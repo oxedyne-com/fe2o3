@@ -1,6 +1,6 @@
 //! Formatting of dates and times: patterns, tokens, locales and RFC 9557 output.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod pattern;

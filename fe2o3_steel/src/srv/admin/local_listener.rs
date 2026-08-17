@@ -29,7 +29,7 @@
 //!   default for `/admin/database`. Operators who want a specific
 //!   vhost's ozone use the public path.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::{

@@ -28,7 +28,7 @@
 //! file left behind and rebuilds the caches from the index files, and garbage
 //! collection, measured against the same churn run with collection disabled.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::{

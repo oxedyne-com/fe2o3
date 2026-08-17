@@ -13,7 +13,7 @@
 //! worst kind of failure to debug: the file is "fixed" and the reason is never named. So they are all
 //! written.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::opc::{

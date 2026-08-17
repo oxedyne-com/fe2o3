@@ -89,7 +89,7 @@
 //! chosen by guessing what the content is: the question asked is only whether the
 //! newlines are frequent enough to cut on, which is a fact about the bytes.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

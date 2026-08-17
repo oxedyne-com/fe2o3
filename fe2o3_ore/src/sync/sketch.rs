@@ -43,7 +43,7 @@
 //! peers that estimated differently still reconcile -- each answering under the
 //! other's shape -- and there is no configuration to get wrong.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

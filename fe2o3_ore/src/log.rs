@@ -43,7 +43,7 @@
 //! log holds nothing it has not accepted, and a caller that wants a pending
 //! queue keeps the leftovers and offers them again.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

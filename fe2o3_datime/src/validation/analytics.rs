@@ -1,7 +1,7 @@
 //! Metrics for validation: how often it runs, how often it passes, how long
 //! it takes, and which rules do the rejecting.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

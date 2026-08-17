@@ -13,7 +13,7 @@
 //! CLI-only verbs is therefore still recognised by the wallet but
 //! refused by the dashboard.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::{

@@ -3,7 +3,7 @@
 //! A validator carries a set of rules and a strictness setting, and reports
 //! every failure it finds rather than stopping at the first.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

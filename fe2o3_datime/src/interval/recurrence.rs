@@ -4,7 +4,7 @@
 //! generates with by_weekday, by_month_day and the rest. A pattern pairs a
 //! rule with a start time and a set of dates to skip.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

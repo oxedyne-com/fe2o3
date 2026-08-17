@@ -6,7 +6,7 @@
 //! delivery, etc. The trait is split into two methods so the same handler
 //! type can serve both ports with different policies.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::mail::store::MailUser;

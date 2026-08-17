@@ -16,7 +16,7 @@
 //! path needs for its spans. One reader that refuses honestly above a stated ceiling beats two
 //! readers that disagree about what a document says.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::opc::{

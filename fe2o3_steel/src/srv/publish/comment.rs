@@ -26,7 +26,7 @@
 //! commenter's address, where they give one, is stored and **never rendered and never returned by
 //! any endpoint** -- it exists to notify them of a reply and for nothing else.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::publish::{

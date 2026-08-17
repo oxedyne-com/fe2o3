@@ -24,7 +24,7 @@
 //! console -- the site's content -- and carries no operator scope: it can never
 //! stand in for an `/admin` session.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::admin::{

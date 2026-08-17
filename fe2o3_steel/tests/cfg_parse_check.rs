@@ -3,7 +3,7 @@
 //! Run with `STEEL_CONFIG_CHECK=/path/to/config.jdat cargo test --test cfg_parse_check -- --nocapture`.
 //! Unset, it skips.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

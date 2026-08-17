@@ -1,6 +1,6 @@
 //! Parser tests for day incrementor and relative date expressions.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

@@ -83,7 +83,7 @@
 //! that carry one have one, it is the author's own clock rather than a position
 //! in the order, and nothing decides anything by it: see [`Op::Mark`].
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

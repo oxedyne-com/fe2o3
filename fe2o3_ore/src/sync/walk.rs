@@ -39,7 +39,7 @@
 //! discharged where the information is; the second is what stops a peer that got
 //! it wrong from leaving a hole in someone else's history.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::OpId;

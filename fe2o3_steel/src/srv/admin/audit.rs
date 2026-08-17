@@ -39,7 +39,7 @@
 //! that succeeds against a healthy wallet should still let the
 //! operator in even if the disk holding the audit log is full.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

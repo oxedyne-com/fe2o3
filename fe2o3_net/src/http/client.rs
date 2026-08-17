@@ -24,7 +24,7 @@
 //!   not supported: ACME API responses always carry a `Content-Length`
 //!   header, and that is the only production caller for now.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

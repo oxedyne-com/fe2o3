@@ -3,7 +3,7 @@
 //! Ranges are indexed at both ends, so a query can find the ranges that
 //! overlap it, sit inside it, or contain it without scanning them all.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

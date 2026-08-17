@@ -20,7 +20,7 @@
 //! [`crate::office`] -- and sharing code between them is how the second one gets the first one's
 //! assumptions.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod edit;

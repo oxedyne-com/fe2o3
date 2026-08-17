@@ -11,7 +11,7 @@
 //! no hidden I/O, which is the property that made the primitive crates
 //! (Kademlia, OAM, IBLT, HotStuff) easy to test and reason about.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::record::{

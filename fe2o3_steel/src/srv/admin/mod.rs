@@ -44,7 +44,7 @@
 //! - [`handler`] -- HTTP dispatcher that maps `/admin/*` request paths
 //!   to the appropriate view or action.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod assets;

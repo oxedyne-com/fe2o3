@@ -4,7 +4,7 @@
 //! recurrence, business day and priority, so a query filtered on any of those
 //! can start from the most selective index rather than scanning.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

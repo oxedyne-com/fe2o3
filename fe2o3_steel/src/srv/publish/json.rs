@@ -9,7 +9,7 @@
 //! is a post however it is asked for. A slug cannot collide with this: `index.json` is not a name a
 //! slug may wear, punctuation not being allowed in one.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::cache;

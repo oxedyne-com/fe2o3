@@ -44,7 +44,7 @@
 //! a loop at three in the morning and hide the fault it was built to reveal; and a decision to
 //! restart a payments process belongs to a person who has read why it stopped.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::{

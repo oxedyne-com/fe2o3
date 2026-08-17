@@ -9,7 +9,7 @@
 //! The size ceiling is the caller's and is checked against the decoded length, since base64 inflates
 //! by a third and a caller means the bytes it will store, not the string it was sent.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

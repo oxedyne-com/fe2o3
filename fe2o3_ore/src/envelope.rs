@@ -11,7 +11,7 @@
 //! implementation to sign or verify. That keeps the crate free of key handling
 //! and free of any particular algorithm's baggage.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::op::Record;

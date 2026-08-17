@@ -31,7 +31,7 @@
 //! rearrangement. A directory of Markdown is not a stand-in meanwhile: it is a real way to write, and
 //! the file is the source either way.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod ai;

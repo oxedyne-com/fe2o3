@@ -10,7 +10,7 @@
 //! full engine without touching disk. A later commit wires the
 //! `fe2o3_o3db_sync` adapter in an integration crate.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::record::{

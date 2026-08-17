@@ -17,7 +17,7 @@
 //!
 //! [c]: crate::dist::config::Consistency::Cohort
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::cohort::Cohort;

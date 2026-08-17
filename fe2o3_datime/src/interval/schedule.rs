@@ -1,7 +1,7 @@
 //! Schedules: named collections of events, each an interval with an optional
 //! recurrence, that can be searched by date and checked for conflicts.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

@@ -10,7 +10,7 @@
 //! `word/_rels/document.xml.rels` have nothing to do with the ids in `_rels/.rels`, and a scheme that
 //! shared them would work until the day two parts both had one.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::zip::Zip;

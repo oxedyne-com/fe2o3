@@ -23,7 +23,7 @@
 //! // "2024-06-15T14:30:00.000000000-04:00[America/New_York]"
 //! ```
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

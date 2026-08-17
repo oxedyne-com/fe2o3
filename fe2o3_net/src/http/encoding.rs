@@ -15,7 +15,7 @@
 //!
 //! [RFC 9110 §12.5.3]: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.3
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

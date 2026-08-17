@@ -5,7 +5,7 @@
 //! `MailStore` and `UserStore` so the same loop serves any Hematite
 //! mailbox backend.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::mail::{

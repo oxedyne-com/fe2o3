@@ -1,6 +1,6 @@
 //! Integration tests for the Kademlia routing-table primitive.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 #![cfg(feature = "dist")]
 

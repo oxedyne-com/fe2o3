@@ -13,7 +13,7 @@
 //! network. The alt text is written in its place and the image is counted. A caller that can resolve
 //! the source is where images will be added.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_text::doc::{

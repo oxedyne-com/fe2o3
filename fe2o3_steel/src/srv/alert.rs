@@ -26,7 +26,7 @@
 //! external mailbox at least survives the host -- and why alerting is a
 //! complement to external monitoring, not a substitute for it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::cfg::AlertConfig;

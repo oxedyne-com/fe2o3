@@ -39,7 +39,7 @@
 //! As everywhere else in the crate: bytes in, bytes out, and where they live is
 //! the caller's business.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::OpId;

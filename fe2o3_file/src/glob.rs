@@ -36,7 +36,7 @@
 //! escaped, because the pattern is split on every `/` before anything else is
 //! read. An unclosed `[` is a literal `[`, as it is a match failure in git.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

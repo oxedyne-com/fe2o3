@@ -5,7 +5,7 @@
 //! (`put`, `get`, `delete`, `digests`) plus a few edge cases. The test
 //! runs only with `--features dist`.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 #![cfg(feature = "dist")]

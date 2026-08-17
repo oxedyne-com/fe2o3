@@ -36,7 +36,7 @@
 //! to run it is a poor trade. Neither is a wrapper around the other; they share
 //! the messages above, which is where the protocol actually is.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::time::Time;

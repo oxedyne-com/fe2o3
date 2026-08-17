@@ -3,7 +3,7 @@
 //! The unit tests cover the record's encoding and the index's arithmetic. This covers the thing they
 //! cannot: that a post written to a database comes back out of it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

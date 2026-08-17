@@ -19,7 +19,7 @@
 //! where it is rendered -- but it is escaped everywhere it is shown except the preview, which is the
 //! rendered HTML a reader would get.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::{

@@ -17,7 +17,7 @@
 //! [`connection_manager_scpd`] exists and why a server that skips it is refused
 //! by sets that would otherwise have worked.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::upnp::{

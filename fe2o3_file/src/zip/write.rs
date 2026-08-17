@@ -9,7 +9,7 @@
 //! because inserting or removing a member moves everything after it. Where nothing moved, nothing is
 //! patched, and the bytes out are the bytes in.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::zip::{

@@ -27,7 +27,7 @@
 //! [`MARK_MIN_PX`] carries its declaration in words beside it, and [`Size::alone`] will not return a
 //! wordless mark below that size however small a caller asks for.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::cache;

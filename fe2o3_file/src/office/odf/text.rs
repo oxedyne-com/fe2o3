@@ -8,7 +8,7 @@
 //! it is worth saying why: OpenDocument put the meaning in the element and Microsoft put it in a
 //! style, and every consequence follows from that one choice.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::edit::{

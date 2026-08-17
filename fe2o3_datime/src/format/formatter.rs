@@ -3,7 +3,7 @@
 //! A formatter walks a parsed pattern, and may carry a locale together with
 //! overrides for month names, day names and the AM/PM markers.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

@@ -19,7 +19,7 @@
 //! does the second. Attributes on argument elements are ignored, and so is
 //! anything outside `<s:Body>`.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::upnp::{

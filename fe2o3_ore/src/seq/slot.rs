@@ -29,7 +29,7 @@
 //! that crosses a file boundary is arbitrated instead, by the render, and
 //! [`Slots::cycles`] is what tells it where the cycles are.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

@@ -28,7 +28,7 @@
 //!
 //! [`HeaderFields::get_one`]: crate::http::fields::HeaderFields::get_one
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::http::msg::HttpMessage;

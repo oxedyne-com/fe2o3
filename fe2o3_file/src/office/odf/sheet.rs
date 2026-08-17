@@ -16,7 +16,7 @@
 //! `office:value` is what the last calculation left, and nothing here recalculates. See
 //! [`crate::office::sheet`] for why that is the correct answer rather than a shortcut.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::odf::{

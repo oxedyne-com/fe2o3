@@ -20,7 +20,7 @@
 //! UTC, because a post carries no zone and inventing one from where the server happens to be would
 //! make the same post's feed entry move when the server did.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::cache;

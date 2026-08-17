@@ -33,7 +33,7 @@
 //! engines disagree about what it measures -- when a page was published, when it was last crawled,
 //! how long ago either was -- and a confidently wrong date is worse than an honest blank.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

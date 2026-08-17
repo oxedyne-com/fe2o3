@@ -38,7 +38,7 @@
 //! produce it -- so a queue forms only by luck, and the test would then
 //! measure the machine rather than the database.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::{

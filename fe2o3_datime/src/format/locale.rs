@@ -4,7 +4,7 @@
 //! with short and long variants. A small built-in database covers the common
 //! ones.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::format::FormatPattern;

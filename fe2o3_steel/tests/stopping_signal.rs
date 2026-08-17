@@ -23,7 +23,7 @@
 //! Unix only. Windows has no `kill` and no signals; the three console events the
 //! same listener answers there cannot be sent from here.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 #![cfg(unix)]

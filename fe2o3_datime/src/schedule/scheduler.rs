@@ -4,7 +4,7 @@
 //! A background thread moves them to worker threads as their time arrives, or
 //! the caller can drive the whole thing by hand with process_pending.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

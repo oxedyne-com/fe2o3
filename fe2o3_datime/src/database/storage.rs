@@ -4,7 +4,7 @@
 //! for time-ordered queries, ISO 8601 for readability, components for partial
 //! queries, and Unix timestamps for existing systems.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

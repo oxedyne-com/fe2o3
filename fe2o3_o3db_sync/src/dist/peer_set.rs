@@ -14,7 +14,7 @@
 //! search and `O(n)` for the shift, which is appropriate for the expected
 //! peer counts (tens to low thousands, updated infrequently).
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::kademlia::id::NodeId;

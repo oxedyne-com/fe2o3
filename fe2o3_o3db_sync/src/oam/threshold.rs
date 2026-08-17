@@ -19,7 +19,7 @@
 //!   `2^256`", which would not fit in a 256-bit word, so it is held as a
 //!   sentinel instead.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

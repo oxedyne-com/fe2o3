@@ -31,7 +31,7 @@
 //! a hole in it has its batch refused whole, and the session errs rather than
 //! absorbing part of it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::OpId;

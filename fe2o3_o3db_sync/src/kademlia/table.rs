@@ -7,7 +7,7 @@
 //! via LRU probe), removal, lookup and a `k_closest` query used by both
 //! `FIND_NODE` and `FIND_CLOSEST` message-layer flows.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::{

@@ -20,7 +20,7 @@
 //! [`OamConfig`]: crate::oam::config::OamConfig
 //! [`Threshold`]: crate::oam::threshold::Threshold
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::peer_set::PeerSet;

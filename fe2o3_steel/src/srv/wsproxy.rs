@@ -10,7 +10,7 @@
 //! bytes in both directions until an end closes, which is also why nothing here needs to know
 //! which sub-protocol, extensions or message sizes the two ends agreed on.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

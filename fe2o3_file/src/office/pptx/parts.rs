@@ -10,7 +10,7 @@
 //! repetition -- twelve colours, three fill styles, three line styles, three effect styles, three
 //! background fills -- and a blob is where a typo in the eleventh colour waits.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::pptx::{

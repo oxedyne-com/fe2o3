@@ -11,7 +11,7 @@
 //! tombstone never reached the replay under test.  This test writes on both sides of a deletion,
 //! forces the rebuild, and insists that everything except the deleted key comes back.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::{

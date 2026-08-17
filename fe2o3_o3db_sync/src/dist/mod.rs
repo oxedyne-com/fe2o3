@@ -51,7 +51,7 @@
 //! feature. Local-only callers pay no compile cost for the distributed
 //! primitive graph.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod cohort;

@@ -11,7 +11,7 @@
 //! All three reduce to XOR distance comparisons between 256-bit identifiers.
 //! None of them take locks, issue I/O, or spawn tasks.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::threshold::Threshold;

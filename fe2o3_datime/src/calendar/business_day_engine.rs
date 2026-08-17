@@ -4,7 +4,7 @@
 //! including custom business week definitions, holiday following rules,
 //! and complex date adjustment algorithms commonly used in financial systems.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

@@ -8,7 +8,7 @@
 //! idle, and asserts that the whole process consumes only a trivial
 //! amount of CPU time over the measurement window.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::{

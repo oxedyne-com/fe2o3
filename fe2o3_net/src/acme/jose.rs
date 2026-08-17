@@ -27,7 +27,7 @@
 //! form (64 bytes: `r || s`) that JWS requires. No ASN.1 to P1363 conversion
 //! is needed on our side.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

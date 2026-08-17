@@ -3,7 +3,7 @@
 //! Offset calculations and DST transitions are expensive, and the same values
 //! are asked for repeatedly.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

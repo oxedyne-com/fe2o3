@@ -15,7 +15,7 @@
 //! file anchors after a byte like every other splice, and every operation without
 //! exception is placed by the content it names rather than by a file it asserts.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

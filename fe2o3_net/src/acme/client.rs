@@ -38,7 +38,7 @@
 //! supplies an `Arc<ClientConfig>` that pins the Let's Encrypt root
 //! anchors; see [`crate::acme::trust::letsencrypt_client_config`].
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

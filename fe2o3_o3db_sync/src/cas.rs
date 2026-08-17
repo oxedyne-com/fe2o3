@@ -42,7 +42,7 @@
 //! without changing [`Manifest`] or [`Cas`] -- both chunkers return the same
 //! manifest shape, and a store cannot tell which produced what it holds.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

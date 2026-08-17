@@ -4,7 +4,7 @@
 //! verify the supplied password, returning a [`MailUser`] handle that the
 //! `MailStore` then consumes to address the right mailbox.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::mail::store::MailUser;

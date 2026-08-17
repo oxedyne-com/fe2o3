@@ -24,7 +24,7 @@
 //! the text pulled from what it returns, the error surfaced rather than swallowed -- it does. The
 //! network wrapper [`complete`] is as thin as the send seam it borrows from [`crate::http::client`].
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

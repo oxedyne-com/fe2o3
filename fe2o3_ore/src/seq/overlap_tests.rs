@@ -18,7 +18,7 @@
 //! case. And both sides are told, by one flag that names the group and the
 //! operation that prevailed rather than a pair that may never have met.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

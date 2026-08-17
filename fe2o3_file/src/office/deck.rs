@@ -19,7 +19,7 @@
 //! Markdown-to-slides tool uses, and it is a convention rather than a rule because it is the one
 //! authors already write to.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_text::doc::{

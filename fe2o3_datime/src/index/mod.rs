@@ -3,7 +3,7 @@
 //! This module provides indexing structures for fast time-based lookups,
 //! range queries, and temporal data organisation.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod time_index;

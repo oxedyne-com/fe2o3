@@ -17,7 +17,7 @@
 //! against delete needs no tie-break: the bytes move, and they are dead, and
 //! both are true at once.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

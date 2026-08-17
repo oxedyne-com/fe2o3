@@ -12,7 +12,7 @@
 //! font would be deciding something that is not its to decide, and a site that could not restyle its
 //! own prose would not really own it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::cache;

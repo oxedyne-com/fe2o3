@@ -13,7 +13,7 @@
 //! machine, the TLS-ALPN-01 challenge cert generator and the renewal loop are
 //! added incrementally on top of [`jose`].
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod cache;

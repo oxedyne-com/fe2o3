@@ -27,7 +27,7 @@
 //! `QRESYNC`, `BINARY`, `LITERAL+` quirks beyond plain pass-through,
 //! ACLs, quotas, namespace, sort, thread.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod client;

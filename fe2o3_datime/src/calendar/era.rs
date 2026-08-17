@@ -6,7 +6,7 @@
 //! The Japanese calendar uses the same month/day structure as the Gregorian calendar
 //! but years are counted from the beginning of each emperor's reign.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

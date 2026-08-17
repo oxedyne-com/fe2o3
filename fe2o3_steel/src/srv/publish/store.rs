@@ -21,7 +21,7 @@
 //! from a scan when it has to be ([`rebuild_index`]), but that is a repair rather than a code path
 //! anything normal takes.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::publish::{

@@ -39,7 +39,7 @@
 //! let out = res!(zip.write());	// Every other member is the bytes it was.
 //! ```
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod read;

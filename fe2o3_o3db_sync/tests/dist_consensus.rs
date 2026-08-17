@@ -18,7 +18,7 @@
 //!   * Persistence: every cohort member ends up with the record in its
 //!     local storage; non-members do not.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

@@ -5,7 +5,7 @@
 //! interesting decisions are made, since the same number can be a day, a month
 //! or an hour depending on what surrounds it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

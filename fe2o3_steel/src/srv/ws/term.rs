@@ -35,7 +35,7 @@
 //! This is the only place in the crate that reaches for `nix`, which is why it
 //! is the whole of the Windows task for the server.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

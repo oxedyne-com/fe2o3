@@ -33,7 +33,7 @@
 //! restart consequently invalidates outstanding dashboard cookies,
 //! which is the correct behaviour anyway.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::{

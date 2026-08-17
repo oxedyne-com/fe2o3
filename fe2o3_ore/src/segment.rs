@@ -58,7 +58,7 @@
 //! hasher and salt it is given, so a segment that a later reader could not get
 //! to the end of is refused before anything is added to it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::envelope::Envelope;

@@ -3,7 +3,7 @@
 //! Storage is a plain Vec, so several operations are O(n). Safety is preferred
 //! over speed here, and no unsafe code is used.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use std::hash::Hash;

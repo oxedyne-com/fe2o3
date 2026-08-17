@@ -24,7 +24,7 @@
 //! [c]: crate::dist::config::Consistency::Cohort
 //! [hs]: https://github.com/oxedyne-io/fe2o3/tree/main/fe2o3_hotstuff
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::peer_set::PeerSet;

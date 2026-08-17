@@ -4,7 +4,7 @@
 //! turns into a validator on demand. A registry holds several by name, and a
 //! set of standard profiles covers the usual cases.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

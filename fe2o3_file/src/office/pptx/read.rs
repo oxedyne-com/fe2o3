@@ -11,7 +11,7 @@
 //! A reader that walked the archive would deal a deck of more than nine slides out of order, and it
 //! would look like an authoring mistake rather than a reading one.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::deck::{

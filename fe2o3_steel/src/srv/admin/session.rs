@@ -32,7 +32,7 @@
 //! routes the same bytes back through `decrypt`, which verifies the
 //! tag, strips the nonce, and returns the plaintext.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::admin::{

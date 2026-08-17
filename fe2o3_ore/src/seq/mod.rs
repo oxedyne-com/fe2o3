@@ -104,7 +104,7 @@
 //! so an author who takes identifiers from the log gets the intuition for
 //! nothing; an author minting its own is responsible for the same rule.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod atom;

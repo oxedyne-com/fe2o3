@@ -11,7 +11,7 @@
 //! asserting through the parser proves what a reader of it actually gets, which is the property an
 //! upstream depends on.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

@@ -43,7 +43,7 @@
 //! and a delivery-receipt webhook is a second service to run on the host that may be the one in
 //! trouble.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

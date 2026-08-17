@@ -27,7 +27,7 @@
 //! attribute rather than a style name, so nothing has to resolve a style to know a heading is one.
 //! That is the reverse of WordprocessingML and it is the easier direction.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod pkg;

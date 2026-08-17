@@ -13,7 +13,7 @@
 //! nothing, and none of the ten answers moves. The multi-file cases are beside
 //! this file in `file_tests.rs`.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

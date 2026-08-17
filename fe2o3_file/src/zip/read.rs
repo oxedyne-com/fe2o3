@@ -9,7 +9,7 @@
 //! alignment gap, a data descriptor written in either of its two shapes -- travels with the member
 //! before it and survives the round trip without this having to understand it.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::zip::{

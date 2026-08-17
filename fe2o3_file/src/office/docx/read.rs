@@ -37,7 +37,7 @@
 //! That is display, and display only -- nothing here authors `w:ins` or `w:del`, because getting
 //! those subtly wrong corrupts a legal review and the person who finds out is a lawyer.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::opc::{

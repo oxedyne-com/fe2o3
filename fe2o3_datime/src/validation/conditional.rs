@@ -4,7 +4,7 @@
 //! which is how "extended hours at the weekend" or "holiday rules in
 //! December" are expressed.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

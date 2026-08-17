@@ -21,7 +21,7 @@
 //! deadlock that deadlocks says nothing except that somebody has to press
 //! Ctrl-C.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

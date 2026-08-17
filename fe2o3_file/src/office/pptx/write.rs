@@ -11,7 +11,7 @@
 //! that looks like. That is the whole mapping, and it is small because [`crate::office::deck`] is
 //! small on purpose.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::deck::Deck;

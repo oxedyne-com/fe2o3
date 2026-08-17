@@ -5,7 +5,7 @@
 //! peer and refreshed when either input changes -- `n` on a configuration
 //! reload, `N` on a HyperLogLog-driven estimate update.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use super::threshold::Threshold;

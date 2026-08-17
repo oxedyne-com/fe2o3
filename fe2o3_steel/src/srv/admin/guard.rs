@@ -9,7 +9,7 @@
 //! handler so a blacklisted attacker costs the server only a SYN/ACK -- no TLS handshake,
 //! no HTTP parse, no application dispatch.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

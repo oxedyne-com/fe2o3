@@ -28,7 +28,7 @@
 //! by some control points and silently ignored by others, which is the failure
 //! that eats an afternoon.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod device;

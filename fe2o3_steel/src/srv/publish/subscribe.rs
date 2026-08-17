@@ -20,7 +20,7 @@
 //! [`INDEX_KEY`], a subscriber under its own key, and nothing walks the whole database -- a token is
 //! matched by reading the index and a record per entry, the same cost a listing already pays.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::publish::{

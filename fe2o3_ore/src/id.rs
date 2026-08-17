@@ -22,7 +22,7 @@
 //! than where it sits, the name survives the byte being moved, and an edit
 //! anchored to it travels with the content it was written against.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

@@ -10,7 +10,7 @@
 //! The client that makes the call lives upstream in [`oxedyne_fe2o3_net::llm`]; this module is the
 //! settings around it, and the two prompts a site sends with its two kinds of request.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::publish::subscribe;

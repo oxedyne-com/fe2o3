@@ -6,7 +6,7 @@
 //! every member nobody touched, not their content, because two members can hold the same content and
 //! different bytes and it is the bytes a colleague's reader parses.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_file::office::docx;

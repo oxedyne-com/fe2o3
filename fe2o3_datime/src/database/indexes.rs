@@ -3,7 +3,7 @@
 //! Emits CREATE INDEX statements for SQL stores and index specifications for
 //! MongoDB.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

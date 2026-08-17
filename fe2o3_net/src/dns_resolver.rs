@@ -9,7 +9,7 @@
 //! crate. Outbound SMTP needs MX lookups and `std::net` does not expose
 //! them; rather than add `hickory-resolver` we own the ~250 lines.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

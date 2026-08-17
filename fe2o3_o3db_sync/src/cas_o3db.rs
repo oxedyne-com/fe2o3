@@ -17,7 +17,7 @@
 //! tombstone on its first read rather than racing a direct-to-disk delete. The
 //! log-structured engine reclaims the space on compaction.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::cas::{

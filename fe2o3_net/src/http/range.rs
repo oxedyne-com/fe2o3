@@ -38,7 +38,7 @@
 //! representation earns a `416`, which is a statement about the representation
 //! rather than about the syntax.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::http::{

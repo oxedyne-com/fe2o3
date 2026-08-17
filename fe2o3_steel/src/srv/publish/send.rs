@@ -18,7 +18,7 @@
 //! test against a live remote is exactly what a test cannot catch. What *can* be pinned -- the JSON a
 //! remote is sent, the permalink pulled from what it returns -- is.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::srv::publish::{

@@ -21,7 +21,7 @@
 //! or killed process cannot leave a partial file behind that the next
 //! start-up would read as truncated garbage.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::acme::jose::JwsSigner;

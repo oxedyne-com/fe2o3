@@ -5,7 +5,7 @@
 //! same rustls server config so a single ACME-issued certificate
 //! covers every protocol.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::app::mail::AppMailHandler;

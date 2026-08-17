@@ -10,7 +10,7 @@
 //! is the client's half of the exchange: does it read the mechanism list, choose one it can speak,
 //! encode the credential correctly, and refuse to go on when the login is rejected.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::{

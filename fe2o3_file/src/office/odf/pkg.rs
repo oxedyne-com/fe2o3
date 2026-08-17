@@ -5,7 +5,7 @@
 //! be got wrong -- `mimetype` first and stored -- is the part it would be easiest to get wrong
 //! separately in each.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::office::odf::{

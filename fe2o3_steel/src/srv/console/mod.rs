@@ -38,7 +38,7 @@
 //! session cookie is `Path=/`, so it is already sent to `/manage` and every other site path. The
 //! console lives where the credential that opens it is actually presented.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod publish;

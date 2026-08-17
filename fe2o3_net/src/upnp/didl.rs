@@ -19,7 +19,7 @@
 //! apart, so that a caller trying profile strings against a real television
 //! changes one table rather than a dozen format strings.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::upnp::{

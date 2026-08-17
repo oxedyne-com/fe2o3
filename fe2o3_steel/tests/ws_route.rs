@@ -8,7 +8,7 @@
 //! The relay is driven directly rather than through a TLS listener, because what is under test is
 //! the forwarding, and a certificate would only stand between the test and the bytes.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;

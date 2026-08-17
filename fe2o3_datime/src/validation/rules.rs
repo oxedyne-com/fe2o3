@@ -3,7 +3,7 @@
 //! A rule is a name and up to three closures, one each for a CalClock, a
 //! CalendarDate and a ClockTime. Rules combine with all_rules and any_rule.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

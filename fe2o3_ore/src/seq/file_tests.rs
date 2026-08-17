@@ -16,7 +16,7 @@
 //! through this same engine: file identity must not perturb single-file
 //! semantics, and that they are unchanged is the instrument for saying so.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::id::{

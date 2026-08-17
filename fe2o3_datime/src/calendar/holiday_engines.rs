@@ -4,7 +4,7 @@
 //! calculate complex holidays like Easter, Thanksgiving, and other date-based
 //! holidays for various countries and jurisdictions.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::{

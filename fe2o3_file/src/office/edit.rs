@@ -22,7 +22,7 @@
 //! other end exactly as they left. See [`crate::office`] on why that is the whole point of the third
 //! verb.
 //!
-//! [Written entirely with AI](https://need2know.ai/entirely-ai/code)\
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
