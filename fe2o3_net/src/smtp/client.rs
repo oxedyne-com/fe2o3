@@ -114,6 +114,10 @@ impl SubmissionConfig {
 struct DeliveryTarget {
     host:       String,     // MX exchange
     addr:       IpAddr,
+    // Always 25 for a resolved exchange, which is the only port mail is delivered on. It is a
+    // field rather than a literal so a fixture can stand in as an exchange on a loopback port;
+    // nothing reads it from configuration and nothing should.
+    port:       u16,
     preference: u16,        // as the MX record gave it
 }
 
@@ -202,15 +206,37 @@ impl OutboundClient {
                 targets.push(DeliveryTarget {
                     host:       mx.exchange.clone(),
                     addr:       IpAddr::V4(ip),
+                    port:       25,
                     preference: pref,
                 });
             }
         }
+        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body).await
+    }
+
+    /// The delivery loop itself, given the exchanges rather than resolving them.
+    ///
+    /// Split out of [`Self::deliver`] for one reason: everything above this point needs a live MX
+    /// lookup, so the loop below -- preference order, which failures are worth another exchange, and
+    /// whether the collapsed error is permanent -- could not be exercised at all. It carries
+    /// jarrah's outbound mail and had no test until 2026-08-17. Private, and takes the exchanges as
+    /// an argument rather than reading them from anywhere: this is not a way to configure where mail
+    /// goes, it is a way for a fixture to stand in as an exchange.
+    async fn deliver_to_exchanges(
+        &self,
+        targets:    &[DeliveryTarget],
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+    )
+        -> Outcome<String>
+    {
         if targets.is_empty() {
             return Err(err!(
                 "No reachable MX hosts for any of the configured recipients.";
                 IO, Network, Missing));
         }
+        let mut targets: Vec<DeliveryTarget> = targets.to_vec();
         targets.sort_by_key(|t| t.preference);
 
         let mut last_err: Option<String> = None;
@@ -223,7 +249,7 @@ impl OutboundClient {
             match self.try_one(tgt, mail_from, rcpt_to, body).await {
                 Ok(qid) => return Ok(qid),
                 Err(e) => {
-                    if e.tags().contains(&ErrTag::Permanent) {
+                    if is_permanent(&e) {
                         permanent = true;
                     }
                     let msg = fmt!("MX {} ({}): {}", tgt.host, tgt.addr, e);
@@ -375,7 +401,7 @@ impl OutboundClient {
     )
         -> Outcome<String>
     {
-        let addr = std::net::SocketAddr::new(tgt.addr, 25);
+        let addr = std::net::SocketAddr::new(tgt.addr, tgt.port);
         let connect = TcpStream::connect(addr);
         let plain = match timeout(SMTP_CLIENT_TIMEOUT, connect).await {
             Ok(Ok(s))  => s,
@@ -525,11 +551,30 @@ async fn transact(
 ///
 /// The one predicate a caller needs to tell "this address is bad, suppress it" from "the network
 /// hiccupped, try again later". A permanent failure is tagged [`ErrTag::Permanent`] where the 5xx is
-/// read off the wire in [`transact`], and [`OutboundClient::deliver`] carries the tag out through the
-/// collapsed per-exchange error, so this reads the tag rather than parse a status code out of a
+/// read off the wire in [`transact`], so this reads the tag rather than parse a status code out of a
 /// message.
+///
+/// The whole chain is walked, not only the outermost frame. `res!` wraps a cause in an
+/// `Error::Upstream` carrying **no tags of its own**, and `Error::tags` reports one frame's tags
+/// rather than the chain's -- so every `res!` between the 5xx and the caller hid the tag. Reading
+/// only the outer frame, as this did until 2026-08-17, made the predicate answer `false` to every
+/// permanent failure there has ever been: `submit` and `try_one` each pass `transact`'s error
+/// through one `res!`. Nothing was suppressed, and `fe2o3_steel`'s subscriber list kept mailing
+/// addresses their servers had refused outright.
 pub fn is_permanent(e: &Error<ErrTag>) -> bool {
-    e.tags().contains(&ErrTag::Permanent)
+    if e.tags().contains(&ErrTag::Permanent) {
+        return true;
+    }
+    let mut cause = std::error::Error::source(e);
+    while let Some(c) = cause {
+        if let Some(inner) = c.downcast_ref::<Error<ErrTag>>() {
+            if inner.tags().contains(&ErrTag::Permanent) {
+                return true;
+            }
+        }
+        cause = c.source();
+    }
+    false
 }
 
 /// Prove to the provider that the sender holds the account.
@@ -703,5 +748,899 @@ fn extract_domain(addr: &str) -> Outcome<String> {
         None => Err(err!(
             "Address '{}' has no '@'.", addr;
             Invalid, Input, Mismatch)),
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TESTS                                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+// These drive the whole conversation against a stand-in provider on loopback, not
+// the pieces of it in isolation. They live in the module rather than in `tests/`
+// because `tests/main.rs` gates every case behind a single `filter` string, and on
+// 2026-08-17 that filter was `"dns"` -- so the four submission cases in
+// `tests/smtp_submit.rs` had never once run, while the harness reported them green.
+// A test that cannot be switched off by editing one word somewhere else is worth
+// more than a tidier home for it.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::Mutex;
+
+    use tokio::{
+        io::{
+            AsyncBufReadExt,
+            AsyncReadExt,
+            BufReader,
+        },
+        net::TcpListener,
+    };
+
+
+    const USER: &str = "alice@example.com";
+    const PASS: &str = "app-password-not-a-real-one";
+    const EHLO: &str = "sender.test";
+
+
+    /// What the stand-in server does when it is spoken to.
+    ///
+    /// It poses as a submission provider for [`OutboundClient::submit`] and as an MX exchange for
+    /// [`OutboundClient::deliver_to_exchanges`], which is honest: SMTP is the same protocol on both
+    /// sides of the difference, and the difference is entirely in what the client does with it.
+    #[derive(Clone, Copy)]
+    struct Provider {
+        mechs:      &'static str,   // advertised after `AUTH`; empty for no `AUTH` line at all
+        starttls:   bool,           // advertise `STARTTLS` in the EHLO reply
+        // Whether a `STARTTLS` command is answered 220. There is no TLS behind this fixture, so a
+        // test that advertises the extension answers 454 -- which is the opportunistic case worth
+        // covering anyway: a client offered TLS and refused it must deliver in the clear rather
+        // than give up on the exchange.
+        starttls_ok: bool,
+        auth_ok:    bool,
+        banner:     u16,            // 220 is ready for mail; 421 refuses the connection
+        rcpt_code:  u16,            // 250 accepts the recipient
+        data_code:  u16,            // 250 accepts the message
+    }
+
+    impl Provider {
+        /// Offers both mechanisms this client can speak, and takes everything.
+        fn accepting() -> Self {
+            Self {
+                mechs:       "PLAIN LOGIN",
+                starttls:    false,
+                starttls_ok: false,
+                auth_ok:     true,
+                banner:      220,
+                rcpt_code:   250,
+                data_code:   250,
+            }
+        }
+
+        /// An exchange, which advertises no `AUTH`: a delivering client is not expected to prove
+        /// anything, and must not try.
+        fn exchange() -> Self {
+            Self { mechs: "", ..Self::accepting() }
+        }
+
+        fn ehlo_reply(&self) -> String {
+            let mut out = fmt!("250-provider.example.com\r\n250-SIZE 35882577\r\n");
+            if self.starttls {
+                out.push_str("250-STARTTLS\r\n");
+            }
+            if !self.mechs.is_empty() {
+                out.push_str(&fmt!("250-AUTH {}\r\n", self.mechs));
+            }
+            out.push_str("250 8BITMIME\r\n");
+            out
+        }
+    }
+
+    /// Every line the provider was sent, in order, including the DATA body.
+    type Transcript = Arc<Mutex<Vec<String>>>;
+
+    async fn provider(p: Provider) -> Outcome<(SocketAddr, Transcript)> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the stand-in provider."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading the stand-in provider's address."; IO, Network)));
+
+        let seen: Transcript = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+
+        tokio::spawn(async move {
+            let (sock, _) = match listener.accept().await {
+                Ok(x)  => x,
+                Err(_) => return,
+            };
+            let (r, mut w) = sock.into_split();
+            let mut lines = BufReader::new(r).lines();
+
+            let _ = w.write_all(fmt!("{} provider.example.com ESMTP\r\n",
+                p.banner).as_bytes()).await;
+
+            let mut in_data    = false;
+            let mut await_user = false;
+            let mut await_pass = false;
+            let verdict = if p.auth_ok {
+                &b"235 2.7.0 Accepted\r\n"[..]
+            } else {
+                &b"535 5.7.8 Username and Password not accepted\r\n"[..]
+            };
+
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Ok(mut g) = log.lock() {
+                    g.push(line.clone());
+                }
+                if in_data {
+                    if line == "." {
+                        in_data = false;
+                        let _ = w.write_all(fmt!("{} 2.0.0 Ok: queued as STANDIN1\r\n",
+                            p.data_code).as_bytes()).await;
+                    }
+                    continue;
+                }
+                if await_user {
+                    await_user = false;
+                    await_pass = true;
+                    let _ = w.write_all(b"334 UGFzc3dvcmQ6\r\n").await;      // "Password:"
+                    continue;
+                }
+                if await_pass {
+                    await_pass = false;
+                    let _ = w.write_all(verdict).await;
+                    continue;
+                }
+
+                let up = line.to_uppercase();
+                if up.starts_with("EHLO") {
+                    let _ = w.write_all(p.ehlo_reply().as_bytes()).await;
+                } else if up.starts_with("STARTTLS") {
+                    let _ = w.write_all(if p.starttls_ok {
+                        &b"220 Go ahead\r\n"[..]
+                    } else {
+                        &b"454 4.7.0 TLS not available at the moment\r\n"[..]
+                    }).await;
+                } else if up.starts_with("AUTH PLAIN") {
+                    let _ = w.write_all(verdict).await;
+                } else if up.starts_with("AUTH LOGIN") {
+                    await_user = true;
+                    let _ = w.write_all(b"334 VXNlcm5hbWU6\r\n").await;      // "Username:"
+                } else if up.starts_with("MAIL FROM") {
+                    let _ = w.write_all(b"250 2.1.0 Ok\r\n").await;
+                } else if up.starts_with("RCPT TO") {
+                    let _ = w.write_all(fmt!("{} recipient\r\n", p.rcpt_code).as_bytes()).await;
+                } else if up.starts_with("DATA") {
+                    in_data = true;
+                    let _ = w.write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n").await;
+                } else if up.starts_with("QUIT") {
+                    let _ = w.write_all(b"221 2.0.0 Bye\r\n").await;
+                    return;
+                } else {
+                    let _ = w.write_all(b"250 2.0.0 Ok\r\n").await;
+                }
+            }
+        });
+
+        Ok((addr, seen))
+    }
+
+    fn cfg(addr: SocketAddr, security: Security) -> SubmissionConfig {
+        SubmissionConfig::new("provider.example.com", addr.port(), security, USER, PASS)
+            .with_addr(addr)
+            .with_timeout(Duration::from_secs(10))
+    }
+
+    /// One line deliberately begins with a full stop, so dot-stuffing is under
+    /// test in every case that gets as far as the body.
+    fn body() -> Vec<u8> {
+        let mut s = String::new();
+        s.push_str("From: Alice <alice@example.com>\r\n");
+        s.push_str("To: Bob <bob@example.net>\r\n");
+        s.push_str("Subject: Hello\r\n");
+        s.push_str("\r\n");
+        s.push_str("A line.\r\n");
+        s.push_str(".A line that begins with a full stop.\r\n");
+        s.into_bytes()
+    }
+
+    fn lines_of(t: &Transcript) -> Outcome<Vec<String>> {
+        match t.lock() {
+            Ok(g)  => Ok(g.clone()),
+            Err(_) => Err(err!("The provider's transcript was poisoned."; Lock, Poisoned)),
+        }
+    }
+
+    /// Whether the password reached the provider, in the clear or base64, on any
+    /// line. The only safe answer for a conversation that never authenticated.
+    fn password_crossed(lines: &[String]) -> bool {
+        for l in lines {
+            if l.contains(PASS) {
+                return true;
+            }
+            if let Ok(raw) = base64::decode(l.trim()) {
+                if String::from_utf8_lossy(&raw).contains(PASS) {
+                    return true;
+                }
+            }
+            // AUTH PLAIN carries it inside the command.
+            if let Some(b64) = l.split_whitespace().last() {
+                if let Ok(raw) = base64::decode(b64) {
+                    if String::from_utf8_lossy(&raw).contains(PASS) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn client() -> Outcome<OutboundClient> {
+        OutboundClient::with_system_roots(EHLO)
+    }
+
+    // ── The submission conversation ───────────────────────────────
+
+    /// The whole exchange, in order, with the credential in it: this is the shape
+    /// every caller of `submit` depends on and none of them can see.
+    #[tokio::test]
+    async fn test_submission_speaks_the_conversation_in_order_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        let qid = res!(c.submit(
+            &cfg(addr, Security::Plain),
+            "alice@example.com",
+            &[fmt!("bob@example.net")],
+            &body(),
+        ).await);
+        req!(true, qid.contains("STANDIN1"), "the provider's queue id must come back");
+
+        let lines = res!(lines_of(&seen));
+        // Position matters: EHLO before AUTH, AUTH before MAIL FROM, and the
+        // terminator after the body. A client that authenticates after offering
+        // the envelope has told the provider who it is too late.
+        let at = |want: &str| -> Option<usize> {
+            lines.iter().position(|l| l.to_uppercase().starts_with(want))
+        };
+        let ehlo = res!(at("EHLO").ok_or_else(|| err!("No EHLO was sent."; Test, Missing)));
+        let auth = res!(at("AUTH").ok_or_else(|| err!("No AUTH was sent."; Test, Missing)));
+        let mail = res!(at("MAIL FROM").ok_or_else(|| err!("No MAIL FROM."; Test, Missing)));
+        let rcpt = res!(at("RCPT TO").ok_or_else(|| err!("No RCPT TO."; Test, Missing)));
+        let data = res!(at("DATA").ok_or_else(|| err!("No DATA."; Test, Missing)));
+        req!(true, ehlo < auth, "AUTH came before EHLO");
+        req!(true, auth < mail, "the envelope was offered before the login");
+        req!(true, mail < rcpt, "RCPT TO came before MAIL FROM");
+        req!(true, rcpt < data, "DATA came before RCPT TO");
+        req!(true, lines.iter().any(|l| l == "."), "the DATA terminator never arrived");
+        req!(true, lines.iter().any(|l| l.to_uppercase().starts_with("QUIT")),
+            "the client did not say QUIT");
+        Ok(())
+    }
+
+    /// `PLAIN` is offered first and must be the one chosen, with an empty
+    /// authorisation identity, the account, then the password, NUL-separated.
+    #[tokio::test]
+    async fn test_auth_plain_encodes_the_credential_as_rfc4616_asks_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await);
+
+        let lines = res!(lines_of(&seen));
+        let auth = res!(lines.iter()
+            .find(|l| l.to_uppercase().starts_with("AUTH PLAIN"))
+            .ok_or_else(|| err!("The client never sent AUTH PLAIN: {:?}", lines;
+                Test, Missing)));
+        let b64 = auth["AUTH PLAIN ".len()..].trim().to_string();
+        let raw = res!(base64::decode(&b64));
+        req!(fmt!("\0{}\0{}", USER, PASS).into_bytes(), raw);
+        Ok(())
+    }
+
+    /// A provider offering only `LOGIN` must be spoken to, not given up on: the
+    /// account and the password go over on their own lines, base64 and nothing
+    /// else.
+    #[tokio::test]
+    async fn test_auth_login_is_the_fallback_when_plain_is_absent_00() -> Outcome<()> {
+        let p = Provider { mechs: "LOGIN", ..Provider::accepting() };
+        let (addr, seen) = res!(provider(p).await);
+        let c = res!(client().await);
+        let qid = res!(c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"));
+
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH LOGIN")));
+        req!(true, lines.iter().any(|l| base64::decode(l.trim())
+            .map(|b| b == USER.as_bytes()).unwrap_or(false)),
+            "the account never went over");
+        req!(true, lines.iter().any(|l| base64::decode(l.trim())
+            .map(|b| b == PASS.as_bytes()).unwrap_or(false)),
+            "the password never went over");
+        Ok(())
+    }
+
+    /// RFC 5321 §4.5.2 on the wire, not in a unit test of `dot_stuff`: a body line
+    /// beginning with a full stop must arrive doubled, or it ends the message and
+    /// the rest of it is read as commands.
+    #[tokio::test]
+    async fn test_a_leading_full_stop_arrives_doubled_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await);
+
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.starts_with("..A line that begins")),
+            "the line was not stuffed: {:?}", lines);
+        // And the single-dot terminator is still exactly one dot.
+        req!(1, lines.iter().filter(|l| *l == ".").count());
+        Ok(())
+    }
+
+    /// A body that does not end in CRLF still gets a terminator on a line of its
+    /// own, rather than one glued to the last line of the message.
+    #[tokio::test]
+    async fn test_a_body_without_a_trailing_crlf_still_terminates_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            b"Subject: x\r\n\r\nno trailing newline").await);
+
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l == "no trailing newline"),
+            "the last body line was mangled: {:?}", lines);
+        req!(true, lines.iter().any(|l| l == "."), "no terminator on its own line");
+        Ok(())
+    }
+
+    /// Submission may span domains -- the provider works out where each goes --
+    /// and every recipient must get its own RCPT TO.
+    #[tokio::test]
+    async fn test_submission_offers_every_recipient_across_domains_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(
+            &cfg(addr, Security::Plain),
+            USER,
+            &[fmt!("bob@example.net"), fmt!("carol@elsewhere.example"), fmt!("dan@third.test")],
+            &body(),
+        ).await);
+
+        let lines = res!(lines_of(&seen));
+        for who in ["bob@example.net", "carol@elsewhere.example", "dan@third.test"] {
+            req!(true, lines.iter().any(|l| l == &fmt!("RCPT TO:<{}>", who)),
+                "{} was not offered", who);
+        }
+        req!(3, lines.iter().filter(|l| l.to_uppercase().starts_with("RCPT TO")).count());
+        Ok(())
+    }
+
+    // ── Refusals, and what must not have happened first ───────────
+
+    /// A refused credential is an error, and the message must not be offered
+    /// anyway. The provider said no; sending on regardless is how a message is
+    /// reported sent and never arrives.
+    #[tokio::test]
+    async fn test_a_refused_credential_stops_the_conversation_00() -> Outcome<()> {
+        let p = Provider { auth_ok: false, ..Provider::accepting() };
+        let (addr, seen) = res!(provider(p).await);
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await;
+        if out.is_ok() {
+            return Err(err!(
+                "The provider refused the credential and the client reported success.";
+                Test, Invalid));
+        }
+        // The 535 case names the application-password fix, because a wrong
+        // password and a password the provider will not take from a program are
+        // indistinguishable on the wire and the second is the common one.
+        let msg = match out {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => String::new(),
+        };
+        req!(true, msg.to_lowercase().contains("application"),
+            "the refusal did not name the fix: {}", msg);
+        req!(false, msg.contains(PASS), "the password leaked into the error: {}", msg);
+
+        let lines = res!(lines_of(&seen));
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("MAIL FROM")),
+            "the client offered the envelope after its login was rejected");
+        Ok(())
+    }
+
+    /// A provider offering only a mechanism this client cannot speak gets no
+    /// password at all -- not an attempt, and not a plaintext fallback.
+    #[tokio::test]
+    async fn test_an_unspeakable_mechanism_never_sees_the_password_00() -> Outcome<()> {
+        let p = Provider { mechs: "XOAUTH2 GSSAPI", ..Provider::accepting() };
+        let (addr, seen) = res!(provider(p).await);
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await;
+        if out.is_ok() {
+            return Err(err!(
+                "The client claimed to submit through a provider whose only mechanisms \
+                it cannot speak."; Test, Invalid));
+        }
+        let lines = res!(lines_of(&seen));
+        req!(false, password_crossed(&lines),
+            "the password crossed the wire anyway: {:?}", lines);
+        Ok(())
+    }
+
+    /// A provider advertising no `AUTH` line at all is refused for the same
+    /// reason, and the message with it.
+    #[tokio::test]
+    async fn test_a_provider_offering_no_auth_is_refused_00() -> Outcome<()> {
+        let p = Provider { mechs: "", ..Provider::accepting() };
+        let (addr, seen) = res!(provider(p).await);
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await;
+        req!(true, out.is_err(), "a provider that cannot be authenticated to was used");
+        let lines = res!(lines_of(&seen));
+        req!(false, password_crossed(&lines));
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("MAIL FROM")));
+        Ok(())
+    }
+
+    /// `STARTTLS` was asked for and the provider does not offer it. The password
+    /// would cross in the clear, so nothing crosses at all -- and the error says
+    /// so, rather than only that something failed.
+    #[tokio::test]
+    async fn test_starttls_absent_means_the_password_is_withheld_00() -> Outcome<()> {
+        let p = Provider { starttls: false, ..Provider::accepting() };
+        let (addr, seen) = res!(provider(p).await);
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::StartTls), USER,
+            &[fmt!("bob@example.net")], &body()).await;
+        let msg = match out {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "The client submitted a password to a provider offering no TLS.";
+                Test, Invalid)),
+        };
+        req!(true, msg.contains("STARTTLS"), "the error did not name STARTTLS: {}", msg);
+        let lines = res!(lines_of(&seen));
+        req!(false, password_crossed(&lines),
+            "the password crossed a connection that could not be secured: {:?}", lines);
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH")),
+            "the client began to authenticate anyway");
+        Ok(())
+    }
+
+    // ── Permanence, which is what a caller retries or suppresses on ──
+
+    /// A 5xx on a recipient is authoritative: the caller suppresses the address
+    /// rather than sweeping it again forever. This is the only thing
+    /// [`is_permanent`] is for, and the only way a caller can tell the two apart.
+    #[tokio::test]
+    async fn test_a_5xx_recipient_refusal_is_permanent_00() -> Outcome<()> {
+        let p = Provider { rcpt_code: 550, ..Provider::accepting() };
+        let (addr, _) = res!(provider(p).await);
+        let c = res!(client().await);
+        match c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("A 550 on RCPT TO was reported as a send."; Test, Invalid)),
+            Err(e) => {
+                req!(true, is_permanent(&e),
+                    "a 550 was not tagged permanent, so the caller will retry it forever: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// A 4xx is the greylisting case, and carries no such tag: retried later it
+    /// usually succeeds, and suppressing the address would lose the mail.
+    #[tokio::test]
+    async fn test_a_4xx_recipient_refusal_is_transient_00() -> Outcome<()> {
+        let p = Provider { rcpt_code: 451, ..Provider::accepting() };
+        let (addr, _) = res!(provider(p).await);
+        let c = res!(client().await);
+        match c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("A 451 on RCPT TO was reported as a send."; Test, Invalid)),
+            Err(e) => {
+                req!(false, is_permanent(&e),
+                    "a 451 was tagged permanent, so the caller will suppress a good \
+                    address: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// And the same distinction on the message itself, where a policy block is
+    /// permanent and a full mailbox is not.
+    #[tokio::test]
+    async fn test_a_refused_message_carries_its_permanence_00() -> Outcome<()> {
+        let (addr, _) = res!(provider(Provider { data_code: 552, ..Provider::accepting() }).await);
+        let c = res!(client().await);
+        match c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await
+        {
+            Ok(_)  => return Err(err!("A 552 was reported as a send."; Test, Invalid)),
+            Err(e) => req!(true, is_permanent(&e), "a 552 on the message was not permanent: {}", e),
+        }
+
+        let (addr, _) = res!(provider(Provider { data_code: 452, ..Provider::accepting() }).await);
+        match c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await
+        {
+            Ok(_)  => Err(err!("A 452 was reported as a send."; Test, Invalid)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "a 452 was tagged permanent: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    // ── Wire shape ────────────────────────────────────────────────
+
+    /// A multi-line greeting or EHLO reply is one response, and the client must
+    /// read to the line whose fourth byte is a space rather than stopping at the
+    /// first.
+    #[tokio::test]
+    async fn test_a_multiline_ehlo_is_read_as_one_response_00() -> Outcome<()> {
+        // `Provider::ehlo_reply` sends four lines, three continued. Reaching AUTH
+        // at all proves the mechanism list was read out of the last-but-one.
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH PLAIN")),
+            "the mechanism list was not read out of the continued EHLO reply");
+        Ok(())
+    }
+
+    /// The EHLO name the caller configured is the one that goes over: it is what
+    /// a receiving server checks against the sending IP's PTR.
+    #[tokio::test]
+    async fn test_the_configured_ehlo_name_is_the_one_sent_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), USER, &[fmt!("bob@example.net")],
+            &body()).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l == &fmt!("EHLO {}", EHLO)),
+            "EHLO did not carry the configured name: {:?}", lines);
+        Ok(())
+    }
+
+    /// The envelope sender is the address the caller gave, angle-bracketed, and
+    /// not the login -- the two differ whenever a person sends as an alias.
+    #[tokio::test]
+    async fn test_the_envelope_sender_is_not_the_login_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        res!(c.submit(&cfg(addr, Security::Plain), "alias@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l == "MAIL FROM:<alias@example.com>"),
+            "the envelope sender was rewritten: {:?}", lines);
+        Ok(())
+    }
+
+    /// Nothing at all happens without a recipient: no connection, no banner read,
+    /// no credential offered to a conversation that cannot carry a message.
+    #[tokio::test]
+    async fn test_no_recipient_is_refused_before_dialling_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(Provider::accepting()).await);
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::Plain), USER, &[], &body()).await;
+        req!(true, out.is_err(), "a message with no recipient was submitted");
+        req!(true, res!(lines_of(&seen)).is_empty(),
+            "the client dialled a provider for a message it could not send");
+        Ok(())
+    }
+
+    /// A greeting that is not a 220 is not a provider ready to take mail, and the
+    /// client must stop there rather than talk over it.
+    #[tokio::test]
+    async fn test_a_refused_banner_stops_before_ehlo_00() -> Outcome<()> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding a refusing provider."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; IO, Network)));
+        let seen: Transcript = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        tokio::spawn(async move {
+            if let Ok((sock, _)) = listener.accept().await {
+                let (r, mut w) = sock.into_split();
+                let _ = w.write_all(b"554 no service here\r\n").await;
+                let mut buf = Vec::new();
+                let mut r = r;
+                let _ = r.read_to_end(&mut buf).await;
+                if let Ok(mut g) = log.lock() {
+                    g.push(String::from_utf8_lossy(&buf).into_owned());
+                }
+            }
+        });
+
+        let c = res!(client().await);
+        let out = c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await;
+        let msg = match out {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A 554 greeting was treated as a provider ready for mail."; Test, Invalid)),
+        };
+        req!(true, msg.contains("220"), "the error did not say what was expected: {}", msg);
+        let said = res!(lines_of(&seen)).join("");
+        req!(false, said.to_uppercase().contains("EHLO"),
+            "the client talked over a refusing banner: {:?}", said);
+        Ok(())
+    }
+
+    // ── The pieces, where the whole conversation cannot reach them ──
+
+    #[test]
+    fn test_dot_stuff_doubles_only_at_a_line_start_00() -> Outcome<()> {
+        req!(b"..a\r\n".to_vec(),        dot_stuff(b".a\r\n"));
+        req!(b"a.b\r\n".to_vec(),        dot_stuff(b"a.b\r\n"));
+        req!(b"x\r\n..y\r\n".to_vec(),   dot_stuff(b"x\r\n.y\r\n"));
+        // Two dots on their own line become three: the receiver unstuffs one.
+        req!(b"...\r\n".to_vec(),        dot_stuff(b"..\r\n"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_extract_domain_takes_the_last_at_00() -> Outcome<()> {
+        req!(fmt!("example.com"), res!(extract_domain("a@example.com")));
+        req!(fmt!("example.com"), res!(extract_domain("A@Example.COM")));
+        // A quoted local part may itself contain an '@'.
+        req!(fmt!("example.com"), res!(extract_domain("\"odd@name\"@example.com")));
+        req!(true, extract_domain("no-at-sign").is_err());
+        Ok(())
+    }
+
+    /// The tag survives being wrapped. `res!` builds an `Error::Upstream` with no
+    /// tags of its own, so a predicate reading one frame answers `false` however
+    /// many 5xx there were underneath -- which is what made this inert.
+    #[test]
+    fn test_permanence_survives_a_wrapping_frame_00() -> Outcome<()> {
+        let inner: Error<ErrTag> = err!(
+            "RCPT TO:<nobody@example.net> rejected: 550 no such mailbox";
+            IO, Network, Wire, Permanent);
+        req!(true, is_permanent(&inner), "the tag is not read at the innermost frame");
+
+        let once = Error::Upstream(std::sync::Arc::new(inner), ErrMsg {
+            tags: &[],
+            msg:  errmsg!(),
+        });
+        req!(true, is_permanent(&once), "one wrapping frame hid the tag");
+
+        let twice = Error::Upstream(std::sync::Arc::new(once), ErrMsg {
+            tags: &[],
+            msg:  errmsg!(),
+        });
+        req!(true, is_permanent(&twice), "two wrapping frames hid the tag");
+
+        // And a transient failure stays transient however deep it is, or every
+        // greylisted address would be suppressed.
+        let soft: Error<ErrTag> = err!(
+            "RCPT TO:<bob@example.net> rejected: 451 try later";
+            IO, Network, Wire);
+        let wrapped = Error::Upstream(std::sync::Arc::new(soft), ErrMsg {
+            tags: &[],
+            msg:  errmsg!(),
+        });
+        req!(false, is_permanent(&wrapped), "a 451 was read as permanent");
+        Ok(())
+    }
+
+    /// Delivery is one SMTP transaction per domain, and the MVP does one domain.
+    /// Refusing loudly beats delivering to the first domain and dropping the rest.
+    #[tokio::test]
+    async fn test_delivery_refuses_a_mixed_domain_envelope_00() -> Outcome<()> {
+        let c = res!(client().await);
+        req!(true, c.deliver("a@example.com", &[], b"x").await.is_err(),
+            "delivery with no recipient was accepted");
+        req!(true, c.deliver("a@example.com",
+            &[fmt!("b@one.example"), fmt!("c@two.example")], b"x").await.is_err(),
+            "delivery accepted two domains in one transaction");
+        Ok(())
+    }
+
+    // ── Delivery to an exchange, which carries jarrah's outbound mail ──
+
+    /// A stand-in exchange, and the target that points at it. `preference` is what
+    /// the MX record would have said.
+    async fn exchange_at(p: Provider, preference: u16) -> Outcome<(DeliveryTarget, Transcript)> {
+        let (addr, seen) = res!(provider(p).await);
+        Ok((DeliveryTarget {
+            host:       fmt!("mx{}.example.net", preference),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference,
+        }, seen))
+    }
+
+    /// The conversation a mail *server* has: no credential, because the receiving
+    /// exchange takes the message for being responsible for the recipient. A
+    /// delivering client that tries to log in is doing a mail client's job.
+    #[tokio::test]
+    async fn test_delivery_never_authenticates_00() -> Outcome<()> {
+        // The exchange advertises AUTH anyway, which real ones commonly do.
+        let (tgt, seen) = res!(exchange_at(Provider::accepting(), 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "postmaster@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"));
+
+        let lines = res!(lines_of(&seen));
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH")),
+            "a delivering client tried to authenticate: {:?}", lines);
+        req!(false, password_crossed(&lines));
+        req!(true, lines.iter().any(|l| l == "MAIL FROM:<postmaster@example.com>"));
+        req!(true, lines.iter().any(|l| l == "RCPT TO:<bob@example.net>"));
+        req!(true, lines.iter().any(|l| l == "."), "the message was never terminated");
+        // Dot-stuffing is the same on this path, and it is a different call site.
+        req!(true, lines.iter().any(|l| l.starts_with("..A line that begins")));
+        Ok(())
+    }
+
+    /// Preference order, which is the whole point of holding a list: the lowest
+    /// number is tried first.
+    ///
+    /// The preferred exchange refuses at `RCPT TO` rather than at the banner,
+    /// deliberately. A banner-refusing fixture records nothing, so "its transcript
+    /// is empty" is satisfied by *never having been dialled* as much as by having
+    /// been -- and an assertion that cannot fail proves nothing. Written that way
+    /// first, this case passed with `sort_by_key` deleted.
+    #[tokio::test]
+    async fn test_exchanges_are_tried_in_preference_order_00() -> Outcome<()> {
+        let dead = Provider { rcpt_code: 550, ..Provider::exchange() };
+        let c = res!(client().await);
+
+        // The refusing exchange is preferred, so it must be spoken to first and
+        // the message must still land on the second.
+        let (bad,  saw_bad)  = res!(exchange_at(dead, 10).await);
+        let (good, saw_good) = res!(exchange_at(Provider::exchange(), 20).await);
+        let qid = res!(c.deliver_to_exchanges(&[good.clone(), bad.clone()],
+            "a@example.com", &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&saw_bad)).iter().any(|l| l.starts_with("RCPT TO")),
+            "the preferred exchange was skipped: it was never offered the recipient");
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."),
+            "the message did not reach the second exchange");
+
+        // With the preferences swapped the good one is used first, and the
+        // refusing one is never dialled at all.
+        let (good, saw_good) = res!(exchange_at(Provider::exchange(), 10).await);
+        let (bad,  saw_bad)  = res!(exchange_at(dead, 20).await);
+        res!(c.deliver_to_exchanges(&[bad, good], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."));
+        req!(true, res!(lines_of(&saw_bad)).is_empty(),
+            "a less-preferred exchange was used while a better one worked");
+        Ok(())
+    }
+
+    /// A 5xx recipient refusal is authoritative for the domain: it survives the
+    /// collapse of every per-exchange error into one, so the caller suppresses the
+    /// address instead of sweeping it forever. This is the path `deliver`'s own
+    /// re-tagging was written for, and which never worked.
+    #[tokio::test]
+    async fn test_a_permanent_refusal_survives_the_collapse_00() -> Outcome<()> {
+        let dead = Provider { rcpt_code: 550, ..Provider::exchange() };
+        let (a, _) = res!(exchange_at(dead, 10).await);
+        let (b, _) = res!(exchange_at(dead, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("Two 550s were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(true, is_permanent(&e),
+                    "a 550 from every exchange was not permanent, so the address is \
+                    retried forever: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// Greylisting is the common case and must not suppress anybody: a 4xx from
+    /// every exchange collapses to a transient error.
+    #[tokio::test]
+    async fn test_a_transient_refusal_stays_transient_through_the_collapse_00() -> Outcome<()> {
+        let busy = Provider { rcpt_code: 450, ..Provider::exchange() };
+        let (a, _) = res!(exchange_at(busy, 10).await);
+        let (b, _) = res!(exchange_at(busy, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("Two 450s were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(false, is_permanent(&e),
+                    "greylisting was read as permanent, so a good address is \
+                    suppressed: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// One exchange refusing permanently is enough, even where another failed for
+    /// a reason that carries no verdict. The address is bad; which exchange said
+    /// so does not change that, and the flag must survive a later attempt.
+    #[tokio::test]
+    async fn test_one_permanent_refusal_among_failures_is_enough_00() -> Outcome<()> {
+        let (dead, _)     = res!(exchange_at(
+            Provider { rcpt_code: 550, ..Provider::exchange() }, 10).await);
+        let (refusing, _) = res!(exchange_at(
+            Provider { banner: 421, ..Provider::exchange() }, 20).await);
+        let c = res!(client().await);
+        match c.deliver_to_exchanges(&[dead, refusing], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Ok(_)  => Err(err!("A 550 and a 421 were reported as a delivery."; Test, Invalid)),
+            Err(e) => {
+                req!(true, is_permanent(&e),
+                    "the permanent refusal was lost behind a later transient one: {}", e);
+                Ok(())
+            },
+        }
+    }
+
+    /// Opportunistic means opportunistic: an exchange that advertises `STARTTLS`
+    /// and then will not do it still gets the mail, in the clear. Delivery has no
+    /// credential to protect, and refusing here would silently stop mail to any
+    /// exchange having a bad day with its certificate.
+    #[tokio::test]
+    async fn test_a_refused_starttls_still_delivers_in_the_clear_00() -> Outcome<()> {
+        let p = Provider { starttls: true, starttls_ok: false, ..Provider::exchange() };
+        let (tgt, seen) = res!(exchange_at(p, 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"), "a refused STARTTLS stopped the delivery");
+
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase() == "STARTTLS"),
+            "the offer was advertised and not taken up: {:?}", lines);
+        req!(true, lines.iter().any(|l| l == "."), "the message never arrived");
+        Ok(())
+    }
+
+    /// No exchanges is a named error, not a silent success. A resolver that found
+    /// nothing must not look like a delivery.
+    #[tokio::test]
+    async fn test_no_exchange_is_a_named_failure_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let msg = match c.deliver_to_exchanges(&[], "a@example.com",
+            &[fmt!("bob@example.net")], &body()).await
+        {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "Delivery with nowhere to deliver reported success."; Test, Invalid)),
+        };
+        req!(true, msg.contains("No reachable MX"), "the error did not say why: {}", msg);
+        Ok(())
+    }
+
+    /// Where every exchange failed, the caller gets the last one's words -- and
+    /// the exchange they came from, because "delivery failed" without a host is
+    /// not something an operator can act on.
+    #[tokio::test]
+    async fn test_a_collapsed_error_names_an_exchange_00() -> Outcome<()> {
+        let (a, _) = res!(exchange_at(
+            Provider { rcpt_code: 550, ..Provider::exchange() }, 10).await);
+        let host = a.host.clone();
+        let c = res!(client().await);
+        let msg = match c.deliver_to_exchanges(&[a], "a@example.com",
+            &[fmt!("nobody@example.net")], &body()).await
+        {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!("A 550 was a delivery."; Test, Invalid)),
+        };
+        req!(true, msg.contains(&host), "the failing exchange was not named: {}", msg);
+        req!(true, msg.contains("550"), "the server's code was dropped: {}", msg);
+        Ok(())
     }
 }
