@@ -58,6 +58,10 @@ A closing paragraph.
 /// gets both wrong.
 const RICH: &[u8] = include_bytes!("data/rich.docx");
 
+/// A `.docx` LibreOffice wrote holding a picture, which is the one thing in this fixture set that a
+/// reading view genuinely cannot draw. The band that says so is the whole point of it.
+const WITHPIC: &[u8] = include_bytes!("data/withpic.docx");
+
 /// The parts a `.docx` cannot open without.
 const REQUIRED: [&str; 4] = [
 	"[Content_Types].xml",
@@ -290,6 +294,21 @@ pub fn test_office(filter: &'static str) -> Outcome<()> {
 		assert!(r.undrawn.is_empty(), "got {:?}", r.undrawn);
 		assert!(r.say_undrawn().is_none());
 		assert!(!r.macros);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A picture in a foreign document is counted 012", "all", "office"], || {
+		// The counting, on a real document rather than on a hand-made `Reading`. LibreOffice writes a
+		// picture as `w:drawing`, and the prose around it has to survive it: a reader that stopped at
+		// the drawing would lose the rest of the document and report one image.
+		let r = res!(docx::read(WITHPIC));
+		assert_eq!(r.undrawn, vec![(Undrawable::Image, 1)], "got {:?}", r.undrawn);
+		assert_eq!(res!(r.say_undrawn().ok_or_else(|| err!("no phrase"; Missing))),
+			"1 thing is not drawn: 1 image");
+		let md = markdown::write::render(&r.doc);
+		assert!(md.contains("# Report With A Picture"), "got {}", md);
+		assert!(md.contains("Text before the picture."), "got {}", md);
+		assert!(md.contains("Text after the picture."), "the prose after the drawing survived: {}", md);
 		Ok(())
 	}));
 
