@@ -300,5 +300,37 @@ pub fn test_xlsx(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["The styles part carries every table Excel insists on 009", "all", "xlsx"], || {
+		// Excel is stricter than the schema here and its answer to a missing table is a REPAIR PROMPT,
+		// which "fixes" the file and never names the reason. `cellStyles` was the one missing: it holds
+		// the named style a cell wears when nobody has styled it, the schema makes it optional, and
+		// Excel writes it in every workbook it saves. openpyxl warned "Workbook contains no default
+		// style" over ours and not over LibreOffice's.
+		let bytes = res!(xlsx::write(&book()));
+		let zip = res!(oxedyne_fe2o3_file::zip::Zip::read(bytes));
+		let styles = res!(zip.text("xl/styles.xml"));
+		assert!(styles.contains("<cellStyle name=\"Normal\" xfId=\"0\" builtinId=\"0\"/>"),
+			"no default cell style: {}", styles);
+
+		// In CT_Stylesheet's own order, because the sequence is not a suggestion: a `cellStyles` before
+		// `cellXfs` is invalid however right its content is.
+		const ORDER: [&str; 6] = ["<fonts", "<fills", "<borders", "<cellStyleXfs", "<cellXfs",
+			"<cellStyles"];
+		let mut last = 0usize;
+		for tag in ORDER {
+			let at = res!(styles.find(tag).ok_or_else(|| err!(
+				"xl/styles.xml has no {} element at all.", tag; Test, Missing)));
+			assert!(at > last, "{} comes before the element it must follow", tag);
+			last = at;
+		}
+		// The fill table's first two entries, in this order, whether or not anything uses either.
+		let none_at = res!(styles.find("patternType=\"none\"").ok_or_else(|| err!(
+			"the fill table has no `none` entry"; Test, Missing)));
+		let gray_at = res!(styles.find("patternType=\"gray125\"").ok_or_else(|| err!(
+			"the fill table has no `gray125` entry"; Test, Missing)));
+		assert!(none_at < gray_at, "the two required fills are the wrong way round");
+		Ok(())
+	}));
+
 	Ok(())
 }

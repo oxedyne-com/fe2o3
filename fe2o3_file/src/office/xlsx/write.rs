@@ -13,6 +13,12 @@
 //! worst kind of failure to debug: the file is "fixed" and the reason is never named. So they are all
 //! written.
 //!
+//! `<cellStyles>` belongs to that list and was missing from it. The schema makes the element optional
+//! and Excel writes `<cellStyle name="Normal" xfId="0" builtinId="0"/>` in every workbook it saves --
+//! it is the named style a cell has when nobody has styled it. openpyxl says "Workbook contains no
+//! default style" over every workbook this wrote and says nothing over LibreOffice's, which is how the
+//! omission was pinned on us rather than on the reader.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
@@ -336,6 +342,13 @@ fn styles() -> Outcome<String> {
 	out.empty("xf", &[("numFmtId", "14"), ("fontId", "0"), ("fillId", "0"), ("borderId", "0"),
 		("xfId", "0"), ("applyNumberFormat", "1")]);
 	res!(out.close("cellXfs"));
+
+	// The named style a cell wears when nobody has styled it. `builtinId="0"` is what makes it Excel's
+	// own Normal rather than a style of ours that happens to be called that. After `cellXfs`, which is
+	// where CT_Stylesheet's sequence puts it.
+	out.open("cellStyles", &[("count", "1")]);
+	out.empty("cellStyle", &[("name", "Normal"), ("xfId", "0"), ("builtinId", "0")]);
+	res!(out.close("cellStyles"));
 
 	res!(out.close("styleSheet"));
 	out.finish()
