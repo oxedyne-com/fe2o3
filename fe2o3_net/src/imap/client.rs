@@ -1250,8 +1250,588 @@ fn quoted(s: &str) -> String {
 mod tests {
     use super::*;
 
+    use std::sync::Mutex;
+
+    use tokio::net::TcpListener;
+
     fn line(text: &str, lits: Vec<Vec<u8>>) -> RawLine {
         RawLine { text: text.to_string(), literals: lits }
+    }
+
+
+    // ┌───────────────────────────────────────────────────────────────────────┐
+    // │ A SCRIPTED SERVER                                                     │
+    // └───────────────────────────────────────────────────────────────────────┘
+
+    // The round-trip against fe2o3's own ImapServer lives in
+    // fe2o3_mail/tests/imap_roundtrip.rs and proves the happy path. What it
+    // cannot pose is a server behaving badly -- a BYE greeting, a literal larger
+    // than the client will allocate for, a tag the client never sent, bytes
+    // pipelined behind a STARTTLS response. Those are the cases where this client
+    // either refuses or is quietly compromised, so they are scripted here.
+
+    const USER: &str = "alice@example.com";
+    const PASS: &str = "app-password-not-a-real-one";
+
+    /// Every line the server was sent, in order, plus a `<literal N>` marker and
+    /// its payload wherever the client sent one.
+    type Transcript = Arc<Mutex<Vec<String>>>;
+
+    /// Serve `greeting`, then answer each command the client sends with the next
+    /// entry of `script`, verbatim. `%T%` in an entry becomes the tag the client
+    /// used on the command being answered, so a script need not track them.
+    ///
+    /// A command ending in a `{n}` literal marker is answered as scripted; where
+    /// that answer begins with `+`, the `n` bytes and their CRLF are read off and
+    /// logged before the next command. Running off the end of the script closes
+    /// the connection, which is a legitimate thing for a server to do and one the
+    /// client must not hang on.
+    async fn scripted(
+        greeting:   &'static str,
+        script:     Vec<&'static str>,
+    )
+        -> Outcome<(SocketAddr, Transcript)>
+    {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the scripted IMAP server."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading its address."; IO, Network)));
+
+        let seen: Transcript = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+
+        tokio::spawn(async move {
+            let (sock, _) = match listener.accept().await {
+                Ok(x)  => x,
+                Err(_) => return,
+            };
+            let (r, mut w) = sock.into_split();
+            let mut rd = BufReader::new(r);
+
+            let _ = w.write_all(greeting.as_bytes()).await;
+
+            let mut script = script.into_iter();
+            while let Some(reply) = script.next() {
+                let mut buf: Vec<u8> = Vec::with_capacity(256);
+                match rd.read_until(b'\n', &mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_)          => (),
+                }
+                while buf.last() == Some(&b'\n') || buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+                let cmd = String::from_utf8_lossy(&buf).into_owned();
+                if let Ok(mut g) = log.lock() {
+                    g.push(cmd.clone());
+                }
+                let tag = cmd.split_whitespace().next().unwrap_or("").to_string();
+                let out = reply.replace("%T%", &tag);
+                let _ = w.write_all(out.as_bytes()).await;
+
+                // A synchronising literal the client is now entitled to send. It
+                // is not a command, so the entry that follows goes out without
+                // waiting for another line -- the client is waiting on the
+                // completion and will send nothing until it has it.
+                if out.starts_with('+') {
+                    if let Some(n) = trailing_literal_len(&cmd) {
+                        let mut lit = vec![0u8; n];
+                        if rd.read_exact(&mut lit).await.is_err() {
+                            return;
+                        }
+                        let mut tail = Vec::new();
+                        let _ = rd.read_until(b'\n', &mut tail).await;
+                        if let Ok(mut g) = log.lock() {
+                            g.push(fmt!("<literal {}>", n));
+                            g.push(String::from_utf8_lossy(&lit).into_owned());
+                        }
+                        match script.next() {
+                            Some(done) => {
+                                let _ = w.write_all(
+                                    done.replace("%T%", &tag).as_bytes()).await;
+                            },
+                            None => return,
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok((addr, seen))
+    }
+
+    fn cfg(addr: SocketAddr) -> ImapConfig {
+        ImapConfig::new(fmt!("127.0.0.1"), addr.port(), Security::Plain)
+            .with_addr(addr)
+            .with_timeout(Duration::from_secs(10))
+    }
+
+    fn lines_of(t: &Transcript) -> Outcome<Vec<String>> {
+        match t.lock() {
+            Ok(g)  => Ok(g.clone()),
+            Err(_) => Err(err!("The server's transcript was poisoned."; Lock, Poisoned)),
+        }
+    }
+
+    /// A greeting that already carries the capability list, which is the common
+    /// case and saves a round trip.
+    const GREET: &str = "* OK [CAPABILITY IMAP4rev1 SPECIAL-USE AUTH=PLAIN] ready\r\n";
+
+    // ── The greeting ──────────────────────────────────────────────
+
+    /// A `BYE` greeting is a refusal, and the server's own words are the most
+    /// useful thing anybody will say about it.
+    #[tokio::test]
+    async fn test_a_bye_greeting_is_a_refusal_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            "* BYE Too many connections from your IP\r\n", vec![]).await);
+        let out = ImapClient::connect(&cfg(addr)).await;
+        let msg = match out {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A BYE greeting was treated as a usable connection."; Test, Invalid)),
+        };
+        req!(true, msg.contains("Too many connections"),
+            "the server's own words were dropped: {}", msg);
+        Ok(())
+    }
+
+    /// Anything that is not `OK` or `PREAUTH` is not an IMAP server, and talking
+    /// on regardless is how a client sends a password to whatever answered.
+    #[tokio::test]
+    async fn test_a_greeting_that_is_not_a_greeting_is_refused_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted("+OK POP3 server ready\r\n", vec![]).await);
+        req!(true, ImapClient::connect(&cfg(addr)).await.is_err(),
+            "a POP3 greeting was accepted as IMAP");
+        req!(true, res!(lines_of(&seen)).is_empty(),
+            "the client sent a command to something that never greeted it");
+        Ok(())
+    }
+
+    /// The greeting's `[CAPABILITY ...]` is taken at its word: a client that asks
+    /// again anyway has spent a round trip on nothing, on every connection.
+    #[tokio::test]
+    async fn test_a_capability_in_the_greeting_saves_the_round_trip_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec![]).await);
+        let c = res!(ImapClient::connect(&cfg(addr)).await);
+        req!(true, c.has_cap("IMAP4REV1"));
+        req!(true, c.has_cap("SPECIAL-USE"));
+        req!(true, res!(lines_of(&seen)).is_empty(),
+            "the client asked for CAPABILITY it had already been given");
+        Ok(())
+    }
+
+    /// A greeting without one leaves the client not knowing what the server can
+    /// do, so it must ask before doing anything that depends on the answer.
+    #[tokio::test]
+    async fn test_a_bare_greeting_is_followed_by_capability_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            "* OK ready\r\n",
+            vec!["* CAPABILITY IMAP4rev1 STARTTLS\r\n%T% OK done\r\n"],
+        ).await);
+        let c = res!(ImapClient::connect(&cfg(addr)).await);
+        req!(true, c.has_cap("STARTTLS"));
+        let lines = res!(lines_of(&seen));
+        req!(1, lines.len());
+        req!(true, lines[0].to_uppercase().ends_with("CAPABILITY"),
+            "the client did not ask for CAPABILITY: {:?}", lines);
+        Ok(())
+    }
+
+    /// A refresh replaces the set rather than adding to it. A capability left
+    /// behind is one the client believes in and the server has withdrawn --
+    /// after a login, that is a command sent to a server that will reject it.
+    #[tokio::test]
+    async fn test_a_capability_refresh_replaces_rather_than_accumulates_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            "* OK [CAPABILITY IMAP4rev1 STARTTLS LOGINDISABLED] ready\r\n",
+            vec!["* CAPABILITY IMAP4rev1 IDLE\r\n%T% OK done\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        req!(true, c.has_cap("LOGINDISABLED"));
+        res!(c.capability().await);
+        req!(false, c.has_cap("LOGINDISABLED"),
+            "a withdrawn capability survived the refresh");
+        req!(false, c.has_cap("STARTTLS"), "a withdrawn capability survived the refresh");
+        req!(true, c.has_cap("IDLE"));
+        Ok(())
+    }
+
+    // ── Authentication ────────────────────────────────────────────
+
+    /// A refusal carries the server's words -- `[AUTHENTICATIONFAILED]` is what
+    /// tells a person their app password is the problem -- and never the password.
+    #[tokio::test]
+    async fn test_a_refused_login_keeps_the_words_and_not_the_password_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec!["%T% NO [AUTHENTICATIONFAILED] Invalid credentials (Failure)\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.login(USER, PASS).await {
+            Err(e) => fmt!("{}", e),
+            Ok(())  => return Err(err!("A refused LOGIN was reported as a success.";
+                Test, Invalid)),
+        };
+        req!(true, msg.contains("AUTHENTICATIONFAILED"),
+            "the server's response code was dropped: {}", msg);
+        req!(false, msg.contains(PASS), "the password leaked into the error: {}", msg);
+        // It did go over the wire, which is what LOGIN is; the point is that the
+        // error does not repeat it into a log file.
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.contains(PASS)));
+        Ok(())
+    }
+
+    /// `LOGINDISABLED` means the password will be refused, so it is not sent. A
+    /// client that tries anyway has put the credential on the wire to learn
+    /// something the server already told it.
+    #[tokio::test]
+    async fn test_logindisabled_withholds_the_password_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            "* OK [CAPABILITY IMAP4rev1 LOGINDISABLED STARTTLS] ready\r\n",
+            vec!["%T% OK never reached\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        req!(true, c.login(USER, PASS).await.is_err(),
+            "the client sent a password to a server that had disabled it");
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.contains(PASS)),
+            "the password crossed the wire anyway");
+        Ok(())
+    }
+
+    /// XOAUTH2 is refused outright where the server does not offer it, rather
+    /// than sent and rejected -- a bearer token spent on a server that cannot
+    /// use it is a token in somebody's log.
+    #[tokio::test]
+    async fn test_xoauth2_is_not_offered_to_a_server_without_it_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec!["%T% OK never reached\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        req!(true, c.authenticate_xoauth2(USER, "ya29.a-bearer-token").await.is_err());
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.contains("ya29")),
+            "the token crossed the wire to a server that does not speak XOAUTH2");
+        Ok(())
+    }
+
+    /// STARTTLS was asked for and the server does not offer it. The credential is
+    /// not sent in the clear as a fallback.
+    #[tokio::test]
+    async fn test_starttls_absent_refuses_the_connection_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            "* OK [CAPABILITY IMAP4rev1 AUTH=PLAIN] ready\r\n", vec![]).await);
+        let c = ImapConfig::new(fmt!("127.0.0.1"), addr.port(), Security::StartTls)
+            .with_addr(addr)
+            .with_timeout(Duration::from_secs(10));
+        let msg = match ImapClient::connect(&c).await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A connection that could not be secured was returned as usable.";
+                Test, Invalid)),
+        };
+        req!(true, msg.contains("STARTTLS"), "the error did not name STARTTLS: {}", msg);
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.to_uppercase().contains("LOGIN")),
+            "the client began to log in over an unprotected connection");
+        Ok(())
+    }
+
+    /// RFC 2595 §3.1: anything the server pipelines behind its `STARTTLS` reply
+    /// arrived unprotected and is indistinguishable from what the TLS peer says
+    /// next. Discarding it silently is the downgrade attack; the connection must
+    /// be refused.
+    #[tokio::test]
+    async fn test_data_pipelined_behind_starttls_is_refused_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            "* OK [CAPABILITY IMAP4rev1 STARTTLS] ready\r\n",
+            // The OK, and then an injected untagged line the real peer never sent.
+            vec!["%T% OK Begin TLS negotiation now\r\n* OK [CAPABILITY IMAP4rev1 \
+                AUTH=PLAIN LOGINDISABLED] injected\r\n"],
+        ).await);
+        let c = ImapConfig::new(fmt!("127.0.0.1"), addr.port(), Security::StartTls)
+            .with_addr(addr)
+            .with_timeout(Duration::from_secs(10));
+        let msg = match ImapClient::connect(&c).await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "Bytes injected before the handshake were accepted as the peer's.";
+                Test, Invalid)),
+        };
+        req!(true, msg.contains("after its STARTTLS response"),
+            "the refusal did not name the reason: {}", msg);
+        Ok(())
+    }
+
+    // ── The wire, where a line is not a line ──────────────────────
+
+    /// The reader's whole job: a literal announced mid-line, whose payload
+    /// contains CRLF, a close paren and a `{n}` of its own. A client that reads
+    /// FETCH replies line by line loses the message here, and the bug does not
+    /// show until somebody sends an attachment.
+    #[tokio::test]
+    async fn test_a_literal_containing_crlf_survives_the_reader_00() -> Outcome<()> {
+        // 62 bytes, counted: a body with two blank lines, a close paren and a
+        // fake literal marker in it.
+        let body = "Subject: awkward\r\n\r\n) not the end {17}\r\nlast line\r\n";
+        req!(51, body.len(), "the scripted literal length must match the payload");
+        let script = vec![
+            "%T% OK [READ-WRITE] SELECT completed\r\n",
+            "* 1 FETCH (UID 9 FLAGS (\\Seen) RFC822.SIZE 51 BODY[] {51}\r\n\
+             Subject: awkward\r\n\r\n) not the end {17}\r\nlast line\r\n)\r\n\
+             %T% OK FETCH completed\r\n",
+        ];
+        let (addr, _) = res!(scripted(GREET, script).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let msgs = res!(c.uid_fetch(&[9], FetchWhat::Full).await);
+        req!(1, msgs.len(), "the FETCH reply was lost");
+        req!(body.as_bytes().to_vec(), msgs[0].body,
+            "the literal came back changed: {:?}", String::from_utf8_lossy(&msgs[0].body));
+        req!(9, msgs[0].uid);
+        req!(vec![fmt!("\\Seen")], msgs[0].flags);
+        Ok(())
+    }
+
+    /// A server announcing more than the client will allocate for is refused
+    /// before the allocation, not after it.
+    #[tokio::test]
+    async fn test_an_oversized_literal_is_refused_before_allocating_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            GREET,
+            vec![
+                "%T% OK SELECT completed\r\n",
+                // 64 MiB + 1, announced and never sent.
+                "* 1 FETCH (UID 9 BODY[] {67108865}\r\n",
+            ],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let msg = match c.uid_fetch(&[9], FetchWhat::Full).await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A 64 MiB literal was accepted from a server that never sent it.";
+                Test, Invalid)),
+        };
+        req!(true, msg.contains("67108865"), "the error did not name the size: {}", msg);
+        Ok(())
+    }
+
+    /// A tag the client never sent means the connection is out of step, and
+    /// nothing read after it belongs to the command that is waiting. Matching it
+    /// loosely is how one command's reply is read as another's.
+    #[tokio::test]
+    async fn test_a_foreign_tag_takes_the_connection_out_of_step_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            GREET,
+            vec!["a9999 OK SELECT completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.select("INBOX").await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A reply carrying somebody else's tag was accepted."; Test, Invalid)),
+        };
+        req!(true, msg.contains("a9999"), "the error did not name the tag seen: {}", msg);
+        Ok(())
+    }
+
+    /// A server that hangs up mid-command is an error naming the close, not a
+    /// hang and not an empty success.
+    #[tokio::test]
+    async fn test_a_closed_connection_is_named_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET, vec![]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.select("INBOX").await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!(
+                "A closed connection was reported as a SELECT."; Test, Invalid)),
+        };
+        req!(true, msg.contains("closed the connection"),
+            "the error did not say the server hung up: {}", msg);
+        Ok(())
+    }
+
+    /// `NO` and `BAD` are different failures and are reported as such: one is a
+    /// server refusing, the other a client having sent nonsense.
+    #[tokio::test]
+    async fn test_no_and_bad_are_reported_apart_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(GREET,
+            vec!["%T% NO Mailbox does not exist\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.select("nosuch").await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!("A NO was a success."; Test, Invalid)),
+        };
+        req!(true, msg.contains("refused"), "a NO did not read as a refusal: {}", msg);
+
+        let (addr, _) = res!(scripted(GREET, vec!["%T% BAD Command unrecognised\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.select("INBOX").await {
+            Err(e) => fmt!("{}", e),
+            Ok(_)  => return Err(err!("A BAD was a success."; Test, Invalid)),
+        };
+        req!(true, msg.contains("malformed"), "a BAD did not read as malformed: {}", msg);
+        Ok(())
+    }
+
+    // ── What the client puts on the wire ──────────────────────────
+
+    /// A week's worth of consecutive UIDs is a command line a server is entitled
+    /// to reject, so they go over collapsed into ranges. Asserted from what the
+    /// server received, not from the function that builds it.
+    #[tokio::test]
+    async fn test_a_uid_set_reaches_the_server_collapsed_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec![
+                "%T% OK SELECT completed\r\n",
+                "%T% OK FETCH completed\r\n",
+            ],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_fetch(&[1, 2, 3, 7, 9, 10], FetchWhat::Meta).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.contains("UID FETCH 1:3,7,9:10")),
+            "the UID set was not collapsed on the wire: {:?}", lines);
+        Ok(())
+    }
+
+    /// An empty set is no command at all: `UID FETCH ` with nothing after it is a
+    /// syntax error, and a caller passing an empty search result has done nothing
+    /// wrong.
+    #[tokio::test]
+    async fn test_an_empty_fetch_sends_nothing_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET, vec!["%T% OK SELECT completed\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        let before = res!(lines_of(&seen)).len();
+        req!(true, res!(c.uid_fetch(&[], FetchWhat::Full).await).is_empty());
+        res!(c.uid_store_flags(&[], FlagOp::Add, &["\\Seen"]).await);
+        req!(before, res!(lines_of(&seen)).len(),
+            "a command was sent for an empty UID set");
+        Ok(())
+    }
+
+    /// `RETURN (SPECIAL-USE)` is asked for only where the server said it
+    /// understands it. Sent to a server without the capability it is a `LIST` the
+    /// server may reject outright, and then no folders are listed at all.
+    #[tokio::test]
+    async fn test_special_use_is_asked_for_only_when_offered_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(GREET,
+            vec!["* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n%T% OK LIST completed\r\n"]).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.list("", "*").await);
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.contains("RETURN (SPECIAL-USE)")),
+            "SPECIAL-USE was offered and not asked for");
+
+        let (addr, seen) = res!(scripted(
+            "* OK [CAPABILITY IMAP4rev1] ready\r\n",
+            vec!["* LIST (\\HasNoChildren) \"/\" \"INBOX\"\r\n%T% OK LIST completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.list("", "*").await);
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.contains("SPECIAL-USE")),
+            "SPECIAL-USE was asked of a server that never offered it");
+        Ok(())
+    }
+
+    /// `EXAMINE` rather than `SELECT`, because a sync that marks mail read is a
+    /// sync somebody notices. The gateway's fetch path uses this one.
+    #[tokio::test]
+    async fn test_examine_is_read_only_on_the_wire_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec!["* 42 EXISTS\r\n* OK [UIDVALIDITY 1234567890]\r\n\
+                  * OK [UIDNEXT 4321]\r\n%T% OK [READ-ONLY] EXAMINE completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let st = res!(c.examine("INBOX").await);
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.contains("EXAMINE \"INBOX\"")),
+            "EXAMINE was not the verb sent");
+        req!(42,           st.exists);
+        req!(1_234_567_890, st.uid_validity);
+        req!(4_321,        st.uid_next);
+        req!(true,         st.read_only);
+        Ok(())
+    }
+
+    /// A server may downgrade a `SELECT` and say so only in the completion line's
+    /// response code. A client that misses it believes it may set flags.
+    #[tokio::test]
+    async fn test_a_downgraded_select_is_read_only_00() -> Outcome<()> {
+        let (addr, _) = res!(scripted(
+            GREET,
+            vec!["* 3 EXISTS\r\n%T% OK [READ-ONLY] SELECT completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let st = res!(c.select("INBOX").await);
+        req!(true, st.read_only, "the downgrade in the completion line was missed");
+        Ok(())
+    }
+
+    /// `.SILENT` on every `STORE`: the client already knows what it asked for,
+    /// and the untagged FETCH the server would send back is a round trip spent on
+    /// nothing.
+    #[tokio::test]
+    async fn test_a_store_is_silent_on_the_wire_00() -> Outcome<()> {
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec!["%T% OK SELECT completed\r\n", "%T% OK STORE completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.select("INBOX").await);
+        res!(c.uid_store_flags(&[4, 5], FlagOp::Add, &["\\Seen"]).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.contains("UID STORE 4:5 +FLAGS.SILENT (\\Seen)")),
+            "the STORE was not what was expected: {:?}", lines);
+        Ok(())
+    }
+
+    // ── APPEND, the one command with a literal going the other way ──
+
+    /// The body waits for the `+` continuation. Sending it before the server has
+    /// asked is how a client and a server disagree about where a message ends.
+    #[tokio::test]
+    async fn test_append_waits_for_the_continuation_00() -> Outcome<()> {
+        let body = b"Subject: filed\r\n\r\nA sent message.\r\n";
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec!["+ Ready for literal data\r\n", "%T% OK [APPENDUID 1 12] APPEND completed\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        res!(c.append("Sent", &["\\Seen"], body).await);
+
+        let lines = res!(lines_of(&seen));
+        // The command, then the marker the fixture logs when it reads the
+        // literal, then the payload -- in that order, which is the point.
+        let cmd = res!(lines.iter().position(|l| l.contains("APPEND \"Sent\""))
+            .ok_or_else(|| err!("No APPEND was sent: {:?}", lines; Test, Missing)));
+        let lit = res!(lines.iter().position(|l| l.starts_with("<literal "))
+            .ok_or_else(|| err!("The body never arrived: {:?}", lines; Test, Missing)));
+        req!(true, cmd < lit, "the body was sent before the command");
+        req!(true, lines[cmd].contains(&fmt!("{{{}}}", body.len())),
+            "the announced length was wrong: {}", lines[cmd]);
+        req!(true, lines[cmd].contains("(\\Seen)"), "the flags were dropped");
+        req!(fmt!("<literal {}>", body.len()), lines[lit]);
+        req!(String::from_utf8_lossy(body).into_owned(), lines[lit + 1]);
+        Ok(())
+    }
+
+    /// A refusal instead of a continuation stops the body: a server that will not
+    /// take the message must not be sent it anyway.
+    #[tokio::test]
+    async fn test_a_refused_append_sends_no_body_00() -> Outcome<()> {
+        let body = b"Subject: filed\r\n\r\nA sent message.\r\n";
+        let (addr, seen) = res!(scripted(
+            GREET,
+            vec!["%T% NO [OVERQUOTA] Mailbox is full\r\n"],
+        ).await);
+        let mut c = res!(ImapClient::connect(&cfg(addr)).await);
+        let msg = match c.append("Sent", &[], body).await {
+            Err(e) => fmt!("{}", e),
+            Ok(())  => return Err(err!("A refused APPEND was a success."; Test, Invalid)),
+        };
+        req!(true, msg.contains("OVERQUOTA"), "the server's words were dropped: {}", msg);
+        req!(false, res!(lines_of(&seen)).iter().any(|l| l.starts_with("<literal ")),
+            "the body was sent to a mailbox that had refused it");
+        Ok(())
     }
 
     #[test]
