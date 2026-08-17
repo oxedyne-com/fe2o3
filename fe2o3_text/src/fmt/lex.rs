@@ -41,6 +41,11 @@ pub struct LangTokens {
     pub char_delimiter:     Option<char>,
     /// Raw string prefix (e.g. `r#"` in Rust). Empty if none.
     pub raw_string_prefix:  String,
+    /// Literal prefixes that bind to the string or character literal
+    /// after them (e.g. `b`, `br`, `c`, `cr` in Rust), longest first.
+    /// Without these a prefix lexes as a separate identifier and the
+    /// formatter separates it from its literal, which does not compile.
+    pub literal_prefixes:   Vec<String>,
     /// Attribute prefix (e.g. `#[` in Rust). Empty if none.
     pub attribute_prefix:   String,
     /// Lifetime prefix (e.g. `'` when followed by an ident in Rust).
@@ -82,6 +87,9 @@ pub fn rust_tokens() -> LangTokens {
         string_delimiters:      vec!['"'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      "r".to_string(),
+        // Longest first, so `br` is matched before `b`.
+        literal_prefixes:       ["br", "cr", "b", "c"]
+                                    .iter().map(|s| s.to_string()).collect(),
         attribute_prefix:       "#[".to_string(),
         lifetime_prefix:        Some('\''),
     }
@@ -114,6 +122,7 @@ pub fn c_tokens() -> LangTokens {
         string_delimiters:      vec!['"'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      String::new(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       String::new(),
         lifetime_prefix:        None,
     }
@@ -160,6 +169,7 @@ pub fn cpp_tokens() -> LangTokens {
         string_delimiters:      vec!['"'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      "R\"".to_string(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       "[[".to_string(),
         lifetime_prefix:        None,
     }
@@ -202,6 +212,7 @@ pub fn csharp_tokens() -> LangTokens {
         string_delimiters:      vec!['"'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      "@".to_string(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       "[".to_string(),
         lifetime_prefix:        None,
     }
@@ -233,6 +244,7 @@ pub fn go_tokens() -> LangTokens {
         string_delimiters:      vec!['"', '`'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      String::new(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       String::new(),
         lifetime_prefix:        None,
     }
@@ -270,6 +282,7 @@ pub fn js_tokens() -> LangTokens {
         string_delimiters:      vec!['"', '\'', '`'],
         char_delimiter:         None,
         raw_string_prefix:      String::new(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       "@".to_string(),
         lifetime_prefix:        None,
     }
@@ -306,6 +319,7 @@ pub fn java_tokens() -> LangTokens {
         string_delimiters:      vec!['"'],
         char_delimiter:         Some('\''),
         raw_string_prefix:      String::new(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       "@".to_string(),
         lifetime_prefix:        None,
     }
@@ -339,6 +353,7 @@ pub fn python_tokens() -> LangTokens {
         string_delimiters:      vec!['"', '\''],
         char_delimiter:         None,
         raw_string_prefix:      "r".to_string(),
+        literal_prefixes:       Vec::new(),
         attribute_prefix:       "@".to_string(),
         lifetime_prefix:        None,
     }
@@ -454,8 +469,16 @@ pub fn lex(src: &str, lang: &LangTokens) -> Outcome<Vec<Token>> {
         let tok_start = pos;
 
         // Doc comment.
+        // A run of more slashes than the prefix is an ordinary comment,
+        // not documentation: Rust reads `////` as a plain comment and
+        // `///` as a doc comment, and treating the two alike moves a
+        // `////` line onto the item below it.
         let doc_prefix = lang.doc_comment_prefixes.iter()
-            .find(|p| src[pos..].starts_with(p.as_str()))
+            .find(|p| {
+                src[pos..].starts_with(p.as_str())
+                    && !(p.ends_with('/')
+                        && bytes.get(pos + p.len()) == Some(&b'/'))
+            })
             .cloned();
         if doc_prefix.is_some() {
             let start = pos;
@@ -491,6 +514,22 @@ pub fn lex(src: &str, lang: &LangTokens) -> Outcome<Vec<Token>> {
             }
             tokens.push(Token {
                 kind:           TokenKind::Attribute,
+                text:           src[start..pos].to_string(),
+                leading_trivia: trivia,
+                span:           Span { start: tok_start, end: pos },
+            });
+            continue;
+        }
+
+        // Prefixed literal (Rust `b"..."`, `br#"..."#`, `c"..."`,
+        // `b'x'`). Tried before the plain string and identifier paths,
+        // because the prefix would otherwise lex as its own identifier
+        // and the formatter would put a space between the two.
+        if let Some((end, kind)) = lex_prefixed_literal(src, bytes, pos, len, lang) {
+            let start = pos;
+            pos = end;
+            tokens.push(Token {
+                kind,
                 text:           src[start..pos].to_string(),
                 leading_trivia: trivia,
                 span:           Span { start: tok_start, end: pos },
@@ -728,6 +767,88 @@ fn advance_char(src: &str, pos: usize) -> usize {
         p += 1;
     }
     p
+}
+
+/// Where a prefixed literal beginning at `pos` ends, and what it is.
+///
+/// A prefix only counts when a literal actually follows it, so `brand`
+/// stays an identifier and Rust's raw identifier `r#type` is left to
+/// the raw-string path, which already rejects it.
+fn lex_prefixed_literal(
+    src:    &str,
+    bytes:  &[u8],
+    pos:    usize,
+    len:    usize,
+    lang:   &LangTokens,
+) -> Option<(usize, TokenKind)> {
+    for prefix in &lang.literal_prefixes {
+        if !src[pos..].starts_with(prefix.as_str()) {
+            continue;
+        }
+        let after = pos + prefix.len();
+        if after >= len {
+            continue;
+        }
+        // A prefix is only a prefix when an ident character does not
+        // follow the literal opener, e.g. `b"x"` but not `brand`.
+        match bytes[after] {
+            b'"' => {
+                let mut p = after + 1;
+                while p < len {
+                    if bytes[p] == b'\\' {
+                        p += 2;
+                    } else if bytes[p] == b'"' {
+                        p += 1;
+                        break;
+                    } else {
+                        p += 1;
+                    }
+                }
+                return Some((p.min(len), TokenKind::StringLit));
+            }
+            b'#' => {
+                let mut hashes = 0usize;
+                let mut p = after;
+                while p < len && bytes[p] == b'#' {
+                    hashes += 1;
+                    p += 1;
+                }
+                if p >= len || bytes[p] != b'"' {
+                    continue; // Not a raw literal after all.
+                }
+                p += 1;
+                let close: String = std::iter::once('"')
+                    .chain(std::iter::repeat('#').take(hashes))
+                    .collect();
+                while p < len {
+                    if src[p..].starts_with(close.as_str()) {
+                        p += close.len();
+                        break;
+                    }
+                    p = advance_char(src, p);
+                }
+                return Some((p.min(len), TokenKind::StringLit));
+            }
+            _ => {
+                // Byte character literal, e.g. `b'a'` or `b'\n'`.
+                if lang.char_delimiter == Some(bytes[after] as char) {
+                    let mut p = after + 1;
+                    while p < len {
+                        if bytes[p] == b'\\' {
+                            p += 2;
+                        } else if lang.char_delimiter == Some(bytes[p] as char) {
+                            p += 1;
+                            break;
+                        } else {
+                            p += 1;
+                        }
+                    }
+                    return Some((p.min(len), TokenKind::CharLit));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn is_ident_start(b: u8) -> bool {

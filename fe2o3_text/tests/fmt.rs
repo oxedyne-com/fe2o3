@@ -714,6 +714,12 @@ impl fmt::Display for TokenKind {
 /// across files. Checks that the formatter does not crash and
 /// that the output is idempotent (formatting twice gives the
 /// same result as formatting once).
+/// Whether an error is the formatter declining a file rather than
+/// dropping one of its comments.
+fn is_comment_refusal(e: &oxedyne_fe2o3_core::error::Error<oxedyne_fe2o3_core::error::ErrTag>) -> bool {
+    format!("{}", e).contains("would alter its comments")
+}
+
 #[test]
 fn test_workspace_regression() {
     use std::fs;
@@ -724,6 +730,7 @@ fn test_workspace_regression() {
 
     let mut checked = 0usize;
     let mut failed: Vec<String> = Vec::new();
+    let mut refused = 0usize;
 
     // Walk the workspace, skipping target/.
     let mut dirs = vec![root.clone()];
@@ -736,7 +743,9 @@ fn test_workspace_regression() {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().unwrap_or_default();
-                if name == "target" || name == ".git" {
+                // `.claude` holds agent worktrees: whole duplicate
+                // copies of this tree.
+                if name == "target" || name == ".git" || name == ".claude" {
                     continue;
                 }
                 dirs.push(path);
@@ -754,11 +763,18 @@ fn test_workspace_regression() {
             }
             let rel = path.strip_prefix(&root).unwrap_or(&path);
 
-            // Format once.
+            // Format once. A file the formatter declines because it
+            // could not carry every comment through is not a failure --
+            // declining is the safe outcome, and the point of the guard.
+            // Only an unexpected error, or non-idempotent output, is.
             let first = match format_rust(&source, &spec) {
                 Ok(s) => s,
                 Err(e) => {
-                    failed.push(format!("{}: format error: {}", rel.display(), e));
+                    if is_comment_refusal(&e) {
+                        refused += 1;
+                    } else {
+                        failed.push(format!("{}: format error: {}", rel.display(), e));
+                    }
                     continue;
                 }
             };
@@ -767,7 +783,11 @@ fn test_workspace_regression() {
             let second = match format_rust(&first, &spec) {
                 Ok(s) => s,
                 Err(e) => {
-                    failed.push(format!("{}: second-pass error: {}", rel.display(), e));
+                    if is_comment_refusal(&e) {
+                        refused += 1;
+                    } else {
+                        failed.push(format!("{}: second-pass error: {}", rel.display(), e));
+                    }
                     continue;
                 }
             };
@@ -795,7 +815,10 @@ fn test_workspace_regression() {
         }
     }
 
-    println!("Checked {} files, {} failures.", checked, failed.len());
+    println!(
+        "Checked {} files, {} declined for comment safety, {} failures.",
+        checked, refused, failed.len(),
+    );
     if !failed.is_empty() {
         for f in &failed {
             println!("  FAIL: {}", f);

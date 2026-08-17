@@ -32,11 +32,69 @@ use oxedyne_fe2o3_core::prelude::*;
 pub fn format_rust(source: &str, spec: &FormatSpec) -> Outcome<String> {
     let lang = lex::rust_tokens();
     let tokens = res!(lex::lex(source, &lang));
+    // The parser reads the EOF token as a stop condition and does not
+    // put it in the tree, so a comment on the last line -- which the
+    // lexer attaches to EOF as leading trivia -- never reaches the
+    // formatter. Carry it across the parse.
+    let trailing = tokens
+        .last()
+        .filter(|t| matches!(t.kind, TokenKind::Eof)
+            && t.leading_trivia.iter().any(is_comment_trivia))
+        .cloned();
+    let before = comment_texts(&tokens);
     let cst = res!(parse::parse_rust(tokens));
-    let document = format_source_file(&cst, spec);
+    let document = format_source_file(&cst, trailing, spec);
     let indent_str = spec.indent_str();
-    let formatted = render::render(spec.max_width, &indent_str, &document);
+    let formatted = end_with_newline(render::render(spec.max_width, &indent_str, &document));
+
+    // Refuse rather than corrupt. Not every layout path carries a
+    // comment through yet, and a formatter that silently drops one --
+    // or moves it onto the next item, where it comes to describe the
+    // wrong code -- does more harm than one that declines the file.
+    // Checked on the output, so it holds however the layout changes.
+    let after = comment_texts(&res!(lex::lex(&formatted, &lang)));
+    if before != after {
+        return Err(err!(
+            "Formatting this file would alter its comments ({} before, {} after). \
+            Refusing, rather than dropping one.",
+            before.len(), after.len();
+            Format, Mismatch));
+    }
     Ok(formatted)
+}
+
+/// Every comment in a token stream, in order.
+///
+/// Plain comments are trivia attached to the following token; doc
+/// comments are tokens in their own right. Both are compared, so a
+/// formatting pass cannot quietly lose either. Right-trimmed, because
+/// trailing spaces inside a comment carry no meaning.
+fn comment_texts(tokens: &[Token]) -> Vec<String> {
+    let mut out = Vec::new();
+    for tok in tokens {
+        for t in &tok.leading_trivia {
+            if let Trivia::LineComment(c) | Trivia::BlockComment(c) = t {
+                out.push(c.trim_end().to_string());
+            }
+        }
+        if let TokenKind::DocComment(c) = &tok.kind {
+            out.push(c.trim_end().to_string());
+        }
+    }
+    out
+}
+
+/// Give the output the single trailing newline a text file should end
+/// with, so a formatted file does not read as "\ No newline at end of
+/// file" in every diff.
+fn end_with_newline(mut s: String) -> String {
+    while s.ends_with('\n') {
+        s.pop();
+    }
+    if !s.is_empty() {
+        s.push('\n');
+    }
+    s
 }
 
 /// Format source code using a pre-built language token definition.
@@ -53,15 +111,21 @@ pub fn format_with_lang(
     let document = tokens_to_formatted_doc(&tokens, spec);
     let indent_str = spec.indent_str();
     let formatted = render::render(spec.max_width, &indent_str, &document);
-    Ok(formatted)
+    Ok(end_with_newline(formatted))
 }
 
 // ── Source file ──────────────────────────────────────────────────
 
 /// Flatten a CST into tokens and format via the token-stream pipeline.
-fn format_source_file(node: &CstNode, spec: &FormatSpec) -> Doc {
+///
+/// `trailing` is the lexer's EOF token where it carries a comment the
+/// parse would otherwise have dropped.
+fn format_source_file(node: &CstNode, trailing: Option<Token>, spec: &FormatSpec) -> Doc {
     let mut tokens: Vec<Token> = Vec::new();
     collect_tokens(node, &mut tokens);
+    if let Some(eof) = trailing {
+        tokens.push(eof);
+    }
     tokens_to_formatted_doc(&tokens, spec)
 }
 
@@ -216,7 +280,11 @@ fn format_token_range(
                             TokenKind::Punct('{') => { depth += 1; arm_tokens.push(at.clone()); }
                             TokenKind::Punct('}') => {
                                 depth -= 1;
-                                if depth > 0 { arm_tokens.push(at.clone()); }
+                                if depth > 0 {
+                                    arm_tokens.push(at.clone());
+                                } else {
+                                    carry_close_comments(&mut arm_tokens, at);
+                                }
                             }
                             _ => { arm_tokens.push(at.clone()); }
                         }
@@ -259,7 +327,11 @@ fn format_token_range(
                             TokenKind::Punct('{') => { depth += 1; field_tokens.push(bt.clone()); }
                             TokenKind::Punct('}') => {
                                 depth -= 1;
-                                if depth > 0 { field_tokens.push(bt.clone()); }
+                                if depth > 0 {
+                                    field_tokens.push(bt.clone());
+                                } else {
+                                    carry_close_comments(&mut field_tokens, bt);
+                                }
                             }
                             _ => { field_tokens.push(bt.clone()); }
                         }
@@ -486,6 +558,13 @@ fn format_fn_from_tokens(
                 TokenKind::Punct(')') => {
                     depth -= 1;
                     if depth == 0 {
+                        // A comment on the parameter list's last line is
+                        // attached to this paren, and is dropped with it.
+                        // Carrying it here does not help -- parameters
+                        // render through smart_spaced_tokens, which emits
+                        // no trivia -- and an empty group would earn a
+                        // comma of its own. The comment guard in
+                        // format_rust refuses such a file instead.
                         if !current_param.is_empty() {
                             params.push(current_param);
                             current_param = Vec::new();
@@ -624,7 +703,11 @@ fn format_fn_from_tokens(
                 TokenKind::Punct('{') => { depth += 1; body_tokens.push(bt.clone()); }
                 TokenKind::Punct('}') => {
                     depth -= 1;
-                    if depth > 0 { body_tokens.push(bt.clone()); }
+                    if depth > 0 {
+                        body_tokens.push(bt.clone());
+                    } else {
+                        carry_close_comments(&mut body_tokens, bt);
+                    }
                 }
                 _ => { body_tokens.push(bt.clone()); }
             }
@@ -692,6 +775,50 @@ fn format_fn_from_tokens(
 
     sig.push(doc::group(doc::concat(grouped)));
     doc::concat(sig)
+}
+
+/// Whether a piece of trivia is a comment rather than whitespace.
+fn is_comment_trivia(t: &Trivia) -> bool {
+    matches!(t, Trivia::LineComment(_) | Trivia::BlockComment(_))
+}
+
+/// Keep a closing brace's comments when the brace itself is dropped.
+///
+/// A scan that gathers a block's contents stops at the closing brace
+/// and does not keep it, because the brace is emitted separately. But
+/// the lexer attaches any comment on the block's last line to that
+/// brace as leading trivia, so the comment would go with it. Push a
+/// token that renders nothing and carries the comments instead. The
+/// trivia is cut after the last comment, so the newline that ran on to
+/// the brace does not become a blank line.
+/// Emit comments carried off a block's closing delimiter.
+///
+/// `lead_break` puts a line break before the first one, which is wanted
+/// when content precedes it and not when the block was otherwise empty.
+fn emit_carried_comments(docs: &mut Vec<Doc>, tail: &[Token], lead_break: bool) {
+    let mut first = true;
+    for tok in tail {
+        for t in &tok.leading_trivia {
+            if let Trivia::LineComment(c) | Trivia::BlockComment(c) = t {
+                if !first || lead_break {
+                    docs.push(doc::hardline());
+                }
+                docs.push(doc::text(c.as_str()));
+                first = false;
+            }
+        }
+    }
+}
+
+fn carry_close_comments(out: &mut Vec<Token>, close: &Token) {
+    if let Some(last) = close.leading_trivia.iter().rposition(is_comment_trivia) {
+        out.push(Token {
+            kind:           TokenKind::Ident,
+            text:           String::new(),
+            leading_trivia: close.leading_trivia[..=last].to_vec(),
+            span:           close.span,
+        });
+    }
 }
 
 /// Flush pending newlines as hardlines, capped to max_blank_lines.
@@ -1108,11 +1235,11 @@ fn format_param_list(
         }
     }
 
-    // Compute max name width (text length of name tokens + spaces).
-    let name_widths: Vec<usize> = parsed.iter().map(|(name_toks, _)| {
-        name_toks.iter().map(|t| t.text.len()).sum::<usize>()
-            + name_toks.len().saturating_sub(1) // spaces between tokens
-    }).collect();
+    // Widths must be what the renderer will actually emit; see
+    // rendered_width.
+    let name_widths: Vec<usize> = parsed.iter()
+        .map(|(name_toks, _)| rendered_width(name_toks))
+        .collect();
     let max_name = name_widths.iter().copied().max().unwrap_or(0);
 
     // Build docs: flat uses normal spacing, broken uses padded names.
@@ -1155,10 +1282,24 @@ fn format_param_list(
 /// aligns the `=>` across all simple (single-line) arms.
 fn format_match_arms(tokens: &[Token], spec: &FormatSpec) -> Doc {
     // Split into individual arms at top-level commas.
-    let arms: Vec<Vec<Token>> = split_by_comma_depth(tokens)
+    let mut arms: Vec<Vec<Token>> = split_by_comma_depth(tokens)
         .into_iter().filter(|a| !a.is_empty()).collect();
+
+    // A trailing group of carried comments is the block's last comment,
+    // not an arm. Left in, it would be given an arm's comma, which is a
+    // bare `,` on a line of its own and does not compile.
+    let mut tail: Vec<Token> = Vec::new();
+    while arms.last().map(|a| is_comment_only(a)).unwrap_or(false) {
+        if let Some(a) = arms.pop() {
+            tail.splice(0..0, a);
+        }
+    }
+    let arms = arms;
+
     if arms.is_empty() {
-        return doc::empty();
+        let mut docs = Vec::new();
+        emit_carried_comments(&mut docs, &tail, false);
+        return doc::concat(docs);
     }
 
     // Parse each arm: split prefix, find `=>`, split pattern/body.
@@ -1207,11 +1348,11 @@ fn format_match_arms(tokens: &[Token], spec: &FormatSpec) -> Doc {
         }
     }
 
-    // Compute pattern widths for alignment (prefix excluded).
-    let pat_widths: Vec<usize> = parsed.iter().map(|a| {
-        a.pattern.iter().map(|t| t.text.len()).sum::<usize>()
-            + a.pattern.len().saturating_sub(1)
-    }).collect();
+    // Pattern widths for alignment (prefix excluded). Measured as the
+    // renderer will emit them: `Some(v)` is seven columns, not ten.
+    let pat_widths: Vec<usize> = parsed.iter()
+        .map(|a| rendered_width(&a.pattern))
+        .collect();
     let max_pat = pat_widths.iter().copied().max().unwrap_or(0);
     let min_pat = pat_widths.iter().copied().min().unwrap_or(0);
     let align = (max_pat - min_pat) <= spec.field_align_threshold
@@ -1255,12 +1396,83 @@ fn format_match_arms(tokens: &[Token], spec: &FormatSpec) -> Doc {
     if spec.match_trailing_comma && !parsed.is_empty() {
         docs.push(doc::text(","));
     }
+    emit_carried_comments(&mut docs, &tail, true);
     doc::concat(docs)
 }
 
 /// Split a token sequence at commas, respecting bracket depth.
 /// Unlike `split_by_comma`, this tracks `{`, `(`, `[` depth so
 /// commas inside braced blocks don't split arms.
+/// The column width a token run occupies once rendered.
+///
+/// Counting `sum(len) + n - 1` assumes a space between every pair of
+/// tokens, which the renderer does not emit: `Some(v)` is four tokens
+/// but seven columns, not ten. Alignment computed from the wrong width
+/// puts the separators in different columns, which reads worse than no
+/// alignment at all.
+fn rendered_width(tokens: &[Token]) -> usize {
+    let mut w = 0usize;
+    for (i, tok) in tokens.iter().enumerate() {
+        if i > 0 {
+            let prev = &tokens[i - 1];
+            if needs_separator_space(prev, tok)
+                || (!suppress_space_before(tok) && !suppress_space_after(prev))
+            {
+                w += 1;
+            }
+        }
+        w += tok.text.chars().count();
+    }
+    w
+}
+
+/// Whether a field group carries no code, only carried comments.
+///
+/// `carry_close_comments` puts a block's last comment on a token that
+/// renders nothing. Split by comma, that becomes a group of its own,
+/// and treating it as a field earns it a comma it must not have.
+fn is_comment_only(field: &[Token]) -> bool {
+    field.iter().all(|t| t.text.is_empty())
+}
+
+/// Give each field back the comment written after its comma.
+///
+/// A comment at the end of a field's line comes after the comma, so
+/// the lexer attaches it to the *next* field as leading trivia. Left
+/// there, the formatter prints it above that next field, where it
+/// silently comes to describe the wrong one. Comments before the first
+/// newline belong to the field just closed; everything from the
+/// newline on is genuinely the next field's.
+fn lift_trailing_comments(fields: &mut [Vec<Token>]) -> Vec<Vec<String>> {
+    let mut trailing: Vec<Vec<String>> = vec![Vec::new(); fields.len()];
+    for i in 1..fields.len() {
+        let mut lifted: Vec<String> = Vec::new();
+        if let Some(first) = fields[i].first_mut() {
+            let mut keep: Vec<Trivia> = Vec::new();
+            let mut seen_newline = false;
+            for t in std::mem::take(&mut first.leading_trivia) {
+                if seen_newline {
+                    keep.push(t);
+                    continue;
+                }
+                match &t {
+                    Trivia::Newline => {
+                        seen_newline = true;
+                        keep.push(t);
+                    }
+                    Trivia::LineComment(c) | Trivia::BlockComment(c) => {
+                        lifted.push(c.clone());
+                    }
+                    Trivia::Whitespace(_) => keep.push(t),
+                }
+            }
+            first.leading_trivia = keep;
+        }
+        trailing[i - 1] = lifted;
+    }
+    trailing
+}
+
 fn split_by_comma_depth(tokens: &[Token]) -> Vec<Vec<Token>> {
     let mut groups: Vec<Vec<Token>> = Vec::new();
     let mut current: Vec<Token> = Vec::new();
@@ -1334,6 +1546,16 @@ fn split_field_prefix(tokens: &[Token]) -> (Vec<Token>, Vec<Token>) {
 /// Emit doc comments and attributes on their own lines.
 fn emit_prefix(docs: &mut Vec<Doc>, prefix: &[Token]) {
     for tok in prefix {
+        // A plain comment written above a doc comment or an attribute
+        // is attached to that token as leading trivia. Emitting only
+        // the token's own text drops it -- and a `// ---- section ----`
+        // banner above a documented field is exactly that shape.
+        for t in &tok.leading_trivia {
+            if let Trivia::LineComment(c) | Trivia::BlockComment(c) = t {
+                docs.push(doc::text(c.as_str()));
+                docs.push(doc::hardline());
+            }
+        }
         docs.push(doc::text(tok.text.as_str()));
         docs.push(doc::hardline());
     }
@@ -1434,26 +1656,21 @@ fn format_field_content(tokens: &[Token], spec: &FormatSpec) -> Doc {
 }
 
 fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
-    let fields: Vec<Vec<Token>> = split_by_comma_depth(tokens)
+    let mut fields: Vec<Vec<Token>> = split_by_comma_depth(tokens)
         .into_iter().filter(|f| !f.is_empty()).collect();
-    if fields.len() < 2 {
-        let mut docs = Vec::new();
-        for (i, field) in fields.iter().enumerate() {
-            if i > 0 {
-                docs.push(doc::text(","));
-                docs.push(doc::hardline());
-            }
-            let (prefix, content) = split_field_prefix(field);
-            emit_prefix(&mut docs, &prefix);
-            docs.push(format_field_content(&content, spec));
+
+    // A trailing group of carried comments is the block's last comment,
+    // not a field, so it is emitted after the fields and earns no comma.
+    let mut tail: Vec<Token> = Vec::new();
+    while fields.last().map(|f| is_comment_only(f)).unwrap_or(false) {
+        if let Some(f) = fields.pop() {
+            tail.splice(0..0, f);
         }
-        if !fields.is_empty() {
-            docs.push(doc::text(","));
-        }
-        return doc::concat(docs);
     }
 
-    // Split each field into prefix and content.
+    let trailing = lift_trailing_comments(&mut fields);
+
+    // Split each field into prefix (doc comments, attributes) and content.
     let split: Vec<(Vec<Token>, Vec<Token>)> = fields.iter()
         .map(|f| split_field_prefix(f))
         .collect();
@@ -1461,95 +1678,90 @@ fn format_aligned_fields(tokens: &[Token], spec: &FormatSpec) -> Doc {
     // Detect separator at depth 0 only (ignore `:` inside `{...}`).
     let has_colon = split.iter().any(|(_, c)| find_at_depth0(c, ':').is_some());
     let has_eq = split.iter().any(|(_, c)| find_at_depth0(c, '=').is_some());
-
-    let (sep_char, _sep_str) = if has_colon {
-        (':', ":")
+    let sep_char = if has_colon {
+        Some(':')
     } else if has_eq {
-        ('=', " =")
+        Some('=')
     } else {
-        // No separator — emit without alignment.
-        let mut docs = Vec::new();
-        for (i, (prefix, content)) in split.iter().enumerate() {
-            if i > 0 {
-                docs.push(doc::text(","));
-                docs.push(doc::hardline());
-            }
-            emit_prefix(&mut docs, prefix);
-            docs.push(format_field_content(content, spec));
-        }
-        if !fields.is_empty() {
-            docs.push(doc::text(","));
-        }
-        return doc::concat(docs);
+        None
     };
 
-    // Split each field's content at the depth-0 separator.
-    let mut parsed: Vec<(Vec<Token>, Vec<Token>, Vec<Token>)> = Vec::new();
-    for (prefix, content) in &split {
-        let sep_pos = find_at_depth0(content, sep_char);
-        match sep_pos {
-            Some(sp) => {
-                parsed.push((prefix.clone(), content[..sp].to_vec(), content[sp + 1..].to_vec()));
-            }
-            None => {
-                parsed.push((prefix.clone(), content.clone(), Vec::new()));
-            }
-        }
-    }
+    // Split each field's content at the depth-0 separator, where there
+    // is one. Without a separator there is nothing to align on, and the
+    // field is emitted whole.
+    let parsed: Vec<(Vec<Token>, Vec<Token>, Vec<Token>)> = split.iter()
+        .map(|(prefix, content)| match sep_char.and_then(|c| find_at_depth0(content, c)) {
+            Some(sp) => (
+                prefix.clone(),
+                content[..sp].to_vec(),
+                content[sp + 1..].to_vec(),
+            ),
+            None => (prefix.clone(), content.clone(), Vec::new()),
+        })
+        .collect();
 
-    // Compute name widths (content only, not prefix).
-    let name_widths: Vec<usize> = parsed.iter().map(|(_, name_toks, _)| {
-        name_toks.iter().map(|t| t.text.len()).sum::<usize>()
-            + name_toks.len().saturating_sub(1)
-    }).collect();
+    // Alignment is only worth doing when the names are of comparable
+    // length; one long name would otherwise push every other value out.
+    let name_widths: Vec<usize> = parsed.iter()
+        .map(|(_, name_toks, _)| rendered_width(name_toks))
+        .collect();
     let max_name = name_widths.iter().copied().max().unwrap_or(0);
     let min_name = name_widths.iter().copied().min().unwrap_or(0);
-    let align = (max_name - min_name) <= spec.field_align_threshold;
+    let align = sep_char.is_some()
+        && parsed.len() > 1
+        && max_name.saturating_sub(min_name) <= spec.field_align_threshold;
 
-    // Build docs.
     let mut docs = Vec::new();
-    for (i, ((prefix, name_toks, val_toks), &name_w)) in parsed.iter().zip(name_widths.iter()).enumerate() {
-        if i > 0 {
-            docs.push(doc::text(","));
-            docs.push(doc::hardline());
-        }
+    for (i, ((prefix, name_toks, val_toks), &name_w)) in
+        parsed.iter().zip(name_widths.iter()).enumerate()
+    {
         emit_prefix(&mut docs, prefix);
         if val_toks.is_empty() {
             docs.push(format_field_content(name_toks, spec));
         } else {
             let name_doc = doc::concat(smart_spaced_tokens(name_toks));
             let val_doc = doc::concat(smart_spaced_tokens(val_toks));
-            if align {
-                let pad = " ".repeat(max_name - name_w);
-                if sep_char == '=' {
-                    docs.push(doc::concat(vec![
-                        name_doc,
-                        doc::text(pad.as_str()),
-                        doc::text(" = "),
-                        val_doc,
-                    ]));
-                } else {
-                    docs.push(doc::concat(vec![
-                        name_doc,
-                        doc::text(":"),
-                        doc::text(" "),
-                        doc::text(pad.as_str()),
-                        val_doc,
-                    ]));
-                }
-            } else {
-                let unpadded_sep = if sep_char == '=' { " = " } else { ": " };
-                docs.push(doc::concat(vec![
+            let pad = if align { " ".repeat(max_name - name_w) } else { String::new() };
+            match sep_char {
+                Some('=') => docs.push(doc::concat(vec![
                     name_doc,
-                    doc::text(unpadded_sep),
+                    doc::text(pad.as_str()),
+                    doc::text(" = "),
                     val_doc,
-                ]));
+                ])),
+                _ => docs.push(doc::concat(vec![
+                    name_doc,
+                    doc::text(": "),
+                    doc::text(pad.as_str()),
+                    val_doc,
+                ])),
+            }
+        }
+        // The comma belongs to the field, and the field's own trailing
+        // comment follows it on the same line.
+        docs.push(doc::text(","));
+        for c in &trailing[i] {
+            docs.push(doc::text(" "));
+            docs.push(doc::text(c.as_str()));
+        }
+        if i + 1 < parsed.len() {
+            docs.push(doc::hardline());
+        }
+    }
+
+    // The block's last comment, which sat above the closing brace.
+    for tok in &tail {
+        for t in &tok.leading_trivia {
+            match t {
+                Trivia::LineComment(c) | Trivia::BlockComment(c) => {
+                    docs.push(doc::hardline());
+                    docs.push(doc::text(c.as_str()));
+                }
+                Trivia::Newline | Trivia::Whitespace(_) => {}
             }
         }
     }
-    if !fields.is_empty() {
-        docs.push(doc::text(","));
-    }
+
     doc::concat(docs)
 }
 
@@ -1559,6 +1771,13 @@ fn ends_with_comma(tokens: &[Token]) -> bool {
 }
 
 fn is_short_body(tokens: &[Token]) -> bool {
+    // A body carrying a comment cannot be collapsed onto one line:
+    // the single-line path renders through smart_spaced_tokens, which
+    // emits no trivia, so the comment would be dropped.
+    let has_comment = tokens
+        .iter()
+        .any(|t| t.leading_trivia.iter().any(is_comment_trivia));
+    if has_comment { return false; }
     // Must be a single expression — no semicolons, no let, no braces.
     let has_semi = tokens.iter().any(|t| matches!(t.kind, TokenKind::Punct(';')));
     if has_semi { return false; }

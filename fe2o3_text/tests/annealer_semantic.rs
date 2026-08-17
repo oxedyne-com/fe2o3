@@ -17,15 +17,52 @@ use oxedyne_fe2o3_text::fmt::{
     cst::{
         Token,
         TokenKind,
+        Trivia,
     },
     spec::FormatSpec,
 };
 
 /// A token reduced to its semantically-significant identity.
+///
+/// Plain comments are not tokens -- the lexer attaches them to the
+/// following token as `Trivia` -- so they are lifted into this stream
+/// as `Comment` entries. Without that, a formatter could delete every
+/// `//` line in the file and this test would still pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Sig {
-    kind: TokenKind,
-    text: String,
+enum Sig {
+    /// A significant token.
+    Tok {
+        kind: TokenKind,
+        text: String,
+    },
+    /// A plain `//` or `/* */` comment, right-trimmed.
+    Comment(String),
+}
+
+impl Sig {
+    /// The text, for divergence reporting.
+    fn text(&self) -> &str {
+        match self {
+            Self::Tok { text, .. }  => text,
+            Self::Comment(s)        => s,
+        }
+    }
+}
+
+/// Lift a token's leading comments into the comparable stream.
+///
+/// Whitespace and newlines are skipped: they are exactly what a
+/// formatter exists to change. Comment text is right-trimmed, since
+/// trailing spaces inside a comment carry no meaning.
+fn push_comments(out: &mut Vec<Sig>, tok: &Token) {
+    for t in &tok.leading_trivia {
+        match t {
+            Trivia::LineComment(s) | Trivia::BlockComment(s) => {
+                out.push(Sig::Comment(s.trim_end().to_string()));
+            }
+            Trivia::Whitespace(_) | Trivia::Newline => {}
+        }
+    }
 }
 
 /// Reduce a token stream to a semantically-comparable sequence.
@@ -48,11 +85,15 @@ fn sig(tokens: &[Token]) -> Vec<Sig> {
     // shifts a token boundary (`>` `>` becomes the single `>>`).
     let mut raw: Vec<Sig> = Vec::with_capacity(tokens.len());
     for t in tokens.iter() {
+        // Comments precede the token they are attached to, including
+        // the EOF token -- a comment at the end of a file hangs off
+        // EOF and would otherwise be dropped here.
+        push_comments(&mut raw, t);
         if matches!(t.kind, TokenKind::Eof) {
             continue;
         }
         match &t.kind {
-            TokenKind::DocComment(s) => raw.push(Sig {
+            TokenKind::DocComment(s) => raw.push(Sig::Tok {
                 kind: TokenKind::DocComment(s.trim_end().to_string()),
                 text: t.text.trim_end().to_string(),
             }),
@@ -62,7 +103,7 @@ fn sig(tokens: &[Token]) -> Vec<Sig> {
             {
                 let ch = op.as_bytes()[0] as char;
                 for _ in 0..op.len() {
-                    raw.push(Sig { kind: TokenKind::Punct(ch), text: ch.to_string() });
+                    raw.push(Sig::Tok { kind: TokenKind::Punct(ch), text: ch.to_string() });
                 }
             }
             // A number token with a trailing dot (e.g. `0.`) arises when
@@ -73,23 +114,36 @@ fn sig(tokens: &[Token]) -> Vec<Sig> {
             // is a *split*, not a strip, so a genuine float-to-integer
             // change (`0.` becoming `0`) would still be caught.
             TokenKind::Number if t.text.len() > 1 && t.text.ends_with('.') => {
-                raw.push(Sig {
+                raw.push(Sig::Tok {
                     kind: TokenKind::Number,
                     text: t.text[..t.text.len() - 1].to_string(),
                 });
-                raw.push(Sig { kind: TokenKind::Punct('.'), text: ".".to_string() });
+                raw.push(Sig::Tok { kind: TokenKind::Punct('.'), text: ".".to_string() });
             }
-            _ => raw.push(Sig { kind: t.kind.clone(), text: t.text.clone() }),
+            _ => raw.push(Sig::Tok { kind: t.kind.clone(), text: t.text.clone() }),
         }
     }
 
-    // Second pass: drop trailing commas (comma followed by a closer).
+    raw
+}
+
+/// The significant tokens alone, with insignificant trailing commas
+/// removed.
+///
+/// The comma drop runs here, on the comment-free sequence, so that a
+/// comment sitting between a comma and its closing delimiter cannot
+/// change whether that comma is judged insignificant.
+fn code_sig(tokens: &[Token]) -> Vec<Sig> {
+    let raw: Vec<Sig> = sig(tokens)
+        .into_iter()
+        .filter(|s| !matches!(s, Sig::Comment(_)))
+        .collect();
     let mut out: Vec<Sig> = Vec::with_capacity(raw.len());
     for i in 0..raw.len() {
-        if raw[i].kind == TokenKind::Punct(',') {
-            if let Some(next) = raw.get(i + 1) {
+        if raw[i] == (Sig::Tok { kind: TokenKind::Punct(','), text: ",".to_string() }) {
+            if let Some(Sig::Tok { kind, .. }) = raw.get(i + 1) {
                 if matches!(
-                    next.kind,
+                    kind,
                     TokenKind::Punct(')') | TokenKind::Punct(']') | TokenKind::Punct('}')
                 ) {
                     continue;
@@ -99,6 +153,14 @@ fn sig(tokens: &[Token]) -> Vec<Sig> {
         out.push(raw[i].clone());
     }
     out
+}
+
+/// The comments alone, in order.
+fn comment_sig(tokens: &[Token]) -> Vec<Sig> {
+    sig(tokens)
+        .into_iter()
+        .filter(|s| matches!(s, Sig::Comment(_)))
+        .collect()
 }
 
 /// Report a single file's semantic divergence, if any.
@@ -125,6 +187,8 @@ fn test_workspace_semantic_preservation() {
     let mut checked = 0usize;
     let mut lex_errs = 0usize;
     let mut fmt_errs = 0usize;
+    let mut code_diffs = 0usize;
+    let mut comment_diffs = 0usize;
     let mut diffs: Vec<Divergence> = Vec::new();
 
     let mut dirs = vec![root.clone()];
@@ -137,7 +201,10 @@ fn test_workspace_semantic_preservation() {
             let path = entry.path();
             if path.is_dir() {
                 let name = path.file_name().unwrap_or_default();
-                if name == "target" || name == ".git" {
+                // `.claude` holds agent worktrees: whole duplicate
+                // copies of this tree, which would be checked again
+                // under a second name.
+                if name == "target" || name == ".git" || name == ".claude" {
                     continue;
                 }
                 dirs.push(path);
@@ -169,10 +236,28 @@ fn test_workspace_semantic_preservation() {
                 Err(_) => { lex_errs += 1; continue; }
             };
 
-            let a = sig(&src_toks);
-            let b = sig(&out_toks);
+            let a_code = code_sig(&src_toks);
+            let b_code = code_sig(&out_toks);
+            let a_com  = comment_sig(&src_toks);
+            let b_com  = comment_sig(&out_toks);
             checked += 1;
 
+            // Two separate guarantees, because they carry different
+            // weight. Losing a comment, or reordering one, is
+            // corruption. Moving one between the end of a line and the
+            // line above is layout, which is what a formatter is for.
+            if a_code != b_code {
+                code_diffs += 1;
+                println!("  CODE DIVERGE {}", rel);
+            }
+            if a_com != b_com {
+                comment_diffs += 1;
+                println!(
+                    "  COMMENT DIVERGE {} ({} before, {} after)",
+                    rel, a_com.len(), b_com.len(),
+                );
+            }
+            let (a, b) = (a_code, b_code);
             if a != b {
                 // Locate the first divergence.
                 let mut idx = 0;
@@ -183,7 +268,7 @@ fn test_workspace_semantic_preservation() {
                 let lo = idx.saturating_sub(3);
                 let ctx: Vec<String> = a[lo..idx]
                     .iter()
-                    .map(|s| s.text.clone())
+                    .map(|s| s.text().to_string())
                     .collect();
                 diffs.push(Divergence {
                     file:    rel,
@@ -197,19 +282,32 @@ fn test_workspace_semantic_preservation() {
     }
 
     println!(
-        "Semantic check: {} files, {} token-divergences, {} lex-errs, {} fmt-errs.",
-        checked, diffs.len(), lex_errs, fmt_errs,
+        "Semantic check: {} files, {} code-divergences, {} comment-divergences, \
+{} layout moves, {} lex-errs, {} refused.",
+        checked, code_diffs, comment_diffs,
+        diffs.len().saturating_sub(code_diffs + comment_diffs),
+        lex_errs, fmt_errs,
     );
-    for d in &diffs {
+    for d in diffs.iter().take(20) {
         println!(
             "  DIVERGE {} @tok {} after [{}]:\n     source: {:?}\n     output: {:?}",
             d.file, d.index, d.context, d.before, d.after,
         );
     }
 
-    assert!(
-        diffs.is_empty(),
-        "{} file(s) had their token stream altered by the formatter",
-        diffs.len(),
+    // A formatter may move a comment between the end of a line and the
+    // line above it -- that is layout. It may never lose one, duplicate
+    // one, reorder them, or change a single significant token. Those
+    // are the two assertions worth making, and the reason the earlier
+    // token-only check passed while comments were being deleted.
+    assert_eq!(
+        code_diffs, 0,
+        "{} file(s) had their significant token stream altered",
+        code_diffs,
+    );
+    assert_eq!(
+        comment_diffs, 0,
+        "{} file(s) had a comment lost, added or reordered",
+        comment_diffs,
     );
 }
