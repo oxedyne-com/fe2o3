@@ -413,11 +413,25 @@ pub enum Op {
 	// The single primitive insertion, deletion and replacement all follow from:
 	// an insertion removes nothing, a deletion inserts nothing, a replacement
 	// does both at once.
+	//
+	// One buffer, three owners. `insert` is shared rather than owned outright
+	// because the log's record, the sequence's cloned `Applied` and the
+	// `crate::seq::atom::Atoms` entry all want the same bytes: three copies cost
+	// 7.63 kB of resident memory per operation on a real 44,628-operation
+	// history. The FIXED structures come to about 344 bytes of that; the rest is
+	// not all content, and saying so was an error in an earlier draft of this
+	// comment -- the remainder also holds envelope payloads, the segment buffer
+	// read whole, and BTreeMap nodes that split badly under ascending keys.
+	// Sharing took the figure to 5.79 kB, so `Sequence::apply_record`'s clone of
+	// an operation is a refcount bump and an atom is a handle. The wire form is
+	// untouched -- `to_dat` hands `Dat::BU64` the same byte sequence whatever
+	// owns it -- which had to be true, since a format that moved here would make
+	// every existing store unreadable.
 	Splice {
 		left: Option<Anchor>,			// binds after a byte
 		right: Option<Anchor>,			// binds before a byte
 		remove: Vec<ContentRange>,
-		insert: Arc<[u8]>,				// shared: see the note on sharing below
+		insert: Arc<[u8]>,				// shared, so a clone copies no bytes
 	},
 	Move {
 		src: Vec<ContentRange>,			// in the order it lands in

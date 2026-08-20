@@ -130,9 +130,14 @@ impl CalClock {
 	
 	pub fn to_nanos(&self) -> Outcome<i64> {
 		let millis = res!(self.to_millis());
-		let nanos_from_millis = millis * 1_000_000;
-		let additional_nanos = self.time.nanosecond().of() as i64;
-		Ok(nanos_from_millis + additional_nanos)
+		// `to_millis` already carries the whole-millisecond part of the sub-second
+		// field, because `millis_of_day` is `nanos_of_day / 1_000_000`.  Adding the
+		// entire nanosecond-of-second field back would count those milliseconds
+		// twice, and would leave the result non-monotonic across a second boundary.
+		// Only the sub-millisecond remainder is still missing.  Zone offsets are
+		// whole milliseconds, so nothing below a millisecond is lost by `to_millis`.
+		let sub_milli = (self.time.nanosecond().of() % 1_000_000) as i64;
+		Ok(millis * 1_000_000 + sub_milli)
 	}
 	
 	pub fn from_millis(millis: i64, zone: CalClockZone) -> Outcome<Self> {
@@ -140,9 +145,12 @@ impl CalClock {
 		let offset_millis = res!(zone.offset_millis_at_time(millis));
 		let local_millis = millis + offset_millis as i64;
 		
-		// Calculate days since epoch
-		let days_since_epoch = local_millis / (24 * 60 * 60 * 1000);
-		let millis_of_day = (local_millis % (24 * 60 * 60 * 1000)) as u32;
+		// Euclidean, so a pre-epoch instant floors onto the day below it and
+		// leaves a non-negative millisecond-of-day.  Truncating division would
+		// put 1969-12-31T23:59:59.999Z on day 0 with a negative remainder, which
+		// then wraps when cast to u32.
+		let days_since_epoch = local_millis.div_euclid(24 * 60 * 60 * 1000);
+		let millis_of_day = local_millis.rem_euclid(24 * 60 * 60 * 1000) as u32;
 		
 		// Create date from days since epoch
 		let date = res!(CalendarDate::from_days_since_epoch(days_since_epoch, zone.clone()));
@@ -158,16 +166,19 @@ impl CalClock {
 	}
 	
 	pub fn from_nanos(nanos: i64, zone: CalClockZone) -> Outcome<Self> {
-		let millis = nanos / 1_000_000;
+		let millis = nanos.div_euclid(1_000_000);
 		let mut result = res!(Self::from_millis(millis, zone));
 		
-		// Set the remaining nanoseconds
-		let remaining_nanos = (nanos % 1_000_000) as u32;
+		// `from_millis` has already set the millisecond part of the sub-second
+		// field.  The sub-millisecond remainder adds to it; replacing it, as this
+		// once did, threw the milliseconds away and broke the round trip with
+		// `to_nanos`.
+		let sub_milli = nanos.rem_euclid(1_000_000) as u32;
 		result.time = res!(ClockTime::new(
 			result.time.hour().of(),
 			result.time.minute().of(),
 			result.time.second().of(),
-			remaining_nanos,
+			result.time.nanosecond().of() + sub_milli,
 			result.zone().clone()
 		));
 		
@@ -685,27 +696,14 @@ impl CalClock {
         crate::parser::Parser::parse_datetime(input, CalClockZone::utc())
     }
     
+    /// Identical to `to_nanos`; `to_millis` is already reckoned from the Unix epoch.
     pub fn to_nanos_since_epoch(&self) -> Outcome<i64> {
-        let millis = res!(self.to_millis());
-        Ok(millis * 1_000_000 + self.nanosecond() as i64)
+        self.to_nanos()
     }
     
+    /// Identical to `from_nanos`; both read the count from the Unix epoch.
     pub fn from_nanos_since_epoch(nanos: i64, zone: CalClockZone) -> Outcome<Self> {
-        let millis = nanos / 1_000_000;
-        let remaining_nanos = (nanos % 1_000_000) as u32;
-        
-        let mut calclock = res!(Self::from_millis(millis, zone));
-        
-        // Set the nanosecond component
-        calclock.time = res!(ClockTime::new(
-            calclock.hour(),
-            calclock.minute(),
-            calclock.second(),
-            remaining_nanos,
-            calclock.zone().clone()
-        ));
-        
-        Ok(calclock)
+        Self::from_nanos(nanos, zone)
     }
     
     // ========================================================================

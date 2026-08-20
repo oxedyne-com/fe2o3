@@ -511,6 +511,12 @@ fn flag_ranges(dat: &Dat, what: &str)
 ///
 /// The figures are the repository's, since the render is the repository's: one
 /// forest is laid out and walked, and a file is a subtree of it.
+///
+/// `rendered` and `withheld` count bytes this render materialised and `atom_bytes`
+/// does not: since 2026-08-20 an atom's bytes are shared with the record they came
+/// from rather than copied out of it, so that figure says how much content the
+/// history holds and not what holding it costs. See
+/// [`crate::seq::atom::Atoms::total`], which it comes from.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Stats {
 	pub ops:				usize,	// operations in the set

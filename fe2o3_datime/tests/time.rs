@@ -210,6 +210,90 @@ pub fn test_time(filter: &str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["calclock_to_nanos_monotonic", "all", "time", "calclock"], || {
+        // `to_millis` already truncates the sub-second field to whole
+        // milliseconds, so the old `to_nanos` added those milliseconds a second
+        // time.  The overcount grows with the sub-second field and resets when
+        // the second rolls over, which makes the sequence run backwards at every
+        // second boundary.  Ordering is built on this number, so `is_before`,
+        // `is_after` and `PartialOrd` all answered wrongly there.
+        let zone = res!(CalClockZone::new("UTC"));
+        let steps = [
+            (15u8, 999_999_998u32),
+            (15,    999_999_999),
+            (16,    0),
+            (16,    1),
+        ];
+        let mut prev: Option<i64> = None;
+        for (sec, nanos) in steps {
+            let cc = res!(CalClock::new(2024, 3, 15, 14, 30, sec, nanos, zone.clone()));
+            let now = res!(cc.to_nanos());
+            if let Some(before) = prev {
+                assert!(now > before,
+                    "14:30:{:02}.{:09} answers {} ns, which is not after the {} ns \
+                    of the instant before it.", sec, nanos, now, before);
+            }
+            prev = Some(now);
+        }
+
+        // The boundary itself: one nanosecond apart, and in that order.
+        let last  = res!(CalClock::new(2024, 3, 15, 14, 30, 15, 999_999_999, zone.clone()));
+        let first = res!(CalClock::new(2024, 3, 15, 14, 30, 16, 0, zone.clone()));
+        assert_eq!(res!(first.to_nanos()) - res!(last.to_nanos()), 1,
+            "The second boundary is not one nanosecond wide.");
+        assert!(last.is_before(&first), "is_before misreads the second boundary.");
+        assert!(first.is_after(&last), "is_after misreads the second boundary.");
+        assert!(last < first, "PartialOrd misreads the second boundary.");
+        let gap = res!(last.duration_until(&first));
+        assert_eq!(res!(gap.to_nanos()), 1,
+            "duration_until misreads the second boundary.");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["calclock_to_nanos_known_value", "all", "time", "calclock"], || {
+        // Derived by hand, not from the method under test.
+        //
+        // Days from 1970-01-01 to 2024-01-01: 54 years of 365 days, plus one
+        // day for each of the 13 leap years 1972, 1976, ... 2020, so
+        //   54 * 365 + 13 = 19710 + 13 = 19723 days.
+        // 2024 is a leap year, so 2024-03-15 is a further 31 + 29 + 14 = 74
+        // days on, giving 19797 days.  19797 * 86400 = 1_710_460_800 seconds,
+        // which is the published Unix time of 2024-03-15T00:00:00Z.
+        // 14:30:15 is 14*3600 + 30*60 + 15 = 52_215 seconds into the day, so
+        // the instant is 1_710_513_015 seconds after the epoch, and
+        //   1_710_513_015 * 1e9 + 123_456_789 nanoseconds.
+        const WANT: i64 = 1_710_513_015_123_456_789;
+
+        let zone = res!(CalClockZone::new("UTC"));
+        let cc = res!(CalClock::new(2024, 3, 15, 14, 30, 15, 123_456_789, zone.clone()));
+        let got = res!(cc.to_nanos());
+        assert_eq!(got, WANT, "to_nanos is out by {} ns.", got - WANT);
+        assert_eq!(res!(cc.to_nanos_since_epoch()), WANT,
+            "to_nanos_since_epoch disagrees with to_nanos.");
+        assert_eq!(res!(cc.to_millis()), 1_710_513_015_123,
+            "to_millis disagrees with the hand-worked value.");
+
+        // The last nanosecond before the epoch, where the whole thing is negative.
+        let before = res!(CalClock::new(1969, 12, 31, 23, 59, 59, 999_999_999, zone.clone()));
+        assert_eq!(res!(before.to_nanos()), -1,
+            "The nanosecond before the epoch is not -1.");
+
+        // `from_nanos` is the inverse.  It used to overwrite the whole sub-second
+        // field with the sub-millisecond remainder, throwing the milliseconds away.
+        for want in [WANT, -1i64, 0i64] {
+            let back = res!(CalClock::from_nanos(want, zone.clone()));
+            let round = res!(back.to_nanos());
+            assert_eq!(round, want,
+                "{} does not survive from_nanos then to_nanos; it came back as {}.",
+                want, round);
+        }
+        let back = res!(CalClock::from_nanos_since_epoch(WANT, zone.clone()));
+        assert_eq!(back.nanosecond(), 123_456_789,
+            "from_nanos_since_epoch lost the millisecond part of the sub-second field.");
+        assert_eq!(back.second(), 15, "from_nanos_since_epoch landed on the wrong second.");
+        Ok(())
+    }));
+
     Ok(())
 }
 

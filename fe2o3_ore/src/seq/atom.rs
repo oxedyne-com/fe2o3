@@ -61,10 +61,14 @@ impl Atoms {
 			let made = match op {
 				Op::FileCreate { .. }				=> Arc::from(vec![ORIGIN]),
 				// Shares the operation's buffer rather than copying it. Held three
-				// times -- here, in the log's record, and in the sequence's applied
-				// copy -- the content of a real history was 7.7 kB of resident
-				// memory per operation, 346 MB at 44,541 of them, and every verb
-				// that opens the repository paid it.
+				// times -- here, in the log's record, and in the sequence's
+				// `Applied` -- the content of a real history cost 7.63 kB of
+				// resident memory per operation, 345,272 kB at 44,628 of them, and
+				// every verb that opens the repository paid it, `ore log` included,
+				// over no network at all. Sharing brought that to 5.79 kB and
+				// 263,136 kB. It did NOT reach the 5 kB aimed at: 258 MB is still
+				// resident with the content held once, and where the rest of it
+				// lives is a profiling question nobody has answered.
 				Op::Splice { insert, .. } if !insert.is_empty()	=> insert.clone(),
 				_						=> continue,
 			};
@@ -96,12 +100,15 @@ impl Atoms {
 
 	/// Bytes an atom can be read for, across every atom.
 	///
-	/// NOT a measure of what this structure costs. The buffers are shared with the
-	/// records the atoms were built from, so a caller summing this to learn a
-	/// memory figure over-reports by however many owners each buffer has -- which
-	/// is the sharing this type exists to do, and it changed under this name on
-	/// 2026-08-20. Somewhere between two and three times, on the histories
-	/// measured.
+	/// NOT a measure of what this structure costs, and it used to be one.
+	///
+	/// The buffers are shared with the records the atoms were built from, so what
+	/// this returns is bytes an atom can be READ for, not bytes this map is
+	/// keeping alive. Its marginal cost is the map itself; the content would be
+	/// resident whether these atoms existed or not. A caller summing it to learn
+	/// a memory figure is not over-reporting by some factor -- it is measuring
+	/// something else entirely. The meaning changed under the name on 2026-08-20,
+	/// when the buffer came to be shared; the arithmetic did not.
 	pub fn total(&self) -> u64 {
 		self.map.values().map(|v| v.len() as u64).sum()
 	}
