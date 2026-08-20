@@ -428,7 +428,7 @@ impl Sequence {
 				None => {
 					let order = res!(slots.order(&claims));
 					let walk = res!(render::traverse(
-						&slots, &order, &claims, &dead, &atoms));
+						&slots, &order, &claims, &dead, &atoms, render::Emit::Bytes));
 					break (claims, slots, order, walk, dead, yields);
 				},
 			}
@@ -689,7 +689,9 @@ impl Sequence {
 		let claims = res!(Claims::build_without(ops, voided));
 		let slots = res!(Slots::place_without(ops, voided));
 		let order = res!(slots.order(&claims));
-		let walk = res!(render::traverse(&slots, &order, &claims, dead, atoms));
+		// Only `owner` is kept below, so the content is not laid out at all.
+		let walk = res!(render::traverse(
+			&slots, &order, &claims, dead, atoms, render::Emit::OwnersOnly));
 		Ok(Layout { slots, claims, owner: walk.owner })
 	}
 
