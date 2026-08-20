@@ -226,6 +226,15 @@ impl Snapshot {
 		&self.frontier
 	}
 
+	/// Takes the states out, for a caller that is about to own them.
+	///
+	/// A snapshot of a large tree is most of a working copy, and cloning it to
+	/// read it doubles the largest thing in memory at the moment it is least
+	/// affordable.
+	pub fn into_files(self) -> Vec<FileState> {
+		self.files
+	}
+
 	pub fn files(&self) -> &[FileState] {
 		&self.files
 	}
