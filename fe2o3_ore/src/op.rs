@@ -103,6 +103,8 @@ use oxedyne_fe2o3_iop_hash::api::{
 };
 use oxedyne_fe2o3_jdat::prelude::*;
 
+use std::sync::Arc;
+
 
 //// Operation wire codes.
 pub const CODE_FILE_CREATE:	u8 = 1;
@@ -415,7 +417,7 @@ pub enum Op {
 		left: Option<Anchor>,			// binds after a byte
 		right: Option<Anchor>,			// binds before a byte
 		remove: Vec<ContentRange>,
-		insert: Vec<u8>,
+		insert: Arc<[u8]>,				// shared: see the note on sharing below
 	},
 	Move {
 		src: Vec<ContentRange>,			// in the order it lands in
@@ -715,7 +717,7 @@ impl Op {
 						left:	None,
 						right:	None,
 						remove:	vec![res!(ContentRange::new(id, 0, insert.len() as u64))],
-						insert:	Vec::new(),
+						insert:	Arc::from(Vec::new()),
 					});
 				}
 				Ok(Undoing {
@@ -771,7 +773,7 @@ impl Op {
 			left:	Some(Anchor::after(ContentId::new(was.op(), was.to() - 1))),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	bytes,
+			insert:	bytes.into(),
 		})
 	}
 
@@ -895,7 +897,7 @@ impl Op {
 				Anchor::opt_to_dat(left),
 				Anchor::opt_to_dat(right),
 				Dat::List(remove.iter().map(|r| r.to_dat()).collect()),
-				Dat::BU64(insert.clone()),
+				Dat::BU64(insert.to_vec()),
 			]),
 			Self::Move { src, left, right } => Dat::List(vec![
 				Dat::U8(CODE_MOVE),
@@ -1023,7 +1025,7 @@ impl Op {
 					left:	res!(Anchor::opt_from_dat(&v[1])),
 					right:	res!(Anchor::opt_from_dat(&v[2])),
 					remove:	res!(as_ranges(&v[3], "Splice remove")),
-					insert:	res!(as_bytes(&v[4], "Splice insert")),
+					insert:	res!(as_bytes(&v[4], "Splice insert")).into(),
 				}
 			},
 			CODE_MOVE => {
@@ -1557,14 +1559,14 @@ mod tests {
 				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
-				insert:	b"hello".to_vec(),
+				insert:	b"hello".to_vec().into(),
 			},
 			// A deletion, which places nothing and so needs no origin.
 			Op::Splice {
 				left:	None,
 				right:	None,
 				remove:	vec![range(1, 12, 17)],
-				insert:	Vec::new(),
+				insert:	Vec::new().into(),
 			},
 			// A replacement whose payload exceeds what a BU8 length can hold,
 			// killing several fragmented runs at once.
@@ -1575,7 +1577,7 @@ mod tests {
 					range(1, 0, u64::MAX),
 					range(4, 7, 9),
 				],
-				insert:	vec![0xa5; 1000],
+				insert:	vec![0xa5; 1000].into(),
 			},
 			// An empty path, and a path that is not UTF-8 at all, which the old
 			// vocabulary could not spell.
@@ -1765,7 +1767,7 @@ mod tests {
 				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
-				insert:	vec![0x5a; len],
+				insert:	vec![0x5a; len].into(),
 			};
 			let back = res!(Op::decode_all(&res!(op.encode())));
 			match back {
@@ -1848,7 +1850,7 @@ mod tests {
 			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"x".to_vec(),
+			insert:	b"x".to_vec().into(),
 		}.names_file(), None);
 		assert_eq!(Op::Move {
 			src:	Vec::new(),
@@ -1865,7 +1867,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"x".to_vec(),
+			insert:	b"x".to_vec().into(),
 		};
 		assert!(stray.check_placement().is_err());
 		assert!(stray.validate().is_err());
@@ -1877,7 +1879,7 @@ mod tests {
 			(Some(Anchor::origin(oid(1, 1))), None),
 			(None, Some(Anchor::before(content(1, 0)))),
 		] {
-			let op = Op::Splice { left, right, remove: Vec::new(), insert: b"x".to_vec() };
+			let op = Op::Splice { left, right, remove: Vec::new(), insert: b"x".to_vec().into() };
 			res!(op.check_placement());
 			assert_eq!(op, res!(Op::from_dat(&op.to_dat())));
 		}
@@ -1886,7 +1888,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 0, 4)],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		};
 		res!(del.validate());
 		assert_eq!(del, res!(Op::from_dat(&del.to_dat())));
@@ -1983,13 +1985,13 @@ mod tests {
 			left:	Some(Anchor::before(cid)),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"x".to_vec(),
+			insert:	b"x".to_vec().into(),
 		}.validate().is_err());
 		assert!(Op::Splice {
 			left:	None,
 			right:	Some(Anchor::after(cid)),
 			remove:	Vec::new(),
-			insert:	b"x".to_vec(),
+			insert:	b"x".to_vec().into(),
 		}.validate().is_err());
 		assert!(Op::Move {
 			src:	vec![range(1, 0, 4), range(1, 2, 6)],
@@ -2532,7 +2534,7 @@ mod tests {
 				left,
 				right,
 				remove:	vec![range(1, 0, 3)],
-				insert:	b"x".to_vec(),
+				insert:	b"x".to_vec().into(),
 			};
 			assert_eq!(sp, res!(Op::decode_all(&res!(sp.encode()))));
 			assert_eq!(sp, res!(Op::from_dat(&sp.to_dat())));
@@ -2552,7 +2554,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 12, 16)],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		};
 		assert!(res!(other.hash((), [0u8; 0])).as_vec() != want);
 		Ok(())
@@ -2563,7 +2565,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 12, 15)],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		}
 	}
 
@@ -2573,7 +2575,7 @@ mod tests {
 			left:	Some(Anchor::after(content(1, 0))),
 			right:	None,
 			remove:	vec![range(1, 1, 3)],
-			insert:	b"abcdef".to_vec(),
+			insert:	b"abcdef".to_vec().into(),
 		};
 		let buf = res!(op.encode());
 		for cut in 1..buf.len() {
@@ -2676,7 +2678,7 @@ mod tests {
 				left:	Some(Anchor::origin(oid(1, 1))),
 				right:	None,
 				remove:	Vec::new(),
-				insert:	b"abcdef".to_vec(),
+				insert:	b"abcdef".to_vec().into(),
 			},
 		);
 		let buf = res!(rec.encode());
@@ -2796,7 +2798,7 @@ mod tests {
 			left:	Some(Anchor::after(content(1, 3))),
 			right:	None,
 			remove:	vec![range(1, 4, 9), range(2, 0, 2)],
-			insert:	b"hello".to_vec(),
+			insert:	b"hello".to_vec().into(),
 		};
 		let undoing = res!(op.undoing(id));
 		assert_eq!(undoing.prior, None, "a splice records everything its inverse needs");
@@ -2807,7 +2809,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![res!(ContentRange::new(id, 0, 5))],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		}]);
 		res!(undoing.written[0].validate());
 
@@ -2816,7 +2818,7 @@ mod tests {
 			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"abc".to_vec(),
+			insert:	b"abc".to_vec().into(),
 		};
 		let undoing = res!(op.undoing(id));
 		assert!(undoing.copies.is_empty(), "an insertion buried nothing");
@@ -2828,7 +2830,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 4, 9)],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		};
 		let undoing = res!(op.undoing(id));
 		assert!(undoing.written.is_empty(), "a deletion minted nothing to take back");
@@ -2839,7 +2841,7 @@ mod tests {
 			left:	None,
 			right:	None,
 			remove:	vec![range(1, 4, 4), range(1, 6, 8)],
-			insert:	Vec::new(),
+			insert:	Vec::new().into(),
 		};
 		assert_eq!(res!(op.undoing(id)).copies, vec![range(1, 6, 8)]);
 		Ok(())
@@ -2911,19 +2913,19 @@ mod tests {
 				left:	Some(Anchor::after(content(1, 4))),
 				right:	None,
 				remove:	vec![range(2, 0, 1)],
-				insert:	b"ab".to_vec(),
+				insert:	b"ab".to_vec().into(),
 			},
 			Op::Splice {
 				left:	Some(Anchor::after(content(1, 4))),
 				right:	Some(Anchor::before(content(2, 0))),
 				remove:	Vec::new(),
-				insert:	b"ab".to_vec(),
+				insert:	b"ab".to_vec().into(),
 			},
 			Op::Splice {
 				left:	None,
 				right:	Some(Anchor::before(content(2, 0))),
 				remove:	Vec::new(),
-				insert:	b"ab".to_vec(),
+				insert:	b"ab".to_vec().into(),
 			},
 		] {
 			assert_eq!(op.restored(), None, "the {} answered", op.name());
@@ -2939,7 +2941,7 @@ mod tests {
 			left:	Some(Anchor::after(content(1, 1))),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"abcdef".to_vec(),
+			insert:	b"abcdef".to_vec().into(),
 		}.restored(), None);
 		Ok(())
 	}

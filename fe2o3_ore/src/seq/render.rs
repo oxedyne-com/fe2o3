@@ -1101,7 +1101,7 @@ impl Rendered {
 		} else {
 			res!(self.gap(at))
 		};
-		Ok(Op::Splice { left, right, remove, insert })
+		Ok(Op::Splice { left, right, remove, insert: insert.into() })
 	}
 
 	/// Builds a content-anchored move from index-based editing intent: take

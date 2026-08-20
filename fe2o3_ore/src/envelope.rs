@@ -244,7 +244,7 @@ mod tests {
 			left:	Some(Anchor::origin(oid(1, 1))),
 			right:	None,
 			remove:	vec![res!(ContentRange::new(oid(1, 1), 12, 15))],
-			insert:	vec![0x7e; 900],	// beyond what a BU8 length could hold
+			insert:	vec![0x7e; 900].into(),	// beyond what a BU8 length could hold
 		})
 	}
 

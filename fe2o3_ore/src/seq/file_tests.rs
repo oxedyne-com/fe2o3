@@ -1086,13 +1086,13 @@ fn the_origin_anchor_is_what_says_which_file() -> Outcome<()> {
 		left:	Some(Anchor::origin(a)),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"into a".to_vec(),
+		insert:	b"into a".to_vec().into(),
 	})));
 	ops.push(res!(reps[0].author(Op::Splice {
 		left:	Some(Anchor::origin(b)),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"into b".to_vec(),
+		insert:	b"into b".to_vec().into(),
 	})));
 	let repo = res!(case("a.txt=\"into a\" b.txt=\"into b\"", &ops));
 	assert_eq!(res!(text(&repo, a)), "into a");

@@ -427,7 +427,7 @@ mod tests {
 			left:	Some(Anchor::origin(create)),
 			right:	None,
 			remove:	Vec::new(),
-			insert:	b"- Eggs\n- Milk\n- Cheese\n".to_vec(),
+			insert:	b"- Eggs\n- Milk\n- Cheese\n".to_vec().into(),
 		}));
 		let repo = res!(seq.render());
 		let view = match repo.file(create) {

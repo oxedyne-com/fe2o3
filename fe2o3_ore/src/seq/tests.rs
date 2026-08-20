@@ -759,7 +759,7 @@ fn an_operation_anchored_in_an_absent_file_is_refused() -> Outcome<()> {
 		left:	Some(Anchor::origin(ghost)),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"orphan".to_vec(),
+		insert:	b"orphan".to_vec().into(),
 	}));
 	assert!(seq.render().is_err(),
 		"the origin anchor names a file no operation created");
@@ -812,7 +812,7 @@ fn an_anchor_past_the_end_of_its_atom_is_refused() -> Outcome<()> {
 		left:	Some(Anchor::after(ContentId::new(st.seed, 99))),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"x".to_vec(),
+		insert:	b"x".to_vec().into(),
 	};
 	let head = res!(Header::new(OpId::new(ReplicaId::new(1), 3), vec![st.seed]));
 	res!(seq.apply(head, stray));
@@ -965,7 +965,7 @@ fn absorbing_a_clashing_identity_is_refused() -> Outcome<()> {
 		left:	Some(Anchor::after(ContentId::new(seed_id, 0))),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	bytes.to_vec(),
+		insert:	bytes.to_vec().into(),
 	};
 	let mut mine = Sequence::new();
 	for op in &st.ops {
@@ -1004,13 +1004,13 @@ fn a_repository_of_two_files_replays_from_the_log() -> Outcome<()> {
 		left:	Some(Anchor::origin(a.id())),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"alpha".to_vec(),
+		insert:	b"alpha".to_vec().into(),
 	}));
 	let b_seed = res!(log.author(r2, Op::Splice {
 		left:	Some(Anchor::origin(b.id())),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"beta".to_vec(),
+		insert:	b"beta".to_vec().into(),
 	}));
 	// Each operation is written against the whole frontier, which after the
 	// second file was created is that creation alone.
@@ -1021,7 +1021,7 @@ fn a_repository_of_two_files_replays_from_the_log() -> Outcome<()> {
 		left:	Some(Anchor::after(ContentId::new(a_seed.id(), 4))),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b" and omega".to_vec(),
+		insert:	b" and omega".to_vec().into(),
 	}));
 	// Replay: every record goes to the one repository.
 	let mut seq = Sequence::new();
@@ -1070,7 +1070,7 @@ fn an_identity_names_one_operation() -> Outcome<()> {
 		left:	Some(Anchor::origin(st.file)),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"different".to_vec(),
+		insert:	b"different".to_vec().into(),
 	};
 	assert!(seq.apply(first.0.clone(), other).is_err());
 	// Two headers differing only in their parents are two operations too.
@@ -1091,13 +1091,13 @@ fn an_operation_the_structure_cannot_resolve_is_refused() -> Outcome<()> {
 		left:	Some(Anchor::before(cid)),
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"x".to_vec(),
+		insert:	b"x".to_vec().into(),
 	}).is_err());
 	assert!(seq.apply(head(), Op::Splice {
 		left:	None,
 		right:	Some(Anchor::after(cid)),
 		remove:	Vec::new(),
-		insert:	b"x".to_vec(),
+		insert:	b"x".to_vec().into(),
 	}).is_err());
 	assert!(seq.apply(head(), Op::Move {
 		src:	vec![
@@ -1112,7 +1112,7 @@ fn an_operation_the_structure_cannot_resolve_is_refused() -> Outcome<()> {
 		left:	None,
 		right:	None,
 		remove:	Vec::new(),
-		insert:	b"x".to_vec(),
+		insert:	b"x".to_vec().into(),
 	}).is_err());
 	assert!(seq.is_empty());
 	Ok(())

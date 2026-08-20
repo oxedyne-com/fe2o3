@@ -27,6 +27,7 @@ use crate::op::Op;
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 
 // The byte a file's origin anchor holds.  It is born dead and never renders, so
@@ -38,7 +39,7 @@ pub const ORIGIN: u8 = 0;
 /// Every atom an operation set creates, keyed by the operation that created it.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Atoms {
-	map: BTreeMap<OpId, Vec<u8>>, // inserted bytes, by creating operation
+	map: BTreeMap<OpId, Arc<[u8]>>, // inserted bytes, by creating operation
 }
 
 impl Atoms {
@@ -55,10 +56,15 @@ impl Atoms {
 	pub fn build(ops: &[(OpId, &Op)])
 		-> Outcome<Self>
 	{
-		let mut map: BTreeMap<OpId, Vec<u8>> = BTreeMap::new();
+		let mut map: BTreeMap<OpId, Arc<[u8]>> = BTreeMap::new();
 		for (id, op) in ops {
 			let made = match op {
-				Op::FileCreate { .. }				=> vec![ORIGIN],
+				Op::FileCreate { .. }				=> Arc::from(vec![ORIGIN]),
+				// Shares the operation's buffer rather than copying it. Held three
+				// times -- here, in the log's record, and in the sequence's applied
+				// copy -- the content of a real history was 7.7 kB of resident
+				// memory per operation, 346 MB at 44,541 of them, and every verb
+				// that opens the repository paid it.
 				Op::Splice { insert, .. } if !insert.is_empty()	=> insert.clone(),
 				_						=> continue,
 			};
@@ -75,7 +81,7 @@ impl Atoms {
 	pub fn get(&self, id: &OpId)
 		-> Option<&[u8]>
 	{
-		self.map.get(id).map(|v| v.as_slice())
+		self.map.get(id).map(|v| &v[..])
 	}
 
 	/// An operation that inserted nothing creates no atom, so its run is zero
@@ -88,7 +94,14 @@ impl Atoms {
 		self.map.len()
 	}
 
-	/// Bytes held, across every atom.
+	/// Bytes an atom can be read for, across every atom.
+	///
+	/// NOT a measure of what this structure costs. The buffers are shared with the
+	/// records the atoms were built from, so a caller summing this to learn a
+	/// memory figure over-reports by however many owners each buffer has -- which
+	/// is the sharing this type exists to do, and it changed under this name on
+	/// 2026-08-20. Somewhere between two and three times, on the histories
+	/// measured.
 	pub fn total(&self) -> u64 {
 		self.map.values().map(|v| v.len() as u64).sum()
 	}
@@ -97,7 +110,7 @@ impl Atoms {
 	pub fn iter(&self)
 		-> impl Iterator<Item = (&OpId, &[u8])>
 	{
-		self.map.iter().map(|(id, v)| (id, v.as_slice()))
+		self.map.iter().map(|(id, v)| (id, &v[..]))
 	}
 
 	/// Fails when the range names an atom the set does not hold, or reaches past

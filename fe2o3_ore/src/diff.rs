@@ -329,7 +329,7 @@ fn trimmed_splice(old: &[u8], new: &[u8]) -> Splice {
 	Splice {
 		at:		front,
 		delete:	old.len() - front - back,
-		insert:	new[front..new.len() - back].to_vec(),
+		insert:	new[front..new.len() - back].to_vec().into(),
 	}
 }
 
@@ -679,7 +679,7 @@ fn refine(
 				out.push(Splice {
 					at:		oa + c.a.start,
 					delete:	c.a.end - c.a.start,
-					insert:	new[na + c.b.start..na + c.b.end].to_vec(),
+					insert:	new[na + c.b.start..na + c.b.end].to_vec().into(),
 				});
 			}
 			return;
@@ -688,7 +688,7 @@ fn refine(
 	out.push(Splice {
 		at:		oa,
 		delete:	ob - oa,
-		insert:	new[na..nb].to_vec(),
+		insert:	new[na..nb].to_vec().into(),
 	});
 }
 
@@ -967,15 +967,15 @@ mod tests {
 		assert!(apply(old, &[Splice { at: 12, delete: 0, insert: Vec::new() }]).is_err());
 		assert!(apply(old, &[Splice { at: 0, delete: 12, insert: Vec::new() }]).is_err());
 		assert!(apply(old, &[
-			Splice { at: 6, delete: 1, insert: Vec::new() },
-			Splice { at: 2, delete: 1, insert: Vec::new() },
+			Splice { at: 6, delete: 1, insert: Vec::new() }.into(),
+			Splice { at: 2, delete: 1, insert: Vec::new() }.into(),
 		]).is_err());
 		assert!(apply(old, &[
-			Splice { at: 0, delete: 4, insert: Vec::new() },
-			Splice { at: 2, delete: 1, insert: Vec::new() },
+			Splice { at: 0, delete: 4, insert: Vec::new() }.into(),
+			Splice { at: 2, delete: 1, insert: Vec::new() }.into(),
 		]).is_err(), "overlapping splices");
 		assert!(apply(old, &[
-			Splice { at: usize::MAX, delete: usize::MAX, insert: Vec::new() },
+			Splice { at: usize::MAX, delete: usize::MAX, insert: Vec::new() }.into(),
 		]).is_err(), "an offset that would overflow");
 		Ok(())
 	}

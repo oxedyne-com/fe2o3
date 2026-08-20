@@ -1079,7 +1079,7 @@ mod tests {
 					left:	Some(Anchor::origin(oid(1, 1))),
 					right:	None,
 					remove:	Vec::new(),
-					insert:	b"the quick brown fox".to_vec(),
+					insert:	b"the quick brown fox".to_vec().into(),
 				},
 			),
 			Record::new(
@@ -1096,7 +1096,7 @@ mod tests {
 					left:	Some(Anchor::after(ContentId::new(oid(1, 2), 0))),
 					right:	Some(Anchor::before(ContentId::new(oid(1, 2), 1))),
 					remove:	vec![res!(ContentRange::new(oid(1, 2), 10, 15))],
-					insert:	vec![0x2a; 900],	// beyond a single byte length
+					insert:	vec![0x2a; 900].into(),	// beyond a single byte length
 				},
 			),
 			Record::new(
@@ -1769,7 +1769,7 @@ mod tests {
 						left:	anchored,
 						right:	None,
 						remove:	Vec::new(),
-						insert:	vec![(next() % 256) as u8; 1 + next() % 700],
+						insert:	vec![(next() % 256) as u8; 1 + next() % 700].into(),
 					},
 					5 => Op::Move {
 						src:	vec![res!(ContentRange::new(id, 0, (next() % 50) as u64))],
@@ -1942,7 +1942,7 @@ mod tests {
 				left:	Some(Anchor::origin(oid(1, 3))),
 				right:	None,
 				remove:	Vec::new(),
-				insert:	secret.to_vec(),
+				insert:	secret.to_vec().into(),
 			},
 		);
 		let plain = Entry::Sealed(res!(Envelope::seal_record(&signer, &rec)));
