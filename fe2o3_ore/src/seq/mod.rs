@@ -367,8 +367,9 @@ impl Sequence {
 	///
 	/// Fails if the graph is not causally closed, if it does not hold every
 	/// operation the sequence does, or if the operation set names content or a
-	/// file it does not hold. Under a debug build the render is checked for
-	/// conservation before it is returned; see [`Sequence::check_conservation`].
+	/// file it does not hold. Every render is checked for conservation before it
+	/// is returned, in a release build as much as a debug one, because the
+	/// structures the check needs are the ones the render is still holding.
 	pub fn render_with(&self, cause: &Causality<'_>)
 		-> Outcome<Repo>
 	{
@@ -533,9 +534,12 @@ impl Sequence {
 			orphaned:			walk.orphaned,
 		};
 		let repo = Repo::new(out, flags, repo_notes, index, stats);
-		if cfg!(debug_assertions) {
-			res!(Self::conserved(&repo, &atoms, &dead));
-		}
+		// Checked here, in every build, because here is where it is nearly free:
+		// the atoms and the tombstones are the ones this render just used, and
+		// [`Sequence::check_conservation`] exists only for a caller holding a
+		// render it did not produce. Rebuilding them to ask the same question
+		// cost 5.51 s of a 20.2 s open, measured on a 44,628 operation history.
+		res!(Self::conserved(&repo, &atoms, &dead));
 		Ok(repo)
 	}
 
@@ -554,6 +558,13 @@ impl Sequence {
 	/// otherwise would report every yield as a byte gone missing. Causality is
 	/// judged by the sequence's own operations, so a caller who rendered against a
 	/// wider graph should check the render it holds rather than this.
+	///
+	/// **A render this sequence produced has been checked already**, by
+	/// [`Sequence::render_with`], and calling this on one rebuilds the atoms, the
+	/// tombstones, a whole trial layout and the overlap arbitration to reach the
+	/// same answer -- 5.51 s of a 20.2 s open, measured. What remains for this to
+	/// do is the case its name suggests: a repository assembled some other way,
+	/// or one deliberately damaged by a test.
 	pub fn check_conservation(&self, repo: &Repo)
 		-> Outcome<()>
 	{
