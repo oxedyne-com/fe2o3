@@ -172,6 +172,19 @@ pub fn is_auto_mark(name: &str) -> bool {
 /// the bookkeeping. Three programs, one convention, and the day two of them spell
 /// it differently is the day the forge and the mirror disagree about what a mark
 /// says.
+///
+/// # What the value is
+///
+/// Git's whole author line, `Name <email> 1735089438 +0800`: the identity, the
+/// moment and the zone offset the author's own clock was reading. Not the identity
+/// alone. [`Op::Mark`] carries a time in UTC and no zone, so an offset survives an
+/// import only here, and a mirror writing a commit back out reads it from here.
+///
+/// **A reader showing this to a person shows the name, not the line.** The moment
+/// is bookkeeping, and a page that prints the value whole prints a timestamp in the
+/// middle of an author's name. Neither function below looks at the shape: the value
+/// is opaque bytes to both, so a caller that wants the name splits the last two
+/// space-separated fields off itself.
 pub const AUTHOR_TRAILER: &str = "Ore-Author: ";
 
 /// Adds the identity line a commit was authored under to the body its mark will
@@ -219,10 +232,11 @@ pub fn with_author(body: Option<&[u8]>, identity: &[u8]) -> Vec<u8> {
 /// use oxedyne_fe2o3_ore::op::{with_author, without_author};
 ///
 /// let said = b"Tidy the parser.\n";
-/// let carried = with_author(Some(said), b"Jason Hoogland <hoogland@gmail.com>");
+/// let line = b"Jason Hoogland <hoogland@gmail.com> 1735089438 +0800";
+/// let carried = with_author(Some(said), line);
 /// let (body, who) = without_author(&carried);
 /// assert_eq!(body, said);
-/// assert_eq!(who, Some(&b"Jason Hoogland <hoogland@gmail.com>"[..]));
+/// assert_eq!(who, Some(&line[..]));
 ///
 /// // A commit message ending in a line of its own that looks like the trailer.
 /// // One line comes off, and the person's line survives untouched.
