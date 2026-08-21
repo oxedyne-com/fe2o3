@@ -87,6 +87,13 @@ use std::collections::{
 // outright.
 const REF_FORBIDDEN: &[u8] = b" ~^:?*[\\";
 
+// Component length
+// Bytes, not characters, and the difference is the whole point: a component of
+// 200 accented letters passes a character count and is 400 bytes in the
+// directory entry. Git states no limit of its own -- this one is the
+// filesystem's, and 255 is what every filesystem git runs on allows a file name.
+const REF_COMPONENT_BYTES: usize = 255;
+
 
 // ---------------------------------------------------------------------------
 // What a commit says about the tree.
@@ -546,7 +553,18 @@ fn check_identity(who: &Person)
 }
 
 /// The rules are `git-check-ref-format(1)`'s, less the ones that concern a
-/// reference spelled on a command line rather than in a stream.
+/// reference spelled on a command line rather than in a stream, and one more
+/// that is not git's at all: how long a component may be.
+///
+/// That last one is the filesystem's rule and git states none, which is why a
+/// name can satisfy `git-check-ref-format(1)` and still be a reference git
+/// cannot write: a loose reference is a file named after the component, and a
+/// file name is 255 bytes. It matters here rather than at the point of failure
+/// because `git fast-import` refuses the **whole stream** over one reference it
+/// could not create, having already applied everything else, and reports it on
+/// stderr after the caller's command has returned successfully. A caller
+/// deriving a name from something a person wrote -- a commit subject, a title --
+/// cuts it to length before offering it, and this is what says so.
 pub fn check_refname(name: &str)
 	-> Outcome<()>
 {
@@ -592,6 +610,16 @@ pub fn check_refname(name: &str)
 				"The reference {:?} holds the component {:?}, and a component may not \
 				begin with a full stop.", name, part;
 			Invalid, Input));
+		}
+		if part.len() > REF_COMPONENT_BYTES {
+			return Err(err!(
+				"The reference {:?} holds a component of {} bytes. Git keeps a loose \
+				reference in a file whose name is that component, and {} bytes is what \
+				a file name may be, so git would accept this name by its own rules and \
+				then fail to create it -- refusing the whole stream it arrived in. Cut \
+				the name to length before offering it.",
+				name, part.len(), REF_COMPONENT_BYTES;
+			Invalid, Input, Excessive));
 		}
 	}
 	Ok(())
@@ -971,6 +999,33 @@ mod test {
 		for name in ["refs/heads/main", "refs/tags/v1.0", "refs/tags/a.b-c_d"] {
 			res!(check_refname(name));
 		}
+		Ok(())
+	}
+
+	/// A component longer than a file name may be is refused, and counted in
+	/// bytes.
+	///
+	/// The two-byte character is the whole of the second half: 200 of them are
+	/// 200 characters and 400 bytes, so a rule counting characters passes a name
+	/// the filesystem will not hold. Every name here is otherwise legal, which is
+	/// what makes the length the only thing being asked about.
+	#[test]
+	fn a_reference_component_is_bounded_in_bytes() -> Outcome<()> {
+		let longest = "a".repeat(255);
+		res!(check_refname(&fmt!("refs/tags/{}", longest)));
+		assert!(check_refname(&fmt!("refs/tags/{}a", longest)).is_err(),
+			"one byte over the limit is refused");
+		// Every component is asked, not only the last.
+		assert!(check_refname(&fmt!("refs/{}a/main", longest)).is_err(),
+			"a long component anywhere in the name is refused");
+		// And the whole name may exceed the limit while no component does, since
+		// the limit is on the file name and not on the path.
+		res!(check_refname(&fmt!("refs/{}/{}", longest, longest)));
+		let accented = "\u{e9}".repeat(200);
+		assert_eq!(accented.chars().count(), 200, "two hundred characters");
+		assert_eq!(accented.len(), 400, "and four hundred bytes");
+		assert!(check_refname(&fmt!("refs/tags/{}", accented)).is_err(),
+			"the count is of bytes, which is what the directory entry holds");
 		Ok(())
 	}
 
