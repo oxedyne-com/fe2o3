@@ -342,6 +342,10 @@ pub fn build_upgrade_request_head(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::http::{
+        fields::HeaderField,
+        header::HttpHeader,
+    };
 
     /// Header names are one name whatever their case.
     ///
@@ -440,6 +444,57 @@ mod tests {
         assert!(ForwardedPolicy::new(&[fmt!("198.51.100.0/24"), fmt!("nonsense")]).is_err());
         let policy = res!(ForwardedPolicy::new(&[fmt!("198.51.100.0/24")]));
         assert!(policy.trusts(&res!("198.51.100.1:80".parse::<SocketAddr>(), Test)));
+        Ok(())
+    }
+
+    /// A caller's `multipart/form-data` reaches the upstream still naming its top
+    /// level.
+    ///
+    /// The line a hop writes comes from the parsed field, and the multipart arm of
+    /// `ContentTypeValue` wrote the subtype alone, so `multipart/form-data;
+    /// boundary=x` left the hop as `form-data; boundary=x`.  The upstream's own
+    /// parser then refused it -- "Invalid Media type 'form-data', '/' character not
+    /// found" -- and dropped the connection without answering.  Seen six times on
+    /// the live forge, from a scanner posting a form to `/`.
+    #[test]
+    fn test_a_multipart_content_type_survives_a_hop_00() -> Outcome<()> {
+        let wire = fmt!(
+            "POST / HTTP/1.1\r\n\
+            Host: forge.example\r\n\
+            Content-Type: multipart/form-data; boundary=----WebKitFormBoundaryAbC\r\n\
+            Content-Length: 0\r\n");
+        let request = HttpMessage {
+            header: res!(HttpHeader::parse(wire, Some(true))),
+            ..Default::default()
+        };
+        let head = build_proxy_request_head(
+            "POST",
+            "/",
+            "127.0.0.1",
+            &request,
+            &res!("127.0.0.1:48742".parse::<SocketAddr>(), Test),
+            &ForwardedPolicy::none(),
+            0,
+        );
+        assert!(
+            head.to_lowercase().contains("content-type: multipart/form-data; boundary="),
+            "the hop wrote:\n{}", head,
+        );
+        // The boundary's CASE is a second property and a second defect: the
+        // parameter value used to be lowercased with everything else, and a
+        // multipart boundary is case sensitive (RFC 2046 s5.1.1), so the
+        // upstream would have looked for a delimiter the body does not contain.
+        assert!(
+            head.contains("boundary=----WebKitFormBoundaryAbC\r\n"),
+            "the boundary lost its case:\n{}", head,
+        );
+        // And the upstream can read back what the hop wrote, which is the failure
+        // as the forge met it.
+        for line in head.lines() {
+            if line.to_lowercase().starts_with("content-type:") {
+                res!(HeaderField::new(line, None));
+            }
+        }
         Ok(())
     }
 }

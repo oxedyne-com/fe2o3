@@ -49,7 +49,11 @@ impl Display for ContentTypeValue {
                 Some(cs) => write!(f, "{}; charset={}", mt, cs),
                 None => write!(f, "{}", mt),
             },
-            Self::Multipart((mt, b)) => write!(f, "{}; boundary={}", mt, b),
+            // `mt` here is the SUBTYPE, whose Display is "form-data", so the top
+            // level has to be written. Without it a parsed multipart header was
+            // re-emitted as `form-data; boundary=...`, which the next hop cannot
+            // parse -- see the note on `Multipart`'s own Display.
+            Self::Multipart((mt, b)) => write!(f, "multipart/{}; boundary={}", mt, b),
         }
     }
 }

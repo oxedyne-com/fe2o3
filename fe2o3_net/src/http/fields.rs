@@ -1050,27 +1050,30 @@ impl HeaderFieldValue {
                 Invalid, Input, String, Decode)),
             },
             HeaderName::ContentType => { // A; B=C
-                let mut parts = value.split(';').map(str::trim).map(|w| w.to_lowercase());
+                // The media type and the parameter NAME are matched case
+                // insensitively, but the parameter VALUE is not lowercased: a
+                // multipart boundary is case sensitive (RFC 2046 s5.1.1), and
+                // lowercasing `----WebKitFormBoundaryAbC` yields a delimiter
+                // that matches nothing in the body it is meant to divide.
+                let mut parts = value.split(';').map(str::trim);
                 match parts.next() { // A
                     Some(first) => {
-                        let media_type = res!(MediaType::from_str(&first));
+                        let media_type = res!(MediaType::from_str(&first.to_lowercase()));
                         let is_multipart = match media_type {
                             MediaType::Multipart(Multipart::FormData) => true,
                             _ => false,
                         };
                         match parts.next() { // B=C
                             Some(second) => {
-                                let mut parts2 = second.split('=')
-                                    .map(str::trim)
-                                    .map(|w| w.to_lowercase());
+                                let mut parts2 = second.split('=').map(str::trim);
                                 match parts2.next() { // B
                                     Some(left) => match is_multipart {
-                                        true => if left != "boundary" {
+                                        true => if left.to_lowercase() != "boundary" {
                                             return Err(err!(
                                                 "Expected 'boundary' found '{}'.", left;
                                             Invalid, Input, String, Decode));
                                         },
-                                        false => if left != "charset" {
+                                        false => if left.to_lowercase() != "charset" {
                                             return Err(err!(
                                                 "Expected 'charset' found '{}'.", left;
                                             Invalid, Input, String, Decode));
@@ -1086,7 +1089,7 @@ impl HeaderFieldValue {
                                         ))),
                                         false => Self::ContentType(ContentTypeValue::MediaType((
                                             media_type,
-                                            Some(res!(Charset::from_str(&right))),
+                                            Some(res!(Charset::from_str(&right.to_lowercase()))),
                                         ))),
                                     },
                                     None => return Err(err!("Missing {} value in '{}'.",
