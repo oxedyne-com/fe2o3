@@ -148,6 +148,7 @@ pub struct Session {
 	told:		bool,				// everything owed has been sent
 	heard:		bool,				// the other side has said it is finished
 	fell_back:	Option<Fallback>,	// the first fallback, kept for the asking
+	known:		BTreeSet<OpId>,		// operations the far end has shown it holds
 	sent:		usize,				// operations handed over
 	absorbed:	usize,				// operations absorbed
 }
@@ -155,12 +156,30 @@ pub struct Session {
 impl Session {
 
 	pub fn new(mode: Mode) -> Self {
+		Self::knowing(mode, BTreeSet::new())
+	}
+
+	/// A session that starts knowing the far end already holds `known`.
+	///
+	/// The one thing a session boundary would otherwise throw away. No message says
+	/// "you handed me this": a frontier reports what its own end holds, and a head
+	/// nobody here has seen subtracts nothing, so a fresh session works out what it
+	/// owes from the frontier alone and offers back everything the sessions before
+	/// it took in. A carrier that runs several sessions -- which a bounded reply
+	/// makes it do -- hands one session's [`Session::known`] to the next, and the
+	/// re-offer stops.
+	///
+	/// It is a proof and not a claim. Every identifier in it is one this end watched
+	/// arrive, or one the carrier watched leave and be taken; nothing in it rests on
+	/// what a peer says about itself, which is what makes it safe to subtract.
+	pub fn knowing(mode: Mode, known: BTreeSet<OpId>) -> Self {
 		Self {
 			mode,
 			opened:		false,
 			told:		false,
 			heard:		false,
 			fell_back:	None,
+			known,
 			sent:		0,
 			absorbed:	0,
 		}
@@ -179,6 +198,16 @@ impl Session {
 	/// than watching every turn.
 	pub fn fell_back(&self) -> Option<Fallback> {
 		self.fell_back
+	}
+
+	/// What the far end has shown it holds: what this session was told when it
+	/// opened, and every operation that has arrived in a [`Message::Send`] since.
+	///
+	/// Not what it was sent. Whether a batch reached the far end is a question about
+	/// the carrier and not about the session, so a carrier that knows its request
+	/// was taken puts those identifiers in itself.
+	pub fn known(&self) -> &BTreeSet<OpId> {
+		&self.known
 	}
 
 	pub fn ops_sent(&self) -> usize {
@@ -231,6 +260,10 @@ impl Session {
 				for entry in &entries {
 					let rec = res!(entry.peek());
 					let id = rec.id();
+					// Written down whether or not it is news here. An operation a peer
+					// hands over is an operation that peer holds, and that is the whole of
+					// what a later session needs to stop offering it back.
+					self.known.insert(id);
 					if !log.contains(&id) && taken.insert(id) {
 						batch.push(rec);
 					}
@@ -292,10 +325,10 @@ impl Session {
 					if self.fell_back.is_none() {
 						self.fell_back = Some(reason);
 					}
-					(owed(log, heads), covered(log, heads))
+					(owed(log, heads, &self.known), covered(log, heads, &self.known))
 				},
 			},
-			None => (owed(log, heads), covered(log, heads)),
+			None => (owed(log, heads, &self.known), covered(log, heads, &self.known)),
 		};
 		let ids = close(log, &send, &held);
 		if !ids.is_empty() {

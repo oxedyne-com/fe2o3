@@ -9,7 +9,8 @@
 //! ancestors -- and the heads themselves -- of every head we can also see:
 //!
 //! ```text
-//! covered = ancestors-or-self, within our log, of (their heads ∩ our log)
+//! roots   = (their heads ∪ what they have handed us) ∩ our log
+//! covered = ancestors-or-self, within our log, of roots
 //! owed    = our log \ covered
 //! ```
 //!
@@ -30,6 +31,22 @@
 //!
 //! Where both sides have written, [`crate::sync::sketch`] is what makes the
 //! exchange proportional to the difference instead.
+//!
+//! # What they handed us
+//!
+//! The second root set is the one a frontier cannot report. A peer that hands an
+//! operation over holds it -- a proof, not a claim -- and its heads say nothing
+//! about it, since a head we have never seen subtracts nothing. Held in one
+//! session that costs nothing, because a session sends what it owes once. It
+//! costs a carrier that runs several: a bounded reply makes a large clone into a
+//! run of sessions, and a session that started again from the frontier alone
+//! offered back, every time, the whole prefix the sessions before it had just
+//! delivered.
+//!
+//! Measured on the clone of fe2o3 of 12026-08-22, 35,314 operations over sixteen
+//! sessions: 166,224 operations offered, every one of them already held at the
+//! far end, 717 MB up against 87 MB down. [`crate::sync::Session::knowing`] is
+//! how a carrier carries the answer across the boundary.
 //!
 //! # Closure at both ends
 //!
@@ -54,10 +71,16 @@ use std::collections::BTreeSet;
 /// The operations of `log` that a peer whose frontier is `heads` demonstrably
 /// holds. Heads the log does not hold are skipped: they are operations the peer
 /// has and we do not, and they say nothing about what we hold.
-pub fn covered(log: &OpLog, heads: &[OpId]) -> BTreeSet<OpId> {
+///
+/// `known` is the rest of what the peer has shown it holds, which is what it
+/// handed over earlier in the same exchange. Those are roots of the same walk and
+/// not a separate kind of thing: a log is causally closed, so a peer that holds an
+/// operation holds every ancestor of it, exactly as it does of a head.
+pub fn covered(log: &OpLog, heads: &[OpId], known: &BTreeSet<OpId>) -> BTreeSet<OpId> {
 	let mut seen: BTreeSet<OpId> = BTreeSet::new();
 	let mut stack: Vec<OpId> = heads
 		.iter()
+		.chain(known.iter())
 		.filter(|h| log.contains(h))
 		.copied()
 		.collect();
@@ -82,8 +105,8 @@ pub fn covered(log: &OpLog, heads: &[OpId]) -> BTreeSet<OpId> {
 /// so a receiver places the whole batch in one pass; nothing depends on it,
 /// since [`OpLog::absorb`](crate::log::OpLog::absorb) takes a batch however it
 /// is shuffled.
-pub fn owed(log: &OpLog, heads: &[OpId]) -> Vec<OpId> {
-	let held = covered(log, heads);
+pub fn owed(log: &OpLog, heads: &[OpId], known: &BTreeSet<OpId>) -> Vec<OpId> {
+	let held = covered(log, heads, known);
 	log.iter()
 		.map(|rec| rec.id())
 		.filter(|id| !held.contains(id))
@@ -190,6 +213,11 @@ mod tests {
 		OpId::new(ReplicaId::new(replica), counter)
 	}
 
+	/// Nothing remembered beyond the frontier, which is what a first session knows.
+	fn nil() -> BTreeSet<OpId> {
+		BTreeSet::new()
+	}
+
 	fn rec(id: OpId, parents: Vec<OpId>, name: &str)
 		-> Outcome<Record>
 	{
@@ -222,14 +250,14 @@ mod tests {
 	fn a_head_we_hold_covers_its_ancestors() -> Outcome<()> {
 		let log = res!(forked());
 		assert_eq!(
-			covered(&log, &[oid(1, 2)]).into_iter().collect::<Vec<_>>(),
+			covered(&log, &[oid(1, 2)], &nil()).into_iter().collect::<Vec<_>>(),
 			vec![oid(1, 1), oid(1, 2)],
 		);
-		assert_eq!(owed(&log, &[oid(1, 2)]), vec![oid(2, 3), oid(1, 4)]);
+		assert_eq!(owed(&log, &[oid(1, 2)], &nil()), vec![oid(2, 3), oid(1, 4)]);
 		// A merge covers both branches, so nothing is owed.
-		assert!(owed(&log, &[oid(1, 4)]).is_empty());
+		assert!(owed(&log, &[oid(1, 4)], &nil()).is_empty());
 		// Two heads together cover their union.
-		assert!(owed(&log, &[oid(1, 2), oid(2, 3)]) == vec![oid(1, 4)]);
+		assert!(owed(&log, &[oid(1, 2), oid(2, 3)], &nil()) == vec![oid(1, 4)]);
 		Ok(())
 	}
 
@@ -237,8 +265,8 @@ mod tests {
 	#[test]
 	fn an_empty_peer_is_owed_everything() -> Outcome<()> {
 		let log = res!(forked());
-		assert!(covered(&log, &[]).is_empty());
-		assert_eq!(owed(&log, &[]), vec![oid(1, 1), oid(1, 2), oid(2, 3), oid(1, 4)]);
+		assert!(covered(&log, &[], &nil()).is_empty());
+		assert_eq!(owed(&log, &[], &nil()), vec![oid(1, 1), oid(1, 2), oid(2, 3), oid(1, 4)]);
 		Ok(())
 	}
 
@@ -247,10 +275,84 @@ mod tests {
 	#[test]
 	fn a_head_we_do_not_hold_covers_nothing() -> Outcome<()> {
 		let log = res!(forked());
-		assert!(covered(&log, &[oid(9, 9)]).is_empty());
-		assert_eq!(owed(&log, &[oid(9, 9)]).len(), log.len(), "the whole log, loosely");
+		assert!(covered(&log, &[oid(9, 9)], &nil()).is_empty());
+		assert_eq!(owed(&log, &[oid(9, 9)], &nil()).len(), log.len(), "the whole log, loosely");
 		// Mixed: the head we hold still does its work.
-		assert_eq!(owed(&log, &[oid(9, 9), oid(1, 2)]), vec![oid(2, 3), oid(1, 4)]);
+		assert_eq!(owed(&log, &[oid(9, 9), oid(1, 2)], &nil()), vec![oid(2, 3), oid(1, 4)]);
+		Ok(())
+	}
+
+	/// The half a frontier cannot report. A peer's heads say what it holds *now*;
+	/// nothing in them says "you handed me this", and a head nobody here has seen
+	/// subtracts nothing at all.
+	#[test]
+	fn what_they_handed_us_is_not_offered_back() -> Outcome<()> {
+		let log = res!(forked());
+		// Their tip is news to us, so on the frontier alone the whole log is owed.
+		let theirs = vec![oid(9, 9)];
+		assert_eq!(owed(&log, &theirs, &nil()).len(), log.len());
+		// Remember two they handed over, and it is exactly the rest.
+		let handed: BTreeSet<OpId> = [oid(1, 1), oid(1, 2)].into_iter().collect();
+		assert_eq!(
+			covered(&log, &theirs, &handed).into_iter().collect::<Vec<_>>(),
+			vec![oid(1, 1), oid(1, 2)],
+		);
+		assert_eq!(owed(&log, &theirs, &handed), vec![oid(2, 3), oid(1, 4)]);
+		// One that they handed over covers its ancestors as a head does, since a log
+		// is causally closed: the merge alone leaves nothing owed.
+		let handed: BTreeSet<OpId> = [oid(1, 4)].into_iter().collect();
+		assert!(owed(&log, &theirs, &handed).is_empty());
+		// And an operation nobody here holds says nothing, exactly as their tip does.
+		let handed: BTreeSet<OpId> = [oid(8, 8)].into_iter().collect();
+		assert_eq!(owed(&log, &theirs, &handed).len(), log.len());
+		Ok(())
+	}
+
+	/// Which is what makes it safe to subtract, and the reason a remembered root is
+	/// walked rather than merely removed: a peer that holds an operation holds every
+	/// ancestor of it, so what is subtracted has to be closed downwards or the
+	/// remainder arrives at the far end with a hole in it.
+	#[test]
+	fn what_is_subtracted_is_closed_downwards() -> Outcome<()> {
+		let log = res!(forked());
+		for handed in [
+			vec![],
+			vec![oid(1, 1)],
+			vec![oid(1, 2)],
+			vec![oid(2, 3)],
+			vec![oid(1, 2), oid(2, 3)],
+			// The merge, whose parents were never handed over by name.
+			vec![oid(1, 4)],
+			vec![oid(1, 4), oid(8, 8)],
+		] {
+			let handed: BTreeSet<OpId> = handed.into_iter().collect();
+			let held = covered(&log, &[oid(9, 9)], &handed);
+			for id in &held {
+				let rec = match log.get(id) {
+					Some(r) => r,
+					None => return Err(err!("The log lost {}.", id; Test, Missing)),
+				};
+				for p in rec.parents() {
+					assert!(held.contains(p),
+						"{} is subtracted and its parent {} is not, remembering {:?}",
+						id, p, handed);
+				}
+			}
+			// So a peer holding exactly that much takes what is left of the log with
+			// no hole in it, which is the check the receiver makes for itself.
+			let mut peer = OpLog::new();
+			let mut have = Vec::new();
+			for rec in log.iter() {
+				if held.contains(&rec.id()) {
+					have.push(rec.clone());
+				}
+			}
+			res!(peer.absorb(have));
+			let ids: BTreeSet<OpId> = owed(&log, &[oid(9, 9)], &handed).into_iter().collect();
+			let entries = res!(entries_for(&log, &ids));
+			assert_eq!(res!(arrival_gap(&peer, &entries)), None,
+				"what is left over does not close, remembering {:?}", handed);
+		}
 		Ok(())
 	}
 
@@ -267,8 +369,8 @@ mod tests {
 			vec![oid(1, 4)],
 			vec![oid(9, 9)],
 		] {
-			let held = covered(&log, &heads);
-			let ids = owed(&log, &heads);
+			let held = covered(&log, &heads, &nil());
+			let ids = owed(&log, &heads, &nil());
 			// Every parent of everything sent is either sent or held.
 			for id in &ids {
 				let rec = match log.get(id) {
@@ -321,7 +423,7 @@ mod tests {
 	fn arrival_names_the_hole() -> Outcome<()> {
 		let log = res!(forked());
 		let mut fresh = OpLog::new();
-		let all = res!(entries_for(&log, &owed(&log, &[]).into_iter().collect()));
+		let all = res!(entries_for(&log, &owed(&log, &[], &nil()).into_iter().collect()));
 		assert!(res!(closes(&fresh, &all)), "a whole history closes against nothing");
 		// Drop the root, and the batch no longer closes.
 		let short: Vec<Entry> = all[1..].to_vec();

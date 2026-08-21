@@ -27,7 +27,10 @@
 //!
 //! - The **frontier walk** is the default and is correct at any divergence. The
 //!   peers exchange their frontiers, and each sends every operation the other's
-//!   frontier does not cover. It costs one round trip and never fails.
+//!   frontier does not cover -- and that it has not already watched the other
+//!   hand over, which is the half a frontier cannot report and which
+//!   [`Session::knowing`] is how a carrier remembers. It costs one round trip and
+//!   never fails.
 //! - **Sketch reconciliation** is the optimisation. Each peer sends an
 //!   invertible Bloom lookup table over the names of the operations it holds;
 //!   subtracting one from the other yields the difference directly, in bytes

@@ -34,6 +34,8 @@ use crate::sync::sketch::Fallback;
 
 use oxedyne_fe2o3_core::prelude::*;
 
+use std::collections::BTreeSet;
+
 
 /// A small linear congruential generator, so a failure can be reproduced.
 struct Rng(u64);
@@ -264,6 +266,87 @@ fn one_sided_divergence_converges() -> Outcome<()> {
 	assert_eq!(sa.ops_sent(), 61, "the news and nothing else");
 	assert_eq!(sb.ops_sent(), 5, "and the shared prefix, loosely, the other way");
 	assert_eq!(sa.ops_absorbed(), 0, "every one of which was already held");
+	Ok(())
+}
+
+/// One clone, cut into sessions by a carrier that bounds its reply, with `carry`
+/// saying whether one session hands the next what it learned.
+///
+/// The bound is the relay's: what does not fit is not sent and not remembered,
+/// and `Done` claims only that this end will send no more this turn, so the
+/// puller opens again. An append-order prefix of an owed set is causally closed
+/// by construction, which is what makes cutting one safe.
+fn clone_in_sessions(a: &mut OpLog, cut: usize, carry: bool)
+	-> Outcome<(usize, usize, OpLog)>
+{
+	let mut b = OpLog::new();
+	let mut known: BTreeSet<OpId> = BTreeSet::new();
+	let mut offered = 0usize;
+	let mut sessions = 0usize;
+	while b.len() < a.len() {
+		sessions += 1;
+		if sessions > 32 {
+			return Err(err!(
+				"The sessions stopped making progress, at {} of {}.", b.len(), a.len();
+			Test, Excessive));
+		}
+		let mut sa = Session::new(Mode::Walk);
+		let mut sb = if carry {
+			Session::knowing(Mode::Walk, known.clone())
+		} else {
+			Session::new(Mode::Walk)
+		};
+		let hello = res!(sb.open(&b));
+		let mut room = cut;
+		for msg in res!(sa.receive(a, hello)).send {
+			let msg = match msg {
+				Message::Send { entries } => {
+					let take = std::cmp::min(room, entries.len());
+					room -= take;
+					Message::Send { entries: entries.into_iter().take(take).collect() }
+				},
+				other => other,
+			};
+			for out in &res!(sb.receive(&mut b, msg)).send {
+				offered += out.entries().len();
+			}
+		}
+		if !sb.is_converged() {
+			return Err(err!(
+				"A session ended unconverged after {} of them.", sessions; Test, Missing));
+		}
+		known = sb.known().clone();
+	}
+	Ok((sessions, offered, b))
+}
+
+/// **The defect this exists for.** A relay bounds its reply, so a clone larger
+/// than the bound is a run of sessions, and every session that began again from
+/// the frontier alone offered back the whole prefix the sessions before it had
+/// just delivered. Nothing in a frontier says "you handed me this": a head the
+/// puller has never seen subtracts nothing, so its own log looked entirely owed.
+///
+/// Measured on fe2o3 on 12026-08-22, 35,314 operations over sixteen sessions:
+/// 166,224 operations offered, every one of them already at the far end, 717 MB
+/// up against 87 MB down. Here the same shape at four sessions, with the loose
+/// run kept beside the tight one so the cost has a number rather than a claim.
+#[test]
+fn a_bounded_clone_offers_back_nothing_it_was_given() -> Outcome<()> {
+	let mut a = OpLog::new();
+	res!(write(&mut a, 1, 40, "x"));
+
+	let (sessions, offered, b) = res!(clone_in_sessions(&mut a, 10, true));
+	res!(agree(&a, &b));
+	assert!(sessions > 1, "the bound was never reached, so nothing here was exercised");
+	assert_eq!(offered, 0, "a clone owes nothing and offered {} operations", offered);
+
+	// The same clone, with each session starting from the frontier alone.
+	let (loose_sessions, loose, b) = res!(clone_in_sessions(&mut a, 10, false));
+	res!(agree(&a, &b));
+	assert_eq!(loose_sessions, sessions, "remembering changed how many sessions it took");
+	// Ten, then twenty, then thirty: the triangular number the fe2o3 clone paid
+	// 717 MB of.
+	assert_eq!(loose, 60, "the loose run's cost is not what it was");
 	Ok(())
 }
 
