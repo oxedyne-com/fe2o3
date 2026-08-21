@@ -161,6 +161,100 @@ pub fn is_auto_mark(name: &str) -> bool {
 }
 
 
+/// What a mark's body calls the identity line the commit it was imported from was
+/// authored under.
+///
+/// A trailer in git's own sense -- last line, `Key: value` -- so that a body
+/// already ending in `Co-Authored-By:` lines gains it inside the block those lines
+/// are in. Here rather than in the importer for the reason [`AUTO_MARK_PREFIX`] is
+/// here: an importer writes it, a mirror reads it back to author the commit under
+/// the name it arrived with, and a forge reads it to show a person the name and not
+/// the bookkeeping. Three programs, one convention, and the day two of them spell
+/// it differently is the day the forge and the mirror disagree about what a mark
+/// says.
+pub const AUTHOR_TRAILER: &str = "Ore-Author: ";
+
+/// Adds the identity line a commit was authored under to the body its mark will
+/// carry.
+///
+/// No blank line before it, so that the trailer joins whatever block ends the body
+/// -- which is where git puts its own -- and taking exactly one line back off is
+/// unambiguous however the body ended.
+pub fn with_author(body: Option<&[u8]>, identity: &[u8]) -> Vec<u8> {
+	let mut out = body.unwrap_or_default().to_vec();
+	if !out.is_empty() && !out.ends_with(b"\n") {
+		out.push(b'\n');
+	}
+	out.extend_from_slice(AUTHOR_TRAILER.as_bytes());
+	out.extend_from_slice(identity);
+	out.push(b'\n');
+	out
+}
+
+/// Splits the identity line back off a mark's body, where it carries one.
+///
+/// # One line, and never a loop
+///
+/// A commit message may say anything, including a last line of its own beginning
+/// `Ore-Author:`, and [`with_author`] writes the importer's trailer *after*
+/// whatever was already there. So the importer's is always the last line and
+/// exactly one line comes off. A reader that stripped until no trailer remained
+/// would eat the person's line as well and author the commit under the name in it,
+/// which is a round trip that silently rewrites history rather than reproducing it.
+///
+/// # What it cannot decide
+///
+/// A mark authored in Ore rather than imported, whose body's last line a person
+/// typed as `Ore-Author: ...`, is indistinguishable from an imported one and is
+/// split. Nothing in a mark says whether it was imported, and adding something
+/// would be a discriminator in the history for the benefit of one importer. What a
+/// caller loses is one line of a body, which for a mirror is a name it would have
+/// derived anyway and for a reader is a line shown as an author instead of as
+/// text.
+///
+/// The identity is bytes and is not checked: git says nothing about the encoding
+/// of an identity line, and a caller that has to put it on a page decodes it there.
+///
+/// ```
+/// use oxedyne_fe2o3_ore::op::{with_author, without_author};
+///
+/// let said = b"Tidy the parser.\n";
+/// let carried = with_author(Some(said), b"Jason Hoogland <hoogland@gmail.com>");
+/// let (body, who) = without_author(&carried);
+/// assert_eq!(body, said);
+/// assert_eq!(who, Some(&b"Jason Hoogland <hoogland@gmail.com>"[..]));
+///
+/// // A commit message ending in a line of its own that looks like the trailer.
+/// // One line comes off, and the person's line survives untouched.
+/// let awkward = b"Fix it.\nOre-Author: Somebody Else <else@example.com>\n";
+/// let carried = with_author(Some(awkward), b"Jason Hoogland <hoogland@gmail.com>");
+/// let (body, who) = without_author(&carried);
+/// assert_eq!(body, awkward);
+/// assert_eq!(who, Some(&b"Jason Hoogland <hoogland@gmail.com>"[..]));
+///
+/// // A mark nobody imported carries no trailer and is handed back whole.
+/// let (body, who) = without_author(b"Ready to cut.\n");
+/// assert_eq!(body, b"Ready to cut.\n");
+/// assert_eq!(who, None);
+/// ```
+pub fn without_author(body: &[u8]) -> (&[u8], Option<&[u8]>) {
+	// A body the importer wrote ends in the newline that terminates its trailer, so
+	// one that does not end in a newline cannot be carrying one.
+	let above = match body.strip_suffix(b"\n") {
+		Some(above)	=> above,
+		None		=> return (body, None),
+	};
+	let start = match above.iter().rposition(|b| *b == b'\n') {
+		Some(at)	=> at + 1,
+		None		=> 0,
+	};
+	match above[start..].strip_prefix(AUTHOR_TRAILER.as_bytes()) {
+		Some(identity)	=> (&body[..start], Some(identity)),
+		None			=> (body, None),
+	}
+}
+
+
 //// File mode wire codes.
 pub const MODE_NORMAL:		u8 = 0;
 pub const MODE_EXECUTABLE:	u8 = 1;
