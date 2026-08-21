@@ -251,6 +251,16 @@ impl Session {
 				self.heard = true;
 				Ok(self.turn(Vec::new(), None))
 			},
+			// A piece of an operation is not an operation, and a session that
+			// tried to place one would be placing something nobody signed. Putting
+			// the pieces back together is the carrier's work -- `Parts` in
+			// `sync::msg` -- and a session is handed the result.
+			Message::Part { id, seq, total, .. } => Err(err!(
+				"A session was handed piece {} of the {} the operation {} was cut \
+				into. A piece is a transport's business: `sync::msg::Parts` puts a \
+				run of them back into the send it was cut from, and that is what a \
+				session receives.", seq, total, id;
+			Invalid, Input, Mismatch)),
 		}
 	}
 

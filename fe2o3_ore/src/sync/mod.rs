@@ -65,8 +65,10 @@ mod tests;
 
 pub use msg::{
 	Message,
+	Parts,
 	MAGIC,
 	VERSION,
+	VERSION_MIN,
 };
 pub use session::{
 	Mode,

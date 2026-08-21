@@ -649,3 +649,27 @@ fn the_mode_is_chosen_from_the_two_shapes() -> Outcome<()> {
 	assert_eq!(Mode::between(0, 0, 0, 0), Mode::Walk);
 	Ok(())
 }
+
+/// A session refuses a piece of an operation rather than trying to place it.
+///
+/// Putting a run of pieces back together is the carrier's work, and a session
+/// that took one would be placing something nobody signed. The refusal names
+/// where the work belongs, because a caller meeting it has reached for the wrong
+/// layer rather than made a mistake.
+#[test]
+fn a_session_refuses_a_piece_of_an_operation() -> Outcome<()> {
+	let mut log = OpLog::default();
+	let mut session = Session::new(Mode::Walk);
+	let e = match session.receive(&mut log, Message::Part {
+		id:		OpId::new(ReplicaId::new(1), 1),
+		seq:	0,
+		total:	4,
+		bytes:	vec![0x01],
+	}) {
+		Ok(_) => return Err(err!("A session placed a piece of an operation."; Test)),
+		Err(e) => e,
+	};
+	assert!(fmt!("{}", e).contains("Parts"), "the refusal does not say where the work belongs: {}", e);
+	assert_eq!(log.len(), 0, "a refused piece changed the log");
+	Ok(())
+}

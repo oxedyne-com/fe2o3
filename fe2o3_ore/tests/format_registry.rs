@@ -162,10 +162,13 @@ fn compiled(name: &str) -> Option<Dat> {
 		"op::AUTHOR_TRAILER"		=> Dat::Str(op::AUTHOR_TRAILER.to_string()),
 		"sync::msg::MAGIC"			=> magic(&msg::MAGIC),
 		"sync::msg::VERSION"		=> Dat::U8(msg::VERSION),
+		"sync::msg::VERSION_MIN"	=> Dat::U8(msg::VERSION_MIN),
 		"sync::msg::KIND_HELLO"		=> Dat::U8(msg::KIND_HELLO),
 		"sync::msg::KIND_SKETCH"	=> Dat::U8(msg::KIND_SKETCH),
 		"sync::msg::KIND_SEND"		=> Dat::U8(msg::KIND_SEND),
 		"sync::msg::KIND_DONE"		=> Dat::U8(msg::KIND_DONE),
+		"sync::msg::KIND_PART"		=> Dat::U8(msg::KIND_PART),
+		"sync::msg::PART_MAX"		=> Dat::U64(msg::PART_MAX as u64),
 		_ => return None,
 	})
 }
@@ -607,6 +610,39 @@ fn the_version_table_agrees_with_highest_code() -> Outcome<()> {
 					c.name, code, segment::VERSION, top; Mismatch));
 			}
 		}
+	}
+	Ok(())
+}
+
+/// No message kind sits above what the message version admits.
+///
+/// The mirror of the last block of the test above, for the other vocabulary.
+/// `sync::msg::highest_kind` is the rule the message kinds grow by and nothing
+/// checked it: a kind added without the version moving is a message no peer
+/// could ever legally stamp, and a version moving with no kind above the old top
+/// is a version that bought nothing and refuses old peers for no reason.
+#[test]
+fn no_message_kind_sits_above_what_its_version_admits() -> Outcome<()> {
+	let top = msg::highest_kind(msg::VERSION);
+	for c in res!(constants()) {
+		if c.name.starts_with("sync::msg::KIND_") {
+			let kind = res!(byte_of(&c.name));
+			if kind > top {
+				return Err(err!(
+					"{} is {} and a peer at sync::msg::VERSION ({}) may send up to \
+					kind {}, so nothing could ever stamp it: Message::decode refuses \
+					a kind its declared version does not admit.",
+					c.name, kind, msg::VERSION, top; Mismatch));
+			}
+		}
+	}
+	let was = msg::highest_kind(msg::VERSION_MIN);
+	if msg::VERSION != msg::VERSION_MIN && was >= top {
+		return Err(err!(
+			"sync::msg::VERSION is {} and sync::msg::VERSION_MIN is {}, and \
+			highest_kind admits up to kind {} at both. A version that adds no kind \
+			refuses every older peer and buys nothing for it.",
+			msg::VERSION, msg::VERSION_MIN, top; Mismatch));
 	}
 	Ok(())
 }

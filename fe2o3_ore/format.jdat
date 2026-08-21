@@ -271,15 +271,23 @@
         {
             "name":     "sync::msg::VERSION",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|32),
+            "line":     (u64|48),
+            "value":    (u8|2),
+            "axis":     "vocabulary",
+            "holds":    "the newest set of message kinds a peer may send, stamped only on a message that needs it. It does not move when the OPERATION vocabulary does, so an old relay accepts the frame and then fails inside Entry::from_dat, after the handshake said it was compatible; it moved to 2 for sync::msg::KIND_PART, where the refusal lands at the header instead"
+        },
+        {
+            "name":     "sync::msg::VERSION_MIN",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|58),
             "value":    (u8|1),
             "axis":     "vocabulary",
-            "holds":    "which message kinds a peer may send; it does not move when the operation vocabulary does, so an old relay accepts the frame and then fails inside Entry::from_dat, after the handshake said it was compatible"
+            "holds":    "the oldest message version this crate reads, and the version stamped on every message a version 1 peer could itself have sent; it stays at 1 because version 2 added a kind above the existing ones and moved nothing else"
         },
         {
             "name":     "sync::msg::KIND_HELLO",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|35),
+            "line":     (u64|61),
             "value":    (u8|1),
             "axis":     "vocabulary",
             "holds":    "a peer opening a session"
@@ -287,7 +295,7 @@
         {
             "name":     "sync::msg::KIND_SKETCH",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|36),
+            "line":     (u64|62),
             "value":    (u8|2),
             "axis":     "vocabulary",
             "holds":    "a peer offering what it holds"
@@ -295,7 +303,7 @@
         {
             "name":     "sync::msg::KIND_SEND",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|37),
+            "line":     (u64|63),
             "value":    (u8|3),
             "axis":     "vocabulary",
             "holds":    "a peer handing entries over"
@@ -303,10 +311,26 @@
         {
             "name":     "sync::msg::KIND_DONE",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|38),
+            "line":     (u64|64),
             "value":    (u8|4),
             "axis":     "vocabulary",
-            "holds":    "a peer closing a session"
+            "holds":    "a peer closing a session; the top of the version 1 vocabulary"
+        },
+        {
+            "name":     "sync::msg::KIND_PART",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|65),
+            "value":    (u8|5),
+            "axis":     "vocabulary",
+            "holds":    "one piece of an operation the carrier cannot take whole; the top of the version 2 vocabulary. A piece is not an operation: nothing places it, nothing signs it, and no segment may carry it, which is why it is a message kind and not an entry kind beside segment::KIND_PACKED"
+        },
+        {
+            "name":     "sync::msg::PART_MAX",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|76),
+            "value":    (u64|67108864),
+            "axis":     "vocabulary",
+            "holds":    "the most an operation may come to when its pieces are put back together. A declared piece count is never sized from, only the bytes that actually arrived are counted, so this is a policy ceiling and not a guard against an allocation a peer could ask for"
         }
     ],
 
@@ -368,12 +392,23 @@
             "name":     "the_message_bytes_are_frozen",
             "file":     "src/sync/msg.rs",
             "magic":    "sync::msg::MAGIC",
-            "holds":    "a send message carrying one bare entry; it has no segment header, so the operation vocabulary rising does not move a byte of it",
+            "holds":    "a send message carrying one bare entry; it has no segment header, so the operation vocabulary rising does not move a byte of it, and the message vocabulary rising does not either -- a message is stamped with the version it needs, so this one still says 1",
             "pins": [
-                { "at": (u64|6),  "is": "sync::msg::VERSION" },
+                { "at": (u64|6),  "is": "sync::msg::VERSION_MIN" },
                 { "at": (u64|11), "is": "sync::msg::KIND_SEND" },
                 { "at": (u64|19), "is": "segment::KIND_BARE" },
                 { "at": (u64|75), "is": "op::CODE_MARK" }
+            ]
+        },
+        {
+            "name":     "the_part_bytes_are_frozen",
+            "file":     "src/sync/msg.rs",
+            "magic":    "sync::msg::MAGIC",
+            "holds":    "the first of the two pieces a small bare entry is cut into. What it freezes beyond the framing is that the payload is a PREFIX OF THE ENTRY'S OWN BYTES and not a re-encoding of it, which is the whole of why a signature survives being cut up: the bytes put back together are the bytes that were signed",
+            "pins": [
+                { "at": (u64|6),  "is": "sync::msg::VERSION" },
+                { "at": (u64|11), "is": "sync::msg::KIND_PART" },
+                { "at": (u64|67), "is": "segment::KIND_BARE" }
             ]
         }
     ],
@@ -398,6 +433,46 @@
     "open": [],
 
     "settled": [
+        {
+            "question": "how an operation larger than the carrier's request limit crosses at all",
+            "answer":   "its ENCODED BYTES are cut into pieces and put back together at the far end, as sync::msg::KIND_PART. Three alternatives were refused on their merits. Raising the server's limit fixes one operation and leaves the next, and the owner refused it for exactly that reason. Splitting the OPERATION -- one large Splice becoming several -- changes what was signed and cannot touch an operation already in a log. Compressing it moves the threshold rather than removing it, and segment::KIND_PACKED already does that where it belongs. Cutting the bytes leaves the operation exactly as it was, which is the only one of the four that keeps the per-operation signature intact",
+            "answered": "12026-08-22",
+            "note":     "relay_transport.md",
+            "names":    ["sync::msg::KIND_PART"],
+            "refused":  ["KIND_CHUNK", "KIND_FRAGMENT", "KIND_SLICE", "KIND_PIECE"]
+        },
+        {
+            "question": "which axis a piece sits on: a message kind, or an entry kind on the container axis beside segment::KIND_PACKED",
+            "answer":   "a MESSAGE kind, and the message version moved for it. The KIND_PACKED precedent does not transfer, and the reason it does not is the reason it was taken: a kind byte was right there because a SEGMENT stamps one version over many records, so a bump would condemn every plain record beside the new one. A message stamps its own version in its own bytes, so a bump condemns nothing it does not have to. Two further reasons. A piece is not a record -- it has no digest, no header of its own and may never reach a segment -- so an entry kind would be a form Store::append had to grow a refusal for, which is a form in the wrong crate. And the refusal lands better: a message kind is refused at the header, before a decode and naming both versions, where an entry kind is refused inside Entry::from_dat, after the handshake has already said the frame was compatible",
+            "answered": "12026-08-22",
+            "note":     "relay_transport.md",
+            "names":    ["sync::msg::KIND_PART", "sync::msg::VERSION"],
+            "refused":  ["KIND_PARTED", "KIND_SPLIT", "KIND_PIECES"]
+        },
+        {
+            "question": "whether sync::msg::VERSION moves, and what an old peer meets when it does",
+            "answer":   "yes, 1 to 2, with sync::msg::VERSION_MIN introduced at 1 and a message stamped with THE VERSION IT NEEDS rather than the version its writer was built at. Every message a version 1 peer could have sent is spelled and stamped exactly as it was, so the_message_bytes_are_frozen does not move a byte and its pin at index 6 moves from VERSION to VERSION_MIN. An old peer meets a version 2 message at the header and refuses by name, saying both versions; sync::msg::highest_kind makes the superset promise true of the bytes and not merely of the intention, so a part stamped as version 1 is refused too",
+            "answered": "12026-08-22",
+            "note":     "relay_transport.md",
+            "names":    ["sync::msg::VERSION", "sync::msg::VERSION_MIN"],
+            "refused":  ["MSG_VERSION", "ORESYN_VERSION", "VERSION_PART"]
+        },
+        {
+            "question": "what a piece says about itself, and what puts a run of them back together",
+            "answer":   "id, seq, total and bytes, and sync::msg::Parts. The identifier is carried in clear beside the pieces and compared against the header inside the reassembled entry, for the reason a veiled entry carries its header twice: a carrier that cut an operation up is a carrier that could have relabelled the pieces, and the record inside is the signed one. Parts holds ONE run and nothing durable: a run begins at piece zero and a piece zero discards whatever the attempt before it left, so a push that died halfway completes on a rerun rather than doubling, and the operation -- never absorbed -- is offered again of its own accord. That is resume-is-rerun unchanged",
+            "answered": "12026-08-22",
+            "note":     "relay_transport.md",
+            "names":    [],
+            "refused":  ["Reassembler", "Assembler", "PartBuffer", "chunk_no", "nparts", "piece_count"]
+        },
+        {
+            "question": "what bounds an operation put back together out of pieces",
+            "answer":   "sync::msg::PART_MAX, sixty-four mebibytes, the same as segment::PACKED_MAX and the relay's frame limit. It is a POLICY ceiling and not a guard against an allocation a peer could ask for: a declared piece count is never sized from, and the bytes counted are the bytes that arrived, so a peer wanting to make a carrier hold a gigabyte has to send one. The number is the largest single operation whose arrival costs no more than opening the repository it belongs to already costs, an operation of n bytes being held about three times over while it is taken in",
+            "answered": "12026-08-22",
+            "note":     "relay_transport.md",
+            "names":    ["sync::msg::PART_MAX"],
+            "refused":  ["PART_LIMIT", "MAX_PART", "REASSEMBLY_MAX"]
+        },
         {
             "question": "the spelling of the flag that says a segment is compressed",
             "answer":   "segment::KIND_PACKED, byte 4. It says a run was PACKED rather than naming the algorithm, because the algorithm is revisable by a repack and a name like DEFLATED would not be",
