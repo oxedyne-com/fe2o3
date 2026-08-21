@@ -55,3 +55,11 @@ fe2o3_text/tests/unicode_data/BidiCharacterTest.txt
 # The Ore replica. Its store, its bookkeeping and the git mirror it writes all
 # live here, and none of it belongs in git.
 /.ore/
+
+# Ore reads only the root ignore file, so the rules a nested .gitignore holds
+# are repeated here. Unanchored and directory-only, `target/` also catches a
+# build directory under a subcrate, which `/target/` above would let through
+# into a log that cannot forget it.
+target/
+fe2o3_namex/namex_echo.jdat
+fe2o3_namex/namex_echo.json
