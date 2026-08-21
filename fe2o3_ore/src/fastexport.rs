@@ -222,6 +222,95 @@ impl Person {
 }
 
 
+/// Splits git's `<seconds> <offset>` off the end of an identity line.
+///
+/// The line is git's own -- `Jason Hoogland <hoogland@gmail.com> 1735089438 +0800`
+/// -- and this is the one place that decides where the name ends and the moment
+/// begins. It is here rather than in each reader because the readers cannot be
+/// allowed to disagree: [`crate::op::AUTHOR_TRAILER`] carries such a line inside a
+/// mark, a mirror reads it to author a commit under the name it arrived with, and
+/// a forge reads it to show a person that name. Two implementations agreeing
+/// because they were written to agree is the arrangement this project has paid for
+/// before.
+///
+/// # All of it or none of it
+///
+/// A tail that is not a moment leaves the whole line as the identity, and this is
+/// the case worth stating: `J H <j@h.test>` splits on spaces perfectly well and
+/// would come back as `J` under a rule that only counted fields. So the tail is
+/// handed to [`parse_when`], the one reader of git's raw date format here, and its
+/// refusal is the answer -- an error is what "there is no moment on the end of
+/// this" looks like, rather than something being wrong.
+///
+/// A negative second is a commit dated before 1970, which git permits and which an
+/// import writes back as it read it.
+///
+/// ```
+/// use oxedyne_fe2o3_ore::fastexport::split_identity_line;
+///
+/// let (who, when) = match split_identity_line(
+///     "Jason Hoogland <hoogland@gmail.com> 1735089438 +0800")
+/// {
+///     Some(split)	=> split,
+///     None		=> panic!("a whole identity line splits"),
+/// };
+/// assert_eq!(who, "Jason Hoogland <hoogland@gmail.com>");
+/// assert_eq!(when.secs, 1735089438);
+/// assert_eq!(format!("{}", when.tz), "+0800");
+///
+/// // A tail that is not a moment, however much it looks like one. Losing
+/// // somebody over a malformed offset would defeat the point of carrying the
+/// // name at all, so all of the line is the person.
+/// for line in [
+///     "J H <j@h.test>",
+///     "J H <j@h.test> 1735089438 tomorrow",
+///     "J H <j@h.test> whenever +0800",
+///     "J H <j@h.test> +0800",
+///     "J H <j@h.test> 1735089438 +08:00",
+///     "replica 4256968235 <4256968235@replica.invalid>",
+/// ] {
+///     assert!(split_identity_line(line).is_none(), "{:?} ends in no moment", line);
+/// }
+///
+/// // A commit dated before 1970, which git writes with a negative second, in a
+/// // zone that is not a whole hour.
+/// let (who, when) = match split_identity_line("J H <j@h.test> -14182940 -0330") {
+///     Some(split)	=> split,
+///     None		=> panic!("that is a moment"),
+/// };
+/// assert_eq!(who, "J H <j@h.test>");
+/// assert_eq!(when.secs, -14182940);
+/// assert_eq!(format!("{}", when.tz), "-0330");
+/// ```
+pub fn split_identity_line(line: &str) -> Option<(&str, When)> {
+	let offset = match line.rfind(' ') {
+		Some(at)	=> at,
+		None		=> return None,
+	};
+	let secs = match line[..offset].rfind(' ') {
+		Some(at)	=> at,
+		None		=> return None,
+	};
+	match parse_when(line[secs + 1..].as_bytes(), "identity") {
+		Ok(when)	=> Some((&line[..secs], when)),
+		Err(_)		=> None,
+	}
+}
+
+/// Returns the identity an identity line names, which is all of it where the tail
+/// is not a moment.
+///
+/// What a reader showing a person a name wants: the moment is bookkeeping, and a
+/// page printing the value whole prints a timestamp in the middle of somebody's
+/// name.
+pub fn identity_in(line: &str) -> &str {
+	match split_identity_line(line) {
+		Some((identity, _))	=> identity,
+		None				=> line,
+	}
+}
+
+
 /// A commit signature carried verbatim through the stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GpgSig {

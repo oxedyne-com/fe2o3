@@ -182,9 +182,14 @@ pub fn is_auto_mark(name: &str) -> bool {
 ///
 /// **A reader showing this to a person shows the name, not the line.** The moment
 /// is bookkeeping, and a page that prints the value whole prints a timestamp in the
-/// middle of an author's name. Neither function below looks at the shape: the value
-/// is opaque bytes to both, so a caller that wants the name splits the last two
-/// space-separated fields off itself.
+/// middle of an author's name. [`crate::fastexport::identity_in`] is that name and
+/// [`crate::fastexport::split_identity_line`] is both halves; the two functions
+/// below take the value as opaque bytes and neither looks at its shape, so the
+/// split lives beside [`crate::fastexport::When`], whose format it is.
+///
+/// **A reader does not write its own split.** Where a name ends and a moment begins
+/// is one rule with three readers, and the day two of them decide it differently is
+/// the day this constant was moved here to prevent.
 pub const AUTHOR_TRAILER: &str = "Ore-Author: ";
 
 /// Adds the identity line a commit was authored under to the body its mark will
