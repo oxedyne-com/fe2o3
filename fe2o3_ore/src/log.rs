@@ -318,9 +318,7 @@ impl<'a> Causality<'a> {
 
 	/// Is ancestry answered from the version vector index rather than by walking?
 	///
-	/// The index is built where the graph admits it and refused where it does
-	/// not, so this reports which of the two [`Causality::reaches`] is using. The
-	/// answers are the same either way; only the cost differs.
+	/// The answers are the same either way, and only the cost differs.
 	pub fn is_indexed(&self) -> bool {
 		self.vectors.is_some()
 	}
@@ -756,20 +754,10 @@ mod tests {
 	/// bounded walk, the unbounded one -- the answer is the same, over every pair
 	/// of a few hundred randomly shaped histories.
 	///
-	/// The shapes are the point, and two thirds of them are shapes the tool
-	/// cannot mint. A minted history names a replica's own previous operation, so
-	/// no replica ever forks against itself and the index needs no cut. A graded
-	/// history -- every parent below its child in counter -- takes arbitrary
-	/// earlier parents, so it grades but forks constantly, and the index has to
-	/// cut it into runs to stay exact. An ungraded one is what [`OpLog::append`]
-	/// nevertheless accepts, since it requires only that a parent be present and
-	/// that a replica's own counters rise; on those both the index and the bound
-	/// must switch themselves off, and the only way to know they do is to build
-	/// them and ask.
-	///
-	/// All three exercise long chains, wide merges, several replicas authoring at
-	/// once, and operations sharing a counter because two replicas minted one
-	/// concurrently.
+	/// Three shape families, two of them shapes the tool cannot mint: minted, so
+	/// nothing forks and no cut is needed; graded but forking, so the index must
+	/// cut to stay exact; and ungraded, which [`OpLog::append`] still accepts and
+	/// on which both the index and the bound must switch themselves off.
 	#[test]
 	fn a_bounded_ancestry_walk_answers_exactly_as_an_exhaustive_one()
 		-> Outcome<()>
@@ -1001,12 +989,10 @@ mod tests {
 	/// A counter no replica ever spent is not reached, though the vector for its
 	/// replica stands above it.
 	///
-	/// Minting is against the whole log, so a replica's own counters skip
-	/// whenever another writes in between: two replicas taking turns leaves one
-	/// with the odd counters and the other with the even. The index reads only
-	/// the highest counter a replica reached, which stands above the counters
-	/// nobody minted as much as above the ones somebody did, so an identifier the
-	/// graph does not hold has to be refused by name rather than by arithmetic.
+	/// Minting is against the whole log, so a replica's counters skip whenever
+	/// another writes in between, and the index reads only the highest one
+	/// reached. An identifier the graph does not hold therefore has to be refused
+	/// by name rather than by arithmetic.
 	#[test]
 	fn a_counter_nobody_spent_is_not_reached()
 		-> Outcome<()>
