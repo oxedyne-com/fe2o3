@@ -40,6 +40,7 @@ struct Registry {
 	goldens:	Vec<Dat>,
 	open:		Vec<Dat>,
 	removed:	Vec<Dat>,
+	settled:	Vec<Dat>,
 	versions:	Vec<Dat>,
 }
 
@@ -92,6 +93,16 @@ struct Removed {
 }
 
 #[derive(Clone, Debug, Default, FromDatMap)]
+struct Settled {
+	answer:		String,
+	answered:	String,
+	names:		Vec<String>,
+	note:		String,
+	question:	String,
+	refused:	Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, FromDatMap)]
 struct Open {
 	asked:		String,
 	guard:		Vec<String>,
@@ -103,7 +114,7 @@ struct Open {
 // The sections the registry is expected to carry. An unknown key would otherwise
 // be read past in silence, so a section renamed by a typo would take its whole
 // contents out of the checking with nothing to show for it.
-const SECTIONS: usize = 7;
+const SECTIONS: usize = 8;
 
 // The axes a name may sit on. Which axis a name belongs to decides whether a
 // version moves for it, so a new one is a design decision and belongs in a
@@ -125,6 +136,8 @@ fn compiled(name: &str) -> Option<Dat> {
 		"segment::KIND_BARE"		=> Dat::U8(segment::KIND_BARE),
 		"segment::KIND_SEALED"		=> Dat::U8(segment::KIND_SEALED),
 		"segment::KIND_VEILED"		=> Dat::U8(segment::KIND_VEILED),
+		"segment::KIND_PACKED"		=> Dat::U8(segment::KIND_PACKED),
+		"segment::PACKED_MAX"		=> Dat::U64(segment::PACKED_MAX as u64),
 		"op::CODE_FILE_CREATE"		=> Dat::U8(op::CODE_FILE_CREATE),
 		"op::CODE_FILE_DELETE"		=> Dat::U8(op::CODE_FILE_DELETE),
 		"op::CODE_FILE_RENAME"		=> Dat::U8(op::CODE_FILE_RENAME),
@@ -673,6 +686,66 @@ fn no_open_name_has_been_invented() -> Outcome<()> {
 						invented that the reasoning in {} says cannot be guessed: {}.",
 						o.question, o.asked, where_, i + 1, name, o.note, o.why;
 						Mismatch));
+				}
+			}
+		}
+	}
+	Ok(())
+}
+
+/// A question the owner has answered still refuses what the answer ruled out.
+///
+/// The inversion the `removed` section makes, made again. While a question is
+/// open every candidate spelling is guarded so that nobody quietly picks one;
+/// once it is answered, the spellings the answer did NOT pick have to stay
+/// picked-against, or the second lane to arrive invents the alternative that was
+/// considered and rejected and nothing says it was.
+///
+/// The answer itself is checked too, where it names a constant: a settled row
+/// pointing at a name the registry does not carry is a decision recorded and
+/// never built.
+#[test]
+fn every_settled_question_still_refuses_what_it_ruled_out() -> Outcome<()> {
+	let reg = res!(registry());
+	let known: BTreeSet<String> = res!(constants()).into_iter().map(|c| c.name).collect();
+	let settled: Vec<Settled> = res!(rows(&reg.settled, "settled"));
+	if settled.is_empty() {
+		return Err(err!(
+			"The registry carries no settled questions. Every one that has been \
+			answered belongs here, or the reasoning behind it lives only in whatever \
+			document nobody opens."; Missing));
+	}
+	let mut haystack: Vec<(String, String)> = Vec::new();
+	for path in res!(sources()) {
+		haystack.push((fmt!("{}", path.display()), res!(slurp(&path))));
+	}
+	let manifest = root().join("Cargo.toml");
+	haystack.push((fmt!("{}", manifest.display()), res!(slurp(&manifest))));
+
+	for row in settled {
+		for name in &row.names {
+			if !known.contains(name) {
+				return Err(err!(
+					"The registry says '{}' was answered on {} by {}, and the constants \
+					section does not carry that name. A decision recorded and never \
+					built is worse than one still open, because nothing looks for it.",
+					row.question, row.answered, name; Missing));
+			}
+		}
+		for name in &row.refused {
+			for (where_, src) in &haystack {
+				for (i, line) in src.lines().enumerate() {
+					if !introduces(line, name) {
+						continue;
+					}
+					return Err(err!(
+						"'{}' was answered on {} -- {} -- and {}:{} introduces '{}', \
+						which the answer ruled out. Either the answer has changed and \
+						the registry was not told, or the alternative that was \
+						considered and rejected has been built beside the one that was \
+						chosen. The reasoning is in {}.",
+						row.question, row.answered, row.answer, where_, i + 1, name,
+						row.note; Mismatch));
 				}
 			}
 		}

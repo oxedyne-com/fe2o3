@@ -15,3 +15,7 @@ oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_data 		   		= { path = "../fe2o3_data", default-features = false }
 oxedyne_fe2o3_iop_crypto 		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
+# Deflate, for the packed record kind. Default features resolve to miniz_oxide,
+# which is pure Rust and builds for wasm32 like the rest of this crate; the C
+# backend is not asked for and must not be.
+flate2 							= "1.0"

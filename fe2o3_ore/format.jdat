@@ -69,6 +69,22 @@
             "holds":    "a record whose header is in clear and whose body is ciphertext; it cost no version bump, which is the precedent every later container change is read against"
         },
         {
+            "name":     "segment::KIND_PACKED",
+            "file":     "src/segment.rs",
+            "line":     (u64|184),
+            "value":    (u8|4),
+            "axis":     "container",
+            "holds":    "a record carrying a run of records deflated together; like the veil it cost no version bump, and what is inside it is the plain framing unchanged, so a packed segment yields the same records with the same digests as the plain one it was made from"
+        },
+        {
+            "name":     "segment::PACKED_MAX",
+            "file":     "src/segment.rs",
+            "line":     (u64|192),
+            "value":    (u64|67108864),
+            "axis":     "container",
+            "holds":    "the most a packed run may inflate to; a compressed frame is an instruction to allocate and it arrives from wherever the segment did, so one that reaches this is refused rather than obeyed"
+        },
+        {
             "name":     "op::CODE_FILE_CREATE",
             "file":     "src/op.rs",
             "line":     (u64|110),
@@ -379,41 +395,48 @@
         }
     ],
 
-    "open": [
+    "open": [],
+
+    "settled": [
         {
             "question": "the spelling of the flag that says a segment is compressed",
-            "why":      "every reader of a segment has to agree on it, and a reader that brings the wrong spelling reads nonsense rather than an error",
-            "asked":    "12026-08-21",
+            "answer":   "segment::KIND_PACKED, byte 4. It says a run was PACKED rather than naming the algorithm, because the algorithm is revisable by a repack and a name like DEFLATED would not be",
+            "answered": "12026-08-21",
             "note":     "segment_compression.md",
-            "guard":    ["KIND_COMPRESSED", "COMPRESSED", "COMPRESSION", "compressed", "compression"]
+            "names":    ["segment::KIND_PACKED"],
+            "refused":  ["KIND_COMPRESSED", "COMPRESSED", "COMPRESSION", "compressed", "compression"]
         },
         {
             "question": "which axis the flag sits on: a header field, a kind byte, or the version",
-            "why":      "it decides whether segment::VERSION moves and whether the two segment golden tests move with it. The veiling precedent says a container change need cost neither",
-            "asked":    "12026-08-21",
+            "answer":   "a kind byte, on the container axis, exactly as the veil was. The KIND_VEILED doc argues it in its own words -- the kind byte says so in the record where it is rather than in a header that would condemn every plain record beside it -- and a header field could not have been free anyway, since entries begin immediately after the header and a new field would make an old reader parse it as the start of an entry",
+            "answered": "12026-08-21",
             "note":     "segment_compression.md",
-            "guard":    ["COMPRESS_AXIS"]
+            "names":    ["segment::KIND_PACKED"],
+            "refused":  ["COMPRESS_AXIS"]
         },
         {
             "question": "which compression algorithm, named on the wire or implied by the version",
-            "why":      "a reader that brings the wrong one gets nonsense, not an error",
-            "asked":    "12026-08-21",
+            "answer":   "deflate, through flate2, implied by the kind and named nowhere on the wire. It resolves to miniz_oxide, which is pure Rust and builds for wasm32; zstd binds C. At the megabyte frames this format uses, zstd's advantage is 2.9 points rather than the 4.5 it shows over a whole segment, because its long range matching is most of what a frame that size neutralises",
+            "answered": "12026-08-21",
             "note":     "segment_compression.md",
-            "guard":    ["ALGO_ZSTD", "ALGO_DEFLATE", "COMPRESS_ALGO", "zstd", "flate2"]
+            "names":    [],
+            "refused":  ["ALGO_ZSTD", "ALGO_DEFLATE", "COMPRESS_ALGO", "zstd"]
         },
         {
             "question": "whether the compression level is recorded in the segment",
-            "why":      "it changes the bytes and nothing else, and recording it invites a test to freeze it, which would freeze a dependency version and call it a format",
-            "asked":    "12026-08-21",
+            "answer":   "no. Deflate carries what it needs to inflate, so a reader never asks; recording it would invite a test to freeze it, and freezing it would freeze a dependency version and call it a format. For the same reason there is no golden byte test over a packed payload: the framing around a run is asserted structurally by the_packed_framing_is_fixed, and what a compressor made of the records is not a fact about Ore",
+            "answered": "12026-08-21",
             "note":     "segment_compression.md",
-            "guard":    ["COMPRESS_LEVEL", "LEVEL_DEFAULT"]
+            "names":    [],
+            "refused":  ["COMPRESS_LEVEL", "LEVEL_DEFAULT"]
         },
         {
             "question": "whether segment::VERSION rises for compression",
-            "why":      "the rule the vocabulary grows by is about operation codes, and compression adds no operation, so the rule does not decide this on its own",
-            "asked":    "12026-08-21",
+            "answer":   "no, it stays at 4. The rule the vocabulary grows by is about operation codes and compression adds none, so a packed segment declares the version its operations need and the two segment golden tests do not move a byte",
+            "answered": "12026-08-21",
             "note":     "segment_compression.md",
-            "guard":    []
+            "names":    ["segment::VERSION"],
+            "refused":  []
         }
     ]
 }

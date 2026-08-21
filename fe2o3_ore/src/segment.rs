@@ -160,6 +160,36 @@ pub const KIND_SEALED:	u8 = 2;
 /// the form, and the kind byte says so in the record where it is rather than in a
 /// header that would condemn every plain record beside it.
 pub const KIND_VEILED:	u8 = 3;
+/// Kind byte of a record carrying a RUN of records, deflated together.
+///
+/// The same axis as [`KIND_VEILED`] and for the same reason: it says what was
+/// done to the records in the record where they are, rather than in a header
+/// that would condemn every plain record beside it. [`VERSION`] does not move
+/// for it, a segment may hold packed and plain records side by side, and a
+/// reader that meets one and cannot inflate says so by name.
+///
+/// **A run and not a record.** Compression saves what is redundant *between*
+/// records, and a record is about 1.4 kB, which is too small a window to see any
+/// of it: measured on a 55 MB segment, deflating each record on its own reached
+/// 58.8% where deflating runs of a megabyte reached 38.4%. So one packed record
+/// carries a run, each run inflatable on its own, and reaching a record costs
+/// its own megabyte rather than the whole segment.
+///
+/// **What is inside is the plain framing, unchanged.** The inflated bytes are
+/// exactly the bytes those records would have occupied unpacked, digests
+/// included, so a packed segment and a plain one carrying the same history yield
+/// the same records with the same digests in the same order. That is what keeps
+/// a fold over those digests -- the thing a repack compares two stores by -- the
+/// same on both sides, and it is why packing is revocable.
+pub const KIND_PACKED:	u8 = 4;
+
+/// Most bytes a packed run may inflate to.
+///
+/// A compressed frame is an instruction to allocate, and the instruction arrives
+/// from wherever the segment did. The declared run is a megabyte and this is
+/// sixty-four, so nothing a writer here produces comes near it and a frame that
+/// does is refused by name rather than obeyed.
+pub const PACKED_MAX: usize = 64 << 20;
 
 // How much consumed prefix a reader tolerates before it moves the remainder to
 // the front of its buffer.
@@ -632,6 +662,54 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 	pub fn push(&mut self, entry: &Entry)
 		-> Outcome<()>
 	{
+		res!(self.admits(entry));
+		let mut framed = Vec::new();
+		res!(self.frame_into(entry, &mut framed));
+		self.buf.extend_from_slice(&framed);
+		self.count += 1;
+		Ok(())
+	}
+
+	/// Writes a run of entries as one packed record.
+	///
+	/// What goes under the compressor is the framing those entries would have had
+	/// written plainly -- kind, length, body, digest, one after another -- so
+	/// inflating yields exactly the bytes a plain segment holds and the records
+	/// come back with the digests they always had. Nothing about an entry is
+	/// re-encoded on the way in or out, so a signature made before packing is the
+	/// signature checked after it.
+	///
+	/// The outer record carries a digest of the compressed bytes, which is what
+	/// catches damage before anything is inflated.
+	pub fn push_packed(&mut self, entries: &[Entry])
+		-> Outcome<()>
+	{
+		if entries.is_empty() {
+			return Err(err!(
+				"A packed record was asked for over no entries. An empty run would be \
+				a record carrying nothing, which a reader cannot tell from a damaged \
+				one."; Invalid, Input, Missing));
+		}
+		let mut plain = Vec::new();
+		for entry in entries {
+			res!(self.admits(entry));
+			res!(self.frame_into(entry, &mut plain));
+		}
+		let body = res!(deflate(&plain));
+		let digest = self.hasher.clone().hash(&[&[KIND_PACKED], &body], self.salt).as_vec();
+		self.buf.push(KIND_PACKED);
+		varint_encode(body.len() as u64, &mut self.buf);
+		self.buf.extend_from_slice(&body);
+		varint_encode(digest.len() as u64, &mut self.buf);
+		self.buf.extend_from_slice(&digest);
+		self.count += entries.len();
+		Ok(())
+	}
+
+	/// Refuses an entry whose operation the declared version has no code for.
+	fn admits(&self, entry: &Entry)
+		-> Outcome<()>
+	{
 		if self.version < VERSION && !entry.is_veiled() {
 			let op = res!(entry.peek()).op;
 			let top = highest_code(self.version);
@@ -644,15 +722,22 @@ impl<H: Hasher, const S: usize> Writer<H, S> {
 				Invalid, Input, Version, Mismatch));
 			}
 		}
+		Ok(())
+	}
+
+	/// Appends one record's framing, which is the same whether it is going
+	/// straight into the segment or into a run about to be packed.
+	fn frame_into(&self, entry: &Entry, out: &mut Vec<u8>)
+		-> Outcome<()>
+	{
 		let kind = entry.kind();
 		let body = res!(entry.body());
 		let digest = self.hasher.clone().hash(&[&[kind], &body], self.salt).as_vec();
-		self.buf.push(kind);
-		varint_encode(body.len() as u64, &mut self.buf);
-		self.buf.extend_from_slice(&body);
-		varint_encode(digest.len() as u64, &mut self.buf);
-		self.buf.extend_from_slice(&digest);
-		self.count += 1;
+		out.push(kind);
+		varint_encode(body.len() as u64, out);
+		out.extend_from_slice(&body);
+		varint_encode(digest.len() as u64, out);
+		out.extend_from_slice(&digest);
 		Ok(())
 	}
 
@@ -702,6 +787,12 @@ pub struct Reader<H: Hasher, const S: usize> {
 	head:	Option<Head>,		// the header, once it has been read
 	count:	usize,				// records handed over
 	tally:	Option<Vec<u8>>,	// digests of records handed over since the last take
+	// A packed record inflated, and how much of it has been handed over. A run is
+	// drained before another byte of the segment is looked at, so the records
+	// come out in the order they went in and a caller cannot tell a packed
+	// segment from a plain one.
+	run:	Vec<u8>,
+	ran:	usize,
 }
 
 impl<H: Hasher, const S: usize> Reader<H, S> {
@@ -716,6 +807,8 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 			head:	None,
 			count:	0,
 			tally:	None,
+			run:	Vec::new(),
+			ran:	0,
 		}
 	}
 
@@ -772,7 +865,7 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 
 	/// Has the segment ended with every byte of it turned into a record?
 	pub fn is_exhausted(&self) -> bool {
-		self.eof && self.pos >= self.buf.len()
+		self.eof && self.pos >= self.buf.len() && self.ran >= self.run.len()
 	}
 
 	/// `None` means that the next record is not yet complete, or, once
@@ -800,11 +893,65 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 				},
 			}
 		}
+		// A run already inflated is drained first, so that the records of a packed
+		// segment arrive in the order they were packed and the caller cannot tell
+		// which kind of segment it is reading.
+		if self.ran < self.run.len() {
+			let (entry, used, digest) = {
+				let taken = res!(framed(
+					&self.hasher, self.salt, &self.run[self.ran..], self.count));
+				match taken {
+					Some(f) => {
+						if f.kind == KIND_PACKED {
+							return Err(err!(
+								"Record {} of a packed run is itself packed. A run holds \
+								the records it packed and nothing else; a run inside a run \
+								would hide the framing a reader places records by.",
+								self.count;
+							Decode, Input, Invalid));
+						}
+						(res!(Entry::from_body(f.kind, f.body)), f.used, f.digest)
+					},
+					None => return Err(err!(
+						"A packed run ends part way through record {}, with {} byte{} \
+						left over. The run inflated and what came out is not the framing \
+						that went in.", self.count, self.run.len() - self.ran,
+						if self.run.len() - self.ran == 1 { "" } else { "s" };
+					Decode, Input, Missing)),
+				}
+			};
+			self.ran += used;
+			self.count += 1;
+			if let Some(tally) = &mut self.tally {
+				tally.extend_from_slice(&digest);
+			}
+			if self.ran >= self.run.len() {
+				self.run = Vec::new();
+				self.ran = 0;
+			}
+			return Ok(Some(entry));
+		}
 		if self.pos >= self.buf.len() {
 			return Ok(None);
 		}
-		match res!(self.read_entry()) {
-			Some((entry, used, digest)) => {
+		// The outer digest of a packed record covers the compressed bytes and is
+		// checked before anything is inflated, which is what stops a damaged frame
+		// becoming an instruction to allocate. It is NOT tallied: what a fold over
+		// a log names is the records, and a packed segment holds the same records
+		// as the plain one it was made from.
+		let made = {
+			let taken = res!(framed(
+				&self.hasher, self.salt, &self.buf[self.pos..], self.count));
+			match taken {
+				Some(f) if f.kind == KIND_PACKED	=> Some((Made::Run(res!(
+					inflate(f.body, self.count))), f.used)),
+				Some(f)								=> Some((Made::One(res!(
+					Entry::from_body(f.kind, f.body)), f.digest), f.used)),
+				None								=> None,
+			}
+		};
+		match made {
+			Some((Made::One(entry, digest), used)) => {
 				self.pos += used;
 				self.count += 1;
 				if let Some(tally) = &mut self.tally {
@@ -812,6 +959,13 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 				}
 				self.compact();
 				Ok(Some(entry))
+			},
+			Some((Made::Run(run), used)) => {
+				self.pos += used;
+				self.run = run;
+				self.ran = 0;
+				self.compact();
+				self.next_entry()
 			},
 			None => {
 				if self.eof {
@@ -827,71 +981,6 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		}
 	}
 
-	/// `None` unless a whole record is there. The third element is the digest
-	/// just computed over the record, which is handed back rather than dropped
-	/// because [`Reader::tallying`] has a caller that wants it and recomputing it
-	/// would mean hashing the segment again.
-	fn read_entry(&self)
-		-> Outcome<Option<(Entry, usize, Vec<u8>)>>
-	{
-		let buf = &self.buf[self.pos..];
-		let kind = buf[0];
-		let mut at = 1usize;
-		let (len, used) = match res!(try_varint(&buf[at..])) {
-			Some(v)	=> v,
-			None	=> return Ok(None),
-		};
-		at += used;
-		let body_end = match at.checked_add(len as usize) {
-			Some(e) if (len as u64) <= usize::MAX as u64 => e,
-			_ => return Err(err!(
-				"Record {} of the segment declares a body of {} bytes, which no \
-				buffer can hold.", self.count, len;
-			Decode, Input, Excessive)),
-		};
-		if buf.len() < body_end {
-			return Ok(None);
-		}
-		let body = &buf[at..body_end];
-		at = body_end;
-		let (dlen, used) = match res!(try_varint(&buf[at..])) {
-			Some(v)	=> v,
-			None	=> return Ok(None),
-		};
-		at += used;
-		let digest_end = match at.checked_add(dlen as usize) {
-			Some(e) if (dlen as u64) <= usize::MAX as u64 => e,
-			_ => return Err(err!(
-				"Record {} of the segment declares a digest of {} bytes, which no \
-				buffer can hold.", self.count, dlen;
-			Decode, Input, Excessive)),
-		};
-		if buf.len() < digest_end {
-			return Ok(None);
-		}
-		let digest = &buf[at..digest_end];
-		let want = self.hasher.clone().hash(&[&[kind], body], self.salt).as_vec();
-		if want != digest {
-			// Naming the operation is worth a decode attempt, since a caller with a
-			// damaged segment wants to know which edit is at risk. Where the body is
-			// too far gone to decode, the ordinal is all there is to say.
-			let named = match Entry::from_body(kind, body) {
-				Ok(entry) => match entry.id() {
-					Ok(id)	=> fmt!("the operation {}", id),
-					Err(_)	=> fmt!("an unreadable operation"),
-				},
-				Err(_) => fmt!("an unreadable operation"),
-			};
-			return Err(err!(
-				"Record {} of the segment, carrying {}, fails its integrity check: \
-				{} bytes of body hash to {:02x?}, and {:02x?} was recorded.",
-				self.count, named, body.len(), want, digest;
-			Decode, Input, Checksum, Mismatch));
-		}
-		let entry = res!(Entry::from_body(kind, body));
-		Ok(Some((entry, digest_end, want)))
-	}
-
 	/// Drops the consumed prefix of the buffer once it is worth the move.
 	fn compact(&mut self) {
 		if self.pos == self.buf.len() {
@@ -904,6 +993,162 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 	}
 }
 
+
+/// What one step of [`Reader::next_entry`] produced from the segment: a record,
+/// or a run to be handed over a record at a time.
+enum Made {
+	One(Entry, Vec<u8>),	// the entry, and the digest it was checked against
+	Run(Vec<u8>),			// a packed record inflated, still framed
+}
+
+/// One framed record, checked against the digest written beside it.
+///
+/// The kind is handed back rather than interpreted, because what is done next
+/// depends on it: a bare, sealed or veiled record becomes an [`Entry`], and a
+/// packed one becomes a run of them.
+struct Framed<'a> {
+	kind:	u8,
+	body:	&'a [u8],
+	used:	usize,		// bytes of `buf` the whole record occupied
+	digest:	Vec<u8>,	// what it was checked against, which is what a fold wants
+}
+
+/// Reads one framed record from the front of `buf`, whether that is a segment
+/// being fed or a run just inflated.
+///
+/// `None` means the bytes so far are a prefix of a record and more are needed;
+/// the caller decides whether more can arrive. `ordinal` is only for the
+/// messages, so that a damaged record names its own position.
+fn framed<'a, H: Hasher, const S: usize>(
+	hasher:		&H,
+	salt:		[u8; S],
+	buf:		&'a [u8],
+	ordinal:	usize,
+)
+	-> Outcome<Option<Framed<'a>>>
+{
+	if buf.is_empty() {
+		return Ok(None);
+	}
+	let kind = buf[0];
+	let mut at = 1usize;
+	let (len, used) = match res!(try_varint(&buf[at..])) {
+		Some(v)	=> v,
+		None	=> return Ok(None),
+	};
+	at += used;
+	let body_end = match at.checked_add(len as usize) {
+		Some(e) if (len as u64) <= usize::MAX as u64 => e,
+		_ => return Err(err!(
+			"Record {} of the segment declares a body of {} bytes, which no buffer \
+			can hold.", ordinal, len;
+		Decode, Input, Excessive)),
+	};
+	if buf.len() < body_end {
+		return Ok(None);
+	}
+	let body = &buf[at..body_end];
+	at = body_end;
+	let (dlen, used) = match res!(try_varint(&buf[at..])) {
+		Some(v)	=> v,
+		None	=> return Ok(None),
+	};
+	at += used;
+	let digest_end = match at.checked_add(dlen as usize) {
+		Some(e) if (dlen as u64) <= usize::MAX as u64 => e,
+		_ => return Err(err!(
+			"Record {} of the segment declares a digest of {} bytes, which no buffer \
+			can hold.", ordinal, dlen;
+		Decode, Input, Excessive)),
+	};
+	if buf.len() < digest_end {
+		return Ok(None);
+	}
+	let digest = &buf[at..digest_end];
+	let want = hasher.clone().hash(&[&[kind], body], salt).as_vec();
+	if want != digest {
+		// Naming the operation is worth a decode attempt, since a caller with a
+		// damaged segment wants to know which edit is at risk. Where the body is
+		// too far gone to decode, the ordinal is all there is to say.
+		let named = match kind {
+			KIND_PACKED => fmt!("a run of packed operations"),
+			_ => match Entry::from_body(kind, body) {
+				Ok(entry) => match entry.id() {
+					Ok(id)	=> fmt!("the operation {}", id),
+					Err(_)	=> fmt!("an unreadable operation"),
+				},
+				Err(_) => fmt!("an unreadable operation"),
+			},
+		};
+		return Err(err!(
+			"Record {} of the segment, carrying {}, fails its integrity check: {} \
+			bytes of body hash to {:02x?}, and {:02x?} was recorded.",
+			ordinal, named, body.len(), want, digest;
+		Decode, Input, Checksum, Mismatch));
+	}
+	Ok(Some(Framed { kind, body, used: digest_end, digest: want }))
+}
+
+/// Compresses a run's plain framing.
+fn deflate(plain: &[u8])
+	-> Outcome<Vec<u8>>
+{
+	let mut out = Vec::new();
+	let mut enc = flate2::write::DeflateEncoder::new(&mut out, flate2::Compression::new(6));
+	match std::io::Write::write_all(&mut enc, plain) {
+		Ok(())	=> (),
+		Err(e)	=> return Err(err!(e,
+			"{} bytes of records could not be compressed.", plain.len();
+		Encode, Data)),
+	}
+	match enc.finish() {
+		Ok(_)	=> (),
+		Err(e)	=> return Err(err!(e,
+			"{} bytes of records could not be compressed.", plain.len();
+		Encode, Data)),
+	}
+	Ok(out)
+}
+
+/// Inflates a packed run, refusing one that would not stop.
+///
+/// A compressed frame is an instruction to allocate and it arrives from wherever
+/// the segment did, so the output is bounded by [`PACKED_MAX`] and a frame that
+/// reaches it is refused rather than obeyed. The digest over the compressed
+/// bytes has already held by the time this is called, so what this guards is a
+/// frame somebody wrote to be obeyed rather than one that was damaged.
+fn inflate(body: &[u8], ordinal: usize)
+	-> Outcome<Vec<u8>>
+{
+	let mut out = Vec::new();
+	// `std::io::Read::take`, not the iterator's: the bound is on bytes read.
+	let mut dec = std::io::Read::take(
+		flate2::read::DeflateDecoder::new(body), (PACKED_MAX as u64) + 1);
+	match std::io::Read::read_to_end(&mut dec, &mut out) {
+		Ok(_)	=> (),
+		Err(e)	=> return Err(err!(e,
+			"The packed run at record {} carries {} bytes that do not inflate. The \
+			digest over them held, so the bytes are the bytes that were written and \
+			what is wrong is what they say.", ordinal, body.len();
+		Decode, Input, Invalid)),
+	}
+	if out.len() > PACKED_MAX {
+		return Err(err!(
+			"The packed run at record {} inflates past {} bytes, which is the most a \
+			run may come to. A run this crate writes is a megabyte, so this is not one \
+			of them, and it is refused rather than allocated for.",
+			ordinal, PACKED_MAX;
+		Decode, Input, Excessive));
+	}
+	if out.is_empty() {
+		return Err(err!(
+			"The packed run at record {} inflates to nothing. A run carries the \
+			records it packed, and an empty one cannot be told from a damaged one.",
+			ordinal;
+		Decode, Input, Missing));
+	}
+	Ok(out)
+}
 
 /// A header's parents, named the way a reader names them.
 fn said_parents(head: &Header) -> String {
@@ -1331,6 +1576,299 @@ mod tests {
 			assert!(plain.take_digests().is_empty(), "and keeps nothing on the way");
 		}
 		assert_eq!(got, entries);
+		Ok(())
+	}
+
+	/// **The invariant packing rests on**: a packed segment yields the same
+	/// records, with the same digests, in the same order, as the plain segment it
+	/// was made from.
+	///
+	/// A fold over those digests is what `ore repack` compares two stores by, so
+	/// if this were not exact a compressed store and an uncompressed one carrying
+	/// one history would disagree about their own shape, and packing would stop
+	/// being revocable. The digests are compared as well as the entries, because
+	/// the entries could agree while the framing they were checked against did
+	/// not.
+	#[test]
+	fn a_packed_segment_yields_what_the_plain_one_yields() -> Outcome<()> {
+		let entries = res!(bare());
+		assert!(entries.len() > 2, "the fixture holds enough records to be a run");
+		let head = Head::new(Some(ReplicaId::new(4)));
+
+		let plain = res!(encode(&head, &entries, Fold, [0u8; 0]));
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push_packed(&entries));
+		let packed = writer.finish();
+		assert_ne!(plain, packed, "the two are not the same bytes");
+
+		let read = |bytes: &[u8]| -> Outcome<(Vec<Entry>, Vec<u8>, usize)> {
+			let mut reader: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+			reader.feed(bytes);
+			reader.end();
+			let mut got = Vec::new();
+			while let Some(entry) = res!(reader.next_entry()) {
+				got.push(entry);
+			}
+			assert!(reader.is_exhausted(), "every byte became a record");
+			let tally = reader.take_digests();
+			Ok((got, tally, reader.count()))
+		};
+		let (plain_entries, plain_tally, plain_count) = res!(read(&plain));
+		let (packed_entries, packed_tally, packed_count) = res!(read(&packed));
+
+		assert_eq!(plain_entries, entries, "the plain segment reads back");
+		assert_eq!(packed_entries, entries, "and so does the packed one");
+		assert_eq!(packed_count, plain_count, "the same number of records");
+		assert_eq!(packed_count, entries.len(), "which is the number that went in");
+		assert_eq!(packed_tally, plain_tally,
+			"and the same digests in the same order, which is what a fold over a log \
+			names and what makes packing revocable");
+		assert!(!packed_tally.is_empty(), "the fixture really tallied something");
+		Ok(())
+	}
+
+	/// A run's own digest is over the compressed bytes and is NOT among the
+	/// digests a reader tallies.
+	///
+	/// Stated separately because it is the part that would be easy to get right
+	/// by accident and wrong on the next change: one packed record yields several
+	/// records, and what a fold wants is the several.
+	#[test]
+	fn the_runs_own_digest_is_not_tallied() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push_packed(&entries));
+		let packed = writer.finish();
+
+		let mut reader: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+		reader.feed(&packed);
+		reader.end();
+		while res!(reader.next_entry()).is_some() {}
+		let tally = reader.take_digests();
+		assert_eq!(tally.len(), entries.len() * 8,
+			"one eight byte digest per RECORD, not one for the run");
+		Ok(())
+	}
+
+	/// The framing around a packed run is fixed, and its payload is not frozen.
+	///
+	/// There is no golden byte array here on purpose. A packed run's payload is
+	/// what a compressor made of the records, so freezing it would freeze a
+	/// dependency version and call it a format: the first `cargo update` that
+	/// moved `miniz_oxide` would redden it, with nothing about Ore having
+	/// changed. What a reader elsewhere must agree about is the framing, and that
+	/// is what is asserted -- the magic, the declared version, the kind byte, and
+	/// that the length and the digest that follow describe what is there.
+	#[test]
+	fn the_packed_framing_is_fixed() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push_packed(&entries));
+		let bytes = writer.finish();
+
+		assert_eq!(&bytes[..MAGIC.len()], &MAGIC[..], "a segment begins with the magic");
+		assert_eq!(bytes[6], VERSION, "the version sits where it always has");
+		assert_eq!(bytes[7], 0, "no replica hint follows");
+		assert_eq!(bytes[8], KIND_PACKED, "and the record says it is a run");
+
+		// The length, the payload and the digest, read the way a reader reads them.
+		let (len, used) = res!(varint_decode(&bytes[9..]));
+		let at = 9 + used;
+		let body = &bytes[at..at + len as usize];
+		let (dlen, used) = res!(varint_decode(&bytes[at + len as usize..]));
+		let dat = at + len as usize + used;
+		assert_eq!(bytes.len(), dat + dlen as usize, "and nothing after the digest");
+		let want = Fold.hash(&[&[KIND_PACKED], body], [0u8; 0]).as_vec();
+		assert_eq!(&bytes[dat..], &want[..],
+			"the digest is over the compressed bytes, which is what catches damage \
+			before anything is inflated");
+		Ok(())
+	}
+
+	/// A run inside a run is refused.
+	#[test]
+	fn a_run_inside_a_run_is_refused() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		// A run of records, packed, and then that whole framing packed again as if
+		// it were a run of its own.
+		let mut inner: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(inner.push_packed(&entries));
+		let once = inner.finish();
+		let framing = &once[Head::new(None).encode().len()..];
+
+		let mut outer: Vec<u8> = Head::new(None).encode();
+		let body = res!(deflate(framing));
+		let digest = Fold.hash(&[&[KIND_PACKED], &body], [0u8; 0]).as_vec();
+		outer.push(KIND_PACKED);
+		varint_encode(body.len() as u64, &mut outer);
+		outer.extend_from_slice(&body);
+		varint_encode(digest.len() as u64, &mut outer);
+		outer.extend_from_slice(&digest);
+
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.feed(&outer);
+		reader.end();
+		let said = match reader.next_entry() {
+			Ok(_)	=> return Err(err!("A run inside a run was read."; Test, Invalid)),
+			Err(e)	=> fmt!("{}", e.plain()),
+		};
+		assert!(said.contains("itself packed"), "and says so: {}", said);
+		Ok(())
+	}
+
+	/// A damaged run is named by its digest, before a byte of it is inflated.
+	#[test]
+	fn a_damaged_run_is_named_and_never_inflated() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push_packed(&entries));
+		let good = writer.finish();
+
+		// Every single-byte change to the compressed payload, which is where damage
+		// lands: each is caught, and none of them reaches the decompressor.
+		let at = 9 + res!(varint_decode(&good[9..])).1;
+		let len = res!(varint_decode(&good[9..])).0 as usize;
+		assert!(len > 4, "there is a payload to damage");
+		for i in [at, at + 1, at + len / 2, at + len - 1] {
+			let mut bad = good.clone();
+			bad[i] ^= 0x01;
+			let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+			reader.feed(&bad);
+			reader.end();
+			let said = match reader.next_entry() {
+				Ok(_)	=> return Err(err!(
+					"A run damaged at byte {} was read.", i; Test, Invalid)),
+				Err(e)	=> fmt!("{}", e.plain()),
+			};
+			assert!(said.contains("fails its integrity check"),
+				"damage at {} is caught by the digest, not by the decompressor: {}",
+				i, said);
+			assert!(said.contains("a run of packed operations"),
+				"and the message says what the record was: {}", said);
+		}
+		Ok(())
+	}
+
+	/// A run that would not stop inflating is refused rather than allocated for.
+	///
+	/// The digest holds, so this is not damage: it is a frame somebody wrote to be
+	/// obeyed. What refuses it is the bound and nothing else, which is why the
+	/// frame is built to be sound in every other respect.
+	#[test]
+	fn a_run_that_would_not_stop_is_refused() -> Outcome<()> {
+		let big = vec![0u8; PACKED_MAX + 1024];
+		let body = res!(deflate(&big));
+		assert!(body.len() < 1 << 20, "the fixture really is a small frame: {}", body.len());
+		let digest = Fold.hash(&[&[KIND_PACKED], &body], [0u8; 0]).as_vec();
+		let mut bytes = Head::new(None).encode();
+		bytes.push(KIND_PACKED);
+		varint_encode(body.len() as u64, &mut bytes);
+		bytes.extend_from_slice(&body);
+		varint_encode(digest.len() as u64, &mut bytes);
+		bytes.extend_from_slice(&digest);
+
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.feed(&bytes);
+		reader.end();
+		let said = match reader.next_entry() {
+			Ok(_)	=> return Err(err!("A run past the bound was inflated."; Test, Invalid)),
+			Err(e)	=> fmt!("{}", e.plain()),
+		};
+		assert!(said.contains("inflates past"), "and says why: {}", said);
+		Ok(())
+	}
+
+	/// Packed and plain records sit side by side in one segment.
+	///
+	/// The kind is per record, so a segment is not one thing or the other. This is
+	/// what lets a repack pack the sealed part of a log and leave the tail alone.
+	#[test]
+	fn a_segment_holds_packed_and_plain_together() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push(&entries[0]));
+		res!(writer.push_packed(&entries[1..]));
+		res!(writer.push(&entries[0]));
+		let bytes = writer.finish();
+
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.feed(&bytes);
+		reader.end();
+		let mut got = Vec::new();
+		while let Some(entry) = res!(reader.next_entry()) {
+			got.push(entry);
+		}
+		let mut want = vec![entries[0].clone()];
+		want.extend_from_slice(&entries[1..]);
+		want.push(entries[0].clone());
+		assert_eq!(got, want, "in the order they were written");
+		assert!(reader.is_exhausted());
+		Ok(())
+	}
+
+	/// A byte at a time reads a packed segment as a mouthful does.
+	#[test]
+	fn a_byte_at_a_time_reads_a_packed_segment_the_same() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(writer.push_packed(&entries));
+		let bytes = writer.finish();
+
+		let mut reader: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+		let mut got: Vec<Entry> = Vec::new();
+		let mut slow = Vec::new();
+		for b in &bytes {
+			reader.feed(&[*b]);
+			while let Some(entry) = res!(reader.next_entry()) {
+				got.push(entry);
+			}
+			slow.extend_from_slice(&reader.take_digests());
+		}
+		reader.end();
+		while let Some(entry) = res!(reader.next_entry()) {
+			got.push(entry);
+		}
+		slow.extend_from_slice(&reader.take_digests());
+		assert_eq!(got, entries, "a run only becomes records once all of it has arrived");
+		assert_eq!(slow.len(), entries.len() * 8);
+		assert!(reader.is_exhausted());
+		Ok(())
+	}
+
+	/// An empty run is refused at both ends.
+	#[test]
+	fn an_empty_run_is_refused() -> Outcome<()> {
+		let head = Head::new(None);
+		let mut writer: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		let said = match writer.push_packed(&[]) {
+			Ok(())	=> return Err(err!("An empty run was written."; Test, Invalid)),
+			Err(e)	=> fmt!("{}", e.plain()),
+		};
+		assert!(said.contains("over no entries"), "and says so: {}", said);
+
+		// And one that inflates to nothing, which is what a reader could meet.
+		let body = res!(deflate(&[]));
+		let digest = Fold.hash(&[&[KIND_PACKED], &body], [0u8; 0]).as_vec();
+		let mut bytes = Head::new(None).encode();
+		bytes.push(KIND_PACKED);
+		varint_encode(body.len() as u64, &mut bytes);
+		bytes.extend_from_slice(&body);
+		varint_encode(digest.len() as u64, &mut bytes);
+		bytes.extend_from_slice(&digest);
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.feed(&bytes);
+		reader.end();
+		let said = match reader.next_entry() {
+			Ok(_)	=> return Err(err!("An empty run was read."; Test, Invalid)),
+			Err(e)	=> fmt!("{}", e.plain()),
+		};
+		assert!(said.contains("inflates to nothing"), "and says so: {}", said);
 		Ok(())
 	}
 

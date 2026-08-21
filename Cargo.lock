@@ -2331,6 +2331,7 @@ dependencies = [
 name = "oxedyne_fe2o3_ore"
 version = "0.5.0"
 dependencies = [
+ "flate2",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_data",
  "oxedyne_fe2o3_iop_crypto",
