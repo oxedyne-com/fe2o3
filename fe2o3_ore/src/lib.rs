@@ -60,7 +60,6 @@ pub mod log;
 pub mod op;
 pub mod segment;
 pub mod seq;
-pub mod snapshot;
 pub mod sync;
 
 #[cfg(test)]

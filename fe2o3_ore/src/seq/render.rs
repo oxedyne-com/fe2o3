@@ -912,22 +912,6 @@ pub struct Rendered {
 
 impl Rendered {
 
-	/// Takes a snapshot's record of one file as a rendered file.
-	///
-	/// A snapshot holds only what still exists, so this is always live.
-	pub fn from_parts(
-		file:	OpId,
-		path:	Vec<u8>,
-		mode:	Mode,
-		bytes:	Vec<u8>,
-		runs:	Vec<Run>,
-		flags:	Vec<Flag>,
-		notes:	Vec<Note>,
-	)
-		-> Self
-	{
-		Self { file, path, mode, live: true, bytes, runs, flags, notes }
-	}
 
 	#[allow(clippy::too_many_arguments)]
 	pub(super) fn new(
@@ -1202,29 +1186,6 @@ impl Repo {
 		Self { files, flags, notes, index, stats }
 	}
 
-	/// Builds a repository from states a snapshot carried, rather than from a
-	/// render.
-	///
-	/// For a reader that wants to SEE the state and not to merge into it. A
-	/// snapshot holds only live files and carries no placement index, so the
-	/// index is empty and `placement` answers nothing -- a caller that needs
-	/// either must render. What it does carry is every file's bytes, provenance
-	/// runs, flags and notes, which is what a working copy is compared against.
-	pub fn from_states(files: Vec<Rendered>) -> Self {
-		let mut flags: Vec<Flag> = Vec::new();
-		for f in &files {
-			flags.extend(f.flags().iter().cloned());
-		}
-		flags.sort();
-		flags.dedup();
-		Self {
-			files,
-			flags,
-			notes:	Vec::new(),
-			index:	BTreeMap::new(),
-			stats:	Stats::default(),
-		}
-	}
 
 	pub fn files(&self) -> &[Rendered] {
 		&self.files

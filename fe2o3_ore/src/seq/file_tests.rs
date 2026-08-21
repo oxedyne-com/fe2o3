@@ -1558,32 +1558,3 @@ fn a_mode_of_an_absent_file_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// The point of carrying it there: a checkout reads a snapshot instead of the
-/// log.
-#[test]
-fn a_mode_rides_the_snapshot() -> Outcome<()> {
-	use crate::snapshot::{
-		FileState,
-		Snapshot,
-	};
-	let (mut reps, mut ops, ids) = res!(stage(
-		&[(b"run.sh", b"#!/bin/sh\n"), (b"link", b"run.sh"), (b"plain.txt", b"hi\n")],
-		1,
-	));
-	ops.push(res!(reps[0].set_mode(ids[0], Mode::Executable)));
-	ops.push(res!(reps[0].set_mode(ids[1], Mode::Symlink)));
-	let repo = res!(converge(&ops));
-	let states: Vec<FileState> = repo.live().into_iter().map(FileState::of).collect();
-	let frontier: Vec<OpId> = ops.iter().map(|o| o.0.id()).collect();
-	let snap = res!(Snapshot::new(frontier, states));
-	let back = res!(Snapshot::decode(&res!(snap.encode())));
-	assert_eq!(back, snap);
-	let modes: Vec<(String, Mode)> = back.files()
-		.iter()
-		.map(|f| (f.path_lossy(), f.mode))
-		.collect();
-	assert!(modes.contains(&(fmt!("run.sh"), Mode::Executable)), "modes were {:?}", modes);
-	assert!(modes.contains(&(fmt!("link"), Mode::Symlink)), "modes were {:?}", modes);
-	assert!(modes.contains(&(fmt!("plain.txt"), Mode::Normal)), "modes were {:?}", modes);
-	Ok(())
-}
