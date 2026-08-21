@@ -42,7 +42,10 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::id::OpId;
+use crate::id::{
+	OpId,
+	ReplicaId,
+};
 use crate::op::Mode;
 use crate::seq::render::{
 	Flag,
@@ -56,6 +59,41 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 
 pub const MAGIC: [u8; 6] = *b"ORESNP"; // the bytes every snapshot begins with
+pub const SUFFIX: &str = ".snp"; // the suffix every snapshot file carries
+
+
+/// The name a snapshot takes, which is the operation the mark was recorded as.
+///
+/// An identifier's own spelling is `r<replica>:<counter>`, and a colon is not a
+/// name every filesystem this runs on will take, so a hyphen stands in for it
+/// and the `r` is dropped. That substitution is the whole reason this function
+/// and [`named_at`] exist as a pair rather than as a `format!` at the writer and
+/// an extension test at the reader: **a name a reader cannot turn back into an
+/// identifier is a name it cannot order**, and an unordered set of snapshots is
+/// one the reader chooses from by whatever the directory happened to yield.
+pub fn file_name(at: OpId) -> String {
+	fmt!("{}-{}{}", at.replica.inner(), at.counter, SUFFIX)
+}
+
+/// The operation a snapshot's name says it was taken at.
+///
+/// `None` where the name is not one [`file_name`] wrote, which is how a torn
+/// write, an editor's backup and a foreign file are all skipped by one test
+/// rather than by a rule each reader keeps for itself.
+pub fn named_at(name: &str) -> Option<OpId> {
+	let body = match name.strip_suffix(SUFFIX) {
+		Some(b) => b,
+		None => return None,
+	};
+	let (replica, counter) = match body.split_once('-') {
+		Some(pair) => pair,
+		None => return None,
+	};
+	match (replica.parse::<u64>(), counter.parse::<u64>()) {
+		(Ok(r), Ok(c))	=> Some(OpId::new(ReplicaId::new(r), c)),
+		_				=> None,
+	}
+}
 
 /// The format version this module writes.
 ///
@@ -383,6 +421,61 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// A name this module wrote is a name it can read back, for every part of
+	/// an identifier that a filesystem might have opinions about.
+	///
+	/// The pair is the point: a writer alone round-trips against nothing, and a
+	/// reader that cannot recover the identifier cannot order the files it
+	/// finds -- which is how a reader comes to take whichever snapshot the
+	/// directory happened to yield last.
+	#[test]
+	fn a_snapshot_name_reads_back_as_the_operation_it_names()
+		-> Outcome<()>
+	{
+		for (replica, counter) in [
+			(0u64, 0u64),
+			(1, 1),
+			(2798293571, 44629),
+			(u64::MAX, u64::MAX),
+		] {
+			let at = OpId::new(ReplicaId::new(replica), counter);
+			let name = file_name(at);
+			assert!(name.ends_with(SUFFIX), "{:?} does not carry the suffix", name);
+			assert!(!name.contains(':'),
+				"{:?} holds a colon, which is not a filename everywhere", name);
+			assert_eq!(named_at(&name), Some(at), "the name {:?} did not read back", name);
+		}
+		Ok(())
+	}
+
+	/// A name this module did not write names nothing.
+	///
+	/// Each of these is a file that turns up beside a snapshot in the wild, and
+	/// a reader that took any of them for a snapshot would be choosing by the
+	/// extension rather than by the rule.
+	#[test]
+	fn a_name_this_module_did_not_write_names_nothing()
+		-> Outcome<()>
+	{
+		for name in [
+			"last",                 // the bookkeeping beside them
+			"7-10.snp.tmp",         // a torn write
+			"7-10.snp~",            // an editor's backup
+			"snapshot.snp",         // no identifier at all
+			"7.snp",                // half an identifier
+			"-10.snp",              // no replica
+			"7-.snp",               // no counter
+			"r7-10.snp",            // the identifier's own spelling, which is not this one
+			"7:10.snp",             // ditto
+			"7-10",                 // no suffix
+			"7-1x0.snp",            // not a number
+			"7-99999999999999999999999.snp", // past u64
+		] {
+			assert_eq!(named_at(name), None, "{:?} was taken for a snapshot", name);
+		}
+		Ok(())
+	}
 
 	use crate::id::{
 		Anchor,
