@@ -1,0 +1,419 @@
+{
+    "about": "The on-disk and on-the-wire names this crate fixes, and the tests that freeze them. This file is the authority for the version constants, the wire codes, the kind bytes and the golden byte tests; format_change_contract.md carries the reasoning and points here for the facts. tests/format_registry.rs reads it and reddens when the code and this file disagree, which is why the facts live here rather than in a document nothing can check.",
+
+    "files": [
+        {
+            "path":     "src/segment.rs",
+            "role":     "the segment container, its version, and the kind byte on every record",
+            "exempt":   []
+        },
+        {
+            "path":     "src/op.rs",
+            "role":     "the operation vocabulary and the values inside an operation",
+            "exempt":   []
+        },
+        {
+            "path":     "src/sync/msg.rs",
+            "role":     "the sync message frame",
+            "exempt":   []
+        }
+    ],
+
+    "constants": [
+        {
+            "name":     "segment::MAGIC",
+            "file":     "src/segment.rs",
+            "line":     (u64|83),
+            "value":    "ORESEG",
+            "axis":     "frame",
+            "holds":    "the six bytes a reader matches before it believes the file is a segment at all"
+        },
+        {
+            "name":     "segment::VERSION",
+            "file":     "src/segment.rs",
+            "line":     (u64|105),
+            "value":    (u8|4),
+            "axis":     "vocabulary",
+            "holds":    "which operation codes a segment written now may carry, stamped at byte 6 of every segment"
+        },
+        {
+            "name":     "segment::VERSION_MIN",
+            "file":     "src/segment.rs",
+            "line":     (u64|124),
+            "value":    (u8|2),
+            "axis":     "vocabulary",
+            "holds":    "the oldest segment this crate reads; it stays where it is because every version since has been a strict superset of it"
+        },
+        {
+            "name":     "segment::KIND_BARE",
+            "file":     "src/segment.rs",
+            "line":     (u64|150),
+            "value":    (u8|1),
+            "axis":     "container",
+            "holds":    "a record carrying an unsigned, unencrypted operation"
+        },
+        {
+            "name":     "segment::KIND_SEALED",
+            "file":     "src/segment.rs",
+            "line":     (u64|152),
+            "value":    (u8|2),
+            "axis":     "container",
+            "holds":    "a record carrying a signed envelope"
+        },
+        {
+            "name":     "segment::KIND_VEILED",
+            "file":     "src/segment.rs",
+            "line":     (u64|162),
+            "value":    (u8|3),
+            "axis":     "container",
+            "holds":    "a record whose header is in clear and whose body is ciphertext; it cost no version bump, which is the precedent every later container change is read against"
+        },
+        {
+            "name":     "op::CODE_FILE_CREATE",
+            "file":     "src/op.rs",
+            "line":     (u64|110),
+            "value":    (u8|1),
+            "axis":     "vocabulary",
+            "holds":    "a file comes into being"
+        },
+        {
+            "name":     "op::CODE_FILE_DELETE",
+            "file":     "src/op.rs",
+            "line":     (u64|111),
+            "value":    (u8|2),
+            "axis":     "vocabulary",
+            "holds":    "a file stops being"
+        },
+        {
+            "name":     "op::CODE_FILE_RENAME",
+            "file":     "src/op.rs",
+            "line":     (u64|112),
+            "value":    (u8|3),
+            "axis":     "vocabulary",
+            "holds":    "a file takes another path"
+        },
+        {
+            "name":     "op::CODE_MARK",
+            "file":     "src/op.rs",
+            "line":     (u64|113),
+            "value":    (u8|4),
+            "axis":     "vocabulary",
+            "holds":    "a name given to a point, two elements and nothing more; every mark ever signed is spelled this way and none of them may move"
+        },
+        {
+            "name":     "op::CODE_SPLICE",
+            "file":     "src/op.rs",
+            "line":     (u64|114),
+            "value":    (u8|5),
+            "axis":     "vocabulary",
+            "holds":    "an edit to a file's contents"
+        },
+        {
+            "name":     "op::CODE_MOVE",
+            "file":     "src/op.rs",
+            "line":     (u64|115),
+            "value":    (u8|6),
+            "axis":     "vocabulary",
+            "holds":    "a run of atoms taken from one place to another"
+        },
+        {
+            "name":     "op::CODE_NOTE",
+            "file":     "src/op.rs",
+            "line":     (u64|116),
+            "value":    (u8|7),
+            "axis":     "vocabulary",
+            "holds":    "something said about the history rather than done to it; the top of the version 2 vocabulary"
+        },
+        {
+            "name":     "op::CODE_FILE_MODE",
+            "file":     "src/op.rs",
+            "line":     (u64|117),
+            "value":    (u8|8),
+            "axis":     "vocabulary",
+            "holds":    "a file's mode changes; the top of the version 3 vocabulary"
+        },
+        {
+            "name":     "op::CODE_MARK_TIMED",
+            "file":     "src/op.rs",
+            "line":     (u64|118),
+            "value":    (u8|9),
+            "axis":     "vocabulary",
+            "holds":    "the second spelling of a mark, for one carrying a body, a time, or both"
+        },
+        {
+            "name":     "op::CODE_PROPOSAL",
+            "file":     "src/op.rs",
+            "line":     (u64|119),
+            "value":    (u8|10),
+            "axis":     "vocabulary",
+            "holds":    "what is being asked for"
+        },
+        {
+            "name":     "op::CODE_SAID",
+            "file":     "src/op.rs",
+            "line":     (u64|120),
+            "value":    (u8|11),
+            "axis":     "vocabulary",
+            "holds":    "one remark in a proposal's discussion"
+        },
+        {
+            "name":     "op::CODE_SETTLED",
+            "file":     "src/op.rs",
+            "line":     (u64|121),
+            "value":    (u8|12),
+            "axis":     "vocabulary",
+            "holds":    "what became of a proposal"
+        },
+        {
+            "name":     "op::CODE_REVERTS",
+            "file":     "src/op.rs",
+            "line":     (u64|122),
+            "value":    (u8|13),
+            "axis":     "vocabulary",
+            "holds":    "what a set of operations undoes; the top of the version 4 vocabulary"
+        },
+        {
+            "name":     "op::MODE_NORMAL",
+            "file":     "src/op.rs",
+            "line":     (u64|278),
+            "value":    (u8|0),
+            "axis":     "field",
+            "holds":    "the mode a file has unless something says otherwise"
+        },
+        {
+            "name":     "op::MODE_EXECUTABLE",
+            "file":     "src/op.rs",
+            "line":     (u64|279),
+            "value":    (u8|1),
+            "axis":     "field",
+            "holds":    "the mode a FileMode operation carries for an executable"
+        },
+        {
+            "name":     "op::MODE_SYMLINK",
+            "file":     "src/op.rs",
+            "line":     (u64|280),
+            "value":    (u8|2),
+            "axis":     "field",
+            "holds":    "the mode a FileMode operation carries for a symbolic link"
+        },
+        {
+            "name":     "op::SETTLED_OPEN",
+            "file":     "src/op.rs",
+            "line":     (u64|284),
+            "value":    (u8|0),
+            "axis":     "field",
+            "holds":    "a proposal nobody has settled"
+        },
+        {
+            "name":     "op::SETTLED_ACCEPTED",
+            "file":     "src/op.rs",
+            "line":     (u64|285),
+            "value":    (u8|1),
+            "axis":     "field",
+            "holds":    "a proposal taken up"
+        },
+        {
+            "name":     "op::SETTLED_DECLINED",
+            "file":     "src/op.rs",
+            "line":     (u64|286),
+            "value":    (u8|2),
+            "axis":     "field",
+            "holds":    "a proposal turned down"
+        },
+        {
+            "name":     "op::SETTLED_DONE",
+            "file":     "src/op.rs",
+            "line":     (u64|287),
+            "value":    (u8|3),
+            "axis":     "field",
+            "holds":    "a proposal carried out"
+        },
+        {
+            "name":     "op::AUTO_MARK_PREFIX",
+            "file":     "src/op.rs",
+            "line":     (u64|133),
+            "value":    "@",
+            "axis":     "convention",
+            "holds":    "the character an automatic mark's name begins with, and which a person's mark may not; it separates the marks a person named from the ones a command wrote"
+        },
+        {
+            "name":     "op::AUTHOR_TRAILER",
+            "file":     "src/op.rs",
+            "line":     (u64|193),
+            "value":    "Ore-Author: ",
+            "axis":     "convention",
+            "holds":    "the commit-message trailer the git exporter writes and the git importer reads; a mismatch loses attribution silently in both directions"
+        },
+        {
+            "name":     "sync::msg::MAGIC",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|29),
+            "value":    "ORESYN",
+            "axis":     "frame",
+            "holds":    "the six bytes every sync message begins with"
+        },
+        {
+            "name":     "sync::msg::VERSION",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|32),
+            "value":    (u8|1),
+            "axis":     "vocabulary",
+            "holds":    "which message kinds a peer may send; it does not move when the operation vocabulary does, so an old relay accepts the frame and then fails inside Entry::from_dat, after the handshake said it was compatible"
+        },
+        {
+            "name":     "sync::msg::KIND_HELLO",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|35),
+            "value":    (u8|1),
+            "axis":     "vocabulary",
+            "holds":    "a peer opening a session"
+        },
+        {
+            "name":     "sync::msg::KIND_SKETCH",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|36),
+            "value":    (u8|2),
+            "axis":     "vocabulary",
+            "holds":    "a peer offering what it holds"
+        },
+        {
+            "name":     "sync::msg::KIND_SEND",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|37),
+            "value":    (u8|3),
+            "axis":     "vocabulary",
+            "holds":    "a peer handing entries over"
+        },
+        {
+            "name":     "sync::msg::KIND_DONE",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|38),
+            "value":    (u8|4),
+            "axis":     "vocabulary",
+            "holds":    "a peer closing a session"
+        }
+    ],
+
+    "versions": [
+        {
+            "version":      (u8|2),
+            "highest_code": "op::CODE_NOTE",
+            "note":         "frozen with the note at the top; the oldest version this crate reads"
+        },
+        {
+            "version":      (u8|3),
+            "highest_code": "op::CODE_FILE_MODE",
+            "note":         "one code added above the version 2 vocabulary and nothing else; the framing did not move a byte"
+        },
+        {
+            "version":      (u8|4),
+            "highest_code": "op::CODE_REVERTS",
+            "note":         "five codes added at once, for the mark's second spelling and the proposal operations"
+        }
+    ],
+
+    "goldens": [
+        {
+            "name":     "the_segment_bytes_are_frozen",
+            "file":     "src/segment.rs",
+            "magic":    "segment::MAGIC",
+            "holds":    "a one record segment carrying a mark with neither a body nor a time; the fixed point for the framing and for the mark spelling every signature in every repository depends on",
+            "pins": [
+                { "at": (u64|6),  "is": "segment::VERSION" },
+                { "at": (u64|9),  "is": "segment::KIND_BARE" },
+                { "at": (u64|66), "is": "op::CODE_MARK" }
+            ]
+        },
+        {
+            "name":     "the_file_mode_bytes_are_frozen",
+            "file":     "src/segment.rs",
+            "magic":    "segment::MAGIC",
+            "holds":    "the operation the version 3 bump exists for, in the encoding it was added in; it is spelled the same in version 4, which is why a store full of them needs no migration",
+            "pins": [
+                { "at": (u64|6),  "is": "segment::VERSION" },
+                { "at": (u64|8),  "is": "segment::KIND_BARE" },
+                { "at": (u64|43), "is": "op::CODE_FILE_MODE" },
+                { "at": (u64|66), "is": "op::MODE_EXECUTABLE" }
+            ]
+        },
+        {
+            "name":     "the_veiled_bytes_are_frozen",
+            "file":     "src/segment.rs",
+            "magic":    "segment::MAGIC",
+            "holds":    "the veiled framing under the identity encrypter, and the fact that the entry a veil is put around is the entry that was signed, byte for byte",
+            "pins": [
+                { "at": (u64|6),   "is": "segment::VERSION" },
+                { "at": (u64|8),   "is": "segment::KIND_VEILED" },
+                { "at": (u64|74),  "is": "segment::KIND_BARE" },
+                { "at": (u64|130), "is": "op::CODE_MARK" }
+            ]
+        },
+        {
+            "name":     "the_message_bytes_are_frozen",
+            "file":     "src/sync/msg.rs",
+            "magic":    "sync::msg::MAGIC",
+            "holds":    "a send message carrying one bare entry; it has no segment header, so the operation vocabulary rising does not move a byte of it",
+            "pins": [
+                { "at": (u64|6),  "is": "sync::msg::VERSION" },
+                { "at": (u64|11), "is": "sync::msg::KIND_SEND" },
+                { "at": (u64|19), "is": "segment::KIND_BARE" },
+                { "at": (u64|75), "is": "op::CODE_MARK" }
+            ]
+        }
+    ],
+
+    "removed": [
+        {
+            "name":     "snapshot::VERSION",
+            "file":     "src/snapshot.rs",
+            "gone":     "12026-08-21",
+            "commit":   "2e956a4",
+            "why":      "the snapshot format was taken out once a render was measured linear rather than quadratic. The row is kept because the contract's own table went on naming this constant, at a line in a file that had been deleted, for four days"
+        },
+        {
+            "name":     "the_snapshot_bytes_are_frozen",
+            "file":     "src/snapshot.rs",
+            "gone":     "12026-08-21",
+            "commit":   "2e956a4",
+            "why":      "the golden test went with the format it froze. The contract's table went on listing it, which is the same failure twice in one document"
+        }
+    ],
+
+    "open": [
+        {
+            "question": "the spelling of the flag that says a segment is compressed",
+            "why":      "every reader of a segment has to agree on it, and a reader that brings the wrong spelling reads nonsense rather than an error",
+            "asked":    "12026-08-21",
+            "note":     "segment_compression.md",
+            "guard":    ["KIND_COMPRESSED", "COMPRESSED", "COMPRESSION", "compressed", "compression"]
+        },
+        {
+            "question": "which axis the flag sits on: a header field, a kind byte, or the version",
+            "why":      "it decides whether segment::VERSION moves and whether the two segment golden tests move with it. The veiling precedent says a container change need cost neither",
+            "asked":    "12026-08-21",
+            "note":     "segment_compression.md",
+            "guard":    ["COMPRESS_AXIS"]
+        },
+        {
+            "question": "which compression algorithm, named on the wire or implied by the version",
+            "why":      "a reader that brings the wrong one gets nonsense, not an error",
+            "asked":    "12026-08-21",
+            "note":     "segment_compression.md",
+            "guard":    ["ALGO_ZSTD", "ALGO_DEFLATE", "COMPRESS_ALGO", "zstd", "flate2"]
+        },
+        {
+            "question": "whether the compression level is recorded in the segment",
+            "why":      "it changes the bytes and nothing else, and recording it invites a test to freeze it, which would freeze a dependency version and call it a format",
+            "asked":    "12026-08-21",
+            "note":     "segment_compression.md",
+            "guard":    ["COMPRESS_LEVEL", "LEVEL_DEFAULT"]
+        },
+        {
+            "question": "whether segment::VERSION rises for compression",
+            "why":      "the rule the vocabulary grows by is about operation codes, and compression adds no operation, so the rule does not decide this on its own",
+            "asked":    "12026-08-21",
+            "note":     "segment_compression.md",
+            "guard":    []
+        }
+    ]
+}
