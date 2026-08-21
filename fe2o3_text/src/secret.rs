@@ -40,7 +40,15 @@ const LOCKFILES: &[&str] = &[
 	"go.sum",
 ];
 
-// Directories holding somebody else's code, or a build's output.
+// Directories holding somebody else's code, or a build's output, and the one directory name that
+// says a person wrote whatever is under it. A name on the vendored list skips only while no `src`
+// stands above it: every convention that put a name there -- a bundler's `dist`, a package
+// manager's `node_modules`, cargo's `target` -- writes its directory beside a source tree and never
+// inside one, so a `dist` below a `src` is hand written by construction. Matching the bare name at
+// any depth read fourteen hand-written Rust files under one `src/dist/` as build output and
+// exempted them from this guard and from the git hook, which is a hole rather than a saving. It was
+// found on 2026-08-21, when the tree holding them was put under a version control system that
+// cannot forget what it captures.
 const VENDORED: &[&str] = &[
 	"node_modules",
 	"target",
@@ -49,6 +57,7 @@ const VENDORED: &[&str] = &[
 	"dist",
 	"build",
 ];
+const SOURCE: &str = "src";
 
 // The two halves of a PEM private key header, which names its algorithm in the middle. Held apart
 // so that this file does not itself carry the header a scanner looks for, its own included.
@@ -264,14 +273,23 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 
 /// Is the path one whose long hashes read like keys, and which is therefore not scanned?
 ///
-/// A lockfile by name, or anything under a vendored or built directory. The path is relative to
-/// the root of whatever is being scanned, with `/` between its components.
+/// A lockfile by name, or anything under a vendored or built directory that no `src` stands above.
+/// The path is relative to the root of whatever is being scanned, with `/` between its components.
 pub fn skip_path(path: &[u8]) -> bool {
 	let mut last: &[u8] = b"";
 	let mut dirs = 0;
+	let mut sourced = false;
 	for comp in path.split(|b| *b == b'/') {
-		if dirs > 0 && VENDORED.iter().any(|v| v.as_bytes() == last) {
-			return true;
+		// Something follows `last`, so `last` is a directory rather than the file at the end.
+		if dirs > 0 {
+			if last == SOURCE.as_bytes() {
+				sourced = true;
+			}
+			// A source tree inside a vendored one is still somebody else's, so the first of the two
+			// names to appear is the one that decides.
+			if !sourced && VENDORED.iter().any(|v| v.as_bytes() == last) {
+				return true;
+			}
 		}
 		last = comp;
 		dirs += 1;

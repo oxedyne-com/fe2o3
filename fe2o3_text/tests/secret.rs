@@ -146,5 +146,39 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["A vendored name below a source tree is not build output", "all",
+		"secret", "path"], ||
+	{
+		// `dist` earns its place on the list because a bundler writes one beside a source tree.
+		// Below a `src` the same name is a person's own, and reading it as build output left
+		// fourteen hand-written Rust files unscanned by this crate and by the git hook.
+		for path in ["fe2o3_o3db_sync/src/dist/cohort.rs", "src/dist/mod.rs", "a/b/src/build/x.rs",
+			"src/vendor/x.rs", "crate/src/target/y.rs", "src/node_modules/z.js", "src/.venv/w.py"]
+		{
+			req!(secret::skip_path(path.as_bytes()), false, "for {:?}", path);
+		}
+		// A source tree inside a vendored one is still somebody else's.
+		for path in ["node_modules/pkg/src/dist/bundle.js", "vendor/dep/src/lib.rs",
+			"target/debug/build/dep/src/main.rs"]
+		{
+			req!(secret::skip_path(path.as_bytes()), true, "for {:?}", path);
+		}
+		// The name of a lockfile still decides, wherever the file sits.
+		req!(secret::skip_path(b"src/dist/Cargo.lock"), true);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A key in a source tree called dist is found", "all", "secret", "path"],
+		||
+	{
+		// The two halves of the guard, put together the way a caller puts them: the path is
+		// scanned, and the scan refuses what is in it.
+		let path = b"fe2o3_o3db_sync/src/dist/transport.rs";
+		req!(secret::skip_path(path), false);
+		let line = fmt!("let key = \"{}{}\";\n", SHAPED[0].0, SHAPED[0].1);
+		req!(secret::scan(line.as_bytes()), vec![Find { line: 1, kind: Kind::Fireworks }]);
+		Ok(())
+	}));
+
 	Ok(())
 }
