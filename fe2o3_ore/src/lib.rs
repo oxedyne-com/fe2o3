@@ -24,8 +24,6 @@
 //!   directly and renders a file's bytes from an operation set.
 //! - [`segment`] is the durable form of a run of operations, read incrementally
 //!   and checked with a hasher the caller brings.
-//! - [`snapshot`] is the durable form of a rendered state at a frontier, so a
-//!   reader can start there and replay only what came after.
 //! - [`fastexport`] parses git's fast-import stream, which is the one interface
 //!   git keeps for foreign consumers of a repository.
 //! - [`gitexport`] emits it, so a history written here becomes a git repository

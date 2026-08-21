@@ -835,7 +835,7 @@ impl Placement {
 /// did this note end up".
 ///
 /// There is no codec for this type, and that is deliberate: a repository view is
-/// derived from the file views a snapshot already carries, except for a note on
+/// derived from the file views a render already carries, except for a note on
 /// dead content, which is derived from the operation log. Storing it would be
 /// storing a join.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
