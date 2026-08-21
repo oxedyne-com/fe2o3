@@ -2,6 +2,7 @@ mod base2x;
 mod highlight;
 mod markdown;
 mod pattern;
+mod secret;
 mod string;
 mod xml;
 
@@ -31,6 +32,7 @@ fn run_tests() -> Outcome<()> {
     res!(highlight::test_highlight(filter));
     res!(markdown::test_markdown(filter));
     res!(pattern::test_pattern(filter));
+    res!(secret::test_secret(filter));
     res!(string::test_string(filter));
     res!(xml::test_xml(filter));
 

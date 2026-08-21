@@ -39,6 +39,7 @@ pub mod lines;
 pub mod doc;
 pub mod pattern;
 pub mod regex;
+pub mod secret;
 pub mod split;
 pub mod string;
 pub mod phrase;
