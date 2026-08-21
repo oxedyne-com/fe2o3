@@ -66,33 +66,18 @@ use std::collections::{
 };
 
 
-/// Entries the version vector matrix may hold before it stops being worth
-/// building.
-///
-/// One `u64` each, so the ceiling is 32 MiB. The history this was measured on
-/// -- 44,629 operations, two replicas cut into 31 runs -- wants 44,629 x 31 x 8
-/// = 11.1 MB; the same history over two unbroken runs would want 714 kB, and ten
-/// 3.6 MB. The ceiling is reached at 94 runs over that history, or ten runs over
-/// 419,430 operations. Past it the walk is the cheaper thing to keep: the matrix
-/// costs a column per run on every edge to fill, so a history that forks against
-/// itself thousands of times is one the index should decline.
+// One u64 each, so 32 MiB.  A history that forks against itself thousands of
+// times wants a column per run and is one the index should decline.
 const VECTORS_ENTRIES_MAX: usize = 4 * 1024 * 1024;
 
 
-/// A version vector per operation: the highest counter each *run* reached inside
-/// that operation's ancestry, the operation itself included.
+/// The highest counter each run reached inside an operation's ancestry, so that
+/// ancestry is two lookups rather than a walk.
 ///
-/// It exists so that `reaches(from, target)` is `vv[from][run(target)] >=
-/// target.counter` and costs two lookups rather than a walk. A single highest
-/// counter can only stand for a set of operations that enters an ancestry with
-/// none skipped, which is why the column is a run and not a replica: a replica
-/// that forks against itself -- authoring against a frontier that no longer
-/// holds its own last operation -- leaves counters inside its range that the
-/// ancestry does not hold, and one number cannot say so. Where that happens the
-/// replica is cut at the fork and the pieces get a column each.
-///
-/// Twenty-nine such forks were found in a 44,629 operation history, so this is
-/// not a hypothetical: cutting is the difference between an index and none.
+/// A column is a run and not a replica because one counter can only stand for a
+/// set that enters an ancestry with none skipped, and a replica that forks
+/// against itself leaves gaps inside its own range. Twenty-nine such forks in a
+/// 44,629 operation history, so the cut is what makes an index possible at all.
 #[derive(Clone, Debug)]
 struct Vectors {
 	cols:	usize,						// runs, which is the width of a row
@@ -102,16 +87,13 @@ struct Vectors {
 
 impl Vectors {
 
-	/// `None` wherever the graph does not admit the index, which is the whole of
-	/// the precondition and is looked at rather than assumed.
+	/// `None` wherever the graph does not admit an index, which is looked at
+	/// rather than assumed.
 	///
-	/// Two passes, and the first earns the second. A column per replica gives
-	/// maxima that are right whatever the shape -- a maximum over a union of
-	/// ancestries is a maximum however much is missing from them -- so it finds
-	/// exactly where a replica's run is broken, without yet being safe to compare
-	/// against. The second pass gives each unbroken piece a column of its own,
-	/// and on a history with no forks at all there is nothing to cut and the
-	/// first pass is the answer.
+	/// Two passes, and the first earns the second: a column per replica gives
+	/// maxima that hold whatever the shape, so it finds the forks without being
+	/// safe to compare against, and the second gives each unbroken piece a
+	/// column. A history that never forks stops after the first.
 	fn build(parents: &BTreeMap<OpId, &[OpId]>, graded: bool)
 		-> Option<Self>
 	{
@@ -203,14 +185,12 @@ impl Vectors {
 		Some(Self { cols, rows, at })
 	}
 
-	/// One pass over the graph in topological order, giving each operation the
-	/// highest counter every column reached in its ancestry.
+	/// One pass in topological order, giving each operation the highest counter
+	/// every column reached in its ancestry.
 	///
-	/// `runs` says which column an operation's own counter belongs in. `check`
-	/// asks each column to arrive at exactly the counter the previous operation
-	/// of that column left behind, which is what the comparison in
-	/// [`Vectors::reaches`] rests on; the first pass is not entitled to it and so
-	/// does not ask.
+	/// Under `check` each column must arrive at exactly the counter the previous
+	/// operation of that column left, which is what [`Vectors::reaches`] rests
+	/// on. The first pass is not entitled to that and does not ask.
 	fn fill(
 		parents:	&BTreeMap<OpId, &[OpId]>,
 		order:		&[OpId],
@@ -328,14 +308,10 @@ impl<'a> Causality<'a> {
 
 	/// Does every parent edge step strictly downwards in counter?
 	///
-	/// True of every history this tool mints, because an operation takes the
-	/// counter one past the highest the whole log holds
-	/// ([`OpLog::next_counter`]) and its parents are all in that log. It is not
-	/// true by construction, though: [`OpLog::append`] requires a parent to be
-	/// present and requires a replica's own counters to rise, and neither of
-	/// those forbids a hand-assembled graph whose child sits below its parent.
-	/// So it is measured rather than assumed, and what rests on it
-	/// ([`Causality::reaches`]) asks first.
+	/// True of anything this tool mints, since an operation takes the counter one
+	/// past the highest the log holds. Not true by construction, though, because
+	/// [`OpLog::append`] forbids neither a hand-assembled graph whose child sits
+	/// below its parent nor one that sits level with it. So it is measured.
 	pub fn is_graded(&self) -> bool {
 		self.graded
 	}
@@ -354,11 +330,8 @@ impl<'a> Causality<'a> {
 		self.vectors.as_ref().map(|vv| vv.bytes())
 	}
 
-	/// How many unbroken runs the index cuts the operations into.
-	///
-	/// One per replica where no replica ever forks against itself, and one more
-	/// for every fork after that. It is the width of the index and so what its
-	/// size is linear in, which is the only reason a caller would ask.
+	/// One per replica, and one more for every fork after that.  The index is
+	/// linear in this.
 	pub fn index_runs(&self) -> Option<usize> {
 		self.vectors.as_ref().map(|vv| vv.cols)
 	}
@@ -426,36 +399,19 @@ impl<'a> Causality<'a> {
 		if from == target {
 			return true;
 		}
-		// Where the graph admits a version vector index ([`Vectors`]), ancestry is
-		// two lookups and a comparison, and the walk below never runs. Measured on
-		// the 44,629 operation history: the bound the walk carries took the render
-		// from 14.8 s to 4.9 s, and the index takes it to 0.28 s for 12.4 MB and
-		// 28 ms of building.
+		// Two lookups and a comparison, and the walk below never runs.  It took a
+		// 44,629 operation render from 4.9 s to 0.28 s for 12.4 MB.
 		if let Some(vv) = &self.vectors {
 			return vv.reaches(from, target);
 		}
-		// An operation takes the counter one past the highest the log holds
-		// ([`OpLog::next_counter`]), so every parent edge steps strictly
-		// downwards in counter. Two facts follow, and between them they are the
-		// difference between walking a window of the history and walking all of
-		// it. Nothing at or below the target's counter can reach the target, so
-		// the question is settled without a walk; and a branch that has fallen
-		// to or below it can only fall further, so it is done.
+		// Every parent edge steps strictly downwards in counter, so nothing at or
+		// below the target's counter can reach it and a branch that has fallen
+		// there is done.  That bounds the walk by the window between the two
+		// rather than by the size of the history, and it matters most where a
+		// `false` answer would otherwise have to exhaust the whole ancestor set.
 		//
-		// This matters most in the case that used to be worst. A `false` answer
-		// had to exhaust the whole ancestor set to be sure, and `concurrent`
-		// asks for two of them -- so the pair the repository exists to handle,
-		// two genuinely concurrent edits, was the pair that cost the most.
-		// Measured on a 44,629 operation history: 12,128 calls popped 187
-		// million nodes, and three stages of the render spent 98% of their time
-		// here.
-		//
-		// Both facts rest on the counter rule, which is NOT enforced by
-		// [`OpLog::append`] -- it requires a parent to be present and a
-		// replica's own counters to rise, and neither forbids a child below its
-		// parent. So the graph is asked ([`Causality::is_graded`]) rather than
-		// assumed, and a graph that does not hold the rule is walked as it
-		// always was.
+		// The rule is not enforced ([`Causality::is_graded`]), so the graph is
+		// asked rather than assumed.
 		if self.graded && from.counter <= target.counter {
 			return false;
 		}
