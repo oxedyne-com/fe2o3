@@ -66,20 +66,241 @@ use std::collections::{
 };
 
 
+/// Entries the version vector matrix may hold before it stops being worth
+/// building.
+///
+/// One `u64` each, so the ceiling is 32 MiB. The history this was measured on
+/// -- 44,629 operations, two replicas cut into 31 runs -- wants 44,629 x 31 x 8
+/// = 11.1 MB; the same history over two unbroken runs would want 714 kB, and ten
+/// 3.6 MB. The ceiling is reached at 94 runs over that history, or ten runs over
+/// 419,430 operations. Past it the walk is the cheaper thing to keep: the matrix
+/// costs a column per run on every edge to fill, so a history that forks against
+/// itself thousands of times is one the index should decline.
+const VECTORS_ENTRIES_MAX: usize = 4 * 1024 * 1024;
+
+
+/// A version vector per operation: the highest counter each *run* reached inside
+/// that operation's ancestry, the operation itself included.
+///
+/// It exists so that `reaches(from, target)` is `vv[from][run(target)] >=
+/// target.counter` and costs two lookups rather than a walk. A single highest
+/// counter can only stand for a set of operations that enters an ancestry with
+/// none skipped, which is why the column is a run and not a replica: a replica
+/// that forks against itself -- authoring against a frontier that no longer
+/// holds its own last operation -- leaves counters inside its range that the
+/// ancestry does not hold, and one number cannot say so. Where that happens the
+/// replica is cut at the fork and the pieces get a column each.
+///
+/// Twenty-nine such forks were found in a 44,629 operation history, so this is
+/// not a hypothetical: cutting is the difference between an index and none.
+#[derive(Clone, Debug)]
+struct Vectors {
+	cols:	usize,						// runs, which is the width of a row
+	rows:	Vec<u64>,					// one row of `cols` per operation
+	at:		HashMap<OpId, (u32, u32)>,	// each operation's row, and the run it belongs to
+}
+
+impl Vectors {
+
+	/// `None` wherever the graph does not admit the index, which is the whole of
+	/// the precondition and is looked at rather than assumed.
+	///
+	/// Two passes, and the first earns the second. A column per replica gives
+	/// maxima that are right whatever the shape -- a maximum over a union of
+	/// ancestries is a maximum however much is missing from them -- so it finds
+	/// exactly where a replica's run is broken, without yet being safe to compare
+	/// against. The second pass gives each unbroken piece a column of its own,
+	/// and on a history with no forks at all there is nothing to cut and the
+	/// first pass is the answer.
+	fn build(parents: &BTreeMap<OpId, &[OpId]>, graded: bool)
+		-> Option<Self>
+	{
+		// Counters are a topological order only where every edge steps down one,
+		// and without a topological order a parent's vector is not finished when
+		// its child comes to read it.
+		if !graded {
+			return None;
+		}
+		let n = parents.len();
+		// A column apiece is the narrowest the matrix can be, so a set that will
+		// not fit one column wide will not fit any, and nothing is allocated to
+		// find that out. This also holds `n` inside a `u32`, which the row and run
+		// numbers below are.
+		if n == 0 || n > VECTORS_ENTRIES_MAX {
+			return None;
+		}
+		// Ascending counter, which grading makes a topological order and which is
+		// not the order `OpId` sorts in -- that is replica first.
+		let mut order: Vec<OpId> = parents.keys().copied().collect();
+		order.sort_unstable_by_key(|id| (id.counter, id.replica));
+		let mut pos: HashMap<OpId, u32> = HashMap::with_capacity(n);
+		for (i, id) in order.iter().enumerate() {
+			pos.insert(*id, i as u32);
+		}
+		let mut column: BTreeMap<ReplicaId, usize> = BTreeMap::new();
+		for id in order.iter() {
+			let next = column.len();
+			column.entry(id.replica).or_insert(next);
+		}
+		let reps = column.len();
+		let mut runs: Vec<u32> = Vec::with_capacity(n);
+		for id in order.iter() {
+			match column.get(&id.replica) {
+				Some(c)	=> runs.push(*c as u32),
+				None	=> return None,
+			}
+		}
+		let rows = match Self::fill(parents, &order, &pos, &runs, reps, false) {
+			Some(r)	=> r,
+			None	=> return None,
+		};
+
+		// Where each replica's run is broken, and so where it is cut. A break is
+		// the parents between them reaching less of this replica than its
+		// immediately preceding operation, and nothing else. Reading it back off
+		// the finished matrix costs one visit per edge rather than per column,
+		// since only the operation's own column is in question.
+		let mut now: Vec<u32> = (0..reps as u32).collect();	// the run each replica is in
+		let mut last: Vec<u64> = vec![0; reps];
+		let mut cols = reps;
+		for (i, id) in order.iter().enumerate() {
+			let c = runs[i] as usize;
+			let mut reached = 0u64;
+			if let Some(ps) = parents.get(id) {
+				for p in ps.iter() {
+					if let Some(a) = pos.get(p) {
+						let seen = rows[(*a as usize) * reps + c];
+						if seen > reached {
+							reached = seen;
+						}
+					}
+				}
+			}
+			if reached != last[c] {
+				now[c] = cols as u32;
+				cols += 1;
+			}
+			runs[i] = now[c];
+			last[c] = id.counter;
+		}
+
+		// Nothing cut means every check above passed and the first pass is already
+		// the index. Otherwise each piece has a column of its own, and the pass
+		// that fills them asks for the run to be unbroken rather than trusting the
+		// cutting to have made it so.
+		let rows = if cols == reps {
+			rows
+		} else {
+			match Self::fill(parents, &order, &pos, &runs, cols, true) {
+				Some(r)	=> r,
+				None	=> return None,
+			}
+		};
+		let at: HashMap<OpId, (u32, u32)> = order.iter()
+			.enumerate()
+			.map(|(i, id)| (*id, (i as u32, runs[i])))
+			.collect();
+		Some(Self { cols, rows, at })
+	}
+
+	/// One pass over the graph in topological order, giving each operation the
+	/// highest counter every column reached in its ancestry.
+	///
+	/// `runs` says which column an operation's own counter belongs in. `check`
+	/// asks each column to arrive at exactly the counter the previous operation
+	/// of that column left behind, which is what the comparison in
+	/// [`Vectors::reaches`] rests on; the first pass is not entitled to it and so
+	/// does not ask.
+	fn fill(
+		parents:	&BTreeMap<OpId, &[OpId]>,
+		order:		&[OpId],
+		pos:		&HashMap<OpId, u32>,
+		runs:		&[u32],
+		cols:		usize,
+		check:		bool,
+	)
+		-> Option<Vec<u64>>
+	{
+		let n = order.len();
+		let entries = match n.checked_mul(cols) {
+			Some(e) if e <= VECTORS_ENTRIES_MAX	=> e,
+			_									=> return None,
+		};
+		let mut rows: Vec<u64> = vec![0; entries];
+		let mut last: Vec<u64> = vec![0; cols];
+		for (i, id) in order.iter().enumerate() {
+			let base = i * cols;
+			let ps = match parents.get(id) {
+				Some(p)	=> *p,
+				None	=> return None,
+			};
+			for p in ps.iter() {
+				// A parent with no position is one the graph does not hold, and one
+				// positioned at or after its child would leave the row being read
+				// unfinished. Closure forbids the first and grading the second, so
+				// both are asked here for nothing -- but neither is enforced by
+				// [`OpLog::append`], which is why they are asked at all.
+				let from = match pos.get(p) {
+					Some(a) if (*a as usize) < i	=> (*a as usize) * cols,
+					_								=> return None,
+				};
+				for k in 0..cols {
+					let reached = rows[from + k];
+					if reached > rows[base + k] {
+						rows[base + k] = reached;
+					}
+				}
+			}
+			let c = runs[i] as usize;
+			if check && rows[base + c] != last[c] {
+				return None;
+			}
+			rows[base + c] = id.counter;
+			last[c] = id.counter;
+		}
+		Some(rows)
+	}
+
+	fn reaches(&self, from: &OpId, target: &OpId) -> bool {
+		let row = match self.at.get(from) {
+			Some((row, _))	=> *row as usize,
+			None			=> return false,
+		};
+		// A target the graph does not hold has no run and is not reached, which has
+		// to be looked up rather than left to the arithmetic: a replica's counters
+		// may skip, since minting is against the whole log, and a vector standing
+		// above a counter nobody ever spent would otherwise read as a reach.
+		let col = match self.at.get(target) {
+			Some((_, col))	=> *col as usize,
+			None			=> return false,
+		};
+		self.rows[row * self.cols + col] >= target.counter
+	}
+
+	/// Roughly what the index occupies, for a caller pricing it.
+	fn bytes(&self) -> usize {
+		self.rows.len() * std::mem::size_of::<u64>()
+			+ self.at.capacity() * (std::mem::size_of::<OpId>() + 2 * std::mem::size_of::<u32>())
+	}
+}
+
+
 /// The parent graph over a set of operations, and the ancestry questions it
 /// answers.
 ///
 /// Built by borrowing each operation's parents rather than copying them, so
 /// asking a question of a large history costs one map and no duplication of the
-/// graph. Every question is asked by walking parents, which terminates because
-/// an operation may not name itself and counters strictly increase along any
-/// path a replica writes.
+/// graph. Ancestry is answered from a version vector index where the graph
+/// admits one, and otherwise by walking parents, which terminates because an
+/// operation may not name itself and counters strictly increase along any path
+/// a replica writes.
 #[derive(Clone, Debug, Default)]
 pub struct Causality<'a> {
 	parents:	BTreeMap<OpId, &'a [OpId]>,	// each operation's parents, by operation
 	// Whether every edge steps strictly downwards in counter, which is what lets
 	// an ancestry walk stop.  Established by looking, never assumed.
 	graded:		bool,
+	vectors:	Option<Vectors>,			// ancestry in O(1), where the graph earns it
 }
 
 impl<'a> Causality<'a> {
@@ -101,7 +322,8 @@ impl<'a> Causality<'a> {
 				}
 			}
 		}
-		Self { parents, graded }
+		let vectors = Vectors::build(&parents, graded);
+		Self { parents, graded, vectors }
 	}
 
 	/// Does every parent edge step strictly downwards in counter?
@@ -116,6 +338,29 @@ impl<'a> Causality<'a> {
 	/// ([`Causality::reaches`]) asks first.
 	pub fn is_graded(&self) -> bool {
 		self.graded
+	}
+
+	/// Is ancestry answered from the version vector index rather than by walking?
+	///
+	/// The index is built where the graph admits it and refused where it does
+	/// not, so this reports which of the two [`Causality::reaches`] is using. The
+	/// answers are the same either way; only the cost differs.
+	pub fn is_indexed(&self) -> bool {
+		self.vectors.is_some()
+	}
+
+	/// Roughly what the index occupies, and `None` where there is none.
+	pub fn index_bytes(&self) -> Option<usize> {
+		self.vectors.as_ref().map(|vv| vv.bytes())
+	}
+
+	/// How many unbroken runs the index cuts the operations into.
+	///
+	/// One per replica where no replica ever forks against itself, and one more
+	/// for every fork after that. It is the width of the index and so what its
+	/// size is linear in, which is the only reason a caller would ask.
+	pub fn index_runs(&self) -> Option<usize> {
+		self.vectors.as_ref().map(|vv| vv.cols)
 	}
 
 	pub fn len(&self) -> usize {
@@ -180,6 +425,14 @@ impl<'a> Causality<'a> {
 	pub fn reaches(&self, from: &OpId, target: &OpId) -> bool {
 		if from == target {
 			return true;
+		}
+		// Where the graph admits a version vector index ([`Vectors`]), ancestry is
+		// two lookups and a comparison, and the walk below never runs. Measured on
+		// the 44,629 operation history: the bound the walk carries took the render
+		// from 14.8 s to 4.9 s, and the index takes it to 0.28 s for 12.4 MB and
+		// 28 ms of building.
+		if let Some(vv) = &self.vectors {
+			return vv.reaches(from, target);
 		}
 		// An operation takes the counter one past the highest the log holds
 		// ([`OpLog::next_counter`]), so every parent edge steps strictly
@@ -522,20 +775,44 @@ mod tests {
 		false
 	}
 
-	/// The bounded walk answers every ancestry question exactly as the
-	/// exhaustive one does, over every pair of a few hundred randomly shaped
-	/// histories.
+	/// Every ordered pair, against the exhaustive walk, naming the pair that
+	/// disagrees.
+	fn every_pair_agrees(cause: &Causality<'_>, ids: &[OpId], what: &str) {
+		for a in ids {
+			for b in ids {
+				assert_eq!(
+					cause.reaches(a, b),
+					reaches_exhaustively(cause, a, b),
+					"{}: reaches({}, {}) disagrees with the exhaustive walk",
+					what, a, b);
+			}
+		}
+	}
+
+	/// A graph over borrowed parent lists, which is how every caller builds one.
+	fn built<'b>(ids: &'b [OpId], parents: &'b [Vec<OpId>])
+		-> Causality<'b>
+	{
+		Causality::new(ids.iter().zip(parents.iter()).map(|(id, p)| (*id, p.as_slice())))
+	}
+
+	/// Whichever way ancestry is answered -- the version vector index, the
+	/// bounded walk, the unbounded one -- the answer is the same, over every pair
+	/// of a few hundred randomly shaped histories.
 	///
-	/// The shapes are the point, and half of them are shapes the tool cannot
-	/// mint. A graded history -- every parent below its child in counter -- is
-	/// what `next_counter` produces and is the case the bound applies to. An
-	/// ungraded one is what [`OpLog::append`] nevertheless accepts, since it
-	/// requires only that a parent be present and that a replica's own counters
-	/// rise; on those the bound must switch itself off, and the only way to know
-	/// it does is to build them and ask.
+	/// The shapes are the point, and two thirds of them are shapes the tool
+	/// cannot mint. A minted history names a replica's own previous operation, so
+	/// no replica ever forks against itself and the index needs no cut. A graded
+	/// history -- every parent below its child in counter -- takes arbitrary
+	/// earlier parents, so it grades but forks constantly, and the index has to
+	/// cut it into runs to stay exact. An ungraded one is what [`OpLog::append`]
+	/// nevertheless accepts, since it requires only that a parent be present and
+	/// that a replica's own counters rise; on those both the index and the bound
+	/// must switch themselves off, and the only way to know they do is to build
+	/// them and ask.
 	///
-	/// Both kinds exercise long chains, wide merges, several replicas authoring
-	/// at once, and operations sharing a counter because two replicas minted one
+	/// All three exercise long chains, wide merges, several replicas authoring at
+	/// once, and operations sharing a counter because two replicas minted one
 	/// concurrently.
 	#[test]
 	fn a_bounded_ancestry_walk_answers_exactly_as_an_exhaustive_one()
@@ -553,8 +830,13 @@ mod tests {
 		let mut pairs = 0usize;
 		let mut saw_graded = 0usize;
 		let mut saw_ungraded = 0usize;
-		for shape in 0..200u64 {
-			let graded = shape % 2 == 0;
+		let mut saw_indexed = 0usize;
+		let mut saw_walked = 0usize;
+		let mut saw_cut = 0usize;
+		for shape in 0..201u64 {
+			let kind = shape % 3;
+			let minted = kind == 0;
+			let graded = kind != 2;
 			let replicas = 1 + (shape % 4);
 			let n = 2 + (next() % 40) as usize;
 			let mut ids: Vec<OpId> = Vec::new();
@@ -571,6 +853,14 @@ mod tests {
 					continue;
 				}
 				let mut ps: Vec<OpId> = Vec::new();
+				// A replica authors against its own frontier, so its own previous
+				// operation is always among the parents. That is the whole of what
+				// the index needs, and the only family here that supplies it.
+				if minted {
+					if let Some(prev) = ids.iter().rev().find(|c| c.replica == id.replica) {
+						ps.push(*prev);
+					}
+				}
 				for (j, cand) in ids.iter().enumerate() {
 					// A graded shape takes only parents strictly below, which is
 					// what minting guarantees. An ungraded one takes any earlier
@@ -588,14 +878,30 @@ mod tests {
 			let cause = Causality::new(
 				ids.iter().zip(parents.iter()).map(|(id, p)| (*id, p.as_slice())));
 			if cause.is_graded() { saw_graded += 1; } else { saw_ungraded += 1; }
+			if cause.is_indexed() { saw_indexed += 1; } else { saw_walked += 1; }
+			let distinct: BTreeSet<ReplicaId> = ids.iter().map(|id| id.replica).collect();
+			match cause.index_runs() {
+				Some(runs) if runs > distinct.len()	=> saw_cut += 1,
+				Some(runs)							=> assert!(!minted || runs == distinct.len(),
+					"shape {}: a minted history forks against nothing, so it wants \
+					{} runs and not {}", shape, distinct.len(), runs),
+				None								=> assert!(!cause.is_graded(),
+					"shape {}: a graded, closed graph admits an index", shape),
+			}
+			assert!(!minted || cause.is_indexed(),
+				"shape {}: a minted history leaves every replica's run unbroken, so \
+				the index must have been built", shape);
 			for a in &ids {
 				for b in &ids {
 					pairs += 1;
 					assert_eq!(
 						cause.reaches(a, b),
 						reaches_exhaustively(&cause, a, b),
-						"shape {}: the bounded walk and the exhaustive one disagree \
-						about whether {} reaches {}", shape, a, b);
+						"shape {}: ancestry as answered ({}) and the exhaustive walk \
+						disagree about whether {} reaches {}",
+						shape,
+						if cause.is_indexed() { "indexed" } else { "walked" },
+						a, b);
 				}
 			}
 		}
@@ -607,6 +913,200 @@ mod tests {
 		assert!(saw_graded >= 20 && saw_ungraded >= 20,
 			"the shapes did not cover both cases: {} graded, {} ungraded",
 			saw_graded, saw_ungraded);
+		// And the same argument for the index: all of them indexed and the walk
+		// never ran, none of them and the index never did. The cut is counted
+		// separately, since an index that never had to cut anything would agree
+		// with the walk for a reason that says nothing about forks.
+		assert!(saw_indexed >= 20 && saw_walked >= 20,
+			"the shapes did not cover both cases: {} indexed, {} walked",
+			saw_indexed, saw_walked);
+		assert!(saw_cut >= 20, "only {} shapes forked against themselves, which is \
+			too few to have exercised the cut", saw_cut);
+		Ok(())
+	}
+
+	/// A replica that forks against itself is cut at the fork, and the index goes
+	/// on answering exactly.
+	///
+	/// The cut is the whole reason the index exists on real histories: a 44,629
+	/// operation repository turned out to hold twenty-nine of these forks, and
+	/// one column per replica would have been refused on every one of them.
+	#[test]
+	fn a_replica_that_forks_against_itself_is_cut_at_the_fork()
+		-> Outcome<()>
+	{
+		// A replica skipping one of its own: (1,3) names (1,1) and not (1,2), so
+		// counter 2 is outside its ancestry while counter 3 is inside it, and no
+		// single highest counter for replica 1 could say that. Cut at (1,3) there
+		// are two runs, and each is a number that can be compared.
+		let ids = vec![oid(1, 1), oid(1, 2), oid(1, 3)];
+		let parents = vec![vec![], vec![oid(1, 1)], vec![oid(1, 1)]];
+		let cause = built(&ids, &parents);
+		assert!(cause.is_graded());
+		assert!(cause.is_indexed(), "a fork is cut, not refused");
+		assert_eq!(cause.index_runs(), Some(2), "one replica, cut once");
+		assert!(!cause.reaches(&oid(1, 3), &oid(1, 2)), "it never saw it");
+		assert!(cause.reaches(&oid(1, 3), &oid(1, 1)));
+		assert!(cause.concurrent(&oid(1, 2), &oid(1, 3)));
+		every_pair_agrees(&cause, &ids, "a replica skipping one of its own");
+
+		// A replica whose first operation in the graph is not its first: (1,2) is
+		// a root though (1,1) is present, which is the same fork at the start.
+		let ids = vec![oid(1, 1), oid(1, 2)];
+		let parents = vec![vec![], vec![]];
+		let cause = built(&ids, &parents);
+		assert_eq!(cause.index_runs(), Some(2));
+		assert!(!cause.reaches(&oid(1, 2), &oid(1, 1)));
+		every_pair_agrees(&cause, &ids, "a root that is not the replica's first");
+
+		// Forking twice cuts twice, and the pieces do not run together: (1,5) sees
+		// the first piece only, (1,4) the second only.
+		let ids = vec![oid(1, 1), oid(1, 2), oid(1, 3), oid(1, 4), oid(1, 5)];
+		let parents = vec![
+			vec![],
+			vec![oid(1, 1)],
+			vec![oid(1, 2)],
+			vec![],
+			vec![oid(1, 3)],
+		];
+		let cause = built(&ids, &parents);
+		assert_eq!(cause.index_runs(), Some(3), "one replica, cut twice");
+		assert!(cause.reaches(&oid(1, 5), &oid(1, 3)));
+		assert!(!cause.reaches(&oid(1, 5), &oid(1, 4)));
+		assert!(!cause.reaches(&oid(1, 4), &oid(1, 1)));
+		every_pair_agrees(&cause, &ids, "a replica forking twice");
+
+		// One replica, its run unbroken, which needs no cut and gets none.
+		let ids = vec![oid(1, 1), oid(1, 2), oid(1, 3)];
+		let parents = vec![vec![], vec![oid(1, 1)], vec![oid(1, 2)]];
+		let cause = built(&ids, &parents);
+		assert_eq!(cause.index_runs(), Some(1), "nothing to cut");
+		assert!(cause.reaches(&oid(1, 3), &oid(1, 1)));
+		assert!(!cause.reaches(&oid(1, 1), &oid(1, 3)));
+		every_pair_agrees(&cause, &ids, "one replica");
+
+		// Two replicas sharing a counter, which is what concurrent minting gives.
+		let ids = vec![oid(1, 1), oid(2, 1), oid(1, 2), oid(2, 2)];
+		let parents = vec![
+			vec![],
+			vec![],
+			vec![oid(1, 1), oid(2, 1)],
+			vec![oid(1, 1), oid(2, 1)],
+		];
+		let cause = built(&ids, &parents);
+		assert_eq!(cause.index_runs(), Some(2), "one run per replica");
+		assert!(cause.concurrent(&oid(1, 1), &oid(2, 1)));
+		assert!(cause.concurrent(&oid(1, 2), &oid(2, 2)));
+		assert!(cause.reaches(&oid(1, 2), &oid(2, 1)), "the merge saw both");
+		every_pair_agrees(&cause, &ids, "two replicas sharing a counter");
+		Ok(())
+	}
+
+	/// The index is refused wherever the graph does not admit one at all, and the
+	/// walk answers instead.
+	///
+	/// Each shape here is one way it can be inadmissible, written out rather than
+	/// waited for: the random families above will produce them, but not reliably,
+	/// and a case that only sometimes runs is a case nobody is checking.
+	#[test]
+	fn the_index_is_refused_where_the_graph_does_not_admit_one()
+		-> Outcome<()>
+	{
+		// A parent the graph does not hold. The walk still answers `true` for the
+		// missing parent itself, since it is named on an edge the graph holds, and
+		// the index has no row to read that off.
+		let ids = vec![oid(1, 1), oid(2, 3)];
+		let parents = vec![vec![], vec![oid(1, 1), oid(1, 2)]];
+		let cause = built(&ids, &parents);
+		assert!(!cause.is_closed());
+		assert!(!cause.is_indexed(), "an open graph must refuse the index");
+		assert_eq!(cause.index_bytes(), None);
+		assert!(cause.reaches(&oid(2, 3), &oid(1, 2)), "it is named as a parent");
+		every_pair_agrees(&cause, &ids, "a parent the graph does not hold");
+
+		// Ungraded, so counters give no topological order to build in.
+		let ids = vec![oid(1, 1), oid(2, 1)];
+		let parents = vec![vec![], vec![oid(1, 1)]];
+		let cause = built(&ids, &parents);
+		assert!(!cause.is_graded());
+		assert!(!cause.is_indexed(), "an ungraded graph must refuse the index");
+		assert!(cause.reaches(&oid(2, 1), &oid(1, 1)));
+		every_pair_agrees(&cause, &ids, "an ungraded graph");
+
+		// Nothing at all, which has no row to be the answer.
+		let none: Vec<(OpId, &[OpId])> = Vec::new();
+		let cause = Causality::new(none);
+		assert!(!cause.is_indexed());
+		assert!(!cause.reaches(&oid(1, 1), &oid(1, 2)));
+		assert!(cause.reaches(&oid(1, 1), &oid(1, 1)));
+		Ok(())
+	}
+
+	/// A counter no replica ever spent is not reached, though the vector for its
+	/// replica stands above it.
+	///
+	/// Minting is against the whole log, so a replica's own counters skip
+	/// whenever another writes in between: two replicas taking turns leaves one
+	/// with the odd counters and the other with the even. The index reads only
+	/// the highest counter a replica reached, which stands above the counters
+	/// nobody minted as much as above the ones somebody did, so an identifier the
+	/// graph does not hold has to be refused by name rather than by arithmetic.
+	#[test]
+	fn a_counter_nobody_spent_is_not_reached()
+		-> Outcome<()>
+	{
+		let r1 = ReplicaId::new(1);
+		let r2 = ReplicaId::new(2);
+		let mut log = OpLog::new();
+		for i in 0..6 {
+			res!(log.author(r1, mark(&fmt!("a{}", i))));
+			res!(log.author(r2, mark(&fmt!("b{}", i))));
+		}
+		let ids: Vec<OpId> = log.iter().map(|rec| rec.head.id()).collect();
+		let cause = log.causality();
+		assert!(cause.is_indexed(), "a minted history is what the index is for");
+		assert_eq!(log.head(r1), Some(11));
+		assert_eq!(log.head(r2), Some(12));
+		let head = oid(1, 11);
+		assert!(cause.reaches(&head, &oid(1, 9)), "its own previous");
+		assert!(cause.reaches(&head, &oid(2, 10)), "and what it was written against");
+		for gap in [2u64, 4, 6, 8, 10] {
+			assert!(!cause.reaches(&head, &oid(1, gap)),
+				"replica 1 never spent counter {}, so nothing reaches it", gap);
+		}
+		// And above everything, and a replica the graph has never heard of.
+		assert!(!cause.reaches(&head, &oid(1, 99)));
+		assert!(!cause.reaches(&head, &oid(7, 1)));
+		every_pair_agrees(&cause, &ids, "a minted history");
+		Ok(())
+	}
+
+	/// The index costs what the arithmetic on it says, which is worth knowing
+	/// before it is switched on over a history a hundred times this size.
+	#[test]
+	fn the_index_costs_a_row_per_operation()
+		-> Outcome<()>
+	{
+		let r1 = ReplicaId::new(1);
+		let r2 = ReplicaId::new(2);
+		let mut log = OpLog::new();
+		for i in 0..50 {
+			res!(log.author(r1, mark(&fmt!("a{}", i))));
+			res!(log.author(r2, mark(&fmt!("b{}", i))));
+		}
+		let cause = log.causality();
+		let bytes = match cause.index_bytes() {
+			Some(b) => b,
+			None => return Err(err!("The index was refused on a minted history."; Test)),
+		};
+		// A hundred operations over two replicas: 100 x 2 x 8 = 1,600 bytes of
+		// matrix, and the row map on top of it.
+		assert!(bytes >= 1_600, "{} bytes is below the matrix itself", bytes);
+		assert!(bytes < 16_000, "{} bytes is more than the matrix and a map", bytes);
+		let empty = Causality::default();
+		assert_eq!(empty.index_bytes(), None);
+		assert!(!empty.is_indexed());
+		assert!(!empty.reaches(&oid(1, 1), &oid(1, 2)));
 		Ok(())
 	}
 
