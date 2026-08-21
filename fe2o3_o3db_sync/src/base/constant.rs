@@ -23,6 +23,25 @@ impl OzoneConfig {
                 USER_REQUEST_TIMEOUT;
             Invalid, Input));
         }
+        // The three deadlines nest: a bot gives up on another bot first, a user request next,
+        // and a control operation last.  Invert any pair and the outer waiter reports a failure
+        // the inner one has not yet had the chance to make.
+        if USER_REQUEST_TIMEOUT <= BOT_REQUEST_TIMEOUT {
+            return Err(err!(
+                "The user request timeout, {:?}, must exceed the internal bot request timeout, \
+                {:?}, or a user request can be abandoned while the bot serving it is still \
+                waiting on another bot.", USER_REQUEST_TIMEOUT, BOT_REQUEST_TIMEOUT;
+            Invalid, Input));
+        }
+        if CONTROL_REQUEST_TIMEOUT < USER_REQUEST_TIMEOUT {
+            return Err(err!(
+                "The control operation timeout, {:?}, must be at least the user request \
+                timeout, {:?}.  A control operation is issued once, at startup, behind \
+                whatever initialisation work the zone bots are still doing, so it cannot be \
+                held to a deadline shorter than an ordinary request's.",
+                CONTROL_REQUEST_TIMEOUT, USER_REQUEST_TIMEOUT;
+            Invalid, Input));
+        }
         Ok(())
     }
 }
@@ -89,6 +108,26 @@ pub const USER_REQUEST_WAIT:                    Wait = Wait {
 pub const BOT_REQUEST_TIMEOUT:                  Duration = Duration::from_secs(5);
 pub const BOT_REQUEST_WAIT:                     Wait = Wait {
     max_wait:       BOT_REQUEST_TIMEOUT,
+    check_interval: CHECK_INTERVAL,
+};
+// A control operation -- activating garbage collection, rolling every writer onto a fresh live
+// file -- is issued once, by whoever owns the database, and usually while it is still starting.
+// Its message queues behind whatever the zone bots are already doing, and the initial survey of
+// a large store's files runs for minutes, so this deadline marks not how long the answer should
+// take but the point at which a bot is better presumed dead than busy.
+//
+// It is deliberately larger than USER_REQUEST_TIMEOUT and the two must not be unified.  A user
+// request is one of very many, on a path a client is blocked on, and its short deadline is what
+// turns a slow request path into a visible error instead of a hang; stretching it to cover
+// startup would hide the very thing it exists to expose.  A control operation has no client
+// waiting on it and happens once, so waiting costs nothing and failing costs everything: six
+// seconds applied here stops a large database booting at all.
+//
+// Five minutes rather than no limit, because a bot that has said nothing for five minutes is a
+// fault to report, not a slow start to wait out.
+pub const CONTROL_REQUEST_TIMEOUT:              Duration = Duration::from_secs(300);
+pub const CONTROL_REQUEST_WAIT:                 Wait = Wait {
+    max_wait:       CONTROL_REQUEST_TIMEOUT,
     check_interval: CHECK_INTERVAL,
 };
 pub const ZONE_STATE_UPDATER_LISTEN_TIMEOUT:    Duration = Duration::from_millis(300);

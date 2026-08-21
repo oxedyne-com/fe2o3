@@ -1019,6 +1019,11 @@ impl<
         }
     }
 
+    /// Walks every index file in every zone, so the cost is the size of the store rather than
+    /// the size of the result.  The deadline is the ordinary user request one, which is what
+    /// keeps "nothing on a request path may scan" enforceable rather than advisory: a walk big
+    /// enough to matter fails here instead of stalling the caller.  A background walk that has
+    /// deliberately accepted the cost says so at its call site with `scan_with_wait`.
     pub fn scan(
         &self,
         opts:   &ScanOpts,
@@ -1026,7 +1031,25 @@ impl<
     )
         -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
     {
+        self.scan_with_wait(opts, schms2, constant::USER_REQUEST_WAIT)
+    }
+
+    /// `scan` with the deadline named by the caller instead of taken from `USER_REQUEST_WAIT`.
+    ///
+    /// # Arguments
+    ///
+    /// * `wait` - how long every zone has, in total, to return its entries.  Only a caller that
+    ///   knows it is off the request path should lengthen this.
+    pub fn scan_with_wait(
+        &self,
+        opts:   &ScanOpts,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        wait:   Wait,
+    )
+        -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
+    {
         let nz = self.cfg().num_zones();
+        let max_wait = wait.max_wait;
         let resp = self.responder();
 
         // Send one ScanRequest to a scan bot of every zone.
@@ -1050,7 +1073,18 @@ impl<
         }
 
         // Gather one ScanEntries response per zone.
-        let (_, msgs) = res!(resp.recv_number(nz, constant::USER_REQUEST_WAIT));
+        let (_, msgs) = match resp.recv_number(nz, wait) {
+            Ok(v) => v,
+            Err(e) => return Err(err!(e,
+                "{}: A scan of all {} zones did not finish within {:?}.  A scan walks every \
+                index file in every zone, so it takes longer the larger the store is, however \
+                few entries match; a scan on a request path is what this deadline exists to \
+                catch.  A caller that is deliberately off the request path should name its own \
+                deadline with scan_with_wait rather than lengthening \
+                constant::USER_REQUEST_TIMEOUT, which every user request shares.",
+                self.ozid(), nz, max_wait;
+                Channel, Timeout)),
+        };
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> = Vec::new();
         for msg in msgs {
             match msg {
@@ -1078,6 +1112,30 @@ impl<
         Ok(out)
     }
 
+    /// Explains a control operation that did not complete, since the bare shortfall from
+    /// `recv_number` names neither the operation, nor the reason a healthy database can miss
+    /// the deadline, nor the constant to change if it should not have.
+    fn control_failure(
+        &self,
+        e:      Error<ErrTag>,
+        opn:    &str,   // the operation attempted
+        n:      usize,  // acknowledgements expected
+        who:    &str,   // the bots expected to acknowledge
+    )
+        -> Error<ErrTag>
+    {
+        err!(e,
+            "{}: The {} failed while waiting up to {:?} for all {} {} to acknowledge it.  A \
+            bot acknowledges a control message only once it reaches it in its queue, so the \
+            usual cause is a store large enough that the bots are still surveying its files \
+            after startup, rather than any fault in the operation.  This deadline is \
+            constant::CONTROL_REQUEST_TIMEOUT; raise that if a store legitimately needs \
+            longer, and not constant::USER_REQUEST_TIMEOUT, which is deliberately short \
+            because every user request shares it.",
+            self.ozid(), opn, constant::CONTROL_REQUEST_TIMEOUT, n, who;
+            Channel, Timeout)
+    }
+
     /// Activate garbage collection by sending a control message to the igbots via the zbots, via the supervisor.
     pub fn activate_gc(&self, on: bool) -> Outcome<()> {
         info!(sync_log::stream(), "Activating garbage collection...");
@@ -1090,7 +1148,13 @@ impl<
                 "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
                 Channel, Write));
         }
-        let (_, msgs) = res!(resp.recv_number(self.cfg().num_zones(), constant::USER_REQUEST_WAIT));
+        // A control operation, not a user request: this runs once, at startup, behind whatever
+        // initialisation the zone bots are still doing.  See constant::CONTROL_REQUEST_TIMEOUT.
+        let nz = self.cfg().num_zones();
+        let (_, msgs) = match resp.recv_number(nz, constant::CONTROL_REQUEST_WAIT) {
+            Ok(v) => v,
+            Err(e) => return Err(self.control_failure(e, emsg, nz, "zone bots")),
+        };
         for msg in msgs {
             match msg {
                 OzoneMsg::Error(e) => return Err(err!(e,
@@ -1414,6 +1478,9 @@ impl<
                 "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
                 Channel, Write));
         }
+        // Deliberately a user request deadline and not the control one: this reports what the
+        // zone bots already hold, it is callable at any time rather than only during startup,
+        // and a caller wanting an answer is better told quickly that there is none.
         let (_, msgs) = res!(resp.recv_number(self.cfg().num_zones(), constant::USER_REQUEST_WAIT));
         let mut map = BTreeMap::new();
         for msg in msgs {
@@ -1442,7 +1509,12 @@ impl<
                 "{}: Cannot send {} to supervisor.", self.ozid(), emsg;
                 Channel, Write));
         }
-        let (_, msgs) = res!(resp.recv_number(self.cfg().num_wbots(), constant::USER_REQUEST_WAIT));
+        // A control operation like `activate_gc`, and queued behind the same zone bot work.
+        let nw = self.cfg().num_wbots();
+        let (_, msgs) = match resp.recv_number(nw, constant::CONTROL_REQUEST_WAIT) {
+            Ok(v) => v,
+            Err(e) => return Err(self.control_failure(e, emsg, nw, "writer bots")),
+        };
         for msg in msgs {
             match msg {
                 OzoneMsg::Error(e) => return Err(err!(e,
