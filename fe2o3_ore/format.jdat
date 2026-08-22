@@ -430,7 +430,15 @@
         }
     ],
 
-    "open": [],
+    "open": [
+        {
+            "question": "how a wrap stops being served, so that removing somebody from a veiled repository means something",
+            "asked":    "12026-08-22",
+            "note":     "key_distribution.md",
+            "why":      "the wraps route takes a deposit and keeps one wrap per address, so a wrap can be replaced and cannot yet be taken away. Revocation is forward only whatever is built -- a departed member keeps whatever they already copied, and no scheme changes that -- so what is open is only the mechanism: a deposit that is authoritative over the whole list would let any pusher wipe everybody else's wraps, and a removal of one named address needs a name for the act and a rule about who may do it. Both are shared names, and the tool that mints a fresh content key on the other side of it has to say in words that operations already veiled under the old key stay readable to whoever held it",
+            "guard":    ["WRAP_REVOKE", "revoke_wrap", "DROP_WRAP", "wraps_delete", "revoked", "revoke", "withdraw"]
+        }
+    ],
 
     "settled": [
         {
