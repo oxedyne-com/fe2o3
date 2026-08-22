@@ -1,11 +1,21 @@
 //! Every credential in this file is spelled in two pieces and joined at run time, so that the
 //! scanners which read this very file -- the git hook, and this crate's own scanner under a
 //! version control system that cannot forget -- find nothing in it to refuse.
+//!
+//! The DER fixtures are the one thing here written out whole, and they are not credentials. Each
+//! is the structural head of a key -- the outer length, the version, the algorithm's object
+//! identifier and the tag that opens the private bytes -- read off a key generated with `openssl
+//! genpkey` or `ring` for that purpose, and stopping exactly where the secret would begin. The
+//! body is filler put there at run time. That is enough to ask the detector the only question it
+//! asks, and it means no key was written into a file that is pushed to a public repository.
 
-use oxedyne_fe2o3_text::secret::{
-	self,
-	Find,
-	Kind,
+use oxedyne_fe2o3_text::{
+	base2x,
+	secret::{
+		self,
+		Find,
+		Kind,
+	},
 };
 
 use oxedyne_fe2o3_core::{
@@ -33,6 +43,43 @@ const SHAPED: &[(&str, &str, Kind)] = &[
 
 // The value of a `Kind::Assigned` finding, in two pieces for the same reason.
 const LITERAL: (&str, &str) = ("9f3Bq7", "ZmR4tYuIoPkLjHgFdS");
+
+// The structural head of one private key of each form this catches, and the whole size of the key
+// it came off. Read off keys generated with `openssl genpkey`, `openssl ecparam -genkey` and
+// `ring`, in that order of appearance, and stopping before the private bytes: see the note at the
+// head of this file.
+const DER: &[(&str, &str, usize)] = &[
+	("ed25519, PKCS#8",		"302E020100300506032B657004220420",					48),
+	("ed25519, with the public key",
+							"3051020101300506032B657004220420",					83),
+	("X25519, PKCS#8",		"302E020100300506032B656E04220420",					48),
+	("RSA-2048, PKCS#8",	"308204BD020100300D06092A864886F70D0101010500048204A7",
+																				1217),
+	("RSA-2048, PKCS#1",	"308204A30201000282010100",							1191),
+	("RSA-4096, PKCS#1",	"308209290201000282020100",							2349),
+	("P-256, PKCS#8",		"308187020100301306072A8648CE3D020106082A8648CE3D030107",
+																				138),
+	("P-384, PKCS#8",		"3081B6020100301006072A8648CE3D020106052B8104002204819E",
+																				185),
+	("P-256, SEC1",			"30770201010420",									121),
+	("P-384, SEC1",			"3081A40201010430",									167),
+];
+
+// The 83-byte shape the DKIM signing key was in, named on its own because it is the case this
+// rule was written for.
+const DKIM: (&str, usize) = (DER[1].1, DER[1].2);
+
+/// The key of that shape, its structure real and its body filler.
+fn der(head: &str, len: usize) -> Outcome<Vec<u8>> {
+	let mut out = res!(base2x::HEX.from_str(head));
+	// Whatever stands where the secret would is beside the point: the detector is being asked a
+	// question about the encoding, and it never looks at these bytes.
+	while out.len() < len {
+		out.push(0x5A);
+	}
+	out.truncate(len);
+	Ok(out)
+}
 
 
 pub fn test_secret(filter: &'static str) -> Outcome<()> {
@@ -177,6 +224,104 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		req!(secret::skip_path(path), false);
 		let line = fmt!("let key = \"{}{}\";\n", SHAPED[0].0, SHAPED[0].1);
 		req!(secret::scan(line.as_bytes()), vec![Find { line: 1, kind: Kind::Fireworks }]);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A private key in DER form is caught", "all", "secret", "der"], || {
+		for (what, head, len) in DER {
+			let key = res!(der(head, *len));
+			req!(key.len(), *len, "for {:?}", what);
+			req!(secret::scan(&key), vec![Find { line: 1, kind: Kind::DerKey }], "for {:?}", what);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["The DKIM key's own shape is caught at 83 bytes", "all", "secret",
+		"der"], ||
+	{
+		// A raw PKCS#8 ed25519 key carrying its public half, which is what `ring` writes and what
+		// signed mail for four months from a folder that replicates. No armour, no vendor prefix
+		// and no field name beside it.
+		let key = res!(der(DKIM.0, DKIM.1));
+		req!(key.len(), 83);
+		req!(key[1], 0x51);
+		req!(secret::scan(&key), vec![Find { line: 1, kind: Kind::DerKey }]);
+		// The object identifier is the whole of what says so. One byte off it and this is 83 bytes
+		// that nothing else in the module can see -- no shape, no field name, no armour -- which is
+		// what the four months were.
+		let mut off = key.clone();
+		off[11] ^= 0x01;
+		req!(secret::scan(&off), Vec::<Find>::new());
+		// A real key's bytes are random, so a NUL stands somewhere in most of them, and the binary
+		// skip would then stop the scan before it began. This is asked first, and the order is what
+		// this line holds in place.
+		let mut nulled = key.clone();
+		nulled[20] = 0;
+		req!(secret::scan(&nulled), vec![Find { line: 1, kind: Kind::DerKey }]);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A newline after the last byte does not hide a DER key", "all",
+		"secret", "der"], ||
+	{
+		for tail in ["\n", "\r\n", "\n\n"] {
+			let mut key = res!(der(DER[0].1, DER[0].2));
+			key.extend_from_slice(tail.as_bytes());
+			req!(secret::scan(&key), vec![Find { line: 1, kind: Kind::DerKey }], "for {:?}", tail);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["What is not a whole DER private key is left alone", "all", "secret",
+		"der"], ||
+	{
+		// A public key, which names the same algorithm and holds nothing worth refusing: the
+		// version integer this rule turns on is absent from it.
+		let public = res!(der("302A300506032B6570032100", 44));
+		req!(secret::scan(&public), Vec::<Find>::new(), "public key");
+		// A certificate, whose outer sequence opens with another sequence.
+		let cert = res!(der("3082013B3081EEA003020102", 319));
+		req!(secret::scan(&cert), Vec::<Find>::new(), "certificate");
+		// An algorithm nobody has, one object identifier byte away from ed25519.
+		let other = res!(der("302E020100300506032B657104220420", 48));
+		req!(secret::scan(&other), Vec::<Find>::new(), "unknown algorithm");
+		// Truncated, and padded: in both the outer length stops accounting for the file, and what
+		// is refused is a file that is a key and nothing else.
+		let short = res!(der(DER[0].1, 47));
+		req!(secret::scan(&short), Vec::<Find>::new(), "truncated");
+		let mut long = res!(der(DER[0].1, DER[0].2));
+		long.push(0x5A);
+		req!(secret::scan(&long), Vec::<Find>::new(), "padded");
+		// A key with anything at all written after it, which is a file holding a key rather than a
+		// key. The PEM shape is the armoured form of the same thing and is what catches that case.
+		let mut noted = res!(der(DER[0].1, DER[0].2));
+		noted.extend_from_slice(b"# a note\n");
+		req!(secret::scan(&noted), Vec::<Find>::new(), "annotated");
+		// Nothing, and something far too small to be a key.
+		req!(secret::scan(b""), Vec::<Find>::new(), "empty");
+		req!(secret::scan(&[0x30, 0x02, 0x02, 0x01]), Vec::<Find>::new(), "tiny");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A compiled artefact is not read for a DER key", "all", "secret",
+		"der"], ||
+	{
+		// Size is the whole of the gate, and it is asked before a byte is looked at. fe2o3 has a
+		// 22 MB binary in its history, and the estate has ONNX models and video beside it. What it
+		// costs is stated here rather than left to be found: this is a well formed ed25519 key
+		// declaring 8996 bytes, which is the size an RSA-16384 key would be, and it goes free.
+		let big = res!(der("30822324020100300506032B657004220420", 9000));
+		req!(big.len(), 9000);
+		req!(secret::scan(&big), Vec::<Find>::new(), "over the ceiling");
+		// One byte under the ceiling the same key is caught, so the gate and nothing else is what
+		// let the one above through.
+		let under = res!(der("30821F3C020100300506032B657004220420", 8000));
+		req!(under.len(), 8000);
+		req!(secret::scan(&under), vec![Find { line: 1, kind: Kind::DerKey }], "at the ceiling");
+		// And an ELF header opens with nothing this rule answers to.
+		let mut elf = fmt!("\u{7f}ELF").into_bytes();
+		elf.resize(200, 0);
+		req!(secret::scan(&elf), Vec::<Find>::new(), "ELF");
 		Ok(())
 	}));
 

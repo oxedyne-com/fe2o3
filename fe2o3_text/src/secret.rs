@@ -15,6 +15,21 @@
 //! UTF-8 byte in a comment is exactly where an unnoticed key would sit, and a scanner that decoded
 //! first would pass over the file entirely.
 //!
+//! # Key material with no text shape
+//!
+//! A private key written as raw DER is a credential that no run of characters describes: it has no
+//! armour, no vendor prefix and no field name beside it, and it holds NULs, so the binary skip
+//! below was passing over precisely the thing this module exists to stop. It is caught instead by
+//! the fixed bytes the encoding itself puts at the front of one -- an algorithm's object
+//! identifier, which is as literal as the PEM header above it and is a heuristic in no sense at
+//! all. Written on 2026-08-23, after a live DKIM signing key spent four months at mode 644 in a
+//! replicated folder and nothing here could have seen it.
+//!
+//! The bytes were read off keys generated for the purpose and are stated in [`DER_ALGOS`]; none of
+//! them came from a file in anybody's tree, and nothing in this module was tuned against one. That
+//! matters to the next reader, who will otherwise assume the opposite and be right to distrust the
+//! result.
+//!
 //! # Why the shapes are matched by hand
 //!
 //! [`crate::regex`] would say these patterns in one line each, and is not used for two reasons: it
@@ -64,6 +79,37 @@ const SOURCE: &str = "src";
 const PEM_ALGOS: &[&str] = &["", "RSA ", "EC ", "DSA ", "OPENSSH ", "PGP "];
 const PEM_KEY: &str = "PRIVATE KEY";
 
+// Widest a file can be and still be taken for a bare DER key, and narrowest. The upper bound is
+// what keeps this off the compiled artefacts: a 22 MB binary is rejected on a length comparison
+// before a byte of it is looked at, and no private key comes near 8000 bytes -- an RSA-8192 key in
+// PKCS#8 is about 4.7 kB, and everything else on this list is under 2.4 kB. The lower bound is
+// below the smallest of them, an ed25519 key at 48 bytes.
+const DER_MAX: usize = 8000;
+const DER_MIN: usize = 32;
+
+/// The `AlgorithmIdentifier` that stands after the version in a PKCS#8 private key, one per
+/// algorithm, each an object identifier the encoding fixes and nobody chooses.
+///
+/// Every sequence here was read off a key generated for the purpose -- `openssl genpkey` for the
+/// first five, `ring`'s own Ed25519 generator for the sixth form below -- and not off a file in
+/// any tree. There is nothing to tune and nothing that was tuned: a file opening with one of these
+/// is a private key of that algorithm, and the question has no second answer.
+pub const DER_ALGOS: &[&[u8]] = &[
+	&[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70],							// ed25519
+	&[0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x6e],							// X25519
+	&[0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01,
+		0x01, 0x01, 0x05, 0x00],											// RSA
+	&[0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+		0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],		// ECDSA, P-256
+	&[0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+		0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],							// ECDSA, P-384
+];
+
+// Widths of the private scalar of the curves whose keys `openssl ecparam -genkey` writes in the
+// older SEC1 form, which names no algorithm and is what this machine's openssl produces by
+// default. P-256, P-384, P-521.
+const DER_SCALARS: &[u8] = &[0x20, 0x30, 0x42];
+
 // Field names that say outright what the value beside them is.
 const FIELDS: &[&str] = &[
 	"api_key",
@@ -107,6 +153,7 @@ pub enum Kind {
 	Stripe,		// sk_live_, rk_live_
 	Google,		// AIza
 	PrivateKey,	// a PEM private key block
+	DerKey,		// a private key written as DER, with nothing around it
 	Assigned,	// a named secret field holding a long literal
 }
 
@@ -125,6 +172,7 @@ impl Kind {
 			Self::Stripe		=> "Stripe live secret key",
 			Self::Google		=> "Google API key",
 			Self::PrivateKey	=> "private key block",
+			Self::DerKey		=> "private key in DER form",
 			Self::Assigned		=> "assigned secret literal",
 		}
 	}
@@ -250,6 +298,13 @@ fn field_lead(b: u8) -> bool {
 /// believes, and a credential compiled into a binary was in a source file first.
 pub fn scan(data: &[u8]) -> Vec<Find> {
 	let mut out = Vec::new();
+	// Asked before the binary skip, because a key in DER form is exactly what that skip passes
+	// over: NULs at the front, no text anywhere, and nothing the line walk below can see. It is a
+	// property of the whole input rather than of a line, so it answers on its own and stops here.
+	if der_key(data) {
+		out.push(Find { line: 1, kind: Kind::DerKey });
+		return out;
+	}
 	let head = data.len().min(BINARY_HEAD);
 	if data[..head].contains(&0) {
 		return out;
@@ -295,6 +350,70 @@ pub fn skip_path(path: &[u8]) -> bool {
 		dirs += 1;
 	}
 	LOCKFILES.iter().any(|f| f.as_bytes() == last)
+}
+
+/// Is the whole of these bytes one private key, written as DER and left unarmoured?
+///
+/// The three questions are the encoding's own, and each of them has one answer. The outer
+/// `SEQUENCE` has to account for the input exactly, so what is refused is a file that is a key and
+/// nothing else -- a byte of anything else in it and this is not what it claims to be. The version
+/// `INTEGER` is 0 for PKCS#8 and PKCS#1 and 1 for the `OneAsymmetricKey` form that carries the
+/// public key too, which is the 83-byte shape `ring` writes and the shape the DKIM key was in.
+/// What follows the version is then an algorithm's object identifier from [`DER_ALGOS`], or the
+/// modulus of a PKCS#1 RSA key, or the private scalar of a SEC1 elliptic curve key.
+///
+/// There is no marker that excuses a finding here, and there cannot be: a file which is a key and
+/// nothing else has nowhere to put one, and anything appended to make room stops the length
+/// accounting above from agreeing, at which point there is no finding to excuse. A test that needs
+/// a key should generate one, which is what this crate's own suite does.
+fn der_key(data: &[u8]) -> bool {
+	if data.len() < DER_MIN || data.len() > DER_MAX || data.first() != Some(&0x30) {
+		return false;
+	}
+	let (len, hdr) = match der_len(&data[1..]) {
+		Some(v)	=> v,
+		None	=> return false,
+	};
+	let whole = 1 + hdr + len;
+	// An editor or a shell redirect will put a newline after the last byte, and that is the only
+	// thing allowed to stand outside the SEQUENCE.
+	if whole > data.len() || !data[whole..].iter().all(|b| *b == b'\n' || *b == b'\r') {
+		return false;
+	}
+	let body = &data[1 + hdr..];
+	let after = if body.starts_with(&[0x02, 0x01, 0x00]) {
+		&body[3..]
+	} else if body.starts_with(&[0x02, 0x01, 0x01]) {
+		// The version says the public key follows the private one, so a SEC1 scalar can stand here
+		// as well as a PKCS#8 algorithm.
+		let after = &body[3..];
+		if DER_SCALARS.iter().any(|w| after.starts_with(&[0x04, *w])) {
+			return true;
+		}
+		after
+	} else {
+		return false;
+	};
+	if DER_ALGOS.iter().any(|a| after.starts_with(a)) {
+		return true;
+	}
+	// PKCS#1, which names no algorithm: what follows the version is the modulus, an INTEGER whose
+	// length is written long form because no key worth having has one under 128 bytes.
+	after.starts_with(&[0x02, 0x81]) || after.starts_with(&[0x02, 0x82])
+}
+
+/// The length a DER header declares, and the bytes that header took, or nothing where the form is
+/// one no private key is written in.
+fn der_len(from: &[u8]) -> Option<(usize, usize)> {
+	match from.first() {
+		Some(n) if *n < 0x80	=> Some((*n as usize, 1)),
+		Some(&0x81)				=> from.get(1).map(|n| (*n as usize, 2)),
+		Some(&0x82)				=> match (from.get(1), from.get(2)) {
+			(Some(hi), Some(lo))	=> Some((((*hi as usize) << 8) | *lo as usize, 3)),
+			_						=> None,
+		},
+		_						=> None,
+	}
 }
 
 /// Does the line carry the marker that excuses it?
