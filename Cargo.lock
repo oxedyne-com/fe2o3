@@ -2081,6 +2081,7 @@ dependencies = [
  "bindgen",
  "byteorder",
  "console_error_panic_hook",
+ "curve25519-dalek",
  "digest 0.7.6",
  "ed25519-dalek",
  "hex",

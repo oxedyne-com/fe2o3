@@ -443,4 +443,18 @@
       "Database",
     ]),
   },
+  "HFN5dPSwWFeAktUWQEr0S9Zn1LyMSaurR4tPSPM9c0w=": {
+    (nams): (vek|[
+      "X25519",
+    ]),
+    (lang): "English",
+    (desc): "An elliptic curve Diffie-Hellman function over Curve25519, specified in RFC 7748. Two parties each hold a 32 byte secret and publish a 32 byte public key, and each computes the same 32 byte shared secret from its own secret and the other's public key.",
+    (tim1): "12006",
+    (tags): (vek|[
+      "Algorithm",
+      "Asymmetric",
+      "KeyAgreement",
+      "Transformation",
+    ]),
+  },
 }
