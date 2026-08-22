@@ -61,8 +61,10 @@ const DER: &[(&str, &str, usize)] = &[
 																				138),
 	("P-384, PKCS#8",		"3081B6020100301006072A8648CE3D020106052B8104002204819E",
 																				185),
+	("P-521, PKCS#8",		"3081EE020100301006072A8648CE3D020106052B81040023",	241),
 	("P-256, SEC1",			"30770201010420",									121),
 	("P-384, SEC1",			"3081A40201010430",									167),
+	("P-521, SEC1",			"3081DC0201010442",									223),
 ];
 
 // The 83-byte shape the DKIM signing key was in, named on its own because it is the case this

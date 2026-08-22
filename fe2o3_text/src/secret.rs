@@ -90,8 +90,8 @@ const DER_MIN: usize = 32;
 /// The `AlgorithmIdentifier` that stands after the version in a PKCS#8 private key, one per
 /// algorithm, each an object identifier the encoding fixes and nobody chooses.
 ///
-/// Every sequence here was read off a key generated for the purpose -- `openssl genpkey` for the
-/// first five, `ring`'s own Ed25519 generator for the sixth form below -- and not off a file in
+/// Every sequence here was read off the front of a key generated for the purpose -- `openssl
+/// genpkey -outform DER` piped through `openssl pkcs8 -topk8`, on 2026-08-23 -- and off no file in
 /// any tree. There is nothing to tune and nothing that was tuned: a file opening with one of these
 /// is a private key of that algorithm, and the question has no second answer.
 pub const DER_ALGOS: &[&[u8]] = &[
@@ -103,11 +103,13 @@ pub const DER_ALGOS: &[&[u8]] = &[
 		0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07],		// ECDSA, P-256
 	&[0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
 		0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22],							// ECDSA, P-384
+	&[0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01,
+		0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x23],							// ECDSA, P-521
 ];
 
 // Widths of the private scalar of the curves whose keys `openssl ecparam -genkey` writes in the
 // older SEC1 form, which names no algorithm and is what this machine's openssl produces by
-// default. P-256, P-384, P-521.
+// default. Read off one key per curve, the same day and the same way. P-256, P-384, P-521.
 const DER_SCALARS: &[u8] = &[0x20, 0x30, 0x42];
 
 // Field names that say outright what the value beside them is.
