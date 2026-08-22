@@ -196,6 +196,44 @@ pub const PACKED_MAX: usize = 64 << 20;
 const COMPACT_THRESHOLD: usize = 1 << 16;
 
 
+/// Whether a reader recomputes each record's digest, or takes the one written
+/// beside it.
+///
+/// Recomputing is what a segment's framing is for and it is the default; there
+/// is no way to reach [`Integrity::Vouched`] except by asking for it. The two
+/// read the same records out of the same bytes and differ only in what they
+/// notice about damage.
+///
+/// # What vouching costs, and what it is worth
+///
+/// The digest covers `[kind] || body` of one record, so recomputing it hashes
+/// every byte of the segment. Over a 35,408 operation log in 85 MB that is
+/// 420 ms of a 574 ms decode -- the file I/O beneath it is 7.7 ms -- which is
+/// paid on every read of a history that has not changed since the last one.
+///
+/// What it buys is the only check that survives a segment nothing else looks
+/// at. A signature says who wrote a record and is skippable by a caller that
+/// remembers checking it; the digest says the bytes are the bytes, and a body
+/// byte that flips on the disk changes neither the file's length nor its
+/// modification time nor the digests recorded beside the bodies. So a caller
+/// that vouches has stopped looking for bit rot on this read, and something
+/// else must look for it on some other one. That is not a trade this crate can
+/// make on a caller's behalf, which is why it is an argument.
+///
+/// **A caller warranting [`Integrity::Vouched`] warrants three things**: that
+/// these exact bytes were read under [`Integrity::Checked`] at some point, that
+/// nothing has appended to or rewritten the file since, and that something
+/// still re-reads them checked on a timescale it has chosen. Vouching for a
+/// file still being written, or for one this machine has never checked, throws
+/// the check away and puts nothing in its place.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Integrity {
+	#[default]
+	Checked,	// hash each body and refuse a record whose digest does not match
+	Vouched,	// take the recorded digest as read, on the caller's warrant above
+}
+
+
 /// What a segment says about itself before its first record.
 ///
 /// The replica hint is exactly that: a note of who was writing, which lets a
@@ -787,6 +825,7 @@ pub struct Reader<H: Hasher, const S: usize> {
 	head:	Option<Head>,		// the header, once it has been read
 	count:	usize,				// records handed over
 	tally:	Option<Vec<u8>>,	// digests of records handed over since the last take
+	check:	Integrity,			// whether each record's digest is recomputed
 	// A packed record inflated, and how much of it has been handed over. A run is
 	// drained before another byte of the segment is looked at, so the records
 	// come out in the order they went in and a caller cannot tell a packed
@@ -807,9 +846,21 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 			head:	None,
 			count:	0,
 			tally:	None,
+			check:	Integrity::Checked,
 			run:	Vec::new(),
 			ran:	0,
 		}
+	}
+
+	/// Reads on the caller's warrant that these bytes have already been checked,
+	/// rather than checking them again.
+	///
+	/// Read [`Integrity`] before reaching for this. It takes the segment's only
+	/// defence against a body byte that flipped on the disk out of the read, and
+	/// it is the caller who has to say where that defence went instead.
+	pub fn integrity(mut self, check: Integrity) -> Self {
+		self.check = check;
+		self
 	}
 
 	/// A reader that also keeps the digest of every record it hands over, for a
@@ -924,7 +975,7 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		if self.ran < self.run.len() {
 			let (entry, used, digest) = {
 				let taken = res!(framed(
-					&self.hasher, self.salt, &self.run[self.ran..], self.count));
+					&self.hasher, self.salt, &self.run[self.ran..], self.count, self.check));
 				match taken {
 					Some(f) => {
 						if f.kind == KIND_PACKED {
@@ -935,7 +986,7 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 								self.count;
 							Decode, Input, Invalid));
 						}
-						(res!(Entry::from_body(f.kind, f.body)), f.used, f.digest)
+						(res!(Entry::from_body(f.kind, f.body)), f.used, f.digest.to_vec())
 					},
 					None => return Err(err!(
 						"A packed run ends part way through record {}, with {} byte{} \
@@ -966,12 +1017,12 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		// as the plain one it was made from.
 		let made = {
 			let taken = res!(framed(
-				&self.hasher, self.salt, &self.buf[self.pos..], self.count));
+				&self.hasher, self.salt, &self.buf[self.pos..], self.count, self.check));
 			match taken {
 				Some(f) if f.kind == KIND_PACKED	=> Some((Made::Run(res!(
 					inflate(f.body, self.count))), f.used)),
 				Some(f)								=> Some((Made::One(res!(
-					Entry::from_body(f.kind, f.body)), f.digest), f.used)),
+					Entry::from_body(f.kind, f.body)), f.digest.to_vec()), f.used)),
 				None								=> None,
 			}
 		};
@@ -1026,7 +1077,7 @@ enum Made {
 	Run(Vec<u8>),			// a packed record inflated, still framed
 }
 
-/// One framed record, checked against the digest written beside it.
+/// One framed record, with the digest written beside it.
 ///
 /// The kind is handed back rather than interpreted, because what is done next
 /// depends on it: a bare, sealed or veiled record becomes an [`Entry`], and a
@@ -1035,7 +1086,7 @@ struct Framed<'a> {
 	kind:	u8,
 	body:	&'a [u8],
 	used:	usize,		// bytes of `buf` the whole record occupied
-	digest:	Vec<u8>,	// what it was checked against, which is what a fold wants
+	digest:	&'a [u8],	// the record's digest, which is what a fold wants
 }
 
 /// Reads one framed record from the front of `buf`, whether that is a segment
@@ -1044,11 +1095,16 @@ struct Framed<'a> {
 /// `None` means the bytes so far are a prefix of a record and more are needed;
 /// the caller decides whether more can arrive. `ordinal` is only for the
 /// messages, so that a damaged record names its own position.
+///
+/// Under [`Integrity::Vouched`] the body is not hashed and the recorded digest
+/// is handed back unexamined, so what comes out of a run of records is the same
+/// bytes either way and only the damage a fold could name differs.
 fn framed<'a, H: Hasher, const S: usize>(
 	hasher:		&H,
 	salt:		[u8; S],
 	buf:		&'a [u8],
 	ordinal:	usize,
+	check:		Integrity,
 )
 	-> Outcome<Option<Framed<'a>>>
 {
@@ -1090,6 +1146,9 @@ fn framed<'a, H: Hasher, const S: usize>(
 		return Ok(None);
 	}
 	let digest = &buf[at..digest_end];
+	if let Integrity::Vouched = check {
+		return Ok(Some(Framed { kind, body, used: digest_end, digest }));
+	}
 	let want = hasher.clone().hash(&[&[kind], body], salt).as_vec();
 	if want != digest {
 		// Naming the operation is worth a decode attempt, since a caller with a
@@ -1111,7 +1170,7 @@ fn framed<'a, H: Hasher, const S: usize>(
 			ordinal, named, body.len(), want, digest;
 		Decode, Input, Checksum, Mismatch));
 	}
-	Ok(Some(Framed { kind, body, used: digest_end, digest: want }))
+	Ok(Some(Framed { kind, body, used: digest_end, digest }))
 }
 
 /// Compresses a run's plain framing.
@@ -1139,9 +1198,12 @@ fn deflate(plain: &[u8])
 ///
 /// A compressed frame is an instruction to allocate and it arrives from wherever
 /// the segment did, so the output is bounded by [`PACKED_MAX`] and a frame that
-/// reaches it is refused rather than obeyed. The digest over the compressed
-/// bytes has already held by the time this is called, so what this guards is a
-/// frame somebody wrote to be obeyed rather than one that was damaged.
+/// reaches it is refused rather than obeyed. The bound is what makes
+/// [`Integrity::Vouched`] safe to offer: under [`Integrity::Checked`] the digest
+/// over the compressed bytes has held by the time this is called and what
+/// remains to guard against is a frame somebody wrote to be obeyed, but a
+/// vouched read reaches here with the frame unexamined and the same bound holds
+/// it.
 fn inflate(body: &[u8], ordinal: usize)
 	-> Outcome<Vec<u8>>
 {
@@ -1866,6 +1928,159 @@ mod tests {
 			assert!(said.contains("a run of packed operations"),
 				"and the message says what the record was: {}", said);
 		}
+		Ok(())
+	}
+
+	/// A vouched read yields exactly what a checked read yields, for every shape
+	/// of segment there is.
+	///
+	/// This is the whole of what the gate may change: which bodies get hashed.
+	/// The records that come out, the order they come out in, the header and the
+	/// tally a fold is built from must all be the same bytes, because a caller
+	/// switching modes is not asking for a different history. The tally matters
+	/// most: a vouched read hands back the digest it found rather than one it
+	/// computed, and if those two ever differed on sound bytes then every verdict
+	/// ever filed would miss.
+	#[test]
+	fn a_vouched_read_yields_what_a_checked_read_yields() -> Outcome<()> {
+		let entries = res!(bare());
+		let (signed, _) = res!(sealed());
+		let head = Head::new(Some(ReplicaId::new(7)));
+
+		let mut mixed: Writer<Fold, 0> = Writer::new(&head, Fold, [0u8; 0]);
+		res!(mixed.push(&entries[0]));
+		res!(mixed.push_packed(&entries[1..]));
+		res!(mixed.push(&signed[0]));
+		let shapes = [
+			("plain bare",	res!(encode(&head, &entries, Fold, [0u8; 0]))),
+			("plain sealed",	res!(encode(&head, &signed, Fold, [0u8; 0]))),
+			("packed and plain together",	mixed.finish()),
+		];
+
+		for (shape, bytes) in &shapes {
+			let mut want: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+			let mut got: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0])
+				.integrity(Integrity::Vouched);
+			let (mut want_out, mut got_out) = (Vec::new(), Vec::new());
+			want.feed(bytes);
+			want.end();
+			got.feed(bytes);
+			got.end();
+			while let Some(entry) = res!(want.next_entry()) {
+				want_out.push(entry);
+			}
+			while let Some(entry) = res!(got.next_entry()) {
+				got_out.push(entry);
+			}
+			assert!(!want_out.is_empty(), "the {} fixture holds records", shape);
+			assert_eq!(got_out, want_out, "a vouched read of a {} segment", shape);
+			assert_eq!(got.head(), want.head(), "and reads the same header, {}", shape);
+			assert_eq!(got.count(), want.count(), "and the same count, {}", shape);
+			let tally = want.take_digests();
+			assert_eq!(tally.len(), want_out.len() * 8, "one digest per record, {}", shape);
+			assert_eq!(got.take_digests(), tally,
+				"and the same tally, so a fold over a vouched read is the fold a \
+				verdict was filed under, {}", shape);
+		}
+		Ok(())
+	}
+
+	/// **The trade, written down.** A body byte that flips under a vouched read
+	/// is handed over as though nothing happened, and a fold cannot see it
+	/// either.
+	///
+	/// The same damage under a checked read is refused by name. Both halves are
+	/// asserted here because the pair is the point: this is not a test that the
+	/// gate works, it is a test of what the gate costs, and the cost is what
+	/// [`crate::segment::Integrity`] tells a caller to go and cover somewhere
+	/// else.
+	#[test]
+	fn a_vouched_read_lets_a_flipped_body_byte_through() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(None);
+		let good = res!(encode(&head, &entries, Fold, [0u8; 0]));
+
+		// One letter of a note's text, which is bit rot as it actually reads: a
+		// byte that keeps its record the same length and the same shape, so
+		// nothing but the digest over it could ever have noticed.
+		let at = res!(good.windows(3).position(|w| w == b"fox").ok_or_else(|| err!(
+			"The fixture no longer carries the text this test damages."; Test, Missing)));
+		let mut bad = good.clone();
+		bad[at] ^= 0x20;
+		assert_eq!(bad.len(), good.len(), "the damage moved nothing");
+		assert_ne!(bad, good, "and really is damage");
+
+		let mut checked: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+		checked.feed(&bad);
+		checked.end();
+		let said = loop {
+			match checked.next_entry() {
+				Ok(Some(_))	=> (),
+				Ok(None)	=> return Err(err!(
+					"A checked read took a segment whose body bytes had been changed.";
+				Test, Invalid)),
+				Err(e)		=> break fmt!("{}", e.plain()),
+			}
+		};
+		assert!(said.contains("fails its integrity check"),
+			"a checked read still says what is wrong: {}", said);
+
+		let mut vouched: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0])
+			.integrity(Integrity::Vouched);
+		vouched.feed(&bad);
+		vouched.end();
+		let mut got = Vec::new();
+		while let Some(entry) = res!(vouched.next_entry()) {
+			got.push(entry);
+		}
+		assert_eq!(got.len(), entries.len(),
+			"a vouched read hands over every record of a damaged segment");
+		assert_ne!(got, entries,
+			"and what it hands over is not what was written");
+
+		// And the fold is blind to it, which is the part that decides where the
+		// check has to go instead: the digests are read out of the file, so the
+		// same file with a changed body folds to what it folded to before.
+		let mut sound: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0])
+			.integrity(Integrity::Vouched);
+		sound.feed(&good);
+		sound.end();
+		while let Some(_) = res!(sound.next_entry()) {}
+		assert_eq!(vouched.take_digests(), sound.take_digests(),
+			"a damaged body folds to what the sound one folded to, so nothing \
+			downstream of the tally can catch this either");
+		Ok(())
+	}
+
+	/// A vouched read reaches the decompressor with the frame unexamined, and the
+	/// bound still refuses a run that would not stop.
+	///
+	/// [`Integrity::Vouched`] gives up the digest that used to stand in front of
+	/// [`inflate`], so the only thing between a hostile frame and the allocator
+	/// is [`PACKED_MAX`]. That was true before and is load bearing now.
+	#[test]
+	fn a_vouched_read_still_refuses_a_run_that_would_not_stop() -> Outcome<()> {
+		let big = vec![0u8; PACKED_MAX + 1024];
+		let body = res!(deflate(&big));
+		let mut bytes = Head::new(None).encode();
+		bytes.push(KIND_PACKED);
+		varint_encode(body.len() as u64, &mut bytes);
+		bytes.extend_from_slice(&body);
+		// A digest that is not the frame's, so that nothing here could be passing
+		// because the frame happened to check out.
+		varint_encode(8, &mut bytes);
+		bytes.extend_from_slice(&[0u8; 8]);
+
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0])
+			.integrity(Integrity::Vouched);
+		reader.feed(&bytes);
+		reader.end();
+		let said = match reader.next_entry() {
+			Ok(_)	=> return Err(err!(
+				"A vouched read inflated a run past the bound."; Test, Invalid)),
+			Err(e)	=> fmt!("{}", e.plain()),
+		};
+		assert!(said.contains("inflates past"), "and says why: {}", said);
 		Ok(())
 	}
 
