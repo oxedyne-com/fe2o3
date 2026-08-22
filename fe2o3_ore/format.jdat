@@ -434,6 +434,38 @@
 
     "settled": [
         {
+            "question": "which key receives a wrapped content key, and what says that the key belongs to a replica",
+            "answer":   "a SEPARATE X25519 key, the veil key, published by a binding over the tag ORE-VEIL-1 and signed by the replica's Ed25519 key. The tool spells the tag ore_store::veilkey::VEIL_BIND_TAG and names the scheme X25519 in the file's own scheme field, shaped on Ed25519 in .ore/key and AES-256-GCM in .ore/veil. Reusing the Ed25519 replica identity was possible and was refused: the two are the same curve in two coordinate systems and ed25519-dalek ships the conversion, but that library argues against this exact reuse in its own documentation, citing eprint 2021/509. The binding cannot certify itself the way ORE-BIND-1 does, because an X25519 key cannot sign. It is signed by the replica's Ed25519 key, whose own binding is self-certified, so a reader checks a chain of two links and a carrier can forge neither: a fabricated veil key fails the Ed25519 signature over it, and a fabricated Ed25519 binding fails its own",
+            "answered": "12026-08-22",
+            "note":     "key_distribution.md",
+            "names":    [],
+            "refused":  ["ORE-WRAP-1", "ORE-KEM-1", "ORE-VEILKEY-1", "ORE-X25519-1", "VEILKEY_TAG", "WRAP_TAG", "Curve25519", "ECDH"]
+        },
+        {
+            "question": "where a replica's veil key lives, and what that file is called",
+            "answer":   "one word, veilkey, in the .ore directory beside the signing key and the content key, written under the same mode 0600; ore_store::veilkey::VEIL_KEY_FILE, format version 1. Its fields are the signing key file's -- format, scheme, replica, public, secret -- because it is the same kind of thing said about a different scheme, and a second spelling of the same five fields would be a seam for nothing. One word rather than veil-key or veil_key so that no reader takes it for a variant of the content key .ore/veil, which is a different key of a different kind for a different job. A veil key is per REPLICA and not per person, decided by the owner on 12026-08-22: a wrap is eighty bytes so three machines cost nothing, and a secret then lives on exactly one machine, so losing a laptop revokes exactly one thing instead of forcing a re-key. The cost accepted with it is that a relay's idea of who may read a repository is a list of replicas and not a list of people",
+            "answered": "12026-08-22",
+            "note":     "key_distribution.md",
+            "names":    [],
+            "refused":  ["veilkeys", "wrapkey", "VEILKEY_FILE", "AGREE_FILE"]
+        },
+        {
+            "question": "where the wraps and the veil bindings sit on a relay, and on which route they cross",
+            "answer":   "two files beside acl in the hosted repository's own directory, veils for the bindings and wraps for the wraps, both served and taken at a route of their own, .../wraps. Not inside the repository: .ore is the one directory capture refuses by name, so the history cannot carry the key that opens it. Not inside acl: a wrap is not an authorisation, and folding it in would drag key material through every access check that has no use for it. Not on the keys route: the bindings there populate the trust set that decides provenance, a veil binding decides nothing about provenance, and leaving that route's bytes alone keeps a relay built before this able to answer a client built after it. THE RELAY SERVES WRAPS TO ANYBODY WHO MAY PULL, AND THAT IS NOT A LEAK -- a wrap is useless without the member's secret, which is why it may travel through the party it is being kept from",
+            "answered": "12026-08-22",
+            "note":     "key_distribution.md",
+            "names":    [],
+            "refused":  ["WRAP_FILE", "VEIL_RECORD_FILE", "wrapped_keys", "keybox"]
+        },
+        {
+            "question": "what one wrap says about itself",
+            "answer":   "three fields and nothing else: to, the veil public key the wrap is addressed to; eph, the ephemeral X25519 public key minted for this wrap alone; and wrapped, the content key encrypted under the key those two agree on. No replica number and no person's name, because the address is the key: membership is a set of replicas, and if a human readable list is ever wanted it joins through the voice record rather than by putting a name in here. The sender's key is ephemeral rather than static so that a member's leaked secret does not open every wrap ever made to them; be exact about what that buys, since it protects the WRAP and not the REPOSITORY -- every wrap an attacker can still fetch from the relay is still opened by that secret",
+            "answered": "12026-08-22",
+            "note":     "key_distribution.md",
+            "names":    [],
+            "refused":  ["recipient", "ephemeral", "sealed_to", "wrapped_key", "eph_pk"]
+        },
+        {
             "question": "how an operation larger than the carrier's request limit crosses at all",
             "answer":   "its ENCODED BYTES are cut into pieces and put back together at the far end, as sync::msg::KIND_PART. Three alternatives were refused on their merits. Raising the server's limit fixes one operation and leaves the next, and the owner refused it for exactly that reason. Splitting the OPERATION -- one large Splice becoming several -- changes what was signed and cannot touch an operation already in a log. Compressing it moves the threshold rather than removing it, and segment::KIND_PACKED already does that where it belongs. Cutting the bytes leaves the operation exactly as it was, which is the only one of the four that keeps the per-operation signature intact",
             "answered": "12026-08-22",
