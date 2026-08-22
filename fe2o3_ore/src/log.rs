@@ -55,6 +55,7 @@ use crate::op::{
 	Op,
 	Record,
 };
+use crate::seq::OpOrder;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -681,6 +682,81 @@ impl OpLog {
 }
 
 
+/// Which mark closes each operation: the earliest mark, in op order, that holds
+/// it in its causal past.
+///
+/// A mark is in its own past, so a mark closes itself. An operation nothing has
+/// marked since is absent, which is every operation written after the last mark.
+///
+/// # What this is for, and why it is here rather than in a reader
+///
+/// An importer mints a commit's operations and then mints the [`Op::Mark`] that
+/// names the point they reach, so a commit's operations are exactly those the
+/// commit's mark closes. A mirror uses that in one direction, writing each mark
+/// back out as the commit whose changes those operations are; a forge attributing
+/// a stretch of a file uses it in the other, going from the operation that wrote
+/// the bytes to the mark that carries what the commit said about itself --
+/// notably [`crate::op::AUTHOR_TRAILER`], which is the only place the identity a
+/// commit was authored under survives. Two readers, one relation, and the day
+/// they compute it differently is the day they disagree about who wrote a file.
+///
+/// # What it cannot answer
+///
+/// **Concurrency.** An operation two replicas both marked afterwards, without
+/// either having seen the other's mark, lies in the past of two marks and is
+/// closed by neither in any causal sense. The lower op order is taken, which is
+/// the arbitration `ore back` makes between two marks of one name and is a
+/// choice rather than a fact. A history imported from a version control system
+/// with a single writer per commit never presents one.
+///
+/// **Authorship.** That an operation is closed by a mark says the mark was
+/// written knowing of it, and nothing whatever about whose hand wrote either.
+/// A caller joining the two -- to read a mark's body as saying something about
+/// the operations it closes -- owes its reader that distinction, and should
+/// satisfy itself that the same replica wrote both before it draws the join.
+///
+/// # Cost
+///
+/// One pass over the log in reverse and one edge each, because append order is a
+/// linear extension of the causal order, so every child is met before its
+/// parents. Nothing walks the graph twice, and no ancestry index is built or
+/// needed: a mark deeper in the past of another mark carries a strictly greater
+/// counter, the counter being a Lamport clock, so taking the least op order over
+/// an operation's children's answers is the least over all of its descendants.
+pub fn closing_marks(log: &OpLog) -> HashMap<OpId, OpId> {
+	let mut out: HashMap<OpId, OpId> = HashMap::with_capacity(log.len());
+	for at in (0..log.len()).rev() {
+		let rec = match log.at(at) {
+			Some(rec)	=> rec,
+			None		=> continue,
+		};
+		let id = rec.head.id();
+		let closes = match rec.op {
+			Op::Mark { .. } => {
+				out.insert(id, id);
+				id
+			},
+			_ => match out.get(&id) {
+				Some(held)	=> *held,
+				// Nothing has marked it, so it closes nothing for its parents
+				// either.
+				None		=> continue,
+			},
+		};
+		let taken = OpOrder::of(&closes);
+		for parent in rec.parents() {
+			match out.get(parent) {
+				Some(held) if OpOrder::of(held) <= taken => (),
+				_ => {
+					out.insert(*parent, closes);
+				},
+			}
+		}
+	}
+	out
+}
+
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -698,6 +774,63 @@ mod tests {
 		-> Outcome<Record>
 	{
 		Ok(Record::new(res!(Header::new(id, parents)), mark(name)))
+	}
+
+	/// An operation that is not a mark, so that a mark has something to close.
+	fn made(id: OpId, parents: Vec<OpId>, path: &str)
+		-> Outcome<Record>
+	{
+		Ok(Record::new(
+			res!(Header::new(id, parents)),
+			Op::FileCreate { path: path.as_bytes().to_vec() }))
+	}
+
+	/// Every operation is closed by the earliest mark holding it, a mark closes
+	/// itself, and an operation nothing has marked since is closed by nothing.
+	///
+	/// The two concurrent pairs are appended in opposite orders on purpose. `late`
+	/// arrives after `early` and `hi` arrives before `lo`, so neither the first
+	/// answer met nor the last one can be right by accident; only comparing op
+	/// order gives both. `hi` and `lo` also sit on different replicas with the
+	/// higher counter on the higher replica number, so a comparison on [`OpId`] --
+	/// which puts the replica first -- names the wrong one of them.
+	///
+	/// Proved red three ways: reversing the comparison in the guard closes `a` on
+	/// `late`; dropping the mark's insertion of itself leaves `early` closed by
+	/// nothing and every operation before it unclosed; and walking the log
+	/// forwards rather than backwards closes nothing at all, since a parent is
+	/// then read before the child that has the answer.
+	#[test]
+	fn a_mark_closes_the_operations_it_was_written_over() -> Outcome<()> {
+		let mut log = OpLog::new();
+		let (a, b)			= (oid(1, 1), oid(1, 2));
+		let (early, late)	= (oid(1, 3), oid(2, 5));
+		let c				= oid(1, 8);
+		let (hi, lo)		= (oid(9, 10), oid(1, 9));
+		let d				= oid(1, 11);
+		res!(log.append(res!(made(a, vec![], "x"))));
+		res!(log.append(res!(made(b, vec![a], "y"))));
+		res!(log.append(res!(rec(early, vec![b], "early"))));
+		res!(log.append(res!(rec(late, vec![b], "late"))));
+		res!(log.append(res!(made(c, vec![], "z"))));
+		res!(log.append(res!(rec(hi, vec![c], "hi"))));
+		res!(log.append(res!(rec(lo, vec![c], "lo"))));
+		res!(log.append(res!(made(d, vec![lo], "w"))));
+
+		let closes = closing_marks(&log);
+		assert_eq!(closes.get(&a), Some(&early),
+			"the first operation is closed by the first mark written over it");
+		assert_eq!(closes.get(&b), Some(&early),
+			"and so is the one between it and that mark, and not by the later mark \
+			that also holds it");
+		assert_eq!(closes.get(&early), Some(&early), "a mark is in its own past");
+		assert_eq!(closes.get(&late), Some(&late), "every mark is");
+		assert_eq!(closes.get(&c), Some(&lo),
+			"the lower op order closes it however the two marks arrived, and the \
+			replica breaks a tie rather than deciding one");
+		assert_eq!(closes.get(&d), None,
+			"nothing has marked the tail of the history, so nothing closes it");
+		Ok(())
 	}
 
 	/// Ancestry by exhaustive walk, with no bound of any kind.
