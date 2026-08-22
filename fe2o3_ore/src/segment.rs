@@ -827,6 +827,31 @@ impl<H: Hasher, const S: usize> Reader<H, S> {
 		reader
 	}
 
+	/// Takes up a segment part way through, at a byte that is a record boundary.
+	///
+	/// A reader ordinarily learns the header from the bytes it is fed, and the
+	/// only place a header is written is the first bytes of the segment. So a
+	/// reader that is to be fed from the middle has to be told two things the
+	/// bytes it will see do not carry: the header the segment declared, and how
+	/// many records stand before the first one it will be handed. The header is
+	/// what lets it place records at all; the count is what lets a damaged record
+	/// name its own position in the file rather than its position in the read.
+	///
+	/// **The caller warrants that the next byte fed begins a record.** Nothing
+	/// here can check that: a segment carries no index and a record is found only
+	/// by reading the one before it, so the only party that knows where a record
+	/// begins is the read that stopped there. A byte offset taken from anywhere
+	/// else will be refused as a damaged record, which is the right answer given
+	/// the wrong question.
+	///
+	/// A segment grows only at its end and nothing already written is ever
+	/// revisited, which is what makes taking one up worth doing: a reader that
+	/// kept where it stopped reads only what has arrived since.
+	pub fn take_up(&mut self, head: Head, ordinal: usize) {
+		self.head = Some(head);
+		self.count = ordinal;
+	}
+
 	/// The digests of the records handed over since the last call, in order, for
 	/// a reader built by [`Reader::tallying`]. Empty for any other.
 	pub fn take_digests(&mut self) -> Vec<u8> {
@@ -1427,6 +1452,97 @@ mod tests {
 		assert_eq!(got_head, head);
 		assert_eq!(got, entries);
 		Ok(())
+	}
+
+	/// Reads `want` entries from the front of a segment and says how many bytes
+	/// they took, which is the only place a byte offset into a segment may come
+	/// from.
+	fn up_to(bytes: &[u8], want: usize)
+		-> Outcome<(Head, Vec<Entry>, Vec<u8>, usize)>
+	{
+		// The header is read on the way to the first record, so a caller that
+		// wants none of them has to read it for itself.
+		if want == 0 {
+			let (head, used) = res!(res!(Head::decode(bytes)).ok_or_else(|| err!(
+				"The segment yielded no header."; Bug, Missing)));
+			return Ok((head, Vec::new(), Vec::new(), used));
+		}
+		let mut reader: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+		reader.feed(bytes);
+		let mut got = Vec::new();
+		while got.len() < want {
+			match res!(reader.next_entry()) {
+				Some(entry)	=> got.push(entry),
+				None		=> break,
+			}
+		}
+		let head = res!(reader.head().ok_or_else(|| err!(
+			"The segment yielded no header."; Bug, Missing)));
+		let at = bytes.len() - reader.remaining().len();
+		Ok((*head, got, reader.take_digests(), at))
+	}
+
+	#[test]
+	fn a_reader_taken_up_part_way_yields_what_a_whole_read_yields() -> Outcome<()> {
+		let entries = res!(bare());
+		let head = Head::new(Some(ReplicaId::new(7)));
+		let bytes = res!(encode(&head, &entries, Fold, [0u8; 0]));
+		let (_, whole, all_digests, _) = res!(up_to(&bytes, entries.len() + 1));
+		assert_eq!(whole, entries);
+		// Every boundary, so that no one lucky stopping place carries the test.
+		for stopped in 0..entries.len() {
+			let (got_head, first, first_digests, at) = res!(up_to(&bytes, stopped));
+			assert_eq!(got_head, head);
+			let mut reader: Reader<Fold, 0> = Reader::tallying(Fold, [0u8; 0]);
+			reader.take_up(got_head, stopped);
+			reader.feed(&bytes[at..]);
+			reader.end();
+			let mut rest = Vec::new();
+			while let Some(entry) = res!(reader.next_entry()) {
+				rest.push(entry);
+			}
+			let mut joined = first;
+			joined.extend(rest);
+			assert_eq!(joined, entries,
+				"a read stopped after {} entries and taken up again lost or changed \
+				something", stopped);
+			let mut digests = first_digests;
+			digests.extend(reader.take_digests());
+			assert_eq!(digests, all_digests,
+				"the digests of a read stopped after {} entries and taken up again are \
+				not the digests of one read", stopped);
+			assert_eq!(reader.count(), entries.len(),
+				"a reader taken up at {} did not end at the count the file holds", stopped);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn a_reader_taken_up_names_a_damaged_record_by_its_place_in_the_file() -> Outcome<()> {
+		let entries = res!(bare());
+		let bytes = res!(encode(&Head::new(None), &entries, Fold, [0u8; 0]));
+		const STOPPED: usize = 4;
+		let (head, _, _, at) = res!(up_to(&bytes, STOPPED));
+		let mut damaged = bytes.to_vec();
+		// Into the body of the record that begins there: past its kind byte and
+		// the varint that gives its length.
+		damaged[at + 3] ^= 0xff;
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.take_up(head, STOPPED);
+		reader.feed(&damaged[at..]);
+		reader.end();
+		match reader.next_entry() {
+			Ok(_) => Err(err!(
+				"A record whose body was altered was read as though it were sound.";
+			Test, Invalid)),
+			Err(e) => {
+				let said = fmt!("{}", e);
+				assert!(said.contains(&fmt!("Record {} of the segment", STOPPED)),
+					"the message names the record by its place in the read rather than \
+					in the file: {}", said);
+				Ok(())
+			},
+		}
 	}
 
 	#[test]
