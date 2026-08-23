@@ -38,6 +38,23 @@
 //! watched machine's business -- a gateway's `/api/health` already reports whether its store
 //! opened, which is a far better answer than whether a port accepts a connection.
 //!
+//! # Why a peer may say `http`, and why it must say so
+//!
+//! A probe is normally `https`, because it crosses the public internet and an unauthenticated
+//! answer can be forged by anybody on the path -- and the forgery that matters is a `200`, which
+//! hides the outage rather than inventing one. That stays the default and the absence of the key
+//! keeps it.
+//!
+//! The exception this admits is a machine that serves nothing else. birch holds the off-host copy
+//! of the forge and listens on 22 alone; giving it a certificate means giving it a public name, a
+//! port open to a certificate authority's validators, and a renewal that can quietly stop -- three
+//! moving parts on the one machine whose entire value is being boring. Its freshness endpoint is a
+//! high port admitted by its firewall from the watcher's address alone. So a peer may carry
+//! `"plain_ok": (true)`, and it is per peer rather than a switch on the watcher, because the
+//! judgement is about one wire and not about watching in general. On 2026-08-23 that copy failed
+//! every hour for twenty-one hours with nobody able to see it, which is the cost of the stricter
+//! answer.
+//!
 //! # What it deliberately does not do
 //!
 //! It does not restart anything. A watcher that repairs is a watcher that can flap a service in
@@ -52,12 +69,18 @@ use crate::srv::{
         AlertEvent,
         Alerter,
     },
-    cfg::WatchConfig,
+    cfg::{
+        WatchConfig,
+        WatchPeer,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::{
-    client::https_request,
+    client::{
+        http_request,
+        https_request,
+    },
     header::{
         HttpHeadline,
         HttpMethod,
@@ -117,12 +140,37 @@ pub struct Watcher {
     state:      HashMap<String, PeerState>,
 }
 
+/// Refuse a peer whose URL this cannot honestly probe.
+///
+/// Separated from [`Watcher::new`] so the rule can be tested on its own: it decides whether an
+/// operator is watched over an authenticated wire, and a rule that costly should not need an
+/// alerter and a TLS client standing up before it can be exercised.
+fn vet(p: &WatchPeer) -> Outcome<()> {
+    let url = res!(Url::parse(&p.url));
+    if !url.scheme.is_tls() && !p.plain_ok {
+        return Err(err!(
+            "The watch entry for '{}' names {}, which is not https. A health probe crosses the \
+            public internet and its answer decides whether an operator is woken, so it is \
+            authenticated or it is not worth making. A machine that cannot hold a certificate \
+            may say so with \"plain_ok\": (true) on its own entry, which is a judgement about \
+            that one wire.", p.name, p.url;
+            Configuration, Invalid, Input));
+    }
+    if p.plain_ok && url.scheme.is_tls() {
+        warn!("The watch entry for '{}' says plain_ok and names an https URL. The key does \
+            nothing here; remove it, so it does not read as a weakness that was accepted.",
+            p.name);
+    }
+    Ok(())
+}
+
 impl Watcher {
     /// Build a watcher over a peer list.
     ///
-    /// A peer whose URL cannot be parsed, or one that is not `https`, is refused at start-up
-    /// rather than at the first poll: a watcher that silently watches nothing is the failure
-    /// this module exists to prevent, and start-up is when somebody is looking.
+    /// A peer whose URL cannot be parsed, or one that is not `https` and has not said
+    /// `plain_ok`, is refused at start-up rather than at the first poll: a watcher that silently
+    /// watches nothing is the failure this module exists to prevent, and start-up is when
+    /// somebody is looking.
     pub fn new(
         cfg:     Arc<WatchConfig>,
         alerter: Arc<Alerter>,
@@ -133,14 +181,7 @@ impl Watcher {
     {
         let mut state = HashMap::new();
         for p in &cfg.peers {
-            let url = res!(Url::parse(&p.url));
-            if !url.scheme.is_tls() {
-                return Err(err!(
-                    "The watch entry for '{}' names {}, which is not https. A health probe \
-                    crosses the public internet and its answer decides whether an operator is \
-                    woken, so it is authenticated or it is not worth making.", p.name, p.url;
-                    Configuration, Invalid, Input));
-            }
+            res!(vet(p));
             state.insert(p.name.clone(), PeerState::default());
         }
         Ok(Self { cfg, alerter, tls, whoami, state })
@@ -154,10 +195,15 @@ impl Watcher {
     pub async fn run(mut self) {
         let every = Duration::from_secs(self.cfg.interval_secs.max(5));
         let repeat = Duration::from_secs(self.cfg.repeat_secs.max(60));
+        // A peer probed over plain http is named as such here, so that the concession shows in
+        // the log an operator actually reads rather than only in a configuration file nobody
+        // opens between incidents.
         info!("Watching {} peer(s) every {}s: {}.",
             self.cfg.peers.len(),
             every.as_secs(),
-            self.cfg.peers.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "));
+            self.cfg.peers.iter()
+                .map(|p| if p.plain_ok { fmt!("{} (plain http)", p.name) } else { p.name.clone() })
+                .collect::<Vec<_>>().join(", "));
 
         // The first probe waits one interval. A node that has just restarted is a node whose
         // peers may still be restarting too -- a shared power event, a rolling deploy -- and an
@@ -209,13 +255,19 @@ impl Watcher {
         let path = loc.target.clone();
         let timeout = Duration::from_secs(self.cfg.timeout_secs.max(2));
 
-        let call = https_request(
-            &host, port, HttpMethod::GET, &path,
-            &[("Connection", "close"), ("User-Agent", "steel-watch")],
-            &[],
-            self.tls.clone(),
-        );
-        match tokio::time::timeout(timeout, call).await {
+        let headers = [("Connection", "close"), ("User-Agent", "steel-watch")];
+        // The scheme decides, and `new` has already refused a plain URL that nobody opted in
+        // to -- so by the time a probe runs, `http` here means the operator wrote it down.
+        let reply = if loc.scheme.is_tls() {
+            let call = https_request(
+                &host, port, HttpMethod::GET, &path, &headers, &[], self.tls.clone(),
+            );
+            tokio::time::timeout(timeout, call).await
+        } else {
+            let call = http_request(&host, port, HttpMethod::GET, &path, &headers, &[]);
+            tokio::time::timeout(timeout, call).await
+        };
+        match reply {
             Ok(Ok(reply)) => {
                 let code = match &reply.header.headline {
                     HttpHeadline::Response { status } => *status as u16,
@@ -318,7 +370,6 @@ impl Watcher {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::srv::cfg::WatchPeer;
 
     /// The state machine, without a network.
     ///
@@ -329,8 +380,9 @@ mod tests {
         let cfg = WatchConfig {
             enabled:        true,
             peers:          vec![WatchPeer {
-                name: fmt!("jarrah"),
-                url:  fmt!("https://example.test/api/health"),
+                name:     fmt!("jarrah"),
+                url:      fmt!("https://example.test/api/health"),
+                plain_ok: false,
             }],
             interval_secs:  60,
             fail_threshold: threshold,
@@ -371,10 +423,44 @@ mod tests {
     fn a_peer_list_is_data_so_the_estate_can_change_without_a_rebuild() {
         let (mut cfg, _) = machine(2);
         cfg.peers.push(WatchPeer {
-            name: fmt!("conifer"),
-            url:  fmt!("https://ontheism.org/health"),
+            name:     fmt!("conifer"),
+            url:      fmt!("https://ontheism.org/health"),
+            plain_ok: false,
         });
         assert_eq!(cfg.peers.len(), 2,
             "adding a machine must be a configuration change and nothing else");
+    }
+
+    /// The default must be the strict one, because a config that says nothing about a wire is a
+    /// config whose author never thought about it.
+    #[test]
+    fn a_plain_url_is_refused_unless_the_operator_wrote_it_down() {
+        let refused = vet(&WatchPeer {
+            name:     fmt!("birch"),
+            url:      fmt!("http://65.21.145.109:9109/forge/fresh"),
+            plain_ok: false,
+        });
+        assert!(refused.is_err(), "a plain http peer was accepted without plain_ok");
+        let msg = fmt!("{}", refused.err().unwrap());
+        assert!(msg.contains("plain_ok"),
+            "the refusal must name the key that would allow it, or the operator has to read \
+            the source to find out: got '{}'", msg);
+
+        assert!(vet(&WatchPeer {
+            name:     fmt!("birch"),
+            url:      fmt!("http://65.21.145.109:9109/forge/fresh"),
+            plain_ok: true,
+        }).is_ok(), "a plain http peer was refused although plain_ok was set");
+    }
+
+    /// A malformed URL is refused whatever the peer says about its wire, so `plain_ok` cannot be
+    /// read as a general relaxation.
+    #[test]
+    fn plain_ok_does_not_excuse_a_url_that_cannot_be_parsed() {
+        assert!(vet(&WatchPeer {
+            name:     fmt!("nowhere"),
+            url:      fmt!("not a url at all"),
+            plain_ok: true,
+        }).is_err(), "plain_ok let an unparseable URL through");
     }
 }

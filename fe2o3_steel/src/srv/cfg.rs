@@ -1872,8 +1872,12 @@ impl Default for SmsAlertConfig {
 pub struct WatchPeer {
     // What to call it in an alert: a person's name for the machine, not a hostname, since the
     // alert is read on a phone in the dark.
-    pub name: String,
-    pub url:  String,   // the health URL, which must be `https`
+    pub name:     String,
+    pub url:      String,   // the health URL, `https` unless `plain_ok` is set
+    // Whether a plain `http` URL is acceptable for this one peer. Off unless the operator
+    // writes it, and never a global switch: see `crate::srv::watch` for the single case it is
+    // meant for.
+    pub plain_ok: bool,
 }
 
 /// Watching the other machines in the estate.
@@ -2028,7 +2032,10 @@ impl WatchConfig {
                         "watch.peers entry {} needs both a 'name' and a 'url'.", i;
                         Configuration, Invalid, Missing));
                 }
-                out.peers.push(WatchPeer { name, url });
+                // Absent means false, so every peer written before this key existed keeps
+                // demanding TLS, which is the answer a silent config should give.
+                let plain_ok = matches!(pm.get(&dat!("plain_ok")), Some(Dat::Bool(true)));
+                out.peers.push(WatchPeer { name, url, plain_ok });
             }
         }
         if out.enabled {
