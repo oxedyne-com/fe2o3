@@ -756,3 +756,64 @@ fn a_session_refuses_a_piece_of_an_operation() -> Outcome<()> {
 	assert_eq!(log.len(), 0, "a refused piece changed the log");
 	Ok(())
 }
+
+/// What every message kind comes to, measured and then encoded, and the two
+/// numbers compared.
+///
+/// [`Message::encoded_len`] is what both ends decide a body's contents by, so a
+/// number one short of the truth is a body over a bound that was published and a
+/// proxy closing the connection. The corpus is every kind, at the shapes whose
+/// lengths are decided by something other than the message itself: a frontier of
+/// none and of many, a send of none, one and many, and the pieces an operation
+/// too large for the carrier is cut into.
+///
+/// Proved red by adding one to the answer, and again by leaving the magic and the
+/// version out of it.
+#[test]
+fn encoded_len_is_what_the_message_encodes_to() -> Outcome<()> {
+	let head = res!(Header::new(
+		OpId::new(ReplicaId::new(5), 7),
+		vec![OpId::new(ReplicaId::new(1), 1)],
+	));
+	let entry = |len: usize| crate::segment::Entry::Bare(Record::new(head.clone(), Op::Proposal {
+		title:	fmt!("of {} bytes", len),
+		body:	vec![0x5a; len],
+		voice:	fmt!("wren"),
+		time:	1_755_400_000,
+	}));
+	let heads: Vec<OpId> = (1..=40).map(|i| OpId::new(ReplicaId::new(i), i)).collect();
+	// One piece over a mebibyte, so the pieces are many and the last one short.
+	let big = crate::segment::Entry::Bare(Record::new(head.clone(), Op::Proposal {
+		title:	fmt!("a large one"),
+		body:	vec![0xa5; 3_000_000],
+		voice:	fmt!("wren"),
+		time:	1_755_400_000,
+	}));
+	let mut corpus = vec![
+		(fmt!("an empty hello"),	Message::hello(Vec::new())),
+		(fmt!("a wide hello"),		Message::hello(heads.clone())),
+		(fmt!("an empty sketch"),	Message::sketch(Vec::new(), Vec::new(), 0)),
+		(fmt!("a sketch"),			Message::sketch(heads, vec![0x11; 4_000], u64::MAX)),
+		(fmt!("an empty send"),		Message::Send { entries: Vec::new() }),
+		(fmt!("a send of one"),		Message::Send { entries: vec![entry(0)] }),
+		(fmt!("a send of many"),	Message::Send {
+			entries: (0..64).map(|i| entry(i * 37)).collect(),
+		}),
+		(fmt!("a done"),			Message::Done),
+	];
+	let pieces = res!(Message::part(&big, 1 << 20));
+	assert!(pieces.len() > 2, "the operation went in {} pieces", pieces.len());
+	for (i, piece) in pieces.into_iter().enumerate() {
+		corpus.push((fmt!("piece {}", i), piece));
+	}
+	let mut kinds = BTreeSet::new();
+	for (name, msg) in corpus {
+		kinds.insert(msg.kind());
+		let said = res!(msg.encoded_len());
+		let wrote = res!(msg.encode()).len();
+		assert_eq!(said, wrote,
+			"{} is measured at {} bytes and encodes to {}", name, said, wrote);
+	}
+	assert_eq!(kinds.len(), 5, "the corpus covers {} of the five message kinds", kinds.len());
+	Ok(())
+}

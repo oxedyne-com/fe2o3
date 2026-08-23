@@ -1640,8 +1640,11 @@ fn as_opt_id(dat: &Dat, what: &str)
 }
 
 
+// Reachable from the other modules' tests because `samples` is the crate's one
+// list of every operation variant, and a second list would be the one that goes
+// stale when the vocabulary grows.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
 	use super::*;
 
 	use crate::id::{
@@ -1667,7 +1670,7 @@ mod tests {
 	}
 
 	/// One of every variant, including payloads that stress the encoding.
-	fn samples() -> Vec<Op> {
+	pub(crate) fn samples() -> Vec<Op> {
 		vec![
 			Op::FileCreate { path: b"src/lib.rs".to_vec() },
 			Op::FileDelete { file: oid(1, 1) },

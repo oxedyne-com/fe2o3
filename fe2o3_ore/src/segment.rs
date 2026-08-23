@@ -544,6 +544,25 @@ impl Entry {
 		Ok(inner)
 	}
 
+	/// What the entry comes to in a carrier, without any of it being encoded.
+	///
+	/// Exactly the length [`Entry::to_dat`] encodes to, and which form that is
+	/// matters: this is the tagged shape a sync message carries, not the untagged
+	/// body a segment writes beside a kind byte of its own.
+	///
+	/// A carrier that bounds what it will send measures every entry it considers
+	/// and sends only some of them, so measuring by serialising buys a number at
+	/// the price of the history it is about to throw away. On fe2o3's own history
+	/// that is a 22,153,680 byte operation encoded and discarded once per clone.
+	pub fn dat_len(&self)
+		-> Outcome<usize>
+	{
+		Ok(res!(self.to_dat().byte_len().ok_or_else(|| err!(
+			"A {} holds a daticle whose encoded length cannot be known without \
+			encoding it, which is a kind no entry was ever built to carry.", self.name();
+		Bug, Invalid))))
+	}
+
 	/// The shape is `[kind, body]`.
 	///
 	/// This is the form for a carrier that is itself a daticle, such as a sync
@@ -1311,6 +1330,7 @@ mod tests {
 		Mode,
 		Op,
 	};
+	use crate::op::tests::samples;
 	use crate::test_support::{
 		Fold,
 		StubSigner,
@@ -3146,6 +3166,66 @@ mod tests {
 		assert!(got[0].is_veiled());
 		assert_eq!(res!(got[0].id()), oid(2, 3));
 		assert_eq!(res!(res!(got[0].unveil(&())).peek()).head.parents(), vec![oid(1, 7)]);
+		Ok(())
+	}
+
+	/// Every shape an entry takes, measured and then encoded, and the two numbers
+	/// compared.
+	///
+	/// This is the only test [`Entry::dat_len`] can have. It is a claim about
+	/// bytes nobody built, and a carrier that believes it one byte short puts a
+	/// reply past a bound it published -- which is a proxy closing a connection
+	/// rather than a number being slightly wrong. So the corpus is every
+	/// operation variant, in each of the three entry forms, and the payload sizes
+	/// that move the compact length prefixes: nothing at all, one byte, and the
+	/// 22,153,680 byte operation fe2o3's own history holds.
+	///
+	/// Proved red by adding one to the answer, and again by measuring the body
+	/// alone rather than the tagged form a message carries, which is the very
+	/// confusion between the two forms the doc above warns about.
+	#[test]
+	fn dat_len_is_what_the_entry_encodes_to() -> Outcome<()> {
+		let signer = StubSigner::with_seed(3);
+		let cipher = StubCipher::with_seed(9);
+		let head = res!(Header::new(oid(5, 7), vec![oid(1, 1), oid(2, 2)]));
+
+		let mut ops: Vec<(String, Op)> = samples()
+			.into_iter()
+			.enumerate()
+			.map(|(i, op)| (fmt!("sample {} ({})", i, op.name()), op))
+			.collect();
+		let payloads: [(&str, usize); 3] = [
+			("an empty payload",		0),
+			("a one byte payload",		1),
+			("the 22,153,680 byte one",	22_153_680),
+		];
+		for (name, len) in payloads {
+			ops.push((name.to_string(), Op::Splice {
+				left:	Some(Anchor::origin(oid(1, 1))),
+				right:	None,
+				remove:	Vec::new(),
+				insert:	vec![0x5a; len].into(),
+			}));
+		}
+		assert!(ops.len() > 30, "the corpus is {} operations, which is not every shape", ops.len());
+
+		let mut seen = std::collections::BTreeSet::new();
+		for (name, op) in ops {
+			seen.insert(op.code());
+			let rec = Record::new(head.clone(), op);
+			let bare = Entry::Bare(rec.clone());
+			let sealed = Entry::Sealed(res!(Envelope::seal_record(&signer, &rec)));
+			let veiled = res!(bare.veil(&cipher));
+			for (form, entry) in [("bare", bare), ("sealed", sealed), ("veiled", veiled)] {
+				let said = res!(entry.dat_len());
+				let wrote = res!(entry.to_dat().to_bytes(Vec::new())).len();
+				assert_eq!(said, wrote,
+					"{}, {}: measured at {} bytes and encoded to {}", name, form, said, wrote);
+			}
+		}
+		assert_eq!(seen.len(), highest_code(VERSION) as usize,
+			"the corpus covers {} of the {} operation codes this version writes",
+			seen.len(), highest_code(VERSION));
 		Ok(())
 	}
 }

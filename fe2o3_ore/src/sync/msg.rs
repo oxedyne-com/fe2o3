@@ -402,6 +402,23 @@ impl Message {
 		Ok(buf)
 	}
 
+	/// What [`Message::encode`] comes to, without any of it being built.
+	///
+	/// Both ends bound what they put in one body, and a bound is decided by
+	/// measuring messages that are then mostly not sent. Serialising to measure
+	/// makes that decision cost the payload it declines: a clone of fe2o3 measured
+	/// its whole history twice over to send it once.
+	pub fn encoded_len(&self)
+		-> Outcome<usize>
+	{
+		let body = res!(self.to_dat().byte_len().ok_or_else(|| err!(
+			"A {} message holds a daticle whose encoded length cannot be known \
+			without encoding it, which is a kind no message was built to carry.",
+			self.name();
+		Bug, Invalid)));
+		Ok(MAGIC.len() + 1 + body)
+	}
+
 
 	/// Cuts one entry into pieces, each of which encodes to at most `cap` bytes.
 	///
@@ -436,13 +453,13 @@ impl Message {
 		// than guessed at with a margin that would be wrong at some size nobody
 		// tried.
 		let empty = Self::Part { id, seq: 0, total: 1, bytes: Vec::new() };
-		let mut room = cap.saturating_sub(res!(empty.encode()).len());
+		let mut room = cap.saturating_sub(res!(empty.encoded_len()));
 		loop {
 			if room == 0 {
 				return Err(err!(
 					"A carrier taking {} bytes cannot carry a piece of the operation \
 					{}: the framing of a piece comes to {} on its own.",
-					cap, id, res!(empty.encode()).len();
+					cap, id, res!(empty.encoded_len());
 				Invalid, Input, Range));
 			}
 			let sample = Self::Part {
@@ -451,7 +468,7 @@ impl Message {
 				total:	1,
 				bytes:	whole[..std::cmp::min(room, whole.len())].to_vec(),
 			};
-			let sized = res!(sample.encode()).len();
+			let sized = res!(sample.encoded_len());
 			if sized <= cap {
 				break;
 			}
