@@ -71,6 +71,10 @@ const DER: &[(&str, &str, usize)] = &[
 // rule was written for.
 const DKIM: (&str, usize) = (DER[1].1, DER[1].2);
 
+// A certificate, which is what a key is most often bundled with, and whose outer sequence opens
+// with another sequence where a key's opens with a version.
+const CERT: (&str, usize) = ("3082013B3081EEA003020102", 319);
+
 /// The key of that shape, its structure real and its body filler.
 fn der(head: &str, len: usize) -> Outcome<Vec<u8>> {
 	let mut out = res!(base2x::HEX.from_str(head));
@@ -274,7 +278,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
-	res!(test_it(filter, &["What is not a whole DER private key is left alone", "all", "secret",
+	res!(test_it(filter, &["What is not a DER private key is left alone", "all", "secret",
 		"der"], ||
 	{
 		// A public key, which names the same algorithm and holds nothing worth refusing: the
@@ -282,36 +286,119 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let public = res!(der("302A300506032B6570032100", 44));
 		req!(secret::scan(&public), Vec::<Find>::new(), "public key");
 		// A certificate, whose outer sequence opens with another sequence.
-		let cert = res!(der("3082013B3081EEA003020102", 319));
+		let cert = res!(der(CERT.0, CERT.1));
 		req!(secret::scan(&cert), Vec::<Find>::new(), "certificate");
 		// An algorithm nobody has, one object identifier byte away from ed25519.
 		let other = res!(der("302E020100300506032B657104220420", 48));
 		req!(secret::scan(&other), Vec::<Find>::new(), "unknown algorithm");
-		// Truncated, and padded: in both the outer length stops accounting for the file, and what
-		// is refused is a file that is a key and nothing else.
+		// Truncated: the outer length declares more than is there, so the sequence it names is not
+		// in the file. Nor is the key -- openssl reads nothing out of this one.
 		let short = res!(der(DER[0].1, 47));
 		req!(secret::scan(&short), Vec::<Find>::new(), "truncated");
-		let mut long = res!(der(DER[0].1, DER[0].2));
-		long.push(0x5A);
-		req!(secret::scan(&long), Vec::<Find>::new(), "padded");
-		// A key with anything at all written after it, which is a file holding a key rather than a
-		// key. The PEM shape is the armoured form of the same thing and is what catches that case.
-		let mut noted = res!(der(DER[0].1, DER[0].2));
-		noted.extend_from_slice(b"# a note\n");
-		req!(secret::scan(&noted), Vec::<Find>::new(), "annotated");
+		// A three-byte sequence holding the version and stopping, with an ed25519 key's algorithm
+		// standing immediately after it. Every test below the length is asked inside the declared
+		// bytes, and this is the fixture that says so: unbounded, the sequence borrows the seven
+		// bytes after itself and this reads as a key.
+		let borrowed = res!(der("3003020100300506032B6570", 48));
+		req!(secret::scan(&borrowed), Vec::<Find>::new(), "borrowed algorithm");
 		// Nothing, and something far too small to be a key.
 		req!(secret::scan(b""), Vec::<Find>::new(), "empty");
 		req!(secret::scan(&[0x30, 0x02, 0x02, 0x01]), Vec::<Find>::new(), "tiny");
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["Bytes written after a DER key do not hide it", "all", "secret",
+		"der"], ||
+	{
+		// What this rule asked until 2026-08-23 was that the outer sequence account for the input
+		// exactly, so that what it refused was a file that was a key and nothing else. One byte
+		// appended walked past the whole of it, and what walked past was a key openssl still read
+		// and signed with.
+		for tail in [&b"x"[..], b"\0", b" ", b"# the dkim signing key\n"] {
+			let mut key = res!(der(DKIM.0, DKIM.1));
+			key.extend_from_slice(tail);
+			req!(secret::scan(&key), vec![Find { line: 1, kind: Kind::DerKey }], "for {:?}", tail);
+		}
+		// The shape nobody has to tamper with to produce: a key and the certificate that goes with
+		// it in one file, which is what `cat key.der cert.der` writes.
+		let mut bundle = res!(der(DER[0].1, DER[0].2));
+		bundle.extend_from_slice(&res!(der(CERT.0, CERT.1)));
+		req!(bundle.len(), DER[0].2 + CERT.1);
+		req!(secret::scan(&bundle), vec![Find { line: 1, kind: Kind::DerKey }], "key and cert");
+		// And the marker is not a way out either, wherever it is written: this reads the key's own
+		// structure and never the bytes around it, so there is nowhere to put one that it looks at.
+		let mut marked = res!(der(DER[0].1, DER[0].2));
+		marked.extend_from_slice(fmt!("\n// {}\n", secret::MARKER).as_bytes());
+		req!(secret::scan(&marked), vec![Find { line: 1, kind: Kind::DerKey }], "marked");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A DER key away from the front of the file is caught", "all", "secret",
+		"der"], ||
+	{
+		// `cat cert.der key.der`, which is the bundle a person writes without thinking about it:
+		// `openssl pkey -inform DER` reads the private key straight out of one, signs with it, and
+		// the signature verifies against the original key's public half. Both guards walked past it
+		// until 2026-08-23, because each only ever looked at byte 0.
+		for (what, head, len) in DER {
+			let mut bundle = res!(der(CERT.0, CERT.1));
+			bundle.extend_from_slice(&res!(der(head, *len)));
+			req!(bundle.len(), CERT.1 + *len, "for {:?}", what);
+			req!(secret::scan(&bundle), vec![Find { line: 1, kind: Kind::DerKey }], "for {:?}", what);
+		}
+		// One byte in front of it does the same, whatever the byte is, the SEQUENCE tag included.
+		for lead in [0x41u8, 0x00, 0x30, 0x02] {
+			let mut data = vec![lead];
+			data.extend_from_slice(&res!(der(DKIM.0, DKIM.1)));
+			req!(secret::scan(&data), vec![Find { line: 1, kind: Kind::DerKey }],
+				"for a leading {:#04x}", lead);
+		}
+		// And the finding names the line the key opens on, so that a key written into a file
+		// somebody reads is reported where they will find it rather than at the top.
+		let mut noted = fmt!("# the dkim signing key\n\n").into_bytes();
+		noted.extend_from_slice(&res!(der(DKIM.0, DKIM.1)));
+		req!(secret::scan(&noted), vec![Find { line: 3, kind: Kind::DerKey }]);
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["Only a small file is read at every offset", "all", "secret", "der"],
+		||
+	{
+		// `ring` holds the head of a PKCS#8 key as a `const` template -- these very bytes, which is
+		// why the fixture below is the DKIM shape -- and a compiler writes that template into the
+		// read-only data of whatever links it. A sweep of every file under ~/usr on 2026-08-23,
+		// 623,722 files and 202 GB with nothing skipped, found the structure at 1,729 offsets in 303
+		// files, and every one of the 303 was a compiled artefact carrying that template: not one was
+		// a key. Nothing separates a template from a key that is not a guess about the bytes around
+		// it, and refusing an ordinary build output is how a guard gets switched off. So the offsets
+		// are read only while the file is small enough to be a key and what a key is bundled with,
+		// and the smallest artefact in that sweep was 101,960 bytes, three times the span.
+		let key = res!(der(DKIM.0, DKIM.1));
+		let mut inside = vec![0x5A; secret::DER_SPAN - key.len()];
+		inside.extend_from_slice(&key);
+		req!(inside.len(), secret::DER_SPAN);
+		req!(secret::scan(&inside), vec![Find { line: 1, kind: Kind::DerKey }], "at the span");
+		// One byte wider and only the front is read, which is where this key is not.
+		let mut over = vec![0x5A; secret::DER_SPAN + 1 - key.len()];
+		over.extend_from_slice(&key);
+		req!(over.len(), secret::DER_SPAN + 1);
+		req!(secret::scan(&over), Vec::<Find>::new(), "past the span");
+		// The front of a file is still read whatever the file's size, which is the rule as it stood
+		// before offsets were looked at and is what catches `cat key.der cert.der`.
+		let mut wide = key.clone();
+		wide.resize(secret::DER_SPAN * 4, 0x5A);
+		req!(secret::scan(&wide), vec![Find { line: 1, kind: Kind::DerKey }], "at the front");
+		Ok(())
+	}));
+
 	res!(test_it(filter, &["A compiled artefact is not read for a DER key", "all", "secret",
 		"der"], ||
 	{
-		// Size is the whole of the gate, and it is asked before a byte is looked at. fe2o3 has a
-		// 22 MB binary in its history, and the estate has ONNX models and video beside it. What it
-		// costs is stated here rather than left to be found: this is a well formed ed25519 key
-		// declaring 8996 bytes, which is the size an RSA-16384 key would be, and it goes free.
+		// Size is the whole of the gate, and it is asked of the length the sequence declares, which
+		// is read out of the first four bytes and nothing more. fe2o3 has a 22 MB binary in its
+		// history, and the estate has ONNX models and video beside it. What the ceiling costs is
+		// stated here rather than left to be found: this is a well formed ed25519 key declaring
+		// 8996 bytes, which is the size an RSA-16384 key would be, and it goes free.
 		let big = res!(der("30822324020100300506032B657004220420", 9000));
 		req!(big.len(), 9000);
 		req!(secret::scan(&big), Vec::<Find>::new(), "over the ceiling");

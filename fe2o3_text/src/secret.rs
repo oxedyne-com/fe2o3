@@ -20,15 +20,35 @@
 //! A private key written as raw DER is a credential that no run of characters describes: it has no
 //! armour, no vendor prefix and no field name beside it, and it holds NULs, so the binary skip
 //! below was passing over precisely the thing this module exists to stop. It is caught instead by
-//! the fixed bytes the encoding itself puts at the front of one -- an algorithm's object
-//! identifier, which is as literal as the PEM header above it and is a heuristic in no sense at
-//! all. Written on 2026-08-23, after a live DKIM signing key spent four months at mode 644 in a
-//! replicated folder and nothing here could have seen it.
+//! the fixed bytes the encoding itself puts in front of one -- an algorithm's object identifier,
+//! which is as literal as the PEM header above it and is a heuristic in no sense at all. Written
+//! on 2026-08-23, after a live DKIM signing key spent four months at mode 644 in a replicated
+//! folder and nothing here could have seen it.
 //!
 //! The bytes were read off keys generated for the purpose and are stated in [`DER_ALGOS`]; none of
 //! them came from a file in anybody's tree, and nothing in this module was tuned against one. That
 //! matters to the next reader, who will otherwise assume the opposite and be right to distrust the
 //! result.
+//!
+//! # Why a key is looked for at every offset, and only in a small file
+//!
+//! Ring 0.17.8 holds the head of a PKCS#8 key as a `const` template -- the outer `SEQUENCE`, the
+//! version, the algorithm's object identifier and the tag that opens the private bytes -- and a
+//! compiler puts that template in the read-only data of whatever links it. Those bytes are the
+//! structure of a private key because that is what a template of one is, so [`der_key`] says so,
+//! and it is right: there is no test that separates a template from a key which is not a guess
+//! about the bytes standing after it. A sweep of every file under this tree on 2026-08-23 --
+//! 623,722 files, 202 GB, nothing skipped -- found the structure at 1,729 offsets in 303 files,
+//! and every one of the 303 was a compiled artefact carrying that template: executables, `.rlib`,
+//! `.rmeta`, `.o`, WebAssembly modules, and one capture of a tree holding an executable. Not one
+//! was a key.
+//!
+//! So a scan of every offset in a compiled artefact refuses it, and a guard that refuses an
+//! ordinary build output is a guard somebody turns off. [`DER_SPAN`] is what stops that, and it is
+//! a size and nothing cleverer: the whole of a file is read at every offset while the file is
+//! small enough to be a key and the things a key is bundled with, and above that only its front is
+//! read, which is where the rule stood until this was written. The smallest artefact in that sweep
+//! was 101,960 bytes, three times the span.
 //!
 //! # Why the shapes are matched by hand
 //!
@@ -79,13 +99,21 @@ const SOURCE: &str = "src";
 const PEM_ALGOS: &[&str] = &["", "RSA ", "EC ", "DSA ", "OPENSSH ", "PGP "];
 const PEM_KEY: &str = "PRIVATE KEY";
 
-// Widest a file can be and still be taken for a bare DER key, and narrowest. The upper bound is
-// what keeps this off the compiled artefacts: a 22 MB binary is rejected on a length comparison
-// before a byte of it is looked at, and no private key comes near 8000 bytes -- an RSA-8192 key in
-// PKCS#8 is about 4.7 kB, and everything else on this list is under 2.4 kB. The lower bound is
-// below the smallest of them, an ed25519 key at 48 bytes.
+// Widest a DER key may declare itself and still be looked at, and narrowest a file can be to hold
+// one at all. The ceiling is on the length the SEQUENCE declares rather than on the file, because
+// what stands after a key is not the key, and gating on the file was what let a key with one byte
+// appended through. No private key comes near 8000 bytes: an RSA-8192 key in PKCS#8 is about
+// 4.7 kB and everything else on this list is under 2.4 kB. The floor is below the smallest key, an
+// ed25519 at 48 bytes.
 const DER_MAX: usize = 8000;
 const DER_MIN: usize = 32;
+
+/// Widest a file can be and still be read at every offset rather than only at its front.
+///
+/// Four times the widest a key may declare itself, so that a key and the certificate chain it is
+/// bundled with are inside it several times over, and far below any compiled artefact: see this
+/// module's header for the sweep that says so and for why a size is what stands here.
+pub const DER_SPAN: usize = 4 * DER_MAX;
 
 /// The `AlgorithmIdentifier` that stands after the version in a PKCS#8 private key, one per
 /// algorithm, each an object identifier the encoding fixes and nobody chooses.
@@ -155,7 +183,7 @@ pub enum Kind {
 	Stripe,		// sk_live_, rk_live_
 	Google,		// AIza
 	PrivateKey,	// a PEM private key block
-	DerKey,		// a private key written as DER, with nothing around it
+	DerKey,		// a private key written as DER, at any offset in a small file
 	Assigned,	// a named secret field holding a long literal
 }
 
@@ -302,9 +330,10 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 	let mut out = Vec::new();
 	// Asked before the binary skip, because a key in DER form is exactly what that skip passes
 	// over: NULs at the front, no text anywhere, and nothing the line walk below can see. It is a
-	// property of the whole input rather than of a line, so it answers on its own and stops here.
-	if der_key(data) {
-		out.push(Find { line: 1, kind: Kind::DerKey });
+	// property of the bytes rather than of a line, so it answers on its own and stops here,
+	// whatever else stands around the key.
+	if let Some(at) = der_key(data) {
+		out.push(Find { line: line_at(data, at), kind: Kind::DerKey });
 		return out;
 	}
 	let head = data.len().min(BINARY_HEAD);
@@ -354,35 +383,69 @@ pub fn skip_path(path: &[u8]) -> bool {
 	LOCKFILES.iter().any(|f| f.as_bytes() == last)
 }
 
-/// Is the whole of these bytes one private key, written as DER and left unarmoured?
+/// Where a private key, written as DER and left unarmoured, stands in these bytes, if one does.
+///
+/// The front of the input is asked whatever its size, and every offset in it as well while it is
+/// no wider than [`DER_SPAN`]. Until 2026-08-23 only the front was asked, and `cat cert.der
+/// key.der` -- a bundle nobody has to tamper with to produce, and one `openssl pkey -inform DER`
+/// reads the private key straight out of and signs with -- went free because the certificate stood
+/// first.
+///
+/// There is no marker that excuses a finding here, and there cannot be: this reads the key's own
+/// structure and nothing around it, so there is nowhere to write one that it would look at. A test
+/// that needs a key should generate one, which is what this crate's own suite does.
+fn der_key(data: &[u8]) -> Option<usize> {
+	if der_key_at(data, 0) {
+		return Some(0);
+	}
+	if data.len() > DER_SPAN {
+		return None;
+	}
+	// The version INTEGER is the one thing every form below has in common, and it stands at a fixed
+	// distance into the SEQUENCE, whose header is one, two or three bytes wide. So a candidate
+	// opening is at one of three known distances back from a version, and a walk looking for the
+	// version rather than for the SEQUENCE tag asks the full test 210 times less often: three bytes
+	// of a compiled artefact answer where one does not. What the two find is the same set.
+	let last = data.len().saturating_sub(2);
+	for v in 0..last {
+		if data[v] != 0x02 || data[v + 1] != 0x01 || (data[v + 2] != 0x00 && data[v + 2] != 0x01) {
+			continue;
+		}
+		for hdr in 1..=3 {
+			if v >= 1 + hdr && der_key_at(data, v - 1 - hdr) {
+				return Some(v - 1 - hdr);
+			}
+		}
+	}
+	None
+}
+
+/// Does one stand at this offset?
 ///
 /// The three questions are the encoding's own, and each of them has one answer. The outer
-/// `SEQUENCE` has to account for the input exactly, so what is refused is a file that is a key and
-/// nothing else -- a byte of anything else in it and this is not what it claims to be. The version
-/// `INTEGER` is 0 for PKCS#8 and PKCS#1 and 1 for the `OneAsymmetricKey` form that carries the
-/// public key too, which is the 83-byte shape `ring` writes and the shape the DKIM key was in.
-/// What follows the version is then an algorithm's object identifier from [`DER_ALGOS`], or the
-/// modulus of a PKCS#1 RSA key, or the private scalar of a SEC1 elliptic curve key.
-///
-/// There is no marker that excuses a finding here, and there cannot be: a file which is a key and
-/// nothing else has nowhere to put one, and anything appended to make room stops the length
-/// accounting above from agreeing, at which point there is no finding to excuse. A test that needs
-/// a key should generate one, which is what this crate's own suite does.
-fn der_key(data: &[u8]) -> bool {
-	if data.len() < DER_MIN || data.len() > DER_MAX || data.first() != Some(&0x30) {
+/// `SEQUENCE` declares its own length and that is where the key ends: everything asked below is
+/// asked of those bytes, and whatever stands after them is no part of the key and is not looked
+/// at. The version `INTEGER` is 0 for PKCS#8 and PKCS#1 and 1 for the `OneAsymmetricKey` form that
+/// carries the public key too, which is the 83-byte shape `ring` writes and the shape the DKIM key
+/// was in. What follows the version is then an algorithm's object identifier from [`DER_ALGOS`],
+/// or the modulus of a PKCS#1 RSA key, or the private scalar of a SEC1 elliptic curve key.
+fn der_key_at(data: &[u8], at: usize) -> bool {
+	if data.len() - at < DER_MIN || data[at] != 0x30 {
 		return false;
 	}
-	let (len, hdr) = match der_len(&data[1..]) {
+	let (len, hdr) = match der_len(&data[at + 1..]) {
 		Some(v)	=> v,
 		None	=> return false,
 	};
 	let whole = 1 + hdr + len;
-	// An editor or a shell redirect will put a newline after the last byte, and that is the only
-	// thing allowed to stand outside the SEQUENCE.
-	if whole > data.len() || !data[whole..].iter().all(|b| *b == b'\n' || *b == b'\r') {
+	// The SEQUENCE has to be all there, and the ceiling is asked of the length it declares rather
+	// than of what is left of the file.
+	if whole > data.len() - at || whole > DER_MAX {
 		return false;
 	}
-	let body = &data[1 + hdr..];
+	// Bounded by the declared length, so that a SEQUENCE too short to hold one of the shapes below
+	// cannot borrow the bytes standing after it to finish the match.
+	let body = &data[at + 1 + hdr..at + whole];
 	let after = if body.starts_with(&[0x02, 0x01, 0x00]) {
 		&body[3..]
 	} else if body.starts_with(&[0x02, 0x01, 0x01]) {
@@ -402,6 +465,13 @@ fn der_key(data: &[u8]) -> bool {
 	// PKCS#1, which names no algorithm: what follows the version is the modulus, an INTEGER whose
 	// length is written long form because no key worth having has one under 128 bytes.
 	after.starts_with(&[0x02, 0x81]) || after.starts_with(&[0x02, 0x82])
+}
+
+/// The line an offset falls on, counting line feeds, so that a key written into a text file is
+/// reported where a person will find it. A key at the front of a file is line 1, which is where
+/// every one of them was reported before offsets were looked at.
+fn line_at(data: &[u8], at: usize) -> usize {
+	1 + data[..at].iter().filter(|b| **b == b'\n').count()
 }
 
 /// The length a DER header declares, and the bytes that header took, or nothing where the form is
