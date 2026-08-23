@@ -59,6 +59,7 @@ fn a_post_survives_the_database() -> Outcome<()> {
         source: fmt!("# On rent\n\nAn opening sentence.\n"),
         deliveries: Vec::new(),
         tags:   vec![fmt!("rust"), fmt!("web")],
+        ai_level: None,
     };
     res!(store::put(&handle, &rec, "test"));
 
@@ -481,6 +482,7 @@ async fn a_test_send_touches_no_state_or_history() -> Outcome<()> {
         source: fmt!("# WIP\n\nNot yet.\n"),
         deliveries: Vec::new(),
         tags:   Vec::new(),
+        ai_level: None,
     };
     res!(store::put(&handle, &draft, "test"));
 
