@@ -2198,7 +2198,6 @@ pub struct ServerConfig {
 
     // --- Server bind and policy (shared) ------------------------------------
     pub log_level:                      String,         // used by the server once running
-    pub num_server_bots:                u16,            // how many server bot workers
     pub server_address:                 String,         // typically "0.0.0.0"
     pub server_port_tcp:                u16,            // the primary HTTPS port
     // Optional plaintext HTTP listener port. When non-zero, Steel binds this port too and
@@ -2389,7 +2388,6 @@ impl Default for ServerConfig {
         Self {
             tls_dir_rel:                    fmt!("./tls"),
             log_level:                      fmt!("debug"),
-            num_server_bots:                1,
             server_address:                 fmt!("0.0.0.0"),
             server_port_tcp:                8443,
             server_port_tcp_plaintext:      0,      // disabled by default
@@ -2741,6 +2739,12 @@ mod tests {
     /// config file already on disk, which is an outage rather than a feature.
     /// The compression and fingerprint settings are new, so a config written
     /// before they existed must still load and must come up with the defaults.
+    ///
+    /// The map below still names `num_server_bots`, which is no longer a field,
+    /// and that is deliberate: `from_datmap` reads the keys it knows and does
+    /// not object to the rest, so this is also the check that REMOVING a field
+    /// leaves every config already written for it loading unchanged. Nine
+    /// `config.jdat` files across the apps set that key and none needs editing.
     #[test]
     fn a_config_written_before_these_fields_existed_still_loads() -> Outcome<()> {
         let mut m = DaticleMap::new();
