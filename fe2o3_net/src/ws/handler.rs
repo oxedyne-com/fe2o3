@@ -75,6 +75,19 @@ pub trait WebSocketHandler:
     {
         self
     }
+
+    /// Record, on a cloned handler just before the handshake, whether the
+    /// connection carries an authenticated operator session. The default is a
+    /// no-op returning the handler unchanged, so handlers with no operator-only
+    /// commands are unaffected. A handler that gates privileged commands on an
+    /// operator overrides this to store the flag; it must default those
+    /// commands to refused so a handler that never has this set stays closed.
+    fn with_operator_authed(self, _authed: bool) -> Self
+    where
+        Self: Sized,
+    {
+        self
+    }
 }
 
 #[derive(Clone, Debug)]

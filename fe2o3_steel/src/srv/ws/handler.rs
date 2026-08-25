@@ -117,6 +117,12 @@ pub struct AppWebSocketHandler {
     dev_manager: Option<Arc<DevRefreshManager>>,
     sid: Option<String>,
     term_manager: Option<Arc<TerminalManager>>,
+    // Whether this connection carries an authenticated operator (dashboard)
+    // session. The `term_*` management commands spawn, list, rename and kill
+    // terminal sessions, which is an operator capability, so they are gated on
+    // this. It defaults to `false` and is set only when the router has resolved
+    // an operator principal for the request: absent that, the commands refuse.
+    operator_authed: bool,
 }
 
 impl AppWebSocketHandler {
@@ -126,6 +132,7 @@ impl AppWebSocketHandler {
             dev_manager,
             sid: None,
             term_manager: None,
+            operator_authed: false,
         }
     }
 
@@ -133,6 +140,7 @@ impl AppWebSocketHandler {
         self.term_manager = Some(tm);
         self
     }
+
 
     fn scoped_sess_key(&self, user_key: &str) -> Option<Dat> {
         self.sid.as_ref().map(|sid| {
@@ -222,6 +230,11 @@ impl WebSocketHandler for AppWebSocketHandler {
 
     fn attach_sid(mut self, sid: Option<String>) -> Self {
         self.sid = sid;
+        self
+    }
+
+    fn with_operator_authed(mut self, authed: bool) -> Self {
+        self.operator_authed = authed;
         self
     }
 
@@ -941,6 +954,11 @@ impl WebSocketHandler for AppWebSocketHandler {
                 // └───────────────────────┘
                 "term_new" => {
                     trace!("{}: term_new", id);
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("term_new: an authenticated operator session \
+                                is required.")]);
+                    }
                     let tm = match &self.term_manager {
                         Some(t) => t.clone(),
                         None => return Self::response_text(syntax, "error",
@@ -959,6 +977,11 @@ impl WebSocketHandler for AppWebSocketHandler {
                 }
                 "term_list" => {
                     trace!("{}: term_list", id);
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("term_list: an authenticated operator session \
+                                is required.")]);
+                    }
                     let tm = match &self.term_manager {
                         Some(t) => t.clone(),
                         None => return Self::response_text(syntax, "error",
@@ -973,6 +996,11 @@ impl WebSocketHandler for AppWebSocketHandler {
                 }
                 "term_close" => {
                     trace!("{}: term_close", id);
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("term_close: an authenticated operator session \
+                                is required.")]);
+                    }
                     let tm = match &self.term_manager {
                         Some(t) => t.clone(),
                         None => return Self::response_text(syntax, "error",
@@ -992,6 +1020,11 @@ impl WebSocketHandler for AppWebSocketHandler {
                 }
                 "term_set_name" => {
                     trace!("{}: term_set_name", id);
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("term_set_name: an authenticated operator session \
+                                is required.")]);
+                    }
                     let tm = match &self.term_manager {
                         Some(t) => t.clone(),
                         None => return Self::response_text(syntax, "error",

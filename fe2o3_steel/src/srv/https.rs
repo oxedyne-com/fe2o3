@@ -385,8 +385,19 @@ impl<
                         // The raw sid string is enough for the WS handler:
                         // it only needs a stable per-client key prefix, not
                         // the typed numeric identifier.
+                        // Resolve the operator principal for this request, if
+                        // any, so the handler's `term_*` management commands --
+                        // which spawn, list, rename and kill terminal sessions --
+                        // are gated on an authenticated operator exactly as the
+                        // `/term/` bridge above is. Absent an operator session
+                        // the flag is false and those commands refuse.
+                        let ws_operator = self.admin_state.as_ref()
+                            .and_then(|st| crate::srv::admin::handler
+                                ::extract_principal(st, &request.header.fields))
+                            .is_some();
                         let ws_handler = vhost.ws_handler.clone()
-                            .attach_sid(sid_str.clone());
+                            .attach_sid(sid_str.clone())
+                            .with_operator_authed(ws_operator);
                         let reunited_stream = read_stream.unsplit(write_stream);
                         let vhost_db = self.db_for_vhost(vhost.primary_hostname());
                         return self.handle_websocket(
