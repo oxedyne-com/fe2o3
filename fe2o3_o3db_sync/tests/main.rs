@@ -6,6 +6,7 @@ mod durability;
 mod perf;
 mod rollover;
 mod scan;
+mod scan_torn_tail;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -34,6 +35,7 @@ fn run_tests() -> Outcome<()> {
     res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));
     res!(scan::test_scan(filter));
+    res!(scan_torn_tail::test_scan_torn_tail(filter));
     res!(durability::test_durability(filter));
     res!(delete_replay::test_delete_replay(filter));
     res!(chunked_value::test_chunked_value(filter));
