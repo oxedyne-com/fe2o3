@@ -312,6 +312,22 @@ impl WebSocketHandler for AppWebSocketHandler {
                 // └───────────────────────┘
                 "insert" => {
                     trace!("Received insert");
+                    // Raw, unscoped write of any key in the vhost store. Its
+                    // scoped siblings -- `sess_put` (session namespace) and
+                    // `user_put` (the authenticated user's namespace) -- carry
+                    // every legitimate client write, each confined to a prefix
+                    // the caller owns. This one is confined to nothing, so it is
+                    // an operator capability: absent an operator session it
+                    // refuses, the same gate the `term_*` commands and the
+                    // `/term/` bridge stand behind. Otherwise a stranger could
+                    // overwrite `publish/admins`, a user's credential record, or
+                    // any session's binding.
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("insert: an authenticated operator session \
+                                is required; use sess_put or user_put for \
+                                scoped writes.")]);
+                    }
                     if let Some((ref db, uid)) = db {
                         let db = match db.write() {
                             Err(_err) => {
@@ -361,6 +377,18 @@ impl WebSocketHandler for AppWebSocketHandler {
                     return Self::response_text(syntax, "error", vec![dat!(err.to_string())]);
                 }
                 "get_data" => {
+                    // Raw, unscoped read of any key in the vhost store, the read
+                    // counterpart of `insert` and gated the same way. `sess_get`
+                    // and `user_get` read only the caller's own namespace; this
+                    // reads anything, so absent an operator session it refuses,
+                    // rather than hand a stranger another user's credential
+                    // record or any session's binding.
+                    if !self.operator_authed {
+                        return Self::response_text(syntax, "error",
+                            vec![dat!("get_data: an authenticated operator session \
+                                is required; use sess_get or user_get for \
+                                scoped reads.")]);
+                    }
                     if let Some((ref db, _uid)) = db {
                         let db = match db.read() {
                             Err(_err) => {
