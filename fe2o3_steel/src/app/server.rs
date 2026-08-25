@@ -669,24 +669,30 @@ impl AppShellContext {
                 Arc::new(vh.site_admins.clone()),
             );
 
+            // One terminal manager per vhost, built only where the config asks
+            // for it. It is shared two ways: attached to the WS syntax handler
+            // for the `term_*` management commands, and held on the runtime so
+            // the `/term/` bridge router can see whether the feature exists at
+            // all -- the presence of this is the config gate that decides
+            // whether an upgrade to `/term/<name>` is dispatched or refused.
+            let term_manager = vh.term_config.as_ref().map(|tc| Arc::new(
+                crate::srv::ws::term::TerminalManager::new(
+                    &tc.session_prefix,
+                    &tc.launch_command,
+                )
+            ));
             let runtime = Arc::new(VhostRuntime {
                 hostnames:      vh.hostnames.clone(),
                 web_handler,
-                ws_handler:     if let Some(tc) = &vh.term_config {
-                    ws_handler.clone().with_term_manager(Arc::new(
-                        crate::srv::ws::term::TerminalManager::new(
-                            &tc.session_prefix,
-                            &tc.launch_command,
-                        )
-                    ))
-                } else {
-                    ws_handler.clone()
+                ws_handler:     match &term_manager {
+                    Some(tm) => ws_handler.clone().with_term_manager(tm.clone()),
+                    None     => ws_handler.clone(),
                 },
                 ws_syntax:      ws_syntax.clone(),
                 redirects:      vh.redirects.clone(),
                 proxy_routes:   vh.proxy_routes.clone(),
                 ws_routes:      vh.ws_routes.clone(),
-                term_manager:   None,
+                term_manager:   term_manager.clone(),
                 uses_sessions:  vh.uses_sessions(),
             });
 

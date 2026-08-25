@@ -330,6 +330,44 @@ impl<
                                     let _ = resp.write_all(&mut write_stream).await;
                                     break;
                                 }
+                                // ── Gate: fail closed on config and auth ──
+                                // The bridge attaches a raw pty to a shell, so the upgrade is
+                                // dispatched only when two things both hold, and each fails
+                                // closed. The vhost must have enabled terminals -- a vhost with
+                                // no `term_config` leaves `term_manager` unset -- and the
+                                // request must carry an authenticated operator session, the
+                                // same principal the admin routes read from the dashboard
+                                // cookie. Absent either, the answer is a refusal, never a
+                                // shell. The decision lives in `terminal_gate` so it is
+                                // testable apart from this connection machinery.
+                                let principal = self.admin_state.as_ref()
+                                    .and_then(|st| crate::srv::admin::handler::extract_principal(
+                                        st, &request.header.fields));
+                                match terminal_gate(vhost.term_manager.is_some(), principal.as_ref()) {
+                                    TerminalGate::NotEnabled => {
+                                        warn!("{}: terminal WS refused for '{}': vhost '{}' has no term_config.",
+                                            id, session_name, vhost.primary_hostname());
+                                        let mut resp = HttpMessage::respond_with_text(
+                                            HttpStatus::Forbidden,
+                                            "Terminal features are not enabled on this host.",
+                                        );
+                                        resp.set_connection_close(true);
+                                        let _ = resp.write_all(&mut write_stream).await;
+                                        break;
+                                    }
+                                    TerminalGate::NotAuthenticated => {
+                                        warn!("{}: terminal WS refused for '{}': no authenticated operator session.",
+                                            id, session_name);
+                                        let mut resp = HttpMessage::respond_with_text(
+                                            HttpStatus::Forbidden,
+                                            "Terminal access requires an authenticated operator session.",
+                                        );
+                                        resp.set_connection_close(true);
+                                        let _ = resp.write_all(&mut write_stream).await;
+                                        break;
+                                    }
+                                    TerminalGate::Dispatch => (),
+                                }
                                 log!(log_level,
                                     "{}: terminal ws -> '{}'", id, session_name);
                                 let reunited = read_stream.unsplit(write_stream);
@@ -1086,5 +1124,103 @@ impl<
             &policy,
             id,
         ).await
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TERMINAL DISPATCH GATE                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The outcome of deciding whether a `/term/<name>` upgrade may be dispatched to
+/// the terminal bridge. Both conditions fail closed: a vhost that never enabled
+/// terminals is [`NotEnabled`](Self::NotEnabled), and a request with no operator
+/// session is [`NotAuthenticated`](Self::NotAuthenticated). Only when the vhost
+/// has terminals and the caller is an authenticated operator is the answer
+/// [`Dispatch`](Self::Dispatch).
+///
+/// This exists so the decision is testable apart from the connection machinery
+/// in `handle_https`, which cannot be stood up without a TLS stream.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalGate {
+    Dispatch,
+    NotEnabled,
+    NotAuthenticated,
+}
+
+/// Decides whether to dispatch an upgrade to the terminal bridge.
+///
+/// `term_enabled` is whether the vhost carries a `term_config` (its
+/// `term_manager` is set); `principal` is the operator resolved from the
+/// request's dashboard cookie, if any. The gate is deliberately conjunctive and
+/// order-sensitive only for the sake of a precise refusal: configuration is
+/// checked first, so a host that never asked for terminals never even reports
+/// whether the caller was authenticated.
+pub fn terminal_gate(
+    term_enabled:   bool,
+    principal:      Option<&crate::srv::admin::AdminPrincipal>,
+)
+    -> TerminalGate
+{
+    if !term_enabled {
+        return TerminalGate::NotEnabled;
+    }
+    if principal.is_none() {
+        return TerminalGate::NotAuthenticated;
+    }
+    TerminalGate::Dispatch
+}
+
+
+#[cfg(test)]
+mod terminal_gate_tests {
+    use super::{
+        terminal_gate,
+        TerminalGate,
+    };
+    use crate::srv::admin::AdminPrincipal;
+
+    fn operator() -> AdminPrincipal {
+        AdminPrincipal {
+            name:       "op".to_string(),
+            scopes:     vec!["dashboard:view".to_string()],
+            expires_at: u64::MAX,
+        }
+    }
+
+    // An unauthenticated upgrade to `/term/` is refused even where the feature
+    // is enabled: a terminal-enabled vhost with no operator session must not
+    // dispatch. This is the hole that shipped -- the router dispatched every
+    // `/term/` upgrade regardless of the caller.
+    #[test]
+    fn unauthenticated_term_upgrade_is_refused() {
+        assert_eq!(
+            terminal_gate(true, None),
+            TerminalGate::NotAuthenticated,
+            "an unauthenticated /term/ upgrade must be refused, not dispatched",
+        );
+    }
+
+    // A vhost with no `term_config` refuses regardless of who is asking: even a
+    // fully authenticated operator does not reach a shell on a host that never
+    // enabled terminals. This is the config gate the router never consulted --
+    // `None` must mean off, failing closed.
+    #[test]
+    fn term_without_config_is_refused_even_for_an_operator() {
+        let op = operator();
+        assert_eq!(
+            terminal_gate(false, Some(&op)),
+            TerminalGate::NotEnabled,
+            "a vhost with no term_config must refuse /term/ for anyone",
+        );
+        // And with no config and no session, still refused, config first.
+        assert_eq!(terminal_gate(false, None), TerminalGate::NotEnabled);
+    }
+
+    // The one path that dispatches: terminals enabled and an operator present.
+    #[test]
+    fn enabled_and_authenticated_dispatches() {
+        let op = operator();
+        assert_eq!(terminal_gate(true, Some(&op)), TerminalGate::Dispatch);
     }
 }

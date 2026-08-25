@@ -1820,7 +1820,7 @@ pub fn redirect_to_login() -> HttpMessage {
 /// scope -- is flattened to `None`, so the caller can simply 303 to login.
 pub fn extract_principal(
     state:   &AdminState,
-    headers: &Arc<HeaderFields>,
+    headers: &HeaderFields,
 )
     -> Option<AdminPrincipal>
 {
@@ -1840,7 +1840,7 @@ pub fn extract_principal(
     Some(principal)
 }
 
-fn read_cookie(headers: &Arc<HeaderFields>, name: &str) -> Option<String> {
+fn read_cookie(headers: &HeaderFields, name: &str) -> Option<String> {
     if let Some(HeaderFieldValue::Cookie(cookies)) =
         headers.get_one(&HeaderName::Cookie)
     {
