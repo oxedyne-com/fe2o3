@@ -102,7 +102,12 @@ pub const MAGIC: [u8; 6] = *b"ORESEG"; // the bytes every segment begins with
 /// not move a byte this time either, and neither did a mark that carries neither
 /// a body nor a time: it is still written at wire code 4 with the two elements it
 /// always had, so every mark ever signed still verifies.
-pub const VERSION: u8 = 4;
+///
+/// Raised to 5 when the vocabulary gained [`crate::op::Op::Amended`] at wire code
+/// 14, so that a proposal's author can state it again without the opening
+/// operation being touched. The framing did not move, and the four proposal codes
+/// below it did not move either.
+pub const VERSION: u8 = 5;
 
 /// The oldest format version this module reads.
 ///
@@ -128,7 +133,8 @@ pub const VERSION_MIN: u8 = 2;
 /// Version 2 was frozen with [`crate::op::CODE_NOTE`] at the top of the
 /// vocabulary; version 3 added [`crate::op::Op::FileMode`] above it and nothing
 /// else; version 4 added the five codes from [`crate::op::CODE_MARK_TIMED`] up to
-/// [`crate::op::CODE_REVERTS`]. A writer continuing a segment somebody else wrote
+/// [`crate::op::CODE_REVERTS`]; version 5 added [`crate::op::CODE_AMENDED`] above
+/// those and nothing else. A writer continuing a segment somebody else wrote
 /// asks this rather than assuming, so that "an older version is a strict subset
 /// of a newer one" stays true of the bytes and not only of the intention.
 ///
@@ -141,8 +147,10 @@ pub const fn highest_code(version: u8) -> u8 {
 		crate::op::CODE_NOTE
 	} else if version == 3 {
 		crate::op::CODE_FILE_MODE
-	} else {
+	} else if version == 4 {
 		crate::op::CODE_REVERTS
+	} else {
+		crate::op::CODE_AMENDED
 	}
 }
 
@@ -2431,7 +2439,12 @@ mod tests {
 	fn an_old_segment_refuses_a_newer_operation() -> Outcome<()> {
 		assert_eq!(highest_code(VERSION_MIN), crate::op::CODE_NOTE);
 		assert_eq!(highest_code(3), crate::op::CODE_FILE_MODE);
-		assert_eq!(highest_code(VERSION), crate::op::CODE_REVERTS);
+		assert_eq!(highest_code(4), crate::op::CODE_REVERTS);
+		assert_eq!(highest_code(VERSION), crate::op::CODE_AMENDED);
+		// Every rung is named above, so a bump that forgot one would be caught here
+		// rather than by a segment somebody could not read.
+		assert!(highest_code(4) < highest_code(VERSION),
+			"the vocabulary grows upwards, and version 5 must admit more than version 4");
 		let old = Head { version: VERSION_MIN, replica: None };
 		let mode = Entry::Bare(Record::root(
 			oid(1, 1),
@@ -2460,6 +2473,63 @@ mod tests {
 		let mut writer: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
 		assert_eq!(writer.version(), VERSION);
 		res!(writer.push(&mode));
+		Ok(())
+	}
+
+	/// A version 4 segment refuses an Amended, and a version 5 one takes it.
+	///
+	/// The same boundary as the version 3 test below, at the rung this change
+	/// added, and it is worth its own test for the reason that one is: version 4
+	/// is the version every repository written before this change is sitting in.
+	/// Every existing store is therefore a version 4 store, and what a version 4
+	/// segment does when handed code 14 is what decides whether an amendment costs
+	/// anybody a migration. It does not -- the operation is refused by name and
+	/// the caller opens a segment at the current version beside it.
+	#[test]
+	fn a_version_four_segment_refuses_an_amendment() -> Outcome<()> {
+		let v4 = Head { version: 4, replica: None };
+		let amended = Op::Amended {
+			on:		oid(3, 4),
+			title:	fmt!("Say it again"),
+			body:	b"and say it better".to_vec(),
+			voice:	fmt!("wren"),
+			time:	1_755_400_300,
+		};
+		assert_eq!(amended.code(), crate::op::CODE_AMENDED);
+		assert!(amended.code() > highest_code(4),
+			"an amendment must sit above the version 4 vocabulary");
+		let entry = Entry::Bare(Record::root(oid(9, 1), amended.clone()));
+		// An operation version 4 does spell still goes into a version 4 segment, so
+		// what follows is a refusal of this operation and not of the segment.
+		let settled = Entry::Bare(Record::root(oid(9, 2), Op::Settled {
+			on:		oid(3, 4),
+			state:	crate::op::Settled::Accepted,
+			mark:	None,
+			time:	1_755_400_301,
+		}));
+		let mut writer: Writer<Fold, 0> = Writer::new(&v4, Fold, [0u8; 0]);
+		res!(writer.push(&settled));
+		let e = match writer.push(&entry) {
+			Ok(()) => return Err(err!(
+				"An Amended at code {} was written into a version 4 segment.",
+				amended.code(); Test)),
+			Err(e) => e,
+		};
+		let msg = fmt!("{}", e);
+		assert!(msg.contains("Amended"), "message was {}", msg);
+		assert!(msg.contains(&fmt!("{}", amended.code())), "message was {}", msg);
+		// And continuing a version 4 segment somebody else wrote, which is where a
+		// real repository meets this rather than at a fresh one.
+		let bytes = res!(encode(&v4, &[settled], Fold, [0u8; 0]));
+		let mut writer: Writer<Fold, 0> = res!(Writer::resume(&bytes, Fold, [0u8; 0]));
+		assert_eq!(writer.version(), 4);
+		assert!(writer.push(&entry).is_err());
+		// A segment at the current version takes it, and reads back what went in.
+		let mut writer: Writer<Fold, 0> = Writer::new(&Head::new(None), Fold, [0u8; 0]);
+		assert_eq!(writer.version(), VERSION);
+		res!(writer.push(&entry));
+		let back = res!(Op::from_dat(&amended.to_dat()));
+		assert_eq!(back, amended, "an amendment did not survive its own encoding");
 		Ok(())
 	}
 
@@ -2551,10 +2621,10 @@ mod tests {
 	/// it was added in on 12026-07-30. It is shaped like a FileRename -- a code,
 	/// an identifier, a field -- and the field is a single tagged byte.
 	///
-	/// The version 4 bump moved the version byte here and nothing else, which is
-	/// the point: the operation this test pins was written in version 3 and is
-	/// spelled in version 4 by the same bytes, so a segment full of them needs no
-	/// migration.
+	/// The version 4 and version 5 bumps each moved the version byte here and
+	/// nothing else, which is the point: the operation this test pins was written
+	/// in version 3 and is spelled in version 5 by the same bytes, so a segment
+	/// full of them needs no migration.
 	#[test]
 	fn the_file_mode_bytes_are_frozen() -> Outcome<()> {
 		let rec = Record::root(oid(1, 1), Op::FileMode {
@@ -2563,9 +2633,9 @@ mod tests {
 		});
 		let bytes = res!(encode(&Head::new(None), &[Entry::Bare(rec)], Fold, [0u8; 0]));
 		let want: &[u8] = &[
-			// The magic, version 4, and no replica hint.
+			// The magic, version 5, and no replica hint.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x04,
+			0x05,
 			0x00,
 			// The record: a bare one, and 57 bytes of body.
 			0x01,
@@ -2853,7 +2923,7 @@ mod tests {
 			// The segment header: the magic, the version, a hint follows, and the
 			// replica it names.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x04,
+			0x05,
 			0x01,
 			0x02,
 			// The record: a bare one, and 61 bytes of body.
@@ -3105,9 +3175,9 @@ mod tests {
 		let veiled = res!(Entry::Bare(rec).veil(&()));
 		let bytes = res!(encode(&Head::new(None), &[veiled], Fold, [0u8; 0]));
 		let want: &[u8] = &[
-			// The magic, version 4, and no replica hint.
+			// The magic, version 5, and no replica hint.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x04,
+			0x05,
 			0x00,
 			// The record: a veiled one, and 126 bytes of body.
 			0x03,

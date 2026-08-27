@@ -120,6 +120,7 @@ pub const CODE_PROPOSAL:	u8 = 10;
 pub const CODE_SAID:		u8 = 11;
 pub const CODE_SETTLED:		u8 = 12;
 pub const CODE_REVERTS:		u8 = 13;
+pub const CODE_AMENDED:		u8 = 14;	// a proposal's author restating it
 
 
 /// The character beginning the name of an [`Op::Mark`] a tool wrote rather than
@@ -574,6 +575,21 @@ pub enum Op {
 		mark: Option<OpId>,				// an identifier, never a mark's name
 		time: u64,
 	},
+	// A proposal's author saying it again, better. The opening operation is never
+	// altered and the earlier statements stay in the log, so what a reader sees is
+	// the latest amendment its author wrote and the record of every one before it.
+	// Whether an amendment counts is a question about its author, and the answer is
+	// the same on every replica: it is folded where `voice` is the voice that
+	// opened the proposal, and passed over otherwise. That comparison is against
+	// the opening operation alone, so it does not depend on what else the log holds
+	// or on the order a reader walks it.
+	Amended {
+		on: OpId,						// the proposal being restated
+		title: String,
+		body: Vec<u8>,
+		voice: String,
+		time: u64,
+	},
 	Reverts {
 		undone: Vec<OpId>,				// ascending, without repetition, never empty
 	},
@@ -603,6 +619,7 @@ impl Op {
 			Self::Proposal { .. }	=> CODE_PROPOSAL,
 			Self::Said { .. }		=> CODE_SAID,
 			Self::Settled { .. }	=> CODE_SETTLED,
+			Self::Amended { .. }	=> CODE_AMENDED,
 			Self::Reverts { .. }	=> CODE_REVERTS,
 		}
 	}
@@ -623,6 +640,7 @@ impl Op {
 			Self::Proposal { .. }	=> "Proposal",
 			Self::Said { .. }		=> "Said",
 			Self::Settled { .. }	=> "Settled",
+			Self::Amended { .. }	=> "Amended",
 			Self::Reverts { .. }	=> "Reverts",
 		}
 	}
@@ -791,6 +809,10 @@ impl Op {
 			Self::Settled { .. } => Some(
 				"a settlement asserts what a proposal now is, and is superseded by \
 				writing another rather than undone"),
+			Self::Amended { .. } => Some(
+				"an amendment is its author saying a proposal again, and the saying \
+				grows rather than retracts; a statement got wrong is answered by \
+				writing another amendment, which is what supersedes it"),
 			Self::Reverts { .. } => Some(
 				"this names what some edits were written to undo; taking the name away \
 				would leave the edits and lose the only record of what they were for, so \
@@ -1058,6 +1080,14 @@ impl Op {
 				opt_id_to_dat(mark),
 				Dat::U64(*time),
 			]),
+			Self::Amended { on, title, body, voice, time } => Dat::List(vec![
+				Dat::U8(CODE_AMENDED),
+				on.to_dat(),
+				Dat::Str(title.clone()),
+				Dat::BU64(body.clone()),
+				Dat::Str(voice.clone()),
+				Dat::U64(*time),
+			]),
 			Self::Reverts { undone } => Dat::List(vec![
 				Dat::U8(CODE_REVERTS),
 				Dat::List(undone.iter().map(|u| u.to_dat()).collect()),
@@ -1195,6 +1225,16 @@ impl Op {
 					state:	res!(Settled::from_dat(&v[2])),
 					mark:	res!(as_opt_id(&v[3], "Settled mark")),
 					time:	res!(as_u64(&v[4], "Settled time")),
+				}
+			},
+			CODE_AMENDED => {
+				res!(expect_len(v, 6, "Amended"));
+				Self::Amended {
+					on:		res!(OpId::from_dat(&v[1])),
+					title:	res!(as_str(&v[2], "Amended title")),
+					body:	res!(as_bytes(&v[3], "Amended body")),
+					voice:	res!(as_str(&v[4], "Amended voice")),
+					time:	res!(as_u64(&v[5], "Amended time")),
 				}
 			},
 			CODE_REVERTS => {
@@ -1787,6 +1827,31 @@ pub(crate) mod tests {
 				on:		oid(3, 4),
 				state:	Settled::Done,
 				mark:	Some(oid(1, u64::MAX)),
+				time:	u64::MAX,
+			},
+			// An amendment by the voice that opened the proposal, one whose body
+			// exceeds a single byte length field, and the empty extreme -- the same
+			// three shapes the proposal above is sampled at, since an amendment
+			// carries what a proposal carries and must encode the same way.
+			Op::Amended {
+				on:		oid(3, 4),
+				title:	fmt!("Carry a body on a mark, and say when"),
+				body:	b"A mark names a point and says nothing about it or when.".to_vec(),
+				voice:	fmt!("wren"),
+				time:	1_755_400_300,
+			},
+			Op::Amended {
+				on:		oid(3, 4),
+				title:	fmt!("caf\u{e9}"),
+				body:	vec![0xff; 700],
+				voice:	fmt!("caf\u{e9}"),
+				time:	1_755_400_301,
+			},
+			Op::Amended {
+				on:		oid(u64::MAX, u64::MAX),
+				title:	String::new(),
+				body:	Vec::new(),
+				voice:	String::new(),
 				time:	u64::MAX,
 			},
 			// A revert of one operation, of several by one author, and of several
@@ -2880,6 +2945,7 @@ pub(crate) mod tests {
 		let refused = [
 			CODE_FILE_DELETE, CODE_MARK, CODE_MARK_TIMED, CODE_NOTE,
 			CODE_PROPOSAL, CODE_SAID, CODE_SETTLED, CODE_REVERTS,
+			CODE_AMENDED,
 		];
 		for op in samples() {
 			let id = oid(77, 3);
