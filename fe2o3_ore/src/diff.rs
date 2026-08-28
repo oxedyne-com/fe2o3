@@ -302,6 +302,214 @@ pub fn apply(old: &[u8], splices: &[Splice])
 }
 
 
+// ┌───────────────────────────────────────────────────────────────┐
+// │ Stored patches                                                 │
+// └───────────────────────────────────────────────────────────────┘
+//
+// A splice list is only worth storing if the bytes it was made against can be
+// named again months later. `apply` refuses a list that is structurally
+// impossible against the bytes in hand -- one that overlaps itself, or reaches
+// past the end -- and that is as far as offsets alone can go: a list made
+// against a DIFFERENT old file of a compatible shape applies perfectly well and
+// returns something nobody wrote. So a stored patch carries the length and the
+// checksum of both sides, and the reader is told which side is wrong rather
+// than handed a plausible answer.
+
+// Leading bytes of a stored patch, so a reader given some other file says so
+// instead of decoding whatever it was given.
+pub const PATCH_MAGIC: [u8; 4] = *b"ORDF";
+
+// The only layout understood here. A later one takes the next number, and a
+// reader that does not know a number refuses rather than guesses at it.
+pub const PATCH_FORMAT: u32 = 1;
+
+// Magic, format, the two lengths, the two checksums and the splice count.
+pub const PATCH_HEADER: usize = 28;
+
+// Offset, deletion count and insertion length, ahead of the inserted bytes.
+const SPLICE_HEADER: usize = 12;
+
+
+/// The splices from `old` to `new`, encoded as bytes that carry what they were
+/// made against.
+///
+/// **What comes back has already been decoded and applied again, and the result
+/// compared with `new`.** Nothing else here can promise that. `diff` is a guess
+/// by construction, and `apply` sees only whether a list fits the bytes it is
+/// given, so a caller who stores a patch and reads it back a year later has
+/// nobody to appeal to. One `apply` at record time is what turns a silent
+/// reconstruction failure into a refusal at the one moment the correct bytes
+/// are still in hand -- and it runs over the ENCODED form, through the same
+/// door a reader comes in by, so an encoder fault is caught here too.
+pub fn make_patch(old: &[u8], new: &[u8])
+	-> Outcome<Vec<u8>>
+{
+	if old.len() > u32::MAX as usize || new.len() > u32::MAX as usize {
+		return Err(err!(
+			"A patch addresses its bytes with 32 bit offsets, so neither side may be \
+			longer than {} bytes; the old side is {} and the new side {}.",
+			u32::MAX, old.len(), new.len(); Invalid, Input, Size));
+	}
+	let splices = diff(old, new);
+	let patch = encode_patch(old, new, &splices);
+	let back = res!(apply_patch(old, &patch), Invalid, Data);
+	if back != new {
+		return Err(err!(
+			"A patch from {} bytes to {} reconstructed {} bytes that are not them, so it \
+			is refused rather than stored.", old.len(), new.len(), back.len();
+		Invalid, Data, Mismatch));
+	}
+	Ok(patch)
+}
+
+/// The bytes a patch was made towards, given the bytes it was made from.
+///
+/// Four things are checked before a single splice is applied: that this is a
+/// patch at all, that its layout is one this build knows, and that `old` is the
+/// length and the checksum the patch was made against. The last is what stops a
+/// patch recorded against a different parent from returning a wrong file
+/// quietly; the checksum of the result is then confirmed as well, which catches
+/// a patch whose own bytes have decayed on disk.
+pub fn apply_patch(old: &[u8], patch: &[u8])
+	-> Outcome<Vec<u8>>
+{
+	if patch.len() < PATCH_HEADER {
+		return Err(err!(
+			"A patch is at least {} bytes of header; this one is {}.",
+			PATCH_HEADER, patch.len(); Invalid, Input, Decode));
+	}
+	if patch[0..4] != PATCH_MAGIC {
+		return Err(err!(
+			"These {} bytes do not begin with a patch's mark {:?}, so they are some other \
+			file.", patch.len(), PATCH_MAGIC; Invalid, Input, Decode));
+	}
+	let format = u32_at(patch, 4);
+	if format != PATCH_FORMAT {
+		return Err(err!(
+			"This patch is written in format {}, and this build reads format {}.",
+			format, PATCH_FORMAT; Invalid, Input, Decode));
+	}
+	let old_len = u32_at(patch, 8) as usize;
+	let old_sum = u32_at(patch, 12);
+	let new_len = u32_at(patch, 16) as usize;
+	let new_sum = u32_at(patch, 20);
+	let count = u32_at(patch, 24) as usize;
+	if old.len() != old_len {
+		return Err(err!(
+			"This patch was made against {} bytes and has been given {}, so it is not this \
+			file's patch.", old_len, old.len(); Invalid, Input, Mismatch));
+	}
+	let sum = checksum(old);
+	if sum != old_sum {
+		return Err(err!(
+			"This patch was made against bytes checksumming {:08x}, and the {} bytes given \
+			checksum {:08x}, so it is not this file's patch.", old_sum, old.len(), sum;
+		Invalid, Input, Checksum));
+	}
+	let splices = res!(decode_splices(patch, count));
+	let out = res!(apply(old, &splices));
+	if out.len() != new_len {
+		return Err(err!(
+			"This patch says it makes {} bytes and made {}.", new_len, out.len();
+		Invalid, Data, Mismatch));
+	}
+	let sum = checksum(&out);
+	if sum != new_sum {
+		return Err(err!(
+			"This patch says it makes bytes checksumming {:08x} and made {} bytes \
+			checksumming {:08x}.", new_sum, out.len(), sum; Invalid, Data, Checksum));
+	}
+	Ok(out)
+}
+
+/// The length of the bytes a patch was made from, and of the bytes it makes,
+/// read from its header without applying it.
+///
+/// For a caller weighing a patch against a full copy before it has either file
+/// in hand.
+pub fn patch_lengths(patch: &[u8])
+	-> Outcome<(usize, usize)>
+{
+	if patch.len() < PATCH_HEADER || patch[0..4] != PATCH_MAGIC {
+		return Err(err!(
+			"These {} bytes are not a patch.", patch.len(); Invalid, Input, Decode));
+	}
+	Ok((u32_at(patch, 8) as usize, u32_at(patch, 16) as usize))
+}
+
+fn encode_patch(old: &[u8], new: &[u8], splices: &[Splice])
+	-> Vec<u8>
+{
+	let body: usize = splices.iter().map(|s| SPLICE_HEADER + s.insert.len()).sum();
+	let mut out = Vec::with_capacity(PATCH_HEADER + body);
+	out.extend_from_slice(&PATCH_MAGIC);
+	out.extend_from_slice(&PATCH_FORMAT.to_le_bytes());
+	out.extend_from_slice(&(old.len() as u32).to_le_bytes());
+	out.extend_from_slice(&checksum(old).to_le_bytes());
+	out.extend_from_slice(&(new.len() as u32).to_le_bytes());
+	out.extend_from_slice(&checksum(new).to_le_bytes());
+	out.extend_from_slice(&(splices.len() as u32).to_le_bytes());
+	for sp in splices {
+		out.extend_from_slice(&(sp.at as u32).to_le_bytes());
+		out.extend_from_slice(&(sp.delete as u32).to_le_bytes());
+		out.extend_from_slice(&(sp.insert.len() as u32).to_le_bytes());
+		out.extend_from_slice(&sp.insert);
+	}
+	out
+}
+
+/// Every length is read before it is trusted, so a truncated or corrupted patch
+/// is a refusal rather than a panic on a slice.
+fn decode_splices(patch: &[u8], count: usize)
+	-> Outcome<Vec<Splice>>
+{
+	let mut out = Vec::with_capacity(count.min(1024));
+	let mut at = PATCH_HEADER;
+	for i in 0..count {
+		if at + SPLICE_HEADER > patch.len() {
+			return Err(err!(
+				"Splice {} of {} begins at byte {} of a patch {} bytes long, so the patch is \
+				truncated.", i, count, at, patch.len(); Invalid, Input, Decode));
+		}
+		let off = u32_at(patch, at) as usize;
+		let del = u32_at(patch, at + 4) as usize;
+		let ins = u32_at(patch, at + 8) as usize;
+		at += SPLICE_HEADER;
+		let end = match at.checked_add(ins) {
+			Some(e) if e <= patch.len()	=> e,
+			_ => return Err(err!(
+				"Splice {} of {} inserts {} bytes from byte {} of a patch {} bytes long, so \
+				the patch is truncated.", i, count, ins, at, patch.len();
+			Invalid, Input, Decode)),
+		};
+		out.push(Splice { at: off, delete: del, insert: patch[at..end].to_vec() });
+		at = end;
+	}
+	if at != patch.len() {
+		return Err(err!(
+			"A patch of {} splices ends at byte {} of {}, so it carries {} bytes nothing \
+			accounts for.", count, at, patch.len(), patch.len() - at; Invalid, Input, Decode));
+	}
+	Ok(out)
+}
+
+/// CRC-32, from the one already in the dependency graph for the deflate the
+/// packed record kind uses. It is here to catch a patch meeting bytes it was not
+/// made against and a patch that has decayed on disk, neither of which is an
+/// adversary, and a second hash implementation would be two to keep in step.
+fn checksum(buf: &[u8]) -> u32 {
+	let mut crc = flate2::Crc::new();
+	crc.update(buf);
+	crc.sum()
+}
+
+fn u32_at(buf: &[u8], at: usize) -> u32 {
+	u32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]])
+}
+
+
+
+
 fn common_prefix(a: &[u8], b: &[u8]) -> usize {
 	let limit = a.len().min(b.len());
 	let mut n = 0;
@@ -1351,5 +1559,184 @@ mod tests {
 		assert_eq!(starts[1], MAX_CHUNK);
 		Ok(())
 	}
-}
 
+	// ── Stored patches ──
+
+	/// This module's own source: real text, with real indentation, real comment
+	/// prose and real repeated tokens, rather than a fixture shaped to flatter
+	/// the diff.
+	const SOURCE: &str = include_str!("diff.rs");
+
+	/// One line changed in the middle of a real file must cost the line and not
+	/// the file, and must come back exactly.
+	#[test]
+	fn a_patch_of_one_line_costs_the_line_and_not_the_file() -> Outcome<()> {
+		let old = SOURCE.as_bytes();
+		let mut lines: Vec<&str> = SOURCE.split('\n').collect();
+		let at = lines.len() / 2;
+		lines[at] = "\t// one line, changed.";
+		let new_text = lines.join("\n");
+		let new = new_text.as_bytes();
+		let patch = res!(make_patch(old, new));
+		assert!(
+			patch.len() * 20 < old.len(),
+			"a one line change cost {} bytes against a file of {}",
+			patch.len(), old.len(),
+		);
+		assert_eq!(res!(apply_patch(old, &patch)), new);
+		Ok(())
+	}
+
+	/// The header says what it was made from and what it makes, without either
+	/// file being present.
+	#[test]
+	fn a_patch_names_both_lengths_in_its_header() -> Outcome<()> {
+		let old = b"one\ntwo\nthree\n";
+		let new = b"one\ntwo\nthree\nfour\n";
+		let patch = res!(make_patch(old, new));
+		assert_eq!(res!(patch_lengths(&patch)), (old.len(), new.len()));
+		Ok(())
+	}
+
+	/// **The break this whole encoding exists for.** A splice list made against
+	/// one parent, applied to a different parent OF THE SAME LENGTH, is
+	/// structurally valid: `apply` cannot see anything wrong with it and returns
+	/// bytes nobody ever wrote. The patch must refuse instead.
+	///
+	/// The refusal is required to blame the INPUT and not the result. The
+	/// checksum of the reconstruction would catch this too, and would say the
+	/// patch made the wrong bytes -- true, useless, and pointing at the one
+	/// thing that is not at fault. So the old side's checksum is what decides;
+	/// the length beside it is the plainer message for the common case and is
+	/// not load bearing on its own.
+	#[test]
+	fn a_patch_refuses_a_parent_it_was_not_made_against() -> Outcome<()> {
+		let old = b"alpha\nbravo\ncharlie\ndelta\n";
+		let new = b"alpha\nBRAVO\ncharlie\ndelta\n";
+		// Same length, different bytes: a length check alone would pass this.
+		let other = b"alpha\nbravo\ncharlie\nDELTA\n";
+		assert_eq!(old.len(), other.len());
+		let patch = res!(make_patch(old, new));
+		// The bare splice list would have applied without complaint.
+		let splices = diff(old, new);
+		let wrong = res!(apply(other, &splices));
+		assert_ne!(wrong, new.to_vec(), "the wrong parent gives bytes nobody wrote");
+		// And one byte shorter, so the length is wrong as well as the content.
+		let shorter = b"alpha\nbravo\ncharlie\ndelt\n";
+		for parent in [&other[..], &shorter[..]] {
+			match apply_patch(parent, &patch) {
+				Ok(got)	=> panic!(
+					"a patch applied to a parent it was not made against returned {} bytes",
+					got.len()),
+				Err(e)	=> {
+					let tags = e.tags();
+					assert!(
+						tags.contains(&ErrTag::Input),
+						"the refusal must blame the parent it was given; it said {:?}", tags);
+					assert!(
+						!tags.contains(&ErrTag::Data),
+						"blaming the reconstruction points at the one thing not at fault; \
+						it said {:?}", tags);
+				},
+			}
+		}
+		Ok(())
+	}
+
+	/// A patch a byte short, and a patch a byte long, are both refused: nothing
+	/// is decoded from a length the file does not carry, and nothing is left
+	/// over unaccounted for.
+	#[test]
+	fn a_patch_that_is_not_its_own_length_is_refused() -> Outcome<()> {
+		let old = SOURCE.as_bytes();
+		let new_text = SOURCE.replace("Myers", "MYERS");
+		let patch = res!(make_patch(old, new_text.as_bytes()));
+		// Every truncation, not a few: the decode reads a length out of the
+		// file and then indexes with it, so a bound it does not check is a
+		// panic rather than a refusal -- and a panic in a browser takes the tab.
+		for cut in 1..patch.len() {
+			let short = &patch[..patch.len() - cut];
+			assert!(apply_patch(old, short).is_err(), "a patch {} bytes short was read", cut);
+		}
+		let mut long = patch.clone();
+		long.push(0);
+		assert!(apply_patch(old, &long).is_err(), "a patch with a trailing byte was read");
+		Ok(())
+	}
+
+	/// A bit rotted anywhere in the payload is caught by the checksum of the
+	/// result, which is the only check that can see it: the splices still fit
+	/// the old bytes, so `apply` is happy.
+	#[test]
+	fn a_patch_whose_bytes_have_decayed_is_refused() -> Outcome<()> {
+		let old = b"alpha\nbravo\ncharlie\ndelta\necho\n";
+		let new = b"alpha\nbravo\nCHARLIE THE LONGER\ndelta\necho\n";
+		let patch = res!(make_patch(old, new));
+		let mut caught = 0;
+		let mut passed = 0;
+		for i in PATCH_HEADER..patch.len() {
+			let mut bent = patch.clone();
+			bent[i] ^= 0x20;
+			match apply_patch(old, &bent) {
+				Ok(got)	=> {
+					passed += 1;
+					assert_eq!(got, new.to_vec(), "byte {} bent and the answer was wrong", i);
+				},
+				Err(_)	=> caught += 1,
+			}
+		}
+		assert_eq!(passed, 0, "{} bent patches were accepted", passed);
+		assert!(caught > 0);
+		// A bent patch blames neither the caller nor the parent: what is wrong
+		// is the patch itself, and a reader has to be able to tell the two
+		// apart to know which file to go and find.
+		let mut bent = patch.clone();
+		bent[patch.len() - 1] ^= 0x20;
+		match apply_patch(old, &bent) {
+			Ok(_)	=> panic!("a bent patch was applied"),
+			Err(e)	=> assert!(
+				e.tags().contains(&ErrTag::Data),
+				"a bent patch must blame itself; it said {:?}", e.tags()),
+		}
+		Ok(())
+	}
+
+	/// Handed a file that is not a patch, the reader says so rather than
+	/// decoding whatever it was given.
+	#[test]
+	fn what_is_not_a_patch_is_not_read_as_one() -> Outcome<()> {
+		let old = b"alpha\nbravo\n";
+		for bytes in [&b""[..], b"{}", b"<html></html>", &[0u8; PATCH_HEADER][..]] {
+			assert!(apply_patch(old, bytes).is_err(), "{:?} was read as a patch", Bytes(bytes));
+			assert!(patch_lengths(bytes).is_err(), "{:?} was measured as a patch", Bytes(bytes));
+		}
+		// The right mark, an unknown layout.
+		let mut future = res!(make_patch(old, b"alpha\nBRAVO\n"));
+		future[4] = 0xff;
+		assert!(apply_patch(old, &future).is_err(), "a patch from the future was read");
+		// A whole valid patch with the mark alone spoilt. Nothing else in it is
+		// wrong, so this is the one case where the mark is what has to catch it.
+		let mut unmarked = res!(make_patch(old, b"alpha\nBRAVO\n"));
+		unmarked[0] = b'X';
+		assert!(apply_patch(old, &unmarked).is_err(), "a patch with the wrong mark was read");
+		assert!(patch_lengths(&unmarked).is_err(), "a patch with the wrong mark was measured");
+		Ok(())
+	}
+
+	/// Both empty sides, and a patch that changes nothing, still round-trip.
+	#[test]
+	fn the_empty_cases_still_round_trip() -> Outcome<()> {
+		let text = SOURCE.as_bytes();
+		for (old, new) in [
+			(&b""[..], &b""[..]),
+			(&b""[..], text),
+			(text, &b""[..]),
+			(text, text),
+		] {
+			let patch = res!(make_patch(old, new));
+			assert_eq!(res!(apply_patch(old, &patch)), new.to_vec());
+		}
+		Ok(())
+	}
+
+}
