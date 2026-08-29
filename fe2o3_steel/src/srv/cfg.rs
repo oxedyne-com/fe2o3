@@ -343,11 +343,16 @@ impl ApiRoute {
         Ok(())
     }
 
-    /// Resolve `{file:path}` and `{env:VAR}` or `{env:VAR:default}`
-    /// placeholders in a config value.
+    /// Resolve `{file:path}`, optional `{file?:path}`, and `{env:VAR}` or
+    /// `{env:VAR:default}` placeholders in a config value.
     ///
     /// * `{file:path}` — replaced with the trimmed contents of the file,
     ///   resolved relative to `root`. Fails if the file cannot be read.
+    /// * `{file?:path}` — the optional form: replaced with the trimmed
+    ///   contents when the file exists, and with the empty string when it
+    ///   is absent. Any read error other than not-found — a present file
+    ///   the process may not read, say — still fails, so an unreadable key
+    ///   is never silently dropped.
     /// * `{env:VAR}` — replaced with the value of environment variable
     ///   `VAR`. Fails if the variable is unset.
     /// * `{env:VAR:default}` — replaced with the env var value, or
@@ -394,23 +399,48 @@ impl ApiRoute {
         Ok(result)
     }
 
-    /// Resolve only `{file:path}` placeholders.
+    /// Resolve `{file:path}` and optional `{file?:path}` placeholders.
+    ///
+    /// `{file:path}` fails on any read error. `{file?:path}` resolves to
+    /// the empty string when the file is not found, but still fails on any
+    /// other read error — a present-but-unreadable key must not be silently
+    /// swallowed.
     fn resolve_file_only(value: &str, root: &Path) -> Outcome<String> {
         let mut result = value.to_string();
-        while let Some(start) = result.find("{file:") {
+        loop {
+            // Find the earliest of the two markers. The required '{file:' is
+            // not a substring of the optional '{file?:' — the sixth byte is
+            // ':' against '?' — so a plain search for one never matches the
+            // other, and the two positions can never coincide.
+            let required = result.find("{file:");
+            let optional = result.find("{file?:");
+            let (start, marker_len, is_optional) = match (required, optional) {
+                (None,    None)              => break,
+                (Some(r), None)              => (r, 6, false),
+                (None,    Some(o))           => (o, 7, true),
+                (Some(r), Some(o)) if o < r  => (o, 7, true),
+                (Some(r), Some(_))           => (r, 6, false),
+            };
+            let opt_mark = if is_optional { "?" } else { "" };
             let end = match result[start..].find('}') {
                 Some(i) => start + i,
                 None => return Err(err!(
-                    "Config: unclosed '{{file:' placeholder in value '{}'.", value;
+                    "Config: unclosed '{{file{}:' placeholder in value '{}'.",
+                    opt_mark, value;
                     Invalid, Input)),
             };
-            let rel_path = result[start + 6..end].to_string();
+            let rel_path = result[start + marker_len..end].to_string();
             let abs_path = root.join(&rel_path);
             let content = match std::fs::read_to_string(&abs_path) {
                 Ok(s) => s.trim().to_string(),
+                // An absent optional file resolves to nothing. Only not-found
+                // is tolerated, so a permissions failure on a present file
+                // still errors below rather than yielding a silent empty key.
+                Err(e) if is_optional
+                    && e.kind() == std::io::ErrorKind::NotFound => String::new(),
                 Err(e) => return Err(err!(e,
-                    "Config: failed to read '{{file:{}}}' at '{:?}'.",
-                    rel_path, abs_path;
+                    "Config: failed to read '{{file{}:{}}}' at '{:?}'.",
+                    opt_mark, rel_path, abs_path;
                     IO, File, Read)),
             };
             result.replace_range(start..=end, &content);
@@ -2970,6 +3000,104 @@ mod tests {
         v.ws_routes = vec![ws_up("/ws", "[2001:db8::1]", 9000)];
         assert!(v.validate_egress().is_err(),
             "an entry naming the loopback must not permit another address");
+        Ok(())
+    }
+
+    /// A unique, empty scratch directory under the system temp root.
+    fn scratch_dir(tag: &str) -> Outcome<PathBuf> {
+        let nanos = match std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+        {
+            Ok(d)  => d.as_nanos(),
+            Err(_) => 0,
+        };
+        let dir = std::env::temp_dir().join(fmt!(
+            "fe2o3_steel_file_resolver_{}_{}_{}", tag, std::process::id(), nanos));
+        res!(std::fs::create_dir_all(&dir));
+        Ok(dir)
+    }
+
+    /// `{file:path}` fails when the file is missing; `{file?:path}` yields the
+    /// empty string on that one io kind — not-found — and nothing else. The
+    /// two optional cases below straddle the branch: a missing file must give
+    /// `""` while a read that fails for any *other* reason must still error,
+    /// so the test fails if the not-found guard is dropped (every error
+    /// swallowed) or inverted (not-found not swallowed).
+    #[test]
+    fn optional_file_marker_swallows_only_not_found() -> Outcome<()> {
+        let root = res!(scratch_dir("optmark"));
+        let present = "present.key";
+        // A trailing newline proves the resolver trims, as the required form does.
+        res!(std::fs::write(root.join(present), "s3cret\n"));
+
+        // Required form: present resolves to the trimmed contents, ...
+        assert_eq!(
+            res!(ApiRoute::resolve_file_only(&fmt!("{{file:{}}}", present), &root)),
+            "s3cret",
+            "{{file:PRESENT}} must resolve to the trimmed file contents");
+        // ... and missing hard-errors exactly as before this change.
+        assert!(
+            ApiRoute::resolve_file_only("{file:absent.key}", &root).is_err(),
+            "{{file:MISSING}} must still hard-error");
+
+        // Optional form: present behaves identically to the required form.
+        assert_eq!(
+            res!(ApiRoute::resolve_file_only(&fmt!("{{file?:{}}}", present), &root)),
+            "s3cret",
+            "{{file?:PRESENT}} must resolve to the trimmed file contents");
+        // The load-bearing case: a not-found file resolves to the empty string.
+        assert_eq!(
+            res!(ApiRoute::resolve_file_only("{file?:absent.key}", &root)),
+            "",
+            "{{file?:MISSING}} must resolve to \"\", not error");
+
+        // A read that fails for a reason other than not-found must still
+        // error, so a present-but-unreadable key is never silently dropped.
+        // Traversing through a regular file yields ENOTDIR, an io error whose
+        // kind is not NotFound and therefore must not be swallowed. This holds
+        // for any user, needing no permission games.
+        res!(std::fs::write(root.join("notdir"), "x"));
+        assert!(
+            ApiRoute::resolve_file_only("{file?:notdir/child}", &root).is_err(),
+            "{{file?:...}} must error on a non-not-found io error (ENOTDIR here)");
+
+        // The literal present-but-unreadable case, where the platform allows
+        // it to be constructed: a mode-000 file read by a non-root user fails
+        // with PermissionDenied, which the optional form must not swallow.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let locked = root.join("locked.key");
+            res!(std::fs::write(&locked, "nope\n"));
+            res!(std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)));
+            // Skip the assertion if the test runs as root, where mode-000 is
+            // still readable and the read would succeed.
+            if std::fs::read_to_string(&locked).is_err() {
+                assert!(
+                    ApiRoute::resolve_file_only("{file?:locked.key}", &root).is_err(),
+                    "{{file?:PRESENT_BUT_UNREADABLE}} must error, not yield \"\"");
+            }
+            let _ = std::fs::set_permissions(
+                &locked, std::fs::Permissions::from_mode(0o600));
+        }
+
+        // Both markers may co-occur in one value, and the required finder must
+        // not mis-match the optional marker: here the absent optional collapses
+        // to nothing while the present required resolves around it.
+        assert_eq!(
+            res!(ApiRoute::resolve_file_only(
+                &fmt!("a{{file?:absent.key}}b{{file:{}}}c", present), &root)),
+            "abs3cretc",
+            "the required finder must not mis-read '{{file?:' as '{{file:'");
+
+        // The optional marker also works through the public wired entry point,
+        // which runs the env pass first.
+        assert_eq!(
+            res!(ApiRoute::resolve_file_refs("{file?:absent.key}", &root)),
+            "",
+            "the optional marker must resolve through resolve_file_refs too");
+
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 }
