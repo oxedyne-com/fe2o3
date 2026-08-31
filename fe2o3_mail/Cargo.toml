@@ -7,12 +7,28 @@ license = "BSD-2-Clause/Apache-2.0"
 description = "Hematite email primitives."
 repository = "https://github.com/oxedyne-io/fe2o3"
 
+[features]
+# The server pieces -- the Maildir store and the passwd-style user file -- pull in
+# `fe2o3_net`'s trait surface (and, through the user file, the hash and JDAT crates), none of
+# which a browser client needs or can build for `wasm32-unknown-unknown`. They are on by
+# default, so every existing consumer is unchanged; a client depends on this crate with
+# `default-features = false` to get only the sans-io `message` module (and the shared
+# primitive types and the outbound spool, both of which need nothing but `fe2o3_core`).
+default = ["server"]
+server = [
+	"oxedyne_fe2o3_hash",
+	"oxedyne_fe2o3_iop_hash",
+	"oxedyne_fe2o3_jdat",
+	"oxedyne_fe2o3_net",
+]
+
 [dependencies]
 oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
-oxedyne_fe2o3_hash 		   		= { path = "../fe2o3_hash" }
-oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash" }
-oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat" }
-oxedyne_fe2o3_net				= { path = "../fe2o3_net" }
+oxedyne_fe2o3_text				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_hash 		   		= { path = "../fe2o3_hash", optional = true }
+oxedyne_fe2o3_iop_hash			= { path = "../fe2o3_iop_hash", optional = true }
+oxedyne_fe2o3_jdat 		   		= { path = "../fe2o3_jdat", optional = true }
+oxedyne_fe2o3_net				= { path = "../fe2o3_net", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.35", features = ["full"] }

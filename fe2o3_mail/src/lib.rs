@@ -1,15 +1,23 @@
 //! Hematite email implementations.
 //!
-//! The trait surface (`MailStore`, `UserStore`) lives in `fe2o3_net`
-//! alongside the SMTP and IMAP servers that consume it. This crate
-//! provides the on-disk implementations -- a Maildir-backed mailbox
-//! store and a `passwd`-style user file -- plus the small set of
-//! primitive types the rest of Hematite shares for sending mail.
+//! Two layers live here.  The sans-io [`message`] module reads a message from bytes and
+//! builds a draft into bytes, owning no socket and no clock, so a browser client can use it
+//! -- it is behind no feature and drags in nothing but `fe2o3_core` and `fe2o3_text`.
+//!
+//! The server layer is the on-disk implementations of the trait surface (`MailStore`,
+//! `UserStore`) that lives in `fe2o3_net` alongside the SMTP and IMAP servers that consume
+//! it -- a Maildir-backed mailbox store and a `passwd`-style user file -- plus the outbound
+//! spool.  The store and the user file pull in `fe2o3_net`, which does not build for
+//! `wasm32-unknown-unknown`, so they sit behind the `server` feature (on by default).
 
 #![forbid(unsafe_code)]
 
+pub mod message;
+
+#[cfg(feature = "server")]
 pub mod maildir;
 pub mod outbound;
+#[cfg(feature = "server")]
 pub mod passwd;
 
 use oxedyne_fe2o3_core::prelude::*;
