@@ -1543,6 +1543,19 @@ fn decode_framed(buf: &[u8], what: &str)
 	Ok((dat, end))
 }
 
+/// Refuses an operation whose list is not EXACTLY `want` elements long.
+///
+/// This exact-length check is why the operation wire format is strictly
+/// versioned and forward-INcompatible, which is not obvious from the code and
+/// is worth knowing before touching an op: adding a field to an existing op (a
+/// new trailing list element in its `to_dat`), or adding a new op code, makes
+/// every reader running an older build reject it HERE -- "expects N ... got
+/// N+1". So an op-format change is never a local edit; it is a hard, fleet-wide
+/// readers-first rollout -- every replica must run a build that accepts the new
+/// shape BEFORE any replica writes it -- and since fe2o3 and the forge repos are
+/// now publicly cloneable, it reaches external cloners on old clients that
+/// cannot be upgraded. Carry new information in an EXISTING op (a `Said` comment,
+/// say) in preference to extending one; a new wire code is no cheaper here.
 fn expect_len(v: &[Dat], want: usize, what: &str)
 	-> Outcome<()>
 {
