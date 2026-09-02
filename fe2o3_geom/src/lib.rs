@@ -21,4 +21,5 @@ pub mod dim;
 pub mod planar;
 pub mod proj;
 pub mod rect;
+pub mod rigid;
 pub mod shape;
