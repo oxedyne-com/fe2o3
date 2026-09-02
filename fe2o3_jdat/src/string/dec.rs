@@ -1228,7 +1228,14 @@ impl Dat {
                     }
                 } else {
                     let mut new_state = state.recurse();
-                    if !state.explicit_kind {
+                    // A nested `{` value is a fresh map unless we are continuing an explicitly
+                    // declared map kind -- the `{` right after a `(MAP|` or `(OMAP|` kindicle.
+                    // When the parent carries a non-map explicit kind (a user kind acting as a
+                    // map, say), that kind belongs to the parent, not to this value, so the value
+                    // must be defined as a map here.  Mirrors the `[` branch, which already resets
+                    // to `Kind::List`.  Without this a nested map value inherits the parent's
+                    // non-map kind, leaving its own frame with no map capture.
+                    if !(state.explicit_kind && state.kind_outer.is_map()) {
                         // We are free to define the kind of this store.map.
                         match cfg.use_ordmaps {
                             true => new_state.kind_outer = Kind::OrdMap,

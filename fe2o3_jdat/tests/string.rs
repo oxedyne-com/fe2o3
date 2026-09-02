@@ -1080,6 +1080,67 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["String decoding 690", "all", "map", "usr"], || {
+        // A map carried as the payload of a non-map user kind, whose own values are themselves
+        // maps or lists.  The nested `{` value used to inherit the parent's user kind as its
+        // outer kind, leaving the value's frame with no map capture: a non-empty nested map hit
+        // "Map capture not active" at the colon, an empty one "Map capture not actived" at the
+        // closing brace.  Each shape is checked for the exact decoded structure and for a full
+        // decode -> re-encode -> decode round trip.
+        let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+        let ukind = UsrKindId::new(1, Some("node"), None);
+        res!(uks.add(ukind.clone()));
+        let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+
+        // Non-empty nested map value (the reported failure).
+        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":{\"x\":1},\"b\":2})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "b".to_string() => 2u8,
+        });
+        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat); // round trip
+
+        // Empty nested map value.
+        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":{},\"b\":1})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{},
+            "b".to_string() => 1u8,
+        });
+        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat);
+
+        // Empty nested list value, and a deeper mixture, still under the user kind.
+        let dat = res!(Dat::decode_string_with_config(
+            "(node|{\"a\":{},\"b\":[],\"c\":{\"d\":1}})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{},
+            "b".to_string() => listdat![],
+            "c".to_string() => mapdat!{ "d".to_string() => 1u8 },
+        });
+        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat);
+
+        // Control: a list value under the user kind already decoded correctly and must stay so.
+        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":[1],\"b\":2})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => listdat![1u8],
+            "b".to_string() => 2u8,
+        });
+
+        // Control: the same nesting without a user kind must keep decoding as before.
+        let dat = res!(Dat::decode_string("{\"a\":{\"x\":1},\"b\":2}"));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "b".to_string() => 2u8,
+        });
+
+        // Control: an explicitly declared ordered map keeps its ordered kind through the fix.
+        let dat = res!(Dat::decode_string("(omap|{\"a\":(omap|{\"x\":1}),\"b\":2})"));
+        req!(dat, omapdat!{
+            "a".to_string() => omapdat!{ "x".to_string() => 1u8 },
+            "b".to_string() => 2u8,
+        });
+        Ok(())
+    }));
+
     res!(test_it(filter, &["String integrated decoding 000", "all", "map"], || {
         let d = res!(Dat::decode_string("
         {
