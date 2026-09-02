@@ -2530,6 +2530,41 @@ pub(crate) mod tests {
 		Ok(())
 	}
 
+	/// A settlement is exactly five wire elements, and nothing more may be added to
+	/// it.
+	///
+	/// This is a load-bearing invariant, not a formality. [`Op::from_dat`] validates
+	/// the length with [`expect_len`], so a six-element settlement is refused by every
+	/// reader written against this format -- including the external cloners of a public
+	/// repository still running an older client. An acceptance reason therefore rides
+	/// as a separate [`Op::Said`] rather than a sixth field here; if this test ever has
+	/// to change to add one, so does every one of those readers first.
+	#[test]
+	fn a_settlement_is_five_wire_elements() -> Outcome<()> {
+		let op = Op::Settled {
+			on:		oid(3, 4),
+			state:	Settled::Accepted,
+			mark:	None,
+			time:	7,
+		};
+		let dat = op.to_dat();
+		let listed = match &dat {
+			Dat::List(v) => v,
+			other => return Err(err!(
+				"A settlement serialises to a list, got {:?}.", other; Test, Mismatch)),
+		};
+		assert_eq!(listed.len(), 5, "a settlement grew or lost a wire element");
+		assert_eq!(listed[0], Dat::U8(CODE_SETTLED));
+		assert_eq!(op, res!(Op::from_dat(&dat)), "a settlement did not round-trip");
+		// A sixth element is refused, which is the whole point: adding a field would
+		// break this and every reader like it.
+		let mut six = listed.clone();
+		six.push(Dat::Str(fmt!("a reason")));
+		assert!(Op::from_dat(&Dat::List(six)).is_err(),
+			"a six-element settlement was accepted, so old readers would break silently");
+		Ok(())
+	}
+
 	/// The ordering rule is [`Header`]'s parents, for the same reason: two byte
 	/// spellings of one set would both verify against a signature. The rule that
 	/// it names anything at all is [`Op::check_note`]'s, for the same reason: a
