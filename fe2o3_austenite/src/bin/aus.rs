@@ -85,6 +85,11 @@ fn main() -> Outcome<()> {
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
 	res!(out.ledger.to_file(&ledger_path));
 
+	// The whole run as one PDF beside the per-page SVGs: same placed frames, same glyph outlines,
+	// emitted as fill operators rather than <path> elements.
+	let pdf = res!(oxedyne_fe2o3_austenite::emit::pdf::render_document(&out.pages));
+	res!(std::fs::write(fmt!("{}/document.pdf", out_dir), pdf));
+
 	println!(
 		"aus: composed {} page(s) in {} pass(es); {} anchor(s) in the ledger.",
 		out.pages.len(), out.passes, out.ledger.len());

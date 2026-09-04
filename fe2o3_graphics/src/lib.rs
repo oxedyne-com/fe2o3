@@ -98,6 +98,7 @@ pub mod jpeg;
 pub mod matroska;
 pub mod mp4;
 pub mod path;
+pub mod pdf;
 pub mod pixmap;
 pub mod png;
 pub mod prelude;

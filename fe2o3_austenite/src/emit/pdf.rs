@@ -1,0 +1,118 @@
+//! The PDF page writer.
+//!
+//! The parallel of [`super::svg`], over the very same placed frames. Where the SVG writer renders each
+//! box and glyph outline as a `<path>` element, this one hands the same [`Path`] and [`Rgba`] to
+//! `fe2o3_graphics`'s [`PdfWriter`], which emits them as fill and stroke operators in a page's content
+//! stream. No font is embedded: a glyph is a filled outline path, exactly as it is for SVG, which is
+//! the whole reason a PDF writer here is short.
+//!
+//! A document is one file across all its pages, not a string per page, so this module's entry point is
+//! [`render_document`] rather than the per-page `render_page` the [`super::Emitter`] enum uses for
+//! SVG.
+
+use crate::font::ShapedText;
+use crate::ir::Sp;
+use crate::page::{
+	Page,
+	PlacedKind,
+};
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::{
+	colour::Rgba,
+	path::{
+		Bounds,
+		Path,
+	},
+	pdf::{
+		PdfPage,
+		PdfWriter,
+	},
+	transform::Transform,
+};
+
+/// Renders a whole document -- every page -- as one PDF file.
+pub fn render_document(pages: &[Page]) -> Outcome<Vec<u8>> {
+	let mut writer = PdfWriter::new();
+	for page in pages {
+		writer.add_page(res!(render_page(page)));
+	}
+	writer.to_bytes()
+}
+
+/// Builds one page's draw list: a white ground, then each placed box as a fill or a stroke.
+///
+/// The coordinates are the engine's page frame -- top-left origin, y down -- and are handed on
+/// unflipped, since `fe2o3_graphics::pdf` flips the whole page itself.
+pub fn render_page(page: &Page) -> Outcome<PdfPage> {
+	let w = page.geom.width.to_pt();
+	let h = page.geom.height.to_pt();
+	let mut out = PdfPage::new(w, h);
+
+	// A white ground, matching the SVG writer's opaque background rectangle.
+	out.fill(res!(Path::rect(Bounds::new(0.0, 0.0, w as f32, h as f32))), Rgba::WHITE);
+
+	// A half-point grey pen outlines a reservation, so a proof shows where a resolved value will sit
+	// without the box reading as content.
+	let grey = Rgba::new(176, 176, 176, 255);
+
+	for placed in &page.frame.placed {
+		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
+		// rectangle.
+		if let PlacedKind::Text(shaped) = &placed.kind {
+			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
+			continue;
+		}
+
+		let x0 = placed.x.to_pt() as f32;
+		let y0 = placed.y.to_pt() as f32;
+		let x1 = (placed.x + placed.dims.width).to_pt() as f32;
+		let y1 = (placed.y + placed.dims.height + placed.dims.depth).to_pt() as f32;
+
+		// A zero-area box has nothing to draw, and `Path::rect` would reject it.
+		if x1 <= x0 || y1 <= y0 {
+			continue;
+		}
+		let path = res!(Path::rect(Bounds::new(x0, y0, x1, y1)));
+		match &placed.kind {
+			PlacedKind::Rule		=> out.fill(path, Rgba::BLACK),
+			PlacedKind::Reserved	=> out.stroke(path, grey, 0.5),
+			PlacedKind::Text(_)		=> continue,	// drawn above
+		}
+	}
+
+	// The running head and folio arrive as `PlacedKind::Text` and are drawn as glyph outlines with the
+	// body, above. This writer adds no page furniture of its own.
+	Ok(out)
+}
+
+/// Draws a placed run as filled glyph outlines. `height` is the face ascent, so `by + height` is the
+/// baseline. `bx`/`by` are the box's top-left.
+fn draw_text(
+	out:	&mut PdfPage,
+	bx:		Sp,
+	by:		Sp,
+	height:	Sp,
+	shaped:	&ShapedText,
+)
+	-> Outcome<()>
+{
+	let base_x	= bx.to_pt() as f32;
+	let base_y	= (by + height).to_pt() as f32;
+	for glyph in &shaped.run().glyphs {
+		let path = res!(shaped.outline(glyph));
+		// A glyph with no ink -- a space -- carries an advance but nothing to fill.
+		if path.is_empty() {
+			continue;
+		}
+		// The outline is font-frame, y up; the page is y down. Flip in y, then move onto the baseline
+		// at the glyph's own offset. The run is shaped in points, so no scale beyond the flip. The page
+		// itself is flipped once more into PDF's y-up frame by the PDF writer, which leaves the glyph
+		// the right way up on the page.
+		let t = Transform::scale(1.0, -1.0)
+			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
+		let placed = res!(path.transform(&t));
+		out.fill(placed, Rgba::BLACK);
+	}
+	Ok(())
+}
