@@ -1,0 +1,23 @@
+US-English hyphenation patterns -- provenance and licence
+=========================================================
+
+The patterns in hyph-en-us.txt are Frank Liang's original US-English hyphenation
+patterns, first published in his 1983 Stanford thesis "Word Hy-phen-a-tion by
+Com-put-er" and distributed with TeX as `hyphen.tex`. They are the same patterns
+carried, unmodified, by the hyph-utf8 project as `hyph-en-us.tex`.
+
+Liang's patterns are freely redistributable. The `hyphen.tex` file that first
+carried them states:
+
+    Unlimited copying and redistribution of this file are permitted as long as
+    this file is not modified. Modifications are permitted, but only if the
+    resulting file is not named hyphen.tex.
+
+The hyph-utf8 redistribution places the US-English patterns under permissive
+terms (the "hyph-utf8" licence, an MIT-style permission grant); the underlying
+Liang patterns themselves are in the public domain.
+
+Only a subset appears here (see the header of hyph-en-us.txt for why). The
+patterns were selected and their values confirmed against a local reference copy
+of the same public-domain pattern data; the full permissive set substitutes for
+this file with no change to the code that reads it.

@@ -110,14 +110,14 @@ fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 		ref_line_dims)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(12.0))));
 
-	// The body: one real paragraph, broken into justified lines at the measure by Knuth-Plass. The
-	// text is repeated to span a few pages, so pagination and two-pass convergence still get a workout.
-	let sentence = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor \
-		incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
-		exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor \
-		in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur \
-		sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est \
-		laborum.";
+	// The body: one real paragraph, broken into justified lines at the measure by Knuth-Plass. The long
+	// English words carry legal Liang hyphenation points, so at least one line ends on a discretionary
+	// hyphen. The text is repeated to span a few pages, so pagination and two-pass convergence still get
+	// a workout.
+	let sentence = "The typographic algorithm favours justification over ragged setting, and its \
+		discretionary hyphenation lets an unusually long word break across the boundary between two \
+		consecutive lines. Hyphenation of a difficult word such as representation keeps every \
+		paragraph beautiful.";
 	let mut body = String::new();
 	for _ in 0..14 {
 		body.push_str(sentence);

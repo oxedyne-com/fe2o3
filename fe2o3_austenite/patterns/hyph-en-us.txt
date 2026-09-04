@@ -1,0 +1,124 @@
+% Liang US-English hyphenation patterns (the classic hyphen.tex / hyph-en-us set).
+%
+% This is a SMALL, deliberately-chosen subset of Frank Liang's original patterns:
+% just the patterns that are substrings of the demo words in bin/aus.rs, which is
+% enough to hyphenate each of them exactly as the full set does (a word's
+% hyphenation depends only on the patterns that are substrings of ".word.", and
+% every such pattern for those words is present here). The complete permissive
+% hyph-en-us set drops in unchanged -- same file, same format, no code change --
+% and every other word simply gains break points. See LICENCE.txt for provenance.
+%
+% Format: one pattern per line; a digit between two letters is the inter-letter
+% value at that gap; '.' is a word boundary. Odd wins an interior break point;
+% values combine by maximum across all matching patterns. Comments start with '%'.
+.1co
+.1pa
+.1ty
+.a4l1g4
+.co2n
+.d1if
+.di4f1f
+.dis1
+.p2a2r
+.para1gr
+.repr2
+.ty3po
+.ty5po4g
+.typo1gr
+.typogr4aphi
+.un3u4
+1ca
+1co
+1d2a
+1fi
+1go
+1gr
+1ly
+1na
+1pa
+1su
+1t2io
+1t2iv
+1ta
+1ty
+2a2r
+2io
+2is1c
+2ith
+2iv
+2n1s2
+2us
+3c4ut
+3fu
+4aphi
+4c5u1t2iv
+4dary
+4f1f
+4h1m
+4l1g4
+4lt
+4ph.
+4u1t2i
+4ve.
+5gra4ph.
+5graph1ic
+5po4g
+a1t2io
+al1l
+atio2n
+bou2
+boun2d3
+c4u1t2i
+co2n
+cu4lt
+d1if
+d2a2r
+dis1
+e1cu
+e1na
+e1s2e
+en1t
+en1ta
+epr2
+f1fi
+fi1ca
+fi3cu
+gr4aphi
+he1na4
+he2n
+hen5at
+hy3ph
+i1ca
+i1fi
+i4f1f
+io1n1a
+io2n
+l1go3
+l1l
+n1d2a
+n1t
+n1ta
+n2a2r
+n2at
+n2se
+o1gr
+o1n1a
+o2n
+o2n3s2
+ou2
+oun2d
+p2a2r
+p3re1s2e
+ph1ic
+phe2n
+pr2
+s3tif2
+sen1t
+st2i
+su1al
+tif2
+tio2n
+u2su
+u4lt
+unu4
+y3po

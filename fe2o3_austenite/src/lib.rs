@@ -29,6 +29,7 @@
 pub mod driver;
 pub mod emit;
 pub mod font;
+pub mod hyphenate;
 pub mod ir;
 pub mod ledger;
 pub mod linebreak;

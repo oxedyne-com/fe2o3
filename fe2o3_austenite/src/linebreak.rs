@@ -13,6 +13,7 @@
 //! driver lays a line left to right with no notion of a ratio, and still fills the measure.
 
 use crate::font::ShapedText;
+use crate::hyphenate::Hyphenator;
 use crate::ir::{
 	BoxNode,
 	Dims,
@@ -39,6 +40,8 @@ use std::sync::Arc;
 const LINE_PENALTY:		f64 = 10.0;			// Knuth's l, the intrinsic cost of ending any line
 const MAX_RATIO:		f64 = 10.0;			// tolerance: a break looser than this is infeasible
 const FLAGGED_DEMERIT:	f64 = 10_000.0;		// two flagged breaks in a row (consecutive hyphens)
+const HYPHEN_PENALTY:	i32 = 50;			// the cost of taking a discretionary (interior) break
+const HYPHEN_MIN:		usize = 5;			// a word shorter than this is never split
 
 /// The finishing glue's stretch: large against any real line, so a short last line sets flush left.
 fn inf_stretch() -> Sp { Sp::from_pt(10_000.0) }
@@ -66,8 +69,9 @@ pub fn break_paragraph(
 	Ok(lines)
 }
 
-/// One entry of the box-glue-penalty stream. A `Boxed` word is rigid; a `Glued` space stretches and
-/// shrinks; a `Pen` is a break carrying no space (a hyphen point, or the forced end of the stream).
+/// One entry of the box-glue-penalty stream. A `Boxed` word (or word fragment) is rigid; a `Glued`
+/// space stretches and shrinks; a `Pen` is a break carrying no space (a hyphen point, or the forced
+/// end of the stream).
 enum Kind {
 	Boxed(ShapedText),
 	Glued,
@@ -76,11 +80,12 @@ enum Kind {
 
 struct Item {
 	kind:		Kind,
-	width:		Sp,		// box advance, or glue natural length
+	width:		Sp,						// box advance, or glue natural length
 	stretch:	Sp,
 	shrink:		Sp,
-	penalty:	i32,	// break cost; a box carries INFINITY, a plain space break carries 0
+	penalty:	i32,					// break cost; a box carries INFINITY, a plain space break 0
 	flagged:	bool,
+	hyphen:		Option<ShapedText>,		// a discretionary's hyphen glyph, drawn only if the break is taken
 }
 
 /// Shapes each word of `text` and turns UAX #14's opportunities into the box-glue-penalty stream.
@@ -102,6 +107,10 @@ fn build_items(
 	let stretch	= Sp(sp_w.raw() / 2);
 	let shrink	= Sp(sp_w.raw() / 3);
 
+	// The hyphen glyph a taken discretionary draws, shaped once and cloned into each break point.
+	let hyphen	= res!(ShapedText::new(fonts.clone(), role, dir, size, "-"));
+	let hyph	= Hyphenator::en_us();
+
 	let mut items	= Vec::new();
 	let opps		= linebreak::line_breaks(text);
 	let mut prev	= 0usize;
@@ -111,16 +120,7 @@ fn build_items(
 		let word	= seg.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
 		let tail	= &seg[word.len()..];
 		if !word.is_empty() {
-			let shaped	= res!(ShapedText::new(fonts.clone(), role, dir, size, word));
-			let w		= shaped.dims().width;
-			items.push(Item {
-				kind:		Kind::Boxed(shaped),
-				width:		w,
-				stretch:	Sp::ZERO,
-				shrink:		Sp::ZERO,
-				penalty:	Penalty::INFINITY,
-				flagged:	false,
-			});
+			res!(push_word(&mut items, fonts.clone(), role, dir, size, word, &hyph, &hyphen));
 		}
 		match opp.kind {
 			Break::Mandatory => {
@@ -128,30 +128,88 @@ fn build_items(
 				// then a forced break the optimiser must take.
 				items.push(Item {
 					kind: Kind::Glued, width: Sp::ZERO, stretch: inf_stretch(), shrink: Sp::ZERO,
-					penalty: Penalty::INFINITY, flagged: false });
+					penalty: Penalty::INFINITY, flagged: false, hyphen: None });
 				items.push(Item {
 					kind: Kind::Pen, width: Sp::ZERO, stretch: Sp::ZERO, shrink: Sp::ZERO,
-					penalty: Penalty::EJECT, flagged: false });
+					penalty: Penalty::EJECT, flagged: false, hyphen: None });
 			},
 			Break::Optional => {
 				let spaces = tail.chars().filter(|c| *c == ' ').count() as i32;
 				if spaces > 0 {
 					items.push(Item {
 						kind: Kind::Glued, width: Sp(sp_w.raw() * spaces), stretch, shrink,
-						penalty: 0, flagged: false });
+						penalty: 0, flagged: false, hyphen: None });
 				} else {
 					// A break with no space -- a slash or an already-present hyphen. Latin prose rarely
 					// reaches here; it becomes a zero-width penalty so the two parts may still part.
 					items.push(Item {
 						kind: Kind::Pen, width: Sp::ZERO, stretch: Sp::ZERO, shrink: Sp::ZERO,
-						penalty: 0, flagged: false });
+						penalty: 0, flagged: false, hyphen: None });
 				}
 			},
 		}
 	}
-	// TODO (hyphenation): Liang's algorithm slots in here, inserting a flagged zero-width penalty of
-	// the hyphen's width at each legal interior break of a word, so long words may split.
 	Ok(items)
+}
+
+/// Shapes one word and pushes it as boxes. A word long enough to hold a legal Liang break is split at
+/// each point into fragment boxes joined by flagged hyphen penalties, so the optimiser may take one
+/// and end a line inside the word; otherwise the word is a single rigid box. The hyphenation runs on
+/// the word's alphabetic core, so leading and trailing punctuation stay clinging to the outer
+/// fragments.
+fn push_word(
+	items:	&mut Vec<Item>,
+	fonts:	Arc<FontSet>,
+	role:	Role,
+	dir:	Dir,
+	size:	Sp,
+	word:	&str,
+	hyph:	&Hyphenator,
+	hyphen:	&ShapedText,
+)
+	-> Outcome<()>
+{
+	// The alphabetic core, and where it starts in the word, so break points map back to word bytes.
+	let start	= word.len() - word.trim_start_matches(|c: char| !c.is_alphabetic()).len();
+	let core	= word.trim_matches(|c: char| !c.is_alphabetic());
+	let points	= if core.chars().count() >= HYPHEN_MIN { hyph.hyphenate(core) } else { Vec::new() };
+
+	if points.is_empty() {
+		let shaped	= res!(ShapedText::new(fonts, role, dir, size, word));
+		let w		= shaped.dims().width;
+		items.push(Item {
+			kind: Kind::Boxed(shaped), width: w, stretch: Sp::ZERO, shrink: Sp::ZERO,
+			penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+		return Ok(());
+	}
+
+	// Turn each char-prefix count into a byte split within the word, then walk the fragments.
+	let mut splits: Vec<usize> = Vec::with_capacity(points.len());
+	for &chars in &points {
+		let off = core.char_indices().nth(chars).map_or(core.len(), |(b, _)| b);
+		splits.push(start + off);
+	}
+	let mut bounds = Vec::with_capacity(splits.len() + 2);
+	bounds.push(0);
+	bounds.extend_from_slice(&splits);
+	bounds.push(word.len());
+
+	for w in bounds.windows(2) {
+		let frag	= &word[w[0]..w[1]];
+		let shaped	= res!(ShapedText::new(fonts.clone(), role, dir, size, frag));
+		let fw		= shaped.dims().width;
+		items.push(Item {
+			kind: Kind::Boxed(shaped), width: fw, stretch: Sp::ZERO, shrink: Sp::ZERO,
+			penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+		if w[1] < word.len() {
+			// A discretionary between two fragments: a flagged break whose taken cost is the hyphen's
+			// width, added to the line only when the optimiser chooses it (see line_len).
+			items.push(Item {
+				kind: Kind::Pen, width: Sp::ZERO, stretch: Sp::ZERO, shrink: Sp::ZERO,
+				penalty: HYPHEN_PENALTY, flagged: true, hyphen: Some(hyphen.clone()) });
+		}
+	}
+	Ok(())
 }
 
 /// Is item `i` a legal breakpoint? A space breaks after a word, unless forbidden -- the finishing
@@ -169,6 +227,17 @@ fn is_break(items: &[Item], i: usize) -> bool {
 /// Was the break at predecessor position `pos` flagged? The sentinel start (`-1`) never was.
 fn flagged_at(items: &[Item], pos: isize) -> bool {
 	pos >= 0 && items[pos as usize].flagged
+}
+
+/// The natural length of the line running `[lower, b)` and ending at the break `b`, given the width
+/// prefix sums `sw`. A discretionary break adds its hyphen glyph -- the width appears on the line only
+/// when the break is taken, which is exactly the standard Knuth-Plass discretionary rule.
+fn line_len(items: &[Item], sw: &[i64], lower: usize, b: usize) -> f64 {
+	let mut l = (sw[b] - sw[lower]) as f64;
+	if let Some(h) = &items[b].hyphen {
+		l += h.dims().width.raw() as f64;
+	}
+	l
 }
 
 /// One settled breakpoint: where it broke, which node it came from, and the running demerit total.
@@ -249,7 +318,7 @@ fn optimal_breaks(items: &[Item], measure: Sp) -> Vec<isize> {
 		for (k, &ni) in active.iter().enumerate() {
 			let a		= nodes[ni].pos;
 			let lower	= if a < 0 { 0usize } else { a as usize + 1 };
-			let l		= (sw[b] - sw[lower]) as f64;
+			let l		= line_len(items, &sw, lower, b);
 			let y		= (sy[b] - sy[lower]) as f64;
 			let z		= (sz[b] - sz[lower]) as f64;
 			let r		= ratio(target, l, y, z);
@@ -334,7 +403,7 @@ fn set_lines(
 		let lower	= if a < 0 { 0usize } else { a as usize + 1 };
 		let forced	= matches!(items[hi].kind, Kind::Pen) && items[hi].penalty <= Penalty::EJECT;
 
-		let l		= (sw[hi] - sw[lower]) as f64;
+		let l		= line_len(items, &sw, lower, hi);
 		let y		= (sy[hi] - sy[lower]) as f64;
 		let z		= (sz[hi] - sz[lower]) as f64;
 		let r		= ratio(target, l, y, z);
@@ -365,6 +434,14 @@ fn set_lines(
 				},
 				Kind::Pen => (),	// an unchosen interior break sets no ink
 			}
+		}
+
+		// A taken discretionary draws its hyphen as the line's last box.
+		if let Some(h) = &items[hi].hyphen {
+			let leaf = Leaf::text(h.clone());
+			if leaf.dims.height > height { height = leaf.dims.height; }
+			if leaf.dims.depth > depth { depth = leaf.dims.depth; }
+			children.push(Node::Leaf(leaf));
 		}
 
 		let dims = Dims::new(measure, height, depth);
