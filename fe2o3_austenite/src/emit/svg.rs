@@ -74,14 +74,9 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 		out.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
 	}
 
-	// The folio, as page furniture rather than shaped body text -- the viewer's default face renders
-	// it. Making it a shaped run like the body is a later tidy, not part of proving the seam.
-	let folio_x = w / 2;
-	let folio_y = h.saturating_sub(page.geom.margin.to_pt() as usize / 2);
-	out.push_str(&fmt!(
-		"  <text x=\"{}\" y=\"{}\" text-anchor=\"middle\" font-size=\"9\" fill=\"#000000\">{}</text>\n",
-		folio_x, folio_y, page.number));
-
+	// The running head and folio are shaped runs placed into the frame's margins by
+	// `doc::decorate`, so they arrive here as `PlacedKind::Text` and are drawn as glyph outlines with
+	// the body, above. This writer adds no page furniture of its own.
 	out.push_str("</svg>\n");
 	Ok(out)
 }

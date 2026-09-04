@@ -167,7 +167,10 @@ fn compose<M: Metrics>(
 				if !frame.is_empty() && y + v > bottom {
 					finish_page(&mut pages, &mut frame, &mut page_no, &mut y, top, geom);
 				}
-				frame.push(Placed::new(geom.content_left(), y, b.dims, PlacedKind::Rule));
+				// A keep box: a heading bound to the first line of its paragraph. Placed whole, so the
+				// greedy breaker moves it entire to the next page rather than splitting it; its children
+				// are set from the box top, not drawn as one placeholder rectangle.
+				res!(place_vbox(b, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
 				y += v;
 				at_top = false;
 			},
@@ -246,6 +249,49 @@ fn place_line<M: Metrics>(
 				frame.push(Placed::new(x, y, b.dims, PlacedKind::Rule));
 				x += b.dims.width;
 			},
+		}
+	}
+	Ok(())
+}
+
+/// Sets a vertical keep box: its children stacked from the box top, each at the content left. Lines
+/// are placed, glue advances the cursor, and an anchor is recorded at the y it reaches -- so a
+/// heading's anchor takes the page and position the box settled on, never a provisional one from
+/// before the box was moved to fit.
+fn place_vbox<M: Metrics>(
+	vbox:		&BoxNode,
+	y_top:		Sp,
+	page_no:	u32,
+	geom:		PageGeometry,
+	metrics:	&M,
+	incoming:	&Ledger,
+	frame:		&mut Frame,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	let mut yy = y_top;
+	for child in &vbox.list {
+		match child {
+			Node::HBox(b) => {
+				res!(place_line(b, yy, page_no, geom, metrics, incoming, frame, ledger));
+				yy += b.dims.vextent();
+			},
+			Node::VBox(b) => {
+				res!(place_vbox(b, yy, page_no, geom, metrics, incoming, frame, ledger));
+				yy += b.dims.vextent();
+			},
+			Node::Leaf(l) => {
+				res!(place_leaf(l, geom.content_left(), yy, page_no, metrics, incoming, frame, ledger));
+				yy += l.dims.vextent();
+			},
+			Node::Glue(g) => {
+				yy += g.natural;
+			},
+			Node::Anchor(id) => {
+				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
+			},
+			Node::Penalty(_) => (),
 		}
 	}
 	Ok(())
