@@ -1,10 +1,8 @@
 //! `aus` -- the Austenite command-line driver.
 //!
-//! It builds a small in-memory document, runs the two-pass driver to a fixed point, writes each page
-//! as an SVG, and prints the page count. That count is the pagination oracle: run against Typst on
-//! the same input, it proves the streaming, flat-memory model paginates correctly. Phase 1 makes the
-//! body real shaped text -- Latin sentences set with the embedded `fe2o3_font` set and drawn as glyph
-//! outlines -- so the output SVG shows actual letters rather than the grey rules of Phase 0.
+//! Builds a small document, runs the two-pass driver to a fixed point, writes each page as SVG, and
+//! prints the page count -- the pagination oracle against Typst on the same input. The body is real
+//! shaped text, so the SVG shows actual letters.
 //!
 //! Usage: `aus [OUTPUT_DIR]` (default `aus-out`).
 
@@ -73,14 +71,9 @@ fn main() -> Outcome<()> {
 	Ok(())
 }
 
-/// Builds a small multi-page document: a shaped heading, a forward reference to the total page count,
-/// and a run of shaped body lines. The heading and body are real text set with the embedded font set
-/// and drawn as glyph outlines; the forward reference keeps a reserved slot, so the ledger and the
-/// two-pass convergence are still exercised.
-///
-/// There is no line breaker yet, so each line is one pre-composed sentence chosen to sit within the
-/// measure. The Knuth-Plass breaker that turns a paragraph of words into lines is the next increment;
-/// see the TODO in this crate pointing at `fe2o3_text::unicode::linebreak`.
+/// A small multi-page document: a shaped heading, a forward-reference line with a reserved slot (to
+/// exercise the ledger), and shaped body lines. No line breaker yet -- each line is one pre-composed
+/// sentence; see the TODO in `driver` pointing at `fe2o3_text::unicode::linebreak`.
 fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 	let geom	= PageGeometry::a4();
 	let cw		= geom.content_width();

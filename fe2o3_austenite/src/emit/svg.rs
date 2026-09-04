@@ -86,15 +86,8 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 	Ok(out)
 }
 
-/// Draws one placed run of shaped text as filled glyph outlines.
-///
-/// The box's top-left is `(bx, by)` and the baseline sits `height` -- the face ascent -- below the
-/// top, so `by + height` is the baseline in device points. A glyph outline arrives in the font's
-/// frame, with its origin at the glyph and y increasing upwards; the page's y increases downwards, so
-/// each outline is flipped in y and moved onto the baseline. The run was shaped at a size in points,
-/// which are the device points the SVG viewport is in, so no scale beyond the flip is needed. Each
-/// glyph's own `x` and `y` offsets from the run origin are added: `x` along the baseline, `y` upward
-/// (which a combining mark uses, and which the flip turns into a subtraction).
+/// Draws a placed run as filled glyph outlines. `height` is the face ascent, so `by + height` is the
+/// baseline. `bx`/`by` are the box's top-left.
 fn draw_text(
 	out:	&mut String,
 	bx:		Sp,
@@ -112,6 +105,8 @@ fn draw_text(
 		if path.is_empty() {
 			continue;
 		}
+		// The outline is font-frame, y up; the page is y down. Flip in y, then move onto the baseline
+		// at the glyph's own offset. The run is shaped in points, so no scale beyond the flip.
 		let t = Transform::scale(1.0, -1.0)
 			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
 		let placed = res!(path.transform(&t));

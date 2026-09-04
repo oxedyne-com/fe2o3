@@ -17,16 +17,11 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::prelude::*;
 use oxedyne_fe2o3_text::unicode::norm::combining_class;
 
-/// Whether a character takes the face of what surrounds it rather than choosing its own.
-///
-/// Two kinds do. A SPACE is in every face, so it has no opinion worth asking for and asking would
-/// cut every run at every word. A COMBINING MARK is positioned against the letter it sits on, by the
-/// face that drew that letter: an accent drawn by a face that never saw the base it belongs to lands
-/// somewhere of its own choosing, which is how text acquires floating accents.
-///
-/// The mark test is the canonical combining class, which is the one fe2o3_text makes public. It is
-/// not every mark -- a mark of class zero is not caught -- but it is every mark whose whole purpose
-/// is to be placed against something else, which is the set that matters here.
+/// Whether a character takes the face of what surrounds it rather than choosing its own. A SPACE is
+/// in every face, so asking would cut every run at every word; a COMBINING MARK is positioned by the
+/// face that drew its base, so an accent drawn by a face that never saw that base floats. The mark
+/// test is the canonical combining class -- not every mark, but every one meant to be placed against
+/// something else.
 fn neutral(ch: char) -> bool {
 	ch.is_whitespace() || combining_class(ch) != 0
 }
@@ -34,22 +29,15 @@ fn neutral(ch: char) -> bool {
 /// A stretch of a string that one face draws the whole of.
 #[derive(Clone, Copy, Debug)]
 struct Seg {
-	/// Which face in the chain draws it.
-	face:	u8,
-	/// Where it starts in the string, in bytes.
-	start:	usize,
-	/// Where it ends, in bytes.
-	end:	usize,
+	face:	u8,	// which face in the chain draws it
+	start:	usize,	// where it starts in the string, bytes
+	end:	usize,	// where it ends, bytes
 }
 
-/// What the engine draws with: a face, and the faces to fall back to for what it cannot draw.
-///
-/// The first face is the one chosen for how it reads, and it draws nearly everything. The rest are
-/// there for what it lacks. See the crate note: this is what lets the face at the head of the chain
-/// be swapped without the swap costing coverage.
+/// What the engine draws with: a face chosen for how it reads, and the faces to fall back to for
+/// what it lacks. See the crate note on why a font is a chain, not a file.
 pub struct Font {
-	/// The faces, in the order they are tried. Never empty.
-	faces:	Vec<Face>,
+	faces:	Vec<Face>,	// in the order they are tried; never empty
 }
 
 impl Font {
@@ -80,9 +68,6 @@ impl Font {
 	}
 
 	/// The face at the head of the chain: the one the reader actually reads.
-	///
-	/// The chain is never empty -- `chain` refuses an empty one and `new` builds one of exactly one --
-	/// so the error is a statement that the type's own invariant broke, not a case a caller can meet.
 	fn first(&self) -> Outcome<&Face> {
 		match self.faces.first() {
 			Some(face) => Ok(face),
@@ -99,20 +84,15 @@ impl Font {
 		}
 	}
 
-	/// The vertical metrics at a size, in pixels.
-	///
-	/// They are the FIRST face's, and not the tallest of those that happened to be used. A line's
-	/// height must not depend on whether an arrow in the middle of it came from further down the
-	/// chain: text that changed its leading because of one character would ripple every time a
-	/// document was edited. The faces behind the first are chosen to sit within its box.
+	/// The vertical metrics at a size, in pixels. They are the FIRST face's, never the tallest used:
+	/// a line's height must not change because one arrow in it came from further down the chain. The
+	/// faces behind the first are chosen to sit within its box.
 	pub fn metrics(&self, size: f32) -> Outcome<Metrics> {
 		res!(self.first()).metrics(size)
 	}
 
-	/// Which face draws a character: the first in the chain that can.
-	///
-	/// A character no face has is left with the first, which draws its own "not defined" glyph. That
-	/// is the honest answer -- the reader is told something is missing rather than shown nothing.
+	/// Which face draws a character: the first in the chain that can. One no face has is left with the
+	/// first, which draws its own "not defined" glyph -- the reader is told something is missing.
 	fn pick(&self, ch: char) -> u8 {
 		for (i, face) in self.faces.iter().enumerate() {
 			if face.covers(ch) {
@@ -122,18 +102,12 @@ impl Font {
 		0
 	}
 
-	/// Cuts a string into the stretches each face draws.
-	///
-	/// Nearly every character simply asks the chain who draws it. The exception is the NEUTRAL ones,
-	/// which take the face already in hand if it can draw them at all -- see [`neutral`]. A space is
-	/// in every face, so asking the chain about it would always answer "the first", which would end
-	/// the stretch either side of every space: a line of Arabic would be cut into words and shaped one
-	/// at a time, losing the shaper's work across each join.
-	///
-	/// Stickiness must go no further than that. A face kept for anything it merely HAPPENS to cover
-	/// never gives the reading face back: the wide face draws Latin perfectly well, so one arrow in a
-	/// sentence would drag the whole of the rest of that sentence into the fallback, and the reader
-	/// would watch the typeface change mid-line for no reason they could see.
+	/// Cuts a string into the stretches each face draws. Nearly every character asks the chain who
+	/// draws it; the NEUTRAL ones (see [`neutral`]) take the face already in hand if it covers them at
+	/// all, so a space does not end the stretch either side of it and cut a line of Arabic into words.
+	/// Stickiness goes no further: a face kept for what it merely HAPPENS to cover would drag the rest
+	/// of a sentence into the fallback over one arrow, and the reader would see the typeface change
+	/// mid-line for no reason.
 	fn segment(&self, text: &str) -> Vec<Seg> {
 		let mut segs: Vec<Seg> = Vec::new();
 		let mut cur: Option<(u8, usize)> = None;
@@ -162,10 +136,8 @@ impl Font {
 		segs
 	}
 
-	/// Shapes a string, each face in the chain drawing what the one before it could not.
-	///
-	/// The common case by far is a string one face draws the whole of, which is one shaping call and
-	/// exactly what it has always been.
+	/// Shapes a string, each face in the chain drawing what the one before it could not. The common
+	/// case by far is a string one face draws the whole of: one shaping call.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir) -> Outcome<Run> {
 		if text.is_empty() {
 			return Ok(Run {

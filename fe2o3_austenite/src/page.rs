@@ -14,9 +14,8 @@ use crate::ir::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_geom::rect::AbsSize;
 
-/// A page's physical geometry: its trim size and, for Phase 0, a single uniform margin. The text
-/// block is the trim inset by that margin on every side. Facing-page asymmetry -- a wider gutter on
-/// the binding edge -- is a Phase 2 addition and belongs here as recto and verso margins.
+/// A page's physical geometry: its trim size and, for Phase 0, one uniform margin. The text block is
+/// the trim inset by that margin on every side.
 #[derive(Clone, Copy, Debug)]
 pub struct PageGeometry {
 	pub width:	Sp,
@@ -38,10 +37,8 @@ impl PageGeometry {
 		}
 	}
 
-	/// The x of the text block's left edge.
 	pub fn content_left(&self) -> Sp { self.margin }
 
-	/// The y of the text block's top edge.
 	pub fn content_top(&self) -> Sp { self.margin }
 
 	/// The width available to a line of text.
@@ -50,10 +47,9 @@ impl PageGeometry {
 	/// The height available to a column of vertical material before the page is full.
 	pub fn content_height(&self) -> Sp { self.height - self.margin * 2 }
 
-	/// The page's extent in whole device points, for an SVG viewport. This is the one place
-	/// `fe2o3_geom` fits the typesetter cleanly: a viewport extent is non-negative and device-space,
-	/// which is exactly what its unsigned `Dim` models. Rounding to whole points is harmless for a
-	/// viewport attribute and keeps the SVG terse.
+	/// The page extent in whole device points, for an SVG viewport. A viewport extent is non-negative
+	/// device-space, which is what `fe2o3_geom`'s unsigned `Dim` models; rounding to whole points is
+	/// harmless here.
 	pub fn media_box(&self) -> AbsSize {
 		let w = self.width.to_pt().round() as usize;
 		let h = self.height.to_pt().round() as usize;
@@ -61,12 +57,8 @@ impl PageGeometry {
 	}
 }
 
-/// What a placed box draws. A [`Self::Text`] is a shaped run drawn as glyph outlines; a
-/// [`Self::Rule`] is a solid mark; a [`Self::Reserved`] is a forward reference's held-open space,
-/// outlined faintly so a proof shows where a value will land.
-///
-/// Not `Copy` and not `PartialEq`: a [`ShapedText`] owns a shaped run and a shared font handle, which
-/// a placement clones from the leaf that carried it into the frame.
+/// What a placed box draws. A `Reserved` is a forward reference's held-open space, outlined faintly so
+/// a proof shows where a value will land.
 #[derive(Clone, Debug)]
 pub enum PlacedKind {
 	Rule,

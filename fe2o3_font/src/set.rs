@@ -16,49 +16,32 @@ use oxedyne_fe2o3_core::prelude::*;
 // │ coverage, so a face may be chosen for how it reads and for nothing else.    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The face running text is set in.
 const BODY:		&[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
-/// The same face, emphasised strongly.
 const BOLD:		&[u8] = include_bytes!("../fonts/NotoSans-Bold.ttf");
-/// The same face, leaning. A real italic, drawn: not the upright one sheared.
-const ITALIC:		&[u8] = include_bytes!("../fonts/NotoSans-Italic.ttf");
-/// The same face, leaning and strong.
+const ITALIC:		&[u8] = include_bytes!("../fonts/NotoSans-Italic.ttf");	// a real italic, drawn, not sheared
 const BOLD_ITALIC:	&[u8] = include_bytes!("../fonts/NotoSans-BoldItalic.ttf");
-/// Preserved source, where the columns must line up.
 const MONO:		&[u8] = include_bytes!("../fonts/NotoSansMono-Regular.ttf");
 
-/// The face behind all the others: what the chain falls back to.
-///
-/// DejaVu is not here to be read. It is here because it holds the arrows, the mathematics, the
-/// Arabic and the Hebrew that a face chosen for reading does not, and a reader who meets a `→` in a
-/// document should see an arrow rather than a box. It is never the first face tried, so it shapes
-/// nothing a better face can draw.
+// The face every chain falls back to. DejaVu is not here to be read but for the arrows, mathematics,
+// Arabic and Hebrew a reading face lacks, so a `→` reaches ink rather than a box. Never tried first,
+// it shapes nothing a better face can draw.
 const WIDE:		&[u8] = include_bytes!("../fonts/DejaVuSans.ttf");
-/// The same, behind the monospaced face, so that preserved source keeps its columns.
-const WIDE_MONO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
+const WIDE_MONO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");	// the same, behind mono
 
 /// The reader's typefaces, one chain per role.
 pub struct FontSet {
-	/// Running text.
 	body:		Font,
-	/// Running text, emphasised strongly.
 	bold:		Font,
-	/// Running text, emphasised.
 	italic:		Font,
-	/// Running text, emphasised, and strongly.
 	bold_italic:	Font,
-	/// Preserved source.
 	mono:		Font,
 }
 
 impl FontSet {
 
-	/// The set the engine carries, so that it renders standalone, identically, anywhere.
-	///
-	/// Every chain ends in the wide face, so a character the chosen face lacks is still drawn. The
-	/// leaning chains fall back to the UPRIGHT wide face rather than to nothing: an arrow has no
-	/// italic form, and an upright arrow inside a leaning sentence is what every other renderer shows
-	/// there too.
+	/// The set the engine carries, so it renders standalone and identically anywhere. Every chain ends
+	/// in the wide face; the leaning chains fall back to the UPRIGHT wide face, since an arrow has no
+	/// italic form and an upright arrow in a leaning sentence is what every renderer shows.
 	pub fn embedded() -> Outcome<Self> {
 		let wide = || Face::new(WIDE.to_vec());
 		Ok(Self {
@@ -161,12 +144,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// The characters that sent me looking for a chain in the first place.
-	///
-	/// Every one of these appears in real documents already held in the library, and the reading face
-	/// draws none of them. Before the chain they were drawn as the "not defined" box, which is the
-	/// failure this whole mechanism exists to prevent, and no test caught it because every test used
-	/// English. So the test is the evidence: these characters, from the corpus, must reach ink.
+	/// The characters that sent me looking for a chain: each appears in real documents already held in
+	/// the library, the reading face draws none of them, and before the chain they were tofu.
 	#[test]
 	fn test_what_the_reading_face_lacks_is_drawn_by_the_face_behind_it_06() -> Outcome<()> {
 		let fs = res!(FontSet::embedded());
@@ -201,12 +180,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A face already in hand keeps the spaces and the punctuation around what it is drawing.
-	///
-	/// Every face has a space. If the chain were consulted per character rather than the face in hand
-	/// being kept, a space would be drawn by whichever face came first, ending the stretch either side
-	/// of it -- and a line of prose would be shaped one word at a time, losing every kern across every
-	/// join. So the mixed string must come back in as few stretches as it has real changes of face.
+	/// A face already in hand keeps the spaces and punctuation around what it draws, so a mixed string
+	/// comes back in as few stretches as it has real changes of face -- not one per word.
 	#[test]
 	fn test_a_face_in_hand_keeps_what_it_can_draw_08() -> Outcome<()> {
 		let fs = res!(FontSet::embedded());
@@ -224,11 +199,8 @@ mod tests {
 		Ok(())
 	}
 
-	/// A glyph's cluster is a byte offset into the WHOLE string, not into the stretch it was cut into.
-	///
-	/// This is what a caret is placed by. A face that shaped only the middle of a paragraph reports
-	/// offsets into its own fragment, and unless they are put back where they came from every caret
-	/// after the first fallback lands in the wrong place.
+	/// A glyph's cluster is a byte offset into the WHOLE string, not the stretch it was cut into --
+	/// what a caret is placed by, so a fallback in the middle does not misplace every caret after it.
 	#[test]
 	fn test_clusters_are_offsets_into_the_whole_string_09() -> Outcome<()> {
 		let fs = res!(FontSet::embedded());

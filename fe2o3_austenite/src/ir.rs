@@ -181,16 +181,8 @@ impl Penalty {
 	pub fn is_forced(&self) -> bool { self.cost <= Self::EJECT }
 }
 
-/// What an atomic box draws.
-///
-/// A [`Self::Text`] is a run of real shaped text, drawn as glyph outlines -- the Phase 1 leaf. A
-/// [`Self::Rule`] is a solid rectangle, which stood in for a shaped line before a font existed and
-/// still serves for the rules and boxes that carry no text. A [`Self::Reserved`] occupies the width a
-/// forward reference will need once the ledger resolves it -- the width-reservation the architecture
-/// relies on so that two passes suffice by construction.
-///
-/// `PartialEq` is not derived: a [`ShapedText`] carries a shaped run of floats and a shared font
-/// handle, neither of which compares meaningfully, and nothing in the engine needs a leaf to.
+/// What an atomic box draws. `Reserved` holds open the width a forward reference will need once the
+/// ledger resolves it, which is what lets two passes suffice by construction.
 #[derive(Clone, Debug)]
 pub enum LeafKind {
 	Rule,
@@ -215,8 +207,7 @@ impl Leaf {
 		Self { kind: LeafKind::Reserved(id), dims, span: None }
 	}
 
-	/// A leaf of real shaped text. Its dimensions are the run's own -- the width the shaper measured,
-	/// and the face's height and depth -- so the leaf occupies exactly what its glyphs will draw into.
+	/// A leaf of real shaped text, taking its dimensions from the run.
 	pub fn text(shaped: ShapedText) -> Self {
 		let dims = shaped.dims();
 		Self { kind: LeafKind::Text(shaped), dims, span: None }
@@ -281,20 +272,14 @@ impl Node {
 	}
 }
 
-/// A source of glyph and box metrics.
-///
-/// This is the seam for real typesetting. Phase 1 implements it over `fe2o3_font` as
-/// [`FontMetrics`](crate::font::FontMetrics), which shapes a run against an OpenType face with
-/// HarfBuzz and sums the shaper's advances. [`StubMetrics`] remains as the fixed-advance
-/// implementation, for exercising the driver without a font. The bound is a generic, not a trait
-/// object, per the house preference.
+/// A source of glyph and box metrics: the seam for real typesetting. Implemented over `fe2o3_font`
+/// by [`FontMetrics`](crate::font::FontMetrics), and by [`StubMetrics`] for running without a font.
 pub trait Metrics {
 	fn measure(&self, text: &str) -> Outcome<Dims>;
 }
 
-/// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It measures
-/// nothing real; it exists so the two-pass driver can run without a font, and it stands beside the
-/// real [`FontMetrics`](crate::font::FontMetrics) that Phase 1 wired to `fe2o3_font`.
+/// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It runs the
+/// driver without a font, beside the real [`FontMetrics`](crate::font::FontMetrics).
 #[derive(Clone, Copy, Debug)]
 pub struct StubMetrics {
 	pub em:		Sp,	// advance and body height of one character

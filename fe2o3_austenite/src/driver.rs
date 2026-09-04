@@ -277,9 +277,8 @@ fn place_leaf<M: Metrics>(
 			Ok(x + leaf.dims.width)
 		},
 		LeafKind::Text(shaped) => {
-			// The run was already shaped and measured when the leaf was built, so the leaf's own
-			// dimensions are the run's: placing it is recording where it sits and advancing by its
-			// width. The writer reads the run back out of the frame to draw the glyphs.
+			// Already shaped and measured; place it and advance by its width. The writer reads the run
+			// back out of the frame to draw the glyphs.
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(shaped.clone())));
 			Ok(x + leaf.dims.width)
 		},

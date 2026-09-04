@@ -17,9 +17,8 @@ use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::collections::BTreeMap;
 
-/// The kinds of thing that carry an identity a reference can resolve to. This is a closed
-/// vocabulary on purpose: a query class the engine does not know is one it cannot answer, and the
-/// architecture makes that a declared limit rather than a silent gap.
+/// The closed vocabulary of things a reference can resolve to. A kind the engine does not know is a
+/// limit it declares, not a gap it hides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AnchorKind {
 	Label,		// \label{...}, the general cross-reference target
@@ -56,9 +55,8 @@ impl AnchorKind {
 	}
 }
 
-/// An anchor's identity: its kind and a key unique within that kind. Two anchors are the same
-/// anchor exactly when both agree, which is what makes the identity content-addressable rather than
-/// positional -- a label keeps its identity when a paragraph moves it to another page.
+/// An anchor's identity, its kind and a key unique within it. Content-addressed, not positional, so
+/// a label keeps its identity when a paragraph moves it to another page.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AnchorId {
 	pub kind:	AnchorKind,
@@ -70,9 +68,8 @@ impl AnchorId {
 		Self { kind, key: key.into() }
 	}
 
-	/// A stable 64-bit address for the identity, an FNV-1a hash over the kind and key. This is the
-	/// content address the incremental machinery keys on; the identity itself remains the map key,
-	/// so a collision costs a comparison, never a wrong answer.
+	/// A stable 64-bit FNV-1a address over kind and key, for the incremental cache. The identity
+	/// stays the map key, so a collision costs a comparison, not a wrong answer.
 	pub fn address(&self) -> u64 {
 		let mut h: u64 = 0xcbf2_9ce4_8422_2325;
 		let mix = |h: &mut u64, b: u8| {
@@ -118,10 +115,9 @@ impl Position {
 	}
 }
 
-/// One resolved anchor. `reserved` is the width a forward reference to it held open before its value
-/// was known; `realised` is the width its value actually took once resolved. When `realised`
-/// exceeds `reserved` the reservation overflowed, the line it sat on may have re-broken, and the
-/// driver owes another pass -- this is the only thing that stops two passes from sufficing.
+/// One resolved anchor. `reserved` is the width a forward reference held open before its value was
+/// known, `realised` what the value took; `realised` over `reserved` overflowed the reservation and
+/// owes the driver another pass.
 #[derive(Clone, Debug)]
 pub struct Anchor {
 	pub id:			AnchorId,
@@ -212,8 +208,8 @@ impl Ledger {
 		self.entries.is_empty()
 	}
 
-	/// The anchors whose realised value overflowed the width reserved for it. A non-empty result is
-	/// the honest reason a third pass is needed rather than a hoped-for one.
+	/// The anchors whose realised value overflowed its reservation. A non-empty result is why a third
+	/// pass is needed.
 	pub fn overflowed(&self) -> Vec<AnchorId> {
 		self.entries.values().filter(|a| a.overflowed()).map(|a| a.id.clone()).collect()
 	}

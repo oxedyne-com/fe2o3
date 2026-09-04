@@ -1,8 +1,8 @@
 //! One typeface: parse, coverage, metrics, shaping and glyph outlines.
 //!
-//! This is where `harfrust` shapes and `skrifa` draws, and where both are turned back into this
-//! crate's own types at once. A face is rarely used alone; what a caller draws with is a
-//! [`Font`](crate::font::Font), a chain of these.
+//! Where `harfrust` shapes and `skrifa` draws, both turned back into this crate's own types at once.
+//! A face is rarely used alone; what a caller draws with is a [`Font`](crate::font::Font), a chain of
+//! these.
 
 use crate::shape::{
 	Dir,
@@ -36,32 +36,23 @@ use skrifa::{
 
 use std::collections::HashSet;
 
-/// The part a font plays. A document names a role; the reader's font set decides what it looks
-/// like.
+/// The part a font plays. A document names a role; the reader's font set decides what it looks like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
-	/// Running text.
 	#[default]
-	Body,
-	/// Running text, emphasised strongly.
-	Bold,
-	/// Running text, emphasised.
-	Italic,
-	/// Running text, emphasised, and strongly.
-	BoldItalic,
-	/// Preserved source, where the columns must line up.
-	Mono,
+	Body,		// running text
+	Bold,		// running text, emphasised strongly
+	Italic,		// running text, emphasised
+	BoldItalic,	// running text, emphasised, and strongly
+	Mono,		// preserved source, where the columns must line up
 }
 
 /// The vertical metrics of a font at a size, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Metrics {
-	/// How far the tallest letters rise above the baseline.
-	pub ascent:	f32,
-	/// How far the deepest letters fall below the baseline, as a positive number.
-	pub descent:	f32,
-	/// The gap the designer asks for between one line's descent and the next line's ascent.
-	pub leading:	f32,
+	pub ascent:	f32,	// how far the tallest letters rise above the baseline
+	pub descent:	f32,	// how far the deepest fall below it, as a positive number
+	pub leading:	f32,	// the gap the designer asks between one line's descent and the next's ascent
 }
 
 impl Metrics {
@@ -72,30 +63,17 @@ impl Metrics {
 	}
 }
 
-/// One typeface, at any size: a single font file.
-///
-/// The font's bytes are owned, and both third-party parsers are handed a borrow of them when they
-/// are needed. The shaper's tables, which are what costs anything to build, are cached.
-///
-/// A face is rarely used alone. What the engine draws with is a [`Font`](crate::font::Font), which
-/// is a chain of these.
+/// One typeface, at any size: a single font file. Its bytes are owned and lent to both third-party
+/// parsers when needed; the shaper's tables, the costly part to build, are cached.
 pub struct Face {
-	/// The font file.
-	bytes:	Vec<u8>,
-	/// The shaper's cached view of the font, built once.
-	shaper:	ShaperData,
-	/// Font units per em, the number every measurement in the file is in terms of.
-	upem:	f32,
-	/// Every character the face can draw.
-	///
-	/// Read once, when the face is read, because the question "can you draw this?" is asked of every
-	/// character of every string shaped, and the alternative is re-parsing the file to ask it.
-	covers:	HashSet<u32>,
+	bytes:	Vec<u8>,		// the font file
+	shaper:	ShaperData,		// the shaper's cached view, built once
+	upem:	f32,			// font units per em, what every measurement in the file is in terms of
+	covers:	HashSet<u32>,		// every character the face can draw, read once (asked per character)
 }
 
 impl Face {
 
-	/// Reads a face from the bytes of a font file.
 	pub fn new(bytes: Vec<u8>) -> Outcome<Self> {
 		let sf = match ShapeFont::new(&bytes) {
 			Ok(f) => f,
@@ -127,11 +105,7 @@ impl Face {
 		})
 	}
 
-	/// Whether the face can draw a character.
-	///
-	/// A face that cannot is passed over, and the next in the chain asked. A face that can is asked
-	/// to, even where a later one would draw it better: the chain is an order of preference, and the
-	/// first face is the preferred one by construction.
+	/// Can the face draw this character?
 	pub fn covers(&self, ch: char) -> bool {
 		self.covers.contains(&(ch as u32))
 	}
@@ -164,16 +138,9 @@ impl Face {
 	}
 
 	/// Shapes a string this face can draw the whole of: the glyphs it becomes, and where each sits.
-	///
-	/// This is the deep part, and it is HarfBuzz's. What comes back is the same answer the rest of
-	/// the world's software would give for the same text and the same font, which for Arabic
-	/// joining or Indic reordering is not something worth being original about.
-	///
-	/// `face` is which face in the chain this is, which each glyph carries so that painting knows
-	/// what to ask for its outline. `at` is where the string sits in the one it was cut from, which
-	/// is added to every cluster: a cluster is a byte offset into the ORIGINAL text, and a face that
-	/// shaped only the middle of a paragraph would otherwise report offsets into its own fragment and
-	/// put every caret in the wrong place.
+	/// `face` is which face in the chain this is, carried on every glyph so painting knows whose
+	/// outline to ask for; `at` is the string's byte offset in the one it was cut from, added to each
+	/// cluster so a caret reads offsets into the original text rather than into this fragment.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir, face: u8, at: usize) -> Outcome<Run> {
 		if text.is_empty() {
 			return Ok(Run {
@@ -220,10 +187,8 @@ impl Face {
 		})
 	}
 
-	/// The outline of one glyph, at a size, as a path.
-	///
-	/// The path is in the font's frame: the origin is the glyph's own, and y increases upwards.
-	/// Painting flips it onto the page.
+	/// The outline of one glyph at a size, in the font's frame: origin the glyph's own, y up. Painting
+	/// flips it onto the page.
 	pub fn outline(&self, id: u32, size: f32) -> Outcome<Path> {
 		let of = res!(self.outline_font());
 		let glyphs = of.outline_glyphs();
@@ -248,14 +213,12 @@ struct Pen {
 
 impl Pen {
 
-	/// A pen with nothing drawn.
 	fn new() -> Self {
 		Self {
 			pb: PathBuilder::new(),
 		}
 	}
 
-	/// The path drawn, or the first fault met drawing it.
 	fn finish(self) -> Outcome<Path> {
 		self.pb.finish()
 	}
