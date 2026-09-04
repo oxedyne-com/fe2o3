@@ -236,14 +236,10 @@ fn place_line<M: Metrics>(
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, x, y)));
 			},
 			Node::Penalty(_) => {
-				// Line-internal penalties refine Knuth-Plass breaks. A line is still pre-composed by
-				// its caller -- Phase 1 shapes real text but does not yet break paragraphs into lines --
-				// so there is nothing to weigh here.
-				//
-				// TODO (line breaking): the Knuth-Plass breaker goes here. Feed each paragraph's shaped
-				// run and the legal break opportunities from `fe2o3_text::unicode::linebreak`
-				// (`line_breaks` / `break_offsets`) into a total-fit optimiser that minimises the sum of
-				// squared badness, then set each chosen line as its own HBox.
+				// A line arrives here already broken: `linebreak::break_paragraph` runs the Knuth-Plass
+				// optimiser upstream and hands the driver finished HBox lines of words and justified
+				// glue. A penalty inside such a line would be a later intra-line refinement (a kept
+				// discretionary break), which Phase 1 does not yet place, so there is nothing to weigh.
 			},
 			Node::HBox(b) | Node::VBox(b) => {
 				frame.push(Placed::new(x, y, b.dims, PlacedKind::Rule));

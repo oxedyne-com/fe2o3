@@ -25,6 +25,7 @@ use oxedyne_fe2o3_austenite::{
 		Node,
 		Sp,
 	},
+	linebreak::break_paragraph,
 	ledger::{
 		AnchorId,
 		AnchorKind,
@@ -72,13 +73,12 @@ fn main() -> Outcome<()> {
 }
 
 /// A small multi-page document: a shaped heading, a forward-reference line with a reserved slot (to
-/// exercise the ledger), and shaped body lines. No line breaker yet -- each line is one pre-composed
-/// sentence; see the TODO in `driver` pointing at `fe2o3_text::unicode::linebreak`.
+/// exercise the ledger), and a real paragraph run through the Knuth-Plass breaker so the body is set
+/// justified across the measure.
 fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 	let geom	= PageGeometry::a4();
 	let cw		= geom.content_width();
 	let body_sz	= Sp::from_pt(11.0);
-	let gap		= Glue::fixed(Sp::from_pt(4.0));
 
 	let mut nodes: Vec<Node> = Vec::new();
 
@@ -110,17 +110,23 @@ fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 		ref_line_dims)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(12.0))));
 
-	// The body: enough shaped lines to span a few pages. Each is one sentence set as a single run.
-	let n_body = 90u32;
-	for i in 0..n_body {
-		let text	= fmt!(
-			"{:>2}. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod.",
-			i + 1);
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, body_sz, &text));
-		let dims	= shaped.dims();
-		nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(shaped))], dims)));
-		nodes.push(Node::Glue(gap));
+	// The body: one real paragraph, broken into justified lines at the measure by Knuth-Plass. The
+	// text is repeated to span a few pages, so pagination and two-pass convergence still get a workout.
+	let sentence = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor \
+		incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud \
+		exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor \
+		in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur \
+		sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est \
+		laborum.";
+	let mut body = String::new();
+	for _ in 0..14 {
+		body.push_str(sentence);
+		body.push(' ');
 	}
+	let leading = Sp::from_pt(13.2);	// 1.2x the 11pt body
+	let lines	= res!(break_paragraph(
+		fonts.clone(), Role::Body, Dir::Ltr, body_sz, body.trim_end(), cw, leading));
+	nodes.extend(lines);
 
 	Ok(Document::new(nodes, geom))
 }
