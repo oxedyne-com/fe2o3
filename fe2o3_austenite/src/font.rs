@@ -46,6 +46,10 @@ impl Metrics for FontMetrics {
 		let shaped = res!(ShapedText::shape(self.fonts.clone(), self.role, self.dir, self.size, text));
 		Ok(shaped.dims())
 	}
+
+	fn shape(&self, text: &str) -> Outcome<Option<ShapedText>> {
+		Ok(Some(res!(ShapedText::shape(self.fonts.clone(), self.role, self.dir, self.size, text))))
+	}
 }
 
 /// A shaped run and the font handle to draw it, carried by a [`LeafKind::Text`](crate::ir::LeafKind)

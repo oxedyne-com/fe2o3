@@ -171,6 +171,27 @@ pub struct Delta {
 	pub to:		u32,
 }
 
+/// What a forward reference resolves to: a value the previous pass fixed and this pass can read.
+/// A closed vocabulary, so a kind the engine cannot resolve is a limit it declares, not a gap it
+/// hides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ref {
+	TotalPages,			// the document's own page count, the "of M" in "page N of M"
+	PageOf(AnchorId),	// the page a named anchor resolved to, the general cross-reference
+}
+
+impl Ref {
+	/// The value this reference resolves to against `incoming`, or `None` when the previous pass has
+	/// not fixed it yet -- the empty ledger of Pass A, or an anchor not yet recorded. A composed
+	/// ledger always fixes at least one page, so a zero total is the Pass A tell.
+	pub fn resolve(&self, incoming: &Ledger) -> Option<u32> {
+		match self {
+			Ref::TotalPages	=> if incoming.total_pages == 0 { None } else { Some(incoming.total_pages) },
+			Ref::PageOf(id)	=> incoming.page_of(id),
+		}
+	}
+}
+
 /// The whole anchor table for one composition, plus the total page count the last page fixed.
 #[derive(Clone, Debug, Default)]
 pub struct Ledger {

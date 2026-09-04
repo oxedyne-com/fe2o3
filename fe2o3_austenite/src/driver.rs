@@ -20,6 +20,7 @@
 use crate::{
 	ir::{
 		BoxNode,
+		Dims,
 		Leaf,
 		LeafKind,
 		Metrics,
@@ -260,7 +261,7 @@ fn place_leaf<M: Metrics>(
 	x:			Sp,
 	y:			Sp,
 	page_no:	u32,
-	_metrics:	&M,
+	metrics:	&M,
 	incoming:	&Ledger,
 	frame:		&mut Frame,
 	ledger:		&mut Ledger,
@@ -278,18 +279,42 @@ fn place_leaf<M: Metrics>(
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(shaped.clone())));
 			Ok(x + leaf.dims.width)
 		},
-		LeafKind::Reserved(id) => {
-			// Phase 0 models every forward reference as an "of M" total-count reference: its value is
-			// the page count resolved by the previous pass. A cross-reference to a specific anchor's
-			// page is the same mechanism reading `incoming.page_of(target)` instead, and joins in
-			// Phase 3 with the table of contents.
-			let value		= incoming.total_pages;
-			let em			= leaf.dims.height;			// one digit is about one em in the stub metric
-			let realised	= em * digits(value);
-			let reserved	= leaf.dims.width;
-			let slot		= if realised > reserved { realised } else { reserved };
+		LeafKind::Reserved(id, refr) => {
+			// A forward reference. What it resolves to is the reference's own business (a total count, a
+			// cross-referenced page); the driver only asks the previous pass's ledger for the value and
+			// holds the declared width open until it has one.
+			let reserved = leaf.dims.width;
+			let realised = match refr.resolve(incoming) {
+				Some(value) => {
+					// The previous pass fixed the value. Shape it as real text when a font backs the
+					// metric, or keep the reservation box under the fontless stub; either way its realised
+					// width is recorded so the overflow logic still governs a further pass.
+					let text = fmt!("{}", value);
+					match res!(metrics.shape(&text)) {
+						Some(shaped) => {
+							let w		= shaped.dims().width;
+							let dims	= Dims::new(w, leaf.dims.height, leaf.dims.depth);
+							frame.push(Placed::new(x, y, dims, PlacedKind::Text(shaped)));
+							w
+						},
+						None => {
+							frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Reserved));
+							res!(metrics.measure(&text)).width
+						},
+					}
+				},
+				None => {
+					// Pass A: no value yet. Hold the reservation open and realise nothing, so no overflow
+					// is charged before there is a value that could exceed the width.
+					frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Reserved));
+					Sp::ZERO
+				},
+			};
 
-			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Reserved));
+			// The slot never shrinks below the reservation, so following material stays put while the
+			// value fits; a value wider than its reservation grows the slot and shifts what follows,
+			// which is the honest cause of a further pass, recorded as the anchor's overflow.
+			let slot = if realised > reserved { realised } else { reserved };
 			let mut anchor = Anchor::new(id.clone(), Position::new(page_no, x, y));
 			anchor.reserved = reserved;
 			anchor.realised = realised;
@@ -297,18 +322,6 @@ fn place_leaf<M: Metrics>(
 			Ok(x + slot)
 		},
 	}
-}
-
-/// The number of decimal digits in a page number, at least one (zero has one digit). This is the
-/// width a resolved reference needs, in digit-widths.
-fn digits(n: u32) -> i32 {
-	let mut n = n;
-	let mut d = 1i32;
-	while n >= 10 {
-		n /= 10;
-		d += 1;
-	}
-	d
 }
 
 /// Builds the non-convergence error: the ledger difference the architecture promises, naming the

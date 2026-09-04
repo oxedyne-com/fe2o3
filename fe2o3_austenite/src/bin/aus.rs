@@ -29,6 +29,7 @@ use oxedyne_fe2o3_austenite::{
 	ledger::{
 		AnchorId,
 		AnchorKind,
+		Ref,
 	},
 	page::PageGeometry,
 };
@@ -92,8 +93,10 @@ fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(12.0))));
 
 	// A forward reference to the total page count: a shaped label, then a slot reserved three digits
-	// wide. Pass A shows nothing resolved; Pass B fills the slot from Pass A's page count. The label is
-	// real text; the slot stays a reservation until a cross-reference machinery resolves it.
+	// wide. Pass A shows the empty reservation; Pass B resolves `Ref::TotalPages` against Pass A's
+	// ledger and draws the real count as shaped glyphs, so the slot reads "runs to N". Three digit-ems
+	// is wider than any small page count, so the value fits its reservation and the document converges
+	// in the normal two passes.
 	let label = res!(ShapedText::new(
 		fonts.clone(), Role::Body, Dir::Ltr, body_sz, "This document runs to"));
 	let label_dims	= label.dims();
@@ -105,7 +108,7 @@ fn build_demo(fonts: Arc<FontSet>) -> Outcome<Document> {
 		vec![
 			Node::Leaf(Leaf::text(label)),
 			Node::Glue(Glue::fixed(Sp::from_pt(4.0))),
-			Node::Leaf(Leaf::reserved(ref_id, ref_dims)),
+			Node::Leaf(Leaf::reserved(ref_id, Ref::TotalPages, ref_dims)),
 		],
 		ref_line_dims)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(12.0))));

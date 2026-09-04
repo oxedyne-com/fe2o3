@@ -9,7 +9,10 @@
 //! appears only at the output boundary, where a coordinate becomes a device length.
 
 use crate::font::ShapedText;
-use crate::ledger::AnchorId;
+use crate::ledger::{
+	AnchorId,
+	Ref,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -186,8 +189,8 @@ impl Penalty {
 #[derive(Clone, Debug)]
 pub enum LeafKind {
 	Rule,
-	Reserved(AnchorId),	// a forward reference holding open its own width
-	Text(ShapedText),	// a shaped run of real text, drawn as glyph outlines
+	Reserved(AnchorId, Ref),	// a forward reference: its own identity, and what it resolves to
+	Text(ShapedText),			// a shaped run of real text, drawn as glyph outlines
 }
 
 /// An atomic box: intrinsic dimensions, what it draws, and where in the source it came from.
@@ -203,8 +206,8 @@ impl Leaf {
 		Self { kind: LeafKind::Rule, dims, span: None }
 	}
 
-	pub fn reserved(id: AnchorId, dims: Dims) -> Self {
-		Self { kind: LeafKind::Reserved(id), dims, span: None }
+	pub fn reserved(id: AnchorId, refr: Ref, dims: Dims) -> Self {
+		Self { kind: LeafKind::Reserved(id, refr), dims, span: None }
 	}
 
 	/// A leaf of real shaped text, taking its dimensions from the run.
@@ -276,6 +279,11 @@ impl Node {
 /// by [`FontMetrics`](crate::font::FontMetrics), and by [`StubMetrics`] for running without a font.
 pub trait Metrics {
 	fn measure(&self, text: &str) -> Outcome<Dims>;
+
+	/// Shapes text into a placeable run when a font backs this metric, or `None` for the fontless
+	/// stub. A forward reference resolved against a font metric is shaped and drawn here as real
+	/// glyphs; against the stub it stays a reservation, measured but not drawn.
+	fn shape(&self, text: &str) -> Outcome<Option<ShapedText>>;
 }
 
 /// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It runs the
@@ -296,5 +304,9 @@ impl Metrics for StubMetrics {
 	fn measure(&self, text: &str) -> Outcome<Dims> {
 		let n = text.chars().count() as i32;
 		Ok(Dims::new(self.em * n, self.em, self.depth))
+	}
+
+	fn shape(&self, _text: &str) -> Outcome<Option<ShapedText>> {
+		Ok(None)	// no font behind the stub, so nothing to shape into glyphs
 	}
 }
