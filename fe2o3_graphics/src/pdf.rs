@@ -449,18 +449,22 @@ mod tests {
 
 		// The entries begin after "xref\n" and the "0 M\n" subsection header. The free object is entry
 		// zero; objects 1..=obj_count follow, twenty bytes each.
-		let text = String::from_utf8_lossy(&bytes);
-		let marker = match text.find("xref\n0 ") {
+		// Search the raw bytes, not a lossy string: the header's binary-marker comment holds non-UTF-8
+		// bytes, so a String index would not line up with the byte offsets the entries are read at.
+		let needle = b"xref\n0 ";
+		let marker = match bytes.windows(needle.len()).position(|w| w == needle) {
 			Some(i) => i,
 			None => return Err(err!("no xref section in the file"; Test)),
 		};
-		let head_end = match text[marker..].find('\n').and_then(|a|
-			text[marker + a + 1..].find('\n').map(|b| marker + a + 1 + b + 1))
-		{
-			Some(i) => i,
+		let nl1 = match bytes[marker..].iter().position(|&b| b == b'\n') {
+			Some(i) => marker + i,
 			None => return Err(err!("the xref header is malformed"; Test)),
 		};
-		let entries = &bytes[head_end..];
+		let nl2 = match bytes[nl1 + 1..].iter().position(|&b| b == b'\n') {
+			Some(i) => nl1 + 1 + i,
+			None => return Err(err!("the xref header is malformed"; Test)),
+		};
+		let entries = &bytes[nl2 + 1..];
 		for obj in 1..=obj_count {
 			let field = res!(std::str::from_utf8(&entries[obj * 20..obj * 20 + 10]));
 			let off: usize = res!(field.parse::<usize>());
