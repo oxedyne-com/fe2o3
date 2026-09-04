@@ -38,6 +38,12 @@ use oxedyne_fe2o3_austenite::{
 		Ref,
 	},
 	page::PageGeometry,
+	table::{
+		Align,
+		Cell,
+		Row,
+		Table,
+	},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -218,6 +224,49 @@ fn blocks() -> Vec<Block> {
 			put to the same record, and none of them reaches behind it to the layout. That discipline \
 			is what lets the whole document be composed in a bounded window of memory, one page \
 			assembled and written and forgotten before the next begins, however long the manuscript \
-			runs.")
+			runs."),
+
+		Block::heading(1, "A Table of the Three Stages"),
+		Block::paragraph(
+			"The three stages the earlier sections describe can be set side by side. The table below is \
+			itself a block in this same vertical list: its columns are sized to their contents, its cells \
+			wrapped to those columns by the very line breaker that sets the prose, and its rules drawn as \
+			the same filled rectangles the engine uses for any rule. It is placed whole, so were it to meet \
+			the foot of a page with too little room, it would move entire to the next."),
+		Block::table(comparison_table()),
 	]
+}
+
+/// A small comparison table: a bold header row, three body rows, and a right-aligned numeric column,
+/// with two columns wide enough to wrap so cell line breaking is exercised.
+fn comparison_table() -> Table {
+	let head = Row::new(vec![
+		Cell::new("Stage"),
+		Cell::new("What it stacks"),
+		Cell::new("Breaks it weighs"),
+		Cell::aligned("Passes", Align::Right),
+	]);
+	let body = vec![
+		Row::new(vec![
+			Cell::new("Line breaking"),
+			Cell::new("shaped words and elastic interword spaces"),
+			Cell::new("the whole paragraph at once"),
+			Cell::aligned("1", Align::Right),
+		]),
+		Row::new(vec![
+			Cell::new("Page breaking"),
+			Cell::new("finished lines and vertical springs"),
+			Cell::new("one page, greedily, for now"),
+			Cell::aligned("1", Align::Right),
+		]),
+		Row::new(vec![
+			Cell::new("Running heads"),
+			Cell::new("nothing at all; it consults the ledger"),
+			Cell::new("none"),
+			Cell::aligned("2", Align::Right),
+		]),
+	];
+	let mut rows = vec![head];
+	rows.extend(body);
+	Table::new(true, rows)
 }

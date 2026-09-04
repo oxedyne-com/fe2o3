@@ -35,3 +35,4 @@ pub mod ir;
 pub mod ledger;
 pub mod linebreak;
 pub mod page;
+pub mod table;

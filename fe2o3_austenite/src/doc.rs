@@ -33,6 +33,10 @@ use crate::ledger::{
 	Ref,
 };
 use crate::linebreak::break_paragraph;
+use crate::table::{
+	self,
+	Table,
+};
 use crate::page::{
 	Page,
 	PageGeometry,
@@ -55,6 +59,7 @@ use std::sync::Arc;
 pub enum Block {
 	Heading { level: u8, text: String },
 	Paragraph { text: String },
+	Table(Table),
 }
 
 impl Block {
@@ -64,6 +69,10 @@ impl Block {
 
 	pub fn paragraph<S: Into<String>>(text: S) -> Self {
 		Self::Paragraph { text: text.into() }
+	}
+
+	pub fn table(table: Table) -> Self {
+		Self::Table(table)
 	}
 }
 
@@ -79,6 +88,12 @@ pub struct Style {
 	pub h3_size:		Sp,
 	pub header_size:	Sp,	// the running head's size
 	pub folio_size:		Sp,
+	pub table_skip:		Sp,	// space set above and below a table
+	pub cell_pad_x:		Sp,	// horizontal padding between a cell's text and its column rules
+	pub cell_pad_y:		Sp,	// vertical padding above and below a cell's lines
+	pub line_gap:		Sp,	// leading between the wrapped lines within one cell
+	pub rule_thin:		Sp,	// an interior grid rule
+	pub rule_thick:		Sp,	// the frame and the rule beneath a header
 }
 
 impl Default for Style {
@@ -92,6 +107,12 @@ impl Default for Style {
 			h3_size:		Sp::from_pt(12.0),
 			header_size:	Sp::from_pt(9.5),
 			folio_size:		Sp::from_pt(10.0),
+			table_skip:		Sp::from_pt(10.0),
+			cell_pad_x:		Sp::from_pt(5.0),
+			cell_pad_y:		Sp::from_pt(3.0),
+			line_gap:		Sp::from_pt(3.0),
+			rule_thin:		Sp::from_pt(0.4),
+			rule_thick:		Sp::from_pt(0.8),
 		}
 	}
 }
@@ -195,6 +216,17 @@ pub fn author(
 				let lines = res!(break_paragraph(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, text, measure, style.leading));
 				nodes.extend(lines);
+				i += 1;
+				first = false;
+			},
+			Block::Table(t) => {
+				// Space above the table, discarded at a page top like any other leading. The table lowers
+				// to one keep box, so the driver moves it whole to the next page when it will not fit.
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				}
+				nodes.push(res!(table::lower(fonts.clone(), style, measure, t)));
+				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
 			},
