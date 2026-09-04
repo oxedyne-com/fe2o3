@@ -69,13 +69,66 @@ pub fn break_paragraph(
 	Ok(lines)
 }
 
+/// One run of a segmented paragraph: a stretch of plain text, or a pre-built footnote mark leaf. A
+/// paragraph carrying footnotes is a sequence of these -- the text either side of each mark, and the
+/// mark itself -- so a mark clings to the word before it and line breaking still flows around it.
+pub enum Piece {
+	Text(String),
+	Mark(Leaf),	// a footnote mark, already shaped as a raised superscript (LeafKind::Mark)
+}
+
+/// Breaks a segmented paragraph the way [`break_paragraph`] breaks a plain one, but with footnote marks
+/// woven into the stream. Each text piece contributes its words and interword glue; each mark piece a
+/// rigid superscript box that never breaks and that the following space may break after. The result is
+/// the same vertical list of HBox lines, so the driver sets it with no special case -- and a paragraph
+/// of a single text piece produces exactly what [`break_paragraph`] would.
+pub fn break_paragraph_pieces(
+	fonts:		Arc<FontSet>,
+	role:		Role,
+	dir:		Dir,
+	size:		Sp,
+	pieces:		&[Piece],
+	measure:	Sp,
+	leading:	Sp,
+)
+	-> Outcome<Vec<Node>>
+{
+	let (sp_w, stretch, shrink, hyphen) = res!(interword(fonts.clone(), role, dir, size));
+	let hyph = Hyphenator::en_us();
+
+	let mut items = Vec::new();
+	for piece in pieces {
+		match piece {
+			Piece::Text(text) => {
+				res!(push_text_run(
+					&mut items, fonts.clone(), role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
+			},
+			Piece::Mark(leaf) => {
+				items.push(Item {
+					kind: Kind::Mark(leaf.clone()), width: leaf.dims.width, stretch: Sp::ZERO,
+					shrink: Sp::ZERO, penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+			},
+		}
+	}
+	push_finish(&mut items);	// the forced break that ends the paragraph, whatever the last piece was
+
+	if items.is_empty() {
+		return Ok(Vec::new());
+	}
+	let breaks	= optimal_breaks(&items, measure);
+	let lines	= res!(set_lines(&items, &breaks, measure, leading));
+	Ok(lines)
+}
+
 /// One entry of the box-glue-penalty stream. A `Boxed` word (or word fragment) is rigid; a `Glued`
 /// space stretches and shrinks; a `Pen` is a break carrying no space (a hyphen point, or the forced
-/// end of the stream).
+/// end of the stream); a `Mark` is a footnote's superscript, rigid like a box but already built with
+/// its raised dimensions.
 enum Kind {
 	Boxed(ShapedText),
 	Glued,
 	Pen,
+	Mark(Leaf),
 }
 
 struct Item {
@@ -88,9 +141,8 @@ struct Item {
 	hyphen:		Option<ShapedText>,		// a discretionary's hyphen glyph, drawn only if the break is taken
 }
 
-/// Shapes each word of `text` and turns UAX #14's opportunities into the box-glue-penalty stream.
-/// Punctuation stays with its word: the opportunities only fall after spaces (and the odd slash or
-/// hyphen), so trimming a segment's trailing whitespace leaves the word with its clinging marks.
+/// Shapes each word of `text` and turns UAX #14's opportunities into the box-glue-penalty stream, then
+/// closes it with the forced break that ends the paragraph.
 fn build_items(
 	fonts:	Arc<FontSet>,
 	role:	Role,
@@ -100,41 +152,107 @@ fn build_items(
 )
 	-> Outcome<Vec<Item>>
 {
-	// The interword space, measured from the face, with the classic TeX-ish elasticity: it grows by a
-	// half and gives up a third of itself.
+	let (sp_w, stretch, shrink, hyphen) = res!(interword(fonts.clone(), role, dir, size));
+	let hyph = Hyphenator::en_us();
+
+	let mut items = Vec::new();
+	res!(push_text_run(&mut items, fonts, role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
+	push_finish(&mut items);
+	Ok(items)
+}
+
+/// The interword space, measured from the face with the classic TeX-ish elasticity -- it grows by a
+/// half and gives up a third -- and the hyphen glyph a taken discretionary draws, both shaped once.
+fn interword(
+	fonts:	Arc<FontSet>,
+	role:	Role,
+	dir:	Dir,
+	size:	Sp,
+)
+	-> Outcome<(Sp, Sp, Sp, ShapedText)>
+{
 	let space	= res!(ShapedText::new(fonts.clone(), role, dir, size, " "));
 	let sp_w	= space.dims().width;
 	let stretch	= Sp(sp_w.raw() / 2);
 	let shrink	= Sp(sp_w.raw() / 3);
+	let hyphen	= res!(ShapedText::new(fonts, role, dir, size, "-"));
+	Ok((sp_w, stretch, shrink, hyphen))
+}
 
-	// The hyphen glyph a taken discretionary draws, shaped once and cloned into each break point.
-	let hyphen	= res!(ShapedText::new(fonts.clone(), role, dir, size, "-"));
-	let hyph	= Hyphenator::en_us();
+/// The glue and forced break that end a paragraph: a glue of near-infinite stretch swallows the last
+/// line's slack so it sets flush left, then a forced break the optimiser must take.
+fn push_finish(items: &mut Vec<Item>) {
+	items.push(Item {
+		kind: Kind::Glued, width: Sp::ZERO, stretch: inf_stretch(), shrink: Sp::ZERO,
+		penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+	items.push(Item {
+		kind: Kind::Pen, width: Sp::ZERO, stretch: Sp::ZERO, shrink: Sp::ZERO,
+		penalty: Penalty::EJECT, flagged: false, hyphen: None });
+}
 
-	let mut items	= Vec::new();
+/// Appends one run of text as words and interword glue, turning UAX #14's opportunities into the
+/// stream. Punctuation stays with its word: the opportunities only fall after spaces (and the odd slash
+/// or hyphen), so trimming a segment's trailing whitespace leaves the word with its clinging marks. The
+/// run's terminal opportunity does not close the paragraph -- that is [`push_finish`]'s single job,
+/// after every run -- so a mark piece may follow this run's last word with nothing between them.
+#[allow(clippy::too_many_arguments)]
+fn push_text_run(
+	items:	&mut Vec<Item>,
+	fonts:	Arc<FontSet>,
+	role:	Role,
+	dir:	Dir,
+	size:	Sp,
+	text:	&str,
+	sp_w:	Sp,
+	stretch:	Sp,
+	shrink:	Sp,
+	hyph:	&Hyphenator,
+	hyphen:	&ShapedText,
+)
+	-> Outcome<()>
+{
+	// A run that follows a mark (or another run) may open with a space -- the interword space that parts
+	// the mark from the next word. Lift it out as its own elastic, breakable glue rather than baking it
+	// into the first word's box, so the space justifies and the line may break after the mark.
+	let trimmed	= text.trim_start_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
+	let lead	= text.len() - trimmed.len();
+	if lead > 0 {
+		let spaces = text[..lead].chars().filter(|c| *c == ' ').count() as i32;
+		if spaces > 0 {
+			items.push(Item {
+				kind: Kind::Glued, width: Sp(sp_w.raw() * spaces), stretch, shrink,
+				penalty: 0, flagged: false, hyphen: None });
+		}
+	}
+	let text		= trimmed;
+
 	let opps		= linebreak::line_breaks(text);
+	let n			= opps.len();
 	let mut prev	= 0usize;
-	for opp in &opps {
+	for (oi, opp) in opps.iter().enumerate() {
 		let seg		= &text[prev..opp.offset];
 		prev		= opp.offset;
 		let word	= seg.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
 		let tail	= &seg[word.len()..];
 		if !word.is_empty() {
-			res!(push_word(&mut items, fonts.clone(), role, dir, size, word, &hyph, &hyphen));
+			res!(push_word(items, fonts.clone(), role, dir, size, word, hyph, hyphen));
 		}
+		let spaces = tail.chars().filter(|c| *c == ' ').count() as i32;
 		match opp.kind {
+			Break::Mandatory if oi + 1 == n => {
+				// The run's own end. Any trailing space becomes a breakable glue so a following mark or
+				// run may part from this word; the paragraph's forced break is added once, by push_finish.
+				if spaces > 0 {
+					items.push(Item {
+						kind: Kind::Glued, width: Sp(sp_w.raw() * spaces), stretch, shrink,
+						penalty: 0, flagged: false, hyphen: None });
+				}
+			},
 			Break::Mandatory => {
-				// A paragraph end or an explicit newline: glue that fills the last line to flush left,
-				// then a forced break the optimiser must take.
-				items.push(Item {
-					kind: Kind::Glued, width: Sp::ZERO, stretch: inf_stretch(), shrink: Sp::ZERO,
-					penalty: Penalty::INFINITY, flagged: false, hyphen: None });
-				items.push(Item {
-					kind: Kind::Pen, width: Sp::ZERO, stretch: Sp::ZERO, shrink: Sp::ZERO,
-					penalty: Penalty::EJECT, flagged: false, hyphen: None });
+				// An interior hard break (an explicit newline within the run): flush the line and force it.
+				push_finish(items);
 			},
 			Break::Optional => {
-				let spaces = tail.chars().filter(|c| *c == ' ').count() as i32;
 				if spaces > 0 {
 					items.push(Item {
 						kind: Kind::Glued, width: Sp(sp_w.raw() * spaces), stretch, shrink,
@@ -149,7 +267,7 @@ fn build_items(
 			},
 		}
 	}
-	Ok(items)
+	Ok(())
 }
 
 /// Shapes one word and pushes it as boxes. A word long enough to hold a legal Liang break is split at
@@ -217,10 +335,11 @@ fn push_word(
 /// breaks unless forbidden; a box never breaks.
 fn is_break(items: &[Item], i: usize) -> bool {
 	match items[i].kind {
-		Kind::Glued		=> i > 0 && matches!(items[i - 1].kind, Kind::Boxed(_))
+		Kind::Glued		=> i > 0 && matches!(items[i - 1].kind, Kind::Boxed(_) | Kind::Mark(_))
 							&& items[i].penalty < Penalty::INFINITY,
 		Kind::Pen		=> items[i].penalty < Penalty::INFINITY,
 		Kind::Boxed(_)	=> false,
+		Kind::Mark(_)	=> false,	// a mark clings to its word; the space after it may break
 	}
 }
 
@@ -415,6 +534,14 @@ fn set_lines(
 			match &item.kind {
 				Kind::Boxed(shaped) => {
 					let leaf = Leaf::text(shaped.clone());
+					if leaf.dims.height > height { height = leaf.dims.height; }
+					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
+					children.push(Node::Leaf(leaf));
+				},
+				Kind::Mark(leaf) => {
+					// The mark carries its own raised dims; a superscript is shorter than the line, so it
+					// takes the line's height from the words around it, not from itself.
+					let leaf = leaf.clone();
 					if leaf.dims.height > height { height = leaf.dims.height; }
 					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 					children.push(Node::Leaf(leaf));

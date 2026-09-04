@@ -21,6 +21,7 @@ use crate::{
 	ir::{
 		BoxNode,
 		Dims,
+		Footnote,
 		Leaf,
 		LeafKind,
 		Metrics,
@@ -43,17 +44,45 @@ use crate::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// A trivial in-memory document: a vertical box-glue-penalty stream, and the geometry every page
-/// takes. Phase 0 has one geometry for the whole document; per-chapter geometry is later.
+/// The spacing that frames the footnotes at the foot of a page: the gap above the separator rule, the
+/// rule itself and how wide it runs, the gap below it before the first note, and the gap between one
+/// note and the next. Every length is scaled points, so the foot never leaves the integer domain the
+/// driver breaks on. The note lines themselves carry their own leading; this is only the furniture
+/// around them.
+#[derive(Clone, Copy, Debug)]
+pub struct FootStyle {
+	pub gap_above_rule:	Sp,
+	pub rule_thick:		Sp,
+	pub rule_width:		Sp,
+	pub gap_below_rule:	Sp,
+	pub gap_between:	Sp,
+}
+
+impl Default for FootStyle {
+	fn default() -> Self {
+		Self {
+			gap_above_rule:	Sp::from_pt(8.0),
+			rule_thick:		Sp::from_pt(0.4),
+			rule_width:		Sp::from_pt(120.0),	// a short rule, about a third of a text block
+			gap_below_rule:	Sp::from_pt(4.0),
+			gap_between:	Sp::from_pt(3.0),
+		}
+	}
+}
+
+/// A trivial in-memory document: a vertical box-glue-penalty stream, the geometry every page takes, and
+/// the foot spacing its footnotes are framed with. Phase 0 has one geometry for the whole document;
+/// per-chapter geometry is later.
 #[derive(Clone, Debug)]
 pub struct Document {
 	pub nodes:	Vec<Node>,
 	pub geom:	PageGeometry,
+	pub foot:	FootStyle,
 }
 
 impl Document {
 	pub fn new(nodes: Vec<Node>, geom: PageGeometry) -> Self {
-		Self { nodes, geom }
+		Self { nodes, geom, foot: FootStyle::default() }
 	}
 }
 
@@ -117,6 +146,15 @@ pub fn run<M: Metrics>(
 /// would overflow the text block, then the page is broken. Each page's frame is built, kept in the
 /// returned vector, and would be dropped after writing in a streaming caller; Phase 0 returns them
 /// together so the harness can write them and count them.
+///
+/// Footnotes couple to the break: a footnote's note is set at the foot of the page its mark lands on,
+/// so the effective bottom shrinks by the note's height as marks accumulate, and a line is judged
+/// against a bottom already charged for its own note. This does not threaten convergence. A note's
+/// height is fixed at author time, independent of the layout, so the reservation a page pays is a pure
+/// function of which marks fell on it; the fill is as deterministic as it was without footnotes. What
+/// footnotes can do is push a heading or an anchor to a later page than a footnote-free fill would --
+/// exactly the movement the ledger already reconciles across passes, and the loop settles on it in the
+/// usual way.
 fn compose<M: Metrics>(
 	doc:		&Document,
 	metrics:	&M,
@@ -135,6 +173,11 @@ fn compose<M: Metrics>(
 	let mut y		= top;
 	let mut at_top	= true;	// just after a break, leading glue and penalties are discarded
 
+	// The footnotes whose marks have landed on the page under construction. Each reduces the height left
+	// for the body by its own height plus the separator furniture, so the effective bottom shrinks as
+	// they accumulate; they are set at the foot when the page closes, then this is cleared.
+	let mut notes:	Vec<Footnote> = Vec::new();
+
 	for node in &doc.nodes {
 		match node {
 			Node::Glue(g) => {
@@ -146,48 +189,39 @@ fn compose<M: Metrics>(
 			},
 			Node::Penalty(p) => {
 				if p.is_forced() && !frame.is_empty() {
-					finish_page(&mut pages, &mut frame, &mut page_no, &mut y, top, geom);
+					res!(finish_page(
+						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
+						&mut notes, &doc.foot, bottom, metrics, incoming, &mut ledger));
 					at_top = true;
 				}
 			},
 			Node::Anchor(id) => {
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
-			Node::HBox(b) => {
-				let v = b.dims.vextent();
-				if !frame.is_empty() && y + v > bottom {
-					finish_page(&mut pages, &mut frame, &mut page_no, &mut y, top, geom);
+			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
+				let v = node.vextent();
+
+				// The footnotes this node's marks introduce. The break is judged against a bottom already
+				// shrunk by the notes on the page and by these -- so a line and its own note never part.
+				let mut marks: Vec<Footnote> = Vec::new();
+				collect_marks(node, &mut marks);
+				let reserve = foot_reserve(&notes, &marks, &doc.foot);
+				if !frame.is_empty() && y + v > bottom - reserve {
+					res!(finish_page(
+						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
+						&mut notes, &doc.foot, bottom, metrics, incoming, &mut ledger));
 				}
-				res!(place_line(b, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
-				y += v;
-				at_top = false;
-			},
-			Node::VBox(b) => {
-				let v = b.dims.vextent();
-				if !frame.is_empty() && y + v > bottom {
-					finish_page(&mut pages, &mut frame, &mut page_no, &mut y, top, geom);
-				}
-				// A keep box: a heading bound to the first line of its paragraph. Placed whole, so the
-				// greedy breaker moves it entire to the next page rather than splitting it; its children
-				// are set from the box top, not drawn as one placeholder rectangle.
-				res!(place_vbox(b, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
-				y += v;
-				at_top = false;
-			},
-			Node::Leaf(l) => {
-				let v = l.dims.vextent();
-				if !frame.is_empty() && y + v > bottom {
-					finish_page(&mut pages, &mut frame, &mut page_no, &mut y, top, geom);
-				}
-				res!(place_leaf(l, geom.content_left(), y, page_no, metrics, incoming, &mut frame, &mut ledger));
+				res!(place_node(node, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
+				notes.append(&mut marks);	// its marks now belong to the page the node landed on
 				y += v;
 				at_top = false;
 			},
 		}
 	}
 
-	// The last page holds whatever is left, unless nothing is.
+	// The last page holds whatever is left, unless nothing is; its footnotes are set at its foot first.
 	if !frame.is_empty() {
+		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom, metrics, incoming, &mut ledger));
 		pages.push(Page::new(page_no, geom, std::mem::take(&mut frame)));
 	} else if pages.is_empty() {
 		// A document with no material is still one blank page, so a page count is always at least one.
@@ -198,18 +232,131 @@ fn compose<M: Metrics>(
 	Ok((pages, ledger))
 }
 
-/// Closes the current page: stores it, resets the frame and cursor, and advances the folio.
-fn finish_page(
+/// Closes the current page: sets its footnotes at the foot, stores it, clears the note accumulator, and
+/// resets the frame and cursor before advancing the folio.
+#[allow(clippy::too_many_arguments)]
+fn finish_page<M: Metrics>(
 	pages:		&mut Vec<Page>,
 	frame:		&mut Frame,
 	page_no:	&mut u32,
 	y:			&mut Sp,
 	top:		Sp,
 	geom:		PageGeometry,
-) {
+	notes:		&mut Vec<Footnote>,
+	foot:		&FootStyle,
+	bottom:		Sp,
+	metrics:	&M,
+	incoming:	&Ledger,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	res!(lay_footnotes(frame, notes, *page_no, geom, foot, bottom, metrics, incoming, ledger));
 	pages.push(Page::new(*page_no, geom, std::mem::take(frame)));
+	notes.clear();
 	*page_no += 1;
 	*y = top;
+	Ok(())
+}
+
+/// Dispatches a node to the placement helper for its shape. The break decision is the caller's; this
+/// only lays the node's ink at `y` on `page_no`.
+fn place_node<M: Metrics>(
+	node:		&Node,
+	y:			Sp,
+	page_no:	u32,
+	geom:		PageGeometry,
+	metrics:	&M,
+	incoming:	&Ledger,
+	frame:		&mut Frame,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	match node {
+		// A keep box (a heading bound to the first line of its paragraph) is placed whole, so the greedy
+		// breaker moves it entire rather than splitting it.
+		Node::VBox(b)	=> place_vbox(b, y, page_no, geom, metrics, incoming, frame, ledger),
+		Node::HBox(b)	=> place_line(b, y, page_no, geom, metrics, incoming, frame, ledger),
+		Node::Leaf(l)	=> place_leaf(l, geom.content_left(), y, page_no, metrics, incoming, frame, ledger).map(|_| ()),
+		_				=> Ok(()),
+	}
+}
+
+/// Gathers the footnotes whose marks fall anywhere within `node`, in the document order they were set,
+/// by walking its boxes. A mark is a [`LeafKind::Mark`] leaf; the note it carries is what the page
+/// breaker reserves foot space for and what the closing page sets at its foot.
+fn collect_marks(node: &Node, out: &mut Vec<Footnote>) {
+	match node {
+		Node::HBox(b) | Node::VBox(b)	=> for child in &b.list { collect_marks(child, out); },
+		Node::Leaf(l)					=> if let LeafKind::Mark(f) = &l.kind { out.push(f.clone()); },
+		_								=> (),
+	}
+}
+
+/// The height a set of footnotes takes at the foot: the separator furniture, the notes' own stacked
+/// heights, and the gaps between them. Zero when there are none, so a page with no footnote keeps the
+/// whole body height. `existing` are the page's notes already; `extra` are a candidate line's, weighed
+/// in so a line and its own note are judged against the same page together.
+fn foot_reserve(existing: &[Footnote], extra: &[Footnote], foot: &FootStyle) -> Sp {
+	let n = existing.len() + extra.len();
+	if n == 0 {
+		return Sp::ZERO;
+	}
+	let mut h = Sp::ZERO;
+	for f in existing.iter().chain(extra.iter()) {
+		h += f.height;
+	}
+	foot.gap_above_rule + foot.rule_thick + foot.gap_below_rule + h + foot.gap_between * (n as i32 - 1)
+}
+
+/// Sets a page's accumulated footnotes at its foot: a short separator rule, then each note as the small
+/// paragraph it was set into, seated so the whole block's foot meets the bottom of the text block, above
+/// the folio. The block's height is exactly [`foot_reserve`]'s, so the body above it -- placed against a
+/// bottom shrunk by that same amount -- never collides with it.
+#[allow(clippy::too_many_arguments)]
+fn lay_footnotes<M: Metrics>(
+	frame:		&mut Frame,
+	notes:		&[Footnote],
+	page_no:	u32,
+	geom:		PageGeometry,
+	foot:		&FootStyle,
+	bottom:		Sp,
+	metrics:	&M,
+	incoming:	&Ledger,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	if notes.is_empty() {
+		return Ok(());
+	}
+	let total	= foot_reserve(notes, &[], foot);
+	let mut yy	= bottom - total;
+
+	yy += foot.gap_above_rule;
+	frame.push(Placed::new(
+		geom.content_left(), yy, Dims::new(foot.rule_width, foot.rule_thick, Sp::ZERO), PlacedKind::Rule));
+	yy = yy + foot.rule_thick + foot.gap_below_rule;
+
+	for (i, f) in notes.iter().enumerate() {
+		for child in &f.note {
+			match child {
+				Node::HBox(b) => {
+					res!(place_line(b, yy, page_no, geom, metrics, incoming, frame, ledger));
+					yy += b.dims.vextent();
+				},
+				Node::Glue(g) => {
+					yy += g.natural;
+				},
+				_ => (),
+			}
+		}
+		if i + 1 < notes.len() {
+			yy += foot.gap_between;
+		}
+	}
+	Ok(())
 }
 
 /// Lays one horizontal box -- a line -- left to right, placing each child and recording any anchor
@@ -323,6 +470,12 @@ fn place_leaf<M: Metrics>(
 			// Already shaped and measured; place it and advance by its width. The writer reads the run
 			// back out of the frame to draw the glyphs.
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(shaped.clone())));
+			Ok(x + leaf.dims.width)
+		},
+		LeafKind::Mark(footnote) => {
+			// The superscript number is drawn like any run; its raised dims put the baseline above the
+			// line's. The note it carries is set at the page foot by the breaker, not here.
+			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(footnote.mark.clone())));
 			Ok(x + leaf.dims.width)
 		},
 		LeafKind::Reserved(id, refr) => {

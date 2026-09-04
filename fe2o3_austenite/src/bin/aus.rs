@@ -12,6 +12,7 @@ use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
 		Block,
+		Segment,
 		Style,
 	},
 	driver::{
@@ -141,14 +142,20 @@ fn blocks() -> Vec<Block> {
 			without catching. The difficulty is that words have fixed widths and lines do not, so the \
 			spaces between words must stretch or shrink to fill each measure exactly. Done badly, this \
 			leaves rivers of white running down the page; done well, it is invisible."),
-		Block::paragraph(
-			"The mechanism that makes the difference is the treatment of the interword space as an \
-			elastic rather than a constant. Each space is given a natural width, an amount by which it \
-			is willing to stretch, and an amount by which it will shrink under pressure. When a line \
-			is a little too short, every space in it grows by a proportional share of the slack; when \
-			it is a little too long, every space gives up a share. Because the adjustment is spread \
-			evenly across the whole line, no single gap yawns open while its neighbours stay tight, \
-			and the resulting greyness is uniform."),
+		Block::rich(vec![
+			Segment::text(
+				"The mechanism that makes the difference is the treatment of the interword space as an \
+				elastic rather than a constant. Each space is given a natural width, an amount by which it \
+				is willing to stretch, and an amount by which it will shrink under pressure."),
+			Segment::footnote(
+				"The natural width is the font's own space; the engine lets it grow by a half and give up \
+				a third of itself, the elasticity Knuth chose for plain TeX."),
+			Segment::text(
+				" When a line is a little too short, every space in it grows by a proportional share of the \
+				slack; when it is a little too long, every space gives up a share. Because the adjustment \
+				is spread evenly across the whole line, no single gap yawns open while its neighbours stay \
+				tight, and the resulting greyness is uniform."),
+		]),
 		Block::paragraph(
 			"Justification, then, is not a decoration applied after the fact but a consequence of how \
 			the line is built. The engine that sets this document carries the adjustment inside the \
@@ -186,13 +193,20 @@ fn blocks() -> Vec<Block> {
 			fixed height, springs of adjustable space between them, and points at which a break is \
 			permitted or penalised. A page fills until the next line would overflow the text block, \
 			and then it breaks, carrying the remainder to a fresh page."),
-		Block::paragraph(
-			"Some breaks, though legal, are ugly. A heading marooned at the foot of a page, severed \
-			from the paragraph it introduces, is one such fault, and this engine forbids it by binding \
-			each heading to the first line beneath it as a single indivisible unit. Should the two not \
-			fit together at the foot of a page, they move together to the next. The running head above \
-			and the folio below are added last of all, in the margins, where they name the current \
-			section and number the page without disturbing a single line of the text they frame."),
+		Block::rich(vec![
+			Segment::text(
+				"Some breaks, though legal, are ugly. A heading marooned at the foot of a page, severed \
+				from the paragraph it introduces, is one such fault, and this engine forbids it by binding \
+				each heading to the first line beneath it as a single indivisible unit."),
+			Segment::footnote(
+				"This is the widow-and-orphan guard in its simplest form: a heading and its first line are \
+				set inside one unbreakable box, so the greedy breaker moves the pair together."),
+			Segment::text(
+				" Should the two not fit together at the foot of a page, they move together to the next. \
+				The running head above and the folio below are added last of all, in the margins, where \
+				they name the current section and number the page without disturbing a single line of the \
+				text they frame."),
+		]),
 		Block::paragraph(
 			"The vertical breaker in this first increment is deliberately simple. It fills greedily, \
 			taking the first legal break that keeps the page from overflowing, and it does not yet \

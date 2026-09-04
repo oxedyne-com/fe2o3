@@ -184,6 +184,19 @@ impl Penalty {
 	pub fn is_forced(&self) -> bool { self.cost <= Self::EJECT }
 }
 
+/// A footnote: the superscript mark set in the running text, and the note set at the foot of the page
+/// the mark lands on. The number is assigned at author time as a document-order fold, so it is content
+/// order and never a layout query. `note` is the note already set as a small paragraph (the lines and
+/// their leading), prefixed by its own superscript number; `height` is what that stack occupies, which
+/// the page breaker reserves from the body of the page the mark falls on.
+#[derive(Clone, Debug)]
+pub struct Footnote {
+	pub number:	u32,
+	pub mark:	ShapedText,	// the superscript number drawn where the mark falls
+	pub note:	Vec<Node>,	// the note as HBox lines and interline glue, set at the foot measure
+	pub height:	Sp,			// the note's stacked vertical extent, reserved from the body
+}
+
 /// What an atomic box draws. `Reserved` holds open the width a forward reference will need once the
 /// ledger resolves it, which is what lets two passes suffice by construction.
 #[derive(Clone, Debug)]
@@ -191,6 +204,7 @@ pub enum LeafKind {
 	Rule,
 	Reserved(AnchorId, Ref),	// a forward reference: its own identity, and what it resolves to
 	Text(ShapedText),			// a shaped run of real text, drawn as glyph outlines
+	Mark(Footnote),				// a footnote reference mark; its note is set at the page foot
 }
 
 /// An atomic box: intrinsic dimensions, what it draws, and where in the source it came from.
@@ -214,6 +228,19 @@ impl Leaf {
 	pub fn text(shaped: ShapedText) -> Self {
 		let dims = shaped.dims();
 		Self { kind: LeafKind::Text(shaped), dims, span: None }
+	}
+
+	/// A leaf of shaped text with dimensions the caller sets rather than the run's own, so a run can be
+	/// raised or seated within a taller line -- a footnote's superscript number, say.
+	pub fn text_dims(shaped: ShapedText, dims: Dims) -> Self {
+		Self { kind: LeafKind::Text(shaped), dims, span: None }
+	}
+
+	/// A footnote mark. `dims` is the superscript's box, its height reduced so the baseline the emitter
+	/// draws at (`y + height`) sits raised above the surrounding line's baseline, and its width small
+	/// enough that line breaking flows around it as around any narrow box.
+	pub fn mark(footnote: Footnote, dims: Dims) -> Self {
+		Self { kind: LeafKind::Mark(footnote), dims, span: None }
 	}
 
 	pub fn with_span(mut self, span: Span) -> Self {

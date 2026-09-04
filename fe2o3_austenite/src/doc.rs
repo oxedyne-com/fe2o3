@@ -15,11 +15,15 @@
 //! head is TeX's `\mark` reimplemented through the ledger: the section current at the top of a page
 //! is the most recent heading the ledger resolved to an earlier page.
 
-use crate::driver::Document;
+use crate::driver::{
+	Document,
+	FootStyle,
+};
 use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
 	Dims,
+	Footnote,
 	Glue,
 	Leaf,
 	Node,
@@ -32,7 +36,11 @@ use crate::ledger::{
 	Ledger,
 	Ref,
 };
-use crate::linebreak::break_paragraph;
+use crate::linebreak::{
+	break_paragraph,
+	break_paragraph_pieces,
+	Piece,
+};
 use crate::table::{
 	self,
 	Table,
@@ -53,12 +61,31 @@ use oxedyne_fe2o3_font::{
 
 use std::sync::Arc;
 
+/// One run of a rich paragraph: a stretch of text, or a footnote whose mark falls after the run before
+/// it. The note text is set at the foot of the page the mark lands on, and numbered in document order.
+#[derive(Clone, Debug)]
+pub enum Segment {
+	Text(String),
+	Footnote { note: String },
+}
+
+impl Segment {
+	pub fn text<S: Into<String>>(text: S) -> Self {
+		Self::Text(text.into())
+	}
+
+	pub fn footnote<S: Into<String>>(note: S) -> Self {
+		Self::Footnote { note: note.into() }
+	}
+}
+
 /// One block of the authored document. The closed vocabulary the block layer sets; richer blocks
 /// (lists, quotes, figures) are later variants here.
 #[derive(Clone, Debug)]
 pub enum Block {
 	Heading { level: u8, text: String },
 	Paragraph { text: String },
+	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	Table(Table),
 }
 
@@ -69,6 +96,10 @@ impl Block {
 
 	pub fn paragraph<S: Into<String>>(text: S) -> Self {
 		Self::Paragraph { text: text.into() }
+	}
+
+	pub fn rich(segments: Vec<Segment>) -> Self {
+		Self::RichParagraph { segments }
 	}
 
 	pub fn table(table: Table) -> Self {
@@ -88,6 +119,8 @@ pub struct Style {
 	pub h3_size:		Sp,
 	pub header_size:	Sp,	// the running head's size
 	pub folio_size:		Sp,
+	pub foot_size:		Sp,	// the footnote text's size, a touch below the body
+	pub foot_leading:	Sp,	// leading between the wrapped lines of one footnote
 	pub table_skip:		Sp,	// space set above and below a table
 	pub cell_pad_x:		Sp,	// horizontal padding between a cell's text and its column rules
 	pub cell_pad_y:		Sp,	// vertical padding above and below a cell's lines
@@ -107,6 +140,8 @@ impl Default for Style {
 			h3_size:		Sp::from_pt(12.0),
 			header_size:	Sp::from_pt(9.5),
 			folio_size:		Sp::from_pt(10.0),
+			foot_size:		Sp::from_pt(9.0),
+			foot_leading:	Sp::from_pt(10.8),	// 1.2x the footnote size
 			table_skip:		Sp::from_pt(10.0),
 			cell_pad_x:		Sp::from_pt(5.0),
 			cell_pad_y:		Sp::from_pt(3.0),
@@ -171,6 +206,7 @@ pub fn author(
 
 	let mut i		= 0usize;
 	let mut first	= true;
+	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, text } => {
@@ -219,6 +255,17 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::RichParagraph { segments } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no));
+				let lines = res!(break_paragraph_pieces(
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
+				nodes.extend(lines);
+				i += 1;
+				first = false;
+			},
 			Block::Table(t) => {
 				// Space above the table, discarded at a page top like any other leading. The table lowers
 				// to one keep box, so the driver moves it whole to the next page when it will not fit.
@@ -233,7 +280,112 @@ pub fn author(
 		}
 	}
 
-	Ok((Document::new(nodes, geom), heads))
+	let mut document = Document::new(nodes, geom);
+	document.foot = foot_style(style);
+	Ok((document, heads))
+}
+
+/// The foot spacing derived from the block style, so the separator rule and the gaps around the notes
+/// match the document's other furniture. The rule runs a third of the measure, a conventional short
+/// footnote rule.
+fn foot_style(style: Style) -> FootStyle {
+	FootStyle {
+		gap_above_rule:	style.para_skip,
+		rule_thick:		style.rule_thin,
+		rule_width:		Sp(style.body_size.raw() * 12),
+		gap_below_rule:	Sp::from_pt(4.0),
+		gap_between:	Sp::from_pt(3.0),
+	}
+}
+
+/// Turns a rich paragraph's segments into the pieces the line breaker weaves, assigning each footnote
+/// its number from the running fold and setting its note as a small paragraph at the foot measure. A
+/// text segment is a piece as it stands; a footnote segment becomes a superscript mark piece carrying
+/// the set note.
+fn build_pieces(
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style:		Style,
+	segments:	&[Segment],
+	foot_no:	&mut u32,
+)
+	-> Outcome<Vec<Piece>>
+{
+	let measure			= geom.content_width();
+	let mut pieces		= Vec::with_capacity(segments.len());
+	for seg in segments {
+		match seg {
+			Segment::Text(text) => {
+				pieces.push(Piece::Text(text.clone()));
+			},
+			Segment::Footnote { note } => {
+				*foot_no += 1;
+				let label			= fmt!("{}", *foot_no);
+				let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, style.body_size, &label));
+				let footnote		= res!(build_footnote(fonts.clone(), style, measure, *foot_no, note, mark));
+				pieces.push(Piece::Mark(Leaf::mark(footnote, dims)));
+			},
+		}
+	}
+	Ok(pieces)
+}
+
+/// Builds a footnote from its already-shaped body mark and its note text. The note is set as a small
+/// paragraph at the foot measure, prefixed by the number as a hanging superscript, and its stacked
+/// height noted so the page breaker can reserve it.
+fn build_footnote(
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	number:		u32,
+	note:		&str,
+	mark:		ShapedText,
+)
+	-> Outcome<Footnote>
+{
+	let mut lines = res!(break_paragraph(
+		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, note, measure, style.foot_leading));
+
+	// Prefix the note's first line with the number as a small superscript and a thin gap, so the note
+	// reads against its mark. The prefix is shorter than the line, so it does not change the line height.
+	let (pre_shaped, pre_dims) = res!(superscript(fonts.clone(), Role::Body, style.foot_size, &fmt!("{}", number)));
+	if let Some(Node::HBox(b)) = lines.first_mut() {
+		let gap = Sp(style.foot_size.raw() / 4);
+		b.list.insert(0, Node::Glue(Glue::fixed(gap)));
+		b.list.insert(0, Node::Leaf(Leaf::text_dims(pre_shaped, pre_dims)));
+	}
+
+	let mut height = Sp::ZERO;
+	for n in &lines {
+		height += n.vextent();
+	}
+
+	Ok(Footnote { number, mark, note: lines, height })
+}
+
+/// Shapes a short run at `0.7x` the surrounding size and returns it with the box that raises its
+/// baseline. The box height is the surrounding ascent less a raise of a third of that ascent; the
+/// emitter draws a run's baseline at `y + height`, so a shorter box lifts the run above the line's
+/// baseline. The width and depth are the small run's own, keeping the mark narrow.
+fn superscript(
+	fonts:	Arc<FontSet>,
+	role:	Role,
+	base:	Sp,
+	text:	&str,
+)
+	-> Outcome<(ShapedText, Dims)>
+{
+	let small	= Sp(base.raw() * 7 / 10);
+	let shaped	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, small, text));
+	let sd		= shaped.dims();
+
+	// The surrounding line's ascent, taken from a body-size digit, and the raise off its baseline.
+	let sample	= res!(ShapedText::new(fonts, role, Dir::Ltr, base, "0"));
+	let ascent	= sample.dims().height;
+	let raise	= Sp(ascent.raw() * 35 / 100);
+	let height	= if ascent > raise { ascent - raise } else { ascent };
+
+	Ok((shaped, Dims::new(sd.width, height, sd.depth)))
 }
 
 /// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per
