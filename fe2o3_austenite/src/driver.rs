@@ -236,8 +236,14 @@ fn place_line<M: Metrics>(
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, x, y)));
 			},
 			Node::Penalty(_) => {
-				// Line-internal penalties refine Knuth-Plass breaks, which arrive in Phase 1. A
-				// Phase 0 line is pre-broken by its caller, so there is nothing to weigh here.
+				// Line-internal penalties refine Knuth-Plass breaks. A line is still pre-composed by
+				// its caller -- Phase 1 shapes real text but does not yet break paragraphs into lines --
+				// so there is nothing to weigh here.
+				//
+				// TODO (line breaking): the Knuth-Plass breaker goes here. Feed each paragraph's shaped
+				// run and the legal break opportunities from `fe2o3_text::unicode::linebreak`
+				// (`line_breaks` / `break_offsets`) into a total-fit optimiser that minimises the sum of
+				// squared badness, then set each chosen line as its own HBox.
 			},
 			Node::HBox(b) | Node::VBox(b) => {
 				frame.push(Placed::new(x, y, b.dims, PlacedKind::Rule));
@@ -268,6 +274,13 @@ fn place_leaf<M: Metrics>(
 	match &leaf.kind {
 		LeafKind::Rule => {
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Rule));
+			Ok(x + leaf.dims.width)
+		},
+		LeafKind::Text(shaped) => {
+			// The run was already shaped and measured when the leaf was built, so the leaf's own
+			// dimensions are the run's: placing it is recording where it sits and advancing by its
+			// width. The writer reads the run back out of the frame to draw the glyphs.
+			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(shaped.clone())));
 			Ok(x + leaf.dims.width)
 		},
 		LeafKind::Reserved(id) => {

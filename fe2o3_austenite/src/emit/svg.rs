@@ -1,11 +1,14 @@
 //! The SVG page writer.
 //!
-//! The geometry and paint are handed to `fe2o3_graphics`: [`Path::rect`] builds each box, and the
+//! The geometry and paint are handed to `fe2o3_graphics`: [`Path::rect`] builds each box, a glyph's
+//! outline arrives from `fe2o3_font` as a [`Path`] and is placed with [`Path::transform`], and the
 //! crate's own [`write_path_data`] and [`presentation`] render the `d` attribute and the fill or
 //! stroke. This module writes only the element tree around them -- the `<svg>`, `<rect>` and
 //! `<path>` -- which `fe2o3_graphics::svg` deliberately leaves to the caller, because the document
 //! shape above a `<path>` is the caller's format, not that crate's.
 
+use crate::font::ShapedText;
+use crate::ir::Sp;
 use crate::page::{
 	Page,
 	PlacedKind,
@@ -23,6 +26,7 @@ use oxedyne_fe2o3_graphics::{
 		presentation,
 		write_path_data,
 	},
+	transform::Transform,
 };
 
 /// Renders one page as a self-contained SVG document.
@@ -44,6 +48,13 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 		"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
 
 	for placed in &page.frame.placed {
+		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
+		// rectangle.
+		if let PlacedKind::Text(shaped) = &placed.kind {
+			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
+			continue;
+		}
+
 		let x0 = placed.x.to_pt() as f32;
 		let y0 = placed.y.to_pt() as f32;
 		let x1 = (placed.x + placed.dims.width).to_pt() as f32;
@@ -55,15 +66,16 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 		}
 		let path	= res!(Path::rect(Bounds::new(x0, y0, x1, y1)));
 		let d		= write_path_data(&path);
-		let attrs	= match placed.kind {
+		let attrs	= match &placed.kind {
 			PlacedKind::Rule		=> presentation(Some(Rgba::BLACK), None),
 			PlacedKind::Reserved	=> presentation(None, Some((grey, &pen))),
+			PlacedKind::Text(_)		=> continue,	// drawn above
 		};
 		out.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
 	}
 
 	// The folio, as page furniture rather than shaped body text -- the viewer's default face renders
-	// it. Real folios become shaped glyph runs once a font exists in Phase 1.
+	// it. Making it a shaped run like the body is a later tidy, not part of proving the seam.
 	let folio_x = w / 2;
 	let folio_y = h.saturating_sub(page.geom.margin.to_pt() as usize / 2);
 	out.push_str(&fmt!(
@@ -72,4 +84,40 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 
 	out.push_str("</svg>\n");
 	Ok(out)
+}
+
+/// Draws one placed run of shaped text as filled glyph outlines.
+///
+/// The box's top-left is `(bx, by)` and the baseline sits `height` -- the face ascent -- below the
+/// top, so `by + height` is the baseline in device points. A glyph outline arrives in the font's
+/// frame, with its origin at the glyph and y increasing upwards; the page's y increases downwards, so
+/// each outline is flipped in y and moved onto the baseline. The run was shaped at a size in points,
+/// which are the device points the SVG viewport is in, so no scale beyond the flip is needed. Each
+/// glyph's own `x` and `y` offsets from the run origin are added: `x` along the baseline, `y` upward
+/// (which a combining mark uses, and which the flip turns into a subtraction).
+fn draw_text(
+	out:	&mut String,
+	bx:		Sp,
+	by:		Sp,
+	height:	Sp,
+	shaped:	&ShapedText,
+)
+	-> Outcome<()>
+{
+	let base_x	= bx.to_pt() as f32;
+	let base_y	= (by + height).to_pt() as f32;
+	for glyph in &shaped.run().glyphs {
+		let path = res!(shaped.outline(glyph));
+		// A glyph with no ink -- a space -- carries an advance but nothing to fill.
+		if path.is_empty() {
+			continue;
+		}
+		let t = Transform::scale(1.0, -1.0)
+			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
+		let placed = res!(path.transform(&t));
+		out.push_str(&fmt!(
+			"  <path d=\"{}\" {}/>\n",
+			write_path_data(&placed), presentation(Some(Rgba::BLACK), None)));
+	}
+	Ok(())
 }

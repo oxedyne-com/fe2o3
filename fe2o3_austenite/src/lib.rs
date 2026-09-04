@@ -1,10 +1,11 @@
 //! Austenite: a streaming, two-pass typesetting engine.
 //!
-//! This crate is the Phase 0 spine -- a walking skeleton, not a typesetter. It carries a
+//! This crate began as the Phase 0 spine -- a walking skeleton, not a typesetter. It carries a
 //! box/glue/penalty intermediate representation, a jdat ledger of anchors, and a two-pass driver
 //! whose convergence loop is honest about how it terminates. Pages are emitted as SVG through
-//! `fe2o3_graphics`. Real font metrics, Knuth-Plass line breaking, and Pearl output are later
-//! phases, stubbed behind clean seams here.
+//! `fe2o3_graphics`. Phase 1 wires the metric seam to `fe2o3_font`: real text is shaped with
+//! HarfBuzz, measured against a real face, and drawn as glyph outlines (see [`font`]). Knuth-Plass
+//! line breaking and Pearl output remain later phases, stubbed behind clean seams here.
 //!
 //! The design is set out in `doc/Austenite/sec_architecture.typ` and `sec_decisions.typ`. Two
 //! commitments from there shape every type below:
@@ -26,6 +27,7 @@
 
 pub mod driver;
 pub mod emit;
+pub mod font;
 pub mod ir;
 pub mod ledger;
 pub mod page;

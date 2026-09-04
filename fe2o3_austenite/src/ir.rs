@@ -8,6 +8,7 @@
 //! Lengths are [`Sp`], scaled points, per the architecture's reproducibility rule. Floating point
 //! appears only at the output boundary, where a coordinate becomes a device length.
 
+use crate::font::ShapedText;
 use crate::ledger::AnchorId;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -182,14 +183,19 @@ impl Penalty {
 
 /// What an atomic box draws.
 ///
-/// Phase 0 has two leaves. A [`Self::Rule`] is a solid rectangle, which stands in for a shaped line
-/// of text so pagination and emission can be exercised before any font exists. A [`Self::Reserved`]
-/// occupies the width a forward reference will need once the ledger resolves it -- the
-/// width-reservation the architecture relies on so that two passes suffice by construction.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A [`Self::Text`] is a run of real shaped text, drawn as glyph outlines -- the Phase 1 leaf. A
+/// [`Self::Rule`] is a solid rectangle, which stood in for a shaped line before a font existed and
+/// still serves for the rules and boxes that carry no text. A [`Self::Reserved`] occupies the width a
+/// forward reference will need once the ledger resolves it -- the width-reservation the architecture
+/// relies on so that two passes suffice by construction.
+///
+/// `PartialEq` is not derived: a [`ShapedText`] carries a shaped run of floats and a shared font
+/// handle, neither of which compares meaningfully, and nothing in the engine needs a leaf to.
+#[derive(Clone, Debug)]
 pub enum LeafKind {
 	Rule,
 	Reserved(AnchorId),	// a forward reference holding open its own width
+	Text(ShapedText),	// a shaped run of real text, drawn as glyph outlines
 }
 
 /// An atomic box: intrinsic dimensions, what it draws, and where in the source it came from.
@@ -207,6 +213,13 @@ impl Leaf {
 
 	pub fn reserved(id: AnchorId, dims: Dims) -> Self {
 		Self { kind: LeafKind::Reserved(id), dims, span: None }
+	}
+
+	/// A leaf of real shaped text. Its dimensions are the run's own -- the width the shaper measured,
+	/// and the face's height and depth -- so the leaf occupies exactly what its glyphs will draw into.
+	pub fn text(shaped: ShapedText) -> Self {
+		let dims = shaped.dims();
+		Self { kind: LeafKind::Text(shaped), dims, span: None }
 	}
 
 	pub fn with_span(mut self, span: Span) -> Self {
@@ -270,18 +283,18 @@ impl Node {
 
 /// A source of glyph and box metrics.
 ///
-/// This is the seam for real typesetting. Phase 1 implements it over `fe2o3_font`, measuring a run
-/// against an OpenType face with its `hmtx` advances and `GPOS` kerning. Phase 0 has one
-/// implementation, [`StubMetrics`], which gives every character a fixed advance so the driver can be
-/// exercised without a font. The bound is a generic, not a trait object, per the house preference.
+/// This is the seam for real typesetting. Phase 1 implements it over `fe2o3_font` as
+/// [`FontMetrics`](crate::font::FontMetrics), which shapes a run against an OpenType face with
+/// HarfBuzz and sums the shaper's advances. [`StubMetrics`] remains as the fixed-advance
+/// implementation, for exercising the driver without a font. The bound is a generic, not a trait
+/// object, per the house preference.
 pub trait Metrics {
 	fn measure(&self, text: &str) -> Outcome<Dims>;
 }
 
 /// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It measures
-/// nothing real; it exists so the two-pass driver is a walking skeleton and not a diagram.
-///
-/// TODO Phase 1: replace with a `fe2o3_font` face providing real advances, ascent and descent.
+/// nothing real; it exists so the two-pass driver can run without a font, and it stands beside the
+/// real [`FontMetrics`](crate::font::FontMetrics) that Phase 1 wired to `fe2o3_font`.
 #[derive(Clone, Copy, Debug)]
 pub struct StubMetrics {
 	pub em:		Sp,	// advance and body height of one character

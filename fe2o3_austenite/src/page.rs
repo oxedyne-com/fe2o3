@@ -5,6 +5,7 @@
 //! hands the page to a writer, and drops it -- so the engine holds one window of frames plus the
 //! ledger, never the document.
 
+use crate::font::ShapedText;
 use crate::ir::{
 	Dims,
 	Sp,
@@ -60,17 +61,22 @@ impl PageGeometry {
 	}
 }
 
-/// What a placed box draws. A [`Self::Rule`] is a solid mark; a [`Self::Reserved`] is a forward
-/// reference's held-open space, outlined faintly so a proof shows where a value will land.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a placed box draws. A [`Self::Text`] is a shaped run drawn as glyph outlines; a
+/// [`Self::Rule`] is a solid mark; a [`Self::Reserved`] is a forward reference's held-open space,
+/// outlined faintly so a proof shows where a value will land.
+///
+/// Not `Copy` and not `PartialEq`: a [`ShapedText`] owns a shaped run and a shared font handle, which
+/// a placement clones from the leaf that carried it into the frame.
+#[derive(Clone, Debug)]
 pub enum PlacedKind {
 	Rule,
 	Reserved,
+	Text(ShapedText),
 }
 
 /// A box set at an absolute position on a page. The position is the top-left of the box; the
 /// baseline sits `dims.height` below it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Placed {
 	pub x:		Sp,
 	pub y:		Sp,
