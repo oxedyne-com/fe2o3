@@ -1,0 +1,288 @@
+//! The anchor ledger: the one channel through which a layout fact reaches anything.
+//!
+//! Stratification (see `sec_decisions.typ`) forbids user code from observing layout directly. What
+//! it may see is here: a map from an anchor's identity to the page and position it resolved to. The
+//! ledger is filled during composition, is content-addressed by anchor identity, serialises to jdat,
+//! and -- in a later phase -- ships inside the Pearl file so the document is queryable without the
+//! engine.
+//!
+//! Content addressing is what buys incremental compilation and what turns a convergence failure into
+//! a report: two ledgers can be differenced, and the difference names the anchor that moved and the
+//! pages it moved between.
+
+use crate::ir::Sp;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+
+use std::collections::BTreeMap;
+
+/// The kinds of thing that carry an identity a reference can resolve to. This is a closed
+/// vocabulary on purpose: a query class the engine does not know is one it cannot answer, and the
+/// architecture makes that a declared limit rather than a silent gap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AnchorKind {
+	Label,		// \label{...}, the general cross-reference target
+	Heading,	// a section or chapter title, for running heads and the table of contents
+	IndexEntry,	// an index term at the point it occurs
+	Float,		// a figure or table, placed away from its anchor
+	Citation,	// a bibliographic reference
+	Equation,	// a numbered display equation
+}
+
+impl AnchorKind {
+	fn tag(&self) -> u8 {
+		match self {
+			AnchorKind::Label		=> 0,
+			AnchorKind::Heading		=> 1,
+			AnchorKind::IndexEntry	=> 2,
+			AnchorKind::Float		=> 3,
+			AnchorKind::Citation	=> 4,
+			AnchorKind::Equation	=> 5,
+		}
+	}
+
+	fn from_tag(tag: u8) -> Outcome<Self> {
+		match tag {
+			0 => Ok(AnchorKind::Label),
+			1 => Ok(AnchorKind::Heading),
+			2 => Ok(AnchorKind::IndexEntry),
+			3 => Ok(AnchorKind::Float),
+			4 => Ok(AnchorKind::Citation),
+			5 => Ok(AnchorKind::Equation),
+			_ => Err(err!(
+				"Anchor kind tag {} is not one of the six known kinds.", tag; Input, Invalid)),
+		}
+	}
+}
+
+/// An anchor's identity: its kind and a key unique within that kind. Two anchors are the same
+/// anchor exactly when both agree, which is what makes the identity content-addressable rather than
+/// positional -- a label keeps its identity when a paragraph moves it to another page.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AnchorId {
+	pub kind:	AnchorKind,
+	pub key:	String,
+}
+
+impl AnchorId {
+	pub fn new<S: Into<String>>(kind: AnchorKind, key: S) -> Self {
+		Self { kind, key: key.into() }
+	}
+
+	/// A stable 64-bit address for the identity, an FNV-1a hash over the kind and key. This is the
+	/// content address the incremental machinery keys on; the identity itself remains the map key,
+	/// so a collision costs a comparison, never a wrong answer.
+	pub fn address(&self) -> u64 {
+		let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+		let mix = |h: &mut u64, b: u8| {
+			*h ^= b as u64;
+			*h = h.wrapping_mul(0x0000_0100_0000_01b3);
+		};
+		mix(&mut h, self.kind.tag());
+		for b in self.key.as_bytes() {
+			mix(&mut h, *b);
+		}
+		h
+	}
+}
+
+impl ToDat for AnchorId {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(omapdat!{
+			"kind"	=> dat!(self.kind.tag()),
+			"key"	=> dat!(self.key.clone()),
+		})
+	}
+}
+
+impl FromDat for AnchorId {
+	fn from_dat(mut dat: Dat) -> Outcome<Self> {
+		let tag	= try_extract_dat!(res!(dat.map_remove_must(&dat!("kind"))), U8);
+		let key	= try_extract_dat!(res!(dat.map_remove_must(&dat!("key"))), Str);
+		Ok(Self { kind: res!(AnchorKind::from_tag(tag)), key })
+	}
+}
+
+/// Where an anchor resolved: the one-based page, and the position of its top-left on that page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Position {
+	pub page:	u32,
+	pub x:		Sp,
+	pub y:		Sp,
+}
+
+impl Position {
+	pub fn new(page: u32, x: Sp, y: Sp) -> Self {
+		Self { page, x, y }
+	}
+}
+
+/// One resolved anchor. `reserved` is the width a forward reference to it held open before its value
+/// was known; `realised` is the width its value actually took once resolved. When `realised`
+/// exceeds `reserved` the reservation overflowed, the line it sat on may have re-broken, and the
+/// driver owes another pass -- this is the only thing that stops two passes from sufficing.
+#[derive(Clone, Debug)]
+pub struct Anchor {
+	pub id:			AnchorId,
+	pub pos:		Position,
+	pub reserved:	Sp,
+	pub realised:	Sp,
+}
+
+impl Anchor {
+	pub fn new(id: AnchorId, pos: Position) -> Self {
+		Self { id, pos, reserved: Sp::ZERO, realised: Sp::ZERO }
+	}
+
+	/// Did the resolved value outgrow the width held open for it?
+	pub fn overflowed(&self) -> bool {
+		self.realised > self.reserved
+	}
+}
+
+impl ToDat for Anchor {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(omapdat!{
+			"id"		=> res!(self.id.to_dat()),
+			"page"		=> dat!(self.pos.page),
+			"x"			=> res!(self.pos.x.to_dat()),
+			"y"			=> res!(self.pos.y.to_dat()),
+			"reserved"	=> res!(self.reserved.to_dat()),
+			"realised"	=> res!(self.realised.to_dat()),
+		})
+	}
+}
+
+impl FromDat for Anchor {
+	fn from_dat(mut dat: Dat) -> Outcome<Self> {
+		let id			= res!(AnchorId::from_dat(res!(dat.map_remove_must(&dat!("id")))));
+		let page		= try_extract_dat!(res!(dat.map_remove_must(&dat!("page"))), U32);
+		let x			= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("x")))));
+		let y			= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("y")))));
+		let reserved	= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("reserved")))));
+		let realised	= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("realised")))));
+		Ok(Self { id, pos: Position::new(page, x, y), reserved, realised })
+	}
+}
+
+/// One anchor that moved between two ledgers: the identity, and the pages it left and arrived on.
+/// A non-empty diff is exactly the convergence-failure report the architecture promises.
+#[derive(Clone, Debug)]
+pub struct Delta {
+	pub id:		AnchorId,
+	pub from:	u32,
+	pub to:		u32,
+}
+
+/// The whole anchor table for one composition, plus the total page count the last page fixed.
+#[derive(Clone, Debug, Default)]
+pub struct Ledger {
+	entries:			BTreeMap<AnchorId, Anchor>,
+	pub total_pages:	u32,
+}
+
+impl Ledger {
+	pub fn new() -> Self {
+		Self { entries: BTreeMap::new(), total_pages: 0 }
+	}
+
+	/// Records an anchor's placement, replacing any earlier record of the same identity within this
+	/// pass. The last placement wins because a pass overwrites a stale one as it re-lays the stream.
+	pub fn record(&mut self, anchor: Anchor) {
+		self.entries.insert(anchor.id.clone(), anchor);
+	}
+
+	pub fn get(&self, id: &AnchorId) -> Option<&Anchor> {
+		self.entries.get(id)
+	}
+
+	/// The page an anchor resolved to in this ledger, if it is known. A forward reference reads this
+	/// from the previous pass's ledger; when it is absent (the first pass) the caller reserves a
+	/// width and defers.
+	pub fn page_of(&self, id: &AnchorId) -> Option<u32> {
+		self.entries.get(id).map(|a| a.pos.page)
+	}
+
+	pub fn len(&self) -> usize {
+		self.entries.len()
+	}
+
+	pub fn is_empty(&self) -> bool {
+		self.entries.is_empty()
+	}
+
+	/// The anchors whose realised value overflowed the width reserved for it. A non-empty result is
+	/// the honest reason a third pass is needed rather than a hoped-for one.
+	pub fn overflowed(&self) -> Vec<AnchorId> {
+		self.entries.values().filter(|a| a.overflowed()).map(|a| a.id.clone()).collect()
+	}
+
+	/// Every anchor that sits on a different page than it did in `prev`. Ordering by identity makes
+	/// the diff deterministic, so a report reads the same on every machine.
+	pub fn diff(&self, prev: &Ledger) -> Vec<Delta> {
+		let mut out = Vec::new();
+		for (id, anchor) in &self.entries {
+			if let Some(before) = prev.entries.get(id) {
+				if before.pos.page != anchor.pos.page {
+					out.push(Delta { id: id.clone(), from: before.pos.page, to: anchor.pos.page });
+				}
+			}
+		}
+		out
+	}
+
+	/// Has the ledger stopped moving? It is stable against `prev` when the total page count agrees
+	/// and no anchor changed page. Position within a page may still differ without forcing another
+	/// pass, because only a page change can move a forward reference's page number.
+	pub fn is_stable_against(&self, prev: &Ledger) -> bool {
+		self.total_pages == prev.total_pages && self.diff(prev).is_empty()
+	}
+
+	/// Writes the ledger to a file as jdat text.
+	pub fn to_file<P: AsRef<std::path::Path>>(&self, path: P) -> Outcome<()> {
+		let dat	= res!(self.to_dat());
+		let cfg	= oxedyne_fe2o3_jdat::string::enc::EncoderConfig::<(), ()>::default();
+		let s	= res!(dat.encode_string_with_config(&cfg));
+		res!(std::fs::write(path, s));
+		Ok(())
+	}
+
+	/// Reads a ledger back from a jdat file.
+	pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Outcome<Self> {
+		let s	= res!(std::fs::read_to_string(path));
+		let dat	= res!(Dat::decode_string(s));
+		Self::from_dat(dat)
+	}
+}
+
+impl ToDat for Ledger {
+	fn to_dat(&self) -> Outcome<Dat> {
+		let mut anchors = Vec::with_capacity(self.entries.len());
+		for a in self.entries.values() {
+			anchors.push(res!(a.to_dat()));
+		}
+		Ok(omapdat!{
+			"total_pages"	=> dat!(self.total_pages),
+			"anchors"		=> Dat::List(anchors),
+		})
+	}
+}
+
+impl FromDat for Ledger {
+	fn from_dat(mut dat: Dat) -> Outcome<Self> {
+		if dat.kind() != Kind::OrdMap && dat.kind() != Kind::Map {
+			return Err(err!(
+				"A ledger must decode from a jdat map, found a {:?}.", dat.kind();
+				Input, Invalid, Mismatch));
+		}
+		let total_pages	= try_extract_dat!(res!(dat.map_remove_must(&dat!("total_pages"))), U32);
+		let anchors_dat	= try_extract_dat!(res!(dat.map_remove_must(&dat!("anchors"))), List);
+		let mut entries = BTreeMap::new();
+		for d in anchors_dat {
+			let a = res!(Anchor::from_dat(d));
+			entries.insert(a.id.clone(), a);
+		}
+		Ok(Self { entries, total_pages })
+	}
+}

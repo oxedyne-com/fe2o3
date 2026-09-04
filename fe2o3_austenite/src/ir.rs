@@ -1,0 +1,302 @@
+//! The box, glue and penalty intermediate representation.
+//!
+//! This is TeX's model: vertical and horizontal material is a stream of boxes (rigid rectangles),
+//! glue (stretchable, shrinkable space) and penalties (the cost of breaking at a point). Austenite
+//! adds an anchor node, a zero-size marker that records where an identity landed so the ledger can
+//! resolve references to it.
+//!
+//! Lengths are [`Sp`], scaled points, per the architecture's reproducibility rule. Floating point
+//! appears only at the output boundary, where a coordinate becomes a device length.
+
+use crate::ledger::AnchorId;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+
+/// A length in scaled points: one sixty-five-thousand-five-hundred-and-thirty-sixth of a point, as
+/// in TeX. Integer arithmetic makes every break decision exact and every build byte-identical, which
+/// is the whole reason the type is not an `f64`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Sp(pub i32);
+
+impl Sp {
+	pub const ZERO:	Sp	= Sp(0);
+	pub const UNIT:	i32	= 65_536;	// scaled points to the point
+
+	/// Converts a length in points to scaled points, rounding to the nearest unit. This is a
+	/// boundary conversion; once inside the engine a length never leaves the integer domain.
+	pub fn from_pt(pt: f64) -> Self {
+		Sp((pt * Sp::UNIT as f64).round() as i32)
+	}
+
+	/// The length in points, for the output boundary only.
+	pub fn to_pt(self) -> f64 {
+		self.0 as f64 / Sp::UNIT as f64
+	}
+
+	pub fn raw(self) -> i32 { self.0 }
+}
+
+impl std::ops::Add for Sp {
+	type Output = Sp;
+	fn add(self, other: Sp) -> Sp { Sp(self.0.saturating_add(other.0)) }
+}
+
+impl std::ops::Sub for Sp {
+	type Output = Sp;
+	fn sub(self, other: Sp) -> Sp { Sp(self.0.saturating_sub(other.0)) }
+}
+
+impl std::ops::Neg for Sp {
+	type Output = Sp;
+	fn neg(self) -> Sp { Sp(self.0.saturating_neg()) }
+}
+
+impl std::ops::Mul<i32> for Sp {
+	type Output = Sp;
+	fn mul(self, k: i32) -> Sp { Sp(self.0.saturating_mul(k)) }
+}
+
+impl std::ops::AddAssign for Sp {
+	fn add_assign(&mut self, other: Sp) { self.0 = self.0.saturating_add(other.0); }
+}
+
+impl ToDat for Sp {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(dat!(self.0))
+	}
+}
+
+impl FromDat for Sp {
+	fn from_dat(dat: Dat) -> Outcome<Self> {
+		Ok(Sp(try_extract_dat!(dat, I32)))
+	}
+}
+
+/// A span of the source a box came from, in byte offsets, so a diagnostic can quote it. The
+/// architecture makes this universal; Phase 0 carries it but does not yet render carets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+	pub start:	u32,
+	pub end:	u32,
+}
+
+impl Span {
+	pub fn new(start: u32, end: u32) -> Self { Self { start, end } }
+}
+
+/// The three measurements a box occupies, split at the baseline as TeX splits them: `height` reaches
+/// up from the baseline, `depth` hangs below it, and the two sum to the visual extent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dims {
+	pub width:	Sp,
+	pub height:	Sp,
+	pub depth:	Sp,
+}
+
+impl Dims {
+	pub fn new(width: Sp, height: Sp, depth: Sp) -> Self {
+		Self { width, height, depth }
+	}
+
+	/// The vertical extent, height above the baseline plus depth below it, which is what a vertical
+	/// list advances by when it stacks this box.
+	pub fn vextent(&self) -> Sp { self.height + self.depth }
+}
+
+impl ToDat for Dims {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(listdat![
+			res!(self.width.to_dat()),
+			res!(self.height.to_dat()),
+			res!(self.depth.to_dat()),
+		])
+	}
+}
+
+impl FromDat for Dims {
+	fn from_dat(dat: Dat) -> Outcome<Self> {
+		let v = try_extract_dat!(dat, List);
+		if v.len() != 3 {
+			return Err(err!(
+				"Dims expects a list of three scaled lengths, found {}.", v.len();
+				Input, Invalid, Mismatch));
+		}
+		Ok(Self {
+			width:	res!(Sp::from_dat(v[0].clone())),
+			height:	res!(Sp::from_dat(v[1].clone())),
+			depth:	res!(Sp::from_dat(v[2].clone())),
+		})
+	}
+}
+
+/// Space that can grow and shrink. `natural` is the length at rest, `stretch` the amount it will
+/// grow when a line or page is loose, `shrink` the amount it will give up when tight.
+///
+/// Phase 0 is finite glue only. TeX's infinite orders (fil, fill, filll), which centre and fill,
+/// are a Phase 1 addition and belong here as a `stretch_order` beside the amount.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Glue {
+	pub natural:	Sp,
+	pub stretch:	Sp,
+	pub shrink:		Sp,
+}
+
+impl Glue {
+	pub fn fixed(natural: Sp) -> Self {
+		Self { natural, stretch: Sp::ZERO, shrink: Sp::ZERO }
+	}
+
+	pub fn new(natural: Sp, stretch: Sp, shrink: Sp) -> Self {
+		Self { natural, stretch, shrink }
+	}
+}
+
+/// The cost of breaking a line or page at a point, and whether the break is flagged (two flagged
+/// breaks in a row are themselves penalised, which is how TeX avoids two hyphens ending consecutive
+/// lines). A cost of [`Penalty::INFINITY`] forbids a break; [`Penalty::EJECT`] forces one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Penalty {
+	pub cost:		i32,
+	pub flagged:	bool,
+}
+
+impl Penalty {
+	pub const INFINITY:	i32	= 10_000;	// a break here is forbidden
+	pub const EJECT:	i32	= -10_000;	// a break here is forced
+
+	pub fn new(cost: i32, flagged: bool) -> Self {
+		Self { cost, flagged }
+	}
+
+	/// A forced break, which the page breaker must take -- an explicit page break, or the end of a
+	/// chapter.
+	pub fn eject() -> Self { Self { cost: Self::EJECT, flagged: false } }
+
+	/// Is a break at this penalty forbidden?
+	pub fn is_forbidden(&self) -> bool { self.cost >= Self::INFINITY }
+
+	/// Is a break at this penalty forced?
+	pub fn is_forced(&self) -> bool { self.cost <= Self::EJECT }
+}
+
+/// What an atomic box draws.
+///
+/// Phase 0 has two leaves. A [`Self::Rule`] is a solid rectangle, which stands in for a shaped line
+/// of text so pagination and emission can be exercised before any font exists. A [`Self::Reserved`]
+/// occupies the width a forward reference will need once the ledger resolves it -- the
+/// width-reservation the architecture relies on so that two passes suffice by construction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeafKind {
+	Rule,
+	Reserved(AnchorId),	// a forward reference holding open its own width
+}
+
+/// An atomic box: intrinsic dimensions, what it draws, and where in the source it came from.
+#[derive(Clone, Debug)]
+pub struct Leaf {
+	pub kind:	LeafKind,
+	pub dims:	Dims,
+	pub span:	Option<Span>,
+}
+
+impl Leaf {
+	pub fn rule(dims: Dims) -> Self {
+		Self { kind: LeafKind::Rule, dims, span: None }
+	}
+
+	pub fn reserved(id: AnchorId, dims: Dims) -> Self {
+		Self { kind: LeafKind::Reserved(id), dims, span: None }
+	}
+
+	pub fn with_span(mut self, span: Span) -> Self {
+		self.span = Some(span);
+		self
+	}
+}
+
+/// A box holding a list set either horizontally or vertically, with its own resolved dimensions. The
+/// orientation lives in the enclosing [`Node`] variant, not here, because it is the parent's list
+/// direction that decides how these children stack.
+#[derive(Clone, Debug)]
+pub struct BoxNode {
+	pub list:	Vec<Node>,
+	pub dims:	Dims,
+}
+
+impl BoxNode {
+	pub fn new(list: Vec<Node>, dims: Dims) -> Self {
+		Self { list, dims }
+	}
+}
+
+/// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
+#[derive(Clone, Debug)]
+pub enum Node {
+	HBox(BoxNode),		// a list set left to right
+	VBox(BoxNode),		// a list set top to bottom
+	Leaf(Leaf),
+	Glue(Glue),
+	Penalty(Penalty),
+	Anchor(AnchorId),	// a zero-size marker recording where an identity landed
+}
+
+impl Node {
+	/// The amount a vertical list advances when it stacks this node. A box or leaf contributes its
+	/// height plus depth, glue its natural length, and a penalty or anchor nothing -- they mark a
+	/// position without occupying one.
+	pub fn vextent(&self) -> Sp {
+		match self {
+			Node::HBox(b)		=> b.dims.vextent(),
+			Node::VBox(b)		=> b.dims.vextent(),
+			Node::Leaf(l)		=> l.dims.vextent(),
+			Node::Glue(g)		=> g.natural,
+			Node::Penalty(_)	=> Sp::ZERO,
+			Node::Anchor(_)		=> Sp::ZERO,
+		}
+	}
+
+	/// Is this a legal place to break a page? A page may break at glue that follows a non-discardable
+	/// item, and at a penalty that is not forbidden. Phase 0 keeps the rule to those two, which is
+	/// enough to paginate; widow and orphan penalties join it in Phase 2.
+	pub fn is_breakpoint(&self) -> bool {
+		match self {
+			Node::Glue(_)		=> true,
+			Node::Penalty(p)	=> !p.is_forbidden(),
+			_					=> false,
+		}
+	}
+}
+
+/// A source of glyph and box metrics.
+///
+/// This is the seam for real typesetting. Phase 1 implements it over `fe2o3_font`, measuring a run
+/// against an OpenType face with its `hmtx` advances and `GPOS` kerning. Phase 0 has one
+/// implementation, [`StubMetrics`], which gives every character a fixed advance so the driver can be
+/// exercised without a font. The bound is a generic, not a trait object, per the house preference.
+pub trait Metrics {
+	fn measure(&self, text: &str) -> Outcome<Dims>;
+}
+
+/// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It measures
+/// nothing real; it exists so the two-pass driver is a walking skeleton and not a diagram.
+///
+/// TODO Phase 1: replace with a `fe2o3_font` face providing real advances, ascent and descent.
+#[derive(Clone, Copy, Debug)]
+pub struct StubMetrics {
+	pub em:		Sp,	// advance and body height of one character
+	pub depth:	Sp,	// descent below the baseline
+}
+
+impl StubMetrics {
+	pub fn new(em: Sp, depth: Sp) -> Self {
+		Self { em, depth }
+	}
+}
+
+impl Metrics for StubMetrics {
+	fn measure(&self, text: &str) -> Outcome<Dims> {
+		let n = text.chars().count() as i32;
+		Ok(Dims::new(self.em * n, self.em, self.depth))
+	}
+}
