@@ -75,6 +75,13 @@ pub fn break_paragraph(
 pub enum Piece {
 	Text(String),
 	Mark(Leaf),	// a footnote mark, already shaped as a raised superscript (LeafKind::Mark)
+	Math {		// an inline maths box, already flattened to leaves and glue by math::layout
+		nodes:	Vec<Node>,
+		width:	Sp,
+		height:	Sp,	// the line height the box asks for, the surrounding text ascent
+		depth:	Sp,	// how far the box hangs below the baseline
+		over:	Sp,	// how far it climbs above the line, so the line above can open for it
+	},
 }
 
 /// Breaks a segmented paragraph the way [`break_paragraph`] breaks a plain one, but with footnote marks
@@ -108,6 +115,13 @@ pub fn break_paragraph_pieces(
 					kind: Kind::Mark(leaf.clone()), width: leaf.dims.width, stretch: Sp::ZERO,
 					shrink: Sp::ZERO, penalty: Penalty::INFINITY, flagged: false, hyphen: None });
 			},
+			Piece::Math { nodes, width, height, depth, over } => {
+					// A rigid cluster, like a very wide box: it never breaks, and the space after it may.
+					items.push(Item {
+						kind: Kind::Math { nodes: nodes.clone(), height: *height, depth: *depth, over: *over },
+						width: *width, stretch: Sp::ZERO, shrink: Sp::ZERO,
+						penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+				},
 		}
 	}
 	push_finish(&mut items);	// the forced break that ends the paragraph, whatever the last piece was
@@ -129,6 +143,12 @@ enum Kind {
 	Glued,
 	Pen,
 	Mark(Leaf),
+	Math {						// an inline maths box: pre-built leaves and glue, its own extent
+		nodes:	Vec<Node>,
+		height:	Sp,
+		depth:	Sp,
+		over:	Sp,	// how far the box climbs above the line top, for the interline gap above it
+	},
 }
 
 struct Item {
@@ -335,11 +355,13 @@ fn push_word(
 /// breaks unless forbidden; a box never breaks.
 fn is_break(items: &[Item], i: usize) -> bool {
 	match items[i].kind {
-		Kind::Glued		=> i > 0 && matches!(items[i - 1].kind, Kind::Boxed(_) | Kind::Mark(_))
+		Kind::Glued		=> i > 0
+							&& matches!(items[i - 1].kind, Kind::Boxed(_) | Kind::Mark(_) | Kind::Math { .. })
 							&& items[i].penalty < Penalty::INFINITY,
 		Kind::Pen		=> items[i].penalty < Penalty::INFINITY,
 		Kind::Boxed(_)	=> false,
-		Kind::Mark(_)	=> false,	// a mark clings to its word; the space after it may break
+		Kind::Mark(_)	=> false,		// a mark clings to its word; the space after it may break
+		Kind::Math { .. }	=> false,	// a maths box is rigid; the space after it may break
 	}
 }
 
@@ -514,9 +536,12 @@ fn set_lines(
 		sz[i + 1] = sz[i] + items[i].shrink.raw() as i64;
 	}
 
-	let mut out		= Vec::new();
-	let windows		= breaks.windows(2).count();
-	for (li, w) in breaks.windows(2).enumerate() {
+	// Each set line, kept with its own height, depth and overshoot, so the interline glue between two of
+	// them can be sized from the depth of the upper and the height of the lower -- TeX's baselineskip
+	// rule, which a single line's own extent cannot give -- and opened further when the lower line
+	// carries inline maths that climbs above its own top.
+	let mut lines:	Vec<(Node, Sp, Sp, Sp)> = Vec::new();
+	for w in breaks.windows(2) {
 		let a		= w[0];
 		let hi		= w[1] as usize;
 		let lower	= if a < 0 { 0usize } else { a as usize + 1 };
@@ -530,6 +555,7 @@ fn set_lines(
 		let mut children:	Vec<Node> = Vec::new();
 		let mut height		= Sp::ZERO;
 		let mut depth		= Sp::ZERO;
+		let mut over		= Sp::ZERO;	// how far any inline maths on the line climbs above the line top
 		for item in items.iter().take(hi).skip(lower) {
 			match &item.kind {
 				Kind::Boxed(shaped) => {
@@ -545,6 +571,18 @@ fn set_lines(
 					if leaf.dims.height > height { height = leaf.dims.height; }
 					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 					children.push(Node::Leaf(leaf));
+				},
+				Kind::Math { nodes, height: mh, depth: md, over: mo } => {
+					// The cluster's leaves are already seated by shift. It asks for the line's own text
+					// height so its baseline meets the prose; its depth may hang lower, opening the space
+					// below; and its overshoot opens the space above, so a tall fraction clears the line
+					// above rather than climbing into it.
+					if *mh > height { height = *mh; }
+					if *md > depth { depth = *md; }
+					if *mo > over { over = *mo; }
+					for n in nodes {
+						children.push(n.clone());
+					}
 				},
 				Kind::Glued => {
 					// Justification lives in the glue: the natural space plus the ratio's share of its
@@ -572,12 +610,26 @@ fn set_lines(
 		}
 
 		let dims = Dims::new(measure, height, depth);
-		out.push(Node::HBox(BoxNode::new(children, dims)));
+		lines.push((Node::HBox(BoxNode::new(children, dims)), height, depth, over));
+	}
 
-		// Leading between baselines, but not after the final line.
-		if li + 1 < windows {
-			let vextent	= height + depth;
-			let gap		= if leading > vextent { leading - vextent } else { Sp::ZERO };
+	// Assemble the vertical list: each line, then the glue to the next. The glue sets the baselines
+	// `leading` apart when the type is loose enough, and otherwise falls to a minimum so a tall line --
+	// one carrying an inline fraction, say -- opens the space it needs rather than climbing into the
+	// line above. The upper line's depth and the lower line's height are what the gap is measured from,
+	// so a line's own height never has to stand in for its neighbour's.
+	let heights:	Vec<Sp> = lines.iter().map(|l| l.1).collect();
+	let overs:		Vec<Sp> = lines.iter().map(|l| l.3).collect();
+	let count				= lines.len();
+	let mut out = Vec::with_capacity(count * 2);
+	for (i, (node, _height, depth_above, _over)) in lines.into_iter().enumerate() {
+		out.push(node);
+		if i + 1 < count {
+			// The baselineskip glue, never less than the overshoot the lower line needs to clear the one
+			// above; a plain pair of prose lines wants neither, so the gap stays zero as before.
+			let want	= leading - depth_above - heights[i + 1];
+			let mut gap	= if want > Sp::ZERO { want } else { Sp::ZERO };
+			if overs[i + 1] > gap { gap = overs[i + 1]; }
 			out.push(Node::Glue(Glue::fixed(gap)));
 		}
 	}

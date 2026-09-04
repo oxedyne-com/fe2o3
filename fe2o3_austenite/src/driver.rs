@@ -461,6 +461,10 @@ fn place_leaf<M: Metrics>(
 )
 	-> Outcome<Sp>
 {
+	// The leaf's own vertical shift moves its ink off the line's baseline without a nested box -- a
+	// maths script raised, a fraction's numerator lifted and its bar seated on the axis. The x advance
+	// is unaffected, so the horizontal cursor the caller tracks is untouched.
+	let y = y + leaf.shift;
 	match &leaf.kind {
 		LeafKind::Rule => {
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Rule));

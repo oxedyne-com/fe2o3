@@ -41,6 +41,10 @@ use crate::linebreak::{
 	break_paragraph_pieces,
 	Piece,
 };
+use crate::math::{
+	self,
+	Atom,
+};
 use crate::table::{
 	self,
 	Table,
@@ -67,6 +71,7 @@ use std::sync::Arc;
 pub enum Segment {
 	Text(String),
 	Footnote { note: String },
+	Math(Atom),	// an inline maths expression, set within the running line
 }
 
 impl Segment {
@@ -76,6 +81,10 @@ impl Segment {
 
 	pub fn footnote<S: Into<String>>(note: S) -> Self {
 		Self::Footnote { note: note.into() }
+	}
+
+	pub fn math(expr: Atom) -> Self {
+		Self::Math(expr)
 	}
 }
 
@@ -87,6 +96,7 @@ pub enum Block {
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	Table(Table),
+	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
 }
 
 impl Block {
@@ -104,6 +114,12 @@ impl Block {
 
 	pub fn table(table: Table) -> Self {
 		Self::Table(table)
+	}
+
+	/// A display equation set centred on its own line. A numbered one takes the next equation number at
+	/// the right margin and records an [`Equation`](crate::ledger::AnchorKind::Equation) anchor.
+	pub fn equation(expr: Atom, numbered: bool) -> Self {
+		Self::Equation { expr, numbered }
 	}
 }
 
@@ -207,6 +223,7 @@ pub fn author(
 	let mut i		= 0usize;
 	let mut first	= true;
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
+	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, text } => {
@@ -277,6 +294,16 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::Equation { expr, numbered } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				let number = if *numbered { eq_no += 1; Some(eq_no) } else { None };
+				res!(equation(&mut nodes, fonts.clone(), style, measure, expr, number));
+				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				i += 1;
+				first = false;
+			},
 		}
 	}
 
@@ -324,6 +351,26 @@ fn build_pieces(
 				let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, style.body_size, &label));
 				let footnote		= res!(build_footnote(fonts.clone(), style, measure, *foot_no, note, mark));
 				pieces.push(Piece::Mark(Leaf::mark(footnote, dims)));
+			},
+			Segment::Math(expr) => {
+				// The inline box is flattened to leaves and glue by the maths layout; unwrap the HBox it
+				// returns and weave its children into the line, so they draw as real glyphs rather than as
+				// a nested rectangle. The box seats its baseline on the text baseline -- a body ascent
+				// below the line top -- so the line asks for that ascent as its height; anything the maths
+				// reaches above it is the overshoot the line above must open for.
+				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				if let Node::HBox(b) = node {
+					let ascent	= res!(ShapedText::new(
+						fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "0")).dims().height;
+					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
+					pieces.push(Piece::Math {
+						nodes:	b.list,
+						width:	b.dims.width,
+						height:	ascent,
+						depth:	b.dims.depth,
+						over,
+					});
+				}
 			},
 		}
 	}
@@ -386,6 +433,68 @@ fn superscript(
 	let height	= if ascent > raise { ascent - raise } else { ascent };
 
 	Ok((shaped, Dims::new(sd.width, height, sd.depth)))
+}
+
+/// Sets a display equation as a centred line, appended to the vertical list. The maths box is laid
+/// out, its returned HBox unwrapped, and its leaves centred in the measure; a numbered equation gets
+/// its number flush at the right margin and an [`Equation`](crate::ledger::AnchorKind::Equation) anchor
+/// recorded just before the line, so the ledger can later resolve a reference to it. The line's height
+/// and depth take the greater of the maths extent and a body digit, so a short equation still leaves
+/// room for its number.
+fn equation(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	expr:		&Atom,
+	number:		Option<u32>,
+)
+	-> Outcome<()>
+{
+	let node = res!(math::layout(fonts.clone(), &style, expr, true));
+	let (list, dims) = match node {
+		Node::HBox(b)	=> (b.list, b.dims),
+		_				=> return Err(err!(
+			"Maths layout returned a non-HBox node for a display equation."; Bug)),
+	};
+
+	let w		= dims.width;
+	let centre	= if measure > w { Sp((measure.raw() - w.raw()) / 2) } else { Sp::ZERO };
+	let baseline	= dims.height;	// the maths baseline's distance below the line top
+
+	// A body digit fixes the line's minimum height and depth, so the number is never clipped when the
+	// maths sits shallow.
+	let sample	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "0"));
+	let height	= if baseline > sample.dims().height { baseline } else { sample.dims().height };
+	let depth	= if dims.depth > sample.dims().depth { dims.depth } else { sample.dims().depth };
+
+	let mut children:	Vec<Node> = Vec::new();
+	if centre.raw() > 0 {
+		children.push(Node::Glue(Glue::fixed(centre)));
+	}
+	for n in list {
+		children.push(n);
+	}
+	let cursor = centre + w;	// where the maths ends, from the line's left
+
+	if let Some(num) = number {
+		let label	= fmt!("({})", num);
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &label));
+		let nw		= shaped.dims().width;
+		let target	= if measure > nw { measure - nw } else { cursor };
+		if target > cursor {
+			children.push(Node::Glue(Glue::fixed(target - cursor)));
+		}
+		// The number sits on the maths baseline; a zero-height leaf plus the baseline shift seats it there.
+		let leaf = Leaf::text_dims(shaped, Dims::new(nw, Sp::ZERO, Sp::ZERO)).with_shift(baseline);
+		children.push(Node::Leaf(leaf));
+
+		let id = AnchorId::new(AnchorKind::Equation, fmt!("eq-{}", num));
+		nodes.push(Node::Anchor(id));
+	}
+
+	nodes.push(Node::HBox(BoxNode::new(children, Dims::new(measure, height, depth))));
+	Ok(())
 }
 
 /// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per

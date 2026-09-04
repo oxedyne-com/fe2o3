@@ -212,39 +212,48 @@ pub enum LeafKind {
 pub struct Leaf {
 	pub kind:	LeafKind,
 	pub dims:	Dims,
+	pub shift:	Sp,				// downward offset applied at placement; positive lowers, negative raises
 	pub span:	Option<Span>,
 }
 
 impl Leaf {
 	pub fn rule(dims: Dims) -> Self {
-		Self { kind: LeafKind::Rule, dims, span: None }
+		Self { kind: LeafKind::Rule, dims, shift: Sp::ZERO, span: None }
 	}
 
 	pub fn reserved(id: AnchorId, refr: Ref, dims: Dims) -> Self {
-		Self { kind: LeafKind::Reserved(id, refr), dims, span: None }
+		Self { kind: LeafKind::Reserved(id, refr), dims, shift: Sp::ZERO, span: None }
 	}
 
 	/// A leaf of real shaped text, taking its dimensions from the run.
 	pub fn text(shaped: ShapedText) -> Self {
 		let dims = shaped.dims();
-		Self { kind: LeafKind::Text(shaped), dims, span: None }
+		Self { kind: LeafKind::Text(shaped), dims, shift: Sp::ZERO, span: None }
 	}
 
 	/// A leaf of shaped text with dimensions the caller sets rather than the run's own, so a run can be
 	/// raised or seated within a taller line -- a footnote's superscript number, say.
 	pub fn text_dims(shaped: ShapedText, dims: Dims) -> Self {
-		Self { kind: LeafKind::Text(shaped), dims, span: None }
+		Self { kind: LeafKind::Text(shaped), dims, shift: Sp::ZERO, span: None }
 	}
 
 	/// A footnote mark. `dims` is the superscript's box, its height reduced so the baseline the emitter
 	/// draws at (`y + height`) sits raised above the surrounding line's baseline, and its width small
 	/// enough that line breaking flows around it as around any narrow box.
 	pub fn mark(footnote: Footnote, dims: Dims) -> Self {
-		Self { kind: LeafKind::Mark(footnote), dims, span: None }
+		Self { kind: LeafKind::Mark(footnote), dims, shift: Sp::ZERO, span: None }
 	}
 
 	pub fn with_span(mut self, span: Span) -> Self {
 		self.span = Some(span);
+		self
+	}
+
+	/// Sets the vertical shift applied when the leaf is placed, so a glyph run or a rule can sit above
+	/// or below its line's baseline without a nested box. Maths uses this to stack a fraction's parts
+	/// and to raise a script; a positive shift lowers the leaf, a negative one raises it.
+	pub fn with_shift(mut self, shift: Sp) -> Self {
+		self.shift = shift;
 		self
 	}
 }
