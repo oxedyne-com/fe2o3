@@ -23,12 +23,14 @@ use crate::ir::{
 	Glue,
 	Leaf,
 	Node,
+	Penalty,
 	Sp,
 };
 use crate::ledger::{
 	AnchorId,
 	AnchorKind,
 	Ledger,
+	Ref,
 };
 use crate::linebreak::break_paragraph;
 use crate::page::{
@@ -200,6 +202,83 @@ pub fn author(
 	}
 
 	Ok((Document::new(nodes, geom), heads))
+}
+
+/// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per
+/// heading -- the title on the left, indented by its level, and its page on the right. The page is a
+/// forward reference resolved with [`Ref::PageOf`] against the incoming ledger, so it reuses the same
+/// reserve-then-resolve slot the driver already runs for any forward reference. The caller prepends
+/// these nodes to the document; a trailing forced break starts the body on a fresh page.
+///
+/// A fact a reader could not derive. Each entry reserves a fixed slot for its page number -- three
+/// digits wide, so a resolved folio never outgrows it -- and its line height is the title's, whatever
+/// the number turns out to be. The contents block therefore has a constant vertical extent from the
+/// first pass, so the body it displaces settles once and the forward references converge in the usual
+/// two passes, with no special case in the driver. The number is set left-aligned within its slot;
+/// true flush-right within the slot, and a dotted rather than a blank leader, are later refinements,
+/// as is a title too wide to sit on one line with its page.
+pub fn contents(
+	fonts:	Arc<FontSet>,
+	geom:	PageGeometry,
+	style:	Style,
+	heads:	&[Heading],
+)
+	-> Outcome<Vec<Node>>
+{
+	let measure			= geom.content_width();
+	let mut nodes:	Vec<Node> = Vec::new();
+
+	// The block's own heading, set bold like a section but recorded as no anchor -- so it is neither a
+	// running-head section nor an entry in its own list.
+	let title	= res!(ShapedText::new(fonts.clone(), Role::Bold, Dir::Ltr, style.h2_size, "Contents"));
+	let td		= title.dims();
+	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
+	nodes.push(Node::Glue(Glue::fixed(style.space_below(2))));
+
+	// A fixed slot wide enough for a three-digit folio, so a resolved number never overflows its
+	// reservation and every entry keeps a constant height across passes.
+	let slot	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "000"));
+	let slot_w	= slot.dims().width;
+
+	for (i, h) in heads.iter().enumerate() {
+		let indent	= style.body_size * (h.level.saturating_sub(1) as i32);
+		let entry	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.title));
+		let ed		= entry.dims();
+
+		// The leader is the blank span from the title to the slot at the right edge; the slot's right
+		// edge falls on the measure. A title too wide to leave a one-em minimum keeps that minimum and
+		// runs under its page -- the over-wide case, left to a later refinement.
+		let min_lead	= style.body_size;
+		let taken		= indent + ed.width + slot_w;
+		let leader_w	= if measure > taken + min_lead { measure - taken } else { min_lead };
+
+		// The entry's own identity, distinct from the heading it points at, so recording the slot never
+		// overwrites the heading's ledger row. Its reference resolves the heading's page.
+		let toc_id		= AnchorId::new(AnchorKind::Label, fmt!("toc-{}", h.id.key));
+		let slot_dims	= Dims::new(slot_w, ed.height, ed.depth);
+
+		let mut children:	Vec<Node> = Vec::new();
+		if indent.raw() > 0 {
+			children.push(Node::Glue(Glue::fixed(indent)));
+		}
+		children.push(Node::Leaf(Leaf::text(entry)));
+		children.push(Node::Glue(Glue::fixed(leader_w)));
+		children.push(Node::Leaf(Leaf::reserved(toc_id, Ref::PageOf(h.id.clone()), slot_dims)));
+
+		let line_dims = Dims::new(measure, ed.height, ed.depth);
+		nodes.push(Node::HBox(BoxNode::new(children, line_dims)));
+
+		// Leading between entries, but not after the last.
+		if i + 1 < heads.len() {
+			let vextent	= ed.height + ed.depth;
+			let gap		= if style.leading > vextent { style.leading - vextent } else { Sp::ZERO };
+			nodes.push(Node::Glue(Glue::fixed(gap)));
+		}
+	}
+
+	// The contents stands alone at the front; the body opens on a fresh page.
+	nodes.push(Node::Penalty(Penalty::eject()));
+	Ok(nodes)
 }
 
 /// Wraps a vertical run of nodes as a keep box, its extent the sum of its children's, so the driver

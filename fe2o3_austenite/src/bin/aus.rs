@@ -61,6 +61,13 @@ fn main() -> Outcome<()> {
 	let style	= Style::default();
 
 	let (mut document, heads) = res!(doc::author(fonts.clone(), geom, style, &blocks()));
+
+	// A table of contents at the very front: page 1 lists each section title against its resolved page,
+	// the body follows on page 2. Prepended before the run, so its height is part of the vertical list
+	// the driver converges -- the folios it prints are the very ones its own length helped fix.
+	let toc = res!(doc::contents(fonts.clone(), geom, style, &heads));
+	document.nodes.splice(0..0, toc);
+
 	res!(append_colophon(&mut document, fonts.clone(), style));
 
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
