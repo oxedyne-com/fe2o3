@@ -17,7 +17,8 @@ strong and /this/ is emphasised while the arithmetic and the dates are left alon
 This short account follows the sheet from the materials that preceded it,
 through its invention and the closely guarded craft of its manufacture, to the
 question that preoccupies conservators today: how to keep the paper of the
-industrial age from destroying itself.
+industrial age from destroying itself. The invention itself is told on page
+#ref(<invention>).page, and the whole account runs to #total-pages() pages.
 
 Before paper, the surfaces people wrote on each had a fatal drawback:
 
@@ -53,7 +54,7 @@ was waiting for, without quite knowing it, was a writing surface that could be
 manufactured in quantity from cheap and renewable materials, and manufactured by
 anyone who learned the craft.
 
-== The Invention in the East
+== The Invention in the East <invention>
 
 That surface was invented in China. Tradition credits the court official Cai Lun
 with the innovation around the year 105, though archaeology now shows that crude

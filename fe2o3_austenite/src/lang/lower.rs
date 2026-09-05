@@ -22,7 +22,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
 		match item {
-			Item::Heading { level, text, .. }	=> out.push(Block::heading(*level, text.clone())),
+			Item::Heading { level, text, label, .. }	=> out.push(
+				Block::heading_labelled(*level, text.clone(), label.clone())),
 			Item::Paragraph { runs, .. }		=> out.push(lower_paragraph(runs)),
 			Item::List { ordered, items, .. }	=> out.push(Block::list(
 				*ordered,
@@ -47,5 +48,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Text(text)		=> Segment::text(text.clone()),
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
+		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
+		Inline::TotalPages		=> Segment::total_pages(),
 	}
 }

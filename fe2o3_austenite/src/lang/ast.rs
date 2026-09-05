@@ -11,16 +11,18 @@ use crate::ir::Span;
 /// `Span` model already reserves it, so the front end records it from the first increment.
 #[derive(Clone, Debug)]
 pub enum Item {
-	Heading { level: u8, text: String, span: Span },
+	Heading { level: u8, text: String, label: Option<String>, span: Span },	// label: a trailing <name>
 	Paragraph { runs: Vec<Inline>, span: Span },
 	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
 }
 
-/// One inline run of a paragraph: ordinary prose, or a run marked for emphasis. Nesting -- an emphasis
-/// inside another -- is a later increment, so a run's text is flat.
+/// One inline run of a paragraph: ordinary prose, a run marked for emphasis, or a cross-reference.
+/// Nesting -- an emphasis inside another -- is a later increment, so a run's text is flat.
 #[derive(Clone, Debug)]
 pub enum Inline {
 	Text(String),
 	Strong(String),	// *strong*, lowered to a bold segment
 	Emph(String),	// /emph/, lowered to an italic segment
+	PageRef(String),	// #ref(<label>).page, resolving to the labelled anchor's page number
+	TotalPages,		// #total-pages(), resolving to the document's page count
 }

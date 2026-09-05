@@ -76,6 +76,8 @@ pub enum Segment {
 	Emph(String),	// set in the italic face
 	Footnote { note: String },
 	Math(Atom),	// an inline maths expression, set within the running line
+	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
+	TotalPages,		// the document's own page count, the "M" in "page N of M"
 }
 
 impl Segment {
@@ -98,13 +100,21 @@ impl Segment {
 	pub fn math(expr: Atom) -> Self {
 		Self::Math(expr)
 	}
+
+	pub fn page_ref<S: Into<String>>(label: S) -> Self {
+		Self::PageRef(label.into())
+	}
+
+	pub fn total_pages() -> Self {
+		Self::TotalPages
+	}
 }
 
 /// One block of the authored document. The closed vocabulary the block layer sets; richer blocks
 /// (lists, quotes, figures) are later variants here.
 #[derive(Clone, Debug)]
 pub enum Block {
-	Heading { level: u8, text: String },
+	Heading { level: u8, text: String, label: Option<String> },	// label: an author anchor a `#ref` resolves to
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
@@ -115,7 +125,12 @@ pub enum Block {
 
 impl Block {
 	pub fn heading<S: Into<String>>(level: u8, text: S) -> Self {
-		Self::Heading { level, text: text.into() }
+		Self::Heading { level, text: text.into(), label: None }
+	}
+
+	/// A heading carrying an author label, so a `#ref(<label>)` elsewhere resolves to its page.
+	pub fn heading_labelled<S: Into<String>>(level: u8, text: S, label: Option<String>) -> Self {
+		Self::Heading { level, text: text.into(), label }
 	}
 
 	pub fn paragraph<S: Into<String>>(text: S) -> Self {
@@ -253,11 +268,12 @@ pub fn author(
 	let mut i		= 0usize;
 	let mut first	= true;
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
+	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
 	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the figures
 	while i < blocks.len() {
 		match &blocks[i] {
-			Block::Heading { level, text } => {
+			Block::Heading { level, text, label } => {
 				// Space above the heading. At a page top the driver discards it, so the first heading on a
 				// page still sits flush to the text block.
 				if !first {
@@ -275,7 +291,14 @@ pub fn author(
 				// The heading, its space below, and the first line of the paragraph it introduces are set
 				// as one box: an atomic unit the greedy page breaker moves whole, so a heading is never the
 				// last thing on a page. When no paragraph follows, the box is the heading alone.
-				let mut keep	= vec![Node::Anchor(id), hbox, Node::Glue(Glue::fixed(style.space_below(*level)))];
+				let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
+				// An author label rides the same position as the heading, so a `#ref(<label>)` resolves to
+				// the heading's page. It is a second anchor at one point, not a second heading.
+				if let Some(l) = label {
+					keep.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.clone())));
+				}
+				keep.push(hbox);
+				keep.push(Node::Glue(Glue::fixed(style.space_below(*level))));
 				let mut rest:	Vec<Node> = Vec::new();
 				if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
 					let mut lines = res!(break_paragraph(
@@ -307,7 +330,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no));
+				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
 				nodes.extend(lines);
@@ -318,7 +341,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no));
+				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no));
 				i += 1;
 				first = false;
 			},
@@ -377,15 +400,17 @@ fn foot_style(style: Style) -> FootStyle {
 }
 
 /// Turns a rich paragraph's segments into the pieces the line breaker weaves, assigning each footnote
-/// its number from the running fold and setting its note as a small paragraph at the foot measure. A
-/// text segment is a piece as it stands; a footnote segment becomes a superscript mark piece carrying
-/// the set note.
+/// its number from the running fold and setting its note as a small paragraph at the foot measure, and
+/// each cross-reference a reserved inline slot the driver resolves in pass B. A text segment is a piece
+/// as it stands; a footnote becomes a superscript mark piece carrying the set note; a page reference or
+/// a total-pages call becomes a shrink-to-fit reserved leaf, unique by the running `ref_no`.
 fn build_pieces(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
 	style:		Style,
 	segments:	&[Segment],
 	foot_no:	&mut u32,
+	ref_no:		&mut u32,
 )
 	-> Outcome<Vec<Piece>>
 {
@@ -429,9 +454,35 @@ fn build_pieces(
 					});
 				}
 			},
+			Segment::PageRef(label) => {
+				pieces.push(Piece::Mark(res!(ref_slot(
+					fonts.clone(), style, ref_no,
+					Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone()))))));
+			},
+			Segment::TotalPages => {
+				pieces.push(Piece::Mark(res!(ref_slot(fonts.clone(), style, ref_no, Ref::TotalPages))));
+			},
 		}
 	}
 	Ok(pieces)
+}
+
+/// Builds one inline cross-reference: a reserved leaf, unique by the running `ref_no`, that reserves a
+/// three-digit slot and shrinks to the value the driver resolves for `refr` in pass B. It seats on the
+/// body baseline, taking a body digit's height and depth so it aligns with the prose around it.
+fn ref_slot(
+	fonts:	Arc<FontSet>,
+	style:	Style,
+	ref_no:	&mut u32,
+	refr:	Ref,
+)
+	-> Outcome<Leaf>
+{
+	*ref_no += 1;
+	let own		= AnchorId::new(AnchorKind::Label, fmt!("ref-{}", *ref_no));
+	let slot	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, style.body_size, "000"));
+	let sd		= slot.dims();
+	Ok(Leaf::reserved_inline(own, refr, Dims::new(sd.width, sd.height, sd.depth)))
 }
 
 /// Sets a bullet or numbered list into the vertical list. Each item is broken at a measure reduced by
@@ -451,6 +502,7 @@ fn list(
 	ordered:	bool,
 	items:		&[Vec<Segment>],
 	foot_no:	&mut u32,
+	ref_no:		&mut u32,
 )
 	-> Outcome<()>
 {
@@ -470,7 +522,7 @@ fn list(
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);

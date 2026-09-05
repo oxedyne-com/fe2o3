@@ -59,15 +59,21 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			flush_para(&mut items, &mut lines, para_start, para_end);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
-			let title = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
-			if title.is_empty() {
+			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
+			if raw.is_empty() {
 				return Err(err!(
 					"Empty heading on line {}: a `=` marker must be followed by a title.", line_no;
 					Input, Invalid, Missing));
 			}
+			let (title, label) = split_label(raw);
+			if title.is_empty() {
+				return Err(err!(
+					"Heading on line {} has a label but no title.", line_no; Input, Invalid, Missing));
+			}
 			items.push(Item::Heading {
 				level:	level as u8,
-				text:	title.to_string(),
+				text:	title,
+				label,
 				span:	Span::new(start, end),
 			});
 		} else if let Some((ord, text)) = marker(trimmed) {
@@ -177,6 +183,16 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 	let mut i				= 0usize;
 	while i < n {
 		let c = chars[i];
+		if c == '#' {
+			if let Some((inline, next)) = reference(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(inline);
+				i = next;
+				continue;
+			}
+		}
 		if (c == '*' || c == '/') && is_opener(&chars, i) {
 			if let Some(close) = find_closer(&chars, i + 1, c) {
 				if !plain.is_empty() {
@@ -231,4 +247,55 @@ fn is_closer(chars: &[char], j: usize) -> bool {
 /// closes -- in which case the opener is ordinary text.
 fn find_closer(chars: &[char], start: usize, delim: char) -> Option<usize> {
 	(start..chars.len()).find(|&j| chars[j] == delim && is_closer(chars, j))
+}
+
+/// Reads a `#`-sigil inline at `i`: `#total-pages()` or `#ref(<label>).page`, returning the inline and
+/// the index just past it. A `#` that opens neither is left to the caller as an ordinary character, so a
+/// stray hash in prose is literal. A label runs to the first `>` and carries no whitespace.
+fn reference(chars: &[char], i: usize) -> Option<(Inline, usize)> {
+	if let Some(next) = at(chars, i, "#total-pages()") {
+		return Some((Inline::TotalPages, next));
+	}
+	let open = at(chars, i, "#ref(<")?;
+	let mut j = open;
+	while j < chars.len() && chars[j] != '>' {
+		j += 1;
+	}
+	if j >= chars.len() {
+		return None;	// no closing '>'
+	}
+	let label: String = chars[open..j].iter().collect();
+	let tail = at(chars, j + 1, ").page")?;	// past '>' and the mandatory ).page
+	if label.is_empty() || label.contains(char::is_whitespace) {
+		return None;
+	}
+	Some((Inline::PageRef(label), tail))
+}
+
+/// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
+fn at(chars: &[char], i: usize, s: &str) -> Option<usize> {
+	let mut k = i;
+	for ch in s.chars() {
+		if chars.get(k) != Some(&ch) {
+			return None;
+		}
+		k += 1;
+	}
+	Some(k)
+}
+
+/// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
+/// labels the heading and is removed from its text. A title that merely contains angle brackets, or a
+/// `< >` with a space inside, keeps them as ordinary characters.
+fn split_label(title: &str) -> (String, Option<String>) {
+	let t = title.trim_end();
+	if let Some(inner) = t.strip_suffix('>') {
+		if let Some(p) = inner.rfind('<') {
+			let label = &inner[p + 1..];
+			if !label.is_empty() && !label.contains(char::is_whitespace) {
+				return (inner[..p].trim_end().to_string(), Some(label.to_string()));
+			}
+		}
+	}
+	(t.to_string(), None)
 }

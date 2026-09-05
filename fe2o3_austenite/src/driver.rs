@@ -487,12 +487,12 @@ fn place_leaf<M: Metrics>(
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Graphic(g.clone())));
 			Ok(x + leaf.dims.width)
 		},
-		LeafKind::Reserved(id, refr) => {
+		LeafKind::Reserved(id, refr, hold) => {
 			// A forward reference. What it resolves to is the reference's own business (a total count, a
 			// cross-referenced page); the driver only asks the previous pass's ledger for the value and
 			// holds the declared width open until it has one.
 			let reserved = leaf.dims.width;
-			let realised = match refr.resolve(incoming) {
+			let (realised, resolved) = match refr.resolve(incoming) {
 				Some(value) => {
 					// The previous pass fixed the value. Shape it as real text when a font backs the
 					// metric, or keep the reservation box under the fontless stub; either way its realised
@@ -503,11 +503,11 @@ fn place_leaf<M: Metrics>(
 							let w		= shaped.dims().width;
 							let dims	= Dims::new(w, leaf.dims.height, leaf.dims.depth);
 							frame.push(Placed::new(x, y, dims, PlacedKind::Text(shaped)));
-							w
+							(w, true)
 						},
 						None => {
 							frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Reserved));
-							res!(metrics.measure(&text)).width
+							(res!(metrics.measure(&text)).width, true)
 						},
 					}
 				},
@@ -515,14 +515,21 @@ fn place_leaf<M: Metrics>(
 					// Pass A: no value yet. Hold the reservation open and realise nothing, so no overflow
 					// is charged before there is a value that could exceed the width.
 					frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Reserved));
-					Sp::ZERO
+					(Sp::ZERO, false)
 				},
 			};
 
-			// The slot never shrinks below the reservation, so following material stays put while the
-			// value fits; a value wider than its reservation grows the slot and shifts what follows,
-			// which is the honest cause of a further pass, recorded as the anchor's overflow.
-			let slot = if realised > reserved { realised } else { reserved };
+			// A value wider than its reservation always grows the slot -- the honest cause of a further
+			// pass, charged as the anchor's overflow. Within the reservation, furniture (`hold`) keeps the
+			// declared width so a right-aligned column stays put, while an inline reference shrinks to the
+			// resolved value so it reads without a gap; a still-unresolved slot keeps its reservation.
+			let slot = if realised > reserved {
+				realised
+			} else if *hold || !resolved {
+				reserved
+			} else {
+				realised
+			};
 			let mut anchor = Anchor::new(id.clone(), Position::new(page_no, x, y));
 			anchor.reserved = reserved;
 			anchor.realised = realised;

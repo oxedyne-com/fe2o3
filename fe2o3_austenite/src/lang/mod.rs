@@ -6,9 +6,10 @@
 //! increment can grow the surface language -- richer parse, same lowering seam -- without disturbing
 //! the block layer beneath it.
 //!
-//! The markup spine is headings, paragraphs and inline emphasis (`*strong*`, `/emph/`). The `#` code
-//! mode and the declared-query references of `sec_language` are later increments, so this front end
-//! still treats `#` as an ordinary literal character.
+//! The markup spine is headings, paragraphs, inline emphasis (`*strong*`, `/emph/`), bullet and
+//! numbered lists, and the declared cross-references `#ref(<label>).page` and `#total-pages()` -- a
+//! heading is labelled with a trailing `<name>`. The general `#` code mode of `sec_language` is a later
+//! increment, so a `#` that opens neither reference form is an ordinary literal character.
 
 pub mod ast;
 pub mod lower;
