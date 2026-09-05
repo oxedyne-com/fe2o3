@@ -20,10 +20,16 @@ use oxedyne_fe2o3_austenite::{
 		self,
 		Config,
 	},
-	emit::Emitter,
+	emit::{
+		self,
+		Emitter,
+	},
 	font::FontMetrics,
 	lang,
-	page::PageGeometry,
+	page::{
+		Frame,
+		PageGeometry,
+	},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -32,6 +38,8 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 
+use std::fs::File;
+use std::io::BufWriter;
 use std::sync::Arc;
 
 fn main() -> Outcome<()> {
@@ -85,20 +93,30 @@ fn main() -> Outcome<()> {
 	}
 
 	res!(std::fs::create_dir_all(&out_dir));
-	let emitter = Emitter::Svg;
-	for page in &out.pages {
-		let svg		= res!(emitter.render(page));
-		let path	= fmt!("{}/page-{:03}.{}", out_dir, page.number, emitter.extension());
-		res!(std::fs::write(&path, svg));
-	}
 
+	// The ledger is small and independent of the pages, so it is written first and out of the way.
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
 	res!(out.ledger.to_file(&ledger_path));
 
-	// The whole run as one PDF beside the per-page SVGs: the same placed frames and glyph outlines,
-	// emitted as fill operators rather than <path> elements.
-	let pdf = res!(oxedyne_fe2o3_austenite::emit::pdf::render_document(&out.pages));
-	res!(std::fs::write(fmt!("{}/document.pdf", out_dir), pdf));
+	// Emit each page and drop its frame before the next. Both writers are streaming: the SVG is one file
+	// per page, and the PDF is written object by object into the file as each page is composed, never
+	// accumulated. Holding one page's glyph outlines at a time -- rather than every page's at once, as a
+	// buffered whole-document PDF would -- is what keeps a whole-book compile flat in memory. The bytes
+	// are identical to the buffered path; only the peak memory differs.
+	let emitter		= Emitter::Svg;
+	let pdf_file	= res!(File::create(fmt!("{}/document.pdf", out_dir)));
+	let mut pdf		= res!(emit::pdf::open_document(BufWriter::new(pdf_file), out.pages.len()));
+	for page in &mut out.pages {
+		let svg		= res!(emitter.render(page));
+		let path	= fmt!("{}/page-{:03}.{}", out_dir, page.number, emitter.extension());
+		res!(std::fs::write(&path, svg));
+
+		res!(emit::pdf::write_page(&mut pdf, page));
+
+		// The page is written; free its frame so the next page's outlines are the only ones live.
+		page.frame = Frame::new();
+	}
+	res!(pdf.finish());
 
 	println!(
 		"ingot: {} -> {} page(s) in {} pass(es); {} anchor(s) in the ledger; written to {}/",

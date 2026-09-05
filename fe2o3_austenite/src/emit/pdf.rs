@@ -21,6 +21,8 @@ use crate::page::{
 	PlacedKind,
 };
 
+use std::io::Write;
+
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
 	colour::Rgba,
@@ -30,18 +32,39 @@ use oxedyne_fe2o3_graphics::{
 	},
 	pdf::{
 		PdfPage,
+		PdfStream,
 		PdfWriter,
 	},
 	transform::Transform,
 };
 
-/// Renders a whole document -- every page -- as one PDF file.
+/// Renders a whole document -- every page -- as one PDF file, held in a buffer. A convenience for a
+/// short run; a whole book streams to a file with [`stream_document`] instead, which never holds more
+/// than one page's outlines. The bytes are the same either way.
 pub fn render_document(pages: &[Page]) -> Outcome<Vec<u8>> {
 	let mut writer = PdfWriter::new();
 	for page in pages {
 		writer.add_page(res!(render_page(page)));
 	}
 	writer.to_bytes()
+}
+
+/// Opens a page-at-a-time PDF stream over `out`, for a document of exactly `total` pages.
+///
+/// This is the streaming half of the emitter, and the reason a whole-book compile is flat in memory:
+/// the caller composes one page, calls [`write_page`] to serialise it to `out`, then drops the page's
+/// frame, so neither the engine nor the writer ever holds every page's glyph outlines at once. Close
+/// the stream with [`PdfStream::finish`] once all `total` pages are written. Compression is off, as
+/// [`render_document`] leaves it, so the two produce identical bytes.
+pub fn open_document<W: Write>(out: W, total: usize) -> Outcome<PdfStream<W>> {
+	PdfStream::new(out, total, false)
+}
+
+/// Renders one page's frame to the open PDF stream. The page's outlines live only for this call: the
+/// [`PdfPage`] built here is written and dropped before returning, so the caller may drop the page's
+/// frame the moment this returns.
+pub fn write_page<W: Write>(stream: &mut PdfStream<W>, page: &Page) -> Outcome<()> {
+	stream.page(&res!(render_page(page)))
 }
 
 /// Builds one page's draw list: a white ground, then each placed box as a fill or a stroke.
