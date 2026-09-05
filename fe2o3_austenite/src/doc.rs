@@ -29,6 +29,7 @@ use crate::ir::{
 	Glue,
 	Graphic,
 	Leaf,
+	LeafKind,
 	Length,
 	Node,
 	Penalty,
@@ -55,6 +56,7 @@ use crate::table::{
 	Table,
 };
 use crate::page::{
+	Frame,
 	Page,
 	PageGeometry,
 	Placed,
@@ -365,10 +367,11 @@ impl Style {
 /// title back from an anchor -- the ledger stores only the identity, not the words.
 #[derive(Clone, Debug)]
 pub struct Heading {
-	pub id:		AnchorId,
-	pub level:	u8,
-	pub title:	String,
-	pub number:	String,	// the dotted number a numbered heading shows ("2.3.1"); empty for a part divider
+	pub id:			AnchorId,
+	pub level:		u8,
+	pub title:		String,	// the display words, markup removed, for the anchor slug and a plain fallback
+	pub segments:	Vec<Segment>,	// the title's rich runs, so a running head or contents entry renders its maths and emphasis
+	pub number:		String,	// the dotted number a numbered heading shows ("2.3.1"); empty for a part divider
 }
 
 /// The book's front matter, read from the root's template call: the title, subtitle and author the
@@ -456,7 +459,13 @@ pub fn author(
 				// rich runs below, so a glossary term or emphasis in a heading renders rather than leaking.
 				let title = flatten_segments(segments);
 				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(&title)));
-				heads.push(Heading { id: id.clone(), level: *level, title: title.clone(), number: number.clone() });
+				heads.push(Heading {
+					id:			id.clone(),
+					level:		*level,
+					title:		title.clone(),
+					segments:	segments.clone(),
+					number:		number.clone(),
+				});
 
 				// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
 				// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
@@ -632,7 +641,13 @@ pub fn author(
 				// folio centres; a heading anchor lists it in the contents. Both sit at the page top.
 				nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Citation, slug(title))));
 				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(title)));
-				heads.push(Heading { id: id.clone(), level: 0, title: title.clone(), number: String::new() });
+				heads.push(Heading {
+				id:			id.clone(),
+				level:		0,
+				title:		title.clone(),
+				segments:	vec![Segment::text(title.clone())],
+				number:		String::new(),
+			});
 				nodes.push(Node::Anchor(id));
 				// The title left in the display face at the chapter-title size (the template's
 				// glossary-index-title size, equal to it in these books' scales).
@@ -1822,8 +1837,9 @@ pub fn contents(
 			let n = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number));
 			n.dims().width
 		};
-		let entry	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.title));
-		let ed		= entry.dims();
+		// The entry's title set from its rich runs, so a maths span or emphasis in a heading renders here
+		// rather than dropping to a gap. The height is the sample's, constant across passes.
+		let (entry, ed)	= res!(inline_segments(&fonts, style, &h.segments, Role::Body, style.body_size));
 
 		// The leader span from the title's end to the folio slot; a title too wide to leave a one-em
 		// minimum keeps that minimum and runs under its folio -- the over-wide case, left as it falls.
@@ -1856,7 +1872,7 @@ pub fn contents(
 				ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number)))));
 			children.push(Node::Glue(Glue::fixed(gap)));
 		}
-		children.push(Node::Leaf(Leaf::text(entry)));
+		children.extend(entry);
 		children.push(Node::Glue(Glue::fixed(lead_margin)));
 		children.push(Node::Leaf(Leaf::text(dots)));
 		if trailing.raw() > 0 {
@@ -1951,6 +1967,82 @@ fn flatten_segments(segments: &[Segment]) -> String {
 		}
 	}
 	out
+}
+
+/// Sets a title's rich runs into one horizontal line at `size` in `role`, so a running head or a
+/// table-of-contents entry renders the title's maths, emphasis and glossary term rather than flattening
+/// them to plain words or dropping the maths to a gap. Every run seats on a common baseline taken from a
+/// full-size sample; a maths span is set at `size` and its glyphs woven into the line as the body sets
+/// inline maths. A cross-reference, footnote or citation in a title has no form here and is dropped. The
+/// returned dims carry the line's total width and the sample's ascent and depth, so a caller lays it out
+/// with a constant height whatever the runs turn out to be.
+fn inline_segments(
+	fonts:		&Arc<FontSet>,
+	style:		Style,
+	segments:	&[Segment],
+	role:		Role,
+	size:		Sp,
+)
+	-> Outcome<(Vec<Node>, Dims)>
+{
+	let sample	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, "Ag"));
+	let asc		= sample.dims().height;
+	let dep		= sample.dims().depth;
+	let italic	= role == Role::Italic;
+
+	let mut children:	Vec<Node> = Vec::new();
+	let mut width		= Sp::ZERO;
+	for seg in segments {
+		// A maths span is unwrapped and its leaves woven straight into the line; every other run resolves to
+		// a text string set in a face chosen against the base role, so an emphasis in an italic running head
+		// toggles upright as Typst sets it.
+		let (text, r): (&str, Role) = match seg {
+			Segment::Text(t)	=> (t, role),
+			Segment::Strong(t)	=> (t, if italic { Role::BoldItalic } else { Role::Bold }),
+			Segment::Emph(t)	=> (t, if italic { Role::Body } else { Role::Italic }),
+			Segment::Super(t)	=> (t, role),
+			Segment::Code(t)	=> (t, Role::Mono),
+			Segment::Glossary { display, .. }	=> (display, role),
+			Segment::Math(atom)	=> {
+				let mut hs = style;
+				hs.body_size = size;
+				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
+					width += b.dims.width;
+					children.extend(b.list);
+				}
+				continue;
+			},
+			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_)	=> continue,
+		};
+		let sh	= res!(ShapedText::new(fonts.clone(), r, Dir::Ltr, size, text));
+		let w	= sh.dims().width;
+		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+		width += w;
+	}
+	Ok((children, Dims::new(width, asc, dep)))
+}
+
+/// Places a horizontal run of leaves (a rich running head from [`inline_segments`]) into a page frame,
+/// starting at `x0` with `top` the run's box top. It mirrors the driver's own line placement: a text or
+/// graphic leaf lands at the running x plus its own shift, glue advances the cursor, and a reserved or
+/// rule leaf -- neither of which a heading run holds -- is skipped.
+fn place_run(frame: &mut Frame, nodes: &[Node], x0: Sp, top: Sp) {
+	let mut x = x0;
+	for n in nodes {
+		match n {
+			Node::Leaf(l) => {
+				let y = top + l.shift;
+				match &l.kind {
+					LeafKind::Text(sh)		=> frame.push(Placed::new(x, y, l.dims, PlacedKind::Text(sh.clone()))),
+					LeafKind::Graphic(g)	=> frame.push(Placed::new(x, y, l.dims, PlacedKind::Graphic(g.clone()))),
+					_						=> {},
+				}
+				x += l.dims.width;
+			},
+			Node::Glue(g)	=> x += g.natural,
+			_				=> {},
+		}
+	}
 }
 
 /// A filesystem-safe key from a heading's words: lowercase, runs of non-alphanumerics collapsed to a
@@ -2325,13 +2417,13 @@ pub fn decorate(
 		// The chapter running at the top of this page (the most recent level-1 heading resolved to an
 		// earlier page), whether a chapter opens at the very top of this one, and whether a part divider
 		// does -- a part page carries no folio at all.
-		let mut chapter:	Option<&str>	= None;
+		let mut chapter:	Option<&Heading>	= None;
 		let mut opens					= false;
 		let mut opens_part				= false;
 		for h in heads {
 			if let Some(a) = ledger.get(&h.id) {
 				if a.pos.page < page.number {
-					if h.level == 1 { chapter = Some(&h.title); }
+					if h.level == 1 { chapter = Some(h); }
 				} else if a.pos.page == page.number {
 					if a.pos.y == content_top {
 						if h.level == 1 { opens = true; }	// a chapter opens at the very top
@@ -2374,18 +2466,20 @@ pub fn decorate(
 		};
 		page.frame.push(Placed::new(folio_x, head_base - fd.height, fd, PlacedKind::Text(folio)));
 
-		// The title side: the book title on a verso page, the chapter title on a recto, both italic and
-		// set against the folio at the opposite edge.
-		let title	= if page.number % 2 == 0 { book_title } else { chapter.unwrap_or("") };
-		if !title.is_empty() {
-			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.header_size, title));
-			let d		= shaped.dims();
-			let x		= if page.number % 2 == 0 {
-				content_left + content_width - d.width	// verso: title at the inner (spine) edge
-			} else {
-				content_left								// recto: title at the inner (spine) edge
-			};
-			page.frame.push(Placed::new(x, head_base - d.height, d, PlacedKind::Text(shaped)));
+		// The title side: the book title on a verso page, set against the folio at the inner edge; the
+		// chapter title on a recto, set from its rich runs so a maths span or emphasis in the title renders
+		// rather than dropping to a gap. Both italic.
+		if page.number % 2 == 0 {
+			if !book_title.is_empty() {
+				let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.header_size, book_title));
+				let d		= shaped.dims();
+				let x		= content_left + content_width - d.width;	// verso: title at the inner (spine) edge
+				page.frame.push(Placed::new(x, head_base - d.height, d, PlacedKind::Text(shaped)));
+			}
+		} else if let Some(ch) = chapter {
+			let (rnodes, rd) = res!(inline_segments(fonts, style, &ch.segments, Role::Italic, style.header_size));
+			// Recto: title at the inner (spine) edge, its box top a full ascent above the head baseline.
+			place_run(&mut page.frame, &rnodes, content_left, head_base - rd.height);
 		}
 	}
 	Ok(())
