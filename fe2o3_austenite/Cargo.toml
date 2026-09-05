@@ -16,6 +16,10 @@ path = "src/bin/aus.rs"
 name = "ingot"
 path = "src/bin/ingot.rs"
 
+[[bin]]
+name = "diagram_demo"
+path = "src/bin/diagram_demo.rs"
+
 [dependencies]
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
