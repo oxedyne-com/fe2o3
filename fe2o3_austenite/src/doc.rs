@@ -546,7 +546,7 @@ pub fn author(
 				}
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
 				nodes.extend(lines);
 				i += 1;
 				first = false;
@@ -563,7 +563,7 @@ pub fn author(
 				pieces.extend(res!(build_pieces(
 					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib, &refs)));
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
 				nodes.extend(lines);
 				i += 1;
 				first = false;
@@ -959,7 +959,7 @@ fn list(
 		}
 		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
-			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
+			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading, true));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
 		nodes.extend(lines);
 	}
@@ -2007,7 +2007,7 @@ fn reference_block(
 		pieces.push(Piece::Text { text: text.clone(), role });
 	}
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading));
+		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading, true));
 
 	// Indent every line but the first by the hang, so the entry hangs under its first line.
 	let mut first = true;

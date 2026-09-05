@@ -1165,9 +1165,13 @@ fn parse_let_array(buf: &str) -> Vec<Vec<Inline>> {
 }
 
 /// Collects every `[...]` group in `inner`, in order, each parsed into its inline runs. A `[` inside a
-/// string is not a cell. Once a group opens, its whole content is one cell and is not descended into, so
-/// a `table.cell(colspan: n)[...]` wrapper contributes its single bracketed content as one cell (the span
-/// is not yet modelled, so the cell sits in one column).
+/// string is not a cell. Once a group opens, its whole content is one cell and is not descended into.
+///
+/// A `table.cell(colspan: n)[...]` wrapper is expanded to `n` grid cells: the bracketed content, then
+/// `n - 1` empty span placeholders. A spanning cell consumes several columns in Typst, so without the
+/// placeholders every cell after it slides one column to the left and the last column overruns the
+/// table; the placeholders keep the flat cell stream aligned to the column grid. A bare `table.cell(...)`
+/// (no `colspan`) is one cell, like a plain `[...]`.
 fn collect_cells(inner: &str) -> Vec<Vec<Inline>> {
 	let chars:	Vec<char>	= inner.chars().collect();
 	let mut cells			= Vec::new();
@@ -1188,6 +1192,32 @@ fn collect_cells(inner: &str) -> Vec<Vec<Inline>> {
 			i += 1;
 			continue;
 		}
+		// A `table.cell(args)[content]` wrapper: read the args for a `colspan`, then take the following
+		// `[...]` as the content and emit it across that many columns.
+		if let Some(after) = at_lit(&chars, i, "table.cell") {
+			if chars.get(after) == Some(&'(') {
+				if let Some((args, past_args)) = read_group(&chars, after) {
+					let span	= cell_colspan(&args);
+					let mut j	= past_args;
+					while j < chars.len() && chars[j].is_whitespace() {
+						j += 1;
+					}
+					if chars.get(j) == Some(&'[') {
+						if let Some((content, next)) = read_group(&chars, j) {
+							cells.push(parse_inlines(&content));
+							for _ in 1..span {
+								cells.push(vec![Inline::Text(String::new())]);
+							}
+							i = next;
+							continue;
+						}
+					}
+					// No content group followed the wrapper; step past its args and carry on.
+					i = past_args;
+					continue;
+				}
+			}
+		}
 		if c == '[' {
 			if let Some((content, next)) = read_group(&chars, i) {
 				cells.push(parse_inlines(&content));
@@ -1198,6 +1228,21 @@ fn collect_cells(inner: &str) -> Vec<Vec<Inline>> {
 		i += 1;
 	}
 	cells
+}
+
+/// The `colspan:` of a `table.cell(...)` argument list, at least one. A missing or unreadable `colspan`
+/// is a single column.
+fn cell_colspan(args: &str) -> usize {
+	for arg in split_top_args(args) {
+		if let Some((key, val)) = named_arg(arg.trim()) {
+			if key == "colspan" {
+				if let Ok(n) = val.trim().parse::<usize>() {
+					return n.max(1);
+				}
+			}
+		}
+	}
+	1
 }
 
 /// Parses the inner text of a `#table(...)` call into a [`TableSpec`]. `columns:` fixes the column

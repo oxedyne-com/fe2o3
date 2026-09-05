@@ -477,7 +477,10 @@ fn break_cell(
 	if pieces.is_empty() {
 		return Ok(Vec::new());
 	}
-	let nodes = res!(break_paragraph_pieces(fonts, base, Dir::Ltr, size, pieces, colwidth, leading));
+	// A cell is set ragged (`justify = false`): every space keeps its natural width, so the band's own
+	// justification to the table width -- for which the cells would otherwise hold the only stretchable
+	// glue -- cannot stretch or collapse the words within a cell. Typst sets table cells left-aligned.
+	let nodes = res!(break_paragraph_pieces(fonts, base, Dir::Ltr, size, pieces, colwidth, leading, false));
 	let mut out = Vec::new();
 	for n in nodes {
 		if let Node::HBox(b) = n {

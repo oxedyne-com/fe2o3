@@ -64,8 +64,8 @@ pub fn break_paragraph(
 	if items.is_empty() {
 		return Ok(Vec::new());
 	}
-	let breaks	= optimal_breaks(&items, measure);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading));
+	let breaks	= optimal_breaks(&items, measure, true);
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, true));
 	Ok(lines)
 }
 
@@ -91,6 +91,10 @@ pub enum Piece {
 /// rigid superscript box that never breaks and that the following space may break after. The result is
 /// the same vertical list of HBox lines, so the driver sets it with no special case -- and a paragraph
 /// of a single text piece produces exactly what [`break_paragraph`] would.
+///
+/// `justify` fills each line to the measure by adjusting its interword glue, the body's set; `false`
+/// sets the lines ragged right, each space at its natural width -- what a table cell wants, so the
+/// band's own justification to the table width cannot stretch or collapse the words within a cell.
 pub fn break_paragraph_pieces(
 	fonts:		Arc<FontSet>,
 	role:		Role,
@@ -99,6 +103,7 @@ pub fn break_paragraph_pieces(
 	pieces:		&[Piece],
 	measure:	Sp,
 	leading:	Sp,
+	justify:	bool,
 )
 	-> Outcome<Vec<Node>>
 {
@@ -133,8 +138,8 @@ pub fn break_paragraph_pieces(
 	if items.is_empty() {
 		return Ok(Vec::new());
 	}
-	let breaks	= optimal_breaks(&items, measure);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading));
+	let breaks	= optimal_breaks(&items, measure, justify);
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, justify));
 	Ok(lines)
 }
 
@@ -431,7 +436,7 @@ fn demerits(r: f64, pen: i32, flagged: bool, after_flagged: bool) -> f64 {
 /// within tolerance -- a word wider than the measure, say -- and the break is forced or the active
 /// set would empty, the least-bad predecessor is taken anyway, so the program never dead-ends and
 /// the line is simply set overfull.
-fn optimal_breaks(items: &[Item], measure: Sp) -> Vec<isize> {
+fn optimal_breaks(items: &[Item], measure: Sp, justify: bool) -> Vec<isize> {
 	let n		= items.len();
 	let target	= measure.raw() as f64;
 
@@ -465,7 +470,10 @@ fn optimal_breaks(items: &[Item], measure: Sp) -> Vec<isize> {
 			let lower	= if a < 0 { 0usize } else { a as usize + 1 };
 			let l		= line_len(items, &sw, lower, b);
 			let y		= (sy[b] - sy[lower]) as f64;
-			let z		= (sz[b] - sz[lower]) as f64;
+			// A ragged set never shrinks a space to fit: with no shrink capacity, a line naturally wider
+			// than the measure is infeasible, so the breaker takes an earlier break rather than letting the
+			// line overrun -- what a table cell wants, where an overrun would cross its column rule.
+			let z		= if justify { (sz[b] - sz[lower]) as f64 } else { 0.0 };
 			let r		= ratio(target, l, y, z);
 			let d		= demerits(r, pen, flagged_b, flagged_at(items, a));
 			let total	= nodes[ni].total + d;
@@ -525,6 +533,7 @@ fn set_lines(
 	breaks:		&[isize],
 	measure:	Sp,
 	leading:	Sp,
+	justify:	bool,
 )
 	-> Outcome<Vec<Node>>
 {
@@ -590,9 +599,11 @@ fn set_lines(
 				},
 				Kind::Glued => {
 					// Justification lives in the glue: the natural space plus the ratio's share of its
-					// elasticity, so the driver's plain left-to-right pass fills the measure.
+					// elasticity, so the driver's plain left-to-right pass fills the measure. A ragged set
+					// (a cell), or the natural-spaced last line of a paragraph, keeps the space at its
+					// natural width.
 					let nat = item.width;
-					let adj = if forced {
+					let adj = if !justify || forced {
 						nat
 					} else if r >= 0.0 {
 						Sp(nat.raw() + (r * item.stretch.raw() as f64).round() as i32)
