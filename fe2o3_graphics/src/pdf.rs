@@ -26,7 +26,16 @@ use crate::path::{
 	Seg,
 };
 
+use std::io::Write;
+
 use oxedyne_fe2o3_core::prelude::*;
+
+// The FNV-1a parameters the file's deterministic `/ID` is folded with: two bases give the two hash
+// halves, and the one prime multiplies each step. Kept as constants so the streaming writer can fold
+// the body as it goes rather than hashing a whole buffer at the end.
+const FNV_BASIS_A:	u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_BASIS_B:	u64 = 0x8422_2325_cbf2_9ce4;
+const FNV_PRIME:	u64 = 0x0000_0100_0000_01b3;
 
 /// One drawn shape: a path and how it is painted. Fill and stroke are the two the typesetter needs --
 /// glyphs and rules fill, a held-open reservation strokes.
@@ -107,41 +116,66 @@ impl PdfWriter {
 
 	/// Renders the whole document to PDF bytes.
 	///
-	/// The body is built into one buffer while the byte offset of every object is recorded, so the
-	/// cross-reference table can name each object's exact position. The trailer's `/ID` is a hash of
-	/// that body, so two runs over the same pages agree to the byte.
+	/// A convenience over [`PdfStream`]: it streams the accumulated pages into an in-memory buffer and
+	/// returns it. The bytes are exactly those [`PdfStream`] writes page by page, so a caller that
+	/// cannot hold the whole document keeps the identical file by streaming to a file handle instead.
 	pub fn to_bytes(&self) -> Outcome<Vec<u8>> {
-		let n = self.pages.len();
-		// Object 1 is the catalogue, 2 the page tree, then a page object and a content stream for each
-		// page: page i takes 3 + 2i and 4 + 2i.
-		let obj_count = 2 + 2 * n;
-		let mut buf: Vec<u8> = Vec::new();
-		let mut offsets: Vec<usize> = vec![0; obj_count + 1]; // one-based; [0] is the free object
+		let mut stream = res!(PdfStream::new(Vec::new(), self.pages.len(), self.compress));
+		for page in &self.pages {
+			res!(stream.page(page));
+		}
+		Ok(res!(stream.finish()))
+	}
+}
 
-		buf.extend_from_slice(b"%PDF-1.7\n");
+/// A PDF writer that emits one page at a time to any [`Write`] sink, holding no more than the page in
+/// hand. Where [`PdfWriter`] accumulates every page's outline paths and then serialises them into one
+/// buffer -- three live copies of the whole document at the peak -- this writes each page's objects
+/// the moment it is handed over and lets the caller drop the page, so a book of any length costs one
+/// page of memory. The bytes are identical to [`PdfWriter::to_bytes`]: the same object numbering, the
+/// same body order, the same content-derived `/ID`.
+///
+/// The page count is fixed at construction because the page-tree object -- written first, before any
+/// page -- names every page object and their count. The deterministic `/ID` is a hash of the body,
+/// folded here as each byte is written rather than over a finished buffer, so no buffer is needed.
+pub struct PdfStream<W: Write> {
+	out:		W,
+	compress:	bool,
+	n:			usize,			// the fixed page count, named by the page tree
+	offsets:	Vec<usize>,		// one-based object byte offsets; [0] is the free object
+	pos:		usize,			// bytes of body written so far, the next object's offset
+	added:		usize,			// pages handed over so far
+	hash_a:		u64,			// running FNV-1a of the body, first `/ID` half
+	hash_b:		u64,			// running FNV-1a of the body, second half
+}
+
+impl<W: Write> PdfStream<W> {
+	/// Opens a stream for a document of exactly `n` pages, writing the header, catalogue and page tree
+	/// at once. `compress` zlib-compresses each content stream, matching [`PdfWriter::with_compression`].
+	pub fn new(out: W, n: usize, compress: bool) -> Outcome<Self> {
+		let obj_count = 2 + 2 * n;
+		let mut s = Self {
+			out,
+			compress,
+			n,
+			offsets:	vec![0; obj_count + 1],
+			pos:		0,
+			added:		0,
+			hash_a:		FNV_BASIS_A,
+			hash_b:		FNV_BASIS_B,
+		};
+
+		res!(s.body(b"%PDF-1.7\n"));
 		// A comment of high bytes tells a naive tool the file is binary, so it is not mangled in
 		// transit. Four bytes above 127, as the specification suggests.
-		buf.extend_from_slice(b"%\xE2\xE3\xCF\xD3\n");
-
-		// The content streams are built first, since a stream's `/Length` must be known before its
-		// object is written.
-		let mut streams: Vec<Vec<u8>> = Vec::with_capacity(n);
-		for page in &self.pages {
-			let raw = content_stream(page).into_bytes();
-			let bytes = if self.compress {
-				res!(deflate(&raw))
-			} else {
-				raw
-			};
-			streams.push(bytes);
-		}
+		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
 
 		// The catalogue.
-		offsets[1] = buf.len();
-		buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+		s.offsets[1] = s.pos;
+		res!(s.body(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n"));
 
-		// The page tree.
-		offsets[2] = buf.len();
+		// The page tree, naming every page object up front, which is why `n` is fixed here.
+		s.offsets[2] = s.pos;
 		let mut kids = String::new();
 		for i in 0..n {
 			if i > 0 {
@@ -149,48 +183,93 @@ impl PdfWriter {
 			}
 			kids.push_str(&fmt!("{} 0 R", 3 + 2 * i));
 		}
-		buf.extend_from_slice(fmt!(
-			"2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n", kids, n).as_bytes());
+		let tree = fmt!("2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n", kids, n);
+		res!(s.body(tree.as_bytes()));
 
-		// Each page, then its content stream.
-		for i in 0..n {
-			let page	= &self.pages[i];
-			let page_obj	= 3 + 2 * i;
-			let content_obj	= 4 + 2 * i;
+		Ok(s)
+	}
 
-			offsets[page_obj] = buf.len();
-			buf.extend_from_slice(fmt!(
-				"{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] {} \
-					/Contents {} 0 R >>\nendobj\n",
-				page_obj, numf(page.width), numf(page.height), resources(page), content_obj,
-			).as_bytes());
-
-			offsets[content_obj] = buf.len();
-			let filter = if self.compress { " /Filter /FlateDecode" } else { "" };
-			buf.extend_from_slice(fmt!(
-				"{} 0 obj\n<< /Length {}{} >>\nstream\n",
-				content_obj, streams[i].len(), filter).as_bytes());
-			buf.extend_from_slice(&streams[i]);
-			buf.extend_from_slice(b"\nendstream\nendobj\n");
+	/// Writes the next page -- its page object and its content stream -- then advances. The page must
+	/// be the next of the `n` promised at construction; an extra page is a mismatch the file could not
+	/// name, so it is refused rather than written past the page tree.
+	pub fn page(&mut self, page: &PdfPage) -> Outcome<()> {
+		if self.added >= self.n {
+			return Err(err!(
+				"A PdfStream opened for {} page(s) was handed a further page; the page tree cannot \
+				name it.", self.n; Input, Invalid, Excessive));
 		}
+		let i			= self.added;
+		let page_obj	= 3 + 2 * i;
+		let content_obj	= 4 + 2 * i;
 
-		// The identifier is derived from the body already written, never from the clock.
-		let id = doc_id(&buf);
+		// The content stream, built now so its `/Length` is known before the object that wraps it.
+		let raw = content_stream(page).into_bytes();
+		let bytes = if self.compress {
+			res!(deflate(&raw))
+		} else {
+			raw
+		};
 
-		// The cross-reference table. Every entry is exactly twenty bytes: a ten-digit offset, a
-		// five-digit generation, the type, and a two-byte end.
-		let xref_off = buf.len();
-		buf.extend_from_slice(fmt!("xref\n0 {}\n", obj_count + 1).as_bytes());
-		buf.extend_from_slice(b"0000000000 65535 f\r\n");
+		self.offsets[page_obj] = self.pos;
+		let head = fmt!(
+			"{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] {} \
+				/Contents {} 0 R >>\nendobj\n",
+			page_obj, numf(page.width), numf(page.height), resources(page), content_obj);
+		res!(self.body(head.as_bytes()));
+
+		self.offsets[content_obj] = self.pos;
+		let filter = if self.compress { " /Filter /FlateDecode" } else { "" };
+		let open = fmt!(
+			"{} 0 obj\n<< /Length {}{} >>\nstream\n", content_obj, bytes.len(), filter);
+		res!(self.body(open.as_bytes()));
+		res!(self.body(&bytes));
+		res!(self.body(b"\nendstream\nendobj\n"));
+
+		self.added += 1;
+		Ok(())
+	}
+
+	/// Closes the file: writes the cross-reference table and the trailer, flushes, and returns the sink.
+	/// The `/ID` is the body hash folded as the body was written, so the file matches
+	/// [`PdfWriter::to_bytes`] to the byte.
+	pub fn finish(mut self) -> Outcome<W> {
+		let obj_count = 2 + 2 * self.n;
+
+		// The identifier is derived from the body already written, never from the clock. The two halves
+		// were folded byte by byte as the body streamed out.
+		let id = fmt!("{:016x}{:016x}", self.hash_a, self.hash_b);
+
+		// The cross-reference table and trailer sit after the body and are not part of the hash, so they
+		// are written straight to the sink without folding. Every entry is exactly twenty bytes: a
+		// ten-digit offset, a five-digit generation, the type, and a two-byte end.
+		let xref_off = self.pos;
+		let mut tail = String::new();
+		tail.push_str(&fmt!("xref\n0 {}\n", obj_count + 1));
+		tail.push_str("0000000000 65535 f\r\n");
 		for k in 1..=obj_count {
-			buf.extend_from_slice(fmt!("{:010} 00000 n\r\n", offsets[k]).as_bytes());
+			tail.push_str(&fmt!("{:010} 00000 n\r\n", self.offsets[k]));
 		}
-
-		buf.extend_from_slice(fmt!(
+		tail.push_str(&fmt!(
 			"trailer\n<< /Size {} /Root 1 0 R /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
-			obj_count + 1, id, id, xref_off).as_bytes());
+			obj_count + 1, id, id, xref_off));
+		res!(self.out.write_all(tail.as_bytes()));
+		res!(self.out.flush());
+		Ok(self.out)
+	}
 
-		Ok(buf)
+	/// Writes a run of body bytes: out to the sink, on to the running offset, and folded into both
+	/// halves of the deterministic `/ID`. Only the body passes through here; the xref and trailer, which
+	/// the hash excludes, are written directly.
+	fn body(&mut self, bytes: &[u8]) -> Outcome<()> {
+		res!(self.out.write_all(bytes));
+		self.pos += bytes.len();
+		for &b in bytes {
+			self.hash_a ^= b as u64;
+			self.hash_a = self.hash_a.wrapping_mul(FNV_PRIME);
+			self.hash_b ^= b as u64;
+			self.hash_b = self.hash_b.wrapping_mul(FNV_PRIME);
+		}
+		Ok(())
 	}
 }
 
@@ -342,26 +421,6 @@ fn numf(v: f64) -> String {
 
 fn numf32(v: f32) -> String {
 	fmt!("{}", v)
-}
-
-/// A deterministic identifier for the file, thirty-two hex digits from two FNV-1a hashes of the body.
-///
-/// A `/ID` conventionally identifies a file, and a fresh file's two elements are equal. Deriving it
-/// from the content rather than a clock or a random source keeps the whole file byte-deterministic.
-fn doc_id(bytes: &[u8]) -> String {
-	let a = fnv1a_64(bytes, 0xcbf2_9ce4_8422_2325);
-	let b = fnv1a_64(bytes, 0x8422_2325_cbf2_9ce4);
-	fmt!("{:016x}{:016x}", a, b)
-}
-
-/// FNV-1a over the bytes, from a given basis.
-fn fnv1a_64(bytes: &[u8], basis: u64) -> u64 {
-	let mut h = basis;
-	for &b in bytes {
-		h ^= b as u64;
-		h = h.wrapping_mul(0x0000_0100_0000_01b3);
-	}
-	h
 }
 
 /// Zlib-compresses a content stream, for `/FlateDecode`.
