@@ -1185,6 +1185,32 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
         });
         req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
 
+        // The list analogue: a `(node|[...])` value must keep its list payload, exactly as the
+        // `(node|{...})` map value keeps its map.  Previously this hard-errored with "Found a
+        // '[' which is incompatible".
+        let dat = res!(Dat::decode_string_with_config(
+            "(node|{\"a\":(node|[1,2]),\"b\":2})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => listdat![1u8, 2u8],
+            "b".to_string() => 2u8,
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+
+        // A `(node|[...])` list value sitting beside a `(node|{...})` map value, so both molecule
+        // shapes are exercised under the one user kind.
+        let dat = res!(Dat::decode_string_with_config(
+            "(node|{\"a\":(node|[1,2]),\"b\":(node|{\"c\":3})})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => listdat![1u8, 2u8],
+            "b".to_string() => mapdat!{ "c".to_string() => 3u8 },
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+
+        // The `(node|(node|[...]))` unitary form keeps the inner list payload under the outer
+        // kind, mirroring the map case above.
+        let dat = res!(Dat::decode_string_with_config("(node|(node|[1,2]))", &jdat_dec));
+        req!(dat, Dat::Usr(ukind.clone(), Some(Box::new(listdat![1u8, 2u8]))));
+
         // Control: a dataless `(node)` value with no payload is untouched by the fix.
         let dat = res!(Dat::decode_string_with_config("(node|{\"a\":(node),\"b\":2})", &jdat_dec));
         req!(dat, mapdat!{

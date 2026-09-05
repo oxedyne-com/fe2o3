@@ -1187,8 +1187,23 @@ impl Dat {
             }
             '[' => {
                 if state.molecular_capture == None {
+                    // A `[` that is the whole molecular payload of a dataless user kind --
+                    // `(node|[...])` -- resolves in this frame to a bare list, the list analogue
+                    // of `{` resolving `(node|{...})` to a bare map.  Capture the list here and
+                    // reset the frame's kind to List so `close_bracket` builds it and terminates
+                    // at the matching `]`, leaving the enclosing `)` and any separators to the
+                    // parent frame.  Descending as the ordinary branch below does would not
+                    // terminate the payload frame at `]`, so it would swallow the parent's
+                    // separators.  Without this a `[` under a user kind raised "Found a '['
+                    // which is incompatible".
+                    let dataless_usr = matches!(
+                        &state.kind_outer, Kind::Usr(ukid) if ukid.kind().is_none());
                     if state.kind_outer == Kind::Unknown {
                         state.molecular_capture = Some(MolecularCapture::ListMixed);
+                    } else if dataless_usr {
+                        state.molecular_capture = Some(MolecularCapture::ListMixed);
+                        state.kind_outer = Kind::List;
+                        return Ok(Step::Continue);
                     } else {
                         match MolecularCapture::from_kind(&state.kind_outer) {
                             Some(MolecularCapture::Map) |
