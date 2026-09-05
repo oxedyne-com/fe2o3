@@ -1179,63 +1179,91 @@ fn slug(text: &str) -> String {
 	if out.is_empty() { "heading".to_string() } else { out }
 }
 
-/// Draws the page furniture -- a running head in the top margin and a folio in the bottom -- onto
-/// every composed page. Called after the driver has converged: the furniture sits outside the text
-/// block, so adding it moves nothing and cannot reopen the fixed point.
+/// Draws the page furniture -- a running head in the top margin and a folio -- onto every composed
+/// page. Called after the driver has converged: the furniture sits outside the text block, so adding
+/// it moves nothing and cannot reopen the fixed point.
 ///
-/// The running head is the section current at the top of each page: the most recent heading the
-/// ledger resolved to an earlier page. A page onto which no earlier section runs -- the first page,
-/// and any page a section opens at its very top -- omits the running head, which is the usual
-/// suppression on a title or chapter-opening page. Both the head and the folio are shaped through the
-/// same path as the body and drawn as glyph outlines.
+/// The running head follows the book's own scheme, the even/odd split the template sets. A verso (even)
+/// page carries the folio at the outer edge and the book title, in italic, at the inner; a recto (odd)
+/// page carries the current chapter title, in italic, at the inner edge and the folio at the outer. The
+/// current chapter is the most recent level-1 heading the ledger resolved to an earlier page. A page a
+/// chapter opens at its very top -- and the first page, before any chapter runs -- omits the running
+/// head and sets a centred folio at the foot instead, the usual chapter-opening treatment. The frame is
+/// laid at the recto (binding-left) split; `ingot` mirrors a verso page's whole frame to the fore-edge
+/// afterwards, so placing the folio at the block's left on a verso page lands it at the outer margin.
+/// Both the head and the folio are shaped through the same path as the body and drawn as glyph outlines.
 pub fn decorate(
-	pages:	&mut [Page],
-	ledger:	&Ledger,
-	heads:	&[Heading],
-	fonts:	&Arc<FontSet>,
-	style:	Style,
-	geom:	PageGeometry,
+	pages:		&mut [Page],
+	ledger:		&Ledger,
+	heads:		&[Heading],
+	fonts:		&Arc<FontSet>,
+	style:		Style,
+	geom:		PageGeometry,
+	book_title:	&str,
 )
 	-> Outcome<()>
 {
-	let content_top = geom.content_top();
+	let content_top		= geom.content_top();
+	let content_left	= geom.content_left();
+	let content_width	= geom.content_width();
 	for page in pages.iter_mut() {
-		// The section running at the top of this page, and whether a section opens the page.
-		let mut running:	Option<&str>	= None;
-		let mut suppress					= false;
+		// The chapter running at the top of this page (the most recent level-1 heading resolved to an
+		// earlier page), and whether a chapter opens at the very top of this one.
+		let mut chapter:	Option<&str>	= None;
+		let mut opens					= false;
 		for h in heads {
 			if let Some(a) = ledger.get(&h.id) {
 				if a.pos.page < page.number {
-					running = Some(&h.title);
+					if h.level == 1 { chapter = Some(&h.title); }
 				} else if a.pos.page == page.number {
-					if a.pos.y == content_top {
-						suppress = true;	// a section opens at the very top: this is its opening page
+					if h.level == 1 && a.pos.y == content_top {
+						opens = true;	// a chapter opens at the very top: this is its opening page
 					}
-					break;
 				} else {
 					break;	// headings are in document order, so the rest resolve to later pages
 				}
 			}
 		}
-		if suppress {
-			running = None;
-		}
 
-		if let Some(title) = running {
-			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.header_size, title));
+		// The head baseline sits a fixed step above the text block; a folio at the foot sits a step below.
+		let head_base	= content_top - Sp::from_pt(8.0);
+		let foot_top	= content_top + geom.content_height() + Sp::from_pt(14.0);
+		let num			= fmt!("{}", page.number);
+
+		if opens || chapter.is_none() {
+			// A chapter-opening page: no running head, a centred folio at the foot.
+			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &num));
 			let d		= shaped.dims();
 			let x		= centre_x(geom, d.width);
-			// Seat the head above the text block, its baseline within the top margin.
-			let y		= content_top - d.vextent() - Sp::from_pt(6.0);
-			page.frame.push(Placed::new(x, y, d, PlacedKind::Text(shaped)));
+			page.frame.push(Placed::new(x, foot_top, d, PlacedKind::Text(shaped)));
+			continue;
 		}
 
-		let num		= fmt!("{}", page.number);
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &num));
-		let d		= shaped.dims();
-		let x		= centre_x(geom, d.width);
-		let y		= content_top + geom.content_height() + Sp::from_pt(14.0);
-		page.frame.push(Placed::new(x, y, d, PlacedKind::Text(shaped)));
+		// The folio, at the outer margin of the running head. On a recto (odd) page the outer edge is the
+		// block's right; on a verso (even) page it is the block's left, which the mirror shift carries to
+		// the fore-edge.
+		let folio	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &num));
+		let fd		= folio.dims();
+		let folio_x	= if page.number % 2 == 0 {
+			content_left
+		} else {
+			content_left + content_width - fd.width
+		};
+		page.frame.push(Placed::new(folio_x, head_base - fd.height, fd, PlacedKind::Text(folio)));
+
+		// The title side: the book title on a verso page, the chapter title on a recto, both italic and
+		// set against the folio at the opposite edge.
+		let title	= if page.number % 2 == 0 { book_title } else { chapter.unwrap_or("") };
+		if !title.is_empty() {
+			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.header_size, title));
+			let d		= shaped.dims();
+			let x		= if page.number % 2 == 0 {
+				content_left + content_width - d.width	// verso: title at the inner (spine) edge
+			} else {
+				content_left								// recto: title at the inner (spine) edge
+			};
+			page.frame.push(Placed::new(x, head_base - d.height, d, PlacedKind::Text(shaped)));
+		}
 	}
 	Ok(())
 }

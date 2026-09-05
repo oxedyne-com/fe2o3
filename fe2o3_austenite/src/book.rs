@@ -36,6 +36,7 @@ pub struct BookSpec {
 	pub style:	Style,
 	pub fonts:	Arc<FontSet>,
 	pub blocks:	Vec<Block>,
+	pub title:	String,	// the book title, for the verso running head
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -73,8 +74,36 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
 	let blocks		= res!(assemble(&root_src, &root_dir));
+	let title		= content_field(&root_src, "title").unwrap_or_default();
 
-	Ok(BookSpec { geom, style, fonts, blocks })
+	Ok(BookSpec { geom, style, fonts, blocks, title })
+}
+
+/// The text of a `name: [ ... ]` content field in the root's template call -- the book title, say --
+/// with the surrounding brackets dropped and inner whitespace trimmed. Bracket-balanced, so a nested
+/// group does not close it early.
+fn content_field(src: &str, name: &str) -> Option<String> {
+	let needle	= fmt!("{}:", name);
+	let at		= src.find(&needle)?;
+	let rest	= &src[at + needle.len()..];
+	let open	= rest.find('[')?;
+	let bytes	= rest.as_bytes();
+	let mut depth	= 0i32;
+	let mut i	= open;
+	while i < bytes.len() {
+		match bytes[i] {
+			b'['	=> depth += 1,
+			b']'	=> {
+				depth -= 1;
+				if depth == 0 {
+					return Some(rest[open + 1..i].trim().to_string());
+				}
+			},
+			_	=> {},
+		}
+		i += 1;
+	}
+	None
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
