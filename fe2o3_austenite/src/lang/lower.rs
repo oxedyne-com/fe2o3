@@ -11,10 +11,19 @@ use crate::doc::{
 	Block,
 	Segment,
 };
+use crate::table::{
+	Align,
+	Cell,
+	Row,
+	Table,
+};
 
 use super::ast::{
+	AlignSpec,
+	FigureBody,
 	Inline,
 	Item,
+	TableSpec,
 };
 
 /// Lowers a surface item list to the block list the driver authors from.
@@ -29,9 +38,44 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 				*ordered,
 				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
+			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
+			Item::Figure { body, caption, supplement, label, .. }	=> out.push(match body {
+				FigureBody::Table(spec)	=> Block::table_figure(
+					build_table(spec), caption.clone(), supplement.clone(), label.clone()),
+				FigureBody::Image { path }	=> Block::image_figure(
+					path.clone(), caption.clone(), supplement.clone(), label.clone()),
+			}),
 		}
 	}
 	out
+}
+
+/// Builds a [`Table`] from the parsed spec: the flat cells are chunked into rows of `ncols`, each cell
+/// given its alignment from the [`AlignSpec`]. A header row's cells set centred; a closure aligns the
+/// first column centred and the rest flush left, matching the `(col, row) => ...` idiom these books use.
+fn build_table(spec: &TableSpec) -> Table {
+	let ncols = spec.ncols.max(1);
+	let mut rows:	Vec<Row>	= Vec::new();
+	for (r, chunk) in spec.cells.chunks(ncols).enumerate() {
+		let mut cells = Vec::with_capacity(ncols);
+		for (c, text) in chunk.iter().enumerate() {
+			cells.push(Cell::aligned(text.clone(), cell_align(&spec.align, spec.header, r, c)));
+		}
+		rows.push(Row::new(cells));
+	}
+	Table::new(spec.header, rows)
+}
+
+/// The alignment of one cell at row `r`, column `c`, given the table's declared [`AlignSpec`].
+fn cell_align(spec: &AlignSpec, header: bool, r: usize, c: usize) -> Align {
+	if header && r == 0 {
+		return Align::Centre;	// a header row centres its labels
+	}
+	match spec {
+		AlignSpec::Uniform(a)		=> *a,
+		AlignSpec::PerColumn(cols)	=> cols.get(c).copied().unwrap_or(Align::Left),
+		AlignSpec::Closure			=> if c == 0 { Align::Centre } else { Align::Left },
+	}
 }
 
 /// Lowers a paragraph's inline runs. A paragraph of one plain text run keeps the plain-paragraph path
@@ -56,5 +100,6 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Math(atom)		=> Segment::math(atom.clone()),
 		Inline::Glossary { term, display }
 								=> Segment::glossary(term.clone(), display.clone()),
+		Inline::Footnote(note)	=> Segment::footnote(note.clone()),
 	}
 }

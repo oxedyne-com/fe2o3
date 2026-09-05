@@ -26,11 +26,14 @@
 //! its display text plain; a pure index marker sets nothing.
 
 use crate::ir::Span;
+use crate::table::Align;
 
-use super::ast::{Inline, Item};
+use super::ast::{AlignSpec, FigureBody, Inline, Item, TableSpec};
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
+
+use std::collections::HashMap;
 
 /// Parses a whole Ingot source string into its surface items. The only error is an empty heading --
 /// a `=` marker with no title -- which names the offending 1-based line.
@@ -60,6 +63,16 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	// when not skipping. While it is `Some`, every line is consumed and nothing is set until the delimiters
 	// balance.
 	let mut skip:		Option<SkipState>	= None;
+
+	// A multi-line construct whose whole text is gathered so it can be parsed rather than skipped: a
+	// `#figure(...)`, a bare `#table(...)`, or a `#let name = (...)` data array feeding a table. `None`
+	// when none is open. The accumulated text is dispatched by its kind when the delimiters balance.
+	let mut capture:	Option<Capture>		= None;
+
+	// Data arrays declared by `#let name = (...)` and referenced by a table's `..name.flatten()` spread:
+	// the name maps to the flat sequence of cell texts the array holds. Populated as the arrays are read,
+	// so a later figure resolves its cells against them.
+	let mut arrays:		HashMap<String, Vec<String>>	= HashMap::new();
 
 	// Whether a `/* ... */` block comment is open across the line break. A `//` line comment never
 	// straddles a line, so it needs no carried state.
@@ -105,6 +118,22 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			continue;
 		}
 
+		// A multi-line construct is being gathered whole: keep appending its lines and tracking the bracket
+		// balance until the delimiters close, then dispatch the accumulated text by its kind. Like the skip
+		// above, this takes precedence over the markup rules, since the span is a code construct.
+		if let Some(cap) = capture.as_mut() {
+			cap.buf.push_str(line);
+			cap.buf.push('\n');
+			scan_brackets(line, &mut cap.state);
+			if cap.state.depth <= 0 {
+				let done = capture.take();
+				if let Some(cap) = done {
+					dispatch_capture(cap, &mut items, &mut arrays);
+				}
+			}
+			continue;
+		}
+
 		// A fenced code block takes precedence over every other rule: inside it, only a closing fence is
 		// special and every other line is verbatim, so its own `=`, `-` or `*` carry no markup meaning.
 		if let Some((buf, cstart)) = code.as_mut() {
@@ -129,6 +158,23 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// A blank line closes the paragraph or list it follows.
 			flush_para(&mut items, &mut lines, para_start, para_end);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+		} else if let Some(kind) = capture_opener(trimmed) {
+			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
+			// array feeding a table. It closes any open block, then its whole text is gathered by the check
+			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
+			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			let mut state	= SkipState { depth: 0, in_string: false };
+			scan_brackets(line, &mut state);
+			let mut buf		= String::new();
+			buf.push_str(line);
+			buf.push('\n');
+			let cap = Capture { kind, buf, state };
+			if cap.state.depth <= 0 {
+				dispatch_capture(cap, &mut items, &mut arrays);	// the whole construct closed on one line
+			} else {
+				capture = Some(cap);
+			}
 		} else if let Some(decision) = code_skip(trimmed) {
 			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
 			// to a template function Austenite does not yet run: it closes any open block and is skipped.
@@ -193,6 +239,11 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 	if let Some((buf, cstart)) = code {
 		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
+	}
+	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
+	// still yields its best-effort figure or table rather than swallowing the tail silently.
+	if let Some(cap) = capture {
+		dispatch_capture(cap, &mut items, &mut arrays);
 	}
 	Ok(items)
 }
@@ -308,6 +359,18 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				}
 				runs.push(Inline::Code(chars[i + 1..close].iter().collect()));
 				i = close + 1;
+				continue;
+			}
+		}
+		// An inline footnote. Its bracketed content is markup, reduced here to display text, since the
+		// engine sets a footnote's note as a plain small paragraph. The mark falls after the run before it.
+		if c == '#' {
+			if let Some((note, next)) = footnote_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::Footnote(note));
+				i = next;
 				continue;
 			}
 		}
@@ -592,6 +655,44 @@ fn split_label(title: &str) -> (String, Option<String>) {
 	(t.to_string(), None)
 }
 
+/// Reads an inline `#footnote[...]` at `i` (a `#`), returning the note's text -- its markup reduced to
+/// display text by [`flatten_markup`] -- and the index just past the closing `]`. `None` when the shape
+/// is not a footnote call or its bracket does not close, so anything else is left as ordinary text.
+fn footnote_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#footnote")?;
+	if chars.get(open) != Some(&'[') {
+		return None;
+	}
+	let (inner, next) = read_group(chars, open)?;
+	Some((flatten_markup(&inner), next))
+}
+
+/// Reduces a run of markup to plain display text: the words a reader sees, with the emphasis, code,
+/// glossary and index delimiters removed. A glossary term contributes its display, a visible index call
+/// its text, a pure index marker nothing; `*strong*` and `_emph_` contribute their inner words. Inline
+/// maths and cross-references, which have no plain form here, contribute nothing. Used where the engine
+/// takes a plain string -- a footnote's note, a table cell, a figure caption -- and cannot yet carry the
+/// runs themselves.
+pub fn flatten_markup(text: &str) -> String {
+	let mut out = String::new();
+	for run in parse_inlines(text) {
+		match run {
+			Inline::Text(t)					=> out.push_str(&t),
+			// A `*strong*` or `_emph_` inner run may still carry markup -- `*_word_*` nests emphasis in
+			// strong -- so it is flattened again to strip the inner delimiters. Parsing does not nest, so
+			// each pass removes one layer and the recursion terminates on plain text.
+			Inline::Strong(t)				=> out.push_str(&flatten_markup(&t)),
+			Inline::Emph(t)					=> out.push_str(&flatten_markup(&t)),
+			Inline::Code(t)					=> out.push_str(&t),
+			Inline::Glossary { display, .. }	=> out.push_str(&display),
+			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
+			Inline::Math(_)					=> {},	// maths is dropped from a flattened string
+			Inline::Footnote(_)				=> {},	// a nested footnote is not set within a flattened string
+		}
+	}
+	out
+}
+
 /// What an inline glossary or index call sets into the running text.
 enum Call {
 	Glossary { term: String, display: String },	// a glossary term, keyed by `term` for first-use styling
@@ -800,4 +901,444 @@ fn strip_comments(line: &str, st: &mut CommentState) -> String {
 		i += 1;
 	}
 	out
+}
+
+// -- Multi-line figure, table and data-array capture ----------------------------------------------
+
+/// A multi-line construct gathered whole so it can be parsed. The buffer accumulates its lines; the
+/// bracket state closes it when the delimiters balance; the kind decides how the buffer is dispatched.
+struct Capture {
+	kind:	CaptureKind,
+	buf:	String,
+	state:	SkipState,
+}
+
+/// Which multi-line construct is being gathered.
+enum CaptureKind {
+	Figure,			// a `#figure(...)` call, possibly wrapping a table or an image
+	Table,			// a bare `#table(...)` call
+	Let(String),	// a `#let name = (...)` data array bound to this name
+}
+
+/// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
+/// bare `#table(`, or a `#let name = (` data array. `None` for any other line, which the caller then
+/// offers to [`code_skip`].
+fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
+	if trimmed.starts_with("#figure(") {
+		return Some(CaptureKind::Figure);
+	}
+	if trimmed.starts_with("#table(") {
+		return Some(CaptureKind::Table);
+	}
+	let_array_name(trimmed).map(CaptureKind::Let)
+}
+
+/// If the line is a `#let name = (` binding whose value opens a paren group, its name; else `None`. Only
+/// an array or tuple value is captured -- a scalar or a function `#let` (whose name carries `(`) is left
+/// to [`code_skip`].
+fn let_array_name(trimmed: &str) -> Option<String> {
+	let rest	= trimmed.strip_prefix("#let ")?;
+	let eq		= rest.find('=')?;
+	let name	= rest[..eq].trim();
+	if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+		return None;
+	}
+	let value = rest[eq + 1..].trim_start();
+	if value.starts_with('(') {
+		Some(name.to_string())
+	} else {
+		None
+	}
+}
+
+/// Dispatches a completed capture: a data array is evaluated and stored under its name; a table or a
+/// figure is parsed into an [`Item`]. A construct that does not parse -- an unresolved spread, an empty
+/// table -- yields no item rather than an error, so a stray call never fails the whole document.
+fn dispatch_capture(
+	cap:	Capture,
+	items:	&mut Vec<Item>,
+	arrays:	&mut HashMap<String, Vec<String>>,
+)
+{
+	match cap.kind {
+		CaptureKind::Let(name) => {
+			arrays.insert(name, parse_let_array(&cap.buf));
+		},
+		CaptureKind::Table => {
+			if let Some(inner) = call_inner(&cap.buf, "table") {
+				if let Some(spec) = parse_table_spec(&inner, arrays) {
+					items.push(Item::Table { spec, span: Span::new(0, 0) });
+				}
+			}
+		},
+		CaptureKind::Figure => {
+			if let Some(item) = parse_figure(&cap.buf, arrays) {
+				items.push(item);
+			}
+		},
+	}
+}
+
+/// Evaluates a `#let name = (...)` value into the flat sequence of cell texts it holds. The value is the
+/// paren group after the `=`; every `[...]` group within it, at any depth, is one cell -- which is what
+/// `array.flatten()` yields for an array of content tuples.
+fn parse_let_array(buf: &str) -> Vec<String> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let eq = match chars.iter().position(|&c| c == '=') {
+		Some(e)	=> e,
+		None	=> return Vec::new(),
+	};
+	let open = match (eq + 1..chars.len()).find(|&j| !chars[j].is_whitespace()) {
+		Some(v) if chars[v] == '('	=> v,
+		_							=> return Vec::new(),
+	};
+	match read_group(&chars, open) {
+		Some((inner, _))	=> collect_cells(&inner),
+		None				=> Vec::new(),
+	}
+}
+
+/// Collects every `[...]` group in `inner`, in order, as flattened cell text. A `[` inside a string is
+/// not a cell. Once a group opens, its whole content is one cell and is not descended into.
+fn collect_cells(inner: &str) -> Vec<String> {
+	let chars:	Vec<char>	= inner.chars().collect();
+	let mut cells			= Vec::new();
+	let mut in_str			= false;
+	let mut esc				= false;
+	let mut i				= 0usize;
+	while i < chars.len() {
+		let c = chars[i];
+		if in_str {
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		if c == '"' {
+			in_str = true;
+			i += 1;
+			continue;
+		}
+		if c == '[' {
+			if let Some((content, next)) = read_group(&chars, i) {
+				cells.push(flatten_markup(&content));
+				i = next;
+				continue;
+			}
+		}
+		i += 1;
+	}
+	cells
+}
+
+/// Parses the inner text of a `#table(...)` call into a [`TableSpec`]. `columns:` fixes the column
+/// count, `align:` the alignment, a `fill:` keyed on `row == 0` marks a header row; cells come from
+/// inline `[...]` groups and from a `..name.flatten()` spread resolved against the data arrays. `None`
+/// when no cells are found, so an empty or unresolved table sets nothing.
+fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<String>>) -> Option<TableSpec> {
+	let mut ncols	= 1usize;
+	let mut align	= AlignSpec::Uniform(Align::Left);
+	let mut header	= false;
+	let mut cells:	Vec<String>	= Vec::new();
+	for arg in split_top_args(inner) {
+		let a = arg.trim();
+		if a.is_empty() {
+			continue;
+		}
+		if let Some((key, val)) = named_arg(a) {
+			match key.as_str() {
+				"columns"	=> ncols = parse_columns(&val),
+				"align"		=> align = parse_align(&val),
+				"fill"		=> if mentions_row0(&val) { header = true; },
+				_			=> {},	// inset, stroke, gutter and the rest are not modelled
+			}
+			continue;
+		}
+		if let Some(name) = spread_name(a) {
+			if let Some(v) = arrays.get(&name) {
+				cells.extend(v.iter().cloned());
+			}
+			continue;
+		}
+		if a.starts_with('[') {
+			let ch: Vec<char> = a.chars().collect();
+			if let Some((content, _)) = read_group(&ch, 0) {
+				cells.push(flatten_markup(&content));
+			}
+		}
+	}
+	if cells.is_empty() {
+		return None;
+	}
+	Some(TableSpec { ncols: ncols.max(1), header, align, cells })
+}
+
+/// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
+/// positional argument is the body -- a wrapped `#table(...)` set in full, or an image call stood in for
+/// by a placeholder; `caption:` sets the caption, `supplement:`/`kind:` the "Figure" or "Table" label.
+fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<String>>) -> Option<Item> {
+	let (body_src, label)	= strip_trailing_label(buf);
+	let inner				= call_inner(&body_src, "figure")?;
+
+	let mut caption:	Option<String>	= None;
+	let mut supplement:	Option<String>	= None;
+	let mut kind:		Option<String>	= None;
+	let mut positional:	Option<String>	= None;
+	for arg in split_top_args(&inner) {
+		let a = arg.trim();
+		if a.is_empty() {
+			continue;
+		}
+		if let Some((key, val)) = named_arg(a) {
+			match key.as_str() {
+				"caption"		=> caption = Some(caption_text(&val)),
+				"supplement"	=> supplement = Some(unquote(&val)),
+				"kind"			=> kind = Some(unquote(&val)),
+				_				=> {},	// placement and the rest do not affect the set figure
+			}
+			continue;
+		}
+		if positional.is_none() {
+			positional = Some(a.to_string());	// the first positional argument is the figure body
+		}
+	}
+
+	let body_text	= positional.unwrap_or_default();
+	let body		= figure_body(&body_text, arrays);
+	let supplement	= supplement.unwrap_or_else(|| match kind.as_deref() {
+		Some("table")	=> "Table".to_string(),
+		_				=> "Figure".to_string(),
+	});
+	Some(Item::Figure { body, caption, supplement, label, span: Span::new(0, 0) })
+}
+
+/// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
+/// parses, otherwise an image placeholder carrying the image path (empty when none is found).
+fn figure_body(text: &str, arrays: &HashMap<String, Vec<String>>) -> FigureBody {
+	if let Some(inner) = call_inner(text, "table") {
+		if let Some(spec) = parse_table_spec(&inner, arrays) {
+			return FigureBody::Table(spec);
+		}
+	}
+	FigureBody::Image { path: image_path(text).unwrap_or_default() }
+}
+
+/// The image path of a `padded-image("...")` or `image("...")` call in `text`, or `None`. The custom
+/// wrapper is tried first, since `image` is a word boundary within it only after the hyphen.
+fn image_path(text: &str) -> Option<String> {
+	for name in ["padded-image", "image"] {
+		if let Some(inner) = call_inner(text, name) {
+			if let Some(s) = first_string(&inner) {
+				return Some(s);
+			}
+		}
+	}
+	None
+}
+
+/// The content of the first `name(...)` call in `text`, balanced across nesting and strings, or `None`.
+/// `name` must sit at a word boundary, so a short name does not match inside a longer identifier.
+fn call_inner(text: &str, name: &str) -> Option<String> {
+	let chars:	Vec<char>	= text.chars().collect();
+	let namev:	Vec<char>	= name.chars().collect();
+	let paren				= find_call(&chars, &namev, 0)?;
+	read_group(&chars, paren).map(|(inner, _)| inner)
+}
+
+/// The index of the `(` of the first `name(` at a word boundary at or after `from`, or `None`.
+fn find_call(chars: &[char], name: &[char], from: usize) -> Option<usize> {
+	if name.is_empty() {
+		return None;
+	}
+	let mut i = from;
+	while i + name.len() < chars.len() {
+		if chars[i..].starts_with(name) && chars.get(i + name.len()) == Some(&'(') {
+			let boundary = i == 0 || !is_call_ident(chars[i - 1]);
+			if boundary {
+				return Some(i + name.len());
+			}
+		}
+		i += 1;
+	}
+	None
+}
+
+/// A character that continues a Typst identifier, for the word-boundary test in [`find_call`].
+fn is_call_ident(c: char) -> bool {
+	c.is_alphanumeric() || c == '-' || c == '_'
+}
+
+/// The first `"..."` string literal's content in `text`, or `None`.
+fn first_string(text: &str) -> Option<String> {
+	let chars:	Vec<char>	= text.chars().collect();
+	let start				= chars.iter().position(|&c| c == '"')?;
+	let end					= (start + 1..chars.len()).find(|&j| chars[j] == '"')?;
+	Some(chars[start + 1..end].iter().collect())
+}
+
+/// Splits the inner text of a call by its top-level commas, respecting `()[]{}` nesting and `"..."`
+/// strings, so a comma inside a nested group or a string does not part an argument.
+fn split_top_args(inner: &str) -> Vec<String> {
+	let mut args:	Vec<String>	= Vec::new();
+	let mut cur					= String::new();
+	let mut depth				= 0i32;
+	let mut in_str				= false;
+	let mut esc					= false;
+	for c in inner.chars() {
+		if in_str {
+			cur.push(c);
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> { in_str = true; cur.push(c); },
+			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
+			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
+			',' if depth == 0	=> { args.push(std::mem::take(&mut cur)); },
+			_					=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		args.push(cur);
+	}
+	args
+}
+
+/// Splits a `key: value` argument at its top-level colon, returning the key and the trimmed value, or
+/// `None` when there is no top-level colon or the key is not a bare identifier -- so a positional cell
+/// or a spread is not mistaken for a named argument.
+fn named_arg(arg: &str) -> Option<(String, String)> {
+	let chars:	Vec<char>	= arg.chars().collect();
+	let mut depth			= 0i32;
+	let mut in_str			= false;
+	let mut esc				= false;
+	for (i, &c) in chars.iter().enumerate() {
+		if in_str {
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'				=> in_str = true,
+			'(' | '[' | '{'	=> depth += 1,
+			')' | ']' | '}'	=> depth -= 1,
+			':' if depth == 0 => {
+				let key: String = chars[..i].iter().collect();
+				let key = key.trim().to_string();
+				if !key.is_empty() && key.chars().all(is_call_ident) {
+					let val: String = chars[i + 1..].iter().collect();
+					return Some((key, val.trim().to_string()));
+				}
+				return None;
+			},
+			_				=> {},
+		}
+	}
+	None
+}
+
+/// The array name of a `..name` or `..name.flatten()` spread argument, or `None`.
+fn spread_name(arg: &str) -> Option<String> {
+	let rest		= arg.trim().strip_prefix("..")?;
+	let name: String	= rest.chars().take_while(|&c| is_call_ident(c)).collect();
+	if name.is_empty() {
+		None
+	} else {
+		Some(name)
+	}
+}
+
+/// Parses a `columns:` value into a column count: an integer as itself, a track list `(a, b, c)` as its
+/// entry count, anything else as one column.
+fn parse_columns(val: &str) -> usize {
+	let v = val.trim();
+	if let Ok(n) = v.parse::<usize>() {
+		return n.max(1);
+	}
+	if v.starts_with('(') {
+		let ch: Vec<char> = v.chars().collect();
+		if let Some((inner, _)) = read_group(&ch, 0) {
+			let cnt = split_top_args(&inner).iter().filter(|p| !p.trim().is_empty()).count();
+			return cnt.max(1);
+		}
+	}
+	1
+}
+
+/// Parses an `align:` value: a `(col, row) => ...` closure as [`AlignSpec::Closure`], a tuple of column
+/// alignments as [`AlignSpec::PerColumn`], a single alignment word as [`AlignSpec::Uniform`].
+fn parse_align(val: &str) -> AlignSpec {
+	let v = val.trim();
+	if v.contains("=>") {
+		return AlignSpec::Closure;
+	}
+	if v.starts_with('(') {
+		let ch: Vec<char> = v.chars().collect();
+		if let Some((inner, _)) = read_group(&ch, 0) {
+			let cols: Vec<Align> = split_top_args(&inner).iter().map(|p| word_align(p)).collect();
+			if !cols.is_empty() {
+				return AlignSpec::PerColumn(cols);
+			}
+		}
+	}
+	AlignSpec::Uniform(word_align(v))
+}
+
+/// Maps a Typst alignment word to an [`Align`], ignoring a `+ horizon`/`+ top` vertical component and
+/// treating `start`/`end` as left/right. An unknown word is left-aligned.
+fn word_align(s: &str) -> Align {
+	let first = s.trim().split(|c: char| c.is_whitespace() || c == '+').next().unwrap_or("").trim();
+	match first {
+		"center" | "centre"	=> Align::Centre,
+		"right" | "end"		=> Align::Right,
+		_					=> Align::Left,
+	}
+}
+
+/// Does a `fill:` value key on the first row, marking a header? True for `row == 0` written with or
+/// without spaces.
+fn mentions_row0(val: &str) -> bool {
+	let compact: String = val.chars().filter(|c| !c.is_whitespace()).collect();
+	compact.contains("row==0")
+}
+
+/// Reduces a `caption: [...]` value to display text: the bracket content flattened, or the whole value
+/// flattened when it is not a bracket group.
+fn caption_text(val: &str) -> String {
+	let v = val.trim();
+	let ch: Vec<char> = v.chars().collect();
+	if ch.first() == Some(&'[') {
+		if let Some((content, _)) = read_group(&ch, 0) {
+			return flatten_markup(&content);
+		}
+	}
+	flatten_markup(v)
+}
+
+/// Strips a trailing `<label>` from a captured call, returning the call text without it and the label.
+/// A `<name>` with no inner whitespace at the very end labels the figure; anything else keeps the text.
+fn strip_trailing_label(buf: &str) -> (String, Option<String>) {
+	let t = buf.trim_end();
+	if let Some(inner) = t.strip_suffix('>') {
+		if let Some(p) = inner.rfind('<') {
+			let label = &inner[p + 1..];
+			if !label.is_empty() && !label.contains(char::is_whitespace) {
+				return (inner[..p].to_string(), Some(label.to_string()));
+			}
+		}
+	}
+	(buf.to_string(), None)
+}
+
+/// Strips a surrounding `"..."` from a string-literal argument value, leaving anything else unchanged.
+fn unquote(val: &str) -> String {
+	let t = val.trim();
+	if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+		return t[1..t.len() - 1].to_string();
+	}
+	t.to_string()
 }

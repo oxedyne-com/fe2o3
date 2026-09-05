@@ -23,6 +23,7 @@ use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
 	Dims,
+	DrawOp,
 	Footnote,
 	Glue,
 	Graphic,
@@ -63,7 +64,15 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 	shape::Dir,
 };
+use oxedyne_fe2o3_graphics::{
+	colour::Rgba,
+	path::{
+		PathBuilder,
+		Pt,
+	},
+};
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -128,6 +137,12 @@ pub enum Block {
 	Table(Table),
 	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
 	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
+	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
+	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
+	TableFigure { table: Table, caption: Option<String>, supplement: String, label: Option<String> },
+	// A `#figure(...)` wrapping an image: a sized placeholder box stands in for the image this increment
+	// does not load, with the numbered caption beneath. The path is kept for a later image loader.
+	ImageFigure { path: String, caption: Option<String>, supplement: String, label: Option<String> },
 }
 
 impl Block {
@@ -174,6 +189,32 @@ impl Block {
 	/// as a [`Float`](crate::ledger::AnchorKind::Float) anchor so a cross-reference resolves its page.
 	pub fn figure(graphic: Graphic, caption: Option<String>) -> Self {
 		Self::Figure { graphic, caption }
+	}
+
+	/// A table wrapped in a figure: the ruled grid, then a "{supplement} N: {caption}" line beneath,
+	/// numbered per supplement so tables and figures carry independent counts.
+	pub fn table_figure(
+		table:		Table,
+		caption:	Option<String>,
+		supplement:	String,
+		label:		Option<String>,
+	)
+		-> Self
+	{
+		Self::TableFigure { table, caption, supplement, label }
+	}
+
+	/// An image wrapped in a figure, stood in for by a placeholder box this increment. The path is kept
+	/// so a later increment can load the image in its place.
+	pub fn image_figure(
+		path:		String,
+		caption:	Option<String>,
+		supplement:	String,
+		label:		Option<String>,
+	)
+		-> Self
+	{
+		Self::ImageFigure { path, caption, supplement, label }
 	}
 }
 
@@ -283,7 +324,10 @@ pub fn author(
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
 	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
-	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the figures
+	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the drawn figures
+	// The number per figure supplement ("Figure", "Table"): a document-order fold, so tables and figures
+	// carry independent counts, matching Typst's per-kind numbering.
+	let mut counters:	HashMap<String, u32>	= HashMap::new();
 	// Glossary terms already set once, in document order. The first mention of a term is set bold-italic
 	// and every later mention plain; author walks the blocks in order, so the set decides first-use with
 	// no second pass. Keyed by the term as written, matching the template's case-sensitive tracking.
@@ -400,6 +444,30 @@ pub fn author(
 				}
 				fig_no += 1;
 				res!(figure(&mut nodes, fonts.clone(), style, measure, graphic.clone(), caption.as_deref(), fig_no));
+				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				i += 1;
+				first = false;
+			},
+			Block::TableFigure { table, caption, supplement, label } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				}
+				let number = next_number(&mut counters, supplement);
+				res!(table_figure(
+					&mut nodes, fonts.clone(), style, measure, table,
+					caption.as_deref(), supplement, number, label.as_deref()));
+				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				i += 1;
+				first = false;
+			},
+			Block::ImageFigure { path, caption, supplement, label } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				}
+				let number = next_number(&mut counters, supplement);
+				res!(image_figure(
+					&mut nodes, fonts.clone(), style, measure, path,
+					caption.as_deref(), supplement, number, label.as_deref()));
 				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
@@ -792,6 +860,170 @@ fn figure(
 	crow.push(Node::Leaf(Leaf::text(shaped)));
 	nodes.push(Node::HBox(BoxNode::new(crow, Dims::new(measure, cd.height, cd.depth))));
 	Ok(())
+}
+
+/// The next number for a figure supplement, incrementing its running count so tables and figures carry
+/// independent sequences.
+fn next_number(counters: &mut HashMap<String, u32>, supplement: &str) -> u32 {
+	let n = counters.entry(supplement.to_string()).or_insert(0);
+	*n += 1;
+	*n
+}
+
+/// Sets a table wrapped in a figure: the figure's anchors, the ruled table as one keep box, then a
+/// numbered caption beneath. The table lowers exactly as a bare [`Block::Table`] does, so it moves whole
+/// to the next page when it will not fit where it stands.
+#[allow(clippy::too_many_arguments)]
+fn table_figure(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	table:		&Table,
+	caption:	Option<&str>,
+	supplement:	&str,
+	number:		u32,
+	label:		Option<&str>,
+)
+	-> Outcome<()>
+{
+	figure_anchors(nodes, supplement, number, label);
+	nodes.push(res!(table::lower(fonts.clone(), style, measure, table)));
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
+	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	Ok(())
+}
+
+/// Sets an image wrapped in a figure: the figure's anchors, a sized placeholder box centred where the
+/// image will go, then a numbered caption beneath. The image itself is loaded by a later increment; the
+/// placeholder holds its space so the surrounding pagination is already near-right.
+#[allow(clippy::too_many_arguments)]
+fn image_figure(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	_path:		&str,
+	caption:	Option<&str>,
+	supplement:	&str,
+	number:		u32,
+	label:		Option<&str>,
+)
+	-> Outcome<()>
+{
+	figure_anchors(nodes, supplement, number, label);
+
+	let leaf	= Leaf::graphic(res!(placeholder(measure)));
+	let gw		= leaf.dims.width;
+	let gh		= leaf.dims.height + leaf.dims.depth;
+	let pad		= if measure > gw { Sp((measure.raw() - gw.raw()) / 2) } else { Sp::ZERO };
+	let mut row:	Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(leaf));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, gh, Sp::ZERO))));
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
+	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	Ok(())
+}
+
+/// Records a figure's anchors: an author label (when the source labelled it) so a cross-reference
+/// resolves the figure's page, and a [`Float`](crate::ledger::AnchorKind::Float) anchor keyed by
+/// supplement and number for the figure's own identity.
+fn figure_anchors(nodes: &mut Vec<Node>, supplement: &str, number: u32, label: Option<&str>) {
+	if let Some(l) = label {
+		nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.to_string())));
+	}
+	nodes.push(Node::Anchor(AnchorId::new(
+		AnchorKind::Float, fmt!("{}-{}", supplement.to_lowercase(), number))));
+}
+
+/// Sets a figure caption -- "{supplement} {number}: {caption}" -- centred beneath the figure, wrapped
+/// greedily into ragged centred lines at the body size. A caption with no text sets just its number.
+fn captioned(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	supplement:	&str,
+	number:		u32,
+	caption:	Option<&str>,
+)
+	-> Outcome<()>
+{
+	let text = match caption {
+		Some(c) if !c.trim().is_empty()	=> fmt!("{} {}: {}", supplement, number, c.trim()),
+		_								=> fmt!("{} {}", supplement, number),
+	};
+
+	let size	= style.body_size;
+	let mut line	= String::new();
+	let mut first	= true;
+	for word in text.split_whitespace() {
+		let trial = if line.is_empty() { word.to_string() } else { fmt!("{} {}", line, word) };
+		let shaped = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, &trial));
+		if shaped.dims().width > measure && !line.is_empty() {
+			res!(emit_caption_line(nodes, fonts.clone(), style, measure, size, &line, &mut first));
+			line = word.to_string();
+		} else {
+			line = trial;
+		}
+	}
+	if !line.is_empty() {
+		res!(emit_caption_line(nodes, fonts.clone(), style, measure, size, &line, &mut first));
+	}
+	Ok(())
+}
+
+/// Sets one centred caption line, with interline leading before every line but the first.
+fn emit_caption_line(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	size:		Sp,
+	line:		&str,
+	first:		&mut bool,
+)
+	-> Outcome<()>
+{
+	let shaped	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, size, line));
+	let d		= shaped.dims();
+	if !*first {
+		let vext	= d.height + d.depth;
+		let gap		= if style.leading > vext { style.leading - vext } else { style.line_gap };
+		nodes.push(Node::Glue(Glue::fixed(gap)));
+	}
+	*first = false;
+	let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+	let mut row:	Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(Leaf::text(shaped)));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	Ok(())
+}
+
+/// Builds the placeholder box that stands in for an image this increment does not load: a light-filled,
+/// lightly-stroked rectangle the width of the measure and half as tall, capped so a wide page does not
+/// leave a giant void. The caption beneath still names the figure.
+fn placeholder(measure: Sp) -> Outcome<Graphic> {
+	let w	= measure.to_pt() as f32;
+	let h	= (w * 0.5).clamp(120.0, 360.0);
+	let mut pb = PathBuilder::new();
+	pb.move_to(Pt::new(0.0, 0.0));
+	pb.line_to(Pt::new(w, 0.0));
+	pb.line_to(Pt::new(w, h));
+	pb.line_to(Pt::new(0.0, h));
+	pb.close();
+	let path	= res!(pb.finish());
+	let ops		= vec![
+		DrawOp::Fill { path: path.clone(), colour: Rgba::opaque(238, 238, 240) },
+		DrawOp::Stroke { path, colour: Rgba::opaque(150, 150, 150), width: 0.8 },
+	];
+	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w as f64), Sp::from_pt(h as f64), Sp::ZERO)))
 }
 
 /// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per
