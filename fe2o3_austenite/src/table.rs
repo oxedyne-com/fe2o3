@@ -21,7 +21,9 @@ use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
 	Dims,
+	DrawOp,
 	Glue,
+	Graphic,
 	Leaf,
 	Node,
 	Sp,
@@ -33,6 +35,13 @@ use oxedyne_fe2o3_font::{
 	face::Role,
 	set::FontSet,
 	shape::Dir,
+};
+use oxedyne_fe2o3_graphics::{
+	colour::Rgba,
+	path::{
+		Bounds,
+		Path,
+	},
 };
 
 use std::sync::Arc;
@@ -192,12 +201,16 @@ pub fn lower(
 	push_hrule(&mut children, &mut total_h, table_width, style.rule_thick);
 
 	for r in 0..rows.len() {
+		// A header row carries a grey wash behind every one of its bands, drawn before the rules and text
+		// so they sit over it; a body row has none.
+		let fill = if table.header && r == 0 { Some(style.header_fill) } else { None };
+
 		// The top padding of the row: a rules-only band, so the first line's baseline clears the rule.
 		let empty:	Vec<Option<&CellLine>>	= vec![None; ncols];
 		let flush:	Vec<Align>				= vec![Align::Left; ncols];
 		let pad_band = build_band(
 			ncols, &vrule_left, &tv, &content_left, &colwidth,
-			style.cell_pad_y, table_width, &empty, &flush);
+			style.cell_pad_y, table_width, &empty, &flush, fill);
 		children.push(pad_band);
 		total_h += style.cell_pad_y;
 
@@ -225,7 +238,7 @@ pub fn lower(
 
 			let hb = build_band(
 				ncols, &vrule_left, &tv, &content_left, &colwidth,
-				bh, table_width, &opt, &aligns);
+				bh, table_width, &opt, &aligns, fill);
 			children.push(hb);
 			total_h += bh;
 		}
@@ -393,11 +406,22 @@ fn build_band(
 	table_width:	Sp,
 	lines:			&[Option<&CellLine>],
 	aligns:			&[Align],
+	fill:			Option<Rgba>,
 )
 	-> Node
 {
 	let mut kids:	Vec<Node>	= Vec::new();
 	let mut cursor				= Sp::ZERO;
+
+	// The row wash sits behind the band: a zero-width graphic leaf drawn first, so it does not advance the
+	// horizontal cursor the rules and lines are positioned against, yet its path spans the whole band and
+	// paints under them (the writer draws in frame order, so the rules and glyphs that follow sit over it).
+	if let Some(colour) = fill {
+		if let Some(g) = fill_band(table_width, band_height, colour) {
+			kids.push(Node::Leaf(g));
+		}
+	}
+
 	for b in 0..=ncols {
 		// The vertical rule at this boundary, seated on its fixed x.
 		kids.push(Node::Glue(Glue::fixed(vrule_left[b] - cursor)));
@@ -423,6 +447,22 @@ fn build_band(
 		}
 	}
 	Node::HBox(BoxNode::new(kids, Dims::new(table_width, band_height, Sp::ZERO)))
+}
+
+/// Builds the background wash of one band: a graphic leaf whose single fill covers the band rectangle in
+/// `colour`. The leaf declares zero width so it does not move the band's horizontal cursor -- the path is
+/// drawn from the leaf's placement whatever the declared advance -- and its height matches the band, so
+/// the wash tiles seamlessly with the band above and below. `None` for a degenerate (zero-area) band, so
+/// `Path::rect` is never handed an empty rectangle.
+fn fill_band(width: Sp, height: Sp, colour: Rgba) -> Option<Leaf> {
+	let w = width.to_pt() as f32;
+	let h = height.to_pt() as f32;
+	if w <= 0.0 || h <= 0.0 {
+		return None;
+	}
+	let rect	= Path::rect(Bounds::new(0.0, 0.0, w, h)).ok()?;
+	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour }], Dims::new(Sp::ZERO, height, Sp::ZERO));
+	Some(Leaf::graphic(graphic))
 }
 
 /// Pushes a full-width horizontal rule and advances the running height by its thickness.

@@ -297,6 +297,7 @@ pub struct Style {
 	pub line_gap:		Sp,	// leading between the wrapped lines within one cell
 	pub rule_thin:		Sp,	// an interior grid rule
 	pub rule_thick:		Sp,	// the frame and the rule beneath a header
+	pub header_fill:	Rgba,	// the wash behind a header row, the books' light.lighten(10%)
 }
 
 impl Default for Style {
@@ -324,6 +325,7 @@ impl Default for Style {
 			line_gap:		Sp::from_pt(3.0),
 			rule_thin:		Sp::from_pt(0.4),
 			rule_thick:		Sp::from_pt(0.8),
+			header_fill:	Rgba::opaque(235, 238, 241),	// #E9ECEF lightened 10%, the template's header1
 		}
 	}
 }
