@@ -112,7 +112,7 @@ fn compile_loop(fonts: Arc<FontSet>) -> Outcome<Graphic> {
 	d.edge(Endpoint::node("src"), Endpoint::node("parse"), None, Route::Straight)
 		.edge(Endpoint::node("parse"), Endpoint::node("check"), None, Route::Straight)
 		.edge(Endpoint::port("check", Port::South), Endpoint::node("layout"), Some("yes"), Route::Straight)
-		.edge(Endpoint::port("check", Port::East), Endpoint::port("err", Port::North), Some("no"), Route::Straight)
+		.edge(Endpoint::port("check", Port::East), Endpoint::port("err", Port::West), Some("no"), Route::Straight)
 		.edge(Endpoint::port("err", Port::North), Endpoint::port("parse", Port::East), Some("fix"), Route::Orthogonal)
 		.edge(Endpoint::node("layout"), Endpoint::node("pearl"), None, Route::Straight);
 

@@ -43,11 +43,13 @@ use std::sync::{
 	OnceLock,
 };
 
-// The maths font: Noto Sans Math, which carries a real maths alphabet (the Mathematical Italic block),
-// upright operators and relations, and the large symbols a text face lacks. It pairs with the Noto Sans
-// body the reading set is built on. It has no OpenType MATH table, so the layout constants below stay
-// TeX's plain defaults and a delimiter does not grow to its content; that is the documented remainder.
-const MATH_FONT: &[u8] = include_bytes!("../fonts/NotoSansMath-Regular.ttf");
+// The maths font: Latin Modern Math, the OpenType form of Computer Modern -- the faces TeX sets
+// mathematics in -- so a variable, an operator and a radical wear the letterforms a reader knows from
+// every mathematics paper. It carries the Mathematical Italic block, the upright operators and the
+// large symbols, and an OpenType MATH table of layout constants and grown-delimiter variants. This
+// increment draws its glyphs; reading the MATH table for the constants and the growing delimiters is
+// the next step.
+const MATH_FONT: &[u8] = include_bytes!("../fonts/latinmodern-math.otf");
 
 /// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
 /// behind a [`OnceLock`]; a lost race merely parses twice and keeps the first.
@@ -257,13 +259,14 @@ fn build_sym(
 )
 	-> Outcome<MBox>
 {
-	let size	= size_for(style, level);
-	let font	= res!(math_font());
-	let shown	= math_text(text, class);
-	let shaped	= res!(ShapedText::new_with_font(font, Dir::Ltr, size, &shown));
-	let d		= shaped.dims();
-	let piece	= Piece { x: Sp::ZERO, width: d.width, rel: Sp::ZERO, draw: Draw::Glyph(shaped) };
-	Ok(MBox { pieces: vec![piece], width: d.width, height: d.height, depth: d.depth, class })
+	let size		= size_for(style, level);
+	let font		= res!(math_font());
+	let shown		= math_text(text, class);
+	let shaped		= res!(ShapedText::new_with_font(font, Dir::Ltr, size, &shown));
+	let width		= shaped.dims().width;			// the advance, the horizontal extent
+	let (height, depth)	= res!(shaped.ink_extent());	// the true ink extent, not the font's global metric
+	let piece		= Piece { x: Sp::ZERO, width, rel: Sp::ZERO, draw: Draw::Glyph(shaped) };
+	Ok(MBox { pieces: vec![piece], width, height, depth, class })
 }
 
 /// The characters actually shaped for an atom. A single-letter ordinary variable is remapped to its

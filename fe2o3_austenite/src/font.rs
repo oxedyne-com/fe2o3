@@ -22,6 +22,7 @@ use oxedyne_fe2o3_font::{
 	},
 };
 use oxedyne_fe2o3_graphics::path::Path;
+use oxedyne_fe2o3_graphics::transform::Transform;
 
 use std::sync::Arc;
 
@@ -142,6 +143,25 @@ impl ShapedText {
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
 		self.src.font().outline(glyph.face, glyph.id, self.size)
+	}
+
+	/// The run's real ink extent above and below the baseline, taken from the glyph outlines rather
+	/// than the font's global ascent and descent. Maths needs this: a maths font's global ascent spans
+	/// its tallest construction -- a big integral, a three-storey brace -- not the single symbol in
+	/// hand, so seating a fraction or a script by the font metric puts it wildly wrong. The outline is
+	/// y up with the baseline at zero, so the top of the ink is the height and the bottom, when it dips
+	/// below the baseline, is the depth.
+	pub fn ink_extent(&self) -> Outcome<(Sp, Sp)> {
+		let mut top = 0.0f32;	// greatest height above the baseline
+		let mut bot = 0.0f32;	// greatest depth below it, as a positive number
+		for glyph in &self.run.glyphs {
+			let path = res!(self.outline(glyph));
+			if let Some(b) = path.bounds(&Transform::IDENTITY) {
+				if b.y1 > top { top = b.y1; }
+				if -b.y0 > bot { bot = -b.y0; }
+			}
+		}
+		Ok((Sp::from_pt(top as f64), Sp::from_pt(bot as f64)))
 	}
 }
 
