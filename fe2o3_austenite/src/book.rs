@@ -783,9 +783,13 @@ mod tests {
 		let blocks = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir));
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
-			Block::Heading { level, text, .. } => {
+			Block::Heading { level, segments, .. } => {
 				assert_eq!(*level, 0, "a part divider is a level-0 heading, outside the chapter numbering");
-				assert_eq!(text, "The Pattern", "the title is the bracket body");
+				let title = segments.iter().map(|s| match s {
+					Segment::Text(t)	=> t.clone(),
+					_					=> String::new(),
+				}).collect::<String>();
+				assert_eq!(title, "The Pattern", "the title is the bracket body");
 			},
 			other => return Err(err!("expected a heading, found {:?}", other; Test, Bug)),
 		}

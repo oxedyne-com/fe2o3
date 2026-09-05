@@ -139,7 +139,7 @@ impl Segment {
 /// (lists, quotes, figures) are later variants here.
 #[derive(Clone, Debug)]
 pub enum Block {
-	Heading { level: u8, text: String, label: Option<String> },	// label: an author anchor a `#ref` resolves to
+	Heading { level: u8, segments: Vec<Segment>, label: Option<String> },	// segments: the title's rich runs; label: an author anchor a `#ref` resolves to
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
@@ -173,12 +173,19 @@ pub enum Block {
 
 impl Block {
 	pub fn heading<S: Into<String>>(level: u8, text: S) -> Self {
-		Self::Heading { level, text: text.into(), label: None }
+		Self::Heading { level, segments: vec![Segment::text(text.into())], label: None }
 	}
 
 	/// A heading carrying an author label, so a `#ref(<label>)` elsewhere resolves to its page.
 	pub fn heading_labelled<S: Into<String>>(level: u8, text: S, label: Option<String>) -> Self {
-		Self::Heading { level, text: text.into(), label }
+		Self::Heading { level, segments: vec![Segment::text(text.into())], label }
+	}
+
+	/// A heading whose title carries rich inline runs -- emphasis, a glossary term, an index call or a
+	/// maths span -- so each sets its display text in the head and the table of contents rather than
+	/// leaking its raw source.
+	pub fn heading_rich(level: u8, segments: Vec<Segment>, label: Option<String>) -> Self {
+		Self::Heading { level, segments, label }
 	}
 
 	pub fn paragraph<S: Into<String>>(text: S) -> Self {
@@ -428,7 +435,7 @@ pub fn author(
 	let mut seen:	HashSet<String>	= HashSet::new();
 	while i < blocks.len() {
 		match &blocks[i] {
-			Block::Heading { level, text, label } => {
+			Block::Heading { level, segments, label } => {
 				// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
 				if *level >= 1 {
 					let l = (*level as usize).min(6);
@@ -437,8 +444,12 @@ pub fn author(
 				}
 				let number = heading_number(*level, &sec);
 
-				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(text)));
-				heads.push(Heading { id: id.clone(), level: *level, title: text.clone(), number: number.clone() });
+				// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
+				// title the contents list and the running head read back. The heading itself is set from the
+				// rich runs below, so a glossary term or emphasis in a heading renders rather than leaking.
+				let title = flatten_segments(segments);
+				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(&title)));
+				heads.push(Heading { id: id.clone(), level: *level, title: title.clone(), number: number.clone() });
 
 				// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
 				// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
@@ -448,7 +459,7 @@ pub fn author(
 						nodes.push(Node::Penalty(Penalty::eject()));
 					}
 					res!(chapter_opener(
-						&mut nodes, &fonts, heading.as_ref(), style, measure, *level, &number, text, &id, label.as_deref()));
+						&mut nodes, &fonts, heading.as_ref(), style, measure, *level, &number, &title, &id, label.as_deref()));
 					i += 1;
 					first = false;
 					prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
@@ -462,7 +473,7 @@ pub fn author(
 				}
 
 				let hbox = res!(subheading_hbox(
-					&fonts, heading.as_ref(), style, *level, &number, text));
+					fonts.clone(), heading.as_ref(), style, *level, &number, segments, &mut seen));
 
 				let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
 				if let Some(l) = label {
@@ -1759,6 +1770,28 @@ fn vbox(list: Vec<Node>, width: Sp) -> Node {
 	Node::VBox(BoxNode::new(list, Dims::new(width, ext, Sp::ZERO)))
 }
 
+/// The plain display words of a heading's rich runs: the text a reader sees with the markup removed, so
+/// the anchor slug, the table-of-contents entry and the running head read the rendered title rather than
+/// its raw source. A glossary term contributes its display, emphasis and code their inner words; a maths
+/// span, a cross-reference, a footnote and a citation have no plain form here and contribute nothing.
+fn flatten_segments(segments: &[Segment]) -> String {
+	let mut out = String::new();
+	for seg in segments {
+		match seg {
+			Segment::Text(t)				=> out.push_str(t),
+			Segment::Strong(t)				=> out.push_str(t),
+			Segment::Emph(t)				=> out.push_str(t),
+			Segment::Code(t)				=> out.push_str(t),
+			Segment::Glossary { display, .. }	=> out.push_str(display),
+			Segment::Math(_)				=> {},
+			Segment::PageRef(_)				=> {},
+			Segment::Footnote { .. }		=> {},
+			Segment::Cite(_)				=> {},
+		}
+	}
+	out
+}
+
 /// A filesystem-safe key from a heading's words: lowercase, runs of non-alphanumerics collapsed to a
 /// single dash. Prefixed with an ordinal by the caller, so two headings of the same words stay
 /// distinct identities.
@@ -1800,6 +1833,7 @@ fn heading_number(level: u8, sec: &[u32; 6]) -> String {
 
 /// A heading run's face: the display face (Radley) a book supplies for its chapters and level-2
 /// sections, or a reading-set role for the finer levels.
+#[derive(Clone, Copy)]
 enum HeadFace<'a> {
 	Solo(&'a Arc<Font>),
 	Role(Role),
@@ -1859,23 +1893,28 @@ fn smallcaps_runs(text: &str) -> Vec<(String, bool)> {
 	runs
 }
 
-/// Builds a sub-heading line (levels 2-4): the number in the heading face, a thin gap, then the title,
-/// small-capped from level 3 down. Runs of differing size seat on one baseline by taking a common ascent
-/// and depth from a full-size sample, so the small caps and the full caps sit level.
+/// Builds a sub-heading line (levels 2-4): the number in the heading face, a thin gap, then the title
+/// set from its rich runs, small-capped from level 3 down. Runs of differing size seat on one baseline
+/// by taking a common ascent and depth from a full-size sample, so the small caps and the full caps sit
+/// level. A glossary term keeps its own first-use bold-italic (recorded in `seen`, shared with the body
+/// so document order decides), emphasis its face, and a maths span is set at the heading size and its
+/// glyphs woven into the line -- so a call in a heading renders rather than leaking its raw source.
 fn subheading_hbox(
-	fonts:		&Arc<FontSet>,
+	fonts:		Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
 	style:		Style,
 	level:		u8,
 	number:		&str,
-	title:		&str,
+	segments:	&[Segment],
+	seen:		&mut HashSet<String>,
 )
 	-> Outcome<Node>
 {
 	let face		= head_face(level, display);
 	let size		= style.heading_size(level);
 	let small_size	= Sp(size.raw() * 3 / 4);	// small caps at 0.75 of the heading size
-	let sample		= res!(head_shape(fonts, &face, size, "Ag"));
+	let smallcaps	= level >= 3;
+	let sample		= res!(head_shape(&fonts, &face, size, "Ag"));
 	let asc			= sample.dims().height;
 	let dep			= sample.dims().depth;
 
@@ -1883,7 +1922,7 @@ fn subheading_hbox(
 	let mut width		= Sp::ZERO;
 
 	if !number.is_empty() {
-		let sh	= res!(head_shape(fonts, &face, size, number));
+		let sh	= res!(head_shape(&fonts, &face, size, number));
 		let w	= sh.dims().width;
 		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
 		width += w;
@@ -1892,22 +1931,104 @@ fn subheading_hbox(
 		width += gap;
 	}
 
-	if level >= 3 {
-		for (run, is_small) in smallcaps_runs(title) {
-			let rs	= if is_small { small_size } else { size };
-			let sh	= res!(head_shape(fonts, &face, rs, &run));
-			let w	= sh.dims().width;
-			children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
-			width += w;
+	for seg in segments {
+		match seg {
+			Segment::Text(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
+			Segment::Strong(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Strong), size, small_size, smallcaps, t, asc, dep)),
+			Segment::Emph(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Emph), size, small_size, smallcaps, t, asc, dep)),
+			Segment::Code(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
+			Segment::Glossary { term, display: disp }	=> {
+				// First use is set bold-italic, matching the template's `*_term_*`; a later use takes the
+				// heading's own face. The set is the body's, so a term first seen in a heading is plain in
+				// the prose after it, exactly as document order dictates.
+				let f = if seen.insert(term.clone()) { head_run_face(&face, HeadRun::Gloss) } else { face };
+				res!(push_head_text(
+					&mut children, &mut width, &fonts, &f, size, small_size, smallcaps, disp, asc, dep));
+			},
+			Segment::Math(atom)	=> {
+				// The span is set at the heading size and unwrapped, its leaves woven into the line as the
+				// body sets inline maths, so a subscripted variable in a heading draws as real glyphs.
+				let mut hs = style;
+				hs.body_size = size;
+				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
+					width += b.dims.width;
+					children.extend(b.list);
+				}
+			},
+			// A footnote, cross-reference or citation in a heading is vanishingly rare and has no display
+			// form here; it is dropped rather than set, leaving the heading its words.
+			Segment::Footnote { .. }	=> {},
+			Segment::PageRef(_)			=> {},
+			Segment::Cite(_)			=> {},
 		}
-	} else {
-		let sh	= res!(head_shape(fonts, &face, size, title));
-		let w	= sh.dims().width;
-		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
-		width += w;
 	}
 
 	Ok(Node::HBox(BoxNode::new(children, Dims::new(width, asc, dep))))
+}
+
+/// A heading run marked for emphasis: strong (`*..*`), emph (`_.._`), or a glossary term's first-use
+/// bold-italic.
+enum HeadRun {
+	Strong,
+	Emph,
+	Gloss,
+}
+
+/// The face one emphasised heading run sets in. A display face (Radley, levels 1-2) has no role variants
+/// loaded, so every run keeps it; a role face (levels 3-4) takes the run's own role, an emphasis inside
+/// an italic heading toggling upright as Typst sets it, a strong one going bold-italic.
+fn head_run_face<'a>(base: &HeadFace<'a>, run: HeadRun) -> HeadFace<'a> {
+	match base {
+		HeadFace::Solo(f)	=> HeadFace::Solo(f),
+		HeadFace::Role(r)	=> {
+			let italic = *r == Role::Italic;
+			let role = match run {
+				HeadRun::Strong	=> if italic { Role::BoldItalic } else { Role::Bold },
+				HeadRun::Gloss	=> Role::BoldItalic,
+				HeadRun::Emph	=> if italic { Role::Body } else { Role::Italic },	// emph toggles against an italic heading
+			};
+			HeadFace::Role(role)
+		},
+	}
+}
+
+/// Sets one heading text run into the line, small-capping it (levels 3-4) run by run so a was-lowercase
+/// stretch sets uppercase at the small size while capitals keep the full size, both seated on the common
+/// baseline. A run with no small caps sets whole at the full size.
+#[allow(clippy::too_many_arguments)]
+fn push_head_text(
+	children:	&mut Vec<Node>,
+	width:		&mut Sp,
+	fonts:		&Arc<FontSet>,
+	face:		&HeadFace,
+	size:		Sp,
+	small_size:	Sp,
+	smallcaps:	bool,
+	text:		&str,
+	asc:		Sp,
+	dep:		Sp,
+)
+	-> Outcome<()>
+{
+	if smallcaps {
+		for (run, is_small) in smallcaps_runs(text) {
+			let rs	= if is_small { small_size } else { size };
+			let sh	= res!(head_shape(fonts, face, rs, &run));
+			let w	= sh.dims().width;
+			children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+			*width += w;
+		}
+	} else {
+		let sh	= res!(head_shape(fonts, face, size, text));
+		let w	= sh.dims().width;
+		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+		*width += w;
+	}
+	Ok(())
 }
 
 /// Renders a shaped run as a coloured graphic: each glyph outline filled in `colour`, so a heading can

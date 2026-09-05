@@ -203,9 +203,12 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 				return Err(err!(
 					"Heading on line {} has a label but no title.", line_no; Input, Invalid, Missing));
 			}
+			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
+			// maths span in a heading sets its display text rather than leaking its raw source into the head
+			// and the table of contents.
 			items.push(Item::Heading {
 				level:	level as u8,
-				text:	title,
+				runs:	parse_inlines(&title),
 				label,
 				span:	Span::new(start, end),
 			});

@@ -14,7 +14,7 @@ use crate::table::Align;
 /// `Span` model already reserves it, so the front end records it from the first increment.
 #[derive(Clone, Debug)]
 pub enum Item {
-	Heading { level: u8, text: String, label: Option<String>, span: Span },	// label: a trailing <name>
+	Heading { level: u8, runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, runs: the title's inline markup
 	Paragraph { runs: Vec<Inline>, span: Span },
 	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face

@@ -31,8 +31,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
 		match item {
-			Item::Heading { level, text, label, .. }	=> out.push(
-				Block::heading_labelled(*level, text.clone(), label.clone())),
+			Item::Heading { level, runs, label, .. }	=> out.push(
+				Block::heading_rich(*level, runs.iter().map(lower_inline).collect(), label.clone())),
 			Item::Paragraph { runs, .. }		=> out.push(lower_paragraph(runs)),
 			Item::List { ordered, items, .. }	=> out.push(Block::list(
 				*ordered,
