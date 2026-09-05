@@ -1515,7 +1515,12 @@ impl Dat {
             Kind::True  => store.val_opt = Some(Dat::Bool(true)),
             Kind::False => store.val_opt = Some(Dat::Bool(false)),
             Kind::None  => store.val_opt = Some(Dat::Opt(Box::new(None))),
-            Kind::Usr(ukid) if ukid.kind().is_none() =>
+            // A dataless user kind with no payload is `(node)`.  But if a molecular payload
+            // has already been captured into `val_opt` by a nested descend -- a `(node|{...})`
+            // value, whose `{...}` decoded a level down and landed here -- keep it: overwriting
+            // with `None` silently drops that payload.  The kept payload is wrapped (mol == None)
+            // or committed to the enclosing molecule (mol == Some) by the logic below.
+            Kind::Usr(ukid) if ukid.kind().is_none() && store.val_opt.is_none() =>
                 store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
             _ => (),
             // We don't necessarily return out of the method here because the

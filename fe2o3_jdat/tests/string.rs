@@ -1141,6 +1141,59 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["String decoding 691", "all", "map", "usr"], || {
+        // A molecular payload carried by a non-map user kind as a *nested value* used to be
+        // silently dropped on text decode.  Under the fix at close_paren, the payload captured a
+        // level down survives instead of being overwritten with a bare `(node)`:
+        //   - as a map value, `(node|{...})` kept its inner map (was `(node)`, payload lost);
+        //   - as a unitary value, `(node|(node|{...}))` kept the inner payload too.
+        // Each shape is checked for the exact decoded structure and a decode -> re-encode ->
+        // decode round trip.
+        let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+        let ukind = UsrKindId::new(1, Some("node"), None);
+        res!(uks.add(ukind.clone()));
+        let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+
+        // The reported failure: a `(node|{...})` map value.  Its inner map used to vanish,
+        // leaving `(node)`.
+        let dat = res!(Dat::decode_string_with_config(
+            "(node|{\"a\":(node|{\"x\":1}),\"b\":2})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "b".to_string() => 2u8,
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat); // round trip
+
+        // The `(node|(node|{...}))` form: the inner molecular payload used to vanish too, leaving
+        // `(node|(node))`.  The inner user kind resolves to its bare map payload, kept under the
+        // outer kind.  (No round trip here: a top-level `(node|{...})` re-decodes to a bare map,
+        // an existing asymmetry unrelated to this fix, so the shape is not a fixed point.)
+        let dat = res!(Dat::decode_string_with_config("(node|(node|{\"x\":1}))", &jdat_dec));
+        req!(dat, Dat::Usr(ukind.clone(), Some(Box::new(mapdat!{
+            "x".to_string() => 1u8,
+        }))));
+
+        // Several sibling user-kind map values, each carrying its own map molecule, and a
+        // deeper level of the same nesting.
+        let dat = res!(Dat::decode_string_with_config(
+            "(node|{\"a\":(node|{\"c\":3}),\"b\":(node|{\"d\":(node|{\"e\":4})})})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "c".to_string() => 3u8 },
+            "b".to_string() => mapdat!{
+                "d".to_string() => mapdat!{ "e".to_string() => 4u8 },
+            },
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+
+        // Control: a dataless `(node)` value with no payload is untouched by the fix.
+        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":(node),\"b\":2})", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => res!(Dat::try_from((ukind.clone(), None))),
+            "b".to_string() => 2u8,
+        });
+        Ok(())
+    }));
+
     res!(test_it(filter, &["String integrated decoding 000", "all", "map"], || {
         let d = res!(Dat::decode_string("
         {
