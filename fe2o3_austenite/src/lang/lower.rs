@@ -49,6 +49,5 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
-		Inline::TotalPages		=> Segment::total_pages(),
 	}
 }

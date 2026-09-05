@@ -6,25 +6,26 @@ cheap, light, foldable, and extraordinarily durable when it is made well; a
 sheet manufactured a thousand years ago can still be read today, while the
 magnetic and optical media of the last century have already grown unreadable.
 The story of how a mat of macerated plant fibre came to carry almost everything
-humanity chose to remember is a story of /patient craftsmanship/, of secrets kept
+humanity chose to remember is a story of _patient craftsmanship_, of secrets kept
 and secrets stolen, and of a technology so successful that it became invisible.
 
-A note on the marks themselves: the asterisk in 5 * 3 and the slash in a date
-like 10/105, or in a phrase like paper and/or parchment, are ordinary text and
-must never open emphasis. Only a delimiter that hugs a word does, so *this* is
-strong and /this/ is emphasised while the arithmetic and the dates are left alone.
+A note on the marks themselves, in Typst's own spelling: the underscore in a name
+like fe2o3_net and the asterisk in 5 * 3 are ordinary text and must never open
+emphasis. Only a delimiter that hugs a word does, so *this* is strong and _this_ is
+emphasised, while a literal dollar is written \$5 and the code and the arithmetic
+are left alone.
 
 This short account follows the sheet from the materials that preceded it,
 through its invention and the closely guarded craft of its manufacture, to the
 question that preoccupies conservators today: how to keep the paper of the
 industrial age from destroying itself. The invention itself is told on page
-#ref(<invention>).page, and the whole account runs to #total-pages() pages.
+@invention, where the eastern origin of the craft is set out.
 
 Before paper, the surfaces people wrote on each had a fatal drawback:
 
 - clay was heavy, and a tablet large enough to hold a long administrative text was so unwieldy that a scribe could carry only a few of them at a time, which is part of why the medium never travelled far from the archive that produced it;
 - papyrus was brittle, and it cracked when it was folded rather than rolled;
-- parchment was superb but /ruinously expensive/, a whole flock to a book.
+- parchment was superb but _ruinously expensive_, a whole flock to a book.
 
 Papermaking answered all three at once, and it did so in a fixed sequence of
 steps that has scarcely changed in two thousand years:

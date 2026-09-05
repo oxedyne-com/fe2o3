@@ -77,7 +77,6 @@ pub enum Segment {
 	Footnote { note: String },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
-	TotalPages,		// the document's own page count, the "M" in "page N of M"
 }
 
 impl Segment {
@@ -103,10 +102,6 @@ impl Segment {
 
 	pub fn page_ref<S: Into<String>>(label: S) -> Self {
 		Self::PageRef(label.into())
-	}
-
-	pub fn total_pages() -> Self {
-		Self::TotalPages
 	}
 }
 
@@ -458,9 +453,6 @@ fn build_pieces(
 				pieces.push(Piece::Mark(res!(ref_slot(
 					fonts.clone(), style, ref_no,
 					Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone()))))));
-			},
-			Segment::TotalPages => {
-				pieces.push(Piece::Mark(res!(ref_slot(fonts.clone(), style, ref_no, Ref::TotalPages))));
 			},
 		}
 	}

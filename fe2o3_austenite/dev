@@ -3,12 +3,12 @@
 # │ Live-preview an Ingot document in the browser │
 # └──────────────────────────────────────────────┘
 #
-# Austenite's answer to `typst watch`. Watches a .ingot source, recompiles it
-# with the `ingot` binary on every save, rasterises the pages, and serves an
-# auto-refreshing preview over HTTP -- so the loop is edit, save, and see the
-# set page a moment later, from this machine or any other on the network.
+# Austenite's answer to `typst watch`. Watches a Typst source, recompiles it with
+# the compiler on every save, rasterises the pages, and serves an auto-refreshing
+# preview over HTTP -- so the loop is edit, save, and see the set page a moment
+# later, from this machine or any other on the network.
 #
-#   ./dev [SOURCE.ingot]        default: samples/manuscript.ingot
+#   ./dev [SOURCE.typ]          default: samples/manuscript.typ
 #
 # Environment: PORT (default 8137), DPI (default 130), CARGO_TARGET_DIR.
 # A compile error is shown in the browser, in full, rather than a stale page.
@@ -16,12 +16,12 @@
 set -euo pipefail
 
 CRATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="${1:-$CRATE/samples/manuscript.ingot}"
+SRC="${1:-$CRATE/samples/manuscript.typ}"
 PORT="${PORT:-8137}"
 DPI="${DPI:-130}"
 
-if [[ "$SRC" != *.ingot ]]; then
-	echo "dev: the source should be a .ingot file, not '$SRC'." >&2
+if [[ "$SRC" != *.typ ]]; then
+	echo "dev: the source should be a .typ file, not '$SRC'." >&2
 	exit 1
 fi
 if [[ ! -f "$SRC" ]]; then

@@ -22,7 +22,6 @@ pub enum Item {
 pub enum Inline {
 	Text(String),
 	Strong(String),	// *strong*, lowered to a bold segment
-	Emph(String),	// /emph/, lowered to an italic segment
-	PageRef(String),	// #ref(<label>).page, resolving to the labelled anchor's page number
-	TotalPages,		// #total-pages(), resolving to the document's page count
+	Emph(String),	// _emph_, lowered to an italic segment
+	PageRef(String),	// @label, resolving to the labelled anchor's page number
 }

@@ -1,15 +1,14 @@
-//! The Ingot front end: the human-written source language above the block layer.
+//! The source front end: Austenite reads Typst markup, so an existing Typst document sets without
+//! being rewritten in a new language. [`parse::document`] reads a source string into the surface tree
+//! of [`ast::Item`], and [`lower::blocks`] maps that tree onto [`doc::Block`](crate::doc::Block), the
+//! authoring vocabulary the two-pass driver already sets. The two steps are kept apart so the surface
+//! can grow -- richer parse, same lowering seam -- without disturbing the block layer beneath it.
 //!
-//! An Ingot file is line-oriented markup. [`parse::document`] reads it into the surface tree of
-//! [`ast::Item`], and [`lower::blocks`] maps that tree onto [`doc::Block`](crate::doc::Block), the
-//! authoring vocabulary the two-pass driver already sets. The two steps are kept apart so a later
-//! increment can grow the surface language -- richer parse, same lowering seam -- without disturbing
-//! the block layer beneath it.
-//!
-//! The markup spine is headings, paragraphs, inline emphasis (`*strong*`, `/emph/`), bullet and
-//! numbered lists, and the declared cross-references `#ref(<label>).page` and `#total-pages()` -- a
-//! heading is labelled with a trailing `<name>`. The general `#` code mode of `sec_language` is a later
-//! increment, so a `#` that opens neither reference form is an ordinary literal character.
+//! The markup implemented so far is Typst's: headings (`=`), paragraphs, `*strong*` and `_emph_`,
+//! bullet (`-`) and numbered (`+`) lists, and the `@label` cross-reference, with a heading labelled by a
+//! trailing `<name>` and `\` escaping the next character. Typst code statements -- `#import`, `#let`,
+//! `#set`, `#show` -- and whole-line calls to template functions are skipped for now: the styling and
+//! computation layer, and inline `$maths$`, code and `#figure`/`#image`, are later increments.
 
 pub mod ast;
 pub mod lower;
@@ -19,9 +18,9 @@ use crate::doc::Block;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// Parses Ingot source and lowers it to the block list the driver authors from, in one step. The
-/// usual entry point: a caller that wants the surface tree in between reaches for [`parse::document`]
-/// and [`lower::blocks`] directly.
+/// Parses Typst source and lowers it to the block list the driver authors from, in one step. The usual
+/// entry point: a caller that wants the surface tree in between reaches for [`parse::document`] and
+/// [`lower::blocks`] directly.
 pub fn to_blocks(src: &str) -> Outcome<Vec<Block>> {
 	let items = res!(parse::document(src));
 	Ok(lower::blocks(&items))

@@ -54,6 +54,12 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// A blank line closes the paragraph or list it follows.
 			flush_para(&mut items, &mut lines, para_start, para_end);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+		} else if is_code_line(trimmed) {
+			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a whole-line call to a
+			// template function Austenite does not yet run: it closes any open block and is skipped. The
+			// styling and computation layer is a later increment; the prose around it still sets.
+			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 		} else if trimmed.starts_with('=') {
 			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end);
@@ -169,31 +175,38 @@ fn normalise_ws(s: &str) -> String {
 	s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Splits a whitespace-collapsed paragraph into inline runs, recognising `*strong*` and `/emph/`. A
-/// delimiter opens emphasis only when it flanks the left of a word -- the start of the paragraph,
-/// whitespace, or an opening bracket precedes it and a non-space follows -- and closes only when it
-/// flanks the right -- a non-space precedes it and the end, whitespace, or closing punctuation follows.
-/// An unpaired delimiter is ordinary text, so `5 * 3`, `12/25` and `and/or` are left untouched. Nesting
-/// is a later increment: the first valid closer ends the run, and any delimiter inside it is literal.
+/// Splits a whitespace-collapsed paragraph into inline runs in Typst's markup: `*strong*`, `_emph_`, a
+/// `@label` cross-reference, and `\`-escapes. An emphasis delimiter pairs only when it flanks a word --
+/// whitespace or an opening bracket before it and a non-space after to open, the reverse to close -- so
+/// `fe2o3_net`, `5 * 3` and a lone `_` are ordinary text. A backslash sets the next character literally,
+/// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
+/// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
 fn parse_inlines(text: &str) -> Vec<Inline> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let n					= chars.len();
 	let mut runs:	Vec<Inline>	= Vec::new();
-	let mut plain			= String::new();	// ordinary text gathered before the next emphasis run
+	let mut plain			= String::new();	// ordinary text gathered before the next run
 	let mut i				= 0usize;
 	while i < n {
 		let c = chars[i];
-		if c == '#' {
-			if let Some((inline, next)) = reference(&chars, i) {
+		// A backslash escapes the next character, which is then set as itself.
+		if c == '\\' && i + 1 < n {
+			plain.push(chars[i + 1]);
+			i += 2;
+			continue;
+		}
+		// A Typst cross-reference: `@` then a label.
+		if c == '@' {
+			if let Some((label, next)) = at_label(&chars, i) {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
-				runs.push(inline);
+				runs.push(Inline::PageRef(label));
 				i = next;
 				continue;
 			}
 		}
-		if (c == '*' || c == '/') && is_opener(&chars, i) {
+		if (c == '*' || c == '_') && is_opener(&chars, i) {
 			if let Some(close) = find_closer(&chars, i + 1, c) {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
@@ -249,39 +262,60 @@ fn find_closer(chars: &[char], start: usize, delim: char) -> Option<usize> {
 	(start..chars.len()).find(|&j| chars[j] == delim && is_closer(chars, j))
 }
 
-/// Reads a `#`-sigil inline at `i`: `#total-pages()` or `#ref(<label>).page`, returning the inline and
-/// the index just past it. A `#` that opens neither is left to the caller as an ordinary character, so a
-/// stray hash in prose is literal. A label runs to the first `>` and carries no whitespace.
-fn reference(chars: &[char], i: usize) -> Option<(Inline, usize)> {
-	if let Some(next) = at(chars, i, "#total-pages()") {
-		return Some((Inline::TotalPages, next));
-	}
-	let open = at(chars, i, "#ref(<")?;
-	let mut j = open;
-	while j < chars.len() && chars[j] != '>' {
+/// Reads a Typst cross-reference at `i` (an `@`): the label of letters, digits and `- _ :` that follows,
+/// and the index just past it. `None` when no label char follows, so a bare or escaped `@` is ordinary
+/// text. A trailing `.` is not a label character, so `@intro.` at the end of a sentence keeps its stop.
+fn at_label(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let start	= i + 1;
+	let mut j	= start;
+	while j < chars.len() && is_label_char(chars[j]) {
 		j += 1;
 	}
-	if j >= chars.len() {
-		return None;	// no closing '>'
-	}
-	let label: String = chars[open..j].iter().collect();
-	let tail = at(chars, j + 1, ").page")?;	// past '>' and the mandatory ).page
-	if label.is_empty() || label.contains(char::is_whitespace) {
+	if j == start {
 		return None;
 	}
-	Some((Inline::PageRef(label), tail))
+	Some((chars[start..j].iter().collect(), j))
 }
 
-/// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
-fn at(chars: &[char], i: usize, s: &str) -> Option<usize> {
-	let mut k = i;
-	for ch in s.chars() {
-		if chars.get(k) != Some(&ch) {
-			return None;
+/// A character legal within a Typst label. Deliberately excludes `.`, so a label does not swallow the
+/// full stop that ends a sentence.
+fn is_label_char(c: char) -> bool {
+	c.is_alphanumeric() || matches!(c, '-' | '_' | ':')
+}
+
+/// Is this already-left-trimmed line a Typst code statement Austenite skips for now? The four block
+/// statements (`#import`, `#let`, `#set`, `#show`) and a whole-line call to a template function -- a
+/// line that opens `#name(` or `#name[` and closes with the matching bracket -- are the styling and
+/// computation layer, a later increment; the prose around them still sets.
+fn is_code_line(trimmed: &str) -> bool {
+	for kw in ["#import ", "#import\"", "#let ", "#set ", "#show ", "#show:"] {
+		if trimmed.starts_with(kw) {
+			return true;
 		}
-		k += 1;
 	}
-	Some(k)
+	standalone_call(trimmed)
+}
+
+/// Does the whole line consist of one `#name(...)` or `#name[...]` call? A crude test -- it opens with
+/// `#`, an identifier, then `(` or `[`, and ends with `)` or `]` -- enough to skip a single-line call to
+/// an unrecognised template function without mistaking a paragraph that merely contains an inline call.
+fn standalone_call(trimmed: &str) -> bool {
+	let mut cs = trimmed.chars();
+	if cs.next() != Some('#') {
+		return false;
+	}
+	let mut saw_ident = false;
+	for c in cs {
+		if c.is_alphanumeric() || c == '-' || c == '_' {
+			saw_ident = true;
+			continue;
+		}
+		// The first non-identifier character must open the call.
+		return saw_ident
+			&& (c == '(' || c == '[')
+			&& (trimmed.ends_with(')') || trimmed.ends_with(']'));
+	}
+	false
 }
 
 /// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
