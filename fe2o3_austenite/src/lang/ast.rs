@@ -19,7 +19,7 @@ pub enum Item {
 	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
-	Figure { body: FigureBody, caption: Option<String>, supplement: String, label: Option<String>, span: Span },
+	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, span: Span },	// caption: the caption's inline markup
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is
@@ -33,14 +33,15 @@ pub enum FigureBody {
 }
 
 /// A parsed Typst `#table(...)` call, before it is built into a [`table::Table`](crate::table::Table).
-/// The cells are already flattened to display text, row-major; `header` is set when a `fill:` keys the
-/// first row or the first row is wholly bold; `align` records the column alignment the call declared.
+/// Each cell keeps its inline runs, row-major, so a bold header, an italic word, a superscript or an
+/// in-cell maths span sets with its own face rather than flattening to upright text; `header` is set when
+/// a `fill:` keys the first row; `align` records the column alignment the call declared.
 #[derive(Clone, Debug)]
 pub struct TableSpec {
 	pub ncols:	usize,
 	pub header:	bool,
 	pub align:	AlignSpec,
-	pub cells:	Vec<String>,	// flat, row-major, markup already reduced to display text
+	pub cells:	Vec<Vec<Inline>>,	// flat, row-major; each cell a run of inline markup
 }
 
 /// How a table's cells align. `Uniform` sets every cell alike; `PerColumn` gives each column its own

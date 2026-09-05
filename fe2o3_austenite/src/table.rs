@@ -16,7 +16,11 @@
 //! several lines simply contributes to several bands. The whole grid is thus leaves in HBoxes stacked
 //! in one VBox, which is the only shape the driver draws as real glyphs throughout.
 
-use crate::doc::Style;
+use crate::doc::{
+	Segment,
+	Style,
+	superscript,
+};
 use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
@@ -28,7 +32,11 @@ use crate::ir::{
 	Node,
 	Sp,
 };
-use crate::linebreak::break_paragraph;
+use crate::linebreak::{
+	Piece,
+	break_paragraph_pieces,
+};
+use crate::math;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -54,21 +62,27 @@ pub enum Align {
 	Right,
 }
 
-/// One cell: its text, and how that text aligns in the column. A cell holds text in this increment;
-/// inline runs (a bold word inside a cell) are a later variant here.
+/// One cell: its inline content, and how that content aligns in the column. A cell carries a run of
+/// [`Segment`]s -- a bold header, an italic word, a superscript dagger or an in-cell maths span each set
+/// with its own face -- broken to the column width exactly as a rich paragraph is broken to the measure.
 #[derive(Clone, Debug)]
 pub struct Cell {
-	pub text:	String,
-	pub align:	Align,
+	pub content:	Vec<Segment>,
+	pub align:		Align,
 }
 
 impl Cell {
 	pub fn new<S: Into<String>>(text: S) -> Self {
-		Self { text: text.into(), align: Align::Left }
+		Self { content: vec![Segment::text(text)], align: Align::Left }
 	}
 
 	pub fn aligned<S: Into<String>>(text: S, align: Align) -> Self {
-		Self { text: text.into(), align }
+		Self { content: vec![Segment::text(text)], align }
+	}
+
+	/// A cell carrying a run of rich segments -- the form the reader builds from a Typst cell's markup.
+	pub fn rich(content: Vec<Segment>, align: Align) -> Self {
+		Self { content, align }
 	}
 }
 
@@ -153,7 +167,12 @@ pub fn lower(
 			reduce the columns or the padding.", ncols, measure.raw(); Input, Invalid, TooBig));
 	}
 
-	let colwidth = res!(size_columns(fonts.clone(), size, table, ncols, available));
+	// Each cell's inline content is built once into the pieces the line breaker weaves -- a run of shaped
+	// text in its face, a maths cluster, a superscript mark -- and reused for measuring the columns and for
+	// the final wrap, so a cell shapes its faces only once. The base role per row is bold in a header row,
+	// so a plain header label still sets bold, and body elsewhere.
+	let (piece_grid, bases) = res!(build_grid(fonts.clone(), style, table, ncols));
+	let colwidth = res!(size_columns(fonts.clone(), size, &piece_grid, &bases, ncols, available));
 
 	// Column boundary positions, the running x of each vertical rule and each cell's text left.
 	let mut vrule_left	= vec![Sp::ZERO; ncols + 1];
@@ -174,15 +193,12 @@ pub fn lower(
 	// Wrap every cell to its column, and note the tallest stack of lines in each row.
 	let mut grid:	Vec<Vec<Vec<CellLine>>>	= Vec::with_capacity(rows.len());
 	let mut nbands:	Vec<usize>				= Vec::with_capacity(rows.len());
-	for (r, row) in rows.iter().enumerate() {
-		let role = row_role(table, r);
+	for r in 0..rows.len() {
 		let mut cells = Vec::with_capacity(ncols);
 		let mut bands = 0usize;
 		for c in 0..ncols {
-			let lines = match row.cells.get(c) {
-				Some(cell)	=> res!(wrap_cell(fonts.clone(), role, size, &cell.text, colwidth[c], style.leading)),
-				None		=> Vec::new(),
-			};
+			let lines = res!(break_cell(
+				fonts.clone(), bases[r], size, &piece_grid[r][c], colwidth[c], style.leading));
 			bands = bands.max(lines.len());
 			cells.push(lines);
 		}
@@ -258,9 +274,95 @@ pub fn lower(
 	Ok(Node::VBox(BoxNode::new(children, dims)))
 }
 
-/// The role a row's cells are shaped in: bold for a header row, the body face otherwise.
-fn row_role(table: &Table, r: usize) -> Role {
+/// The base role a row's plain text sets in: bold for a header row, the body face otherwise. Authored
+/// emphasis within a cell keeps its own face over this base.
+fn base_role(table: &Table, r: usize) -> Role {
 	if table.header && r == 0 { Role::Bold } else { Role::Body }
+}
+
+/// Builds every cell's pieces once, and the base role of each row. A missing cell (a ragged row shorter
+/// than the widest) gives an empty piece list, so the column simply carries nothing there.
+fn build_grid(
+	fonts:	Arc<FontSet>,
+	style:	Style,
+	table:	&Table,
+	ncols:	usize,
+)
+	-> Outcome<(Vec<Vec<Vec<Piece>>>, Vec<Role>)>
+{
+	let mut grid:	Vec<Vec<Vec<Piece>>>	= Vec::with_capacity(table.rows.len());
+	let mut bases:	Vec<Role>				= Vec::with_capacity(table.rows.len());
+	for (r, row) in table.rows.iter().enumerate() {
+		let base = base_role(table, r);
+		bases.push(base);
+		let mut cols = Vec::with_capacity(ncols);
+		for c in 0..ncols {
+			let pieces = match row.cells.get(c) {
+				Some(cell)	=> res!(cell_pieces(fonts.clone(), style, &cell.content, base)),
+				None		=> Vec::new(),
+			};
+			cols.push(pieces);
+		}
+		grid.push(cols);
+	}
+	Ok((grid, bases))
+}
+
+/// Turns a cell's rich segments into the pieces the line breaker weaves. Plain text takes the row's base
+/// role -- a header cell's bold, a body cell's body; `*strong*`, `_emph_`, a `#super[...]`, inline code
+/// and an in-cell maths span keep their own faces, so a cell sets exactly as a run of prose would. A
+/// footnote or a cross-reference in a cell -- rare -- is not set here; a citation falls back to its keys.
+fn cell_pieces(
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	segments:	&[Segment],
+	base:		Role,
+)
+	-> Outcome<Vec<Piece>>
+{
+	let size = style.body_size;
+	let mut pieces = Vec::with_capacity(segments.len());
+	for seg in segments {
+		match seg {
+			Segment::Text(t)		=> pieces.push(Piece::Text { text: t.clone(), role: base }),
+			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
+			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: emph_role(base) }),
+			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
+			Segment::Glossary { display, .. }
+									=> pieces.push(Piece::Text { text: display.clone(), role: base }),
+			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: base }),
+			Segment::PageRef(_)		=> {},	// a cross-reference in a cell is not resolved to a page here
+			Segment::Footnote { .. }	=> {},	// a footnote in a cell is not set at this increment
+			Segment::Super(t) => {
+				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
+			},
+			Segment::Math(expr) => {
+				// The inline box is flattened to leaves and glue by the maths layout; its children weave into
+				// the line as real glyphs, its baseline seated on the text baseline.
+				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				if let Node::HBox(b) = node {
+					let ascent	= res!(ShapedText::new(
+						fonts.clone(), base, Dir::Ltr, size, "0")).dims().height;
+					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
+					pieces.push(Piece::Math {
+						nodes:	b.list,
+						width:	b.dims.width,
+						height:	ascent,
+						depth:	b.dims.depth,
+						over,
+					});
+				}
+			},
+		}
+	}
+	Ok(pieces)
+}
+
+/// The face an emphasised run takes over a base: bold-italic within a header (whose base is bold), plain
+/// italic elsewhere.
+fn emph_role(base: Role) -> Role {
+	if base == Role::Bold { Role::BoldItalic } else { Role::Italic }
 }
 
 /// Assigns each column a text width. Each column asks for its widest cell's natural width; when the
@@ -273,7 +375,8 @@ fn row_role(table: &Table, r: usize) -> Role {
 fn size_columns(
 	fonts:		Arc<FontSet>,
 	size:		Sp,
-	table:		&Table,
+	grid:		&[Vec<Vec<Piece>>],
+	bases:		&[Role],
 	ncols:		usize,
 	available:	i32,
 )
@@ -281,15 +384,19 @@ fn size_columns(
 {
 	let mut natural	= vec![0i64; ncols];
 	let mut minw	= vec![0i64; ncols];
-	for (r, row) in table.rows.iter().enumerate() {
-		let role = row_role(table, r);
+	for (r, row) in grid.iter().enumerate() {
+		let base = bases[r];
 		for c in 0..ncols {
-			if let Some(cell) = row.cells.get(c) {
-				let nat = res!(text_width(fonts.clone(), role, size, &cell.text));
-				natural[c] = natural[c].max(nat.raw() as i64);
-				let lw = res!(longest_word(fonts.clone(), role, size, &cell.text));
-				minw[c] = minw[c].max(lw.raw() as i64);
+			let pieces = &row[c];
+			if pieces.is_empty() {
+				continue;
 			}
+			// The natural width is the cell set on one line; the minimum is the widest line once the cell is
+			// broken as hard as it can be, the least the column can shrink to before a word must protrude.
+			let nat = res!(measure_cell(fonts.clone(), base, size, pieces, Sp::from_pt(100_000.0)));
+			natural[c] = natural[c].max(nat.raw() as i64);
+			let lw = res!(measure_cell(fonts.clone(), base, size, pieces, Sp(1)));
+			minw[c] = minw[c].max(lw.raw() as i64);
 		}
 	}
 
@@ -333,46 +440,44 @@ fn size_columns(
 	Ok(colwidth)
 }
 
-/// The natural width of a cell's whole text set on one line, or zero for an empty cell.
-fn text_width(fonts: Arc<FontSet>, role: Role, size: Sp, text: &str) -> Outcome<Sp> {
-	if text.trim().is_empty() {
-		return Ok(Sp::ZERO);
-	}
-	let shaped = res!(ShapedText::new(fonts, role, Dir::Ltr, size, text));
-	Ok(shaped.dims().width)
-}
-
-/// The width of a cell's widest single word: the least a column can be squeezed to before a word
-/// must protrude.
-fn longest_word(fonts: Arc<FontSet>, role: Role, size: Sp, text: &str) -> Outcome<Sp> {
+/// The widest line a cell's pieces set to when broken at `measure`: at a large measure this is the cell's
+/// natural one-line width, at a tiny one the least it can shrink to. Zero for an empty cell.
+fn measure_cell(
+	fonts:		Arc<FontSet>,
+	base:		Role,
+	size:		Sp,
+	pieces:		&[Piece],
+	measure:	Sp,
+)
+	-> Outcome<Sp>
+{
 	let mut m = Sp::ZERO;
-	for w in text.split_whitespace() {
-		let shaped = res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, w));
-		if shaped.dims().width > m {
-			m = shaped.dims().width;
+	for line in res!(break_cell(fonts, base, size, pieces, measure, size)) {
+		if line.width > m {
+			m = line.width;
 		}
 	}
 	Ok(m)
 }
 
-/// Wraps a cell's text to its column, reusing the paragraph line breaker at the column width. Each
-/// returned HBox is one line; its shaped leaves and glue are kept, with the natural width summed for
-/// alignment. The interline glue the breaker inserts is dropped -- a band supplies its own vertical
-/// spacing.
-fn wrap_cell(
+/// Breaks a cell's pieces to its column, reusing the rich-paragraph line breaker at the column width, so a
+/// cell's faces, superscripts and maths flow exactly as a paragraph's do. Each returned HBox is one line;
+/// its leaves and glue are kept, with the natural width summed for alignment. The interline glue the
+/// breaker inserts is dropped -- a band supplies its own vertical spacing. An empty cell yields no lines.
+fn break_cell(
 	fonts:		Arc<FontSet>,
-	role:		Role,
+	base:		Role,
 	size:		Sp,
-	text:		&str,
+	pieces:		&[Piece],
 	colwidth:	Sp,
 	leading:	Sp,
 )
 	-> Outcome<Vec<CellLine>>
 {
-	if text.trim().is_empty() {
+	if pieces.is_empty() {
 		return Ok(Vec::new());
 	}
-	let nodes = res!(break_paragraph(fonts, role, Dir::Ltr, size, text, colwidth, leading));
+	let nodes = res!(break_paragraph_pieces(fonts, base, Dir::Ltr, size, pieces, colwidth, leading));
 	let mut out = Vec::new();
 	for n in nodes {
 		if let Node::HBox(b) = n {

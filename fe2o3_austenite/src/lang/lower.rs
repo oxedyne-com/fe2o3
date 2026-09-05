@@ -39,28 +39,33 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
-			Item::Figure { body, caption, supplement, label, .. }	=> out.push(match body {
-				FigureBody::Table(spec)	=> Block::table_figure(
-					build_table(spec), caption.clone(), supplement.clone(), label.clone()),
-				FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
-					path.clone(), *width, *height, *scale,
-					caption.clone(), supplement.clone(), label.clone()),
-			}),
+			Item::Figure { body, caption, supplement, label, .. }	=> {
+				let caption = caption.as_ref().map(|runs| runs.iter().map(lower_inline).collect());
+				out.push(match body {
+					FigureBody::Table(spec)	=> Block::table_figure(
+						build_table(spec), caption, supplement.clone(), label.clone()),
+					FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
+						path.clone(), *width, *height, *scale,
+						caption, supplement.clone(), label.clone()),
+				});
+			},
 		}
 	}
 	out
 }
 
 /// Builds a [`Table`] from the parsed spec: the flat cells are chunked into rows of `ncols`, each cell
-/// given its alignment from the [`AlignSpec`]. A header row's cells set centred; a closure aligns the
-/// first column centred and the rest flush left, matching the `(col, row) => ...` idiom these books use.
+/// carrying its inline runs lowered to segments and its alignment from the [`AlignSpec`]. A header row's
+/// cells set centred; a closure aligns the first column centred and the rest flush left, matching the
+/// `(col, row) => ...` idiom these books use.
 fn build_table(spec: &TableSpec) -> Table {
 	let ncols = spec.ncols.max(1);
 	let mut rows:	Vec<Row>	= Vec::new();
 	for (r, chunk) in spec.cells.chunks(ncols).enumerate() {
 		let mut cells = Vec::with_capacity(ncols);
-		for (c, text) in chunk.iter().enumerate() {
-			cells.push(Cell::aligned(text.clone(), cell_align(&spec.align, spec.header, r, c)));
+		for (c, runs) in chunk.iter().enumerate() {
+			let content = runs.iter().map(lower_inline).collect();
+			cells.push(Cell::rich(content, cell_align(&spec.align, spec.header, r, c)));
 		}
 		rows.push(Row::new(cells));
 	}

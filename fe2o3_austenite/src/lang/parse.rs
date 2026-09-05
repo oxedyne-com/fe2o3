@@ -71,9 +71,9 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	let mut capture:	Option<Capture>		= None;
 
 	// Data arrays declared by `#let name = (...)` and referenced by a table's `..name.flatten()` spread:
-	// the name maps to the flat sequence of cell texts the array holds. Populated as the arrays are read,
-	// so a later figure resolves its cells against them.
-	let mut arrays:		HashMap<String, Vec<String>>	= HashMap::new();
+	// the name maps to the flat sequence of cells the array holds, each cell a run of inline markup.
+	// Populated as the arrays are read, so a later figure resolves its cells against them.
+	let mut arrays:		HashMap<String, Vec<Vec<Inline>>>	= HashMap::new();
 
 	// Whether a `/* ... */` block comment is open across the line break. A `//` line comment never
 	// straddles a line, so it needs no carried state.
@@ -1118,7 +1118,7 @@ fn let_array_name(trimmed: &str) -> Option<String> {
 fn dispatch_capture(
 	cap:	Capture,
 	items:	&mut Vec<Item>,
-	arrays:	&mut HashMap<String, Vec<String>>,
+	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
 )
 {
 	match cap.kind {
@@ -1140,10 +1140,10 @@ fn dispatch_capture(
 	}
 }
 
-/// Evaluates a `#let name = (...)` value into the flat sequence of cell texts it holds. The value is the
-/// paren group after the `=`; every `[...]` group within it, at any depth, is one cell -- which is what
-/// `array.flatten()` yields for an array of content tuples.
-fn parse_let_array(buf: &str) -> Vec<String> {
+/// Evaluates a `#let name = (...)` value into the flat sequence of cells it holds, each cell its inline
+/// runs. The value is the paren group after the `=`; every `[...]` group within it, at any depth, is one
+/// cell -- which is what `array.flatten()` yields for an array of content tuples.
+fn parse_let_array(buf: &str) -> Vec<Vec<Inline>> {
 	let chars:	Vec<char>	= buf.chars().collect();
 	let eq = match chars.iter().position(|&c| c == '=') {
 		Some(e)	=> e,
@@ -1159,9 +1159,11 @@ fn parse_let_array(buf: &str) -> Vec<String> {
 	}
 }
 
-/// Collects every `[...]` group in `inner`, in order, as flattened cell text. A `[` inside a string is
-/// not a cell. Once a group opens, its whole content is one cell and is not descended into.
-fn collect_cells(inner: &str) -> Vec<String> {
+/// Collects every `[...]` group in `inner`, in order, each parsed into its inline runs. A `[` inside a
+/// string is not a cell. Once a group opens, its whole content is one cell and is not descended into, so
+/// a `table.cell(colspan: n)[...]` wrapper contributes its single bracketed content as one cell (the span
+/// is not yet modelled, so the cell sits in one column).
+fn collect_cells(inner: &str) -> Vec<Vec<Inline>> {
 	let chars:	Vec<char>	= inner.chars().collect();
 	let mut cells			= Vec::new();
 	let mut in_str			= false;
@@ -1183,7 +1185,7 @@ fn collect_cells(inner: &str) -> Vec<String> {
 		}
 		if c == '[' {
 			if let Some((content, next)) = read_group(&chars, i) {
-				cells.push(flatten_markup(&content));
+				cells.push(parse_inlines(&content));
 				i = next;
 				continue;
 			}
@@ -1197,11 +1199,11 @@ fn collect_cells(inner: &str) -> Vec<String> {
 /// count, `align:` the alignment, a `fill:` keyed on `row == 0` marks a header row; cells come from
 /// inline `[...]` groups and from a `..name.flatten()` spread resolved against the data arrays. `None`
 /// when no cells are found, so an empty or unresolved table sets nothing.
-fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<String>>) -> Option<TableSpec> {
+fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option<TableSpec> {
 	let mut ncols	= 1usize;
 	let mut align	= AlignSpec::Uniform(Align::Left);
 	let mut header	= false;
-	let mut cells:	Vec<String>	= Vec::new();
+	let mut cells:	Vec<Vec<Inline>>	= Vec::new();
 	for arg in split_top_args(inner) {
 		let a = arg.trim();
 		if a.is_empty() {
@@ -1225,7 +1227,7 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<String>>) -> Optio
 		if a.starts_with('[') {
 			let ch: Vec<char> = a.chars().collect();
 			if let Some((content, _)) = read_group(&ch, 0) {
-				cells.push(flatten_markup(&content));
+				cells.push(parse_inlines(&content));
 			}
 		}
 	}
@@ -1238,11 +1240,11 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<String>>) -> Optio
 /// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
 /// positional argument is the body -- a wrapped `#table(...)` set in full, or an image call stood in for
 /// by a placeholder; `caption:` sets the caption, `supplement:`/`kind:` the "Figure" or "Table" label.
-fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<String>>) -> Option<Item> {
+fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option<Item> {
 	let (body_src, label)	= strip_trailing_label(buf);
 	let inner				= call_inner(&body_src, "figure")?;
 
-	let mut caption:	Option<String>	= None;
+	let mut caption:	Option<Vec<Inline>>	= None;
 	let mut supplement:	Option<String>	= None;
 	let mut kind:		Option<String>	= None;
 	let mut positional:	Option<String>	= None;
@@ -1253,7 +1255,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<String>>) -> Option<Item
 		}
 		if let Some((key, val)) = named_arg(a) {
 			match key.as_str() {
-				"caption"		=> caption = Some(caption_text(&val)),
+				"caption"		=> caption = Some(caption_inlines(&val)),
 				"supplement"	=> supplement = Some(unquote(&val)),
 				"kind"			=> kind = Some(unquote(&val)),
 				_				=> {},	// placement and the rest do not affect the set figure
@@ -1276,7 +1278,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<String>>) -> Option<Item
 
 /// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
 /// parses, otherwise an image carrying the path and any declared sizing (empty path when none is found).
-fn figure_body(text: &str, arrays: &HashMap<String, Vec<String>>) -> FigureBody {
+fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> FigureBody {
 	if let Some(inner) = call_inner(text, "table") {
 		if let Some(spec) = parse_table_spec(&inner, arrays) {
 			return FigureBody::Table(spec);
@@ -1513,17 +1515,18 @@ fn mentions_row0(val: &str) -> bool {
 	compact.contains("row==0")
 }
 
-/// Reduces a `caption: [...]` value to display text: the bracket content flattened, or the whole value
-/// flattened when it is not a bracket group.
-fn caption_text(val: &str) -> String {
+/// Parses a `caption: [...]` value into its inline runs: the bracket content scanned for markup, or the
+/// whole value scanned when it is not a bracket group, so a caption's emphasis, superscript or in-caption
+/// maths sets with its own face rather than flattening to upright text.
+fn caption_inlines(val: &str) -> Vec<Inline> {
 	let v = val.trim();
 	let ch: Vec<char> = v.chars().collect();
 	if ch.first() == Some(&'[') {
 		if let Some((content, _)) = read_group(&ch, 0) {
-			return flatten_markup(&content);
+			return parse_inlines(&content);
 		}
 	}
-	flatten_markup(v)
+	parse_inlines(v)
 }
 
 /// Strips a trailing `<label>` from a captured call, returning the call text without it and the label.

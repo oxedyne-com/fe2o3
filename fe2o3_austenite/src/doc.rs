@@ -154,7 +154,7 @@ pub enum Block {
 	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
 	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
 	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
-	TableFigure { table: Table, caption: Option<String>, supplement: String, label: Option<String> },
+	TableFigure { table: Table, caption: Option<Vec<Segment>>, supplement: String, label: Option<String> },
 	// A `#figure(...)` wrapping an image: the loaded raster centred in the measure with the numbered
 	// caption beneath, or -- when the path resolves to nothing or is a vector SVG with no raster beside
 	// it -- a sized placeholder box in its place. The sizing hints size the drawn image.
@@ -163,7 +163,7 @@ pub enum Block {
 		width:		Option<Length>,
 		height:		Option<Length>,
 		scale:		Option<f64>,
-		caption:	Option<String>,
+		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
 	},
@@ -233,7 +233,7 @@ impl Block {
 	/// numbered per supplement so tables and figures carry independent counts.
 	pub fn table_figure(
 		table:		Table,
-		caption:	Option<String>,
+		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
 	)
@@ -251,7 +251,7 @@ impl Block {
 		width:		Option<Length>,
 		height:		Option<Length>,
 		scale:		Option<f64>,
-		caption:	Option<String>,
+		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
 	)
@@ -964,7 +964,7 @@ fn build_footnote(
 /// baseline. The box height is the surrounding ascent less a raise of a third of that ascent; the
 /// emitter draws a run's baseline at `y + height`, so a shorter box lifts the run above the line's
 /// baseline. The width and depth are the small run's own, keeping the mark narrow.
-fn superscript(
+pub(crate) fn superscript(
 	fonts:	Arc<FontSet>,
 	role:	Role,
 	base:	Sp,
@@ -1114,7 +1114,7 @@ fn table_figure(
 	style:		Style,
 	measure:	Sp,
 	table:		&Table,
-	caption:	Option<&str>,
+	caption:	Option<&[Segment]>,
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
@@ -1141,7 +1141,7 @@ fn image_figure(
 	width:		Option<Length>,
 	height:		Option<Length>,
 	scale:		Option<f64>,
-	caption:	Option<&str>,
+	caption:	Option<&[Segment]>,
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
@@ -1229,8 +1229,17 @@ fn figure_anchors(nodes: &mut Vec<Node>, supplement: &str, number: u32, label: O
 		AnchorKind::Float, fmt!("{}-{}", supplement.to_lowercase(), number))));
 }
 
+/// One typeset unit of a caption: an unbreakable cluster of one or more boxes (a word, or a word with an
+/// attached superscript, or a maths cluster) with its extent, or a breakable interword space.
+enum CapTok {
+	Unit { nodes: Vec<Node>, width: Sp, height: Sp, depth: Sp },
+	Space,
+}
+
 /// Sets a figure caption -- "{supplement} {number}: {caption}" -- centred beneath the figure, wrapped
-/// greedily into ragged centred lines at the body size. A caption with no text sets just its number.
+/// greedily into ragged centred lines at the body size. The caption's own runs are set with their faces,
+/// so an emphasised word, a superscript or an in-caption maths span renders rather than flattening to
+/// upright text or vanishing. A caption with no text sets just its number.
 fn captioned(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
@@ -1238,61 +1247,198 @@ fn captioned(
 	measure:	Sp,
 	supplement:	&str,
 	number:		u32,
-	caption:	Option<&str>,
+	caption:	Option<&[Segment]>,
 )
 	-> Outcome<()>
 {
-	let text = match caption {
-		Some(c) if !c.trim().is_empty()	=> fmt!("{} {}: {}", supplement, number, c.trim()),
-		_								=> fmt!("{} {}", supplement, number),
-	};
-
 	let size	= style.body_size;
-	let mut line	= String::new();
-	let mut first	= true;
-	for word in text.split_whitespace() {
-		let trial = if line.is_empty() { word.to_string() } else { fmt!("{} {}", line, word) };
-		let shaped = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, &trial));
-		if shaped.dims().width > measure && !line.is_empty() {
-			res!(emit_caption_line(nodes, fonts.clone(), style, measure, size, &line, &mut first));
-			line = word.to_string();
-		} else {
-			line = trial;
+	let space_w	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, " ")).dims().width;
+
+	// The leading "{supplement} {number}: " (or just the number when the caption has no text), then the
+	// caption's segments, tokenised into words, spaces, superscripts and maths clusters. A shared
+	// pending-space flag carries a run's trailing space to the next token, so spacing follows the source.
+	let has_text	= caption.map(|c| segments_have_text(c)).unwrap_or(false);
+	let prefix		= if has_text { fmt!("{} {}: ", supplement, number) } else { fmt!("{} {}", supplement, number) };
+
+	let mut toks:	Vec<CapTok>	= Vec::new();
+	let mut pending				= false;
+	res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, &prefix));
+	if let Some(segs) = caption {
+		for seg in segs {
+			match seg {
+				Segment::Text(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, t)),
+				Segment::Strong(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Bold, size, t)),
+				Segment::Emph(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Italic, size, t)),
+				Segment::Code(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Mono, size, t)),
+				Segment::Glossary { display, .. }
+									=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, display)),
+				Segment::Cite(keys)	=> res!(push_caption_text(
+										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")))),
+				Segment::PageRef(_)		=> {},	// a cross-reference in a caption is not resolved here
+				Segment::Footnote { .. }	=> {},	// a footnote in a caption is not set here
+				Segment::Super(t) => {
+					let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
+					push_caption_box(&mut toks, &mut pending,
+						vec![Node::Leaf(Leaf::text_dims(shaped, dims))], dims.width, dims.height, dims.depth);
+				},
+				Segment::Math(expr) => {
+					let node = res!(math::layout(fonts.clone(), &style, expr, false));
+					if let Node::HBox(b) = node {
+						push_caption_box(&mut toks, &mut pending, b.list, b.dims.width, b.dims.height, b.dims.depth);
+					}
+				},
+			}
+		}
+	}
+
+	// Greedy line fill: units joined by single spaces, broken before the unit that would overrun the
+	// measure. Each finished line is centred by a left glue of half its slack.
+	let mut line:	Vec<&CapTok>	= Vec::new();
+	let mut line_w					= Sp::ZERO;
+	let mut first					= true;
+	for tok in &toks {
+		if let CapTok::Unit { width, .. } = tok {
+			let add = if line.is_empty() { *width } else { space_w + *width };
+			if !line.is_empty() && line_w + add > measure {
+				res!(emit_caption_units(nodes, style, measure, space_w, &line, line_w, &mut first));
+				line.clear();
+				line_w = Sp::ZERO;
+			}
+			line_w += if line.is_empty() { *width } else { space_w + *width };
+			line.push(tok);
 		}
 	}
 	if !line.is_empty() {
-		res!(emit_caption_line(nodes, fonts.clone(), style, measure, size, &line, &mut first));
+		res!(emit_caption_units(nodes, style, measure, space_w, &line, line_w, &mut first));
 	}
 	Ok(())
 }
 
-/// Sets one centred caption line, with interline leading before every line but the first.
-fn emit_caption_line(
-	nodes:		&mut Vec<Node>,
+/// Whether any caption segment carries visible text, so the colon prefix is set only for a real caption.
+fn segments_have_text(segs: &[Segment]) -> bool {
+	segs.iter().any(|s| match s {
+		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::Code(t) | Segment::Super(t)
+							=> !t.trim().is_empty(),
+		Segment::Glossary { display, .. }	=> !display.trim().is_empty(),
+		Segment::Math(_) | Segment::Cite(_)	=> true,
+		_									=> false,
+	})
+}
+
+/// Tokenises a text run into word units and interword spaces, in the given face, appending to `toks`. A
+/// leading or run-crossing space is carried in `pending` and emitted only before the next word, so the
+/// source's spacing survives and a trailing space attaches to whatever segment follows.
+fn push_caption_text(
+	toks:		&mut Vec<CapTok>,
+	pending:	&mut bool,
 	fonts:		Arc<FontSet>,
+	role:		Role,
+	size:		Sp,
+	text:		&str,
+)
+	-> Outcome<()>
+{
+	let mut word = String::new();
+	for c in text.chars() {
+		if c.is_whitespace() {
+			if !word.is_empty() {
+				res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word));
+			}
+			*pending = true;
+		} else {
+			word.push(c);
+		}
+	}
+	if !word.is_empty() {
+		res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word));
+	}
+	Ok(())
+}
+
+/// Shapes one word and pushes it as a unit, emitting a pending space before it when one is due.
+fn flush_caption_word(
+	toks:		&mut Vec<CapTok>,
+	pending:	&mut bool,
+	fonts:		Arc<FontSet>,
+	role:		Role,
+	size:		Sp,
+	word:		&mut String,
+)
+	-> Outcome<()>
+{
+	let shaped	= res!(ShapedText::new(fonts, role, Dir::Ltr, size, word));
+	let d		= shaped.dims();
+	push_caption_box(toks, pending, vec![Node::Leaf(Leaf::text(shaped))], d.width, d.height, d.depth);
+	word.clear();
+	Ok(())
+}
+
+/// Pushes a pre-built box as a caption unit, emitting a pending interword space before it first. Adjacent
+/// boxes with no pending space between them (a word and its attached superscript) become one unit.
+fn push_caption_box(
+	toks:		&mut Vec<CapTok>,
+	pending:	&mut bool,
+	mut boxes:	Vec<Node>,
+	width:		Sp,
+	height:		Sp,
+	depth:		Sp,
+)
+{
+	if *pending {
+		toks.push(CapTok::Space);
+		*pending = false;
+	} else if let Some(CapTok::Unit { nodes, width: w, height: h, depth: dp }) = toks.last_mut() {
+		// No space since the previous unit: attach to it, so a word and its superscript stay unbreakable.
+		nodes.append(&mut boxes);
+		*w		= *w + width;
+		*h		= (*h).max(height);
+		*dp		= (*dp).max(depth);
+		return;
+	}
+	toks.push(CapTok::Unit { nodes: boxes, width, height, depth });
+}
+
+/// Sets one centred caption line from its units, with interline leading before every line but the first.
+fn emit_caption_units(
+	nodes:		&mut Vec<Node>,
 	style:		Style,
 	measure:	Sp,
-	size:		Sp,
-	line:		&str,
+	space_w:	Sp,
+	line:		&[&CapTok],
+	line_w:		Sp,
 	first:		&mut bool,
 )
 	-> Outcome<()>
 {
-	let shaped	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, size, line));
-	let d		= shaped.dims();
+	let mut height	= Sp::ZERO;
+	let mut depth	= Sp::ZERO;
+	for tok in line {
+		if let CapTok::Unit { height: h, depth: d, .. } = tok {
+			height	= height.max(*h);
+			depth	= depth.max(*d);
+		}
+	}
 	if !*first {
-		let vext	= d.height + d.depth;
+		let vext	= height + depth;
 		let gap		= if style.leading > vext { style.leading - vext } else { style.line_gap };
 		nodes.push(Node::Glue(Glue::fixed(gap)));
 	}
 	*first = false;
-	let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+
+	let pad = if measure > line_w { Sp((measure.raw() - line_w.raw()) / 2) } else { Sp::ZERO };
 	let mut row:	Vec<Node> = Vec::new();
 	if pad.raw() > 0 {
 		row.push(Node::Glue(Glue::fixed(pad)));
 	}
-	row.push(Node::Leaf(Leaf::text(shaped)));
-	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	for (k, tok) in line.iter().enumerate() {
+		if let CapTok::Unit { nodes: ns, .. } = tok {
+			if k > 0 {
+				row.push(Node::Glue(Glue::fixed(space_w)));	// the single interword space between units
+			}
+			for n in ns { row.push(n.clone()); }
+		}
+	}
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, height, depth))));
 	Ok(())
 }
 
