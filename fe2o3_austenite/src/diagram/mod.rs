@@ -448,6 +448,7 @@ fn ink_bounds(ops: &[DrawOp]) -> Outcome<Bounds> {
 		let path = match op {
 			DrawOp::Fill { path, .. }	=> path,
 			DrawOp::Stroke { path, .. }	=> path,
+			DrawOp::Image { .. }		=> continue,	// a raster has no vector ink to bound; a diagram emits none
 		};
 		if let Some(b) = path.bounds(&Transform::IDENTITY) {
 			bb = Some(match bb {
@@ -471,5 +472,8 @@ fn shift(op: DrawOp, t: &Transform) -> Outcome<DrawOp> {
 			colour,
 			width,
 		},
+		// A diagram carries only vector ink, so a raster never reaches this frame shift; it passes through
+		// untouched, the arm present only for exhaustiveness over the shared draw-op vocabulary.
+		img @ DrawOp::Image { .. } => img,
 	})
 }

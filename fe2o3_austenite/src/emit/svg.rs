@@ -25,6 +25,7 @@ use oxedyne_fe2o3_graphics::{
 		Bounds,
 		Path,
 	},
+	pixmap::Pixmap,
 	stroke::Stroke,
 	svg::{
 		presentation,
@@ -32,6 +33,7 @@ use oxedyne_fe2o3_graphics::{
 	},
 	transform::Transform,
 };
+use oxedyne_fe2o3_text::base64;
 
 /// Renders one page as a self-contained SVG document.
 pub fn render_page(page: &Page) -> Outcome<String> {
@@ -102,6 +104,8 @@ fn draw_graphic(
 	-> Outcome<()>
 {
 	let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
+	let ox = bx.to_pt() as f32;
+	let oy = by.to_pt() as f32;
 	for op in &graphic.ops {
 		match op {
 			DrawOp::Fill { path, colour } => {
@@ -114,6 +118,18 @@ fn draw_graphic(
 				let p	= res!(path.transform(&t));
 				out.push_str(&fmt!(
 					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(None, Some((*colour, &pen)))));
+			},
+			DrawOp::Image { image, x, y, w, h } => {
+				// The raster is re-encoded to PNG and embedded as a base64 data URI in an `<image>`. Its
+				// frame is the page's own -- top-left, y down -- so the rectangle is placed directly, with
+				// no flip; `preserveAspectRatio="none"` lets the box already sized to the aspect fill.
+				let pm	= res!(Pixmap::from_data(image.width, image.height, image.rgba.clone()));
+				let png	= res!(pm.to_png());
+				let b64	= base64::encode(&png);
+				out.push_str(&fmt!(
+					"  <image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" \
+						href=\"data:image/png;base64,{}\"/>\n",
+					ox + *x, oy + *y, *w, *h, b64));
 			},
 		}
 	}

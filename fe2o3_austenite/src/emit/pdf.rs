@@ -130,10 +130,20 @@ fn draw_graphic(
 	-> Outcome<()>
 {
 	let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
+	let ox = bx.to_pt();
+	let oy = by.to_pt();
 	for op in &graphic.ops {
 		match op {
 			DrawOp::Fill { path, colour }			=> out.fill(res!(path.transform(&t)), *colour),
 			DrawOp::Stroke { path, colour, width }	=> out.stroke(res!(path.transform(&t)), *colour, (*width).into()),
+			DrawOp::Image { image, x, y, w, h } => {
+				// The raster fills its rectangle at the graphic's placement; the PDF writer embeds it as an
+				// image XObject, straight RGB with a soft mask only when a sample is translucent.
+				let (rgb, alpha) = crate::image::split_rgba(image);
+				out.image(
+					rgb, alpha, image.width, image.height,
+					ox + *x as f64, oy + *y as f64, *w as f64, *h as f64);
+			},
 		}
 	}
 	Ok(())

@@ -37,8 +37,10 @@ const FNV_BASIS_A:	u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_BASIS_B:	u64 = 0x8422_2325_cbf2_9ce4;
 const FNV_PRIME:	u64 = 0x0000_0100_0000_01b3;
 
-/// One drawn shape: a path and how it is painted. Fill and stroke are the two the typesetter needs --
-/// glyphs and rules fill, a held-open reservation strokes.
+/// One drawn shape: a path and how it is painted, or a raster image placed in a rectangle. Fill and
+/// stroke are the two the typesetter needs for vector ink -- glyphs and rules fill, a held-open
+/// reservation strokes; `Image` embeds a decoded raster (a figure's photograph or diagram) as an image
+/// XObject, its samples straight RGB with an optional grey soft mask for translucency.
 #[derive(Clone, Debug)]
 pub enum Draw {
 	Fill {
@@ -50,15 +52,27 @@ pub enum Draw {
 		colour:	Rgba,
 		width:	f64,	// pen width, in points
 	},
+	Image {
+		rgb:	Vec<u8>,			// packed RGB, iw*ih*3, row-major, top row first
+		alpha:	Option<Vec<u8>>,	// packed grey soft mask, iw*ih, present only when a pixel is translucent
+		iw:		usize,				// image width in samples
+		ih:		usize,				// image height in samples
+		x:		f64,				// placement rectangle, engine frame (top-left, y down), points
+		y:		f64,
+		w:		f64,
+		h:		f64,
+	},
 }
 
 impl Draw {
 
-	/// The paint colour, whichever kind of draw this is.
+	/// The paint colour of a vector draw, opaque for an image (whose translucency rides its own soft
+	/// mask, not the page's alpha graphics state).
 	fn colour(&self) -> Rgba {
 		match self {
 			Draw::Fill { colour, .. }	=> *colour,
 			Draw::Stroke { colour, .. }	=> *colour,
+			Draw::Image { .. }			=> Rgba::new(0, 0, 0, 255),
 		}
 	}
 }
@@ -87,6 +101,26 @@ impl PdfPage {
 
 	pub fn stroke(&mut self, path: Path, colour: Rgba, width: f64) {
 		self.draws.push(Draw::Stroke { path, colour, width });
+	}
+
+	/// Places a decoded raster in the rectangle at top-left `(x, y)`, `w` wide and `h` tall, in the
+	/// engine's y-down point frame. `rgb` is `iw * ih * 3` straight-RGB samples, top row first; `alpha`,
+	/// when given, is the matching `iw * ih` grey soft mask that carries any translucency. The image is
+	/// scaled to fill the rectangle, so the caller sizes the rectangle to the image's aspect if it wants
+	/// no distortion.
+	#[allow(clippy::too_many_arguments)]
+	pub fn image(
+		&mut self,
+		rgb:	Vec<u8>,
+		alpha:	Option<Vec<u8>>,
+		iw:		usize,
+		ih:		usize,
+		x:		f64,
+		y:		f64,
+		w:		f64,
+		h:		f64,
+	) {
+		self.draws.push(Draw::Image { rgb, alpha, iw, ih, x, y, w, h });
 	}
 }
 
@@ -145,6 +179,7 @@ pub struct PdfStream<W: Write> {
 	offsets:	Vec<usize>,		// one-based object byte offsets; [0] is the free object
 	pos:		usize,			// bytes of body written so far, the next object's offset
 	added:		usize,			// pages handed over so far
+	next_extra:	usize,			// next free object number past the fixed page/content block, for image XObjects
 	hash_a:		u64,			// running FNV-1a of the body, first `/ID` half
 	hash_b:		u64,			// running FNV-1a of the body, second half
 }
@@ -161,6 +196,7 @@ impl<W: Write> PdfStream<W> {
 			offsets:	vec![0; obj_count + 1],
 			pos:		0,
 			added:		0,
+			next_extra:	obj_count + 1,
 			hash_a:		FNV_BASIS_A,
 			hash_b:		FNV_BASIS_B,
 		};
@@ -202,6 +238,26 @@ impl<W: Write> PdfStream<W> {
 		let page_obj	= 3 + 2 * i;
 		let content_obj	= 4 + 2 * i;
 
+		// Assign object numbers for every image on the page -- one for the image itself, and one more for
+		// its soft mask when it carries translucency -- so the page's resource dictionary can name them
+		// before the streams are written. The numbers run past the fixed page/content block, growing the
+		// object count a no-image document never touches.
+		let mut img_objs: Vec<(usize, Option<usize>)> = Vec::new();
+		for d in &page.draws {
+			if let Draw::Image { alpha, .. } = d {
+				let image_obj = self.next_extra;
+				self.next_extra += 1;
+				let smask_obj = if alpha.is_some() {
+					let m = self.next_extra;
+					self.next_extra += 1;
+					Some(m)
+				} else {
+					None
+				};
+				img_objs.push((image_obj, smask_obj));
+			}
+		}
+
 		// The content stream, built now so its `/Length` is known before the object that wraps it.
 		let raw = content_stream(page).into_bytes();
 		let bytes = if self.compress {
@@ -214,7 +270,7 @@ impl<W: Write> PdfStream<W> {
 		let head = fmt!(
 			"{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {} {}] {} \
 				/Contents {} 0 R >>\nendobj\n",
-			page_obj, numf(page.width), numf(page.height), resources(page), content_obj);
+			page_obj, numf(page.width), numf(page.height), resources(page, &img_objs), content_obj);
 		res!(self.body(head.as_bytes()));
 
 		self.offsets[content_obj] = self.pos;
@@ -225,15 +281,86 @@ impl<W: Write> PdfStream<W> {
 		res!(self.body(&bytes));
 		res!(self.body(b"\nendstream\nendobj\n"));
 
+		// The image XObjects, in the order their numbers were assigned. The soft mask, when present, is
+		// written straight after the image object that references it.
+		let mut idx = 0;
+		for d in &page.draws {
+			if let Draw::Image { rgb, alpha, iw, ih, .. } = d {
+				let (image_obj, smask_obj) = img_objs[idx];
+				idx += 1;
+				res!(self.write_image(image_obj, rgb, *iw, *ih, smask_obj));
+				if let (Some(m), Some(a)) = (smask_obj, alpha) {
+					res!(self.write_smask(m, a, *iw, *ih));
+				}
+			}
+		}
+
 		self.added += 1;
 		Ok(())
+	}
+
+	/// Writes an image XObject: a straight-RGB, eight-bit `/DeviceRGB` sample stream, always
+	/// zlib-compressed so a photograph does not bloat the file, and pointing at its soft mask when one
+	/// was assigned. The samples are folded into the deterministic `/ID` like all body bytes.
+	fn write_image(
+		&mut self,
+		obj:	usize,
+		rgb:	&[u8],
+		iw:		usize,
+		ih:		usize,
+		smask:	Option<usize>,
+	)
+		-> Outcome<()>
+	{
+		let data = res!(deflate(rgb));
+		self.set_extra_offset(obj);
+		let mask = match smask {
+			Some(m)	=> fmt!(" /SMask {} 0 R", m),
+			None	=> String::new(),
+		};
+		let head = fmt!(
+			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceRGB \
+				/BitsPerComponent 8{} /Filter /FlateDecode /Length {} >>\nstream\n",
+			obj, iw, ih, mask, data.len());
+		res!(self.body(head.as_bytes()));
+		res!(self.body(&data));
+		res!(self.body(b"\nendstream\nendobj\n"));
+		Ok(())
+	}
+
+	/// Writes a soft-mask XObject: a single-channel `/DeviceGray` image the same size as its owner, its
+	/// samples the straight alpha, zlib-compressed and folded into the `/ID` like any body bytes.
+	fn write_smask(&mut self, obj: usize, alpha: &[u8], iw: usize, ih: usize) -> Outcome<()> {
+		let data = res!(deflate(alpha));
+		self.set_extra_offset(obj);
+		let head = fmt!(
+			"{} 0 obj\n<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray \
+				/BitsPerComponent 8 /Filter /FlateDecode /Length {} >>\nstream\n",
+			obj, iw, ih, data.len());
+		res!(self.body(head.as_bytes()));
+		res!(self.body(&data));
+		res!(self.body(b"\nendstream\nendobj\n"));
+		Ok(())
+	}
+
+	/// Records the byte offset of an extra object -- an image or soft mask numbered past the fixed
+	/// page/content block -- growing the offset table to reach it. The extras are assigned and written in
+	/// increasing number order, so the table grows one slot at a time and stays indexed by object number.
+	fn set_extra_offset(&mut self, obj: usize) {
+		while self.offsets.len() <= obj {
+			self.offsets.push(0);
+		}
+		self.offsets[obj] = self.pos;
 	}
 
 	/// Closes the file: writes the cross-reference table and the trailer, flushes, and returns the sink.
 	/// The `/ID` is the body hash folded as the body was written, so the file matches
 	/// [`PdfWriter::to_bytes`] to the byte.
 	pub fn finish(mut self) -> Outcome<W> {
-		let obj_count = 2 + 2 * self.n;
+		// The fixed page/content block is `2 + 2n` objects; every image and soft mask took a further
+		// number past it, so the highest object written is one below the next free number. A document with
+		// no images leaves `next_extra` at `2 + 2n + 1`, giving exactly the original count.
+		let obj_count = self.next_extra - 1;
 
 		// The identifier is derived from the body already written, never from the clock. The two halves
 		// were folded byte by byte as the body streamed out.
@@ -288,9 +415,22 @@ fn content_stream(page: &PdfPage) -> String {
 	// and sets nothing.
 	let translucent = page.draws.iter().any(|d| d.colour().a != 255);
 	let mut cur_alpha: Option<u8> = None;
+	let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
 
 	for d in &page.draws {
 		match d {
+			Draw::Image { x, y, w, h, .. } => {
+				// The page CTM already flips y into the engine's top-left frame. An image's sample space
+				// paints the unit square with its top row at the square's top, so mapping it into the
+				// rectangle at top-left (x, y) needs `w 0 0 -h x (y+h)`: the negative height and the raised
+				// origin put the first row at y and the last at y+h. Bracketed in q/Q so it disturbs nothing
+				// after it.
+				s.push_str("q\n");
+				s.push_str(&fmt!("{} 0 0 {} {} {} cm\n", numf(*w), numf(-*h), numf(*x), numf(*y + *h)));
+				s.push_str(&fmt!("/Im{} Do\n", img_k));
+				s.push_str("Q\n");
+				img_k += 1;
+			},
 			Draw::Fill { path, colour } => {
 				if translucent {
 					set_alpha(&mut s, &mut cur_alpha, colour.a);
@@ -364,13 +504,31 @@ fn path_ops(s: &mut String, path: &Path) {
 	}
 }
 
-/// The page's `/Resources`, holding an `/ExtGState` for each distinct alpha only when the page has a
-/// translucent shape. An all-opaque page carries an empty resource dictionary.
-fn resources(page: &PdfPage) -> String {
+/// The page's `/Resources`: an `/ExtGState` for each distinct alpha when a shape is translucent, and an
+/// `/XObject` dict naming each image `/Im{k}` by the object number assigned in [`PdfStream::page`]. An
+/// all-opaque page with no image carries an empty resource dictionary -- byte for byte the original.
+fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)]) -> String {
 	let translucent = page.draws.iter().any(|d| d.colour().a != 255);
+
+	// The image resource dict, `/Im{k}` in draw order to match the content stream's `Do` names.
+	let xobjects = if img_objs.is_empty() {
+		String::new()
+	} else {
+		let mut x = String::from(" /XObject << ");
+		for (k, (obj, _)) in img_objs.iter().enumerate() {
+			x.push_str(&fmt!("/Im{} {} 0 R ", k, obj));
+		}
+		x.push_str(">>");
+		x
+	};
+
 	if !translucent {
-		return fmt!("/Resources << >>");
+		if xobjects.is_empty() {
+			return fmt!("/Resources << >>");
+		}
+		return fmt!("/Resources <<{} >>", xobjects);
 	}
+
 	let mut alphas: Vec<u8> = Vec::new();
 	for d in &page.draws {
 		let a = d.colour().a;
@@ -389,7 +547,7 @@ fn resources(page: &PdfPage) -> String {
 		let v = chan(*a);
 		gs.push_str(&fmt!("/GS{} << /ca {} /CA {} >> ", a, v, v));
 	}
-	fmt!("/Resources << /ExtGState << {}>> >>", gs)
+	fmt!("/Resources << /ExtGState << {}>>{} >>", gs, xobjects)
 }
 
 /// Sets the alpha graphics state, but only when it changes, naming each state `/GSn` by its alpha

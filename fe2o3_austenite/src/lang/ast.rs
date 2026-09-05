@@ -5,6 +5,7 @@
 //! The `#` code mode and the declared-query references of `sec_language` are later increments -- the
 //! tree names only what the engine can already set.
 
+use crate::ir::Length;
 use crate::ir::Span;
 use crate::math::Atom;
 use crate::table::Align;
@@ -26,7 +27,9 @@ pub enum Item {
 #[derive(Clone, Debug)]
 pub enum FigureBody {
 	Table(TableSpec),
-	Image { path: String },	// the image path, for the placeholder's note and a later loader
+	// The image path and any sizing the call declared: `width`/`height` from `image(...)`, `scale` from
+	// `padded-image(...)`. A hint the call omits is `None`, and the figure fills the measure.
+	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64> },
 }
 
 /// A parsed Typst `#table(...)` call, before it is built into a [`table::Table`](crate::table::Table).

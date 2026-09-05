@@ -35,6 +35,7 @@ pub mod emit;
 pub mod font;
 pub mod fonts;
 pub mod hyphenate;
+pub mod image;
 pub mod ir;
 pub mod lang;
 pub mod ledger;

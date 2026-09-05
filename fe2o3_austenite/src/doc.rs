@@ -28,8 +28,10 @@ use crate::ir::{
 	Glue,
 	Graphic,
 	Leaf,
+	Length,
 	Node,
 	Penalty,
+	RasterImage,
 	Sp,
 };
 use crate::ledger::{
@@ -142,9 +144,18 @@ pub enum Block {
 	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
 	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
 	TableFigure { table: Table, caption: Option<String>, supplement: String, label: Option<String> },
-	// A `#figure(...)` wrapping an image: a sized placeholder box stands in for the image this increment
-	// does not load, with the numbered caption beneath. The path is kept for a later image loader.
-	ImageFigure { path: String, caption: Option<String>, supplement: String, label: Option<String> },
+	// A `#figure(...)` wrapping an image: the loaded raster centred in the measure with the numbered
+	// caption beneath, or -- when the path resolves to nothing or is a vector SVG with no raster beside
+	// it -- a sized placeholder box in its place. The sizing hints size the drawn image.
+	ImageFigure {
+		path:		String,
+		width:		Option<Length>,
+		height:		Option<Length>,
+		scale:		Option<f64>,
+		caption:	Option<String>,
+		supplement:	String,
+		label:		Option<String>,
+	},
 }
 
 impl Block {
@@ -206,17 +217,22 @@ impl Block {
 		Self::TableFigure { table, caption, supplement, label }
 	}
 
-	/// An image wrapped in a figure, stood in for by a placeholder box this increment. The path is kept
-	/// so a later increment can load the image in its place.
+	/// An image wrapped in a figure: the raster at `path`, sized by the declared hints, centred in the
+	/// measure with its numbered caption beneath. A path that resolves to nothing, or a vector SVG with no
+	/// raster beside it, falls back to a placeholder box at render time.
+	#[allow(clippy::too_many_arguments)]
 	pub fn image_figure(
 		path:		String,
+		width:		Option<Length>,
+		height:		Option<Length>,
+		scale:		Option<f64>,
 		caption:	Option<String>,
 		supplement:	String,
 		label:		Option<String>,
 	)
 		-> Self
 	{
-		Self::ImageFigure { path, caption, supplement, label }
+		Self::ImageFigure { path, width, height, scale, caption, supplement, label }
 	}
 }
 
@@ -520,13 +536,13 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
-			Block::ImageFigure { path, caption, supplement, label } => {
+			Block::ImageFigure { path, width, height, scale, caption, supplement, label } => {
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				}
 				let number = next_number(&mut counters, supplement);
 				res!(image_figure(
-					&mut nodes, fonts.clone(), style, measure, path,
+					&mut nodes, fonts.clone(), style, measure, path, *width, *height, *scale,
 					caption.as_deref(), supplement, number, label.as_deref()));
 				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
@@ -968,16 +984,19 @@ fn table_figure(
 	Ok(())
 }
 
-/// Sets an image wrapped in a figure: the figure's anchors, a sized placeholder box centred where the
-/// image will go, then a numbered caption beneath. The image itself is loaded by a later increment; the
-/// placeholder holds its space so the surrounding pagination is already near-right.
+/// Sets an image wrapped in a figure: the figure's anchors, the loaded raster centred in the measure,
+/// then a numbered caption beneath. A path that resolves to nothing, or a vector SVG with no raster
+/// beside it, falls back to the placeholder box, which holds the same space so pagination is unchanged.
 #[allow(clippy::too_many_arguments)]
 fn image_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
 	style:		Style,
 	measure:	Sp,
-	_path:		&str,
+	path:		&str,
+	width:		Option<Length>,
+	height:		Option<Length>,
+	scale:		Option<f64>,
 	caption:	Option<&str>,
 	supplement:	&str,
 	number:		u32,
@@ -987,7 +1006,13 @@ fn image_figure(
 {
 	figure_anchors(nodes, supplement, number, label);
 
-	let leaf	= Leaf::graphic(res!(placeholder(measure)));
+	// The loaded raster sized to the measure, or the placeholder box when nothing loads. A load failure
+	// is not fatal: the figure keeps its space and its caption, and the missing ink is a reported gap.
+	let graphic = match crate::image::load(path) {
+		Ok(img)	=> res!(image_graphic(measure, img, width, height, scale)),
+		Err(_)	=> res!(placeholder(measure)),
+	};
+	let leaf	= Leaf::graphic(graphic);
 	let gw		= leaf.dims.width;
 	let gh		= leaf.dims.height + leaf.dims.depth;
 	let pad		= if measure > gw { Sp((measure.raw() - gw.raw()) / 2) } else { Sp::ZERO };
@@ -1000,6 +1025,53 @@ fn image_figure(
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
 	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
 	Ok(())
+}
+
+/// Builds a graphic that draws a loaded raster to fill a box sized from the declared hints and the
+/// image's own aspect. With no hint the image fills the measure; a `width`/`height` in the source sets
+/// that axis and the other follows the aspect; a hint that would overflow the measure is clamped to it.
+/// A single [`DrawOp::Image`] carries the pixels, so the emitters place one raster per figure.
+fn image_graphic(
+	measure:	Sp,
+	img:		RasterImage,
+	width:		Option<Length>,
+	height:		Option<Length>,
+	scale:		Option<f64>,
+)
+	-> Outcome<Graphic>
+{
+	let m		= measure.to_pt();
+	let iw		= img.width.max(1) as f64;
+	let ih		= img.height.max(1) as f64;
+	let aspect	= ih / iw;
+
+	// Resolve the declared width and height to points; a percentage is of the measure, a length absolute.
+	let resolve = |len: Length| -> f64 {
+		match len {
+			Length::Rel(f)	=> m * f,
+			Length::Abs(pt)	=> pt,
+		}
+	};
+
+	// A width wins the sizing; else a height sets it through the aspect; else the image fills the
+	// measure. `scale` on a `padded-image` multiplies a filled measure, so a 100% scale is the measure.
+	let mut w = match (width, height) {
+		(Some(wl), _)		=> resolve(wl),
+		(None, Some(hl))	=> resolve(hl) / aspect,
+		(None, None)		=> m * scale.unwrap_or(1.0),
+	};
+	if w > m || w <= 0.0 {
+		w = m;
+	}
+	let h = match height {
+		Some(hl) if width.is_none() && scale.is_none()	=> resolve(hl),
+		_												=> w * aspect,
+	};
+
+	let wf	= w as f32;
+	let hf	= h as f32;
+	let ops	= vec![DrawOp::Image { image: Arc::new(img), x: 0.0, y: 0.0, w: wf, h: hf }];
+	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w), Sp::from_pt(h), Sp::ZERO)))
 }
 
 /// Records a figure's anchors: an author label (when the source labelled it) so a cross-reference

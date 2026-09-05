@@ -42,8 +42,9 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::Figure { body, caption, supplement, label, .. }	=> out.push(match body {
 				FigureBody::Table(spec)	=> Block::table_figure(
 					build_table(spec), caption.clone(), supplement.clone(), label.clone()),
-				FigureBody::Image { path }	=> Block::image_figure(
-					path.clone(), caption.clone(), supplement.clone(), label.clone()),
+				FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
+					path.clone(), *width, *height, *scale,
+					caption.clone(), supplement.clone(), label.clone()),
 			}),
 		}
 	}

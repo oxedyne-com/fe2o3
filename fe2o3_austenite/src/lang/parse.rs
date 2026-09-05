@@ -25,6 +25,7 @@
 //! glossary term sets its display text, bold-italic on its first document use; a visible index call sets
 //! its display text plain; a pure index marker sets nothing.
 
+use crate::ir::Length;
 use crate::ir::Span;
 use crate::table::Align;
 
@@ -1114,27 +1115,73 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<String>>) -> Option<Item
 }
 
 /// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
-/// parses, otherwise an image placeholder carrying the image path (empty when none is found).
+/// parses, otherwise an image carrying the path and any declared sizing (empty path when none is found).
 fn figure_body(text: &str, arrays: &HashMap<String, Vec<String>>) -> FigureBody {
 	if let Some(inner) = call_inner(text, "table") {
 		if let Some(spec) = parse_table_spec(&inner, arrays) {
 			return FigureBody::Table(spec);
 		}
 	}
-	FigureBody::Image { path: image_path(text).unwrap_or_default() }
+	let (path, width, height, scale) = image_call(text);
+	FigureBody::Image { path, width, height, scale }
 }
 
-/// The image path of a `padded-image("...")` or `image("...")` call in `text`, or `None`. The custom
-/// wrapper is tried first, since `image` is a word boundary within it only after the hyphen.
-fn image_path(text: &str) -> Option<String> {
+/// The path and sizing of a `padded-image("...")` or `image("...")` call in `text`. The custom wrapper is
+/// tried first, since `image` is a word boundary within it only after the hyphen. The first positional
+/// argument is the path; `width`/`height` size an `image(...)`, `scale` a `padded-image(...)`. A path
+/// that is not found gives an empty string, which the block layer stands in for with a placeholder.
+fn image_call(text: &str) -> (String, Option<Length>, Option<Length>, Option<f64>) {
 	for name in ["padded-image", "image"] {
 		if let Some(inner) = call_inner(text, name) {
-			if let Some(s) = first_string(&inner) {
-				return Some(s);
+			let mut path:	Option<String>	= None;
+			let mut width:	Option<Length>	= None;
+			let mut height:	Option<Length>	= None;
+			let mut scale:	Option<f64>		= None;
+			for arg in split_top_args(&inner) {
+				let a = arg.trim();
+				if a.is_empty() {
+					continue;
+				}
+				if let Some((key, val)) = named_arg(a) {
+					match key.as_str() {
+						"width"		=> width = parse_length(&val),
+						"height"	=> height = parse_length(&val),
+						"scale"		=> scale = parse_percent(&val),
+						_			=> {},	// padding and the rest do not size the set image
+					}
+					continue;
+				}
+				if path.is_none() {
+					path = first_string(a);
+				}
+			}
+			if let Some(p) = path {
+				return (p, width, height, scale);
 			}
 		}
 	}
-	None
+	(String::new(), None, None, None)
+}
+
+/// Reads a Typst length argument into a [`Length`]: a percentage as a fraction of the measure, a `pt`,
+/// `mm`, `cm` or `in` length as absolute points, a bare number as points. `auto` and anything unreadable
+/// give `None`, so the figure falls back to filling the measure.
+fn parse_length(val: &str) -> Option<Length> {
+	let v = val.trim();
+	if let Some(pct) = v.strip_suffix('%') {
+		return pct.trim().parse::<f64>().ok().map(|n| Length::Rel(n / 100.0));
+	}
+	for (unit, per_pt) in [("pt", 1.0), ("mm", 72.0 / 25.4), ("cm", 72.0 / 2.54), ("in", 72.0)] {
+		if let Some(num) = v.strip_suffix(unit) {
+			return num.trim().parse::<f64>().ok().map(|n| Length::Abs(n * per_pt));
+		}
+	}
+	v.parse::<f64>().ok().map(Length::Abs)
+}
+
+/// Reads a percentage argument (`100%`) into a fraction (`1.0`), or `None` when it is not a percentage.
+fn parse_percent(val: &str) -> Option<f64> {
+	val.trim().strip_suffix('%').and_then(|p| p.trim().parse::<f64>().ok()).map(|n| n / 100.0)
 }
 
 /// The content of the first `name(...)` call in `text`, balanced across nesting and strings, or `None`.

@@ -203,12 +203,33 @@ pub struct Footnote {
 	pub height:	Sp,			// the note's stacked vertical extent, reserved from the body
 }
 
-/// One drawing operation within a [`Graphic`]: a filled or stroked path in the graphic's own frame,
-/// which is y down and in points, so placing the graphic needs only a translation.
+/// A decoded raster image: straight, eight-bit RGBA samples, row-major with the top row first, ready to
+/// hand to the PDF and SVG writers. Held behind an [`Arc`] in a [`DrawOp::Image`] so a figure's pixels
+/// are shared, not copied, as the graphic rides the stream.
+#[derive(Clone, Debug)]
+pub struct RasterImage {
+	pub width:	usize,		// samples across
+	pub height:	usize,		// samples down
+	pub rgba:	Vec<u8>,	// width * height * 4 straight-RGBA bytes, top row first
+}
+
+/// A hint from an `image(...)` or `padded-image(...)` call for how large to draw a figure: a fraction of
+/// the measure (`50%`) or an absolute length in points (`4cm`). An axis with no hint is taken from the
+/// other axis and the image's own aspect, and a figure with no hint at all fills the measure.
+#[derive(Clone, Copy, Debug)]
+pub enum Length {
+	Rel(f64),	// a fraction of the container measure
+	Abs(f64),	// an absolute length in points
+}
+
+/// One drawing operation within a [`Graphic`]: a filled or stroked path, or a placed raster, in the
+/// graphic's own frame, which is y down and in points, so placing the graphic needs only a translation.
 #[derive(Clone, Debug)]
 pub enum DrawOp {
 	Fill { path: Path, colour: Rgba },
 	Stroke { path: Path, colour: Rgba, width: f32 },	// stroke width in points
+	// A raster drawn to fill the rectangle at top-left (x, y), w wide and h tall, in the graphic's frame.
+	Image { image: Arc<RasterImage>, x: f32, y: f32, w: f32, h: f32 },
 }
 
 /// A self-contained piece of drawn ink -- a diagram, a figure, a baked label run -- as a bag of paths

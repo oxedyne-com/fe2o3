@@ -60,6 +60,13 @@ fn main() -> Outcome<()> {
 			"Could not read the Ingot source file {:?}.", source; File, Read)),
 	};
 
+	// A figure's `/assets/...` image path is root-relative in Typst, not filesystem-absolute; the image
+	// loader resolves it against this directory and, failing that, its ancestors, so a chapter compiled
+	// on its own finds the shared assets through the book's `assets` entry just as a whole book does.
+	if let Some(dir) = std::path::Path::new(&source).parent() {
+		res!(oxedyne_fe2o3_austenite::image::set_base_dir(dir.to_path_buf()));
+	}
+
 	// A book root assembles chapters and carries its own geometry, fonts and type; a lone file sets on
 	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
 	// one place or the other, and the rest of the run is identical.
