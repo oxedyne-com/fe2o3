@@ -10,14 +10,15 @@
 //! rectangle. The one returned HBox is unwrapped by the caller: [`doc`](crate::doc) weaves its leaves
 //! into a paragraph line for inline maths, or centres them on their own line for a display equation.
 //!
-//! The MATH-font boundary, stated plainly. A real OpenType MATH font carries an italic maths alphabet,
-//! glyph variants that grow a delimiter or a radical to its content, and a table of layout constants
-//! (the axis height, the fraction rule thickness, the script shifts, the spacing). The embedded text
-//! faces carry none of this. So this module approximates: a variable is set in the text italic rather
-//! than a maths italic; the axis is a quarter of the em rather than the font's `AxisHeight`; the rule
-//! thickness and the inter-atom spaces are TeX's plain defaults, not the face's; and a delimiter is
-//! whatever the text face draws at the running size, with no growth. Radicals, big operators, growing
-//! delimiters, matrices and a maths parser are later work; see the crate's phase notes.
+//! The MATH-font boundary, stated plainly. Latin Modern Math carries a real OpenType MATH table, and
+//! this module now sets to it: the maths italic alphabet, the axis height, the fraction rule thickness,
+//! the display-style fraction shifts and gaps, the script shifts and their minima, and the two script
+//! scale-down percentages are all read from the font, and a delimiter or a radical grows to its content
+//! through the font's vertical glyph variants. The plain-TeX guesses -- a quarter-em axis, half-em
+//! shifts, seven-tenths and one-half script sizes -- survive only as the fallback for a text face with
+//! no MATH table. The inter-atom spacing is still TeX's reduced `mu` table rather than the font's, and a
+//! delimiter taller than the largest pre-drawn variant is not yet assembled from repeating pieces; big
+//! operators, matrices and a maths parser are later work. See the crate's phase notes.
 
 use crate::doc::Style;
 use crate::font::ShapedText;
@@ -54,9 +55,8 @@ use std::sync::{
 // The maths font: Latin Modern Math, the OpenType form of Computer Modern -- the faces TeX sets
 // mathematics in -- so a variable, an operator and a radical wear the letterforms a reader knows from
 // every mathematics paper. It carries the Mathematical Italic block, the upright operators and the
-// large symbols, and an OpenType MATH table of layout constants and grown-delimiter variants. This
-// increment draws its glyphs; reading the MATH table for the constants and the growing delimiters is
-// the next step.
+// large symbols, and an OpenType MATH table of layout constants and grown-delimiter variants, which
+// this module reads for its shifts, gaps and variants (see the header).
 const MATH_FONT: &[u8] = include_bytes!("../fonts/latinmodern-math.otf");
 
 /// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
@@ -216,15 +216,34 @@ impl Level {
 	}
 }
 
-/// The type size at a level: the body size at text, seven tenths of it at script, half at
-/// script-of-script -- the ratios plain TeX uses, since the text faces carry no optical sizes.
+/// The type size at a level: the body size at text, and the two smaller sizes from the maths font's
+/// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. Latin Modern's are 70 and 50, the
+/// plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a MATH table.
 fn size_for(style: &Style, level: Level) -> Sp {
 	let body = style.body_size.raw();
+	let (s_pct, ss_pct) = script_percents();
 	match level {
 		Level::Text			=> style.body_size,
-		Level::Script		=> Sp(body * 7 / 10),
-		Level::ScriptScript	=> Sp(body / 2),
+		Level::Script		=> Sp(body * s_pct / 100),
+		Level::ScriptScript	=> Sp(body * ss_pct / 100),
 	}
+}
+
+/// The maths font's two script scale-down percentages, or the plain-TeX 70 and 50 when the font carries
+/// no MATH table. Read from the cached table, so this costs only a lookup.
+fn script_percents() -> (i32, i32) {
+	match math_table() {
+		Ok(Some(t)) => {
+			let c = t.constants();
+			(c.script_percent_scale_down as i32, c.script_script_percent_scale_down as i32)
+		},
+		_ => (70, 50),
+	}
+}
+
+/// A design-unit length scaled to a type size in scaled points, from the parsed table.
+fn du(table: &Arc<MathTable>, value: i16, size_pt: f32) -> Sp {
+	Sp::from_pt(table.scaled(value, size_pt) as f64)
 }
 
 /// What a drawable is: a shaped glyph run, or a horizontal bar of the given thickness (a fraction
@@ -385,14 +404,26 @@ fn build_row(
 
 	for atom in items {
 		let m = res!(build(style, atom, level, display));
+		// TeX's binary-operator cancellation: a Bin with no atom to its left to bind -- at the row's
+		// start, or after another operator, a relation or an opening -- is not binary but a sign on the
+		// atom that follows, so it is retyped Ord and sheds its medium space. This is what turns the
+		// leading minus of `-b` from a subtraction with a gap into a tight unary sign.
+		let cls = match m.class {
+			Class::Bin => match prev {
+				None => Class::Ord,
+				Some(Class::Ord) | Some(Class::Close) => Class::Bin,
+				Some(_) => Class::Ord,
+			},
+			other => other,
+		};
 		if let Some(pc) = prev {
-			cursor += space_between(pc, m.class, size);
+			cursor += space_between(pc, cls, size);
 		}
 		place_into(&mut pieces, m.pieces, cursor, Sp::ZERO);
 		cursor += m.width;
 		if m.height > height { height = m.height; }
 		if m.depth > depth { depth = m.depth; }
-		prev = Some(m.class);
+		prev = Some(cls);
 	}
 	Ok(MBox { pieces, width: cursor, height, depth, class: Class::Ord })
 }
@@ -421,9 +452,11 @@ fn mu_between(left: Class, right: Class) -> i32 {
 	}
 }
 
-/// Stacks a numerator over a denominator, centred over a bar seated on the maths axis. The parts are
-/// set one level down (a fraction inside running text uses script size), the bar is the default rule
-/// thickness, and the axis is a quarter of the em -- the height a relation and a fraction centre on.
+/// Stacks a numerator over a denominator, centred over a bar seated on the maths axis. Following TeX's
+/// style rule, a display fraction's immediate parts stay full size (Display's numerator style is Text)
+/// while a script-level fraction's parts step down; the shifts, the gaps, the rule thickness and the
+/// axis all come from the font's MATH constants -- the display-style variants of the fraction metrics --
+/// falling back to the plain-TeX guesses only when the font has no table.
 fn build_frac(
 	style:		&Style,
 	num:		&Atom,
@@ -441,27 +474,59 @@ fn build_frac(
 			Atom::Sym("/".to_string(), Class::Ord),
 			den.clone(),
 		];
-		return build_row(style, &items, level, display);
+		// A text/inline fraction's parts drop one size level (Text's numerator style is Script).
+		return build_row(style, &items, level.smaller(), display);
 	}
 
 	let size	= size_for(style, level);
-	let sub		= level.smaller();
-	let n		= res!(build(style, num, sub, display));
-	let d		= res!(build(style, den, sub, display));
+	let size_pt	= size.to_pt() as f32;
+	let table	= res!(math_table());
 
-	let axis	= Sp(size.raw() / 4);		// the maths axis, a quarter of the em
-	let t		= style.rule_thin;			// the fraction bar, the default rule thickness
-	let phi		= Sp(size.raw() / 6);		// clearance between a part and the bar
-	let pad		= Sp(size.raw() / 6);		// the bar's overhang past the wider part
+	// TeX's style progression: at display style (level Text here) the parts stay full size; a fraction
+	// nested inside a script steps its parts down. The parts are themselves no longer display style.
+	let sub		= if level == Level::Text { Level::Text } else { level.smaller() };
+	let n		= res!(build(style, num, sub, false));
+	let d		= res!(build(style, den, sub, false));
 
+	// The display-style fraction metrics from the MATH table, or the plain-TeX guesses without one.
+	let (axis, t, num_shift, den_shift, num_gap, den_gap) = match &table {
+		Some(tb) => {
+			let c = tb.constants();
+			(
+				du(tb, c.axis_height, size_pt),
+				du(tb, c.fraction_rule_thickness, size_pt),
+				du(tb, c.fraction_num_display_shift_up, size_pt),
+				du(tb, c.fraction_den_display_shift_down, size_pt),
+				du(tb, c.fraction_num_display_gap_min, size_pt),
+				du(tb, c.fraction_denom_display_gap_min, size_pt),
+			)
+		},
+		None => (
+			Sp(size.raw() / 4),		// axis
+			style.rule_thin,		// bar thickness
+			Sp(size.raw() / 2),		// numerator shift up
+			Sp(size.raw() / 2),		// denominator shift down
+			Sp(size.raw() / 6),		// numerator gap
+			Sp(size.raw() / 6),		// denominator gap
+		),
+	};
+
+	// The bar's top edge as a `rel` offset down from the maths baseline; above the baseline is negative.
+	// Its foot sits `t` below, at `-axis + t/2`, which the gap arithmetic below uses directly.
+	let bar_top	= -axis - Sp(t.raw() / 2);
+
+	// The numerator baseline: the font's display shift, but pushed higher if that leaves less than the
+	// least gap between the numerator's foot and the bar's top.
+	let num_lift	= num_shift.raw().max(axis.raw() + t.raw() / 2 + n.depth.raw() + num_gap.raw());
+	let num_base	= Sp(-num_lift);
+	// The denominator baseline: the font's display shift, dropped further if the gap below the bar is
+	// tighter than the least.
+	let den_drop	= den_shift.raw().max(d.height.raw() - axis.raw() + t.raw() / 2 + den_gap.raw());
+	let den_base	= Sp(den_drop);
+
+	let pad		= Sp(size.raw() / 8);		// a small overhang of the bar past the wider part
 	let fw		= n.width.raw().max(d.width.raw());
 	let width	= Sp(fw) + pad;
-
-	// The bar's top edge, and the baselines of the two parts, all as `rel` offsets down from the maths
-	// baseline. Above the baseline is negative.
-	let bar_top		= -axis - Sp(t.raw() / 2);
-	let num_base	= bar_top - phi - n.depth;			// numerator bottom clears the bar top
-	let den_base	= -axis + Sp(t.raw() / 2) + phi + d.height;	// denominator top clears the bar bottom
 
 	let mut pieces:	Vec<Piece> = Vec::new();
 	let nx = Sp((width.raw() - n.width.raw()) / 2);
@@ -475,10 +540,13 @@ fn build_frac(
 	Ok(MBox { pieces, width, height, depth, class: Class::Ord })
 }
 
-/// Hangs a superscript and/or a subscript off a base. The scripts are set one level down and lifted or
-/// dropped by a fixed fraction of the em -- half an em up for a superscript, a quarter down for a
-/// subscript, the latter deepened when the base itself hangs below the baseline. Real script shifts
-/// come from the font's maths table; these are the plain-TeX order of magnitude.
+/// Hangs a superscript and/or a subscript off a base. The scripts are set one size level down and
+/// lifted or dropped by the font's own MATH shifts: a superscript rides at least `superscriptShiftUp`
+/// but higher off a tall base or to keep its foot above `superscriptBottomMin`; a subscript drops at
+/// least `subscriptShiftDown`, deeper below a base that hangs below the baseline, and never letting its
+/// top climb past `subscriptTopMax`. With both present, the pair is spread so the gap between the
+/// superscript's foot and the subscript's top is no less than `subSuperscriptGapMin`. Without a MATH
+/// table the plain-TeX fractions of the em stand in.
 fn build_script(
 	style:		&Style,
 	base:		&Atom,
@@ -490,7 +558,10 @@ fn build_script(
 	-> Outcome<MBox>
 {
 	let size	= size_for(style, level);
+	let size_pt	= size.to_pt() as f32;
 	let em		= size.raw();
+	let table	= res!(math_table());
+	// The base keeps the enclosing style; the scripts step down a size and are never display style.
 	let b		= res!(build(style, base, level, display));
 
 	let mut pieces:	Vec<Piece> = Vec::new();
@@ -502,19 +573,74 @@ fn build_script(
 	let mut height	= b.height;
 	let mut depth	= b.depth;
 
-	if let Some(s) = sup {
-		let m		= res!(build(style, s, level.smaller(), display));
-		let rise	= Sp(em / 2);		// half the em above the baseline
-		place_into(&mut pieces, m.pieces, sx, -rise);
+	// The MATH script shifts scaled to the base size, or the plain-TeX guesses without a table.
+	let (sup_shift, sup_bottom_min, sup_drop_max, sub_shift, sub_top_max, sub_drop_min, gap_min) =
+		match &table {
+			Some(t) => {
+				let c = t.constants();
+				(
+					du(t, c.superscript_shift_up, size_pt),
+					du(t, c.superscript_bottom_min, size_pt),
+					du(t, c.superscript_baseline_drop_max, size_pt),
+					du(t, c.subscript_shift_down, size_pt),
+					du(t, c.subscript_top_max, size_pt),
+					du(t, c.subscript_baseline_drop_min, size_pt),
+					du(t, c.sub_superscript_gap_min, size_pt),
+				)
+			},
+			None => (
+				Sp(em / 2), Sp(em / 12), Sp(em / 4), Sp(em / 4), Sp(em / 3), Sp(em / 20), Sp(em / 6),
+			),
+		};
+
+	// The superscript's rise, and the subscript's drop, as positive distances from the maths baseline.
+	// Computed even when only one is present, so the combined-gap step can reconcile them.
+	let sup_m = match sup {
+		Some(s) => Some(res!(build(style, s, level.smaller(), false))),
+		None => None,
+	};
+	let sub_m = match sub {
+		Some(s) => Some(res!(build(style, s, level.smaller(), false))),
+		None => None,
+	};
+
+	let mut rise = Sp::ZERO;
+	if let Some(m) = &sup_m {
+		// At least the font's shift; higher off a tall base; and enough that the foot clears the
+		// baseline by `superscriptBottomMin`.
+		let r = sup_shift.raw()
+			.max(b.height.raw() - sup_drop_max.raw())
+			.max(sup_bottom_min.raw() + m.depth.raw());
+		rise = Sp(r);
+	}
+	let mut drop = Sp::ZERO;
+	if let Some(m) = &sub_m {
+		// At least the font's shift; deeper below a base that descends; and enough that the top does
+		// not rise past `subscriptTopMax` above the baseline.
+		let d = sub_shift.raw()
+			.max(b.depth.raw() + sub_drop_min.raw())
+			.max(m.height.raw() - sub_top_max.raw());
+		drop = Sp(d);
+	}
+
+	// With both scripts, widen the split until the vertical gap between the superscript's foot and the
+	// subscript's top reaches the font's minimum, deepening the subscript rather than raising the
+	// superscript, so the superscript keeps its natural height.
+	if let (Some(sm), Some(bm)) = (&sup_m, &sub_m) {
+		let gap = (drop.raw() - bm.height.raw()) + (rise.raw() - sm.depth.raw());
+		if gap < gap_min.raw() {
+			drop = Sp(drop.raw() + (gap_min.raw() - gap));
+		}
+	}
+
+	if let Some(m) = sup_m {
+		place_into(&mut pieces, m.pieces, sx, Sp(-rise.raw()));
 		let w = sx + m.width;
 		if w > width { width = w; }
 		let top = rise + m.height;
 		if top > height { height = top; }
 	}
-	if let Some(s) = sub {
-		let m		= res!(build(style, s, level.smaller(), display));
-		let floor	= Sp(em / 4);		// a quarter of the em below the baseline
-		let drop	= if b.depth + Sp(em / 20) > floor { b.depth + Sp(em / 20) } else { floor };
+	if let Some(m) = sub_m {
 		place_into(&mut pieces, m.pieces, sx, drop);
 		let w = sx + m.width;
 		if w > width { width = w; }
@@ -613,11 +739,21 @@ fn build_fence(
 		Some(t)	=> Sp::from_pt(t.scaled(t.constants().axis_height, size_pt) as f64),
 		None	=> Sp(size.raw() / 4),
 	};
-	// The delimiter's total height: twice the body's greater reach from the axis.
+	// The content's symmetric reach about the axis: a delimiter is centred on the axis, so it must span
+	// twice the body's greater reach from it.
 	let above	= b.height - axis;
 	let below	= b.depth + axis;
 	let half	= if above > below { above } else { below };
-	let target	= half + half;
+	let content	= half + half;
+
+	// LaTeX would accept a delimiter a little shorter than the content -- the greater of its
+	// `DelimiterFactor` (901/1000) and the content less `DelimiterShortfall` (~5pt) -- so a fraction is
+	// not wrapped in a delimiter a whole size too large. That allowance only helps when a variant sits
+	// just below the content; here the reference sets Latin Modern's parentheses to cover the fraction
+	// outright, and the shortfall would drop a variant and leave the marks visibly short of it. So the
+	// target is the content itself, the `factor = 1000, shortfall = 0` case, and the tightest variant
+	// reaching it is chosen -- which reproduces the reference to within a pixel.
+	let target	= content;
 
 	let mut pieces:	Vec<Piece> = Vec::new();
 	let gap			= Sp(size.raw() / 12);

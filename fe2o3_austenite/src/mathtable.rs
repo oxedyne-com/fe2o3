@@ -19,15 +19,29 @@ use std::collections::HashMap;
 /// [`MathTable::scaled`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Constants {
+	// The two script size percentages open the table, before the MathValueRecord run: a script is set
+	// at this percent of the running size, a script of a script at the second percent.
+	pub script_percent_scale_down:			i16,
+	pub script_script_percent_scale_down:	i16,
 	pub axis_height:				i16,	// the maths axis a fraction bar and a relation centre on
 	pub fraction_rule_thickness:	i16,
-	pub fraction_num_shift_up:		i16,
-	pub fraction_den_shift_down:	i16,
+	pub fraction_num_shift_up:		i16,	// text-style numerator baseline rise
+	pub fraction_den_shift_down:	i16,	// text-style denominator baseline drop
+	// Display-style fraction metrics: a display fraction sets its parts full size and further apart.
+	pub fraction_num_display_shift_up:		i16,
+	pub fraction_den_display_shift_down:	i16,
+	pub fraction_num_display_gap_min:		i16,	// least gap between numerator and bar, display style
+	pub fraction_denom_display_gap_min:		i16,	// least gap between bar and denominator, display style
 	pub radical_vertical_gap:		i16,	// clearance between the radicand and the rule above it
 	pub radical_rule_thickness:		i16,	// the vinculum's thickness
 	pub radical_extra_ascender:		i16,	// space above the vinculum
 	pub superscript_shift_up:		i16,
+	pub superscript_bottom_min:		i16,	// least height of a superscript's foot above the baseline
+	pub superscript_baseline_drop_max:	i16,	// most a superscript baseline sits below the base's top
 	pub subscript_shift_down:		i16,
+	pub subscript_top_max:			i16,	// most a subscript's top may reach above the baseline
+	pub subscript_baseline_drop_min:	i16,	// least a subscript baseline sits below the base's foot
+	pub sub_superscript_gap_min:	i16,	// least gap between a superscript foot and a subscript top
 }
 
 /// The parsed MATH table: the units-per-em its values are in, the constants, and each vertically
@@ -96,12 +110,24 @@ impl MathTable {
 fn parse_constants(b: &[u8], c: usize) -> Outcome<Constants> {
 	let mvr = |i: usize| -> Outcome<i16> { be_i16(b, c + 8 + 4 * i) };
 	Ok(Constants {
+		// The two percentages precede the MathValueRecord run, at the table's very start.
+		script_percent_scale_down:			res!(be_i16(b, c)),
+		script_script_percent_scale_down:	res!(be_i16(b, c + 2)),
 		axis_height:				res!(mvr(1)),
 		subscript_shift_down:		res!(mvr(4)),
+		subscript_top_max:			res!(mvr(5)),
+		subscript_baseline_drop_min:	res!(mvr(6)),
 		superscript_shift_up:		res!(mvr(7)),
+		superscript_bottom_min:		res!(mvr(9)),
+		superscript_baseline_drop_max:	res!(mvr(10)),
+		sub_superscript_gap_min:	res!(mvr(11)),
 		fraction_num_shift_up:		res!(mvr(28)),
+		fraction_num_display_shift_up:		res!(mvr(29)),
 		fraction_den_shift_down:	res!(mvr(30)),
+		fraction_den_display_shift_down:	res!(mvr(31)),
+		fraction_num_display_gap_min:		res!(mvr(33)),
 		fraction_rule_thickness:	res!(mvr(34)),
+		fraction_denom_display_gap_min:		res!(mvr(36)),
 		radical_vertical_gap:		res!(mvr(45)),
 		radical_rule_thickness:		res!(mvr(47)),
 		radical_extra_ascender:		res!(mvr(48)),
