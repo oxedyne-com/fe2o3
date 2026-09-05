@@ -126,11 +126,34 @@ pub enum Class {
 	Punct,	// punctuation
 }
 
+/// An accent riding above (or a rule below) a base: the dot of a derivative, the bar of a mean, the
+/// hat of an estimate, the vinculum of an overline. A glyph accent is a mark centred over the base; a
+/// rule accent is a bar drawn the width of the base, over it (`overline`) or under it (`underline`).
+#[derive(Clone, Debug)]
+pub enum Accent {
+	Over(String),	// a mark centred above the base (dot, hat, tilde, ...)
+	OverRule,		// a bar the width of the base, above it (an overline)
+	UnderRule,		// a bar the width of the base, below it (an underline)
+}
+
+/// How a [`Atom::Matrix`] aligns and delimits its grid. A plain matrix centres each column and wraps
+/// the grid in its delimiters; `cases` left-aligns and opens a single brace; an alignment block (a
+/// multi-line display equation broken at `\` and aligned at `&`) alternates right- then left-aligned
+/// columns with no gap at the alignment point, and carries no delimiters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatKind {
+	Matrix,
+	Cases,
+	Align,
+}
+
 /// A node of the maths tree. `Sym` is the leaf: its text and its class. The recursive variants build
-/// rows, fractions and scripts; grouping `{ ... }` is a [`Atom::Row`].
+/// rows, fractions, scripts, accents and grids; grouping `{ ... }` is a [`Atom::Row`].
 #[derive(Clone, Debug)]
 pub enum Atom {
 	Sym(String, Class),
+	Text(String),		// an upright roman run: a quoted string, a `text()`/`upright()`, `d` of a differential
+	Space(i32),			// a fixed horizontal space, in thousandths of an em (a `quad`, a `thin`, an `#h(..)`)
 	Row(Vec<Atom>),
 	Frac {
 		num:	Box<Atom>,
@@ -146,6 +169,16 @@ pub enum Atom {
 		left:	char,	// the opening delimiter, grown to the body
 		body:	Box<Atom>,
 		right:	char,	// the closing delimiter, grown to the body
+	},
+	Accent {
+		base:	Box<Atom>,
+		mark:	Accent,
+	},
+	Matrix {
+		rows:	Vec<Vec<Atom>>,
+		left:	Option<char>,	// an opening delimiter grown to the grid, or none
+		right:	Option<char>,	// a closing delimiter grown to the grid, or none
+		kind:	MatKind,
 	},
 }
 
@@ -193,6 +226,22 @@ impl Atom {
 	/// A body between a pair of delimiters that grow to it, such as parentheses around a tall fraction.
 	pub fn fence(left: char, body: Atom, right: char) -> Self {
 		Atom::Fence { left, body: Box::new(body), right }
+	}
+
+	/// An upright roman run: a quoted string or a `text()`/`upright()`, never set in the maths italic.
+	pub fn text<S: Into<String>>(text: S) -> Self { Atom::Text(text.into()) }
+
+	/// A fixed horizontal space, its width in thousandths of an em (1000 = one em).
+	pub fn space(milli_em: i32) -> Self { Atom::Space(milli_em) }
+
+	/// A base with an accent riding above it, or a rule over or under it.
+	pub fn accent(base: Atom, mark: Accent) -> Self {
+		Atom::Accent { base: Box::new(base), mark }
+	}
+
+	/// A grid of atoms: a matrix, a `cases`, or a multi-line alignment block.
+	pub fn matrix(rows: Vec<Vec<Atom>>, left: Option<char>, right: Option<char>, kind: MatKind) -> Self {
+		Atom::Matrix { rows, left, right, kind }
 	}
 }
 
@@ -326,12 +375,17 @@ fn build(
 	-> Outcome<MBox>
 {
 	match expr {
-		Atom::Sym(text, class)			=> build_sym(style, text, *class, level),
+		Atom::Sym(text, class)			=> build_sym(style, text, *class, level, display),
+		Atom::Text(text)				=> build_text(style, text, level),
+		Atom::Space(mem)				=> Ok(build_space(style, *mem, level)),
 		Atom::Row(items)				=> build_row(style, items, level, display),
 		Atom::Frac { num, den }			=> build_frac(style, num, den, level, display),
 		Atom::Script { base, sup, sub }	=> build_script(style, base, sup.as_deref(), sub.as_deref(), level, display),
 		Atom::Sqrt(radicand)			=> build_sqrt(style, radicand, level, display),
 		Atom::Fence { left, body, right }	=> build_fence(style, *left, body, *right, level, display),
+		Atom::Accent { base, mark }		=> build_accent(style, base, mark, level, display),
+		Atom::Matrix { rows, left, right, kind }
+										=> build_matrix(style, rows, *left, *right, *kind, level, display),
 	}
 }
 
@@ -340,14 +394,23 @@ fn build(
 /// operator or a delimiter is the font's upright glyph. The run's ascent and descent stand in for the
 /// atom's height and depth.
 fn build_sym(
-	style:	&Style,
-	text:	&str,
-	class:	Class,
-	level:	Level,
+	style:		&Style,
+	text:		&str,
+	class:		Class,
+	level:		Level,
+	display:	bool,
 )
 	-> Outcome<MBox>
 {
 	let size		= size_for(style, level);
+	// A big operator (a summation, an integral) is set from its larger display variant when it stands in
+	// a display equation at running size, the way TeX's `\displaystyle` grows it; inline and in a script
+	// it keeps its text-size glyph.
+	if display && level == Level::Text && is_bigop(text) {
+		if let Some(m) = res!(build_bigop(text, size)) {
+			return Ok(m);
+		}
+	}
 	let font		= res!(math_font());
 	let shown		= math_text(text, class);
 	let shaped		= res!(ShapedText::new_with_font(font, Dir::Ltr, size, &shown));
@@ -355,6 +418,85 @@ fn build_sym(
 	let (height, depth)	= res!(shaped.ink_extent());	// the true ink extent, not the font's global metric
 	let piece		= Piece { x: Sp::ZERO, width, rel: Sp::ZERO, draw: Draw::Glyph(shaped) };
 	Ok(MBox { pieces: vec![piece], width, height, depth, class })
+}
+
+/// Is the symbol a large operator that grows in a display equation -- a summation, a product, an
+/// integral, a big union or intersection?
+fn is_bigop(text: &str) -> bool {
+	matches!(text,
+		"\u{2211}" | "\u{220F}" | "\u{2210}" |					// sum, product, coproduct
+		"\u{222B}" | "\u{222C}" | "\u{222D}" | "\u{222E}" |		// integral and its multiples
+		"\u{22C0}" | "\u{22C1}" | "\u{22C2}" | "\u{22C3}" |		// big and, or, intersection, union
+		"\u{2A00}" | "\u{2A01}" | "\u{2A02}" | "\u{2A04}" | "\u{2A06}")	// big odot, oplus, otimes, uplus, sqcup
+}
+
+/// Does the symbol set its scripts as limits -- above and below in a display equation -- rather than
+/// beside it? The big operators do, and the named limit operators (`lim`, `max`, `min`, ...), but an
+/// integral does not: its bounds sit beside the sign even in display.
+fn is_limits(text: &str) -> bool {
+	let integral = matches!(text, "\u{222B}" | "\u{222C}" | "\u{222D}" | "\u{222E}");
+	if integral {
+		return false;
+	}
+	is_bigop(text) || matches!(text,
+		"lim" | "max" | "min" | "sup" | "inf" | "det" | "gcd" | "limsup" | "liminf" | "Pr")
+}
+
+/// Draws a big operator from its tallest-but-one display variant, seated centred on the maths axis like
+/// a delimiter, so a summation towers over its limits. `None` when the font offers no larger variant, in
+/// which case the caller sets the plain glyph.
+fn build_bigop(text: &str, size: Sp) -> Outcome<Option<MBox>> {
+	let table = res!(math_table());
+	let tb = match &table {
+		Some(t)	=> t,
+		None	=> return Ok(None),
+	};
+	let font		= res!(math_font());
+	let size_pt		= size.to_pt() as f32;
+	let base		= res!(glyph_id(&font, size, text));
+	// A display big operator is about the next size up; ask for a variant around 1.4x the running size
+	// and take the tallest the font offers below that, which is Latin Modern's display form.
+	let target		= Sp(size.raw() * 7 / 5);
+	let variant		= match tb.variant_for(base as u16, target.to_pt() as f32, size_pt) {
+		Some(g) if g as u32 != base	=> g as u32,
+		_							=> return Ok(None),		// no larger form: leave the plain glyph
+	};
+	let (path, gh, gd, gw) = res!(glyph_ink(&font, variant, size));
+	let axis	= du(tb, tb.constants().axis_height, size_pt);
+	// Centre the glyph's ink on the axis.
+	let rel		= -axis - Sp((gd.raw() - gh.raw()) / 2);
+	let piece	= Piece { x: Sp::ZERO, width: gw, rel, draw: Draw::Ink(path) };
+	let height	= gh - rel;		// ink top above the baseline
+	let depth	= rel + gd;		// ink bottom below the baseline
+	Ok(Some(MBox { pieces: vec![piece], width: gw, height, depth, class: Class::Op }))
+}
+
+/// Sets an upright roman run from the maths font: a quoted string, a `text()`/`upright()`, the `d` of a
+/// differential. Unlike a single-letter ordinary, it is never remapped to the maths italic. It presents
+/// as ordinary so it abuts what follows without an operator's spacing.
+fn build_text(
+	style:	&Style,
+	text:	&str,
+	level:	Level,
+)
+	-> Outcome<MBox>
+{
+	let size		= size_for(style, level);
+	let font		= res!(math_font());
+	let shaped		= res!(ShapedText::new_with_font(font, Dir::Ltr, size, text));
+	let width		= shaped.dims().width;
+	let (height, depth)	= res!(shaped.ink_extent());
+	let piece		= Piece { x: Sp::ZERO, width, rel: Sp::ZERO, draw: Draw::Glyph(shaped) };
+	Ok(MBox { pieces: vec![piece], width, height, depth, class: Class::Ord })
+}
+
+/// A fixed horizontal space: a zero-ink box the requested fraction of an em wide. It presents as
+/// ordinary, so it neither adds nor sheds the automatic inter-atom spacing around it -- its width is the
+/// whole of the gap.
+fn build_space(style: &Style, milli_em: i32, level: Level) -> MBox {
+	let size	= size_for(style, level);
+	let width	= Sp(size.raw() * milli_em / 1000);
+	MBox { pieces: Vec::new(), width, height: Sp::ZERO, depth: Sp::ZERO, class: Class::Ord }
 }
 
 /// The characters actually shaped for an atom. A single-letter ordinary variable is remapped to its
@@ -483,10 +625,12 @@ fn build_frac(
 	let table	= res!(math_table());
 
 	// TeX's style progression: at display style (level Text here) the parts stay full size; a fraction
-	// nested inside a script steps its parts down. The parts are themselves no longer display style.
+	// nested inside a script steps its parts down. The parts keep the block (display) context so a big
+	// operator in a numerator still sets its limits below and a nested fraction still stacks, both a size
+	// smaller; only the running/inline distinction was ever about slashing, and that was handled above.
 	let sub		= if level == Level::Text { Level::Text } else { level.smaller() };
-	let n		= res!(build(style, num, sub, false));
-	let d		= res!(build(style, den, sub, false));
+	let n		= res!(build(style, num, sub, display));
+	let d		= res!(build(style, den, sub, display));
 
 	// The display-style fraction metrics from the MATH table, or the plain-TeX guesses without one.
 	let (axis, t, num_shift, den_shift, num_gap, den_gap) = match &table {
@@ -557,6 +701,16 @@ fn build_script(
 )
 	-> Outcome<MBox>
 {
+	// A big operator or a named limit operator in a display equation sets its scripts as limits, centred
+	// above and below the sign rather than beside it.
+	if display && level == Level::Text {
+		if let Atom::Sym(text, _) = base {
+			if is_limits(text) {
+				return build_limits(style, base, sup, sub, level);
+			}
+		}
+	}
+
 	let size	= size_for(style, level);
 	let size_pt	= size.to_pt() as f32;
 	let em		= size.raw();
@@ -649,6 +803,271 @@ fn build_script(
 	}
 
 	Ok(MBox { pieces, width, height, depth, class: b.class })
+}
+
+/// The maths axis at a size: the height a fraction bar, a relation and a grown delimiter centre on,
+/// from the font's MATH table or the plain-TeX quarter-em without one.
+fn axis_height(table: &Option<Arc<MathTable>>, size: Sp, size_pt: f32) -> Sp {
+	match table {
+		Some(t)	=> Sp::from_pt(t.scaled(t.constants().axis_height, size_pt) as f64),
+		None	=> Sp(size.raw() / 4),
+	}
+}
+
+/// Sets a big operator with its scripts as limits, centred above and below the sign. The operator keeps
+/// the running size (and grows to its display variant through [`build`]); each limit is set one size
+/// level down and centred on the operator, a small gap clear of it.
+fn build_limits(
+	style:	&Style,
+	base:	&Atom,
+	sup:	Option<&Atom>,
+	sub:	Option<&Atom>,
+	level:	Level,
+)
+	-> Outcome<MBox>
+{
+	let size	= size_for(style, level);
+	let gap		= Sp(size.raw() / 6);		// clearance between the operator and a limit
+	// The operator itself, at display size (a summation grows to its larger variant here).
+	let op		= res!(build(style, base, level, true));
+	let up		= match sup {
+		Some(a)	=> Some(res!(build(style, a, level.smaller(), false))),
+		None	=> None,
+	};
+	let lo		= match sub {
+		Some(a)	=> Some(res!(build(style, a, level.smaller(), false))),
+		None	=> None,
+	};
+
+	let mut width	= op.width;
+	if let Some(m) = &up { if m.width > width { width = m.width; } }
+	if let Some(m) = &lo { if m.width > width { width = m.width; } }
+
+	let mut pieces:	Vec<Piece> = Vec::new();
+	let centre = |w: Sp| Sp((width.raw() - w.raw()) / 2);
+	place_into(&mut pieces, op.pieces, centre(op.width), Sp::ZERO);
+	let mut height	= op.height;
+	let mut depth	= op.depth;
+
+	if let Some(m) = up {
+		// The upper limit's baseline, so its foot clears the operator's top by `gap`.
+		let drel	= -(op.height + gap + m.depth);
+		let top		= -drel + m.height;
+		place_into(&mut pieces, m.pieces, centre(m.width), drel);
+		if top > height { height = top; }
+	}
+	if let Some(m) = lo {
+		// The lower limit's baseline, so its top clears the operator's foot by `gap`.
+		let drel	= op.depth + gap + m.height;
+		let bottom	= drel + m.depth;
+		place_into(&mut pieces, m.pieces, centre(m.width), drel);
+		if bottom > depth { depth = bottom; }
+	}
+
+	Ok(MBox { pieces, width, height, depth, class: Class::Op })
+}
+
+/// Sets an accent over a base, or a rule over or under it. A glyph accent is shaped from the maths font
+/// and centred over the base, its foot a hair above the base's ink; an overline or underline is a bar
+/// the width of the base, a small gap clear of it. The base keeps its size and style.
+fn build_accent(
+	style:		&Style,
+	base:		&Atom,
+	mark:		&Accent,
+	level:		Level,
+	display:	bool,
+)
+	-> Outcome<MBox>
+{
+	let size	= size_for(style, level);
+	let size_pt	= size.to_pt() as f32;
+	let table	= res!(math_table());
+	let b		= res!(build(style, base, level, display));
+
+	let rule = match &table {
+		Some(t)	=> Sp::from_pt(t.scaled(t.constants().fraction_rule_thickness, size_pt) as f64),
+		None	=> style.rule_thin,
+	};
+	let gap		= Sp(size.raw() / 12);		// clearance between the base and its accent or rule
+
+	let mut pieces:	Vec<Piece> = Vec::new();
+	place_into(&mut pieces, b.pieces, Sp::ZERO, Sp::ZERO);
+	let mut height	= b.height;
+	let mut depth	= b.depth;
+
+	match mark {
+		Accent::OverRule => {
+			let bar_top	= -(b.height + gap + rule);
+			pieces.push(Piece { x: Sp::ZERO, width: b.width, rel: bar_top, draw: Draw::Bar(rule) });
+			height = b.height + gap + rule;
+		},
+		Accent::UnderRule => {
+			let bar_top	= b.depth + gap;
+			pieces.push(Piece { x: Sp::ZERO, width: b.width, rel: bar_top, draw: Draw::Bar(rule) });
+			depth = b.depth + gap + rule;
+		},
+		Accent::Over(glyph) => {
+			// A spacing-accent glyph carries its own high position in the font, so it is placed by its
+			// actual outline rather than by shaping: the mark is dropped until its ink foot sits a small
+			// gap above the base's ink top, then centred over the base's width.
+			let font		= res!(math_font());
+			let gid			= res!(glyph_id(&font, size, glyph));
+			let (path, _, _, gw)	= res!(glyph_ink(&font, gid, size));
+			let (ink_top, ink_bottom) = match path.bounds(&Transform::IDENTITY) {
+				Some(bd)	=> (Sp::from_pt(bd.y0 as f64), Sp::from_pt(bd.y1 as f64)),
+				None		=> (Sp::ZERO, Sp::ZERO),
+			};
+			// The ink foot wants to land a gap above the base top (negative is up).
+			let target		= Sp(-(b.height.raw() + gap.raw()));
+			let dy			= target - ink_bottom;
+			let moved		= res!(path.transform(&Transform::translate(0.0, dy.to_pt() as f32)));
+			let x			= Sp((b.width.raw() - gw.raw()) / 2);
+			pieces.push(Piece { x, width: gw, rel: Sp::ZERO, draw: Draw::Ink(moved) });
+			let top			= Sp(-(ink_top.raw() + dy.raw()));
+			if top > height { height = top; }
+		},
+	}
+
+	Ok(MBox { pieces, width: b.width, height, depth, class: Class::Ord })
+}
+
+/// Sets a grid of atoms: a matrix, a `cases`, or a multi-line alignment block. Every cell is measured,
+/// the columns sized to their widest cell and the rows to their tallest; the grid is stacked with a row
+/// gap and centred on the maths axis, each column aligned by the grid's kind. A matrix and a `cases`
+/// then wrap the grid in delimiters grown to it. An alignment block carries none and butts its columns
+/// at the alignment point, so `a &= b` reads as one line.
+fn build_matrix(
+	style:		&Style,
+	rows:		&[Vec<Atom>],
+	left:		Option<char>,
+	right:		Option<char>,
+	kind:		MatKind,
+	level:		Level,
+	_display:	bool,		// a grid sets its own cell style by kind, not the enclosing display flag
+)
+	-> Outcome<MBox>
+{
+	let size	= size_for(style, level);
+	let size_pt	= size.to_pt() as f32;
+	let table	= res!(math_table());
+	let axis	= axis_height(&table, size, size_pt);
+
+	let nrows	= rows.len();
+	if nrows == 0 {
+		return Ok(MBox { pieces: Vec::new(), width: Sp::ZERO, height: Sp::ZERO, depth: Sp::ZERO, class: Class::Ord });
+	}
+	let ncols	= rows.iter().map(|r| r.len()).max().unwrap_or(0);
+	// A cell keeps the grid's level; an alignment line is display style (its fractions stack), a matrix
+	// or a `cases` cell is text style.
+	let cell_display = kind == MatKind::Align;
+
+	// Measure every cell.
+	let mut cells:	Vec<Vec<MBox>> = Vec::with_capacity(nrows);
+	for row in rows {
+		let mut cs = Vec::with_capacity(ncols);
+		for c in 0..ncols {
+			let m = match row.get(c) {
+				Some(a)	=> res!(build(style, a, level, cell_display)),
+				None	=> MBox { pieces: Vec::new(), width: Sp::ZERO, height: Sp::ZERO, depth: Sp::ZERO, class: Class::Ord },
+			};
+			cs.push(m);
+		}
+		cells.push(cs);
+	}
+
+	// Column widths and per-row height and depth.
+	let mut colw	= vec![Sp::ZERO; ncols];
+	let mut rowh	= vec![Sp::ZERO; nrows];
+	let mut rowd	= vec![Sp::ZERO; nrows];
+	for (ri, row) in cells.iter().enumerate() {
+		for (c, m) in row.iter().enumerate() {
+			if m.width > colw[c]	{ colw[c] = m.width; }
+			if m.height > rowh[ri]	{ rowh[ri] = m.height; }
+			if m.depth > rowd[ri]	{ rowd[ri] = m.depth; }
+		}
+	}
+
+	let (col_gap, row_gap) = match kind {
+		MatKind::Matrix	=> (Sp(size.raw() * 11 / 20), Sp(size.raw() * 7 / 20)),	// 0.55em, 0.35em
+		MatKind::Cases	=> (Sp(size.raw() * 4 / 5),   Sp(size.raw() * 2 / 5)),	// 0.80em, 0.40em
+		// An alignment line breaks at `&` before a relation (`&=`), so the gap at the alignment point is
+		// a relation's thick space, matching the space the relation carries on its other side.
+		MatKind::Align	=> (Sp(size.raw() * 5 / 18),  Sp(size.raw() * 2 / 5)),	// 5 mu, 0.40em
+	};
+
+	// The grid's total width.
+	let mut content_w = Sp::ZERO;
+	for c in 0..ncols {
+		content_w += colw[c];
+		if c + 1 < ncols { content_w += col_gap; }
+	}
+
+	// Each row's baseline, relative to the first row's baseline (positive down), then the shift that puts
+	// the grid's vertical centre on the axis.
+	let mut base_rel	= vec![Sp::ZERO; nrows];
+	let mut y			= Sp::ZERO;
+	for i in 0..nrows {
+		base_rel[i] = y;
+		if i + 1 < nrows {
+			y += rowd[i] + row_gap + rowh[i + 1];
+		}
+	}
+	let span_below	= base_rel[nrows - 1] + rowd[nrows - 1];	// first baseline to grid foot
+	let span_above	= rowh[0];									// first baseline to grid top
+	let centre		= Sp((span_below.raw() - span_above.raw()) / 2);
+	let shift		= Sp(-axis.raw()) - centre;					// grid centre onto the axis
+
+	let content_h	= span_above - shift;			// grid top above the baseline
+	let content_d	= span_below + shift;			// grid foot below the baseline
+
+	// Place the cells, with the content offset for a left delimiter added later.
+	let mut pieces:	Vec<Piece> = Vec::new();
+	for (ri, row) in cells.into_iter().enumerate() {
+		let by = base_rel[ri] + shift;
+		let mut cx = Sp::ZERO;
+		for (c, m) in row.into_iter().enumerate() {
+			let dx = match kind {
+				MatKind::Cases						=> Sp::ZERO,						// left aligned
+				MatKind::Align if c % 2 == 0		=> Sp(colw[c].raw() - m.width.raw()),	// right aligned
+				MatKind::Align						=> Sp::ZERO,						// left aligned
+				MatKind::Matrix						=> Sp((colw[c].raw() - m.width.raw()) / 2),	// centred
+			};
+			place_into(&mut pieces, m.pieces, cx + dx, by);
+			cx += colw[c] + col_gap;
+		}
+	}
+
+	// Wrap the grid in its delimiters, each grown to span the grid symmetrically about the axis.
+	if left.is_none() && right.is_none() {
+		return Ok(MBox { pieces, width: content_w, height: content_h, depth: content_d, class: Class::Ord });
+	}
+	let font	= res!(math_font());
+	let target	= content_h + content_d;
+	let gap		= Sp(size.raw() / 8);
+
+	let mut out:	Vec<Piece> = Vec::new();
+	let mut cursor	= Sp::ZERO;
+	let mut height	= content_h;
+	let mut depth	= content_d;
+	if let Some(ch) = left {
+		let (w, h, d) = res!(place_delim(&font, &table, ch, target, axis, size, size_pt, &mut out, cursor));
+		cursor += w + gap;
+		if h > height { height = h; }
+		if d > depth { depth = d; }
+	}
+	for p in pieces {
+		out.push(Piece { x: p.x + cursor, width: p.width, rel: p.rel, draw: p.draw });
+	}
+	cursor += content_w;
+	if let Some(ch) = right {
+		cursor += gap;
+		let (w, h, d) = res!(place_delim(&font, &table, ch, target, axis, size, size_pt, &mut out, cursor));
+		cursor += w;
+		if h > height { height = h; }
+		if d > depth { depth = d; }
+	}
+
+	Ok(MBox { pieces: out, width: cursor, height, depth, class: Class::Ord })
 }
 
 /// Sets a square root: a radical sign grown to the radicand, a vinculum ruled over it, and the radicand
