@@ -1,7 +1,7 @@
-//! The surface syntax tree of an Ingot source file, before lowering to [`doc::Block`](crate::doc::Block).
+//! The surface syntax tree of a Typst source file, before lowering to [`doc::Block`](crate::doc::Block).
 //!
 //! Increment 2 adds inline emphasis to the markup spine: a document is a sequence of headings and
-//! paragraphs, and a paragraph is a sequence of [`Inline`] runs -- plain text, `*strong*`, `/emph/`.
+//! paragraphs, and a paragraph is a sequence of [`Inline`] runs -- plain text, `*strong*`, `_emph_`.
 //! The `#` code mode and the declared-query references of `sec_language` are later increments -- the
 //! tree names only what the engine can already set.
 

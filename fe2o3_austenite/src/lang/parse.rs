@@ -1,4 +1,4 @@
-//! The Ingot parser: line-oriented source into the surface tree of [`ast::Item`](super::ast::Item).
+//! The Typst reader: line-oriented source into the surface tree of [`ast::Item`](super::ast::Item).
 //!
 //! The scan is deliberately simple, one pass over the lines. A line whose first non-blank character
 //! is `=` is a heading, its level the run of leading `=`; a line opening with `-` or `+` (and a space)
@@ -8,8 +8,14 @@
 //! the measure. Byte offsets are tracked across the raw lines so each [`Item`] carries a true [`Span`].
 //!
 //! A closed paragraph's text is then scanned for inline emphasis by [`parse_inlines`]: `*strong*` and
-//! `/emph/`. A delimiter pairs only when it flanks a word, so a stray asterisk, a date's slash, or
+//! `_emph_`. A delimiter pairs only when it flanks a word, so a stray asterisk, a date's slash, or
 //! `and/or` is left as ordinary text rather than opening an emphasis that never closes.
+//!
+//! A Typst code statement (`#import`/`#let`/`#set`/`#show`) or a line-leading standalone template call
+//! (`#name(...)` or `#name[...]`) is not set: it is skipped. When its delimiters do not balance on the
+//! opening line -- a `#figure(...)`, `#table(...)`, `#aside-box[...]`, or a `#let x = (...)` data array
+//! that spans many lines -- the reader consumes following lines, tracking nesting across `()`, `[]` and
+//! `{}` and respecting string literals, until the delimiters balance, so the whole span renders nothing.
 
 use crate::ir::Span;
 
@@ -41,6 +47,12 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	// stands, its indentation and markup untouched.
 	let mut code:		Option<(Vec<String>, u32)>	= None;
 
+	// A multi-line Typst code statement or standalone template call being skipped: the net bracket depth
+	// still open across the lines consumed so far, and whether a string literal is currently open. `None`
+	// when not skipping. While it is `Some`, every line is consumed and nothing is set until the delimiters
+	// balance.
+	let mut skip:		Option<SkipState>	= None;
+
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
@@ -56,6 +68,18 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		let end = start.saturating_add(line.len() as u32);
 
 		let trimmed = line.trim_start();
+
+		// A multi-line code statement or standalone call is being skipped: keep consuming lines, tracking
+		// bracket nesting across `()`, `[]` and `{}` and respecting string literals, until the delimiters
+		// balance. Nothing between the opener and its close is set. This takes precedence over every other
+		// rule, since the span is code, not markup.
+		if let Some(state) = skip.as_mut() {
+			scan_brackets(line, state);
+			if state.depth <= 0 {
+				skip = None;
+			}
+			continue;
+		}
 
 		// A fenced code block takes precedence over every other rule: inside it, only a closing fence is
 		// special and every other line is verbatim, so its own `=`, `-` or `*` carry no markup meaning.
@@ -81,12 +105,17 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// A blank line closes the paragraph or list it follows.
 			flush_para(&mut items, &mut lines, para_start, para_end);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
-		} else if is_code_line(trimmed) {
-			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a whole-line call to a
-			// template function Austenite does not yet run: it closes any open block and is skipped. The
-			// styling and computation layer is a later increment; the prose around it still sets.
+		} else if let Some(decision) = code_skip(trimmed) {
+			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
+			// to a template function Austenite does not yet run: it closes any open block and is skipped.
+			// The styling and computation layer is a later increment; the prose around it still sets. When
+			// its delimiters do not balance on this line, the multi-line span is consumed by the check at the
+			// top of the loop until they do.
 			flush_para(&mut items, &mut lines, para_start, para_end);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			if let CodeSkip::Multi(state) = decision {
+				skip = Some(state);
+			}
 		} else if trimmed.starts_with('=') {
 			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end);
@@ -381,23 +410,62 @@ fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	Some(k)
 }
 
-/// Is this already-left-trimmed line a Typst code statement Austenite skips for now? The four block
-/// statements (`#import`, `#let`, `#set`, `#show`) and a whole-line call to a template function -- a
-/// line that opens `#name(` or `#name[` and closes with the matching bracket -- are the styling and
-/// computation layer, a later increment; the prose around them still sets.
-fn is_code_line(trimmed: &str) -> bool {
+/// The running bracket balance while a multi-line code statement or template call is skipped: `depth`
+/// is the net count of unclosed `()`, `[]` and `{}` openers, and `in_string` records whether a `"..."`
+/// literal is currently open so a bracket inside it does not count. Both persist across the lines of a
+/// span, since a string or a nesting may straddle the line break.
+struct SkipState {
+	depth:		i32,
+	in_string:	bool,
+}
+
+/// What to do with a line-leading Typst code statement or standalone template call.
+enum CodeSkip {
+	Line,				// the call closes on this line; skip the one line, as before
+	Multi(SkipState),	// the delimiters are still open; begin a multi-line skip carrying the depth
+}
+
+/// If this already-left-trimmed line begins a Typst code statement Austenite skips for now, decides how
+/// much to skip: `Line` for a statement or standalone call that closes on this line, `Multi` for one
+/// whose delimiters are still open at the end of it. `None` when the line is not code the reader skips,
+/// so the caller sets it as prose.
+///
+/// The four block statements (`#import`, `#let`, `#set`, `#show`) are always code; a line-leading call
+/// (`#name(` or `#name[`) is skipped only as a whole -- either it closes on the line, or it opens a
+/// multi-line span. A balanced `#name[...]` with prose trailing it (`#index-main[x]More prose...`) is
+/// left to set, since its content is a marker within a real paragraph, not a standalone call.
+fn code_skip(trimmed: &str) -> Option<CodeSkip> {
+	let keyword	= code_keyword(trimmed);
+	if !keyword && !opens_standalone_call(trimmed) {
+		return None;
+	}
+	let mut state = SkipState { depth: 0, in_string: false };
+	scan_brackets(trimmed, &mut state);
+	if state.depth > 0 {
+		return Some(CodeSkip::Multi(state));
+	}
+	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
+	// call is skipped only when it truly ends with its own closer, so a marker inside a paragraph sets.
+	if keyword || trimmed.ends_with(')') || trimmed.ends_with(']') {
+		return Some(CodeSkip::Line);
+	}
+	None
+}
+
+/// Does this already-left-trimmed line open one of the four Typst block statements the reader skips?
+fn code_keyword(trimmed: &str) -> bool {
 	for kw in ["#import ", "#import\"", "#let ", "#set ", "#show ", "#show:"] {
 		if trimmed.starts_with(kw) {
 			return true;
 		}
 	}
-	standalone_call(trimmed)
+	false
 }
 
-/// Does the whole line consist of one `#name(...)` or `#name[...]` call? A crude test -- it opens with
-/// `#`, an identifier, then `(` or `[`, and ends with `)` or `]` -- enough to skip a single-line call to
-/// an unrecognised template function without mistaking a paragraph that merely contains an inline call.
-fn standalone_call(trimmed: &str) -> bool {
+/// Does this already-left-trimmed line open with a standalone call -- `#`, an identifier, then `(` or
+/// `[`? A crude test, enough to recognise the opener of a call to an unrecognised template function
+/// without inspecting where or whether it closes; the balance decides single- versus multi-line.
+fn opens_standalone_call(trimmed: &str) -> bool {
 	let mut cs = trimmed.chars();
 	if cs.next() != Some('#') {
 		return false;
@@ -409,11 +477,35 @@ fn standalone_call(trimmed: &str) -> bool {
 			continue;
 		}
 		// The first non-identifier character must open the call.
-		return saw_ident
-			&& (c == '(' || c == '[')
-			&& (trimmed.ends_with(')') || trimmed.ends_with(']'));
+		return saw_ident && (c == '(' || c == '[');
 	}
 	false
+}
+
+/// Folds one line's `()[]{}` into the running [`SkipState`], updating the depth and the in-string flag.
+/// A bracket inside a `"..."` literal is ignored, and a `\`-escaped character within a string is passed
+/// over, so a quote or bracket written `\"` or `\(` does not miscount. The state carries into the next
+/// line, so a string or a nesting that straddles the break is tracked correctly.
+fn scan_brackets(line: &str, state: &mut SkipState) {
+	let mut escaped = false;
+	for c in line.chars() {
+		if state.in_string {
+			if escaped {
+				escaped = false;
+			} else if c == '\\' {
+				escaped = true;
+			} else if c == '"' {
+				state.in_string = false;
+			}
+			continue;
+		}
+		match c {
+			'"'					=> state.in_string = true,
+			'(' | '[' | '{'		=> state.depth += 1,
+			')' | ']' | '}'		=> state.depth -= 1,
+			_					=> {},
+		}
+	}
 }
 
 /// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
