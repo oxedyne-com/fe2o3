@@ -151,6 +151,7 @@ struct RawStyle {
 	body_pt:	f64,
 	leading_em:	f64,	// par leading, a multiple of the em
 	par_skip_em:	f64,	// space between paragraphs, a multiple of the em
+	indent_em:	f64,	// first-line indent, a multiple of the em
 	h1_pt:		f64,	// chapter-title size
 	h2_pt:		f64,	// first sub-heading size
 	h3_pt:		f64,	// second sub-heading size
@@ -189,12 +190,13 @@ fn read_config(src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	let body_pt		= arm(src, "body-text-size", &format).as_deref().and_then(first_num).unwrap_or(11.0);
 	let leading_em	= arm(src, "body-line-spacing", &format).as_deref().and_then(first_num).unwrap_or(0.75);
 	let par_skip_em	= arm(src, "body-par-spacing", &format).as_deref().and_then(first_num).unwrap_or(0.75);
+	let indent_em	= arm(src, "body-par-indent", &format).as_deref().and_then(first_num).unwrap_or(0.0);
 	let h1_pt		= scale.as_deref().and_then(|a| num_after(a, "chapter-title:")).unwrap_or(20.0);
 	let subs		= scale.as_deref().and_then(|a| tuple_after(a, "sub-headings:")).unwrap_or_default();
 	let h2_pt		= subs.first().copied().unwrap_or(15.0);
 	let h3_pt		= subs.get(1).copied().unwrap_or(12.5);
 
-	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, h1_pt, h2_pt, h3_pt }))
+	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, h1_pt, h2_pt, h3_pt }))
 }
 
 // The Libertinus line box Typst sets, as a fraction of the em, measured from the oracle. Typst's config
@@ -215,6 +217,7 @@ fn build_style(raw: &RawStyle) -> Style {
 	style.body_size	= Sp::from_pt(raw.body_pt);
 	style.leading	= Sp::from_pt(baseline);
 	style.para_skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
+	style.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
 	style.h1_size	= Sp::from_pt(raw.h1_pt);
 	style.h2_size	= Sp::from_pt(raw.h2_pt);
 	style.h3_size	= Sp::from_pt(raw.h3_pt);

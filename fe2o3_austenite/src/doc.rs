@@ -225,6 +225,7 @@ pub struct Style {
 	pub body_size:		Sp,
 	pub leading:		Sp,
 	pub para_skip:		Sp,	// extra space between one paragraph and the next
+	pub indent:		Sp,	// first-line indent of a paragraph following another paragraph
 	pub h1_size:		Sp,
 	pub h2_size:		Sp,
 	pub h3_size:		Sp,
@@ -248,6 +249,7 @@ impl Default for Style {
 			body_size:		Sp::from_pt(11.0),
 			leading:		Sp::from_pt(13.2),	// 1.2x the body
 			para_skip:		Sp::from_pt(6.0),
+			indent:			Sp::ZERO,	// no first-line indent unless a book config sets one
 			h1_size:		Sp::from_pt(16.0),
 			h2_size:		Sp::from_pt(13.0),
 			h3_size:		Sp::from_pt(12.0),
@@ -321,6 +323,10 @@ pub fn author(
 
 	let mut i		= 0usize;
 	let mut first	= true;
+	// Whether the block just emitted was a paragraph. A paragraph following another paragraph takes the
+	// first-line indent; one opening a section (after a heading, list, figure or the document start) does
+	// not -- Typst's `first-line-indent` with `all: false`, and what the oracle sets.
+	let mut prev_para	= false;
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
 	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
@@ -361,13 +367,16 @@ pub fn author(
 				keep.push(hbox);
 				keep.push(Node::Glue(Glue::fixed(style.space_below(*level))));
 				let mut rest:	Vec<Node> = Vec::new();
+				let mut consumed_para = false;
 				if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
+					// The first paragraph after a heading opens the section, so it takes no first-line indent.
 					let mut lines = res!(break_paragraph(
 						fonts.clone(), Role::Body, Dir::Ltr, style.body_size, para, measure, style.leading));
 					if !lines.is_empty() {
 						keep.push(lines.remove(0));	// the first line joins the heading
 						rest = lines;				// its leading glue and the remaining lines follow
 					}
+					consumed_para = true;
 					i += 2;
 				} else {
 					i += 1;
@@ -376,27 +385,44 @@ pub fn author(
 				nodes.push(vbox(keep, measure));
 				nodes.extend(rest);
 				first = false;
+				// A heading opens a section: the paragraph it swallowed took no indent, but the NEXT paragraph
+				// follows a paragraph and so is indented.
+				prev_para = consumed_para;
 			},
 			Block::Paragraph { text } => {
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				let lines = res!(break_paragraph(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, text, measure, style.leading));
-				nodes.extend(lines);
-				i += 1;
-				first = false;
-			},
-			Block::RichParagraph { segments } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				// A plain paragraph is set through the piece breaker so a leading indent box can ride the
+				// front of its first line; without an indent it produces exactly what `break_paragraph` does.
+				let mut pieces = Vec::new();
+				if prev_para && style.indent.raw() > 0 {
+					pieces.push(indent_piece(style.indent));
 				}
-				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen));
+				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
 				nodes.extend(lines);
 				i += 1;
 				first = false;
+				prev_para = true;
+			},
+			Block::RichParagraph { segments } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				let mut pieces = Vec::new();
+				if prev_para && style.indent.raw() > 0 {
+					pieces.push(indent_piece(style.indent));
+				}
+				pieces.extend(res!(build_pieces(
+					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen)));
+				let lines = res!(break_paragraph_pieces(
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
+				nodes.extend(lines);
+				i += 1;
+				first = false;
+				prev_para = true;
 			},
 			Block::List { ordered, items } => {
 				if !first {
@@ -405,6 +431,7 @@ pub fn author(
 				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen));
 				i += 1;
 				first = false;
+				prev_para = false;
 			},
 			Block::Code { lines: src } => {
 				if !first {
@@ -414,6 +441,7 @@ pub fn author(
 				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				i += 1;
 				first = false;
+				prev_para = false;
 			},
 			Block::Table(t) => {
 				// Space above the table, discarded at a page top like any other leading. The table lowers
@@ -425,6 +453,7 @@ pub fn author(
 				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
+				prev_para = false;
 			},
 			Block::Equation { expr, numbered } => {
 				if !first {
@@ -435,6 +464,7 @@ pub fn author(
 				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				i += 1;
 				first = false;
+				prev_para = false;
 			},
 			Block::Figure { graphic, caption } => {
 				// Space above the figure, discarded at a page top like any other leading. The figure is
@@ -490,6 +520,20 @@ fn foot_style(style: Style) -> FootStyle {
 		rule_width:		Sp(style.body_size.raw() * 12),
 		gap_below_rule:	Sp::from_pt(4.0),
 		gap_between:	Sp::from_pt(3.0),
+	}
+}
+
+/// A first-line indent as a rigid leading piece: an empty box of the indent width that the optimiser
+/// counts against the first line and that never breaks, so the first word sits one indent in and the
+/// line still fills the measure. Modelled as a maths piece of zero height carrying a single fixed glue,
+/// which is how the piece breaker already threads a pre-built inline cluster into the line.
+fn indent_piece(indent: Sp) -> Piece {
+	Piece::Math {
+		nodes:	vec![Node::Glue(Glue::fixed(indent))],
+		width:	indent,
+		height:	Sp::ZERO,
+		depth:	Sp::ZERO,
+		over:	Sp::ZERO,
 	}
 }
 
