@@ -425,6 +425,17 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
+		// An inline claim marker, `#claim-label(...)` or `#claim-refs(...)`, from the book's claims
+		// machinery. A `claim-label` registers invisible metadata and sets a small code in the outside
+		// margin; a `claim-refs` registers metadata only. Neither places anything in the body text column,
+		// so the marker is consumed and nothing set where it stood, matching Typst's body flow -- the
+		// marginal code is not reproduced, the page having a single text column and no margin placement.
+		if c == '#' {
+			if let Some(next) = claim_call(&chars, i) {
+				i = next;
+				continue;
+			}
+		}
 		// The `#raw("...")` call form of inline code.
 		if c == '#' {
 			if let Some((text, next)) = raw_call(&chars, i) {
@@ -652,7 +663,8 @@ fn is_inline_call(name: &str) -> bool {
 	matches!(name,
 		"gs" | "gscap" | "gsi" | "gscapi" | "glossind" | "glossindcap"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
-		| "index" | "index-main" | "cite")
+		| "index" | "index-main" | "cite"
+		| "claim-label" | "claim-refs")
 }
 
 /// Folds one line's `()[]{}` into the running [`SkipState`], updating the depth and the in-string flag.
@@ -745,6 +757,23 @@ fn cite_keys(inner: &str) -> Vec<String> {
 		i += 1;
 	}
 	keys
+}
+
+/// Reads an inline `#claim-label(...)` or `#claim-refs(...)` at `i` (a `#`), returning the index just
+/// past the closing `)`. Both are the book's claims plumbing: `claim-label` registers invisible metadata
+/// and sets a compressed code string in the outside margin, `claim-refs` registers metadata only, and
+/// neither sets anything in the body text column. The reader consumes the call and sets nothing where it
+/// stood, so the raw markup no longer leaks and the surrounding prose closes over the gap as Typst's body
+/// does. The marginal code annotation is not reproduced: the page carries a single text column with no
+/// margin-placement facility. `None` when the shape is not a claim call or its parentheses do not close.
+fn claim_call(chars: &[char], i: usize) -> Option<usize> {
+	let open = at_lit(chars, i, "#claim-label")
+		.or_else(|| at_lit(chars, i, "#claim-refs"))?;
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	let (_, next) = read_group(chars, open)?;
+	Some(next)
 }
 
 /// Reduces a run of markup to plain display text: the words a reader sees, with the emphasis, code,
@@ -1468,4 +1497,45 @@ fn unquote(val: &str) -> String {
 		return t[1..t.len() - 1].to_string();
 	}
 	t.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// A `#claim-label`/`#claim-refs` marker sets nothing in the body, and the prose on either side
+	/// closes over the gap as one text run, so no raw markup leaks.
+	#[test]
+	fn claim_marker_sets_nothing_inline() {
+		let runs = parse_inlines("clinical authority#claim-label(<LS8>) bites hardest.");
+		assert_eq!(runs.len(), 1);
+		match &runs[0] {
+			Inline::Text(t) => assert_eq!(t, "clinical authority bites hardest."),
+			other => panic!("expected one text run, got {:?}", other),
+		}
+		// The multi-code and metadata-only forms are consumed the same way.
+		assert_eq!(
+			flatten_markup("margins#claim-label(<CD14>, <CD15>, <CD4>) formalised#claim-refs(<A1>)."),
+			"margins formalised.");
+	}
+
+	/// A line that opens with a claim marker is prose, not a standalone call the line scanner skips, so
+	/// the sentence that follows the marker is set rather than dropped with it.
+	#[test]
+	fn line_leading_claim_marker_is_prose() {
+		assert!(is_inline_call("claim-label"));
+		assert!(is_inline_call("claim-refs"));
+		assert!(code_skip("#claim-label(<CD18>). Equilibrium appropriation follows.").is_none());
+	}
+
+	/// A citation nested in emphasis keeps its own [`Inline::Cite`] run rather than leaking its source,
+	/// while the surrounding words take the emphasis face.
+	#[test]
+	fn cite_survives_inside_emphasis() {
+		let runs = parse_inlines("the classic _early work #cite(<coase1937nature>) here_.");
+		assert!(runs.iter().any(|r| matches!(r, Inline::Cite(k) if k == &vec!["coase1937nature".to_string()])),
+			"cite run missing: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#cite"))),
+			"raw #cite leaked: {:?}", runs);
+	}
 }
