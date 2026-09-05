@@ -77,6 +77,7 @@ pub enum Segment {
 	Footnote { note: String },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
+	Code(String),	// an inline code span, set in the mono face
 }
 
 impl Segment {
@@ -103,6 +104,10 @@ impl Segment {
 	pub fn page_ref<S: Into<String>>(label: S) -> Self {
 		Self::PageRef(label.into())
 	}
+
+	pub fn code<S: Into<String>>(text: S) -> Self {
+		Self::Code(text.into())
+	}
 }
 
 /// One block of the authored document. The closed vocabulary the block layer sets; richer blocks
@@ -113,6 +118,7 @@ pub enum Block {
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
+	Code { lines: Vec<String> },	// a verbatim code block, set in the mono face, whitespace preserved
 	Table(Table),
 	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
 	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
@@ -140,6 +146,12 @@ impl Block {
 	/// item may carry emphasis, a footnote or inline maths exactly as a rich paragraph does.
 	pub fn list(ordered: bool, items: Vec<Vec<Segment>>) -> Self {
 		Self::List { ordered, items }
+	}
+
+	/// A verbatim code block: each line set in the mono face with its whitespace preserved and no
+	/// justification, the way source is shown.
+	pub fn code(lines: Vec<String>) -> Self {
+		Self::Code { lines }
 	}
 
 	pub fn table(table: Table) -> Self {
@@ -340,6 +352,15 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::Code { lines: src } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				res!(code_block(&mut nodes, fonts.clone(), style, src));
+				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				i += 1;
+				first = false;
+			},
 			Block::Table(t) => {
 				// Space above the table, discarded at a page top like any other leading. The table lowers
 				// to one keep box, so the driver moves it whole to the next page when it will not fit.
@@ -454,6 +475,9 @@ fn build_pieces(
 					fonts.clone(), style, ref_no,
 					Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone()))))));
 			},
+			Segment::Code(text) => {
+				pieces.push(Piece::Text { text: text.clone(), role: Role::Mono });
+			},
 		}
 	}
 	Ok(pieces)
@@ -519,6 +543,44 @@ fn list(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
 		nodes.extend(lines);
+	}
+	Ok(())
+}
+
+/// Sets a verbatim code block: each source line in the mono face, its leading whitespace preserved by
+/// shaping the whole line, given a one-em hanging indent, and never justified or wrapped. A blank line
+/// keeps the mono line's height so the block's vertical rhythm holds. The block's space from its
+/// neighbours is the caller's. A long line overflows the measure rather than wrapping -- code is not
+/// reflowed; a scrolling or wrapping treatment is a later refinement, as is keeping the block whole
+/// across a page break.
+fn code_block(
+	nodes:	&mut Vec<Node>,
+	fonts:	Arc<FontSet>,
+	style:	Style,
+	lines:	&[String],
+)
+	-> Outcome<()>
+{
+	// Code is set a touch smaller than the body, as most templates do, so more of a wide line fits the
+	// measure before it overflows.
+	let size	= style.foot_size;
+	let indent	= style.body_size;	// a one-em hang, so the block sits off the left margin
+	let sample	= res!(ShapedText::new(fonts.clone(), Role::Mono, Dir::Ltr, size, "0"));
+	let sh		= sample.dims().height;	// a mono digit fixes the height of a blank line
+	let sd		= sample.dims().depth;
+	for (i, line) in lines.iter().enumerate() {
+		let shaped	= res!(ShapedText::new(
+			fonts.clone(), Role::Mono, Dir::Ltr, size,
+			if line.is_empty() { " " } else { line }));
+		let d		= shaped.dims();
+		let h		= if d.height > Sp::ZERO { d.height } else { sh };
+		let dep		= if d.depth > Sp::ZERO { d.depth } else { sd };
+		let children = vec![Node::Glue(Glue::fixed(indent)), Node::Leaf(Leaf::text(shaped))];
+		nodes.push(Node::HBox(BoxNode::new(children, Dims::new(indent + d.width, h, dep))));
+		if i + 1 < lines.len() {
+			let gap = if style.leading > h + dep { style.leading - h - dep } else { style.line_gap };
+			nodes.push(Node::Glue(Glue::fixed(gap)));
+		}
 	}
 	Ok(())
 }

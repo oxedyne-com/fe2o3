@@ -35,6 +35,11 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	let mut list_start:	u32				= 0;
 	let mut list_end:	u32				= 0;
 
+	// A fenced code block, while one is open: the verbatim lines gathered so far and the byte offset it
+	// began at. A ```-fence opens it, the next ```-fence closes it; between them every line is kept as it
+	// stands, its indentation and markup untouched.
+	let mut code:		Option<(Vec<String>, u32)>	= None;
+
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
@@ -50,6 +55,27 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		let end = start.saturating_add(line.len() as u32);
 
 		let trimmed = line.trim_start();
+
+		// A fenced code block takes precedence over every other rule: inside it, only a closing fence is
+		// special and every other line is verbatim, so its own `=`, `-` or `*` carry no markup meaning.
+		if let Some((buf, cstart)) = code.as_mut() {
+			if is_fence(trimmed) {
+				items.push(Item::Code { lines: std::mem::take(buf), span: Span::new(*cstart, end) });
+				code = None;
+			} else {
+				buf.push(line.to_string());
+			}
+			continue;
+		}
+		if is_fence(trimmed) {
+			// An opening fence closes any paragraph or list, then begins a verbatim block. The fence line
+			// itself (and any language tag on it) is not kept.
+			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			code = Some((Vec::new(), start));
+			continue;
+		}
+
 		if trimmed.is_empty() {
 			// A blank line closes the paragraph or list it follows.
 			flush_para(&mut items, &mut lines, para_start, para_end);
@@ -107,10 +133,20 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		}
 	}
 
-	// A source that ends without a closing blank line still closes its last paragraph or list.
+	// A source that ends without a closing blank line still closes its last paragraph or list; an
+	// unterminated code fence still yields the block it had gathered.
 	flush_para(&mut items, &mut lines, para_start, para_end);
 	flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+	if let Some((buf, cstart)) = code {
+		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
+	}
 	Ok(items)
+}
+
+/// Is this already-left-trimmed line a ```` ``` ```` code fence? An opening fence may carry a language
+/// tag (```` ```rust ````); a closing fence is bare. Either way it opens with three backticks.
+fn is_fence(trimmed: &str) -> bool {
+	trimmed.starts_with("```")
 }
 
 /// Reads a list marker at the start of an already-left-trimmed line: `-` opens a bullet item, `+` a
@@ -194,6 +230,28 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 			plain.push(chars[i + 1]);
 			i += 2;
 			continue;
+		}
+		// An inline code span, `raw` between backticks: its content is verbatim, no markup within.
+		if c == '`' {
+			if let Some(close) = (i + 1..n).find(|&j| chars[j] == '`') {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::Code(chars[i + 1..close].iter().collect()));
+				i = close + 1;
+				continue;
+			}
+		}
+		// The `#raw("...")` call form of inline code.
+		if c == '#' {
+			if let Some((text, next)) = raw_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::Code(text));
+				i = next;
+				continue;
+			}
 		}
 		// A Typst cross-reference: `@` then a label.
 		if c == '@' {
@@ -281,6 +339,30 @@ fn at_label(chars: &[char], i: usize) -> Option<(String, usize)> {
 /// full stop that ends a sentence.
 fn is_label_char(c: char) -> bool {
 	c.is_alphanumeric() || matches!(c, '-' | '_' | ':')
+}
+
+/// Reads an inline `#raw("...")` at `i`, returning its literal content and the index past the closing
+/// `")`. `None` when the shape does not match, so a `#raw` written any other way is left as ordinary
+/// text. Escaped quotes inside the string are not handled -- a later refinement.
+fn raw_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open	= at_lit(chars, i, "#raw(\"")?;
+	let close	= (open..chars.len()).find(|&j| chars[j] == '"')?;
+	if chars.get(close + 1) != Some(&')') {
+		return None;
+	}
+	Some((chars[open..close].iter().collect(), close + 2))
+}
+
+/// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
+fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
+	let mut k = i;
+	for ch in s.chars() {
+		if chars.get(k) != Some(&ch) {
+			return None;
+		}
+		k += 1;
+	}
+	Some(k)
 }
 
 /// Is this already-left-trimmed line a Typst code statement Austenite skips for now? The four block

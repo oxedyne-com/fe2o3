@@ -28,6 +28,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::List { ordered, items, .. }	=> out.push(Block::list(
 				*ordered,
 				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
+			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 		}
 	}
 	out
@@ -49,5 +50,6 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
+		Inline::Code(text)		=> Segment::code(text.clone()),
 	}
 }
