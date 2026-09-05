@@ -33,11 +33,33 @@ use crate::ir::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
+	font::Font,
 	set::FontSet,
 	shape::Dir,
 };
 
-use std::sync::Arc;
+use std::sync::{
+	Arc,
+	OnceLock,
+};
+
+// The maths font: Noto Sans Math, which carries a real maths alphabet (the Mathematical Italic block),
+// upright operators and relations, and the large symbols a text face lacks. It pairs with the Noto Sans
+// body the reading set is built on. It has no OpenType MATH table, so the layout constants below stay
+// TeX's plain defaults and a delimiter does not grow to its content; that is the documented remainder.
+const MATH_FONT: &[u8] = include_bytes!("../fonts/NotoSansMath-Regular.ttf");
+
+/// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
+/// behind a [`OnceLock`]; a lost race merely parses twice and keeps the first.
+fn math_font() -> Outcome<Arc<Font>> {
+	static MATH: OnceLock<Arc<Font>> = OnceLock::new();
+	if let Some(f) = MATH.get() {
+		return Ok(f.clone());
+	}
+	let f = Arc::new(res!(Font::new(MATH_FONT.to_vec())));
+	let _ = MATH.set(f.clone());
+	Ok(f)
+}
 
 /// An atom's spacing class, after TeX. The class of the atoms either side of a gap fixes the space
 /// set there; the class also decides, for a symbol, whether it is set upright or in the maths italic.
@@ -180,7 +202,7 @@ pub fn layout(
 )
 	-> Outcome<Node>
 {
-	let m = res!(build(&fonts, style, expr, Level::Text));
+	let m = res!(build(style, expr, Level::Text, display));
 
 	// The baseline's distance from the box top. A display box stands on its own, so its top is its
 	// highest ink and the baseline sits `height` below it. An inline box shares the line, so its
@@ -204,29 +226,30 @@ fn ascent(fonts: &Arc<FontSet>, size: Sp) -> Outcome<Sp> {
 
 /// Measures an atom into a maths box at a size level. Recursion mirrors the tree: a symbol shapes one
 /// run, a row concatenates its atoms with class spacing, a fraction stacks two smaller boxes over a
-/// bar, and a script hangs smaller boxes off a base.
+/// bar or slashes them on the line, and a script hangs smaller boxes off a base. `display` distinguishes
+/// a display equation, which stacks its fractions, from inline maths, which slashes them so a running
+/// line never opens above a fraction.
 fn build(
-	fonts:	&Arc<FontSet>,
-	style:	&Style,
-	expr:	&Atom,
-	level:	Level,
+	style:		&Style,
+	expr:		&Atom,
+	level:		Level,
+	display:	bool,
 )
 	-> Outcome<MBox>
 {
 	match expr {
-		Atom::Sym(text, class)			=> build_sym(fonts, style, text, *class, level),
-		Atom::Row(items)				=> build_row(fonts, style, items, level),
-		Atom::Frac { num, den }			=> build_frac(fonts, style, num, den, level),
-		Atom::Script { base, sup, sub }	=> build_script(fonts, style, base, sup.as_deref(), sub.as_deref(), level),
+		Atom::Sym(text, class)			=> build_sym(style, text, *class, level),
+		Atom::Row(items)				=> build_row(style, items, level, display),
+		Atom::Frac { num, den }			=> build_frac(style, num, den, level, display),
+		Atom::Script { base, sup, sub }	=> build_script(style, base, sup.as_deref(), sub.as_deref(), level, display),
 	}
 }
 
-/// Sets one symbol. A single-letter ordinary atom is the maths italic (approximated by the text
-/// italic); a function name, a digit, an operator or a delimiter is upright. The run's ascent and
-/// descent stand in for the atom's height and depth -- an over-estimate for a short letter, which the
-/// text faces give no cheaper way to tighten.
+/// Sets one symbol from the maths font. A single-letter ordinary atom is drawn from the Mathematical
+/// Italic block -- a real maths italic, not the text italic -- while a function name, a digit, an
+/// operator or a delimiter is the font's upright glyph. The run's ascent and descent stand in for the
+/// atom's height and depth.
 fn build_sym(
-	fonts:	&Arc<FontSet>,
 	style:	&Style,
 	text:	&str,
 	class:	Class,
@@ -235,35 +258,49 @@ fn build_sym(
 	-> Outcome<MBox>
 {
 	let size	= size_for(style, level);
-	let role	= role_for(text, class);
-	let shaped	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, text));
+	let font	= res!(math_font());
+	let shown	= math_text(text, class);
+	let shaped	= res!(ShapedText::new_with_font(font, Dir::Ltr, size, &shown));
 	let d		= shaped.dims();
 	let piece	= Piece { x: Sp::ZERO, width: d.width, rel: Sp::ZERO, draw: Draw::Glyph(shaped) };
 	Ok(MBox { pieces: vec![piece], width: d.width, height: d.height, depth: d.depth, class })
 }
 
-/// The face a symbol is set in: the italic for a single-letter variable, the upright body for
-/// everything else. This one rule is the core maths convention -- `x` leans, `sin` and `2` and `+`
-/// stand straight.
-fn role_for(text: &str, class: Class) -> Role {
+/// The characters actually shaped for an atom. A single-letter ordinary variable is remapped to its
+/// Mathematical Italic codepoint, so `x` draws as a maths italic from the maths font; everything else
+/// -- a digit, a multi-letter name, an operator -- is shaped as written, upright.
+fn math_text(text: &str, class: Class) -> String {
 	if class == Class::Ord {
 		let mut it = text.chars();
 		if let (Some(c), None) = (it.next(), it.next()) {
-			if c.is_alphabetic() {
-				return Role::Italic;
+			if let Some(m) = math_italic(c) {
+				return m.to_string();
 			}
 		}
 	}
-	Role::Body
+	text.to_string()
+}
+
+/// The Mathematical Italic codepoint of a Latin letter, or `None` for anything else. The italic small
+/// `h` is the one hole in the block -- U+1D455 is unassigned -- and lives at U+210E, the Planck
+/// constant, which every maths font draws as the italic h.
+fn math_italic(c: char) -> Option<char> {
+	let cp = match c {
+		'h'			=> 0x210E,
+		'a'..='z'	=> 0x1D44E + (c as u32 - 'a' as u32),
+		'A'..='Z'	=> 0x1D434 + (c as u32 - 'A' as u32),
+		_			=> return None,
+	};
+	char::from_u32(cp)
 }
 
 /// Concatenates a row's atoms left to right, opening a class-driven space before each atom but the
 /// first. The row presents as ordinary to whatever encloses it.
 fn build_row(
-	fonts:	&Arc<FontSet>,
-	style:	&Style,
-	items:	&[Atom],
-	level:	Level,
+	style:		&Style,
+	items:		&[Atom],
+	level:		Level,
+	display:	bool,
 )
 	-> Outcome<MBox>
 {
@@ -275,7 +312,7 @@ fn build_row(
 	let mut prev:	Option<Class>	= None;
 
 	for atom in items {
-		let m = res!(build(fonts, style, atom, level));
+		let m = res!(build(style, atom, level, display));
 		if let Some(pc) = prev {
 			cursor += space_between(pc, m.class, size);
 		}
@@ -316,18 +353,29 @@ fn mu_between(left: Class, right: Class) -> i32 {
 /// set one level down (a fraction inside running text uses script size), the bar is the default rule
 /// thickness, and the axis is a quarter of the em -- the height a relation and a fraction centre on.
 fn build_frac(
-	fonts:	&Arc<FontSet>,
-	style:	&Style,
-	num:	&Atom,
-	den:	&Atom,
-	level:	Level,
+	style:		&Style,
+	num:		&Atom,
+	den:		&Atom,
+	level:		Level,
+	display:	bool,
 )
 	-> Outcome<MBox>
 {
+	// Inline, a fraction is slashed on the line -- numerator, solidus, denominator abreast -- so it
+	// keeps within the line's height and never opens a gap above it. Only a display fraction stacks.
+	if !display {
+		let items = vec![
+			num.clone(),
+			Atom::Sym("/".to_string(), Class::Ord),
+			den.clone(),
+		];
+		return build_row(style, &items, level, display);
+	}
+
 	let size	= size_for(style, level);
 	let sub		= level.smaller();
-	let n		= res!(build(fonts, style, num, sub));
-	let d		= res!(build(fonts, style, den, sub));
+	let n		= res!(build(style, num, sub, display));
+	let d		= res!(build(style, den, sub, display));
 
 	let axis	= Sp(size.raw() / 4);		// the maths axis, a quarter of the em
 	let t		= style.rule_thin;			// the fraction bar, the default rule thickness
@@ -360,18 +408,18 @@ fn build_frac(
 /// subscript, the latter deepened when the base itself hangs below the baseline. Real script shifts
 /// come from the font's maths table; these are the plain-TeX order of magnitude.
 fn build_script(
-	fonts:	&Arc<FontSet>,
-	style:	&Style,
-	base:	&Atom,
-	sup:	Option<&Atom>,
-	sub:	Option<&Atom>,
-	level:	Level,
+	style:		&Style,
+	base:		&Atom,
+	sup:		Option<&Atom>,
+	sub:		Option<&Atom>,
+	level:		Level,
+	display:	bool,
 )
 	-> Outcome<MBox>
 {
 	let size	= size_for(style, level);
 	let em		= size.raw();
-	let b		= res!(build(fonts, style, base, level));
+	let b		= res!(build(style, base, level, display));
 
 	let mut pieces:	Vec<Piece> = Vec::new();
 	place_into(&mut pieces, b.pieces, Sp::ZERO, Sp::ZERO);
@@ -383,7 +431,7 @@ fn build_script(
 	let mut depth	= b.depth;
 
 	if let Some(s) = sup {
-		let m		= res!(build(fonts, style, s, level.smaller()));
+		let m		= res!(build(style, s, level.smaller(), display));
 		let rise	= Sp(em / 2);		// half the em above the baseline
 		place_into(&mut pieces, m.pieces, sx, -rise);
 		let w = sx + m.width;
@@ -392,7 +440,7 @@ fn build_script(
 		if top > height { height = top; }
 	}
 	if let Some(s) = sub {
-		let m		= res!(build(fonts, style, s, level.smaller()));
+		let m		= res!(build(style, s, level.smaller(), display));
 		let floor	= Sp(em / 4);		// a quarter of the em below the baseline
 		let drop	= if b.depth + Sp(em / 20) > floor { b.depth + Sp(em / 20) } else { floor };
 		place_into(&mut pieces, m.pieces, sx, drop);

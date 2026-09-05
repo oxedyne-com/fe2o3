@@ -8,8 +8,11 @@
 use crate::font::ShapedText;
 use crate::ir::{
 	Dims,
+	Graphic,
 	Sp,
 };
+
+use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_geom::rect::AbsSize;
@@ -64,6 +67,7 @@ pub enum PlacedKind {
 	Rule,
 	Reserved,
 	Text(ShapedText),
+	Graphic(Arc<Graphic>),	// a figure's baked paths, drawn at this box's position
 }
 
 /// A box set at an absolute position on a page. The position is the top-left of the box; the

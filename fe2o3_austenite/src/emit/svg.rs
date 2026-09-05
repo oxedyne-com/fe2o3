@@ -8,7 +8,11 @@
 //! shape above a `<path>` is the caller's format, not that crate's.
 
 use crate::font::ShapedText;
-use crate::ir::Sp;
+use crate::ir::{
+	DrawOp,
+	Graphic,
+	Sp,
+};
 use crate::page::{
 	Page,
 	PlacedKind,
@@ -54,6 +58,10 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
 			continue;
 		}
+		if let PlacedKind::Graphic(g) = &placed.kind {
+			res!(draw_graphic(&mut out, placed.x, placed.y, g));
+			continue;
+		}
 
 		let x0 = placed.x.to_pt() as f32;
 		let y0 = placed.y.to_pt() as f32;
@@ -70,6 +78,7 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 			PlacedKind::Rule		=> presentation(Some(Rgba::BLACK), None),
 			PlacedKind::Reserved	=> presentation(None, Some((grey, &pen))),
 			PlacedKind::Text(_)		=> continue,	// drawn above
+			PlacedKind::Graphic(_)	=> continue,	// drawn above
 		};
 		out.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
 	}
@@ -79,6 +88,36 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 	// the body, above. This writer adds no page furniture of its own.
 	out.push_str("</svg>\n");
 	Ok(out)
+}
+
+/// Draws a placed graphic: each op's path translated from the graphic's own frame to where the graphic
+/// landed, then filled or stroked. The paths are already y down in points, so a translation suffices --
+/// no flip, unlike a glyph outline.
+fn draw_graphic(
+	out:		&mut String,
+	bx:			Sp,
+	by:			Sp,
+	graphic:	&Graphic,
+)
+	-> Outcome<()>
+{
+	let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
+	for op in &graphic.ops {
+		match op {
+			DrawOp::Fill { path, colour } => {
+				let p = res!(path.transform(&t));
+				out.push_str(&fmt!(
+					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(Some(*colour), None)));
+			},
+			DrawOp::Stroke { path, colour, width } => {
+				let pen	= res!(Stroke::new(*width));
+				let p	= res!(path.transform(&t));
+				out.push_str(&fmt!(
+					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(None, Some((*colour, &pen)))));
+			},
+		}
+	}
+	Ok(())
 }
 
 /// Draws a placed run as filled glyph outlines. `height` is the face ascent, so `by + height` is the

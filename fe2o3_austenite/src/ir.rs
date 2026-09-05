@@ -16,6 +16,12 @@ use crate::ledger::{
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_graphics::{
+	colour::Rgba,
+	path::Path,
+};
+
+use std::sync::Arc;
 
 /// A length in scaled points: one sixty-five-thousand-five-hundred-and-thirty-sixth of a point, as
 /// in TeX. Integer arithmetic makes every break decision exact and every build byte-identical, which
@@ -197,6 +203,30 @@ pub struct Footnote {
 	pub height:	Sp,			// the note's stacked vertical extent, reserved from the body
 }
 
+/// One drawing operation within a [`Graphic`]: a filled or stroked path in the graphic's own frame,
+/// which is y down and in points, so placing the graphic needs only a translation.
+#[derive(Clone, Debug)]
+pub enum DrawOp {
+	Fill { path: Path, colour: Rgba },
+	Stroke { path: Path, colour: Rgba, width: f32 },	// stroke width in points
+}
+
+/// A self-contained piece of drawn ink -- a diagram, a figure, a baked label run -- as a bag of paths
+/// with a bounding box. It rides the stream as a [`LeafKind::Graphic`] leaf and is placed like any box;
+/// the emitter translates its ops to where it landed and draws them. Every path is already flattened
+/// here, a text label's glyph outlines included, so a built graphic never reaches back into shaping.
+#[derive(Clone, Debug)]
+pub struct Graphic {
+	pub ops:	Vec<DrawOp>,
+	pub dims:	Dims,
+}
+
+impl Graphic {
+	pub fn new(ops: Vec<DrawOp>, dims: Dims) -> Self {
+		Self { ops, dims }
+	}
+}
+
 /// What an atomic box draws. `Reserved` holds open the width a forward reference will need once the
 /// ledger resolves it, which is what lets two passes suffice by construction.
 #[derive(Clone, Debug)]
@@ -205,6 +235,7 @@ pub enum LeafKind {
 	Reserved(AnchorId, Ref),	// a forward reference: its own identity, and what it resolves to
 	Text(ShapedText),			// a shaped run of real text, drawn as glyph outlines
 	Mark(Footnote),				// a footnote reference mark; its note is set at the page foot
+	Graphic(Arc<Graphic>),		// a self-contained figure, its ops drawn at the leaf's placement
 }
 
 /// An atomic box: intrinsic dimensions, what it draws, and where in the source it came from.
@@ -242,6 +273,13 @@ impl Leaf {
 	/// enough that line breaking flows around it as around any narrow box.
 	pub fn mark(footnote: Footnote, dims: Dims) -> Self {
 		Self { kind: LeafKind::Mark(footnote), dims, shift: Sp::ZERO, span: None }
+	}
+
+	/// A graphic leaf: a figure set as one box, its ink the graphic's own paths. The dims are the
+	/// graphic's bounding box, so the vertical list stacks it and a line flows around it as any box.
+	pub fn graphic(graphic: Graphic) -> Self {
+		let dims = graphic.dims;
+		Self { kind: LeafKind::Graphic(Arc::new(graphic)), dims, shift: Sp::ZERO, span: None }
 	}
 
 	pub fn with_span(mut self, span: Span) -> Self {

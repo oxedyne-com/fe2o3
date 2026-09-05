@@ -13,6 +13,7 @@ use crate::ir::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
+	font::Font,
 	set::FontSet,
 	shape::{
 		Dir,
@@ -52,13 +53,29 @@ impl Metrics for FontMetrics {
 	}
 }
 
+/// Where a shaped run draws its glyphs from: a role in the reader's set, or a standalone font handed
+/// in outside the set -- the maths font, which is not one of the reading roles. Both are shared (`Arc`)
+/// because a run is cloned into the page frame and outlives the composition that placed it.
+#[derive(Clone)]
+enum Source {
+	Set { fonts: Arc<FontSet>, role: Role },
+	Solo { font: Arc<Font> },
+}
+
+impl Source {
+	fn font(&self) -> &Font {
+		match self {
+			Source::Set { fonts, role }	=> fonts.get(*role),
+			Source::Solo { font }		=> font,
+		}
+	}
+}
+
 /// A shaped run and the font handle to draw it, carried by a [`LeafKind::Text`](crate::ir::LeafKind)
-/// so the emitter can outline each glyph. The set is shared (`Arc`) because a run is cloned into the
-/// page frame and outlives the composition that placed it.
+/// so the emitter can outline each glyph.
 #[derive(Clone)]
 pub struct ShapedText {
-	fonts:	Arc<FontSet>,
-	role:	Role,
+	src:	Source,
 	size:	f32,	// device points, the shaper's pixel and the outline's size
 	run:	Run,
 	dims:	Dims,
@@ -88,7 +105,24 @@ impl ShapedText {
 	)
 		-> Outcome<Self>
 	{
-		let font	= fonts.get(role);
+		Self::from_source(Source::Set { fonts, role }, dir, size, text)
+	}
+
+	/// Shapes in a standalone font outside the reading set -- the maths font, whose glyphs a role's
+	/// chain does not carry. The run seats and outlines against that same font.
+	pub fn new_with_font(
+		font:	Arc<Font>,
+		dir:	Dir,
+		size:	Sp,
+		text:	&str,
+	)
+		-> Outcome<Self>
+	{
+		Self::from_source(Source::Solo { font }, dir, size.to_pt() as f32, text)
+	}
+
+	fn from_source(src: Source, dir: Dir, size: f32, text: &str) -> Outcome<Self> {
+		let font	= src.font();
 		let run		= res!(font.shape(text, size, dir));
 		let vm		= res!(font.metrics(size));
 		let dims	= Dims::new(
@@ -96,7 +130,7 @@ impl ShapedText {
 			Sp::from_pt(vm.ascent as f64),		// height above the baseline
 			Sp::from_pt(vm.descent as f64),		// depth below it
 		);
-		Ok(Self { fonts, role, size, run, dims })
+		Ok(Self { src, size, run, dims })
 	}
 
 	pub fn dims(&self) -> Dims { self.dims }
@@ -107,7 +141,7 @@ impl ShapedText {
 
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
-		self.fonts.get(self.role).outline(glyph.face, glyph.id, self.size)
+		self.src.font().outline(glyph.face, glyph.id, self.size)
 	}
 }
 
@@ -115,7 +149,6 @@ impl std::fmt::Debug for ShapedText {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		// The font set holds parsed faces that do not print; summarise the run instead.
 		f.debug_struct("ShapedText")
-			.field("role", &self.role)
 			.field("size", &self.size)
 			.field("glyphs", &self.run.glyphs.len())
 			.field("dims", &self.dims)

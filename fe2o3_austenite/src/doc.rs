@@ -25,6 +25,7 @@ use crate::ir::{
 	Dims,
 	Footnote,
 	Glue,
+	Graphic,
 	Leaf,
 	Node,
 	Penalty,
@@ -97,6 +98,7 @@ pub enum Block {
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
 	Table(Table),
 	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
+	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
 }
 
 impl Block {
@@ -120,6 +122,12 @@ impl Block {
 	/// the right margin and records an [`Equation`](crate::ledger::AnchorKind::Equation) anchor.
 	pub fn equation(expr: Atom, numbered: bool) -> Self {
 		Self::Equation { expr, numbered }
+	}
+
+	/// A drawn figure, centred on its own line and captioned "Figure N" beneath, its identity recorded
+	/// as a [`Float`](crate::ledger::AnchorKind::Float) anchor so a cross-reference resolves its page.
+	pub fn figure(graphic: Graphic, caption: Option<String>) -> Self {
+		Self::Figure { graphic, caption }
 	}
 }
 
@@ -224,6 +232,7 @@ pub fn author(
 	let mut first	= true;
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
+	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the figures
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, text } => {
@@ -301,6 +310,18 @@ pub fn author(
 				let number = if *numbered { eq_no += 1; Some(eq_no) } else { None };
 				res!(equation(&mut nodes, fonts.clone(), style, measure, expr, number));
 				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				i += 1;
+				first = false;
+			},
+			Block::Figure { graphic, caption } => {
+				// Space above the figure, discarded at a page top like any other leading. The figure is
+				// one keep box, so the breaker moves it whole to the next page when it will not fit.
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				}
+				fig_no += 1;
+				res!(figure(&mut nodes, fonts.clone(), style, measure, graphic.clone(), caption.as_deref(), fig_no));
+				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
 			},
@@ -494,6 +515,55 @@ fn equation(
 	}
 
 	nodes.push(Node::HBox(BoxNode::new(children, Dims::new(measure, height, depth))));
+	Ok(())
+}
+
+/// Sets a figure: its identity as a [`Float`](crate::ledger::AnchorKind::Float) anchor, the graphic
+/// centred on its own line, and a caption centred beneath. The graphic's dimensions are its bounding
+/// box, `height` the whole visual extent and `depth` zero, so the line advances by the figure's height
+/// and the greedy breaker moves it whole. The anchor is recorded before the ink so a reference to the
+/// figure resolves the page it lands on.
+fn figure(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	graphic:	Graphic,
+	caption:	Option<&str>,
+	number:		u32,
+)
+	-> Outcome<()>
+{
+	let id = AnchorId::new(AnchorKind::Float, fmt!("fig-{}", number));
+	nodes.push(Node::Anchor(id));
+
+	// The graphic centred: a fixed box with glue to its left, on a line whose height is the figure's.
+	let leaf	= Leaf::graphic(graphic);
+	let gw		= leaf.dims.width;
+	let gh		= leaf.dims.height + leaf.dims.depth;
+	let pad		= if measure > gw { Sp((measure.raw() - gw.raw()) / 2) } else { Sp::ZERO };
+	let mut row:	Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(leaf));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, gh, Sp::ZERO))));
+
+	// The caption, centred beneath the figure, set in the italic at the footnote size.
+	let text = match caption {
+		Some(c)	=> fmt!("Figure {}.  {}", number, c),
+		None	=> fmt!("Figure {}.", number),
+	};
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
+	let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.foot_size, &text));
+	let cd		= shaped.dims();
+	let cpad	= if measure > cd.width { Sp((measure.raw() - cd.width.raw()) / 2) } else { Sp::ZERO };
+	let mut crow:	Vec<Node> = Vec::new();
+	if cpad.raw() > 0 {
+		crow.push(Node::Glue(Glue::fixed(cpad)));
+	}
+	crow.push(Node::Leaf(Leaf::text(shaped)));
+	nodes.push(Node::HBox(BoxNode::new(crow, Dims::new(measure, cd.height, cd.depth))));
 	Ok(())
 }
 

@@ -482,6 +482,11 @@ fn place_leaf<M: Metrics>(
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Text(footnote.mark.clone())));
 			Ok(x + leaf.dims.width)
 		},
+		LeafKind::Graphic(g) => {
+			// A figure placed whole: its ops are translated to this position and drawn by the emitter.
+			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Graphic(g.clone())));
+			Ok(x + leaf.dims.width)
+		},
 		LeafKind::Reserved(id, refr) => {
 			// A forward reference. What it resolves to is the reference's own business (a total count, a
 			// cross-referenced page); the driver only asks the previous pass's ledger for the value and

@@ -244,9 +244,10 @@ fn blocks() -> Vec<Block> {
 		Block::heading(1, "Setting Mathematics on the Line"),
 		Block::paragraph(
 			"Mathematics is the sternest test of a typesetter, for it stacks symbols in two dimensions \
-			where prose runs in one. This first increment sets real expressions from the same text faces \
-			the prose uses: a single-letter variable leans in the italic, while a digit, a function name \
-			and an operator stand upright, which is the oldest convention of the craft."),
+			where prose runs in one. This increment sets real expressions in a dedicated mathematics \
+			font: a single-letter variable is drawn from the true mathematics italic alphabet, while a \
+			digit, a function name and an operator stand upright, which is the oldest convention of the \
+			craft."),
 		Block::rich(vec![
 			Segment::text("The equivalence of mass and energy is written "),
 			Segment::math(Atom::row(vec![
@@ -258,8 +259,8 @@ fn blocks() -> Vec<Block> {
 			Segment::text(", a variable carrying a raised square. A quantity may equally be set as a \
 				fraction in the running line, such as "),
 			Segment::math(Atom::frac(Atom::num("1"), Atom::num("2"))),
-			Segment::text(", its numerator stacked over its denominator with a bar between, though a tall \
-				fraction is better shown displayed than crammed into the leading of a line of prose."),
+			Segment::text(", set on the line with a solidus so it keeps within the line's height, though a \
+				tall fraction is better shown displayed than crammed into the leading of a line of prose."),
 		]),
 		Block::paragraph(
 			"A display equation is set on a line of its own, centred on the measure and, when it earns a \
@@ -292,12 +293,12 @@ fn blocks() -> Vec<Block> {
 			]),
 			true),
 		Block::paragraph(
-			"Without an OpenType mathematics font the engine can only approximate. The variables are the \
-			text italic rather than a true mathematics alphabet, the radical and the parentheses cannot \
-			grow to embrace their contents, and the axis, the rule thickness and the inter-symbol spaces \
-			are the classical defaults rather than a font's own constants. What the increment proves is \
-			the layout: symbols stacked, scripts raised, and a fraction centred on the axis, all set from \
-			the same boxes and glue as the prose."),
+			"The mathematics font carries no OpenType MATH table, so the engine still approximates. The \
+			radical and the parentheses cannot grow to embrace their contents, and the axis, the rule \
+			thickness and the inter-symbol spaces are the classical defaults rather than a font's own \
+			constants. What the increment sets is a real mathematics alphabet on a layout of stacked \
+			symbols, raised scripts and a fraction centred on the axis, all built from the same boxes and \
+			glue as the prose."),
 
 		Block::heading(1, "A Table of the Three Stages"),
 		Block::paragraph(

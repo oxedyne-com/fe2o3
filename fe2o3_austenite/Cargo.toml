@@ -6,10 +6,15 @@ edition = "2021"
 license = "BSD-2-Clause/Apache-2.0"
 description = "Austenite: a streaming, two-pass typesetting engine. Phase 0 spine."
 repository = "https://github.com/oxedyne-io/fe2o3"
+autobins = false
 
 [[bin]]
 name = "aus"
 path = "src/bin/aus.rs"
+
+[[bin]]
+name = "ingot"
+path = "src/bin/ingot.rs"
 
 [dependencies]
 oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
