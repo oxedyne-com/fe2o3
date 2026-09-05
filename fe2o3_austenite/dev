@@ -1,0 +1,157 @@
+#!/usr/bin/env bash
+# ┌──────────────────────────────────────────────┐
+# │ Live-preview an Ingot document in the browser │
+# └──────────────────────────────────────────────┘
+#
+# Austenite's answer to `typst watch`. Watches a .ingot source, recompiles it
+# with the `ingot` binary on every save, rasterises the pages, and serves an
+# auto-refreshing preview over HTTP -- so the loop is edit, save, and see the
+# set page a moment later, from this machine or any other on the network.
+#
+#   ./dev [SOURCE.ingot]        default: samples/manuscript.ingot
+#
+# Environment: PORT (default 8137), DPI (default 130), CARGO_TARGET_DIR.
+# A compile error is shown in the browser, in full, rather than a stale page.
+
+set -euo pipefail
+
+CRATE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC="${1:-$CRATE/samples/manuscript.ingot}"
+PORT="${PORT:-8137}"
+DPI="${DPI:-130}"
+
+if [[ "$SRC" != *.ingot ]]; then
+	echo "dev: the source should be a .ingot file, not '$SRC'." >&2
+	exit 1
+fi
+if [[ ! -f "$SRC" ]]; then
+	echo "dev: no such file: $SRC" >&2
+	exit 1
+fi
+
+# The preview lives under the cargo target cache, off the source tree: not
+# synced, not tmpfs, and cleared fresh each run.
+SLOT="${RC_SLOT:-solo}"
+TARGET="${CARGO_TARGET_DIR:-$HOME/.cache/cargo-targets/$SLOT/austenite}"
+PREVIEW="$TARGET/dev-preview"
+INGOT="$TARGET/debug/ingot"
+
+rm -rf "$PREVIEW"
+mkdir -p "$PREVIEW"
+
+cleanup() { kill $(jobs -p) 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+# Build the compiler once. A warm build is a second or two; a cold one longer.
+echo "dev: building ingot ..."
+( cd "$CRATE" && cargo build -q -p oxedyne_fe2o3_austenite --bin ingot )
+if [[ ! -x "$INGOT" ]]; then
+	echo "dev: ingot binary not found at $INGOT after build." >&2
+	exit 1
+fi
+
+# The preview page: it polls a version stamp and, when it changes, redraws the
+# pages (cache-busted) or the compile error. Written once; the loop only updates
+# the data files beside it.
+cat > "$PREVIEW/index.html" <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<title>Austenite live preview</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #4a4d52; font: 14px system-ui, sans-serif; }
+  #bar { position: fixed; inset: 0 0 auto 0; z-index: 9;
+         background: #1e1f22; color: #cfd2d6; padding: 7px 14px;
+         box-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  #bar b { color: #f0f2f4; }
+  #pages { padding: 46px 0 28px; display: flex; flex-direction: column;
+           align-items: center; gap: 18px; }
+  img { max-width: min(92vw, 900px); background: #fff;
+        box-shadow: 0 3px 16px rgba(0,0,0,.5); }
+  .err { white-space: pre-wrap; color: #ff9b9b; background: #2b1717;
+         border: 1px solid #5a2a2a; border-radius: 8px;
+         padding: 14px 16px; margin: 60px 16px; max-width: 900px;
+         font: 13px ui-monospace, monospace; }
+</style>
+<div id="bar">Austenite &mdash; <b id="stamp">starting &hellip;</b></div>
+<div id="pages"></div>
+<script>
+let cur = "";
+async function tick() {
+  try {
+    const v = (await (await fetch("version.txt", { cache: "no-store" })).text()).trim();
+    if (v && v !== cur) { cur = v; await render(v); }
+  } catch (e) { /* server between writes; try again */ }
+  setTimeout(tick, 600);
+}
+async function render(v) {
+  const m = await (await fetch("pages.json?" + v, { cache: "no-store" })).json();
+  document.getElementById("stamp").textContent =
+    m.error ? (m.stamp + " — compile error") : (m.stamp + " — " + m.pages + " page(s)");
+  const box = document.getElementById("pages");
+  box.innerHTML = "";
+  if (m.error) {
+    const d = document.createElement("div");
+    d.className = "err";
+    d.textContent = m.error;
+    box.appendChild(d);
+    return;
+  }
+  for (let i = 1; i <= m.pages; i++) {
+    const im = new Image();
+    im.src = "page-" + String(i).padStart(3, "0") + ".png?" + v;
+    box.appendChild(im);
+  }
+}
+tick();
+</script>
+HTML
+
+json_escape() { python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))'; }
+
+compile() {
+	local ts err rc n f i
+	ts="$(date '+%H:%M:%S')"
+	rm -f "$PREVIEW"/page-*.png "$PREVIEW"/raw-*.png
+	set +e
+	err="$("$INGOT" "$SRC" "$PREVIEW/out" 2>&1 >/dev/null)"; rc=$?
+	set -e
+	if [[ $rc -eq 0 && -f "$PREVIEW/out/document.pdf" ]]; then
+		pdftoppm -r "$DPI" -png "$PREVIEW/out/document.pdf" "$PREVIEW/raw" >/dev/null 2>&1 || true
+		i=0
+		for f in $(ls -v "$PREVIEW"/raw-*.png 2>/dev/null); do
+			i=$((i + 1))
+			mv "$f" "$PREVIEW/page-$(printf '%03d' "$i").png"
+		done
+		printf '{"stamp":"%s","pages":%d}\n' "$ts" "$i" > "$PREVIEW/pages.json"
+		echo "dev: [$ts] compiled $i page(s)"
+	else
+		printf '{"stamp":"%s","pages":0,"error":%s}\n' "$ts" "$(printf '%s' "$err" | json_escape)" \
+			> "$PREVIEW/pages.json"
+		echo "dev: [$ts] compile error:"
+		printf '%s\n' "$err"
+	fi
+	date +%s%N > "$PREVIEW/version.txt"
+}
+
+# Serve the preview directory.
+( cd "$PREVIEW" && exec python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &
+
+compile	# first render, so the page is there the moment the browser opens
+
+echo
+echo "dev: watching $(basename "$SRC")"
+echo "dev: preview at http://localhost:$PORT/   (Ctrl-C to stop)"
+echo
+
+# Poll the source's modification time; recompile whenever it changes. `stat` is
+# cheaper than any file-watch daemon and needs nothing installed.
+last="$(stat -c %Y "$SRC" 2>/dev/null || echo 0)"
+while true; do
+	sleep 0.5
+	now="$(stat -c %Y "$SRC" 2>/dev/null || echo 0)"
+	if [[ "$now" != "$last" ]]; then
+		last="$now"
+		compile
+	fi
+done

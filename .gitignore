@@ -3,6 +3,10 @@
 !*/
 !*.*
 
+# ... but the Austenite live-preview script is deliberately extensionless (`./dev`,
+# after `typst watch`), so it is re-included by name.
+!fe2o3_austenite/dev
+
 # Agent worktrees. These are a checkout apiece, so a blanket `git add` in a tree
 # several sessions share would commit a copy of the repository into itself.
 .claude/worktrees/
