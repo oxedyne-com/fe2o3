@@ -450,7 +450,7 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
 				let inner: String = chars[i + 1..close].iter().collect();
-				runs.push(if c == '*' { Inline::Strong(inner) } else { Inline::Emph(inner) });
+				push_emphasis(&mut runs, c == '*', &inner);
 				i = close + 1;
 				continue;
 			}
@@ -465,6 +465,29 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 		runs.push(Inline::Text(String::new()));	// a paragraph of pure delimiters keeps one empty run
 	}
 	runs
+}
+
+/// Pushes an emphasised run (`*strong*` when `strong`, else `_emph_`) onto `runs`, reading its inner
+/// markup. When the inner is plain text the run keeps the fast flat path -- one [`Inline::Strong`] or
+/// [`Inline::Emph`]. When it carries a glossary term, an index call or a maths span -- as
+/// `*The captation #gsi[attractor]*` does -- the emphasis is expanded: its plain stretches take the
+/// emphasis face and the embedded calls become their own runs, so a call nested in emphasis renders its
+/// display text rather than leaking its raw source. A glossary term keeps its own first-use bold-italic
+/// (which subsumes the surrounding emphasis), so only the plain stretches carry the emphasis face.
+fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str) {
+	let sub = parse_inlines(inner);
+	if let [Inline::Text(t)] = sub.as_slice() {
+		runs.push(if strong { Inline::Strong(t.clone()) } else { Inline::Emph(t.clone()) });
+		return;
+	}
+	for run in sub {
+		match run {
+			// A plain stretch takes the emphasis face; an already-emphasised inner run (`*_word_*`) keeps
+			// its own face, one level of nesting being all the flat run vocabulary carries.
+			Inline::Text(t)	=> runs.push(if strong { Inline::Strong(t) } else { Inline::Emph(t) }),
+			other			=> runs.push(other),
+		}
+	}
 }
 
 /// Does the delimiter at `i` flank the left of a word? A non-space must follow it, and the start of the
