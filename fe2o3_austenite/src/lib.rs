@@ -38,5 +38,6 @@ pub mod lang;
 pub mod ledger;
 pub mod linebreak;
 pub mod math;
+pub mod mathtable;
 pub mod page;
 pub mod table;

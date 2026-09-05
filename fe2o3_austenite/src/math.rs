@@ -24,11 +24,14 @@ use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
 	Dims,
+	DrawOp,
 	Glue,
+	Graphic,
 	Leaf,
 	Node,
 	Sp,
 };
+use crate::mathtable::MathTable;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -36,6 +39,11 @@ use oxedyne_fe2o3_font::{
 	font::Font,
 	set::FontSet,
 	shape::Dir,
+};
+use oxedyne_fe2o3_graphics::{
+	colour::Rgba,
+	path::Path,
+	transform::Transform,
 };
 
 use std::sync::{
@@ -61,6 +69,48 @@ fn math_font() -> Outcome<Arc<Font>> {
 	let f = Arc::new(res!(Font::new(MATH_FONT.to_vec())));
 	let _ = MATH.set(f.clone());
 	Ok(f)
+}
+
+/// The maths font's OpenType MATH table, parsed once and shared -- the layout constants and the grown
+/// delimiter and radical variants. `None` if the font carries no such table, in which case the layout
+/// falls back to the plain-TeX approximations.
+fn math_table() -> Outcome<Option<Arc<MathTable>>> {
+	static TABLE: OnceLock<Option<Arc<MathTable>>> = OnceLock::new();
+	if let Some(t) = TABLE.get() {
+		return Ok(t.clone());
+	}
+	let parsed = res!(MathTable::parse(MATH_FONT)).map(Arc::new);
+	let _ = TABLE.set(parsed.clone());
+	Ok(parsed)
+}
+
+/// The glyph id a single character shapes to in the maths font, for looking the character up in the
+/// MATH table's variants.
+fn glyph_id(font: &Arc<Font>, size: Sp, ch: &str) -> Outcome<u32> {
+	let run = res!(font.shape(ch, size.to_pt() as f32, Dir::Ltr));
+	match run.glyphs.first() {
+		Some(g) => Ok(g.id),
+		None => Err(err!("The maths font shaped {:?} to no glyph.", ch; Bug)),
+	}
+}
+
+/// One glyph's outline flipped into the engine's y-down frame, with its ink bounding box. The outline
+/// comes from the font y up with the baseline at zero; the flip leaves the baseline at zero and the ink
+/// above the baseline at negative y. Returns the flipped path and its extent above and below and its
+/// width, so a caller can seat a grown delimiter or a radical by its ink.
+fn glyph_ink(font: &Arc<Font>, gid: u32, size: Sp) -> Outcome<(Path, Sp, Sp, Sp)> {
+	let raw		= res!(font.outline(0, gid, size.to_pt() as f32));
+	let path	= res!(raw.transform(&Transform::scale(1.0, -1.0)));
+	match path.bounds(&Transform::IDENTITY) {
+		Some(b) => {
+			// y down: the top of the ink is the least y, the bottom the greatest.
+			let height	= if b.y0 < 0.0 { Sp::from_pt((-b.y0) as f64) } else { Sp::ZERO };
+			let depth	= if b.y1 > 0.0 { Sp::from_pt(b.y1 as f64) } else { Sp::ZERO };
+			let width	= Sp::from_pt(b.x1.max(0.0) as f64);
+			Ok((path, height, depth, width))
+		},
+		None => Ok((path, Sp::ZERO, Sp::ZERO, Sp::ZERO)),	// a blank glyph, nothing to seat
+	}
 }
 
 /// An atom's spacing class, after TeX. The class of the atoms either side of a gap fixes the space
@@ -90,6 +140,12 @@ pub enum Atom {
 		base:	Box<Atom>,
 		sup:	Option<Box<Atom>>,
 		sub:	Option<Box<Atom>>,
+	},
+	Sqrt(Box<Atom>),	// a square root: the radical sign and a vinculum over the radicand
+	Fence {
+		left:	char,	// the opening delimiter, grown to the body
+		body:	Box<Atom>,
+		right:	char,	// the closing delimiter, grown to the body
 	},
 }
 
@@ -127,6 +183,16 @@ impl Atom {
 
 	pub fn subsup(base: Atom, sub: Atom, sup: Atom) -> Self {
 		Atom::Script { base: Box::new(base), sup: Some(Box::new(sup)), sub: Some(Box::new(sub)) }
+	}
+
+	/// A square root over the radicand.
+	pub fn sqrt(radicand: Atom) -> Self {
+		Atom::Sqrt(Box::new(radicand))
+	}
+
+	/// A body between a pair of delimiters that grow to it, such as parentheses around a tall fraction.
+	pub fn fence(left: char, body: Atom, right: char) -> Self {
+		Atom::Fence { left, body: Box::new(body), right }
 	}
 }
 
@@ -166,7 +232,8 @@ fn size_for(style: &Style, level: Level) -> Sp {
 /// [`LeafKind::Rule`](crate::ir::LeafKind).
 enum Draw {
 	Glyph(ShapedText),
-	Bar(Sp),	// thickness
+	Bar(Sp),		// thickness
+	Ink(Path),		// a raw outline in the y-down frame, baseline at zero: a grown delimiter or radical
 }
 
 /// One drawable within a maths box: its left `x` from the box's own left, its `width`, and `rel` --
@@ -244,6 +311,8 @@ fn build(
 		Atom::Row(items)				=> build_row(style, items, level, display),
 		Atom::Frac { num, den }			=> build_frac(style, num, den, level, display),
 		Atom::Script { base, sup, sub }	=> build_script(style, base, sup.as_deref(), sub.as_deref(), level, display),
+		Atom::Sqrt(radicand)			=> build_sqrt(style, radicand, level, display),
+		Atom::Fence { left, body, right }	=> build_fence(style, *left, body, *right, level, display),
 	}
 }
 
@@ -456,6 +525,155 @@ fn build_script(
 	Ok(MBox { pieces, width, height, depth, class: b.class })
 }
 
+/// Sets a square root: a radical sign grown to the radicand, a vinculum ruled over it, and the radicand
+/// seated beneath the vinculum. The gaps, the rule thickness and the space above come from the font's
+/// MATH constants when it has them; the radical sign is the tallest-fitting vertical variant the MATH
+/// table offers, or the plain sign when the font carries no table.
+fn build_sqrt(
+	style:		&Style,
+	radicand:	&Atom,
+	level:		Level,
+	display:	bool,
+)
+	-> Outcome<MBox>
+{
+	let size	= size_for(style, level);
+	let size_pt	= size.to_pt() as f32;
+	let r		= res!(build(style, radicand, level, display));
+	let table	= res!(math_table());
+
+	let (gap, rule, extra) = match &table {
+		Some(t) => {
+			let c = t.constants();
+			(
+				Sp::from_pt(t.scaled(c.radical_vertical_gap, size_pt) as f64),
+				Sp::from_pt(t.scaled(c.radical_rule_thickness, size_pt) as f64),
+				Sp::from_pt(t.scaled(c.radical_extra_ascender, size_pt) as f64),
+			)
+		},
+		None => (Sp(size.raw() / 18), style.rule_thin, Sp(size.raw() / 18)),
+	};
+
+	let target	= r.height + r.depth + gap + rule;	// the radical sign must at least span this
+	let font	= res!(math_font());
+	let base	= res!(glyph_id(&font, size, "\u{221A}"));
+	let variant	= match &table {
+		Some(t)	=> t.variant_for(base as u16, target.to_pt() as f32, size_pt).map(|g| g as u32),
+		None	=> None,
+	}.unwrap_or(base);
+	let (path, gh, gd, gw) = res!(glyph_ink(&font, variant, size));
+
+	let mut pieces:	Vec<Piece> = Vec::new();
+	let kern	= Sp(size.raw() / 24);
+
+	// The vinculum's top edge, a rel above the baseline (negative is up): clearing the radicand by `gap`.
+	let bar_top	= -(r.height + gap + rule);
+	// The radical sign, seated so its ink top meets the bar top. A taller variant then reaches below the
+	// radicand, the way a radical encloses it.
+	let sign_rel	= bar_top + gh;
+	pieces.push(Piece { x: Sp::ZERO, width: gw, rel: sign_rel, draw: Draw::Ink(path) });
+
+	// The radicand, to the right of the sign, and the vinculum ruled across it.
+	let rx = gw + kern;
+	place_into(&mut pieces, r.pieces, rx, Sp::ZERO);
+	pieces.push(Piece { x: gw, width: r.width + kern, rel: bar_top, draw: Draw::Bar(rule) });
+
+	let sign_bottom	= sign_rel + gd;
+	let depth		= if sign_bottom > r.depth { sign_bottom } else { r.depth };
+	Ok(MBox {
+		pieces,
+		width:	gw + kern + r.width,
+		height:	r.height + gap + rule + extra,
+		depth,
+		class:	Class::Ord,
+	})
+}
+
+/// Sets a body between a pair of delimiters grown to it. The delimiters span symmetrically about the
+/// maths axis, tall enough to cover the body's reach above and below that axis; each is the
+/// tightest-fitting vertical variant the MATH table offers, or the plain delimiter when the font has no
+/// table (in which case it does not grow).
+fn build_fence(
+	style:		&Style,
+	left:		char,
+	body:		&Atom,
+	right:		char,
+	level:		Level,
+	display:	bool,
+)
+	-> Outcome<MBox>
+{
+	let size	= size_for(style, level);
+	let size_pt	= size.to_pt() as f32;
+	let b		= res!(build(style, body, level, display));
+	let table	= res!(math_table());
+	let font	= res!(math_font());
+
+	let axis = match &table {
+		Some(t)	=> Sp::from_pt(t.scaled(t.constants().axis_height, size_pt) as f64),
+		None	=> Sp(size.raw() / 4),
+	};
+	// The delimiter's total height: twice the body's greater reach from the axis.
+	let above	= b.height - axis;
+	let below	= b.depth + axis;
+	let half	= if above > below { above } else { below };
+	let target	= half + half;
+
+	let mut pieces:	Vec<Piece> = Vec::new();
+	let gap			= Sp(size.raw() / 12);
+
+	let (lw, lh, ld) = res!(place_delim(&font, &table, left, target, axis, size, size_pt, &mut pieces, Sp::ZERO));
+	let mut cursor = lw + gap;
+	let body_h = b.height;
+	let body_d = b.depth;
+	let body_w = b.width;
+	place_into(&mut pieces, b.pieces, cursor, Sp::ZERO);
+	cursor += body_w + gap;
+	let (rw, rh, rd) = res!(place_delim(&font, &table, right, target, axis, size, size_pt, &mut pieces, cursor));
+	cursor += rw;
+
+	Ok(MBox {
+		pieces,
+		width:	cursor,
+		height:	body_h.max(lh).max(rh),
+		depth:	body_d.max(ld).max(rd),
+		class:	Class::Ord,
+	})
+}
+
+/// Places one delimiter for [`build_fence`], centred on the maths axis, and returns its width and its
+/// reach above and below the baseline.
+fn place_delim(
+	font:		&Arc<Font>,
+	table:		&Option<Arc<MathTable>>,
+	ch:			char,
+	target:		Sp,
+	axis:		Sp,
+	size:		Sp,
+	size_pt:	f32,
+	pieces:		&mut Vec<Piece>,
+	x:			Sp,
+)
+	-> Outcome<(Sp, Sp, Sp)>
+{
+	let s		= ch.to_string();
+	let base	= res!(glyph_id(font, size, &s));
+	let variant	= match table {
+		Some(t)	=> t.variant_for(base as u16, target.to_pt() as f32, size_pt).map(|g| g as u32),
+		None	=> None,
+	}.unwrap_or(base);
+	let (path, gh, gd, gw) = res!(glyph_ink(font, variant, size));
+
+	// Centre the glyph's ink on the axis: a glyph at rel R has its ink centre at R + (gd - gh)/2, wanted
+	// at -axis (the axis, above the baseline).
+	let rel			= -axis - Sp((gd.raw() - gh.raw()) / 2);
+	pieces.push(Piece { x, width: gw, rel, draw: Draw::Ink(path) });
+
+	let height	= gh - rel;		// ink top above the baseline, as a positive reach
+	let depth	= rel + gd;		// ink bottom below the baseline
+	Ok((gw, height, depth))
+}
+
 /// Copies a child box's drawables into a parent, offset right by `dx` and down by `drel`. This is the
 /// one move composition needs: a row slides a child along, a fraction lifts and lowers its parts, a
 /// script hangs them off the base.
@@ -492,6 +710,14 @@ fn emit(mbox: MBox, base: Sp) -> (Vec<Node>, Dims) {
 			Draw::Bar(t) => {
 				let dims = Dims::new(p.width, t, Sp::ZERO);
 				nodes.push(Node::Leaf(Leaf::rule(dims).with_shift(shift)));
+			},
+			Draw::Ink(path) => {
+				// A grown delimiter or radical: its flipped outline as a one-op graphic, seated on the
+				// line by the same shift as a glyph. The box is zero-height, so the shift alone seats it.
+				let g = Graphic::new(
+					vec![DrawOp::Fill { path, colour: Rgba::BLACK }],
+					Dims::new(p.width, Sp::ZERO, Sp::ZERO));
+				nodes.push(Node::Leaf(Leaf::graphic(g).with_shift(shift)));
 			},
 		}
 		cursor = p.x + p.width;

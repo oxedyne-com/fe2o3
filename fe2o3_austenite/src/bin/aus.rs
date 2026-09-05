@@ -266,7 +266,7 @@ fn blocks() -> Vec<Block> {
 			"A display equation is set on a line of its own, centred on the measure and, when it earns a \
 			reference, numbered at the right margin. The quadratic formula gathers every feature of this \
 			increment at once: a fraction with its rule, a superscript, upright digits and operators, an \
-			italic unknown, and delimiters drawn at the running size."),
+			italic unknown, and a radical grown from the font's own glyphs to sit over its contents."),
 		Block::equation(
 			Atom::row(vec![
 				Atom::var("x"),
@@ -276,14 +276,15 @@ fn blocks() -> Vec<Block> {
 						Atom::bin("\u{2212}"),	// a unary minus, set as the minus glyph
 						Atom::var("b"),
 						Atom::bin("\u{00B1}"),	// plus-or-minus
-						Atom::op("\u{221A}"),	// a radical sign, drawn at the running size (it does not grow)
-						Atom::open("("),
-						Atom::sup(Atom::var("b"), Atom::num("2")),
-						Atom::bin("\u{2212}"),
-						Atom::num("4"),
-						Atom::var("a"),
-						Atom::var("c"),
-						Atom::close(")"),
+						// The radicand under a grown radical: its vinculum, not a pair of parentheses,
+						// encloses the discriminant.
+						Atom::sqrt(Atom::row(vec![
+							Atom::sup(Atom::var("b"), Atom::num("2")),
+							Atom::bin("\u{2212}"),
+							Atom::num("4"),
+							Atom::var("a"),
+							Atom::var("c"),
+						])),
 					]),
 					Atom::row(vec![
 						Atom::num("2"),
@@ -293,12 +294,31 @@ fn blocks() -> Vec<Block> {
 			]),
 			true),
 		Block::paragraph(
-			"The mathematics font carries no OpenType MATH table, so the engine still approximates. The \
-			radical and the parentheses cannot grow to embrace their contents, and the axis, the rule \
-			thickness and the inter-symbol spaces are the classical defaults rather than a font's own \
-			constants. What the increment sets is a real mathematics alphabet on a layout of stacked \
-			symbols, raised scripts and a fraction centred on the axis, all built from the same boxes and \
-			glue as the prose."),
+			"Delimiters grow to what they enclose. Set around a fraction, a pair of parentheses is drawn \
+			from the font's own taller glyphs rather than the running-size pair, so the marks embrace the \
+			whole of what they hold instead of clipping its top and foot."),
+		Block::equation(
+			Atom::sup(
+				Atom::fence(
+					'(',
+					Atom::frac(
+						Atom::row(vec![Atom::var("a"), Atom::bin("+"), Atom::var("b")]),
+						Atom::var("c"),
+					),
+					')',
+				),
+				Atom::num("2"),
+			),
+			true),
+		Block::paragraph(
+			"The engine reads the font's OpenType MATH table. The radical sign and the parentheses are \
+			grown from the font's own taller glyph variants to embrace their contents, and the axis, the \
+			gaps and the rule thicknesses are the font's own constants rather than plain-TeX guesses. What \
+			remains is the deeper machinery: a delimiter taller than the largest variant should be \
+			assembled from repeating pieces, and the inter-atom spacing is still a reduced table. The \
+			increment sets a real mathematics alphabet on a layout of stacked symbols, raised scripts, a \
+			fraction centred on the axis and delimiters cut to fit, all built from the same boxes and glue \
+			as the prose."),
 
 		Block::heading(1, "A Table of the Three Stages"),
 		Block::paragraph(
