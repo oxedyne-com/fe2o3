@@ -34,6 +34,7 @@ use ring::{
         EcdsaKeyPair,
         KeyPair,
         UnparsedPublicKey,
+        ECDSA_P256_SHA256_ASN1,
         ECDSA_P256_SHA256_FIXED,
         ECDSA_P256_SHA256_FIXED_SIGNING,
     },
@@ -46,6 +47,18 @@ use ring::{
 /// `ring` reporting every malformed input as an ordinary verification failure.
 pub fn verify_p256_sha256_fixed(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
     let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, pubkey);
+    key.verify(msg, sig).is_ok()
+}
+
+/// The sibling of [`verify_p256_sha256_fixed`] for the ASN.1 DER signature form.
+/// The key and message encodings are identical -- a 65-byte uncompressed SEC1
+/// point and a raw (un-hashed) message -- but `sig` is the DER `SEQUENCE { r, s }`
+/// rather than the 64-byte `r || s`. This is the shape a WebAuthn/CTAP
+/// authenticator emits for an ES256 assertion (COSE algorithm `-7`), where the
+/// fixed form of a browser's own WebCrypto key does not apply. As above, any
+/// malformed input fails to verify rather than panicking.
+pub fn verify_p256_sha256_asn1(pubkey: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, pubkey);
     key.verify(msg, sig).is_ok()
 }
 
@@ -215,6 +228,86 @@ mod tests {
             "verify should reject a short signature");
         assert!(!verify_p256_sha256_fixed(&[], msg, &sig),
             "verify should reject an empty public key");
+
+        Ok(())
+    }
+
+    /// The ASN.1 sibling verifies what `ring`'s DER signer produces, in the shape a WebAuthn
+    /// authenticator emits: a 65-byte SEC1 key, a raw message, and a DER `SEQUENCE { r, s }`
+    /// signature. A tampered signature, message and key must all be rejected, the fixed-form
+    /// verifier must NOT accept a DER signature (the two encodings are distinct), and
+    /// wrong-length inputs must fail gracefully rather than panic.
+    #[test]
+    fn test_p256_verify_asn1_round_trip() -> Outcome<()> {
+        use ring::signature::ECDSA_P256_SHA256_ASN1_SIGNING;
+
+        let rng = SystemRandom::new();
+
+        let pkcs8 = match EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng) {
+            Ok(doc) => doc,
+            Err(e) => return Err(err!(
+                "ring failed to generate a P-256 ASN.1 PKCS#8 document: {}.", e; Test, Init)),
+        };
+        let key_pair = match EcdsaKeyPair::from_pkcs8(
+            &ECDSA_P256_SHA256_ASN1_SIGNING,
+            pkcs8.as_ref(),
+            &rng,
+        ) {
+            Ok(kp) => kp,
+            Err(e) => return Err(err!(
+                "ring rejected its own freshly-generated ASN.1 PKCS#8: {}.", e; Test, Init)),
+        };
+
+        let pubkey = key_pair.public_key().as_ref().to_vec();
+        assert_eq!(pubkey.len(), 65, "P-256 raw public key must be 65 bytes");
+        assert_eq!(pubkey[0], 0x04, "uncompressed SEC1 point must start with 0x04");
+
+        // The ASN.1 signer emits a DER SEQUENCE, variable length (~70-72 bytes),
+        // never the fixed 64.
+        let msg = b"webauthn.get assertion over authenticatorData || SHA-256(clientDataJSON)";
+        let sig = match key_pair.sign(&rng, msg) {
+            Ok(s) => s.as_ref().to_vec(),
+            Err(e) => return Err(err!(
+                "ring failed to sign the P-256 ASN.1 test message: {}.", e; Test, Data)),
+        };
+        assert_ne!(sig.len(), 64, "the DER form is not the 64-byte fixed form");
+        assert_eq!(sig[0], 0x30, "a DER SEQUENCE begins with the 0x30 tag");
+
+        // A valid DER signature verifies under the ASN.1 verifier.
+        assert!(verify_p256_sha256_asn1(&pubkey, msg, &sig),
+            "asn1 verify should accept a valid DER signature");
+
+        // The fixed-form verifier must not accept a DER signature: the encodings
+        // are distinct and must not be interchangeable.
+        assert!(!verify_p256_sha256_fixed(&pubkey, msg, &sig),
+            "the fixed verifier must reject a DER-encoded signature");
+
+        // A tampered signature is rejected (perturb r, past the DER header).
+        let mut bad_sig = sig.clone();
+        let last = bad_sig.len() - 1;
+        bad_sig[last] ^= 0x01;
+        assert!(!verify_p256_sha256_asn1(&pubkey, msg, &bad_sig),
+            "asn1 verify should reject a tampered signature");
+
+        // A tampered message is rejected.
+        let mut bad_msg = msg.to_vec();
+        bad_msg[0] ^= 0x01;
+        assert!(!verify_p256_sha256_asn1(&pubkey, &bad_msg, &sig),
+            "asn1 verify should reject a tampered message");
+
+        // A tampered public key is rejected.
+        let mut bad_key = pubkey.clone();
+        bad_key[1] ^= 0x01;
+        assert!(!verify_p256_sha256_asn1(&bad_key, msg, &sig),
+            "asn1 verify should reject a wrong public key");
+
+        // Wrong-length and empty inputs must fail gracefully, not panic.
+        assert!(!verify_p256_sha256_asn1(&pubkey[..64], msg, &sig),
+            "asn1 verify should reject a short public key");
+        assert!(!verify_p256_sha256_asn1(&pubkey, msg, &[]),
+            "asn1 verify should reject an empty signature");
+        assert!(!verify_p256_sha256_asn1(&pubkey, msg, &sig[..2]),
+            "asn1 verify should reject a truncated DER signature");
 
         Ok(())
     }

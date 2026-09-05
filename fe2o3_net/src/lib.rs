@@ -111,6 +111,7 @@ pub mod ssdp;
 pub mod time;
 pub mod tls;
 pub mod upnp;
+pub mod webauthn;
 pub mod ws;
 
 pub use ws::core::WebSocket;
