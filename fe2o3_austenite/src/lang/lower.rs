@@ -54,5 +54,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),
 		Inline::Math(atom)		=> Segment::math(atom.clone()),
+		Inline::Glossary { term, display }
+								=> Segment::glossary(term.clone(), display.clone()),
 	}
 }

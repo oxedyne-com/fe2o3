@@ -64,6 +64,7 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// One run of a rich paragraph: a stretch of body text, a strongly emphasised run (`*strong*`, set
@@ -78,6 +79,7 @@ pub enum Segment {
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
 	Code(String),	// an inline code span, set in the mono face
+	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use, plain after
 }
 
 impl Segment {
@@ -107,6 +109,10 @@ impl Segment {
 
 	pub fn code<S: Into<String>>(text: S) -> Self {
 		Self::Code(text.into())
+	}
+
+	pub fn glossary<T: Into<String>, D: Into<String>>(term: T, display: D) -> Self {
+		Self::Glossary { term: term.into(), display: display.into() }
 	}
 }
 
@@ -278,6 +284,10 @@ pub fn author(
 	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
 	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the figures
+	// Glossary terms already set once, in document order. The first mention of a term is set bold-italic
+	// and every later mention plain; author walks the blocks in order, so the set decides first-use with
+	// no second pass. Keyed by the term as written, matching the template's case-sensitive tracking.
+	let mut seen:	HashSet<String>	= HashSet::new();
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, text, label } => {
@@ -337,7 +347,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no));
+				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
 				nodes.extend(lines);
@@ -348,7 +358,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no));
+				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen));
 				i += 1;
 				first = false;
 			},
@@ -427,6 +437,7 @@ fn build_pieces(
 	segments:	&[Segment],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	seen:		&mut HashSet<String>,
 )
 	-> Outcome<Vec<Piece>>
 {
@@ -478,6 +489,13 @@ fn build_pieces(
 			Segment::Code(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Mono });
 			},
+			Segment::Glossary { term, display } => {
+				// The first mention of a term is set bold-italic, matching the template's `*_term_*`;
+				// every later mention is plain body text. Document order is the traversal order, so the
+				// set alone decides, with no second pass.
+				let role = if seen.insert(term.clone()) { Role::BoldItalic } else { Role::Body };
+				pieces.push(Piece::Text { text: display.clone(), role });
+			},
 		}
 	}
 	Ok(pieces)
@@ -519,6 +537,7 @@ fn list(
 	items:		&[Vec<Segment>],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	seen:		&mut HashSet<String>,
 )
 	-> Outcome<()>
 {
@@ -538,7 +557,7 @@ fn list(
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);

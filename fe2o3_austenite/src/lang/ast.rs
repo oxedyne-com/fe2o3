@@ -29,4 +29,5 @@ pub enum Inline {
 	PageRef(String),	// @label, resolving to the labelled anchor's page number
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree
+	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
 }

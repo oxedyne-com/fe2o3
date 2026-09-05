@@ -16,6 +16,14 @@
 //! opening line -- a `#figure(...)`, `#table(...)`, `#aside-box[...]`, or a `#let x = (...)` data array
 //! that spans many lines -- the reader consumes following lines, tracking nesting across `()`, `[]` and
 //! `{}` and respecting string literals, until the delimiters balance, so the whole span renders nothing.
+//!
+//! Typst comments are stripped before a line is classified: a `//` runs to the line's end, and a
+//! `/* ... */` spans lines, both dropped -- except within a `"..."` string or a `` `code` `` span, and a
+//! `//` right after `:` is kept, so a bare URL survives. Inline glossary and index calls, defined in the
+//! book template (`#gs`, `#gscap`, `#gsi`, `#gscapi`, `#glossind`, `#glossindcap`, `#idx`, `#idx-main`,
+//! `#idx-as`, `#idx-main-as`, `#index`, `#index-main`, `#idx-nested`), are read by [`parse_inlines`]: a
+//! glossary term sets its display text, bold-italic on its first document use; a visible index call sets
+//! its display text plain; a pure index marker sets nothing.
 
 use crate::ir::Span;
 
@@ -53,6 +61,10 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	// balance.
 	let mut skip:		Option<SkipState>	= None;
 
+	// Whether a `/* ... */` block comment is open across the line break. A `//` line comment never
+	// straddles a line, so it needs no carried state.
+	let mut comment	= CommentState { in_block: false };
+
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
@@ -66,6 +78,18 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		if let Some(s) = line.strip_suffix('\n') { line = s; }
 		if let Some(s) = line.strip_suffix('\r') { line = s; }
 		let end = start.saturating_add(line.len() as u32);
+
+		// Strip Typst comments before classifying the line, but not while a fenced code block or a
+		// multi-line call skip is open: inside a fence a `//` is verbatim, and a skipped span is dropped
+		// whole regardless. The span above is computed from the raw line, so a diagnostic caret still
+		// points into the source.
+		let stripped;
+		let line = if code.is_none() && skip.is_none() {
+			stripped = strip_comments(line, &mut comment);
+			stripped.as_str()
+		} else {
+			line
+		};
 
 		let trimmed = line.trim_start();
 
@@ -287,6 +311,38 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
+		// An inline glossary or index call defined in the book template. A glossary term is a run of its
+		// own, so [`doc::author`] can set it bold-italic on first use; a visible index call sets its
+		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
+		// sets nothing.
+		if c == '#' {
+			if let Some((call, next)) = glossary_call(&chars, i) {
+				match call {
+					Call::Glossary { term, display } => {
+						if !plain.is_empty() {
+							runs.push(Inline::Text(std::mem::take(&mut plain)));
+						}
+						runs.push(Inline::Glossary { term, display });
+					},
+					Call::Visible(display) => {
+						let sub = parse_inlines(&display);
+						// A plain display folds back into the running text, keeping the fast single-run
+						// path; a display carrying markup becomes its own runs.
+						if let [Inline::Text(t)] = sub.as_slice() {
+							plain.push_str(t);
+						} else {
+							if !plain.is_empty() {
+								runs.push(Inline::Text(std::mem::take(&mut plain)));
+							}
+							runs.extend(sub);
+						}
+					},
+					Call::Invisible => {},	// a pure index marker sets nothing
+				}
+				i = next;
+				continue;
+			}
+		}
 		// The `#raw("...")` call form of inline code.
 		if c == '#' {
 			if let Some((text, next)) = raw_call(&chars, i) {
@@ -470,16 +526,28 @@ fn opens_standalone_call(trimmed: &str) -> bool {
 	if cs.next() != Some('#') {
 		return false;
 	}
-	let mut saw_ident = false;
+	let mut ident	= String::new();
 	for c in cs {
 		if c.is_alphanumeric() || c == '-' || c == '_' {
-			saw_ident = true;
+			ident.push(c);
 			continue;
 		}
-		// The first non-identifier character must open the call.
-		return saw_ident && (c == '(' || c == '[');
+		// The first non-identifier character must open the call. A line-leading inline glossary or
+		// index call is content, not a skippable standalone call, even when it happens to close on its
+		// own line, so [`parse_inlines`] sets its display text rather than the reader dropping it.
+		return !ident.is_empty() && (c == '(' || c == '[') && !is_inline_call(&ident);
 	}
 	false
+}
+
+/// Is this identifier one of the book template's inline glossary or index functions? These emit body
+/// text (or an invisible marker) mid-paragraph, so a line that opens with one is prose the inline
+/// scanner reads, never a standalone call the line scanner skips.
+fn is_inline_call(name: &str) -> bool {
+	matches!(name,
+		"gs" | "gscap" | "gsi" | "gscapi" | "glossind" | "glossindcap"
+		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
+		| "index" | "index-main")
 }
 
 /// Folds one line's `()[]{}` into the running [`SkipState`], updating the depth and the in-string flag.
@@ -522,4 +590,214 @@ fn split_label(title: &str) -> (String, Option<String>) {
 		}
 	}
 	(t.to_string(), None)
+}
+
+/// What an inline glossary or index call sets into the running text.
+enum Call {
+	Glossary { term: String, display: String },	// a glossary term, keyed by `term` for first-use styling
+	Visible(String),	// display text set plain, its markup parsed by the caller
+	Invisible,			// a pure index marker: nothing is set
+}
+
+/// Reads an inline glossary or index call at `i` (a `#`), returning what it sets and the index just past
+/// it, or `None` when the `#name` is not one the reader knows or its argument brackets do not close.
+///
+/// The visible glossary functions set their bracket content as the term, capitalising the display for
+/// the `-cap` variants; `idx`/`idx-main` set the content plain; `idx-as`/`idx-main-as` take a second
+/// argument as the display and set that; `index`/`index-main`/`idx-nested` are pure markers and set
+/// nothing. First use is keyed by the term as written, matching the template's own case-sensitive
+/// `glossary-seen` set. The term-dict lookups (`#g`, `#gcap`, `#gi`, `#gcapi`, `#t`, `#tcap`) need the
+/// dictionary and are a later increment; they are not matched here, so they still set literally.
+fn glossary_call(chars: &[char], i: usize) -> Option<(Call, usize)> {
+	if chars.get(i) != Some(&'#') {
+		return None;
+	}
+	let start	= i + 1;
+	let mut j	= start;
+	while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+		j += 1;
+	}
+	if j == start {
+		return None;
+	}
+	let name: String = chars[start..j].iter().collect();
+	if !is_inline_call(&name) {
+		return None;
+	}
+	match chars.get(j) {
+		Some('(') | Some('[')	=> {},
+		_						=> return None,
+	}
+	let (a1, next1) = read_group(chars, j)?;
+
+	// The two-argument display functions take the second argument as the visible text.
+	if name == "idx-as" || name == "idx-main-as" {
+		let (a2, next2) = read_group(chars, next1)?;
+		return Some((Call::Visible(unwrap_arg(&a2)), next2));
+	}
+	// A nested index entry is a pure marker; consume an optional second argument.
+	if name == "idx-nested" {
+		let end = match read_group(chars, next1) {
+			Some((_, n2))	=> n2,
+			None			=> next1,
+		};
+		return Some((Call::Invisible, end));
+	}
+
+	let arg = unwrap_arg(&a1);
+	let call = match name.as_str() {
+		"gs" | "gsi" | "glossind"			=> Call::Glossary { term: arg.clone(), display: arg },
+		"gscap" | "gscapi" | "glossindcap"	=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
+		"idx" | "idx-main"					=> Call::Visible(arg),
+		"index" | "index-main"				=> Call::Invisible,
+		_									=> return None,
+	};
+	Some((call, next1))
+}
+
+/// Reads a bracket or paren group whose opener sits at `i`, returning its inner content and the index
+/// just past the matching closer. Nesting of the same delimiter and `"..."` strings are respected, so a
+/// bracket inside a quoted argument or a nested group does not close the group early. `None` when the
+/// group never closes, so a malformed call is left as ordinary text.
+fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open	= *chars.get(i)?;
+	let close	= match open {
+		'['	=> ']',
+		'('	=> ')',
+		_	=> return None,
+	};
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut escaped	= false;
+	let mut inner	= String::new();
+	let mut j		= i;
+	while j < chars.len() {
+		let c = chars[j];
+		if in_str {
+			inner.push(c);
+			if escaped				{ escaped = false; }
+			else if c == '\\'		{ escaped = true; }
+			else if c == '"'		{ in_str = false; }
+			j += 1;
+			continue;
+		}
+		if c == '"' {
+			in_str = true;
+			inner.push(c);
+		} else if c == open {
+			depth += 1;
+			if depth > 1 { inner.push(c); }	// keep a nested opener, drop the outer one
+		} else if c == close {
+			depth -= 1;
+			if depth == 0 {
+				return Some((inner, j + 1));
+			}
+			inner.push(c);
+		} else {
+			inner.push(c);
+		}
+		j += 1;
+	}
+	None
+}
+
+/// Strips a `"..."` wrapper from a paren-string argument, so `#gs("surplus")` reads the same term as
+/// `#gs[surplus]`. A bracket argument has no quotes to strip and is returned unchanged.
+fn unwrap_arg(inner: &str) -> String {
+	let t = inner.trim();
+	if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+		return t[1..t.len() - 1].to_string();
+	}
+	inner.to_string()
+}
+
+/// Capitalises the first character of a term for the `-cap` glossary variants, leaving the rest as it
+/// stands. The template capitalises the first grapheme cluster; the first `char` matches it for every
+/// term in these books.
+fn cap_first(s: &str) -> String {
+	let mut cs = s.chars();
+	match cs.next() {
+		Some(c)	=> c.to_uppercase().collect::<String>() + cs.as_str(),
+		None	=> String::new(),
+	}
+}
+
+/// Whether a `/* ... */` block comment is open across the line break.
+struct CommentState {
+	in_block:	bool,
+}
+
+/// Removes Typst comments from one line: a `//` to the line's end, and any `/* ... */` span, which may
+/// have opened on an earlier line ([`CommentState::in_block`] carries that across). A `//` or `/*`
+/// inside a `"..."` string or a `` `code` `` span is not a comment and is kept, and a `//` immediately
+/// after `:` is kept so a bare URL survives. Quotes and backticks are treated as span delimiters here,
+/// which is what the reader's markup needs; a real Typst code line with string literals is skipped whole
+/// by the caller, so stripping it never reaches the output.
+fn strip_comments(line: &str, st: &mut CommentState) -> String {
+	let chars:	Vec<char>	= line.chars().collect();
+	let mut out				= String::new();
+	let mut in_str			= false;
+	let mut in_raw			= false;
+	let mut prev			= '\0';
+	let mut i				= 0usize;
+	while i < chars.len() {
+		let c = chars[i];
+		if st.in_block {
+			if c == '*' && chars.get(i + 1) == Some(&'/') {
+				st.in_block = false;
+				i += 2;
+				prev = '\0';
+				continue;
+			}
+			i += 1;
+			continue;
+		}
+		if in_str {
+			out.push(c);
+			if c == '"' { in_str = false; }
+			prev = c;
+			i += 1;
+			continue;
+		}
+		if in_raw {
+			out.push(c);
+			if c == '`' { in_raw = false; }
+			prev = c;
+			i += 1;
+			continue;
+		}
+		if c == '"' {
+			in_str = true;
+			out.push(c);
+			prev = c;
+			i += 1;
+			continue;
+		}
+		if c == '`' {
+			in_raw = true;
+			out.push(c);
+			prev = c;
+			i += 1;
+			continue;
+		}
+		if c == '/' && chars.get(i + 1) == Some(&'/') {
+			if prev == ':' {
+				out.push(c);	// a `://` is part of a URL, not a comment
+				prev = c;
+				i += 1;
+				continue;
+			}
+			break;	// a line comment: drop the rest of the line
+		}
+		if c == '/' && chars.get(i + 1) == Some(&'*') {
+			st.in_block = true;
+			i += 2;
+			prev = '\0';
+			continue;
+		}
+		out.push(c);
+		prev = c;
+		i += 1;
+	}
+	out
 }
