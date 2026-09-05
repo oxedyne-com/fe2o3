@@ -30,6 +30,7 @@ use crate::{
 	},
 	ledger::{
 		Anchor,
+		AnchorKind,
 		Ledger,
 		Position,
 	},
@@ -196,6 +197,12 @@ fn compose<M: Metrics>(
 				}
 			},
 			Node::Anchor(id) => {
+				// The first heading recorded fixes where the body opens, so a folio reference can turn a
+				// physical page into the printed folio. Front matter sets no heading anchors, so the first
+				// to arrive here is the body's opening part or chapter.
+				if ledger.body_start_page == 0 && id.kind == AnchorKind::Heading {
+					ledger.body_start_page = page_no;
+				}
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {

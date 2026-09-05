@@ -70,7 +70,7 @@ fn render_one(
 	-> Outcome<()>
 {
 	let blocks = vec![Block::equation(expr.clone(), false)];
-	let (document, _heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks));
+	let (document, _heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks, None));
 
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));

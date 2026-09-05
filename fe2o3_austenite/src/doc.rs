@@ -333,14 +333,47 @@ pub struct Heading {
 	pub title:	String,
 }
 
+/// The book's front matter, read from the root's template call: the title, subtitle and author the
+/// title page sets, the cover raster a development build carries, and the imprint the meta page prints.
+/// A field a book omits is `None` and its line is not set. The whole struct is `None` for a lone
+/// manuscript, which carries no front matter at all.
+#[derive(Clone, Debug, Default)]
+pub struct FrontMatter {
+	pub title:			String,
+	pub subtitle:		Option<String>,
+	pub author:			String,
+	pub cover_image:	Option<String>,	// a `/assets/...` raster path, set only in a development build
+	pub logo_image:		Option<String>,	// the publisher logo under the title, often an SVG (then not set)
+	pub publisher:		Option<String>,
+	pub edition:		Option<String>,
+	pub isbn:			Option<String>,
+	pub copyright:		Option<String>,	// the already-composed "Copyright © 2026 ..." line
+	pub rights:			Option<String>,
+	pub ai_declaration:	Option<String>,
+	pub website:		Option<String>,
+	pub toolchain:		bool,			// whether to print the "Created using ..." toolchain line
+	pub dedication:		Option<String>,
+	pub about_author:	Option<String>,	// the author biography, set on its own page
+	// The display sizes the title page and back-matter titles set, read from the config's type scale.
+	pub title_size:		Sp,
+	pub subtitle_size:	Sp,
+	pub author_size:	Sp,
+	pub back_title_size:	Sp,	// the "About the Author"/"Bibliography" heading size
+}
+
 /// Turns an authored block list into the composed document, and the heading table the running heads
 /// resolve against. The geometry fixes the measure every paragraph is set to.
+///
+/// When `front` is set the front matter -- cover, title page, imprint, dedication and author note --
+/// is composed ahead of the body, so the body's first heading fixes where the printed folio restarts
+/// at one; a lone manuscript passes `None` and carries no front matter.
 pub fn author(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
 	style:		Style,
 	heading:	Option<Arc<Font>>,
 	blocks:		&[Block],
+	front:		Option<&FrontMatter>,
 )
 	-> Outcome<(Document, Vec<Heading>)>
 {
@@ -551,7 +584,16 @@ pub fn author(
 		}
 	}
 
-	let mut document = Document::new(nodes, geom);
+	// The front matter is composed ahead of the body so its cover, title, imprint and note leaves take
+	// the physical pages before the body opens; the body then carries no heading anchor of the front
+	// matter's, so the driver fixes the folio restart at the first body heading.
+	let mut stream: Vec<Node> = Vec::new();
+	if let Some(fm) = front {
+		res!(front_matter(&mut stream, &fonts, heading.as_ref(), geom, style, fm));
+	}
+	stream.extend(nodes);
+
+	let mut document = Document::new(stream, geom);
 	document.foot = foot_style(style);
 	Ok((document, heads))
 }
@@ -1172,6 +1214,312 @@ fn placeholder(measure: Sp) -> Outcome<Graphic> {
 	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w as f64), Sp::from_pt(h as f64), Sp::ZERO)))
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ FRONT MATTER                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Composes the front matter ahead of the body: the cover raster (a development build only), the title
+/// page, the imprint, an optional dedication, and an optional author biography, each on its own page
+/// closed by a forced break. None of these leaves sets a heading anchor, so the body's first heading
+/// still fixes where the printed folio restarts at one.
+fn front_matter(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	geom:		PageGeometry,
+	style:		Style,
+	fm:			&FrontMatter,
+)
+	-> Outcome<()>
+{
+	// Cover: the raster filling the content box, a development build only. A path that will not load
+	// (an SVG, or a missing file) sets no cover page rather than a placeholder.
+	if let Some(path) = &fm.cover_image {
+		if let Ok(node) = fm_cover_node(geom, path) {
+			nodes.push(node);
+			nodes.push(Node::Penalty(Penalty::eject()));
+		}
+	}
+
+	res!(fm_title_page(nodes, fonts, geom, style, fm));
+	nodes.push(Node::Penalty(Penalty::eject()));
+
+	if fm_has_imprint(fm) {
+		res!(fm_meta_page(nodes, fonts, geom, style, fm));
+		nodes.push(Node::Penalty(Penalty::eject()));
+	}
+
+	if let Some(ded) = &fm.dedication {
+		res!(fm_dedication_page(nodes, fonts, geom, style, ded));
+		nodes.push(Node::Penalty(Penalty::eject()));
+	}
+
+	if let Some(bio) = &fm.about_author {
+		res!(fm_about_author_page(nodes, fonts, display, geom, style, fm.back_title_size, bio));
+		nodes.push(Node::Penalty(Penalty::eject()));
+	}
+
+	Ok(())
+}
+
+/// Does the book set any imprint field, so a meta page is worth composing?
+fn fm_has_imprint(fm: &FrontMatter) -> bool {
+	fm.publisher.is_some() || fm.edition.is_some() || fm.isbn.is_some() || fm.copyright.is_some()
+		|| fm.rights.is_some() || fm.ai_declaration.is_some() || fm.website.is_some() || fm.toolchain
+}
+
+/// A rigid vertical spacer that a page top does not discard, so front-matter elements sit at fixed
+/// fractions of the page down from the top. Modelled as an empty horizontal box of the wanted height,
+/// which the greedy breaker advances the cursor by without placing any ink.
+fn fm_spacer(height: Sp) -> Node {
+	Node::HBox(BoxNode::new(Vec::new(), Dims::new(Sp::ZERO, height, Sp::ZERO)))
+}
+
+/// Shapes one line and pushes it centred in the measure, returning its vertical extent so the caller can
+/// track the cursor down the page.
+fn fm_centred_line(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	role:		Role,
+	size:		Sp,
+	text:		&str,
+	measure:	Sp,
+)
+	-> Outcome<Sp>
+{
+	let shaped = match display {
+		Some(f)	=> res!(ShapedText::new_with_font((*f).clone(), Dir::Ltr, size, text)),
+		None	=> res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, text)),
+	};
+	let d	= shaped.dims();
+	let pad	= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+	let mut row: Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(Leaf::text(shaped)));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	Ok(d.height + d.depth)
+}
+
+/// Sets a run of text as greedily-wrapped centred lines (the title, which may not fit one line),
+/// returning the total vertical extent set.
+fn fm_centred_wrap(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	role:		Role,
+	size:		Sp,
+	text:		&str,
+	measure:	Sp,
+	leading:	Sp,
+)
+	-> Outcome<Sp>
+{
+	let mut line	= String::new();
+	let mut total	= Sp::ZERO;
+	let mut first	= true;
+	let mut flush = |nodes: &mut Vec<Node>, line: &str, first: &mut bool, total: &mut Sp| -> Outcome<()> {
+		let shaped	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, line));
+		let d		= shaped.dims();
+		if !*first {
+			let vext	= d.height + d.depth;
+			let gap		= if leading > vext { leading - vext } else { Sp::ZERO };
+			nodes.push(Node::Glue(Glue::fixed(gap)));
+			*total += gap;
+		}
+		*first = false;
+		let pad	= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+		let mut row: Vec<Node> = Vec::new();
+		if pad.raw() > 0 {
+			row.push(Node::Glue(Glue::fixed(pad)));
+		}
+		row.push(Node::Leaf(Leaf::text(shaped)));
+		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+		*total += d.height + d.depth;
+		Ok(())
+	};
+	for word in text.split_whitespace() {
+		let trial	= if line.is_empty() { word.to_string() } else { fmt!("{} {}", line, word) };
+		let shaped	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, size, &trial));
+		if shaped.dims().width > measure && !line.is_empty() {
+			res!(flush(nodes, &line, &mut first, &mut total));
+			line = word.to_string();
+		} else {
+			line = trial;
+		}
+	}
+	if !line.is_empty() {
+		res!(flush(nodes, &line, &mut first, &mut total));
+	}
+	Ok(total)
+}
+
+/// Builds the cover page: the raster at `path` filling the content box on its own line. The image fills
+/// the text block rather than bleeding to the trim edge -- a full-bleed cover is a later refinement.
+fn fm_cover_node(geom: PageGeometry, path: &str) -> Outcome<Node> {
+	let img	= res!(crate::image::load(path));
+	let w	= geom.content_width();
+	let h	= geom.content_height();
+	let ops	= vec![DrawOp::Image {
+		image: Arc::new(img), x: 0.0, y: 0.0, w: w.to_pt() as f32, h: h.to_pt() as f32 }];
+	let graphic	= Graphic::new(ops, Dims::new(w, h, Sp::ZERO));
+	Ok(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(w, h, Sp::ZERO))))
+}
+
+/// Sets the title page: the author name in the upper band, the title and subtitle about the centre, and
+/// the publisher logo near the foot -- the template's three-band grid, approximated with fixed fractions
+/// of the page height.
+fn fm_title_page(
+	nodes:	&mut Vec<Node>,
+	fonts:	&Arc<FontSet>,
+	geom:	PageGeometry,
+	style:	Style,
+	fm:		&FrontMatter,
+)
+	-> Outcome<()>
+{
+	let measure	= geom.content_width();
+	let h		= geom.content_height();
+	let mut y	= Sp::ZERO;
+
+	// The author name, in the upper fifth.
+	nodes.push(fm_spacer(Sp(h.raw() * 17 / 100)));
+	y += Sp(h.raw() * 17 / 100);
+	y += res!(fm_centred_line(nodes, fonts, None, Role::Body, fm.author_size, &fm.author, measure));
+
+	// The title about the vertical centre, wrapped when it will not fit one line, then the subtitle.
+	let target = Sp(h.raw() * 38 / 100);
+	if target > y {
+		nodes.push(fm_spacer(target - y));
+		y = target;
+	}
+	let title_lead = Sp(fm.title_size.raw() * 6 / 5);
+	y += res!(fm_centred_wrap(nodes, fonts, Role::Bold, fm.title_size, &fm.title, measure, title_lead));
+	if let Some(sub) = &fm.subtitle {
+		let gap = Sp(fm.title_size.raw() * 3 / 5);
+		nodes.push(fm_spacer(gap));
+		y += gap;
+		y += res!(fm_centred_line(nodes, fonts, None, Role::Italic, fm.subtitle_size, sub, measure));
+	}
+
+	// The publisher logo near the foot, when it loads (an SVG logo does not, and is simply omitted).
+	if let Some(logo) = &fm.logo_image {
+		if let Ok(node) = fm_logo_node(fonts, geom, style, logo) {
+			let target = Sp(h.raw() * 84 / 100);
+			if target > y {
+				nodes.push(fm_spacer(target - y));
+			}
+			nodes.push(node);
+		}
+	}
+	Ok(())
+}
+
+/// Builds the logo line: the raster at `path` centred at a modest width. An SVG or missing file errors,
+/// and the title page omits the logo.
+fn fm_logo_node(_fonts: &Arc<FontSet>, geom: PageGeometry, _style: Style, path: &str) -> Outcome<Node> {
+	let img	= res!(crate::image::load(path));
+	let measure	= geom.content_width();
+	let w	= Sp::from_pt(110.0);	// the type scale's logo width, about 110 pt
+	let aspect	= (img.height.max(1) as f64) / (img.width.max(1) as f64);
+	let hh	= Sp::from_pt(110.0 * aspect);
+	let ops	= vec![DrawOp::Image {
+		image: Arc::new(img), x: 0.0, y: 0.0, w: w.to_pt() as f32, h: hh.to_pt() as f32 }];
+	let graphic	= Graphic::new(ops, Dims::new(w, hh, Sp::ZERO));
+	let pad	= if measure > w { Sp((measure.raw() - w.raw()) / 2) } else { Sp::ZERO };
+	let mut row: Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(Leaf::graphic(graphic)));
+	Ok(Node::HBox(BoxNode::new(row, Dims::new(measure, hh, Sp::ZERO))))
+}
+
+/// Sets the imprint (meta) page: the publisher, edition, copyright, rights, AI declaration, website and
+/// toolchain lines, set small in the lower half of the page as the template bottom-aligns them.
+fn fm_meta_page(
+	nodes:	&mut Vec<Node>,
+	fonts:	&Arc<FontSet>,
+	geom:	PageGeometry,
+	style:	Style,
+	fm:		&FrontMatter,
+)
+	-> Outcome<()>
+{
+	let measure	= geom.content_width();
+	let h		= geom.content_height();
+	let size	= Sp(style.body_size.raw() * 4 / 5);	// the template's 0.8em imprint
+
+	// Drop to the lower part of the page; the template bottom-aligns, approximated here by a top spacer.
+	nodes.push(fm_spacer(Sp(h.raw() * 48 / 100)));
+
+	let mut lines: Vec<String> = Vec::new();
+	if let Some(p) = &fm.publisher		{ lines.push(p.clone()); }
+	if let Some(e) = &fm.edition		{ lines.push(e.clone()); }
+	if let Some(i) = &fm.isbn			{ lines.push(fmt!("ISBN {}", i)); }
+	if let Some(c) = &fm.copyright		{ lines.push(c.clone()); }
+	if let Some(r) = &fm.rights			{ lines.push(r.clone()); }
+	if let Some(a) = &fm.ai_declaration	{ lines.push(a.clone()); }
+	if let Some(w) = &fm.website		{ lines.push(w.clone()); }
+	if fm.toolchain {
+		lines.push("Created using Typst (built using Rust) and Inkscape.".to_string());
+	}
+
+	let mut first = true;
+	for line in &lines {
+		if !first {
+			nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+		}
+		first = false;
+		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5)));
+		nodes.extend(broken);
+	}
+	Ok(())
+}
+
+/// Sets the dedication page: the dedication centred, in italic, about the vertical centre.
+fn fm_dedication_page(
+	nodes:	&mut Vec<Node>,
+	fonts:	&Arc<FontSet>,
+	geom:	PageGeometry,
+	style:	Style,
+	text:	&str,
+)
+	-> Outcome<()>
+{
+	let measure	= geom.content_width();
+	let h		= geom.content_height();
+	nodes.push(fm_spacer(Sp(h.raw() * 40 / 100)));
+	let size	= Sp(style.body_size.raw() * 11 / 10);
+	res!(fm_centred_wrap(nodes, fonts, Role::Italic, size, text, measure, Sp(size.raw() * 6 / 5)));
+	Ok(())
+}
+
+/// Sets the "About the Author" page: the title in the display face, then the biography justified below.
+fn fm_about_author_page(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	geom:		PageGeometry,
+	style:		Style,
+	title_size:	Sp,
+	bio:		&str,
+)
+	-> Outcome<()>
+{
+	let measure	= geom.content_width();
+	nodes.push(fm_spacer(Sp::from_pt(24.0)));
+	let title = res!(head_shape(fonts, &head_face(1, display), title_size, "About the Author"));
+	let td = title.dims();
+	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
+	let size	= Sp(style.body_size.raw() * 9 / 10);
+	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5)));
+	nodes.extend(broken);
+	Ok(())
+}
+
 /// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per
 /// heading -- the title on the left, indented by its level, and its page on the right. The page is a
 /// forward reference resolved with [`Ref::PageOf`] against the incoming ledger, so it reuses the same
@@ -1513,18 +1861,32 @@ pub fn decorate(
 	let content_top		= geom.content_top();
 	let content_left	= geom.content_left();
 	let content_width	= geom.content_width();
+	// The body opens on this physical page; the printed folio restarts at one here, so a body page's
+	// folio is its physical page less the front matter before it. A run with no headings (a lone
+	// manuscript) leaves `body_start_page` zero, so the whole document is body and the folio is physical.
+	let body_start		= ledger.body_start_page.max(1);
 	for page in pages.iter_mut() {
+		// Front matter -- the cover, title, imprint and contents leaves before the body -- carries no
+		// running head and no folio, exactly as the template sets `numbering: none` there.
+		if page.number < body_start {
+			continue;
+		}
+		let folio = page.number - (body_start - 1);
+
 		// The chapter running at the top of this page (the most recent level-1 heading resolved to an
-		// earlier page), and whether a chapter opens at the very top of this one.
+		// earlier page), whether a chapter opens at the very top of this one, and whether a part divider
+		// does -- a part page carries no folio at all.
 		let mut chapter:	Option<&str>	= None;
 		let mut opens					= false;
+		let mut opens_part				= false;
 		for h in heads {
 			if let Some(a) = ledger.get(&h.id) {
 				if a.pos.page < page.number {
 					if h.level == 1 { chapter = Some(&h.title); }
 				} else if a.pos.page == page.number {
-					if h.level == 1 && a.pos.y == content_top {
-						opens = true;	// a chapter opens at the very top: this is its opening page
+					if a.pos.y == content_top {
+						if h.level == 1 { opens = true; }	// a chapter opens at the very top
+						if h.level == 0 { opens_part = true; }	// a part divider opens at the very top
 					}
 				} else {
 					break;	// headings are in document order, so the rest resolve to later pages
@@ -1532,10 +1894,15 @@ pub fn decorate(
 			}
 		}
 
+		// A part divider stands alone with no folio and no head, as the template's part page sets.
+		if opens_part {
+			continue;
+		}
+
 		// The head baseline sits a fixed step above the text block; a folio at the foot sits a step below.
 		let head_base	= content_top - Sp::from_pt(8.0);
 		let foot_top	= content_top + geom.content_height() + Sp::from_pt(14.0);
-		let num			= fmt!("{}", page.number);
+		let num			= fmt!("{}", folio);
 
 		if opens || chapter.is_none() {
 			// A chapter-opening page: no running head, a centred folio at the foot.

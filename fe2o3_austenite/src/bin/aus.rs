@@ -68,7 +68,7 @@ fn main() -> Outcome<()> {
 	let geom	= PageGeometry::a4();
 	let style	= Style::default();
 
-	let (mut document, heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks()));
+	let (mut document, heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks(), None));
 
 	// A table of contents at the very front: page 1 lists each section title against its resolved page,
 	// the body follows on page 2. Prepended before the run, so its height is part of the vertical list

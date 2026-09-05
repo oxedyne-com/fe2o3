@@ -14,10 +14,12 @@
 
 use crate::doc::{
 	Block,
+	FrontMatter,
 	Style,
 };
 use crate::fonts;
 use crate::ir::Sp;
+use crate::lang::parse::flatten_markup;
 use crate::lang;
 use crate::page::PageGeometry;
 
@@ -43,6 +45,7 @@ pub struct BookSpec {
 	// The display face for chapter and level-2 headings (Radley), loaded by path from the book's assets;
 	// None when the book ships no such face, so headings fall back to the body bold.
 	pub heading:	Option<Arc<Font>>,
+	pub front:		FrontMatter,	// the title page, cover and imprint, read from the root's template call
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -85,8 +88,272 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	let style		= build_style(&raw);
 	let blocks		= res!(assemble(&root_src, &root_dir));
 	let title		= content_field(&root_src, "title").unwrap_or_default();
+	let front		= read_front_matter(&root_src, &config_src, &title);
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading })
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front })
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ FRONT MATTER EXTRACTION                                                    │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Reads the front matter the root's `#show: doc.with(...)` sets: the title and subtitle, the author and
+/// imprint from `meta-data`, the cover the config selects for a development build, and the display sizes
+/// from the config's type scale. A field the book omits is left `None`, and its page or line is not set.
+fn read_front_matter(root_src: &str, config_src: &str, title: &str) -> FrontMatter {
+	let subtitle	= content_field(root_src, "subtitle");
+	let meta		= meta_block(root_src).unwrap_or_default();
+
+	let author		= string_field(&meta, "authors").unwrap_or_default();
+	let publisher	= content_field(&meta, "publisher").map(|s| clean_content(&s));
+	let edition		= string_field(&meta, "edition");
+	let isbn		= string_field(&meta, "isbn");
+	let copyright	= copyright_line(&meta);
+	let rights		= content_field(&meta, "rights").map(|s| clean_content(&s));
+	let ai_decl		= content_field(&meta, "ai-declaration").map(|s| clean_content(&s));
+	let website		= content_field(&meta, "website").map(|s| clean_content(&s)).filter(|s| !s.is_empty());
+	let toolchain	= bool_field(&meta, "show-toolchain");
+	let dedication	= string_field(&meta, "dedication").filter(|s| s != "none" && !s.is_empty());
+	let about		= content_field(&meta, "bio").map(|s| clean_content(&s)).filter(|s| !s.is_empty());
+	let logo		= string_field(root_src, "title-logo-path");
+
+	// The cover the config picks: none in an interior build, the format's raster in a development one.
+	let format		= read_let_string(config_src, "format").unwrap_or_default();
+	let mode		= read_let_string(config_src, "mode").unwrap_or_default();
+	let cover		= if mode == "interior" {
+		None
+	} else {
+		arm(config_src, "cover-image-path", &format).as_deref().and_then(first_quoted)
+	};
+
+	// The display sizes from the type scale the format selects.
+	let scale		= arm(config_src, "type-scale", &format);
+	let sz = |key: &str, default: f64| -> Sp {
+		Sp::from_pt(scale.as_deref().and_then(|a| num_after(a, key)).unwrap_or(default))
+	};
+
+	FrontMatter {
+		title:			title.to_string(),
+		subtitle,
+		author,
+		cover_image:	cover,
+		logo_image:		logo,
+		publisher,
+		edition,
+		isbn,
+		copyright,
+		rights,
+		ai_declaration:	ai_decl,
+		website,
+		toolchain,
+		dedication,
+		about_author:	about,
+		title_size:		sz("title:", 28.0),
+		subtitle_size:	sz("subtitle:", 16.0),
+		author_size:	sz("author:", 17.0),
+		back_title_size:	sz("back-matter-title:", 17.0),
+	}
+}
+
+/// The inner text of the root's `meta-data: ( ... )` argument, balanced across nested groups and
+/// strings, or `None` when the root sets no `meta-data`.
+fn meta_block(src: &str) -> Option<String> {
+	let at		= src.find("meta-data:")?;
+	let rest	= &src[at + "meta-data:".len()..];
+	let open	= rest.find('(')?;
+	let bytes	= rest.as_bytes();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut i		= open;
+	while i < bytes.len() {
+		let c = bytes[i] as char;
+		if in_str {
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		match c {
+			'"'	=> in_str = true,
+			'('	=> depth += 1,
+			')'	=> {
+				depth -= 1;
+				if depth == 0 {
+					return Some(rest[open + 1..i].to_string());
+				}
+			},
+			_	=> {},
+		}
+		i += 1;
+	}
+	None
+}
+
+/// The string a `name: "..."` field binds: the first `"..."` in the field's value, which runs to the
+/// next top-level comma (a comma inside the string does not end it). `None` when the value holds no
+/// string literal -- a `name: none` reads as absent -- so a later field's value is never read by mistake.
+fn string_field(src: &str, name: &str) -> Option<String> {
+	let needle	= fmt!("{}:", name);
+	let at		= src.find(&needle)?;
+	let rest	= &src[at + needle.len()..];
+	// Bound the value at the next depth-zero comma, respecting strings, so the search stays in this field.
+	let bytes	= rest.as_bytes();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut end		= rest.len();
+	let mut i		= 0usize;
+	while i < bytes.len() {
+		let c = bytes[i] as char;
+		if in_str {
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		match c {
+			'"'					=> in_str = true,
+			'(' | '[' | '{'		=> depth += 1,
+			')' | ']' | '}'		=> depth -= 1,
+			',' if depth == 0	=> { end = i; break; },
+			_					=> {},
+		}
+		i += 1;
+	}
+	first_quoted(&rest[..end])
+}
+
+/// The `Copyright © YEAR HOLDER. NOTICE` line the template composes from the `copyright: (year, [holder],
+/// notice)` tuple, or `None` when the book sets no copyright tuple.
+fn copyright_line(meta: &str) -> Option<String> {
+	let at		= meta.find("copyright:")?;
+	let rest	= &meta[at + "copyright:".len()..];
+	let open	= rest.find('(')?;
+	// The tuple's three parts: a year string, a `[holder]` content, and a notice string.
+	let inner	= balanced_parens(&rest[open..])?;
+	let parts	= split_top(&inner);
+	if parts.is_empty() {
+		return None;
+	}
+	let year	= parts.first().map(|s| unquote_or_content(s)).unwrap_or_default();
+	let holder	= parts.get(1).map(|s| unquote_or_content(s)).unwrap_or_default();
+	let notice	= parts.get(2).map(|s| unquote_or_content(s)).unwrap_or_default();
+	Some(fmt!("Copyright © {} {}. {}", year.trim(), holder.trim(), notice.trim()))
+}
+
+/// The contents of a `(...)` at the start of `s`, balanced across nesting and strings.
+fn balanced_parens(s: &str) -> Option<String> {
+	let bytes	= s.as_bytes();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut i		= 0usize;
+	while i < bytes.len() {
+		let c = bytes[i] as char;
+		if in_str {
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		match c {
+			'"'	=> in_str = true,
+			'('	=> depth += 1,
+			')'	=> {
+				depth -= 1;
+				if depth == 0 {
+					return Some(s[1..i].to_string());
+				}
+			},
+			_	=> {},
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Splits `s` at its top-level commas, respecting nesting and strings.
+fn split_top(s: &str) -> Vec<String> {
+	let mut out:	Vec<String>	= Vec::new();
+	let mut cur					= String::new();
+	let mut depth				= 0i32;
+	let mut in_str				= false;
+	let mut esc					= false;
+	for c in s.chars() {
+		if in_str {
+			cur.push(c);
+			if esc			{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> { in_str = true; cur.push(c); },
+			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
+			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
+			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
+			_					=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
+	}
+	out
+}
+
+/// Reads a tuple part as a plain string: a `"..."` literal unquoted, or a `[...]` content flattened.
+fn unquote_or_content(part: &str) -> String {
+	let t = part.trim();
+	if t.starts_with('"') && t.ends_with('"') && t.len() >= 2 {
+		return t[1..t.len() - 1].to_string();
+	}
+	if t.starts_with('[') && t.ends_with(']') && t.len() >= 2 {
+		return flatten_markup(&t[1..t.len() - 1]);
+	}
+	t.to_string()
+}
+
+/// Whether a `name: true` boolean field is set true.
+fn bool_field(src: &str, name: &str) -> bool {
+	let needle	= fmt!("{}:", name);
+	match src.find(&needle) {
+		Some(at)	=> {
+			let rest	= &src[at + needle.len()..];
+			let end		= rest.find(',').unwrap_or(rest.len());
+			rest[..end].trim().starts_with("true")
+		},
+		None		=> false,
+	}
+}
+
+/// Reduces a content field to a single line of display text: markup flattened, Typst line breaks (`\`)
+/// turned to spaces, and any leftover `#name[...]` term call stripped, so an imprint or biography line
+/// reads as plain prose.
+fn clean_content(s: &str) -> String {
+	let flat	= flatten_markup(s);
+	let mut out	= flat.replace('\\', " ");
+	// Drop a `#ident[...]` or `#ident("...")` term call left after flattening (e.g. `#t[website]`).
+	while let Some(h) = out.find('#') {
+		let tail	= &out[h + 1..];
+		let name_len	= tail.chars().take_while(|c| c.is_alphanumeric() || *c == '-' || *c == '_').count();
+		let after	= &tail[name_len..];
+		let end = if after.starts_with('[') {
+			after.find(']').map(|e| h + 1 + name_len + e + 1)
+		} else if after.starts_with('(') {
+			after.find(')').map(|e| h + 1 + name_len + e + 1)
+		} else {
+			Some(h + 1 + name_len)
+		};
+		match end {
+			Some(e)	=> { out.replace_range(h..e, ""); },
+			None	=> break,
+		}
+	}
+	out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The text of a `name: [ ... ]` content field in the root's template call -- the book title, say --

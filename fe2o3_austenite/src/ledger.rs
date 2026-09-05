@@ -177,7 +177,11 @@ pub struct Delta {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ref {
 	TotalPages,			// the document's own page count, the "of M" in "page N of M"
-	PageOf(AnchorId),	// the page a named anchor resolved to, the general cross-reference
+	PageOf(AnchorId),	// the physical page a named anchor resolved to, the general cross-reference
+	// The printed folio a named anchor resolved to: its physical page less the front-matter offset, so
+	// a table-of-contents entry reads the body folio (which restarts at 1 after the front matter) rather
+	// than the physical page it shares with the cover, title and contents leaves.
+	FolioOf(AnchorId),
 }
 
 impl Ref {
@@ -188,6 +192,14 @@ impl Ref {
 		match self {
 			Ref::TotalPages	=> if incoming.total_pages == 0 { None } else { Some(incoming.total_pages) },
 			Ref::PageOf(id)	=> incoming.page_of(id),
+			// The body has not been located until a pass has recorded its first heading, so a zero
+			// `body_start_page` is the Pass A tell: reserve the slot and defer, exactly as an unresolved
+			// page reference does.
+			Ref::FolioOf(id) => if incoming.body_start_page == 0 {
+				None
+			} else {
+				incoming.page_of(id).map(|p| p.saturating_sub(incoming.body_start_page - 1))
+			},
 		}
 	}
 }
@@ -197,11 +209,17 @@ impl Ref {
 pub struct Ledger {
 	entries:			BTreeMap<AnchorId, Anchor>,
 	pub total_pages:	u32,
+	// The physical page the body opens on -- the page of the first heading recorded during composition,
+	// after the cover, title, imprint and contents leaves the front matter sets. The printed folio
+	// restarts at 1 there, so a body page's folio is its physical page less `body_start_page - 1`, and a
+	// contents entry's folio is resolved through [`Ref::FolioOf`] the same way. Zero until a heading is
+	// recorded, which is the Pass A tell a folio reference reads.
+	pub body_start_page:	u32,
 }
 
 impl Ledger {
 	pub fn new() -> Self {
-		Self { entries: BTreeMap::new(), total_pages: 0 }
+		Self { entries: BTreeMap::new(), total_pages: 0, body_start_page: 0 }
 	}
 
 	/// Records an anchor's placement, replacing any earlier record of the same identity within this
@@ -253,7 +271,9 @@ impl Ledger {
 	/// and no anchor changed page. Position within a page may still differ without forcing another
 	/// pass, because only a page change can move a forward reference's page number.
 	pub fn is_stable_against(&self, prev: &Ledger) -> bool {
-		self.total_pages == prev.total_pages && self.diff(prev).is_empty()
+		self.total_pages == prev.total_pages
+			&& self.body_start_page == prev.body_start_page
+			&& self.diff(prev).is_empty()
 	}
 
 	/// Writes the ledger to a file as jdat text.
@@ -280,8 +300,9 @@ impl ToDat for Ledger {
 			anchors.push(res!(a.to_dat()));
 		}
 		Ok(omapdat!{
-			"total_pages"	=> dat!(self.total_pages),
-			"anchors"		=> Dat::List(anchors),
+			"total_pages"		=> dat!(self.total_pages),
+			"body_start_page"	=> dat!(self.body_start_page),
+			"anchors"			=> Dat::List(anchors),
 		})
 	}
 }
@@ -294,12 +315,18 @@ impl FromDat for Ledger {
 				Input, Invalid, Mismatch));
 		}
 		let total_pages	= try_extract_dat!(res!(dat.map_remove_must(&dat!("total_pages"))), U32);
+		// A ledger written before the front-matter offset existed carries no `body_start_page`; default it
+		// to zero so an older ledger still decodes.
+		let body_start_page = match dat.map_remove(&dat!("body_start_page")) {
+			Ok(Some(d))	=> try_extract_dat!(d, U32),
+			_			=> 0,
+		};
 		let anchors_dat	= try_extract_dat!(res!(dat.map_remove_must(&dat!("anchors"))), List);
 		let mut entries = BTreeMap::new();
 		for d in anchors_dat {
 			let a = res!(Anchor::from_dat(d));
 			entries.insert(a.id.clone(), a);
 		}
-		Ok(Self { entries, total_pages })
+		Ok(Self { entries, total_pages, body_start_page })
 	}
 }
