@@ -31,6 +31,7 @@ pub mod doc;
 pub mod driver;
 pub mod emit;
 pub mod font;
+pub mod fonts;
 pub mod hyphenate;
 pub mod ir;
 pub mod lang;

@@ -28,7 +28,6 @@ use oxedyne_fe2o3_austenite::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
-	set::FontSet,
 	shape::Dir,
 };
 
@@ -53,7 +52,7 @@ fn main() -> Outcome<()> {
 	};
 	let blocks = res!(lang::to_blocks(&src));
 
-	let fonts	= Arc::new(res!(FontSet::embedded()));
+	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
 	let style	= Style::default();
 

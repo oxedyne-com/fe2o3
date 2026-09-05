@@ -54,7 +54,7 @@ fn main() -> Outcome<()> {
 		None	=> "diagram-out".to_string(),
 	};
 
-	let fonts	= Arc::new(res!(FontSet::embedded()));
+	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
 	let style	= Style::default();
 
