@@ -433,6 +433,7 @@ pub fn author(
 	// first-line indent; one opening a section (after a heading, list, figure or the document start) does
 	// not -- Typst's `first-line-indent` with `all: false`, and what the oracle sets.
 	let mut prev_para	= false;
+	let mut part_no	= 0u32;	// the part-divider ordinal, a document-order fold, shown as a Roman numeral
 	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
 	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
 	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
@@ -478,8 +479,17 @@ pub fn author(
 					if !first {
 						nodes.push(Node::Penalty(Penalty::eject()));
 					}
+					// A part divider (level 0) carries a "Part N" run-in label above its title; a chapter carries
+					// none. The ordinal is a Roman numeral, the template's `smallcaps(part-counter.display("I"))`.
+					let part_label = if *level == 0 {
+						part_no += 1;
+						fmt!("Part {}", roman(part_no))
+					} else {
+						String::new()
+					};
 					res!(chapter_opener(
-						&mut nodes, &fonts, heading.as_ref(), style, measure, *level, &number, &title, &id, label.as_deref()));
+						&mut nodes, &fonts, heading.as_ref(), style, geom, measure, *level, &number, &title,
+						&part_label, &id, label.as_deref()));
 					i += 1;
 					first = false;
 					prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
@@ -1691,16 +1701,23 @@ fn fm_centred_wrap(
 	Ok(total)
 }
 
-/// Builds the cover page: the raster at `path` filling the content box on its own line. The image fills
-/// the text block rather than bleeding to the trim edge -- a full-bleed cover is a later refinement.
+/// Builds the cover page: the raster at `path` bleeding to the trim edge on all four sides. The box the
+/// breaker measures is the content area, so the cover paginates as a single leaf closed by the caller's
+/// eject; the image inside is offset back to the physical page origin and sized to the whole trim, so it
+/// paints under the margins to the paper edge. The emitter does not clip a graphic to its box, so the
+/// overpaint lands. Page one is a recto -- the inside margin is the left one and no mirror shift applies
+/// -- so the offset is simply the top and inside margins.
 fn fm_cover_node(geom: PageGeometry, path: &str) -> Outcome<Node> {
 	let img	= res!(crate::image::load(path));
-	let w	= geom.content_width();
-	let h	= geom.content_height();
-	let ops	= vec![DrawOp::Image {
-		image: Arc::new(img), x: 0.0, y: 0.0, w: w.to_pt() as f32, h: h.to_pt() as f32 }];
-	let graphic	= Graphic::new(ops, Dims::new(w, h, Sp::ZERO));
-	Ok(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(w, h, Sp::ZERO))))
+	let cw	= geom.content_width();
+	let ch	= geom.content_height();
+	let ox	= -(geom.content_left().to_pt() as f32);
+	let oy	= -(geom.content_top().to_pt() as f32);
+	let pw	= geom.width.to_pt() as f32;
+	let ph	= geom.height.to_pt() as f32;
+	let ops	= vec![DrawOp::Image { image: Arc::new(img), x: ox, y: oy, w: pw, h: ph }];
+	let graphic	= Graphic::new(ops, Dims::new(cw, ch, Sp::ZERO));
+	Ok(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(cw, ch, Sp::ZERO))))
 }
 
 /// Sets the title page: the author name in the upper band, the title and subtitle about the centre, and
@@ -2379,20 +2396,53 @@ fn coloured_run(shaped: &ShapedText, colour: Rgba) -> Outcome<Graphic> {
 	Ok(Graphic::new(ops, shaped.dims()))
 }
 
+/// Pushes a shaped run centred within `measure` on its own line.
+fn push_centred_shape(nodes: &mut Vec<Node>, sh: ShapedText, measure: Sp) -> Outcome<()> {
+	let d	= sh.dims();
+	let pad	= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+	let mut row: Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(Leaf::text(sh)));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	Ok(())
+}
+
+/// The upper-case Roman numeral for `n`, covering the part range a book uses.
+fn roman(mut n: u32) -> String {
+	let table = [
+		(100u32, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+		(10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+	];
+	let mut out = String::new();
+	for (v, s) in table {
+		while n >= v {
+			out.push_str(s);
+			n -= v;
+		}
+	}
+	out
+}
+
 /// Sets a chapter opener (level 1) or a part divider (level 0) on a fresh page. A chapter shows its
 /// number as a giant grey display numeral centred near the page top, then its title beneath in the
-/// display face at the chapter-title size; a part shows its title centred, with no number. The anchor
-/// (and any label) is recorded at the opener, so a running head or a cross-reference finds its page.
+/// display face at the chapter-title size. A part divider carries `part_label` ("Part I") in the
+/// display face above its title, both centred and set about the vertical middle of the page, matching
+/// the template's `align(center + horizon)` part page. The anchor (and any label) is recorded at the
+/// opener, so a running head or a cross-reference finds its page.
 #[allow(clippy::too_many_arguments)]
 fn chapter_opener(
 	nodes:		&mut Vec<Node>,
 	fonts:		&Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
 	style:		Style,
+	geom:		PageGeometry,
 	measure:	Sp,
 	level:		u8,
 	number:		&str,
 	title:		&str,
+	part_label:	&str,
 	id:			&AnchorId,
 	label:		Option<&str>,
 )
@@ -2404,6 +2454,30 @@ fn chapter_opener(
 	}
 
 	let face = head_face(level, display);
+
+	// A part divider fills its own page: a small display label, a gap, then the title, the block set
+	// about the vertical centre. The label is upper-cased, the template's tracked small caps rendered as
+	// plain caps here (the shaper carries no tracking); the gap is the template's `#v(2em)`, two body em.
+	if level == 0 {
+		let label_size	= Sp::from_pt(style.h1_size.to_pt() * 0.55);	// the template's part-label, ~13/24 of the title
+		let lab			= res!(head_shape(fonts, &face, label_size, &part_label.to_uppercase()));
+		let ttl			= res!(head_shape(fonts, &face, style.h1_size, title));
+		let gap			= Sp::from_pt(style.body_size.to_pt() * 2.0);	// #v(2em)
+		let lab_v		= lab.dims().height + lab.dims().depth;
+		let ttl_v		= ttl.dims().height + ttl.dims().depth;
+		let block_v		= lab_v + gap + ttl_v;
+		let content_h	= geom.content_height();
+		// Drop the block so its middle sits at the page's vertical centre; a box spacer, which a page top
+		// keeps where glue would be discarded.
+		if content_h > block_v {
+			let top = Sp((content_h.raw() - block_v.raw()) / 2);
+			nodes.push(Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, top, Sp::ZERO))));
+		}
+		res!(push_centred_shape(nodes, lab, measure));
+		nodes.push(Node::Glue(Glue::fixed(gap)));
+		res!(push_centred_shape(nodes, ttl, measure));
+		return Ok(());
+	}
 
 	if level == 1 && !number.is_empty() {
 		// A box (not glue, which a page top discards) reserves the space the number drops from the head.
@@ -2422,16 +2496,10 @@ fn chapter_opener(
 		nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
 	}
 
-	// The title: a chapter sets it left in the display face, a part centres it.
+	// The chapter title, set left in the display face beneath the number (a part divider returned above).
 	let sh	= res!(head_shape(fonts, &face, style.h1_size, title));
 	let d	= sh.dims();
-	let pad	= if level == 0 && measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
-	let mut row:	Vec<Node> = Vec::new();
-	if pad.raw() > 0 {
-		row.push(Node::Glue(Glue::fixed(pad)));
-	}
-	row.push(Node::Leaf(Leaf::text(sh)));
-	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
 	Ok(())
 }
