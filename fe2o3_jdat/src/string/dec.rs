@@ -1450,6 +1450,26 @@ impl Dat {
     )
         -> Outcome<Option<Self>>
     {
+        // A `)` closing a `(node|{...})` or `(node|[...])` value that sits inside a PLAIN map --
+        // the wrapper's molecular payload decoded a level down and was left in `val_opt` by the
+        // descend, and the payload's own `}` / `]` terminated the child frame, leaving this `)`
+        // for the map frame.  A dataless user-kind value frame does not descend its own `{` (its
+        // `MolecularCapture::from_kind` is None), so it ends at the payload's `}` and hands the
+        // `)` up; a map-kind value frame -- `(omap|{...})` -- does descend and consumes its own
+        // `)`, so it never reaches here.  The payload resolves to a bare map or list (the wrapper
+        // is dropped, exactly as a top-level `(node|{...})` does), so keep it pending: the
+        // enclosing map commits it on the next `,` or `}`.  Without this the `kind == Unknown`
+        // path below rejects the `)` for lack of a ListMixed capture ("should have triggered ...
+        // Some(Map)").  The guard is confined to a genuine plain-map accumulator (`!explicit_kind`)
+        // so it never fires in an explicit map-kind or user-kind value frame, whose own `)` the
+        // existing logic below still terminates on.
+        if !state.kind_capture
+            && !state.explicit_kind
+            && state.molecular_capture == Some(MolecularCapture::Map)
+            && store.val_opt.is_some()
+        {
+            return Ok(None);
+        }
         let kind_inner = if state.kind_capture {
             // We were capturing a kind, but the daticle finished before
             // | and no data was found.  This is valid for AtomLogic

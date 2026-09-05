@@ -1220,6 +1220,55 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    res!(test_it(filter, &["String decoding 692", "all", "map", "usr"], || {
+        // A user-kind value carrying a molecular payload -- `(node|{...})` or `(node|[...])` --
+        // sitting as a VALUE inside a PLAIN map, whose own outer kind is a map, not a user kind.
+        // The payload decoded a level down and the wrapper's closing `)` was left for the plain
+        // map frame, where close_paren rejected it ("should have triggered ListMixed ... Some(Map)")
+        // because the frame is capturing a map, not a mixed list.  Distinct from "String decoding
+        // 690"/"691", where the payload sits UNDER a user kind (the outer kind is `(node|...)`).
+        // Each shape is checked for the exact structure and a decode -> re-encode -> decode trip.
+        let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+        let ukind = UsrKindId::new(1, Some("node"), None);
+        res!(uks.add(ukind.clone()));
+        let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+
+        // The reported failure: a `(node|{...})` map value in a plain map.
+        let dat = res!(Dat::decode_string_with_config("{\"a\":(node|{\"x\":1})}", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat); // round trip
+
+        // The list analogue: a `(node|[...])` list value in a plain map.
+        let dat = res!(Dat::decode_string_with_config("{\"a\":(node|[1,2])}", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => listdat![1u8, 2u8],
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+
+        // Siblings of both molecule shapes, with a plain value between them, all in the one map.
+        let dat = res!(Dat::decode_string_with_config(
+            "{\"a\":(node|{\"x\":1}),\"b\":2,\"c\":(node|[3,4])}", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "b".to_string() => 2u8,
+            "c".to_string() => listdat![3u8, 4u8],
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+
+        // Nested: the `(node|{...})` value sits inside a nested plain map value, not the outer one.
+        let dat = res!(Dat::decode_string_with_config(
+            "{\"a\":{\"b\":(node|{\"x\":1})}}", &jdat_dec));
+        req!(dat, mapdat!{
+            "a".to_string() => mapdat!{
+                "b".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            },
+        });
+        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        Ok(())
+    }));
+
     res!(test_it(filter, &["String integrated decoding 000", "all", "map"], || {
         let d = res!(Dat::decode_string("
         {
