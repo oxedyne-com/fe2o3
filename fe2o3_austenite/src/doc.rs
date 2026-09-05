@@ -61,6 +61,7 @@ use crate::page::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
+	font::Font,
 	set::FontSet,
 	shape::Dir,
 };
@@ -70,6 +71,7 @@ use oxedyne_fe2o3_graphics::{
 		PathBuilder,
 		Pt,
 	},
+	transform::Transform,
 };
 
 use std::collections::HashMap;
@@ -226,9 +228,12 @@ pub struct Style {
 	pub leading:		Sp,
 	pub para_skip:		Sp,	// extra space between one paragraph and the next
 	pub indent:		Sp,	// first-line indent of a paragraph following another paragraph
-	pub h1_size:		Sp,
+	pub h1_size:		Sp,	// the chapter title, set beneath the chapter number
 	pub h2_size:		Sp,
 	pub h3_size:		Sp,
+	pub h4_size:		Sp,
+	pub chap_num_size:	Sp,	// the giant chapter number on a chapter-opening page
+	pub chap_num_grey:	Rgba,	// the fill of that number, a light grey
 	pub header_size:	Sp,	// the running head's size
 	pub folio_size:		Sp,
 	pub foot_size:		Sp,	// the footnote text's size, a touch below the body
@@ -253,6 +258,9 @@ impl Default for Style {
 			h1_size:		Sp::from_pt(16.0),
 			h2_size:		Sp::from_pt(13.0),
 			h3_size:		Sp::from_pt(12.0),
+			h4_size:		Sp::from_pt(11.0),
+			chap_num_size:	Sp::from_pt(54.0),
+			chap_num_grey:	Rgba::opaque(200, 200, 200),	// Typst's luma(200)
 			header_size:	Sp::from_pt(9.5),
 			folio_size:		Sp::from_pt(10.0),
 			foot_size:		Sp::from_pt(9.0),
@@ -272,9 +280,11 @@ impl Default for Style {
 impl Style {
 	fn heading_size(&self, level: u8) -> Sp {
 		match level {
+			0 => self.h1_size,	// a part-divider title, set at the chapter-title size
 			1 => self.h1_size,
 			2 => self.h2_size,
-			_ => self.h3_size,
+			3 => self.h3_size,
+			_ => self.h4_size,
 		}
 	}
 
@@ -310,10 +320,11 @@ pub struct Heading {
 /// Turns an authored block list into the composed document, and the heading table the running heads
 /// resolve against. The geometry fixes the measure every paragraph is set to.
 pub fn author(
-	fonts:	Arc<FontSet>,
-	geom:	PageGeometry,
-	style:	Style,
-	blocks:	&[Block],
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style:		Style,
+	heading:	Option<Arc<Font>>,
+	blocks:		&[Block],
 )
 	-> Outcome<(Document, Vec<Heading>)>
 {
@@ -323,6 +334,9 @@ pub fn author(
 
 	let mut i		= 0usize;
 	let mut first	= true;
+	// The chapter and section counters, a document-order fold. A level-L heading (L>=1) steps counter
+	// L and clears the deeper ones; a level-0 part divider steps none, so it stays outside the numbering.
+	let mut sec:	[u32; 6]	= [0; 6];
 	// Whether the block just emitted was a paragraph. A paragraph following another paragraph takes the
 	// first-line indent; one opening a section (after a heading, list, figure or the document start) does
 	// not -- Typst's `first-line-indent` with `all: false`, and what the oracle sets.
@@ -341,26 +355,42 @@ pub fn author(
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, text, label } => {
+				// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
+				if *level >= 1 {
+					let l = (*level as usize).min(6);
+					sec[l - 1] += 1;
+					for k in l..6 { sec[k] = 0; }
+				}
+				let number = heading_number(*level, &sec);
+
+				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(text)));
+				heads.push(Heading { id: id.clone(), level: *level, title: text.clone() });
+
+				// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
+				// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
+				// breaker never strands it at a page foot.
+				if *level <= 1 {
+					if !first {
+						nodes.push(Node::Penalty(Penalty::eject()));
+					}
+					res!(chapter_opener(
+						&mut nodes, &fonts, heading.as_ref(), style, measure, *level, &number, text, &id, label.as_deref()));
+					i += 1;
+					first = false;
+					prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
+					continue;
+				}
+
 				// Space above the heading. At a page top the driver discards it, so the first heading on a
 				// page still sits flush to the text block.
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
 				}
 
-				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(text)));
-				heads.push(Heading { id: id.clone(), level: *level, title: text.clone() });
+				let hbox = res!(subheading_hbox(
+					&fonts, heading.as_ref(), style, *level, &number, text));
 
-				let shaped	= res!(ShapedText::new(
-					fonts.clone(), Role::Bold, Dir::Ltr, style.heading_size(*level), text));
-				let hd		= shaped.dims();
-				let hbox	= Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(shaped))], hd));
-
-				// The heading, its space below, and the first line of the paragraph it introduces are set
-				// as one box: an atomic unit the greedy page breaker moves whole, so a heading is never the
-				// last thing on a page. When no paragraph follows, the box is the heading alone.
 				let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
-				// An author label rides the same position as the heading, so a `#ref(<label>)` resolves to
-				// the heading's page. It is a second anchor at one point, not a second heading.
 				if let Some(l) = label {
 					keep.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.clone())));
 				}
@@ -1177,6 +1207,211 @@ fn slug(text: &str) -> String {
 		out.pop();
 	}
 	if out.is_empty() { "heading".to_string() } else { out }
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ HEADINGS                                                                   │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The number shown before a heading: the chapter number alone for a chapter (level 1), the dotted path
+/// for a deeper level (`2.3.1`), and nothing for a part divider (level 0).
+fn heading_number(level: u8, sec: &[u32; 6]) -> String {
+	match level {
+		0 => String::new(),
+		1 => fmt!("{}", sec[0]),
+		_ => {
+			let l = (level as usize).min(6);
+			let parts: Vec<String> = sec[..l].iter().map(|n| fmt!("{}", n)).collect();
+			parts.join(".")
+		},
+	}
+}
+
+/// A heading run's face: the display face (Radley) a book supplies for its chapters and level-2
+/// sections, or a reading-set role for the finer levels.
+enum HeadFace<'a> {
+	Solo(&'a Arc<Font>),
+	Role(Role),
+}
+
+/// The face a heading level sets in. Levels 0-2 take the display face when the book supplies one, else
+/// the body bold; level 3 is Libertinus italic and level 4+ Libertinus upright -- the template's
+/// `if it.level <= 2 { "Radley" } else { "Libertinus Serif" }` with its level-3 italic.
+fn head_face(level: u8, display: Option<&Arc<Font>>) -> HeadFace<'_> {
+	match display {
+		Some(f) if level <= 2	=> HeadFace::Solo(f),
+		_ if level == 3			=> HeadFace::Role(Role::Italic),
+		_ if level <= 2			=> HeadFace::Role(Role::Bold),	// no display face: the body bold stands in
+		_						=> HeadFace::Role(Role::Body),
+	}
+}
+
+/// Shapes one heading run in its face.
+fn head_shape(
+	fonts:	&Arc<FontSet>,
+	face:	&HeadFace,
+	size:	Sp,
+	text:	&str,
+)
+	-> Outcome<ShapedText>
+{
+	match face {
+		HeadFace::Solo(f)	=> ShapedText::new_with_font((*f).clone(), Dir::Ltr, size, text),
+		HeadFace::Role(r)	=> ShapedText::new(fonts.clone(), *r, Dir::Ltr, size, text),
+	}
+}
+
+/// Splits a title into runs for synthetic small caps: a run of originally-lowercase letters, uppercased
+/// and to be set at the small size, alternates with runs of everything else (capitals, digits, spaces,
+/// punctuation) kept at the full size. The bool is true for the small (was-lowercase) runs. Synthetic
+/// because the shaper applies no OpenType `smcp`; used only where the template's face (Libertinus, levels
+/// 3-4) really carries small caps -- Radley does not, so the level-1/2 titles keep their case.
+fn smallcaps_runs(text: &str) -> Vec<(String, bool)> {
+	let mut runs:	Vec<(String, bool)> = Vec::new();
+	let mut cur		= String::new();
+	let mut small	= false;
+	for ch in text.chars() {
+		let is_small = ch.is_lowercase();
+		if !cur.is_empty() && is_small != small {
+			runs.push((std::mem::take(&mut cur), small));
+		}
+		small = is_small;
+		if is_small {
+			for u in ch.to_uppercase() { cur.push(u); }
+		} else {
+			cur.push(ch);
+		}
+	}
+	if !cur.is_empty() {
+		runs.push((cur, small));
+	}
+	runs
+}
+
+/// Builds a sub-heading line (levels 2-4): the number in the heading face, a thin gap, then the title,
+/// small-capped from level 3 down. Runs of differing size seat on one baseline by taking a common ascent
+/// and depth from a full-size sample, so the small caps and the full caps sit level.
+fn subheading_hbox(
+	fonts:		&Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	style:		Style,
+	level:		u8,
+	number:		&str,
+	title:		&str,
+)
+	-> Outcome<Node>
+{
+	let face		= head_face(level, display);
+	let size		= style.heading_size(level);
+	let small_size	= Sp(size.raw() * 3 / 4);	// small caps at 0.75 of the heading size
+	let sample		= res!(head_shape(fonts, &face, size, "Ag"));
+	let asc			= sample.dims().height;
+	let dep			= sample.dims().depth;
+
+	let mut children:	Vec<Node> = Vec::new();
+	let mut width		= Sp::ZERO;
+
+	if !number.is_empty() {
+		let sh	= res!(head_shape(fonts, &face, size, number));
+		let w	= sh.dims().width;
+		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+		width += w;
+		let gap = Sp(size.raw() / 5);	// ~0.2 em, the template's `h(0.2em)`
+		children.push(Node::Glue(Glue::fixed(gap)));
+		width += gap;
+	}
+
+	if level >= 3 {
+		for (run, is_small) in smallcaps_runs(title) {
+			let rs	= if is_small { small_size } else { size };
+			let sh	= res!(head_shape(fonts, &face, rs, &run));
+			let w	= sh.dims().width;
+			children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+			width += w;
+		}
+	} else {
+		let sh	= res!(head_shape(fonts, &face, size, title));
+		let w	= sh.dims().width;
+		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
+		width += w;
+	}
+
+	Ok(Node::HBox(BoxNode::new(children, Dims::new(width, asc, dep))))
+}
+
+/// Renders a shaped run as a coloured graphic: each glyph outline filled in `colour`, so a heading can
+/// take a fill the text emitter (which draws every run black) does not carry. The outline is font-frame,
+/// y up; it is flipped and seated on the run's baseline, `height` below the box top.
+fn coloured_run(shaped: &ShapedText, colour: Rgba) -> Outcome<Graphic> {
+	let base_y = shaped.dims().height.to_pt() as f32;
+	let mut ops = Vec::new();
+	for glyph in &shaped.run().glyphs {
+		let path = res!(shaped.outline(glyph));
+		if path.is_empty() {
+			continue;
+		}
+		let t = Transform::scale(1.0, -1.0)
+			.then(&Transform::translate(glyph.x, base_y - glyph.y));
+		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+	}
+	Ok(Graphic::new(ops, shaped.dims()))
+}
+
+/// Sets a chapter opener (level 1) or a part divider (level 0) on a fresh page. A chapter shows its
+/// number as a giant grey display numeral centred near the page top, then its title beneath in the
+/// display face at the chapter-title size; a part shows its title centred, with no number. The anchor
+/// (and any label) is recorded at the opener, so a running head or a cross-reference finds its page.
+#[allow(clippy::too_many_arguments)]
+fn chapter_opener(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	style:		Style,
+	measure:	Sp,
+	level:		u8,
+	number:		&str,
+	title:		&str,
+	id:			&AnchorId,
+	label:		Option<&str>,
+)
+	-> Outcome<()>
+{
+	nodes.push(Node::Anchor(id.clone()));
+	if let Some(l) = label {
+		nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.to_string())));
+	}
+
+	let face = head_face(level, display);
+
+	if level == 1 && !number.is_empty() {
+		// A box (not glue, which a page top discards) reserves the space the number drops from the head.
+		nodes.push(Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, Sp::from_pt(36.0), Sp::ZERO))));
+
+		let sh		= res!(head_shape(fonts, &face, style.chap_num_size, number));
+		let d		= sh.dims();
+		let graphic	= res!(coloured_run(&sh, style.chap_num_grey));
+		let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+		let mut row:	Vec<Node> = Vec::new();
+		if pad.raw() > 0 {
+			row.push(Node::Glue(Glue::fixed(pad)));
+		}
+		row.push(Node::Leaf(Leaf::graphic(graphic)));
+		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height + d.depth, Sp::ZERO))));
+		nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
+	}
+
+	// The title: a chapter sets it left in the display face, a part centres it.
+	let sh	= res!(head_shape(fonts, &face, style.h1_size, title));
+	let d	= sh.dims();
+	let pad	= if level == 0 && measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+	let mut row:	Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(Leaf::text(sh)));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height, d.depth))));
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
+	Ok(())
 }
 
 /// Draws the page furniture -- a running head in the top margin and a folio -- onto every composed

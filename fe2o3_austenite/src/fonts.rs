@@ -34,6 +34,13 @@ pub fn libertinus() -> Outcome<FontSet> {
 	))
 }
 
+/// One face loaded from a file as a shareable handle, for a role outside the five-face reading set --
+/// a heading face a book supplies by path (Radley, say). It is shaped through the `Solo` path the way
+/// the maths font is. The error names the path, so the caller can choose to fall back rather than fail.
+pub fn font_from_file(path: &Path) -> Outcome<std::sync::Arc<Font>> {
+	Ok(std::sync::Arc::new(res!(face_from_file(path))))
+}
+
 /// Reads one face from a file, naming the path when the read fails so a missing font is obvious.
 fn face_from_file(path: &Path) -> Outcome<Font> {
 	let bytes = match std::fs::read(path) {

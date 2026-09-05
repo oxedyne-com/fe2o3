@@ -63,16 +63,16 @@ fn main() -> Outcome<()> {
 	// A book root assembles chapters and carries its own geometry, fonts and type; a lone file sets on
 	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
 	// one place or the other, and the rest of the run is identical.
-	let (blocks, fonts, geom, style, title) = if book::is_book_root(&src) {
+	let (blocks, fonts, geom, style, title, heading) = if book::is_book_root(&src) {
 		let spec = res!(book::load(std::path::Path::new(&source)));
-		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title)
+		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading)
 	} else {
 		let blocks	= res!(lang::to_blocks(&src));
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new())
+		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None)
 	};
 
-	let (document, heads)	= res!(doc::author(fonts.clone(), geom, style, &blocks));
+	let (document, heads)	= res!(doc::author(fonts.clone(), geom, style, heading, &blocks));
 	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
 	let mut out				= res!(driver::run(&document, &metrics, Config::default()));
 	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, style, geom, &title));

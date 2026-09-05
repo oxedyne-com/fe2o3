@@ -22,7 +22,10 @@ use crate::lang;
 use crate::page::PageGeometry;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_font::set::FontSet;
+use oxedyne_fe2o3_font::{
+	font::Font,
+	set::FontSet,
+};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -37,6 +40,9 @@ pub struct BookSpec {
 	pub fonts:	Arc<FontSet>,
 	pub blocks:	Vec<Block>,
 	pub title:	String,	// the book title, for the verso running head
+	// The display face for chapter and level-2 headings (Radley), loaded by path from the book's assets;
+	// None when the book ships no such face, so headings fall back to the body bold.
+	pub heading:	Option<Arc<Font>>,
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -70,13 +76,17 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	};
 	let libertinus_dir = project_dir.join("assets").join("fonts").join("libertinus");
 	let fonts = Arc::new(res!(fonts::libertinus_from_dir(&libertinus_dir)));
+	// The heading display face (Radley) sits beside Libertinus in the shared assets tree. A book without
+	// it still sets, with headings in the body bold, so a failed load is a fall-back rather than an error.
+	let radley_path	= project_dir.join("assets").join("fonts").join("Radley-Regular.ttf");
+	let heading		= fonts::font_from_file(&radley_path).ok();
 
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
 	let blocks		= res!(assemble(&root_src, &root_dir));
 	let title		= content_field(&root_src, "title").unwrap_or_default();
 
-	Ok(BookSpec { geom, style, fonts, blocks, title })
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading })
 }
 
 /// The text of a `name: [ ... ]` content field in the root's template call -- the book title, say --
@@ -129,9 +139,11 @@ pub fn assemble(root_src: &str, root_dir: &Path) -> Outcome<Vec<Block>> {
 				blocks.extend(res!(lang::to_blocks(&src)));
 			}
 		} else if t.starts_with("#part-page") {
-			// A part divider: its title is the last bracket group on the line.
+			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
+			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
+			// its number across a part boundary and a part never appears in a running head.
 			if let Some(title) = bracket_body(t) {
-				blocks.push(Block::heading(1, title));
+				blocks.push(Block::heading(0, title));
 			}
 		}
 	}
@@ -181,9 +193,11 @@ struct RawStyle {
 	leading_em:	f64,	// par leading, a multiple of the em
 	par_skip_em:	f64,	// space between paragraphs, a multiple of the em
 	indent_em:	f64,	// first-line indent, a multiple of the em
+	chap_num_pt:	f64,	// the giant chapter-opener number size
 	h1_pt:		f64,	// chapter-title size
-	h2_pt:		f64,	// first sub-heading size
-	h3_pt:		f64,	// second sub-heading size
+	h2_pt:		f64,	// level-2 sub-heading size
+	h3_pt:		f64,	// level-3 sub-heading size
+	h4_pt:		f64,	// level-4 sub-heading size
 }
 
 /// Reads the branch of a config the `format` switch selects into a geometry and the raw type values.
@@ -220,12 +234,17 @@ fn read_config(src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	let leading_em	= arm(src, "body-line-spacing", &format).as_deref().and_then(first_num).unwrap_or(0.75);
 	let par_skip_em	= arm(src, "body-par-spacing", &format).as_deref().and_then(first_num).unwrap_or(0.75);
 	let indent_em	= arm(src, "body-par-indent", &format).as_deref().and_then(first_num).unwrap_or(0.0);
+	let chap_num_pt	= scale.as_deref().and_then(|a| num_after(a, "chapter-num:")).unwrap_or(54.0);
 	let h1_pt		= scale.as_deref().and_then(|a| num_after(a, "chapter-title:")).unwrap_or(20.0);
+	// The template sizes a sub-heading by `sub-headings.at(level - 1)`: level 2 takes the second entry,
+	// level 3 the third, level 4 the fourth. The first entry is the section-title reserve, unused by the
+	// show rule, so the level-2 heading is only a step above the body.
 	let subs		= scale.as_deref().and_then(|a| tuple_after(a, "sub-headings:")).unwrap_or_default();
-	let h2_pt		= subs.first().copied().unwrap_or(15.0);
-	let h3_pt		= subs.get(1).copied().unwrap_or(12.5);
+	let h2_pt		= subs.get(1).copied().unwrap_or(12.5);
+	let h3_pt		= subs.get(2).copied().unwrap_or(11.5);
+	let h4_pt		= subs.get(3).copied().unwrap_or(11.0);
 
-	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, h1_pt, h2_pt, h3_pt }))
+	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, chap_num_pt, h1_pt, h2_pt, h3_pt, h4_pt }))
 }
 
 // The Libertinus line box Typst sets, as a fraction of the em, measured from the oracle. Typst's config
@@ -247,9 +266,11 @@ fn build_style(raw: &RawStyle) -> Style {
 	style.leading	= Sp::from_pt(baseline);
 	style.para_skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
 	style.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
+	style.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
 	style.h1_size	= Sp::from_pt(raw.h1_pt);
 	style.h2_size	= Sp::from_pt(raw.h2_pt);
 	style.h3_size	= Sp::from_pt(raw.h3_pt);
+	style.h4_size	= Sp::from_pt(raw.h4_pt);
 	style
 }
 
@@ -379,8 +400,10 @@ mod tests {
 		assert!(geom.inside > geom.outside, "the binding margin is the wider of the two");
 		assert!((raw.body_pt - 11.0).abs() < 1e-9, "body 11 pt, found {}", raw.body_pt);
 		assert!((raw.h1_pt - 20.0).abs() < 1e-9, "h1 = chapter-title 20 pt, found {}", raw.h1_pt);
-		assert!((raw.h2_pt - 15.0).abs() < 1e-9, "h2 = first sub-heading 15 pt, found {}", raw.h2_pt);
-		assert!((raw.h3_pt - 12.5).abs() < 1e-9, "h3 = second sub-heading 12.5 pt, found {}", raw.h3_pt);
+		// The level-2 heading takes sub-headings[1], not the first (section-title) entry.
+		assert!((raw.h2_pt - 12.5).abs() < 1e-9, "h2 = sub-heading[1] 12.5 pt, found {}", raw.h2_pt);
+		assert!((raw.h3_pt - 11.5).abs() < 1e-9, "h3 = sub-heading[2] 11.5 pt, found {}", raw.h3_pt);
+		assert!((raw.h4_pt - 11.0).abs() < 1e-9, "h4 = sub-heading[3] 11 pt, found {}", raw.h4_pt);
 		Ok(())
 	}
 
@@ -406,7 +429,7 @@ mod tests {
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
 			Block::Heading { level, text, .. } => {
-				assert_eq!(*level, 1, "a part divider is a level-1 heading");
+				assert_eq!(*level, 0, "a part divider is a level-0 heading, outside the chapter numbering");
 				assert_eq!(text, "The Pattern", "the title is the bracket body");
 			},
 			other => return Err(err!("expected a heading, found {:?}", other; Test, Bug)),
