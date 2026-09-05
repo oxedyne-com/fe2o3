@@ -331,6 +331,7 @@ pub struct Heading {
 	pub id:		AnchorId,
 	pub level:	u8,
 	pub title:	String,
+	pub number:	String,	// the dotted number a numbered heading shows ("2.3.1"); empty for a part divider
 }
 
 /// The book's front matter, read from the root's template call: the title, subtitle and author the
@@ -413,7 +414,7 @@ pub fn author(
 				let number = heading_number(*level, &sec);
 
 				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(text)));
-				heads.push(Heading { id: id.clone(), level: *level, title: text.clone() });
+				heads.push(Heading { id: id.clone(), level: *level, title: text.clone(), number: number.clone() });
 
 				// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
 				// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
@@ -590,6 +591,10 @@ pub fn author(
 	let mut stream: Vec<Node> = Vec::new();
 	if let Some(fm) = front {
 		res!(front_matter(&mut stream, &fonts, heading.as_ref(), geom, style, fm));
+		// The contents follows the front matter and precedes the body, resolving each entry's folio as a
+		// forward reference into the body the driver has not composed yet.
+		stream.extend(res!(contents(
+			fonts.clone(), heading.as_ref(), geom, style, fm.back_title_size, &heads)));
 	}
 	stream.extend(nodes);
 
@@ -1520,56 +1525,82 @@ fn fm_about_author_page(
 	Ok(())
 }
 
-/// Sets a table of contents from the heading table: a bold "Contents" title, then one entry per
-/// heading -- the title on the left, indented by its level, and its page on the right. The page is a
-/// forward reference resolved with [`Ref::PageOf`] against the incoming ledger, so it reuses the same
-/// reserve-then-resolve slot the driver already runs for any forward reference. The caller prepends
-/// these nodes to the document; a trailing forced break starts the body on a fresh page.
+/// Sets a table of contents from the heading table: the "Contents" title in the display face, then one
+/// entry per heading -- its number in a column indented by level, its title, a dotted leader, and its
+/// printed folio flush at the right. The folio is a forward reference resolved with [`Ref::FolioOf`]
+/// against the incoming ledger, so it reads the body folio (which restarts at one) rather than the
+/// physical page, reusing the same reserve-then-resolve slot the driver runs for any forward reference.
+/// The caller prepends these nodes after the front matter; a trailing forced break opens the body.
 ///
-/// A fact a reader could not derive. Each entry reserves a fixed slot for its page number -- three
-/// digits wide, so a resolved folio never outgrows it -- and its line height is the title's, whatever
-/// the number turns out to be. The contents block therefore has a constant vertical extent from the
-/// first pass, so the body it displaces settles once and the forward references converge in the usual
-/// two passes, with no special case in the driver. The number is set left-aligned within its slot;
-/// true flush-right within the slot, and a dotted rather than a blank leader, are later refinements,
-/// as is a title too wide to sit on one line with its page.
+/// A fact a reader could not derive. Each entry reserves a fixed slot for its folio -- three digits
+/// wide, so a resolved number never outgrows it -- and its line height is the entry's, whatever the
+/// folio turns out to be, and the dotted leader takes the width left over. The contents block therefore
+/// has a constant vertical extent from the first pass, so the body it displaces settles once and the
+/// forward references converge in the usual two passes, with no special case in the driver.
 pub fn contents(
-	fonts:	Arc<FontSet>,
-	geom:	PageGeometry,
-	style:	Style,
-	heads:	&[Heading],
+	fonts:		Arc<FontSet>,
+	display:	Option<&Arc<Font>>,
+	geom:		PageGeometry,
+	style:		Style,
+	title_size:	Sp,
+	heads:		&[Heading],
 )
 	-> Outcome<Vec<Node>>
 {
 	let measure			= geom.content_width();
 	let mut nodes:	Vec<Node> = Vec::new();
 
-	// The block's own heading, set bold like a section but recorded as no anchor -- so it is neither a
-	// running-head section nor an entry in its own list.
-	let title	= res!(ShapedText::new(fonts.clone(), Role::Bold, Dir::Ltr, style.h2_size, "Contents"));
+	// The block's own heading, in the display face at the back-matter title size, recorded as no anchor --
+	// so it is neither a running-head section nor an entry in its own list.
+	let title	= res!(head_shape(&fonts, &head_face(1, display), title_size, "Contents"));
 	let td		= title.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
-	nodes.push(Node::Glue(Glue::fixed(style.space_below(2))));
+	nodes.push(Node::Glue(Glue::fixed(style.space_below(1))));
 
 	// A fixed slot wide enough for a three-digit folio, so a resolved number never overflows its
 	// reservation and every entry keeps a constant height across passes.
 	let slot	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "000"));
 	let slot_w	= slot.dims().width;
+	// A dot-and-space leader unit, measured once, so a leader is filled with a whole number of dots.
+	let dot		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, ". "));
+	let dot_w	= dot.dims().width.raw().max(1);
+	// The step a level indents the number column by, and the gap between a number and its title.
+	let step	= Sp(style.body_size.raw() * 3 / 2);
+	let gap		= Sp(style.body_size.raw() * 3 / 5);
 
 	for (i, h) in heads.iter().enumerate() {
-		let indent	= style.body_size * (h.level.saturating_sub(1) as i32);
+		// The number column is indented per level: a part (level 0) and a chapter (level 1) sit at the
+		// margin, deeper levels step right. The number is empty for a part, which then shows title alone.
+		let depth	= (h.level.max(1) - 1) as i32;
+		let indent	= step * depth;
+		let numw	= if h.number.is_empty() {
+			Sp::ZERO
+		} else {
+			let n = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number));
+			n.dims().width
+		};
 		let entry	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.title));
 		let ed		= entry.dims();
 
-		// The leader is the blank span from the title to the slot at the right edge; the slot's right
-		// edge falls on the measure. A title too wide to leave a one-em minimum keeps that minimum and
-		// runs under its page -- the over-wide case, left to a later refinement.
+		// The leader span from the title's end to the folio slot; a title too wide to leave a one-em
+		// minimum keeps that minimum and runs under its folio -- the over-wide case, left as it falls.
+		let num_col	= if numw.raw() > 0 { numw + gap } else { Sp::ZERO };
+		let taken	= indent + num_col + ed.width + slot_w;
 		let min_lead	= style.body_size;
-		let taken		= indent + ed.width + slot_w;
 		let leader_w	= if measure > taken + min_lead { measure - taken } else { min_lead };
 
+		// Fill the leader with a whole number of dots, padded to the folio slot on the right so the slot's
+		// right edge falls on the measure.
+		let lead_margin	= Sp(style.body_size.raw() / 2);
+		let usable		= (leader_w.raw() - lead_margin.raw()).max(0);
+		let n_dots		= (usable / dot_w).max(0) as usize;
+		let dots		= res!(ShapedText::new(
+			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &". ".repeat(n_dots)));
+		let dots_w		= dots.dims().width;
+		let trailing	= if leader_w > lead_margin + dots_w { leader_w - lead_margin - dots_w } else { Sp::ZERO };
+
 		// The entry's own identity, distinct from the heading it points at, so recording the slot never
-		// overwrites the heading's ledger row. Its reference resolves the heading's page.
+		// overwrites the heading's ledger row. Its reference resolves the heading's folio.
 		let toc_id		= AnchorId::new(AnchorKind::Label, fmt!("toc-{}", h.id.key));
 		let slot_dims	= Dims::new(slot_w, ed.height, ed.depth);
 
@@ -1577,9 +1608,18 @@ pub fn contents(
 		if indent.raw() > 0 {
 			children.push(Node::Glue(Glue::fixed(indent)));
 		}
+		if numw.raw() > 0 {
+			children.push(Node::Leaf(Leaf::text(res!(
+				ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number)))));
+			children.push(Node::Glue(Glue::fixed(gap)));
+		}
 		children.push(Node::Leaf(Leaf::text(entry)));
-		children.push(Node::Glue(Glue::fixed(leader_w)));
-		children.push(Node::Leaf(Leaf::reserved(toc_id, Ref::PageOf(h.id.clone()), slot_dims)));
+		children.push(Node::Glue(Glue::fixed(lead_margin)));
+		children.push(Node::Leaf(Leaf::text(dots)));
+		if trailing.raw() > 0 {
+			children.push(Node::Glue(Glue::fixed(trailing)));
+		}
+		children.push(Node::Leaf(Leaf::reserved(toc_id, Ref::FolioOf(h.id.clone()), slot_dims)));
 
 		let line_dims = Dims::new(measure, ed.height, ed.depth);
 		nodes.push(Node::HBox(BoxNode::new(children, line_dims)));
@@ -1587,8 +1627,8 @@ pub fn contents(
 		// Leading between entries, but not after the last.
 		if i + 1 < heads.len() {
 			let vextent	= ed.height + ed.depth;
-			let gap		= if style.leading > vextent { style.leading - vextent } else { Sp::ZERO };
-			nodes.push(Node::Glue(Glue::fixed(gap)));
+			let lead	= if style.leading > vextent { style.leading - vextent } else { Sp::ZERO };
+			nodes.push(Node::Glue(Glue::fixed(lead)));
 		}
 	}
 
