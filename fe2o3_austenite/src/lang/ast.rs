@@ -13,6 +13,7 @@ use crate::ir::Span;
 pub enum Item {
 	Heading { level: u8, text: String, span: Span },
 	Paragraph { runs: Vec<Inline>, span: Span },
+	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
 }
 
 /// One inline run of a paragraph: ordinary prose, or a run marked for emphasis. Nesting -- an emphasis

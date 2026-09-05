@@ -1,10 +1,11 @@
 //! The Ingot parser: line-oriented source into the surface tree of [`ast::Item`](super::ast::Item).
 //!
 //! The scan is deliberately simple, one pass over the lines. A line whose first non-blank character
-//! is `=` is a heading, its level the run of leading `=`. Every other non-blank line accumulates into
-//! a paragraph that a blank line -- or the next heading, or end of input -- closes. Whitespace within
-//! a paragraph is made insignificant here, so the line breaker downstream owns the measure. Byte
-//! offsets are tracked across the raw lines so each [`Item`] carries a true source [`Span`].
+//! is `=` is a heading, its level the run of leading `=`; a line opening with `-` or `+` (and a space)
+//! is a list item, a run of them a bullet or numbered list; every other non-blank line accumulates into
+//! a paragraph. A blank line, a heading, or the start of the other kind of block closes whatever is
+//! open. Whitespace within a paragraph is made insignificant here, so the line breaker downstream owns
+//! the measure. Byte offsets are tracked across the raw lines so each [`Item`] carries a true [`Span`].
 //!
 //! A closed paragraph's text is then scanned for inline emphasis by [`parse_inlines`]: `*strong*` and
 //! `/emph/`. A delimiter pairs only when it flanks a word, so a stray asterisk, a date's slash, or
@@ -26,6 +27,14 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	let mut offset:		u32			= 0;			// running byte offset of the current line's start
 	let mut line_no					= 0usize;		// 1-based, for a diagnostic
 
+	// The current list, if one is open: its kind, its items so far, and the source it spans. A list is a
+	// run of consecutive marker lines; a blank line, a heading, a paragraph line, or a marker of the
+	// other kind closes it.
+	let mut list:		Vec<Vec<Inline>>	= Vec::new();
+	let mut list_ord					= false;
+	let mut list_start:	u32				= 0;
+	let mut list_end:	u32				= 0;
+
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
@@ -42,11 +51,13 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 
 		let trimmed = line.trim_start();
 		if trimmed.is_empty() {
-			// A blank line closes the paragraph it follows.
+			// A blank line closes the paragraph or list it follows.
 			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 		} else if trimmed.starts_with('=') {
-			// A heading closes any paragraph above it, then stands on its own line.
+			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let title = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
 			if title.is_empty() {
@@ -59,9 +70,23 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 				text:	title.to_string(),
 				span:	Span::new(start, end),
 			});
+		} else if let Some((ord, text)) = marker(trimmed) {
+			// A list item. It closes any open paragraph, and a list of the other kind, but joins a list of
+			// its own kind. The item's text carries inline emphasis like any run.
+			flush_para(&mut items, &mut lines, para_start, para_end);
+			if !list.is_empty() && list_ord != ord {
+				flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			}
+			if list.is_empty() {
+				list_ord	= ord;
+				list_start	= start;
+			}
+			list.push(parse_inlines(&text));
+			list_end = end;
 		} else {
-			// Any other non-blank line joins the running paragraph; its own line break and indentation
-			// carry no meaning, only its words.
+			// Any other non-blank line joins the running paragraph, closing a list first; its own line
+			// break and indentation carry no meaning, only its words.
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			if lines.is_empty() {
 				para_start = start;
 			}
@@ -70,9 +95,47 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		}
 	}
 
-	// A source that ends without a closing blank line still closes its last paragraph.
+	// A source that ends without a closing blank line still closes its last paragraph or list.
 	flush_para(&mut items, &mut lines, para_start, para_end);
+	flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 	Ok(items)
+}
+
+/// Reads a list marker at the start of an already-left-trimmed line: `-` opens a bullet item, `+` a
+/// numbered one. The marker must be the whole line or be followed by whitespace, so a dash inside a word
+/// or a `+1` is ordinary prose, not a marker. Returns the item's kind and its text with the marker and
+/// surrounding whitespace removed.
+fn marker(trimmed: &str) -> Option<(bool, String)> {
+	let first	= trimmed.chars().next()?;
+	let ordered	= match first {
+		'-'	=> false,
+		'+'	=> true,
+		_	=> return None,
+	};
+	let rest = &trimmed[first.len_utf8()..];
+	if rest.is_empty() {
+		return Some((ordered, String::new()));
+	}
+	if rest.starts_with(|c: char| c.is_whitespace()) {
+		return Some((ordered, rest.trim().to_string()));
+	}
+	None
+}
+
+/// Closes the list being accumulated, if any, into one [`Item::List`]. An empty accumulator flushes
+/// nothing, so a stray flush between two paragraphs costs nothing.
+fn flush_list(
+	items:		&mut Vec<Item>,
+	list:		&mut Vec<Vec<Inline>>,
+	ordered:	bool,
+	start:		u32,
+	end:		u32,
+)
+{
+	if list.is_empty() {
+		return;
+	}
+	items.push(Item::List { ordered, items: std::mem::take(list), span: Span::new(start, end) });
 }
 
 /// Closes the paragraph being accumulated, if any: its lines are joined, their whitespace collapsed,

@@ -24,6 +24,9 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 		match item {
 			Item::Heading { level, text, .. }	=> out.push(Block::heading(*level, text.clone())),
 			Item::Paragraph { runs, .. }		=> out.push(lower_paragraph(runs)),
+			Item::List { ordered, items, .. }	=> out.push(Block::list(
+				*ordered,
+				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
 		}
 	}
 	out

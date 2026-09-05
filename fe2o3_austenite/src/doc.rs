@@ -107,6 +107,7 @@ pub enum Block {
 	Heading { level: u8, text: String },
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
+	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
 	Table(Table),
 	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
 	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
@@ -123,6 +124,12 @@ impl Block {
 
 	pub fn rich(segments: Vec<Segment>) -> Self {
 		Self::RichParagraph { segments }
+	}
+
+	/// A bullet (`ordered` false) or numbered (`ordered` true) list. Each item is a run sequence, so an
+	/// item may carry emphasis, a footnote or inline maths exactly as a rich paragraph does.
+	pub fn list(ordered: bool, items: Vec<Vec<Segment>>) -> Self {
+		Self::List { ordered, items }
 	}
 
 	pub fn table(table: Table) -> Self {
@@ -156,6 +163,8 @@ pub struct Style {
 	pub folio_size:		Sp,
 	pub foot_size:		Sp,	// the footnote text's size, a touch below the body
 	pub foot_leading:	Sp,	// leading between the wrapped lines of one footnote
+	pub list_marker_gap:	Sp,	// space between a list marker and the item text it introduces
+	pub list_item_skip:		Sp,	// vertical space set between one list item and the next
 	pub table_skip:		Sp,	// space set above and below a table
 	pub cell_pad_x:		Sp,	// horizontal padding between a cell's text and its column rules
 	pub cell_pad_y:		Sp,	// vertical padding above and below a cell's lines
@@ -177,6 +186,8 @@ impl Default for Style {
 			folio_size:		Sp::from_pt(10.0),
 			foot_size:		Sp::from_pt(9.0),
 			foot_leading:	Sp::from_pt(10.8),	// 1.2x the footnote size
+				list_marker_gap:	Sp::from_pt(6.0),
+				list_item_skip:		Sp::from_pt(3.0),
 			table_skip:		Sp::from_pt(10.0),
 			cell_pad_x:		Sp::from_pt(5.0),
 			cell_pad_y:		Sp::from_pt(3.0),
@@ -303,6 +314,14 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::List { ordered, items } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no));
+				i += 1;
+				first = false;
+			},
 			Block::Table(t) => {
 				// Space above the table, discarded at a page top like any other leading. The table lowers
 				// to one keep box, so the driver moves it whole to the next page when it will not fit.
@@ -413,6 +432,72 @@ fn build_pieces(
 		}
 	}
 	Ok(pieces)
+}
+
+/// Sets a bullet or numbered list into the vertical list. Each item is broken at a measure reduced by
+/// the marker column and then hung under its marker: the first line carries the marker leaf and a gap
+/// that together fill the indent, the rest are shifted right by it, so every line's right edge still
+/// lands on the measure. The marker column is the widest marker the list uses plus
+/// [`list_marker_gap`](Style), so a bullet list and a numbered list of ten items align their text
+/// alike. Items are parted by [`list_item_skip`](Style); the list's space from its neighbours is the
+/// caller's. Each item is a segment run, so it breaks through the same path a rich paragraph does and
+/// may carry emphasis, a footnote or inline maths.
+fn list(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style:		Style,
+	measure:	Sp,
+	ordered:	bool,
+	items:		&[Vec<Segment>],
+	foot_no:	&mut u32,
+)
+	-> Outcome<()>
+{
+	// Shape every marker once and keep the widest, so each item's text starts at the one indent.
+	let mut markers:	Vec<ShapedText>	= Vec::with_capacity(items.len());
+	let mut marker_w					= Sp::ZERO;
+	for idx in 0..items.len() {
+		let label	= if ordered { fmt!("{}.", idx + 1) } else { "\u{2022}".to_string() };	// U+2022 bullet
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &label));
+		if shaped.dims().width > marker_w { marker_w = shaped.dims().width; }
+		markers.push(shaped);
+	}
+	let indent	= marker_w + style.list_marker_gap;
+	let inner	= if measure > indent { measure - indent } else { measure };
+
+	for (idx, item) in items.iter().enumerate() {
+		if idx > 0 {
+			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
+		}
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no));
+		let mut lines	= res!(break_paragraph_pieces(
+			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
+		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
+		nodes.extend(lines);
+	}
+	Ok(())
+}
+
+/// Hangs a broken item under its marker. The first line takes the marker leaf and a gap filling the
+/// rest of the indent; every line takes a leading glue that shifts it right by the indent; each line's
+/// box grows to the full measure. The item was broken at `measure - indent`, so the right edge lands on
+/// the measure. Only [`Node::HBox`] lines are shifted -- the interline glue between them is left alone.
+fn indent_item(lines: &mut [Node], marker: Leaf, indent: Sp) {
+	let mut first = true;
+	for line in lines.iter_mut() {
+		if let Node::HBox(b) = line {
+			if first {
+				let gap = if indent > marker.dims.width { indent - marker.dims.width } else { Sp::ZERO };
+				b.list.insert(0, Node::Glue(Glue::fixed(gap)));
+				b.list.insert(0, Node::Leaf(marker.clone()));
+				first = false;
+			} else {
+				b.list.insert(0, Node::Glue(Glue::fixed(indent)));
+			}
+			b.dims = Dims::new(b.dims.width + indent, b.dims.height, b.dims.depth);
+		}
+	}
 }
 
 /// Builds a footnote from its already-shaped body mark and its note text. The note is set as a small
