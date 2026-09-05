@@ -443,6 +443,9 @@ pub fn author(
 	// and every later mention plain; author walks the blocks in order, so the set decides first-use with
 	// no second pass. Keyed by the term as written, matching the template's case-sensitive tracking.
 	let mut seen:	HashSet<String>	= HashSet::new();
+	// The text every labelled cross-reference resolves to, settled once from document order so a forward
+	// reference reads its referent's supplement and number without a layout round-trip.
+	let refs = ref_targets(blocks);
 	while i < blocks.len() {
 		match &blocks[i] {
 			Block::Heading { level, segments, label } => {
@@ -547,7 +550,7 @@ pub fn author(
 					pieces.push(indent_piece(style.indent));
 				}
 				pieces.extend(res!(build_pieces(
-					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib)));
+					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib, &refs)));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
 				nodes.extend(lines);
@@ -559,7 +562,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen, bib));
+				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen, bib, &refs));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -720,11 +723,57 @@ fn indent_piece(indent: Sp) -> Piece {
 	}
 }
 
+/// The text each labelled cross-reference resolves to, fixed in a document-order pre-pass. A reference's
+/// supplement word and number depend only on document order, not on layout, so they are settled once here
+/// and set as static text -- Typst's own "Chapter 4" for a chapter, "Section 7.7" for a section, and
+/// "{supplement} {number}" for a figure or table -- matching the oracle's own output. The heading and
+/// figure counters are stepped exactly as [`author`] steps them, so a label's number here is the number
+/// the block itself sets. A label the pre-pass never records (a reference to an equation, whose number
+/// this reader does not yet track) is left for the caller's page-number fallback.
+fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
+	let mut out:		HashMap<String, String>	= HashMap::new();
+	let mut sec:		[u32; 6]				= [0; 6];
+	let mut counters:	HashMap<String, u32>	= HashMap::new();
+	for block in blocks {
+		match block {
+			Block::Heading { level, label, .. } => {
+				if *level >= 1 {
+					let l = (*level as usize).min(6);
+					sec[l - 1] += 1;
+					for k in l..6 { sec[k] = 0; }
+				}
+				if let Some(l) = label {
+					let number = heading_number(*level, &sec);
+					// A chapter (level 1) takes the "Chapter" supplement the template sets; a deeper heading
+					// takes "Section" with its full dotted number, as Typst's default heading reference does. A
+					// part divider (level 0) carries no number and is no reference target.
+					let text = match *level {
+						0			=> continue,
+						1			=> fmt!("Chapter {}", number),
+						_			=> fmt!("Section {}", number),
+					};
+					out.insert(l.clone(), text);
+				}
+			},
+			Block::TableFigure { supplement, label, .. }
+			| Block::ImageFigure { supplement, label, .. } => {
+				let n = next_number(&mut counters, supplement);
+				if let Some(l) = label {
+					out.insert(l.clone(), fmt!("{} {}", supplement, n));
+				}
+			},
+			_ => {},
+		}
+	}
+	out
+}
+
 /// Turns a rich paragraph's segments into the pieces the line breaker weaves, assigning each footnote
 /// its number from the running fold and setting its note as a small paragraph at the foot measure, and
 /// each cross-reference a reserved inline slot the driver resolves in pass B. A text segment is a piece
 /// as it stands; a footnote becomes a superscript mark piece carrying the set note; a page reference or
 /// a total-pages call becomes a shrink-to-fit reserved leaf, unique by the running `ref_no`.
+#[allow(clippy::too_many_arguments)]
 fn build_pieces(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
@@ -734,6 +783,7 @@ fn build_pieces(
 	ref_no:		&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
 )
 	-> Outcome<Vec<Piece>>
 {
@@ -785,9 +835,17 @@ fn build_pieces(
 				}
 			},
 			Segment::PageRef(label) => {
-				pieces.push(Piece::Mark(res!(ref_slot(
-					fonts.clone(), style, ref_no,
-					Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone()))))));
+				// A cross-reference resolves to Typst's own supplement-and-number text -- "Chapter 4",
+				// "Section 7.7", "Figure 2", "Table 1" -- fixed by the document-order pre-pass and set as body
+				// text. A label the pre-pass did not record (a reference to an equation, whose number this
+				// reader does not track) falls back to the reserved page-number slot the driver resolves in
+				// pass B, so the reference still reads rather than vanishing.
+				match refs.get(label) {
+					Some(text)	=> pieces.push(Piece::Text { text: text.clone(), role: Role::Body }),
+					None		=> pieces.push(Piece::Mark(res!(ref_slot(
+						fonts.clone(), style, ref_no,
+						Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone())))))),
+				}
 			},
 			Segment::Code(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Mono });
@@ -843,6 +901,7 @@ fn ref_slot(
 /// alike. Items are parted by [`list_item_skip`](Style); the list's space from its neighbours is the
 /// caller's. Each item is a segment run, so it breaks through the same path a rich paragraph does and
 /// may carry emphasis, a footnote or inline maths.
+#[allow(clippy::too_many_arguments)]
 fn list(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
@@ -855,6 +914,7 @@ fn list(
 	ref_no:		&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
 )
 	-> Outcome<()>
 {
@@ -874,7 +934,7 @@ fn list(
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen, bib));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
