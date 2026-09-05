@@ -14,6 +14,7 @@
 use crate::ir::Span;
 
 use super::ast::{Inline, Item};
+use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -230,6 +231,21 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 			plain.push(chars[i + 1]);
 			i += 2;
 			continue;
+		}
+		// An inline maths span between dollars. A `\$` was already turned into a literal above, so a `$`
+		// reaching here opens maths. If it parses, it is a maths run; if not, the literal `$...$` is kept.
+		if c == '$' {
+			if let Some(close) = (i + 1..n).find(|&j| chars[j] == '$') {
+				let inner: String = chars[i + 1..close].iter().collect();
+				if let Ok(atom) = mathparse::parse(&inner) {
+					if !plain.is_empty() {
+						runs.push(Inline::Text(std::mem::take(&mut plain)));
+					}
+					runs.push(Inline::Math(atom));
+					i = close + 1;
+					continue;
+				}
+			}
 		}
 		// An inline code span, `raw` between backticks: its content is verbatim, no markup within.
 		if c == '`' {

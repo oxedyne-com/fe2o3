@@ -40,6 +40,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 fn lower_paragraph(runs: &[Inline]) -> Block {
 	match runs {
 		[Inline::Text(text)]	=> Block::paragraph(text.clone()),
+		// A paragraph that is nothing but one maths span is a display equation on its own line.
+		[Inline::Math(atom)]	=> Block::equation(atom.clone(), false),
 		_						=> Block::rich(runs.iter().map(lower_inline).collect()),
 	}
 }
@@ -51,5 +53,6 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),
+		Inline::Math(atom)		=> Segment::math(atom.clone()),
 	}
 }

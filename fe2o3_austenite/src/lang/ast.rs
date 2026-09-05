@@ -6,6 +6,7 @@
 //! tree names only what the engine can already set.
 
 use crate::ir::Span;
+use crate::math::Atom;
 
 /// One block of Ingot markup. The byte span is carried for a future diagnostic caret; the driver's
 /// `Span` model already reserves it, so the front end records it from the first increment.
@@ -27,4 +28,5 @@ pub enum Inline {
 	Emph(String),	// _emph_, lowered to an italic segment
 	PageRef(String),	// @label, resolving to the labelled anchor's page number
 	Code(String),	// `raw` or #raw("..."), set in the mono face
+	Math(Atom),		// $...$, parsed to the engine's maths tree
 }

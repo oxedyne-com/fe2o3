@@ -12,6 +12,7 @@
 
 pub mod ast;
 pub mod lower;
+pub mod mathparse;
 pub mod parse;
 
 use crate::doc::Block;
