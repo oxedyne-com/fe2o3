@@ -66,11 +66,14 @@ use oxedyne_fe2o3_font::{
 
 use std::sync::Arc;
 
-/// One run of a rich paragraph: a stretch of text, or a footnote whose mark falls after the run before
+/// One run of a rich paragraph: a stretch of body text, a strongly emphasised run (`*strong*`, set
+/// bold), an emphasised run (`/emph/`, set italic), or a footnote whose mark falls after the run before
 /// it. The note text is set at the foot of the page the mark lands on, and numbered in document order.
 #[derive(Clone, Debug)]
 pub enum Segment {
 	Text(String),
+	Strong(String),	// set in the bold face
+	Emph(String),	// set in the italic face
 	Footnote { note: String },
 	Math(Atom),	// an inline maths expression, set within the running line
 }
@@ -78,6 +81,14 @@ pub enum Segment {
 impl Segment {
 	pub fn text<S: Into<String>>(text: S) -> Self {
 		Self::Text(text.into())
+	}
+
+	pub fn strong<S: Into<String>>(text: S) -> Self {
+		Self::Strong(text.into())
+	}
+
+	pub fn emph<S: Into<String>>(text: S) -> Self {
+		Self::Emph(text.into())
 	}
 
 	pub fn footnote<S: Into<String>>(note: S) -> Self {
@@ -364,7 +375,13 @@ fn build_pieces(
 	for seg in segments {
 		match seg {
 			Segment::Text(text) => {
-				pieces.push(Piece::Text(text.clone()));
+				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
+			},
+			Segment::Strong(text) => {
+				pieces.push(Piece::Text { text: text.clone(), role: Role::Bold });
+			},
+			Segment::Emph(text) => {
+				pieces.push(Piece::Text { text: text.clone(), role: Role::Italic });
 			},
 			Segment::Footnote { note } => {
 				*foot_no += 1;

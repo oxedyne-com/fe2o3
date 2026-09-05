@@ -69,11 +69,13 @@ pub fn break_paragraph(
 	Ok(lines)
 }
 
-/// One run of a segmented paragraph: a stretch of plain text, or a pre-built footnote mark leaf. A
-/// paragraph carrying footnotes is a sequence of these -- the text either side of each mark, and the
-/// mark itself -- so a mark clings to the word before it and line breaking still flows around it.
+/// One run of a segmented paragraph: a stretch of text in a named face, or a pre-built footnote mark
+/// leaf. A rich paragraph is a sequence of these -- an emphasised run and the body either side of it,
+/// the text around each footnote mark, and the marks themselves -- so a run shapes in its own face while
+/// line breaking still flows across the boundaries. The `role` is per run: `*strong*` arrives as a
+/// `Bold` piece, `/emph/` as an `Italic` one, the surrounding prose as `Body`.
 pub enum Piece {
-	Text(String),
+	Text { text: String, role: Role },
 	Mark(Leaf),	// a footnote mark, already shaped as a raised superscript (LeafKind::Mark)
 	Math {		// an inline maths box, already flattened to leaves and glue by math::layout
 		nodes:	Vec<Node>,
@@ -106,9 +108,11 @@ pub fn break_paragraph_pieces(
 	let mut items = Vec::new();
 	for piece in pieces {
 		match piece {
-			Piece::Text(text) => {
+			Piece::Text { text, role: run } => {
+				// The run shapes in its own face; the interword glue keeps the paragraph's role, so a space
+				// beside an emphasised word stays the body space (TeX sets the space in the surrounding font).
 				res!(push_text_run(
-					&mut items, fonts.clone(), role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
+					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
 			},
 			Piece::Mark(leaf) => {
 				items.push(Item {

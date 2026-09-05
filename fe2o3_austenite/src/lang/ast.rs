@@ -1,8 +1,9 @@
 //! The surface syntax tree of an Ingot source file, before lowering to [`doc::Block`](crate::doc::Block).
 //!
-//! Increment 1 is the markup spine: a document is a sequence of headings and paragraphs. Inline
-//! emphasis, the `#` code mode, and the declared-query references of `sec_language` are later
-//! increments -- the tree names only what the engine can already set.
+//! Increment 2 adds inline emphasis to the markup spine: a document is a sequence of headings and
+//! paragraphs, and a paragraph is a sequence of [`Inline`] runs -- plain text, `*strong*`, `/emph/`.
+//! The `#` code mode and the declared-query references of `sec_language` are later increments -- the
+//! tree names only what the engine can already set.
 
 use crate::ir::Span;
 
@@ -11,5 +12,14 @@ use crate::ir::Span;
 #[derive(Clone, Debug)]
 pub enum Item {
 	Heading { level: u8, text: String, span: Span },
-	Paragraph { text: String, span: Span },
+	Paragraph { runs: Vec<Inline>, span: Span },
+}
+
+/// One inline run of a paragraph: ordinary prose, or a run marked for emphasis. Nesting -- an emphasis
+/// inside another -- is a later increment, so a run's text is flat.
+#[derive(Clone, Debug)]
+pub enum Inline {
+	Text(String),
+	Strong(String),	// *strong*, lowered to a bold segment
+	Emph(String),	// /emph/, lowered to an italic segment
 }
