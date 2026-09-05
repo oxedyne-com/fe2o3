@@ -1213,7 +1213,7 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> 
 			match key.as_str() {
 				"columns"	=> ncols = parse_columns(&val),
 				"align"		=> align = parse_align(&val),
-				"fill"		=> if mentions_row0(&val) { header = true; },
+				"fill"		=> if fill_marks_header(&val) { header = true; },
 				_			=> {},	// inset, stroke, gutter and the rest are not modelled
 			}
 			continue;
@@ -1224,11 +1224,10 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> 
 			}
 			continue;
 		}
-		if a.starts_with('[') {
-			let ch: Vec<char> = a.chars().collect();
-			if let Some((content, _)) = read_group(&ch, 0) {
-				cells.push(parse_inlines(&content));
-			}
+		// An inline positional cell, or a `table.header(...)`/`table.cell(...)` wrapper whose bracketed
+		// content is the cell -- each `[...]` group in the argument is one cell, in order.
+		if a.contains('[') {
+			cells.extend(collect_cells(a));
 		}
 	}
 	if cells.is_empty() {
@@ -1508,11 +1507,16 @@ fn word_align(s: &str) -> Align {
 	}
 }
 
-/// Does a `fill:` value key on the first row, marking a header? True for `row == 0` written with or
-/// without spaces.
-fn mentions_row0(val: &str) -> bool {
+/// Does a `fill:` value key on the first row, marking a header? A `fill: (col, row) => ...` closure whose
+/// body tests the row index against zero (`row == 0` or the common `y == 0`) fills the first row, which is
+/// the books' header idiom; a `y < n` band likewise begins at the first row. Written with or without
+/// spaces, and matching either name the closure gives its second (row) parameter.
+fn fill_marks_header(val: &str) -> bool {
 	let compact: String = val.chars().filter(|c| !c.is_whitespace()).collect();
 	compact.contains("row==0")
+		|| compact.contains("y==0")
+		|| compact.contains("row<")
+		|| compact.contains("y<")
 }
 
 /// Parses a `caption: [...]` value into its inline runs: the bracket content scanned for markup, or the
