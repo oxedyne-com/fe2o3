@@ -90,8 +90,10 @@ fn cell_align(spec: &AlignSpec, header: bool, r: usize, c: usize) -> Align {
 fn lower_paragraph(runs: &[Inline]) -> Block {
 	match runs {
 		[Inline::Text(text)]	=> Block::paragraph(text.clone()),
-		// A paragraph that is nothing but one maths span is a display equation on its own line.
-		[Inline::Math(atom)]	=> Block::equation(atom.clone(), false),
+		// A paragraph that is nothing but one maths span is a display equation on its own line. The
+		// template sets `math.equation(numbering: "(1)")`, so every display equation takes the next
+		// number; inline maths, a run among others, never does.
+		[Inline::Math(atom)]	=> Block::equation(atom.clone(), true),
 		_						=> Block::rich(runs.iter().map(lower_inline).collect()),
 	}
 }
