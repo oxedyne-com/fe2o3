@@ -292,7 +292,7 @@ fn blocks() -> Vec<Block> {
 					]),
 				),
 			]),
-			true),
+			true, None),
 		Block::paragraph(
 			"Delimiters grow to what they enclose. Set around a fraction, a pair of parentheses is drawn \
 			from the font's own taller glyphs rather than the running-size pair, so the marks embrace the \
@@ -309,7 +309,7 @@ fn blocks() -> Vec<Block> {
 				),
 				Atom::num("2"),
 			),
-			true),
+			true, None),
 		Block::paragraph(
 			"The engine reads the font's OpenType MATH table. The radical sign and the parentheses are \
 			grown from the font's own taller glyph variants to embrace their contents, and the axis, the \

@@ -33,7 +33,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 		match item {
 			Item::Heading { level, runs, label, .. }	=> out.push(
 				Block::heading_rich(*level, runs.iter().map(lower_inline).collect(), label.clone())),
-			Item::Paragraph { runs, .. }		=> out.push(lower_paragraph(runs)),
+			Item::Paragraph { runs, label, .. }	=> out.push(lower_paragraph(runs, label.clone())),
 			Item::List { ordered, items, .. }	=> out.push(Block::list(
 				*ordered,
 				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
@@ -86,14 +86,15 @@ fn cell_align(spec: &AlignSpec, header: bool, r: usize, c: usize) -> Align {
 
 /// Lowers a paragraph's inline runs. A paragraph of one plain text run keeps the plain-paragraph path
 /// (a single-role Knuth-Plass break); the moment it carries an emphasis run it becomes a rich paragraph
-/// of segments, which the driver breaks with a face per run.
-fn lower_paragraph(runs: &[Inline]) -> Block {
+/// of segments, which the driver breaks with a face per run. A `label` is the paragraph's trailing
+/// `<name>`, carried onto a display equation so an `@`-reference can resolve to it.
+fn lower_paragraph(runs: &[Inline], label: Option<String>) -> Block {
 	match runs {
 		[Inline::Text(text)]	=> Block::paragraph(text.clone()),
 		// A paragraph that is nothing but one maths span is a display equation on its own line. The
 		// template sets `math.equation(numbering: "(1)")`, so every display equation takes the next
 		// number; inline maths, a run among others, never does.
-		[Inline::Math(atom)]	=> Block::equation(atom.clone(), true),
+		[Inline::Math(atom)]	=> Block::equation(atom.clone(), true, label),
 		_						=> Block::rich(runs.iter().map(lower_inline).collect()),
 	}
 }

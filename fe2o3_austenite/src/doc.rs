@@ -152,7 +152,7 @@ pub enum Block {
 	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
 	Code { lines: Vec<String> },	// a verbatim code block, set in the mono face, whitespace preserved
 	Table(Table),
-	Equation { expr: Atom, numbered: bool },	// a display equation on its own centred line
+	Equation { expr: Atom, numbered: bool, label: Option<String> },	// a display equation on its own centred line; label anchors an @-reference
 	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
 	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
 	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
@@ -220,9 +220,10 @@ impl Block {
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
-	/// the right margin and records an [`Equation`](crate::ledger::AnchorKind::Equation) anchor.
-	pub fn equation(expr: Atom, numbered: bool) -> Self {
-		Self::Equation { expr, numbered }
+	/// the right margin and records an [`Equation`](crate::ledger::AnchorKind::Equation) anchor; a trailing
+	/// `<label>` lets an `@`-reference resolve to "Equation N".
+	pub fn equation(expr: Atom, numbered: bool, label: Option<String>) -> Self {
+		Self::Equation { expr, numbered, label }
 	}
 
 	/// A drawn figure, centred on its own line and captioned "Figure N" beneath, its identity recorded
@@ -589,7 +590,7 @@ pub fn author(
 				first = false;
 				prev_para = false;
 			},
-			Block::Equation { expr, numbered } => {
+			Block::Equation { expr, numbered, .. } => {
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
@@ -727,13 +728,14 @@ fn indent_piece(indent: Sp) -> Piece {
 /// supplement word and number depend only on document order, not on layout, so they are settled once here
 /// and set as static text -- Typst's own "Chapter 4" for a chapter, "Section 7.7" for a section, and
 /// "{supplement} {number}" for a figure or table -- matching the oracle's own output. The heading and
-/// figure counters are stepped exactly as [`author`] steps them, so a label's number here is the number
-/// the block itself sets. A label the pre-pass never records (a reference to an equation, whose number
-/// this reader does not yet track) is left for the caller's page-number fallback.
+/// figure and equation counters are stepped exactly as [`author`] steps them, so a label's number here is
+/// the number the block itself sets -- a chapter, section, figure, table or "Equation N". A label the
+/// pre-pass never records is left for the caller's page-number fallback.
 fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 	let mut out:		HashMap<String, String>	= HashMap::new();
 	let mut sec:		[u32; 6]				= [0; 6];
 	let mut counters:	HashMap<String, u32>	= HashMap::new();
+	let mut eq_no		= 0u32;	// the equation counter, stepped exactly as `author` steps it
 	for block in blocks {
 		match block {
 			Block::Heading { level, label, .. } => {
@@ -760,6 +762,17 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 				let n = next_number(&mut counters, supplement);
 				if let Some(l) = label {
 					out.insert(l.clone(), fmt!("{} {}", supplement, n));
+				}
+			},
+			Block::Equation { numbered, label, .. } => {
+				// A numbered equation steps the counter; a labelled one anchors "Equation N", Typst's
+				// default equation reference. An unnumbered equation carries no number, so its label is
+				// left to the caller's page-number fallback.
+				if *numbered {
+					eq_no += 1;
+					if let Some(l) = label {
+						out.insert(l.clone(), fmt!("Equation {}", eq_no));
+					}
 				}
 			},
 			_ => {},
@@ -836,10 +849,10 @@ fn build_pieces(
 			},
 			Segment::PageRef(label) => {
 				// A cross-reference resolves to Typst's own supplement-and-number text -- "Chapter 4",
-				// "Section 7.7", "Figure 2", "Table 1" -- fixed by the document-order pre-pass and set as body
-				// text. A label the pre-pass did not record (a reference to an equation, whose number this
-				// reader does not track) falls back to the reserved page-number slot the driver resolves in
-				// pass B, so the reference still reads rather than vanishing.
+				// "Section 7.7", "Figure 2", "Table 1", "Equation 9" -- fixed by the document-order pre-pass
+				// and set as body text. A label the pre-pass did not record falls back to the reserved
+				// page-number slot the driver resolves in pass B, so the reference still reads rather than
+				// vanishing.
 				match refs.get(label) {
 					Some(text)	=> pieces.push(Piece::Text { text: text.clone(), role: Role::Body }),
 					None		=> pieces.push(Piece::Mark(res!(ref_slot(

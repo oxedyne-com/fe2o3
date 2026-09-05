@@ -15,7 +15,7 @@ use crate::table::Align;
 #[derive(Clone, Debug)]
 pub enum Item {
 	Heading { level: u8, runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, runs: the title's inline markup
-	Paragraph { runs: Vec<Inline>, span: Span },
+	Paragraph { runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, anchoring a display equation for cross-reference
 	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure

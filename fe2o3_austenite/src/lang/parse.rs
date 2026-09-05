@@ -309,8 +309,13 @@ fn flush_para(
 		return;
 	}
 	let text = normalise_ws(&lines.join(" "));
-	let runs = parse_inlines(&text);
-	items.push(Item::Paragraph { runs, span: Span::new(start, end) });
+	// A trailing `<name>` labels the block -- in practice a display equation, `$ ... $ <eq_x>` -- and is
+	// stripped before the runs are read, so the maths span stands alone and lowers to a numbered equation
+	// rather than a rich paragraph. Ordinary prose ends in a full stop, so the conservative `split_label`
+	// (a single whitespace-free token in angle brackets at the very end) does not fire on it.
+	let (body, label) = split_label(&text);
+	let runs = parse_inlines(&body);
+	items.push(Item::Paragraph { runs, label, span: Span::new(start, end) });
 	lines.clear();
 }
 
