@@ -60,7 +60,8 @@ pub enum AlignSpec {
 pub enum Inline {
 	Text(String),
 	Strong(String),	// *strong*, lowered to a bold segment
-	Emph(String),	// _emph_, lowered to an italic segment
+	Emph(String),	// _emph_ or #emph[...], lowered to an italic segment
+	Super(String),	// #super[...], lowered to a raised, smaller segment
 	PageRef(String),	// @label, resolving to the labelled anchor's page number
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree

@@ -89,6 +89,7 @@ pub enum Segment {
 	Text(String),
 	Strong(String),	// set in the bold face
 	Emph(String),	// set in the italic face
+	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
 	Footnote { note: String },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
@@ -108,6 +109,10 @@ impl Segment {
 
 	pub fn emph<S: Into<String>>(text: S) -> Self {
 		Self::Emph(text.into())
+	}
+
+	pub fn superscript<S: Into<String>>(text: S) -> Self {
+		Self::Super(text.into())
 	}
 
 	pub fn footnote<S: Into<String>>(note: S) -> Self {
@@ -727,6 +732,13 @@ fn build_pieces(
 			},
 			Segment::Emph(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Italic });
+			},
+			Segment::Super(text) => {
+				// The same raise the footnote mark rides: a run shaped at 0.7x, its box shortened so the
+				// emitter seats its baseline above the line's. It is rigid and never breaks -- the space
+				// after it may -- exactly as a mark piece behaves.
+				let (shaped, dims)	= res!(superscript(fonts.clone(), Role::Body, style.body_size, text));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
 			Segment::Footnote { note } => {
 				*foot_no += 1;
@@ -1781,6 +1793,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::Text(t)				=> out.push_str(t),
 			Segment::Strong(t)				=> out.push_str(t),
 			Segment::Emph(t)				=> out.push_str(t),
+			Segment::Super(t)				=> out.push_str(t),
 			Segment::Code(t)				=> out.push_str(t),
 			Segment::Glossary { display, .. }	=> out.push_str(display),
 			Segment::Math(_)				=> {},
@@ -1939,6 +1952,10 @@ fn subheading_hbox(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Strong), size, small_size, smallcaps, t, asc, dep)),
 			Segment::Emph(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Emph), size, small_size, smallcaps, t, asc, dep)),
+			// A superscript in a heading is vanishingly rare; set its text in the heading face rather than
+			// raising it, so the words are kept without a scripted run in display type.
+			Segment::Super(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
 			Segment::Code(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
 			Segment::Glossary { term, display: disp }	=> {

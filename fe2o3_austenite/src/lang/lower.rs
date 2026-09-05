@@ -96,6 +96,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Text(text)		=> Segment::text(text.clone()),
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
+		Inline::Super(text)		=> Segment::superscript(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),
 		Inline::Math(atom)		=> Segment::math(atom.clone()),

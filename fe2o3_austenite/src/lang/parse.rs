@@ -378,6 +378,30 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
+		// The function-call form of emphasis, `#emph[...]`, set exactly as `_..._`: its bracketed content is
+		// markup, so it takes the same expansion, and a call nested within it renders its display text.
+		if c == '#' {
+			if let Some((inner, next)) = emph_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				push_emphasis(&mut runs, false, &inner);
+				i = next;
+				continue;
+			}
+		}
+		// Typst's superscript, `#super[...]` or `#super("...")`. Its content is usually a short string or
+		// number, reduced to display text here and set raised and smaller by the block layer.
+		if c == '#' {
+			if let Some((text, next)) = super_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::Super(text));
+				i = next;
+				continue;
+			}
+		}
 		// An inline glossary or index call defined in the book template. A glossary term is a run of its
 		// own, so [`doc::author`] can set it bold-italic on first use; a visible index call sets its
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
@@ -664,6 +688,7 @@ fn is_inline_call(name: &str) -> bool {
 		"gs" | "gscap" | "gsi" | "gscapi" | "glossind" | "glossindcap"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
 		| "index" | "index-main" | "cite"
+		| "emph" | "super"
 		| "claim-label" | "claim-refs")
 }
 
@@ -719,6 +744,31 @@ fn footnote_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 	}
 	let (inner, next) = read_group(chars, open)?;
 	Some((flatten_markup(&inner), next))
+}
+
+/// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
+/// form of `_..._` and the caller expands it the same way -- and the index just past the closing `]`.
+/// `None` when the shape is not an emph call or its bracket does not close, so anything else is left as
+/// ordinary text.
+fn emph_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#emph")?;
+	if chars.get(open) != Some(&'[') {
+		return None;
+	}
+	read_group(chars, open)
+}
+
+/// Reads an inline `#super[...]` or `#super("...")` at `i` (a `#`), returning its content reduced to
+/// display text by [`flatten_markup`] -- usually a short string or number -- and the index just past the
+/// closing bracket. `None` when the shape is not a super call or its argument does not close.
+fn super_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#super")?;
+	match chars.get(open) {
+		Some('[') | Some('(')	=> {},
+		_						=> return None,
+	}
+	let (inner, next) = read_group(chars, open)?;
+	Some((flatten_markup(&unwrap_arg(&inner)), next))
 }
 
 /// Reads an inline `#cite(...)` at `i` (a `#`), returning the citation keys and the index past the
@@ -792,6 +842,7 @@ pub fn flatten_markup(text: &str) -> String {
 			// each pass removes one layer and the recursion terminates on plain text.
 			Inline::Strong(t)				=> out.push_str(&flatten_markup(&t)),
 			Inline::Emph(t)					=> out.push_str(&flatten_markup(&t)),
+			Inline::Super(t)				=> out.push_str(&t),	// a flattened string cannot raise; keep its text
 			Inline::Code(t)					=> out.push_str(&t),
 			Inline::Glossary { display, .. }	=> out.push_str(&display),
 			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
@@ -1526,6 +1577,39 @@ mod tests {
 		assert!(is_inline_call("claim-label"));
 		assert!(is_inline_call("claim-refs"));
 		assert!(code_skip("#claim-label(<CD18>). Equilibrium appropriation follows.").is_none());
+	}
+
+	/// `#emph[...]` is the call form of `_..._`: it yields an [`Inline::Emph`] run with the same inner
+	/// text, and nothing raw leaks.
+	#[test]
+	fn emph_call_reads_as_emphasis() {
+		let runs = parse_inlines("The cube asks #emph[who] does the extracting.");
+		assert!(runs.iter().any(|r| matches!(r, Inline::Emph(t) if t == "who")),
+			"emph run missing: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#emph"))),
+			"raw #emph leaked: {:?}", runs);
+		// A call carrying its own markup expands the same way `_..._` does.
+		let nested = parse_inlines("#emph[the #idx[Harvard Business Review] weekly]");
+		assert!(nested.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#emph") || t.contains("#idx"))),
+			"raw markup leaked from nested emph: {:?}", nested);
+	}
+
+	/// `#super[...]` yields an [`Inline::Super`] run of its content, in both the bracket and the string
+	/// argument forms, and never leaves raw source behind.
+	#[test]
+	fn super_call_reads_as_superscript() {
+		let runs = parse_inlines("The area is 10#super[6] units, split#super[†] on the case.");
+		let sups: Vec<&String> = runs.iter().filter_map(|r| match r {
+			Inline::Super(t) => Some(t),
+			_ => None,
+		}).collect();
+		assert_eq!(sups, vec!["6", "†"], "unexpected superscript runs: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#super"))),
+			"raw #super leaked: {:?}", runs);
+		// The string-argument form reads the same, its quotes stripped.
+		let quoted = parse_inlines("x#super(\"2\")");
+		assert!(quoted.iter().any(|r| matches!(r, Inline::Super(t) if t == "2")),
+			"quoted super run missing: {:?}", quoted);
 	}
 
 	/// A citation nested in emphasis keeps its own [`Inline::Cite`] run rather than leaking its source,
