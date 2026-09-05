@@ -68,12 +68,12 @@ fn main() -> Outcome<()> {
 	let geom	= PageGeometry::a4();
 	let style	= Style::default();
 
-	let (mut document, heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks(), None));
+	let (mut document, heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks(), None, None));
 
 	// A table of contents at the very front: page 1 lists each section title against its resolved page,
 	// the body follows on page 2. Prepended before the run, so its height is part of the vertical list
 	// the driver converges -- the folios it prints are the very ones its own length helped fix.
-	let toc = res!(doc::contents(fonts.clone(), geom, style, &heads));
+	let toc = res!(doc::contents(fonts.clone(), None, geom, style, style.h2_size, &heads));
 	document.nodes.splice(0..0, toc);
 
 	res!(append_colophon(&mut document, fonts.clone(), style));

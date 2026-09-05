@@ -407,6 +407,21 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
+		// An inline citation, `#cite(<key>)` or `#cite(<a>, <b>)`. Its keys become a cite run the block
+		// layer resolves to "(Author Year)" against the bibliography; a citation with no readable key is
+		// dropped rather than left as raw source.
+		if c == '#' {
+			if let Some((keys, next)) = cite_call(&chars, i) {
+				if !keys.is_empty() {
+					if !plain.is_empty() {
+						runs.push(Inline::Text(std::mem::take(&mut plain)));
+					}
+					runs.push(Inline::Cite(keys));
+				}
+				i = next;
+				continue;
+			}
+		}
 		// The `#raw("...")` call form of inline code.
 		if c == '#' {
 			if let Some((text, next)) = raw_call(&chars, i) {
@@ -611,7 +626,7 @@ fn is_inline_call(name: &str) -> bool {
 	matches!(name,
 		"gs" | "gscap" | "gsi" | "gscapi" | "glossind" | "glossindcap"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
-		| "index" | "index-main")
+		| "index" | "index-main" | "cite")
 }
 
 /// Folds one line's `()[]{}` into the running [`SkipState`], updating the depth and the in-string flag.
@@ -668,6 +683,44 @@ fn footnote_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 	Some((flatten_markup(&inner), next))
 }
 
+/// Reads an inline `#cite(...)` at `i` (a `#`), returning the citation keys and the index past the
+/// closing `)`. Every `<label>` token inside the parentheses is a key; a named argument such as
+/// `form: "prose"` carries no label and is ignored. `None` when the shape is not a cite call or its
+/// parentheses do not close, so anything else is left as ordinary text.
+fn cite_call(chars: &[char], i: usize) -> Option<(Vec<String>, usize)> {
+	let open = at_lit(chars, i, "#cite")?;
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	let (inner, next) = read_group(chars, open)?;
+	let keys = cite_keys(&inner);
+	Some((keys, next))
+}
+
+/// Extracts the `<label>` citation keys from the inside of a `#cite(...)` call, in order. A `<` opens a
+/// key and the next `>` closes it; anything outside a `<...>` pair (a named argument, a separating comma)
+/// is skipped.
+fn cite_keys(inner: &str) -> Vec<String> {
+	let chars:	Vec<char>	= inner.chars().collect();
+	let mut keys			= Vec::new();
+	let mut i				= 0usize;
+	while i < chars.len() {
+		if chars[i] == '<' {
+			if let Some(close) = (i + 1..chars.len()).find(|&j| chars[j] == '>') {
+				let key: String = chars[i + 1..close].iter().collect();
+				let key = key.trim().to_string();
+				if !key.is_empty() {
+					keys.push(key);
+				}
+				i = close + 1;
+				continue;
+			}
+		}
+		i += 1;
+	}
+	keys
+}
+
 /// Reduces a run of markup to plain display text: the words a reader sees, with the emphasis, code,
 /// glossary and index delimiters removed. A glossary term contributes its display, a visible index call
 /// its text, a pure index marker nothing; `*strong*` and `_emph_` contribute their inner words. Inline
@@ -689,6 +742,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
 			Inline::Math(_)					=> {},	// maths is dropped from a flattened string
 			Inline::Footnote(_)				=> {},	// a nested footnote is not set within a flattened string
+			Inline::Cite(_)					=> {},	// a citation has no plain form before the bibliography resolves it
 		}
 	}
 	out

@@ -203,6 +203,11 @@ fn compose<M: Metrics>(
 				if ledger.body_start_page == 0 && id.kind == AnchorKind::Heading {
 					ledger.body_start_page = page_no;
 				}
+				// The bibliography marker (the only Citation-kind anchor) fixes where the back matter opens,
+				// so its pages drop the running head and centre the folio.
+				if ledger.back_matter_start_page == 0 && id.kind == AnchorKind::Citation {
+					ledger.back_matter_start_page = page_no;
+				}
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {

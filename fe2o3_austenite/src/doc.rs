@@ -15,6 +15,7 @@
 //! head is TeX's `\mark` reimplemented through the ledger: the section current at the top of a page
 //! is the most recent heading the ledger resolved to an earlier page.
 
+use crate::bib::Bibliography;
 use crate::driver::{
 	Document,
 	FootStyle,
@@ -93,6 +94,7 @@ pub enum Segment {
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
 	Code(String),	// an inline code span, set in the mono face
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use, plain after
+	Cite(Vec<String>),	// a citation, resolved to "(Author Year)" against the bibliography
 }
 
 impl Segment {
@@ -127,6 +129,10 @@ impl Segment {
 	pub fn glossary<T: Into<String>, D: Into<String>>(term: T, display: D) -> Self {
 		Self::Glossary { term: term.into(), display: display.into() }
 	}
+
+	pub fn cite(keys: Vec<String>) -> Self {
+		Self::Cite(keys)
+	}
 }
 
 /// One block of the authored document. The closed vocabulary the block layer sets; richer blocks
@@ -156,6 +162,13 @@ pub enum Block {
 		supplement:	String,
 		label:		Option<String>,
 	},
+	// A back-matter section title (the Bibliography) on its own page, set left in the display face and
+	// unnumbered. It records a heading anchor so the contents lists it, and a back-matter marker so the
+	// running head is dropped and the folio centres from here on.
+	BackMatterHeading { title: String },
+	// One bibliography reference: its styled runs, each carrying whether it sets in italic. Set small,
+	// as a paragraph the reader reads as one entry.
+	Reference { runs: Vec<(String, bool)> },
 }
 
 impl Block {
@@ -233,6 +246,16 @@ impl Block {
 		-> Self
 	{
 		Self::ImageFigure { path, width, height, scale, caption, supplement, label }
+	}
+
+	/// A back-matter section heading (the Bibliography), on its own page, unnumbered.
+	pub fn back_matter_heading<S: Into<String>>(title: S) -> Self {
+		Self::BackMatterHeading { title: title.into() }
+	}
+
+	/// One bibliography reference, a sequence of runs each flagged for italic.
+	pub fn reference(runs: Vec<(String, bool)>) -> Self {
+		Self::Reference { runs }
 	}
 }
 
@@ -375,6 +398,7 @@ pub fn author(
 	heading:	Option<Arc<Font>>,
 	blocks:		&[Block],
 	front:		Option<&FrontMatter>,
+	bib:		Option<&Bibliography>,
 )
 	-> Outcome<(Document, Vec<Heading>)>
 {
@@ -496,7 +520,7 @@ pub fn author(
 					pieces.push(indent_piece(style.indent));
 				}
 				pieces.extend(res!(build_pieces(
-					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen)));
+					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib)));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading));
 				nodes.extend(lines);
@@ -508,7 +532,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				}
-				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen));
+				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen, bib));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -582,6 +606,39 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::BackMatterHeading { title } => {
+				if !first {
+					nodes.push(Node::Penalty(Penalty::eject()));
+				}
+				// The back-matter marker (a Citation anchor) fixes where the running head drops and the
+				// folio centres; a heading anchor lists it in the contents. Both sit at the page top.
+				nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Citation, slug(title))));
+				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(title)));
+				heads.push(Heading { id: id.clone(), level: 0, title: title.clone(), number: String::new() });
+				nodes.push(Node::Anchor(id));
+				// The title left in the display face at the chapter-title size (the template's
+				// glossary-index-title size, equal to it in these books' scales).
+				let sh	= res!(head_shape(&fonts, &head_face(1, heading.as_ref()), style.h1_size, title));
+				let d	= sh.dims();
+				nodes.push(Node::HBox(BoxNode::new(
+					vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
+				nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
+				i += 1;
+				first = false;
+				prev_para = false;
+			},
+			Block::Reference { runs } => {
+				// The reference list is tight, entry under entry, so entries part by the interline leading
+				// rather than the paragraph skip.
+				if !first {
+					let gap = if style.foot_leading > style.foot_size { style.foot_leading - style.foot_size } else { style.line_gap };
+					nodes.push(Node::Glue(Glue::fixed(gap)));
+				}
+				res!(reference_block(&mut nodes, fonts.clone(), style, measure, runs));
+				i += 1;
+				first = false;
+				prev_para = false;
+			},
 		}
 	}
 
@@ -643,6 +700,7 @@ fn build_pieces(
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
 	seen:		&mut HashSet<String>,
+	bib:		Option<&Bibliography>,
 )
 	-> Outcome<Vec<Piece>>
 {
@@ -701,6 +759,19 @@ fn build_pieces(
 				let role = if seen.insert(term.clone()) { Role::BoldItalic } else { Role::Body };
 				pieces.push(Piece::Text { text: display.clone(), role });
 			},
+			Segment::Cite(keys) => {
+				// Resolve the citation to "(Author Year)" against the bibliography, set as body text. A
+				// key the bibliography does not hold, or a run with no bibliography loaded, falls back to
+				// the bracketed keys so the citation still reads rather than vanishing.
+				let text = match bib {
+					Some(b) => {
+						let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+						b.format_citation(&refs).unwrap_or_else(|_| fmt!("({})", keys.join("; ")))
+					},
+					None => fmt!("({})", keys.join("; ")),
+				};
+				pieces.push(Piece::Text { text, role: Role::Body });
+			},
 		}
 	}
 	Ok(pieces)
@@ -743,6 +814,7 @@ fn list(
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
 	seen:		&mut HashSet<String>,
+	bib:		Option<&Bibliography>,
 )
 	-> Outcome<()>
 {
@@ -762,7 +834,7 @@ fn list(
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen, bib));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
@@ -1637,6 +1709,45 @@ pub fn contents(
 	Ok(nodes)
 }
 
+/// Sets one bibliography reference: its runs woven into justified lines at the footnote size, with a
+/// hanging indent -- the first line flush left, every continuation line indented, as a Chicago
+/// reference list sets. The runs' italic flag chooses the face, so a book or journal title sets italic.
+fn reference_block(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	runs:		&[(String, bool)],
+)
+	-> Outcome<()>
+{
+	let hang	= Sp(style.body_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take
+	let inner	= if measure > hang { measure - hang } else { measure };
+
+	let mut pieces: Vec<Piece> = Vec::with_capacity(runs.len());
+	for (text, italic) in runs {
+		let role = if *italic { Role::Italic } else { Role::Body };
+		pieces.push(Piece::Text { text: text.clone(), role });
+	}
+	let mut lines = res!(break_paragraph_pieces(
+		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading));
+
+	// Indent every line but the first by the hang, so the entry hangs under its first line.
+	let mut first = true;
+	for line in lines.iter_mut() {
+		if let Node::HBox(b) = line {
+			if first {
+				first = false;
+			} else {
+				b.list.insert(0, Node::Glue(Glue::fixed(hang)));
+				b.dims = Dims::new(b.dims.width + hang, b.dims.height, b.dims.depth);
+			}
+		}
+	}
+	nodes.extend(lines);
+	Ok(())
+}
+
 /// Wraps a vertical run of nodes as a keep box, its extent the sum of its children's, so the driver
 /// places it whole or moves it whole. The whole extent is carried as height; a block has no baseline
 /// the page cares about, so the depth is zero.
@@ -1912,6 +2023,18 @@ pub fn decorate(
 			continue;
 		}
 		let folio = page.number - (body_start - 1);
+
+		// The back matter -- the bibliography and beyond -- drops the running head and centres the folio at
+		// the foot, as the template sets it.
+		let back_start = ledger.back_matter_start_page;
+		if back_start != 0 && page.number >= back_start {
+			let foot_top	= content_top + geom.content_height() + Sp::from_pt(14.0);
+			let shaped		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &fmt!("{}", folio)));
+			let d			= shaped.dims();
+			let x			= centre_x(geom, d.width);
+			page.frame.push(Placed::new(x, foot_top, d, PlacedKind::Text(shaped)));
+			continue;
+		}
 
 		// The chapter running at the top of this page (the most recent level-1 heading resolved to an
 		// earlier page), whether a chapter opens at the very top of this one, and whether a part divider

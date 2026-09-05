@@ -215,11 +215,15 @@ pub struct Ledger {
 	// contents entry's folio is resolved through [`Ref::FolioOf`] the same way. Zero until a heading is
 	// recorded, which is the Pass A tell a folio reference reads.
 	pub body_start_page:	u32,
+	// The physical page the back matter opens on -- the page carrying the bibliography marker. From there
+	// the running head is dropped and the folio centres at the foot, as the template sets its back matter.
+	// Zero when the document carries no back matter.
+	pub back_matter_start_page:	u32,
 }
 
 impl Ledger {
 	pub fn new() -> Self {
-		Self { entries: BTreeMap::new(), total_pages: 0, body_start_page: 0 }
+		Self { entries: BTreeMap::new(), total_pages: 0, body_start_page: 0, back_matter_start_page: 0 }
 	}
 
 	/// Records an anchor's placement, replacing any earlier record of the same identity within this
@@ -273,6 +277,7 @@ impl Ledger {
 	pub fn is_stable_against(&self, prev: &Ledger) -> bool {
 		self.total_pages == prev.total_pages
 			&& self.body_start_page == prev.body_start_page
+			&& self.back_matter_start_page == prev.back_matter_start_page
 			&& self.diff(prev).is_empty()
 	}
 
@@ -300,9 +305,10 @@ impl ToDat for Ledger {
 			anchors.push(res!(a.to_dat()));
 		}
 		Ok(omapdat!{
-			"total_pages"		=> dat!(self.total_pages),
-			"body_start_page"	=> dat!(self.body_start_page),
-			"anchors"			=> Dat::List(anchors),
+			"total_pages"			=> dat!(self.total_pages),
+			"body_start_page"		=> dat!(self.body_start_page),
+			"back_matter_start_page"	=> dat!(self.back_matter_start_page),
+			"anchors"				=> Dat::List(anchors),
 		})
 	}
 }
@@ -321,12 +327,16 @@ impl FromDat for Ledger {
 			Ok(Some(d))	=> try_extract_dat!(d, U32),
 			_			=> 0,
 		};
+		let back_matter_start_page = match dat.map_remove(&dat!("back_matter_start_page")) {
+			Ok(Some(d))	=> try_extract_dat!(d, U32),
+			_			=> 0,
+		};
 		let anchors_dat	= try_extract_dat!(res!(dat.map_remove_must(&dat!("anchors"))), List);
 		let mut entries = BTreeMap::new();
 		for d in anchors_dat {
 			let a = res!(Anchor::from_dat(d));
 			entries.insert(a.id.clone(), a);
 		}
-		Ok(Self { entries, total_pages, body_start_page })
+		Ok(Self { entries, total_pages, body_start_page, back_matter_start_page })
 	}
 }

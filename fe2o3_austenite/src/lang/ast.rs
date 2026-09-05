@@ -66,4 +66,5 @@ pub enum Inline {
 	Math(Atom),		// $...$, parsed to the engine's maths tree
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
 	Footnote(String),	// #footnote[...], its note text set at the foot of the page its mark lands on
+	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
 }

@@ -102,5 +102,6 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Glossary { term, display }
 								=> Segment::glossary(term.clone(), display.clone()),
 		Inline::Footnote(note)	=> Segment::footnote(note.clone()),
+		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
 	}
 }

@@ -12,9 +12,14 @@
 //! -- page size, mirror margins, body and heading type -- from the arm the `format` string picks, and
 //! nothing more. A field a book does not set keeps the engine default.
 
+use crate::bib::{
+	Bibliography,
+	RefStyle,
+};
 use crate::doc::{
 	Block,
 	FrontMatter,
+	Segment,
 	Style,
 };
 use crate::fonts;
@@ -46,6 +51,9 @@ pub struct BookSpec {
 	// None when the book ships no such face, so headings fall back to the body bold.
 	pub heading:	Option<Arc<Font>>,
 	pub front:		FrontMatter,	// the title page, cover and imprint, read from the root's template call
+	// The bibliography, parsed from the file the root names and marked with the keys the body cited, so
+	// the block layer resolves an in-text `#cite` against it. None when the book names no bibliography.
+	pub bib:		Option<Bibliography>,
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -57,6 +65,12 @@ pub fn is_book_root(src: &str) -> bool {
 /// Assembles the book rooted at `root_path`: reads its `config.typ`, loads its Libertinus faces by
 /// path, and follows the root's includes into one block stream.
 pub fn load(root_path: &Path) -> Outcome<BookSpec> {
+	// Canonicalise the root so its parent and grandparent are real absolute directories. A root given
+	// relatively (`lucronics.typ`) otherwise has an empty parent, and the project directory the shared
+	// `refs.bib` and assets sit in cannot be found -- a symlinked `assets` masks this for fonts, but the
+	// bibliography one level up is missed.
+	let root_path = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+	let root_path = root_path.as_path();
 	let root_dir = match root_path.parent() {
 		Some(d)	=> d.to_path_buf(),
 		None	=> return Err(err!("The book root {:?} has no parent directory.", root_path; Input, Invalid)),
@@ -86,11 +100,85 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
-	let blocks		= res!(assemble(&root_src, &root_dir));
+	let mut blocks	= res!(assemble(&root_src, &root_dir));
 	let title		= content_field(&root_src, "title").unwrap_or_default();
 	let front		= read_front_matter(&root_src, &config_src, &title);
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front })
+	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
+	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
+	let bib = res!(load_bibliography(&root_src, &project_dir, &mut blocks));
+
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib })
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ BIBLIOGRAPHY                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Parses the bibliography the root's `meta-data.bibliography` names, marks every key the body cited,
+/// and appends the Bibliography back matter (a heading and the sorted, cited-only reference list) to the
+/// block stream. Returns the marked bibliography for the in-text citation formatter, or `None` when the
+/// book names no bibliography or the file cannot be read.
+fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+	let meta = match meta_block(root_src) {
+		Some(m)	=> m,
+		None	=> return Ok(None),
+	};
+	let path_str = match string_field(&meta, "bibliography") {
+		Some(p)	=> p,
+		None	=> return Ok(None),	// no bibliography named
+	};
+
+	// The path is Typst-root-relative (`/refs.bib`); resolve it against the project directory.
+	let rel		= path_str.trim_start_matches('/');
+	let bib_path	= project_dir.join(rel);
+	let src = match std::fs::read_to_string(&bib_path) {
+		Ok(s)	=> s,
+		Err(_)	=> return Ok(None),	// a named bibliography that will not read is a reported gap, not a failure
+	};
+	let mut bib = res!(Bibliography::parse(&src));
+
+	// Mark every key the body cited, so the reference list holds exactly the cited works.
+	for keys in collect_cite_keys(blocks) {
+		for k in keys {
+			bib.mark_cited(&k);
+		}
+	}
+
+	// Append the back matter: the section heading, then one Reference block per sorted, cited reference.
+	blocks.push(Block::back_matter_heading("Bibliography"));
+	for reference in bib.reference_list() {
+		let runs: Vec<(String, bool)> = reference.runs.iter()
+			.map(|r| (r.text.clone(), r.style == RefStyle::Italic))
+			.collect();
+		blocks.push(Block::reference(runs));
+	}
+
+	Ok(Some(bib))
+}
+
+/// Gathers the citation keys the body's blocks carry, in document order, so each can be marked cited.
+fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
+	let mut out = Vec::new();
+	for block in blocks {
+		match block {
+			Block::RichParagraph { segments }	=> collect_cite_segments(segments, &mut out),
+			Block::List { items, .. }			=> for item in items {
+				collect_cite_segments(item, &mut out);
+			},
+			_									=> {},
+		}
+	}
+	out
+}
+
+/// Pushes the keys of every citation segment in `segments` onto `out`.
+fn collect_cite_segments(segments: &[Segment], out: &mut Vec<Vec<String>>) {
+	for seg in segments {
+		if let Segment::Cite(keys) = seg {
+			out.push(keys.clone());
+		}
+	}
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -704,3 +792,4 @@ mod tests {
 		Ok(())
 	}
 }
+
