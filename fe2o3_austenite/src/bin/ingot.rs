@@ -11,6 +11,7 @@
 //! Usage: `ingot <SOURCE.ingot> [OUTPUT_DIR]` (default output `ingot-out`).
 
 use oxedyne_fe2o3_austenite::{
+	book,
 	doc::{
 		self,
 		Style,
@@ -50,16 +51,38 @@ fn main() -> Outcome<()> {
 		Err(e)	=> return Err(err!(e,
 			"Could not read the Ingot source file {:?}.", source; File, Read)),
 	};
-	let blocks = res!(lang::to_blocks(&src));
 
-	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-	let geom	= PageGeometry::a4();
-	let style	= Style::default();
+	// A book root assembles chapters and carries its own geometry, fonts and type; a lone file sets on
+	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
+	// one place or the other, and the rest of the run is identical.
+	let (blocks, fonts, geom, style) = if book::is_book_root(&src) {
+		let spec = res!(book::load(std::path::Path::new(&source)));
+		(spec.blocks, spec.fonts, spec.geom, spec.style)
+	} else {
+		let blocks	= res!(lang::to_blocks(&src));
+		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
+		(blocks, fonts, PageGeometry::a4(), Style::default())
+	};
 
 	let (document, heads)	= res!(doc::author(fonts.clone(), geom, style, &blocks));
 	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
 	let mut out				= res!(driver::run(&document, &metrics, Config::default()));
 	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, style, geom));
+
+	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso
+	// page -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits
+	// at the spine on both sides of the leaf. Uniform margins give a zero shift, so a non-book run is
+	// untouched.
+	let shift = geom.mirror_shift();
+	if shift.raw() != 0 {
+		for page in &mut out.pages {
+			if page.number % 2 == 0 {
+				for placed in &mut page.frame.placed {
+					placed.x = placed.x + shift;
+				}
+			}
+		}
+	}
 
 	res!(std::fs::create_dir_all(&out_dir));
 	let emitter = Emitter::Svg;

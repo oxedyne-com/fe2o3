@@ -27,6 +27,7 @@
 //! Anthropic Claude
 
 pub mod bib;
+pub mod book;
 pub mod diagram;
 pub mod doc;
 pub mod driver;
