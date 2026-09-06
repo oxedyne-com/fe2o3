@@ -11,9 +11,13 @@
 //! paths, opacity rides its own attributes, and `fill-rule="evenodd"` asks a holed shape to fill with
 //! its overlaps read as holes.
 //!
-//! What is still left at the door: `<text>`/`<tspan>` (an Inkscape file keeps live text, needing a font
-//! to shape, which this fontless reader has none of); an embedded `<image>` (a base64 raster, which the
-//! flat fill/stroke op set cannot carry); `<clipPath>` and markers (arrowheads); and `filter`/`pattern`.
+//! Live `<text>`/`<tspan>` runs an Inkscape file keeps are read, but not shaped: this reader has no font,
+//! so a run comes out as an [`SvgOp::Text`] carrying the string, the anchor point, the enclosing frame,
+//! the size and the face hints, for a caller that does have a font set to shape to glyph outlines. An
+//! embedded `<image>` (a base64 PNG or JPEG) is decoded here to straight RGBA and placed as an
+//! [`SvgOp::Image`]. What is still left at the door: `<clipPath>` and markers (arrowheads);
+//! `filter`/`pattern`; a `<text>` rotated or sheared by its frame keeps its position but is shaped upright;
+//! and an `<image>` under a rotation or shear is placed by its axis-aligned bounds.
 //! A gradient fill (`url(#id)`) resolves to the flat mean of its stops -- a true axial or radial shading
 //! would need a paint the op set does not model -- and a reference to nothing draws nothing rather than
 //! failing the read. A file reaching past all this is read as far as it fits and the rest is left.
@@ -22,7 +26,8 @@
 //! SVG; it bakes each glyph to an outline, files the outline once as a `<symbol>`, and places it with a
 //! `<use>` whose enclosing group carries the position and the y-flip that turns a font's y-up outline the
 //! right way up. So no font is needed to read that text back: the outlines are already in the file, and a
-//! `<use>` is just a filled path fetched by id. That is why this module takes no font set.
+//! `<use>` is just a filled path fetched by id. An illustrator's `<text>`, by contrast, is still live
+//! text, so the reader hands it on unshaped for the caller with a font to bake -- see [`SvgOp::Text`].
 //!
 //! The geometry comes out in the `viewBox`'s own units, y down, which for a Typst file are points. A
 //! caller sizing the picture to a figure width scales every path by one factor; nothing here bakes that
@@ -48,20 +53,56 @@ use crate::stroke::{
 use crate::transform::Transform;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::{
 	Elem,
+	Node,
 	Xml,
 };
 
 use std::collections::HashMap;
 
-/// One drawing operation read from an SVG document: a filled or a stroked path, in the document's own
-/// frame (y down, `viewBox` units). The geometry is flattened of its element tree -- every transform is
-/// baked into the path -- so a caller need only scale and place it.
+/// One drawing operation read from an SVG document: a filled or a stroked path, a live text run, or a
+/// decoded raster, in the document's own frame (y down, `viewBox` units). Path geometry is flattened of
+/// its element tree -- every transform baked in -- so a caller need only scale and place it. A text run,
+/// which needs a font this reader has none of, is instead handed on with its own frame (`local`), for the
+/// caller to shape; a raster carries its pixels and a placement rectangle already in the picture frame.
 #[derive(Clone, Debug)]
 pub enum SvgOp {
 	Fill { path: Path, colour: Rgba },
 	Stroke { path: Path, colour: Rgba, stroke: Stroke },
+	// A live `<text>`/`<tspan>` run left unshaped: `local` maps its own frame (y down) to the picture
+	// frame, `x`/`y` are the anchor and baseline in that frame, `size` the font-size in its units.
+	Text {
+		text:	String,
+		local:	Transform,
+		x:		f32,
+		y:		f32,
+		size:	f32,
+		anchor:	Anchor,
+		italic:	bool,
+		bold:	bool,
+		colour:	Rgba,
+	},
+	// A decoded raster and the rectangle it fills, top-left (x, y), w wide and h tall, in the picture frame.
+	Image {
+		rgba:	Vec<u8>,	// straight RGBA, row-major, top row first
+		iw:		usize,		// image pixel width
+		ih:		usize,		// image pixel height
+		x:		f32,
+		y:		f32,
+		w:		f32,
+		h:		f32,
+	},
+}
+
+/// Where a `<text>` run's anchor point sits along the run: at its start, middle or end, per SVG's
+/// `text-anchor`. The caller applies it once the run's advance is known from shaping.
+#[derive(Clone, Copy, Debug)]
+pub enum Anchor {
+	Start,
+	Middle,
+	End,
 }
 
 /// A read SVG document: its drawing operations and the size of its `viewBox`, in the `viewBox`'s units.
@@ -97,6 +138,10 @@ struct Paint {
 	dash:			Option<Vec<f32>>,
 	dash_offset:	f32,
 	opacity:		f32,			// cumulative group opacity, folded into every emitted alpha
+	font_size:		f32,			// inherited font-size, in the element's own frame; 0 until a font sets one
+	text_anchor:	Anchor,			// inherited text-anchor
+	italic:			bool,			// inherited font-style: italic
+	bold:			bool,			// inherited font-weight: bold
 }
 
 impl Default for Paint {
@@ -114,6 +159,10 @@ impl Default for Paint {
 			dash:			None,
 			dash_offset:	0.0,
 			opacity:		1.0,
+			font_size:		0.0,
+			text_anchor:	Anchor::Start,
+			italic:			false,
+			bold:			false,
 		}
 	}
 }
@@ -144,7 +193,7 @@ pub fn read_document(src: &str) -> Outcome<SvgPicture> {
 	// carries that origin to (0, 0); a Typst file's origin is already there and the translation is nil.
 	let base = Transform::translate(-vx, -vy);
 	let mut ops: Vec<SvgOp> = Vec::new();
-	res!(walk(root, &base, &Paint::default(), &defs, &mut ops));
+	res!(walk(root, &base, &Paint::default(), &defs, &xml, &mut ops));
 
 	Ok(SvgPicture { ops, width: vw, height: vh })
 }
@@ -279,6 +328,7 @@ fn walk(
 	ctx:	&Transform,
 	paint:	&Paint,
 	defs:	&Defs,
+	xml:	&Xml,
 	ops:	&mut Vec<SvgOp>,
 )
 	-> Outcome<()>
@@ -292,11 +342,19 @@ fn walk(
 			"g" | "a" | "svg" => {
 				let local = child_transform(child, ctx);
 				let sub = resolve_paint(paint, child, defs);
-				res!(walk(child, &local, &sub, defs, ops));
+				res!(walk(child, &local, &sub, defs, xml, ops));
 			},
 			"use" => {
 				let sub = resolve_paint(paint, child, defs);
 				res!(emit_use(child, ctx, &sub, defs, ops));
+			},
+			"text" => {
+				// A live text run, handed on unshaped; its `<tspan>` children are read here, not descended.
+				let sub = resolve_paint(paint, child, defs);
+				res!(emit_text(child, ctx, &sub, defs, xml, ops));
+			},
+			"image" => {
+				res!(emit_image(child, ctx, ops));
 			},
 			_ => {
 				// A shape is painted with its resolved state; an unmodelled container may still hold
@@ -307,7 +365,7 @@ fn walk(
 					res!(emit_shape(shape, &local, &sub, ops));
 				} else {
 					let local = child_transform(child, ctx);
-					res!(walk(child, &local, &sub, defs, ops));
+					res!(walk(child, &local, &sub, defs, xml, ops));
 				}
 			},
 		}
@@ -371,7 +429,36 @@ fn resolve_paint(base: &Paint, elem: &Elem, defs: &Defs) -> Paint {
 		// Group opacity is not a paint of its own; it scales everything the subtree draws.
 		p.opacity *= number(&v).clamp(0.0, 1.0);
 	}
+	// The font state cascades like the paint, so a `<g font-size=.. text-anchor=middle>` sets it for the
+	// `<text>` runs beneath, which is where an Inkscape file often keeps it rather than on the text itself.
+	if let Some(v) = prop(elem, style, "font-size") {
+		let n = length_num(&v);
+		if n > 0.0 {
+			p.font_size = n;
+		}
+	}
+	if let Some(v) = prop(elem, style, "font-style") {
+		let t = v.trim();
+		p.italic = t == "italic" || t == "oblique";
+	}
+	if let Some(v) = prop(elem, style, "font-weight") {
+		let t = v.trim();
+		p.bold = t == "bold" || t == "bolder"
+			|| t.parse::<f32>().map(|w| w >= 600.0).unwrap_or(false);
+	}
+	if let Some(v) = prop(elem, style, "text-anchor") {
+		p.text_anchor = parse_anchor(&v);
+	}
 	p
+}
+
+/// SVG's `text-anchor` (or the `text-align` shorthand Inkscape sometimes writes) as an [`Anchor`].
+fn parse_anchor(v: &str) -> Anchor {
+	match v.trim() {
+		"middle" | "center"	=> Anchor::Middle,
+		"end" | "right"		=> Anchor::End,
+		_					=> Anchor::Start,
+	}
 }
 
 /// A property's value, from the element's `style` first and its presentation attribute second, so the
@@ -439,6 +526,203 @@ fn emit_use(
 	let local	= child_transform(elem, ctx);
 	let local	= Transform::translate(x, y).then(&local);
 	emit_shape(outline, &local, paint, ops)
+}
+
+/// The font state inherited down a `<text>` and reset by each `<tspan>`: the size, the anchor, the face
+/// hints, and the colour the run is painted. The size begins at zero -- a run that never gets one cannot
+/// be shaped and is dropped -- and the colour at the inherited fill.
+#[derive(Clone)]
+struct TextState {
+	size:	f32,		// font-size, in the element's own units
+	anchor:	Anchor,
+	italic:	bool,
+	bold:	bool,
+	colour:	Rgba,
+}
+
+impl TextState {
+	/// The starting state a `<text>` inherits, all cascaded down the group tree to this point: the font
+	/// size, the anchor, the face hints, and the fill colour.
+	fn from_paint(paint: &Paint) -> Self {
+		Self {
+			size:	paint.font_size,
+			anchor:	paint.text_anchor,
+			italic:	paint.italic,
+			bold:	paint.bold,
+			colour:	paint.fill.unwrap_or(Rgba::BLACK),
+		}
+	}
+}
+
+/// Resolves a `<text>` or `<tspan>`'s font state from the inherited one: its `style` properties (which
+/// win) and its presentation attributes (which fall back), each overriding only what it names. A
+/// `fill:none` on labelled outline text falls back to the stroke colour, so the glyphs still show.
+fn text_state(base: &TextState, elem: &Elem, defs: &Defs) -> TextState {
+	let mut s	= base.clone();
+	let style	= elem.attr("style").unwrap_or("");
+
+	if let Some(v) = prop(elem, style, "font-size") {
+		let n = length_num(&v);
+		if n > 0.0 {
+			s.size = n;
+		}
+	}
+	if let Some(v) = prop(elem, style, "font-style") {
+		let t = v.trim();
+		s.italic = t == "italic" || t == "oblique";
+	}
+	if let Some(v) = prop(elem, style, "font-weight") {
+		let t = v.trim();
+		s.bold = t == "bold" || t == "bolder"
+			|| t.parse::<f32>().map(|w| w >= 600.0).unwrap_or(false);
+	}
+	// `text-anchor` is the SVG property; `text-align` is the shorthand Inkscape writes on a `<tspan>`.
+	if let Some(v) = prop(elem, style, "text-anchor").or_else(|| prop(elem, style, "text-align")) {
+		s.anchor = parse_anchor(&v);
+	}
+	// Fill wins the colour; a declared `none` falls back to the stroke so outline text still paints; a
+	// stroke alone, with no fill declared, likewise sets the colour.
+	if let Some(v) = prop(elem, style, "fill") {
+		match resolve_fill(&v, defs) {
+			Some(c)	=> s.colour = c,
+			None	=> {
+				if let Some(sc) = prop(elem, style, "stroke").and_then(|w| resolve_fill(&w, defs)) {
+					s.colour = sc;
+				}
+			},
+		}
+	} else if let Some(v) = prop(elem, style, "stroke") {
+		if let Some(c) = resolve_fill(&v, defs) {
+			s.colour = c;
+		}
+	}
+	s
+}
+
+/// Reads a live `<text>` into text runs: its direct text at its own anchor, and each `<tspan>` at the
+/// tspan's anchor (falling back to the text's) with the tspan's own font state. The reader shapes none of
+/// it -- it carries no font -- so each run is an [`SvgOp::Text`] the caller with a font set bakes.
+fn emit_text(
+	elem:	&Elem,
+	ctx:	&Transform,
+	paint:	&Paint,
+	defs:	&Defs,
+	xml:	&Xml,
+	ops:	&mut Vec<SvgOp>,
+)
+	-> Outcome<()>
+{
+	let local	= child_transform(elem, ctx);
+	let base	= text_state(&TextState::from_paint(paint), elem, defs);
+	let tx		= first_number(elem.attr("x"));
+	let ty		= first_number(elem.attr("y"));
+
+	for kid in &elem.kids {
+		match kid {
+			Node::Elem(e) if e.name.local() == "tspan" => {
+				let st	= text_state(&base, e, defs);
+				let sx	= e.attr("x").map(|v| first_number(Some(v))).unwrap_or(tx);
+				let sy	= e.attr("y").map(|v| first_number(Some(v))).unwrap_or(ty);
+				push_text_run(ops, &xml.text_of(e), &local, sx, sy, &st);
+			},
+			Node::Text(span) => {
+				push_text_run(ops, &xml.text(span), &local, tx, ty, &base);
+			},
+			_ => {},
+		}
+	}
+	Ok(())
+}
+
+/// Queues one text run, dropping a run with no size to shape at or no visible characters. A tab or a
+/// newline `xml:space="preserve"` leaves in the content -- a wrapped label keeps a line break inside its
+/// run -- becomes a space, since the run sets on one line and the shaper would otherwise draw the control
+/// character as a missing-glyph box.
+fn push_text_run(
+	ops:	&mut Vec<SvgOp>,
+	text:	&str,
+	local:	&Transform,
+	x:		f32,
+	y:		f32,
+	st:		&TextState,
+) {
+	let cleaned: String = text
+		.chars()
+		.map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
+		.collect();
+	let cleaned = cleaned.trim();
+	if st.size <= 0.0 || cleaned.is_empty() {
+		return;
+	}
+	ops.push(SvgOp::Text {
+		text:	cleaned.to_string(),
+		local:	*local,
+		x,
+		y,
+		size:	st.size,
+		anchor:	st.anchor,
+		italic:	st.italic,
+		bold:	st.bold,
+		colour:	st.colour,
+	});
+}
+
+/// Decodes an embedded `<image>` -- a `data:...;base64,` PNG or JPEG -- and places its rectangle in the
+/// picture frame. A file reference, an unreadable payload or an unknown raster draws nothing rather than
+/// failing the whole read. The placement is mapped through the element's frame by its corners, so a
+/// translate or a scale is exact; a rotation or a shear is approximated by the axis-aligned bounds.
+fn emit_image(elem: &Elem, ctx: &Transform, ops: &mut Vec<SvgOp>) -> Outcome<()> {
+	let href = match elem.attr("xlink:href").or_else(|| elem.attr("href")) {
+		Some(h)	=> h,
+		None	=> return Ok(()),
+	};
+	let payload = match href.find("base64,") {
+		Some(i)	=> &href[i + "base64,".len()..],
+		None	=> return Ok(()),	// a file reference carries no bytes to decode here
+	};
+	// Inkscape wraps the payload across lines; the decoder refuses whitespace, so strip it first.
+	let clean: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+	let bytes = match base64::decode(&clean) {
+		Ok(b)	=> b,
+		Err(_)	=> return Ok(()),
+	};
+	let iw;
+	let ih;
+	let rgba;
+	if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+		let pm = res!(crate::pixmap::Pixmap::from_png(&bytes));
+		iw = pm.width();
+		ih = pm.height();
+		rgba = pm.into_data();
+	} else if bytes.starts_with(&[0xFF, 0xD8]) {
+		let pm = res!(crate::pixmap::Pixmap::from_jpeg(&bytes));
+		iw = pm.width();
+		ih = pm.height();
+		rgba = pm.into_data();
+	} else {
+		return Ok(());	// neither PNG nor JPEG by its magic bytes
+	}
+
+	let x = first_number(elem.attr("x"));
+	let y = first_number(elem.attr("y"));
+	let w = first_number(elem.attr("width"));
+	let h = first_number(elem.attr("height"));
+	if w <= 0.0 || h <= 0.0 {
+		return Ok(());
+	}
+	let local	= child_transform(elem, ctx);
+	let p0		= local.apply(Pt::new(x, y));
+	let p1		= local.apply(Pt::new(x + w, y + h));
+	ops.push(SvgOp::Image {
+		rgba,
+		iw,
+		ih,
+		x:	p0.x.min(p1.x),
+		y:	p0.y.min(p1.y),
+		w:	(p1.x - p0.x).abs(),
+		h:	(p1.y - p0.y).abs(),
+	});
+	Ok(())
 }
 
 /// Emits a shape's fill and stroke ops under a resolved presentation state. A path with a fill paints it
@@ -719,6 +1003,21 @@ fn named_colour(name: &str) -> Option<Rgba> {
 fn length_pt(s: &str) -> f32 {
 	let t = s.trim().trim_end_matches("pt");
 	number(t)
+}
+
+/// A length as its bare number, dropping any trailing unit letters or a percent sign -- a `font-size`
+/// arrives as `3.5278px`, whose unit `length_pt` would not shed. The value keeps the element's own units.
+fn length_num(s: &str) -> f32 {
+	numbers(s).first().copied().unwrap_or(0.0)
+}
+
+/// The first number of an attribute -- an `x`/`y` may carry a whitespace-separated list -- or zero for
+/// an absent or unparseable one.
+fn first_number(v: Option<&str>) -> f32 {
+	match v {
+		Some(s)	=> numbers(s).first().copied().unwrap_or(0.0),
+		None	=> 0.0,
+	}
 }
 
 /// One number, or zero when the text does not parse.

@@ -79,6 +79,7 @@ use oxedyne_fe2o3_graphics::{
 		Pt,
 	},
 	svg_doc::{
+		Anchor,
 		SvgOp,
 		SvgPicture,
 	},
@@ -1354,7 +1355,7 @@ fn image_figure(
 	// raster fills a rectangle; an SVG is drawn as its own scaled paths.
 	let graphic = match crate::image::load_figure(path) {
 		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
-		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(measure, pic, width, height, scale)),
+		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale)),
 		Err(_)									=> res!(placeholder(measure)),
 	};
 	let leaf	= Leaf::graphic(graphic);
@@ -1425,8 +1426,11 @@ fn image_graphic(
 /// The picture comes out of the reader in its viewBox units, which for a typesetter's SVG are points, so
 /// the intrinsic size stands in for a raster's pixel dimensions. One uniform factor scales every path;
 /// a dashed or a capped stroke is baked to a filled outline first, since a plain [`DrawOp::Stroke`]
-/// carries only a width, and the emitter would otherwise draw it solid.
+/// carries only a width, and the emitter would otherwise draw it solid. An illustrator's live `<text>`
+/// arrives unshaped, so it is shaped here with the book's font set and baked to glyph outlines, and an
+/// embedded raster is placed as a scaled [`DrawOp::Image`].
 fn svg_graphic(
+	fonts:		Arc<FontSet>,
 	measure:	Sp,
 	pic:		SvgPicture,
 	width:		Option<Length>,
@@ -1482,9 +1486,76 @@ fn svg_graphic(
 					});
 				}
 			},
+			SvgOp::Text { text, local, x, y, size, anchor, italic, bold, colour } => {
+				res!(bake_svg_text(
+					&mut ops, fonts.clone(), &text, &local, &t, x, y, size, anchor, italic, bold, colour));
+			},
+			SvgOp::Image { rgba, iw, ih, x, y, w: iwd, h: ihd } => {
+				// The raster's placement rectangle is in the picture frame; the same factor scales it.
+				let img = RasterImage { width: iw, height: ih, rgba };
+				ops.push(DrawOp::Image {
+					image:	Arc::new(img),
+					x:		x * s,
+					y:		y * s,
+					w:		iwd * s,
+					h:		ihd * s,
+				});
+			},
 		}
 	}
 	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w), Sp::from_pt(h), Sp::ZERO)))
+}
+
+/// Shapes one live SVG text run with the book's font set and bakes it to filled glyph outlines. The run
+/// is shaped at its own font-size in the picture's units; `local` maps that frame to the picture frame
+/// and `t` the picture frame to the drawn frame. The anchor slides the pen from the run's start once the
+/// advance is known, and each glyph's y-up outline is flipped onto the SVG's y-down baseline before the
+/// two frame transforms carry it home -- the same bake the diagram and plot labels use.
+#[allow(clippy::too_many_arguments)]
+fn bake_svg_text(
+	ops:	&mut Vec<DrawOp>,
+	fonts:	Arc<FontSet>,
+	text:	&str,
+	local:	&Transform,
+	t:		&Transform,
+	x:		f32,
+	y:		f32,
+	size:	f32,
+	anchor:	Anchor,
+	italic:	bool,
+	bold:	bool,
+	colour:	Rgba,
+)
+	-> Outcome<()>
+{
+	if size <= 0.0 {
+		return Ok(());
+	}
+	let role = match (bold, italic) {
+		(true, true)	=> Role::BoldItalic,
+		(true, false)	=> Role::Bold,
+		(false, true)	=> Role::Italic,
+		(false, false)	=> Role::Body,
+	};
+	let shaped	= res!(ShapedText::new(fonts, role, Dir::Ltr, Sp::from_pt(size as f64), text));
+	let advance	= shaped.dims().width.to_pt() as f32;
+	let pen_x	= match anchor {
+		Anchor::Start	=> x,
+		Anchor::Middle	=> x - advance / 2.0,
+		Anchor::End		=> x - advance,
+	};
+	for glyph in &shaped.run().glyphs {
+		let outline = res!(shaped.outline(glyph));
+		if outline.is_empty() {
+			continue;	// a space carries an advance but no ink
+		}
+		let place = Transform::scale(1.0, -1.0)
+			.then(&Transform::translate(pen_x + glyph.x, y - glyph.y))
+			.then(local)
+			.then(t);
+		ops.push(DrawOp::Fill { path: res!(outline.transform(&place)), colour });
+	}
+	Ok(())
 }
 
 /// Records a figure's anchors: an author label (when the source labelled it) so a cross-reference
