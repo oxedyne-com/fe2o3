@@ -215,20 +215,19 @@ fn main() -> Outcome<()> {
 	// For an illustration-dense book the per-page ink is heavy enough that even a pair of pages can breach
 	// that budget, so parallelism there is not free.
 	//
-	// The default is therefore page-at-a-time -- width one -- honouring the streaming memory budget
-	// exactly; the speed-up at the default comes from the shared glyph-outline cache alone. A caller with
-	// memory to spare opens the window with AUS_EMIT_WINDOW: emit then renders that many pages across the
-	// cores and the wall time falls towards real time (a text book reaches four to five times at a window
-	// of eight, for roughly a tenth more peak memory). When the window is open, a second bound guards a
-	// picture book: AUS_EMIT_BUDGET_MB caps the estimated page ink in flight (see [`page_hold_estimate`]),
-	// so a run of heavy figure pages closes its chunk early and never all coincide. A chunk always holds
-	// at least one page, so a page heavier than the budget still renders -- alone.
+	// The default therefore opens the window to eight pages (capped at the core count), which brings a
+	// text book to roughly Typst's own wall time while peak memory stays a few hundred megabytes -- far
+	// under Typst's gigabytes -- and the shared glyph-outline cache speeds every path besides. The ink
+	// budget below keeps the window honest: AUS_EMIT_BUDGET_MB caps the estimated page ink in flight (see
+	// [`page_hold_estimate`]), so a run of heavy figure pages closes its chunk early and never all
+	// coincide; a chunk always holds at least one page, so a page heavier than the budget still renders --
+	// alone. A caller wanting the strict page-at-a-time floor sets AUS_EMIT_WINDOW=1.
 	let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
 	let width = std::env::var("AUS_EMIT_WINDOW")
 		.ok()
 		.and_then(|s| s.parse::<usize>().ok())
 		.filter(|n| *n >= 1)
-		.unwrap_or(1)
+		.unwrap_or(8)
 		.min(cores);
 	let budget = std::env::var("AUS_EMIT_BUDGET_MB")
 		.ok()
