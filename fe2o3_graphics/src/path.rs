@@ -424,6 +424,212 @@ impl Path {
 		flush(&mut cur, false, &mut out);
 		out
 	}
+
+	/// Reorders this path's contours so that filling it non-zero paints what filling it even-odd would.
+	///
+	/// The engine's fill operators are non-zero throughout, so a path an SVG marks
+	/// `fill-rule="evenodd"` must have its geometry adjusted rather than its rule carried downstream.
+	/// For properly nested contours -- a ring inside a ring inside a ring, none crossing another --
+	/// even-odd paints a point iff it lies inside an odd number of contours, and non-zero does the same
+	/// once each contour's winding alternates with its nesting depth: the outermost wound one way, its
+	/// holes the other, an island inside a hole back the first way. This gives every contour the winding
+	/// its depth wants, reversing the ones that disagree. A self-crossing contour -- which a glyph or an
+	/// icon outline does not carry -- is left as it is, since its own two rules already differ.
+	pub fn even_odd_as_non_zero(&self) -> Outcome<Self> {
+		let contours = self.contours();
+		if contours.len() < 2 {
+			// One contour (or none) fills the same either way, so nothing needs reordering.
+			return Ok(self.clone());
+		}
+
+		// A flattened polygon per contour, for the area and the containment tests. The order matches
+		// `contours`, so a polygon and its segment list share an index.
+		let polys: Vec<Vec<Pt>> = contours
+			.iter()
+			.map(|segs| flatten_segs(segs))
+			.collect();
+
+		let mut pb = PathBuilder::new();
+		for (i, segs) in contours.iter().enumerate() {
+			// The nesting depth is how many of the other contours contain this one. A point taken at a
+			// boundary vertex, nudged a hair towards the contour's own centroid, reflects where the
+			// contour actually lies -- unlike the bare centroid, which for a ring can fall in its hole and
+			// so inside a smaller sibling. For non-crossing contours, one such point decides containment.
+			let mut depth = 0usize;
+			if let Some(pt) = probe_point(&polys[i]) {
+				for (j, other) in polys.iter().enumerate() {
+					if j != i && point_in_polygon(pt, other) {
+						depth += 1;
+					}
+				}
+			}
+			// Even depth wants a positive winding, odd depth a negative one; a contour whose signed area
+			// already has that sign is emitted as read, one that disagrees is emitted reversed.
+			let want_positive	= depth % 2 == 0;
+			let is_positive		= signed_area(&polys[i]) >= 0.0;
+			if want_positive == is_positive {
+				replay(&mut pb, segs);
+			} else {
+				replay(&mut pb, &reverse_contour(segs));
+			}
+		}
+		pb.finish()
+	}
+
+	/// Splits the path into its contours, each a segment list beginning at a [`Seg::MoveTo`] and carrying
+	/// any trailing [`Seg::Close`]. A stray segment before the first move starts a contour of its own
+	/// rather than being lost.
+	fn contours(&self) -> Vec<Vec<Seg>> {
+		let mut out: Vec<Vec<Seg>> = Vec::new();
+		let mut cur: Vec<Seg> = Vec::new();
+		for seg in &self.segs {
+			match *seg {
+				Seg::MoveTo(_) => {
+					if !cur.is_empty() {
+						out.push(std::mem::take(&mut cur));
+					}
+					cur.push(*seg);
+				},
+				Seg::Close => {
+					cur.push(*seg);
+					out.push(std::mem::take(&mut cur));
+				},
+				_ => cur.push(*seg),
+			}
+		}
+		if !cur.is_empty() {
+			out.push(cur);
+		}
+		out
+	}
+}
+
+/// Replays a contour's segments into a builder, so several contours become one path again.
+fn replay(pb: &mut PathBuilder, segs: &[Seg]) {
+	for seg in segs {
+		match *seg {
+			Seg::MoveTo(p)			=> pb.move_to(p),
+			Seg::LineTo(p)			=> pb.line_to(p),
+			Seg::QuadTo(c, p)		=> pb.quad_to(c, p),
+			Seg::CubicTo(c0, c1, p)	=> pb.cubic_to(c0, c1, p),
+			Seg::Close				=> pb.close(),
+		}
+	}
+}
+
+/// Reverses one contour, so a clockwise ring becomes anticlockwise and the reverse.
+///
+/// The vertices are walked backwards from the last endpoint to the first, and each segment's controls
+/// come with it -- a cubic's two controls swap, a quadratic's one stays -- so the traced curve is
+/// identical and only its direction is turned. The contour keeps its closedness: a closed ring reverses
+/// to a closed ring.
+fn reverse_contour(segs: &[Seg]) -> Vec<Seg> {
+	// The endpoint of each segment, the first being the move's own point, plus whether the contour closed.
+	let mut pts:	Vec<Pt> = Vec::new();
+	let mut kinds:	Vec<Seg> = Vec::new();	// one per edge, its controls only; endpoints read from `pts`
+	let mut closed = false;
+	for seg in segs {
+		match *seg {
+			Seg::MoveTo(p) => pts.push(p),
+			Seg::LineTo(p) => { kinds.push(Seg::LineTo(p)); pts.push(p); },
+			Seg::QuadTo(c, p) => { kinds.push(Seg::QuadTo(c, p)); pts.push(p); },
+			Seg::CubicTo(c0, c1, p) => { kinds.push(Seg::CubicTo(c0, c1, p)); pts.push(p); },
+			Seg::Close => closed = true,
+		}
+	}
+	if pts.is_empty() {
+		return segs.to_vec();
+	}
+	let mut out: Vec<Seg> = Vec::new();
+	out.push(Seg::MoveTo(*pts.last().unwrap_or(&Pt::default())));
+	// Edge k joins pts[k] to pts[k+1]; reversed, it joins pts[k+1] back to pts[k].
+	for k in (0..kinds.len()).rev() {
+		let to = pts[k];
+		match kinds[k] {
+			Seg::LineTo(_)			=> out.push(Seg::LineTo(to)),
+			Seg::QuadTo(c, _)		=> out.push(Seg::QuadTo(c, to)),
+			Seg::CubicTo(c0, c1, _)	=> out.push(Seg::CubicTo(c1, c0, to)),
+			_						=> out.push(Seg::LineTo(to)),
+		}
+	}
+	if closed {
+		out.push(Seg::Close);
+	}
+	out
+}
+
+/// Flattens one contour's segments to a polygon, at a tolerance fine enough for the area and containment
+/// tests, in the contour's own frame.
+fn flatten_segs(segs: &[Seg]) -> Vec<Pt> {
+	let mut pb = PathBuilder::new();
+	replay(&mut pb, segs);
+	match pb.finish() {
+		Ok(p) => p.flatten(&Transform::IDENTITY, TOLERANCE)
+			.into_iter()
+			.next()
+			.unwrap_or_default(),
+		Err(_) => Vec::new(),
+	}
+}
+
+/// The signed area of a closed polygon by the shoelace formula; positive one way round, negative the
+/// other. Only the sign is read, to tell a contour's winding.
+fn signed_area(poly: &[Pt]) -> f32 {
+	let n = poly.len();
+	if n < 3 {
+		return 0.0;
+	}
+	let mut a = 0.0;
+	for i in 0..n {
+		let p = poly[i];
+		let q = poly[(i + 1) % n];
+		a += p.x * q.y - q.x * p.y;
+	}
+	a * 0.5
+}
+
+/// A point that lies where the contour lies, for the containment test: the first vertex pulled a small
+/// way towards the centroid, so it is just inside the boundary rather than out at the middle. `None` for
+/// a degenerate polygon.
+fn probe_point(poly: &[Pt]) -> Option<Pt> {
+	let n = poly.len();
+	if n < 3 {
+		return None;
+	}
+	let mut cx = 0.0;
+	let mut cy = 0.0;
+	for p in poly {
+		cx += p.x;
+		cy += p.y;
+	}
+	let c = Pt::new(cx / n as f32, cy / n as f32);
+	// A hair towards the centroid keeps the point close to the boundary vertex, which is what tells this
+	// contour's extent apart from a smaller sibling that shares its middle.
+	let v = poly[0];
+	Some(Pt::new(v.x + (c.x - v.x) * 0.02, v.y + (c.y - v.y) * 0.02))
+}
+
+/// Is a point inside a polygon, by the even-odd ray-crossing count?
+fn point_in_polygon(pt: Pt, poly: &[Pt]) -> bool {
+	let n = poly.len();
+	if n < 3 {
+		return false;
+	}
+	let mut inside = false;
+	let mut j = n - 1;
+	for i in 0..n {
+		let a = poly[i];
+		let b = poly[j];
+		if (a.y > pt.y) != (b.y > pt.y) {
+			let t = (pt.y - a.y) / (b.y - a.y);
+			let x = a.x + t * (b.x - a.x);
+			if pt.x < x {
+				inside = !inside;
+			}
+		}
+		j = i;
+	}
+	inside
 }
 
 /// Flattens a quadratic Bezier, appending the points after the first.
@@ -799,6 +1005,41 @@ mod tests {
 		};
 		// The curve only reaches y = 50, but the control point at y = 100 is counted.
 		assert_eq!(b.y1, 100.0);
+		Ok(())
+	}
+
+	#[test]
+	fn test_even_odd_hole_reverses_to_a_non_zero_hole_30() -> Outcome<()> {
+		// An outer ring and an inner ring wound the same way. Even-odd hollows the inner one; so must the
+		// converted path fill non-zero, which means the two rings end wound against each other.
+		let mut pb = PathBuilder::new();
+		// Outer, anticlockwise in a y-down frame.
+		pb.move_to(Pt::new(0.0, 0.0));
+		pb.line_to(Pt::new(10.0, 0.0));
+		pb.line_to(Pt::new(10.0, 10.0));
+		pb.line_to(Pt::new(0.0, 10.0));
+		pb.close();
+		// Inner, the same sense as the outer.
+		pb.move_to(Pt::new(3.0, 3.0));
+		pb.line_to(Pt::new(7.0, 3.0));
+		pb.line_to(Pt::new(7.0, 7.0));
+		pb.line_to(Pt::new(3.0, 7.0));
+		pb.close();
+		let p = res!(pb.finish());
+
+		// Before: both rings wind the same way, so their signed areas share a sign.
+		let before: Vec<f32> = p.contours().iter().map(|c| signed_area(&flatten_segs(c))).collect();
+		assert_eq!(before.len(), 2);
+		assert!(before[0].signum() == before[1].signum(),
+			"the source rings wind the same way, areas {before:?}");
+
+		let conv = res!(p.even_odd_as_non_zero());
+		let after: Vec<f32> = conv.contours().iter().map(|c| signed_area(&flatten_segs(c))).collect();
+		assert_eq!(after.len(), 2);
+		// After: the inner ring has been reversed, so the two now wind against each other and non-zero
+		// leaves the middle empty exactly as even-odd would.
+		assert!(after[0].signum() != after[1].signum(),
+			"the converted rings must wind against each other, areas {after:?}");
 		Ok(())
 	}
 }
