@@ -181,6 +181,15 @@ pub enum Block {
 		supplement:	String,
 		label:		Option<String>,
 	},
+	// A `#figure(...)` whose body is drawn by code -- a CeTZ/Fletcher diagram, a bar chart or a line plot.
+	// The graphic is built at render time from the document's font set and placed like an image figure,
+	// with the numbered caption beneath.
+	CodeFigure {
+		figure:		crate::lang::codefig::CodeFigure,
+		caption:	Option<Vec<Segment>>,
+		supplement:	String,
+		label:		Option<String>,
+	},
 	// A back-matter section title (the Bibliography) on its own page, set left in the display face and
 	// unnumbered. It records a heading anchor so the contents lists it, and a back-matter marker so the
 	// running head is dropped and the folio centres from here on.
@@ -280,6 +289,19 @@ impl Block {
 		-> Self
 	{
 		Self::ImageFigure { path, width, height, scale, caption, supplement, label }
+	}
+
+	/// A figure drawn by code (a diagram, bar chart or line plot): its builder, numbered caption, and the
+	/// label a cross-reference resolves to. The graphic is built at render time from the font set.
+	pub fn code_figure(
+		figure:		crate::lang::codefig::CodeFigure,
+		caption:	Option<Vec<Segment>>,
+		supplement:	String,
+		label:		Option<String>,
+	)
+		-> Self
+	{
+		Self::CodeFigure { figure, caption, supplement, label }
 	}
 
 	/// A back-matter section heading (the Bibliography), on its own page, unnumbered.
@@ -686,6 +708,18 @@ pub fn author(
 				i += 1;
 				first = false;
 			},
+			Block::CodeFigure { figure, caption, supplement, label } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				}
+				let number = next_number(&mut counters, supplement);
+				res!(code_figure(
+					&mut nodes, fonts.clone(), style, measure, figure,
+					caption.as_deref(), supplement, number, label.as_deref()));
+				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				i += 1;
+				first = false;
+			},
 			Block::BackMatterHeading { title } => {
 				if !first {
 					nodes.push(Node::Penalty(Penalty::eject()));
@@ -817,7 +851,8 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 				}
 			},
 			Block::TableFigure { supplement, label, .. }
-			| Block::ImageFigure { supplement, label, .. } => {
+			| Block::ImageFigure { supplement, label, .. }
+			| Block::CodeFigure { supplement, label, .. } => {
 				let n = next_number(&mut counters, supplement);
 				if let Some(l) = label {
 					out.insert(l.clone(), fmt!("{} {}", supplement, n));
@@ -1371,6 +1406,76 @@ fn image_figure(
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
 	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
 	Ok(())
+}
+
+/// Sets a figure drawn by code: the figure's anchors, the built graphic centred in the measure (scaled
+/// down uniformly if it is wider than the measure), then a numbered caption beneath. Building can fail --
+/// a malformed diagram -- in which case the placeholder holds the space so pagination is unchanged.
+#[allow(clippy::too_many_arguments)]
+fn code_figure(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	measure:	Sp,
+	figure:		&crate::lang::codefig::CodeFigure,
+	caption:	Option<&[Segment]>,
+	supplement:	&str,
+	number:		u32,
+	label:		Option<&str>,
+)
+	-> Outcome<()>
+{
+	figure_anchors(nodes, supplement, number, label);
+
+	let graphic = match figure.build(fonts.clone()) {
+		Ok(g)	=> res!(fit_graphic(g, measure)),
+		Err(_)	=> res!(placeholder(measure)),
+	};
+	let leaf	= Leaf::graphic(graphic);
+	let gw		= leaf.dims.width;
+	let gh		= leaf.dims.height + leaf.dims.depth;
+	let pad		= if measure > gw { Sp((measure.raw() - gw.raw()) / 2) } else { Sp::ZERO };
+	let mut row:	Vec<Node> = Vec::new();
+	if pad.raw() > 0 {
+		row.push(Node::Glue(Glue::fixed(pad)));
+	}
+	row.push(Node::Leaf(leaf));
+	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, gh, Sp::ZERO))));
+	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
+	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	Ok(())
+}
+
+/// Scales a built graphic down uniformly if it is wider than the measure, so a wide diagram fits the text
+/// block; a graphic already within the measure is returned unchanged. Every path is carried through the
+/// same factor, and the dimensions follow.
+fn fit_graphic(g: Graphic, measure: Sp) -> Outcome<Graphic> {
+	let w = g.dims.width;
+	if w <= measure || w.raw() <= 0 {
+		return Ok(g);
+	}
+	let s = measure.to_pt() as f32 / w.to_pt() as f32;
+	let t = Transform::scale(s, s);
+	let mut ops: Vec<DrawOp> = Vec::with_capacity(g.ops.len());
+	for op in g.ops {
+		ops.push(match op {
+			DrawOp::Fill { path, colour } => DrawOp::Fill { path: res!(path.transform(&t)), colour },
+			DrawOp::Stroke { path, colour, width } => DrawOp::Stroke {
+				path:	res!(path.transform(&t)),
+				colour,
+				width:	width * s,
+			},
+			DrawOp::Image { image, x, y, w, h } => DrawOp::Image {
+				image, x: x * s, y: y * s, w: w * s, h: h * s,
+			},
+		});
+	}
+	let dims = Dims::new(
+		Sp::from_pt(g.dims.width.to_pt() * s as f64),
+		Sp::from_pt(g.dims.height.to_pt() * s as f64),
+		Sp::from_pt(g.dims.depth.to_pt() * s as f64),
+	);
+	Ok(Graphic::new(ops, dims))
 }
 
 /// Builds a graphic that draws a loaded raster to fill a box sized from the declared hints and the

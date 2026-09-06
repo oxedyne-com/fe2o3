@@ -49,6 +49,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 					FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
 						path.clone(), *width, *height, *scale,
 						caption, supplement.clone(), label.clone()),
+					FigureBody::Code(figure)	=> Block::code_figure(
+						figure.clone(), caption, supplement.clone(), label.clone()),
 				});
 			},
 		}

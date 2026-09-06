@@ -11,6 +11,7 @@
 //! computation layer, and inline `$maths$`, code and `#figure`/`#image`, are later increments.
 
 pub mod ast;
+pub mod codefig;
 pub mod lower;
 pub mod mathparse;
 pub mod parse;

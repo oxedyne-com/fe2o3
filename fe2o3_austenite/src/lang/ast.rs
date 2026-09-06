@@ -7,6 +7,7 @@
 
 use crate::ir::Length;
 use crate::ir::Span;
+use crate::lang::codefig::CodeFigure;
 use crate::math::Atom;
 use crate::table::Align;
 
@@ -31,6 +32,9 @@ pub enum FigureBody {
 	// The image path and any sizing the call declared: `width`/`height` from `image(...)`, `scale` from
 	// `padded-image(...)`. A hint the call omits is `None`, and the figure fills the measure.
 	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64> },
+	// A figure the document draws by code -- a CeTZ/Fletcher diagram, a bar chart or a line plot -- read
+	// from the `#figure` body's source into a ready builder that draws real vector ink.
+	Code(CodeFigure),
 }
 
 /// A parsed Typst `#table(...)` call, before it is built into a [`table::Table`](crate::table::Table).
