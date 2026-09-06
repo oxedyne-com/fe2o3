@@ -227,7 +227,9 @@ fn fixture(tag: &str) -> Outcome<(PathBuf, PathBuf, Vec<usize>, Vec<bool>)> {
 	for (data, sync) in units {
 		sizes.push(data.len());
 		syncs.push(sync);
-		res!(track.push(Sample { data, dur: TICKS, sync }));
+		// No composition offset: the source is encoded with no B-pictures, so decode order and
+		// display order agree and each sample is shown at its decoding time.
+		res!(track.push(Sample { data, dur: TICKS, sync, off: 0 }));
 	}
 	let buf = res!(track.finish());
 	let path = tmp(&fmt!("mp4_oracle_{}.mp4", tag));
