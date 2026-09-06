@@ -187,10 +187,13 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 		if let Some(dir) = std::path::Path::new(source).parent() {
 			res!(book::install_term_dict(dir));
 		}
-		let (blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
+		let (mut blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
 		skip_line = terse_skip_line(&skips);
+		// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile
+		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
+		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, None)
+		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, bib)
 	};
 	mark("parse+lower+fonts", t_parse);
 

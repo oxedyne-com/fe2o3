@@ -282,8 +282,15 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 		Ok(s)	=> s,
 		Err(_)	=> return Ok(None),	// a named bibliography that will not read is a reported gap, not a failure
 	};
-	let mut bib = res!(Bibliography::parse(&src));
+	let bib = res!(Bibliography::parse(&src));
+	Ok(Some(append_bibliography(bib, blocks)))
+}
 
+/// Marks every key the body cited on `bib`, then appends the Bibliography back matter -- the section
+/// heading and one Reference block per sorted, cited reference -- to the block stream, returning the
+/// marked bibliography for the in-text citation formatter. Shared by the whole-book path and the lone
+/// chapter path, so a chapter compiled on its own resolves its citations exactly as the book does.
+fn append_bibliography(mut bib: Bibliography, blocks: &mut Vec<Block>) -> Bibliography {
 	// Mark every key the body cited, so the reference list holds exactly the cited works.
 	for keys in collect_cite_keys(blocks) {
 		for k in keys {
@@ -299,8 +306,28 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 			.collect();
 		blocks.push(Block::reference(runs));
 	}
+	bib
+}
 
-	Ok(Some(bib))
+/// Locates a `refs.bib` beside a lone chapter or in an ancestor directory, parses it, marks the keys the
+/// chapter cited, appends the reference list as back matter, and returns the marked bibliography so the
+/// block layer resolves each in-text `#cite` to Chicago author-year -- as a whole-book compile does.
+/// `None` when no `refs.bib` is found or it will not read, in which case the raw cite key stands as before.
+pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+	let start = match source.parent() {
+		Some(d)	=> d,
+		None	=> return Ok(None),
+	};
+	let bib_path = match find_up(start, "refs.bib") {
+		Some(p)	=> p,
+		None	=> return Ok(None),
+	};
+	let src = match std::fs::read_to_string(&bib_path) {
+		Ok(s)	=> s,
+		Err(_)	=> return Ok(None),	// a bibliography found but unreadable is a reported gap, not a failure
+	};
+	let bib = res!(Bibliography::parse(&src));
+	Ok(Some(append_bibliography(bib, blocks)))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1278,6 +1305,35 @@ mod tests {
 		assert_eq!(map.get("website").map(String::as_str), Some("elearnity.oxegen.io"));
 		assert_eq!(map.get("iniverse").map(String::as_str), Some("iniverse"));
 		assert_eq!(map.len(), 3, "unexpected entries: {:?}", map);
+	}
+
+	/// A lone chapter finds a `refs.bib` in an ancestor directory, marks the key it cited, and returns a
+	/// bibliography that resolves that key to an author-year citation rather than the raw key.
+	#[test]
+	fn test_lone_chapter_resolves_its_citation_05() -> Outcome<()> {
+		// A unique scratch tree: refs.bib at the top, the chapter one level down, so the walk-up finds it.
+		let base = std::env::temp_dir().join(fmt!("austenite-bibtest-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		let sub = base.join("chapters");
+		res!(std::fs::create_dir_all(&sub));
+		res!(std::fs::write(base.join("refs.bib"),
+			"@article{smith2020, author = {Smith, John}, title = {A Title}, year = {2020}, journal = {J}}\n"));
+		let chapter = sub.join("chap.typ");
+		res!(std::fs::write(&chapter, "cited here"));
+
+		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite(vec!["smith2020".to_string()])] }];
+		let bib = res!(load_lone_bibliography(&chapter, &mut blocks));
+
+		// Clean up before asserting, so a failed assertion still leaves no scratch behind.
+		let _ = std::fs::remove_dir_all(&base);
+
+		let bib = res!(bib.ok_or_else(|| err!("no bibliography was found beside the chapter"; Test, Missing)));
+		let cite = res!(bib.format_citation(&["smith2020"]));
+		assert!(cite.contains("Smith") && cite.contains("2020"),
+			"citation did not resolve to author-year: {:?}", cite);
+		assert!(!cite.contains("smith2020"), "the raw cite key leaked: {:?}", cite);
+		Ok(())
 	}
 }
 
