@@ -176,6 +176,15 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			} else {
 				capture = Some(cap);
 			}
+		} else if trimmed.starts_with("#line(") && call_inner(trimmed, "line").is_some() {
+			// A standalone `#line(length:.., stroke:..)` horizontal divider (the appendix brackets a note
+			// with one above and below). It closes any open block and sets a stroked rule; a multi-line
+			// `#line(` that does not close on this line falls through to the skip path below.
+			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			if let Some(rule) = parse_line_rule(trimmed) {
+				items.push(rule);
+			}
 		} else if let Some(decision) = code_skip(trimmed) {
 			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
 			// to a template function Austenite does not yet run: it closes any open block and is skipped.
@@ -1426,6 +1435,51 @@ fn parse_length(val: &str) -> Option<Length> {
 		}
 	}
 	v.parse::<f64>().ok().map(Length::Abs)
+}
+
+/// Parses a standalone `#line(length:.., stroke:..)` into an [`Item::Rule`]. The length is a fraction of
+/// the measure (`100%`) or an absolute length; the stroke gives the rule's thickness (a `pt` length) and
+/// its grey (a `luma(N)` component). A missing length fills the measure; a missing thickness is a hairline
+/// half-point; a missing colour is black, Typst's default stroke.
+fn parse_line_rule(trimmed: &str) -> Option<Item> {
+	let inner		= call_inner(trimmed, "line")?;
+	let mut width	= Length::Rel(1.0);
+	let mut thickness	= 0.5;
+	let mut grey	= 0u8;
+	for arg in split_top_args(&inner) {
+		let a = arg.trim();
+		if let Some((key, val)) = named_arg(a) {
+			match key.as_str() {
+				"length"	=> if let Some(l) = parse_length(&val) { width = l; },
+				"stroke"	=> {
+					let (t, g) = parse_stroke(&val);
+					if let Some(t) = t { thickness = t; }
+					if let Some(g) = g { grey = g; }
+				},
+				_			=> {},	// start, end, angle and the rest do not affect a horizontal divider
+			}
+		}
+	}
+	Some(Item::Rule { width, thickness, grey, span: Span::new(0, 0) })
+}
+
+/// The thickness (a `pt` length) and grey (a `luma(N)` value, 0-255) of a `stroke:` value such as
+/// `0.5pt + luma(180)`; either component may be absent. A `luma` is read as a grey level; a bare colour
+/// name or an `rgb(...)` is not modelled and leaves the grey unset.
+fn parse_stroke(val: &str) -> (Option<f64>, Option<u8>) {
+	let mut thickness:	Option<f64>	= None;
+	let mut grey:		Option<u8>	= None;
+	for part in val.split('+') {
+		let p = part.trim();
+		if let Some(inner) = call_inner(p, "luma") {
+			if let Ok(n) = inner.trim().trim_end_matches('%').trim().parse::<f64>() {
+				grey = Some(n.clamp(0.0, 255.0) as u8);
+			}
+		} else if let Some(Length::Abs(pt)) = parse_length(p) {
+			thickness = Some(pt);
+		}
+	}
+	(thickness, grey)
 }
 
 /// Reads a percentage argument (`100%`) into a fraction (`1.0`), or `None` when it is not a percentage.

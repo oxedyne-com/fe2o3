@@ -20,6 +20,7 @@ pub enum Item {
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
 	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, span: Span },	// caption: the caption's inline markup
+	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is

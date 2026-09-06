@@ -40,6 +40,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 				items.iter().map(|item| item.iter().map(lower_inline).collect()).collect())),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
+			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
 			Item::Figure { body, caption, supplement, label, .. }	=> {
 				let caption = caption.as_ref().map(|runs| runs.iter().map(lower_inline).collect());
 				out.push(match body {

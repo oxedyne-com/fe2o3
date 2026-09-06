@@ -73,6 +73,8 @@ use oxedyne_fe2o3_font::{
 use oxedyne_fe2o3_graphics::{
 	colour::Rgba,
 	path::{
+		Bounds,
+		Path,
 		PathBuilder,
 		Pt,
 	},
@@ -180,6 +182,9 @@ pub enum Block {
 	// One bibliography reference: its styled runs, each carrying whether it sets in italic. Set small,
 	// as a paragraph the reader reads as one entry.
 	Reference { runs: Vec<(String, bool)> },
+	// A standalone `#line(...)` horizontal divider: a stroked rule of the given width (a fraction of the
+	// measure or an absolute length), thickness in points, and grey level, with a paragraph skip either side.
+	Rule { width: Length, thickness: f64, grey: u8 },
 }
 
 impl Block {
@@ -221,6 +226,10 @@ impl Block {
 
 	pub fn table(table: Table) -> Self {
 		Self::Table(table)
+	}
+
+	pub fn rule(width: Length, thickness: f64, grey: u8) -> Self {
+		Self::Rule { width, thickness, grey }
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
@@ -688,6 +697,16 @@ pub fn author(
 					nodes.push(Node::Glue(Glue::fixed(gap)));
 				}
 				res!(reference_block(&mut nodes, fonts.clone(), style, measure, runs));
+				i += 1;
+				first = false;
+				prev_para = false;
+			},
+			Block::Rule { width, thickness, grey } => {
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				rule_divider(&mut nodes, measure, *width, *thickness, *grey);
+				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -2662,6 +2681,29 @@ fn chapter_opener(
 /// where leading glue would be discarded.
 fn vspacer(height: Sp) -> Node {
 	Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, height, Sp::ZERO)))
+}
+
+/// Appends a horizontal rule -- a standalone `#line(...)` divider -- as a filled grey bar of the given
+/// width (a fraction of the measure or an absolute length), thickness and grey level, seated flush left.
+/// A degenerate rule (zero width or thickness) adds nothing rather than an empty box.
+fn rule_divider(nodes: &mut Vec<Node>, measure: Sp, width: Length, thickness: f64, grey: u8) {
+	let w = match width {
+		Length::Rel(f)	=> Sp::from_pt(measure.to_pt() * f),
+		Length::Abs(pt)	=> Sp::from_pt(pt),
+	};
+	let wf = w.to_pt() as f32;
+	let hf = thickness as f32;
+	if wf <= 0.0 || hf <= 0.0 {
+		return;
+	}
+	let h		= Sp::from_pt(thickness);
+	let colour	= Rgba::opaque(grey, grey, grey);
+	let rect = match Path::rect(Bounds::new(0.0, 0.0, wf, hf)) {
+		Ok(r)	=> r,
+		Err(_)	=> return,
+	};
+	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour }], Dims::new(w, h, Sp::ZERO));
+	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(measure, h, Sp::ZERO))));
 }
 
 /// Draws the page furniture -- a running head in the top margin and a folio -- onto every composed
