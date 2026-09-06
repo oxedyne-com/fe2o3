@@ -253,9 +253,12 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 		}
 
 		if trimmed.is_empty() {
-			// A blank line closes the paragraph or list it follows.
+			// A blank line closes the paragraph it follows, but not an open list: Typst continues an enum
+			// (or bullet list) across a blank line between items, restarting the numbering only when other
+			// content intervenes. The list is therefore held open here; the marker branch joins a following
+			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
+			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 		} else if let Some(kind) = capture_opener(trimmed) {
 			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
 			// array feeding a table. It closes any open block, then its whole text is gathered by the check
@@ -2281,6 +2284,28 @@ mod tests {
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
 			"unknown term-dict key did not fall back to its text: {:?}", runs);
 		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
+	}
+
+	/// A blank line between numbered items does not restart the enum: Typst continues the numbering across
+	/// the gap, so the items form one list. Real content between two lists still starts a fresh one.
+	#[test]
+	fn blank_line_between_enum_items_continues_one_list() {
+		let src = "+ first item\n\n+ second item\n\n+ third item\n";
+		let (items, _) = document_with_skips(src).expect("parse");
+		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
+		assert_eq!(lists.len(), 1, "blank lines split the enum: {:?}", items);
+		match lists[0] {
+			Item::List { ordered, items, .. } => {
+				assert!(*ordered, "the continued list lost its ordered kind");
+				assert_eq!(items.len(), 3, "the enum dropped items across the blanks: {:?}", items);
+			},
+			_ => unreachable!(),
+		}
+		// A paragraph between two lists still restarts, so genuinely separate lists are not merged.
+		let src2 = "+ a\n\n+ b\n\nA paragraph between.\n\n+ c\n";
+		let (items2, _) = document_with_skips(src2).expect("parse");
+		let lists2 = items2.iter().filter(|it| matches!(it, Item::List { .. })).count();
+		assert_eq!(lists2, 2, "prose between two lists did not restart them: {:?}", items2);
 	}
 
 	/// An unhandled inline `#func[...]` is consumed and recorded rather than left as raw markup, its
