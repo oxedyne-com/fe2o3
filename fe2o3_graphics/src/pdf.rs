@@ -122,6 +122,30 @@ impl PdfPage {
 	) {
 		self.draws.push(Draw::Image { rgb, alpha, iw, ih, x, y, w, h });
 	}
+
+	/// The page's content stream, serialised: the flip matrix and every shape's paint operators, the raw
+	/// bytes before any `/Filter` compression. This is the costly half of writing a page -- thousands of
+	/// glyph outlines turned into path operators -- and it is a pure function of the page, so a caller
+	/// may compute it off the writer's thread and hand it back to [`PdfStream::page_prepared`], which does
+	/// only the sequential framing and hashing the bytes then need.
+	pub fn content_bytes(&self) -> Vec<u8> {
+		content_stream(self).into_bytes()
+	}
+
+	/// Drops the draws no longer needed once [`content_bytes`](Self::content_bytes) has been taken: every
+	/// opaque vector fill and stroke, whose only remaining use would have been the content stream that is
+	/// now serialised. What is kept is exactly what [`PdfStream::page_prepared`] still reads -- the images
+	/// (written as XObjects) and any translucent vector draw (whose alpha the page's `/ExtGState` names).
+	/// An opaque draw contributes only the alpha 255 that resource set always carries, so dropping it
+	/// leaves the written bytes identical; it only frees the glyph outlines a rendered-ahead page would
+	/// otherwise hold. Call it after the content bytes are in hand, never before.
+	pub fn shed_serialised_draws(&mut self) {
+		self.draws.retain(|d| match d {
+			Draw::Image { .. }			=> true,
+			Draw::Fill { colour, .. }	=> colour.a != 255,
+			Draw::Stroke { colour, .. }	=> colour.a != 255,
+		});
+	}
 }
 
 /// Accumulates pages and writes them out as one PDF file.
@@ -229,6 +253,16 @@ impl<W: Write> PdfStream<W> {
 	/// be the next of the `n` promised at construction; an extra page is a mismatch the file could not
 	/// name, so it is refused rather than written past the page tree.
 	pub fn page(&mut self, page: &PdfPage) -> Outcome<()> {
+		let raw = content_stream(page).into_bytes();
+		self.page_prepared(page, &raw)
+	}
+
+	/// Writes the next page from a content stream already serialised -- by [`PdfPage::content_bytes`],
+	/// typically on another thread -- so this call does only the sequential work: assigning object
+	/// numbers, framing the page and its stream, writing any images, and folding every byte into the
+	/// running `/ID` in page order. The bytes are identical to [`page`](Self::page)'s; the only
+	/// difference is where the content stream was built.
+	pub fn page_prepared(&mut self, page: &PdfPage, raw: &[u8]) -> Outcome<()> {
 		if self.added >= self.n {
 			return Err(err!(
 				"A PdfStream opened for {} page(s) was handed a further page; the page tree cannot \
@@ -258,12 +292,12 @@ impl<W: Write> PdfStream<W> {
 			}
 		}
 
-		// The content stream, built now so its `/Length` is known before the object that wraps it.
-		let raw = content_stream(page).into_bytes();
+		// The content stream was serialised by the caller so its `/Length` is known before the object that
+		// wraps it; only the optional compression is left to do here.
 		let bytes = if self.compress {
-			res!(deflate(&raw))
+			res!(deflate(raw))
 		} else {
-			raw
+			raw.to_vec()
 		};
 
 		self.offsets[page_obj] = self.pos;
