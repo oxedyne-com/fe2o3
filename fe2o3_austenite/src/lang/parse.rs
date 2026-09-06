@@ -42,6 +42,32 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::RwLock;
+
+// The book's `term-dict`, set once by the loader before parsing so the term-dictionary glossary family
+// (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`) resolves a key to its display value while the key
+// identity is still known. A process-global rather than a threaded argument, mirroring the image base:
+// the inline reader sets one run at a time and carries no book context of its own. `None` until the
+// loader installs one, in which case every key falls back to its own text.
+static TERM_DICT: RwLock<Option<HashMap<String, String>>> = RwLock::new(None);
+
+/// Records the book's `term-dict`, read from a sibling `terms.typ`, so the term-dictionary glossary
+/// family resolves each key to its value at parse time. Installing a fresh map replaces any prior one.
+pub fn set_term_dict(dict: HashMap<String, String>) -> Outcome<()> {
+	let mut guard = lock_write!(TERM_DICT, "While recording the term dictionary");
+	*guard = Some(dict);
+	Ok(())
+}
+
+/// The display value a `term-dict` key resolves to, or `None` when no map is installed or it holds no
+/// such key. A poisoned lock reads as absent rather than failing the parse: a missing value falls back
+/// to the key text, which is exactly the safe degradation here.
+fn term_value(key: &str) -> Option<String> {
+	match TERM_DICT.read() {
+		Ok(guard)	=> guard.as_ref().and_then(|m| m.get(key).cloned()),
+		Err(_)		=> None,
+	}
+}
 
 /// A tally of the constructs the reader skipped rather than set, keyed by the source name each was
 /// written with (`#show`, `#let`, `#columns`, an unknown `#func`) and counted. A caller prints it so a
@@ -502,7 +528,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
 		// sets nothing.
 		if c == '#' {
-			if let Some((call, next)) = glossary_call(&chars, i) {
+			if let Some((call, next)) = glossary_call(&chars, i, skips) {
 				match call {
 					Call::Glossary { term, display } => {
 						if !plain.is_empty() {
@@ -1114,12 +1140,13 @@ enum Call {
 /// nothing. First use is keyed by the term as written, matching the template's own case-sensitive
 /// `glossary-seen` set.
 ///
-/// The term-dictionary family reads the same way but keys a `term-dict` entry rather than carrying its
-/// own display: `g`/`gi` set it bold-italic on first use, `gcap`/`gcapi` capitalised, `t`/`tcap` plain and
-/// `graw` plain (its mono face is not reproduced). The reader has no `term-dict`, so it sets the key text
-/// as written; a key that differs from its value (the template translates `org` to a company name) sets
-/// the key, which the caller records only in that it no longer leaks the raw call.
-fn glossary_call(chars: &[char], i: usize) -> Option<(Call, usize)> {
+/// The term-dictionary family keys a `term-dict` entry rather than carrying its own display, and the
+/// reader translates the key to that value at parse time (the loader installs the map from `terms.typ`
+/// before parsing): `g`/`gi` set the value bold-italic on first use, `gcap`/`gcapi` capitalised, `t`/`tcap`
+/// plain and `graw` plain (its mono face is not reproduced). A key with no `term-dict` entry falls back to
+/// the key text and is recorded in `skips`, so an unknown key is visible on the terse skip line rather
+/// than silently wrong -- the template panics on a miss, which the reader must not.
+fn glossary_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Call, usize)> {
 	if chars.get(i) != Some(&'#') {
 		return None;
 	}
@@ -1157,14 +1184,43 @@ fn glossary_call(chars: &[char], i: usize) -> Option<(Call, usize)> {
 
 	let arg = unwrap_arg(&a1);
 	let call = match name.as_str() {
-		"gs" | "gsi" | "glossind" | "g" | "gi"		=> Call::Glossary { term: arg.clone(), display: arg },
-		"gscap" | "gscapi" | "glossindcap" | "gcap" | "gcapi"	=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
-		"idx" | "idx-main" | "t" | "graw"			=> Call::Visible(arg),
-		"tcap"										=> Call::Visible(cap_first(&arg)),
-		"index" | "index-main"						=> Call::Invisible,
-		_										=> return None,
+		// The simple family keys its own display text (a `term-defs` entry), so no translation applies.
+		"gs" | "gsi"							=> Call::Glossary { term: arg.clone(), display: arg },
+		"gscap" | "gscapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
+		// `glossind`/`glossindcap` auto-detect: a key that is in `term-dict` sets its value, otherwise the
+		// key stands as its own display, matching the template's `if key in term-dict` branch.
+		"glossind"								=> {
+			let display = term_value(&arg).unwrap_or_else(|| arg.clone());
+			Call::Glossary { term: arg.clone(), display }
+		},
+		"glossindcap"							=> {
+			let display = term_value(&arg).unwrap_or_else(|| arg.clone());
+			Call::Glossary { term: arg.clone(), display: cap_first(&display) }
+		},
+		// The term-dictionary family translates the key to its value; first use is keyed by the key, as the
+		// template keys `glossary-seen` by the key name rather than the value.
+		"g" | "gi"								=> Call::Glossary { term: arg.clone(), display: resolve_term(&arg, &name, skips) },
+		"gcap" | "gcapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&resolve_term(&arg, &name, skips)) },
+		"t" | "graw"							=> Call::Visible(resolve_term(&arg, &name, skips)),
+		"tcap"									=> Call::Visible(cap_first(&resolve_term(&arg, &name, skips))),
+		"idx" | "idx-main"						=> Call::Visible(arg),
+		"index" | "index-main"					=> Call::Invisible,
+		_									=> return None,
 	};
 	Some((call, next1))
+}
+
+/// Resolves a term-dictionary key to its display value, or -- when no map is installed or it holds no
+/// such key -- falls back to the key text and records the miss in `skips` under the calling function's
+/// name, so an unknown key shows on the terse skip line rather than rendering silently as the raw key.
+fn resolve_term(key: &str, func: &str, skips: &mut SkipSummary) -> String {
+	match term_value(key) {
+		Some(value)	=> value,
+		None		=> {
+			skips.record(&fmt!("#{} unknown term-dict key {:?}", func, key));
+			key.to_string()
+		},
+	}
 }
 
 /// Reads a bracket or paren group whose opener sits at `i`, returning its inner content and the index
@@ -2180,15 +2236,51 @@ mod tests {
 	/// The term-dictionary aliases set their argument text with the styling of their `gs` siblings: `g`/`gi`
 	/// a first-use glossary term, `t`/`tcap` plain text, and none of them leak raw markup. A line opening
 	/// with one is prose, not a skipped standalone call.
+	/// Installs a fixed term dictionary so the term-dictionary family resolves deterministically. The map
+	/// is a process-global shared across the parallel tests, so every term-dependent test installs the
+	/// same one and their order cannot matter.
+	fn install_test_terms() {
+		let mut m = HashMap::new();
+		m.insert("org".to_string(),			"Elearnity Pty Ltd".to_string());
+		m.insert("org_short".to_string(),	"Elearnity".to_string());
+		m.insert("website".to_string(),		"elearnity.oxegen.io".to_string());
+		m.insert("iniverse".to_string(),	"iniverse".to_string());
+		set_term_dict(m).expect("install test term dict");
+	}
+
 	#[test]
 	fn term_dict_aliases_render_without_leaking() {
+		install_test_terms();
+		// `iniverse` translates to itself, so the display equals the key here whether or not a map is set.
 		let runs = parse_inlines("Call it the #g[iniverse], your inner universe.");
 		assert!(runs.iter().any(|r| matches!(r, Inline::Glossary { term, display } if term == "iniverse" && display == "iniverse")),
 			"glossary alias missing: {:?}", runs);
-		assert_eq!(flatten_markup("Visit #t[website] today"), "Visit website today");
+		// A key that differs from its value now sets the value, not the key.
+		assert_eq!(flatten_markup("Visit #t[website] today"), "Visit elearnity.oxegen.io today");
+		// A key absent from the dictionary falls back to its own text, capitalised for the `-cap` form.
 		assert_eq!(flatten_markup("#tcap[donate] to help"), "Donate to help");
 		assert!(is_inline_call("g") && is_inline_call("t") && is_inline_call("graw"));
 		assert!(code_skip("#t[website]").is_none());
+	}
+
+	/// The term-dictionary family sets a key's value: `t`/`graw` plain, `tcap` capitalised, `g` bold-italic
+	/// on first use keyed by the key; an unknown key falls back to the key text and is recorded, never a
+	/// panic (the template panics on a miss, the reader must not).
+	#[test]
+	fn term_dict_resolves_key_to_value() {
+		install_test_terms();
+		assert_eq!(flatten_markup("Visit #t[website]"), "Visit elearnity.oxegen.io");
+		assert_eq!(flatten_markup("#graw[org]"), "Elearnity Pty Ltd");
+		let runs = parse_inlines("The #g[org] view.");
+		assert!(runs.iter().any(|r| matches!(r, Inline::Glossary { term, display }
+				if term == "org" && display == "Elearnity Pty Ltd")),
+			"g did not translate the key to its value: {:?}", runs);
+		// An unknown key: the key text stands and the miss is recorded on the skip tally.
+		let mut skips = SkipSummary::default();
+		let runs = parse_inlines_in("A #t[nonesuch] term.", &mut skips);
+		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
+			"unknown term-dict key did not fall back to its text: {:?}", runs);
+		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
 	}
 
 	/// An unhandled inline `#func[...]` is consumed and recorded rather than left as raw markup, its
@@ -2211,6 +2303,7 @@ mod tests {
 	/// dropped construct is visible rather than silent. Handled inline calls do not appear in the tally.
 	#[test]
 	fn skip_summary_reports_skipped_constructs() {
+		install_test_terms();	// so `#g[iniverse]` resolves and adds no term-dict miss to the tally
 		let src = "#import \"x.typ\": *\n#set page(margin: 1cm)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
 		let (_, skips) = document_with_skips(src).expect("parse");
 		assert_eq!(skips.total(), 3);

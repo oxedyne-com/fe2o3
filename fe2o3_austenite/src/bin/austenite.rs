@@ -182,6 +182,11 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 		skip_line = terse_skip_line(&spec.skips);
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
 	} else {
+		// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
+		// `#t`/`#g` term calls resolve to their values just as in a whole-book compile.
+		if let Some(dir) = std::path::Path::new(source).parent() {
+			res!(book::install_term_dict(dir));
+		}
 		let (blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
 		skip_line = terse_skip_line(&skips);
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));

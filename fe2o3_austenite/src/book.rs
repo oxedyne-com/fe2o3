@@ -42,7 +42,11 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 };
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{
+	Path,
+	PathBuf,
+};
 use std::sync::Arc;
 
 const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
@@ -95,6 +99,10 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 		Ok(s)	=> s,
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
+
+	// Install the book's `term-dict` from a `terms.typ` beside or above the root, so the term-dictionary
+	// glossary family resolves each key to its value as the chapters are read below.
+	res!(install_term_dict(&root_dir));
 
 	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
 	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
@@ -293,6 +301,125 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 	}
 
 	Ok(Some(bib))
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TERM DICTIONARY                                                            │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Reads the book's `term-dict` from a `terms.typ` beside or above `start_dir` and installs it, so the
+/// term-dictionary glossary family (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`) resolves each key to
+/// its value while the chapters are read. An absent or `term-dict`-less `terms.typ` installs an empty
+/// map, under which every key falls back to its own text.
+pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
+	let src = match find_up(start_dir, "terms.typ") {
+		Some(p)	=> std::fs::read_to_string(&p).unwrap_or_default(),
+		None	=> String::new(),
+	};
+	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
+	Ok(())
+}
+
+/// Parses the `#let term-dict = ( "key": "value", ... )` block from a `terms.typ` source into a key→value
+/// map. `terms.typ` is a pure data file (no imports, state or side effects), so the literal is read
+/// directly rather than evaluated: the quoted strings inside the dictionary's balanced parentheses come in
+/// key, value order, and are paired off. An empty map when the source names no `term-dict`.
+fn parse_term_dict(src: &str) -> HashMap<String, String> {
+	let mut map = HashMap::new();
+	// Find the assignment `term-dict =`, not a mention in a comment: the name must be followed, after only
+	// whitespace, by `=`. The file opens with a `// term-dict: ...` comment whose own parentheses would
+	// otherwise be read as the literal, so the first bare occurrence is not enough.
+	let at = match assignment_offset(src, "term-dict") {
+		Some(a)	=> a,
+		None	=> return map,
+	};
+	let chars: Vec<char> = src[at..].chars().collect();
+
+	// Advance to the opening parenthesis of the dictionary literal.
+	let mut i = 0;
+	while i < chars.len() && chars[i] != '(' {
+		i += 1;
+	}
+	if i >= chars.len() {
+		return map;
+	}
+
+	// Walk the balanced group, collecting each `"..."` string; string escapes are honoured so a quote or
+	// backslash inside a value does not end it early. The strings alternate key, value, key, value.
+	let mut depth	= 0i32;
+	let mut strings:	Vec<String>	= Vec::new();
+	while i < chars.len() {
+		match chars[i] {
+			'('	=> depth += 1,
+			')'	=> {
+				depth -= 1;
+				if depth == 0 {
+					break;
+				}
+			},
+			'"'	=> {
+				let mut s	= String::new();
+				let mut esc	= false;
+				i += 1;
+				while i < chars.len() {
+					let c = chars[i];
+					if esc			{ s.push(c); esc = false; }
+					else if c == '\\'	{ esc = true; }
+					else if c == '"'	{ break; }
+					else			{ s.push(c); }
+					i += 1;
+				}
+				strings.push(s);
+			},
+			_	=> {},
+		}
+		i += 1;
+	}
+
+	let mut k = 0;
+	while k + 1 < strings.len() {
+		map.insert(strings[k].clone(), strings[k + 1].clone());
+		k += 2;
+	}
+	map
+}
+
+/// The byte offset of a `name =` assignment in `src` -- the position of `name` where the next
+/// non-whitespace character after it is `=`. Skips a mention of the name in a comment or another context
+/// (say `// name: ...`), returning the first true assignment, or `None` when there is none.
+fn assignment_offset(src: &str, name: &str) -> Option<usize> {
+	let mut from = 0;
+	while let Some(rel) = src[from..].find(name) {
+		let at		= from + rel;
+		let after	= at + name.len();
+		let rest	= src[after..].trim_start();
+		if rest.starts_with('=') {
+			return Some(at);
+		}
+		from = after;
+	}
+	None
+}
+
+/// Searches `start` and up to a few ancestor directories for a file named `name`, returning the first
+/// that exists. The bound keeps a lone-file compile from walking to the filesystem root: a book's shared
+/// `terms.typ` or `refs.bib` sits at most a couple of levels above a chapter.
+fn find_up(start: &Path, name: &str) -> Option<PathBuf> {
+	const MAX_HOPS: usize = 6;
+	let mut dir		= Some(start);
+	let mut hops	= 0usize;
+	while let Some(d) = dir {
+		let cand = d.join(name);
+		if cand.exists() {
+			return Some(cand);
+		}
+		if hops >= MAX_HOPS {
+			break;
+		}
+		hops += 1;
+		dir = d.parent();
+	}
+	None
 }
 
 /// Gathers the citation keys the body's blocks carry, in document order, so each can be marked cited.
@@ -1132,6 +1259,25 @@ mod tests {
 			other => return Err(err!("expected a heading, found {:?}", other; Test, Bug)),
 		}
 		Ok(())
+	}
+
+	/// The term-dict reader picks the `#let term-dict = (...)` assignment, not the `// term-dict: ...`
+	/// comment above it whose own parentheses would otherwise be read as the literal.
+	#[test]
+	fn test_term_dict_reader_skips_the_comment_04() {
+		let src = r#"
+// term-dict:  key -> display value (plain strings)
+#let term-dict = (
+  "org": "Elearnity Pty Ltd",
+  "website": "elearnity.oxegen.io",
+  "iniverse": "iniverse",
+)
+"#;
+		let map = parse_term_dict(src);
+		assert_eq!(map.get("org").map(String::as_str), Some("Elearnity Pty Ltd"));
+		assert_eq!(map.get("website").map(String::as_str), Some("elearnity.oxegen.io"));
+		assert_eq!(map.get("iniverse").map(String::as_str), Some("iniverse"));
+		assert_eq!(map.len(), 3, "unexpected entries: {:?}", map);
 	}
 }
 
