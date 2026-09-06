@@ -11,6 +11,13 @@
 //! This is targeted extraction, not a Typst evaluator. It reads the concrete fields these books define
 //! -- page size, mirror margins, body and heading type -- from the arm the `format` string picks, and
 //! nothing more. A field a book does not set keeps the engine default.
+//!
+//! Two root idioms are recognised. A *book* root (the elearnity manuscripts) carries a `config.typ`
+//! beside it and selects its geometry and type from a `format` switch there. A *doc-template* root (the
+//! oxedyne documentation trees -- the Hematite guide, the Austenite design) has no `config.typ`: it takes
+//! its A4 page and 2.5 cm margins from the shared `template.typ` and its body size from the `#show:
+//! doc.with(...)` call. The presence of `config.typ` picks the path; both follow the root's includes the
+//! same way, and both degrade to a readable A4 default rather than failing on a field they cannot find.
 
 use crate::bib::{
 	Bibliography,
@@ -62,8 +69,13 @@ pub fn is_book_root(src: &str) -> bool {
 	src.lines().any(|l| l.trim_start().starts_with("#include"))
 }
 
-/// Assembles the book rooted at `root_path`: reads its `config.typ`, loads its Libertinus faces by
-/// path, and follows the root's includes into one block stream.
+/// Assembles the document rooted at `root_path` into a [`BookSpec`], recognising both root idioms the
+/// house Typst trees use. A *book* root sets its geometry and type through a `config.typ` beside it,
+/// chosen by a `format` switch (the elearnity manuscripts); a *doc-template* root has no `config.typ`
+/// and takes its A4 geometry from the shared `template.typ` and its body size from the `#show:
+/// doc.with(...)` call (the oxedyne documentation trees -- the Hematite guide, the Austenite design).
+/// The presence of `config.typ` beside the root selects the path: the book reader is unchanged, and a
+/// root without a config falls to the doc reader rather than failing on the missing file.
 pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	// Canonicalise the root so its parent and grandparent are real absolute directories. A root given
 	// relatively (`lucronics.typ`) otherwise has an empty parent, and the project directory the shared
@@ -80,6 +92,18 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
 
+	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
+	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
+	let config_path = root_dir.join("config.typ");
+	if !config_path.exists() {
+		return load_doc(&root_dir, &root_src);
+	}
+	load_book(&root_dir, &root_src)
+}
+
+/// The book (`format`-switch) path: reads the `config.typ` beside the root, loads the shared Libertinus
+/// faces by path from the project assets tree, and follows the root's includes into one block stream.
+fn load_book(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	// The config sits beside the root; the assets tree is one level up (the project root), holding the
 	// Libertinus directory both books share.
 	let config_path	= root_dir.join("config.typ");
@@ -89,7 +113,7 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	};
 	let project_dir = match root_dir.parent() {
 		Some(d)	=> d.to_path_buf(),
-		None	=> root_dir.clone(),
+		None	=> root_dir.to_path_buf(),
 	};
 	let libertinus_dir = project_dir.join("assets").join("fonts").join("libertinus");
 	let fonts = Arc::new(res!(fonts::libertinus_from_dir(&libertinus_dir)));
@@ -100,15 +124,122 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
-	let mut blocks	= res!(assemble(&root_src, &root_dir));
-	let title		= content_field(&root_src, "title").unwrap_or_default();
-	let front		= read_front_matter(&root_src, &config_src, &title);
+	let mut blocks	= res!(assemble(root_src, root_dir));
+	let title		= content_field(root_src, "title").unwrap_or_default();
+	let front		= read_front_matter(root_src, &config_src, &title);
 
 	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
-	let bib = res!(load_bibliography(&root_src, &project_dir, &mut blocks));
+	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
 
 	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib })
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ DOCUMENTATION IDIOM                                                        │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The documentation (`doc.with`) path: the oxedyne doc trees (Hematite, Austenite) carry no
+/// `config.typ`. Their A4 page and 2.5 cm margins live in the shared `template.typ`, and the body size
+/// is the `text-size:` argument of the root's `#show: doc.with(...)` call. Geometry and type are read
+/// from those two sources; the body font is the embedded Libertinus, which is the doc body and heading
+/// family both (a doc heading is Libertinus bold, so no separate display face is loaded); and the
+/// includes are followed exactly as for a book. A field the tree omits keeps a readable default.
+fn load_doc(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
+	let (geom, raw)	= res!(read_doc_config(root_dir, root_src));
+	let style		= build_style(&raw);
+	let fonts		= Arc::new(res!(fonts::libertinus()));
+	// A doc heading is set in Libertinus bold -- the body family -- so no display face is supplied, and
+	// the heading path falls back to the body bold, which is exactly what the template's show rule sets.
+	let heading:	Option<Arc<Font>>	= None;
+	let blocks		= res!(assemble(root_src, root_dir));
+	let title		= content_field(root_src, "title").unwrap_or_default();
+	let front		= read_doc_front_matter(root_src, &raw, &title);
+
+	// A doc tree names its bibliography, glossary and index through raw Typst calls the reader skips, not
+	// the book's `meta-data.bibliography` field, so no reference back matter is assembled here.
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib: None })
+}
+
+/// Reads a doc-template root's geometry and type: the paper and margins from the shared `template.typ`
+/// beside the root, and the body size from the root's `doc.with(text-size: ..)` argument. The template
+/// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
+/// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
+/// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
+fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle)> {
+	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
+	let template = std::fs::read_to_string(root_dir.join("template.typ")).unwrap_or_default();
+
+	let paper_name	= first_quoted_after(&template, "paper:").unwrap_or_else(|| "a4".to_string());
+	let (pw_mm, ph_mm)	= paper_dims_mm(&paper_name);
+
+	// The uniform margin: the `a4:` entry of the template's `#let margins = (...)` dictionary, a length.
+	let margin_pt	= let_dict_field(&template, "margins", "a4")
+		.and_then(|v| parse_len_pt(&v))
+		.unwrap_or(2.5 * 10.0 * MM_PER_PT);	// 2.5 cm default
+	let foot_extra	= 0.25 * 10.0 * MM_PER_PT;	// the template's `bottom: margins.a4 + 0.25cm`
+
+	let geom = PageGeometry::with_margins(
+		Sp::from_pt(pw_mm * MM_PER_PT),
+		Sp::from_pt(ph_mm * MM_PER_PT),
+		Sp::from_pt(margin_pt),
+		Sp::from_pt(margin_pt),
+		Sp::from_pt(margin_pt),
+		Sp::from_pt(margin_pt + foot_extra),
+	);
+
+	// The body size the doc.with call sets, else the template's own `text-size: 11pt` default.
+	let body_pt	= first_len_after(root_src, "text-size:")
+		.or_else(|| first_len_after(&template, "text-size:"))
+		.unwrap_or(11.0);
+
+	// The doc template leaves leading and paragraph spacing at the Typst defaults it inherits (0.65 em
+	// leading; a paragraph gap of the same order with no first-line indent), and sizes its headings in the
+	// show rule: a level-1 heading at 14 pt small-caps, level 2 at 12 pt, level 3 at 13 pt, level 4 at 12 pt.
+	let raw = RawStyle {
+		body_pt,
+		leading_em:		0.65,
+		par_skip_em:	0.65,
+		indent_em:		0.0,
+		chap_num_pt:	54.0,
+		chap_grid:		[72.0, 8.0, 36.0, 20.0],
+		h1_pt:			14.0,
+		h2_pt:			12.0,
+		h3_pt:			13.0,
+		h4_pt:			12.0,
+	};
+	Ok((geom, raw))
+}
+
+/// The front matter a doc root states: its title and subtitle, and the author from the first `meta-data`
+/// entry. A doc tree carries no imprint (no ISBN, publisher or copyright tuple), so only a title page and
+/// the contents are composed from this; the display sizes take the doc scale rather than a book's.
+fn read_doc_front_matter(root_src: &str, raw: &RawStyle, title: &str) -> FrontMatter {
+	let subtitle	= content_field(root_src, "subtitle");
+	let meta		= meta_block(root_src).unwrap_or_default();
+	let author		= string_field(&meta, "authors").unwrap_or_default();
+
+	FrontMatter {
+		title:			title.to_string(),
+		subtitle,
+		author,
+		cover_image:	None,
+		logo_image:		None,
+		publisher:		None,
+		edition:		None,
+		isbn:			None,
+		copyright:		None,
+		rights:			None,
+		ai_declaration:	None,
+		website:		None,
+		toolchain:		false,
+		dedication:		None,
+		about_author:	None,
+		title_size:		Sp::from_pt(28.0),
+		subtitle_size:	Sp::from_pt(16.0),
+		author_size:	Sp::from_pt(17.0),
+		back_title_size:	Sp::from_pt(raw.h1_pt),
+	}
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -733,6 +864,82 @@ fn tuple_after(s: &str, key: &str) -> Option<Vec<f64>> {
 	Some(nums)
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ DOC TEMPLATE EXTRACTION HELPERS                                            │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The trim of a named paper, in millimetres. Only the sizes the doc trees reach for are tabulated;
+/// an unknown name falls to A4, so a doc that sets an exotic paper still lands on a readable page.
+fn paper_dims_mm(name: &str) -> (f64, f64) {
+	match name {
+		"a3"		=> (297.0, 420.0),
+		"a4"		=> (210.0, 297.0),
+		"a5"		=> (148.0, 210.0),
+		"us-letter"	=> (215.9, 279.4),
+		"us-legal"	=> (215.9, 355.6),
+		_			=> (210.0, 297.0),
+	}
+}
+
+/// The first `"..."` string after `key` anywhere in `src` -- `paper: "a4"` reads as `a4`. Used to read a
+/// bare `name: "value"` setting that is not bounded by the field machinery the book path needs.
+fn first_quoted_after(src: &str, key: &str) -> Option<String> {
+	let at = src.find(key)?;
+	first_quoted(&src[at + key.len()..])
+}
+
+/// The value bound to `field` inside a top-level `#let <dict> = ( ... )` dictionary -- the `a4:` entry of
+/// the template's `#let margins = (a4: 2.5cm, ...)`, say. The dictionary is matched by paren depth from
+/// the `#let`, and the field's value runs to the next depth-zero comma, so a nested group does not end it.
+fn let_dict_field(src: &str, dict: &str, field: &str) -> Option<String> {
+	let needle	= fmt!("#let {} =", dict);
+	let start	= src.find(&needle)?;
+	let tail	= &src[start + needle.len()..];
+	let open	= tail.find('(')?;
+	let body	= balanced_parens(&tail[open..])?;
+	// Within the dictionary body, find `field:` and take its value up to the next top-level comma.
+	let key		= fmt!("{}:", field);
+	let at		= body.find(&key)?;
+	let rest	= &body[at + key.len()..];
+	let bytes	= rest.as_bytes();
+	let mut depth	= 0i32;
+	let mut end		= rest.len();
+	let mut i		= 0usize;
+	while i < bytes.len() {
+		match bytes[i] as char {
+			'(' | '[' | '{'		=> depth += 1,
+			')' | ']' | '}'		=> depth -= 1,
+			',' if depth == 0	=> { end = i; break; },
+			_					=> {},
+		}
+		i += 1;
+	}
+	Some(rest[..end].trim().to_string())
+}
+
+/// A Typst length token as points: the leading number scaled by its unit (`cm`, `mm`, `in`, `pt`). A
+/// bare number with no unit reads as points. `None` when no number leads the slice.
+fn parse_len_pt(s: &str) -> Option<f64> {
+	let n = first_num(s)?;
+	let unit = s.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == '-' || c.is_whitespace());
+	let per_pt = if unit.starts_with("cm") {
+		10.0 * MM_PER_PT
+	} else if unit.starts_with("mm") {
+		MM_PER_PT
+	} else if unit.starts_with("in") {
+		72.0
+	} else {
+		1.0	// `pt` or unitless
+	};
+	Some(n * per_pt)
+}
+
+/// The first length after `key` in `src`, in points -- `text-size: 11pt` reads as `11.0`.
+fn first_len_after(src: &str, key: &str) -> Option<f64> {
+	let at = src.find(key)?;
+	parse_len_pt(&src[at + key.len()..])
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -793,6 +1000,66 @@ mod tests {
 	fn test_a_root_with_includes_reads_as_a_book_02() {
 		assert!(is_book_root("#show: doc.with()\n#include \"chap_01.typ\"\n"));
 		assert!(!is_book_root("= A lone heading\n\nSome prose.\n"));
+	}
+
+	#[test]
+	fn test_a_typst_length_reads_in_points_04() -> Outcome<()> {
+		assert!((res!(parse_len_pt("11pt").ok_or_else(|| err!("no number"; Test, Bug))) - 11.0).abs() < 1e-9);
+		// 2.5 cm = 25 mm = 25 * 72 / 25.4 = 70.866 pt.
+		let cm = res!(parse_len_pt("2.5cm").ok_or_else(|| err!("no number"; Test, Bug)));
+		assert!((cm - 70.866).abs() < 1e-2, "2.5 cm should be ~70.87 pt, found {}", cm);
+		let mm = res!(parse_len_pt("18mm").ok_or_else(|| err!("no number"; Test, Bug)));
+		assert!((mm - 51.024).abs() < 1e-2, "18 mm should be ~51.02 pt, found {}", mm);
+		// A bare number reads as points.
+		assert!((res!(parse_len_pt("150").ok_or_else(|| err!("no number"; Test, Bug))) - 150.0).abs() < 1e-9);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_margin_dict_field_and_paper_read_05() -> Outcome<()> {
+		let tmpl = r#"
+#let margins = (
+  a4: 2.5cm,
+  title_page: 45%,
+  section_header: 150pt,
+)
+#let doc(body) = {
+  set page(paper: "a4", margin: (top: 0pt))
+  body
+}
+"#;
+		let a4 = res!(let_dict_field(tmpl, "margins", "a4").ok_or_else(|| err!("no a4 field"; Test, Bug)));
+		assert_eq!(a4, "2.5cm", "the margins.a4 entry is the 2.5cm length");
+		let paper = res!(first_quoted_after(tmpl, "paper:").ok_or_else(|| err!("no paper"; Test, Bug)));
+		assert_eq!(paper, "a4", "the page paper is a4");
+		let (w, h) = paper_dims_mm(&paper);
+		assert_eq!((w as i64, h as i64), (210, 297), "a4 is 210 by 297 mm");
+		Ok(())
+	}
+
+	#[test]
+	fn test_doc_front_matter_reads_title_subtitle_author_06() {
+		let root = r#"
+#show: doc.with(
+  title: [Austenite],
+  subtitle: [Design Document],
+  text-size: 11pt,
+  meta-data: (
+    ( version: "0.1.0", authors: "J. D. Hoogland", notes: "Initial." ),
+  ),
+)
+= Purpose
+"#;
+		let raw = RawStyle {
+			body_pt: 11.0, leading_em: 0.65, par_skip_em: 0.65, indent_em: 0.0,
+			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
+			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
+		};
+		let fm = read_doc_front_matter(root, &raw, "Austenite");
+		assert_eq!(fm.title, "Austenite");
+		assert_eq!(fm.subtitle.as_deref(), Some("Design Document"));
+		assert_eq!(fm.author, "J. D. Hoogland");
+		assert!(fm.isbn.is_none() && fm.copyright.is_none(), "a doc tree carries no imprint");
 	}
 
 	#[test]
