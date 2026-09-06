@@ -45,3 +45,4 @@ pub mod mathtable;
 pub mod page;
 pub mod plot;
 pub mod table;
+pub mod watch;

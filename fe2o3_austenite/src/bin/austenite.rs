@@ -10,7 +10,9 @@
 //! is passed over rather than failing the compile, and the lone-file path reports the tally on one terse
 //! line so a dropped construct is visible.
 //!
-//! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`).
+//! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`), or
+//! `austenite --watch <SOURCE.typ> [OUTPUT_DIR]` to recompile on every change to the root, its includes,
+//! its `config.typ`, or its assets.
 
 use oxedyne_fe2o3_austenite::{
 	book,
@@ -35,6 +37,7 @@ use oxedyne_fe2o3_austenite::{
 		PageGeometry,
 		PlacedKind,
 	},
+	watch,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -46,7 +49,9 @@ use oxedyne_fe2o3_graphics::pdf::PdfPage;
 
 use std::fs::File;
 use std::io::BufWriter;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// An estimate of the extra memory rendering this page holds in flight, in bytes -- dominated by the
 /// figure rasters, which [`emit::pdf::render_page`] copies out of the shared frame into the page's own
@@ -331,17 +336,142 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 	})
 }
 
+/// The first double-quoted run in a slice, its contents without the quotes. Mirrors the book
+/// assembler's include parsing so the watch set follows exactly the files a compile reads.
+fn first_quoted(s: &str) -> Option<String> {
+	let open	= match s.find('"') {
+		Some(i)	=> i,
+		None	=> return None,
+	};
+	let rest	= &s[open + 1..];
+	let close	= match rest.find('"') {
+		Some(i)	=> i,
+		None	=> return None,
+	};
+	Some(rest[..close].to_string())
+}
+
+/// Adds every file under `dir`, recursively, to `set`, plus `dir` itself so an asset added or removed
+/// changes the watched snapshot. Bounded in depth and count so a large font tree cannot make a tick
+/// expensive; the cap is generous for a book's assets.
+fn collect_files(dir: &std::path::Path, set: &mut Vec<PathBuf>, depth: usize) {
+	const MAX_DEPTH:	usize = 6;
+	const MAX_FILES:	usize = 4000;
+
+	if depth > MAX_DEPTH || set.len() > MAX_FILES {
+		return;
+	}
+	set.push(dir.to_path_buf());
+	let entries = match std::fs::read_dir(dir) {
+		Ok(e)	=> e,
+		Err(_)	=> return,
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		if path.is_dir() {
+			collect_files(&path, set, depth + 1);
+		} else {
+			set.push(path);
+		}
+		if set.len() > MAX_FILES {
+			return;
+		}
+	}
+}
+
+/// The set of files a compile of `source` depends on, for the watch to poll: the root itself, its
+/// `config.typ`, each file it `#include`s, and the assets trees a book resolves against (beside the
+/// root and one level up, per the book assembler). Recomputed each tick, so a newly added include or
+/// asset is watched without a restart.
+fn watch_set(source: &str) -> Vec<PathBuf> {
+	let mut set: Vec<PathBuf> = Vec::new();
+	let src_path = PathBuf::from(source);
+	set.push(src_path.clone());
+
+	let root_dir = src_path.parent()
+		.map(|p| p.to_path_buf())
+		.unwrap_or_else(|| PathBuf::from("."));
+	set.push(root_dir.join("config.typ"));
+
+	// Read the root fresh so an include added mid-session joins the watch; a read failure just leaves the
+	// include set as it was on the previous tick.
+	if let Ok(src) = std::fs::read_to_string(&src_path) {
+		for line in src.lines() {
+			let t = line.trim_start();
+			if let Some(rest) = t.strip_prefix("#include") {
+				if let Some(rel) = first_quoted(rest) {
+					set.push(root_dir.join(rel));
+				}
+			}
+		}
+	}
+
+	// The assets tree sits beside the root and, for a book, one level up at the project root. Watch both,
+	// recursively, so an edited figure or image triggers a rebuild, not only an added or removed file.
+	collect_files(&root_dir.join("assets"), &mut set, 0);
+	if let Some(project_dir) = root_dir.parent() {
+		collect_files(&project_dir.join("assets"), &mut set, 0);
+	}
+	set
+}
+
+/// Prints one terse status line for a compile that produced `stats` of `source` into `out_dir`, taking
+/// `elapsed` wall: the source, the page count, the wall in seconds, and the skip line folded on where
+/// there is one.
+fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Duration) {
+	let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s -> {}/",
+		source, stats.pages, elapsed.as_secs_f64(), out_dir);
+	if let Some(skip) = &stats.skip_line {
+		line.push_str("; ");
+		line.push_str(skip);
+	}
+	println!("{}", line);
+}
+
 fn main() -> Outcome<()> {
-	let args: Vec<String> = std::env::args().collect();
-	let source = match args.get(1) {
+	// Flags may precede or follow the paths; only `--watch` (`-w`) is recognised, everything else is a
+	// positional argument in order: the source root, then the optional output directory.
+	let mut watching	= false;
+	let mut pos:	Vec<String>	= Vec::new();
+	for a in std::env::args().skip(1) {
+		match a.as_str() {
+			"--watch" | "-w"	=> watching = true,
+			_					=> pos.push(a),
+		}
+	}
+	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
+			"Usage: austenite [--watch] <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
 	};
-	let out_dir = match args.get(2) {
+	let out_dir = match pos.get(1) {
 		Some(s)	=> s.clone(),
 		None	=> "austenite-out".to_string(),
 	};
+
+	if watching {
+		// Poll interval: brisk enough to feel live, cheap enough to leave the cores to the compile.
+		let interval	= Duration::from_millis(400);
+		let src_files	= source.clone();		// the file-set closure borrows this
+		let src_build	= source.clone();		// the build closure owns this
+		let out			= out_dir.clone();
+		println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", source, out_dir);
+		return watch::run(
+			move || watch_set(&src_files),
+			move || {
+				let t = std::time::Instant::now();
+				match compile(&src_build, &out) {
+					Ok(stats)	=> {
+						// The skip line is folded into the status line, so the rebuild is one line.
+						print_status(&src_build, &out, &stats, t.elapsed());
+						Ok(())
+					},
+					Err(e)		=> Err(e),
+				}
+			},
+			interval,
+		);
+	}
 
 	let t = std::time::Instant::now();
 	let stats = res!(compile(&source, &out_dir));
