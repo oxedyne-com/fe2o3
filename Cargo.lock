@@ -2223,6 +2223,7 @@ version = "0.5.0"
 dependencies = [
  "flate2",
  "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_text",
 ]
 
 [[package]]

@@ -106,5 +106,6 @@ pub mod qr;
 pub mod raster;
 pub mod stroke;
 pub mod svg;
+pub mod svg_doc;
 pub mod transform;
 pub mod yuv;
