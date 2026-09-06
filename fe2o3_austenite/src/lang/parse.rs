@@ -29,7 +29,7 @@ use crate::ir::Length;
 use crate::ir::Span;
 use crate::table::Align;
 
-use super::ast::{AlignSpec, FigureBody, Inline, Item, TableSpec};
+use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, TableSpec};
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -534,10 +534,14 @@ fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str) {
 	}
 	for run in sub {
 		match run {
-			// A plain stretch takes the emphasis face; an already-emphasised inner run (`*_word_*`) keeps
-			// its own face, one level of nesting being all the flat run vocabulary carries.
-			Inline::Text(t)	=> runs.push(if strong { Inline::Strong(t) } else { Inline::Emph(t) }),
-			other			=> runs.push(other),
+			// A plain stretch takes the emphasis face.
+			Inline::Text(t)					=> runs.push(if strong { Inline::Strong(t) } else { Inline::Emph(t) }),
+			// An inner run of the opposite face (`*_word_*`, `_*word*_`) multiplies the two faces to a
+			// bold-italic run rather than losing the outer; a run of the same face, a glossary term or a
+			// maths span keeps its own face, one level of nesting being all the flat vocabulary carries.
+			Inline::Emph(t) if strong		=> runs.push(Inline::BoldItalic(t)),
+			Inline::Strong(t) if !strong	=> runs.push(Inline::BoldItalic(t)),
+			other							=> runs.push(other),
 		}
 	}
 }
@@ -857,6 +861,7 @@ pub fn flatten_markup(text: &str) -> String {
 			// each pass removes one layer and the recursion terminates on plain text.
 			Inline::Strong(t)				=> out.push_str(&flatten_markup(&t)),
 			Inline::Emph(t)					=> out.push_str(&flatten_markup(&t)),
+			Inline::BoldItalic(t)			=> out.push_str(&t),	// already the flat inner of a nested run
 			Inline::Super(t)				=> out.push_str(&t),	// a flattened string cannot raise; keep its text
 			Inline::Code(t)					=> out.push_str(&t),
 			Inline::Glossary { display, .. }	=> out.push_str(&display),
@@ -1657,12 +1662,26 @@ fn track_weight(track: &str) -> f64 {
 	}
 }
 
-/// Parses an `align:` value: a `(col, row) => ...` closure as [`AlignSpec::Closure`], a tuple of column
-/// alignments as [`AlignSpec::PerColumn`], a single alignment word as [`AlignSpec::Uniform`].
+/// Parses an `align:` value: a `(col, row) => ...` closure as [`AlignSpec::Closure`] (its parameter
+/// names and body captured for per-cell evaluation), a tuple of column alignments as
+/// [`AlignSpec::PerColumn`], a single alignment word as [`AlignSpec::Uniform`].
 fn parse_align(val: &str) -> AlignSpec {
 	let v = val.trim();
-	if v.contains("=>") {
-		return AlignSpec::Closure;
+	if let Some(arrow) = v.find("=>") {
+		let params	= v[..arrow].trim();
+		let body	= v[arrow + 2..].trim().to_string();
+		// The parameter list `(col, row)`; a bare single parameter has no parentheses. The first names the
+		// column, the second the row, matching Typst's `(col, row)` order.
+		let names: Vec<String> = {
+			let pch: Vec<char> = params.chars().collect();
+			match read_group(&pch, 0) {
+				Some((inner, _))	=> split_top_args(&inner).iter().map(|s| s.trim().to_string()).collect(),
+				None				=> vec![params.trim().to_string()],
+			}
+		};
+		let col_var = names.first().cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "col".to_string());
+		let row_var = names.get(1).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| "row".to_string());
+		return AlignSpec::Closure(ClosureAlign { col_var, row_var, body });
 	}
 	if v.starts_with('(') {
 		let ch: Vec<char> = v.chars().collect();
@@ -1779,6 +1798,59 @@ mod tests {
 		let nested = parse_inlines("#emph[the #idx[Harvard Business Review] weekly]");
 		assert!(nested.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#emph") || t.contains("#idx"))),
 			"raw markup leaked from nested emph: {:?}", nested);
+	}
+
+	/// Emphasis nested one level -- `*_x_*` or `_*x*_` -- collapses to a single [`Inline::BoldItalic`]
+	/// run rather than dropping the outer face, so a bold-italic term sets in the bold-italic face in
+	/// prose, a footnote or a table cell alike.
+	#[test]
+	fn nested_emphasis_reads_as_bold_italic() {
+		for src in ["here *_both_* faces", "here _*both*_ faces"] {
+			let runs = parse_inlines(src);
+			assert!(runs.iter().any(|r| matches!(r, Inline::BoldItalic(t) if t == "both")),
+				"expected a bold-italic run from {:?}, got {:?}", src, runs);
+			assert!(runs.iter().all(|r| !matches!(r, Inline::Emph(t) if t == "both")),
+				"outer face dropped to plain emph in {:?}: {:?}", src, runs);
+		}
+		// A lone `*strong*` or `_emph_` still yields its single face, unchanged.
+		assert!(parse_inlines("just *strong* here").iter().any(|r| matches!(r, Inline::Strong(t) if t == "strong")));
+		assert!(parse_inlines("just _emph_ here").iter().any(|r| matches!(r, Inline::Emph(t) if t == "emph")));
+	}
+
+	/// A `(col, row) => ...` alignment closure is evaluated per cell: a row-keyed closure centres the
+	/// header and flushes the body left; a per-column closure honours each column's own alignment,
+	/// including an `or` over several columns.
+	#[test]
+	fn align_closure_evaluates_per_cell() {
+		let row_keyed = parse_align("(col, row) => { if row == 0 { center } else { left } }");
+		match row_keyed {
+			AlignSpec::Closure(cl) => {
+				assert_eq!(cl.align_at(0, 0), Align::Centre);	// header, column 0
+				assert_eq!(cl.align_at(0, 1), Align::Left);	// body, column 0 -- was wrongly centred before
+				assert_eq!(cl.align_at(2, 3), Align::Left);
+			},
+			other => panic!("expected a closure, got {:?}", other),
+		}
+		let per_col = parse_align("(col, row) => { if row == 0 { center } else if col == 0 or col == 4 { left } else { center } }");
+		match per_col {
+			AlignSpec::Closure(cl) => {
+				assert_eq!(cl.align_at(0, 1), Align::Left);
+				assert_eq!(cl.align_at(4, 1), Align::Left);
+				assert_eq!(cl.align_at(1, 1), Align::Centre);
+				assert_eq!(cl.align_at(3, 2), Align::Centre);
+			},
+			other => panic!("expected a closure, got {:?}", other),
+		}
+		// A tuple pick indexed by the column parameter.
+		let tuple = parse_align("(x, y) => (left, center, right).at(x)");
+		match tuple {
+			AlignSpec::Closure(cl) => {
+				assert_eq!(cl.align_at(0, 5), Align::Left);
+				assert_eq!(cl.align_at(1, 5), Align::Centre);
+				assert_eq!(cl.align_at(2, 5), Align::Right);
+			},
+			other => panic!("expected a closure, got {:?}", other),
+		}
 	}
 
 	/// `#super[...]` yields an [`Inline::Super`] run of its content, in both the bracket and the string

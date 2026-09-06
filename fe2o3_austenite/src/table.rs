@@ -353,6 +353,7 @@ fn cell_pieces(
 			Segment::Text(t)		=> pieces.push(Piece::Text { text: t.clone(), role: base }),
 			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
 			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: emph_role(base) }),
+			Segment::BoldItalic(t)	=> pieces.push(Piece::Text { text: t.clone(), role: Role::BoldItalic }),
 			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
 			Segment::Glossary { display, .. }
 									=> pieces.push(Piece::Text { text: display.clone(), role: base }),

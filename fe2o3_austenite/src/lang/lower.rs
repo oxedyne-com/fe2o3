@@ -58,8 +58,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 
 /// Builds a [`Table`] from the parsed spec: the flat cells are chunked into rows of `ncols`, each cell
 /// carrying its inline runs lowered to segments and its alignment from the [`AlignSpec`]. A header row's
-/// cells set centred; a closure aligns the first column centred and the rest flush left, matching the
-/// `(col, row) => ...` idiom these books use.
+/// cells set centred under the fixed forms; a closure is evaluated per cell, so a `(col, row) => ...`
+/// spec sets each cell exactly as its own row/column logic dictates.
 fn build_table(spec: &TableSpec) -> Table {
 	let ncols = spec.ncols.max(1);
 	let mut rows:	Vec<Row>	= Vec::new();
@@ -88,15 +88,20 @@ fn build_table(spec: &TableSpec) -> Table {
 	table
 }
 
-/// The alignment of one cell at row `r`, column `c`, given the table's declared [`AlignSpec`].
+/// The alignment of one cell at row `r`, column `c`, given the table's declared [`AlignSpec`]. A closure
+/// carries its own row/column logic and is evaluated for every cell, header row included; the fixed
+/// forms have no row dependence, so a header row centres its labels as Typst's book style does.
 fn cell_align(spec: &AlignSpec, header: bool, r: usize, c: usize) -> Align {
+	if let AlignSpec::Closure(cl) = spec {
+		return cl.align_at(c, r);
+	}
 	if header && r == 0 {
 		return Align::Centre;	// a header row centres its labels
 	}
 	match spec {
 		AlignSpec::Uniform(a)		=> *a,
 		AlignSpec::PerColumn(cols)	=> cols.get(c).copied().unwrap_or(Align::Left),
-		AlignSpec::Closure			=> if c == 0 { Align::Centre } else { Align::Left },
+		AlignSpec::Closure(cl)		=> cl.align_at(c, r),
 	}
 }
 
@@ -120,6 +125,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Text(text)		=> Segment::text(text.clone()),
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
+		Inline::BoldItalic(text)	=> Segment::bold_italic(text.clone()),
 		Inline::Super(text)		=> Segment::superscript(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),

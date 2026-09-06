@@ -97,6 +97,7 @@ pub enum Segment {
 	Text(String),
 	Strong(String),	// set in the bold face
 	Emph(String),	// set in the italic face
+	BoldItalic(String),	// `*_x_*`/`_*x*_`, set in the bold-italic face
 	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
 	Footnote { note: Vec<Segment> },
 	Math(Atom),	// an inline maths expression, set within the running line
@@ -117,6 +118,10 @@ impl Segment {
 
 	pub fn emph<S: Into<String>>(text: S) -> Self {
 		Self::Emph(text.into())
+	}
+
+	pub fn bold_italic<S: Into<String>>(text: S) -> Self {
+		Self::BoldItalic(text.into())
 	}
 
 	pub fn superscript<S: Into<String>>(text: S) -> Self {
@@ -848,6 +853,9 @@ fn build_pieces(
 			Segment::Emph(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Italic });
 			},
+			Segment::BoldItalic(text) => {
+				pieces.push(Piece::Text { text: text.clone(), role: Role::BoldItalic });
+			},
 			Segment::Super(text) => {
 				// The same raise the footnote mark rides: a run shaped at 0.7x, its box shortened so the
 				// emitter seats its baseline above the line's. It is rigid and never breaks -- the space
@@ -1108,6 +1116,7 @@ fn footnote_pieces(
 			Segment::Text(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Body }),
 			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
 			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Italic }),
+			Segment::BoldItalic(t)	=> pieces.push(Piece::Text { text: t.clone(), role: Role::BoldItalic }),
 			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
 			Segment::Glossary { display, .. }
 									=> pieces.push(Piece::Text { text: display.clone(), role: Role::Body }),
@@ -1509,8 +1518,9 @@ fn captioned(
 		for seg in segs {
 			match seg {
 				Segment::Text(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, t)),
-				Segment::Strong(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Bold, size, t)),
-				Segment::Emph(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Italic, size, t)),
+				Segment::Strong(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Bold, size, t)),
+				Segment::Emph(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Italic, size, t)),
+				Segment::BoldItalic(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::BoldItalic, size, t)),
 				Segment::Code(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Mono, size, t)),
 				Segment::Glossary { display, .. }
 									=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, display)),
@@ -1559,7 +1569,7 @@ fn captioned(
 /// Whether any caption segment carries visible text, so the colon prefix is set only for a real caption.
 fn segments_have_text(segs: &[Segment]) -> bool {
 	segs.iter().any(|s| match s {
-		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::Code(t) | Segment::Super(t)
+		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t) | Segment::Code(t) | Segment::Super(t)
 							=> !t.trim().is_empty(),
 		Segment::Glossary { display, .. }	=> !display.trim().is_empty(),
 		Segment::Math(_) | Segment::Cite(_)	=> true,
@@ -2199,6 +2209,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::Text(t)				=> out.push_str(t),
 			Segment::Strong(t)				=> out.push_str(t),
 			Segment::Emph(t)				=> out.push_str(t),
+			Segment::BoldItalic(t)			=> out.push_str(t),
 			Segment::Super(t)				=> out.push_str(t),
 			Segment::Code(t)				=> out.push_str(t),
 			Segment::Glossary { display, .. }	=> out.push_str(display),
@@ -2239,11 +2250,12 @@ fn inline_segments(
 		// a text string set in a face chosen against the base role, so an emphasis in an italic running head
 		// toggles upright as Typst sets it.
 		let (text, r): (&str, Role) = match seg {
-			Segment::Text(t)	=> (t, role),
-			Segment::Strong(t)	=> (t, if italic { Role::BoldItalic } else { Role::Bold }),
-			Segment::Emph(t)	=> (t, if italic { Role::Body } else { Role::Italic }),
-			Segment::Super(t)	=> (t, role),
-			Segment::Code(t)	=> (t, Role::Mono),
+			Segment::Text(t)		=> (t, role),
+			Segment::Strong(t)		=> (t, if italic { Role::BoldItalic } else { Role::Bold }),
+			Segment::Emph(t)		=> (t, if italic { Role::Body } else { Role::Italic }),
+			Segment::BoldItalic(t)	=> (t, if italic { Role::Bold } else { Role::BoldItalic }),
+			Segment::Super(t)		=> (t, role),
+			Segment::Code(t)		=> (t, Role::Mono),
 			Segment::Glossary { display, .. }	=> (display, role),
 			Segment::Math(atom)	=> {
 				let mut hs = style;
@@ -2434,6 +2446,8 @@ fn subheading_hbox(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Strong), size, small_size, smallcaps, t, asc, dep)),
 			Segment::Emph(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Emph), size, small_size, smallcaps, t, asc, dep)),
+			Segment::BoldItalic(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::BoldItalic), size, small_size, smallcaps, t, asc, dep)),
 			// A superscript in a heading is vanishingly rare; set its text in the heading face rather than
 			// raising it, so the words are kept without a scripted run in display type.
 			Segment::Super(t)	=> res!(push_head_text(
@@ -2474,6 +2488,7 @@ fn subheading_hbox(
 enum HeadRun {
 	Strong,
 	Emph,
+	BoldItalic,
 	Gloss,
 }
 
@@ -2486,9 +2501,10 @@ fn head_run_face<'a>(base: &HeadFace<'a>, run: HeadRun) -> HeadFace<'a> {
 		HeadFace::Role(r)	=> {
 			let italic = *r == Role::Italic;
 			let role = match run {
-				HeadRun::Strong	=> if italic { Role::BoldItalic } else { Role::Bold },
-				HeadRun::Gloss	=> Role::BoldItalic,
-				HeadRun::Emph	=> if italic { Role::Body } else { Role::Italic },	// emph toggles against an italic heading
+				HeadRun::Strong		=> if italic { Role::BoldItalic } else { Role::Bold },
+				HeadRun::BoldItalic	=> if italic { Role::Bold } else { Role::BoldItalic },	// nested emphasis toggles against an italic heading
+				HeadRun::Gloss		=> Role::BoldItalic,
+				HeadRun::Emph		=> if italic { Role::Body } else { Role::Italic },	// emph toggles against an italic heading
 			};
 			HeadFace::Role(role)
 		},
