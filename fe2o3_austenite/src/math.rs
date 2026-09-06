@@ -1042,7 +1042,7 @@ fn build_matrix(
 		return Ok(MBox { pieces, width: content_w, height: content_h, depth: content_d, class: Class::Ord });
 	}
 	let font	= res!(math_font());
-	let target	= content_h + content_d;
+	let target	= delim_target(content_h + content_d);
 	let gap		= Sp(size.raw() / 8);
 
 	let mut out:	Vec<Piece> = Vec::new();
@@ -1134,10 +1134,24 @@ fn build_sqrt(
 	})
 }
 
+/// The height a grown delimiter must reach for a content of the given symmetric height, after LaTeX's
+/// allowance that a delimiter may fall a little short of its content rather than jump a whole variant
+/// larger. The least acceptable clearance is the greater of `DelimiterFactor` (901/1000) of the content
+/// and the content less `DelimiterShortfall` (5 pt); the caller then takes the tightest variant reaching
+/// it. Covering the content outright instead runs a fence one variant larger than the New CM oracle
+/// wherever the content sits just above a variant -- the oversize the fidelity sweep measured -- because
+/// Latin Modern's variant ladder is coarse and the next size up overshoots by 15-20 %.
+fn delim_target(content: Sp) -> Sp {
+	let factor		= Sp(content.raw() * 901 / 1000);
+	let shortfall	= Sp::from_pt(5.0);
+	let floored		= if content > shortfall { content - shortfall } else { Sp::ZERO };
+	if factor > floored { factor } else { floored }
+}
+
 /// Sets a body between a pair of delimiters grown to it. The delimiters span symmetrically about the
-/// maths axis, tall enough to cover the body's reach above and below that axis; each is the
-/// tightest-fitting vertical variant the MATH table offers, or the plain delimiter when the font has no
-/// table (in which case it does not grow).
+/// maths axis, tall enough to cover the body's reach above and below that axis, less LaTeX's shortfall
+/// allowance ([`delim_target`]); each is the tightest-fitting vertical variant the MATH table offers, or
+/// the plain delimiter when the font has no table (in which case it does not grow).
 fn build_fence(
 	style:		&Style,
 	left:		char,
@@ -1165,14 +1179,7 @@ fn build_fence(
 	let half	= if above > below { above } else { below };
 	let content	= half + half;
 
-	// LaTeX would accept a delimiter a little shorter than the content -- the greater of its
-	// `DelimiterFactor` (901/1000) and the content less `DelimiterShortfall` (~5pt) -- so a fraction is
-	// not wrapped in a delimiter a whole size too large. That allowance only helps when a variant sits
-	// just below the content; here the reference sets Latin Modern's parentheses to cover the fraction
-	// outright, and the shortfall would drop a variant and leave the marks visibly short of it. So the
-	// target is the content itself, the `factor = 1000, shortfall = 0` case, and the tightest variant
-	// reaching it is chosen -- which reproduces the reference to within a pixel.
-	let target	= content;
+	let target	= delim_target(content);
 
 	let mut pieces:	Vec<Piece> = Vec::new();
 	let gap			= Sp(size.raw() / 12);
