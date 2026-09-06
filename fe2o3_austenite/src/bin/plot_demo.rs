@@ -107,9 +107,13 @@ fn trig_plot(fonts: Arc<FontSet>) -> Outcome<Graphic> {
 		x_ticks:	vec![-6.0, -4.0, -2.0, 0.0, 2.0, 4.0, 6.0],
 		y_ticks:	vec![-1.0, -0.5, 0.0, 0.5, 1.0],
 		series:		vec![
-			Series { points: sample(f64::sin), colour: Rgba::opaque(30, 90, 200), width: 1.4 },
-			Series { points: sample(f64::cos), colour: Rgba::opaque(200, 60, 50), width: 1.4 },
+			Series { points: sample(f64::sin), colour: Rgba::opaque(30, 90, 200), width: 1.4, dashed: false, label: None },
+			Series { points: sample(f64::cos), colour: Rgba::opaque(200, 60, 50), width: 1.4, dashed: false, label: None },
 		],
+		axis:		oxedyne_fe2o3_austenite::plot::AxisStyle::Framed,
+		x_label:	None,
+		y_label:	None,
+		legend:		false,
 	};
 	plot.build(fonts)
 }
@@ -132,8 +136,12 @@ fn gaussian_plot(fonts: Arc<FontSet>) -> Outcome<Graphic> {
 		x_ticks:	vec![-4.0, -3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0, 4.0],
 		y_ticks:	vec![0.0, 0.1, 0.2, 0.3, 0.4],
 		series:		vec![
-			Series { points, colour: Rgba::opaque(120, 40, 160), width: 1.6 },
+			Series { points, colour: Rgba::opaque(120, 40, 160), width: 1.6, dashed: false, label: None },
 		],
+		axis:		oxedyne_fe2o3_austenite::plot::AxisStyle::Framed,
+		x_label:	None,
+		y_label:	None,
+		legend:		false,
 	};
 	plot.build(fonts)
 }

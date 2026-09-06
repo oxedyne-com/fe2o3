@@ -34,6 +34,9 @@ pub enum Placement {
 pub enum Route {
 	Straight,
 	Orthogonal,
+	// A rectangular feedback loop: out of both ports to the right, clear of every box by `out` past the
+	// wider port, then a single vertical run joining the two levels. This is the flowchart's return arrow.
+	Feedback { out: Sp },
 }
 
 /// A cardinal direction, the way a port faces out of its box: an edge leaves and enters along it.
@@ -134,6 +137,15 @@ pub fn route_points(
 {
 	match route {
 		Route::Straight => vec![from, to],
+		Route::Feedback { out } => {
+			// Both ends leave to the right; the vertical run sits `out` past whichever port reaches
+			// furthest right, so the loop clears every box between the two levels.
+			let x_far	= from.0.max(to.0);
+			let x_det	= x_far + out;
+			let mut pts	= vec![from, (x_det, from.1), (x_det, to.1), to];
+			dedup(&mut pts);
+			pts
+		},
 		Route::Orthogonal => {
 			let p1 = offset(from, from_dir, stub);
 			let p2 = offset(to, to_dir, stub);
@@ -252,6 +264,30 @@ pub fn label_anchor(pts: &[(Sp, Sp)]) -> Option<((Sp, Sp), (f32, f32))> {
 		None           => (0.0, -1.0),
 	};
 	Some((mid, perp))
+}
+
+/// An anchor a little way along the first segment from the source, and the unit perpendicular to that
+/// segment, so a branch label ("Y"/"N") sits by the decision it leaves rather than out at a far corner.
+/// The offset is `lead` past the source, clamped to the segment so a short first segment still anchors.
+pub fn label_anchor_near_source(pts: &[(Sp, Sp)], lead: Sp) -> Option<((Sp, Sp), (f32, f32))> {
+	if pts.len() < 2 {
+		return None;
+	}
+	let a = pts[0];
+	let b = pts[1];
+	let (ux, uy) = unit(a, b)?;
+	// The segment length in points, so the lead does not overshoot a short first segment.
+	let seg_len	= {
+		let dx = (b.0.to_pt() - a.0.to_pt()) as f32;
+		let dy = (b.1.to_pt() - a.1.to_pt()) as f32;
+		(dx * dx + dy * dy).sqrt()
+	};
+	let d		= (lead.to_pt() as f32).min(seg_len * 0.6);
+	let anchor	= (
+		Sp::from_pt((a.0.to_pt() as f32 + ux * d) as f64),
+		Sp::from_pt((a.1.to_pt() as f32 + uy * d) as f64),
+	);
+	Some((anchor, (-uy, ux)))
 }
 
 /// The unit vector from `a` to `b` in points, or `None` if they coincide.

@@ -1230,7 +1230,7 @@ fn resolve_term(key: &str, func: &str, skips: &mut SkipSummary) -> String {
 /// just past the matching closer. Nesting of the same delimiter and `"..."` strings are respected, so a
 /// bracket inside a quoted argument or a nested group does not close the group early. `None` when the
 /// group never closes, so a malformed call is left as ordinary text.
-fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
+pub(crate) fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
 	let open	= *chars.get(i)?;
 	let close	= match open {
 		'['	=> ']',
@@ -1649,7 +1649,7 @@ fn parse_table_spec(
 
 /// The absolute point value of a [`Length`], resolving a percentage against a nominal 100 pt so a
 /// percentage inset still yields a sensible padding; a table's inset is in practice an absolute length.
-fn length_pt(len: Length) -> f64 {
+pub(crate) fn length_pt(len: Length) -> f64 {
 	match len {
 		Length::Abs(pt)	=> pt,
 		Length::Rel(f)	=> f * 100.0,
@@ -1722,6 +1722,11 @@ fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Figure
 			return FigureBody::Table(spec);
 		}
 	}
+	// A CeTZ/Fletcher diagram, bar chart or line plot drawn inline is read into a builder that draws it
+	// for real; only when the body is none of these does it fall through to the image/placeholder path.
+	if let Some(cf) = super::codefig::parse_code_figure(text) {
+		return FigureBody::Code(cf);
+	}
 	let (path, width, height, scale) = image_call(text);
 	FigureBody::Image { path, width, height, scale }
 }
@@ -1766,7 +1771,7 @@ fn image_call(text: &str) -> (String, Option<Length>, Option<Length>, Option<f64
 /// Reads a Typst length argument into a [`Length`]: a percentage as a fraction of the measure, a `pt`,
 /// `mm`, `cm` or `in` length as absolute points, a bare number as points. `auto` and anything unreadable
 /// give `None`, so the figure falls back to filling the measure.
-fn parse_length(val: &str) -> Option<Length> {
+pub(crate) fn parse_length(val: &str) -> Option<Length> {
 	let v = val.trim();
 	if let Some(pct) = v.strip_suffix('%') {
 		return pct.trim().parse::<f64>().ok().map(|n| Length::Rel(n / 100.0));
@@ -1831,7 +1836,7 @@ fn parse_percent(val: &str) -> Option<f64> {
 
 /// The content of the first `name(...)` call in `text`, balanced across nesting and strings, or `None`.
 /// `name` must sit at a word boundary, so a short name does not match inside a longer identifier.
-fn call_inner(text: &str, name: &str) -> Option<String> {
+pub(crate) fn call_inner(text: &str, name: &str) -> Option<String> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let namev:	Vec<char>	= name.chars().collect();
 	let paren				= find_call(&chars, &namev, 0)?;
@@ -1862,7 +1867,7 @@ fn is_call_ident(c: char) -> bool {
 }
 
 /// The first `"..."` string literal's content in `text`, or `None`.
-fn first_string(text: &str) -> Option<String> {
+pub(crate) fn first_string(text: &str) -> Option<String> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let start				= chars.iter().position(|&c| c == '"')?;
 	let end					= (start + 1..chars.len()).find(|&j| chars[j] == '"')?;
@@ -1871,7 +1876,7 @@ fn first_string(text: &str) -> Option<String> {
 
 /// Splits the inner text of a call by its top-level commas, respecting `()[]{}` nesting and `"..."`
 /// strings, so a comma inside a nested group or a string does not part an argument.
-fn split_top_args(inner: &str) -> Vec<String> {
+pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 	let mut args:	Vec<String>	= Vec::new();
 	let mut cur					= String::new();
 	let mut depth				= 0i32;
@@ -1902,7 +1907,7 @@ fn split_top_args(inner: &str) -> Vec<String> {
 /// Splits a `key: value` argument at its top-level colon, returning the key and the trimmed value, or
 /// `None` when there is no top-level colon or the key is not a bare identifier -- so a positional cell
 /// or a spread is not mistaken for a named argument.
-fn named_arg(arg: &str) -> Option<(String, String)> {
+pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 	let chars:	Vec<char>	= arg.chars().collect();
 	let mut depth			= 0i32;
 	let mut in_str			= false;
