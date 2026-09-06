@@ -1142,7 +1142,13 @@ fn build_sqrt(
 /// wherever the content sits just above a variant -- the oversize the fidelity sweep measured -- because
 /// Latin Modern's variant ladder is coarse and the next size up overshoots by 15-20 %.
 fn delim_target(content: Sp) -> Sp {
-	let factor		= Sp(content.raw() * 901 / 1000);
+	// The DelimiterFactor product is computed in i64: a tall matrix or deep fence carries a content
+	// extent past ~36 pt, where `content.raw() * 901` overflows the i32 scaled-point domain (a debug
+	// build panics; a release build wraps to a garbage, often negative, factor and then falls through to
+	// `floored`). Widening only the intermediate leaves the result identical for every in-range input --
+	// the quotient can never exceed `content`, so narrowing back to i32 never truncates -- while a
+	// legitimately tall content now yields the true 901/1000 factor instead of a wrapped one.
+	let factor		= Sp((content.raw() as i64 * 901 / 1000) as i32);
 	let shortfall	= Sp::from_pt(5.0);
 	let floored		= if content > shortfall { content - shortfall } else { Sp::ZERO };
 	if factor > floored { factor } else { floored }
@@ -1293,4 +1299,34 @@ fn emit(mbox: MBox, base: Sp) -> (Vec<Node>, Dims) {
 	// find how far the maths climbs above the line, a display caller takes the height as the box's own.
 	let dims = Dims::new(mbox.width, mbox.height, mbox.depth);
 	(nodes, dims)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// A delimiter target for a tall matrix (content extent well past 36 pt) once overflowed the i32
+	// scaled-point product `content.raw() * 901`: a debug build panicked, a release build wrapped to a
+	// garbage factor. The widened arithmetic must yield the true DelimiterFactor (901/1000) instead.
+	#[test]
+	fn delim_target_tall_content_no_overflow() {
+		// 50 pt of content: content.raw() * 901 = 2.95e9, past i32::MAX (2.147e9).
+		let content	= Sp::from_pt(50.0);
+		let got		= delim_target(content);
+		// 0.901 * 50 pt = 45.05 pt, which exceeds content less the 5 pt shortfall (45 pt), so the factor
+		// wins. A wrapped product would have given a negative or tiny factor, falling through to 45 pt.
+		let expect	= Sp((content.raw() as i64 * 901 / 1000) as i32);
+		assert_eq!(got, expect);
+		assert!(got.raw() > 0);
+		assert!(got > content - Sp::from_pt(5.0));
+	}
+
+	// In-range content is unchanged by the widening: below ~36 pt the i32 product never overflowed, so
+	// the result must match exactly what it always was.
+	#[test]
+	fn delim_target_small_content_unchanged() {
+		let content	= Sp::from_pt(20.0);
+		let got		= delim_target(content);
+		assert_eq!(got, Sp(content.raw() * 901 / 1000));
+	}
 }
