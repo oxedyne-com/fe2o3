@@ -153,7 +153,10 @@ fn main() -> Outcome<()> {
 		let spec = res!(book::load(std::path::Path::new(&source)));
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
 	} else {
-		let blocks	= res!(lang::to_blocks(&src));
+		let (blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
+		if let Some(report) = skips.report() {
+			eprintln!("[austenite] {}", report);
+		}
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, None)
 	};

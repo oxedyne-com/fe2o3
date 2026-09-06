@@ -16,14 +16,20 @@
 //! opening line -- a `#figure(...)`, `#table(...)`, `#aside-box[...]`, or a `#let x = (...)` data array
 //! that spans many lines -- the reader consumes following lines, tracking nesting across `()`, `[]` and
 //! `{}` and respecting string literals, until the delimiters balance, so the whole span renders nothing.
+//! Every such skip is recorded by name into a [`SkipSummary`] the parse returns beside its items, so a
+//! caller reports the constructs it dropped rather than losing them silently. A `#columns(n)[ ... ]`
+//! wrapper is the exception the reader does not drop whole: its body is re-parsed and set single-column.
 //!
 //! Typst comments are stripped before a line is classified: a `//` runs to the line's end, and a
 //! `/* ... */` spans lines, both dropped -- except within a `"..."` string or a `` `code` `` span, and a
 //! `//` right after `:` is kept, so a bare URL survives. Inline glossary and index calls, defined in the
-//! book template (`#gs`, `#gscap`, `#gsi`, `#gscapi`, `#glossind`, `#glossindcap`, `#idx`, `#idx-main`,
-//! `#idx-as`, `#idx-main-as`, `#index`, `#index-main`, `#idx-nested`), are read by [`parse_inlines`]: a
-//! glossary term sets its display text, bold-italic on its first document use; a visible index call sets
-//! its display text plain; a pure index marker sets nothing.
+//! book template (`#gs`, `#gscap`, `#gsi`, `#gscapi`, `#glossind`, `#glossindcap`, the term-dictionary
+//! family `#g`, `#gcap`, `#gi`, `#gcapi`, `#t`, `#tcap`, `#graw`, and `#idx`, `#idx-main`, `#idx-as`,
+//! `#idx-main-as`, `#index`, `#index-main`, `#idx-nested`), plus a `#link(dest)[text]` hyperlink, are read
+//! by [`parse_inlines`]: a glossary term sets its display text, bold-italic on its first document use; a
+//! visible term or index call sets its display text plain; a link sets its text and drops the destination;
+//! a pure index marker sets nothing. An inline `#func[...]` the reader does not know is consumed, recorded
+//! in the summary, and its bracketed body folded in, so its words survive but its raw markup never leaks.
 
 use crate::ir::Length;
 use crate::ir::Span;
@@ -34,11 +40,76 @@ use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
+
+/// A tally of the constructs the reader skipped rather than set, keyed by the source name each was
+/// written with (`#show`, `#let`, `#columns`, an unknown `#func`) and counted. A caller prints it so a
+/// dropped construct is a visible report rather than a silent gap. Empty when the reader set everything
+/// it met. Names carry their leading `#`, so the report reads back as source.
+#[derive(Clone, Debug, Default)]
+pub struct SkipSummary {
+	counts:	BTreeMap<String, usize>,
+}
+
+impl SkipSummary {
+	/// Records one skipped construct by the source name it was written with (with its leading `#`).
+	fn record(&mut self, name: &str) {
+		*self.counts.entry(name.to_string()).or_insert(0) += 1;
+	}
+
+	pub fn is_empty(&self) -> bool { self.counts.is_empty() }
+
+	/// The number of distinct construct names skipped.
+	pub fn kinds(&self) -> usize { self.counts.len() }
+
+	/// The total count of skipped constructs across every name.
+	pub fn total(&self) -> usize { self.counts.values().sum() }
+
+	/// Each skipped construct name with its count, ordered by descending count then name, so the report
+	/// leads with the construct that cost the most.
+	pub fn entries(&self) -> Vec<(String, usize)> {
+		let mut v: Vec<(String, usize)> = self.counts.iter().map(|(k, &c)| (k.clone(), c)).collect();
+		v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+		v
+	}
+
+	/// Folds another summary's counts into this one, so a caller assembling several chapters reports one
+	/// total rather than a summary per file.
+	pub fn merge(&mut self, other: &SkipSummary) {
+		for (k, &c) in &other.counts {
+			*self.counts.entry(k.clone()).or_insert(0) += c;
+		}
+	}
+
+	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- or `None` when
+	/// nothing was skipped, so a caller prints the line only when it has something to say.
+	pub fn report(&self) -> Option<String> {
+		if self.counts.is_empty() {
+			return None;
+		}
+		let parts: Vec<String> = self.entries().into_iter()
+			.map(|(n, c)| fmt!("{} ({})", n, c))
+			.collect();
+		let n = self.total();
+		Some(fmt!("skipped {} unsupported construct{}: {}",
+			n, if n == 1 { "" } else { "s" }, parts.join(", ")))
+	}
+}
 
 /// Parses a whole Ingot source string into its surface items. The only error is an empty heading --
 /// a `=` marker with no title -- which names the offending 1-based line.
 pub fn document(src: &str) -> Outcome<Vec<Item>> {
+	let (items, _) = res!(document_with_skips(src));
+	Ok(items)
+}
+
+/// Parses a source string into its surface items and, alongside, the [`SkipSummary`] of every construct
+/// the reader passed over rather than set -- a `#let`/`#set`/`#show`/`#import` code line, an unknown
+/// line-leading `#func(...)` call, a `#columns` wrapper, and any unhandled inline `#func[...]`. The
+/// caller prints the summary so a dropped construct is reported rather than lost silently.
+pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
+	let mut skips:		SkipSummary	= SkipSummary::default();
 	let mut items:		Vec<Item>	= Vec::new();
 	let mut lines:		Vec<String>	= Vec::new();	// the current paragraph's constituent lines
 	let mut para_start:	u32			= 0;			// byte offset of the paragraph's first line
@@ -129,7 +200,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			if cap.state.depth <= 0 {
 				let done = capture.take();
 				if let Some(cap) = done {
-					dispatch_capture(cap, &mut items, &mut arrays);
+					dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
 				}
 			}
 			continue;
@@ -149,7 +220,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 		if is_fence(trimmed) {
 			// An opening fence closes any paragraph or list, then begins a verbatim block. The fence line
 			// itself (and any language tag on it) is not kept.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			code = Some((Vec::new(), start));
 			continue;
@@ -157,13 +228,13 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 
 		if trimmed.is_empty() {
 			// A blank line closes the paragraph or list it follows.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 		} else if let Some(kind) = capture_opener(trimmed) {
 			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
 			// array feeding a table. It closes any open block, then its whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			let mut state	= SkipState { depth: 0, in_string: false };
 			scan_brackets(line, &mut state);
@@ -172,7 +243,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			buf.push('\n');
 			let cap = Capture { kind, buf, state };
 			if cap.state.depth <= 0 {
-				dispatch_capture(cap, &mut items, &mut arrays);	// the whole construct closed on one line
+				dispatch_capture(cap, &mut items, &mut arrays, &mut skips);	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
 			}
@@ -180,7 +251,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// A standalone `#line(length:.., stroke:..)` horizontal divider (the appendix brackets a note
 			// with one above and below). It closes any open block and sets a stroked rule; a multi-line
 			// `#line(` that does not close on this line falls through to the skip path below.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			if let Some(rule) = parse_line_rule(trimmed) {
 				items.push(rule);
@@ -191,14 +262,15 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// The styling and computation layer is a later increment; the prose around it still sets. When
 			// its delimiters do not balance on this line, the multi-line span is consumed by the check at the
 			// top of the loop until they do.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			skips.record(&construct_name(trimmed));
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
 		} else if trimmed.starts_with('=') {
 			// A heading closes any paragraph or list above it, then stands on its own line.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
@@ -217,14 +289,14 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 			// and the table of contents.
 			items.push(Item::Heading {
 				level:	level as u8,
-				runs:	parse_inlines(&title),
+				runs:	parse_inlines_in(&title, &mut skips),
 				label,
 				span:	Span::new(start, end),
 			});
 		} else if let Some((ord, text)) = marker(trimmed) {
 			// A list item. It closes any open paragraph, and a list of the other kind, but joins a list of
 			// its own kind. The item's text carries inline emphasis like any run.
-			flush_para(&mut items, &mut lines, para_start, para_end);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			if !list.is_empty() && list_ord != ord {
 				flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 			}
@@ -232,7 +304,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 				list_ord	= ord;
 				list_start	= start;
 			}
-			list.push(parse_inlines(&text));
+			list.push(parse_inlines_in(&text, &mut skips));
 			list_end = end;
 		} else {
 			// Any other non-blank line joins the running paragraph, closing a list first; its own line
@@ -248,7 +320,7 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 
 	// A source that ends without a closing blank line still closes its last paragraph or list; an
 	// unterminated code fence still yields the block it had gathered.
-	flush_para(&mut items, &mut lines, para_start, para_end);
+	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 	flush_list(&mut items, &mut list, list_ord, list_start, list_end);
 	if let Some((buf, cstart)) = code {
 		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
@@ -256,9 +328,9 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
 	// still yields its best-effort figure or table rather than swallowing the tail silently.
 	if let Some(cap) = capture {
-		dispatch_capture(cap, &mut items, &mut arrays);
+		dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
 	}
-	Ok(items)
+	Ok((items, skips))
 }
 
 /// Is this already-left-trimmed line a ```` ``` ```` code fence? An opening fence may carry a language
@@ -312,6 +384,7 @@ fn flush_para(
 	lines:	&mut Vec<String>,
 	start:	u32,
 	end:	u32,
+	skips:	&mut SkipSummary,
 )
 {
 	if lines.is_empty() {
@@ -323,7 +396,7 @@ fn flush_para(
 	// rather than a rich paragraph. Ordinary prose ends in a full stop, so the conservative `split_label`
 	// (a single whitespace-free token in angle brackets at the very end) does not fire on it.
 	let (body, label) = split_label(&text);
-	let runs = parse_inlines(&body);
+	let runs = parse_inlines_in(&body, skips);
 	items.push(Item::Paragraph { runs, label, span: Span::new(start, end) });
 	lines.clear();
 }
@@ -341,6 +414,14 @@ fn normalise_ws(s: &str) -> String {
 /// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
 /// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
 fn parse_inlines(text: &str) -> Vec<Inline> {
+	let mut skips = SkipSummary::default();
+	parse_inlines_in(text, &mut skips)
+}
+
+/// The inline scanner proper, recording every unhandled inline call into `skips` so a `#func[...]` the
+/// reader cannot set is reported rather than leaked into the running text. [`parse_inlines`] is the thin
+/// wrapper for callers -- table cells, captions, flattening -- that do not surface the summary.
+fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let n					= chars.len();
 	let mut runs:	Vec<Inline>	= Vec::new();
@@ -383,7 +464,7 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 		// An inline footnote. Its bracketed content is markup, carried as inline runs so the note sets its
 		// own emphasis at the foot of the page. The mark falls after the run before it.
 		if c == '#' {
-			if let Some((note, next)) = footnote_call(&chars, i) {
+			if let Some((note, next)) = footnote_call(&chars, i, skips) {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
@@ -399,7 +480,7 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
-				push_emphasis(&mut runs, false, &inner);
+				push_emphasis(&mut runs, false, &inner, skips);
 				i = next;
 				continue;
 			}
@@ -430,7 +511,7 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 						runs.push(Inline::Glossary { term, display });
 					},
 					Call::Visible(display) => {
-						let sub = parse_inlines(&display);
+						let sub = parse_inlines_in(&display, skips);
 						// A plain display folds back into the running text, keeping the fast single-run
 						// path; a display carrying markup becomes its own runs.
 						if let [Inline::Text(t)] = sub.as_slice() {
@@ -485,6 +566,24 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
+		// A Typst hyperlink, `#link("url")[text]` or `#link(<label>)[text]`. The link text is what a print
+		// reader sees, so its markup is parsed and folded into the running line; the destination has no place
+		// on a page with no clickable annotation and is dropped. A `#link("url")` with no bracket sets the
+		// URL itself as its text, as Typst does.
+		if c == '#' {
+			if let Some((body, next)) = link_call(&chars, i, skips) {
+				if let [Inline::Text(t)] = body.as_slice() {
+					plain.push_str(t);
+				} else {
+					if !plain.is_empty() {
+						runs.push(Inline::Text(std::mem::take(&mut plain)));
+					}
+					runs.extend(body);
+				}
+				i = next;
+				continue;
+			}
+		}
 		// A Typst cross-reference: `@` then a label.
 		if c == '@' {
 			if let Some((label, next)) = at_label(&chars, i) {
@@ -502,8 +601,30 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
 				let inner: String = chars[i + 1..close].iter().collect();
-				push_emphasis(&mut runs, c == '*', &inner);
+				push_emphasis(&mut runs, c == '*', &inner, skips);
 				i = close + 1;
+				continue;
+			}
+		}
+		// An inline `#func(...)` or `#func[...]` call none of the handlers above claimed: a template function
+		// the reader cannot yet run. It is recorded by name and consumed whole, so its raw markup no longer
+		// leaks into the set text. When it wraps a single `[...]` content group -- the common shape of a Typst
+		// content function -- that body is parsed and folded in, keeping its words rather than dropping them;
+		// a call with only paren arguments (`#v(1em)`, `#colbreak()`) sets nothing where it stood.
+		if c == '#' {
+			if let Some((body, next, name)) = unknown_call(&chars, i, skips) {
+				skips.record(&name);
+				if let Some(body) = body {
+					if let [Inline::Text(t)] = body.as_slice() {
+						plain.push_str(t);
+					} else {
+						if !plain.is_empty() {
+							runs.push(Inline::Text(std::mem::take(&mut plain)));
+						}
+						runs.extend(body);
+					}
+				}
+				i = next;
 				continue;
 			}
 		}
@@ -526,8 +647,8 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 /// emphasis face and the embedded calls become their own runs, so a call nested in emphasis renders its
 /// display text rather than leaking its raw source. A glossary term keeps its own first-use bold-italic
 /// (which subsumes the surrounding emphasis), so only the plain stretches carry the emphasis face.
-fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str) {
-	let sub = parse_inlines(inner);
+fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str, skips: &mut SkipSummary) {
+	let sub = parse_inlines_in(inner, skips);
 	if let [Inline::Text(t)] = sub.as_slice() {
 		runs.push(if strong { Inline::Strong(t.clone()) } else { Inline::Emph(t.clone()) });
 		return;
@@ -610,6 +731,104 @@ fn raw_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 		return None;
 	}
 	Some((chars[open..close].iter().collect(), close + 2))
+}
+
+/// Reads an inline `#link(dest)[text]` (or a bare `#link(dest)`) at `i` (a `#`), returning the link's
+/// display runs and the index just past it. The destination -- a `"url"` string or a `<label>` -- is read
+/// and discarded, the page carrying no clickable annotation; the bracketed text is what the reader sees,
+/// so it is parsed for its own markup. A `#link(dest)` with no following `[...]` sets the destination
+/// string itself as its text, as Typst does. Any unhandled inline call within the text is recorded into
+/// `skips`. `None` when the shape is not a link call or its arguments do not close.
+fn link_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Vec<Inline>, usize)> {
+	let Some(open) = at_lit(chars, i, "#link") else { return None; };
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	let Some((dest, after_dest)) = read_group(chars, open) else { return None; };
+	// A following `[...]` group is the link text; without one, the destination stands as the text.
+	if chars.get(after_dest) == Some(&'[') {
+		let Some((body, next)) = read_group(chars, after_dest) else { return None; };
+		return Some((parse_inlines_in(&body, skips), next));
+	}
+	let text = link_dest_text(&dest);
+	Some((vec![Inline::Text(text)], after_dest))
+}
+
+/// The display text of a bare `#link(dest)` with no bracketed body: a `"url"` string loses its quotes, a
+/// `<label>` its angle brackets, and anything else stands as written.
+fn link_dest_text(dest: &str) -> String {
+	let t = dest.trim();
+	if let Some(inner) = t.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+		return inner.to_string();
+	}
+	unwrap_arg(t)
+}
+
+/// Reads an inline `#name(...)`/`#name[...]` call at `i` (a `#`) that no earlier handler claimed, so the
+/// reader can consume it whole rather than leak its raw markup. Returns the bracketed body's runs (parsed,
+/// so its own markup survives) when the call is a single `[...]` content group, `None` for the body when it
+/// carries only paren arguments, together with the index just past the call and its `#name` for the skip
+/// report. The final `None` is returned when `i` does not open a `#name(`/`#name[` call at all, so a bare
+/// `#` or a `#variable` interpolation is left as ordinary text.
+fn unknown_call(chars: &[char], i: usize, skips: &mut SkipSummary)
+	-> Option<(Option<Vec<Inline>>, usize, String)>
+{
+	if chars.get(i) != Some(&'#') {
+		return None;
+	}
+	let start	= i + 1;
+	let mut j	= start;
+	while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '-' || chars[j] == '_' || chars[j] == '.') {
+		j += 1;
+	}
+	if j == start {
+		return None;
+	}
+	let name: String = chars[start..j].iter().collect();
+	match chars.get(j) {
+		// A `#name[body]`: the bracketed content is the call's displayable body.
+		Some('[') => {
+			let Some((body, next)) = read_group(chars, j) else { return None; };
+			Some((Some(parse_inlines_in(&body, skips)), next, fmt!("#{}", name)))
+		},
+		// A `#name(args)` and any following `[body]`: read the arguments away, then fold a body if one trails.
+		Some('(') => {
+			let Some((_, after_args)) = read_group(chars, j) else { return None; };
+			if chars.get(after_args) == Some(&'[') {
+				let Some((body, next)) = read_group(chars, after_args) else { return None; };
+				return Some((Some(parse_inlines_in(&body, skips)), next, fmt!("#{}", name)));
+			}
+			Some((None, after_args, fmt!("#{}", name)))
+		},
+		_ => None,
+	}
+}
+
+/// The `#name` of a skipped line-leading code statement or standalone call, for the skip report: the
+/// keyword itself for a block statement (`#let`, `#set`, `#show`, `#import`), or `#` and the identifier of
+/// a standalone call. Falls back to the first whitespace-delimited token when neither shape reads, so the
+/// tally always names something rather than nothing.
+fn construct_name(trimmed: &str) -> String {
+	for kw in ["#import", "#let", "#set", "#show"] {
+		if trimmed.starts_with(kw) {
+			return kw.to_string();
+		}
+	}
+	let mut cs = trimmed.chars();
+	if cs.next() == Some('#') {
+		let mut ident = String::new();
+		for c in cs {
+			if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+				ident.push(c);
+			} else {
+				break;
+			}
+		}
+		if !ident.is_empty() {
+			return fmt!("#{}", ident);
+		}
+	}
+	trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
 }
 
 /// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
@@ -698,14 +917,19 @@ fn opens_standalone_call(trimmed: &str) -> bool {
 	false
 }
 
-/// Is this identifier one of the book template's inline glossary or index functions? These emit body
-/// text (or an invisible marker) mid-paragraph, so a line that opens with one is prose the inline
-/// scanner reads, never a standalone call the line scanner skips.
+/// Is this identifier one of the book template's inline functions the reader sets in place -- a glossary
+/// or index call, a term-dictionary lookup, a hyperlink, a citation or an emphasis call? These emit body
+/// text (or an invisible marker) mid-paragraph, so a line that opens with one is prose the inline scanner
+/// reads, never a standalone call the line scanner skips.
 fn is_inline_call(name: &str) -> bool {
 	matches!(name,
+		// The simple string-keyed glossary/index family, keyed on their own display text.
 		"gs" | "gscap" | "gsi" | "gscapi" | "glossind" | "glossindcap"
+		// The term-dictionary family, keyed on a `term-dict` entry: `g`/`gcap`/`gi`/`gcapi` set the value
+		// with first-use styling, `t`/`tcap` set it plain, `graw` sets it in the mono face.
+		| "g" | "gcap" | "gi" | "gcapi" | "t" | "tcap" | "graw"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
-		| "index" | "index-main" | "cite"
+		| "index" | "index-main" | "cite" | "link"
 		| "emph" | "super"
 		| "claim-label" | "claim-refs")
 }
@@ -756,13 +980,13 @@ fn split_label(title: &str) -> (String, Option<String>) {
 /// `*strong*` or `_emph_` in the note sets with its own face -- and the index just past the closing `]`.
 /// `None` when the shape is not a footnote call or its bracket does not close, so anything else is left as
 /// ordinary text.
-fn footnote_call(chars: &[char], i: usize) -> Option<(Vec<Inline>, usize)> {
-	let open = at_lit(chars, i, "#footnote")?;
+fn footnote_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Vec<Inline>, usize)> {
+	let Some(open) = at_lit(chars, i, "#footnote") else { return None; };
 	if chars.get(open) != Some(&'[') {
 		return None;
 	}
-	let (inner, next) = read_group(chars, open)?;
-	Some((parse_inlines(&inner), next))
+	let Some((inner, next)) = read_group(chars, open) else { return None; };
+	Some((parse_inlines_in(&inner, skips), next))
 }
 
 /// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
@@ -888,8 +1112,13 @@ enum Call {
 /// the `-cap` variants; `idx`/`idx-main` set the content plain; `idx-as`/`idx-main-as` take a second
 /// argument as the display and set that; `index`/`index-main`/`idx-nested` are pure markers and set
 /// nothing. First use is keyed by the term as written, matching the template's own case-sensitive
-/// `glossary-seen` set. The term-dict lookups (`#g`, `#gcap`, `#gi`, `#gcapi`, `#t`, `#tcap`) need the
-/// dictionary and are a later increment; they are not matched here, so they still set literally.
+/// `glossary-seen` set.
+///
+/// The term-dictionary family reads the same way but keys a `term-dict` entry rather than carrying its
+/// own display: `g`/`gi` set it bold-italic on first use, `gcap`/`gcapi` capitalised, `t`/`tcap` plain and
+/// `graw` plain (its mono face is not reproduced). The reader has no `term-dict`, so it sets the key text
+/// as written; a key that differs from its value (the template translates `org` to a company name) sets
+/// the key, which the caller records only in that it no longer leaks the raw call.
 fn glossary_call(chars: &[char], i: usize) -> Option<(Call, usize)> {
 	if chars.get(i) != Some(&'#') {
 		return None;
@@ -928,11 +1157,12 @@ fn glossary_call(chars: &[char], i: usize) -> Option<(Call, usize)> {
 
 	let arg = unwrap_arg(&a1);
 	let call = match name.as_str() {
-		"gs" | "gsi" | "glossind"			=> Call::Glossary { term: arg.clone(), display: arg },
-		"gscap" | "gscapi" | "glossindcap"	=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
-		"idx" | "idx-main"					=> Call::Visible(arg),
-		"index" | "index-main"				=> Call::Invisible,
-		_									=> return None,
+		"gs" | "gsi" | "glossind" | "g" | "gi"		=> Call::Glossary { term: arg.clone(), display: arg },
+		"gscap" | "gscapi" | "glossindcap" | "gcap" | "gcapi"	=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
+		"idx" | "idx-main" | "t" | "graw"			=> Call::Visible(arg),
+		"tcap"										=> Call::Visible(cap_first(&arg)),
+		"index" | "index-main"						=> Call::Invisible,
+		_										=> return None,
 	};
 	Some((call, next1))
 }
@@ -1099,6 +1329,7 @@ enum CaptureKind {
 	Figure,			// a `#figure(...)` call, possibly wrapping a table or an image
 	Table,			// a bare `#table(...)` call
 	Let(String),	// a `#let name = (...)` data array bound to this name
+	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -1110,6 +1341,9 @@ fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
 	}
 	if trimmed.starts_with("#table(") {
 		return Some(CaptureKind::Table);
+	}
+	if trimmed.starts_with("#columns(") {
+		return Some(CaptureKind::Columns);
 	}
 	let_array_name(trimmed).map(CaptureKind::Let)
 }
@@ -1139,6 +1373,7 @@ fn dispatch_capture(
 	cap:	Capture,
 	items:	&mut Vec<Item>,
 	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
+	skips:	&mut SkipSummary,
 )
 {
 	match cap.kind {
@@ -1157,7 +1392,50 @@ fn dispatch_capture(
 				items.push(item);
 			}
 		},
+		CaptureKind::Columns => {
+			// The reader has no column model: the `#columns(n)[ ... ]` wrapper is recorded as skipped and
+			// its body set single-column, so the words survive even though the multi-column layout does not.
+			// The body is a block sequence, so it is read through the document parser again and its items
+			// spliced in; a nested skip (a `#colbreak()`, an unknown call) folds into the same summary.
+			skips.record("#columns");
+			if let Some(body) = columns_body(&cap.buf) {
+				if let Ok((mut inner, sub)) = document_with_skips(&body) {
+					skips.merge(&sub);
+					items.append(&mut inner);
+				}
+			}
+		},
 	}
+}
+
+/// The `[ ... ]` body of a captured `#columns(n)[ ... ]` wrapper: the column count arguments are read and
+/// dropped, and the bracketed block content returned for re-parsing. `None` when no `[...]` group follows
+/// the arguments, so a malformed wrapper contributes no body.
+fn columns_body(buf: &str) -> Option<String> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let Some(at) = find_lit(&chars, "#columns") else { return None; };
+	let open	= at + "#columns".chars().count();
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	let Some((_, after_args)) = read_group(&chars, open) else { return None; };
+	let mut j = after_args;
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	if chars.get(j) != Some(&'[') {
+		return None;
+	}
+	read_group(&chars, j).map(|(body, _)| body)
+}
+
+/// The index of the first occurrence of the literal `s` in `chars`, or `None`.
+fn find_lit(chars: &[char], s: &str) -> Option<usize> {
+	let pat:	Vec<char>	= s.chars().collect();
+	if pat.is_empty() || chars.len() < pat.len() {
+		return None;
+	}
+	(0..=chars.len() - pat.len()).find(|&start| chars[start..start + pat.len()] == pat[..])
 }
 
 /// Evaluates a `#let name = (...)` value into the flat sequence of cells it holds, each cell its inline
@@ -1880,5 +2158,80 @@ mod tests {
 			"cite run missing: {:?}", runs);
 		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#cite"))),
 			"raw #cite leaked: {:?}", runs);
+	}
+
+	/// `#link("url")[text]` sets the link text in the running line and drops the URL, so no raw `#link`
+	/// leaks; a bare `#link("url")` with no bracket sets the URL as its own text.
+	#[test]
+	fn link_call_renders_text_not_markup() {
+		let runs = parse_inlines("See #link(\"https://aistatement.com\")[Centre for AI Safety, May 2023] on risk.");
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#link") || t.contains("http"))),
+			"raw link markup leaked: {:?}", runs);
+		let joined = flatten_markup("See #link(\"https://aistatement.com\")[Centre for AI Safety, May 2023] on risk.");
+		assert_eq!(joined, "See Centre for AI Safety, May 2023 on risk.");
+		// The label-destination form and the bare no-body form both set text without leaking.
+		assert_eq!(flatten_markup("read #link(<intro>)[the opening]"), "read the opening");
+		assert_eq!(flatten_markup("at #link(\"elearnity.io\")"), "at elearnity.io");
+		// A line-leading link is prose the inline scanner reads, not a standalone call the line scanner drops.
+		assert!(is_inline_call("link"));
+		assert!(code_skip("#link(\"https://x.io\")[click]").is_none());
+	}
+
+	/// The term-dictionary aliases set their argument text with the styling of their `gs` siblings: `g`/`gi`
+	/// a first-use glossary term, `t`/`tcap` plain text, and none of them leak raw markup. A line opening
+	/// with one is prose, not a skipped standalone call.
+	#[test]
+	fn term_dict_aliases_render_without_leaking() {
+		let runs = parse_inlines("Call it the #g[iniverse], your inner universe.");
+		assert!(runs.iter().any(|r| matches!(r, Inline::Glossary { term, display } if term == "iniverse" && display == "iniverse")),
+			"glossary alias missing: {:?}", runs);
+		assert_eq!(flatten_markup("Visit #t[website] today"), "Visit website today");
+		assert_eq!(flatten_markup("#tcap[donate] to help"), "Donate to help");
+		assert!(is_inline_call("g") && is_inline_call("t") && is_inline_call("graw"));
+		assert!(code_skip("#t[website]").is_none());
+	}
+
+	/// An unhandled inline `#func[...]` is consumed and recorded rather than left as raw markup, its
+	/// bracketed body folded in so its words survive; a paren-only call sets nothing where it stood.
+	#[test]
+	fn unknown_inline_call_is_recorded_not_leaked() {
+		let mut skips = SkipSummary::default();
+		let runs = parse_inlines_in("a #smallcaps[Nato] treaty and a #v(2pt) gap", &mut skips);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps") || t.contains("#v("))),
+			"raw unknown call leaked: {:?}", runs);
+		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
+			"smallcaps body dropped: {:?}", runs);
+		assert_eq!(skips.total(), 2);
+		let names: Vec<String> = skips.entries().into_iter().map(|(n, _)| n).collect();
+		assert!(names.contains(&"#smallcaps".to_string()) && names.contains(&"#v".to_string()),
+			"unexpected skip names: {:?}", names);
+	}
+
+	/// The reader tallies the code lines and unknown calls it skips, and reports them one line, so a
+	/// dropped construct is visible rather than silent. Handled inline calls do not appear in the tally.
+	#[test]
+	fn skip_summary_reports_skipped_constructs() {
+		let src = "#import \"x.typ\": *\n#set page(margin: 1cm)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
+		let (_, skips) = document_with_skips(src).expect("parse");
+		assert_eq!(skips.total(), 3);
+		let report = skips.report().expect("a report");
+		assert!(report.starts_with("skipped 3 unsupported constructs:"), "report was {:?}", report);
+		for name in ["#import", "#set", "#show"] {
+			assert!(report.contains(name), "{} missing from {:?}", name, report);
+		}
+		// A source the reader sets whole has nothing to report.
+		let (_, clean) = document_with_skips("Just prose with #g[iniverse].\n").expect("parse");
+		assert!(clean.is_empty() && clean.report().is_none());
+	}
+
+	/// A `#columns(n)[ ... ]` wrapper is recorded as skipped and its body set single-column, so the words
+	/// survive and no raw wrapper leaks into the block stream.
+	#[test]
+	fn columns_wrapper_flattens_to_single_column() {
+		let src = "#columns(2)[\nFirst paragraph here.\n\nSecond paragraph here.\n]\n";
+		let (items, skips) = document_with_skips(src).expect("parse");
+		let paras = items.iter().filter(|it| matches!(it, Item::Paragraph { .. })).count();
+		assert_eq!(paras, 2, "column body not set as paragraphs: {:?}", items);
+		assert_eq!(skips.entries(), vec![("#columns".to_string(), 1)]);
 	}
 }
