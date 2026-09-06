@@ -9,12 +9,8 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 autobins = false
 
 [[bin]]
-name = "aus"
-path = "src/bin/aus.rs"
-
-[[bin]]
-name = "ingot"
-path = "src/bin/ingot.rs"
+name = "austenite"
+path = "src/bin/austenite.rs"
 
 [[bin]]
 name = "diagram_demo"

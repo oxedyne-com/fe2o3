@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ┌──────────────────────────────────────────────┐
-# │ Live-preview an Ingot document in the browser │
+# │ Live-preview a Typst document in the browser │
 # └──────────────────────────────────────────────┘
 #
 # Austenite's answer to `typst watch`. Watches a Typst source, recompiles it with
@@ -34,7 +34,7 @@ fi
 SLOT="${RC_SLOT:-solo}"
 TARGET="${CARGO_TARGET_DIR:-$HOME/.cache/cargo-targets/$SLOT/austenite}"
 PREVIEW="$TARGET/dev-preview"
-INGOT="$TARGET/debug/ingot"
+AUSTENITE="$TARGET/debug/austenite"
 
 rm -rf "$PREVIEW"
 mkdir -p "$PREVIEW"
@@ -43,10 +43,10 @@ cleanup() { kill $(jobs -p) 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
 # Build the compiler once. A warm build is a second or two; a cold one longer.
-echo "dev: building ingot ..."
-( cd "$CRATE" && cargo build -q -p oxedyne_fe2o3_austenite --bin ingot )
-if [[ ! -x "$INGOT" ]]; then
-	echo "dev: ingot binary not found at $INGOT after build." >&2
+echo "dev: building austenite ..."
+( cd "$CRATE" && cargo build -q -p oxedyne_fe2o3_austenite --bin austenite )
+if [[ ! -x "$AUSTENITE" ]]; then
+	echo "dev: austenite binary not found at $AUSTENITE after build." >&2
 	exit 1
 fi
 
@@ -114,7 +114,7 @@ compile() {
 	ts="$(date '+%H:%M:%S')"
 	rm -f "$PREVIEW"/page-*.png "$PREVIEW"/raw-*.png
 	set +e
-	err="$("$INGOT" "$SRC" "$PREVIEW/out" 2>&1 >/dev/null)"; rc=$?
+	err="$("$AUSTENITE" "$SRC" "$PREVIEW/out" 2>&1 >/dev/null)"; rc=$?
 	set -e
 	if [[ $rc -eq 0 && -f "$PREVIEW/out/document.pdf" ]]; then
 		pdftoppm -r "$DPI" -png "$PREVIEW/out/document.pdf" "$PREVIEW/raw" >/dev/null 2>&1 || true

@@ -1,14 +1,16 @@
-//! `ingot` -- compile an Ingot source file to a set page.
+//! `austenite` -- compile a Typst document to a set of pages.
 //!
-//! Reads a `.ingot` manuscript, parses and lowers it through the [`lang`](oxedyne_fe2o3_austenite::lang)
-//! front end to a block list, authors that through the block layer, runs the two-pass driver to a
-//! fixed point, decorates each page with a running head and a folio, and writes every page as SVG
-//! alongside the resolved ledger and a single PDF of the whole run.
+//! Reads a Typst root, follows its `#include` chain through the [`book`](oxedyne_fe2o3_austenite::book)
+//! assembler (or, for a lone file, straight through the [`lang`](oxedyne_fe2o3_austenite::lang) reader),
+//! authors the block stream through the block layer, runs the two-pass driver to a fixed point, decorates
+//! each page with a running head and a folio, and writes every page as SVG alongside the resolved ledger
+//! and a single PDF of the whole run.
 //!
-//! Increment 1 sets the markup spine faithfully: what the source says, and no more. There is no
-//! table of contents, because the language has no `#outline()` yet.
+//! A construct the reader cannot yet set -- a `#show` rule, a `#columns` wrapper, an unknown `#func` --
+//! is passed over rather than failing the compile, and the lone-file path reports the tally on one terse
+//! line so a dropped construct is visible.
 //!
-//! Usage: `ingot <SOURCE.ingot> [OUTPUT_DIR]` (default output `ingot-out`).
+//! Usage: `austenite <SOURCE.typ> [OUTPUT_DIR]` (default output `austenite-out`).
 
 use oxedyne_fe2o3_austenite::{
 	book,
@@ -93,6 +95,16 @@ struct Prepared {
 	content:	Vec<u8>,
 }
 
+/// The result of a compile, for the caller to report: the page count, the number of driver passes to
+/// the fixed point, the count of anchors in the resolved ledger, and the terse skip line (or `None`
+/// when nothing was skipped).
+struct CompileStats {
+	pages:		usize,
+	passes:		u32,
+	anchors:	usize,
+	skip_line:	Option<String>,
+}
+
 /// Renders one page to both artefacts, the pure work a chunk runs across the cores. The SVG is written
 /// to its file here and dropped; the PDF content stream is serialised here too -- the bulk of the cost --
 /// and returned for the ordered writer to frame.
@@ -110,7 +122,23 @@ fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
 	Ok(Prepared { pdf, content })
 }
 
-fn main() -> Outcome<()> {
+/// The one terse skip line -- `skipped: #show ×2, #columns ×1` -- built from the summary's per-name
+/// counts, or `None` when the reader set everything it met. Ordered by the summary (descending count,
+/// then name), so the line leads with the construct that cost the most.
+fn terse_skip_line(skips: &lang::SkipSummary) -> Option<String> {
+	if skips.is_empty() {
+		return None;
+	}
+	let parts: Vec<String> = skips.entries().into_iter()
+		.map(|(n, c)| fmt!("{} ×{}", n, c))
+		.collect();
+	Some(fmt!("skipped: {}", parts.join(", ")))
+}
+
+/// Compiles the Typst root at `source` into `out_dir`, writing every page's SVG, the resolved ledger,
+/// and one PDF of the whole run. Returns the counts and the terse skip line for the caller to report;
+/// prints nothing itself save the phase profile when `AUS_PROFILE` is set.
+fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 	// Phase timing, gated on AUS_PROFILE so a normal run is untouched. Each phase reports its wall time
 	// to stderr, leaving stdout (and every emitted byte) exactly as it was.
 	let prof = std::env::var("AUS_PROFILE").is_ok();
@@ -121,27 +149,16 @@ fn main() -> Outcome<()> {
 	};
 	let t_all = std::time::Instant::now();
 
-	let args: Vec<String> = std::env::args().collect();
-	let source = match args.get(1) {
-		Some(s)	=> s.clone(),
-		None	=> return Err(err!(
-			"Usage: ingot <SOURCE.ingot> [OUTPUT_DIR]"; Input, Invalid, Missing)),
-	};
-	let out_dir = match args.get(2) {
-		Some(s)	=> s.clone(),
-		None	=> "ingot-out".to_string(),
-	};
-
-	let src = match std::fs::read_to_string(&source) {
+	let src = match std::fs::read_to_string(source) {
 		Ok(s)	=> s,
 		Err(e)	=> return Err(err!(e,
-			"Could not read the Ingot source file {:?}.", source; File, Read)),
+			"Could not read the source file {:?}.", source; File, Read)),
 	};
 
 	// A figure's `/assets/...` image path is root-relative in Typst, not filesystem-absolute; the image
 	// loader resolves it against this directory and, failing that, its ancestors, so a chapter compiled
 	// on its own finds the shared assets through the book's `assets` entry just as a whole book does.
-	if let Some(dir) = std::path::Path::new(&source).parent() {
+	if let Some(dir) = std::path::Path::new(source).parent() {
 		res!(oxedyne_fe2o3_austenite::image::set_base_dir(dir.to_path_buf()));
 	}
 
@@ -149,14 +166,17 @@ fn main() -> Outcome<()> {
 	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
 	// one place or the other, and the rest of the run is identical.
 	let t_parse = std::time::Instant::now();
+	let mut skip_line: Option<String> = None;
 	let (blocks, fonts, geom, style, title, heading, front, bib) = if book::is_book_root(&src) {
-		let spec = res!(book::load(std::path::Path::new(&source)));
+		// TODO: thread book-path skips -- `book::load` assembles the chapters through the reader but does
+		// not yet return the merged SkipSummary, so a book compile cannot report its skipped constructs.
+		// That threading belongs in book.rs, which another lane owns; leave the terse line to the lone-file
+		// path until it lands.
+		let spec = res!(book::load(std::path::Path::new(source)));
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
 	} else {
 		let (blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
-		if let Some(report) = skips.report() {
-			eprintln!("[austenite] {}", report);
-		}
+		skip_line = terse_skip_line(&skips);
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, None)
 	};
@@ -188,7 +208,7 @@ fn main() -> Outcome<()> {
 		}
 	}
 
-	res!(std::fs::create_dir_all(&out_dir));
+	res!(std::fs::create_dir_all(out_dir));
 
 	// The ledger is small and independent of the pages, so it is written first and out of the way.
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
@@ -266,7 +286,7 @@ fn main() -> Outcome<()> {
 		// Render this chunk's pages in parallel: each worker builds its page's SVG string, its PDF draw
 		// list, and that list serialised to content-stream bytes -- all pure, all independent.
 		let tr = std::time::Instant::now();
-		let out_ref = out_dir.as_str();
+		let out_ref = out_dir;
 		let rendered: Vec<Outcome<Prepared>> = std::thread::scope(|scope| {
 			let handles: Vec<_> = slice.iter()
 				.map(|page| scope.spawn(move || render_page_pair(page, out_ref)))
@@ -303,8 +323,33 @@ fn main() -> Outcome<()> {
 		eprintln!("[profile] {:<22} {:>8.1} ms", "TOTAL", t_all.elapsed().as_secs_f64() * 1000.0);
 	}
 
+	Ok(CompileStats {
+		pages:		out.pages.len(),
+		passes:		out.passes,
+		anchors:	out.ledger.len(),
+		skip_line,
+	})
+}
+
+fn main() -> Outcome<()> {
+	let args: Vec<String> = std::env::args().collect();
+	let source = match args.get(1) {
+		Some(s)	=> s.clone(),
+		None	=> return Err(err!(
+			"Usage: austenite <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
+	};
+	let out_dir = match args.get(2) {
+		Some(s)	=> s.clone(),
+		None	=> "austenite-out".to_string(),
+	};
+
+	let t = std::time::Instant::now();
+	let stats = res!(compile(&source, &out_dir));
+	if let Some(skip) = &stats.skip_line {
+		eprintln!("[austenite] {}", skip);
+	}
 	println!(
-		"ingot: {} -> {} page(s) in {} pass(es); {} anchor(s) in the ledger; written to {}/",
-		source, out.pages.len(), out.passes, out.ledger.len(), out_dir);
+		"austenite: {} -> {} page(s) in {} pass(es); {} anchor(s) in the ledger; {:.2}s; written to {}/",
+		source, stats.pages, stats.passes, stats.anchors, t.elapsed().as_secs_f64(), out_dir);
 	Ok(())
 }
