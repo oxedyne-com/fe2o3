@@ -67,6 +67,20 @@ pub fn write_page<W: Write>(stream: &mut PdfStream<W>, page: &Page) -> Outcome<(
 	stream.page(&res!(render_page(page)))
 }
 
+/// Writes a page whose draw list and content stream were built elsewhere -- on a worker thread, so the
+/// costly path transforms and serialisation run off the writer's thread. The sequential framing and the
+/// page-ordered `/ID` fold stay here, so the bytes are identical to [`write_page`]'s. `content` is the
+/// [`PdfPage::content_bytes`] of the same `pdf_page`.
+pub fn write_page_prepared<W: Write>(
+	stream:		&mut PdfStream<W>,
+	pdf_page:	&PdfPage,
+	content:	&[u8],
+)
+	-> Outcome<()>
+{
+	stream.page_prepared(pdf_page, content)
+}
+
 /// Builds one page's draw list: a white ground, then each placed box as a fill or a stroke.
 ///
 /// The coordinates are the engine's page frame -- top-left origin, y down -- and are handed on

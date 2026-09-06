@@ -22,13 +22,16 @@ use oxedyne_fe2o3_austenite::{
 	},
 	emit::{
 		self,
-		Emitter,
+		svg,
 	},
 	font::FontMetrics,
+	ir::DrawOp,
 	lang,
 	page::{
 		Frame,
+		Page,
 		PageGeometry,
+		PlacedKind,
 	},
 };
 
@@ -37,12 +40,87 @@ use oxedyne_fe2o3_font::{
 	face::Role,
 	shape::Dir,
 };
+use oxedyne_fe2o3_graphics::pdf::PdfPage;
 
 use std::fs::File;
 use std::io::BufWriter;
 use std::sync::Arc;
 
+/// An estimate of the extra memory rendering this page holds in flight, in bytes -- dominated by the
+/// figure rasters, which [`emit::pdf::render_page`] copies out of the shared frame into the page's own
+/// straight-RGB (and, when translucent, grey) buffers. A text page estimates near zero; a full-page
+/// illustration estimates several megabytes. The chunker sums this across a forming chunk and closes it
+/// before the sum would breach the memory budget, so an illustration-dense book self-limits its window
+/// while a text book packs a chunk full. The glyph outlines are not counted: they were shown to stay
+/// flat to a wide window, and are shed the moment the content stream is serialised.
+fn page_hold_estimate(page: &Page) -> usize {
+	// Rough bytes-per-unit for the SVG text and PDF content a page's ink expands to while it is in flight.
+	// A glyph becomes an outline of a couple of dozen path operators in each of the two serialisations; a
+	// figure's own path is written op for op; a raster is copied sample by sample. The constants are
+	// deliberately generous -- the estimate gates concurrency, so over-counting only narrows a chunk.
+	const PER_GLYPH:	usize = 800;	// one glyph's outline, in both serialisations (measured)
+	const PER_SEG:		usize = 320;	// one figure path segment, across every live buffer (measured)
+	const PER_SAMPLE:	usize = 8;		// RGB copy plus soft mask, with headroom
+
+	let mut bytes = 0usize;
+	for placed in &page.frame.placed {
+		match &placed.kind {
+			PlacedKind::Text(shaped) => {
+				bytes += shaped.run().glyphs.len() * PER_GLYPH;
+			},
+			PlacedKind::Graphic(g) => {
+				for op in &g.ops {
+					match op {
+						DrawOp::Fill { path, .. }	=> bytes += path.segs().len() * PER_SEG,
+						DrawOp::Stroke { path, .. }	=> bytes += path.segs().len() * PER_SEG,
+						DrawOp::Image { image, .. }	=> bytes += image.width * image.height * PER_SAMPLE,
+					}
+				}
+			},
+			_ => {},
+		}
+	}
+	bytes
+}
+
+/// One page's PDF, rendered off the writer's thread: its draw list (images only, once the outlines are
+/// serialised) and that list already serialised to content-stream bytes. The costly transforms and
+/// serialisation are done; the sequential writer only frames these and folds them into the file in page
+/// order. The page's SVG is written straight to its own file by the worker, since an SVG page is an
+/// independent file that owes nothing to page order, so its string never travels back or accumulates.
+struct Prepared {
+	pdf:		PdfPage,
+	content:	Vec<u8>,
+}
+
+/// Renders one page to both artefacts, the pure work a chunk runs across the cores. The SVG is written
+/// to its file here and dropped; the PDF content stream is serialised here too -- the bulk of the cost --
+/// and returned for the ordered writer to frame.
+fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
+	let svg			= res!(svg::render_page(page));
+	let path		= fmt!("{}/page-{:03}.svg", out_dir, page.number);
+	res!(std::fs::write(&path, &svg));
+	drop(svg);
+
+	let mut pdf		= res!(emit::pdf::render_page(page));
+	let content		= pdf.content_bytes();
+	// The glyph outlines are now serialised into `content`; free them so a chunk rendered ahead holds
+	// only its images and content bytes, not every page's paths at once. Peak memory stays flat.
+	pdf.shed_serialised_draws();
+	Ok(Prepared { pdf, content })
+}
+
 fn main() -> Outcome<()> {
+	// Phase timing, gated on AUS_PROFILE so a normal run is untouched. Each phase reports its wall time
+	// to stderr, leaving stdout (and every emitted byte) exactly as it was.
+	let prof = std::env::var("AUS_PROFILE").is_ok();
+	let mark = |label: &str, t: std::time::Instant| {
+		if prof {
+			eprintln!("[profile] {:<22} {:>8.1} ms", label, t.elapsed().as_secs_f64() * 1000.0);
+		}
+	};
+	let t_all = std::time::Instant::now();
+
 	let args: Vec<String> = std::env::args().collect();
 	let source = match args.get(1) {
 		Some(s)	=> s.clone(),
@@ -70,6 +148,7 @@ fn main() -> Outcome<()> {
 	// A book root assembles chapters and carries its own geometry, fonts and type; a lone file sets on
 	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
 	// one place or the other, and the rest of the run is identical.
+	let t_parse = std::time::Instant::now();
 	let (blocks, fonts, geom, style, title, heading, front, bib) = if book::is_book_root(&src) {
 		let spec = res!(book::load(std::path::Path::new(&source)));
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
@@ -78,11 +157,18 @@ fn main() -> Outcome<()> {
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, None)
 	};
+	mark("parse+lower+fonts", t_parse);
 
+	let t_author			= std::time::Instant::now();
 	let (document, heads)	= res!(doc::author(fonts.clone(), geom, style, heading, &blocks, front.as_ref(), bib.as_ref()));
+	mark("author(shape+break)", t_author);
 	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let t_run				= std::time::Instant::now();
 	let mut out				= res!(driver::run(&document, &metrics, Config::default()));
+	mark("driver::run", t_run);
+	let t_decorate			= std::time::Instant::now();
 	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, style, geom, &title));
+	mark("decorate", t_decorate);
 
 	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso
 	// page -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits
@@ -107,23 +193,113 @@ fn main() -> Outcome<()> {
 
 	// Emit each page and drop its frame before the next. Both writers are streaming: the SVG is one file
 	// per page, and the PDF is written object by object into the file as each page is composed, never
-	// accumulated. Holding one page's glyph outlines at a time -- rather than every page's at once, as a
-	// buffered whole-document PDF would -- is what keeps a whole-book compile flat in memory. The bytes
-	// are identical to the buffered path; only the peak memory differs.
-	let emitter		= Emitter::Svg;
+	// accumulated. Holding a bounded window of pages' glyph outlines -- rather than every page's at once,
+	// as a buffered whole-document PDF would -- is what keeps a whole-book compile flat in memory.
+	//
+	// Almost the whole cost of a compile is here: turning each glyph into a filled outline and serialising
+	// it, page after page. That work is a pure function of the placed frame and is independent between
+	// pages, so a chunk of pages is rendered across the cores at once. The order is preserved exactly: a
+	// chunk's results are written to the SVG files and folded into the single PDF stream in page order,
+	// so the bytes are identical to a sequential emit -- only the wall time differs. The PDF's object
+	// numbering and its running `/ID` hash stay strictly sequential in the writer, on this thread.
+	let t_emit	= std::time::Instant::now();
+	let mut t_render_ms	= 0.0f64;	// wall spent in the parallel render stage
+	let mut t_write_ms	= 0.0f64;	// wall spent writing results out in order
 	let pdf_file	= res!(File::create(fmt!("{}/document.pdf", out_dir)));
 	let mut pdf		= res!(emit::pdf::open_document(BufWriter::new(pdf_file), out.pages.len()));
-	for page in &mut out.pages {
-		let svg		= res!(emitter.render(page));
-		let path	= fmt!("{}/page-{:03}.{}", out_dir, page.number, emitter.extension());
-		res!(std::fs::write(&path, svg));
 
-		res!(emit::pdf::write_page(&mut pdf, page));
+	// Emit is by far the costliest phase and is embarrassingly parallel: each page's outline transforms
+	// and serialisation are a pure function of its frame, independent of every other page. But a rendered
+	// page is large -- its glyph outlines and figures expand to megabytes of SVG and PDF operators -- so
+	// holding several at once regresses peak memory, which the engine keeps to a page-at-a-time budget.
+	// For an illustration-dense book the per-page ink is heavy enough that even a pair of pages can breach
+	// that budget, so parallelism there is not free.
+	//
+	// The default is therefore page-at-a-time -- width one -- honouring the streaming memory budget
+	// exactly; the speed-up at the default comes from the shared glyph-outline cache alone. A caller with
+	// memory to spare opens the window with AUS_EMIT_WINDOW: emit then renders that many pages across the
+	// cores and the wall time falls towards real time (a text book reaches four to five times at a window
+	// of eight, for roughly a tenth more peak memory). When the window is open, a second bound guards a
+	// picture book: AUS_EMIT_BUDGET_MB caps the estimated page ink in flight (see [`page_hold_estimate`]),
+	// so a run of heavy figure pages closes its chunk early and never all coincide. A chunk always holds
+	// at least one page, so a page heavier than the budget still renders -- alone.
+	let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+	let width = std::env::var("AUS_EMIT_WINDOW")
+		.ok()
+		.and_then(|s| s.parse::<usize>().ok())
+		.filter(|n| *n >= 1)
+		.unwrap_or(1)
+		.min(cores);
+	let budget = std::env::var("AUS_EMIT_BUDGET_MB")
+		.ok()
+		.and_then(|s| s.parse::<usize>().ok())
+		.unwrap_or(8)
+		.saturating_mul(1024 * 1024);
 
-		// The page is written; free its frame so the next page's outlines are the only ones live.
-		page.frame = Frame::new();
+	if prof {
+		let ests: Vec<usize> = out.pages.iter().map(page_hold_estimate).collect();
+		let sum: usize = ests.iter().sum();
+		let max = ests.iter().copied().max().unwrap_or(0);
+		eprintln!("[profile]   est/page max {:.2} MB, mean {:.2} MB",
+			max as f64 / 1048576.0, sum as f64 / 1048576.0 / out.pages.len().max(1) as f64);
+	}
+
+	let total = out.pages.len();
+	let mut start = 0usize;
+	while start < total {
+		// Grow the chunk to the page-count width, but stop early once the page ink in flight would exceed
+		// the memory budget -- keeping at least the one page so a heavy page still renders.
+		let mut end		= start;
+		let mut held	= 0usize;
+		while end < total && end - start < width {
+			let cost = page_hold_estimate(&out.pages[end]);
+			if end > start && held + cost > budget {
+				break;
+			}
+			held += cost;
+			end += 1;
+		}
+		let slice	= &out.pages[start..end];
+
+		// Render this chunk's pages in parallel: each worker builds its page's SVG string, its PDF draw
+		// list, and that list serialised to content-stream bytes -- all pure, all independent.
+		let tr = std::time::Instant::now();
+		let out_ref = out_dir.as_str();
+		let rendered: Vec<Outcome<Prepared>> = std::thread::scope(|scope| {
+			let handles: Vec<_> = slice.iter()
+				.map(|page| scope.spawn(move || render_page_pair(page, out_ref)))
+				.collect();
+			handles.into_iter()
+				.map(|h| match h.join() {
+					Ok(r)	=> r,
+					Err(_)	=> Err(err!("A page-render worker thread panicked."; Bug, Thread)),
+				})
+				.collect()
+		});
+		if prof { t_render_ms += tr.elapsed().as_secs_f64() * 1000.0; }
+
+		// Fold the chunk into the PDF stream in page order (its `/ID` hashes page by page). The SVG files
+		// were already written by the workers. Then free each page's frame, holding no chunk beyond this.
+		let tw = std::time::Instant::now();
+		for prep in rendered {
+			let prep	= res!(prep);
+			res!(emit::pdf::write_page_prepared(&mut pdf, &prep.pdf, &prep.content));
+		}
+		for page in &mut out.pages[start..end] {
+			page.frame = Frame::new();
+		}
+		if prof { t_write_ms += tw.elapsed().as_secs_f64() * 1000.0; }
+
+		start = end;
 	}
 	res!(pdf.finish());
+	mark("emit(svg+pdf)", t_emit);
+	if prof {
+		eprintln!("[profile]   render (parallel){:>8.1} ms", t_render_ms);
+		eprintln!("[profile]   write (in order) {:>8.1} ms", t_write_ms);
+		eprintln!("[profile]   width/budgetMB    {:>8}", width);
+		eprintln!("[profile] {:<22} {:>8.1} ms", "TOTAL", t_all.elapsed().as_secs_f64() * 1000.0);
+	}
 
 	println!(
 		"ingot: {} -> {} page(s) in {} pass(es); {} anchor(s) in the ledger; written to {}/",
