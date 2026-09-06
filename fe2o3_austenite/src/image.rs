@@ -1,11 +1,16 @@
 //! External image loading for figures.
 //!
 //! A `#figure(...)` body may be an `image("...")` or `padded-image("...")` call naming a file in the
-//! book's asset tree. This module resolves that path against the book root, decodes a raster (PNG or
-//! JPEG) to straight RGBA through `fe2o3_graphics`'s [`Pixmap`], and hands the block layer a
-//! [`RasterImage`] it wraps in a [`DrawOp::Image`](crate::ir::DrawOp). It reads no vector SVG: there is
-//! no SVG document reader in the workspace yet, so an SVG figure is served by the same-stem raster the
-//! books ship beside it, and where none exists the caller keeps its placeholder.
+//! book's asset tree. This module resolves that path against the book root and loads it by type: a
+//! raster (PNG or JPEG) is decoded to straight RGBA through `fe2o3_graphics`'s [`Pixmap`] and handed to
+//! the block layer as a [`RasterImage`] it wraps in a [`DrawOp::Image`](crate::ir::DrawOp); an SVG is
+//! read as native vectors through `fe2o3_graphics`'s [`svg_doc`](oxedyne_fe2o3_graphics::svg_doc) into an
+//! [`SvgPicture`] the block layer scales to the figure width and maps to filled and stroked ops. The
+//! typesetter's SVG bakes its text to glyph outlines, so no font is needed to read it back.
+//!
+//! [`load_figure`] is the type-dispatching entry the figure path uses. [`load`] remains for the cover and
+//! logo, which are rasters; it still serves an SVG there from a same-stem raster, and where none exists
+//! the caller keeps its placeholder.
 //!
 //! The book root is not threaded through the block layer -- the reader sets one file with no notion of
 //! where the tree lives -- so the binary records it once with [`set_base_dir`] before authoring, and the
@@ -17,6 +22,10 @@ use crate::ir::RasterImage;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::pixmap::Pixmap;
+use oxedyne_fe2o3_graphics::svg_doc::{
+	self,
+	SvgPicture,
+};
 
 use std::path::{
 	Path,
@@ -63,6 +72,35 @@ pub fn resolve(src: &str) -> Outcome<Option<PathBuf>> {
 	}
 	cands.push(PathBuf::from(stripped));
 	Ok(cands.into_iter().find(|p| p.exists()))
+}
+
+/// A loaded figure: a decoded raster, or an SVG read as a resolution-independent [`SvgPicture`] the
+/// caller sizes and maps to drawing ops. The two are kept apart because a raster fills a rectangle and a
+/// vector carries its own paths, and the block layer draws them by different routes.
+pub enum Figure {
+	Raster(RasterImage),
+	Vector(SvgPicture),
+}
+
+/// Loads a figure by type: an SVG read as native vectors, a PNG or JPEG decoded to a raster. The path is
+/// resolved against the book root, and a type that is neither is an error the caller turns into a
+/// placeholder.
+pub fn load_figure(src: &str) -> Outcome<Figure> {
+	let path = res!(res!(resolve(src)).ok_or_else(|| err!(
+		"Could not resolve the figure image path {:?} against the book root.", src;
+		Input, Missing, File)));
+	let ext = path.extension()
+		.and_then(|e| e.to_str())
+		.unwrap_or("")
+		.to_lowercase();
+	if ext == "svg" {
+		let src = match std::fs::read_to_string(&path) {
+			Ok(s)	=> s,
+			Err(e)	=> return Err(err!(e, "Could not read the SVG figure {:?}.", path; File, Read)),
+		};
+		return Ok(Figure::Vector(res!(svg_doc::read_document(&src))));
+	}
+	Ok(Figure::Raster(res!(load_file(&path))))
 }
 
 /// Loads the raster a figure names: a PNG or JPEG decoded straight, or -- for an SVG, which has no

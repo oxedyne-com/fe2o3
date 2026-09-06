@@ -76,6 +76,10 @@ use oxedyne_fe2o3_graphics::{
 		PathBuilder,
 		Pt,
 	},
+	svg_doc::{
+		SvgOp,
+		SvgPicture,
+	},
 	transform::Transform,
 };
 
@@ -1248,11 +1252,13 @@ fn image_figure(
 {
 	figure_anchors(nodes, supplement, number, label);
 
-	// The loaded raster sized to the measure, or the placeholder box when nothing loads. A load failure
-	// is not fatal: the figure keeps its space and its caption, and the missing ink is a reported gap.
-	let graphic = match crate::image::load(path) {
-		Ok(img)	=> res!(image_graphic(measure, img, width, height, scale)),
-		Err(_)	=> res!(placeholder(measure)),
+	// The loaded figure sized to the measure, or the placeholder box when nothing loads. A load failure
+	// is not fatal: the figure keeps its space and its caption, and the missing ink is a reported gap. A
+	// raster fills a rectangle; an SVG is drawn as its own scaled paths.
+	let graphic = match crate::image::load_figure(path) {
+		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
+		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(measure, pic, width, height, scale)),
+		Err(_)									=> res!(placeholder(measure)),
 	};
 	let leaf	= Leaf::graphic(graphic);
 	let gw		= leaf.dims.width;
@@ -1313,6 +1319,74 @@ fn image_graphic(
 	let wf	= w as f32;
 	let hf	= h as f32;
 	let ops	= vec![DrawOp::Image { image: Arc::new(img), x: 0.0, y: 0.0, w: wf, h: hf }];
+	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w), Sp::from_pt(h), Sp::ZERO)))
+}
+
+/// Builds a graphic from a read SVG, scaled to fit the box the sizing hints and the picture's own aspect
+/// ask for -- the same sizing a raster gets -- and its paths mapped to fill and stroke ops.
+///
+/// The picture comes out of the reader in its viewBox units, which for a typesetter's SVG are points, so
+/// the intrinsic size stands in for a raster's pixel dimensions. One uniform factor scales every path;
+/// a dashed or a capped stroke is baked to a filled outline first, since a plain [`DrawOp::Stroke`]
+/// carries only a width, and the emitter would otherwise draw it solid.
+fn svg_graphic(
+	measure:	Sp,
+	pic:		SvgPicture,
+	width:		Option<Length>,
+	height:		Option<Length>,
+	scale:		Option<f64>,
+)
+	-> Outcome<Graphic>
+{
+	let m		= measure.to_pt();
+	let iw		= (pic.width as f64).max(1.0);
+	let ih		= (pic.height as f64).max(1.0);
+	let aspect	= ih / iw;
+
+	let resolve = |len: Length| -> f64 {
+		match len {
+			Length::Rel(f)	=> m * f,
+			Length::Abs(pt)	=> pt,
+		}
+	};
+	let mut w = match (width, height) {
+		(Some(wl), _)		=> resolve(wl),
+		(None, Some(hl))	=> resolve(hl) / aspect,
+		(None, None)		=> m * scale.unwrap_or(1.0),
+	};
+	if w > m || w <= 0.0 {
+		w = m;
+	}
+	let h = match height {
+		Some(hl) if width.is_none() && scale.is_none()	=> resolve(hl),
+		_												=> w * aspect,
+	};
+
+	// A uniform factor from the picture's intrinsic width to the drawn width; the height follows the
+	// same factor, since the aspect was preserved above.
+	let s	= (w / iw) as f32;
+	let t	= Transform::scale(s, s);
+	let mut ops: Vec<DrawOp> = Vec::with_capacity(pic.ops.len());
+	for op in pic.ops {
+		match op {
+			SvgOp::Fill { path, colour } => {
+				ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+			},
+			SvgOp::Stroke { path, colour, stroke } => {
+				if stroke.dash.is_some() {
+					// Bake the dashes into an outline in the picture's frame, then scale that with the rest.
+					let outline = res!(path.stroke(&stroke));
+					ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour });
+				} else {
+					ops.push(DrawOp::Stroke {
+						path:	res!(path.transform(&t)),
+						colour,
+						width:	stroke.width * s,
+					});
+				}
+			},
+		}
+	}
 	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w), Sp::from_pt(h), Sp::ZERO)))
 }
 
