@@ -34,7 +34,9 @@ use skrifa::{
 	MetadataProvider,
 };
 
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::RwLock;
 
 /// The part a font plays. A document names a role; the reader's font set decides what it looks like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -66,10 +68,15 @@ impl Metrics {
 /// One typeface, at any size: a single font file. Its bytes are owned and lent to both third-party
 /// parsers when needed; the shaper's tables, the costly part to build, are cached.
 pub struct Face {
-	bytes:	Vec<u8>,		// the font file
-	shaper:	ShaperData,		// the shaper's cached view, built once
-	upem:	f32,			// font units per em, what every measurement in the file is in terms of
-	covers:	HashSet<u32>,		// every character the face can draw, read once (asked per character)
+	bytes:		Vec<u8>,		// the font file
+	shaper:		ShaperData,		// the shaper's cached view, built once
+	upem:		f32,			// font units per em, what every measurement in the file is in terms of
+	covers:		HashSet<u32>,	// every character the face can draw, read once (asked per character)
+	// Drawn glyph outlines, memoised by (glyph id, size in its raw bits). A book draws the same few
+	// hundred glyphs at the same few sizes hundreds of thousands of times; re-reading the font and
+	// redrawing each outline every time was the whole cost of emit. The outline is a pure function of
+	// its key, so the cache changes nothing in the bytes drawn -- only how many times they are computed.
+	outlines:	RwLock<HashMap<(u32, u32), Path>>,
 }
 
 impl Face {
@@ -102,6 +109,7 @@ impl Face {
 			shaper,
 			upem,
 			covers,
+			outlines:	RwLock::new(HashMap::new()),
 		})
 	}
 
@@ -190,6 +198,17 @@ impl Face {
 	/// The outline of one glyph at a size, in the font's frame: origin the glyph's own, y up. Painting
 	/// flips it onto the page.
 	pub fn outline(&self, id: u32, size: f32) -> Outcome<Path> {
+		// The same glyph at the same size is drawn again and again across a book; memoise it. The key is
+		// the size's raw bits, so two calls at the identical `f32` share an entry and a re-shaped run at a
+		// new size (a heading, a footnote) gets its own -- no float is compared for near-equality.
+		let key = (id, size.to_bits());
+		{
+			let cache = lock_read!(self.outlines);
+			if let Some(path) = cache.get(&key) {
+				return Ok(path.clone());
+			}
+		}
+
 		let of = res!(self.outline_font());
 		let glyphs = of.outline_glyphs();
 		let glyph = match glyphs.get(GlyphId::new(id)) {
@@ -202,7 +221,10 @@ impl Face {
 		if let Err(e) = glyph.draw(settings, &mut pen) {
 			return Err(err!("The outline of glyph {} could not be drawn: {:?}.", id, e; Invalid));
 		}
-		pen.finish()
+		let path = res!(pen.finish());
+		let mut cache = lock_write!(self.outlines);
+		cache.insert(key, path.clone());
+		Ok(path)
 	}
 }
 
