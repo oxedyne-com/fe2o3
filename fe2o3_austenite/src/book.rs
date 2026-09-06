@@ -549,6 +549,7 @@ struct RawStyle {
 	par_skip_em:	f64,	// space between paragraphs, a multiple of the em
 	indent_em:	f64,	// first-line indent, a multiple of the em
 	chap_num_pt:	f64,	// the giant chapter-opener number size
+	chap_grid:	[f64; 4],	// chapter-opener grid rows: number band, gap, title band, gap-to-body, in points
 	h1_pt:		f64,	// chapter-title size
 	h2_pt:		f64,	// level-2 sub-heading size
 	h3_pt:		f64,	// level-3 sub-heading size
@@ -590,6 +591,15 @@ fn read_config(src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	let par_skip_em	= arm(src, "body-par-spacing", &format).as_deref().and_then(first_num).unwrap_or(0.75);
 	let indent_em	= arm(src, "body-par-indent", &format).as_deref().and_then(first_num).unwrap_or(0.0);
 	let chap_num_pt	= scale.as_deref().and_then(|a| num_after(a, "chapter-num:")).unwrap_or(54.0);
+	// The chapter-opener grid rows: the number band, the gap below it, the title band, and the gap down to
+	// the body. Absent, the opener falls back to spacers roughly matching a 20 pt body scale.
+	let grid		= scale.as_deref().and_then(|a| tuple_after(a, "chapter-grid-rows:")).unwrap_or_default();
+	let chap_grid	= [
+		grid.first().copied().unwrap_or(72.0),
+		grid.get(1).copied().unwrap_or(8.0),
+		grid.get(2).copied().unwrap_or(36.0),
+		grid.get(3).copied().unwrap_or(20.0),
+	];
 	let h1_pt		= scale.as_deref().and_then(|a| num_after(a, "chapter-title:")).unwrap_or(20.0);
 	// The template sizes a sub-heading by `sub-headings.at(level - 1)`: level 2 takes the second entry,
 	// level 3 the third, level 4 the fourth. The first entry is the section-title reserve, unused by the
@@ -599,16 +609,18 @@ fn read_config(src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	let h3_pt		= subs.get(2).copied().unwrap_or(11.5);
 	let h4_pt		= subs.get(3).copied().unwrap_or(11.0);
 
-	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, chap_num_pt, h1_pt, h2_pt, h3_pt, h4_pt }))
+	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, chap_num_pt, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt }))
 }
 
 // The Libertinus line box Typst sets, as a fraction of the em, measured from the oracle. Typst's config
 // leading is the gap ADDED between line boxes; the baseline-to-baseline skip is that gap plus the box.
 // The box is not the face's nominal ascender + descender (fe2o3_font reports ~1.14 em for Libertinus,
-// which sets ~30% too loose); Typst's rendered Libertinus line box measures ~0.68 em -- 15.75 pt for an
-// 11 pt body at 0.75 em leading, read straight off `oracle/oxpecker_body.png`. The driver takes a
-// baseline distance, so the style carries box + leading, and the flow then lands on Typst's grid.
-const LIBERTINUS_LINE_BOX_EM: f64 = 0.682;
+// which sets ~30% too loose); Typst's rendered Libertinus line box measures ~0.66 em -- for an 11 pt
+// body at 0.78 em leading that gives (0.66 + 0.78) x 11 = 15.84 pt baseline-to-baseline, matching the
+// Lucronics oracle measured at 300 DPI (66 px). An earlier 0.682 set the pitch 0.24 pt too loose,
+// losing ~1 line per page and driving the whole-book pagination drift. The driver takes a baseline
+// distance, so the style carries box + leading, and the flow then lands on Typst's grid.
+const LIBERTINUS_LINE_BOX_EM: f64 = 0.660;
 
 /// Turns the raw config values into a [`Style`]. The leading is the one derived value: the config sets
 /// a gap in ems, and the driver wants a baseline-to-baseline distance, so the Libertinus line box (see
@@ -622,6 +634,12 @@ fn build_style(raw: &RawStyle) -> Style {
 	style.para_skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
 	style.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
 	style.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
+	style.chap_grid		= [
+		Sp::from_pt(raw.chap_grid[0]),
+		Sp::from_pt(raw.chap_grid[1]),
+		Sp::from_pt(raw.chap_grid[2]),
+		Sp::from_pt(raw.chap_grid[3]),
+	];
 	style.h1_size	= Sp::from_pt(raw.h1_pt);
 	style.h2_size	= Sp::from_pt(raw.h2_pt);
 	style.h3_size	= Sp::from_pt(raw.h3_pt);

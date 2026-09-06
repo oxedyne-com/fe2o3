@@ -96,7 +96,7 @@ pub enum Segment {
 	Strong(String),	// set in the bold face
 	Emph(String),	// set in the italic face
 	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
-	Footnote { note: String },
+	Footnote { note: Vec<Segment> },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
 	Code(String),	// an inline code span, set in the mono face
@@ -121,8 +121,8 @@ impl Segment {
 		Self::Super(text.into())
 	}
 
-	pub fn footnote<S: Into<String>>(note: S) -> Self {
-		Self::Footnote { note: note.into() }
+	pub fn footnote(note: Vec<Segment>) -> Self {
+		Self::Footnote { note }
 	}
 
 	pub fn math(expr: Atom) -> Self {
@@ -292,6 +292,7 @@ pub struct Style {
 	pub h4_size:		Sp,
 	pub chap_num_size:	Sp,	// the giant chapter number on a chapter-opening page
 	pub chap_num_grey:	Rgba,	// the fill of that number, a light grey
+	pub chap_grid:		[Sp; 4],	// chapter-opener grid rows: number band, gap, title band, gap-to-body
 	pub header_size:	Sp,	// the running head's size
 	pub folio_size:		Sp,
 	pub foot_size:		Sp,	// the footnote text's size, a touch below the body
@@ -320,6 +321,7 @@ impl Default for Style {
 			h4_size:		Sp::from_pt(11.0),
 			chap_num_size:	Sp::from_pt(54.0),
 			chap_num_grey:	Rgba::opaque(200, 200, 200),	// Typst's luma(200)
+			chap_grid:		[Sp::from_pt(72.0), Sp::from_pt(8.0), Sp::from_pt(36.0), Sp::from_pt(20.0)],
 			header_size:	Sp::from_pt(9.5),
 			folio_size:		Sp::from_pt(10.0),
 			foot_size:		Sp::from_pt(9.0),
@@ -598,7 +600,7 @@ pub fn author(
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				}
-				nodes.push(res!(table::lower(fonts.clone(), style, measure, t)));
+				nodes.push(res!(table::lower(fonts.clone(), style, measure, t, &refs)));
 				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
@@ -634,7 +636,7 @@ pub fn author(
 				let number = next_number(&mut counters, supplement);
 				res!(table_figure(
 					&mut nodes, fonts.clone(), style, measure, table,
-					caption.as_deref(), supplement, number, label.as_deref()));
+					caption.as_deref(), supplement, number, label.as_deref(), &refs));
 				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
 				i += 1;
 				first = false;
@@ -1037,22 +1039,28 @@ fn build_footnote(
 	style:		Style,
 	measure:	Sp,
 	number:		u32,
-	note:		&str,
+	note:		&[Segment],
 	mark:		ShapedText,
 )
 	-> Outcome<Footnote>
 {
-	let mut lines = res!(break_paragraph(
-		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, note, measure, style.foot_leading));
+	// The note's own inline runs, so a `*strong*` or `_emph_` term in the note sets with its own face
+	// rather than flattening to upright text. A nested footnote or a cross-reference in a note -- rare --
+	// sets nothing here, as a footnote carries no counter or reserved slot of its own.
+	let pieces = res!(footnote_pieces(fonts.clone(), style, note));
 
-	// Prefix the note's first line with the number as a small superscript and a thin gap, so the note
-	// reads against its mark. The prefix is shorter than the line, so it does not change the line height.
-	let (pre_shaped, pre_dims) = res!(superscript(fonts.clone(), Role::Body, style.foot_size, &fmt!("{}", number)));
-	if let Some(Node::HBox(b)) = lines.first_mut() {
-		let gap = Sp(style.foot_size.raw() / 4);
-		b.list.insert(0, Node::Glue(Glue::fixed(gap)));
-		b.list.insert(0, Node::Leaf(Leaf::text_dims(pre_shaped, pre_dims)));
-	}
+	// The number sets as a small superscript that hangs to the left of the note: the note breaks at a
+	// measure reduced by the mark's hang, its first line carries the mark and a gap that together fill the
+	// hang, and every continuation line is shifted right by it, so the note's text block sits proud of its
+	// mark exactly as Typst hangs a footnote.
+	let (pre_shaped, pre_dims)	= res!(superscript(fonts.clone(), Role::Body, style.foot_size, &fmt!("{}", number)));
+	let gap		= Sp(style.foot_size.raw() / 4);
+	let hang	= pre_dims.width + gap;
+	let inner	= if measure > hang { measure - hang } else { measure };
+
+	let mut lines = res!(break_paragraph_pieces(
+		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading, true));
+	indent_item(&mut lines, Leaf::text_dims(pre_shaped, pre_dims), hang);
 
 	let mut height = Sp::ZERO;
 	for n in &lines {
@@ -1060,6 +1068,48 @@ fn build_footnote(
 	}
 
 	Ok(Footnote { number, mark, note: lines, height })
+}
+
+/// Turns a footnote's inline runs into the pieces the line breaker weaves: a text run keeps its face, a
+/// `*strong*` sets bold, an `_emph_` italic, a superscript rides raised, a code span sets mono, an in-note
+/// maths span is flattened to leaves, and a glossary term sets its display text. A nested footnote, a
+/// cross-reference and a citation are set as plain text or dropped, since a footnote carries no counter,
+/// reserved page slot or bibliography of its own at this increment.
+fn footnote_pieces(
+	fonts:		Arc<FontSet>,
+	style:		Style,
+	segments:	&[Segment],
+)
+	-> Outcome<Vec<Piece>>
+{
+	let size = style.foot_size;
+	let mut pieces = Vec::with_capacity(segments.len());
+	for seg in segments {
+		match seg {
+			Segment::Text(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Body }),
+			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
+			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Italic }),
+			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
+			Segment::Glossary { display, .. }
+									=> pieces.push(Piece::Text { text: display.clone(), role: Role::Body }),
+			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: Role::Body }),
+			Segment::PageRef(_)		=> {},	// a cross-reference in a note carries no reserved slot here
+			Segment::Footnote { .. }	=> {},	// a nested footnote is not set within a footnote
+			Segment::Super(t) => {
+				let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
+			},
+			Segment::Math(expr) => {
+				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				if let Node::HBox(b) = node {
+					let ascent	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "0")).dims().height;
+					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
+					pieces.push(Piece::Math { nodes: b.list, width: b.dims.width, height: ascent, depth: b.dims.depth, over });
+				}
+			},
+		}
+	}
+	Ok(pieces)
 }
 
 /// Shapes a short run at `0.7x` the surrounding size and returns it with the box that raises its
@@ -1220,11 +1270,12 @@ fn table_figure(
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
+	refs:		&HashMap<String, String>,
 )
 	-> Outcome<()>
 {
 	figure_anchors(nodes, supplement, number, label);
-	nodes.push(res!(table::lower(fonts.clone(), style, measure, table)));
+	nodes.push(res!(table::lower(fonts.clone(), style, measure, table, refs)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
 	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
 	Ok(())
@@ -1947,6 +1998,9 @@ fn fm_about_author_page(
 	Ok(())
 }
 
+/// The deepest heading level the contents lists, matching the template's `outline(depth: 3)`.
+const TOC_DEPTH: u8 = 3;
+
 /// Sets a table of contents from the heading table: the "Contents" title in the display face, then one
 /// entry per heading -- its number in a column indented by level, its title, a dotted leader, and its
 /// printed folio flush at the right. The folio is a forward reference resolved with [`Ref::FolioOf`]
@@ -1991,6 +2045,11 @@ pub fn contents(
 	let gap		= Sp(style.body_size.raw() * 3 / 5);
 
 	for (i, h) in heads.iter().enumerate() {
+		// The template sets `outline(depth: 3)`, so the contents stops at level 3 (a `===` subsection,
+		// dotted number x.y.z); a level-4 `====` heading is listed in no contents and is skipped here.
+		if h.level > TOC_DEPTH {
+			continue;
+		}
 		// The number column is indented per level: a part (level 0) and a chapter (level 1) sit at the
 		// margin, deeper levels step right. The number is empty for a part, which then shows title alone.
 		let depth	= (h.level.max(1) - 1) as i32;
@@ -2554,11 +2613,20 @@ fn chapter_opener(
 	}
 
 	if level == 1 && !number.is_empty() {
-		// A box (not glue, which a page top discards) reserves the space the number drops from the head.
-		nodes.push(Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, Sp::from_pt(36.0), Sp::ZERO))));
-
+		// The opener reproduces the template's four-row grid (`chapter-grid-rows`): a tall band holding the
+		// number centred on its middle, a gap, a shorter band holding the title on its foot, and a gap down
+		// to the body. Every row is a box, not glue -- a page top discards leading glue, and the opener sits
+		// at the page top -- so the bands hold their heights and the body lands on the grid's foot.
 		let sh		= res!(head_shape(fonts, &face, style.chap_num_size, number));
 		let d		= sh.dims();
+		let num_v	= d.height + d.depth;
+		let band	= style.chap_grid[0];
+		// The number rides the middle of its band (Typst's `center + horizon`): the slack splits above and
+		// below. A band shorter than the number leaves no slack and the number simply fills it.
+		let above	= if band > num_v { Sp((band.raw() - num_v.raw()) / 2) } else { Sp::ZERO };
+		let below	= if band > num_v + above { band - num_v - above } else { Sp::ZERO };
+		nodes.push(vspacer(above));
+
 		let graphic	= res!(coloured_run(&sh, style.chap_num_grey));
 		let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
 		let mut row:	Vec<Node> = Vec::new();
@@ -2566,16 +2634,34 @@ fn chapter_opener(
 			row.push(Node::Glue(Glue::fixed(pad)));
 		}
 		row.push(Node::Leaf(Leaf::graphic(graphic)));
-		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, d.height + d.depth, Sp::ZERO))));
-		nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
+		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, num_v, Sp::ZERO))));
+		nodes.push(vspacer(below));
+		nodes.push(vspacer(style.chap_grid[1]));	// the gap row between number and title
+
+		// The title rides the foot of its band (Typst's `left + bottom`): all the slack sits above it.
+		let sh_t	= res!(head_shape(fonts, &face, style.h1_size, title));
+		let dt		= sh_t.dims();
+		let title_v	= dt.height + dt.depth;
+		let band2	= style.chap_grid[2];
+		let top2	= if band2 > title_v { band2 - title_v } else { Sp::ZERO };
+		nodes.push(vspacer(top2));
+		nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh_t))], Dims::new(measure, dt.height, dt.depth))));
+		nodes.push(vspacer(style.chap_grid[3]));	// the gap row down to the body
+		return Ok(());
 	}
 
-	// The chapter title, set left in the display face beneath the number (a part divider returned above).
+	// An unnumbered level-1 opener (no grid number): the title set left in the display face, then a gap.
 	let sh	= res!(head_shape(fonts, &face, style.h1_size, title));
 	let d	= sh.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
 	Ok(())
+}
+
+/// A rigid vertical spacer: a zero-width box of the given height, so it holds its space at a page top
+/// where leading glue would be discarded.
+fn vspacer(height: Sp) -> Node {
+	Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, height, Sp::ZERO)))
 }
 
 /// Draws the page furniture -- a running head in the top margin and a folio -- onto every composed

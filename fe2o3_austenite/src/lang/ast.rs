@@ -38,10 +38,13 @@ pub enum FigureBody {
 /// a `fill:` keys the first row; `align` records the column alignment the call declared.
 #[derive(Clone, Debug)]
 pub struct TableSpec {
-	pub ncols:	usize,
-	pub header:	bool,
-	pub align:	AlignSpec,
-	pub cells:	Vec<Vec<Inline>>,	// flat, row-major; each cell a run of inline markup
+	pub ncols:		usize,
+	pub header:		bool,
+	pub align:		AlignSpec,
+	pub weights:	Vec<f64>,		// the `Nfr` weight per column; 0.0 for an `auto`/fixed track, empty for a bare `columns: N`
+	pub text_pt:	Option<f64>,	// a `text(size: Npt)[...]` wrapper's size, so a small table sets small
+	pub inset_pt:	Option<f64>,	// the `inset:` cell padding in points, overriding the default
+	pub cells:		Vec<Vec<Inline>>,	// flat, row-major; each cell a run of inline markup
 }
 
 /// How a table's cells align. `Uniform` sets every cell alike; `PerColumn` gives each column its own
@@ -67,6 +70,6 @@ pub enum Inline {
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
-	Footnote(String),	// #footnote[...], its note text set at the foot of the page its mark lands on
+	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
 }

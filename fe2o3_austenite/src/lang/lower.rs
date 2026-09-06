@@ -11,6 +11,7 @@ use crate::doc::{
 	Block,
 	Segment,
 };
+use crate::ir::Sp;
 use crate::table::{
 	Align,
 	Cell,
@@ -69,7 +70,21 @@ fn build_table(spec: &TableSpec) -> Table {
 		}
 		rows.push(Row::new(cells));
 	}
-	Table::new(spec.header, rows)
+	// A `columns: (2fr, 5fr, ...)` track list sizes the columns fractionally, as Typst does; a bare
+	// `columns: N` carries no weights and the columns fall back to content sizing. A weight list shorter
+	// than the columns is padded with content-sized zeros so every column has an entry.
+	let mut table = if spec.weights.iter().any(|&w| w > 0.0) {
+		let mut weights = spec.weights.clone();
+		weights.resize(ncols, 0.0);
+		Table::with_weights(spec.header, rows, weights)
+	} else {
+		Table::new(spec.header, rows)
+	};
+	// A `text(size: Npt)` wrapper (the books set their claim tables at 7 pt) and an explicit `inset:` cell
+	// padding carry through, so the table sets at the oracle's reduced size rather than the body size.
+	table.text_size	= spec.text_pt.map(Sp::from_pt);
+	table.inset		= spec.inset_pt.map(Sp::from_pt);
+	table
 }
 
 /// The alignment of one cell at row `r`, column `c`, given the table's declared [`AlignSpec`].
@@ -110,7 +125,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Math(atom)		=> Segment::math(atom.clone()),
 		Inline::Glossary { term, display }
 								=> Segment::glossary(term.clone(), display.clone()),
-		Inline::Footnote(note)	=> Segment::footnote(note.clone()),
+		Inline::Footnote(note)	=> Segment::footnote(note.iter().map(lower_inline).collect()),
 		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
 	}
 }

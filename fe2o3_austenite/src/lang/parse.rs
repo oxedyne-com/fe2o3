@@ -371,8 +371,8 @@ fn parse_inlines(text: &str) -> Vec<Inline> {
 				continue;
 			}
 		}
-		// An inline footnote. Its bracketed content is markup, reduced here to display text, since the
-		// engine sets a footnote's note as a plain small paragraph. The mark falls after the run before it.
+		// An inline footnote. Its bracketed content is markup, carried as inline runs so the note sets its
+		// own emphasis at the foot of the page. The mark falls after the run before it.
 		if c == '#' {
 			if let Some((note, next)) = footnote_call(&chars, i) {
 				if !plain.is_empty() {
@@ -739,16 +739,17 @@ fn split_label(title: &str) -> (String, Option<String>) {
 	(t.to_string(), None)
 }
 
-/// Reads an inline `#footnote[...]` at `i` (a `#`), returning the note's text -- its markup reduced to
-/// display text by [`flatten_markup`] -- and the index just past the closing `]`. `None` when the shape
-/// is not a footnote call or its bracket does not close, so anything else is left as ordinary text.
-fn footnote_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+/// Reads an inline `#footnote[...]` at `i` (a `#`), returning the note's inline markup -- parsed so a
+/// `*strong*` or `_emph_` in the note sets with its own face -- and the index just past the closing `]`.
+/// `None` when the shape is not a footnote call or its bracket does not close, so anything else is left as
+/// ordinary text.
+fn footnote_call(chars: &[char], i: usize) -> Option<(Vec<Inline>, usize)> {
 	let open = at_lit(chars, i, "#footnote")?;
 	if chars.get(open) != Some(&'[') {
 		return None;
 	}
 	let (inner, next) = read_group(chars, open)?;
-	Some((flatten_markup(&inner), next))
+	Some((parse_inlines(&inner), next))
 }
 
 /// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
@@ -1132,7 +1133,7 @@ fn dispatch_capture(
 		},
 		CaptureKind::Table => {
 			if let Some(inner) = call_inner(&cap.buf, "table") {
-				if let Some(spec) = parse_table_spec(&inner, arrays) {
+				if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(&cap.buf)) {
 					items.push(Item::Table { spec, span: Span::new(0, 0) });
 				}
 			}
@@ -1249,11 +1250,19 @@ fn cell_colspan(args: &str) -> usize {
 /// count, `align:` the alignment, a `fill:` keyed on `row == 0` marks a header row; cells come from
 /// inline `[...]` groups and from a `..name.flatten()` spread resolved against the data arrays. `None`
 /// when no cells are found, so an empty or unresolved table sets nothing.
-fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option<TableSpec> {
-	let mut ncols	= 1usize;
-	let mut align	= AlignSpec::Uniform(Align::Left);
-	let mut header	= false;
-	let mut cells:	Vec<Vec<Inline>>	= Vec::new();
+fn parse_table_spec(
+	inner:			&str,
+	arrays:			&HashMap<String, Vec<Vec<Inline>>>,
+	outer_text_pt:	Option<f64>,
+)
+	-> Option<TableSpec>
+{
+	let mut ncols		= 1usize;
+	let mut align		= AlignSpec::Uniform(Align::Left);
+	let mut header		= false;
+	let mut inset_pt:	Option<f64>			= None;
+	let mut weights:	Vec<f64>			= Vec::new();
+	let mut cells:		Vec<Vec<Inline>>	= Vec::new();
 	for arg in split_top_args(inner) {
 		let a = arg.trim();
 		if a.is_empty() {
@@ -1261,10 +1270,11 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> 
 		}
 		if let Some((key, val)) = named_arg(a) {
 			match key.as_str() {
-				"columns"	=> ncols = parse_columns(&val),
+				"columns"	=> { ncols = parse_columns(&val); weights = parse_column_weights(&val); },
 				"align"		=> align = parse_align(&val),
 				"fill"		=> if fill_marks_header(&val) { header = true; },
-				_			=> {},	// inset, stroke, gutter and the rest are not modelled
+				"inset"		=> inset_pt = parse_length(&val).map(length_pt),
+				_			=> {},	// stroke, gutter and the rest are not modelled
 			}
 			continue;
 		}
@@ -1283,7 +1293,35 @@ fn parse_table_spec(inner: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> 
 	if cells.is_empty() {
 		return None;
 	}
-	Some(TableSpec { ncols: ncols.max(1), header, align, cells })
+	Some(TableSpec { ncols: ncols.max(1), header, align, weights, text_pt: outer_text_pt, inset_pt, cells })
+}
+
+/// The absolute point value of a [`Length`], resolving a percentage against a nominal 100 pt so a
+/// percentage inset still yields a sensible padding; a table's inset is in practice an absolute length.
+fn length_pt(len: Length) -> f64 {
+	match len {
+		Length::Abs(pt)	=> pt,
+		Length::Rel(f)	=> f * 100.0,
+	}
+}
+
+/// The size of a `text(size: Npt)[...]` (or `#text(...)`) wrapper at the start of `text`, in points, or
+/// `None` when the body is not wrapped in a sized `text` call. This lets a figure's small-set table --
+/// `text(size: 7pt)[#table(...)]` -- carry its reduced size, which Typst applies to the whole table.
+fn outer_text_size(text: &str) -> Option<f64> {
+	let inner = call_inner(text, "text")?;
+	for arg in split_top_args(&inner) {
+		let a = arg.trim();
+		if let Some((key, val)) = named_arg(a) {
+			if key == "size" {
+				return parse_length(&val).map(length_pt);
+			}
+		} else if a.ends_with("pt") || a.ends_with("em") {
+			// The first positional length is the size, as in `text(7pt)[...]`.
+			return parse_length(a).map(length_pt);
+		}
+	}
+	None
 }
 
 /// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
@@ -1329,7 +1367,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 /// parses, otherwise an image carrying the path and any declared sizing (empty path when none is found).
 fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> FigureBody {
 	if let Some(inner) = call_inner(text, "table") {
-		if let Some(spec) = parse_table_spec(&inner, arrays) {
+		if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(text)) {
 			return FigureBody::Table(spec);
 		}
 	}
@@ -1525,6 +1563,44 @@ fn parse_columns(val: &str) -> usize {
 		}
 	}
 	1
+}
+
+/// The per-column fractional weights of a `columns:` track list: a track `Nfr` (or a bare `fr`, weight 1)
+/// contributes its weight, an `auto` or a fixed length contributes `0.0` so the column is sized to its
+/// content. A bare `columns: N` gives no weights (an empty vector), leaving every column content-sized.
+/// The weights let [`table::lower`](crate::table) reproduce Typst's fractional column sizing rather than
+/// sizing every column from its widest cell.
+fn parse_column_weights(val: &str) -> Vec<f64> {
+	let v = val.trim();
+	if !v.starts_with('(') {
+		return Vec::new();
+	}
+	let ch: Vec<char> = v.chars().collect();
+	let inner = match read_group(&ch, 0) {
+		Some((inner, _))	=> inner,
+		None				=> return Vec::new(),
+	};
+	let mut out = Vec::new();
+	for track in split_top_args(&inner) {
+		let t = track.trim();
+		if t.is_empty() {
+			continue;
+		}
+		out.push(track_weight(t));
+	}
+	out
+}
+
+/// The fractional weight of one `columns:` track: `Nfr` reads as `N`, a bare `fr` as `1`, and any other
+/// track -- `auto`, `3cm`, `40pt`, `20%` -- as `0.0`, which marks the column content-sized.
+fn track_weight(track: &str) -> f64 {
+	match track.strip_suffix("fr") {
+		Some(num) => {
+			let n = num.trim();
+			if n.is_empty() { 1.0 } else { n.parse::<f64>().unwrap_or(0.0) }
+		},
+		None => 0.0,
+	}
 }
 
 /// Parses an `align:` value: a `(col, row) => ...` closure as [`AlignSpec::Closure`], a tuple of column
