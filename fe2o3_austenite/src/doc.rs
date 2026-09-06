@@ -293,9 +293,21 @@ impl Block {
 }
 
 /// The point sizes and vertical spaces the block layer sets to. Every length is scaled points, so
+/// How a top-level heading opens. A book chapter opens with the giant grey number and dotted
+/// numbering the manuscripts use ([`BookOpener`](HeadingStyle::BookOpener)); a documentation tree opens
+/// with the template's full-width grey banner bar and no numbering at all
+/// ([`DocBanner`](HeadingStyle::DocBanner)). The block layer reads this to pick the opener and to decide
+/// whether a heading carries a number, so one authoring path serves both idioms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeadingStyle {
+	BookOpener,
+	DocBanner,
+}
+
 /// the styling never leaves the integer domain the driver breaks on.
 #[derive(Clone, Copy, Debug)]
 pub struct Style {
+	pub heading_style:	HeadingStyle,	// which top-level opener and numbering the headings take
 	pub body_size:		Sp,
 	pub leading:		Sp,
 	pub para_skip:		Sp,	// extra space between one paragraph and the next
@@ -325,6 +337,7 @@ pub struct Style {
 impl Default for Style {
 	fn default() -> Self {
 		Self {
+			heading_style:	HeadingStyle::BookOpener,
 			body_size:		Sp::from_pt(11.0),
 			leading:		Sp::from_pt(13.2),	// 1.2x the body
 			para_skip:		Sp::from_pt(6.0),
@@ -477,7 +490,12 @@ pub fn author(
 					sec[l - 1] += 1;
 					for k in l..6 { sec[k] = 0; }
 				}
-				let number = heading_number(*level, &sec);
+				// A documentation tree sets `numbering: none`: its headings carry no dotted number, on the
+				// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
+				let number = match style.heading_style {
+					HeadingStyle::DocBanner	=> String::new(),
+					HeadingStyle::BookOpener	=> heading_number(*level, &sec),
+				};
 
 				// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
 				// title the contents list and the running head read back. The heading itself is set from the
@@ -2417,10 +2435,14 @@ fn subheading_hbox(
 )
 	-> Outcome<Node>
 {
-	let face		= head_face(level, display);
+	// A documentation tree sets its sub-headings from the template's show rule -- level 2 bold-italic,
+	// level 3 italic, deeper levels upright -- with no small caps; a book takes the display face (or body
+	// bold) and small-caps the finer levels.
+	let doc			= style.heading_style == HeadingStyle::DocBanner;
+	let face		= if doc { doc_head_face(level) } else { head_face(level, display) };
 	let size		= style.heading_size(level);
 	let small_size	= Sp(size.raw() * 3 / 4);	// small caps at 0.75 of the heading size
-	let smallcaps	= level >= 3;
+	let smallcaps	= !doc && level >= 3;
 	let sample		= res!(head_shape(&fonts, &face, size, "Ag"));
 	let asc			= sample.dims().height;
 	let dep			= sample.dims().depth;
@@ -2481,6 +2503,17 @@ fn subheading_hbox(
 	}
 
 	Ok(Node::HBox(BoxNode::new(children, Dims::new(width, asc, dep))))
+}
+
+/// The face a documentation sub-heading level sets in, matching `template.typ`'s heading show rule: level
+/// 2 bold-italic, level 3 italic, level 4 and deeper upright. All in the body family (Libertinus), which
+/// is the doc heading family too, so no display face is consulted.
+fn doc_head_face(level: u8) -> HeadFace<'static> {
+	match level {
+		2	=> HeadFace::Role(Role::BoldItalic),
+		3	=> HeadFace::Role(Role::Italic),
+		_	=> HeadFace::Role(Role::Body),
+	}
 }
 
 /// A heading run marked for emphasis: strong (`*..*`), emph (`_.._`), or a glossary term's first-use
@@ -2647,6 +2680,13 @@ fn chapter_opener(
 		return Ok(());
 	}
 
+	// A documentation tree opens a level-1 heading with the template's full-width grey banner bar carrying
+	// the title in small caps, rather than a numbered chapter opener.
+	if level == 1 && style.heading_style == HeadingStyle::DocBanner {
+		res!(doc_banner(nodes, fonts, geom, measure, title));
+		return Ok(());
+	}
+
 	if level == 1 && !number.is_empty() {
 		// The opener reproduces the template's four-row grid (`chapter-grid-rows`): a tall band holding the
 		// number centred on its middle, a gap, a shorter band holding the title on its foot, and a gap down
@@ -2690,6 +2730,72 @@ fn chapter_opener(
 	let d	= sh.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
+	Ok(())
+}
+
+/// Draws the documentation template's chapter banner: a full-width grey bar hanging into the page's top
+/// and side margins (`template.typ`'s `chapter-banner`, a `place`d rect 150 pt tall from the page top,
+/// `100% + 2*margin` wide), carrying the title left-aligned in small-caps bold, seated on the band's
+/// vertical middle. The bar is drawn from one box whose ops bleed past its bounds -- the emitter clips
+/// nothing -- and the box holds the template's `#v(95pt)` of following space, so the body lands where the
+/// oracle sets it. No number is drawn: a doc tree sets `numbering: none`.
+fn doc_banner(
+	nodes:		&mut Vec<Node>,
+	fonts:		&Arc<FontSet>,
+	geom:		PageGeometry,
+	measure:	Sp,
+	title:		&str,
+)
+	-> Outcome<()>
+{
+	let grey		= Rgba::opaque(240, 240, 240);	// the template's `colours.lightgrey`, luma(240)
+	let banner_h	= 150.0f32;						// the template's rect height
+	let follow		= Sp::from_pt(95.0);			// the template's `#v(95pt)` down to the body
+	// The box origin is the content top-left; the graphic's ops are in that frame, y down. The bar reaches
+	// the page's left edge (x = -inside) and top edge (y = -top), and runs the full page width and 150 pt
+	// deep, so it hangs into both margins exactly as the placed rect does.
+	let inside_pt	= geom.content_left().to_pt() as f32;
+	let top_pt		= geom.content_top().to_pt() as f32;
+	let page_w_pt	= geom.width.to_pt() as f32;
+	let x0			= -inside_pt;
+	let y0			= -top_pt;
+	let x1			= page_w_pt - inside_pt;
+	let y1			= banner_h - top_pt;
+
+	let mut ops:	Vec<DrawOp>	= Vec::new();
+	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
+
+	// The title in the heading face's bold, at the template's 26 pt, small-capped run by run (the shaper
+	// carries no `smcp`, so the case is synthesised: was-lowercase letters uppercased at 0.75 of the size).
+	let face		= HeadFace::Role(Role::Bold);
+	let size		= Sp::from_pt(26.0);
+	let small_size	= Sp(size.raw() * 3 / 4);
+	let sample		= res!(head_shape(fonts, &face, size, "Ag"));
+	let asc			= sample.dims().height.to_pt() as f32;
+	let dep			= sample.dims().depth.to_pt() as f32;
+	// The band's vertical middle in the box frame, then the baseline that centres the run's box on it.
+	let band_mid	= (banner_h / 2.0) - top_pt;
+	let base_y		= band_mid + (asc - dep) / 2.0;
+
+	let mut x_off	= 0.0f32;	// the title's left edge sits at the content left (box origin)
+	for (run, is_small) in smallcaps_runs(title) {
+		let rs		= if is_small { small_size } else { size };
+		let shaped	= res!(head_shape(fonts, &face, rs, &run));
+		for glyph in &shaped.run().glyphs {
+			let path = res!(shaped.outline(glyph));
+			if path.is_empty() {
+				continue;
+			}
+			let t = Transform::scale(1.0, -1.0)
+				.then(&Transform::translate(x_off + glyph.x, base_y - glyph.y));
+			ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Rgba::BLACK });
+		}
+		x_off += shaped.dims().width.to_pt() as f32;
+	}
+
+	let graphic = Graphic::new(ops, Dims::new(measure, follow, Sp::ZERO));
+	// The box holds the `#v(95pt)` of flow space; the bar draws past its top edge into the margins.
+	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(measure, follow, Sp::ZERO))));
 	Ok(())
 }
 

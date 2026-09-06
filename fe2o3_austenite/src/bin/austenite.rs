@@ -171,13 +171,15 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
 	// one place or the other, and the rest of the run is identical.
 	let t_parse = std::time::Instant::now();
-	let mut skip_line: Option<String> = None;
+	// The terse skip line, set from whichever path assembles the source: a book or doc root through
+	// `book::load`'s merged tally, a lone file through its own reader summary.
+	let skip_line: Option<String>;
 	let (blocks, fonts, geom, style, title, heading, front, bib) = if book::is_book_root(&src) {
-		// TODO: thread book-path skips -- `book::load` assembles the chapters through the reader but does
-		// not yet return the merged SkipSummary, so a book compile cannot report its skipped constructs.
-		// That threading belongs in book.rs, which another lane owns; leave the terse line to the lone-file
-		// path until it lands.
+		// A book or doc root assembles its chapters through the reader and merges each chapter's skip tally
+		// into one summary, so a whole-book or whole-doc compile reports its skipped constructs on the same
+		// terse line the lone-file path prints.
 		let spec = res!(book::load(std::path::Path::new(source)));
+		skip_line = terse_skip_line(&spec.skips);
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
 	} else {
 		let (blocks, skips)	= res!(lang::to_blocks_with_skips(&src));

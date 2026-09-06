@@ -26,6 +26,7 @@ use crate::bib::{
 use crate::doc::{
 	Block,
 	FrontMatter,
+	HeadingStyle,
 	Segment,
 	Style,
 };
@@ -61,6 +62,9 @@ pub struct BookSpec {
 	// The bibliography, parsed from the file the root names and marked with the keys the body cited, so
 	// the block layer resolves an in-text `#cite` against it. None when the book names no bibliography.
 	pub bib:		Option<Bibliography>,
+	// The constructs the reader skipped across every chapter, merged into one tally, so the binary reports
+	// a book or doc compile's skipped constructs on the same terse line a lone file already prints.
+	pub skips:		lang::SkipSummary,
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -124,7 +128,7 @@ fn load_book(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
-	let mut blocks	= res!(assemble(root_src, root_dir));
+	let (mut blocks, skips)	= res!(assemble(root_src, root_dir));
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	let front		= read_front_matter(root_src, &config_src, &title);
 
@@ -132,7 +136,7 @@ fn load_book(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
 	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib })
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib, skips })
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -147,18 +151,21 @@ fn load_book(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 /// includes are followed exactly as for a book. A field the tree omits keeps a readable default.
 fn load_doc(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	let (geom, raw)	= res!(read_doc_config(root_dir, root_src));
-	let style		= build_style(&raw);
+	let mut style	= build_style(&raw);
+	// A doc tree sets `numbering: none` and opens each top-level heading with the template's grey banner
+	// bar, not the book's numbered chapter opener, so its headings take the doc banner style.
+	style.heading_style = HeadingStyle::DocBanner;
 	let fonts		= Arc::new(res!(fonts::libertinus()));
 	// A doc heading is set in Libertinus bold -- the body family -- so no display face is supplied, and
 	// the heading path falls back to the body bold, which is exactly what the template's show rule sets.
 	let heading:	Option<Arc<Font>>	= None;
-	let blocks		= res!(assemble(root_src, root_dir));
+	let (blocks, skips)	= res!(assemble(root_src, root_dir));
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	let front		= read_doc_front_matter(root_src, &raw, &title);
 
 	// A doc tree names its bibliography, glossary and index through raw Typst calls the reader skips, not
 	// the book's `meta-data.bibliography` field, so no reference back matter is assembled here.
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib: None })
+	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib: None, skips })
 }
 
 /// Reads a doc-template root's geometry and type: the paper and margins from the shared `template.typ`
@@ -608,13 +615,21 @@ fn content_field(src: &str, name: &str) -> Option<String> {
 
 /// Follows a root's `#include "..."` lines in order, reading each chapter and setting it through the
 /// reader, and lifts each `#part-page[...]` divider to a level-1 heading so the part titles keep their
-/// place in the flow. Everything else in the root -- the `#show: doc.with(...)` template call and its
-/// metadata -- is book furniture the reader cannot evaluate, and is passed over.
-pub fn assemble(root_src: &str, root_dir: &Path) -> Outcome<Vec<Block>> {
+/// place in the flow. The root's own inline markup between the code lines is read too, in document order:
+/// a doc root opens with a section (`= Purpose ...`) written straight in the root before its includes,
+/// where a book root carries only the template call. Non-code lines are accumulated and flushed through
+/// the reader at each include or part boundary, so the reader sees whole markup runs -- a heading and its
+/// paragraphs together -- and the root's opening section keeps its place ahead of the first chapter. The
+/// template call itself (`#show: doc.with(...)`, `#import`, `#pagebreak`) is code the reader skips and
+/// tallies, so it never leaks into the flow.
+pub fn assemble(root_src: &str, root_dir: &Path) -> Outcome<(Vec<Block>, lang::SkipSummary)> {
 	let mut blocks: Vec<Block> = Vec::new();
+	let mut skips = lang::SkipSummary::default();
+	let mut buf = String::new();	// the root's inline markup gathered since the last boundary
 	for line in root_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
+			res!(flush_inline(&mut buf, &mut blocks, &mut skips));
 			if let Some(rel) = first_quoted(rest) {
 				let path	= root_dir.join(&rel);
 				let src		= match std::fs::read_to_string(&path) {
@@ -622,18 +637,39 @@ pub fn assemble(root_src: &str, root_dir: &Path) -> Outcome<Vec<Block>> {
 					Err(e)	=> return Err(err!(e,
 						"Could not read the included chapter {:?}.", path; File, Read)),
 				};
-				blocks.extend(res!(lang::to_blocks(&src)));
+				let (chap, chap_skips) = res!(lang::to_blocks_with_skips(&src));
+				blocks.extend(chap);
+				skips.merge(&chap_skips);
 			}
 		} else if t.starts_with("#part-page") {
+			res!(flush_inline(&mut buf, &mut blocks, &mut skips));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
 			// its number across a part boundary and a part never appears in a running head.
 			if let Some(title) = bracket_body(t) {
 				blocks.push(Block::heading(0, title));
 			}
+		} else {
+			buf.push_str(line);
+			buf.push('\n');
 		}
 	}
-	Ok(blocks)
+	// The tail after the last include: back-matter markup a doc root closes with, if any.
+	res!(flush_inline(&mut buf, &mut blocks, &mut skips));
+	Ok((blocks, skips))
+}
+
+/// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips,
+/// then clears the buffer. A buffer holding only code and whitespace yields no blocks -- a book root's
+/// template call reduces to nothing, so the book path is unchanged.
+fn flush_inline(buf: &mut String, blocks: &mut Vec<Block>, skips: &mut lang::SkipSummary) -> Outcome<()> {
+	if !buf.trim().is_empty() {
+		let (b, s) = res!(lang::to_blocks_with_skips(buf));
+		blocks.extend(b);
+		skips.merge(&s);
+	}
+	buf.clear();
+	Ok(())
 }
 
 /// The first double-quoted run in a slice, its contents without the quotes.
@@ -1063,9 +1099,26 @@ mod tests {
 	}
 
 	#[test]
+	fn test_root_inline_markup_is_read_before_includes_07() -> Outcome<()> {
+		let dir = std::path::Path::new("/nonexistent");
+		// A doc root opens with an inline section written straight in the root, ahead of its includes (the
+		// Austenite design's `= Purpose`). With no include present, only that inline markup is read; its
+		// heading and paragraph must both survive, and the template call above them must be skipped, not set.
+		let root = "#import \"template.typ\": *\n#show: doc.with(title: [X])\n\n= Purpose\n\nAustenite is an engine.\n";
+		let (blocks, _skips) = res!(assemble(root, dir));
+		assert!(
+			blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
+			"the root's inline level-1 heading is read into the flow");
+		assert!(
+			blocks.iter().any(|b| matches!(b, Block::Paragraph { .. } | Block::RichParagraph { .. })),
+			"the inline paragraph beneath the heading is read too");
+		Ok(())
+	}
+
+	#[test]
 	fn test_a_part_page_divider_lifts_to_a_heading_03() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
-		let blocks = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir));
+		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir));
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
 			Block::Heading { level, segments, .. } => {
