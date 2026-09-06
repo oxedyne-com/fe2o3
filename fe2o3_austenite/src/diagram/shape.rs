@@ -52,6 +52,7 @@ pub enum Shape {
 	Box,		// a plain rectangle, the default process step
 	Stadium,	// a rectangle with fully rounded ends, a start or terminal
 	Diamond,	// a rhombus on the box's side midpoints, a decision
+	Hexagon,	// a horizontal hexagon with slanted ends, a preparation or setup step
 }
 
 impl Shape {
@@ -87,6 +88,12 @@ impl Shape {
 				Sp(label_w.raw() * 2) + Sp(pad_x.raw() * 4),
 				Sp(label_ext.raw() * 2) + Sp(pad_y.raw() * 4),
 			),
+			Shape::Hexagon => (
+				// The slanted caps eat about a cap width at each end, so a full extent of width is added
+				// so the label's rectangle clears the slopes, as a stadium adds its caps.
+				label_w + label_ext + pad_x + pad_x,
+				label_ext + pad_y + pad_y,
+			),
 		}
 	}
 
@@ -112,6 +119,21 @@ impl Shape {
 				pb.line_to(Pt::new(x1, cy));	// east
 				pb.line_to(Pt::new(cx, y1));	// south
 				pb.line_to(Pt::new(x0, cy));	// west
+				pb.close();
+				pb.finish()
+			},
+			Shape::Hexagon => {
+				let cy		= r.centre_y().to_pt() as f32;
+				// The slant eats two-fifths of the height at each end, a gentle taper matching the
+				// preparation hexagon these flowcharts draw.
+				let cap		= (r.h.to_pt() as f32) * 0.4;
+				let mut pb = PathBuilder::new();
+				pb.move_to(Pt::new(x0, cy));		// west vertex
+				pb.line_to(Pt::new(x0 + cap, y0));	// top-left shoulder
+				pb.line_to(Pt::new(x1 - cap, y0));	// top-right shoulder
+				pb.line_to(Pt::new(x1, cy));		// east vertex
+				pb.line_to(Pt::new(x1 - cap, y1));	// bottom-right shoulder
+				pb.line_to(Pt::new(x0 + cap, y1));	// bottom-left shoulder
 				pb.close();
 				pb.finish()
 			},

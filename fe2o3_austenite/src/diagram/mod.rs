@@ -80,17 +80,20 @@ enum PlaceSpec {
 #[derive(Clone, Debug)]
 struct NodeSpec {
 	id:		String,
-	label:	String,
+	label:	String,			// a `\n` in the label parts it into stacked, centred lines
 	place:	PlaceSpec,
 	shape:	Shape,
+	fill:	Option<Rgba>,	// this node's own wash, overriding the style default when set
+	size:	Option<(Sp, Sp)>,	// an explicit box, grown to hold the label but never shrunk below it
 }
 
 #[derive(Clone, Debug)]
 struct EdgeSpec {
-	from:	Endpoint,
-	to:		Endpoint,
-	label:	Option<String>,
-	route:	Route,
+	from:		Endpoint,
+	to:			Endpoint,
+	label:		Option<String>,
+	route:		Route,
+	near_src:	bool,	// seat the label by the source end rather than at the longest segment's midpoint
 }
 
 /// The lengths and colours a diagram is drawn to. Every length is scaled points, so the styling never
@@ -153,6 +156,8 @@ impl Diagram {
 			label:	label.into(),
 			place:	PlaceSpec::At { x, y },
 			shape,
+			fill:	None,
+			size:	None,
 		});
 		self
 	}
@@ -169,6 +174,8 @@ impl Diagram {
 			label:	label.into(),
 			place:	PlaceSpec::Below { of: of.to_string(), gap },
 			shape,
+			fill:	None,
+			size:	None,
 		});
 		self
 	}
@@ -185,7 +192,28 @@ impl Diagram {
 			label:	label.into(),
 			place:	PlaceSpec::Right { of: of.to_string(), gap },
 			shape,
+			fill:	None,
+			size:	None,
 		});
+		self
+	}
+
+	/// Sets the fill wash of the most recently added node, overriding the style default. A node with no
+	/// fill set takes the diagram style's fill.
+	pub fn fill(&mut self, colour: Rgba) -> &mut Self {
+		if let Some(n) = self.nodes.last_mut() {
+			n.fill = Some(colour);
+		}
+		self
+	}
+
+	/// Sets an explicit box for the most recently added node. The box is grown to hold the label if the
+	/// label is larger, but never shrunk below the given extent -- the way a flowchart fixes a decision's
+	/// diamond to a uniform size.
+	pub fn size(&mut self, w: Sp, h: Sp) -> &mut Self {
+		if let Some(n) = self.nodes.last_mut() {
+			n.size = Some((w, h));
+		}
 		self
 	}
 
@@ -194,8 +222,22 @@ impl Diagram {
 		self.edges.push(EdgeSpec {
 			from,
 			to,
-			label:	label.map(|s| s.to_string()),
+			label:		label.map(|s| s.to_string()),
 			route,
+			near_src:	false,
+		});
+		self
+	}
+
+	/// Joins two ports with an edge whose label is seated by the source end rather than at the midpoint of
+	/// the longest segment -- the placement a flowchart's decision branch labels ("Y", "N") take.
+	pub fn edge_near(&mut self, from: Endpoint, to: Endpoint, label: Option<&str>, route: Route) -> &mut Self {
+		self.edges.push(EdgeSpec {
+			from,
+			to,
+			label:		label.map(|s| s.to_string()),
+			route,
+			near_src:	true,
 		});
 		self
 	}
@@ -216,15 +258,33 @@ impl Diagram {
 		}
 
 		// Shape each label and size its box. A relative placement is resolved to the anchor's index
-		// here, which enforces the dependency order: the anchor must already be known.
-		let mut labels:	Vec<ShapedText>				= Vec::with_capacity(self.nodes.len());
+		// here, which enforces the dependency order: the anchor must already be known. A label carrying a
+		// `\n` is shaped a line at a time and stacked, so the box holds the widest line and the full stack.
+		let mut labels:	Vec<Vec<ShapedText>>		= Vec::with_capacity(self.nodes.len());
 		let mut specs:	Vec<(Placement, Sp, Sp)>	= Vec::with_capacity(self.nodes.len());
 		for (i, n) in self.nodes.iter().enumerate() {
-			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.label_size, &n.label));
-			let ld		= shaped.dims();
-			let ext		= ld.height + ld.depth;
-			let (w, h)	= n.shape.size_for_label(ld.width, ext, style.pad_x, style.pad_y);
-			labels.push(shaped);
+			let mut lines:	Vec<ShapedText>	= Vec::new();
+			let mut max_w					= Sp::ZERO;
+			let mut ext						= Sp::ZERO;
+			for (li, line) in n.label.split('\n').enumerate() {
+				let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.label_size, line));
+				let ld		= shaped.dims();
+				if ld.width > max_w {
+					max_w = ld.width;
+				}
+				if li > 0 {
+					ext = ext + line_gap(style.label_size);
+				}
+				ext = ext + ld.height + ld.depth;
+				lines.push(shaped);
+			}
+			let (mut w, mut h)	= n.shape.size_for_label(max_w, ext, style.pad_x, style.pad_y);
+			// An explicit box grows the node but never shrinks it below what the label needs.
+			if let Some((ew, eh)) = n.size {
+				if ew > w { w = ew; }
+				if eh > h { h = eh; }
+			}
+			labels.push(lines);
 
 			let placement = match &n.place {
 				PlaceSpec::At { x, y } => Placement::At { x: *x, y: *y },
@@ -246,11 +306,13 @@ impl Diagram {
 		for (i, n) in self.nodes.iter().enumerate() {
 			let r		= &rects[i];
 			let outline	= res!(n.shape.outline(r));
-			if let Some(fill) = style.node_fill {
+			// A node's own fill wins; otherwise the diagram style's default fill, or none.
+			let fill = n.fill.or(style.node_fill);
+			if let Some(fill) = fill {
 				ops.push(DrawOp::Fill { path: outline.clone(), colour: fill });
 			}
 			ops.push(DrawOp::Stroke { path: outline, colour: Rgba::BLACK, width: style.node_stroke });
-			res!(bake_label_centred(&mut ops, &labels[i], r));
+			res!(bake_label_centred(&mut ops, &labels[i], style.label_size, r));
 		}
 
 		// The edges, each routed once its ports are placed.
@@ -297,13 +359,19 @@ impl Diagram {
 		// can pick the side facing the other end.
 		let a_ref = ref_point(ra, &e.from);
 		let b_ref = ref_point(rb, &e.to);
-		let a_port = match e.from.port {
-			Some(p) => p,
-			None    => layout::nearest_port(ra, b_ref),
-		};
-		let b_port = match e.to.port {
-			Some(p) => p,
-			None    => layout::nearest_port(rb, a_ref),
+		// A feedback loop always leaves and re-enters on the east side, whatever the endpoints declared.
+		let (a_port, b_port) = if matches!(e.route, Route::Feedback { .. }) {
+			(Port::East, Port::East)
+		} else {
+			let a_port = match e.from.port {
+				Some(p) => p,
+				None    => layout::nearest_port(ra, b_ref),
+			};
+			let b_port = match e.to.port {
+				Some(p) => p,
+				None    => layout::nearest_port(rb, a_ref),
+			};
+			(a_port, b_port)
 		};
 
 		let a_xy = self.nodes[ai].shape.port(ra, a_port);
@@ -334,26 +402,33 @@ impl Diagram {
 		});
 
 		if let Some(text) = &e.label {
-			res!(self.bake_edge_label(ops, fonts, style, &pts, text));
+			res!(self.bake_edge_label(ops, fonts, style, &pts, text, e.near_src));
 		}
 		Ok(())
 	}
 
-	/// Bakes an edge label, centred on the midpoint of the edge's longest segment and nudged clear of
-	/// the line along its perpendicular.
+	/// Bakes an edge label. By default it sits at the midpoint of the edge's longest segment, nudged clear
+	/// of the line along its perpendicular; when `near_src` is set it sits a little way along the first
+	/// segment from the source, the placement a flowchart's branch label ("Y"/"N") takes.
 	fn bake_edge_label(
 		&self,
-		ops:	&mut Vec<DrawOp>,
-		fonts:	Arc<FontSet>,
-		style:	&DiagramStyle,
-		pts:	&[(Sp, Sp)],
-		text:	&str,
+		ops:		&mut Vec<DrawOp>,
+		fonts:		Arc<FontSet>,
+		style:		&DiagramStyle,
+		pts:		&[(Sp, Sp)],
+		text:		&str,
+		near_src:	bool,
 	)
 		-> Outcome<()>
 	{
 		let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.edge_label_size, text));
 		let ld		= shaped.dims();
-		let (mid, perp) = match layout::label_anchor(pts) {
+		let anchor = if near_src {
+			layout::label_anchor_near_source(pts, style.stub)
+		} else {
+			layout::label_anchor(pts)
+		};
+		let (mid, perp) = match anchor {
 			Some(a) => a,
 			None    => return Ok(()),	// a zero-length edge carries no label
 		};
@@ -410,15 +485,42 @@ fn ref_point(r: &Rect, end: &Endpoint) -> (Sp, Sp) {
 	}
 }
 
-/// Bakes a shaped run centred within a node's box: horizontally on the centre, vertically on the
-/// baseline that seats the text block's middle on the box centre.
-fn bake_label_centred(ops: &mut Vec<DrawOp>, shaped: &ShapedText, r: &Rect) -> Outcome<()> {
-	let ld		= shaped.dims();
-	let base_x	= r.centre_x() - Sp(ld.width.raw() / 2);
-	// The block runs from the baseline up by height and down by depth; centring the block on the box
-	// centre puts the baseline half a (height - depth) below it.
-	let base_y	= r.centre_y() + Sp((ld.height.raw() - ld.depth.raw()) / 2);
-	bake_label(ops, shaped, base_x, base_y)
+/// The gap left between two stacked label lines, a fifth of the label size, so a two-line label reads as
+/// one centred block rather than a crammed pair.
+fn line_gap(label_size: Sp) -> Sp {
+	Sp(label_size.raw() / 5)
+}
+
+/// Bakes a stack of shaped lines centred within a node's box: each line centred horizontally on the box
+/// centre, the whole stack centred vertically on it. A single line is the common case and lands exactly
+/// as before; extra lines are seated above and below by their own extents plus the line gap.
+fn bake_label_centred(
+	ops:		&mut Vec<DrawOp>,
+	lines:		&[ShapedText],
+	label_size:	Sp,
+	r:			&Rect,
+)
+	-> Outcome<()>
+{
+	// The stack's full height: the sum of each line's extent, parted by the line gap.
+	let mut total = Sp::ZERO;
+	for (i, line) in lines.iter().enumerate() {
+		if i > 0 {
+			total = total + line_gap(label_size);
+		}
+		let ld = line.dims();
+		total = total + ld.height + ld.depth;
+	}
+	// The top of the stack, so its middle seats on the box centre.
+	let mut y = r.centre_y() - Sp(total.raw() / 2);
+	for line in lines {
+		let ld		= line.dims();
+		let base_x	= r.centre_x() - Sp(ld.width.raw() / 2);
+		let base_y	= y + ld.height;	// baseline sits a height below the line's top
+		res!(bake_label(ops, line, base_x, base_y));
+		y = y + ld.height + ld.depth + line_gap(label_size);
+	}
+	Ok(())
 }
 
 /// Bakes a shaped run as filled glyph outlines at a baseline, exactly as the SVG writer draws a line
