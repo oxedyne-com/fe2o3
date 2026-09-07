@@ -156,6 +156,62 @@ pub fn chat_body(model: &str, system: &str, user: &str) -> Outcome<String> {
 	Dat::Map(body).json()
 }
 
+/// The request body for a single-turn completion carrying one image beside the user's text.
+///
+/// The only thing that differs from [`chat_body`] is the user message's `content`: instead of a bare
+/// string it is the OpenAI multimodal array -- a `text` part and an `image_url` part -- so a vision
+/// model reads the words and the picture as one turn. The image travels inline as a `data:` URL,
+/// `data:<image_mime>;base64,<image_b64>`, which is what the OpenAI-compatible vision dialect expects and
+/// what lets a caller send bytes it holds without first hosting them somewhere fetchable. `image_mime` is
+/// the media type as the model wants to see it, e.g. `image/png` or `image/jpeg`; `image_b64` is the
+/// image already Base64-encoded, since encoding is the caller's to do and not this builder's to guess.
+/// Built through the daticle encoder for the same reason [`chat_body`] is: whatever a system prompt or a
+/// user text contains reaches the model correctly quoted.
+pub fn chat_body_vision(
+	model:		&str,
+	system:		&str,
+	user:		&str,
+	image_mime:	&str,
+	image_b64:	&str,
+)
+	-> Outcome<String>
+{
+	let text_msg = |role: &str, content: &str| {
+		let mut m = DaticleMap::new();
+		m.insert(dat!("role"), dat!(role.to_string()));
+		m.insert(dat!("content"), dat!(content.to_string()));
+		Dat::Map(m)
+	};
+
+	// The user turn's content is an array of typed parts rather than a plain string.
+	let mut text_part = DaticleMap::new();
+	text_part.insert(dat!("type"), dat!("text".to_string()));
+	text_part.insert(dat!("text"), dat!(user.to_string()));
+
+	let mut url_holder = DaticleMap::new();
+	url_holder.insert(dat!("url"), dat!(fmt!("data:{};base64,{}", image_mime, image_b64)));
+
+	let mut image_part = DaticleMap::new();
+	image_part.insert(dat!("type"), dat!("image_url".to_string()));
+	image_part.insert(dat!("image_url"), Dat::Map(url_holder));
+
+	let mut user_msg = DaticleMap::new();
+	user_msg.insert(dat!("role"), dat!("user".to_string()));
+	user_msg.insert(dat!("content"), Dat::List(vec![
+		Dat::Map(text_part),
+		Dat::Map(image_part),
+	]));
+
+	let mut body = DaticleMap::new();
+	body.insert(dat!("model"), dat!(model.to_string()));
+	body.insert(dat!("messages"), Dat::List(vec![
+		text_msg("system", system),
+		Dat::Map(user_msg),
+	]));
+	body.insert(dat!("temperature"), dat!(0.2f64));
+	Dat::Map(body).json()
+}
+
 /// The assistant's text from a provider's reply, or the reason there is none.
 ///
 /// A provider answers a good request with `{"choices":[{"message":{"content":"..."}}]}` and a bad one
@@ -252,6 +308,50 @@ pub async fn complete(
 	chat_reply(&payload)
 }
 
+/// [`complete`] for a vision endpoint: the same send seam and the same reply reader, but the body carries
+/// one image beside the text (see [`chat_body_vision`]). The reply dialect is unchanged -- a vision model
+/// answers with `choices[0].message.content` exactly as a text one does -- so [`chat_reply`] reads it.
+pub async fn complete_vision(
+	cfg:		&LlmConfig,
+	system:		&str,
+	user:		&str,
+	image_mime:	&str,
+	image_b64:	&str,
+	tls:		Arc<ClientConfig>,
+)
+	-> Outcome<String>
+{
+	let body = res!(chat_body_vision(&cfg.model, system, user, image_mime, image_b64));
+	let auth = fmt!("Bearer {}", cfg.api_key);
+	let headers: &[(&str, &str)] = &[
+		("Host",		cfg.provider.host()),
+		("Authorization",	&auth),
+		("Content-Type",	"application/json"),
+		("Accept",		"application/json"),
+	];
+	let resp = res!(https_request(
+		cfg.provider.host(),
+		443,
+		HttpMethod::POST,
+		cfg.provider.path(),
+		headers,
+		body.as_bytes(),
+		tls,
+	).await);
+
+	let payload = String::from_utf8_lossy(&resp.body).to_string();
+	let status = match &resp.header.headline {
+		HttpHeadline::Response { status }	=> *status as u16,
+		_					=> 0,
+	};
+	if !(200..300).contains(&status) {
+		return Err(err!(
+			"The LLM provider answered {} to a vision completion request: {}", status, payload;
+			Network, Data));
+	}
+	chat_reply(&payload)
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -320,6 +420,63 @@ mod tests {
 		let bare = r#"{"error":"model not found"}"#;
 		let e2 = fmt!("{}", chat_reply(bare).err().unwrap());
 		assert!(e2.contains("model not found"), "the bare message was not surfaced: {}", e2);
+		Ok(())
+	}
+
+	/// A vision body keeps the text-only system message but turns the user `content` into the two-part
+	/// array a vision model reads, with the image inlined as a `data:` URL of the given mime and bytes.
+	#[test]
+	fn test_the_vision_body_carries_an_image_part_04() -> Outcome<()> {
+		let body = res!(chat_body_vision(
+			"acme/vision-1",
+			"You describe images.",
+			"What is in this picture?",
+			"image/png",
+			"aGVsbG8=", // "hello" in Base64, standing in for image bytes.
+		));
+		let dat = res!(Dat::decode_string_with_config(body.clone(), &json_decoder()));
+		let map = match dat { Dat::Map(m) => m, _ => return Err(err!("not an object"; Test)) };
+		let msgs = match map.get(&dat!("messages")) {
+			Some(Dat::List(l)) => l,
+			_ => return Err(err!("no messages list: {}", body; Test)),
+		};
+		assert_eq!(msgs.len(), 2, "expected system then user: {}", body);
+
+		// The system turn is still a plain string, unchanged from the text-only shape.
+		let system = match &msgs[0] {
+			Dat::Map(m) => m,
+			_ => return Err(err!("system message not a map: {}", body; Test)),
+		};
+		assert!(matches!(system.get(&dat!("content")), Some(Dat::Str(_))),
+			"system content should be a bare string: {}", body);
+
+		// The user turn's content is the multimodal array of a text part and an image part.
+		let user = match &msgs[1] {
+			Dat::Map(m) => m,
+			_ => return Err(err!("user message not a map: {}", body; Test)),
+		};
+		let parts = match user.get(&dat!("content")) {
+			Some(Dat::List(l)) => l,
+			_ => return Err(err!("user content is not an array: {}", body; Test)),
+		};
+		assert_eq!(parts.len(), 2, "expected a text part and an image part: {}", body);
+
+		let part_type = |d: &Dat| match d { Dat::Map(m) => match m.get(&dat!("type")) {
+			Some(Dat::Str(s)) => s.clone(), _ => String::new() }, _ => String::new() };
+		assert_eq!(part_type(&parts[0]), "text", "first part should be text: {}", body);
+		assert_eq!(part_type(&parts[1]), "image_url", "second part should be image_url: {}", body);
+
+		// The image part nests `image_url.url` as a data URL of the given mime and Base64 payload.
+		let image = match &parts[1] { Dat::Map(m) => m, _ => return Err(err!("image part not a map"; Test)) };
+		let holder = match image.get(&dat!("image_url")) {
+			Some(Dat::Map(m)) => m,
+			_ => return Err(err!("image_url is not a nested object: {}", body; Test)),
+		};
+		match holder.get(&dat!("url")) {
+			Some(Dat::Str(s)) => assert_eq!(s, "data:image/png;base64,aGVsbG8=",
+				"the data URL was not built as expected: {}", body),
+			_ => return Err(err!("image_url carried no url string: {}", body; Test)),
+		}
 		Ok(())
 	}
 }
