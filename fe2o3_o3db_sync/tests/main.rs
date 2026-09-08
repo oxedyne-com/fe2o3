@@ -1,4 +1,5 @@
 mod basic;
+mod chunk_leak;
 mod chunked_value;
 mod dal;
 mod delete_replay;
@@ -31,6 +32,7 @@ fn main() -> Outcome<()> {
 fn run_tests() -> Outcome<()> {
 
     let filter = "all";
+    res!(chunk_leak::test_chunk_leak(filter));
     res!(rollover::test_rollover(filter));
     res!(basic::test_basic(filter));
     res!(dal::test_docs(filter));

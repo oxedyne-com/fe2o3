@@ -506,13 +506,52 @@ impl<
                     let datfilemax = self.cfg().data_file_max_bytes as f64;
                     let trigger = constant::OLD_DATA_PERCENT_GC_TRIGGER;
                     let oldfrac = 100.0 * (oldvals / datfilemax);
-                    if ((oldfrac > trigger) || fstat.is_all_data_old()) &&
+                    let eligible =
+                        ((oldfrac > trigger) || fstat.is_all_data_old()) &&
                         fstat.no_pending_moves() &&
                         !fstat.is_live() &&
                         !fstat.gc_active() && // Never set a second collector on the same file.
                         fstat.no_readers() &&
-                        self.gc_auto_active()
-                    {
+                        self.gc_auto_active();
+                    // A sealed file may still have writes draining.  A record's bytes reach the
+                    // data file in `WriterBot::write` before its accounting does: the accounting
+                    // travels writer -> cbot -> fbot as an `UpdateData`, while the seal travels
+                    // writer -> fbot directly and can overtake it.  So at the moment a sibling
+                    // record's supersession trips this trigger, `dat_size` and `dmap` can still
+                    // lag the physical file by the records whose `UpdateData` is in flight.
+                    // Collecting then is doubly wrong: the snapshot's accounting disagrees with
+                    // the file it transcribes (the `old_sum != old_size - new_size` abort), and a
+                    // later in-flight `UpdateData` would insert a now-stale position into the
+                    // rewritten file.  Defer until the on-disk size equals the accounted size --
+                    // the point at which every write has drained.  This is rare on the unchunked
+                    // path (old bytes accrue a small record at a time, long after the file has
+                    // sealed and drained) but routine for a chunked value, whose single overwrite
+                    // both rolls a file mid-burst and supersedes a whole value's worth of records
+                    // at once.  A later supersession re-evaluates, so deferral only delays.
+                    let drained = if eligible {
+                        let mut dat_path = self.zdir().dir.clone();
+                        dat_path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
+                        match std::fs::metadata(&dat_path) {
+                            Ok(m)  => m.len() == fstat.get_data_file_size() as u64,
+                            // Cannot confirm the file has drained, so do not collect it yet.
+                            Err(_) => false,
+                        }
+                    } else {
+                        false
+                    };
+                    // Case (c) from `register_old`: once the file has fully drained, every parked
+                    // supersession must have found its record.  Any left over refers to a record
+                    // that is not on disk -- a genuine accounting fault, not the write-path race --
+                    // so fail loudly rather than collect a file whose accounting is inconsistent.
+                    if eligible && drained && !fstat.pending_old_empty() {
+                        return Err(err!(
+                            "{:?}: File {} has drained (on-disk size equals accounted size) yet \
+                            {} superseded record(s) were never inserted: {:?}. This is an \
+                            accounting inconsistency, not the write-path race.",
+                            self_id, fnum, fstat.pending_old().len(), fstat.pending_old();
+                            Bug, Missing, Data));
+                    }
+                    if eligible && drained {
                         // [18.1] Select a gbot to collect the garbage.
                         debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
                         let bots = res!(self.igbots());
@@ -526,7 +565,7 @@ impl<
                                     res!(fs::remove_file(path));
                                 }
                             }
-                            debug!(sync_log::stream(), 
+                            debug!(sync_log::stream(),
                                 "{}: All the data in file {} is old, the file has therefore been deleted.",
                                 self_id, fnum,
                             );

@@ -184,6 +184,12 @@ pub const DEFAULT_WIRE_CHUNK_BYTES:     usize = 1_024; // 1 KiB
 
 // Hashing.
 pub const KEY_HASH_SALT:                [u8; 16] = SALT16;
+// Salt for the deterministic chunk set identifier, kept distinct from the
+// routing salt so the two hashes of a key never coincide.
+pub const CHUNK_SET_ID_SALT:            [u8; 16] = [
+    0x7a, 0x1d, 0x3f, 0x9c, 0x42, 0xe8, 0x05, 0xb6,
+    0x11, 0x93, 0xaf, 0x6e, 0x28, 0xd4, 0x7c, 0x50,
+];
 pub const SALT8: [u8; 8] = [
     0x15, 0x04, 0x84, 0x1e, 0xf2, 0x07, 0x19, 0xbc,
 ];

@@ -60,7 +60,9 @@ use oxedyne_fe2o3_hash::{
         ChecksummerDefAlt,
         ChecksumScheme,
     },
+    hash::HashScheme,
 };
+use oxedyne_fe2o3_iop_hash::api::HashForm;
 use oxedyne_fe2o3_iop_db::api::{
     Meta,
     RestSchemesOverride,
@@ -165,6 +167,28 @@ impl<
         self.ozone_key(res!(k.as_bytes()), schms2)
     }
     
+    /// Derives the chunk set identifier for a value from its key bytes.  A chunked value's chunk
+    /// records are addressed by `Tup5u64([set_id, index, ..])`; deriving `set_id` from the key --
+    /// rather than from a fresh random ticket per operation -- makes a later overwrite of the same
+    /// key write its chunks under the same addresses, so the ordinary supersession path flags the
+    /// superseded chunk records old and the collector reclaims them.  Seahash gives a stable
+    /// 64-bit value across runs and builds; the dedicated salt keeps it distinct from the routing
+    /// hash.  The collision probability matches the random ticket it replaces (~2^-64).
+    pub fn chunk_set_id(kbuf: &[u8]) -> u64 {
+        match HashScheme::new_seahash().hash(&[kbuf], constant::CHUNK_SET_ID_SALT).as_hashform() {
+            HashForm::U64(h)    => h,
+            // Seahash always yields a U64; fold any other form defensively into one.
+            other               => {
+                let v = other.as_vec();
+                let mut buf = [0u8; 8];
+                for (i, b) in v.iter().take(8).enumerate() {
+                    buf[i] = *b;
+                }
+                u64::from_be_bytes(buf)
+            },
+        }
+    }
+
     pub fn ozone_key(
         &self,
         kbuf:   Vec<u8>,
@@ -423,8 +447,9 @@ impl<
             user,
             schms2,
             resp.clone(),
+            None,
         ));
-        let nchunks = msgs.len(); 
+        let nchunks = msgs.len();
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
@@ -432,14 +457,48 @@ impl<
         Ok(nchunks)
     }
 
-    /// The key and value `Dat`icles are serialised here and then sent for final processing.
-    pub fn prepare_write_dat(
+    /// Store forcing the chunk set identifier rather than deriving it from the key.  Test and
+    /// migration support: it reproduces a value as an earlier build wrote it (a random
+    /// per-operation set_id), so that reads of such a value can be exercised after the switch to
+    /// key-derived identifiers.  Production writes never take this path.
+    pub fn store_dat_using_responder_forcing_set_id(
         &self,
         k:      Dat,
         v:      Dat,
         user:   UID,
         schms2: Option<&RestSchemesOverride<ENC, KH>>,
         resp:   Responder<UIDL, UID, ENC, KH>,
+        set_id: u64,
+    )
+        -> Outcome<usize>
+    {
+        let msgs = res!(self.prepare_write_dat(
+            k,
+            v,
+            user,
+            schms2,
+            resp.clone(),
+            Some(set_id),
+        ));
+        let nchunks = msgs.len();
+        if resp.is_some() {
+            res!(resp.send(OzoneMsg::Chunks(nchunks)));
+        }
+        res!(self.store_bytes(msgs));
+        Ok(nchunks)
+    }
+
+    /// The key and value `Dat`icles are serialised here and then sent for final processing.  A
+    /// `set_id_override` of `None` derives the chunk set identifier from the key (the ordinary
+    /// path); `Some` forces it, for reproducing an earlier build's random-keyed values.
+    pub fn prepare_write_dat(
+        &self,
+        k:              Dat,
+        v:              Dat,
+        user:           UID,
+        schms2:         Option<&RestSchemesOverride<ENC, KH>>,
+        resp:           Responder<UIDL, UID, ENC, KH>,
+        set_id_override: Option<u64>,
     )
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
     {
@@ -451,6 +510,7 @@ impl<
             user,
             schms2,
             resp,
+            set_id_override,
         )
     }
 
@@ -465,6 +525,7 @@ impl<
         user:       UID,
         schms2:     Option<&RestSchemesOverride<ENC, KH>>,
         resp:       Responder<UIDL, UID, ENC, KH>,
+        set_id_override: Option<u64>,
     )
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
     {
@@ -505,7 +566,14 @@ impl<
             let chunker = OzoneConfig::chunker(chunk_config);
             // 4.1 Chunk data.
             let (chunks, chunk_state) = res!(chunker.chunk(&vbuf));
-            let datkeys = res!(chunker.keys(**resp.ticket(), &chunk_state));
+            // Address the chunks by a key-derived identifier, not the per-operation ticket, so an
+            // overwrite of the same key supersedes the prior value's chunk records in place.  A
+            // forced identifier (test/migration only) reproduces an earlier build's random keys.
+            let set_id = match set_id_override {
+                Some(id)    => id,
+                None        => Self::chunk_set_id(&kbuf),
+            };
+            let datkeys = res!(chunker.keys(set_id, &chunk_state));
             
             // 4.2 Store main key -> bunch key.
             let mut bkbuf = res!(datkeys[0].as_bytes());
@@ -629,6 +697,17 @@ impl<
         //    routing decision, so it is carried through to the writer rather than dropped.
         let (kstored, cbwind, chash) = res!(self.ozone_key_dat(k, schms2));
 
+        // 1a. If the value is chunked, the tombstone on the user key below supersedes only the
+        //     bunch key; the chunk records live under their own keys and would leak forever (the
+        //     whole reason a chunked value's chunks are never rewritten on delete).  So read the
+        //     current bunch key, reconstruct each chunk key from the set_id it stores -- random
+        //     for a pre-upgrade value, key-derived for a new one, either way exactly what
+        //     `fetch_chunks` reconstructs to read them -- and tombstone each so the ordinary
+        //     supersession path reclaims them.  These carry no responder: the caller waits only
+        //     on the single bunch-key delete below.  The read is confined to the delete path,
+        //     which is rare relative to writes, and only chunked values pay the fan-out.
+        res!(self.reclaim_chunks_on_delete(k, user, schms2));
+
         // 2. The value we use to indicate deletion is an unencrypted custom usr type.
         let v = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
         let vstored = res!(v.as_bytes());
@@ -663,7 +742,65 @@ impl<
             _ => Ok(()),
         }
     }
-    
+
+    /// Reads the current value at `k` and, if it is chunked, tombstones every chunk record so the
+    /// collector reclaims them.  A no-op for an unchunked or absent value.  Chunk keys are
+    /// reconstructed from the part key exactly as `fetch_chunks` does, so this works for values
+    /// written under either the old random set_id or the new key-derived one.
+    fn reclaim_chunks_on_delete(
+        &self,
+        k:      &Dat,
+        user:   UID,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<()>
+    {
+        let enc = self.schemes().encrypter();
+        let or_enc = schms2.map(|s| s.encrypter());
+
+        let resp = res!(self.fetch_using_schemes(k, schms2));
+        let pkey = match res!(resp.recv_daticle(enc, or_enc)) {
+            (Some((Dat::Tup5u64(tup), _)), _) => PartKey(tup),
+            _ => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
+        };
+
+        for i in 1..(pkey.num_parts() + 1) {
+            let ck = Dat::Tup5u64([
+                pkey.set_id(),
+                i,
+                pkey.data_len(),
+                pkey.num_parts(),
+                pkey.part_size(),
+            ]);
+            let (ckbuf, ccbwind, cchash) = res!(self.ozone_key_dat(&ck, schms2));
+            let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+            let tvstored = res!(tomb.as_bytes());
+            let mut cmeta = Meta::new(user);
+            res!(cmeta.stamp_time_now());
+            let msg = res!(Self::package_write(
+                KeyVal {
+                    key:    Key::Complete(ckbuf),
+                    val:    tvstored,
+                    chash:  cchash,
+                    meta:   cmeta,
+                    cbpind: **ccbwind.bpind(),
+                },
+                Self::no_responder(),
+                self.schemes().checksummer().clone(),
+            ));
+            let cwbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, ccbwind.zind()));
+            let (cbot, cbpind) = cwbots.choose_bot(&ChooseBot::Randomly);
+            match cbot.send(msg) {
+                Err(e) => return Err(err!(e,
+                    "{}: While sending chunk {} tombstone to wbot {}.",
+                    self.ozid(), i, WorkerInd::new(*ccbwind.zind(), cbpind);
+                    Channel, Write)),
+                _ => (),
+            }
+        }
+        Ok(())
+    }
+
     // Read API, for general public use.
     
     /// Get a `Dat`icle value using the given key and data scheme overrides.  The result is

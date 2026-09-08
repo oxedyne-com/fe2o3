@@ -48,6 +48,7 @@ pub struct FileState {
     oldcnt:     usize,
     dmap:       BTreeMap<u64, DataState>, // Map of key-value pair starting positions in data file.
     mmap:       BTreeMap<u64, u64>, // Ephemeral map of the movement of starting positions due to gc.
+    pending_old: BTreeMap<u64, u64>, // Supersessions that arrived before the record's insert; start -> registered length.
     gc_active:  bool,
     readers:    usize,
 }
@@ -173,6 +174,12 @@ impl FileState {
         self.mmap.len() == 0
     }
 
+    /// Are there no supersessions still waiting for their record's insertion to land?
+    pub fn pending_old_empty(&self) -> bool {
+        self.pending_old.is_empty()
+    }
+    pub fn pending_old(&self) -> &BTreeMap<u64, u64> { &self.pending_old }
+
     pub fn data_map_empty(&self) -> bool {
         self.dmap.len() == 0
     }
@@ -191,10 +198,48 @@ impl FileState {
         &mut self,
         floc:   &FileLocation,
         ilen:   usize, // encoded index length
-    ) 
+    )
         -> Outcome<usize>
     {
         self.dmap.insert(floc.start, DataState::Cur);
+        // If a supersession of this record arrived before the record itself (see `register_old`
+        // case (c)), apply the deferred flag now that the record is present.  The parked length
+        // must match the record actually inserted here; a mismatch means the parked supersession
+        // referred to a different record at this position -- a genuine inconsistency, not a race.
+        if let Some(plen) = self.pending_old.remove(&floc.start) {
+            let rec_len = floc.klen + floc.vlen;
+            if plen != rec_len {
+                return Err(err!(
+                    "A supersession parked for position {} expected a record of length {}, but \
+                    the record inserted there has length {}.", floc.start, plen, rec_len;
+                    Bug, Mismatch, Data));
+            }
+            match self.dmap.get_mut(&floc.start) {
+                Some(dstat) => *dstat = DataState::Old,
+                None => return Err(err!(
+                    "The record just inserted at position {} vanished before its parked \
+                    supersession could be applied.", floc.start;
+                    Bug, Missing, Data)),
+            }
+            match self.oldsum.checked_add(rec_len) {
+                Some(sum) => self.oldsum = sum,
+                None => {
+                    self.oldsum = u64::MAX;
+                    return Err(err!(
+                        "Applying a parked supersession at position {} overflowed oldsum.",
+                        floc.start; Bug, Overflow, Integer));
+                },
+            }
+            match self.oldcnt.checked_add(1) {
+                Some(sum) => self.oldcnt = sum,
+                None => {
+                    self.oldcnt = usize::MAX;
+                    return Err(err!(
+                        "Applying a parked supersession at position {} overflowed oldcnt.",
+                        floc.start; Bug, Overflow, Integer));
+                },
+            }
+        }
         let dat_len = try_into!(usize, floc.klen + floc.vlen);
         match self.dat_size.checked_add(dat_len) {
             Some(sum) => self.dat_size = sum,
@@ -265,20 +310,41 @@ impl FileState {
     )
         -> Outcome<()>
     {
-        // Look the entry up before writing to it: a failed flagging must leave the record
-        // map exactly as it was, otherwise a missing entry is replaced by a spurious old
-        // one that the old-record counters below never see, and the two disagree forever.
+        // A write's bytes reach the data file (in `WriterBot::write`) before its accounting
+        // does: the cbot acknowledges the caller and only then forwards the `UpdateData` that
+        // drives `insert_new`, so a supersession of a key can reach the fbot before the very
+        // record it supersedes has been inserted into this map.  That is a general property of
+        // the write path, not a chunk peculiarity, but deterministic chunk keys make it routine:
+        // one overwrite supersedes a whole value's worth of same-keyed records at once, racing
+        // their sibling insertions.  So a lookup miss here is not proof of a fault -- it may be a
+        // supersession that has merely overtaken its record.  Three cases, kept distinct so a
+        // real accounting fault cannot hide behind a tolerant one:
+        //   (a) the record is present and current -- flag it old, the ordinary path;
+        //   (b) the record is present and already old -- the same supersession seen twice (a
+        //       start is unique within a file generation, so an old entry here is provably the
+        //       same record), absorbed without double counting;
+        //   (c) the record is absent -- park the supersession and let `insert_new` apply it when
+        //       the record lands.  A park that never reconciles is caught as a hard error once
+        //       the file has fully drained (see `schedule_deletion`), so a genuinely missing
+        //       record -- the fault class that masked the 2026-07-28 rollover bug -- still fails
+        //       loudly rather than being swallowed.
         match self.dmap.get_mut(&dloc.start) {
             Some(dstat @ DataState::Cur) => *dstat = DataState::Old,
-            Some(DataState::Old) => {
-                return Err(err!(
-                    "{:?} has already been marked as old.", dloc;
-                Bug, Mismatch, Data));
-            }
-            None => return Err(err!(
-                "While attempting to flag {:?} as old, a data entry starting \
-                at position {} in the FileState was not found.", dloc, dloc.start;
-            Bug, Missing, Data)),
+            // (b) Provable duplicate: same location, already accounted old.  Nothing to do.
+            Some(DataState::Old) => return Ok(()),
+            // (c) The record has not been inserted yet; park until it is.
+            None => {
+                match self.pending_old.get(&dloc.start) {
+                    Some(len) if *len == dloc.len => (), // already parked, same record
+                    Some(len) => return Err(err!(
+                        "Two different supersessions were parked for position {}: lengths {} \
+                        and {}. A start is unique within a file generation, so this is a genuine \
+                        accounting inconsistency, not a race.", dloc.start, len, dloc.len;
+                        Bug, Mismatch, Data)),
+                    None => { self.pending_old.insert(dloc.start, dloc.len); },
+                }
+                return Ok(());
+            },
         }
         match self.oldsum.checked_add(dloc.len) {
             Some(sum) => self.oldsum = sum,
