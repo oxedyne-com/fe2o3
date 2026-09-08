@@ -157,6 +157,8 @@ mod tests {
         ToBytes,
     };
 
+    use std::io::Cursor;
+
     /// Wraps a leaf in `levels` nested lists, so that the leaf sits at depth `levels + 1`.
     fn nest(levels: usize) -> Dat {
         let mut dat = Dat::Empty;
@@ -326,6 +328,80 @@ mod tests {
         let mut buf = vec![Dat::MAP_CODE, Dat::C64_CODE_START + 8];
         buf.extend_from_slice(&[0xff; 8]);
         assert!(Dat::from_bytes_limited(&buf, &DecodeLimits::default()).is_err());
+        Ok(())
+    }
+
+    // The streaming loader `Dat::load_bytes` is a separate decoder from the slice decoder above:
+    // it reads from any `io::Read`, and o3db walks a data file through it to rebuild an index.  A
+    // crash leaves a torn tail whose length header decodes to a garbage payload length, and the
+    // loader once did `vec![0; vlen]` on it, aborting the process (a capacity overflow above
+    // `isize::MAX`, a failed multi-exabyte allocation below it) before the rebuild's own error
+    // handling could truncate the tail.  The loader must return an error on an implausible length,
+    // never abort, for every variable-length code.
+
+    #[test]
+    fn test_streaming_loader_refuses_bu64_length_above_isize_max() -> Outcome<()> {
+        // A BU64 whose eight-byte length is all ones: far above isize::MAX, once a capacity
+        // overflow.  Only three payload bytes follow.
+        let mut buf = vec![Dat::BU64_CODE];
+        buf.extend_from_slice(&[0xff; 8]);
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert!(Dat::load_bytes(&mut Cursor::new(buf)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_loader_refuses_bu64_length_below_isize_max() -> Outcome<()> {
+        // A BU64 length below isize::MAX but still enormous (roughly 72 PiB), once a failed
+        // allocation that aborts rather than unwinds.  Only three payload bytes follow.
+        let mut buf = vec![Dat::BU64_CODE];
+        buf.extend_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert!(Dat::load_bytes(&mut Cursor::new(buf)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_loader_refuses_bu32_length_past_the_buffer() -> Outcome<()> {
+        // A BU32 length of four gigabytes with three payload bytes: not an abort, but a four-gigabyte
+        // allocation from three bytes of input is a denial of service in its own right. Assert the
+        // specific bounded-loader error, not merely that it errors: a reintroduced pre-allocating
+        // read would also meet the end of the reader and error, so only the torn-length message has
+        // teeth against a regression at this site.
+        let mut buf = vec![Dat::BU32_CODE];
+        buf.extend_from_slice(&[0xff; 4]);
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]);
+        let res = Dat::load_bytes(&mut Cursor::new(buf));
+        let shown = match &res {
+            Ok(_)	=> String::from("a decoded value"),
+            Err(e)	=> e.to_string(),
+        };
+        assert!(
+            shown.contains("torn or corrupt length header"),
+            "BU32 hostile length must produce the bounded torn-length error, got: {}", shown,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_loader_refuses_variable_c64_length_near_usize_max() -> Outcome<()> {
+        // The c64-prefixed variable case (a string here) with an eight-byte length of all ones and
+        // three payload bytes.
+        let mut buf = vec![Dat::STR_CODE, Dat::C64_CODE_START + 8];
+        buf.extend_from_slice(&[0xff; 8]);
+        buf.extend_from_slice(&[0x01, 0x02, 0x03]);
+        assert!(Dat::load_bytes(&mut Cursor::new(buf)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_loader_round_trips_a_genuine_byte_payload() -> Outcome<()> {
+        // The guard must not reject a valid variable-length payload: a BU-encoded byte vector still
+        // loads back byte for byte.
+        let original = Dat::BU8(vec![9u8, 8, 7, 6, 5, 4, 3, 2, 1, 0]);
+        let buf = res!(original.to_bytes(Vec::new()));
+        let loaded = res!(Dat::load_bytes(&mut Cursor::new(buf.clone())));
+        assert_eq!(loaded, buf);
         Ok(())
     }
 }

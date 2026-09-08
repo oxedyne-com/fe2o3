@@ -81,6 +81,36 @@ impl Dat {
         Ok(byts)
     }
 
+    /// Reads a variable payload of `vlen` bytes onto `byts` without trusting
+    /// `vlen` enough to pre-allocate it. A torn or corrupt length header (the
+    /// crash tail of an append-only store, say) can name a payload far larger
+    /// than the reader holds, and `vec![0; vlen]` on such a value aborts the
+    /// whole process before the caller can treat it as the decode error it is:
+    /// a capacity overflow when `vlen` exceeds `isize::MAX`, a failed
+    /// multi-exabyte allocation otherwise. Growing the buffer only as real bytes
+    /// arrive caps the allocation at what the reader actually yields, so an
+    /// implausible length becomes a catchable error instead of a panic.
+    fn load_payload<R: io::Read>(
+        mut r:  &mut R,
+        vlen:   usize,
+        byts:   &mut Vec<u8>,
+    )
+        -> Outcome<()>
+    {
+        let start = byts.len();
+        let mut take = io::Read::take(&mut r, vlen as u64);
+        let got = res!(io::Read::read_to_end(&mut take, byts), Decode, Bytes);
+        if got != vlen {
+            byts.truncate(start);
+            return Err(err!(
+                "A byte payload declared a length of {} but only {} byte(s) were \
+                available before the end of the reader: a torn or corrupt length \
+                header.", vlen, got;
+                Decode, Bytes, Input));
+        }
+        Ok(())
+    }
+
     /// This method returns the raw bytes for an encoded `Dat`.
     pub fn load_bytes_muncher<R: io::Read>(
         mut r: &mut R,
@@ -306,9 +336,7 @@ impl Dat {
                 }
                 // Avoid the use of the heap for the C64, for what it's worth.
                 let vlen = res!(Self::load_c64(&mut r, c64code[0], &mut byts));
-                let mut v = vec![0;vlen];
-                res!(r.read_exact(&mut v));
-                byts.extend_from_slice(&v[..]);
+                res!(Self::load_payload(&mut r, vlen, byts));
                 return Ok(())
             },
             Self::C64_CODE_START..=Self::C64_CODE_END => { // C64
@@ -493,9 +521,7 @@ impl Dat {
                 let vlen = u8::from_be_bytes(
                     res!(<[u8; 1]>::try_from(&v[..]), Decode, Bytes)
                 ) as usize;
-                let mut v = vec![0;vlen];
-                res!(r.read_exact(&mut v));
-                byts.extend_from_slice(&v[..]);
+                res!(Self::load_payload(&mut r, vlen, byts));
                 return Ok(())
             },
             Self::BU16_CODE => {
@@ -514,9 +540,7 @@ impl Dat {
                 let vlen = u16::from_be_bytes(
                     res!(<[u8; 2]>::try_from(&v[..]), Decode, Bytes)
                 ) as usize;
-                let mut v = vec![0;vlen];
-                res!(r.read_exact(&mut v));
-                byts.extend_from_slice(&v[..]);
+                res!(Self::load_payload(&mut r, vlen, byts));
                 return Ok(())
             },
             Self::BU32_CODE => {
@@ -535,9 +559,7 @@ impl Dat {
                 let vlen = u32::from_be_bytes(
                     res!(<[u8; 4]>::try_from(&v[..]), Decode, Bytes)
                 ) as usize;
-                let mut v = vec![0;vlen];
-                res!(r.read_exact(&mut v));
-                byts.extend_from_slice(&v[..]);
+                res!(Self::load_payload(&mut r, vlen, byts));
                 return Ok(())
             },
             Self::BU64_CODE => {
@@ -556,9 +578,7 @@ impl Dat {
                 let vlen = u64::from_be_bytes(
                     res!(<[u8; 8]>::try_from(&v[..]), Decode, Bytes)
                 ) as usize;
-                let mut v = vec![0;vlen];
-                res!(r.read_exact(&mut v));
-                byts.extend_from_slice(&v[..]);
+                res!(Self::load_payload(&mut r, vlen, byts));
                 return Ok(())
             },
             // Fixed length bytes
