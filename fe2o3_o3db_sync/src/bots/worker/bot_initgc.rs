@@ -438,36 +438,72 @@ impl<
         //    after the size check below has confirmed that the data file read whole.
         let mut ind_path = self.zdir().dir.clone();
         ind_path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
+        // The data file's own path, needed if the walk hits a torn final record
+        // and has to truncate it away (step 4a).
+        let mut dat_path = self.zdir().dir.clone();
+        dat_path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
+
+        let csummer = self.api().schemes().checksummer().clone();
 
         let mut pos = 0;
         let mut kpos = 0;
         let mut klen = 0;
         let mut count = 0;
+        // Byte offset just past the last record that decoded whole, the number
+        // of such records, and whether a torn tail was cut. An append-only log
+        // can only be interrupted at its end, so a decode failure with nothing
+        // valid after it is the torn tail: the file is truncated here and the
+        // rebuild carries on, so one interrupted append costs one record rather
+        // than the whole file. A good record decoding after a bad one is not a
+        // crash tail but mid-file corruption, and is surfaced instead (see
+        // `try_truncate_torn_tail`).
+        let mut last_good_pos: u64 = 0;
+        let mut good_count = 0usize;
+        let mut tail_truncated = false;
 
-        let csum_len = res!(self.api().schemes().checksummer().len());
+        let csum_len = res!(csummer.len());
 
         loop {
             // 3. Load the key Daticle bytes and while we're at it, compare the checksum.
-            let (key, meta, chash) = match StoredKey::load(
+            let (key, meta, chash, mut pending_index) = match StoredKey::load(
                 &mut reader,
-                self.api().schemes().checksummer().clone(),
+                csummer.clone(),
             ) {
-                Err(e) => return Err(err!(e,
-                    "{}: While reading from position {} in {:?} file {}, \
-                    having read {} items.",
-                    self.ozid(), pos, typ, fnum, count;
-                    IO, File, Read)),
+                Err(e) => {
+                    // A decode failure at the key.  If this is the append-only
+                    // crash tail, truncate and finish the rebuild from what was
+                    // recovered; otherwise surface it.
+                    if res!(self.try_truncate_torn_tail(
+                        &dat_path, last_good_pos, dat_size, fnum, csummer.clone(),
+                    )) {
+                        tail_truncated = true;
+                        break;
+                    }
+                    return Err(err!(e,
+                        "{}: Decode failure reading a key at position {} in {:?} file {} \
+                        after {} good records, and it is not an append-only crash tail \
+                        (a valid record decodes further on, or a writer is extending the \
+                        file): this is mid-file corruption, and truncating here would \
+                        discard live data.",
+                        self.ozid(), last_good_pos, typ, fnum, good_count;
+                        IO, File, Data, Mismatch));
+                },
                 Ok(None) => break,
-                Ok(Some((skey, mut skbyts, n))) => {
+                Ok(Some((skey, skbyts, n))) => {
                     count += 1;
                     kpos = pos;
                     klen = n;
                     pos += n;
                     let chash = skey.ref_chash().clone();
-                    index_file_buffer.extend_from_slice(skey.ref_chash());
-                    index_file_buffer.append(&mut skbyts);
+                    // Build the index record (cache hash followed by the stored
+                    // key bytes) but hold it back: it is appended to the index
+                    // buffer only once the value beside it has also decoded, so
+                    // a torn tail that left a key without its value does not
+                    // leave a dangling key in the rebuilt index.
+                    let mut pending = skey.ref_chash().to_vec();
+                    pending.extend_from_slice(&skbyts);
                     let meta = skey.meta().clone();
-                    (skey.into_key(), meta, chash)
+                    (skey.into_key(), meta, chash, pending)
                 },
             };
             // 4. Count the value Daticle bytes.  Dat::count_bytes also moves the
@@ -476,26 +512,77 @@ impl<
                 &mut reader,
                 csum_len,
             ) {
-                Err(e) => return Err(err!(e,
-                    "{}: While reading from position {} in {:?} file {}, \
-                    having read {} items.",
-                    self.ozid(), pos, typ, fnum, count;
-                    IO, File, Read)),
-                Ok(0) => return Err(err!(
-                    "{}: Missing value at end of {:?} file {}.",
-                    self.ozid(), typ, fnum;
-                    IO, File, Data, Missing)),
+                Err(e) => {
+                    // 4a. The key decoded but its value did not.  Treat a torn
+                    //     tail the same way as a torn key above.
+                    if res!(self.try_truncate_torn_tail(
+                        &dat_path, last_good_pos, dat_size, fnum, csummer.clone(),
+                    )) {
+                        tail_truncated = true;
+                        break;
+                    }
+                    return Err(err!(e,
+                        "{}: Decode failure reading a value at position {} in {:?} file {} \
+                        after {} good records, and it is not an append-only crash tail: \
+                        this is mid-file corruption, and truncating here would discard \
+                        live data.",
+                        self.ozid(), last_good_pos, typ, fnum, good_count;
+                        IO, File, Data, Mismatch));
+                },
+                Ok(0) => {
+                    // A key with no value is the classic interrupted append: the
+                    // key reached disk and the crash fell before its value. The
+                    // reader is at EOF, so nothing follows -- a torn tail.
+                    if res!(self.try_truncate_torn_tail(
+                        &dat_path, last_good_pos, dat_size, fnum, csummer.clone(),
+                    )) {
+                        tail_truncated = true;
+                        break;
+                    }
+                    return Err(err!(
+                        "{}: Missing value at position {} in {:?} file {} after {} good \
+                        records, and it is not an append-only crash tail.",
+                        self.ozid(), last_good_pos, typ, fnum, good_count;
+                        IO, File, Data, Missing));
+                },
                 Ok(n) => {
+                    count += 1;
+                    pos += n;
+
+                    // 4b. `StoredValue::count` walks the value by seeking over
+                    //     its declared length rather than reading it, so a value
+                    //     whose length header survived but whose body was cut off
+                    //     by a crash is not caught above -- it seeks past the end
+                    //     of the file and reports the full length. Catch it here:
+                    //     a record that claims to end past the surveyed file size
+                    //     is a torn final value. Treat it as the torn tail (drop
+                    //     it, truncate, continue); if a good record still decodes
+                    //     after it, that is mid-file corruption and is surfaced.
+                    if pos as u64 > dat_size as u64 {
+                        if res!(self.try_truncate_torn_tail(
+                            &dat_path, last_good_pos, dat_size, fnum, csummer.clone(),
+                        )) {
+                            tail_truncated = true;
+                            break;
+                        }
+                        return Err(err!(
+                            "{}: Value at position {} in {:?} file {} declares a length \
+                            that runs {} bytes past the surveyed file size of {}, after \
+                            {} good records, and it is not an append-only crash tail: \
+                            this is mid-file corruption.",
+                            self.ozid(), last_good_pos, typ, fnum, pos - dat_size, dat_size,
+                            good_count;
+                            IO, File, Data, Mismatch));
+                    }
+
                     // 5. Create the FileLocation.
-                    let sfloc = res!(StoredFileLocation::new( // do this before incrementing pos
+                    let sfloc = res!(StoredFileLocation::new(
                         fnum,
                         kpos as u64,
                         klen as u64,
                         n as u64,
-                        self.api().schemes().checksummer().clone(),
+                        csummer.clone(),
                     ));
-                    count += 1;
-                    pos += n;
 
                     // 6. Insert the key and location into the bot cache, informing a gbot about
                     //    new data and old data that can be scheduled for garbage collection.  The
@@ -526,22 +613,43 @@ impl<
                         )
                     ));
 
-                    // 7. Append to the index file buffer.
-                    //let ibuf = StoredIndex::as_bytes(&floc);
+                    // 7. The record is whole: commit its held-back key bytes and
+                    //    its index entry to the buffer, and mark this as the last
+                    //    good boundary.
+                    index_file_buffer.append(&mut pending_index);
                     index_file_buffer.extend_from_slice(ibuf);
+                    last_good_pos = pos as u64;
+                    good_count += 1;
                 },
             }
         }
 
-        // 8. Do size check.  This guards the truncation below: if a wbot appended to the data
-        //    file after the survey measured it, the walk reads more than was surveyed and the
-        //    rebuild is abandoned here, before anything is overwritten.
-        if pos != dat_size {
-            return Err(err!(
-                "{}: After initial caching of data file {}, the total data count \
-                came to {} bytes, but the originally surveyed file size was {}.",
-                self.ozid(), fnum, pos, dat_size;
-                Mismatch, Data));
+        // 8. Do size check.  The walk ended without a decode failure but read a
+        //    different number of bytes than the survey measured.  `pos > dat_size`
+        //    is caught inside the loop (step 4b) and cannot reach here.  A
+        //    deliberate tail truncation leaves `pos < dat_size` by design and is
+        //    exempt.  What remains is `pos < dat_size`: trailing bytes after the
+        //    last decoded record that were too few to read as another record (a
+        //    sub-header fragment of an interrupted append, which `StoredKey::load`
+        //    reports as a clean end).  That is the torn tail too, so truncate to
+        //    the last good record rather than abandoning the whole file -- unless
+        //    a valid record still decodes in those trailing bytes (corruption) or
+        //    a writer has grown the file past the survey (a live append), both of
+        //    which `try_truncate_torn_tail` refuses and which are surfaced here.
+        if !tail_truncated && pos != dat_size {
+            if pos < dat_size
+                && res!(self.try_truncate_torn_tail(
+                    &dat_path, last_good_pos, dat_size, fnum, csummer.clone(),
+                ))
+            {
+                tail_truncated = true;
+            } else {
+                return Err(err!(
+                    "{}: After initial caching of data file {}, the total data count \
+                    came to {} bytes, but the originally surveyed file size was {}.",
+                    self.ozid(), fnum, pos, dat_size;
+                    Mismatch, Data));
+            }
         }
 
         // 9. Write the rebuilt index into the existing index file, keeping its inode so that
@@ -690,8 +798,24 @@ impl<
                 old_start1 = old_start2;
                 dstat1 = fstat.get_data_state(old_start2).cloned();
             }
+
+            // Durability barrier before the rename below: force the transcribed
+            // temporary data file to stable storage. Dropping the BufWriter
+            // flushes the buffer into the page cache, but the rename at step 7
+            // is a directory operation that can reach disk before the file's
+            // contents do. A power loss in that window would leave the rename
+            // durable and the file torn -- a renamed, torn file replacing a
+            // previously good one. Syncing the contents first closes that hole.
+            res!(data_writer.flush());
+            if let Err(e) = data_writer.get_ref().sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on the transcribed temporary data file {:?} \
+                    failed before renaming it over data file {}.",
+                    self.ozid(), tmp_data_path, fnum;
+                    IO, File, Write));
+            }
         }
-        
+
         let new_size = new_start as usize;
 
         // 4. Do some checks.
@@ -754,6 +878,14 @@ impl<
 
         // 7. Replace the old data file with the new temporary file.
         res!(fs::rename(tmp_data_path, data_path));
+
+        // Persist the directory entries changed by the renames above (this data
+        // file here, and the index file inside `cache_data_file`). A rename is a
+        // directory metadata operation; fsyncing the file contents does not
+        // persist the rename itself, so without this a power loss could leave
+        // the directory pointing at a file that is not yet on disk. Both files
+        // live directly in the zone directory, so one fsync of it covers both.
+        res!(Self::sync_dir(&self.zdir().dir));
 
         // 8. Reset FileState.
         fstat.reset_old_accounting();
@@ -924,6 +1056,18 @@ impl<
             // doing so, and a rebuild that silently lost its tail would be renamed over a
             // good index.
             res!(writer.flush());
+            // Durability barrier before the rename below: force the rebuilt
+            // index contents to stable storage, for the same reason the data
+            // transcription is synced before its rename -- the rename can reach
+            // disk before the contents, and a power loss there would rename a
+            // torn index over a good one.
+            if let Err(e) = writer.get_ref().sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on the rebuilt temporary index file {:?} \
+                    failed before renaming it over index file {}.",
+                    self.ozid(), tmp_ind_path, fnum;
+                    IO, File, Write));
+            }
         } // close out that writer
 
         // Put the rebuilt index in place in one step.
@@ -976,6 +1120,127 @@ impl<
             }
         }
         Ok(fstat)
+    }
+
+    /// Is there a complete, checksum-valid key/value record beginning at any
+    /// offset in `[from, end)` of the data file?  Called only after the rebuild
+    /// walk hits a decode failure, to tell an append-only crash tail (nothing
+    /// valid follows the torn record) from mid-file corruption (a good record
+    /// decodes after the bad one).  A crash leaves only the one partially
+    /// written record after the last good one, so this scans a short region and
+    /// answers no; corruption of an otherwise whole file finds the next real
+    /// record quickly and answers yes.  The region is read once into memory and
+    /// every offset is tried, so the cost is bounded by the data file size and
+    /// paid only on the rare torn-rebuild path.  A false positive would need a
+    /// run of bytes that parses as a whole key and value and passes the key's
+    /// checksum by chance, which is negligible.
+    fn valid_record_after<C: Checksummer>(
+        dat_path:   &std::path::Path,
+        csummer:    C,
+        from:       u64,
+        end:        u64,
+    )
+        -> Outcome<bool>
+    {
+        if from >= end {
+            return Ok(false);
+        }
+        let csum_len = res!(csummer.len());
+        let mut file = match OpenOptions::new().read(true).open(dat_path) {
+            Err(e) => return Err(err!(e,
+                "While opening data file {:?} to scan for a valid record past a \
+                torn one.", dat_path;
+                IO, File, Read)),
+            Ok(f) => f,
+        };
+        res!(file.seek(SeekFrom::Start(from)));
+        let mut tail = Vec::new();
+        res!(file.read_to_end(&mut tail));
+        // Offset 0 is the record that already failed to decode in the caller, so
+        // start one byte in: the question is whether a GOOD record follows it.
+        for off in 1..tail.len() {
+            let mut cur = std::io::Cursor::new(&tail[off..]);
+            if let Ok(Some((_, _, _))) = StoredKey::<UIDL, UID>::load(&mut cur, csummer.clone()) {
+                if let Ok(n) = StoredValue::count(&mut cur, csum_len) {
+                    if n > 0 {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Decides whether a decode failure during the data-file rebuild is the
+    /// append-only crash tail and, if so, truncates the data file to the last
+    /// good record and returns `true` so the caller can finish the rebuild from
+    /// what was recovered.  Returns `false` when a good record decodes after the
+    /// failed one (mid-file corruption) or the file has grown past the survey (a
+    /// writer is appending to it): in both cases the tail is not ours to cut and
+    /// the caller surfaces the original error.
+    fn try_truncate_torn_tail<C: Checksummer>(
+        &self,
+        dat_path:       &std::path::Path,
+        last_good_pos:  u64,
+        dat_size:       usize,
+        fnum:           FileNum,
+        csummer:        C,
+    )
+        -> Outcome<bool>
+    {
+        if res!(Self::valid_record_after(dat_path, csummer, last_good_pos, dat_size as u64)) {
+            return Ok(false);
+        }
+        // A file longer than the survey means a writer appended under the
+        // rebuild; the tail is not a crash artefact and must not be cut.
+        let phys_len = res!(fs::metadata(dat_path)).len();
+        if phys_len != dat_size as u64 {
+            return Ok(false);
+        }
+        let tf = match OpenOptions::new().write(true).open(dat_path) {
+            Err(e) => return Err(err!(e,
+                "{}: Opening data file {:?} ({}) to truncate a torn tail to {}.",
+                self.ozid(), dat_path, fnum, last_good_pos;
+                IO, File, Write)),
+            Ok(f) => f,
+        };
+        if let Err(e) = tf.set_len(last_good_pos) {
+            return Err(err!(e,
+                "{}: Truncating data file {:?} ({}) to {} to drop a torn tail.",
+                self.ozid(), dat_path, fnum, last_good_pos;
+                IO, File, Write));
+        }
+        if let Err(e) = tf.sync_all() {
+            return Err(err!(e,
+                "{}: Syncing data file {:?} ({}) after truncating a torn tail.",
+                self.ozid(), dat_path, fnum;
+                IO, File, Write));
+        }
+        warn!(sync_log::stream(),
+            "{}: Data file {} had a torn final record at position {}; truncated to \
+            the last good record and rebuilding the index from it. One interrupted \
+            append costs one record.",
+            self.ozid(), fnum, last_good_pos);
+        Ok(true)
+    }
+
+    /// Forces a directory's entries to stable storage.  A `rename` is a
+    /// directory metadata operation, so fsyncing a renamed file's contents does
+    /// not persist the rename itself; this is called after the GC renames so a
+    /// power loss cannot leave the directory pointing at a file that never
+    /// reached disk.
+    fn sync_dir(dir: &std::path::Path) -> Outcome<()> {
+        match File::open(dir) {
+            Err(e) => Err(err!(e,
+                "While opening directory {:?} to fsync it.", dir;
+                IO, File, Read)),
+            Ok(d) => match d.sync_all() {
+                Err(e) => Err(err!(e,
+                    "While fsyncing directory {:?}.", dir;
+                    IO, File, Write)),
+                Ok(()) => Ok(()),
+            },
+        }
     }
 
 }

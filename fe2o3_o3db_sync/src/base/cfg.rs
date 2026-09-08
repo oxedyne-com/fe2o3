@@ -148,12 +148,29 @@ impl Default for OzoneConfig {
                                                     "max_size" => 104_857_600u64,
                                                 },
                                             }.get_map().unwrap(),
-            // Durability barrier. Default off, matching pre-feature behaviour.
-            // Operators that want stronger guarantees opt in via
-            // `sync_on_write`, `sync_every_n_writes`, or `sync_interval_ms`.
+            // Durability barrier. The default is a bounded group-commit: an
+            // acknowledged write is fsynced within `sync_interval_ms` of the
+            // last fsync, giving a durability floor without paying an fsync per
+            // write. 200 ms is the group-commit window: it bounds crash loss on
+            // the live file to roughly the writes of the last interval while
+            // leaving the hot path to ack into the page cache as before, so a
+            // wbot pays about one data+index fsync per 200 ms of sustained
+            // writing rather than one per write. This is independent of, and in
+            // addition to, the unconditional fsync barriers on seal and before
+            // the GC rename, which bound loss to the live file's tail under any
+            // policy. Operators wanting a stronger floor set `sync_on_write` (an
+            // fsync per write) or `sync_every_n_writes`; `sync_interval_ms = 0`
+            // restores the old never-fsync append behaviour.
+            //
+            // Known limitation (no background tick in this wave):
+            // `maybe_sync_files` evaluates the interval on each write, so if
+            // writes stop, the final sub-interval of writes is not fsynced until
+            // the next write arrives. The seal barrier still makes every sealed
+            // file durable; only the live file's most recent unsynced tail is
+            // exposed across a write pause.
             sync_on_write:                  false,
             sync_every_n_writes:            0,
-            sync_interval_ms:               0,
+            sync_interval_ms:               200,
         }
     }
 }

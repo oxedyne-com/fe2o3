@@ -337,6 +337,14 @@ impl<
                 Bug, Invalid, Input)),
         };
 
+        // Durability barrier on seal: force the data and index of the file
+        // about to be sealed to stable storage before it is closed and a fresh
+        // live pair takes over. This is unconditional, independent of the
+        // configured write sync policy, and bounds crash loss to the current
+        // live file's tail under any policy -- once a file is sealed it is
+        // durable. The cost is one fsync pair per ~`data_file_max_bytes` of
+        // writes, not one per write.
+        res!(self.sync_sealed_pair());
         self.lpair.close();
         self.lpair = res!(self.zdir().open_live(fnum_new));
         let start = self.lpair().dat.size;
@@ -506,6 +514,27 @@ impl<
                 Ok(start)
             },
         }
+    }
+
+    /// Forces the current live pair's data and index files to stable storage.
+    /// Used as the unconditional barrier on seal/rollover, so a sealed file is
+    /// durable regardless of the configured write sync policy.
+    fn sync_sealed_pair(&mut self) -> Outcome<()> {
+        if let Some(file) = self.lpair_mut().dat.file.as_mut() {
+            if let Err(e) = file.sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on the sealed data file failed.", self.ozid();
+                    IO, File, Write));
+            }
+        }
+        if let Some(file) = self.lpair_mut().ind.file.as_mut() {
+            if let Err(e) = file.sync_data() {
+                return Err(err!(e,
+                    "{}: sync_data on the sealed index file failed.", self.ozid();
+                    IO, File, Write));
+            }
+        }
+        Ok(())
     }
 
     fn maybe_sync_files(&mut self) -> Outcome<()> {
