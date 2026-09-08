@@ -156,6 +156,7 @@ pub mod file;
 pub mod test;
 
 pub mod db;
+pub mod migrate; // Live-set store migration and compaction (drops orphaned chunk records).
 pub mod prelude;
 
 /// Peer-to-peer distributed Ozone: OAM placement + IBLT anti-entropy +
