@@ -772,33 +772,58 @@ impl<
                 pkey.num_parts(),
                 pkey.part_size(),
             ]);
-            let (ckbuf, ccbwind, cchash) = res!(self.ozone_key_dat(&ck, schms2));
-            let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
-            let tvstored = res!(tomb.as_bytes());
-            let mut cmeta = Meta::new(user);
-            res!(cmeta.stamp_time_now());
-            let msg = res!(Self::package_write(
-                KeyVal {
-                    key:    Key::Complete(ckbuf),
-                    val:    tvstored,
-                    chash:  cchash,
-                    meta:   cmeta,
-                    cbpind: **ccbwind.bpind(),
-                },
-                Self::no_responder(),
-                self.schemes().checksummer().clone(),
-            ));
-            let cwbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, ccbwind.zind()));
-            let (cbot, cbpind) = cwbots.choose_bot(&ChooseBot::Randomly);
-            match cbot.send(msg) {
-                Err(e) => return Err(err!(e,
-                    "{}: While sending chunk {} tombstone to wbot {}.",
-                    self.ozid(), i, WorkerInd::new(*ccbwind.zind(), cbpind);
-                    Channel, Write)),
-                _ => (),
-            }
+            // No responder: the caller waits only on the single bunch-key delete.
+            res!(self.tombstone_chunk_key(&ck, user, schms2, Self::no_responder()));
         }
         Ok(())
+    }
+
+    /// Writes an unencrypted deleted-kind tombstone at the `Key::Complete` form of a chunk-data
+    /// key, dispatched to the writer of the key's routed zone under the given responder.  Because
+    /// the stored-key bytes are the chunk key's bytes either way, the tombstone supersedes the
+    /// chunk record at the same cache key, so the ordinary supersession collector flags the
+    /// chunk's bytes old and reclaims them -- the only in-place way to retire a chunk record, since
+    /// the store has no primitive that forgets a key without writing something at it.  Shared by
+    /// the delete path, which reclaims a deleted value's chunks, and the orphan sweep, which
+    /// reclaims chunk records no live bunch key references.
+    ///
+    /// `ck` must be the chunk's `Dat::Tup5u64` part key.  The tombstone is left unencrypted,
+    /// exactly as an ordinary key delete leaves it, so a reader recognises it without the at-rest
+    /// key.
+    pub fn tombstone_chunk_key(
+        &self,
+        ck:     &Dat,
+        user:   UID,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+        resp:   Responder<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<()>
+    {
+        let (ckbuf, ccbwind, cchash) = res!(self.ozone_key_dat(ck, schms2));
+        let tomb = Dat::Usr(id::usr_kind_id_deleted(), Some(Box::new(Dat::Empty)));
+        let tvstored = res!(tomb.as_bytes());
+        let mut cmeta = Meta::new(user);
+        res!(cmeta.stamp_time_now());
+        let msg = res!(Self::package_write(
+            KeyVal {
+                key:    Key::Complete(ckbuf),
+                val:    tvstored,
+                chash:  cchash,
+                meta:   cmeta,
+                cbpind: **ccbwind.bpind(),
+            },
+            resp,
+            self.schemes().checksummer().clone(),
+        ));
+        let cwbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Writer, ccbwind.zind()));
+        let (cbot, cbpind) = cwbots.choose_bot(&ChooseBot::Randomly);
+        match cbot.send(msg) {
+            Err(e) => Err(err!(e,
+                "{}: While sending chunk tombstone for {:?} to wbot {}.",
+                self.ozid(), ck, WorkerInd::new(*ccbwind.zind(), cbpind);
+                Channel, Write)),
+            _ => Ok(()),
+        }
     }
 
     // Read API, for general public use.

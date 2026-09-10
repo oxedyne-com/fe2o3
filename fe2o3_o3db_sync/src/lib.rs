@@ -157,6 +157,7 @@ pub mod test;
 
 pub mod db;
 pub mod migrate; // Live-set store migration and compaction (drops orphaned chunk records).
+pub mod sweep; // In-place, online orphan sweep (reclaims orphaned chunk records via supersession).
 pub mod prelude;
 
 /// Peer-to-peer distributed Ozone: OAM placement + IBLT anti-entropy +

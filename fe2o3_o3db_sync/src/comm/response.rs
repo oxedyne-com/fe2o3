@@ -135,7 +135,16 @@ impl<
                         Channel, Read)),
                     Recv::Result(Ok(msg)) => match msg {
                         OzoneMsg::Error(e) => return Err(e),
-                        OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) => {
+                        // A single record is decoded the same whether it was read under a Complete
+                        // key or a chunk key: the chunk arm is reached when a chunk-data key is
+                        // fetched directly -- which an orphan sweep does to read a chunk record's
+                        // tombstone, and which also arises when a deleted chunked value's chunk key
+                        // is scanned (its newest record is a deleted-kind marker and scans as a
+                        // Tup5u64 main key).  Recognising the marker in both arms, not just the
+                        // Complete one, is what lets such a key read back as absent rather than as
+                        // an "unexpected" error.
+                        OzoneMsg::Value(Value::Complete(Some((dat, meta)), postgc)) |
+                        OzoneMsg::Value(Value::Chunk(Some((dat, meta)), _, postgc)) => {
                             // A deletion is stored as a tombstone value under the deleted key, and
                             // the reader finds it exactly as it finds any other value.  A key whose
                             // newest value is a tombstone has no value, so say so here, once, for

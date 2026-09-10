@@ -196,7 +196,12 @@ impl<
     )
         -> Outcome<Vec<(Dat, Dat, Meta<UIDL, UID>)>>
     {
-        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>
+        // The chunk index of each record is carried alongside its key and meta so the
+        // main-key / chunk-data classification is made on the newest record per key, not on
+        // whichever happened to be walked last: a chunk-data record later superseded by a
+        // Complete tombstone must classify as the tombstone, or the inverse scan would emit a
+        // chunk key a delete has already begun reclaiming.
+        let mut live: HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>
             = HashMap::new();
         let mut short: Vec<Shortfall> = Vec::new();
 
@@ -236,7 +241,14 @@ impl<
 
         let mut out: Vec<(Dat, Dat, Meta<UIDL, UID>)> =
             Vec::with_capacity(live.len());
-        for (_kbyts, (kdat, meta)) in live.into_iter() {
+        for (_kbyts, (kdat, meta, cind)) in live.into_iter() {
+            // A chunk-data record has a chunk index >= 1.  The default scan keeps the main user
+            // keys (Complete, and the bunch key at index 0) and elides those; `chunk_data_only`
+            // inverts it, keeping only the chunk-data keys.
+            let is_chunk_data = matches!(cind, Some(c) if c >= 1);
+            if opts.chunk_data_only != is_chunk_data {
+                continue;
+            }
             if !scan_matches_prefix(&kdat, opts.prefix.as_ref()) {
                 continue;
             }
@@ -259,7 +271,7 @@ impl<
 
     fn scan_pass(
         &mut self,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>,
     )
         -> Outcome<Vec<Shortfall>>
     {
@@ -327,7 +339,7 @@ impl<
     fn scan_walk_ind_file(
         &mut self,
         fnum: FileNum,
-        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>)>,
+        live: &mut HashMap<Vec<u8>, (Dat, Meta<UIDL, UID>, Option<usize>)>,
     )
         -> Outcome<u64>
     {
@@ -394,16 +406,12 @@ impl<
                 },
             }
 
-            // 3. Elide internal chunk entries; only main user keys
-            //    appear in the scan result. Main keys are either
-            //    `Complete` (non-chunked values) or `Chunk(_, 0)`
-            //    (the bunch-key pointer for a chunked value).
+            // 3. Record the chunk index so the caller can classify on the newest record.
+            //    `Complete` keys have no index, a bunch key is index 0, and a chunk-data
+            //    record is index >= 1.  The main-key / chunk-data split is applied in
+            //    `scan_zone` after the newest-wins dedup below, not here, so a chunk-data
+            //    record superseded by a later Complete tombstone classifies as the tombstone.
             let cind = key.index();
-            if let Some(c) = cind {
-                if c >= 1 {
-                    continue;
-                }
-            }
 
             // 4. Decode the raw key bytes to a Dat.
             let kbyts = key.into_bytes();
@@ -422,7 +430,7 @@ impl<
             //    same raw key bytes (from higher fnum or later in
             //    the same file) overwrite, which is exactly the
             //    stale-filtering behaviour we want.
-            live.insert(kbyts, (kdat, meta));
+            live.insert(kbyts, (kdat, meta, cind));
         }
         Ok(covered)
     }

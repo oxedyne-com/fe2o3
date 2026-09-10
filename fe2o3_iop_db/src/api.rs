@@ -165,6 +165,7 @@ pub struct ScanOpts {
     pub prefix:         Option<Dat>,
     pub limit:          Option<usize>,
     pub include_values: bool,
+    pub chunk_data_only: bool,  // emit only a chunked value's internal chunk-data keys (the inverse of the default)
 }
 
 impl ScanOpts {
@@ -177,6 +178,7 @@ impl ScanOpts {
             prefix:         Some(Dat::Str(prefix.into())),
             limit:          None,
             include_values: false,
+            chunk_data_only: false,
         }
     }
 
@@ -187,6 +189,15 @@ impl ScanOpts {
 
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = Some(n);
+        self
+    }
+
+    /// Inverts which records a scan emits: with this set the scan returns only the internal
+    /// chunk-data keys of chunked values (chunk index `>= 1`) and elides the main user keys a
+    /// default scan returns.  An orphan sweep uses it to enumerate every chunk-data record and
+    /// subtract the set still referenced by a live bunch key.
+    pub fn chunk_data_only(mut self, yes: bool) -> Self {
+        self.chunk_data_only = yes;
         self
     }
 }
