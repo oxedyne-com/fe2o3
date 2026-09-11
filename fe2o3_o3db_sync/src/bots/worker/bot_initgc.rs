@@ -887,6 +887,17 @@ impl<
         // live directly in the zone directory, so one fsync of it covers both.
         res!(Self::sync_dir(&self.zdir().dir));
 
+        // Both renames put a new inode behind an unchanged path and unlinked the old one, but
+        // an rbot that read this file earlier still holds the old inode open in its file cache
+        // for `constant::FILE_CACHE_EXPIRY_SECS`, and nothing about a rename reaches that cache.
+        // It would go on seeking to the NEW offsets in the OLD inode, which are not record
+        // boundaries there, so every read of a carried record would fail its checksum until the
+        // entry expired a quarter of an hour later. Hence this notice, and hence its position:
+        // after both renames, because an rbot told beforehand would simply reopen the path and
+        // cache the old inode again. Telling an rbot that has no entry, or one opened since the
+        // rename, costs it a reopen and nothing else.
+        res!(self.notify_file_replaced(fnum, &[FileType::Data, FileType::Index]));
+
         // 8. Reset FileState.
         fstat.reset_old_accounting();
 
@@ -912,6 +923,33 @@ impl<
             old_size,
             new_size,
         );
+        Ok(())
+    }
+
+    /// Tells every rbot to drop its cached handle on the given files, because a collection has
+    /// just renamed new ones over them.  Every pool in every zone is told: a file number is only
+    /// unique within a zone, so a same-numbered file elsewhere is invalidated needlessly, but that
+    /// costs one reopen and keeps the notice independent of which zone a reader serves.
+    fn notify_file_replaced(
+        &self,
+        fnum:   FileNum,
+        typs:   &[FileType],
+    )
+        -> Outcome<()>
+    {
+        for pool in self.chans().get_all_workers_of_type(&WorkerType::Reader) {
+            for i in 0..pool.len() {
+                let bot = res!(pool.get_bot(i));
+                for typ in typs {
+                    if let Err(e) = bot.send(OzoneMsg::FileReplaced(fnum, typ.clone())) {
+                        return Err(err!(e,
+                            "{}: Cannot tell rbot {} that {:?} file {} has been replaced.",
+                            self.ozid(), i, typ, fnum;
+                            Channel, Write));
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

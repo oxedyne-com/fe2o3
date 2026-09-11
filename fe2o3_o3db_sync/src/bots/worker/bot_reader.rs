@@ -155,7 +155,7 @@ impl<
                 if let Some(msg) = self.listen_worker(msg) {
                     match msg {
                         // COMMAND
-                        // ..
+                        OzoneMsg::FileReplaced(fnum, typ) => self.drop_cached_file(fnum, &typ),
                         // WORK
                         OzoneMsg::Read(key, cbpind, resp_r1) => {
                             let result = self.read(key, cbpind);
@@ -208,6 +208,23 @@ impl<
 
     fn ref_file_cache(&self)        -> &FileCache       { &self.fcache }
     fn mut_file_cache(&mut self)    -> &mut FileCache   { &mut self.fcache }
+
+    /// Forgets any open handle on the given file, so that the next read of it opens the path
+    /// afresh.  A collection renames a new file over an old one, which leaves a cached handle on
+    /// the unlinked inode: correct bytes for the file that was, at offsets that belong to the file
+    /// that is.  Dropping the entry is the whole of the repair, and it keeps the read path free of
+    /// any per-read check for the same thing.
+    fn drop_cached_file(
+        &mut self,
+        fnum:   FileNum,
+        typ:    &FileType,
+    ) {
+        let k = FileCacheIndex { fnum, typ: typ.clone() };
+        if self.mut_file_cache().mut_map().remove(&k).is_some() {
+            trace!(sync_log::stream(), "{}: Dropped the cached handle on {:?} file {}, which a \
+                collection has replaced.", self.ozid(), typ, fnum);
+        }
+    }
 
     fn get_file(
         &mut self,
@@ -319,15 +336,20 @@ impl<
         // <7> Read the value from the file location.  If the value was cached, it has been
         // returned above already.
         let vlen = floc.val().len as usize;
-        let mut val = res!(self.read_from_file(floc));
-        res!(self.api().schemes().checksummer().clone().verify(&val));
-
-        // <8> Advise the fbot that reading has finished so it can decrement its counter.
         let fnum = floc.file_number();
+        let result = self.read_checked(floc);
+
+        // <8> Advise the fbot that reading has finished so it can decrement its counter.  The
+        // outcome of the read is held back until this has been sent, because the count has to
+        // come down whether the read worked or not: the fbot will not collect a file whose
+        // reader count is above zero, so a read that returned early -- a checksum mismatch is
+        // the one that arrives in bursts -- left a count that never came down, and with it a
+        // file that could never be collected again for the life of the process.
         let bots = res!(self.fbots());
         let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
         res!(bot.send(OzoneMsg::ReadFinished(fnum)));
 
+        let mut val = res!(result);
         val.truncate(vlen - res!(self.api().schms.checksummer().len()));
         // All values are wrapped inside a Dat::BU64.
         let (dat, _) = res!(Dat::from_bytes(&val));
@@ -336,6 +358,20 @@ impl<
             cind,
             postgc,
         )));
+    }
+
+    /// Reads the record at the given location and checks it against its stored checksum.  Split
+    /// out of `read` only so that the caller can report the read finished to the fbot on the way
+    /// out, whichever way this goes.
+    fn read_checked(
+        &mut self,
+        floc: FileLocation,
+    )
+        -> Outcome<Vec<u8>>
+    {
+        let val = res!(self.read_from_file(floc));
+        res!(self.api().schemes().checksummer().clone().verify(&val));
+        Ok(val)
     }
 
     fn read_from_file(

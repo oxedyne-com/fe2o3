@@ -76,6 +76,7 @@ pub enum OzoneMsg<
     Config(OzoneConfig),
     //ConfigConfirm(OzoneBotId, Ticket),
     Finish,
+    FileReplaced(FileNum, FileType), // a collection renamed a new file over this one
     GcCompleted(FileNum, FileState, usize),
     InitTest,
     MessageCount(usize),
