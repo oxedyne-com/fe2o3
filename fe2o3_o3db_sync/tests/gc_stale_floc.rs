@@ -632,6 +632,272 @@ fn read_during_compaction() -> Outcome<()> {
     Ok(())
 }
 
+const NDEL:         usize = 6;      // chunked keys deleted during the burst
+const CHUNKED_BYTES: usize = 1_600; // over the 1_500 chunk threshold, so each value is chunked
+
+fn del_key(i: usize) -> Dat { dat!(fmt!("gcrace:del:{:04}", i)) }
+fn del_val(i: usize) -> Dat { value_of((i as u8).wrapping_mul(7).wrapping_add(3), CHUNKED_BYTES) }
+fn chunked_survivor_key() -> Dat { dat!("gcrace:chunksurv") }
+fn chunked_survivor_val() -> Dat { value_of(0xa5, CHUNKED_BYTES) }
+
+/// A delete of a chunked key travels the same read path as a get: `delete_using_responder` calls
+/// `reclaim_chunks_on_delete`, which fetches the bunch key through a reader bot before it can
+/// tombstone the chunk records it names.  If that bunch-key record lives in a file a collection is
+/// renaming underneath the reader, the fetch is exposed to exactly the stale-handle race that
+/// `read_during_compaction` drives -- and a failed fetch there fails the delete with `[Checksum]`.
+/// This case deletes a set of chunked keys while a supersession burst compacts the files their
+/// records sit in, and insists every delete succeeds and the key then reads back absent.  A reader
+/// hammers a separate chunked survivor throughout, both to keep the collection racing and because a
+/// chunked get is itself a fan-out of reads over bunch and chunk records.
+fn delete_during_compaction() -> Outcome<()> {
+
+    let label = "delete_during_compaction";
+    let db_root = res!(canonical_dir("./test_db_gc_stale_floc_delete"));
+
+    let enckey = [0x5cu8; 32];
+    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&enckey[..]));
+    let crc32 = ChecksumScheme::new_crc32();
+    let schms2: RestSchemesOverride<EncryptionScheme, HashScheme> =
+        RestSchemesOverride::default()
+            .set_encrypter(Override::Default(aes_gcm.clone()));
+    let schms2 = Some(&schms2);
+    let user = setup::Uid::default();
+
+    let schms_input = RestSchemesInput::new(
+        Some(aes_gcm.clone()),
+        None::<HashScheme>,
+        None::<HashScheme>,
+        Some(crc32.clone()),
+    );
+
+    let mut cfg = res!(setup::default_cfg());
+    cfg.num_zones               = 1;
+    cfg.num_cbots_per_zone      = 1;
+    cfg.num_fbots_per_zone      = 1;
+    cfg.num_igbots_per_zone     = 1;
+    cfg.num_rbots_per_zone      = 2;
+    cfg.num_wbots_per_zone      = 1;
+    cfg.data_file_max_bytes     = 4_000;
+    cfg.rest_chunk_threshold    = 1_500;
+    cfg.rest_chunk_bytes        = 64;
+    cfg.init_load_caches        = true;
+    cfg.sync_on_write           = true;
+    cfg.zone_overrides          = DaticleMap::new();
+
+    test!(sync_log::stream(), "+--- gc stale floc: {} ---", label);
+
+    let db = res!(setup::start_db(
+        db_root.clone(),
+        Some(cfg.clone()),
+        schms_input.clone(),
+        None,
+        true, // gc on
+        true, // wipe
+    ));
+    thread::sleep(Duration::from_millis(500));
+
+    // A few fillers ahead of the chunked records, so those records are carried to a new offset by
+    // the collection rather than sitting at the head and never moving.
+    for i in 0..NPRE {
+        res!(db.insert(filler_key(i), value_of(i as u8, VALUE_BYTES), user, schms2));
+    }
+    // The chunked survivor the reader hammers throughout, and the chunked keys that get deleted mid
+    // burst.  Each is asserted to have actually chunked, or the delete would never reach the
+    // reclaim fetch this case exists to exercise.
+    let (_, ns) = res!(db.insert(chunked_survivor_key(), chunked_survivor_val(), user, schms2));
+    if ns < 2 {
+        let _ = db.shutdown();
+        return Err(err!(
+            "[{}] The chunked survivor stored in {} chunk(s); the value must exceed the chunk \
+            threshold so the delete path fetches a bunch key.", label, ns;
+            Test, Size));
+    }
+    for i in 0..NDEL {
+        let (_, nc) = res!(db.insert(del_key(i), del_val(i), user, schms2));
+        if nc < 2 {
+            let _ = db.shutdown();
+            return Err(err!(
+                "[{}] Delete-target {} stored in {} chunk(s); it must chunk so its delete drives \
+                reclaim_chunks_on_delete.", label, i, nc;
+                Test, Size));
+        }
+    }
+    for i in NPRE..NFILL {
+        res!(db.insert(filler_key(i), value_of(i as u8, VALUE_BYTES), user, schms2));
+    }
+    thread::sleep(Duration::from_millis(500));
+    res!(db.api().clear_cache_values(wait()));
+
+    let before = res!(data_file_sizes(&db_root));
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let reads = Arc::new(AtomicUsize::new(0));
+    let read_faults: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let outcome = thread::scope(|scope| {
+        let stop_r = Arc::clone(&stop);
+        let reads_r = Arc::clone(&reads);
+        let faults_r = Arc::clone(&read_faults);
+        let db_r = &db;
+        scope.spawn(move || {
+            while !stop_r.load(Ordering::Relaxed) {
+                let n = reads_r.fetch_add(1, Ordering::Relaxed) + 1;
+                let fault = match db_r.get(&chunked_survivor_key(), schms2) {
+                    Ok(Some((got, _))) => if got == chunked_survivor_val() {
+                        None
+                    } else {
+                        Some(fmt!("Read {} of the chunked survivor returned different bytes.", n))
+                    },
+                    Ok(None) => Some(fmt!(
+                        "Read {} of the chunked survivor found nothing under a live key.", n)),
+                    Err(e) => Some(fmt!("Read {} of the chunked survivor failed: {}", n, e)),
+                };
+                if let Some(msg) = fault {
+                    let mut slot = lock_mutex_thread!(faults_r, "concurrent reader");
+                    slot.push(msg);
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        });
+
+        // Drive the collection with a supersession burst, and delete the chunked keys through it.
+        // The deletes are spaced across the burst so some land while a file holding a bunch-key
+        // record is mid-rename -- the moment the reclaim fetch is exposed to the stale handle.
+        let mut result = Ok(());
+        let mut delete_faults: Vec<String> = Vec::new();
+        let mut next_del = 0usize;
+        for i in 0..NFILL {
+            if let Err(e) = db.insert(
+                filler_key(i),
+                value_of((i + 128) as u8, VALUE_BYTES),
+                user,
+                schms2,
+            ) {
+                result = Err(e);
+                break;
+            }
+            // Roughly one delete every NFILL/NDEL fillers, so they are strewn through the burst.
+            if next_del < NDEL && i >= (next_del * NFILL) / NDEL {
+                match db.delete(&del_key(next_del), user, schms2) {
+                    Ok(_) => (),
+                    Err(e) => delete_faults.push(fmt!(
+                        "Delete of {:?} during collection failed: {}", del_key(next_del), e)),
+                }
+                next_del += 1;
+            }
+        }
+        // Any deletes not yet issued (short burst) go out now, still before settling.
+        while next_del < NDEL {
+            if let Err(e) = db.delete(&del_key(next_del), user, schms2) {
+                delete_faults.push(fmt!(
+                    "Delete of {:?} during collection failed: {}", del_key(next_del), e));
+            }
+            next_del += 1;
+        }
+        thread::sleep(Duration::from_secs(3));
+        stop.store(true, Ordering::Relaxed);
+        result.map(|()| delete_faults)
+    });
+    let delete_faults = res!(outcome);
+
+    let compacted = res!(wait_for_compaction(&db_root, &before, Duration::from_secs(5)));
+    let nreads = reads.load(Ordering::Relaxed);
+
+    let read_fault_list = {
+        let slot = lock_mutex!(read_faults);
+        slot.clone()
+    };
+
+    // Every deleted key must now read back absent: the tombstone superseded the bunch key and the
+    // reclaim tombstoned each chunk, so a get reconstructs nothing.  A key that still reads a value
+    // would mean the delete's write landed but its reclaim fetch was skipped or lost.
+    let mut still_present = Vec::new();
+    for i in 0..NDEL {
+        match db.get(&del_key(i), schms2) {
+            Ok(None) => (),
+            Ok(Some(_)) => still_present.push(fmt!("{:?} still returns a value", del_key(i))),
+            Err(e) => still_present.push(fmt!("read-back of {:?} failed: {}", del_key(i), e)),
+        }
+    }
+
+    // The chunked survivor, never deleted, must still read back its bytes.
+    let mut survivor_faults = Vec::new();
+    for n in 1..=NREADS {
+        match db.get(&chunked_survivor_key(), schms2) {
+            Ok(Some((got, _))) => if got != chunked_survivor_val() {
+                survivor_faults.push(fmt!("post-settle read {} returned different bytes", n));
+            },
+            Ok(None) => survivor_faults.push(fmt!("post-settle read {} found nothing", n)),
+            Err(e) => survivor_faults.push(fmt!("post-settle read {} failed: {}", n, e)),
+        }
+    }
+
+    // No read may have stranded a reader count: a fetch that returned early on a checksum mismatch
+    // without reporting completion leaves a file uncollectable.  This holds for a delete's internal
+    // fetch exactly as for a plain read.
+    let mut stranded = Vec::new();
+    for (wind, fstates) in res!(db.api().collect_file_states(wait())) {
+        for (fnum, fstat) in fstates.map() {
+            if fstat.readers() != 0 {
+                stranded.push(fmt!("{} file {} holds {} reader(s)", wind, fnum, fstat.readers()));
+            }
+        }
+    }
+
+    let _ = db.shutdown();
+    thread::sleep(Duration::from_millis(300));
+
+    match compacted {
+        None => return Err(err!(
+            "[{}] No data file shrank, so no compaction ran under the deletes and this case \
+            would prove nothing.", label;
+            Test, Missing)),
+        Some((path, was, is)) => test!(sync_log::stream(),
+            "[{}] Compacted {:?}: {} -> {} bytes, under {} concurrent reads and {} deletes; {} \
+            deletes failed, {} reads failed.",
+            label, path, was, is, nreads, NDEL,
+            delete_faults.len(), read_fault_list.len()),
+    }
+
+    for msg in delete_faults.iter().take(3) {
+        test!(sync_log::stream(), "[{}] Delete fault: {}", label, msg);
+    }
+    for msg in read_fault_list.iter().take(3) {
+        test!(sync_log::stream(), "[{}] Read fault: {}", label, msg);
+    }
+
+    if !delete_faults.is_empty() {
+        return Err(err!(
+            "[{}] {} of {} chunked-key deletes failed while their files were being compacted.  \
+            First: {}", label, delete_faults.len(), NDEL, delete_faults[0];
+            Test, Data));
+    }
+    if !still_present.is_empty() {
+        return Err(err!(
+            "[{}] {} deleted key(s) did not read back absent: {}.",
+            label, still_present.len(), still_present.join("; ");
+            Test, Data, Mismatch));
+    }
+    if !read_fault_list.is_empty() || !survivor_faults.is_empty() {
+        return Err(err!(
+            "[{}] The chunked survivor broke: {} read(s) failed during collection and {} after.",
+            label, read_fault_list.len(), survivor_faults.len();
+            Test, Data));
+    }
+    if !stranded.is_empty() {
+        return Err(err!(
+            "[{}] Every read has finished, but {} file state(s) still hold a reader count: {}.",
+            label, stranded.len(), stranded.join("; ");
+            Test, Data, Mismatch));
+    }
+
+    test!(sync_log::stream(),
+        "[{}] {} chunked-key deletes all succeeded under a live collection, each read back \
+        absent, the chunked survivor stayed intact across {} reads, and every file state is back \
+        to zero readers.", label, NDEL, nreads);
+    Ok(())
+}
+
 /// Creates the directory if it does not exist.
 fn canonical_dir(p: &str) -> Outcome<PathBuf> {
     match Path::new(p).canonicalize() {
@@ -651,6 +917,7 @@ pub fn test_gc_stale_floc(_filter: &'static str) -> Outcome<()> {
     res!(run_case(Case::SomeSurvive));
     res!(run_case(Case::OnlySurvivor));
     res!(read_during_compaction());
+    res!(delete_during_compaction());
     Ok(())
 }
 

@@ -297,13 +297,20 @@ impl<
                                 mloc2.new_start_position(new_start);
                                 postgc = true;
                             }
+                            // Increment the reader count whether or not the location was remapped.
+                            // The count is the pin that keeps a file from being collected while a
+                            // read of it is in flight (`schedule_deletion` will not start a
+                            // collection unless `no_readers`), and a `postgc` read needs that pin
+                            // as much as any other: the burst that carried this record can trip the
+                            // trigger again at once, and a second collection renaming the file
+                            // between here and the rbot's read would leave the just-handed-back
+                            // offset pointing into a superseded inode -- a checksum failure the
+                            // rbot's handle drop cannot repair, because the offset itself is stale.
+                            // The rbot sends `ReadFinished` on every path, so this decrements
+                            // cleanly; leaving it out here was also what drove the reader count
+                            // below zero when a `postgc` read reported a finish it never counted.
                             (
-                                if postgc {
-                                    Ok(())
-                                } else {
-                                    let result = fstat.inc_readers();
-                                    result
-                                },
+                                fstat.inc_readers(),
                                 OzoneMsg::ReadResult(ReadResult::Location(mloc2, postgc)),
                             )
                         },
