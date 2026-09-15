@@ -152,6 +152,8 @@ fn compiled(name: &str) -> Option<Dat> {
 		"op::CODE_SETTLED"			=> Dat::U8(op::CODE_SETTLED),
 		"op::CODE_REVERTS"			=> Dat::U8(op::CODE_REVERTS),
 		"op::CODE_AMENDED"			=> Dat::U8(op::CODE_AMENDED),
+		"op::CODE_FORGET"			=> Dat::U8(op::CODE_FORGET),
+		"op::CODE_FORGOTTEN"		=> Dat::U8(op::CODE_FORGOTTEN),
 		"op::MODE_NORMAL"			=> Dat::U8(op::MODE_NORMAL),
 		"op::MODE_EXECUTABLE"		=> Dat::U8(op::MODE_EXECUTABLE),
 		"op::MODE_SYMLINK"			=> Dat::U8(op::MODE_SYMLINK),

@@ -22,7 +22,10 @@ use crate::id::{
 	ContentRange,
 	OpId,
 };
-use crate::op::Op;
+use crate::op::{
+	Op,
+	Placing,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -70,6 +73,14 @@ impl Atoms {
 				// resident with the content held once, and where the rest of it
 				// lives is a profiling question nobody has answered.
 				Op::Splice { insert, .. } if !insert.is_empty()	=> insert.clone(),
+				// A forgotten file still mints its origin anchor, and a forgotten
+				// insertion still occupies its length, so that every offset a
+				// later operation named inside it still names something. The
+				// bytes are gone; what stands in for them is never read, because
+				// [`crate::seq::claim::Dead`] buries the whole run.
+				Op::Forgotten { placing: Placing::File }	=> Arc::from(vec![ORIGIN]),
+				Op::Forgotten { placing: Placing::Splice { len, .. } } if *len > 0
+					=> Arc::from(vec![0u8; *len as usize]),
 				_						=> continue,
 			};
 			if map.insert(*id, made).is_some() {

@@ -107,7 +107,7 @@ pub const MAGIC: [u8; 6] = *b"ORESEG"; // the bytes every segment begins with
 /// 14, so that a proposal's author can state it again without the opening
 /// operation being touched. The framing did not move, and the four proposal codes
 /// below it did not move either.
-pub const VERSION: u8 = 5;
+pub const VERSION: u8 = 6;
 
 /// The oldest format version this module reads.
 ///
@@ -149,8 +149,10 @@ pub const fn highest_code(version: u8) -> u8 {
 		crate::op::CODE_FILE_MODE
 	} else if version == 4 {
 		crate::op::CODE_REVERTS
-	} else {
+	} else if version == 5 {
 		crate::op::CODE_AMENDED
+	} else {
+		crate::op::CODE_FORGOTTEN
 	}
 }
 
@@ -616,7 +618,7 @@ impl Entry {
 	}
 
 	/// The daticle form of whichever shape the entry holds.
-	fn body(&self)
+	pub fn body(&self)
 		-> Outcome<Vec<u8>>
 	{
 		let dat = match self {
@@ -2440,7 +2442,8 @@ mod tests {
 		assert_eq!(highest_code(VERSION_MIN), crate::op::CODE_NOTE);
 		assert_eq!(highest_code(3), crate::op::CODE_FILE_MODE);
 		assert_eq!(highest_code(4), crate::op::CODE_REVERTS);
-		assert_eq!(highest_code(VERSION), crate::op::CODE_AMENDED);
+		assert_eq!(highest_code(5), crate::op::CODE_AMENDED);
+		assert_eq!(highest_code(VERSION), crate::op::CODE_FORGOTTEN);
 		// Every rung is named above, so a bump that forgot one would be caught here
 		// rather than by a segment somebody could not read.
 		assert!(highest_code(4) < highest_code(VERSION),
@@ -2572,6 +2575,12 @@ mod tests {
 				time:	1_755_000_003,
 			},
 			Op::Reverts { undone: vec![oid(1, 1), oid(2, 1)] },
+			Op::Forget {
+				of:		vec![crate::op::Stub { id: oid(1, 1), placing: crate::op::Placing::File }],
+				reason:	b"a key".to_vec(),
+				time:	1_755_000_004,
+			},
+			Op::Forgotten { placing: crate::op::Placing::Void },
 		];
 		for (i, op) in newer.iter().enumerate() {
 			let code = op.code();
@@ -2635,7 +2644,7 @@ mod tests {
 		let want: &[u8] = &[
 			// The magic, version 5, and no replica hint.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x05,
+			0x06,
 			0x00,
 			// The record: a bare one, and 57 bytes of body.
 			0x01,
@@ -2923,7 +2932,7 @@ mod tests {
 			// The segment header: the magic, the version, a hint follows, and the
 			// replica it names.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x05,
+			0x06,
 			0x01,
 			0x02,
 			// The record: a bare one, and 61 bytes of body.
@@ -3177,7 +3186,7 @@ mod tests {
 		let want: &[u8] = &[
 			// The magic, version 5, and no replica hint.
 			0x4f, 0x52, 0x45, 0x53, 0x45, 0x47,
-			0x05,
+			0x06,
 			0x00,
 			// The record: a veiled one, and 126 bytes of body.
 			0x03,

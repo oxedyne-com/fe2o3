@@ -121,6 +121,8 @@ pub const CODE_SAID:		u8 = 11;
 pub const CODE_SETTLED:		u8 = 12;
 pub const CODE_REVERTS:		u8 = 13;
 pub const CODE_AMENDED:		u8 = 14;	// a proposal's author restating it
+pub const CODE_FORGET:		u8 = 15;	// earlier operations losing their content
+pub const CODE_FORGOTTEN:	u8 = 16;	// what stands where a forgotten one stood
 
 
 /// The character beginning the name of an [`Op::Mark`] a tool wrote rather than
@@ -496,6 +498,118 @@ pub struct Undoing {
 /// since a splice says the same, the sequence structure in [`crate::seq`] can
 /// resolve any two of them against each other however they happen to arrive, in
 /// one file or across two.
+/// What a forgotten operation still does to the render, once its content is gone.
+///
+/// Forgetting takes the bytes and leaves the shape. An insertion's shape is its
+/// anchors, what it removed, and how many bytes it placed: with those kept, every
+/// later edit anchored inside the forgotten text still resolves, against text
+/// that is now buried whole. A file's creation still mints its origin anchor, so
+/// a splice into it still has something to name, and the file is dead from
+/// birth. Everything else -- a mark's words, a note's text, a proposal's body, a
+/// rename's path -- has a shape that touches no byte, and is void.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Placing {
+	Void,
+	File,
+	Splice {
+		left:	Option<Anchor>,
+		right:	Option<Anchor>,
+		remove:	Vec<ContentRange>,
+		len:	u64,				// bytes the insertion placed, all of them buried
+	},
+}
+
+impl Placing {
+	pub const fn code(&self) -> u8 {
+		match self {
+			Self::Void			=> 0,
+			Self::File			=> 1,
+			Self::Splice { .. }	=> 2,
+		}
+	}
+
+	pub fn to_dat(&self) -> Dat {
+		match self {
+			Self::Void	=> Dat::List(vec![Dat::U8(0)]),
+			Self::File	=> Dat::List(vec![Dat::U8(1)]),
+			Self::Splice { left, right, remove, len } => Dat::List(vec![
+				Dat::U8(2),
+				Anchor::opt_to_dat(left),
+				Anchor::opt_to_dat(right),
+				Dat::List(remove.iter().map(|r| r.to_dat()).collect()),
+				Dat::U64(*len),
+			]),
+		}
+	}
+
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if !v.is_empty() => v,
+			other => return Err(err!(
+				"A Placing is a non-empty list, not {:?}.", other;
+			Decode, Input, Invalid)),
+		};
+		let code = match &v[0] {
+			Dat::U8(c) => *c,
+			other => return Err(err!(
+				"A Placing opens with its code as a U8, not {:?}.", other;
+			Decode, Input, Invalid)),
+		};
+		match code {
+			0 => {
+				res!(expect_len(v, 1, "Placing::Void"));
+				Ok(Self::Void)
+			},
+			1 => {
+				res!(expect_len(v, 1, "Placing::File"));
+				Ok(Self::File)
+			},
+			2 => {
+				res!(expect_len(v, 5, "Placing::Splice"));
+				Ok(Self::Splice {
+					left:	res!(Anchor::opt_from_dat(&v[1])),
+					right:	res!(Anchor::opt_from_dat(&v[2])),
+					remove:	res!(as_ranges(&v[3], "Placing::Splice remove")),
+					len:	res!(as_u64(&v[4], "Placing::Splice len")),
+				})
+			},
+			other => Err(err!(
+				"Placing code {} is not recognised.", other;
+			Decode, Input, Invalid)),
+		}
+	}
+}
+
+/// One operation a [`Op::Forget`] names, and the shape it keeps.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Stub {
+	pub id:			OpId,
+	pub placing:	Placing,
+}
+
+impl Stub {
+	pub fn to_dat(&self) -> Dat {
+		Dat::List(vec![self.id.to_dat(), self.placing.to_dat()])
+	}
+
+	pub fn from_dat(dat: &Dat)
+		-> Outcome<Self>
+	{
+		let v = match dat {
+			Dat::List(v) if v.len() == 2 => v,
+			other => return Err(err!(
+				"A Stub is a list of an identifier and a placing, not {:?}.", other;
+			Decode, Input, Invalid)),
+		};
+		Ok(Self {
+			id:			res!(OpId::from_dat(&v[0])),
+			placing:	res!(Placing::from_dat(&v[1])),
+		})
+	}
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Op {
 	FileCreate {
@@ -593,6 +707,25 @@ pub enum Op {
 	Reverts {
 		undone: Vec<OpId>,				// ascending, without repetition, never empty
 	},
+	// Earlier operations losing their content and keeping their shape. Ore
+	// reconstructs every state from the operations, which is what makes merging
+	// tractable, and it was never a promise to keep everything: history is the
+	// author's data. What this records is the act, so that every replica forgets
+	// the same things, and so that the log always says that it forgot. The
+	// stubs are the authority on what shape each forgotten operation keeps; a
+	// replica still holding the original bytes and one holding only a
+	// `Forgotten` render the same, because both read the shape from here.
+	Forget {
+		of:		Vec<Stub>,				// ascending by identifier, without repetition, never empty
+		reason:	Vec<u8>,				// not this crate's to decode; may be empty
+		time:	u64,					// unix epoch seconds, and it orders nothing
+	},
+	// What stands under a forgotten operation's own header once its bytes are
+	// gone from the store. Written by a repack in the original's place, never
+	// authored; the `Forget` naming it is what vouches for it.
+	Forgotten {
+		placing: Placing,
+	},
 }
 
 impl Op {
@@ -621,6 +754,8 @@ impl Op {
 			Self::Settled { .. }	=> CODE_SETTLED,
 			Self::Amended { .. }	=> CODE_AMENDED,
 			Self::Reverts { .. }	=> CODE_REVERTS,
+			Self::Forget { .. }		=> CODE_FORGET,
+			Self::Forgotten { .. }	=> CODE_FORGOTTEN,
 		}
 	}
 
@@ -642,6 +777,8 @@ impl Op {
 			Self::Settled { .. }	=> "Settled",
 			Self::Amended { .. }	=> "Amended",
 			Self::Reverts { .. }	=> "Reverts",
+			Self::Forget { .. }		=> "Forget",
+			Self::Forgotten { .. }	=> "Forgotten",
 		}
 	}
 
@@ -661,6 +798,8 @@ impl Op {
 		match self {
 			Self::Splice { left, right, .. }	=> (*left, *right),
 			Self::Move { left, right, .. }		=> (*left, *right),
+			Self::Forgotten { placing: Placing::Splice { left, right, .. } }
+												=> (*left, *right),
 			_									=> (None, None),
 		}
 	}
@@ -676,6 +815,8 @@ impl Op {
 		match self {
 			Self::Splice { remove, .. }	=> remove,
 			Self::Move { src, .. }		=> src,
+			Self::Forgotten { placing: Placing::Splice { remove, .. } }
+										=> remove,
 			_							=> &[],
 		}
 	}
@@ -695,6 +836,8 @@ impl Op {
 		match self {
 			Self::Splice { insert, .. }	=> insert.len() as u64,
 			Self::Move { src, .. }		=> src.iter().map(|r| r.len()).sum(),
+			Self::Forgotten { placing: Placing::Splice { len, .. } }
+										=> *len,
 			_							=> 0,
 		}
 	}
@@ -722,6 +865,10 @@ impl Op {
 			Self::Move { .. } => Err(err!(
 				"A Move carries no origin; a move always places what it names, so it \
 				always names where.";
+			Invalid, Input, Missing)),
+			Self::Forgotten { placing: Placing::Splice { len, .. } } if *len > 0 => Err(err!(
+				"A Forgotten splice of {} bytes carries no origin; the shape a forgotten \
+				insertion keeps is where it stood.", len;
 			Invalid, Input, Missing)),
 			_ => Ok(()),
 		}
@@ -817,6 +964,13 @@ impl Op {
 				"this names what some edits were written to undo; taking the name away \
 				would leave the edits and lose the only record of what they were for, so \
 				it is those edits that are reverted"),
+			Self::Forget { .. } => Some(
+				"a forget is the record that content was taken out of the history, and \
+				the content is gone from wherever this record has reached; nothing brings \
+				it back, and taking the record away would leave the stubs unexplained"),
+			Self::Forgotten { .. } => Some(
+				"this stands where a forgotten operation stood, and holds its shape and \
+				none of its content; there is nothing left to undo"),
 			_ => None,
 		}
 	}
@@ -997,7 +1151,77 @@ impl Op {
 		res!(self.check_placement());
 		res!(self.check_note());
 		res!(self.check_reverts());
+		res!(self.check_forget());
 		Ok(())
+	}
+
+	/// Checks the rule that a forget names what it forgets, exactly once each, in
+	/// order, and with a shape the sequence can place.
+	///
+	/// Ascending and without repetition for the reason [`Op::check_reverts`]
+	/// holds its list that way: one set, one spelling, one signature. Each kept
+	/// shape is put to the same anchor rule a live splice is, because the shape is
+	/// what every later operation anchored inside the forgotten text resolves
+	/// against, and a shape that could not be placed would strand all of them.
+	pub fn check_forget(&self)
+		-> Outcome<()>
+	{
+		let of = match self {
+			Self::Forget { of, .. }	=> of,
+			_						=> return Ok(()),
+		};
+		if of.is_empty() {
+			return Err(err!(
+				"A Forget names no operation; a forget takes content out of the \
+				history, and a Mark is what says something about a point in it.";
+			Invalid, Input, Missing));
+		}
+		for pair in of.windows(2) {
+			if pair[1].id <= pair[0].id {
+				return Err(err!(
+					"A Forget lists {} after {}; what a forget names is listed ascending \
+					and without repetition.", pair[1].id, pair[0].id;
+				Decode, Input, Order));
+			}
+		}
+		for stub in of {
+			res!(Self::Forgotten { placing: stub.placing.clone() }.validate());
+		}
+		Ok(())
+	}
+
+	/// The shape this operation would keep if it were forgotten, or `None` where
+	/// it has no content to lose.
+	///
+	/// This is the one place that decides what forgetting each kind of operation
+	/// means, so that a command and a forge forget the same operation the same
+	/// way. An operation that is all shape and no content -- a deletion, a move,
+	/// a mode, a settlement, a revert's record, and a forget itself -- has nothing
+	/// a forget could take, and is refused with that reason rather than recorded
+	/// as a void that changes nothing.
+	pub fn stub_of(&self) -> Option<Placing> {
+		match self {
+			Self::FileCreate { .. }	=> Some(Placing::File),
+			Self::Splice { left, right, remove, insert } => Some(Placing::Splice {
+				left:	*left,
+				right:	*right,
+				remove:	remove.clone(),
+				len:	insert.len() as u64,
+			}),
+			Self::FileRename { .. }
+			| Self::Mark { .. }
+			| Self::Note { .. }
+			| Self::Proposal { .. }
+			| Self::Said { .. }
+			| Self::Amended { .. }	=> Some(Placing::Void),
+			Self::FileDelete { .. }
+			| Self::FileMode { .. }
+			| Self::Move { .. }
+			| Self::Settled { .. }
+			| Self::Reverts { .. }
+			| Self::Forget { .. }
+			| Self::Forgotten { .. }	=> None,
+		}
 	}
 
 	/// The shape is `[code, field, ...]`, the fields in declaration order.
@@ -1091,6 +1315,16 @@ impl Op {
 			Self::Reverts { undone } => Dat::List(vec![
 				Dat::U8(CODE_REVERTS),
 				Dat::List(undone.iter().map(|u| u.to_dat()).collect()),
+			]),
+			Self::Forget { of, reason, time } => Dat::List(vec![
+				Dat::U8(CODE_FORGET),
+				Dat::List(of.iter().map(|s| s.to_dat()).collect()),
+				Dat::BU64(reason.clone()),
+				Dat::U64(*time),
+			]),
+			Self::Forgotten { placing } => Dat::List(vec![
+				Dat::U8(CODE_FORGOTTEN),
+				placing.to_dat(),
 			]),
 		}
 	}
@@ -1243,6 +1477,32 @@ impl Op {
 					undone: res!(as_ids(&v[1], "Reverts undone")),
 				}
 			},
+			CODE_FORGET => {
+				res!(expect_len(v, 4, "Forget"));
+				let of = match &v[1] {
+					Dat::List(items) => {
+						let mut out = Vec::with_capacity(items.len());
+						for item in items {
+							out.push(res!(Stub::from_dat(item)));
+						}
+						out
+					},
+					other => return Err(err!(
+						"Forget of is a list of stubs, not {:?}.", other;
+					Decode, Input, Invalid)),
+				};
+				Self::Forget {
+					of,
+					reason:	res!(as_bytes(&v[2], "Forget reason")),
+					time:	res!(as_u64(&v[3], "Forget time")),
+				}
+			},
+			CODE_FORGOTTEN => {
+				res!(expect_len(v, 2, "Forgotten"));
+				Self::Forgotten {
+					placing: res!(Placing::from_dat(&v[1])),
+				}
+			},
 			other => return Err(err!(
 				"Op code {} is not recognised.", other;
 			Decode, Input, Invalid)),
@@ -1250,6 +1510,7 @@ impl Op {
 		res!(op.check_placement());
 		res!(op.check_note());
 		res!(op.check_reverts());
+		res!(op.check_forget());
 		Ok(op)
 	}
 
@@ -1928,6 +2189,28 @@ pub(crate) mod tests {
 				on:		vec![range(3, 5, 5), range(3, 5, 6)],
 				text:	Vec::new(),
 			},
+			Op::Forget {
+				of: vec![
+					Stub { id: oid(1, 1), placing: Placing::File },
+					Stub { id: oid(1, 2), placing: Placing::Splice {
+						left:	Some(Anchor::origin(oid(1, 1))),
+						right:	None,
+						remove:	vec![],
+						len:	5,
+					} },
+					Stub { id: oid(2, 9), placing: Placing::Void },
+				],
+				reason:	b"a key that should never have been written".to_vec(),
+				time:	1_755_000_010,
+			},
+			Op::Forgotten { placing: Placing::Void },
+			Op::Forgotten { placing: Placing::File },
+			Op::Forgotten { placing: Placing::Splice {
+				left:	Some(Anchor::origin(oid(1, 1))),
+				right:	None,
+				remove:	vec![],
+				len:	5,
+			} },
 		]
 	}
 
@@ -2993,7 +3276,7 @@ pub(crate) mod tests {
 		let refused = [
 			CODE_FILE_DELETE, CODE_MARK, CODE_MARK_TIMED, CODE_NOTE,
 			CODE_PROPOSAL, CODE_SAID, CODE_SETTLED, CODE_REVERTS,
-			CODE_AMENDED,
+			CODE_AMENDED, CODE_FORGET, CODE_FORGOTTEN,
 		];
 		for op in samples() {
 			let id = oid(77, 3);

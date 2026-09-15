@@ -55,15 +55,15 @@ const ALPHA: &[u8] = b"0123456789ABCDEFGHIJ";
 /// One replica of a repository holding one file: the frontend that turns
 /// index-based editing intent into content-anchored operations, which is what a
 /// real editor would be.
-struct Replica {
-	id:		u64,			// every operation of this replica is named by it
-	seq:	Sequence,
-	file:	OpId,			// the file being edited
+pub(super) struct Replica {
+	pub(super) id:		u64,			// every operation of this replica is named by it
+	pub(super) seq:	Sequence,
+	pub(super) file:	OpId,			// the file being edited
 }
 
 impl Replica {
 
-	fn new(id: u64, file: OpId) -> Self {
+	pub(super) fn new(id: u64, file: OpId) -> Self {
 		Self { id, seq: Sequence::new(), file }
 	}
 
@@ -79,13 +79,13 @@ impl Replica {
 		)
 	}
 
-	fn recv(&mut self, op: (Header, Op))
+	pub(super) fn recv(&mut self, op: (Header, Op))
 		-> Outcome<()>
 	{
 		self.seq.apply(op.0, op.1)
 	}
 
-	fn view(&self)
+	pub(super) fn view(&self)
 		-> Outcome<Rendered>
 	{
 		let repo = res!(self.seq.render());
@@ -96,7 +96,7 @@ impl Replica {
 		}
 	}
 
-	fn author(&mut self, op: Op)
+	pub(super) fn author(&mut self, op: Op)
 		-> Outcome<(Header, Op)>
 	{
 		let head = res!(self.next_head());
@@ -104,7 +104,7 @@ impl Replica {
 		Ok((head, op))
 	}
 
-	fn insert(&mut self, at: usize, bytes: &[u8])
+	pub(super) fn insert(&mut self, at: usize, bytes: &[u8])
 		-> Outcome<(Header, Op)>
 	{
 		let op = res!(res!(self.view()).splice(at, 0, bytes.to_vec()));
@@ -144,16 +144,16 @@ impl Replica {
 
 /// A repository staged with one file carrying some initial text, and the
 /// replicas that have seen it.
-struct Stage {
-	reps:	Vec<Replica>,			// each holding everything staged
-	ops:	Vec<(Header, Op)>,		// the file's creation, then the seeding splice
-	file:	OpId,
-	seed:	OpId,					// the splice that wrote the initial text
+pub(super) struct Stage {
+	pub(super) reps:	Vec<Replica>,			// each holding everything staged
+	pub(super) ops:	Vec<(Header, Op)>,		// the file's creation, then the seeding splice
+	pub(super) file:	OpId,
+	pub(super) seed:	OpId,					// the splice that wrote the initial text
 }
 
 /// Creates one file, writes `text` into it, and hands out `replicas` replicas
 /// that have seen both operations.
-fn seed(text: &[u8], replicas: u64)
+pub(super) fn seed(text: &[u8], replicas: u64)
 	-> Outcome<Stage>
 {
 	let mut origin = Replica::new(0, OpId::default());
@@ -190,7 +190,7 @@ fn permute(idx: &mut Vec<usize>, k: usize, out: &mut Vec<Vec<usize>>) {
 /// Applies an operation set in every delivery order, requiring that all of them
 /// render the same bytes in every file and raise the same flags, and returns
 /// that render.
-fn converge(ops: &[(Header, Op)])
+pub(super) fn converge(ops: &[(Header, Op)])
 	-> Outcome<Repo>
 {
 	let n = ops.len();
@@ -266,7 +266,7 @@ fn listing(repo: &Repo) -> String {
 
 /// Runs an operation set under every delivery order and checks one file's render
 /// against the answer the case prescribes.
-fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
+pub(super) fn case(file: OpId, expect: &str, ops: &[(Header, Op)])
 	-> Outcome<Rendered>
 {
 	let repo = res!(converge(ops));

@@ -39,7 +39,10 @@ use crate::id::{
 	OpId,
 	Side,
 };
-use crate::op::Op;
+use crate::op::{
+	Op,
+	Placing,
+};
 use crate::seq::claim::Claims;
 use crate::seq::OpOrder;
 
@@ -201,6 +204,32 @@ impl Slots {
 						});
 						sub += r.len();
 					}
+				},
+				// A forgotten operation keeps its place in the order exactly as
+				// it stood, so that what was anchored inside it is laid out where
+				// it always was; only the bytes are gone, and they are buried.
+				Op::Forgotten { placing: Placing::File } => {
+					slots.push(Slot {
+						place:	*id,
+						sub:	0,
+						claim:	res!(ContentRange::new(*id, 0, 1)),
+						left:	None,
+						right:	None,
+						seed:	true,
+					});
+				},
+				Op::Forgotten { placing: Placing::Splice { left, right, len, .. } } => {
+					if *len == 0 {
+						continue;
+					}
+					slots.push(Slot {
+						place:	*id,
+						sub:	0,
+						claim:	res!(ContentRange::new(*id, 0, *len)),
+						left:	*left,
+						right:	*right,
+						seed:	false,
+					});
 				},
 				_ => (),
 			}

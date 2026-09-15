@@ -32,7 +32,7 @@
             "name":     "segment::VERSION",
             "file":     "src/segment.rs",
             "line":     (u64|110),
-            "value":    (u8|5),
+            "value":    (u8|6),
             "axis":     "vocabulary",
             "holds":    "which operation codes a segment written now may carry, stamped at byte 6 of every segment"
         },
@@ -47,7 +47,7 @@
         {
             "name":     "segment::KIND_BARE",
             "file":     "src/segment.rs",
-            "line":     (u64|158),
+            "line":     (u64|160),
             "value":    (u8|1),
             "axis":     "container",
             "holds":    "a record carrying an unsigned, unencrypted operation"
@@ -55,7 +55,7 @@
         {
             "name":     "segment::KIND_SEALED",
             "file":     "src/segment.rs",
-            "line":     (u64|160),
+            "line":     (u64|162),
             "value":    (u8|2),
             "axis":     "container",
             "holds":    "a record carrying a signed envelope"
@@ -63,7 +63,7 @@
         {
             "name":     "segment::KIND_VEILED",
             "file":     "src/segment.rs",
-            "line":     (u64|170),
+            "line":     (u64|172),
             "value":    (u8|3),
             "axis":     "container",
             "holds":    "a record whose header is in clear and whose body is ciphertext; it cost no version bump, which is the precedent every later container change is read against"
@@ -71,7 +71,7 @@
         {
             "name":     "segment::KIND_PACKED",
             "file":     "src/segment.rs",
-            "line":     (u64|192),
+            "line":     (u64|194),
             "value":    (u8|4),
             "axis":     "container",
             "holds":    "a record carrying a run of records deflated together; like the veil it cost no version bump, and what is inside it is the plain framing unchanged, so a packed segment yields the same records with the same digests as the plain one it was made from"
@@ -79,7 +79,7 @@
         {
             "name":     "segment::PACKED_MAX",
             "file":     "src/segment.rs",
-            "line":     (u64|200),
+            "line":     (u64|202),
             "value":    (u64|67108864),
             "axis":     "container",
             "holds":    "the most a packed run may inflate to; a compressed frame is an instruction to allocate and it arrives from wherever the segment did, so one that reaches this is refused rather than obeyed"
@@ -197,9 +197,25 @@
             "holds":    "a proposal restated by the voice that opened it; the top of the version 5 vocabulary"
         },
         {
+            "name":     "op::CODE_FORGET",
+            "file":     "src/op.rs",
+            "line":     (u64|124),
+            "value":    (u8|15),
+            "axis":     "vocabulary",
+            "holds":    "earlier operations losing their content and keeping their shape; the act recorded so that every replica forgets the same things"
+        },
+        {
+            "name":     "op::CODE_FORGOTTEN",
+            "file":     "src/op.rs",
+            "line":     (u64|125),
+            "value":    (u8|16),
+            "axis":     "vocabulary",
+            "holds":    "what stands under a forgotten operation's own header once its bytes are gone: its shape, written by a repack and vouched for by the Forget that names it; the top of the version 6 vocabulary"
+        },
+        {
             "name":     "op::MODE_NORMAL",
             "file":     "src/op.rs",
-            "line":     (u64|279),
+            "line":     (u64|281),
             "value":    (u8|0),
             "axis":     "field",
             "holds":    "the mode a file has unless something says otherwise"
@@ -207,7 +223,7 @@
         {
             "name":     "op::MODE_EXECUTABLE",
             "file":     "src/op.rs",
-            "line":     (u64|280),
+            "line":     (u64|282),
             "value":    (u8|1),
             "axis":     "field",
             "holds":    "the mode a FileMode operation carries for an executable"
@@ -215,7 +231,7 @@
         {
             "name":     "op::MODE_SYMLINK",
             "file":     "src/op.rs",
-            "line":     (u64|281),
+            "line":     (u64|283),
             "value":    (u8|2),
             "axis":     "field",
             "holds":    "the mode a FileMode operation carries for a symbolic link"
@@ -223,7 +239,7 @@
         {
             "name":     "op::SETTLED_OPEN",
             "file":     "src/op.rs",
-            "line":     (u64|285),
+            "line":     (u64|287),
             "value":    (u8|0),
             "axis":     "field",
             "holds":    "a proposal nobody has settled"
@@ -231,7 +247,7 @@
         {
             "name":     "op::SETTLED_ACCEPTED",
             "file":     "src/op.rs",
-            "line":     (u64|286),
+            "line":     (u64|288),
             "value":    (u8|1),
             "axis":     "field",
             "holds":    "a proposal taken up"
@@ -239,7 +255,7 @@
         {
             "name":     "op::SETTLED_DECLINED",
             "file":     "src/op.rs",
-            "line":     (u64|287),
+            "line":     (u64|289),
             "value":    (u8|2),
             "axis":     "field",
             "holds":    "a proposal turned down"
@@ -247,7 +263,7 @@
         {
             "name":     "op::SETTLED_DONE",
             "file":     "src/op.rs",
-            "line":     (u64|288),
+            "line":     (u64|290),
             "value":    (u8|3),
             "axis":     "field",
             "holds":    "a proposal carried out"
@@ -255,7 +271,7 @@
         {
             "name":     "op::AUTO_MARK_PREFIX",
             "file":     "src/op.rs",
-            "line":     (u64|134),
+            "line":     (u64|136),
             "value":    "@",
             "axis":     "convention",
             "holds":    "the character an automatic mark's name begins with, and which a person's mark may not; it separates the marks a person named from the ones a command wrote"
@@ -263,7 +279,7 @@
         {
             "name":     "op::AUTHOR_TRAILER",
             "file":     "src/op.rs",
-            "line":     (u64|194),
+            "line":     (u64|196),
             "value":    "Ore-Author: ",
             "axis":     "convention",
             "holds":    "the commit-message trailer the git exporter writes and the git importer reads; a mismatch loses attribution silently in both directions"
@@ -362,6 +378,11 @@
             "version":      (u8|5),
             "highest_code": "op::CODE_AMENDED",
             "note":         "one code added above the version 4 vocabulary and nothing else, so that a proposal's author can state it again without the opening operation being touched"
+        },
+        {
+            "version":      (u8|6),
+            "highest_code": "op::CODE_FORGOTTEN",
+            "note":         "two codes added above the version 5 vocabulary: a Forget, which names earlier operations and the shape each keeps, and a Forgotten, which a repack writes in a forgotten operation's place. History is the author's data; what the log keeps for good is that it forgot"
         }
     ],
 

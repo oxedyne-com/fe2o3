@@ -26,7 +26,10 @@ use crate::id::{
 	OpId,
 };
 use crate::seq::atom::Atoms;
-use crate::op::Op;
+use crate::op::{
+	Op,
+	Placing,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_data::interval::IntervalMap;
@@ -198,6 +201,30 @@ impl Dead {
 							res!(map.entry(*id).or_default()
 								.insert(0..insert.len() as u64, ()));
 						}
+						continue;
+					}
+					for r in remove {
+						if r.is_empty() {
+							continue;
+						}
+						res!(map.entry(r.op()).or_default().insert(r.offsets(), ()));
+					}
+				},
+				// A forgotten file is dead from birth, as any file's origin byte
+				// is. A forgotten insertion is buried whole -- that is what
+				// forgetting is, in this structure -- and what it removed stays
+				// removed, since the removal was done and forgetting the bytes
+				// it brought does not bring back the bytes it took. Yielding
+				// changes nothing here: its insertion is buried already, and a
+				// yielded splice's removals would be dropped, so they are.
+				Op::Forgotten { placing: Placing::File } => {
+					res!(map.entry(*id).or_default().insert(0..1, ()));
+				},
+				Op::Forgotten { placing: Placing::Splice { remove, len, .. } } => {
+					if *len > 0 {
+						res!(map.entry(*id).or_default().insert(0..*len, ()));
+					}
+					if yielded.contains(id) {
 						continue;
 					}
 					for r in remove {

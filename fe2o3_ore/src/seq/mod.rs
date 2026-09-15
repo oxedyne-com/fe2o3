@@ -118,6 +118,8 @@ mod file_tests;
 mod overlap_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod forget_tests;
 
 use crate::id::{
 	ContentId,
@@ -130,7 +132,9 @@ use crate::op::{
 	Header,
 	Mode,
 	Op,
+	Placing,
 	Record,
+	Stub,
 };
 use crate::seq::atom::Atoms;
 use crate::seq::claim::{
@@ -206,13 +210,14 @@ struct FileInfo {
 /// forest is laid out.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Sequence {
-	ops: BTreeMap<OpId, Applied>, // by identity
+	ops:		BTreeMap<OpId, Applied>,	// by identity
+	forgotten:	BTreeMap<OpId, Placing>,	// what every Forget in the set says
 }
 
 impl Sequence {
 
 	pub fn new() -> Self {
-		Self { ops: BTreeMap::new() }
+		Self { ops: BTreeMap::new(), forgotten: BTreeMap::new() }
 	}
 
 	/// Builds a repository from an operation set, in any order.
@@ -240,6 +245,21 @@ impl Sequence {
 	{
 		res!(op.validate());
 		let id = head.id();
+		// A forget is applied to the set as much as to itself: every operation
+		// it names is held from now on in the shape the forget says, whether
+		// the original was here first or arrives later, and whether what arrives
+		// is the original or the stub a repack wrote. That is what makes the
+		// set a function of its members and nothing else -- two replicas that
+		// hold the same operations and the same forgets render the same bytes,
+		// and it does not matter which of them still has the forgotten bytes on
+		// its disk.
+		if let Op::Forget { of, .. } = &op {
+			res!(self.forget(of));
+		}
+		let op = match self.forgotten.get(&id) {
+			Some(placing)	=> Op::Forgotten { placing: placing.clone() },
+			None			=> op,
+		};
 		let applied = Applied { parents: head.parents().to_vec(), op };
 		match self.ops.get(&id) {
 			Some(seen) if *seen != applied => Err(err!(
@@ -252,6 +272,43 @@ impl Sequence {
 				Ok(())
 			},
 		}
+	}
+
+	/// Holds every operation the stubs name in the shape they say, from now on
+	/// and whether the original is here yet or not.
+	///
+	/// This is what applying a [`Op::Forget`] does to the set, split out so that
+	/// it can be done without the forget itself joining the set: a state older
+	/// than the forget, rendered from the ancestry of a mark, holds none of the
+	/// forget's parents and cannot carry the forget, and must still not show
+	/// what was forgotten. The bytes are gone from every state there ever was,
+	/// which is what forgetting means.
+	pub fn forget(&mut self, of: &[Stub])
+		-> Outcome<()>
+	{
+		for stub in of {
+			match self.forgotten.get(&stub.id) {
+				Some(seen) if *seen != stub.placing => return Err(err!(
+					"The operation {} is said to keep one shape by one forget and \
+					another by another; a forgotten operation keeps one shape.", stub.id;
+				Invalid, Input, Conflict)),
+				_ => (),
+			}
+		}
+		for stub in of {
+			self.forgotten.insert(stub.id, stub.placing.clone());
+			if let Some(held) = self.ops.get_mut(&stub.id) {
+				held.op = Op::Forgotten { placing: stub.placing.clone() };
+			}
+		}
+		Ok(())
+	}
+
+	/// Every stub the forgets in this set have said, ascending by identifier.
+	pub fn forgotten(&self) -> Vec<Stub> {
+		self.forgotten.iter()
+			.map(|(id, placing)| Stub { id: *id, placing: placing.clone() })
+			.collect()
 	}
 
 	/// Takes every operation of another repository, and returns how many of them
@@ -272,22 +329,54 @@ impl Sequence {
 	pub fn absorb(&mut self, other: &Self)
 		-> Outcome<usize>
 	{
-		let mut fresh: Vec<(OpId, &Applied)> = Vec::new();
+		// The forgets of both sides first, since they decide the shape every
+		// operation is compared in: an original on one side and its stub on the
+		// other are one operation, not two.
+		let mut forgotten = self.forgotten.clone();
+		for (id, placing) in &other.forgotten {
+			match forgotten.get(id) {
+				Some(seen) if seen != placing => return Err(err!(
+					"The operation {} is forgotten in one shape in one repository and \
+					in another shape in the other; a forgotten operation keeps one \
+					shape, so the two are not branches of one history.", id;
+				Invalid, Input, Conflict)),
+				_ => {
+					forgotten.insert(*id, placing.clone());
+				},
+			}
+		}
+		let shaped = |id: &OpId, applied: &Applied| -> Applied {
+			match forgotten.get(id) {
+				Some(p)	=> Applied {
+					parents:	applied.parents.clone(),
+					op:			Op::Forgotten { placing: p.clone() },
+				},
+				None	=> applied.clone(),
+			}
+		};
+		let mut fresh: Vec<(OpId, Applied)> = Vec::new();
 		for (id, applied) in &other.ops {
+			let theirs = shaped(id, applied);
 			match self.ops.get(id) {
-				Some(seen) if seen != applied => return Err(err!(
+				Some(seen) if shaped(id, seen) != theirs => return Err(err!(
 					"The identity {} names a {} in one repository and a {} in the \
 					other; an operation identity names one operation, so the two are \
-					not branches of one history.", id, seen.op.name(), applied.op.name();
+					not branches of one history.", id, seen.op.name(), theirs.op.name();
 				Invalid, Input, Conflict)),
 				Some(_)	=> (),
-				None	=> fresh.push((*id, applied)),
+				None	=> fresh.push((*id, theirs)),
 			}
 		}
 		let n = fresh.len();
 		for (id, applied) in fresh {
-			self.ops.insert(id, applied.clone());
+			self.ops.insert(id, applied);
 		}
+		for (id, applied) in self.ops.iter_mut() {
+			if let Some(p) = forgotten.get(id) {
+				applied.op = Op::Forgotten { placing: p.clone() };
+			}
+		}
+		self.forgotten = forgotten;
 		Ok(n)
 	}
 
@@ -589,6 +678,16 @@ impl Sequence {
 						path:	path.clone(),
 						mode:	Mode::default(),
 						live:	true,
+					});
+				},
+				// A forgotten file has no path to be laid out under and is dead
+				// from birth. It is still a file, so that a rename, a mode or a
+				// deletion naming it is complete rather than an error.
+				Op::Forgotten { placing: Placing::File } => {
+					files.insert(*id, FileInfo {
+						path:	Vec::new(),
+						mode:	Mode::default(),
+						live:	false,
 					});
 				},
 				Op::FileRename { file, path } => {
