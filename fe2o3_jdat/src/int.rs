@@ -506,6 +506,10 @@ impl DatInt {
     const I32_MIN_AS_I128: i128 = i32::MIN as i128;
     const I64_MIN_AS_I128: i128 = i64::MIN as i128;
 
+    /// The narrowest signed variant that holds `n`.  Signedness is the caller's
+    /// choice and not the value's: a small positive number arrives here as `I8`
+    /// rather than `U8`, so the sign the caller meant survives the round trip
+    /// through `Dat`.
     pub fn min_size_int(n: i128) -> Self {
         if Self::I8_MIN_AS_I128 <= n && n <= Self::I8_MAX_AS_I128 {
             Self::I8(n as i8)
@@ -559,5 +563,26 @@ impl DatIntKind {
             Self::I64   => DatInt::I64(Rand::rand_u64() as i64),
             Self::I128  => DatInt::I128(Rand::rand_u128() as i128),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn min_size_int_narrows_within_the_signed_kinds() {
+        // Positive values stay signed, so the unsigned variants are never reached.
+        assert_eq!(DatInt::min_size_int(0),         DatInt::I8(0));
+        assert_eq!(DatInt::min_size_int(127),       DatInt::I8(127));
+        assert_eq!(DatInt::min_size_int(128),       DatInt::I16(128));
+        // Each boundary belongs to the narrower of the two kinds it separates.
+        assert_eq!(DatInt::min_size_int(-128),      DatInt::I8(-128));
+        assert_eq!(DatInt::min_size_int(-129),      DatInt::I16(-129));
+        assert_eq!(DatInt::min_size_int(i64::MAX as i128), DatInt::I64(i64::MAX));
+        assert_eq!(
+            DatInt::min_size_int(i64::MAX as i128 + 1),
+            DatInt::I128(i64::MAX as i128 + 1),
+        );
     }
 }
