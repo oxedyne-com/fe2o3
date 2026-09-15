@@ -251,6 +251,22 @@ impl Iblt {
 		out
 	}
 
+	/// How many cells the serialised form declares, read out of its header
+	/// without the table being built.
+	///
+	/// A reader sizes its answer from this, and sizing an answer is exactly what
+	/// must not cost the allocation the number asks for.
+	pub fn cells_in(bytes: &[u8]) -> Outcome<usize> {
+		if bytes.len() < 8 * 5 {
+			return Err(err!(
+				"IBLT serialised form too short: {} bytes.", bytes.len();
+			Invalid, Input, Size));
+		}
+		let mut buf = [0u8; 8];
+		buf.copy_from_slice(&bytes[..8]);
+		Ok(u64::from_le_bytes(buf) as usize)
+	}
+
 	/// Parses the serialised form produced by [`Iblt::to_bytes`].
 	pub fn from_bytes(bytes: &[u8]) -> Outcome<Self> {
 		if bytes.len() < 8 * 5 {

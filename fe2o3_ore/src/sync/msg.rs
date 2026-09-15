@@ -1,11 +1,11 @@
 //! What one peer says to another.
 //!
-//! Four messages, and both peers may send all four. A message has a daticle
-//! form, for a caller that keeps its wire in daticles, and a byte form that
-//! begins with a magic and a version, for a caller that keeps a wire of bytes.
-//! The version is there because these bytes cross between machines that were
-//! built at different times, and a reader that cannot tell an old spelling from
-//! a new one will eventually mistake one for the other.
+//! A handful of messages, and both peers may send every one of them. A message
+//! has a daticle form, for a caller that keeps its wire in daticles, and a byte
+//! form that begins with a magic and a version, for a caller that keeps a wire
+//! of bytes. The version is there because these bytes cross between machines
+//! that were built at different times, and a reader that cannot tell an old
+//! spelling from a new one will eventually mistake one for the other.
 //!
 //! # Framing belongs to the transport
 //!
@@ -52,7 +52,15 @@ pub const MAGIC: [u8; 6] = *b"ORESYN";
 /// cannot read the repository could never build them itself. A part is still
 /// stamped 2 -- see [`version_for`] -- so a peer built before any of this reads
 /// every message it could have read before.
-pub const VERSION: u8 = 3;
+///
+/// Raised to 4 for [`Message::Resume`], and that one is about a carrier that
+/// keeps nothing. A bounded reply cuts a frontier walk into a run of sessions,
+/// and a carrier with no memory of the last one works out the same owed set and
+/// sends the same prefix again; the cursor is how the end that does remember
+/// tells it where to carry on from. A peer too old to read one is not refused
+/// anything: it is simply never sent one, and answers from the frontier as it
+/// always did.
+pub const VERSION: u8 = 4;
 
 /// The oldest format version this module reads, and the version a message is
 /// stamped with when it needs nothing newer.
@@ -71,6 +79,7 @@ pub const KIND_SEND:		u8 = 3;
 pub const KIND_DONE:		u8 = 4;
 pub const KIND_PART:		u8 = 5;
 pub const KIND_FORGOTTEN:	u8 = 6;
+pub const KIND_RESUME:		u8 = 7;
 
 /// Most bytes an operation may come to when its pieces are put back together.
 ///
@@ -97,7 +106,8 @@ pub const fn highest_kind(version: u8) -> u8 {
 	match version {
 		0 | 1	=> KIND_DONE,
 		2		=> KIND_PART,
-		_		=> KIND_FORGOTTEN,
+		3		=> KIND_FORGOTTEN,
+		_		=> KIND_RESUME,
 	}
 }
 
@@ -178,6 +188,27 @@ pub enum Message {
 	Forgotten {
 		entries: Vec<Entry>,	// each a Forgotten record under the original's header
 	},
+	// How far into what the receiver last owed this speaker the speaker was
+	// carried, so that a receiver keeping nothing between sessions does not begin
+	// again.  A bounded reply cuts a frontier walk into a run of sessions, and an
+	// owed set is worked out afresh in each of them: where the speaker's own
+	// frontier does not move -- which is what a pull-only mirror's never does --
+	// the same prefix is sent every time and the exchange makes no progress at
+	// all.
+	//
+	// It names an operation and not a count, because a count is a position in a
+	// set that is recomputed and an identifier is a position in the log, which is
+	// not.  What it claims is that the speaker holds every operation of the
+	// receiver's log up to and including this one, and that is a claim the
+	// receiver's own earlier answers make true: everything before it was either
+	// sent to the speaker or already subtracted as held.
+	//
+	// It rides beside an opening rather than inside one, so that the four
+	// original kinds are still spelled exactly as they were and a peer that never
+	// learned this one is simply never sent it.
+	Resume {
+		at: OpId,	// the last operation of the receiver's owed set that arrived
+	},
 }
 
 impl Message {
@@ -200,6 +231,7 @@ impl Message {
 			Self::Done				=> KIND_DONE,
 			Self::Part { .. }		=> KIND_PART,
 			Self::Forgotten { .. }	=> KIND_FORGOTTEN,
+			Self::Resume { .. }		=> KIND_RESUME,
 		}
 	}
 
@@ -221,6 +253,7 @@ impl Message {
 			Self::Done				=> "done",
 			Self::Part { .. }		=> "part",
 			Self::Forgotten { .. }	=> "forgotten",
+			Self::Resume { .. }		=> "resume",
 		}
 	}
 
@@ -237,7 +270,8 @@ impl Message {
 			Self::Send { .. }
 			| Self::Done
 			| Self::Part { .. }
-			| Self::Forgotten { .. }	=> &[],
+			| Self::Forgotten { .. }
+			| Self::Resume { .. }		=> &[],
 		}
 	}
 
@@ -256,7 +290,8 @@ impl Message {
 			Self::Hello { .. }
 			| Self::Sketch { .. }
 			| Self::Done
-			| Self::Part { .. }			=> &[],
+			| Self::Part { .. }
+			| Self::Resume { .. }		=> &[],
 		}
 	}
 
@@ -319,6 +354,7 @@ impl Message {
 			Self::Forgotten { entries } => Dat::List(
 				entries.iter().map(|e| e.to_dat()).collect(),
 			),
+			Self::Resume { at } => at.to_dat(),
 		};
 		Dat::List(vec![Dat::U8(self.kind()), body])
 	}
@@ -459,6 +495,7 @@ impl Message {
 				}
 				Ok(Self::Forgotten { entries })
 			},
+			KIND_RESUME => Ok(Self::Resume { at: res!(OpId::from_dat(&v[1])) }),
 			other => Err(err!(
 				"A Message is tagged {}, which names no message this version knows.",
 				other;
@@ -857,6 +894,7 @@ mod tests {
 			Message::Part { id: oid(2, 3), seq: 0, total: 3, bytes: vec![0x5a; 40] },
 			Message::Part { id: oid(2, 3), seq: 2, total: 3, bytes: vec![0x01] },
 			Message::Forgotten { entries: res!(stubs()) },
+			Message::Resume { at: oid(2, 3) },
 		])
 	}
 
@@ -1141,16 +1179,18 @@ mod tests {
 		assert!(fmt!("{}", e).contains("kind"), "message was {}", e);
 
 		assert_eq!(highest_kind(VERSION_MIN), KIND_DONE);
-		assert_eq!(highest_kind(VERSION), KIND_FORGOTTEN);
+		assert_eq!(highest_kind(VERSION), KIND_RESUME);
 		// Every older message still says what it always said, so an old peer reads
-		// it unchanged: the four original kinds say 1 and a part still says 2,
-		// although VERSION has moved past both.
+		// it unchanged: the four original kinds say 1, a part still says 2 and a
+		// replacement still says 3, although VERSION has moved past all of them.
 		for msg in res!(samples()) {
 			let stamped = res!(msg.encode())[MAGIC.len()];
 			match msg {
 				Message::Part { .. }		=> assert_eq!(stamped, 2,
 					"a part stopped being a version 2 message"),
-				Message::Forgotten { .. }	=> assert_eq!(stamped, VERSION),
+				Message::Forgotten { .. }	=> assert_eq!(stamped, 3,
+					"a replacement stopped being a version 3 message"),
+				Message::Resume { .. }		=> assert_eq!(stamped, VERSION),
 				_							=> assert_eq!(stamped, VERSION_MIN,
 					"the {} message stopped being a version 1 message", msg.name()),
 			}
@@ -1160,7 +1200,7 @@ mod tests {
 		// kind, so a reader following `highest_kind` never refuses one a writer
 		// was entitled to send.
 		for kind in [KIND_HELLO, KIND_SKETCH, KIND_SEND, KIND_DONE, KIND_PART,
-			KIND_FORGOTTEN]
+			KIND_FORGOTTEN, KIND_RESUME]
 		{
 			let at = version_for(kind);
 			assert!(highest_kind(at) >= kind,
@@ -1183,7 +1223,7 @@ mod tests {
 	fn an_older_peer_refuses_a_replacement_and_nothing_else() -> Outcome<()> {
 		let msg = Message::Forgotten { entries: res!(stubs()) };
 		let bytes = res!(msg.encode());
-		assert_eq!(bytes[MAGIC.len()], VERSION,
+		assert_eq!(bytes[MAGIC.len()], version_for(KIND_FORGOTTEN),
 			"a replacement is stamped with the version it needs");
 		// What a version 2 peer would be doing if it read this one: believing a
 		// stamp the sender could not honestly have written.
@@ -1289,6 +1329,41 @@ mod tests {
 		let whole = res!(entry.to_dat().to_bytes(Vec::new()));
 		assert_eq!(&want[63..], &whole[..33],
 			"a piece carries something other than the entry's own bytes");
+		Ok(())
+	}
+
+	/// The bytes of a cursor, frozen.
+	///
+	/// It is one identifier, and the framing around it is the whole of what a
+	/// peer too old to read this one meets: the version byte, refused at the
+	/// header by name. What the test holds down is that a cursor carries nothing
+	/// else -- no count, no set, no claim about what was sent -- because a carrier
+	/// that keeps nothing between sessions must be told where to resume in a
+	/// message small enough to ride beside every opening.
+	#[test]
+	fn the_resume_bytes_are_frozen() -> Outcome<()> {
+		let msg = Message::Resume { at: oid(2, 3) };
+		let want: &[u8] = &[
+			// The magic, and the version a cursor needs.
+			0x4f, 0x52, 0x45, 0x53, 0x59, 0x4e,
+			0x04,
+			// The message: a two-element list of the kind and the body, 23 bytes.
+			0x33, 0x21, 0x17,
+				// The kind: resume.
+				0x0a, 0x07,
+				// The body: the operation this end was carried as far as, r2:3.
+				0x33, 0x21, 0x12,
+					0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+					0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+		];
+		assert_eq!(res!(msg.encode()), want, "the resume message format has changed");
+		assert_eq!(res!(Message::decode(want)), msg);
+		// And a peer built before it refuses it at the header, naming both
+		// versions, rather than reading past a kind it does not know.
+		let mut older = want.to_vec();
+		older[6] = version_for(KIND_FORGOTTEN);
+		assert!(Message::decode(&older).is_err(),
+			"a cursor stamped as version 3 was read by a version 3 vocabulary");
 		Ok(())
 	}
 
@@ -1493,3 +1568,4 @@ mod tests {
 		Ok(())
 	}
 }
+

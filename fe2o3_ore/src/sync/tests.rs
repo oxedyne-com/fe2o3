@@ -25,12 +25,16 @@ use crate::op::{
 };
 use crate::sync::msg::Message;
 use crate::sync::session::{
+	Growth,
 	Mode,
 	Session,
 	Step,
 	FANOUT,
 };
-use crate::sync::sketch::Fallback;
+use crate::sync::sketch::{
+	Fallback,
+	MIN_CELLS,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -418,6 +422,16 @@ fn an_undersized_sketch_falls_back_and_still_converges() -> Outcome<()> {
 	Ok(())
 }
 
+/// And a stall grows before it falls back, and then gives the walk the turn.
+///
+/// The order is the point. A table that stalls says the estimate was low and
+/// says nothing about by how much, so doubling it is tried before a frontier is
+/// walked -- against a peer whose head this end does not hold, the walk's owed
+/// set is the whole log. What stops the climb is not a count of growths: every
+/// growth at least doubles, and it ends at whichever of `GROW_CELLS` and the size
+/// [`Mode::between`] would not have chosen -- a table sized for as much as the
+/// smaller log -- comes first. Two logs that share nothing reach the second of
+/// those in a handful of turns, which is this test.
 #[test]
 fn a_fallback_is_reported_and_remembered() -> Outcome<()> {
 	let mut a = OpLog::new();
@@ -430,15 +444,38 @@ fn a_fallback_is_reported_and_remembered() -> Outcome<()> {
 	// is sent.
 	let opening = res!(sa.open(&a));
 	let turn = res!(sb.receive(&mut b, res!(Message::decode(&res!(opening.encode())))));
-	assert!(matches!(turn.step, Step::FellBack(_)), "step was {:?}", turn.step);
-	assert!(sb.fell_back().is_some());
-	assert!(!sb.is_converged(), "it has told, and not heard");
+	// Sixteen cells against a difference of two hundred and forty: the first
+	// answer is a bigger table and not the walk, and nothing is handed over with
+	// it.
+	match turn.step {
+		Step::Grew { cells } => assert!(cells > MIN_CELLS,
+			"it grew to {} cells, which is no larger than the table it answered",
+			cells),
+		other => return Err(err!("The first answer was {:?}.", other; Test, Mismatch)),
+	}
+	assert_eq!(turn.send.len(), 1, "a turn that grew handed something over as well");
+	assert!(sb.fell_back().is_none(), "growing was recorded as falling back");
+	assert!(!sb.is_converged());
 	// The rest of the exchange, by hand, so that the sticky flag can be read at
-	// the end.
-	for msg in turn.send {
-		let back = res!(sa.receive(&mut a, msg));
-		for msg in back.send {
-			res!(sb.receive(&mut b, msg));
+	// the end. Both ends grow once, both stall again, and the walk answers.
+	let mut queue = turn.send;
+	let mut guard = 0usize;
+	while !(sa.is_converged() && sb.is_converged()) {
+		guard += 1;
+		if guard > 16 {
+			return Err(err!(
+				"The exchange took {} turns to converge.", guard; Test, Excessive));
+		}
+		let mut back = Vec::new();
+		for msg in std::mem::take(&mut queue) {
+			for out in res!(sa.receive(&mut a, msg)).send {
+				back.push(out);
+			}
+		}
+		for msg in back {
+			for out in res!(sb.receive(&mut b, msg)).send {
+				queue.push(out);
+			}
 		}
 	}
 	assert!(sa.is_converged());
@@ -815,5 +852,264 @@ fn encoded_len_is_what_the_message_encodes_to() -> Outcome<()> {
 			"{} is measured at {} bytes and encodes to {}", name, said, wrote);
 	}
 	assert_eq!(kinds.len(), 5, "the corpus covers {} of the five message kinds", kinds.len());
+	Ok(())
+}
+
+
+/// Two logs that already agree cost a handful of hundred bytes, whatever the
+/// history behind them.
+///
+/// The number nothing else in this file pins. A sync that carries nothing is the
+/// ordinary outcome of a repository somebody syncs often, and what it costs is
+/// the whole argument for sketching: the exchange is proportional to the
+/// difference and not to the history, so a thousand-fold larger history has to
+/// cost the same nothing.
+#[test]
+fn a_sync_that_carries_nothing_costs_almost_nothing() -> Outcome<()> {
+	let mut a = OpLog::new();
+	res!(write(&mut a, 1, 1_400, "x"));
+	res!(merge(&mut a, 2, "join"));
+	let mut b = a.clone();
+	let mode = Mode::between(a.len(), a.frontier().len(), b.len(), 0);
+	let tally = res!(exchange(&mut a, &mut b, mode));
+	res!(agree(&a, &b));
+	assert_eq!(tally.ops, 0, "an exchange between equals handed something over");
+	assert!(tally.bytes < 4 << 10,
+		"a no-op sync of {} operations cost {} bytes over {} messages",
+		a.len(), tally.bytes, tally.messages);
+	assert!(tally.fell_back.is_none(), "it fell back: {:?}", tally.fell_back);
+	Ok(())
+}
+
+/// A two-sided divergence reconciles by sketch, at every size worth trying, and
+/// never reaches the walk.
+///
+/// The case the estimate cannot see. Each side holds a head the other does not,
+/// so the two logs' lengths say nothing about how far apart they are -- k against
+/// k + 2 is two, and the truth is 2k + 2. Where the first table is too small the
+/// answer is a larger table, so what this asserts is that the sketch path
+/// finishes the job: the logs agree, nothing fell back to the walk, and the whole
+/// exchange stays far under the history it reconciles.
+#[test]
+fn a_two_sided_divergence_decodes() -> Outcome<()> {
+	for k in [1usize, 2, 5, 9, 17, 33, 64] {
+		let (mut a, mut b) = res!(diverged(300, k, k + 2));
+		let whole = a.len();
+		// What each end knows before it opens: its own shape, the other's length,
+		// and that the other's frontier is news to it.
+		let mode = Mode::between(a.len(), a.frontier().len(), b.len(), b.frontier().len());
+		let tally = res!(exchange(&mut a, &mut b, mode));
+		res!(agree(&a, &b));
+		assert!(tally.fell_back.is_none(),
+			"at k = {} the exchange fell back to the walk: {:?}", k, tally.fell_back);
+		// The walk would have offered the whole log from each side, since neither
+		// can subtract the other's tip.
+		assert!(tally.ops < whole,
+			"at k = {} the exchange handed over {} operations of a {} operation log",
+			k, tally.ops, whole);
+	}
+	Ok(())
+}
+
+/// A cursor carries a bounded walk forward, against a peer whose head the log
+/// does not hold.
+///
+/// The fault in one place. A peer that has written anything of its own presents
+/// a frontier this log cannot subtract, so the owed set is the whole log however
+/// much of it that peer already holds -- and a carrier with a bounded reply sends
+/// the same prefix every session, for ever. The cursor is what a session with no
+/// memory is told instead, and it is one identifier: everything at or before it
+/// in the append order is held, so the next owed set begins where the last one
+/// stopped.
+#[test]
+fn a_cursor_moves_a_bounded_walk_along() -> Outcome<()> {
+	let mut here = OpLog::new();
+	res!(write(&mut here, 1, 60, "x"));
+	// A peer holding the whole of it and one operation of its own, which is the
+	// head this log has never seen.
+	let mut there = here.clone();
+	res!(write(&mut there, 2, 1, "mine"));
+	let heads = there.frontier();
+	assert_eq!(heads.len(), 1);
+	assert!(!here.contains(&heads[0]), "the peer's head is one this log holds");
+
+	// Without a cursor, every session owes the same whole log.
+	let mut first = Session::new(Mode::Walk);
+	let turn = res!(first.receive(&mut here.clone(), Message::hello(heads.clone())));
+	let offered = turn.send.iter().map(|m| m.entries().len()).sum::<usize>();
+	assert_eq!(offered, 60, "the walk offered {} of a 60 operation log", offered);
+
+	// With one, the owed set begins after the operation it names. Twenty at a
+	// time, which is what a bounded reply leaves behind.
+	let mut at = 0usize;
+	let mut sessions = 0usize;
+	while at < 60 {
+		sessions += 1;
+		if sessions > 8 {
+			return Err(err!(
+				"{} sessions carried the walk to {} of 60.", sessions, at;
+			Test, Excessive));
+		}
+		let mut session = Session::new(Mode::Walk);
+		if at > 0 {
+			let cursor = match here.at(at - 1) {
+				Some(rec)	=> rec.id(),
+				None		=> return Err(err!("The log lost operation {}.", at; Test, Missing)),
+			};
+			res!(session.receive(&mut here.clone(), Message::Resume { at: cursor }));
+		}
+		let turn = res!(session.receive(&mut here.clone(), Message::hello(heads.clone())));
+		let mut sent: Vec<OpId> = Vec::new();
+		for msg in &turn.send {
+			for entry in msg.entries() {
+				sent.push(res!(entry.id()));
+			}
+		}
+		assert_eq!(sent.len(), 60 - at,
+			"at cursor {} the session owed {} operations", at, sent.len());
+		match here.at(at) {
+			Some(rec)	=> assert_eq!(sent[0], rec.id(),
+				"the session began at {} rather than at the cursor", sent[0]),
+			None		=> return Err(err!("The log lost operation {}.", at; Test, Missing)),
+		}
+		// What a bounded reply would have carried of it.
+		at += 20;
+	}
+	assert_eq!(sessions, 3, "the walk took {} sessions at twenty a turn", sessions);
+	Ok(())
+}
+
+
+/// An end that grows against a peer that cannot answer a grown table strands it,
+/// so it does not grow.
+///
+/// **The compatibility failure of the whole idea, and it is not symmetric.** A
+/// grown table is a question, and the answer to it is the peer opening again at
+/// the new shape. A peer built before growth existed opens once: fed a grown
+/// table it decodes it, hands over what it owes, and the end that grew is left
+/// holding a table nobody will answer -- it said only the table, so it never
+/// worked out what it owed, and a carrier that keeps nothing between requests has
+/// no opening to answer on the visit after.
+///
+/// Both halves are asserted here, because the second is the reason the first is a
+/// knob rather than a rule. Told that its peer opens once, the end that would
+/// have grown walks instead and the two logs agree; told nothing, it grows and
+/// the pipe empties with it unconverged, which is the state a carrier reports as
+/// unfinished.
+#[test]
+fn growth_against_a_peer_that_opens_once_is_refused() -> Outcome<()> {
+	// A divergence the first table cannot hold, which is what makes the question
+	// arise at all.
+	let spread = |a: &OpLog, b: &OpLog| Mode::between(
+		a.len(), a.frontier().len(), b.len(), b.frontier().len());
+
+	// A opens once and never again, which is every build before the cursor. B
+	// answers it, and is told what A is.
+	let (mut a, mut b) = res!(diverged(300, 30, 32));
+	let mode = spread(&a, &b);
+	let mut sa = Session::new(mode).with_growth(Growth::Refused);
+	let mut sb = Session::new(mode).with_growth(Growth::Refused);
+	assert!(res!(called_upon(&mut sa, &mut a, &mut sb, &mut b)),
+		"an exchange with a peer that opens once did not finish");
+	res!(agree(&a, &b));
+	assert!(sb.fell_back().is_some(), "B grew against a peer that opens once");
+
+	// The same exchange with B told nothing: it grows, and A -- which opens once
+	// -- answers the grown table and then has nothing more to say. B never made
+	// its own opening count, so it is left unconverged with the pipe empty.
+	let (mut a, mut b) = res!(diverged(300, 30, 32));
+	let mut sa = Session::new(mode).with_growth(Growth::Refused);
+	let mut sb = Session::new(mode);
+	assert!(!res!(called_upon(&mut sa, &mut a, &mut sb, &mut b)),
+		"a peer that opens once answered a grown table, so growth costs nothing \
+		against it and this knob is not needed");
+	assert!(!sb.is_converged(), "B is the end left holding a table nobody answered");
+
+	// And between two ends that both re-open the same divergence settles by
+	// sketch, so what is being refused above is a saving and not the exchange.
+	let (mut c, mut d) = res!(diverged(300, 30, 32));
+	let tally = res!(exchange(&mut c, &mut d, mode));
+	res!(agree(&c, &d));
+	assert!(tally.fell_back.is_none(),
+		"two ends that both re-open fell back: {:?}", tally.fell_back);
+	Ok(())
+}
+
+/// Runs an exchange where `sa` speaks first and `sb` answers, and says whether
+/// both ends converged before the pipe emptied.
+///
+/// Unlike [`exchange`] it is not an error for the pipe to empty with one end
+/// unfinished, because that is the outcome one of its callers is asserting.
+fn called_upon(
+	sa:	&mut Session,
+	a:	&mut OpLog,
+	sb:	&mut Session,
+	b:	&mut OpLog,
+)
+	-> Outcome<bool>
+{
+	let mut queue = vec![res!(sa.open(a))];
+	let mut guard = 0usize;
+	while !(sa.is_converged() && sb.is_converged()) {
+		guard += 1;
+		if guard > 16 {
+			return Err(err!(
+				"An exchange took {} turns without converging.", guard; Test, Excessive));
+		}
+		if queue.is_empty() {
+			return Ok(false);
+		}
+		let mut back = Vec::new();
+		for msg in std::mem::take(&mut queue) {
+			for out in res!(sb.receive(b, msg)).send {
+				back.push(out);
+			}
+		}
+		for msg in back {
+			for out in res!(sa.receive(a, msg)).send {
+				queue.push(out);
+			}
+		}
+	}
+	Ok(true)
+}
+
+/// Reading the sizing rule backwards lands exactly where it started.
+///
+/// Both directions cost something and they are not the same something. A cell
+/// short of the table being answered is a stall put straight back on the wire; a
+/// cell over is a round trip, because an arriving table wider than the last one
+/// sent is exactly what a re-opening is read off, so a peer that answers with one
+/// cell more than it was given is answered again.
+#[test]
+fn a_width_is_a_fixed_point_of_the_sizing_rule() -> Outcome<()> {
+	use crate::sync::sketch::{
+		cells_for,
+		estimate_for,
+		MAX_CELLS,
+		MIN_CELLS,
+	};
+
+	// Every width a sketch can actually declare, which is the image of the sizing
+	// rule and not every number between its ends.
+	let mut estimate = 0usize;
+	let mut seen = 0usize;
+	while estimate <= (2 * MAX_CELLS) / 3 + 4 {
+		let cells = cells_for(estimate);
+		assert!(cells >= MIN_CELLS && cells <= MAX_CELLS);
+		assert_eq!(cells_for(estimate_for(cells)), cells,
+			"a table of {} cells is read back as an estimate of {}, which sizes {}",
+			cells, estimate_for(cells), cells_for(estimate_for(cells)));
+		seen += 1;
+		estimate += 1;
+	}
+	assert!(seen > 600_000, "only {} widths were tried", seen);
+	// And a width the rule cannot produce is rounded up rather than down, since
+	// narrower is the direction that stalls.
+	for cells in MIN_CELLS..4096 {
+		assert!(cells_for(estimate_for(cells)) >= cells,
+			"a table of {} cells is answered with {}", cells,
+			cells_for(estimate_for(cells)));
+	}
 	Ok(())
 }

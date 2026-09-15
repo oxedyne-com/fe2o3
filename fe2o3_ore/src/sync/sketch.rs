@@ -74,6 +74,18 @@ pub const MIN_CELLS: usize = 16;	// fewest cells, whatever the estimate
 // having.
 pub const MAX_CELLS: usize = 1 << 20;
 
+/// The most cells a sketch grown to answer a stalled decode may declare.
+///
+/// A table crosses in one message and nothing cuts one up, so the bound is the
+/// smallest body a carrier is met with in ordinary use: one mebibyte, which is
+/// nginx's default and what Ore's own relay client falls back to when a relay
+/// publishes no limit. At twenty-eight bytes a cell -- the key, the fingerprint
+/// and the count -- this many cells come to 896 KiB, which leaves the framing
+/// room to spare, and they cover a difference of about twenty-one thousand
+/// operations. A difference larger than that is a bulk transfer, which is what
+/// [`crate::sync::walk`] is for, so growth stops here and the walk answers.
+pub const GROW_CELLS: usize = 1 << 15;
+
 /// Two peers must sketch under the same seed to subtract at all, and they do:
 /// the seed travels in the table's own serialised form, and a receiver adopts
 /// it. This one is for a caller with no reason to choose another.
@@ -159,6 +171,50 @@ pub fn cells_for(estimate: usize) -> usize {
 	// Three halves, rounded up, without leaving the integers.
 	let want = estimate.saturating_mul(3).saturating_add(1) / 2;
 	want.max(MIN_CELLS).min(MAX_CELLS)
+}
+
+/// The estimate a table of `cells` was sized from, which is [`cells_for`] read
+/// backwards.
+///
+/// Never narrower and never wider than it has to be, which are two requirements
+/// and not one. Narrower is unsafe: this is what a peer answering a table sizes
+/// its own from, and an answer a cell short of the table it answers puts back on
+/// the wire the stall it was sent to settle. Wider is merely wrong, and it costs
+/// a round trip rather than bytes: a peer that answers a table with one cell more
+/// than it holds is a peer the other end then answers again, because an arriving
+/// table wider than the last one sent is what a re-opening is read off.
+///
+/// So the division is rounded down and corrected upwards only where it fell
+/// short, which makes every reachable width a fixed point of the pair.
+pub fn estimate_for(cells: usize) -> usize {
+	let want = cells.saturating_mul(2) / 3;
+	match cells_for(want) < cells {
+		true	=> want.saturating_add(1),
+		false	=> want,
+	}
+}
+
+/// The estimate to sketch under when a table of `cells` could not be decoded:
+/// twice the cells, and `None` where that would pass [`GROW_CELLS`].
+///
+/// Doubling rather than guessing again. What a stall says is that the difference
+/// is larger than the table, and nothing in it says by how much -- the peeling
+/// decoder stops without knowing what it did not recover -- so the only honest
+/// answer is to try a size that cannot be reached by repeating the mistake.
+/// `None` is the answer the walk takes.
+pub fn grown(cells: usize) -> Option<usize> {
+	let want = cells.saturating_mul(2);
+	match want > GROW_CELLS {
+		true	=> None,
+		false	=> Some(estimate_for(want)),
+	}
+}
+
+/// How many cells a serialised table declares, without the table being built.
+pub fn cells_in(bytes: &[u8])
+	-> Outcome<usize>
+{
+	Ok(res!(Iblt::cells_in(bytes)))
 }
 
 pub fn config(estimate: usize, seed: u64) -> IbltConfig {

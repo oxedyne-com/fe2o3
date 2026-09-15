@@ -172,6 +172,7 @@ fn compiled(name: &str) -> Option<Dat> {
 		"sync::msg::KIND_DONE"		=> Dat::U8(msg::KIND_DONE),
 		"sync::msg::KIND_PART"		=> Dat::U8(msg::KIND_PART),
 		"sync::msg::KIND_FORGOTTEN"	=> Dat::U8(msg::KIND_FORGOTTEN),
+		"sync::msg::KIND_RESUME"	=> Dat::U8(msg::KIND_RESUME),
 		"sync::msg::PART_MAX"		=> Dat::U64(msg::PART_MAX as u64),
 		// Not a constant, and the one pin that cannot be: a message is stamped
 		// with the version it NEEDS, so a part says 2 while sync::msg::VERSION
@@ -180,6 +181,8 @@ fn compiled(name: &str) -> Option<Dat> {
 		// the rule does.
 		"sync::msg::version_for(KIND_PART)"
 									=> Dat::U8(msg::version_for(msg::KIND_PART)),
+		"sync::msg::version_for(KIND_FORGOTTEN)"
+									=> Dat::U8(msg::version_for(msg::KIND_FORGOTTEN)),
 		_ => return None,
 	})
 }

@@ -295,23 +295,23 @@
         {
             "name":     "sync::msg::VERSION",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|55),
-            "value":    (u8|3),
+            "line":     (u64|63),
+            "value":    (u8|4),
             "axis":     "vocabulary",
-            "holds":    "the newest set of message kinds a peer may send, stamped only on a message that needs it. It does not move when the OPERATION vocabulary does, so an old relay accepts the frame and then fails inside Entry::from_dat, after the handshake said it was compatible; it moved to 2 for sync::msg::KIND_PART and to 3 for sync::msg::KIND_FORGOTTEN, where the refusal lands at the header instead"
+            "holds":    "the newest set of message kinds a peer may send, stamped only on a message that needs it. It does not move when the OPERATION vocabulary does, so an old relay accepts the frame and then fails inside Entry::from_dat, after the handshake said it was compatible; it moved to 2 for sync::msg::KIND_PART, to 3 for sync::msg::KIND_FORGOTTEN and to 4 for sync::msg::KIND_RESUME, where the refusal lands at the header instead"
         },
         {
             "name":     "sync::msg::VERSION_MIN",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|65),
+            "line":     (u64|73),
             "value":    (u8|1),
             "axis":     "vocabulary",
-            "holds":    "the oldest message version this crate reads, and the version stamped on every message a version 1 peer could itself have sent; it stays at 1 because versions 2 and 3 each added a kind above the existing ones and moved nothing else"
+            "holds":    "the oldest message version this crate reads, and the version stamped on every message a version 1 peer could itself have sent; it stays at 1 because versions 2, 3 and 4 each added a kind above the existing ones and moved nothing else"
         },
         {
             "name":     "sync::msg::KIND_HELLO",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|68),
+            "line":     (u64|76),
             "value":    (u8|1),
             "axis":     "vocabulary",
             "holds":    "a peer opening a session"
@@ -319,7 +319,7 @@
         {
             "name":     "sync::msg::KIND_SKETCH",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|69),
+            "line":     (u64|77),
             "value":    (u8|2),
             "axis":     "vocabulary",
             "holds":    "a peer offering what it holds"
@@ -327,7 +327,7 @@
         {
             "name":     "sync::msg::KIND_SEND",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|70),
+            "line":     (u64|78),
             "value":    (u8|3),
             "axis":     "vocabulary",
             "holds":    "a peer handing entries over"
@@ -335,7 +335,7 @@
         {
             "name":     "sync::msg::KIND_DONE",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|71),
+            "line":     (u64|79),
             "value":    (u8|4),
             "axis":     "vocabulary",
             "holds":    "a peer closing a session; the top of the version 1 vocabulary"
@@ -343,7 +343,7 @@
         {
             "name":     "sync::msg::KIND_PART",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|72),
+            "line":     (u64|80),
             "value":    (u8|5),
             "axis":     "vocabulary",
             "holds":    "one piece of an operation the carrier cannot take whole; the top of the version 2 vocabulary. A piece is not an operation: nothing places it, nothing signs it, and no segment may carry it, which is why it is a message kind and not an entry kind beside segment::KIND_PACKED"
@@ -351,15 +351,23 @@
         {
             "name":     "sync::msg::KIND_FORGOTTEN",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|73),
+            "line":     (u64|81),
             "value":    (u8|6),
             "axis":     "vocabulary",
             "holds":    "records to be written in place of the operations a Forget names, so that a carrier's copy of a history stops holding their bytes; the top of the version 3 vocabulary. It is not an offer and no session absorbs it: every identifier it carries is one the receiver already holds, and what changes is the form it is held in. The SENDER builds the stubs in every case, because a carrier of a veiled repository can read neither the forget nor the record it names"
         },
         {
+            "name":     "sync::msg::KIND_RESUME",
+            "file":     "src/sync/msg.rs",
+            "line":     (u64|82),
+            "value":    (u8|7),
+            "axis":     "vocabulary",
+            "holds":    "how far into what the receiver last owed the speaker the speaker was carried; the top of the version 4 vocabulary. It names an operation and not a count, because an owed set is recomputed every session and a log's append order is not, and it rides BESIDE an opening rather than inside one so that the four original kinds are still spelled exactly as they were. Without it a bounded frontier walk against a peer whose head the carrier does not hold sends the same prefix every session, for ever"
+        },
+        {
             "name":     "sync::msg::PART_MAX",
             "file":     "src/sync/msg.rs",
-            "line":     (u64|84),
+            "line":     (u64|93),
             "value":    (u64|67108864),
             "axis":     "vocabulary",
             "holds":    "the most an operation may come to when its pieces are put back together. A declared piece count is never sized from, only the bytes that actually arrived are counted, so this is a policy ceiling and not a guard against an allocation a peer could ask for"
@@ -459,10 +467,20 @@
             "magic":    "sync::msg::MAGIC",
             "holds":    "a replacement message carrying one bare record in a forgotten operation's place. Two builds that disagree about this are two builds that disagree about which record a carrier writes over which, and the one that has it wrong destroys a history rather than failing to read one. Byte 80 is the Placing code, 0 for a void, which is the shape a forgotten mark or note keeps; byte 79 is the U8 tag in front of it",
             "pins": [
-                { "at": (u64|6),  "is": "sync::msg::VERSION" },
+                { "at": (u64|6),  "is": "sync::msg::version_for(KIND_FORGOTTEN)" },
                 { "at": (u64|11), "is": "sync::msg::KIND_FORGOTTEN" },
                 { "at": (u64|19), "is": "segment::KIND_BARE" },
                 { "at": (u64|75), "is": "op::CODE_FORGOTTEN" }
+            ]
+        },
+        {
+            "name":     "the_resume_bytes_are_frozen",
+            "file":     "src/sync/msg.rs",
+            "magic":    "sync::msg::MAGIC",
+            "holds":    "a cursor, which is one identifier and the framing around it. What it freezes is that a cursor carries nothing else -- no count, no set, no claim about what was sent -- and that a peer built before it meets the refusal at the header, by version, rather than reading past a kind it does not know",
+            "pins": [
+                { "at": (u64|6),  "is": "sync::msg::VERSION" },
+                { "at": (u64|11), "is": "sync::msg::KIND_RESUME" }
             ]
         }
     ],

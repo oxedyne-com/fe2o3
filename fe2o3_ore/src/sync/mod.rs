@@ -39,10 +39,28 @@
 //!   repository that syncs often.
 //!
 //! A sketch is sized from an estimate, and an estimate can be wrong. When the
-//! peeling decoder stalls the difference is not half taken: the outcome says so
-//! -- [`Step::FellBack`] -- and the walk answers instead, from the frontier the
-//! sketch message carried for exactly that purpose. Nothing is guessed and no
-//! round trip is lost.
+//! peeling decoder stalls the difference is not half taken: the answer is a
+//! table of twice the cells -- [`Step::Grew`] -- and, once growth has climbed as
+//! far as it is worth climbing, the walk, from the frontier the sketch message
+//! carried for exactly that purpose ([`Step::FellBack`]). Nothing is guessed and
+//! no round trip is lost.
+//!
+//! Growing before walking is not a preference between two equally good answers.
+//! A peer that has written anything of its own presents a frontier this end
+//! cannot subtract, so the walk's owed set is the whole log however much of it
+//! that peer already holds; a table twice the size costs a round trip and some
+//! hundreds of bytes.
+//!
+//! # A carrier that keeps nothing
+//!
+//! A bounded reply cuts an exchange into a run of sessions, and three things
+//! would otherwise be thrown away at each boundary: what the far end handed over
+//! ([`Session::knowing`]), the table size that was grown to
+//! ([`Session::sizing`]), and how far into the owed set the far end was carried
+//! ([`Message::Resume`]). The last of those is the one that crosses the wire,
+//! because it is the only one the end that keeps nothing cannot work out for
+//! itself -- and without it a bounded walk against a peer whose head the carrier
+//! does not hold sends the same prefix every session, for ever.
 //!
 //! # Layout
 //!
@@ -74,6 +92,7 @@ pub use msg::{
 	VERSION_MIN,
 };
 pub use session::{
+	Growth,
 	Mode,
 	Session,
 	Step,
