@@ -1,11 +1,8 @@
-# Ignore files that do not have an extension (typically executable files)
-*
-!*/
-!*.*
-
-# ... but the Austenite live-preview script is deliberately extensionless (`./dev`,
-# after `typst watch`), so it is re-included by name.
-!fe2o3_austenite/dev
+# Nothing here keeps a file out for lacking an extension. The opening this file
+# carried until 2026-09-15 -- `*`, `!*/`, `!*.*` -- was meant for stray compiled
+# binaries, and what it did was keep every new LICENSE, Makefile and build script
+# out of git without `add -f`, and out of the Ore history with nothing saying so.
+# Compiled output lives under target/, which is named below.
 
 # Agent worktrees. These are a checkout apiece, so a blanket `git add` in a tree
 # several sessions share would commit a copy of the repository into itself.

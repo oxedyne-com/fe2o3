@@ -357,6 +357,52 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 	out
 }
 
+/// Paths that are a secret by name, as ignore rules in git's glob syntax, one per line.
+///
+/// The other half of this module. [`scan`] reads bytes and refuses a credential it can recognise;
+/// this names the files a credential conventionally lives in, whatever their bytes say, so that a
+/// tool writing a history can keep them out before it has read a byte of them. A `.env` holding
+/// `DB_PASSWORD=hunter2` has no shape [`scan`] answers to, and a PEM certificate is not a secret at
+/// all but stands beside the key that is, so a rule by name is what stops both.
+///
+/// The syntax is a `.gitignore`'s, so that a tool which already compiles one can compile this by
+/// prepending it: a repository's own rules then come last and win, and a `!` line in them
+/// re-includes anything here by name. The one re-inclusion this list makes itself is the example
+/// file every `.env` convention ships beside the real one, which holds placeholders by definition
+/// and is the file a reader needs most.
+///
+/// This is not compiled here, because the glob machinery lives downstream of this crate; the test
+/// that every line is a rule the matcher accepts, and that it decides what this comment says it
+/// does, is beside that machinery.
+pub const SECRET_PATHS: &[&str] = &[
+	// Environment files, which hold credentials by convention and nothing by shape.
+	".env",
+	".env.*",
+	"!.env.example",
+	"!.env.sample",
+	"!.env.template",
+	// Key material by extension, and the certificate that conventionally stands beside it.
+	"*.pem",
+	"*.key",
+	"*.p12",
+	"*.pfx",
+	"*.jks",
+	"*.keystore",
+	// The names every SSH client writes a private key under.
+	"id_rsa",
+	"id_dsa",
+	"id_ecdsa",
+	"id_ed25519",
+	// Machine credentials for other services, kept in the home directory by convention and
+	// copied into a project by mistake.
+	".netrc",
+	".pgpass",
+	".htpasswd",
+	// Directories whose name says what they hold.
+	"keys/",
+	"tls/",
+];
+
 /// Is the path one whose long hashes read like keys, and which is therefore not scanned?
 ///
 /// A lockfile by name, or anything under a vendored or built directory that no `src` stands above.

@@ -5,6 +5,7 @@ use oxedyne_fe2o3_file::glob::{
     Glob,
     IgnoreFile,
 };
+use oxedyne_fe2o3_text::secret;
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -152,6 +153,35 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         assert!(Glob::new(b"").is_err());
         assert!(Glob::new(b"!").is_err());
         assert!(Glob::new(b"/").is_err());
+        Ok(())
+    }));
+
+    // The list lives upstream of this matcher, so the proof that every line of it is a rule, and
+    // that the rules decide what the list's comment says, has to stand here.
+    res!(test_it(filter, &["The secret paths are rules, and decide what they say 000", "all",
+        "glob", "secret"], ||
+    {
+        for line in secret::SECRET_PATHS {
+            res!(Glob::new(line.as_bytes()));
+        }
+        let f = IgnoreFile::parse(secret::SECRET_PATHS.join("\n").as_bytes());
+        for path in [
+            ".env", "app/.env.local", ".env.production",
+            "server.pem", "cert/server.key", "store.p12", "store.pfx", "app.jks", "app.keystore",
+            "id_rsa", ".ssh/id_ed25519", ".netrc", ".pgpass", ".htpasswd",
+            "keys/anything.txt", "deep/tls/chain.txt",
+        ] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is a secret by name", path);
+        }
+        for path in [
+            ".env.example", ".env.sample", ".env.template", "environment.rs", "envoy.yaml",
+            "id_ed25519.pub", "server.pub", "server.crt", "README.md", "src/keys.rs",
+            "keys.txt", "tls.rs", "monkeys/banana.txt",
+        ] {
+            assert!(!f.excludes(path.as_bytes(), false), "{} is not", path);
+        }
+        assert!(f.excludes(b"keys", true), "the directory itself");
+        assert!(!f.excludes(b"keys", false), "and not a file of that name");
         Ok(())
     }));
 
