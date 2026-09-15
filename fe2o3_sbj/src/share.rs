@@ -35,7 +35,7 @@
 //!
 //! # What a share may not carry
 //!
-//! Three paths are refused outright, and each is refused here rather than left to a client, so
+//! Five paths are refused outright, and each is refused here rather than left to a client, so
 //! that every implementation refuses the same things:
 //!
 //! - `.daimond/` — the meta, the append-only log, the link sidecar. The log is a record of what
@@ -47,6 +47,18 @@
 //!   by the sender would pin the receiver's copy against every future template fix on THEIR
 //!   machine, which they never chose. A copy that arrives without one is a case the receiving
 //!   client already knows how to handle: it asks.
+//! - `triggers.json` — automation that fires with nobody pressing anything. It arms on the
+//!   RECEIVER's money, and a client cannot save them from it by leaving it switched off: `on:
+//!   false` does not disarm a trigger, and a leaf that appears in a pause tree plays. Refused in
+//!   the FORMAT rather than by the sending client, because a receiver's exposure must not depend
+//!   on which build the sender was running.
+//! - `STATE.md` — folder marks and build commands on the SENDER's disk. It is the one standing
+//!   file that is about a machine rather than about the work, it is rebuilt on the first turn in
+//!   the copy, and a path on somebody's disk is exactly what does not leave their device.
+//!
+//! The last two are the ones that are not about tidiness, and a template has refused both since it
+//! existed (`daimond` `src/protocol.rs`, `TEMPLATE_DROP_EXACT`). A share carries the same files to
+//! the same people, so the two lists agreeing is the point rather than a coincidence.
 //!
 //! The canonical rules of `SPEC.md` §3 apply unchanged. Two of them do real work here that they do
 //! not do for a message: [`KEY_FILES`] is ordered by path and refuses a duplicate, since a set of
@@ -88,15 +100,34 @@ pub const KEY_BODY:	&'static str = "body";
 pub const KEY_PATH:	&'static str = "path";
 
 
-/// The path prefixes and names a share may not carry, and why.
+/// The path prefixes a share may not carry, and why.
 ///
-/// Checked as a prefix in the first two cases and as the whole path in the third, which is what
-/// `capp.json` needs: a file called `capp.json` inside a folder of the receiver's own making is
-/// ordinary data, and the delivery record is the one at the root.
+/// Checked as a prefix here and as the whole path in [`REFUSED_EXACT`], which is what `capp.json`
+/// needs: a file called `capp.json` inside a folder of the receiver's own making is ordinary data,
+/// and the delivery record is the one at the root.
 pub const REFUSED_PREFIXES:	&[&'static str] = &[".daimond/", "versions/"];
 
-/// The exact path a share may not carry. See [`REFUSED_PREFIXES`] for the prefixes.
-pub const REFUSED_EXACT:	&'static str = "capp.json";
+/// The exact paths a share may not carry, each with the reason it is refused.
+///
+/// Whole paths rather than prefixes, and at the ROOT: a `triggers.json` a receiver writes inside a
+/// folder of their own is ordinary data, and only the one the app arms from is automation.
+///
+/// It was one path and it is three. The two that joined it are the ones that are not about
+/// tidiness, and the module header argues both; the reason they are HERE rather than in the
+/// sending client is that a receiver's exposure must not depend on which build the sender ran.
+pub const REFUSED_EXACT:	&[(&'static str, &'static str)] = &[
+	("capp.json",
+		"It is a DELIVERY record: it says which bytes were delivered to that instance and at 		what template version, and it decides which files a future template fix may replace. The 		receiver was not delivered to; they were given a copy by a person. One carried across 		from somebody else's machine would pin their copy against updates they never chose, and 		a doctored one would do it on purpose. A copy with no record is a case the receiving 		client already knows: it asks."),
+	("triggers.json",
+		"It is ARMED AUTOMATION. A trigger fires with nobody pressing anything, and it would fire 		on the receiver's account and spend the receiver's money because they accepted a gift. 		Sending it switched off is not an answer: `on: false` does not disarm a trigger -- the 		pause tree is the authority and a leaf that appears in it plays -- so a share that 		carried one and said it was off would be worse than one that carries none. The receiver 		sets up their own."),
+	("STATE.md",
+		"It names the SENDER's own machine: the folders they marked and the command they build 		with. A path on somebody's disk does not leave their device, and this file is the one 		standing file that is about a machine rather than about the work. The copy rebuilds it on 		its first turn, from the receiver's own folders."),
+];
+
+/// Is this exact path one a share may not carry? Answers the reason where it is.
+pub fn refused_exact(path: &str) -> Option<&'static str> {
+	REFUSED_EXACT.iter().find(|(name, _)| *name == path).map(|(_, why)| *why)
+}
 
 /// The suffixes that make a file code rather than data.
 ///
@@ -313,15 +344,8 @@ pub fn check_path(path: &str) -> Outcome<()> {
 			Invalid, Input));
 		}
 	}
-	if path == REFUSED_EXACT {
-		return Err(err!(
-			"A share may not carry \"{}\". It is a DELIVERY record: it says which bytes were \
-			delivered to that instance and at what template version, and it decides which files a \
-			future template fix may replace. The receiver was not delivered to; they were given a \
-			copy by a person. One carried across from somebody else's machine would pin their copy \
-			against updates they never chose, and a doctored one would do it on purpose. A copy \
-			with no record is a case the receiving client already knows: it asks.", REFUSED_EXACT;
-		Invalid, Input));
+	if let Some(why) = refused_exact(path) {
+		return Err(err!("A share may not carry \"{}\". {}", path, why; Invalid, Input));
 	}
 	Ok(())
 }
@@ -879,13 +903,15 @@ mod tests {
 		Ok(())
 	}
 
-	/// Each of the three refused paths, refused, and each saying which rule it broke.
+	/// Each refused path, refused, and each saying which rule it broke.
 	#[test]
-	fn test_the_three_refused_paths() -> Outcome<()> {
+	fn test_the_refused_paths() -> Outcome<()> {
 		for (path, says) in [
 			(".daimond/log.jsonl",	".daimond/"),
 			("versions/3/crystal.json",	"versions/"),
 			("capp.json",	"capp.json"),
+			("triggers.json",	"triggers.json"),
+			("STATE.md",	"STATE.md"),
 		] {
 			match check_path(path) {
 				Ok(()) => return Err(err!(
@@ -901,7 +927,71 @@ mod tests {
 		// the root, and a folder of the receiver's own making may hold anything.
 		res!(check_path("recipes/capp.json"));
 		res!(check_path("notes/versions/old.md"));
+		res!(check_path("saved/triggers.json"));
+		res!(check_path("docs/STATE.md"));
 		Ok(())
+	}
+
+	/// A share may not carry armed automation, and it is the FORMAT that says so.
+	///
+	/// REMOVE THE `triggers.json` ENTRY FROM [`REFUSED_EXACT`] AND THIS GOES RED, which is the
+	/// whole of what it is for: the sending client refuses the file too, and a check that drove
+	/// only the client would pass on a build whose sender was somebody else's.
+	///
+	/// A trigger fires with nobody pressing anything. It would arm on the receiver's account, be
+	/// governed by the receiver's pause tree -- where a leaf that appears PLAYS -- and spend the
+	/// receiver's money, because they accepted a gift. Switching it off in the file is not the
+	/// answer and the reason is in the constant.
+	#[test]
+	fn test_a_share_may_not_carry_a_trigger() -> Outcome<()> {
+		match check_path("triggers.json") {
+			Ok(()) => return Err(err!(
+				"A share accepted \"triggers.json\": automation that fires with nobody pressing \
+				anything, on the receiver's account and at the receiver's expense."; Test, Invalid)),
+			Err(e) => {
+				let msg = fmt!("{}", e);
+				// The refusal has to say WHY, because the sender reads it and the only thing they
+				// can do about it is understand it.
+				assert!(msg.contains("fires with nobody pressing anything"),
+					"The refusal does not say what a trigger does: {}", msg);
+			},
+		}
+		// And it is refused where it is ENCODED, not merely where a path is checked -- so a caller
+		// that built the payload by hand is refused as well.
+		let s = Share::new(fmt!("N"), vec![0xA1; 32], vec![0xB2; 16], None, vec![
+			File { path: fmt!("triggers.json"), body: b"[{\"on\":true}]".to_vec() },
+		]);
+		match s.encode() {
+			Ok(_) => Err(err!(
+				"A share carrying \"triggers.json\" encoded."; Test, Invalid)),
+			Err(_) => Ok(()),
+		}
+	}
+
+	/// A share may not carry the sender's own machine.
+	///
+	/// REMOVE THE `STATE.md` ENTRY FROM [`REFUSED_EXACT`] AND THIS GOES RED. `STATE.md` holds the
+	/// folders the sender marked and the command they build with -- paths on their disk, which do
+	/// not leave their device. The copy rebuilds it on its first turn from the receiver's own.
+	#[test]
+	fn test_a_share_may_not_carry_the_senders_machine() -> Outcome<()> {
+		match check_path("STATE.md") {
+			Ok(()) => return Err(err!(
+				"A share accepted \"STATE.md\", which names folders on the sender's own disk.";
+			Test, Invalid)),
+			Err(e) => {
+				let msg = fmt!("{}", e);
+				assert!(msg.contains("SENDER's own machine"),
+					"The refusal does not say whose machine it names: {}", msg);
+			},
+		}
+		let s = Share::new(fmt!("N"), vec![0xA1; 32], vec![0xB2; 16], None, vec![
+			File { path: fmt!("STATE.md"), body: b"Marked: /home/somebody/work\n".to_vec() },
+		]);
+		match s.encode() {
+			Ok(_) => Err(err!("A share carrying \"STATE.md\" encoded."; Test, Invalid)),
+			Err(_) => Ok(()),
+		}
 	}
 
 	#[test]
