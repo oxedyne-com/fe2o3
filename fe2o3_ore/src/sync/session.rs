@@ -294,6 +294,18 @@ impl Session {
 				run of them back into the send it was cut from, and that is what a \
 				session receives.", seq, total, id;
 			Invalid, Input, Mismatch)),
+			// A replacement names operations the receiver already holds and asks
+			// for the form they are held in to change, which is a fact about a
+			// store and not about a set of operations. A session reconciles sets,
+			// so it neither sends this nor answers it; a carrier acts on it once
+			// the session it arrived beside has finished.
+			Message::Forgotten { entries } => Err(err!(
+				"A session was handed {} record{} to write in place of operations it \
+				already holds. What a forget takes out of a store is the carrier's \
+				work -- `Message::replacements` is what hands them over -- and a \
+				session places operations and never rewrites one.",
+				entries.len(), if entries.len() == 1 { "" } else { "s" };
+			Invalid, Input, Mismatch)),
 		}
 	}
 

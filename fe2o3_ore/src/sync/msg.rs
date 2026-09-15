@@ -45,24 +45,32 @@ pub const MAGIC: [u8; 6] = *b"ORESYN";
 /// it does not have to, and it puts the refusal at the header -- before a
 /// decode, naming both versions -- rather than inside `Entry::from_dat`, after
 /// the handshake has already said the frame was compatible.
-pub const VERSION: u8 = 2;
+///
+/// Raised to 3 for [`Message::Forgotten`], by the same rule and for the same
+/// reason: a carrier's copy of a history cannot drop what a forget took unless
+/// somebody hands it the stubs to write in their place, and a carrier that
+/// cannot read the repository could never build them itself. A part is still
+/// stamped 2 -- see [`version_for`] -- so a peer built before any of this reads
+/// every message it could have read before.
+pub const VERSION: u8 = 3;
 
 /// The oldest format version this module reads, and the version a message is
 /// stamped with when it needs nothing newer.
 ///
-/// It stays at 1 because version 2 is a strict superset: the framing is
-/// identical, the four original kinds are spelled exactly as they were, and the
-/// only thing a version 1 reader cannot do is read a kind that did not exist
+/// It stays at 1 because every version since is a strict superset: the framing
+/// is identical, the four original kinds are spelled exactly as they were, and
+/// the only thing a version 1 reader cannot do is read a kind that did not exist
 /// when it was built. [`highest_kind`] is what keeps that true of the bytes and
 /// not merely of the intention.
 pub const VERSION_MIN: u8 = 1;
 
 // The kind byte each message is tagged with on the wire.
-pub const KIND_HELLO:	u8 = 1;
-pub const KIND_SKETCH:	u8 = 2;
-pub const KIND_SEND:	u8 = 3;
-pub const KIND_DONE:	u8 = 4;
-pub const KIND_PART:	u8 = 5;
+pub const KIND_HELLO:		u8 = 1;
+pub const KIND_SKETCH:		u8 = 2;
+pub const KIND_SEND:		u8 = 3;
+pub const KIND_DONE:		u8 = 4;
+pub const KIND_PART:		u8 = 5;
+pub const KIND_FORGOTTEN:	u8 = 6;
 
 /// Most bytes an operation may come to when its pieces are put back together.
 ///
@@ -86,11 +94,26 @@ pub const PART_MAX: usize = 64 << 20;
 /// read it is a peer that would also have to guess at what else the sender
 /// thought version 1 meant.
 pub const fn highest_kind(version: u8) -> u8 {
-	if version <= VERSION_MIN {
-		KIND_DONE
-	} else {
-		KIND_PART
+	match version {
+		0 | 1	=> KIND_DONE,
+		2		=> KIND_PART,
+		_		=> KIND_FORGOTTEN,
 	}
+}
+
+/// The oldest format version whose vocabulary spells the given kind.
+///
+/// The inverse of [`highest_kind`], and worked out from it rather than written
+/// down beside it, so that a kind added to one cannot be forgotten in the other.
+/// This is what stamps a message with the version it needs: a part still says 2
+/// after [`VERSION`] moved to 3, because nothing about a part changed and a peer
+/// that could read one before still can.
+pub const fn version_for(kind: u8) -> u8 {
+	let mut version = VERSION_MIN;
+	while version < VERSION && highest_kind(version) < kind {
+		version += 1;
+	}
+	version
 }
 
 
@@ -140,6 +163,21 @@ pub enum Message {
 		total:	u64,		// how many pieces there are
 		bytes:	Vec<u8>,	// this piece of the entry's encoded form
 	},
+	// What to write in place of the operations a [`crate::op::Op::Forget`]
+	// names, so that a peer holding this history stops holding their bytes.
+	// Every identifier here is one the receiver already holds and nothing
+	// absorbs any of it: what changes is the form a record is held in, not the
+	// set of operations there are, so a session neither sends this nor answers
+	// it and a carrier acts on it after the session has finished.
+	//
+	// The SENDER builds the stubs, always. A carrier of a veiled repository can
+	// read neither the forget nor the record it names, so it could not build
+	// one if it wanted to; a carrier of a plain one could, and is sent them
+	// anyway, because two ways of arriving at the same record is one more than
+	// the act needs.
+	Forgotten {
+		entries: Vec<Entry>,	// each a Forgotten record under the original's header
+	},
 }
 
 impl Message {
@@ -156,11 +194,12 @@ impl Message {
 
 	pub fn kind(&self) -> u8 {
 		match self {
-			Self::Hello { .. }	=> KIND_HELLO,
-			Self::Sketch { .. }	=> KIND_SKETCH,
-			Self::Send { .. }	=> KIND_SEND,
-			Self::Done			=> KIND_DONE,
-			Self::Part { .. }	=> KIND_PART,
+			Self::Hello { .. }		=> KIND_HELLO,
+			Self::Sketch { .. }		=> KIND_SKETCH,
+			Self::Send { .. }		=> KIND_SEND,
+			Self::Done				=> KIND_DONE,
+			Self::Part { .. }		=> KIND_PART,
+			Self::Forgotten { .. }	=> KIND_FORGOTTEN,
 		}
 	}
 
@@ -170,20 +209,18 @@ impl Message {
 	/// built at, so every message a version 1 peer could have sent is still
 	/// spelled and stamped exactly as it was.
 	pub fn version(&self) -> u8 {
-		match self {
-			Self::Part { .. }	=> VERSION,
-			_					=> VERSION_MIN,
-		}
+		version_for(self.kind())
 	}
 
 	/// For messages about messages.
 	pub fn name(&self) -> &'static str {
 		match self {
-			Self::Hello { .. }	=> "hello",
-			Self::Sketch { .. }	=> "sketch",
-			Self::Send { .. }	=> "send",
-			Self::Done			=> "done",
-			Self::Part { .. }	=> "part",
+			Self::Hello { .. }		=> "hello",
+			Self::Sketch { .. }		=> "sketch",
+			Self::Send { .. }		=> "send",
+			Self::Done				=> "done",
+			Self::Part { .. }		=> "part",
+			Self::Forgotten { .. }	=> "forgotten",
 		}
 	}
 
@@ -195,11 +232,12 @@ impl Message {
 	/// Empty for the messages that carry no frontier.
 	pub fn heads(&self) -> &[OpId] {
 		match self {
-			Self::Hello { heads }			=> heads,
-			Self::Sketch { heads, .. }		=> heads,
+			Self::Hello { heads }		=> heads,
+			Self::Sketch { heads, .. }	=> heads,
 			Self::Send { .. }
 			| Self::Done
-			| Self::Part { .. }				=> &[],
+			| Self::Part { .. }
+			| Self::Forgotten { .. }	=> &[],
 		}
 	}
 
@@ -207,13 +245,34 @@ impl Message {
 	/// message reaches a session: every [`Entry::Sealed`] can be put to
 	/// [`crate::envelope::Envelope::verify`] under whatever scheme the caller
 	/// holds. No scheme is chosen here and none is assumed.
+	///
+	/// A [`Message::Forgotten`] answers here as well, so that what a carrier is
+	/// asked to write over its store is checked exactly as what it is asked to
+	/// absorb. What separates the two is [`Message::replacements`].
 	pub fn entries(&self) -> &[Entry] {
 		match self {
-			Self::Send { entries }	=> entries,
+			Self::Send { entries }		=> entries,
+			Self::Forgotten { entries }	=> entries,
 			Self::Hello { .. }
 			| Self::Sketch { .. }
 			| Self::Done
-			| Self::Part { .. }		=> &[],
+			| Self::Part { .. }			=> &[],
+		}
+	}
+
+	/// The records a [`Message::Forgotten`] asks to be written in place of the
+	/// ones they name, and nothing for every other message.
+	///
+	/// Asked separately from [`Message::entries`] because the two are acted on
+	/// differently and only the caller can tell them apart: an entry of a send is
+	/// an operation to absorb, and one of these is an operation already held,
+	/// arriving in the form it is to be kept in from now on. A caller that
+	/// absorbed one would place nothing; a caller that wrote a send's entries
+	/// over its store would destroy a history.
+	pub fn replacements(&self) -> &[Entry] {
+		match self {
+			Self::Forgotten { entries }	=> entries,
+			_							=> &[],
 		}
 	}
 
@@ -227,9 +286,10 @@ impl Message {
 	/// [`Message::entries`] is not the same question.
 	pub fn carries_operations(&self) -> bool {
 		match self {
-			Self::Send { entries }	=> !entries.is_empty(),
-			Self::Part { .. }		=> true,
-			_						=> false,
+			Self::Send { entries }		=> !entries.is_empty(),
+			Self::Forgotten { entries }	=> !entries.is_empty(),
+			Self::Part { .. }			=> true,
+			_							=> false,
 		}
 	}
 
@@ -256,6 +316,9 @@ impl Message {
 				Dat::U64(*total),
 				Dat::BU64(bytes.clone()),
 			]),
+			Self::Forgotten { entries } => Dat::List(
+				entries.iter().map(|e| e.to_dat()).collect(),
+			),
 		};
 		Dat::List(vec![Dat::U8(self.kind()), body])
 	}
@@ -375,6 +438,26 @@ impl Message {
 					Decode, Input, Invalid));
 				}
 				Ok(Self::Part { id, seq, total, bytes })
+			},
+			KIND_FORGOTTEN => {
+				let listed = match &v[1] {
+					Dat::List(e) => e,
+					other => return Err(err!(
+						"A forgotten message's records expect Dat::List, got {:?}.", other;
+					Decode, Input, Mismatch)),
+				};
+				if listed.is_empty() {
+					return Err(err!(
+						"A forgotten message names no record to write. It is an \
+						instruction to a carrier and not a statement about a session, \
+						so an empty one asks for nothing and says nothing.";
+					Decode, Input, Missing));
+				}
+				let mut entries = Vec::with_capacity(listed.len());
+				for item in listed {
+					entries.push(res!(Entry::from_dat(item)));
+				}
+				Ok(Self::Forgotten { entries })
 			},
 			other => Err(err!(
 				"A Message is tagged {}, which names no message this version knows.",
@@ -732,10 +815,15 @@ mod tests {
 	use super::*;
 
 	use crate::envelope::Envelope;
-	use crate::id::ReplicaId;
+	use crate::id::{
+		Anchor,
+		ContentId,
+		ReplicaId,
+	};
 	use crate::op::{
 		Header,
 		Op,
+		Placing,
 		Record,
 	};
 	use crate::test_support::StubSigner;
@@ -768,6 +856,31 @@ mod tests {
 			Message::Done,
 			Message::Part { id: oid(2, 3), seq: 0, total: 3, bytes: vec![0x5a; 40] },
 			Message::Part { id: oid(2, 3), seq: 2, total: 3, bytes: vec![0x01] },
+			Message::Forgotten { entries: res!(stubs()) },
+		])
+	}
+
+	/// Two records in a forgotten operation's place: one bare, one sealed, and
+	/// both shapes a splice can keep.
+	fn stubs()
+		-> Outcome<Vec<Entry>>
+	{
+		let void = Record::new(
+			res!(Header::new(oid(2, 4), vec![oid(2, 3)])),
+			Op::Forgotten { placing: Placing::Void },
+		);
+		let placed = Record::new(
+			res!(Header::new(oid(2, 5), vec![oid(2, 4)])),
+			Op::Forgotten { placing: Placing::Splice {
+				left:	Some(Anchor::after(ContentId::new(oid(2, 3), 0))),
+				right:	None,
+				remove:	Vec::new(),
+				len:	17,
+			} },
+		);
+		Ok(vec![
+			Entry::Bare(void),
+			Entry::Sealed(res!(Envelope::seal_record(&StubSigner::with_seed(5), &placed))),
 		])
 	}
 
@@ -1012,7 +1125,8 @@ mod tests {
 	fn a_version_and_a_kind_have_to_agree() -> Outcome<()> {
 		let part = Message::Part { id: oid(1, 1), seq: 0, total: 1, bytes: vec![0x01] };
 		let bytes = res!(part.encode());
-		assert_eq!(bytes[MAGIC.len()], VERSION, "a part is stamped with the version it needs");
+		assert_eq!(bytes[MAGIC.len()], version_for(KIND_PART),
+			"a part is stamped with the version it needs");
 
 		// The same message stamped as version 1, which is what an old peer would
 		// have to believe to read it.
@@ -1027,16 +1141,96 @@ mod tests {
 		assert!(fmt!("{}", e).contains("kind"), "message was {}", e);
 
 		assert_eq!(highest_kind(VERSION_MIN), KIND_DONE);
-		assert_eq!(highest_kind(VERSION), KIND_PART);
-		// Every older message still says 1, so an old peer reads it unchanged.
+		assert_eq!(highest_kind(VERSION), KIND_FORGOTTEN);
+		// Every older message still says what it always said, so an old peer reads
+		// it unchanged: the four original kinds say 1 and a part still says 2,
+		// although VERSION has moved past both.
 		for msg in res!(samples()) {
 			let stamped = res!(msg.encode())[MAGIC.len()];
 			match msg {
-				Message::Part { .. }	=> assert_eq!(stamped, VERSION),
-				_						=> assert_eq!(stamped, VERSION_MIN,
+				Message::Part { .. }		=> assert_eq!(stamped, 2,
+					"a part stopped being a version 2 message"),
+				Message::Forgotten { .. }	=> assert_eq!(stamped, VERSION),
+				_							=> assert_eq!(stamped, VERSION_MIN,
 					"the {} message stopped being a version 1 message", msg.name()),
 			}
 		}
+		// And the two halves of the rule are each other's inverse, at every kind
+		// there is: a message is stamped with the oldest version that admits its
+		// kind, so a reader following `highest_kind` never refuses one a writer
+		// was entitled to send.
+		for kind in [KIND_HELLO, KIND_SKETCH, KIND_SEND, KIND_DONE, KIND_PART,
+			KIND_FORGOTTEN]
+		{
+			let at = version_for(kind);
+			assert!(highest_kind(at) >= kind,
+				"kind {} is stamped version {}, which admits only up to {}",
+				kind, at, highest_kind(at));
+			assert!(at == VERSION_MIN || highest_kind(at - 1) < kind,
+				"kind {} is stamped version {}, and version {} would have carried it",
+				kind, at, at - 1);
+		}
+		Ok(())
+	}
+
+	/// A peer built before the replacement message refuses one by name, at the
+	/// header, and reads everything it could read before.
+	///
+	/// The rule of rule six: nothing new is negotiated. The version byte already
+	/// says what a reader must understand, and a reader that does not is told so
+	/// before it decodes a byte of the body.
+	#[test]
+	fn an_older_peer_refuses_a_replacement_and_nothing_else() -> Outcome<()> {
+		let msg = Message::Forgotten { entries: res!(stubs()) };
+		let bytes = res!(msg.encode());
+		assert_eq!(bytes[MAGIC.len()], VERSION,
+			"a replacement is stamped with the version it needs");
+		// What a version 2 peer would be doing if it read this one: believing a
+		// stamp the sender could not honestly have written.
+		let mut lying = bytes.clone();
+		lying[MAGIC.len()] = 2;
+		let e = match Message::decode(&lying) {
+			Ok(got) => return Err(err!(
+				"A replacement stamped version 2 decoded as a {}.", got.name();
+			Test, Mismatch)),
+			Err(e) => e,
+		};
+		let said = fmt!("{}", e);
+		assert!(said.contains("kind"), "message was {}", said);
+		// A version this reader does not know is refused at the header too, which
+		// is what a NEWER peer's message meets here.
+		let mut ahead = bytes.clone();
+		ahead[MAGIC.len()] = VERSION + 1;
+		let e = match Message::decode(&ahead) {
+			Ok(got) => return Err(err!(
+				"A message stamped version {} decoded as a {}.", VERSION + 1, got.name();
+			Test, Mismatch)),
+			Err(e) => e,
+		};
+		assert!(fmt!("{}", e).contains("format version"), "message was {}", e);
+		Ok(())
+	}
+
+	/// A replacement carries its records where provenance is checked, and says
+	/// separately that they are replacements and not an offer.
+	#[test]
+	fn a_replacement_is_not_an_offer() -> Outcome<()> {
+		let msg = Message::Forgotten { entries: res!(stubs()) };
+		assert_eq!(msg.entries().len(), 2, "the records are where a verifier looks");
+		assert_eq!(msg.replacements().len(), 2);
+		assert!(msg.heads().is_empty());
+		assert!(!msg.is_opening());
+		assert!(msg.carries_operations(), "a body of nothing else still does work");
+		// A send is the other way round: entries to absorb, and nothing to write
+		// over anything.
+		let send = Message::Send { entries: res!(stubs()) };
+		assert!(send.replacements().is_empty(),
+			"a send's entries were read as records to write over the store");
+		// And an empty one is refused rather than carried, since it asks for
+		// nothing.
+		let empty = Message::Forgotten { entries: Vec::new() };
+		assert!(Message::from_dat(&empty.to_dat()).is_err(),
+			"an empty replacement was taken for a message");
 		Ok(())
 	}
 
@@ -1095,6 +1289,62 @@ mod tests {
 		let whole = res!(entry.to_dat().to_bytes(Vec::new()));
 		assert_eq!(&want[63..], &whole[..33],
 			"a piece carries something other than the entry's own bytes");
+		Ok(())
+	}
+
+	/// The bytes of a replacement, frozen.
+	///
+	/// Two builds that disagree about this are two builds that disagree about
+	/// which record a carrier is to write over which, and the one that gets it
+	/// wrong destroys a history rather than failing to read one. What it freezes
+	/// besides the framing is that the record inside is an ordinary entry under
+	/// the forgotten operation's own header -- the same spelling a segment
+	/// carries, so what the carrier writes down is what it was handed.
+	#[test]
+	fn the_forgotten_bytes_are_frozen() -> Outcome<()> {
+		let msg = Message::Forgotten {
+			entries: vec![Entry::Bare(Record::new(
+				res!(Header::new(oid(2, 3), vec![oid(1, 7)])),
+				Op::Forgotten { placing: Placing::Void },
+			))],
+		};
+		let want: &[u8] = &[
+			// The magic, and the version a replacement needs.
+			0x4f, 0x52, 0x45, 0x53, 0x59, 0x4e,
+			0x03,
+			// The message: a two-element list of the kind and the body, 71 bytes.
+			0x33, 0x21, 0x47,
+				// The kind: forgotten.
+				0x0a, 0x06,
+				// The body: a list of one entry, 66 bytes.
+				0x33, 0x21, 0x42,
+					// The entry, 63 bytes: the kind, and the record.
+					0x33, 0x21, 0x3f,
+						// Bare.
+						0x0a, 0x01,
+						// The record, 58 bytes: the header, the operation.
+						0x33, 0x21, 0x3a,
+							// The header, 45 bytes, and it is the FORGOTTEN
+							// operation's own: the identifier r2:3, then the parents.
+							0x33, 0x21, 0x2d,
+								0x33, 0x21, 0x12,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02,
+									0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03,
+								// One parent, r1:7.
+								0x33, 0x21, 0x15,
+									0x33, 0x21, 0x12,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+										0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07,
+							// The operation, 7 bytes: the Forgotten code, and the
+							// shape it keeps, which here is a void.
+							0x33, 0x21, 0x07,
+								0x0a, 0x10,
+								0x33, 0x21, 0x02,
+									0x0a, 0x00,
+		];
+		assert_eq!(res!(msg.encode()), want, "the replacement message format has changed");
+		// And the frozen bytes still read.
+		assert_eq!(res!(Message::decode(want)), msg);
 		Ok(())
 	}
 

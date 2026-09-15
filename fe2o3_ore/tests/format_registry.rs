@@ -171,7 +171,15 @@ fn compiled(name: &str) -> Option<Dat> {
 		"sync::msg::KIND_SEND"		=> Dat::U8(msg::KIND_SEND),
 		"sync::msg::KIND_DONE"		=> Dat::U8(msg::KIND_DONE),
 		"sync::msg::KIND_PART"		=> Dat::U8(msg::KIND_PART),
+		"sync::msg::KIND_FORGOTTEN"	=> Dat::U8(msg::KIND_FORGOTTEN),
 		"sync::msg::PART_MAX"		=> Dat::U64(msg::PART_MAX as u64),
+		// Not a constant, and the one pin that cannot be: a message is stamped
+		// with the version it NEEDS, so a part says 2 while sync::msg::VERSION
+		// says 3, and the byte a golden freezes is what the encoder would write.
+		// Asked of the function the encoder itself asks, so the pin moves only if
+		// the rule does.
+		"sync::msg::version_for(KIND_PART)"
+									=> Dat::U8(msg::version_for(msg::KIND_PART)),
 		_ => return None,
 	})
 }
