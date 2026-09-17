@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pearl shot</title>
+<style>
+	html, body { margin: 0; padding: 0; background: #fff; }
+	svg { display: block; }
+</style>
+</head>
+<body>
+<script src="pearl.js"></script>
+<script>
+	// A bare, chromeless single-page render for pixel-diffing against Austenite's reference SVG.
+	// ?doc=<file>&page=<n> -- renders exactly that page's <svg> at the top-left, 1 px per point.
+	(async () => {
+		const p = new URLSearchParams(location.search);
+		const url = p.get("doc") || "samples/keystone.json";
+		const page = parseInt(p.get("page") || "0", 10);
+		const res = await fetch(url, { cache: "no-store" });
+		const doc = await res.json();
+		const entry = doc.index[page];
+		const svg = Pearl.renderPage(doc, entry.block);
+		document.body.appendChild(svg);
+		document.title = "ready";
+	})();
+</script>
+</body>
+</html>

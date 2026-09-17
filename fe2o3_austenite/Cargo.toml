@@ -17,6 +17,10 @@ name = "pearl_render"
 path = "src/bin/pearl_render.rs"
 
 [[bin]]
+name = "pearl_json"
+path = "src/bin/pearl_json.rs"
+
+[[bin]]
 name = "diagram_demo"
 path = "src/bin/diagram_demo.rs"
 

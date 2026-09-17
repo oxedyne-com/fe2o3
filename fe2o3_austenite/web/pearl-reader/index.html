@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pearl Reader</title>
+<style>
+	:root {
+		--bg:    #6b7280;
+		--panel: #ffffff;
+		--ink:   #1f2937;
+		--line:  #d1d5db;
+	}
+	* { box-sizing: border-box; }
+	html, body { margin: 0; padding: 0; }
+	body {
+		font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+		color: var(--ink);
+		background: var(--bg);
+	}
+	header {
+		position: sticky; top: 0; z-index: 5;
+		display: flex; align-items: center; gap: 12px;
+		padding: 10px 16px;
+		background: var(--panel);
+		border-bottom: 1px solid var(--line);
+	}
+	header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+	header .sp { flex: 1; }
+	select, button {
+		font: inherit; padding: 4px 8px;
+		border: 1px solid var(--line); border-radius: 6px; background: #fff;
+	}
+	#status { color: #4b5563; font-variant-numeric: tabular-nums; }
+	#pages { padding: 24px 16px 64px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
+	.pearl-page {
+		background: #fff;
+		box-shadow: 0 2px 10px rgba(0,0,0,.35);
+	}
+	.pearl-page svg { display: block; }
+</style>
+</head>
+<body>
+<header>
+	<h1>Pearl Reader <span style="font-weight:400;color:#6b7280">&mdash; .prl v0</span></h1>
+	<label>Document
+		<select id="doc">
+			<option value="samples/keystone.json">keystone (1 page)</option>
+			<option value="samples/manuscript.json">manuscript (3 pages)</option>
+			<option value="samples/maths.json">maths (1 page)</option>
+		</select>
+	</label>
+	<span class="sp"></span>
+	<span id="status"></span>
+</header>
+<main id="pages"></main>
+
+<script src="pearl.js"></script>
+<script>
+	const sel      = document.getElementById("doc");
+	const pages    = document.getElementById("pages");
+	const statusEl = document.getElementById("status");
+
+	async function show(url) {
+		statusEl.textContent = "loading…";
+		try {
+			const doc = await Pearl.loadAndRender(url, pages);
+			const g = Object.keys(doc.glyphs).length;
+			statusEl.textContent = `${doc.index.length} page(s) · ${g} glyph outlines`;
+		} catch (e) {
+			statusEl.textContent = "error: " + e.message;
+			console.error(e);
+		}
+	}
+
+	// A ?doc= query overrides the picker, so a headless driver can name the file.
+	const q = new URLSearchParams(location.search).get("doc");
+	if (q) {
+		const opt = [...sel.options].find(o => o.value.endsWith(q) || o.value === q);
+		if (opt) sel.value = opt.value;
+		else { sel.insertAdjacentHTML("beforeend", `<option value="${q}" selected>${q}</option>`); }
+	}
+	sel.addEventListener("change", () => show(sel.value));
+	show(sel.value);
+</script>
+</body>
+</html>
