@@ -13,6 +13,10 @@ name = "austenite"
 path = "src/bin/austenite.rs"
 
 [[bin]]
+name = "pearl_render"
+path = "src/bin/pearl_render.rs"
+
+[[bin]]
 name = "diagram_demo"
 path = "src/bin/diagram_demo.rs"
 

@@ -187,7 +187,7 @@ fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
 /// Compiles the Typst root at `source` into `out_dir`, writing every page's SVG, the resolved ledger,
 /// and one PDF of the whole run. Returns the counts and the terse skip line for the caller to report;
 /// prints nothing itself save the phase profile when `AUS_PROFILE` is set.
-fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
+fn compile(source: &str, out_dir: &str, pearl: bool) -> Outcome<CompileStats> {
 	// Phase timing, gated on AUS_PROFILE so a normal run is untouched. Each phase reports its wall time
 	// to stderr, leaving stdout (and every emitted byte) exactly as it was.
 	let prof = std::env::var("AUS_PROFILE").is_ok();
@@ -273,6 +273,14 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 	// The ledger is small and independent of the pages, so it is written first and out of the way.
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
 	res!(out.ledger.to_file(&ledger_path));
+
+	// Pearl, when asked: a content-addressed `.prl` accumulated across the streaming emit loop, each page
+	// folded in before its frame is dropped, so it streams exactly as the SVG and PDF arms do.
+	let mut pearl_builder = if pearl {
+		Some(res!(emit::pearl::PearlBuilder::new(&out.ledger, geom)))
+	} else {
+		None
+	};
 
 	// Emit each page and drop its frame before the next. Both writers are streaming: the SVG is one file
 	// per page, and the PDF is written object by object into the file as each page is composed, never
@@ -369,6 +377,12 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 			let prep	= res!(prep);
 			res!(emit::pdf::write_page_prepared(&mut pdf, &prep.pdf, &prep.content));
 		}
+		// Fold this chunk's pages into the Pearl document before their frames are freed below.
+		if let Some(pb) = pearl_builder.as_mut() {
+			for page in &out.pages[start..end] {
+				res!(pb.add_page(page));
+			}
+		}
 		for page in &mut out.pages[start..end] {
 			page.frame = Frame::new();
 		}
@@ -377,6 +391,9 @@ fn compile(source: &str, out_dir: &str) -> Outcome<CompileStats> {
 		start = end;
 	}
 	res!(pdf.finish());
+	if let Some(pb) = pearl_builder {
+		res!(pb.to_file(fmt!("{}/document.prl", out_dir)));
+	}
 	mark("emit(svg+pdf)", t_emit);
 	if prof {
 		eprintln!("[profile]   render (parallel){:>8.1} ms", t_render_ms);
@@ -489,17 +506,19 @@ fn main() -> Outcome<()> {
 	// Flags may precede or follow the paths; only `--watch` (`-w`) is recognised, everything else is a
 	// positional argument in order: the source root, then the optional output directory.
 	let mut watching	= false;
+	let mut pearl		= false;
 	let mut pos:	Vec<String>	= Vec::new();
 	for a in std::env::args().skip(1) {
 		match a.as_str() {
 			"--watch" | "-w"	=> watching = true,
+			"--pearl"			=> pearl = true,
 			_					=> pos.push(a),
 		}
 	}
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
+			"Usage: austenite [--watch] [--pearl] <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
 		Some(s)	=> s.clone(),
@@ -517,7 +536,7 @@ fn main() -> Outcome<()> {
 			move || watch_set(&src_files),
 			move || {
 				let t = std::time::Instant::now();
-				match compile(&src_build, &out) {
+				match compile(&src_build, &out, pearl) {
 					Ok(stats)	=> {
 						// The skip line is folded into the status line, so the rebuild is one line.
 						print_status(&src_build, &out, &stats, t.elapsed());
@@ -531,7 +550,7 @@ fn main() -> Outcome<()> {
 	}
 
 	let t = std::time::Instant::now();
-	let stats = res!(compile(&source, &out_dir));
+	let stats = res!(compile(&source, &out_dir, pearl));
 	if let Some(skip) = &stats.skip_line {
 		eprintln!("[austenite] {}", skip);
 	}
