@@ -34,10 +34,68 @@
 	#status { color: #4b5563; font-variant-numeric: tabular-nums; }
 	#pages { padding: 24px 16px 64px; display: flex; flex-direction: column; align-items: center; gap: 24px; }
 	.pearl-page {
+		position: relative;                 /* the overlay layer is absolute within the page */
 		background: #fff;
 		box-shadow: 0 2px 10px rgba(0,0,0,.35);
 	}
 	.pearl-page svg { display: block; }
+
+	/* The overlay sits exactly over the SVG (1 user unit = 1 px), carrying links and annotations. */
+	.pearl-overlay { position: absolute; inset: 0; pointer-events: none; }
+	.pearl-overlay > * { pointer-events: auto; }
+
+	/* A link hotspot: a subtle box while idle, a clear underline and tint on hover, so a reader sees it. */
+	.pearl-link {
+		position: absolute; display: block;
+		border-bottom: 1.5px solid rgba(37,99,235,.55);
+		border-radius: 2px;
+		background: rgba(37,99,235,.06);
+		cursor: pointer; text-decoration: none;
+	}
+	.pearl-link:hover  { background: rgba(37,99,235,.18); border-bottom-color: rgba(37,99,235,.95); }
+	.pearl-link.int    { border-bottom-style: dashed; }
+	.pearl-link.dead   { border-bottom-color: rgba(220,38,38,.7); background: rgba(220,38,38,.08); }
+
+	/* A highlight: a translucent amber wash over the annotated region. */
+	.pearl-highlight {
+		position: absolute;
+		background: rgba(250,204,21,.38);
+		mix-blend-mode: multiply;
+		border-radius: 2px;
+	}
+
+	/* A note marker in the left margin, with a bubble that opens on click. */
+	.pearl-note {
+		position: absolute; left: -14px;
+		width: 26px; height: 26px; padding: 0;
+		border: 1px solid #c084fc; border-radius: 50%;
+		background: #f5f3ff; color: #6b21a8;
+		font-size: 13px; line-height: 1; cursor: pointer;
+	}
+	.pearl-note:hover { background: #ede9fe; }
+	.pearl-note-bubble {
+		display: none; position: absolute; left: 32px; top: 0;
+		width: 220px; padding: 8px 10px; z-index: 10;
+		background: #fff; border: 1px solid #c084fc; border-radius: 8px;
+		box-shadow: 0 4px 14px rgba(0,0,0,.2);
+		text-align: left; cursor: default;
+	}
+	.pearl-note-bubble.open { display: block; }
+	.pearl-note-text { color: #1f2937; }
+	.pearl-note-meta { margin-top: 6px; color: #6b7280; font-size: 12px; }
+
+	/* Drag-and-drop affordance covering the viewport while a file hovers. */
+	#drop {
+		position: fixed; inset: 0; z-index: 20; display: none;
+		align-items: center; justify-content: center;
+		background: rgba(37,99,235,.12);
+		border: 3px dashed rgba(37,99,235,.7);
+	}
+	#drop.on { display: flex; }
+	#drop span {
+		padding: 16px 24px; border-radius: 10px;
+		background: #fff; font-size: 16px; font-weight: 600; color: #1e3a8a;
+	}
 </style>
 </head>
 <body>
@@ -45,15 +103,19 @@
 	<h1>Pearl Reader <span style="font-weight:400;color:#6b7280">&mdash; .prl v0</span></h1>
 	<label>Document
 		<select id="doc">
+			<option value="samples/demo.prl">demo (links + annotations)</option>
 			<option value="samples/keystone.prl">keystone (1 page)</option>
 			<option value="samples/manuscript.prl">manuscript (3 pages)</option>
 			<option value="samples/maths.prl">maths (1 page)</option>
 			<option value="samples/raster.prl">raster (1 page)</option>
 		</select>
 	</label>
+	<button id="open" type="button">Open file…</button>
+	<input id="file" type="file" accept=".prl" hidden>
 	<span class="sp"></span>
 	<span id="status"></span>
 </header>
+<div id="drop"><span>Drop a .prl to open</span></div>
 <main id="pages"></main>
 
 <script src="jdat.js"></script>
@@ -62,18 +124,65 @@
 	const sel      = document.getElementById("doc");
 	const pages    = document.getElementById("pages");
 	const statusEl = document.getElementById("status");
+	const fileInput = document.getElementById("file");
+	const openBtn   = document.getElementById("open");
+	const drop      = document.getElementById("drop");
 
-	async function show(url) {
-		statusEl.textContent = "loading…";
+	// Reports what was rendered: page and glyph counts, plus any links and annotations, so the header
+	// confirms the demo features are present.
+	function report(doc, name) {
+		const g = Object.keys(doc.glyphs).length;
+		let links = 0;
+		for (let i = 0; i < doc.index.length; i++) links += Pearl.linksOnPage(doc, i).length;
+		const anns = (doc.annotations || []).length;
+		const extra = (links ? ` · ${links} link(s)` : "") + (anns ? ` · ${anns} annotation(s)` : "");
+		statusEl.textContent = `${name ? name + " · " : ""}${doc.index.length} page(s) · ${g} glyphs${extra}`;
+	}
+
+	// Renders a document already in memory as .prl text (a dropped or picked file).
+	function showText(text, name) {
+		statusEl.textContent = "rendering…";
 		try {
-			const doc = await Pearl.loadAndRender(url, pages);
-			const g = Object.keys(doc.glyphs).length;
-			statusEl.textContent = `${doc.index.length} page(s) · ${g} glyph outlines`;
+			report(Pearl.renderText(text, pages), name);
 		} catch (e) {
 			statusEl.textContent = "error: " + e.message;
 			console.error(e);
 		}
 	}
+
+	// Renders a document fetched from a URL (the sample picker).
+	async function show(url) {
+		statusEl.textContent = "loading…";
+		try {
+			report(await Pearl.loadAndRender(url, pages));
+		} catch (e) {
+			statusEl.textContent = "error: " + e.message;
+			console.error(e);
+		}
+	}
+
+	// A local file, read as text through FileReader -- no server, no upload, so any .prl on disk opens.
+	function openFile(file) {
+		if (!file) return;
+		const reader = new FileReader();
+		reader.onload  = () => showText(reader.result, file.name);
+		reader.onerror = () => { statusEl.textContent = "error: could not read " + file.name; };
+		reader.readAsText(file);
+	}
+
+	openBtn.addEventListener("click", () => fileInput.click());
+	fileInput.addEventListener("change", () => openFile(fileInput.files[0]));
+
+	// Drag-and-drop anywhere on the window opens the dropped .prl.
+	let dragDepth = 0;
+	window.addEventListener("dragenter", (e) => { e.preventDefault(); if (++dragDepth === 1) drop.classList.add("on"); });
+	window.addEventListener("dragover",  (e) => { e.preventDefault(); });
+	window.addEventListener("dragleave", (e) => { e.preventDefault(); if (--dragDepth <= 0) { dragDepth = 0; drop.classList.remove("on"); } });
+	window.addEventListener("drop", (e) => {
+		e.preventDefault();
+		dragDepth = 0; drop.classList.remove("on");
+		if (e.dataTransfer.files.length) openFile(e.dataTransfer.files[0]);
+	});
 
 	// A ?doc= query overrides the picker, so a headless driver can name the file.
 	const q = new URLSearchParams(location.search).get("doc");

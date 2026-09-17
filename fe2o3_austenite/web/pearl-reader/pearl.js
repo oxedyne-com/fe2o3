@@ -144,6 +144,9 @@ function renderPage(doc, blockKey) {
 				}));
 				break;
 			}
+			case "link":
+				// A link leaf places no ink -- it is a hotspot, drawn by the overlay layer, not the SVG.
+				break;
 			default:
 				console.warn("Unknown Pearl leaf kind:", tag);
 		}
@@ -151,28 +154,186 @@ function renderPage(doc, blockKey) {
 	return svg;
 }
 
-// Renders every page in the document's index into `container`.
+// ---------------------------------------------------------------------------------------------------
+// Links: reading the `link` leaves off a page, and resolving a target the way `PearlDoc::resolve_link`
+// does -- an external uri stands as its address; an internal anchor goes through the shipped ledger to a
+// page, then through the index to that page's content-addressed block.
+// ---------------------------------------------------------------------------------------------------
+
+// The `link` leaves on the page at `idx`: each carries a rectangle in scaled points and a target, in the
+// order they were emitted, mirroring `PearlDoc::links_on_page`.
+function linksOnPage(doc, idx) {
+	const entry = doc.index[idx];
+	const block = doc.blocks[entry.block];
+	const out   = [];
+	for (const leaf of block.leaves) {
+		if (leaf[0] !== "link") continue;
+		out.push({ x: leaf[1], y: leaf[2], w: leaf[3], h: leaf[4], target: leaf[5] });
+	}
+	return out;
+}
+
+// A stored link target -- `["uri", addr]` or `["anchor", { kind, key }]` -- resolved to where it points.
+// Returns { kind: "uri", uri } for an external target; { kind: "block", block, page } for an internal one
+// the ledger has fixed; or null for a dangling cross-reference, exactly as `resolve_link` returns `None`.
+function resolveLink(doc, target) {
+	const tag = target[0];
+	if (tag === "uri") {
+		return { kind: "uri", uri: target[1] };
+	}
+	if (tag === "anchor") {
+		const id     = target[1];              // { kind: <u8 tag>, key: <string> }
+		const ledger = doc.ledger;
+		const anchor = (ledger.anchors || []).find(a => a.id.kind === id.kind && a.id.key === id.key);
+		if (!anchor) return null;              // the ledger has not fixed this anchor
+		const page = anchor.page;
+		const hit  = doc.index.find(e => e.page === page);
+		if (!hit) return null;                 // the anchor's page is not one the index holds
+		return { kind: "block", block: hit.block, page };
+	}
+	console.warn("Unknown Pearl link-target kind:", tag);
+	return null;
+}
+
+// The annotations anchored to a given block hash, in the order they were added. A file written before the
+// annotations section existed simply carries none.
+function annotationsForBlock(doc, blockHash) {
+	return (doc.annotations || []).filter(a => a.anchor === blockHash);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Rendering the document, plus an overlay layer per page carrying link hotspots and annotations. The
+// SVG is authored in points and drawn at 1 user unit = 1 px (its width/height attributes are the point
+// dimensions), so a scaled-point length converts to a CSS pixel through `sp()` alone -- no page scale to
+// track.
+// ---------------------------------------------------------------------------------------------------
+
 function renderDocument(doc, container) {
 	container.innerHTML = "";
 	if (doc.pearl !== "0") {
 		console.warn("This reader speaks Pearl v0; file is v" + doc.pearl);
 	}
-	for (const entry of doc.index) {
+
+	// Build every page first, keeping the DOM node beside its index entry so an internal link can scroll
+	// its target block into view.
+	const pageEls = [];
+	doc.index.forEach((entry, idx) => {
 		const page = document.createElement("div");
 		page.className = "pearl-page";
+		page.dataset.block = entry.block;
 		page.appendChild(renderPage(doc, entry.block));
+
+		const overlay = document.createElement("div");
+		overlay.className = "pearl-overlay";
+		page.appendChild(overlay);
+
 		container.appendChild(page);
+		pageEls.push(page);
+
+		addLinks(doc, idx, overlay, container);
+		addAnnotations(doc, entry.block, overlay);
+	});
+	return pageEls;
+}
+
+// Lays a clickable hotspot over each link leaf: an external uri opens in a new tab; an internal anchor
+// resolves and scrolls the target page's block into view. Each hotspot shows a subtle box-and-underline
+// so a reader can see it is a link, the affordance the SVG arm draws no ink for.
+function addLinks(doc, idx, overlay, container) {
+	for (const link of linksOnPage(doc, idx)) {
+		const res  = resolveLink(doc, link.target);
+		const spot = document.createElement("a");
+		spot.className = "pearl-link" + (res && res.kind === "uri" ? " ext" : " int");
+		spot.style.left   = sp(link.x) + "px";
+		spot.style.top    = sp(link.y) + "px";
+		spot.style.width  = sp(link.w) + "px";
+		spot.style.height = sp(link.h) + "px";
+
+		if (res && res.kind === "uri") {
+			spot.href   = res.uri;
+			spot.target = "_blank";
+			spot.rel    = "noopener";
+			spot.title  = res.uri;
+			console.log(`link (page ${idx + 1}): external -> ${res.uri}`);
+		} else if (res && res.kind === "block") {
+			spot.href  = "#";
+			spot.title = `page ${res.page}`;
+			spot.addEventListener("click", (ev) => {
+				ev.preventDefault();
+				const tgt = container.querySelector(`.pearl-page[data-block="${res.block}"]`);
+				if (tgt) tgt.scrollIntoView({ behavior: "smooth", block: "start" });
+			});
+			console.log(`link (page ${idx + 1}): internal -> block ${res.block.slice(0, 8)}… on page ${res.page}`);
+		} else {
+			// A dangling cross-reference: mark it, but do not pretend it goes anywhere.
+			spot.className += " dead";
+			spot.title = "unresolved link";
+			console.warn(`link (page ${idx + 1}): unresolved target`, link.target);
+		}
+		overlay.appendChild(spot);
 	}
 }
 
-// Fetches a .prl and parses its text jdat into the document model, then renders it.
-async function loadAndRender(url, container) {
-	const res = await fetch(url, { cache: "no-store" });
-	if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
-	const text = await res.text();
+// Draws the annotations anchored to this page's block: a `highlight` is a translucent rectangle over its
+// `rect` (or the whole page when it has none); a `note` is a margin marker that reveals its payload and
+// author on click.
+function addAnnotations(doc, blockHash, overlay) {
+	let noteRow = 0;
+	for (const ann of annotationsForBlock(doc, blockHash)) {
+		if (ann.kind === "highlight") {
+			const r = ann.rect;
+			const box = document.createElement("div");
+			box.className = "pearl-highlight";
+			if (r) {
+				box.style.left   = sp(r[0]) + "px";
+				box.style.top    = sp(r[1]) + "px";
+				box.style.width  = sp(r[2]) + "px";
+				box.style.height = sp(r[3]) + "px";
+			} else {
+				// A whole-block highlight: a thin band down the page's left edge, so it is visible but does
+				// not blanket the text.
+				box.style.left = "0"; box.style.top = "0"; box.style.width = "6px"; box.style.height = "100%";
+			}
+			if (ann.payload) box.title = ann.payload;
+			overlay.appendChild(box);
+		} else if (ann.kind === "note") {
+			const marker = document.createElement("button");
+			marker.className = "pearl-note";
+			marker.textContent = "✎"; // a pencil, the note affordance
+			marker.style.top = (18 + noteRow * 30) + "px";
+			noteRow++;
+
+			const bubble = document.createElement("div");
+			bubble.className = "pearl-note-bubble";
+			bubble.innerHTML =
+				`<div class="pearl-note-text"></div><div class="pearl-note-meta"></div>`;
+			bubble.querySelector(".pearl-note-text").textContent = ann.payload;
+			bubble.querySelector(".pearl-note-meta").textContent =
+				`${ann.author || "unknown"} · ${ann.created || ""}`;
+			marker.addEventListener("click", () => {
+				bubble.classList.toggle("open");
+			});
+			marker.appendChild(bubble);
+			overlay.appendChild(marker);
+		}
+	}
+}
+
+// Parses a .prl's text jdat into the document model and renders it into `container`.
+function renderText(text, container) {
 	const doc = Jdat.parse(text);
 	renderDocument(doc, container);
 	return doc;
 }
 
-window.Pearl = { renderDocument, renderPage, loadAndRender };
+// Fetches a .prl by URL, then parses and renders it.
+async function loadAndRender(url, container) {
+	const res = await fetch(url, { cache: "no-store" });
+	if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
+	return renderText(await res.text(), container);
+}
+
+window.Pearl = {
+	renderDocument, renderPage, renderText, loadAndRender,
+	linksOnPage, resolveLink, annotationsForBlock,
+};
