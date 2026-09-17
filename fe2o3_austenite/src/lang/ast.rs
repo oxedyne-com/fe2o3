@@ -24,6 +24,7 @@ pub enum Item {
 	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, span: Span },	// a line-leading `#padded-image(...)`/`#image(...)`, set centred without a figure number
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
+	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is

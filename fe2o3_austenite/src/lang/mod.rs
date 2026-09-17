@@ -17,10 +17,18 @@ pub mod mathparse;
 pub mod parse;
 
 use crate::doc::Block;
+use crate::doc::Segment;
 
 pub use parse::SkipSummary;
 
 use oxedyne_fe2o3_core::prelude::*;
+
+/// Reads one run of Typst inline markup -- prose with `*strong*`, `_emph_`, a maths span or a glossary
+/// term -- into the [`Segment`]s the block layer sets, without a surrounding block. The book layer uses
+/// it to turn a `term-defs` definition (Typst content, `[...]`) into the runs of a glossary table cell.
+pub fn inline_segments(text: &str) -> Vec<Segment> {
+	lower::lower_runs(&parse::parse_inlines(text))
+}
 
 /// Parses Typst source and lowers it to the block list the driver authors from, in one step. The usual
 /// entry point: a caller that wants the surface tree in between reaches for [`parse::document`] and

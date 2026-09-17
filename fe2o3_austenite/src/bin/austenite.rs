@@ -230,9 +230,12 @@ fn compile(source: &str, out_dir: &str, pearl: bool) -> Outcome<CompileStats> {
 		// `#t`/`#g` term calls resolve to their values just as in a whole-book compile.
 		if let Some(dir) = std::path::Path::new(source).parent() {
 			res!(book::install_term_dict(dir));
+			res!(book::install_term_defs(dir));
 		}
 		let (mut blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
 		skip_line = terse_skip_line(&skips);
+		// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
+		book::resolve_glossary(&mut blocks);
 		// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile
 		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
 		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));

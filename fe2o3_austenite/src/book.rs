@@ -35,6 +35,12 @@ use crate::ir::Sp;
 use crate::lang::parse::flatten_markup;
 use crate::lang;
 use crate::page::PageGeometry;
+use crate::table::{
+	Align,
+	Cell,
+	Row,
+	Table,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -43,11 +49,21 @@ use oxedyne_fe2o3_font::{
 };
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{
 	Path,
 	PathBuf,
 };
 use std::sync::Arc;
+use std::sync::RwLock;
+
+/// The book's `term-defs`, read from a sibling `terms.typ` and installed before assembly, so
+/// [`resolve_glossary`] can fill a `#print-glossary()` placeholder with each used term's definition. A
+/// process-global, mirroring the term-dictionary the parser installs: the glossary table is built once
+/// the whole document's blocks are assembled, from a map set at the same point the term-dictionary is.
+/// `None` until the loader installs one, under which no term carries a definition and the glossary is
+/// its header row alone. The value is already the lowered definition runs, parsed from the content once.
+static TERM_DEFS: RwLock<Option<HashMap<String, Vec<Segment>>>> = RwLock::new(None);
 
 const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
 
@@ -100,9 +116,11 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
 
-	// Install the book's `term-dict` from a `terms.typ` beside or above the root, so the term-dictionary
-	// glossary family resolves each key to its value as the chapters are read below.
+	// Install the book's `term-dict` and `term-defs` from a `terms.typ` beside or above the root: the
+	// dictionary so the glossary family resolves each key to its value as the chapters are read, and the
+	// definitions so a `#print-glossary()` can be filled once the document's used terms are known.
 	res!(install_term_dict(&root_dir));
+	res!(install_term_defs(&root_dir));
 
 	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
 	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
@@ -137,6 +155,8 @@ fn load_book(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	let (geom, raw) = res!(read_config(&config_src));
 	let style		= build_style(&raw);
 	let (mut blocks, skips)	= res!(assemble(root_src, root_dir));
+	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
+	resolve_glossary(&mut blocks);
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	let front		= read_front_matter(root_src, &config_src, &title);
 
@@ -202,7 +222,10 @@ fn load_doc(root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	// A doc heading is set in Libertinus bold -- the body family -- so no display face is supplied, and
 	// the heading path falls back to the body bold, which is exactly what the template's show rule sets.
 	let heading:	Option<Arc<Font>>	= None;
-	let (blocks, skips)	= res!(assemble(root_src, root_dir));
+	let (mut blocks, skips)	= res!(assemble(root_src, root_dir));
+	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
+	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
+	resolve_glossary(&mut blocks);
 	let mut front	= read_doc_front_matter(root_dir, root_src, &raw, &title);
 
 	// The reading time the meta page appends to its notes cell: the whole-document word count over the
@@ -471,6 +494,269 @@ pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
 	};
 	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
 	Ok(())
+}
+
+/// Reads the book's `term-defs` from a `terms.typ` beside or above `start_dir` and installs it, so
+/// [`resolve_glossary`] can give each glossary term used in the document its definition row. An absent or
+/// `term-defs`-less `terms.typ` installs an empty map, under which every term contributes no row and the
+/// glossary sets its header alone -- the same early return the template's style makes for an undefined key.
+pub fn install_term_defs(start_dir: &Path) -> Outcome<()> {
+	let src = match find_up(start_dir, "terms.typ") {
+		Some(p)	=> std::fs::read_to_string(&p).unwrap_or_default(),
+		None	=> String::new(),
+	};
+	let mut defs: HashMap<String, Vec<Segment>> = HashMap::new();
+	for (key, content) in parse_term_defs(&src) {
+		defs.insert(key, lang::inline_segments(&content));
+	}
+	let mut guard = lock_write!(TERM_DEFS, "While recording the term definitions");
+	*guard = Some(defs);
+	Ok(())
+}
+
+/// The lowered definition runs a `term-defs` key resolves to, or `None` when no map is installed or it
+/// holds no such key. A poisoned lock reads as absent, so a missing definition drops the term's row
+/// rather than failing the compile -- the safe degradation, matching the template's undefined-key branch.
+fn term_def(key: &str) -> Option<Vec<Segment>> {
+	match TERM_DEFS.read() {
+		Ok(guard)	=> guard.as_ref().and_then(|m| m.get(key).cloned()),
+		Err(_)		=> None,
+	}
+}
+
+/// Parses the `#let term-defs = ( "key": [definition], ... )` block from a `terms.typ` source into
+/// key→content pairs. Unlike the term-dictionary, whose values are quoted strings, a definition is Typst
+/// *content* (`[...]`) carrying inline markup, so each value is the balanced-bracket group's inner source,
+/// left for [`lang::inline_segments`] to parse. Pairs are returned in source order; a value that is not a
+/// content group (a tuple or bare string) is skipped, since the live term files use plain content only.
+fn parse_term_defs(src: &str) -> Vec<(String, String)> {
+	let mut out: Vec<(String, String)> = Vec::new();
+	// The assignment, not a `// term-defs: ...` mention: the name must be followed, after only whitespace,
+	// by `=`, exactly as the term-dictionary reader guards its own literal.
+	let at = match assignment_offset(src, "term-defs") {
+		Some(a)	=> a,
+		None	=> return out,
+	};
+	let chars: Vec<char> = src[at..].chars().collect();
+	let n = chars.len();
+
+	// Advance to the opening parenthesis of the dictionary literal, then step past it.
+	let mut i = 0;
+	while i < n && chars[i] != '(' {
+		i += 1;
+	}
+	if i >= n {
+		return out;
+	}
+	i += 1;
+
+	loop {
+		// Skip the whitespace and commas between entries; stop at the closing parenthesis or the source end.
+		while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
+			i += 1;
+		}
+		if i >= n || chars[i] == ')' {
+			break;
+		}
+		if chars[i] != '"' {
+			i += 1;	// a stray token inside the literal (a comment survivor); step over it
+			continue;
+		}
+		// The quoted key, honouring string escapes so a quote inside it does not end it early.
+		let (key, next) = read_string(&chars, i);
+		i = next;
+		// The `:` between key and value, and the whitespace either side of it.
+		while i < n && chars[i].is_whitespace() {
+			i += 1;
+		}
+		if i < n && chars[i] == ':' {
+			i += 1;
+		}
+		while i < n && chars[i].is_whitespace() {
+			i += 1;
+		}
+		// The value: a `[...]` content group is the definition; anything else is skipped to the next entry.
+		if i < n && chars[i] == '[' {
+			let (content, next) = read_content(&chars, i);
+			out.push((key, content));
+			i = next;
+		} else {
+			// Not a content group: advance to the next top-level comma so the reader resynchronises.
+			let mut depth = 0i32;
+			while i < n {
+				match chars[i] {
+					'(' | '[' | '{'	=> depth += 1,
+					')' | ']' | '}'	=> {
+						if depth == 0 {
+							break;
+						}
+						depth -= 1;
+					},
+					','	if depth == 0	=> break,
+					_	=> {},
+				}
+				i += 1;
+			}
+		}
+	}
+	out
+}
+
+/// Reads a `"..."` string whose opening quote sits at `i`, returning its unescaped contents and the index
+/// just past the closing quote. A backslash sets the next character literally, so a quote or backslash
+/// inside the string does not end it early.
+fn read_string(chars: &[char], i: usize) -> (String, usize) {
+	let mut s	= String::new();
+	let mut j	= i + 1;	// past the opening quote
+	let mut esc	= false;
+	while j < chars.len() {
+		let c = chars[j];
+		if esc			{ s.push(c); esc = false; }
+		else if c == '\\'	{ esc = true; }
+		else if c == '"'	{ j += 1; break; }
+		else			{ s.push(c); }
+		j += 1;
+	}
+	(s, j)
+}
+
+/// Reads a `[...]` content group whose opening bracket sits at `i`, returning its inner source and the
+/// index just past the closing bracket. Brackets nested in the content (a `#emph[...]` inside a
+/// definition) are balanced, and a quoted string inside the content is skipped whole so a `]` within it
+/// does not close the group early.
+fn read_content(chars: &[char], i: usize) -> (String, usize) {
+	let mut depth	= 0i32;
+	let mut j		= i;
+	let mut inner	= String::new();
+	while j < chars.len() {
+		match chars[j] {
+			'['	=> {
+				depth += 1;
+				if depth > 1 {
+					inner.push('[');	// a nested opener is part of the content
+				}
+			},
+			']'	=> {
+				depth -= 1;
+				if depth == 0 {
+					j += 1;
+					break;
+				}
+				inner.push(']');
+			},
+			'"'	=> {
+				// Copy the whole quoted string verbatim so a bracket inside it is not read as structure.
+				let (s, next) = read_string(chars, j);
+				inner.push('"');
+				inner.push_str(&s);
+				inner.push('"');
+				j = next;
+				continue;
+			},
+			c	=> inner.push(c),
+		}
+		j += 1;
+	}
+	(inner.trim().to_string(), j)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ GLOSSARY                                                                   │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The point size a `#print-glossary()` table sets at, matching the template's `text(size: 9pt)`.
+const GLOSSARY_TEXT_PT: f64 = 9.0;
+
+/// The cell padding a `#print-glossary()` table insets by, matching the template's `inset: 6pt`.
+const GLOSSARY_INSET_PT: f64 = 6.0;
+
+/// Fills each `#print-glossary()` placeholder in an assembled block stream with a Term/Definition table
+/// of the glossary terms the document uses, in first-appearance order. The placeholder is replaced in
+/// place, so the glossary sets where the author wrote the call rather than as appended back matter.
+///
+/// The terms are the [`Segment::Glossary`] runs the parser recorded, walked in document order and
+/// deduplicated by term key -- the key the template's `glossary-seen` set keys by -- keeping the first
+/// occurrence. A term with no `term-defs` entry contributes no row, matching the template style's early
+/// return for an undefined key. The Term column shows the term-dictionary value where the key has one
+/// (the `g`/`gcap` family) and the key itself otherwise (the `gs` family), reproducing the metadata
+/// `value` the template stores; the Definition column carries the parsed definition content.
+pub fn resolve_glossary(blocks: &mut Vec<Block>) {
+	let idx = match blocks.iter().position(|b| matches!(b, Block::Glossary)) {
+		Some(i)	=> i,
+		None	=> return,
+	};
+	// The glossary term keys in first-appearance order, deduplicated, keeping only those with a definition.
+	let mut seen:		HashSet<String>	= HashSet::new();
+	let mut ordered:	Vec<String>		= Vec::new();
+	for block in blocks.iter() {
+		collect_glossary_terms(block, &mut seen, &mut ordered);
+	}
+
+	// The header row, then one row per defined term: the Term column its display value, the Definition
+	// column its parsed content. The header sets bold and centred (a header row's own face and alignment);
+	// body cells set left, matching the template's `(left, left).at(col)`.
+	let mut rows: Vec<Row> = Vec::new();
+	rows.push(Row::new(vec![
+		Cell::rich(vec![Segment::strong("Term")], Align::Centre),
+		Cell::rich(vec![Segment::strong("Definition")], Align::Centre),
+	]));
+	for key in &ordered {
+		let def = match term_def(key) {
+			Some(d)	=> d,
+			None	=> continue,
+		};
+		let value = crate::lang::parse::term_value(key).unwrap_or_else(|| key.clone());
+		rows.push(Row::new(vec![
+			Cell::rich(vec![Segment::text(value)], Align::Left),
+			Cell::rich(def, Align::Left),
+		]));
+	}
+
+	let mut table		= Table::with_weights(true, rows, vec![1.0, 3.0]);
+	table.text_size		= Some(Sp::from_pt(GLOSSARY_TEXT_PT));
+	table.inset			= Some(Sp::from_pt(GLOSSARY_INSET_PT));
+	blocks[idx] = Block::Table(table);
+}
+
+/// Walks one block's rich runs, recording each glossary term key on its first appearance -- in document
+/// order, deduplicated -- when the key carries a `term-defs` definition. Headings, paragraphs, list items
+/// and table cells all carry glossary terms, and a term inside a footnote counts as a use, so each is
+/// walked. A term with no definition is passed over, so the ordered set holds only rows the glossary sets.
+fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &mut Vec<String>) {
+	match block {
+		Block::Heading { segments, .. }			=> collect_from_segments(segments, seen, ordered),
+		Block::RichParagraph { segments }		=> collect_from_segments(segments, seen, ordered),
+		Block::List { items, .. }				=> for it in items { collect_from_segments(it, seen, ordered); },
+		Block::Table(t)							=> collect_from_table(t, seen, ordered),
+		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
+		_										=> {},
+	}
+}
+
+/// Records each glossary term in a run of segments, descending into a footnote's own runs so a term first
+/// used inside a note is ordered by the note's position, as the template's document-order query is.
+fn collect_from_segments(segments: &[Segment], seen: &mut HashSet<String>, ordered: &mut Vec<String>) {
+	for seg in segments {
+		match seg {
+			Segment::Glossary { term, .. }	=> {
+				if term_def(term).is_some() && seen.insert(term.clone()) {
+					ordered.push(term.clone());
+				}
+			},
+			Segment::Footnote { note }		=> collect_from_segments(note, seen, ordered),
+			_								=> {},
+		}
+	}
+}
+
+/// Records each glossary term across a table's cells, row-major, so a term first used in a table is
+/// ordered by the cell it appears in.
+fn collect_from_table(table: &Table, seen: &mut HashSet<String>, ordered: &mut Vec<String>) {
+	for row in &table.rows {
+		for cell in &row.cells {
+			collect_from_segments(&cell.content, seen, ordered);
+		}
+	}
 }
 
 /// Parses the `#let term-dict = ( "key": "value", ... )` block from a `terms.typ` source into a key→value
@@ -1630,6 +1916,76 @@ mod tests {
 		assert!(cite.contains("Smith") && cite.contains("2020"),
 			"citation did not resolve to author-year: {:?}", cite);
 		assert!(!cite.contains("smith2020"), "the raw cite key leaked: {:?}", cite);
+		Ok(())
+	}
+
+	/// The `term-defs` reader lifts each key's content group, not the leading comment's, keeping the
+	/// definition's inner markup source and pairing it with its key in source order.
+	#[test]
+	fn test_term_defs_reader_reads_content_groups_10() {
+		let src = r#"
+// term-defs: key -> definition (content)
+#let term-defs = (
+  "org": [The Oxegence Foundation, a non-profit.],
+  "ai": [Artificial Intelligence.],
+)
+"#;
+		let defs = parse_term_defs(src);
+		assert_eq!(defs.len(), 2, "unexpected entries: {:?}", defs);
+		assert_eq!(defs[0].0, "org");
+		assert_eq!(defs[0].1, "The Oxegence Foundation, a non-profit.");
+		assert_eq!(defs[1].0, "ai");
+		assert_eq!(defs[1].1, "Artificial Intelligence.");
+	}
+
+	/// `#print-glossary()` collects the document's glossary terms in first-appearance order, deduplicated
+	/// by key, dropping a term with no definition, and fills the placeholder with a Term/Definition table
+	/// whose Term column is the term-dictionary value where the key has one and the key itself otherwise.
+	#[test]
+	fn test_resolve_glossary_orders_dedupes_and_skips_undefined_11() -> Outcome<()> {
+		// The term-dictionary gives the `g`-family its display value; `meet` has none, so its Term column is
+		// the key itself, as the `gs`-family metadata stores.
+		res!(crate::lang::parse::set_term_dict(HashMap::from([
+			("org".to_string(), "Oxegence Foundation".to_string()),
+		])));
+		{
+			let mut guard = lock_write!(TERM_DEFS, "test term-defs");
+			let mut m: HashMap<String, Vec<Segment>> = HashMap::new();
+			m.insert("org".to_string(),  vec![Segment::text("The Foundation.")]);
+			m.insert("meet".to_string(), vec![Segment::text("To oxedize.")]);
+			*guard = Some(m);
+		}
+		let mut blocks = vec![
+			Block::rich(vec![
+				Segment::glossary("meet", "oxedize"),
+				Segment::text(" then "),
+				Segment::glossary("org", "Oxegence Foundation"),
+			]),
+			Block::rich(vec![
+				Segment::glossary("meet", "oxedize"),		// a second use adds no row
+				Segment::glossary("surplus", "surplus"),	// no definition, so no row
+			]),
+			Block::Glossary,
+		];
+		resolve_glossary(&mut blocks);
+
+		let table = match &blocks[2] {
+			Block::Table(t)	=> t,
+			other			=> return Err(err!("expected a glossary table, found {:?}", other; Test, Bug)),
+		};
+		assert!(table.header, "the glossary sets a header row");
+		assert_eq!(table.weights, vec![1.0, 3.0], "columns are 1fr / 3fr");
+		assert_eq!(table.rows.len(), 3, "header plus the two defined terms");
+
+		// The Term column of a body row, flattened to its text.
+		let term_of = |r: usize| -> String {
+			table.rows[r].cells[0].content.iter().map(|s| match s {
+				Segment::Text(t)	=> t.clone(),
+				_					=> String::new(),
+			}).collect()
+		};
+		assert_eq!(term_of(1), "meet", "first appearance, a key with no dict value shows the key itself");
+		assert_eq!(term_of(2), "Oxegence Foundation", "second appearance, a key with a dict value shows it");
 		Ok(())
 	}
 }

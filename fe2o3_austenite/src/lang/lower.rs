@@ -56,6 +56,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::Image { path, width, height, scale, .. }	=> out.push(
 				Block::image(path.clone(), *width, *height, *scale)),
 			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
+			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
 		}
 	}
 	out
@@ -127,7 +128,7 @@ fn lower_paragraph(runs: &[Inline], label: Option<String>) -> Block {
 
 /// Lowers a run of inlines to segments, then groups adjacent citations, so a `#cite ... #cite`
 /// sequence parted by nothing but whitespace sets as one parenthesis.
-fn lower_runs(runs: &[Inline]) -> Vec<Segment> {
+pub(crate) fn lower_runs(runs: &[Inline]) -> Vec<Segment> {
 	group_adjacent_cites(runs.iter().map(lower_inline).collect())
 }
 

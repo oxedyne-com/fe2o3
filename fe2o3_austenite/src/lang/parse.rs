@@ -285,6 +285,13 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			if let Some(rule) = parse_line_rule(trimmed) {
 				items.push(rule);
 			}
+		} else if trimmed.starts_with("#print-glossary(") {
+			// A line-leading `#print-glossary()`: the glossary section's Term/Definition table. It closes any
+			// open block and emits a placeholder the book layer fills once the whole document's glossary terms
+			// are known -- unlike the surrounding template calls it is set in place, not recorded as a skip.
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			items.push(Item::PrintGlossary { span: Span::new(start, end) });
 		} else if let Some(decision) = code_skip(trimmed) {
 			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
 			// to a template function Austenite does not yet run: it closes any open block and is skipped.
@@ -442,7 +449,7 @@ fn normalise_ws(s: &str) -> String {
 /// `fe2o3_net`, `5 * 3` and a lone `_` are ordinary text. A backslash sets the next character literally,
 /// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
 /// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
-fn parse_inlines(text: &str) -> Vec<Inline> {
+pub(crate) fn parse_inlines(text: &str) -> Vec<Inline> {
 	let mut skips = SkipSummary::default();
 	parse_inlines_in(text, &mut skips)
 }

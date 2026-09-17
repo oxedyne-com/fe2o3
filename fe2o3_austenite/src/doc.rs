@@ -209,6 +209,11 @@ pub enum Block {
 	// A line-leading `#section-banner("logo")`: a fresh page, then the template's full-width grey bar hanging
 	// into the top and side margins, carrying the section's logo right-aligned on the band's vertical middle.
 	SectionBanner { path: String },
+	// A line-leading `#print-glossary()` before the book layer resolves it: a placeholder the assembler
+	// replaces in place with a [`Table`] of the document's glossary terms and their definitions. It never
+	// survives to layout -- `book::resolve_glossary` walks the assembled blocks and swaps it out -- so the
+	// layout and word-count passes treat a stray one as empty rather than setting anything for it.
+	Glossary,
 }
 
 impl Block {
@@ -861,6 +866,9 @@ pub fn author(
 				first = false;
 				prev_para = false;
 			},
+			// The book layer resolves every `#print-glossary()` placeholder into a table before layout, so one
+			// reaching here (a lone-file compile that never ran the resolver) sets nothing rather than failing.
+			Block::Glossary => { i += 1; },
 		}
 	}
 
@@ -2695,7 +2703,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::BackMatterHeading { title }	=> count_str(title, &mut n),
 			Block::Reference { runs }			=> for (t, _) in runs { count_str(t, &mut n); },
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. }		=> {},
+			| Block::SectionBanner { .. } | Block::Glossary	=> {},
 		}
 	}
 	n
