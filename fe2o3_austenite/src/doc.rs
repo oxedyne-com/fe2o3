@@ -157,6 +157,15 @@ impl Segment {
 	}
 }
 
+/// One entry of a [`Block::List`]: its own rich runs and any lists nested beneath it, so a step carrying
+/// indented sub-bullets keeps them under the step. A nested list is itself a [`Block::List`], set at an
+/// increased left indent when the parent renders.
+#[derive(Clone, Debug)]
+pub struct ListEntry {
+	pub segments:	Vec<Segment>,
+	pub children:	Vec<Block>,
+}
+
 /// One block of the authored document. The closed vocabulary the block layer sets; richer blocks
 /// (lists, quotes, figures) are later variants here.
 #[derive(Clone, Debug)]
@@ -164,7 +173,7 @@ pub enum Block {
 	Heading { level: u8, segments: Vec<Segment>, label: Option<String> },	// segments: the title's rich runs; label: an author anchor a `#ref` resolves to
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
-	List { ordered: bool, items: Vec<Vec<Segment>> },	// a bullet or numbered list, each item a run sequence
+	List { ordered: bool, items: Vec<ListEntry> },	// a bullet or numbered list; an entry may nest sub-lists
 	Code { lines: Vec<String> },	// a verbatim code block, set in the mono face, whitespace preserved
 	Table(Table),
 	Equation { expr: Atom, numbered: bool, label: Option<String> },	// a display equation on its own centred line; label anchors an @-reference
@@ -246,9 +255,9 @@ impl Block {
 		Self::RichParagraph { segments }
 	}
 
-	/// A bullet (`ordered` false) or numbered (`ordered` true) list. Each item is a run sequence, so an
-	/// item may carry emphasis, a footnote or inline maths exactly as a rich paragraph does.
-	pub fn list(ordered: bool, items: Vec<Vec<Segment>>) -> Self {
+	/// A bullet (`ordered` false) or numbered (`ordered` true) list. Each entry carries its run sequence --
+	/// emphasis, a footnote or inline maths, as a rich paragraph does -- and any sub-lists nested beneath it.
+	pub fn list(ordered: bool, items: Vec<ListEntry>) -> Self {
 		Self::List { ordered, items }
 	}
 
@@ -1145,7 +1154,7 @@ fn list(
 	style:		Style,
 	measure:	Sp,
 	ordered:	bool,
-	items:		&[Vec<Segment>],
+	items:		&[ListEntry],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
 	seen:		&mut HashSet<String>,
@@ -1154,7 +1163,8 @@ fn list(
 )
 	-> Outcome<()>
 {
-	// Shape every marker once and keep the widest, so each item's text starts at the one indent.
+	// Shape every marker once and keep the widest, so each item's text starts at the one indent. The
+	// number counts across every entry regardless of any sub-list, so an ordered list stays 1..N.
 	let mut markers:	Vec<ShapedText>	= Vec::with_capacity(items.len());
 	let mut marker_w					= Sp::ZERO;
 	for idx in 0..items.len() {
@@ -1166,17 +1176,40 @@ fn list(
 	let indent	= marker_w + style.list_marker_gap;
 	let inner	= if measure > indent { measure - indent } else { measure };
 
-	for (idx, item) in items.iter().enumerate() {
+	for (idx, entry) in items.iter().enumerate() {
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, item, foot_no, ref_no, seen, bib, refs));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading, true));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
 		nodes.extend(lines);
+		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
+		// it is laid out within the item's inner measure and then shifted right by this list's indent.
+		for child in &entry.children {
+			if let Block::List { ordered: cord, items: citems } = child {
+				nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
+				let mut sub: Vec<Node> = Vec::new();
+				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
+					foot_no, ref_no, seen, bib, refs));
+				shift_nodes(&mut sub, indent);
+				nodes.extend(sub);
+			}
+		}
 	}
 	Ok(())
+}
+
+/// Shifts every line box in `nodes` right by `by`, inserting a leading glue and growing the box width, so
+/// a nested list sets indented under its parent item. The interline glue between the boxes is left alone.
+fn shift_nodes(nodes: &mut [Node], by: Sp) {
+	for node in nodes.iter_mut() {
+		if let Node::HBox(b) = node {
+			b.list.insert(0, Node::Glue(Glue::fixed(by)));
+			b.dims = Dims::new(b.dims.width + by, b.dims.height, b.dims.depth);
+		}
+	}
 }
 
 /// Sets a verbatim code block: each source line in the mono face, its leading whitespace preserved by
@@ -2716,7 +2749,10 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::Heading { segments, .. }		=> count_segs(segments, &mut n),
 			Block::Paragraph { text }			=> count_str(text, &mut n),
 			Block::RichParagraph { segments }	=> count_segs(segments, &mut n),
-			Block::List { items, .. }			=> for it in items { count_segs(it, &mut n); },
+			Block::List { items, .. }			=> for it in items {
+				count_segs(&it.segments, &mut n);
+				n += count_words(&it.children);
+			},
 			Block::Code { lines }				=> for l in lines { count_str(l, &mut n); },
 			Block::Table(t)						=> count_cells(t, &mut n),
 			Block::Figure { caption, .. }		=> if let Some(c) = caption { count_str(c, &mut n); },
@@ -3920,7 +3956,8 @@ mod tests {
 		let blocks = vec![
 			Block::Heading { level: 1, segments: vec![Segment::text("The Purpose")], label: None },
 			Block::Paragraph { text: "It reads a document and writes 42 pages.".to_string() },
-			Block::List { ordered: false, items: vec![vec![Segment::strong("one two")]] },
+			Block::List { ordered: false, items: vec![
+				ListEntry { segments: vec![Segment::strong("one two")], children: vec![] }] },
 		];
 		// Heading: 2; paragraph: "It reads a document and writes pages" = 7 (the "42" counts none);
 		// list item: 2. Total 11.

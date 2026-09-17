@@ -35,7 +35,7 @@ use crate::ir::Length;
 use crate::ir::Span;
 use crate::table::Align;
 
-use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, TableSpec};
+use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, ListItem, TableSpec};
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -143,13 +143,11 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 	let mut offset:		u32			= 0;			// running byte offset of the current line's start
 	let mut line_no					= 0usize;		// 1-based, for a diagnostic
 
-	// The current list, if one is open: its kind, its items so far, and the source it spans. A list is a
-	// run of consecutive marker lines; a blank line, a heading, a paragraph line, or a marker of the
-	// other kind closes it.
-	let mut list:		Vec<Vec<Inline>>	= Vec::new();
-	let mut list_ord					= false;
-	let mut list_start:	u32				= 0;
-	let mut list_end:	u32				= 0;
+	// The stack of open list levels, innermost last. Each level records the leading-space indent of its
+	// markers, so a deeper marker opens a sub-list under the current item and a shallower one closes back
+	// to the matching level; an empty stack means no list is open. A list is a run of marker lines that a
+	// blank line does not break (Typst continues an enum across a gap), but any other content flushes.
+	let mut stack:		Vec<ListFrame>	= Vec::new();
 
 	// A fenced code block, while one is open: the verbatim lines gathered so far and the byte offset it
 	// began at. A ```-fence opens it, the next ```-fence closes it; between them every line is kept as it
@@ -247,7 +245,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// An opening fence closes any paragraph or list, then begins a verbatim block. The fence line
 			// itself (and any language tag on it) is not kept.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			code = Some((Vec::new(), start));
 			continue;
 		}
@@ -264,7 +262,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// array feeding a table. It closes any open block, then its whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			let mut state	= SkipState { depth: 0, in_string: false };
 			scan_brackets(line, &mut state);
 			let mut buf		= String::new();
@@ -281,7 +279,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// with one above and below). It closes any open block and sets a stroked rule; a multi-line
 			// `#line(` that does not close on this line falls through to the skip path below.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			if let Some(rule) = parse_line_rule(trimmed) {
 				items.push(rule);
 			}
@@ -290,7 +288,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// open block and emits a placeholder the book layer fills once the whole document's glossary terms
 			// are known -- unlike the surrounding template calls it is set in place, not recorded as a skip.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			items.push(Item::PrintGlossary { span: Span::new(start, end) });
 		} else if let Some(decision) = code_skip(trimmed) {
 			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
@@ -299,7 +297,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// its delimiters do not balance on this line, the multi-line span is consumed by the check at the
 			// top of the loop until they do.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			skips.record(&construct_name(trimmed));
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
@@ -307,7 +305,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 		} else if trimmed.starts_with('=') {
 			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
 			if raw.is_empty() {
@@ -330,22 +328,18 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 				span:	Span::new(start, end),
 			});
 		} else if let Some((ord, text)) = marker(trimmed) {
-			// A list item. It closes any open paragraph, and a list of the other kind, but joins a list of
-			// its own kind. The item's text carries inline emphasis like any run.
+			// A list item. It closes any open paragraph, then joins the list stack by its indentation: a
+			// deeper marker opens a sub-list under the current item, a shallower one closes back to the
+			// matching level, and a same-indent marker of the other kind ends the list and starts one of
+			// the new kind. The item's text carries inline emphasis like any run.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			if !list.is_empty() && list_ord != ord {
-				flush_list(&mut items, &mut list, list_ord, list_start, list_end);
-			}
-			if list.is_empty() {
-				list_ord	= ord;
-				list_start	= start;
-			}
-			list.push(parse_inlines_in(&text, &mut skips));
-			list_end = end;
+			let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+			let runs = parse_inlines_in(&text, &mut skips);
+			list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 		} else {
 			// Any other non-blank line joins the running paragraph, closing a list first; its own line
 			// break and indentation carry no meaning, only its words.
-			flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+			flush_list(&mut items, &mut stack);
 			if lines.is_empty() {
 				para_start = start;
 			}
@@ -357,7 +351,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 	// A source that ends without a closing blank line still closes its last paragraph or list; an
 	// unterminated code fence still yields the block it had gathered.
 	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-	flush_list(&mut items, &mut list, list_ord, list_start, list_end);
+	flush_list(&mut items, &mut stack);
 	if let Some((buf, cstart)) = code {
 		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
 	}
@@ -396,20 +390,88 @@ fn marker(trimmed: &str) -> Option<(bool, String)> {
 	None
 }
 
-/// Closes the list being accumulated, if any, into one [`Item::List`]. An empty accumulator flushes
-/// nothing, so a stray flush between two paragraphs costs nothing.
-fn flush_list(
-	items:		&mut Vec<Item>,
-	list:		&mut Vec<Vec<Inline>>,
+/// One open level of a possibly-nested list while the reader accumulates it. `indent` is the leading-space
+/// width of the level's markers, so a deeper marker opens a child level and a shallower one closes this
+/// level back into the item it hung under.
+struct ListFrame {
+	indent:		usize,
 	ordered:	bool,
+	items:		Vec<ListItem>,
 	start:		u32,
 	end:		u32,
+}
+
+/// Attaches a marker line to the open list stack by its `indent`, opening or closing nested levels as the
+/// indentation and kind require. A deeper marker opens a sub-list under the current item; a shallower one
+/// closes the deeper level(s) first; a same-indent marker continues the level when its kind matches and
+/// otherwise ends it and starts a fresh list of the new kind, as the flat reader did.
+fn list_marker(
+	items:	&mut Vec<Item>,
+	stack:	&mut Vec<ListFrame>,
+	indent:	usize,
+	ord:	bool,
+	runs:	Vec<Inline>,
+	start:	u32,
+	end:	u32,
 )
 {
-	if list.is_empty() {
-		return;
+	// Close every open level deeper than this marker: a dedent ends the nested list(s), each folding into
+	// the item it hung under.
+	while stack.last().map_or(false, |f| f.indent > indent) {
+		if let Some(frame) = stack.pop() {
+			fold(items, stack, frame);
+		}
 	}
-	items.push(Item::List { ordered, items: std::mem::take(list), span: Span::new(start, end) });
+	match stack.last_mut() {
+		Some(top) if top.indent == indent && top.ordered == ord => {
+			// Same level, same kind: another item of the open list.
+			top.items.push(ListItem { runs, children: Vec::new() });
+			top.end = end;
+		},
+		Some(top) if top.indent == indent => {
+			// Same indent, the other kind: the open list ends and a fresh one of the new kind begins.
+			if let Some(frame) = stack.pop() {
+				fold(items, stack, frame);
+			}
+			stack.push(ListFrame {
+				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], start, end });
+		},
+		// Deeper than the current level (a sub-list), or the first marker of a list: open a new level. A
+		// deeper level becomes a child of the current item when it folds.
+		_ => stack.push(ListFrame {
+			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], start, end }),
+	}
+}
+
+/// Folds a closed list level into the tree: it becomes an [`Item::List`] hanging under the current item of
+/// the level below, or a top-level item when no level remains open.
+fn fold(items: &mut Vec<Item>, stack: &mut Vec<ListFrame>, frame: ListFrame) {
+	let list = Item::List {
+		ordered:	frame.ordered,
+		items:		frame.items,
+		span:		Span::new(frame.start, frame.end),
+	};
+	match stack.last_mut() {
+		Some(parent) => match parent.items.last_mut() {
+			Some(item)	=> {
+				item.children.push(list);
+				parent.end = frame.end;
+			},
+			// A nested level always opens after its parent item exists, so this arm is unreachable in
+			// practice; a stray level is kept as a top-level item rather than dropped.
+			None		=> items.push(list),
+		},
+		None => items.push(list),
+	}
+}
+
+/// Closes every open list level into the item tree. The deepest level folds into its parent's current item
+/// first, so a nested list lands under the item it hung under; the outermost becomes a top-level
+/// [`Item::List`]. An empty stack flushes nothing, so a stray flush between two paragraphs costs nothing.
+fn flush_list(items: &mut Vec<Item>, stack: &mut Vec<ListFrame>) {
+	while let Some(frame) = stack.pop() {
+		fold(items, stack, frame);
+	}
 }
 
 /// Closes the paragraph being accumulated, if any: its lines are joined, their whitespace collapsed,
@@ -2443,6 +2505,64 @@ mod tests {
 		let (items2, _) = document_with_skips(src2).expect("parse");
 		let lists2 = items2.iter().filter(|it| matches!(it, Item::List { .. })).count();
 		assert_eq!(lists2, 2, "prose between two lists did not restart them: {:?}", items2);
+	}
+
+	/// An indented `-` sub-bullet between two `+` steps nests under the step it follows rather than closing
+	/// the enum: the ordered list stays one list of three items, and the sub-bullet hangs under the first.
+	#[test]
+	fn indented_sub_bullet_nests_and_enum_continues() {
+		let src = "+ step one\n  - a sub point\n  - another sub point\n+ step two\n+ step three\n";
+		let (items, _) = document_with_skips(src).expect("parse");
+		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
+		assert_eq!(lists.len(), 1, "the sub-bullet split the enum into several lists: {:?}", items);
+		match lists[0] {
+			Item::List { ordered, items, .. } => {
+				assert!(*ordered, "the parent list lost its ordered kind");
+				assert_eq!(items.len(), 3, "the enum did not keep three steps: {:?}", items);
+				// The sub-bullets hang under the first step, as an unordered child list of two items.
+				assert_eq!(items[0].children.len(), 1, "the first step lost its sub-list: {:?}", items[0]);
+				match &items[0].children[0] {
+					Item::List { ordered: cord, items: citems, .. } => {
+						assert!(!*cord, "the sub-list should be unordered");
+						assert_eq!(citems.len(), 2, "the sub-list dropped an item: {:?}", citems);
+					},
+					other => panic!("the child was not a nested list: {:?}", other),
+				}
+				assert!(items[1].children.is_empty(), "step two wrongly gained children");
+			},
+			_ => unreachable!(),
+		}
+	}
+
+	/// Two levels of indentation parse to two levels of nesting: a `-` under a `+`, and a deeper `-` under
+	/// that `-`, so the tree is enum -> bullet -> bullet.
+	#[test]
+	fn two_level_nesting_parses_to_two_levels() {
+		let src = "+ outer step\n  - middle bullet\n    - inner bullet\n+ next step\n";
+		let (items, _) = document_with_skips(src).expect("parse");
+		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
+		assert_eq!(lists.len(), 1, "the deep nesting split the list: {:?}", items);
+		match lists[0] {
+			Item::List { items, .. } => {
+				assert_eq!(items.len(), 2, "the outer enum did not keep two steps: {:?}", items);
+				let mid = &items[0].children;
+				assert_eq!(mid.len(), 1, "the middle level is missing: {:?}", items[0]);
+				match &mid[0] {
+					Item::List { items: mid_items, .. } => {
+						assert_eq!(mid_items.len(), 1, "the middle list should hold one bullet");
+						let inner = &mid_items[0].children;
+						assert_eq!(inner.len(), 1, "the inner level is missing: {:?}", mid_items[0]);
+						match &inner[0] {
+							Item::List { items: inner_items, .. } =>
+								assert_eq!(inner_items.len(), 1, "the inner list should hold one bullet"),
+							other => panic!("the inner child was not a list: {:?}", other),
+						}
+					},
+					other => panic!("the middle child was not a list: {:?}", other),
+				}
+			},
+			_ => unreachable!(),
+		}
 	}
 
 	/// An unhandled inline `#func[...]` is consumed and recorded rather than left as raw markup, its

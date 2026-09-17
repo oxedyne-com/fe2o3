@@ -17,7 +17,7 @@ use crate::table::Align;
 pub enum Item {
 	Heading { level: u8, runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, runs: the title's inline markup
 	Paragraph { runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, anchoring a display equation for cross-reference
-	List { ordered: bool, items: Vec<Vec<Inline>>, span: Span },	// `-` bullets or `+` numbered
+	List { ordered: bool, items: Vec<ListItem>, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
 	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, span: Span },	// caption: the caption's inline markup
@@ -26,6 +26,15 @@ pub enum Item {
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 	Box { items: Vec<Item>, span: Span },	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box
+}
+
+/// One item of an [`Item::List`]: its own inline runs, and any lists nested beneath it by deeper marker
+/// indentation. `children` holds nested `Item::List`s, so a `+` step carrying indented `-` sub-bullets
+/// keeps them under the step rather than breaking the parent enumeration.
+#[derive(Clone, Debug)]
+pub struct ListItem {
+	pub runs:		Vec<Inline>,
+	pub children:	Vec<Item>,
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is
