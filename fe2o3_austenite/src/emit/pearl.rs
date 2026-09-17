@@ -18,9 +18,13 @@
 
 use crate::ir::{
 	DrawOp,
+	LinkTarget,
 	Sp,
 };
-use crate::ledger::Ledger;
+use crate::ledger::{
+	AnchorId,
+	Ledger,
+};
 use crate::page::{
 	Page,
 	PageGeometry,
@@ -83,6 +87,175 @@ pub fn rgba_from_dat(dat: &Dat) -> Outcome<Rgba> {
 	))
 }
 
+/// A link target as it is stored in a `link` leaf: `["uri", <string>]` for an external address, or
+/// `["anchor", <AnchorId map>]` for an internal cross-reference. The anchor rides its own [`ToDat`] form
+/// so the reader rebuilds it with [`AnchorId::from_dat`], no private tag table exposed.
+fn link_target_to_dat(target: &LinkTarget) -> Outcome<Dat> {
+	Ok(match target {
+		LinkTarget::Uri(uri)	=> listdat![dat!("uri"), dat!(uri.clone())],
+		LinkTarget::Anchor(id)	=> listdat![dat!("anchor"), res!(id.to_dat())],
+	})
+}
+
+/// Reads a link target back from its stored `["uri", ...]` or `["anchor", ...]` form.
+fn link_target_from_dat(dat: &Dat) -> Outcome<LinkTarget> {
+	let items	= try_extract_dat!(dat.clone(), List);
+	let tag		= try_extract_dat!(res!(items.first().ok_or_else(|| err!(
+		"A link target carries no kind tag."; Input, Invalid))).clone(), Str);
+	match tag.as_str() {
+		"uri" => {
+			let uri = try_extract_dat!(res!(items.get(1).ok_or_else(|| err!(
+				"A uri link target is missing its address."; Input, Invalid))).clone(), Str);
+			Ok(LinkTarget::Uri(uri))
+		},
+		"anchor" => {
+			let id = res!(AnchorId::from_dat(res!(items.get(1).ok_or_else(|| err!(
+				"An anchor link target is missing its anchor identity."; Input, Invalid))).clone()));
+			Ok(LinkTarget::Anchor(id))
+		},
+		other => Err(err!(
+			"'{}' is not a Pearl v0 link-target kind.", other; Input, Invalid)),
+	}
+}
+
+/// A link read back from a `.prl`: the rectangle it covers on its page, and where it points. Where a
+/// [`Resolved`](LinkResolution) internal target is wanted, [`PearlDoc::resolve_link`] turns the anchor
+/// into a block address through the shipped ledger and index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PearlLink {
+	pub x:		Sp,
+	pub y:		Sp,
+	pub w:		Sp,
+	pub h:		Sp,
+	pub target:	LinkTarget,
+}
+
+/// A link's destination once resolved: an external address stands as-is; an internal anchor becomes the
+/// content-addressed block it landed in, on the page the ledger fixed it to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkResolution {
+	Uri(String),
+	Block { block: String, page: u32 },
+}
+
+/// What an annotation is. A kind the reader does not know is a limit it declares, not a gap it hides, so
+/// decoding an unknown kind is an error rather than a silent default -- the same stance the ledger takes
+/// on an anchor kind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnnotationKind {
+	Highlight,	// a marked span, no text of its own beyond the region
+	Note,		// a comment attached to the anchor, its words in the payload
+}
+
+impl AnnotationKind {
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			AnnotationKind::Highlight	=> "highlight",
+			AnnotationKind::Note		=> "note",
+		}
+	}
+
+	pub fn from_str(s: &str) -> Outcome<Self> {
+		match s {
+			"highlight"	=> Ok(AnnotationKind::Highlight),
+			"note"		=> Ok(AnnotationKind::Note),
+			other		=> Err(err!(
+				"'{}' is not a Pearl v0 annotation kind.", other; Input, Invalid)),
+		}
+	}
+}
+
+/// A saved annotation. The anchor is the content address of the block it attaches to -- not a page or an
+/// offset -- so it survives repagination: the block keeps its identity when it moves to another page, and
+/// the annotation follows it. `rect` is a region within that block, in the block's own coordinates, or the
+/// whole block when absent. `created` is an author-supplied timestamp, carried verbatim.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Annotation {
+	pub anchor:		String,					// content address of the anchored block
+	pub rect:		Option<(Sp, Sp, Sp, Sp)>,	// x, y, w, h within the block, or the whole block when None
+	pub kind:		AnnotationKind,
+	pub payload:	String,					// the note's text, or a highlight's optional label
+	pub author:		String,
+	pub created:	String,					// author-supplied timestamp, carried as written
+}
+
+impl Annotation {
+	pub fn new<S: Into<String>>(
+		anchor:		S,
+		kind:		AnnotationKind,
+		payload:	S,
+		author:		S,
+		created:	S,
+	)
+		-> Self
+	{
+		Self {
+			anchor:		anchor.into(),
+			rect:		None,
+			kind,
+			payload:	payload.into(),
+			author:		author.into(),
+			created:	created.into(),
+		}
+	}
+
+	/// Confines the annotation to a rectangle within its anchored block, rather than the whole block.
+	pub fn with_rect(mut self, x: Sp, y: Sp, w: Sp, h: Sp) -> Self {
+		self.rect = Some((x, y, w, h));
+		self
+	}
+}
+
+impl ToDat for Annotation {
+	fn to_dat(&self) -> Outcome<Dat> {
+		let mut d = omapdat!{
+			"anchor"	=> dat!(self.anchor.clone()),
+			"kind"		=> dat!(self.kind.as_str()),
+			"payload"	=> dat!(self.payload.clone()),
+			"author"	=> dat!(self.author.clone()),
+			"created"	=> dat!(self.created.clone()),
+		};
+		if let Some((x, y, w, h)) = self.rect {
+			res!(d.map_put(dat!("rect"), listdat![
+				res!(x.to_dat()),
+				res!(y.to_dat()),
+				res!(w.to_dat()),
+				res!(h.to_dat()),
+			]));
+		}
+		Ok(d)
+	}
+}
+
+impl FromDat for Annotation {
+	fn from_dat(mut dat: Dat) -> Outcome<Self> {
+		let anchor	= try_extract_dat!(res!(dat.map_remove_must(&dat!("anchor"))), Str);
+		let kind	= res!(AnnotationKind::from_str(
+			&try_extract_dat!(res!(dat.map_remove_must(&dat!("kind"))), Str)));
+		let payload	= try_extract_dat!(res!(dat.map_remove_must(&dat!("payload"))), Str);
+		let author	= try_extract_dat!(res!(dat.map_remove_must(&dat!("author"))), Str);
+		let created	= try_extract_dat!(res!(dat.map_remove_must(&dat!("created"))), Str);
+		let rect	= match res!(dat.map_remove(&dat!("rect"))) {
+			Some(d) => {
+				let v = try_extract_dat!(d, List);
+				if v.len() != 4 {
+					return Err(err!(
+						"An annotation rect is four scaled lengths, found {}.", v.len();
+						Input, Invalid, Mismatch));
+				}
+				Some((
+					res!(Sp::from_dat(v[0].clone())),
+					res!(Sp::from_dat(v[1].clone())),
+					res!(Sp::from_dat(v[2].clone())),
+					res!(Sp::from_dat(v[3].clone())),
+				))
+			},
+			None => None,
+		};
+		Ok(Self { anchor, rect, kind, payload, author, created })
+	}
+}
+
 /// Accumulates pages into one Pearl document: the glyph, image and block stores deduplicated by content
 /// address, the page index in order, and the ledger shipped inside. Fed one page at a time from the
 /// emit loop, before each page's frame is dropped, so it streams exactly as the SVG and PDF arms do.
@@ -92,7 +265,7 @@ pub struct PearlBuilder {
 	blocks:	BTreeMap<String, Dat>,	// block address   -> page block
 	index:	Vec<Dat>,				// [{ "page", "block" }, ...], in page order
 	geom:	Dat,					// the document geometry, [w, h, inside, outside, top, bottom]
-	ledger:	Dat,
+	ledger:	Ledger,					// shipped inside, and used to resolve internal link targets
 }
 
 impl PearlBuilder {
@@ -103,7 +276,7 @@ impl PearlBuilder {
 			blocks:	BTreeMap::new(),
 			index:	Vec::new(),
 			geom:	geometry_to_dat(&geom),
-			ledger:	res!(ledger.to_dat()),
+			ledger:	ledger.clone(),
 		})
 	}
 
@@ -151,6 +324,19 @@ impl PearlBuilder {
 				PlacedKind::Graphic(g) => {
 					let bx = placed.x;
 					let by = placed.y;
+					// A linked graphic carries a `link` leaf over its placement box, additive beside its ink so a
+					// reader that ignores the tag still draws the figure. The box is the graphic's, matching the
+					// PDF arm's annotation rectangle: width, and height plus depth.
+					if let Some(target) = &g.link {
+						leaves.push(listdat![
+							dat!("link"),
+							res!(bx.to_dat()),
+							res!(by.to_dat()),
+							res!(g.dims.width.to_dat()),
+							res!((g.dims.height + g.dims.depth).to_dat()),
+							res!(link_target_to_dat(target)),
+						]);
+					}
 					for op in &g.ops {
 						match op {
 							DrawOp::Fill { path, colour } => {
@@ -217,25 +403,27 @@ impl PearlBuilder {
 		Ok(())
 	}
 
-	/// The whole document as one jdat map, ready to encode.
-	pub fn into_dat(self) -> Dat {
+	/// The whole document as one jdat map, ready to encode. The `annotations` section opens empty: the
+	/// engine authors none, and a reader adds them through [`PearlDoc::add_annotation`].
+	pub fn into_dat(self) -> Outcome<Dat> {
 		let glyphs	= create_dat_ordmap(self.glyphs.into_iter().map(|(k, v)| (dat!(k), v)).collect());
 		let images	= create_dat_ordmap(self.images.into_iter().map(|(k, v)| (dat!(k), v)).collect());
 		let blocks	= create_dat_ordmap(self.blocks.into_iter().map(|(k, v)| (dat!(k), v)).collect());
-		omapdat!{
-			"pearl"		=> dat!(PEARL_VERSION),
-			"index"		=> Dat::List(self.index),
-			"glyphs"	=> glyphs,
-			"images"	=> images,
-			"blocks"	=> blocks,
-			"ledger"	=> self.ledger,
-			"geom"		=> self.geom,
-		}
+		Ok(omapdat!{
+			"pearl"			=> dat!(PEARL_VERSION),
+			"index"			=> Dat::List(self.index),
+			"glyphs"		=> glyphs,
+			"images"		=> images,
+			"blocks"		=> blocks,
+			"ledger"		=> res!(self.ledger.to_dat()),
+			"geom"			=> self.geom,
+			"annotations"	=> Dat::List(Vec::new()),
+		})
 	}
 
 	/// The whole document encoded as text jdat, the same encoding the ledger uses.
 	pub fn to_string(self) -> Outcome<String> {
-		encode(&self.into_dat())
+		encode(&res!(self.into_dat()))
 	}
 
 	/// Writes the document to `path` as text jdat.
@@ -444,12 +632,134 @@ impl PearlDoc {
 							href=\"data:image/png;base64,{}\"/>\n",
 						ox + x, oy + y, iw, ih, b64));
 				},
+				// A link leaf places no ink: the SVG arm draws no clickable annotation, so rendering skips it and
+				// the page stays byte-identical to that arm's output. A reader that wants the links reads them
+				// with `PearlDoc::links_on_page`.
+				"link" => {},
 				other => return Err(err!(
 					"'{}' is not a Pearl v0 leaf kind.", other; Input, Invalid)),
 			}
 		}
 		out.push_str("</svg>\n");
 		Ok(out)
+	}
+
+	/// The links on the page at `idx` (zero-based): each `link` leaf's rectangle and target, in the order
+	/// they were emitted. A page with no links returns an empty vector.
+	pub fn links_on_page(&self, idx: usize) -> Outcome<Vec<PearlLink>> {
+		let index	= res!(self.top.map_get_list(&dat!("index")));
+		let entry	= res!(index.get(idx).ok_or_else(|| err!(
+			"Page index {} is past the {} pages the document holds.", idx, index.len(); Input, Range)));
+		let block_key	= res!(entry.map_get_string(&dat!("block")));
+		let blocks		= res!(self.top.map_get_must(&dat!("blocks")));
+		let block		= res!(blocks.map_get_must(&dat!(block_key)));
+		let leaves		= res!(block.map_get_list(&dat!("leaves")));
+		let mut out = Vec::new();
+		for leaf in leaves {
+			let items	= try_extract_dat!(leaf.clone(), List);
+			let tag		= try_extract_dat!(res!(items.first().ok_or_else(|| err!(
+				"An empty leaf carries no kind tag."; Input, Invalid))).clone(), Str);
+			if tag != "link" {
+				continue;
+			}
+			let target = res!(link_target_from_dat(res!(items.get(5).ok_or_else(|| err!(
+				"A link leaf is missing its target."; Input, Invalid)))));
+			out.push(PearlLink {
+				x:		sp_at(&items, 1)?,
+				y:		sp_at(&items, 2)?,
+				w:		sp_at(&items, 3)?,
+				h:		sp_at(&items, 4)?,
+				target,
+			});
+		}
+		Ok(out)
+	}
+
+	/// Resolves a link's destination: an external target stands as its address; an internal anchor is
+	/// resolved through the shipped ledger to the page it landed on, then through the index to that page's
+	/// content-addressed block. `None` when the ledger has not fixed the anchor, or no page in the index
+	/// carries it -- a dangling cross-reference the caller reports rather than follows.
+	pub fn resolve_link(&self, target: &LinkTarget) -> Outcome<Option<LinkResolution>> {
+		match target {
+			LinkTarget::Uri(uri) => Ok(Some(LinkResolution::Uri(uri.clone()))),
+			LinkTarget::Anchor(id) => {
+				let ledger	= res!(Ledger::from_dat(res!(self.top.map_get_must(&dat!("ledger"))).clone()));
+				let page	= match ledger.page_of(id) {
+					Some(p)	=> p,
+					None	=> return Ok(None),	// the ledger has not fixed this anchor
+				};
+				let index = res!(self.top.map_get_list(&dat!("index")));
+				for entry in index {
+					if try_extract_dat!(res!(entry.map_get_must(&dat!("page"))).clone(), U32) == page {
+						let block = res!(entry.map_get_string(&dat!("block")));
+						return Ok(Some(LinkResolution::Block { block, page }));
+					}
+				}
+				Ok(None)	// the anchor's page is not one the index holds
+			},
+		}
+	}
+
+	/// The content addresses of the document's page blocks, in page order, read from the index. These are
+	/// the stable identities an annotation anchors to.
+	pub fn block_hashes(&self) -> Outcome<Vec<String>> {
+		let index = res!(self.top.map_get_list(&dat!("index")));
+		let mut out = Vec::with_capacity(index.len());
+		for entry in index {
+			out.push(res!(entry.map_get_string(&dat!("block"))));
+		}
+		Ok(out)
+	}
+
+	/// Is `hash` the address of a block the document holds? An annotation whose anchor answers false is
+	/// orphaned -- its content is gone from the file.
+	pub fn has_block(&self, hash: &str) -> Outcome<bool> {
+		let blocks = res!(self.top.map_get_must(&dat!("blocks")));
+		Ok(res!(blocks.map_get(&dat!(hash))).is_some())
+	}
+
+	/// The annotations carried in the document, in the order they were added. A file written before the
+	/// annotations section existed, or one with an empty section, returns an empty vector.
+	pub fn annotations(&self) -> Outcome<Vec<Annotation>> {
+		let list = match self.top.map_get(&dat!("annotations")) {
+			Ok(Some(d))	=> try_extract_dat!(d.clone(), List),
+			_			=> return Ok(Vec::new()),
+		};
+		let mut out = Vec::with_capacity(list.len());
+		for d in list {
+			out.push(res!(Annotation::from_dat(d)));
+		}
+		Ok(out)
+	}
+
+	/// Attaches an annotation, appending it to the `annotations` section. The anchor must address a block
+	/// the document holds, so an annotation cannot be attached to content that is not here; the rectangle,
+	/// if any, is a region within that block. The change lives in memory until [`to_string`](Self::to_string)
+	/// or [`write_file`](Self::write_file) writes the document back.
+	pub fn add_annotation(&mut self, ann: Annotation) -> Outcome<()> {
+		if !res!(self.has_block(&ann.anchor)) {
+			return Err(err!(
+				"Annotation anchor block {} is not in the document, so nothing to attach it to.",
+				ann.anchor; Input, Invalid, Missing));
+		}
+		let mut list = match res!(self.top.map_get(&dat!("annotations"))) {
+			Some(d)	=> try_extract_dat!(d.clone(), List),
+			None	=> Vec::new(),
+		};
+		list.push(res!(ann.to_dat()));
+		res!(self.top.map_put(dat!("annotations"), Dat::List(list)));
+		Ok(())
+	}
+
+	/// The document re-encoded as text jdat, carrying every later change -- added annotations included.
+	pub fn to_string(&self) -> Outcome<String> {
+		encode(&self.top)
+	}
+
+	/// Writes the document back to `path` as text jdat, carrying every later change.
+	pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> Outcome<()> {
+		res!(std::fs::write(path, res!(self.to_string())));
+		Ok(())
 	}
 }
 
@@ -477,8 +787,15 @@ mod tests {
 		Dims,
 		DrawOp,
 		Graphic,
+		LinkTarget,
 	};
-	use crate::ledger::Ledger;
+	use crate::ledger::{
+		Anchor,
+		AnchorId,
+		AnchorKind,
+		Ledger,
+		Position,
+	};
 	use crate::page::{
 		Frame,
 		Page,
@@ -553,6 +870,127 @@ mod tests {
 	fn test_a_colour_round_trips_through_its_leaf_form_01() -> Outcome<()> {
 		let c = Rgba::new(128, 0, 200, 64);
 		assert_eq!(c, res!(rgba_from_dat(&rgba_to_dat(c))));
+		Ok(())
+	}
+
+	/// A one-op figure, enough to place as a linked graphic without a font.
+	fn dot_graphic(link: Option<LinkTarget>) -> Outcome<Graphic> {
+		let fill = res!(Path::rect(Bounds::new(0.0, 0.0, 20.0, 20.0)));
+		let mut g = Graphic::new(
+			vec![DrawOp::Fill { path: fill, colour: Rgba::BLACK }],
+			Dims::new(Sp::from_pt(20.0), Sp::from_pt(20.0), Sp::ZERO));
+		g.link = link;
+		Ok(g)
+	}
+
+	// A document with an external `#link` and an internal `@ref` carries both into the `.prl` as `link`
+	// leaves, and the reader reads them back: the external one stands as its URI, and the internal one
+	// resolves -- through the shipped ledger and index -- to the content-addressed block of the page its
+	// anchor landed on, not to a raw page number.
+	#[test]
+	fn test_links_round_trip_internal_and_external_02() -> Outcome<()> {
+		let geom	= PageGeometry::a4();
+		let anchor	= AnchorId::new(AnchorKind::Label, "sec:intro");
+
+		// Page 1 carries the two links; page 2 is where the internal anchor resolves.
+		let mut frame1 = Frame::new();
+		let ext = res!(dot_graphic(Some(LinkTarget::Uri("https://oxedyne.com".to_string()))));
+		frame1.push(Placed::new(
+			Sp::from_pt(50.0), Sp::from_pt(50.0), ext.dims, PlacedKind::Graphic(Arc::new(ext))));
+		let int = res!(dot_graphic(Some(LinkTarget::Anchor(anchor.clone()))));
+		frame1.push(Placed::new(
+			Sp::from_pt(50.0), Sp::from_pt(120.0), int.dims, PlacedKind::Graphic(Arc::new(int))));
+		let page1 = Page::new(1, geom, frame1);
+
+		let mut frame2 = Frame::new();
+		let target = res!(dot_graphic(None));
+		frame2.push(Placed::new(
+			Sp::from_pt(60.0), Sp::from_pt(60.0), target.dims, PlacedKind::Graphic(Arc::new(target))));
+		let page2 = Page::new(2, geom, frame2);
+
+		// The ledger fixes the anchor on page 2, as a composition pass would.
+		let mut ledger = Ledger::new();
+		ledger.record(Anchor::new(anchor.clone(), Position::new(2, Sp::ZERO, Sp::ZERO)));
+
+		let mut builder = res!(PearlBuilder::new(&ledger, geom));
+		res!(builder.add_page(&page1));
+		res!(builder.add_page(&page2));
+		let doc = res!(PearlDoc::from_string(res!(builder.to_string())));
+
+		let links = res!(doc.links_on_page(0));
+		assert_eq!(links.len(), 2, "both links are carried onto page 1");
+		assert!(res!(doc.links_on_page(1)).is_empty(), "page 2 carries no links");
+
+		// The external link stands as its address.
+		let ext_link = res!(links.iter().find(|l| matches!(l.target, LinkTarget::Uri(_)))
+			.ok_or_else(|| err!("the external link is missing"; Test)));
+		assert_eq!(
+			res!(doc.resolve_link(&ext_link.target)),
+			Some(LinkResolution::Uri("https://oxedyne.com".to_string())));
+
+		// The internal link resolves to page 2's block, not to the number 2.
+		let int_link = res!(links.iter().find(|l| matches!(l.target, LinkTarget::Anchor(_)))
+			.ok_or_else(|| err!("the internal link is missing"; Test)));
+		let want_block = res!(doc.block_hashes())[1].clone();
+		assert_eq!(
+			res!(doc.resolve_link(&int_link.target)),
+			Some(LinkResolution::Block { block: want_block, page: 2 }));
+		Ok(())
+	}
+
+	// Annotations anchor to content-addressed block hashes, read back with their fields intact, and survive
+	// a re-emit of the document -- the point being that the anchor is the block's identity, so an annotation
+	// stays attached across a rewrite the way it would across a repagination.
+	#[test]
+	fn test_annotations_anchor_to_blocks_and_survive_re_emit_03() -> Outcome<()> {
+		let geom = PageGeometry::a4();
+
+		// A two-page document, so there are two real block hashes to anchor to.
+		let mut b = res!(PearlBuilder::new(&Ledger::new(), geom));
+		for n in 1..=2u32 {
+			let mut frame = Frame::new();
+			let g = res!(dot_graphic(None));
+			frame.push(Placed::new(
+				Sp::from_pt(40.0), Sp::from_pt(40.0), g.dims, PlacedKind::Graphic(Arc::new(g))));
+			res!(b.add_page(&Page::new(n, geom, frame)));
+		}
+		let mut doc = res!(PearlDoc::from_string(res!(b.to_string())));
+
+		// Emit is empty by default.
+		assert!(res!(doc.annotations()).is_empty(), "the engine authors no annotations");
+
+		let hashes = res!(doc.block_hashes());
+		assert_eq!(hashes.len(), 2);
+		res!(doc.add_annotation(Annotation::new(
+			hashes[0].as_str(), AnnotationKind::Highlight, "the opening claim", "jason",
+			"2026-09-17T10:00:00Z").with_rect(
+			Sp::from_pt(40.0), Sp::from_pt(40.0), Sp::from_pt(120.0), Sp::from_pt(12.0))));
+		res!(doc.add_annotation(Annotation::new(
+			hashes[1].as_str(), AnnotationKind::Note, "check this figure", "jason",
+			"2026-09-17T11:00:00Z")));
+
+		// An annotation cannot attach to a block the document does not hold.
+		assert!(doc.add_annotation(Annotation::new(
+			"0000000000000000", AnnotationKind::Note, "orphan", "jason", "2026-09-17T12:00:00Z")).is_err(),
+			"attaching to an absent block is refused");
+
+		// Re-emit and re-read: the annotations survive, resolve to the right blocks, and keep their fields.
+		let doc2 = res!(PearlDoc::from_string(res!(doc.to_string())));
+		let anns = res!(doc2.annotations());
+		assert_eq!(anns.len(), 2, "both annotations survive the re-emit");
+		assert_eq!(anns[0].anchor, hashes[0], "the first annotation still names page 1's block");
+		assert!(res!(doc2.has_block(&anns[0].anchor)), "and that block is still in the document");
+		assert_eq!(anns[0].kind, AnnotationKind::Highlight);
+		assert_eq!(anns[0].rect, Some((
+			Sp::from_pt(40.0), Sp::from_pt(40.0), Sp::from_pt(120.0), Sp::from_pt(12.0))));
+		assert_eq!(anns[1].anchor, hashes[1], "the second annotation still names page 2's block");
+		assert_eq!(anns[1].kind, AnnotationKind::Note);
+		assert_eq!(anns[1].payload, "check this figure");
+		assert_eq!(anns[1].rect, None, "a whole-block annotation carries no rect");
+
+		// A second re-emit keeps them still, so the section is stable under repeated rewrites.
+		let doc3 = res!(PearlDoc::from_string(res!(doc2.to_string())));
+		assert_eq!(res!(doc3.annotations()).len(), 2, "annotations persist across a second re-emit");
 		Ok(())
 	}
 }
