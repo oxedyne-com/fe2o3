@@ -5,8 +5,10 @@
 //! whose convergence loop is honest about how it terminates. Pages are emitted as SVG through
 //! `fe2o3_graphics`. Phase 1 wires the metric seam to `fe2o3_font`: real text is shaped with
 //! HarfBuzz, measured against a real face, and drawn as glyph outlines (see [`font`]). Knuth-Plass
-//! total-fit line breaking sets a paragraph into justified lines (see [`linebreak`]); Pearl output
-//! remains a later phase, stubbed behind a clean seam here.
+//! total-fit line breaking sets a paragraph into justified lines (see [`linebreak`]). Pearl output
+//! has a v0 spike (see [`emit::pearl`]): `austenite --pearl` writes a content-addressed `.prl` -- glyph
+//! outlines stored once, each page a view over a block, the ledger inside -- which `pearl_render` reads
+//! back to the SVG arm's own bytes.
 //!
 //! The design is set out in `doc/Austenite/sec_architecture.typ` and `sec_decisions.typ`. Two
 //! commitments from there shape every type below:

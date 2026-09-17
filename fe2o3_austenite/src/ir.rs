@@ -232,6 +232,16 @@ pub enum DrawOp {
 	Image { image: Arc<RasterImage>, x: f32, y: f32, w: f32, h: f32 },
 }
 
+/// Where a link points: out of the document to a URI, or into it to a named anchor. An internal target
+/// carries the anchor's identity, not a page or a block address, so it stays stable as the document
+/// repaginates -- the reader resolves it against the shipped ledger, which turns the identity into the
+/// page it landed on and then into the content-addressed block of that page.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+	Uri(String),		// an external address, followed as-is
+	Anchor(AnchorId),	// an internal cross-reference, resolved through the ledger to a block and page
+}
+
 /// A self-contained piece of drawn ink -- a diagram, a figure, a baked label run -- as a bag of paths
 /// with a bounding box. It rides the stream as a [`LeafKind::Graphic`] leaf and is placed like any box;
 /// the emitter translates its ops to where it landed and draws them. Every path is already flattened
@@ -240,7 +250,7 @@ pub enum DrawOp {
 pub struct Graphic {
 	pub ops:	Vec<DrawOp>,
 	pub dims:	Dims,
-	pub link:	Option<String>,	// a URL the whole graphic links to, drawn as a PDF link annotation over its box
+	pub link:	Option<LinkTarget>,	// where the whole graphic links, drawn over its placement box
 }
 
 impl Graphic {
@@ -248,11 +258,19 @@ impl Graphic {
 		Self { ops, dims, link: None }
 	}
 
-	/// Makes the whole graphic a clickable link to `url` -- the PDF writer draws a link annotation over its
-	/// placement box. The meta page's "Made with AI" chip carries the scheme URL this way; the SVG writer,
-	/// which sets the mark as a plain image, leaves it unlinked.
+	/// Makes the whole graphic a clickable link to the external `url` -- the PDF writer draws a link
+	/// annotation over its placement box, and Pearl carries it as a `link` leaf. The meta page's "Made
+	/// with AI" chip carries the scheme URL this way; the SVG writer, which sets the mark as a plain
+	/// image, leaves it unlinked.
 	pub fn with_link(mut self, url: String) -> Self {
-		self.link = Some(url);
+		self.link = Some(LinkTarget::Uri(url));
+		self
+	}
+
+	/// Makes the whole graphic a cross-reference to `anchor` within the document, resolved through the
+	/// ledger at read time to the content-addressed block the anchor landed in.
+	pub fn with_link_anchor(mut self, anchor: AnchorId) -> Self {
+		self.link = Some(LinkTarget::Anchor(anchor));
 		self
 	}
 }
