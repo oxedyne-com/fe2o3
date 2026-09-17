@@ -45,9 +45,10 @@
 	<h1>Pearl Reader <span style="font-weight:400;color:#6b7280">&mdash; .prl v0</span></h1>
 	<label>Document
 		<select id="doc">
-			<option value="samples/keystone.json">keystone (1 page)</option>
-			<option value="samples/manuscript.json">manuscript (3 pages)</option>
-			<option value="samples/maths.json">maths (1 page)</option>
+			<option value="samples/keystone.prl">keystone (1 page)</option>
+			<option value="samples/manuscript.prl">manuscript (3 pages)</option>
+			<option value="samples/maths.prl">maths (1 page)</option>
+			<option value="samples/raster.prl">raster (1 page)</option>
 		</select>
 	</label>
 	<span class="sp"></span>
@@ -55,6 +56,7 @@
 </header>
 <main id="pages"></main>
 
+<script src="jdat.js"></script>
 <script src="pearl.js"></script>
 <script>
 	const sel      = document.getElementById("doc");

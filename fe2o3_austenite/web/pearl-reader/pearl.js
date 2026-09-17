@@ -1,4 +1,4 @@
-// pearl.js -- a first-cut browser reader for the Pearl (.prl) document format.
+// pearl.js -- a browser reader for the Pearl (.prl) document format.
 //
 // It renders a Pearl document to inline SVG from the format's own data model -- glyph outlines stored
 // once, placed per leaf, plus fills, strokes, rules and rasters -- reproducing the transform the
@@ -6,9 +6,11 @@
 // src/emit/svg.rs draw_text). The goal is pixel parity with that arm's SVG, which already matches the
 // PDF.
 //
-// Transport: the .prl is text jdat; the `pearl_json` companion binary re-encodes the identical Dat as
-// JSON so the browser can JSON.parse it. Nothing here is pre-rendered -- the page is built from
-// outlines and placements.
+// Transport: the reader fetches the .prl and parses its text jdat directly in the browser (jdat.js) --
+// there is no JSON projection any more. Nothing here is pre-rendered: the page is built from the
+// outlines and placements the .prl carries. A typed jdat atom decodes to the same plain value its old
+// JSON projection did -- an omap to an object, a list to an array, u32/i32/u8/f32 to a Number, a base64
+// PNG to a string -- so the renderer below is unchanged from the JSON-fed first cut.
 
 "use strict";
 
@@ -163,10 +165,12 @@ function renderDocument(doc, container) {
 	}
 }
 
+// Fetches a .prl and parses its text jdat into the document model, then renders it.
 async function loadAndRender(url, container) {
 	const res = await fetch(url, { cache: "no-store" });
 	if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
-	const doc = await res.json();
+	const text = await res.text();
+	const doc = Jdat.parse(text);
 	renderDocument(doc, container);
 	return doc;
 }

@@ -9,16 +9,17 @@
 </style>
 </head>
 <body>
+<script src="jdat.js"></script>
 <script src="pearl.js"></script>
 <script>
 	// A bare, chromeless single-page render for pixel-diffing against Austenite's reference SVG.
 	// ?doc=<file>&page=<n> -- renders exactly that page's <svg> at the top-left, 1 px per point.
 	(async () => {
 		const p = new URLSearchParams(location.search);
-		const url = p.get("doc") || "samples/keystone.json";
+		const url = p.get("doc") || "samples/keystone.prl";
 		const page = parseInt(p.get("page") || "0", 10);
 		const res = await fetch(url, { cache: "no-store" });
-		const doc = await res.json();
+		const doc = Jdat.parse(await res.text());
 		const entry = doc.index[page];
 		const svg = Pearl.renderPage(doc, entry.block);
 		document.body.appendChild(svg);
