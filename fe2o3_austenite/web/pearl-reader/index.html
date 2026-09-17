@@ -84,6 +84,42 @@
 	.pearl-note-text { color: #1f2937; }
 	.pearl-note-meta { margin-top: 6px; color: #6b7280; font-size: 12px; }
 
+	/* Authoring toolbar. */
+	#author { width: 90px; }
+	#annotate.on { background: #2563eb; color: #fff; border-color: #2563eb; }
+	#pages.annotating .pearl-page { cursor: crosshair; }
+	/* In annotate mode existing overlay items must not swallow a drag that starts over them. */
+	#pages.annotating .pearl-link,
+	#pages.annotating .pearl-highlight,
+	#pages.annotating .pearl-note { pointer-events: none; }
+
+	/* The live selection while dragging out a region. */
+	.pearl-draw {
+		position: absolute; pointer-events: none;
+		background: rgba(37,99,235,.14);
+		border: 1.5px dashed rgba(37,99,235,.85);
+		border-radius: 2px;
+	}
+
+	/* The composer popover shown after a drag. */
+	.pearl-composer {
+		position: absolute; z-index: 30; width: 240px; padding: 10px;
+		background: #fff; border: 1px solid #94a3b8; border-radius: 8px;
+		box-shadow: 0 6px 20px rgba(0,0,0,.28);
+		text-align: left; cursor: default;
+	}
+	.pearl-composer .pc-row { display: flex; align-items: center; gap: 8px; }
+	.pearl-composer .pc-kind { margin-bottom: 6px; }
+	.pearl-composer label { font-size: 13px; }
+	.pearl-composer .pc-payload {
+		width: 100%; margin-bottom: 8px; font: inherit; padding: 4px 6px;
+		border: 1px solid var(--line); border-radius: 6px; resize: vertical;
+	}
+	.pearl-composer .pc-author { flex: 1; min-width: 0; padding: 3px 6px;
+		border: 1px solid var(--line); border-radius: 6px; font: inherit; }
+	.pearl-composer .pc-sp { flex: 1; }
+	.pearl-composer .pc-save { background: #2563eb; color: #fff; border-color: #2563eb; }
+
 	/* Drag-and-drop affordance covering the viewport while a file hovers. */
 	#drop {
 		position: fixed; inset: 0; z-index: 20; display: none;
@@ -112,6 +148,9 @@
 	</label>
 	<button id="open" type="button">Open file…</button>
 	<input id="file" type="file" accept=".prl" hidden>
+	<button id="annotate" type="button" title="Toggle annotation authoring">Annotate</button>
+	<label>as <input id="author" type="text" value="me"></label>
+	<button id="save" type="button" title="Download the .prl with your annotations">Save .prl</button>
 	<span class="sp"></span>
 	<span id="status"></span>
 </header>
@@ -120,6 +159,7 @@
 
 <script src="jdat.js"></script>
 <script src="pearl.js"></script>
+<script src="authoring.js"></script>
 <script>
 	const sel      = document.getElementById("doc");
 	const pages    = document.getElementById("pages");
@@ -127,6 +167,13 @@
 	const fileInput = document.getElementById("file");
 	const openBtn   = document.getElementById("open");
 	const drop      = document.getElementById("drop");
+	const annotateBtn = document.getElementById("annotate");
+	const authorInput = document.getElementById("author");
+	const saveBtn     = document.getElementById("save");
+
+	// The current document and its display name, so authoring knows what it is editing and saving.
+	let currentDoc  = null;
+	let currentName = "document.prl";
 
 	// Reports what was rendered: page and glyph counts, plus any links and annotations, so the header
 	// confirms the demo features are present.
@@ -139,22 +186,34 @@
 		statusEl.textContent = `${name ? name + " · " : ""}${doc.index.length} page(s) · ${g} glyphs${extra}`;
 	}
 
+	// Registers a freshly rendered document with the authoring layer and reports it.
+	function adopt(doc, name) {
+		currentDoc  = doc;
+		currentName = name || currentName;
+		Authoring.setDocument(doc, currentName);
+		report(doc, name);
+	}
+
 	// Renders a document already in memory as .prl text (a dropped or picked file).
 	function showText(text, name) {
 		statusEl.textContent = "rendering…";
 		try {
-			report(Pearl.renderText(text, pages), name);
+			adopt(Pearl.renderText(text, pages), name);
 		} catch (e) {
 			statusEl.textContent = "error: " + e.message;
 			console.error(e);
 		}
 	}
 
-	// Renders a document fetched from a URL (the sample picker).
+	// Renders a document fetched from a URL (the sample picker). It goes through text, not
+	// `loadAndRender`, so the source is captured for the authoring splice.
 	async function show(url) {
 		statusEl.textContent = "loading…";
 		try {
-			report(await Pearl.loadAndRender(url, pages));
+			const res = await fetch(url, { cache: "no-store" });
+			if (!res.ok) throw new Error(`Failed to load ${url}: ${res.status}`);
+			const name = url.split("/").pop();
+			adopt(Pearl.renderText(await res.text(), pages), name);
 		} catch (e) {
 			statusEl.textContent = "error: " + e.message;
 			console.error(e);
@@ -192,6 +251,17 @@
 		else { sel.insertAdjacentHTML("beforeend", `<option value="${q}" selected>${q}</option>`); }
 	}
 	sel.addEventListener("change", () => show(sel.value));
+
+	// Wire the authoring layer: the toggle, the author field and the save button, and re-report the count
+	// after each new annotation so the header reflects it live.
+	Authoring.init({
+		container:   pages,
+		toggle:      annotateBtn,
+		authorInput: authorInput,
+		save:        saveBtn,
+		onChange:    () => { if (currentDoc) report(currentDoc, currentName); },
+	});
+
 	show(sel.value);
 </script>
 </body>

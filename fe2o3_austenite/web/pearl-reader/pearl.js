@@ -274,54 +274,65 @@ function addLinks(doc, idx, overlay, container) {
 	}
 }
 
-// Draws the annotations anchored to this page's block: a `highlight` is a translucent rectangle over its
-// `rect` (or the whole page when it has none); a `note` is a margin marker that reveals its payload and
-// author on click.
+// Draws the annotations anchored to this page's block, in order. Each is placed by `renderAnnotation`,
+// which the authoring layer also calls to show a freshly created annotation without a full repaint.
 function addAnnotations(doc, blockHash, overlay) {
-	let noteRow = 0;
 	for (const ann of annotationsForBlock(doc, blockHash)) {
-		if (ann.kind === "highlight") {
-			const r = ann.rect;
-			const box = document.createElement("div");
-			box.className = "pearl-highlight";
-			if (r) {
-				box.style.left   = sp(r[0]) + "px";
-				box.style.top    = sp(r[1]) + "px";
-				box.style.width  = sp(r[2]) + "px";
-				box.style.height = sp(r[3]) + "px";
-			} else {
-				// A whole-block highlight: a thin band down the page's left edge, so it is visible but does
-				// not blanket the text.
-				box.style.left = "0"; box.style.top = "0"; box.style.width = "6px"; box.style.height = "100%";
-			}
-			if (ann.payload) box.title = ann.payload;
-			overlay.appendChild(box);
-		} else if (ann.kind === "note") {
-			const marker = document.createElement("button");
-			marker.className = "pearl-note";
-			marker.textContent = "✎"; // a pencil, the note affordance
-			marker.style.top = (18 + noteRow * 30) + "px";
-			noteRow++;
-
-			const bubble = document.createElement("div");
-			bubble.className = "pearl-note-bubble";
-			bubble.innerHTML =
-				`<div class="pearl-note-text"></div><div class="pearl-note-meta"></div>`;
-			bubble.querySelector(".pearl-note-text").textContent = ann.payload;
-			bubble.querySelector(".pearl-note-meta").textContent =
-				`${ann.author || "unknown"} · ${ann.created || ""}`;
-			marker.addEventListener("click", () => {
-				bubble.classList.toggle("open");
-			});
-			marker.appendChild(bubble);
-			overlay.appendChild(marker);
-		}
+		renderAnnotation(ann, overlay);
 	}
 }
 
-// Parses a .prl's text jdat into the document model and renders it into `container`.
+// Places a single annotation into a page's overlay: a `highlight` is a translucent rectangle over its
+// `rect` (or a left-edge band when it has none); a `note` is a margin marker that reveals its payload and
+// author on click. Notes stack down the margin, the running row kept on the overlay so a later addition
+// lands below the ones already there.
+function renderAnnotation(ann, overlay) {
+	if (ann.kind === "highlight") {
+		const r = ann.rect;
+		const box = document.createElement("div");
+		box.className = "pearl-highlight";
+		if (r) {
+			box.style.left   = sp(r[0]) + "px";
+			box.style.top    = sp(r[1]) + "px";
+			box.style.width  = sp(r[2]) + "px";
+			box.style.height = sp(r[3]) + "px";
+		} else {
+			// A whole-block highlight: a thin band down the page's left edge, so it is visible but does
+			// not blanket the text.
+			box.style.left = "0"; box.style.top = "0"; box.style.width = "6px"; box.style.height = "100%";
+		}
+		if (ann.payload) box.title = ann.payload;
+		overlay.appendChild(box);
+	} else if (ann.kind === "note") {
+		const noteRow = overlay._noteRow || 0;
+		overlay._noteRow = noteRow + 1;
+
+		const marker = document.createElement("button");
+		marker.className = "pearl-note";
+		marker.textContent = "✎"; // a pencil, the note affordance
+		marker.style.top = (18 + noteRow * 30) + "px";
+
+		const bubble = document.createElement("div");
+		bubble.className = "pearl-note-bubble";
+		bubble.innerHTML =
+			`<div class="pearl-note-text"></div><div class="pearl-note-meta"></div>`;
+		bubble.querySelector(".pearl-note-text").textContent = ann.payload;
+		bubble.querySelector(".pearl-note-meta").textContent =
+			`${ann.author || "unknown"} · ${ann.created || ""}`;
+		marker.addEventListener("click", () => {
+			bubble.classList.toggle("open");
+		});
+		marker.appendChild(bubble);
+		overlay.appendChild(marker);
+	}
+}
+
+// Parses a .prl's text jdat into the document model and renders it into `container`. The source text is
+// kept on the returned model as `__source`, so the authoring layer can splice an updated annotations
+// section back into the original document byte for byte (see authoring.js).
 function renderText(text, container) {
 	const doc = Jdat.parse(text);
+	doc.__source = text;
 	renderDocument(doc, container);
 	return doc;
 }
@@ -335,5 +346,6 @@ async function loadAndRender(url, container) {
 
 window.Pearl = {
 	renderDocument, renderPage, renderText, loadAndRender,
-	linksOnPage, resolveLink, annotationsForBlock,
+	linksOnPage, resolveLink, annotationsForBlock, renderAnnotation,
+	sp, SP_PER_PT,
 };

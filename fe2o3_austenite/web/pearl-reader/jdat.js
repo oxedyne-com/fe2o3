@@ -154,4 +154,70 @@ function parseJdat(src) {
 	return result;
 }
 
-window.Jdat = { parse: parseJdat };
+// ---------------------------------------------------------------------------------------------------
+// Serialising back to text jdat -- the inverse of the parser above, enough to re-emit an annotation and
+// the list that holds it. The parser strips a scalar's type tag on the way in, so a re-serialisation of
+// the *whole* document from the parsed model could not know a number's original tag (u32 vs i32 vs u8 vs
+// f32), and the Rust decoder rejects the wrong one (`try_extract_dat!(_, U8)` and its kin). Annotations
+// are the one section the authoring layer builds itself, with every atom's tag known, so this serialiser
+// carries the tag explicitly through the small wrappers below and emits a section the Rust reader accepts.
+// ---------------------------------------------------------------------------------------------------
+
+// A scalar with its jdat tag preserved, so `encodeJdat` writes `(<tag>|<n>)` rather than a bare number.
+function atom(tag, n) { return { __atom: tag, value: n }; }
+
+// An ordered map with its tag, so `encodeJdat` writes `(omap|{ ... })` rather than a bare `{ ... }`.
+function omap(obj) { return { __omap: obj }; }
+
+// A jdat string with RFC 8259 escapes, matching the escapes the parser's `str()` accepts.
+function encodeString(s) {
+	let out = '"';
+	for (const ch of s) {
+		switch (ch) {
+			case '"':	out += '\\"';	break;
+			case "\\":	out += "\\\\";	break;
+			case "\b":	out += "\\b";	break;
+			case "\f":	out += "\\f";	break;
+			case "\n":	out += "\\n";	break;
+			case "\r":	out += "\\r";	break;
+			case "\t":	out += "\\t";	break;
+			default:
+				const code = ch.codePointAt(0);
+				if (code < 0x20) out += "\\u" + code.toString(16).padStart(4, "0");
+				else out += ch;
+		}
+	}
+	return out + '"';
+}
+
+// Emits a value as text jdat, reproducing the spacing the Rust encoder uses: a space after `{`, `[`, `:`
+// and `,`, and none before the closing bracket. An `omap`/`atom` wrapper carries its tag; a plain string,
+// array or number falls through to the bare forms.
+function encodeJdat(v) {
+	if (v && v.__atom !== undefined)	return `(${v.__atom}|${v.value})`;
+	if (v && v.__omap !== undefined) {
+		const obj = v.__omap;
+		const keys = Object.keys(obj);
+		if (keys.length === 0) return "(omap|{})";
+		const body = keys.map(k => `${encodeString(k)}: ${encodeJdat(obj[k])}`).join(", ");
+		return `(omap|{ ${body}})`;
+	}
+	if (Array.isArray(v)) {
+		if (v.length === 0) return "[]";
+		return `[ ${v.map(encodeJdat).join(", ")}]`;
+	}
+	if (typeof v === "string")	return encodeString(v);
+	if (typeof v === "number")	return String(v);
+	throw new Error("encodeJdat: cannot serialise " + typeof v);
+}
+
+window.Jdat = {
+	parse:	parseJdat,
+	encode:	encodeJdat,
+	atom,
+	omap,
+	i32:	n => atom("i32", Math.round(n)),
+	u32:	n => atom("u32", Math.round(n)),
+	u8:		n => atom("u8", Math.round(n)),
+	f32:	n => atom("f32", n),
+};

@@ -39,5 +39,18 @@ fn main() -> Outcome<()> {
 		res!(std::fs::write(&path, &svg));
 	}
 	println!("pearl_render: {} -> {} page(s); written to {}/", source, pages, out_dir);
+
+	// Read the annotations back through the format's own decoder, so a `.prl` authored elsewhere -- the
+	// browser reader included -- is proven readable here, rectangles and all.
+	let anns = res!(doc.annotations());
+	println!("pearl_render: {} annotation(s)", anns.len());
+	for a in &anns {
+		let rect = match a.rect {
+			Some((x, y, w, h)) => fmt!("[{} {} {} {}]", x.raw(), y.raw(), w.raw(), h.raw()),
+			None => "(whole block)".to_string(),
+		};
+		println!("  {} @ {} rect {} by {} -- {:?}",
+			a.kind.as_str(), &a.anchor[..8.min(a.anchor.len())], rect, a.author, a.payload);
+	}
 	Ok(())
 }
