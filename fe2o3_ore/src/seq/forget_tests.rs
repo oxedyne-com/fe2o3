@@ -175,6 +175,79 @@ fn two_forgets_disagreeing_on_a_shape_are_refused() -> Outcome<()> {
 	Ok(())
 }
 
+/// The source of a move can be forgotten, and the moved bytes are gone from the
+/// destination they were carried to, in every delivery order.
+#[test]
+fn qa_forgetting_a_moved_ranges_source_buries_it_at_the_destination() -> Outcome<()> {
+	let mut st = res!(seed(b"one two three\n", 1));
+	let rep = &mut st.reps[0];
+	// The secret goes in, is then carried to the front, and is then forgotten.
+	let secret = res!(rep.insert(4, b"SECRET "));
+	assert_eq!(res!(rep.view()).text_lossy(), "one SECRET two three\n");
+	let mv = {
+		let op = res!(res!(rep.view()).move_range(4, 7, 0));
+		res!(rep.author(op))
+	};
+	assert_eq!(res!(rep.view()).text_lossy(), "SECRET one two three\n");
+	let forget = res!(forget_of(rep, &[(secret.0.id(), &secret.1)]));
+	let mut ops = st.ops.clone();
+	ops.extend([secret, mv, forget]);
+	// The bytes are buried wherever they came to rest, so the file is what it was.
+	let got = res!(case(st.file, "one two three\n", &ops));
+	assert!(!got.bytes().windows(6).any(|w| w == b"SECRET"), "the bytes are gone");
+	Ok(())
+}
+
+/// A deletion that spans the junction of a forgotten insertion and the text after
+/// it keeps the part of the cut that fell outside the buried bytes.
+#[test]
+fn qa_a_cut_across_a_forgotten_boundary_still_removes_the_outside_byte() -> Outcome<()> {
+	let mut st = res!(seed(b"abc\n", 1));
+	let rep = &mut st.reps[0];
+	let secret = res!(rep.insert(1, b"SECRET"));
+	assert_eq!(res!(rep.view()).text_lossy(), "aSECRETbc\n");
+	// Cut "Tb": the last byte of the secret and the first original byte after it.
+	let cut = {
+		let op = res!(res!(rep.view()).splice(6, 2, Vec::new()));
+		res!(rep.author(op))
+	};
+	assert_eq!(res!(rep.view()).text_lossy(), "aSECREc\n");
+	let forget = res!(forget_of(rep, &[(secret.0.id(), &secret.1)]));
+	let mut ops = st.ops.clone();
+	ops.extend([secret, cut, forget]);
+	// The secret is buried whole; the cut's removal of the original 'b' still
+	// stands, since forgetting bytes does not bring back what a later edit took.
+	res!(case(st.file, "ac\n", &ops));
+	Ok(())
+}
+
+/// The bytes two concurrent moves both claim can be forgotten, and conservation
+/// holds although one move yields the run to the other, in every delivery order.
+#[test]
+fn qa_forgetting_a_run_two_moves_contend_for_conserves() -> Outcome<()> {
+	let mut st = res!(seed(b"- Eggs\n- Milk\n- Cheese\n", 2));
+	let seed_op = st.ops[1].clone();	// the splice that wrote the list
+	let (r1, r2) = st.reps.split_at_mut(1);
+	// Both replicas move "- Milk\n" (seed bytes 7..14); one wins, one yields.
+	let lost = {
+		let op = res!(res!(r1[0].view()).move_range(7, 7, 0));
+		res!(r1[0].author(op))
+	};
+	let won = {
+		let op = res!(res!(r2[0].view()).move_range(7, 7, 22));
+		res!(r2[0].author(op))
+	};
+	let forget = res!(forget_of(&mut r1[0], &[(seed_op.0.id(), &seed_op.1)]));
+	let mut ops = st.ops.clone();
+	ops.extend([lost, won, forget]);
+	// Every byte the seed wrote is buried, so the file is empty; the overlap of the
+	// two moves must still balance under conservation, which `case` checks in every
+	// delivery order.
+	let got = res!(case(st.file, "", &ops));
+	assert!(got.bytes().is_empty(), "the whole list is buried");
+	Ok(())
+}
+
 /// What each kind of operation keeps when forgotten, and which have nothing to
 /// forget.
 #[test]
