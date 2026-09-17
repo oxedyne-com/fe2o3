@@ -2412,21 +2412,34 @@ fn fm_doc_title_page(
 
 	// The title and subtitle centred on the right column: from the sidebar's right edge plus the template's
 	// 20 pt, running to the page's right margin less 20 pt. The title rides the column's vertical centre
-	// (the template's 40%/10%/50% grid seats it at the half), the subtitle two lines below.
+	// (the template's 40%/10%/50% grid seats it at the half), the subtitle two lines below. The title wraps
+	// within `col_w`, exactly as the template's `rect(width: size.width - margins.title_page - 40pt)` wraps
+	// `#text(size: 35pt)[#emph(title)]` -- a long title (e.g. "Oxegen Technical Specification") otherwise
+	// shapes as one run and overruns the rail.
 	let col_l		= side_w + 20.0;
 	let col_w		= pw - side_w - 40.0;
 	let centre_box	= -il + col_l + col_w / 2.0;
-	let title_size	= 40.0f32;	// the template's fixed title size, independent of the config type scale
+	let title_size	= 35.0f32;	// the template's fixed title size, independent of the config type scale
 	let sub_size	= 20.0f32;
-	let title_top	= ph / 2.0 - it;	// the column centre, in the box frame
 	let sample		= res!(head_shape(fonts, &HeadFace::Role(Role::Body), Sp::from_pt(title_size as f64), "Ag"));
 	let asc			= sample.dims().height.to_pt() as f32;
 	let dep			= sample.dims().depth.to_pt() as f32;
-	let title_base	= title_top + asc;
-	res!(title_run_ops(&mut ops, fonts, &fm.title, title_size, centre_box, title_base, fm.title_smallcaps));
+	let leading		= (asc + dep) * 1.2;	// title line height, leading proportioned as the body text is
+
+	let lines		= res!(wrap_title_lines(fonts, &fm.title, title_size, col_w, fm.title_smallcaps));
+	let extra		= (lines.len().saturating_sub(1)) as f32 * leading;
+	// The column centre, in the box frame, shifted up by half the extra lines' height so a wrapped title
+	// still balances about the same point a single line would occupy.
+	let title_top	= ph / 2.0 - it - extra / 2.0;
+	let mut title_base = title_top + asc;
+	for (line, fit_size) in &lines {
+		res!(title_run_ops(&mut ops, fonts, line, *fit_size, centre_box, title_base, fm.title_smallcaps));
+		title_base += leading;
+	}
 	if let Some(sub) = &fm.subtitle {
-		// Two blank lines below the title (the template's `\ \`), then the subtitle in italic.
-		let sub_base = title_base + dep + 28.0 + sub_size;
+		// Two blank lines below the title (the template's `\ \`), then the subtitle in italic. `title_base`
+		// has already stepped past the last title line, so back off one `leading` to its baseline.
+		let sub_base = title_base - leading + dep + 28.0 + sub_size;
 		res!(title_run_ops(&mut ops, fonts, sub, sub_size, centre_box, sub_base, false));
 	}
 
@@ -2474,6 +2487,66 @@ fn translate_ops(src: Vec<DrawOp>, dx: f32, dy: f32) -> Outcome<Vec<DrawOp>> {
 	Ok(out)
 }
 
+/// Measures a title run's total advance exactly as `title_run_ops` shapes it (the same small-caps
+/// splitting, so a wrap decided from this width breaks where the baked glyphs will actually fall).
+fn title_run_width(fonts: &Arc<FontSet>, text: &str, size_pt: f32, smallcaps: bool) -> Outcome<f32> {
+	let size		= Sp::from_pt(size_pt as f64);
+	let small_size	= Sp(size.raw() * 3 / 4);
+	let face		= if smallcaps { HeadFace::Role(Role::Body) } else { HeadFace::Role(Role::Italic) };
+	let runs		= if smallcaps { smallcaps_runs(text) } else { vec![(text.to_string(), false)] };
+	let mut total = 0.0f32;
+	for (run, is_small) in &runs {
+		let rs		= if *is_small { small_size } else { size };
+		let shaped	= res!(head_shape(fonts, &face, rs, run));
+		total += shaped.dims().width.to_pt() as f32;
+	}
+	Ok(total)
+}
+
+/// Greedily word-wraps a title to `col_w`, returning each line with the size it draws at. A line is
+/// normally `size_pt`; the one exception is a single word that is still wider than `col_w` on its own
+/// (an unbreakable overflow), which is kept alone on its line and scaled down to fit rather than left to
+/// overrun the rail.
+fn wrap_title_lines(
+	fonts:		&Arc<FontSet>,
+	text:		&str,
+	size_pt:	f32,
+	col_w:		f32,
+	smallcaps:	bool,
+)
+	-> Outcome<Vec<(String, f32)>>
+{
+	let mut lines: Vec<String> = Vec::new();
+	let mut line = String::new();
+	for word in text.split_whitespace() {
+		let trial	= if line.is_empty() { word.to_string() } else { fmt!("{} {}", line, word) };
+		let w		= res!(title_run_width(fonts, &trial, size_pt, smallcaps));
+		if w > col_w && !line.is_empty() {
+			lines.push(line.clone());
+			line = word.to_string();
+		} else {
+			line = trial;
+		}
+	}
+	if !line.is_empty() {
+		lines.push(line);
+	}
+	if lines.is_empty() {
+		lines.push(String::new());
+	}
+
+	let mut out: Vec<(String, f32)> = Vec::with_capacity(lines.len());
+	for line in lines {
+		let mut fit = size_pt;
+		let w = res!(title_run_width(fonts, &line, fit, smallcaps));
+		if w > col_w && w > 0.0 {
+			fit = fit * col_w / w;	// shrink-to-fit: an unbreakable word wider than the rail
+		}
+		out.push((line, fit));
+	}
+	Ok(out)
+}
+
 /// Bakes a title or subtitle run to filled glyph outlines centred on `centre_x` at baseline `base_y`, in
 /// the box frame (y down). Small caps are synthesised run by run as the banner sets them (was-lowercase
 /// letters uppercased at 0.75 of the size); a plain run sets italic, matching the template's `emph`. The
@@ -2497,12 +2570,7 @@ fn title_run_ops(
 	let runs		= if smallcaps { smallcaps_runs(text) } else { vec![(text.to_string(), false)] };
 
 	// Total advance, so the run seats centred on `centre_x`.
-	let mut total = 0.0f32;
-	for (run, is_small) in &runs {
-		let rs		= if *is_small { small_size } else { size };
-		let shaped	= res!(head_shape(fonts, &face, rs, run));
-		total += shaped.dims().width.to_pt() as f32;
-	}
+	let total = res!(title_run_width(fonts, text, size_pt, smallcaps));
 
 	let mut x = centre_x - total / 2.0;
 	for (run, is_small) in &runs {
