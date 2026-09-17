@@ -14,6 +14,7 @@ use crate::font::ShapedText;
 use crate::ir::{
 	DrawOp,
 	Graphic,
+	LinkTarget,
 	Sp,
 };
 use crate::page::{
@@ -163,7 +164,10 @@ fn draw_graphic(
 	// A linked graphic (the meta page's "Made with AI" chip) draws a clickable link annotation over its
 	// placement box, in the same y-down engine frame the ink is placed in; the writer flips it into PDF
 	// space. Only the mark carries the link, matching the template, where the words beside it are plain.
-	if let Some(url) = &graphic.link {
+	// v0 draws only an external URI annotation here; an internal `LinkTarget::Anchor` needs the ledger to
+	// resolve its destination page, which this per-graphic call does not hold, so it is left for a
+	// follow-up (Pearl already carries the internal target for a reader that has the ledger).
+	if let Some(LinkTarget::Uri(url)) = &graphic.link {
 		let w = graphic.dims.width.to_pt();
 		let h = (graphic.dims.height + graphic.dims.depth).to_pt();
 		out.link(ox, oy, w, h, url.clone());
