@@ -25,6 +25,7 @@ pub enum Item {
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
+	Box { items: Vec<Item>, span: Span },	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is

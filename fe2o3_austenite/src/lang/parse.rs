@@ -1398,6 +1398,7 @@ enum CaptureKind {
 	SectionBanner,	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a section logo
 	Let(String),	// a `#let name = (...)` data array bound to this name
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
+	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -1412,6 +1413,12 @@ fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
 	}
 	if trimmed.starts_with("#columns(") {
 		return Some(CaptureKind::Columns);
+	}
+	// A `#styled-box[ ... ]` callout: a full-measure filled box wrapping running prose. Its body opens with
+	// the `[` on this line and closes on a later one, so it is gathered whole and re-parsed rather than
+	// skipped -- otherwise the bracket span reads as an unbalanced standalone call and its text is dropped.
+	if trimmed.starts_with("#styled-box[") {
+		return Some(CaptureKind::StyledBox);
 	}
 	// A documentation section opens with a line-leading `#section-banner("logo")` -- a full-width grey bar
 	// carrying the section's logo -- captured here so the bar is drawn rather than the call dropped. Tried
@@ -1500,6 +1507,18 @@ fn dispatch_capture(
 				}
 			}
 		},
+		CaptureKind::StyledBox => {
+			// A `#styled-box[ ... ]` callout. Its body is a block sequence, so it is read through the document
+			// parser again and wrapped in a single [`Item::Box`] the lowering sets in a filled, padded box --
+			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
+			// recorded in the summary; a nested skip within the body (an unknown inline call) still folds in.
+			if let Some(body) = styled_box_body(&cap.buf) {
+				if let Ok((inner, sub)) = document_with_skips(&body) {
+					skips.merge(&sub);
+					items.push(Item::Box { items: inner, span: Span::new(0, 0) });
+				}
+			}
+		},
 	}
 }
 
@@ -1522,6 +1541,19 @@ fn columns_body(buf: &str) -> Option<String> {
 		return None;
 	}
 	read_group(&chars, j).map(|(body, _)| body)
+}
+
+/// The `[ ... ]` body of a captured `#styled-box[ ... ]` callout, returned for re-parsing. The call takes
+/// no arguments, so the bracket group opens immediately after the name. `None` when no `[...]` follows, so
+/// a malformed callout contributes no body.
+fn styled_box_body(buf: &str) -> Option<String> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let Some(at) = find_lit(&chars, "#styled-box") else { return None; };
+	let open = at + "#styled-box".chars().count();
+	if chars.get(open) != Some(&'[') {
+		return None;
+	}
+	read_group(&chars, open).map(|(body, _)| body)
 }
 
 /// The index of the first occurrence of the literal `s` in `chars`, or `None`.
@@ -2196,6 +2228,34 @@ mod tests {
 		assert!(!skips.entries().iter().any(|(name, _)| name == "#section-banner"),
 			"a section banner must not be reported as a skipped construct");
 		assert!(!items.iter().any(|it| matches!(it, Item::Image { .. })), "a section banner is not a plain image");
+		Ok(())
+	}
+
+	/// A line-leading `#styled-box[...]` callout, its body opening on the marker line and closing on a later
+	/// one, is gathered whole and read as an [`Item::Box`] holding the re-parsed body -- not skipped as an
+	/// unbalanced standalone call, which would drop the callout's text. The construct is set, so it is not
+	/// reported as a skipped construct.
+	#[test]
+	fn line_leading_styled_box_reads_as_box() -> Outcome<()> {
+		let (items, skips) = res!(document_with_skips(
+			"Lead prose.\n\n#styled-box[\n*Principle.* Every participant is accountable.\n]\n\nTrailing prose.\n"));
+		let inner = res!(items.iter().find_map(|it| match it {
+			Item::Box { items, .. }	=> Some(items.clone()),
+			_						=> None,
+		}).ok_or_else(|| err!("no Item::Box was produced for the standalone styled-box"; Test, Bug)));
+		// The body re-parses to a paragraph, and its lead-in bold survives as a strong run.
+		let has_para = inner.iter().any(|it| matches!(it, Item::Paragraph { .. }));
+		assert!(has_para, "the styled-box body must re-parse to a paragraph, got: {:?}", inner);
+		let has_strong = inner.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if runs.iter().any(|r| matches!(r, Inline::Strong(t) if t == "Principle."))));
+		assert!(has_strong, "the body's bold lead-in must survive, got: {:?}", inner);
+		// The callout must not have been swallowed as a skipped construct.
+		assert!(!skips.entries().iter().any(|(name, _)| name == "#styled-box"),
+			"a styled-box must not be reported as a skipped construct");
+		// The prose either side of the callout still sets.
+		assert!(items.iter().any(|it| matches!(it, Item::Paragraph { runs, .. }
+			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Lead prose."))))),
+			"prose before the callout is dropped");
 		Ok(())
 	}
 

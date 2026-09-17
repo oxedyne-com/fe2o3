@@ -729,6 +729,7 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 		Block::List { items, .. }				=> for it in items { collect_from_segments(it, seen, ordered); },
 		Block::Table(t)							=> collect_from_table(t, seen, ordered),
 		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
+		Block::Box { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		_										=> {},
 	}
 }
@@ -870,6 +871,7 @@ fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
 			Block::List { items, .. }			=> for item in items {
 				collect_cite_segments(item, &mut out);
 			},
+			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
 			_									=> {},
 		}
 	}

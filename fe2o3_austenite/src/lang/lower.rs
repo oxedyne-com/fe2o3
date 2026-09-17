@@ -57,6 +57,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 				Block::image(path.clone(), *width, *height, *scale)),
 			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
 			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
+			Item::Box { items, .. }				=> out.push(Block::box_callout(blocks(items))),
 		}
 	}
 	out

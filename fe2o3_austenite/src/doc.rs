@@ -214,6 +214,11 @@ pub enum Block {
 	// survives to layout -- `book::resolve_glossary` walks the assembled blocks and swaps it out -- so the
 	// layout and word-count passes treat a stray one as empty rather than setting anything for it.
 	Glossary,
+	// A `#styled-box[...]` callout: its inner blocks set inside a padded box that runs the full measure,
+	// washed the template's `colours.veronica.lighten(90%)` (a pale violet) with a 4 pt corner radius. The
+	// callout is laid out as one keep box, so it moves whole to the next page rather than splitting the wash
+	// from its words.
+	Box { blocks: Vec<Block>, fill: Rgba },
 }
 
 impl Block {
@@ -259,6 +264,13 @@ impl Block {
 
 	pub fn rule(width: Length, thickness: f64, grey: u8) -> Self {
 		Self::Rule { width, thickness, grey }
+	}
+
+	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
+	/// violet, `colours.veronica.lighten(90%)`. The fill is fixed by the construct, so the caller supplies
+	/// only the body.
+	pub fn box_callout(blocks: Vec<Block>) -> Self {
+		Self::Box { blocks, fill: Rgba::opaque(245, 230, 255) }
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
@@ -862,6 +874,20 @@ pub fn author(
 				nodes.push(Node::Penalty(Penalty::eject()));
 				res!(section_banner(&mut nodes, fonts.clone(), geom, measure, path));
 				pending_banner = true;	// the section's level-1 heading follows and opens beneath this banner
+				i += 1;
+				first = false;
+				prev_para = false;
+			},
+			Block::Box { blocks: inner, fill } => {
+				// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
+				// box, so the breaker moves it whole to the next page when it will not fit.
+				if !first {
+					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				}
+				res!(styled_box(
+					&mut nodes, fonts.clone(), geom, style, measure, inner, *fill,
+					&mut foot_no, &mut ref_no, &mut seen, bib, &refs));
+				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -2702,6 +2728,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 												=> if let Some(c) = caption { count_segs(c, &mut n); },
 			Block::BackMatterHeading { title }	=> count_str(title, &mut n),
 			Block::Reference { runs }			=> for (t, _) in runs { count_str(t, &mut n); },
+			Block::Box { blocks, .. }			=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
 			| Block::SectionBanner { .. } | Block::Glossary	=> {},
 		}
@@ -3586,6 +3613,123 @@ fn section_banner(
 /// where leading glue would be discarded.
 fn vspacer(height: Sp) -> Node {
 	Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, height, Sp::ZERO)))
+}
+
+/// Sets a `#styled-box[...]` callout: its inner blocks laid out at the measure less the horizontal insets,
+/// seated one inset in from the left and top, over a filled rounded rectangle that runs the full measure.
+/// The template's box takes `inset: (x: 1em, y: 1em, bottom: 1.2em)`, so the sides and top pad one body em
+/// and the foot 1.2 em, and `radius: 4pt` rounds the corners; the wash is `colours.veronica.lighten(90%)`,
+/// a pale violet. The wash draws first with no vertical extent of its own, so the words overlay it, and the
+/// whole callout is one keep box -- the breaker moves it entire rather than splitting the wash from its text.
+#[allow(clippy::too_many_arguments)]
+fn styled_box(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style:		Style,
+	measure:	Sp,
+	blocks:		&[Block],
+	fill:		Rgba,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	seen:		&mut HashSet<String>,
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
+)
+	-> Outcome<()>
+{
+	let em			= style.body_size;
+	let inset_x		= em;								// the template's `inset.x`, one body em
+	let inset_top	= em;								// the template's `inset.y`, one body em
+	let inset_bot	= Sp::from_pt(em.to_pt() * 1.2);	// the template's `inset.bottom`, 1.2 em
+	let radius		= 4.0f32;							// the template's `radius: 4pt`
+	let two_x		= inset_x + inset_x;
+	let inner_w		= if measure > two_x { measure - two_x } else { measure };
+
+	// The inner blocks laid out at the reduced measure, then each line shifted one inset in from the left by
+	// a leading glue: `place_vbox` seats every child at the content left, so the horizontal inset rides
+	// inside the line rather than on the box.
+	let mut inner:	Vec<Node>	= Vec::new();
+	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, seen, bib, refs));
+	for node in inner.iter_mut() {
+		if let Node::HBox(b) = node {
+			b.list.insert(0, Node::Glue(Glue::fixed(inset_x)));
+			b.dims = Dims::new(b.dims.width + inset_x, b.dims.height, b.dims.depth);
+		}
+	}
+
+	// The stacked height of the inner content, so the wash encloses it plus the top and bottom insets.
+	let mut content_h = Sp::ZERO;
+	for node in &inner {
+		content_h += node.vextent();
+	}
+	let total = inset_top + content_h + inset_bot;
+
+	// The wash: a rounded rectangle the full measure wide and the whole box tall, drawn behind the words.
+	// Its leaf reports no vertical extent, so the cursor stays at the box top and the content overlays it.
+	let rect	= res!(Path::round_rect(
+		Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), radius));
+	let graphic	= Graphic::new(
+		vec![DrawOp::Fill { path: rect, colour: fill }], Dims::new(measure, Sp::ZERO, Sp::ZERO));
+
+	let mut children:	Vec<Node>	= Vec::new();
+	children.push(Node::Leaf(Leaf::graphic(graphic)));
+	children.push(Node::Glue(Glue::fixed(inset_top)));
+	children.append(&mut inner);
+	children.push(Node::Glue(Glue::fixed(inset_bot)));
+	nodes.push(vbox(children, measure));
+	Ok(())
+}
+
+/// Lays a callout's inner blocks into a flow of line nodes at `measure`: a plain or rich paragraph is
+/// woven into justified lines and a list set as its bullets, blocks parted by a paragraph skip. Only the
+/// block kinds a callout body carries are set -- a `#styled-box` wraps running prose, not a heading, a
+/// figure or a table -- so any other block is passed over.
+#[allow(clippy::too_many_arguments)]
+fn box_flow(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style:		Style,
+	measure:	Sp,
+	blocks:		&[Block],
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	seen:		&mut HashSet<String>,
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
+)
+	-> Outcome<()>
+{
+	let mut first = true;
+	for block in blocks {
+		if !first {
+			nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+		}
+		match block {
+			Block::Paragraph { text } => {
+				let pieces = vec![Piece::Text { text: text.clone(), role: Role::Body }];
+				let lines = res!(break_paragraph_pieces(
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+				nodes.extend(lines);
+			},
+			Block::RichParagraph { segments } => {
+				let pieces = res!(build_pieces(
+					fonts.clone(), geom, style, segments, foot_no, ref_no, seen, bib, refs));
+				let lines = res!(break_paragraph_pieces(
+					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+				nodes.extend(lines);
+			},
+			Block::List { ordered, items } => {
+				res!(list(
+					nodes, fonts.clone(), geom, style, measure, *ordered, items,
+					foot_no, ref_no, seen, bib, refs));
+			},
+			_ => {},
+		}
+		first = false;
+	}
+	Ok(())
 }
 
 /// Appends a horizontal rule -- a standalone `#line(...)` divider -- as a filled grey bar of the given
