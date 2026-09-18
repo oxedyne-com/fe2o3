@@ -792,4 +792,69 @@ mod tests {
 		assert_eq!(heads[1].number, "1.1", "the level-2 heading, outside the rule, keeps the default number");
 		Ok(())
 	}
+
+	/// A `#show par: set text(size: 9pt)` rule wraps the paragraph the heading keeps with in a single-block
+	/// `Scoped`, and `walk`'s lookahead descends that scope: the heading still keeps its following line (the
+	/// keep box holds two HBoxes, not a stranded one), and the kept line is set at the scoped 9pt -- exactly
+	/// the height a theme whose body size is 9pt directly produces (positive). Without the rule the keep box
+	/// is unchanged (negative). Guards the scope-transparent keep-with-next fix (L1-c1); before it, the
+	/// `Scoped`-wrapped paragraph was invisible to the lookahead and the heading stranded.
+	#[test]
+	fn par_rule_keeps_with_heading_through_its_scope() -> Outcome<()> {
+		use std::sync::Arc;
+		use crate::doc::{author, HeadingStyle};
+		use crate::ir::{Node, Sp};
+
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= crate::page::PageGeometry::a4();
+		let faces	= crate::fonts::FaceResolver::default();
+
+		// DocInline sets the heading as an inline sub-heading that keeps with its following paragraph.
+		let mut theme = Theme::default();
+		theme.heading.kind = HeadingStyle::DocInline;
+
+		let blocks = || vec![
+			heading(2),
+			Block::Paragraph { text: "Body after the heading, long enough to keep on its own line.".to_string() },
+		];
+
+		// The heading's keep VBox as its list of HBox heights: HBox[0] is the shaped heading line, HBox[1] is
+		// the following paragraph's first line, pulled into the keep box.
+		let keep_hboxes = |base: &Theme, rules_src: &str| -> Outcome<Vec<i32>> {
+			let mut refusals	= Refusals::default();
+			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let mut bs			= blocks();
+			apply_rules(&mut bs, &rules);
+			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			for n in &doc.nodes {
+				if let Node::VBox(b) = n {
+					return Ok(b.list.iter().filter_map(|c| match c {
+						Node::HBox(h)	=> Some(h.dims.height.raw()),
+						_				=> None,
+					}).collect());
+				}
+			}
+			Ok(Vec::new())
+		};
+
+		let base	= res!(keep_hboxes(&theme, ""));
+		let ruled	= res!(keep_hboxes(&theme, "#show par: set text(size: 9pt)\n"));
+		// The independent oracle: a theme whose body size is 9pt directly, no authored rule.
+		let mut theme9	= theme.clone();
+		theme9.text.body_size = Sp::from_pt(9.0);
+		let direct	= res!(keep_hboxes(&theme9, ""));
+
+		// The keep box holds two HBoxes in every case: the heading line and the body line it kept with.
+		assert_eq!(base.len(), 2, "the heading must keep its following body line: {:?}", base);
+		assert_eq!(ruled.len(), 2, "the par rule must not strand the heading -- the scope is seen through: {:?}", ruled);
+		assert_eq!(direct.len(), 2, "the direct 9pt oracle keeps likewise: {:?}", direct);
+
+		// Positive: the kept body line takes the rule's 9pt, matching a direct 9pt body theme exactly.
+		assert_eq!(ruled[1], direct[1],
+			"the kept body line must take the scoped 9pt, the same height a direct 9pt theme sets");
+		assert!(ruled[1] < base[1], "the 9pt rule must shrink the kept body line below the default");
+		// Negative: the heading line itself is untouched by a par rule.
+		assert_eq!(ruled[0], base[0], "a par rule must not change the heading line");
+		Ok(())
+	}
 }

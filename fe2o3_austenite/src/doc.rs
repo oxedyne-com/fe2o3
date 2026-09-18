@@ -507,6 +507,26 @@ struct Cont<'a> {
 	theme:	&'a Theme,
 }
 
+/// The paragraph a heading keeps with, seen through any single-block `#show par` scope, and the effective
+/// theme its kept line is broken under. A bare [`Block::Paragraph`] returns its text and `theme` unchanged;
+/// a [`Block::Scoped`] a `par` set-fields rule produced -- always the one-block shape [`rules::wrap_matching`]
+/// makes -- is descended, folding each `patch` onto the theme, so the kept line takes the rule's styling.
+/// Only a single-block scope is seen through: a multi-block chapter scope (from the book assembler) is left
+/// opaque, so a heading never reaches across a chapter boundary to strand its own keep. `None` when the
+/// lookahead is not a paragraph (a figure, a list, another heading), so the heading keeps with nothing.
+fn keep_with_next_para<'a>(look: &'a Block, theme: &Theme) -> Option<(&'a str, Theme)> {
+	match look {
+		Block::Paragraph { text }	=> Some((text.as_str(), theme.clone())),
+		// The exact single-block wrap a `par` rule makes: descend it under the folded theme. A multi-block
+		// scope is not a rule wrap and is left opaque, so the heading does not see through a chapter boundary.
+		Block::Scoped { patch, blocks } if blocks.len() == 1 => {
+			let scoped = { let mut t = theme.clone(); t.apply(patch); t };
+			keep_with_next_para(&blocks[0], &scoped)
+		},
+		_							=> None,
+	}
+}
+
 impl<'a> Authoring<'a> {
 	/// Sets a block slice under `style`, the theme in force for it. A [`Block::Scoped`] overlays its patch
 	/// on `style` and recurses over its own blocks under that scoped theme, so a `#set` inside an included
@@ -647,10 +667,15 @@ impl<'a> Authoring<'a> {
 							None	=> (None, style),
 						}
 					};
-					if let Some(Block::Paragraph { text: para }) = look {
+					// The lookahead is seen through a single-block `#show par` scope, so a rule-wrapped paragraph
+					// keeps with the heading just as a bare one does; `eff_theme` folds any such scope's patch so
+					// the kept line is broken at the scoped size. A bare paragraph returns the theme unchanged, so
+					// the render is byte-identical where no `par` rule wraps it.
+					let kept = look.and_then(|block| keep_with_next_para(block, look_theme));
+					if let Some((para, eff_theme)) = kept {
 						// The first paragraph after a heading opens the section, so it takes no first-line indent.
 						let mut lines = res!(break_paragraph(
-							self.fonts.clone(), Role::Body, Dir::Ltr, look_theme.text.body_size, para, self.measure, look_theme.text.leading, look_theme.text.hyphenate));
+							self.fonts.clone(), Role::Body, Dir::Ltr, eff_theme.text.body_size, para, self.measure, eff_theme.text.leading, eff_theme.text.hyphenate));
 						if !lines.is_empty() {
 							keep.push(lines.remove(0));	// the first line joins the heading
 							rest = lines;				// its leading glue and the remaining lines follow
