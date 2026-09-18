@@ -279,4 +279,5 @@ pub enum Inline {
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
 	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
+	MarginNote(String),	// #claim-label(<code>..), its compressed code drawn in the outside margin, nothing in the body
 }

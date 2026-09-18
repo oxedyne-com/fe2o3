@@ -203,6 +203,7 @@ fn lower_inline(run: &Inline) -> Segment {
 								=> Segment::glossary(term.clone(), display.clone()),
 		Inline::Footnote(note)	=> Segment::footnote(lower_runs(note)),
 		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
+		Inline::MarginNote(display)	=> Segment::margin_note(display.clone()),
 	}
 }
 

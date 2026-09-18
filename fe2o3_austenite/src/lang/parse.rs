@@ -790,12 +790,19 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 			}
 		}
 		// An inline claim marker, `#claim-label(...)` or `#claim-refs(...)`, from the book's claims
-		// machinery. A `claim-label` registers invisible metadata and sets a small code in the outside
-		// margin; a `claim-refs` registers metadata only. Neither places anything in the body text column,
-		// so the marker is consumed and nothing set where it stood, matching Typst's body flow -- the
-		// marginal code is not reproduced, the page having a single text column and no margin placement.
+		// machinery. A `claim-label` registers invisible metadata AND sets a compressed code in the outside
+		// margin: it emits a `MarginNote` run, which sets nothing in the body column but records a zero-width
+		// anchor the overlay pass draws the code against after convergence. A `claim-refs` registers metadata
+		// only, with no visible output, so it is consumed and emits nothing. Either way the body prose closes
+		// over the marker's place, matching Typst's own body flow.
 		if c == '#' {
-			if let Some(next) = claim_call(&chars, i) {
+			if let Some((note, next)) = claim_call(&chars, i) {
+				if let Some(display) = note {
+					if !plain.is_empty() {
+						runs.push(Inline::Text(std::mem::take(&mut plain)));
+					}
+					runs.push(Inline::MarginNote(display));
+				}
 				i = next;
 				continue;
 			}
@@ -1385,21 +1392,131 @@ fn cite_keys(inner: &str) -> Vec<String> {
 	keys
 }
 
-/// Reads an inline `#claim-label(...)` or `#claim-refs(...)` at `i` (a `#`), returning the index just
-/// past the closing `)`. Both are the book's claims plumbing: `claim-label` registers invisible metadata
-/// and sets a compressed code string in the outside margin, `claim-refs` registers metadata only, and
-/// neither sets anything in the body text column. The reader consumes the call and sets nothing where it
-/// stood, so the raw markup no longer leaks and the surrounding prose closes over the gap as Typst's body
-/// does. The marginal code annotation is not reproduced: the page carries a single text column with no
-/// margin-placement facility. `None` when the shape is not a claim call or its parentheses do not close.
-fn claim_call(chars: &[char], i: usize) -> Option<usize> {
-	let open = at_lit(chars, i, "#claim-label")
-		.or_else(|| at_lit(chars, i, "#claim-refs"))?;
+/// Reads an inline `#claim-label(...)` or `#claim-refs(...)` at `i` (a `#`), returning the compressed
+/// margin code it sets (if any) and the index just past the closing `)`. `#claim-label(..codes)` places a
+/// compressed code string in the outside margin, so it yields `Some(display)`: the codes joined, with a
+/// run of three or more consecutive same-prefix codes collapsed to a range (`B1 B2 B3 B4` -> `B1–4`),
+/// matching the book's `claims.typ` `_compress-codes`. `#claim-refs(..codes)` registers reverse-index
+/// metadata only, with no visible output, so it yields `None` for the code while still being consumed.
+/// Neither sets anything in the body text column, so the surrounding prose closes over the marker's place
+/// as Typst's own body flow does. The outer `None` is returned when the shape is not a claim call or its
+/// parentheses do not close.
+fn claim_call(chars: &[char], i: usize) -> Option<(Option<String>, usize)> {
+	let (open, is_label) = match at_lit(chars, i, "#claim-label") {
+		Some(o)	=> (o, true),
+		None	=> (at_lit(chars, i, "#claim-refs")?, false),
+	};
 	if chars.get(open) != Some(&'(') {
 		return None;
 	}
-	let (_, next) = read_group(chars, open)?;
-	Some(next)
+	let (inner, next) = read_group(chars, open)?;
+	if !is_label {
+		return Some((None, next));	// metadata-only: consumed, nothing set
+	}
+	let display = compress_codes(&claim_codes(&inner));
+	let out = if display.trim().is_empty() { None } else { Some(display) };
+	Some((out, next))
+}
+
+/// The claim codes named inside a `#claim-label`/`#claim-refs` argument list, in source order: each
+/// `<name>` label's name and each `"string"` argument's text, a `<...>` or `"..."` wrapper stripped and
+/// anything else taken as written -- `claims.typ`'s own `str(c)` fallback for a bare argument.
+fn claim_codes(inner: &str) -> Vec<String> {
+	let mut out = Vec::new();
+	for arg in split_claim_args(inner) {
+		let a = arg.trim();
+		if a.is_empty() {
+			continue;
+		}
+		let code = if let Some(rest) = a.strip_prefix('<') {
+			rest.strip_suffix('>').unwrap_or(rest).trim().to_string()
+		} else if a.starts_with('"') {
+			unwrap_arg(a)
+		} else {
+			a.to_string()
+		};
+		if !code.is_empty() {
+			out.push(code);
+		}
+	}
+	out
+}
+
+/// Splits a claim argument list on its top-level commas, holding a `<...>`, `(...)` or `[...]` nesting and
+/// a `"..."` string together so a comma inside one does not split an argument.
+fn split_claim_args(inner: &str) -> Vec<String> {
+	let mut out		= Vec::new();
+	let mut cur		= String::new();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	for c in inner.chars() {
+		match c {
+			'"'								=> { in_str = !in_str; cur.push(c); },
+			'<' | '(' | '[' if !in_str		=> { depth += 1; cur.push(c); },
+			'>' | ')' | ']' if !in_str		=> { depth -= 1; cur.push(c); },
+			',' if depth == 0 && !in_str	=> out.push(std::mem::take(&mut cur)),
+			_								=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
+	}
+	out
+}
+
+/// The margin display for a set of claim codes, a port of `claims.typ`'s `_compress-codes`: two or fewer
+/// codes join with a space unchanged; a run of three or more consecutive codes sharing a letter prefix and
+/// ascending by one collapses to a `first–lastnum` range (an en dash, `B1 B2 B3 B4` -> `B1–4`), a run of
+/// exactly two is left expanded, and a code that does not parse as letters-then-digits is passed through.
+fn compress_codes(codes: &[String]) -> String {
+	if codes.len() <= 2 {
+		return codes.join(" ");
+	}
+	// (prefix, number) for each code that matches `^([A-Za-z]+)(\d+)$`, else `None` for one that does not.
+	let parsed: Vec<Option<(String, u64)>> = codes.iter().map(|s| parse_code(s)).collect();
+	let mut result:	Vec<String>	= Vec::new();
+	let mut i					= 0usize;
+	while i < codes.len() {
+		let prefix = match &parsed[i] {
+			Some((p, _))	=> p.clone(),
+			None			=> { result.push(codes[i].clone()); i += 1; continue; },
+		};
+		// The longest run from `i` sharing the prefix and ascending by one, per the Typst helper.
+		let mut run_end = i;
+		while run_end + 1 < codes.len() {
+			match (&parsed[run_end + 1], &parsed[run_end]) {
+				(Some((np, nn)), Some((_, cn))) if *np == prefix && *nn == cn + 1	=> run_end += 1,
+				_																=> break,
+			}
+		}
+		if run_end > i + 1 {
+			let last_num = match &parsed[run_end] { Some((_, n)) => *n, None => 0 };
+			result.push(fmt!("{}\u{2013}{}", codes[i], last_num));
+		} else if run_end > i {
+			result.push(codes[i].clone());
+			result.push(codes[run_end].clone());
+		} else {
+			result.push(codes[i].clone());
+		}
+		i = run_end + 1;
+	}
+	result.join(" ")
+}
+
+/// A claim code split into its letter prefix and its number, as `claims.typ`'s `^([A-Za-z]+)(\d+)$` match
+/// does: `None` when the code is not one or more ASCII letters followed by one or more ASCII digits and
+/// nothing else.
+fn parse_code(s: &str) -> Option<(String, u64)> {
+	let s		= s.trim();
+	let split	= s.find(|c: char| c.is_ascii_digit())?;
+	let (pre, num) = s.split_at(split);
+	if pre.is_empty() || !pre.chars().all(|c| c.is_ascii_alphabetic()) {
+		return None;
+	}
+	if num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+		return None;
+	}
+	num.parse::<u64>().ok().map(|n| (pre.to_string(), n))
 }
 
 /// Reduces a run of markup to plain display text: the words a reader sees, with the emphasis, code,
@@ -1426,6 +1543,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::Math(_)					=> {},	// maths is dropped from a flattened string
 			Inline::Footnote(_)				=> {},	// a nested footnote is not set within a flattened string
 			Inline::Cite(_)					=> {},	// a citation has no plain form before the bibliography resolves it
+			Inline::MarginNote(_)			=> {},	// a margin code is not part of the flattened body text
 		}
 	}
 	out
@@ -2516,20 +2634,34 @@ mod tests {
 	use super::*;
 	use crate::math::{Atom, MatKind};
 
-	/// A `#claim-label`/`#claim-refs` marker sets nothing in the body, and the prose on either side
-	/// closes over the gap as one text run, so no raw markup leaks.
+	/// A `#claim-label` emits a `MarginNote` carrying its compressed code and sets nothing in the body
+	/// column; a `#claim-refs` is metadata-only and emits nothing. The body prose on either side closes over
+	/// the gap when flattened, so no raw markup leaks.
 	#[test]
-	fn claim_marker_sets_nothing_inline() {
+	fn claim_label_emits_a_margin_note_and_sets_nothing_inline() {
 		let runs = parse_inlines("clinical authority#claim-label(<LS8>) bites hardest.");
-		assert_eq!(runs.len(), 1);
-		match &runs[0] {
-			Inline::Text(t) => assert_eq!(t, "clinical authority bites hardest."),
-			other => panic!("expected one text run, got {:?}", other),
-		}
-		// The multi-code and metadata-only forms are consumed the same way.
+		assert_eq!(runs.len(), 3, "text, margin note, text: got {:?}", runs);
+		assert!(matches!(&runs[0], Inline::Text(t) if t == "clinical authority"));
+		assert!(matches!(&runs[1], Inline::MarginNote(d) if d == "LS8"),
+			"the claim code rides in a margin note: {:?}", runs[1]);
+		assert!(matches!(&runs[2], Inline::Text(t) if t == " bites hardest."));
+		// The margin code is not part of the flattened body text; a metadata-only `claim-refs` emits nothing.
 		assert_eq!(
 			flatten_markup("margins#claim-label(<CD14>, <CD15>, <CD4>) formalised#claim-refs(<A1>)."),
 			"margins formalised.");
+	}
+
+	/// `_compress-codes`: a run of three or more consecutive same-prefix codes collapses to an en-dash
+	/// range, a pair stays expanded, two or fewer codes join unchanged, and an unparseable run passes through.
+	#[test]
+	fn claim_codes_compress_consecutive_runs() {
+		let display = |s: &str| parse_inlines(s).into_iter()
+			.find_map(|r| match r { Inline::MarginNote(d) => Some(d), _ => None })
+			.unwrap_or_default();
+		assert_eq!(display("x#claim-label(<B1>, <B2>, <B3>, <B4>)"), "B1\u{2013}4");	// B1–4
+		assert_eq!(display("x#claim-label(<A1>, <A2>)"), "A1 A2");
+		assert_eq!(display("x#claim-label(<CD14>, <CD15>, <CD4>)"), "CD14 CD15 CD4");
+		assert_eq!(display("x#claim-label(<LS8>)"), "LS8");
 	}
 
 	/// A line that opens with a claim marker is prose, not a standalone call the line scanner skips, so

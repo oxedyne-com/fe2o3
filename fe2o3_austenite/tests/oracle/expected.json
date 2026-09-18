@@ -2,5 +2,6 @@
 	{ "name": "cheapthinking-ch03", "pages": 6, "anchors": 3, "pdf_sha256": "80810813aec55b5d619e701d004ad5ce8e51ba44c441921a163739cfc74a25af" },
 	{ "name": "oxeweb-overview", "pages": 36, "anchors": 131, "pdf_sha256": "51def2ce37dc33113eeaf0096a3c053fe42ab3700c209b527653f3c4d085fcda" },
 	{ "name": "oxeweb-techspec", "pages": 144, "anchors": 567, "pdf_sha256": "a3475b153ffd942073cfa06d71c04fe91a275114868ea2cd3189857e319041d2" },
-	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204" }
+	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204" },
+	{ "name": "marginalia-fixture", "pages": 2, "anchors": 3, "pdf_sha256": "2db3749a1bc790f159e627996667f956ece55d4511392bb52a82207da9b98224" }
 ]}

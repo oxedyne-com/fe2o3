@@ -105,6 +105,15 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own marginalia fixture -- the A1 MARGINALIA primitive's regression root. It sets a
+			// `#claim-label(...)` code in the outside margin on a recto and a verso leaf; see the file for why
+			// it is self-contained and needs no symbol-modifier patch.
+			name:				"marginalia-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/marginalia_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

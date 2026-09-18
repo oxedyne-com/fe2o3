@@ -27,6 +27,7 @@ pub enum AnchorKind {
 	Float,		// a figure or table, placed away from its anchor
 	Citation,	// a bibliographic reference
 	Equation,	// a numbered display equation
+	MarginNote,	// a marginal claim-code annotation, drawn post-convergence in the outside margin
 }
 
 impl AnchorKind {
@@ -38,6 +39,7 @@ impl AnchorKind {
 			AnchorKind::Float		=> 3,
 			AnchorKind::Citation	=> 4,
 			AnchorKind::Equation	=> 5,
+			AnchorKind::MarginNote	=> 6,
 		}
 	}
 
@@ -49,8 +51,9 @@ impl AnchorKind {
 			3 => Ok(AnchorKind::Float),
 			4 => Ok(AnchorKind::Citation),
 			5 => Ok(AnchorKind::Equation),
+			6 => Ok(AnchorKind::MarginNote),
 			_ => Err(err!(
-				"Anchor kind tag {} is not one of the six known kinds.", tag; Input, Invalid)),
+				"Anchor kind tag {} is not one of the seven known kinds.", tag; Input, Invalid)),
 		}
 	}
 
@@ -64,6 +67,7 @@ impl AnchorKind {
 			AnchorKind::Float		=> "float",
 			AnchorKind::Citation	=> "citation",
 			AnchorKind::Equation	=> "equation",
+			AnchorKind::MarginNote	=> "margin_note",
 		}
 	}
 }

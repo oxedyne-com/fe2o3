@@ -23,6 +23,7 @@ use crate::ir::{
 	Penalty,
 	Sp,
 };
+use crate::ledger::AnchorId;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -80,6 +81,11 @@ pub fn break_paragraph(
 pub enum Piece {
 	Text { text: String, role: Role },
 	Mark(Leaf),	// a footnote mark, already shaped as a raised superscript (LeafKind::Mark)
+	// A zero-width anchor woven into the line at the point it was authored, recording where an identity
+	// landed without occupying any horizontal space -- the marginalia anchor, whose margin note is drawn
+	// post-convergence from the ledger. It never removes a break opportunity: the line breaks exactly as
+	// it would with the anchor absent, so a paragraph carrying one sets byte-identically to one that does not.
+	Anchor(AnchorId),
 	Math {		// an inline maths box, already flattened to leaves and glue by math::layout
 		nodes:	Vec<Node>,
 		width:	Sp,
@@ -129,6 +135,13 @@ pub fn break_paragraph_pieces(
 					kind: Kind::Mark(leaf.clone()), width: leaf.dims.width, stretch: Sp::ZERO,
 					shrink: Sp::ZERO, penalty: Penalty::INFINITY, flagged: false, hyphen: None });
 			},
+			Piece::Anchor(id) => {
+				// Zero of everything: no width to shift a break, an infinite penalty so it is never itself a
+				// breakpoint, and `is_break` looks through it so the glue beside it breaks as if it were absent.
+				items.push(Item {
+					kind: Kind::Anchor(id.clone()), width: Sp::ZERO, stretch: Sp::ZERO,
+					shrink: Sp::ZERO, penalty: Penalty::INFINITY, flagged: false, hyphen: None });
+			},
 			Piece::Math { nodes, width, height, depth, over } => {
 					// A rigid cluster, like a very wide box: it never breaks, and the space after it may.
 					items.push(Item {
@@ -157,6 +170,7 @@ enum Kind {
 	Glued,
 	Pen,
 	Mark(Leaf),
+	Anchor(AnchorId),			// a zero-width position marker woven into the line, drawn as a `Node::Anchor`
 	Math {						// an inline maths box: pre-built leaves and glue, its own extent
 		nodes:	Vec<Node>,
 		height:	Sp,
@@ -375,13 +389,32 @@ fn push_word(
 fn is_break(items: &[Item], i: usize) -> bool {
 	match items[i].kind {
 		Kind::Glued		=> i > 0
-							&& matches!(items[i - 1].kind, Kind::Boxed(_) | Kind::Mark(_) | Kind::Math { .. })
+							&& prev_is_boxlike(items, i)
 							&& items[i].penalty < Penalty::INFINITY,
 		Kind::Pen		=> items[i].penalty < Penalty::INFINITY,
 		Kind::Boxed(_)	=> false,
 		Kind::Mark(_)	=> false,		// a mark clings to its word; the space after it may break
+		Kind::Anchor(_)	=> false,		// a zero-width anchor never breaks; the glue beside it may
 		Kind::Math { .. }	=> false,	// a maths box is rigid; the space after it may break
 	}
+}
+
+/// Is the item before glue `i` one a space can break after -- a word, a mark or a maths box? A zero-width
+/// [`Kind::Anchor`] is looked through, not counted: it neither is a breakable box nor blocks the space from
+/// breaking after the box before it, so a line carrying a margin anchor breaks exactly as the same line
+/// without one would. Without this the anchor would sit between a word and its trailing space and forbid
+/// the break there, moving the line ends of a paragraph that carries a claim code.
+fn prev_is_boxlike(items: &[Item], i: usize) -> bool {
+	let mut j = i;
+	while j > 0 {
+		j -= 1;
+		match items[j].kind {
+			Kind::Anchor(_)	=> continue,	// look through it to the real box before
+			Kind::Boxed(_) | Kind::Mark(_) | Kind::Math { .. }	=> return true,
+			_				=> return false,
+		}
+	}
+	false
 }
 
 /// Was the break at predecessor position `pos` flagged? The sentinel start (`-1`) never was.
@@ -597,6 +630,12 @@ fn set_lines(
 					if leaf.dims.height > height { height = leaf.dims.height; }
 					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 					children.push(Node::Leaf(leaf));
+				},
+				Kind::Anchor(id) => {
+					// A zero-width marker: it draws no ink and takes no height or depth, so it neither
+					// advances the line's cursor nor raises its extent. The driver records where it landed
+					// when it places the line, which is the (x, y) the margin note is drawn against.
+					children.push(Node::Anchor(id.clone()));
 				},
 				Kind::Math { nodes, height: mh, depth: md, over: mo } => {
 					// The cluster's leaves are already seated by shift. It asks for the line's own text

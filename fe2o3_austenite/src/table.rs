@@ -430,6 +430,7 @@ fn cell_pieces(
 				}
 			},
 			Segment::Footnote { .. }	=> {},	// a footnote in a cell is not set at this increment
+			Segment::MarginNote(_)	=> {},	// a margin note in a cell sets nothing here
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
@@ -703,6 +704,18 @@ fn greedy_break_cell(
 					height:			leaf.dims.height,
 					depth:			leaf.dims.depth,
 					space_before:	Sp::ZERO,	// a mark clings to the word before it
+				});
+				pending = 0;
+			},
+			Piece::Anchor(id) => {
+				// A margin note authored inside a cell: a zero-width marker carried so the driver records
+				// where it landed and the overlay draws its code, occupying none of the cell's width.
+				units.push(Unit {
+					node:			Node::Anchor(id.clone()),
+					width:			Sp::ZERO,
+					height:			Sp::ZERO,
+					depth:			Sp::ZERO,
+					space_before:	Sp::ZERO,
 				});
 				pending = 0;
 			},

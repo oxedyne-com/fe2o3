@@ -115,6 +115,7 @@ pub enum Segment {
 	Code(String),	// an inline code span, set in the mono face
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use, plain after
 	Cite(Vec<String>),	// a citation, resolved to "(Author Year)" against the bibliography
+	MarginNote(String),	// a `#claim-label(...)`'s compressed code, drawn in the outside margin; sets nothing in the body column
 }
 
 impl Segment {
@@ -160,6 +161,10 @@ impl Segment {
 
 	pub fn cite(keys: Vec<String>) -> Self {
 		Self::Cite(keys)
+	}
+
+	pub fn margin_note<S: Into<String>>(display: S) -> Self {
+		Self::MarginNote(display.into())
 	}
 }
 
@@ -494,6 +499,7 @@ struct Authoring<'a> {
 	part_no:		u32,
 	foot_no:		u32,
 	ref_no:			u32,
+	margin_no:		u32,	// a document-order counter making each margin note's anchor identity unique
 	eq_no:			u32,
 	fig_no:			u32,
 	counters:		HashMap<String, u32>,
@@ -732,7 +738,7 @@ impl<'a> Authoring<'a> {
 						pieces.push(indent_piece(style.par.indent));
 					}
 					pieces.extend(res!(build_pieces(
-						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs)));
+						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs)));
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
 					self.nodes.extend(lines);
@@ -744,7 +750,7 @@ impl<'a> Authoring<'a> {
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
-					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs));
+					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -909,7 +915,7 @@ impl<'a> Authoring<'a> {
 					let fill = scoped.callout.fill;
 					res!(styled_box(
 						&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-						&mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs));
+						&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
 					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					i += 1;
 					self.first = false;
@@ -970,6 +976,7 @@ pub fn author(
 		part_no:	0,
 		foot_no:	0,
 		ref_no:		0,
+		margin_no:	0,
 		eq_no:		0,
 		fig_no:		0,
 		counters:	HashMap::new(),
@@ -1119,6 +1126,7 @@ fn build_pieces(
 	segments:	&[Segment],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
@@ -1211,9 +1219,30 @@ fn build_pieces(
 				};
 				pieces.push(Piece::Text { text, role: Role::Body });
 			},
+			Segment::MarginNote(display) => {
+				// A margin note sets nothing in the body column: it weaves a zero-width anchor into the line
+				// at this point, recording where it landed so `decorate` draws the compressed code in the
+				// outside margin after convergence. The identity carries a document-order ordinal, so two
+				// identical codes stay distinct in the ledger, and the display text itself, which `decorate`
+				// reads back from the key -- no side table has to be threaded out of the layout.
+				*margin_no += 1;
+				let key = fmt!("{}\u{1f}{}", *margin_no, display);
+				pieces.push(Piece::Anchor(AnchorId::new(AnchorKind::MarginNote, key)));
+			},
 		}
 	}
 	Ok(pieces)
+}
+
+/// The compressed code a margin note's anchor key carries, recovered for [`decorate`] to draw: the key is
+/// `<ordinal>\u{1f}<display>`, the ordinal making the identity unique and the display the words. An
+/// unexpected key with no separator yields the empty string, so a stray anchor draws nothing rather than
+/// its own bookkeeping.
+fn margin_display(key: &str) -> &str {
+	match key.split_once('\u{1f}') {
+		Some((_, display))	=> display,
+		None				=> "",
+	}
 }
 
 /// Builds one inline cross-reference: a reserved leaf, unique by the running `ref_no`, that reserves a
@@ -1254,6 +1283,7 @@ fn list(
 	items:		&[ListEntry],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
@@ -1294,7 +1324,7 @@ fn list(
 		if idx > 0 {
 			nodes.push(Node::Glue(Glue::fixed(item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, seen, bib, refs));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, margin_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
@@ -1306,7 +1336,7 @@ fn list(
 				nodes.push(Node::Glue(Glue::fixed(item_skip)));
 				let mut sub: Vec<Node> = Vec::new();
 				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
-					foot_no, ref_no, seen, bib, refs));
+					foot_no, ref_no, margin_no, seen, bib, refs));
 				shift_nodes(&mut sub, indent);
 				nodes.extend(sub);
 			}
@@ -1451,6 +1481,7 @@ fn footnote_pieces(
 			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: Role::Body }),
 			Segment::PageRef(_)		=> {},	// a cross-reference in a note carries no reserved slot here
 			Segment::Footnote { .. }	=> {},	// a nested footnote is not set within a footnote
+			Segment::MarginNote(_)	=> {},	// a margin note is not set within a footnote's own body
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
@@ -2033,6 +2064,7 @@ fn captioned(
 										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")))),
 				Segment::PageRef(_)		=> {},	// a cross-reference in a caption is not resolved here
 				Segment::Footnote { .. }	=> {},	// a footnote in a caption is not set here
+				Segment::MarginNote(_)	=> {},	// a margin note in a caption sets nothing here
 				Segment::Super(t) => {
 					let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
 					push_caption_box(&mut toks, &mut pending,
@@ -2919,7 +2951,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 				Segment::Glossary { display, .. }		=> count_str(display, n),
 				Segment::Footnote { note }				=> count_segs(note, n),
 				Segment::Cite(keys)						=> for k in keys { count_str(k, n); },
-				Segment::PageRef(_) | Segment::Math(_)	=> {},
+				Segment::PageRef(_) | Segment::Math(_) | Segment::MarginNote(_)	=> {},
 			}
 		}
 	}
@@ -3209,6 +3241,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::PageRef(_)				=> {},
 			Segment::Footnote { .. }		=> {},
 			Segment::Cite(_)				=> {},
+			Segment::MarginNote(_)			=> {},	// the margin code is not part of the flattened body text
 		}
 	}
 	out
@@ -3258,7 +3291,7 @@ fn inline_segments(
 				}
 				continue;
 			},
-			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_)	=> continue,
+			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_) | Segment::MarginNote(_)	=> continue,
 		};
 		let sh	= res!(ShapedText::new(fonts.clone(), r, Dir::Ltr, size, text));
 		let w	= sh.dims().width;
@@ -3585,11 +3618,12 @@ fn subheading_hbox(
 					children.extend(b.list);
 				}
 			},
-			// A footnote, cross-reference or citation in a heading is vanishingly rare and has no display
-			// form here; it is dropped rather than set, leaving the heading its words.
+			// A footnote, cross-reference, citation or margin note in a heading is vanishingly rare and has no
+			// display form here; it is dropped rather than set, leaving the heading its words.
 			Segment::Footnote { .. }	=> {},
 			Segment::PageRef(_)			=> {},
 			Segment::Cite(_)			=> {},
+			Segment::MarginNote(_)		=> {},
 		}
 	}
 
@@ -3979,6 +4013,7 @@ fn styled_box(
 	fill:		Rgba,
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
@@ -3997,7 +4032,7 @@ fn styled_box(
 	// a leading glue: `place_vbox` seats every child at the content left, so the horizontal inset rides
 	// inside the line rather than on the box.
 	let mut inner:	Vec<Node>	= Vec::new();
-	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, seen, bib, refs));
+	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, margin_no, seen, bib, refs));
 	for node in inner.iter_mut() {
 		if let Node::HBox(b) = node {
 			b.list.insert(0, Node::Glue(Glue::fixed(inset_x)));
@@ -4028,6 +4063,37 @@ fn styled_box(
 	Ok(())
 }
 
+/// Measures a block flow without placing it: the blocks are set at `measure` exactly as [`box_flow`] sets
+/// them, and the stacked vertical extent is returned as [`Dims`] -- `width` the measure, `height` the sum of
+/// the flow's node extents, `depth` zero. The overlay pass sizes a note this way before drawing it, the same
+/// measure Typst's own `measure(content)` gives. The document-order counters a full render threads are
+/// throwaway here (a measure numbers nothing), so a footnote or reference inside the measured blocks counts
+/// only within this scratch flow and never reaches the document.
+pub fn measure_blocks(
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style: &Theme,
+	measure:	Sp,
+	blocks:		&[Block],
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
+)
+	-> Outcome<Dims>
+{
+	let mut nodes:		Vec<Node>		= Vec::new();
+	let mut foot_no						= 0u32;
+	let mut ref_no						= 0u32;
+	let mut margin_no					= 0u32;
+	let mut seen:		HashSet<String>	= HashSet::new();
+	res!(box_flow(&mut nodes, fonts, geom, style, measure, blocks,
+		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, bib, refs));
+	let mut height = Sp::ZERO;
+	for n in &nodes {
+		height += n.vextent();
+	}
+	Ok(Dims::new(measure, height, Sp::ZERO))
+}
+
 /// Lays a callout's inner blocks into a flow of line nodes at `measure`: a plain or rich paragraph is
 /// woven into justified lines and a list set as its bullets, blocks parted by a paragraph skip. Only the
 /// block kinds a callout body carries are set -- a `#styled-box` wraps running prose, not a heading, a
@@ -4042,6 +4108,7 @@ fn box_flow(
 	blocks:		&[Block],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
@@ -4049,7 +4116,7 @@ fn box_flow(
 	-> Outcome<()>
 {
 	let mut first = true;
-	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, seen, bib, refs, &mut first));
+	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, margin_no, seen, bib, refs, &mut first));
 	Ok(())
 }
 
@@ -4067,6 +4134,7 @@ fn box_flow_scoped(
 	blocks:		&[Block],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
+	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
@@ -4078,7 +4146,7 @@ fn box_flow_scoped(
 		if let Block::Scoped { patch, blocks: inner } = block {
 			let scoped = { let mut t = style.clone(); t.apply(patch); t };
 			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner,
-				foot_no, ref_no, seen, bib, refs, first));
+				foot_no, ref_no, margin_no, seen, bib, refs, first));
 			continue;
 		}
 		if !*first {
@@ -4093,7 +4161,7 @@ fn box_flow_scoped(
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
-					fonts.clone(), geom, style, segments, foot_no, ref_no, seen, bib, refs));
+					fonts.clone(), geom, style, segments, foot_no, ref_no, margin_no, seen, bib, refs));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
 				nodes.extend(lines);
@@ -4101,7 +4169,7 @@ fn box_flow_scoped(
 			Block::List { ordered, items } => {
 				res!(list(
 					nodes, fonts.clone(), geom, style, measure, *ordered, items,
-					foot_no, ref_no, seen, bib, refs));
+					foot_no, ref_no, margin_no, seen, bib, refs));
 			},
 			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
 			// set in the mono face at the scoped `code.size`, the same as a top-level code block. Without this
@@ -4287,6 +4355,63 @@ pub fn decorate(
 			// Recto: title at the inner (spine) edge, its box top a full ascent above the head baseline.
 			place_run(&mut page.frame, &rnodes, content_left, head_base - rd.height);
 		}
+	}
+
+	// The overlay's second job: the marginalia the composition recorded, drawn on every page from the same
+	// converged ledger the running head reads. A run over all pages, separate from the running-head loop's
+	// front-matter and part-page early-outs, since a margin note belongs to its own body page regardless of
+	// that page's running-head treatment.
+	for page in pages.iter_mut() {
+		res!(draw_marginalia(page, ledger, fonts, style, geom));
+	}
+	Ok(())
+}
+
+/// Draws the marginalia the composition recorded: each `#claim-label(...)`'s compressed code, set at the
+/// corpus's 6.5 pt `luma(90)` grey in the outside margin at the vertical position its zero-width anchor
+/// landed. It is the overlay pass's second job beside the running head -- both are zero-flow ink drawn from
+/// the converged ledger, so neither can reopen the fixed point. The frame is laid at the recto split, so a
+/// recto note seats flush against the block's right (its outer edge) and a verso note flush against the
+/// block's left, which `ingot`'s mirror shift then carries out to the fore-edge -- the same mirror the folio
+/// rides. The code's baseline is seated on the body baseline of the line its anchor sits in, so it lines up
+/// with the prose it annotates rather than floating at the line top.
+fn draw_marginalia(
+	page:	&mut Page,
+	ledger:	&Ledger,
+	fonts:	&Arc<FontSet>,
+	style: &Theme,
+	geom:	PageGeometry,
+)
+	-> Outcome<()>
+{
+	let content_left	= geom.content_left();
+	let content_width	= geom.content_width();
+	let size	= Sp::from_pt(6.5);
+	let colour	= Rgba::opaque(90, 90, 90);	// Typst's `luma(90)`
+	// The body ascent, so the small code's baseline meets the prose baseline of the line it annotates.
+	let body_asc = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "Ag")).dims().height;
+	for anchor in ledger.anchors() {
+		if anchor.id.kind != AnchorKind::MarginNote || anchor.pos.page != page.number {
+			continue;
+		}
+		let display = margin_display(&anchor.id.key);
+		if display.is_empty() {
+			continue;
+		}
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, display)).with_colour(colour);
+		let d		= shaped.dims();
+		// Horizontal, in recto (binding-left) coordinates: a recto page seats the code's left edge at the
+		// block's right edge (the outer margin); a verso page seats its right edge at the block's left edge,
+		// which the verso mirror shift `ingot` applies afterwards carries out to the fore-edge.
+		let x = if page.number % 2 == 0 {
+			content_left - d.width
+		} else {
+			content_left + content_width
+		};
+		// Vertical: the anchor's y is the top of the line it landed in; the line's baseline is a body ascent
+		// below that, and the code is lifted by its own height so its baseline -- not its top -- meets it.
+		let y = anchor.pos.y + body_asc - d.height;
+		page.frame.push(Placed::new(x, y, d, PlacedKind::Text(shaped)));
 	}
 	Ok(())
 }
@@ -4750,6 +4875,106 @@ an interior line justification fills to the measure while ragged setting does no
 		absent.heading.face = Some("NoSuchDisplayFace".to_string());
 		assert!(matches!(resolved_head_face(2, &absent, &faces, false), HeadFace::Role(_)),
 			"an unresolvable face must fall to a role face");
+		Ok(())
+	}
+
+	/// A margin note's anchor is zero flow extent: the body it sits in sets byte-identically to the same body
+	/// without it. The driver's frames (which carry no marginalia -- that is `decorate`'s overlay) must match
+	/// placement for placement whether or not a `#claim-label` splits the paragraph, so the anchor cannot
+	/// perturb a line or page break. This is the unit-level shadow of the oracle's byte-identity gate.
+	#[test]
+	fn margin_anchor_is_zero_extent_body_is_byte_identical() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let body	= "The claim sits amid a paragraph long enough to wrap across several justified \
+					lines so a zero-width anchor woven into it has every chance to shift a break if it were \
+					not truly weightless, which is exactly what must not happen.";
+		// Same body, but a `#claim-label` splits it after the third word -- the anchor lands mid-line.
+		let plain	= vec![Block::rich(vec![Segment::text(body)])];
+		let (head, tail) = body.split_at(body.find("amid").unwrap_or(0) + 4);
+		let noted	= vec![Block::rich(vec![
+			Segment::text(head), Segment::margin_note("A1"), Segment::text(tail)])];
+
+		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+		let (doc_p, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &plain, None, None));
+		let (doc_n, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &noted, None, None));
+		let out_p		= res!(crate::driver::run(&doc_p, &metrics, crate::driver::Config::default()));
+		let out_n		= res!(crate::driver::run(&doc_n, &metrics, crate::driver::Config::default()));
+
+		assert_eq!(out_p.pages.len(), out_n.pages.len(), "the anchor must not change the page count");
+		for (pp, pn) in out_p.pages.iter().zip(out_n.pages.iter()) {
+			assert_eq!(pp.frame.placed.len(), pn.frame.placed.len(),
+				"the anchor draws no body ink, so the frames must carry the same number of placed boxes");
+			for (a, b) in pp.frame.placed.iter().zip(pn.frame.placed.iter()) {
+				assert_eq!((a.x, a.y), (b.x, b.y),
+					"every body box must land where it did without the anchor");
+			}
+		}
+		// The noted run recorded exactly one margin anchor; the plain run recorded none.
+		let count = |o: &crate::driver::CompileOutput| o.ledger.anchors()
+			.filter(|a| a.id.kind == crate::ledger::AnchorKind::MarginNote).count();
+		assert_eq!(count(&out_n), 1, "the claim label records one margin anchor");
+		assert_eq!(count(&out_p), 0, "the plain body records none");
+		Ok(())
+	}
+
+	/// The overlay pass draws a recorded margin note in the outside margin -- flush against the block's right
+	/// edge on a recto page, and against its left edge on a verso page (which the frame mirror then carries to
+	/// the fore-edge) -- at the corpus's 6.5 pt, and never inside the text block.
+	#[test]
+	fn draw_marginalia_places_the_code_in_the_outside_margin_both_sides() -> Outcome<()> {
+		use crate::ledger::{Anchor, Position};	// AnchorId, AnchorKind, Ledger are already in scope
+
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let cl		= geom.content_left();
+		let cw		= geom.content_width();
+
+		// One ledger, the same code recorded on a recto (page 1) and a verso (page 2) at a mid-block y.
+		let y = geom.content_top() + Sp::from_pt(120.0);
+		let mut ledger = Ledger::new();
+		ledger.record(Anchor::new(AnchorId::new(AnchorKind::MarginNote, "1\u{1f}A1"), Position::new(1, cl, y)));
+		ledger.record(Anchor::new(AnchorId::new(AnchorKind::MarginNote, "2\u{1f}B4"), Position::new(2, cl, y)));
+
+		// Recto (page 1): the code's left edge seats at the block's right edge, in the outer margin.
+		let mut recto = Page::new(1, geom, Frame::new());
+		res!(draw_marginalia(&mut recto, &ledger, &fonts, &style, geom));
+		let rp = recto.frame.placed.iter().find(|p| matches!(p.kind, PlacedKind::Text(_)))
+			.ok_or_else(|| err!("the recto margin note was not drawn"; Test, Missing))?;
+		assert_eq!(rp.x, cl + cw, "a recto note's left edge sits at the block's right (outer) edge");
+		assert!(rp.dims.height.raw() > 0, "the note has real shaped extent");
+
+		// Verso (page 2): the code's right edge seats at the block's left edge; the frame mirror carries it out.
+		let mut verso = Page::new(2, geom, Frame::new());
+		res!(draw_marginalia(&mut verso, &ledger, &fonts, &style, geom));
+		let vp = verso.frame.placed.iter().find(|p| matches!(p.kind, PlacedKind::Text(_)))
+			.ok_or_else(|| err!("the verso margin note was not drawn"; Test, Missing))?;
+		assert_eq!(vp.x + vp.dims.width, cl, "a verso note's right edge sits at the block's left edge");
+		Ok(())
+	}
+
+	/// `measure_blocks` sizes a block flow without placing it: a paragraph measures a positive height at the
+	/// measure width, an empty flow measures zero, and the same blocks measure the same height twice.
+	#[test]
+	fn measure_blocks_sizes_a_flow() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let measure	= geom.content_width();
+		let refs	= HashMap::new();
+
+		let blocks	= vec![Block::rich(vec![Segment::text(
+			"A paragraph with enough words to wrap onto at least a second line at this measure.")])];
+		let d1 = res!(measure_blocks(fonts.clone(), geom, &style, measure, &blocks, None, &refs));
+		let d2 = res!(measure_blocks(fonts.clone(), geom, &style, measure, &blocks, None, &refs));
+		assert_eq!(d1.width, measure, "the measured width is the measure it was set at");
+		assert!(d1.height.raw() > 0, "a real paragraph has positive height");
+		assert_eq!(d1.height, d2.height, "measuring is deterministic");
+
+		let empty = res!(measure_blocks(fonts, geom, &style, measure, &[], None, &refs));
+		assert_eq!(empty.height, Sp::ZERO, "an empty flow measures zero height");
 		Ok(())
 	}
 }
