@@ -44,7 +44,7 @@ use oxedyne_fe2o3_graphics::{
 /// short run; a whole book streams to a file with [`stream_document`] instead, which never holds more
 /// than one page's outlines. The bytes are the same either way.
 pub fn render_document(pages: &[Page]) -> Outcome<Vec<u8>> {
-	let mut writer = PdfWriter::new();
+	let mut writer = PdfWriter::new().with_compression(true);
 	for page in pages {
 		writer.add_page(res!(render_page(page)));
 	}
@@ -56,10 +56,10 @@ pub fn render_document(pages: &[Page]) -> Outcome<Vec<u8>> {
 /// This is the streaming half of the emitter, and the reason a whole-book compile is flat in memory:
 /// the caller composes one page, calls [`write_page`] to serialise it to `out`, then drops the page's
 /// frame, so neither the engine nor the writer ever holds every page's glyph outlines at once. Close
-/// the stream with [`PdfStream::finish`] once all `total` pages are written. Compression is off, as
+/// the stream with [`PdfStream::finish`] once all `total` pages are written. Compression is on, as
 /// [`render_document`] leaves it, so the two produce identical bytes.
 pub fn open_document<W: Write>(out: W, total: usize) -> Outcome<PdfStream<W>> {
-	PdfStream::new(out, total, false)
+	PdfStream::new(out, total, true)
 }
 
 /// As [`open_document`], but the file also carries a document outline (the viewer's bookmark side
@@ -72,7 +72,7 @@ pub fn open_document_with_outline<W: Write>(
 )
 	-> Outcome<PdfStream<W>>
 {
-	PdfStream::new_with_outline(out, total, false, outline)
+	PdfStream::new_with_outline(out, total, true, outline)
 }
 
 /// Renders one page's frame to the open PDF stream. The page's outlines live only for this call: the

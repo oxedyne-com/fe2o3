@@ -870,14 +870,27 @@ fn dec6(v: f64) -> String {
 	if t.is_empty() { "0".to_string() } else { t.to_string() }
 }
 
-/// A length or coordinate in its shortest exact decimal. Rust's own float formatting already gives
-/// the shortest form that reads back to the same value.
+/// A length or coordinate to three decimal places, trailing zeros and the point trimmed. Three places
+/// is a thousandth of a point -- far below any renderer's resolution -- so nothing visible is lost,
+/// while a coordinate like `841.8897705078125` shrinks to `841.89`: coordinate digits are about a
+/// third of a content stream's bytes, and full f32 precision spends them on noise. The rounding is
+/// deterministic (round-half-to-even), which the content-addressed file needs.
 fn numf(v: f64) -> String {
-	fmt!("{}", v)
+	trim_dec(fmt!("{:.3}", v))
 }
 
 fn numf32(v: f32) -> String {
-	fmt!("{}", v)
+	trim_dec(fmt!("{:.3}", v))
+}
+
+/// Trims the trailing zeros and any bare point from a fixed-precision decimal, and folds a rounded
+/// `-0` back to `0` so the bytes stay canonical.
+fn trim_dec(s: String) -> String {
+	if !s.contains('.') {
+		return s;
+	}
+	let t = s.trim_end_matches('0').trim_end_matches('.');
+	if t.is_empty() || t == "-0" { "0".to_string() } else { t.to_string() }
 }
 
 /// Zlib-compresses a content stream, for `/FlateDecode`.
@@ -1069,6 +1082,71 @@ mod tests {
 		assert!(!text.contains("/Annots"), "no annotation array when the page carries no link");
 		assert!(!text.contains("/Subtype /Link"), "no link annotation is written");
 		assert_eq!(res!(build()), bytes, "an annot-free page is deterministic");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_coordinate_rounds_to_three_places_10() -> Outcome<()> {
+		// Full f32 precision is spent on noise below a thousandth of a point; three places is far finer
+		// than any renderer resolves. A rounded -0 folds back to 0 so the bytes stay canonical.
+		assert_eq!(numf32(841.8897705078125), "841.89");
+		assert_eq!(numf(3.14159), "3.142");
+		assert_eq!(numf(0.0004), "0");
+		assert_eq!(numf(-0.0004), "0");
+		assert_eq!(numf(12.5), "12.5");
+		assert_eq!(numf(100.0), "100");
+		Ok(())
+	}
+
+	#[test]
+	fn test_compression_shrinks_and_flate_decodes_11() -> Outcome<()> {
+		use flate2::read::ZlibDecoder;
+		use std::io::Read;
+
+		// The same page compressed and uncompressed: the compressed file names /FlateDecode on its content
+		// stream, is smaller, and its stream inflates back to the operators the uncompressed file writes in
+		// the clear.
+		let build = |compress: bool| -> Outcome<Vec<u8>> {
+			let mut w = PdfWriter::new().with_compression(compress);
+			let mut page = PdfPage::new(200.0, 200.0);
+			for i in 0..200 {
+				let o = i as f32 * 0.1;
+				page.fill(res!(Path::rect(Bounds::new(1.0 + o, 1.0 + o, 9.0 + o, 9.0 + o))), Rgba::BLACK);
+			}
+			w.add_page(page);
+			w.to_bytes()
+		};
+		let plain	= res!(build(false));
+		let zipped	= res!(build(true));
+		assert!(zipped.len() < plain.len(),
+			"compression shrank the file: {} < {}", zipped.len(), plain.len());
+		let ztext = String::from_utf8_lossy(&zipped);
+		assert!(ztext.contains("/Filter /FlateDecode"), "the content stream is flate-filtered");
+
+		// The content object is object 4 (catalogue, page tree, page, content); pull its stream bytes and
+		// inflate them.
+		let obj		= b"4 0 obj";
+		let at		= match zipped.windows(obj.len()).position(|w| w == obj) {
+			Some(i)	=> i,
+			None	=> return Err(err!("no content object in the compressed file"; Test)),
+		};
+		let tail	= &zipped[at..];
+		let sopen	= b"stream\n";
+		let sp		= match tail.windows(sopen.len()).position(|w| w == sopen) {
+			Some(i)	=> i + sopen.len(),
+			None	=> return Err(err!("the content object opens no stream"; Test)),
+		};
+		let sclose	= b"\nendstream";
+		let ep		= match tail[sp..].windows(sclose.len()).position(|w| w == sclose) {
+			Some(i)	=> sp + i,
+			None	=> return Err(err!("the content stream is unterminated"; Test)),
+		};
+		let mut dec	= ZlibDecoder::new(&tail[sp..ep]);
+		let mut raw	= Vec::new();
+		res!(dec.read_to_end(&mut raw));
+		let ctext	= String::from_utf8_lossy(&raw);
+		assert!(ctext.contains("1 0 0 -1 0 200 cm"), "the inflated stream holds the page flip");
+		assert!(ctext.contains("\nf\n"), "the inflated stream holds fill operators");
 		Ok(())
 	}
 
