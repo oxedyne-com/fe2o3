@@ -9,11 +9,19 @@
 //! calls), not read back from the document's own Typst labels. A raster sample adds a coarse visual
 //! sanity check where ImageMagick is installed.
 //!
-//! Every external tool -- `typst`, `pdfinfo`, `pdftoppm`, `compare`, `identify` -- is invoked by
-//! [`std::process::Command`], never linked in: a missing or incompatible `typst` (see
-//! [`corpus`]'s doc comment on the `oxeweb` roots) downgrades that root's oracle comparison to a
+//! Every external tool -- `typst`, `pdfinfo`, `pdftoppm`, `compare`, `identify`, `sha256sum` -- is
+//! invoked by [`std::process::Command`], never linked in: a missing or incompatible `typst` (see
+//! [`corpus`]'s doc comment on the `oxeweb-techspec` root) downgrades that root's oracle comparison to a
 //! recorded note rather than failing the whole suite, since the Austenite-only side -- did it compile,
 //! how many pages, how many anchors -- is still a real regression signal on its own.
+//!
+//! Three invariants beyond the page/anchor comparison are recorded into the baseline
+//! ([`Baseline`]/[`BaselineEntry`]) and asserted against it, not against a fixed magic number: the
+//! rendered PDF's SHA-256 (byte-identity -- did austenite's OWN output move at all), and the worst of
+//! three sampled pages' raster diff against the Typst oracle (did austenite's output stop LOOKING like
+//! Typst's). Both are gated by the same accept switch: a run that finds either has moved from its
+//! recorded baseline fails, unless `ORACLE_ACCEPT=1` is set, in which case the new value is re-recorded
+//! and printed rather than silently accepted -- see [`record_and_diff`] and [`BaselineOutcome`].
 
 pub mod trio;
 
@@ -33,44 +41,68 @@ use std::process::Command;
 /// template chain makes -- `thinking_chap_03.typ` reaches two levels up to a shared `style/` tree, where
 /// the three `doc`-template roots each sit beside their own `template.typ` and need none.
 pub struct CorpusRoot {
-	pub name:		&'static str,	// short, for a file tag and a report line
-	pub path:		&'static str,	// the root `.typ` file, absolute
-	pub typst_root:	Option<&'static str>,
+	pub name:				&'static str,	// short, for a file tag and a report line
+	pub path:				&'static str,	// the root `.typ` file, absolute
+	pub typst_root:			Option<&'static str>,
+	/// Does this root's Typst-oracle compile need [`prepare_patched_template_mirror`]'s harness-local,
+	/// symbol-patched copy of `template.typ`? See [`corpus`]'s doc comment on the two `oxeweb` roots.
+	pub typst_symbol_patch:	bool,
 }
 
 /// The bounded corpus, listed in the one place a later unit extends: three template documents that
-/// exercise Austenite's own book assembly (`#include` chains, front matter, a table of contents), plus
-/// one short book chapter compiled as a lone file, the other path through the reader. Deliberately not
-/// a whole 700-page book -- the point is a repeatable few-second check, not a render soak.
+/// exercise Austenite's own book assembly (`#include` chains, front matter, a table of contents), one
+/// short book chapter compiled as a lone file, the other path through the reader, and one small fixture
+/// this crate owns outright. Deliberately not a whole 700-page book -- the point is a repeatable
+/// few-second check, not a render soak.
 ///
-/// **The two `oxeweb` roots do not compile under the `typst` installed at the time of writing (0.15.1,
-/// 2026-09-18): their shared `oxeweb/doc/template.typ:100` uses a `$times.circle$` symbol-modifier
-/// expression that binary rejects with "unknown symbol modifier".** This is a pre-existing
-/// incompatibility in a template this crate does not own, not an Austenite regression, so
-/// [`compare_root`] downgrades an oracle failure on these two roots to a recorded note rather than a
-/// test failure -- they still exercise Austenite's own compile, page count and ledger. Re-pin `typst`
-/// (or fix the template) and the two roots' Typst comparison resumes without any change here.
+/// **The two `oxeweb` roots' shared `oxeweb/doc/template.typ` uses four symbol-modifier expressions --
+/// `times.circle`, `backslash.circle`, `plus.circle`, `minus.circle` (lines 100-103) -- the `typst`
+/// installed at the time of writing (0.15.1, 2026-09-18) rejects with "unknown symbol modifier".** The
+/// same four glyphs are reachable as `times.o`, `backslash.o`, `plus.o`, `minus.o`, which 0.15.1 does
+/// accept, so for the Typst-oracle compile ONLY, [`run_typst`] builds a harness-local mirror
+/// ([`prepare_patched_template_mirror`]) with just those four tokens swapped in a scratch copy of
+/// `template.typ` -- the owner's committed file (usr-a4's, mid-reconciliation as of this unit) is never
+/// touched, and austenite still renders the real one. `oxeweb-overview` compiles cleanly against the
+/// patched mirror. `oxeweb-techspec` does not: its own `utils.typ` (shared with `oxeweb-overview` by
+/// symlink, but only actually *called* from a TechSpec chapter) defines `cat()`/`tup()` helpers using
+/// `bracket.l.double`/`angle.l.double`, a *removed* modifier in 0.15.1 with no glyph-identical
+/// replacement found by this unit -- a second, separate incompatibility, discovered but deliberately
+/// left unpatched rather than guessed at (see this unit's own report). [`compare_root`] downgrades that
+/// remaining failure to a recorded note, as before. Any incompatibility here is pre-existing in a
+/// template/helper tree this crate does not own, not an Austenite regression.
 pub fn corpus() -> Vec<CorpusRoot> {
 	vec![
 		CorpusRoot {
-			name:		"austenite-doc",
-			path:		"/home/jason/usr/complement/projects/oxedyne/doc/Austenite/austenite.typ",
-			typst_root:	None,
+			name:				"austenite-doc",
+			path:				"/home/jason/usr/complement/projects/oxedyne/doc/Austenite/austenite.typ",
+			typst_root:			None,
+			typst_symbol_patch:	false,
 		},
 		CorpusRoot {
-			name:		"oxeweb-overview",
-			path:		"/home/jason/usr/complement/projects/oxegen/oxeweb/doc/Overview/overview.typ",
-			typst_root:	None,
+			name:				"oxeweb-overview",
+			path:				"/home/jason/usr/complement/projects/oxegen/oxeweb/doc/Overview/overview.typ",
+			typst_root:			None,
+			typst_symbol_patch:	true,
 		},
 		CorpusRoot {
-			name:		"oxeweb-techspec",
-			path:		"/home/jason/usr/complement/projects/oxegen/oxeweb/doc/TechSpec/techspec.typ",
-			typst_root:	None,
+			name:				"oxeweb-techspec",
+			path:				"/home/jason/usr/complement/projects/oxegen/oxeweb/doc/TechSpec/techspec.typ",
+			typst_root:			None,
+			typst_symbol_patch:	true,
 		},
 		CorpusRoot {
-			name:		"cheapthinking-ch03",
-			path:		"/home/jason/usr/books/elearnity/CheapThinking/thinking_chap_03.typ",
-			typst_root:	Some("/home/jason/usr/books/elearnity"),
+			name:				"cheapthinking-ch03",
+			path:				"/home/jason/usr/books/elearnity/CheapThinking/thinking_chap_03.typ",
+			typst_root:			Some("/home/jason/usr/books/elearnity"),
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own fixture, not an external doc tree -- see the file itself for why it
+			// exercises real lowerable `#set` styling rather than only Austenite's book assembly.
+			name:				"styling-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/styling_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
 		},
 	]
 }
@@ -230,6 +262,69 @@ fn parse_skip_line(stderr: &str) -> Option<String> {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE HARNESS-LOCAL SYMBOL-MODIFIER PATCH                                    │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The four symbol-modifier tokens `oxeweb/doc/template.typ` uses that this `typst` rejects, and the
+/// glyph-identical tokens it accepts in their place -- see [`corpus`]'s doc comment. Checked by hand
+/// against this box's `typst 0.15.1`: swapping these four is what takes `oxeweb-overview` from a hard
+/// compile failure to a clean 38-page render.
+const SYMBOL_MODIFIER_PATCH: &[(&str, &str)] = &[
+	("times.circle",		"times.o"),
+	("backslash.circle",	"backslash.o"),
+	("plus.circle",			"plus.o"),
+	("minus.circle",		"minus.o"),
+];
+
+/// Builds a harness-local mirror of `root_dir` under `work_dir`, for the Typst-oracle compile of a root
+/// whose shared `template.typ` needs [`SYMBOL_MODIFIER_PATCH`]: every top-level `.typ` file except
+/// `template.typ` is copied in unchanged (a real file, not a symlink -- `typst` resolves a relative
+/// `#import`/`#include` against a symlinked file's REAL directory, following the link away from the
+/// mirror rather than staying inside it, which was checked by hand and is why a symlink cannot be used
+/// for anything on the `#import`/`#include` chain), `template.typ` itself is written with the four
+/// tokens swapped, and every other entry (assets, subdirectories, anything not itself a `.typ` file --
+/// never a target of a relative import, only ever opened by path for its bytes) is symlinked, cheaply,
+/// since nothing about *its own* directory is ever resolved. Rebuilt from scratch on every run (removed
+/// first), so nothing here is itself a baseline a later run could grow stale against.
+fn prepare_patched_template_mirror(root_dir: &Path, work_dir: &Path, tag: &str) -> Outcome<PathBuf> {
+	let mirror_dir = work_dir.join(fmt!("{}-typst-patched-root", tag));
+	if mirror_dir.is_dir() {
+		res!(std::fs::remove_dir_all(&mirror_dir));
+	}
+	res!(std::fs::create_dir_all(&mirror_dir));
+
+	let entries = match std::fs::read_dir(root_dir) {
+		Ok(e)	=> e,
+		Err(e)	=> return Err(err!(e, "Could not list {:?}.", root_dir; File, Read)),
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		let name = entry.file_name();
+		let is_template = name.to_str() == Some("template.typ");
+		let is_typ = path.extension().and_then(|e| e.to_str()) == Some("typ");
+		if is_template {
+			continue;	// written separately, patched, below
+		}
+		let dest = mirror_dir.join(&name);
+		if is_typ {
+			let text = res!(std::fs::read_to_string(&path));
+			res!(std::fs::write(&dest, text));
+		} else if let Err(e) = std::os::unix::fs::symlink(&path, &dest) {
+			return Err(err!(e, "Could not symlink {:?} into the patched-template mirror {:?}.", path, mirror_dir; IO));
+		}
+	}
+
+	let real_template = root_dir.join("template.typ");
+	let mut patched = res!(std::fs::read_to_string(&real_template));
+	for (from, to) in SYMBOL_MODIFIER_PATCH {
+		patched = patched.replace(from, to);
+	}
+	res!(std::fs::write(mirror_dir.join("template.typ"), patched));
+
+	Ok(mirror_dir)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ RUNNING THE TYPST ORACLE                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -265,9 +360,20 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 		return Err(err!("Corpus root {:?} does not exist.", root.path; NotFound, File));
 	}
 
+	// A root whose shared template needs the symbol-modifier patch compiles from a harness-local mirror
+	// instead of its own real directory -- see [`prepare_patched_template_mirror`]. Every other root
+	// compiles exactly as before, straight out of its own directory.
+	let (compile_dir, compile_root) = if root.typst_symbol_patch {
+		let mirror = res!(prepare_patched_template_mirror(root_dir, work_dir, root.name));
+		let compile_root = mirror.join(&root_name);
+		(mirror, compile_root)
+	} else {
+		(root_dir.to_path_buf(), root_path.to_path_buf())
+	};
+
 	let template	= include_str!("dump.typ");
 	let dump_src	= template.replace("__ROOT__", &root_name);
-	let dump_path	= root_dir.join(fmt!(".oracle-dump-{}.typ", root.name));
+	let dump_path	= compile_dir.join(fmt!(".oracle-dump-{}.typ", root.name));
 	res!(std::fs::write(&dump_path, &dump_src));
 	let _cleanup = RemoveOnDrop(dump_path.clone());
 
@@ -286,12 +392,12 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 	}
 	let rows = res!(parse_typst_rows(&String::from_utf8_lossy(&qout.stdout)));
 
-	// The page count comes from compiling the ORIGINAL root, not the dump copy, so the trailing
-	// invisible `#metadata` call (it draws no ink and opens no page of its own) cannot be blamed for a
-	// count that turns out to disagree.
+	// The page count comes from compiling the ORIGINAL root (or, for a patched root, its mirror copy of
+	// the same unchanged root text), not the dump copy, so the trailing invisible `#metadata` call (it
+	// draws no ink and opens no page of its own) cannot be blamed for a count that turns out to disagree.
 	let pdf_path = work_dir.join(fmt!("{}-typst.pdf", root.name));
 	let mut compile = Command::new("typst");
-	compile.arg("compile").arg(root_path).arg(&pdf_path);
+	compile.arg("compile").arg(&compile_root).arg(&pdf_path);
 	if let Some(r) = root.typst_root { compile.arg("--root").arg(r); }
 	let cout = match compile.output() {
 		Ok(o)	=> o,
@@ -336,6 +442,9 @@ pub struct RootReport {
 	pub name:				&'static str,
 	pub austenite_pages:	usize,
 	pub austenite_anchors:	usize,
+	pub pdf_sha256:			String,			// austenite's own rendered PDF, hex -- the byte-identity invariant
+	pub raster_samples:	Vec<(usize, f64)>,	// (page, AE diff percent) for each page actually sampled
+	pub raster_worst_pct:	Option<f64>,		// the worst of `raster_samples`; `None` when none were taken
 	pub skip_line:			Option<String>,
 	pub typst_pages:		Option<usize>,
 	pub oracle_note:		Option<String>,	// why the oracle comparison did not run, when it did not
@@ -353,8 +462,9 @@ impl RootReport {
 			(None, Some(note))	=> fmt!("typst oracle unavailable ({})", note),
 			(None, None)		=> "typst oracle not attempted".to_string(),
 		};
-		fmt!("{}: austenite {} page(s), {} anchor(s){} -- {}{}",
-			self.name, self.austenite_pages, self.austenite_anchors,
+		let hash_tag = self.pdf_sha256.get(..12).unwrap_or(&self.pdf_sha256);
+		fmt!("{}: austenite {} page(s), {} anchor(s), sha256 {}…{} -- {}{}",
+			self.name, self.austenite_pages, self.austenite_anchors, hash_tag,
 			self.skip_line.as_ref().map(|s| fmt!(" [{}]", s)).unwrap_or_default(),
 			oracle,
 			self.raster_note.as_ref().map(|r| fmt!("; {}", r)).unwrap_or_default())
@@ -387,10 +497,15 @@ const COUNT_TOLERANCE: usize = 2;
 /// as a hard stop, since every other comparison depends on that page existing.
 pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 	let ausout = res!(run_austenite(root, work_dir));
+	let pdf_sha256 = res!(sha256_of_file(&ausout.pdf_path));
 
 	let mut mismatches: Vec<String>	= Vec::new();
 	let mut typst_pages					= None;
 	let mut oracle_note					= None;
+	// The first figure's page, or else the first heading's page beyond page 1, as the raster sample's
+	// third landmark page (see the raster block below) -- set from the Typst side's rows while they are
+	// still in scope, since the Austenite side has no page-drift-free way to name the "same" page.
+	let mut landmark_page: Option<usize>	= None;
 
 	match run_typst(root, work_dir) {
 		Ok(typout) => {
@@ -454,27 +569,53 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 						i + 1, drift, PAGE_DRIFT_TOLERANCE, t.page, a.page));
 				}
 			}
+
+			landmark_page = ty_figs.first().map(|f| f.page as usize)
+				.or_else(|| ty_heads.iter().find(|h| h.page > 1).map(|h| h.page as usize));
 		},
 		Err(e) => oracle_note = Some(fmt!("{}", e)),
 	}
 
-	// The raster sample: one page, sampled only where a Typst PDF exists to sample against (skipped,
-	// not failed, when ImageMagick or Poppler are absent -- see [`raster_diff_fraction`]).
-	let raster_note = if typst_pages.is_some() {
+	// The raster samples: up to three pages -- the first, roughly the middle, and a landmark page
+	// carrying a figure or a heading beyond page 1 where one was found -- sampled only where a Typst PDF
+	// exists to sample against (skipped, not failed, when ImageMagick or Poppler are absent -- see
+	// [`raster_diff_fraction`]). Comparing more than page 1 alone is the point of promoting this from a
+	// note to an assertion: a face, size or leading change that happens not to move page 1's line breaks
+	// would otherwise sail through unseen.
+	let (raster_samples, raster_note) = if let Some(total) = typst_pages {
 		let ty_pdf = work_dir.join(fmt!("{}-typst.pdf", root.name));
-		match raster_diff_fraction(&ausout.pdf_path, &ty_pdf, 1, 150, work_dir, root.name) {
-			Ok(Some(frac))	=> Some(fmt!("page 1 raster differs in {:.1}% of pixels (fuzz 5%)", frac * 100.0)),
-			Ok(None)		=> None,	// no ImageMagick/Poppler on this box
-			Err(e)			=> Some(fmt!("raster sample failed: {}", e)),
+		let pages = sample_page_numbers(total, landmark_page);
+		let mut samples: Vec<(usize, f64)>	= Vec::new();
+		let mut note: Option<String>		= None;
+		for page in pages {
+			match raster_diff_fraction(&ausout.pdf_path, &ty_pdf, page, RASTER_DPI, work_dir, root.name) {
+				Ok(Some(frac))	=> samples.push((page, frac * 100.0)),
+				Ok(None)		=> break,	// no ImageMagick/Poppler on this box -- stop, not fail
+				Err(e)			=> { note = Some(fmt!("raster sample on page {} failed: {}", page, e)); break; },
+			}
 		}
+		if note.is_none() && !samples.is_empty() {
+			// The worst only, here -- each sampled page's own fraction is carried in `samples` for the
+			// caller to print at whatever granularity it wants (`oracle.rs` prints one line per page).
+			let worst = samples.iter().map(|(_, f)| *f).fold(0.0, f64::max);
+			note = Some(fmt!("worst-page raster diff {:.1}% over {} page(s) (fuzz {:.0}%, {} DPI)",
+				worst, samples.len(), RASTER_FUZZ_PCT, RASTER_DPI));
+		}
+		(samples, note)
 	} else {
-		None
+		(Vec::new(), None)
 	};
+	let raster_worst_pct = raster_samples.iter().map(|(_, f)| *f).fold(None, |acc: Option<f64>, f| {
+		Some(acc.map_or(f, |a: f64| a.max(f)))
+	});
 
 	Ok(RootReport {
 		name:				root.name,
 		austenite_pages:	ausout.total_pages,
 		austenite_anchors:	ausout.rows.len(),
+		pdf_sha256,
+		raster_samples,
+		raster_worst_pct,
 		skip_line:			ausout.skip_line,
 		typst_pages,
 		oracle_note,
@@ -488,13 +629,56 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 // │ RASTER SAMPLE                                                              │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// The DPI the raster sample rasterises at -- within the brief's 150-300 DPI range, at its lower,
+/// cheaper end: this is a coarse visual sanity net over three pages per root, not a proof pass, and a
+/// higher DPI would only make the `compare` step slower without changing what a real face, size or
+/// leading change looks like against it.
+const RASTER_DPI: u32 = 150;
+
+/// The fuzz ImageMagick's `compare -metric AE` is given, as a percentage: small enough that a real
+/// styling change still registers, big enough that anti-aliasing and hinting differences between the
+/// two engines' rasterisers do not themselves count. This bounds each page's OWN diff fraction; the
+/// assertion in [`record_and_diff`] is a second, independent fuzz on top of it -- the worst sampled
+/// page's fraction is compared against its OWN recorded baseline, not an absolute ceiling, since a
+/// document's inherent Typst-vs-Austenite line-break drift (see `PAGE_DRIFT_TOLERANCE`'s own comment)
+/// already varies enormously root to root: `austenite-doc`'s page 1 measured 1.3% against Typst on this
+/// box, `cheapthinking-ch03`'s measured 18.3%, both today's ordinary, unregressed shape of two different
+/// line-breakers on two different documents. A single global percentage tight enough to catch a face
+/// change on the first document would already fail the second outright.
+const RASTER_FUZZ_PCT: f64 = 5.0;
+
+/// Up to three page numbers (1-based, ascending, deduplicated, clamped to `total_pages`) to raster-
+/// sample: the first page, roughly the middle, and `landmark` (a figure's or a beyond-page-1 heading's
+/// page, from the Typst side's own rows) when one was found and is not already covered -- falling back
+/// to the last page so three genuinely different pages are sampled wherever the document has them. A
+/// short document (the `styling-fixture` root is one page) simply samples fewer.
+fn sample_page_numbers(total_pages: usize, landmark: Option<usize>) -> Vec<usize> {
+	if total_pages == 0 {
+		return Vec::new();
+	}
+	let mut pages = vec![1usize];
+	let middle = ((total_pages + 1) / 2).max(1);
+	if !pages.contains(&middle) {
+		pages.push(middle);
+	}
+	let third = match landmark {
+		Some(p) if p >= 1 && p <= total_pages => p,
+		_ => total_pages,
+	};
+	if !pages.contains(&third) {
+		pages.push(third);
+	}
+	pages.sort_unstable();
+	pages
+}
+
 /// The fraction of pixels that differ between page `page` of `pdf_a` and `pdf_b`, both rasterised at
-/// `dpi` via `pdftoppm` and compared with ImageMagick's `compare -metric AE -fuzz 5%` (a small fuzz so
-/// anti-aliasing and hinting differences between the two engines' rasterisers do not themselves count).
+/// `dpi` via `pdftoppm` and compared with ImageMagick's `compare -metric AE -fuzz` [`RASTER_FUZZ_PCT`].
 /// `Ok(None)` when `pdftoppm`, `compare` or `identify` is not installed, so a box without ImageMagick
-/// still runs the rest of the suite -- this sample is a coarse visual sanity net, one root at a page,
-/// bounded well under the DPI a real proof pass would use, not the harness's primary signal (that is
-/// the page-count and anchor-page comparison above, which needs no rasteriser at all).
+/// still runs the rest of the suite -- this sample is a coarse visual sanity net, not the harness's
+/// primary signal (that is the page-count and anchor-page comparison above, which needs no rasteriser at
+/// all). `tag` is namespaced by `page` internally, so a caller sampling several pages of the same root
+/// does not have one page's PNGs found by [`rasterise_page`]'s directory scan for another's.
 fn raster_diff_fraction(
 	pdf_a:		&Path,
 	pdf_b:		&Path,
@@ -508,8 +692,8 @@ fn raster_diff_fraction(
 	if !tool_present("pdftoppm") || !tool_present("compare") || !tool_present("identify") {
 		return Ok(None);
 	}
-	let dir_a = work_dir.join(fmt!("{}-raster-a", tag));
-	let dir_b = work_dir.join(fmt!("{}-raster-b", tag));
+	let dir_a = work_dir.join(fmt!("{}-p{}-raster-a", tag, page));
+	let dir_b = work_dir.join(fmt!("{}-p{}-raster-b", tag, page));
 	let png_a = res!(rasterise_page(pdf_a, page, dpi, &dir_a));
 	let png_b = res!(rasterise_page(pdf_b, page, dpi, &dir_b));
 	Ok(Some(res!(pixel_diff_fraction(&png_a, &png_b))))
@@ -562,7 +746,7 @@ fn rasterise_page(pdf: &Path, page: usize, dpi: u32, out_dir: &Path) -> Outcome<
 fn pixel_diff_fraction(png_a: &Path, png_b: &Path) -> Outcome<f64> {
 	let output = match Command::new("compare")
 		.arg("-metric").arg("AE")
-		.arg("-fuzz").arg("5%")
+		.arg("-fuzz").arg(fmt!("{}%", RASTER_FUZZ_PCT))
 		.arg(png_a).arg(png_b).arg("null:")
 		.output()
 	{
@@ -608,18 +792,50 @@ fn png_dimensions(png: &Path) -> Outcome<(u32, u32)> {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ BYTE IDENTITY                                                              │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The rendered PDF's SHA-256 digest, hex, via the system `sha256sum` -- the same check the milestone
+/// audit found being run by hand outside the harness ("the only byte-identity check was a manual
+/// `sha256sum`"). Folding it in here, as an asserted [`BaselineEntry`] field rather than a note a person
+/// has to remember to run, is the whole point of this unit's first item: a wrong face, size, leading or
+/// colour changes these bytes, and a changed hash now fails the suite unless `ORACLE_ACCEPT=1`.
+fn sha256_of_file(path: &Path) -> Outcome<String> {
+	let output = match Command::new("sha256sum").arg(path).output() {
+		Ok(o)	=> o,
+		Err(e)	=> return Err(err!(e, "Could not run `sha256sum` on {:?}.", path; IO)),
+	};
+	if !output.status.success() {
+		return Err(err!("`sha256sum` on {:?} exited with {}.", path, output.status; Invalid, Unexpected));
+	}
+	let text = String::from_utf8_lossy(&output.stdout);
+	match text.split_whitespace().next() {
+		Some(hash)	=> Ok(hash.to_string()),
+		None		=> Err(err!("`sha256sum` produced no output for {:?}.", path; Missing, Invalid)),
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ BASELINE                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// What is recorded per root for a later run to diff against: today's own output, not a copy of the
 /// Typst oracle's (which the corpus's own comparison already re-derives fresh on every run). A drift
-/// here -- a page count or anchor count that moves between two runs of the *same* commit -- is either a
-/// non-determinism bug or evidence the corpus files themselves changed underfoot; a drift across two
-/// commits is what a later unit's regression check is for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// here -- a page count, anchor count, PDF hash or raster fraction that moves between two runs -- is
+/// either a non-determinism bug, evidence the corpus files themselves changed underfoot, or a real
+/// regression (or a deliberate, `ORACLE_ACCEPT`-ed change) -- see [`record_and_diff`].
+///
+/// `raster_worst_pct` is `Option`, unlike the other three fields, because it depends on tooling
+/// (`pdftoppm`/ImageMagick) that may not be on a given box: `None` means "not measured this run", and
+/// [`record_and_diff`] compares it only when both the prior and the current entry have a value, so a box
+/// without ImageMagick neither trips a false raster regression nor silently erases a real one recorded
+/// elsewhere.
+#[derive(Clone, Debug, PartialEq)]
 pub struct BaselineEntry {
-	pub pages:		usize,
-	pub anchors:	usize,
+	pub pages:				usize,
+	pub anchors:			usize,
+	pub pdf_sha256:			String,
+	pub raster_worst_pct:	Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -633,7 +849,7 @@ impl Baseline {
 	}
 
 	pub fn get(&self, name: &str) -> Option<BaselineEntry> {
-		self.entries.get(name).copied()
+		self.entries.get(name).cloned()
 	}
 
 	pub fn set(&mut self, name: &str, entry: BaselineEntry) {
@@ -643,11 +859,16 @@ impl Baseline {
 	fn to_dat(&self) -> Outcome<Dat> {
 		let mut rows = Vec::with_capacity(self.entries.len());
 		for (name, e) in &self.entries {
-			rows.push(omapdat!{
-				"name"		=> dat!(name.clone()),
-				"pages"		=> dat!(e.pages as u64),
-				"anchors"	=> dat!(e.anchors as u64),
-			});
+			let mut row = omapdat!{
+				"name"			=> dat!(name.clone()),
+				"pages"			=> dat!(e.pages as u64),
+				"anchors"		=> dat!(e.anchors as u64),
+				"pdf_sha256"	=> dat!(e.pdf_sha256.clone()),
+			};
+			if let Some(pct) = e.raster_worst_pct {
+				let _ = res!(row.map_put(dat!("raster_worst_pct"), dat!(pct)));
+			}
+			rows.push(row);
 		}
 		Ok(omapdat!{ "roots" => Dat::List(rows) })
 	}
@@ -656,12 +877,26 @@ impl Baseline {
 		let rows	= try_extract_dat!(res!(dat.map_remove_must(&dat!("roots"))), List);
 		let mut entries = BTreeMap::new();
 		for mut row in rows {
-			let name	= try_extract_dat!(res!(row.map_remove_must(&dat!("name"))), Str);
-			let pages_d	= res!(row.map_remove_must(&dat!("pages")));
-			let anch_d	= res!(row.map_remove_must(&dat!("anchors")));
-			let pages	= try_extract_dat_as!(pages_d, usize, U8, U16, U32, U64, I8, I16, I32, I64);
-			let anchors	= try_extract_dat_as!(anch_d, usize, U8, U16, U32, U64, I8, I16, I32, I64);
-			entries.insert(name, BaselineEntry { pages, anchors });
+			let name		= try_extract_dat!(res!(row.map_remove_must(&dat!("name"))), Str);
+			let pages_d		= res!(row.map_remove_must(&dat!("pages")));
+			let anch_d		= res!(row.map_remove_must(&dat!("anchors")));
+			let hash_d		= res!(row.map_remove_must(&dat!("pdf_sha256")));
+			let pages		= try_extract_dat_as!(pages_d, usize, U8, U16, U32, U64, I8, I16, I32, I64);
+			let anchors		= try_extract_dat_as!(anch_d, usize, U8, U16, U32, U64, I8, I16, I32, I64);
+			let pdf_sha256	= try_extract_dat!(hash_d, Str);
+			// `get_float64` rather than `try_extract_dat!(d, F64)`: a plain JSON number decodes back as
+			// `Dat::Adec` (arbitrary-precision decimal), not `Dat::F64` -- there is no float-literal type
+			// tag in JSON itself -- and `get_float64` is JDAT's own conversion across every numeric kind,
+			// where `try_extract_dat!` only matches one exact variant.
+			let raster_worst_pct = match res!(row.map_remove(&dat!("raster_worst_pct"))) {
+				Some(d)	=> match d.get_float64() {
+					Some(f)	=> Some(f.0),
+					None	=> return Err(err!(
+						"The 'raster_worst_pct' field was not a number: {:?}", d; Daticle, Input, Invalid)),
+				},
+				None	=> None,
+			};
+			entries.insert(name, BaselineEntry { pages, anchors, pdf_sha256, raster_worst_pct });
 		}
 		Ok(Self { entries })
 	}
@@ -686,25 +921,102 @@ pub fn baseline_path(work_dir: &Path) -> PathBuf {
 	work_dir.join("baseline.json")
 }
 
-/// Records `report` into the baseline at `path`, or -- when an entry for this root is already there --
-/// returns the disagreement as a `Some` for the caller to decide whether it is a real regression.
-/// Bootstraps the file (and always reports no disagreement) the first time a root is seen, which is
-/// exactly today's run against the tree this unit lands in: there is no earlier baseline to diverge
-/// from yet, only one being laid down for the unit after this one to diff against.
-pub fn record_and_diff(path: &Path, report: &RootReport) -> Outcome<Option<String>> {
+/// How far a re-measured raster percentage may sit from what was recorded before it is treated as a real
+/// change rather than float round-trip noise. Deliberately tiny -- the two PDFs it is measured from are
+/// byte-identical run to run whenever [`BaselineEntry::pdf_sha256`] itself has not moved, so the raster
+/// percentage should reproduce exactly; this only absorbs the last decimal digit `compare`'s own text
+/// output rounds to, not any real drift. A genuine face, size or leading change moves a page's raster
+/// diff by whole percentage points, not hundredths.
+const RASTER_EPSILON_PCT: f64 = 0.05;
+
+/// What [`record_and_diff`] found for one root.
+pub enum BaselineOutcome {
+	/// No baseline existed for this root yet; `report`'s numbers are now the baseline a later run diffs
+	/// against.
+	Bootstrapped,
+	/// A baseline existed and matched (within [`RASTER_EPSILON_PCT`] on the raster field); nothing was
+	/// rewritten.
+	Unchanged,
+	/// A baseline existed and did not match, `ORACLE_ACCEPT=1` was set, and the new values were
+	/// re-recorded -- the message names what changed, for the caller to print as a visible, accepted
+	/// event rather than a silent pass.
+	Accepted(String),
+	/// A baseline existed and did not match, and `ORACLE_ACCEPT` was not set: the message is the problem
+	/// to report, and the baseline file was left untouched so a second unaccepted run reports the same
+	/// drift rather than quietly re-agreeing with itself.
+	Rejected(String),
+}
+
+/// Every field of `prior` that differs from `current`, each as one human-readable line -- empty when the
+/// two agree (the raster field compared with [`RASTER_EPSILON_PCT`]'s headroom, and only when both sides
+/// actually measured one; see [`BaselineEntry`]'s own doc comment).
+fn describe_entry_diff(prior: &BaselineEntry, current: &BaselineEntry) -> Vec<String> {
+	let mut out = Vec::new();
+	if prior.pages != current.pages {
+		out.push(fmt!("pages {} -> {}", prior.pages, current.pages));
+	}
+	if prior.anchors != current.anchors {
+		out.push(fmt!("anchors {} -> {}", prior.anchors, current.anchors));
+	}
+	if prior.pdf_sha256 != current.pdf_sha256 {
+		let p = prior.pdf_sha256.get(..12).unwrap_or(&prior.pdf_sha256);
+		let c = current.pdf_sha256.get(..12).unwrap_or(&current.pdf_sha256);
+		out.push(fmt!("pdf sha256 {}… -> {}…", p, c));
+	}
+	if let (Some(p), Some(c)) = (prior.raster_worst_pct, current.raster_worst_pct) {
+		if (p - c).abs() > RASTER_EPSILON_PCT {
+			out.push(fmt!("raster worst-page diff {:.2}% -> {:.2}%", p, c));
+		}
+	}
+	out
+}
+
+/// Records `report` into the baseline at `path`, gated by `accept` (the caller's `ORACLE_ACCEPT=1`):
+/// bootstraps the file the first time a root is seen (always [`BaselineOutcome::Bootstrapped`], recording
+/// whatever this run found as the new baseline); on a later run, a baseline that agrees is
+/// [`BaselineOutcome::Unchanged`], one that disagrees and `accept` is set is
+/// [`BaselineOutcome::Accepted`] (re-recorded), and one that disagrees without `accept` is
+/// [`BaselineOutcome::Rejected`] -- the file is left exactly as it was, so the SAME drift is reported
+/// again on a second unaccepted run rather than the baseline quietly catching up to a regression it
+/// should have caught.
+pub fn record_and_diff(path: &Path, report: &RootReport, accept: bool) -> Outcome<BaselineOutcome> {
 	let mut baseline = if path.is_file() {
 		res!(Baseline::read_from_file(path))
 	} else {
 		Baseline::default()
 	};
-	let current = BaselineEntry { pages: report.austenite_pages, anchors: report.austenite_anchors };
+	let current = BaselineEntry {
+		pages:				report.austenite_pages,
+		anchors:			report.austenite_anchors,
+		pdf_sha256:			report.pdf_sha256.clone(),
+		raster_worst_pct:	report.raster_worst_pct,
+	};
 	let prior = baseline.get(report.name);
-	baseline.set(report.name, current);
-	res!(baseline.write_to_file(path));
 	match prior {
-		Some(p) if p != current => Ok(Some(fmt!(
-			"{} moved from the recorded baseline: {} page(s)/{} anchor(s) -> {} page(s)/{} anchor(s)",
-			report.name, p.pages, p.anchors, current.pages, current.anchors))),
-		_ => Ok(None),
+		None => {
+			baseline.set(report.name, current);
+			res!(baseline.write_to_file(path));
+			Ok(BaselineOutcome::Bootstrapped)
+		},
+		Some(p) => {
+			let diffs = describe_entry_diff(&p, &current);
+			if diffs.is_empty() {
+				// Still rewritten: a raster field newly measured this run (`None` -> `Some`, a box that
+				// just gained ImageMagick) upgrades the stored entry even though nothing DIFFERS.
+				baseline.set(report.name, current);
+				res!(baseline.write_to_file(path));
+				Ok(BaselineOutcome::Unchanged)
+			} else if accept {
+				let msg = fmt!("{}: {}", report.name, diffs.join(", "));
+				baseline.set(report.name, current);
+				res!(baseline.write_to_file(path));
+				Ok(BaselineOutcome::Accepted(msg))
+			} else {
+				let msg = fmt!(
+					"{} moved from the recorded baseline ({}) -- set ORACLE_ACCEPT=1 to accept and re-record",
+					report.name, diffs.join(", "));
+				Ok(BaselineOutcome::Rejected(msg))
+			}
+		},
 	}
 }
