@@ -526,13 +526,32 @@ impl<'a> Authoring<'a> {
 		while i < blocks.len() {
 			if let Block::Scoped { patch, blocks: inner } = &blocks[i] {
 				let scoped = { let mut t = style.clone(); t.apply(patch); t };
-				// The continuation for the scoped slice is the block that follows the scope at THIS level, set
-				// under THIS theme -- so a heading ending the scope keeps with the sibling paragraph beyond it.
-				let inner_cont = blocks.get(i + 1).map(|b| Cont { block: b, theme: style });
+				// The scoped slice's continuation is the block that follows the scope at THIS level, set under
+				// THIS theme -- so a heading ending the scope keeps with the sibling paragraph beyond it. When
+				// the scope is this slice's last block, the continuation is instead this walk's own (the
+				// parent's block beyond every enclosing scope, under its own theme), threaded inward so a
+				// heading ending a *nested* scope -- an authored rule stacked on the default one -- still keeps
+				// with the paragraph past the scopes' closing edges rather than stranding it.
+				let has_sibling	= i + 1 < blocks.len();
+				let inner_cont	= if has_sibling {
+					Some(Cont { block: &blocks[i + 1], theme: style })
+				} else {
+					cont
+				};
 				let ate = res!(self.walk(inner, &scoped, inner_cont));
-				// The scope's last heading kept with the following sibling paragraph: skip past it here, since
-				// the inner walk already set it.
-				i += if ate { 2 } else { 1 };
+				if ate {
+					if has_sibling {
+						// The inner walk pulled this slice's next sibling into its keep box: skip it here.
+						i += 2;
+					} else {
+						// The inner walk pulled THIS walk's own continuation (the parent's block): tell the
+						// caller to skip it, exactly as a bare final heading of this slice would.
+						consumed_cont	= true;
+						i += 1;
+					}
+				} else {
+					i += 1;
+				}
 				continue;
 			}
 			match &blocks[i] {
