@@ -3998,10 +3998,14 @@ fn vspacer(height: Sp) -> Node {
 
 /// Sets a `#styled-box[...]` callout: its inner blocks laid out at the measure less the horizontal insets,
 /// seated one inset in from the left and top, over a filled rounded rectangle that runs the full measure.
-/// The template's box takes `inset: (x: 1em, y: 1em, bottom: 1.2em)`, so the sides and top pad one body em
-/// and the foot 1.2 em, and `radius: 4pt` rounds the corners; the wash is `colours.veronica.lighten(90%)`,
-/// a pale violet. The wash draws first with no vertical extent of its own, so the words overlay it, and the
-/// whole callout is one keep box -- the breaker moves it entire rather than splitting the wash from its text.
+/// The template's own box takes `inset: (x: 1em, y: 1em, bottom: 1.2em)`, so the sides and top pad one body
+/// em and the foot 1.2 em, and `radius: 4pt` rounds the corners; the wash is `colours.veronica.lighten(90%)`,
+/// a pale violet. A `#show` rule's `block.with(fill:, inset:, radius:)` can override any of the four on
+/// `style.callout` (each `None` until a rule names it), so this reads them off `style` and falls back to
+/// the template's own constants precisely where a rule left them unset -- the bare `#styled-box[...]` path,
+/// which sets no such rule, always takes every fallback and renders exactly as before. The wash draws first
+/// with no vertical extent of its own, so the words overlay it, and the whole callout is one keep box -- the
+/// breaker moves it entire rather than splitting the wash from its text.
 #[allow(clippy::too_many_arguments)]
 fn styled_box(
 	nodes:		&mut Vec<Node>,
@@ -4021,10 +4025,12 @@ fn styled_box(
 	-> Outcome<()>
 {
 	let em			= style.text.body_size;
-	let inset_x		= em;								// the template's `inset.x`, one body em
-	let inset_top	= em;								// the template's `inset.y`, one body em
-	let inset_bot	= Sp::from_pt(em.to_pt() * 1.2);	// the template's `inset.bottom`, 1.2 em
-	let radius		= 4.0f32;							// the template's `radius: 4pt`
+	// Each falls back to the template's own constant precisely where a rule left it unset, so the bare
+	// `#styled-box[...]` path -- which sets no such rule -- takes every fallback and is unchanged.
+	let inset_x		= style.callout.inset_x.unwrap_or(em);								// `inset.x`, default one body em
+	let inset_top	= style.callout.inset_top.unwrap_or(em);							// `inset.y`, default one body em
+	let inset_bot	= style.callout.inset_bot.unwrap_or(Sp::from_pt(em.to_pt() * 1.2));	// `inset.bottom`, default 1.2 em
+	let radius		= style.callout.radius.map_or(4.0f32, |sp| sp.to_pt() as f32);		// `radius`, default 4pt
 	let two_x		= inset_x + inset_x;
 	let inner_w		= if measure > two_x { measure - two_x } else { measure };
 

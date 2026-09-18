@@ -104,16 +104,30 @@ pub enum Transform {
 /// template placed around it, and a theme overlay wraps the whole group. `pre`/`post` are the blocks a
 /// `v(<len>)`/`line(...)` in the template lowers to, before and after the element. `hole` is the overlay a
 /// `#set` inside the wrap contributes (and, under a heading selector, the level spacing a `v(...)` folds
-/// into). `frame`, when set, seats the element in a washed [`Block::Box`] of that fill -- a `block.with(fill:
-/// ...)` callout. `rule_id` and the hole's index (always `pre.len()`) are recorded so a later pass can
-/// address the moved element by the rule that placed it -- the block-identity hook the design note calls for.
+/// into). `frame`, when set, seats the element in a washed [`Block::Box`] of that fill and, where the rule
+/// names them, that inset and radius too -- a `block.with(fill:, inset:, radius:)` callout. `rule_id` and
+/// the hole's index (always `pre.len()`) are recorded so a later pass can address the moved element by the
+/// rule that placed it -- the block-identity hook the design note calls for.
 #[derive(Clone, Debug)]
 pub struct Template {
 	pub pre:		Vec<Block>,
 	pub hole:		ThemePatch,
 	pub post:		Vec<Block>,
-	pub frame:		Option<Rgba>,
+	pub frame:		Option<TemplateFrame>,
 	pub rule_id:	RuleId,
+}
+
+/// The wash a `block.with(fill:, inset:, radius:)` template names -- the fill always, `inset_x`/
+/// `inset_top`/`inset_bot`/`radius` only where the rule sets them. `None` on any of the four leaves the
+/// renderer's own default (the `#styled-box` template's one body em, 1.2 body em and 4pt) untouched, so a
+/// rule that names only `fill:` frames the element without moving its geometry at all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TemplateFrame {
+	pub fill:		Rgba,
+	pub inset_x:	Option<Sp>,
+	pub inset_top:	Option<Sp>,
+	pub inset_bot:	Option<Sp>,
+	pub radius:		Option<Sp>,
 }
 
 /// A rule's index in the set that produced it -- the identity hook a set-fields wrap carries so a later
@@ -555,7 +569,7 @@ fn lower_template(selector: &Selector, body: &str) -> Transform {
 	let mut pre:	Vec<Block>		= Vec::new();
 	let mut post:	Vec<Block>		= Vec::new();
 	let mut hole					= ThemePatch::default();
-	let mut frame:	Option<Rgba>	= None;
+	let mut frame:	Option<TemplateFrame>	= None;
 	let mut seen_hole				= false;
 
 	for stmt in split_statements(body) {
@@ -785,10 +799,13 @@ fn stroke_grey(v: &str) -> Option<u8> {
 }
 
 /// Reads the element (hole) statement of a template into the hole patch and frame. A `block.with(fill: ...)`
-/// or `block(fill: ...)[#it]` sets the frame's wash; a `#set text(...)` inside the wrap's content overlays
-/// the element; a bare `it` leaves both untouched. A wrap that is neither a `.with` partial nor a content
-/// wrap of `it` is refused, so a body this reader cannot place is a visible refusal, not a silent no-op.
-fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<Rgba>) -> Outcome<()> {
+/// or `block(fill: ...)[#it]` sets the frame's wash, plus its `inset:`/`radius:` when the same call names
+/// them; a `#set text(...)` inside the wrap's content overlays the element; a bare `it` leaves both
+/// untouched. A wrap that is neither a `.with` partial nor a content wrap of `it` is refused, so a body
+/// this reader cannot place is a visible refusal, not a silent no-op -- and so is an `inset`/`radius` this
+/// reader cannot resolve to a length (an `em` or `%` value, or a dict form naming something other than
+/// `x`/`y`/`bottom`), rather than the fill being framed while its geometry is quietly dropped.
+fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<TemplateFrame>) -> Outcome<()> {
 	let is_wrap = s.starts_with("block") || s.starts_with("box");
 	if !is_wrap {
 		// A bare `it` / `it.body` -- the element passes through untouched.
@@ -798,10 +815,20 @@ fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<Rgba>) -> Out
 	let head = s.strip_prefix("block").or_else(|| s.strip_prefix("box")).unwrap_or(s);
 	let head = head.trim_start_matches(".with").trim_start();
 	let args = call_group(head).unwrap_or_default();
-	// A `fill:` washes the element in a box.
+	// A `fill:` washes the element in a box; `inset:`/`radius:` in the same call ride along on it, since
+	// neither means anything without a box to draw them on.
 	if let Some(fv) = named_value(&args, "fill") {
 		match parse_colour(&fv) {
-			Some(rgba)	=> *frame = Some(rgba),
+			Some(rgba)	=> {
+				let mut tf = TemplateFrame { fill: rgba, inset_x: None, inset_top: None, inset_bot: None, radius: None };
+				if let Some(iv) = named_value(&args, "inset") {
+					res!(read_inset(&iv, &mut tf));
+				}
+				if let Some(rv) = named_value(&args, "radius") {
+					tf.radius = Some(Sp::from_pt(res!(length_pt_or_refuse("radius", &rv))));
+				}
+				*frame = Some(tf);
+			},
 			None		=> return Err(err!(
 				"a template fill colour could not be resolved: {}", short(&fv); Invalid, Input)),
 		}
@@ -820,6 +847,55 @@ fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<Rgba>) -> Out
 		return Err(err!("a template wrap places no element `it`: {}", short(s); Invalid, Input));
 	}
 	Ok(())
+}
+
+/// Reads a `block.with(inset: ...)` argument into `tf`: a scalar length (`inset: 8pt`) pads every side
+/// alike, and the dict form (`inset: (x: 8pt, y: 6pt, bottom: 8pt)`) reuses the corpus's own shape -- `x`
+/// the horizontal pad, `y` the top pad (and the foot pad too, unless `bottom` overrides it), `bottom` the
+/// foot pad alone. A dict key this reader does not recognise, or a length it cannot resolve to points (an
+/// `em` or `%` value), is refused rather than silently left at the renderer's default.
+fn read_inset(raw: &str, tf: &mut TemplateFrame) -> Outcome<()> {
+	let raw = raw.trim();
+	if raw.starts_with('(') {
+		let inner = res!(call_group(raw).ok_or_else(||
+			err!("a template inset dict is not a closed (...) group: {}", short(raw); Invalid, Input)));
+		let mut named = false;
+		if let Some(xv) = named_value(&inner, "x") {
+			tf.inset_x = Some(Sp::from_pt(res!(length_pt_or_refuse("inset x", &xv))));
+			named = true;
+		}
+		if let Some(yv) = named_value(&inner, "y") {
+			let pt = Sp::from_pt(res!(length_pt_or_refuse("inset y", &yv)));
+			tf.inset_top = Some(pt);
+			tf.inset_bot = Some(pt);	// `y` sets top and bottom alike, unless `bottom` overrides it below
+			named = true;
+		}
+		if let Some(bv) = named_value(&inner, "bottom") {
+			tf.inset_bot = Some(Sp::from_pt(res!(length_pt_or_refuse("inset bottom", &bv))));
+			named = true;
+		}
+		if !named {
+			return Err(err!("a template inset dict names none of x/y/bottom: {}", short(raw); Invalid, Input));
+		}
+		Ok(())
+	} else {
+		let pt = Sp::from_pt(res!(length_pt_or_refuse("inset", raw)));
+		tf.inset_x		= Some(pt);
+		tf.inset_top	= Some(pt);
+		tf.inset_bot	= Some(pt);
+		Ok(())
+	}
+}
+
+/// A length token to points, refusing rather than silently dropping a value [`length_pt`] cannot resolve
+/// (an `em` or `%`, which has no absolute size at lowering time) -- named by `field` for the diagnostic.
+fn length_pt_or_refuse(field: &str, v: &str) -> Outcome<f64> {
+	match length_pt(v) {
+		Some(pt)	=> Ok(pt),
+		None		=> Err(err!(
+			"a template {} length could not be resolved to points (em/% are not supported here): {}",
+			field, short(v); Invalid, Input)),
+	}
 }
 
 /// Folds the non-default leaves of `src` onto `dst` -- the overlay a wrap's inner `#set` contributes to the
@@ -1231,11 +1307,16 @@ fn wrap_matching(block: Block, rules: &[Rule], avail: Sp) -> Block {
 /// in a sibling resolves to an absolute against `avail` here, at the placement measure.
 fn materialise_template(t: &Template, it: Block, avail: Sp) -> Block {
 	let hole_block = match t.frame {
-		Some(fill)	=> {
-			// The element seated in a box washed the template's fill -- the wash the renderer reads from
-			// `callout.fill` for a `Block::Box`.
+		Some(tf)	=> {
+			// The element seated in a box washed the template's fill, plus whichever of inset/radius the
+			// rule named -- the renderer reads all five from `callout.*` on the box's own scoped theme,
+			// falling back to its own constants for whatever the rule left `None`.
 			let mut patch = ThemePatch::default();
-			patch.callout.fill = Some(fill);
+			patch.callout.fill			= Some(tf.fill);
+			patch.callout.inset_x		= tf.inset_x;
+			patch.callout.inset_top		= tf.inset_top;
+			patch.callout.inset_bot		= tf.inset_bot;
+			patch.callout.radius		= tf.radius;
 			Block::Box { blocks: vec![it], patch }
 		},
 		None		=> it,
@@ -1531,16 +1612,24 @@ mod tests {
 
 	/// A `#show raw: block.with(fill: ..., inset: ..., radius: ...)` lowers to a template that frames the
 	/// element, and applying it seats the code block -- moved, not cloned -- inside a `Block::Box` washed the
-	/// named fill, under a transparent hole scope. The frame colour is the one the template named.
+	/// named fill, under a transparent hole scope. The fill, inset and radius are each the value the
+	/// template named -- the consume half of the invariant this rule form used to fail (fill was kept,
+	/// inset/radius silently dropped).
 	#[test]
 	fn template_on_raw_frames_the_code() {
 		let sel	= raw_selector();
-		let tr	= lower_transform(&sel, "it => block.with(fill: luma(240), inset: 8pt, radius: 4pt)");
+		let tr	= lower_transform(&sel, "it => block.with(fill: luma(240), inset: 8pt, radius: 10pt)");
 		let t	= match tr {
 			Transform::Template(t)	=> t,
 			other					=> panic!("expected a template, got {:?}", other),
 		};
-		assert_eq!(t.frame, Some(Rgba::opaque(240, 240, 240)), "the block.with fill becomes the frame");
+		assert_eq!(t.frame, Some(TemplateFrame {
+			fill:		Rgba::opaque(240, 240, 240),
+			inset_x:	Some(Sp::from_pt(8.0)),
+			inset_top:	Some(Sp::from_pt(8.0)),
+			inset_bot:	Some(Sp::from_pt(8.0)),
+			radius:		Some(Sp::from_pt(10.0)),
+		}), "the block.with fill, inset and radius all become the frame");
 		assert!(t.pre.is_empty() && t.post.is_empty(), "a bare frame has no siblings");
 		assert_eq!(t.hole, ThemePatch::default(), "no #set inside, so the hole is transparent");
 
@@ -1562,11 +1651,89 @@ mod tests {
 						assert!(matches!(bb[0], Block::Code { .. }), "the code is moved into the box");
 						assert_eq!(patch.callout.fill, Some(Rgba::opaque(240, 240, 240)),
 							"the box wash is the template's fill");
+						assert_eq!(patch.callout.inset_x, Some(Sp::from_pt(8.0)), "the box carries the named inset x");
+						assert_eq!(patch.callout.inset_top, Some(Sp::from_pt(8.0)), "the box carries the named inset y");
+						assert_eq!(patch.callout.inset_bot, Some(Sp::from_pt(8.0)), "the box carries the named inset bottom");
+						assert_eq!(patch.callout.radius, Some(Sp::from_pt(10.0)), "the box carries the named radius");
 					},
 					other	=> panic!("expected the code framed in a Box, got {:?}", other),
 				}
 			},
 			other	=> panic!("expected a Scoped group, got {:?}", other),
+		}
+	}
+
+	/// A `block.with(fill: ...)` with no `inset`/`radius` frames the element but names no geometry override
+	/// -- the byte-identical path a bare `#styled-box[...]` (and this same rule form before it named any
+	/// geometry) must keep, with the renderer's own constants left to apply downstream.
+	#[test]
+	fn template_frame_with_no_geometry_overrides_nothing() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240))") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		assert_eq!(t.frame, Some(TemplateFrame {
+			fill:		Rgba::opaque(240, 240, 240),
+			inset_x:	None,
+			inset_top:	None,
+			inset_bot:	None,
+			radius:		None,
+		}), "no inset/radius named, so the frame carries no geometry override");
+
+		let rule = Rule {
+			selector:	sel,
+			transform:	Transform::Template(t),
+			rule_id:	0,
+			source:		"#show raw".to_string(),
+			span:		Span::new(0, 0),
+		};
+		let mut blocks = vec![Block::Code { lines: vec!["let x = 1;".to_string()] }];
+		apply_rules(&mut blocks, std::slice::from_ref(&rule), Sp::from_pt(400.0));
+		match &blocks[0] {
+			Block::Scoped { blocks: inner, .. } => match &inner[0] {
+				Block::Box { patch, .. }	=> {
+					assert_eq!(patch.callout.inset_x, None, "no inset override -- the renderer's own default applies");
+					assert_eq!(patch.callout.inset_top, None);
+					assert_eq!(patch.callout.inset_bot, None);
+					assert_eq!(patch.callout.radius, None, "no radius override -- the renderer's own default applies");
+				},
+				other	=> panic!("expected the code framed in a Box, got {:?}", other),
+			},
+			other	=> panic!("expected a Scoped group, got {:?}", other),
+		}
+	}
+
+	/// The `inset: (x:, y:, bottom:)` dict form the corpus uses: `x` and `y` set the horizontal and top pad,
+	/// `y` also sets the bottom pad by default, and a following `bottom` overrides just that one side.
+	#[test]
+	fn template_inset_dict_form() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240), inset: (x: 8pt, y: 6pt, bottom: 12pt))") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		let tf = t.frame.expect("a fill names a frame");
+		assert_eq!(tf.inset_x, Some(Sp::from_pt(8.0)), "the dict's x becomes inset_x");
+		assert_eq!(tf.inset_top, Some(Sp::from_pt(6.0)), "the dict's y becomes inset_top");
+		assert_eq!(tf.inset_bot, Some(Sp::from_pt(12.0)), "a following bottom overrides y for the foot pad");
+	}
+
+	/// A rule's `inset`/`radius` that this reader cannot resolve to points -- an `em` value, which has no
+	/// absolute size at lowering time -- is refused, naming the field, rather than silently framing the
+	/// element with its geometry dropped.
+	#[test]
+	fn template_frame_geometry_refuses_unresolvable_lengths() {
+		let sel	= raw_selector();
+		match lower_transform(&sel, "it => block.with(fill: luma(240), inset: 1em)") {
+			Transform::Refused(reason)	=> assert!(reason.contains("inset"),
+				"the refusal must name the field it could not resolve: {}", reason),
+			other						=> panic!("expected a refusal, got {:?}", other),
+		}
+		match lower_transform(&sel, "it => block.with(fill: luma(240), radius: 50%)") {
+			Transform::Refused(reason)	=> assert!(reason.contains("radius"),
+				"the refusal must name the field it could not resolve: {}", reason),
+			other						=> panic!("expected a refusal, got {:?}", other),
 		}
 	}
 
