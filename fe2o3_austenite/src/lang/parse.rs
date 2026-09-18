@@ -740,6 +740,21 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 				continue;
 			}
 		}
+		// The function-call form of strength, `#strong[...]` or `#strong("...")`, set exactly as `*...*`:
+		// the bracket form's content is markup and takes the same expansion as the emph call above; the
+		// paren form's quoted-string argument is plain text bold in full. A paren argument that is not a
+		// plain string -- a bare identifier or an expression this reader cannot evaluate -- is left for
+		// the generic call handler below, which records the refusal rather than guessing at its text.
+		if c == '#' {
+			if let Some((inner, next)) = strong_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				push_emphasis(&mut runs, true, &inner, span, skips);
+				i = next;
+				continue;
+			}
+		}
 		// Typst's superscript, `#super[...]` or `#super("...")`. Its content is usually a short string or
 		// number, reduced to display text here and set raised and smaller by the block layer.
 		if c == '#' {
@@ -1295,7 +1310,7 @@ fn is_inline_call(name: &str) -> bool {
 		| "g" | "gcap" | "gi" | "gcapi" | "t" | "tcap" | "graw"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
 		| "index" | "index-main" | "cite" | "link"
-		| "emph" | "super"
+		| "emph" | "strong" | "super"
 		| "claim-label" | "claim-refs")
 }
 
@@ -1349,6 +1364,29 @@ fn emph_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 		return None;
 	}
 	read_group(chars, open)
+}
+
+/// Reads an inline `#strong[...]` or `#strong("...")` at `i` (a `#`), returning the text to set bold and
+/// the index just past the closing bracket. The bracket form's content is markup, unreduced -- it is the
+/// call form of `*...*` and the caller expands it the same way emph does. The paren form's argument is
+/// only resolved when it is a plain `"..."` string; a bare identifier or any other expression is not a
+/// text this reader can evaluate, so `None` is returned and the generic call handler records the refusal
+/// instead of guessing. `None` also when the shape is not a strong call or its group does not close.
+fn strong_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#strong")?;
+	match chars.get(open) {
+		Some('[')	=> read_group(chars, open),
+		Some('(')	=> {
+			let (inner, next) = read_group(chars, open)?;
+			let t = inner.trim();
+			if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+				Some((t[1..t.len() - 1].to_string(), next))
+			} else {
+				None
+			}
+		},
+		_			=> None,
+	}
 }
 
 /// Reads an inline `#super[...]` or `#super("...")` at `i` (a `#`), returning its content reduced to
@@ -3003,6 +3041,35 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let nested = parse_inlines("#emph[the #idx[Harvard Business Review] weekly]");
 		assert!(nested.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#emph") || t.contains("#idx"))),
 			"raw markup leaked from nested emph: {:?}", nested);
+	}
+
+	/// `#strong[...]` and `#strong("...")` are the call forms of `*...*`: both yield an [`Inline::Strong`]
+	/// run rather than a skip, and nothing raw leaks. A paren argument the reader cannot evaluate -- a
+	/// bare identifier here -- keeps the current refusal rather than guessing at its text.
+	#[test]
+	fn strong_call_reads_as_bold() -> Outcome<()> {
+		let bracket = parse_inlines("You want: #strong[the short version] first.");
+		assert!(bracket.iter().any(|r| matches!(r, Inline::Strong(t) if t == "the short version")),
+			"strong run missing from bracket form: {:?}", bracket);
+		assert!(bracket.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#strong"))),
+			"raw #strong leaked: {:?}", bracket);
+
+		let paren = parse_inlines("#strong(\"the short version\") first.");
+		assert!(paren.iter().any(|r| matches!(r, Inline::Strong(t) if t == "the short version")),
+			"strong run missing from paren form: {:?}", paren);
+
+		// A call carrying its own markup expands the same way `*...*` does.
+		let nested = parse_inlines("#strong[the #idx[Harvard Business Review] weekly]");
+		assert!(nested.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#strong") || t.contains("#idx"))),
+			"raw markup leaked from nested strong: {:?}", nested);
+
+		// A paren argument that is not a plain string is left for the generic call handler, so it is
+		// still tallied as a skip rather than silently guessed at.
+		let (_it, skips) = res!(document_with_refusals("#strong(ident)\n\nBody.\n"));
+		assert!(skips.entries().iter().any(|(n, _)| n == "#strong"),
+			"an unresolvable #strong(...) argument must still be recorded as a refusal, got: {:?}",
+			skips.entries());
+		Ok(())
 	}
 
 	/// Emphasis nested one level -- `*_x_*` or `_*x*_` -- collapses to a single [`Inline::BoldItalic`]
