@@ -1,0 +1,6 @@
+{ "roots": [
+	{ "name": "cheapthinking-ch03", "pages": 6, "anchors": 3, "pdf_sha256": "80810813aec55b5d619e701d004ad5ce8e51ba44c441921a163739cfc74a25af" },
+	{ "name": "oxeweb-overview", "pages": 35, "anchors": 131, "pdf_sha256": "9e676ed65310c1862c54ad79270227c13baa1e38320488cadd60a2c806f27a48" },
+	{ "name": "oxeweb-techspec", "pages": 141, "anchors": 563, "pdf_sha256": "12f37c237338979415a2af8dd3dfd735200bbdba4f9e3f8c48097e0457ed6439" },
+	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204" }
+]}

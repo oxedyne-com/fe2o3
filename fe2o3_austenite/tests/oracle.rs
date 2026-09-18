@@ -13,6 +13,11 @@
 //! values are re-recorded and printed as an accepted change rather than silently passing. See
 //! `tests/oracle/mod.rs`'s `record_and_diff` and `BaselineOutcome`.
 //!
+//! The reference for the crate-owned corpus roots is now checked in at `tests/oracle/expected.json`, and
+//! the harness seeds a fresh (or cleared) cache from it: a pinned root can no longer bootstrap on whatever
+//! renders, so a regression on a fresh box fails instead of self-blessing -- the milestone audit's first
+//! finding. austenite-doc is deferred (its source is under active authoring), so it still bootstraps.
+//!
 //! `tests/oracle/mod.rs` (loaded below as `mod driver`, see its own comment for why) is the driver;
 //! everything that shells out to `typst`, `pdfinfo`, `pdftoppm`, ImageMagick or `sha256sum` lives there,
 //! so this file stays a short statement of what is being asserted and why.
@@ -221,6 +226,66 @@ fn oracle_accept_gates_and_rerecords_a_changed_baseline() -> Outcome<()> {
 	let now_second = baseline.get("accept-fixture-root");
 	if now_second.as_ref().map(|e| e.pdf_sha256.as_str()) != Some("hash-two") {
 		return Err(err!("An accepted drift's baseline was not re-recorded: {:?}", now_second; Test, Mismatch));
+	}
+
+	let _ = std::fs::remove_file(&path);
+	Ok(())
+}
+
+/// The in-tree pin: a root listed in `tests/oracle/expected.json` seeds its reference from that tracked
+/// file when the cache has no entry, so on a fresh (or cleared) cache a matching render is `Unchanged` and
+/// a regressed one is `Rejected` -- never the always-pass `Bootstrapped`. A root absent from the file
+/// (austenite-doc, under active authoring) still bootstraps. This is the milestone audit's first finding
+/// fixed: a fresh box can no longer silently re-baseline on whatever it renders.
+#[test]
+fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
+	use driver::{BaselineOutcome, RootReport, record_and_diff};
+	use std::path::PathBuf;
+
+	let work_dir	= res!(qc_dir());
+	let path		= work_dir.join("baseline-expected-selftest.json");
+
+	let report = |name: &'static str, hash: &str| RootReport {
+		name,
+		austenite_pages:	1,
+		austenite_anchors:	4,
+		pdf_sha256:			hash.to_string(),
+		raster_samples:		Vec::new(),
+		raster_worst_pct:	None,
+		skip_line:			None,
+		typst_pages:		Some(1),
+		oracle_note:		None,
+		mismatches:			Vec::new(),
+		raster_note:		None,
+		pdf_path:			PathBuf::from("/nonexistent/expected-selftest.pdf"),
+	};
+
+	// styling-fixture is pinned; this is exactly its hash in tests/oracle/expected.json.
+	const FIXTURE_HASH: &str = "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204";
+
+	// A matching render on a fresh cache is Unchanged (the reference came from expected.json), not Bootstrapped.
+	let _ = std::fs::remove_file(&path);
+	match res!(record_and_diff(&path, &report("styling-fixture", FIXTURE_HASH), false)) {
+		BaselineOutcome::Unchanged	=> {},
+		_							=> return Err(err!(
+			"a pinned root matching expected.json was not Unchanged -- it bootstrapped or rejected instead";
+			Test, Mismatch)),
+	}
+
+	// A regressed render on a fresh cache is Rejected, not Bootstrapped: the pin blocks self-blessing.
+	let _ = std::fs::remove_file(&path);
+	match res!(record_and_diff(&path, &report("styling-fixture", "deadbeefdeadbeef"), false)) {
+		BaselineOutcome::Rejected(_)	=> {},
+		_							=> return Err(err!(
+			"a regressed pinned root was not Rejected -- the in-tree pin did not block the bootstrap";
+			Test, Mismatch)),
+	}
+
+	// A root absent from expected.json (austenite-doc's shape) still bootstraps.
+	let _ = std::fs::remove_file(&path);
+	match res!(record_and_diff(&path, &report("not-a-pinned-root", "abc123"), false)) {
+		BaselineOutcome::Bootstrapped	=> {},
+		_							=> return Err(err!("a non-pinned root did not bootstrap"; Test, Mismatch)),
 	}
 
 	let _ = std::fs::remove_file(&path);

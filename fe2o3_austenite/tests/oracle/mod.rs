@@ -921,6 +921,19 @@ pub fn baseline_path(work_dir: &Path) -> PathBuf {
 	work_dir.join("baseline.json")
 }
 
+/// The checked-in expected baseline: the crate-owned corpus roots' reference PDF hashes, tracked in the
+/// repository at `tests/oracle/expected.json` so a fresh box, or a cleared cache, diffs against them
+/// rather than bootstrapping on whatever renders. This is the milestone audit's first finding fixed --
+/// that the only reference was a mutable cache file with an always-pass bootstrap, so a regression on a
+/// fresh box silently re-baselined itself. A root pinned here can never bootstrap (see [`record_and_diff`]),
+/// so a regression fails instead of self-blessing. austenite-doc is deliberately absent: its source is
+/// under active authoring this session, so its hash is not yet fixed; it still bootstraps into the cache
+/// until its final hash is pinned here.
+fn expected_baseline() -> Option<Baseline> {
+	let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("oracle").join("expected.json");
+	Baseline::read_from_file(&path).ok()
+}
+
 /// How far a re-measured raster percentage may sit from what was recorded before it is treated as a real
 /// change rather than float round-trip noise. Deliberately tiny -- the two PDFs it is measured from are
 /// byte-identical run to run whenever [`BaselineEntry::pdf_sha256`] itself has not moved, so the raster
@@ -991,9 +1004,18 @@ pub fn record_and_diff(path: &Path, report: &RootReport, accept: bool) -> Outcom
 		pdf_sha256:			report.pdf_sha256.clone(),
 		raster_worst_pct:	report.raster_worst_pct,
 	};
-	let prior = baseline.get(report.name);
+	// A crate-owned root with no cache entry seeds its prior from the tracked expected.json, so a fresh box
+	// (or a cleared cache) diffs against the checked-in reference rather than bootstrapping on whatever
+	// rendered. The always-pass Bootstrapped is thus impossible for a pinned root, and a regression there
+	// fails instead of self-blessing.
+	let prior = match baseline.get(report.name) {
+		Some(p)	=> Some(p),
+		None	=> expected_baseline().and_then(|e| e.get(report.name)),
+	};
 	match prior {
 		None => {
+			// Not pinned in expected.json either (austenite-doc, under active authoring): bootstrap into the
+			// cache as before, until its final hash is checked in.
 			baseline.set(report.name, current);
 			res!(baseline.write_to_file(path));
 			Ok(BaselineOutcome::Bootstrapped)
