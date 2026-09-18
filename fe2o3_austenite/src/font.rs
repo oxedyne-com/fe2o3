@@ -80,6 +80,7 @@ pub struct ShapedText {
 	size:	f32,	// device points, the shaper's pixel and the outline's size
 	run:	Run,
 	dims:	Dims,
+	text:	String,	// the shaped source string, so a glyph's cluster recovers its source scalar(s)
 }
 
 impl ShapedText {
@@ -131,11 +132,14 @@ impl ShapedText {
 			Sp::from_pt(vm.ascent as f64),		// height above the baseline
 			Sp::from_pt(vm.descent as f64),		// depth below it
 		);
-		Ok(Self { src, size, run, dims })
+		Ok(Self { src, size, run, dims, text: text.to_string() })
 	}
 
 	pub fn dims(&self) -> Dims { self.dims }
 	pub fn run(&self) -> &Run { &self.run }
+
+	/// The shaped source string, whose byte offsets a glyph's [`cluster`](Glyph::cluster) indexes.
+	pub fn source(&self) -> &str { &self.text }
 
 	/// The size the run was shaped at, in device points.
 	pub fn size(&self) -> f32 { self.size }
@@ -143,6 +147,13 @@ impl ShapedText {
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
 		self.src.font().outline(glyph.face, glyph.id, self.size)
+	}
+
+	/// One glyph's outline at a canonical thousand units per em, in the font frame (origin at the glyph, y
+	/// up); empty for a space. The PDF writer stores this once and shows it at any point size, so the same
+	/// glyph in body and in a heading shares a single stored outline.
+	pub fn outline_canonical(&self, glyph: &Glyph) -> Outcome<Path> {
+		self.src.font().outline(glyph.face, glyph.id, 1000.0)
 	}
 
 	/// The run's real ink extent above and below the baseline, taken from the glyph outlines rather

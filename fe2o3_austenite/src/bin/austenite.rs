@@ -67,8 +67,9 @@ use std::time::Duration;
 /// straight-RGB (and, when translucent, grey) buffers. A text page estimates near zero; a full-page
 /// illustration estimates several megabytes. The chunker sums this across a forming chunk and closes it
 /// before the sum would breach the memory budget, so an illustration-dense book self-limits its window
-/// while a text book packs a chunk full. The glyph outlines are not counted: they were shown to stay
-/// flat to a wide window, and are shed the moment the content stream is serialised.
+/// while a text book packs a chunk full. The glyph outlines are not counted: a chunk holds them until the
+/// writer serialises its pages, but they were shown to stay flat to a wide window, and text is now stored
+/// once per distinct glyph rather than baked per occurrence, so the held bytes are smaller than before.
 fn page_hold_estimate(page: &Page) -> usize {
 	// Rough bytes-per-unit for the SVG text and PDF content a page's ink expands to while it is in flight.
 	// A glyph becomes an outline of a couple of dozen path operators in each of the two serialisations; a
@@ -99,14 +100,12 @@ fn page_hold_estimate(page: &Page) -> usize {
 	bytes
 }
 
-/// One page's PDF, rendered off the writer's thread: its draw list (images only, once the outlines are
-/// serialised) and that list already serialised to content-stream bytes. The costly transforms and
-/// serialisation are done; the sequential writer only frames these and folds them into the file in page
-/// order. The page's SVG is written straight to its own file by the worker, since an SVG page is an
-/// independent file that owes nothing to page order, so its string never travels back or accumulates.
+/// One page's PDF draw list, built off the writer's thread. The worker fetches the page's glyph outlines
+/// (warming the shared cache) and writes the page's SVG straight to its own file, since an SVG page owes
+/// nothing to page order. The content stream itself is serialised on the writer's thread, in page order,
+/// where a glyph's Type-3 code is assigned deterministically; the draw list travels back for that.
 struct Prepared {
 	pdf:		PdfPage,
-	content:	Vec<u8>,
 }
 
 /// The result of a compile, for the caller to report: the page count, the number of driver passes to
@@ -120,20 +119,16 @@ struct CompileStats {
 }
 
 /// Renders one page to both artefacts, the pure work a chunk runs across the cores. The SVG is written
-/// to its file here and dropped; the PDF content stream is serialised here too -- the bulk of the cost --
-/// and returned for the ordered writer to frame.
+/// to its file here and dropped; the PDF draw list is built here -- fetching each glyph's outline, the
+/// bulk of the cost -- and returned for the ordered writer to serialise and frame in page order.
 fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
 	let svg			= res!(svg::render_page(page));
 	let path		= fmt!("{}/page-{:03}.svg", out_dir, page.number);
 	res!(std::fs::write(&path, &svg));
 	drop(svg);
 
-	let mut pdf		= res!(emit::pdf::render_page(page));
-	let content		= pdf.content_bytes();
-	// The glyph outlines are now serialised into `content`; free them so a chunk rendered ahead holds
-	// only its images and content bytes, not every page's paths at once. Peak memory stays flat.
-	pdf.shed_serialised_draws();
-	Ok(Prepared { pdf, content })
+	let pdf			= res!(emit::pdf::render_page(page));
+	Ok(Prepared { pdf })
 }
 
 /// The one terse skip line -- `skipped: #show ×2, #columns ×1` -- built from the summary's per-name
@@ -378,7 +373,7 @@ fn compile(source: &str, out_dir: &str, pearl: bool) -> Outcome<CompileStats> {
 		let tw = std::time::Instant::now();
 		for prep in rendered {
 			let prep	= res!(prep);
-			res!(emit::pdf::write_page_prepared(&mut pdf, &prep.pdf, &prep.content));
+			res!(emit::pdf::write_built_page(&mut pdf, &prep.pdf));
 		}
 		// Fold this chunk's pages into the Pearl document before their frames are freed below.
 		if let Some(pb) = pearl_builder.as_mut() {

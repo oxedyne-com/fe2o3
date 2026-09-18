@@ -82,18 +82,12 @@ pub fn write_page<W: Write>(stream: &mut PdfStream<W>, page: &Page) -> Outcome<(
 	stream.page(&res!(render_page(page)))
 }
 
-/// Writes a page whose draw list and content stream were built elsewhere -- on a worker thread, so the
-/// costly path transforms and serialisation run off the writer's thread. The sequential framing and the
-/// page-ordered `/ID` fold stay here, so the bytes are identical to [`write_page`]'s. `content` is the
-/// [`PdfPage::content_bytes`] of the same `pdf_page`.
-pub fn write_page_prepared<W: Write>(
-	stream:		&mut PdfStream<W>,
-	pdf_page:	&PdfPage,
-	content:	&[u8],
-)
-	-> Outcome<()>
-{
-	stream.page_prepared(pdf_page, content)
+/// Writes a page whose draw list was built elsewhere -- on a worker thread, so the outline fetches and
+/// the SVG the same walk produces run off the writer's thread. The content stream is serialised here, in
+/// page order, because that is where a glyph's Type-3 code is assigned deterministically; with text now a
+/// few bytes of text operators rather than full inline outlines, that serialisation is cheap.
+pub fn write_built_page<W: Write>(stream: &mut PdfStream<W>, pdf_page: &PdfPage) -> Outcome<()> {
+	stream.page(pdf_page)
 }
 
 /// Builds one page's draw list: a white ground, then each placed box as a fill or a stroke.
@@ -202,20 +196,37 @@ fn draw_text(
 {
 	let base_x	= bx.to_pt() as f32;
 	let base_y	= (by + height).to_pt() as f32;
+	let src		= shaped.source();
+
+	// The cluster byte offsets in ascending order: a glyph's source text runs from its own cluster to the
+	// next boundary, so a ligature spans several source bytes and a plain letter spans one character. Built
+	// from every glyph, spaces included, so an inked glyph's text stops exactly at the following space.
+	let mut bounds: Vec<usize> = shaped.run().glyphs.iter().map(|g| g.cluster).collect();
+	bounds.sort_unstable();
+	bounds.dedup();
+	let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
 	for glyph in &shaped.run().glyphs {
-		let path = res!(shaped.outline(glyph));
-		// A glyph with no ink -- a space -- carries an advance but nothing to fill.
-		if path.is_empty() {
+		// The writer stores this canonical outline once and shows it at the run's point size. A glyph with
+		// no ink -- a space -- has an empty outline and is skipped, exactly as the SVG writer skips it, so the
+		// two arms place the same marks; the viewer infers word gaps from the glyph positions.
+		let outline = res!(shaped.outline_canonical(glyph));
+		if outline.is_empty() {
 			continue;
 		}
-		// The outline is font-frame, y up; the page is y down. Flip in y, then move onto the baseline
-		// at the glyph's own offset. The run is shaped in points, so no scale beyond the flip. The page
-		// itself is flipped once more into PDF's y-up frame by the PDF writer, which leaves the glyph
-		// the right way up on the page.
-		let t = Transform::scale(1.0, -1.0)
-			.then(&Transform::translate(base_x + glyph.x, base_y - glyph.y));
-		let placed = res!(path.transform(&t));
-		out.fill(placed, Rgba::BLACK);
+		// The source scalar(s) this glyph stands for, for the font's /ToUnicode: from its cluster to the next
+		// boundary, given only to the first inked glyph at that cluster so a decomposed mark does not repeat
+		// the character its base already carries.
+		let text = if claimed.insert(glyph.cluster) {
+			let start	= glyph.cluster;
+			let end		= bounds.iter().copied().find(|&b| b > start).unwrap_or(src.len());
+			src.get(start..end).unwrap_or("").to_string()
+		} else {
+			String::new()
+		};
+		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame. The writer
+		// flips the outline back to y up within the page's y-flip, so the glyph reads upright.
+		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, Rgba::BLACK, text);
 	}
 	Ok(())
 }
@@ -237,6 +248,42 @@ mod tests {
 		PlacedKind,
 	};
 	use std::sync::Arc;
+
+	#[test]
+	fn text_is_type3_and_extractable_via_tounicode() -> Outcome<()> {
+		// A shaped word is drawn as a Type-3 font, and the font's /ToUnicode CMap maps its codes back to the
+		// source characters, so a viewer extracts the real word rather than the font's private codes. Built
+		// uncompressed, so the CMap is readable straight from the bytes.
+		use crate::font::ShapedText;
+		use oxedyne_fe2o3_font::{
+			face::Role,
+			shape::Dir,
+		};
+
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let shaped	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, Sp::from_pt(11.0), "Oxegen"));
+		let tdims	= shaped.dims();
+		let mut frame = Frame::new();
+		frame.push(Placed::new(Sp::from_pt(60.0), Sp::from_pt(80.0), tdims, PlacedKind::Text(shaped)));
+		let page	= Page::new(1, geom, frame);
+
+		let pdf_page = res!(render_page(&page));
+		let mut w	= PdfWriter::new();	// uncompressed, so the CMap is legible in the bytes
+		w.add_page(pdf_page);
+		let bytes	= res!(w.to_bytes());
+		let text	= String::from_utf8_lossy(&bytes);
+
+		assert!(text.contains("/Subtype /Type3"), "the word is drawn as a Type-3 font");
+		assert!(text.contains(" Tj\n"), "the glyphs are shown with text operators");
+		assert!(text.contains("beginbfchar"), "a ToUnicode CMap carries character mappings");
+		// The distinct letters of "Oxegen" appear as UTF-16BE destinations in the CMap.
+		for (ch, hex) in [('O', "004F"), ('x', "0078"), ('e', "0065"), ('g', "0067"), ('n', "006E")] {
+			assert!(text.contains(&fmt!("<{}>", hex)),
+				"the CMap maps '{}' (U+{}) so the word is extractable", ch, hex);
+		}
+		Ok(())
+	}
 
 	#[test]
 	fn a_linked_graphic_emits_a_link_annotation() -> Outcome<()> {
