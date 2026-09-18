@@ -233,6 +233,16 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 /// line-leading `#func(...)` call, a `#columns` wrapper, and any unhandled inline `#func[...]`. The
 /// caller prints the summary so a dropped construct is reported rather than lost silently.
 pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
+	document_with_templates(src, &crate::lang::rules::TemplateFns::new())
+}
+
+/// As [`document_with_refusals`], with a set of bound `#let` furniture functions (`tfns`) in scope: a call
+/// to one -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- is expanded into a padded box rather
+/// than tallied as a skipped construct. A body re-parsed here carries the same `tfns`, so a furniture call
+/// nested inside another's body expands too. With an empty map this is exactly [`document_with_refusals`].
+pub fn document_with_templates(src: &str, tfns: &crate::lang::rules::TemplateFns)
+	-> Outcome<(Vec<Item>, Refusals)>
+{
 	let mut skips:		Refusals	= Refusals::default();
 	let mut items:		Vec<Item>	= Vec::new();
 	let mut lines:		Vec<String>	= Vec::new();	// the current paragraph's constituent lines
@@ -322,7 +332,7 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 			if !cap.state.has_open_bracket() {
 				let done = capture.take();
 				if let Some(cap) = done {
-					dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
+					dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);
 				}
 			}
 			continue;
@@ -364,7 +374,7 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
 			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-		} else if let Some(kind) = capture_opener(trimmed) {
+		} else if let Some(kind) = capture_opener(trimmed, tfns) {
 			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
 			// array feeding a table. It closes any open block, then its whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
@@ -377,7 +387,7 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 			buf.push('\n');
 			let cap = Capture { kind, buf, state, start };
 			if !cap.state.has_open_bracket() {
-				dispatch_capture(cap, &mut items, &mut arrays, &mut skips);	// the whole construct closed on one line
+				dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
 			}
@@ -478,7 +488,7 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
 	// still yields its best-effort figure or table rather than swallowing the tail silently.
 	if let Some(cap) = capture {
-		dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
+		dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);
 	}
 	Ok((items, skips))
 }
@@ -1803,12 +1813,20 @@ enum CaptureKind {
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
+	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
 /// bare `#table(`, or a `#let name = (` data array. `None` for any other line, which the caller then
 /// offers to [`code_skip`].
-fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
+fn capture_opener(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> Option<CaptureKind> {
+	// A call to a bound `#let` furniture function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` --
+	// is expanded rather than skipped. Recognised before the generic openers so a furniture name never
+	// collides with one of them (none of the corpus names does), and only when the map holds it, so an
+	// unbound `#name[...]` still falls through to be tallied as a skip exactly as before.
+	if let Some(name) = template_call_name(trimmed, tfns) {
+		return Some(CaptureKind::TemplateCall(name));
+	}
 	if trimmed.starts_with("#figure(") {
 		return Some(CaptureKind::Figure);
 	}
@@ -1850,6 +1868,50 @@ fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
 		return Some(CaptureKind::DeclStyle);
 	}
 	let_array_name(trimmed).map(CaptureKind::Let)
+}
+
+/// If this line opens a call to a bound furniture function -- `#<name>(` or `#<name>[` where `<name>` is a
+/// key of `tfns` -- that name; else `None`. The name must be followed immediately by `(` (a keyword-argument
+/// call) or `[` (a bare content call), so `#pr-note[` matches but a word that merely starts with a bound
+/// name does not.
+fn template_call_name(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> Option<String> {
+	let rest = trimmed.strip_prefix('#')?;
+	let name_len = rest.chars().take_while(|&c| c.is_alphanumeric() || c == '-' || c == '_').count();
+	if name_len == 0 {
+		return None;
+	}
+	let name: String = rest.chars().take(name_len).collect();
+	let next = rest.chars().nth(name_len);
+	if (next == Some('(') || next == Some('[')) && tfns.contains_key(&name) {
+		Some(name)
+	} else {
+		None
+	}
+}
+
+/// The `[ ... ]` body of a captured furniture call, and its keyword arguments if any. `#name[ body ]` has
+/// no arguments (`args` empty); `#name(title: [..])[ body ]` carries the argument group before the body.
+/// `None` when no `[ ... ]` content group follows the name, so a malformed call contributes no body.
+fn template_call_parts(buf: &str, name: &str) -> Option<(String, String)> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let at		= find_lit(&chars, &fmt!("#{}", name))?;
+	let mut j	= at + name.chars().count() + 1;	// past `#name`
+	let mut args	= String::new();
+	// An optional keyword-argument group `( ... )` immediately after the name.
+	if chars.get(j) == Some(&'(') {
+		let (inner, after) = read_group(&chars, j)?;
+		args = inner;
+		j = after;
+	}
+	// Whitespace between the argument group and the content body.
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	if chars.get(j) != Some(&'[') {
+		return None;
+	}
+	let (body, _) = read_group(&chars, j)?;
+	Some((args, body))
 }
 
 /// Is this line a `#show: <ident>.with(` whole-document template application -- the form whose named
@@ -1910,6 +1972,7 @@ fn dispatch_capture(
 	items:	&mut Vec<Item>,
 	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
 	skips:	&mut Refusals,
+	tfns:	&crate::lang::rules::TemplateFns,
 )
 {
 	match cap.kind {
@@ -1952,7 +2015,7 @@ fn dispatch_capture(
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = document_with_refusals(&body) {
+				if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
 					skips.merge(sub);
 					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -1972,7 +2035,7 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((inner, sub)) = document_with_refusals(&body) {
+				if let Ok((inner, sub)) = document_with_templates(&body, tfns) {
 					skips.merge(sub);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
@@ -1994,7 +2057,64 @@ fn dispatch_capture(
 				skips.record(&name, Span::new(cap.start, cap.start));
 			}
 		},
+		CaptureKind::TemplateCall(name) => {
+			// A call to a bound `#let` furniture function. Its `[ ... ]` body is a block sequence, re-parsed
+			// through the document parser (with the same furniture in scope, so a nested call expands too) and
+			// wrapped in a single `Item::Box` under the definition's lowered patch -- the callout geometry and
+			// the inner-set overlay. A `title:` argument becomes a leading bold paragraph in the box. The call
+			// is set, not skipped, so it is not tallied; a refusal inside the body still folds in.
+			let tf = match tfns.get(&name) {
+				Some(tf)	=> tf,
+				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+			};
+			if let Some((args, body)) = template_call_parts(&cap.buf, &name) {
+				if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
+					skips.merge(sub);
+					// A `title:` keyword argument, its content set as a leading bold paragraph at the title size
+					// the definition named, ahead of the body.
+					if tf.has_title {
+						if let Some(title) = named_content_arg(&args, "title") {
+							let runs = parse_inlines(&title);
+							inner.insert(0, Item::Paragraph {
+								runs:	vec![Inline::Strong(inline_plain(&runs))],
+								label:	None,
+								span:	Span::new(cap.start, cap.start),
+							});
+						}
+					}
+					items.push(Item::Box { items: inner, patch: tf.patch.clone(), span: Span::new(cap.start, cap.start) });
+				}
+			}
+		},
 	}
+}
+
+/// The content of a `key: [ ... ]` keyword argument, without its brackets. Used to read a furniture call's
+/// `title:` argument. `None` when the key is absent or its value is not a content block.
+fn named_content_arg(args: &str, key: &str) -> Option<String> {
+	let at		= args.find(key)?;
+	let after	= &args[at + key.len()..];
+	let after	= after.trim_start();
+	let after	= after.strip_prefix(':')?.trim_start();
+	if !after.starts_with('[') {
+		return None;
+	}
+	let chars:	Vec<char>	= after.chars().collect();
+	read_group(&chars, 0).map(|(inner, _)| inner)
+}
+
+/// The plain text of a run of inline markup, dropping the markup and keeping the words -- a title is set as
+/// one bold run, so its own emphasis is flattened rather than nested inside the bold.
+fn inline_plain(runs: &[Inline]) -> String {
+	let mut out = String::new();
+	for run in runs {
+		match run {
+			Inline::Text(t) | Inline::Strong(t) | Inline::Emph(t) | Inline::BoldItalic(t)
+			| Inline::Super(t) | Inline::Code(t)	=> out.push_str(t),
+			_										=> {},
+		}
+	}
+	out
 }
 
 /// The `[ ... ]` body of a captured `#columns(n)[ ... ]` wrapper: the column count arguments are read and
@@ -2734,6 +2854,46 @@ mod tests {
 		assert!(items.iter().any(|it| matches!(it, Item::Paragraph { runs, .. }
 			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Lead prose."))))),
 			"prose before the callout is dropped");
+		Ok(())
+	}
+
+	/// A call to a bound `#let` furniture function -- `#pr-note[ ... ]` -- is gathered whole and expanded
+	/// into an [`Item::Box`] carrying the definition's lowered patch (a transparent-wash, asymmetric-inset
+	/// block), its `[ ... ]` body re-parsed into the box. The call is set, not skipped, so it is not tallied;
+	/// an unbound `#name[...]` (no definition in scope) still falls through to be reported as a skip.
+	#[test]
+	fn pr_note_call_expands_to_a_box_and_is_not_skipped() -> Outcome<()> {
+		let def = "#let pr-note(body) = block(inset: (left: 1.2em, right: 0.6em), above: 0.9em, below: 1.1em, \
+{ set text(size: 0.88em); set par(spacing: 0.55em, first-line-indent: 0em); body })\n";
+		let mut tfns = crate::lang::rules::TemplateFns::new();
+		crate::lang::rules::collect_template_fns(def, crate::ir::Sp::from_pt(10.0), &mut tfns);
+		assert!(tfns.contains_key("pr-note"), "the definition is collected");
+
+		let src = "Lead prose.\n\n#pr-note[\n*Baseline:* one measure.\n\nA second paragraph.\n]\n\nTrailing prose.\n";
+		let (items, skips) = res!(document_with_templates(src, &tfns));
+		let (inner, patch) = res!(items.iter().find_map(|it| match it {
+			Item::Box { items, patch, .. }	=> Some((items.clone(), patch.clone())),
+			_							=> None,
+		}).ok_or_else(|| err!("no Item::Box was produced for the pr-note call"; Test, Bug)));
+		// The box carries the pr-note geometry: an asymmetric inset and a transparent (no-wash) fill.
+		assert_eq!(patch.callout.inset_left, Some(crate::ir::Sp::from_pt(12.0)), "left inset resolved at 10pt body");
+		assert_eq!(patch.callout.fill.map(|c| c.a), Some(0), "no fill -- a plain indented block");
+		assert_eq!(patch.text.body_size, Some(crate::ir::Sp::from_pt(8.8)), "the body sets at 0.88em");
+		// The body re-parses to paragraphs, its bold lead-in surviving as a strong run.
+		assert!(inner.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if runs.iter().any(|r| matches!(r, Inline::Strong(t) if t == "Baseline:")))),
+			"the body's bold lead-in must survive, got: {:?}", inner);
+		// The call is not tallied as a skipped construct, and the surrounding prose still sets.
+		assert!(!skips.entries().iter().any(|(name, _)| name == "#pr-note"),
+			"a bound furniture call must not be reported as a skip");
+		assert!(items.iter().any(|it| matches!(it, Item::Paragraph { runs, .. }
+			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Lead prose."))))),
+			"prose before the call is dropped");
+
+		// With no definition in scope, the same call is left to be tallied as a skip, unchanged.
+		let (_it2, skips2) = res!(document_with_refusals(src));
+		assert!(skips2.entries().iter().any(|(name, _)| name == "#pr-note"),
+			"an unbound furniture call still reports as a skip");
 		Ok(())
 	}
 

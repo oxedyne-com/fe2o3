@@ -51,3 +51,11 @@ pub fn to_blocks_with_refusals(src: &str) -> Outcome<(Vec<Block>, Refusals)> {
 	let (items, skips) = res!(parse::document_with_refusals(src));
 	Ok((lower::blocks(&items), skips))
 }
+
+/// As [`to_blocks_with_refusals`], with a set of bound `#let` furniture functions in scope: a call to one
+/// (`#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]`) expands into a padded box rather than a skip. The
+/// book assembler collects the definitions once and threads them into every chapter it reads.
+pub fn to_blocks_with_templates(src: &str, tfns: &rules::TemplateFns) -> Outcome<(Vec<Block>, Refusals)> {
+	let (items, skips) = res!(parse::document_with_templates(src, tfns));
+	Ok((lower::blocks(&items), skips))
+}

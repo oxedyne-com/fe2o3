@@ -349,6 +349,8 @@ impl Default for ThemeCode {
 pub struct ThemeCallout {
 	pub fill:		Rgba,			// reserved
 	pub inset_x:	Option<Sp>,		// a rule's `inset:` (or its dict form's `x:`); None keeps the body em
+	pub inset_left:	Option<Sp>,		// an asymmetric `inset.left`; overrides inset_x on the left when set
+	pub inset_right:	Option<Sp>,	// an asymmetric `inset.right`; overrides inset_x on the right when set
 	pub inset_top:	Option<Sp>,		// as inset_x, but the top pad (the dict form's `y:`)
 	pub inset_bot:	Option<Sp>,		// as inset_x, but the foot pad (the dict form's `bottom:`, 1.2em default)
 	pub radius:		Option<Sp>,		// a rule's `radius:`; None keeps the template's 4pt
@@ -359,6 +361,8 @@ impl Default for ThemeCallout {
 		Self {
 			fill:		Rgba::opaque(245, 230, 255),
 			inset_x:	None,
+			inset_left:	None,
+			inset_right:	None,
 			inset_top:	None,
 			inset_bot:	None,
 			radius:		None,
@@ -597,6 +601,8 @@ pub struct ThemeCodePatch {
 pub struct ThemeCalloutPatch {
 	pub fill:		Option<Rgba>,
 	pub inset_x:	Option<Sp>,
+	pub inset_left:	Option<Sp>,
+	pub inset_right:	Option<Sp>,
 	pub inset_top:	Option<Sp>,
 	pub inset_bot:	Option<Sp>,
 	pub radius:		Option<Sp>,
@@ -797,12 +803,14 @@ impl ThemeCodePatch {
 impl ThemeCalloutPatch {
 	fn apply(&self, t: &mut ThemeCallout) {
 		patch_merge!(self.fill, t.fill);
-		// These four are already `Option<Sp>` on the theme side (an unset override, not an unset length),
+		// These are already `Option<Sp>` on the theme side (an unset override, not an unset length),
 		// so a named override replaces the option outright rather than unwrapping into it.
-		if self.inset_x.is_some()	{ t.inset_x = self.inset_x; }
-		if self.inset_top.is_some()	{ t.inset_top = self.inset_top; }
-		if self.inset_bot.is_some()	{ t.inset_bot = self.inset_bot; }
-		if self.radius.is_some()	{ t.radius = self.radius; }
+		if self.inset_x.is_some()		{ t.inset_x = self.inset_x; }
+		if self.inset_left.is_some()	{ t.inset_left = self.inset_left; }
+		if self.inset_right.is_some()	{ t.inset_right = self.inset_right; }
+		if self.inset_top.is_some()		{ t.inset_top = self.inset_top; }
+		if self.inset_bot.is_some()		{ t.inset_bot = self.inset_bot; }
+		if self.radius.is_some()		{ t.radius = self.radius; }
 	}
 }
 
@@ -1193,6 +1201,8 @@ impl ThemeCallout {
 		Ok(omapdat!{
 			"fill"			=> rgba_dat(self.fill),
 			"inset_x"		=> opt_sp_dat(self.inset_x),
+			"inset_left"	=> opt_sp_dat(self.inset_left),
+			"inset_right"	=> opt_sp_dat(self.inset_right),
 			"inset_top"		=> opt_sp_dat(self.inset_top),
 			"inset_bot"		=> opt_sp_dat(self.inset_bot),
 			"radius"		=> opt_sp_dat(self.radius),
@@ -1202,6 +1212,8 @@ impl ThemeCallout {
 		Ok(Self {
 			fill:		res!(rgba_from(res!(map_must(&mut d, "fill")))),
 			inset_x:	res!(opt_sp_from(res!(map_must(&mut d, "inset_x")))),
+			inset_left:	res!(opt_sp_from(res!(map_must(&mut d, "inset_left")))),
+			inset_right:	res!(opt_sp_from(res!(map_must(&mut d, "inset_right")))),
 			inset_top:	res!(opt_sp_from(res!(map_must(&mut d, "inset_top")))),
 			inset_bot:	res!(opt_sp_from(res!(map_must(&mut d, "inset_bot")))),
 			radius:		res!(opt_sp_from(res!(map_must(&mut d, "radius")))),

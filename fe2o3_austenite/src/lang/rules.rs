@@ -1190,6 +1190,545 @@ fn length_pt(s: &str) -> Option<f64> {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ #let TEMPLATE FUNCTIONS (a `#let name(params) = block/box(...)` furniture)  │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A `#let name(params) = <expr>` furniture function the reader expands at each call site. The two the
+/// Lucronics corpus defines -- `#pr-note(body)` (a plain indented, tightened block) and
+/// `#aside-box(title: ..., body)` (a washed, left-stroked callout) -- both wrap their body parameter in a
+/// `block(...)`/`box(...)`, so a call `#name[ ... ]` sets that body inside the furniture's frame rather
+/// than being tallied as a skipped construct.
+///
+/// The definition is lowered once (at book-assembly time, against the document's body size, so every
+/// `em` length resolves to an absolute at that size) into a serialisable [`ThemePatch`] carrying the
+/// frame's geometry (`callout.*`) and the inner `#set text`/`#set par` overlay (`text.*`/`par.*`). A call
+/// then re-parses its `[ ... ]` body and wraps it in a `Block::Box` under that patch -- the same shape a
+/// `#styled-box[...]` produces, so the callout renderer sets it with no new path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TemplateFn {
+	pub body_param:		String,			// the content parameter the call's `[ ... ]` body fills
+	pub has_title:		bool,			// a `title:` parameter -> a leading bold title paragraph in the body
+	pub title_size:		Option<Sp>,		// the title run's text size, em-resolved (a bold paragraph is set at it)
+	pub patch:			ThemePatch,		// the frame geometry and the inner-set overlay, merged
+}
+
+/// The template functions in scope for a source, by name. Empty until a book's definitions are collected;
+/// a source with none reads exactly as before.
+pub type TemplateFns = std::collections::HashMap<String, TemplateFn>;
+
+/// Collects every `#let name(params) = block/box(...)` furniture definition in `src` into `tfns`, lowering
+/// each against `body_size` so its `em` lengths resolve to absolutes. A definition whose body this reader
+/// cannot lower (not a `block`/`box` wrap, or naming a length it cannot resolve) is passed over silently --
+/// the call then stays a tallied skip, exactly as before, rather than expanding wrongly. A byte-identical
+/// definition seen twice (the corpus repeats `#let pr-note` verbatim atop three chapters) re-inserts the
+/// same value, so the map is definition-order-independent.
+pub fn collect_template_fns(src: &str, body_size: Sp, tfns: &mut TemplateFns) {
+	let chars:	Vec<char>	= src.chars().collect();
+	let mut i	= 0usize;
+	while i < chars.len() {
+		// A definition opens at a line-leading `#let <ident>(` -- a function `#let`, whose name is followed by
+		// a parameter list. (`#let name = (...)` -- a value binding -- has no `(` right after the name and is
+		// left to the data-array reader.)
+		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+			if let Some((name, params, expr, next)) = read_let_fn(&chars, i) {
+				// A name the reader already handles as a built-in construct (`styled-box`, `padded-image`,
+				// `part-page`, ...) is NOT overridden by a collected definition, so the built-in path stays
+				// authoritative and a corpus that defines its own `styled-box` renders exactly as before.
+				if !is_reserved_construct(&name) {
+					if let Some(tf) = lower_template_fn(&params, &expr, body_size) {
+						tfns.insert(name, tf);
+					}
+				}
+				i = next;
+				continue;
+			}
+		}
+		i += 1;
+	}
+}
+
+/// Is `name` a construct the reader already captures specially, so a `#let` of that name must not shadow
+/// the built-in path? These are exactly the names [`crate::lang::parse::capture_opener`] and the document
+/// loop match on before the furniture arm.
+fn is_reserved_construct(name: &str) -> bool {
+	matches!(name,
+		"styled-box" | "figure" | "table" | "columns" | "image" | "padded-image"
+		| "section-banner" | "print-glossary" | "line" | "part-page")
+}
+
+/// Is `at` the start of a line (position 0, or just after a newline)?
+fn at_line_start(chars: &[char], at: usize) -> bool {
+	at == 0 || chars.get(at - 1) == Some(&'\n')
+}
+
+/// Does `chars` hold the literal `pat` starting at `at`?
+fn starts_with_at(chars: &[char], at: usize, pat: &str) -> bool {
+	let p: Vec<char> = pat.chars().collect();
+	if at + p.len() > chars.len() {
+		return false;
+	}
+	chars[at..at + p.len()] == p[..]
+}
+
+/// Reads a `#let name(params) = <expr>` beginning at `at` (the `#`), returning the name, the parameter
+/// list text, the definition expression, and the index just past the expression. The expression runs to
+/// the end of the top-level balanced group it opens (`block( ... )`, `box( ... )`, or a `{ ... }` body),
+/// so a multi-line definition is read whole. `None` when the line is not a function `#let`.
+fn read_let_fn(chars: &[char], at: usize) -> Option<(String, String, String, usize)> {
+	let mut j = at + "#let ".chars().count();
+	// The name: identifier characters up to the `(`.
+	let name_start = j;
+	while j < chars.len() && is_ident_char(chars[j]) {
+		j += 1;
+	}
+	let name: String = chars[name_start..j].iter().collect();
+	if name.is_empty() || chars.get(j) != Some(&'(') {
+		return None;
+	}
+	// The parameter list `( ... )`.
+	let (params, after_params) = read_paren_group(chars, j)?;
+	// The `=` separating the signature from the body.
+	let mut k = after_params;
+	while k < chars.len() && chars[k].is_whitespace() {
+		k += 1;
+	}
+	if chars.get(k) != Some(&'=') {
+		return None;
+	}
+	k += 1;
+	while k < chars.len() && chars[k].is_whitespace() {
+		k += 1;
+	}
+	// The expression is the balanced group the body opens: a `block(`/`box(` call, or a `{ ... }` block.
+	let (expr, next) = read_balanced_from(chars, k)?;
+	Some((name, params, expr, next))
+}
+
+/// Reads the balanced `( ... )` group whose `(` sits at `open`, returning the inner text (without the
+/// parentheses) and the index just past the `)`.
+fn read_paren_group(chars: &[char], open: usize) -> Option<(String, usize)> {
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	read_delim_group(chars, open)
+}
+
+/// Reads the balanced group whose opener (`(`, `[` or `{`) sits at `open`, returning the inner text
+/// (without the delimiters) and the index just past its close. Nesting and string literals are honoured.
+fn read_delim_group(chars: &[char], open: usize) -> Option<(String, usize)> {
+	if !matches!(chars.get(open), Some('(') | Some('[') | Some('{')) {
+		return None;
+	}
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	for i in open..chars.len() {
+		let c = chars[i];
+		if in_str {
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'				=> in_str = true,
+			'(' | '[' | '{'	=> depth += 1,
+			')' | ']' | '}'	=> {
+				depth -= 1;
+				if depth == 0 {
+					let inner: String = chars[open + 1..i].iter().collect();
+					return Some((inner, i + 1));
+				}
+			},
+			_				=> {},
+		}
+	}
+	None
+}
+
+/// Reads the balanced group beginning at `from` -- a `name( ... )` call, a `( ... )`, a `[ ... ]` or a
+/// `{ ... }` -- returning the whole group's text (delimiters included) and the index just past its close.
+/// The group starts at the first `(`/`[`/`{` at or after `from` on the definition; leading identifier
+/// characters (a call name like `block`) are kept in the returned text.
+fn read_balanced_from(chars: &[char], from: usize) -> Option<(String, usize)> {
+	// Skip a leading call name to its opening bracket, keeping the name in the span.
+	let mut open = from;
+	while open < chars.len() && (is_ident_char(chars[open]) || chars[open] == '.') {
+		open += 1;
+	}
+	let opener = *chars.get(open)?;
+	if !matches!(opener, '(' | '[' | '{') {
+		return None;
+	}
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	for i in open..chars.len() {
+		let c = chars[i];
+		if in_str {
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'				=> in_str = true,
+			'(' | '[' | '{'	=> depth += 1,
+			')' | ']' | '}'	=> {
+				depth -= 1;
+				if depth == 0 {
+					let span: String = chars[from..=i].iter().collect();
+					return Some((span, i + 1));
+				}
+			},
+			_				=> {},
+		}
+	}
+	None
+}
+
+fn is_ident_char(c: char) -> bool {
+	c.is_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Lowers a furniture definition's parameter list and body expression to a [`TemplateFn`], resolving every
+/// `em` length against `body_size`. The recognised body is a single `block(...)`/`box(...)` wrap (`pr-note`)
+/// or a `{ ... }` block whose first `box(...)`/`block(...)` is that wrap (`aside-box`, which then re-wraps
+/// it in a `figure(placement: auto)` this reader lowers in-flow). The named arguments read are `inset`
+/// (scalar or a `(left:, right:, x:, y:, top:, bottom:)` dict), `above`/`below` (block margins folded into
+/// the top/bottom pads), `fill`, `radius` and `stroke: (left: <w> + <colour>)`; the positional content
+/// block's inner `set text(size:)` / `set par(spacing:, first-line-indent:)` become the body overlay.
+/// `None` when the body is neither wrap, or a length will not resolve -- the call then stays a tallied skip.
+fn lower_template_fn(params: &str, expr: &str, body_size: Sp) -> Option<TemplateFn> {
+	let body_param	= body_param_name(params)?;
+	let has_title	= param_names(params).iter().any(|p| p == "title");
+
+	// The wrap call: the definition's own `block(...)`/`box(...)`, taken directly when the body is that call,
+	// or found as the first such call inside a `{ ... }` body (the `let inner = box(...)` idiom). A `box` and
+	// a `block` lower alike -- both wrap the body in a padded frame.
+	let wrap = wrap_call(expr)?;
+	let args	= wrap_args(&wrap)?;
+
+	let mut patch = ThemePatch::default();
+
+	// The fill: a resolved colour washes the frame; an absent (or unresolved) fill leaves it transparent, so
+	// a plain indented block draws no panel. `box` and `block` alike carry a fill only when the source names one.
+	let fill = match named_value(&args, "fill") {
+		Some(fv)	=> parse_colour(&fv).unwrap_or(Rgba::TRANSPARENT),
+		None		=> Rgba::TRANSPARENT,
+	};
+	patch.callout.fill = Some(fill);
+
+	// The inset: a scalar pads every side, a dict names `left`/`right`/`x`/`y`/`top`/`bottom`. `x` sets both
+	// horizontal pads, `y` both vertical; a side-specific key overrides.
+	if let Some(iv) = named_value(&args, "inset") {
+		let pads = read_inset_pads(&iv, body_size)?;
+		patch.callout.inset_left	= pads.left;
+		patch.callout.inset_right	= pads.right;
+		patch.callout.inset_top		= pads.top;
+		patch.callout.inset_bot		= pads.bottom;
+	}
+	// The block margins `above`/`below` fold into the top/bottom pads: with a transparent wash they read as
+	// the block's own leading/trailing space, an honest first cut of Typst's block spacing model.
+	if let Some(av) = named_value(&args, "above") {
+		patch.callout.inset_top = Some(resolve_len(&av, body_size)?);
+	}
+	if let Some(bv) = named_value(&args, "below") {
+		patch.callout.inset_bot = Some(resolve_len(&bv, body_size)?);
+	}
+	if let Some(rv) = named_value(&args, "radius") {
+		patch.callout.radius = Some(resolve_len(&rv, body_size)?);
+	}
+
+	// The positional content block: its inner `set text`/`set par` overlay the body, and it must reference
+	// the body parameter (the hole). A definition whose content never names the body is not a furniture wrap.
+	let (_delim, content) = positional_content(&args)?;
+	if !mentions_word(&content, &body_param) {
+		return None;
+	}
+	read_inner_sets_em(&content, body_size, &mut patch);
+
+	// The title run's size (`text(size: 0.85em)[#title]`), read from the content so a title paragraph is set
+	// at the same size the body is.
+	let title_size = if has_title {
+		title_text_size(&content, body_size)
+	} else {
+		None
+	};
+
+	Some(TemplateFn { body_param, has_title, title_size, patch })
+}
+
+/// The body parameter's name: the last positional (unnamed) parameter in the list, which is the content
+/// the call supplies. A named parameter (`title: none`, `float: true`) is a keyword the call may set, not
+/// the content hole. `None` when the list names no positional parameter.
+fn body_param_name(params: &str) -> Option<String> {
+	split_top_commas_str(params).into_iter().rev().find_map(|p| {
+		let p = p.trim();
+		if p.is_empty() || p.contains(':') {
+			None
+		} else if p.chars().all(is_ident_char) {
+			Some(p.to_string())
+		} else {
+			None
+		}
+	})
+}
+
+/// Every parameter's name (the identifier before any `:` default), for detecting a `title:` keyword.
+fn param_names(params: &str) -> Vec<String> {
+	split_top_commas_str(params).into_iter().filter_map(|p| {
+		let name = p.split(':').next().unwrap_or("").trim();
+		if !name.is_empty() && name.chars().all(is_ident_char) {
+			Some(name.to_string())
+		} else {
+			None
+		}
+	}).collect()
+}
+
+/// The `block(...)`/`box(...)` wrap call of a furniture body: the whole expression when it is that call, or
+/// the first such call inside a `{ ... }` body. `None` when neither is present.
+fn wrap_call(expr: &str) -> Option<String> {
+	let e = expr.trim();
+	if e.starts_with("block") || e.starts_with("box") {
+		return Some(e.to_string());
+	}
+	// A `{ ... }` body (the `let inner = box(...)` idiom): find the first `block(`/`box(` call within.
+	let chars: Vec<char> = e.chars().collect();
+	for name in ["box", "block"] {
+		if let Some(at) = find_call(&chars, name) {
+			if let Some((span, _)) = read_balanced_from(&chars, at) {
+				return Some(span);
+			}
+		}
+	}
+	None
+}
+
+/// The argument text of a `name( ... )` wrap call, without the enclosing parentheses.
+fn wrap_args(wrap: &str) -> Option<String> {
+	let chars:	Vec<char>	= wrap.chars().collect();
+	let open = chars.iter().position(|&c| c == '(')?;
+	read_paren_group(&chars, open).map(|(inner, _)| inner)
+}
+
+/// The index of a `name(` call in `chars`, at a word boundary so `box` is not found inside a longer word.
+fn find_call(chars: &[char], name: &str) -> Option<usize> {
+	let pat: Vec<char> = name.chars().collect();
+	let n = pat.len();
+	let mut i = 0usize;
+	while i + n < chars.len() {
+		if chars[i..i + n] == pat[..]
+			&& (i == 0 || !is_ident_char(chars[i - 1]))
+			&& chars.get(i + n) == Some(&'(')
+		{
+			return Some(i);
+		}
+		i += 1;
+	}
+	None
+}
+
+/// The four inset pads a furniture block names.
+struct InsetPads {
+	left:	Option<Sp>,
+	right:	Option<Sp>,
+	top:	Option<Sp>,
+	bottom:	Option<Sp>,
+}
+
+/// Reads a furniture `inset:` value into its four pads, resolving `em` against `body_size`. A scalar
+/// (`inset: 8pt`) pads every side; a dict (`inset: (x: 1em, y: 1em, bottom: 1.2em)` or
+/// `(left: 1.2em, right: 0.6em)`) names sides -- `x` both horizontal, `y` both vertical, then a
+/// side-specific key overrides. `None` when a named length will not resolve, so the call stays a skip.
+fn read_inset_pads(raw: &str, body_size: Sp) -> Option<InsetPads> {
+	let raw = raw.trim();
+	let mut pads = InsetPads { left: None, right: None, top: None, bottom: None };
+	if raw.starts_with('(') {
+		let inner = call_group(raw)?;
+		if let Some(v) = named_value(&inner, "x") {
+			let sp = resolve_len(&v, body_size)?;
+			pads.left = Some(sp);
+			pads.right = Some(sp);
+		}
+		if let Some(v) = named_value(&inner, "y") {
+			let sp = resolve_len(&v, body_size)?;
+			pads.top = Some(sp);
+			pads.bottom = Some(sp);
+		}
+		if let Some(v) = named_value(&inner, "left") {
+			pads.left = Some(resolve_len(&v, body_size)?);
+		}
+		if let Some(v) = named_value(&inner, "right") {
+			pads.right = Some(resolve_len(&v, body_size)?);
+		}
+		if let Some(v) = named_value(&inner, "top") {
+			pads.top = Some(resolve_len(&v, body_size)?);
+		}
+		if let Some(v) = named_value(&inner, "bottom") {
+			pads.bottom = Some(resolve_len(&v, body_size)?);
+		}
+		Some(pads)
+	} else {
+		let sp = resolve_len(raw, body_size)?;
+		Some(InsetPads { left: Some(sp), right: Some(sp), top: Some(sp), bottom: Some(sp) })
+	}
+}
+
+/// The first top-level `{ ... }` or `[ ... ]` content group in a wrap's argument list, as its delimiter and
+/// inner text -- the block the body parameter sits in. `None` when the call carries no positional content.
+fn positional_content(args: &str) -> Option<(char, String)> {
+	let chars:	Vec<char>	= args.chars().collect();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut i		= 0usize;
+	while i < chars.len() {
+		let c = chars[i];
+		if in_str {
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		match c {
+			'"'					=> in_str = true,
+			'(' 				=> depth += 1,
+			')'					=> depth -= 1,
+			'{' | '[' if depth == 0	=> {
+				if let Some((span, _)) = read_delim_group(&chars, i) {
+					return Some((c, span));
+				}
+				return None;
+			},
+			'{' | '['			=> depth += 1,
+			'}' | ']'			=> depth -= 1,
+			_					=> {},
+		}
+		i += 1;
+	}
+	None
+}
+
+/// Reads a content block's inner `set text(size:)` and `set par(spacing:, first-line-indent:)` into the
+/// hole overlay, resolving `em` against `body_size`. A `#`-prefixed `#set` (an `[ ... ]` content block) and
+/// a bare `set` (a `{ ... }` code block) are both read.
+fn read_inner_sets_em(content: &str, body_size: Sp, patch: &mut ThemePatch) {
+	for stmt in split_statements(content) {
+		let s = stmt.trim().trim_start_matches('#').trim();
+		let after = match s.strip_prefix("set ") {
+			Some(a)	=> a.trim(),
+			None	=> continue,
+		};
+		let open = match after.find('(') {
+			Some(i)	=> i,
+			None	=> continue,
+		};
+		let target	= after[..open].trim();
+		let cargs	= match call_group(&after[open..]) {
+			Some(a)	=> a,
+			None	=> continue,
+		};
+		match target {
+			"text" => {
+				if let Some(v) = named_value(&cargs, "size") {
+					if let Some(sp) = resolve_len(&v, body_size) {
+						patch.text.body_size = Some(sp);
+					}
+				}
+			},
+			"par" => {
+				if let Some(v) = named_value(&cargs, "spacing") {
+					if let Some(sp) = resolve_len(&v, body_size) {
+						patch.par.skip = Some(sp);
+					}
+				}
+				if let Some(v) = named_value(&cargs, "first-line-indent") {
+					if let Some(sp) = resolve_len(&v, body_size) {
+						patch.par.indent = Some(sp);
+					}
+				}
+				if let Some(v) = named_value(&cargs, "leading") {
+					if let Some(sp) = resolve_len(&v, body_size) {
+						patch.text.leading = Some(sp);
+					}
+				}
+			},
+			_ => {},
+		}
+	}
+}
+
+/// The size of a `text(size: <len>)[#title]` run inside a furniture's content -- the size a leading title
+/// paragraph is set at. `None` when no such run names a size.
+fn title_text_size(content: &str, body_size: Sp) -> Option<Sp> {
+	// The title run carries `weight: "bold"`, so match the first `text(...)` naming a bold weight and a size.
+	let chars: Vec<char> = content.chars().collect();
+	let mut from = 0usize;
+	while let Some(at) = find_call(&chars[from..], "text").map(|i| from + i) {
+		if let Some((_, next)) = read_balanced_from(&chars, at) {
+			let call: String = chars[at..next].iter().collect();
+			if let Some(a) = wrap_args(&call) {
+				if a.contains("bold") {
+					if let Some(v) = named_value(&a, "size") {
+						if let Some(sp) = resolve_len(&v, body_size) {
+							return Some(sp);
+						}
+					}
+				}
+			}
+			from = next;
+		} else {
+			break;
+		}
+	}
+	None
+}
+
+/// A length token to scaled points, resolving `em` against `body_size` (an em is that fraction of the
+/// running text size). Accepts `em`, and every absolute unit [`length_pt`] reads (`pt`/`mm`/`cm`/`in`/bare).
+/// `None` for a `%` or an unrecognised unit, so a caller refuses rather than sizing wrongly.
+fn resolve_len(v: &str, body_size: Sp) -> Option<Sp> {
+	let v = v.trim();
+	if let Some(num) = v.strip_suffix("em") {
+		let n: f64 = num.trim().parse().ok()?;
+		return Some(Sp::from_pt(n * body_size.to_pt()));
+	}
+	length_pt(v).map(Sp::from_pt)
+}
+
+/// Splits a parameter or dict text on top-level commas (outside any `(...)`/`[...]`/`{...}`/`"..."`).
+fn split_top_commas_str(s: &str) -> Vec<String> {
+	let mut out		= Vec::new();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut cur		= String::new();
+	for c in s.chars() {
+		if in_str {
+			cur.push(c);
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> { in_str = true; cur.push(c); },
+			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
+			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
+			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
+			_					=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
+	}
+	out
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MATCHING                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -1830,5 +2369,103 @@ mod tests {
 		};
 		assert!(t.frame.is_none(), "a wrap with no fill does not frame");
 		assert_eq!(t.hole.text.body_size, Some(Sp::from_pt(9.0)), "the inner #set text overlays the element");
+	}
+
+	// -- #let furniture template functions ---------------------------------------------------------
+
+	/// `resolve_len` reads an `em` as that fraction of the running body size, and every absolute unit
+	/// straight through, so a furniture length lowers to a fixed point value at the document's own size.
+	#[test]
+	fn resolve_len_reads_em_against_body_size() {
+		let body = Sp::from_pt(10.0);
+		assert_eq!(resolve_len("0.88em", body), Some(Sp::from_pt(8.8)));
+		assert_eq!(resolve_len("1.2em", body), Some(Sp::from_pt(12.0)));
+		assert_eq!(resolve_len("0em", body), Some(Sp::from_pt(0.0)));
+		assert_eq!(resolve_len("6pt", body), Some(Sp::from_pt(6.0)));
+		assert_eq!(resolve_len("50%", body), None, "a percentage has no absolute size here");
+	}
+
+	/// The corpus `#pr-note(body)` definition lowers to a transparent-wash box with the asymmetric left/right
+	/// inset it names, the `above`/`below` margins folded into the top/bottom pads, and its inner `#set
+	/// text`/`#set par` as the body overlay -- every `em` resolved against the document body size.
+	#[test]
+	fn collect_lowers_pr_note() {
+		let src = "\
+#let pr-note(body) = block(
+	inset: (left: 1.2em, right: 0.6em),
+	above: 0.9em,
+	below: 1.1em,
+	{
+		set text(size: 0.88em)
+		set par(spacing: 0.55em, first-line-indent: 0em)
+		body
+	},
+)
+";
+		let body = Sp::from_pt(10.0);
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, body, &mut tfns);
+		let tf = tfns.get("pr-note").expect("pr-note is collected");
+		assert_eq!(tf.body_param, "body");
+		assert!(!tf.has_title, "pr-note takes no title");
+		assert_eq!(tf.patch.callout.fill, Some(Rgba::TRANSPARENT), "no fill -- a plain indented block, no wash");
+		assert_eq!(tf.patch.callout.inset_left, Some(Sp::from_pt(12.0)), "left: 1.2em at a 10pt body");
+		assert_eq!(tf.patch.callout.inset_right, Some(Sp::from_pt(6.0)), "right: 0.6em");
+		assert_eq!(tf.patch.callout.inset_top, Some(Sp::from_pt(9.0)), "above: 0.9em folds into the top pad");
+		assert_eq!(tf.patch.callout.inset_bot, Some(Sp::from_pt(11.0)), "below: 1.1em folds into the bottom pad");
+		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.8)), "set text(size: 0.88em)");
+		assert_eq!(tf.patch.par.skip, Some(Sp::from_pt(5.5)), "set par(spacing: 0.55em)");
+		assert_eq!(tf.patch.par.indent, Some(Sp::from_pt(0.0)), "set par(first-line-indent: 0em)");
+	}
+
+	/// A furniture body that never names its content parameter is not a wrap -- it lowers to nothing, so a
+	/// call to it stays a tallied skip rather than expanding wrongly.
+	#[test]
+	fn a_definition_that_ignores_its_body_is_not_lowered() {
+		let src = "#let bogus(body) = block(inset: 6pt, { set text(size: 0.9em) })\n";
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, Sp::from_pt(10.0), &mut tfns);
+		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
+	}
+
+	/// An `#aside-box(title: none, float: true, body)` definition (the `let inner = box(...)` idiom, re-wrapped
+	/// in a floating figure) lowers: the body parameter is found past the two keyword parameters, the title
+	/// keyword is recognised, and the `box`'s fill/inset/radius resolve. A `luma(...)` fill stands in for the
+	/// corpus's `colours.yellow.lighten(92%)` here -- palette-name resolution is the aside-box milestone's
+	/// own gap. The `figure(placement: auto)` float wrapper is lowered in-flow (no placement engine), an
+	/// accepted fidelity delta for the visual QC.
+	#[test]
+	fn collect_lowers_aside_box_shape() {
+		let src = "\
+#let aside-box(title: none, float: true, body) = {
+	let inner = box(
+		width: 100%,
+		inset: (x: 1em, y: 1em, bottom: 1.2em),
+		fill: luma(240),
+		radius: 4pt,
+		stroke: (left: 2pt + luma(50)),
+		[
+			#if title != none [
+				#text(weight: \"bold\", size: 0.85em)[#title] #v(0.4em)
+			]
+			#text(size: 0.85em)[#body]
+		]
+	)
+	if float { figure(placement: auto, inner) } else { inner }
+}
+";
+		let body = Sp::from_pt(10.0);
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, body, &mut tfns);
+		let tf = tfns.get("aside-box").expect("aside-box is collected");
+		assert_eq!(tf.body_param, "body", "the body is the last positional parameter, past title: and float:");
+		assert!(tf.has_title, "a title: keyword is recognised");
+		assert_eq!(tf.patch.callout.fill, Some(Rgba::opaque(240, 240, 240)), "the box fill resolves");
+		assert_eq!(tf.patch.callout.inset_left, Some(Sp::from_pt(10.0)), "inset.x -> left, 1em at 10pt");
+		assert_eq!(tf.patch.callout.inset_right, Some(Sp::from_pt(10.0)), "inset.x -> right");
+		assert_eq!(tf.patch.callout.inset_top, Some(Sp::from_pt(10.0)), "inset.y -> top");
+		assert_eq!(tf.patch.callout.inset_bot, Some(Sp::from_pt(12.0)), "bottom overrides y for the foot pad");
+		assert_eq!(tf.patch.callout.radius, Some(Sp::from_pt(4.0)), "radius: 4pt");
+		assert_eq!(tf.title_size, Some(Sp::from_pt(8.5)), "the bold title run is set at 0.85em");
 	}
 }

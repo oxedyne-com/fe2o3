@@ -4026,23 +4026,27 @@ fn styled_box(
 {
 	let em			= style.text.body_size;
 	// Each falls back to the template's own constant precisely where a rule left it unset, so the bare
-	// `#styled-box[...]` path -- which sets no such rule -- takes every fallback and is unchanged.
-	let inset_x		= style.callout.inset_x.unwrap_or(em);								// `inset.x`, default one body em
+	// `#styled-box[...]` path -- which sets no such rule -- takes every fallback and is unchanged. The left
+	// and right pads take an asymmetric `inset.left`/`inset.right` override first (a `#let` template block's
+	// `inset: (left:, right:)`), then the symmetric `inset.x`, then one body em -- so a callout that names
+	// neither is exactly as before.
+	let inset_left	= style.callout.inset_left.or(style.callout.inset_x).unwrap_or(em);	// `inset.left`, default one body em
+	let inset_right	= style.callout.inset_right.or(style.callout.inset_x).unwrap_or(em);	// `inset.right`, default one body em
 	let inset_top	= style.callout.inset_top.unwrap_or(em);							// `inset.y`, default one body em
 	let inset_bot	= style.callout.inset_bot.unwrap_or(Sp::from_pt(em.to_pt() * 1.2));	// `inset.bottom`, default 1.2 em
 	let radius		= style.callout.radius.map_or(4.0f32, |sp| sp.to_pt() as f32);		// `radius`, default 4pt
-	let two_x		= inset_x + inset_x;
+	let two_x		= inset_left + inset_right;
 	let inner_w		= if measure > two_x { measure - two_x } else { measure };
 
-	// The inner blocks laid out at the reduced measure, then each line shifted one inset in from the left by
-	// a leading glue: `place_vbox` seats every child at the content left, so the horizontal inset rides
-	// inside the line rather than on the box.
+	// The inner blocks laid out at the reduced measure, then each line shifted one left inset in by a leading
+	// glue: `place_vbox` seats every child at the content left, so the horizontal inset rides inside the line
+	// rather than on the box.
 	let mut inner:	Vec<Node>	= Vec::new();
 	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, margin_no, seen, bib, refs));
 	for node in inner.iter_mut() {
 		if let Node::HBox(b) = node {
-			b.list.insert(0, Node::Glue(Glue::fixed(inset_x)));
-			b.dims = Dims::new(b.dims.width + inset_x, b.dims.height, b.dims.depth);
+			b.list.insert(0, Node::Glue(Glue::fixed(inset_left)));
+			b.dims = Dims::new(b.dims.width + inset_left, b.dims.height, b.dims.depth);
 		}
 	}
 
@@ -4053,15 +4057,18 @@ fn styled_box(
 	}
 	let total = inset_top + content_h + inset_bot;
 
-	// The wash: a rounded rectangle the full measure wide and the whole box tall, drawn behind the words.
-	// Its leaf reports no vertical extent, so the cursor stays at the box top and the content overlays it.
-	let rect	= res!(Path::round_rect(
-		Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), radius));
-	let graphic	= Graphic::new(
-		vec![DrawOp::Fill { path: rect, colour: fill }], Dims::new(measure, Sp::ZERO, Sp::ZERO));
-
 	let mut children:	Vec<Node>	= Vec::new();
-	children.push(Node::Leaf(Leaf::graphic(graphic)));
+	// The wash: a rounded rectangle the full measure wide and the whole box tall, drawn behind the words.
+	// Its leaf reports no vertical extent, so the cursor stays at the box top and the content overlays it. A
+	// fully transparent fill (a `#let` template block with no `fill:` -- a plain indented block, not a washed
+	// callout) draws no rectangle at all, so the inset positions the text without any panel behind it.
+	if fill.a != 0 {
+		let rect	= res!(Path::round_rect(
+			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), radius));
+		let graphic	= Graphic::new(
+			vec![DrawOp::Fill { path: rect, colour: fill }], Dims::new(measure, Sp::ZERO, Sp::ZERO));
+		children.push(Node::Leaf(Leaf::graphic(graphic)));
+	}
 	children.push(Node::Glue(Glue::fixed(inset_top)));
 	children.append(&mut inner);
 	children.push(Node::Glue(Glue::fixed(inset_bot)));
