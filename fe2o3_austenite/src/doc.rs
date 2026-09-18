@@ -3500,10 +3500,10 @@ fn chapter_opener(
 		// number centred on its middle, a gap, a shorter band holding the title on its foot, and a gap down
 		// to the body. Every row is a box, not glue -- a page top discards leading glue, and the opener sits
 		// at the page top -- so the bands hold their heights and the body lands on the grid's foot.
-		let sh		= res!(head_shape(fonts, &face, style.heading.chap_num_size, number));
+		let sh		= res!(head_shape(fonts, &face, style.opener.chap_num_size, number));
 		let d		= sh.dims();
 		let num_v	= d.height + d.depth;
-		let band	= style.heading.chap_grid[0];
+		let band	= style.opener.chap_grid[0];
 		// The number rides the middle of its band (Typst's `center + horizon`): the slack splits above and
 		// below. A band shorter than the number leaves no slack and the number simply fills it.
 		let above	= if band > num_v { Sp((band.raw() - num_v.raw()) / 2) } else { Sp::ZERO };
@@ -3519,17 +3519,17 @@ fn chapter_opener(
 		row.push(Node::Leaf(Leaf::graphic(graphic)));
 		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, num_v, Sp::ZERO))));
 		nodes.push(vspacer(below));
-		nodes.push(vspacer(style.heading.chap_grid[1]));	// the gap row between number and title
+		nodes.push(vspacer(style.opener.chap_grid[1]));	// the gap row between number and title
 
 		// The title rides the foot of its band (Typst's `left + bottom`): all the slack sits above it.
 		let sh_t	= res!(head_shape(fonts, &face, style.heading.levels[0].size, title));
 		let dt		= sh_t.dims();
 		let title_v	= dt.height + dt.depth;
-		let band2	= style.heading.chap_grid[2];
+		let band2	= style.opener.chap_grid[2];
 		let top2	= if band2 > title_v { band2 - title_v } else { Sp::ZERO };
 		nodes.push(vspacer(top2));
 		nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh_t))], Dims::new(measure, dt.height, dt.depth))));
-		nodes.push(vspacer(style.heading.chap_grid[3]));	// the gap row down to the body
+		nodes.push(vspacer(style.opener.chap_grid[3]));	// the gap row down to the body
 		return Ok(());
 	}
 

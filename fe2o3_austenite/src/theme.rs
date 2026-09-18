@@ -8,10 +8,21 @@
 //!
 //! **Canonical serialisation.** [`Theme::to_dat`] emits an ordered map whose key order is fixed and
 //! documented here, and every sub-struct does the same in field-declaration order. The order is a
-//! stable contract: a later unit hashes a theme's `to_dat` bytes as one input to a block address, so
+//! stable contract: a later unit hashes a group's `to_dat` bytes as one input to a block address, so
 //! the ordering must not change without changing that address deliberately. The canonical group order
-//! is: `text, par, heading, list, enumeration, table, figure, code, callout, equation, page,
-//! furniture, colours, calibration`. This unit computes no address; it only fixes the ordering.
+//! is: `text, par, heading, opener, list, enumeration, table, figure, code, callout, equation, page,
+//! furniture, colours, calibration`.
+//!
+//! **Block-address encoding.** [`Theme::group_dat`] returns one named group's daticle so a rule's block
+//! address hashes only the groups that rule reads, not the whole theme -- a footnote-size change must
+//! not invalidate every heading block's address. The daticle is hashed under **bdat**
+//! (`fe2o3_jdat`'s insertion-order-preserving binary encoding), chosen over `json_canonical` because
+//! the group's field order is already a deliberate, documented contract that bdat preserves verbatim,
+//! whereas `json_canonical` re-sorts keys and so discards that order for no gain here; the float-refusal
+//! that distinguishes them is moot, since every leaf survives `to_dat` as an integer (a length as
+//! scaled-point `I32`, a colour channel as `U8`, the calibration constant as its IEEE-754 `U64` bits),
+//! so no float ever reaches the encoder. This unit computes no address; it fixes the ordering and the
+//! per-group selector the address will read.
 //!
 //! **Defaults reproduce the old `Style` exactly**, so a corpus rendered with a default (or
 //! config-built) `Theme` is byte-identical to the pre-`Theme` build. The gate on the unit that landed
@@ -35,6 +46,7 @@ pub struct Theme {
 	pub text:			ThemeText,
 	pub par:			ThemePar,
 	pub heading:		ThemeHeading,
+	pub opener:			ThemeOpener,
 	pub list:			ThemeList,
 	pub enumeration:	ThemeEnum,
 	pub table:			ThemeTable,
@@ -54,6 +66,7 @@ impl Default for Theme {
 			text:			ThemeText::default(),
 			par:			ThemePar::default(),
 			heading:		ThemeHeading::default(),
+			opener:			ThemeOpener::default(),
 			list:			ThemeList::default(),
 			enumeration:	ThemeEnum::default(),
 			table:			ThemeTable::default(),
@@ -70,35 +83,30 @@ impl Default for Theme {
 }
 
 impl Theme {
-	/// The type size a heading of this level is set at. Level 0 (a part divider) takes the chapter-title
-	/// size, and any level past 4 takes the level-4 size.
-	pub fn heading_size(&self, level: u8) -> Sp {
-		match level {
-			0 | 1	=> self.heading.levels[0].size,
-			2		=> self.heading.levels[1].size,
-			3		=> self.heading.levels[2].size,
-			_		=> self.heading.levels[3].size,
-		}
+	/// The `levels` index a heading of this level reads: level 0 (a part divider) and level 1 both take
+	/// index 0 (the chapter title), and a level past the last entry clamps to it. Now that `levels` is a
+	/// `Vec` this is one place rather than three parallel matches, and it reaches `levels[3]` for level 4
+	/// rather than stopping at `levels[2]`.
+	fn level_idx(&self, level: u8) -> usize {
+		let i = if level <= 1 { 0 } else { (level as usize) - 1 };
+		i.min(self.heading.levels.len().saturating_sub(1))
 	}
 
-	/// The space set above a heading of this level, always greater than the space below it, so a
-	/// heading binds visually to the text it introduces rather than to the text it follows. Levels
-	/// past 2 (and a level-0 part divider) share the level-3 spacing.
+	/// The type size a heading of this level is set at. Level 0 (a part divider) takes the chapter-title
+	/// size, and any level past the last takes the last level's size.
+	pub fn heading_size(&self, level: u8) -> Sp {
+		self.heading.levels[self.level_idx(level)].size
+	}
+
+	/// The space set above a heading of this level, always greater than the space below it, so a heading
+	/// binds visually to the text it introduces rather than to the text it follows.
 	pub fn space_above(&self, level: u8) -> Sp {
-		match level {
-			1	=> self.heading.levels[0].space_above,
-			2	=> self.heading.levels[1].space_above,
-			_	=> self.heading.levels[2].space_above,
-		}
+		self.heading.levels[self.level_idx(level)].space_above
 	}
 
 	/// The space set below a heading of this level. See [`Theme::space_above`] for the level mapping.
 	pub fn space_below(&self, level: u8) -> Sp {
-		match level {
-			1	=> self.heading.levels[0].space_below,
-			2	=> self.heading.levels[1].space_below,
-			_	=> self.heading.levels[2].space_below,
-		}
+		self.heading.levels[self.level_idx(level)].space_below
 	}
 }
 
@@ -191,26 +199,43 @@ impl ThemeHeadingLevel {
 	}
 }
 
-/// Headings: which opener and numbering the top level takes, the per-level styling indexed 0..4 for
-/// levels 1..4, and the chapter opener's giant number size and grid.
+/// Headings: which opener and numbering the top level takes, and the per-level styling indexed from 0
+/// (level 1). A `Vec` rather than a fixed four, so a document with headings deeper than level 4 carries a
+/// level for each; the default holds four. The chapter opener's own geometry lives apart, in
+/// [`ThemeOpener`], so a rule reading a heading's size does not depend on the opener grid.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeHeading {
-	pub kind:			HeadingStyle,			// which top-level opener and numbering the headings take
-	pub levels:			[ThemeHeadingLevel; 4],	// index 0 is level 1, index 3 is level 4
-	pub chap_num_size:	Sp,						// the giant chapter number on a chapter-opening page
-	pub chap_grid:		[Sp; 4],				// opener grid rows: number band, gap, title band, gap-to-body
+	pub kind:	HeadingStyle,			// which top-level opener and numbering the headings take
+	pub levels:	Vec<ThemeHeadingLevel>,	// index 0 is level 1; the default holds four, more are allowed
 }
 
 impl Default for ThemeHeading {
 	fn default() -> Self {
 		Self {
 			kind:	HeadingStyle::BookOpener,
-			levels:	[
+			levels:	vec![
 				ThemeHeadingLevel::new(16.0, 20.0, 8.0),	// level 1, the chapter title
 				ThemeHeadingLevel::new(13.0, 15.0, 6.0),	// level 2
 				ThemeHeadingLevel::new(12.0, 12.0, 5.0),	// level 3
 				ThemeHeadingLevel::new(11.0, 12.0, 5.0),	// level 4
 			],
+		}
+	}
+}
+
+/// The chapter opener's geometry, kept apart from the generic per-level `heading` styling: the giant
+/// chapter number's size and the opener grid rows. One template's opener draws a large number over a
+/// grid; a book without that opener leaves these at their defaults, unread. Separated so a rule that
+/// reads the `heading` group is not invalidated when only the opener geometry changes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeOpener {
+	pub chap_num_size:	Sp,			// the giant chapter number on a chapter-opening page
+	pub chap_grid:		[Sp; 4],	// opener grid rows: number band, gap, title band, gap-to-body
+}
+
+impl Default for ThemeOpener {
+	fn default() -> Self {
+		Self {
 			chap_num_size:	Sp::from_pt(54.0),
 			chap_grid:		[Sp::from_pt(72.0), Sp::from_pt(8.0), Sp::from_pt(36.0), Sp::from_pt(20.0)],
 		}
@@ -335,11 +360,11 @@ impl Default for ThemeEquation {
 	}
 }
 
-/// A per-part page-geometry override. Every field is `None` today, meaning the part takes the
-/// document-level geometry passed to the driver; a later unit lowers a document's sequential top-level
-/// `set page(...)` calls into per-part overrides here.
+/// One page class's geometry: the trim and the four margins, each an optional override on the
+/// document-level geometry the driver still supplies today. Every field is `None` until a unit lowers a
+/// document's `set page(...)` into it, so an unset class takes the driver's geometry unchanged.
 #[derive(Clone, Debug, PartialEq, Default)]
-pub struct ThemePagePart {
+pub struct ThemePageGeom {
 	pub width:			Option<Sp>,
 	pub height:			Option<Sp>,
 	pub margin_inside:	Option<Sp>,
@@ -348,7 +373,20 @@ pub struct ThemePagePart {
 	pub margin_bottom:	Option<Sp>,
 }
 
-/// Page geometry per part of the book. Reserved; see [`ThemePagePart`].
+/// A book part's page geometry, per page class. `default` applies to every page of the part; `recto` and
+/// `verso` override it on the right- and left-hand pages, and `opener` on a part- or chapter-opening
+/// page. All are `None` today -- the part takes the document-level geometry passed to the driver -- and
+/// are reserved for the folds and running furniture a later unit lowers into them; keeping them here now
+/// is free, whereas widening the shape once a unit reads it is not.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct ThemePagePart {
+	pub default:	ThemePageGeom,
+	pub recto:		ThemePageGeom,
+	pub verso:		ThemePageGeom,
+	pub opener:		ThemePageGeom,
+}
+
+/// Page geometry per part of the book, each part per page class. Reserved; see [`ThemePagePart`].
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct ThemePage {
 	pub front:	ThemePagePart,
@@ -430,6 +468,7 @@ pub struct ThemePatch {
 	pub text:			ThemeTextPatch,
 	pub par:			ThemeParPatch,
 	pub heading:		ThemeHeadingPatch,
+	pub opener:			ThemeOpenerPatch,
 	pub list:			ThemeListPatch,
 	pub enumeration:	ThemeEnumPatch,
 	pub table:			ThemeTablePatch,
@@ -483,7 +522,16 @@ pub struct ThemeHeadingLevelPatch {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemeHeadingPatch {
 	pub kind:			Option<HeadingStyle>,
-	pub levels:			[ThemeHeadingLevelPatch; 4],
+	// `set heading(numbering: ...)` applies one pattern across every level, whatever the theme's level
+	// count, so it is a group-level leaf rather than a per-level one.
+	pub numbering_all:	Option<Option<String>>,
+	// Per-level overrides, index i onto theme level i; shorter than the theme's `levels` leaves the deeper
+	// levels untouched, longer ignores the surplus.
+	pub levels:			Vec<ThemeHeadingLevelPatch>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeOpenerPatch {
 	pub chap_num_size:	Option<Sp>,
 	pub chap_grid:		Option<[Sp; 4]>,
 }
@@ -534,13 +582,21 @@ pub struct ThemeEquationPatch {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub struct ThemePagePartPatch {
+pub struct ThemePageGeomPatch {
 	pub width:			Option<Option<Sp>>,
 	pub height:			Option<Option<Sp>>,
 	pub margin_inside:	Option<Option<Sp>>,
 	pub margin_outside:	Option<Option<Sp>>,
 	pub margin_top:		Option<Option<Sp>>,
 	pub margin_bottom:	Option<Option<Sp>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemePagePartPatch {
+	pub default:	ThemePageGeomPatch,
+	pub recto:		ThemePageGeomPatch,
+	pub verso:		ThemePageGeomPatch,
+	pub opener:		ThemePageGeomPatch,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -587,6 +643,7 @@ impl Theme {
 		patch.text.apply(&mut self.text);
 		patch.par.apply(&mut self.par);
 		patch.heading.apply(&mut self.heading);
+		patch.opener.apply(&mut self.opener);
 		patch.list.apply(&mut self.list);
 		patch.enumeration.apply(&mut self.enumeration);
 		patch.table.apply(&mut self.table);
@@ -645,11 +702,22 @@ impl ThemeHeadingLevelPatch {
 impl ThemeHeadingPatch {
 	fn apply(&self, h: &mut ThemeHeading) {
 		patch_merge!(self.kind, h.kind);
+		// A uniform numbering pattern applies to every level the theme carries, whatever their count.
+		if let Some(n) = &self.numbering_all {
+			for l in &mut h.levels {
+				l.numbering = n.clone();
+			}
+		}
 		for (p, l) in self.levels.iter().zip(h.levels.iter_mut()) {
 			p.apply(l);
 		}
-		patch_merge!(self.chap_num_size, h.chap_num_size);
-		patch_merge!(self.chap_grid, h.chap_grid);
+	}
+}
+
+impl ThemeOpenerPatch {
+	fn apply(&self, o: &mut ThemeOpener) {
+		patch_merge!(self.chap_num_size, o.chap_num_size);
+		patch_merge!(self.chap_grid, o.chap_grid);
 	}
 }
 
@@ -705,14 +773,23 @@ impl ThemeEquationPatch {
 	}
 }
 
-impl ThemePagePartPatch {
-	fn apply(&self, t: &mut ThemePagePart) {
+impl ThemePageGeomPatch {
+	fn apply(&self, t: &mut ThemePageGeom) {
 		patch_merge!(self.width, t.width);
 		patch_merge!(self.height, t.height);
 		patch_merge!(self.margin_inside, t.margin_inside);
 		patch_merge!(self.margin_outside, t.margin_outside);
 		patch_merge!(self.margin_top, t.margin_top);
 		patch_merge!(self.margin_bottom, t.margin_bottom);
+	}
+}
+
+impl ThemePagePartPatch {
+	fn apply(&self, t: &mut ThemePagePart) {
+		self.default.apply(&mut t.default);
+		self.recto.apply(&mut t.recto);
+		self.verso.apply(&mut t.verso);
+		self.opener.apply(&mut t.opener);
 	}
 }
 
@@ -947,31 +1024,38 @@ impl ThemeHeadingLevel {
 
 impl ThemeHeading {
 	fn to_dat(&self) -> Outcome<Dat> {
-		let mut levels = Vec::with_capacity(4);
+		let mut levels = Vec::with_capacity(self.levels.len());
 		for l in &self.levels {
 			levels.push(res!(l.to_dat()));
 		}
 		Ok(omapdat!{
-			"kind"			=> heading_kind_dat(self.kind),
-			"levels"		=> Dat::List(levels),
-			"chap_num_size"	=> sp_dat(self.chap_num_size),
-			"chap_grid"		=> sp4_dat(&self.chap_grid),
+			"kind"		=> heading_kind_dat(self.kind),
+			"levels"	=> Dat::List(levels),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		let kind		= res!(heading_kind_from(res!(map_must(&mut d, "kind"))));
 		let levels_list	= try_extract_dat!(res!(map_must(&mut d, "levels")), List);
-		if levels_list.len() != 4 {
-			return Err(err!("A theme heading must hold 4 levels, found {}.", levels_list.len(); Input, Invalid));
+		if levels_list.is_empty() {
+			return Err(err!("A theme heading must hold at least one level, found none."; Input, Invalid));
 		}
-		let mut it		= levels_list.into_iter();
-		let l0			= res!(ThemeHeadingLevel::from_dat(res!(it.next().ok_or_else(|| err!("missing heading level 1"; Input, Missing)))));
-		let l1			= res!(ThemeHeadingLevel::from_dat(res!(it.next().ok_or_else(|| err!("missing heading level 2"; Input, Missing)))));
-		let l2			= res!(ThemeHeadingLevel::from_dat(res!(it.next().ok_or_else(|| err!("missing heading level 3"; Input, Missing)))));
-		let l3			= res!(ThemeHeadingLevel::from_dat(res!(it.next().ok_or_else(|| err!("missing heading level 4"; Input, Missing)))));
+		let mut levels = Vec::with_capacity(levels_list.len());
+		for entry in levels_list {
+			levels.push(res!(ThemeHeadingLevel::from_dat(entry)));
+		}
+		Ok(Self { kind, levels })
+	}
+}
+
+impl ThemeOpener {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(omapdat!{
+			"chap_num_size"	=> sp_dat(self.chap_num_size),
+			"chap_grid"		=> sp4_dat(&self.chap_grid),
+		})
+	}
+	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		Ok(Self {
-			kind,
-			levels:			[l0, l1, l2, l3],
 			chap_num_size:	res!(sp_from(res!(map_must(&mut d, "chap_num_size")))),
 			chap_grid:		res!(sp4_from(res!(map_must(&mut d, "chap_grid")))),
 		})
@@ -1081,7 +1165,7 @@ impl ThemeEquation {
 	}
 }
 
-impl ThemePagePart {
+impl ThemePageGeom {
 	fn to_dat(&self) -> Outcome<Dat> {
 		Ok(omapdat!{
 			"width"				=> opt_sp_dat(self.width),
@@ -1100,6 +1184,25 @@ impl ThemePagePart {
 			margin_outside:	res!(opt_sp_from(res!(map_must(&mut d, "margin_outside")))),
 			margin_top:		res!(opt_sp_from(res!(map_must(&mut d, "margin_top")))),
 			margin_bottom:	res!(opt_sp_from(res!(map_must(&mut d, "margin_bottom")))),
+		})
+	}
+}
+
+impl ThemePagePart {
+	fn to_dat(&self) -> Outcome<Dat> {
+		Ok(omapdat!{
+			"default"	=> res!(self.default.to_dat()),
+			"recto"		=> res!(self.recto.to_dat()),
+			"verso"		=> res!(self.verso.to_dat()),
+			"opener"	=> res!(self.opener.to_dat()),
+		})
+	}
+	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		Ok(Self {
+			default:	res!(ThemePageGeom::from_dat(res!(map_must(&mut d, "default")))),
+			recto:		res!(ThemePageGeom::from_dat(res!(map_must(&mut d, "recto")))),
+			verso:		res!(ThemePageGeom::from_dat(res!(map_must(&mut d, "verso")))),
+			opener:		res!(ThemePageGeom::from_dat(res!(map_must(&mut d, "opener")))),
 		})
 	}
 }
@@ -1177,6 +1280,7 @@ impl ToDat for Theme {
 			"text"			=> res!(self.text.to_dat()),
 			"par"			=> res!(self.par.to_dat()),
 			"heading"		=> res!(self.heading.to_dat()),
+			"opener"		=> res!(self.opener.to_dat()),
 			"list"			=> res!(self.list.to_dat()),
 			"enumeration"	=> res!(self.enumeration.to_dat()),
 			"table"			=> res!(self.table.to_dat()),
@@ -1203,6 +1307,7 @@ impl FromDat for Theme {
 			text:			res!(ThemeText::from_dat(res!(map_must(&mut dat, "text")))),
 			par:			res!(ThemePar::from_dat(res!(map_must(&mut dat, "par")))),
 			heading:		res!(ThemeHeading::from_dat(res!(map_must(&mut dat, "heading")))),
+			opener:			res!(ThemeOpener::from_dat(res!(map_must(&mut dat, "opener")))),
 			list:			res!(ThemeList::from_dat(res!(map_must(&mut dat, "list")))),
 			enumeration:	res!(ThemeEnum::from_dat(res!(map_must(&mut dat, "enumeration")))),
 			table:			res!(ThemeTable::from_dat(res!(map_must(&mut dat, "table")))),
@@ -1215,6 +1320,57 @@ impl FromDat for Theme {
 			colours:		res!(ThemeColours::from_dat(res!(map_must(&mut dat, "colours")))),
 			calibration:	res!(ThemeCalibration::from_dat(res!(map_must(&mut dat, "calibration")))),
 		})
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ PER-GROUP DATICLE (for a block address)                                    │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// One named group of a [`Theme`], in canonical order. A rule's block address hashes only the groups the
+/// rule reads, named by this enum, so a change to a group a block does not read cannot move that block's
+/// address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThemeGroup {
+	Text,
+	Par,
+	Heading,
+	Opener,
+	List,
+	Enumeration,
+	Table,
+	Figure,
+	Code,
+	Callout,
+	Equation,
+	Page,
+	Furniture,
+	Colours,
+	Calibration,
+}
+
+impl Theme {
+	/// The daticle of one group, in the group's own canonical field order (see the module header). A block
+	/// address hashes the bdat encoding of this for each group a rule reads, rather than the whole theme, so
+	/// an unrelated group's change leaves the address unmoved.
+	pub fn group_dat(&self, group: ThemeGroup) -> Outcome<Dat> {
+		match group {
+			ThemeGroup::Text		=> self.text.to_dat(),
+			ThemeGroup::Par			=> self.par.to_dat(),
+			ThemeGroup::Heading		=> self.heading.to_dat(),
+			ThemeGroup::Opener		=> self.opener.to_dat(),
+			ThemeGroup::List		=> self.list.to_dat(),
+			ThemeGroup::Enumeration	=> self.enumeration.to_dat(),
+			ThemeGroup::Table		=> self.table.to_dat(),
+			ThemeGroup::Figure		=> self.figure.to_dat(),
+			ThemeGroup::Code		=> self.code.to_dat(),
+			ThemeGroup::Callout		=> self.callout.to_dat(),
+			ThemeGroup::Equation	=> self.equation.to_dat(),
+			ThemeGroup::Page		=> self.page.to_dat(),
+			ThemeGroup::Furniture	=> self.furniture.to_dat(),
+			ThemeGroup::Colours		=> self.colours.to_dat(),
+			ThemeGroup::Calibration	=> self.calibration.to_dat(),
+		}
 	}
 }
 
@@ -1246,8 +1402,10 @@ mod tests {
 		theme.heading.kind				= HeadingStyle::DocInline;
 		theme.heading.levels[0].numbering	= Some("1.1".to_string());
 		theme.heading.levels[2].weight		= Some(700);
+		theme.opener.chap_num_size		= Sp::from_pt(48.0);
 		theme.equation.numbering		= Some("(1)".to_string());
-		theme.page.body.margin_inside	= Some(Sp::from_pt(19.0));
+		theme.page.body.default.margin_inside	= Some(Sp::from_pt(19.0));
+		theme.page.body.opener.margin_top		= Some(Sp::from_pt(40.0));
 		theme.calibration.line_box_em	= 0.682;
 		let dat		= res!(theme.to_dat());
 		let back	= res!(Theme::from_dat(dat));
@@ -1269,30 +1427,63 @@ mod tests {
 		theme.apply(&ThemePatch::default());
 		assert_eq!(theme, before);
 
-		// A patch naming a handful of fields across groups overwrites exactly those.
+		// A patch naming a handful of fields across groups overwrites exactly those. `numbering_all` folds
+		// onto every level; a per-level override targets one; the opener and page groups take their own.
 		let mut patch = ThemePatch::default();
 		patch.text.body_size				= Some(Sp::from_pt(12.0));
 		patch.text.faces.body				= Some(Some("Libertinus Serif".to_string()));
 		patch.par.indent					= Some(Sp::from_pt(18.0));
-		patch.heading.levels[0].numbering	= Some(Some("1.1".to_string()));
+		patch.heading.numbering_all			= Some(Some("1.1".to_string()));
+		patch.opener.chap_num_size			= Some(Sp::from_pt(48.0));
 		patch.equation.numbering			= Some(Some("(1)".to_string()));
-		patch.page.body.width				= Some(Some(Sp::from_pt(400.0)));
+		patch.page.body.default.width		= Some(Some(Sp::from_pt(400.0)));
 		theme.apply(&patch);
 
 		assert_eq!(theme.text.body_size,				Sp::from_pt(12.0));
 		assert_eq!(theme.text.faces.body,				Some("Libertinus Serif".to_string()));
 		assert_eq!(theme.par.indent,					Sp::from_pt(18.0));
+		// numbering_all reached every level, not just the first.
 		assert_eq!(theme.heading.levels[0].numbering,	Some("1.1".to_string()));
+		assert_eq!(theme.heading.levels[1].numbering,	Some("1.1".to_string()));
+		assert_eq!(theme.opener.chap_num_size,			Sp::from_pt(48.0));
 		assert_eq!(theme.equation.numbering,			Some("(1)".to_string()));
-		assert_eq!(theme.page.body.width,				Some(Sp::from_pt(400.0)));
+		assert_eq!(theme.page.body.default.width,		Some(Sp::from_pt(400.0)));
 		// A field the patch did not name kept its default.
 		assert_eq!(theme.text.leading,					Theme::default().text.leading);
-		assert_eq!(theme.heading.levels[1].numbering,	None);
+		assert_eq!(theme.page.body.recto.width,			None);
 
 		// An `Option<Option<..>>` leaf set to `Some(None)` clears the theme's own value.
 		let mut clear = ThemePatch::default();
 		clear.text.faces.body = Some(None);
 		theme.apply(&clear);
 		assert_eq!(theme.text.faces.body, None);
+	}
+
+	/// `group_dat` returns one group's daticle, so a block address over one group is unmoved by a change
+	/// to another -- the isolation the per-group hash exists for -- while a change within the group moves it.
+	#[test]
+	fn group_dat_isolates_one_group() -> Outcome<()> {
+		let base		= Theme::default();
+		let heading_dat	= res!(base.group_dat(ThemeGroup::Heading));
+
+		// A change in an unrelated group leaves the heading group's daticle identical.
+		let mut other = Theme::default();
+		other.furniture.foot_size = Sp::from_pt(7.0);
+		assert_eq!(res!(other.group_dat(ThemeGroup::Heading)), heading_dat,
+			"a furniture change must not move the heading group's daticle");
+		assert_ne!(res!(other.group_dat(ThemeGroup::Furniture)), res!(base.group_dat(ThemeGroup::Furniture)),
+			"but it must move the furniture group's own");
+
+		// A change within the heading group moves it.
+		let mut deeper = Theme::default();
+		deeper.heading.levels[0].size = Sp::from_pt(20.0);
+		assert_ne!(res!(deeper.group_dat(ThemeGroup::Heading)), heading_dat);
+
+		// The opener geometry is its own group now, so a chapter-number tweak leaves the heading group alone.
+		let mut op = Theme::default();
+		op.opener.chap_num_size = Sp::from_pt(60.0);
+		assert_eq!(res!(op.group_dat(ThemeGroup::Heading)), heading_dat,
+			"an opener change must not move the heading group's daticle");
+		Ok(())
 	}
 }

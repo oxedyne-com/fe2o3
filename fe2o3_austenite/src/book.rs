@@ -1464,8 +1464,8 @@ fn build_style(raw: &RawStyle) -> Theme {
 	style.text.leading	= Sp::from_pt(baseline);
 	style.par.skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
 	style.par.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
-	style.heading.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
-	style.heading.chap_grid		= [
+	style.opener.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
+	style.opener.chap_grid		= [
 		Sp::from_pt(raw.chap_grid[0]),
 		Sp::from_pt(raw.chap_grid[1]),
 		Sp::from_pt(raw.chap_grid[2]),

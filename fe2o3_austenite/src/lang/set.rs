@@ -138,12 +138,11 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 			}
 		},
 		"heading" => {
-			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does.
+			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does:
+			// one group-level leaf the patch folds onto every level, whatever their count.
 			if let Some(pattern) = named_string(args, "numbering") {
 				let pat = if pattern.is_empty() { None } else { Some(pattern) };
-				for level in &mut patch.heading.levels {
-					level.numbering = Some(pat.clone());
-				}
+				patch.heading.numbering_all = Some(pat);
 				used.push("numbering");
 			}
 		},
@@ -181,11 +180,11 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 			// Page geometry lowers onto the body part's reserved override; a later unit consumes it and
 			// splits front/body/back. Only the fields a `set page` names are written.
 			if let Some(pt) = named_length_mm_or_pt(args, "width") {
-				patch.page.body.width = Some(Some(pt));
+				patch.page.body.default.width = Some(Some(pt));
 				used.push("width");
 			}
 			if let Some(pt) = named_length_mm_or_pt(args, "height") {
-				patch.page.body.height = Some(Some(pt));
+				patch.page.body.default.height = Some(Some(pt));
 				used.push("height");
 			}
 		},
