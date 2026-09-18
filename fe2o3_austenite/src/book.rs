@@ -262,7 +262,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// own `#show <selector>: <transform>` rules are appended, refused where a transform reads the page or
 	// patches a field the renderer does not read.
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
-	lang::rules::apply_rules(&mut blocks, &rules);
+	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver is built from every heading face the document can name -- the root theme's, and every
 	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
@@ -349,7 +349,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
-	lang::rules::apply_rules(&mut blocks, &rules);
+	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
 	// file is noted rather than silently set in Regular.

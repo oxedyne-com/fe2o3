@@ -242,6 +242,9 @@ pub enum Block {
 	// style only that subtree, not the document. This is the general mechanism the rule engine's set-fields
 	// transform reuses to patch a subtree.
 	Scoped { patch: ThemePatch, blocks: Vec<Block> },
+	// A vertical space a `#show` template's `v(<len>)` lowers to: a fixed leading emitted as a sibling
+	// before or after the element the template wraps. It carries no words and anchors no reference.
+	Space(Sp),
 }
 
 impl Block {
@@ -288,6 +291,8 @@ impl Block {
 	pub fn rule(width: Length, thickness: f64, grey: u8) -> Self {
 		Self::Rule { width, thickness, grey }
 	}
+
+	pub fn space(height: Sp) -> Self { Self::Space(height) }
 
 	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
 	/// violet. The wash is the theme's `callout.fill` at render (its default that pale violet), so a
@@ -915,6 +920,14 @@ impl<'a> Authoring<'a> {
 				Block::Glossary => { i += 1; },
 				// A scope is handled by the recursion at the loop top; named here only for exhaustiveness.
 				Block::Scoped { .. } => { i += 1; },
+				Block::Space(sp) => {
+					// A template's `v(<len>)`, set as a fixed leading between its siblings. Not discarded at a
+					// page top: the author asked for it, so it holds like any authored space.
+					self.nodes.push(Node::Glue(Glue::fixed(*sp)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
 			}
 		}
 		Ok(consumed_cont)
@@ -2942,7 +2955,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			// A scope carries its words in its own nested blocks, counted here rather than as flat siblings.
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. } | Block::Glossary	=> {},
+			| Block::SectionBanner { .. } | Block::Glossary | Block::Space(_)	=> {},
 		}
 	}
 	n
@@ -4089,6 +4102,16 @@ fn box_flow_scoped(
 				res!(list(
 					nodes, fonts.clone(), geom, style, measure, *ordered, items,
 					foot_no, ref_no, seen, bib, refs));
+			},
+			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
+			// set in the mono face at the scoped `code.size`, the same as a top-level code block. Without this
+			// arm the box body dropped its code silently.
+			Block::Code { lines } => {
+				res!(code_block(nodes, fonts.clone(), style, lines));
+			},
+			// A nested space a template placed inside a boxed body.
+			Block::Space(sp) => {
+				nodes.push(Node::Glue(Glue::fixed(*sp)));
 			},
 			_ => {},
 		}

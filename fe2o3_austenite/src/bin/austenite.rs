@@ -321,7 +321,8 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// re-assert the theme's own heading sizes (byte-neutral); the file's own `#show <selector>:
 		// <transform>` rules are appended, refused where a transform reads the page or an unread field.
 		let rules = lang::rules::rule_set_for(&style, &src, &mut refusals);
-		lang::rules::apply_rules(&mut blocks, &rules);
+		// A lone file sets on A4 (its geometry below), so the placement width a template resolves against is A4's.
+		lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
 		// A lone file may name a heading font in its own `#show: doc.with(...)`; resolve it against the
 		// tree's assets the same way a whole doc does, so a lone chapter's heading face reaches the page.
 		let faces = match std::path::Path::new(source).parent() {

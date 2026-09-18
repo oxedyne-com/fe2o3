@@ -39,7 +39,11 @@
 //! computes no address or hash from them yet.
 
 use crate::doc::Block;
-use crate::ir::Span;
+use crate::ir::{
+	Length,
+	Sp,
+	Span,
+};
 use crate::theme::{
 	Theme,
 	ThemeHeadingLevelPatch,
@@ -50,6 +54,7 @@ use super::parse::Refusals;
 use super::set;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::Rgba;
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ THE RULE                                                                   │
@@ -85,12 +90,30 @@ pub struct Selector {
 	pub predicates:	Vec<FieldPredicate>,
 }
 
-/// What a rule does to a matched element. This part builds only a set-fields transform; a page-reading or
-/// otherwise unsupported transform is a [`Transform::Refused`], recorded and never run.
+/// What a rule does to a matched element: patch its subtree ([`Transform::SetFields`], Part 1), or place
+/// sibling blocks around it and overlay a theme on the group ([`Transform::Template`], this part). A
+/// page-reading or otherwise unsupported transform is a [`Transform::Refused`], recorded and never run.
 #[derive(Clone, Debug)]
 pub enum Transform {
 	SetFields(ThemePatch),
+	Template(Template),
 	Refused(String),	// the reason, recorded as a refusal rather than applied
+}
+
+/// A template transform: the matched element is *moved* (not cloned) into a hole between sibling blocks the
+/// template placed around it, and a theme overlay wraps the whole group. `pre`/`post` are the blocks a
+/// `v(<len>)`/`line(...)` in the template lowers to, before and after the element. `hole` is the overlay a
+/// `#set` inside the wrap contributes (and, under a heading selector, the level spacing a `v(...)` folds
+/// into). `frame`, when set, seats the element in a washed [`Block::Box`] of that fill -- a `block.with(fill:
+/// ...)` callout. `rule_id` and the hole's index (always `pre.len()`) are recorded so a later pass can
+/// address the moved element by the rule that placed it -- the block-identity hook the design note calls for.
+#[derive(Clone, Debug)]
+pub struct Template {
+	pub pre:		Vec<Block>,
+	pub hole:		ThemePatch,
+	pub post:		Vec<Block>,
+	pub frame:		Option<Rgba>,
+	pub rule_id:	RuleId,
 }
 
 /// A rule's index in the set that produced it -- the identity hook a set-fields wrap carries so a later
@@ -179,11 +202,15 @@ pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) 
 		};
 		let span		= Span::new(line_start as u32, offset as u32);
 		let source		= fmt!("#show {}", sel_text.trim());
-		let transform	= lower_transform(&selector, tr_text.trim());
+		let mut transform	= lower_transform(&selector, tr_text.trim());
 		if let Transform::Refused(reason) = &transform {
 			refusals.record(&fmt!("{} ({})", source, reason), span);
 		}
 		let rule_id = base_id + rules.len();
+		// A template records the rule that placed it, so the moved element keeps an addressable identity.
+		if let Transform::Template(t) = &mut transform {
+			t.rule_id = rule_id;
+		}
 		rules.push(Rule { selector, transform, rule_id, source, span });
 	}
 	rules
@@ -325,10 +352,12 @@ fn lower_transform(selector: &Selector, body: &str) -> Transform {
 		}
 	}
 
-	// The one form this part lowers: `set <target>(<args>)`.
+	// A `set <target>(<args>)` lowers to a set-fields patch below; a body that is not a bare `set` -- a
+	// template with holes, a wrap -- is read by the template lowerer, which builds a [`Transform::Template`]
+	// or refuses the body it cannot place.
 	let after = match body.strip_prefix("set ") {
 		Some(a)	=> a.trim(),
-		None	=> return Transform::Refused(fmt!("unsupported transform: {}", short(body))),
+		None	=> return lower_template(selector, body),
 	};
 	let open = match after.find('(') {
 		Some(i)	=> i,
@@ -500,6 +529,588 @@ fn short(body: &str) -> String {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ LOWERING A TEMPLATE (a #show whose body wraps the element)                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Lowers a `#show <selector>: <body>` whose body is not a bare `set` to a [`Transform::Template`], or
+/// refuses it. The recognised shapes are the corpus's shared template forms: a `block.with(fill:, inset:,
+/// radius:)` (or `block(fill: ...)[#it]`) wash around the element -- a callout frame; a `block(...)[ #set
+/// text(...) #it.body ]` whose inner `#set` overlays the element (the hole patch); and `v(<len>)` / `line(...)`
+/// statements set as siblings before or after the element (`pre` / `post`). An inline wrap (`underline`) and a
+/// text rewrite (`regex`) have no block lowering and are refused; a page-reading body is already refused
+/// upstream. Under a heading selector a `v(<len>)` folds into the matched level's `space_above` / `space_below`
+/// rather than a sibling -- a sibling after a heading would break its keep-with-next -- and any other sibling
+/// there is refused for the same reason.
+fn lower_template(selector: &Selector, body: &str) -> Transform {
+	let body = strip_code_block(body.trim());
+	// An inline dress or a text rewrite is not a block-level template.
+	if mentions_call(body, "underline") {
+		return Transform::Refused(fmt!("underline wraps inline content, not a block: {}", short(body)));
+	}
+	if mentions_call(body, "regex") {
+		return Transform::Refused(fmt!("a regex show rewrites matched text, not an element: {}", short(body)));
+	}
+
+	let heading			= selector.kind == ElementKind::Heading;
+	let mut pre:	Vec<Block>		= Vec::new();
+	let mut post:	Vec<Block>		= Vec::new();
+	let mut hole					= ThemePatch::default();
+	let mut frame:	Option<Rgba>	= None;
+	let mut seen_hole				= false;
+
+	for stmt in split_statements(body) {
+		let s = stmt.trim().trim_start_matches('#').trim();
+		if s.is_empty() {
+			continue;
+		}
+		if let Some(kind) = spacer_kind(s) {
+			match make_spacer(selector, kind, s, seen_hole, heading, &mut hole) {
+				Ok(None)		=> {},	// folded into the level's spacing (a heading v)
+				Ok(Some(b))		=> if seen_hole { post.push(b); } else { pre.push(b); },
+				Err(e)			=> return Transform::Refused(fmt!("{}", e)),
+			}
+		} else if is_element_stmt(s) {
+			if seen_hole {
+				return Transform::Refused(fmt!("a template names the element `it` more than once: {}", short(body)));
+			}
+			if let Err(e) = read_element(s, &mut hole, &mut frame) {
+				return Transform::Refused(fmt!("{}", e));
+			}
+			seen_hole = true;
+		} else {
+			return Transform::Refused(fmt!("unsupported template statement: {}", short(s)));
+		}
+	}
+
+	if !seen_hole {
+		return Transform::Refused(fmt!("a template body names no element `it`: {}", short(body)));
+	}
+	// The rule_id is stamped by `collect_from_source` once the rule's index is known.
+	Transform::Template(Template { pre, hole, post, frame, rule_id: 0 })
+}
+
+/// A code-block wrapper `{ ... }` stripped to its contents, so the statements inside can be split; a body
+/// that is a single expression (a `block.with(...)`) is returned unchanged.
+fn strip_code_block(body: &str) -> &str {
+	let b = body.trim();
+	match (b.strip_prefix('{'), b.strip_suffix('}')) {
+		(Some(inner), _) if b.ends_with('}')	=> inner.trim(),
+		_										=> b,
+	}
+}
+
+/// Does `body` call `name` -- the identifier `name` immediately before a `(`, at a word boundary -- so a
+/// template mentioning `underline(` or `regex(` is caught without matching it inside a longer word?
+fn mentions_call(body: &str, name: &str) -> bool {
+	let bytes	= body.as_bytes();
+	let mut from	= 0usize;
+	while let Some(rel) = body[from..].find(name) {
+		let at = from + rel;
+		let before_ok = at == 0 || {
+			let p = bytes[at - 1];
+			!(p.is_ascii_alphanumeric() || p == b'-' || p == b'_')
+		};
+		let after = at + name.len();
+		if before_ok && after < bytes.len() && bytes[after] == b'(' {
+			return true;
+		}
+		from = at + name.len();
+	}
+	false
+}
+
+/// Splits a template body into its top-level statements, at a newline or `;` outside any `(...)`, `[...]`,
+/// `{...}` or `"..."` -- the statement separators of a Typst code block.
+fn split_statements(body: &str) -> Vec<String> {
+	let mut out		= Vec::new();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut cur		= String::new();
+	for c in body.chars() {
+		if in_str {
+			cur.push(c);
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> { in_str = true; cur.push(c); },
+			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
+			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
+			'\n' | ';' if depth == 0	=> { out.push(std::mem::take(&mut cur)); },
+			_						=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
+	}
+	out
+}
+
+/// A `v(...)` or `line(...)` spacer statement, or `None` for a statement that is neither.
+#[derive(Clone, Copy, PartialEq)]
+enum SpacerKind {
+	Vertical,	// v(<len>)
+	Line,		// line(...) -- a horizontal divider
+}
+
+impl SpacerKind {
+	fn label(self) -> &'static str {
+		match self {
+			SpacerKind::Vertical	=> "v()",
+			SpacerKind::Line		=> "line()",
+		}
+	}
+}
+
+/// Which spacer, if any, this already-`#`-stripped statement opens with.
+fn spacer_kind(s: &str) -> Option<SpacerKind> {
+	if s.starts_with("v(")		{ Some(SpacerKind::Vertical) }
+	else if s.starts_with("line(")	{ Some(SpacerKind::Line) }
+	else						{ None }
+}
+
+/// Does this statement carry the element `it` -- a wrap (`block`/`box`) or a bare `it` reference? Used to
+/// tell the hole statement from the spacers around it.
+fn is_element_stmt(s: &str) -> bool {
+	s.starts_with("block") || s.starts_with("box") || mentions_word(s, "it")
+}
+
+/// Does `s` contain the bare identifier `word` at a word boundary (so `it` is not found inside `with`)?
+fn mentions_word(s: &str, word: &str) -> bool {
+	let bytes	= s.as_bytes();
+	let mut from	= 0usize;
+	while let Some(rel) = s[from..].find(word) {
+		let at		= from + rel;
+		let before	= at == 0 || !is_ident_byte(bytes[at - 1]);
+		let after_i	= at + word.len();
+		let after	= after_i >= bytes.len() || !is_ident_byte(bytes[after_i]);
+		if before && after {
+			return true;
+		}
+		from = at + word.len();
+	}
+	false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+	b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+/// Builds the sibling block a spacer lowers to, or folds a heading's `v(...)` into the matched level's
+/// spacing (returning `Ok(None)`). Under a heading a non-`v` sibling is refused -- a divider after a heading
+/// strands it from the content it must keep with.
+fn make_spacer(
+	selector:	&Selector,
+	kind:		SpacerKind,
+	s:			&str,
+	seen_hole:	bool,
+	heading:	bool,
+	hole:		&mut ThemePatch,
+)
+	-> Outcome<Option<Block>>
+{
+	if heading {
+		if kind != SpacerKind::Vertical {
+			// The keep-with-next guard: a heading must stay adjacent to the block it keeps with.
+			if seen_hole {
+				return Err(err!("post-content after a heading breaks keep-with-next"; Invalid, Input));
+			}
+			return Err(err!(
+				"a heading template supports only v() spacing, not a leading {}", kind.label(); Invalid, Input));
+		}
+		let sp	= res!(spacer_length(s));
+		let n	= res!(level_predicate(selector).ok_or_else(||
+			err!("a heading spacing template needs a level: predicate"; Invalid, Input)));
+		let idx	= (n.max(1) as usize) - 1;
+		while hole.heading.levels.len() <= idx {
+			hole.heading.levels.push(ThemeHeadingLevelPatch::default());
+		}
+		// A v() before the element lifts the level's space above; one after sets its space below.
+		if seen_hole {
+			hole.heading.levels[idx].space_below = Some(sp);
+		} else {
+			hole.heading.levels[idx].space_above = Some(sp);
+		}
+		return Ok(None);
+	}
+	match kind {
+		SpacerKind::Vertical	=> Ok(Some(Block::Space(res!(spacer_length(s))))),
+		SpacerKind::Line		=> Ok(Some(res!(read_line(s)))),
+	}
+}
+
+/// The scaled-point length of a `v(<len>)` statement's argument. An `em` (or `%`) value has no running
+/// size at lowering time, so it is refused rather than set wrongly.
+fn spacer_length(s: &str) -> Outcome<Sp> {
+	let inside = res!(call_args(s, "v").ok_or_else(|| err!("malformed v() spacer: {}", short(s); Invalid, Input)));
+	match length_pt(inside.trim()) {
+		Some(pt)	=> Ok(Sp::from_pt(pt)),
+		None		=> Err(err!("a v() length needs an absolute unit (pt/mm/cm), not {}", short(&inside); Invalid, Input)),
+	}
+}
+
+/// A `line(length: <len>, stroke: <n>pt)` lowered to a horizontal rule. A `length` given as a percentage is
+/// a fraction of the placement measure ([`Length::Rel`]); an absolute length is [`Length::Abs`]. The stroke
+/// thickness and grey take template-like defaults when the source names none.
+fn read_line(s: &str) -> Outcome<Block> {
+	let inside = res!(call_args(s, "line").ok_or_else(|| err!("malformed line() divider: {}", short(s); Invalid, Input)));
+	let width = match named_value(&inside, "length") {
+		Some(v) if v.trim_end().ends_with('%')	=> {
+			let f = res!(v.trim_end().trim_end_matches('%').trim().parse::<f64>()
+				.map_err(|_| err!("line length percentage not a number: {}", short(&v); Invalid, Input)));
+			Length::Rel(f / 100.0)
+		},
+		Some(v)	=> match length_pt(v.trim()) {
+			Some(pt)	=> Length::Abs(pt),
+			None		=> return Err(err!("a line length needs pt/mm/cm or %, not {}", short(&v); Invalid, Input)),
+		},
+		None	=> Length::Rel(1.0),	// a bare divider runs the full measure
+	};
+	// The stroke, if any, is `<n>pt` optionally `+ luma(<g>)`; default a thin black rule.
+	let (thickness, grey) = match named_value(&inside, "stroke") {
+		Some(v)	=> (length_pt(&v).unwrap_or(0.6), stroke_grey(&v).unwrap_or(0)),
+		None	=> (0.6, 0),
+	};
+	Ok(Block::Rule { width, thickness, grey })
+}
+
+/// The grey level a `stroke: ... + luma(<g>)` names, or `None` when the stroke carries no `luma`.
+fn stroke_grey(v: &str) -> Option<u8> {
+	let at	= v.find("luma(")? + "luma(".len();
+	let end	= v[at..].find(')')?;
+	v[at..at + end].trim().parse::<f64>().ok().map(|n| n.round().clamp(0.0, 255.0) as u8)
+}
+
+/// Reads the element (hole) statement of a template into the hole patch and frame. A `block.with(fill: ...)`
+/// or `block(fill: ...)[#it]` sets the frame's wash; a `#set text(...)` inside the wrap's content overlays
+/// the element; a bare `it` leaves both untouched. A wrap that is neither a `.with` partial nor a content
+/// wrap of `it` is refused, so a body this reader cannot place is a visible refusal, not a silent no-op.
+fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<Rgba>) -> Outcome<()> {
+	let is_wrap = s.starts_with("block") || s.starts_with("box");
+	if !is_wrap {
+		// A bare `it` / `it.body` -- the element passes through untouched.
+		return Ok(());
+	}
+	// The wrap's argument list -- `block.with(<args>)` or `block(<args>)[...]`.
+	let head = s.strip_prefix("block").or_else(|| s.strip_prefix("box")).unwrap_or(s);
+	let head = head.trim_start_matches(".with").trim_start();
+	let args = call_group(head).unwrap_or_default();
+	// A `fill:` washes the element in a box.
+	if let Some(fv) = named_value(&args, "fill") {
+		match parse_colour(&fv) {
+			Some(rgba)	=> *frame = Some(rgba),
+			None		=> return Err(err!(
+				"a template fill colour could not be resolved: {}", short(&fv); Invalid, Input)),
+		}
+	}
+	// A content block `[ ... ]` may carry `#set` overlays and must reference `it` when the wrap is not a
+	// `.with` partial application.
+	let has_partial	= s.contains(".with");
+	if let Some(content) = bracket_content(s) {
+		for (target, cargs) in inner_sets(&content) {
+			merge_patch(hole, &set::lower_set(&target, &cargs));
+		}
+		if !mentions_word(&content, "it") {
+			return Err(err!("a template wrap's content does not place the element `it`: {}", short(s); Invalid, Input));
+		}
+	} else if !has_partial {
+		return Err(err!("a template wrap places no element `it`: {}", short(s); Invalid, Input));
+	}
+	Ok(())
+}
+
+/// Folds the non-default leaves of `src` onto `dst` -- the overlay a wrap's inner `#set` contributes to the
+/// hole. Each group `lower_set` writes is folded, the heading group per level so a heading `v(...)` spacing
+/// already folded in stands beside a `#set heading(...)` the same wrap might carry.
+fn merge_patch(dst: &mut ThemePatch, src: &ThemePatch) {
+	let d = ThemePatch::default();
+	if src.text != d.text				{ dst.text = src.text.clone(); }
+	if src.par != d.par					{ dst.par = src.par.clone(); }
+	if src.list != d.list				{ dst.list = src.list.clone(); }
+	if src.enumeration != d.enumeration	{ dst.enumeration = src.enumeration.clone(); }
+	if src.equation != d.equation		{ dst.equation = src.equation.clone(); }
+	if src.page != d.page				{ dst.page = src.page.clone(); }
+	if src.code != d.code				{ dst.code = src.code.clone(); }
+	// The heading group, folded leaf by leaf so a level's spacing set elsewhere survives.
+	if src.heading.numbering_all.is_some()	{ dst.heading.numbering_all = src.heading.numbering_all.clone(); }
+	if src.heading.size_all.is_some()		{ dst.heading.size_all = src.heading.size_all; }
+	if src.heading.face.is_some()			{ dst.heading.face = src.heading.face.clone(); }
+	if src.heading.kind.is_some()			{ dst.heading.kind = src.heading.kind; }
+	for (i, lvl) in src.heading.levels.iter().enumerate() {
+		while dst.heading.levels.len() <= i {
+			dst.heading.levels.push(ThemeHeadingLevelPatch::default());
+		}
+		let into = &mut dst.heading.levels[i];
+		if lvl.size.is_some()			{ into.size = lvl.size; }
+		if lvl.space_above.is_some()	{ into.space_above = lvl.space_above; }
+		if lvl.space_below.is_some()	{ into.space_below = lvl.space_below; }
+		if lvl.face.is_some()			{ into.face = lvl.face.clone(); }
+		if lvl.weight.is_some()			{ into.weight = lvl.weight; }
+		if lvl.italic.is_some()			{ into.italic = lvl.italic; }
+		if lvl.smallcaps.is_some()		{ into.smallcaps = lvl.smallcaps; }
+		if lvl.numbering.is_some()		{ into.numbering = lvl.numbering.clone(); }
+	}
+}
+
+/// The top-level `#set <target>(<args>)` declarations inside a wrap's content block, as `(target, args)`
+/// pairs -- the overlay a `block(...)[ #set text(size: 9pt) #it ]` contributes to the hole.
+fn inner_sets(content: &str) -> Vec<(String, String)> {
+	let mut out = Vec::new();
+	for stmt in split_statements(content) {
+		let s = stmt.trim().trim_start_matches('#').trim();
+		let after = match s.strip_prefix("set ") {
+			Some(a)	=> a.trim(),
+			None	=> continue,
+		};
+		let open = match after.find('(') {
+			Some(i)	=> i,
+			None	=> continue,
+		};
+		let target = after[..open].trim().to_string();
+		if let Some(args) = call_group(&after[open..]) {
+			out.push((target, args));
+		}
+	}
+	out
+}
+
+/// The text inside the first balanced `(...)` of `call(...)` when `s` opens with `name`, or `None`.
+fn call_args(s: &str, name: &str) -> Option<String> {
+	let rest = s.strip_prefix(name)?.trim_start();
+	call_group(rest)
+}
+
+/// The text inside a balanced `(...)` at the start of `s` (which must open with `(`), spanning nested
+/// brackets and strings. `None` when the parentheses never close.
+fn call_group(s: &str) -> Option<String> {
+	let s = s.trim_start();
+	let bytes = s.as_bytes();
+	if bytes.first() != Some(&b'(') {
+		return None;
+	}
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	for (i, c) in s.char_indices() {
+		if in_str {
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'			=> in_str = true,
+			'(' | '[' | '{'	=> depth += 1,
+			')' | ']' | '}'	=> {
+				depth -= 1;
+				if depth == 0 {
+					return Some(s[1..i].to_string());
+				}
+			},
+			_			=> {},
+		}
+	}
+	None
+}
+
+/// The text inside the first balanced `[...]` content block of `s`, or `None` when there is none.
+fn bracket_content(s: &str) -> Option<String> {
+	let start	= s.find('[')?;
+	let bytes	= s.as_bytes();
+	let mut depth	= 0i32;
+	for (i, c) in s[start..].char_indices() {
+		match c {
+			'['	=> depth += 1,
+			']'	=> {
+				depth -= 1;
+				if depth == 0 {
+					let _ = bytes;
+					return Some(s[start + 1..start + i].to_string());
+				}
+			},
+			_	=> {},
+		}
+	}
+	None
+}
+
+/// The raw value text a `key:` names inside an argument list, up to the next top-level comma. `None` when
+/// the key is absent.
+fn named_value(args: &str, key: &str) -> Option<String> {
+	let bytes	= args.as_bytes();
+	let mut from	= 0usize;
+	let start = loop {
+		let rel	= args[from..].find(key)?;
+		let at	= from + rel;
+		let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+		let mut j = at + key.len();
+		while j < bytes.len() && bytes[j] == b' ' {
+			j += 1;
+		}
+		if before_ok && j < bytes.len() && bytes[j] == b':' {
+			break j + 1;
+		}
+		from = at + key.len();
+	};
+	// Read to the next comma outside any nested group.
+	let tail	= &args[start..];
+	let mut depth	= 0i32;
+	let mut end		= tail.len();
+	for (i, c) in tail.char_indices() {
+		match c {
+			'(' | '[' | '{'	=> depth += 1,
+			')' | ']' | '}'	=> depth -= 1,
+			',' if depth == 0	=> { end = i; break; },
+			_			=> {},
+		}
+	}
+	Some(tail[..end].trim().to_string())
+}
+
+/// A colour expression lowered to an [`Rgba`]. The forms a template fill takes that resolve without a
+/// palette: `luma(<n>)`, `rgb("#rrggbb")`, `rgb(<r>, <g>, <b>)` and a small set of named colours, each
+/// optionally lightened or darkened (`.lighten(<p>%)` / `.darken(<p>%)`). A palette reference (`colours.blue`)
+/// resolves to no value here and the caller refuses it rather than guessing.
+fn parse_colour(expr: &str) -> Option<Rgba> {
+	let e = expr.trim();
+	// The base runs up to the first `.lighten`/`.darken` modifier (a `luma(...)`/`rgb(...)` call keeps its
+	// own parentheses); the rest is the modifier chain.
+	let split_at = [".lighten", ".darken"].iter().filter_map(|m| e.find(m)).min();
+	let (head, mods) = match split_at {
+		Some(i)	=> (e[..i].trim(), &e[i..]),
+		None	=> (e, ""),
+	};
+	let base = if let Some(rest) = head.strip_prefix("luma(") {
+		let n = rest.trim_end_matches(')').trim().parse::<f64>().ok()?;
+		let v = n.round().clamp(0.0, 255.0) as u8;
+		Rgba::opaque(v, v, v)
+	} else if let Some(rest) = head.strip_prefix("rgb(") {
+		res_rgb(rest.trim_end_matches(')').trim())?
+	} else {
+		named_colour(head)?
+	};
+	Some(apply_colour_mods(base, mods))
+}
+
+/// `rgb("#rrggbb")` or `rgb(<r>, <g>, <b>)` to an [`Rgba`].
+fn res_rgb(inner: &str) -> Option<Rgba> {
+	let inner = inner.trim();
+	if let Some(hex) = inner.strip_prefix('"').and_then(|h| h.strip_suffix('"')) {
+		let hex = hex.trim_start_matches('#');
+		if hex.len() == 6 {
+			let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+			let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+			let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+			return Some(Rgba::opaque(r, g, b));
+		}
+		return None;
+	}
+	let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+	if parts.len() == 3 {
+		let r = parts[0].parse::<f64>().ok()?.round().clamp(0.0, 255.0) as u8;
+		let g = parts[1].parse::<f64>().ok()?.round().clamp(0.0, 255.0) as u8;
+		let b = parts[2].parse::<f64>().ok()?.round().clamp(0.0, 255.0) as u8;
+		return Some(Rgba::opaque(r, g, b));
+	}
+	None
+}
+
+/// A named colour to its [`Rgba`], for the handful Typst's own defaults carry.
+fn named_colour(name: &str) -> Option<Rgba> {
+	Some(match name {
+		"black"				=> Rgba::opaque(0, 0, 0),
+		"white"				=> Rgba::opaque(255, 255, 255),
+		"gray" | "grey"		=> Rgba::opaque(170, 170, 170),
+		"silver"			=> Rgba::opaque(221, 221, 221),
+		"red"				=> Rgba::opaque(255, 65, 54),
+		"green"				=> Rgba::opaque(46, 204, 64),
+		"blue"				=> Rgba::opaque(0, 116, 217),
+		"yellow"			=> Rgba::opaque(255, 220, 0),
+		"orange"			=> Rgba::opaque(255, 133, 27),
+		"purple"			=> Rgba::opaque(177, 13, 201),
+		_					=> return None,
+	})
+}
+
+/// Applies the trailing `.lighten(<p>%)` / `.darken(<p>%)` modifiers of a colour expression, each mixing the
+/// colour that fraction toward white or black the way Typst's own `.lighten`/`.darken` do.
+fn apply_colour_mods(base: Rgba, mods: &str) -> Rgba {
+	let mut c = base;
+	let mut rest = mods;
+	loop {
+		let dot = match rest.find('.') {
+			Some(i)	=> i,
+			None	=> break,
+		};
+		let after = &rest[dot + 1..];
+		let open = match after.find('(') {
+			Some(i)	=> i,
+			None	=> break,
+		};
+		let name = after[..open].trim();
+		let inner = match call_group(&after[open..]) {
+			Some(g)	=> g,
+			None	=> break,
+		};
+		let pct = inner.trim().trim_end_matches('%').trim().parse::<f64>().unwrap_or(0.0) / 100.0;
+		c = match name {
+			"lighten"	=> mix(c, 255, pct),
+			"darken"	=> mix(c, 0, pct),
+			_			=> c,
+		};
+		// Advance past this `.name(inner)` modifier: the dot, the name, and the balanced `(inner)`.
+		let consumed = dot + 1 + open + 1 + inner.len() + 1;
+		if consumed >= rest.len() {
+			break;
+		}
+		rest = &rest[consumed..];
+	}
+	c
+}
+
+/// Mixes each channel of `c` a fraction `t` toward `target` (0 or 255) -- the arithmetic behind lighten/darken.
+fn mix(c: Rgba, target: i32, t: f64) -> Rgba {
+	let f = |v: u8| -> u8 {
+		let nv = v as f64 + (target as f64 - v as f64) * t;
+		nv.round().clamp(0.0, 255.0) as u8
+	};
+	Rgba::new(f(c.r), f(c.g), f(c.b), c.a)
+}
+
+/// A length token to points, accepting `pt`, `mm`, `cm`, `in` or a bare number. An `em` or `%` value has no
+/// absolute size at lowering time, so it returns `None` and the caller refuses it.
+fn length_pt(s: &str) -> Option<f64> {
+	let s = s.trim();
+	let mut end = 0usize;
+	let mut seen_dot = false;
+	for (i, c) in s.char_indices() {
+		if c.is_ascii_digit() || (c == '-' && i == 0) {
+			end = i + c.len_utf8();
+		} else if c == '.' && !seen_dot {
+			seen_dot = true;
+			end = i + c.len_utf8();
+		} else {
+			break;
+		}
+	}
+	if end == 0 {
+		return None;
+	}
+	let num: f64 = s[..end].parse().ok()?;
+	let unit = s[end..].trim();
+	match unit {
+		"" | "pt"	=> Some(num),
+		"mm"		=> Some(num * 72.0 / 25.4),
+		"cm"		=> Some(num * 72.0 / 2.54),
+		"in"		=> Some(num * 72.0),
+		_			=> None,
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MATCHING                                                                   │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -557,40 +1168,95 @@ fn predicate_holds(p: &FieldPredicate, block: &Block) -> bool {
 ///
 /// Recurses into existing [`Block::Scoped`] and [`Block::Box`] subtrees first, so a rule reaches an
 /// element already inside a scope (an included chapter's own) as well as one at top level.
-pub fn apply_rules(blocks: &mut Vec<Block>, rules: &[Rule]) {
+///
+/// `avail` is the content width in force at placement (`geom.content_width()`), threaded so a template's
+/// relative divider (a `line(length: 100%)`) resolves to an absolute width against the measure it will set
+/// at, rather than being left to guess one.
+pub fn apply_rules(blocks: &mut Vec<Block>, rules: &[Rule], avail: Sp) {
 	// Descend into existing nesting subtrees first, so their own elements are matched too.
 	for b in blocks.iter_mut() {
 		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } = b {
-			apply_rules(inner, rules);
+			apply_rules(inner, rules, avail);
 		}
 	}
 	// Then wrap each block this slice holds that a rule matches.
 	let taken = std::mem::take(blocks);
 	let mut out = Vec::with_capacity(taken.len());
 	for block in taken {
-		out.push(wrap_matching(block, rules));
+		out.push(wrap_matching(block, rules, avail));
 	}
 	*blocks = out;
 }
 
-/// Wraps `block` in one [`Block::Scoped`] per rule that matches it, the last matching rule innermost so it
-/// overrides the earlier ones; a rule whose patch is empty adds no scope. A block no rule matches is
-/// returned unchanged.
-fn wrap_matching(block: Block, rules: &[Rule]) -> Block {
-	// The matching rules' patches in order, so the fold wraps them last-innermost below.
-	let mut patches: Vec<&ThemePatch> = Vec::new();
+/// Wraps `block` in one [`Block::Scoped`] per set-fields rule that matches it, the last matching rule
+/// innermost so it overrides the earlier ones; a rule whose patch is empty adds no scope. A matching
+/// template then restructures the (possibly already-scoped) block into its `Scoped{hole, [pre.., it, post..]}`
+/// shape, the last matching template winning. A block no rule matches is returned unchanged.
+fn wrap_matching(block: Block, rules: &[Rule], avail: Sp) -> Block {
+	// The matching set-fields patches in order, so the fold wraps them last-innermost below.
+	let mut patches:	Vec<&ThemePatch>	= Vec::new();
+	// The last matching template, applied outermost of the set-fields scopes since it restructures the block.
+	let mut template:	Option<&Template>	= None;
 	for rule in rules {
-		if let Transform::SetFields(p) = &rule.transform {
-			if *p != ThemePatch::default() && matches(&rule.selector, &block) {
-				patches.push(p);
-			}
+		match &rule.transform {
+			Transform::SetFields(p)	=> {
+				if *p != ThemePatch::default() && matches(&rule.selector, &block) {
+					patches.push(p);
+				}
+			},
+			Transform::Template(t)	=> {
+				if matches(&rule.selector, &block) {
+					template = Some(t);
+				}
+			},
+			Transform::Refused(_)	=> {},
 		}
 	}
 	let mut wrapped = block;
 	for p in patches.into_iter().rev() {
 		wrapped = Block::Scoped { patch: p.clone(), blocks: vec![wrapped] };
 	}
+	if let Some(t) = template {
+		wrapped = materialise_template(t, wrapped, avail);
+	}
 	wrapped
+}
+
+/// Materialises a template around the matched element: the element is *moved* into the hole between the
+/// template's `pre` and `post` siblings (wrapped in a washed [`Block::Box`] when the template frames it), and
+/// the whole sequence is overlaid with the hole patch through a [`Block::Scoped`]. A relative divider width
+/// in a sibling resolves to an absolute against `avail` here, at the placement measure.
+fn materialise_template(t: &Template, it: Block, avail: Sp) -> Block {
+	let hole_block = match t.frame {
+		Some(fill)	=> {
+			// The element seated in a box washed the template's fill -- the wash the renderer reads from
+			// `callout.fill` for a `Block::Box`.
+			let mut patch = ThemePatch::default();
+			patch.callout.fill = Some(fill);
+			Block::Box { blocks: vec![it], patch }
+		},
+		None		=> it,
+	};
+	let mut seq = Vec::with_capacity(t.pre.len() + 1 + t.post.len());
+	for b in &t.pre {
+		seq.push(resolve_avail(b.clone(), avail));
+	}
+	seq.push(hole_block);
+	for b in &t.post {
+		seq.push(resolve_avail(b.clone(), avail));
+	}
+	Block::Scoped { patch: t.hole.clone(), blocks: seq }
+}
+
+/// Resolves a template sibling's relative width against the placement `avail`: a `Block::Rule` whose width is
+/// a fraction ([`Length::Rel`], from a `line(length: 100%)`) becomes an absolute ([`Length::Abs`]) at that
+/// measure, so its extent is fixed where it will set rather than left relative. Every other block is unchanged.
+fn resolve_avail(block: Block, avail: Sp) -> Block {
+	match block {
+		Block::Rule { width: Length::Rel(f), thickness, grey }	=>
+			Block::Rule { width: Length::Abs(avail.to_pt() * f), thickness, grey },
+		other	=> other,
+	}
 }
 
 /// The default rule set followed by a source's own rules, ready to apply. The default set uses `theme`
@@ -649,12 +1315,12 @@ mod tests {
 				assert_eq!(p.heading.levels.first().and_then(|l| l.size), Some(crate::ir::Sp::from_pt(30.0)));
 				assert!(p.text.body_size.is_none(), "a heading size rule must not write text.body_size");
 			},
-			Transform::Refused(r)	=> panic!("a heading size rule was refused: {}", r),
+			other					=> panic!("a heading size rule should lower to set-fields, got {:?}", other),
 		}
 		// Under a body selector, the same set stays a body-size patch.
 		match lower_transform(&par, "set text(size: 30pt)") {
 			Transform::SetFields(p)	=> assert_eq!(p.text.body_size, Some(crate::ir::Sp::from_pt(30.0))),
-			Transform::Refused(r)	=> panic!("a body size rule was refused: {}", r),
+			other					=> panic!("a body size rule should lower to set-fields, got {:?}", other),
 		}
 		assert!(matches!(lower_transform(&h1, "it => context measure(it)"), Transform::Refused(_)),
 			"a page-reading transform must be refused");
@@ -726,7 +1392,7 @@ mod tests {
 			let mut refusals	= Refusals::default();
 			let rules			= rule_set_for(base, rules_src, &mut refusals);
 			let mut bs			= blocks();
-			apply_rules(&mut bs, &rules);
+			apply_rules(&mut bs, &rules, geom.content_width());
 			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			let mut out = Vec::new();
 			for n in &doc.nodes {
@@ -785,7 +1451,7 @@ mod tests {
 		let rules = collect_from_source(
 			"#show heading.where(level: 1): set heading(numbering: \"A\")\n", 0, &mut refusals);
 		let mut blocks = vec![heading(1), heading(2)];
-		apply_rules(&mut blocks, &rules);
+		apply_rules(&mut blocks, &rules, geom.content_width());
 		let (_, heads) = res!(crate::doc::author(
 			fonts, geom, &style, &crate::fonts::FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads[0].number, "A", "the level-1 rule renumbers only the level-1 heading");
@@ -824,7 +1490,7 @@ mod tests {
 			let mut refusals	= Refusals::default();
 			let rules			= rule_set_for(base, rules_src, &mut refusals);
 			let mut bs			= blocks();
-			apply_rules(&mut bs, &rules);
+			apply_rules(&mut bs, &rules, geom.content_width());
 			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			for n in &doc.nodes {
 				if let Node::VBox(b) = n {
@@ -856,5 +1522,143 @@ mod tests {
 		// Negative: the heading line itself is untouched by a par rule.
 		assert_eq!(ruled[0], base[0], "a par rule must not change the heading line");
 		Ok(())
+	}
+
+	fn raw_selector() -> Selector { Selector { kind: ElementKind::Raw, predicates: vec![] } }
+
+	/// A `#show raw: block.with(fill: ..., inset: ..., radius: ...)` lowers to a template that frames the
+	/// element, and applying it seats the code block -- moved, not cloned -- inside a `Block::Box` washed the
+	/// named fill, under a transparent hole scope. The frame colour is the one the template named.
+	#[test]
+	fn template_on_raw_frames_the_code() {
+		let sel	= raw_selector();
+		let tr	= lower_transform(&sel, "it => block.with(fill: luma(240), inset: 8pt, radius: 4pt)");
+		let t	= match tr {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		assert_eq!(t.frame, Some(Rgba::opaque(240, 240, 240)), "the block.with fill becomes the frame");
+		assert!(t.pre.is_empty() && t.post.is_empty(), "a bare frame has no siblings");
+		assert_eq!(t.hole, ThemePatch::default(), "no #set inside, so the hole is transparent");
+
+		let rule = Rule {
+			selector:	sel,
+			transform:	Transform::Template(t),
+			rule_id:	7,
+			source:		"#show raw".to_string(),
+			span:		Span::new(0, 0),
+		};
+		let mut blocks = vec![Block::Code { lines: vec!["let x = 1;".to_string()] }];
+		apply_rules(&mut blocks, std::slice::from_ref(&rule), Sp::from_pt(400.0));
+		match &blocks[0] {
+			Block::Scoped { patch, blocks: inner } => {
+				assert_eq!(patch, &ThemePatch::default(), "the hole scope is transparent");
+				match &inner[0] {
+					Block::Box { blocks: bb, patch }	=> {
+						assert_eq!(bb.len(), 1);
+						assert!(matches!(bb[0], Block::Code { .. }), "the code is moved into the box");
+						assert_eq!(patch.callout.fill, Some(Rgba::opaque(240, 240, 240)),
+							"the box wash is the template's fill");
+					},
+					other	=> panic!("expected the code framed in a Box, got {:?}", other),
+				}
+			},
+			other	=> panic!("expected a Scoped group, got {:?}", other),
+		}
+	}
+
+	/// A `#show heading.where(level: N): it => {{ v(a); it; v(b) }}` redirects the `v(...)` spacers into the
+	/// matched level's own `space_above`/`space_below` rather than sibling blocks -- a sibling after a heading
+	/// would break its keep-with-next -- so the template carries no `pre`/`post` and the hole patch names the
+	/// level's spacing.
+	#[test]
+	fn heading_v_template_redirects_into_level_spacing() {
+		let sel	= Selector { kind: ElementKind::Heading, predicates: vec![FieldPredicate::Level(2)] };
+		let t	= match lower_transform(&sel, "it => { v(12pt); it; v(6pt) }") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		assert!(t.pre.is_empty(), "a heading v() must not become a leading sibling block");
+		assert!(t.post.is_empty(), "a heading v() must not become a trailing sibling block");
+		assert!(t.frame.is_none());
+		let lvl = t.hole.heading.levels.get(1).expect("level 2 -> index 1 is present");
+		assert_eq!(lvl.space_above, Some(Sp::from_pt(12.0)), "the leading v() lifts space above the level");
+		assert_eq!(lvl.space_below, Some(Sp::from_pt(6.0)), "the trailing v() sets space below the level");
+	}
+
+	/// The template reader refuses the bodies it cannot place as blocks: an inline `underline` wrap, a `regex`
+	/// text rewrite, a page-reading `context` body, and -- under a heading selector -- any post sibling other
+	/// than a `v()`, which would strand the heading from the content it keeps with.
+	#[test]
+	fn template_refusals() {
+		let raw	= raw_selector();
+		let h1	= Selector { kind: ElementKind::Heading, predicates: vec![FieldPredicate::Level(1)] };
+		assert!(matches!(lower_transform(&raw, "it => underline(it)"), Transform::Refused(_)),
+			"underline is an inline wrap, not a block template");
+		assert!(matches!(lower_transform(&raw, "it => it.text.replace(regex(\"x\"), \"y\")"), Transform::Refused(_)),
+			"a regex show rewrites text, not an element");
+		assert!(matches!(lower_transform(&raw, "it => context { it }"), Transform::Refused(_)),
+			"a page-reading context body has no lowering");
+		match lower_transform(&h1, "it => { it; line(length: 100%) }") {
+			Transform::Refused(reason)	=> assert!(reason.contains("keep-with-next"),
+				"a post block after a heading must be refused for keep-with-next, got: {}", reason),
+			other						=> panic!("expected a refusal, got {:?}", other),
+		}
+	}
+
+	/// A `#show raw: it => {{ v(6pt); block.with(fill: luma(240)); v(6pt) }}` places the `v(...)` spacers as
+	/// sibling `Block::Space` blocks around the framed element (a non-heading selector has no keep-with-next
+	/// guard), and the divider width of a `line(length: 100%)` resolves to an absolute against the placement
+	/// avail when the template is applied.
+	#[test]
+	fn non_heading_template_places_spacer_siblings() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => { v(6pt); block.with(fill: luma(240)); line(length: 50%) }") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		assert_eq!(t.pre.len(), 1, "the leading v() is a sibling before the element");
+		assert!(matches!(t.pre[0], Block::Space(sp) if sp == Sp::from_pt(6.0)));
+		assert_eq!(t.post.len(), 1, "the trailing line() is a sibling after the element");
+		assert!(matches!(t.post[0], Block::Rule { width: Length::Rel(f), .. } if (f - 0.5).abs() < 1e-9),
+			"the divider keeps its relative width until placement");
+		assert!(t.frame.is_some());
+
+		let rule = Rule {
+			selector:	sel,
+			transform:	Transform::Template(t),
+			rule_id:	0,
+			source:		"#show raw".to_string(),
+			span:		Span::new(0, 0),
+		};
+		let mut blocks = vec![Block::Code { lines: vec!["code".to_string()] }];
+		apply_rules(&mut blocks, std::slice::from_ref(&rule), Sp::from_pt(400.0));
+		// The produced sequence is [Space, Box{code}, Rule]; the rule's width resolved against avail (400 pt).
+		match &blocks[0] {
+			Block::Scoped { blocks: seq, .. } => {
+				assert_eq!(seq.len(), 3, "pre, hole, post: {:?}", seq);
+				assert!(matches!(seq[0], Block::Space(_)));
+				assert!(matches!(seq[1], Block::Box { .. }));
+				match &seq[2] {
+					Block::Rule { width: Length::Abs(pt), .. }	=> assert!((pt - 200.0).abs() < 1e-6,
+						"50% of a 400pt avail resolves to 200pt, got {}", pt),
+					other	=> panic!("expected an absolute divider width, got {:?}", other),
+				}
+			},
+			other	=> panic!("expected a Scoped group, got {:?}", other),
+		}
+	}
+
+	/// A `block(...)[ #set text(size: 9pt) #it ]` wrap with no fill lowers to a template whose hole patch
+	/// overlays the inner `#set` on the element, with no frame.
+	#[test]
+	fn template_inner_set_becomes_the_hole() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => block(inset: 6pt)[#set text(size: 9pt)\n#it]") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("expected a template, got {:?}", other),
+		};
+		assert!(t.frame.is_none(), "a wrap with no fill does not frame");
+		assert_eq!(t.hole.text.body_size, Some(Sp::from_pt(9.0)), "the inner #set text overlays the element");
 	}
 }
