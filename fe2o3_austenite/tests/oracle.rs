@@ -288,6 +288,28 @@ fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
 		_							=> return Err(err!("a non-pinned root did not bootstrap"; Test, Mismatch)),
 	}
 
+	// Q6: a cache that self-blessed a WRONG hash for a pinned root does not govern it -- the tracked
+	// expected.json is authoritative even when a cache entry exists, so the correct render is still
+	// Unchanged (matched against expected, not the poisoned cache) rather than the cache masking a drift.
+	{
+		use driver::{Baseline, BaselineEntry};
+		use std::collections::BTreeMap;
+		let mut seeded = BTreeMap::new();
+		seeded.insert("styling-fixture".to_string(), BaselineEntry {
+			pages:				1,
+			anchors:			4,
+			pdf_sha256:			"cache-self-blessed-wrong-hash".to_string(),
+			raster_worst_pct:	None,
+		});
+		res!(Baseline::from_entries(seeded).write_to_file(&path));
+	}
+	match res!(record_and_diff(&path, &report("styling-fixture", FIXTURE_HASH), false)) {
+		BaselineOutcome::Unchanged	=> {},
+		_							=> return Err(err!(
+			"a pinned root was governed by a poisoned cache instead of expected.json";
+			Test, Mismatch)),
+	}
+
 	let _ = std::fs::remove_file(&path);
 	Ok(())
 }
