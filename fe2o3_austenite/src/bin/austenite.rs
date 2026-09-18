@@ -55,6 +55,7 @@ use oxedyne_fe2o3_graphics::pdf::{
 	OutlineItem,
 	PdfPage,
 };
+use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -144,6 +145,22 @@ fn terse_skip_line(skips: &lang::SkipSummary) -> Option<String> {
 	Some(fmt!("skipped: {}", parts.join(", ")))
 }
 
+/// Each ledger anchor's kind, label (its content key) and resolved page, as a small JSON array -- the
+/// oracle harness's other half, compared against a Typst `query` dump of the same document's headings
+/// and figures. Kept separate from [`Ledger::to_file`]'s full jdat dump, which also carries the
+/// `reserved`/`realised` widths a Typst comparison has no equivalent for.
+fn ledger_dump_json(ledger: &Ledger) -> Outcome<String> {
+	let mut rows = Vec::with_capacity(ledger.len());
+	for a in ledger.anchors() {
+		rows.push(omapdat!{
+			"kind"	=> dat!(a.id.kind.name()),
+			"label"	=> dat!(a.id.key.clone()),
+			"page"	=> dat!(a.pos.page),
+		});
+	}
+	Dat::List(rows).json()
+}
+
 /// Builds the PDF document outline (the viewer's bookmark side panel) from the resolved ledger: the
 /// three front-matter leaves first -- title page, meta (imprint) page and contents -- then every body
 /// heading in reading order. The front-matter pages carry no heading of their own, so the block layer
@@ -180,9 +197,11 @@ fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
 }
 
 /// Compiles the Typst root at `source` into `out_dir`, writing every page's SVG, the resolved ledger,
-/// and one PDF of the whole run. Returns the counts and the terse skip line for the caller to report;
-/// prints nothing itself save the phase profile when `AUS_PROFILE` is set.
-fn compile(source: &str, out_dir: &str, pearl: bool) -> Outcome<CompileStats> {
+/// and one PDF of the whole run. `ledger_out`, when given, also writes the terse kind/label/page JSON
+/// dump ([`ledger_dump_json`]) the oracle harness compares against a Typst `query`. Returns the counts
+/// and the terse skip line for the caller to report; prints nothing itself save the phase profile when
+/// `AUS_PROFILE` is set.
+fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -> Outcome<CompileStats> {
 	// Phase timing, gated on AUS_PROFILE so a normal run is untouched. Each phase reports its wall time
 	// to stderr, leaving stdout (and every emitted byte) exactly as it was.
 	let prof = std::env::var("AUS_PROFILE").is_ok();
@@ -271,6 +290,10 @@ fn compile(source: &str, out_dir: &str, pearl: bool) -> Outcome<CompileStats> {
 	// The ledger is small and independent of the pages, so it is written first and out of the way.
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
 	res!(out.ledger.to_file(&ledger_path));
+	if let Some(path) = ledger_out {
+		let json = res!(ledger_dump_json(&out.ledger));
+		res!(std::fs::write(path, json));
+	}
 
 	// Pearl, when asked: a content-addressed `.prl` accumulated across the streaming emit loop, each page
 	// folded in before its frame is dropped, so it streams exactly as the SVG and PDF arms do.
@@ -501,22 +524,33 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 }
 
 fn main() -> Outcome<()> {
-	// Flags may precede or follow the paths; only `--watch` (`-w`) is recognised, everything else is a
-	// positional argument in order: the source root, then the optional output directory.
+	// Flags may precede or follow the paths; only `--watch` (`-w`), `--pearl` and `--ledger-out <path>`
+	// are recognised, everything else is a positional argument in order: the source root, then the
+	// optional output directory.
 	let mut watching	= false;
 	let mut pearl		= false;
+	let mut ledger_out:	Option<String>	= None;
 	let mut pos:	Vec<String>	= Vec::new();
-	for a in std::env::args().skip(1) {
+	let mut args = std::env::args().skip(1);
+	while let Some(a) = args.next() {
 		match a.as_str() {
 			"--watch" | "-w"	=> watching = true,
 			"--pearl"			=> pearl = true,
+			"--ledger-out"		=> {
+				ledger_out = Some(match args.next() {
+					Some(p)	=> p,
+					None	=> return Err(err!(
+						"--ledger-out needs a path argument."; Input, Invalid, Missing)),
+				});
+			},
 			_					=> pos.push(a),
 		}
 	}
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] <SOURCE.typ> [OUTPUT_DIR]"; Input, Invalid, Missing)),
+			"Usage: austenite [--watch] [--pearl] [--ledger-out PATH] <SOURCE.typ> [OUTPUT_DIR]";
+			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
 		Some(s)	=> s.clone(),
@@ -529,12 +563,13 @@ fn main() -> Outcome<()> {
 		let src_files	= source.clone();		// the file-set closure borrows this
 		let src_build	= source.clone();		// the build closure owns this
 		let out			= out_dir.clone();
+		let ledger_out_w	= ledger_out.clone();	// the build closure owns this
 		println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", source, out_dir);
 		return watch::run(
 			move || watch_set(&src_files),
 			move || {
 				let t = std::time::Instant::now();
-				match compile(&src_build, &out, pearl) {
+				match compile(&src_build, &out, pearl, ledger_out_w.as_deref()) {
 					Ok(stats)	=> {
 						// The skip line is folded into the status line, so the rebuild is one line.
 						print_status(&src_build, &out, &stats, t.elapsed());
@@ -548,7 +583,7 @@ fn main() -> Outcome<()> {
 	}
 
 	let t = std::time::Instant::now();
-	let stats = res!(compile(&source, &out_dir, pearl));
+	let stats = res!(compile(&source, &out_dir, pearl, ledger_out.as_deref()));
 	if let Some(skip) = &stats.skip_line {
 		eprintln!("[austenite] {}", skip);
 	}

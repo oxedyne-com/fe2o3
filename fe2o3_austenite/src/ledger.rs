@@ -53,6 +53,19 @@ impl AnchorKind {
 				"Anchor kind tag {} is not one of the six known kinds.", tag; Input, Invalid)),
 		}
 	}
+
+	/// The kind's name, lower case -- for a diagnostic or a JSON dump where the numeric `tag` means
+	/// nothing to a reader outside the engine.
+	pub fn name(&self) -> &'static str {
+		match self {
+			AnchorKind::Label		=> "label",
+			AnchorKind::Heading		=> "heading",
+			AnchorKind::IndexEntry	=> "index_entry",
+			AnchorKind::Float		=> "float",
+			AnchorKind::Citation	=> "citation",
+			AnchorKind::Equation	=> "equation",
+		}
+	}
 }
 
 /// An anchor's identity, its kind and a key unique within it. Content-addressed, not positional, so
@@ -248,6 +261,12 @@ impl Ledger {
 
 	pub fn get(&self, id: &AnchorId) -> Option<&Anchor> {
 		self.entries.get(id)
+	}
+
+	/// Every resolved anchor, in identity order -- for a caller that reports or dumps the whole table
+	/// rather than looking up one entry, such as the oracle harness's per-anchor page comparison.
+	pub fn anchors(&self) -> impl Iterator<Item = &Anchor> {
+		self.entries.values()
 	}
 
 	/// The page an anchor resolved to in this ledger, if it is known. A forward reference reads this
