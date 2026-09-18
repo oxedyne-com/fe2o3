@@ -255,6 +255,14 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// by `read_config` above; this reads only the root's own top-level declarations.
 	lang::set::lower_root_declarations(root_src, &mut style);
 	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path));
+	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
+	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
+	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
+	// union is taken. The default rules re-assert the theme's own heading sizes (byte-neutral); the root's
+	// own `#show <selector>: <transform>` rules are appended, refused where a transform reads the page or
+	// patches a field the renderer does not read.
+	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	lang::rules::apply_rules(&mut blocks, &rules);
 	// The resolver is built from every heading face the document can name -- the root theme's, and every
 	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
@@ -338,6 +346,10 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		None	=> root_dir.join("assets").join("fonts"),
 	};
 	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path));
+	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
+	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
+	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	lang::rules::apply_rules(&mut blocks, &rules);
 	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
 	// file is noted rather than silently set in Regular.

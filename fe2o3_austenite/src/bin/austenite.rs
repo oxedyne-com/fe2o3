@@ -285,7 +285,7 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	// The terse skip line, set from whichever path assembles the source: a book or doc root through
 	// `book::load`'s merged tally, a lone file through its own reader summary.
 	let skip_line: Option<String>;
-	let refusals: lang::Refusals;
+	let mut refusals: lang::Refusals;
 	let (blocks, fonts, geom, style, title, faces, front, bib) = if book::is_book_root(&src) {
 		// A book or doc root assembles its chapters through the reader and merges each chapter's refusal
 		// table into one, so a whole-book or whole-doc compile reports its skipped constructs on the same
@@ -316,6 +316,12 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// otherwise the capture would be a silent skip.
 		let mut style	= Theme::default();
 		lang::set::lower_root_declarations(&src, &mut style);
+		// The styling rule engine runs over the lone chapter's block tree here, at the blocks->author seam,
+		// before its faces are resolved -- so a rule-named face reaches the resolver. The default rules
+		// re-assert the theme's own heading sizes (byte-neutral); the file's own `#show <selector>:
+		// <transform>` rules are appended, refused where a transform reads the page or an unread field.
+		let rules = lang::rules::rule_set_for(&style, &src, &mut refusals);
+		lang::rules::apply_rules(&mut blocks, &rules);
 		// A lone file may name a heading font in its own `#show: doc.with(...)`; resolve it against the
 		// tree's assets the same way a whole doc does, so a lone chapter's heading face reaches the page.
 		let faces = match std::path::Path::new(source).parent() {

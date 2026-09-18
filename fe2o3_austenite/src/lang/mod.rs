@@ -15,6 +15,7 @@ pub mod codefig;
 pub mod lower;
 pub mod mathparse;
 pub mod parse;
+pub mod rules;
 pub mod set;
 
 use crate::doc::Block;
