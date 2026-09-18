@@ -12,8 +12,8 @@ use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
 		Block,
-		Style,
 	},
+	theme::Theme,
 	driver::{
 		self,
 		Config,
@@ -48,7 +48,7 @@ fn main() -> Outcome<()> {
 
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
-	let style	= Style::default();
+	let style	= Theme::default();
 
 	let waves	= res!(trig_plot(fonts.clone()));
 	let bell	= res!(gaussian_plot(fonts.clone()));
@@ -66,11 +66,11 @@ fn main() -> Outcome<()> {
 		Block::figure(bell, Some("The standard normal density.".to_string())),
 	];
 
-	let (document, heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks, None, None));
+	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
 
-	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let mut out	= res!(driver::run(&document, &metrics, Config::default()));
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, style, geom, "", None));
+	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, "", None));
 
 	res!(std::fs::create_dir_all(&out_dir));
 	let emitter = Emitter::Svg;

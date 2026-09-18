@@ -65,6 +65,7 @@ use crate::page::{
 	Placed,
 	PlacedKind,
 };
+use crate::theme::Theme;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -377,98 +378,6 @@ pub enum HeadingStyle {
 	DocInline,
 }
 
-/// the styling never leaves the integer domain the driver breaks on.
-#[derive(Clone, Copy, Debug)]
-pub struct Style {
-	pub heading_style:	HeadingStyle,	// which top-level opener and numbering the headings take
-	pub body_size:		Sp,
-	pub leading:		Sp,
-	pub para_skip:		Sp,	// extra space between one paragraph and the next
-	pub indent:		Sp,	// first-line indent of a paragraph following another paragraph
-	pub h1_size:		Sp,	// the chapter title, set beneath the chapter number
-	pub h2_size:		Sp,
-	pub h3_size:		Sp,
-	pub h4_size:		Sp,
-	pub chap_num_size:	Sp,	// the giant chapter number on a chapter-opening page
-	pub chap_num_grey:	Rgba,	// the fill of that number, a light grey
-	pub chap_grid:		[Sp; 4],	// chapter-opener grid rows: number band, gap, title band, gap-to-body
-	pub header_size:	Sp,	// the running head's size
-	pub folio_size:		Sp,
-	pub foot_size:		Sp,	// the footnote text's size, a touch below the body
-	pub foot_leading:	Sp,	// leading between the wrapped lines of one footnote
-	pub list_marker_gap:	Sp,	// space between a list marker and the item text it introduces
-	pub list_item_skip:		Sp,	// vertical space set between one list item and the next
-	pub table_skip:		Sp,	// space set above and below a table
-	pub cell_pad_x:		Sp,	// horizontal padding between a cell's text and its column rules
-	pub cell_pad_y:		Sp,	// vertical padding above and below a cell's lines
-	pub line_gap:		Sp,	// leading between the wrapped lines within one cell
-	pub rule_thin:		Sp,	// an interior grid rule
-	pub rule_thick:		Sp,	// the frame and the rule beneath a header
-	pub header_fill:	Rgba,	// the wash behind a header row, the books' light.lighten(10%)
-}
-
-impl Default for Style {
-	fn default() -> Self {
-		Self {
-			heading_style:	HeadingStyle::BookOpener,
-			body_size:		Sp::from_pt(11.0),
-			leading:		Sp::from_pt(13.2),	// 1.2x the body
-			para_skip:		Sp::from_pt(6.0),
-			indent:			Sp::ZERO,	// no first-line indent unless a book config sets one
-			h1_size:		Sp::from_pt(16.0),
-			h2_size:		Sp::from_pt(13.0),
-			h3_size:		Sp::from_pt(12.0),
-			h4_size:		Sp::from_pt(11.0),
-			chap_num_size:	Sp::from_pt(54.0),
-			chap_num_grey:	Rgba::opaque(200, 200, 200),	// Typst's luma(200)
-			chap_grid:		[Sp::from_pt(72.0), Sp::from_pt(8.0), Sp::from_pt(36.0), Sp::from_pt(20.0)],
-			header_size:	Sp::from_pt(9.5),
-			folio_size:		Sp::from_pt(10.0),
-			foot_size:		Sp::from_pt(9.0),
-			foot_leading:	Sp::from_pt(10.8),	// 1.2x the footnote size
-				list_marker_gap:	Sp::from_pt(6.0),
-				list_item_skip:		Sp::from_pt(3.0),
-			table_skip:		Sp::from_pt(10.0),
-			cell_pad_x:		Sp::from_pt(5.0),
-			cell_pad_y:		Sp::from_pt(3.0),
-			line_gap:		Sp::from_pt(3.0),
-			rule_thin:		Sp::from_pt(0.4),
-			rule_thick:		Sp::from_pt(0.8),
-			header_fill:	Rgba::opaque(235, 238, 241),	// #E9ECEF lightened 10%, the template's header1
-		}
-	}
-}
-
-impl Style {
-	fn heading_size(&self, level: u8) -> Sp {
-		match level {
-			0 => self.h1_size,	// a part-divider title, set at the chapter-title size
-			1 => self.h1_size,
-			2 => self.h2_size,
-			3 => self.h3_size,
-			_ => self.h4_size,
-		}
-	}
-
-	/// The space set above a heading of this level, always greater than the space below it, so a
-	/// heading binds visually to the text it introduces rather than to the text it follows.
-	fn space_above(&self, level: u8) -> Sp {
-		match level {
-			1 => Sp::from_pt(20.0),
-			2 => Sp::from_pt(15.0),
-			_ => Sp::from_pt(12.0),
-		}
-	}
-
-	fn space_below(&self, level: u8) -> Sp {
-		match level {
-			1 => Sp::from_pt(8.0),
-			2 => Sp::from_pt(6.0),
-			_ => Sp::from_pt(5.0),
-		}
-	}
-}
-
 /// A recorded heading: the anchor identity the ledger resolves to a page, its level, and its display
 /// title. The block layer keeps this table beside the composed stream so [`decorate`] can read a
 /// title back from an anchor -- the ledger stores only the identity, not the words.
@@ -552,7 +461,7 @@ pub struct MetaRow {
 pub fn author(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	heading:	Option<Arc<Font>>,
 	blocks:		&[Block],
 	front:		Option<&FrontMatter>,
@@ -603,7 +512,7 @@ pub fn author(
 				}
 				// A documentation tree sets `numbering: none`: its headings carry no dotted number, on the
 				// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
-				let number = match style.heading_style {
+				let number = match style.heading.kind {
 					HeadingStyle::DocBanner | HeadingStyle::DocInline	=> String::new(),
 					HeadingStyle::BookOpener							=> heading_number(*level, &sec),
 				};
@@ -636,7 +545,7 @@ pub fn author(
 				// grey title bar (`DocBanner`): an explicit banner always owns its chapter's header, so the
 				// duplicate title bar is suppressed regardless of the doc's default mode.
 				let opens = *level == 0
-					|| (*level == 1 && style.heading_style != HeadingStyle::DocInline && !banner);
+					|| (*level == 1 && style.heading.kind != HeadingStyle::DocInline && !banner);
 				if opens {
 					if !first {
 						nodes.push(Node::Penalty(Penalty::eject()));
@@ -678,7 +587,7 @@ pub fn author(
 				if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
 					// The first paragraph after a heading opens the section, so it takes no first-line indent.
 					let mut lines = res!(break_paragraph(
-						fonts.clone(), Role::Body, Dir::Ltr, style.body_size, para, measure, style.leading));
+						fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, measure, style.text.leading));
 					if !lines.is_empty() {
 						keep.push(lines.remove(0));	// the first line joins the heading
 						rest = lines;				// its leading glue and the remaining lines follow
@@ -698,17 +607,17 @@ pub fn author(
 			},
 			Block::Paragraph { text } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				// A plain paragraph is set through the piece breaker so a leading indent box can ride the
 				// front of its first line; without an indent it produces exactly what `break_paragraph` does.
 				let mut pieces = Vec::new();
-				if prev_para && style.indent.raw() > 0 {
-					pieces.push(indent_piece(style.indent));
+				if prev_para && style.par.indent.raw() > 0 {
+					pieces.push(indent_piece(style.par.indent));
 				}
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
 				nodes.extend(lines);
 				i += 1;
 				first = false;
@@ -716,16 +625,16 @@ pub fn author(
 			},
 			Block::RichParagraph { segments } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				let mut pieces = Vec::new();
-				if prev_para && style.indent.raw() > 0 {
-					pieces.push(indent_piece(style.indent));
+				if prev_para && style.par.indent.raw() > 0 {
+					pieces.push(indent_piece(style.par.indent));
 				}
 				pieces.extend(res!(build_pieces(
 					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib, &refs)));
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
 				nodes.extend(lines);
 				i += 1;
 				first = false;
@@ -733,7 +642,7 @@ pub fn author(
 			},
 			Block::List { ordered, items } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen, bib, &refs));
 				i += 1;
@@ -742,10 +651,10 @@ pub fn author(
 			},
 			Block::Code { lines: src } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				res!(code_block(&mut nodes, fonts.clone(), style, src));
-				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -754,21 +663,21 @@ pub fn author(
 				// Space above the table, discarded at a page top like any other leading. The table lowers
 				// to one keep box, so the driver moves it whole to the next page when it will not fit.
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				}
 				nodes.push(res!(table::lower(fonts.clone(), style, measure, t, &refs)));
-				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
 			},
 			Block::Equation { expr, numbered, .. } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				let number = if *numbered { eq_no += 1; Some(eq_no) } else { None };
 				res!(equation(&mut nodes, fonts.clone(), style, measure, expr, number));
-				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -777,47 +686,47 @@ pub fn author(
 				// Space above the figure, discarded at a page top like any other leading. The figure is
 				// one keep box, so the breaker moves it whole to the next page when it will not fit.
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				}
 				fig_no += 1;
 				res!(figure(&mut nodes, fonts.clone(), style, measure, graphic.clone(), caption.as_deref(), fig_no));
-				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				i += 1;
 				first = false;
 			},
 			Block::TableFigure { table, caption, supplement, label } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				}
 				let number = next_number(&mut counters, supplement);
 				res!(table_figure(
 					&mut nodes, fonts.clone(), style, measure, table,
 					caption.as_deref(), supplement, number, label.as_deref(), &refs));
-				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				i += 1;
 				first = false;
 			},
 			Block::ImageFigure { path, width, height, scale, caption, supplement, label } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				}
 				let number = next_number(&mut counters, supplement);
 				res!(image_figure(
 					&mut nodes, fonts.clone(), style, measure, path, *width, *height, *scale,
 					caption.as_deref(), supplement, number, label.as_deref()));
-				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				i += 1;
 				first = false;
 			},
 			Block::CodeFigure { figure, caption, supplement, label } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				}
 				let number = next_number(&mut counters, supplement);
 				res!(code_figure(
 					&mut nodes, fonts.clone(), style, measure, figure,
 					caption.as_deref(), supplement, number, label.as_deref()));
-				nodes.push(Node::Glue(Glue::fixed(style.table_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 				i += 1;
 				first = false;
 			},
@@ -840,7 +749,7 @@ pub fn author(
 				nodes.push(Node::Anchor(id));
 				// The title left in the display face at the chapter-title size (the template's
 				// glossary-index-title size, equal to it in these books' scales).
-				let sh	= res!(head_shape(&fonts, &head_face(1, heading.as_ref()), style.h1_size, title));
+				let sh	= res!(head_shape(&fonts, &head_face(1, heading.as_ref()), style.heading.levels[0].size, title));
 				let d	= sh.dims();
 				nodes.push(Node::HBox(BoxNode::new(
 					vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
@@ -853,7 +762,7 @@ pub fn author(
 				// The reference list is tight, entry under entry, so entries part by the interline leading
 				// rather than the paragraph skip.
 				if !first {
-					let gap = if style.foot_leading > style.foot_size { style.foot_leading - style.foot_size } else { style.line_gap };
+					let gap = if style.furniture.foot_leading > style.furniture.foot_size { style.furniture.foot_leading - style.furniture.foot_size } else { style.table.line_gap };
 					nodes.push(Node::Glue(Glue::fixed(gap)));
 				}
 				res!(reference_block(&mut nodes, fonts.clone(), style, measure, runs));
@@ -863,10 +772,10 @@ pub fn author(
 			},
 			Block::Rule { width, thickness, grey } => {
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				rule_divider(&mut nodes, measure, *width, *thickness, *grey);
-				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -891,12 +800,12 @@ pub fn author(
 				// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
 				// box, so the breaker moves it whole to the next page when it will not fit.
 				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
 				res!(styled_box(
 					&mut nodes, fonts.clone(), geom, style, measure, inner, *fill,
 					&mut foot_no, &mut ref_no, &mut seen, bib, &refs));
-				nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				i += 1;
 				first = false;
 				prev_para = false;
@@ -928,11 +837,11 @@ pub fn author(
 /// The foot spacing derived from the block style, so the separator rule and the gaps around the notes
 /// match the document's other furniture. The rule runs a third of the measure, a conventional short
 /// footnote rule.
-fn foot_style(style: Style) -> FootStyle {
+fn foot_style(style: &Theme) -> FootStyle {
 	FootStyle {
-		gap_above_rule:	style.para_skip,
-		rule_thick:		style.rule_thin,
-		rule_width:		Sp(style.body_size.raw() * 12),
+		gap_above_rule:	style.par.skip,
+		rule_thick:		style.table.rule_thin,
+		rule_width:		Sp(style.text.body_size.raw() * 12),
 		gap_below_rule:	Sp::from_pt(4.0),
 		gap_between:	Sp::from_pt(3.0),
 	}
@@ -1019,7 +928,7 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 fn build_pieces(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	segments:	&[Segment],
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
@@ -1049,13 +958,13 @@ fn build_pieces(
 				// The same raise the footnote mark rides: a run shaped at 0.7x, its box shortened so the
 				// emitter seats its baseline above the line's. It is rigid and never breaks -- the space
 				// after it may -- exactly as a mark piece behaves.
-				let (shaped, dims)	= res!(superscript(fonts.clone(), Role::Body, style.body_size, text));
+				let (shaped, dims)	= res!(superscript(fonts.clone(), Role::Body, style.text.body_size, text));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
 			Segment::Footnote { note } => {
 				*foot_no += 1;
 				let label			= fmt!("{}", *foot_no);
-				let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, style.body_size, &label));
+				let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, style.text.body_size, &label));
 				let footnote		= res!(build_footnote(fonts.clone(), style, measure, *foot_no, note, mark));
 				pieces.push(Piece::Mark(Leaf::mark(footnote, dims)));
 			},
@@ -1065,10 +974,10 @@ fn build_pieces(
 				// a nested rectangle. The box seats its baseline on the text baseline -- a body ascent
 				// below the line top -- so the line asks for that ascent as its height; anything the maths
 				// reaches above it is the overshoot the line above must open for.
-				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				let node = res!(math::layout(fonts.clone(), style, expr, false));
 				if let Node::HBox(b) = node {
 					let ascent	= res!(ShapedText::new(
-						fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "0")).dims().height;
+						fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "0")).dims().height;
 					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
 					pieces.push(Piece::Math {
 						nodes:	b.list,
@@ -1125,7 +1034,7 @@ fn build_pieces(
 /// body baseline, taking a body digit's height and depth so it aligns with the prose around it.
 fn ref_slot(
 	fonts:	Arc<FontSet>,
-	style:	Style,
+	style: &Theme,
 	ref_no:	&mut u32,
 	refr:	Ref,
 )
@@ -1133,7 +1042,7 @@ fn ref_slot(
 {
 	*ref_no += 1;
 	let own		= AnchorId::new(AnchorKind::Label, fmt!("ref-{}", *ref_no));
-	let slot	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, style.body_size, "000"));
+	let slot	= res!(ShapedText::new(fonts, Role::Body, Dir::Ltr, style.text.body_size, "000"));
 	let sd		= slot.dims();
 	Ok(Leaf::reserved_inline(own, refr, Dims::new(sd.width, sd.height, sd.depth)))
 }
@@ -1142,8 +1051,9 @@ fn ref_slot(
 /// the marker column and then hung under its marker: the first line carries the marker leaf and a gap
 /// that together fill the indent, the rest are shifted right by it, so every line's right edge still
 /// lands on the measure. The marker column is the widest marker the list uses plus
-/// [`list_marker_gap`](Style), so a bullet list and a numbered list of ten items align their text
-/// alike. Items are parted by [`list_item_skip`](Style); the list's space from its neighbours is the
+/// [`marker_gap`](crate::theme::ThemeList::marker_gap), so a bullet list and a numbered list of ten
+/// items align their text alike. Items are parted by [`item_skip`](crate::theme::ThemeList::item_skip);
+/// the list's space from its neighbours is the
 /// caller's. Each item is a segment run, so it breaks through the same path a rich paragraph does and
 /// may carry emphasis, a footnote or inline maths.
 #[allow(clippy::too_many_arguments)]
@@ -1151,7 +1061,7 @@ fn list(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	ordered:	bool,
 	items:		&[ListEntry],
@@ -1169,27 +1079,27 @@ fn list(
 	let mut marker_w					= Sp::ZERO;
 	for idx in 0..items.len() {
 		let label	= if ordered { fmt!("{}.", idx + 1) } else { "\u{2022}".to_string() };	// U+2022 bullet
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &label));
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &label));
 		if shaped.dims().width > marker_w { marker_w = shaped.dims().width; }
 		markers.push(shaped);
 	}
-	let indent	= marker_w + style.list_marker_gap;
+	let indent	= marker_w + style.list.marker_gap;
 	let inner	= if measure > indent { measure - indent } else { measure };
 
 	for (idx, entry) in items.iter().enumerate() {
 		if idx > 0 {
-			nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
+			nodes.push(Node::Glue(Glue::fixed(style.list.item_skip)));
 		}
 		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
-			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, inner, style.leading, true));
+			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, true));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
 		nodes.extend(lines);
 		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
 		// it is laid out within the item's inner measure and then shifted right by this list's indent.
 		for child in &entry.children {
 			if let Block::List { ordered: cord, items: citems } = child {
-				nodes.push(Node::Glue(Glue::fixed(style.list_item_skip)));
+				nodes.push(Node::Glue(Glue::fixed(style.list.item_skip)));
 				let mut sub: Vec<Node> = Vec::new();
 				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
 					foot_no, ref_no, seen, bib, refs));
@@ -1221,15 +1131,15 @@ fn shift_nodes(nodes: &mut [Node], by: Sp) {
 fn code_block(
 	nodes:	&mut Vec<Node>,
 	fonts:	Arc<FontSet>,
-	style:	Style,
+	style: &Theme,
 	lines:	&[String],
 )
 	-> Outcome<()>
 {
 	// Code is set a touch smaller than the body, as most templates do, so more of a wide line fits the
 	// measure before it overflows.
-	let size	= style.foot_size;
-	let indent	= style.body_size;	// a one-em hang, so the block sits off the left margin
+	let size	= style.furniture.foot_size;
+	let indent	= style.text.body_size;	// a one-em hang, so the block sits off the left margin
 	let sample	= res!(ShapedText::new(fonts.clone(), Role::Mono, Dir::Ltr, size, "0"));
 	let sh		= sample.dims().height;	// a mono digit fixes the height of a blank line
 	let sd		= sample.dims().depth;
@@ -1243,7 +1153,7 @@ fn code_block(
 		let children = vec![Node::Glue(Glue::fixed(indent)), Node::Leaf(Leaf::text(shaped))];
 		nodes.push(Node::HBox(BoxNode::new(children, Dims::new(indent + d.width, h, dep))));
 		if i + 1 < lines.len() {
-			let gap = if style.leading > h + dep { style.leading - h - dep } else { style.line_gap };
+			let gap = if style.text.leading > h + dep { style.text.leading - h - dep } else { style.table.line_gap };
 			nodes.push(Node::Glue(Glue::fixed(gap)));
 		}
 	}
@@ -1276,7 +1186,7 @@ fn indent_item(lines: &mut [Node], marker: Leaf, indent: Sp) {
 /// height noted so the page breaker can reserve it.
 fn build_footnote(
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	number:		u32,
 	note:		&[Segment],
@@ -1293,13 +1203,13 @@ fn build_footnote(
 	// measure reduced by the mark's hang, its first line carries the mark and a gap that together fill the
 	// hang, and every continuation line is shifted right by it, so the note's text block sits proud of its
 	// mark exactly as Typst hangs a footnote.
-	let (pre_shaped, pre_dims)	= res!(superscript(fonts.clone(), Role::Body, style.foot_size, &fmt!("{}", number)));
-	let gap		= Sp(style.foot_size.raw() / 4);
+	let (pre_shaped, pre_dims)	= res!(superscript(fonts.clone(), Role::Body, style.furniture.foot_size, &fmt!("{}", number)));
+	let gap		= Sp(style.furniture.foot_size.raw() / 4);
 	let hang	= pre_dims.width + gap;
 	let inner	= if measure > hang { measure - hang } else { measure };
 
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading, true));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true));
 	indent_item(&mut lines, Leaf::text_dims(pre_shaped, pre_dims), hang);
 
 	let mut height = Sp::ZERO;
@@ -1317,12 +1227,12 @@ fn build_footnote(
 /// reserved page slot or bibliography of its own at this increment.
 fn footnote_pieces(
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	segments:	&[Segment],
 )
 	-> Outcome<Vec<Piece>>
 {
-	let size = style.foot_size;
+	let size = style.furniture.foot_size;
 	let mut pieces = Vec::with_capacity(segments.len());
 	for seg in segments {
 		match seg {
@@ -1341,7 +1251,7 @@ fn footnote_pieces(
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
 			Segment::Math(expr) => {
-				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				let node = res!(math::layout(fonts.clone(), style, expr, false));
 				if let Node::HBox(b) = node {
 					let ascent	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "0")).dims().height;
 					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
@@ -1387,14 +1297,14 @@ pub(crate) fn superscript(
 fn equation(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	expr:		&Atom,
 	number:		Option<u32>,
 )
 	-> Outcome<()>
 {
-	let node = res!(math::layout(fonts.clone(), &style, expr, true));
+	let node = res!(math::layout(fonts.clone(), style, expr, true));
 	let (list, dims) = match node {
 		Node::HBox(b)	=> (b.list, b.dims),
 		_				=> return Err(err!(
@@ -1407,7 +1317,7 @@ fn equation(
 
 	// A body digit fixes the line's minimum height and depth, so the number is never clipped when the
 	// maths sits shallow.
-	let sample	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "0"));
+	let sample	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "0"));
 	let height	= if baseline > sample.dims().height { baseline } else { sample.dims().height };
 	let depth	= if dims.depth > sample.dims().depth { dims.depth } else { sample.dims().depth };
 
@@ -1422,7 +1332,7 @@ fn equation(
 
 	if let Some(num) = number {
 		let label	= fmt!("({})", num);
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &label));
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &label));
 		let nw		= shaped.dims().width;
 		let target	= if measure > nw { measure - nw } else { cursor };
 		if target > cursor {
@@ -1448,7 +1358,7 @@ fn equation(
 fn figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	graphic:	Graphic,
 	caption:	Option<&str>,
@@ -1477,7 +1387,7 @@ fn figure(
 		None	=> fmt!("Figure {}.", number),
 	};
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
-	let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.foot_size, &text));
+	let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.furniture.foot_size, &text));
 	let cd		= shaped.dims();
 	let cpad	= if measure > cd.width { Sp((measure.raw() - cd.width.raw()) / 2) } else { Sp::ZERO };
 	let mut crow:	Vec<Node> = Vec::new();
@@ -1504,7 +1414,7 @@ fn next_number(counters: &mut HashMap<String, u32>, supplement: &str) -> u32 {
 fn table_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
 	caption:	Option<&[Segment]>,
@@ -1529,7 +1439,7 @@ fn table_figure(
 fn image_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	path:		&str,
 	width:		Option<Length>,
@@ -1610,7 +1520,7 @@ fn plain_image(
 fn code_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	figure:		&crate::lang::codefig::CodeFigure,
 	caption:	Option<&[Segment]>,
@@ -1883,7 +1793,7 @@ enum CapTok {
 fn captioned(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	supplement:	&str,
 	number:		u32,
@@ -1891,7 +1801,7 @@ fn captioned(
 )
 	-> Outcome<()>
 {
-	let size	= style.body_size;
+	let size	= style.text.body_size;
 	let space_w	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, " ")).dims().width;
 
 	// The leading "{supplement} {number}: " (or just the number when the caption has no text), then the
@@ -1923,7 +1833,7 @@ fn captioned(
 						vec![Node::Leaf(Leaf::text_dims(shaped, dims))], dims.width, dims.height, dims.depth);
 				},
 				Segment::Math(expr) => {
-					let node = res!(math::layout(fonts.clone(), &style, expr, false));
+					let node = res!(math::layout(fonts.clone(), style, expr, false));
 					if let Node::HBox(b) = node {
 						push_caption_box(&mut toks, &mut pending, b.list, b.dims.width, b.dims.height, b.dims.depth);
 					}
@@ -2042,7 +1952,7 @@ fn push_caption_box(
 /// Sets one centred caption line from its units, with interline leading before every line but the first.
 fn emit_caption_units(
 	nodes:		&mut Vec<Node>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	space_w:	Sp,
 	line:		&[&CapTok],
@@ -2061,7 +1971,7 @@ fn emit_caption_units(
 	}
 	if !*first {
 		let vext	= height + depth;
-		let gap		= if style.leading > vext { style.leading - vext } else { style.line_gap };
+		let gap		= if style.text.leading > vext { style.text.leading - vext } else { style.table.line_gap };
 		nodes.push(Node::Glue(Glue::fixed(gap)));
 	}
 	*first = false;
@@ -2116,7 +2026,7 @@ fn front_matter(
 	fonts:		&Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	fm:			&FrontMatter,
 )
 	-> Outcome<()>
@@ -2294,7 +2204,7 @@ fn fm_title_page(
 	nodes:	&mut Vec<Node>,
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
-	style:	Style,
+	style: &Theme,
 	fm:		&FrontMatter,
 )
 	-> Outcome<()>
@@ -2338,7 +2248,7 @@ fn fm_title_page(
 
 /// Builds the logo line: the raster at `path` centred at a modest width. An SVG or missing file errors,
 /// and the title page omits the logo.
-fn fm_logo_node(_fonts: &Arc<FontSet>, geom: PageGeometry, _style: Style, path: &str) -> Outcome<Node> {
+fn fm_logo_node(_fonts: &Arc<FontSet>, geom: PageGeometry, _style: &Theme, path: &str) -> Outcome<Node> {
 	let img	= res!(crate::image::load(path));
 	let measure	= geom.content_width();
 	let w	= Sp::from_pt(110.0);	// the type scale's logo width, about 110 pt
@@ -2596,14 +2506,14 @@ fn fm_meta_page(
 	nodes:	&mut Vec<Node>,
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
-	style:	Style,
+	style: &Theme,
 	fm:		&FrontMatter,
 )
 	-> Outcome<()>
 {
 	let measure	= geom.content_width();
 	let h		= geom.content_height();
-	let size	= Sp(style.body_size.raw() * 4 / 5);	// the template's 0.8em imprint
+	let size	= Sp(style.text.body_size.raw() * 4 / 5);	// the template's 0.8em imprint
 
 	// Drop to the lower part of the page; the template bottom-aligns, approximated here by a top spacer.
 	nodes.push(fm_spacer(Sp(h.raw() * 48 / 100)));
@@ -2623,7 +2533,7 @@ fn fm_meta_page(
 	let mut first = true;
 	for line in &lines {
 		if !first {
-			nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 		}
 		first = false;
 		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5)));
@@ -2644,7 +2554,7 @@ fn fm_doc_meta_page(
 	nodes:	&mut Vec<Node>,
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
-	style:	Style,
+	style: &Theme,
 	fm:		&FrontMatter,
 )
 	-> Outcome<()>
@@ -2665,10 +2575,10 @@ fn fm_doc_meta_page(
 	// between the four elements approximate the template's `place(bottom, dy: ..)` offsets.
 	let mut foot:	Vec<Node>	= Vec::new();
 	let mut foot_h				= Sp::ZERO;
-	let gap						= Sp(style.body_size.raw() * 3 / 4);
+	let gap						= Sp(style.text.body_size.raw() * 3 / 4);
 
 	if let Some(ack) = &fm.acknowledgement {
-		let size	= Sp(style.body_size.raw() * 85 / 100);
+		let size	= Sp(style.text.body_size.raw() * 85 / 100);
 		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, ack, measure, Sp(size.raw() * 6 / 5)));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
@@ -2676,7 +2586,7 @@ fn fm_doc_meta_page(
 	if let Some(cr) = &fm.copyright {
 		foot.push(Node::Glue(Glue::fixed(gap)));
 		foot_h += gap;
-		let size	= style.body_size;
+		let size	= style.text.body_size;
 		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, cr, measure, Sp(size.raw() * 6 / 5)));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
@@ -2685,7 +2595,7 @@ fn fm_doc_meta_page(
 	{
 		foot.push(Node::Glue(Glue::fixed(gap)));
 		foot_h += gap;
-		let size	= Sp(style.body_size.raw() * 3 / 4);
+		let size	= Sp(style.text.body_size.raw() * 3 / 4);
 		let line	= "This document was created using Austenite (built using Rust).";
 		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5)));
 		for n in &broken { foot_h += node_vext(n); }
@@ -2695,7 +2605,7 @@ fn fm_doc_meta_page(
 		if let Ok(graphic) = image_at_height(fonts, path, 18.0) {
 			let logo = Leaf::graphic(graphic);
 			let lh	 = logo.dims.height + logo.dims.depth;
-			let big	 = Sp(style.body_size.raw() * 3 / 2);	// a little more air above the logo
+			let big	 = Sp(style.text.body_size.raw() * 3 / 2);	// a little more air above the logo
 			foot.push(Node::Glue(Glue::fixed(big)));
 			foot_h += big + lh;
 			foot.push(Node::HBox(BoxNode::new(vec![Node::Leaf(logo)], Dims::new(measure, lh, Sp::ZERO))));
@@ -2856,7 +2766,7 @@ fn fm_dedication_page(
 	nodes:	&mut Vec<Node>,
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
-	style:	Style,
+	style: &Theme,
 	text:	&str,
 )
 	-> Outcome<()>
@@ -2864,7 +2774,7 @@ fn fm_dedication_page(
 	let measure	= geom.content_width();
 	let h		= geom.content_height();
 	nodes.push(fm_spacer(Sp(h.raw() * 40 / 100)));
-	let size	= Sp(style.body_size.raw() * 11 / 10);
+	let size	= Sp(style.text.body_size.raw() * 11 / 10);
 	res!(fm_centred_wrap(nodes, fonts, Role::Italic, size, text, measure, Sp(size.raw() * 6 / 5)));
 	Ok(())
 }
@@ -2875,7 +2785,7 @@ fn fm_about_author_page(
 	fonts:		&Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	title_size:	Sp,
 	bio:		&str,
 )
@@ -2887,7 +2797,7 @@ fn fm_about_author_page(
 	let td = title.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
-	let size	= Sp(style.body_size.raw() * 9 / 10);
+	let size	= Sp(style.text.body_size.raw() * 9 / 10);
 	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5)));
 	nodes.extend(broken);
 	Ok(())
@@ -2912,7 +2822,7 @@ pub fn contents(
 	fonts:		Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	title_size:	Sp,
 	heads:		&[Heading],
 )
@@ -2934,14 +2844,14 @@ pub fn contents(
 
 	// A fixed slot wide enough for a three-digit folio, so a resolved number never overflows its
 	// reservation and every entry keeps a constant height across passes.
-	let slot	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, "000"));
+	let slot	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "000"));
 	let slot_w	= slot.dims().width;
 	// A dot-and-space leader unit, measured once, so a leader is filled with a whole number of dots.
-	let dot		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, ". "));
+	let dot		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, ". "));
 	let dot_w	= dot.dims().width.raw().max(1);
 	// The step a level indents the number column by, and the gap between a number and its title.
-	let step	= Sp(style.body_size.raw() * 3 / 2);
-	let gap		= Sp(style.body_size.raw() * 3 / 5);
+	let step	= Sp(style.text.body_size.raw() * 3 / 2);
+	let gap		= Sp(style.text.body_size.raw() * 3 / 5);
 
 	for (i, h) in heads.iter().enumerate() {
 		// The template sets `outline(depth: 3)`, so the contents stops at level 3 (a `===` subsection,
@@ -2956,27 +2866,27 @@ pub fn contents(
 		let numw	= if h.number.is_empty() {
 			Sp::ZERO
 		} else {
-			let n = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number));
+			let n = res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &h.number));
 			n.dims().width
 		};
 		// The entry's title set from its rich runs, so a maths span or emphasis in a heading renders here
 		// rather than dropping to a gap. The height is the sample's, constant across passes.
-		let (entry, ed)	= res!(inline_segments(&fonts, style, &h.segments, Role::Body, style.body_size));
+		let (entry, ed)	= res!(inline_segments(&fonts, style, &h.segments, Role::Body, style.text.body_size));
 
 		// The leader span from the title's end to the folio slot; a title too wide to leave a one-em
 		// minimum keeps that minimum and runs under its folio -- the over-wide case, left as it falls.
 		let num_col	= if numw.raw() > 0 { numw + gap } else { Sp::ZERO };
 		let taken	= indent + num_col + ed.width + slot_w;
-		let min_lead	= style.body_size;
+		let min_lead	= style.text.body_size;
 		let leader_w	= if measure > taken + min_lead { measure - taken } else { min_lead };
 
 		// Fill the leader with a whole number of dots, padded to the folio slot on the right so the slot's
 		// right edge falls on the measure.
-		let lead_margin	= Sp(style.body_size.raw() / 2);
+		let lead_margin	= Sp(style.text.body_size.raw() / 2);
 		let usable		= (leader_w.raw() - lead_margin.raw()).max(0);
 		let n_dots		= (usable / dot_w).max(0) as usize;
 		let dots		= res!(ShapedText::new(
-			fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &". ".repeat(n_dots)));
+			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &". ".repeat(n_dots)));
 		let dots_w		= dots.dims().width;
 		let trailing	= if leader_w > lead_margin + dots_w { leader_w - lead_margin - dots_w } else { Sp::ZERO };
 
@@ -2991,7 +2901,7 @@ pub fn contents(
 		}
 		if numw.raw() > 0 {
 			children.push(Node::Leaf(Leaf::text(res!(
-				ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &h.number)))));
+				ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &h.number)))));
 			children.push(Node::Glue(Glue::fixed(gap)));
 		}
 		children.extend(entry);
@@ -3008,7 +2918,7 @@ pub fn contents(
 		// Leading between entries, but not after the last.
 		if i + 1 < heads.len() {
 			let vextent	= ed.height + ed.depth;
-			let lead	= if style.leading > vextent { style.leading - vextent } else { Sp::ZERO };
+			let lead	= if style.text.leading > vextent { style.text.leading - vextent } else { Sp::ZERO };
 			nodes.push(Node::Glue(Glue::fixed(lead)));
 		}
 	}
@@ -3024,13 +2934,13 @@ pub fn contents(
 fn reference_block(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	runs:		&[(String, bool)],
 )
 	-> Outcome<()>
 {
-	let hang	= Sp(style.body_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take
+	let hang	= Sp(style.text.body_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take
 	let inner	= if measure > hang { measure - hang } else { measure };
 
 	let mut pieces: Vec<Piece> = Vec::with_capacity(runs.len());
@@ -3039,7 +2949,7 @@ fn reference_block(
 		pieces.push(Piece::Text { text: text.clone(), role });
 	}
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.foot_size, &pieces, inner, style.foot_leading, true));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true));
 
 	// Indent every line but the first by the hang, so the entry hangs under its first line.
 	let mut first = true;
@@ -3101,7 +3011,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 /// with a constant height whatever the runs turn out to be.
 fn inline_segments(
 	fonts:		&Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	segments:	&[Segment],
 	role:		Role,
 	size:		Sp,
@@ -3128,8 +3038,8 @@ fn inline_segments(
 			Segment::Code(t)		=> (t, Role::Mono),
 			Segment::Glossary { display, .. }	=> (display, role),
 			Segment::Math(atom)	=> {
-				let mut hs = style;
-				hs.body_size = size;
+				let mut hs = style.clone();
+				hs.text.body_size = size;
 				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
 					width += b.dims.width;
 					children.extend(b.list);
@@ -3279,7 +3189,7 @@ fn smallcaps_runs(text: &str) -> Vec<(String, bool)> {
 fn subheading_hbox(
 	fonts:		Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
-	style:		Style,
+	style: &Theme,
 	level:		u8,
 	number:		&str,
 	segments:	&[Segment],
@@ -3290,7 +3200,7 @@ fn subheading_hbox(
 	// A documentation tree sets its sub-headings from the template's show rule -- an inline level-1 heading
 	// (a `DocInline` tree) bold small-caps, level 2 bold-italic, level 3 italic, deeper levels upright; a
 	// book takes the display face (or body bold) and small-caps the finer levels.
-	let doc			= matches!(style.heading_style, HeadingStyle::DocBanner | HeadingStyle::DocInline);
+	let doc			= matches!(style.heading.kind, HeadingStyle::DocBanner | HeadingStyle::DocInline);
 	let face		= if doc { doc_head_face(level) } else { head_face(level, display) };
 	let size		= style.heading_size(level);
 	let small_size	= Sp(size.raw() * 3 / 4);	// small caps at 0.75 of the heading size
@@ -3339,8 +3249,8 @@ fn subheading_hbox(
 			Segment::Math(atom)	=> {
 				// The span is set at the heading size and unwrapped, its leaves woven into the line as the
 				// body sets inline maths, so a subscripted variable in a heading draws as real glyphs.
-				let mut hs = style;
-				hs.body_size = size;
+				let mut hs = style.clone();
+				hs.text.body_size = size;
 				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
 					width += b.dims.width;
 					children.extend(b.list);
@@ -3491,7 +3401,7 @@ fn chapter_opener(
 	nodes:		&mut Vec<Node>,
 	fonts:		&Arc<FontSet>,
 	display:	Option<&Arc<Font>>,
-	style:		Style,
+	style: &Theme,
 	geom:		PageGeometry,
 	measure:	Sp,
 	level:		u8,
@@ -3514,10 +3424,10 @@ fn chapter_opener(
 	// about the vertical centre. The label is upper-cased, the template's tracked small caps rendered as
 	// plain caps here (the shaper carries no tracking); the gap is the template's `#v(2em)`, two body em.
 	if level == 0 {
-		let label_size	= Sp::from_pt(style.h1_size.to_pt() * 0.55);	// the template's part-label, ~13/24 of the title
+		let label_size	= Sp::from_pt(style.heading.levels[0].size.to_pt() * 0.55);	// the template's part-label, ~13/24 of the title
 		let lab			= res!(head_shape(fonts, &face, label_size, &part_label.to_uppercase()));
-		let ttl			= res!(head_shape(fonts, &face, style.h1_size, title));
-		let gap			= Sp::from_pt(style.body_size.to_pt() * 2.0);	// #v(2em)
+		let ttl			= res!(head_shape(fonts, &face, style.heading.levels[0].size, title));
+		let gap			= Sp::from_pt(style.text.body_size.to_pt() * 2.0);	// #v(2em)
 		let lab_v		= lab.dims().height + lab.dims().depth;
 		let ttl_v		= ttl.dims().height + ttl.dims().depth;
 		let block_v		= lab_v + gap + ttl_v;
@@ -3536,7 +3446,7 @@ fn chapter_opener(
 
 	// A documentation tree opens a level-1 heading with the template's full-width grey banner bar carrying
 	// the title in small caps, rather than a numbered chapter opener.
-	if level == 1 && style.heading_style == HeadingStyle::DocBanner {
+	if level == 1 && style.heading.kind == HeadingStyle::DocBanner {
 		res!(doc_banner(nodes, fonts, geom, measure, title));
 		return Ok(());
 	}
@@ -3546,17 +3456,17 @@ fn chapter_opener(
 		// number centred on its middle, a gap, a shorter band holding the title on its foot, and a gap down
 		// to the body. Every row is a box, not glue -- a page top discards leading glue, and the opener sits
 		// at the page top -- so the bands hold their heights and the body lands on the grid's foot.
-		let sh		= res!(head_shape(fonts, &face, style.chap_num_size, number));
+		let sh		= res!(head_shape(fonts, &face, style.heading.chap_num_size, number));
 		let d		= sh.dims();
 		let num_v	= d.height + d.depth;
-		let band	= style.chap_grid[0];
+		let band	= style.heading.chap_grid[0];
 		// The number rides the middle of its band (Typst's `center + horizon`): the slack splits above and
 		// below. A band shorter than the number leaves no slack and the number simply fills it.
 		let above	= if band > num_v { Sp((band.raw() - num_v.raw()) / 2) } else { Sp::ZERO };
 		let below	= if band > num_v + above { band - num_v - above } else { Sp::ZERO };
 		nodes.push(vspacer(above));
 
-		let graphic	= res!(coloured_run(&sh, style.chap_num_grey));
+		let graphic	= res!(coloured_run(&sh, style.colours.chap_num_grey));
 		let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
 		let mut row:	Vec<Node> = Vec::new();
 		if pad.raw() > 0 {
@@ -3565,22 +3475,22 @@ fn chapter_opener(
 		row.push(Node::Leaf(Leaf::graphic(graphic)));
 		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, num_v, Sp::ZERO))));
 		nodes.push(vspacer(below));
-		nodes.push(vspacer(style.chap_grid[1]));	// the gap row between number and title
+		nodes.push(vspacer(style.heading.chap_grid[1]));	// the gap row between number and title
 
 		// The title rides the foot of its band (Typst's `left + bottom`): all the slack sits above it.
-		let sh_t	= res!(head_shape(fonts, &face, style.h1_size, title));
+		let sh_t	= res!(head_shape(fonts, &face, style.heading.levels[0].size, title));
 		let dt		= sh_t.dims();
 		let title_v	= dt.height + dt.depth;
-		let band2	= style.chap_grid[2];
+		let band2	= style.heading.chap_grid[2];
 		let top2	= if band2 > title_v { band2 - title_v } else { Sp::ZERO };
 		nodes.push(vspacer(top2));
 		nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh_t))], Dims::new(measure, dt.height, dt.depth))));
-		nodes.push(vspacer(style.chap_grid[3]));	// the gap row down to the body
+		nodes.push(vspacer(style.heading.chap_grid[3]));	// the gap row down to the body
 		return Ok(());
 	}
 
 	// An unnumbered level-1 opener (no grid number): the title set left in the display face, then a gap.
-	let sh	= res!(head_shape(fonts, &face, style.h1_size, title));
+	let sh	= res!(head_shape(fonts, &face, style.heading.levels[0].size, title));
 	let d	= sh.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
@@ -3730,7 +3640,7 @@ fn styled_box(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	blocks:		&[Block],
 	fill:		Rgba,
@@ -3742,7 +3652,7 @@ fn styled_box(
 )
 	-> Outcome<()>
 {
-	let em			= style.body_size;
+	let em			= style.text.body_size;
 	let inset_x		= em;								// the template's `inset.x`, one body em
 	let inset_top	= em;								// the template's `inset.y`, one body em
 	let inset_bot	= Sp::from_pt(em.to_pt() * 1.2);	// the template's `inset.bottom`, 1.2 em
@@ -3794,7 +3704,7 @@ fn box_flow(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	blocks:		&[Block],
 	foot_no:	&mut u32,
@@ -3808,20 +3718,20 @@ fn box_flow(
 	let mut first = true;
 	for block in blocks {
 		if !first {
-			nodes.push(Node::Glue(Glue::fixed(style.para_skip)));
+			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 		}
 		match block {
 			Block::Paragraph { text } => {
 				let pieces = vec![Piece::Text { text: text.clone(), role: Role::Body }];
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
 				nodes.extend(lines);
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
 					fonts.clone(), geom, style, segments, foot_no, ref_no, seen, bib, refs));
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.body_size, &pieces, measure, style.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
 				nodes.extend(lines);
 			},
 			Block::List { ordered, items } => {
@@ -3892,7 +3802,7 @@ pub fn decorate(
 	ledger:			&Ledger,
 	heads:			&[Heading],
 	fonts:			&Arc<FontSet>,
-	style:			Style,
+	style: &Theme,
 	geom:			PageGeometry,
 	book_title:		&str,
 	footer_logo:	Option<&str>,
@@ -3928,7 +3838,7 @@ pub fn decorate(
 		let back_start = ledger.back_matter_start_page;
 		if back_start != 0 && page.number >= back_start {
 			let foot_top	= content_top + geom.content_height() + Sp::from_pt(14.0);
-			let shaped		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &fmt!("{}", folio)));
+			let shaped		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.furniture.folio_size, &fmt!("{}", folio)));
 			let d			= shaped.dims();
 			let x			= centre_x(geom, d.width);
 			page.frame.push(Placed::new(x, foot_top, d, PlacedKind::Text(shaped)));
@@ -3969,7 +3879,7 @@ pub fn decorate(
 
 		if opens || chapter.is_none() {
 			// A chapter-opening page: no running head, a centred folio at the foot.
-			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &num));
+			let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.furniture.folio_size, &num));
 			let d		= shaped.dims();
 			let x		= centre_x(geom, d.width);
 			page.frame.push(Placed::new(x, foot_top, d, PlacedKind::Text(shaped)));
@@ -3979,7 +3889,7 @@ pub fn decorate(
 		// The folio, at the outer margin of the running head. On a recto (odd) page the outer edge is the
 		// block's right; on a verso (even) page it is the block's left, which the mirror shift carries to
 		// the fore-edge.
-		let folio	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.folio_size, &num));
+		let folio	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.furniture.folio_size, &num));
 		let fd		= folio.dims();
 		let folio_x	= if page.number % 2 == 0 {
 			content_left
@@ -3993,13 +3903,13 @@ pub fn decorate(
 		// rather than dropping to a gap. Both italic.
 		if page.number % 2 == 0 {
 			if !book_title.is_empty() {
-				let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.header_size, book_title));
+				let shaped	= res!(ShapedText::new(fonts.clone(), Role::Italic, Dir::Ltr, style.furniture.header_size, book_title));
 				let d		= shaped.dims();
 				let x		= content_left + content_width - d.width;	// verso: title at the inner (spine) edge
 				page.frame.push(Placed::new(x, head_base - d.height, d, PlacedKind::Text(shaped)));
 			}
 		} else if let Some(ch) = chapter {
-			let (rnodes, rd) = res!(inline_segments(fonts, style, &ch.segments, Role::Italic, style.header_size));
+			let (rnodes, rd) = res!(inline_segments(fonts, style, &ch.segments, Role::Italic, style.furniture.header_size));
 			// Recto: title at the inner (spine) edge, its box top a full ascent above the head baseline.
 			place_run(&mut page.frame, &rnodes, content_left, head_base - rd.height);
 		}
@@ -4097,15 +4007,15 @@ mod tests {
 		// count was two, which is the duplicate bar this guards against.
 		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
 		let geom	= PageGeometry::a4();
-		let mut style	= Style::default();
-		style.heading_style = HeadingStyle::DocBanner;
+		let mut style	= Theme::default();
+		style.heading.kind = HeadingStyle::DocBanner;
 		let blocks = vec![
 			Block::Paragraph { text: "Intro before the section.".to_string() },
 			Block::section_banner("assets/svg/pearlite_logo_text_right.svg".to_string()),
 			Block::Heading { level: 1, segments: vec![Segment::text("Pearlite")], label: None },
 			Block::Paragraph { text: "Pearlite is the format.".to_string() },
 		];
-		let (doc, heads) = res!(author(fonts, geom, style, None, &blocks, None, None));
+		let (doc, heads) = res!(author(fonts, geom, &style, None, &blocks, None, None));
 		assert!(heads.iter().any(|h| h.level == 1 && h.title == "Pearlite" && h.banner),
 			"the level-1 heading after a #section-banner carries the banner flag");
 		let forced = doc.nodes.iter()

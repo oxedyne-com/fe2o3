@@ -12,8 +12,8 @@ use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
 		Block,
-		Style,
 	},
+	theme::Theme,
 	driver::{
 		self,
 		Config,
@@ -44,13 +44,13 @@ fn main() -> Outcome<()> {
 
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
-	let style	= Style::default();
+	let style	= Theme::default();
 
 	res!(std::fs::create_dir_all(&out_dir));
 
 	for (i, expr) in exemplars().into_iter().enumerate() {
 		let n = i + 1;
-		res!(render_one(fonts.clone(), geom, style, &expr, &out_dir, n));
+		res!(render_one(fonts.clone(), geom, &style, &expr, &out_dir, n));
 	}
 
 	println!("mathgallery: wrote {} equation PDF(s) to {}/", exemplars().len(), out_dir);
@@ -62,7 +62,7 @@ fn main() -> Outcome<()> {
 fn render_one(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
-	style:		Style,
+	style: &Theme,
 	expr:		&Atom,
 	out_dir:	&str,
 	n:			usize,
@@ -72,7 +72,7 @@ fn render_one(
 	let blocks = vec![Block::equation(expr.clone(), false, None)];
 	let (document, _heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks, None, None));
 
-	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 
 	let pdf = res!(oxedyne_fe2o3_austenite::emit::pdf::render_document(&out.pages));

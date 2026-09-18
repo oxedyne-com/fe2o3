@@ -19,8 +19,8 @@ use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
 		Heading,
-		Style,
 	},
+	theme::Theme,
 	driver::{
 		self,
 		Config,
@@ -311,20 +311,20 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
 		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		(blocks, fonts, PageGeometry::a4(), Style::default(), String::new(), None, None, bib)
+		(blocks, fonts, PageGeometry::a4(), Theme::default(), String::new(), None, None, bib)
 	};
 	mark("parse+lower+fonts", t_parse);
 
 	let t_author			= std::time::Instant::now();
-	let (document, heads)	= res!(doc::author(fonts.clone(), geom, style, heading, &blocks, front.as_ref(), bib.as_ref()));
+	let (document, heads)	= res!(doc::author(fonts.clone(), geom, &style, heading, &blocks, front.as_ref(), bib.as_ref()));
 	mark("author(shape+break)", t_author);
-	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let t_run				= std::time::Instant::now();
 	let mut out				= res!(driver::run(&document, &metrics, Config::default()));
 	mark("driver::run", t_run);
 	let t_decorate			= std::time::Instant::now();
 	let footer_logo			= front.as_ref().and_then(|f| f.footer_logo.as_deref());
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, style, geom, &title, footer_logo));
+	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, &title, footer_logo));
 	mark("decorate", t_decorate);
 
 	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso

@@ -20,7 +20,7 @@
 //! delimiter taller than the largest pre-drawn variant is not yet assembled from repeating pieces; big
 //! operators, matrices and a maths parser are later work. See the crate's phase notes.
 
-use crate::doc::Style;
+use crate::theme::Theme;
 use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
@@ -283,11 +283,11 @@ impl Level {
 /// The type size at a level: the body size at text, and the two smaller sizes from the maths font's
 /// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. Latin Modern's are 70 and 50, the
 /// plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a MATH table.
-fn size_for(style: &Style, level: Level) -> Sp {
-	let body = style.body_size.raw();
+fn size_for(style: &Theme, level: Level) -> Sp {
+	let body = style.text.body_size.raw();
 	let (s_pct, ss_pct) = script_percents();
 	match level {
-		Level::Text			=> style.body_size,
+		Level::Text			=> style.text.body_size,
 		Level::Script		=> Sp(body * s_pct / 100),
 		Level::ScriptScript	=> Sp(body * ss_pct / 100),
 	}
@@ -348,7 +348,7 @@ struct MBox {
 /// rectangle.
 pub fn layout(
 	fonts:		Arc<FontSet>,
-	style:		&Style,
+	style: &Theme,
 	expr:		&Atom,
 	display:	bool,
 )
@@ -362,7 +362,7 @@ pub fn layout(
 	let base = if display {
 		m.height
 	} else {
-		res!(ascent(&fonts, style.body_size))
+		res!(ascent(&fonts, style.text.body_size))
 	};
 
 	let (nodes, dims) = emit(m, base);
@@ -382,7 +382,7 @@ fn ascent(fonts: &Arc<FontSet>, size: Sp) -> Outcome<Sp> {
 /// a display equation, which stacks its fractions, from inline maths, which slashes them so a running
 /// line never opens above a fraction.
 fn build(
-	style:		&Style,
+	style: &Theme,
 	expr:		&Atom,
 	level:		Level,
 	display:	bool,
@@ -413,7 +413,7 @@ fn build(
 /// operator or a delimiter is the font's upright glyph. The run's ascent and descent stand in for the
 /// atom's height and depth.
 fn build_sym(
-	style:		&Style,
+	style: &Theme,
 	text:		&str,
 	class:		Class,
 	level:		Level,
@@ -494,7 +494,7 @@ fn build_bigop(text: &str, size: Sp) -> Outcome<Option<MBox>> {
 /// differential. Unlike a single-letter ordinary, it is never remapped to the maths italic. It presents
 /// as ordinary so it abuts what follows without an operator's spacing.
 fn build_text(
-	style:	&Style,
+	style: &Theme,
 	text:	&str,
 	level:	Level,
 )
@@ -512,7 +512,7 @@ fn build_text(
 /// A fixed horizontal space: a zero-ink box the requested fraction of an em wide. It presents as
 /// ordinary, so it neither adds nor sheds the automatic inter-atom spacing around it -- its width is the
 /// whole of the gap.
-fn build_space(style: &Style, milli_em: i32, level: Level) -> MBox {
+fn build_space(style: &Theme, milli_em: i32, level: Level) -> MBox {
 	let size	= size_for(style, level);
 	let width	= Sp(size.raw() * milli_em / 1000);
 	MBox { pieces: Vec::new(), width, height: Sp::ZERO, depth: Sp::ZERO, class: Class::Ord }
@@ -549,7 +549,7 @@ fn math_italic(c: char) -> Option<char> {
 /// Concatenates a row's atoms left to right, opening a class-driven space before each atom but the
 /// first. The row presents as ordinary to whatever encloses it.
 fn build_row(
-	style:		&Style,
+	style: &Theme,
 	items:		&[Atom],
 	level:		Level,
 	display:	bool,
@@ -619,7 +619,7 @@ fn mu_between(left: Class, right: Class) -> i32 {
 /// axis all come from the font's MATH constants -- the display-style variants of the fraction metrics --
 /// falling back to the plain-TeX guesses only when the font has no table.
 fn build_frac(
-	style:		&Style,
+	style: &Theme,
 	num:		&Atom,
 	den:		&Atom,
 	level:		Level,
@@ -668,7 +668,7 @@ fn build_frac(
 		},
 		None => (
 			Sp(size.raw() / 4),		// axis
-			style.rule_thin,		// bar thickness
+			style.table.rule_thin,		// bar thickness
 			Sp(size.raw() / 2),		// numerator shift up
 			Sp(size.raw() / 2),		// denominator shift down
 			Sp(size.raw() / 6),		// numerator gap
@@ -716,7 +716,7 @@ fn build_frac(
 /// superscript's foot and the subscript's top is no less than `subSuperscriptGapMin`. Without a MATH
 /// table the plain-TeX fractions of the em stand in.
 fn build_script(
-	style:		&Style,
+	style: &Theme,
 	base:		&Atom,
 	sup:		Option<&Atom>,
 	sub:		Option<&Atom>,
@@ -842,7 +842,7 @@ fn axis_height(table: &Option<Arc<MathTable>>, size: Sp, size_pt: f32) -> Sp {
 /// the running size (and grows to its display variant through [`build`]); each limit is set one size
 /// level down and centred on the operator, a small gap clear of it.
 fn build_limits(
-	style:	&Style,
+	style: &Theme,
 	base:	&Atom,
 	sup:	Option<&Atom>,
 	sub:	Option<&Atom>,
@@ -895,7 +895,7 @@ fn build_limits(
 /// and centred over the base, its foot a hair above the base's ink; an overline or underline is a bar
 /// the width of the base, a small gap clear of it. The base keeps its size and style.
 fn build_accent(
-	style:		&Style,
+	style: &Theme,
 	base:		&Atom,
 	mark:		&Accent,
 	level:		Level,
@@ -910,7 +910,7 @@ fn build_accent(
 
 	let rule = match &table {
 		Some(t)	=> Sp::from_pt(t.scaled(t.constants().fraction_rule_thickness, size_pt) as f64),
-		None	=> style.rule_thin,
+		None	=> style.table.rule_thin,
 	};
 	let gap		= Sp(size.raw() / 12);		// clearance between the base and its accent or rule
 
@@ -961,7 +961,7 @@ fn build_accent(
 /// then wrap the grid in delimiters grown to it. An alignment block carries none and butts its columns
 /// at the alignment point, so `a &= b` reads as one line.
 fn build_matrix(
-	style:		&Style,
+	style: &Theme,
 	rows:		&[Vec<Atom>],
 	left:		Option<char>,
 	right:		Option<char>,
@@ -1099,7 +1099,7 @@ fn build_matrix(
 /// MATH constants when it has them; the radical sign is the tallest-fitting vertical variant the MATH
 /// table offers, or the plain sign when the font carries no table.
 fn build_sqrt(
-	style:		&Style,
+	style: &Theme,
 	radicand:	&Atom,
 	level:		Level,
 	display:	bool,
@@ -1120,7 +1120,7 @@ fn build_sqrt(
 				Sp::from_pt(t.scaled(c.radical_extra_ascender, size_pt) as f64),
 			)
 		},
-		None => (Sp(size.raw() / 18), style.rule_thin, Sp(size.raw() / 18)),
+		None => (Sp(size.raw() / 18), style.table.rule_thin, Sp(size.raw() / 18)),
 	};
 
 	let target	= r.height + r.depth + gap + rule;	// the radical sign must at least span this
@@ -1183,7 +1183,7 @@ fn delim_target(content: Sp) -> Sp {
 /// allowance ([`delim_target`]); each is the tightest-fitting vertical variant the MATH table offers, or
 /// the plain delimiter when the font has no table (in which case it does not grow).
 fn build_fence(
-	style:		&Style,
+	style: &Theme,
 	left:		char,
 	body:		&Atom,
 	right:		char,
@@ -1199,7 +1199,7 @@ fn build_fence(
 /// A binomial coefficient: the two terms stacked with no rule between them, wrapped in parentheses grown
 /// to the stack. Typst stacks a binom even inline, so the fraction is built bar-less and then fenced.
 fn build_binom(
-	style:		&Style,
+	style: &Theme,
 	top:		&Atom,
 	bottom:		&Atom,
 	level:		Level,
@@ -1215,7 +1215,7 @@ fn build_binom(
 /// maths axis. Shared by [`build_fence`], whose body comes from an [`Atom`], and [`build_binom`], whose
 /// body is the bar-less stacked fraction.
 fn fence_around(
-	style:		&Style,
+	style: &Theme,
 	left:		char,
 	right:		char,
 	b:			MBox,

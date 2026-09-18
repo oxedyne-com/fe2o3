@@ -18,9 +18,9 @@
 
 use crate::doc::{
 	Segment,
-	Style,
 	superscript,
 };
+use crate::theme::Theme;
 use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
@@ -164,7 +164,7 @@ struct CellLine {
 /// use; a table whose natural columns are narrower than the measure is set narrower, flush left.
 pub fn lower(
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
 	refs:		&HashMap<String, String>,
@@ -174,14 +174,14 @@ pub fn lower(
 	// A `text(size: Npt)` wrapper sets the whole table at its reduced size (the books' claim tables set at
 	// 7 pt), and an explicit `inset:` overrides the cell padding on both axes; the interline gap within a
 	// cell scales with the text so a small table sets tight. The rules and header wash keep the style's.
-	let size		= table.text_size.unwrap_or(style.body_size);
-	let scale		= size.raw() as f64 / style.body_size.raw().max(1) as f64;
-	let pad_x		= table.inset.unwrap_or(style.cell_pad_x);
-	let pad_y		= table.inset.unwrap_or(style.cell_pad_y);
+	let size		= table.text_size.unwrap_or(style.text.body_size);
+	let scale		= size.raw() as f64 / style.text.body_size.raw().max(1) as f64;
+	let pad_x		= table.inset.unwrap_or(style.table.cell_pad_x);
+	let pad_y		= table.inset.unwrap_or(style.table.cell_pad_y);
 	let line_gap	= if table.text_size.is_some() {
-		Sp::from_pt(style.line_gap.to_pt() * scale)
+		Sp::from_pt(style.table.line_gap.to_pt() * scale)
 	} else {
-		style.line_gap
+		style.table.line_gap
 	};
 	let cell_leading	= Sp::from_pt(size.to_pt() * 1.2);	// dropped by `break_cell`, but a sane interline base
 	let rows	= &table.rows;
@@ -195,9 +195,9 @@ pub fn lower(
 
 	// The vertical rules: a heavier pen frames the grid, a lighter one divides the columns. Their
 	// widths take real horizontal space, so they are budgeted before the columns are sized.
-	let mut tv = vec![style.rule_thin; ncols + 1];
-	tv[0]		= style.rule_thick;
-	tv[ncols]	= style.rule_thick;
+	let mut tv = vec![style.table.rule_thin; ncols + 1];
+	tv[0]		= style.table.rule_thick;
+	tv[ncols]	= style.table.rule_thick;
 	let vrule_total: i32 = tv.iter().map(|s| s.raw()).sum();
 
 	// The text width left for the columns after the padding either side of every cell and the rules
@@ -265,12 +265,12 @@ pub fn lower(
 	let mut total_h		= Sp::ZERO;
 
 	// The top frame.
-	push_hrule(&mut children, &mut total_h, table_width, style.rule_thick);
+	push_hrule(&mut children, &mut total_h, table_width, style.table.rule_thick);
 
 	for r in 0..rows.len() {
 		// A header row carries a grey wash behind every one of its bands, drawn before the rules and text
 		// so they sit over it; a body row has none.
-		let fill = if table.header && r == 0 { Some(style.header_fill) } else { None };
+		let fill = if table.header && r == 0 { Some(style.colours.header_fill) } else { None };
 
 		// The top padding of the row: a rules-only band, so the first line's baseline clears the rule.
 		let empty:	Vec<Option<&CellLine>>	= vec![None; ncols];
@@ -312,11 +312,11 @@ pub fn lower(
 
 		// The rule under the row: heavy beneath a header and at the very foot, light between body rows.
 		let th = if table.header && r == 0 {
-			style.rule_thick
+			style.table.rule_thick
 		} else if r + 1 == rows.len() {
-			style.rule_thick
+			style.table.rule_thick
 		} else {
-			style.rule_thin
+			style.table.rule_thin
 		};
 		push_hrule(&mut children, &mut total_h, table_width, th);
 	}
@@ -370,7 +370,7 @@ fn base_role(table: &Table, r: usize) -> Role {
 /// than the widest) gives an empty piece list, so the column simply carries nothing there.
 fn build_grid(
 	fonts:	Arc<FontSet>,
-	style:	Style,
+	style: &Theme,
 	table:	&Table,
 	ncols:	usize,
 	refs:	&HashMap<String, String>,
@@ -401,14 +401,14 @@ fn build_grid(
 /// footnote or a cross-reference in a cell -- rare -- is not set here; a citation falls back to its keys.
 fn cell_pieces(
 	fonts:		Arc<FontSet>,
-	style:		Style,
+	style: &Theme,
 	segments:	&[Segment],
 	base:		Role,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<Vec<Piece>>
 {
-	let size = style.body_size;
+	let size = style.text.body_size;
 	let mut pieces = Vec::with_capacity(segments.len());
 	for seg in segments {
 		match seg {
@@ -437,7 +437,7 @@ fn cell_pieces(
 			Segment::Math(expr) => {
 				// The inline box is flattened to leaves and glue by the maths layout; its children weave into
 				// the line as real glyphs, its baseline seated on the text baseline.
-				let node = res!(math::layout(fonts.clone(), &style, expr, false));
+				let node = res!(math::layout(fonts.clone(), style, expr, false));
 				if let Node::HBox(b) = node {
 					let ascent	= res!(ShapedText::new(
 						fonts.clone(), base, Dir::Ltr, size, "0")).dims().height;

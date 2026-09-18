@@ -8,8 +8,8 @@
 use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
-		Style,
 	},
+	theme::Theme,
 	driver::{
 		self,
 		Config,
@@ -85,9 +85,9 @@ $ binom(n, k) + ceil(x) + floor(y) $ <eq_binom_ceil_floor>
 	let blocks	= res!(lang::to_blocks(src));
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
-	let style	= Style::default();
-	let (document, _heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks, None, None));
-	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let style	= Theme::default();
+	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
+	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 	if out.pages.is_empty() {
 		return Err(err!("The display-equation regression doc rendered no pages."; Invalid, Missing));
@@ -115,9 +115,9 @@ pub fn pdf_stays_compact_and_extractable(work_dir: &Path) -> Outcome<()> {
 	let blocks	= res!(lang::to_blocks(&src));
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
-	let style	= Style::default();
-	let (document, _heads) = res!(doc::author(fonts.clone(), geom, style, None, &blocks, None, None));
-	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.body_size);
+	let style	= Theme::default();
+	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
+	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 	let pdf		= res!(emit::pdf::render_document(&out.pages));
 

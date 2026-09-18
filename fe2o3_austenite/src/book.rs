@@ -28,8 +28,8 @@ use crate::doc::{
 	FrontMatter,
 	HeadingStyle,
 	Segment,
-	Style,
 };
+use crate::theme::Theme;
 use crate::fonts;
 use crate::ir::Sp;
 use crate::lang::parse::flatten_markup;
@@ -71,7 +71,7 @@ const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
 /// and type style read from its config, and the faces loaded by path from its assets.
 pub struct BookSpec {
 	pub geom:	PageGeometry,
-	pub style:	Style,
+	pub style:	Theme,
 	pub fonts:	Arc<FontSet>,
 	pub blocks:	Vec<Block>,
 	pub title:	String,	// the book title, for the verso running head
@@ -213,7 +213,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// argument: an explicit `true`/`false` decides, and its `auto` default turns the chapter banners off
 	// only for the Hematite guide, whose sections carry logo banners instead.
 	let want_banners = tri_bool(root_src, "chapter-banners").unwrap_or(title != "Hematite");
-	style.heading_style = if want_banners {
+	style.heading.kind = if want_banners {
 		HeadingStyle::DocBanner
 	} else {
 		HeadingStyle::DocInline
@@ -1430,38 +1430,29 @@ fn read_config(src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	Ok((geom, RawStyle { body_pt, leading_em, par_skip_em, indent_em, chap_num_pt, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt }))
 }
 
-// The Libertinus line box Typst sets, as a fraction of the em, measured from the oracle. Typst's config
-// leading is the gap ADDED between line boxes; the baseline-to-baseline skip is that gap plus the box.
-// The box is not the face's nominal ascender + descender (fe2o3_font reports ~1.14 em for Libertinus,
-// which sets ~30% too loose); Typst's rendered Libertinus line box measures ~0.66 em -- for an 11 pt
-// body at 0.78 em leading that gives (0.66 + 0.78) x 11 = 15.84 pt baseline-to-baseline, matching the
-// Lucronics oracle measured at 300 DPI (66 px). An earlier 0.682 set the pitch 0.24 pt too loose,
-// losing ~1 line per page and driving the whole-book pagination drift. The driver takes a baseline
-// distance, so the style carries box + leading, and the flow then lands on Typst's grid.
-const LIBERTINUS_LINE_BOX_EM: f64 = 0.660;
+/// Turns the raw config values into a [`Theme`]. The leading is the one derived value: the config sets
+/// a gap in ems, and the driver wants a baseline-to-baseline distance, so the Libertinus line box (the
+/// theme's [`ThemeCalibration::line_box_em`](crate::theme::ThemeCalibration), which documents the
+/// calibration) is added to it -- what puts the line grid on the oracle's.
+fn build_style(raw: &RawStyle) -> Theme {
+	let mut style = Theme::default();
+	let baseline = (style.calibration.line_box_em + raw.leading_em) * raw.body_pt;
 
-/// Turns the raw config values into a [`Style`]. The leading is the one derived value: the config sets
-/// a gap in ems, and the driver wants a baseline-to-baseline distance, so the Libertinus line box (see
-/// [`LIBERTINUS_LINE_BOX_EM`]) is added to it -- the calibration that puts the line grid on the oracle's.
-fn build_style(raw: &RawStyle) -> Style {
-	let baseline = (LIBERTINUS_LINE_BOX_EM + raw.leading_em) * raw.body_pt;
-
-	let mut style = Style::default();
-	style.body_size	= Sp::from_pt(raw.body_pt);
-	style.leading	= Sp::from_pt(baseline);
-	style.para_skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
-	style.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
-	style.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
-	style.chap_grid		= [
+	style.text.body_size	= Sp::from_pt(raw.body_pt);
+	style.text.leading	= Sp::from_pt(baseline);
+	style.par.skip	= Sp::from_pt(raw.par_skip_em * raw.body_pt);
+	style.par.indent	= Sp::from_pt(raw.indent_em * raw.body_pt);
+	style.heading.chap_num_size	= Sp::from_pt(raw.chap_num_pt);
+	style.heading.chap_grid		= [
 		Sp::from_pt(raw.chap_grid[0]),
 		Sp::from_pt(raw.chap_grid[1]),
 		Sp::from_pt(raw.chap_grid[2]),
 		Sp::from_pt(raw.chap_grid[3]),
 	];
-	style.h1_size	= Sp::from_pt(raw.h1_pt);
-	style.h2_size	= Sp::from_pt(raw.h2_pt);
-	style.h3_size	= Sp::from_pt(raw.h3_pt);
-	style.h4_size	= Sp::from_pt(raw.h4_pt);
+	style.heading.levels[0].size	= Sp::from_pt(raw.h1_pt);
+	style.heading.levels[1].size	= Sp::from_pt(raw.h2_pt);
+	style.heading.levels[2].size	= Sp::from_pt(raw.h3_pt);
+	style.heading.levels[3].size	= Sp::from_pt(raw.h4_pt);
 	style
 }
 
