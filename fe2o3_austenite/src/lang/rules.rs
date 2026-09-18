@@ -189,6 +189,23 @@ pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) 
 	rules
 }
 
+/// Does this already-left-trimmed line declare a per-element `#show <selector>: <transform>` rule the rule
+/// engine collects and applies (or refuses in its own diagnostic)? True only when a selector between
+/// `#show ` and a top-level colon parses to a known element kind -- the same recognition
+/// [`collect_from_source`] uses -- so the reader can stop tallying such a line as a skipped construct and
+/// leave it to the engine. A `#show:` doc application (no selector) and a `#show ...` whose selector no
+/// element answers to are not rule lines.
+pub fn is_rule_line(trimmed: &str) -> bool {
+	let after = match trimmed.strip_prefix("#show ") {
+		Some(a)	=> a,
+		None	=> return false,
+	};
+	match split_at_top_level_colon(after) {
+		Some((sel_text, _))	=> parse_selector(sel_text.trim()).is_some(),
+		None				=> false,
+	}
+}
+
 /// The `(selector, transform)` split of a `#show <selector>: <transform>` body at the first colon that is
 /// not inside a `(...)`/`[...]`/`"..."` -- so the colon inside `where(level: 1)` is passed over and the
 /// real separator found. `None` when there is no top-level colon.

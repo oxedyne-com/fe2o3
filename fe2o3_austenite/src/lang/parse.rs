@@ -1720,11 +1720,15 @@ fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
 		return Some(CaptureKind::Image);
 	}
 	// A declarative styling construct the reader lowers onto the theme rather than refusing: a
-	// `#show: <template>.with(...)` whole-document application, or a top-level `#set` on an element the
-	// theme carries a field for. An introspective `#show ...: it => { ... }` carries no `.with(` and a
-	// `#set rect(...)` names no theme element, so both return `None` here and fall through to
-	// [`code_skip`], staying a visible refusal.
-	if is_show_doc_with(trimmed) || is_lowerable_set(trimmed) {
+	// `#show: <template>.with(...)` whole-document application, a top-level `#set` on an element the theme
+	// carries a field for, or a per-element `#show <selector>: <transform>` rule the engine collects and
+	// applies. Capturing the rule line here stops the reader tallying it as a skipped construct while the
+	// rule engine separately reads and applies (or refuses) it -- otherwise an authored selector rule is
+	// double-reported, skipped by the reader AND applied by the engine. A `#set rect(...)` names no theme
+	// element and a `#show <selector>` whose selector no element answers to are not caught, so both fall
+	// through to [`code_skip`], staying a visible refusal; an engine-refused rule (an introspective
+	// `it => { ... }`) surfaces through the rule engine's own diagnostic, not the reader's skip tally.
+	if is_show_doc_with(trimmed) || is_lowerable_set(trimmed) || crate::lang::rules::is_rule_line(trimmed) {
 		return Some(CaptureKind::DeclStyle);
 	}
 	let_array_name(trimmed).map(CaptureKind::Let)
@@ -2902,20 +2906,36 @@ mod tests {
 	#[test]
 	fn skip_summary_reports_skipped_constructs() {
 		install_test_terms();	// so `#g[iniverse]` resolves and adds no term-dict miss to the tally
-		// `#set rect` names no theme element and `#show heading: it => it` is introspective, so both stay
-		// refused (a lowerable `#set page`/`#show: doc.with` would be captured, not tallied -- see
-		// `lowerable_set_and_doc_with_are_captured_not_refused`).
+		// `#import` and `#set rect` (which names no theme element) stay reader refusals. A per-element
+		// `#show <selector>: ...` line is a rule the engine collects and applies (or refuses in its own
+		// diagnostic), so the reader captures it as a declarative-styling construct and no longer tallies it
+		// -- see `show_selector_rule_is_not_a_reader_skip` and the L0 double-report fix.
 		let src = "#import \"x.typ\": *\n#set rect(stroke: 1pt)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
 		let (_, skips) = document_with_refusals(src).expect("parse");
-		assert_eq!(skips.total(), 3);
+		assert_eq!(skips.total(), 2, "the selector show rule is captured for the engine, not tallied: {:?}", skips.sites());
 		let report = skips.report().expect("a report");
-		assert!(report.starts_with("skipped 3 unsupported constructs:"), "report was {:?}", report);
-		for name in ["#import", "#set", "#show"] {
+		assert!(report.starts_with("skipped 2 unsupported constructs:"), "report was {:?}", report);
+		for name in ["#import", "#set"] {
 			assert!(report.contains(name), "{} missing from {:?}", name, report);
 		}
+		assert!(!report.contains("heading"),
+			"a selector show rule must not appear in the reader's skip tally (it is the engine's to apply/refuse): {:?}", report);
 		// A source the reader sets whole has nothing to report.
 		let (_, clean) = document_with_refusals("Just prose with #g[iniverse].\n").expect("parse");
 		assert!(clean.is_empty() && clean.report().is_none());
+	}
+
+	/// A `#show <selector>: <transform>` line is a per-element rule the engine collects and applies, so the
+	/// reader captures it as a declarative-styling construct rather than tallying it as a skipped one -- the
+	/// L0 double-report fix. Both the lowerable set-fields form and the refused introspective form are
+	/// captured; the refused one surfaces through the rule engine's own diagnostic, not the reader's tally.
+	#[test]
+	fn show_selector_rule_is_not_a_reader_skip() {
+		let (_, lowerable) = document_with_refusals("#show par: set text(size: 9pt)\n\nBody.\n").expect("parse");
+		assert_eq!(lowerable.total(), 0, "a lowerable selector rule is not a reader skip: {:?}", lowerable.sites());
+		let (_, introspective) = document_with_refusals("#show heading: it => it\n\nBody.\n").expect("parse");
+		assert_eq!(introspective.total(), 0,
+			"a refused selector rule surfaces via the engine, not the reader tally: {:?}", introspective.sites());
 	}
 
 	/// A `#show: <template>.with(...)` application and a lowerable top-level `#set` are captured rather
@@ -2928,10 +2948,12 @@ mod tests {
 		let (_, skips) = document_with_refusals(lowered).expect("parse");
 		assert_eq!(skips.total(), 0, "lowerable declarations should not be refused: {:?}", skips.sites());
 
-		// The unsupported and introspective forms still refuse.
+		// The unsupported `#set` still refuses; a `#show <selector>:` rule is now the engine's to apply or
+		// refuse, so it is captured here rather than tallied by the reader (see
+		// `show_selector_rule_is_not_a_reader_skip`).
 		let refused = "#set rect(stroke: 1pt)\n\n#show heading: it => it\n";
 		let (_, skips) = document_with_refusals(refused).expect("parse");
-		assert_eq!(skips.total(), 2, "unsupported/introspective forms should still refuse: {:?}", skips.sites());
+		assert_eq!(skips.total(), 1, "the unsupported #set still refuses; the show rule is captured for the engine: {:?}", skips.sites());
 	}
 
 	/// A line-leading `#context[...]` -- Typst's self-observation entry point -- is refused as exactly
