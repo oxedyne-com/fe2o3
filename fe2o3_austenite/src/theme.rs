@@ -124,6 +124,7 @@ pub struct ThemeText {
 	pub ligatures:	bool,	// reserved
 	pub hyphenate:	bool,	// reserved
 	pub justify:	bool,	// reserved
+	pub fill:		Rgba,	// prose text colour from `#set text(fill:)`, default black
 	pub faces:		FaceSet,	// reserved: role -> family name, resolved to a loaded face at render
 }
 
@@ -136,6 +137,7 @@ impl Default for ThemeText {
 			ligatures:	true,
 			hyphenate:	true,
 			justify:	true,
+			fill:		Rgba::BLACK,
 			faces:		FaceSet::default(),
 		}
 	}
@@ -500,6 +502,7 @@ pub struct ThemeTextPatch {
 	pub ligatures:	Option<bool>,
 	pub hyphenate:	Option<bool>,
 	pub justify:	Option<bool>,
+	pub fill:		Option<Rgba>,
 	pub faces:		FaceSetPatch,
 }
 
@@ -680,6 +683,7 @@ impl ThemeTextPatch {
 		patch_merge!(self.ligatures, t.ligatures);
 		patch_merge!(self.hyphenate, t.hyphenate);
 		patch_merge!(self.justify, t.justify);
+		patch_merge!(self.fill, t.fill);
 		self.faces.apply(&mut t.faces);
 	}
 }
@@ -974,6 +978,7 @@ impl ThemeText {
 			"ligatures"	=> dat!(self.ligatures),
 			"hyphenate"	=> dat!(self.hyphenate),
 			"justify"	=> dat!(self.justify),
+			"fill"		=> rgba_dat(self.fill),
 			"faces"		=> res!(self.faces.to_dat()),
 		})
 	}
@@ -985,6 +990,7 @@ impl ThemeText {
 			ligatures:	try_extract_dat!(res!(map_must(&mut d, "ligatures")), Bool),
 			hyphenate:	try_extract_dat!(res!(map_must(&mut d, "hyphenate")), Bool),
 			justify:	try_extract_dat!(res!(map_must(&mut d, "justify")), Bool),
+			fill:		res!(rgba_from(res!(map_must(&mut d, "fill")))),
 			faces:		res!(FaceSet::from_dat(res!(map_must(&mut d, "faces")))),
 		})
 	}

@@ -162,7 +162,81 @@ fn draw_text(
 		let placed = res!(path.transform(&t));
 		out.push_str(&fmt!(
 			"  <path d=\"{}\" {}/>\n",
-			write_path_data(&placed), presentation(Some(Rgba::BLACK), None)));
+			write_path_data(&placed), presentation(Some(shaped.colour()), None)));
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::ir::{
+		LeafKind,
+		Node,
+	};
+	use crate::linebreak::break_paragraph;
+	use crate::page::{
+		Frame,
+		PageGeometry,
+		Placed,
+	};
+	use oxedyne_fe2o3_font::{
+		face::Role,
+		shape::Dir,
+	};
+	use std::sync::Arc;
+
+	/// A body paragraph set with a fill draws its glyphs in that colour, and a default paragraph stays
+	/// black. The paragraph is broken by [`break_paragraph`] with the fill threaded from the theme, then
+	/// its text leaves are placed and rendered, so the test exercises the whole thread from the line
+	/// breaker to the SVG paint. Black is asserted free of red -- the byte-identity the all-black corpus
+	/// rests on, since a black run's paint is exactly what it was before text carried a colour.
+	#[test]
+	fn a_paragraph_renders_in_its_set_fill() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let measure	= Sp::from_pt(400.0);
+		let size	= Sp::from_pt(11.0);
+		let leading	= Sp::from_pt(13.2);
+
+		// A run set red renders red glyphs.
+		let rnodes	= res!(break_paragraph(
+			fonts.clone(), Role::Body, Dir::Ltr, size, "Red prose here", measure, leading, false, Rgba::opaque(255, 0, 0)));
+		let rsvg	= res!(render_text_leaves(geom, &rnodes));
+		assert!(rsvg.contains("fill=\"#ff0000\""), "a paragraph set red must draw red glyphs, found: {}", rsvg);
+
+		// The default fill (black) renders black glyphs and never red.
+		let bnodes	= res!(break_paragraph(
+			fonts.clone(), Role::Body, Dir::Ltr, size, "Black prose here", measure, leading, false, Rgba::BLACK));
+		let bsvg	= res!(render_text_leaves(geom, &bnodes));
+		assert!(bsvg.contains("fill=\"#000000\""), "a default paragraph must draw black glyphs");
+		assert!(!bsvg.contains("fill=\"#ff0000\""), "a default paragraph must never draw red");
+		Ok(())
+	}
+
+	/// Places every text leaf of a broken paragraph into a frame and renders it to SVG, so a test can see
+	/// the fill the line breaker set without standing up the whole driver.
+	fn render_text_leaves(geom: PageGeometry, nodes: &[Node]) -> Outcome<String> {
+		let mut frame	= Frame::new();
+		let mut x		= Sp::from_pt(60.0);
+		let y			= Sp::from_pt(80.0);
+		for node in nodes {
+			place_text_leaves(node, &mut frame, &mut x, y);
+		}
+		render_page(&Page::new(1, geom, frame))
+	}
+
+	// Walks a node tree, placing each text leaf at the running pen so its glyphs reach the SVG.
+	fn place_text_leaves(node: &Node, frame: &mut Frame, x: &mut Sp, y: Sp) {
+		match node {
+			Node::Leaf(leaf) => {
+				if let LeafKind::Text(shaped) = &leaf.kind {
+					frame.push(Placed::new(*x, y, leaf.dims, PlacedKind::Text(shaped.clone())));
+					*x = Sp(x.raw() + leaf.dims.width.raw());
+				}
+			},
+			Node::HBox(b) | Node::VBox(b)	=> for child in &b.list { place_text_leaves(child, frame, x, y); },
+			_								=> {},
+		}
+	}
 }

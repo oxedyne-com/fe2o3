@@ -133,6 +133,18 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 				patch.text.hyphenate = Some(b);
 				used.push("hyphenate");
 			}
+			// The prose fill colour: `rgb("#…")`, `luma(n)`, a named colour, each optionally `.lighten`/
+			// `.darken`. Read with the same grammar as a rule's fill ([`crate::lang::rules::parse_colour`])
+			// so the two readers cannot drift. A palette reference (`colours.blue`) resolves to nothing here
+			// and is left unmarked, so a `#set text(fill: colours.x)` is refused rather than set wrongly.
+			// This lowers a body `#set text(fill:)` only; a heading-selector fill stays refused on the rule
+			// engine's own path.
+			if let Some(expr) = named_value(args, "fill") {
+				if let Some(rgba) = crate::lang::rules::parse_colour(&expr) {
+					patch.text.fill = Some(rgba);
+					used.push("fill");
+				}
+			}
 		},
 		"par" => {
 			if let Some(pt) = named_length_pt(args, "leading") {
@@ -436,6 +448,37 @@ fn named_string(args: &str, key: &str) -> Option<String> {
 	None
 }
 
+/// The raw value expression a `key:` names, read to the next top-level comma -- one not nested inside a
+/// `(...)`, `[...]`, `{...}` or `"..."` -- and trimmed. Unlike [`named_string`] it keeps the value's own
+/// delimiters, so a call like `rgb("#ff0000")`, an argument list `rgb(0, 0, 0)` or a modifier chain
+/// `red.darken(20%)` arrives whole for a colour reader. `None` when the key is absent or the value empty.
+fn named_value(args: &str, key: &str) -> Option<String> {
+	let start				= key_value_start(args, key)?;
+	let chars: Vec<char>	= args[start..].chars().collect();
+	let mut depth			= 0i32;
+	let mut in_str			= false;
+	let mut esc				= false;
+	let mut end				= chars.len();
+	for (i, c) in chars.iter().enumerate() {
+		if in_str {
+			if esc				{ esc = false; }
+			else if *c == '\\'	{ esc = true; }
+			else if *c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> in_str = true,
+			'(' | '[' | '{'		=> depth += 1,
+			')' | ']' | '}'		=> depth -= 1,
+			',' if depth == 0	=> { end = i; break; },
+			_					=> {},
+		}
+	}
+	let v: String = chars[..end].iter().collect();
+	let v = v.trim().to_string();
+	if v.is_empty() { None } else { Some(v) }
+}
+
 /// The boolean a `key: true`/`key: false` names. `None` when absent or not a boolean literal.
 fn named_bool(args: &str, key: &str) -> Option<bool> {
 	let start	= key_value_start(args, key)?;
@@ -529,6 +572,35 @@ mod tests {
 		assert_eq!(theme.text.faces.body, Some("Libertinus Serif".to_string()));
 		// The leading was not named, so it kept its default.
 		assert_eq!(theme.text.leading, Theme::default().text.leading);
+	}
+
+	/// `#set text(fill: rgb("#ff0000"))` lowers the prose fill, consuming the argument so it is not refused;
+	/// the default theme carries black. A palette reference the reader cannot resolve without a palette
+	/// (`fill: colours.blue`) leaves the field unset and is flagged for refusal rather than guessed at.
+	#[test]
+	fn set_text_lowers_fill_colour() {
+		use oxedyne_fe2o3_graphics::colour::Rgba;
+
+		// The default is black, so an unset document renders exactly as before text carried a colour.
+		assert_eq!(Theme::default().text.fill, Rgba::BLACK);
+
+		let patch = lower_set("text", "fill: rgb(\"#ff0000\")");
+		assert_eq!(patch.text.fill, Some(Rgba::opaque(255, 0, 0)));
+		let mut theme = Theme::default();
+		theme.apply(&patch);
+		assert_eq!(theme.text.fill, Rgba::opaque(255, 0, 0));
+		// The fill was consumed, so a `#set text(fill: ...)` is not spuriously refused.
+		assert_eq!(set_refusal_reason("text", "fill: rgb(\"#ff0000\")"), None);
+
+		// A `luma`, a named colour, and a lightened named colour all read, so the grammar matches a rule's.
+		assert_eq!(lower_set("text", "fill: luma(0)").text.fill, Some(Rgba::opaque(0, 0, 0)));
+		assert_eq!(lower_set("text", "fill: red").text.fill, Some(Rgba::opaque(255, 65, 54)));
+		assert!(lower_set("text", "fill: black.lighten(50%)").text.fill.is_some());
+
+		// A palette reference resolves to nothing here, so the field is left unset and the set is refused
+		// rather than set wrongly.
+		assert_eq!(lower_set("text", "fill: colours.blue").text.fill, None);
+		assert!(set_refusal_reason("text", "fill: colours.blue").is_some());
 	}
 
 	/// `set heading(numbering: "1.1")` lowers to a patch that applies the pattern across every level.

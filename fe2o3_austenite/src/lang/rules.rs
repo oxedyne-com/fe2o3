@@ -974,7 +974,10 @@ fn named_value(args: &str, key: &str) -> Option<String> {
 /// palette: `luma(<n>)`, `rgb("#rrggbb")`, `rgb(<r>, <g>, <b>)` and a small set of named colours, each
 /// optionally lightened or darkened (`.lighten(<p>%)` / `.darken(<p>%)`). A palette reference (`colours.blue`)
 /// resolves to no value here and the caller refuses it rather than guessing.
-fn parse_colour(expr: &str) -> Option<Rgba> {
+///
+/// Shared with the `#set text(fill:)` lowering ([`crate::lang::set`]), which reads a body-text colour
+/// with the same grammar, so the two readers cannot drift.
+pub(crate) fn parse_colour(expr: &str) -> Option<Rgba> {
 	let e = expr.trim();
 	// The base runs up to the first `.lighten`/`.darken` modifier (a `luma(...)`/`rgb(...)` call keeps its
 	// own parentheses); the rest is the modifier chain.

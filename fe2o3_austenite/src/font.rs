@@ -21,6 +21,7 @@ use oxedyne_fe2o3_font::{
 		Run,
 	},
 };
+use oxedyne_fe2o3_graphics::colour::Rgba;
 use oxedyne_fe2o3_graphics::path::Path;
 use oxedyne_fe2o3_graphics::transform::Transform;
 
@@ -81,6 +82,7 @@ pub struct ShapedText {
 	run:	Run,
 	dims:	Dims,
 	text:	String,	// the shaped source string, so a glyph's cluster recovers its source scalar(s)
+	colour:	Rgba,	// the fill the glyphs draw in; black unless a `#set text(fill:)` sets it
 }
 
 impl ShapedText {
@@ -132,8 +134,18 @@ impl ShapedText {
 			Sp::from_pt(vm.ascent as f64),		// height above the baseline
 			Sp::from_pt(vm.descent as f64),		// depth below it
 		);
-		Ok(Self { src, size, run, dims, text: text.to_string() })
+		Ok(Self { src, size, run, dims, text: text.to_string(), colour: Rgba::BLACK })
 	}
+
+	/// The same run set to draw in `colour`. Consumes and returns `self` so a caller can colour a shaped
+	/// box inline without a second binding -- the line breaker paints every prose leaf this way.
+	pub fn with_colour(mut self, colour: Rgba) -> Self {
+		self.colour = colour;
+		self
+	}
+
+	/// The fill the glyphs draw in, black unless a `#set text(fill:)` set it.
+	pub fn colour(&self) -> Rgba { self.colour }
 
 	pub fn dims(&self) -> Dims { self.dims }
 	pub fn run(&self) -> &Run { &self.run }

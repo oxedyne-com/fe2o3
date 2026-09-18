@@ -30,6 +30,7 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 	shape::Dir,
 };
+use oxedyne_fe2o3_graphics::colour::Rgba;
 use oxedyne_fe2o3_text::unicode::linebreak::{
 	self,
 	Break,
@@ -58,6 +59,7 @@ pub fn break_paragraph(
 	measure:	Sp,
 	leading:	Sp,
 	hyphenate:	bool,
+	fill:		Rgba,	// the colour every prose leaf of this paragraph draws in, from `theme.text.fill`
 )
 	-> Outcome<Vec<Node>>
 {
@@ -66,7 +68,7 @@ pub fn break_paragraph(
 		return Ok(Vec::new());
 	}
 	let breaks	= optimal_breaks(&items, measure, true);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading, true));
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, true, fill));
 	Ok(lines)
 }
 
@@ -106,6 +108,7 @@ pub fn break_paragraph_pieces(
 	leading:	Sp,
 	justify:	bool,
 	hyphenate:	bool,
+	fill:		Rgba,	// the colour every prose text leaf draws in; marks and maths keep their own black
 )
 	-> Outcome<Vec<Node>>
 {
@@ -141,7 +144,7 @@ pub fn break_paragraph_pieces(
 		return Ok(Vec::new());
 	}
 	let breaks	= optimal_breaks(&items, measure, justify);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading, justify));
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, justify, fill));
 	Ok(lines)
 }
 
@@ -541,6 +544,7 @@ fn set_lines(
 	measure:	Sp,
 	leading:	Sp,
 	justify:	bool,
+	fill:		Rgba,	// the fill every text box (and a taken hyphen) is coloured with as it becomes a leaf
 )
 	-> Outcome<Vec<Node>>
 {
@@ -579,7 +583,9 @@ fn set_lines(
 		for item in items.iter().take(hi).skip(lower) {
 			match &item.kind {
 				Kind::Boxed(shaped) => {
-					let leaf = Leaf::text(shaped.clone());
+					// Every prose box takes the paragraph's fill as it becomes a drawn leaf; black leaves the
+					// glyph emitters' bytes exactly as before.
+					let leaf = Leaf::text(shaped.clone().with_colour(fill));
 					if leaf.dims.height > height { height = leaf.dims.height; }
 					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 					children.push(Node::Leaf(leaf));
@@ -623,9 +629,9 @@ fn set_lines(
 			}
 		}
 
-		// A taken discretionary draws its hyphen as the line's last box.
+		// A taken discretionary draws its hyphen as the line's last box, in the paragraph's own fill.
 		if let Some(h) = &items[hi].hyphen {
-			let leaf = Leaf::text(h.clone());
+			let leaf = Leaf::text(h.clone().with_colour(fill));
 			if leaf.dims.height > height { height = leaf.dims.height; }
 			if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 			children.push(Node::Leaf(leaf));

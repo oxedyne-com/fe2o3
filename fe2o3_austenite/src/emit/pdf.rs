@@ -226,7 +226,7 @@ fn draw_text(
 		};
 		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame. The writer
 		// flips the outline back to y up within the page's y-flip, so the glyph reads upright.
-		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, Rgba::BLACK, text);
+		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, shaped.colour(), text);
 	}
 	Ok(())
 }

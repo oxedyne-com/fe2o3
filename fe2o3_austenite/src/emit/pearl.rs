@@ -305,7 +305,7 @@ impl PearlBuilder {
 						});
 						glyphs.push(listdat![dat!(key), dat!(glyph.x), dat!(glyph.y)]);
 					}
-					leaves.push(listdat![
+					let mut leaf = vec![
 						dat!("text"),
 						res!(placed.x.to_dat()),
 						res!(placed.y.to_dat()),
@@ -313,7 +313,14 @@ impl PearlBuilder {
 						res!(placed.dims.height.to_dat()),
 						res!(placed.dims.depth.to_dat()),
 						Dat::List(glyphs),
-					]);
+					];
+					// The fill rides as an optional trailing element, written only when the run is not black.
+					// A black run adds nothing, so an all-black document's bytes are exactly what they were
+					// before text carried a colour; the reader defaults a missing element to black.
+					if shaped.colour() != Rgba::BLACK {
+						leaf.push(rgba_to_dat(shaped.colour()));
+					}
+					leaves.push(Dat::List(leaf));
 				},
 				PlacedKind::Rule => {
 					leaves.push(box_leaf("rule", placed.x, placed.y, placed.dims)?);
@@ -539,6 +546,12 @@ impl PearlDoc {
 					let height	= sp_at(&items, 4)?;
 					let base_x	= x.to_pt() as f32;
 					let base_y	= (y + height).to_pt() as f32;
+					// The fill is an optional trailing element; a leaf without one is black, the form every
+					// pre-colour text leaf took, so an all-black document reads back byte-identical.
+					let colour	= match items.get(7) {
+						Some(d)	=> res!(rgba_from_dat(d)),
+						None	=> Rgba::BLACK,
+					};
 					let run		= try_extract_dat!(res!(items.get(6).ok_or_else(|| err!(
 						"A text leaf is missing its glyph list."; Input, Invalid))).clone(), List);
 					for g in &run {
@@ -560,7 +573,7 @@ impl PearlDoc {
 						let placed = res!(path.transform(&t));
 						out.push_str(&fmt!(
 							"  <path d=\"{}\" {}/>\n",
-							write_path_data(&placed), presentation(Some(Rgba::BLACK), None)));
+							write_path_data(&placed), presentation(Some(colour), None)));
 					}
 				},
 				"rule" | "reserved" => {
