@@ -1863,10 +1863,16 @@ fn dispatch_capture(
 		},
 		CaptureKind::DeclStyle => {
 			// A declarative styling construct -- a `#show: <template>.with(...)` application or a lowerable
-			// top-level `#set`. The reader gathers it whole so it is neither refused nor leaked into the
-			// prose; lowering its arguments onto the theme is the book assembler's job (see
-			// [`crate::lang::set`] and [`crate::book`]), which reads the same source with the theme in hand.
-			// Nothing is emitted into the item stream, and nothing is recorded as a refusal.
+			// top-level `#set`. The reader gathers it whole so it is neither leaked into the prose nor
+			// blindly refused; lowering its arguments onto the theme is the book assembler's job (see
+			// [`crate::lang::set`] and [`crate::book`]), which reads the same source with the theme in hand,
+			// so nothing is emitted into the item stream here. A `#set` that would lower to nothing -- one
+			// applying no argument, or naming an unrecognised or unconvertible one -- is recorded as a
+			// refusal (H2), so it is visible rather than a silent no-op; a `#set` that fully lowers, and a
+			// `#show: doc.with(...)`, record nothing.
+			if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
+				skips.record(&name, Span::new(cap.start, cap.start));
+			}
 		},
 	}
 }
@@ -2616,6 +2622,20 @@ mod tests {
 		let (plain, _) = res!(document_with_refusals("#columns(2)[\nPlain body.\n]\n"));
 		assert!(!plain.iter().any(|it| matches!(it, Item::ScopePush(_) | Item::ScopePop)),
 			"a columns body with no #set must not be wrapped in a scope");
+		Ok(())
+	}
+
+	/// H2: a lowerable `#set` that lowers to nothing (an unrecognised argument) is recorded as a visible
+	/// refusal named for the set, rather than silently dropped, while one that fully lowers records none.
+	#[test]
+	fn unconsumed_set_is_recorded_as_a_refusal() -> Outcome<()> {
+		let (_items, skips) = res!(document_with_refusals("#set text(lang: \"de\")\n\nBody.\n"));
+		assert!(skips.entries().iter().any(|(name, _)| name == "#set text"),
+			"an unconsumed #set must be recorded as a refusal, got: {:?}", skips.entries());
+
+		let (_items2, skips2) = res!(document_with_refusals("#set text(size: 12pt)\n\nBody.\n"));
+		assert!(!skips2.entries().iter().any(|(name, _)| name == "#set text"),
+			"a fully-lowered #set must not be recorded as a refusal, got: {:?}", skips2.entries());
 		Ok(())
 	}
 

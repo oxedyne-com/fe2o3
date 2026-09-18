@@ -97,33 +97,44 @@ pub fn lower_set(target: &str, args: &str) -> ThemePatch {
 	patch
 }
 
-fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) {
+fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'static str> {
+	// The argument keys this set actually applied. A key present in the source but absent here was either
+	// unrecognised for the target or did not convert (an `em` length, a bare `none`); the refusal check
+	// ([`set_refusal_reason`]) compares this against the keys the source named.
+	let mut used: Vec<&'static str> = Vec::new();
 	match target {
 		"text" => {
 			if let Some(pt) = named_length_pt(args, "size") {
 				patch.text.body_size = Some(Sp::from_pt(pt));
+				used.push("size");
 			}
 			if let Some(font) = named_string(args, "font") {
 				if !font.is_empty() {
 					patch.text.faces.body = Some(Some(font));
+					used.push("font");
 				}
 			}
 			if let Some(b) = named_bool(args, "hyphenate") {
 				patch.text.hyphenate = Some(b);
+				used.push("hyphenate");
 			}
 		},
 		"par" => {
 			if let Some(pt) = named_length_pt(args, "leading") {
 				patch.text.leading = Some(Sp::from_pt(pt));
+				used.push("leading");
 			}
 			if let Some(pt) = named_length_pt(args, "spacing") {
 				patch.par.skip = Some(Sp::from_pt(pt));
+				used.push("spacing");
 			}
 			if let Some(pt) = named_length_pt(args, "first-line-indent") {
 				patch.par.indent = Some(Sp::from_pt(pt));
+				used.push("first-line-indent");
 			}
 			if let Some(b) = named_bool(args, "justify") {
 				patch.text.justify = Some(b);
+				used.push("justify");
 			}
 		},
 		"heading" => {
@@ -133,30 +144,37 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) {
 				for level in &mut patch.heading.levels {
 					level.numbering = Some(pat.clone());
 				}
+				used.push("numbering");
 			}
 		},
 		"list" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
 				patch.list.item_skip = Some(Sp::from_pt(pt));
+				used.push("spacing");
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {
 				patch.list.marker_gap = Some(Sp::from_pt(pt));
+				used.push("indent");
 			}
 		},
 		"enum" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
 				patch.enumeration.item_skip = Some(Sp::from_pt(pt));
+				used.push("spacing");
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {
 				patch.enumeration.marker_gap = Some(Sp::from_pt(pt));
+				used.push("indent");
 			}
 			if let Some(pattern) = named_string(args, "numbering") {
 				patch.enumeration.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
+				used.push("numbering");
 			}
 		},
 		"math.equation" => {
 			if let Some(pattern) = named_string(args, "numbering") {
 				patch.equation.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
+				used.push("numbering");
 			}
 		},
 		"page" => {
@@ -164,13 +182,98 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) {
 			// splits front/body/back. Only the fields a `set page` names are written.
 			if let Some(pt) = named_length_mm_or_pt(args, "width") {
 				patch.page.body.width = Some(Some(pt));
+				used.push("width");
 			}
 			if let Some(pt) = named_length_mm_or_pt(args, "height") {
 				patch.page.body.height = Some(Some(pt));
+				used.push("height");
 			}
 		},
 		_ => {},
 	}
+	used
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ REFUSING A #set THAT LOWERED TO NOTHING (H2)                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The top-level argument keys `args` names, in source order: an identifier at depth zero immediately
+/// before a `:`. A key nested inside a `(...)`, `[...]` or `"..."` is not top-level, so `header: [x: y]`
+/// names only `header`. Used to tell which of a `#set`'s arguments the lowering left unapplied.
+fn arg_keys(args: &str) -> Vec<String> {
+	let chars:	Vec<char>			= args.chars().collect();
+	let mut keys					= Vec::new();
+	let mut depth					= 0i32;
+	let mut in_str					= false;
+	let mut esc						= false;
+	// The start of the current top-level token, or `None` once its `:` has been passed, so only the first
+	// `:` of a `key: value` names a key and a `:` inside the value is ignored.
+	let mut token_start:	Option<usize>	= Some(0);
+	let mut i						= 0usize;
+	while i < chars.len() {
+		let c = chars[i];
+		if in_str {
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			i += 1;
+			continue;
+		}
+		match c {
+			'"'					=> in_str = true,
+			'(' | '[' | '{'		=> depth += 1,
+			')' | ']' | '}'		=> depth -= 1,
+			',' if depth == 0	=> token_start = Some(i + 1),
+			':' if depth == 0	=> {
+				if let Some(start) = token_start.take() {
+					let key: String = chars[start..i].iter().collect();
+					let key = key.trim().to_string();
+					if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
+						keys.push(key);
+					}
+				}
+			},
+			_					=> {},
+		}
+		i += 1;
+	}
+	keys
+}
+
+/// Why a lowerable `#set <target>(...)` should be refused rather than pass silently: it applied none of
+/// its arguments, or named one the lowering does not recognise or could not convert (an `em` length with
+/// no context, a `#set text(lang: ...)`, a `heading(numbering: none)`). `None` when every argument the
+/// source named was applied. Only a lowerable target is judged here; a `#set` on any other target is
+/// refused by the reader's own skip path.
+fn set_refusal_reason(target: &str, args: &str) -> Option<String> {
+	if !LOWERABLE_SET_TARGETS.iter().any(|t| *t == target) {
+		return None;
+	}
+	let present			= arg_keys(args);
+	let mut patch		= ThemePatch::default();
+	let used			= lower_set_into(target, args, &mut patch);
+	if present.is_empty() {
+		return Some(fmt!("#set {} applied no argument", target));
+	}
+	let leftover: Vec<String> = present.into_iter()
+		.filter(|k| !used.iter().any(|u| *u == k.as_str()))
+		.collect();
+	if leftover.is_empty() {
+		None
+	} else {
+		Some(fmt!("#set {} left unapplied: {}", target, leftover.join(", ")))
+	}
+}
+
+/// If a captured declarative-styling construct is a `#set` on a theme element that lowered to nothing --
+/// applying no argument, or hitting an unrecognised or unconvertible one -- the construct name to record
+/// as a refusal, so a `#set` that silently did nothing becomes a visible refusal (H2). `None` for a `#set`
+/// that fully lowered, and for a `#show: <t>.with(...)` (whose non-theme arguments are the book's front
+/// matter, not a no-op). The reader calls this as it dispatches a captured `DeclStyle` construct.
+pub fn declstyle_refusal(buf: &str) -> Option<String> {
+	let (target, args) = top_level_sets(buf).into_iter().next()?;
+	set_refusal_reason(&target, &args).map(|_| fmt!("#set {}", target))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -443,5 +546,38 @@ mod tests {
 	fn balanced_parens_spans_lines_and_skips_strings() {
 		let s = "(\n  a: 1,\n  b: \"a)b\",\n  c: (1, 2),\n)tail";
 		assert_eq!(balanced_parens(s), Some("\n  a: 1,\n  b: \"a)b\",\n  c: (1, 2),\n".to_string()));
+	}
+
+	/// The top-level argument keys are read at depth zero, so a nested `key:` inside a `[...]` value is not
+	/// mistaken for one of the set's own arguments.
+	#[test]
+	fn arg_keys_reads_top_level_keys_only() {
+		assert_eq!(arg_keys("size: 12pt, font: \"A\""), vec!["size".to_string(), "font".to_string()]);
+		assert_eq!(arg_keys("header: [page: 1]"), vec!["header".to_string()]);
+		assert_eq!(arg_keys(""), Vec::<String>::new());
+	}
+
+	/// H2: a lowerable `#set` that applies none of its arguments -- an unknown key, an unconvertible `em`
+	/// length, or a bare `none` -- is flagged for refusal; one that fully lowers is not; and a partially
+	/// applied set is flagged for the argument it dropped.
+	#[test]
+	fn unconsumed_set_is_flagged_for_refusal() {
+		// Fully applied: no refusal.
+		assert_eq!(set_refusal_reason("text", "size: 12pt"), None);
+		assert_eq!(set_refusal_reason("par", "leading: 14pt, first-line-indent: 12pt"), None);
+		// An unrecognised argument key.
+		assert!(set_refusal_reason("text", "lang: \"de\"").is_some());
+		// A recognised key whose value does not convert (an `em` needs a context this lowering has not).
+		assert!(set_refusal_reason("text", "size: 1em").is_some());
+		// A bare `none` is not a string the numbering reader accepts, so nothing is applied.
+		assert!(set_refusal_reason("heading", "numbering: none").is_some());
+		// A partially-applied set is still flagged, for the argument it dropped.
+		assert!(set_refusal_reason("text", "size: 12pt, weight: 700").is_some());
+
+		// declstyle_refusal drives it off a captured construct buffer, naming the set, and never flags a
+		// `#show: doc.with(...)`, whose non-theme arguments are front matter rather than a no-op.
+		assert_eq!(declstyle_refusal("#set text(size: 12pt)\n"), None);
+		assert_eq!(declstyle_refusal("#set text(lang: \"de\")\n"), Some("#set text".to_string()));
+		assert_eq!(declstyle_refusal("#show: doc.with(title: [X])\n"), None);
 	}
 }
