@@ -146,11 +146,20 @@ fn patch_face_names(patch: &crate::theme::ThemePatch, out: &mut Vec<String>) {
 	}
 }
 
-/// Records a note for each root heading level that names a face and asks for a weight or slant the book
-/// ships no file for -- so a bold or italic heading falling back to Regular is visible rather than silent.
-/// A level whose face has no file at all is not noted here: that is the ordinary role fall-back, not a
-/// missing variant.
-fn note_missing_face_variants(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
+/// Records a note for each heading level that names a face and asks for a weight or slant the book ships
+/// no file for -- so a bold or italic heading falling back to Regular is visible rather than silent. Checks
+/// the root theme's own levels, then descends every scoped or box subtree, folding its patch onto the theme
+/// in force at that point (mirroring the merge [`Theme::apply`] performs) so a rule- or chapter-scoped face
+/// is checked with the same weight/italic the renderer would set, not only the root's own. A level whose
+/// face has no file at all is not noted here: that is the ordinary role fall-back, not a missing variant.
+pub fn note_missing_face_variants(theme: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
+	note_missing_variants_for_levels(theme, faces, skips);
+	note_missing_face_variants_in(theme, blocks, faces, skips);
+}
+
+/// The per-level check [`note_missing_face_variants`] runs at the root and, folded onto a scope's merged
+/// theme, at every scoped or box subtree.
+fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
 	for (i, l) in theme.heading.levels.iter().enumerate() {
 		let name = match l.face.as_deref().or(theme.heading.face.as_deref()) {
 			Some(n)	=> n,
@@ -175,16 +184,41 @@ fn note_missing_face_variants(theme: &Theme, faces: &FaceResolver, skips: &mut l
 	}
 }
 
-/// Builds a face resolver for a lone chapter rooted at `root_dir`, loading each heading face the `theme`
-/// names from the tree's `assets/fonts` (one level up from the root, beside a shared template). A lone
-/// file with no such directory, or naming only its body family, yields an empty resolver, so its headings
-/// set in the body role as before.
-pub fn face_resolver(root_dir: &Path, theme: &Theme) -> FaceResolver {
+/// Descends every [`Block::Scoped`]/[`Block::Box`] subtree, folding its patch onto `parent` (the theme in
+/// force at that point) before checking the merged levels and recursing, so a nested scope's own patch
+/// folds onto its immediate parent's, not the document root's.
+fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
+	for b in blocks {
+		match b {
+			Block::Scoped { patch, blocks }	=> {
+				let mut scoped = parent.clone();
+				scoped.apply(patch);
+				note_missing_variants_for_levels(&scoped, faces, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+			},
+			Block::Box { patch, blocks }		=> {
+				let mut scoped = parent.clone();
+				scoped.apply(patch);
+				note_missing_variants_for_levels(&scoped, faces, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+			},
+			_							=> {},
+		}
+	}
+}
+
+/// Builds a face resolver for a lone chapter rooted at `root_dir`, loading every heading face the `theme`
+/// and `blocks` name -- the root theme's own, and every name a scoped or box subtree's patch introduces --
+/// from the tree's `assets/fonts` (one level up from the root, beside a shared template). This mirrors the
+/// whole-book path's [`all_face_names`] union rather than the root theme alone, so a rule- or chapter-scoped
+/// face resolves here too and not only when a whole book assembles it. A lone file with no such directory,
+/// or naming only its body family, yields an empty resolver, so its headings set in the body role as before.
+pub fn face_resolver(root_dir: &Path, theme: &Theme, blocks: &[Block]) -> FaceResolver {
 	let assets_fonts = match root_dir.parent() {
 		Some(d)	=> d.join("assets").join("fonts"),
 		None	=> root_dir.join("assets").join("fonts"),
 	};
-	FaceResolver::load(&assets_fonts, &heading_face_names(theme))
+	FaceResolver::load(&assets_fonts, &all_face_names(theme, blocks))
 }
 
 /// Assembles the document rooted at `root_path` into a [`BookSpec`], recognising both root idioms the
@@ -268,7 +302,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
 	// no file for.
 	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
-	note_missing_face_variants(&style, &faces, &mut skips);
+	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks);
 	let title		= content_field(root_src, "title").unwrap_or_default();
@@ -354,7 +388,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
 	// file is noted rather than silently set in Regular.
 	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
-	note_missing_face_variants(&style, &faces, &mut skips);
+	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks);
@@ -2235,6 +2269,93 @@ mod tests {
 			Block::Table(_)	=> Ok(()),
 			other			=> Err(err!("a #print-glossary inside a scope must be filled, found {:?}", other; Test, Bug)),
 		}
+	}
+
+	/// `face_resolver` (the lone-file path's resolver builder) must resolve a face named only inside the
+	/// file's own block tree -- by a rule or a `#styled-box`'s scope -- not only one the root theme names
+	/// itself. Before this, it loaded from [`heading_face_names`] alone, so a rule-named face never resolved
+	/// on the lone-file path even though the whole-book path (via [`all_face_names`]) already handled it.
+	#[test]
+	fn test_face_resolver_reads_a_block_scoped_face_name_13() -> Outcome<()> {
+		let base = std::env::temp_dir().join(fmt!("austenite-facer-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		let fonts_dir = base.join("assets").join("fonts");
+		res!(std::fs::create_dir_all(&fonts_dir));
+		let src_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf");
+		res!(std::fs::copy(&src_font, fonts_dir.join("LibertinusSerif-Regular.otf")));
+
+		// The root theme names no display face at all; only a scoped patch -- as a rule or a `#styled-box`
+		// would build -- names one, so `heading_face_names(&theme)` alone would find nothing.
+		let theme = Theme::default();
+		assert!(heading_face_names(&theme).is_empty(), "the root theme must name no face for this to test the block path");
+		let blocks = vec![
+			Block::Scoped {
+				patch: crate::theme::ThemePatch {
+					heading: crate::theme::ThemeHeadingPatch {
+						face: Some(Some("LibertinusSerif".to_string())),
+						..Default::default()
+					},
+					..Default::default()
+				},
+				blocks: vec![],
+			},
+		];
+		// `root_dir`'s parent is `base`, matching a lone chapter's own directory beside `base/assets/fonts`.
+		let root_dir = base.join("chapter");
+		let faces = face_resolver(&root_dir, &theme, &blocks);
+
+		let _ = std::fs::remove_dir_all(&base);
+		assert!(faces.resolves("LibertinusSerif"),
+			"a face named only by a scoped patch in the block tree must still resolve on the lone-file path");
+		Ok(())
+	}
+
+	/// `note_missing_face_variants` must also flag a scoped or box subtree's own heading levels, folding its
+	/// patch onto the theme in force at that point -- not only the document root's levels. A rule or a
+	/// `#styled-box` that sets a bold heading in a face the tree ships only Regular for must be noted, the
+	/// same as a root-level heading would be.
+	#[test]
+	fn test_note_missing_face_variants_descends_scoped_patches_14() -> Outcome<()> {
+		let base = std::env::temp_dir().join(fmt!("austenite-missvar-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		res!(std::fs::create_dir_all(&base));
+		// Only a Regular file for "TestFace": `has_variant` for bold must come back false.
+		let src_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf");
+		res!(std::fs::copy(&src_font, base.join("TestFace-Regular.otf")));
+		let faces = FaceResolver::load(&base, &["TestFace".to_string()]);
+		let _ = std::fs::remove_dir_all(&base);
+		assert!(faces.resolves("TestFace"), "the Regular file must load");
+		assert!(!faces.has_variant("TestFace", true, false), "no Bold file was shipped, so bold must not be an exact variant");
+
+		// The root theme names no face at all, so the root-level pass records nothing; only the scoped
+		// patch's level-1 override names "TestFace" in bold.
+		let theme = Theme::default();
+		let blocks = vec![
+			Block::Scoped {
+				patch: crate::theme::ThemePatch {
+					heading: crate::theme::ThemeHeadingPatch {
+						levels: vec![
+							crate::theme::ThemeHeadingLevelPatch {
+								face:	Some(Some("TestFace".to_string())),
+								weight:	Some(Some(700)),
+								..Default::default()
+							},
+						],
+						..Default::default()
+					},
+					..Default::default()
+				},
+				blocks: vec![],
+			},
+		];
+		let mut skips = lang::Refusals::default();
+		note_missing_face_variants(&theme, &blocks, &faces, &mut skips);
+		assert_eq!(skips.total(), 1, "the scoped bold heading in a Regular-only face must be noted exactly once");
+		assert!(skips.sites()[0].name.contains("TestFace") && skips.sites()[0].name.contains("bold"),
+			"the note must name the face and the missing slant, found {:?}", skips.sites()[0].name);
+		Ok(())
 	}
 }
 

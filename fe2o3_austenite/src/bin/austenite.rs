@@ -323,12 +323,15 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		let rules = lang::rules::rule_set_for(&style, &src, &mut refusals);
 		// A lone file sets on A4 (its geometry below), so the placement width a template resolves against is A4's.
 		lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
-		// A lone file may name a heading font in its own `#show: doc.with(...)`; resolve it against the
-		// tree's assets the same way a whole doc does, so a lone chapter's heading face reaches the page.
+		// A lone file may name a heading font in its own `#show: doc.with(...)`, or a rule/scope inside its
+		// own block tree may name one; resolve against the union of both against the tree's assets, the same
+		// way a whole book or doc does, so a lone chapter's heading face reaches the page whichever source
+		// names it. A heading asking for a weight/slant the tree ships no file for is noted, as for a book.
 		let faces = match std::path::Path::new(source).parent() {
-			Some(dir)	=> book::face_resolver(dir, &style),
+			Some(dir)	=> book::face_resolver(dir, &style, &blocks),
 			None		=> oxedyne_fe2o3_austenite::fonts::FaceResolver::default(),
 		};
+		book::note_missing_face_variants(&style, &blocks, &faces, &mut refusals);
 		(blocks, fonts, PageGeometry::a4(), style, String::new(), faces, None, bib)
 	};
 	mark("parse+lower+fonts", t_parse);
