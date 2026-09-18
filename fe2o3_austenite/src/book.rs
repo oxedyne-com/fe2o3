@@ -153,7 +153,11 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	let heading		= fonts::font_from_file(&radley_path).ok();
 
 	let (geom, raw) = res!(read_config(&config_src));
-	let style		= build_style(&raw);
+	let mut style	= build_style(&raw);
+	// The root's own declarative styling -- its `#show: doc.with(...)` application and any lowerable
+	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
+	// by `read_config` above; this reads only the root's own top-level declarations.
+	lang::set::lower_root_declarations(root_src, &mut style);
 	let (mut blocks, skips)	= res!(assemble(root_src, root_dir, root_path));
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks);
@@ -206,6 +210,9 @@ fn ai_declaration_mark(slug: &str) -> Option<(String, String)> {
 fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
 	let (geom, raw)	= res!(read_doc_config(root_dir, root_src));
 	let mut style	= build_style(&raw);
+	// The doc root's own `#show: doc.with(...)` application (and any lowerable top-level `#set`) lowers
+	// onto the theme; its per-format type scale is read from the config by `read_doc_config` above.
+	lang::set::lower_root_declarations(root_src, &mut style);
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	// A doc tree sets `numbering: none`; its top-level headings open with the template's grey banner bar
 	// unless the tree draws its own per-section `#section-banner` logo bars, in which case each level-1

@@ -1684,6 +1684,7 @@ enum CaptureKind {
 	Let(String),	// a `#let name = (...)` data array bound to this name
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
+	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -1718,7 +1719,48 @@ fn capture_opener(trimmed: &str) -> Option<CaptureKind> {
 	if trimmed.starts_with("#padded-image(") || trimmed.starts_with("#image(") {
 		return Some(CaptureKind::Image);
 	}
+	// A declarative styling construct the reader lowers onto the theme rather than refusing: a
+	// `#show: <template>.with(...)` whole-document application, or a top-level `#set` on an element the
+	// theme carries a field for. An introspective `#show ...: it => { ... }` carries no `.with(` and a
+	// `#set rect(...)` names no theme element, so both return `None` here and fall through to
+	// [`code_skip`], staying a visible refusal.
+	if is_show_doc_with(trimmed) || is_lowerable_set(trimmed) {
+		return Some(CaptureKind::DeclStyle);
+	}
 	let_array_name(trimmed).map(CaptureKind::Let)
+}
+
+/// Is this line a `#show: <ident>.with(` whole-document template application -- the form whose named
+/// arguments lower onto the theme? Distinguished from an introspective `#show ...: it => { ... }`,
+/// which carries no `.with(` and is left to be refused.
+fn is_show_doc_with(trimmed: &str) -> bool {
+	let rest = match trimmed.strip_prefix("#show:") {
+		Some(r)	=> r.trim_start(),
+		None	=> return false,
+	};
+	match rest.find(".with(") {
+		Some(dot)	=> {
+			let ident = &rest[..dot];
+			!ident.is_empty() && ident.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+		},
+		None		=> false,
+	}
+}
+
+/// Is this line a lowerable top-level `#set <target>(` -- one of the elements the theme carries a field
+/// for (text, par, page, heading, list, enum, math.equation)? A `#set` on any other target returns
+/// `false` and is left to [`code_skip`] to refuse, since the reader has no field for it.
+fn is_lowerable_set(trimmed: &str) -> bool {
+	let rest = match trimmed.strip_prefix("#set ") {
+		Some(r)	=> r.trim_start(),
+		None	=> return false,
+	};
+	for target in ["text(", "par(", "page(", "heading(", "list(", "enum(", "math.equation("] {
+		if rest.starts_with(target) {
+			return true;
+		}
+	}
+	false
 }
 
 /// If the line is a `#let name = (` binding whose value opens a paren group, its name; else `None`. Only
@@ -1806,6 +1848,13 @@ fn dispatch_capture(
 					items.push(Item::Box { items: inner, span: Span::new(0, 0) });
 				}
 			}
+		},
+		CaptureKind::DeclStyle => {
+			// A declarative styling construct -- a `#show: <template>.with(...)` application or a lowerable
+			// top-level `#set`. The reader gathers it whole so it is neither refused nor leaked into the
+			// prose; lowering its arguments onto the theme is the book assembler's job (see
+			// [`crate::lang::set`] and [`crate::book`]), which reads the same source with the theme in hand.
+			// Nothing is emitted into the item stream, and nothing is recorded as a refusal.
 		},
 	}
 }
@@ -2801,7 +2850,10 @@ mod tests {
 	#[test]
 	fn skip_summary_reports_skipped_constructs() {
 		install_test_terms();	// so `#g[iniverse]` resolves and adds no term-dict miss to the tally
-		let src = "#import \"x.typ\": *\n#set page(margin: 1cm)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
+		// `#set rect` names no theme element and `#show heading: it => it` is introspective, so both stay
+		// refused (a lowerable `#set page`/`#show: doc.with` would be captured, not tallied -- see
+		// `lowerable_set_and_doc_with_are_captured_not_refused`).
+		let src = "#import \"x.typ\": *\n#set rect(stroke: 1pt)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
 		let (_, skips) = document_with_refusals(src).expect("parse");
 		assert_eq!(skips.total(), 3);
 		let report = skips.report().expect("a report");
@@ -2812,6 +2864,22 @@ mod tests {
 		// A source the reader sets whole has nothing to report.
 		let (_, clean) = document_with_refusals("Just prose with #g[iniverse].\n").expect("parse");
 		assert!(clean.is_empty() && clean.report().is_none());
+	}
+
+	/// A `#show: <template>.with(...)` application and a lowerable top-level `#set` are captured rather
+	/// than refused -- their styling lowers onto the theme -- so neither adds to the refusal tally, while
+	/// an introspective `#show` and a `#set` on an unsupported target still do.
+	#[test]
+	fn lowerable_set_and_doc_with_are_captured_not_refused() {
+		// A multi-line `#show: doc.with(...)` and a lowerable `#set text(...)`: both captured, no refusal.
+		let lowered = "#show: doc.with(\n  title: [X],\n  heading-font: \"Graystroke\",\n)\n\n#set text(size: 11pt)\n\n= Heading\n\nBody.\n";
+		let (_, skips) = document_with_refusals(lowered).expect("parse");
+		assert_eq!(skips.total(), 0, "lowerable declarations should not be refused: {:?}", skips.sites());
+
+		// The unsupported and introspective forms still refuse.
+		let refused = "#set rect(stroke: 1pt)\n\n#show heading: it => it\n";
+		let (_, skips) = document_with_refusals(refused).expect("parse");
+		assert_eq!(skips.total(), 2, "unsupported/introspective forms should still refuse: {:?}", skips.sites());
 	}
 
 	/// A line-leading `#context[...]` -- Typst's self-observation entry point -- is refused as exactly

@@ -311,7 +311,12 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
 		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		(blocks, fonts, PageGeometry::a4(), Theme::default(), String::new(), None, None, bib)
+		// A lone file may carry its own `#show: doc.with(...)` or a lowerable top-level `#set`; the reader
+		// captures those rather than refusing them, so their styling is lowered onto the theme here --
+		// otherwise the capture would be a silent skip.
+		let mut style	= Theme::default();
+		lang::set::lower_root_declarations(&src, &mut style);
+		(blocks, fonts, PageGeometry::a4(), style, String::new(), None, None, bib)
 	};
 	mark("parse+lower+fonts", t_parse);
 
