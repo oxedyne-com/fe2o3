@@ -250,7 +250,16 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			continue;
 		}
 
-		if trimmed.is_empty() {
+		// A display maths block ($ ... $) spans several source lines, but every branch below classifies a
+		// line on its own -- so, left unchecked, a `=`-lead alignment row reads as a heading, a `-`-lead row
+		// as a list marker, and a blank row between stacked lines flushes the paragraph early, each stealing
+		// the line before the paragraph ever reaches `mathparse` whole. While an odd number of unescaped `$`
+		// have accumulated in the running paragraph the block is still open, so the blank/heading/list checks
+		// below are skipped for as long as it is: a fence opening or a capture opener (a `#`-led construct)
+		// still takes precedence regardless, since neither shape occurs inside genuine display maths.
+		let math_block_open = math_open(&lines);
+
+		if trimmed.is_empty() && !math_block_open {
 			// A blank line closes the paragraph it follows, but not an open list: Typst continues an enum
 			// (or bullet list) across a blank line between items, restarting the numbering only when other
 			// content intervenes. The list is therefore held open here; the marker branch joins a following
@@ -302,7 +311,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
-		} else if trimmed.starts_with('=') {
+		} else if trimmed.starts_with('=') && !math_block_open {
 			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut stack);
@@ -327,24 +336,33 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 				label,
 				span:	Span::new(start, end),
 			});
-		} else if let Some((ord, text)) = marker(trimmed) {
-			// A list item. It closes any open paragraph, then joins the list stack by its indentation: a
-			// deeper marker opens a sub-list under the current item, a shallower one closes back to the
-			// matching level, and a same-indent marker of the other kind ends the list and starts one of
-			// the new kind. The item's text carries inline emphasis like any run.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-			let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-			let runs = parse_inlines_in(&text, &mut skips);
-			list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 		} else {
-			// Any other non-blank line joins the running paragraph, closing a list first; its own line
-			// break and indentation carry no meaning, only its words.
-			flush_list(&mut items, &mut stack);
-			if lines.is_empty() {
-				para_start = start;
+			// A list marker joins the list stack, unless a display maths block is open, in which case a
+			// `-`/`+`-lead row is part of the equation, not a bullet: it falls through to the paragraph arm
+			// below like every other captured line.
+			match if math_block_open { None } else { marker(trimmed) } {
+				Some((ord, text)) => {
+					// A list item. It closes any open paragraph, then joins the list stack by its indentation:
+					// a deeper marker opens a sub-list under the current item, a shallower one closes back to
+					// the matching level, and a same-indent marker of the other kind ends the list and starts
+					// one of the new kind. The item's text carries inline emphasis like any run.
+					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+					let indent = line.chars().take_while(|c| c.is_whitespace()).count();
+					let runs = parse_inlines_in(&text, &mut skips);
+					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
+				},
+				None => {
+					// Any other non-blank line joins the running paragraph, closing a list first; its own line
+					// break and indentation carry no meaning, only its words. This is also where a blank,
+					// heading-lead or list-marker-lead line lands while a display maths block is open.
+					flush_list(&mut items, &mut stack);
+					if lines.is_empty() {
+						para_start = start;
+					}
+					lines.push(line.to_string());
+					para_end = end;
+				},
 			}
-			lines.push(line.to_string());
-			para_end = end;
 		}
 	}
 
@@ -361,6 +379,26 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 		dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
 	}
 	Ok((items, skips))
+}
+
+/// Is a display maths block still open across the paragraph lines gathered so far? A `$` toggles the
+/// state; a `\`-escaped one (`\$`) is skipped, mirroring the same escape in [`parse_inlines_in`], so it
+/// never toggles. An odd running count means the block opened on some earlier line and has not yet met
+/// its close, which is what lets [`document_with_skips`] keep capturing lines the per-line classifier
+/// would otherwise steal as a heading, a list marker, or a paragraph-flushing blank.
+fn math_open(lines: &[String]) -> bool {
+	let mut open = false;
+	for line in lines {
+		let mut chars = line.chars();
+		while let Some(c) = chars.next() {
+			if c == '\\' {
+				chars.next();	// the escaped character, taken literally
+			} else if c == '$' {
+				open = !open;
+			}
+		}
+	}
+	open
 }
 
 /// Is this already-left-trimmed line a ```` ``` ```` code fence? An opening fence may carry a language
@@ -2231,6 +2269,7 @@ fn unquote(val: &str) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::math::{Atom, MatKind};
 
 	/// A `#claim-label`/`#claim-refs` marker sets nothing in the body, and the prose on either side
 	/// closes over the gap as one text run, so no raw markup leaks.
@@ -2608,5 +2647,62 @@ mod tests {
 		let paras = items.iter().filter(|it| matches!(it, Item::Paragraph { .. })).count();
 		assert_eq!(paras, 2, "column body not set as paragraphs: {:?}", items);
 		assert_eq!(skips.entries(), vec![("#columns".to_string(), 1)]);
+	}
+
+	/// Reads a single [`Item::Paragraph`]'s runs out of a parse, failing loudly with the whole item list
+	/// when the source did not yield exactly one paragraph -- the shape every `math_open` regression test
+	/// below expects, since a display block that leaked a line would instead split the source into a
+	/// paragraph plus a stray heading or list.
+	fn one_paragraph(items: &[Item]) -> Outcome<(Vec<Inline>, Option<String>)> {
+		let paras: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::Paragraph { .. })).collect();
+		match paras.as_slice() {
+			[Item::Paragraph { runs, label, .. }] => Ok((runs.clone(), label.clone())),
+			_ => Err(err!("expected exactly one paragraph, got: {:?}", items; Test, Bug)),
+		}
+	}
+
+	/// A source line inside an open `$...$` display block that begins `=` (an alignment row such as
+	/// `=> 2N &= ...`, Oxegen TechSpec `app_maths.typ:533-534`) must stay in the equation, not be read as
+	/// a heading -- the heading branch is gated off by `math_open` for exactly this shape.
+	#[test]
+	fn equals_lead_row_inside_display_math_stays_in_block() -> Outcome<()> {
+		let src = "Total hashes.\n\n$\nN &= sum_(j=1)^J n_j \\\n=> 2N &= sum_(j=2)^(J+1) 2^(j-1) \\\n=> 2N - N &= 2^J - 1 \\\n$\n\nEnd of block.\n";
+		let (items, _skips) = res!(document_with_skips(src));
+		assert!(!items.iter().any(|it| matches!(it, Item::Heading { .. })),
+			"a `=`-lead row inside the block must not become a heading: {:?}", items);
+		let has_align = items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if matches!(runs.as_slice(),
+				[Inline::Math(Atom::Matrix { kind: MatKind::Align, .. })])));
+		assert!(has_align, "no single-run display alignment paragraph was produced: {:?}", items);
+		Ok(())
+	}
+
+	/// A source line inside an open `$...$` display block that begins `-` (a row such as
+	/// `- tilde(N)_(1 0) u (...) = 0`, Oxegen TechSpec `ch04_nodes.typ:1657`) must stay in the equation,
+	/// not be read as a bullet -- the list-marker branch is gated off by `math_open` for exactly this shape.
+	#[test]
+	fn dash_lead_row_inside_display_math_stays_in_block() -> Outcome<()> {
+		let src = "$\na &= b \\\n- tilde(N)_(1 0) u (x) = 0 \\\nc &= d\n$\n";
+		let (items, _skips) = res!(document_with_skips(src));
+		assert!(!items.iter().any(|it| matches!(it, Item::List { .. })),
+			"a `-`-lead row inside the block must not become a list: {:?}", items);
+		let (runs, _label) = res!(one_paragraph(&items));
+		assert!(matches!(runs.as_slice(), [Inline::Math(Atom::Matrix { kind: MatKind::Align, .. })]),
+			"expected one display alignment run, got: {:?}", runs);
+		Ok(())
+	}
+
+	/// A blank source line inside an open `$...$` display block (Oxegen TechSpec `ch04_nodes.typ:1661-1666`)
+	/// must stay in the equation rather than flush the paragraph early, and a closing `$ <label>` still
+	/// labels the resulting equation.
+	#[test]
+	fn blank_line_inside_display_math_stays_in_block_and_label_still_attaches() -> Outcome<()> {
+		let src = "$\na &= b \\\n\nc &= d\n$ <eq_test>\n";
+		let (items, _skips) = res!(document_with_skips(src));
+		let (runs, label) = res!(one_paragraph(&items));
+		assert!(matches!(runs.as_slice(), [Inline::Math(Atom::Matrix { kind: MatKind::Align, .. })]),
+			"expected one display alignment run, got: {:?}", runs);
+		assert_eq!(label, Some("eq_test".to_string()), "the closing label must still attach");
+		Ok(())
 	}
 }
