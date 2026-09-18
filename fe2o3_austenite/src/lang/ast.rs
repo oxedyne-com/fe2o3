@@ -29,6 +29,10 @@ pub enum Item {
 	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box, plus the
 	// theme patch its body's own top-level `#set` declarations lower to, scoped to the box (H3).
 	Box { items: Vec<Item>, patch: ThemePatch, span: Span },
+	// A theme-scope boundary bracketing a run of flat-spliced sibling items -- a `#columns[...]` body whose
+	// own `#set` declarations scope to it (H1's flat-splice sibling). Lowered to `Block::ScopePush`/`Pop`.
+	ScopePush(ThemePatch),
+	ScopePop,
 }
 
 /// One item of an [`Item::List`]: its own inline runs, and any lists nested beneath it by deeper marker

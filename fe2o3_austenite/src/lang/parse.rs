@@ -1832,7 +1832,17 @@ fn dispatch_capture(
 			if let Some(body) = columns_body(&cap.buf) {
 				if let Ok((mut inner, sub)) = document_with_refusals(&body) {
 					skips.merge(sub);
-					items.append(&mut inner);
+					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
+					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
+					// brackets them. An empty patch -- a body that declares no styling -- adds no markers.
+					let patch = crate::lang::set::lower_declarations(&body);
+					if patch == crate::theme::ThemePatch::default() {
+						items.append(&mut inner);
+					} else {
+						items.push(Item::ScopePush(patch));
+						items.append(&mut inner);
+						items.push(Item::ScopePop);
+					}
 				}
 			}
 		},
@@ -2584,6 +2594,28 @@ mod tests {
 		assert!(items.iter().any(|it| matches!(it, Item::Paragraph { runs, .. }
 			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Lead prose."))))),
 			"prose before the callout is dropped");
+		Ok(())
+	}
+
+	/// A `#columns[...]` body's own top-level `#set` declarations scope to the spliced subtree (H1's
+	/// flat-splice sibling): the reader brackets the spliced items in an `Item::ScopePush`/`ScopePop`
+	/// carrying the lowered patch. A columns body that declares nothing splices in flat, with no markers.
+	#[test]
+	fn columns_body_set_scopes_the_spliced_subtree() -> Outcome<()> {
+		let (items, _skips) = res!(document_with_refusals(
+			"#columns(2)[\n#set text(size: 20pt)\n\nScoped body.\n]\n"));
+		let push = res!(items.iter().find_map(|it| match it {
+			Item::ScopePush(p)	=> Some(p.clone()),
+			_					=> None,
+		}).ok_or_else(|| err!("no Item::ScopePush was produced for a columns body with a #set"; Test, Bug)));
+		assert_eq!(push.text.body_size, Some(crate::ir::Sp::from_pt(20.0)),
+			"the columns body's #set text(size:) did not lower into the scope patch");
+		assert!(items.iter().any(|it| matches!(it, Item::ScopePop)), "the scope must be closed");
+
+		// A columns body that declares nothing splices in flat, with no scope markers.
+		let (plain, _) = res!(document_with_refusals("#columns(2)[\nPlain body.\n]\n"));
+		assert!(!plain.iter().any(|it| matches!(it, Item::ScopePush(_) | Item::ScopePop)),
+			"a columns body with no #set must not be wrapped in a scope");
 		Ok(())
 	}
 

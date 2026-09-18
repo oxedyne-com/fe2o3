@@ -233,6 +233,14 @@ pub enum Block {
 	// from its words. `patch` is the theme overlay the box body's own `#set` declarations lower to, applied
 	// to the box's subtree at render (H3) so a `#set` inside a callout scopes to it, not the document.
 	Box { blocks: Vec<Block>, fill: Rgba, patch: ThemePatch },
+	// A theme-scope boundary. `ScopePush` overlays its patch on the effective theme for the blocks that
+	// follow it, and the matching `ScopePop` restores the theme that was in force before it -- so an
+	// included chapter's (or any selected subtree's) `#set` declarations style only that subtree, not the
+	// document. The pair brackets a contiguous run of sibling blocks in the flat stream; they carry no ink
+	// and are transparent to every pass but the renderer, which folds the patch onto its effective theme.
+	// This is the general mechanism the rule engine's set-fields transform reuses to patch a subtree.
+	ScopePush(ThemePatch),
+	ScopePop,
 }
 
 impl Block {
@@ -505,7 +513,30 @@ pub fn author(
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
 	let refs = ref_targets(blocks);
+	// The effective theme: the document theme with every open scope's patch folded on, so a block set
+	// inside an included chapter (or any bracketed subtree) is styled by that subtree's own `#set`. A
+	// `ScopePush` saves the current theme and overlays its patch; the matching `ScopePop` restores it. With
+	// no scopes -- every corpus document today -- `cur` stays equal to the document theme, so the render is
+	// byte-identical.
+	let mut cur:			Theme		= style.clone();
+	let mut theme_stack:	Vec<Theme>	= Vec::new();
 	while i < blocks.len() {
+		if let Block::ScopePush(patch) = &blocks[i] {
+			theme_stack.push(cur.clone());
+			cur.apply(patch);
+			i += 1;
+			continue;
+		}
+		if let Block::ScopePop = &blocks[i] {
+			if let Some(prev) = theme_stack.pop() {
+				cur = prev;
+			}
+			i += 1;
+			continue;
+		}
+		// Every content arm below renders with the effective theme, so a scoped patch reaches it without the
+		// arm having to name it: `style` is shadowed to the current scope's theme for the rest of this pass.
+		let style: &Theme = &cur;
 		match &blocks[i] {
 			Block::Heading { level, segments, label } => {
 				// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
@@ -821,6 +852,8 @@ pub fn author(
 			// The book layer resolves every `#print-glossary()` placeholder into a table before layout, so one
 			// reaching here (a lone-file compile that never ran the resolver) sets nothing rather than failing.
 			Block::Glossary => { i += 1; },
+			// Scope markers are consumed before this match; named here only for exhaustiveness.
+			Block::ScopePush(_) | Block::ScopePop => { i += 1; },
 		}
 	}
 
@@ -2751,8 +2784,11 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::BackMatterHeading { title }	=> count_str(title, &mut n),
 			Block::Reference { runs }			=> for (t, _) in runs { count_str(t, &mut n); },
 			Block::Box { blocks, .. }			=> n += count_words(blocks),
+			// A scope marker carries no words; the blocks it brackets are siblings in the flat stream, counted
+			// in their own right as this walk reaches them.
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. } | Block::Glossary	=> {},
+			| Block::SectionBanner { .. } | Block::Glossary
+			| Block::ScopePush(_) | Block::ScopePop	=> {},
 		}
 	}
 	n

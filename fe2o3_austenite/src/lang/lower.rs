@@ -58,6 +58,8 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
 			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
 			Item::Box { items, patch, .. }		=> out.push(Block::box_callout(blocks(items), patch.clone())),
+			Item::ScopePush(patch)				=> out.push(Block::ScopePush(patch.clone())),
+			Item::ScopePop						=> out.push(Block::ScopePop),
 		}
 	}
 	out

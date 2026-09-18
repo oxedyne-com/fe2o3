@@ -29,7 +29,10 @@ use crate::doc::{
 	HeadingStyle,
 	Segment,
 };
-use crate::theme::Theme;
+use crate::theme::{
+	Theme,
+	ThemePatch,
+};
 use crate::fonts;
 use crate::ir::Sp;
 use crate::lang::parse::flatten_markup;
@@ -1293,7 +1296,19 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path) -> Outcome<(V
 				};
 				let (chap, mut chap_skips) = res!(lang::to_blocks_with_refusals(&src));
 				chap_skips.tag_file(&path.display().to_string());
-				blocks.extend(chap);
+				// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
+				// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
+				// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
+				// no styling -- every corpus chapter today -- lowers to an empty patch and adds no markers,
+				// keeping the block stream and the render byte-identical.
+				let chap_patch = lang::set::lower_declarations(&src);
+				if chap_patch == ThemePatch::default() {
+					blocks.extend(chap);
+				} else {
+					blocks.push(Block::ScopePush(chap_patch));
+					blocks.extend(chap);
+					blocks.push(Block::ScopePop);
+				}
 				skips.merge(chap_skips);
 			}
 		} else if t.starts_with("#part-page") {
@@ -1928,6 +1943,54 @@ mod tests {
 		assert!(cite.contains("Smith") && cite.contains("2020"),
 			"citation did not resolve to author-year: {:?}", cite);
 		assert!(!cite.contains("smith2020"), "the raw cite key leaked: {:?}", cite);
+		Ok(())
+	}
+
+	/// An included chapter's own `#set text(size: ...)` is lowered and scoped to that chapter's subtree
+	/// (H1): `assemble` brackets the chapter's blocks in a `ScopePush`/`ScopePop` carrying the lowered
+	/// patch, and a sibling chapter that declares nothing is left unwrapped. Before this, a chapter's
+	/// `#set` was captured by the reader but never lowered, since lowering ran only over the root.
+	#[test]
+	fn test_included_chapter_set_is_scoped_to_its_subtree_h1() -> Outcome<()> {
+		let base = std::env::temp_dir().join(fmt!("austenite-h1-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		res!(std::fs::create_dir_all(&base));
+		// Chapter A declares a body size; chapter B declares nothing.
+		res!(std::fs::write(base.join("chap_a.typ"), "#set text(size: 20pt)\n= Chapter A\nAlpha body.\n"));
+		res!(std::fs::write(base.join("chap_b.typ"), "= Chapter B\nBeta body.\n"));
+		let root_src	= "#include \"chap_a.typ\"\n#include \"chap_b.typ\"\n";
+		let root_path	= base.join("root.typ");
+
+		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path));
+
+		// Clean up before asserting, so a failed assertion leaves no scratch behind.
+		let _ = std::fs::remove_dir_all(&base);
+
+		// Exactly one scope, carrying chapter A's lowered body size.
+		let pushes: Vec<&ThemePatch> = blocks.iter().filter_map(|b| match b {
+			Block::ScopePush(p)	=> Some(p),
+			_					=> None,
+		}).collect();
+		let pops = blocks.iter().filter(|b| matches!(b, Block::ScopePop)).count();
+		assert_eq!(pushes.len(), 1, "expected exactly one scope push, got {}", pushes.len());
+		assert_eq!(pops, 1, "expected exactly one scope pop, got {}", pops);
+		assert_eq!(pushes[0].text.body_size, Some(Sp::from_pt(20.0)),
+			"the chapter's #set text(size:) did not lower into the scope patch");
+
+		// The push opens chapter A and the pop closes before chapter B, which carries no scope of its own.
+		let push_at	= res!(blocks.iter().position(|b| matches!(b, Block::ScopePush(_)))
+			.ok_or_else(|| err!("no scope push in the assembled stream"; Test, Missing)));
+		let pop_at	= res!(blocks.iter().position(|b| matches!(b, Block::ScopePop))
+			.ok_or_else(|| err!("no scope pop in the assembled stream"; Test, Missing)));
+		assert!(push_at < pop_at, "the scope push must precede its pop");
+		// The push opens chapter A's subtree: its first bracketed block is that chapter's heading, and the
+		// chapter's own `#set` line emitted no block of its own (it was lowered into the patch, not set).
+		assert!(matches!(&blocks[push_at + 1], Block::Heading { .. }),
+			"the block after the push should be chapter A's heading");
+		// Chapter B, everything after the pop, is unwrapped -- no further scope markers.
+		assert!(blocks[pop_at + 1..].iter().all(|b| !matches!(b, Block::ScopePush(_) | Block::ScopePop)),
+			"a chapter that declares nothing must not be wrapped in a scope");
 		Ok(())
 	}
 
