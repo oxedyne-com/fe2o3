@@ -16,7 +16,7 @@
 //! opening line -- a `#figure(...)`, `#table(...)`, `#aside-box[...]`, or a `#let x = (...)` data array
 //! that spans many lines -- the reader consumes following lines, tracking nesting across `()`, `[]` and
 //! `{}` and respecting string literals, until the delimiters balance, so the whole span renders nothing.
-//! Every such skip is recorded by name into a [`SkipSummary`] the parse returns beside its items, so a
+//! Every such skip is recorded by name into a [`Refusals`] the parse returns beside its items, so a
 //! caller reports the constructs it dropped rather than losing them silently. A `#columns(n)[ ... ]`
 //! wrapper is the exception the reader does not drop whole: its body is re-parsed and set single-column.
 //!
@@ -69,49 +69,147 @@ pub(crate) fn term_value(key: &str) -> Option<String> {
 	}
 }
 
-/// A tally of the constructs the reader skipped rather than set, keyed by the source name each was
-/// written with (`#show`, `#let`, `#columns`, an unknown `#func`) and counted. A caller prints it so a
-/// dropped construct is a visible report rather than a silent gap. Empty when the reader set everything
-/// it met. Names carry their leading `#`, so the report reads back as source.
-#[derive(Clone, Debug, Default)]
-pub struct SkipSummary {
-	counts:	BTreeMap<String, usize>,
+/// Why a construct was refused rather than set: the axis a per-site diagnostic reports alongside its
+/// name and location, so a reader can tell a categorical limit from a todo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalClass {
+	// Typst's own general evaluation primitives -- `#import`, `#let`, `#set`, `#show` -- which run an
+	// arbitrary expression to a value. Austenite's driver converges a fixed, two-pass ledger to a point;
+	// it does not carry a Typst-style evaluator, so these are a categorical limit of the architecture
+	// (see the crate root's own note that Typst treats a document as a program and Austenite does not),
+	// not a specific feature waiting to be added.
+	FixedPoint,
+	// A construct that reads the page's own laid-out state back into the document -- `#context`,
+	// `#query`, `#locate`, a counter's or state's `.at`/`.get`, `#measure`, `#layout`. This is exactly
+	// Typst's self-observation model, which the ledger exists to answer in Austenite's own terms; a
+	// construct landing here is a real gap the ledger could plausibly close, not a limit of the design.
+	Introspective,
+	// Anything else skipped: a specific call or wrapper (`#columns`, an unknown standalone or inline
+	// `#func`, an unknown term-dictionary key) that names no fundamental barrier -- just not yet read.
+	Unsupported,
 }
 
-impl SkipSummary {
-	/// Records one skipped construct by the source name it was written with (with its leading `#`).
-	fn record(&mut self, name: &str) {
-		*self.counts.entry(name.to_string()).or_insert(0) += 1;
+impl RefusalClass {
+	/// Classifies a refusal by the source name it was recorded under. Matched by substring rather than
+	/// an exact keyword, since the same construct is recorded under different shapes depending on how it
+	/// was written (`#context`, a bare `context` inside a longer call name) -- this is a diagnostic
+	/// classifier, not a parser, so a generous match that occasionally over-reaches is the right trade.
+	fn classify(name: &str) -> Self {
+		let lower = name.to_lowercase();
+		for kw in ["#import", "#let", "#set", "#show"] {
+			if lower.starts_with(kw) {
+				return RefusalClass::FixedPoint;
+			}
+		}
+		const INTROSPECTIVE: [&str; 8] =
+			["context", "query", "locate", "counter.at", "counter.get", "state", "measure", "layout"];
+		if INTROSPECTIVE.iter().any(|kw| lower.contains(kw)) {
+			return RefusalClass::Introspective;
+		}
+		RefusalClass::Unsupported
 	}
 
-	pub fn is_empty(&self) -> bool { self.counts.is_empty() }
+	/// The word `--explain` prints for this class.
+	pub fn label(&self) -> &'static str {
+		match self {
+			RefusalClass::FixedPoint		=> "fixed-point",
+			RefusalClass::Introspective	=> "introspective",
+			RefusalClass::Unsupported		=> "unsupported",
+		}
+	}
+}
 
-	/// The number of distinct construct names skipped.
-	pub fn kinds(&self) -> usize { self.counts.len() }
+/// One site the reader passed over rather than set: the source name it was written with (carrying its
+/// leading `#`, so it reads back as source), the byte span it was found at, and why it was refused.
+/// The span is the whole containing line for a code statement or standalone call, or the whole
+/// containing item (a paragraph, a heading) for an inline call found within one -- Austenite's inline
+/// scanner does not keep the fine per-character offset once a paragraph's lines have been joined and its
+/// whitespace collapsed, so the enclosing item is the finest boundary available without a deeper rework
+/// of the reader than this diagnostic upgrade is for.
+#[derive(Clone, Debug)]
+pub struct Refusal {
+	pub name:	String,
+	pub span:	Span,
+	pub class:	RefusalClass,
+	// The source file this site was read from, for `--explain`'s "file:line:col". Empty immediately
+	// after parsing, since a lone parse of a source string carries no filename of its own; the book
+	// assembler ([`crate::book::assemble`]) tags each chapter's (and the root's own) refusals with the
+	// real path once assembly is back in a context that has one -- see [`Refusals::tag_file`].
+	pub file:	String,
+}
 
-	/// The total count of skipped constructs across every name.
-	pub fn total(&self) -> usize { self.counts.values().sum() }
+/// Every site the reader refused across one parse (or, once [`Refusals::merge`] has folded chapters
+/// together, across a whole book). Kept as a flat list of [`Refusal`]s rather than the old name-keyed
+/// tally, so a caller can still print the terse one-line [`Refusals::report`] but can also walk every
+/// site for `--explain`'s per-site listing. Empty when the reader set everything it met.
+#[derive(Clone, Debug, Default)]
+pub struct Refusals {
+	sites: Vec<Refusal>,
+}
 
-	/// Each skipped construct name with its count, ordered by descending count then name, so the report
+impl Refusals {
+	/// Records one refused construct by the source name it was written with (with its leading `#`) and
+	/// the span it was found at, classifying it from the name.
+	fn record(&mut self, name: &str, span: Span) {
+		let class = RefusalClass::classify(name);
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new() });
+	}
+
+	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
+	/// the parser) that wants a known `Refusals` without driving a real parse to produce one.
+	pub fn from_sites(sites: Vec<Refusal>) -> Self {
+		Self { sites }
+	}
+
+	pub fn is_empty(&self) -> bool { self.sites.is_empty() }
+
+	/// Sets every site's `file` that is not already set, so a caller assembling several chapters can tag
+	/// each chapter's refusals with its own path right after parsing it, before folding them into the
+	/// book's running total with [`merge`](Self::merge) -- at which point every site already carries the
+	/// file it came from, and a second tagging (the root's own trailing markup, read after every
+	/// include) touches only the sites still unset.
+	pub fn tag_file(&mut self, file: &str) {
+		for r in &mut self.sites {
+			if r.file.is_empty() {
+				r.file = file.to_string();
+			}
+		}
+	}
+
+	/// Every refused site, in the order the reader met them.
+	pub fn sites(&self) -> &[Refusal] { &self.sites }
+
+	/// The number of distinct construct names refused.
+	pub fn kinds(&self) -> usize { self.entries().len() }
+
+	/// The total count of refused sites across every name.
+	pub fn total(&self) -> usize { self.sites.len() }
+
+	/// Each refused construct name with its count, ordered by descending count then name, so the report
 	/// leads with the construct that cost the most.
 	pub fn entries(&self) -> Vec<(String, usize)> {
-		let mut v: Vec<(String, usize)> = self.counts.iter().map(|(k, &c)| (k.clone(), c)).collect();
+		let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+		for r in &self.sites {
+			*counts.entry(r.name.as_str()).or_insert(0) += 1;
+		}
+		let mut v: Vec<(String, usize)> = counts.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
 		v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 		v
 	}
 
-	/// Folds another summary's counts into this one, so a caller assembling several chapters reports one
-	/// total rather than a summary per file.
-	pub fn merge(&mut self, other: &SkipSummary) {
-		for (k, &c) in &other.counts {
-			*self.counts.entry(k.clone()).or_insert(0) += c;
-		}
+	/// Folds another parse's refusals into this one, so a caller assembling several chapters reports one
+	/// total rather than a summary per file. `other` is consumed rather than borrowed: a caller merging a
+	/// just-parsed chapter's refusals into the book's running total has no further use for its own copy.
+	pub fn merge(&mut self, other: Refusals) {
+		self.sites.extend(other.sites);
 	}
 
 	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- or `None` when
-	/// nothing was skipped, so a caller prints the line only when it has something to say.
+	/// nothing was skipped, so a caller prints the line only when it has something to say. Unchanged in
+	/// wording from before this unit: `--explain` is the new, detailed report, this terse one stays the
+	/// default.
 	pub fn report(&self) -> Option<String> {
-		if self.counts.is_empty() {
+		if self.sites.is_empty() {
 			return None;
 		}
 		let parts: Vec<String> = self.entries().into_iter()
@@ -126,16 +224,16 @@ impl SkipSummary {
 /// Parses a whole Ingot source string into its surface items. The only error is an empty heading --
 /// a `=` marker with no title -- which names the offending 1-based line.
 pub fn document(src: &str) -> Outcome<Vec<Item>> {
-	let (items, _) = res!(document_with_skips(src));
+	let (items, _) = res!(document_with_refusals(src));
 	Ok(items)
 }
 
-/// Parses a source string into its surface items and, alongside, the [`SkipSummary`] of every construct
+/// Parses a source string into its surface items and, alongside, the [`Refusals`] of every construct
 /// the reader passed over rather than set -- a `#let`/`#set`/`#show`/`#import` code line, an unknown
 /// line-leading `#func(...)` call, a `#columns` wrapper, and any unhandled inline `#func[...]`. The
 /// caller prints the summary so a dropped construct is reported rather than lost silently.
-pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
-	let mut skips:		SkipSummary	= SkipSummary::default();
+pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
+	let mut skips:		Refusals	= Refusals::default();
 	let mut items:		Vec<Item>	= Vec::new();
 	let mut lines:		Vec<String>	= Vec::new();	// the current paragraph's constituent lines
 	let mut para_start:	u32			= 0;			// byte offset of the paragraph's first line
@@ -277,7 +375,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
-			let cap = Capture { kind, buf, state };
+			let cap = Capture { kind, buf, state, start };
 			if !cap.state.has_open_bracket() {
 				dispatch_capture(cap, &mut items, &mut arrays, &mut skips);	// the whole construct closed on one line
 			} else {
@@ -307,7 +405,10 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// top of the loop until they do.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut stack);
-			skips.record(&construct_name(trimmed));
+			// The recorded span is the opening line alone, even for a construct whose delimiters run on
+			// for several more: that is where a reader wants `--explain`'s caret to land, and the true
+			// closing offset is not known until the multi-line skip above closes, several iterations on.
+			skips.record(&construct_name(trimmed), Span::new(start, end));
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
@@ -330,11 +431,12 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
 			// maths span in a heading sets its display text rather than leaking its raw source into the head
 			// and the table of contents.
+			let head_span = Span::new(start, end);
 			items.push(Item::Heading {
 				level:	level as u8,
-				runs:	parse_inlines_in(&title, &mut skips),
+				runs:	parse_inlines_in(&title, head_span, &mut skips),
 				label,
-				span:	Span::new(start, end),
+				span:	head_span,
 			});
 		} else {
 			// A list marker joins the list stack, unless a display maths block is open, in which case a
@@ -348,7 +450,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 					// one of the new kind. The item's text carries inline emphasis like any run.
 					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 					let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-					let runs = parse_inlines_in(&text, &mut skips);
+					let runs = parse_inlines_in(&text, Span::new(start, end), &mut skips);
 					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 				},
 				None => {
@@ -384,7 +486,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 /// Is a display maths block still open across the paragraph lines gathered so far? A `$` toggles the
 /// state; a `\`-escaped one (`\$`) is skipped, mirroring the same escape in [`parse_inlines_in`], so it
 /// never toggles. An odd running count means the block opened on some earlier line and has not yet met
-/// its close, which is what lets [`document_with_skips`] keep capturing lines the per-line classifier
+/// its close, which is what lets [`document_with_refusals`] keep capturing lines the per-line classifier
 /// would otherwise steal as a heading, a list marker, or a paragraph-flushing blank.
 fn math_open(lines: &[String]) -> bool {
 	let mut open = false;
@@ -520,7 +622,7 @@ fn flush_para(
 	lines:	&mut Vec<String>,
 	start:	u32,
 	end:	u32,
-	skips:	&mut SkipSummary,
+	skips:	&mut Refusals,
 )
 {
 	if lines.is_empty() {
@@ -532,8 +634,9 @@ fn flush_para(
 	// rather than a rich paragraph. Ordinary prose ends in a full stop, so the conservative `split_label`
 	// (a single whitespace-free token in angle brackets at the very end) does not fire on it.
 	let (body, label) = split_label(&text);
-	let runs = parse_inlines_in(&body, skips);
-	items.push(Item::Paragraph { runs, label, span: Span::new(start, end) });
+	let span = Span::new(start, end);
+	let runs = parse_inlines_in(&body, span, skips);
+	items.push(Item::Paragraph { runs, label, span });
 	lines.clear();
 }
 
@@ -550,14 +653,20 @@ fn normalise_ws(s: &str) -> String {
 /// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
 /// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
 pub(crate) fn parse_inlines(text: &str) -> Vec<Inline> {
-	let mut skips = SkipSummary::default();
-	parse_inlines_in(text, &mut skips)
+	let mut skips = Refusals::default();
+	// A table cell, a caption or a flattened array cell has no item-level span of its own to attribute a
+	// refusal to (see `Refusal`'s own doc comment on why the item, not the character, is the finest
+	// boundary kept); this thin wrapper already threw the summary away before this unit, so a zero span
+	// changes nothing a caller could observe.
+	parse_inlines_in(text, Span::new(0, 0), &mut skips)
 }
 
-/// The inline scanner proper, recording every unhandled inline call into `skips` so a `#func[...]` the
-/// reader cannot set is reported rather than leaked into the running text. [`parse_inlines`] is the thin
-/// wrapper for callers -- table cells, captions, flattening -- that do not surface the summary.
-fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
+/// The inline scanner proper, recording every unhandled inline call into `skips`, at `span` (the whole
+/// containing item -- a paragraph, a heading, a list item -- rather than the call's own narrower
+/// position; see `Refusal`'s doc comment), so a `#func[...]` the reader cannot set is reported rather
+/// than leaked into the running text. [`parse_inlines`] is the thin wrapper for callers -- table cells,
+/// captions, flattening -- that do not surface the summary.
+fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let n					= chars.len();
 	let mut runs:	Vec<Inline>	= Vec::new();
@@ -600,7 +709,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 		// An inline footnote. Its bracketed content is markup, carried as inline runs so the note sets its
 		// own emphasis at the foot of the page. The mark falls after the run before it.
 		if c == '#' {
-			if let Some((note, next)) = footnote_call(&chars, i, skips) {
+			if let Some((note, next)) = footnote_call(&chars, i, span, skips) {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
@@ -616,7 +725,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 				if !plain.is_empty() {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
-				push_emphasis(&mut runs, false, &inner, skips);
+				push_emphasis(&mut runs, false, &inner, span, skips);
 				i = next;
 				continue;
 			}
@@ -638,7 +747,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
 		// sets nothing.
 		if c == '#' {
-			if let Some((call, next)) = glossary_call(&chars, i, skips) {
+			if let Some((call, next)) = glossary_call(&chars, i, span, skips) {
 				match call {
 					Call::Glossary { term, display } => {
 						if !plain.is_empty() {
@@ -647,7 +756,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 						runs.push(Inline::Glossary { term, display });
 					},
 					Call::Visible(display) => {
-						let sub = parse_inlines_in(&display, skips);
+						let sub = parse_inlines_in(&display, span, skips);
 						// A plain display folds back into the running text, keeping the fast single-run
 						// path; a display carrying markup becomes its own runs.
 						if let [Inline::Text(t)] = sub.as_slice() {
@@ -707,7 +816,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 		// on a page with no clickable annotation and is dropped. A `#link("url")` with no bracket sets the
 		// URL itself as its text, as Typst does.
 		if c == '#' {
-			if let Some((body, next)) = link_call(&chars, i, skips) {
+			if let Some((body, next)) = link_call(&chars, i, span, skips) {
 				if let [Inline::Text(t)] = body.as_slice() {
 					plain.push_str(t);
 				} else {
@@ -737,7 +846,7 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 					runs.push(Inline::Text(std::mem::take(&mut plain)));
 				}
 				let inner: String = chars[i + 1..close].iter().collect();
-				push_emphasis(&mut runs, c == '*', &inner, skips);
+				push_emphasis(&mut runs, c == '*', &inner, span, skips);
 				i = close + 1;
 				continue;
 			}
@@ -748,8 +857,8 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 		// content function -- that body is parsed and folded in, keeping its words rather than dropping them;
 		// a call with only paren arguments (`#v(1em)`, `#colbreak()`) sets nothing where it stood.
 		if c == '#' {
-			if let Some((body, next, name)) = unknown_call(&chars, i, skips) {
-				skips.record(&name);
+			if let Some((body, next, name)) = unknown_call(&chars, i, span, skips) {
+				skips.record(&name, span);
 				if let Some(body) = body {
 					if let [Inline::Text(t)] = body.as_slice() {
 						plain.push_str(t);
@@ -783,8 +892,8 @@ fn parse_inlines_in(text: &str, skips: &mut SkipSummary) -> Vec<Inline> {
 /// emphasis face and the embedded calls become their own runs, so a call nested in emphasis renders its
 /// display text rather than leaking its raw source. A glossary term keeps its own first-use bold-italic
 /// (which subsumes the surrounding emphasis), so only the plain stretches carry the emphasis face.
-fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str, skips: &mut SkipSummary) {
-	let sub = parse_inlines_in(inner, skips);
+fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str, span: Span, skips: &mut Refusals) {
+	let sub = parse_inlines_in(inner, span, skips);
 	if let [Inline::Text(t)] = sub.as_slice() {
 		runs.push(if strong { Inline::Strong(t.clone()) } else { Inline::Emph(t.clone()) });
 		return;
@@ -875,7 +984,7 @@ fn raw_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 /// so it is parsed for its own markup. A `#link(dest)` with no following `[...]` sets the destination
 /// string itself as its text, as Typst does. Any unhandled inline call within the text is recorded into
 /// `skips`. `None` when the shape is not a link call or its arguments do not close.
-fn link_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Vec<Inline>, usize)> {
+fn link_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> Option<(Vec<Inline>, usize)> {
 	let Some(open) = at_lit(chars, i, "#link") else { return None; };
 	if chars.get(open) != Some(&'(') {
 		return None;
@@ -884,7 +993,7 @@ fn link_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Vec<I
 	// A following `[...]` group is the link text; without one, the destination stands as the text.
 	if chars.get(after_dest) == Some(&'[') {
 		let Some((body, next)) = read_group(chars, after_dest) else { return None; };
-		return Some((parse_inlines_in(&body, skips), next));
+		return Some((parse_inlines_in(&body, span, skips), next));
 	}
 	let text = link_dest_text(&dest);
 	Some((vec![Inline::Text(text)], after_dest))
@@ -906,7 +1015,7 @@ fn link_dest_text(dest: &str) -> String {
 /// carries only paren arguments, together with the index just past the call and its `#name` for the skip
 /// report. The final `None` is returned when `i` does not open a `#name(`/`#name[` call at all, so a bare
 /// `#` or a `#variable` interpolation is left as ordinary text.
-fn unknown_call(chars: &[char], i: usize, skips: &mut SkipSummary)
+fn unknown_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals)
 	-> Option<(Option<Vec<Inline>>, usize, String)>
 {
 	if chars.get(i) != Some(&'#') {
@@ -925,14 +1034,14 @@ fn unknown_call(chars: &[char], i: usize, skips: &mut SkipSummary)
 		// A `#name[body]`: the bracketed content is the call's displayable body.
 		Some('[') => {
 			let Some((body, next)) = read_group(chars, j) else { return None; };
-			Some((Some(parse_inlines_in(&body, skips)), next, fmt!("#{}", name)))
+			Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)))
 		},
 		// A `#name(args)` and any following `[body]`: read the arguments away, then fold a body if one trails.
 		Some('(') => {
 			let Some((_, after_args)) = read_group(chars, j) else { return None; };
 			if chars.get(after_args) == Some(&'[') {
 				let Some((body, next)) = read_group(chars, after_args) else { return None; };
-				return Some((Some(parse_inlines_in(&body, skips)), next, fmt!("#{}", name)));
+				return Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)));
 			}
 			Some((None, after_args, fmt!("#{}", name)))
 		},
@@ -1204,13 +1313,13 @@ fn split_label(title: &str) -> (String, Option<String>) {
 /// `*strong*` or `_emph_` in the note sets with its own face -- and the index just past the closing `]`.
 /// `None` when the shape is not a footnote call or its bracket does not close, so anything else is left as
 /// ordinary text.
-fn footnote_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Vec<Inline>, usize)> {
+fn footnote_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> Option<(Vec<Inline>, usize)> {
 	let Some(open) = at_lit(chars, i, "#footnote") else { return None; };
 	if chars.get(open) != Some(&'[') {
 		return None;
 	}
 	let Some((inner, next)) = read_group(chars, open) else { return None; };
-	Some((parse_inlines_in(&inner, skips), next))
+	Some((parse_inlines_in(&inner, span, skips), next))
 }
 
 /// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
@@ -1344,7 +1453,7 @@ enum Call {
 /// plain and `graw` plain (its mono face is not reproduced). A key with no `term-dict` entry falls back to
 /// the key text and is recorded in `skips`, so an unknown key is visible on the terse skip line rather
 /// than silently wrong -- the template panics on a miss, which the reader must not.
-fn glossary_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(Call, usize)> {
+fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> Option<(Call, usize)> {
 	if chars.get(i) != Some(&'#') {
 		return None;
 	}
@@ -1397,10 +1506,10 @@ fn glossary_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(C
 		},
 		// The term-dictionary family translates the key to its value; first use is keyed by the key, as the
 		// template keys `glossary-seen` by the key name rather than the value.
-		"g" | "gi"								=> Call::Glossary { term: arg.clone(), display: resolve_term(&arg, &name, skips) },
-		"gcap" | "gcapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&resolve_term(&arg, &name, skips)) },
-		"t" | "graw"							=> Call::Visible(resolve_term(&arg, &name, skips)),
-		"tcap"									=> Call::Visible(cap_first(&resolve_term(&arg, &name, skips))),
+		"g" | "gi"								=> Call::Glossary { term: arg.clone(), display: resolve_term(&arg, &name, span, skips) },
+		"gcap" | "gcapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&resolve_term(&arg, &name, span, skips)) },
+		"t" | "graw"							=> Call::Visible(resolve_term(&arg, &name, span, skips)),
+		"tcap"									=> Call::Visible(cap_first(&resolve_term(&arg, &name, span, skips))),
 		"idx" | "idx-main"						=> Call::Visible(arg),
 		"index" | "index-main"					=> Call::Invisible,
 		_									=> return None,
@@ -1411,11 +1520,11 @@ fn glossary_call(chars: &[char], i: usize, skips: &mut SkipSummary) -> Option<(C
 /// Resolves a term-dictionary key to its display value, or -- when no map is installed or it holds no
 /// such key -- falls back to the key text and records the miss in `skips` under the calling function's
 /// name, so an unknown key shows on the terse skip line rather than rendering silently as the raw key.
-fn resolve_term(key: &str, func: &str, skips: &mut SkipSummary) -> String {
+fn resolve_term(key: &str, func: &str, span: Span, skips: &mut Refusals) -> String {
 	match term_value(key) {
 		Some(value)	=> value,
 		None		=> {
-			skips.record(&fmt!("#{} unknown term-dict key {:?}", func, key));
+			skips.record(&fmt!("#{} unknown term-dict key {:?}", func, key), span);
 			key.to_string()
 		},
 	}
@@ -1563,6 +1672,7 @@ struct Capture {
 	kind:	CaptureKind,
 	buf:	String,
 	state:	SkipState,
+	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
 }
 
 /// Which multi-line construct is being gathered.
@@ -1636,7 +1746,7 @@ fn dispatch_capture(
 	cap:	Capture,
 	items:	&mut Vec<Item>,
 	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
-	skips:	&mut SkipSummary,
+	skips:	&mut Refusals,
 )
 {
 	match cap.kind {
@@ -1673,11 +1783,14 @@ fn dispatch_capture(
 			// The reader has no column model: the `#columns(n)[ ... ]` wrapper is recorded as skipped and
 			// its body set single-column, so the words survive even though the multi-column layout does not.
 			// The body is a block sequence, so it is read through the document parser again and its items
-			// spliced in; a nested skip (a `#colbreak()`, an unknown call) folds into the same summary.
-			skips.record("#columns");
+			// spliced in; a nested refusal (a `#colbreak()`, an unknown call) folds into the same table.
+			// The span is the wrapper's own opening line; a refusal recorded inside the re-parsed body
+			// carries a span relative to that body text alone, not the enclosing document -- a known,
+			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
+			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = document_with_skips(&body) {
-					skips.merge(&sub);
+				if let Ok((mut inner, sub)) = document_with_refusals(&body) {
+					skips.merge(sub);
 					items.append(&mut inner);
 				}
 			}
@@ -1686,10 +1799,10 @@ fn dispatch_capture(
 			// A `#styled-box[ ... ]` callout. Its body is a block sequence, so it is read through the document
 			// parser again and wrapped in a single [`Item::Box`] the lowering sets in a filled, padded box --
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
-			// recorded in the summary; a nested skip within the body (an unknown inline call) still folds in.
+			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((inner, sub)) = document_with_skips(&body) {
-					skips.merge(&sub);
+				if let Ok((inner, sub)) = document_with_refusals(&body) {
+					skips.merge(sub);
 					items.push(Item::Box { items: inner, span: Span::new(0, 0) });
 				}
 			}
@@ -2363,7 +2476,7 @@ mod tests {
 	/// its path and scale, not skipped as a template call and not wrapped in a numbered figure.
 	#[test]
 	fn line_leading_padded_image_reads_as_image() -> Outcome<()> {
-		let (items, _skips) = res!(document_with_skips(
+		let (items, _skips) = res!(document_with_refusals(
 			"= Pearl\n\n#padded-image(\"assets/svg/pearlite_logo_text_right.svg\", scale: 45%)\n\nPearl is the format.\n"));
 		let img = res!(items.iter().find_map(|it| match it {
 			Item::Image { path, scale, .. }	=> Some((path.clone(), *scale)),
@@ -2381,7 +2494,7 @@ mod tests {
 	/// plain `#image`.
 	#[test]
 	fn line_leading_section_banner_reads_as_banner() -> Outcome<()> {
-		let (items, skips) = res!(document_with_skips(
+		let (items, skips) = res!(document_with_refusals(
 			"#section-banner(\"assets/svg/fe2o3_logo_text_right.svg\")\n\n= Steel Server\n\nSteel is the server.\n"));
 		let path = res!(items.iter().find_map(|it| match it {
 			Item::SectionBanner { path, .. }	=> Some(path.clone()),
@@ -2401,7 +2514,7 @@ mod tests {
 	/// reported as a skipped construct.
 	#[test]
 	fn line_leading_styled_box_reads_as_box() -> Outcome<()> {
-		let (items, skips) = res!(document_with_skips(
+		let (items, skips) = res!(document_with_refusals(
 			"Lead prose.\n\n#styled-box[\n*Principle.* Every participant is accountable.\n]\n\nTrailing prose.\n"));
 		let inner = res!(items.iter().find_map(|it| match it {
 			Item::Box { items, .. }	=> Some(items.clone()),
@@ -2580,8 +2693,8 @@ mod tests {
 				if term == "org" && display == "Elearnity Pty Ltd")),
 			"g did not translate the key to its value: {:?}", runs);
 		// An unknown key: the key text stands and the miss is recorded on the skip tally.
-		let mut skips = SkipSummary::default();
-		let runs = parse_inlines_in("A #t[nonesuch] term.", &mut skips);
+		let mut skips = Refusals::default();
+		let runs = parse_inlines_in("A #t[nonesuch] term.", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
 			"unknown term-dict key did not fall back to its text: {:?}", runs);
 		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
@@ -2592,7 +2705,7 @@ mod tests {
 	#[test]
 	fn blank_line_between_enum_items_continues_one_list() {
 		let src = "+ first item\n\n+ second item\n\n+ third item\n";
-		let (items, _) = document_with_skips(src).expect("parse");
+		let (items, _) = document_with_refusals(src).expect("parse");
 		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
 		assert_eq!(lists.len(), 1, "blank lines split the enum: {:?}", items);
 		match lists[0] {
@@ -2604,7 +2717,7 @@ mod tests {
 		}
 		// A paragraph between two lists still restarts, so genuinely separate lists are not merged.
 		let src2 = "+ a\n\n+ b\n\nA paragraph between.\n\n+ c\n";
-		let (items2, _) = document_with_skips(src2).expect("parse");
+		let (items2, _) = document_with_refusals(src2).expect("parse");
 		let lists2 = items2.iter().filter(|it| matches!(it, Item::List { .. })).count();
 		assert_eq!(lists2, 2, "prose between two lists did not restart them: {:?}", items2);
 	}
@@ -2614,7 +2727,7 @@ mod tests {
 	#[test]
 	fn indented_sub_bullet_nests_and_enum_continues() {
 		let src = "+ step one\n  - a sub point\n  - another sub point\n+ step two\n+ step three\n";
-		let (items, _) = document_with_skips(src).expect("parse");
+		let (items, _) = document_with_refusals(src).expect("parse");
 		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
 		assert_eq!(lists.len(), 1, "the sub-bullet split the enum into several lists: {:?}", items);
 		match lists[0] {
@@ -2641,7 +2754,7 @@ mod tests {
 	#[test]
 	fn two_level_nesting_parses_to_two_levels() {
 		let src = "+ outer step\n  - middle bullet\n    - inner bullet\n+ next step\n";
-		let (items, _) = document_with_skips(src).expect("parse");
+		let (items, _) = document_with_refusals(src).expect("parse");
 		let lists: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::List { .. })).collect();
 		assert_eq!(lists.len(), 1, "the deep nesting split the list: {:?}", items);
 		match lists[0] {
@@ -2671,8 +2784,8 @@ mod tests {
 	/// bracketed body folded in so its words survive; a paren-only call sets nothing where it stood.
 	#[test]
 	fn unknown_inline_call_is_recorded_not_leaked() {
-		let mut skips = SkipSummary::default();
-		let runs = parse_inlines_in("a #smallcaps[Nato] treaty and a #v(2pt) gap", &mut skips);
+		let mut skips = Refusals::default();
+		let runs = parse_inlines_in("a #smallcaps[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps") || t.contains("#v("))),
 			"raw unknown call leaked: {:?}", runs);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
@@ -2689,7 +2802,7 @@ mod tests {
 	fn skip_summary_reports_skipped_constructs() {
 		install_test_terms();	// so `#g[iniverse]` resolves and adds no term-dict miss to the tally
 		let src = "#import \"x.typ\": *\n#set page(margin: 1cm)\n\nBody with #g[iniverse] and a #footnote[note].\n\n#show heading: it => it\n";
-		let (_, skips) = document_with_skips(src).expect("parse");
+		let (_, skips) = document_with_refusals(src).expect("parse");
 		assert_eq!(skips.total(), 3);
 		let report = skips.report().expect("a report");
 		assert!(report.starts_with("skipped 3 unsupported constructs:"), "report was {:?}", report);
@@ -2697,8 +2810,57 @@ mod tests {
 			assert!(report.contains(name), "{} missing from {:?}", name, report);
 		}
 		// A source the reader sets whole has nothing to report.
-		let (_, clean) = document_with_skips("Just prose with #g[iniverse].\n").expect("parse");
+		let (_, clean) = document_with_refusals("Just prose with #g[iniverse].\n").expect("parse");
 		assert!(clean.is_empty() && clean.report().is_none());
+	}
+
+	/// A line-leading `#context[...]` -- Typst's self-observation entry point -- is refused as exactly
+	/// one site, classed `Introspective`, spanning the line it stands on.
+	#[test]
+	fn context_call_is_one_introspective_refusal() {
+		let src = "#context[whatever]\n";
+		let (_, refusals) = document_with_refusals(src).expect("parse");
+		assert_eq!(refusals.total(), 1, "expected exactly one refusal: {:?}", refusals.sites());
+		let site = &refusals.sites()[0];
+		assert_eq!(site.name, "#context");
+		assert_eq!(site.class, RefusalClass::Introspective);
+		assert_eq!(site.span, Span::new(0, src.len() as u32 - 1), "span should cover the line, sans its newline");
+	}
+
+	/// A line-leading `#query(...)` -- reading the document's own resolved structure back -- is refused
+	/// as exactly one site, classed `Introspective`.
+	#[test]
+	fn query_call_is_one_introspective_refusal() {
+		let src = "#query(heading)\n";
+		let (_, refusals) = document_with_refusals(src).expect("parse");
+		assert_eq!(refusals.total(), 1, "expected exactly one refusal: {:?}", refusals.sites());
+		let site = &refusals.sites()[0];
+		assert_eq!(site.name, "#query");
+		assert_eq!(site.class, RefusalClass::Introspective);
+		assert_eq!(site.span, Span::new(0, src.len() as u32 - 1));
+	}
+
+	/// A line-leading `#state(...)` call -- a state read/write that only resolves against Typst's own
+	/// layout observation -- is refused as exactly one site, classed `Introspective`.
+	#[test]
+	fn state_call_is_one_introspective_refusal() {
+		let src = "#state(\"count\", 0)\n";
+		let (_, refusals) = document_with_refusals(src).expect("parse");
+		assert_eq!(refusals.total(), 1, "expected exactly one refusal: {:?}", refusals.sites());
+		let site = &refusals.sites()[0];
+		assert_eq!(site.name, "#state");
+		assert_eq!(site.class, RefusalClass::Introspective);
+		assert_eq!(site.span, Span::new(0, src.len() as u32 - 1));
+	}
+
+	/// The three classes land where the classifier's own doc comment says they should: Typst's general
+	/// evaluation primitives are `FixedPoint`, an unrecognised call or wrapper is `Unsupported`.
+	#[test]
+	fn refusal_class_sorts_fixed_point_and_unsupported_correctly() {
+		assert_eq!(RefusalClass::classify("#let"), RefusalClass::FixedPoint);
+		assert_eq!(RefusalClass::classify("#show"), RefusalClass::FixedPoint);
+		assert_eq!(RefusalClass::classify("#columns"), RefusalClass::Unsupported);
+		assert_eq!(RefusalClass::classify("#smallcaps"), RefusalClass::Unsupported);
 	}
 
 	/// A `#columns(n)[ ... ]` wrapper is recorded as skipped and its body set single-column, so the words
@@ -2706,7 +2868,7 @@ mod tests {
 	#[test]
 	fn columns_wrapper_flattens_to_single_column() {
 		let src = "#columns(2)[\nFirst paragraph here.\n\nSecond paragraph here.\n]\n";
-		let (items, skips) = document_with_skips(src).expect("parse");
+		let (items, skips) = document_with_refusals(src).expect("parse");
 		let paras = items.iter().filter(|it| matches!(it, Item::Paragraph { .. })).count();
 		assert_eq!(paras, 2, "column body not set as paragraphs: {:?}", items);
 		assert_eq!(skips.entries(), vec![("#columns".to_string(), 1)]);
@@ -2730,7 +2892,7 @@ mod tests {
 	#[test]
 	fn equals_lead_row_inside_display_math_stays_in_block() -> Outcome<()> {
 		let src = "Total hashes.\n\n$\nN &= sum_(j=1)^J n_j \\\n=> 2N &= sum_(j=2)^(J+1) 2^(j-1) \\\n=> 2N - N &= 2^J - 1 \\\n$\n\nEnd of block.\n";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		assert!(!items.iter().any(|it| matches!(it, Item::Heading { .. })),
 			"a `=`-lead row inside the block must not become a heading: {:?}", items);
 		let has_align = items.iter().any(|it| matches!(it,
@@ -2746,7 +2908,7 @@ mod tests {
 	#[test]
 	fn dash_lead_row_inside_display_math_stays_in_block() -> Outcome<()> {
 		let src = "$\na &= b \\\n- tilde(N)_(1 0) u (x) = 0 \\\nc &= d\n$\n";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		assert!(!items.iter().any(|it| matches!(it, Item::List { .. })),
 			"a `-`-lead row inside the block must not become a list: {:?}", items);
 		let (runs, _label) = res!(one_paragraph(&items));
@@ -2761,7 +2923,7 @@ mod tests {
 	#[test]
 	fn blank_line_inside_display_math_stays_in_block_and_label_still_attaches() -> Outcome<()> {
 		let src = "$\na &= b \\\n\nc &= d\n$ <eq_test>\n";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let (runs, label) = res!(one_paragraph(&items));
 		assert!(matches!(runs.as_slice(), [Inline::Math(Atom::Matrix { kind: MatKind::Align, .. })]),
 			"expected one display alignment run, got: {:?}", runs);
@@ -2815,7 +2977,7 @@ mod tests {
 
 Trailing prose.
 ";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let (caption, supplement, label) = res!(one_figure(&items));
 		let caption = res!(caption.ok_or_else(|| err!("the figure lost its caption"; Test, Bug)));
 		assert!(plain(&caption).contains("Representative processing times"),
@@ -2842,7 +3004,7 @@ Trailing prose.
 
 After the figure.
 ";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let (caption, _supplement, label) = res!(one_figure(&items));
 		let caption = res!(caption.ok_or_else(|| err!("the maths caption was lost"; Test, Bug)));
 		assert!(plain(&caption).contains("see") && plain(&caption).contains("where it holds"),
@@ -2862,7 +3024,7 @@ After the figure.
 	#[test]
 	fn code_string_paren_does_not_count() -> Outcome<()> {
 		let src = "#figure(image(\"a(b).png\"), caption: [c])\n\nNext paragraph.\n";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let (caption, _supplement, _label) = res!(one_figure(&items));
 		let caption = res!(caption.ok_or_else(|| err!("the figure lost its caption"; Test, Bug)));
 		assert_eq!(plain(&caption), "c", "the caption was misread past the string paren: {:?}", caption);
@@ -2890,7 +3052,7 @@ After the figure.
 
 Following text.
 ";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let (caption, _supplement, label) = res!(one_figure(&items));
 		let caption = res!(caption.ok_or_else(|| err!("the call caption was lost"; Test, Bug)));
 		assert!(plain(&caption).contains("see") && plain(&caption).contains("note (z"),
@@ -2938,7 +3100,7 @@ Following text.
 		let src = "passes its own pair to #raw(\"read_message\"), or to\n\
 #raw(\"WebSocket::with_limits\"). There is deliberately no way to express \"no\n\
 bound\".\n";
-		let (items, _skips) = res!(document_with_skips(src));
+		let (items, _skips) = res!(document_with_refusals(src));
 		let text: String = items.iter()
 			.filter_map(|it| match it {
 				Item::Paragraph { runs, .. }	=> Some(plain(runs)),

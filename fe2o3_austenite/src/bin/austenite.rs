@@ -117,6 +117,7 @@ struct CompileStats {
 	passes:		u32,
 	anchors:	usize,
 	skip_line:	Option<String>,
+	refusals:	lang::Refusals,	// every refused site, for `--explain`; the terse `skip_line` stays the default
 }
 
 /// Renders one page to both artefacts, the pure work a chunk runs across the cores. The SVG is written
@@ -135,7 +136,7 @@ fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
 /// The one terse skip line -- `skipped: #show ×2, #columns ×1` -- built from the summary's per-name
 /// counts, or `None` when the reader set everything it met. Ordered by the summary (descending count,
 /// then name), so the line leads with the construct that cost the most.
-fn terse_skip_line(skips: &lang::SkipSummary) -> Option<String> {
+fn terse_skip_line(skips: &lang::Refusals) -> Option<String> {
 	if skips.is_empty() {
 		return None;
 	}
@@ -143,6 +144,58 @@ fn terse_skip_line(skips: &lang::SkipSummary) -> Option<String> {
 		.map(|(n, c)| fmt!("{} ×{}", n, c))
 		.collect();
 	Some(fmt!("skipped: {}", parts.join(", ")))
+}
+
+/// The detailed report `--explain` prints: every refused site, one per line, as `file:line:col: <class>:
+/// skipped <name>` with the source line beneath it and a `^` caret under the column the span starts at.
+/// Each referenced file is read at most once, cached by path, and a file that has since moved or gone
+/// (a rare race, not the common case) yields a one-line note in its place rather than failing the whole
+/// report -- `--explain` is a diagnostic, and a diagnostic that can fail is a worse tool than one that
+/// degrades. Sites are printed in the order the reader met them, which is document order within a file
+/// and file order (root first, then each `#include` as it is read) across a whole book.
+fn explain_refusals(refusals: &lang::Refusals) -> String {
+	let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
+	let mut out = String::new();
+	for r in refusals.sites() {
+		let text = cache.entry(r.file.clone())
+			.or_insert_with(|| std::fs::read_to_string(&r.file).ok());
+		match text {
+			Some(src) => {
+				let (line_no, col, line_text) = line_col_of(src, r.span.start);
+				out.push_str(&fmt!("{}:{}:{}: {}: skipped {}\n", r.file, line_no, col, r.class.label(), r.name));
+				out.push_str(line_text);
+				out.push('\n');
+				for _ in 1..col { out.push(' '); }
+				out.push_str("^\n");
+			},
+			None => {
+				out.push_str(&fmt!("{}: {}: skipped {} (source no longer readable for a caret)\n",
+					r.file, r.class.label(), r.name));
+			},
+		}
+	}
+	out
+}
+
+/// The 1-based line and column a byte offset falls on within `src`, and the full text of that line (its
+/// trailing newline trimmed), for a `--explain` caret. The column is a byte offset within the line, not
+/// a character count, matching [`crate::ir::Span`]'s own byte-based accounting.
+fn line_col_of(src: &str, offset: u32) -> (usize, usize, &str) {
+	let offset = (offset as usize).min(src.len());
+	let mut line_no		= 1usize;
+	let mut line_start	= 0usize;
+	for (i, b) in src.bytes().enumerate() {
+		if i >= offset {
+			break;
+		}
+		if b == b'\n' {
+			line_no += 1;
+			line_start = i + 1;
+		}
+	}
+	let line_end = src[line_start..].find('\n').map(|p| line_start + p).unwrap_or(src.len());
+	let col = offset.saturating_sub(line_start) + 1;
+	(line_no, col, &src[line_start..line_end])
 }
 
 /// Each ledger anchor's kind, label (its content key) and resolved page, as a small JSON array -- the
@@ -232,12 +285,14 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	// The terse skip line, set from whichever path assembles the source: a book or doc root through
 	// `book::load`'s merged tally, a lone file through its own reader summary.
 	let skip_line: Option<String>;
+	let refusals: lang::Refusals;
 	let (blocks, fonts, geom, style, title, heading, front, bib) = if book::is_book_root(&src) {
-		// A book or doc root assembles its chapters through the reader and merges each chapter's skip tally
-		// into one summary, so a whole-book or whole-doc compile reports its skipped constructs on the same
-		// terse line the lone-file path prints.
+		// A book or doc root assembles its chapters through the reader and merges each chapter's refusal
+		// table into one, so a whole-book or whole-doc compile reports its skipped constructs on the same
+		// terse line the lone-file path prints, and `--explain` walks every chapter's sites.
 		let spec = res!(book::load(std::path::Path::new(source)));
 		skip_line = terse_skip_line(&spec.skips);
+		refusals = spec.skips;
 		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
 	} else {
 		// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
@@ -246,8 +301,10 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 			res!(book::install_term_dict(dir));
 			res!(book::install_term_defs(dir));
 		}
-		let (mut blocks, skips)	= res!(lang::to_blocks_with_skips(&src));
+		let (mut blocks, mut skips)	= res!(lang::to_blocks_with_refusals(&src));
+		skips.tag_file(source);
 		skip_line = terse_skip_line(&skips);
+		refusals = skips;
 		// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
 		book::resolve_glossary(&mut blocks);
 		// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile
@@ -428,6 +485,7 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		passes:		out.passes,
 		anchors:	out.ledger.len(),
 		skip_line,
+		refusals,
 	})
 }
 
@@ -524,11 +582,12 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 }
 
 fn main() -> Outcome<()> {
-	// Flags may precede or follow the paths; only `--watch` (`-w`), `--pearl` and `--ledger-out <path>`
-	// are recognised, everything else is a positional argument in order: the source root, then the
-	// optional output directory.
+	// Flags may precede or follow the paths; only `--watch` (`-w`), `--pearl`, `--ledger-out <path>` and
+	// `--explain` are recognised, everything else is a positional argument in order: the source root,
+	// then the optional output directory.
 	let mut watching	= false;
 	let mut pearl		= false;
+	let mut explain		= false;
 	let mut ledger_out:	Option<String>	= None;
 	let mut pos:	Vec<String>	= Vec::new();
 	let mut args = std::env::args().skip(1);
@@ -536,6 +595,7 @@ fn main() -> Outcome<()> {
 		match a.as_str() {
 			"--watch" | "-w"	=> watching = true,
 			"--pearl"			=> pearl = true,
+			"--explain"			=> explain = true,
 			"--ledger-out"		=> {
 				ledger_out = Some(match args.next() {
 					Some(p)	=> p,
@@ -549,7 +609,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--ledger-out PATH] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
@@ -584,11 +644,90 @@ fn main() -> Outcome<()> {
 
 	let t = std::time::Instant::now();
 	let stats = res!(compile(&source, &out_dir, pearl, ledger_out.as_deref()));
-	if let Some(skip) = &stats.skip_line {
+	if explain {
+		print!("{}", explain_refusals(&stats.refusals));
+	} else if let Some(skip) = &stats.skip_line {
 		eprintln!("[austenite] {}", skip);
 	}
 	println!(
 		"austenite: {} -> {} page(s) in {} pass(es); {} anchor(s) in the ledger; {:.2}s; written to {}/",
 		source, stats.pages, stats.passes, stats.anchors, t.elapsed().as_secs_f64(), out_dir);
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use oxedyne_fe2o3_austenite::ir::Span;
+	use oxedyne_fe2o3_austenite::lang::{Refusal, RefusalClass, Refusals};
+
+	/// A pure check of the byte-offset-to-line/column arithmetic `--explain`'s caret depends on, with no
+	/// file on disk involved: the third line, its fifth byte (the `d` of "third").
+	#[test]
+	fn line_col_of_finds_the_right_line_and_column() {
+		let src = "first\nsecond\nthird line\n";
+		let offset = src.find("d line").expect("fixture text") as u32;
+		let (line_no, col, text) = line_col_of(src, offset);
+		assert_eq!(line_no, 3, "wrong line for offset {}", offset);
+		assert_eq!(col, 5, "wrong column for offset {}", offset);
+		assert_eq!(text, "third line");
+	}
+
+	/// `line_col_of` on the very first byte reports line 1, column 1 -- the boundary a fencepost error
+	/// would miss.
+	#[test]
+	fn line_col_of_handles_the_first_byte() {
+		let (line_no, col, text) = line_col_of("hello\nworld\n", 0);
+		assert_eq!((line_no, col), (1, 1));
+		assert_eq!(text, "hello");
+	}
+
+	/// `--explain`'s report for a site whose file can no longer be read (moved, deleted -- a rare race,
+	/// not the common case) degrades to a one-line note naming the class and construct, rather than
+	/// failing the whole report or panicking.
+	#[test]
+	fn explain_degrades_when_the_file_cannot_be_read() {
+		let refusals = Refusals::from_sites(vec![Refusal {
+			name:	"#query".to_string(),
+			span:	Span::new(0, 0),
+			class:	RefusalClass::Introspective,
+			file:	"/nonexistent/path/for/an/austenite/explain/test.typ".to_string(),
+		}]);
+		let report = explain_refusals(&refusals);
+		assert!(report.contains("introspective"), "class label missing: {:?}", report);
+		assert!(report.contains("#query"), "construct name missing: {:?}", report);
+		assert!(report.contains("no longer readable"), "no degraded-file note: {:?}", report);
+	}
+
+	/// `--explain`'s report for a readable file names it, its 1-based line and column, the refusal's
+	/// class and name, the source line itself, and a caret under the column the span starts at -- the
+	/// full shape a reader relies on to jump straight to the site.
+	#[test]
+	fn explain_reports_file_line_col_class_name_and_a_caret() -> Outcome<()> {
+		let dir = std::env::temp_dir().join(fmt!("austenite-explain-test-{}", std::process::id()));
+		res!(std::fs::create_dir_all(&dir));
+		let path = dir.join("fixture.typ");
+		let src = "= Heading\n\n#context[whatever]\n";
+		res!(std::fs::write(&path, src));
+
+		let offset = res!(src.find("#context")
+			.ok_or_else(|| err!("Fixture text lost its own marker."; Bug, Missing))) as u32;
+		let refusals = Refusals::from_sites(vec![Refusal {
+			name:	"#context".to_string(),
+			span:	Span::new(offset, offset + "#context[whatever]".len() as u32),
+			class:	RefusalClass::Introspective,
+			file:	path.display().to_string(),
+		}]);
+		let report = explain_refusals(&refusals);
+
+		let _ = std::fs::remove_file(&path);
+		let _ = std::fs::remove_dir(&dir);
+
+		let expected_head = fmt!("{}:3:1: introspective: skipped #context", path.display());
+		assert!(report.starts_with(&expected_head), "report was {:?}", report);
+		let lines: Vec<&str> = report.lines().collect();
+		assert_eq!(lines.get(1), Some(&"#context[whatever]"), "source line missing: {:?}", report);
+		assert_eq!(lines.get(2), Some(&"^"), "caret missing or misplaced: {:?}", report);
+		Ok(())
+	}
 }
