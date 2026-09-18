@@ -801,10 +801,12 @@ const GLOSSARY_INSET_PT: f64 = 6.0;
 /// (the `g`/`gcap` family) and the key itself otherwise (the `gs` family), reproducing the metadata
 /// `value` the template stores; the Definition column carries the parsed definition content.
 pub fn resolve_glossary(blocks: &mut Vec<Block>) {
-	let idx = match blocks.iter().position(|b| matches!(b, Block::Glossary)) {
-		Some(i)	=> i,
-		None	=> return,
-	};
+	// The placeholder may sit inside a scoped (or callout) subtree -- an included chapter's own
+	// `#print-glossary()` -- not only at top level, so it is sought through the whole tree. With none
+	// anywhere, nothing is built, exactly as before.
+	if !any_glossary(blocks) {
+		return;
+	}
 	// The glossary term keys in first-appearance order, deduplicated, keeping only those with a definition.
 	let mut seen:		HashSet<String>	= HashSet::new();
 	let mut ordered:	Vec<String>		= Vec::new();
@@ -835,7 +837,38 @@ pub fn resolve_glossary(blocks: &mut Vec<Block>) {
 	let mut table		= Table::with_weights(true, rows, vec![1.0, 3.0]);
 	table.text_size		= Some(Sp::from_pt(GLOSSARY_TEXT_PT));
 	table.inset			= Some(Sp::from_pt(GLOSSARY_INSET_PT));
-	blocks[idx] = Block::Table(table);
+	// Replace the first placeholder in document order, wherever in the tree it sits, with the built table.
+	let _ = replace_first_glossary(blocks, Block::Table(table));
+}
+
+/// Is there a `#print-glossary()` placeholder anywhere in the tree, descending into scoped and callout
+/// subtrees? The guard that keeps [`resolve_glossary`] from building a table no placeholder will consume.
+fn any_glossary(blocks: &[Block]) -> bool {
+	blocks.iter().any(|b| match b {
+		Block::Glossary									=> true,
+		Block::Scoped { blocks, .. } | Block::Box { blocks, .. }	=> any_glossary(blocks),
+		_											=> false,
+	})
+}
+
+/// Replaces the first [`Block::Glossary`] placeholder in document order -- at top level or inside a scoped
+/// or callout subtree -- with `table`, returning `Ok(())` when it did and `Err(table)` (the table handed
+/// back) when the slice held no placeholder, so the search threads on through the rest of the tree.
+fn replace_first_glossary(blocks: &mut [Block], table: Block) -> Result<(), Block> {
+	let mut slot = table;
+	for b in blocks.iter_mut() {
+		if matches!(b, Block::Glossary) {
+			*b = slot;
+			return Ok(());
+		}
+		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } = b {
+			match replace_first_glossary(inner, slot) {
+				Ok(())			=> return Ok(()),
+				Err(returned)	=> slot = returned,	// not in this subtree; keep the table and walk on
+			}
+		}
+	}
+	Err(slot)
 }
 
 /// Walks one block's rich runs, recording each glossary term key on its first appearance -- in document
@@ -2166,6 +2199,30 @@ mod tests {
 		assert_eq!(term_of(1), "meet", "first appearance, a key with no dict value shows the key itself");
 		assert_eq!(term_of(2), "Oxegence Foundation", "second appearance, a key with a dict value shows it");
 		Ok(())
+	}
+
+	/// A `#print-glossary()` placeholder inside a scoped subtree -- an included chapter's own call -- is found
+	/// and filled in place, not dropped: the resolver descends into the scope and swaps the nested placeholder
+	/// for the glossary table. Before it recursed, only a top-level placeholder was ever seen, so a scoped
+	/// call silently vanished. Needs no term definitions: with none, a header-only table is built and set.
+	#[test]
+	fn test_resolve_glossary_fills_a_placeholder_inside_a_scope_12() -> Outcome<()> {
+		let mut blocks = vec![
+			Block::paragraph("Body."),
+			Block::Scoped {
+				patch:	ThemePatch::default(),
+				blocks:	vec![Block::Glossary],
+			},
+		];
+		resolve_glossary(&mut blocks);
+		let inner = match &blocks[1] {
+			Block::Scoped { blocks, .. }	=> blocks,
+			other							=> return Err(err!("the scope must survive resolution, found {:?}", other; Test, Bug)),
+		};
+		match &inner[0] {
+			Block::Table(_)	=> Ok(()),
+			other			=> Err(err!("a #print-glossary inside a scope must be filled, found {:?}", other; Test, Bug)),
+		}
 	}
 }
 

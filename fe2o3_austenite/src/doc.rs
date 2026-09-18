@@ -495,19 +495,44 @@ struct Authoring<'a> {
 	seen:			HashSet<String>,
 }
 
+/// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
+/// level, and the theme it is set under. A heading that is the last block of a [`Block::Scoped`] reads this
+/// so its "keep with the next paragraph" pairing sees through the scope's closing edge to the sibling
+/// beyond it, rather than stranding the heading and setting the gap's leading twice. The continuation is
+/// carried with its own (parent) theme, since it lies outside the scope the heading sits in. `None` at the
+/// top level, where the slice has no parent to continue from.
+#[derive(Clone, Copy)]
+struct Cont<'a> {
+	block:	&'a Block,
+	theme:	&'a Theme,
+}
+
 impl<'a> Authoring<'a> {
 	/// Sets a block slice under `style`, the theme in force for it. A [`Block::Scoped`] overlays its patch
 	/// on `style` and recurses over its own blocks under that scoped theme, so a `#set` inside an included
 	/// chapter (or any bracketed subtree) styles only that subtree; the shared counters count on across the
 	/// boundary. With no scope -- every corpus document today -- `style` is the document theme throughout, so
 	/// the render is byte-identical.
-	fn walk(&mut self, blocks: &[Block], style: &Theme) -> Outcome<()> {
+	///
+	/// `cont` is the block that follows this slice at the parent's level (`None` at the top). Returns whether
+	/// the slice's final heading pulled that continuation paragraph into its keep box -- the caller then skips
+	/// the paragraph rather than setting it a second time, so a heading alone in a scope still keeps with the
+	/// sibling paragraph beyond the scope edge.
+	fn walk(&mut self, blocks: &[Block], style: &Theme, cont: Option<Cont<'_>>) -> Outcome<bool> {
+		// Set when the final heading of this slice keeps with the parent's continuation paragraph, so the
+		// caller skips that paragraph rather than setting it twice.
+		let mut consumed_cont = false;
 		let mut i = 0usize;
 		while i < blocks.len() {
 			if let Block::Scoped { patch, blocks: inner } = &blocks[i] {
 				let scoped = { let mut t = style.clone(); t.apply(patch); t };
-				res!(self.walk(inner, &scoped));
-				i += 1;
+				// The continuation for the scoped slice is the block that follows the scope at THIS level, set
+				// under THIS theme -- so a heading ending the scope keeps with the sibling paragraph beyond it.
+				let inner_cont = blocks.get(i + 1).map(|b| Cont { block: b, theme: style });
+				let ate = res!(self.walk(inner, &scoped, inner_cont));
+				// The scope's last heading kept with the following sibling paragraph: skip past it here, since
+				// the inner walk already set it.
+				i += if ate { 2 } else { 1 };
 				continue;
 			}
 			match &blocks[i] {
@@ -592,16 +617,34 @@ impl<'a> Authoring<'a> {
 					keep.push(Node::Glue(Glue::fixed(style.space_below(*level))));
 					let mut rest:	Vec<Node> = Vec::new();
 					let mut consumed_para = false;
-					if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
+					// The paragraph the heading keeps with: its in-slice next sibling, or -- when the heading is
+					// the last block of a scope -- the parent's continuation beyond the scope's closing edge. The
+					// continuation is broken under its own (parent) theme, since it lies outside this scope.
+					let (look, look_theme): (Option<&Block>, &Theme) = if i + 1 < blocks.len() {
+						(Some(&blocks[i + 1]), style)
+					} else {
+						match cont {
+							Some(c)	=> (Some(c.block), c.theme),
+							None	=> (None, style),
+						}
+					};
+					if let Some(Block::Paragraph { text: para }) = look {
 						// The first paragraph after a heading opens the section, so it takes no first-line indent.
 						let mut lines = res!(break_paragraph(
-							self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, self.measure, style.text.leading, style.text.hyphenate));
+							self.fonts.clone(), Role::Body, Dir::Ltr, look_theme.text.body_size, para, self.measure, look_theme.text.leading, look_theme.text.hyphenate));
 						if !lines.is_empty() {
 							keep.push(lines.remove(0));	// the first line joins the heading
 							rest = lines;				// its leading glue and the remaining lines follow
 						}
 						consumed_para = true;
-						i += 2;
+						if i + 1 < blocks.len() {
+							i += 2;
+						} else {
+							// The paragraph was the parent's continuation, in the parent's slice: leave it there
+							// for the caller to skip, since this walk cannot advance past its own slice's end.
+							consumed_cont = true;
+							i += 1;
+						}
 					} else {
 						i += 1;
 					}
@@ -830,7 +873,7 @@ impl<'a> Authoring<'a> {
 				Block::Scoped { .. } => { i += 1; },
 			}
 		}
-		Ok(())
+		Ok(consumed_cont)
 	}
 }
 
@@ -853,7 +896,7 @@ pub fn author(
 {
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
-	let refs = ref_targets(blocks);
+	let refs = ref_targets(blocks, style);
 	let mut authoring = Authoring {
 		fonts:		fonts.clone(),
 		geom,
@@ -875,7 +918,8 @@ pub fn author(
 		counters:	HashMap::new(),
 		seen:		HashSet::new(),
 	};
-	res!(authoring.walk(blocks, style));
+	// The top level has no parent continuation; the returned "consumed" flag is meaningless here and dropped.
+	res!(authoring.walk(blocks, style, None));
 	let heads = authoring.heads;
 
 	// The front matter is composed ahead of the body so its cover, title, imprint and note leaves take
@@ -930,13 +974,35 @@ fn indent_piece(indent: Sp) -> Piece {
 /// figure and equation counters are stepped exactly as [`author`] steps them, so a label's number here is
 /// the number the block itself sets -- a chapter, section, figure, table or "Equation N". A label the
 /// pre-pass never records is left for the caller's page-number fallback.
-fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
+fn ref_targets(blocks: &[Block], style: &Theme) -> HashMap<String, String> {
 	let mut out:		HashMap<String, String>	= HashMap::new();
 	let mut sec:		[u32; 6]				= [0; 6];
 	let mut counters:	HashMap<String, u32>	= HashMap::new();
 	let mut eq_no		= 0u32;	// the equation counter, stepped exactly as `author` steps it
+	ref_targets_walk(blocks, style, &mut out, &mut sec, &mut counters, &mut eq_no);
+	out
+}
+
+/// The document-order counting walk behind [`ref_targets`], recursing into a [`Block::Scoped`] under its
+/// overlaid theme with the counters shared across the boundary -- exactly as [`Authoring::walk`] numbers
+/// the same tree, so a heading, figure or equation inside a scope takes the number it will actually be set
+/// with, and a cross-reference after or into a scope resolves to the right one. The heading number is read
+/// through [`heading_number_themed`], honouring any per-level numbering pattern the scope's theme carries,
+/// so a numbered pattern matches the rendered heading rather than the plain dotted arabic.
+fn ref_targets_walk(
+	blocks:		&[Block],
+	style: &Theme,
+	out:		&mut HashMap<String, String>,
+	sec:		&mut [u32; 6],
+	counters:	&mut HashMap<String, u32>,
+	eq_no:		&mut u32,
+) {
 	for block in blocks {
 		match block {
+			Block::Scoped { patch, blocks: inner } => {
+				let scoped = { let mut t = style.clone(); t.apply(patch); t };
+				ref_targets_walk(inner, &scoped, out, sec, counters, eq_no);
+			},
 			Block::Heading { level, label, .. } => {
 				if *level >= 1 {
 					let l = (*level as usize).min(6);
@@ -944,7 +1010,7 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 					for k in l..6 { sec[k] = 0; }
 				}
 				if let Some(l) = label {
-					let number = heading_number(*level, &sec);
+					let number = heading_number_themed(*level, sec, style);
 					// A chapter (level 1) takes the "Chapter" supplement the template sets; a deeper heading
 					// takes "Section" with its full dotted number, as Typst's default heading reference does. A
 					// part divider (level 0) carries no number and is no reference target.
@@ -959,7 +1025,7 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 			Block::TableFigure { supplement, label, .. }
 			| Block::ImageFigure { supplement, label, .. }
 			| Block::CodeFigure { supplement, label, .. } => {
-				let n = next_number(&mut counters, supplement);
+				let n = next_number(counters, supplement);
 				if let Some(l) = label {
 					out.insert(l.clone(), fmt!("{} {}", supplement, n));
 				}
@@ -969,16 +1035,18 @@ fn ref_targets(blocks: &[Block]) -> HashMap<String, String> {
 				// default equation reference. An unnumbered equation carries no number, so its label is
 				// left to the caller's page-number fallback.
 				if *numbered {
-					eq_no += 1;
+					*eq_no += 1;
 					if let Some(l) = label {
-						out.insert(l.clone(), fmt!("Equation {}", eq_no));
+						out.insert(l.clone(), fmt!("Equation {}", *eq_no));
 					}
 				}
 			},
+			// A `#styled-box` body sets running prose only -- `Authoring::walk` numbers no heading, figure or
+			// equation inside it -- so a label there is no numbered target and the box is not descended, exactly
+			// as the render leaves it.
 			_ => {},
 		}
 	}
-	out
 }
 
 /// Turns a rich paragraph's segments into the pieces the line breaker weaves, assigning each footnote
@@ -4372,6 +4440,84 @@ mod tests {
 		for l in &mut alpha.heading.levels { l.numbering = Some("A".to_string()); }
 		let (_, heads_a) = res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads_a[0].number, "A", "a heading numbering pattern must reach the rendered number");
+		Ok(())
+	}
+
+	/// A heading inside a scope is counted in document order, and a cross-reference into that scope resolves
+	/// its number: `[Scoped{[H1 "A" <a>]}, H1 "B", @a]` numbers the headings 1 and 2 and resolves `@a` to
+	/// "Chapter 1". Before the reference pre-pass recursed into a `Block::Scoped`, the scoped heading was
+	/// invisible to it -- `@a` fell back to a page number and the top-level "B" would have taken "Chapter 1"
+	/// -- so this fixture would have caught that blindness.
+	#[test]
+	fn cross_reference_into_a_scope_resolves_the_scoped_heading_number() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();	// BookOpener: headings carry a document-order number
+		let heading = |t: &str, label: Option<&str>| Block::Heading {
+			level:		1,
+			segments:	vec![Segment::text(t)],
+			label:		label.map(|s| s.to_string()),
+		};
+		let blocks = vec![
+			Block::Scoped { patch: ThemePatch::default(), blocks: vec![heading("A", Some("a"))] },
+			heading("B", None),
+			Block::RichParagraph { segments: vec![Segment::page_ref("a".to_string())] },
+		];
+
+		// The reference pre-pass sees the heading inside the scope: `@a` resolves to "Chapter 1", the number
+		// that heading actually takes -- not a page-number fallback, and not the top-level count.
+		let refs = ref_targets(&blocks, &style);
+		assert_eq!(refs.get("a").map(String::as_str), Some("Chapter 1"),
+			"a cross-reference into a scope must resolve the scoped heading's own number");
+
+		// And the headings number 1, 2 in document order across the scope boundary.
+		let (_, heads) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
+		let nums: Vec<&str> = heads.iter().map(|h| h.number.as_str()).collect();
+		assert_eq!(nums, vec!["1", "2"], "headings number in document order across a scope edge");
+		Ok(())
+	}
+
+	/// A sub-heading alone in a scope still keeps with the sibling paragraph beyond the scope's closing edge:
+	/// `[P, Scoped{[H2]}, P]` sets an identical node stream to the flat `[P, H2, P]`, the heading's first
+	/// paragraph line joining its keep box either way. This is the "keep with next" gate a per-element
+	/// heading rule (which wraps each heading in its own scope) relies on to stay byte-identical.
+	#[test]
+	fn a_scoped_heading_keeps_with_the_paragraph_beyond_the_scope() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let para	= |t: &str| Block::Paragraph { text: t.to_string() };
+		let h2		= || Block::Heading { level: 2, segments: vec![Segment::text("A Section")], label: None };
+		let body	= "A paragraph long enough to set at least one full line of body text on the page, \
+			and then a little more to be sure it wraps onto a second line.";
+
+		// A signature of the node stream: each node's kind tag and its vertical extent, which together fix
+		// where the heading keep box sits and how the following paragraph's lines are placed.
+		fn sig(doc: &Document) -> Vec<(u8, i32)> {
+			doc.nodes.iter().map(|n| {
+				let tag = match n {
+					Node::HBox(_)		=> 0u8,
+					Node::VBox(_)		=> 1,
+					Node::Glue(_)		=> 2,
+					Node::Penalty(_)	=> 3,
+					_					=> 9,
+				};
+				(tag, n.vextent().raw())
+			}).collect()
+		}
+
+		let flat = vec![para("Intro."), h2(), para(body)];
+		let (doc_flat, _) = res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &flat, None, None));
+
+		let wrapped = vec![
+			para("Intro."),
+			Block::Scoped { patch: ThemePatch::default(), blocks: vec![h2()] },
+			para(body),
+		];
+		let (doc_wrap, _) = res!(author(fonts, geom, &style, &FaceResolver::default(), &wrapped, None, None));
+
+		assert_eq!(sig(&doc_flat), sig(&doc_wrap),
+			"a heading alone in a scope must keep with the sibling paragraph beyond it, exactly as the flat pairing does");
 		Ok(())
 	}
 
