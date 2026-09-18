@@ -1106,13 +1106,13 @@ enum Frame {
 /// skip is still open while it is not. `escaped` records that the previous character was a `\` inside a
 /// string, maths span or content block, so a `\"`, `\$` or `\]` is passed over rather than closing its
 /// frame. Both persist across the lines of a span, since a frame may straddle the line break.
-struct SkipState {
+pub(crate) struct SkipState {
 	frames:		Vec<Frame>,
 	escaped:	bool,
 }
 
 impl SkipState {
-	fn new() -> Self {
+	pub(crate) fn new() -> Self {
 		SkipState { frames: Vec::new(), escaped: false }
 	}
 
@@ -1126,7 +1126,7 @@ impl SkipState {
 	/// capture test, matching the old flat `depth > 0`: a dangling `"` or `$` left open at the end of a line
 	/// does not keep a construct open, since in prose a stray quote (an author's `"no bound"` split across
 	/// two lines after an inline `#raw("...")`) or a lone `$` is a character, not the start of a code span.
-	fn has_open_bracket(&self) -> bool {
+	pub(crate) fn has_open_bracket(&self) -> bool {
 		self.frames.iter().any(|f| matches!(f, Frame::Code | Frame::Content))
 	}
 
@@ -1285,7 +1285,7 @@ fn is_inline_call(name: &str) -> bool {
 /// Folds one line's delimiters into the running [`SkipState`]. A bracket inside a `"..."` string, a `$...$`
 /// maths span or a `[...]` content block is not counted as structural nesting; the frame stack decides.
 /// The state carries into the next line, so a frame that straddles the break is tracked correctly.
-fn scan_brackets(line: &str, state: &mut SkipState) {
+pub(crate) fn scan_brackets(line: &str, state: &mut SkipState) {
 	let chars: Vec<char> = line.chars().collect();
 	let mut i = 0;
 	while i < chars.len() {
@@ -1839,9 +1839,7 @@ fn dispatch_capture(
 					if patch == crate::theme::ThemePatch::default() {
 						items.append(&mut inner);
 					} else {
-						items.push(Item::ScopePush(patch));
-						items.append(&mut inner);
-						items.push(Item::ScopePop);
+						items.push(Item::Scoped { patch, items: inner });
 					}
 				}
 			}
@@ -2604,23 +2602,23 @@ mod tests {
 	}
 
 	/// A `#columns[...]` body's own top-level `#set` declarations scope to the spliced subtree (H1's
-	/// flat-splice sibling): the reader brackets the spliced items in an `Item::ScopePush`/`ScopePop`
-	/// carrying the lowered patch. A columns body that declares nothing splices in flat, with no markers.
+	/// flat-splice sibling): the reader nests the spliced items inside one `Item::Scoped` carrying the
+	/// lowered patch. A columns body that declares nothing splices in flat, with no scope.
 	#[test]
 	fn columns_body_set_scopes_the_spliced_subtree() -> Outcome<()> {
 		let (items, _skips) = res!(document_with_refusals(
 			"#columns(2)[\n#set text(size: 20pt)\n\nScoped body.\n]\n"));
-		let push = res!(items.iter().find_map(|it| match it {
-			Item::ScopePush(p)	=> Some(p.clone()),
-			_					=> None,
-		}).ok_or_else(|| err!("no Item::ScopePush was produced for a columns body with a #set"; Test, Bug)));
-		assert_eq!(push.text.body_size, Some(crate::ir::Sp::from_pt(20.0)),
+		let (patch, inner) = res!(items.iter().find_map(|it| match it {
+			Item::Scoped { patch, items }	=> Some((patch.clone(), items)),
+			_								=> None,
+		}).ok_or_else(|| err!("no Item::Scoped was produced for a columns body with a #set"; Test, Bug)));
+		assert_eq!(patch.text.body_size, Some(crate::ir::Sp::from_pt(20.0)),
 			"the columns body's #set text(size:) did not lower into the scope patch");
-		assert!(items.iter().any(|it| matches!(it, Item::ScopePop)), "the scope must be closed");
+		assert!(!inner.is_empty(), "the scope must carry the body's items");
 
-		// A columns body that declares nothing splices in flat, with no scope markers.
+		// A columns body that declares nothing splices in flat, with no scope.
 		let (plain, _) = res!(document_with_refusals("#columns(2)[\nPlain body.\n]\n"));
-		assert!(!plain.iter().any(|it| matches!(it, Item::ScopePush(_) | Item::ScopePop)),
+		assert!(!plain.iter().any(|it| matches!(it, Item::Scoped { .. })),
 			"a columns body with no #set must not be wrapped in a scope");
 		Ok(())
 	}

@@ -781,6 +781,7 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 		Block::Table(t)							=> collect_from_table(t, seen, ordered),
 		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
 		Block::Box { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
+		Block::Scoped { blocks, .. }			=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		_										=> {},
 	}
 }
@@ -924,6 +925,7 @@ fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
 				out.extend(collect_cite_keys(&item.children));
 			},
 			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
+			Block::Scoped { blocks, .. }		=> out.extend(collect_cite_keys(blocks)),
 			_									=> {},
 		}
 	}
@@ -1337,15 +1339,13 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path) -> Outcome<(V
 				// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 				// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
 				// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
-				// no styling -- every corpus chapter today -- lowers to an empty patch and adds no markers,
-				// keeping the block stream and the render byte-identical.
+				// no styling -- every corpus chapter today -- lowers to an empty patch and nests nothing,
+				// splicing its blocks in flat and keeping the block stream and the render byte-identical.
 				let chap_patch = lang::set::lower_declarations(&src);
 				if chap_patch == ThemePatch::default() {
 					blocks.extend(chap);
 				} else {
-					blocks.push(Block::ScopePush(chap_patch));
-					blocks.extend(chap);
-					blocks.push(Block::ScopePop);
+					blocks.push(Block::Scoped { patch: chap_patch, blocks: chap });
 				}
 				skips.merge(chap_skips);
 			}
@@ -1985,9 +1985,9 @@ mod tests {
 	}
 
 	/// An included chapter's own `#set text(size: ...)` is lowered and scoped to that chapter's subtree
-	/// (H1): `assemble` brackets the chapter's blocks in a `ScopePush`/`ScopePop` carrying the lowered
-	/// patch, and a sibling chapter that declares nothing is left unwrapped. Before this, a chapter's
-	/// `#set` was captured by the reader but never lowered, since lowering ran only over the root.
+	/// (H1): `assemble` nests the chapter's blocks inside one `Block::Scoped` carrying the lowered patch,
+	/// and a sibling chapter that declares nothing is left unwrapped. Before this, a chapter's `#set` was
+	/// captured by the reader but never lowered, since lowering ran only over the root.
 	#[test]
 	fn test_included_chapter_set_is_scoped_to_its_subtree_h1() -> Outcome<()> {
 		let base = std::env::temp_dir().join(fmt!("austenite-h1-{}",
@@ -2005,30 +2005,24 @@ mod tests {
 		// Clean up before asserting, so a failed assertion leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
 
-		// Exactly one scope, carrying chapter A's lowered body size.
-		let pushes: Vec<&ThemePatch> = blocks.iter().filter_map(|b| match b {
-			Block::ScopePush(p)	=> Some(p),
-			_					=> None,
+		// Exactly one scope, carrying chapter A's lowered body size, its nested blocks opening with that
+		// chapter's heading -- the `#set` line emitted no block of its own (it lowered into the patch).
+		let scopes: Vec<(&ThemePatch, &Vec<Block>)> = blocks.iter().filter_map(|b| match b {
+			Block::Scoped { patch, blocks }	=> Some((patch, blocks)),
+			_							=> None,
 		}).collect();
-		let pops = blocks.iter().filter(|b| matches!(b, Block::ScopePop)).count();
-		assert_eq!(pushes.len(), 1, "expected exactly one scope push, got {}", pushes.len());
-		assert_eq!(pops, 1, "expected exactly one scope pop, got {}", pops);
-		assert_eq!(pushes[0].text.body_size, Some(Sp::from_pt(20.0)),
+		assert_eq!(scopes.len(), 1, "expected exactly one scope, got {}", scopes.len());
+		let (patch, inner) = scopes[0];
+		assert_eq!(patch.text.body_size, Some(Sp::from_pt(20.0)),
 			"the chapter's #set text(size:) did not lower into the scope patch");
+		assert!(matches!(inner.first(), Some(Block::Heading { .. })),
+			"the scope's first nested block should be chapter A's heading");
 
-		// The push opens chapter A and the pop closes before chapter B, which carries no scope of its own.
-		let push_at	= res!(blocks.iter().position(|b| matches!(b, Block::ScopePush(_)))
-			.ok_or_else(|| err!("no scope push in the assembled stream"; Test, Missing)));
-		let pop_at	= res!(blocks.iter().position(|b| matches!(b, Block::ScopePop))
-			.ok_or_else(|| err!("no scope pop in the assembled stream"; Test, Missing)));
-		assert!(push_at < pop_at, "the scope push must precede its pop");
-		// The push opens chapter A's subtree: its first bracketed block is that chapter's heading, and the
-		// chapter's own `#set` line emitted no block of its own (it was lowered into the patch, not set).
-		assert!(matches!(&blocks[push_at + 1], Block::Heading { .. }),
-			"the block after the push should be chapter A's heading");
-		// Chapter B, everything after the pop, is unwrapped -- no further scope markers.
-		assert!(blocks[pop_at + 1..].iter().all(|b| !matches!(b, Block::ScopePush(_) | Block::ScopePop)),
-			"a chapter that declares nothing must not be wrapped in a scope");
+		// Chapter B declares nothing, so it is a flat sibling of the scope: exactly one heading sits at the
+		// top level (chapter B's), chapter A's being nested inside the scope rather than a flat sibling.
+		let top_headings = blocks.iter().filter(|b| matches!(b, Block::Heading { .. })).count();
+		assert_eq!(top_headings, 1,
+			"chapter B's heading must be the one flat-sibling heading; A's is nested in the scope");
 		Ok(())
 	}
 

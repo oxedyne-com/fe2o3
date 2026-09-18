@@ -235,14 +235,13 @@ pub enum Block {
 	// from its words. `patch` is the theme overlay the box body's own `#set` declarations lower to, applied
 	// to the box's subtree at render (H3) so a `#set` inside a callout scopes to it, not the document.
 	Box { blocks: Vec<Block>, fill: Rgba, patch: ThemePatch },
-	// A theme-scope boundary. `ScopePush` overlays its patch on the effective theme for the blocks that
-	// follow it, and the matching `ScopePop` restores the theme that was in force before it -- so an
-	// included chapter's (or any selected subtree's) `#set` declarations style only that subtree, not the
-	// document. The pair brackets a contiguous run of sibling blocks in the flat stream; they carry no ink
-	// and are transparent to every pass but the renderer, which folds the patch onto its effective theme.
-	// This is the general mechanism the rule engine's set-fields transform reuses to patch a subtree.
-	ScopePush(ThemePatch),
-	ScopePop,
+	// A theme scope: `patch` is overlaid on the effective theme for the nested `blocks`, and lifts again
+	// when they end. Nesting the governed blocks rather than bracketing them with a separate open/close
+	// marker makes an unmatched or missing close structurally impossible, and every pass that recurses over
+	// `blocks` scopes for free -- an included chapter's (or any selected subtree's) `#set` declarations
+	// style only that subtree, not the document. This is the general mechanism the rule engine's set-fields
+	// transform reuses to patch a subtree.
+	Scoped { patch: ThemePatch, blocks: Vec<Block> },
 }
 
 impl Block {
@@ -466,6 +465,373 @@ pub struct MetaRow {
 	pub ai_mark_url:	Option<String>,	// the scheme page the mark links to, <scheme>/<slug>/<medium>
 }
 
+/// The mutable authoring state and immutable context of one document render, so the block walk can
+/// recurse into a [`Block::Scoped`] subtree -- setting its blocks under the scoped theme while every
+/// document-order counter (headings, footnotes, figures, the glossary first-use set) keeps counting
+/// across the boundary. The counters and accumulators are shared; only the theme changes per scope.
+struct Authoring<'a> {
+	// Immutable render context.
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	faces:		&'a FaceResolver,
+	measure:	Sp,
+	bib:		Option<&'a Bibliography>,
+	refs:		HashMap<String, String>,
+	// The composed body nodes and the heading table, both grown in document order.
+	nodes:		Vec<Node>,
+	heads:		Vec<Heading>,
+	// Running document-order state.
+	first:			bool,
+	sec:			[u32; 6],
+	prev_para:		bool,
+	pending_banner:	bool,
+	part_no:		u32,
+	foot_no:		u32,
+	ref_no:			u32,
+	eq_no:			u32,
+	fig_no:			u32,
+	counters:		HashMap<String, u32>,
+	seen:			HashSet<String>,
+}
+
+impl<'a> Authoring<'a> {
+	/// Sets a block slice under `style`, the theme in force for it. A [`Block::Scoped`] overlays its patch
+	/// on `style` and recurses over its own blocks under that scoped theme, so a `#set` inside an included
+	/// chapter (or any bracketed subtree) styles only that subtree; the shared counters count on across the
+	/// boundary. With no scope -- every corpus document today -- `style` is the document theme throughout, so
+	/// the render is byte-identical.
+	fn walk(&mut self, blocks: &[Block], style: &Theme) -> Outcome<()> {
+		let mut i = 0usize;
+		while i < blocks.len() {
+			if let Block::Scoped { patch, blocks: inner } = &blocks[i] {
+				let scoped = { let mut t = style.clone(); t.apply(patch); t };
+				res!(self.walk(inner, &scoped));
+				i += 1;
+				continue;
+			}
+			match &blocks[i] {
+				Block::Heading { level, segments, label } => {
+					// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
+					if *level >= 1 {
+						let l = (*level as usize).min(6);
+						self.sec[l - 1] += 1;
+						for k in l..6 { self.sec[k] = 0; }
+					}
+					// A documentation tree sets `numbering: none`: its headings carry no dotted number, on the
+					// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
+					let number = match style.heading.kind {
+						HeadingStyle::DocBanner | HeadingStyle::DocInline	=> String::new(),
+						HeadingStyle::BookOpener							=> heading_number(*level, &self.sec),
+					};
+
+					// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
+					// title the contents list and the running head read back. The heading itself is set from the
+					// rich runs below, so a glossary term or emphasis in a heading renders rather than leaking.
+					let title = flatten_segments(segments);
+					let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", self.heads.len() + 1, slug(&title)));
+					// A level-1 heading that follows a `#section-banner` opens its section beneath the banner, so
+					// its page suppresses the running head like a chapter opener; the flag is one-shot.
+					let banner = self.pending_banner && *level == 1;
+					self.pending_banner = false;
+					self.heads.push(Heading {
+						id:			id.clone(),
+						level:		*level,
+						title:		title.clone(),
+						segments:	segments.clone(),
+						number:		number.clone(),
+						banner,
+					});
+
+					// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
+					// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
+					// breaker never strands it at a page foot. A level-1 heading that carries its own
+					// `#section-banner` is the exception: it is set inline beneath the banner the section drew, so
+					// it takes the sub-heading path with no page break of its own -- the banner already turned the
+					// page. This holds whether the tree sets every section that way (`DocInline`, the Hematite
+					// guide) or opts one chapter in with an explicit `#section-banner` while defaulting to the
+					// grey title bar (`DocBanner`): an explicit banner always owns its chapter's header, so the
+					// duplicate title bar is suppressed regardless of the doc's default mode.
+					let opens = *level == 0
+						|| (*level == 1 && style.heading.kind != HeadingStyle::DocInline && !banner);
+					if opens {
+						if !self.first {
+							self.nodes.push(Node::Penalty(Penalty::eject()));
+						}
+						// A part divider (level 0) carries a "Part N" run-in label above its title; a chapter carries
+						// none. The ordinal is a Roman numeral, the template's `smallcaps(part-counter.display("I"))`.
+						let part_label = if *level == 0 {
+							self.part_no += 1;
+							fmt!("Part {}", roman(self.part_no))
+						} else {
+							String::new()
+						};
+						res!(chapter_opener(
+							&mut self.nodes, &self.fonts, self.faces, style, self.geom, self.measure, *level, &number, &title,
+							&part_label, &id, label.as_deref()));
+						i += 1;
+						self.first = false;
+						self.prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
+						continue;
+					}
+
+					// Space above the heading. At a page top the driver discards it, so the first heading on a
+					// page still sits flush to the text block.
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
+					}
+
+					let hbox = res!(subheading_hbox(
+						self.fonts.clone(), self.faces, style, *level, &number, segments, &mut self.seen));
+
+					let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
+					if let Some(l) = label {
+						keep.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.clone())));
+					}
+					keep.push(hbox);
+					keep.push(Node::Glue(Glue::fixed(style.space_below(*level))));
+					let mut rest:	Vec<Node> = Vec::new();
+					let mut consumed_para = false;
+					if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
+						// The first paragraph after a heading opens the section, so it takes no first-line indent.
+						let mut lines = res!(break_paragraph(
+							self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, self.measure, style.text.leading));
+						if !lines.is_empty() {
+							keep.push(lines.remove(0));	// the first line joins the heading
+							rest = lines;				// its leading glue and the remaining lines follow
+						}
+						consumed_para = true;
+						i += 2;
+					} else {
+						i += 1;
+					}
+
+					self.nodes.push(vbox(keep, self.measure));
+					self.nodes.extend(rest);
+					self.first = false;
+					// A heading opens a section: the paragraph it swallowed took no indent, but the NEXT paragraph
+					// follows a paragraph and so is indented.
+					self.prev_para = consumed_para;
+				},
+				Block::Paragraph { text } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					// A plain paragraph is set through the piece breaker so a leading indent box can ride the
+					// front of its first line; without an indent it produces exactly what `break_paragraph` does.
+					let mut pieces = Vec::new();
+					if self.prev_para && style.par.indent.raw() > 0 {
+						pieces.push(indent_piece(style.par.indent));
+					}
+					pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
+					let lines = res!(break_paragraph_pieces(
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, true));
+					self.nodes.extend(lines);
+					i += 1;
+					self.first = false;
+					self.prev_para = true;
+				},
+				Block::RichParagraph { segments } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					let mut pieces = Vec::new();
+					if self.prev_para && style.par.indent.raw() > 0 {
+						pieces.push(indent_piece(style.par.indent));
+					}
+					pieces.extend(res!(build_pieces(
+						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs)));
+					let lines = res!(break_paragraph_pieces(
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, true));
+					self.nodes.extend(lines);
+					i += 1;
+					self.first = false;
+					self.prev_para = true;
+				},
+				Block::List { ordered, items } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Code { lines: src } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					res!(code_block(&mut self.nodes, self.fonts.clone(), style, src));
+					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Table(t) => {
+					// Space above the table, discarded at a page top like any other leading. The table lowers
+					// to one keep box, so the driver moves it whole to the next page when it will not fit.
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					}
+					self.nodes.push(res!(table::lower(self.fonts.clone(), style, self.measure, t, &self.refs)));
+					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Equation { expr, numbered, .. } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					let number = if *numbered { self.eq_no += 1; Some(self.eq_no) } else { None };
+					res!(equation(&mut self.nodes, self.fonts.clone(), style, self.measure, expr, number));
+					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Figure { graphic, caption } => {
+					// Space above the figure, discarded at a page top like any other leading. The figure is
+					// one keep box, so the breaker moves it whole to the next page when it will not fit.
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					}
+					self.fig_no += 1;
+					res!(figure(&mut self.nodes, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
+					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					i += 1;
+					self.first = false;
+				},
+				Block::TableFigure { table, caption, supplement, label } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					}
+					let number = next_number(&mut self.counters, supplement);
+					res!(table_figure(
+						&mut self.nodes, self.fonts.clone(), style, self.measure, table,
+						caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
+					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					i += 1;
+					self.first = false;
+				},
+				Block::ImageFigure { path, width, height, scale, caption, supplement, label } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					}
+					let number = next_number(&mut self.counters, supplement);
+					res!(image_figure(
+						&mut self.nodes, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
+						caption.as_deref(), supplement, number, label.as_deref()));
+					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					i += 1;
+					self.first = false;
+				},
+				Block::CodeFigure { figure, caption, supplement, label } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					}
+					let number = next_number(&mut self.counters, supplement);
+					res!(code_figure(
+						&mut self.nodes, self.fonts.clone(), style, self.measure, figure,
+						caption.as_deref(), supplement, number, label.as_deref()));
+					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					i += 1;
+					self.first = false;
+				},
+				Block::BackMatterHeading { title } => {
+					if !self.first {
+						self.nodes.push(Node::Penalty(Penalty::eject()));
+					}
+					// The back-matter marker (a Citation anchor) fixes where the running head drops and the
+					// folio centres; a heading anchor lists it in the contents. Both sit at the page top.
+					self.nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Citation, slug(title))));
+					let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", self.heads.len() + 1, slug(title)));
+					self.heads.push(Heading {
+					id:			id.clone(),
+					level:		0,
+					title:		title.clone(),
+					segments:	vec![Segment::text(title.clone())],
+					number:		String::new(),
+					banner:		false,
+				});
+					self.nodes.push(Node::Anchor(id));
+					// The title left in the display face at the chapter-title size (the template's
+					// glossary-index-title size, equal to it in these books' scales).
+					let sh	= res!(head_shape(&self.fonts, &resolved_head_face(1, style, self.faces, is_doc_heading(style)), style.heading.levels[0].size, title));
+					let d	= sh.dims();
+					self.nodes.push(Node::HBox(BoxNode::new(
+						vec![Node::Leaf(Leaf::text(sh))], Dims::new(self.measure, d.height, d.depth))));
+					self.nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Reference { runs } => {
+					// The reference list is tight, entry under entry, so entries part by the interline leading
+					// rather than the paragraph skip.
+					if !self.first {
+						let gap = if style.furniture.foot_leading > style.furniture.foot_size { style.furniture.foot_leading - style.furniture.foot_size } else { style.table.line_gap };
+						self.nodes.push(Node::Glue(Glue::fixed(gap)));
+					}
+					res!(reference_block(&mut self.nodes, self.fonts.clone(), style, self.measure, runs));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Rule { width, thickness, grey } => {
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					rule_divider(&mut self.nodes, self.measure, *width, *thickness, *grey);
+					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Image { path, width, height, scale } => {
+					res!(plain_image(&mut self.nodes, self.fonts.clone(), self.measure, path, *width, *height, *scale));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::SectionBanner { path } => {
+					// The template's `#section-banner` turns the page first (`pagebreak(weak: true)`); a forced
+					// eject the driver drops when the page is already fresh, so it never opens a blank one.
+					self.nodes.push(Node::Penalty(Penalty::eject()));
+					res!(section_banner(&mut self.nodes, self.fonts.clone(), self.geom, self.measure, path));
+					self.pending_banner = true;	// the section's level-1 heading follows and opens beneath this banner
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::Box { blocks: inner, fill, patch } => {
+					// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
+					// box, so the breaker moves it whole to the next page when it will not fit.
+					if !self.first {
+						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					}
+					// The box body is set with the document theme overlaid by the box's own `#set` declarations,
+					// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
+					// nothing renders byte-identically.
+					let scoped = { let mut t = style.clone(); t.apply(patch); t };
+					res!(styled_box(
+						&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, *fill,
+						&mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs));
+					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				// The book layer resolves every `#print-glossary()` placeholder into a table before layout, so one
+				// reaching here (a lone-file compile that never ran the resolver) sets nothing rather than failing.
+				Block::Glossary => { i += 1; },
+				// A scope is handled by the recursion at the loop top; named here only for exhaustiveness.
+				Block::Scoped { .. } => { i += 1; },
+			}
+		}
+		Ok(())
+	}
+}
+
 /// Turns an authored block list into the composed document, and the heading table the running heads
 /// resolve against. The geometry fixes the measure every paragraph is set to.
 ///
@@ -483,381 +849,32 @@ pub fn author(
 )
 	-> Outcome<(Document, Vec<Heading>)>
 {
-	let measure	= geom.content_width();
-	let mut nodes:	Vec<Node>		= Vec::new();
-	let mut heads:	Vec<Heading>	= Vec::new();
-
-	let mut i		= 0usize;
-	let mut first	= true;
-	// The chapter and section counters, a document-order fold. A level-L heading (L>=1) steps counter
-	// L and clears the deeper ones; a level-0 part divider steps none, so it stays outside the numbering.
-	let mut sec:	[u32; 6]	= [0; 6];
-	// Whether the block just emitted was a paragraph. A paragraph following another paragraph takes the
-	// first-line indent; one opening a section (after a heading, list, figure or the document start) does
-	// not -- Typst's `first-line-indent` with `all: false`, and what the oracle sets.
-	let mut prev_para	= false;
-	// Set when a `#section-banner` was the block just emitted, so the level-1 heading that follows it is
-	// marked as opening beneath a banner. It is consumed (and cleared) by that heading, the block the
-	// source always places immediately after the banner.
-	let mut pending_banner	= false;
-	let mut part_no	= 0u32;	// the part-divider ordinal, a document-order fold, shown as a Roman numeral
-	let mut foot_no	= 0u32;	// the footnote number, a document-order fold over the marks
-	let mut ref_no	= 0u32;	// a running counter giving each inline cross-reference its own anchor id
-	let mut eq_no	= 0u32;	// the equation number, a document-order fold over the numbered displays
-	let mut fig_no	= 0u32;	// the figure number, a document-order fold over the drawn figures
-	// The number per figure supplement ("Figure", "Table"): a document-order fold, so tables and figures
-	// carry independent counts, matching Typst's per-kind numbering.
-	let mut counters:	HashMap<String, u32>	= HashMap::new();
-	// Glossary terms already set once, in document order. The first mention of a term is set bold-italic
-	// and every later mention plain; author walks the blocks in order, so the set decides first-use with
-	// no second pass. Keyed by the term as written, matching the template's case-sensitive tracking.
-	let mut seen:	HashSet<String>	= HashSet::new();
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
 	let refs = ref_targets(blocks);
-	// The effective theme: the document theme with every open scope's patch folded on, so a block set
-	// inside an included chapter (or any bracketed subtree) is styled by that subtree's own `#set`. A
-	// `ScopePush` saves the current theme and overlays its patch; the matching `ScopePop` restores it. With
-	// no scopes -- every corpus document today -- `cur` stays equal to the document theme, so the render is
-	// byte-identical.
-	let mut cur:			Theme		= style.clone();
-	let mut theme_stack:	Vec<Theme>	= Vec::new();
-	while i < blocks.len() {
-		if let Block::ScopePush(patch) = &blocks[i] {
-			theme_stack.push(cur.clone());
-			cur.apply(patch);
-			i += 1;
-			continue;
-		}
-		if let Block::ScopePop = &blocks[i] {
-			if let Some(prev) = theme_stack.pop() {
-				cur = prev;
-			}
-			i += 1;
-			continue;
-		}
-		// Every content arm below renders with the effective theme, so a scoped patch reaches it without the
-		// arm having to name it: `style` is shadowed to the current scope's theme for the rest of this pass.
-		let style: &Theme = &cur;
-		match &blocks[i] {
-			Block::Heading { level, segments, label } => {
-				// Step the counters for a numbered level (1..); a part divider (level 0) steps none.
-				if *level >= 1 {
-					let l = (*level as usize).min(6);
-					sec[l - 1] += 1;
-					for k in l..6 { sec[k] = 0; }
-				}
-				// A documentation tree sets `numbering: none`: its headings carry no dotted number, on the
-				// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
-				let number = match style.heading.kind {
-					HeadingStyle::DocBanner | HeadingStyle::DocInline	=> String::new(),
-					HeadingStyle::BookOpener							=> heading_number(*level, &sec),
-				};
-
-				// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
-				// title the contents list and the running head read back. The heading itself is set from the
-				// rich runs below, so a glossary term or emphasis in a heading renders rather than leaking.
-				let title = flatten_segments(segments);
-				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(&title)));
-				// A level-1 heading that follows a `#section-banner` opens its section beneath the banner, so
-				// its page suppresses the running head like a chapter opener; the flag is one-shot.
-				let banner = pending_banner && *level == 1;
-				pending_banner = false;
-				heads.push(Heading {
-					id:			id.clone(),
-					level:		*level,
-					title:		title.clone(),
-					segments:	segments.clone(),
-					number:		number.clone(),
-					banner,
-				});
-
-				// A chapter (level 1) or a part divider (level 0) opens a fresh page and stands alone; a
-				// deeper heading binds to the first line of the paragraph it introduces, so the greedy page
-				// breaker never strands it at a page foot. A level-1 heading that carries its own
-				// `#section-banner` is the exception: it is set inline beneath the banner the section drew, so
-				// it takes the sub-heading path with no page break of its own -- the banner already turned the
-				// page. This holds whether the tree sets every section that way (`DocInline`, the Hematite
-				// guide) or opts one chapter in with an explicit `#section-banner` while defaulting to the
-				// grey title bar (`DocBanner`): an explicit banner always owns its chapter's header, so the
-				// duplicate title bar is suppressed regardless of the doc's default mode.
-				let opens = *level == 0
-					|| (*level == 1 && style.heading.kind != HeadingStyle::DocInline && !banner);
-				if opens {
-					if !first {
-						nodes.push(Node::Penalty(Penalty::eject()));
-					}
-					// A part divider (level 0) carries a "Part N" run-in label above its title; a chapter carries
-					// none. The ordinal is a Roman numeral, the template's `smallcaps(part-counter.display("I"))`.
-					let part_label = if *level == 0 {
-						part_no += 1;
-						fmt!("Part {}", roman(part_no))
-					} else {
-						String::new()
-					};
-					res!(chapter_opener(
-						&mut nodes, &fonts, faces, style, geom, measure, *level, &number, &title,
-						&part_label, &id, label.as_deref()));
-					i += 1;
-					first = false;
-					prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
-					continue;
-				}
-
-				// Space above the heading. At a page top the driver discards it, so the first heading on a
-				// page still sits flush to the text block.
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
-				}
-
-				let hbox = res!(subheading_hbox(
-					fonts.clone(), faces, style, *level, &number, segments, &mut seen));
-
-				let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
-				if let Some(l) = label {
-					keep.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.clone())));
-				}
-				keep.push(hbox);
-				keep.push(Node::Glue(Glue::fixed(style.space_below(*level))));
-				let mut rest:	Vec<Node> = Vec::new();
-				let mut consumed_para = false;
-				if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
-					// The first paragraph after a heading opens the section, so it takes no first-line indent.
-					let mut lines = res!(break_paragraph(
-						fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, measure, style.text.leading));
-					if !lines.is_empty() {
-						keep.push(lines.remove(0));	// the first line joins the heading
-						rest = lines;				// its leading glue and the remaining lines follow
-					}
-					consumed_para = true;
-					i += 2;
-				} else {
-					i += 1;
-				}
-
-				nodes.push(vbox(keep, measure));
-				nodes.extend(rest);
-				first = false;
-				// A heading opens a section: the paragraph it swallowed took no indent, but the NEXT paragraph
-				// follows a paragraph and so is indented.
-				prev_para = consumed_para;
-			},
-			Block::Paragraph { text } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				// A plain paragraph is set through the piece breaker so a leading indent box can ride the
-				// front of its first line; without an indent it produces exactly what `break_paragraph` does.
-				let mut pieces = Vec::new();
-				if prev_para && style.par.indent.raw() > 0 {
-					pieces.push(indent_piece(style.par.indent));
-				}
-				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
-				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
-				nodes.extend(lines);
-				i += 1;
-				first = false;
-				prev_para = true;
-			},
-			Block::RichParagraph { segments } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				let mut pieces = Vec::new();
-				if prev_para && style.par.indent.raw() > 0 {
-					pieces.push(indent_piece(style.par.indent));
-				}
-				pieces.extend(res!(build_pieces(
-					fonts.clone(), geom, style, segments, &mut foot_no, &mut ref_no, &mut seen, bib, &refs)));
-				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
-				nodes.extend(lines);
-				i += 1;
-				first = false;
-				prev_para = true;
-			},
-			Block::List { ordered, items } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				res!(list(&mut nodes, fonts.clone(), geom, style, measure, *ordered, items, &mut foot_no, &mut ref_no, &mut seen, bib, &refs));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Code { lines: src } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				res!(code_block(&mut nodes, fonts.clone(), style, src));
-				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Table(t) => {
-				// Space above the table, discarded at a page top like any other leading. The table lowers
-				// to one keep box, so the driver moves it whole to the next page when it will not fit.
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				}
-				nodes.push(res!(table::lower(fonts.clone(), style, measure, t, &refs)));
-				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Equation { expr, numbered, .. } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				let number = if *numbered { eq_no += 1; Some(eq_no) } else { None };
-				res!(equation(&mut nodes, fonts.clone(), style, measure, expr, number));
-				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Figure { graphic, caption } => {
-				// Space above the figure, discarded at a page top like any other leading. The figure is
-				// one keep box, so the breaker moves it whole to the next page when it will not fit.
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				}
-				fig_no += 1;
-				res!(figure(&mut nodes, fonts.clone(), style, measure, graphic.clone(), caption.as_deref(), fig_no));
-				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				i += 1;
-				first = false;
-			},
-			Block::TableFigure { table, caption, supplement, label } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				}
-				let number = next_number(&mut counters, supplement);
-				res!(table_figure(
-					&mut nodes, fonts.clone(), style, measure, table,
-					caption.as_deref(), supplement, number, label.as_deref(), &refs));
-				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				i += 1;
-				first = false;
-			},
-			Block::ImageFigure { path, width, height, scale, caption, supplement, label } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				}
-				let number = next_number(&mut counters, supplement);
-				res!(image_figure(
-					&mut nodes, fonts.clone(), style, measure, path, *width, *height, *scale,
-					caption.as_deref(), supplement, number, label.as_deref()));
-				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				i += 1;
-				first = false;
-			},
-			Block::CodeFigure { figure, caption, supplement, label } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				}
-				let number = next_number(&mut counters, supplement);
-				res!(code_figure(
-					&mut nodes, fonts.clone(), style, measure, figure,
-					caption.as_deref(), supplement, number, label.as_deref()));
-				nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-				i += 1;
-				first = false;
-			},
-			Block::BackMatterHeading { title } => {
-				if !first {
-					nodes.push(Node::Penalty(Penalty::eject()));
-				}
-				// The back-matter marker (a Citation anchor) fixes where the running head drops and the
-				// folio centres; a heading anchor lists it in the contents. Both sit at the page top.
-				nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Citation, slug(title))));
-				let id = AnchorId::new(AnchorKind::Heading, fmt!("{:02}-{}", heads.len() + 1, slug(title)));
-				heads.push(Heading {
-				id:			id.clone(),
-				level:		0,
-				title:		title.clone(),
-				segments:	vec![Segment::text(title.clone())],
-				number:		String::new(),
-				banner:		false,
-			});
-				nodes.push(Node::Anchor(id));
-				// The title left in the display face at the chapter-title size (the template's
-				// glossary-index-title size, equal to it in these books' scales).
-				let sh	= res!(head_shape(&fonts, &resolved_head_face(1, style, faces, is_doc_heading(style)), style.heading.levels[0].size, title));
-				let d	= sh.dims();
-				nodes.push(Node::HBox(BoxNode::new(
-					vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
-				nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(20.0))));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Reference { runs } => {
-				// The reference list is tight, entry under entry, so entries part by the interline leading
-				// rather than the paragraph skip.
-				if !first {
-					let gap = if style.furniture.foot_leading > style.furniture.foot_size { style.furniture.foot_leading - style.furniture.foot_size } else { style.table.line_gap };
-					nodes.push(Node::Glue(Glue::fixed(gap)));
-				}
-				res!(reference_block(&mut nodes, fonts.clone(), style, measure, runs));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Rule { width, thickness, grey } => {
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				rule_divider(&mut nodes, measure, *width, *thickness, *grey);
-				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Image { path, width, height, scale } => {
-				res!(plain_image(&mut nodes, fonts.clone(), measure, path, *width, *height, *scale));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::SectionBanner { path } => {
-				// The template's `#section-banner` turns the page first (`pagebreak(weak: true)`); a forced
-				// eject the driver drops when the page is already fresh, so it never opens a blank one.
-				nodes.push(Node::Penalty(Penalty::eject()));
-				res!(section_banner(&mut nodes, fonts.clone(), geom, measure, path));
-				pending_banner = true;	// the section's level-1 heading follows and opens beneath this banner
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			Block::Box { blocks: inner, fill, patch } => {
-				// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
-				// box, so the breaker moves it whole to the next page when it will not fit.
-				if !first {
-					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				}
-				// The box body is set with the document theme overlaid by the box's own `#set` declarations,
-				// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
-				// nothing renders byte-identically.
-				let scoped = { let mut t = style.clone(); t.apply(patch); t };
-				res!(styled_box(
-					&mut nodes, fonts.clone(), geom, &scoped, measure, inner, *fill,
-					&mut foot_no, &mut ref_no, &mut seen, bib, &refs));
-				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-				i += 1;
-				first = false;
-				prev_para = false;
-			},
-			// The book layer resolves every `#print-glossary()` placeholder into a table before layout, so one
-			// reaching here (a lone-file compile that never ran the resolver) sets nothing rather than failing.
-			Block::Glossary => { i += 1; },
-			// Scope markers are consumed before this match; named here only for exhaustiveness.
-			Block::ScopePush(_) | Block::ScopePop => { i += 1; },
-		}
-	}
+	let mut authoring = Authoring {
+		fonts:		fonts.clone(),
+		geom,
+		faces,
+		measure:	geom.content_width(),
+		bib,
+		refs,
+		nodes:		Vec::new(),
+		heads:		Vec::new(),
+		first:		true,
+		sec:		[0; 6],
+		prev_para:	false,
+		pending_banner:	false,
+		part_no:	0,
+		foot_no:	0,
+		ref_no:		0,
+		eq_no:		0,
+		fig_no:		0,
+		counters:	HashMap::new(),
+		seen:		HashSet::new(),
+	};
+	res!(authoring.walk(blocks, style));
+	let heads = authoring.heads;
 
 	// The front matter is composed ahead of the body so its cover, title, imprint and note leaves take
 	// the physical pages before the body opens; the body then carries no heading anchor of the front
@@ -870,7 +887,7 @@ pub fn author(
 		stream.extend(res!(contents(
 			fonts.clone(), faces, geom, style, fm.back_title_size, &heads)));
 	}
-	stream.extend(nodes);
+	stream.extend(authoring.nodes);
 
 	let mut document = Document::new(stream, geom);
 	document.foot = foot_style(style);
@@ -2789,11 +2806,10 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::BackMatterHeading { title }	=> count_str(title, &mut n),
 			Block::Reference { runs }			=> for (t, _) in runs { count_str(t, &mut n); },
 			Block::Box { blocks, .. }			=> n += count_words(blocks),
-			// A scope marker carries no words; the blocks it brackets are siblings in the flat stream, counted
-			// in their own right as this walk reaches them.
+			// A scope carries its words in its own nested blocks, counted here rather than as flat siblings.
+			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. } | Block::Glossary
-			| Block::ScopePush(_) | Block::ScopePop	=> {},
+			| Block::SectionBanner { .. } | Block::Glossary	=> {},
 		}
 	}
 	n
@@ -3807,8 +3823,39 @@ fn box_flow(
 	-> Outcome<()>
 {
 	let mut first = true;
+	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, seen, bib, refs, &mut first));
+	Ok(())
+}
+
+/// The recursive core of [`box_flow`]: sets a callout's blocks under `style`, descending into a
+/// [`Block::Scoped`] under its overlaid theme so a `#set` inside a callout body styles only its subtree
+/// rather than being dropped. `first` is shared across the recursion so the inter-block paragraph skip is
+/// placed on document order, not reset at a scope boundary.
+#[allow(clippy::too_many_arguments)]
+fn box_flow_scoped(
+	nodes:		&mut Vec<Node>,
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style: &Theme,
+	measure:	Sp,
+	blocks:		&[Block],
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	seen:		&mut HashSet<String>,
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
+	first:		&mut bool,
+)
+	-> Outcome<()>
+{
 	for block in blocks {
-		if !first {
+		if let Block::Scoped { patch, blocks: inner } = block {
+			let scoped = { let mut t = style.clone(); t.apply(patch); t };
+			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner,
+				foot_no, ref_no, seen, bib, refs, first));
+			continue;
+		}
+		if !*first {
 			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 		}
 		match block {
@@ -3832,7 +3879,7 @@ fn box_flow(
 			},
 			_ => {},
 		}
-		first = false;
+		*first = false;
 	}
 	Ok(())
 }
@@ -4114,6 +4161,54 @@ mod tests {
 			.count();
 		assert_eq!(forced, 1,
 			"only the section banner forces a page break; its heading opens inline, adding none (got {})", forced);
+		Ok(())
+	}
+
+	/// A [`Block::Scoped`] carrying `#set text(size: 20pt)` sets its own paragraph at 20 pt while a sibling
+	/// paragraph outside the scope keeps the document's 11 pt -- proving the scope machinery end to end
+	/// through a real render: the patch reaches the renderer (the scoped line is taller) and does not leak
+	/// past the scope boundary (the sibling matches an unscoped control exactly). Before this, no test
+	/// rendered through a scope at all.
+	#[test]
+	fn a_scoped_set_styles_its_own_subtree_and_no_further() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let para	= || Block::Paragraph { text:
+			"A paragraph long enough to set at least one full line of body text on the page.".to_string() };
+
+		// The tallest and shortest paragraph-line heights in a rendered document.
+		fn line_heights(doc: &Document) -> (Sp, Sp) {
+			let hs: Vec<Sp> = doc.nodes.iter().filter_map(|n| match n {
+				Node::HBox(b) if b.dims.height > Sp::ZERO	=> Some(b.dims.height),
+				_										=> None,
+			}).collect();
+			let max = hs.iter().copied().fold(Sp::ZERO, |a, h| if h > a { h } else { a });
+			let min = hs.iter().copied().fold(max, |a, h| if h < a { h } else { a });
+			(min, max)
+		}
+
+		// Chapter A carries `#set text(size: 20pt)`; chapter B (the flat sibling) carries nothing.
+		let mut scope_patch = ThemePatch::default();
+		scope_patch.text.body_size = Some(Sp::from_pt(20.0));
+		let scoped = vec![
+			Block::Scoped { patch: scope_patch, blocks: vec![para()] },
+			para(),
+		];
+		let (doc, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &scoped, None, None));
+		let (min_s, max_s) = line_heights(&doc);
+
+		// A control with no scope: both paragraphs at the document's 11 pt, so every line is the same height.
+		let plain = vec![para(), para()];
+		let (doc_p, _)	= res!(author(fonts, geom, &style, &FaceResolver::default(), &plain, None, None));
+		let (min_p, max_p) = line_heights(&doc_p);
+
+		assert_eq!(min_p, max_p, "the unscoped control must set every paragraph at one size");
+		assert!(max_s > min_s, "the scoped 20pt paragraph must set taller lines than the 11pt sibling");
+		// The sibling outside the scope matches the control exactly: the scope did not leak past its blocks.
+		assert_eq!(min_s, min_p, "the paragraph outside the scope must keep the document's own size");
+		// And the scoped paragraph really rose above the document size, so the patch reached the renderer.
+		assert!(max_s > max_p, "the scoped paragraph must exceed the unscoped document size");
 		Ok(())
 	}
 }

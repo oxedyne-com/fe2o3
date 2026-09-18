@@ -318,9 +318,22 @@ fn show_doc_with_args(src: &str) -> Option<String> {
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
 	let mut out		= Vec::new();
 	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
+	// The running bracket balance across lines, folded through the reader's own content-aware scanner. A
+	// `#set` on a line that opens inside a `#styled-box[...]`/`#columns[...]` body -- a bracket still open at
+	// the line's start -- is that body's own declaration, lowered onto its scope when the body is re-parsed;
+	// capturing it here too would apply it to the enclosing scope as well. Only a `#set` at true top level
+	// (no open bracket) lowers to this source's scope.
+	let mut state	= crate::lang::parse::SkipState::new();
 	for raw in src.split_inclusive('\n') {
 		let line_start	= offset;
 		offset			= offset.saturating_add(raw.len());
+
+		// The depth in force at this line's start, before its own delimiters are folded in.
+		let nested = state.has_open_bracket();
+		crate::lang::parse::scan_brackets(raw, &mut state);
+		if nested {
+			continue;
+		}
 
 		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
 		let trimmed	= raw.trim_start();
@@ -521,6 +534,19 @@ mod tests {
 		for level in &theme.heading.levels {
 			assert_eq!(level.numbering, Some("1.1".to_string()));
 		}
+	}
+
+	/// A `#set` nested inside a `#styled-box[...]` body is that body's own declaration -- lowered onto its
+	/// scope when the body is re-parsed -- not captured at the enclosing source's top level. Only a
+	/// genuinely top-level `#set` lowers to this source's scope, so the nested 40pt never reaches it and the
+	/// top-level 20pt does (the nesting-aware source scan; without it the flat scan would fold both and the
+	/// later 40pt would win).
+	#[test]
+	fn nested_set_inside_a_bracketed_body_is_not_captured() {
+		let src = "#set text(size: 20pt)\n#styled-box[\n#set text(size: 40pt)\nInside the box.\n]\n";
+		let patch = lower_declarations(src);
+		assert_eq!(patch.text.body_size, Some(Sp::from_pt(20.0)),
+			"only the top-level #set should lower here; the box body's #set must not leak out");
 	}
 
 	/// A `#set` on a target the theme has no field for lowers to an empty patch -- the caller keeps it a
