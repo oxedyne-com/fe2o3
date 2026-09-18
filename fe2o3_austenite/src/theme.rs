@@ -528,6 +528,9 @@ pub struct ThemeHeadingPatch {
 	// `set heading(numbering: ...)` applies one pattern across every level, whatever the theme's level
 	// count, so it is a group-level leaf rather than a per-level one.
 	pub numbering_all:	Option<Option<String>>,
+	// A `#show heading: set text(size: ...)` with no `level:` predicate sizes every level alike, the way
+	// `numbering_all` numbers them alike; a level-predicated rule uses a per-level `levels` entry instead.
+	pub size_all:		Option<Sp>,
 	// Per-level overrides, index i onto theme level i; shorter than the theme's `levels` leaves the deeper
 	// levels untouched, longer ignores the surplus.
 	pub levels:			Vec<ThemeHeadingLevelPatch>,
@@ -709,6 +712,12 @@ impl ThemeHeadingPatch {
 		if let Some(n) = &self.numbering_all {
 			for l in &mut h.levels {
 				l.numbering = n.clone();
+			}
+		}
+		// A uniform size (an unpredicated heading text-size rule) applies to every level alike.
+		if let Some(s) = self.size_all {
+			for l in &mut h.levels {
+				l.size = s;
 			}
 		}
 		for (p, l) in self.levels.iter().zip(h.levels.iter_mut()) {

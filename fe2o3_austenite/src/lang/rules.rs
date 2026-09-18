@@ -24,6 +24,14 @@
 //! A wrap-transform (a template with holes, `it => underline(it)`, `block.with(...)`) is a later part's
 //! work; here such a transform is refused, not guessed at.
 //!
+//! Consuming is selector-aware. The one `text` field a heading renders is its size, so a
+//! `#show heading.where(level: N): set text(size: ...)` is *not* refused: it is redirected into the matched
+//! level's own `heading` size -- the field the renderer reads for a heading (`Theme::heading_size`) -- so
+//! the rule resizes that level's headings and no others (an unpredicated `#show heading:` sizes every level
+//! alike). A `text` field a heading never renders -- tracking, ligatures, a font face, a body hyphenation
+//! switch -- is still refused under a heading selector, naming the field and the selector, so the invariant
+//! holds: every lowered field is consumed by the renderer or refused, never written-and-ignored.
+//!
 //! Block identity (design note). A set-fields transform *preserves* the source element's identity -- the
 //! [`Block::Scoped`] it produces is a derived wrap of the very block matched, not a new element -- so a
 //! later part can address the styled element by the source element's own identity and the [`RuleId`] that
@@ -171,7 +179,7 @@ pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) 
 		};
 		let span		= Span::new(line_start as u32, offset as u32);
 		let source		= fmt!("#show {}", sel_text.trim());
-		let transform	= lower_transform(tr_text.trim());
+		let transform	= lower_transform(&selector, tr_text.trim());
 		if let Transform::Refused(reason) = &transform {
 			refusals.record(&fmt!("{} ({})", source, reason), span);
 		}
@@ -286,7 +294,7 @@ const PAGE_READING_TOKENS: &[&str] = &["context", "query", "counter.at", "state"
 /// Lowers a transform body to a [`Transform`]. A `set <target>(...)` on a field the renderer reads lowers
 /// to a [`Transform::SetFields`]; a body that reads the page, patches an unread or cross-group field, or is
 /// a wrap-transform this part does not build, is a [`Transform::Refused`] carrying its reason.
-fn lower_transform(body: &str) -> Transform {
+fn lower_transform(selector: &Selector, body: &str) -> Transform {
 	// A closure head (`it =>`, `x =>`) is stripped; the transform is what it evaluates to.
 	let body = match body.split_once("=>") {
 		Some((_head, tail))	=> tail.trim(),
@@ -315,13 +323,27 @@ fn lower_transform(body: &str) -> Transform {
 		None	=> return Transform::Refused(fmt!("unbalanced set(...) in transform: {}", short(body))),
 	};
 
-	// A field the renderer does not read (or reads only cross-group) is refused rather than applied, so a
-	// rule that would silently no-op is a visible "not yet supported".
-	if let Some(reason) = unread_field_reason(target, args) {
+	// A field this selector's element does not read (or reads only cross-group) is refused rather than
+	// applied, so a rule that would silently no-op is a visible "not yet supported". The judgement is
+	// selector-aware: a `text` field a heading does not render is refused under a heading selector even
+	// though the same field is read for body text.
+	if let Some(reason) = unread_field_reason(selector, target, args) {
 		return Transform::Refused(reason);
 	}
 
-	let patch = set::lower_set(target, args);
+	// A heading reads its glyph size from the `heading` group, not from `text.body_size` (which no heading
+	// renders), so a `set text(size: ...)` on a heading selector is redirected into the matched level's own
+	// size -- the field the renderer consumes -- affecting only that level (or every level, for an
+	// unpredicated rule). Every other case lowers straight through `set::lower_set`.
+	let patch = if selector.kind == ElementKind::Heading && target == "text" {
+		match heading_size_patch(selector, args) {
+			Some(p)	=> p,
+			None	=> return Transform::Refused(fmt!(
+				"set text on {} named no size the renderer can consume", selector_label(selector))),
+		}
+	} else {
+		set::lower_set(target, args)
+	};
 	if patch == ThemePatch::default() {
 		// The set named a target or argument the theme carries no read field for: refuse rather than wrap an
 		// element in an empty scope that changes nothing.
@@ -330,11 +352,81 @@ fn lower_transform(body: &str) -> Transform {
 	Transform::SetFields(patch)
 }
 
-/// Why a `set <target>(<args>)` transform patches a field the renderer does not read, or reads only across
-/// a group boundary the readiness audit named -- so the rule is refused rather than wrapped to no effect.
-/// `None` when every field it names is one the renderer reads.
-fn unread_field_reason(target: &str, args: &str) -> Option<String> {
+/// The heading-group patch a `set text(size: ...)` on a heading selector lowers to: the size the renderer
+/// reads for a heading is its own level size ([`Theme::heading_size`]), so the text size is redirected
+/// there rather than into `text.body_size`, which a heading never reads. A `level: N` predicate targets
+/// that one level; an unpredicated heading selector sizes every level alike (`size_all`). `None` when the
+/// set names no size, or a size that does not convert to points (an `em`, which needs a running size this
+/// lowering has not) -- the caller then refuses it rather than wrapping to no effect.
+fn heading_size_patch(selector: &Selector, args: &str) -> Option<ThemePatch> {
+	// Reuse the body-size reader: `set text(size: 30pt)` lowers its size into `text.body_size`, and that
+	// point value is exactly the size to redirect into the heading level.
+	let size = set::lower_set("text", args).text.body_size?;
+	let mut patch = ThemePatch::default();
+	match level_predicate(selector) {
+		Some(n)	=> {
+			let idx = (n.max(1) as usize) - 1;	// level 0/1 both index 0, as the theme maps them
+			let mut levels: Vec<ThemeHeadingLevelPatch> = Vec::with_capacity(idx + 1);
+			levels.resize_with(idx + 1, Default::default);
+			levels[idx].size = Some(size);
+			patch.heading.levels = levels;
+		},
+		None	=> patch.heading.size_all = Some(size),
+	}
+	Some(patch)
+}
+
+/// The single `level: N` a selector narrows to, or `None` for an unpredicated selector (or one narrowed by
+/// some other predicate). Used to target a heading size rule at the one level it names.
+fn level_predicate(selector: &Selector) -> Option<u8> {
+	selector.predicates.iter().find_map(|p| match p {
+		FieldPredicate::Level(n)	=> Some(*n),
+		_							=> None,
+	})
+}
+
+/// A selector rendered back to its source form -- `heading`, `heading.where(level: 1)` -- for a refusal
+/// diagnostic that names which selector left a field unconsumed.
+fn selector_label(selector: &Selector) -> String {
+	let kind = match selector.kind {
+		ElementKind::Heading		=> "heading",
+		ElementKind::Figure			=> "figure",
+		ElementKind::FigureCaption	=> "figure.caption",
+		ElementKind::Raw			=> "raw",
+		ElementKind::Equation		=> "equation",
+		ElementKind::Link			=> "link",
+		ElementKind::Paragraph		=> "par",
+		ElementKind::List			=> "list",
+		ElementKind::Table			=> "table",
+	};
+	if selector.predicates.is_empty() {
+		kind.to_string()
+	} else {
+		let preds: Vec<String> = selector.predicates.iter().map(|p| match p {
+			FieldPredicate::Level(n)	=> fmt!("level: {}", n),
+			FieldPredicate::Block(b)	=> fmt!("block: {}", b),
+		}).collect();
+		fmt!("{}.where({})", kind, preds.join(", "))
+	}
+}
+
+/// Why a `set <target>(<args>)` transform patches a field the selector's element does not read, or reads
+/// only across a group boundary the readiness audit named -- so the rule is refused rather than wrapped to
+/// no effect. `None` when every field it names is one the renderer reads for that element. Selector-aware:
+/// a heading renders one shaped line from the `heading` group, so a `text` field that only styles running
+/// body text is refused under a heading selector, whereas the heading's own size passes (it is redirected
+/// into the heading group by [`heading_size_patch`]).
+fn unread_field_reason(selector: &Selector, target: &str, args: &str) -> Option<String> {
 	let has = |key: &str| names_arg(args, key);
+	// A heading's only renderable `text` field is its size; the rest style running body text a heading
+	// never sets, so they are refused here, naming the field and the selector.
+	if selector.kind == ElementKind::Heading && target == "text" {
+		if has("tracking")	{ return Some(fmt!("text.tracking is not read for {}", selector_label(selector))); }
+		if has("ligatures")	{ return Some(fmt!("text.ligatures is not read for {}", selector_label(selector))); }
+		if has("font")		{ return Some(fmt!("a heading font is resolved elsewhere, not from {}", selector_label(selector))); }
+		if has("hyphenate")	{ return Some(fmt!("text.hyphenate is not read for {}", selector_label(selector))); }
+		return None;
+	}
 	match target {
 		"text" => {
 			if has("tracking")	{ return Some("text.tracking is not read by the renderer".to_string()); }
@@ -526,19 +618,33 @@ mod tests {
 		assert!(parse_selector("nonesuch").is_none());
 	}
 
-	/// A `set text(size: 30pt)` transform lowers to a set-fields patch that names the body size; a
-	/// page-reading transform and an unread-field transform are both refused instead.
+	/// A `set text(size: 30pt)` transform lowers to a set-fields patch. Under a heading selector the size is
+	/// redirected into the matched level's own heading size -- the field the renderer reads for a heading --
+	/// and does not touch `text.body_size`; under a body selector it stays `text.body_size`. A page-reading
+	/// transform, a `text` field a heading never renders, and a wrap transform are all refused.
 	#[test]
 	fn transform_lowers_or_refuses() {
-		match lower_transform("set text(size: 30pt)") {
-			Transform::SetFields(p)	=> assert!(p.text.body_size.is_some()),
-			Transform::Refused(r)	=> panic!("a supported set was refused: {}", r),
+		let h1	= Selector { kind: ElementKind::Heading, predicates: vec![FieldPredicate::Level(1)] };
+		let par	= Selector { kind: ElementKind::Paragraph, predicates: vec![] };
+		// Under a heading selector, the text size redirects into the matched level's heading size.
+		match lower_transform(&h1, "set text(size: 30pt)") {
+			Transform::SetFields(p)	=> {
+				assert_eq!(p.heading.levels.first().and_then(|l| l.size), Some(crate::ir::Sp::from_pt(30.0)));
+				assert!(p.text.body_size.is_none(), "a heading size rule must not write text.body_size");
+			},
+			Transform::Refused(r)	=> panic!("a heading size rule was refused: {}", r),
 		}
-		assert!(matches!(lower_transform("it => context measure(it)"), Transform::Refused(_)),
+		// Under a body selector, the same set stays a body-size patch.
+		match lower_transform(&par, "set text(size: 30pt)") {
+			Transform::SetFields(p)	=> assert_eq!(p.text.body_size, Some(crate::ir::Sp::from_pt(30.0))),
+			Transform::Refused(r)	=> panic!("a body size rule was refused: {}", r),
+		}
+		assert!(matches!(lower_transform(&h1, "it => context measure(it)"), Transform::Refused(_)),
 			"a page-reading transform must be refused");
-		assert!(matches!(lower_transform("set text(tracking: 0.1em)"), Transform::Refused(_)),
+		// A `text` field a heading never renders is refused under a heading selector.
+		assert!(matches!(lower_transform(&h1, "set text(tracking: 0.1em)"), Transform::Refused(_)),
 			"an unread field must be refused");
-		assert!(matches!(lower_transform("it => underline(it)"), Transform::Refused(_)),
+		assert!(matches!(lower_transform(&h1, "it => underline(it)"), Transform::Refused(_)),
 			"a wrap transform is a later part, refused here");
 	}
 
@@ -565,33 +671,93 @@ mod tests {
 		assert!(!refusals.is_empty(), "the refusal is recorded for the report");
 	}
 
-	/// Applying an authored 30pt rule wraps the level-1 heading in a `Block::Scoped` carrying the size
-	/// patch and leaves a level-2 heading unwrapped -- the rule styles only its target.
+	/// A `#show heading.where(level: 1): set text(size: 30pt)` rule actually resizes the level-1 heading's
+	/// rendered glyphs and nothing else: the rendered level-1 heading grows to exactly the size a theme that
+	/// set level-1 to 30pt directly produces (positive), while the level-2 and level-3 headings and the body
+	/// text set beside the resized heading keep their sizes (negative). Rendered through `author`, so the
+	/// assertion is on the shaped output, not on the patch -- without the heading-size redirect this fails,
+	/// since a `text.body_size` patch never reaches a heading's `heading_size(level)` glyph size.
 	#[test]
-	fn apply_wraps_only_the_matched_heading() {
-		let mut refusals = Refusals::default();
-		let rules = collect_from_source(
-			"#show heading.where(level: 1): set text(size: 30pt)\n", 0, &mut refusals);
-		let mut blocks = vec![heading(1), heading(2)];
-		apply_rules(&mut blocks, &rules);
-		// The level-1 heading is now a scope carrying the size patch; the level-2 heading is untouched.
-		match &blocks[0] {
-			Block::Scoped { patch, blocks } => {
-				assert_eq!(patch.text.body_size, Some(crate::ir::Sp::from_pt(30.0)));
-				assert!(matches!(blocks[0], Block::Heading { level: 1, .. }));
-			},
-			other => panic!("the level-1 heading should be wrapped, found {:?}", other),
-		}
-		assert!(matches!(blocks[1], Block::Heading { level: 2, .. }),
-			"the level-2 heading must be left unwrapped");
+	fn heading_size_rule_resizes_only_the_matched_level() -> Outcome<()> {
+		use std::sync::Arc;
+		use crate::doc::{author, HeadingStyle};
+		use crate::ir::{Node, Sp};
+
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= crate::page::PageGeometry::a4();
+		let faces	= crate::fonts::FaceResolver::default();
+
+		// DocInline sets every level as an inline sub-heading (no chapter-opener page), so each heading's
+		// glyph size reads `heading_size(level)` through `subheading_hbox` -- the arm the rule must reach.
+		let mut theme = Theme::default();
+		theme.heading.kind = HeadingStyle::DocInline;
+
+		let blocks = || vec![
+			heading(1),
+			Block::Paragraph { text: "Body after one.".to_string() },
+			heading(2),
+			Block::Paragraph { text: "Body after two.".to_string() },
+			heading(3),
+			Block::Paragraph { text: "Body after three.".to_string() },
+		];
+
+		// One render's heading keep boxes, as `(heading-line height, joined body-line height)` pairs in
+		// document order: the first HBox inside each heading VBox is the shaped heading line (its height
+		// scaling with the glyph size), the second is the following paragraph's first line, pulled into the
+		// heading's keep box -- so a body line set right beside the resized heading is measured too.
+		let render = |base: &Theme, rules_src: &str| -> Outcome<Vec<(i32, Option<i32>)>> {
+			let mut refusals	= Refusals::default();
+			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let mut bs			= blocks();
+			apply_rules(&mut bs, &rules);
+			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			let mut out = Vec::new();
+			for n in &doc.nodes {
+				if let Node::VBox(b) = n {
+					let hs: Vec<i32> = b.list.iter().filter_map(|c| match c {
+						Node::HBox(h)	=> Some(h.dims.height.raw()),
+						_				=> None,
+					}).collect();
+					if let Some(&first) = hs.first() {
+						out.push((first, hs.get(1).copied()));
+					}
+				}
+			}
+			Ok(out)
+		};
+
+		let base	= res!(render(&theme, ""));
+		let ruled	= res!(render(&theme, "#show heading.where(level: 1): set text(size: 30pt)\n"));
+		// The independent oracle: a theme that sets level-1's size to 30pt directly, no authored rule.
+		let mut theme30	= theme.clone();
+		theme30.heading.levels[0].size = Sp::from_pt(30.0);
+		let direct	= res!(render(&theme30, ""));
+
+		assert_eq!(base.len(), 3, "three headings render");
+		assert_eq!(ruled.len(), 3);
+		assert_eq!(direct.len(), 3);
+
+		// Positive: the rule enlarges the level-1 heading, to exactly the size a direct 30pt theme sets.
+		assert!(ruled[0].0 > base[0].0, "the level-1 heading must grow under the 30pt rule");
+		assert_eq!(ruled[0].0, direct[0].0,
+			"the rule must resize the level-1 heading to the same glyphs as a direct 30pt theme");
+
+		// Negative: levels 2 and 3 keep their sizes; a level-1 rule touches no other level.
+		assert_eq!(ruled[1].0, base[1].0, "the level-2 heading must be unchanged");
+		assert_eq!(ruled[2].0, base[2].0, "the level-3 heading must be unchanged");
+
+		// Negative: the body lines -- including the one pulled into the resized level-1 heading's keep box --
+		// keep the body size; the heading rule must not bleed into running text.
+		assert_eq!(ruled.iter().map(|p| p.1).collect::<Vec<_>>(),
+			base.iter().map(|p| p.1).collect::<Vec<_>>(),
+			"the body text beside every heading must keep its size");
+		Ok(())
 	}
 
 	/// An authored rule changes only the element it targets, at render time: a level-1 heading numbering
 	/// rule renumbers the level-1 heading while a level-2 heading, outside the rule's scope, keeps the
-	/// default dotted number. Numbering is used as the visibly-read supported field because a heading's
-	/// glyph size is read from `heading_size(level)`, not `text.body_size` -- a `set text(size: ...)` rule
-	/// wraps the heading identically (see `apply_wraps_only_the_matched_heading`) but is inert on its glyphs,
-	/// a finding for the wrap-transform part.
+	/// default dotted number. (A heading *size* rule likewise reaches only its target's glyphs, tested
+	/// through the rendered output in `heading_size_rule_resizes_only_the_matched_level`.)
 	#[test]
 	fn authored_rule_renumbers_only_its_target() -> Outcome<()> {
 		use std::sync::Arc;
