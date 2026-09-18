@@ -322,6 +322,15 @@ impl Parser {
 				let (_, b) = res!(self.two_args());
 				return Ok(Atom::sqrt(b));
 			},
+			// ceil/floor: the argument between ceiling or floor corners, grown to it. `one_arg` returns the
+			// row without a paren fence, so there is no double bracket.
+			"ceil" => return Ok(Atom::fence('\u{2308}', res!(self.one_arg()), '\u{2309}')),
+			"floor" => return Ok(Atom::fence('\u{230A}', res!(self.one_arg()), '\u{230B}')),
+			"binom" => {
+				let (a, b) = res!(self.two_args());
+				return Ok(Atom::binom(a, b));
+			},
+			"display" => return Ok(Atom::display(res!(self.one_arg()))),
 			"text" => {
 				// text("..."): the quoted argument as an upright run.
 				let a = res!(self.one_arg());
@@ -626,6 +635,8 @@ fn restyle(atom: &Atom, alpha: Alphabet) -> Atom {
 		},
 		Atom::Fence { left, body, right } => Atom::fence(*left, restyle(body, alpha), *right),
 		Atom::Accent { base, mark }	=> Atom::accent(restyle(base, alpha), mark.clone()),
+		Atom::Binom { top, bottom }	=> Atom::binom(restyle(top, alpha), restyle(bottom, alpha)),
+		Atom::Display(inner)		=> Atom::display(restyle(inner, alpha)),
 		other => other.clone(),
 	}
 }
@@ -803,6 +814,10 @@ fn named(word: &str) -> Option<(&'static str, Class)> {
 		"forall"	=> ("\u{2200}", Ord),	"exists"	=> ("\u{2203}", Ord),
 		"neg"		=> ("\u{00AC}", Ord),	"ell"		=> ("\u{2113}", Ord),
 		"and"		=> ("\u{2227}", Bin),	"or"		=> ("\u{2228}", Bin),
+		// Blackboard sets.
+		"NN"		=> ("\u{2115}", Ord),	"RR"		=> ("\u{211D}", Ord),
+		"ZZ"		=> ("\u{2124}", Ord),	"QQ"		=> ("\u{211A}", Ord),
+		"GG"		=> ("\u{1D53E}", Ord),
 		_			=> return None,
 	};
 	Some(out)
@@ -828,6 +843,10 @@ fn dotted(name: &str) -> Option<(&'static str, Class)> {
 		"plus.minus"		=> ("\u{00B1}", Bin),
 		"minus.plus"		=> ("\u{2213}", Bin),
 		"dot.op"			=> ("\u{22C5}", Bin),
+		// Circled operators.
+		"plus.circle"		=> ("\u{2295}", Bin),
+		"times.circle"		=> ("\u{2297}", Bin),
+		"dot.circle"		=> ("\u{2299}", Bin),
 		"dots.h"			=> ("\u{2026}", Ord),
 		"dots.h.c"			=> ("\u{22EF}", Ord),
 		"dots.v"			=> ("\u{22EE}", Ord),
@@ -966,6 +985,114 @@ mod tests {
 				assert!(matches!(items.get(1), Some(Atom::Text(s)) if s == "d"));
 			},
 			other => panic!("dif -> {:?}", other),
+		}
+	}
+
+	/// The class of the first `Sym` carrying `text` anywhere in the tree, or `None`. Used to assert a symbol
+	/// resolved (and to what spacing class) without depending on how the parser wrapped it in rows.
+	fn find_sym(a: &Atom, text: &str) -> Option<Class> {
+		match a {
+			Atom::Sym(s, c) if s == text	=> Some(*c),
+			Atom::Sym(..)					=> None,
+			Atom::Text(_) | Atom::Space(_)	=> None,
+			Atom::Row(items)				=> items.iter().find_map(|x| find_sym(x, text)),
+			Atom::Frac { num, den }			=> find_sym(num, text).or_else(|| find_sym(den, text)),
+			Atom::Script { base, sup, sub }	=> find_sym(base, text)
+				.or_else(|| sup.as_deref().and_then(|x| find_sym(x, text)))
+				.or_else(|| sub.as_deref().and_then(|x| find_sym(x, text))),
+			Atom::Sqrt(r)					=> find_sym(r, text),
+			Atom::Fence { body, .. }		=> find_sym(body, text),
+			Atom::Accent { base, .. }		=> find_sym(base, text),
+			Atom::Matrix { rows, .. }		=> rows.iter().flatten().find_map(|x| find_sym(x, text)),
+			Atom::Binom { top, bottom }		=> find_sym(top, text).or_else(|| find_sym(bottom, text)),
+			Atom::Display(inner)			=> find_sym(inner, text),
+		}
+	}
+
+	// The circled operators ⊗ ⊕ ⊙, as dotted names and in a subscript (`M_times.circle`, ch04:1950).
+	#[test]
+	fn circled_operators() {
+		assert!(matches!(parse("times.circle"), Ok(Atom::Sym(ref s, Class::Bin)) if s == "\u{2297}"),
+			"times.circle -> {:?}", parse("times.circle"));
+		assert!(matches!(parse("plus.circle"), Ok(Atom::Sym(ref s, Class::Bin)) if s == "\u{2295}"),
+			"plus.circle -> {:?}", parse("plus.circle"));
+		assert!(matches!(parse("dot.circle"), Ok(Atom::Sym(ref s, Class::Bin)) if s == "\u{2299}"),
+			"dot.circle -> {:?}", parse("dot.circle"));
+		match parse("M_times.circle") {
+			Ok(a @ Atom::Script { .. })	=> assert_eq!(find_sym(&a, "\u{2297}"), Some(Class::Bin),
+				"the subscript ⊗ was lost: {:?}", a),
+			other						=> panic!("M_times.circle -> {:?}", other),
+		}
+	}
+
+	// Blackboard sets NN RR ZZ QQ GG resolve; CC (and UU) deliberately do not, staying upright operators.
+	#[test]
+	fn blackboard_sets_and_cc_exclusion() -> Outcome<()> {
+		assert!(matches!(parse("NN"), Ok(Atom::Sym(ref s, Class::Ord)) if s == "\u{2115}"),
+			"NN -> {:?}", parse("NN"));
+		assert!(matches!(parse("RR"), Ok(Atom::Sym(ref s, Class::Ord)) if s == "\u{211D}"));
+		assert!(matches!(parse("ZZ"), Ok(Atom::Sym(ref s, Class::Ord)) if s == "\u{2124}"));
+		assert!(matches!(parse("QQ"), Ok(Atom::Sym(ref s, Class::Ord)) if s == "\u{211A}"));
+		// GG is the astral blackboard G (U+1D53E, no BMP form), here under a subscript.
+		match parse("GG_2") {
+			Ok(a @ Atom::Script { .. })	=> {
+				assert_eq!(find_sym(&a, "\u{1D53E}"), Some(Class::Ord),
+					"GG did not resolve to the astral blackboard G: {:?}", a);
+				assert!(find_sym(&a, "2").is_some(), "GG_2 lost its subscript: {:?}", a);
+			},
+			other						=> panic!("GG_2 -> {:?}", other),
+		}
+		// CC is not a blackboard set: a lone `parse("CC")` and the subscript `k'_(CC)` both keep it upright.
+		assert!(matches!(parse("CC"), Ok(Atom::Sym(ref s, Class::Op)) if s == "CC"),
+			"CC must stay an upright operator word, got {:?}", parse("CC"));
+		let sub = res!(parse("k'_(CC)"));
+		assert_eq!(find_sym(&sub, "CC"), Some(Class::Op),
+			"CC in a subscript must stay an upright operator, got {:?}", sub);
+		Ok(())
+	}
+
+	// ceil/floor wrap the argument in the corner delimiters, with no extra paren fence (no double bracket).
+	#[test]
+	fn ceil_floor_fences() {
+		match parse("ceil(x)") {
+			Ok(Atom::Fence { left, right, body }) => {
+				assert_eq!(left, '\u{2308}');
+				assert_eq!(right, '\u{2309}');
+				assert!(!matches!(*body, Atom::Fence { left: '(', .. }), "double bracket: {:?}", body);
+			},
+			other => panic!("ceil -> {:?}", other),
+		}
+		match parse("floor(y)") {
+			Ok(Atom::Fence { left, right, .. }) => {
+				assert_eq!(left, '\u{230A}');
+				assert_eq!(right, '\u{230B}');
+			},
+			other => panic!("floor -> {:?}", other),
+		}
+		// ceil(log_2 m) (app_maths:487): the argument is a row, still fenced by the corners.
+		assert!(matches!(parse("ceil(log_2 m)"), Ok(Atom::Fence { left: '\u{2308}', .. })),
+			"ceil(log_2 m) -> {:?}", parse("ceil(log_2 m)"));
+	}
+
+	// binom(n, k) is a binomial atom carrying both terms (ch04:1234/1251).
+	#[test]
+	fn binom_atom() {
+		match parse("binom(n, k)") {
+			Ok(a @ Atom::Binom { .. }) => {
+				assert!(find_sym(&a, "n").is_some(), "binom lost its top term: {:?}", a);
+				assert!(find_sym(&a, "k").is_some(), "binom lost its bottom term: {:?}", a);
+			},
+			other => panic!("binom -> {:?}", other),
+		}
+	}
+
+	// display(x) forces display style, an atom wrapping its argument.
+	#[test]
+	fn display_atom() {
+		match parse("display(x)") {
+			Ok(a @ Atom::Display(_)) => assert!(find_sym(&a, "x").is_some(),
+				"display lost its argument: {:?}", a),
+			other => panic!("display -> {:?}", other),
 		}
 	}
 }

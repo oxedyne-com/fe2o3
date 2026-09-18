@@ -180,6 +180,11 @@ pub enum Atom {
 		right:	Option<char>,	// a closing delimiter grown to the grid, or none
 		kind:	MatKind,
 	},
+	Binom {
+		top:	Box<Atom>,		// the upper term, `binom(top, bottom)`
+		bottom:	Box<Atom>,		// the lower term
+	},
+	Display(Box<Atom>),			// force display style on the inner atom, Typst's `math.display(x)`
 }
 
 impl Atom {
@@ -242,6 +247,16 @@ impl Atom {
 	/// A grid of atoms: a matrix, a `cases`, or a multi-line alignment block.
 	pub fn matrix(rows: Vec<Vec<Atom>>, left: Option<char>, right: Option<char>, kind: MatKind) -> Self {
 		Atom::Matrix { rows, left, right, kind }
+	}
+
+	/// A binomial coefficient `binom(top, bottom)`: the two terms stacked without a rule, in parentheses.
+	pub fn binom(top: Atom, bottom: Atom) -> Self {
+		Atom::Binom { top: Box::new(top), bottom: Box::new(bottom) }
+	}
+
+	/// Forces display style on the inner atom, Typst's `math.display(x)`.
+	pub fn display(inner: Atom) -> Self {
+		Atom::Display(Box::new(inner))
 	}
 }
 
@@ -379,13 +394,17 @@ fn build(
 		Atom::Text(text)				=> build_text(style, text, level),
 		Atom::Space(mem)				=> Ok(build_space(style, *mem, level)),
 		Atom::Row(items)				=> build_row(style, items, level, display),
-		Atom::Frac { num, den }			=> build_frac(style, num, den, level, display),
+		Atom::Frac { num, den }			=> build_frac(style, num, den, level, display, true),
 		Atom::Script { base, sup, sub }	=> build_script(style, base, sup.as_deref(), sub.as_deref(), level, display),
 		Atom::Sqrt(radicand)			=> build_sqrt(style, radicand, level, display),
 		Atom::Fence { left, body, right }	=> build_fence(style, *left, body, *right, level, display),
 		Atom::Accent { base, mark }		=> build_accent(style, base, mark, level, display),
 		Atom::Matrix { rows, left, right, kind }
 										=> build_matrix(style, rows, *left, *right, *kind, level, display),
+		Atom::Binom { top, bottom }		=> build_binom(style, top, bottom, level, display),
+		// Display style forces the block context and the running size, so a fraction stacks and a big
+		// operator sets its limits below, as `math.display(x)` does in Typst.
+		Atom::Display(inner)			=> build(style, inner, Level::Text, true),
 	}
 }
 
@@ -605,12 +624,14 @@ fn build_frac(
 	den:		&Atom,
 	level:		Level,
 	display:	bool,
+	bar:		bool,
 )
 	-> Outcome<MBox>
 {
-	// Inline, a fraction is slashed on the line -- numerator, solidus, denominator abreast -- so it
-	// keeps within the line's height and never opens a gap above it. Only a display fraction stacks.
-	if !display {
+	// Inline, a real fraction is slashed on the line -- numerator, solidus, denominator abreast -- so it
+	// keeps within the line's height and never opens a gap above it. Only a display fraction stacks. A
+	// binomial (no bar) stacks even inline, as Typst does, so the slash path is taken only for a true bar.
+	if !display && bar {
 		let items = vec![
 			num.clone(),
 			Atom::Sym("/".to_string(), Class::Ord),
@@ -677,7 +698,10 @@ fn build_frac(
 	let dx = Sp((width.raw() - d.width.raw()) / 2);
 	place_into(&mut pieces, n.pieces, nx, num_base);
 	place_into(&mut pieces, d.pieces, dx, den_base);
-	pieces.push(Piece { x: Sp::ZERO, width, rel: bar_top, draw: Draw::Bar(t) });
+	// A binomial coefficient stacks its terms with the same gaps but no rule between them.
+	if bar {
+		pieces.push(Piece { x: Sp::ZERO, width, rel: bar_top, draw: Draw::Bar(t) });
+	}
 
 	let height	= n.height - num_base;	// num_base is negative, so this reaches above the baseline
 	let depth	= den_base + d.depth;
@@ -1168,9 +1192,39 @@ fn build_fence(
 )
 	-> Outcome<MBox>
 {
+	let b = res!(build(style, body, level, display));
+	fence_around(style, left, right, b, level)
+}
+
+/// A binomial coefficient: the two terms stacked with no rule between them, wrapped in parentheses grown
+/// to the stack. Typst stacks a binom even inline, so the fraction is built bar-less and then fenced.
+fn build_binom(
+	style:		&Style,
+	top:		&Atom,
+	bottom:		&Atom,
+	level:		Level,
+	display:	bool,
+)
+	-> Outcome<MBox>
+{
+	let stack = res!(build_frac(style, top, bottom, level, display, false));
+	fence_around(style, '(', ')', stack, level)
+}
+
+/// Places an already-built body between a pair of delimiters grown to it, centred symmetrically about the
+/// maths axis. Shared by [`build_fence`], whose body comes from an [`Atom`], and [`build_binom`], whose
+/// body is the bar-less stacked fraction.
+fn fence_around(
+	style:		&Style,
+	left:		char,
+	right:		char,
+	b:			MBox,
+	level:		Level,
+)
+	-> Outcome<MBox>
+{
 	let size	= size_for(style, level);
 	let size_pt	= size.to_pt() as f32;
-	let b		= res!(build(style, body, level, display));
 	let table	= res!(math_table());
 	let font	= res!(math_font());
 
