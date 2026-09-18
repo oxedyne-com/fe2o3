@@ -71,6 +71,8 @@ use crate::theme::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use crate::fonts::FaceResolver;
+
 use oxedyne_fe2o3_font::{
 	face::Role,
 	font::Font,
@@ -474,7 +476,7 @@ pub fn author(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
 	style: &Theme,
-	heading:	Option<Arc<Font>>,
+	faces:		&FaceResolver,
 	blocks:		&[Block],
 	front:		Option<&FrontMatter>,
 	bib:		Option<&Bibliography>,
@@ -594,7 +596,7 @@ pub fn author(
 						String::new()
 					};
 					res!(chapter_opener(
-						&mut nodes, &fonts, heading.as_ref(), style, geom, measure, *level, &number, &title,
+						&mut nodes, &fonts, faces, style, geom, measure, *level, &number, &title,
 						&part_label, &id, label.as_deref()));
 					i += 1;
 					first = false;
@@ -609,7 +611,7 @@ pub fn author(
 				}
 
 				let hbox = res!(subheading_hbox(
-					fonts.clone(), heading.as_ref(), style, *level, &number, segments, &mut seen));
+					fonts.clone(), faces, style, *level, &number, segments, &mut seen));
 
 				let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
 				if let Some(l) = label {
@@ -784,7 +786,7 @@ pub fn author(
 				nodes.push(Node::Anchor(id));
 				// The title left in the display face at the chapter-title size (the template's
 				// glossary-index-title size, equal to it in these books' scales).
-				let sh	= res!(head_shape(&fonts, &head_face(1, heading.as_ref()), style.heading.levels[0].size, title));
+				let sh	= res!(head_shape(&fonts, &resolved_head_face(1, style, faces, is_doc_heading(style)), style.heading.levels[0].size, title));
 				let d	= sh.dims();
 				nodes.push(Node::HBox(BoxNode::new(
 					vec![Node::Leaf(Leaf::text(sh))], Dims::new(measure, d.height, d.depth))));
@@ -862,11 +864,11 @@ pub fn author(
 	// matter's, so the driver fixes the folio restart at the first body heading.
 	let mut stream: Vec<Node> = Vec::new();
 	if let Some(fm) = front {
-		res!(front_matter(&mut stream, &fonts, heading.as_ref(), geom, style, fm));
+		res!(front_matter(&mut stream, &fonts, faces, geom, style, fm));
 		// The contents follows the front matter and precedes the body, resolving each entry's folio as a
 		// forward reference into the body the driver has not composed yet.
 		stream.extend(res!(contents(
-			fonts.clone(), heading.as_ref(), geom, style, fm.back_title_size, &heads)));
+			fonts.clone(), faces, geom, style, fm.back_title_size, &heads)));
 	}
 	stream.extend(nodes);
 
@@ -2065,13 +2067,16 @@ fn placeholder(measure: Sp) -> Outcome<Graphic> {
 fn front_matter(
 	nodes:		&mut Vec<Node>,
 	fonts:		&Arc<FontSet>,
-	display:	Option<&Arc<Font>>,
+	faces:		&FaceResolver,
 	geom:		PageGeometry,
 	style: &Theme,
 	fm:			&FrontMatter,
 )
 	-> Outcome<()>
 {
+	// The title-page display font: the level-1 heading face resolved once, or `None` when the tree ships no
+	// display face, in which case the title helpers set in the body role exactly as before.
+	let display = head_solo(&resolved_head_face(1, style, faces, is_doc_heading(style)));
 	// Cover: the raster filling the content box, a development build only. A path that will not load
 	// (an SVG, or a missing file) sets no cover page rather than a placeholder.
 	if let Some(path) = &fm.cover_image {
@@ -2837,7 +2842,8 @@ fn fm_about_author_page(
 {
 	let measure	= geom.content_width();
 	nodes.push(fm_spacer(Sp::from_pt(24.0)));
-	let title = res!(head_shape(fonts, &head_face(1, display), title_size, "About the Author"));
+	let title_face	= display.map(HeadFace::Solo).unwrap_or(HeadFace::Role(Role::Bold));
+	let title = res!(head_shape(fonts, &title_face, title_size, "About the Author"));
 	let td = title.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
@@ -2864,7 +2870,7 @@ const TOC_DEPTH: u8 = 3;
 /// forward references converge in the usual two passes, with no special case in the driver.
 pub fn contents(
 	fonts:		Arc<FontSet>,
-	display:	Option<&Arc<Font>>,
+	faces:		&FaceResolver,
 	geom:		PageGeometry,
 	style: &Theme,
 	title_size:	Sp,
@@ -2881,7 +2887,7 @@ pub fn contents(
 
 	// The block's own heading, in the display face at the back-matter title size, recorded as no anchor --
 	// so it is neither a running-head section nor an entry in its own list.
-	let title	= res!(head_shape(&fonts, &head_face(1, display), title_size, "Contents"));
+	let title	= res!(head_shape(&fonts, &resolved_head_face(1, style, faces, is_doc_heading(style)), title_size, "Contents"));
 	let td		= title.dims();
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
 	nodes.push(Node::Glue(Glue::fixed(style.space_below(1))));
@@ -3173,12 +3179,49 @@ enum HeadFace<'a> {
 /// The face a heading level sets in. Levels 0-2 take the display face when the book supplies one, else
 /// the body bold; level 3 is Libertinus italic and level 4+ Libertinus upright -- the template's
 /// `if it.level <= 2 { "Radley" } else { "Libertinus Serif" }` with its level-3 italic.
-fn head_face(level: u8, display: Option<&Arc<Font>>) -> HeadFace<'_> {
-	match display {
-		Some(f) if level <= 2	=> HeadFace::Solo(f),
-		_ if level == 3			=> HeadFace::Role(Role::Italic),
-		_ if level <= 2			=> HeadFace::Role(Role::Bold),	// no display face: the body bold stands in
-		_						=> HeadFace::Role(Role::Body),
+/// The face a heading of `level` sets in: for levels 1 and 2, the theme's per-level display face -- or the
+/// role-default heading face -- resolved through the loaded `faces`; a level 3 or deeper, or a named face
+/// the book ships no file for, falls to the idiom's role behaviour (`doc_head_face` for a documentation
+/// tree, `head_face_role`'s body bold/italic/upright for a book). This is what carries a document's
+/// `heading-font` onto the page: a resolvable name renders in that face, an unresolvable one (the body
+/// family, or a face the tree does not ship) renders exactly as the body role did before.
+fn resolved_head_face<'a>(level: u8, style: &'a Theme, faces: &'a FaceResolver, doc: bool) -> HeadFace<'a> {
+	if level <= 2 {
+		let idx = (level.max(1) as usize) - 1;
+		let per_level	= style.heading.levels.get(idx).and_then(|l| l.face.as_deref());
+		let role		= style.text.faces.heading.as_deref();
+		for name in [per_level, role].into_iter().flatten() {
+			if let Some(font) = faces.resolve(name) {
+				return HeadFace::Solo(font);
+			}
+		}
+	}
+	if doc { doc_head_face(level) } else { head_face_role(level) }
+}
+
+/// The body-role face a heading level falls to when no display face is set or resolves: the body bold for
+/// levels 1 and 2, italic for level 3, upright for deeper -- the book idiom's role fallback, split out of
+/// the former `head_face` now that the display face comes from the resolver rather than a passed handle.
+fn head_face_role(level: u8) -> HeadFace<'static> {
+	match level {
+		3				=> HeadFace::Role(Role::Italic),
+		_ if level <= 2	=> HeadFace::Role(Role::Bold),	// no display face: the body bold stands in
+		_				=> HeadFace::Role(Role::Body),
+	}
+}
+
+/// Is this theme's heading kind a documentation tree's (banner or inline), whose role fallback differs
+/// from a book's? A book takes the display face or body bold; a doc small-caps and italicises by level.
+fn is_doc_heading(style: &Theme) -> bool {
+	matches!(style.heading.kind, HeadingStyle::DocBanner | HeadingStyle::DocInline)
+}
+
+/// The concrete display font a resolved head face names, or `None` when it falls to a role face -- for the
+/// front-matter title helpers, which set from a font handle rather than a `HeadFace`.
+fn head_solo<'a>(face: &HeadFace<'a>) -> Option<&'a Arc<Font>> {
+	match face {
+		HeadFace::Solo(f)	=> Some(f),
+		HeadFace::Role(_)	=> None,
 	}
 }
 
@@ -3232,7 +3275,7 @@ fn smallcaps_runs(text: &str) -> Vec<(String, bool)> {
 /// glyphs woven into the line -- so a call in a heading renders rather than leaking its raw source.
 fn subheading_hbox(
 	fonts:		Arc<FontSet>,
-	display:	Option<&Arc<Font>>,
+	faces:		&FaceResolver,
 	style: &Theme,
 	level:		u8,
 	number:		&str,
@@ -3244,8 +3287,8 @@ fn subheading_hbox(
 	// A documentation tree sets its sub-headings from the template's show rule -- an inline level-1 heading
 	// (a `DocInline` tree) bold small-caps, level 2 bold-italic, level 3 italic, deeper levels upright; a
 	// book takes the display face (or body bold) and small-caps the finer levels.
-	let doc			= matches!(style.heading.kind, HeadingStyle::DocBanner | HeadingStyle::DocInline);
-	let face		= if doc { doc_head_face(level) } else { head_face(level, display) };
+	let doc			= is_doc_heading(style);
+	let face		= resolved_head_face(level, style, faces, doc);
 	let size		= style.heading_size(level);
 	let small_size	= Sp(size.raw() * 3 / 4);	// small caps at 0.75 of the heading size
 	let smallcaps	= if doc { level == 1 } else { level >= 3 };
@@ -3444,7 +3487,7 @@ fn roman(mut n: u32) -> String {
 fn chapter_opener(
 	nodes:		&mut Vec<Node>,
 	fonts:		&Arc<FontSet>,
-	display:	Option<&Arc<Font>>,
+	faces:		&FaceResolver,
 	style: &Theme,
 	geom:		PageGeometry,
 	measure:	Sp,
@@ -3462,7 +3505,7 @@ fn chapter_opener(
 		nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, l.to_string())));
 	}
 
-	let face = head_face(level, display);
+	let face = resolved_head_face(level, style, faces, is_doc_heading(style));
 
 	// A part divider fills its own page: a small display label, a gap, then the title, the block set
 	// about the vertical centre. The label is upper-cased, the template's tracked small caps rendered as
@@ -3491,7 +3534,7 @@ fn chapter_opener(
 	// A documentation tree opens a level-1 heading with the template's full-width grey banner bar carrying
 	// the title in small caps, rather than a numbered chapter opener.
 	if level == 1 && style.heading.kind == HeadingStyle::DocBanner {
-		res!(doc_banner(nodes, fonts, geom, measure, title));
+		res!(doc_banner(nodes, fonts, faces, style, geom, measure, title));
 		return Ok(());
 	}
 
@@ -3550,6 +3593,8 @@ fn chapter_opener(
 fn doc_banner(
 	nodes:		&mut Vec<Node>,
 	fonts:		&Arc<FontSet>,
+	faces:		&FaceResolver,
+	style: &Theme,
 	geom:		PageGeometry,
 	measure:	Sp,
 	title:		&str,
@@ -3573,9 +3618,11 @@ fn doc_banner(
 	let mut ops:	Vec<DrawOp>	= Vec::new();
 	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
 
-	// The title in the heading face's bold, at the template's 26 pt, small-capped run by run (the shaper
-	// carries no `smcp`, so the case is synthesised: was-lowercase letters uppercased at 0.75 of the size).
-	let face		= HeadFace::Role(Role::Bold);
+	// The title in the resolved heading face (the template's `heading-font`, e.g. Graystroke), falling to
+	// the body bold when the tree ships no display face, at the template's 26 pt, small-capped run by run
+	// (the shaper carries no `smcp`, so the case is synthesised: was-lowercase letters uppercased at 0.75
+	// of the size).
+	let face		= resolved_head_face(1, style, faces, true);
 	let size		= Sp::from_pt(26.0);
 	let small_size	= Sp(size.raw() * 3 / 4);
 	let sample		= res!(head_shape(fonts, &face, size, "Ag"));
@@ -4059,7 +4106,7 @@ mod tests {
 			Block::Heading { level: 1, segments: vec![Segment::text("Pearlite")], label: None },
 			Block::Paragraph { text: "Pearlite is the format.".to_string() },
 		];
-		let (doc, heads) = res!(author(fonts, geom, &style, None, &blocks, None, None));
+		let (doc, heads) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
 		assert!(heads.iter().any(|h| h.level == 1 && h.title == "Pearlite" && h.banner),
 			"the level-1 heading after a #section-banner carries the banner flag");
 		let forced = doc.nodes.iter()

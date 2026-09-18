@@ -66,7 +66,7 @@ fn main() -> Outcome<()> {
 		Block::figure(bell, Some("The standard normal density.".to_string())),
 	];
 
-	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
+	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, &oxedyne_fe2o3_austenite::fonts::FaceResolver::default(), &blocks, None, None));
 
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let mut out	= res!(driver::run(&document, &metrics, Config::default()));

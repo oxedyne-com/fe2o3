@@ -13,7 +13,59 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 };
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ NAMED DISPLAY-FACE RESOLVER                                                │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A document's named heading display faces, each loaded once from the book's own font directory. The
+/// theme names a heading face by family (`"Graystroke"`, `"Radley"`); the renderer resolves that name
+/// through this to a loaded [`Font`], falling back to a role face from the reading set when the name has
+/// no file. A name with no `<name>-Regular.{ttf,otf}` beside the book is simply absent, so a theme that
+/// names the body family (or a face the tree does not ship) renders in the body role exactly as before --
+/// which is what keeps a document naming no distinct display face byte-identical.
+#[derive(Clone, Default)]
+pub struct FaceResolver {
+	faces:	HashMap<String, Arc<Font>>,
+}
+
+impl FaceResolver {
+	/// Loads each named face that has a `<name>-Regular.ttf` or `.otf` file under `dir`. A name with no
+	/// such file, or one whose file will not parse, is left out rather than failing the load, so a missing
+	/// display face degrades to the body role rather than stopping the render.
+	pub fn load(dir: &Path, names: &[String]) -> Self {
+		let mut faces: HashMap<String, Arc<Font>> = HashMap::new();
+		for name in names {
+			if name.is_empty() || faces.contains_key(name) {
+				continue;
+			}
+			for ext in ["ttf", "otf"] {
+				let path = dir.join(fmt!("{}-Regular.{}", name, ext));
+				if path.is_file() {
+					if let Ok(font) = font_from_file(&path) {
+						faces.insert(name.clone(), font);
+					}
+					break;
+				}
+			}
+		}
+		Self { faces }
+	}
+
+	/// The loaded face for `name`, or `None` when the theme named a face the book ships no file for -- the
+	/// signal for the renderer to fall back to a role face.
+	pub fn resolve(&self, name: &str) -> Option<&Arc<Font>> {
+		self.faces.get(name)
+	}
+
+	/// Does this hold no loaded face? A book naming only its body family resolves nothing.
+	pub fn is_empty(&self) -> bool {
+		self.faces.is_empty()
+	}
+}
 
 const SERIF:		&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
 const BOLD:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
@@ -82,4 +134,20 @@ pub fn libertinus_from_dir(dir: &Path) -> Outcome<FontSet> {
 		&dir.join("LibertinusSerif-BoldItalic.otf"),
 		&dir.join("LibertinusMono-Regular.otf"),
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The resolver loads a named face from a directory holding its `<name>-Regular.otf`, and returns
+	/// `None` for a name with no file, so the renderer falls back to a role face rather than failing.
+	#[test]
+	fn face_resolver_loads_a_named_face() {
+		let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+		let r = FaceResolver::load(&dir, &["LibertinusSerif".to_string(), "NoSuchFace".to_string()]);
+		assert!(r.resolve("LibertinusSerif").is_some(), "an existing face file must resolve to a font");
+		assert!(r.resolve("NoSuchFace").is_none(), "a name with no file must not resolve");
+		assert!(!r.is_empty());
+	}
 }

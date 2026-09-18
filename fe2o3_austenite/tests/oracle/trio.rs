@@ -9,6 +9,7 @@ use oxedyne_fe2o3_austenite::{
 	doc::{
 		self,
 	},
+	fonts::FaceResolver,
 	theme::Theme,
 	driver::{
 		self,
@@ -86,7 +87,7 @@ $ binom(n, k) + ceil(x) + floor(y) $ <eq_binom_ceil_floor>
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
 	let style	= Theme::default();
-	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
+	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 	if out.pages.is_empty() {
@@ -116,7 +117,7 @@ pub fn pdf_stays_compact_and_extractable(work_dir: &Path) -> Outcome<()> {
 	let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
 	let geom	= PageGeometry::a4();
 	let style	= Theme::default();
-	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, None, &blocks, None, None));
+	let (document, _heads) = res!(doc::author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 	let metrics	= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 	let pdf		= res!(emit::pdf::render_document(&out.pages));

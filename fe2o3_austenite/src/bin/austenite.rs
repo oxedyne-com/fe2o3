@@ -286,14 +286,14 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	// `book::load`'s merged tally, a lone file through its own reader summary.
 	let skip_line: Option<String>;
 	let refusals: lang::Refusals;
-	let (blocks, fonts, geom, style, title, heading, front, bib) = if book::is_book_root(&src) {
+	let (blocks, fonts, geom, style, title, faces, front, bib) = if book::is_book_root(&src) {
 		// A book or doc root assembles its chapters through the reader and merges each chapter's refusal
 		// table into one, so a whole-book or whole-doc compile reports its skipped constructs on the same
 		// terse line the lone-file path prints, and `--explain` walks every chapter's sites.
 		let spec = res!(book::load(std::path::Path::new(source)));
 		skip_line = terse_skip_line(&spec.skips);
 		refusals = spec.skips;
-		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.heading, Some(spec.front), spec.bib)
+		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.faces, Some(spec.front), spec.bib)
 	} else {
 		// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
 		// `#t`/`#g` term calls resolve to their values just as in a whole-book compile.
@@ -316,12 +316,18 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// otherwise the capture would be a silent skip.
 		let mut style	= Theme::default();
 		lang::set::lower_root_declarations(&src, &mut style);
-		(blocks, fonts, PageGeometry::a4(), style, String::new(), None, None, bib)
+		// A lone file may name a heading font in its own `#show: doc.with(...)`; resolve it against the
+		// tree's assets the same way a whole doc does, so a lone chapter's heading face reaches the page.
+		let faces = match std::path::Path::new(source).parent() {
+			Some(dir)	=> book::face_resolver(dir, &style),
+			None		=> oxedyne_fe2o3_austenite::fonts::FaceResolver::default(),
+		};
+		(blocks, fonts, PageGeometry::a4(), style, String::new(), faces, None, bib)
 	};
 	mark("parse+lower+fonts", t_parse);
 
 	let t_author			= std::time::Instant::now();
-	let (document, heads)	= res!(doc::author(fonts.clone(), geom, &style, heading, &blocks, front.as_ref(), bib.as_ref()));
+	let (document, heads)	= res!(doc::author(fonts.clone(), geom, &style, &faces, &blocks, front.as_ref(), bib.as_ref()));
 	mark("author(shape+break)", t_author);
 	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 	let t_run				= std::time::Instant::now();

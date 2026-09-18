@@ -34,6 +34,7 @@ use crate::theme::{
 	ThemePatch,
 };
 use crate::fonts;
+use crate::fonts::FaceResolver;
 use crate::ir::Sp;
 use crate::lang::parse::flatten_markup;
 use crate::lang;
@@ -46,10 +47,7 @@ use crate::table::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_font::{
-	font::Font,
-	set::FontSet,
-};
+use oxedyne_fe2o3_font::set::FontSet;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -78,9 +76,10 @@ pub struct BookSpec {
 	pub fonts:	Arc<FontSet>,
 	pub blocks:	Vec<Block>,
 	pub title:	String,	// the book title, for the verso running head
-	// The display face for chapter and level-2 headings (Radley), loaded by path from the book's assets;
-	// None when the book ships no such face, so headings fall back to the body bold.
-	pub heading:	Option<Arc<Font>>,
+	// The document's named heading display faces (Radley for a book, the doc template's `heading-font`
+	// for a doc tree), each loaded by path from the book's assets and resolved by the renderer from the
+	// theme's face names; empty when the document names only its body family, so headings fall to the body.
+	pub faces:	FaceResolver,
 	pub front:		FrontMatter,	// the title page, cover and imprint, read from the root's template call
 	// The bibliography, parsed from the file the root names and marked with the keys the body cited, so
 	// the block layer resolves an in-text `#cite` against it. None when the book names no bibliography.
@@ -94,6 +93,35 @@ pub struct BookSpec {
 /// A single manuscript has none, so the binary can tell a book from a lone file by the source itself.
 pub fn is_book_root(src: &str) -> bool {
 	src.lines().any(|l| l.trim_start().starts_with("#include"))
+}
+
+/// The heading display-face names a theme carries, for the resolver to load: the role-default heading
+/// face and every per-level face, deduplicated in first-seen order.
+pub fn heading_face_names(theme: &Theme) -> Vec<String> {
+	let mut names: Vec<String> = Vec::new();
+	if let Some(n) = &theme.text.faces.heading {
+		names.push(n.clone());
+	}
+	for l in &theme.heading.levels {
+		if let Some(n) = &l.face {
+			if !names.contains(n) {
+				names.push(n.clone());
+			}
+		}
+	}
+	names
+}
+
+/// Builds a face resolver for a lone chapter rooted at `root_dir`, loading each heading face the `theme`
+/// names from the tree's `assets/fonts` (one level up from the root, beside a shared template). A lone
+/// file with no such directory, or naming only its body family, yields an empty resolver, so its headings
+/// set in the body role as before.
+pub fn face_resolver(root_dir: &Path, theme: &Theme) -> FaceResolver {
+	let assets_fonts = match root_dir.parent() {
+		Some(d)	=> d.join("assets").join("fonts"),
+		None	=> root_dir.join("assets").join("fonts"),
+	};
+	FaceResolver::load(&assets_fonts, &heading_face_names(theme))
 }
 
 /// Assembles the document rooted at `root_path` into a [`BookSpec`], recognising both root idioms the
@@ -148,19 +176,22 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 		Some(d)	=> d.to_path_buf(),
 		None	=> root_dir.to_path_buf(),
 	};
-	let libertinus_dir = project_dir.join("assets").join("fonts").join("libertinus");
+	let assets_fonts	= project_dir.join("assets").join("fonts");
+	let libertinus_dir	= assets_fonts.join("libertinus");
 	let fonts = Arc::new(res!(fonts::libertinus_from_dir(&libertinus_dir)));
-	// The heading display face (Radley) sits beside Libertinus in the shared assets tree. A book without
-	// it still sets, with headings in the body bold, so a failed load is a fall-back rather than an error.
-	let radley_path	= project_dir.join("assets").join("fonts").join("Radley-Regular.ttf");
-	let heading		= fonts::font_from_file(&radley_path).ok();
 
 	let (geom, raw) = res!(read_config(&config_src));
 	let mut style	= build_style(&raw);
+	// A book sets its chapter and level-2 headings in Radley, the display face beside Libertinus in the
+	// shared assets tree. It is named on the theme's role-default heading face here, then loaded by the
+	// resolver below; a book whose tree ships no Radley resolves nothing and sets headings in the body
+	// bold, the same fall-back as before.
+	style.text.faces.heading = Some("Radley".to_string());
 	// The root's own declarative styling -- its `#show: doc.with(...)` application and any lowerable
 	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
 	// by `read_config` above; this reads only the root's own top-level declarations.
 	lang::set::lower_root_declarations(root_src, &mut style);
+	let faces = FaceResolver::load(&assets_fonts, &heading_face_names(&style));
 	let (mut blocks, skips)	= res!(assemble(root_src, root_dir, root_path));
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks);
@@ -171,7 +202,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
 	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips })
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -229,9 +260,16 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		HeadingStyle::DocInline
 	};
 	let fonts		= Arc::new(res!(fonts::libertinus()));
-	// A doc heading is set in Libertinus bold -- the body family -- so no display face is supplied, and
-	// the heading path falls back to the body bold, which is exactly what the template's show rule sets.
-	let heading:	Option<Arc<Font>>	= None;
+	// The doc template's `#show: doc.with(heading-font: ...)` lowered its heading face onto the theme's
+	// levels above; the resolver loads it from the tree's own `assets/fonts` (one level up from the root,
+	// beside the shared `template.typ`). A tree naming its body family (or no face) resolves nothing, so
+	// its headings fall to the body role -- Libertinus bold -- exactly as before. oxeweb's "Graystroke"
+	// resolves and its chapter and level-2 headings now set in it, as the template renders them.
+	let assets_fonts = match root_dir.parent() {
+		Some(d)	=> d.join("assets").join("fonts"),
+		None	=> root_dir.join("assets").join("fonts"),
+	};
+	let faces = FaceResolver::load(&assets_fonts, &heading_face_names(&style));
 	let (mut blocks, skips)	= res!(assemble(root_src, root_dir, root_path));
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
@@ -245,7 +283,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 
 	// A doc tree names its bibliography, glossary and index through raw Typst calls the reader skips, not
 	// the book's `meta-data.bibliography` field, so no reference back matter is assembled here.
-	Ok(BookSpec { geom, style, fonts, blocks, title, heading, front, bib: None, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips })
 }
 
 /// Reads a doc-template root's geometry and type: the paper and margins from the shared `template.typ`

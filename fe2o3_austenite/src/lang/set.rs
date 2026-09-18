@@ -22,6 +22,7 @@
 use crate::ir::Sp;
 use crate::theme::{
 	Theme,
+	ThemeHeadingLevelPatch,
 	ThemePatch,
 };
 
@@ -82,7 +83,15 @@ pub fn lower_doc_with(args: &str) -> ThemePatch {
 fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
 	if let Some(font) = named_string(args, "heading-font") {
 		if !font.is_empty() {
-			patch.text.faces.heading = Some(Some(font));
+			// The doc template applies the heading font to levels 1 and 2 only, the body family below (its
+			// per-level show rule: `font: if it.level <= 2 { heading-font } else { "Libertinus Serif" }`).
+			// Lower it into those two levels' `face`, which the renderer resolves and applies, rather than
+			// the role-default `text.faces.heading` nothing read.
+			while patch.heading.levels.len() < 2 {
+				patch.heading.levels.push(ThemeHeadingLevelPatch::default());
+			}
+			patch.heading.levels[0].face = Some(Some(font.clone()));
+			patch.heading.levels[1].face = Some(Some(font));
 		}
 	}
 }
@@ -474,15 +483,19 @@ fn named_length_mm_or_pt(args: &str, key: &str) -> Option<Sp> {
 mod tests {
 	use super::*;
 
-	/// `#show: doc.with(heading-font: "...")` lowers the heading face and leaves the rest of the theme at
-	/// its defaults, so a document that names only a heading font changes only that.
+	/// `#show: doc.with(heading-font: "...")` lowers the heading face into levels 1 and 2 (the doc
+	/// template's per-level rule), leaving deeper levels and the rest of the theme at their defaults, so a
+	/// document that names only a heading font changes only those two levels' face.
 	#[test]
 	fn doc_with_lowers_the_heading_font() {
 		let mut theme = Theme::default();
 		let src = "#import \"template.typ\": *\n#show: doc.with(\n  title: [X],\n  heading-font: \"Graystroke\",\n)\n\n= Body\n";
 		lower_root_declarations(src, &mut theme);
-		assert_eq!(theme.text.faces.heading, Some("Graystroke".to_string()));
-		// A default field the application did not name is untouched.
+		assert_eq!(theme.heading.levels[0].face, Some("Graystroke".to_string()));
+		assert_eq!(theme.heading.levels[1].face, Some("Graystroke".to_string()));
+		// The body family below level 2, and the rest of the theme, are untouched.
+		assert_eq!(theme.heading.levels[2].face, None);
+		assert_eq!(theme.text.faces.heading, None);
 		assert_eq!(theme.text.body_size, Theme::default().text.body_size);
 	}
 
