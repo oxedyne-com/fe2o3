@@ -208,7 +208,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 		// rule, since the span is code, not markup.
 		if let Some(state) = skip.as_mut() {
 			scan_brackets(line, state);
-			if state.depth <= 0 {
+			if !state.has_open_bracket() {
 				skip = None;
 			}
 			continue;
@@ -221,7 +221,7 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			cap.buf.push_str(line);
 			cap.buf.push('\n');
 			scan_brackets(line, &mut cap.state);
-			if cap.state.depth <= 0 {
+			if !cap.state.has_open_bracket() {
 				let done = capture.take();
 				if let Some(cap) = done {
 					dispatch_capture(cap, &mut items, &mut arrays, &mut skips);
@@ -272,13 +272,13 @@ pub fn document_with_skips(src: &str) -> Outcome<(Vec<Item>, SkipSummary)> {
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut stack);
-			let mut state	= SkipState { depth: 0, in_string: false };
+			let mut state	= SkipState::new();
 			scan_brackets(line, &mut state);
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
 			let cap = Capture { kind, buf, state };
-			if cap.state.depth <= 0 {
+			if !cap.state.has_open_bracket() {
 				dispatch_capture(cap, &mut items, &mut arrays, &mut skips);	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
@@ -979,13 +979,116 @@ fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	Some(k)
 }
 
-/// The running bracket balance while a multi-line code statement or template call is skipped: `depth`
-/// is the net count of unclosed `()`, `[]` and `{}` openers, and `in_string` records whether a `"..."`
-/// literal is currently open so a bracket inside it does not count. Both persist across the lines of a
-/// span, since a string or a nesting may straddle the line break.
+/// One open delimiter context on the scanner's stack. Which frame is on top decides whether the next
+/// bracket is structural: a `(` inside a `[...]` content block is author prose, not nesting, and a `(`
+/// or `$` inside a `"..."` string or a `$...$` maths span never counts at all. This is what lets a caption
+/// whose prose carries an unbalanced `(` still close at its `]`, where a flat depth counter stuck open to
+/// end of source and swallowed the figure and everything after it.
+#[derive(Clone, Copy, PartialEq)]
+enum Frame {
+	Code,		// a `(...)`/`{...}`/`#name(...)` group, or the top level: brackets nest, `,`/`:` part
+	Content,	// a `[...]` content block: only `[` `]` nest; author `(` `)` `{` `}` are literal prose
+	Str,		// a `"..."` string literal: every character is literal until the closing quote
+	Math,		// a `$...$` maths span: every character is literal until the closing `$`
+}
+
+/// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
+/// old flat `depth`: the span is closed when the stack is empty (was `depth <= 0`), and a multi-line code
+/// skip is still open while it is not. `escaped` records that the previous character was a `\` inside a
+/// string, maths span or content block, so a `\"`, `\$` or `\]` is passed over rather than closing its
+/// frame. Both persist across the lines of a span, since a frame may straddle the line break.
 struct SkipState {
-	depth:		i32,
-	in_string:	bool,
+	frames:		Vec<Frame>,
+	escaped:	bool,
+}
+
+impl SkipState {
+	fn new() -> Self {
+		SkipState { frames: Vec::new(), escaped: false }
+	}
+
+	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
+	/// where a comma or colon parts only when nothing at all is open and a group closes when the stack empties.
+	fn is_open(&self) -> bool {
+		!self.frames.is_empty()
+	}
+
+	/// Is a structural bracket -- a `(`/`{`/`[` group -- still unclosed? This is the multi-line skip and
+	/// capture test, matching the old flat `depth > 0`: a dangling `"` or `$` left open at the end of a line
+	/// does not keep a construct open, since in prose a stray quote (an author's `"no bound"` split across
+	/// two lines after an inline `#raw("...")`) or a lone `$` is a character, not the start of a code span.
+	fn has_open_bracket(&self) -> bool {
+		self.frames.iter().any(|f| matches!(f, Frame::Code | Frame::Content))
+	}
+
+	/// Folds the character (or, in content mode, the `#ident` run) at `i` into the stack, returning how
+	/// many characters were consumed from `chars` -- always at least one, more for a `#name(`/`#name[`/`#x`
+	/// run whose opener decides the frame it enters. All four scanners share this one transition so a
+	/// bracket is counted at exactly one place, whatever their outer loops do with the characters.
+	fn step(&mut self, chars: &[char], i: usize) -> usize {
+		let c = chars[i];
+		match self.frames.last().copied() {
+			Some(Frame::Str) => {
+				if self.escaped			{ self.escaped = false; }
+				else if c == '\\'		{ self.escaped = true; }
+				else if c == '"'		{ self.frames.pop(); }
+				1
+			},
+			Some(Frame::Math) => {
+				if self.escaped			{ self.escaped = false; }
+				else if c == '\\'		{ self.escaped = true; }
+				else if c == '$'		{ self.frames.pop(); }
+				1
+			},
+			Some(Frame::Content) => {
+				// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over
+				// before any of the structural cases below can act on it.
+				if self.escaped {
+					self.escaped = false;
+					return 1;
+				}
+				match c {
+					'\\'	=> { self.escaped = true; 1 },
+					'['		=> { self.frames.push(Frame::Content); 1 },
+					']'		=> { self.frames.pop(); 1 },
+					'$'		=> { self.frames.push(Frame::Math); 1 },
+					'#'		=> self.content_hash(chars, i),
+					// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole
+					// point of tracking the frame, so a caption's unbalanced paren does not stick.
+					_		=> 1,
+				}
+			},
+			// A code frame, or the top level (an empty stack): brackets nest as the flat counter had them,
+			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span.
+			_ => {
+				match c {
+					'"'				=> { self.frames.push(Frame::Str); },
+					'(' | '{'		=> { self.frames.push(Frame::Code); },
+					'['				=> { self.frames.push(Frame::Content); },
+					'$'				=> { self.frames.push(Frame::Math); },
+					')' | '}'		=> { self.frames.pop(); },
+					_				=> {},
+				}
+				1
+			},
+		}
+	}
+
+	/// Handles a `#` met in content mode: a `#name` identifier follows, and its first non-identifier
+	/// character decides the frame -- `(` opens the call's code arguments, `[` a content block, anything
+	/// else (or end of input) is a bare `#name` field access with no group. Returns the count consumed:
+	/// the `#`, the identifier, and, for a call or content opener, that opener too.
+	fn content_hash(&mut self, chars: &[char], i: usize) -> usize {
+		let mut j = i + 1;
+		while j < chars.len() && is_call_ident(chars[j]) {
+			j += 1;
+		}
+		match chars.get(j) {
+			Some('(')	=> { self.frames.push(Frame::Code); j + 1 - i },
+			Some('[')	=> { self.frames.push(Frame::Content); j + 1 - i },
+			_			=> j - i,	// a bare `#name` (or a lone `#`): open no frame
+		}
+	}
 }
 
 /// What to do with a line-leading Typst code statement or standalone template call.
@@ -1008,9 +1111,9 @@ fn code_skip(trimmed: &str) -> Option<CodeSkip> {
 	if !keyword && !opens_standalone_call(trimmed) {
 		return None;
 	}
-	let mut state = SkipState { depth: 0, in_string: false };
+	let mut state = SkipState::new();
 	scan_brackets(trimmed, &mut state);
-	if state.depth > 0 {
+	if state.has_open_bracket() {
 		return Some(CodeSkip::Multi(state));
 	}
 	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
@@ -1070,29 +1173,14 @@ fn is_inline_call(name: &str) -> bool {
 		| "claim-label" | "claim-refs")
 }
 
-/// Folds one line's `()[]{}` into the running [`SkipState`], updating the depth and the in-string flag.
-/// A bracket inside a `"..."` literal is ignored, and a `\`-escaped character within a string is passed
-/// over, so a quote or bracket written `\"` or `\(` does not miscount. The state carries into the next
-/// line, so a string or a nesting that straddles the break is tracked correctly.
+/// Folds one line's delimiters into the running [`SkipState`]. A bracket inside a `"..."` string, a `$...$`
+/// maths span or a `[...]` content block is not counted as structural nesting; the frame stack decides.
+/// The state carries into the next line, so a frame that straddles the break is tracked correctly.
 fn scan_brackets(line: &str, state: &mut SkipState) {
-	let mut escaped = false;
-	for c in line.chars() {
-		if state.in_string {
-			if escaped {
-				escaped = false;
-			} else if c == '\\' {
-				escaped = true;
-			} else if c == '"' {
-				state.in_string = false;
-			}
-			continue;
-		}
-		match c {
-			'"'					=> state.in_string = true,
-			'(' | '[' | '{'		=> state.depth += 1,
-			')' | ']' | '}'		=> state.depth -= 1,
-			_					=> {},
-		}
+	let chars: Vec<char> = line.chars().collect();
+	let mut i = 0;
+	while i < chars.len() {
+		i += state.step(&chars, i);
 	}
 }
 
@@ -1334,47 +1422,34 @@ fn resolve_term(key: &str, func: &str, skips: &mut SkipSummary) -> String {
 }
 
 /// Reads a bracket or paren group whose opener sits at `i`, returning its inner content and the index
-/// just past the matching closer. Nesting of the same delimiter and `"..."` strings are respected, so a
-/// bracket inside a quoted argument or a nested group does not close the group early. `None` when the
-/// group never closes, so a malformed call is left as ordinary text.
+/// just past the matching closer. The [`SkipState`] frame stack decides what nests: strings, maths spans
+/// and content blocks are respected, so a bracket inside a quoted argument, a `$...$` span or the prose of
+/// a `[...]` caption does not close the group early -- a `(` an author left unbalanced in caption prose is
+/// literal, and the group still closes at its own delimiter. `None` when the group never closes, so a
+/// malformed call is left as ordinary text.
 pub(crate) fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
-	let open	= *chars.get(i)?;
-	let close	= match open {
-		'['	=> ']',
-		'('	=> ')',
-		_	=> return None,
-	};
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut escaped	= false;
+	let open = *chars.get(i)?;
+	if open != '[' && open != '(' {
+		return None;
+	}
+	let mut state	= SkipState::new();
 	let mut inner	= String::new();
-	let mut j		= i;
+	// The opener pushes its frame (`[` a content block, `(` a code group) but is not part of the inner
+	// content, so it is stepped over here and never appended.
+	let mut j = i + state.step(chars, i);
 	while j < chars.len() {
-		let c = chars[j];
-		if in_str {
-			inner.push(c);
-			if escaped				{ escaped = false; }
-			else if c == '\\'		{ escaped = true; }
-			else if c == '"'		{ in_str = false; }
-			j += 1;
-			continue;
+		let consumed = state.step(chars, j);
+		if !state.is_open() {
+			// This character closed the outer group -- the matching closer -- so the group ends just past
+			// it, and the closer is dropped from the inner as the outer opener was.
+			return Some((inner, j + consumed));
 		}
-		if c == '"' {
-			in_str = true;
-			inner.push(c);
-		} else if c == open {
-			depth += 1;
-			if depth > 1 { inner.push(c); }	// keep a nested opener, drop the outer one
-		} else if c == close {
-			depth -= 1;
-			if depth == 0 {
-				return Some((inner, j + 1));
-			}
-			inner.push(c);
-		} else {
-			inner.push(c);
+		// Every other character is inner content, verbatim: a nested opener or closer, a string with its
+		// quotes, a maths span, or a `#name(` run in content mode.
+		for k in j..j + consumed {
+			inner.push(chars[k]);
 		}
-		j += 1;
+		j += consumed;
 	}
 	None
 }
@@ -2045,26 +2120,24 @@ pub(crate) fn first_string(text: &str) -> Option<String> {
 /// Splits the inner text of a call by its top-level commas, respecting `()[]{}` nesting and `"..."`
 /// strings, so a comma inside a nested group or a string does not part an argument.
 pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
+	let chars:	Vec<char>	= inner.chars().collect();
 	let mut args:	Vec<String>	= Vec::new();
 	let mut cur					= String::new();
-	let mut depth				= 0i32;
-	let mut in_str				= false;
-	let mut esc					= false;
-	for c in inner.chars() {
-		if in_str {
-			cur.push(c);
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
+	let mut state				= SkipState::new();
+	let mut i					= 0;
+	while i < chars.len() {
+		// A comma parts the arguments only at the top level; inside any frame -- a nested group, a string,
+		// a maths span or a content block -- it is literal and joins the current argument.
+		if !state.is_open() && chars[i] == ',' {
+			args.push(std::mem::take(&mut cur));
+			i += 1;
 			continue;
 		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> { args.push(std::mem::take(&mut cur)); },
-			_					=> cur.push(c),
+		let consumed = state.step(&chars, i);
+		for k in i..i + consumed {
+			cur.push(chars[k]);
 		}
+		i += consumed;
 	}
 	if !cur.trim().is_empty() {
 		args.push(cur);
@@ -2077,31 +2150,21 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 /// or a spread is not mistaken for a named argument.
 pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 	let chars:	Vec<char>	= arg.chars().collect();
-	let mut depth			= 0i32;
-	let mut in_str			= false;
-	let mut esc				= false;
-	for (i, &c) in chars.iter().enumerate() {
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
+	let mut state			= SkipState::new();
+	let mut i				= 0;
+	while i < chars.len() {
+		// A colon names the argument only at the top level; inside any frame it is part of the value (an
+		// alignment `align: (col, row) => ...`, a ratio in a caption, a dictionary key in code).
+		if !state.is_open() && chars[i] == ':' {
+			let key: String = chars[..i].iter().collect();
+			let key = key.trim().to_string();
+			if !key.is_empty() && key.chars().all(is_call_ident) {
+				let val: String = chars[i + 1..].iter().collect();
+				return Some((key, val.trim().to_string()));
+			}
+			return None;
 		}
-		match c {
-			'"'				=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> depth -= 1,
-			':' if depth == 0 => {
-				let key: String = chars[..i].iter().collect();
-				let key = key.trim().to_string();
-				if !key.is_empty() && key.chars().all(is_call_ident) {
-					let val: String = chars[i + 1..].iter().collect();
-					return Some((key, val.trim().to_string()));
-				}
-				return None;
-			},
-			_				=> {},
-		}
+		i += state.step(&chars, i);
 	}
 	None
 }
@@ -2703,6 +2766,189 @@ mod tests {
 		assert!(matches!(runs.as_slice(), [Inline::Math(Atom::Matrix { kind: MatKind::Align, .. })]),
 			"expected one display alignment run, got: {:?}", runs);
 		assert_eq!(label, Some("eq_test".to_string()), "the closing label must still attach");
+		Ok(())
+	}
+
+	/// The plain text of a run of inline markup, for asserting a caption or paragraph's words without
+	/// caring how they were split into text, emphasis, glossary or maths runs.
+	fn plain(runs: &[Inline]) -> String {
+		let mut s = String::new();
+		for r in runs {
+			match r {
+				Inline::Text(t) | Inline::Strong(t) | Inline::Emph(t)
+				| Inline::BoldItalic(t) | Inline::Super(t) | Inline::Code(t)	=> s.push_str(t),
+				Inline::Glossary { display, .. }							=> s.push_str(display),
+				_															=> {},
+			}
+		}
+		s
+	}
+
+	/// The one [`Item::Figure`] in a parse, failing loudly with the item list when there is not exactly one.
+	fn one_figure(items: &[Item]) -> Outcome<(Option<Vec<Inline>>, String, Option<String>)> {
+		let figs: Vec<&Item> = items.iter().filter(|it| matches!(it, Item::Figure { .. })).collect();
+		match figs.as_slice() {
+			[Item::Figure { caption, supplement, label, .. }]	=>
+				Ok((caption.clone(), supplement.clone(), label.clone())),
+			_	=> Err(err!("expected exactly one figure, got: {:?}", items; Test, Bug)),
+		}
+	}
+
+	/// A `#figure(...)` whose caption prose carries an author's unbalanced `(` (Oxegen TechSpec
+	/// `app_maths.typ:550-566`: "...network messages (latency $100 unit(\"ms\")$ ... chunk sizes $d$.")
+	/// must still close at its own `)`: content mode treats the stray paren as literal prose, where the old
+	/// flat depth counter stuck open to end of source and swallowed both the figure and the tail after it.
+	#[test]
+	fn figure_caption_with_unbalanced_paren_closes_and_tail_survives() -> Outcome<()> {
+		let src = "\
+#figure(
+  block(width: 70%)[
+    #table(
+      columns: (10fr, 10fr),
+      [a], [b],
+    )
+  ],
+  caption: [Representative processing times for hashing and network messages (latency $100 unit(\"ms\")$ per message for a Merkle tree of $1 unit(\"GiB\")$ of datastate with various chunk sizes $d$.],
+  kind: \"table\",
+  supplement: \"Table\",
+) <merkle_tree_chunk_size>
+
+Trailing prose.
+";
+		let (items, _skips) = res!(document_with_skips(src));
+		let (caption, supplement, label) = res!(one_figure(&items));
+		let caption = res!(caption.ok_or_else(|| err!("the figure lost its caption"; Test, Bug)));
+		assert!(plain(&caption).contains("Representative processing times"),
+			"the caption prose was lost: {:?}", caption);
+		assert_eq!(supplement, "Table", "the supplement was not read from the figure");
+		assert_eq!(label, Some("merkle_tree_chunk_size".to_string()), "the figure label was lost");
+		// The tail after the figure must survive rather than be swallowed by a stuck bracket count.
+		let tail = items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if plain(runs).contains("Trailing prose")));
+		assert!(tail, "the prose after the figure was swallowed: {:?}", items);
+		Ok(())
+	}
+
+	/// A `(`, a `)`, a `[` or a `]` inside a `$...$` maths span in a caption is literal maths, never a
+	/// structural bracket, so an interval or a parenthesised function does not miscount and close the
+	/// caption early. Without the maths frame, the `]` in `$[a, b]$` would pop the caption content block.
+	#[test]
+	fn caption_maths_parens_do_not_count() -> Outcome<()> {
+		let src = "\
+#figure(
+  image(\"fig.png\"),
+  caption: [see $f(x)$ over $[a, b]$ where it holds.],
+) <fig_maths>
+
+After the figure.
+";
+		let (items, _skips) = res!(document_with_skips(src));
+		let (caption, _supplement, label) = res!(one_figure(&items));
+		let caption = res!(caption.ok_or_else(|| err!("the maths caption was lost"; Test, Bug)));
+		assert!(plain(&caption).contains("see") && plain(&caption).contains("where it holds"),
+			"the caption prose around the maths was truncated: {:?}", caption);
+		assert!(caption.iter().any(|r| matches!(r, Inline::Math(_))),
+			"the caption maths span was not parsed as maths: {:?}", caption);
+		assert_eq!(label, Some("fig_maths".to_string()), "the label after a maths caption was lost");
+		assert!(items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if plain(runs).contains("After the figure"))),
+			"the tail after a maths caption was swallowed: {:?}", items);
+		Ok(())
+	}
+
+	/// A `(` or `)` inside a `"..."` string argument -- here an image path `image("a(b).png")` -- is literal
+	/// string content, not a structural paren, so a single-line figure carrying such a path closes on its
+	/// line rather than opening a run-away capture.
+	#[test]
+	fn code_string_paren_does_not_count() -> Outcome<()> {
+		let src = "#figure(image(\"a(b).png\"), caption: [c])\n\nNext paragraph.\n";
+		let (items, _skips) = res!(document_with_skips(src));
+		let (caption, _supplement, _label) = res!(one_figure(&items));
+		let caption = res!(caption.ok_or_else(|| err!("the figure lost its caption"; Test, Bug)));
+		assert_eq!(plain(&caption), "c", "the caption was misread past the string paren: {:?}", caption);
+		let path = items.iter().find_map(|it| match it {
+			Item::Figure { body: FigureBody::Image { path, .. }, .. }	=> Some(path.clone()),
+			_														=> None,
+		});
+		assert_eq!(path, Some("a(b).png".to_string()), "the image path with parens was misread: {:?}", path);
+		assert!(items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if plain(runs).contains("Next paragraph"))),
+			"the paragraph after a single-line figure was swallowed: {:?}", items);
+		Ok(())
+	}
+
+	/// A `#name(...)` call met inside a caption's content re-enters code mode, so the string inside it is
+	/// protected and a following unbalanced `(` in the surrounding prose is still literal: the caption
+	/// closes at its own `]` and the tail survives.
+	#[test]
+	fn content_call_inside_caption_reenters_code() -> Outcome<()> {
+		let src = "\
+#figure(
+  image(\"g.png\"),
+  caption: [see #link(\"http://x\")[y] and note (z],
+) <fig_call>
+
+Following text.
+";
+		let (items, _skips) = res!(document_with_skips(src));
+		let (caption, _supplement, label) = res!(one_figure(&items));
+		let caption = res!(caption.ok_or_else(|| err!("the call caption was lost"; Test, Bug)));
+		assert!(plain(&caption).contains("see") && plain(&caption).contains("note (z"),
+			"the caption prose around the call was truncated: {:?}", caption);
+		assert_eq!(label, Some("fig_call".to_string()), "the label after a call caption was lost");
+		assert!(items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if plain(runs).contains("Following text"))),
+			"the tail after a call caption was swallowed: {:?}", items);
+		Ok(())
+	}
+
+	/// [`read_group`] and [`split_top_args`] on a caption argument list directly: an unbalanced `(` in the
+	/// caption prose is literal, so the group closes at its own `]` and the top-level commas still part the
+	/// arguments, with the maths span and its string protected throughout.
+	#[test]
+	fn read_group_and_split_handle_caption_prose_paren() -> Outcome<()> {
+		// read_group on a caption bracket whose prose carries an unbalanced `(` and a `$...$` span with a
+		// quoted `unit("ms")` inside: the group must end at the caption's own `]`, keeping its prose and
+		// stopping before the trailing text.
+		let s: Vec<char> = "[messages (latency $100 unit(\"ms\")$ per $d$.] more".chars().collect();
+		let (inner, next) = res!(read_group(&s, 0)
+			.ok_or_else(|| err!("the caption group did not close"; Test, Bug)));
+		assert!(inner.contains("(latency"), "the caption prose was lost: {:?}", inner);
+		assert!(!inner.contains("more"), "the caption group over-ran its closing bracket: {:?}", inner);
+		assert_eq!(s[next..].iter().collect::<String>(), " more", "the index past the closer is wrong");
+
+		// split_top_args across the same shape: three arguments, the middle a caption whose unbalanced paren
+		// and maths span do not part it, and named_arg reads the caption key back off it.
+		let args = split_top_args("image(\"p.png\"), caption: [x (y $z(w)$.], kind: \"table\"");
+		assert_eq!(args.len(), 3, "the unbalanced caption paren split the arg list wrong: {:?}", args);
+		let named = res!(named_arg(args[1].trim())
+			.ok_or_else(|| err!("the caption argument did not read as named: {:?}", args[1]; Test, Bug)));
+		assert_eq!(named.0, "caption", "the caption key was misread: {:?}", named);
+		assert!(named.1.contains("(y"), "the caption value lost its unbalanced paren: {:?}", named);
+		Ok(())
+	}
+
+	/// A prose line that opens with an inline `#raw("...")` and carries a stray `"` from an author's
+	/// quotation split across the line break must be set as prose, not read as the start of a multi-line
+	/// code skip: a dangling quote is a character, not an open code string. Only an unclosed structural
+	/// bracket keeps a skip open (Hematite `sec_net.typ:679-681`, where `express "no\nbound".` split a
+	/// quotation over two lines after an inline `#raw`).
+	#[test]
+	fn prose_line_with_inline_raw_and_dangling_quote_is_not_skipped() -> Outcome<()> {
+		let src = "passes its own pair to #raw(\"read_message\"), or to\n\
+#raw(\"WebSocket::with_limits\"). There is deliberately no way to express \"no\n\
+bound\".\n";
+		let (items, _skips) = res!(document_with_skips(src));
+		let text: String = items.iter()
+			.filter_map(|it| match it {
+				Item::Paragraph { runs, .. }	=> Some(plain(runs)),
+				_							=> None,
+			})
+			.collect::<Vec<_>>()
+			.join(" ");
+		assert!(text.contains("no way to express"),
+			"the prose after an inline #raw was swallowed as a skip: {:?}", items);
+		assert!(text.contains("bound"), "the continuation line was swallowed: {:?}", items);
 		Ok(())
 	}
 }
