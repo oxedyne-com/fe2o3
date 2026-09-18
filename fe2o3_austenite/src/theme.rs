@@ -411,6 +411,342 @@ impl Default for ThemeCalibration {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THEME PATCH                                                                │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A sparse overlay on a [`Theme`]: the same fourteen groups in the same order, every leaf an `Option`
+/// of the theme's own field type, so `None` leaves a field as it stands and `Some(v)` sets it to `v`.
+/// Lowering a document's `#set`/`#show` declarations ([`crate::lang::set`]) builds one of these rather
+/// than mutating a theme in place, and [`Theme::apply`] folds it onto a theme at the scope it governs --
+/// the document, an included chapter, or a `#styled-box` body. A leaf whose theme type is itself optional
+/// (a face name, a numbering pattern) takes an `Option<Option<..>>`, so a patch can set it, clear it, or
+/// leave it, keeping the overlay fully general for the rule engine that reuses this machinery to apply a
+/// patch to a selected subtree.
+///
+/// The field declaration order mirrors [`Theme`]'s canonical serialisation order (see the module header),
+/// so a future patch serialisation lines up with a theme's without a second ordering contract to keep.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemePatch {
+	pub text:			ThemeTextPatch,
+	pub par:			ThemeParPatch,
+	pub heading:		ThemeHeadingPatch,
+	pub list:			ThemeListPatch,
+	pub enumeration:	ThemeEnumPatch,
+	pub table:			ThemeTablePatch,
+	pub figure:			ThemeFigurePatch,
+	pub code:			ThemeCodePatch,
+	pub callout:		ThemeCalloutPatch,
+	pub equation:		ThemeEquationPatch,
+	pub page:			ThemePagePatch,
+	pub furniture:		ThemeFurniturePatch,
+	pub colours:		ThemeColoursPatch,
+	pub calibration:	ThemeCalibrationPatch,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FaceSetPatch {
+	pub body:		Option<Option<String>>,
+	pub emphasis:	Option<Option<String>>,
+	pub heading:	Option<Option<String>>,
+	pub mono:		Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeTextPatch {
+	pub body_size:	Option<Sp>,
+	pub leading:	Option<Sp>,
+	pub tracking:	Option<Sp>,
+	pub ligatures:	Option<bool>,
+	pub hyphenate:	Option<bool>,
+	pub justify:	Option<bool>,
+	pub faces:		FaceSetPatch,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeParPatch {
+	pub skip:	Option<Sp>,
+	pub indent:	Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeHeadingLevelPatch {
+	pub size:			Option<Sp>,
+	pub face:			Option<Option<String>>,
+	pub weight:			Option<Option<u16>>,
+	pub italic:			Option<bool>,
+	pub smallcaps:		Option<bool>,
+	pub numbering:		Option<Option<String>>,
+	pub space_above:	Option<Sp>,
+	pub space_below:	Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeHeadingPatch {
+	pub kind:			Option<HeadingStyle>,
+	pub levels:			[ThemeHeadingLevelPatch; 4],
+	pub chap_num_size:	Option<Sp>,
+	pub chap_grid:		Option<[Sp; 4]>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeListPatch {
+	pub marker_gap:	Option<Sp>,
+	pub item_skip:	Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeEnumPatch {
+	pub marker_gap:	Option<Sp>,
+	pub item_skip:	Option<Sp>,
+	pub numbering:	Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeTablePatch {
+	pub skip:		Option<Sp>,
+	pub cell_pad_x:	Option<Sp>,
+	pub cell_pad_y:	Option<Sp>,
+	pub line_gap:	Option<Sp>,
+	pub rule_thin:	Option<Sp>,
+	pub rule_thick:	Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeFigurePatch {
+	pub caption_size:	Option<Sp>,
+	pub skip:			Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeCodePatch {
+	pub size:		Option<Sp>,
+	pub background:	Option<Rgba>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeCalloutPatch {
+	pub fill:	Option<Rgba>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeEquationPatch {
+	pub numbering:	Option<Option<String>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemePagePartPatch {
+	pub width:			Option<Option<Sp>>,
+	pub height:			Option<Option<Sp>>,
+	pub margin_inside:	Option<Option<Sp>>,
+	pub margin_outside:	Option<Option<Sp>>,
+	pub margin_top:		Option<Option<Sp>>,
+	pub margin_bottom:	Option<Option<Sp>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemePagePatch {
+	pub front:	ThemePagePartPatch,
+	pub body:	ThemePagePartPatch,
+	pub back:	ThemePagePartPatch,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeFurniturePatch {
+	pub header_size:	Option<Sp>,
+	pub folio_size:		Option<Sp>,
+	pub foot_size:		Option<Sp>,
+	pub foot_leading:	Option<Sp>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeColoursPatch {
+	pub chap_num_grey:	Option<Rgba>,
+	pub header_fill:	Option<Rgba>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeCalibrationPatch {
+	pub line_box_em:	Option<f64>,
+}
+
+// Folds one patch leaf onto its theme field: a `Some` overwrites, a `None` leaves the field as it stands.
+// The clone covers the non-`Copy` leaves (a face name, a numbering pattern); a `Copy` leaf clones for free.
+macro_rules! patch_merge {
+	($from:expr, $to:expr) => {
+		if let Some(v) = &$from {
+			$to = v.clone();
+		}
+	};
+}
+
+impl Theme {
+	/// Folds `patch` onto this theme in place: every field the patch names is overwritten, every field it
+	/// leaves `None` stands. Applying an empty patch is a no-op, so a scope that declares nothing changes
+	/// nothing -- which is what keeps a document with no `#set` byte-identical.
+	pub fn apply(&mut self, patch: &ThemePatch) {
+		patch.text.apply(&mut self.text);
+		patch.par.apply(&mut self.par);
+		patch.heading.apply(&mut self.heading);
+		patch.list.apply(&mut self.list);
+		patch.enumeration.apply(&mut self.enumeration);
+		patch.table.apply(&mut self.table);
+		patch.figure.apply(&mut self.figure);
+		patch.code.apply(&mut self.code);
+		patch.callout.apply(&mut self.callout);
+		patch.equation.apply(&mut self.equation);
+		patch.page.apply(&mut self.page);
+		patch.furniture.apply(&mut self.furniture);
+		patch.colours.apply(&mut self.colours);
+		patch.calibration.apply(&mut self.calibration);
+	}
+}
+
+impl FaceSetPatch {
+	fn apply(&self, t: &mut FaceSet) {
+		patch_merge!(self.body, t.body);
+		patch_merge!(self.emphasis, t.emphasis);
+		patch_merge!(self.heading, t.heading);
+		patch_merge!(self.mono, t.mono);
+	}
+}
+
+impl ThemeTextPatch {
+	fn apply(&self, t: &mut ThemeText) {
+		patch_merge!(self.body_size, t.body_size);
+		patch_merge!(self.leading, t.leading);
+		patch_merge!(self.tracking, t.tracking);
+		patch_merge!(self.ligatures, t.ligatures);
+		patch_merge!(self.hyphenate, t.hyphenate);
+		patch_merge!(self.justify, t.justify);
+		self.faces.apply(&mut t.faces);
+	}
+}
+
+impl ThemeParPatch {
+	fn apply(&self, t: &mut ThemePar) {
+		patch_merge!(self.skip, t.skip);
+		patch_merge!(self.indent, t.indent);
+	}
+}
+
+impl ThemeHeadingLevelPatch {
+	fn apply(&self, l: &mut ThemeHeadingLevel) {
+		patch_merge!(self.size, l.size);
+		patch_merge!(self.face, l.face);
+		patch_merge!(self.weight, l.weight);
+		patch_merge!(self.italic, l.italic);
+		patch_merge!(self.smallcaps, l.smallcaps);
+		patch_merge!(self.numbering, l.numbering);
+		patch_merge!(self.space_above, l.space_above);
+		patch_merge!(self.space_below, l.space_below);
+	}
+}
+
+impl ThemeHeadingPatch {
+	fn apply(&self, h: &mut ThemeHeading) {
+		patch_merge!(self.kind, h.kind);
+		for (p, l) in self.levels.iter().zip(h.levels.iter_mut()) {
+			p.apply(l);
+		}
+		patch_merge!(self.chap_num_size, h.chap_num_size);
+		patch_merge!(self.chap_grid, h.chap_grid);
+	}
+}
+
+impl ThemeListPatch {
+	fn apply(&self, t: &mut ThemeList) {
+		patch_merge!(self.marker_gap, t.marker_gap);
+		patch_merge!(self.item_skip, t.item_skip);
+	}
+}
+
+impl ThemeEnumPatch {
+	fn apply(&self, t: &mut ThemeEnum) {
+		patch_merge!(self.marker_gap, t.marker_gap);
+		patch_merge!(self.item_skip, t.item_skip);
+		patch_merge!(self.numbering, t.numbering);
+	}
+}
+
+impl ThemeTablePatch {
+	fn apply(&self, t: &mut ThemeTable) {
+		patch_merge!(self.skip, t.skip);
+		patch_merge!(self.cell_pad_x, t.cell_pad_x);
+		patch_merge!(self.cell_pad_y, t.cell_pad_y);
+		patch_merge!(self.line_gap, t.line_gap);
+		patch_merge!(self.rule_thin, t.rule_thin);
+		patch_merge!(self.rule_thick, t.rule_thick);
+	}
+}
+
+impl ThemeFigurePatch {
+	fn apply(&self, t: &mut ThemeFigure) {
+		patch_merge!(self.caption_size, t.caption_size);
+		patch_merge!(self.skip, t.skip);
+	}
+}
+
+impl ThemeCodePatch {
+	fn apply(&self, t: &mut ThemeCode) {
+		patch_merge!(self.size, t.size);
+		patch_merge!(self.background, t.background);
+	}
+}
+
+impl ThemeCalloutPatch {
+	fn apply(&self, t: &mut ThemeCallout) {
+		patch_merge!(self.fill, t.fill);
+	}
+}
+
+impl ThemeEquationPatch {
+	fn apply(&self, t: &mut ThemeEquation) {
+		patch_merge!(self.numbering, t.numbering);
+	}
+}
+
+impl ThemePagePartPatch {
+	fn apply(&self, t: &mut ThemePagePart) {
+		patch_merge!(self.width, t.width);
+		patch_merge!(self.height, t.height);
+		patch_merge!(self.margin_inside, t.margin_inside);
+		patch_merge!(self.margin_outside, t.margin_outside);
+		patch_merge!(self.margin_top, t.margin_top);
+		patch_merge!(self.margin_bottom, t.margin_bottom);
+	}
+}
+
+impl ThemePagePatch {
+	fn apply(&self, t: &mut ThemePage) {
+		self.front.apply(&mut t.front);
+		self.body.apply(&mut t.body);
+		self.back.apply(&mut t.back);
+	}
+}
+
+impl ThemeFurniturePatch {
+	fn apply(&self, t: &mut ThemeFurniture) {
+		patch_merge!(self.header_size, t.header_size);
+		patch_merge!(self.folio_size, t.folio_size);
+		patch_merge!(self.foot_size, t.foot_size);
+		patch_merge!(self.foot_leading, t.foot_leading);
+	}
+}
+
+impl ThemeColoursPatch {
+	fn apply(&self, t: &mut ThemeColours) {
+		patch_merge!(self.chap_num_grey, t.chap_num_grey);
+		patch_merge!(self.header_fill, t.header_fill);
+	}
+}
+
+impl ThemeCalibrationPatch {
+	fn apply(&self, t: &mut ThemeCalibration) {
+		patch_merge!(self.line_box_em, t.line_box_em);
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ SERIALISATION HELPERS                                                      │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -919,5 +1255,44 @@ mod tests {
 			return Err(err!("A populated theme did not round-trip through jdat."; Test, Mismatch));
 		}
 		Ok(())
+	}
+
+	/// A `ThemePatch` folds only the fields it names onto a theme: a `Some` leaf overwrites, a `None` leaf
+	/// leaves the theme's own value, and an `Option<Option<..>>` leaf can set a face or clear it. An empty
+	/// patch is a no-op -- the identity the byte-identical gate rests on.
+	#[test]
+	fn theme_patch_applies_only_named_fields() {
+		let mut theme	= Theme::default();
+		let before		= theme.clone();
+
+		// An empty patch changes nothing.
+		theme.apply(&ThemePatch::default());
+		assert_eq!(theme, before);
+
+		// A patch naming a handful of fields across groups overwrites exactly those.
+		let mut patch = ThemePatch::default();
+		patch.text.body_size				= Some(Sp::from_pt(12.0));
+		patch.text.faces.body				= Some(Some("Libertinus Serif".to_string()));
+		patch.par.indent					= Some(Sp::from_pt(18.0));
+		patch.heading.levels[0].numbering	= Some(Some("1.1".to_string()));
+		patch.equation.numbering			= Some(Some("(1)".to_string()));
+		patch.page.body.width				= Some(Some(Sp::from_pt(400.0)));
+		theme.apply(&patch);
+
+		assert_eq!(theme.text.body_size,				Sp::from_pt(12.0));
+		assert_eq!(theme.text.faces.body,				Some("Libertinus Serif".to_string()));
+		assert_eq!(theme.par.indent,					Sp::from_pt(18.0));
+		assert_eq!(theme.heading.levels[0].numbering,	Some("1.1".to_string()));
+		assert_eq!(theme.equation.numbering,			Some("(1)".to_string()));
+		assert_eq!(theme.page.body.width,				Some(Sp::from_pt(400.0)));
+		// A field the patch did not name kept its default.
+		assert_eq!(theme.text.leading,					Theme::default().text.leading);
+		assert_eq!(theme.heading.levels[1].numbering,	None);
+
+		// An `Option<Option<..>>` leaf set to `Some(None)` clears the theme's own value.
+		let mut clear = ThemePatch::default();
+		clear.text.faces.body = Some(None);
+		theme.apply(&clear);
+		assert_eq!(theme.text.faces.body, None);
 	}
 }

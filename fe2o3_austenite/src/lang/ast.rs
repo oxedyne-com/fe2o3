@@ -10,6 +10,7 @@ use crate::ir::Span;
 use crate::lang::codefig::CodeFigure;
 use crate::math::Atom;
 use crate::table::Align;
+use crate::theme::ThemePatch;
 
 /// One block of Ingot markup. The byte span is carried for a future diagnostic caret; the driver's
 /// `Span` model already reserves it, so the front end records it from the first increment.
@@ -25,7 +26,9 @@ pub enum Item {
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
-	Box { items: Vec<Item>, span: Span },	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box
+	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box, plus the
+	// theme patch its body's own top-level `#set` declarations lower to, scoped to the box (H3).
+	Box { items: Vec<Item>, patch: ThemePatch, span: Span },
 }
 
 /// One item of an [`Item::List`]: its own inline runs, and any lists nested beneath it by deeper marker

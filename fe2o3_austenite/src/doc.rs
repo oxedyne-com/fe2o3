@@ -65,7 +65,10 @@ use crate::page::{
 	Placed,
 	PlacedKind,
 };
-use crate::theme::Theme;
+use crate::theme::{
+	Theme,
+	ThemePatch,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -227,8 +230,9 @@ pub enum Block {
 	// A `#styled-box[...]` callout: its inner blocks set inside a padded box that runs the full measure,
 	// washed the template's `colours.veronica.lighten(90%)` (a pale violet) with a 4 pt corner radius. The
 	// callout is laid out as one keep box, so it moves whole to the next page rather than splitting the wash
-	// from its words.
-	Box { blocks: Vec<Block>, fill: Rgba },
+	// from its words. `patch` is the theme overlay the box body's own `#set` declarations lower to, applied
+	// to the box's subtree at render (H3) so a `#set` inside a callout scopes to it, not the document.
+	Box { blocks: Vec<Block>, fill: Rgba, patch: ThemePatch },
 }
 
 impl Block {
@@ -277,10 +281,10 @@ impl Block {
 	}
 
 	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
-	/// violet, `colours.veronica.lighten(90%)`. The fill is fixed by the construct, so the caller supplies
-	/// only the body.
-	pub fn box_callout(blocks: Vec<Block>) -> Self {
-		Self::Box { blocks, fill: Rgba::opaque(245, 230, 255) }
+	/// violet, `colours.veronica.lighten(90%)`. The fill is fixed by the construct; the caller supplies the
+	/// body and the theme patch the box's own `#set` declarations lowered to (empty when it declared none).
+	pub fn box_callout(blocks: Vec<Block>, patch: ThemePatch) -> Self {
+		Self::Box { blocks, fill: Rgba::opaque(245, 230, 255), patch }
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
@@ -796,14 +800,18 @@ pub fn author(
 				first = false;
 				prev_para = false;
 			},
-			Block::Box { blocks: inner, fill } => {
+			Block::Box { blocks: inner, fill, patch } => {
 				// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
 				// box, so the breaker moves it whole to the next page when it will not fit.
 				if !first {
 					nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				}
+				// The box body is set with the document theme overlaid by the box's own `#set` declarations,
+				// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
+				// nothing renders byte-identically.
+				let scoped = { let mut t = style.clone(); t.apply(patch); t };
 				res!(styled_box(
-					&mut nodes, fonts.clone(), geom, style, measure, inner, *fill,
+					&mut nodes, fonts.clone(), geom, &scoped, measure, inner, *fill,
 					&mut foot_no, &mut ref_no, &mut seen, bib, &refs));
 				nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 				i += 1;

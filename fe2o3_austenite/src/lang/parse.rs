@@ -1748,19 +1748,18 @@ fn is_show_doc_with(trimmed: &str) -> bool {
 }
 
 /// Is this line a lowerable top-level `#set <target>(` -- one of the elements the theme carries a field
-/// for (text, par, page, heading, list, enum, math.equation)? A `#set` on any other target returns
-/// `false` and is left to [`code_skip`] to refuse, since the reader has no field for it.
+/// for? The target list is [`crate::lang::set::LOWERABLE_SET_TARGETS`], the single source of truth the
+/// lowering itself matches on, so the reader and the lowering never drift apart. A `#set` on any other
+/// target returns `false` and is left to [`code_skip`] to refuse, since the reader has no field for it.
 fn is_lowerable_set(trimmed: &str) -> bool {
 	let rest = match trimmed.strip_prefix("#set ") {
 		Some(r)	=> r.trim_start(),
 		None	=> return false,
 	};
-	for target in ["text(", "par(", "page(", "heading(", "list(", "enum(", "math.equation("] {
-		if rest.starts_with(target) {
-			return true;
-		}
-	}
-	false
+	crate::lang::set::LOWERABLE_SET_TARGETS.iter().any(|target| {
+		// The target must be followed immediately by `(`, so `par` does not match a `#set part(...)`.
+		rest.strip_prefix(target).map_or(false, |after| after.starts_with('('))
+	})
 }
 
 /// If the line is a `#let name = (` binding whose value opens a paren group, its name; else `None`. Only
@@ -1845,7 +1844,10 @@ fn dispatch_capture(
 			if let Some(body) = styled_box_body(&cap.buf) {
 				if let Ok((inner, sub)) = document_with_refusals(&body) {
 					skips.merge(sub);
-					items.push(Item::Box { items: inner, span: Span::new(0, 0) });
+					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
+					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
+					let patch = crate::lang::set::lower_declarations(&body);
+					items.push(Item::Box { items: inner, patch, span: Span::new(0, 0) });
 				}
 			}
 		},

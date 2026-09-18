@@ -20,121 +20,156 @@
 //! fields those write are populated here only where a `#show: doc.with(...)` names them directly.
 
 use crate::ir::Sp;
-use crate::theme::Theme;
+use crate::theme::{
+	Theme,
+	ThemePatch,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
+
+/// The `#set` targets the theme carries a field for, so a `#set` on one of these lowers rather than
+/// staying a refusal. The single source of truth: [`lower_set`] matches these as its handled arms, and
+/// the reader ([`crate::lang::parse::is_lowerable_set`]) tests a `#set` line against this same list to
+/// decide whether to capture it for lowering or leave it a visible refusal.
+pub const LOWERABLE_SET_TARGETS: &[&str] = &[
+	"text",
+	"par",
+	"page",
+	"heading",
+	"list",
+	"enum",
+	"math.equation",
+];
 
 /// Lowers a source's own top-level declarations onto `theme`: its `#show: <template>.with(...)`
 /// application, then each top-level `#set <target>(...)` the theme carries a field for. Values a
 /// construct does not name are left as the theme already holds them, so a document that sets little
-/// changes little. This reads only the root's own declarations, not those of its includes.
+/// changes little. This reads only the root's own declarations, not those of its includes, and applies
+/// them at the document scope -- the whole theme the driver renders with.
 pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
-	if let Some(args) = show_doc_with_args(src) {
-		lower_doc_with(&args, theme);
-	}
-	for (target, args) in top_level_sets(src) {
-		// A target the theme has no field for returns false; the reader keeps it a refusal, so nothing is
-		// silently dropped here.
-		let _ = lower_set(&target, &args, theme);
-	}
+	theme.apply(&lower_declarations(src));
 }
 
-/// Lowers a `#show: <template>.with(...)` application's named arguments onto `theme`. Only the
+/// The [`ThemePatch`] a source's own top-level declarations lower to, without applying it: a `#show:
+/// <template>.with(...)` application, then each top-level `#set <target>(...)` the theme carries a field
+/// for, folded into one patch in source order so a later `#set` overrides an earlier one. Returned rather
+/// than applied so a caller can fold it at the scope it governs -- the document, an included chapter's
+/// subtree, or a `#styled-box` body. This reads only the source's own declarations, not those of any
+/// file it includes.
+pub fn lower_declarations(src: &str) -> ThemePatch {
+	let mut patch = ThemePatch::default();
+	if let Some(args) = show_doc_with_args(src) {
+		lower_doc_with_into(&args, &mut patch);
+	}
+	for (target, args) in top_level_sets(src) {
+		// A target the theme has no field for writes nothing; the reader keeps such a `#set` a refusal, so
+		// nothing is silently dropped here.
+		lower_set_into(&target, &args, &mut patch);
+	}
+	patch
+}
+
+/// The [`ThemePatch`] a `#show: <template>.with(...)` application's named arguments lower to. Only the
 /// styling-relevant arguments map to theme fields -- `heading-font` names the heading face -- and the
 /// rest (title, subtitle, logos, meta-data) are the book's front matter, read on the book's own path.
 /// An argument this does not recognise is left alone rather than guessed at.
-pub fn lower_doc_with(args: &str, theme: &mut Theme) {
+pub fn lower_doc_with(args: &str) -> ThemePatch {
+	let mut patch = ThemePatch::default();
+	lower_doc_with_into(args, &mut patch);
+	patch
+}
+
+fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
 	if let Some(font) = named_string(args, "heading-font") {
 		if !font.is_empty() {
-			theme.text.faces.heading = Some(font);
+			patch.text.faces.heading = Some(Some(font));
 		}
 	}
 }
 
-/// Lowers a top-level `#set <target>(...)` onto `theme`. Returns `true` when `target` is an element the
-/// theme carries and the set was applied, `false` when it has no theme field -- the caller then leaves
-/// that `#set` a refusal rather than silently dropping it. A named argument the set omits leaves that
-/// field unchanged.
-pub fn lower_set(target: &str, args: &str, theme: &mut Theme) -> bool {
+/// The [`ThemePatch`] a top-level `#set <target>(...)` lowers to. A `target` the theme has no field for
+/// ([`LOWERABLE_SET_TARGETS`]) lowers to an empty patch, and the reader keeps that `#set` a visible
+/// refusal rather than a silent no-op. A named argument the set omits leaves that field unnamed in the
+/// patch, so applying it leaves the theme's own value.
+pub fn lower_set(target: &str, args: &str) -> ThemePatch {
+	let mut patch = ThemePatch::default();
+	lower_set_into(target, args, &mut patch);
+	patch
+}
+
+fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) {
 	match target {
 		"text" => {
 			if let Some(pt) = named_length_pt(args, "size") {
-				theme.text.body_size = Sp::from_pt(pt);
+				patch.text.body_size = Some(Sp::from_pt(pt));
 			}
 			if let Some(font) = named_string(args, "font") {
 				if !font.is_empty() {
-					theme.text.faces.body = Some(font);
+					patch.text.faces.body = Some(Some(font));
 				}
 			}
 			if let Some(b) = named_bool(args, "hyphenate") {
-				theme.text.hyphenate = b;
+				patch.text.hyphenate = Some(b);
 			}
-			true
 		},
 		"par" => {
 			if let Some(pt) = named_length_pt(args, "leading") {
-				theme.text.leading = Sp::from_pt(pt);
+				patch.text.leading = Some(Sp::from_pt(pt));
 			}
 			if let Some(pt) = named_length_pt(args, "spacing") {
-				theme.par.skip = Sp::from_pt(pt);
+				patch.par.skip = Some(Sp::from_pt(pt));
 			}
 			if let Some(pt) = named_length_pt(args, "first-line-indent") {
-				theme.par.indent = Sp::from_pt(pt);
+				patch.par.indent = Some(Sp::from_pt(pt));
 			}
 			if let Some(b) = named_bool(args, "justify") {
-				theme.text.justify = b;
+				patch.text.justify = Some(b);
 			}
-			true
 		},
 		"heading" => {
 			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does.
 			if let Some(pattern) = named_string(args, "numbering") {
 				let pat = if pattern.is_empty() { None } else { Some(pattern) };
-				for level in &mut theme.heading.levels {
-					level.numbering = pat.clone();
+				for level in &mut patch.heading.levels {
+					level.numbering = Some(pat.clone());
 				}
 			}
-			true
 		},
 		"list" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
-				theme.list.item_skip = Sp::from_pt(pt);
+				patch.list.item_skip = Some(Sp::from_pt(pt));
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {
-				theme.list.marker_gap = Sp::from_pt(pt);
+				patch.list.marker_gap = Some(Sp::from_pt(pt));
 			}
-			true
 		},
 		"enum" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
-				theme.enumeration.item_skip = Sp::from_pt(pt);
+				patch.enumeration.item_skip = Some(Sp::from_pt(pt));
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {
-				theme.enumeration.marker_gap = Sp::from_pt(pt);
+				patch.enumeration.marker_gap = Some(Sp::from_pt(pt));
 			}
 			if let Some(pattern) = named_string(args, "numbering") {
-				theme.enumeration.numbering = if pattern.is_empty() { None } else { Some(pattern) };
+				patch.enumeration.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
 			}
-			true
 		},
 		"math.equation" => {
 			if let Some(pattern) = named_string(args, "numbering") {
-				theme.equation.numbering = if pattern.is_empty() { None } else { Some(pattern) };
+				patch.equation.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
 			}
-			true
 		},
 		"page" => {
 			// Page geometry lowers onto the body part's reserved override; a later unit consumes it and
 			// splits front/body/back. Only the fields a `set page` names are written.
 			if let Some(pt) = named_length_mm_or_pt(args, "width") {
-				theme.page.body.width = Some(pt);
+				patch.page.body.width = Some(Some(pt));
 			}
 			if let Some(pt) = named_length_mm_or_pt(args, "height") {
-				theme.page.body.height = Some(pt);
+				patch.page.body.height = Some(Some(pt));
 			}
-			true
 		},
-		_ => false,
+		_ => {},
 	}
 }
 
@@ -163,15 +198,28 @@ fn show_doc_with_args(src: &str) -> Option<String> {
 /// Every top-level `#set <target>(...)` in `src`, as `(target, args)` pairs with the argument text
 /// stripped of its enclosing parentheses. "Top-level" is by line: a line whose trimmed text opens with
 /// `#set `. A malformed set (no balanced parentheses) is skipped.
+///
+/// The `(`'s position is found by tracking the running byte offset of each line rather than by searching
+/// `src` for the line's text: two `#set text(...)` lines with the same target read the same after
+/// `#set `, so a search would resolve the second to the first's arguments. The offset is exact, so the
+/// balanced scan starts at this line's own `(` and reads its own arguments, even when they run on across
+/// several following lines.
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
-	let mut out = Vec::new();
-	for line in src.lines() {
-		let trimmed = line.trim_start();
-		let rest = match trimmed.strip_prefix("#set ") {
-			Some(r)	=> r.trim_start(),
+	let mut out		= Vec::new();
+	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
+	for raw in src.split_inclusive('\n') {
+		let line_start	= offset;
+		offset			= offset.saturating_add(raw.len());
+
+		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
+		let trimmed	= raw.trim_start();
+		let after	= match trimmed.strip_prefix("#set ") {
+			Some(a)	=> a,
 			None	=> continue,
 		};
-		let open = match rest.find('(') {
+		let rest_ws	= after.len() - after.trim_start().len();	// whitespace between `#set ` and the target
+		let rest	= after.trim_start();
+		let open	= match rest.find('(') {
 			Some(i)	=> i,
 			None	=> continue,
 		};
@@ -179,11 +227,9 @@ fn top_level_sets(src: &str) -> Vec<(String, String)> {
 		if target.is_empty() {
 			continue;
 		}
-		// The argument text may run past this line; scan from the '(' across the whole source tail.
-		let abs = match src.find(rest) {
-			Some(i)	=> i + open,
-			None	=> continue,
-		};
+		// The byte offset of this line's own `(`, so the balanced scan reads this set's arguments -- which
+		// may run past the line's end -- rather than an earlier identical prefix's.
+		let abs = line_start + indent + "#set ".len() + rest_ws + open;
 		if let Some(args) = balanced_parens(&src[abs..]) {
 			out.push((target, args));
 		}
@@ -191,44 +237,17 @@ fn top_level_sets(src: &str) -> Vec<(String, String)> {
 	out
 }
 
-/// The text inside a balanced `(...)` at the start of `s` (which must begin with `(`), skipping over
-/// double-quoted strings so a parenthesis inside a string does not unbalance the count. `None` when the
+/// The text inside a balanced `(...)` at the start of `s` (which must begin with `(`). Delegates to the
+/// reader's content-aware group scanner ([`crate::lang::parse::read_group`]), so a `(` an author left
+/// unbalanced inside a `[...]` content block or a `"..."` string does not throw off the count -- the
+/// naive byte counter this replaced miscounted a `set page(header: [p (1)])`. `None` when the
 /// parentheses never close.
 fn balanced_parens(s: &str) -> Option<String> {
-	let bytes		= s.as_bytes();
-	if bytes.first() != Some(&b'(') {
+	let chars: Vec<char> = s.chars().collect();
+	if chars.first() != Some(&'(') {
 		return None;
 	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut escaped	= false;
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i];
-		if in_str {
-			if escaped {
-				escaped = false;
-			} else if c == b'\\' {
-				escaped = true;
-			} else if c == b'"' {
-				in_str = false;
-			}
-		} else {
-			match c {
-				b'"'	=> in_str = true,
-				b'('	=> depth += 1,
-				b')'	=> {
-					depth -= 1;
-					if depth == 0 {
-						return Some(s[1..i].to_string());
-					}
-				},
-				_		=> {},
-			}
-		}
-		i += 1;
-	}
-	None
+	crate::lang::parse::read_group(&chars, 0).map(|(inner, _)| inner)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -365,31 +384,50 @@ mod tests {
 		assert_eq!(theme.text.body_size, Theme::default().text.body_size);
 	}
 
-	/// A lowerable `#set text(size: ...)` writes the body size; an omitted argument leaves its field.
+	/// A lowerable `#set text(size: ...)` lowers to a patch that writes the body size and body face; an
+	/// omitted argument leaves its field unnamed, so applying the patch leaves the theme's own value.
 	#[test]
 	fn set_text_lowers_size_and_font() {
+		let patch = lower_set("text", "size: 12pt, font: \"Libertinus Serif\"");
 		let mut theme = Theme::default();
-		assert!(lower_set("text", "size: 12pt, font: \"Libertinus Serif\"", &mut theme));
+		theme.apply(&patch);
 		assert_eq!(theme.text.body_size, Sp::from_pt(12.0));
 		assert_eq!(theme.text.faces.body, Some("Libertinus Serif".to_string()));
+		// The leading was not named, so it kept its default.
+		assert_eq!(theme.text.leading, Theme::default().text.leading);
 	}
 
-	/// `set heading(numbering: "1.1")` applies the pattern across every level.
+	/// `set heading(numbering: "1.1")` lowers to a patch that applies the pattern across every level.
 	#[test]
 	fn set_heading_numbering_applies_to_all_levels() {
+		let patch = lower_set("heading", "numbering: \"1.1\"");
 		let mut theme = Theme::default();
-		assert!(lower_set("heading", "numbering: \"1.1\"", &mut theme));
+		theme.apply(&patch);
 		for level in &theme.heading.levels {
 			assert_eq!(level.numbering, Some("1.1".to_string()));
 		}
 	}
 
-	/// A `#set` on a target the theme has no field for is not lowered -- the caller keeps it a refusal.
+	/// A `#set` on a target the theme has no field for lowers to an empty patch -- the caller keeps it a
+	/// refusal, and applying the empty patch changes nothing.
 	#[test]
 	fn set_on_unknown_target_is_not_lowered() {
+		let patch = lower_set("rect", "stroke: 1pt");
+		assert_eq!(patch, ThemePatch::default());
 		let mut theme = Theme::default();
-		assert!(!lower_set("rect", "stroke: 1pt", &mut theme));
+		theme.apply(&patch);
 		assert_eq!(theme, Theme::default());
+	}
+
+	/// Two top-level `#set` lines whose text reads identically after `#set ` are read by their own byte
+	/// offset, so the second's arguments are its own -- not the first's, which a naive `src.find` returned.
+	#[test]
+	fn top_level_sets_reads_each_lines_own_arguments() {
+		let src = "#set text(size: 11pt)\n#set text(size: 13pt)\n";
+		let sets = top_level_sets(src);
+		assert_eq!(sets.len(), 2);
+		assert_eq!(sets[0], ("text".to_string(), "size: 11pt".to_string()));
+		assert_eq!(sets[1], ("text".to_string(), "size: 13pt".to_string()));
 	}
 
 	/// The named-argument reader does not confuse a suffix key: `font:` is not found inside
