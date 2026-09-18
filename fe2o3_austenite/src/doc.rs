@@ -3302,7 +3302,7 @@ fn resolved_head_face<'a>(level: u8, style: &'a Theme, faces: &'a FaceResolver, 
 		let idx = (level.max(1) as usize) - 1;
 		let lvl			= style.heading.levels.get(idx);
 		let per_level	= lvl.and_then(|l| l.face.as_deref());
-		let role		= style.text.faces.heading.as_deref();
+		let role		= style.heading.face.as_deref();
 		// The level's own weight and slant choose the variant; the default (no weight, upright) resolves to
 		// the Regular face, so a document naming a plain display face renders exactly as before.
 		let bold		= lvl.and_then(|l| l.weight).map_or(false, |w| w >= 600);
@@ -4515,7 +4515,7 @@ an interior line justification fills to the measure while ragged setting does no
 		let text	= "Chapter Heading";
 
 		let mut style = Theme::default();
-		style.text.faces.heading = Some("LibertinusSerif".to_string());
+		style.heading.face = Some("LibertinusSerif".to_string());
 
 		// A resolvable heading face resolves to a Solo display face, and shapes differently from the body
 		// bold role a book falls to when no display face resolves.
@@ -4534,7 +4534,7 @@ an interior line justification fills to the measure while ragged setting does no
 
 		// A name with no file resolves nothing, so the heading falls to the role as before.
 		let mut absent = Theme::default();
-		absent.text.faces.heading = Some("NoSuchDisplayFace".to_string());
+		absent.heading.face = Some("NoSuchDisplayFace".to_string());
 		assert!(matches!(resolved_head_face(2, &absent, &faces, false), HeadFace::Role(_)),
 			"an unresolvable face must fall to a role face");
 		Ok(())

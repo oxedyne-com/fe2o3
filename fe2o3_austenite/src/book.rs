@@ -99,7 +99,7 @@ pub fn is_book_root(src: &str) -> bool {
 /// face and every per-level face, deduplicated in first-seen order.
 pub fn heading_face_names(theme: &Theme) -> Vec<String> {
 	let mut names: Vec<String> = Vec::new();
-	if let Some(n) = &theme.text.faces.heading {
+	if let Some(n) = &theme.heading.face {
 		names.push(n.clone());
 	}
 	for l in &theme.heading.levels {
@@ -136,7 +136,7 @@ fn collect_patch_face_names(blocks: &[Block], out: &mut Vec<String>) {
 /// The heading face names a single patch introduces -- its role-default heading face and any per-level
 /// face it sets to a name -- appended if not already present.
 fn patch_face_names(patch: &crate::theme::ThemePatch, out: &mut Vec<String>) {
-	if let Some(Some(n)) = &patch.text.faces.heading {
+	if let Some(Some(n)) = &patch.heading.face {
 		if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
 	}
 	for l in &patch.heading.levels {
@@ -152,7 +152,7 @@ fn patch_face_names(patch: &crate::theme::ThemePatch, out: &mut Vec<String>) {
 /// missing variant.
 fn note_missing_face_variants(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
 	for (i, l) in theme.heading.levels.iter().enumerate() {
-		let name = match l.face.as_deref().or(theme.text.faces.heading.as_deref()) {
+		let name = match l.face.as_deref().or(theme.heading.face.as_deref()) {
 			Some(n)	=> n,
 			None	=> continue,
 		};
@@ -249,7 +249,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// shared assets tree. It is named on the theme's role-default heading face here, then loaded by the
 	// resolver below; a book whose tree ships no Radley resolves nothing and sets headings in the body
 	// bold, the same fall-back as before.
-	style.text.faces.heading = Some("Radley".to_string());
+	style.heading.face = Some("Radley".to_string());
 	// The root's own declarative styling -- its `#show: doc.with(...)` application and any lowerable
 	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
 	// by `read_config` above; this reads only the root's own top-level declarations.

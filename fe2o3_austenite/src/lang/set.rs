@@ -86,7 +86,7 @@ fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
 			// The doc template applies the heading font to levels 1 and 2 only, the body family below (its
 			// per-level show rule: `font: if it.level <= 2 { heading-font } else { "Libertinus Serif" }`).
 			// Lower it into those two levels' `face`, which the renderer resolves and applies, rather than
-			// the role-default `text.faces.heading` nothing read.
+			// the role-default `heading.face` nothing read.
 			while patch.heading.levels.len() < 2 {
 				patch.heading.levels.push(ThemeHeadingLevelPatch::default());
 			}
@@ -514,7 +514,7 @@ mod tests {
 		assert_eq!(theme.heading.levels[1].face, Some("Graystroke".to_string()));
 		// The body family below level 2, and the rest of the theme, are untouched.
 		assert_eq!(theme.heading.levels[2].face, None);
-		assert_eq!(theme.text.faces.heading, None);
+		assert_eq!(theme.heading.face, None);
 		assert_eq!(theme.text.body_size, Theme::default().text.body_size);
 	}
 

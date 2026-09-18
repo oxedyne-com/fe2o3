@@ -143,12 +143,12 @@ impl Default for ThemeText {
 
 /// Reserved: the family name each text role is set in, or `None` to take the loaded default. A later
 /// unit lowers `set text(font: ...)` and `show <role>: set text(...)` into these; the renderer does
-/// not read them yet.
+/// not read them yet. The heading display face is not here -- it is read for headings, so it lives in the
+/// `heading` group ([`ThemeHeading::face`]) where a heading block's read-set finds it.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct FaceSet {
 	pub body:		Option<String>,
 	pub emphasis:	Option<String>,
-	pub heading:	Option<String>,
 	pub mono:		Option<String>,
 }
 
@@ -206,6 +206,7 @@ impl ThemeHeadingLevel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeHeading {
 	pub kind:	HeadingStyle,			// which top-level opener and numbering the headings take
+	pub face:	Option<String>,			// role-default display face for the top levels (read for headings)
 	pub levels:	Vec<ThemeHeadingLevel>,	// index 0 is level 1; the default holds four, more are allowed
 }
 
@@ -213,6 +214,7 @@ impl Default for ThemeHeading {
 	fn default() -> Self {
 		Self {
 			kind:	HeadingStyle::BookOpener,
+			face:	None,
 			levels:	vec![
 				ThemeHeadingLevel::new(16.0, 20.0, 8.0),	// level 1, the chapter title
 				ThemeHeadingLevel::new(13.0, 15.0, 6.0),	// level 2
@@ -487,7 +489,6 @@ pub struct ThemePatch {
 pub struct FaceSetPatch {
 	pub body:		Option<Option<String>>,
 	pub emphasis:	Option<Option<String>>,
-	pub heading:	Option<Option<String>>,
 	pub mono:		Option<Option<String>>,
 }
 
@@ -523,6 +524,7 @@ pub struct ThemeHeadingLevelPatch {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemeHeadingPatch {
 	pub kind:			Option<HeadingStyle>,
+	pub face:			Option<Option<String>>,
 	// `set heading(numbering: ...)` applies one pattern across every level, whatever the theme's level
 	// count, so it is a group-level leaf rather than a per-level one.
 	pub numbering_all:	Option<Option<String>>,
@@ -663,7 +665,6 @@ impl FaceSetPatch {
 	fn apply(&self, t: &mut FaceSet) {
 		patch_merge!(self.body, t.body);
 		patch_merge!(self.emphasis, t.emphasis);
-		patch_merge!(self.heading, t.heading);
 		patch_merge!(self.mono, t.mono);
 	}
 }
@@ -703,6 +704,7 @@ impl ThemeHeadingLevelPatch {
 impl ThemeHeadingPatch {
 	fn apply(&self, h: &mut ThemeHeading) {
 		patch_merge!(self.kind, h.kind);
+		patch_merge!(self.face, h.face);
 		// A uniform numbering pattern applies to every level the theme carries, whatever their count.
 		if let Some(n) = &self.numbering_all {
 			for l in &mut h.levels {
@@ -942,7 +944,6 @@ impl FaceSet {
 		Ok(omapdat!{
 			"body"		=> opt_str_dat(&self.body),
 			"emphasis"	=> opt_str_dat(&self.emphasis),
-			"heading"	=> opt_str_dat(&self.heading),
 			"mono"		=> opt_str_dat(&self.mono),
 		})
 	}
@@ -950,7 +951,6 @@ impl FaceSet {
 		Ok(Self {
 			body:		res!(opt_str_from(res!(map_must(&mut d, "body")))),
 			emphasis:	res!(opt_str_from(res!(map_must(&mut d, "emphasis")))),
-			heading:	res!(opt_str_from(res!(map_must(&mut d, "heading")))),
 			mono:		res!(opt_str_from(res!(map_must(&mut d, "mono")))),
 		})
 	}
@@ -1031,11 +1031,13 @@ impl ThemeHeading {
 		}
 		Ok(omapdat!{
 			"kind"		=> heading_kind_dat(self.kind),
+			"face"		=> opt_str_dat(&self.face),
 			"levels"	=> Dat::List(levels),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		let kind		= res!(heading_kind_from(res!(map_must(&mut d, "kind"))));
+		let face		= res!(opt_str_from(res!(map_must(&mut d, "face"))));
 		let levels_list	= try_extract_dat!(res!(map_must(&mut d, "levels")), List);
 		if levels_list.is_empty() {
 			return Err(err!("A theme heading must hold at least one level, found none."; Input, Invalid));
@@ -1044,7 +1046,7 @@ impl ThemeHeading {
 		for entry in levels_list {
 			levels.push(res!(ThemeHeadingLevel::from_dat(entry)));
 		}
-		Ok(Self { kind, levels })
+		Ok(Self { kind, face, levels })
 	}
 }
 
@@ -1485,6 +1487,17 @@ mod tests {
 		op.opener.chap_num_size = Sp::from_pt(60.0);
 		assert_eq!(res!(op.group_dat(ThemeGroup::Heading)), heading_dat,
 			"an opener change must not move the heading group's daticle");
+
+		// The role-default heading face lives in the heading group now (read for headings), not `text`: a
+		// change to it moves the heading group's daticle and leaves the text group's untouched, so a heading
+		// block's read-set is the heading group alone (C4: group contents match what the element consumes).
+		let text_dat = res!(base.group_dat(ThemeGroup::Text));
+		let mut hf = Theme::default();
+		hf.heading.face = Some("Radley".to_string());
+		assert_ne!(res!(hf.group_dat(ThemeGroup::Heading)), heading_dat,
+			"a heading face change must move the heading group's daticle");
+		assert_eq!(res!(hf.group_dat(ThemeGroup::Text)), text_dat,
+			"a heading face change must not move the text group's daticle");
 		Ok(())
 	}
 }
