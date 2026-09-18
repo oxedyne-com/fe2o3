@@ -1046,14 +1046,25 @@ fn named_value(args: &str, key: &str) -> Option<String> {
 	Some(tail[..end].trim().to_string())
 }
 
+/// A template's named colour palette (`#let colours = (yellow: rgb("#f0f600"), ...)`), by name. Empty
+/// unless a book's palette is collected from its template chain; a `colours.<name>` reference resolves
+/// against it.
+pub type Palette = std::collections::HashMap<String, Rgba>;
+
 /// A colour expression lowered to an [`Rgba`]. The forms a template fill takes that resolve without a
 /// palette: `luma(<n>)`, `rgb("#rrggbb")`, `rgb(<r>, <g>, <b>)` and a small set of named colours, each
 /// optionally lightened or darkened (`.lighten(<p>%)` / `.darken(<p>%)`). A palette reference (`colours.blue`)
-/// resolves to no value here and the caller refuses it rather than guessing.
+/// resolves only through [`parse_colour_pal`], which is given the book's palette.
 ///
 /// Shared with the `#set text(fill:)` lowering ([`crate::lang::set`]), which reads a body-text colour
 /// with the same grammar, so the two readers cannot drift.
 pub(crate) fn parse_colour(expr: &str) -> Option<Rgba> {
+	parse_colour_pal(expr, &Palette::new())
+}
+
+/// As [`parse_colour`], resolving a `colours.<name>` reference against `palette` (and applying any trailing
+/// `.lighten`/`.darken` to the looked-up colour). With an empty palette this is exactly [`parse_colour`].
+pub(crate) fn parse_colour_pal(expr: &str, palette: &Palette) -> Option<Rgba> {
 	let e = expr.trim();
 	// The base runs up to the first `.lighten`/`.darken` modifier (a `luma(...)`/`rgb(...)` call keeps its
 	// own parentheses); the rest is the modifier chain.
@@ -1068,10 +1079,50 @@ pub(crate) fn parse_colour(expr: &str) -> Option<Rgba> {
 		Rgba::opaque(v, v, v)
 	} else if let Some(rest) = head.strip_prefix("rgb(") {
 		res_rgb(rest.trim_end_matches(')').trim())?
+	} else if let Some(name) = head.strip_prefix("colours.").or_else(|| head.strip_prefix("colors.")) {
+		*palette.get(name.trim())?
 	} else {
 		named_colour(head)?
 	};
 	Some(apply_colour_mods(base, mods))
+}
+
+/// Collects a template's `#let colours = ( name: <colour>, ... )` palette from `src` into `palette`, so a
+/// `colours.<name>` reference in a furniture fill or stroke resolves. Each entry's value is read with the
+/// same colour grammar as a fill (`rgb("#...")`, `luma(...)`, a named colour). An entry this reader cannot
+/// resolve is passed over; a source with no such binding adds nothing.
+pub fn collect_palette(src: &str, palette: &mut Palette) {
+	let chars:	Vec<char>	= src.chars().collect();
+	let mut i	= 0usize;
+	while i < chars.len() {
+		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let colours") {
+			// The dict opens at the first `(` after the `=`.
+			let mut j = i;
+			while j < chars.len() && chars[j] != '(' && chars[j] != '\n' {
+				j += 1;
+			}
+			if chars.get(j) == Some(&'(') {
+				if let Some((inner, next)) = read_delim_group(&chars, j) {
+					for entry in split_top_commas_str(&inner) {
+						if let Some((name_part, val_part)) = entry.split_once(':') {
+							// The name is the last line of the key part, so a `//` comment line preceding the
+							// entry is dropped; the value is taken up to any trailing `//` line comment.
+							let name = name_part.rsplit('\n').next().unwrap_or(name_part).trim();
+							let val = val_part.split("//").next().unwrap_or(val_part).trim();
+							if !name.is_empty() && name.chars().all(is_ident_char) {
+								if let Some(rgba) = parse_colour(val) {
+									palette.insert(name.to_string(), rgba);
+								}
+							}
+						}
+					}
+					i = next;
+					continue;
+				}
+			}
+		}
+		i += 1;
+	}
 }
 
 /// `rgb("#rrggbb")` or `rgb(<r>, <g>, <b>)` to an [`Rgba`].
@@ -1222,7 +1273,7 @@ pub type TemplateFns = std::collections::HashMap<String, TemplateFn>;
 /// the call then stays a tallied skip, exactly as before, rather than expanding wrongly. A byte-identical
 /// definition seen twice (the corpus repeats `#let pr-note` verbatim atop three chapters) re-inserts the
 /// same value, so the map is definition-order-independent.
-pub fn collect_template_fns(src: &str, body_size: Sp, tfns: &mut TemplateFns) {
+pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &mut TemplateFns) {
 	let chars:	Vec<char>	= src.chars().collect();
 	let mut i	= 0usize;
 	while i < chars.len() {
@@ -1235,7 +1286,7 @@ pub fn collect_template_fns(src: &str, body_size: Sp, tfns: &mut TemplateFns) {
 				// `part-page`, ...) is NOT overridden by a collected definition, so the built-in path stays
 				// authoritative and a corpus that defines its own `styled-box` renders exactly as before.
 				if !is_reserved_construct(&name) {
-					if let Some(tf) = lower_template_fn(&params, &expr, body_size) {
+					if let Some(tf) = lower_template_fn(&params, &expr, body_size, palette) {
 						tfns.insert(name, tf);
 					}
 				}
@@ -1253,7 +1304,9 @@ pub fn collect_template_fns(src: &str, body_size: Sp, tfns: &mut TemplateFns) {
 fn is_reserved_construct(name: &str) -> bool {
 	matches!(name,
 		"styled-box" | "figure" | "table" | "columns" | "image" | "padded-image"
-		| "section-banner" | "print-glossary" | "line" | "part-page")
+		| "section-banner" | "print-glossary" | "line" | "part-page"
+		// Common Typst built-ins a corpus must not be able to redefine into a wrap the reader would expand.
+		| "v" | "h" | "pagebreak" | "outline" | "box" | "block" | "text" | "align" | "grid" | "stack")
 }
 
 /// Is `at` the start of a line (position 0, or just after a newline)?
@@ -1399,7 +1452,7 @@ fn is_ident_char(c: char) -> bool {
 /// the top/bottom pads), `fill`, `radius` and `stroke: (left: <w> + <colour>)`; the positional content
 /// block's inner `set text(size:)` / `set par(spacing:, first-line-indent:)` become the body overlay.
 /// `None` when the body is neither wrap, or a length will not resolve -- the call then stays a tallied skip.
-fn lower_template_fn(params: &str, expr: &str, body_size: Sp) -> Option<TemplateFn> {
+fn lower_template_fn(params: &str, expr: &str, body_size: Sp, palette: &Palette) -> Option<TemplateFn> {
 	let body_param	= body_param_name(params)?;
 	let has_title	= param_names(params).iter().any(|p| p == "title");
 
@@ -1414,10 +1467,19 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp) -> Option<Template
 	// The fill: a resolved colour washes the frame; an absent (or unresolved) fill leaves it transparent, so
 	// a plain indented block draws no panel. `box` and `block` alike carry a fill only when the source names one.
 	let fill = match named_value(&args, "fill") {
-		Some(fv)	=> parse_colour(&fv).unwrap_or(Rgba::TRANSPARENT),
+		Some(fv)	=> parse_colour_pal(&fv, palette).unwrap_or(Rgba::TRANSPARENT),
 		None		=> Rgba::TRANSPARENT,
 	};
 	patch.callout.fill = Some(fill);
+
+	// A `stroke: (left: <w> + <colour>)` -- the aside-box left rule. The width and colour are read from the
+	// dict's `left:` entry; a stroke this reader cannot resolve leaves both unset (no rule drawn).
+	if let Some(sv) = named_value(&args, "stroke") {
+		if let Some((w, col)) = read_left_stroke(&sv, body_size, palette) {
+			patch.callout.stroke_left_w		= Some(w);
+			patch.callout.stroke_left_col	= Some(col);
+		}
+	}
 
 	// The inset: a scalar pads every side, a dict names `left`/`right`/`x`/`y`/`top`/`bottom`. `x` sets both
 	// horizontal pads, `y` both vertical; a side-specific key overrides.
@@ -1446,7 +1508,16 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp) -> Option<Template
 	if !mentions_word(&content, &body_param) {
 		return None;
 	}
+	// The body's own text size may be set two ways: an inner `set text(size:)` (pr-note's `{ ... }` block) or
+	// a `text(size: <x>)[#body]` wrapper around the body (aside-box). Both are read, resolving `em` in the
+	// inner-set chain against the size a preceding `set text` already fixed (so a `par(spacing: 0.55em)` after
+	// `text(size: 0.88em)` tracks Typst, which resolves the em against the reduced size, not the outer one).
 	read_inner_sets_em(&content, body_size, &mut patch);
+	if patch.text.body_size.is_none() {
+		if let Some(sz) = body_wrapper_size(&content, &body_param, body_size) {
+			patch.text.body_size = Some(sz);
+		}
+	}
 
 	// The title run's size (`text(size: 0.85em)[#title]`), read from the content so a title paragraph is set
 	// at the same size the body is.
@@ -1457,6 +1528,72 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp) -> Option<Template
 	};
 
 	Some(TemplateFn { body_param, has_title, title_size, patch })
+}
+
+/// Reads a `stroke: (left: <w> + <colour>)` dict into a width and colour, resolving `em` against `body_size`
+/// and a `colours.<name>` against `palette`. Typst's `2pt + colours.yellow.darken(20%)` is a stroke whose
+/// thickness is the length term and whose paint is the colour term. `None` when there is no `left:` entry or
+/// its width/colour will not resolve, so no rule is drawn rather than a wrong one.
+fn read_left_stroke(raw: &str, body_size: Sp, palette: &Palette) -> Option<(Sp, Rgba)> {
+	let raw = raw.trim();
+	// A dict `(left: ...)`, or a bare stroke applied to every side -- take the `left:` entry, else the whole.
+	let spec = if raw.starts_with('(') {
+		let inner = call_group(raw)?;
+		named_value(&inner, "left")?
+	} else {
+		raw.to_string()
+	};
+	// The spec is `<length> + <colour>` (either order): the term that resolves to a length is the width, the
+	// term that resolves to a colour is the paint.
+	let mut width:	Option<Sp>		= None;
+	let mut colour:	Option<Rgba>	= None;
+	for term in spec.split('+') {
+		let t = term.trim();
+		if let Some(sp) = resolve_len(t, body_size) {
+			width = Some(sp);
+		} else if let Some(c) = parse_colour_pal(t, palette) {
+			colour = Some(c);
+		}
+	}
+	match (width, colour) {
+		(Some(w), Some(c))	=> Some((w, c)),
+		_					=> None,
+	}
+}
+
+/// The size of a `text(size: <len>)[ ... body ... ]` wrapper around the body parameter -- the body text size
+/// when it is set by wrapping rather than by an inner `#set text` (aside-box's `text(size: 0.85em)[#body]`).
+/// `None` when no `text(...)` call whose content names the body carries a size.
+fn body_wrapper_size(content: &str, body_param: &str, body_size: Sp) -> Option<Sp> {
+	let chars: Vec<char> = content.chars().collect();
+	let mut from = 0usize;
+	while let Some(at) = find_call(&chars[from..], "text").map(|i| from + i) {
+		let (call, next) = match read_balanced_from(&chars, at) {
+			Some(r)	=> r,
+			None	=> break,
+		};
+		// The `[ ... ]` content block follows the `( ... )` args (Typst's `text(...)[...]`): read it and test
+		// whether it places the body parameter.
+		let mut k = next;
+		while k < chars.len() && chars[k].is_whitespace() {
+			k += 1;
+		}
+		let places_body = chars.get(k) == Some(&'[')
+			&& read_delim_group(&chars, k)
+				.map(|(inner, _)| mentions_word(&inner, body_param))
+				.unwrap_or(false);
+		if places_body {
+			if let Some(a) = wrap_args(&call) {
+				if let Some(v) = named_value(&a, "size") {
+					if let Some(sp) = resolve_len(&v, body_size) {
+						return Some(sp);
+					}
+				}
+			}
+		}
+		from = next;
+	}
+	None
 }
 
 /// The body parameter's name: the last positional (unnamed) parameter in the list, which is the content
@@ -1616,6 +1753,10 @@ fn positional_content(args: &str) -> Option<(char, String)> {
 /// hole overlay, resolving `em` against `body_size`. A `#`-prefixed `#set` (an `[ ... ]` content block) and
 /// a bare `set` (a `{ ... }` code block) are both read.
 fn read_inner_sets_em(content: &str, body_size: Sp, patch: &mut ThemePatch) {
+	// The text size in force as the statements are read in order. Typst resolves an `em` against the running
+	// font size, so a `set par(spacing: 0.55em)` AFTER a `set text(size: 0.88em)` resolves its em against the
+	// reduced 0.88em size, not the outer body -- tracking that is what keeps the inter-paragraph spacing tight.
+	let mut cur_size = body_size;
 	for stmt in split_statements(content) {
 		let s = stmt.trim().trim_start_matches('#').trim();
 		let after = match s.strip_prefix("set ") {
@@ -1633,25 +1774,28 @@ fn read_inner_sets_em(content: &str, body_size: Sp, patch: &mut ThemePatch) {
 		};
 		match target {
 			"text" => {
+				// `set text(size: 0.88em)`: the em resolves against the size before this set (the running
+				// `cur_size`), and the result becomes the running size for every em that follows.
 				if let Some(v) = named_value(&cargs, "size") {
-					if let Some(sp) = resolve_len(&v, body_size) {
+					if let Some(sp) = resolve_len(&v, cur_size) {
 						patch.text.body_size = Some(sp);
+						cur_size = sp;
 					}
 				}
 			},
 			"par" => {
 				if let Some(v) = named_value(&cargs, "spacing") {
-					if let Some(sp) = resolve_len(&v, body_size) {
+					if let Some(sp) = resolve_len(&v, cur_size) {
 						patch.par.skip = Some(sp);
 					}
 				}
 				if let Some(v) = named_value(&cargs, "first-line-indent") {
-					if let Some(sp) = resolve_len(&v, body_size) {
+					if let Some(sp) = resolve_len(&v, cur_size) {
 						patch.par.indent = Some(sp);
 					}
 				}
 				if let Some(v) = named_value(&cargs, "leading") {
-					if let Some(sp) = resolve_len(&v, body_size) {
+					if let Some(sp) = resolve_len(&v, cur_size) {
 						patch.text.leading = Some(sp);
 					}
 				}
@@ -2404,17 +2548,21 @@ mod tests {
 ";
 		let body = Sp::from_pt(10.0);
 		let mut tfns = TemplateFns::new();
-		collect_template_fns(src, body, &mut tfns);
+		collect_template_fns(src, body, &Palette::new(), &mut tfns);
 		let tf = tfns.get("pr-note").expect("pr-note is collected");
 		assert_eq!(tf.body_param, "body");
 		assert!(!tf.has_title, "pr-note takes no title");
 		assert_eq!(tf.patch.callout.fill, Some(Rgba::TRANSPARENT), "no fill -- a plain indented block, no wash");
+		// The block parameters (inset/above/below) resolve their em against the outer body size, since they are
+		// evaluated in the outer context before the inner `set text` takes effect.
 		assert_eq!(tf.patch.callout.inset_left, Some(Sp::from_pt(12.0)), "left: 1.2em at a 10pt body");
 		assert_eq!(tf.patch.callout.inset_right, Some(Sp::from_pt(6.0)), "right: 0.6em");
 		assert_eq!(tf.patch.callout.inset_top, Some(Sp::from_pt(9.0)), "above: 0.9em folds into the top pad");
 		assert_eq!(tf.patch.callout.inset_bot, Some(Sp::from_pt(11.0)), "below: 1.1em folds into the bottom pad");
-		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.8)), "set text(size: 0.88em)");
-		assert_eq!(tf.patch.par.skip, Some(Sp::from_pt(5.5)), "set par(spacing: 0.55em)");
+		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.8)), "set text(size: 0.88em) against the 10pt body");
+		// The inner `set par(spacing: 0.55em)` follows `set text(size: 0.88em)`, so its em resolves against the
+		// reduced 8.8pt size (0.55 * 8.8 = 4.84pt), tracking Typst -- not against the outer body (which gave 5.5).
+		assert_eq!(tf.patch.par.skip, Some(Sp::from_pt(4.84)), "0.55em against the reduced 8.8pt size");
 		assert_eq!(tf.patch.par.indent, Some(Sp::from_pt(0.0)), "set par(first-line-indent: 0em)");
 	}
 
@@ -2424,7 +2572,7 @@ mod tests {
 	fn a_definition_that_ignores_its_body_is_not_lowered() {
 		let src = "#let bogus(body) = block(inset: 6pt, { set text(size: 0.9em) })\n";
 		let mut tfns = TemplateFns::new();
-		collect_template_fns(src, Sp::from_pt(10.0), &mut tfns);
+		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
 		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
 	}
 
@@ -2456,7 +2604,7 @@ mod tests {
 ";
 		let body = Sp::from_pt(10.0);
 		let mut tfns = TemplateFns::new();
-		collect_template_fns(src, body, &mut tfns);
+		collect_template_fns(src, body, &Palette::new(), &mut tfns);
 		let tf = tfns.get("aside-box").expect("aside-box is collected");
 		assert_eq!(tf.body_param, "body", "the body is the last positional parameter, past title: and float:");
 		assert!(tf.has_title, "a title: keyword is recognised");
@@ -2466,6 +2614,27 @@ mod tests {
 		assert_eq!(tf.patch.callout.inset_top, Some(Sp::from_pt(10.0)), "inset.y -> top");
 		assert_eq!(tf.patch.callout.inset_bot, Some(Sp::from_pt(12.0)), "bottom overrides y for the foot pad");
 		assert_eq!(tf.patch.callout.radius, Some(Sp::from_pt(4.0)), "radius: 4pt");
+		// The left stroke `2pt + luma(50)` -- the length term is the width, the colour term the paint.
+		assert_eq!(tf.patch.callout.stroke_left_w, Some(Sp::from_pt(2.0)), "the left rule is 2pt wide");
+		assert_eq!(tf.patch.callout.stroke_left_col, Some(Rgba::opaque(50, 50, 50)), "the left rule's colour");
+		// The body size comes from the `text(size: 0.85em)[#body]` wrapper, not a `#set`.
+		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.5)), "body wrapped in text(size: 0.85em)");
 		assert_eq!(tf.title_size, Some(Sp::from_pt(8.5)), "the bold title run is set at 0.85em");
+	}
+
+	/// A `#let colours = (...)` palette is collected, and a furniture fill/stroke naming `colours.<name>`
+	/// resolves through it (with any `.lighten`/`.darken` applied to the looked-up colour). Without the
+	/// palette the same reference resolves to nothing and the fill falls back to transparent.
+	#[test]
+	fn palette_resolves_a_named_colour_reference() {
+		let src = "#let colours = (\n  yellow:   rgb(\"#f0f600\"),\n  purple:   rgb(\"#4c1a57\"),\n)\n";
+		let mut palette = Palette::new();
+		collect_palette(src, &mut palette);
+		assert_eq!(palette.get("yellow"), Some(&Rgba::opaque(0xf0, 0xf6, 0x00)));
+		// A reference resolves, and a modifier lightens the looked-up colour toward white.
+		assert_eq!(parse_colour_pal("colours.yellow", &palette), Some(Rgba::opaque(0xf0, 0xf6, 0x00)));
+		assert!(parse_colour_pal("colours.yellow.lighten(92%)", &palette).is_some());
+		// Without the palette, the reference cannot resolve.
+		assert_eq!(parse_colour_pal("colours.yellow", &Palette::new()), None);
 	}
 }

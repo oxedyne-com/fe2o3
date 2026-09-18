@@ -2067,23 +2067,39 @@ fn dispatch_capture(
 				Some(tf)	=> tf,
 				None		=> return,	// the opener only fires for a bound name, so this cannot happen
 			};
-			if let Some((args, body)) = template_call_parts(&cap.buf, &name) {
-				if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
-					skips.merge(sub);
-					// A `title:` keyword argument, its content set as a leading bold paragraph at the title size
-					// the definition named, ahead of the body.
-					if tf.has_title {
-						if let Some(title) = named_content_arg(&args, "title") {
-							let runs = parse_inlines(&title);
-							inner.insert(0, Item::Paragraph {
-								runs:	vec![Inline::Strong(inline_plain(&runs))],
-								label:	None,
-								span:	Span::new(cap.start, cap.start),
-							});
+			match template_call_parts(&cap.buf, &name) {
+				Some((args, body)) => {
+					if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
+						skips.merge(sub);
+						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
+						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
+						// title larger or smaller than the body reads at its own size.
+						if tf.has_title {
+							if let Some(title) = named_content_arg(&args, "title") {
+								let runs	= parse_inlines(&title);
+								let para	= Item::Paragraph {
+									runs:	vec![Inline::Strong(inline_plain(&runs))],
+									label:	None,
+									span:	Span::new(cap.start, cap.start),
+								};
+								let title_item = match tf.title_size {
+									Some(sz)	=> {
+										let mut patch = crate::theme::ThemePatch::default();
+										patch.text.body_size = Some(sz);
+										Item::Scoped { patch, items: vec![para] }
+									},
+									None		=> para,
+								};
+								inner.insert(0, title_item);
+							}
 						}
+						items.push(Item::Box { items: inner, patch: tf.patch.clone(), span: Span::new(cap.start, cap.start) });
 					}
-					items.push(Item::Box { items: inner, patch: tf.patch.clone(), span: Span::new(cap.start, cap.start) });
-				}
+				},
+				// A bound call with no `[ ... ]` body -- e.g. `#pr-note([x])`, an argument-only call this reader
+				// cannot place -- is tallied as a skipped construct rather than dropped silently, so the report
+				// still names it.
+				None => skips.record(&fmt!("#{}", name), Span::new(cap.start, cap.start)),
 			}
 		},
 	}
@@ -2866,7 +2882,8 @@ mod tests {
 		let def = "#let pr-note(body) = block(inset: (left: 1.2em, right: 0.6em), above: 0.9em, below: 1.1em, \
 { set text(size: 0.88em); set par(spacing: 0.55em, first-line-indent: 0em); body })\n";
 		let mut tfns = crate::lang::rules::TemplateFns::new();
-		crate::lang::rules::collect_template_fns(def, crate::ir::Sp::from_pt(10.0), &mut tfns);
+		crate::lang::rules::collect_template_fns(def, crate::ir::Sp::from_pt(10.0),
+			&crate::lang::rules::Palette::new(), &mut tfns);
 		assert!(tfns.contains_key("pr-note"), "the definition is collected");
 
 		let src = "Lead prose.\n\n#pr-note[\n*Baseline:* one measure.\n\nA second paragraph.\n]\n\nTrailing prose.\n";
@@ -2894,6 +2911,46 @@ mod tests {
 		let (_it2, skips2) = res!(document_with_refusals(src));
 		assert!(skips2.entries().iter().any(|(name, _)| name == "#pr-note"),
 			"an unbound furniture call still reports as a skip");
+		Ok(())
+	}
+
+	/// A `#aside-box(title: [...])[ ... ]` call expands into a washed box carrying the definition's fill and
+	/// left stroke, its `title:` argument set as a leading bold paragraph ahead of the body, and it is not
+	/// tallied as a skip. A bound call with no `[ ... ]` body (an argument-only `#aside-box(...)`) is TALLIED
+	/// as a skip rather than dropped silently.
+	#[test]
+	fn aside_box_call_expands_with_title_and_stroke() -> Outcome<()> {
+		let def = "#let aside-box(title: none, body) = box(width: 100%, inset: 8pt, \
+fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yellow.darken(20%)), \
+[#text(weight: \"bold\", size: 0.85em)[#title] #text(size: 0.85em)[#body]])\n";
+		let mut palette = crate::lang::rules::Palette::new();
+		crate::lang::rules::collect_palette("#let colours = (yellow: rgb(\"#f0f600\"),)\n", &mut palette);
+		let mut tfns = crate::lang::rules::TemplateFns::new();
+		crate::lang::rules::collect_template_fns(def, crate::ir::Sp::from_pt(11.0), &palette, &mut tfns);
+		let tf = res!(tfns.get("aside-box").ok_or_else(|| err!("aside-box collected"; Test, Bug)));
+		assert!(tf.patch.callout.fill.map(|c| c.a) == Some(255), "the yellow fill resolved (opaque)");
+		assert!(tf.patch.callout.stroke_left_w.is_some(), "the left stroke width is set");
+
+		let src = "Lead.\n\n#aside-box(title: [The welfare theorems])[\nMarket efficiency proved.\n]\n\nTail.\n";
+		let (items, skips) = res!(document_with_templates(src, &tfns));
+		let inner = res!(items.iter().find_map(|it| match it {
+			Item::Box { items, .. }	=> Some(items.clone()),
+			_					=> None,
+		}).ok_or_else(|| err!("no Item::Box for the aside-box call"; Test, Bug)));
+		// The first item is the bold title (in a size scope), then the body.
+		let has_title = inner.iter().any(|it| match it {
+			Item::Scoped { items, .. }	=> items.iter().any(|p| matches!(p,
+				Item::Paragraph { runs, .. } if runs.iter().any(|r| matches!(r, Inline::Strong(t) if t.contains("welfare"))))),
+			Item::Paragraph { runs, .. }	=> runs.iter().any(|r| matches!(r, Inline::Strong(t) if t.contains("welfare"))),
+			_						=> false,
+		});
+		assert!(has_title, "the title is set as a leading bold paragraph, got: {:?}", inner);
+		assert!(!skips.entries().iter().any(|(n, _)| n == "#aside-box"), "the call is not a skip");
+
+		// A bound call with no `[body]` is tallied as a skip, not dropped.
+		let (_it, skips2) = res!(document_with_templates("#aside-box(title: [X])\n", &tfns));
+		assert!(skips2.entries().iter().any(|(n, _)| n == "#aside-box"),
+			"an argument-only bound call with no body is tallied as a skip");
 		Ok(())
 	}
 

@@ -4058,15 +4058,25 @@ fn styled_box(
 	let total = inset_top + content_h + inset_bot;
 
 	let mut children:	Vec<Node>	= Vec::new();
-	// The wash: a rounded rectangle the full measure wide and the whole box tall, drawn behind the words.
-	// Its leaf reports no vertical extent, so the cursor stays at the box top and the content overlays it. A
-	// fully transparent fill (a `#let` template block with no `fill:` -- a plain indented block, not a washed
-	// callout) draws no rectangle at all, so the inset positions the text without any panel behind it.
+	// The wash and the left rule, both drawn behind the words as one zero-extent graphic: a rounded rectangle
+	// the full measure wide and the whole box tall, then -- when a `stroke: (left: <w> + <colour>)` names one
+	// -- a vertical bar of that width and colour seated at the left edge. A fully transparent fill (a `#let`
+	// template block with no `fill:` -- a plain indented block, not a washed callout) draws no rectangle, so
+	// the inset positions the text with no panel behind it; a left rule with no fill still draws.
+	let mut ops: Vec<DrawOp> = Vec::new();
 	if fill.a != 0 {
 		let rect	= res!(Path::round_rect(
 			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), radius));
-		let graphic	= Graphic::new(
-			vec![DrawOp::Fill { path: rect, colour: fill }], Dims::new(measure, Sp::ZERO, Sp::ZERO));
+		ops.push(DrawOp::Fill { path: rect, colour: fill });
+	}
+	if let (Some(w), Some(col)) = (style.callout.stroke_left_w, style.callout.stroke_left_col) {
+		if w.to_pt() > 0.0 && col.a != 0 {
+			let bar	= res!(Path::rect(Bounds::new(0.0, 0.0, w.to_pt() as f32, total.to_pt() as f32)));
+			ops.push(DrawOp::Fill { path: bar, colour: col });
+		}
+	}
+	if !ops.is_empty() {
+		let graphic	= Graphic::new(ops, Dims::new(measure, Sp::ZERO, Sp::ZERO));
 		children.push(Node::Leaf(Leaf::graphic(graphic)));
 	}
 	children.push(Node::Glue(Glue::fixed(inset_top)));

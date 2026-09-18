@@ -1463,29 +1463,76 @@ fn content_field(src: &str, name: &str) -> Option<String> {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 /// Collects every `#let name(params) = block/box(...)` furniture definition the book declares -- in the
-/// root and in each `#include`d chapter (where `#pr-note` is defined, byte-identical, atop three chapters)
-/// -- into one map, lowered against `body_size` so every `em` length resolves to an absolute at the
-/// document's own text size. A call to one is then expanded rather than tallied as a skip. A tree that
-/// defines none yields an empty map and reads exactly as before.
+/// root, in each `#include`d chapter (where `#pr-note` is defined, byte-identical, atop three chapters), and
+/// in the shared template chain the root imports (where `#aside-box` lives, and, two hops on, the
+/// `#let colours = (...)` palette it fills from) -- into one map, lowered against `body_size` so every `em`
+/// resolves to an absolute and every `colours.<name>` fill/stroke resolves against the palette. A call to
+/// one is then expanded rather than tallied as a skip. A tree that defines none yields an empty map.
 ///
-/// The shared template the root imports (where `#aside-box` lives) is not yet followed: `#aside-box` needs
-/// palette-name colour resolution, a left stroke and a sized bold title beyond `#pr-note`'s machinery, and
-/// is the next furniture milestone. The import-chain walk is deliberately held back until that lands, so a
-/// half-lowered `#aside-box` does not render in the meantime.
+/// The template chain is walked imports-first so a file's own furniture is lowered only once the palettes it
+/// imports are in hand. A collected name that clashes with a built-in construct is refused inside
+/// [`lang::rules::collect_template_fns`], so a template's own `#let styled-box` never shadows the reader's.
 fn collect_book_template_fns(root_src: &str, root_dir: &Path, body_size: Sp) -> lang::rules::TemplateFns {
-	let mut tfns = lang::rules::TemplateFns::new();
-	lang::rules::collect_template_fns(root_src, body_size, &mut tfns);
+	let mut palette	= lang::rules::Palette::new();
+	let mut tfns	= lang::rules::TemplateFns::new();
+	// The template chain the root imports: builds the palette and collects the template's furniture (aside-box).
+	for line in root_src.lines() {
+		let t = line.trim_start();
+		if let Some(rest) = t.strip_prefix("#import") {
+			if let Some(rel) = first_quoted(rest) {
+				walk_template_imports(root_dir, &rel, body_size, &mut palette, &mut tfns, 0);
+			}
+		}
+	}
+	// The root's own definitions, and each included chapter's (pr-note), with the palette now in hand.
+	lang::rules::collect_palette(root_src, &mut palette);
+	lang::rules::collect_template_fns(root_src, body_size, &palette, &mut tfns);
 	for line in root_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
 				if let Ok(src) = std::fs::read_to_string(root_dir.join(&rel)) {
-					lang::rules::collect_template_fns(&src, body_size, &mut tfns);
+					lang::rules::collect_template_fns(&src, body_size, &palette, &mut tfns);
 				}
 			}
 		}
 	}
 	tfns
+}
+
+/// Follows a local `#import "<rel>"` from `dir`, imports-first, collecting each file's `#let colours`
+/// palette and then its furniture definitions -- so a file's fills resolve against the palettes its own
+/// imports supply. A package import (`@preview/...`), a missing file, or a cycle past the depth cap is
+/// skipped.
+fn walk_template_imports(
+	dir:		&Path,
+	rel:		&str,
+	body_size:	Sp,
+	palette:	&mut lang::rules::Palette,
+	tfns:		&mut lang::rules::TemplateFns,
+	depth:		u32,
+)
+{
+	if depth > 4 || rel.starts_with('@') {
+		return;
+	}
+	let path = dir.join(rel);
+	let src = match std::fs::read_to_string(&path) {
+		Ok(s)	=> s,
+		Err(_)	=> return,
+	};
+	let next_dir = path.parent().unwrap_or(dir);
+	// Imports first, so a palette or furniture this file depends on is collected before its own.
+	for line in src.lines() {
+		let t = line.trim_start();
+		if let Some(rest) = t.strip_prefix("#import") {
+			if let Some(inner_rel) = first_quoted(rest) {
+				walk_template_imports(next_dir, &inner_rel, body_size, palette, tfns, depth + 1);
+			}
+		}
+	}
+	lang::rules::collect_palette(&src, palette);
+	lang::rules::collect_template_fns(&src, body_size, palette, tfns);
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

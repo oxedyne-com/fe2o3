@@ -354,6 +354,8 @@ pub struct ThemeCallout {
 	pub inset_top:	Option<Sp>,		// as inset_x, but the top pad (the dict form's `y:`)
 	pub inset_bot:	Option<Sp>,		// as inset_x, but the foot pad (the dict form's `bottom:`, 1.2em default)
 	pub radius:		Option<Sp>,		// a rule's `radius:`; None keeps the template's 4pt
+	pub stroke_left_w:		Option<Sp>,		// a `stroke: (left: <w> + <colour>)` rule width; None draws no left rule
+	pub stroke_left_col:	Option<Rgba>,	// the left rule's colour; a rule draws only when both width and colour are set
 }
 
 impl Default for ThemeCallout {
@@ -366,6 +368,8 @@ impl Default for ThemeCallout {
 			inset_top:	None,
 			inset_bot:	None,
 			radius:		None,
+			stroke_left_w:		None,
+			stroke_left_col:	None,
 		}
 	}
 }
@@ -606,6 +610,8 @@ pub struct ThemeCalloutPatch {
 	pub inset_top:	Option<Sp>,
 	pub inset_bot:	Option<Sp>,
 	pub radius:		Option<Sp>,
+	pub stroke_left_w:		Option<Sp>,
+	pub stroke_left_col:	Option<Rgba>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -811,6 +817,8 @@ impl ThemeCalloutPatch {
 		if self.inset_top.is_some()		{ t.inset_top = self.inset_top; }
 		if self.inset_bot.is_some()		{ t.inset_bot = self.inset_bot; }
 		if self.radius.is_some()		{ t.radius = self.radius; }
+		if self.stroke_left_w.is_some()		{ t.stroke_left_w = self.stroke_left_w; }
+		if self.stroke_left_col.is_some()	{ t.stroke_left_col = self.stroke_left_col; }
 	}
 }
 
@@ -937,6 +945,20 @@ fn rgba_from(mut d: Dat) -> Outcome<Rgba> {
 	let b	= try_extract_dat!(res!(d.map_remove_must(&dat!("b"))), U8);
 	let a	= try_extract_dat!(res!(d.map_remove_must(&dat!("a"))), U8);
 	Ok(Rgba::new(r, g, b, a))
+}
+
+fn opt_rgba_dat(o: Option<Rgba>) -> Dat {
+	Dat::Opt(Box::new(o.map(rgba_dat)))
+}
+
+fn opt_rgba_from(d: Dat) -> Outcome<Option<Rgba>> {
+	match d {
+		Dat::Opt(b)	=> match *b {
+			Some(inner)	=> Ok(Some(res!(rgba_from(inner)))),
+			None		=> Ok(None),
+		},
+		other	=> Err(err!("A theme optional colour must be a jdat Opt, found a {:?}.", other.kind(); Input, Invalid)),
+	}
 }
 
 fn sp4_dat(a: &[Sp; 4]) -> Dat {
@@ -1206,6 +1228,8 @@ impl ThemeCallout {
 			"inset_top"		=> opt_sp_dat(self.inset_top),
 			"inset_bot"		=> opt_sp_dat(self.inset_bot),
 			"radius"		=> opt_sp_dat(self.radius),
+			"stroke_left_w"		=> opt_sp_dat(self.stroke_left_w),
+			"stroke_left_col"	=> opt_rgba_dat(self.stroke_left_col),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
@@ -1217,6 +1241,8 @@ impl ThemeCallout {
 			inset_top:	res!(opt_sp_from(res!(map_must(&mut d, "inset_top")))),
 			inset_bot:	res!(opt_sp_from(res!(map_must(&mut d, "inset_bot")))),
 			radius:		res!(opt_sp_from(res!(map_must(&mut d, "radius")))),
+			stroke_left_w:		res!(opt_sp_from(res!(map_must(&mut d, "stroke_left_w")))),
+			stroke_left_col:	res!(opt_rgba_from(res!(map_must(&mut d, "stroke_left_col")))),
 		})
 	}
 }
