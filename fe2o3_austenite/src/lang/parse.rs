@@ -150,7 +150,7 @@ pub struct Refusals {
 impl Refusals {
 	/// Records one refused construct by the source name it was written with (with its leading `#`) and
 	/// the span it was found at, classifying it from the name.
-	fn record(&mut self, name: &str, span: Span) {
+	pub(crate) fn record(&mut self, name: &str, span: Span) {
 		let class = RefusalClass::classify(name);
 		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new() });
 	}

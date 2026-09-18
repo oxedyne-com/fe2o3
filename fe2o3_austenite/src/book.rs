@@ -112,6 +112,69 @@ pub fn heading_face_names(theme: &Theme) -> Vec<String> {
 	names
 }
 
+/// Every heading display-face name reachable in the document: the root theme's, and every name a scoped
+/// or box subtree's patch introduces, deduplicated in first-seen order. A rule or an included chapter may
+/// name a face the root does not, so the resolver is built from this union rather than the root alone --
+/// otherwise a scoped face could never resolve and would fall silently to the body role.
+pub fn all_face_names(root_theme: &Theme, blocks: &[Block]) -> Vec<String> {
+	let mut names = heading_face_names(root_theme);
+	collect_patch_face_names(blocks, &mut names);
+	names
+}
+
+/// Adds every heading face name a scoped or box subtree's patch names, descending through nested subtrees.
+fn collect_patch_face_names(blocks: &[Block], out: &mut Vec<String>) {
+	for b in blocks {
+		match b {
+			Block::Scoped { patch, blocks }	=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
+			Block::Box { patch, blocks }		=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
+			_							=> {},
+		}
+	}
+}
+
+/// The heading face names a single patch introduces -- its role-default heading face and any per-level
+/// face it sets to a name -- appended if not already present.
+fn patch_face_names(patch: &crate::theme::ThemePatch, out: &mut Vec<String>) {
+	if let Some(Some(n)) = &patch.text.faces.heading {
+		if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
+	}
+	for l in &patch.heading.levels {
+		if let Some(Some(n)) = &l.face {
+			if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
+		}
+	}
+}
+
+/// Records a note for each root heading level that names a face and asks for a weight or slant the book
+/// ships no file for -- so a bold or italic heading falling back to Regular is visible rather than silent.
+/// A level whose face has no file at all is not noted here: that is the ordinary role fall-back, not a
+/// missing variant.
+fn note_missing_face_variants(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
+	for (i, l) in theme.heading.levels.iter().enumerate() {
+		let name = match l.face.as_deref().or(theme.text.faces.heading.as_deref()) {
+			Some(n)	=> n,
+			None	=> continue,
+		};
+		if !faces.resolves(name) {
+			continue;
+		}
+		let bold	= l.weight.map_or(false, |w| w >= 600);
+		let italic	= l.italic;
+		if (bold || italic) && !faces.has_variant(name, bold, italic) {
+			let slant = match (bold, italic) {
+				(true, true)	=> "bold-italic",
+				(true, false)	=> "bold",
+				(false, true)	=> "italic",
+				(false, false)	=> "regular",
+			};
+			skips.record(
+				&fmt!("heading face {:?} level {}: no {} file, set in Regular", name, i + 1, slant),
+				crate::ir::Span::new(0, 0));
+		}
+	}
+}
+
 /// Builds a face resolver for a lone chapter rooted at `root_dir`, loading each heading face the `theme`
 /// names from the tree's `assets/fonts` (one level up from the root, beside a shared template). A lone
 /// file with no such directory, or naming only its body family, yields an empty resolver, so its headings
@@ -191,8 +254,13 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
 	// by `read_config` above; this reads only the root's own top-level declarations.
 	lang::set::lower_root_declarations(root_src, &mut style);
-	let faces = FaceResolver::load(&assets_fonts, &heading_face_names(&style));
-	let (mut blocks, skips)	= res!(assemble(root_src, root_dir, root_path));
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path));
+	// The resolver is built from every heading face the document can name -- the root theme's, and every
+	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
+	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
+	// no file for.
+	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	note_missing_face_variants(&style, &faces, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks);
 	let title		= content_field(root_src, "title").unwrap_or_default();
@@ -269,8 +337,12 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		Some(d)	=> d.join("assets").join("fonts"),
 		None	=> root_dir.join("assets").join("fonts"),
 	};
-	let faces = FaceResolver::load(&assets_fonts, &heading_face_names(&style));
-	let (mut blocks, skips)	= res!(assemble(root_src, root_dir, root_path));
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path));
+	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
+	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
+	// file is noted rather than silently set in Regular.
+	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	note_missing_face_variants(&style, &faces, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks);

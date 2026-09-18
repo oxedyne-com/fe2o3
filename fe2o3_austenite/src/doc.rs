@@ -3300,10 +3300,15 @@ enum HeadFace<'a> {
 fn resolved_head_face<'a>(level: u8, style: &'a Theme, faces: &'a FaceResolver, doc: bool) -> HeadFace<'a> {
 	if level <= 2 {
 		let idx = (level.max(1) as usize) - 1;
-		let per_level	= style.heading.levels.get(idx).and_then(|l| l.face.as_deref());
+		let lvl			= style.heading.levels.get(idx);
+		let per_level	= lvl.and_then(|l| l.face.as_deref());
 		let role		= style.text.faces.heading.as_deref();
+		// The level's own weight and slant choose the variant; the default (no weight, upright) resolves to
+		// the Regular face, so a document naming a plain display face renders exactly as before.
+		let bold		= lvl.and_then(|l| l.weight).map_or(false, |w| w >= 600);
+		let italic		= lvl.map_or(false, |l| l.italic);
 		for name in [per_level, role].into_iter().flatten() {
-			if let Some(font) = faces.resolve(name) {
+			if let Some(font) = faces.resolve_weighted(name, bold, italic) {
 				return HeadFace::Solo(font);
 			}
 		}
@@ -4494,6 +4499,44 @@ an interior line justification fills to the measure while ragged setting does no
 		collect_fills(&bd.nodes, &mut fills);
 		assert!(fills.contains(&Rgba::opaque(200, 20, 20)),
 			"the callout wash must be the theme's callout.fill, not a hard-coded colour: {:?}", fills);
+		Ok(())
+	}
+
+	/// The face resolver reaches a named display face and its weight/slant variants: a theme naming a face
+	/// the crate `fonts/` dir ships resolves to a Solo display face (not a role), shaping differently from
+	/// the body Bold role; and asking a level for `weight: bold` resolves to the Bold file, distinct from
+	/// the Regular. A name with no file falls to the role, unchanged.
+	#[test]
+	fn resolver_reaches_named_face_and_its_weight_variants() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let dir		= std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts");
+		let faces	= FaceResolver::load(&dir, &["LibertinusSerif".to_string()]);
+		let size	= Sp::from_pt(16.0);
+		let text	= "Chapter Heading";
+
+		let mut style = Theme::default();
+		style.text.faces.heading = Some("LibertinusSerif".to_string());
+
+		// A resolvable heading face resolves to a Solo display face, and shapes differently from the body
+		// bold role a book falls to when no display face resolves.
+		let regular	= resolved_head_face(2, &style, &faces, false);
+		assert!(matches!(regular, HeadFace::Solo(_)), "a resolvable face must resolve to a Solo display face");
+		let solo_w	= res!(head_shape(&fonts, &regular, size, text)).dims().width;
+		let bold_role_w	= res!(head_shape(&fonts, &HeadFace::Role(Role::Bold), size, text)).dims().width;
+		assert_ne!(solo_w, bold_role_w, "the resolved display face must shape differently from the body bold");
+
+		// A level asking for bold resolves to the Bold file, distinct in width from the Regular Solo.
+		let mut bold_style = style.clone();
+		bold_style.heading.levels[1].weight = Some(700);
+		let bold	= resolved_head_face(2, &bold_style, &faces, false);
+		let bold_w	= res!(head_shape(&fonts, &bold, size, text)).dims().width;
+		assert_ne!(solo_w, bold_w, "weight: bold must resolve to the Bold file, not the Regular");
+
+		// A name with no file resolves nothing, so the heading falls to the role as before.
+		let mut absent = Theme::default();
+		absent.text.faces.heading = Some("NoSuchDisplayFace".to_string());
+		assert!(matches!(resolved_head_face(2, &absent, &faces, false), HeadFace::Role(_)),
+			"an unresolvable face must fall to a role face");
 		Ok(())
 	}
 }

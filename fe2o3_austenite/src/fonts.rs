@@ -21,49 +21,121 @@ use std::sync::Arc;
 // │ NAMED DISPLAY-FACE RESOLVER                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// A document's named heading display faces, each loaded once from the book's own font directory. The
-/// theme names a heading face by family (`"Graystroke"`, `"Radley"`); the renderer resolves that name
-/// through this to a loaded [`Font`], falling back to a role face from the reading set when the name has
-/// no file. A name with no `<name>-Regular.{ttf,otf}` beside the book is simply absent, so a theme that
-/// names the body family (or a face the tree does not ship) renders in the body role exactly as before --
-/// which is what keeps a document naming no distinct display face byte-identical.
+/// A loaded display-face family: the weight/slant variants found beside the book for one named face,
+/// each optional since a family may ship only a Regular. Resolution falls back toward Regular when a
+/// requested weight or slant has no file, rather than failing.
+#[derive(Clone, Default)]
+struct Family {
+	regular:		Option<Arc<Font>>,
+	bold:			Option<Arc<Font>>,
+	italic:			Option<Arc<Font>>,
+	bold_italic:	Option<Arc<Font>>,
+}
+
+impl Family {
+	/// The best available variant for a requested weight and slant: the exact match where present, then a
+	/// near relative, ending at whatever the family does hold. `None` only for a family that loaded nothing.
+	fn pick(&self, bold: bool, italic: bool) -> Option<&Arc<Font>> {
+		let order: [&Option<Arc<Font>>; 4] = match (bold, italic) {
+			(true, true)	=> [&self.bold_italic, &self.bold, &self.italic, &self.regular],
+			(true, false)	=> [&self.bold, &self.bold_italic, &self.regular, &self.italic],
+			(false, true)	=> [&self.italic, &self.bold_italic, &self.regular, &self.bold],
+			(false, false)	=> [&self.regular, &self.italic, &self.bold, &self.bold_italic],
+		};
+		order.into_iter().flatten().next()
+	}
+
+	/// Does the family hold the exact variant requested, with no fall-back?
+	fn has_exact(&self, bold: bool, italic: bool) -> bool {
+		match (bold, italic) {
+			(true, true)	=> self.bold_italic.is_some(),
+			(true, false)	=> self.bold.is_some(),
+			(false, true)	=> self.italic.is_some(),
+			(false, false)	=> self.regular.is_some(),
+		}
+	}
+
+	fn is_empty(&self) -> bool {
+		self.regular.is_none() && self.bold.is_none() && self.italic.is_none() && self.bold_italic.is_none()
+	}
+}
+
+/// A document's named heading display faces, each family loaded once from the book's own font directory
+/// across its weight and slant variants. The theme names a heading face by family (`"Graystroke"`,
+/// `"Radley"`); the renderer resolves that name -- with the heading level's weight and slant -- through
+/// this to a loaded [`Font`], falling back to a role face from the reading set when the name has no file.
+/// A name with no `<name>-Regular.{ttf,otf}` beside the book is simply absent, so a theme that names the
+/// body family (or a face the tree does not ship) renders in the body role exactly as before -- which is
+/// what keeps a document naming no distinct display face byte-identical.
 #[derive(Clone, Default)]
 pub struct FaceResolver {
-	faces:	HashMap<String, Arc<Font>>,
+	families:	HashMap<String, Family>,
 }
 
 impl FaceResolver {
-	/// Loads each named face that has a `<name>-Regular.ttf` or `.otf` file under `dir`. A name with no
-	/// such file, or one whose file will not parse, is left out rather than failing the load, so a missing
-	/// display face degrades to the body role rather than stopping the render.
+	/// Loads each named face's `<name>-Regular/Bold/Italic/BoldItalic.{ttf,otf}` files that exist under
+	/// `dir`. A name with no file at all, or a variant whose file will not parse, is left out rather than
+	/// failing the load, so a missing display face degrades to the body role rather than stopping the render.
 	pub fn load(dir: &Path, names: &[String]) -> Self {
-		let mut faces: HashMap<String, Arc<Font>> = HashMap::new();
+		let mut families: HashMap<String, Family> = HashMap::new();
 		for name in names {
-			if name.is_empty() || faces.contains_key(name) {
+			if name.is_empty() || families.contains_key(name) {
 				continue;
 			}
-			for ext in ["ttf", "otf"] {
-				let path = dir.join(fmt!("{}-Regular.{}", name, ext));
-				if path.is_file() {
-					if let Ok(font) = font_from_file(&path) {
-						faces.insert(name.clone(), font);
-					}
-					break;
-				}
+			let mut fam = Family::default();
+			load_variant(dir, name, "Regular", &mut fam.regular);
+			load_variant(dir, name, "Bold", &mut fam.bold);
+			load_variant(dir, name, "Italic", &mut fam.italic);
+			load_variant(dir, name, "BoldItalic", &mut fam.bold_italic);
+			if !fam.is_empty() {
+				families.insert(name.clone(), fam);
 			}
 		}
-		Self { faces }
+		Self { families }
 	}
 
-	/// The loaded face for `name`, or `None` when the theme named a face the book ships no file for -- the
-	/// signal for the renderer to fall back to a role face.
+	/// The upright regular face for `name` (or its nearest available variant), or `None` when the book
+	/// ships no file for the name -- the signal for the renderer to fall back to a role face. Kept for
+	/// callers that want the base face; a weighted heading uses [`FaceResolver::resolve_weighted`].
 	pub fn resolve(&self, name: &str) -> Option<&Arc<Font>> {
-		self.faces.get(name)
+		self.families.get(name).and_then(|f| f.pick(false, false))
+	}
+
+	/// The face for `name` at a requested weight and slant, falling back toward Regular when the exact
+	/// variant has no file. `None` when the name has no file at all.
+	pub fn resolve_weighted(&self, name: &str, bold: bool, italic: bool) -> Option<&Arc<Font>> {
+		self.families.get(name).and_then(|f| f.pick(bold, italic))
+	}
+
+	/// Does `name` load at least one file? A name that does but lacks a requested weight/slant still
+	/// resolves (to Regular); this only distinguishes a named-but-absent face from a loaded one.
+	pub fn resolves(&self, name: &str) -> bool {
+		self.families.contains_key(name)
+	}
+
+	/// Does `name` hold the exact weight/slant variant, with no fall-back to Regular? Used to record a note
+	/// when a heading asks for a variant the book does not ship.
+	pub fn has_variant(&self, name: &str, bold: bool, italic: bool) -> bool {
+		self.families.get(name).map_or(false, |f| f.has_exact(bold, italic))
 	}
 
 	/// Does this hold no loaded face? A book naming only its body family resolves nothing.
 	pub fn is_empty(&self) -> bool {
-		self.faces.is_empty()
+		self.families.is_empty()
+	}
+}
+
+/// Loads one weight/slant variant of a named face -- `<name>-<suffix>.ttf` or `.otf` under `dir` -- into
+/// `slot`, leaving it `None` when neither file exists or the one present will not parse.
+fn load_variant(dir: &Path, name: &str, suffix: &str, slot: &mut Option<Arc<Font>>) {
+	for ext in ["ttf", "otf"] {
+		let path = dir.join(fmt!("{}-{}.{}", name, suffix, ext));
+		if path.is_file() {
+			if let Ok(font) = font_from_file(&path) {
+				*slot = Some(font);
+			}
+			return;
+		}
 	}
 }
 
