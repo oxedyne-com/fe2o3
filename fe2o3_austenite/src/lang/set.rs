@@ -107,9 +107,13 @@ pub fn lower_set(target: &str, args: &str) -> ThemePatch {
 }
 
 fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'static str> {
-	// The argument keys this set actually applied. A key present in the source but absent here was either
-	// unrecognised for the target or did not convert (an `em` length, a bare `none`); the refusal check
-	// ([`set_refusal_reason`]) compares this against the keys the source named.
+	// The argument keys this set applied AND the renderer consumes -- the invariant is that every lowered
+	// field is either read by the renderer or refused with a diagnostic, never written-and-ignored. A key
+	// that lowers into a field nothing reads yet (a body `font`, an equation `numbering`, a `page`
+	// dimension) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
+	// unapplied and records a visible "not yet supported" rather than a silent no-op. A key present in the
+	// source but absent for any other reason (unrecognised for the target, an `em` length, a bare `none`)
+	// is likewise not pushed.
 	let mut used: Vec<&'static str> = Vec::new();
 	match target {
 		"text" => {
@@ -117,10 +121,12 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 				patch.text.body_size = Some(Sp::from_pt(pt));
 				used.push("size");
 			}
+			// The body family lowers into the theme, but no renderer reads `text.faces.body` yet (the face
+			// resolver reaches heading faces only), so `font` is left unmarked and a lone `#set text(font:)`
+			// is refused rather than silently ignored.
 			if let Some(font) = named_string(args, "font") {
 				if !font.is_empty() {
 					patch.text.faces.body = Some(Some(font));
-					used.push("font");
 				}
 			}
 			if let Some(b) = named_bool(args, "hyphenate") {
@@ -180,21 +186,21 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 			}
 		},
 		"math.equation" => {
+			// The equation renderer numbers displays "(N)" unconditionally and reads no pattern yet, so a
+			// `numbering` lowers into the theme but is left unmarked -- refused, not silently ignored.
 			if let Some(pattern) = named_string(args, "numbering") {
 				patch.equation.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
-				used.push("numbering");
 			}
 		},
 		"page" => {
-			// Page geometry lowers onto the body part's reserved override; a later unit consumes it and
-			// splits front/body/back. Only the fields a `set page` names are written.
+			// Page geometry lowers onto the body part's reserved override, but no unit consumes it yet (the
+			// driver still supplies the document geometry), so `width`/`height` are left unmarked and a lone
+			// `#set page(...)` is refused as not-yet-supported rather than silently doing nothing.
 			if let Some(pt) = named_length_mm_or_pt(args, "width") {
 				patch.page.body.default.width = Some(Some(pt));
-				used.push("width");
 			}
 			if let Some(pt) = named_length_mm_or_pt(args, "height") {
 				patch.page.body.default.height = Some(Some(pt));
-				used.push("height");
 			}
 		},
 		_ => {},
@@ -595,14 +601,18 @@ mod tests {
 		assert_eq!(arg_keys(""), Vec::<String>::new());
 	}
 
-	/// H2: a lowerable `#set` that applies none of its arguments -- an unknown key, an unconvertible `em`
-	/// length, or a bare `none` -- is flagged for refusal; one that fully lowers is not; and a partially
-	/// applied set is flagged for the argument it dropped.
+	/// H2: a lowerable `#set` whose named arguments the renderer does not consume -- an unknown key, an
+	/// unconvertible `em`, a bare `none`, or a field lowered but not yet read (a body `font`, an equation
+	/// `numbering`, a `page` dimension) -- is flagged for refusal, so it is a visible "not yet supported"
+	/// rather than a silent no-op; a set every one of whose arguments the renderer consumes is not.
 	#[test]
 	fn unconsumed_set_is_flagged_for_refusal() {
-		// Fully applied: no refusal.
+		// Fully consumed: no refusal.
 		assert_eq!(set_refusal_reason("text", "size: 12pt"), None);
-		assert_eq!(set_refusal_reason("par", "leading: 14pt, first-line-indent: 12pt"), None);
+		assert_eq!(set_refusal_reason("par", "leading: 14pt, first-line-indent: 12pt, justify: false"), None);
+		assert_eq!(set_refusal_reason("text", "hyphenate: false"), None);
+		assert_eq!(set_refusal_reason("heading", "numbering: \"1.1\""), None);
+		assert_eq!(set_refusal_reason("enum", "numbering: \"(a)\""), None);
 		// An unrecognised argument key.
 		assert!(set_refusal_reason("text", "lang: \"de\"").is_some());
 		// A recognised key whose value does not convert (an `em` needs a context this lowering has not).
@@ -611,6 +621,13 @@ mod tests {
 		assert!(set_refusal_reason("heading", "numbering: none").is_some());
 		// A partially-applied set is still flagged, for the argument it dropped.
 		assert!(set_refusal_reason("text", "size: 12pt, weight: 700").is_some());
+		// Lowered-but-unread fields are flagged, so a `#set` into one alone is refused rather than a no-op.
+		assert!(set_refusal_reason("text", "font: \"Radley\"").is_some(),
+			"a body font lowers but no renderer reads it yet, so it must be refused");
+		assert!(set_refusal_reason("math.equation", "numbering: \"(1)\"").is_some(),
+			"equation numbering lowers but the renderer always sets (N), so it must be refused");
+		assert!(set_refusal_reason("page", "width: 200mm").is_some(),
+			"page geometry lowers but no unit consumes it yet, so it must be refused");
 
 		// declstyle_refusal drives it off a captured construct buffer, naming the set, and never flags a
 		// `#show: doc.with(...)`, whose non-theme arguments are front matter rather than a no-op.

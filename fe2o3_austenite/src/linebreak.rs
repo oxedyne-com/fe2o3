@@ -57,10 +57,11 @@ pub fn break_paragraph(
 	text:		&str,
 	measure:	Sp,
 	leading:	Sp,
+	hyphenate:	bool,
 )
 	-> Outcome<Vec<Node>>
 {
-	let items = res!(build_items(fonts, role, dir, size, text));
+	let items = res!(build_items(fonts, role, dir, size, text, hyphenate));
 	if items.is_empty() {
 		return Ok(Vec::new());
 	}
@@ -104,6 +105,7 @@ pub fn break_paragraph_pieces(
 	measure:	Sp,
 	leading:	Sp,
 	justify:	bool,
+	hyphenate:	bool,
 )
 	-> Outcome<Vec<Node>>
 {
@@ -117,7 +119,7 @@ pub fn break_paragraph_pieces(
 				// The run shapes in its own face; the interword glue keeps the paragraph's role, so a space
 				// beside an emphasised word stays the body space (TeX sets the space in the surrounding font).
 				res!(push_text_run(
-					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
+					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate));
 			},
 			Piece::Mark(leaf) => {
 				items.push(Item {
@@ -178,6 +180,7 @@ fn build_items(
 	dir:	Dir,
 	size:	Sp,
 	text:	&str,
+	hyphenate:	bool,
 )
 	-> Outcome<Vec<Item>>
 {
@@ -185,7 +188,7 @@ fn build_items(
 	let hyph = Hyphenator::en_us();
 
 	let mut items = Vec::new();
-	res!(push_text_run(&mut items, fonts, role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen));
+	res!(push_text_run(&mut items, fonts, role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate));
 	push_finish(&mut items);
 	Ok(items)
 }
@@ -237,6 +240,7 @@ fn push_text_run(
 	shrink:	Sp,
 	hyph:	&Hyphenator,
 	hyphen:	&ShapedText,
+	hyphenate:	bool,
 )
 	-> Outcome<()>
 {
@@ -264,7 +268,7 @@ fn push_text_run(
 		let word	= seg.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
 		let tail	= &seg[word.len()..];
 		if !word.is_empty() {
-			res!(push_word(items, fonts.clone(), role, dir, size, word, hyph, hyphen));
+			res!(push_word(items, fonts.clone(), role, dir, size, word, hyph, hyphen, hyphenate));
 		}
 		let spaces = tail.chars().filter(|c| *c == ' ').count() as i32;
 		match opp.kind {
@@ -304,6 +308,7 @@ fn push_text_run(
 /// and end a line inside the word; otherwise the word is a single rigid box. The hyphenation runs on
 /// the word's alphabetic core, so leading and trailing punctuation stay clinging to the outer
 /// fragments.
+#[allow(clippy::too_many_arguments)]
 fn push_word(
 	items:	&mut Vec<Item>,
 	fonts:	Arc<FontSet>,
@@ -313,13 +318,15 @@ fn push_word(
 	word:	&str,
 	hyph:	&Hyphenator,
 	hyphen:	&ShapedText,
+	hyphenate:	bool,
 )
 	-> Outcome<()>
 {
-	// The alphabetic core, and where it starts in the word, so break points map back to word bytes.
+	// The alphabetic core, and where it starts in the word, so break points map back to word bytes. With
+	// hyphenation off (`#set text(hyphenate: false)`), no point is offered and the word stays one rigid box.
 	let start	= word.len() - word.trim_start_matches(|c: char| !c.is_alphabetic()).len();
 	let core	= word.trim_matches(|c: char| !c.is_alphabetic());
-	let points	= if core.chars().count() >= HYPHEN_MIN { hyph.hyphenate(core) } else { Vec::new() };
+	let points	= if hyphenate && core.chars().count() >= HYPHEN_MIN { hyph.hyphenate(core) } else { Vec::new() };
 
 	if points.is_empty() {
 		let shaped	= res!(ShapedText::new(fonts, role, dir, size, word));

@@ -302,34 +302,35 @@ impl Default for ThemeTable {
 	}
 }
 
-/// Figures and their captions. Reserved: the renderer sizes a caption inline today; a later unit
-/// lowers `show figure.caption: set text(...)` into `caption_size`.
+/// Figures and their captions. `caption_size` sets a drawn figure's caption (the footnote size, matching
+/// the template); `skip` is reserved for the space around a figure.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeFigure {
-	pub caption_size:	Sp,	// reserved
+	pub caption_size:	Sp,
 	pub skip:			Sp,	// reserved: space around a figure
 }
 
 impl Default for ThemeFigure {
 	fn default() -> Self {
 		Self {
-			caption_size:	Sp::from_pt(9.9),	// reserved placeholder, 0.9em of an 11pt body
+			caption_size:	Sp::from_pt(9.0),	// the footnote size, the drawn-figure caption's own
 			skip:			Sp::from_pt(10.0),
 		}
 	}
 }
 
-/// Code blocks. Reserved for a later unit that lowers a document's raw-block styling.
+/// Code blocks. `size` sets a verbatim block's mono type (a touch below the body, the template's own);
+/// `background` is reserved for a later unit that lowers a raw-block wash.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeCode {
-	pub size:		Sp,		// reserved
+	pub size:		Sp,
 	pub background:	Rgba,	// reserved
 }
 
 impl Default for ThemeCode {
 	fn default() -> Self {
 		Self {
-			size:		Sp::from_pt(9.9),
+			size:		Sp::from_pt(9.0),	// the footnote size a code block has always set at
 			background:	Rgba::opaque(245, 245, 245),
 		}
 	}

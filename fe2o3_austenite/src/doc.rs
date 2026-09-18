@@ -234,7 +234,7 @@ pub enum Block {
 	// callout is laid out as one keep box, so it moves whole to the next page rather than splitting the wash
 	// from its words. `patch` is the theme overlay the box body's own `#set` declarations lower to, applied
 	// to the box's subtree at render (H3) so a `#set` inside a callout scopes to it, not the document.
-	Box { blocks: Vec<Block>, fill: Rgba, patch: ThemePatch },
+	Box { blocks: Vec<Block>, patch: ThemePatch },
 	// A theme scope: `patch` is overlaid on the effective theme for the nested `blocks`, and lifts again
 	// when they end. Nesting the governed blocks rather than bracketing them with a separate open/close
 	// marker makes an unmatched or missing close structurally impossible, and every pass that recurses over
@@ -290,10 +290,11 @@ impl Block {
 	}
 
 	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
-	/// violet, `colours.veronica.lighten(90%)`. The fill is fixed by the construct; the caller supplies the
-	/// body and the theme patch the box's own `#set` declarations lowered to (empty when it declared none).
+	/// violet. The wash is the theme's `callout.fill` at render (its default that pale violet), so a
+	/// `#set`/rule that lowers a callout fill reaches it; the caller supplies the body and the theme patch
+	/// the box's own `#set` declarations lowered to (empty when it declared none).
 	pub fn box_callout(blocks: Vec<Block>, patch: ThemePatch) -> Self {
-		Self::Box { blocks, fill: Rgba::opaque(245, 230, 255), patch }
+		Self::Box { blocks, patch }
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
@@ -521,7 +522,7 @@ impl<'a> Authoring<'a> {
 					// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
 					let number = match style.heading.kind {
 						HeadingStyle::DocBanner | HeadingStyle::DocInline	=> String::new(),
-						HeadingStyle::BookOpener							=> heading_number(*level, &self.sec),
+						HeadingStyle::BookOpener							=> heading_number_themed(*level, &self.sec, style),
 					};
 
 					// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
@@ -594,7 +595,7 @@ impl<'a> Authoring<'a> {
 					if let Some(Block::Paragraph { text: para }) = blocks.get(i + 1) {
 						// The first paragraph after a heading opens the section, so it takes no first-line indent.
 						let mut lines = res!(break_paragraph(
-							self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, self.measure, style.text.leading));
+							self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, para, self.measure, style.text.leading, style.text.hyphenate));
 						if !lines.is_empty() {
 							keep.push(lines.remove(0));	// the first line joins the heading
 							rest = lines;				// its leading glue and the remaining lines follow
@@ -624,7 +625,7 @@ impl<'a> Authoring<'a> {
 					}
 					pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
 					let lines = res!(break_paragraph_pieces(
-						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, true));
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate));
 					self.nodes.extend(lines);
 					i += 1;
 					self.first = false;
@@ -641,7 +642,7 @@ impl<'a> Authoring<'a> {
 					pieces.extend(res!(build_pieces(
 						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs)));
 					let lines = res!(break_paragraph_pieces(
-						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, true));
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate));
 					self.nodes.extend(lines);
 					i += 1;
 					self.first = false;
@@ -803,7 +804,7 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::Box { blocks: inner, fill, patch } => {
+				Block::Box { blocks: inner, patch } => {
 					// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
 					// box, so the breaker moves it whole to the next page when it will not fit.
 					if !self.first {
@@ -811,10 +812,11 @@ impl<'a> Authoring<'a> {
 					}
 					// The box body is set with the document theme overlaid by the box's own `#set` declarations,
 					// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
-					// nothing renders byte-identically.
+					// nothing renders byte-identically. The wash is the scoped theme's `callout.fill`.
 					let scoped = { let mut t = style.clone(); t.apply(patch); t };
+					let fill = scoped.callout.fill;
 					res!(styled_box(
-						&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, *fill,
+						&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
 						&mut self.foot_no, &mut self.ref_no, &mut self.seen, self.bib, &self.refs));
 					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					i += 1;
@@ -1133,33 +1135,50 @@ fn list(
 )
 	-> Outcome<()>
 {
+	// An ordered list takes its metrics and marker pattern from the `enumeration` group, a bulleted list
+	// from `list`. The two groups' defaults match, so an untouched theme sets either alike; a
+	// `#set enum(...)` reaches the ordered branch alone.
+	let (marker_gap, item_skip) = if ordered {
+		(style.enumeration.marker_gap, style.enumeration.item_skip)
+	} else {
+		(style.list.marker_gap, style.list.item_skip)
+	};
 	// Shape every marker once and keep the widest, so each item's text starts at the one indent. The
 	// number counts across every entry regardless of any sub-list, so an ordered list stays 1..N.
 	let mut markers:	Vec<ShapedText>	= Vec::with_capacity(items.len());
 	let mut marker_w					= Sp::ZERO;
 	for idx in 0..items.len() {
-		let label	= if ordered { fmt!("{}.", idx + 1) } else { "\u{2022}".to_string() };	// U+2022 bullet
+		// The ordered marker follows the theme's `enumeration.numbering` pattern where set (Typst's
+		// `#set enum(numbering: ...)`), else the plain `N.` the template sets; a bulleted item is a bullet.
+		let label	= if ordered {
+			match &style.enumeration.numbering {
+				Some(pattern)	=> format_numbering(pattern, &[idx as u32 + 1]),
+				None			=> fmt!("{}.", idx + 1),
+			}
+		} else {
+			"\u{2022}".to_string()	// U+2022 bullet
+		};
 		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &label));
 		if shaped.dims().width > marker_w { marker_w = shaped.dims().width; }
 		markers.push(shaped);
 	}
-	let indent	= marker_w + style.list.marker_gap;
+	let indent	= marker_w + marker_gap;
 	let inner	= if measure > indent { measure - indent } else { measure };
 
 	for (idx, entry) in items.iter().enumerate() {
 		if idx > 0 {
-			nodes.push(Node::Glue(Glue::fixed(style.list.item_skip)));
+			nodes.push(Node::Glue(Glue::fixed(item_skip)));
 		}
 		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, seen, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
-			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, true));
+			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate));
 		indent_item(&mut lines, Leaf::text(markers[idx].clone()), indent);
 		nodes.extend(lines);
 		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
 		// it is laid out within the item's inner measure and then shifted right by this list's indent.
 		for child in &entry.children {
 			if let Block::List { ordered: cord, items: citems } = child {
-				nodes.push(Node::Glue(Glue::fixed(style.list.item_skip)));
+				nodes.push(Node::Glue(Glue::fixed(item_skip)));
 				let mut sub: Vec<Node> = Vec::new();
 				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
 					foot_no, ref_no, seen, bib, refs));
@@ -1197,8 +1216,9 @@ fn code_block(
 	-> Outcome<()>
 {
 	// Code is set a touch smaller than the body, as most templates do, so more of a wide line fits the
-	// measure before it overflows.
-	let size	= style.furniture.foot_size;
+	// measure before it overflows. The size is the theme's own `code` group, so a `#set raw(...)` unit can
+	// lower into it; its default matches the footnote size the block has always used.
+	let size	= style.code.size;
 	let indent	= style.text.body_size;	// a one-em hang, so the block sits off the left margin
 	let sample	= res!(ShapedText::new(fonts.clone(), Role::Mono, Dir::Ltr, size, "0"));
 	let sh		= sample.dims().height;	// a mono digit fixes the height of a blank line
@@ -1269,7 +1289,7 @@ fn build_footnote(
 	let inner	= if measure > hang { measure - hang } else { measure };
 
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true));
 	indent_item(&mut lines, Leaf::text_dims(pre_shaped, pre_dims), hang);
 
 	let mut height = Sp::ZERO;
@@ -1447,7 +1467,8 @@ fn figure(
 		None	=> fmt!("Figure {}.", number),
 	};
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
-	let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.furniture.foot_size, &text));
+	// The caption sets in the italic at the theme's figure caption size (its default the footnote size).
+	let shaped	= res!(ShapedText::new(fonts, Role::Italic, Dir::Ltr, style.figure.caption_size, &text));
 	let cd		= shaped.dims();
 	let cpad	= if measure > cd.width { Sp((measure.raw() - cd.width.raw()) / 2) } else { Sp::ZERO };
 	let mut crow:	Vec<Node> = Vec::new();
@@ -2599,7 +2620,7 @@ fn fm_meta_page(
 			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 		}
 		first = false;
-		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5)));
+		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true));
 		nodes.extend(broken);
 	}
 	Ok(())
@@ -2642,7 +2663,7 @@ fn fm_doc_meta_page(
 
 	if let Some(ack) = &fm.acknowledgement {
 		let size	= Sp(style.text.body_size.raw() * 85 / 100);
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, ack, measure, Sp(size.raw() * 6 / 5)));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, ack, measure, Sp(size.raw() * 6 / 5), true));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -2650,7 +2671,7 @@ fn fm_doc_meta_page(
 		foot.push(Node::Glue(Glue::fixed(gap)));
 		foot_h += gap;
 		let size	= style.text.body_size;
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, cr, measure, Sp(size.raw() * 6 / 5)));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, cr, measure, Sp(size.raw() * 6 / 5), true));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -2660,7 +2681,7 @@ fn fm_doc_meta_page(
 		foot_h += gap;
 		let size	= Sp(style.text.body_size.raw() * 3 / 4);
 		let line	= "This document was created using Austenite (built using Rust).";
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5)));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -2864,7 +2885,7 @@ fn fm_about_author_page(
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
 	let size	= Sp(style.text.body_size.raw() * 9 / 10);
-	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5)));
+	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5), true));
 	nodes.extend(broken);
 	Ok(())
 }
@@ -3015,7 +3036,7 @@ fn reference_block(
 		pieces.push(Piece::Text { text: text.clone(), role });
 	}
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true));
 
 	// Indent every line but the first by the hang, so the entry hangs under its first line.
 	let mut first = true;
@@ -3182,6 +3203,81 @@ fn heading_number(level: u8, sec: &[u32; 6]) -> String {
 			parts.join(".")
 		},
 	}
+}
+
+/// The number shown before a heading of `level`, honouring a per-level Typst numbering pattern the theme
+/// carries (what `#set heading(numbering: "1.1")` lowers into every level, or a per-level override); with
+/// no pattern -- the default -- it falls to the plain dotted arabic of [`heading_number`], so an untouched
+/// theme renders unchanged. A part divider (level 0) carries no number.
+fn heading_number_themed(level: u8, sec: &[u32; 6], style: &Theme) -> String {
+	if level == 0 {
+		return String::new();
+	}
+	let idx = (level as usize).saturating_sub(1).min(style.heading.levels.len().saturating_sub(1));
+	if let Some(pattern) = style.heading.levels.get(idx).and_then(|l| l.numbering.as_deref()) {
+		let l = (level as usize).min(6);
+		return format_numbering(pattern, &sec[..l]);
+	}
+	heading_number(level, sec)
+}
+
+/// Renders a Typst numbering pattern against a list of counter values, as `numbering(pattern, ..nums)`
+/// does: each counting symbol (`1`, `a`, `A`, `i`, `I`) consumes one number and renders it in that
+/// system, the literal text between symbols is kept, and when there are more numbers than symbols the
+/// last symbol and its leading literal repeat -- so `"1.1"` over `[1, 2, 3]` gives `1.2.3`. A pattern with
+/// no counting symbol is a fixed literal, returned unchanged.
+fn format_numbering(pattern: &str, nums: &[u32]) -> String {
+	// Each piece is the literal text leading up to one counting symbol; `suffix` is the literal after the
+	// last symbol.
+	let mut pieces:	Vec<(String, char)>	= Vec::new();
+	let mut prefix						= String::new();
+	for c in pattern.chars() {
+		if matches!(c, '1' | 'a' | 'A' | 'i' | 'I') {
+			pieces.push((std::mem::take(&mut prefix), c));
+		} else {
+			prefix.push(c);
+		}
+	}
+	let suffix = prefix;
+	if pieces.is_empty() {
+		return pattern.to_string();
+	}
+	let mut out = String::new();
+	for (k, n) in nums.iter().enumerate() {
+		let (pre, sym) = &pieces[k.min(pieces.len() - 1)];
+		out.push_str(pre);
+		out.push_str(&numbering_symbol(*sym, *n));
+	}
+	out.push_str(&suffix);
+	out
+}
+
+/// One counter value rendered in the system a Typst counting symbol names.
+fn numbering_symbol(symbol: char, n: u32) -> String {
+	match symbol {
+		'1'	=> fmt!("{}", n),
+		'a'	=> alpha_label(n, false),
+		'A'	=> alpha_label(n, true),
+		'i'	=> roman(n).to_lowercase(),
+		'I'	=> roman(n),
+		_	=> fmt!("{}", n),
+	}
+}
+
+/// A bijective base-26 letter label: 1 -> `a`, 26 -> `z`, 27 -> `aa`, uppercased when `upper` -- Typst's
+/// `"a"`/`"A"` counting symbols. Zero renders empty, as an unstarted counter does.
+fn alpha_label(mut n: u32, upper: bool) -> String {
+	if n == 0 {
+		return String::new();
+	}
+	let base = if upper { b'A' } else { b'a' };
+	let mut chars: Vec<char> = Vec::new();
+	while n > 0 {
+		let rem = ((n - 1) % 26) as u8;
+		chars.push((base + rem) as char);
+		n = (n - 1) / 26;
+	}
+	chars.iter().rev().collect()
 }
 
 /// A heading run's face: the display face (Radley) a book supplies for its chapters and level-2
@@ -3862,14 +3958,14 @@ fn box_flow_scoped(
 			Block::Paragraph { text } => {
 				let pieces = vec![Piece::Text { text: text.clone(), role: Role::Body }];
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate));
 				nodes.extend(lines);
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
 					fonts.clone(), geom, style, segments, foot_no, ref_no, seen, bib, refs));
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, true));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate));
 				nodes.extend(lines);
 			},
 			Block::List { ordered, items } => {
@@ -4209,6 +4305,195 @@ mod tests {
 		assert_eq!(min_s, min_p, "the paragraph outside the scope must keep the document's own size");
 		// And the scoped paragraph really rose above the document size, so the patch reached the renderer.
 		assert!(max_s > max_p, "the scoped paragraph must exceed the unscoped document size");
+		Ok(())
+	}
+
+	// Every Fill colour drawn anywhere in a rendered node tree, for a callout-fill assertion.
+	fn collect_fills(nodes: &[Node], out: &mut Vec<Rgba>) {
+		for n in nodes {
+			match n {
+				Node::HBox(b) | Node::VBox(b)	=> collect_fills(&b.list, out),
+				Node::Leaf(l)					=> if let LeafKind::Graphic(g) = &l.kind {
+					for op in &g.ops {
+						if let DrawOp::Fill { colour, .. } = op { out.push(*colour); }
+					}
+				},
+				_								=> {},
+			}
+		}
+	}
+
+	// The ink width of a set line -- the sum of its children's advances -- which fills to the measure on a
+	// justified interior line and falls short of it on a ragged one, though the line box is measure-wide
+	// either way.
+	fn line_ink_width(line: &[Node]) -> Sp {
+		let mut w = Sp::ZERO;
+		for n in line {
+			w = w + match n {
+				Node::Leaf(l)					=> l.dims.width,
+				Node::Glue(g)					=> g.natural,
+				Node::HBox(b) | Node::VBox(b)	=> b.dims.width,
+				_								=> Sp::ZERO,
+			};
+		}
+		w
+	}
+
+	/// `format_numbering` renders each Typst counting system, keeps literal text, and repeats the last
+	/// symbol for a hierarchical number -- and a pattern with no counting symbol is a fixed literal.
+	#[test]
+	fn numbering_pattern_renders_each_system() {
+		assert_eq!(format_numbering("1.1", &[2, 3]), "2.3");	// hierarchical: the last symbol repeats
+		assert_eq!(format_numbering("1.", &[3]), "3.");
+		assert_eq!(format_numbering("(a)", &[2]), "(b)");
+		assert_eq!(format_numbering("A", &[27]), "AA");
+		assert_eq!(format_numbering("I", &[4]), "IV");
+		assert_eq!(format_numbering("i.", &[9]), "ix.");
+		assert_eq!(format_numbering("Q", &[3]), "Q");		// no counting symbol: a fixed literal
+	}
+
+	/// A `#set heading(numbering: ...)` pattern reaches the rendered heading number: a level-1 heading set
+	/// to pattern "A" carries "A", where the untouched default carries the plain arabic "1".
+	#[test]
+	fn heading_numbering_pattern_reaches_the_number() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let blocks	= vec![Block::Heading { level: 1, segments: vec![Segment::text("Alpha")], label: None }];
+
+		let (_, heads_d) = res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		assert_eq!(heads_d[0].number, "1", "the default heading number is the plain arabic count");
+
+		let mut alpha = Theme::default();
+		for l in &mut alpha.heading.levels { l.numbering = Some("A".to_string()); }
+		let (_, heads_a) = res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
+		assert_eq!(heads_a[0].number, "A", "a heading numbering pattern must reach the rendered number");
+		Ok(())
+	}
+
+	/// `#set par(justify: false)` reaches the renderer: a justified paragraph fills its first (interior)
+	/// line to the measure, an unjustified one leaves it ragged, short of the measure.
+	#[test]
+	fn par_justify_false_leaves_lines_ragged() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let measure	= geom.content_width();
+		let blocks	= vec![Block::Paragraph { text:
+			"A paragraph written long enough that it must wrap onto at least two lines, so its first line is \
+an interior line justification fills to the measure while ragged setting does not.".to_string() }];
+
+		// The ink width of the paragraph's first (interior) line: filled to the measure when justified,
+		// short of it when ragged.
+		fn first_line_ink(doc: &Document) -> Sp {
+			doc.nodes.iter().find_map(|n| match n {
+				Node::HBox(b) if b.dims.height > Sp::ZERO	=> Some(line_ink_width(&b.list)),
+				_										=> None,
+			}).unwrap_or(Sp::ZERO)
+		}
+
+		let (dj, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let mut ragged = Theme::default();
+		ragged.text.justify = false;
+		let (dr, _)	= res!(author(fonts, geom, &ragged, &FaceResolver::default(), &blocks, None, None));
+
+		// The justified interior line fills to the measure; the ragged one leaves its slack on the right.
+		assert!(first_line_ink(&dj) > first_line_ink(&dr),
+			"a justified line fills more of the measure than a ragged one ({:?} vs {:?})",
+			first_line_ink(&dj), first_line_ink(&dr));
+		assert!(first_line_ink(&dj) >= measure - Sp::from_pt(1.0),
+			"a justified interior line reaches the measure");
+		Ok(())
+	}
+
+	/// `#set text(hyphenate: false)` reaches the renderer: a long word set on a narrow page breaks across
+	/// lines when hyphenation is on and stays whole -- fewer lines -- when it is off.
+	#[test]
+	fn text_hyphenate_false_stops_word_breaking() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		// A narrow page, so a long word must hyphenate to fit; `content_width` here is ~24pt.
+		let geom	= PageGeometry::new(Sp::from_pt(90.0), Sp::from_pt(400.0), Sp::from_pt(33.0));
+		let blocks	= vec![Block::Paragraph { text:
+			"antidisestablishmentarianism antidisestablishmentarianism".to_string() }];
+
+		fn line_count(doc: &Document) -> usize {
+			doc.nodes.iter().filter(|n| matches!(n, Node::HBox(b) if b.dims.height > Sp::ZERO)).count()
+		}
+
+		let (on, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let mut no_hyph = Theme::default();
+		no_hyph.text.hyphenate = false;
+		let (off, _) = res!(author(fonts, geom, &no_hyph, &FaceResolver::default(), &blocks, None, None));
+
+		assert!(line_count(&on) > line_count(&off),
+			"hyphenation on must split the long words into more lines than off ({} vs {})",
+			line_count(&on), line_count(&off));
+		Ok(())
+	}
+
+	/// A `#set enum(numbering: ...)` pattern reaches the ordered-list marker: setting `"(a)"` shapes a
+	/// different first marker from the default `"1."`, so the marker glyph really came from the theme.
+	#[test]
+	fn enum_numbering_changes_the_marker() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let items	= || vec![
+			ListEntry { segments: vec![Segment::text("First item.")], children: vec![] },
+			ListEntry { segments: vec![Segment::text("Second item.")], children: vec![] },
+		];
+		let blocks	= vec![Block::list(true, items())];
+
+		// The width of the first list item's leading marker leaf.
+		fn first_marker_width(doc: &Document) -> Sp {
+			for n in &doc.nodes {
+				if let Node::HBox(b) = n {
+					if let Some(Node::Leaf(l)) = b.list.first() {
+						return l.dims.width;
+					}
+				}
+			}
+			Sp::ZERO
+		}
+
+		let (dd, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let mut alpha = Theme::default();
+		alpha.enumeration.numbering = Some("(a)".to_string());
+		let (da, _)	= res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
+
+		assert!(first_marker_width(&dd) > Sp::ZERO, "the default ordered marker has width");
+		assert_ne!(first_marker_width(&dd), first_marker_width(&da),
+			"a `#set enum(numbering: \"(a)\")` must change the rendered marker from the default \"1.\"");
+		Ok(())
+	}
+
+	/// The `code`, `figure` and `callout` theme groups reach the renderer: a code block's mono size, a
+	/// drawn figure's caption size and a callout's wash are each taken from the theme, so nudging them off
+	/// their defaults visibly changes the render.
+	#[test]
+	fn code_caption_and_callout_read_the_theme() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let faces	= FaceResolver::default();
+
+		// Code size: a taller `code.size` sets taller code lines.
+		let code_blocks	= vec![Block::Code { lines: vec!["let x = 1;".to_string()] }];
+		let (cd, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &faces, &code_blocks, None, None));
+		let mut big_code = Theme::default();
+		big_code.code.size = Sp::from_pt(20.0);
+		let (cb, _)	= res!(author(fonts.clone(), geom, &big_code, &faces, &code_blocks, None, None));
+		let tallest = |doc: &Document| doc.nodes.iter().filter_map(|n| match n {
+			Node::HBox(b) if b.dims.height > Sp::ZERO => Some(b.dims.height), _ => None,
+		}).fold(Sp::ZERO, |a, h| if h > a { h } else { a });
+		assert!(tallest(&cb) > tallest(&cd), "a larger code.size must set taller code lines");
+
+		// Callout fill: the wash colour is the theme's `callout.fill`.
+		let box_blocks	= vec![Block::box_callout(
+			vec![Block::Paragraph { text: "Inside a callout.".to_string() }], ThemePatch::default())];
+		let mut red = Theme::default();
+		red.callout.fill = Rgba::opaque(200, 20, 20);
+		let (bd, _)	= res!(author(fonts, geom, &red, &faces, &box_blocks, None, None));
+		let mut fills = Vec::new();
+		collect_fills(&bd.nodes, &mut fills);
+		assert!(fills.contains(&Rgba::opaque(200, 20, 20)),
+			"the callout wash must be the theme's callout.fill, not a hard-coded colour: {:?}", fills);
 		Ok(())
 	}
 }
