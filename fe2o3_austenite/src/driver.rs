@@ -41,6 +41,7 @@ use crate::{
 		PageGeometry,
 		Placed,
 		PlacedKind,
+		Region,
 	},
 };
 
@@ -389,6 +390,7 @@ fn place_float<M: Metrics>(
 	incoming:	&Ledger,
 	frame:		&mut Frame,
 	ledger:		&mut Ledger,
+	region:		Region,	// the band the float lands in, carried onto its anchor so a later shift moves it with its band
 )
 	-> Outcome<()>
 {
@@ -411,7 +413,8 @@ fn place_float<M: Metrics>(
 				yy += l.dims.vextent();
 			},
 			Node::Anchor(id) => {
-				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
+				ledger.record(Anchor::new(
+					id.clone(), Position::new(page_no, geom.content_left(), yy)).with_region(region));
 			},
 			Node::Penalty(_)	=> (),
 			// A float never nests inside another float; a nested one would be a construction error, so it is
@@ -477,20 +480,29 @@ fn try_insert_float<M: Metrics>(
 	match side {
 		FloatPlacement::Bottom => {
 			// Shift the existing foot band up by this float's band and seat the new float at the very foot,
-			// so document order runs top-to-bottom down the foot region (the earliest foot float highest).
-			frame.shift_y(-band, bottom - bands.bot_reserve, Sp(i32::MAX));
-			ledger.shift_anchors(page_no, -band, bottom - bands.bot_reserve, Sp(i32::MAX));
-			res!(place_float(f, bottom - f.height, page_no, geom, metrics, incoming, frame, ledger));
+			// so document order runs top-to-bottom down the foot region (the earliest foot float highest). The
+			// body and top regions stay put; the float's own material is stamped into the foot band after it is
+			// placed (`place_float` lays it as ordinary body material first).
+			let start = frame.len();
+			frame.shift_region(-band, Region::Foot);
+			ledger.shift_region_anchors(page_no, -band, Region::Foot);
+			res!(place_float(f, bottom - f.height, page_no, geom, metrics, incoming, frame, ledger, Region::Foot));
+			frame.stamp_region(start, Region::Foot);
 			bands.bot_reserve = bands.bot_reserve + band;
 		},
 		// Top (auto resolved to top or bottom above, so this arm is top).
 		_ => {
-			// Seat the float below the top band already stacked and shift the body below it down, so document
-			// order runs top-to-bottom down the top region (the earliest top float highest).
+			// Seat the float below the top band already stacked and shift the whole body region down, so
+			// document order runs top-to-bottom down the top region (the earliest top float highest). Shifting
+			// by region, not by a y window, moves a first body line that cap-height seating raised above the
+			// band edge along with the rest of its body -- keying on the raised glyph y would strand it under
+			// the float. The float's own material is stamped into the top band after it is placed.
 			let at = top + bands.top_used;
-			frame.shift_y(band, at, bottom - bands.bot_reserve);
-			ledger.shift_anchors(page_no, band, at, bottom - bands.bot_reserve);
-			res!(place_float(f, at, page_no, geom, metrics, incoming, frame, ledger));
+			let start = frame.len();
+			frame.shift_region(band, Region::Body);
+			ledger.shift_region_anchors(page_no, band, Region::Body);
+			res!(place_float(f, at, page_no, geom, metrics, incoming, frame, ledger, Region::Top));
+			frame.stamp_region(start, Region::Top);
 			bands.top_used = bands.top_used + band;
 			*y += band;
 		},

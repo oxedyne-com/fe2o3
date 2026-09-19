@@ -11,6 +11,7 @@
 //! pages it moved between.
 
 use crate::ir::Sp;
+use crate::page::Region;
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -142,11 +143,19 @@ pub struct Anchor {
 	pub pos:		Position,
 	pub reserved:	Sp,
 	pub realised:	Sp,
+	pub region:		Region,	// the page region it sits in; decides float-relayout membership, transient (not serialised)
 }
 
 impl Anchor {
 	pub fn new(id: AnchorId, pos: Position) -> Self {
-		Self { id, pos, reserved: Sp::ZERO, realised: Sp::ZERO }
+		Self { id, pos, reserved: Sp::ZERO, realised: Sp::ZERO, region: Region::Body }
+	}
+
+	/// The same anchor, tagged for a float band. A body anchor keeps the [`Region::Body`] default; only a
+	/// float's own anchor, recorded as the float is placed, claims [`Region::Top`] or [`Region::Foot`].
+	pub fn with_region(mut self, region: Region) -> Self {
+		self.region = region;
+		self
 	}
 
 	/// Did the resolved value outgrow the width held open for it?
@@ -176,7 +185,9 @@ impl FromDat for Anchor {
 		let y			= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("y")))));
 		let reserved	= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("reserved")))));
 		let realised	= res!(Sp::from_dat(res!(dat.map_remove_must(&dat!("realised")))));
-		Ok(Self { id, pos: Position::new(page, x, y), reserved, realised })
+		// The region is a transient layout fact, spent during composition and not serialised; a decoded
+		// anchor is never reflowed, so it defaults to the body.
+		Ok(Self { id, pos: Position::new(page, x, y), reserved, realised, region: Region::Body })
 	}
 }
 
@@ -324,13 +335,13 @@ impl Ledger {
 		self.entries.get(id)
 	}
 
-	/// Shifts every anchor on `page` whose position lies in the half-open band `[from, upto)` by `by` -- the
-	/// ledger's half of a float insertion, kept in step with [`Frame::shift_y`](crate::page::Frame::shift_y)
-	/// so a reference to a body anchor that moved for a float resolves to where the ink actually landed. An
-	/// anchor outside the band (in the other region) is left where it sits.
-	pub fn shift_anchors(&mut self, page: u32, by: Sp, from: Sp, upto: Sp) {
+	/// Shifts every anchor on `page` belonging to `region` by `by` -- the ledger's half of a float insertion,
+	/// kept in step with [`Frame::shift_region`](crate::page::Frame::shift_region) so a reference to a body
+	/// anchor that moved for a float resolves to where the ink actually landed. An anchor in another region
+	/// is left where it sits, so membership rather than a y window decides what moves.
+	pub fn shift_region_anchors(&mut self, page: u32, by: Sp, region: Region) {
 		for anchor in self.entries.values_mut() {
-			if anchor.pos.page == page && anchor.pos.y >= from && anchor.pos.y < upto {
+			if anchor.pos.page == page && anchor.region == region {
 				anchor.pos.y = anchor.pos.y + by;
 			}
 		}

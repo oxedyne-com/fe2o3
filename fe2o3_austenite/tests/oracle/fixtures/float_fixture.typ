@@ -32,7 +32,7 @@
 
 #set page(width: 595.276pt, height: 841.89pt, margin: 56.9pt)
 #set text(size: 11pt, font: "Libertinus Serif")
-#set par(justify: true, leading: 0.65em, first-line-indent: 0pt)
+#set par(justify: true, leading: 0.65em, spacing: 1.2em, first-line-indent: 0pt)
 
 #let aside-box(float: true, body) = {
   let inner = box(

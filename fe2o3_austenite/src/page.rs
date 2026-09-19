@@ -83,6 +83,18 @@ pub enum PlacedKind {
 	Graphic(Arc<Graphic>),	// a figure's baked paths, drawn at this box's position
 }
 
+/// Which of a page's three vertical regions a placed item belongs to. A float insertion reflows one region
+/// by moving the items that belong to it, so membership -- not a y-coordinate window -- decides what moves.
+/// A body line whose glyphs were raised above the body band's top edge by cap-height seating (see
+/// `linebreak::raise_leaves`) still belongs to the body, and moves down with it when a top float is inserted
+/// above; keying the shift on the raised glyph y instead would leave that line drawn under the float.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Region {
+	Top,	// a top float's band, stacked from the page top down
+	Body,	// the flowing column between the two float bands
+	Foot,	// a foot float's band (footnotes are laid here too, once the page closes and nothing more shifts)
+}
+
 /// A box set at an absolute position on a page. The position is the top-left of the box; the
 /// baseline sits `dims.height` below it.
 #[derive(Clone, Debug)]
@@ -91,11 +103,14 @@ pub struct Placed {
 	pub y:		Sp,
 	pub dims:	Dims,
 	pub kind:	PlacedKind,
+	pub region:	Region,	// which page region it flows in; decides float-relayout membership
 }
 
 impl Placed {
+	/// A placed item defaults to the body region. A float's own material is placed through the same
+	/// helpers and then reclaimed for its band with [`Frame::stamp_region`].
 	pub fn new(x: Sp, y: Sp, dims: Dims, kind: PlacedKind) -> Self {
-		Self { x, y, dims, kind }
+		Self { x, y, dims, kind, region: Region::Body }
 	}
 }
 
@@ -118,16 +133,31 @@ impl Frame {
 		self.placed.is_empty()
 	}
 
-	/// Translates every placed item whose top sits in the half-open band `[from, upto)` by `by` (down for a
-	/// positive `by`, up for a negative one). This is how a float inserted into a part-filled page makes
-	/// room without disturbing the other region: a top float shifts the body band down and leaves the foot
-	/// band alone; a foot float shifts the existing foot band up and leaves the body and top bands alone.
-	/// It mirrors Typst's relayout, which re-flows the whole region when a float is inserted.
-	pub fn shift_y(&mut self, by: Sp, from: Sp, upto: Sp) {
+	pub fn len(&self) -> usize {
+		self.placed.len()
+	}
+
+	/// Translates every placed item belonging to `region` by `by` (down for a positive `by`, up for a
+	/// negative one). This is how a float inserted into a part-filled page makes room without disturbing the
+	/// other regions: a top float shifts the body region down, a foot float shifts the existing foot region
+	/// up, and the bands not being reflowed stay put. It mirrors Typst's relayout, which re-flows the whole
+	/// region when a float is inserted. Membership, not a y window, is the test, so a body line raised above
+	/// the band edge by cap-height seating still moves with its body (see [`Region`]).
+	pub fn shift_region(&mut self, by: Sp, region: Region) {
 		for item in &mut self.placed {
-			if item.y >= from && item.y < upto {
+			if item.region == region {
 				item.y = item.y + by;
 			}
+		}
+	}
+
+	/// Reclaims every item from index `from` to the end for `region`. A float's material is placed through
+	/// the ordinary helpers, which stamp it `Body`; the caller records the frame length before placing the
+	/// float and calls this after, so exactly the float's own items join its band and the body items already
+	/// on the page keep their membership.
+	pub fn stamp_region(&mut self, from: usize, region: Region) {
+		for item in &mut self.placed[from..] {
+			item.region = region;
 		}
 	}
 }

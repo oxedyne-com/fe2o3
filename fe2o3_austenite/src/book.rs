@@ -420,11 +420,6 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips })
 }
 
-/// Reads a doc-template root's geometry and type: the paper and margins from the shared `template.typ`
-/// beside the root, and the body size from the root's `doc.with(text-size: ..)` argument. The template
-/// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
-/// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
-/// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
 /// Which level-1 opener idiom a doc template uses, read from its `show heading` block. A grid template
 /// (oxeweb) opens with a fixed `#grid` of logo/title bands and no number; the oxedyne banner template
 /// draws a grey `#section-banner` bar. The two take different opener metrics and heading scales.
@@ -434,6 +429,11 @@ enum DocOpener {
 	Banner,
 }
 
+/// Reads a doc-template root's geometry and type: the paper and margins from the shared `template.typ`
+/// beside the root, and the body size from the root's `doc.with(text-size: ..)` argument. The template
+/// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
+/// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
+/// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
 fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
 	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
 	let template = vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
@@ -472,10 +472,13 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 	// `(18, 14, 13, 12).at(level - 1)`, so level 2 is 14 pt, level 3 13 pt, level 4 12 pt (the level-1
 	// entry, 18 pt, is unused: level 1 takes the grid). The oxedyne banner template opens with a grey
 	// `#section-banner` bar and no grid, and keeps its own smaller heading scale (chapter title 14 pt).
-	// The presence of a `rows:` tuple after `show heading` tells the two apart; pinning the grid's metrics
-	// onto a banner tree over-set its level-1 and back-matter headings. A future doc template with other
-	// values should have them read from its own `template.typ` rather than pinned here.
-	let head_tail	= template.find("show heading").map(|at| &template[at..]);
+	// The presence of a `rows:` tuple after the rule tells the two apart; pinning the grid's metrics onto a
+	// banner tree over-set its level-1 and back-matter headings. A future doc template with other values
+	// should have them read from its own `template.typ` rather than pinned here. The anchor is the rule form
+	// `show heading: it =>`, not the bare words: the banner template carries a `//` comment naming
+	// `show heading`/`set heading`, and matching that comment (with a `rows:` tuple anywhere after it) would
+	// misread the banner as a grid.
+	let head_tail	= template.find("show heading: it =>").map(|at| &template[at..]);
 	let grid_rows	= head_tail.and_then(|t| tuple_after(t, "rows:")).filter(|r| r.len() >= 4);
 	let (opener, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt) = match grid_rows {
 		Some(rows)	=> {
