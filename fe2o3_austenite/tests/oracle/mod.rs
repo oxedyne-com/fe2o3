@@ -154,6 +154,7 @@ struct AnchorRow {
 	#[allow(dead_code)]	// carried through for a future label-based match; today's comparison is by order
 	label:	String,
 	page:	u32,
+	y:		f64,	// the anchor's y from the page top, in points -- lets the float check tell top from foot
 }
 
 /// One row of the Typst side's dump (`tests/oracle/dump.typ`): a heading's or figure's kind, its Typst
@@ -166,6 +167,7 @@ struct TypstRow {
 	label:	String,
 	title:	String,
 	page:	u32,
+	y:		f64,	// the element's y from the page top, in points -- compared against Austenite's for a float
 }
 
 /// Reads a JSON array of flat objects -- either side's dump -- into rows of `{kind, label, page}`,
@@ -173,7 +175,7 @@ struct TypstRow {
 /// Typst side's JSON, decoded back through the JDAT reader since JDAT is a JSON superset, could as
 /// easily land on `I64`). `title`, present only on the Typst side, defaults to empty when the caller
 /// does not ask for it.
-fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, String, u32)>> {
+fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, String, u32, f64)>> {
 	let dat		= res!(Dat::decode_string(json));
 	let list	= try_extract_dat!(dat, List);
 	let mut out = Vec::with_capacity(list.len());
@@ -187,19 +189,26 @@ fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, Stri
 		};
 		let page_dat	= res!(row.map_remove_must(&dat!("page")));
 		let page		= try_extract_dat_as!(page_dat, u32, U8, U16, U32, U64, I8, I16, I32, I64);
-		out.push((kind, label, title, page));
+		// `y` (whole points from the page top) is present on both sides now; an older dump without it
+		// defaults to zero, harmless for every check but the float side/y one, which only reads roots that
+		// carry it. Both sides emit it as an integer, so it decodes through the same width-tolerant path.
+		let y = match row.map_remove(&dat!("y")) {
+			Ok(Some(d))	=> try_extract_dat_as!(d, i64, U8, U16, U32, U64, I8, I16, I32, I64) as f64,
+			_			=> 0.0,
+		};
+		out.push((kind, label, title, page, y));
 	}
 	Ok(out)
 }
 
 fn parse_anchor_rows(json: &str) -> Outcome<Vec<AnchorRow>> {
 	let raw = res!(parse_rows(json, false));
-	Ok(raw.into_iter().map(|(kind, label, _title, page)| AnchorRow { kind, label, page }).collect())
+	Ok(raw.into_iter().map(|(kind, label, _title, page, y)| AnchorRow { kind, label, page, y }).collect())
 }
 
 fn parse_typst_rows(json: &str) -> Outcome<Vec<TypstRow>> {
 	let raw = res!(parse_rows(json, true));
-	Ok(raw.into_iter().map(|(kind, label, title, page)| TypstRow { kind, label, title, page }).collect())
+	Ok(raw.into_iter().map(|(kind, label, title, page, y)| TypstRow { kind, label, title, page, y }).collect())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -511,6 +520,12 @@ const TOTAL_PAGE_TOLERANCE_FRACTION: f64 = 0.15;
 /// missing rather than every single-heading accounting difference.
 const COUNT_TOLERANCE: usize = 2;
 
+/// How far a strict float root's float may sit, in points, from where Typst set it before the harness
+/// reports it. The two engines draw a float's body differently (Austenite a callout, Typst a plain box),
+/// so a few points of offset is expected; this is tight enough to catch a float set in the wrong band or
+/// at the wrong height, and only the crate-owned `float-fixture` is held to it.
+const FLOAT_Y_TOLERANCE_PT: f64 = 24.0;
+
 /// Runs both compiles for `root` and returns the report [`RootReport::summary`] prints. An `Err` here
 /// means Austenite itself could not produce a page for this root -- the one failure this harness treats
 /// as a hard stop, since every other comparison depends on that page existing.
@@ -574,18 +589,41 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 
 			let ty_figs: Vec<&TypstRow> = typout.rows.iter().filter(|r| r.kind == "figure").collect();
 			let au_figs: Vec<&AnchorRow> = ausout.rows.iter().filter(|r| r.kind == "float").collect();
+			// The float fixture is this crate's own float regression root: it exists to prove float
+			// PLACEMENT matches Typst, so it is held to exact page and count agreement and a per-float side
+			// (top/foot) and y check, not the generous drift the external book roots get (whose absolute
+			// pagination legitimately wanders a page or two from Typst for reasons unrelated to floats).
+			let strict = root.name == "float-fixture";
+			let fig_count_tol	= if strict { 0 } else { COUNT_TOLERANCE };
+			let fig_page_tol	= if strict { 0 } else { PAGE_DRIFT_TOLERANCE };
 			let fig_count_diff = ty_figs.len().abs_diff(au_figs.len());
-			if fig_count_diff > COUNT_TOLERANCE {
+			if fig_count_diff > fig_count_tol {
 				mismatches.push(fmt!(
 					"figure count differs by {} (tolerance {}): typst {} vs austenite {}",
-					fig_count_diff, COUNT_TOLERANCE, ty_figs.len(), au_figs.len()));
+					fig_count_diff, fig_count_tol, ty_figs.len(), au_figs.len()));
 			}
+			// A4 page middle in points -- the threshold that classifies a float's landing side from its y.
+			let page_mid = 841.89 / 2.0;
+			let side = |y: f64| -> &'static str { if y < page_mid { "top" } else { "foot" } };
 			for (i, (t, a)) in ty_figs.iter().zip(au_figs.iter()).enumerate() {
 				let drift = (t.page as i64 - a.page as i64).abs();
-				if drift > PAGE_DRIFT_TOLERANCE {
+				if drift > fig_page_tol {
 					mismatches.push(fmt!(
 						"figure #{} drifted {} page(s) (tolerance {}): typst page {} vs austenite page {}",
-						i + 1, drift, PAGE_DRIFT_TOLERANCE, t.page, a.page));
+						i + 1, drift, fig_page_tol, t.page, a.page));
+				}
+				if strict {
+					if side(t.y) != side(a.y) {
+						mismatches.push(fmt!(
+							"figure #{} landed on a different side: typst {} (y {:.0}pt) vs austenite {} (y {:.0}pt)",
+							i + 1, side(t.y), t.y, side(a.y), a.y));
+					}
+					let dy = (t.y - a.y).abs();
+					if dy > FLOAT_Y_TOLERANCE_PT {
+						mismatches.push(fmt!(
+							"figure #{} y differs by {:.0}pt (tolerance {:.0}pt): typst {:.0}pt vs austenite {:.0}pt",
+							i + 1, dy, FLOAT_Y_TOLERANCE_PT, t.y, a.y));
+					}
 				}
 			}
 

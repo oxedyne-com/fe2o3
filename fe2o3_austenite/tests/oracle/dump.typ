@@ -31,11 +31,15 @@
 		label:	if h.has("label") { str(h.label) } else { "" },
 		title:	text-of(h.body),
 		page:	h.location().page(),
+		y:	int(calc.round(h.location().position().y / 1pt)),
 	)) + figs.map(f => (
 		kind:	"figure",
 		label:	if f.has("label") { str(f.label) } else { "" },
 		title:	if f.has("caption") and f.caption != none { text-of(f.caption.body) } else { "" },
 		page:	f.location().page(),
+		// The figure's y from the page's top edge, in points, so the oracle can compare which side of the
+		// page a float settled on against Austenite's own dump.
+		y:	int(calc.round(f.location().position().y / 1pt)),
 	))
 	[#metadata(entries) <oracle-dump>]
 }
