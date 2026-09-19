@@ -59,11 +59,11 @@ fn main() -> Outcome<()> {
 			"Each figure below is a plot built by Austenite's plotting module: the axes, the grid and \
 			every curve are stroked outline paths, and the tick labels are shaped in the document's own \
 			font, so a plot is drawn geometry a reader can inspect rather than a pasted picture."),
-		Block::figure(waves, Some("The sine and cosine over two periods.".to_string())),
+		Block::figure(waves, Some("The sine and cosine over two periods.".to_string()), None),
 		Block::paragraph(
 			"The standard normal distribution, the bell curve of the central limit theorem, is drawn the \
 			same way from a sampling of its density."),
-		Block::figure(bell, Some("The standard normal density.".to_string())),
+		Block::figure(bell, Some("The standard normal density.".to_string()), None),
 	];
 
 	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, &oxedyne_fe2o3_austenite::fonts::FaceResolver::default(), &blocks, None, None));

@@ -5,6 +5,7 @@
 //! The `#` code mode and the declared-query references of `sec_language` are later increments -- the
 //! tree names only what the engine can already set.
 
+use crate::ir::FloatPlacement;
 use crate::ir::Length;
 use crate::ir::Span;
 use crate::lang::codefig::CodeFigure;
@@ -21,14 +22,16 @@ pub enum Item {
 	List { ordered: bool, items: Vec<ListItem>, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
-	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, span: Span },	// caption: the caption's inline markup
+	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`)
+	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, placement: Option<FloatPlacement>, span: Span },
 	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, span: Span },	// a line-leading `#padded-image(...)`/`#image(...)`, set centred without a figure number
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box, plus the
-	// theme patch its body's own top-level `#set` declarations lower to, scoped to the box (H3).
-	Box { items: Vec<Item>, patch: ThemePatch, span: Span },
+	// theme patch its body's own top-level `#set` declarations lower to, scoped to the box (H3). placement is
+	// Some when the furniture floats its body (an `#aside-box(float: true)` re-wrapped in a floating figure).
+	Box { items: Vec<Item>, patch: ThemePatch, placement: Option<FloatPlacement>, span: Span },
 	// A theme scope wrapping the items it governs -- a `#columns[...]` body whose own `#set` declarations
 	// scope to it (H1's flat-splice sibling). Nesting the items rather than bracketing them with a separate
 	// open/close marker makes an unmatched or missing close structurally impossible. Lowered to

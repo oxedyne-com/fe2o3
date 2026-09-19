@@ -41,23 +41,26 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
 			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
-			Item::Figure { body, caption, supplement, label, .. }	=> {
+			Item::Figure { body, caption, supplement, label, placement, .. }	=> {
 				let caption = caption.as_ref().map(|runs| lower_runs(runs));
 				out.push(match body {
 					FigureBody::Table(spec)	=> Block::table_figure(
-						build_table(spec), caption, supplement.clone(), label.clone()),
+						build_table(spec), caption, supplement.clone(), label.clone(), *placement),
 					FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
 						path.clone(), *width, *height, *scale,
-						caption, supplement.clone(), label.clone()),
+						caption, supplement.clone(), label.clone(), *placement),
 					FigureBody::Code(figure)	=> Block::code_figure(
-						figure.clone(), caption, supplement.clone(), label.clone()),
+						figure.clone(), caption, supplement.clone(), label.clone(), *placement),
 				});
 			},
 			Item::Image { path, width, height, scale, .. }	=> out.push(
 				Block::image(path.clone(), *width, *height, *scale)),
 			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
 			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
-			Item::Box { items, patch, .. }		=> out.push(Block::box_callout(blocks(items), patch.clone())),
+			Item::Box { items, patch, placement, .. }	=> out.push(match placement {
+				Some(p)	=> Block::box_callout_float(blocks(items), patch.clone(), *p),
+				None	=> Block::box_callout(blocks(items), patch.clone()),
+			}),
 			Item::Scoped { patch, items }		=> out.push(Block::Scoped { patch: patch.clone(), blocks: blocks(items) }),
 		}
 	}

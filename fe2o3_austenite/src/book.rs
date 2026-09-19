@@ -128,7 +128,7 @@ fn collect_patch_face_names(blocks: &[Block], out: &mut Vec<String>) {
 	for b in blocks {
 		match b {
 			Block::Scoped { patch, blocks }	=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
-			Block::Box { patch, blocks }		=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
+			Block::Box { patch, blocks, .. }	=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
 			_							=> {},
 		}
 	}
@@ -197,7 +197,7 @@ fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceR
 				note_missing_variants_for_levels(&scoped, faces, skips);
 				note_missing_face_variants_in(&scoped, blocks, faces, skips);
 			},
-			Block::Box { patch, blocks }		=> {
+			Block::Box { patch, blocks, .. }	=> {
 				let mut scoped = parent.clone();
 				scoped.apply(patch);
 				note_missing_variants_for_levels(&scoped, faces, skips);

@@ -40,6 +40,7 @@
 
 use crate::doc::Block;
 use crate::ir::{
+	FloatPlacement,
 	Length,
 	Sp,
 	Span,
@@ -1265,6 +1266,7 @@ pub struct TemplateFn {
 	pub has_title:		bool,			// a `title:` parameter -> a leading bold title paragraph in the body
 	pub title_size:		Option<Sp>,		// the title run's text size, em-resolved (a bold paragraph is set at it)
 	pub patch:			ThemePatch,		// the frame geometry and the inner-set overlay, merged
+	pub float:			Option<FloatPlacement>,	// Some when the body is re-wrapped in `figure(placement: ...)` -- a float
 }
 
 /// The template functions in scope for a source, by name. Empty until a book's definitions are collected;
@@ -1460,6 +1462,12 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp, palette: &Palette)
 	let body_param	= body_param_name(params)?;
 	let has_title	= param_names(params).iter().any(|p| p == "title");
 
+	// The float wrapper: a body re-wrapped in `figure(placement: ...)` (the `#aside-box(float: true)` idiom,
+	// `if float { figure(placement: auto, inner) } else { inner }`) is a float the driver defers, not a keep
+	// box set in the flow. The placement is read from the `figure(...)` call; a body that never wraps in a
+	// figure is not a float.
+	let float = figure_placement_in(expr);
+
 	// The wrap call: the definition's own `block(...)`/`box(...)`, taken directly when the body is that call,
 	// or found as the first such call inside a `{ ... }` body (the `let inner = box(...)` idiom). A `box` and
 	// a `block` lower alike -- both wrap the body in a padded frame.
@@ -1531,7 +1539,24 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp, palette: &Palette)
 		None
 	};
 
-	Some(TemplateFn { body_param, has_title, title_size, patch })
+	Some(TemplateFn { body_param, has_title, title_size, patch, float })
+}
+
+/// Reads the placement of a `figure(placement: <p>, ...)` wrapper in a furniture definition's body, or
+/// `None` when the body wraps its content in no figure. `auto`/`top` float to the top, `bottom` to the
+/// foot -- the same mapping the `#figure` reader uses.
+fn figure_placement_in(expr: &str) -> Option<FloatPlacement> {
+	let at		= expr.find("figure(")?;
+	let rest	= &expr[at + "figure(".len()..];
+	let key		= rest.find("placement:")?;
+	let after	= rest[key + "placement:".len()..].trim_start();
+	// The value runs to the next comma or the close of the call.
+	let end		= after.find(|c| c == ',' || c == ')').unwrap_or(after.len());
+	match after[..end].trim() {
+		"auto" | "top"	=> Some(FloatPlacement::Top),
+		"bottom"		=> Some(FloatPlacement::Bottom),
+		_				=> None,
+	}
 }
 
 /// Reads a `stroke: (left: <w> + <colour>)` dict into a width and colour, resolving `em` against `body_size`
@@ -2004,7 +2029,7 @@ fn materialise_template(t: &Template, it: Block, avail: Sp) -> Block {
 			patch.callout.inset_top		= tf.inset_top;
 			patch.callout.inset_bot		= tf.inset_bot;
 			patch.callout.radius		= tf.radius;
-			Block::Box { blocks: vec![it], patch }
+			Block::Box { blocks: vec![it], patch, placement: None }
 		},
 		None		=> it,
 	};
@@ -2333,7 +2358,7 @@ mod tests {
 			Block::Scoped { patch, blocks: inner } => {
 				assert_eq!(patch, &ThemePatch::default(), "the hole scope is transparent");
 				match &inner[0] {
-					Block::Box { blocks: bb, patch }	=> {
+					Block::Box { blocks: bb, patch, .. }	=> {
 						assert_eq!(bb.len(), 1);
 						assert!(matches!(bb[0], Block::Code { .. }), "the code is moved into the box");
 						assert_eq!(patch.callout.fill, Some(Rgba::opaque(240, 240, 240)),
@@ -2584,8 +2609,8 @@ mod tests {
 	/// in a floating figure) lowers: the body parameter is found past the two keyword parameters, the title
 	/// keyword is recognised, and the `box`'s fill/inset/radius resolve. A `luma(...)` fill stands in for the
 	/// corpus's `colours.yellow.lighten(92%)` here -- palette-name resolution is the aside-box milestone's
-	/// own gap. The `figure(placement: auto)` float wrapper is lowered in-flow (no placement engine), an
-	/// accepted fidelity delta for the visual QC.
+	/// own gap. The `figure(placement: auto)` float wrapper is recognised: `float` is `Some(Top)`, so the
+	/// driver defers the callout to the next page it fits on rather than setting it in the flow.
 	#[test]
 	fn collect_lowers_aside_box_shape() {
 		let src = "\
@@ -2624,6 +2649,7 @@ mod tests {
 		// The body size comes from the `text(size: 0.85em)[#body]` wrapper, not a `#set`.
 		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.5)), "body wrapped in text(size: 0.85em)");
 		assert_eq!(tf.title_size, Some(Sp::from_pt(8.5)), "the bold title run is set at 0.85em");
+		assert_eq!(tf.float, Some(FloatPlacement::Top), "the figure(placement: auto) wrapper makes it a float");
 	}
 
 	/// A `#let colours = (...)` palette is collected, and a furniture fill/stroke naming `colours.<name>`

@@ -69,7 +69,7 @@ fn main() -> Outcome<()> {
 			"The figure below is drawn in Austenite's diagram sub-language: its boxes and edges are the \
 			same outline paths the body text is, and its labels are shaped in the document's own font. \
 			It shows the engine's own compile loop, the parser fed again whenever the type check fails."),
-		Block::figure(graphic, Some("The compile loop".to_string())),
+		Block::figure(graphic, Some("The compile loop".to_string()), None),
 	];
 
 	let (document, heads) = res!(doc::author(fonts.clone(), geom, &style, &oxedyne_fe2o3_austenite::fonts::FaceResolver::default(), &blocks, None, None));

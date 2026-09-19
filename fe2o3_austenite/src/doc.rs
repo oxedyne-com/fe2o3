@@ -25,6 +25,8 @@ use crate::ir::{
 	BoxNode,
 	Dims,
 	DrawOp,
+	FloatNode,
+	FloatPlacement,
 	Footnote,
 	Glue,
 	Graphic,
@@ -193,10 +195,14 @@ pub enum Block {
 	Code { lines: Vec<String> },	// a verbatim code block, set in the mono face, whitespace preserved
 	Table(Table),
 	Equation { expr: Atom, numbered: bool, label: Option<String> },	// a display equation on its own centred line; label anchors an @-reference
-	Figure { graphic: Graphic, caption: Option<String> },	// a drawn figure, centred, numbered, captioned
+	// A drawn figure, centred, numbered, captioned. `placement` is `Some` when the source floated it
+	// (`figure(placement: auto | top | bottom)`): the driver then sets it at the top or foot of the next
+	// page it fits on rather than in the flow. `None` (the Typst default, and `placement: none`) sets it
+	// where it stands.
+	Figure { graphic: Graphic, caption: Option<String>, placement: Option<FloatPlacement> },
 	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
 	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
-	TableFigure { table: Table, caption: Option<Vec<Segment>>, supplement: String, label: Option<String> },
+	TableFigure { table: Table, caption: Option<Vec<Segment>>, supplement: String, label: Option<String>, placement: Option<FloatPlacement> },
 	// A `#figure(...)` wrapping an image: the loaded raster centred in the measure with the numbered
 	// caption beneath, or -- when the path resolves to nothing or is a vector SVG with no raster beside
 	// it -- a sized placeholder box in its place. The sizing hints size the drawn image.
@@ -208,6 +214,7 @@ pub enum Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
+		placement:	Option<FloatPlacement>,
 	},
 	// A `#figure(...)` whose body is drawn by code -- a CeTZ/Fletcher diagram, a bar chart or a line plot.
 	// The graphic is built at render time from the document's font set and placed like an image figure,
@@ -217,6 +224,7 @@ pub enum Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
+		placement:	Option<FloatPlacement>,
 	},
 	// A back-matter section title (the Bibliography) on its own page, set left in the display face and
 	// unnumbered. It records a heading anchor so the contents lists it, and a back-matter marker so the
@@ -244,7 +252,10 @@ pub enum Block {
 	// callout is laid out as one keep box, so it moves whole to the next page rather than splitting the wash
 	// from its words. `patch` is the theme overlay the box body's own `#set` declarations lower to, applied
 	// to the box's subtree at render (H3) so a `#set` inside a callout scopes to it, not the document.
-	Box { blocks: Vec<Block>, patch: ThemePatch },
+	// `placement` is `Some` when the callout is a float (an `#aside-box(float: true)` re-wrapped in
+	// `figure(placement: auto)`): the driver then defers it to the next page it fits on rather than pushing
+	// the flow down. `None` sets it where it stands.
+	Box { blocks: Vec<Block>, patch: ThemePatch, placement: Option<FloatPlacement> },
 	// A theme scope: `patch` is overlaid on the effective theme for the nested `blocks`, and lifts again
 	// when they end. Nesting the governed blocks rather than bracketing them with a separate open/close
 	// marker makes an unmatched or missing close structurally impossible, and every pass that recurses over
@@ -309,7 +320,13 @@ impl Block {
 	/// `#set`/rule that lowers a callout fill reaches it; the caller supplies the body and the theme patch
 	/// the box's own `#set` declarations lowered to (empty when it declared none).
 	pub fn box_callout(blocks: Vec<Block>, patch: ThemePatch) -> Self {
-		Self::Box { blocks, patch }
+		Self::Box { blocks, patch, placement: None }
+	}
+
+	/// A `#styled-box`/`#aside-box` callout the source floated (`float: true`): the driver defers it to the
+	/// top or foot of the next page it fits on, its wash and words kept together.
+	pub fn box_callout_float(blocks: Vec<Block>, patch: ThemePatch, placement: FloatPlacement) -> Self {
+		Self::Box { blocks, patch, placement: Some(placement) }
 	}
 
 	/// A display equation set centred on its own line. A numbered one takes the next equation number at
@@ -321,8 +338,8 @@ impl Block {
 
 	/// A drawn figure, centred on its own line and captioned "Figure N" beneath, its identity recorded
 	/// as a [`Float`](crate::ledger::AnchorKind::Float) anchor so a cross-reference resolves its page.
-	pub fn figure(graphic: Graphic, caption: Option<String>) -> Self {
-		Self::Figure { graphic, caption }
+	pub fn figure(graphic: Graphic, caption: Option<String>, placement: Option<FloatPlacement>) -> Self {
+		Self::Figure { graphic, caption, placement }
 	}
 
 	/// A table wrapped in a figure: the ruled grid, then a "{supplement} N: {caption}" line beneath,
@@ -332,10 +349,11 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
+		placement:	Option<FloatPlacement>,
 	)
 		-> Self
 	{
-		Self::TableFigure { table, caption, supplement, label }
+		Self::TableFigure { table, caption, supplement, label, placement }
 	}
 
 	/// An image wrapped in a figure: the raster at `path`, sized by the declared hints, centred in the
@@ -350,10 +368,11 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
+		placement:	Option<FloatPlacement>,
 	)
 		-> Self
 	{
-		Self::ImageFigure { path, width, height, scale, caption, supplement, label }
+		Self::ImageFigure { path, width, height, scale, caption, supplement, label, placement }
 	}
 
 	/// A figure drawn by code (a diagram, bar chart or line plot): its builder, numbered caption, and the
@@ -363,10 +382,11 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
+		placement:	Option<FloatPlacement>,
 	)
 		-> Self
 	{
-		Self::CodeFigure { figure, caption, supplement, label }
+		Self::CodeFigure { figure, caption, supplement, label, placement }
 	}
 
 	/// A back-matter section heading (the Bibliography), on its own page, unnumbered.
@@ -793,51 +813,94 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::Figure { graphic, caption } => {
+				Block::Figure { graphic, caption, placement } => {
 					// Space above the figure, discarded at a page top like any other leading. The figure is
-					// one keep box, so the breaker moves it whole to the next page when it will not fit.
-					if !self.first {
-						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-					}
+					// one keep box, so the breaker moves it whole to the next page when it will not fit; a
+					// floated one leaves the flow entirely (see [`push_float`]).
 					self.fig_no += 1;
-					res!(figure(&mut self.nodes, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
-					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					match placement {
+						Some(p) => {
+							let mut mid = Vec::new();
+							res!(figure(&mut mid, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
+							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+						},
+						None => {
+							if !self.first {
+								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+							}
+							res!(figure(&mut self.nodes, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
+							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+						},
+					}
 					i += 1;
 					self.first = false;
 				},
-				Block::TableFigure { table, caption, supplement, label } => {
-					if !self.first {
-						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-					}
+				Block::TableFigure { table, caption, supplement, label, placement } => {
 					let number = next_number(&mut self.counters, supplement);
-					res!(table_figure(
-						&mut self.nodes, self.fonts.clone(), style, self.measure, table,
-						caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
-					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					match placement {
+						Some(p) => {
+							let mut mid = Vec::new();
+							res!(table_figure(
+								&mut mid, self.fonts.clone(), style, self.measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
+							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+						},
+						None => {
+							if !self.first {
+								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+							}
+							res!(table_figure(
+								&mut self.nodes, self.fonts.clone(), style, self.measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
+							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+						},
+					}
 					i += 1;
 					self.first = false;
 				},
-				Block::ImageFigure { path, width, height, scale, caption, supplement, label } => {
-					if !self.first {
-						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-					}
+				Block::ImageFigure { path, width, height, scale, caption, supplement, label, placement } => {
 					let number = next_number(&mut self.counters, supplement);
-					res!(image_figure(
-						&mut self.nodes, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
-						caption.as_deref(), supplement, number, label.as_deref()));
-					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					match placement {
+						Some(p) => {
+							let mut mid = Vec::new();
+							res!(image_figure(
+								&mut mid, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
+								caption.as_deref(), supplement, number, label.as_deref()));
+							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+						},
+						None => {
+							if !self.first {
+								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+							}
+							res!(image_figure(
+								&mut self.nodes, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
+								caption.as_deref(), supplement, number, label.as_deref()));
+							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+						},
+					}
 					i += 1;
 					self.first = false;
 				},
-				Block::CodeFigure { figure, caption, supplement, label } => {
-					if !self.first {
-						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
-					}
+				Block::CodeFigure { figure, caption, supplement, label, placement } => {
 					let number = next_number(&mut self.counters, supplement);
-					res!(code_figure(
-						&mut self.nodes, self.fonts.clone(), style, self.measure, figure,
-						caption.as_deref(), supplement, number, label.as_deref()));
-					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+					match placement {
+						Some(p) => {
+							let mut mid = Vec::new();
+							res!(code_figure(
+								&mut mid, self.fonts.clone(), style, self.measure, figure,
+								caption.as_deref(), supplement, number, label.as_deref()));
+							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+						},
+						None => {
+							if !self.first {
+								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+							}
+							res!(code_figure(
+								&mut self.nodes, self.fonts.clone(), style, self.measure, figure,
+								caption.as_deref(), supplement, number, label.as_deref()));
+							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
+						},
+					}
 					i += 1;
 					self.first = false;
 				},
@@ -907,21 +970,33 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::Box { blocks: inner, patch } => {
+				Block::Box { blocks: inner, patch, placement } => {
 					// Space above the callout, discarded at a page top like any other leading. It lowers to one keep
-					// box, so the breaker moves it whole to the next page when it will not fit.
-					if !self.first {
-						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-					}
+					// box, so the breaker moves it whole to the next page when it will not fit; a floated callout
+					// (an `#aside-box(float: true)`) leaves the flow and defers (see [`push_float`]).
 					// The box body is set with the document theme overlaid by the box's own `#set` declarations,
 					// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
 					// nothing renders byte-identically. The wash is the scoped theme's `callout.fill`.
 					let scoped = { let mut t = style.clone(); t.apply(patch); t };
 					let fill = scoped.callout.fill;
-					res!(styled_box(
-						&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-						&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
-					self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+					match placement {
+						Some(p) => {
+							let mut mid = Vec::new();
+							res!(styled_box(
+								&mut mid, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
+							push_float(&mut self.nodes, mid, style.par.skip, style.par.skip, *p);
+						},
+						None => {
+							if !self.first {
+								self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+							}
+							res!(styled_box(
+								&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
+							self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+						},
+					}
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -1625,6 +1700,22 @@ fn equation(
 
 	nodes.push(Node::HBox(BoxNode::new(children, Dims::new(measure, height, depth))));
 	Ok(())
+}
+
+/// Wraps a float's already-lowered material `mid` (a figure and its caption, or an aside box) as a
+/// [`Node::Float`], framing it with the leading and trailing space glue the in-flow form carries. The
+/// leading glue is discarded when the float lands at a page top, so the committed height the driver's fit
+/// test weighs is `mid` alone, without the framing space.
+fn push_float(nodes: &mut Vec<Node>, mid: Vec<Node>, lead: Sp, trail: Sp, placement: FloatPlacement) {
+	let mut h = Sp::ZERO;
+	for n in &mid {
+		h += n.vextent();
+	}
+	let mut list = Vec::with_capacity(mid.len() + 2);
+	list.push(Node::Glue(Glue::fixed(lead)));
+	list.extend(mid);
+	list.push(Node::Glue(Glue::fixed(trail)));
+	nodes.push(Node::Float(FloatNode::new(list, h, placement)));
 }
 
 /// Sets a figure: its identity as a [`Float`](crate::ledger::AnchorKind::Float) anchor, the graphic

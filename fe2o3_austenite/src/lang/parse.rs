@@ -31,6 +31,7 @@
 //! a pure index marker sets nothing. An inline `#func[...]` the reader does not know is consumed, recorded
 //! in the summary, and its bracketed body folded in, so its words survive but its raw markup never leaks.
 
+use crate::ir::FloatPlacement;
 use crate::ir::Length;
 use crate::ir::Span;
 use crate::table::Align;
@@ -2104,7 +2105,7 @@ fn dispatch_capture(
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
 					let patch = crate::lang::set::lower_declarations(&body);
-					items.push(Item::Box { items: inner, patch, span: Span::new(0, 0) });
+					items.push(Item::Box { items: inner, patch, placement: None, span: Span::new(0, 0) });
 				}
 			}
 		},
@@ -2157,7 +2158,7 @@ fn dispatch_capture(
 								inner.insert(0, title_item);
 							}
 						}
-						items.push(Item::Box { items: inner, patch: tf.patch.clone(), span: Span::new(cap.start, cap.start) });
+						items.push(Item::Box { items: inner, patch: tf.patch.clone(), placement: tf.float, span: Span::new(cap.start, cap.start) });
 					}
 				},
 				// A bound call with no `[ ... ]` body -- e.g. `#pr-note([x])`, an argument-only call this reader
@@ -2717,6 +2718,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 	let mut supplement:	Option<String>	= None;
 	let mut kind:		Option<String>	= None;
 	let mut positional:	Option<String>	= None;
+	let mut placement:	Option<FloatPlacement>	= None;
 	for arg in split_top_args(&inner) {
 		let a = arg.trim();
 		if a.is_empty() {
@@ -2727,7 +2729,8 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 				"caption"		=> caption = Some(caption_inlines(&val)),
 				"supplement"	=> supplement = Some(unquote(&val)),
 				"kind"			=> kind = Some(unquote(&val)),
-				_				=> {},	// placement and the rest do not affect the set figure
+				"placement"		=> placement = parse_placement(&val),
+				_				=> {},	// the rest do not affect the set figure
 			}
 			continue;
 		}
@@ -2742,7 +2745,18 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 		Some("table")	=> "Table".to_string(),
 		_				=> "Figure".to_string(),
 	});
-	Some(Item::Figure { body, caption, supplement, label, span: Span::new(0, 0) })
+	Some(Item::Figure { body, caption, supplement, label, placement, span: Span::new(0, 0) })
+}
+
+/// Reads a `#figure` `placement:` value into a float placement. `auto` and `top` float to the page top,
+/// `bottom` to the foot; `none` (and anything unrecognised) leaves the figure in the flow. Typst's own
+/// default for a figure is `none`, so a figure that names no placement is not a float.
+fn parse_placement(val: &str) -> Option<FloatPlacement> {
+	match val.trim() {
+		"auto" | "top"	=> Some(FloatPlacement::Top),
+		"bottom"		=> Some(FloatPlacement::Bottom),
+		_				=> None,
+	}
 }
 
 /// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
