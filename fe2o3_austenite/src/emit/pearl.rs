@@ -52,6 +52,7 @@ use oxedyne_fe2o3_graphics::{
 	transform::Transform,
 };
 use oxedyne_fe2o3_text::base64;
+use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
 /// The Pearl format version this writer emits and the reader accepts.
 pub const PEARL_VERSION: &str = "0";
@@ -306,6 +307,15 @@ impl PearlBuilder {
 						});
 						glyphs.push(listdat![dat!(key), dat!(glyph.x), dat!(glyph.y)]);
 					}
+					// The selectable text layer's spans: one `(gx, gy, text)` per glyph `glyph_text` gives a
+					// non-empty mapping to -- spaces included, unlike `glyphs` above, since a space still
+					// carries a text node the SVG arm's `.tsel` layer needs even though it draws no outline.
+					// Reusing `glyph_text` rather than re-deriving keeps Pearl, the PDF `/ToUnicode` CMap and
+					// the SVG arm agreeing on what each glyph says.
+					let spans: Vec<Dat> = shaped.run().glyphs.iter().zip(shaped.glyph_text().into_iter())
+						.filter(|(_, text)| !text.is_empty())
+						.map(|(g, text)| listdat![dat!(g.x), dat!(g.y), dat!(text)])
+						.collect();
 					let mut leaf = vec![
 						dat!("text"),
 						res!(placed.x.to_dat()),
@@ -314,6 +324,8 @@ impl PearlBuilder {
 						res!(placed.dims.height.to_dat()),
 						res!(placed.dims.depth.to_dat()),
 						Dat::List(glyphs),
+						dat!(shaped.size()),		// the run's point size, for the tsel layer's font-size
+						Dat::List(spans),
 					];
 					// The fill rides as an optional trailing element, written only when the run is not black.
 					// A black run adds nothing, so an all-black document's bytes are exactly what they were
@@ -530,6 +542,8 @@ impl PearlDoc {
 			w, h, w, h));
 		out.push_str(&fmt!(
 			"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
+		// Matches the SVG arm's own `.tsel` style declaration, emitted at the very same point.
+		out.push_str("<style>.tsel { fill: transparent; }</style>\n");
 
 		// A half-point grey pen for a reservation, matching the SVG arm's `pen`/`grey`.
 		let pen		= res!(Stroke::new(0.5));
@@ -547,9 +561,10 @@ impl PearlDoc {
 					let height	= sp_at(&items, 4)?;
 					let base_x	= x.to_pt() as f32;
 					let base_y	= (y + height).to_pt() as f32;
-					// The fill is an optional trailing element; a leaf without one is black, the form every
-					// pre-colour text leaf took, so an all-black document reads back byte-identical.
-					let colour	= match items.get(7) {
+					// The fill is an optional trailing element (after size and the selectable spans); a leaf
+					// without one is black, the form every pre-colour text leaf took, so an all-black document
+					// reads back byte-identical.
+					let colour	= match items.get(9) {
 						Some(d)	=> res!(rgba_from_dat(d)),
 						None	=> Rgba::BLACK,
 					};
@@ -654,6 +669,57 @@ impl PearlDoc {
 					"'{}' is not a Pearl v0 leaf kind.", other; Input, Invalid)),
 			}
 		}
+
+		// A second pass builds every text leaf's invisible, selectable tspans into ONE page-wide `.tsel`
+		// text buffer, matching the SVG arm's own second pass in `svg::run_text_layer`: all the outlines
+		// first, then every run's tspans joining a single `<text>` at the end, in placement order. One
+		// element rather than one per run sidesteps a `window.find` gap Chromium was found to have across
+		// sibling `<text>` elements once tspans carry per-glyph `x`/`y` -- see that function's own comment.
+		// A leading space is inserted ahead of every run but the page's first, to stand in for the
+		// interword gap Pearl's per-word leaves carry as pure position, not a stored glyph.
+		let mut tsel_buf	= String::new();
+		let mut seen_text	= false;
+		for leaf in leaves {
+			let items	= try_extract_dat!(leaf.clone(), List);
+			let tag		= try_extract_dat!(res!(items.first().ok_or_else(|| err!(
+				"An empty leaf carries no kind tag."; Input, Invalid))).clone(), Str);
+			if tag != "text" {
+				continue;
+			}
+			let x		= sp_at(&items, 1)?;
+			let y		= sp_at(&items, 2)?;
+			let height	= sp_at(&items, 4)?;
+			let base_x	= x.to_pt() as f32;
+			let base_y	= (y + height).to_pt() as f32;
+			let size	= f32_at(&items, 7)?;
+			let spans	= try_extract_dat!(res!(items.get(8).ok_or_else(|| err!(
+				"A text leaf is missing its selectable spans."; Input, Invalid))).clone(), List);
+
+			let mut tspans = String::new();
+			for s in &spans {
+				let sl		= try_extract_dat!(s.clone(), List);
+				let gx		= f32_at(&sl, 0)?;
+				let gy		= f32_at(&sl, 1)?;
+				let text	= try_extract_dat!(res!(sl.get(2).ok_or_else(|| err!(
+					"A selectable span is missing its text."; Input, Invalid))).clone(), Str);
+				tspans.push_str(&fmt!(
+					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
+					base_x + gx, base_y - gy, size, xml_escape(&text)));
+			}
+			if tspans.is_empty() {
+				continue;
+			}
+			if seen_text {
+				tsel_buf.push_str(&fmt!(
+					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>", base_x, base_y, size));
+			}
+			tsel_buf.push_str(&tspans);
+			seen_text = true;
+		}
+		if !tsel_buf.is_empty() {
+			out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tsel_buf));
+		}
+
 		out.push_str("</svg>\n");
 		Ok(out)
 	}

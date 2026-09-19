@@ -196,17 +196,12 @@ fn draw_text(
 {
 	let base_x	= bx.to_pt() as f32;
 	let base_y	= (by + height).to_pt() as f32;
-	let src		= shaped.source();
 
-	// The cluster byte offsets in ascending order: a glyph's source text runs from its own cluster to the
-	// next boundary, so a ligature spans several source bytes and a plain letter spans one character. Built
-	// from every glyph, spaces included, so an inked glyph's text stops exactly at the following space.
-	let mut bounds: Vec<usize> = shaped.run().glyphs.iter().map(|g| g.cluster).collect();
-	bounds.sort_unstable();
-	bounds.dedup();
-	let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+	// The source scalar(s) each glyph stands for, for the font's /ToUnicode -- the very mapping the SVG
+	// writer's selectable text layer draws on, so the two never disagree about what a glyph stands for.
+	let texts = shaped.glyph_text();
 
-	for glyph in &shaped.run().glyphs {
+	for (glyph, text) in shaped.run().glyphs.iter().zip(texts.into_iter()) {
 		// The writer stores this canonical outline once and shows it at the run's point size. A glyph with
 		// no ink -- a space -- has an empty outline and is skipped, exactly as the SVG writer skips it, so the
 		// two arms place the same marks; the viewer infers word gaps from the glyph positions.
@@ -214,16 +209,6 @@ fn draw_text(
 		if outline.is_empty() {
 			continue;
 		}
-		// The source scalar(s) this glyph stands for, for the font's /ToUnicode: from its cluster to the next
-		// boundary, given only to the first inked glyph at that cluster so a decomposed mark does not repeat
-		// the character its base already carries.
-		let text = if claimed.insert(glyph.cluster) {
-			let start	= glyph.cluster;
-			let end		= bounds.iter().copied().find(|&b| b > start).unwrap_or(src.len());
-			src.get(start..end).unwrap_or("").to_string()
-		} else {
-			String::new()
-		};
 		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame. The writer
 		// flips the outline back to y up within the page's y-flip, so the glyph reads upright.
 		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, shaped.colour(), text);

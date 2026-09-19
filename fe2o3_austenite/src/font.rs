@@ -168,6 +168,29 @@ impl ShapedText {
 		self.src.font().outline(glyph.face, glyph.id, 1000.0)
 	}
 
+	/// The source text each glyph stands for, one entry per glyph in [`run`](Self::run)'s order: from
+	/// its cluster to the next cluster boundary, given only to the first inked glyph at that cluster so
+	/// a decomposed mark does not repeat the character its base already carries (a later glyph at the
+	/// same cluster gets the empty string). Both the PDF writer's `/ToUnicode` CMap and the SVG writer's
+	/// selectable text layer need exactly this word-to-glyph correspondence, so it is derived once here
+	/// rather than twice: the two writers must never disagree about what a glyph stands for.
+	pub fn glyph_text(&self) -> Vec<String> {
+		let src = &self.text;
+		let mut bounds: Vec<usize> = self.run.glyphs.iter().map(|g| g.cluster).collect();
+		bounds.sort_unstable();
+		bounds.dedup();
+		let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+		self.run.glyphs.iter().map(|glyph| {
+			if claimed.insert(glyph.cluster) {
+				let start	= glyph.cluster;
+				let end		= bounds.iter().copied().find(|&b| b > start).unwrap_or(src.len());
+				src.get(start..end).unwrap_or("").to_string()
+			} else {
+				String::new()
+			}
+		}).collect()
+	}
+
 	/// The run's real ink extent above and below the baseline, taken from the glyph outlines rather
 	/// than the font's global ascent and descent. Maths needs this: a maths font's global ascent spans
 	/// its tallest construction -- a big integral, a three-storey brace -- not the single symbol in

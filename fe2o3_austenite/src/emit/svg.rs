@@ -34,6 +34,7 @@ use oxedyne_fe2o3_graphics::{
 	transform::Transform,
 };
 use oxedyne_fe2o3_text::base64;
+use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
 /// Renders one page as a self-contained SVG document.
 pub fn render_page(page: &Page) -> Outcome<String> {
@@ -52,6 +53,10 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 		w, h, w, h));
 	out.push_str(&fmt!(
 		"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
+	// `.tsel` (Typst.ts's own name for the same idea) is the selectable text layer's class: transparent,
+	// so it draws nothing over the glyph outlines below, and pointer-events left at the SVG default
+	// (not `none`) so a mouse drag still hits real text nodes rather than only outline paths.
+	out.push_str("<style>.tsel { fill: transparent; }</style>\n");
 
 	for placed in &page.frame.placed {
 		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
@@ -88,6 +93,37 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 	// The running head and folio are shaped runs placed into the frame's margins by
 	// `doc::decorate`, so they arrive here as `PlacedKind::Text` and are drawn as glyph outlines with
 	// the body, above. This writer adds no page furniture of its own.
+
+	// A second pass draws every run's invisible, selectable twin on top of the outlines it has already
+	// placed: Austenite's SVG carries only glyph outlines, which a browser can render but neither select
+	// nor search, so Typst.ts's answer -- a transparent text layer at the same baseline positions -- is
+	// mirrored here. See `run_text_layer`.
+	//
+	// Every run's tspans join ONE `<text>` for the whole page, rather than a `<text>` per run: Chromium's
+	// `window.find`/`Ctrl+F` was tested (see the task's headless check) to fail across a boundary between
+	// two sibling `<text>` elements once their tspans carry per-glyph `x`/`y` -- exactly what accurate
+	// glyph-position selection needs -- even though the very same search succeeds across tspans inside
+	// one `<text>`. A single page-wide `<text>` sidesteps the boundary entirely; each tspan still carries
+	// its own `font-size`, so a heading and a caption of different sizes cost nothing by sharing it.
+	//
+	// The line breaker (see `linebreak.rs`) places each word as its own run with the interword gap left
+	// as pure position, not a shaped space glyph -- so two adjacent words carry nothing between them in
+	// the DOM. Left alone, a browser's flattened text content runs their words together with no space,
+	// which breaks a multi-word search or a copied sentence. A single invisible space is inserted ahead
+	// of every run but the page's first, restoring the gap without affecting anything visible.
+	let mut tspans		= String::new();
+	let mut seen_text	= false;
+	for placed in &page.frame.placed {
+		if let PlacedKind::Text(shaped) = &placed.kind {
+			if res!(run_text_layer(&mut tspans, placed.x, placed.y, placed.dims.height, shaped, seen_text)) {
+				seen_text = true;
+			}
+		}
+	}
+	if !tspans.is_empty() {
+		out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tspans));
+	}
+
 	out.push_str("</svg>\n");
 	Ok(out)
 }
@@ -167,6 +203,56 @@ fn draw_text(
 	Ok(())
 }
 
+/// Appends a placed run's invisible, selectable tspans to the page's one `.tsel` text buffer: one
+/// `<tspan>` per inked glyph, each carrying the source text [`ShapedText::glyph_text`] maps that glyph
+/// to, its own `font-size` (runs on a page differ -- a heading against a caption), and sitting exactly
+/// on that glyph's own baseline position -- the same `(base_x + glyph.x, base_y - glyph.y)`
+/// [`draw_text`] paints the outline at, so the invisible character and the visible one it stands in for
+/// never drift apart. The mapping is the very one the PDF writer's `/ToUnicode` CMap uses, not a fresh
+/// derivation, so the two extraction paths can never disagree about what a glyph says.
+///
+/// `sep` asks for a leading space, ahead of this run's own tspans, standing in for the interword gap the
+/// line breaker never gives a glyph of its own (see the call site in `render_page`). Returns whether
+/// anything was appended, so the caller only counts a run that actually carried a character towards
+/// "there was a previous run to space this one from".
+fn run_text_layer(
+	buf:	&mut String,
+	bx:		Sp,
+	by:		Sp,
+	height:	Sp,
+	shaped:	&ShapedText,
+	sep:	bool,
+)
+	-> Outcome<bool>
+{
+	let base_x	= bx.to_pt() as f32;
+	let base_y	= (by + height).to_pt() as f32;
+	let size	= shaped.size();
+	let texts	= shaped.glyph_text();
+
+	let mut spans = String::new();
+	for (glyph, text) in shaped.run().glyphs.iter().zip(texts.iter()) {
+		// A glyph with no text of its own -- a later part of a ligature or decomposed mark, already
+		// claimed by an earlier glyph at the same cluster -- contributes no span; the earlier one already
+		// carries the character.
+		if text.is_empty() {
+			continue;
+		}
+		spans.push_str(&fmt!(
+			"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
+			base_x + glyph.x, base_y - glyph.y, size, xml_escape(text)));
+	}
+	// A run with nothing inked -- entirely spaces -- has nothing to select.
+	if spans.is_empty() {
+		return Ok(false);
+	}
+	if sep {
+		buf.push_str(&fmt!("<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>", base_x, base_y, size));
+	}
+	buf.push_str(&spans);
+	Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -211,6 +297,33 @@ mod tests {
 		let bsvg	= res!(render_text_leaves(geom, &bnodes));
 		assert!(bsvg.contains("fill=\"#000000\""), "a default paragraph must draw black glyphs");
 		assert!(!bsvg.contains("fill=\"#ff0000\""), "a default paragraph must never draw red");
+		Ok(())
+	}
+
+	/// The selectable text layer carries the same word the outlines draw, transparent, and the outlines
+	/// are unmoved by its presence -- the visible ink stays exactly what it was, this test's own name for
+	/// why the oracle's PDF hash (built from the same outlines, on the same path) is untouched by an
+	/// SVG-only addition.
+	#[test]
+	fn a_run_gets_an_invisible_selectable_twin() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let shaped	= res!(crate::font::ShapedText::new(fonts, Role::Body, Dir::Ltr, Sp::from_pt(11.0), "Oxegen"));
+		let dims	= shaped.dims();
+		let mut frame = Frame::new();
+		frame.push(Placed::new(Sp::from_pt(60.0), Sp::from_pt(80.0), dims, PlacedKind::Text(shaped)));
+		let svg = res!(render_page(&Page::new(1, geom, frame)));
+
+		assert!(svg.contains("class=\"tsel\""), "a selectable text layer is drawn, found: {}", svg);
+		assert!(svg.contains(".tsel { fill: transparent; }"), "the layer is transparent");
+		// The word is recoverable letter by letter, as `window.find`/copy-paste would see it: each
+		// character sits in its own positioned `<tspan>`, in order.
+		for ch in "Oxegen".chars() {
+			assert!(svg.contains(&fmt!(">{}</tspan>", ch)), "'{}' is drawn as a selectable tspan, found: {}", ch, svg);
+		}
+		// The visible outlines are unaffected: still one filled black path per inked glyph, nothing new
+		// added to that part of the document.
+		assert!(svg.contains("fill=\"#000000\""), "the outline glyphs still draw in black");
 		Ok(())
 	}
 
