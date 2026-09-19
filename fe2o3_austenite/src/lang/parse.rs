@@ -1286,7 +1286,8 @@ fn code_skip(trimmed: &str) -> Option<CodeSkip> {
 	}
 	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
 	// call is skipped only when it truly ends with its own closer, so a marker inside a paragraph sets.
-	if keyword || trimmed.ends_with(')') || trimmed.ends_with(']') {
+	// The `}` closer is the code-block call form (`#context{ ... }`) that closes on its own line.
+	if keyword || trimmed.ends_with(')') || trimmed.ends_with(']') || trimmed.ends_with('}') {
 		return Some(CodeSkip::Line);
 	}
 	None
@@ -1310,26 +1311,45 @@ fn code_keyword(trimmed: &str) -> bool {
 	false
 }
 
-/// Does this already-left-trimmed line open with a standalone call -- `#`, an identifier, then `(` or
-/// `[`? A crude test, enough to recognise the opener of a call to an unrecognised template function
+/// Does this already-left-trimmed line open with a standalone call -- `#`, an identifier, then `(`, `[`
+/// or `{`? A crude test, enough to recognise the opener of a call to an unrecognised template function
 /// without inspecting where or whether it closes; the balance decides single- versus multi-line.
+///
+/// The `{` opener catches the code-block call form -- `#context { ... }`, the brace twin of
+/// `#context[ ... ]` -- which is always Typst code at a line's head (a `{` in content mode is literal
+/// prose, never a call opener). Typst attaches such a block to its keyword with optional whitespace
+/// (`#context {`, the shape a book's reverse-reference index is written with, Lucronics ch29.8), so a run
+/// of spaces before the `{` is skipped; a space before `(`, by contrast, breaks a Typst call, so only an
+/// immediate `(` counts. No inline-call name is written with a `{`, so the `is_inline_call` guard, which
+/// still holds off the glossary/index family, never fires on the brace form.
 fn opens_standalone_call(trimmed: &str) -> bool {
 	let mut cs = trimmed.chars();
 	if cs.next() != Some('#') {
 		return false;
 	}
 	let mut ident	= String::new();
+	let mut after	= None;	// the first character past the identifier
 	for c in cs {
 		if c.is_alphanumeric() || c == '-' || c == '_' {
 			ident.push(c);
 			continue;
 		}
-		// The first non-identifier character must open the call. A line-leading inline glossary or
-		// index call is content, not a skippable standalone call, even when it happens to close on its
-		// own line, so [`parse_inlines`] sets its display text rather than the reader dropping it.
-		return !ident.is_empty() && (c == '(' || c == '[') && !is_inline_call(&ident);
+		after = Some(c);
+		break;
 	}
-	false
+	if ident.is_empty() || is_inline_call(&ident) {
+		// A line-leading inline glossary or index call is content, not a skippable standalone call, even
+		// when it closes on its own line, so [`parse_inlines`] sets its display text rather than dropping it.
+		return false;
+	}
+	match after {
+		Some('(') | Some('[') | Some('{')	=> true,
+		// A `{` code block may follow the keyword across whitespace (`#context {`); a `(` may not, since a
+		// space before it breaks a Typst call. The second whitespace-split word is the block opener.
+		Some(c) if c.is_whitespace()		=>
+			trimmed.split_whitespace().nth(1).map(|w| w.starts_with('{')).unwrap_or(false),
+		_									=> false,
+	}
 }
 
 /// Is this identifier one of the book template's inline functions the reader sets in place -- a glossary
@@ -3804,6 +3824,38 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert_eq!(site.name, "#context");
 		assert_eq!(site.class, RefusalClass::Introspective);
 		assert_eq!(site.span, Span::new(0, src.len() as u32 - 1), "span should cover the line, sans its newline");
+	}
+
+	/// The brace twin of the above -- a line-leading `#context{ ... }` code-block call, the shape a book's
+	/// reverse-reference index is written with (Lucronics ch29.8) -- is recognised and refused the same
+	/// way, not set as prose. Both a one-line block and a multi-line one are refused as one introspective
+	/// site, and neither leaks its source into the body: the reader must produce no paragraph at all.
+	#[test]
+	fn context_brace_block_is_refused_not_set_as_prose() {
+		// One line, brace immediately after the keyword.
+		let one = "#context{ let x = 1 }\n";
+		let (items, refusals) = document_with_refusals(one).expect("parse");
+		assert_eq!(refusals.total(), 1, "expected exactly one refusal: {:?}", refusals.sites());
+		assert_eq!(refusals.sites()[0].name, "#context");
+		assert_eq!(refusals.sites()[0].class, RefusalClass::Introspective);
+		assert!(!items.iter().any(|it| matches!(it, Item::Paragraph { .. })),
+			"a #context{{}} block must not survive as body text: {:?}", items);
+
+		// Several lines, with a space before the brace -- the real Lucronics ch29.8 shape (`#context {`).
+		// The whole block, including its own `[...]` and nested `{...}`, is consumed by the multi-line
+		// skip, not one line of it set as prose.
+		let many = "Before.\n\n#context {\n let refs = collect-claim-refs()\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
+		let (items, refusals) = document_with_refusals(many).expect("parse");
+		assert_eq!(refusals.total(), 1, "the multi-line brace block is one refusal: {:?}", refusals.sites());
+		assert_eq!(refusals.sites()[0].name, "#context");
+		let bodies: Vec<String> = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(fmt!("{:?}", runs)),
+			_ => None,
+		}).collect();
+		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("by-code")),
+			"no line of the #context{{}} block may leak into a paragraph: {:?}", bodies);
+		// The two real paragraphs around it still set.
+		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
 	}
 
 	/// A line-leading `#query(...)` -- reading the document's own resolved structure back -- is refused

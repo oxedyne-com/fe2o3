@@ -161,6 +161,30 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own `#context{ ... }` brace-form fixture -- the regression root for the Lucronics
+			// ch29.8 leak, where a line-leading `#context { ... }` code-block call was set verbatim as ~300
+			// lines of body text. The reader now refuses the brace form as it already refused `#context[...]`.
+			// The block binds locals and emits nothing, so Typst renders nothing for it and the two engines'
+			// pages agree; a regression that re-leaked its source would set extra paragraphs and move the
+			// pinned hash. See the fixture file for the full shape.
+			name:				"context-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/context_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own `#if media`-guarded include fixture -- the regression root for the elearnity
+			// Sources-chapter bug, where the assembler followed BOTH branches of a `#if media == "ebook" [ ... ]
+			// else [ ... ]` guard and printed the marker lines as prose. It now evaluates the guard and follows
+			// only the taken (ebook) branch. `media_fixture/root.typ` binds `media` and guards its includes; a
+			// regression that followed both branches would render the print branch and the raw marker lines,
+			// moving the page count and the pinned hash. See the fixture files for the full shape.
+			name:				"media-guard-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/media_fixture/root.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

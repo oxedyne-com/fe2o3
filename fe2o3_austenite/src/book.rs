@@ -293,7 +293,9 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// body size so every `em` in a definition resolves to an absolute, then threaded into every chapter the
 	// assembler reads so a call expands into its padded box rather than being tallied as a skipped construct.
 	let tfns = collect_book_template_fns(root_src, root_dir, style.text.body_size);
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns));
+	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
+	// `#if media == "..."` include guard follows only its taken branch.
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns, &config_src));
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
@@ -395,7 +397,9 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		None	=> root_dir.join("assets").join("fonts"),
 	};
 	let tfns = collect_book_template_fns(root_src, root_dir, style.text.body_size);
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns));
+	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
+	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns, ""));
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
@@ -1691,6 +1695,98 @@ fn walk_template_imports(
 /// refusal rather than recursed into forever or dropped without a trace.
 const MAX_INCLUDE_DEPTH: u32 = 64;
 
+/// One open `#if` include guard on the assembler's stack while it walks a file's lines. `live` records
+/// that this guard actually decides emission: its parent branch was being kept, and its condition was one
+/// the evaluator could resolve. A guard nested inside a dropped branch, or one whose form was refused, is
+/// not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else` tracks which of
+/// the two branches the walk is currently inside.
+struct GuardFrame {
+	live:		bool,
+	then_taken:	bool,
+	in_else:	bool,
+}
+
+impl GuardFrame {
+	/// Should the branch currently open under this guard have its content and includes emitted? A
+	/// non-live guard emits from neither branch; a live one emits the then-branch when the condition held
+	/// and the else-branch when it did not.
+	fn emits(&self) -> bool {
+		self.live && (self.then_taken != self.in_else)
+	}
+}
+
+/// Does this whitespace-trimmed line open an evaluable `#if` include guard -- `#if <cond> [` with the
+/// content bracket last on the line? Returns the condition text between `#if ` and the `[`. The one-line
+/// and non-bracket forms deliberately fail here, so [`assemble_into`] refuses rather than mis-follows them.
+fn guard_open(marker: &str) -> Option<&str> {
+	let inner = marker.strip_prefix("#if ")?;
+	let cond  = inner.strip_suffix('[')?;
+	Some(cond.trim())
+}
+
+/// Is this whitespace-trimmed line the `] else [` divider between an include guard's two branches,
+/// however its own internal spacing is written (`]else[`, `] else [`)?
+fn is_guard_else(marker: &str) -> bool {
+	let squeezed: String = marker.chars().filter(|c| !c.is_whitespace()).collect();
+	squeezed == "]else["
+}
+
+/// Evaluates an include-guard condition to which branch to keep -- `Some(true)` for the then-branch,
+/// `Some(false)` for the else-branch -- or `None` when the form is beyond the two the assembler reads or
+/// its variable resolves to no value, so the caller refuses it rather than guessing.
+///
+/// The two forms are `<var> == "<literal>"` (kept when the resolved scalar equals the literal) and a bare
+/// `<var>` (kept when the resolved boolean is true). The variable is resolved from the book's `config.typ`
+/// first, then from the guard's own file -- so a book's `#import "config.typ": media` and a lone file's
+/// own `#let` both answer.
+fn eval_guard(cond: &str, config: &str, file_src: &str) -> Option<bool> {
+	let cond = cond.trim();
+	if let Some(eq) = cond.find("==") {
+		let var = cond[..eq].trim();
+		let rhs = cond[eq + 2..].trim();
+		if !is_simple_ident(var) {
+			return None;
+		}
+		let lit = string_literal(rhs)?;
+		let val = guard_scalar(config, file_src, var)?;
+		return Some(val == lit);
+	}
+	if is_simple_ident(cond) {
+		return guard_bool(config, file_src, cond);
+	}
+	None
+}
+
+/// Is `s` a single plain identifier -- a config-variable name, no operator or call around it?
+fn is_simple_ident(s: &str) -> bool {
+	let mut cs = s.chars();
+	match cs.next() {
+		Some(c) if c.is_alphabetic() || c == '_'	=> {},
+		_											=> return false,
+	}
+	cs.all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The text inside a `"..."` string literal filling the whole of `s`, or `None` when `s` is not one.
+fn string_literal(s: &str) -> Option<&str> {
+	let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+	// A stray interior quote would mean this is not one flat literal; the guard then refuses.
+	if inner.contains('"') {
+		return None;
+	}
+	Some(inner)
+}
+
+/// The scalar an include-guard variable resolves to: the book config's binding, else the guard file's own.
+fn guard_scalar(config: &str, file_src: &str, name: &str) -> Option<String> {
+	read_let_string(config, name).or_else(|| read_let_string(file_src, name))
+}
+
+/// The boolean an include-guard variable resolves to: the book config's binding, else the guard file's own.
+fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
+	read_let_bool(config, name).or_else(|| read_let_bool(file_src, name))
+}
+
 /// Follows a root's `#include "..."` lines in order, reading each chapter and setting it through the
 /// reader, and lifts each `#part-page[...]` divider to a level-1 heading so the part titles keep their
 /// place in the flow. The root's own inline markup between the code lines is read too, in document order:
@@ -1705,12 +1801,16 @@ const MAX_INCLUDE_DEPTH: u32 = 64;
 /// `../evidence/lucronics_evidence.typ` this way -- so the walk is recursive: [`assemble_into`] follows
 /// every level's own includes, each resolved against *that file's own directory*, exactly as Typst
 /// resolves one, rather than always against the book root's.
-pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::rules::TemplateFns)
+///
+/// `config` is the book's `config.typ` source (empty for the documentation idiom, which has none), so a
+/// `#if <var> == "..."` include guard in a chapter can be resolved against the same scalars the config
+/// binds -- `media` above all -- and only the taken branch's includes followed. See [`assemble_into`].
+pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::rules::TemplateFns, config: &str)
 	-> Outcome<(Vec<Block>, lang::Refusals)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
 	let mut skips = lang::Refusals::default();
-	res!(assemble_into(root_src, root_dir, root_path, tfns, 0, &mut blocks, &mut skips));
+	res!(assemble_into(root_src, root_dir, root_path, tfns, config, 0, &mut blocks, &mut skips));
 	Ok((blocks, skips))
 }
 
@@ -1725,6 +1825,7 @@ fn assemble_into(
 	dir:	&Path,
 	path:	&Path,
 	tfns:	&lang::rules::TemplateFns,
+	config:	&str,
 	depth:	u32,
 	blocks:	&mut Vec<Block>,
 	skips:	&mut lang::Refusals,
@@ -1736,8 +1837,65 @@ fn assemble_into(
 	// its own path, exactly as an included chapter's blocks are tagged with theirs -- see `Refusal`'s doc
 	// comment on why the span alone does not already say which file it came from.
 	let label = path.display().to_string();
+	// The open `#if` include guards this file is walking inside, innermost last. A branch's content and
+	// includes are followed only when every guard on the stack is keeping its currently-open branch;
+	// otherwise they are dropped (reported once at the guard, never leaked as prose). See [`GuardFrame`].
+	let mut guards: Vec<GuardFrame> = Vec::new();
 	for line in src.lines() {
 		let t = line.trim_start();
+		let marker = t.trim_end();	// a guard marker line, matched clear of trailing whitespace
+
+		// A guard closer `]` on its own line: close the innermost open guard. A lone `]` with no guard
+		// open is ordinary content (a multi-line content block's closer), left to fall through below.
+		if marker == "]" && !guards.is_empty() {
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			guards.pop();
+			continue;
+		}
+		// A guard divider `] else [`: switch the innermost guard to its else branch.
+		if is_guard_else(marker) && !guards.is_empty() {
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			if let Some(top) = guards.last_mut() {
+				top.in_else = true;
+			}
+			continue;
+		}
+		// A guard opener `#if <cond> [`: evaluate the condition against the config (and this file's own
+		// `#let` bindings) and open a guard. A guard opened inside a dropped branch, or one whose form or
+		// variable the evaluator cannot resolve, keeps neither branch -- the latter is reported, so an
+		// unsupported guard form is never silently followed nor leaked.
+		if let Some(cond) = guard_open(marker) {
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			let parent_active = guards.iter().all(|g| g.emits());
+			let (live, then_taken) = if !parent_active {
+				(false, false)
+			} else {
+				match eval_guard(cond, config, src) {
+					Some(taken)	=> (true, taken),
+					None		=> {
+						skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), crate::ir::Span::new(0, 0));
+						skips.tag_file(&label);
+						(false, false)
+					},
+				}
+			};
+			guards.push(GuardFrame { live, then_taken, in_else: false });
+			continue;
+		}
+		// Any other `#if ...` line is a guard form the assembler does not evaluate (a one-line
+		// `#if c [..] else [..]`, a non-bracket body): refuse and drop it rather than let its raw source
+		// or an untaken branch leak. `#if(` with no space is left to the reader's own code-skip path.
+		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), crate::ir::Span::new(0, 0));
+			skips.tag_file(&label);
+			continue;
+		}
+		// Inside a dropped or refused branch: the content is the untaken alternative, dropped silently
+		// (the guard already carries the report). Markers above are still tracked so the stack balances.
+		if !guards.iter().all(|g| g.emits()) {
+			continue;
+		}
 		if let Some(rest) = t.strip_prefix("#include") {
 			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
 			match first_quoted(rest) {
@@ -1756,7 +1914,7 @@ fn assemble_into(
 					let inc_dir = inc_path.parent().unwrap_or(dir);
 					let mut chap_blocks: Vec<Block> = Vec::new();
 					let mut chap_skips = lang::Refusals::default();
-					res!(assemble_into(&inc_src, inc_dir, &inc_path, tfns, depth + 1,
+					res!(assemble_into(&inc_src, inc_dir, &inc_path, tfns, config, depth + 1,
 						&mut chap_blocks, &mut chap_skips));
 					// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
@@ -1960,6 +2118,21 @@ fn read_let_string(src: &str, name: &str) -> Option<String> {
 	let at		= src.find(&needle)?;
 	let rest	= &src[at + needle.len()..];
 	first_quoted(rest)
+}
+
+/// The boolean a `#let <name> = true` / `= false` binds, if the source sets one as a plain literal. A
+/// binding to anything else (a string, an expression) is not a boolean an include guard can test, so it
+/// yields `None` and the guard refuses rather than inventing a truth value.
+fn read_let_bool(src: &str, name: &str) -> Option<bool> {
+	let needle	= fmt!("#let {} =", name);
+	let at		= src.find(&needle)?;
+	let rest	= src[at + needle.len()..].trim_start();
+	let tok: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+	match tok.as_str() {
+		"true"	=> Some(true),
+		"false"	=> Some(false),
+		_		=> None,
+	}
 }
 
 /// The body of the `if`/`else if` arm a `#let <name> = if format == "<fmt>" {...}` chain selects for
@@ -2345,7 +2518,7 @@ mod tests {
 		// Austenite design's `= Purpose`). With no include present, only that inline markup is read; its
 		// heading and paragraph must both survive, and the template call above them must be skipped, not set.
 		let root = "#import \"template.typ\": *\n#show: doc.with(title: [X])\n\n= Purpose\n\nAustenite is an engine.\n";
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new()));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
 		assert!(
 			blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
 			"the root's inline level-1 heading is read into the flow");
@@ -2355,10 +2528,47 @@ mod tests {
 		Ok(())
 	}
 
+	/// A `#if media == "..." [ ... ] else [ ... ]` include guard is evaluated, not both-branches-followed:
+	/// only the taken branch's content survives, and the `#if`/`] else [`/`]` marker lines never leak as
+	/// prose. The scalar resolves from the book config first (so a real `#import "config.typ": media`
+	/// answers), then from the guard's own file; an unsupported guard form is refused and reported, never
+	/// guessed or leaked. This is the DEFECT B regression gate at the unit level, beside the oracle fixture.
+	#[test]
+	fn if_media_guard_follows_only_the_taken_branch_08() -> Outcome<()> {
+		let dir = std::path::Path::new("/nonexistent");
+		let root = "#let media = \"ebook\"\n\nIntro paragraph.\n\n#if media == \"ebook\" [\nEbook only paragraph.\n] else [\nPrint only paragraph.\n]\n\nTail paragraph.\n";
+
+		// File-local `#let media = "ebook"`, no config: the then-branch is taken.
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("Intro paragraph") && body.contains("Tail paragraph"),
+			"prose around the guard must survive: {}", body);
+		assert!(body.contains("Ebook only paragraph"), "the taken branch must render: {}", body);
+		assert!(!body.contains("Print only paragraph"), "the untaken branch must be dropped: {}", body);
+		assert!(!body.contains("] else [") && !body.contains("#if "),
+			"no guard marker line may leak as prose: {}", body);
+
+		// The book config binds `media = "print"` and takes precedence over the file's own `#let`: the
+		// else-branch is taken instead, proving the config-first resolution the real books rely on.
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), "#let media = \"print\"\n"));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("Print only paragraph"), "config `media` selects the else-branch: {}", body);
+		assert!(!body.contains("Ebook only paragraph"), "the ebook branch is dropped under the config: {}", body);
+
+		// An unsupported guard form is refused and reported, not followed nor leaked.
+		let odd = "#if media > 3 [\nSomething.\n]\n";
+		let (blocks, skips) = res!(assemble(odd, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let body = fmt!("{:?}", blocks);
+		assert!(!body.contains("Something"), "a refused guard follows neither branch: {}", body);
+		assert!(skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a refused guard form must be reported: {:?}", skips.report());
+		Ok(())
+	}
+
 	#[test]
 	fn test_a_part_page_divider_lifts_to_a_heading_03() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
-		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new()));
+		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
 			Block::Heading { level, segments, .. } => {
@@ -2438,7 +2648,7 @@ mod tests {
 		let root_src	= "#include \"chap_a.typ\"\n#include \"chap_b.typ\"\n";
 		let root_path	= base.join("root.typ");
 
-		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, &lang::rules::TemplateFns::new()));
+		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, &lang::rules::TemplateFns::new(), ""));
 
 		// Clean up before asserting, so a failed assertion leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
