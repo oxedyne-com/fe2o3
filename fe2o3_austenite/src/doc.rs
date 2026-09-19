@@ -4470,11 +4470,13 @@ pub fn decorate(
 				if a.pos.page < page.number {
 					if h.level == 1 { chapter = Some(h); }
 				} else if a.pos.page == page.number {
-					// A chapter opens the page either at its very top (a numbered or banner-bar opener) or
-					// beneath a `#section-banner` this page carries: both suppress the running head and seat the
-					// folio at the foot, so the head never lands on the grey bar.
-					if h.level == 1 && (a.pos.y == content_top || h.banner) { opens = true; }
-					if h.level == 0 && a.pos.y == content_top { opens_part = true; }	// a part divider opens at the very top
+					// A chapter (or part divider) that resolves to this page opens it: chapters and parts force a
+					// fresh page, so a level-1/level-0 heading present here is this page's opener, whether it sits
+					// at the very top or has been shifted down by a top float set above it. Detecting the opener
+					// by its presence rather than by `y == content_top` is what keeps a running head and folio off
+					// a chapter-opener page that also carries an automatic float (which pushes the title down).
+					if h.level == 1 { opens = true; }
+					if h.level == 0 { opens_part = true; }
 				} else {
 					break;	// headings are in document order, so the rest resolve to later pages
 				}
