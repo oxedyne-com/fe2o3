@@ -767,6 +767,18 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 				continue;
 			}
 		}
+		// Typst's subscript, `#sub[...]` or `#sub("...")`, e.g. `CO#sub[2]`. Its content reduces to
+		// display text here and is set dropped and smaller by the block layer.
+		if c == '#' {
+			if let Some((text, next)) = sub_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::Sub(text));
+				i = next;
+				continue;
+			}
+		}
 		// An inline glossary or index call defined in the book template. A glossary term is a run of its
 		// own, so [`doc::author`] can set it bold-italic on first use; a visible index call sets its
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
@@ -1310,7 +1322,7 @@ fn is_inline_call(name: &str) -> bool {
 		| "g" | "gcap" | "gi" | "gcapi" | "t" | "tcap" | "graw"
 		| "idx" | "idx-main" | "idx-as" | "idx-main-as" | "idx-nested"
 		| "index" | "index-main" | "cite" | "link"
-		| "emph" | "strong" | "super"
+		| "emph" | "strong" | "super" | "sub"
 		| "claim-label" | "claim-refs")
 }
 
@@ -1394,6 +1406,19 @@ fn strong_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 /// closing bracket. `None` when the shape is not a super call or its argument does not close.
 fn super_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 	let open = at_lit(chars, i, "#super")?;
+	match chars.get(open) {
+		Some('[') | Some('(')	=> {},
+		_						=> return None,
+	}
+	let (inner, next) = read_group(chars, open)?;
+	Some((flatten_markup(&unwrap_arg(&inner)), next))
+}
+
+/// Reads an inline `#sub[...]` or `#sub("...")` at `i` (a `#`), returning its content reduced to display
+/// text by [`flatten_markup`] -- usually a short string or number, as in `CO#sub[2]` -- and the index just
+/// past the closing bracket. `None` when the shape is not a sub call or its argument does not close.
+fn sub_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#sub")?;
 	match chars.get(open) {
 		Some('[') | Some('(')	=> {},
 		_						=> return None,
@@ -1585,6 +1610,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::Emph(t)					=> out.push_str(&flatten_markup(&t)),
 			Inline::BoldItalic(t)			=> out.push_str(&t),	// already the flat inner of a nested run
 			Inline::Super(t)				=> out.push_str(&t),	// a flattened string cannot raise; keep its text
+			Inline::Sub(t)					=> out.push_str(&t),	// a flattened string cannot drop; keep its text
 			Inline::Code(t)					=> out.push_str(&t),
 			Inline::Glossary { display, .. }	=> out.push_str(&display),
 			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
@@ -2164,7 +2190,7 @@ fn inline_plain(runs: &[Inline]) -> String {
 	for run in runs {
 		match run {
 			Inline::Text(t) | Inline::Strong(t) | Inline::Emph(t) | Inline::BoldItalic(t)
-			| Inline::Super(t) | Inline::Code(t)	=> out.push_str(t),
+			| Inline::Super(t) | Inline::Sub(t) | Inline::Code(t)	=> out.push_str(t),
 			_										=> {},
 		}
 	}
@@ -2316,8 +2342,9 @@ fn cell_colspan(args: &str) -> usize {
 
 /// Parses the inner text of a `#table(...)` call into a [`TableSpec`]. `columns:` fixes the column
 /// count, `align:` the alignment, a `fill:` keyed on `row == 0` marks a header row; cells come from
-/// inline `[...]` groups and from a `..name.flatten()` spread resolved against the data arrays. `None`
-/// when no cells are found, so an empty or unresolved table sets nothing.
+/// inline `[...]` groups and from a `..name.flatten()` spread (or the row-remap idiom [`resolve_spread`]
+/// evaluates) resolved against the data arrays. `None` when no cells are found, so an empty or
+/// unresolved table sets nothing.
 fn parse_table_spec(
 	inner:			&str,
 	arrays:			&HashMap<String, Vec<Vec<Inline>>>,
@@ -2331,6 +2358,11 @@ fn parse_table_spec(
 	let mut inset_pt:	Option<f64>			= None;
 	let mut weights:	Vec<f64>			= Vec::new();
 	let mut cells:		Vec<Vec<Inline>>	= Vec::new();
+	// A spread's row-remap idiom needs the column count to chunk its array back into rows, so `columns:`
+	// is read ahead of the main pass -- it names the table's shape wherever it sits in the argument list.
+	let pre_ncols: usize = split_top_args(inner).iter()
+		.find_map(|arg| named_arg(arg.trim()).filter(|(k, _)| k.as_str() == "columns").map(|(_, v)| parse_columns(&v)))
+		.unwrap_or(1);
 	for arg in split_top_args(inner) {
 		let a = arg.trim();
 		if a.is_empty() {
@@ -2346,9 +2378,9 @@ fn parse_table_spec(
 			}
 			continue;
 		}
-		if let Some(name) = spread_name(a) {
-			if let Some(v) = arrays.get(&name) {
-				cells.extend(v.iter().cloned());
+		if spread_name(a).is_some() {
+			if let Some(v) = resolve_spread(a, arrays, pre_ncols) {
+				cells.extend(v);
 			}
 			continue;
 		}
@@ -2362,6 +2394,288 @@ fn parse_table_spec(
 		return None;
 	}
 	Some(TableSpec { ncols: ncols.max(1), header, align, weights, text_pt: outer_text_pt, inset_pt, cells })
+}
+
+/// Resolves a `..name` spread argument to the cells it contributes: the array itself for a bare `..name`
+/// or `..name.flatten()`, or -- for the row-remap idiom `..name.enumerate().map(((idx, row)) => { if COND
+/// { row } else { table.cell(colspan: n)[...] } }).flatten()`, as Lucronics' E. coli comparison uses to
+/// merge its section-heading rows into spanning cells -- each row kept or replaced exactly as that
+/// closure would evaluate it (see [`remap_enumerated_rows`]). `None` for an unknown array name; an
+/// unrecognised suffix on a known array falls back to its raw cells, so an idiom this reader cannot
+/// evaluate still sets a table rather than an empty one.
+fn resolve_spread(
+	arg:	&str,
+	arrays:	&HashMap<String, Vec<Vec<Inline>>>,
+	ncols:	usize,
+)
+	-> Option<Vec<Vec<Inline>>>
+{
+	let name	= spread_name(arg)?;
+	let base	= arrays.get(&name)?;
+	let rest	= arg.trim().strip_prefix("..")?[name.len()..].trim();
+	if rest.is_empty() || rest == ".flatten()" {
+		return Some(base.clone());
+	}
+	Some(remap_enumerated_rows(rest, base, ncols).unwrap_or_else(|| base.clone()))
+}
+
+/// Evaluates the `.enumerate().map(((idx, row)) => { if COND { A } else { B } }).flatten()` idiom
+/// against `base` (chunked into `ncols`-wide row tuples), yielding the flat cell list the closure would
+/// produce. `COND` is a bounded slice of Typst -- `idx == N`, `row.at(N) == [...]`/`!= [...]` literal
+/// comparisons, joined by `and`/`or` and grouped by parens (see [`eval_bool`]); a branch that is the bare
+/// loop variable keeps that row's own cells, one shaped `table.cell(colspan: n)[...]` replaces them with
+/// one spanning cell -- its content may reference the loop variable's cells as `row.at(k)`, substituted
+/// with that cell's plain text before the existing `table.cell(...)` reader ([`collect_cells`]) parses it,
+/// so a `#strong(row.at(0))` inside renders through the ordinary strong-call path. `None` when the suffix
+/// is not this shape, or any row's condition or branch does not evaluate, so the caller falls back to the
+/// untransformed array rather than guess at a partial result.
+fn remap_enumerated_rows(after: &str, base: &[Vec<Inline>], ncols: usize) -> Option<Vec<Vec<Inline>>> {
+	if ncols == 0 || base.is_empty() || base.len() % ncols != 0 {
+		return None;
+	}
+	let rest	= after.strip_prefix(".enumerate()")?.trim_start().strip_prefix(".map")?;
+	let rchars:	Vec<char>	= rest.chars().collect();
+	if rchars.first() != Some(&'(') {
+		return None;
+	}
+	let (map_args, _) = read_group(&rchars, 0)?;
+	let arrow	= map_args.find("=>")?;
+	let params	= map_args[..arrow].trim();
+	let body	= map_args[arrow + 2..].trim();
+	// The closure's own `{ ... }` block wraps its one expression -- unwrap it so what remains starts at
+	// the `if`, the shape [`parse_if_else`] reads.
+	let bchars:	Vec<char>	= body.chars().collect();
+	let body: String = if bchars.first() == Some(&'{') {
+		read_brace(&bchars, 0).map(|(inner, _)| inner)?
+	} else {
+		body.to_string()
+	};
+
+	// The parameter is `((idx, row))`: an extra pair of parens wraps the tuple destructure, since it is
+	// `.map`'s single positional argument.
+	let pchars:	Vec<char>	= params.chars().collect();
+	let inner_params = if pchars.first() == Some(&'(') {
+		read_group(&pchars, 0)?.0
+	} else {
+		params.to_string()
+	};
+	let inner_params	= inner_params.trim();
+	let inner_params	= inner_params.strip_prefix('(').and_then(|s| s.strip_suffix(')')).unwrap_or(inner_params);
+	let names:	Vec<&str>	= inner_params.split(',').map(|s| s.trim()).collect();
+	if names.len() != 2 || names[0].is_empty() || names[1].is_empty() {
+		return None;
+	}
+	let (idx_name, row_name) = (names[0], names[1]);
+
+	let (cond, a_branch, b_branch) = parse_if_else(&body)?;
+
+	let mut out = Vec::with_capacity(base.len());
+	for (i, chunk) in base.chunks(ncols).enumerate() {
+		let row_text: Vec<String> = chunk.iter().map(|cell| inline_plain(cell)).collect();
+		let take_a = eval_bool(&cond, i, &row_text, idx_name, row_name)?;
+		let branch = if take_a { &a_branch } else { &b_branch };
+		if branch.trim() == row_name {
+			out.extend(chunk.iter().cloned());
+			continue;
+		}
+		let substituted	= substitute_row_refs(branch, row_name, &row_text);
+		let cells		= collect_cells(&substituted);
+		if cells.is_empty() {
+			return None;	// the branch is not a cell this reader can set; refuse the whole idiom
+		}
+		out.extend(cells);
+	}
+	Some(out)
+}
+
+/// Splits an `if COND { A } else { B }` closure body into its condition and branch source texts. The
+/// condition runs to the first `{` not nested inside `(...)`/`[...]`; each branch is then read as a
+/// brace-balanced group. `None` when the body is not this shape.
+fn parse_if_else(body: &str) -> Option<(String, String, String)> {
+	let rest	= body.trim().strip_prefix("if")?;
+	let chars:	Vec<char>	= rest.chars().collect();
+	let mut depth	= 0i32;
+	let mut brace_at = None;
+	for (k, &c) in chars.iter().enumerate() {
+		match c {
+			'(' | '['			=> depth += 1,
+			')' | ']'			=> depth -= 1,
+			'{' if depth == 0	=> { brace_at = Some(k); break; },
+			_					=> {},
+		}
+	}
+	let brace_at	= brace_at?;
+	let cond:	String	= chars[..brace_at].iter().collect();
+	let (a_branch, next)	= read_brace(&chars, brace_at)?;
+	let after: String		= chars[next..].iter().collect();
+	let after				= after.trim().strip_prefix("else")?.trim();
+	let bchars:	Vec<char>	= after.chars().collect();
+	if bchars.first() != Some(&'{') {
+		return None;
+	}
+	let (b_branch, _) = read_brace(&bchars, 0)?;
+	Some((cond.trim().to_string(), a_branch.trim().to_string(), b_branch.trim().to_string()))
+}
+
+/// Reads a `{ ... }` block beginning at `i`, matching only `{`/`}` depth -- the closure bodies this
+/// idiom targets hold no literal braces of their own, so a flat counter is enough, unlike [`read_group`]'s
+/// full frame tracking for `[`/`(`. `None` when the block never closes.
+fn read_brace(chars: &[char], i: usize) -> Option<(String, usize)> {
+	if chars.get(i) != Some(&'{') {
+		return None;
+	}
+	let mut depth	= 1i32;
+	let start		= i + 1;
+	let mut j		= start;
+	while j < chars.len() {
+		match chars[j] {
+			'{'	=> depth += 1,
+			'}'	=> {
+				depth -= 1;
+				if depth == 0 {
+					return Some((chars[start..j].iter().collect(), j + 1));
+				}
+			},
+			_	=> {},
+		}
+		j += 1;
+	}
+	None
+}
+
+/// Evaluates a bounded boolean expression -- comparisons of `idx`/`row.at(n)` against a literal or a
+/// number, joined by `and`/`or` and grouped by parens -- against one row's values. `idx_name`/`row_name`
+/// are the closure's own parameter names, so the expression is read against exactly the variables that
+/// idiom bound. `None` when the expression falls outside this bounded grammar.
+fn eval_bool(expr: &str, idx: usize, row: &[String], idx_name: &str, row_name: &str) -> Option<bool> {
+	let expr = expr.trim();
+	if let Some(parts) = split_top_level(expr, "or") {
+		let mut acc = false;
+		for p in &parts {
+			acc = acc || eval_bool(p, idx, row, idx_name, row_name)?;
+		}
+		return Some(acc);
+	}
+	if let Some(parts) = split_top_level(expr, "and") {
+		let mut acc = true;
+		for p in &parts {
+			acc = acc && eval_bool(p, idx, row, idx_name, row_name)?;
+		}
+		return Some(acc);
+	}
+	if expr.starts_with('(') && expr.ends_with(')') {
+		// Confirm the outer parens actually wrap the whole expression, rather than two disjoint groups
+		// that merely happen to open and close at the ends.
+		let mut depth = 0i32;
+		let mut wraps_whole = true;
+		let last = expr.chars().count() - 1;
+		for (k, c) in expr.chars().enumerate() {
+			match c {
+				'('	=> depth += 1,
+				')'	=> {
+					depth -= 1;
+					if depth == 0 && k != last {
+						wraps_whole = false;
+						break;
+					}
+				},
+				_	=> {},
+			}
+		}
+		if wraps_whole {
+			return eval_bool(&expr[1..expr.len() - 1], idx, row, idx_name, row_name);
+		}
+	}
+	eval_cmp(expr, idx, row, idx_name, row_name)
+}
+
+/// Splits `expr` at every top-level (outside `(...)`/`[...]`) whole-word occurrence of `kw` (`"and"` or
+/// `"or"`), or `None` when `kw` does not occur at the top level, so the caller falls through to the next
+/// precedence rather than treating an absent operator as one empty operand.
+fn split_top_level(expr: &str, kw: &str) -> Option<Vec<String>> {
+	let chars:	Vec<char>	= expr.chars().collect();
+	let kwc:	Vec<char>	= kw.chars().collect();
+	let mut depth	= 0i32;
+	let mut parts	= Vec::new();
+	let mut start	= 0usize;
+	let mut i		= 0usize;
+	let mut found	= false;
+	while i < chars.len() {
+		match chars[i] {
+			'(' | '['	=> { depth += 1; i += 1; continue; },
+			')' | ']'	=> { depth -= 1; i += 1; continue; },
+			_			=> {},
+		}
+		if depth == 0 && i + kwc.len() <= chars.len() && chars[i..i + kwc.len()] == kwc[..] {
+			let before_ok	= i == 0 || chars[i - 1].is_whitespace();
+			let after_ok	= chars.get(i + kwc.len()).map(|c| c.is_whitespace()).unwrap_or(true);
+			if before_ok && after_ok {
+				parts.push(chars[start..i].iter().collect::<String>());
+				i = i + kwc.len();
+				start = i;
+				found = true;
+				continue;
+			}
+		}
+		i += 1;
+	}
+	if !found {
+		return None;
+	}
+	parts.push(chars[start..].iter().collect::<String>());
+	Some(parts.into_iter().map(|s| s.trim().to_string()).collect())
+}
+
+/// Evaluates one `lhs (==|!=) rhs` comparison against `idx`/`row`, via [`eval_scalar`]. `None` when
+/// neither `==` nor `!=` appears, or either side does not resolve.
+fn eval_cmp(e: &str, idx: usize, row: &[String], idx_name: &str, row_name: &str) -> Option<bool> {
+	let e = e.trim();
+	let (eq, at) = if let Some(p) = e.find("!=") {
+		(false, p)
+	} else if let Some(p) = e.find("==") {
+		(true, p)
+	} else {
+		return None;
+	};
+	let lhs = eval_scalar(e[..at].trim(), idx, row, idx_name, row_name)?;
+	let rhs = eval_scalar(e[at + 2..].trim(), idx, row, idx_name, row_name)?;
+	Some(if eq { lhs == rhs } else { lhs != rhs })
+}
+
+/// Reads one side of a comparison: the loop index, a `row.at(n)` cell (its plain text), a `[...]` content
+/// literal (its plain text) or a bare number. `None` for anything else, refusing rather than guessing.
+fn eval_scalar(s: &str, idx: usize, row: &[String], idx_name: &str, row_name: &str) -> Option<String> {
+	let s = s.trim();
+	if s == idx_name {
+		return Some(idx.to_string());
+	}
+	if let Some(rest) = s.strip_prefix(row_name) {
+		let n = rest.strip_prefix(".at(")?.strip_suffix(')')?.trim().parse::<usize>().ok()?;
+		return row.get(n).cloned();
+	}
+	if let Some(lit) = s.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+		return Some(lit.trim().to_string());
+	}
+	if s.parse::<usize>().is_ok() {
+		return Some(s.to_string());
+	}
+	None
+}
+
+/// Replaces every `<row_name>.at(k)` reference in `src` with a quoted string of that cell's plain text,
+/// so a branch like `table.cell(colspan: 7)[#strong(row.at(0))]` becomes a call [`collect_cells`] (via
+/// the ordinary `#strong("...")` reader) can already set, rather than teaching the cell reader to evaluate
+/// arbitrary code.
+fn substitute_row_refs(src: &str, row_name: &str, row: &[String]) -> String {
+	let mut out = src.to_string();
+	for (k, cell) in row.iter().enumerate() {
+		let pat = fmt!("{}.at({})", row_name, k);
+		if out.contains(&pat) {
+			let escaped	= cell.replace('\\', "\\\\").replace('"', "\\\"");
+			out = out.replace(&pat, &fmt!("\"{}\"", escaped));
+		}
+	}
+	out
 }
 
 /// The absolute point value of a [`Length`], resolving a percentage against a nominal 100 pt so a
@@ -3143,6 +3457,48 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			"quoted super run missing: {:?}", quoted);
 	}
 
+	/// `#sub[...]` yields an [`Inline::Sub`] run of its content, as `CO#sub[2]` sets it in Lucronics, and
+	/// never leaves raw source behind.
+	#[test]
+	fn sub_call_reads_as_subscript() {
+		let runs = parse_inlines("CO#sub[2] scrubber and H#sub[2]O#sub[2] both drop.");
+		let subs: Vec<&String> = runs.iter().filter_map(|r| match r {
+			Inline::Sub(t) => Some(t),
+			_ => None,
+		}).collect();
+		assert_eq!(subs, vec!["2", "2", "2"], "unexpected subscript runs: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#sub"))),
+			"raw #sub leaked: {:?}", runs);
+		// The string-argument form reads the same, its quotes stripped.
+		let quoted = parse_inlines("x#sub(\"2\")");
+		assert!(quoted.iter().any(|r| matches!(r, Inline::Sub(t) if t == "2")),
+			"quoted sub run missing: {:?}", quoted);
+	}
+
+	/// The `.enumerate().map(((idx, row)) => { if COND { row } else { table.cell(colspan: n)[...] } })
+	/// .flatten()` row-remap idiom -- Lucronics' E. coli comparison uses it to merge a section-heading row
+	/// into one bold spanning cell while an ordinary row passes through -- resolves through the spread, not
+	/// just the untransformed array. This is the reduced shape of the real table (3 columns, one heading
+	/// row) rather than the full 7-column original.
+	#[test]
+	fn table_spread_map_merges_heading_rows_into_bold_spanning_cells() {
+		let let_src = "#let data = (\n  ([Head A], [Head B], [Head C]),\n  ([Section], [], []),\n  ([Item one], [x], [y]),\n)\n";
+		let mut arrays = HashMap::new();
+		arrays.insert("data".to_string(), parse_let_array(let_src));
+
+		let table_src = "\n  columns: 3,\n  ..data.enumerate().map(((idx, row)) => {\n    if idx == 0 or row.at(0) != [Section] {\n      row\n    } else {\n      table.cell(colspan: 3)[#strong(row.at(0))]\n    }\n  }).flatten()\n";
+		let spec = parse_table_spec(table_src, &arrays, None).expect("the spread must resolve to a table");
+		assert_eq!(spec.cells.len(), 9, "3 rows x 3 columns, the merged row padded to width");
+		// Row 0 (the header) and row 2 (an ordinary item) pass through unchanged.
+		assert!(matches!(spec.cells[0].as_slice(), [Inline::Text(t)] if t == "Head A"));
+		assert!(matches!(spec.cells[6].as_slice(), [Inline::Text(t)] if t == "Item one"));
+		// Row 1 (the section heading) is merged into one bold cell, padded to the column count.
+		assert!(matches!(spec.cells[3].as_slice(), [Inline::Strong(t)] if t == "Section"),
+			"expected the merged heading cell, got {:?}", spec.cells[3]);
+		assert!(matches!(spec.cells[4].as_slice(), [Inline::Text(t)] if t.is_empty()), "padding cell after the span");
+		assert!(matches!(spec.cells[5].as_slice(), [Inline::Text(t)] if t.is_empty()), "padding cell after the span");
+	}
+
 	/// A citation nested in emphasis keeps its own [`Inline::Cite`] run rather than leaking its source,
 	/// while the surrounding words take the emphasis face.
 	#[test]
@@ -3496,7 +3852,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		for r in runs {
 			match r {
 				Inline::Text(t) | Inline::Strong(t) | Inline::Emph(t)
-				| Inline::BoldItalic(t) | Inline::Super(t) | Inline::Code(t)	=> s.push_str(t),
+				| Inline::BoldItalic(t) | Inline::Super(t) | Inline::Sub(t) | Inline::Code(t)	=> s.push_str(t),
 				Inline::Glossary { display, .. }							=> s.push_str(display),
 				_															=> {},
 			}

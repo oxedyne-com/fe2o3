@@ -109,6 +109,7 @@ pub enum Segment {
 	Emph(String),	// set in the italic face
 	BoldItalic(String),	// `*_x_*`/`_*x*_`, set in the bold-italic face
 	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
+	Sub(String),	// #sub[...], set dropped and smaller, its baseline lowered below the line's
 	Footnote { note: Vec<Segment> },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
@@ -137,6 +138,10 @@ impl Segment {
 
 	pub fn superscript<S: Into<String>>(text: S) -> Self {
 		Self::Super(text.into())
+	}
+
+	pub fn subscript<S: Into<String>>(text: S) -> Self {
+		Self::Sub(text.into())
 	}
 
 	pub fn footnote(note: Vec<Segment>) -> Self {
@@ -1156,6 +1161,12 @@ fn build_pieces(
 				let (shaped, dims)	= res!(superscript(fonts.clone(), Role::Body, style.text.body_size, text));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
+			Segment::Sub(text) => {
+				// The mirror of the superscript arm just above: a run shaped at 0.7x, its box lengthened so
+				// the emitter seats its baseline below the line's.
+				let (shaped, dims)	= res!(subscript(fonts.clone(), Role::Body, style.text.body_size, text));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
+			},
 			Segment::Footnote { note } => {
 				*foot_no += 1;
 				let label			= fmt!("{}", *foot_no);
@@ -1486,6 +1497,10 @@ fn footnote_pieces(
 				let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
+			Segment::Sub(t) => {
+				let (shaped, dims) = res!(subscript(fonts.clone(), Role::Body, size, t));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
+			},
 			Segment::Math(expr) => {
 				let node = res!(math::layout(fonts.clone(), style, expr, false));
 				if let Node::HBox(b) = node {
@@ -1520,6 +1535,32 @@ pub(crate) fn superscript(
 	let ascent	= sample.dims().height;
 	let raise	= Sp(ascent.raw() * 35 / 100);
 	let height	= if ascent > raise { ascent - raise } else { ascent };
+
+	Ok((shaped, Dims::new(sd.width, height, sd.depth)))
+}
+
+/// Shapes a short run at `0.7x` the surrounding size and returns it with the box that drops its
+/// baseline, the mirror of [`superscript`]. The box height is the surrounding ascent plus a drop of a
+/// fifth of that ascent; since the emitter draws a run's baseline at `y + height`, a taller box seats
+/// the run below the line's baseline. The width and depth are the small run's own, keeping the mark
+/// narrow.
+pub(crate) fn subscript(
+	fonts:	Arc<FontSet>,
+	role:	Role,
+	base:	Sp,
+	text:	&str,
+)
+	-> Outcome<(ShapedText, Dims)>
+{
+	let small	= Sp(base.raw() * 7 / 10);
+	let shaped	= res!(ShapedText::new(fonts.clone(), role, Dir::Ltr, small, text));
+	let sd		= shaped.dims();
+
+	// The surrounding line's ascent, taken from a body-size digit, and the drop below its baseline.
+	let sample	= res!(ShapedText::new(fonts, role, Dir::Ltr, base, "0"));
+	let ascent	= sample.dims().height;
+	let drop	= Sp(ascent.raw() * 20 / 100);
+	let height	= ascent + drop;
 
 	Ok((shaped, Dims::new(sd.width, height, sd.depth)))
 }
@@ -2070,6 +2111,11 @@ fn captioned(
 					push_caption_box(&mut toks, &mut pending,
 						vec![Node::Leaf(Leaf::text_dims(shaped, dims))], dims.width, dims.height, dims.depth);
 				},
+				Segment::Sub(t) => {
+					let (shaped, dims) = res!(subscript(fonts.clone(), Role::Body, size, t));
+					push_caption_box(&mut toks, &mut pending,
+						vec![Node::Leaf(Leaf::text_dims(shaped, dims))], dims.width, dims.height, dims.depth);
+				},
 				Segment::Math(expr) => {
 					let node = res!(math::layout(fonts.clone(), style, expr, false));
 					if let Node::HBox(b) = node {
@@ -2106,7 +2152,7 @@ fn captioned(
 /// Whether any caption segment carries visible text, so the colon prefix is set only for a real caption.
 fn segments_have_text(segs: &[Segment]) -> bool {
 	segs.iter().any(|s| match s {
-		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t) | Segment::Code(t) | Segment::Super(t)
+		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t) | Segment::Code(t) | Segment::Super(t) | Segment::Sub(t)
 							=> !t.trim().is_empty(),
 		Segment::Glossary { display, .. }	=> !display.trim().is_empty(),
 		Segment::Math(_) | Segment::Cite(_)	=> true,
@@ -2947,7 +2993,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 		for seg in segs {
 			match seg {
 				Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t)
-				| Segment::Super(t) | Segment::Code(t)	=> count_str(t, n),
+				| Segment::Super(t) | Segment::Sub(t) | Segment::Code(t)	=> count_str(t, n),
 				Segment::Glossary { display, .. }		=> count_str(display, n),
 				Segment::Footnote { note }				=> count_segs(note, n),
 				Segment::Cite(keys)						=> for k in keys { count_str(k, n); },
@@ -3235,6 +3281,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::Emph(t)				=> out.push_str(t),
 			Segment::BoldItalic(t)			=> out.push_str(t),
 			Segment::Super(t)				=> out.push_str(t),
+			Segment::Sub(t)					=> out.push_str(t),
 			Segment::Code(t)				=> out.push_str(t),
 			Segment::Glossary { display, .. }	=> out.push_str(display),
 			Segment::Math(_)				=> {},
@@ -3280,6 +3327,7 @@ fn inline_segments(
 			Segment::Emph(t)		=> (t, if italic { Role::Body } else { Role::Italic }),
 			Segment::BoldItalic(t)	=> (t, if italic { Role::Bold } else { Role::BoldItalic }),
 			Segment::Super(t)		=> (t, role),
+			Segment::Sub(t)			=> (t, role),
 			Segment::Code(t)		=> (t, Role::Mono),
 			Segment::Glossary { display, .. }	=> (display, role),
 			Segment::Math(atom)	=> {
@@ -3594,9 +3642,11 @@ fn subheading_hbox(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::Emph), size, small_size, smallcaps, t, asc, dep)),
 			Segment::BoldItalic(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &head_run_face(&face, HeadRun::BoldItalic), size, small_size, smallcaps, t, asc, dep)),
-			// A superscript in a heading is vanishingly rare; set its text in the heading face rather than
-			// raising it, so the words are kept without a scripted run in display type.
+			// A superscript or subscript in a heading is vanishingly rare; set its text in the heading face
+			// rather than raising or dropping it, so the words are kept without a scripted run in display type.
 			Segment::Super(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
+			Segment::Sub(t)		=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
 			Segment::Code(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),

@@ -18,6 +18,7 @@
 
 use crate::doc::{
 	Segment,
+	subscript,
 	superscript,
 };
 use crate::theme::Theme;
@@ -396,9 +397,10 @@ fn build_grid(
 }
 
 /// Turns a cell's rich segments into the pieces the line breaker weaves. Plain text takes the row's base
-/// role -- a header cell's bold, a body cell's body; `*strong*`, `_emph_`, a `#super[...]`, inline code
-/// and an in-cell maths span keep their own faces, so a cell sets exactly as a run of prose would. A
-/// footnote or a cross-reference in a cell -- rare -- is not set here; a citation falls back to its keys.
+/// role -- a header cell's bold, a body cell's body; `*strong*`, `_emph_`, a `#super[...]`/`#sub[...]`,
+/// inline code and an in-cell maths span keep their own faces, so a cell sets exactly as a run of prose
+/// would. A footnote or a cross-reference in a cell -- rare -- is not set here; a citation falls back to
+/// its keys.
 fn cell_pieces(
 	fonts:		Arc<FontSet>,
 	style: &Theme,
@@ -433,6 +435,10 @@ fn cell_pieces(
 			Segment::MarginNote(_)	=> {},	// a margin note in a cell sets nothing here
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));
+				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
+			},
+			Segment::Sub(t) => {
+				let (shaped, dims) = res!(subscript(fonts.clone(), base, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
 			Segment::Math(expr) => {
