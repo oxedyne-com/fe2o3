@@ -983,6 +983,7 @@ fn heading_kind_dat(k: HeadingStyle) -> Dat {
 		HeadingStyle::BookOpener	=> "book-opener",
 		HeadingStyle::DocBanner		=> "doc-banner",
 		HeadingStyle::DocInline		=> "doc-inline",
+		HeadingStyle::DocGrid		=> "doc-grid",
 	};
 	dat!(s.to_string())
 }
@@ -993,7 +994,8 @@ fn heading_kind_from(d: Dat) -> Outcome<HeadingStyle> {
 		"book-opener"	=> Ok(HeadingStyle::BookOpener),
 		"doc-banner"	=> Ok(HeadingStyle::DocBanner),
 		"doc-inline"	=> Ok(HeadingStyle::DocInline),
-		other			=> Err(err!("A heading opener kind must be one of book-opener/doc-banner/doc-inline, found {:?}.", other; Input, Invalid)),
+		"doc-grid"		=> Ok(HeadingStyle::DocGrid),
+		other			=> Err(err!("A heading opener kind must be one of book-opener/doc-banner/doc-inline/doc-grid, found {:?}.", other; Input, Invalid)),
 	}
 }
 

@@ -261,7 +261,7 @@ fn expected_json_pin_blocks_bootstrap_for_crate_owned_roots() -> Outcome<()> {
 	};
 
 	// styling-fixture is pinned; this is exactly its hash in tests/oracle/expected.json.
-	const FIXTURE_HASH: &str = "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204";
+	const FIXTURE_HASH: &str = "d035bd3c146435ef5571d26708f274b94dc412e9914317bbc98624c5db45d53f";
 
 	// A matching render on a fresh cache is Unchanged (the reference came from expected.json), not Bootstrapped.
 	let _ = std::fs::remove_file(&path);

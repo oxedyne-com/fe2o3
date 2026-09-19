@@ -438,6 +438,7 @@ pub enum HeadingStyle {
 	BookOpener,
 	DocBanner,
 	DocInline,
+	DocGrid,	// a doc tree whose template opens level 1 with a fixed logo/title grid, no number -- oxeweb's template.typ
 }
 
 /// A recorded heading: the anchor identity the ledger resolves to a page, its level, and its display
@@ -647,8 +648,8 @@ impl<'a> Authoring<'a> {
 					// A documentation tree sets `numbering: none`: its headings carry no dotted number, on the
 					// heading line, in the contents, or before a sub-heading. A book keeps the document-order number.
 					let number = match style.heading.kind {
-						HeadingStyle::DocBanner | HeadingStyle::DocInline	=> String::new(),
-						HeadingStyle::BookOpener							=> heading_number_themed(*level, &self.sec, style),
+						HeadingStyle::DocBanner | HeadingStyle::DocInline | HeadingStyle::DocGrid	=> String::new(),
+						HeadingStyle::BookOpener													=> heading_number_themed(*level, &self.sec, style),
 					};
 
 					// The rendered title, its markup reduced to display words: it keys the anchor slug and is the
@@ -3855,7 +3856,7 @@ fn head_face_role(level: u8) -> HeadFace<'static> {
 /// Is this theme's heading kind a documentation tree's (banner or inline), whose role fallback differs
 /// from a book's? A book takes the display face or body bold; a doc small-caps and italicises by level.
 fn is_doc_heading(style: &Theme) -> bool {
-	matches!(style.heading.kind, HeadingStyle::DocBanner | HeadingStyle::DocInline)
+	matches!(style.heading.kind, HeadingStyle::DocBanner | HeadingStyle::DocInline | HeadingStyle::DocGrid)
 }
 
 /// The concrete display font a resolved head face names, or `None` when it falls to a role face -- for the
@@ -4184,30 +4185,36 @@ fn chapter_opener(
 		return Ok(());
 	}
 
-	if level == 1 && !number.is_empty() {
+	if level == 1 && (!number.is_empty() || style.heading.kind == HeadingStyle::DocGrid) {
 		// The opener reproduces the template's four-row grid (`chapter-grid-rows`): a tall band holding the
 		// number centred on its middle, a gap, a shorter band holding the title on its foot, and a gap down
 		// to the body. Every row is a box, not glue -- a page top discards leading glue, and the opener sits
-		// at the page top -- so the bands hold their heights and the body lands on the grid's foot.
-		let sh		= res!(head_shape(fonts, &face, style.opener.chap_num_size, number));
-		let d		= sh.dims();
-		let num_v	= d.height + d.depth;
-		let band	= style.opener.chap_grid[0];
-		// The number rides the middle of its band (Typst's `center + horizon`): the slack splits above and
-		// below. A band shorter than the number leaves no slack and the number simply fills it.
-		let above	= if band > num_v { Sp((band.raw() - num_v.raw()) / 2) } else { Sp::ZERO };
-		let below	= if band > num_v + above { band - num_v - above } else { Sp::ZERO };
-		nodes.push(vspacer(above));
+		// at the page top -- so the bands hold their heights and the body lands on the grid's foot. A grid
+		// template (oxeweb) carries no number: the first band is then the reserved logo band, an empty box.
+		if !number.is_empty() {
+			let sh		= res!(head_shape(fonts, &face, style.opener.chap_num_size, number));
+			let d		= sh.dims();
+			let num_v	= d.height + d.depth;
+			let band	= style.opener.chap_grid[0];
+			// The number rides the middle of its band (Typst's `center + horizon`): the slack splits above and
+			// below. A band shorter than the number leaves no slack and the number simply fills it.
+			let above	= if band > num_v { Sp((band.raw() - num_v.raw()) / 2) } else { Sp::ZERO };
+			let below	= if band > num_v + above { band - num_v - above } else { Sp::ZERO };
+			nodes.push(vspacer(above));
 
-		let graphic	= res!(coloured_run(&sh, style.colours.chap_num_grey));
-		let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
-		let mut row:	Vec<Node> = Vec::new();
-		if pad.raw() > 0 {
-			row.push(Node::Glue(Glue::fixed(pad)));
+			let graphic	= res!(coloured_run(&sh, style.colours.chap_num_grey));
+			let pad		= if measure > d.width { Sp((measure.raw() - d.width.raw()) / 2) } else { Sp::ZERO };
+			let mut row:	Vec<Node> = Vec::new();
+			if pad.raw() > 0 {
+				row.push(Node::Glue(Glue::fixed(pad)));
+			}
+			row.push(Node::Leaf(Leaf::graphic(graphic)));
+			nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, num_v, Sp::ZERO))));
+			nodes.push(vspacer(below));
+		} else {
+			// The reserved logo/title band the grid template lays down at row 0 (oxeweb's 240pt), no number.
+			nodes.push(vspacer(style.opener.chap_grid[0]));
 		}
-		row.push(Node::Leaf(Leaf::graphic(graphic)));
-		nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, num_v, Sp::ZERO))));
-		nodes.push(vspacer(below));
 		nodes.push(vspacer(style.opener.chap_grid[1]));	// the gap row between number and title
 
 		// The title rides the foot of its band (Typst's `left + bottom`): all the slack sits above it.
@@ -4219,6 +4226,11 @@ fn chapter_opener(
 		nodes.push(vspacer(top2));
 		nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(sh_t))], Dims::new(measure, dt.height, dt.depth))));
 		nodes.push(vspacer(style.opener.chap_grid[3]));	// the gap row down to the body
+		// A grid opener has no number band, so Typst's block-below glue (par.spacing) between the opener grid
+		// and the first paragraph is added explicitly; the numbered book path stays byte-identical.
+		if number.is_empty() {
+			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
+		}
 		return Ok(());
 	}
 

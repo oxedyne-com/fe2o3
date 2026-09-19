@@ -1,8 +1,8 @@
 { "roots": [
-	{ "name": "cheapthinking-ch03", "pages": 6, "anchors": 16, "pdf_sha256": "80810813aec55b5d619e701d004ad5ce8e51ba44c441921a163739cfc74a25af" },
-	{ "name": "oxeweb-overview", "pages": 36, "anchors": 131, "pdf_sha256": "51def2ce37dc33113eeaf0096a3c053fe42ab3700c209b527653f3c4d085fcda" },
-	{ "name": "oxeweb-techspec", "pages": 144, "anchors": 567, "pdf_sha256": "a3475b153ffd942073cfa06d71c04fe91a275114868ea2cd3189857e319041d2" },
-	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204" },
-	{ "name": "marginalia-fixture", "pages": 2, "anchors": 3, "pdf_sha256": "2db3749a1bc790f159e627996667f956ece55d4511392bb52a82207da9b98224" },
-	{ "name": "float-fixture", "pages": 2, "anchors": 4, "pdf_sha256": "3e500eaaa1a2b3226678f1d4acd62d9acfe29fdfaa04d4c22f62bdfba0b03e0e" }
+	{ "name": "cheapthinking-ch03", "pages": 5, "anchors": 16, "pdf_sha256": "c269680891f395382907e33f0cc763658fb90609bba44dc5c04f7e426de1eaa0" },
+	{ "name": "oxeweb-overview", "pages": 38, "anchors": 131, "pdf_sha256": "fec38d1c5f1829b004014f64b3c5cb24115ae2bbae5e54a676f05748bc5e6ed1" },
+	{ "name": "oxeweb-techspec", "pages": 139, "anchors": 567, "pdf_sha256": "e7b6ab3006f0e97936be55f63ef0109cb1666dce02ffe98183a802124241fa3b" },
+	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "d035bd3c146435ef5571d26708f274b94dc412e9914317bbc98624c5db45d53f" },
+	{ "name": "marginalia-fixture", "pages": 2, "anchors": 3, "pdf_sha256": "d693d7e992a31481a6b1a70cff6050ea9c70fefb9a275a5f662ee4ccb9d23381" },
+	{ "name": "float-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "ce6bbb914c483191f1ea66bb5b7f768e6775ff190a655b85ed7c7e2332f5561a" }
 ]}

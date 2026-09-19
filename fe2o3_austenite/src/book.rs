@@ -362,19 +362,24 @@ fn ai_declaration_mark(slug: &str) -> Option<(String, String)> {
 /// family both (a doc heading is Libertinus bold, so no separate display face is loaded); and the
 /// includes are followed exactly as for a book. A field the tree omits keeps a readable default.
 fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
-	let (geom, raw)	= res!(read_doc_config(root_dir, root_src));
+	let (geom, raw, opener)	= res!(read_doc_config(root_dir, root_src));
 	let mut style	= build_style(&raw);
 	// The doc root's own `#show: doc.with(...)` application (and any lowerable top-level `#set`) lowers
 	// onto the theme; its per-format type scale is read from the config by `read_doc_config` above.
 	lang::set::lower_root_declarations(root_src, &mut style);
 	let title		= content_field(root_src, "title").unwrap_or_default();
-	// A doc tree sets `numbering: none`; its top-level headings open with the template's grey banner bar
-	// unless the tree draws its own per-section `#section-banner` logo bars, in which case each level-1
-	// heading is set inline beneath the section's banner. This mirrors the template's `chapter-banners`
-	// argument: an explicit `true`/`false` decides, and its `auto` default turns the chapter banners off
-	// only for the Hematite guide, whose sections carry logo banners instead.
+	// A doc tree sets `numbering: none`; how its top-level headings open turns first on the template
+	// idiom read above. A grid template (oxeweb) opens level 1 with a fixed logo/title grid and no
+	// number -- neither a banner bar nor an inline heading -- so its opener reserves the grid bands
+	// (`DocGrid`). A banner template's top-level headings open with the grey banner bar unless the tree
+	// draws its own per-section `#section-banner` logo bars, in which case each level-1 heading is set
+	// inline beneath the section's banner. This mirrors the template's `chapter-banners` argument: an
+	// explicit `true`/`false` decides, and its `auto` default turns the chapter banners off only for the
+	// Hematite guide, whose sections carry logo banners instead.
 	let want_banners = tri_bool(root_src, "chapter-banners").unwrap_or(title != "Hematite");
-	style.heading.kind = if want_banners {
+	style.heading.kind = if opener == DocOpener::Grid {
+		HeadingStyle::DocGrid
+	} else if want_banners {
 		HeadingStyle::DocBanner
 	} else {
 		HeadingStyle::DocInline
@@ -420,7 +425,16 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 /// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
 /// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
 /// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
-fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle)> {
+/// Which level-1 opener idiom a doc template uses, read from its `show heading` block. A grid template
+/// (oxeweb) opens with a fixed `#grid` of logo/title bands and no number; the oxedyne banner template
+/// draws a grey `#section-banner` bar. The two take different opener metrics and heading scales.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DocOpener {
+	Grid,
+	Banner,
+}
+
+fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
 	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
 	let template = vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
 
@@ -450,25 +464,40 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 	// The doc template inherits Typst's default leading (0.65 em) but its OWN paragraph spacing: the
 	// template sets no `#set par(spacing:)`, so a paragraph gap takes Typst's default `par.spacing` of
 	// 1.2 em (the earlier 0.65 was wrong -- it under-set the gap and, once the block edges were pinned to
-	// cap-height/baseline, drove the whole doc short of the oracle). The level-1 opener is the template's
-	// `show heading` grid -- a 240 pt logo band, a 10 pt gap, a 40 pt title band set at 32 pt small-caps,
-	// and a 20 pt gap to the body -- and its sub-headings size by `(18, 14, 13, 12).at(level - 1)`, so
-	// level 2 is 14 pt, level 3 13 pt, level 4 12 pt (the level-1 entry, 18 pt, is unused: level 1 takes
-	// the grid). These mirror `oxeweb/doc/*/template.typ`; a future doc template with different values
-	// should have them read from its own `template.typ` rather than pinned here.
+	// cap-height/baseline, drove the whole doc short of the oracle). Correct for both idioms.
+	//
+	// The level-1 opener idiom is read from the template's `show heading` block. A grid template
+	// (oxeweb) opens with a fixed `#grid(rows: (240pt, 10pt, 40pt, 20pt))` -- a logo band, a gap, a 40 pt
+	// title band set at `size: 32pt` small-caps, and a gap to the body -- and its sub-headings size by
+	// `(18, 14, 13, 12).at(level - 1)`, so level 2 is 14 pt, level 3 13 pt, level 4 12 pt (the level-1
+	// entry, 18 pt, is unused: level 1 takes the grid). The oxedyne banner template opens with a grey
+	// `#section-banner` bar and no grid, and keeps its own smaller heading scale (chapter title 14 pt).
+	// The presence of a `rows:` tuple after `show heading` tells the two apart; pinning the grid's metrics
+	// onto a banner tree over-set its level-1 and back-matter headings. A future doc template with other
+	// values should have them read from its own `template.typ` rather than pinned here.
+	let head_tail	= template.find("show heading").map(|at| &template[at..]);
+	let grid_rows	= head_tail.and_then(|t| tuple_after(t, "rows:")).filter(|r| r.len() >= 4);
+	let (opener, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt) = match grid_rows {
+		Some(rows)	=> {
+			let h1	= head_tail.and_then(|t| num_after(t, "size:")).unwrap_or(32.0);	// the grid title, `size: 32pt`
+			(DocOpener::Grid, [rows[0], rows[1], rows[2], rows[3]], h1, 14.0, 13.0, 12.0)
+		},
+		None		=> (DocOpener::Banner, [72.0, 8.0, 36.0, 20.0], 14.0, 12.0, 13.0, 12.0),
+	};
+
 	let raw = RawStyle {
 		body_pt,
 		leading_em:		0.65,
 		par_skip_em:	1.2,
 		indent_em:		0.0,
 		chap_num_pt:	54.0,
-		chap_grid:		[240.0, 10.0, 40.0, 20.0],	// the template's `rows: (240pt, 10pt, 40pt, 20pt)`
-		h1_pt:			32.0,	// the opener title, the grid's `size: 32pt`
-		h2_pt:			14.0,
-		h3_pt:			13.0,
-		h4_pt:			12.0,
+		chap_grid,
+		h1_pt,
+		h2_pt,
+		h3_pt,
+		h4_pt,
 	};
-	Ok((geom, raw))
+	Ok((geom, raw, opener))
 }
 
 /// The front matter a doc root states: its title and subtitle, the author from the first `meta-data`
