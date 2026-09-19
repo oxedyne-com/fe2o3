@@ -23,7 +23,7 @@ the browser's local-file CORS rule.
 ## How it reads the format
 
 The `.prl` is text jdat: an ordered map of ordered maps, lists, strings and typed scalar atoms.
-`jdat.js` is a minimal recursive-descent parser for exactly the subset a v0 `.prl` uses:
+`jdat.js` is a minimal recursive-descent parser for exactly the subset a v1 `.prl` uses:
 
 | jdat text                | shape        | JS value                    |
 |--------------------------|--------------|-----------------------------|
@@ -33,11 +33,27 @@ The `.prl` is text jdat: an ordered map of ordered maps, lists, strings and type
 | `(u32\|N)` `(i32\|N)` `(u8\|N)` | integer atom | Number                |
 | `(f32\|X.YeZ)`            | float atom   | Number                      |
 
-There are no byte-strings in a v0 `.prl`: a raster's PNG rides as a **base64 string** (the writer stores
+There are no byte-strings in a v1 `.prl`: a raster's PNG rides as a **base64 string** (the writer stores
 `base64::encode(png)`), so the whole file is these five shapes. Stripping the type tag yields the same
-plain value the old JSON projection did, so `pearl.js`'s renderer is unchanged -- it consumes the parsed
-document directly. Unknown map keys and type tags are tolerated, so a parallel lane adding fields does
-not break the reader.
+plain value the old JSON projection did, so `pearl.js`'s renderer consumes the parsed document directly,
+with no further translation step. Unknown map keys and type tags are tolerated, so a parallel lane adding
+fields does not break the reader.
+
+A `text` leaf's fields past its rigid geometry and outline glyphs -- point size, the selectable spans
+behind the `.tsel` layer below, and the optional fill colour -- ride in one keyed object (`leaf[7]`)
+rather than further positional list elements, so a future field never shifts an index an old reader still
+expects; see `emit/pearl.rs`'s own comment on the v0 leaf-shape fault this replaced.
+
+### Selectable text
+
+Every page carries an invisible, selectable `.tsel` layer over its glyph outlines -- the same answer
+Typst.ts gives for the same problem (outline-only SVG has nothing a browser can select or search). One
+`<text class="tsel">` spans the whole page, its `<tspan>`s built from each `text` leaf's `spans` (a
+glyph's cluster mapped to its source text, spaces included, straight from `ShapedText::glyph_text` on the
+Rust side): a single page-wide element, not one per run, because Chromium's `window.find`/Ctrl+F was
+found not to search across sibling `<text>` elements once their tspans carry per-glyph `x`/`y`. A leading
+space precedes every run but the page's first, standing in for the interword gap the line breaker leaves
+as pure position rather than a glyph.
 
 Regenerate the samples with the engine:
 

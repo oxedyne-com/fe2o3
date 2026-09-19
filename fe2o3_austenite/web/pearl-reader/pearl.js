@@ -3,8 +3,14 @@
 // It renders a Pearl document to inline SVG from the format's own data model -- glyph outlines stored
 // once, placed per leaf, plus fills, strokes, rules and rasters -- reproducing the transform the
 // Austenite SVG arm applies (see fe2o3_austenite/src/emit/pearl.rs render_page and
-// src/emit/svg.rs draw_text). The goal is pixel parity with that arm's SVG, which already matches the
-// PDF.
+// src/emit/svg.rs draw_text/run_text_layer). The goal is pixel parity with that arm's SVG, which already
+// matches the PDF.
+//
+// A `text` leaf's fields past its rigid geometry and outline glyphs (size, selectable spans, the
+// optional colour) ride in leaf[7], a v1 self-describing keyed object -- see pearl.rs's own comment on
+// why a positional tail was dropped. `spans` there is the same cluster-to-source-text mapping the Rust
+// SVG and PDF writers derive from `ShapedText::glyph_text`, so this reader's selectable `.tsel` layer
+// agrees with both of them about what each glyph says.
 //
 // Transport: the reader fetches the .prl and parses its text jdat directly in the browser (jdat.js) --
 // there is no JSON projection any more. Nothing here is pre-rendered: the page is built from the
@@ -37,6 +43,14 @@ function el(name, attrs) {
 	return e;
 }
 
+// A `<tspan>` at (x, y) in `size`, carrying `text` -- the selectable text layer's one building block,
+// used for both a run's own glyph spans and the synthetic interword space between two runs.
+function tspanEl(x, y, size, text) {
+	const t = el("tspan", { x, y, "font-size": size });
+	t.textContent = text;
+	return t;
+}
+
 // Renders one page block to an <svg> element, reproducing the SVG arm leaf by leaf.
 function renderPage(doc, blockKey) {
 	const block  = doc.blocks[blockKey];
@@ -55,6 +69,18 @@ function renderPage(doc, blockKey) {
 		viewBox: `0 0 ${w} ${h}`,
 	});
 	svg.appendChild(el("rect", { x: 0, y: 0, width: w, height: h, fill: "#ffffff" }));
+
+	// The selectable text layer's style, matching the SVG arm's own <style> declaration verbatim.
+	const tselStyle = el("style", {});
+	tselStyle.textContent = ".tsel { fill: transparent; }";
+	svg.appendChild(tselStyle);
+
+	// Gathered across every "text" leaf below into ONE page-wide <text>, appended once at the end --
+	// see svg.rs's run_text_layer for why one element per run breaks a browser's cross-element search. A
+	// leading space precedes every run but the page's first, standing in for the interword gap Austenite's
+	// line breaker leaves as pure position rather than a glyph.
+	const tsel = el("text", { class: "tsel" });
+	let tselHasText = false;
 
 	for (const leaf of block.leaves) {
 		const tag = leaf[0];
@@ -75,6 +101,17 @@ function renderPage(doc, blockKey) {
 						transform: `matrix(1,0,0,-1,${tx},${ty})`,
 						fill: "#000000",
 					}));
+				}
+				// The run's selectable twin: leaf[7].spans maps each text-bearing glyph (spaces included)
+				// to its source text, positioned exactly as its outline was above.
+				const meta = leaf[7];
+				const runSpans = (meta && meta.spans) || [];
+				if (runSpans.length > 0) {
+					if (tselHasText) tsel.appendChild(tspanEl(baseX, baseY, meta.size, " "));
+					for (const s of runSpans) {
+						tsel.appendChild(tspanEl(baseX + s[0], baseY - s[1], meta.size, s[2]));
+					}
+					tselHasText = true;
 				}
 				break;
 			}
@@ -151,6 +188,7 @@ function renderPage(doc, blockKey) {
 				console.warn("Unknown Pearl leaf kind:", tag);
 		}
 	}
+	if (tselHasText) svg.appendChild(tsel);
 	return svg;
 }
 
@@ -210,8 +248,8 @@ function annotationsForBlock(doc, blockHash) {
 
 function renderDocument(doc, container) {
 	container.innerHTML = "";
-	if (doc.pearl !== "0") {
-		console.warn("This reader speaks Pearl v0; file is v" + doc.pearl);
+	if (doc.pearl !== "1") {
+		console.warn("This reader speaks Pearl v1; file is v" + doc.pearl);
 	}
 
 	// Build every page first, keeping the DOM node beside its index entry so an internal link can scroll

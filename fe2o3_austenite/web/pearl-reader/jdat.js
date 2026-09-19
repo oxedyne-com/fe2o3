@@ -1,7 +1,7 @@
 // jdat.js -- a minimal browser parser for the text-jdat subset a Pearl (.prl) document uses.
 //
 // A .prl is text jdat: an ordered map of ordered maps, lists, strings and typed scalar atoms. This
-// parses exactly the subset the Pearl v0 writer emits (see fe2o3_austenite/src/emit/pearl.rs) and
+// parses exactly the subset the Pearl v1 writer emits (see fe2o3_austenite/src/emit/pearl.rs) and
 // returns plain JavaScript values -- objects, arrays, strings and numbers -- so the renderer consumes
 // the real document with no JSON projection in between.
 //
@@ -12,7 +12,7 @@
 //   (u32|N) (i32|N) (u8|N)   integer atoms            -> a Number
 //   (f32|X.YeZ)              a float atom (scientific) -> a Number
 //
-// There are no byte-strings, bools or nulls in a v0 .prl: a raster's PNG rides as a base64 *string*
+// There are no byte-strings, bools or nulls in a v1 .prl: a raster's PNG rides as a base64 *string*
 // (the writer stores `base64::encode(png)`), so the whole file is these five shapes. Unknown type tags
 // and unknown map keys are tolerated -- a parallel lane may add fields -- by stripping the tag and
 // keeping the value, and by never assuming a fixed key set.

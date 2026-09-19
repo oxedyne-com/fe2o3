@@ -11,10 +11,17 @@
 //! paint. This is the "outlines, not programs" shape -- the outline is stored in the glyph store in
 //! the font frame, once, and a placement carries only where it went, not a baked copy.
 //!
-//! v0 scope: one document round-tripping to the SVG arm's own output. Every leaf kind the SVG arm
-//! draws is carried -- text, rule, reservation, and a figure's fills, strokes and rasters. A glyph is
-//! keyed by the content of its outline rather than by `face:id:size`, which is font-source-safe: two
-//! runs drawn from different font chains cannot collide on a shared `(face, id)`.
+//! v1 scope: one document round-tripping to the SVG arm's own output, selectable text layer included.
+//! Every leaf kind the SVG arm draws is carried -- text, rule, reservation, and a figure's fills, strokes
+//! and rasters. A glyph is keyed by the content of its outline rather than by `face:id:size`, which is
+//! font-source-safe: two runs drawn from different font chains cannot collide on a shared `(face, id)`.
+//!
+//! A `text` leaf's fields past its rigid geometry and outline glyphs (size, selectable spans, the
+//! optional colour) ride in one keyed, self-describing map rather than further positional list
+//! elements -- v0 (still readable only by refusal; see [`PEARL_VERSION`]) appended `colour` positionally
+//! only when set, and v1's own first draft inserted `size` and `spans` ahead of it, silently shifting
+//! its index. A keyed map has no index to shift, so a future field joins it without another version
+//! bump.
 
 use crate::ir::{
 	DrawOp,
@@ -54,11 +61,15 @@ use oxedyne_fe2o3_graphics::{
 use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
-/// The Pearl format version this writer emits and the reader accepts.
-pub const PEARL_VERSION: &str = "0";
+/// The Pearl format version this writer emits and the reader accepts. `from_string` refuses any other
+/// version outright (see its own comment) rather than guessing at an old or newer shape, so a version
+/// bump is the whole fix whenever a leaf's fixed fields change -- as v0 -> v1 (the selectable text
+/// layer's `size`/`spans`/`colour` tail) needed and did not originally get, which is what let a stale
+/// reader misparse a new file instead of refusing it.
+pub const PEARL_VERSION: &str = "1";
 
 /// A 64-bit FNV-1a over bytes, as sixteen lower-case hex digits: the content address of a block, a
-/// glyph outline or a raster. A short hex key is enough for v0 -- a collision costs a wrong lookup, not
+/// glyph outline or a raster. A short hex key is enough here -- a collision costs a wrong lookup, not
 /// a silent corruption, and the space is far too large to meet one here.
 fn address(bytes: &[u8]) -> String {
 	let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -116,7 +127,7 @@ fn link_target_from_dat(dat: &Dat) -> Outcome<LinkTarget> {
 			Ok(LinkTarget::Anchor(id))
 		},
 		other => Err(err!(
-			"'{}' is not a Pearl v0 link-target kind.", other; Input, Invalid)),
+			"'{}' is not a Pearl v1 link-target kind.", other; Input, Invalid)),
 	}
 }
 
@@ -162,7 +173,7 @@ impl AnnotationKind {
 			"highlight"	=> Ok(AnnotationKind::Highlight),
 			"note"		=> Ok(AnnotationKind::Note),
 			other		=> Err(err!(
-				"'{}' is not a Pearl v0 annotation kind.", other; Input, Invalid)),
+				"'{}' is not a Pearl v1 annotation kind.", other; Input, Invalid)),
 		}
 	}
 }
@@ -316,7 +327,23 @@ impl PearlBuilder {
 						.filter(|(_, text)| !text.is_empty())
 						.map(|(g, text)| listdat![dat!(g.x), dat!(g.y), dat!(text)])
 						.collect();
-					let mut leaf = vec![
+					// Everything past the rigid geometry (position, box, outline glyphs) rides in ONE
+					// self-describing, keyed tail rather than further positional elements: a v0 leaf grew a
+					// positional "colour" appended only when set, and a later positional insert for "size"
+					// and "spans" silently shifted it -- a stale reader or an old file then misreads a field
+					// by index instead of failing cleanly. A keyed map has no index to shift, so a leaf kind
+					// can grow a field forever without another version bump.
+					let mut meta = omapdat!{
+						"size"	=> dat!(shaped.size()),		// the run's point size, for the tsel layer's font-size
+						"spans"	=> Dat::List(spans),
+					};
+					// The fill rides as an optional key, present only when the run is not black. A black run
+					// adds nothing, so an all-black document's bytes are exactly what they were before text
+					// carried a colour; the reader defaults a missing key to black.
+					if shaped.colour() != Rgba::BLACK {
+						res!(meta.map_put(dat!("colour"), rgba_to_dat(shaped.colour())));
+					}
+					let leaf = listdat![
 						dat!("text"),
 						res!(placed.x.to_dat()),
 						res!(placed.y.to_dat()),
@@ -324,16 +351,9 @@ impl PearlBuilder {
 						res!(placed.dims.height.to_dat()),
 						res!(placed.dims.depth.to_dat()),
 						Dat::List(glyphs),
-						dat!(shaped.size()),		// the run's point size, for the tsel layer's font-size
-						Dat::List(spans),
+						meta,
 					];
-					// The fill rides as an optional trailing element, written only when the run is not black.
-					// A black run adds nothing, so an all-black document's bytes are exactly what they were
-					// before text carried a colour; the reader defaults a missing element to black.
-					if shaped.colour() != Rgba::BLACK {
-						leaf.push(rgba_to_dat(shaped.colour()));
-					}
-					leaves.push(Dat::List(leaf));
+					leaves.push(leaf);
 				},
 				PlacedKind::Rule => {
 					leaves.push(box_leaf("rule", placed.x, placed.y, placed.dims)?);
@@ -561,10 +581,11 @@ impl PearlDoc {
 					let height	= sp_at(&items, 4)?;
 					let base_x	= x.to_pt() as f32;
 					let base_y	= (y + height).to_pt() as f32;
-					// The fill is an optional trailing element (after size and the selectable spans); a leaf
+					// The fill is an optional key in the leaf's metadata tail (see `text_leaf_meta`); a leaf
 					// without one is black, the form every pre-colour text leaf took, so an all-black document
 					// reads back byte-identical.
-					let colour	= match items.get(9) {
+					let meta	= res!(text_leaf_meta(&items));
+					let colour	= match res!(meta.map_get(&dat!("colour"))) {
 						Some(d)	=> res!(rgba_from_dat(d)),
 						None	=> Rgba::BLACK,
 					};
@@ -666,7 +687,7 @@ impl PearlDoc {
 				// with `PearlDoc::links_on_page`.
 				"link" => {},
 				other => return Err(err!(
-					"'{}' is not a Pearl v0 leaf kind.", other; Input, Invalid)),
+					"'{}' is not a Pearl v1 leaf kind.", other; Input, Invalid)),
 			}
 		}
 
@@ -686,20 +707,21 @@ impl PearlDoc {
 			if tag != "text" {
 				continue;
 			}
-			let x		= sp_at(&items, 1)?;
-			let y		= sp_at(&items, 2)?;
-			let height	= sp_at(&items, 4)?;
+			let x		= res!(sp_at(&items, 1));
+			let y		= res!(sp_at(&items, 2));
+			let height	= res!(sp_at(&items, 4));
 			let base_x	= x.to_pt() as f32;
 			let base_y	= (y + height).to_pt() as f32;
-			let size	= f32_at(&items, 7)?;
-			let spans	= try_extract_dat!(res!(items.get(8).ok_or_else(|| err!(
-				"A text leaf is missing its selectable spans."; Input, Invalid))).clone(), List);
+			let meta		= res!(text_leaf_meta(&items));
+			let size_dat	= res!(meta.map_get_must(&dat!("size")));
+			let size		= res!(f32_from(size_dat));
+			let spans		= try_extract_dat!(res!(meta.map_get_must(&dat!("spans"))).clone(), List);
 
 			let mut tspans = String::new();
 			for s in &spans {
 				let sl		= try_extract_dat!(s.clone(), List);
-				let gx		= f32_at(&sl, 0)?;
-				let gy		= f32_at(&sl, 1)?;
+				let gx		= res!(f32_at(&sl, 0));
+				let gy		= res!(f32_at(&sl, 1));
 				let text	= try_extract_dat!(res!(sl.get(2).ok_or_else(|| err!(
 					"A selectable span is missing its text."; Input, Invalid))).clone(), Str);
 				tspans.push_str(&fmt!(
@@ -855,6 +877,22 @@ fn f32_at(list: &[Dat], i: usize) -> Outcome<f32> {
 	let d = res!(list.get(i).ok_or_else(|| err!(
 		"A leaf is missing its float at position {}.", i; Input, Invalid)));
 	Ok(try_extract_dat!(d.clone(), F32).0)
+}
+
+/// A `Dat::F32` unwrapped to its `f32`, for a value already fetched (typically out of a keyed map,
+/// where [`f32_at`]'s list-and-index reading does not apply).
+fn f32_from(d: &Dat) -> Outcome<f32> {
+	Ok(try_extract_dat!(d.clone(), F32).0)
+}
+
+/// A `text` leaf's self-describing tail (position 7, past the tag, geometry and outline glyphs): a
+/// keyed map carrying `size`, `spans` and the optional `colour`. Introduced in v1 so a future field
+/// joins this map instead of another positional append -- the fault v0 had, where inserting `size` and
+/// `spans` ahead of the already-optional `colour` silently shifted its index and broke every reader that
+/// still expected the old position.
+fn text_leaf_meta(items: &[Dat]) -> Outcome<&Dat> {
+	items.get(7).ok_or_else(|| err!(
+		"A text leaf is missing its metadata map."; Input, Invalid))
 }
 
 #[cfg(test)]
@@ -1071,6 +1109,28 @@ mod tests {
 		// A second re-emit keeps them still, so the section is stable under repeated rewrites.
 		let doc3 = res!(PearlDoc::from_string(res!(doc2.to_string())));
 		assert_eq!(res!(doc3.annotations()).len(), 2, "annotations persist across a second re-emit");
+		Ok(())
+	}
+
+	/// Reads a real, checked-in `.prl` -- one of the five `web/pearl-reader/samples/*.prl` the web reader
+	/// serves -- through the actual file-reading path (`PearlDoc::read_file`, the same call
+	/// `pearl_render` makes), not just the in-memory encode/decode `test_pearl_round_trips_...` above
+	/// exercises. That in-memory test alone is exactly what missed the v0 -> v1 split-brain: a positional
+	/// leaf-shape change can leave two in-process round trips agreeing with each other while a real file
+	/// written by an older or newer build is unreadable or misparsed. Reading one of the samples this
+	/// crate ships closes that gap; regenerate them (see the reader's README) whenever the leaf shape
+	/// changes, and this test fails loudly if a regeneration is forgotten.
+	#[test]
+	fn test_a_checked_in_sample_reads_and_renders_04() -> Outcome<()> {
+		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/web/pearl-reader/samples/demo.prl");
+		let doc  = res!(PearlDoc::read_file(path));
+		assert_eq!(res!(doc.page_count()), 2, "demo.prl is a two-page fixture");
+		for idx in 0..2 {
+			let svg = res!(doc.render_page(idx));
+			assert!(svg.starts_with("<svg "), "page {} did not render as an SVG document", idx);
+			assert!(svg.contains("class=\"tsel\""), "page {} carries no selectable text layer", idx);
+			assert!(svg.ends_with("</svg>\n"), "page {} is not a well-formed, closed SVG document", idx);
+		}
 		Ok(())
 	}
 }
