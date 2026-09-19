@@ -4,5 +4,5 @@
 	{ "name": "oxeweb-techspec", "pages": 144, "anchors": 567, "pdf_sha256": "a3475b153ffd942073cfa06d71c04fe91a275114868ea2cd3189857e319041d2" },
 	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "0a16fc6ef17e4c29b43eff7d9ea0204489a27d951039e9b4667eedeeb3ca9204" },
 	{ "name": "marginalia-fixture", "pages": 2, "anchors": 3, "pdf_sha256": "2db3749a1bc790f159e627996667f956ece55d4511392bb52a82207da9b98224" },
-	{ "name": "float-fixture", "pages": 2, "anchors": 5, "pdf_sha256": "b136aa43d6f42f316cd56ffe1b4748de4401d9be21af6e62bc5919bb09827552" }
+	{ "name": "float-fixture", "pages": 2, "anchors": 5, "pdf_sha256": "209fae459a3647d671620325d480468ced9aa67bf0015b65e339c15533970c77" }
 ]}

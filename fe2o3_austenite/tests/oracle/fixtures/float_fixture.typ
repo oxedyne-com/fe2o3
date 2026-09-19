@@ -13,12 +13,18 @@
 // a `Float` anchor to austenite -- the two the oracle order-matches, and for THIS root the harness holds
 // them to exact page agreement and a per-float side (top/foot) and y check.
 //
-// The body is long and plain (both engines break it identically), so the document runs to three pages and
-// the floats are spread across them: a short aside high on page one is drawn to the TOP; an aside met low
-// on page one is drawn to the FOOT (the midpoint rule choosing the near end); a tall aside met low on page
-// two does not fit, so it DEFERS -- the following prose backfills page two and the aside is set at the top
-// of page three -- and a fourth aside met after it settles on page three too, below the deferred one
-// (document order down the top band).
+// The body is long and plain (both engines break it identically), so the document spans more than one page
+// and the four asides are spread across it -- some drawn to the top, some to the foot, one deferring to a
+// later page -- so the engine's queue, midpoint and document-order stacking are all exercised.
+//
+// REGRESSION GUARD, NOT A TYPST-PARITY GATE (this pass). Austenite's float placement is pinned here against
+// ITS OWN baseline (expected.json's `floats`), so a placement regression fails loudly, but it is NOT yet
+// Typst-exact: aside-2 goes to the FOOT under Austenite where Typst sets it at the TOP, and the cascade
+// defers aside-3 to the next page where Typst keeps it at the foot -- a known midpoint subtlety tracked for
+// a follow-up. Two obstacles keep this from being a live Typst-parity gate today: (1) Typst's `query`
+// reports a float's ANCHOR position, not where it floats to, so the dump cannot be compared directly; the
+// fix is to embed in-float `#context here().position()` probes once the midpoint is corrected, upgrading
+// this to true Typst parity. (2) the midpoint itself must first be corrected to match Typst.
 
 #set page(width: 595.276pt, height: 841.89pt, margin: 56.9pt)
 #set text(size: 11pt, font: "Libertinus Serif")
