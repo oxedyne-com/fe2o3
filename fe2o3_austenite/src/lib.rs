@@ -48,4 +48,11 @@ pub mod page;
 pub mod plot;
 pub mod table;
 pub mod theme;
+pub mod vfs;
 pub mod watch;
+
+// The wasm-bindgen compile surface, built only for the wasm target under the `wasm` feature: the
+// dependencies it needs (wasm-bindgen, js-sys) are confined to `cfg(target_arch = "wasm32")`, so a
+// native build never pulls them in whether or not the feature is set.
+#[cfg(all(feature = "wasm", target_arch = "wasm32"))]
+pub mod wasm;

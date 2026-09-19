@@ -8,6 +8,12 @@ description = "Austenite: a streaming, two-pass typesetting engine. Phase 0 spin
 repository = "https://github.com/oxedyne-io/fe2o3"
 autobins = false
 
+# `cdylib` for the wasm-bindgen surface (`wasm-pack` links the single `.wasm`), `rlib` for the native
+# library every downstream crate and the oracle harness depend on.  A native build produces both; the
+# cdylib is unused there and costs only a link.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [[bin]]
 name = "austenite"
 path = "src/bin/austenite.rs"
@@ -39,6 +45,18 @@ oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_graphics 			= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_font 				= { path = "../fe2o3_font" }
 oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
+
+# The wasm-bindgen compile surface's dependencies, confined to the wasm target exactly as `fe2o3_core`
+# confines its own, so Cargo feature unification never pulls them onto a native build.  They are present
+# whenever the target is wasm; the `wasm` feature below gates the module that uses them.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen 	= "0.2"
+js-sys 			= "0.3"
+
+[features]
+# Turns on the `wasm` compile surface (`src/wasm.rs`).  Enable it with `--target wasm32-unknown-unknown
+# --features wasm`; on a native target the module is compiled out regardless, so the feature is inert there.
+wasm = []
 
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }

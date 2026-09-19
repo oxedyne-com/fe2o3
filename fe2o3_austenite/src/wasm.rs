@@ -1,0 +1,472 @@
+//! The wasm-bindgen compile surface, shaped to Daimond's existing Typst-wasm contract so the app can
+//! swap the Typst compiler for Austenite without rewiring its callers.
+//!
+//! A [`DaimondTypst`] is a long-lived compiler instance: it builds the embedded Libertinus reading set
+//! once and holds it across compiles, and it keeps the last compile's ledger so a section-rail query can
+//! read heading pages back without recompiling. Nothing here touches a filesystem, a font service or a
+//! package registry: every source, asset and font a document needs is injected as bytes and read back
+//! through [`crate::vfs`], the same seam the native assembler reads the real filesystem through. This is
+//! the wasm equivalent of Typst's dummy-access model -- a path not injected simply does not resolve.
+//!
+//! Every method resolves; none rejects or throws. A failure returns `{ error: "<file>:<line>: <message>" }`
+//! (the engine's own message where a site is not localised to a line), never a bare access-denied line and
+//! never a JavaScript exception, so a caller composes its diagnostics from a value it always receives.
+//!
+//! Two capabilities are deliberately out of this lane and are documented as gaps rather than stubbed:
+//! the SVG carries no transparent selectable text layer (it is glyph outlines only), and a recompile is
+//! from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not build
+//! one.
+
+use crate::bib::Bibliography;
+use crate::book;
+use crate::doc::{
+	self,
+	Block,
+	FrontMatter,
+	Heading,
+};
+use crate::driver::{
+	self,
+	Config,
+};
+use crate::emit::{
+	self,
+	svg,
+};
+use crate::font::FontMetrics;
+use crate::fonts::{
+	self,
+	FaceResolver,
+};
+use crate::ledger::{
+	AnchorId,
+	AnchorKind,
+	Ledger,
+};
+use crate::lang;
+use crate::page::{
+	Frame,
+	PageGeometry,
+};
+use crate::theme::Theme;
+use crate::vfs;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_font::{
+	face::Role,
+	set::FontSet,
+	shape::Dir,
+};
+use oxedyne_fe2o3_graphics::pdf::{
+	OutlineItem,
+	PdfPage,
+};
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+
+/// A long-lived Austenite compiler for the browser: the embedded reading set built once, and the last
+/// compile's resolved ledger and heading table kept for [`DaimondTypst::query_project`].
+#[wasm_bindgen]
+pub struct DaimondTypst {
+	// The embedded Libertinus reading set, built once and reused so a compile does not re-parse the five
+	// faces each call. `None` only if the embedded bytes failed to parse -- which does not happen in
+	// practice; a compile then reports it rather than the constructor throwing.
+	fonts:			Option<Arc<FontSet>>,
+	// The last compile's ledger and heading table, so a section-rail query reads heading pages back without
+	// recompiling. Replaced by each successful compile's own values.
+	last_ledger:	Option<Ledger>,
+	last_heads:		Vec<Heading>,
+}
+
+#[wasm_bindgen]
+impl DaimondTypst {
+	/// Builds a compiler instance, parsing the embedded reading set once. Infallible by contract -- a font
+	/// that will not parse leaves the set unbuilt and is reported at compile time, never thrown here.
+	#[wasm_bindgen(constructor)]
+	pub fn new() -> DaimondTypst {
+		DaimondTypst {
+			fonts:			fonts::libertinus().ok().map(Arc::new),
+			last_ledger:	None,
+			last_heads:		Vec::new(),
+		}
+	}
+
+	/// Compiles a project to a single PDF: `{ pdf: Uint8Array }` on success, `{ error: String }` otherwise.
+	/// `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts: [[path,
+	/// bytes], ...] }`; every entry is injected into the source map and nothing outside it is read.
+	#[wasm_bindgen(js_name = compileProject)]
+	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
+		match self.run(project, Mode::Pdf) {
+			Ok(Product::Pdf(bytes))	=> ok_pdf(bytes),
+			Ok(Product::Svg(_))		=> err_obj("internal: a PDF compile returned SVG"),
+			Err(msg)				=> err_obj(&msg),
+		}
+	}
+
+	/// The fast live-view path: compiles a project to Austenite's per-page SVG (already glyph outlines),
+	/// `{ svg: string[] }` on success or `{ error }` otherwise. Cheaper than [`Self::compile_project`] --
+	/// no PDF object graph, no cross-page stream -- so a watch loop can call it per keystroke.
+	#[wasm_bindgen(js_name = compileProjectVector)]
+	pub fn compile_project_vector(&mut self, project: &JsValue) -> JsValue {
+		match self.run(project, Mode::Svg) {
+			Ok(Product::Svg(pages))	=> ok_svg(pages),
+			Ok(Product::Pdf(_))		=> err_obj("internal: an SVG compile returned PDF"),
+			Err(msg)				=> err_obj(&msg),
+		}
+	}
+
+	/// Compiles a single source string to PDF, wrapping it as the project's `/main.typ`. The convenience
+	/// entry for a one-file document with no injected assets or fonts.
+	#[wasm_bindgen]
+	pub fn compile(&mut self, source: &str) -> JsValue {
+		self.compile_project(&single_source_project(source))
+	}
+
+	/// The section rail's query: heading rows from the last compile's ledger as a JSON array of
+	/// `{ kind, label, title, level, page }`, or `null` when nothing has compiled yet or the selector is
+	/// one this lane does not resolve. The consumer degrades on `null`.
+	///
+	/// This is a heading/anchor query only, not full Typst `query` semantics: a selector naming headings
+	/// (the section rail's use) returns heading rows; any other selector returns `null` so the caller falls
+	/// back rather than receiving a wrong answer.
+	#[wasm_bindgen(js_name = queryProject)]
+	pub fn query_project(&self, selector: &str, _field: &str) -> JsValue {
+		let ledger = match &self.last_ledger {
+			Some(l)	=> l,
+			None	=> return JsValue::NULL,
+		};
+		let sel = selector.to_lowercase();
+		if !(sel.contains("head") || sel.contains("outline") || sel.is_empty()) {
+			return JsValue::NULL;
+		}
+		let mut rows: Vec<Dat> = Vec::new();
+		for h in &self.last_heads {
+			let page = match ledger.page_of(&h.id) {
+				Some(p)	=> p,
+				None	=> continue,
+			};
+			rows.push(omapdat!{
+				"kind"	=> dat!("heading"),
+				"label"	=> dat!(h.id.key.clone()),
+				"title"	=> dat!(h.title.clone()),
+				"level"	=> dat!(h.level as u32),
+				"page"	=> dat!(page),
+			});
+		}
+		let json = match Dat::List(rows).json() {
+			Ok(s)	=> s,
+			Err(_)	=> return JsValue::NULL,
+		};
+		match js_sys::JSON::parse(&json) {
+			Ok(v)	=> v,
+			Err(_)	=> JsValue::NULL,
+		}
+	}
+
+	/// The compiler's current wasm linear-memory size, in megabytes -- a heap-usage proxy for the app's
+	/// memory gauge.
+	#[wasm_bindgen(js_name = heapMB)]
+	pub fn heap_mb(&self) -> f64 {
+		// `memory_size` counts 64 KiB pages of the one linear memory, so pages / 16 is the size in MiB.
+		core::arch::wasm32::memory_size(0) as f64 / 16.0
+	}
+}
+
+impl Default for DaimondTypst {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+/// Which artefact a run produces.
+#[derive(Clone, Copy)]
+enum Mode {
+	Pdf,
+	Svg,
+}
+
+/// A run's product, matching the mode it was asked for.
+enum Product {
+	Pdf(Vec<u8>),
+	Svg(Vec<String>),
+}
+
+impl DaimondTypst {
+	/// Runs a compile and clears the source map before returning either way, so one instance compiles many
+	/// documents in turn without a stale file leaking between them. Composes the engine's message with the
+	/// main file for the app's `file:line: message` diagnostic.
+	fn run(&mut self, project: &JsValue, mode: Mode) -> Result<Product, String> {
+		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
+		let outcome = self.run_inner(project, &main, mode);
+		let _ = vfs::clear();
+		match outcome {
+			Ok(p)	=> Ok(p),
+			Err(e)	=> Err(fmt!("{}:0: {}", main, e)),
+		}
+	}
+
+	fn run_inner(&mut self, project: &JsValue, main: &str, mode: Mode) -> Outcome<Product> {
+		let fonts = match &self.fonts {
+			Some(f)	=> f.clone(),
+			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
+		};
+
+		// Every source, asset and font becomes a source-map entry; the main path names the root among them.
+		let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+		read_text_pairs(project, "sources", &mut files);
+		read_byte_pairs(project, "assets", &mut files);
+		read_byte_pairs(project, "fonts", &mut files);
+		let main_path = PathBuf::from(main);
+		if !files.contains_key(&main_path) {
+			return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing));
+		}
+		res!(vfs::install(files));
+
+		// A figure's `/assets/...` path is root-relative; resolve it against the main file's directory, the
+		// same base the native binary records before authoring.
+		if let Some(dir) = main_path.parent() {
+			res!(crate::image::set_base_dir(dir.to_path_buf()));
+		}
+
+		// Assemble the document -- a book/doc root through the whole-book assembler, a lone file through the
+		// reader -- exactly the dispatch the native binary makes.
+		let Assembled { blocks, fonts, geom, style, title, faces, front, bib } =
+			res!(self.assemble(&main_path, fonts));
+
+		let (document, heads) =
+			res!(doc::author(fonts.clone(), geom, &style, &faces, &blocks, front.as_ref(), bib.as_ref()));
+		let metrics = FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+		let mut out = res!(driver::run(&document, &metrics, Config::default()));
+
+		let footer_logo = front.as_ref().and_then(|f| f.footer_logo.as_deref());
+		res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, &title, footer_logo));
+
+		// Mirror the margins: a verso (even) page is the recto frame shifted to the fore-edge. A uniform
+		// margin gives a zero shift, so a non-book run is untouched -- the same step the binary makes.
+		let shift = geom.mirror_shift();
+		if shift.raw() != 0 {
+			for page in &mut out.pages {
+				if page.number % 2 == 0 {
+					for placed in &mut page.frame.placed {
+						placed.x = placed.x + shift;
+					}
+				}
+			}
+		}
+
+		// Keep the resolved ledger and heading table for a later section-rail query.
+		self.last_ledger	= Some(out.ledger.clone());
+		self.last_heads		= heads.clone();
+
+		match mode {
+			Mode::Svg => {
+				let mut pages: Vec<String> = Vec::with_capacity(out.pages.len());
+				for page in &out.pages {
+					pages.push(res!(svg::render_page(page)));
+				}
+				Ok(Product::Svg(pages))
+			},
+			Mode::Pdf => {
+				// Sequential emit: wasm has no threads, so the binary's parallel chunking becomes a
+				// page-at-a-time write into an in-memory buffer, freeing each frame after its page is folded in.
+				let mut buf: Vec<u8> = Vec::new();
+				let outline = build_outline(&heads, &out.ledger);
+				let mut pdf = res!(emit::pdf::open_document_with_outline(&mut buf, out.pages.len(), outline));
+				for page in &mut out.pages {
+					let built: PdfPage = res!(emit::pdf::render_page(page));
+					res!(emit::pdf::write_built_page(&mut pdf, &built));
+					page.frame = Frame::new();
+				}
+				res!(pdf.finish());
+				Ok(Product::Pdf(buf))
+			},
+		}
+	}
+
+	/// Assembles the source at `main_path`: a book/doc root through [`book::load`], a lone file through the
+	/// reader with the lone-file styling, glossary and bibliography steps the native binary runs.
+	fn assemble(&self, main_path: &PathBuf, fonts: Arc<FontSet>) -> Outcome<Assembled> {
+		let src = res!(vfs::read_to_string(main_path));
+		if book::is_book_root(&src) {
+			let spec = res!(book::load(main_path));
+			return Ok(Assembled {
+				blocks:	spec.blocks,
+				fonts:	spec.fonts,
+				geom:	spec.geom,
+				style:	spec.style,
+				title:	spec.title,
+				faces:	spec.faces,
+				front:	Some(spec.front),
+				bib:	spec.bib,
+			});
+		}
+
+		// A lone file: install any term dictionary beside it, set on A4 with the embedded reading set, and
+		// run the same glossary, bibliography, styling and face-resolution steps the binary's lone path does.
+		if let Some(dir) = main_path.parent() {
+			res!(book::install_term_dict(dir));
+			res!(book::install_term_defs(dir));
+		}
+		let (mut blocks, mut skips) = res!(lang::to_blocks_with_refusals(&src));
+		skips.tag_file(&main_path.display().to_string());
+		book::resolve_glossary(&mut blocks);
+		let bib = res!(book::load_lone_bibliography(main_path, &mut blocks));
+		let mut style = Theme::default();
+		lang::set::lower_root_declarations(&src, &mut style);
+		let rules = lang::rules::rule_set_for(&style, &src, &mut skips);
+		lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
+		let faces = match main_path.parent() {
+			Some(dir)	=> book::face_resolver(dir, &style, &blocks),
+			None		=> FaceResolver::default(),
+		};
+		book::note_missing_face_variants(&style, &blocks, &faces, &mut skips);
+		Ok(Assembled {
+			blocks,
+			fonts,
+			geom:	PageGeometry::a4(),
+			style,
+			title:	String::new(),
+			faces,
+			front:	None,
+			bib,
+		})
+	}
+}
+
+/// The pieces a compile needs after assembly, from either the whole-book path or the lone-file path.
+struct Assembled {
+	blocks:	Vec<Block>,
+	fonts:	Arc<FontSet>,
+	geom:	PageGeometry,
+	style:	Theme,
+	title:	String,
+	faces:	FaceResolver,
+	front:	Option<FrontMatter>,
+	bib:	Option<Bibliography>,
+}
+
+/// Builds the PDF outline (title, meta and contents leaves, then every body heading) from the resolved
+/// ledger, mirroring the native binary's outline so a viewer's bookmark panel matches.
+fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
+	let mut items: Vec<OutlineItem> = Vec::new();
+	let front = [
+		("frontmatter:title",		"Title"),
+		("frontmatter:meta",		"Meta"),
+		("frontmatter:contents",	"Contents"),
+	];
+	for (key, label) in front {
+		let id = AnchorId::new(AnchorKind::Label, key);
+		if let Some(page) = ledger.page_of(&id) {
+			items.push(OutlineItem { title: label.to_string(), page: (page - 1) as usize, level: 0 });
+		}
+	}
+	for h in heads {
+		if let Some(page) = ledger.page_of(&h.id) {
+			let level = (h.level.max(1) - 1) as u8;
+			items.push(OutlineItem { title: h.title.clone(), page: (page - 1) as usize, level });
+		}
+	}
+	items
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ JS INTEROP                                                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A single-source project object `{ main: "/main.typ", sources: [["/main.typ", source]] }`.
+fn single_source_project(source: &str) -> JsValue {
+	let obj		= js_sys::Object::new();
+	let _		= js_sys::Reflect::set(&obj, &JsValue::from_str("main"), &JsValue::from_str("/main.typ"));
+	let sources	= js_sys::Array::new();
+	let pair	= js_sys::Array::new();
+	pair.push(&JsValue::from_str("/main.typ"));
+	pair.push(&JsValue::from_str(source));
+	sources.push(&pair);
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("sources"), &sources);
+	obj.into()
+}
+
+/// Reads a `[[path, text], ...]` field into the source map, each text UTF-8 encoded.
+fn read_text_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<u8>>) {
+	let arr = match array_field(project, key) {
+		Some(a)	=> a,
+		None	=> return,
+	};
+	for entry in arr.iter() {
+		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+			if let (Some(path), Some(text)) = (pair.get(0).as_string(), pair.get(1).as_string()) {
+				out.insert(PathBuf::from(path), text.into_bytes());
+			}
+		}
+	}
+}
+
+/// Reads a `[[path, bytes], ...]` field into the source map, each value a `Uint8Array` or `ArrayBuffer`.
+fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<u8>>) {
+	let arr = match array_field(project, key) {
+		Some(a)	=> a,
+		None	=> return,
+	};
+	for entry in arr.iter() {
+		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+			if let Some(path) = pair.get(0).as_string() {
+				if let Some(bytes) = to_bytes(&pair.get(1)) {
+					out.insert(PathBuf::from(path), bytes);
+				}
+			}
+		}
+	}
+}
+
+/// The bytes of a `Uint8Array` or an `ArrayBuffer`, or `None` for anything else.
+fn to_bytes(v: &JsValue) -> Option<Vec<u8>> {
+	if let Ok(u8arr) = v.clone().dyn_into::<js_sys::Uint8Array>() {
+		return Some(u8arr.to_vec());
+	}
+	if let Ok(buf) = v.clone().dyn_into::<js_sys::ArrayBuffer>() {
+		return Some(js_sys::Uint8Array::new(&buf).to_vec());
+	}
+	None
+}
+
+/// A string-valued field of a JS object, or `None` when it is absent or not a string.
+fn string_field(obj: &JsValue, key: &str) -> Option<String> {
+	js_sys::Reflect::get(obj, &JsValue::from_str(key)).ok().and_then(|v| v.as_string())
+}
+
+/// An array-valued field of a JS object, or `None` when it is absent or not an array.
+fn array_field(obj: &JsValue, key: &str) -> Option<js_sys::Array> {
+	js_sys::Reflect::get(obj, &JsValue::from_str(key)).ok().and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+}
+
+/// `{ pdf: Uint8Array }`.
+fn ok_pdf(bytes: Vec<u8>) -> JsValue {
+	let obj = js_sys::Object::new();
+	let arr = js_sys::Uint8Array::from(bytes.as_slice());
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("pdf"), &arr);
+	obj.into()
+}
+
+/// `{ svg: string[] }`.
+fn ok_svg(pages: Vec<String>) -> JsValue {
+	let obj = js_sys::Object::new();
+	let arr = js_sys::Array::new();
+	for s in &pages {
+		arr.push(&JsValue::from_str(s));
+	}
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("svg"), &arr);
+	obj.into()
+}
+
+/// `{ error: String }` -- the shape every method returns on failure, so a caller never sees a throw.
+fn err_obj(msg: &str) -> JsValue {
+	let obj = js_sys::Object::new();
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("error"), &JsValue::from_str(msg));
+	obj.into()
+}

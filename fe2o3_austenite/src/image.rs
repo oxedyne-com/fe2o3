@@ -19,6 +19,7 @@
 //! on its own finds the assets through the book's `assets` symlink just as a whole-book compile does.
 
 use crate::ir::RasterImage;
+use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::pixmap::Pixmap;
@@ -71,7 +72,7 @@ pub fn resolve(src: &str) -> Outcome<Option<PathBuf>> {
 		}
 	}
 	cands.push(PathBuf::from(stripped));
-	Ok(cands.into_iter().find(|p| p.exists()))
+	Ok(cands.into_iter().find(|p| vfs::exists(p)))
 }
 
 /// A loaded figure: a decoded raster, or an SVG read as a resolution-independent [`SvgPicture`] the
@@ -94,7 +95,7 @@ pub fn load_figure(src: &str) -> Outcome<Figure> {
 		.unwrap_or("")
 		.to_lowercase();
 	if ext == "svg" {
-		let src = match std::fs::read_to_string(&path) {
+		let src = match vfs::read_to_string(&path) {
 			Ok(s)	=> s,
 			Err(e)	=> return Err(err!(e, "Could not read the SVG figure {:?}.", path; File, Read)),
 		};
@@ -127,7 +128,7 @@ fn load_file(path: &Path) -> Outcome<RasterImage> {
 			// each vector figure, so that is loaded in its place. A missing one is reported, not guessed.
 			for alt in ["png", "jpg", "jpeg"] {
 				let raster = path.with_extension(alt);
-				if raster.exists() {
+				if vfs::exists(&raster) {
 					return decode_raster(&raster);
 				}
 			}
@@ -143,7 +144,7 @@ fn load_file(path: &Path) -> Outcome<RasterImage> {
 /// Decodes a PNG or JPEG file to straight RGBA, choosing the decoder by the file's own magic bytes and
 /// falling back to its extension.
 fn decode_raster(path: &Path) -> Outcome<RasterImage> {
-	let bytes = match std::fs::read(path) {
+	let bytes = match vfs::read(path) {
 		Ok(b)	=> b,
 		Err(e)	=> return Err(err!(e, "Could not read the image file {:?}.", path; File, Read)),
 	};

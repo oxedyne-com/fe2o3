@@ -11,6 +11,7 @@
 //! pages it moved between.
 
 use crate::ir::Sp;
+use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
@@ -323,13 +324,13 @@ impl Ledger {
 		let dat	= res!(self.to_dat());
 		let cfg	= oxedyne_fe2o3_jdat::string::enc::EncoderConfig::<(), ()>::default();
 		let s	= res!(dat.encode_string_with_config(&cfg));
-		res!(std::fs::write(path, s));
+		res!(vfs::write(path.as_ref(), s.as_bytes()));
 		Ok(())
 	}
 
 	/// Reads a ledger back from a jdat file.
 	pub fn from_file<P: AsRef<std::path::Path>>(path: P) -> Outcome<Self> {
-		let s	= res!(std::fs::read_to_string(path));
+		let s	= res!(vfs::read_to_string(path.as_ref()));
 		let dat	= res!(Dat::decode_string(s));
 		Self::from_dat(dat)
 	}
