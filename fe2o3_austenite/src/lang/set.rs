@@ -48,7 +48,9 @@ pub const LOWERABLE_SET_TARGETS: &[&str] = &[
 /// changes little. This reads only the root's own declarations, not those of its includes, and applies
 /// them at the document scope -- the whole theme the driver renders with.
 pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
-	theme.apply(&lower_declarations(src));
+	// The theme's own body size seeds the `em` base: a root that sets no `text(size:)` of its own resolves a
+	// `#set par(spacing: <em>)` against the size the theme already carries, not the raw house default.
+	theme.apply(&lower_declarations_seeded(src, theme.text.body_size.to_pt()));
 }
 
 /// The [`ThemePatch`] a source's own top-level declarations lower to, without applying it: a `#show:
@@ -58,14 +60,31 @@ pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
 /// subtree, or a `#styled-box` body. This reads only the source's own declarations, not those of any
 /// file it includes.
 pub fn lower_declarations(src: &str) -> ThemePatch {
+	// A scoped or reader-side caller (an included chapter, a `#columns`/`#styled-box` body) has no size in
+	// hand: the reader is size-agnostic, so an `em` par-field that names no `text(size:)` of its own falls
+	// back to the house default. One that DOES set its own size resolves against it, found by the pre-pass.
+	lower_declarations_seeded(src, DEFAULT_BODY_PT)
+}
+
+/// The [`ThemePatch`] a source's own top-level declarations lower to, resolving each `em` paragraph field
+/// against the text size in force AT LAYOUT the way Typst does: the batch's FINAL `#set text(size: <pt>)`
+/// wins whether it precedes or follows the `#set par`, and a batch that sets none inherits `scope_body_pt`
+/// (the theme or enclosing-scope size). Because the size is resolved lazily over the whole batch, source
+/// order between the `text` and `par` sets does not change the result.
+fn lower_declarations_seeded(src: &str, scope_body_pt: f64) -> ThemePatch {
 	let mut patch = ThemePatch::default();
 	if let Some(args) = show_doc_with_args(src) {
 		lower_doc_with_into(&args, &mut patch);
 	}
-	for (target, args) in top_level_sets(src) {
+	let sets = top_level_sets(src);
+	// The layout-time `em` base: the last `text(size:)` the batch sets, else the size already in force.
+	let em_base_pt = sets.iter().rev()
+		.find_map(|(target, args)| if target == "text" { named_length_pt(args, "size") } else { None })
+		.unwrap_or(scope_body_pt);
+	for (target, args) in &sets {
 		// A target the theme has no field for writes nothing; the reader keeps such a `#set` a refusal, so
 		// nothing is silently dropped here.
-		lower_set_into(&target, &args, &mut patch);
+		lower_set_into(target, args, &mut patch, em_base_pt);
 	}
 	patch
 }
@@ -102,11 +121,17 @@ fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
 /// patch, so applying it leaves the theme's own value.
 pub fn lower_set(target: &str, args: &str) -> ThemePatch {
 	let mut patch = ThemePatch::default();
-	lower_set_into(target, args, &mut patch);
+	lower_set_into(target, args, &mut patch, DEFAULT_BODY_PT);
 	patch
 }
 
-fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'static str> {
+/// The house default body size, in points -- the base an `em` length in a lone `#set` (no earlier
+/// `#set text(size:)` to move it) resolves against, matching [`crate::theme::ThemeText`]'s own default.
+const DEFAULT_BODY_PT: f64 = 11.0;
+
+/// `em_base_pt` is the text size in force, in points, that a font-relative (`em`) length resolves
+/// against; a caller with no size context passes [`DEFAULT_BODY_PT`].
+fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: f64) -> Vec<&'static str> {
 	// The argument keys this set applied AND the renderer consumes -- the invariant is that every lowered
 	// field is either read by the renderer or refused with a diagnostic, never written-and-ignored. A key
 	// that lowers into a field nothing reads yet (a body `font`, an equation `numbering`, a `page`
@@ -147,15 +172,26 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch) -> Vec<&'sta
 			}
 		},
 		"par" => {
+			// `spacing` (the space between paragraphs) and `first-line-indent` are pure lengths: a `pt` value
+			// is taken verbatim, and a font-relative `em` -- the book/doc template idiom (`#set par(spacing:
+			// 0.75em)`) -- resolves against the text size in force rather than being dropped and left at the
+			// theme default.
+			//
+			// `leading` is deliberately `pt`-only here. Typst's `par(leading:)` is the GAP added between line
+			// boxes, whereas the theme's `text.leading` is the baseline-to-baseline distance; converting one
+			// to the other needs the calibrated line-box height ([`crate::theme::ThemeCalibration`]), the way
+			// the book path's `build_style` does. Lowering an `em` (or even a `pt`) leading straight into the
+			// baseline field would set the line grid wrongly, so that conversion is left to a dedicated leading
+			// pass -- see this crate's parity notes. A `pt` leading keeps the pre-existing behaviour.
 			if let Some(pt) = named_length_pt(args, "leading") {
 				patch.text.leading = Some(Sp::from_pt(pt));
 				used.push("leading");
 			}
-			if let Some(pt) = named_length_pt(args, "spacing") {
+			if let Some(pt) = named_length_pt_em(args, "spacing", em_base_pt) {
 				patch.par.skip = Some(Sp::from_pt(pt));
 				used.push("spacing");
 			}
-			if let Some(pt) = named_length_pt(args, "first-line-indent") {
+			if let Some(pt) = named_length_pt_em(args, "first-line-indent", em_base_pt) {
 				patch.par.indent = Some(Sp::from_pt(pt));
 				used.push("first-line-indent");
 			}
@@ -278,7 +314,7 @@ fn set_refusal_reason(target: &str, args: &str) -> Option<String> {
 	}
 	let present			= arg_keys(args);
 	let mut patch		= ThemePatch::default();
-	let used			= lower_set_into(target, args, &mut patch);
+	let used			= lower_set_into(target, args, &mut patch, DEFAULT_BODY_PT);
 	if present.is_empty() {
 		return Some(fmt!("#set {} applied no argument", target));
 	}
@@ -518,12 +554,25 @@ fn named_number_unit(args: &str, key: &str) -> Option<(f64, String)> {
 }
 
 /// The point value of a `key:`'s length, accepting a bare number or one suffixed `pt`. An `em` or `mm`
-/// value is not converted here (a later unit that knows the body size and the millimetre-per-point ratio
-/// does that); this returns `None` for those so the field is left unchanged rather than set wrongly.
+/// value returns `None` so the field is left unchanged rather than set wrongly; where a field is legally
+/// written in ems (a paragraph metric), the caller uses [`named_length_pt_em`] with the body size instead.
 fn named_length_pt(args: &str, key: &str) -> Option<f64> {
 	let (num, unit) = named_number_unit(args, key)?;
 	match unit.as_str() {
 		"" | "pt"	=> Some(num),
+		_			=> None,
+	}
+}
+
+/// The point value of a `key:`'s length, accepting a bare number, `pt`, or a font-relative `em` resolved
+/// against `em_base_pt` (the text size in force). `mm` is still `None` here -- a paragraph metric is never
+/// set in millimetres, and leaving it unconverted keeps such a `#set` a visible refusal rather than a
+/// wrong write. Used where a metric may legitimately be written in ems, unlike [`named_length_pt`].
+fn named_length_pt_em(args: &str, key: &str, em_base_pt: f64) -> Option<f64> {
+	let (num, unit) = named_number_unit(args, key)?;
+	match unit.as_str() {
+		"" | "pt"	=> Some(num),
+		"em"		=> Some(num * em_base_pt),
 		_			=> None,
 	}
 }
@@ -572,6 +621,45 @@ mod tests {
 		assert_eq!(theme.text.faces.body, Some("Libertinus Serif".to_string()));
 		// The leading was not named, so it kept its default.
 		assert_eq!(theme.text.leading, Theme::default().text.leading);
+	}
+
+	/// A `#set par(...)` lowers its pure-length metrics (`spacing`, `first-line-indent`) in `em` against the
+	/// text size IN FORCE AT LAYOUT, the template idiom (`#set par(spacing: 0.75em)`) that was silently
+	/// dropped before `em` was convertible. Typst resolves the `em` lazily -- the batch's final `text(size:)`
+	/// wins whether it precedes OR follows the `#set par` -- so source order does not change the result.
+	/// `leading` is deliberately NOT converted from `em` here: it is a line-box gap, not a baseline distance,
+	/// so it stays a visible refusal rather than a wrong write (see the `par` arm and [`named_length_pt_em`]).
+	#[test]
+	fn set_par_lowers_em_pure_lengths_against_layout_text_size() {
+		// A lone `#set par` resolves spacing/indent em against the 11 pt house default; an em leading is left
+		// unlowered (its baseline conversion needs the calibrated line box, deferred to a leading pass).
+		let patch = lower_set("par", "leading: 0.78em, spacing: 0.75em, first-line-indent: 1.5em");
+		assert_eq!(patch.par.skip,     Some(Sp::from_pt(0.75 * 11.0)));
+		assert_eq!(patch.par.indent,   Some(Sp::from_pt(1.5  * 11.0)));
+		assert_eq!(patch.text.leading, None);
+
+		// `text(size:)` BEFORE the `par` -- the em resolves against 12 pt.
+		let mut theme = Theme::default();
+		lower_root_declarations("#set text(size: 12pt)\n#set par(spacing: 0.75em)\n\n= Body\n", &mut theme);
+		assert_eq!(theme.par.skip, Sp::from_pt(0.75 * 12.0));
+
+		// `text(size:)` AFTER the `par` -- Typst resolves the em lazily against the size in force at layout,
+		// so the final 20 pt still wins and the result is order-independent (order.typ/order2.typ are
+		// byte-identical under typst 0.15.1).
+		let mut theme = Theme::default();
+		lower_root_declarations("#set par(spacing: 1em)\n#set text(size: 20pt)\n\n= Body\n", &mut theme);
+		assert_eq!(theme.par.skip, Sp::from_pt(20.0));
+
+		// No `text(size:)` in the batch -- the em resolves against the size the theme already carries, not the
+		// raw house default (here a 12 pt theme).
+		let mut theme = Theme::default();
+		theme.text.body_size = Sp::from_pt(12.0);
+		lower_root_declarations("#set par(spacing: 1em)\n\n= Body\n", &mut theme);
+		assert_eq!(theme.par.skip, Sp::from_pt(12.0));
+
+		// A `pt` spacing is still taken verbatim, and a `pt` leading keeps its pre-existing pass-through.
+		assert_eq!(lower_set("par", "spacing: 9pt").par.skip,      Some(Sp::from_pt(9.0)));
+		assert_eq!(lower_set("par", "leading: 16pt").text.leading, Some(Sp::from_pt(16.0)));
 	}
 
 	/// `#set text(fill: rgb("#ff0000"))` lowers the prose fill, consuming the argument so it is not refused;
