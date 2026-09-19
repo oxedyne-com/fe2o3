@@ -14,17 +14,21 @@
 // them to exact page agreement and a per-float side (top/foot) and y check.
 //
 // The body is long and plain (both engines break it identically), so the document spans more than one page
-// and the four asides are spread across it -- some drawn to the top, some to the foot, one deferring to a
-// later page -- so the engine's queue, midpoint and document-order stacking are all exercised.
+// and the four asides are spread across it -- some drawn to the top, some to the foot -- so the engine's
+// queue, midpoint and document-order stacking are all exercised, and the two engines agree float-for-float.
 //
-// REGRESSION GUARD, NOT A TYPST-PARITY GATE (this pass). Austenite's float placement is pinned here against
-// ITS OWN baseline (expected.json's `floats`), so a placement regression fails loudly, but it is NOT yet
-// Typst-exact: aside-2 goes to the FOOT under Austenite where Typst sets it at the TOP, and the cascade
-// defers aside-3 to the next page where Typst keeps it at the foot -- a known midpoint subtlety tracked for
-// a follow-up. Two obstacles keep this from being a live Typst-parity gate today: (1) Typst's `query`
-// reports a float's ANCHOR position, not where it floats to, so the dump cannot be compared directly; the
-// fix is to embed in-float `#context here().position()` probes once the midpoint is corrected, upgrading
-// this to true Typst parity. (2) the midpoint itself must first be corrected to match Typst.
+// TRUE TYPST-PARITY GATE. Each aside's floated placement (page, side, y) is asserted against Typst's own,
+// read through the in-float `#context here().position()` probe above -- Typst's plain `query(figure)`
+// reports a float's ANCHOR position, not where it lands, so the probe is what makes an exact comparison
+// possible. A Fable trace confirmed Austenite's midpoint (`used = base - remaining`, ratio <= 0.5 -> top)
+// reproduces Typst's (compose.rs:319-326) exactly.
+//
+// NO LEVEL-1 HEADING: the fixture opens straight into body on purpose. A lone-file `= Heading` is lowered
+// by austenite as a ~136pt CHAPTER-OPENER grid where Typst (a lone file) sets a plain ~18pt heading; that
+// ~118pt confound pushed the flow deeper and tipped aside-2's midpoint from top to foot, which is a
+// heading-rendering bug (tracked as A18: lone-file/standalone `=` should set a plain heading, not a
+// chapter opener), NOT a float bug. Removing the heading isolates this fixture to what it gates -- FLOAT
+// placement -- so it stays green through the A18 fix rather than coupling to it.
 
 #set page(width: 595.276pt, height: 841.89pt, margin: 56.9pt)
 #set text(size: 11pt, font: "Libertinus Serif")
@@ -36,12 +40,14 @@
     inset: (x: 10pt, y: 10pt),
     fill: luma(240),
     stroke: (left: 2pt + luma(80)),
-    [#text(size: 0.9em)[#body]],
+    // The `#context here().position()` probe reports the aside's TRUE floated position (it is laid out
+    // inside the floated box, so context resolves to where the float lands, not its in-flow anchor). Typst
+    // reads it through the `<fp>` label; austenite ignores the unknown `#context` construct, so it changes
+    // no ink in either engine and the aside's height is identical to a plain one.
+    [#text(size: 0.9em)[#context [#metadata((page: here().position().page, y: int(calc.round(here().position().y / 1pt))))<fp>]#body]],
   )
   if float { figure(placement: auto, inner, caption: none) } else { inner }
 }
-
-= Float Placement
 
 This opening section runs on at plain length so that both engines break its lines at exactly the same
 points and the reading cursor reaches the same depth in each. The words carry no emphasis and no special

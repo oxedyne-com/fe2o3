@@ -26,6 +26,11 @@
 	}
 	let heads = query(heading)
 	let figs  = query(figure)
+	// In-float placement probes (`<fp>`): a float's TRUE floated (page, y), read from a `#context
+	// here().position()` marker laid out inside the floated box. Present only in a fixture that embeds them
+	// (the float fixture); every other root queries none. `query(figure).location()` gives the float's
+	// ANCHOR position, not where it lands, so this is what a float-placement parity check must read.
+	let fps   = query(<fp>)
 	let entries = heads.map(h => (
 		kind:	"heading",
 		label:	if h.has("label") { str(h.label) } else { "" },
@@ -37,9 +42,15 @@
 		label:	if f.has("label") { str(f.label) } else { "" },
 		title:	if f.has("caption") and f.caption != none { text-of(f.caption.body) } else { "" },
 		page:	f.location().page(),
-		// The figure's y from the page's top edge, in points, so the oracle can compare which side of the
-		// page a float settled on against Austenite's own dump.
+		// The figure's ANCHOR y (its in-flow declaration point), for the lenient count/page cross-check --
+		// NOT where a float lands; the `<fp>` probe rows below carry the true floated position.
 		y:	int(calc.round(f.location().position().y / 1pt)),
+	)) + fps.map(m => (
+		kind:	"floatpos",
+		label:	"",
+		title:	"",
+		page:	m.value.page,
+		y:	m.value.y,
 	))
 	[#metadata(entries) <oracle-dump>]
 }

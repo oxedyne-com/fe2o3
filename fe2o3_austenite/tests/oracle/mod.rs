@@ -520,12 +520,12 @@ const TOTAL_PAGE_TOLERANCE_FRACTION: f64 = 0.15;
 /// missing rather than every single-heading accounting difference.
 const COUNT_TOLERANCE: usize = 2;
 
-/// Austenite's own pinned placement for the `float-fixture` root's four asides -- each a `(page, y-in-pt)`
-/// of where the float settled, in document order. This is a SELF-baseline regression guard, not Typst
-/// parity: it fails if a change to the float queue, midpoint or stacking moves a float from where Austenite
-/// currently sets it. See the fixture's header for why exact Typst parity is deferred; when the midpoint is
-/// corrected, some of these values will shift and this baseline is re-pinned to the corrected placement.
-const FLOAT_FIXTURE_BASELINE: &[(u32, i64)] = &[(1, 57), (1, 714), (2, 57), (2, 184)];
+/// How far a float's y (points from the page top) may sit from Typst's before the parity check reports it.
+/// Austenite records a float's anchor at the box top; the Typst probe reads `here().position()` at the top
+/// of the box's content (one inset and a line ascent below the box top), so a constant ~15-20 pt offset is
+/// expected between the two references. This bound is tight enough to catch a float set in the wrong band
+/// or at the wrong height while tolerating that fixed reference offset; page and side are matched exactly.
+const FLOAT_PROBE_Y_TOLERANCE_PT: f64 = 24.0;
 
 /// Runs both compiles for `root` and returns the report [`RootReport::summary`] prints. An `Err` here
 /// means Austenite itself could not produce a page for this root -- the one failure this harness treats
@@ -609,22 +609,35 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 				}
 			}
 
-			// The float fixture is this crate's own float REGRESSION guard: its floats are asserted against
-			// Austenite's own pinned placement (page and y, exact), so a change in the queue, midpoint or
-			// stacking fails loudly. It is NOT yet a Typst-parity gate -- see the fixture's own header for the
-			// two obstacles (Typst reports anchor positions; a midpoint subtlety still diverges) -- so this
-			// checks against `FLOAT_FIXTURE_BASELINE`, not against Typst.
+			// The float fixture is this crate's float PARITY gate: each aside's true floated placement is
+			// asserted against Typst's own, read from the in-float `<fp>` probes (Typst's `query(figure)`
+			// reports anchor positions, not where a float lands, so the probe is what makes this exact). Page
+			// and side (top/foot) must match exactly; y within a fixed reference offset (see the tolerance).
 			if root.name == "float-fixture" {
-				if au_figs.len() != FLOAT_FIXTURE_BASELINE.len() {
+				let ty_fp: Vec<&TypstRow> = typout.rows.iter().filter(|r| r.kind == "floatpos").collect();
+				let page_mid = 841.89 / 2.0;
+				let side = |y: f64| -> &'static str { if y < page_mid { "top" } else { "foot" } };
+				if ty_fp.len() != au_figs.len() {
 					mismatches.push(fmt!(
-						"float count moved from its baseline: expected {} floats, austenite set {}",
-						FLOAT_FIXTURE_BASELINE.len(), au_figs.len()));
+						"float count differs from Typst: typst placed {} float(s), austenite {}",
+						ty_fp.len(), au_figs.len()));
 				}
-				for (i, (a, &(bp, by))) in au_figs.iter().zip(FLOAT_FIXTURE_BASELINE.iter()).enumerate() {
-					if a.page != bp || (a.y - by as f64).abs() > 0.5 {
+				for (i, (t, a)) in ty_fp.iter().zip(au_figs.iter()).enumerate() {
+					if t.page != a.page {
 						mismatches.push(fmt!(
-							"float #{} moved from its baseline (page {} y {}pt) to page {} y {:.0}pt",
-							i + 1, bp, by, a.page, a.y));
+							"float #{} floated to a different page: typst page {} vs austenite page {}",
+							i + 1, t.page, a.page));
+					}
+					if side(t.y) != side(a.y) {
+						mismatches.push(fmt!(
+							"float #{} floated to a different side: typst {} (y {:.0}pt) vs austenite {} (y {:.0}pt)",
+							i + 1, side(t.y), t.y, side(a.y), a.y));
+					}
+					let dy = (t.y - a.y).abs();
+					if dy > FLOAT_PROBE_Y_TOLERANCE_PT {
+						mismatches.push(fmt!(
+							"float #{} y differs by {:.0}pt (tolerance {:.0}pt): typst {:.0}pt vs austenite {:.0}pt",
+							i + 1, dy, FLOAT_PROBE_Y_TOLERANCE_PT, t.y, a.y));
 					}
 				}
 			}
