@@ -268,6 +268,18 @@ impl Ledger {
 		self.entries.get(id)
 	}
 
+	/// Shifts every anchor on `page` whose position is above `above` down by `by` -- the ledger's half of
+	/// a top-float insertion, kept in step with [`Frame::shift_y`](crate::page::Frame::shift_y) so a
+	/// reference to a body anchor that moved down for a float resolves to where the ink actually landed.
+	/// An anchor at or below `above` (a foot float's own) is left where it sits.
+	pub fn shift_anchors(&mut self, page: u32, by: Sp, above: Sp) {
+		for anchor in self.entries.values_mut() {
+			if anchor.pos.page == page && anchor.pos.y < above {
+				anchor.pos.y = anchor.pos.y + by;
+			}
+		}
+	}
+
 	/// Every resolved anchor, in identity order -- for a caller that reports or dumps the whole table
 	/// rather than looking up one entry, such as the oracle harness's per-anchor page comparison.
 	pub fn anchors(&self) -> impl Iterator<Item = &Anchor> {

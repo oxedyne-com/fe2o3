@@ -822,7 +822,7 @@ impl<'a> Authoring<'a> {
 						Some(p) => {
 							let mut mid = Vec::new();
 							res!(figure(&mut mid, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
-							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
@@ -843,7 +843,7 @@ impl<'a> Authoring<'a> {
 							res!(table_figure(
 								&mut mid, self.fonts.clone(), style, self.measure, table,
 								caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
-							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
@@ -866,7 +866,7 @@ impl<'a> Authoring<'a> {
 							res!(image_figure(
 								&mut mid, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
 								caption.as_deref(), supplement, number, label.as_deref()));
-							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
@@ -889,7 +889,7 @@ impl<'a> Authoring<'a> {
 							res!(code_figure(
 								&mut mid, self.fonts.clone(), style, self.measure, figure,
 								caption.as_deref(), supplement, number, label.as_deref()));
-							push_float(&mut self.nodes, mid, style.table.skip, style.table.skip, *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
@@ -981,11 +981,17 @@ impl<'a> Authoring<'a> {
 					let fill = scoped.callout.fill;
 					match placement {
 						Some(p) => {
+							// A floated callout is a `figure(placement: ...)` under the bonnet, so it records a
+							// zero-extent [`Float`](crate::ledger::AnchorKind::Float) anchor -- keyed by a running
+							// aside count -- as Typst counts it among its figures. The anchor rides inside the float,
+							// so it takes the page and position the callout settles on.
 							let mut mid = Vec::new();
+							let n = next_number(&mut self.counters, "aside");
+							mid.push(Node::Anchor(AnchorId::new(AnchorKind::Float, fmt!("aside-{}", n))));
 							res!(styled_box(
 								&mut mid, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
 								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, self.bib, &self.refs));
-							push_float(&mut self.nodes, mid, style.par.skip, style.par.skip, *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
@@ -1703,19 +1709,21 @@ fn equation(
 }
 
 /// Wraps a float's already-lowered material `mid` (a figure and its caption, or an aside box) as a
-/// [`Node::Float`], framing it with the leading and trailing space glue the in-flow form carries. The
-/// leading glue is discarded when the float lands at a page top, so the committed height the driver's fit
-/// test weighs is `mid` alone, without the framing space.
-fn push_float(nodes: &mut Vec<Node>, mid: Vec<Node>, lead: Sp, trail: Sp, placement: FloatPlacement) {
+/// [`Node::Float`]. No block spacing is added around it: Typst frames a float with `clearance` (default
+/// 1.5em of the float's font size), which the driver lays as the gap between the float and the body, so
+/// the committed height the break weighs is `mid` alone.
+fn push_float(nodes: &mut Vec<Node>, mid: Vec<Node>, clearance: Sp, placement: FloatPlacement) {
 	let mut h = Sp::ZERO;
 	for n in &mid {
 		h += n.vextent();
 	}
-	let mut list = Vec::with_capacity(mid.len() + 2);
-	list.push(Node::Glue(Glue::fixed(lead)));
-	list.extend(mid);
-	list.push(Node::Glue(Glue::fixed(trail)));
-	nodes.push(Node::Float(FloatNode::new(list, h, placement)));
+	nodes.push(Node::Float(FloatNode::new(mid, h, clearance, placement)));
+}
+
+/// The clearance a float is framed with -- Typst's `place.clearance` default, 1.5em of the float's font
+/// size, resolved here against the body text size in force where the float is set.
+fn float_clearance(style: &Theme) -> Sp {
+	Sp::from_pt(style.text.body_size.to_pt() * 1.5)
 }
 
 /// Sets a figure: its identity as a [`Float`](crate::ledger::AnchorKind::Float) anchor, the graphic

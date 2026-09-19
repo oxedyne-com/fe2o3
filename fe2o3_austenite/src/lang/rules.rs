@@ -1553,9 +1553,10 @@ fn figure_placement_in(expr: &str) -> Option<FloatPlacement> {
 	// The value runs to the next comma or the close of the call.
 	let end		= after.find(|c| c == ',' || c == ')').unwrap_or(after.len());
 	match after[..end].trim() {
-		"auto" | "top"	=> Some(FloatPlacement::Top),
-		"bottom"		=> Some(FloatPlacement::Bottom),
-		_				=> None,
+		"auto"		=> Some(FloatPlacement::Auto),
+		"top"		=> Some(FloatPlacement::Top),
+		"bottom"	=> Some(FloatPlacement::Bottom),
+		_			=> None,
 	}
 }
 
@@ -2609,8 +2610,8 @@ mod tests {
 	/// in a floating figure) lowers: the body parameter is found past the two keyword parameters, the title
 	/// keyword is recognised, and the `box`'s fill/inset/radius resolve. A `luma(...)` fill stands in for the
 	/// corpus's `colours.yellow.lighten(92%)` here -- palette-name resolution is the aside-box milestone's
-	/// own gap. The `figure(placement: auto)` float wrapper is recognised: `float` is `Some(Top)`, so the
-	/// driver defers the callout to the next page it fits on rather than setting it in the flow.
+	/// own gap. The `figure(placement: auto)` float wrapper is recognised: `float` is `Some(Auto)`, so the
+	/// driver sets the callout at the top or foot of a page by the midpoint rule rather than in the flow.
 	#[test]
 	fn collect_lowers_aside_box_shape() {
 		let src = "\
@@ -2649,7 +2650,7 @@ mod tests {
 		// The body size comes from the `text(size: 0.85em)[#body]` wrapper, not a `#set`.
 		assert_eq!(tf.patch.text.body_size, Some(Sp::from_pt(8.5)), "body wrapped in text(size: 0.85em)");
 		assert_eq!(tf.title_size, Some(Sp::from_pt(8.5)), "the bold title run is set at 0.85em");
-		assert_eq!(tf.float, Some(FloatPlacement::Top), "the figure(placement: auto) wrapper makes it a float");
+		assert_eq!(tf.float, Some(FloatPlacement::Auto), "the figure(placement: auto) wrapper makes it an auto float");
 	}
 
 	/// A `#let colours = (...)` palette is collected, and a furniture fill/stroke naming `colours.<name>`

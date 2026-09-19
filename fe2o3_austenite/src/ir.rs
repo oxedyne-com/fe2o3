@@ -370,33 +370,38 @@ impl BoxNode {
 	}
 }
 
-/// Where a float asks to sit on the page it settles on. Typst's `placement: auto` lets the engine
-/// choose, and Austenite chooses the top; `placement: top` pins the top, `placement: bottom` the foot.
+/// Where a float asks to sit on the page it settles on. `Auto` (Typst's `placement: auto`) lets the
+/// engine choose between top and foot by the midpoint rule -- the side the float's centre would fall on
+/// were it set in the flow. `Top` and `Bottom` pin the side (Typst's `placement: top`/`bottom`). `Auto`
+/// is a distinct variant, not a synonym for `Top`, because the choice it defers is the whole point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FloatPlacement {
+	Auto,
 	Top,
 	Bottom,
 }
 
 /// A block-level float: self-contained vertical material -- a figure and its caption, or an aside box --
-/// that leaves the flow when it will not fit where it stands and is set at the top (or foot) of the next
-/// page instead, its parts kept together (Typst's `figure(placement: auto | top | bottom)`).
+/// set at the top or foot of a page rather than in the flow, its parts kept together (Typst's
+/// `figure(placement: auto | top | bottom)`).
 ///
-/// `list` is the material as a small vertical list, its own leading and trailing space glue included; the
-/// leading glue is discarded when the float lands at a page top, exactly as the page breaker discards a
-/// break's leading glue. `height` is the committed extent the break weighs -- the material without that
-/// discardable framing glue -- so the fit test judges the figure and its caption, not the space around
-/// them. A float is only ever a top-level node of the document stream, never nested in a line or keep box.
+/// `list` is the material as a small vertical list (no block spacing around it -- Typst frames a float
+/// with `clearance`, not paragraph glue). `height` is the material's own extent, what the break weighs.
+/// `clearance` is the gap between the float and the body (Typst's `place.clearance`, default 1.5em of the
+/// float's font size), applied above a foot float and below a top float, and only when the page carries
+/// other content. A float is only ever a top-level node of the document stream, never nested in a line or
+/// keep box.
 #[derive(Clone, Debug)]
 pub struct FloatNode {
 	pub list:		Vec<Node>,
 	pub height:		Sp,
+	pub clearance:	Sp,
 	pub placement:	FloatPlacement,
 }
 
 impl FloatNode {
-	pub fn new(list: Vec<Node>, height: Sp, placement: FloatPlacement) -> Self {
-		Self { list, height, placement }
+	pub fn new(list: Vec<Node>, height: Sp, clearance: Sp, placement: FloatPlacement) -> Self {
+		Self { list, height, clearance, placement }
 	}
 }
 

@@ -2753,9 +2753,10 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 /// default for a figure is `none`, so a figure that names no placement is not a float.
 fn parse_placement(val: &str) -> Option<FloatPlacement> {
 	match val.trim() {
-		"auto" | "top"	=> Some(FloatPlacement::Top),
-		"bottom"		=> Some(FloatPlacement::Bottom),
-		_				=> None,
+		"auto"		=> Some(FloatPlacement::Auto),
+		"top"		=> Some(FloatPlacement::Top),
+		"bottom"	=> Some(FloatPlacement::Bottom),
+		_			=> None,
 	}
 }
 
