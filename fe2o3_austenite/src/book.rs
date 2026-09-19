@@ -447,18 +447,24 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 		.or_else(|| first_len_after(&template, "text-size:"))
 		.unwrap_or(11.0);
 
-	// The doc template leaves leading and paragraph spacing at the Typst defaults it inherits (0.65 em
-	// leading; a paragraph gap of the same order with no first-line indent), and sizes its headings in the
-	// show rule: a level-1 heading at 14 pt small-caps, level 2 at 12 pt, level 3 at 13 pt, level 4 at 12 pt.
+	// The doc template inherits Typst's default leading (0.65 em) but its OWN paragraph spacing: the
+	// template sets no `#set par(spacing:)`, so a paragraph gap takes Typst's default `par.spacing` of
+	// 1.2 em (the earlier 0.65 was wrong -- it under-set the gap and, once the block edges were pinned to
+	// cap-height/baseline, drove the whole doc short of the oracle). The level-1 opener is the template's
+	// `show heading` grid -- a 240 pt logo band, a 10 pt gap, a 40 pt title band set at 32 pt small-caps,
+	// and a 20 pt gap to the body -- and its sub-headings size by `(18, 14, 13, 12).at(level - 1)`, so
+	// level 2 is 14 pt, level 3 13 pt, level 4 12 pt (the level-1 entry, 18 pt, is unused: level 1 takes
+	// the grid). These mirror `oxeweb/doc/*/template.typ`; a future doc template with different values
+	// should have them read from its own `template.typ` rather than pinned here.
 	let raw = RawStyle {
 		body_pt,
 		leading_em:		0.65,
-		par_skip_em:	0.65,
+		par_skip_em:	1.2,
 		indent_em:		0.0,
 		chap_num_pt:	54.0,
-		chap_grid:		[72.0, 8.0, 36.0, 20.0],
-		h1_pt:			14.0,
-		h2_pt:			12.0,
+		chap_grid:		[240.0, 10.0, 40.0, 20.0],	// the template's `rows: (240pt, 10pt, 40pt, 20pt)`
+		h1_pt:			32.0,	// the opener title, the grid's `size: 32pt`
+		h2_pt:			14.0,
 		h3_pt:			13.0,
 		h4_pt:			12.0,
 	};
