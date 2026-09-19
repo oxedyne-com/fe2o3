@@ -1719,8 +1719,8 @@ impl GuardFrame {
 /// content bracket last on the line? Returns the condition text between `#if ` and the `[`. The one-line
 /// and non-bracket forms deliberately fail here, so [`assemble_into`] refuses rather than mis-follows them.
 fn guard_open(marker: &str) -> Option<&str> {
-	let inner = marker.strip_prefix("#if ")?;
-	let cond  = inner.strip_suffix('[')?;
+	let Some(inner)	= marker.strip_prefix("#if ") else { return None; };
+	let Some(cond)	= inner.strip_suffix('[') else { return None; };
 	Some(cond.trim())
 }
 
@@ -1747,8 +1747,8 @@ fn eval_guard(cond: &str, config: &str, file_src: &str) -> Option<bool> {
 		if !is_simple_ident(var) {
 			return None;
 		}
-		let lit = string_literal(rhs)?;
-		let val = guard_scalar(config, file_src, var)?;
+		let Some(lit) = string_literal(rhs) else { return None; };
+		let Some(val) = guard_scalar(config, file_src, var) else { return None; };
 		return Some(val == lit);
 	}
 	if is_simple_ident(cond) {
@@ -1769,7 +1769,8 @@ fn is_simple_ident(s: &str) -> bool {
 
 /// The text inside a `"..."` string literal filling the whole of `s`, or `None` when `s` is not one.
 fn string_literal(s: &str) -> Option<&str> {
-	let inner = s.strip_prefix('"')?.strip_suffix('"')?;
+	let Some(stripped)	= s.strip_prefix('"') else { return None; };
+	let Some(inner)		= stripped.strip_suffix('"') else { return None; };
 	// A stray interior quote would mean this is not one flat literal; the guard then refuses.
 	if inner.contains('"') {
 		return None;
@@ -2124,8 +2125,8 @@ fn read_let_string(src: &str, name: &str) -> Option<String> {
 /// binding to anything else (a string, an expression) is not a boolean an include guard can test, so it
 /// yields `None` and the guard refuses rather than inventing a truth value.
 fn read_let_bool(src: &str, name: &str) -> Option<bool> {
-	let needle	= fmt!("#let {} =", name);
-	let at		= src.find(&needle)?;
+	let needle		= fmt!("#let {} =", name);
+	let Some(at)	= src.find(&needle) else { return None; };
 	let rest	= src[at + needle.len()..].trim_start();
 	let tok: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
 	match tok.as_str() {
