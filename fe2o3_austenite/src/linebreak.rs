@@ -61,6 +61,7 @@ pub fn break_paragraph(
 	leading:	Sp,
 	hyphenate:	bool,
 	fill:		Rgba,	// the colour every prose leaf of this paragraph draws in, from `theme.text.fill`
+	cap:		Option<Sp>,	// the block-edge model; see [`set_lines`]
 )
 	-> Outcome<Vec<Node>>
 {
@@ -69,7 +70,7 @@ pub fn break_paragraph(
 		return Ok(Vec::new());
 	}
 	let breaks	= optimal_breaks(&items, measure, true);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading, true, fill));
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, true, fill, cap));
 	Ok(lines)
 }
 
@@ -115,6 +116,7 @@ pub fn break_paragraph_pieces(
 	justify:	bool,
 	hyphenate:	bool,
 	fill:		Rgba,	// the colour every prose text leaf draws in; marks and maths keep their own black
+	cap:		Option<Sp>,	// the block-edge model; see [`set_lines`]
 )
 	-> Outcome<Vec<Node>>
 {
@@ -157,7 +159,7 @@ pub fn break_paragraph_pieces(
 		return Ok(Vec::new());
 	}
 	let breaks	= optimal_breaks(&items, measure, justify);
-	let lines	= res!(set_lines(&items, &breaks, measure, leading, justify, fill));
+	let lines	= res!(set_lines(&items, &breaks, measure, leading, justify, fill, cap));
 	Ok(lines)
 }
 
@@ -568,6 +570,20 @@ fn optimal_breaks(items: &[Item], measure: Sp, justify: bool) -> Vec<isize> {
 	breaks
 }
 
+/// Raises every drawn leaf of a line by `drop`, a negative shift added to whatever shift the leaf already
+/// carries -- so a footnote mark or a maths script, raised by its own shift or by a shortened box, keeps
+/// that raise relative to the text around it. It is how the block-edge model lifts a first line's glyphs to
+/// meet the cap-height top edge without disturbing anything set on the line.
+fn raise_leaves(list: &mut [Node], drop: Sp) {
+	for node in list.iter_mut() {
+		match node {
+			Node::Leaf(l)					=> l.shift = l.shift - drop,
+			Node::HBox(b) | Node::VBox(b)	=> raise_leaves(&mut b.list, drop),
+			_								=> (),
+		}
+	}
+}
+
 /// Sets each chosen line as an HBox of shaped words and justified glue, joined by leading glue. A
 /// line ending at a forced break keeps natural spacing (flush left); every other line distributes
 /// its slack by the adjustment ratio.
@@ -578,6 +594,14 @@ fn set_lines(
 	leading:	Sp,
 	justify:	bool,
 	fill:		Rgba,	// the fill every text box (and a taken hyphen) is coloured with as it becomes a leaf
+	// The block-edge model. `Some(cap)` seats the paragraph's top edge at the cap height `cap` rather than
+	// the face ascender, and its bottom edge at the baseline rather than the descender -- Typst's default
+	// `top-edge: "cap-height", bottom-edge: "baseline"`, which is what the inter-block glue (`par.skip`, a
+	// heading's before/after, a caption's framing) then attaches to. Within-paragraph line pitch is
+	// untouched: only the first line's height and the last line's depth move, and neither feeds the
+	// interline glue. `None` keeps the ascender/descender edges, for a context whose box edges are its own
+	// (a table cell measured to its inset, the standalone SVG preview).
+	cap:		Option<Sp>,
 )
 	-> Outcome<Vec<Node>>
 {
@@ -597,7 +621,7 @@ fn set_lines(
 	// them can be sized from the depth of the upper and the height of the lower -- TeX's baselineskip
 	// rule, which a single line's own extent cannot give -- and opened further when the lower line
 	// carries inline maths that climbs above its own top.
-	let mut lines:	Vec<(Node, Sp, Sp, Sp)> = Vec::new();
+	let mut lines:	Vec<(Node, Sp, Sp, Sp, Sp)> = Vec::new();
 	for w in breaks.windows(2) {
 		let a		= w[0];
 		let hi		= w[1] as usize;
@@ -613,6 +637,7 @@ fn set_lines(
 		let mut height		= Sp::ZERO;
 		let mut depth		= Sp::ZERO;
 		let mut over		= Sp::ZERO;	// how far any inline maths on the line climbs above the line top
+		let mut mdepth		= Sp::ZERO;	// depth owed to inline maths alone, kept as the block bottom edge
 		for item in items.iter().take(hi).skip(lower) {
 			match &item.kind {
 				Kind::Boxed(shaped) => {
@@ -644,6 +669,7 @@ fn set_lines(
 					// above rather than climbing into it.
 					if *mh > height { height = *mh; }
 					if *md > depth { depth = *md; }
+					if *md > mdepth { mdepth = *md; }
 					if *mo > over { over = *mo; }
 					for n in nodes {
 						children.push(n.clone());
@@ -677,7 +703,36 @@ fn set_lines(
 		}
 
 		let dims = Dims::new(measure, height, depth);
-		lines.push((Node::HBox(BoxNode::new(children, dims)), height, depth, over));
+		lines.push((Node::HBox(BoxNode::new(children, dims)), height, depth, over, mdepth));
+	}
+
+	// The block-edge model, applied once the lines are set. The first line's top edge drops from the face
+	// ascender to the cap height, and the last line's bottom edge rises from the descender to the baseline
+	// (or to the depth of inline maths, which genuinely hangs below and must keep its room). This moves the
+	// box edges the inter-block glue attaches to, not the baselines: the drawer seats each glyph at the
+	// line-top plus the leaf's own ascent, so lifting the first line's top to the cap height would drop the
+	// glyphs unless they are raised to match -- hence `raise_leaves`, which shifts every leaf of the first
+	// line up by the same amount the top moved, keeping a footnote mark's or a script's raise intact. The
+	// interline glue below reads the untouched tuple metrics, and never a line's own height above it nor its
+	// own depth below it, so the within-paragraph pitch set by `leading` is left exactly as it was. A
+	// single-line paragraph is both first and last, and takes both edges.
+	if let Some(cap) = cap {
+		if let Some(first) = lines.first_mut() {
+			let natural = first.1;	// the line's own ascent, from the untouched tuple
+			if natural > cap {
+				let drop = natural - cap;
+				if let Node::HBox(b) = &mut first.0 {
+					b.dims.height = cap;
+					raise_leaves(&mut b.list, drop);
+				}
+			}
+		}
+		if let Some(last) = lines.last_mut() {
+			let md = last.4;
+			if let Node::HBox(b) = &mut last.0 {
+				b.dims.depth = md;
+			}
+		}
 	}
 
 	// Assemble the vertical list: each line, then the glue to the next. The glue sets the baselines
@@ -689,7 +744,7 @@ fn set_lines(
 	let overs:		Vec<Sp> = lines.iter().map(|l| l.3).collect();
 	let count				= lines.len();
 	let mut out = Vec::with_capacity(count * 2);
-	for (i, (node, _height, depth_above, _over)) in lines.into_iter().enumerate() {
+	for (i, (node, _height, depth_above, _over, _mdepth)) in lines.into_iter().enumerate() {
 		out.push(node);
 		if i + 1 < count {
 			// The baselineskip glue, never less than the overshoot the lower line needs to clear the one

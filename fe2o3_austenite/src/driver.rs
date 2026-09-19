@@ -190,7 +190,20 @@ fn compose<M: Metrics>(
 	let mut pending:	Vec<FloatNode>	= Vec::new();
 	let mut bands					= FloatBands::empty();
 
-	for node in &doc.nodes {
+	// The page break is atom-aware, not line-by-line. A run of boxes with no legal breakpoint between them
+	// -- a paragraph's first two lines welded by the orphan penalty, its last two by the widow penalty (see
+	// [`doc::guard_widows`](crate::doc)) -- is an atom, weighed and placed whole: if the atom will not fit,
+	// the page breaks before it rather than splitting a single line off, leaving the page a line short. This
+	// is the page-bottom slack Typst leaves for widow and orphan avoidance. `at_break` tracks whether a
+	// break is permitted at the cursor (a legal breakpoint has just passed, or the page is fresh); `prev_box`
+	// tracks whether the last non-marker node was a box, since a break at glue is legal only after a box --
+	// the TeX rule that makes the glue a forbidden penalty leaves in front illegal too, welding the atom.
+	let mut at_break	= true;
+	let mut prev_box	= false;
+	let nodes			= &doc.nodes;
+	let mut idx			= 0usize;
+	while idx < nodes.len() {
+		let node = &nodes[idx];
 		match node {
 			Node::Glue(g) => {
 				// Glue at the very top of a page is discarded, as TeX discards it, so a page does not
@@ -198,24 +211,40 @@ fn compose<M: Metrics>(
 				if !at_top {
 					y += g.natural;
 				}
+				// Glue after a box is a legal page breakpoint, so the next box opens a fresh atom; glue after a
+				// penalty or glue is not, and leaves `at_break` as it stands.
+				if prev_box {
+					at_break = true;
+				}
+				prev_box = false;
 			},
 			Node::Penalty(p) => {
-				if p.is_forced() && !frame.is_empty() {
-					res!(finish_page(
-						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
-					bands = FloatBands::empty();
-					res!(flush_floats(
-						&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
-						metrics, incoming, &mut ledger));
-					// The body resumes at the region top below any flushed top floats, its leading collapsed.
-					at_top = true;
+				if p.is_forced() {
+					if !frame.is_empty() {
+						res!(finish_page(
+							&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
+							&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
+						bands = FloatBands::empty();
+						res!(flush_floats(
+							&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
+							metrics, incoming, &mut ledger));
+						// The body resumes at the region top below any flushed top floats, its leading collapsed.
+						at_top = true;
+					}
+					at_break = true;
+				} else if p.is_forbidden() {
+					// A forbidden penalty (the widow/orphan weld) blocks a break here, and blocks the glue that
+					// follows it from being one, so the lines either side of it stay in one atom.
+					at_break = false;
+				} else {
+					at_break = true;
 				}
+				prev_box = false;
 			},
 			Node::Anchor(id) => {
 				// The body-start and back-matter markers are noticed by `Ledger::record` as the anchor is
 				// recorded, so a heading nested in a keep box (the inline-heading idiom) fixes the body start
-				// exactly as a top-level chapter opener does.
+				// exactly as a top-level chapter opener does. An anchor is transparent to breakability.
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
 			Node::Float(f) => {
@@ -242,29 +271,35 @@ fn compose<M: Metrics>(
 				}
 			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
-				let v = node.vextent();
+				// At an atom start, weigh the whole atom -- every box up to the next legal breakpoint, with the
+				// footnotes they introduce reserved from the foot -- and break before it if it will not fit. A
+				// box in mid-atom is placed unconditionally: the atom was found to fit when it opened, so no box
+				// within it can overflow, and none may break away from its fellows.
+				if at_break {
+					let (atom_ext, atom_reserve) = atom_measure(nodes, idx, &notes, &doc.foot);
+					if !frame.is_empty() && y + atom_ext > bottom - bands.bot_reserve - atom_reserve {
+						res!(finish_page(
+							&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
+							&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
+						bands = FloatBands::empty();
+						res!(flush_floats(
+							&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
+							metrics, incoming, &mut ledger));
+					}
+				}
 
-				// The footnotes this node's marks introduce. The break is judged against a bottom already
-				// shrunk by the notes on the page, by these, and by any foot floats the page carries -- so a
-				// line and its own note never part, and neither collides with a bottom float.
+				let v = node.vextent();
 				let mut marks: Vec<Footnote> = Vec::new();
 				collect_marks(node, &mut marks);
-				let reserve = foot_reserve(&notes, &marks, &doc.foot);
-				if !frame.is_empty() && y + v > bottom - bands.bot_reserve - reserve {
-					res!(finish_page(
-						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
-					bands = FloatBands::empty();
-					res!(flush_floats(
-						&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
-						metrics, incoming, &mut ledger));
-				}
 				res!(place_node(node, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
 				notes.append(&mut marks);	// its marks now belong to the page the node landed on
 				y += v;
-				at_top = false;
+				at_top		= false;
+				at_break	= false;
+				prev_box	= true;
 			},
 		}
+		idx += 1;
 	}
 
 	// The floats still queued at the end are set now: as many as fit on the current page (respecting the
@@ -524,6 +559,49 @@ fn place_node<M: Metrics>(
 		Node::Leaf(l)	=> place_leaf(l, geom.content_left(), y, page_no, metrics, incoming, frame, ledger).map(|_| ()),
 		_				=> Ok(()),
 	}
+}
+
+/// Weighs the atom beginning at `start`: the boxes from there up to the next legal page breakpoint, their
+/// stacked vertical extent, and the footnotes they introduce (as a foot reservation, `notes` being the
+/// page's existing notes). A break is legal at glue that follows a box, and at a non-forbidden penalty; a
+/// forbidden penalty (the widow/orphan weld set by [`doc::guard_widows`](crate::doc)) blocks the break and
+/// welds the boxes either side of it into the one atom. Anchors and floats are transparent, taking no
+/// extent and neither opening nor closing the atom. The caller checks this extent against the room left on
+/// the page and breaks before the atom rather than splitting a line off it.
+fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootStyle) -> (Sp, Sp) {
+	let mut ext			= Sp::ZERO;
+	let mut marks:		Vec<Footnote> = Vec::new();
+	let mut prev_box	= false;
+	let mut j			= start;
+	while j < nodes.len() {
+		match &nodes[j] {
+			Node::Glue(g) => {
+				if prev_box {
+					break;	// glue after a box: the atom's first legal breakpoint
+				}
+				ext += g.natural;	// interior glue (after a forbidden penalty) is part of the atom
+				prev_box = false;
+			},
+			Node::Penalty(p) => {
+				if p.is_forced() {
+					break;
+				}
+				if p.is_forbidden() {
+					prev_box = false;	// the weld: the atom continues across it
+				} else {
+					break;	// a non-forbidden penalty is a legal breakpoint
+				}
+			},
+			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
+				ext += nodes[j].vextent();
+				collect_marks(&nodes[j], &mut marks);
+				prev_box = true;
+			},
+			Node::Anchor(_) | Node::Float(_) => (),	// transparent to the atom
+		}
+		j += 1;
+	}
+	(ext, foot_reserve(notes, &marks, foot))
 }
 
 /// Gathers the footnotes whose marks fall anywhere within `node`, in the document order they were set,

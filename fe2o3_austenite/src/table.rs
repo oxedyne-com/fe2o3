@@ -669,7 +669,9 @@ fn break_cell(
 	// A cell is set ragged (`justify = false`): every space keeps its natural width, so the band's own
 	// justification to the table width -- for which the cells would otherwise hold the only stretchable
 	// glue -- cannot stretch or collapse the words within a cell. Typst sets table cells left-aligned.
-	let nodes = res!(break_paragraph_pieces(fonts.clone(), base, Dir::Ltr, size, pieces, colwidth, leading, false, true, Rgba::BLACK));
+	// A cell's box edges are its own inset, not the flow's block edges, so the cap-height/baseline model is
+	// off here (`None`): the cell keeps the ascender/descender extent its row height is measured from.
+	let nodes = res!(break_paragraph_pieces(fonts.clone(), base, Dir::Ltr, size, pieces, colwidth, leading, false, true, Rgba::BLACK, None));
 	let mut out = Vec::new();
 	for n in nodes {
 		if let Node::HBox(b) = n {

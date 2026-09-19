@@ -702,7 +702,8 @@ impl<'a> Authoring<'a> {
 					}
 
 					// Space above the heading. At a page top the driver discards it, so the first heading on a
-					// page still sits flush to the text block.
+					// page still sits flush to the text block. A heading following a non-consuming heading omits
+					// it, so the gap between the two is the upper heading's `space_below` alone.
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
 					}
@@ -737,10 +738,11 @@ impl<'a> Authoring<'a> {
 					if let Some((para, eff_theme)) = kept {
 						// The first paragraph after a heading opens the section, so it takes no first-line indent.
 						let mut lines = res!(break_paragraph(
-							self.fonts.clone(), Role::Body, Dir::Ltr, eff_theme.text.body_size, para, self.measure, eff_theme.text.leading, eff_theme.text.hyphenate, eff_theme.text.fill));
+							self.fonts.clone(), Role::Body, Dir::Ltr, eff_theme.text.body_size, para, self.measure, eff_theme.text.leading, eff_theme.text.hyphenate, eff_theme.text.fill,
+							Some(cap_edge(&eff_theme, eff_theme.text.body_size))));
 						if !lines.is_empty() {
-							keep.push(lines.remove(0));	// the first line joins the heading
-							rest = lines;				// its leading glue and the remaining lines follow
+							keep.push(lines.remove(0));			// the first line joins the heading
+							rest = guard_widows(lines);			// its leading glue and the remaining lines follow
 						}
 						consumed_para = true;
 						if i + 1 < blocks.len() {
@@ -774,8 +776,9 @@ impl<'a> Authoring<'a> {
 					}
 					pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
 					let lines = res!(break_paragraph_pieces(
-						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
-					self.nodes.extend(lines);
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
+						Some(cap_edge(style, style.text.body_size))));
+					self.nodes.extend(guard_widows(lines));
 					i += 1;
 					self.first = false;
 					self.prev_para = true;
@@ -791,8 +794,9 @@ impl<'a> Authoring<'a> {
 					pieces.extend(res!(build_pieces(
 						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, self.bib, &self.refs)));
 					let lines = res!(break_paragraph_pieces(
-						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
-					self.nodes.extend(lines);
+						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
+						Some(cap_edge(style, style.text.body_size))));
+					self.nodes.extend(guard_widows(lines));
 					i += 1;
 					self.first = false;
 					self.prev_para = true;
@@ -1162,6 +1166,46 @@ fn indent_piece(indent: Sp) -> Piece {
 	}
 }
 
+/// The block top edge for prose set at `size`: the cap height, as the fraction of the em the theme
+/// calibrates ([`ThemeCalibration::line_box_em`](crate::theme::ThemeCalibration)). Passed to the
+/// paragraph breakers as the block-edge model's top, so a paragraph's first line seats its top at the cap
+/// height and its inter-block glue attaches where Typst's does.
+fn cap_edge(style: &Theme, size: Sp) -> Sp {
+	Sp((size.raw() as f64 * style.calibration.line_box_em).round() as i32)
+}
+
+/// Guards a flow paragraph's set lines against a widow or an orphan across a page break. The page breaker
+/// may break at any interline glue; a forbidden penalty set immediately after the first line and
+/// immediately before the last line stops it stranding a single line either side of a break -- an orphan at
+/// the page foot or a widow at the page head. The lines then move as a unit rather than splitting one off,
+/// which is the page-bottom slack Typst leaves. A paragraph of one or two lines becomes wholly unbreakable;
+/// three or more keep at least two lines on each side of any break they do take. `lines` is the breaker's
+/// output -- HBoxes joined by interline glue -- and the return is the same list with the two penalties woven
+/// in; a paragraph of a single line is returned unchanged.
+fn guard_widows(lines: Vec<Node>) -> Vec<Node> {
+	let n = lines.iter().filter(|node| matches!(node, Node::HBox(_))).count();
+	if n < 2 {
+		return lines;
+	}
+	let forbid		= Node::Penalty(Penalty::new(Penalty::INFINITY, false));
+	let mut out		= Vec::with_capacity(lines.len() + 2);
+	let mut seen	= 0usize;	// HBoxes emitted so far
+	for node in lines {
+		let is_line = matches!(node, Node::HBox(_));
+		out.push(node);
+		if is_line {
+			seen += 1;
+			// After the first line: forbid the break that would orphan it at a page foot. After the
+			// last-but-one line: forbid the break that would widow the last line at a page head. The two
+			// coincide for a two-line paragraph, forbidding its only interior break.
+			if seen == 1 || seen == n - 1 {
+				out.push(forbid.clone());
+			}
+		}
+	}
+	out
+}
+
 /// The text each labelled cross-reference resolves to, fixed in a document-order pre-pass. A reference's
 /// supplement word and number depend only on document order, not on layout, so they are settled once here
 /// and set as static text -- Typst's own "Chapter 4" for a chapter, "Section 7.7" for a section, and
@@ -1477,9 +1521,10 @@ fn list(
 		}
 		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, margin_no, seen, idx, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
-			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK));
+			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK,
+			Some(cap_edge(style, style.text.body_size))));
 		indent_item(&mut lines, Leaf::text(markers[ei].clone()), indent);
-		nodes.extend(lines);
+		nodes.extend(guard_widows(lines));
 		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
 		// it is laid out within the item's inner measure and then shifted right by this list's indent.
 		for child in &entry.children {
@@ -1595,7 +1640,8 @@ fn build_footnote(
 	let inner	= if measure > hang { measure - hang } else { measure };
 
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true, Rgba::BLACK));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true, Rgba::BLACK,
+		Some(cap_edge(style, style.furniture.foot_size))));
 	indent_item(&mut lines, Leaf::text_dims(pre_shaped, pre_dims), hang);
 
 	let mut height = Sp::ZERO;
@@ -2983,7 +3029,7 @@ fn fm_meta_page(
 			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 		}
 		first = false;
-		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK));
+		let broken = res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK, None));
 		nodes.extend(broken);
 	}
 	Ok(())
@@ -3026,7 +3072,7 @@ fn fm_doc_meta_page(
 
 	if let Some(ack) = &fm.acknowledgement {
 		let size	= Sp(style.text.body_size.raw() * 85 / 100);
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, ack, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, ack, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK, None));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -3034,7 +3080,7 @@ fn fm_doc_meta_page(
 		foot.push(Node::Glue(Glue::fixed(gap)));
 		foot_h += gap;
 		let size	= style.text.body_size;
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, cr, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, cr, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK, None));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -3044,7 +3090,7 @@ fn fm_doc_meta_page(
 		foot_h += gap;
 		let size	= Sp(style.text.body_size.raw() * 3 / 4);
 		let line	= "This document was created using Austenite (built using Rust).";
-		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK));
+		let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, line, measure, Sp(size.raw() * 6 / 5), true, Rgba::BLACK, None));
 		for n in &broken { foot_h += node_vext(n); }
 		foot.extend(broken);
 	}
@@ -3248,7 +3294,7 @@ fn fm_about_author_page(
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::text(title))], td)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(18.0))));
 	let size	= Sp(style.text.body_size.raw() * 9 / 10);
-	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5), true, Rgba::BLACK));
+	let broken	= res!(break_paragraph(fonts.clone(), Role::Body, Dir::Ltr, size, bio, measure, Sp(size.raw() * 7 / 5), true, Rgba::BLACK, None));
 	nodes.extend(broken);
 	Ok(())
 }
@@ -3510,7 +3556,8 @@ fn reference_block(
 		pieces.push(Piece::Text { text: text.clone(), role });
 	}
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true, Rgba::BLACK));
+		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true, Rgba::BLACK,
+		Some(cap_edge(style, style.furniture.foot_size))));
 
 	// Indent every line but the first by the hang, so the entry hangs under its first line.
 	let mut first = true;
@@ -4508,14 +4555,16 @@ fn box_flow_scoped(
 			Block::Paragraph { text } => {
 				let pieces = vec![Piece::Text { text: text.clone(), role: Role::Body }];
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
+						Some(cap_edge(style, style.text.body_size))));
 				nodes.extend(lines);
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
 					fonts.clone(), geom, style, segments, foot_no, ref_no, margin_no, seen, idx, bib, refs));
 				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill));
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
+						Some(cap_edge(style, style.text.body_size))));
 				nodes.extend(lines);
 			},
 			Block::List { ordered, items } => {

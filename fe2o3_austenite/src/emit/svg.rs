@@ -287,13 +287,13 @@ mod tests {
 
 		// A run set red renders red glyphs.
 		let rnodes	= res!(break_paragraph(
-			fonts.clone(), Role::Body, Dir::Ltr, size, "Red prose here", measure, leading, false, Rgba::opaque(255, 0, 0)));
+			fonts.clone(), Role::Body, Dir::Ltr, size, "Red prose here", measure, leading, false, Rgba::opaque(255, 0, 0), None));
 		let rsvg	= res!(render_text_leaves(geom, &rnodes));
 		assert!(rsvg.contains("fill=\"#ff0000\""), "a paragraph set red must draw red glyphs, found: {}", rsvg);
 
 		// The default fill (black) renders black glyphs and never red.
 		let bnodes	= res!(break_paragraph(
-			fonts.clone(), Role::Body, Dir::Ltr, size, "Black prose here", measure, leading, false, Rgba::BLACK));
+			fonts.clone(), Role::Body, Dir::Ltr, size, "Black prose here", measure, leading, false, Rgba::BLACK, None));
 		let bsvg	= res!(render_text_leaves(geom, &bnodes));
 		assert!(bsvg.contains("fill=\"#000000\""), "a default paragraph must draw black glyphs");
 		assert!(!bsvg.contains("fill=\"#ff0000\""), "a default paragraph must never draw red");
