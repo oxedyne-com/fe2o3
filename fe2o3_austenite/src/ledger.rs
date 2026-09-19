@@ -151,13 +151,6 @@ impl Anchor {
 		Self { id, pos, reserved: Sp::ZERO, realised: Sp::ZERO, region: Region::Body }
 	}
 
-	/// The same anchor, tagged for a float band. A body anchor keeps the [`Region::Body`] default; only a
-	/// float's own anchor, recorded as the float is placed, claims [`Region::Top`] or [`Region::Foot`].
-	pub fn with_region(mut self, region: Region) -> Self {
-		self.region = region;
-		self
-	}
-
 	/// Did the resolved value outgrow the width held open for it?
 	pub fn overflowed(&self) -> bool {
 		self.realised > self.reserved
@@ -304,15 +297,43 @@ pub struct Ledger {
 	// the running head is dropped and the folio centres at the foot, as the template sets its back matter.
 	// Zero when the document carries no back matter.
 	pub back_matter_start_page:	u32,
+	// The region every anchor recorded from here on is stamped with, until it changes again. Body flow
+	// leaves it at the default [`Region::Body`]; laying a float's own material sets it to the float's band
+	// for that material's duration (see [`enter_region`](Self::enter_region)), so an anchor recorded through
+	// `place_line`, `place_vbox` or `place_leaf` while a float's body is laid inherits the float's band just
+	// as the float's own direct anchor does -- membership is complete, not limited to the float's top-level
+	// nodes.
+	current_region:	Region,
 }
 
 impl Ledger {
 	pub fn new() -> Self {
-		Self { entries: BTreeMap::new(), total_pages: 0, body_start_page: 0, back_matter_start_page: 0 }
+		Self {
+			entries:				BTreeMap::new(),
+			total_pages:			0,
+			body_start_page:		0,
+			back_matter_start_page:	0,
+			current_region:			Region::Body,
+		}
+	}
+
+	/// Sets the region newly recorded anchors are stamped with, returning the region it replaced so the
+	/// caller can restore it once the material that region covers has been laid. Called around a float's
+	/// body so every anchor recorded while it is laid -- direct or nested -- claims the float's band.
+	pub fn enter_region(&mut self, region: Region) -> Region {
+		std::mem::replace(&mut self.current_region, region)
+	}
+
+	/// Restores the region a matching [`enter_region`](Self::enter_region) replaced.
+	pub fn leave_region(&mut self, prev: Region) {
+		self.current_region = prev;
 	}
 
 	/// Records an anchor's placement, replacing any earlier record of the same identity within this
 	/// pass. The last placement wins because a pass overwrites a stale one as it re-lays the stream.
+	/// The anchor is stamped with the ledger's [`current_region`](Self::current_region), overriding
+	/// whatever `Anchor::new` defaulted it to, so region membership follows where the anchor was actually
+	/// recorded rather than which call site happened to record it.
 	///
 	/// The first heading recorded fixes where the body opens, and the bibliography marker (the only
 	/// Citation-kind anchor) where the back matter does. The front matter sets only Label anchors, so the
@@ -321,7 +342,8 @@ impl Ledger {
 	/// keep box (a `#section-banner` section's inline level-1 heading, the `DocInline` idiom). Detecting it
 	/// only among top-level nodes left the inline idiom with a zero `body_start_page`, so its front-matter
 	/// pages were mistaken for body pages and stamped with a folio and footer logo.
-	pub fn record(&mut self, anchor: Anchor) {
+	pub fn record(&mut self, mut anchor: Anchor) {
+		anchor.region = self.current_region;
 		if self.body_start_page == 0 && anchor.id.kind == AnchorKind::Heading {
 			self.body_start_page = anchor.pos.page;
 		}
@@ -454,7 +476,9 @@ impl FromDat for Ledger {
 			let a = res!(Anchor::from_dat(d));
 			entries.insert(a.id.clone(), a);
 		}
-		Ok(Self { entries, total_pages, body_start_page, back_matter_start_page })
+		// A decoded ledger is never reflowed, so it needs no live region-recording state; default it as
+		// `Ledger::new` does.
+		Ok(Self { entries, total_pages, body_start_page, back_matter_start_page, current_region: Region::Body })
 	}
 }
 

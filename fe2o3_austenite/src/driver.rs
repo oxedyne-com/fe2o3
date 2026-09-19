@@ -390,10 +390,16 @@ fn place_float<M: Metrics>(
 	incoming:	&Ledger,
 	frame:		&mut Frame,
 	ledger:		&mut Ledger,
-	region:		Region,	// the band the float lands in, carried onto its anchor so a later shift moves it with its band
+	region:		Region,	// the band the float lands in; every anchor recorded while its material is laid inherits it
 )
 	-> Outcome<()>
 {
+	// Every anchor recorded from here on -- the float's own direct `Node::Anchor`, and any nested through
+	// `place_line`, `place_vbox` or `place_leaf` (a margin note, claim label, ref or index entry inside the
+	// float's body) -- claims this float's band, restored once its material is laid. Membership is decided
+	// here, at the one place that knows a float's material is being laid, rather than at each helper that
+	// happens to record an anchor.
+	let prev_region = ledger.enter_region(region);
 	let mut yy = y_top;
 	for child in &f.list {
 		match child {
@@ -413,8 +419,7 @@ fn place_float<M: Metrics>(
 				yy += l.dims.vextent();
 			},
 			Node::Anchor(id) => {
-				ledger.record(Anchor::new(
-					id.clone(), Position::new(page_no, geom.content_left(), yy)).with_region(region));
+				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
 			},
 			Node::Penalty(_)	=> (),
 			// A float never nests inside another float; a nested one would be a construction error, so it is
@@ -422,6 +427,7 @@ fn place_float<M: Metrics>(
 			Node::Float(_)		=> (),
 		}
 	}
+	ledger.leave_region(prev_region);
 	Ok(())
 }
 

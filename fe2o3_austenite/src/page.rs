@@ -88,9 +88,10 @@ pub enum PlacedKind {
 /// A body line whose glyphs were raised above the body band's top edge by cap-height seating (see
 /// `linebreak::raise_leaves`) still belongs to the body, and moves down with it when a top float is inserted
 /// above; keying the shift on the raised glyph y instead would leave that line drawn under the float.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Region {
 	Top,	// a top float's band, stacked from the page top down
+	#[default]
 	Body,	// the flowing column between the two float bands
 	Foot,	// a foot float's band (footnotes are laid here too, once the page closes and nothing more shifts)
 }

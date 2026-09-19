@@ -123,6 +123,18 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own float+marginalia fixture -- the anchor-region-membership regression root. A
+			// margin-note anchor recorded INSIDE a top-placed `#aside-box` float's body, nested through
+			// `place_line`/`place_vbox`/`place_leaf` rather than as the float's own direct `Node::Anchor`, must
+			// inherit the float's region so a later float insertion on the same page does not drag it off its
+			// own line. See the file for why neither `float-fixture` nor `marginalia-fixture` alone exercises
+			// this; self-contained, needs no symbol-modifier patch.
+			name:				"float-marginalia-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/float_marginalia_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
