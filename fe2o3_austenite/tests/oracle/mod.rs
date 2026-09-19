@@ -225,8 +225,18 @@ struct AusOutput {
 /// Compiles `root` with the built `austenite` binary into the harness's working directory, reading back
 /// the page count from its stdout status line and the anchor table from the `--ledger-out` JSON this
 /// unit adds to `src/bin/austenite.rs`.
+///
+/// The render output dir is keyed by `RC_SLOT` (env, defaulting to `"solo"` outside the fleet) AND this
+/// process's own PID, not by `root.name` alone: `qc_dir()` is one fixed, shared path across every
+/// concurrent lane (see its own doc comment), so two lanes compiling the same corpus root at once used to
+/// render into and sha256 the SAME `document.pdf` -- one lane's hash check could read the other's
+/// half-written or differently-versioned file, a harness race a Fable audit root-caused as the source of
+/// "one run differs, a re-run passes" false reds, not engine nondeterminism. `baseline.json` and
+/// `expected.json` stay unkeyed and shared -- they are read-only pins, not a render target.
 fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
-	let out_dir			= work_dir.join(fmt!("{}-austenite-out", root.name));
+	let slot			= std::env::var("RC_SLOT").unwrap_or_else(|_| "solo".to_string());
+	let pid				= std::process::id();
+	let out_dir			= work_dir.join(fmt!("{}-austenite-out-{}-{}", root.name, slot, pid));
 	let ledger_json_path	= work_dir.join(fmt!("{}-ledger.json", root.name));
 	let bin				= env!("CARGO_BIN_EXE_austenite");
 
