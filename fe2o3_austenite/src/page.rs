@@ -118,13 +118,14 @@ impl Frame {
 		self.placed.is_empty()
 	}
 
-	/// Translates every placed item whose top sits above `above` down the page by `by`. This is how a
-	/// top float inserted into a part-filled page makes room: the body already laid on the page shifts
-	/// down, while anything at or below `above` -- a foot float's reserved band -- stays put. It mirrors
-	/// Typst's relayout, which re-flows the whole region when a float is inserted.
-	pub fn shift_y(&mut self, by: Sp, above: Sp) {
+	/// Translates every placed item whose top sits in the half-open band `[from, upto)` by `by` (down for a
+	/// positive `by`, up for a negative one). This is how a float inserted into a part-filled page makes
+	/// room without disturbing the other region: a top float shifts the body band down and leaves the foot
+	/// band alone; a foot float shifts the existing foot band up and leaves the body and top bands alone.
+	/// It mirrors Typst's relayout, which re-flows the whole region when a float is inserted.
+	pub fn shift_y(&mut self, by: Sp, from: Sp, upto: Sp) {
 		for item in &mut self.placed {
-			if item.y < above {
+			if item.y >= from && item.y < upto {
 				item.y = item.y + by;
 			}
 		}

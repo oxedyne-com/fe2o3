@@ -268,13 +268,13 @@ impl Ledger {
 		self.entries.get(id)
 	}
 
-	/// Shifts every anchor on `page` whose position is above `above` down by `by` -- the ledger's half of
-	/// a top-float insertion, kept in step with [`Frame::shift_y`](crate::page::Frame::shift_y) so a
-	/// reference to a body anchor that moved down for a float resolves to where the ink actually landed.
-	/// An anchor at or below `above` (a foot float's own) is left where it sits.
-	pub fn shift_anchors(&mut self, page: u32, by: Sp, above: Sp) {
+	/// Shifts every anchor on `page` whose position lies in the half-open band `[from, upto)` by `by` -- the
+	/// ledger's half of a float insertion, kept in step with [`Frame::shift_y`](crate::page::Frame::shift_y)
+	/// so a reference to a body anchor that moved for a float resolves to where the ink actually landed. An
+	/// anchor outside the band (in the other region) is left where it sits.
+	pub fn shift_anchors(&mut self, page: u32, by: Sp, from: Sp, upto: Sp) {
 		for anchor in self.entries.values_mut() {
-			if anchor.pos.page == page && anchor.pos.y < above {
+			if anchor.pos.page == page && anchor.pos.y >= from && anchor.pos.y < upto {
 				anchor.pos.y = anchor.pos.y + by;
 			}
 		}

@@ -188,7 +188,7 @@ fn compose<M: Metrics>(
 	// the geometry and does not threaten convergence. `bot_reserve` is the height a page's foot floats
 	// claimed, held back from the body for the life of that page.
 	let mut pending:	Vec<FloatNode>	= Vec::new();
-	let mut bot_reserve				= Sp::ZERO;
+	let mut bands					= FloatBands::empty();
 
 	for node in &doc.nodes {
 		match node {
@@ -203,11 +203,13 @@ fn compose<M: Metrics>(
 				if p.is_forced() && !frame.is_empty() {
 					res!(finish_page(
 						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
-					bot_reserve = res!(flush_floats(
-						&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+						&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
+					bands = FloatBands::empty();
+					res!(flush_floats(
+						&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
 						metrics, incoming, &mut ledger));
-					at_top = frame.is_empty();
+					// The body resumes at the region top below any flushed top floats, its leading collapsed.
+					at_top = true;
 				}
 			},
 			Node::Anchor(id) => {
@@ -217,45 +219,23 @@ fn compose<M: Metrics>(
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
 			Node::Float(f) => {
-				// A float never sets at the cursor -- it is inserted into the page's top or foot region, and
-				// the body already on the page shifts to make room (Typst's relayout). An earlier queued
-				// float holds this one back so document order is kept.
+				// A float never sets at the cursor -- it is inserted into the page's top or foot region and the
+				// body already on the page shifts to make room (Typst's relayout). An earlier queued float holds
+				// this one back so document order is kept; a float that will not fit here defers likewise.
 				if !pending.is_empty() {
 					pending.push(f.clone());
 				} else {
-					// Clearance frames a float only when the page carries other content; the remaining body
-					// space is what is left between the cursor and the foot region, and `need` is what the
-					// float claims from it.
-					let base		= geom.content_height();
-					let clearance	= if frame.is_empty() { Sp::ZERO } else { f.clearance };
-					let need		= f.height + clearance;
-					let remaining	= (bottom - bot_reserve) - y;
-					if need <= remaining || frame.is_empty() {
-						let used = base - remaining;
-						let side = match f.placement {
-							FloatPlacement::Top		=> FloatPlacement::Top,
-							FloatPlacement::Bottom	=> FloatPlacement::Bottom,
-							FloatPlacement::Auto	=> auto_side(used, need, base),
-						};
-						match side {
-							FloatPlacement::Bottom => {
-								// The float seats against the foot region, clearance above it; its whole `need`
-								// is held back from the body for the rest of the page.
-								let y_top = bottom - bot_reserve - f.height;
-								res!(place_float(f, y_top, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
-								bot_reserve = bot_reserve + need;
-							},
-							// Top (auto resolves to top or bottom above, so this arm is top).
-							_ => {
-								// Make room: the body already on the page drops by `need`, then the float takes
-								// the freed band at the content top, the clearance its gap below.
-								frame.shift_y(need, bottom - bot_reserve);
-								ledger.shift_anchors(page_no, need, bottom - bot_reserve);
-								res!(place_float(f, top, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
-								y += need;
-								at_top = false;
-							},
-						}
+					let was_empty	= frame.is_empty();
+					let foot_now	= foot_reserve(&notes, &[], &doc.foot);
+					// Clearance counts in the fit only when the page already carries content; an empty page
+					// seats the float regardless (`force`) and overflows rather than deferring forever.
+					let ok = res!(try_insert_float(
+						f, !was_empty, was_empty, &mut y, &mut bands, foot_now, page_no, geom, top, bottom,
+						metrics, incoming, &mut frame, &mut ledger));
+					if ok {
+						// A float on an otherwise-empty page keeps the region top for the body that follows, so
+						// that body's leading collapses; mid-page, the body already sets the cursor.
+						at_top = was_empty;
 					} else {
 						pending.push(f.clone());
 					}
@@ -270,12 +250,13 @@ fn compose<M: Metrics>(
 				let mut marks: Vec<Footnote> = Vec::new();
 				collect_marks(node, &mut marks);
 				let reserve = foot_reserve(&notes, &marks, &doc.foot);
-				if !frame.is_empty() && y + v > bottom - bot_reserve - reserve {
+				if !frame.is_empty() && y + v > bottom - bands.bot_reserve - reserve {
 					res!(finish_page(
 						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
-					bot_reserve = res!(flush_floats(
-						&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+						&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
+					bands = FloatBands::empty();
+					res!(flush_floats(
+						&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
 						metrics, incoming, &mut ledger));
 				}
 				res!(place_node(node, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
@@ -286,26 +267,28 @@ fn compose<M: Metrics>(
 		}
 	}
 
-	// The floats still queued at the end are set now: as many as fit on the current page, then a fresh page
-	// per remaining batch, so the queue always drains rather than a float being lost. A fresh, empty page
-	// seats at least its front float (even one taller than the column, which overflows rather than spins),
-	// so `pending` shrinks by at least one per fresh page and the loop terminates.
+	// The floats still queued at the end are set now: as many as fit on the current page (respecting the
+	// bands and footnotes it already carries), then a fresh page per remaining batch, so the queue always
+	// drains rather than a float being lost. A fresh, empty page seats at least its front float (even one
+	// taller than the column, which overflows rather than spins), so `pending` shrinks by at least one per
+	// fresh page and the loop terminates.
 	loop {
-		bot_reserve = res!(flush_floats(
-			&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+		let foot_now = foot_reserve(&notes, &[], &doc.foot);
+		res!(flush_floats(
+			&mut pending, &mut frame, &mut y, &mut bands, foot_now, page_no, geom, top, bottom,
 			metrics, incoming, &mut ledger));
 		if pending.is_empty() {
 			break;
 		}
 		res!(finish_page(
 			&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-			&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
-		// The fresh page opens with no foot reserve; the next flush recomputes it.
+			&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
+		bands = FloatBands::empty();
 	}
 
 	// The last page holds whatever is left, unless nothing is; its footnotes are set at its foot first.
 	if !frame.is_empty() {
-		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom - bot_reserve, metrics, incoming, &mut ledger));
+		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom - bands.bot_reserve, metrics, incoming, &mut ledger));
 		pages.push(Page::new(page_no, geom, std::mem::take(&mut frame)));
 	} else if pages.is_empty() {
 		// A document with no material is still one blank page, so a page count is always at least one.
@@ -404,64 +387,119 @@ fn place_float<M: Metrics>(
 	Ok(())
 }
 
-/// Sets the queued floats that fit on a freshly opened page, in document order, and returns the height its
-/// foot floats claimed (held back from the body for the rest of the page). Each float takes the same
-/// midpoint decision the in-flow path does ([`auto_side`]), with `used` the height already inserted this
-/// flush: a top float stacks from the top cursor down (its clearance the gap below it), a foot float seats
-/// against the foot region (its clearance the gap above it). The front float of an empty page is set even
-/// when it is taller than the column -- overflowing rather than deferring forever -- and flushing stops at
-/// the first float that will not fit the space left, so a float never jumps ahead of an earlier one.
+/// A page's float bands: the top band already stacked (top floats plus their clearances) and the foot band
+/// already reserved (foot floats plus their clearances). The body fills what is left between them.
+#[derive(Clone, Copy, Debug)]
+struct FloatBands {
+	top_used:		Sp,
+	bot_reserve:	Sp,
+}
+
+impl FloatBands {
+	fn empty() -> Self { Self { top_used: Sp::ZERO, bot_reserve: Sp::ZERO } }
+}
+
+/// Inserts one float into the current page's top or foot region by Typst's rule, shifting the body (a top
+/// float) or the existing foot band (a foot float) to make room -- Typst re-flows the region on a float
+/// insertion; this shifts only what moved. `clearance_flag` is whether the clearance counts in the FIT and
+/// midpoint budget: Typst sets it only when the page already carries flow content, and a re-queued float is
+/// re-processed with it false. The clearance is ALWAYS laid in the band, per Typst's finalize. `force`
+/// seats the float even when it will not fit (an empty page's front float, which overflows rather than
+/// deferring forever). `foot_now` is the footnote furniture already reserved, so a float never lands over
+/// the notes. Returns `true` when placed, `false` when it does not fit and `force` is unset.
+#[allow(clippy::too_many_arguments)]
+fn try_insert_float<M: Metrics>(
+	f:				&FloatNode,
+	clearance_flag:	bool,
+	force:			bool,
+	y:				&mut Sp,
+	bands:			&mut FloatBands,
+	foot_now:		Sp,
+	page_no:		u32,
+	geom:			PageGeometry,
+	top:			Sp,
+	bottom:			Sp,
+	metrics:		&M,
+	incoming:		&Ledger,
+	frame:			&mut Frame,
+	ledger:			&mut Ledger,
+)
+	-> Outcome<bool>
+{
+	let base		= geom.content_height();
+	let band		= f.height + f.clearance;	// finalize always lays the clearance
+	let need_fit	= f.height + if clearance_flag { f.clearance } else { Sp::ZERO };
+	let remaining	= (bottom - bands.bot_reserve - foot_now) - *y;
+	if need_fit > remaining && !force {
+		return Ok(false);
+	}
+	let used = base - remaining;
+	let side = match f.placement {
+		FloatPlacement::Top		=> FloatPlacement::Top,
+		FloatPlacement::Bottom	=> FloatPlacement::Bottom,
+		FloatPlacement::Auto	=> auto_side(used, need_fit, base),
+	};
+	match side {
+		FloatPlacement::Bottom => {
+			// Shift the existing foot band up by this float's band and seat the new float at the very foot,
+			// so document order runs top-to-bottom down the foot region (the earliest foot float highest).
+			frame.shift_y(-band, bottom - bands.bot_reserve, Sp(i32::MAX));
+			ledger.shift_anchors(page_no, -band, bottom - bands.bot_reserve, Sp(i32::MAX));
+			res!(place_float(f, bottom - f.height, page_no, geom, metrics, incoming, frame, ledger));
+			bands.bot_reserve = bands.bot_reserve + band;
+		},
+		// Top (auto resolved to top or bottom above, so this arm is top).
+		_ => {
+			// Seat the float below the top band already stacked and shift the body below it down, so document
+			// order runs top-to-bottom down the top region (the earliest top float highest).
+			let at = top + bands.top_used;
+			frame.shift_y(band, at, bottom - bands.bot_reserve);
+			ledger.shift_anchors(page_no, band, at, bottom - bands.bot_reserve);
+			res!(place_float(f, at, page_no, geom, metrics, incoming, frame, ledger));
+			bands.top_used = bands.top_used + band;
+			*y += band;
+		},
+	}
+	Ok(true)
+}
+
+/// Sets the queued floats that fit on the current page, in document order, updating its [`FloatBands`].
+/// A queued float is re-processed with `clearance_flag` false (Typst's relayout does the same); the front
+/// float of an empty page is seated even when it will not fit, so the queue always drains, and flushing
+/// stops at the first float that will not fit so a float never jumps ahead of an earlier one. `foot_now` is
+/// the footnote furniture already on the page (zero on a freshly opened one), so a float never lands over
+/// the notes -- the end-of-document drain calls this on a part-filled page and must respect them.
 #[allow(clippy::too_many_arguments)]
 fn flush_floats<M: Metrics>(
 	pending:	&mut Vec<FloatNode>,
 	frame:		&mut Frame,
 	y:			&mut Sp,
+	bands:		&mut FloatBands,
+	foot_now:	Sp,
 	page_no:	u32,
 	geom:		PageGeometry,
+	top:		Sp,
 	bottom:		Sp,
 	metrics:	&M,
 	incoming:	&Ledger,
 	ledger:		&mut Ledger,
 )
-	-> Outcome<Sp>
+	-> Outcome<()>
 {
-	let base				= geom.content_height();
-	let page_empty_at_entry	= frame.is_empty();
-	let mut bot_reserve		= Sp::ZERO;
-	let mut placed_any		= false;
-	while let Some(front) = pending.first() {
-		// The page carries body content once this flush has placed anything, so clearance frames the float;
-		// used is the top band already stacked plus the foot band already reserved.
-		let need	= front.height + front.clearance;
-		let used	= (*y - geom.content_top()) + bot_reserve;
-		let avail	= base - used;
-		// The first float on an empty page seats whatever its height; every later float must fit the space
-		// left, and flushing stops at the first that will not.
-		let force	= page_empty_at_entry && !placed_any;
-		if need > avail && !force {
+	let mut placed_any = false;
+	while !pending.is_empty() {
+		let force = frame.is_empty() && !placed_any;
+		let f = pending[0].clone();
+		let ok = res!(try_insert_float(
+			&f, false, force, y, bands, foot_now, page_no, geom, top, bottom, metrics, incoming, frame, ledger));
+		if ok {
+			pending.remove(0);
+			placed_any = true;
+		} else {
 			break;
 		}
-		let side = match front.placement {
-			FloatPlacement::Top		=> FloatPlacement::Top,
-			FloatPlacement::Bottom	=> FloatPlacement::Bottom,
-			FloatPlacement::Auto	=> auto_side(used, need, base),
-		};
-		let f = pending.remove(0);
-		match side {
-			FloatPlacement::Bottom => {
-				let y_top = bottom - bot_reserve - f.height;
-				res!(place_float(&f, y_top, page_no, geom, metrics, incoming, frame, ledger));
-				bot_reserve = bot_reserve + need;
-			},
-			// Top (auto resolves to top or bottom above, so this arm is top).
-			_ => {
-				res!(place_float(&f, *y, page_no, geom, metrics, incoming, frame, ledger));
-				*y += need;
-			},
-		}
-		placed_any = true;
 	}
-	Ok(bot_reserve)
+	Ok(())
 }
 
 /// Dispatches a node to the placement helper for its shape. The break decision is the caller's; this
