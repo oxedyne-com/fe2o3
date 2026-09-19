@@ -301,7 +301,21 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 			res!(book::install_term_dict(dir));
 			res!(book::install_term_defs(dir));
 		}
-		let (mut blocks, mut skips)	= res!(lang::to_blocks_with_refusals(&src));
+		// A lone file may carry its own `#show: doc.with(...)` or a lowerable top-level `#set`; the reader
+		// captures those rather than refusing them, so their styling is lowered onto the theme here --
+		// otherwise the capture would be a silent skip. Lowered before the blocks are read so a furniture
+		// definition resolves its `em` insets against the file's own body size.
+		let mut style	= Theme::default();
+		lang::set::lower_root_declarations(&src, &mut style);
+		// Collect the file's own `#let` furniture (an `#aside-box`/`#pr-note` defined in the lone file) and
+		// its `#let colours` palette, so a lone chapter honours its own furniture exactly as the book
+		// assembler does for a whole book -- a call to one expands into its padded box (or floating figure)
+		// rather than being dropped as an unknown construct.
+		let mut palette	= lang::rules::Palette::new();
+		let mut tfns	= lang::rules::TemplateFns::new();
+		lang::rules::collect_palette(&src, &mut palette);
+		lang::rules::collect_template_fns(&src, style.text.body_size, &palette, &mut tfns);
+		let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, &tfns));
 		skips.tag_file(source);
 		skip_line = terse_skip_line(&skips);
 		refusals = skips;
@@ -311,11 +325,6 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
 		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));
 		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		// A lone file may carry its own `#show: doc.with(...)` or a lowerable top-level `#set`; the reader
-		// captures those rather than refusing them, so their styling is lowered onto the theme here --
-		// otherwise the capture would be a silent skip.
-		let mut style	= Theme::default();
-		lang::set::lower_root_declarations(&src, &mut style);
 		// The styling rule engine runs over the lone chapter's block tree here, at the blocks->author seam,
 		// before its faces are resolved -- so a rule-named face reaches the resolver. The default rules
 		// re-assert the theme's own heading sizes (byte-neutral); the file's own `#show <selector>:
