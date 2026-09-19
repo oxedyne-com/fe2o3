@@ -4470,12 +4470,15 @@ pub fn decorate(
 				if a.pos.page < page.number {
 					if h.level == 1 { chapter = Some(h); }
 				} else if a.pos.page == page.number {
-					// A chapter (or part divider) that resolves to this page opens it: chapters and parts force a
-					// fresh page, so a level-1/level-0 heading present here is this page's opener, whether it sits
-					// at the very top or has been shifted down by a top float set above it. Detecting the opener
-					// by its presence rather than by `y == content_top` is what keeps a running head and folio off
-					// a chapter-opener page that also carries an automatic float (which pushes the title down).
-					if h.level == 1 { opens = true; }
+					// A chapter (or part divider) that resolves to this page opens it: a book/doc-banner chapter
+					// and a part divider force a fresh page, so a level-1/level-0 heading present here is this
+					// page's opener, whether it sits at the very top or has been shifted down by a top float set
+					// above it -- detecting it by presence rather than by `y == content_top` is what keeps a
+					// running head and folio off a float-shifted opener. A DocInline section (`= Section` mid-file,
+					// no banner) does NOT force a page and sits mid-page, so it must NOT be read as an opener or
+					// the previous section's running head would wrongly drop; it is admitted only when it carries
+					// a banner, matching the opener test the chapter-banner path uses.
+					if h.level == 1 && (h.banner || style.heading.kind != HeadingStyle::DocInline) { opens = true; }
 					if h.level == 0 { opens_part = true; }
 				} else {
 					break;	// headings are in document order, so the rest resolve to later pages

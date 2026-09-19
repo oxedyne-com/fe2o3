@@ -227,18 +227,18 @@ fn compose<M: Metrics>(
 				} else {
 					let was_empty	= frame.is_empty();
 					let foot_now	= foot_reserve(&notes, &[], &doc.foot);
-					// Clearance counts in the fit only when the page already carries content; an empty page
-					// seats the float regardless (`force`) and overflows rather than deferring forever.
+					// Clearance counts in the fit only when the page already carries FLOW content -- `at_top`
+					// tracks its absence, so `!at_top` matches Typst counting only flow frames (a float band
+					// alone is not flow content). An empty page seats the float regardless (`force`) and
+					// overflows rather than deferring forever.
 					let ok = res!(try_insert_float(
-						f, !was_empty, was_empty, &mut y, &mut bands, foot_now, page_no, geom, top, bottom,
+						f, !at_top, was_empty, &mut y, &mut bands, foot_now, page_no, geom, top, bottom,
 						metrics, incoming, &mut frame, &mut ledger));
-					if ok {
-						// A float on an otherwise-empty page keeps the region top for the body that follows, so
-						// that body's leading collapses; mid-page, the body already sets the cursor.
-						at_top = was_empty;
-					} else {
+					if !ok {
 						pending.push(f.clone());
 					}
+					// `at_top` is left unchanged: a float adds no flow content, so whether the following body's
+					// leading collapses is still governed by the flow, not by a float set into a side band.
 				}
 			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
