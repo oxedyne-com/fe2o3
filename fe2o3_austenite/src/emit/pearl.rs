@@ -30,6 +30,7 @@ use crate::page::{
 	PageGeometry,
 	PlacedKind,
 };
+use crate::vfs;
 
 use std::collections::BTreeMap;
 
@@ -435,7 +436,7 @@ impl PearlBuilder {
 
 	/// Writes the document to `path` as text jdat.
 	pub fn to_file<P: AsRef<std::path::Path>>(self, path: P) -> Outcome<()> {
-		res!(std::fs::write(path, res!(self.to_string())));
+		res!(vfs::write(path.as_ref(), res!(self.to_string()).as_bytes()));
 		Ok(())
 	}
 }
@@ -485,7 +486,7 @@ pub struct PearlDoc {
 impl PearlDoc {
 	/// Reads a `.prl` file, decoding its text jdat.
 	pub fn read_file<P: AsRef<std::path::Path>>(path: P) -> Outcome<Self> {
-		Self::from_string(res!(std::fs::read_to_string(path)))
+		Self::from_string(res!(vfs::read_to_string(path.as_ref())))
 	}
 
 	/// Decodes a Pearl document from its text-jdat form, checking the version.
@@ -771,7 +772,7 @@ impl PearlDoc {
 
 	/// Writes the document back to `path` as text jdat, carrying every later change.
 	pub fn write_file<P: AsRef<std::path::Path>>(&self, path: P) -> Outcome<()> {
-		res!(std::fs::write(path, res!(self.to_string())));
+		res!(vfs::write(path.as_ref(), res!(self.to_string()).as_bytes()));
 		Ok(())
 	}
 }

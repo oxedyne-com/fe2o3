@@ -7,6 +7,8 @@
 //! text beside the Computer Modern a reader knows from mathematics. Both are set out under permissive
 //! licences carried beside the font files (`LibertinusSerif-OFL.txt`, `latinmodern-math-GUST-LICENSE.txt`).
 
+use crate::vfs;
+
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	font::Font,
@@ -130,7 +132,7 @@ impl FaceResolver {
 fn load_variant(dir: &Path, name: &str, suffix: &str, slot: &mut Option<Arc<Font>>) {
 	for ext in ["ttf", "otf"] {
 		let path = dir.join(fmt!("{}-{}.{}", name, suffix, ext));
-		if path.is_file() {
+		if vfs::is_file(&path) {
 			if let Ok(font) = font_from_file(&path) {
 				*slot = Some(font);
 			}
@@ -167,7 +169,7 @@ pub fn font_from_file(path: &Path) -> Outcome<std::sync::Arc<Font>> {
 
 /// Reads one face from a file, naming the path when the read fails so a missing font is obvious.
 fn face_from_file(path: &Path) -> Outcome<Font> {
-	let bytes = match std::fs::read(path) {
+	let bytes = match vfs::read(path) {
 		Ok(b)	=> b,
 		Err(e)	=> return Err(err!(e, "Could not read the font file {:?}.", path; File, Read)),
 	};

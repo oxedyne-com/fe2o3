@@ -45,6 +45,7 @@ use crate::table::{
 	Row,
 	Table,
 };
+use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::set::FontSet;
@@ -233,13 +234,13 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	// relatively (`lucronics.typ`) otherwise has an empty parent, and the project directory the shared
 	// `refs.bib` and assets sit in cannot be found -- a symlinked `assets` masks this for fonts, but the
 	// bibliography one level up is missed.
-	let root_path = std::fs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
+	let root_path = vfs::canonicalize(root_path).unwrap_or_else(|_| root_path.to_path_buf());
 	let root_path = root_path.as_path();
 	let root_dir = match root_path.parent() {
 		Some(d)	=> d.to_path_buf(),
 		None	=> return Err(err!("The book root {:?} has no parent directory.", root_path; Input, Invalid)),
 	};
-	let root_src = match std::fs::read_to_string(root_path) {
+	let root_src = match vfs::read_to_string(root_path) {
 		Ok(s)	=> s,
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
@@ -253,7 +254,7 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
 	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
 	let config_path = root_dir.join("config.typ");
-	if !config_path.exists() {
+	if !vfs::exists(&config_path) {
 		return load_doc(root_path, &root_dir, &root_src);
 	}
 	load_book(root_path, &root_dir, &root_src)
@@ -265,7 +266,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// The config sits beside the root; the assets tree is one level up (the project root), holding the
 	// Libertinus directory both books share.
 	let config_path	= root_dir.join("config.typ");
-	let config_src	= match std::fs::read_to_string(&config_path) {
+	let config_src	= match vfs::read_to_string(&config_path) {
 		Ok(s)	=> s,
 		Err(e)	=> return Err(err!(e, "Could not read the book config {:?}.", config_path; File, Read)),
 	};
@@ -416,7 +417,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 /// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
 fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle)> {
 	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
-	let template = std::fs::read_to_string(root_dir.join("template.typ")).unwrap_or_default();
+	let template = vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
 
 	let paper_name	= first_quoted_after(&template, "paper:").unwrap_or_else(|| "a4".to_string());
 	let (pw_mm, ph_mm)	= paper_dims_mm(&paper_name);
@@ -472,7 +473,7 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The AI scheme address the mark links to, `<scheme>/<slug>/<medium>`, read from the shared template's
 	// `ai-scheme-url` and `ai-medium` lets (the template's `link(ai-scheme-url + "/" + slug + "/" +
 	// ai-medium, ..)`). A tree without the template falls back to the scheme's permanent home and doc medium.
-	let template		= std::fs::read_to_string(root_dir.join("template.typ")).unwrap_or_default();
+	let template		= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
 	let ai_scheme_url	= first_quoted_after(&template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
 	let ai_medium		= first_quoted_after(&template, "ai-medium").unwrap_or_else(|| "doc".to_string());
 
@@ -512,7 +513,7 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The sidebar width is `margins.title_page` in the shared template (a percentage of the page); the fill
 	// is the `title-colour` the call names, resolved to a grey level. A doc tree always draws the sidebar,
 	// so `sidebar_grey` is set here (marking the two-column idiom) even when the call omits its colour.
-	let template	= std::fs::read_to_string(root_dir.join("template.typ")).unwrap_or_default();
+	let template	= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
 	let sidebar_frac	= let_dict_field(&template, "margins", "title_page")
 		.and_then(|v| parse_percent(&v))
 		.unwrap_or(0.45);
@@ -598,7 +599,7 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 	// The path is Typst-root-relative (`/refs.bib`); resolve it against the project directory.
 	let rel		= path_str.trim_start_matches('/');
 	let bib_path	= project_dir.join(rel);
-	let src = match std::fs::read_to_string(&bib_path) {
+	let src = match vfs::read_to_string(&bib_path) {
 		Ok(s)	=> s,
 		Err(_)	=> return Ok(None),	// a named bibliography that will not read is a reported gap, not a failure
 	};
@@ -642,7 +643,7 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 		Some(p)	=> p,
 		None	=> return Ok(None),
 	};
-	let src = match std::fs::read_to_string(&bib_path) {
+	let src = match vfs::read_to_string(&bib_path) {
 		Ok(s)	=> s,
 		Err(_)	=> return Ok(None),	// a bibliography found but unreadable is a reported gap, not a failure
 	};
@@ -660,7 +661,7 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 /// map, under which every key falls back to its own text.
 pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
 	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> std::fs::read_to_string(&p).unwrap_or_default(),
+		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
 		None	=> String::new(),
 	};
 	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
@@ -673,7 +674,7 @@ pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
 /// glossary sets its header alone -- the same early return the template's style makes for an undefined key.
 pub fn install_term_defs(start_dir: &Path) -> Outcome<()> {
 	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> std::fs::read_to_string(&p).unwrap_or_default(),
+		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
 		None	=> String::new(),
 	};
 	let mut defs: HashMap<String, Vec<Segment>> = HashMap::new();
@@ -1058,7 +1059,7 @@ fn find_up(start: &Path, name: &str) -> Option<PathBuf> {
 	let mut hops	= 0usize;
 	while let Some(d) = dir {
 		let cand = d.join(name);
-		if cand.exists() {
+		if vfs::exists(&cand) {
 			return Some(cand);
 		}
 		if hops >= MAX_HOPS {
@@ -1491,7 +1492,7 @@ fn collect_book_template_fns(root_src: &str, root_dir: &Path, body_size: Sp) -> 
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
-				if let Ok(src) = std::fs::read_to_string(root_dir.join(&rel)) {
+				if let Ok(src) = vfs::read_to_string(&root_dir.join(&rel)) {
 					lang::rules::collect_template_fns(&src, body_size, &palette, &mut tfns);
 				}
 			}
@@ -1517,7 +1518,7 @@ fn walk_template_imports(
 		return;
 	}
 	let path = dir.join(rel);
-	let src = match std::fs::read_to_string(&path) {
+	let src = match vfs::read_to_string(&path) {
 		Ok(s)	=> s,
 		Err(_)	=> return,
 	};
@@ -1564,7 +1565,7 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::
 			res!(flush_inline(&mut buf, &mut blocks, &mut skips, &root_label, tfns));
 			if let Some(rel) = first_quoted(rest) {
 				let path	= root_dir.join(&rel);
-				let src		= match std::fs::read_to_string(&path) {
+				let src		= match vfs::read_to_string(&path) {
 					Ok(s)	=> s,
 					Err(e)	=> return Err(err!(e,
 						"Could not read the included chapter {:?}.", path; File, Read)),

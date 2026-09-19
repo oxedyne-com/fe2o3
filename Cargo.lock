@@ -2090,6 +2090,7 @@ dependencies = [
 name = "oxedyne_fe2o3_austenite"
 version = "0.5.0"
 dependencies = [
+ "js-sys",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_font",
  "oxedyne_fe2o3_geom",
@@ -2097,6 +2098,7 @@ dependencies = [
  "oxedyne_fe2o3_jdat",
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",
+ "wasm-bindgen",
 ]
 
 [[package]]
