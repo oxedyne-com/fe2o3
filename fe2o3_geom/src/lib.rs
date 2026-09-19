@@ -17,6 +17,7 @@
 //! - Any application requiring 2D layout calculation
 //!
 #![forbid(unsafe_code)]
+pub mod cell;
 pub mod dim;
 pub mod planar;
 pub mod proj;
