@@ -30,6 +30,7 @@
 
 pub mod bib;
 pub mod book;
+pub mod compile;
 pub mod diagram;
 pub mod doc;
 pub mod driver;

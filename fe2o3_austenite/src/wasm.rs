@@ -12,56 +12,27 @@
 //! (the engine's own message where a site is not localised to a line), never a bare access-denied line and
 //! never a JavaScript exception, so a caller composes its diagnostics from a value it always receives.
 //!
-//! Two capabilities are deliberately out of this lane and are documented as gaps rather than stubbed:
-//! the SVG carries no transparent selectable text layer (it is glyph outlines only), and a recompile is
-//! from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not build
-//! one.
+//! One capability is deliberately out of this lane and documented as a gap rather than stubbed: a recompile
+//! is from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not
+//! build one. The per-page SVG does carry a transparent selectable-text layer -- a `.tsel` twin of the
+//! glyph outlines, emitted by [`crate::emit::svg`] -- which is what [`DaimondTypst::compile_project_vector`]
+//! returns and the section rail selects over.
 
-use crate::bib::Bibliography;
-use crate::book;
-use crate::doc::{
-	self,
-	Block,
-	FrontMatter,
-	Heading,
-};
-use crate::driver::{
-	self,
-	Config,
-};
+use crate::compile;
+use crate::doc::Heading;
 use crate::emit::{
 	self,
 	svg,
 };
-use crate::font::FontMetrics;
-use crate::fonts::{
-	self,
-	FaceResolver,
-};
-use crate::ledger::{
-	AnchorId,
-	AnchorKind,
-	Ledger,
-};
-use crate::lang;
-use crate::page::{
-	Frame,
-	PageGeometry,
-};
-use crate::theme::Theme;
+use crate::fonts;
+use crate::ledger::Ledger;
+use crate::page::Frame;
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_font::{
-	face::Role,
-	set::FontSet,
-	shape::Dir,
-};
-use oxedyne_fe2o3_graphics::pdf::{
-	OutlineItem,
-	PdfPage,
-};
+use oxedyne_fe2o3_font::set::FontSet;
+use oxedyne_fe2o3_graphics::pdf::PdfPage;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -228,37 +199,13 @@ impl DaimondTypst {
 		}
 		res!(vfs::install(files));
 
-		// A figure's `/assets/...` path is root-relative; resolve it against the main file's directory, the
-		// same base the native binary records before authoring.
-		if let Some(dir) = main_path.parent() {
-			res!(crate::image::set_base_dir(dir.to_path_buf()));
-		}
-
-		// Assemble the document -- a book/doc root through the whole-book assembler, a lone file through the
-		// reader -- exactly the dispatch the native binary makes.
-		let Assembled { blocks, fonts, geom, style, title, faces, front, bib } =
-			res!(self.assemble(&main_path, fonts));
-
-		let (document, heads) =
-			res!(doc::author(fonts.clone(), geom, &style, &faces, &blocks, front.as_ref(), bib.as_ref()));
-		let metrics = FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
-		let mut out = res!(driver::run(&document, &metrics, Config::default()));
-
-		let footer_logo = front.as_ref().and_then(|f| f.footer_logo.as_deref());
-		res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, &title, footer_logo));
-
-		// Mirror the margins: a verso (even) page is the recto frame shifted to the fore-edge. A uniform
-		// margin gives a zero shift, so a non-book run is untouched -- the same step the binary makes.
-		let shift = geom.mirror_shift();
-		if shift.raw() != 0 {
-			for page in &mut out.pages {
-				if page.number % 2 == 0 {
-					for placed in &mut page.frame.placed {
-						placed.x = placed.x + shift;
-					}
-				}
-			}
-		}
+		// Assemble, author, run, decorate and mirror-shift through the shared pipeline -- the same code the
+		// native binary drives, so the two surfaces cannot drift. The lone-file path takes this instance's
+		// once-built reading set rather than rebuilding it; the base directory for `/assets/...` figures is
+		// set inside `assemble`. The refusal table and skip line are not surfaced by this lane, so they are
+		// discarded.
+		let (assembled, _refusals, _skip)	= res!(compile::assemble(&main_path, || Ok(fonts.clone())));
+		let compile::Rendered { mut out, heads, geom: _ } = res!(compile::author_and_run(assembled));
 
 		// Keep the resolved ledger and heading table for a later section-rail query.
 		self.last_ledger	= Some(out.ledger.clone());
@@ -276,7 +223,7 @@ impl DaimondTypst {
 				// Sequential emit: wasm has no threads, so the binary's parallel chunking becomes a
 				// page-at-a-time write into an in-memory buffer, freeing each frame after its page is folded in.
 				let mut buf: Vec<u8> = Vec::new();
-				let outline = build_outline(&heads, &out.ledger);
+				let outline = compile::build_outline(&heads, &out.ledger);
 				let mut pdf = res!(emit::pdf::open_document_with_outline(&mut buf, out.pages.len(), outline));
 				for page in &mut out.pages {
 					let built: PdfPage = res!(emit::pdf::render_page(page));
@@ -288,91 +235,6 @@ impl DaimondTypst {
 			},
 		}
 	}
-
-	/// Assembles the source at `main_path`: a book/doc root through [`book::load`], a lone file through the
-	/// reader with the lone-file styling, glossary and bibliography steps the native binary runs.
-	fn assemble(&self, main_path: &PathBuf, fonts: Arc<FontSet>) -> Outcome<Assembled> {
-		let src = res!(vfs::read_to_string(main_path));
-		if book::is_book_root(&src) {
-			let spec = res!(book::load(main_path));
-			return Ok(Assembled {
-				blocks:	spec.blocks,
-				fonts:	spec.fonts,
-				geom:	spec.geom,
-				style:	spec.style,
-				title:	spec.title,
-				faces:	spec.faces,
-				front:	Some(spec.front),
-				bib:	spec.bib,
-			});
-		}
-
-		// A lone file: install any term dictionary beside it, set on A4 with the embedded reading set, and
-		// run the same glossary, bibliography, styling and face-resolution steps the binary's lone path does.
-		if let Some(dir) = main_path.parent() {
-			res!(book::install_term_dict(dir));
-			res!(book::install_term_defs(dir));
-		}
-		let (mut blocks, mut skips) = res!(lang::to_blocks_with_refusals(&src));
-		skips.tag_file(&main_path.display().to_string());
-		book::resolve_glossary(&mut blocks);
-		let bib = res!(book::load_lone_bibliography(main_path, &mut blocks));
-		let mut style = Theme::default();
-		lang::set::lower_root_declarations(&src, &mut style);
-		let rules = lang::rules::rule_set_for(&style, &src, &mut skips);
-		lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
-		let faces = match main_path.parent() {
-			Some(dir)	=> book::face_resolver(dir, &style, &blocks),
-			None		=> FaceResolver::default(),
-		};
-		book::note_missing_face_variants(&style, &blocks, &faces, &mut skips);
-		Ok(Assembled {
-			blocks,
-			fonts,
-			geom:	PageGeometry::a4(),
-			style,
-			title:	String::new(),
-			faces,
-			front:	None,
-			bib,
-		})
-	}
-}
-
-/// The pieces a compile needs after assembly, from either the whole-book path or the lone-file path.
-struct Assembled {
-	blocks:	Vec<Block>,
-	fonts:	Arc<FontSet>,
-	geom:	PageGeometry,
-	style:	Theme,
-	title:	String,
-	faces:	FaceResolver,
-	front:	Option<FrontMatter>,
-	bib:	Option<Bibliography>,
-}
-
-/// Builds the PDF outline (title, meta and contents leaves, then every body heading) from the resolved
-/// ledger, mirroring the native binary's outline so a viewer's bookmark panel matches.
-fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
-	let mut items: Vec<OutlineItem> = Vec::new();
-	let front = [
-		("frontmatter:title",		"Title"),
-		("frontmatter:meta",		"Meta"),
-		("frontmatter:contents",	"Contents"),
-	];
-	for (key, label) in front {
-		let id = AnchorId::new(AnchorKind::Label, key);
-		if let Some(page) = ledger.page_of(&id) {
-			items.push(OutlineItem { title: label.to_string(), page: (page - 1) as usize, level: 0 });
-		}
-	}
-	for h in heads {
-		if let Some(page) = ledger.page_of(&h.id) {
-			let level = (h.level.max(1) - 1) as u8;
-			items.push(OutlineItem { title: h.title.clone(), page: (page - 1) as usize, level });
-		}
-	}
-	items
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

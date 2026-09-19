@@ -15,46 +15,24 @@
 //! its `config.typ`, or its assets.
 
 use oxedyne_fe2o3_austenite::{
-	book,
-	doc::{
-		self,
-		Heading,
-	},
-	theme::Theme,
-	driver::{
-		self,
-		Config,
-	},
+	compile,
 	emit::{
 		self,
 		svg,
 	},
-	font::FontMetrics,
 	ir::DrawOp,
-	ledger::{
-		AnchorId,
-		AnchorKind,
-		Ledger,
-	},
+	ledger::Ledger,
 	lang,
 	page::{
 		Frame,
 		Page,
-		PageGeometry,
 		PlacedKind,
 	},
 	watch,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_font::{
-	face::Role,
-	shape::Dir,
-};
-use oxedyne_fe2o3_graphics::pdf::{
-	OutlineItem,
-	PdfPage,
-};
+use oxedyne_fe2o3_graphics::pdf::PdfPage;
 use oxedyne_fe2o3_jdat::prelude::*;
 
 use std::fs::File;
@@ -133,19 +111,6 @@ fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
 	Ok(Prepared { pdf })
 }
 
-/// The one terse skip line -- `skipped: #show ×2, #columns ×1` -- built from the summary's per-name
-/// counts, or `None` when the reader set everything it met. Ordered by the summary (descending count,
-/// then name), so the line leads with the construct that cost the most.
-fn terse_skip_line(skips: &lang::Refusals) -> Option<String> {
-	if skips.is_empty() {
-		return None;
-	}
-	let parts: Vec<String> = skips.entries().into_iter()
-		.map(|(n, c)| fmt!("{} ×{}", n, c))
-		.collect();
-	Some(fmt!("skipped: {}", parts.join(", ")))
-}
-
 /// The detailed report `--explain` prints: every refused site, one per line, as `file:line:col: <class>:
 /// skipped <name>` with the source line beneath it and a `^` caret under the column the span starts at.
 /// Each referenced file is read at most once, cached by path, and a file that has since moved or gone
@@ -217,41 +182,6 @@ fn ledger_dump_json(ledger: &Ledger) -> Outcome<String> {
 	Dat::List(rows).json()
 }
 
-/// Builds the PDF document outline (the viewer's bookmark side panel) from the resolved ledger: the
-/// three front-matter leaves first -- title page, meta (imprint) page and contents -- then every body
-/// heading in reading order. The front-matter pages carry no heading of their own, so the block layer
-/// records a `Label` anchor at the top of each (`frontmatter:title`, `frontmatter:meta`,
-/// `frontmatter:contents`); this reads their page back from the ledger. A leaf the book omits sets no
-/// anchor, so its entry is simply absent. Body headings resolve their page through the heading anchor,
-/// and their depth matches the contents list -- a chapter or a part at the top, deeper headings nested
-/// under it. Pages are zero-based, as [`OutlineItem`] wants; the ledger stores them one-based.
-fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
-	let mut items: Vec<OutlineItem> = Vec::new();
-
-	// The front matter, at the top and at depth zero, so it stands as a sibling of the first body level.
-	let front = [
-		("frontmatter:title",		"Title"),
-		("frontmatter:meta",		"Meta"),
-		("frontmatter:contents",	"Contents"),
-	];
-	for (key, label) in front {
-		let id = AnchorId::new(AnchorKind::Label, key);
-		if let Some(page) = ledger.page_of(&id) {
-			items.push(OutlineItem { title: label.to_string(), page: (page - 1) as usize, level: 0 });
-		}
-	}
-
-	// Every body heading, its depth the contents indent: a chapter or a part at depth zero, a `==`
-	// section at one, and so on. A heading the ledger has not fixed is skipped rather than guessed.
-	for h in heads {
-		if let Some(page) = ledger.page_of(&h.id) {
-			let level = (h.level.max(1) - 1) as u8;
-			items.push(OutlineItem { title: h.title.clone(), page: (page - 1) as usize, level });
-		}
-	}
-	items
-}
-
 /// Compiles the Typst root at `source` into `out_dir`, writing every page's SVG, the resolved ledger,
 /// and one PDF of the whole run. `ledger_out`, when given, also writes the terse kind/label/page JSON
 /// dump ([`ledger_dump_json`]) the oracle harness compares against a Typst `query`. Returns the counts
@@ -268,112 +198,20 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	};
 	let t_all = std::time::Instant::now();
 
-	let src = match std::fs::read_to_string(source) {
-		Ok(s)	=> s,
-		Err(e)	=> return Err(err!(e,
-			"Could not read the source file {:?}.", source; File, Read)),
-	};
-
-	// A figure's `/assets/...` image path is root-relative in Typst, not filesystem-absolute; the image
-	// loader resolves it against this directory and, failing that, its ancestors, so a chapter compiled
-	// on its own finds the shared assets through the book's `assets` entry just as a whole book does.
-	if let Some(dir) = std::path::Path::new(source).parent() {
-		res!(oxedyne_fe2o3_austenite::image::set_base_dir(dir.to_path_buf()));
-	}
-
-	// A book root assembles chapters and carries its own geometry, fonts and type; a lone file sets on
-	// A4 with the embedded Libertinus, as before. The block stream, geometry, style and faces come from
-	// one place or the other, and the rest of the run is identical.
+	// Assemble the document -- a book or doc root through the whole-book assembler, a lone file through the
+	// reader -- and then author, run, decorate and mirror-shift it. Both stages live in `compile`, shared
+	// verbatim with the wasm surface so the two cannot drift. The lone-file path builds the embedded
+	// Libertinus through the thunk, only when it is in fact a lone file.
 	let t_parse = std::time::Instant::now();
-	// The terse skip line, set from whichever path assembles the source: a book or doc root through
-	// `book::load`'s merged tally, a lone file through its own reader summary.
-	let skip_line: Option<String>;
-	let mut refusals: lang::Refusals;
-	let (blocks, fonts, geom, style, title, faces, front, bib) = if book::is_book_root(&src) {
-		// A book or doc root assembles its chapters through the reader and merges each chapter's refusal
-		// table into one, so a whole-book or whole-doc compile reports its skipped constructs on the same
-		// terse line the lone-file path prints, and `--explain` walks every chapter's sites.
-		let spec = res!(book::load(std::path::Path::new(source)));
-		skip_line = terse_skip_line(&spec.skips);
-		refusals = spec.skips;
-		(spec.blocks, spec.fonts, spec.geom, spec.style, spec.title, spec.faces, Some(spec.front), spec.bib)
-	} else {
-		// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
-		// `#t`/`#g` term calls resolve to their values just as in a whole-book compile.
-		if let Some(dir) = std::path::Path::new(source).parent() {
-			res!(book::install_term_dict(dir));
-			res!(book::install_term_defs(dir));
-		}
-		// A lone file may carry its own `#show: doc.with(...)` or a lowerable top-level `#set`; the reader
-		// captures those rather than refusing them, so their styling is lowered onto the theme here --
-		// otherwise the capture would be a silent skip. Lowered before the blocks are read so a furniture
-		// definition resolves its `em` insets against the file's own body size.
-		let mut style	= Theme::default();
-		lang::set::lower_root_declarations(&src, &mut style);
-		// Collect the file's own `#let` furniture (an `#aside-box`/`#pr-note` defined in the lone file) and
-		// its `#let colours` palette, so a lone chapter honours its own furniture exactly as the book
-		// assembler does for a whole book -- a call to one expands into its padded box (or floating figure)
-		// rather than being dropped as an unknown construct.
-		let mut palette	= lang::rules::Palette::new();
-		let mut tfns	= lang::rules::TemplateFns::new();
-		lang::rules::collect_palette(&src, &mut palette);
-		lang::rules::collect_template_fns(&src, style.text.body_size, &palette, &mut tfns);
-		let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, &tfns));
-		skips.tag_file(source);
-		skip_line = terse_skip_line(&skips);
-		refusals = skips;
-		// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
-		book::resolve_glossary(&mut blocks);
-		// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile
-		// sets Chicago author-year in text and a reference list at the end rather than the raw cite key.
-		let bib		= res!(book::load_lone_bibliography(std::path::Path::new(source), &mut blocks));
-		let fonts	= Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()));
-		// The styling rule engine runs over the lone chapter's block tree here, at the blocks->author seam,
-		// before its faces are resolved -- so a rule-named face reaches the resolver. The default rules
-		// re-assert the theme's own heading sizes (byte-neutral); the file's own `#show <selector>:
-		// <transform>` rules are appended, refused where a transform reads the page or an unread field.
-		let rules = lang::rules::rule_set_for(&style, &src, &mut refusals);
-		// A lone file sets on A4 (its geometry below), so the placement width a template resolves against is A4's.
-		lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
-		// A lone file may name a heading font in its own `#show: doc.with(...)`, or a rule/scope inside its
-		// own block tree may name one; resolve against the union of both against the tree's assets, the same
-		// way a whole book or doc does, so a lone chapter's heading face reaches the page whichever source
-		// names it. A heading asking for a weight/slant the tree ships no file for is noted, as for a book.
-		let faces = match std::path::Path::new(source).parent() {
-			Some(dir)	=> book::face_resolver(dir, &style, &blocks),
-			None		=> oxedyne_fe2o3_austenite::fonts::FaceResolver::default(),
-		};
-		book::note_missing_face_variants(&style, &blocks, &faces, &mut refusals);
-		(blocks, fonts, PageGeometry::a4(), style, String::new(), faces, None, bib)
-	};
+	let (assembled, refusals, skip_line) = res!(compile::assemble(
+		std::path::Path::new(source),
+		|| Ok(Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()))),
+	));
 	mark("parse+lower+fonts", t_parse);
 
-	let t_author			= std::time::Instant::now();
-	let (document, heads)	= res!(doc::author(fonts.clone(), geom, &style, &faces, &blocks, front.as_ref(), bib.as_ref()));
-	mark("author(shape+break)", t_author);
-	let metrics				= FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
-	let t_run				= std::time::Instant::now();
-	let mut out				= res!(driver::run(&document, &metrics, Config::default()));
-	mark("driver::run", t_run);
-	let t_decorate			= std::time::Instant::now();
-	let footer_logo			= front.as_ref().and_then(|f| f.footer_logo.as_deref());
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &fonts, &style, geom, &title, footer_logo));
-	mark("decorate", t_decorate);
-
-	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso
-	// page -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits
-	// at the spine on both sides of the leaf. Uniform margins give a zero shift, so a non-book run is
-	// untouched.
-	let shift = geom.mirror_shift();
-	if shift.raw() != 0 {
-		for page in &mut out.pages {
-			if page.number % 2 == 0 {
-				for placed in &mut page.frame.placed {
-					placed.x = placed.x + shift;
-				}
-			}
-		}
-	}
+	let t_author = std::time::Instant::now();
+	let compile::Rendered { mut out, heads, geom } = res!(compile::author_and_run(assembled));
+	mark("author+run+decorate", t_author);
 
 	res!(std::fs::create_dir_all(out_dir));
 
@@ -408,7 +246,7 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	let mut t_render_ms	= 0.0f64;	// wall spent in the parallel render stage
 	let mut t_write_ms	= 0.0f64;	// wall spent writing results out in order
 	let pdf_file	= res!(File::create(fmt!("{}/document.pdf", out_dir)));
-	let outline		= build_outline(&heads, &out.ledger);
+	let outline		= compile::build_outline(&heads, &out.ledger);
 	let mut pdf		= res!(emit::pdf::open_document_with_outline(
 		BufWriter::new(pdf_file), out.pages.len(), outline));
 
