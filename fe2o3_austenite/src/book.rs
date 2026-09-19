@@ -1744,6 +1744,7 @@ fn assemble_into(
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
 					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
 						crate::ir::Span::new(0, 0));
+					skips.tag_file(&label);
 				},
 				Some(rel) => {
 					let inc_path = dir.join(&rel);
@@ -1774,6 +1775,7 @@ fn assemble_into(
 					// A malformed `#include` with no quoted path: reported, not left to fall through as a
 					// literal line of body text.
 					skips.record("#include", crate::ir::Span::new(0, 0));
+					skips.tag_file(&label);
 				},
 			}
 		} else if t.starts_with("#part-page") {
