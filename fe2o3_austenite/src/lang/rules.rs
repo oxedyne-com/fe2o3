@@ -1095,7 +1095,11 @@ pub fn collect_palette(src: &str, palette: &mut Palette) {
 	let chars:	Vec<char>	= src.chars().collect();
 	let mut i	= 0usize;
 	while i < chars.len() {
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let colours") {
+		// The literal must name `colours` exactly, not merely start with it -- `#let colours_x = (...)`
+		// is a different binding and must not be read as the palette.
+		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let colours")
+			&& !chars.get(i + "#let colours".chars().count()).is_some_and(|&c| is_ident_char(c))
+		{
 			// The dict opens at the first `(` after the `=`.
 			let mut j = i;
 			while j < chars.len() && chars[j] != '(' && chars[j] != '\n' {
@@ -2636,5 +2640,15 @@ mod tests {
 		assert!(parse_colour_pal("colours.yellow.lighten(92%)", &palette).is_some());
 		// Without the palette, the reference cannot resolve.
 		assert_eq!(parse_colour_pal("colours.yellow", &Palette::new()), None);
+	}
+
+	/// `#let colours` must match exactly -- a differently named dict such as `#let colours_x` is a
+	/// separate binding, not the palette, and must not be prefix-matched into it.
+	#[test]
+	fn collect_palette_does_not_prefix_match_a_longer_name() {
+		let src = "#let colours_x = (\n  yellow: rgb(\"#f0f600\"),\n)\n";
+		let mut palette = Palette::new();
+		collect_palette(src, &mut palette);
+		assert!(palette.get("yellow").is_none(), "colours_x must not be read as the colours palette");
 	}
 }
