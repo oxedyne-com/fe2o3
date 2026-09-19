@@ -1,7 +1,8 @@
-use crate::{
-    keys::Keys,
-    pqc::dilithium as dilithium2_fe2o3,
-};
+use crate::keys::Keys;
+// `pqc::dilithium` needs a mode feature to have a parameter set (see `pqc::mod`); the pure-Rust
+// `Dilithium2_fe2o3` variant below needs it for the same reason.
+#[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
+use crate::pqc::dilithium as dilithium2_fe2o3;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::{
@@ -9,9 +10,16 @@ use oxedyne_fe2o3_iop_crypto::{
     sign::{
         BatchItem,
         Signer,
-        verify_each,
     },
 };
+// Used by the Dilithium arms of `verify_batch` (pq or a mode feature) and, unconditionally, by
+// a test.
+#[cfg(any(
+    test,
+    feature = "pq",
+    feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3",
+))]
+use oxedyne_fe2o3_iop_crypto::sign::verify_each;
 use oxedyne_fe2o3_namex::{
     id::{
         LocalId,
@@ -46,12 +54,16 @@ use pqcrypto_traits::sign::{
     PublicKey as _,
     SecretKey as _,
 };
+// Only `new_dilithium2_fe2o3` uses the old `rand_core`; it is mode-gated.
+#[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
 use rand_core_old::OsRng as OsRng_old;
 use rand_core::OsRng;
 use secrecy::{
     ExposeSecret,
     Secret,
 };
+// Only the Dilithium2_fe2o3 arm of `sign` zeroizes its own copy of the key; it is mode-gated.
+#[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
 use zeroize::Zeroize;
 
 // Note: Need to use heap when zeroizing:
@@ -64,14 +76,16 @@ pub enum SignatureScheme { // Associated data: (public key, wrapped secret key)
         {Self::ED25519_PK_LEN},
         {Self::ED25519_SK_LEN},
     >),
-    /// The C reference implementation, wrapped. Absent without the `pq` feature; the pure-Rust
-    /// `Dilithium2_fe2o3` below is always here.
+    /// The C reference implementation, wrapped. Absent without the `pq` feature.
     #[cfg(feature = "pq")]
     Dilithium2(Keys<
         {Self::DILITHIUM2_PK_LEN},
         {Self::DILITHIUM2_SK_LEN},
     >),
-    Dilithium2_fe2o3(Keys< // Pure Rust impl based on https://github.com/quininer
+    /// Pure Rust impl based on https://github.com/quininer. Absent without a `mode0`..`mode3`
+    /// feature, which is what gives it a parameter set.
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
+    Dilithium2_fe2o3(Keys<
         {Self::DILITHIUM2_FE2O3_PK_LEN},
         {Self::DILITHIUM2_FE2O3_SK_LEN},
     >),
@@ -83,6 +97,7 @@ impl Debug for SignatureScheme {
             Self::Ed25519(..) => write!(f, "Ed25519"),
             #[cfg(feature = "pq")]
             Self::Dilithium2(..) => write!(f, "Dilithium2"),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(..) => write!(f, "Dilithium2_fe2o3"),
         }
     }
@@ -97,6 +112,7 @@ impl InNamex for SignatureScheme {
             #[cfg(feature = "pq")]
             Self::Dilithium2(..) =>
                 res!(NamexId::try_from("W4+qt2Gd+9RQBxllcx10b4h/Ih3g9m76C+mj17TwUNw=")),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(..) =>
                 res!(NamexId::try_from("zkSGGwLauv5FLpNoCse+3D7bKIdNh7PeBsfbjv/TSvQ=")),
         })
@@ -107,6 +123,7 @@ impl InNamex for SignatureScheme {
             Self::Ed25519(..)           => LocalId(1),
             #[cfg(feature = "pq")]
             Self::Dilithium2(..)        => LocalId(2),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(..)  => LocalId(3),
         }
     }
@@ -167,8 +184,9 @@ impl Signer for SignatureScheme {
                 },
                 _ => Err(err!("Require secret key to sign."; Missing, Configuration)),
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => match keys {
-                Keys { sks: Some(sks), .. } => { 
+                Keys { sks: Some(sks), .. } => {
                     let skv = sks.expose_secret();
                     let mut sk = res!(<[u8; Self::DILITHIUM2_FE2O3_SK_LEN]>::try_from(&skv[..]));
                     let result = dilithium2_fe2o3::sign::sign(msg, &sk).to_vec();
@@ -205,6 +223,7 @@ impl Signer for SignatureScheme {
                 },
                 _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => match keys {
                 Keys { pk: Some(pk), .. } => {
                     let pk = res!(<[u8; Self::DILITHIUM2_FE2O3_PK_LEN]>::try_from(&pk[..]));
@@ -235,6 +254,7 @@ impl Signer for SignatureScheme {
             Self::Ed25519(..) => verify_batch_ed25519(items),
             #[cfg(feature = "pq")]
             Self::Dilithium2(..) => verify_each(self, items),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(..) => verify_each(self, items),
         }
     }
@@ -410,6 +430,7 @@ impl KeyManager for SignatureScheme {
                     None => None,
                 },
             }),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(..) => Self::Dilithium2_fe2o3(Keys {
                 pk: match pk {
                     Some(pk) => Some(res!(
@@ -438,6 +459,7 @@ impl KeyManager for SignatureScheme {
                 Some(k) => Some(&k[..]),
                 None => None,
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => match &keys.pk {
                 Some(k) => Some(&k[..]),
                 None => None,
@@ -462,6 +484,7 @@ impl KeyManager for SignatureScheme {
                 },
                 None => None,
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => match &keys.sks {
                 Some(sks) => {
                     let sk = sks.expose_secret();
@@ -483,6 +506,7 @@ impl KeyManager for SignatureScheme {
                 Some(pk) => Some(res!(<[u8; Self::DILITHIUM2_PK_LEN]>::try_from(&pk[..]))),
                 None => None,
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => keys.pk = match pk {
                 Some(pk) => Some(res!(<[u8; Self::DILITHIUM2_FE2O3_PK_LEN]>::try_from(&pk[..]))),
                 None => None,
@@ -502,6 +526,7 @@ impl KeyManager for SignatureScheme {
                 Some(sk) => Some(Secret::new(res!(<[u8; Self::DILITHIUM2_SK_LEN]>::try_from(&sk[..])))),
                 None => None,
             },
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             Self::Dilithium2_fe2o3(keys) => keys.sks = match sk {
                 Some(sk) => Some(Secret::new(res!(<[u8; Self::DILITHIUM2_FE2O3_SK_LEN]>::try_from(&sk[..])))),
                 None => None,
@@ -527,7 +552,16 @@ impl str::FromStr for SignatureScheme {
                 build does not carry: it was built without the 'pq' feature, which needs a C \
                 toolchain. The pure-Rust 'Dilithium2_fe2o3' is here and does the same job.";
             Invalid, Input, NoImpl)),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             "Dilithium2_fe2o3" => Self::new_dilithium2_fe2o3(),
+            // The name is a real one, and this build simply does not carry it: it was built
+            // without a `mode0`..`mode3` feature, which is what gives Dilithium2_fe2o3 a
+            // parameter set.
+            #[cfg(not(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3")))]
+            "Dilithium2_fe2o3" => return Err(err!(
+                "The signature scheme 'Dilithium2_fe2o3' needs one of the 'mode0'..'mode3' \
+                features, which this build was not given.";
+            Invalid, Input, NoImpl)),
             _ => return Err(err!(
                 "The signature scheme '{}' is not recognised.", name;
             Invalid, Input)),
@@ -549,7 +583,13 @@ impl TryFrom<&LocalId> for SignatureScheme {
                 implementation, which this build does not carry: it was built without the 'pq' \
                 feature. The pure-Rust Dilithium2_fe2o3, local id 3, is here.";
             Invalid, Input, NoImpl)),
+            #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
             LocalId(3) => Self::new_dilithium2_fe2o3(),
+            #[cfg(not(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3")))]
+            LocalId(3) => return Err(err!(
+                "The signature scheme with local id 3 is Dilithium2_fe2o3, which needs one of the \
+                'mode0'..'mode3' features, which this build was not given.";
+            Invalid, Input, NoImpl)),
             _ => return Err(err!(
                 "The signature scheme with local id {} is not recognised.", n;
             Invalid, Input)),
@@ -575,8 +615,12 @@ impl SignatureScheme {
     pub const DILITHIUM2_SK_LEN:        usize = dilithium2::secret_key_bytes();
     #[cfg(feature = "pq")]
     pub const DILITHIUM2_SIG_LEN:       usize = dilithium2::signature_bytes();
+    // These sizes come from the mode feature's parameter set, so they only exist with one.
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     pub const DILITHIUM2_FE2O3_PK_LEN:  usize = dilithium2_fe2o3::params::PUBLICKEYBYTES;
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     pub const DILITHIUM2_FE2O3_SK_LEN:  usize = dilithium2_fe2o3::params::SECRETKEYBYTES;
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     pub const DILITHIUM2_FE2O3_SIG_LEN: usize = dilithium2_fe2o3::params::SIG_SIZE_PACKED;
 
     pub fn new_ed25519() -> Self {
@@ -609,6 +653,7 @@ impl SignatureScheme {
         Self::Dilithium2(Keys::default())
     }
 
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     pub fn new_dilithium2_fe2o3() -> Self {
         let (mut pk, mut sk) = (
             [0; Self::DILITHIUM2_FE2O3_PK_LEN],
@@ -622,6 +667,7 @@ impl SignatureScheme {
         Self::Dilithium2_fe2o3(keys)
     }
 
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     pub fn empty_dilithium2_fe2o3() -> Self {
         Self::Dilithium2_fe2o3(Keys::default())
     }
@@ -892,6 +938,7 @@ mod tests {
 
     /// A scheme with no batch equation still answers the batch, one signature at
     /// a time, so a caller need not ask which scheme it holds.
+    #[cfg(any(feature = "mode0", feature = "mode1", feature = "mode2", feature = "mode3"))]
     #[test]
     fn a_scheme_without_a_batch_equation_still_answers() -> Outcome<()> {
         let scheme = SignatureScheme::new_dilithium2_fe2o3();
