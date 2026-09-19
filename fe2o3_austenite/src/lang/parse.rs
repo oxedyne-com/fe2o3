@@ -786,28 +786,42 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 		// sets nothing.
 		if c == '#' {
 			if let Some((call, next)) = glossary_call(&chars, i, span, skips) {
-				match call {
-					Call::Glossary { term, display } => {
-						if !plain.is_empty() {
-							runs.push(Inline::Text(std::mem::take(&mut plain)));
+					// An index marker is a run of its own, woven in before the display so the block layer
+					// records the term's occurrence at this point; the display, where the call has one, follows.
+					let push_index = |runs: &mut Vec<Inline>, plain: &mut String, index: Option<IndexKey>| {
+						if let Some(k) = index {
+							if !plain.is_empty() {
+								runs.push(Inline::Text(std::mem::take(plain)));
+							}
+							runs.push(Inline::Index { term: k.term, sub: k.sub });
 						}
-						runs.push(Inline::Glossary { term, display });
-					},
-					Call::Visible(display) => {
-						let sub = parse_inlines_in(&display, span, skips);
-						// A plain display folds back into the running text, keeping the fast single-run
-						// path; a display carrying markup becomes its own runs.
-						if let [Inline::Text(t)] = sub.as_slice() {
-							plain.push_str(t);
-						} else {
+					};
+					match call {
+						Call::Glossary { term, display, index } => {
+							push_index(&mut runs, &mut plain, index);
 							if !plain.is_empty() {
 								runs.push(Inline::Text(std::mem::take(&mut plain)));
 							}
-							runs.extend(sub);
-						}
-					},
-					Call::Invisible => {},	// a pure index marker sets nothing
-				}
+							runs.push(Inline::Glossary { term, display });
+						},
+						Call::Visible { display, index } => {
+							push_index(&mut runs, &mut plain, index);
+							let sub = parse_inlines_in(&display, span, skips);
+							// A plain display folds back into the running text, keeping the fast single-run
+							// path; a display carrying markup becomes its own runs.
+							if let [Inline::Text(t)] = sub.as_slice() {
+								plain.push_str(t);
+							} else {
+								if !plain.is_empty() {
+									runs.push(Inline::Text(std::mem::take(&mut plain)));
+								}
+								runs.extend(sub);
+							}
+						},
+						Call::Invisible { index } => {
+							push_index(&mut runs, &mut plain, index);
+						},
+					}
 				i = next;
 				continue;
 			}
@@ -1619,16 +1633,25 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::Footnote(_)				=> {},	// a nested footnote is not set within a flattened string
 			Inline::Cite(_)					=> {},	// a citation has no plain form before the bibliography resolves it
 			Inline::MarginNote(_)			=> {},	// a margin code is not part of the flattened body text
+			Inline::Index { .. }			=> {},	// an index marker sets no words in the body text
 		}
 	}
 	out
 }
 
-/// What an inline glossary or index call sets into the running text.
+/// The index term a call records, with a nested entry's child term where one was given.
+struct IndexKey {
+	term:	String,
+	sub:	Option<String>,
+}
+
+/// What an inline glossary or index call sets into the running text. `index` carries the term the call
+/// adds to the back-matter index, `None` for a glossary-only call (`g`/`gs`/`gscap`/`gcap`) that indexes
+/// nothing.
 enum Call {
-	Glossary { term: String, display: String },	// a glossary term, keyed by `term` for first-use styling
-	Visible(String),	// display text set plain, its markup parsed by the caller
-	Invisible,			// a pure index marker: nothing is set
+	Glossary { term: String, display: String, index: Option<IndexKey> },	// a glossary term, keyed by `term` for first-use styling
+	Visible { display: String, index: Option<IndexKey> },	// display text set plain, its markup parsed by the caller
+	Invisible { index: Option<IndexKey> },	// a pure index marker: nothing is set but the term is recorded
 }
 
 /// Reads an inline glossary or index call at `i` (a `#`), returning what it sets and the index just past
@@ -1668,43 +1691,62 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 	}
 	let (a1, next1) = read_group(chars, j)?;
 
-	// The two-argument display functions take the second argument as the visible text.
+	// The two-argument display functions take the first argument as the index term and the second as the
+	// visible text (`#idx-as("publicani")[tax farmers]` sets "tax farmers", indexes "publicani").
 	if name == "idx-as" || name == "idx-main-as" {
 		let (a2, next2) = read_group(chars, next1)?;
-		return Some((Call::Visible(unwrap_arg(&a2)), next2));
+		let index = Some(IndexKey { term: unwrap_arg(&a1), sub: None });
+		return Some((Call::Visible { display: unwrap_arg(&a2), index }, next2));
 	}
-	// A nested index entry is a pure marker; consume an optional second argument.
+	// A nested index entry is a pure marker of `parent > child`; its second argument is the child term.
 	if name == "idx-nested" {
-		let end = match read_group(chars, next1) {
-			Some((_, n2))	=> n2,
-			None			=> next1,
+		let (child, end) = match read_group(chars, next1) {
+			Some((c, n2))	=> (Some(unwrap_arg(&c)), n2),
+			None			=> (None, next1),
 		};
-		return Some((Call::Invisible, end));
+		let index = Some(IndexKey { term: unwrap_arg(&a1), sub: child });
+		return Some((Call::Invisible { index }, end));
 	}
 
 	let arg = unwrap_arg(&a1);
+	// A glossary+index call indexes the term it displays; a glossary-only call indexes nothing. The `-i`
+	// suffix families and the `glossind`/`glossindcap` and `idx`/`index` families are the indexing ones,
+	// mirroring the template's `#index`/`#index-main` calls inside each.
+	let idx_of = |term: String| Some(IndexKey { term, sub: None });
 	let call = match name.as_str() {
 		// The simple family keys its own display text (a `term-defs` entry), so no translation applies.
-		"gs" | "gsi"							=> Call::Glossary { term: arg.clone(), display: arg },
-		"gscap" | "gscapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&arg) },
+		"gs"									=> Call::Glossary { term: arg.clone(), display: arg, index: None },
+		"gsi"									=> Call::Glossary { term: arg.clone(), display: arg.clone(), index: idx_of(arg) },
+		"gscap"									=> Call::Glossary { term: arg.clone(), display: cap_first(&arg), index: None },
+		"gscapi"								=> Call::Glossary { term: arg.clone(), display: cap_first(&arg), index: idx_of(arg) },
 		// `glossind`/`glossindcap` auto-detect: a key that is in `term-dict` sets its value, otherwise the
-		// key stands as its own display, matching the template's `if key in term-dict` branch.
+		// key stands as its own display, matching the template's `if key in term-dict` branch. Both index the
+		// displayed value (uncapitalised), as the template's `idx-term` default does.
 		"glossind"								=> {
 			let display = term_value(&arg).unwrap_or_else(|| arg.clone());
-			Call::Glossary { term: arg.clone(), display }
+			Call::Glossary { term: arg.clone(), display: display.clone(), index: idx_of(display) }
 		},
 		"glossindcap"							=> {
 			let display = term_value(&arg).unwrap_or_else(|| arg.clone());
-			Call::Glossary { term: arg.clone(), display: cap_first(&display) }
+			Call::Glossary { term: arg.clone(), display: cap_first(&display), index: idx_of(display) }
 		},
 		// The term-dictionary family translates the key to its value; first use is keyed by the key, as the
-		// template keys `glossary-seen` by the key name rather than the value.
-		"g" | "gi"								=> Call::Glossary { term: arg.clone(), display: resolve_term(&arg, &name, span, skips) },
-		"gcap" | "gcapi"						=> Call::Glossary { term: arg.clone(), display: cap_first(&resolve_term(&arg, &name, span, skips)) },
-		"t" | "graw"							=> Call::Visible(resolve_term(&arg, &name, span, skips)),
-		"tcap"									=> Call::Visible(cap_first(&resolve_term(&arg, &name, span, skips))),
-		"idx" | "idx-main"						=> Call::Visible(arg),
-		"index" | "index-main"					=> Call::Invisible,
+		// template keys `glossary-seen` by the key name rather than the value. The `-i` variants index the
+		// translated value.
+		"g"										=> Call::Glossary { term: arg.clone(), display: resolve_term(&arg, &name, span, skips), index: None },
+		"gi"									=> {
+			let display = resolve_term(&arg, &name, span, skips);
+			Call::Glossary { term: arg.clone(), display: display.clone(), index: idx_of(display) }
+		},
+		"gcap"									=> Call::Glossary { term: arg.clone(), display: cap_first(&resolve_term(&arg, &name, span, skips)), index: None },
+		"gcapi"									=> {
+			let display = resolve_term(&arg, &name, span, skips);
+			Call::Glossary { term: arg.clone(), display: cap_first(&display), index: idx_of(display) }
+		},
+		"t" | "graw"							=> Call::Visible { display: resolve_term(&arg, &name, span, skips), index: None },
+		"tcap"									=> Call::Visible { display: cap_first(&resolve_term(&arg, &name, span, skips)), index: None },
+		"idx" | "idx-main"						=> Call::Visible { display: arg.clone(), index: idx_of(arg) },
+		"index" | "index-main"					=> Call::Invisible { index: idx_of(arg) },
 		_									=> return None,
 	};
 	Some((call, next1))

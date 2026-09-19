@@ -200,6 +200,12 @@ pub enum Ref {
 	// a table-of-contents entry reads the body folio (which restarts at 1 after the front matter) rather
 	// than the physical page it shares with the cover, title and contents leaves.
 	FolioOf(AnchorId),
+	// The folios a set of index-entry occurrences resolved to, deduplicated, sorted and run-compressed into
+	// the "12, 15-17, 40" list an index entry sets after its term. Each occurrence resolves as a
+	// [`FolioOf`](Ref::FolioOf), so the list reads body folios; a run of two or more consecutive folios
+	// collapses to a hyphenated range. Text-only -- it resolves to a string, not a page number -- so it is
+	// reached through [`resolve_text`](Ref::resolve_text), never [`resolve`](Ref::resolve).
+	IndexFolios(Vec<AnchorId>),
 }
 
 impl Ref {
@@ -218,8 +224,58 @@ impl Ref {
 			} else {
 				incoming.page_of(id).map(|p| p.saturating_sub(incoming.body_start_page - 1))
 			},
+			// A page number is the folio-list's business, not a single value; it resolves to text alone.
+			Ref::IndexFolios(_) => None,
 		}
 	}
+
+	/// The text this reference sets, or `None` when the previous pass has not fixed it yet -- the same
+	/// deferral [`resolve`](Ref::resolve) makes, so an unresolved slot holds its reservation and shows
+	/// nothing. The page-valued arms format their number; [`IndexFolios`](Ref::IndexFolios) resolves each
+	/// occurrence's folio, deduplicates and sorts them, and joins them into the index list, a run of two or
+	/// more consecutive folios collapsing to a hyphenated range.
+	pub fn resolve_text(&self, incoming: &Ledger) -> Option<String> {
+		match self {
+			Ref::TotalPages | Ref::PageOf(_) | Ref::FolioOf(_) => self.resolve(incoming).map(|n| fmt!("{}", n)),
+			Ref::IndexFolios(ids) => {
+				let mut folios: Vec<u32> = ids.iter()
+					.filter_map(|id| Ref::FolioOf(id.clone()).resolve(incoming))
+					.collect();
+				if folios.is_empty() {
+					// Pass A (empty ledger, no body start) or no occurrence yet fixed: defer, holding the slot.
+					return None;
+				}
+				folios.sort_unstable();
+				folios.dedup();
+				Some(compress_folios(&folios))
+			},
+		}
+	}
+}
+
+/// Joins a sorted, deduplicated folio list into an index entry's page reference: a run of two or more
+/// consecutive folios collapses to `first-last`, and single folios and runs are parted by `", "`. An empty
+/// slice yields the empty string, though [`resolve_text`](Ref::resolve_text) never calls it with one.
+fn compress_folios(folios: &[u32]) -> String {
+	let mut out		= String::new();
+	let mut i		= 0usize;
+	while i < folios.len() {
+		let start	= folios[i];
+		let mut j	= i;
+		while j + 1 < folios.len() && folios[j + 1] == folios[j] + 1 {
+			j += 1;
+		}
+		if !out.is_empty() {
+			out.push_str(", ");
+		}
+		if j > i {
+			out.push_str(&fmt!("{}-{}", start, folios[j]));
+		} else {
+			out.push_str(&fmt!("{}", start));
+		}
+		i = j + 1;
+	}
+	out
 }
 
 /// The whole anchor table for one composition, plus the total page count the last page fixed.

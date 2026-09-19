@@ -205,6 +205,8 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Math(atom)		=> Segment::math(atom.clone()),
 		Inline::Glossary { term, display }
 								=> Segment::glossary(term.clone(), display.clone()),
+		Inline::Index { term, sub }
+								=> Segment::index(term.clone(), sub.clone()),
 		Inline::Footnote(note)	=> Segment::footnote(lower_runs(note)),
 		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
 		Inline::MarginNote(display)	=> Segment::margin_note(display.clone()),

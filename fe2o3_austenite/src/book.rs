@@ -309,13 +309,18 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
 	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
-	resolve_glossary(&mut blocks);
+	resolve_glossary(&mut blocks, false);
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	let front		= read_front_matter(root_src, &config_src, &title);
 
 	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
 	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
+
+	// The glossary and index back matter the root's `meta-data.glossary`/`meta-data.index` flags ask for,
+	// after the bibliography and gated on the body actually carrying the content -- a book that sets a flag
+	// but uses no glossary or index term emits neither section, matching the template's own gate.
+	append_flag_back_matter(root_src, &mut blocks);
 
 	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips })
 }
@@ -397,7 +402,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
-	resolve_glossary(&mut blocks);
+	resolve_glossary(&mut blocks, false);
 	let mut front	= read_doc_front_matter(root_dir, root_src, &raw, &title);
 
 	// The reading time the meta page appends to its notes cell: the whole-document word count over the
@@ -630,6 +635,83 @@ fn append_bibliography(mut bib: Bibliography, blocks: &mut Vec<Block>) -> Biblio
 	bib
 }
 
+/// Appends the glossary and index back matter the root's `meta-data` flags ask for, each gated on the body
+/// carrying its content. The glossary section is a back-matter heading, a one-line note and a
+/// [`Block::Glossary`] placeholder [`resolve_glossary`] fills with the Term/Definition table; it is set
+/// only when the book uses at least one defined glossary term (`meta-data.glossary: true` alone, with no
+/// used term, sets nothing, as the template's own gate does). The index section is a back-matter heading
+/// and a [`Block::Index`] placeholder [`crate::doc::author`] fills from the index markers it gathers walking
+/// the body; it is set only when the body carries at least one index marker.
+fn append_flag_back_matter(root_src: &str, blocks: &mut Vec<Block>) {
+	let meta = match meta_block(root_src) {
+		Some(m)	=> m,
+		None	=> return,
+	};
+
+	if bool_field(&meta, "glossary") && has_defined_glossary_terms(blocks) {
+		blocks.push(Block::back_matter_heading("Glossary"));
+		blocks.push(Block::RichParagraph {
+			segments: vec![Segment::text("Terms are shown by their order of appearance.")],
+		});
+		blocks.push(Block::Glossary);
+		// Fill the placeholder just appended: the earlier whole-book `resolve_glossary` ran before it existed.
+		resolve_glossary(blocks, true);
+	}
+
+	if bool_field(&meta, "index") && has_index_occurrences(blocks) {
+		blocks.push(Block::back_matter_heading("Index"));
+		blocks.push(Block::Index);
+	}
+}
+
+/// Does the body carry at least one glossary term that has a definition? The same walk
+/// [`resolve_glossary`] makes, so the gate agrees with what the table would hold: a term with no `term-defs`
+/// entry contributes no row and does not count.
+fn has_defined_glossary_terms(blocks: &[Block]) -> bool {
+	let mut seen:		HashSet<String>	= HashSet::new();
+	let mut ordered:	Vec<String>		= Vec::new();
+	for block in blocks {
+		collect_glossary_terms(block, &mut seen, &mut ordered);
+	}
+	!ordered.is_empty()
+}
+
+/// Does the body carry at least one index marker anywhere -- in a heading, paragraph, list item, table cell
+/// or callout, or a footnote's own runs? The gate that keeps the index section from being set for a book
+/// that asks for one but marks no term.
+fn has_index_occurrences(blocks: &[Block]) -> bool {
+	blocks.iter().any(block_has_index)
+}
+
+/// Whether one block, or anything nested in it, carries an index marker segment.
+fn block_has_index(block: &Block) -> bool {
+	match block {
+		Block::Heading { segments, .. }		=> segments_have_index(segments),
+		Block::RichParagraph { segments }	=> segments_have_index(segments),
+		Block::List { items, .. }			=> items.iter().any(|it|
+			segments_have_index(&it.segments) || it.children.iter().any(block_has_index)),
+		Block::Table(t)						=> table_has_index(t),
+		Block::TableFigure { table, .. }	=> table_has_index(table),
+		Block::Box { blocks, .. }			=> blocks.iter().any(block_has_index),
+		Block::Scoped { blocks, .. }		=> blocks.iter().any(block_has_index),
+		_									=> false,
+	}
+}
+
+/// Whether a run of segments carries an index marker, descending into a footnote's own runs.
+fn segments_have_index(segments: &[Segment]) -> bool {
+	segments.iter().any(|seg| match seg {
+		Segment::Index { .. }		=> true,
+		Segment::Footnote { note }	=> segments_have_index(note),
+		_						=> false,
+	})
+}
+
+/// Whether any cell of a table carries an index marker.
+fn table_has_index(table: &Table) -> bool {
+	table.rows.iter().any(|row| row.cells.iter().any(|cell| segments_have_index(&cell.content)))
+}
+
 /// Locates a `refs.bib` beside a lone chapter or in an ancestor directory, parses it, marks the keys the
 /// chapter cited, appends the reference list as back matter, and returns the marked bibliography so the
 /// block layer resolves each in-text `#cite` to Chicago author-year -- as a whole-book compile does.
@@ -723,15 +805,36 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 	i += 1;
 
 	loop {
-		// Skip the whitespace and commas between entries; stop at the closing parenthesis or the source end.
-		while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
-			i += 1;
+		// Skip the whitespace, commas and comments between entries; stop at the closing parenthesis or the
+		// source end. Comments must be skipped whole: `terms.typ` carries `// ...` banners and notes between
+		// term groups, and a `)` inside one (a parenthetical aside) would otherwise read as the literal's
+		// closing parenthesis and truncate the parse -- which dropped half of Lucronics' 346 definitions.
+		loop {
+			while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
+				i += 1;
+			}
+			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '/' {
+				i += 2;
+				while i < n && chars[i] != '\n' {
+					i += 1;
+				}
+				continue;
+			}
+			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
+				i += 2;
+				while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+					i += 1;
+				}
+				i = (i + 2).min(n);
+				continue;
+			}
+			break;
 		}
 		if i >= n || chars[i] == ')' {
 			break;
 		}
 		if chars[i] != '"' {
-			i += 1;	// a stray token inside the literal (a comment survivor); step over it
+			i += 1;	// a stray token inside the literal; step over it
 			continue;
 		}
 		// The quoted key, honouring string escapes so a quote inside it does not end it early.
@@ -852,7 +955,7 @@ const GLOSSARY_INSET_PT: f64 = 6.0;
 /// return for an undefined key. The Term column shows the term-dictionary value where the key has one
 /// (the `g`/`gcap` family) and the key itself otherwise (the `gs` family), reproducing the metadata
 /// `value` the template stores; the Definition column carries the parsed definition content.
-pub fn resolve_glossary(blocks: &mut Vec<Block>) {
+pub fn resolve_glossary(blocks: &mut Vec<Block>, breakable: bool) {
 	// The placeholder may sit inside a scoped (or callout) subtree -- an included chapter's own
 	// `#print-glossary()` -- not only at top level, so it is sought through the whole tree. With none
 	// anywhere, nothing is built, exactly as before.
@@ -889,6 +992,11 @@ pub fn resolve_glossary(blocks: &mut Vec<Block>) {
 	let mut table		= Table::with_weights(true, rows, vec![1.0, 3.0]);
 	table.text_size		= Some(Sp::from_pt(GLOSSARY_TEXT_PT));
 	table.inset			= Some(Sp::from_pt(GLOSSARY_INSET_PT));
+	// A book's whole-document glossary runs to many pages, so it sets one keep box per row and paginates
+	// between rows rather than clipping to a single box, matching the template's `block(breakable: true)`
+	// glossary table. A short in-body `#print-glossary()` stays one box, so a doc's existing glossary is
+	// byte-for-byte unchanged.
+	table.breakable		= breakable;
 	// Replace the first placeholder in document order, wherever in the tree it sits, with the built table.
 	let _ = replace_first_glossary(blocks, Block::Table(table));
 }
@@ -2318,7 +2426,7 @@ mod tests {
 			]),
 			Block::Glossary,
 		];
-		resolve_glossary(&mut blocks);
+		resolve_glossary(&mut blocks, false);
 
 		let table = match &blocks[2] {
 			Block::Table(t)	=> t,
@@ -2353,7 +2461,7 @@ mod tests {
 				blocks:	vec![Block::Glossary],
 			},
 		];
-		resolve_glossary(&mut blocks);
+		resolve_glossary(&mut blocks, false);
 		let inner = match &blocks[1] {
 			Block::Scoped { blocks, .. }	=> blocks,
 			other							=> return Err(err!("the scope must survive resolution, found {:?}", other; Test, Bug)),

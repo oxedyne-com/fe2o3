@@ -142,7 +142,7 @@ where
 	let skip_line	= terse_skip_line(&skips);
 	let mut refusals	= skips;
 	// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
-	book::resolve_glossary(&mut blocks);
+	book::resolve_glossary(&mut blocks, false);
 	// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile sets
 	// Chicago author-year in text and a reference list at the end rather than the raw cite key.
 	let bib		= res!(book::load_lone_bibliography(main_path, &mut blocks));

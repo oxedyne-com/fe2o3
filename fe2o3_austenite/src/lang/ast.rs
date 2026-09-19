@@ -281,6 +281,10 @@ pub enum Inline {
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
+	// An index marker (`#index`, `#idx`, `#gsi`, `#idx-nested`, ...): records the term's occurrence for the
+	// back-matter index and sets nothing itself. `sub` carries a nested entry's child term. The visible or
+	// glossary display, where the call has one, is a separate run beside this marker.
+	Index { term: String, sub: Option<String> },
 	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
 	MarginNote(String),	// #claim-label(<code>..), its compressed code drawn in the outside margin, nothing in the body

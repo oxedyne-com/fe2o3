@@ -741,12 +741,11 @@ fn place_leaf<M: Metrics>(
 			// cross-referenced page); the driver only asks the previous pass's ledger for the value and
 			// holds the declared width open until it has one.
 			let reserved = leaf.dims.width;
-			let (realised, resolved) = match refr.resolve(incoming) {
-				Some(value) => {
+			let (realised, resolved) = match refr.resolve_text(incoming) {
+				Some(text) => {
 					// The previous pass fixed the value. Shape it as real text when a font backs the
 					// metric, or keep the reservation box under the fontless stub; either way its realised
 					// width is recorded so the overflow logic still governs a further pass.
-					let text = fmt!("{}", value);
 					match res!(metrics.shape(&text)) {
 						Some(shaped) => {
 							let w		= shaped.dims().width;

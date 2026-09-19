@@ -130,17 +130,18 @@ pub struct Table {
 	pub weights:	Vec<f64>,		// per-column fractional (`fr`) weight; 0.0 for a content-sized column, empty for none
 	pub text_size:	Option<Sp>,		// the `text(size: Npt)` wrapper's size, so a small-set table sets small; body size when none
 	pub inset:		Option<Sp>,		// the `inset:` cell padding, overriding the style default when set
+	pub breakable:	bool,			// set the table as per-row keep boxes so a tall one (a glossary) paginates
 }
 
 impl Table {
 	pub fn new(header: bool, rows: Vec<Row>) -> Self {
-		Self { rows, header, weights: Vec::new(), text_size: None, inset: None }
+		Self { rows, header, weights: Vec::new(), text_size: None, inset: None, breakable: false }
 	}
 
 	/// A table with declared fractional column weights, reproducing Typst's `columns: (2fr, 5fr, ...)`
 	/// sizing; a `0.0` weight leaves that column sized to its content.
 	pub fn with_weights(header: bool, rows: Vec<Row>, weights: Vec<f64>) -> Self {
-		Self { rows, header, weights, text_size: None, inset: None }
+		Self { rows, header, weights, text_size: None, inset: None, breakable: false }
 	}
 
 	/// A grid of string rows, every cell left-aligned; the first row a header when `header`.
@@ -148,7 +149,7 @@ impl Table {
 		let rows = rows.into_iter()
 			.map(|r| Row::new(r.into_iter().map(Cell::new).collect()))
 			.collect();
-		Self { rows, header, weights: Vec::new(), text_size: None, inset: None }
+		Self { rows, header, weights: Vec::new(), text_size: None, inset: None, breakable: false }
 	}
 }
 
@@ -161,16 +162,20 @@ struct CellLine {
 	depth:		Sp,
 }
 
-/// Lowers a table to one keep box. The measure is the width a table spanning the full text block may
-/// use; a table whose natural columns are narrower than the measure is set narrower, flush left.
-pub fn lower(
+/// Builds a table's rows as separate node groups, each carrying one row's rules, header wash and text
+/// bands together with the row's own height. The first group opens with the top frame rule. [`lower`]
+/// stacks every group into one keep box (a plain table moves whole); [`lower_rows`] sets each group as its
+/// own keep box so a tall table (a glossary) paginates between rows. The measure is the width a table
+/// spanning the full text block may use; a table whose natural columns are narrower is set narrower, flush
+/// left. The returned `Sp` is the table's laid width, shared by both callers.
+fn table_row_groups(
 	fonts:		Arc<FontSet>,
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
 	refs:		&HashMap<String, String>,
 )
-	-> Outcome<Node>
+	-> Outcome<(Vec<(Vec<Node>, Sp)>, Sp)>
 {
 	// A `text(size: Npt)` wrapper sets the whole table at its reduced size (the books' claim tables set at
 	// 7 pt), and an explicit `inset:` overrides the cell padding on both axes; the interline gap within a
@@ -262,11 +267,12 @@ pub fn lower(
 	let sample	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "Ag"));
 	let default_v	= sample.dims().height + sample.dims().depth;
 
-	let mut children:	Vec<Node> = Vec::new();
-	let mut total_h		= Sp::ZERO;
+	let mut groups:	Vec<(Vec<Node>, Sp)>	= Vec::with_capacity(rows.len() + 1);
+	let mut cur:	Vec<Node>				= Vec::new();
+	let mut cur_h	= Sp::ZERO;
 
-	// The top frame.
-	push_hrule(&mut children, &mut total_h, table_width, style.table.rule_thick);
+	// The top frame opens the first row's group.
+	push_hrule(&mut cur, &mut cur_h, table_width, style.table.rule_thick);
 
 	for r in 0..rows.len() {
 		// A header row carries a grey wash behind every one of its bands, drawn before the rules and text
@@ -279,8 +285,8 @@ pub fn lower(
 		let pad_band = build_band(
 			ncols, &vrule_left, &tv, &content_left, &colwidth,
 			pad_y, table_width, &empty, &flush, fill);
-		children.push(pad_band);
-		total_h += pad_y;
+		cur.push(pad_band);
+		cur_h += pad_y;
 
 		let bands = nbands[r];
 		for k in 0..bands {
@@ -307,8 +313,8 @@ pub fn lower(
 			let hb = build_band(
 				ncols, &vrule_left, &tv, &content_left, &colwidth,
 				bh, table_width, &opt, &aligns, fill);
-			children.push(hb);
-			total_h += bh;
+			cur.push(hb);
+			cur_h += bh;
 		}
 
 		// The rule under the row: heavy beneath a header and at the very foot, light between body rows.
@@ -319,11 +325,53 @@ pub fn lower(
 		} else {
 			style.table.rule_thin
 		};
-		push_hrule(&mut children, &mut total_h, table_width, th);
+		push_hrule(&mut cur, &mut cur_h, table_width, th);
+
+		// Close this row's group; the next row opens a fresh one.
+		groups.push((std::mem::take(&mut cur), std::mem::replace(&mut cur_h, Sp::ZERO)));
 	}
 
-	let dims = Dims::new(table_width, total_h, Sp::ZERO);
-	Ok(Node::VBox(BoxNode::new(children, dims)))
+	Ok((groups, table_width))
+}
+
+/// Lowers a table to one keep box: every row group stacked into a single [`Node::VBox`], so the driver's
+/// greedy page breaker moves the whole table to the next page when it will not fit. This is the shape every
+/// plain table sets in.
+pub fn lower(
+	fonts:		Arc<FontSet>,
+	style: &Theme,
+	measure:	Sp,
+	table:		&Table,
+	refs:		&HashMap<String, String>,
+)
+	-> Outcome<Node>
+{
+	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
+	let mut children:	Vec<Node> = Vec::new();
+	let mut total_h		= Sp::ZERO;
+	for (nodes, h) in groups {
+		children.extend(nodes);
+		total_h += h;
+	}
+	Ok(Node::VBox(BoxNode::new(children, Dims::new(table_width, total_h, Sp::ZERO))))
+}
+
+/// Lowers a table to one keep box per row, returned as sibling nodes, so the driver paginates between rows
+/// while never splitting a row -- Typst's `block(breakable: true)` table with unbreakable cells. Used for a
+/// tall back-matter table (the glossary) that must run over many pages rather than clip to one keep box.
+pub fn lower_rows(
+	fonts:		Arc<FontSet>,
+	style: &Theme,
+	measure:	Sp,
+	table:		&Table,
+	refs:		&HashMap<String, String>,
+)
+	-> Outcome<Vec<Node>>
+{
+	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
+	Ok(groups.into_iter()
+		.map(|(nodes, h)| Node::VBox(BoxNode::new(nodes, Dims::new(table_width, h, Sp::ZERO))))
+		.collect())
 }
 
 /// Builds a cell's image mark as one line: the image seated at the left, then a gap, then the caption
@@ -433,6 +481,7 @@ fn cell_pieces(
 			},
 			Segment::Footnote { .. }	=> {},	// a footnote in a cell is not set at this increment
 			Segment::MarginNote(_)	=> {},	// a margin note in a cell sets nothing here
+			Segment::Index { .. }	=> {},	// an index marker in a cell sets nothing here
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
