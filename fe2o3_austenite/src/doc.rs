@@ -3536,9 +3536,13 @@ fn index_entry_line(
 	Ok(())
 }
 
-/// Sets one bibliography reference: its runs woven into justified lines at the footnote size, with a
-/// hanging indent -- the first line flush left, every continuation line indented, as a Chicago
-/// reference list sets. The runs' italic flag chooses the face, so a book or journal title sets italic.
+/// Sets one bibliography reference: its runs woven into justified lines at the book template's
+/// body-relative reference size, with a hanging indent -- the first line flush left, every continuation
+/// line indented, as a Chicago reference list sets. The runs' italic flag chooses the face, so a book or
+/// journal title sets italic. The template's `set text(size: 0.85em)` on the bibliography (see the book
+/// template) sizes it a touch below the body, not at the footnote furniture size, and its leading follows
+/// the body's proportionally: 0.85 of the body baseline, since both the line box and the paragraph gap
+/// scale with the font size.
 fn reference_block(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
@@ -3548,6 +3552,8 @@ fn reference_block(
 )
 	-> Outcome<()>
 {
+	let ref_size	= Sp(style.text.body_size.raw() * 85 / 100);	// the template's 0.85em bibliography size
+	let ref_leading	= Sp(style.text.leading.raw() * 85 / 100);	// the body baseline scaled by the same 0.85
 	let hang	= Sp(style.text.body_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take
 	let inner	= if measure > hang { measure - hang } else { measure };
 
@@ -3557,8 +3563,8 @@ fn reference_block(
 		pieces.push(Piece::Text { text: text.clone(), role });
 	}
 	let mut lines = res!(break_paragraph_pieces(
-		fonts.clone(), Role::Body, Dir::Ltr, style.furniture.foot_size, &pieces, inner, style.furniture.foot_leading, true, true, Rgba::BLACK,
-		Some(cap_edge(style, style.furniture.foot_size))));
+		fonts.clone(), Role::Body, Dir::Ltr, ref_size, &pieces, inner, ref_leading, true, true, Rgba::BLACK,
+		Some(cap_edge(style, ref_size))));
 
 	// Indent every line but the first by the hang, so the entry hangs under its first line.
 	let mut first = true;

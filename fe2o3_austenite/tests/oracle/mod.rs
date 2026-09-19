@@ -135,6 +135,21 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// The breakable-glossary regression root. A minimal book (built on the real elearnity book
+			// template, as `cheapthinking-ch03` is) whose only content is a chapter referencing many defined
+			// glossary terms, so the back-matter glossary -- a `block(breakable: true)` table -- runs over
+			// several pages. It is the gate for the row-flow fix in `table::lower_rows`: before it, the
+			// breakable table welded into one atom and every row past the first page was dropped, so a
+			// regression that reintroduces the drop collapses the glossary to a page or two, moving the page
+			// count and the pinned PDF hash. Its front matter is deliberately spare (no cover, no
+			// about-author) so the glossary dominates the page count. Uses the shared elearnity template and
+			// term dictionary, so it needs the elearnity typst root, like `cheapthinking-ch03`.
+			name:				"glossary-oracle",
+			path:				"/home/jason/usr/books/elearnity/CheapThinking/glossary_oracle.typ",
+			typst_root:			Some("/home/jason/usr/books/elearnity"),
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

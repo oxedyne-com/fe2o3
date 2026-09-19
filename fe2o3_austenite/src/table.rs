@@ -359,6 +359,13 @@ pub fn lower(
 /// Lowers a table to one keep box per row, returned as sibling nodes, so the driver paginates between rows
 /// while never splitting a row -- Typst's `block(breakable: true)` table with unbreakable cells. Used for a
 /// tall back-matter table (the glossary) that must run over many pages rather than clip to one keep box.
+///
+/// A zero-height glue is woven between the row boxes. The greedy page breaker treats a glue after a box as
+/// its one legal breakpoint (see [`driver::compose`](crate::driver)); without it a run of adjacent boxes is
+/// one welded atom, so the whole table would be measured and placed as a single unbreakable unit and every
+/// row past the first page would overflow off the bottom and clip. The glue is the breakpoint that lets the
+/// breaker paginate between rows; being zero it adds no space, and the leading glue at a page top is
+/// discarded like any other.
 pub fn lower_rows(
 	fonts:		Arc<FontSet>,
 	style: &Theme,
@@ -369,9 +376,14 @@ pub fn lower_rows(
 	-> Outcome<Vec<Node>>
 {
 	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
-	Ok(groups.into_iter()
-		.map(|(nodes, h)| Node::VBox(BoxNode::new(nodes, Dims::new(table_width, h, Sp::ZERO))))
-		.collect())
+	let mut out: Vec<Node> = Vec::with_capacity(groups.len() * 2);
+	for (nodes, h) in groups {
+		if !out.is_empty() {
+			out.push(Node::Glue(Glue::fixed(Sp::ZERO)));	// the legal breakpoint between rows
+		}
+		out.push(Node::VBox(BoxNode::new(nodes, Dims::new(table_width, h, Sp::ZERO))));
+	}
+	Ok(out)
 }
 
 /// Builds a cell's image mark as one line: the image seated at the left, then a gap, then the caption
