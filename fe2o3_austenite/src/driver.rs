@@ -21,6 +21,8 @@ use crate::{
 	ir::{
 		BoxNode,
 		Dims,
+		FloatNode,
+		FloatPlacement,
 		Footnote,
 		Leaf,
 		LeafKind,
@@ -178,6 +180,16 @@ fn compose<M: Metrics>(
 	// they accumulate; they are set at the foot when the page closes, then this is cleared.
 	let mut notes:	Vec<Footnote> = Vec::new();
 
+	// The floats deferred out of the flow, in document order, awaiting a page with room. A float that will
+	// not fit where it stands joins this queue rather than pushing the flow down and leaving a gap; the
+	// text that follows it backfills the current page, and the float is set at the top (or foot) of the
+	// next page a flush finds room on -- Typst's `placement: auto` top/bottom semantics. The heights are
+	// fixed at author time, exactly as a footnote's is, so the queue is a pure function of the stream and
+	// the geometry and does not threaten convergence. `bot_reserve` is the height a page's foot floats
+	// claimed, held back from the body for the life of that page.
+	let mut pending:	Vec<FloatNode>	= Vec::new();
+	let mut bot_reserve				= Sp::ZERO;
+
 	for node in &doc.nodes {
 		match node {
 			Node::Glue(g) => {
@@ -191,8 +203,11 @@ fn compose<M: Metrics>(
 				if p.is_forced() && !frame.is_empty() {
 					res!(finish_page(
 						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, metrics, incoming, &mut ledger));
-					at_top = true;
+						&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
+					bot_reserve = res!(flush_floats(
+						&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+						metrics, incoming, &mut ledger));
+					at_top = frame.is_empty();
 				}
 			},
 			Node::Anchor(id) => {
@@ -201,18 +216,35 @@ fn compose<M: Metrics>(
 				// exactly as a top-level chapter opener does.
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), y)));
 			},
+			Node::Float(f) => {
+				// A float leaves the flow. It is set where it stands only when it still fits there and no
+				// earlier float is already waiting (order is kept); otherwise it defers, and the following
+				// text backfills the space it would have taken.
+				let fits = frame.is_empty()
+					|| y + f.height <= bottom - bot_reserve - foot_reserve(&notes, &[], &doc.foot);
+				if pending.is_empty() && fits {
+					y = res!(place_float(f, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger, at_top));
+					at_top = false;
+				} else {
+					pending.push(f.clone());
+				}
+			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
 				let v = node.vextent();
 
 				// The footnotes this node's marks introduce. The break is judged against a bottom already
-				// shrunk by the notes on the page and by these -- so a line and its own note never part.
+				// shrunk by the notes on the page, by these, and by any foot floats the page carries -- so a
+				// line and its own note never part, and neither collides with a bottom float.
 				let mut marks: Vec<Footnote> = Vec::new();
 				collect_marks(node, &mut marks);
 				let reserve = foot_reserve(&notes, &marks, &doc.foot);
-				if !frame.is_empty() && y + v > bottom - reserve {
+				if !frame.is_empty() && y + v > bottom - bot_reserve - reserve {
 					res!(finish_page(
 						&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
-						&mut notes, &doc.foot, bottom, metrics, incoming, &mut ledger));
+						&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
+					bot_reserve = res!(flush_floats(
+						&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+						metrics, incoming, &mut ledger));
 				}
 				res!(place_node(node, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
 				notes.append(&mut marks);	// its marks now belong to the page the node landed on
@@ -222,9 +254,26 @@ fn compose<M: Metrics>(
 		}
 	}
 
+	// The floats still queued at the end are set now: as many as fit on the current page, then a fresh page
+	// per remaining batch, so the queue always drains rather than a float being lost. A fresh, empty page
+	// seats at least its front float (even one taller than the column, which overflows rather than spins),
+	// so `pending` shrinks by at least one per fresh page and the loop terminates.
+	loop {
+		bot_reserve = res!(flush_floats(
+			&mut pending, &mut frame, &mut y, page_no, geom, bottom,
+			metrics, incoming, &mut ledger));
+		if pending.is_empty() {
+			break;
+		}
+		res!(finish_page(
+			&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
+			&mut notes, &doc.foot, bottom, bot_reserve, metrics, incoming, &mut ledger));
+		// The fresh page opens with no foot reserve; the next flush recomputes it.
+	}
+
 	// The last page holds whatever is left, unless nothing is; its footnotes are set at its foot first.
 	if !frame.is_empty() {
-		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom, metrics, incoming, &mut ledger));
+		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom - bot_reserve, metrics, incoming, &mut ledger));
 		pages.push(Page::new(page_no, geom, std::mem::take(&mut frame)));
 	} else if pages.is_empty() {
 		// A document with no material is still one blank page, so a page count is always at least one.
@@ -248,18 +297,126 @@ fn finish_page<M: Metrics>(
 	notes:		&mut Vec<Footnote>,
 	foot:		&FootStyle,
 	bottom:		Sp,
+	bot_reserve:	Sp,	// height a foot float claimed on this page; footnotes sit above it
 	metrics:	&M,
 	incoming:	&Ledger,
 	ledger:		&mut Ledger,
 )
 	-> Outcome<()>
 {
-	res!(lay_footnotes(frame, notes, *page_no, geom, foot, bottom, metrics, incoming, ledger));
+	res!(lay_footnotes(frame, notes, *page_no, geom, foot, bottom - bot_reserve, metrics, incoming, ledger));
 	pages.push(Page::new(*page_no, geom, std::mem::take(frame)));
 	notes.clear();
 	*page_no += 1;
 	*y = top;
 	Ok(())
+}
+
+/// Sets a float's material as a small vertical list from `y_top`, discarding the leading space glue when
+/// `discard_leading` (the float has landed at a page top, so the space above it is dropped exactly as a
+/// break's leading glue is). Each child is placed like a keep box's, an anchor recorded at the y it
+/// reaches -- so the float's own [`Float`](crate::ledger::AnchorKind::Float) anchor takes the page and
+/// position it settled on. Returns the y below the placed material.
+#[allow(clippy::too_many_arguments)]
+fn place_float<M: Metrics>(
+	f:			&FloatNode,
+	y_top:		Sp,
+	page_no:	u32,
+	geom:		PageGeometry,
+	metrics:	&M,
+	incoming:	&Ledger,
+	frame:		&mut Frame,
+	ledger:		&mut Ledger,
+	discard_leading:	bool,
+)
+	-> Outcome<Sp>
+{
+	let mut yy		= y_top;
+	let mut started	= !discard_leading;	// leading glue is skipped until the first inked child
+	for child in &f.list {
+		match child {
+			Node::Glue(g) => {
+				if started {
+					yy += g.natural;
+				}
+			},
+			Node::HBox(b) => {
+				started = true;
+				res!(place_line(b, yy, page_no, geom, metrics, incoming, frame, ledger));
+				yy += b.dims.vextent();
+			},
+			Node::VBox(b) => {
+				started = true;
+				res!(place_vbox(b, yy, page_no, geom, metrics, incoming, frame, ledger));
+				yy += b.dims.vextent();
+			},
+			Node::Leaf(l) => {
+				started = true;
+				res!(place_leaf(l, geom.content_left(), yy, page_no, metrics, incoming, frame, ledger));
+				yy += l.dims.vextent();
+			},
+			Node::Anchor(id) => {
+				// A zero-size marker: an anchor before the first ink does not itself start the material, so a
+				// leading glue after it is still discarded at a page top.
+				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
+			},
+			Node::Penalty(_)	=> (),
+			// A float never nests inside another float; a nested one would be a construction error, so it is
+			// left unplaced rather than silently flattened.
+			Node::Float(_)		=> (),
+		}
+	}
+	Ok(yy)
+}
+
+/// Sets the queued floats that fit on a freshly opened page, in document order, and returns the height its
+/// foot floats claimed (held back from the body for the rest of the page). A top float is set from the top
+/// cursor down, advancing `*y`; a foot float is set at the page foot, retreating the foot cursor. The front
+/// float of an empty page is set even when it is taller than the column -- overflowing rather than
+/// deferring forever -- and flushing stops at the first float that will not fit the space left, so a float
+/// never jumps ahead of an earlier one.
+#[allow(clippy::too_many_arguments)]
+fn flush_floats<M: Metrics>(
+	pending:	&mut Vec<FloatNode>,
+	frame:		&mut Frame,
+	y:			&mut Sp,
+	page_no:	u32,
+	geom:		PageGeometry,
+	bottom:		Sp,
+	metrics:	&M,
+	incoming:	&Ledger,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<Sp>
+{
+	// A foot float reserves only its own height; the footnote furniture is the footnote layer's business,
+	// and [`finish_page`] seats the notes above whatever height the foot floats claimed.
+	let page_empty_at_entry	= frame.is_empty();
+	let mut b_cursor		= bottom;
+	let mut placed_any		= false;
+	while let Some(front) = pending.first() {
+		let avail	= b_cursor - *y;
+		// The very first float on an empty page seats whatever its height, so an oversized float overflows a
+		// page of its own rather than the queue never draining; every later float must fit the space left, and
+		// flushing stops at the first that will not -- so a float never jumps ahead of an earlier one.
+		let force	= page_empty_at_entry && !placed_any;
+		if front.height > avail && !force {
+			break;
+		}
+		let f = pending.remove(0);
+		match f.placement {
+			FloatPlacement::Top => {
+				*y = res!(place_float(&f, *y, page_no, geom, metrics, incoming, frame, ledger, true));
+			},
+			FloatPlacement::Bottom => {
+				let y_top = b_cursor - f.height;
+				res!(place_float(&f, y_top, page_no, geom, metrics, incoming, frame, ledger, true));
+				b_cursor = y_top;
+			},
+		}
+		placed_any = true;
+	}
+	Ok(bottom - b_cursor)
 }
 
 /// Dispatches a node to the placement helper for its shape. The break decision is the caller's; this
@@ -399,6 +556,9 @@ fn place_line<M: Metrics>(
 				frame.push(Placed::new(x, y, b.dims, PlacedKind::Rule));
 				x += b.dims.width;
 			},
+			// A float is a block-level node the driver handles before it ever reaches a line; one woven into a
+			// line would be a construction error, so it draws nothing rather than being flattened here.
+			Node::Float(_) => (),
 		}
 	}
 	Ok(())
@@ -442,6 +602,9 @@ fn place_vbox<M: Metrics>(
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
 			},
 			Node::Penalty(_) => (),
+			// A float never nests inside a keep box; one that did would be a construction error, so it draws
+			// nothing rather than being flattened into the box.
+			Node::Float(_) => (),
 		}
 	}
 	Ok(())

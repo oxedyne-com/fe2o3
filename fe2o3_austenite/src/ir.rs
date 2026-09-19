@@ -370,6 +370,36 @@ impl BoxNode {
 	}
 }
 
+/// Where a float asks to sit on the page it settles on. Typst's `placement: auto` lets the engine
+/// choose, and Austenite chooses the top; `placement: top` pins the top, `placement: bottom` the foot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatPlacement {
+	Top,
+	Bottom,
+}
+
+/// A block-level float: self-contained vertical material -- a figure and its caption, or an aside box --
+/// that leaves the flow when it will not fit where it stands and is set at the top (or foot) of the next
+/// page instead, its parts kept together (Typst's `figure(placement: auto | top | bottom)`).
+///
+/// `list` is the material as a small vertical list, its own leading and trailing space glue included; the
+/// leading glue is discarded when the float lands at a page top, exactly as the page breaker discards a
+/// break's leading glue. `height` is the committed extent the break weighs -- the material without that
+/// discardable framing glue -- so the fit test judges the figure and its caption, not the space around
+/// them. A float is only ever a top-level node of the document stream, never nested in a line or keep box.
+#[derive(Clone, Debug)]
+pub struct FloatNode {
+	pub list:		Vec<Node>,
+	pub height:		Sp,
+	pub placement:	FloatPlacement,
+}
+
+impl FloatNode {
+	pub fn new(list: Vec<Node>, height: Sp, placement: FloatPlacement) -> Self {
+		Self { list, height, placement }
+	}
+}
+
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -379,6 +409,7 @@ pub enum Node {
 	Glue(Glue),
 	Penalty(Penalty),
 	Anchor(AnchorId),	// a zero-size marker recording where an identity landed
+	Float(FloatNode),	// a block-level float, deferred by the driver to the top or foot of a later page
 }
 
 impl Node {
@@ -393,6 +424,9 @@ impl Node {
 			Node::Glue(g)		=> g.natural,
 			Node::Penalty(_)	=> Sp::ZERO,
 			Node::Anchor(_)		=> Sp::ZERO,
+			// A float takes no space where it stands: it leaves the flow, and the driver charges its height
+			// against the page it settles on, not this position.
+			Node::Float(_)		=> Sp::ZERO,
 		}
 	}
 
