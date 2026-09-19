@@ -71,6 +71,8 @@ pub mod enc;
 pub mod kem;
 pub mod keys;
 pub mod keystore;
+#[cfg(feature = "p256")]
+pub mod p256;
 pub mod pqc;
 pub mod scheme;
 pub mod sign;
