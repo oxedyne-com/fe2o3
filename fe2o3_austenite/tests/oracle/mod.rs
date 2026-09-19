@@ -25,6 +25,7 @@
 
 pub mod trio;
 
+use oxedyne_fe2o3_austenite::emit::pearl::PearlDoc;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 
@@ -278,10 +279,11 @@ fn parse_typst_rows(json: &str) -> Outcome<Vec<TypstRow>> {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 struct AusOutput {
-	total_pages:	usize,
-	rows:			Vec<AnchorRow>,
-	pdf_path:		PathBuf,
-	skip_line:		Option<String>,	// austenite's own "skipped: ..." stderr line, if it printed one
+	total_pages:		usize,
+	rows:				Vec<AnchorRow>,
+	pdf_path:			PathBuf,
+	skip_line:			Option<String>,	// austenite's own "skipped: ..." stderr line, if it printed one
+	pearl_mismatches:	Vec<String>,	// F2: divergences found between the .prl round-trip and the driver's own SVGs
 }
 
 /// Compiles `root` with the built `austenite` binary into the harness's working directory, reading back
@@ -304,6 +306,7 @@ fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
 
 	let output = match Command::new(bin)
 		.arg("--ledger-out").arg(&ledger_json_path)
+		.arg("--pearl")
 		.arg(root.path)
 		.arg(&out_dir)
 		.output()
@@ -324,11 +327,18 @@ fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
 	let rows			= res!(parse_anchor_rows(&ledger_json));
 	let skip_line		= parse_skip_line(&String::from_utf8_lossy(&output.stderr));
 
+	// F2: the `.prl` this run just wrote (`--pearl`, above) must render, page for page, the very SVG the
+	// driver's own SVG arm wrote beside it -- before the SVGs are deleted below. See
+	// `pearl_round_trip_mismatches`'s own comment for what this actually gates.
+	let pearl_mismatches = res!(pearl_round_trip_mismatches(&out_dir, total_pages));
+
 	// The harness needs only the PDF (for the raster sample) and the ledger JSON (already read above),
 	// not the per-page SVGs -- on `oxeweb-techspec`'s 141 pages those are most of the ~340 MB a run
 	// otherwise leaves behind. Deleting them keeps the working directory bounded across repeat runs
 	// rather than growing it, per the coordinator's direction to keep this render out of `/tmp` and
-	// bounded (a stale session's 7.7 GB of `/tmp` PDFs is exactly the failure mode this avoids).
+	// bounded (a stale session's 7.7 GB of `/tmp` PDFs is exactly the failure mode this avoids). The
+	// `.prl` itself is left in place -- it is one file, not one per page, and the F2 check above needs it
+	// to still be there on a rerun that skips recompiling.
 	if let Ok(entries) = std::fs::read_dir(&out_dir) {
 		for entry in entries.flatten() {
 			let p = entry.path();
@@ -338,7 +348,52 @@ fn run_austenite(root: &CorpusRoot, work_dir: &Path) -> Outcome<AusOutput> {
 		}
 	}
 
-	Ok(AusOutput { total_pages, rows, pdf_path: out_dir.join("document.pdf"), skip_line })
+	Ok(AusOutput { total_pages, rows, pdf_path: out_dir.join("document.pdf"), skip_line, pearl_mismatches })
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ F2: THE .prl / .tsel ORACLE GATE                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// Does the `.prl` this run just wrote render, page for page, the very SVG the driver's own SVG arm wrote
+/// beside it? Nothing else in this harness asserts that a `.prl` -- and the `.tsel` selectable-text layer
+/// riding inside it -- actually agrees with the ink the reader is proofed against: the PDF hash pins the
+/// PDF arm alone, and the crate's own unit round-trip (`emit::pearl`'s own tests) renders a hand-built
+/// frame, not real driver output. `PearlDoc::render_page` is the same reconstruction `pearl_render` and
+/// `web/pearl-reader/pearl.js` both perform, so this is the oracle for both of them: a positional/keyed
+/// `.prl` regression, or a `.tsel` desync from the outlines it sits over, reds here rather than shipping
+/// unseen. Deliberately byte-identity rather than a fuzzy compare -- `emit::pearl::render_page`'s own doc
+/// comment says it reconstructs the SVG arm's output "byte for byte", so anything less than that is
+/// already the divergence this check exists to catch.
+fn pearl_round_trip_mismatches(out_dir: &Path, total_pages: usize) -> Outcome<Vec<String>> {
+	let prl_path = out_dir.join("document.prl");
+	if !prl_path.is_file() {
+		return Ok(vec![fmt!("no document.prl was written to {:?} (was --pearl dropped?)", out_dir)]);
+	}
+	let doc			= res!(PearlDoc::read_file(&prl_path));
+	let prl_pages	= res!(doc.page_count());
+	let mut out = Vec::new();
+	if prl_pages != total_pages {
+		out.push(fmt!(
+			"document.prl carries {} page(s), austenite reported {}", prl_pages, total_pages));
+	}
+	for i in 0..prl_pages.min(total_pages) {
+		let rendered	= res!(doc.render_page(i));
+		let svg_path	= out_dir.join(fmt!("page-{:03}.svg", i + 1));
+		let disk		= match std::fs::read_to_string(&svg_path) {
+			Ok(s)	=> s,
+			Err(e)	=> {
+				out.push(fmt!("page {}: could not read the driver's own {:?}: {}", i + 1, svg_path, e));
+				continue;
+			},
+		};
+		if rendered != disk {
+			out.push(fmt!(
+				"page {}: .prl round-trip diverges from the driver's own SVG at {:?} ({} vs {} bytes)",
+				i + 1, svg_path, rendered.len(), disk.len()));
+		}
+	}
+	Ok(out)
 }
 
 /// Reads the page count back out of austenite's one-line stdout report -- "austenite: SRC -> N
@@ -606,7 +661,12 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 	let ausout = res!(run_austenite(root, work_dir));
 	let pdf_sha256 = res!(sha256_of_file(&ausout.pdf_path));
 
-	let mut mismatches: Vec<String>	= Vec::new();
+	// F2 runs regardless of whether the Typst oracle is even available for this root (e.g.
+	// `oxeweb-techspec`'s known incompatibility, see `corpus`) -- it checks Austenite against itself, not
+	// against Typst, so it is folded straight into `mismatches` ahead of the Typst-side checks below.
+	let mut mismatches: Vec<String>	= ausout.pearl_mismatches.iter()
+		.map(|m| fmt!("prl-vs-svg: {}", m))
+		.collect();
 	let mut typst_pages					= None;
 	let mut oracle_note					= None;
 	// The first figure's page, or else the first heading's page beyond page 1, as the raster sample's

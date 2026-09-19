@@ -90,6 +90,10 @@ function renderPage(doc, blockKey) {
 				// flipped in y and moved to (base_x + gx, base_y - gy).
 				const baseX = sp(leaf[1]);
 				const baseY = sp(leaf[2]) + sp(leaf[4]);
+				// A leaf without a `colour` key is black, the form every pre-colour text leaf took --
+				// matching the Rust reader's own default at pearl.rs's `colour` lookup.
+				const meta = leaf[7];
+				const c = meta && meta.colour;
 				for (const g of leaf[6]) {
 					const entry = glyphs[g[0]];
 					const d = entry && entry.d;
@@ -99,12 +103,12 @@ function renderPage(doc, blockKey) {
 					svg.appendChild(el("path", {
 						d,
 						transform: `matrix(1,0,0,-1,${tx},${ty})`,
-						fill: "#000000",
+						fill: c ? rgb(c) : "#000000",
+						"fill-opacity": c && c[3] < 255 ? opacity(c) : null,
 					}));
 				}
 				// The run's selectable twin: leaf[7].spans maps each text-bearing glyph (spaces included)
 				// to its source text, positioned exactly as its outline was above.
-				const meta = leaf[7];
 				const runSpans = (meta && meta.spans) || [];
 				if (runSpans.length > 0) {
 					if (tselHasText) tsel.appendChild(tspanEl(baseX, baseY, meta.size, " "));
@@ -248,8 +252,10 @@ function annotationsForBlock(doc, blockHash) {
 
 function renderDocument(doc, container) {
 	container.innerHTML = "";
+	// A version mismatch is refused outright, matching the Rust reader's own `PearlDoc::from_string`
+	// check -- a v0 file must fail loudly rather than render silently with no `.tsel` layer.
 	if (doc.pearl !== "1") {
-		console.warn("This reader speaks Pearl v1; file is v" + doc.pearl);
+		throw new Error(`This reader speaks Pearl v1, but the file is v${doc.pearl}.`);
 	}
 
 	// Build every page first, keeping the DOM node beside its index entry so an internal link can scroll

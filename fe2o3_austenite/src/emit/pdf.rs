@@ -183,8 +183,10 @@ fn draw_graphic(
 	Ok(())
 }
 
-/// Draws a placed run as filled glyph outlines. `height` is the face ascent, so `by + height` is the
-/// baseline. `bx`/`by` are the box's top-left.
+/// Draws a placed run as filled glyph outlines. `height` is the line's own HBox height -- the face
+/// ascent for an ordinary line, or the cap height for a first line raised under the block-edge model
+/// (see `linebreak::set_lines`), whose glyphs then carry a compensating negative shift -- so
+/// `by + height` is the baseline either way. `bx`/`by` are the box's top-left.
 fn draw_text(
 	out:	&mut PdfPage,
 	bx:		Sp,

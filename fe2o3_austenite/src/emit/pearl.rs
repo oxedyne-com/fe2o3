@@ -1120,6 +1120,13 @@ mod tests {
 	/// written by an older or newer build is unreadable or misparsed. Reading one of the samples this
 	/// crate ships closes that gap; regenerate them (see the reader's README) whenever the leaf shape
 	/// changes, and this test fails loudly if a regeneration is forgotten.
+	///
+	/// `demo.prl` alone is not enough: it is `pearl_demo_gen`'s hand-built frame, not real driver output,
+	/// so a genuine emit regression (the cap-height/baseline block-edge model landing after these samples
+	/// were first checked in is exactly the shape of one -- see `linebreak.rs`) could move every engine
+	/// sample's glyph placement while this test kept passing against the one sample no engine ever wrote.
+	/// `keystone.prl` -- `samples/keystone.typ` compiled with `--pearl`, one real prose-and-diagram page
+	/// -- closes that gap.
 	#[test]
 	fn test_a_checked_in_sample_reads_and_renders_04() -> Outcome<()> {
 		let path = concat!(env!("CARGO_MANIFEST_DIR"), "/web/pearl-reader/samples/demo.prl");
@@ -1131,6 +1138,14 @@ mod tests {
 			assert!(svg.contains("class=\"tsel\""), "page {} carries no selectable text layer", idx);
 			assert!(svg.ends_with("</svg>\n"), "page {} is not a well-formed, closed SVG document", idx);
 		}
+
+		let engine_path = concat!(env!("CARGO_MANIFEST_DIR"), "/web/pearl-reader/samples/keystone.prl");
+		let engine_doc  = res!(PearlDoc::read_file(engine_path));
+		assert_eq!(res!(engine_doc.page_count()), 1, "keystone.prl is a one-page fixture");
+		let svg = res!(engine_doc.render_page(0));
+		assert!(svg.starts_with("<svg "), "keystone page 0 did not render as an SVG document");
+		assert!(svg.contains("class=\"tsel\""), "keystone page 0 carries no selectable text layer");
+		assert!(svg.ends_with("</svg>\n"), "keystone page 0 is not a well-formed, closed SVG document");
 		Ok(())
 	}
 }
