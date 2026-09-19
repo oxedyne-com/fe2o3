@@ -114,6 +114,15 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own float fixture -- the A1 FLOAT primitive's regression root. Its `#aside-box`es
+			// are `figure(placement: auto)` floats spread across several pages; see the file for why it is
+			// self-contained (a local `#let aside-box`, plain-text bodies) and needs no symbol-modifier patch.
+			name:				"float-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/float_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
