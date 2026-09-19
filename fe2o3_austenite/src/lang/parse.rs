@@ -1292,9 +1292,17 @@ fn code_skip(trimmed: &str) -> Option<CodeSkip> {
 	None
 }
 
-/// Does this already-left-trimmed line open one of the four Typst block statements the reader skips?
+/// Does this already-left-trimmed line open one of the Typst block statements the reader skips?
+///
+/// `#include` sits here too, guarding against the shape it would otherwise fall through to: it takes a
+/// bare string argument, with neither a `(` nor a `[` for [`opens_standalone_call`] to catch, so with no
+/// entry here it reads as an ordinary paragraph line and its raw `#include "path"` prints as literal body
+/// text. The book assembler ([`crate::book::assemble`]) resolves and follows a real `#include` itself,
+/// before a chapter's source ever reaches this parser -- this is the belt-and-braces net for any source
+/// that bypasses that assembler (a bare `to_blocks`/`to_blocks_with_templates` call, a test fixture): the
+/// line is skipped and recorded rather than ever standing a chance of being set as prose.
 fn code_keyword(trimmed: &str) -> bool {
-	for kw in ["#import ", "#import\"", "#let ", "#set ", "#show ", "#show:"] {
+	for kw in ["#import ", "#import\"", "#let ", "#set ", "#show ", "#show:", "#include ", "#include\""] {
 		if trimmed.starts_with(kw) {
 			return true;
 		}

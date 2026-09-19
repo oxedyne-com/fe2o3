@@ -1686,6 +1686,11 @@ fn walk_template_imports(
 // │ INCLUDE FOLLOWING                                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// Recursion depth cap on `#include` following. No real book nests chapters anywhere near this deep, so
+/// hitting it is itself the sign of a self- or mutually-referential include cycle; that is reported as a
+/// refusal rather than recursed into forever or dropped without a trace.
+const MAX_INCLUDE_DEPTH: u32 = 64;
+
 /// Follows a root's `#include "..."` lines in order, reading each chapter and setting it through the
 /// reader, and lifts each `#part-page[...]` divider to a level-1 heading so the part titles keep their
 /// place in the flow. The root's own inline markup between the code lines is read too, in document order:
@@ -1695,44 +1700,84 @@ fn walk_template_imports(
 /// paragraphs together -- and the root's opening section keeps its place ahead of the first chapter. The
 /// template call itself (`#show: doc.with(...)`, `#import`, `#pagebreak`) is code the reader skips and
 /// tallies, so it never leaks into the flow.
+///
+/// A chapter may itself `#include` a file -- Lucronics' `chap_dynstrat_captonic_dynamics.typ` pulls in
+/// `../evidence/lucronics_evidence.typ` this way -- so the walk is recursive: [`assemble_into`] follows
+/// every level's own includes, each resolved against *that file's own directory*, exactly as Typst
+/// resolves one, rather than always against the book root's.
 pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::rules::TemplateFns)
 	-> Outcome<(Vec<Block>, lang::Refusals)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
 	let mut skips = lang::Refusals::default();
-	let mut buf = String::new();	// the root's inline markup gathered since the last boundary
-	// The root's own inline markup (its opening section, any tail after the last include) is tagged with
-	// its own path, exactly as a chapter is tagged with its own -- see `Refusal`'s doc comment on why the
-	// span alone does not already say which file it came from.
-	let root_label = root_path.display().to_string();
-	for line in root_src.lines() {
+	res!(assemble_into(root_src, root_dir, root_path, tfns, 0, &mut blocks, &mut skips));
+	Ok((blocks, skips))
+}
+
+/// The recursive body of [`assemble`]. `dir` is the directory `src` was itself read from -- the book
+/// root's directory at depth 0, an included chapter's own directory one level down -- so a `#include
+/// "../x.typ"` climbs relative to wherever it is written, not the top of the book. An include that
+/// cannot be read, or one written past [`MAX_INCLUDE_DEPTH`], is recorded as a refusal rather than left
+/// to fall through into `buf`, where the generic reader would set its raw `#include "..."` line as
+/// literal body text -- exactly the silent-loss failure this recursion exists to close.
+fn assemble_into(
+	src:	&str,
+	dir:	&Path,
+	path:	&Path,
+	tfns:	&lang::rules::TemplateFns,
+	depth:	u32,
+	blocks:	&mut Vec<Block>,
+	skips:	&mut lang::Refusals,
+)
+	-> Outcome<()>
+{
+	let mut buf = String::new();	// this file's own inline markup gathered since the last boundary
+	// This file's own inline markup (its opening section, any tail after its last include) is tagged with
+	// its own path, exactly as an included chapter's blocks are tagged with theirs -- see `Refusal`'s doc
+	// comment on why the span alone does not already say which file it came from.
+	let label = path.display().to_string();
+	for line in src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
-			res!(flush_inline(&mut buf, &mut blocks, &mut skips, &root_label, tfns));
-			if let Some(rel) = first_quoted(rest) {
-				let path	= root_dir.join(&rel);
-				let src		= match vfs::read_to_string(&path) {
-					Ok(s)	=> s,
-					Err(e)	=> return Err(err!(e,
-						"Could not read the included chapter {:?}.", path; File, Read)),
-				};
-				let (chap, mut chap_skips) = res!(lang::to_blocks_with_templates(&src, tfns));
-				chap_skips.tag_file(&path.display().to_string());
-				// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
-				// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
-				// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
-				// no styling -- every corpus chapter today -- lowers to an empty patch and nests nothing,
-				// splicing its blocks in flat and keeping the block stream and the render byte-identical.
-				let chap_patch = lang::set::lower_declarations(&src);
-				if chap_patch == ThemePatch::default() {
-					blocks.extend(chap);
-				} else {
-					blocks.push(Block::Scoped { patch: chap_patch, blocks: chap });
-				}
-				skips.merge(chap_skips);
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			match first_quoted(rest) {
+				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
+					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
+						crate::ir::Span::new(0, 0));
+				},
+				Some(rel) => {
+					let inc_path = dir.join(&rel);
+					let inc_src = match vfs::read_to_string(&inc_path) {
+						Ok(s)	=> s,
+						Err(e)	=> return Err(err!(e,
+							"Could not read the included chapter {:?}.", inc_path; File, Read)),
+					};
+					let inc_dir = inc_path.parent().unwrap_or(dir);
+					let mut chap_blocks: Vec<Block> = Vec::new();
+					let mut chap_skips = lang::Refusals::default();
+					res!(assemble_into(&inc_src, inc_dir, &inc_path, tfns, depth + 1,
+						&mut chap_blocks, &mut chap_skips));
+					// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
+					// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
+					// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
+					// no styling -- every corpus chapter today -- lowers to an empty patch and nests nothing,
+					// splicing its blocks in flat and keeping the block stream and the render byte-identical.
+					let chap_patch = lang::set::lower_declarations(&inc_src);
+					if chap_patch == ThemePatch::default() {
+						blocks.extend(chap_blocks);
+					} else {
+						blocks.push(Block::Scoped { patch: chap_patch, blocks: chap_blocks });
+					}
+					skips.merge(chap_skips);
+				},
+				None => {
+					// A malformed `#include` with no quoted path: reported, not left to fall through as a
+					// literal line of body text.
+					skips.record("#include", crate::ir::Span::new(0, 0));
+				},
 			}
 		} else if t.starts_with("#part-page") {
-			res!(flush_inline(&mut buf, &mut blocks, &mut skips, &root_label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
 			// its number across a part boundary and a part never appears in a running head.
@@ -1744,9 +1789,10 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::
 			buf.push('\n');
 		}
 	}
-	// The tail after the last include: back-matter markup a doc root closes with, if any.
-	res!(flush_inline(&mut buf, &mut blocks, &mut skips, &root_label, tfns));
-	Ok((blocks, skips))
+	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
+	// include) closes with, if any.
+	res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+	Ok(())
 }
 
 /// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips

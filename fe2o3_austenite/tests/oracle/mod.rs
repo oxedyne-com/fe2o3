@@ -150,6 +150,17 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			Some("/home/jason/usr/books/elearnity"),
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own cross-directory-include fixture -- the regression root for the Lucronics
+			// QA finding: a CHAPTER's own `#include "../x.typ"` (not the book root's) was neither resolved
+			// nor reported. `include_fixture/root.typ` includes `chapters/chapter_one.typ`, which in turn
+			// includes `../evidence/evidence_one.typ` -- a sibling directory, reached only through the
+			// chapter's own include. See the fixture files themselves for the full shape.
+			name:				"include-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/include_fixture/root.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
