@@ -13,7 +13,7 @@ No framework, no build step, no wasm, and **no JSON projection**. Just `index.ht
 
 ```bash
 cd fe2o3_austenite/web/pearl-reader
-python3 -m http.server 8137 --bind 127.0.0.1
+cargo run -p oxedyne_fe2o3_net --no-default-features --bin localserve -- . --port 8137
 # then open http://127.0.0.1:8137/index.html
 ```
 
