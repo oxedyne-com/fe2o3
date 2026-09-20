@@ -452,13 +452,16 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
-			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
+			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Builtin(_)) && !lines.is_empty()))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
 			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
 			// splices its expanded blocks (the `filter` above lets an open-paragraph `#name` fall through to
-			// the paragraph arm). Every other capture kind -- a figure, a bare table, a data array -- flushes
-			// the paragraph and is gathered as before.
+			// the paragraph arm). A markup builtin (`#lorem`, `#v`, `#pagebreak`) is block-position only, so a
+			// continuation line following prose with no blank between (`prose\n#lorem(5)`) likewise falls
+			// through -- to the existing visible refusal, which keeps the prose, rather than splicing an extra
+			// block; inline mid-prose support is a later unit. Every other capture kind -- a figure, a bare
+			// table, a data array -- flushes the paragraph and is gathered as before.
 			//
 			// A multi-line construct the reader sets rather than skips. It closes any open block, then its
 			// whole text is gathered by the check
@@ -2249,8 +2252,18 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// [`dispatch_capture`] (which reads its arguments) rather than being tallied as an unsupported construct
 	// and dropped. None of these names can be a bound furniture or content function -- they are reserved by
 	// [`crate::lang::rules::is_reserved_construct`] -- so this never shadows a corpus binding.
+	//
+	// Own-line only, mirroring [`code_skip`]'s own rule: the call must either open a multi-line span (its
+	// delimiters unbalanced on this line, gathered whole below) or close on this line with nothing but
+	// whitespace after its `)`. A balanced call with trailing prose -- `#lorem(5) more`, `#v(12pt) text` --
+	// is NOT own-line, so it falls through to the existing visible refusal, which keeps that trailing prose;
+	// inline mid-prose support is a later unit.
 	if let Some(kind) = builtin_opener(trimmed) {
-		return Some(CaptureKind::Builtin(kind));
+		let mut state = SkipState::new();
+		scan_brackets(trimmed, &mut state);
+		if state.has_open_bracket() || trimmed.trim_end().ends_with(')') {
+			return Some(CaptureKind::Builtin(kind));
+		}
 	}
 	if trimmed.starts_with("#figure(") {
 		return Some(CaptureKind::Figure);
@@ -2533,8 +2546,12 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((inner, sub)) = parse_items(&body, binds) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
 					skips.merge(sub);
+					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
+					// keep unit -- so it is refused visibly rather than dropped silently at render (see
+					// [`refuse_nested_page_breaks`]).
+					refuse_nested_page_breaks(&mut inner, skips);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
 					let patch = crate::lang::set::lower_declarations(&body);
@@ -2582,6 +2599,9 @@ fn dispatch_capture(
 				Some((args, body)) => {
 					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
 						skips.merge(sub);
+						// A `#pagebreak()` nested in a furniture callout body cannot be honoured -- the box is one
+						// keep unit -- so it is refused visibly rather than dropped silently at render.
+						refuse_nested_page_breaks(&mut inner, skips);
 						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
 						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
 						// title larger or smaller than the body reads at its own size.
@@ -2653,11 +2673,18 @@ fn dispatch_capture(
 		CaptureKind::Builtin(kind) => {
 			let span = Span::new(cap.start, cap.start);
 			match kind {
-				// `#pagebreak()` / `#pagebreak(weak: true)`: a forced eject. The `weak` argument is not
-				// distinguished -- the eject is dropped at an already-fresh page top regardless, which is the
-				// weak behaviour; a strong break on an already-empty page (Typst would open a blank one) is a
-				// documented limitation, not exercised by any corpus.
-				BuiltinKind::PageBreak => items.push(Item::PageBreak { span }),
+				// `#pagebreak()` / `#pagebreak(weak: true)`: a forced eject, mapped to the weak break the driver
+				// drops at an already-fresh page top. A `to:` argument (`pagebreak(to: "odd")`) selects a parity
+				// target the reader does not model, so it is refused visibly rather than set as a plain break
+				// that quietly ignores the argument.
+				BuiltinKind::PageBreak => {
+					let inner = call_inner(&cap.buf, "pagebreak").unwrap_or_default();
+					if inner.contains("to:") {
+						skips.record("#pagebreak", span);
+					} else {
+						items.push(Item::PageBreak { span });
+					}
+				},
 				// `#lorem(<n>)`: n words of the standard placeholder, set as one plain paragraph. A malformed
 				// count stays a visible refusal; a zero count sets nothing; a huge count is capped at the
 				// embedded corpus by [`lorem_words`], so generation stays bounded.
@@ -2671,13 +2698,16 @@ fn dispatch_capture(
 						skips.record("#lorem", span);	// a non-numeric argument stays a visible refusal
 					}
 				},
-				// `#v(<abs len>)`: a fixed vertical space. Only absolute units (pt/mm/cm/in) are set; an `em`,
-				// `%` or `fr` length has no running size here and is left a visible refusal rather than set
-				// wrongly, exactly as the heading-template spacer does (see [`crate::lang::rules`]).
+				// `#v(<abs len>)`: a fixed vertical space. Only an absolute first argument (pt/mm/cm/in) is set;
+				// an `em`, `%` or `fr` length has no running size here, and a `weak:` argument asks for a
+				// collapsing space the reader does not model -- either is refused visibly rather than set as the
+				// wrong space, exactly as the heading-template spacer does (see [`crate::lang::rules`]).
 				BuiltinKind::Vspace => {
-					match vspace_length(&cap.buf) {
-						Some(height)	=> items.push(Item::Space { height, span }),
-						None			=> skips.record("#v", span),
+					let inner = call_inner(&cap.buf, "v").unwrap_or_default();
+					match parse_length(first_arg(&inner).trim()) {
+						Some(Length::Abs(pt)) if !inner.contains("weak:")	=>
+							items.push(Item::Space { height: crate::ir::Sp::from_pt(pt), span }),
+						_													=> skips.record("#v", span),
 					}
 				},
 			}
@@ -2720,21 +2750,29 @@ fn lorem_arg(buf: &str) -> Option<usize> {
 	first_arg(&inner).trim().parse::<usize>().ok()
 }
 
-/// The scaled-point height of a `#v(<len>)` call read from the gathered buffer: its first positional
-/// argument, parsed as an absolute length. `None` for an `em`/`%`/`fr` length or a malformed argument, so
-/// the caller leaves it a visible refusal rather than setting the wrong space.
-fn vspace_length(buf: &str) -> Option<crate::ir::Sp> {
-	let inner = call_inner(buf, "v")?;
-	match parse_length(first_arg(&inner).trim()) {
-		Some(Length::Abs(pt))	=> Some(crate::ir::Sp::from_pt(pt)),
-		_						=> None,
-	}
-}
-
 /// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
 /// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
 fn first_arg(inner: &str) -> String {
 	split_arg_commas(inner).into_iter().next().unwrap_or_default()
+}
+
+/// Records a visible refusal for, and removes, every `#pagebreak()` nested in a callout box's body. A
+/// forced page eject has no meaning inside a box the layout keeps whole -- the box-body renderer has no
+/// page to turn -- so it is refused rather than silently dropped at render. Recurses through a nested scope
+/// or a nested box, so a break buried in either is caught too. The document top level and a `#columns` body
+/// (which splices into the main flow, not a box) are untouched: a break there is honoured.
+fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
+	let mut kept = Vec::with_capacity(items.len());
+	for mut item in items.drain(..) {
+		match &mut item {
+			Item::PageBreak { span }		=> { skips.record("#pagebreak", *span); continue; },
+			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
+			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
+			_								=> {},
+		}
+		kept.push(item);
+	}
+	*items = kept;
 }
 
 /// The positional arguments of a captured content-binding reference, each evaluated to its substitution
@@ -3871,6 +3909,91 @@ mod tests {
 		let (items2, skips2) = res!(document_with_refusals("#v(2em)\n"));
 		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a relative #v must not be set: {:?}", items2);
 		assert!(skips2.report().is_some(), "a relative #v is refused visibly");
+		Ok(())
+	}
+
+	/// Gathers the plain text of every top-level paragraph, for the trailing-prose and continuation checks.
+	#[cfg(test)]
+	fn paragraph_text(items: &[Item]) -> String {
+		items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(runs.iter().filter_map(|r| match r {
+				Inline::Text(t)	=> Some(t.clone()),
+				_				=> None,
+			}).collect::<String>()),
+			_ => None,
+		}).collect::<Vec<_>>().join(" ")
+	}
+
+	/// A balanced builtin call with prose trailing its `)` is NOT own-line: it falls through to the existing
+	/// visible refusal, which keeps the trailing prose. This is the silent-loss regression the milestone audit
+	/// flagged -- `#pagebreak() text`, `#lorem(5) text`, `#v(12pt) text` must not drop the trailing words nor
+	/// set the builtin as a block.
+	#[test]
+	fn trailing_prose_after_a_builtin_is_kept() -> Outcome<()> {
+		for src in [
+			"#pagebreak() and then more prose.\n",
+			"#lorem(5) and then more prose.\n",
+			"#v(12pt) and then more prose.\n",
+		] {
+			let (items, _skips) = res!(document_with_refusals(src));
+			assert!(!items.iter().any(|it| matches!(it, Item::PageBreak { .. } | Item::Space { .. })),
+				"a builtin with trailing prose must not be set as a block: {:?} -> {:?}", src, items);
+			let body = paragraph_text(&items);
+			assert!(body.contains("and then more prose"),
+				"the trailing prose must survive for {:?}: body {:?}", src, body);
+			assert!(!body.contains("Lorem ipsum dolor sit amet"),
+				"a trailing-prose #lorem must not expand as a block for {:?}", src);
+		}
+		Ok(())
+	}
+
+	/// A builtin on the line directly after prose, with no blank line between, is a paragraph continuation:
+	/// block-position support does not fire, so the preceding prose is kept and the builtin is a visible
+	/// refusal rather than an extra spliced block. Own-line (block-position) support only; inline is a later
+	/// unit.
+	#[test]
+	fn mid_paragraph_builtin_continuation_keeps_prose() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("Some opening prose here.\n#lorem(5)\n"));
+		assert!(!items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if matches!(runs.as_slice(), [Inline::Text(t)] if t == "Lorem ipsum dolor sit amet."))),
+			"a continuation #lorem must not splice a block: {:?}", items);
+		assert!(paragraph_text(&items).contains("Some opening prose here"),
+			"the preceding prose is kept: {:?}", items);
+		assert!(skips.report().is_some(), "the continuation #lorem is refused visibly");
+		Ok(())
+	}
+
+	/// A `#pagebreak()` nested in a `#styled-box[ ... ]` callout body cannot be honoured -- the box is one keep
+	/// unit -- so it is a visible refusal, not a silent drop, and no `Item::PageBreak` survives inside the box.
+	#[test]
+	fn page_break_inside_a_box_is_refused_not_dropped() -> Outcome<()> {
+		let src = "#styled-box[\nInside the callout.\n\n#pagebreak()\n\nStill inside.\n]\n";
+		let (items, skips) = res!(document_with_refusals(src));
+		assert!(skips.report().map_or(false, |r| r.contains("#pagebreak")),
+			"the boxed page break is refused visibly: {:?}", skips.report());
+		fn has_page_break(items: &[Item]) -> bool {
+			items.iter().any(|it| match it {
+				Item::PageBreak { .. }		=> true,
+				Item::Box { items, .. }		=> has_page_break(items),
+				Item::Scoped { items, .. }	=> has_page_break(items),
+				_							=> false,
+			})
+		}
+		assert!(!has_page_break(&items), "no page break may survive inside the box: {:?}", items);
+		Ok(())
+	}
+
+	/// An ignored keyword argument is refused, not silently set as the wrong thing: `#pagebreak(to: "odd")`
+	/// selects a parity target the reader does not model, and `#v(24pt, weak: true)` asks for a collapsing
+	/// space it does not model -- each stays a visible refusal rather than a plain break or a fixed space.
+	#[test]
+	fn unsupported_keyword_args_are_refused() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("#pagebreak(to: \"odd\")\n"));
+		assert!(!items.iter().any(|it| matches!(it, Item::PageBreak { .. })), "a `to:` pagebreak is not set: {:?}", items);
+		assert!(skips.report().map_or(false, |r| r.contains("#pagebreak")), "a `to:` pagebreak is refused: {:?}", skips.report());
+		let (items2, skips2) = res!(document_with_refusals("#v(24pt, weak: true)\n"));
+		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a weak #v is not set: {:?}", items2);
+		assert!(skips2.report().map_or(false, |r| r.contains("#v")), "a weak #v is refused: {:?}", skips2.report());
 		Ok(())
 	}
 

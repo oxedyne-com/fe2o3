@@ -301,8 +301,10 @@ pub enum Block {
 	Space(Sp),
 	// A line-leading `#pagebreak()` (or `#pagebreak(weak: true)`): a forced page eject at this point in the
 	// flow. Emitted as a forced break penalty, which the driver drops when the page is already fresh, so a
-	// break that lands at a page top never opens a blank page -- the weak semantics Typst's own default and
-	// its section furniture already rely on (see the `SectionBanner` arm, which turns the page the same way).
+	// break that lands at a page top never opens a blank page -- the WEAK semantics, the same the section
+	// furniture turns the page with (see the `SectionBanner` arm). Both markup forms map here: a strong
+	// `#pagebreak()` on an already-empty page (Typst's default WOULD open a blank one) is not distinguished,
+	// a documented weak-only limitation, not exercised by any corpus.
 	PageBreak,
 }
 
@@ -5194,6 +5196,11 @@ fn box_flow_scoped(
 			Block::Space(sp) => {
 				nodes.push(Node::Glue(Glue::fixed(*sp)));
 			},
+			// A `#pagebreak()` inside a callout body has no page to turn, so it is refused visibly at parse
+			// time ([`crate::lang::parse::refuse_nested_page_breaks`]) and never reaches here. This explicit
+			// arm keeps it out of the silent catch-all below, so a future path that did route one here would
+			// surface as a compile-time non-exhaustiveness rather than a silent drop.
+			Block::PageBreak => {},
 			_ => {},
 		}
 		*first = false;
