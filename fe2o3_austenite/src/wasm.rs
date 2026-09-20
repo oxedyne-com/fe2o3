@@ -19,6 +19,7 @@
 //! returns and the section rail selects over.
 
 use crate::compile;
+use crate::delta;
 use crate::doc::Heading;
 use crate::emit::{
 	self,
@@ -53,6 +54,11 @@ pub struct DaimondTypst {
 	// recompiling. Replaced by each successful compile's own values.
 	last_ledger:	Option<Ledger>,
 	last_heads:		Vec<Heading>,
+	// The last vector-delta compile's page-id sequence and version counter (see `compile_project_delta`).
+	// The only state a delta keeps between compiles: the ids alone, never the rendered SVG, so the heap
+	// holds one id per page rather than the whole rendered document. Empty and zero until the first delta.
+	last_order:		Vec<u64>,
+	version:		u32,
 }
 
 #[wasm_bindgen]
@@ -65,6 +71,8 @@ impl DaimondTypst {
 			fonts:			fonts::libertinus().ok().map(Arc::new),
 			last_ledger:	None,
 			last_heads:		Vec::new(),
+			last_order:		Vec::new(),
+			version:		0,
 		}
 	}
 
@@ -89,6 +97,20 @@ impl DaimondTypst {
 			Ok(Product::Svg(pages))	=> ok_svg(pages),
 			Ok(Product::Pdf(_))		=> err_obj("internal: an SVG compile returned PDF"),
 			Err(msg)				=> err_obj(&msg),
+		}
+	}
+
+	/// The live-view path Daimond consumes: compiles a project to a changed-only page delta, returning
+	/// `{ version, order: string[], changed: [{ id, svg }], reset }` on success or `{ error }` otherwise.
+	/// Only the pages whose rendered SVG changed since the last call carry their SVG in `changed`; the rest
+	/// the consumer serves from its own id-keyed cache. This is the memory-frugal successor to
+	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
+	/// Ids are decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
+	#[wasm_bindgen(js_name = compileProjectDelta)]
+	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
+		match self.run_delta(project) {
+			Ok(d)		=> ok_delta(&d),
+			Err(msg)	=> err_obj(&msg),
 		}
 	}
 
@@ -182,7 +204,35 @@ impl DaimondTypst {
 		}
 	}
 
-	fn run_inner(&mut self, project: &JsValue, main: &str, mode: Mode) -> Outcome<Product> {
+	/// Clears the source map before returning either way, as [`Self::run`] does, and steps the delta state:
+	/// computes the changed-only delta of this compile against the last `order` and stores the new `order`
+	/// and version. Only the ids are kept; the rendered SVG is emitted into the delta and dropped.
+	fn run_delta(&mut self, project: &JsValue) -> Result<delta::PageDelta, String> {
+		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
+		let outcome = self.run_delta_inner(project, &main);
+		let _ = vfs::clear();
+		match outcome {
+			Ok(d)	=> Ok(d),
+			Err(e)	=> Err(fmt!("{}:0: {}", main, e)),
+		}
+	}
+
+	fn run_delta_inner(&mut self, project: &JsValue, main: &str) -> Outcome<delta::PageDelta> {
+		let rendered	= res!(self.assemble_and_run(project, main));
+		let d			= res!(delta::compute(&rendered.out.pages, &self.last_order, self.version));
+		// Retain the id sequence and version alone -- never the SVG -- so the next compile diffs against it.
+		self.last_order	= d.order.clone();
+		self.version	= d.version;
+		Ok(d)
+	}
+
+	/// Assembles, authors, runs, decorates and mirror-shifts a project through the shared pipeline -- the
+	/// same code the native binary drives, so the two surfaces cannot drift -- and keeps the resolved ledger
+	/// and heading table for a later section-rail query. The lone-file path takes this instance's once-built
+	/// reading set rather than rebuilding it; the base directory for `/assets/...` figures is set inside
+	/// `assemble`. The refusal table and skip line are not surfaced by this lane, so they are discarded. The
+	/// caller clears the source map (through [`Self::run`] or [`Self::run_delta`]) once it has the result.
+	fn assemble_and_run(&mut self, project: &JsValue, main: &str) -> Outcome<compile::Rendered> {
 		let fonts = match &self.fonts {
 			Some(f)	=> f.clone(),
 			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
@@ -199,17 +249,17 @@ impl DaimondTypst {
 		}
 		res!(vfs::install(files));
 
-		// Assemble, author, run, decorate and mirror-shift through the shared pipeline -- the same code the
-		// native binary drives, so the two surfaces cannot drift. The lone-file path takes this instance's
-		// once-built reading set rather than rebuilding it; the base directory for `/assets/...` figures is
-		// set inside `assemble`. The refusal table and skip line are not surfaced by this lane, so they are
-		// discarded.
 		let (assembled, _refusals, _skip)	= res!(compile::assemble(&main_path, || Ok(fonts.clone())));
-		let compile::Rendered { mut out, heads, geom: _ } = res!(compile::author_and_run(assembled));
+		let rendered						= res!(compile::author_and_run(assembled));
 
 		// Keep the resolved ledger and heading table for a later section-rail query.
-		self.last_ledger	= Some(out.ledger.clone());
-		self.last_heads		= heads.clone();
+		self.last_ledger	= Some(rendered.out.ledger.clone());
+		self.last_heads		= rendered.heads.clone();
+		Ok(rendered)
+	}
+
+	fn run_inner(&mut self, project: &JsValue, main: &str, mode: Mode) -> Outcome<Product> {
+		let compile::Rendered { mut out, heads, geom: _ } = res!(self.assemble_and_run(project, main));
 
 		match mode {
 			Mode::Svg => {
@@ -323,6 +373,29 @@ fn ok_svg(pages: Vec<String>) -> JsValue {
 		arr.push(&JsValue::from_str(s));
 	}
 	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("svg"), &arr);
+	obj.into()
+}
+
+/// `{ version, order: string[], changed: [{ id, svg }], reset }` -- the changed-only delta. Ids (page
+/// content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and would
+/// silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
+fn ok_delta(d: &delta::PageDelta) -> JsValue {
+	let obj = js_sys::Object::new();
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("version"), &JsValue::from_f64(d.version as f64));
+	let order = js_sys::Array::new();
+	for id in &d.order {
+		order.push(&JsValue::from_str(&fmt!("{}", id)));
+	}
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("order"), &order);
+	let changed = js_sys::Array::new();
+	for (id, svg) in &d.changed {
+		let entry = js_sys::Object::new();
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("id"), &JsValue::from_str(&fmt!("{}", id)));
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("svg"), &JsValue::from_str(svg));
+		changed.push(&entry);
+	}
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("changed"), &changed);
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("reset"), &JsValue::from_bool(d.reset));
 	obj.into()
 }
 

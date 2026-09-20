@@ -86,6 +86,16 @@ pub fn render_page_memo(page: &Page, memo: &mut Memo) -> Outcome<String> {
 	Ok(assemble(page, &ink, &tspans))
 }
 
+/// The stable identity of a whole page for the changed-only delta ([`crate::delta`]): the content hash of
+/// its ENTIRE frame -- body and furniture (running head, folio) alike -- so two compiles yield the same id
+/// for a page exactly when it renders to the same SVG bytes. Deliberately a superset of [`page_key`], which
+/// hashes the body alone for the emit memo (whose furniture is always redrawn fresh); the delta needs the
+/// folio in the key, since the consumer caches and reuses the whole page SVG by this id, and a page whose
+/// only change is its printed folio renders differently and must be resent.
+pub(crate) fn page_id(page: &Page) -> u64 {
+	page_key(page, &page.frame.placed)
+}
+
 /// The content key of a page's body frame: its geometry and every body-placed item's position, size and
 /// ink. Furniture is excluded (it hashes nothing here); the verso mirror shift is already baked into the
 /// placed positions, so a page that changes parity hashes differently and misses, which is correct -- its
