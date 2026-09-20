@@ -28,6 +28,9 @@ oxedyne_fe2o3_jdat		= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_crypto	= { path = "../fe2o3_crypto", features = ["p256"] }
 oxedyne_fe2o3_o3db_sync	= { path = "../fe2o3_o3db_sync" }
 oxedyne_fe2o3_iop_db	= { path = "../fe2o3_iop_db" }
+# SHA-256 for binding a signer's key to its replica identity; the same wasm-clean
+# hasher fe2o3_crypto's p256 verifier already rests on.
+oxedyne_fe2o3_hash		= { path = "../fe2o3_hash" }
 # The loopback browser-shell's static server (`http::local`), and the ring-backed
 # P-256 verifier (`ecdsa`) the integration test uses as a stand-in for a browser's
 # WebCrypto key. Both are tokio-free, so `default-features = false` keeps the whole
@@ -35,5 +38,5 @@ oxedyne_fe2o3_iop_db	= { path = "../fe2o3_iop_db" }
 oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false }
 
 [dev-dependencies]
-# The hash and checksum schemes an o3db instance is parameterised over.
-oxedyne_fe2o3_hash	= { path = "../fe2o3_hash" }
+# The checksum scheme an o3db instance is parameterised over comes from
+# fe2o3_hash, which is now a normal dependency (see above).

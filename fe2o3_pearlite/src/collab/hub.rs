@@ -16,11 +16,23 @@
 //! belongs with the sync transport that carries operations between them, and is that increment's to
 //! build. The interface does not change when it arrives -- only this one implementation behind it.
 
-use crate::collab::DocId;
+use crate::collab::{
+	op,
+	sign,
+	DocId,
+	MAX_DOC_BYTES,
+	MAX_OP_BYTES,
+	MAX_OPS_PER_DOC,
+	MAX_TIME_SKEW_SECS,
+};
 
 use oxedyne_fe2o3_ore::{
 	envelope::Envelope,
 	id::OpId,
+	op::{
+		Op,
+		Record,
+	},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -34,19 +46,110 @@ use oxedyne_fe2o3_o3db_sync::prelude::{
 	Hasher,
 };
 
+use std::time::{
+	SystemTime,
+	UNIX_EPOCH,
+};
+
 /// The thin store the collaboration layer reaches a document's log through.
 ///
 /// It is deliberately just two operations. A store that can do more -- a networked hub, a local cache
 /// -- offers it through this same pair, so nothing above has to know which it holds.
 pub trait Hub {
-	/// Appends a signed operation to a document's log. Appending an operation the log already holds is
-	/// a no-op, so a redelivery does not duplicate it.
-	fn put(&self, doc: &DocId, op: OpId, env: &Envelope) -> Outcome<()>;
+	/// Verifies a signed operation and, if it holds, appends it to a document's log, returning the
+	/// identifier it was stored under -- which is taken from the verified record, never from the
+	/// caller, so a peer cannot store an envelope under an identity it did not sign for. Appending an
+	/// operation the log already holds is a no-op that still returns its identifier, so a redelivery
+	/// does not duplicate it. An envelope that does not verify, is oversized, carries an operation of
+	/// the wrong voice, an annotation stamped for another document, a time far in the future, or that
+	/// would take the log past its size bound, is refused rather than stored.
+	fn put(&self, doc: &DocId, env: &Envelope) -> Outcome<OpId>;
 
 	/// Loads a document's whole log: every operation stored under its identity, each with the envelope
 	/// that attests to it. The order is not significant -- the fold imposes its own -- and a document
 	/// with no operations yet is an empty log, not an error.
 	fn scan(&self, doc: &DocId) -> Outcome<Vec<(OpId, Envelope)>>;
+}
+
+/// The receiving replica's wall clock in unix epoch seconds, for bounding an author-stated time.
+fn now_secs() -> u64 {
+	match SystemTime::now().duration_since(UNIX_EPOCH) {
+		Ok(d)	=> d.as_secs(),
+		Err(_)	=> 0,	// a clock before the epoch bounds nothing, which is safe: it only tightens.
+	}
+}
+
+/// The author-stated time an operation carries, if it carries one, for the skew bound.
+fn op_time(op: &Op) -> Option<u64> {
+	match op {
+		Op::Proposal { time, .. }	=> Some(*time),
+		Op::Said { time, .. }		=> Some(*time),
+		Op::Amended { time, .. }	=> Some(*time),
+		Op::Settled { time, .. }	=> Some(*time),
+		_							=> None,
+	}
+}
+
+/// Checks a verified record is one this log may hold: a Pearlite annotation operation, of the right
+/// voice, whose body -- where it carries one -- decodes as an annotation stamped for this document, and
+/// whose time is not implausibly far ahead of the receiving clock.
+///
+/// This is ingest validation: the fold is poison-proof against a bad operation that is already stored,
+/// and this is what keeps one from being stored in the first place. The two are deliberately
+/// belt-and-braces, since an append-only log cannot take back what it once accepted.
+fn validate_ingest(doc: &DocId, rec: &Record) -> Outcome<()> {
+	// The time bound applies to every operation that states one.
+	if let Some(time) = op_time(&rec.op) {
+		let ceiling = now_secs().saturating_add(MAX_TIME_SKEW_SECS);
+		if time > ceiling {
+			return Err(err!(
+				"The operation {} states a time of {}, more than {} seconds ahead of the receiving \
+				clock; a time far in the future is a bid to win last-writer-wins ordering and is \
+				refused.", rec.id(), time, MAX_TIME_SKEW_SECS;
+				Invalid, Input, Security, Excessive));
+		}
+	}
+	match &rec.op {
+		Op::Proposal { voice, body, .. } | Op::Amended { voice, body, .. } => {
+			res!(check_voice(rec, voice));
+			// The body must decode as an annotation, bounded, and be stamped for this document, or the
+			// operation does not belong in this log.
+			let ann = res!(op::annotation_from_body(body));
+			match &ann.doc_id {
+				Some(id) if id == doc.as_str()	=> {},
+				Some(id)						=> return Err(err!(
+					"The operation {} carries an annotation stamped for document {:?}, not {:?}; it \
+					will not be stored here.", rec.id(), id, doc.as_str();
+					Invalid, Input, Security, Mismatch)),
+				None							=> return Err(err!(
+					"The operation {} carries an annotation with no document identity, so it cannot be \
+					confirmed to belong to {:?}.", rec.id(), doc.as_str();
+					Invalid, Input, Missing)),
+			}
+			Ok(())
+		},
+		Op::Said { voice, .. }	=> check_voice(rec, voice),
+		// A settlement carries no voice or body of its own; its authority is checked at the fold,
+		// against the proposal it settles. Every other operation kind has no business in an annotation
+		// log at all.
+		Op::Settled { .. }		=> Ok(()),
+		other => Err(err!(
+			"The operation {} is a {}, which is not an annotation operation and does not belong in a \
+			Pearlite collaboration log.", rec.id(), other.name();
+			Invalid, Input, Mismatch)),
+	}
+}
+
+/// Refuses an operation written under any voice but Pearlite's, so the log holds annotation threads and
+/// not some other forge's proposals that happen to share the vocabulary.
+fn check_voice(rec: &Record, voice: &str) -> Outcome<()> {
+	if voice != op::VOICE {
+		return Err(err!(
+			"The operation {} is written under the voice {:?}, not {:?}; only Pearlite annotation \
+			operations belong in this log.", rec.id(), voice, op::VOICE;
+			Invalid, Input, Mismatch));
+	}
+	Ok(())
 }
 
 /// A [`Hub`] backed by an o3db instance, reached through the blocking
@@ -113,17 +216,59 @@ where
 	KH:		Hasher,
 	D:		Database<UIDL, UID, ENC, KH>,
 {
-	fn put(&self, doc: &DocId, op: OpId, env: &Envelope) -> Outcome<()> {
-		let mut entries = res!(self.load(doc));
-		if entries.iter().any(|(id, _)| *id == op) {
-			return Ok(());
+	fn put(&self, doc: &DocId, env: &Envelope) -> Outcome<OpId> {
+		// A peer does not get to write an unbounded blob into a log: the size of the sealed envelope is
+		// bounded before anything is decoded from it.
+		if env.payload().len() > MAX_OP_BYTES {
+			return Err(err!(
+				"A Pearlite operation of {} payload bytes exceeds the {}-byte maximum a single \
+				operation may occupy.", env.payload().len(), MAX_OP_BYTES;
+				Invalid, Input, Excessive, Size));
 		}
-		entries.push((op, env.clone()));
+		// Verify the signature, decode the record under bounds, and check the header's replica is the
+		// one the signer's key derives under this document -- so the identity the operation is stored
+		// under is one the signer actually signed for in this document, taken from the record and never
+		// from the caller, and an operation minted for another document is refused here.
+		let opened	= res!(sign::open(env, doc));
+		let id		= opened.record().id();
+		res!(validate_ingest(doc, opened.record()));
+
+		let mut entries = res!(self.load(doc));
+		if let Some((_, stored_env)) = entries.iter().find(|(stored, _)| *stored == id) {
+			// A redelivery of the very same envelope is a no-op; the same identity carrying a different
+			// envelope is a squat or a two-device-same-key race, and is surfaced rather than silently
+			// dropped -- the first-seen operation would otherwise vanish the second, or the reverse.
+			if stored_env == env {
+				return Ok(id);
+			}
+			return Err(err!(
+				"The document {} already holds an operation identified {} with a different envelope; a \
+				second, differing operation under the same identity is a squat or a same-key race, and \
+				is refused rather than either being dropped silently.", doc, id;
+				Invalid, Input, Security, Conflict));
+		}
+		// The count is bounded so a peer cannot exhaust the store by appending without end.
+		if entries.len() >= MAX_OPS_PER_DOC {
+			return Err(err!(
+				"The document {} already holds {} operations, the maximum a single log may hold; a \
+				further operation is refused.", doc, entries.len();
+				Invalid, Input, Excessive, Size));
+		}
+		// The total size is bounded too, so a log's real cost is capped and not only its length.
+		let total: usize = entries.iter().map(|(_, e)| e.payload().len()).sum();
+		if total.saturating_add(env.payload().len()) > MAX_DOC_BYTES {
+			return Err(err!(
+				"The document {} holds {} operation payload bytes; a further {} would pass the {}-byte \
+				maximum a single log may reach, and is refused.",
+				doc, total, env.payload().len(), MAX_DOC_BYTES;
+				Invalid, Input, Excessive, Size));
+		}
+		entries.push((id, env.clone()));
 		let list = Dat::List(entries.iter()
-			.map(|(id, e)| listdat![id.to_dat(), e.to_dat()])
+			.map(|(stored, e)| listdat![stored.to_dat(), e.to_dat()])
 			.collect());
 		res!(self.db.insert(Self::key(doc), list, self.user, None));
-		Ok(())
+		Ok(id)
 	}
 
 	fn scan(&self, doc: &DocId) -> Outcome<Vec<(OpId, Envelope)>> {

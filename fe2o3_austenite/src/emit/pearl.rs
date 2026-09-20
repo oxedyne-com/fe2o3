@@ -190,6 +190,7 @@ pub struct Annotation {
 	pub payload:	String,					// the note's text, or a highlight's optional label
 	pub author:		String,
 	pub created:	String,					// author-supplied timestamp, carried as written
+	pub doc_id:		Option<String>,			// the document the annotation belongs to, when carried
 }
 
 impl Annotation {
@@ -209,12 +210,20 @@ impl Annotation {
 			payload:	payload.into(),
 			author:		author.into(),
 			created:	created.into(),
+			doc_id:		None,
 		}
 	}
 
 	/// Confines the annotation to a rectangle within its anchored block, rather than the whole block.
 	pub fn with_rect(mut self, x: Sp, y: Sp, w: Sp, h: Sp) -> Self {
 		self.rect = Some((x, y, w, h));
+		self
+	}
+
+	/// Stamps the annotation with the document it belongs to, so a fold can refuse
+	/// one replayed onto a different document that happens to share a block address.
+	pub fn with_doc_id<S: Into<String>>(mut self, doc_id: S) -> Self {
+		self.doc_id = Some(doc_id.into());
 		self
 	}
 }
@@ -235,6 +244,11 @@ impl ToDat for Annotation {
 				res!(w.to_dat()),
 				res!(h.to_dat()),
 			]));
+		}
+		// Written only when set, so a document without one encodes exactly as before
+		// and every .prl written before the field existed reads unchanged.
+		if let Some(doc_id) = &self.doc_id {
+			res!(d.map_put(dat!("doc_id"), dat!(doc_id.clone())));
 		}
 		Ok(d)
 	}
@@ -265,7 +279,11 @@ impl FromDat for Annotation {
 			},
 			None => None,
 		};
-		Ok(Self { anchor, rect, kind, payload, author, created })
+		let doc_id = match res!(dat.map_remove(&dat!("doc_id"))) {
+			Some(d) => Some(try_extract_dat!(d, Str)),
+			None => None,
+		};
+		Ok(Self { anchor, rect, kind, payload, author, created, doc_id })
 	}
 }
 

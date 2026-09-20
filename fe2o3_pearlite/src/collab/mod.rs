@@ -34,10 +34,89 @@
 
 pub mod fold;
 pub mod hub;
+pub mod keyring;
 pub mod op;
 pub mod sign;
 
+pub use keyring::Keyring;
+
+use oxedyne_fe2o3_ore::id::ReplicaId;
+
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::bdat::DecodeLimits;
+
+/// The bounds a peer's operation is decoded under.
+///
+/// A signed operation arriving over a relay is attacker-controlled input, and neither the depth nor
+/// the length of what it encodes is the reader's to trust: a few bytes can describe a list nested a
+/// million deep, and a decoder that trusts them recurses until its stack is gone. Sixty-four levels is
+/// deeper than any annotation the format writes, and a mebibyte is far more than an annotation body
+/// needs, so the bound only ever bites a hostile encoding. This is the collaboration layer's policy,
+/// passed down to the mechanism in [`oxedyne_fe2o3_ore`], which stays free of any opinion about it.
+pub const DECODE_LIMITS: DecodeLimits = DecodeLimits {
+	max_depth:	64,
+	max_bytes:	1024 * 1024,
+};
+
+/// The greatest a single signed operation may be, in bytes of its sealed envelope, before the hub
+/// refuses to store it. A relay peer does not get to write an unbounded blob into a document's log.
+pub const MAX_OP_BYTES: usize = 1024 * 1024;
+
+/// The greatest number of operations a single document's log may hold before the hub refuses more, so
+/// a peer cannot exhaust a store by appending without end.
+pub const MAX_OPS_PER_DOC: usize = 100_000;
+
+/// The greatest total size, in bytes of sealed envelope payloads, a single document's log may reach
+/// before the hub refuses more. The op-count cap alone leaves a peer room to store a hundred thousand
+/// mebibyte operations -- a hundred gibibytes -- so a total-bytes cap bounds the log's real cost
+/// rather than only its length.
+pub const MAX_DOC_BYTES: usize = 64 * 1024 * 1024;
+
+/// The furthest ahead of the receiving replica's own clock an operation's author-stated time may be,
+/// in seconds, before the hub refuses it. An author's clock genuinely differs from a reader's, so some
+/// skew is allowed; a `time` far in the future is a bid to win a last-writer-wins ordering forever, and
+/// is refused rather than honoured.
+pub const MAX_TIME_SKEW_SECS: u64 = 24 * 60 * 60;
+
+/// Derives a replica identity from a signer's public key **and the document it writes in**: the first
+/// eight bytes of the SHA-256 of the key followed by the document identity, read big-endian.
+///
+/// This is what binds an operation's name both to the key that signed it and to the one document it
+/// belongs to. A [`ReplicaId`] a peer picks for itself is worthless -- it could pick anyone's -- so it
+/// is not picked but computed, here, from the two things a peer cannot forge: the private key behind
+/// the public one, and the document being written. A record whose header names a replica this does not
+/// derive from its signer *under the document in hand* is refused at [`sign::seal`] and [`sign::open`].
+///
+/// Folding the document into the replica is what closes cross-document replay for every operation kind
+/// at once, the settlement and the reply included, without a wire-format change: the same key signing
+/// in document A and in document B mints two different replica identities, so an operation lifted from
+/// A and appended to B fails the binding check under B. It also makes an honest counter overlap between
+/// two documents impossible -- each document is its own replica space -- and raises identity squatting
+/// from guessing a key to guessing a `(key, document)` pair.
+pub fn replica_of(pubkey: &[u8], doc: &DocId) -> ReplicaId {
+	let mut msg = Vec::with_capacity(pubkey.len() + doc.as_str().len());
+	msg.extend_from_slice(pubkey);
+	msg.extend_from_slice(doc.as_str().as_bytes());
+	let digest = oxedyne_fe2o3_hash::sha256::digest(&msg);
+	let mut bytes = [0u8; 8];
+	bytes.copy_from_slice(&digest[..8]);
+	ReplicaId::new(u64::from_be_bytes(bytes))
+}
+
+/// A signer's stable fingerprint for display and for keying a [`Keyring`]: the SHA-256 of the public
+/// key, as lower-case hexadecimal.
+///
+/// The whole digest rather than the eight bytes [`replica_of`] takes, because a fingerprint is shown
+/// to a person and compared for identity, where the eight-byte replica identity is only an ordering
+/// key: a wider value costs nothing here and leaves no room for a collision to be mistaken for a match.
+pub fn fingerprint(pubkey: &[u8]) -> String {
+	let digest = oxedyne_fe2o3_hash::sha256::digest(pubkey);
+	let mut s = String::with_capacity(digest.len() * 2);
+	for b in digest.iter() {
+		s.push_str(&fmt!("{:02x}", b));
+	}
+	s
+}
 
 /// A document's stable identity: the key its edit stream is stored and folded against.
 ///

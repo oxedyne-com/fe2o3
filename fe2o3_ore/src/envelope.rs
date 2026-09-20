@@ -21,7 +21,10 @@ use oxedyne_fe2o3_iop_crypto::sign::{
 	BatchItem,
 	Signer,
 };
-use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_jdat::{
+	prelude::*,
+	bdat::DecodeLimits,
+};
 
 
 /// An operation's bytes together with the provenance that attests to them.
@@ -126,6 +129,33 @@ impl Envelope {
 		decode_record(&self.payload)
 	}
 
+	/// As [`Envelope::open_record`], but decoding the payload under `lims`.
+	///
+	/// A payload from an untrusted peer is attacker-controlled input, and the
+	/// unlimited decoder [`Envelope::open_record`] uses will recurse until the
+	/// stack is gone on a deeply nested encoding. A caller reading anything it did
+	/// not author passes limits here; see
+	/// [`Dat::from_bytes_limited`](oxedyne_fe2o3_jdat::Dat::from_bytes_limited).
+	pub fn open_record_limited<S: Signer>(&self, scheme: &S, lims: &DecodeLimits)
+		-> Outcome<Record>
+	{
+		if !res!(self.verify(scheme)) {
+			return Err(err!(
+				"The envelope's signature does not verify against its enclosed public \
+				key, so its contents are not attributable.";
+			Invalid, Input, Security, Mismatch));
+		}
+		decode_record_limited(&self.payload, lims)
+	}
+
+	/// As [`Envelope::peek_record`], but decoding the payload under `lims`, for a
+	/// caller inspecting untrusted bytes it has not verified.
+	pub fn peek_record_limited(&self, lims: &DecodeLimits)
+		-> Outcome<Record>
+	{
+		decode_record_limited(&self.payload, lims)
+	}
+
 	pub fn payload(&self) -> &[u8] {
 		&self.payload
 	}
@@ -189,6 +219,15 @@ impl Envelope {
 		let (dat, used) = res!(Dat::from_bytes(buf));
 		Ok((res!(Self::from_dat(&dat)), used))
 	}
+
+	/// As [`Envelope::decode`], but decoding under `lims`, for a caller reading an
+	/// envelope off the wire from an untrusted peer rather than one it wrote.
+	pub fn decode_limited(buf: &[u8], lims: &DecodeLimits)
+		-> Outcome<(Self, usize)>
+	{
+		let (dat, used) = res!(Dat::from_bytes_limited(buf, lims));
+		Ok((res!(Self::from_dat(&dat)), used))
+	}
 }
 
 
@@ -207,7 +246,16 @@ fn field_bytes(dat: &Dat, what: &str)
 fn decode_record(buf: &[u8])
 	-> Outcome<Record>
 {
-	let (dat, used) = res!(Dat::from_bytes(buf));
+	decode_record_limited(buf, &DecodeLimits::UNLIMITED)
+}
+
+/// As [`decode_record`], but bounding the decode with `lims`, so a payload from
+/// an untrusted peer cannot nest deeply enough to exhaust the stack. The whole
+/// payload must still decode, trailing bytes being a fault and not slack.
+fn decode_record_limited(buf: &[u8], lims: &DecodeLimits)
+	-> Outcome<Record>
+{
+	let (dat, used) = res!(Dat::from_bytes_limited(buf, lims));
 	if used != buf.len() {
 		return Err(err!(
 			"An envelope payload of {} bytes decoded from only {} of them.",
@@ -483,6 +531,36 @@ mod tests {
 		let env = res!(Envelope::seal(&s, b"not a daticle at all".to_vec()));
 		assert!(env.peek_record().is_err());
 		assert!(env.open_record(&s).is_err());
+		Ok(())
+	}
+
+	/// A validly-signed payload that nests past the decode limit is refused rather
+	/// than recursed into, so a hostile encoding from a peer cannot exhaust the
+	/// stack. The signature holds -- the point is that the decode terminates.
+	#[test]
+	fn a_deeply_nested_payload_is_refused_not_recursed() -> Outcome<()> {
+		use oxedyne_fe2o3_jdat::bdat::DecodeLimits;
+
+		// A thousand levels of nesting, far beyond the default depth of 64. The bytes are built from
+		// the inside out rather than encoded, because the encoder recurses exactly as the decoder does
+		// and would overflow building the bomb -- which an attacker is under no obligation to use.
+		let mut payload = vec![Dat::EMPTY_CODE];
+		for _ in 0..1_000 {
+			let payload_len = payload.len();
+			let mut outer = vec![Dat::LIST_CODE];
+			outer = res!(Dat::C64(payload_len as u64).to_bytes(outer));
+			outer.append(&mut payload);
+			payload = outer;
+		}
+		let s = StubSigner::with_seed(11);
+		let env = res!(Envelope::seal(&s, payload));
+		// It verifies, so what follows is the decode's doing and not the signature's.
+		assert!(res!(env.verify(&s)));
+		let lims = DecodeLimits::default();
+		assert!(env.peek_record_limited(&lims).is_err(),
+			"a payload nested past the depth limit must be refused");
+		assert!(env.open_record_limited(&s, &lims).is_err(),
+			"opening a payload nested past the depth limit must be refused");
 		Ok(())
 	}
 }

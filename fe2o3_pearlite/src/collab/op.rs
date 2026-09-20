@@ -13,6 +13,11 @@
 //! Each is wrapped in a record with a header (identity and parents) by its author and sealed by
 //! [`super::sign`]; this module supplies only the operation payloads and the decoding back out.
 
+use crate::collab::{
+	DocId,
+	DECODE_LIMITS,
+};
+
 use oxedyne_fe2o3_austenite::emit::pearl::Annotation;
 use oxedyne_fe2o3_ore::{
 	id::OpId,
@@ -30,25 +35,31 @@ use oxedyne_fe2o3_jdat::prelude::*;
 pub const VOICE: &str = "pearlite";
 
 /// Encodes an annotation as the body bytes an operation carries: its [`ToDat`] form in canonical
-/// binary daticle, the same encoding the store and the envelope speak.
-fn annotation_body(ann: &Annotation) -> Outcome<Vec<u8>> {
-	Ok(res!(res!(ann.to_dat()).to_bytes(Vec::new())))
+/// binary daticle, the same encoding the store and the envelope speak, stamped with the document it
+/// belongs to so a fold can refuse it if it is replayed onto another document.
+fn annotation_body(doc: &DocId, ann: &Annotation) -> Outcome<Vec<u8>> {
+	let stamped = ann.clone().with_doc_id(doc.as_str());
+	Ok(res!(res!(stamped.to_dat()).to_bytes(Vec::new())))
 }
 
 /// Decodes an annotation from an operation body's bytes, the inverse of what [`create`] and [`edit`]
 /// store.
+///
+/// The bytes come from a peer over a relay, so they are decoded under the collaboration layer's bounds
+/// rather than trusted: a body that nests past [`DECODE_LIMITS`] is refused here rather than recursed
+/// into.
 pub fn annotation_from_body(body: &[u8]) -> Outcome<Annotation> {
-	let (dat, _) = res!(Dat::from_bytes(body));
+	let (dat, _) = res!(Dat::from_bytes_limited(body, &DECODE_LIMITS));
 	Annotation::from_dat(dat)
 }
 
 /// A new annotation opens a thread: an [`Op::Proposal`] whose body is the annotation and whose title
 /// is the block it hangs on, so a reader listing proposals sees what each is anchored to without
-/// decoding the body.
-pub fn create(ann: &Annotation, time: u64) -> Outcome<Op> {
+/// decoding the body. The annotation body is stamped with `doc`, binding it to the one document.
+pub fn create(doc: &DocId, ann: &Annotation, time: u64) -> Outcome<Op> {
 	Ok(Op::Proposal {
 		title:	ann.anchor.clone(),
-		body:	res!(annotation_body(ann)),
+		body:	res!(annotation_body(doc, ann)),
 		voice:	VOICE.to_string(),
 		time,
 	})
@@ -65,12 +76,13 @@ pub fn reply(on: OpId, text: &str, time: u64) -> Op {
 }
 
 /// An edit restates the annotation: an [`Op::Amended`] naming the opening proposal `on`, whose body is
-/// the new annotation. The fold takes the latest amendment in time order.
-pub fn edit(on: OpId, ann: &Annotation, time: u64) -> Outcome<Op> {
+/// the new annotation, stamped with `doc` as [`create`] stamps it. The fold takes the latest amendment
+/// in time order, and only from the proposal's own signer.
+pub fn edit(doc: &DocId, on: OpId, ann: &Annotation, time: u64) -> Outcome<Op> {
 	Ok(Op::Amended {
 		on,
 		title:	ann.anchor.clone(),
-		body:	res!(annotation_body(ann)),
+		body:	res!(annotation_body(doc, ann)),
 		voice:	VOICE.to_string(),
 		time,
 	})
