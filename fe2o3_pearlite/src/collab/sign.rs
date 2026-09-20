@@ -19,6 +19,11 @@
 //! by identical code on a server and inside a downloaded reader -- the reader never has to trust a
 //! server to have checked provenance for it.
 
+use crate::collab::{
+	replica_of,
+	DECODE_LIMITS,
+};
+
 use oxedyne_fe2o3_ore::{
 	envelope::Envelope,
 	op::Record,
@@ -28,6 +33,19 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_crypto::p256::verify_p256_sha256_fixed;
 
+/// A verified record together with the public key that signed it.
+///
+/// The signer travels with the record because it, and not anything in the body, is the operation's
+/// identity: who authored an annotation is who holds the key, and the fold reads the author from here
+/// rather than from a free-text field a body could claim anything in. Every [`Opened`] that exists is
+/// one whose signature verified and whose header names the replica [`replica_of`] derives from this
+/// key, so a caller holding one need not re-establish either.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Opened {
+	pub record:	Record,
+	pub signer:	Vec<u8>,	// the 65-byte SEC1 public key that signed the record
+}
+
 /// The exact bytes an author signs for `rec`: its canonical binary daticle form, identical to what
 /// [`Envelope::seal_record`] places in an envelope's payload, so the header is covered along with the
 /// operation. A caller with the private key signs these and hands the signature to [`seal`].
@@ -35,12 +53,33 @@ pub fn signing_bytes(rec: &Record) -> Outcome<Vec<u8>> {
 	Ok(res!(rec.to_dat().to_bytes(Vec::new())))
 }
 
+/// Refuses a record whose header names a replica that is not the one its signer's key derives.
+///
+/// This is the whole of the identity binding: a replica identity is not a peer's to choose, it is
+/// [`replica_of`] of the key, so a record claiming another author's replica -- to pre-empt their next
+/// identifier or to poison their counter -- carries a replica the impostor's own key does not derive,
+/// and is refused here before it can be sealed or folded.
+fn check_replica_binding(rec: &Record, pubkey: &[u8]) -> Outcome<()> {
+	let named	= rec.id().replica;
+	let derived	= replica_of(pubkey);
+	if named != derived {
+		return Err(err!(
+			"The record is identified {}, whose replica {} is not the replica {} derived from the \
+			signer's key; a replica identity is bound to the key that signs under it, not chosen.",
+			rec.id(), named, derived;
+			Invalid, Input, Security, Mismatch));
+	}
+	Ok(())
+}
+
 /// Seals a record into an envelope carrying a P-256 signature.
 ///
 /// `pubkey` is the 65-byte uncompressed SEC1 point and `sig` the 64-byte `r || s` over
 /// [`signing_bytes`]`(rec)` -- exactly what a browser's WebCrypto key, or a native P-256 signer,
-/// yields. The signature is checked here, before the envelope is returned, so a mis-signed operation
-/// never reaches the hub and every stored envelope is one that verifies against its own enclosed key.
+/// yields. The signature is checked here, and the record's replica identity is checked to be the one
+/// the key derives, before the envelope is returned, so a mis-signed or misattributed operation never
+/// reaches the hub and every stored envelope is one that verifies against, and is named for, its own
+/// enclosed key.
 pub fn seal(rec: &Record, pubkey: Vec<u8>, sig: Vec<u8>) -> Outcome<Envelope> {
 	let payload = res!(signing_bytes(rec));
 	if !res!(verify_p256_sha256_fixed(&pubkey, &payload, &sig)) {
@@ -49,6 +88,7 @@ pub fn seal(rec: &Record, pubkey: Vec<u8>, sig: Vec<u8>) -> Outcome<Envelope> {
 			be attributable to its enclosed public key.";
 			Invalid, Input, Security, Mismatch));
 	}
+	res!(check_replica_binding(rec, &pubkey));
 	Ok(Envelope::new(payload, pubkey, sig))
 }
 
@@ -59,15 +99,21 @@ pub fn verify(env: &Envelope) -> Outcome<bool> {
 	verify_p256_sha256_fixed(env.signer(), env.payload(), env.signature())
 }
 
-/// Verifies an envelope and, only if it holds, decodes the record inside it. An envelope whose
-/// signature does not verify yields an error rather than a record, so a caller cannot fold in an
-/// operation it has not attributed.
-pub fn open(env: &Envelope) -> Outcome<Record> {
+/// Verifies an envelope and, only if it holds, decodes the record inside it under the collaboration
+/// layer's decode bounds and checks the record's replica against its signer.
+///
+/// An envelope whose signature does not verify, whose payload is a hostile encoding, or whose header
+/// claims a replica its key does not derive yields an error rather than a record, so a caller cannot
+/// fold in an operation it has not attributed. The signer travels back with the record in the
+/// [`Opened`], since that key -- not anything in the body -- is the operation's author.
+pub fn open(env: &Envelope) -> Outcome<Opened> {
 	if !res!(verify(env)) {
 		return Err(err!(
 			"The envelope's P-256 signature does not verify against its enclosed public key, so its \
 			operation is not attributable and will not be folded.";
 			Invalid, Input, Security, Mismatch));
 	}
-	env.peek_record()
+	let record = res!(env.peek_record_limited(&DECODE_LIMITS));
+	res!(check_replica_binding(&record, env.signer()));
+	Ok(Opened { record, signer: env.signer().to_vec() })
 }
