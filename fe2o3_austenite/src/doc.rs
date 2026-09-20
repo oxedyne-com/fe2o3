@@ -132,9 +132,10 @@ pub enum Segment {
 	// An index marker: records the term's occurrence for the back-matter index and sets nothing in the body.
 	// `term` is the sort key (markup flattened, e.g. "March, James"); `display` is the styled text the index
 	// page sets (e.g. "James March", or an italicised case name), so the index prints the display and never
-	// the sort key. `sub` carries a nested entry's child term. The back-matter index reads every occurrence's
-	// page back from the ledger post-convergence.
-	Index { term: String, sub: Option<String>, display: Vec<Segment> },
+	// the sort key. `sub` carries a nested entry's child term. `main` marks a primary reference (`#idx-main`),
+	// whose folio the index page sets bold, as in-dexter's `index-main = index.with(fmt: strong)` does. The
+	// back-matter index reads every occurrence's page back from the ledger post-convergence.
+	Index { term: String, sub: Option<String>, display: Vec<Segment>, main: bool },
 }
 
 impl Segment {
@@ -190,8 +191,8 @@ impl Segment {
 		Self::MarginNote { display: display.into(), codes }
 	}
 
-	pub fn index<T: Into<String>>(term: T, sub: Option<String>, display: Vec<Segment>) -> Self {
-		Self::Index { term: term.into(), sub, display }
+	pub fn index<T: Into<String>>(term: T, sub: Option<String>, main: bool, display: Vec<Segment>) -> Self {
+		Self::Index { term: term.into(), sub, display, main }
 	}
 }
 
@@ -542,9 +543,10 @@ pub struct MetaRow {
 #[derive(Default)]
 pub(crate) struct IndexGather {
 	pub(crate) no:	u32,
-	// Each occurrence: the sort key, a nested child term, the styled display the index page sets, and the
-	// anchor keyed by the counter. The display is carried per occurrence and read from the first of a group.
-	pub(crate) occ:	Vec<(String, Option<String>, Vec<Segment>, AnchorId)>,
+	// Each occurrence: the sort key, a nested child term, the styled display the index page sets, the anchor
+	// keyed by the counter, and whether it is a primary (`#idx-main`) reference whose folio sets bold. The
+	// display is carried per occurrence and read from the first of a group.
+	pub(crate) occ:	Vec<(String, Option<String>, Vec<Segment>, AnchorId, bool)>,
 }
 
 /// The claim references gathered walking the body: one `(code, anchor)` pair per code named in a
@@ -1805,17 +1807,18 @@ pub(crate) fn build_pieces(
 				}
 				pieces.push(Piece::Anchor(id));
 			},
-			Segment::Index { term, sub, display } => {
+			Segment::Index { term, sub, display, main } => {
 				// An index marker sets nothing in the body column: it weaves a zero-width anchor into the line
 				// at this point, so the driver records the folio it lands on, and remembers the occurrence so
 				// the back-matter index lists the term with the page. The ordinal makes each occurrence's
 				// identity unique, so two mentions of one term on one page stay distinct until the entry
 				// deduplicates their resolved folios. The styled display travels with the occurrence so the
-				// index page sets the display words, not the sort key.
+				// index page sets the display words, not the sort key; `main` travels too, so a primary
+				// reference's folio sets bold on the index page.
 				idx.no += 1;
 				let key = fmt!("{}\u{1f}{}\u{1f}{}", idx.no, term, sub.as_deref().unwrap_or(""));
 				let id	= AnchorId::new(AnchorKind::IndexEntry, key);
-				idx.occ.push((term.clone(), sub.clone(), display.clone(), id.clone()));
+				idx.occ.push((term.clone(), sub.clone(), display.clone(), id.clone(), *main));
 				pieces.push(Piece::Anchor(id));
 			},
 		}
@@ -3859,33 +3862,34 @@ fn index_nodes(
 	fonts:	&Arc<FontSet>,
 	style: &Theme,
 	measure:	Sp,
-	occ:	&[(String, Option<String>, Vec<Segment>, AnchorId)],
+	occ:	&[(String, Option<String>, Vec<Segment>, AnchorId, bool)],
 )
 	-> Outcome<Vec<Node>>
 {
 	// Group by term (case-insensitive), each term carrying its own direct occurrences and its nested
-	// children, so a term with sub-entries lists them indented beneath it. The folios are deduplicated and
-	// sorted at resolution, so document order within a group need not be kept here. `display` is the styled
-	// text the index page sets -- the first occurrence's, since every mention of one term carries the same --
-	// so a `#idx-as[March, James][James March]` entry prints "James March" and an emphasised case name sets
-	// italic, rather than the sort key leaking to the page.
+	// children, so a term with sub-entries lists them indented beneath it. Each occurrence carries whether it
+	// is a primary (`#idx-main`) reference, so its folio sets bold. The folios are deduplicated and sorted at
+	// resolution, so document order within a group need not be kept here. `display` is the styled text the
+	// index page sets -- the first occurrence's, since every mention of one term carries the same -- so a
+	// `#idx-as[March, James][James March]` entry prints "James March" and an emphasised case name sets italic,
+	// rather than the sort key leaking to the page.
 	struct Group {
 		display:	Vec<Segment>,
-		direct:		Vec<AnchorId>,
-		subs:		std::collections::BTreeMap<String, (String, Vec<AnchorId>)>,
+		direct:		Vec<(AnchorId, bool)>,
+		subs:		std::collections::BTreeMap<String, (String, Vec<(AnchorId, bool)>)>,
 	}
 	let mut groups: std::collections::BTreeMap<String, Group> = std::collections::BTreeMap::new();
-	for (term, sub, display, id) in occ {
+	for (term, sub, display, id, main) in occ {
 		let g = groups.entry(term.to_lowercase()).or_insert_with(|| Group {
 			display:	display.clone(),
 			direct:		Vec::new(),
 			subs:		std::collections::BTreeMap::new(),
 		});
 		match sub {
-			None		=> g.direct.push(id.clone()),
+			None		=> g.direct.push((id.clone(), *main)),
 			Some(child)	=> {
 				let e = g.subs.entry(child.to_lowercase()).or_insert_with(|| (child.clone(), Vec::new()));
-				e.1.push(id.clone());
+				e.1.push((id.clone(), *main));
 			},
 		}
 	}
@@ -3945,17 +3949,25 @@ fn index_display_run(seg: &Segment) -> (String, Role) {
 }
 
 /// Sets one index entry line: the styled display, indented by `depth`, then -- when the term has any page --
-/// a comma, a space and a reserved folio-list slot the driver resolves. A term with only nested children (no
-/// direct page) sets its name alone, a heading for the indented sub-entries beneath it. The comma before the
-/// folios is the in-dexter separator (`entry, page`), and the display sets in its own faces, so an
-/// emphasised entry italicises. `ref_no` makes each slot's own ledger identity unique.
+/// a comma, a space and the folio list the driver resolves. A term with only nested children (no direct
+/// page) sets its name alone, a heading for the indented sub-entries beneath it. The comma before the folios
+/// is the in-dexter separator (`entry, page`), and the display sets in its own faces, so an emphasised entry
+/// italicises. `ref_no` makes each slot's own ledger identity unique.
+///
+/// The folios split into non-main (set in the body face) and main (`#idx-main`, set bold, reproducing
+/// in-dexter's `index-main = index.with(fmt: strong)`); each group resolves as its own
+/// [`IndexFolios`](Ref::IndexFolios) slot -- deduplicated, sorted and run-compressed independently -- and
+/// the two are parted by `", "` when both are present. in-dexter interleaves a term's main and plain folios
+/// by document order rather than grouping them; the two coincide for an entry whose references are all main
+/// or all plain (the common case, and every entry in the oracle corpus), and differ only in the order of a
+/// single entry that mixes the two, which no fixture yet exercises.
 #[allow(clippy::too_many_arguments)]
 fn index_entry_line(
 	fonts:		&Arc<FontSet>,
 	body:		Sp,	// the index text size (9pt), the term set and the line box sized at it
 	measure:	Sp,
 	display:	&[Segment],
-	ids:		&[AnchorId],
+	ids:		&[(AnchorId, bool)],
 	depth:		i32,
 	unit:		Sp,
 	step:		Sp,
@@ -3985,17 +3997,39 @@ fn index_entry_line(
 		children.push(Node::Leaf(Leaf::text(shaped)));
 	}
 	if !ids.is_empty() {
+		// Split into non-main and main folios, keeping each group's document order (the sort happens at
+		// resolution). A main folio sets bold, a non-main folio in the body face.
+		let plain: Vec<AnchorId>	= ids.iter().filter(|(_, m)| !*m).map(|(id, _)| id.clone()).collect();
+		let main:  Vec<AnchorId>	= ids.iter().filter(|(_, m)|  *m).map(|(id, _)| id.clone()).collect();
+		// The bold folio's worst-case width ("999, " in the bold face), so a bold slot never outgrows it.
+		let bold_unit	= res!(ShapedText::new(fonts.clone(), Role::Bold, Dir::Ltr, body, "999, ")).dims().width;
+
 		// The in-dexter separator between an entry and its folios is a comma and a space, not a bare gap.
 		let sep		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, body, ", "));
 		let sepd	= sep.dims();
 		if sepd.height > height { height = sepd.height; }
 		if sepd.depth > depth_ { depth_ = sepd.depth; }
-		children.push(Node::Leaf(Leaf::text(sep)));
-		*ref_no += 1;
-		let slot_w	= Sp(unit.raw() * ids.len() as i32);
-		let id		= AnchorId::new(AnchorKind::Label, fmt!("index-slot-{}", *ref_no));
-		let dims	= Dims::new(slot_w, height, depth_);
-		children.push(Node::Leaf(Leaf::reserved_inline(id, Ref::IndexFolios(ids.to_vec()), dims)));
+		children.push(Node::Leaf(Leaf::text(sep.clone())));
+
+		// The non-main folios, set in the body face.
+		if !plain.is_empty() {
+			*ref_no += 1;
+			let slot_w	= Sp(unit.raw() * plain.len() as i32);
+			let id		= AnchorId::new(AnchorKind::Label, fmt!("index-slot-{}", *ref_no));
+			let dims	= Dims::new(slot_w, height, depth_);
+			children.push(Node::Leaf(Leaf::reserved_inline(id, Ref::IndexFolios(plain), dims)));
+		}
+		// The main folios, set bold. When both groups are present, a `", "` parts them.
+		if !main.is_empty() {
+			if children.last().map_or(false, |n| matches!(n, Node::Leaf(l) if matches!(l.kind, LeafKind::Reserved(..)))) {
+				children.push(Node::Leaf(Leaf::text(sep)));
+			}
+			*ref_no += 1;
+			let slot_w	= Sp(bold_unit.raw() * main.len() as i32);
+			let id		= AnchorId::new(AnchorKind::Label, fmt!("index-slot-{}", *ref_no));
+			let dims	= Dims::new(slot_w, height, depth_);
+			children.push(Node::Leaf(Leaf::reserved_inline_bold(id, Ref::IndexFolios(main), dims)));
+		}
 	}
 	let line_dims = Dims::new(measure, height, depth_);
 	nodes.push(Node::HBox(BoxNode::new(children, line_dims)));

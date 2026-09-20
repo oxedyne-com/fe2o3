@@ -290,8 +290,10 @@ pub enum Inline {
 	// back-matter index and sets nothing itself in the body. `term` is the sort key (markup flattened); `sub`
 	// carries a nested entry's child term; `display` is the styled runs the index page sets for this entry, so
 	// a `#idx-as[March, James][James March]` prints "James March" and a `#idx[_Case_]` sets italic there. A
-	// visible call sets that same display in the body too, as a separate run beside this marker.
-	Index { term: String, sub: Option<String>, display: Vec<Inline> },
+	// visible call sets that same display in the body too, as a separate run beside this marker. `main` marks a
+	// primary reference (`#idx-main`, `#index-main`, `#idx-main-as`): its folio sets bold on the index page, as
+	// in-dexter's `index-main = index.with(fmt: strong)` renders a main reference's page number.
+	Index { term: String, sub: Option<String>, display: Vec<Inline>, main: bool },
 	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
 	// #claim-label(<code>..) or #claim-refs(<code>..): a zero-width margin anchor. `display` is the compressed

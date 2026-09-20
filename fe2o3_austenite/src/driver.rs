@@ -1072,7 +1072,7 @@ fn place_leaf<M: Metrics>(
 			frame.push(Placed::new(x, y, leaf.dims, PlacedKind::Graphic(g.clone())));
 			Ok(x + leaf.dims.width)
 		},
-		LeafKind::Reserved(id, refr, hold) => {
+		LeafKind::Reserved(id, refr, hold, bold) => {
 			// A forward reference. What it resolves to is the reference's own business (a total count, a
 			// cross-referenced page); the driver only asks the previous pass's ledger for the value and
 			// holds the declared width open until it has one.
@@ -1081,8 +1081,11 @@ fn place_leaf<M: Metrics>(
 				Some(text) => {
 					// The previous pass fixed the value. Shape it as real text when a font backs the
 					// metric, or keep the reservation box under the fontless stub; either way its realised
-					// width is recorded so the overflow logic still governs a further pass.
-					match res!(metrics.shape(&text)) {
+					// width is recorded so the overflow logic still governs a further pass. A main index
+					// reference's folio (`bold`) shapes in the bold face, reproducing in-dexter's strong-set
+					// main page number.
+					let shaped = if *bold { res!(metrics.shape_bold(&text)) } else { res!(metrics.shape(&text)) };
+					match shaped {
 						Some(shaped) => {
 							let w		= shaped.dims().width;
 							let dims	= Dims::new(w, leaf.dims.height, leaf.dims.depth);

@@ -323,7 +323,7 @@ fn rich_paragraph_one(drop_first_use: bool) -> Block {
 	segments.push(Segment::text("the technique that caches "));
 	segments.push(Segment::cite(vec!["scott1976".to_string()]));
 	segments.push(Segment::text("'s peasant economy against a repeated anchor, recording it "));
-	segments.push(Segment::index("Ledger anchor", None, vec![Segment::text("Ledger anchor")]));
+	segments.push(Segment::index("Ledger anchor", None, false, vec![Segment::text("Ledger anchor")]));
 	segments.push(Segment::text(" once per pass"));
 	segments.push(Segment::footnote(vec![Segment::text("A pass converges when no anchor moves twice.")]));
 	segments.push(Segment::text(", and marks it "));
@@ -344,7 +344,7 @@ fn rich_paragraph_two() -> Block {
 		Segment::text(" once more, this time citing "),
 		Segment::cite(vec!["zuboff2019a".to_string(), "zuboff2019b".to_string()]),
 		Segment::text(" on the surveillance ledger, indexing "),
-		Segment::index("Surveillance ledger", None, vec![Segment::text("Surveillance ledger")]),
+		Segment::index("Surveillance ledger", None, false, vec![Segment::text("Surveillance ledger")]),
 		Segment::text(" and noting"),
 		Segment::footnote(vec![Segment::text("Both works share the one 2019 imprint year.")]),
 		Segment::text(" the citation in "),
