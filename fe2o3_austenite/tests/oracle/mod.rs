@@ -203,10 +203,11 @@ pub fn corpus() -> Vec<CorpusRoot> {
 		},
 		CorpusRoot {
 			// This crate's own bracket-aware guard-extent fixture (G1) -- the real elearnity Sources-chapter
-			// shape, where the guarded `#include` sits inside a `#block[ #align(center)[ ... ] ]` wrapper.
-			// A line-marker guard extent closes on the wrapper's own inner `]` rather than the guard's own,
-			// following both branches; the bracket-depth extent tells them apart by nesting depth. See the
-			// fixture file for the full shape and why it is self-contained.
+			// shape, where the guarded branch's own bare `#include` sits beside a multi-line `#emph[ ... ]`
+			// aside whose closing `]` arrives before the guard's own. A line-marker guard extent closes on
+			// that aside's own inner `]` rather than the guard's own, following both branches; the
+			// bracket-depth extent tells them apart by nesting depth. See the fixture file for the full
+			// shape and why it is self-contained.
 			name:				"media-bracket-fixture",
 			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/media_bracket_fixture/root.typ"),
 			typst_root:			None,
