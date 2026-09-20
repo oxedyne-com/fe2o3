@@ -10,7 +10,10 @@
 //! compiles is the id list alone, never the rendered SVG.
 //!
 //! The wasm return shape is a thin marshal of this same [`delta::compute`] result, so unit-testing the
-//! delta logic over real (and synthetic) pages here proves the browser behaviour without a browser.
+//! delta logic over real (and synthetic) pages here proves the browser behaviour without a browser. Each
+//! test passes the prior id set explicitly, exactly as the wasm surface passes the consumer's supplied
+//! `known` ids: the compiler holds no prior set of its own, so the boundary these tests exercise is the
+//! real one.
 
 use oxedyne_fe2o3_austenite::compile::{
 	author_and_run,
@@ -125,6 +128,31 @@ fn identical_recompile_sends_nothing() -> Outcome<()> {
 	assert_eq!(d2.order, d1.order, "identical source yields the identical id sequence");
 	assert!(d2.changed.is_empty(),
 		"an unchanged recompile resends nothing, found {} changed", d2.changed.len());
+	Ok(())
+}
+
+/// The audit blocker: the consumer -- not the compiler -- owns the SVG cache, and clears it on a document
+/// close or switch. A recompile after that clear must be told to resend everything (`reset`, full
+/// `changed`), NOT that nothing changed against the prior ids -- which would leave the emptied cache with no
+/// SVG for any id and a blank preview it could never recover from. Modelled by supplying an empty `known`
+/// (the consumer's now-empty cache) though the source, and so the pages and their ids, are identical to the
+/// priming compile. Were the prior set held in the compiler instead of supplied here, this would return
+/// `changed: []` and the assertion below would fail.
+#[test]
+fn a_cleared_cache_forces_a_full_resend() -> Outcome<()> {
+	let pages	= res!(compile_pages(build_doc(24, None)));
+	let d1		= res!(delta::compute(&pages, &[], 0));
+	assert!(!d1.changed.is_empty(), "the priming compile sends the pages");
+
+	// The consumer closed the document: its cache is empty, so it supplies no known ids on reopen.
+	let reopened	= res!(compile_pages(build_doc(24, None)));
+	let d2			= res!(delta::compute(&reopened, &[], d1.version));
+
+	assert!(d2.reset, "a recompile against an empty known set is a reset -- the recovery");
+	assert_eq!(d2.changed.len(), d2.order.len(),
+		"a cleared cache must be resent in full, not told nothing changed: {} changed of {} pages",
+		d2.changed.len(), d2.order.len());
+	assert!(d2.version > d1.version, "the version still steps monotonically across the clear");
 	Ok(())
 }
 

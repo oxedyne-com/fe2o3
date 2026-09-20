@@ -54,10 +54,10 @@ pub struct DaimondTypst {
 	// recompiling. Replaced by each successful compile's own values.
 	last_ledger:	Option<Ledger>,
 	last_heads:		Vec<Heading>,
-	// The last vector-delta compile's page-id sequence and version counter (see `compile_project_delta`).
-	// The only state a delta keeps between compiles: the ids alone, never the rendered SVG, so the heap
-	// holds one id per page rather than the whole rendered document. Empty and zero until the first delta.
-	last_order:		Vec<u64>,
+	// A strictly monotonic compile tick for the changed-only delta (see `compile_project_delta`). The one
+	// piece of delta state this instance keeps: NOT the prior id set, which lives with the consumer and is
+	// supplied on each compile -- only a counter, so a consumer can discard a stale async return by version.
+	// Zero until the first delta.
 	version:		u32,
 }
 
@@ -71,7 +71,6 @@ impl DaimondTypst {
 			fonts:			fonts::libertinus().ok().map(Arc::new),
 			last_ledger:	None,
 			last_heads:		Vec::new(),
-			last_order:		Vec::new(),
 			version:		0,
 		}
 	}
@@ -102,10 +101,13 @@ impl DaimondTypst {
 
 	/// The live-view path Daimond consumes: compiles a project to a changed-only page delta, returning
 	/// `{ version, order: string[], changed: [{ id, svg }], reset }` on success or `{ error }` otherwise.
-	/// Only the pages whose rendered SVG changed since the last call carry their SVG in `changed`; the rest
-	/// the consumer serves from its own id-keyed cache. This is the memory-frugal successor to
+	/// The project carries `known: string[]` -- the ids the consumer still holds in its own SVG cache -- and
+	/// only the pages whose id is not among them carry their SVG in `changed`; the rest the consumer serves
+	/// from that cache. The compiler keeps no cache state of its own, so a consumer that has cleared its
+	/// cache (a document close or switch) sends `known: []` and gets a full resend (`reset: true`) rather
+	/// than a blank preview against a cache that no longer holds anything. The memory-frugal successor to
 	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
-	/// Ids are decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
+	/// Ids are opaque decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.run_delta(project) {
@@ -204,9 +206,10 @@ impl DaimondTypst {
 		}
 	}
 
-	/// Clears the source map before returning either way, as [`Self::run`] does, and steps the delta state:
-	/// computes the changed-only delta of this compile against the last `order` and stores the new `order`
-	/// and version. Only the ids are kept; the rendered SVG is emitted into the delta and dropped.
+	/// Clears the source map before returning either way, as [`Self::run`] does, and steps the compile tick:
+	/// computes the changed-only delta of this compile against the consumer's supplied `known` ids. The
+	/// compiler retains no prior id set; only the rendered SVG of a newly-changed page is built, carried
+	/// into the delta, and dropped.
 	fn run_delta(&mut self, project: &JsValue) -> Result<delta::PageDelta, String> {
 		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
 		let outcome = self.run_delta_inner(project, &main);
@@ -218,10 +221,20 @@ impl DaimondTypst {
 	}
 
 	fn run_delta_inner(&mut self, project: &JsValue, main: &str) -> Outcome<delta::PageDelta> {
+		// The consumer owns the SVG cache, so it -- not this instance -- is the authority on which page ids
+		// are already held. It supplies them as `known`; a page whose id is not among them is resent. Holding
+		// the prior set here would blank the preview whenever the consumer cleared its cache (a document
+		// close or switch) while this singleton compiler lived on: the delta would report nothing changed
+		// against a cache holding nothing. So `reset` is `known.is_empty()` by construction -- true exactly
+		// when the consumer has nothing to reuse, and a cleared cache recovers with a full resend.
+		let known		= parse_known(project);
 		let rendered	= res!(self.assemble_and_run(project, main));
-		let d			= res!(delta::compute(&rendered.out.pages, &self.last_order, self.version));
-		// Retain the id sequence and version alone -- never the SVG -- so the next compile diffs against it.
-		self.last_order	= d.order.clone();
+		let d			= res!(delta::compute(&rendered.out.pages, &known, self.version));
+		// The version is the one piece of delta state this instance keeps: a strictly monotonic tick, so a
+		// consumer that dispatches compiles without awaiting each can discard a stale async return by its
+		// version. It is deliberately not consumer-supplied -- two compiles dispatched before either returned
+		// would carry the same supplied version and could not be ordered -- and a cache clear does not
+		// disturb it, since recovery is driven by an empty `known`, not by the counter.
 		self.version	= d.version;
 		Ok(d)
 	}
@@ -355,6 +368,25 @@ fn string_field(obj: &JsValue, key: &str) -> Option<String> {
 /// An array-valued field of a JS object, or `None` when it is absent or not an array.
 fn array_field(obj: &JsValue, key: &str) -> Option<js_sys::Array> {
 	js_sys::Reflect::get(obj, &JsValue::from_str(key)).ok().and_then(|v| v.dyn_into::<js_sys::Array>().ok())
+}
+
+/// The consumer's currently-cached page ids, read from the project's `known: string[]` field and parsed
+/// from decimal (the shape [`ok_delta`] emits them in). An absent field, or an entry that is not a decimal
+/// string, is skipped; an empty result forces a full reset -- the safe direction, a resend over a blank.
+fn parse_known(project: &JsValue) -> Vec<u64> {
+	let arr = match array_field(project, "known") {
+		Some(a)	=> a,
+		None	=> return Vec::new(),
+	};
+	let mut ids = Vec::with_capacity(arr.length() as usize);
+	for entry in arr.iter() {
+		if let Some(s) = entry.as_string() {
+			if let Ok(id) = s.parse::<u64>() {
+				ids.push(id);
+			}
+		}
+	}
+	ids
 }
 
 /// `{ pdf: Uint8Array }`.

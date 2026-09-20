@@ -28,10 +28,13 @@
 //! furniture fresh; the delta needs the folio in the key, since the consumer reuses the whole SVG by id and
 //! a page whose only change is its printed folio genuinely renders differently.
 //!
-//! **Residency.** The only state a caller keeps between compiles is the last `order` -- a `Vec` of 64-bit
-//! ids. The rendered SVG of a page is emitted into `changed` when its id is new and then dropped; it is
-//! never retained. So the wasm heap holds roughly one page's SVG plus one id per page, not the whole
-//! rendered document.
+//! **Residency.** The prior id set is supplied by the consumer on each compile (its `known` set, the ids it
+//! still holds in its own cache) and returned as the new `order`; the compiler retains none of it between
+//! compiles. The rendered SVG of a page is emitted into `changed` when its id is new and then dropped, never
+//! retained. So the wasm heap holds roughly one page's SVG plus one id per page during a compile, and
+//! nothing between compiles -- not the whole rendered document, and not the prior set. Keeping the prior set
+//! in the compiler would also be wrong, not merely heavier: a consumer that cleared its cache while the one
+//! singleton compiler lived on would be told nothing changed against a cache holding nothing.
 
 use crate::emit::svg;
 use crate::page::Page;
