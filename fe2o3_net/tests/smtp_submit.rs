@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! Submitting a message through a provider, which means proving the account is ours first.
 //!
 //! Delivery to a recipient's MX needs no credential: the receiving server takes the message because

@@ -1,3 +1,7 @@
+// The whole suite exercises the tokio-driven mbox reader, so it belongs to the
+// async build alone; the lean build compiles no test binary here.
+#![cfg(feature = "async")]
+
 use oxedyne_fe2o3_net::{
     //dns::Fqdn,
     email::{

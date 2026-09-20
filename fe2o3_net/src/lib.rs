@@ -85,6 +85,9 @@
 //! error handling through the `Outcome` type.
 //!
 #![forbid(unsafe_code)]
+// `acme` stays present: its `jose` (JWS/base64url), `cache` and `rfc8555` layers
+// are tokio-free and reused by the tokio-free `webauthn` verifier; only its
+// tokio/rcgen submodules are gated, inside the module.
 pub mod acme;
 pub mod addr;
 pub mod conc;
@@ -100,18 +103,26 @@ pub mod guard;
 pub mod hmac;
 pub mod http;
 pub mod id;
+#[cfg(feature = "async")]
 pub mod imap;
+#[cfg(feature = "async")]
 pub mod llm;
 pub mod mail;
 pub mod media;
 pub mod search;
 pub mod sms;
 pub mod smtp;
+#[cfg(feature = "async")]
 pub mod ssdp;
 pub mod time;
+#[cfg(feature = "async")]
 pub mod tls;
+// UPnP device/service description sits on top of the (tokio-driven) SSDP
+// discovery responder and its `Target` type, so it goes behind the same gate.
+#[cfg(feature = "async")]
 pub mod upnp;
 pub mod webauthn;
 pub mod ws;
 
+#[cfg(feature = "async")]
 pub use ws::core::WebSocket;

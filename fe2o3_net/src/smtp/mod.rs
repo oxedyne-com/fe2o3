@@ -1,6 +1,9 @@
+#[cfg(feature = "async")]
 pub mod client;
 pub mod cmd;
 pub mod codes;
 pub mod handler;
+#[cfg(feature = "async")]
 pub mod msg;
+#[cfg(feature = "async")]
 pub mod server;

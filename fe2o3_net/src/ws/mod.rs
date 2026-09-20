@@ -1,7 +1,10 @@
+#[cfg(feature = "async")]
 pub mod core;
+#[cfg(feature = "async")]
 pub mod handler;
 pub mod status;
 
+#[cfg(feature = "async")]
 pub use self::core::{
     accept_key,
     accept_response,

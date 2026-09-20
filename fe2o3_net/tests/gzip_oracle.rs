@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! The gzip encoder, checked against `gzip(1)` rather than against itself.
 //!
 //! A codec tested only against its own decoder agrees with itself, which is

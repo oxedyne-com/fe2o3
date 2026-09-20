@@ -1,7 +1,12 @@
+// `dns` and `smtp` (command parsing only) are tokio-free; the rest exercise the
+// async half of the crate and compile only when it is built.
 mod dns;
+#[cfg(feature = "async")]
 mod email;
+#[cfg(feature = "async")]
 mod http;
 mod smtp;
+#[cfg(feature = "async")]
 mod smtp_submit;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -34,9 +39,12 @@ fn run_tests() -> Outcome<()> {
     let filter = "all";
 
     res!(dns::test_dns(filter));
+    #[cfg(feature = "async")]
     res!(email::test_email(filter));
+    #[cfg(feature = "async")]
     res!(http::test_http(filter));
     res!(smtp::test_smtp(filter));
+    #[cfg(feature = "async")]
     res!(smtp_submit::test_smtp_submit(filter));
 
     Ok(())

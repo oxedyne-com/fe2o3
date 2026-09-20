@@ -1,5 +1,6 @@
+#[cfg(feature = "async")]
+use crate::conc::AsyncReadIterator;
 use crate::{
-    conc::AsyncReadIterator, 
     constant,
     http::{
         fields::{
@@ -28,12 +29,19 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     str::FromStr,
-    future::Future,
     path::PathBuf,
-    pin::Pin,
     time::Duration,
 };
 
+// `Future`/`Pin` are the async reader's alone; the tokio traits drive every
+// stream read and write in this module, all of it behind the `async` feature.
+#[cfg(feature = "async")]
+use std::{
+    future::Future,
+    pin::Pin,
+};
+
+#[cfg(feature = "async")]
 use tokio::{
     io::{
         AsyncRead,
@@ -124,6 +132,7 @@ impl FileWindow {
     /// encoded cannot be copied straight from the file, because the file is no
     /// longer what is being sent. The eligibility rules that lead here exclude
     /// the large media types, so what is read is markup, script or a module.
+    #[cfg(feature = "async")]
     pub async fn read(&self) -> Outcome<Vec<u8>> {
         let mut file = match tokio::fs::File::open(&self.path).await {
             Ok(f)  => f,
@@ -150,6 +159,7 @@ impl FileWindow {
     /// leave the connection short of the `Content-Length` already promised, which
     /// desynchronises every message after it on a kept-alive connection -- so a
     /// short read is an error, and the caller drops the connection.
+    #[cfg(feature = "async")]
     pub async fn write_to<const CHUNK_SIZE: usize, W: AsyncWriteExt + Unpin>(
         &self,
         sink: &mut W,
@@ -391,6 +401,7 @@ impl HttpMessage {
         }
     }
 
+    #[cfg(feature = "async")]
     pub async fn read<
         'a,
         const HEADER_CHUNK_SIZE: usize,
@@ -533,6 +544,7 @@ impl HttpMessage {
         }
     }
 
+    #[cfg(feature = "async")]
     pub async fn write_all<
         R: AsyncWriteExt + Unpin,
     >(
@@ -776,6 +788,7 @@ pub fn is_chunked(fields: &HeaderFields) -> bool {
 /// `limits.max_body_bytes` bounds the *decoded* size: a chunked body declares
 /// no total up front, so the only way to bound it is to stop reading when it
 /// gets too big, which is what happens here.
+#[cfg(feature = "async")]
 async fn read_chunked<
     const BODY_CHUNK_SIZE: usize,
     R: AsyncRead + Unpin,
@@ -864,6 +877,7 @@ async fn read_chunked<
 
 /// Take the next CRLF-terminated line off the buffer, reading more from the
 /// stream until there is one. `None` means the peer closed first.
+#[cfg(feature = "async")]
 async fn take_line<
     const BODY_CHUNK_SIZE: usize,
     R: AsyncRead + Unpin,
@@ -886,6 +900,7 @@ async fn take_line<
 }
 
 /// Read one more chunk of bytes onto the buffer. `false` means the peer closed.
+#[cfg(feature = "async")]
 async fn fill<
     const BODY_CHUNK_SIZE: usize,
     R: AsyncRead + Unpin,
@@ -908,7 +923,7 @@ async fn fill<
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod body_tests {
     use super::*;
 
@@ -1166,6 +1181,7 @@ mod body_tests {
 }
 
 
+#[cfg(feature = "async")]
 pub struct HttpMessageReader<
     'a,
     const HEADER_CHUNK_SIZE: usize,
@@ -1177,6 +1193,7 @@ pub struct HttpMessageReader<
     limits: Option<ReadLimits>,
 }
 
+#[cfg(feature = "async")]
 impl<
     'a,
     const HEADER_CHUNK_SIZE: usize,
@@ -1242,6 +1259,7 @@ impl<
     }
 }
 
+#[cfg(feature = "async")]
 impl<
     'a,
     const HEADER_CHUNK_SIZE: usize,
@@ -1280,7 +1298,7 @@ impl<
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod reader_tests {
     use super::*;
 

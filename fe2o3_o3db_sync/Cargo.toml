@@ -26,7 +26,12 @@ oxedyne_fe2o3_iop_crypto		= { path = "../fe2o3_iop_crypto" }
 oxedyne_fe2o3_iop_db			= { path = "../fe2o3_iop_db" }
 oxedyne_fe2o3_iop_hash 			= { path = "../fe2o3_iop_hash" }
 oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
-oxedyne_fe2o3_net 				= { path = "../fe2o3_net" }
+# Only `net::id::Uid` (a test) is reached from here, and the library itself uses
+# nothing from the crate -- so it is taken lean, keeping the async runtime out of
+# every downstream that builds o3db_sync without needing net's servers (e.g.
+# fe2o3_pearlite). Callers that do need them enable `async` through their own net
+# dependency, which feature-unifies as usual.
+oxedyne_fe2o3_net 				= { path = "../fe2o3_net", default-features = false }
 oxedyne_fe2o3_num 				= { path = "../fe2o3_num" }
 oxedyne_fe2o3_syntax 			= { path = "../fe2o3_syntax" }
 oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }

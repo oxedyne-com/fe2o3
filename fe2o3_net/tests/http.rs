@@ -1,3 +1,6 @@
+// Exercises the async `HttpMessageReader`, so it belongs to the async build alone.
+#![cfg(feature = "async")]
+
 use oxedyne_fe2o3_net::{
     conc::AsyncReadIterator,
     constant,

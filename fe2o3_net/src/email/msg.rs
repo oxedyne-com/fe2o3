@@ -1,30 +1,30 @@
 use crate::{
     charset::Charset,
-    constant,
     media::{
         ContentTypeValue,
         MediaType,
     },
+};
+// Only `EmailMessage::read` needs these, and it reads off the async SMTP line
+// reader (`smtp::msg`), which is itself gated -- so the imports follow the fn.
+#[cfg(feature = "async")]
+use crate::{
+    constant,
     smtp::msg::SmtpMessage,
 };
 
-use oxedyne_fe2o3_core::{
-    prelude::*,
-    count::ErrorWhen,
-};
+use oxedyne_fe2o3_core::prelude::*;
+#[cfg(feature = "async")]
+use oxedyne_fe2o3_core::count::ErrorWhen;
 
 use std::{
     fmt,
 };
 
-use tokio::{
-    io::{
-        AsyncRead,
-        //AsyncReadExt,
-        AsyncBufRead,
-        //AsyncBufReadExt,
-        //AsyncWriteExt,
-    },
+#[cfg(feature = "async")]
+use tokio::io::{
+    AsyncRead,
+    AsyncBufRead,
 };
 
 
@@ -50,6 +50,7 @@ impl fmt::Display for EmailMessage {
     }
 }
 
+#[cfg(feature = "async")]
 impl EmailMessage {
 
     pub async fn read<R: AsyncRead + AsyncBufRead + Unpin>(

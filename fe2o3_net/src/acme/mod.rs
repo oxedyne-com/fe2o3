@@ -16,9 +16,16 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+// `jose`, `cache` and `rfc8555` are tokio-free primitives (JWS, the on-disk cache
+// and the RFC 8555 message types); `jose` in particular is reused by the
+// tokio-free `webauthn` verifier. The client state machine, the renewal/trust
+// TLS glue and the rcgen-backed challenge cert generator are the async/TLS half.
 pub mod cache;
+#[cfg(feature = "async")]
 pub mod challenge;
+#[cfg(feature = "async")]
 pub mod client;
 pub mod jose;
 pub mod rfc8555;
+#[cfg(feature = "async")]
 pub mod trust;
