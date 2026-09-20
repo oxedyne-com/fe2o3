@@ -136,7 +136,7 @@ where
 	// re-read markup, rather than being dropped as an unknown construct. The import walk resolves an `#import`
 	// even with no `#include` present, which the lone path by definition has none of.
 	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
-	let binds	= lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
+	let binds	= scope.bindings();
 	let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, binds));
 	skips.tag_file(&main_path.display().to_string());
 	let skip_line	= terse_skip_line(&skips);

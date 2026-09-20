@@ -1288,6 +1288,32 @@ pub struct ContentFn {
 /// a source with none reads exactly as before.
 pub type ContentFns = std::collections::HashMap<String, ContentFn>;
 
+/// A `#let name = <literal>` scalar value binding: a bare string, integer, float or length literal, held as
+/// its own display text so a later `#name` reference substitutes it verbatim. Unlike a [`ContentFn`], whose
+/// body is markup re-read through the reader, a scalar's value needs no re-parse -- Typst renders a bare
+/// literal exactly as it was written (`3`, `1.5`, `12pt`), so the source text a scalar was declared with IS
+/// its display text, with a string's quotes stripped.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScalarValue {
+	Str(String),	// a `"..."` string, its quotes stripped
+	Number(String),	// an int, float or length literal, kept as its own source text (unit included)
+}
+
+impl ScalarValue {
+	/// The text a `#name` reference substitutes: the string's contents, or the number/length literal's own
+	/// source text.
+	pub fn display_text(&self) -> &str {
+		match self {
+			Self::Str(s)	=> s,
+			Self::Number(s)	=> s,
+		}
+	}
+}
+
+/// The scalar value bindings in scope for a source, by name. Empty until a document's definitions are
+/// collected; a source with none reads exactly as before.
+pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
+
 /// The `#let` bindings a parse resolves a call against: the furniture functions ([`TemplateFns`], expanded
 /// into a padded box) and the content bindings ([`ContentFns`], spliced as markup). Threaded as one through
 /// the reader so a caller passes both together and a nested body carries the same scope. Borrowed, so it is
@@ -1301,12 +1327,21 @@ pub type ContentFns = std::collections::HashMap<String, ContentFn>;
 pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
 	pub cfns:	&'a ContentFns,
+	pub sfns:	&'a ScalarFns,
 	pub active:	&'b [String],
 }
 
 impl<'a> Bindings<'a, 'static> {
+	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
+	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, active: &[] }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[] }
+	}
+
+	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
+	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
+	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
+		Self { tfns, cfns, sfns, active: &[] }
 	}
 }
 
@@ -1323,8 +1358,15 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, active }
+		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active }
 	}
+}
+
+/// The empty [`ScalarFns`] map [`Bindings::new`] borrows when a caller has no scalar scope to hand -- a
+/// `'static` empty map costs nothing to share and needs no per-call allocation.
+fn empty_scalar_fns() -> &'static ScalarFns {
+	static EMPTY: std::sync::OnceLock<ScalarFns> = std::sync::OnceLock::new();
+	EMPTY.get_or_init(ScalarFns::new)
 }
 
 /// Collects every `#let name(params) = block/box(...)` furniture definition in `src` into `tfns`, lowering
@@ -1385,7 +1427,7 @@ pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 /// `#`), returning the name, its positional parameter names (empty for a value binding), the bracketed body
 /// with its delimiters stripped, and the index just past it. `None` when the line is not a content-binding
 /// `#let`: a furniture `= block/box(...)`, a data array `= (...)` and a scalar all fail the `[` check after
-/// the `=`, so this reader leaves them to the furniture and array readers.
+/// the `=`, so this reader leaves them to the furniture, array and scalar readers.
 fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, usize)> {
 	let mut j = at + "#let ".chars().count();
 	let name_start = j;
@@ -1424,6 +1466,105 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	}
 	let (body, next) = read_delim_group(chars, j)?;
 	Some((name, params, body, next))
+}
+
+/// Collects every `#let name = <literal>` scalar value binding in `src` into `sfns`: a bare `"..."` string,
+/// or an integer, float or length literal, with nothing else on the right of the `=`. A `#let` whose body
+/// is furniture (`= block/box(...)`), content (`= [ ... ]`), a data array (`= (...)`), a function signature
+/// (`name(params) = ...`) or any other expression this reader does not evaluate (a call, a concatenation, an
+/// identifier) is passed over here -- it is left as a visible `#let` skip, exactly as before -- and a name
+/// the reader already handles as a built-in construct is not overridden. A binding seen twice re-inserts the
+/// same value, so the map is definition-order-independent.
+pub fn collect_scalar_fns(src: &str, sfns: &mut ScalarFns) {
+	let chars:	Vec<char>	= src.chars().collect();
+	let mut i	= 0usize;
+	while i < chars.len() {
+		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+			if let Some((name, value, next)) = read_let_scalar(&chars, i) {
+				if !is_reserved_construct(&name) {
+					sfns.insert(name, value);
+				}
+				i = next;
+				continue;
+			}
+		}
+		i += 1;
+	}
+}
+
+/// Reads a `#let name = <literal>` scalar binding beginning at `at` (the `#`), returning the name, its
+/// value, and the index just past the line it stands on. `None` when the line is not a scalar `#let`: a
+/// name immediately followed by `(` is a function signature, left to [`read_let_content`]'s params check and
+/// [`crate::lang::rules::collect_template_fns`]; a value that does not read as a bare string, integer, float
+/// or length literal -- a `[...]` content body, a `(...)` array, a call, an `if`, an identifier or any other
+/// expression -- is left as it stands, for the same visible `#let` skip a scalar binding got before this
+/// reader existed.
+fn read_let_scalar(chars: &[char], at: usize) -> Option<(String, ScalarValue, usize)> {
+	let mut j = at + "#let ".chars().count();
+	let name_start = j;
+	while j < chars.len() && is_ident_char(chars[j]) {
+		j += 1;
+	}
+	let name: String = chars[name_start..j].iter().collect();
+	if name.is_empty() {
+		return None;
+	}
+	// A scalar binding takes no parameter list; a `(` here (with no space, as a signature is written) is a
+	// function, not a value.
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	if chars.get(j) != Some(&'=') {
+		return None;
+	}
+	j += 1;
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	let line_end = chars[j..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| j + p);
+	let rest: String = chars[j..line_end].iter().collect();
+	let value_text = strip_trailing_line_comment(rest.trim());
+	let value = res_scalar_literal(value_text)?;
+	Some((name, value, line_end))
+}
+
+/// Reads `text` (the right-hand side of a `#let`, comment-stripped and trimmed) as a scalar literal: a
+/// `"..."` string, its quotes stripped, or an integer, float or length (`pt`/`mm`/`cm`/`in`) literal kept as
+/// its own source text -- Typst renders a bare number or length exactly as written, so no reformatting is
+/// needed. `None` for anything else, so an expression this reader cannot evaluate is left for the ordinary
+/// `#let` skip rather than misread.
+fn res_scalar_literal(text: &str) -> Option<ScalarValue> {
+	if text.len() >= 2 && text.starts_with('"') && text.ends_with('"') {
+		return Some(ScalarValue::Str(text[1..text.len() - 1].to_string()));
+	}
+	for unit in ["pt", "mm", "cm", "in"] {
+		if let Some(num) = text.strip_suffix(unit) {
+			if !num.is_empty() && num.trim().parse::<f64>().is_ok() {
+				return Some(ScalarValue::Number(text.to_string()));
+			}
+		}
+	}
+	if text.parse::<f64>().is_ok() {
+		return Some(ScalarValue::Number(text.to_string()));
+	}
+	None
+}
+
+/// Strips a trailing `//` line comment from a scalar `#let`'s right-hand side (`#let n = 3 // words/min`),
+/// so the literal reads correctly. A `//` inside the value's own `"..."` quotes is not a comment and is kept.
+fn strip_trailing_line_comment(s: &str) -> &str {
+	let mut in_str = false;
+	let mut chars = s.char_indices().peekable();
+	while let Some((idx, c)) = chars.next() {
+		match c {
+			'"'					=> in_str = !in_str,
+			'/' if !in_str		=> if let Some(&(_, '/')) = chars.peek() {
+				return s[..idx].trim_end();
+			},
+			_					=> {},
+		}
+	}
+	s
 }
 
 /// Is `name` a construct the reader already captures specially, so a `#let` of that name must not shadow
@@ -2726,6 +2867,55 @@ mod tests {
 		let mut tfns = TemplateFns::new();
 		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
 		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
+	}
+
+	/// A bare `#let name = <literal>` collects a scalar for a string, an integer and a length alike, keeping
+	/// a string's contents unquoted and a number or length as its own written text (Typst's own display form
+	/// for a plain literal).
+	#[test]
+	fn collect_scalar_fns_reads_string_int_and_length_literals() {
+		let src = "\
+#let title = \"Field Guide\"
+#let edition = 3
+#let gap = 12pt
+";
+		let mut sfns = ScalarFns::new();
+		collect_scalar_fns(src, &mut sfns);
+		assert_eq!(sfns.get("title"), Some(&ScalarValue::Str("Field Guide".to_string())));
+		assert_eq!(sfns.get("edition"), Some(&ScalarValue::Number("3".to_string())));
+		assert_eq!(sfns.get("gap"), Some(&ScalarValue::Number("12pt".to_string())));
+	}
+
+	/// A `#let` whose right-hand side is not a bare literal -- a furniture wrap, a content binding, a data
+	/// array, a function signature, or an expression this reader does not evaluate -- collects no scalar, so
+	/// it is left exactly as before (a visible `#let` skip, or the furniture/content/array reader's own).
+	#[test]
+	fn collect_scalar_fns_passes_over_non_literal_lets() {
+		let src = "\
+#let pr-note(body) = block(inset: 6pt, body)
+#let greeting = [Hello]
+#let data = (1, 2, 3)
+#let doubled(n) = n * 2
+#let total = count + 1
+";
+		let mut sfns = ScalarFns::new();
+		collect_scalar_fns(src, &mut sfns);
+		assert!(sfns.is_empty(), "no line here is a bare literal binding: {:?}", sfns);
+	}
+
+	/// A trailing `//` comment on a scalar `#let`'s line does not leak into its value -- `#let n = 3 //
+	/// words/min` reads the plain integer, and a string's own `//`-shaped contents (inside its quotes) are
+	/// kept rather than truncated.
+	#[test]
+	fn collect_scalar_fns_strips_a_trailing_comment_but_keeps_a_quoted_one() {
+		let src = "\
+#let speed = 230 // words/min
+#let url-ish = \"see https://example.com\" // not a real link here
+";
+		let mut sfns = ScalarFns::new();
+		collect_scalar_fns(src, &mut sfns);
+		assert_eq!(sfns.get("speed"), Some(&ScalarValue::Number("230".to_string())));
+		assert_eq!(sfns.get("url-ish"), Some(&ScalarValue::Str("see https://example.com".to_string())));
 	}
 
 	/// An `#aside-box(title: none, float: true, body)` definition (the `let inner = box(...)` idiom, re-wrapped

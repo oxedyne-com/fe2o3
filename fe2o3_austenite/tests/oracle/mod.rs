@@ -263,6 +263,18 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own scalar `#let` value-binding fixture (reader-completeness item 2) -- the
+			// regression root for `#let name = <literal>` (a string, an integer or a length) substituting at a
+			// bare `#name` reference, in both a heading title and running prose. Two headings reference a
+			// string scalar and a numeric one; reverting the substitution renders the raw `#name` token instead
+			// of its value, moving both the set text and the pinned hash. See the fixture file for the full
+			// shape and why it needs no symbol-modifier patch.
+			name:				"let-value-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/let_value_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

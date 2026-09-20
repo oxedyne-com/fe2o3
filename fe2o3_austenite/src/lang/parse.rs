@@ -429,7 +429,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		if is_fence(trimmed) {
 			// An opening fence closes any paragraph or list, then begins a verbatim block. The fence line
 			// itself (and any language tag on it) is not kept.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			code = Some((Vec::new(), start));
 			continue;
@@ -450,7 +450,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// content intervenes. The list is therefore held open here; the marker branch joins a following
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
 			// line -- flushes it first, so two lists parted by real content still restart.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
 			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Builtin(_)) && !lines.is_empty()))
 		{
@@ -466,7 +466,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A multi-line construct the reader sets rather than skips. It closes any open block, then its
 			// whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			let mut state	= SkipState::new();
 			scan_brackets(line, &mut state);
@@ -483,7 +483,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A standalone `#line(length:.., stroke:..)` horizontal divider (the appendix brackets a note
 			// with one above and below). It closes any open block and sets a stroked rule; a multi-line
 			// `#line(` that does not close on this line falls through to the skip path below.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			if let Some(rule) = parse_line_rule(trimmed) {
 				items.push(rule);
@@ -492,7 +492,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A line-leading `#print-glossary()`: the glossary section's Term/Definition table. It closes any
 			// open block and emits a placeholder the book layer fills once the whole document's glossary terms
 			// are known -- unlike the surrounding template calls it is set in place, not recorded as a skip.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			items.push(Item::PrintGlossary { span: Span::new(start, end) });
 		} else if let Some(decision) = code_skip(trimmed) {
@@ -501,7 +501,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// The styling and computation layer is a later increment; the prose around it still sets. When
 			// its delimiters do not balance on this line, the multi-line span is consumed by the check at the
 			// top of the loop until they do.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			// The recorded span is the opening line alone, even for a construct whose delimiters run on
 			// for several more: that is where a reader wants `--explain`'s caret to land, and the true
@@ -519,12 +519,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// literal prose would leak a `#` onto the page (the very thing an expanded content-binding body
 			// carrying `#if`/`#{` would do); it is refused with its span instead. The `lines.is_empty()` guard
 			// keeps a reference mid-paragraph joining the line inline, as Typst does, rather than refusing it.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			skips.record(&construct_name(trimmed), Span::new(start, end));
 		} else if trimmed.starts_with('=') && !math_block_open {
 			// A heading closes any paragraph or list above it, then stands on its own line.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
@@ -540,7 +540,9 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			}
 			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
 			// maths span in a heading sets its display text rather than leaking its raw source into the head
-			// and the table of contents.
+			// and the table of contents. A bare `#name` naming a scalar `#let` value binding (`= Product
+			// #version`) substitutes its display text first, the same as a paragraph's.
+			let title = substitute_scalars(&title, binds.sfns);
 			let head_span = Span::new(start, end);
 			items.push(Item::Heading {
 				level:	level as u8,
@@ -558,7 +560,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					// a deeper marker opens a sub-list under the current item, a shallower one closes back to
 					// the matching level, and a same-indent marker of the other kind ends the list and starts
 					// one of the new kind. The item's text carries inline emphasis like any run.
-					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 					let indent = line.chars().take_while(|c| c.is_whitespace()).count();
 					let runs = parse_inlines_in(&text, Span::new(start, end), &mut skips);
 					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
@@ -580,7 +582,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 
 	// A source that ends without a closing blank line still closes its last paragraph or list; an
 	// unterminated code fence still yields the block it had gathered.
-	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 	flush_list(&mut items, &mut stack);
 	if let Some((buf, cstart)) = code {
 		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
@@ -733,6 +735,7 @@ fn flush_para(
 	start:	u32,
 	end:	u32,
 	skips:	&mut Refusals,
+	sfns:	&crate::lang::rules::ScalarFns,
 )
 {
 	if lines.is_empty() {
@@ -744,6 +747,12 @@ fn flush_para(
 	// rather than a rich paragraph. Ordinary prose ends in a full stop, so the conservative `split_label`
 	// (a single whitespace-free token in angle brackets at the very end) does not fire on it.
 	let (body, label) = split_label(&text);
+	// A bare `#name` naming a scalar `#let` value binding substitutes its display text before the inline
+	// scanner runs, so "Version #version." reads the same as if the number or string had been typed in
+	// place. Runs before `parse_inlines_in`, never inside it, so it never touches a raw code span, inline
+	// maths, or any other captured construct (a table, a figure, a `#context` block) -- those are gathered
+	// and dispatched on a wholly separate path and never reach here.
+	let body = substitute_scalars(&body, sfns);
 	let span = Span::new(start, end);
 	let runs = parse_inlines_in(&body, span, skips);
 	items.push(Item::Paragraph { runs, label, span });
@@ -2879,6 +2888,72 @@ fn expand_content_body(cf: &crate::lang::rules::ContentFn, args: &[String]) -> S
 	out
 }
 
+/// Substitutes a bare `#name` reference to a scalar `#let` value binding -- `#let title = "Foo"`, then a
+/// later `#title` -- with its display text: a string's contents, or a number/length literal's own source
+/// text (see [`crate::lang::rules::ScalarValue::display_text`]). Runs once, on a heading's title or a
+/// flushed paragraph's joined text, BEFORE [`parse_inlines_in`] reads it, rather than as a case inside that
+/// scanner: a scalar's value is plain text needing no further markup expansion, so a textual pass here is
+/// the whole fix, and it leaves every other construct -- a table, a figure, a caption, a `#context` block,
+/// a data array -- untouched, since none of those reach this function.
+///
+/// A `#name` inside a raw `` `...` `` code span or a `$...$` maths span is left alone, matching
+/// [`parse_inlines_in`]'s own treatment of those as literal/foreign territory; an escaped `\#name` is left
+/// alone too, so the backslash still reaches the inline scanner to produce a literal `#`. A name with no
+/// scalar binding, or one immediately followed by `(` or `[` (a call, not a bare reference), is untouched --
+/// it still reaches the inline scanner's own refusal path, so an unbound or non-scalar reference stays a
+/// visible skip rather than becoming a silent drop here.
+pub(crate) fn substitute_scalars(text: &str, sfns: &crate::lang::rules::ScalarFns) -> String {
+	if sfns.is_empty() {
+		return text.to_string();	// the common case, no scalar bindings in scope -- costs nothing beyond the check
+	}
+	let chars:	Vec<char>	= text.chars().collect();
+	let mut out		= String::new();
+	let mut i		= 0usize;
+	let mut in_raw	= false;
+	let mut in_math	= false;
+	while i < chars.len() {
+		let c = chars[i];
+		if c == '\\' && i + 1 < chars.len() {
+			out.push(c);
+			out.push(chars[i + 1]);
+			i += 2;
+			continue;
+		}
+		if c == '`' {
+			in_raw = !in_raw;
+			out.push(c);
+			i += 1;
+			continue;
+		}
+		if c == '$' && !in_raw {
+			in_math = !in_math;
+			out.push(c);
+			i += 1;
+			continue;
+		}
+		if c == '#' && !in_raw && !in_math {
+			let start = i + 1;
+			let mut j = start;
+			while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+				j += 1;
+			}
+			if j > start {
+				let name: String = chars[start..j].iter().collect();
+				if !matches!(chars.get(j), Some('(') | Some('[')) {
+					if let Some(value) = sfns.get(&name) {
+						out.push_str(value.display_text());
+						i = j;
+						continue;
+					}
+				}
+			}
+		}
+		out.push(c);
+		i += 1;
+	}
+	out
+}
+
 /// The content of a `key: [ ... ]` keyword argument, without its brackets. Used to read a furniture call's
 /// `title:` argument. `None` when the key is absent or its value is not a content block.
 fn named_content_arg(args: &str, key: &str) -> Option<String> {
@@ -3867,6 +3942,90 @@ mod tests {
 		assert_eq!(
 			flatten_markup("margins#claim-label(<CD14>, <CD15>, <CD4>) formalised#claim-refs(<A1>)."),
 			"margins formalised.");
+	}
+
+	/// A bare `#name` naming a scalar `#let` value binding substitutes its display text: a string's contents
+	/// unquoted, and a number/length literal's own source text, wherever it stands in running text -- at the
+	/// start, mid-sentence, or immediately before punctuation.
+	#[test]
+	fn substitute_scalars_replaces_a_bound_scalar_in_prose() {
+		let mut sfns = crate::lang::rules::ScalarFns::new();
+		sfns.insert("version".to_string(), crate::lang::rules::ScalarValue::Str("1.2".to_string()));
+		sfns.insert("edition".to_string(), crate::lang::rules::ScalarValue::Number("3".to_string()));
+		assert_eq!(
+			substitute_scalars("This is version #version, edition #edition, of the guide.", &sfns),
+			"This is version 1.2, edition 3, of the guide.");
+		// A reference at the very start of the text (the shape a heading title reads).
+		assert_eq!(substitute_scalars("#version Notes", &sfns), "1.2 Notes");
+	}
+
+	/// A `#name` inside a raw `` `...` `` code span or a `$...$` maths span is left untouched -- neither is
+	/// this reader's word, matching how [`parse_inlines_in`] treats them as literal/foreign territory -- and
+	/// an escaped `\#name` is left alone too, so the backslash still reaches the inline scanner to produce a
+	/// literal `#`. An unbound name, or a bound name immediately followed by `(`/`[` (a call, not a bare
+	/// reference), is also untouched.
+	#[test]
+	fn substitute_scalars_leaves_raw_math_and_escaped_references_alone() {
+		let mut sfns = crate::lang::rules::ScalarFns::new();
+		sfns.insert("version".to_string(), crate::lang::rules::ScalarValue::Str("1.2".to_string()));
+		assert_eq!(substitute_scalars("see `#version` in code", &sfns), "see `#version` in code");
+		assert_eq!(substitute_scalars("the constant $#version$ here", &sfns), "the constant $#version$ here");
+		assert_eq!(substitute_scalars("literal \\#version stays", &sfns), "literal \\#version stays");
+		assert_eq!(substitute_scalars("#unknown-name here", &sfns), "#unknown-name here");
+		assert_eq!(substitute_scalars("#version(1) call-shaped", &sfns), "#version(1) call-shaped");
+	}
+
+	/// A scalar `#let` value binding substitutes at a bare `#name` reference in both a heading title and
+	/// running prose, through the whole [`document_with_templates`] pipeline (a [`Bindings::with_scalars`]
+	/// scope, as [`crate::book::Scope::bindings`] builds for a real compile) -- not just in the
+	/// [`substitute_scalars`] unit above.
+	#[test]
+	fn scalar_substitution_applies_in_a_heading_and_in_prose() {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let mut sfns = crate::lang::rules::ScalarFns::new();
+		sfns.insert("title".to_string(), crate::lang::rules::ScalarValue::Str("Guide".to_string()));
+		let binds = crate::lang::rules::Bindings::with_scalars(&tfns, &cfns, &sfns);
+		let src = "= #title\n\nThe #title is version one.\n";
+		let (items, _skips) = document_with_templates(src, binds).expect("parses");
+		match &items[0] {
+			Item::Heading { runs, .. } => assert!(
+				matches!(&runs[0], Inline::Text(t) if t.contains("Guide")),
+				"the heading substitutes the bound scalar: {:?}", runs),
+			other => panic!("expected a heading first, got {:?}", other),
+		}
+		match &items[1] {
+			Item::Paragraph { runs, .. } => {
+				let text: String = runs.iter().map(|r| match r {
+					Inline::Text(t) => t.clone(),
+					_ => String::new(),
+				}).collect();
+				assert!(text.contains("Guide"), "the paragraph substitutes the bound scalar: {:?}", text);
+			},
+			other => panic!("expected a paragraph second, got {:?}", other),
+		}
+	}
+
+	/// A bare `#name` standing alone on its own line -- bound to no scalar, content or template binding --
+	/// is still a visible refusal, exactly as before scalar bindings existed: [`document_with_templates`]
+	/// records it in the returned [`Refusals`] rather than leaking its raw source as a paragraph, whether or
+	/// not the document also carries a scalar scope. Scalar substitution only ever fires for a NAME the
+	/// scope actually binds ([`substitute_scalars`] is a no-op otherwise), so adding it never turns this
+	/// existing refusal into a silent drop.
+	#[test]
+	fn unbound_standalone_reference_stays_a_visible_refusal() {
+		let mut sfns = crate::lang::rules::ScalarFns::new();
+		sfns.insert("title".to_string(), crate::lang::rules::ScalarValue::Str("Guide".to_string()));
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let binds = crate::lang::rules::Bindings::with_scalars(&tfns, &cfns, &sfns);
+		let src = "Some prose above.\n\n#nosuchname\n\nSome prose below.\n";
+		let (items, skips) = document_with_templates(src, binds).expect("parses");
+		assert!(items.iter().all(|it| !matches!(it, Item::Paragraph { runs, .. }
+			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("#nosuchname"))))),
+			"an unbound standalone reference must not leak as paragraph text: {:?}", items);
+		assert!(skips.report().is_some_and(|r| r.contains("nosuchname")),
+			"an unbound standalone reference is a visible refusal, not a silent drop: {:?}", skips.report());
 	}
 
 	/// `lorem_words` reproduces `typst 0.15.1`'s `#lorem(n)` verbatim: the classic opening for small counts,

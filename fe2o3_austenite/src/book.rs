@@ -311,7 +311,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// absolute, then threaded into every chapter the assembler reads so a call expands rather than being
 	// tallied as a skipped construct.
 	let scope = collect_scope(root_src, root_dir, style.text.body_size);
-	let binds = lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
+	let binds = scope.bindings();
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
 	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
@@ -416,7 +416,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		None	=> root_dir.join("assets").join("fonts"),
 	};
 	let scope = collect_scope(root_src, root_dir, style.text.body_size);
-	let binds = lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
+	let binds = scope.bindings();
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
 	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
@@ -1646,36 +1646,48 @@ fn content_field(src: &str, name: &str) -> Option<String> {
 // │ #let SCOPE (furniture + content bindings, collected across the whole tree)  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The owned `#let` bindings a document compiles against: the furniture functions ([`TemplateFns`]) and the
-/// content bindings ([`ContentFns`]). Held here so [`collect_scope`] can hand back both, and the caller
-/// borrows them into a [`lang::rules::Bindings`] to thread through the reader.
+/// The owned `#let` bindings a document compiles against: the furniture functions ([`TemplateFns`]), the
+/// content bindings ([`ContentFns`]) and the scalar value bindings ([`lang::rules::ScalarFns`]). Held here
+/// so [`collect_scope`] can hand back all three, and [`Self::bindings`] borrows them into a
+/// [`lang::rules::Bindings`] to thread through the reader.
 pub struct Scope {
 	pub tfns:	lang::rules::TemplateFns,
 	pub cfns:	lang::rules::ContentFns,
+	pub sfns:	lang::rules::ScalarFns,
 }
 
-/// Collects the whole `#let` scope a document compiles against -- furniture functions and content bindings
-/// alike -- from `main_src`, the template chain it `#import`s (imports-first, so a definition sees the
-/// palettes and bindings its own imports supply) and each chapter it `#include`s. Shared by the book/doc
-/// path and the lone-file path, so an `#import` resolves whether or not the document also carries an
-/// `#include`: a lone file has none, so the include walk is simply a no-op there.
+impl Scope {
+	/// Borrows this scope's three `#let` binding kinds into a [`lang::rules::Bindings`] for the reader.
+	pub fn bindings(&self) -> lang::rules::Bindings<'_, 'static> {
+		lang::rules::Bindings::with_scalars(&self.tfns, &self.cfns, &self.sfns)
+	}
+}
+
+/// Collects the whole `#let` scope a document compiles against -- furniture functions, content bindings and
+/// scalar value bindings alike -- from `main_src`, the template chain it `#import`s (imports-first, so a
+/// definition sees the palettes and bindings its own imports supply) and each chapter it `#include`s. Shared
+/// by the book/doc path and the lone-file path, so an `#import` resolves whether or not the document also
+/// carries an `#include`: a lone file has none, so the include walk is simply a no-op there.
 ///
 /// Furniture is lowered against `body_size` so every `em` resolves to an absolute and every `colours.<name>`
 /// fill/stroke resolves against the palette; a furniture name that clashes with a built-in construct is
-/// refused inside [`lang::rules::collect_template_fns`], and a content-binding name likewise inside
-/// [`lang::rules::collect_content_fns`], so a template's own `#let styled-box` never shadows the reader's. A
-/// tree that defines neither yields two empty maps and reads exactly as before.
+/// refused inside [`lang::rules::collect_template_fns`], and a content-binding or scalar-binding name
+/// likewise inside [`lang::rules::collect_content_fns`]/[`lang::rules::collect_scalar_fns`], so a template's
+/// own `#let styled-box` never shadows the reader's. A tree that defines none of the three yields three
+/// empty maps and reads exactly as before.
 pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	let mut palette	= lang::rules::Palette::new();
 	let mut tfns	= lang::rules::TemplateFns::new();
 	let mut cfns	= lang::rules::ContentFns::new();
-	// The template chain the main source imports: builds the palette and collects furniture and content
-	// bindings (the `#aside-box` furniture, the `#greet` content binding, the palette they resolve against).
+	let mut sfns	= lang::rules::ScalarFns::new();
+	// The template chain the main source imports: builds the palette and collects furniture, content and
+	// scalar bindings (the `#aside-box` furniture, the `#greet` content binding, a `#let title = "..."`
+	// scalar, the palette they resolve against).
 	for line in main_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(rel) = first_quoted(rest) {
-				walk_template_imports(main_dir, &rel, body_size, &mut palette, &mut tfns, &mut cfns, 0);
+				walk_template_imports(main_dir, &rel, body_size, &mut palette, &mut tfns, &mut cfns, &mut sfns, 0);
 			}
 		}
 	}
@@ -1683,6 +1695,7 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	lang::rules::collect_palette(main_src, &mut palette);
 	lang::rules::collect_template_fns(main_src, body_size, &palette, &mut tfns);
 	lang::rules::collect_content_fns(main_src, &mut cfns);
+	lang::rules::collect_scalar_fns(main_src, &mut sfns);
 	for line in main_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
@@ -1690,17 +1703,18 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 				if let Ok(src) = vfs::read_to_string(&main_dir.join(&rel)) {
 					lang::rules::collect_template_fns(&src, body_size, &palette, &mut tfns);
 					lang::rules::collect_content_fns(&src, &mut cfns);
+					lang::rules::collect_scalar_fns(&src, &mut sfns);
 				}
 			}
 		}
 	}
-	Scope { tfns, cfns }
+	Scope { tfns, cfns, sfns }
 }
 
 /// Follows a local `#import "<rel>"` from `dir`, imports-first, collecting each file's `#let colours`
-/// palette, its furniture definitions and its content bindings -- so a file's fills resolve against the
-/// palettes its own imports supply. A package import (`@preview/...`), a missing file, or a cycle past the
-/// depth cap is skipped.
+/// palette, its furniture definitions, its content bindings and its scalar value bindings -- so a file's
+/// fills resolve against the palettes its own imports supply. A package import (`@preview/...`), a missing
+/// file, or a cycle past the depth cap is skipped.
 fn walk_template_imports(
 	dir:		&Path,
 	rel:		&str,
@@ -1708,6 +1722,7 @@ fn walk_template_imports(
 	palette:	&mut lang::rules::Palette,
 	tfns:		&mut lang::rules::TemplateFns,
 	cfns:		&mut lang::rules::ContentFns,
+	sfns:		&mut lang::rules::ScalarFns,
 	depth:		u32,
 )
 {
@@ -1725,13 +1740,14 @@ fn walk_template_imports(
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(inner_rel) = first_quoted(rest) {
-				walk_template_imports(next_dir, &inner_rel, body_size, palette, tfns, cfns, depth + 1);
+				walk_template_imports(next_dir, &inner_rel, body_size, palette, tfns, cfns, sfns, depth + 1);
 			}
 		}
 	}
 	lang::rules::collect_palette(&src, palette);
 	lang::rules::collect_template_fns(&src, body_size, palette, tfns);
 	lang::rules::collect_content_fns(&src, cfns);
+	lang::rules::collect_scalar_fns(&src, sfns);
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
