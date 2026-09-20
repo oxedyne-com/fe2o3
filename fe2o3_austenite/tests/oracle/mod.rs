@@ -251,9 +251,9 @@ pub fn qc_dir() -> Outcome<PathBuf> {
 #[derive(Clone, Debug)]
 struct AnchorRow {
 	kind:	String,
-	#[allow(dead_code)]	// carried through for a future label-based match; today's comparison is by order
 	label:	String,
 	page:	u32,
+	x:		f64,	// the anchor's x from the page left, in points -- lets the index check tell the two columns apart
 	y:		f64,	// the anchor's y from the page top, in points -- lets the float check tell top from foot
 }
 
@@ -275,7 +275,7 @@ struct TypstRow {
 /// Typst side's JSON, decoded back through the JDAT reader since JDAT is a JSON superset, could as
 /// easily land on `I64`). `title`, present only on the Typst side, defaults to empty when the caller
 /// does not ask for it.
-fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, String, u32, f64)>> {
+fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, String, u32, f64, f64)>> {
 	let dat		= res!(Dat::decode_string(json));
 	let list	= try_extract_dat!(dat, List);
 	let mut out = Vec::with_capacity(list.len());
@@ -289,6 +289,12 @@ fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, Stri
 		};
 		let page_dat	= res!(row.map_remove_must(&dat!("page")));
 		let page		= try_extract_dat_as!(page_dat, u32, U8, U16, U32, U64, I8, I16, I32, I64);
+		// `x` (whole points from the page left) is present on Austenite's dump; the Typst side's does not
+		// carry it, so it defaults to zero there, read only by the index-column check on Austenite's rows.
+		let x = match row.map_remove(&dat!("x")) {
+			Ok(Some(d))	=> try_extract_dat_as!(d, i64, U8, U16, U32, U64, I8, I16, I32, I64) as f64,
+			_			=> 0.0,
+		};
 		// `y` (whole points from the page top) is present on both sides now; an older dump without it
 		// defaults to zero, harmless for every check but the float side/y one, which only reads roots that
 		// carry it. Both sides emit it as an integer, so it decodes through the same width-tolerant path.
@@ -296,19 +302,19 @@ fn parse_rows(json: &str, want_title: bool) -> Outcome<Vec<(String, String, Stri
 			Ok(Some(d))	=> try_extract_dat_as!(d, i64, U8, U16, U32, U64, I8, I16, I32, I64) as f64,
 			_			=> 0.0,
 		};
-		out.push((kind, label, title, page, y));
+		out.push((kind, label, title, page, x, y));
 	}
 	Ok(out)
 }
 
 fn parse_anchor_rows(json: &str) -> Outcome<Vec<AnchorRow>> {
 	let raw = res!(parse_rows(json, false));
-	Ok(raw.into_iter().map(|(kind, label, _title, page, y)| AnchorRow { kind, label, page, y }).collect())
+	Ok(raw.into_iter().map(|(kind, label, _title, page, x, y)| AnchorRow { kind, label, page, x, y }).collect())
 }
 
 fn parse_typst_rows(json: &str) -> Outcome<Vec<TypstRow>> {
 	let raw = res!(parse_rows(json, true));
-	Ok(raw.into_iter().map(|(kind, label, title, page, y)| TypstRow { kind, label, title, page, y }).collect())
+	Ok(raw.into_iter().map(|(kind, label, title, page, _x, y)| TypstRow { kind, label, title, page, y }).collect())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -684,6 +690,39 @@ const TOTAL_PAGE_TOLERANCE_FRACTION: f64 = 0.15;
 /// missing rather than every single-heading accounting difference.
 const COUNT_TOLERANCE: usize = 2;
 
+/// The least gap, in points, between two consecutive index-slot x values that marks a jump from one
+/// column to the next rather than the ordinary spread of term widths within a column. In the index-oracle
+/// fixture the two column lefts sit ~115pt apart while slots within a column spread only ~6pt, so any
+/// threshold well between the two -- 50pt -- splits the columns cleanly and would find only one band if the
+/// index ever collapsed to a single column. See [`x_band_count`].
+const INDEX_COLUMN_X_GAP_PT: f64 = 50.0;
+
+/// Counts the distinct x-bands a set of anchor x values falls into, a band being a run of values no two
+/// consecutive of which are more than `min_gap` apart, and returns `(band_count, smallest_band_size)`. It
+/// is the index root's two-column gate: a two-column index yields two bands (the two column lefts), a
+/// one-column regression a single band. An empty input is `(0, 0)`.
+fn x_band_count(xs: &[f64], min_gap: f64) -> (usize, usize) {
+	if xs.is_empty() {
+		return (0, 0);
+	}
+	let mut sorted = xs.to_vec();
+	sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+	let mut bands		= 1usize;
+	let mut smallest	= usize::MAX;
+	let mut this_band	= 1usize;	// members of the band under construction
+	for i in 1..sorted.len() {
+		if sorted[i] - sorted[i - 1] > min_gap {
+			bands += 1;
+			if this_band < smallest { smallest = this_band; }
+			this_band = 1;
+		} else {
+			this_band += 1;
+		}
+	}
+	if this_band < smallest { smallest = this_band; }
+	(bands, smallest)
+}
+
 /// How far a float's y (points from the page top) may sit from Typst's before the parity check reports it.
 /// Austenite records a float's anchor at the box top; the Typst probe reads `here().position()` at the top
 /// of the box's content (one inset and a line ascent below the box top), so a constant ~15-20 pt offset is
@@ -815,6 +854,26 @@ pub fn compare_root(root: &CorpusRoot, work_dir: &Path) -> Outcome<RootReport> {
 				.or_else(|| ty_heads.iter().find(|h| h.page > 1).map(|h| h.page as usize));
 		},
 		Err(e) => oracle_note = Some(fmt!("{}", e)),
+	}
+
+	// The index root's two-column gate. The generic multi-column body flow seats a two-column index by
+	// recording each entry's reserved folio slot at its own column's left; a regression that reverts the
+	// index to one column (or breaks `PageGeometry::column_slice`) collapses every slot onto one x-band.
+	// That would still render *something*, so without this it would trip only as PDF-hash drift, opaque to
+	// read. Here it fails by name: the index-oracle's `index-slot-*` anchors must fall into exactly two
+	// distinct x-bands (the two column lefts, ~115pt apart in this fixture against ~6pt within a column).
+	if root.name == "index-oracle" {
+		let xs: Vec<f64> = ausout.rows.iter()
+			.filter(|r| r.kind == "label" && r.label.starts_with("index-slot-"))
+			.map(|r| r.x)
+			.collect();
+		let (bands, smallest) = x_band_count(&xs, INDEX_COLUMN_X_GAP_PT);
+		if bands != 2 {
+			mismatches.push(fmt!(
+				"index-oracle index slots clustered into {} x-band(s), expected 2 (the two column lefts): \
+				{} slot(s), smallest band {} -- a one-column regression, or a broken column_slice",
+				bands, xs.len(), smallest));
+		}
 	}
 
 	// The raster samples: up to three pages -- the first, roughly the middle, and a landmark page

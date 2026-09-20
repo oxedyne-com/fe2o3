@@ -174,6 +174,9 @@ fn ledger_dump_json(ledger: &Ledger) -> Outcome<String> {
 			"kind"	=> dat!(a.id.kind.name()),
 			"label"	=> dat!(a.id.key.clone()),
 			"page"	=> dat!(a.pos.page),
+			// The x of the anchor's left from the page's left edge, in whole points, so the oracle can tell
+			// which column an index slot landed in and gate that the two-column index really uses two.
+			"x"		=> dat!(a.pos.x.to_pt().round() as i64),
 			// The y of the anchor's top from the page's top edge, in whole points, so the oracle can tell a
 			// top float from a foot one and check a float landed on the same side as Typst.
 			"y"		=> dat!(a.pos.y.to_pt().round() as i64),

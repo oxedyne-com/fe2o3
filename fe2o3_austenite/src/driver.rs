@@ -453,9 +453,12 @@ fn flow_columns<M: Metrics>(
 				if at_break {
 					let (atom_ext, atom_reserve) = atom_measure(list, idx, notes, foot);
 					let col_bottom = bottom - bands.bot_reserve - atom_reserve;
-					// Break the column only when it already carries material: an atom taller than a whole empty
-					// column overflows it rather than looping forever, exactly as the body overflows a too-tall atom.
-					if !at_col_top && yy + atom_ext > col_bottom {
+					// Guard on `!(at_col_top && frame.is_empty())`, not `!at_col_top`: the body breaks whenever the
+					// frame is non-empty, and keying only on the column top diverged -- at a page foot the first atom
+					// of column 0 and then of column 1 both seated below the bottom before any page break, since each
+					// fresh column reads `at_col_top` true. This seats an over-tall atom only on a genuinely empty page
+					// (no spin), and otherwise hops or page-breaks so nothing lands past the foot.
+					if !(at_col_top && frame.is_empty()) && yy + atom_ext > col_bottom {
 						res!(column_hop(
 							&mut col, n, &mut yy, &mut col_top, &mut deepest, &mut at_col_top, pages, frame, page_no,
 							y, top, bottom, geom, notes, foot, bands, pending, metrics, incoming, ledger));
@@ -480,8 +483,12 @@ fn flow_columns<M: Metrics>(
 			// columns block that happened to enclose one just passes it through untouched.
 			Node::RepeatHead(_) => (),
 			// A float or a nested columns block inside a columns block is a construction error the parser never
-			// builds, so it is transparent here rather than flattened.
-			Node::Float(_) | Node::Columns(_) => (),
+			// builds. It is refused loudly rather than silently dropped, keeping the project's loud-refusal
+			// stance: reaching here means the lowering built an impossible shape, which is a bug to surface.
+			Node::Float(_) | Node::Columns(_) => return Err(err!(
+				"A float or a nested columns block was found inside a columns block's list, which the lowering \
+				never builds; this is a construction bug in the caller that assembled the columns node.";
+				Invalid, Bug)),
 		}
 		idx += 1;
 	}
