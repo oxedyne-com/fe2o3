@@ -5,7 +5,7 @@
 	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "d035bd3c146435ef5571d26708f274b94dc412e9914317bbc98624c5db45d53f" },
 	{ "name": "marginalia-fixture", "pages": 2, "anchors": 4, "pdf_sha256": "d693d7e992a31481a6b1a70cff6050ea9c70fefb9a275a5f662ee4ccb9d23381" },
 	{ "name": "claim-index-fixture", "pages": 2, "anchors": 15, "pdf_sha256": "cde7903636412305c8bcd8e09d9dbda45a08d2530cc82164b8f9b3e7e1a86410" },
-	{ "name": "backmatter-oracle", "pages": 5, "anchors": 8, "pdf_sha256": "cab1f21dfc4bfbb98e0bde561628dae62c09d3d22e1f859eccf1a1a7ea932eae" },
+	{ "name": "backmatter-oracle", "pages": 7, "anchors": 8, "pdf_sha256": "55c381c5b491cdc7efbc955a9cd14e060c4283142e73fb36efdd6e57646f7788" },
 	{ "name": "float-fixture", "pages": 2, "anchors": 4, "pdf_sha256": "85a426e1625fbd9760863a1a275181734a2e0b2c9a48c1acf1e1fc597a907f9f" },
 	{ "name": "float-marginalia-fixture", "pages": 1, "anchors": 3, "pdf_sha256": "f3ee71c80e8e0047b3f4eb52c5ea35565f22528c611c06a107bea8cd7d4258e8" },
 	{ "name": "glossary-oracle", "pages": 12, "anchors": 8, "pdf_sha256": "63afbab01fab25856dae9e652030779856a1f2ba41b81eab151c87ef2801d639" },

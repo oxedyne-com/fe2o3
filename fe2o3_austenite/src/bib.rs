@@ -222,11 +222,12 @@ impl Bibliography {
 		if keys.is_empty() {
 			return Err(err!("A citation needs at least one key."; Input, Invalid, Missing));
 		}
+		let suffixes = self.cited_suffixes();
 		let mut labels: Vec<String> = Vec::with_capacity(keys.len());
 		for &k in keys {
 			let entry = res!(self.entry(k).ok_or_else(||
 				err!("Citation key {:?} is not in the bibliography.", k; Input, Missing)));
-			labels.push(cite_label(entry));
+			labels.push(cite_label(entry, suffixes.get(k).map(|s| s.as_str()).unwrap_or("")));
 		}
 		Ok(fmt!("({})", labels.join("; ")))
 	}
@@ -235,7 +236,19 @@ impl Bibliography {
 	pub fn label(&self, key: &str) -> Outcome<String> {
 		let entry = res!(self.entry(key).ok_or_else(||
 			err!("Citation key {:?} is not in the bibliography.", key; Input, Missing)));
-		Ok(cite_label(entry))
+		let suffixes = self.cited_suffixes();
+		Ok(cite_label(entry, suffixes.get(key).map(|s| s.as_str()).unwrap_or("")))
+	}
+
+	/// The year-disambiguation suffixes across the marked-cited works, keyed by entry key, so an in-text
+	/// citation reads the same `2019a`/`2019b` its reference does. Computed over the sorted cited set, which
+	/// is complete by the time citations are formatted (the reader marks every key before the walk sets them).
+	fn cited_suffixes(&self) -> BTreeMap<String, String> {
+		let mut refs: Vec<&Entry> = self.cited.iter()
+			.filter_map(|k| self.entry(k))
+			.collect();
+		sort_entries(&mut refs);
+		year_suffixes(&refs)
 	}
 
 	/// The sorted, Chicago-styled reference list for the cited keys. If nothing has been marked
@@ -245,14 +258,20 @@ impl Bibliography {
 			.filter_map(|k| self.entry(k))
 			.collect();
 		sort_entries(&mut refs);
-		refs.iter().map(|e| format_reference(e)).collect()
+		let suffixes = year_suffixes(&refs);
+		refs.iter()
+			.map(|e| format_reference(e, suffixes.get(e.key()).map(|s| s.as_str()).unwrap_or("")))
+			.collect()
 	}
 
 	/// Every entry in the file, sorted and formatted. For tests and for a "print all" mode.
 	pub fn all_references(&self) -> Vec<Reference> {
 		let mut refs: Vec<&Entry> = self.entries.iter().collect();
 		sort_entries(&mut refs);
-		refs.iter().map(|e| format_reference(e)).collect()
+		let suffixes = year_suffixes(&refs);
+		refs.iter()
+			.map(|e| format_reference(e, suffixes.get(e.key()).map(|s| s.as_str()).unwrap_or("")))
+			.collect()
 	}
 }
 
@@ -338,7 +357,19 @@ fn parse_entry(chars: &[char], start: usize) -> Outcome<(Option<Entry>, usize)> 
 		let (raw, next) = read_value(chars, i);
 		i = next;
 		if !name.is_empty() {
-			fields.push((name.clone(), decode_value(&raw)));
+			// `author` and `editor` are read by `parse_names`, which needs the BibTeX brace grouping intact:
+			// a corporate author is written `{{Name}}`, so after `read_value` strips the outer delimiter its
+			// value is one whole `{...}` group, and that surviving group is the only signal that the name is an
+			// organisation and must not be surname-inverted. `decode_value` collapses grouping braces, so
+			// decoding here would erase it and leave "International Energy Agency" to invert to "Agency,
+			// International Energy". These two fields are therefore stored raw; `parse_names` decodes each name
+			// part itself. Every other field is decoded now, as before.
+			let value = if name.eq_ignore_ascii_case("author") || name.eq_ignore_ascii_case("editor") {
+				raw
+			} else {
+				decode_value(&raw)
+			};
+			fields.push((name.clone(), value));
 		}
 	}
 
@@ -729,22 +760,82 @@ fn is_braced_whole(s: &str) -> bool {
 // In-text citation label.
 // ---------------------------------------------------------------------------------------------
 
-/// The author-year label for one entry, e.g. `Scott 1976`, `Kahneman and Tversky 1979`,
-/// `Acemoglu et al. 2001`. Three or more names collapse to the first plus `et al.`.
-fn cite_label(entry: &Entry) -> String {
+/// The author part of an in-text label, e.g. `Scott`, `Kahneman and Tversky`, `Acemoglu et al.`. Three
+/// or more names collapse to the first plus `et al.`; an authorless work falls back to its title. This
+/// is the key two references share when they must be disambiguated by a year suffix.
+fn cite_who(entry: &Entry) -> String {
 	let names = entry.credited();
-	let year  = entry.field("year").map(|y| year_display(y)).unwrap_or_else(|| "n.d.".to_string());
-	let who = match names.len() {
+	match names.len() {
 		0 => entry.field("title").map(|t| chicago_title_case(t)).unwrap_or_default(),
 		1 => names[0].family().to_string(),
 		2 => fmt!("{} and {}", names[0].family(), names[1].family()),
 		_ => fmt!("{} et al.", names[0].family()),
-	};
+	}
+}
+
+/// The author-year label for one entry, e.g. `Scott 1976`, `Kahneman and Tversky 1979`,
+/// `Acemoglu et al. 2001`. `suffix` is the year-disambiguation letter (`a`, `b`, ...) when this entry
+/// shares an author and a year with another cited work, and empty otherwise, so `Zuboff 2019` becomes
+/// `Zuboff 2019a`.
+fn cite_label(entry: &Entry, suffix: &str) -> String {
+	let year	= entry.field("year").map(|y| year_display(y)).unwrap_or_else(|| "n.d.".to_string());
+	let year	= fmt!("{}{}", year, suffix);
+	let who		= cite_who(entry);
 	if who.is_empty() {
 		year
 	} else {
 		fmt!("{} {}", who, year)
 	}
+}
+
+/// The Chicago year-disambiguation suffixes for a reference list: when two or more cited works share an
+/// author label and a year, each takes a letter -- `a`, `b`, `c` ... -- in the order it stands in the
+/// sorted list, so an in-text `(Zuboff 2019a)` matches its reference. A lone author-year takes none. The
+/// returned map is keyed by entry key; a key absent from it has no suffix. `sorted` must already be in
+/// reference-list order, since the letters follow it.
+fn year_suffixes(sorted: &[&Entry]) -> BTreeMap<String, String> {
+	// Group the entries by (author label, year), keeping each group's members in the sorted order they
+	// arrived in; a group of two or more is ambiguous and its members take letters.
+	let mut order:	Vec<Vec<String>>		= Vec::new();
+	let mut seen:	BTreeMap<String, usize>	= BTreeMap::new();
+	for e in sorted {
+		let year	= e.field("year").map(|y| year_display(y)).unwrap_or_else(|| "n.d.".to_string());
+		let gid		= fmt!("{}\u{0}{}", cite_who(e), year);
+		let pos = match seen.get(&gid) {
+			Some(&p)	=> p,
+			None		=> {
+				let p = order.len();
+				order.push(Vec::new());
+				seen.insert(gid, p);
+				p
+			},
+		};
+		order[pos].push(e.key().to_string());
+	}
+	let mut out: BTreeMap<String, String> = BTreeMap::new();
+	for group in &order {
+		if group.len() > 1 {
+			for (n, key) in group.iter().enumerate() {
+				out.insert(key.clone(), suffix_letter(n));
+			}
+		}
+	}
+	out
+}
+
+/// The `n`-th disambiguation letter: `0 -> a`, `25 -> z`, `26 -> aa`, and so on. A bibliography never
+/// runs past a handful, but the base-26 roll-over keeps a pathological run well-formed rather than wrapping.
+fn suffix_letter(mut n: usize) -> String {
+	let mut s = String::new();
+	loop {
+		let d = (n % 26) as u8;
+		s.insert(0, (b'a' + d) as char);
+		if n < 26 {
+			break;
+		}
+		n = n / 26 - 1;
+	}
+	s
 }
 
 /// The visible year: the leading run of digits (drops a BibTeX `{2024}` note or a trailing letter).
@@ -787,8 +878,9 @@ impl RunBuilder {
 	}
 }
 
-/// Formats one entry as a Chicago author-date reference.
-fn format_reference(entry: &Entry) -> Reference {
+/// Formats one entry as a Chicago author-date reference. `suffix` is the year-disambiguation letter
+/// (`a`, `b`, ...) when this entry shares an author and a year with another in the list, empty otherwise.
+fn format_reference(entry: &Entry, suffix: &str) -> Reference {
 	let mut b = RunBuilder::new();
 	// Author. Year.
 	let author = author_list(&entry.credited(), entry.field("author").is_none());
@@ -802,7 +894,7 @@ fn format_reference(entry: &Entry) -> Reference {
 		}
 	}
 	if let Some(y) = entry.field("year") {
-		b.normal(&year_display(y));
+		b.normal(&fmt!("{}{}", year_display(y), suffix));
 		b.normal(". ");
 	}
 	match entry.kind {
@@ -1253,9 +1345,74 @@ mod tests {
 	fn corporate_single_brace_is_inverted_as_personal() {
 		// Typst reads `{World Bank}` as First=World, Last=Bank and inverts it in the list.
 		let b = bib();
-		let refr = format_reference(b.entry("worldbank2024").expect("present"));
+		let refr = format_reference(b.entry("worldbank2024").expect("present"), "");
 		assert!(refr.plain().starts_with("Bank, World. 2024."),
 			"got: {}", refr.plain());
+	}
+
+	#[test]
+	fn corporate_double_brace_is_not_inverted() {
+		// A BibTeX corporate author is written `{{...}}`; after `read_value` strips the outer delimiter the
+		// surviving brace group marks it an organisation, which Chicago prints verbatim -- never inverted to
+		// "Agency, International Energy". Regression for the decode-before-parse bug that erased the group.
+		let src = r#"
+@report{iea2024,
+  author    = {{International Energy Agency}},
+  title     = {Electricity 2024},
+  year      = {2024},
+  publisher = {IEA}
+}
+"#;
+		let b = match Bibliography::parse(src) { Ok(b) => b, Err(e) => panic!("parse: {}", e) };
+		let r = format_reference(b.entry("iea2024").expect("present"), "");
+		assert!(r.plain().starts_with("International Energy Agency. 2024."),
+			"corporate author must print verbatim; got: {}", r.plain());
+		let names = b.entry("iea2024").expect("present").credited();
+		assert_eq!(names.len(), 1);
+		assert_eq!(names[0].family(), "International Energy Agency");
+		assert!(names[0].given().is_empty());
+	}
+
+	#[test]
+	fn same_author_same_year_takes_letter_suffix() {
+		// Two cited works by one author in one year disambiguate as 2019a / 2019b, and an in-text citation
+		// reads the same letter its reference does. A lone author-year (2020) takes no suffix.
+		let src = r#"
+@book{zuboffA,
+  author    = {Zuboff, Shoshana},
+  title     = {The Age of Surveillance Capitalism},
+  year      = {2019},
+  publisher = {PublicAffairs}
+}
+@book{zuboffB,
+  author    = {Zuboff, Shoshana},
+  title     = {Big Other},
+  year      = {2019},
+  publisher = {Profile Books}
+}
+@book{zuboffC,
+  author    = {Zuboff, Shoshana},
+  title     = {In the Age of the Smart Machine},
+  year      = {1988},
+  publisher = {Basic Books}
+}
+"#;
+		let mut b = match Bibliography::parse(src) { Ok(b) => b, Err(e) => panic!("parse: {}", e) };
+		let _ = b.cite(&["zuboffA", "zuboffB", "zuboffC"]).expect("cite");
+		let la = b.label("zuboffA").expect("label a");
+		let lb = b.label("zuboffB").expect("label b");
+		let lc = b.label("zuboffC").expect("label c");
+		// The 2019 pair each takes a distinct letter; the 1988 lone work takes none.
+		assert!(la.ends_with("2019a") || la.ends_with("2019b"), "got {}", la);
+		assert!(lb.ends_with("2019a") || lb.ends_with("2019b"), "got {}", lb);
+		assert_ne!(la, lb);
+		assert_eq!(lc, "Zuboff 1988");
+		// The reference list carries both suffixes, and each in-text year matches its own reference.
+		let list = b.reference_list();
+		let all: String = list.iter().map(|r| r.plain()).collect::<Vec<_>>().join("\n");
+		assert!(all.contains("2019a."), "list missing 2019a: {}", all);
+		assert!(all.contains("2019b."), "list missing 2019b: {}", all);
+		assert!(!all.contains("1988a."), "lone year must not take a suffix: {}", all);
 	}
 
 	#[test]
@@ -1283,7 +1440,7 @@ mod tests {
 	#[test]
 	fn book_reference_form() {
 		let b = bib();
-		let r = format_reference(b.entry("scott1976moral").expect("present"));
+		let r = format_reference(b.entry("scott1976moral").expect("present"), "");
 		assert_eq!(
 			r.plain(),
 			"Scott, James C. 1976. The Moral Economy of the Peasant: Rebellion and Subsistence in Southeast Asia. Yale University Press.");
@@ -1295,7 +1452,7 @@ mod tests {
 	#[test]
 	fn article_reference_form_with_page_compression() {
 		let b = bib();
-		let r = format_reference(b.entry("kahneman1979prospect").expect("present"));
+		let r = format_reference(b.entry("kahneman1979prospect").expect("present"), "");
 		// Title down-cased "Under" -> "under"; pages 263--291 -> 263-91; DOI as a URL.
 		assert_eq!(
 			r.plain(),
@@ -1305,7 +1462,7 @@ mod tests {
 	#[test]
 	fn three_author_article_and_long_page_range() {
 		let b = bib();
-		let r = format_reference(b.entry("acemoglu2001colonial").expect("present"));
+		let r = format_reference(b.entry("acemoglu2001colonial").expect("present"), "");
 		assert_eq!(
 			r.plain(),
 			"Acemoglu, Daron, Simon Johnson, and James A. Robinson. 2001. \u{201C}The Colonial Origins of Comparative Development: An Empirical Investigation.\u{201D} American Economic Review 91 (5): 1369\u{2013}401. https://doi.org/10.1257/aer.91.5.1369.");
@@ -1314,7 +1471,7 @@ mod tests {
 	#[test]
 	fn report_reference_form() {
 		let b = bib();
-		let r = format_reference(b.entry("acemoglu2024simple").expect("present"));
+		let r = format_reference(b.entry("acemoglu2024simple").expect("present"), "");
 		assert_eq!(
 			r.plain(),
 			"Acemoglu, Daron. 2024. The Simple Macroeconomics of AI. Working Paper No. 32487. Cambridge, MA.");
@@ -1323,7 +1480,7 @@ mod tests {
 	#[test]
 	fn incollection_reference_form() {
 		let b = bib();
-		let r = format_reference(b.entry("tilly1985war").expect("present"));
+		let r = format_reference(b.entry("tilly1985war").expect("present"), "");
 		assert_eq!(
 			r.plain(),
 			"Tilly, Charles. 1985. \u{201C}War Making and State Making as Organized Crime.\u{201D} In Bringing the State Back in, edited by Peter B. Evans, Dietrich Rueschemeyer, and Theda Skocpol, 169\u{2013}91. Cambridge University Press.");
@@ -1378,8 +1535,8 @@ mod tests {
 		// Spot-check a few keys against the oracle page 678.
 		for key in ["scott1976moral", "kahneman1979prospect", "hirschman1970exit"] {
 			if let Some(e) = b.entry(key) {
-				println!("[{}] cite = {}", key, cite_label(e));
-				println!("[{}] ref  = {}", key, format_reference(e).plain());
+				println!("[{}] cite = {}", key, cite_label(e, ""));
+				println!("[{}] ref  = {}", key, format_reference(e, "").plain());
 			}
 		}
 	}
