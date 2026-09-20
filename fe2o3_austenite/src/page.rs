@@ -58,6 +58,30 @@ impl PageGeometry {
 	/// The height available to a column of vertical material before the page is full.
 	pub fn content_height(&self) -> Sp { self.height - self.top - self.bottom }
 
+	/// The geometry of the `i`-th of `n` equal columns within this page's content block, adjacent columns
+	/// parted by `gutter`. Its [`content_left`](Self::content_left) and [`content_width`](Self::content_width)
+	/// are that column's; every other measurement -- the trim, the vertical margins, and so the mirror shift
+	/// -- is the page's own unchanged, so a caller sets a column's material with the ordinary placement
+	/// helpers at a recto x, and the single verso mirror still applies once, to the whole frame, afterwards.
+	/// The column width is the content width less the `n - 1` gutters, divided `n` ways in the integer
+	/// domain; any one-scaled-point remainder from that division falls to the fore-edge margin, so every
+	/// column is the same width and the split stays byte-identical run to run.
+	pub fn column_slice(&self, i: usize, n: usize, gutter: Sp) -> PageGeometry {
+		let n		= n.max(1);
+		let i		= i.min(n - 1);
+		let inner	= self.content_width() - gutter * (n as i32 - 1);	// width left for the columns themselves
+		let col_w	= Sp(inner.raw() / n as i32);
+		let col_left	= self.content_left() + (col_w + gutter) * i as i32;
+		Self {
+			width:		self.width,
+			height:		self.height,
+			inside:		col_left,
+			outside:	self.width - col_left - col_w,
+			top:		self.top,
+			bottom:		self.bottom,
+		}
+	}
+
 	/// The horizontal shift that turns the recto frame the driver laid into a verso one: the content
 	/// block moves from `inside` to `outside` on the left, so the binding margin stays at the spine.
 	/// Zero when the margins are uniform, so a non-book page never moves.

@@ -152,6 +152,21 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_symbol_patch:	false,
 		},
 		CorpusRoot {
+			// The two-column-index regression root. A minimal book (built on the real elearnity book template,
+			// as `glossary-oracle` is) whose body carries fifty invisible index markers across the alphabet, so
+			// the back-matter index runs long enough to fill two columns and overflow onto a second page. It is
+			// the gate for the generic multi-column body flow (`Node::Columns`, `PageGeometry::column_slice`,
+			// `driver::flow_columns`): before it, austenite set the index in a single column, and a regression
+			// that reverts to one column collapses the index to fewer pages, moving the page count and the
+			// pinned PDF hash. Its front matter is deliberately spare (no cover, no about-author) so the chapter
+			// and index dominate the count. Uses the shared elearnity template and index library, so it needs
+			// the elearnity typst root, like `glossary-oracle`.
+			name:				"index-oracle",
+			path:				"/home/jason/usr/books/elearnity/CheapThinking/index_oracle.typ",
+			typst_root:			Some("/home/jason/usr/books/elearnity"),
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
 			// This crate's own cross-directory-include fixture -- the regression root for the Lucronics
 			// QA finding: a CHAPTER's own `#include "../x.typ"` (not the book root's) was neither resolved
 			// nor reported. `include_fixture/root.typ` includes `chapters/chapter_one.typ`, which in turn

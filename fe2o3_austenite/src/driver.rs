@@ -20,6 +20,7 @@
 use crate::{
 	ir::{
 		BoxNode,
+		ColumnsNode,
 		Dims,
 		FloatNode,
 		FloatPlacement,
@@ -271,6 +272,19 @@ fn compose<M: Metrics>(
 					// leading collapses is still governed by the flow, not by a float set into a side band.
 				}
 			},
+			Node::Columns(c) => {
+				// A columns block flows its own material through the multi-column pass, which starts at the
+				// current cursor, fills each column top to bottom, hops to the next at the same top, and breaks
+				// to a fresh page when the last column fills -- closing the page and flushing floats through the
+				// same helpers the body flow uses. The flow resumes below the tallest column of the block's last
+				// page. Any leading glue and penalties are discarded at the block's first column top, so a fresh
+				// page opened mid-block does not carry a break's slack down its first column.
+				res!(flow_columns(
+					c, &mut pages, &mut frame, &mut page_no, &mut y, top, bottom, geom, &mut notes, &doc.foot,
+					&mut bands, &mut pending, &mut at_top, metrics, incoming, &mut ledger));
+				at_break	= true;
+				prev_box	= false;
+			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
 				// At an atom start, weigh the whole atom -- every box up to the next legal breakpoint, with the
 				// footnotes they introduce reserved from the foot -- and break before it if it will not fit. A
@@ -333,6 +347,181 @@ fn compose<M: Metrics>(
 
 	ledger.total_pages = pages.len() as u32;
 	Ok((pages, ledger))
+}
+
+/// Flows a columns block's material into `count` equal side-by-side columns, filling each top to bottom
+/// before hopping to the next, and breaking to a fresh page's first column when the last column fills.
+/// This is the same greedy, atom-aware breaker the page body uses (see [`compose`]) run once per column:
+/// a page is a one-column flow, and this is its generalisation, so the two share the page-close and
+/// float-flush helpers ([`finish_page`], [`flush_floats`]) rather than re-implementing the page break.
+/// Sequential fill, never balancing, matches Typst's `columns(n)` -- the last column of the last page
+/// simply ends where the material runs out.
+///
+/// The block begins at the incoming cursor `*y` (below whatever body already sits on the page) and every
+/// column of that first page starts at the same top; a fresh page opened mid-block starts its columns at
+/// the region top below any top floats a flush seats. On return `*y` sits at the foot of the tallest
+/// column of the block's last page, so the ordinary flow resumes there. Two-pass resolution is untouched:
+/// an anchor -- an index entry's reserved folio slot, or a `Node::Anchor` -- records its x at the column
+/// left, and the reserved slot resolves against the incoming ledger exactly as it does in the body flow.
+#[allow(clippy::too_many_arguments)]
+fn flow_columns<M: Metrics>(
+	cols:		&ColumnsNode,
+	pages:		&mut Vec<Page>,
+	frame:		&mut Frame,
+	page_no:	&mut u32,
+	y:			&mut Sp,
+	top:		Sp,
+	bottom:		Sp,
+	geom:		PageGeometry,
+	notes:		&mut Vec<Footnote>,
+	foot:		&FootStyle,
+	bands:		&mut FloatBands,
+	pending:	&mut Vec<FloatNode>,
+	at_top:		&mut bool,
+	metrics:	&M,
+	incoming:	&Ledger,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	let n		= cols.count.max(1);
+	let list	= &cols.list;
+
+	let mut col			= 0usize;	// the column being filled
+	let mut col_top		= *y;		// the y every column of the current page starts at
+	let mut yy			= col_top;	// the cursor within the current column
+	let mut deepest		= col_top;	// the deepest column foot reached on the current page, for the resume
+	let mut at_col_top	= true;		// just after a column or page break, leading glue is discarded
+	let mut at_break	= true;		// a break (a column or page hop) is permitted at the cursor
+	let mut prev_box	= false;	// the last non-marker node was a box, so glue after it may break
+
+	let mut idx = 0usize;
+	while idx < list.len() {
+		match &list[idx] {
+			Node::Glue(g) => {
+				if !at_col_top {
+					yy += g.natural;
+				}
+				if prev_box {
+					at_break = true;
+				}
+				prev_box = false;
+			},
+			Node::Penalty(p) => {
+				// A forced penalty breaks the column here (Typst's `colbreak`): hop to the next column, or to a
+				// fresh page's first column when the last column is full. A forbidden penalty welds across the
+				// break; any other penalty is an ordinary breakpoint.
+				if p.is_forced() {
+					res!(column_hop(
+						&mut col, n, &mut yy, &mut col_top, &mut deepest, &mut at_col_top, pages, frame, page_no,
+						y, top, bottom, geom, notes, foot, bands, pending, metrics, incoming, ledger));
+					at_break = true;
+				} else if p.is_forbidden() {
+					at_break = false;
+				} else {
+					at_break = true;
+				}
+				prev_box = false;
+			},
+			Node::Anchor(id) => {
+				let col_geom = geom.column_slice(col, n, cols.gutter);
+				ledger.record(Anchor::new(id.clone(), Position::new(*page_no, col_geom.content_left(), yy)));
+			},
+			node @ (Node::HBox(_) | Node::VBox(_) | Node::Leaf(_)) => {
+				if at_break {
+					let (atom_ext, atom_reserve) = atom_measure(list, idx, notes, foot);
+					let col_bottom = bottom - bands.bot_reserve - atom_reserve;
+					// Break the column only when it already carries material: an atom taller than a whole empty
+					// column overflows it rather than looping forever, exactly as the body overflows a too-tall atom.
+					if !at_col_top && yy + atom_ext > col_bottom {
+						res!(column_hop(
+							&mut col, n, &mut yy, &mut col_top, &mut deepest, &mut at_col_top, pages, frame, page_no,
+							y, top, bottom, geom, notes, foot, bands, pending, metrics, incoming, ledger));
+						continue;	// weigh the same atom against the fresh column, without advancing idx
+					}
+				}
+				let col_geom = geom.column_slice(col, n, cols.gutter);
+				let v = node.vextent();
+				let mut marks: Vec<Footnote> = Vec::new();
+				collect_marks(node, &mut marks);
+				res!(place_node(node, yy, *page_no, col_geom, metrics, incoming, frame, ledger));
+				notes.append(&mut marks);	// a note introduced in a column belongs to the page the column is on
+				yy += v;
+				if yy > deepest {
+					deepest = yy;
+				}
+				at_col_top	= false;
+				at_break	= false;
+				prev_box	= true;
+			},
+			// A float or a nested columns block inside a columns block is a construction error the parser never
+			// builds, so it is transparent here rather than flattened.
+			Node::Float(_) | Node::Columns(_) => (),
+		}
+		idx += 1;
+	}
+
+	// The flow resumes below the tallest column of the block's last page. A block that placed nothing leaves
+	// the cursor and the page's `at_top` where they were.
+	*y = deepest;
+	if deepest > col_top {
+		*at_top = false;
+	}
+	Ok(())
+}
+
+/// Advances a columns flow to the next column, or -- when the last column is full -- closes the page,
+/// flushes any pending floats onto the fresh page, and restarts at its first column. The flow's cursors
+/// (`col`, `yy`, `col_top`, `deepest`, `at_col_top`) are reset in place for the column or page just
+/// opened; on a page break the page-body state (`pages`, `frame`, `page_no`, `y`, `bands`, `notes`) is
+/// carried through the same [`finish_page`]/[`flush_floats`] helpers the body flow uses, and the new
+/// column top is taken from the shared cursor below any top band the flush stacked.
+#[allow(clippy::too_many_arguments)]
+fn column_hop<M: Metrics>(
+	col:		&mut usize,
+	n:			usize,
+	yy:			&mut Sp,
+	col_top:	&mut Sp,
+	deepest:	&mut Sp,
+	at_col_top:	&mut bool,
+	pages:		&mut Vec<Page>,
+	frame:		&mut Frame,
+	page_no:	&mut u32,
+	y:			&mut Sp,
+	top:		Sp,
+	bottom:		Sp,
+	geom:		PageGeometry,
+	notes:		&mut Vec<Footnote>,
+	foot:		&FootStyle,
+	bands:		&mut FloatBands,
+	pending:	&mut Vec<FloatNode>,
+	metrics:	&M,
+	incoming:	&Ledger,
+	ledger:		&mut Ledger,
+)
+	-> Outcome<()>
+{
+	if *col + 1 < n {
+		// Another column on this page: the same top, a fresh cursor.
+		*col		+= 1;
+		*yy			= *col_top;
+		*at_col_top	= true;
+	} else {
+		// The last column is full: close the page (its footnotes set at the foot), reset the float bands, and
+		// flush any deferred floats onto the fresh page, then restart at column 0 below whatever top band the
+		// flush stacked. The resume tracker restarts from the new page's column top.
+		res!(finish_page(
+			pages, frame, page_no, y, top, geom, notes, foot, bottom, bands.bot_reserve, metrics, incoming, ledger));
+		*bands = FloatBands::empty();
+		res!(flush_floats(
+			pending, frame, y, bands, Sp::ZERO, *page_no, geom, top, bottom, metrics, incoming, ledger));
+		*col		= 0;
+		*col_top	= *y;	// finish_page reset y to the region top; flush_floats advanced it past any top floats
+		*yy			= *col_top;
+		*deepest	= *col_top;
+		*at_col_top	= true;
+	}
+	Ok(())
 }
 
 /// Closes the current page: sets its footnotes at the foot, stores it, clears the note accumulator, and
@@ -425,6 +614,9 @@ fn place_float<M: Metrics>(
 			// A float never nests inside another float; a nested one would be a construction error, so it is
 			// left unplaced rather than silently flattened.
 			Node::Float(_)		=> (),
+			// A columns block is only ever a top-level document node; one nested in a float's body would be a
+			// construction error, so it draws nothing rather than being flattened here.
+			Node::Columns(_)	=> (),
 		}
 	}
 	ledger.leave_region(prev_region);
@@ -615,7 +807,7 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 				collect_marks(&nodes[j], &mut marks);
 				prev_box = true;
 			},
-			Node::Anchor(_) | Node::Float(_) => (),	// transparent to the atom
+			Node::Anchor(_) | Node::Float(_) | Node::Columns(_) => (),	// transparent to the atom
 		}
 		j += 1;
 	}
@@ -738,6 +930,9 @@ fn place_line<M: Metrics>(
 			// A float is a block-level node the driver handles before it ever reaches a line; one woven into a
 			// line would be a construction error, so it draws nothing rather than being flattened here.
 			Node::Float(_) => (),
+			// A columns block is a top-level node; one woven into a line would be a construction error, so it
+			// draws nothing rather than being flattened here.
+			Node::Columns(_) => (),
 		}
 	}
 	Ok(())
@@ -784,6 +979,9 @@ fn place_vbox<M: Metrics>(
 			// A float never nests inside a keep box; one that did would be a construction error, so it draws
 			// nothing rather than being flattened into the box.
 			Node::Float(_) => (),
+			// A columns block never nests inside a keep box; one that did would be a construction error, so it
+			// draws nothing rather than being flattened into the box.
+			Node::Columns(_) => (),
 		}
 	}
 	Ok(())

@@ -23,6 +23,7 @@ use crate::driver::{
 use crate::font::ShapedText;
 use crate::ir::{
 	BoxNode,
+	ColumnsNode,
 	Dims,
 	DrawOp,
 	FloatNode,
@@ -1116,9 +1117,15 @@ pub fn author(
 	// placeholder has been met and every occurrence's anchor is woven in. Its entries read their pages back
 	// from the ledger after convergence, so they are set after the body they point into, as back matter.
 	if authoring.want_index && !authoring.index_gather.occ.is_empty() {
-		let occ		= std::mem::take(&mut authoring.index_gather.occ);
-		let entries	= res!(index_nodes(&fonts, geom, style, &occ));
-		authoring.nodes.extend(entries);
+		let occ			= std::mem::take(&mut authoring.index_gather.occ);
+		// The back-matter index sets in two columns, as Typst's `print-index` wraps `make-index` in
+		// `columns(2)`. The gutter is 4% of the page measure; each entry is set to the resulting column
+		// width, so a folio list fills its own column rather than the whole page. The driver's multi-column
+		// pass flows the entries down the first column, then the second, breaking to a fresh page as needed.
+		let gutter		= Sp(geom.content_width().raw() * 4 / 100);
+		let col_measure	= geom.column_slice(0, 2, gutter).content_width();
+		let entries		= res!(index_nodes(&fonts, style, col_measure, &occ));
+		authoring.nodes.push(Node::Columns(ColumnsNode::new(entries, 2, gutter)));
 	}
 	let heads = authoring.heads;
 
@@ -3434,13 +3441,15 @@ pub fn contents(
 ///
 /// A fact a reader could not derive: each entry reserves a fixed slot wide enough for its occurrences'
 /// folios set uncompressed ("999, " apiece), so a resolved (compressed) list never outgrows it and the
-/// section's extent is settled from the first pass. An over-long single entry runs past the measure rather
-/// than wrapping, the same over-wide case the table of contents leaves as it falls; the index sets in one
-/// column, where the Typst template sets two.
+/// section's extent is settled from the first pass. An over-long single entry runs past the column rather
+/// than wrapping, the same over-wide case the table of contents leaves as it falls. `measure` is the width
+/// of one column: the caller wraps the returned entries in a [`Node::Columns`], and the driver flows them
+/// down each column in turn, so this sets every entry to the column width, matching the Typst template's
+/// two-column `print-index`.
 fn index_nodes(
 	fonts:	&Arc<FontSet>,
-	geom:	PageGeometry,
 	style: &Theme,
+	measure:	Sp,
 	occ:	&[(String, Option<String>, AnchorId)],
 )
 	-> Outcome<Vec<Node>>
@@ -3469,25 +3478,41 @@ fn index_nodes(
 		}
 	}
 
-	let measure	= geom.content_width();
-	let body	= style.text.body_size;
-	let step	= Sp(body.raw() * 3 / 2);	// the indent a nested sub-entry sets in by
-	let gap		= Sp(body.raw() * 2 / 5);	// the gap between a term and its folio list
+	// The index sets at 9pt, as Typst's `print-index` does with `set text(size: 9pt)`, a little below the
+	// body so more entries fit a column. Its leading keeps the body's line-to-size ratio at the smaller
+	// size; a 1.5em gap parts one alphabetic section from the next (Typst's `spaced-section` `v(1.5em)`),
+	// and entries within a section are parted by that ordinary leading. The single-line entry HBoxes are
+	// already ragged (no justification), matching the template's `set par(justify: false)`.
+	let body		= Sp::from_pt(9.0);
+	// The index leading keeps the body's line-to-size ratio at the smaller size. Computed in i64 so the
+	// scaled-point product does not overflow i32 before the divide brings it back into range.
+	let idx_lead	= if style.text.body_size.raw() > 0 {
+		Sp(((body.raw() as i64 * style.text.leading.raw() as i64) / style.text.body_size.raw() as i64) as i32)
+	} else {
+		body
+	};
+	let entry_lead	= if idx_lead > body { idx_lead - body } else { Sp::ZERO };
+	let section_gap	= Sp(body.raw() * 3 / 2);	// 1.5em at the index size: Typst's per-section v(1.5em)
+	let step		= Sp(body.raw() * 3 / 2);	// the indent a nested sub-entry sets in by
+	let gap			= Sp(body.raw() * 2 / 5);	// the gap between a term and its folio list
 	// One occurrence's worst-case folio width ("999, "), so a compressed list never outgrows its slot.
-	let unit	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, body, "999, ")).dims().width;
+	let unit		= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, body, "999, ")).dims().width;
 
 	let mut nodes:	Vec<Node>	= Vec::new();
 	let mut ref_no				= 0u32;
-	let groups_len				= groups.len();
-	for (gi, (_, g)) in groups.iter().enumerate() {
-		res!(index_entry_line(fonts, style, measure, &g.display, &g.direct, 0, unit, gap, step, &mut ref_no, &mut nodes));
-		for (_, (disp, ids)) in &g.subs {
-			res!(index_entry_line(fonts, style, measure, disp, ids, 1, unit, gap, step, &mut ref_no, &mut nodes));
-		}
-		if gi + 1 < groups_len {
-			// A little leading between entries, as the contents parts its lines.
-			let lead = if style.text.leading > body { style.text.leading - body } else { Sp::ZERO };
+	let mut prev_letter: Option<char> = None;
+	for (key, g) in groups.iter() {
+		let letter = key.chars().next().map(|c| c.to_ascii_uppercase());
+		if !nodes.is_empty() {
+			// Part alphabetic sections by 1.5em, entries within a section by the ordinary index leading.
+			let lead = if letter != prev_letter { section_gap } else { entry_lead };
 			nodes.push(Node::Glue(Glue::fixed(lead)));
+		}
+		prev_letter = letter;
+		res!(index_entry_line(fonts, body, measure, &g.display, &g.direct, 0, unit, gap, step, &mut ref_no, &mut nodes));
+		for (_, (disp, ids)) in &g.subs {
+			nodes.push(Node::Glue(Glue::fixed(entry_lead)));	// a sub-entry sits one leading below its fellow
+			res!(index_entry_line(fonts, body, measure, disp, ids, 1, unit, gap, step, &mut ref_no, &mut nodes));
 		}
 	}
 	Ok(nodes)
@@ -3500,7 +3525,7 @@ fn index_nodes(
 #[allow(clippy::too_many_arguments)]
 fn index_entry_line(
 	fonts:		&Arc<FontSet>,
-	style: &Theme,
+	body:		Sp,	// the index text size (9pt), the term set and the line box sized at it
 	measure:	Sp,
 	display:	&str,
 	ids:		&[AnchorId],
@@ -3513,7 +3538,6 @@ fn index_entry_line(
 )
 	-> Outcome<()>
 {
-	let body	= style.text.body_size;
 	let term	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, body, display));
 	let td		= term.dims();
 	let indent	= step * depth;

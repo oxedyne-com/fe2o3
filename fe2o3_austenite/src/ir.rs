@@ -405,6 +405,28 @@ impl FloatNode {
 	}
 }
 
+/// A block of vertical material set in equal side-by-side columns, filled sequentially: the first column
+/// fills top to bottom, then the flow hops to the next column at the same top, and when the last column
+/// fills the driver breaks to a fresh page's first column. This is Typst's `columns(n)` -- no balancing,
+/// the last column of the last page simply ends where the material runs out.
+///
+/// `list` is the material as an ordinary vertical box-glue-penalty stream, exactly what the page body
+/// flows, so the same greedy atom-aware breaker sets it; `count` is the number of columns and `gutter`
+/// the space between two adjacent columns. A columns block is only ever a top-level node of the document
+/// stream, never nested in a line, keep box or float.
+#[derive(Clone, Debug)]
+pub struct ColumnsNode {
+	pub list:	Vec<Node>,
+	pub count:	usize,
+	pub gutter:	Sp,
+}
+
+impl ColumnsNode {
+	pub fn new(list: Vec<Node>, count: usize, gutter: Sp) -> Self {
+		Self { list, count, gutter }
+	}
+}
+
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -415,6 +437,7 @@ pub enum Node {
 	Penalty(Penalty),
 	Anchor(AnchorId),	// a zero-size marker recording where an identity landed
 	Float(FloatNode),	// a block-level float, deferred by the driver to the top or foot of a later page
+	Columns(ColumnsNode),	// a block flowed into equal side-by-side columns, filled left to right
 }
 
 impl Node {
@@ -432,6 +455,9 @@ impl Node {
 			// A float takes no space where it stands: it leaves the flow, and the driver charges its height
 			// against the page it settles on, not this position.
 			Node::Float(_)		=> Sp::ZERO,
+			// A columns block is flowed by the driver's own multi-column pass, which advances the cursor
+			// itself; it contributes no simple vertical extent to weigh where it stands.
+			Node::Columns(_)	=> Sp::ZERO,
 		}
 	}
 
