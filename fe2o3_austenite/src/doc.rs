@@ -6035,4 +6035,83 @@ an interior line justification fills to the measure while ragged setting does no
 		assert_eq!(empty.height, Sp::ZERO, "an empty flow measures zero height");
 		Ok(())
 	}
+
+	/// A line-leading `#pagebreak()` set directly beneath a prose line (no blank line parting the two) forces
+	/// a new page, exactly as Typst 0.15.1 does -- proved at the RENDER level by the page count, not the parse
+	/// tree. Before the fix the parser dropped a builtin whenever a paragraph was open, so `prose\n#pagebreak()`
+	/// silently lost the break and the closing prose backfilled page one; a bare heading before the break
+	/// escaped only because a heading line does not open a paragraph, which is the asymmetry the live drive saw
+	/// (and why `#section-banner`, a distinct capture kind, always turned the page after prose). The gate is
+	/// self-non-vacuous: the SAME source with the `#pagebreak()` line removed lays one page, so the second page
+	/// is the break's own work -- revert the parser fix and the "with break" render collapses to that one page,
+	/// failing this test rather than passing silently. Typst renders both bodies below at two pages (checked
+	/// against `typst` 0.15.1: `= H\n\npara\n#pagebreak()\npara` and `para\n#pagebreak()\npara` each give 2).
+	#[test]
+	fn pagebreak_beneath_prose_forces_a_new_page() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let metrics	= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+
+		let pages = |src: &str| -> Outcome<usize> {
+			let blocks	= res!(crate::lang::to_blocks(src));
+			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
+			Ok(o.pages.len())
+		};
+
+		// Case A -- a bare heading, then a paragraph, then the break directly beneath that paragraph, then
+		// closing prose (plain, so no heading eject of its own can mask the break's work).
+		let with_a	= "= A Heading\n\nAn opening paragraph before the forced break.\n#pagebreak()\nA closing paragraph after the break.\n";
+		let sans_a	= "= A Heading\n\nAn opening paragraph before the forced break.\nA closing paragraph after the break.\n";
+		assert_eq!(res!(pages(with_a)), 2, "heading + paragraph + adjacent #pagebreak must lay two pages (Typst renders two)");
+		assert_eq!(res!(pages(sans_a)), 1, "the same body without the break lays one page: the second page is the break's own work");
+
+		// Case B -- only a paragraph precedes the break (no heading anywhere), the case the live drive reported
+		// as collapsing to a single page.
+		let with_b	= "An opening paragraph before the forced break.\n#pagebreak()\nA closing paragraph after the break.\n";
+		let sans_b	= "An opening paragraph before the forced break.\nA closing paragraph after the break.\n";
+		assert_eq!(res!(pages(with_b)), 2, "paragraph + adjacent #pagebreak must lay two pages (Typst renders two)");
+		assert_eq!(res!(pages(sans_b)), 1, "the same body without the break lays one page: the break turned it");
+		Ok(())
+	}
+
+	/// A line-leading `#v(50pt)` set directly beneath a prose line shifts the content after it down by exactly
+	/// 50 pt, matching Typst 0.15.1 -- proved at the RENDER level by a placed item's y coordinate, not the
+	/// parse tree. Before the fix the parser dropped the builtin whenever a paragraph was open, so an explicit
+	/// vertical space directly beneath prose vanished and the following block set byte-identically to a document
+	/// with no `#v()` at all. The gate is self-non-vacuous: the same source with the `#v(50pt)` line removed
+	/// leaves the following paragraph at its unshifted y, so the 50 pt delta is the space's own work -- revert
+	/// the parser fix and the delta falls to zero, failing this test.
+	#[test]
+	fn explicit_v_space_shifts_following_content() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let metrics	= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+
+		// The y of the first line of the second paragraph -- the first content element beneath the space. The
+		// first paragraph sets one line (its words share a y); the second paragraph is the first content set
+		// lower, so its line y is the smallest placed y strictly greater than the first line's.
+		let second_para_y = |src: &str| -> Outcome<Sp> {
+			let blocks	= res!(crate::lang::to_blocks(src));
+			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
+			let p		= res!(o.pages.first().ok_or_else(|| err!("no page was laid"; Missing)));
+			let first	= res!(p.frame.placed.first().ok_or_else(|| err!("no content was placed"; Missing))).y;
+			let below	= p.frame.placed.iter().map(|pl| pl.y).filter(|&y| y > first).min();
+			Ok(res!(below.ok_or_else(|| err!("expected a second line of content below the first"; Missing))))
+		};
+
+		// `with_v` sets the space directly beneath the first paragraph (no blank line -- the adjacency the fix
+		// restores); `sans_v` parts the two paragraphs with a blank line instead, so both lay the same two
+		// paragraphs and differ only by the 50 pt the `#v()` adds. The blank-line control avoids merging the two
+		// lines into one wrapped paragraph, which a bare newline between them would do.
+		let with_v	= second_para_y("First paragraph.\n#v(50pt)\nSecond paragraph after the vertical space.\n");
+		let sans_v	= second_para_y("First paragraph.\n\nSecond paragraph after the vertical space.\n");
+		let (with_v, sans_v) = (res!(with_v), res!(sans_v));
+		assert_eq!(with_v - sans_v, Sp::from_pt(50.0),
+			"the content after #v(50pt) must sit exactly 50pt lower than without it (Typst shifts by the same); got {:?}", with_v - sans_v);
+		Ok(())
+	}
 }

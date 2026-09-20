@@ -452,16 +452,20 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
-			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Builtin(_)) && !lines.is_empty()))
+			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
 			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
 			// splices its expanded blocks (the `filter` above lets an open-paragraph `#name` fall through to
-			// the paragraph arm). A markup builtin (`#lorem`, `#v`, `#pagebreak`) is block-position only, so a
-			// continuation line following prose with no blank between (`prose\n#lorem(5)`) likewise falls
-			// through -- to the existing visible refusal, which keeps the prose, rather than splicing an extra
-			// block; inline mid-prose support is a later unit. Every other capture kind -- a figure, a bare
-			// table, a data array -- flushes the paragraph and is gathered as before.
+			// the paragraph arm). A markup builtin (`#lorem`, `#v`, `#pagebreak`) is block-position but not
+			// blank-line-gated: `capture_opener` already admits it only own-line (a balanced call with nothing
+			// but whitespace after its `)`, or a multi-line span), so a builtin directly beneath a prose line
+			// with no blank between (`prose\n#pagebreak()`) closes the paragraph and sets its own block, exactly
+			// as `= heading\n#pagebreak()` and `#section-banner` already do -- Typst turns the page there whether
+			// or not a blank line parts the two, so a paragraph before the break must not silently swallow it.
+			// A builtin with prose on the SAME line (`#lorem(5) more`) is not own-line, so it never reaches here;
+			// inline mid-prose support is a later unit. Every other capture kind -- a figure, a bare table, a
+			// data array -- flushes the paragraph and is gathered as before.
 			//
 			// A multi-line construct the reader sets rather than skips. It closes any open block, then its
 			// whole text is gathered by the check
@@ -3947,19 +3951,38 @@ mod tests {
 		Ok(())
 	}
 
-	/// A builtin on the line directly after prose, with no blank line between, is a paragraph continuation:
-	/// block-position support does not fire, so the preceding prose is kept and the builtin is a visible
-	/// refusal rather than an extra spliced block. Own-line (block-position) support only; inline is a later
-	/// unit.
+	/// An own-line builtin on the line directly after prose, with no blank line between, closes the paragraph
+	/// and sets its own block -- exactly as `= heading\n#pagebreak()` and `#section-banner` already do, and as
+	/// Typst 0.15.1 renders it. A blank line before the builtin is not required: the earlier deferral silently
+	/// swallowed a `#pagebreak()`/`#v()` set directly beneath a paragraph, which is the render bug the live
+	/// drive found (a paragraph before the break collapsed the page count to one; a bare heading before it did
+	/// not, because a heading line opens no paragraph). The preceding prose survives as its own paragraph. A
+	/// builtin with prose on the SAME line (`#lorem(5) more`) is still not own-line -- see
+	/// [`trailing_prose_after_a_builtin_is_kept`] -- so inline mid-prose support remains a later unit.
 	#[test]
-	fn mid_paragraph_builtin_continuation_keeps_prose() -> Outcome<()> {
+	fn own_line_builtin_beneath_prose_flushes_and_sets() -> Outcome<()> {
+		// `#lorem` beneath prose expands its oracle text as a fresh paragraph, and the prose above it is kept.
 		let (items, skips) = res!(document_with_refusals("Some opening prose here.\n#lorem(5)\n"));
-		assert!(!items.iter().any(|it| matches!(it,
+		assert!(items.iter().any(|it| matches!(it,
 			Item::Paragraph { runs, .. } if matches!(runs.as_slice(), [Inline::Text(t)] if t == "Lorem ipsum dolor sit amet."))),
-			"a continuation #lorem must not splice a block: {:?}", items);
+			"a #lorem directly beneath prose sets its oracle text as a block: {:?}", items);
 		assert!(paragraph_text(&items).contains("Some opening prose here"),
 			"the preceding prose is kept: {:?}", items);
-		assert!(skips.report().is_some(), "the continuation #lorem is refused visibly");
+		assert!(skips.report().is_none(), "an own-line builtin beneath prose is set, not refused: {:?}", skips.report());
+
+		// `#pagebreak` beneath prose sets the break; the prose is kept.
+		let (items, skips) = res!(document_with_refusals("Some opening prose here.\n#pagebreak()\n"));
+		assert!(items.iter().any(|it| matches!(it, Item::PageBreak { .. })),
+			"a #pagebreak directly beneath prose is set: {:?}", items);
+		assert!(paragraph_text(&items).contains("Some opening prose here"), "the preceding prose is kept: {:?}", items);
+		assert!(skips.report().is_none(), "the break is set, not refused: {:?}", skips.report());
+
+		// `#v(<abs>)` beneath prose sets the space; the prose is kept.
+		let (items, skips) = res!(document_with_refusals("Some opening prose here.\n#v(12pt)\n"));
+		assert!(items.iter().any(|it| matches!(it, Item::Space { .. })),
+			"an absolute #v directly beneath prose is set: {:?}", items);
+		assert!(paragraph_text(&items).contains("Some opening prose here"), "the preceding prose is kept: {:?}", items);
+		assert!(skips.report().is_none(), "the space is set, not refused: {:?}", skips.report());
 		Ok(())
 	}
 
