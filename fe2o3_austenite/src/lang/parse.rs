@@ -2866,6 +2866,14 @@ fn split_arg_commas(s: &str) -> Vec<String> {
 /// argument supplied substitutes empty). A `#` that opens no parameter name -- an inline call, an escaped
 /// literal -- is left untouched, so the body's own markup survives the substitution. A binding with no
 /// parameters returns its body verbatim.
+///
+/// A `#name(...)` call immediately following a non-parameter identifier -- `#t(w)`, `#g(w)` -- opens Typst's
+/// own code mode inside its parentheses, where `w` is a bare variable reference rather than a markup-mode
+/// `#w`. [`substitute_call_args`] re-quotes any such bare parameter reference found inside that argument
+/// list, so the nested call -- most often a term-dictionary lookup -- resolves against the substituted value
+/// rather than the parameter's own name. Substitution runs here, before the expanded body is re-parsed, so
+/// term-dictionary (or any other) resolution downstream always sees the caller's argument, never the
+/// parameter placeholder: the root fix is ordering, not a term-dictionary-specific patch.
 fn expand_content_body(cf: &crate::lang::rules::ContentFn, args: &[String]) -> String {
 	if cf.params.is_empty() {
 		return cf.body.clone();
@@ -2885,8 +2893,81 @@ fn expand_content_body(cf: &crate::lang::rules::ContentFn, args: &[String]) -> S
 				i = j;
 				continue;
 			}
+			// Not a bare parameter reference; if it names a call (`#t(`, `#g(`, `#anything(`), its argument
+			// list is code mode, where a parameter appears with no leading `#`. Substitute there too, then
+			// resume scanning after the call's closing paren -- the call name and everything past it are
+			// otherwise untouched.
+			if !ident.is_empty() && chars.get(j) == Some(&'(') {
+				if let Some((inner, after)) = read_group(&chars, j) {
+					out.push('#');
+					out.push_str(&ident);
+					out.push('(');
+					out.push_str(&substitute_call_args(&inner, &cf.params, args));
+					out.push(')');
+					i = after;
+					continue;
+				}
+			}
 		}
 		out.push(chars[i]);
+		i += 1;
+	}
+	out
+}
+
+/// Substitutes a bare parameter identifier found inside a call's argument list -- Typst code mode, where a
+/// parameter carries no leading `#` of its own -- with a quoted literal of the caller's argument text, so a
+/// nested call such as `#t(w)` sees the substituted value rather than the parameter's own name. A quote or
+/// backslash in the substituted text is escaped, so the result is always one valid string literal. Left alone
+/// inside an existing `"..."` string, so a quoted argument that merely contains the parameter's name as a
+/// word is not mistaken for a reference to it. An identifier that is not a parameter -- the call's own other
+/// arguments, a keyword name, a literal -- passes through unchanged.
+fn substitute_call_args(inner: &str, params: &[String], args: &[String]) -> String {
+	let chars:	Vec<char>	= inner.chars().collect();
+	let mut out		= String::new();
+	let mut i		= 0usize;
+	let mut in_str	= false;
+	while i < chars.len() {
+		let c = chars[i];
+		if in_str {
+			out.push(c);
+			if c == '\\' && i + 1 < chars.len() {
+				out.push(chars[i + 1]);
+				i += 2;
+				continue;
+			}
+			if c == '"' {
+				in_str = false;
+			}
+			i += 1;
+			continue;
+		}
+		if c == '"' {
+			in_str = true;
+			out.push(c);
+			i += 1;
+			continue;
+		}
+		if c.is_alphabetic() || c == '_' {
+			let start	= i;
+			let mut j	= i + 1;
+			while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+				j += 1;
+			}
+			let word: String = chars[start..j].iter().collect();
+			match params.iter().position(|p| *p == word) {
+				Some(pos)	=> {
+					let value = args.get(pos).map(|s| s.as_str()).unwrap_or("");
+					out.push('"');
+					out.push_str(&value.replace('\\', "\\\\").replace('"', "\\\""));
+					out.push('"');
+				},
+				None		=> out.push_str(&word),
+			}
+			i = j;
+			continue;
+		}
+		out.push(c);
 		i += 1;
 	}
 	out
@@ -4704,6 +4785,46 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
 			"unknown term-dict key did not fall back to its text: {:?}", runs);
 		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
+	}
+
+	/// A term-dictionary lookup inside a `#let` content-function body, keyed on the function's own parameter
+	/// (`#let cite-term(w) = [Learn about #t(w).]`), resolves against the argument the caller passed --
+	/// `#cite-term("website")` must look up "website", not the literal parameter name "w" -- so substitution
+	/// must run before the nested `#t` call is read. Reverting the ordering fix (substituting only bare
+	/// `#param` markup references, never a bare identifier inside a call's argument list) reproduces exactly
+	/// the reported failure: the key "w" is looked up, is not in the dictionary, and the fallback plus a
+	/// recorded skip fire instead of the resolved value.
+	#[test]
+	fn term_dict_resolves_inside_a_content_fn_body_after_param_substitution() {
+		install_test_terms();
+		let mut cfns = crate::lang::rules::ContentFns::new();
+		cfns.insert("cite-term".to_string(), crate::lang::rules::ContentFn {
+			params:	vec!["w".to_string()],
+			body:	"Learn about #t(w).".to_string(),
+		});
+		let tfns	= crate::lang::rules::TemplateFns::new();
+		let binds	= crate::lang::rules::Bindings::new(&tfns, &cfns);
+		let (items, skips) = document_with_templates("#cite-term(\"website\")\n", binds).expect("parse");
+		let resolved = items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if runs.iter().any(|r|
+				matches!(r, Inline::Text(t) if t.contains("elearnity.oxegen.io")))));
+		assert!(resolved,
+			"the content-fn's own parameter did not resolve as the term-dict key: {:?}", items);
+		assert_eq!(skips.total(), 0, "a resolved key must not be recorded as an unknown term-dict miss: {:?}", skips);
+	}
+
+	/// The ordering fix is scoped to a call's argument list, not to ordinary prose: a parameter's name
+	/// appearing as a genuine word in the body's running text (outside any call) is left exactly as written,
+	/// since a bare word in markup mode is prose, never a code-mode variable reference.
+	#[test]
+	fn call_arg_substitution_does_not_touch_ordinary_prose() {
+		let cf = crate::lang::rules::ContentFn {
+			params:	vec!["w".to_string()],
+			body:	"The word w on its own is prose, not #t(w).".to_string(),
+		};
+		let expanded = expand_content_body(&cf, &["website".to_string()]);
+		assert_eq!(expanded, "The word w on its own is prose, not #t(\"website\").",
+			"prose text was wrongly substituted, or the call argument was not: {:?}", expanded);
 	}
 
 	/// A blank line between numbered items does not restart the enum: Typst continues the numbering across

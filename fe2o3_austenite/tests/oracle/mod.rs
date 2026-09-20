@@ -275,6 +275,20 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own term-dict-inside-a-content-fn fixture (reader-completeness item 4) -- the
+			// regression root for a term-dictionary lookup nested in a `#let name(params) = [ ... ]`
+			// content-fn body, keyed on the fn's own parameter: `#let cite-term(w) = [Learn about #t(w).]`,
+			// called as `#cite-term("website")`, must resolve against the caller's argument, not the literal
+			// parameter name. Two calls with different arguments must render two different resolved values
+			// (proving the substitution is genuine), alongside a direct, non-fn-body `#t(...)` reference
+			// proving that path is unchanged. Reverting the fix collapses both calls to the same "w" fallback
+			// text and moves the pinned hash. See the fixture and its sibling `terms.typ` for the full shape.
+			name:				"term-dict-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/term_dict_fn_fixture/root.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
