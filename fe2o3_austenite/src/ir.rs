@@ -169,6 +169,7 @@ impl Glue {
 pub struct Penalty {
 	pub cost:		i32,
 	pub flagged:	bool,
+	pub strong:		bool,	// a strong eject: ejects even on an empty page (a trailing/consecutive `#pagebreak()`), never set on any other break
 }
 
 impl Penalty {
@@ -176,18 +177,25 @@ impl Penalty {
 	pub const EJECT:	i32	= -10_000;	// a break here is forced
 
 	pub fn new(cost: i32, flagged: bool) -> Self {
-		Self { cost, flagged }
+		Self { cost, flagged, strong: false }
 	}
 
-	/// A forced break, which the page breaker must take -- an explicit page break, or the end of a
-	/// chapter.
-	pub fn eject() -> Self { Self { cost: Self::EJECT, flagged: false } }
+	/// A forced break, which the page breaker must take -- a chapter end, section furniture, or a weak
+	/// `#pagebreak(weak: true)`. The driver drops it on an already-empty page, so it opens no blank page.
+	pub fn eject() -> Self { Self { cost: Self::EJECT, flagged: false, strong: false } }
+
+	/// A strong forced break -- the default `#pagebreak()`. Ejects unconditionally, opening a blank page when
+	/// it lands on an already-empty page or trails the document, matching Typst 0.15.1's strong pagebreak.
+	pub fn strong_eject() -> Self { Self { cost: Self::EJECT, flagged: false, strong: true } }
 
 	/// Is a break at this penalty forbidden?
 	pub fn is_forbidden(&self) -> bool { self.cost >= Self::INFINITY }
 
 	/// Is a break at this penalty forced?
 	pub fn is_forced(&self) -> bool { self.cost <= Self::EJECT }
+
+	/// Is this a strong forced eject, one that opens a page even where the current one is empty?
+	pub fn is_strong(&self) -> bool { self.strong }
 }
 
 /// A footnote: the superscript mark set in the running text, and the note set at the foot of the page

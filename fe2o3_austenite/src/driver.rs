@@ -208,6 +208,11 @@ fn compose<M: Metrics>(
 	// the TeX rule that makes the glue a forbidden penalty leaves in front illegal too, welding the atom.
 	let mut at_break	= true;
 	let mut prev_box	= false;
+	// A strong `#pagebreak()` has opened a fresh page that no flow content has yet filled, so that page must
+	// be emitted even if it stays empty (a trailing or consecutive strong break's blank page). Set only by a
+	// strong eject and cleared the moment any flow content, columns block or later page-close lands on the
+	// page, so it is true at the document's end exactly when the last stream event was an unfilled strong break.
+	let mut strong_open	= false;
 	let nodes			= &doc.nodes;
 	let mut idx			= 0usize;
 	while idx < nodes.len() {
@@ -228,7 +233,13 @@ fn compose<M: Metrics>(
 			},
 			Node::Penalty(p) => {
 				if p.is_forced() {
-					if !frame.is_empty() {
+					// A strong eject (the default `#pagebreak()`) ejects unconditionally; a weak one (a chapter
+					// end, section furniture, `#pagebreak(weak: true)`) ejects only a page carrying content and is
+					// dropped on an already-empty page. So the current page is closed when it has content, OR when
+					// the break is strong -- a strong break on an empty page materialises that blank page and opens
+					// another, which is Typst's trailing/consecutive-strong-break behaviour.
+					let strong = p.is_strong();
+					if !frame.is_empty() || strong {
 						res!(finish_page(
 							&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
 							&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
@@ -238,6 +249,9 @@ fn compose<M: Metrics>(
 							metrics, incoming, &mut ledger));
 						// The body resumes at the region top below any flushed top floats, its leading collapsed.
 						at_top = true;
+						// The page just opened is owed by this break only if the break was strong: a trailing strong
+						// break leaves an empty page that must still be emitted, while a weak break leaves none.
+						strong_open = strong;
 					}
 					at_break = true;
 				} else if p.is_forbidden() {
@@ -290,6 +304,7 @@ fn compose<M: Metrics>(
 					&mut bands, &mut pending, &mut at_top, metrics, incoming, &mut ledger));
 				at_break	= true;
 				prev_box	= false;
+				strong_open	= false;	// the columns block set its own material, so no owed-blank strong page remains
 			},
 			Node::RepeatHead(head) => {
 				// Arm or disarm the repeated header. A `Some` clones the boxed header the lowerer built; a
@@ -334,6 +349,7 @@ fn compose<M: Metrics>(
 				at_top		= false;
 				at_break	= false;
 				prev_box	= true;
+				strong_open	= false;	// flow content now fills the page, so it is no longer an owed-blank strong page
 			},
 		}
 		idx += 1;
@@ -356,12 +372,17 @@ fn compose<M: Metrics>(
 			&mut pages, &mut frame, &mut page_no, &mut y, top, geom,
 			&mut notes, &doc.foot, bottom, bands.bot_reserve, metrics, incoming, &mut ledger));
 		bands = FloatBands::empty();
+		strong_open = false;	// a page closed to spill floats onto a fresh one, so no owed-blank strong page remains
 	}
 
 	// The last page holds whatever is left, unless nothing is; its footnotes are set at its foot first.
 	if !frame.is_empty() {
 		res!(lay_footnotes(&mut frame, &notes, page_no, geom, &doc.foot, bottom - bands.bot_reserve, metrics, incoming, &mut ledger));
 		pages.push(Page::new(page_no, geom, std::mem::take(&mut frame)));
+	} else if strong_open {
+		// A trailing strong `#pagebreak()` opened a fresh page that nothing filled: it still exists as a blank
+		// page, so it is emitted rather than dropped (Typst 0.15.1 lays a trailing strong break as a blank page).
+		pages.push(Page::new(page_no, geom, Frame::new()));
 	} else if pages.is_empty() {
 		// A document with no material is still one blank page, so a page count is always at least one.
 		pages.push(Page::new(page_no, geom, Frame::new()));

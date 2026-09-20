@@ -514,7 +514,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
-		} else if lines.is_empty() && is_code_reference(trimmed) {
+		} else if lines.is_empty() && is_code_reference(trimmed) && !names_scalar_alone(trimmed, binds.sfns) {
 			// A line-leading code-mode reference the reader cannot run -- a bare `#name` bound to nothing, a
 			// field/method access `#name.foo`, an `#if`/`#for`/`#while` control keyword, or an anonymous
 			// `#{ ... }`/`#( ... )` block. A bound `#name` was expanded by `capture_opener` above; a
@@ -523,6 +523,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// literal prose would leak a `#` onto the page (the very thing an expanded content-binding body
 			// carrying `#if`/`#{` would do); it is refused with its span instead. The `lines.is_empty()` guard
 			// keeps a reference mid-paragraph joining the line inline, as Typst does, rather than refusing it.
+			// A bare `#name` naming a SCALAR binding is exempt (`names_scalar_alone`): it falls through to the
+			// paragraph arm below, where `flush_para`'s own `substitute_scalars` replaces it with the bound
+			// value, so a scalar standing alone on its line sets its value just as one mid-prose already does.
+			// An UNBOUND standalone name is not exempt, so it stays the visible refusal it has always been.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
 			flush_list(&mut items, &mut stack);
 			skips.record(&construct_name(trimmed), Span::new(start, end));
@@ -1600,6 +1604,30 @@ fn is_code_reference(trimmed: &str) -> bool {
 		Some(c) if c.is_whitespace()	=> chars[name_len..].iter().all(|c| c.is_whitespace()),
 		_				=> false,
 	}
+}
+
+/// Does this already-left-trimmed standalone line consist of a bare `#name` that names a scalar `#let`
+/// binding in scope? Only a bare reference -- an identifier with nothing but whitespace after it -- with a
+/// name `sfns` actually binds qualifies; a `#name.field` access, a `#name(`/`#name[` call and an unbound
+/// name all return false. It exempts exactly the standalone scalar reference from the code-reference skip
+/// so its value is substituted (through the paragraph's own [`substitute_scalars`]), while every other
+/// standalone code reference, above all an unbound name, stays the visible refusal it is.
+fn names_scalar_alone(trimmed: &str, sfns: &crate::lang::rules::ScalarFns) -> bool {
+	let rest = match trimmed.strip_prefix('#') {
+		Some(r)	=> r,
+		None	=> return false,
+	};
+	let chars: Vec<char> = rest.chars().collect();
+	let name_len = chars.iter().take_while(|&&c| c.is_alphanumeric() || c == '-' || c == '_').count();
+	if name_len == 0 {
+		return false;
+	}
+	// A bare `#name`: nothing but whitespace after the identifier (no `.field`, no `(args)`, no `[body]`).
+	if !chars[name_len..].iter().all(|c| c.is_whitespace()) {
+		return false;
+	}
+	let name: String = chars[..name_len].iter().collect();
+	sfns.contains_key(&name)
 }
 
 /// Is this identifier one of the book template's inline functions the reader sets in place -- a glossary
@@ -2686,16 +2714,18 @@ fn dispatch_capture(
 		CaptureKind::Builtin(kind) => {
 			let span = Span::new(cap.start, cap.start);
 			match kind {
-				// `#pagebreak()` / `#pagebreak(weak: true)`: a forced eject, mapped to the weak break the driver
-				// drops at an already-fresh page top. A `to:` argument (`pagebreak(to: "odd")`) selects a parity
-				// target the reader does not model, so it is refused visibly rather than set as a plain break
-				// that quietly ignores the argument.
+				// `#pagebreak()` / `#pagebreak(weak: true)`: a forced eject. The default (`weak: false`) is a
+				// STRONG break, which always opens a fresh page -- even a trailing one, and even when the current
+				// page is already empty; `weak: true` ejects only a page that carries content, matching Typst
+				// 0.15.1 (the strong/weak flag is honoured in the driver's compose). A `to:` argument
+				// (`pagebreak(to: "odd")`) selects a parity target the reader does not model, so it is refused
+				// visibly rather than set as a plain break that quietly ignores the argument.
 				BuiltinKind::PageBreak => {
 					let inner = call_inner(&cap.buf, "pagebreak").unwrap_or_default();
 					if inner.contains("to:") {
 						skips.record("#pagebreak", span);
 					} else {
-						items.push(Item::PageBreak { span });
+						items.push(Item::PageBreak { weak: pagebreak_is_weak(&inner), span });
 					}
 				},
 				// `#lorem(<n>)`: n words of the standard placeholder, set as one plain paragraph. A malformed
@@ -2763,6 +2793,17 @@ fn lorem_arg(buf: &str) -> Option<usize> {
 	first_arg(&inner).trim().parse::<usize>().ok()
 }
 
+/// Does a `#pagebreak(...)` argument list ask for a WEAK break? Only an explicit `weak: true` does; a
+/// `weak: false` and an absent argument are both the STRONG default (Typst 0.15.1), which always ejects.
+/// The value is read as the token immediately after `weak:`, so `weak: true`, `weak:true` and
+/// `weak: false` all resolve correctly.
+fn pagebreak_is_weak(inner: &str) -> bool {
+	match inner.find("weak:") {
+		Some(at)	=> inner[at + "weak:".len()..].trim_start().starts_with("true"),
+		None		=> false,
+	}
+}
+
 /// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
 /// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
 fn first_arg(inner: &str) -> String {
@@ -2778,7 +2819,7 @@ fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
 	let mut kept = Vec::with_capacity(items.len());
 	for mut item in items.drain(..) {
 		match &mut item {
-			Item::PageBreak { span }		=> { skips.record("#pagebreak", *span); continue; },
+			Item::PageBreak { span, .. }	=> { skips.record("#pagebreak", *span); continue; },
 			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
 			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
 			_								=> {},
@@ -4111,6 +4152,29 @@ mod tests {
 			"an unbound standalone reference must not leak as paragraph text: {:?}", items);
 		assert!(skips.report().is_some_and(|r| r.contains("nosuchname")),
 			"an unbound standalone reference is a visible refusal, not a silent drop: {:?}", skips.report());
+	}
+
+	/// A scalar `#let` binding referenced by a bare `#name` standing ALONE on its own line substitutes its
+	/// value, through the whole [`document_with_templates`] pipeline -- not only mid-prose (which item 2 already
+	/// handled) but where the reference is the line's only content, the case the standalone code-reference skip
+	/// path swallowed before. The gate is self-non-vacuous: with the `names_scalar_alone` exemption reverted the
+	/// standalone `#edition` is recorded as a `#pagebreak`-style skip and never becomes a paragraph, so the
+	/// substituted value is absent and a skip is reported -- both assertions below then red. The companion
+	/// [`unbound_standalone_reference_stays_a_visible_refusal`] proves an UNBOUND standalone name still refuses.
+	#[test]
+	fn standalone_line_scalar_reference_substitutes() {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let mut sfns = crate::lang::rules::ScalarFns::new();
+		sfns.insert("edition".to_string(), crate::lang::rules::ScalarValue::Number("3".to_string()));
+		let binds = crate::lang::rules::Bindings::with_scalars(&tfns, &cfns, &sfns);
+		let src = "Some prose above.\n\n#edition\n\nSome prose below.\n";
+		let (items, skips) = document_with_templates(src, binds).expect("parses");
+		assert!(items.iter().any(|it| matches!(it, Item::Paragraph { runs, .. }
+			if matches!(runs.as_slice(), [Inline::Text(t)] if t == "3"))),
+			"a standalone-line scalar reference substitutes its value as its own paragraph: {:?}", items);
+		assert!(!skips.report().is_some_and(|r| r.contains("edition")),
+			"a bound standalone scalar reference is substituted, not recorded as a skip: {:?}", skips.report());
 	}
 
 	/// `lorem_words` reproduces `typst 0.15.1`'s `#lorem(n)` verbatim: the classic opening for small counts,

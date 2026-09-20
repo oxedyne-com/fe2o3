@@ -299,13 +299,12 @@ pub enum Block {
 	// A vertical space a `#show` template's `v(<len>)` lowers to: a fixed leading emitted as a sibling
 	// before or after the element the template wraps. It carries no words and anchors no reference.
 	Space(Sp),
-	// A line-leading `#pagebreak()` (or `#pagebreak(weak: true)`): a forced page eject at this point in the
-	// flow. Emitted as a forced break penalty, which the driver drops when the page is already fresh, so a
-	// break that lands at a page top never opens a blank page -- the WEAK semantics, the same the section
-	// furniture turns the page with (see the `SectionBanner` arm). Both markup forms map here: a strong
-	// `#pagebreak()` on an already-empty page (Typst's default WOULD open a blank one) is not distinguished,
-	// a documented weak-only limitation, not exercised by any corpus.
-	PageBreak,
+	// A line-leading `#pagebreak()` (strong, the default) or `#pagebreak(weak: true)`: a forced page eject at
+	// this point in the flow. A STRONG break always ejects, opening a blank page when there is nothing left to
+	// place (trailing) or when the current page is already empty (consecutive breaks); a WEAK break ejects only
+	// a page that carries content -- the same drop-on-fresh-page semantics the section furniture turns the page
+	// with (see the `SectionBanner` arm), which stays weak. The flag is honoured in the driver's compose.
+	PageBreak { weak: bool },
 }
 
 impl Block {
@@ -355,7 +354,7 @@ impl Block {
 
 	pub fn space(height: Sp) -> Self { Self::Space(height) }
 
-	pub fn page_break() -> Self { Self::PageBreak }
+	pub fn page_break(weak: bool) -> Self { Self::PageBreak { weak } }
 
 	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
 	/// violet. The wash is the theme's `callout.fill` at render (its default that pale violet), so a
@@ -1182,12 +1181,15 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::PageBreak => {
-					// A line-leading `#pagebreak()`: a forced eject, exactly as the section banner turns the
-					// page. The driver drops the break when the frame is already empty, so one landing at a page
-					// top opens no blank page. `first`/`prev_para` are left untouched -- the break sets no ink,
+				Block::PageBreak { weak } => {
+					// A line-leading `#pagebreak()`: a forced eject. A WEAK break emits the ordinary eject the
+					// driver drops when the frame is already empty, so one landing at a page top opens no blank
+					// page -- exactly as the section banner turns the page. A STRONG break emits a strong eject the
+					// driver honours even on an empty page, so a trailing or consecutive strong break opens a blank
+					// page, matching Typst 0.15.1. `first`/`prev_para` are left untouched -- the break sets no ink,
 					// so the block that follows leads against the page top, not against a paragraph.
-					self.nodes.push(Node::Penalty(Penalty::eject()));
+					let eject = if *weak { Penalty::eject() } else { Penalty::strong_eject() };
+					self.nodes.push(Node::Penalty(eject));
 					i += 1;
 				},
 			}
@@ -3677,7 +3679,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
 			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex
-			| Block::Space(_) | Block::PageBreak	=> {},
+			| Block::Space(_) | Block::PageBreak { .. }	=> {},
 		}
 	}
 	n
@@ -5200,7 +5202,7 @@ fn box_flow_scoped(
 			// time ([`crate::lang::parse::refuse_nested_page_breaks`]) and never reaches here. This explicit
 			// arm keeps it out of the silent catch-all below, so a future path that did route one here would
 			// surface as a compile-time non-exhaustiveness rather than a silent drop.
-			Block::PageBreak => {},
+			Block::PageBreak { .. } => {},
 			_ => {},
 		}
 		*first = false;
@@ -6073,6 +6075,42 @@ an interior line justification fills to the measure while ragged setting does no
 		let sans_b	= "An opening paragraph before the forced break.\nA closing paragraph after the break.\n";
 		assert_eq!(res!(pages(with_b)), 2, "paragraph + adjacent #pagebreak must lay two pages (Typst renders two)");
 		assert_eq!(res!(pages(sans_b)), 1, "the same body without the break lays one page: the break turned it");
+		Ok(())
+	}
+
+	/// The strong/weak distinction on `#pagebreak()`, proved at the RENDER level by the page count through the
+	/// real `to_blocks -> author -> driver::run` pipeline, against `typst` 0.15.1 (each source below was
+	/// compiled with the installed typst and its page count read from the PDF): a TRAILING strong `#pagebreak()`
+	/// opens a blank final page (2), a TRAILING `#pagebreak(weak: true)` opens none (1), and TWO strong breaks in
+	/// a row open two blank pages (3). The gate is self-non-vacuous: revert the strong-eject branch in
+	/// [`crate::driver`] (make a strong break drop on an empty page, as a weak one does) and every strong count
+	/// below collapses -- the trailing strong break falls to 1 and the consecutive pair to 1 -- reddening here.
+	#[test]
+	fn strong_and_weak_pagebreaks_lay_the_typst_page_counts() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let metrics	= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+
+		let pages = |src: &str| -> Outcome<usize> {
+			let blocks	= res!(crate::lang::to_blocks(src));
+			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
+			Ok(o.pages.len())
+		};
+
+		// A trailing strong break opens a blank second page (Typst: 2); the same document with the break removed
+		// is one page, so the second page is the strong break's own work.
+		assert_eq!(res!(pages("Hello\n\n#pagebreak()\n")), 2,
+			"a trailing strong #pagebreak() opens a blank final page (Typst renders two)");
+		assert_eq!(res!(pages("Hello\n")), 1, "the same body without the break is one page");
+		// A trailing WEAK break opens no blank page (Typst: 1) -- the pre-existing drop-on-empty-page behaviour.
+		assert_eq!(res!(pages("Hello\n\n#pagebreak(weak: true)\n")), 1,
+			"a trailing #pagebreak(weak: true) opens no blank page (Typst renders one)");
+		// Two strong breaks in a row: the first ejects the content page, the second ejects the now-empty page,
+		// and the trailing open page is blank too (Typst: 3).
+		assert_eq!(res!(pages("Hello\n\n#pagebreak()\n#pagebreak()\n")), 3,
+			"two consecutive strong #pagebreak() lay three pages (Typst renders three)");
 		Ok(())
 	}
 
