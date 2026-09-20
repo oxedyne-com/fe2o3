@@ -7,6 +7,8 @@
 //! - `png <DOC.prl> [OUT_DIR] [--dpi N]` -- per-page PNG at a chosen DPI (Phase 1, [`raster`]).
 //! - `serve <DOC.prl> [--port N] [--no-open]` -- a loopback browser-shell app serving the existing
 //!   `pearl-reader` web assets against this one document (Phase 2, [`shell`]).
+//! - `open <DOC.prl>` -- a true native window rendering the document with the CPU rasteriser, no webview
+//!   (Phase 3, [`window`](oxedyne_fe2o3_pearlite::window); behind the default-off `gui` feature).
 
 use oxedyne_fe2o3_pearlite::raster;
 use oxedyne_fe2o3_pearlite::shell::{
@@ -28,6 +30,7 @@ fn main() -> Outcome<()> {
 		"render"	=> cmd_render(&args[1..]),
 		"png"		=> cmd_png(&args[1..]),
 		"serve"		=> cmd_serve(&args[1..]),
+		"open"		=> cmd_open(&args[1..]),
 		_			=> usage(),
 	}
 }
@@ -37,7 +40,35 @@ fn usage() -> Outcome<()> {
 	println!("  pearlite render <DOC.prl> [OUT_DIR]");
 	println!("  pearlite png <DOC.prl> [OUT_DIR] [--dpi N]");
 	println!("  pearlite serve <DOC.prl> [--port N] [--no-open]");
+	println!("  pearlite open <DOC.prl>              (native window; build with --features gui)");
 	Ok(())
+}
+
+/// Opens the document in a native window. The reader itself lives behind the `gui` feature so the other
+/// subcommands pull in neither winit nor softbuffer; without the feature this arm says how to get it.
+#[cfg(feature = "gui")]
+fn cmd_open(args: &[String]) -> Outcome<()> {
+	use oxedyne_fe2o3_pearlite::window;
+
+	let source = match args.first() {
+		Some(s)	=> s.clone(),
+		None	=> return Err(err!("A .prl path is required."; Input, Missing)),
+	};
+	let doc = res!(PearlDoc::read_file(&source));
+	// The format carries no title of its own, so the file stem stands as the window title.
+	let title = std::path::Path::new(&source)
+		.file_stem()
+		.map(|n| n.to_string_lossy().into_owned())
+		.filter(|s| !s.is_empty())
+		.unwrap_or_else(|| "Pearlite".to_string());
+	window::open(doc, title)
+}
+
+#[cfg(not(feature = "gui"))]
+fn cmd_open(_args: &[String]) -> Outcome<()> {
+	Err(err!(
+		"This build has no native window: rebuild with `--features gui` to use `pearlite open`.";
+		Input, Unimplemented))
 }
 
 /// The document path and the directory to write pages into, from a subcommand's own positional and

@@ -14,10 +14,20 @@ path = "src/lib.rs"
 name = "pearlite"
 path = "src/bin/pearlite.rs"
 
+[features]
+# The native windowed reader (Phase 3), default-off so `render`, `png`, the loopback shell and every
+# other consumer of the crate pull in neither winit nor softbuffer. It is the sole gate on those two
+# dependencies -- verify with `cargo tree -p oxedyne_fe2o3_pearlite -e normal | grep -E 'winit|softbuffer'`
+# (empty without `--features gui`).
+gui = ["dep:winit", "dep:softbuffer"]
+
 [dependencies]
 oxedyne_fe2o3_austenite	= { path = "../fe2o3_austenite" }
 oxedyne_fe2o3_graphics	= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_core		= { path = "../fe2o3_core" }
+# base64 decode for the pixmap sink's embedded rasters -- the same wasm-clean decoder `svg_doc` rests on,
+# already in the tree, so no new external crate.
+oxedyne_fe2o3_text		= { path = "../fe2o3_text" }
 # Collaboration backend: signed operation history (ore), the neutral serialisation
 # it and the store speak (jdat), the wasm-clean P-256 verifier (crypto, p256
 # feature only), the hub store (o3db) and the thin blocking database trait it is
@@ -36,6 +46,13 @@ oxedyne_fe2o3_hash		= { path = "../fe2o3_hash" }
 # WebCrypto key. Both are tokio-free, so `default-features = false` keeps the whole
 # async/TLS half of the crate -- and tokio -- out of this reader entirely.
 oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false }
+
+# Phase 3, the native windowed reader: a true OS window (winit) presenting the CPU-rendered pixmap via a
+# raw framebuffer blit (softbuffer). Owner-ruled: no webview. Both are optional and reached only through
+# the default-off `gui` feature, so the reader's non-window paths and every downstream consumer stay free
+# of them. Cross-OS by construction (x11/wayland, macOS, Windows); only Linux is runtime-verified here.
+winit		= { version = "0.30", optional = true }
+softbuffer	= { version = "0.4", optional = true }
 
 [dev-dependencies]
 # The checksum scheme an o3db instance is parameterised over comes from

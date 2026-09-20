@@ -548,6 +548,138 @@ fn encode(dat: &Dat) -> Outcome<String> {
 // Reading a `.prl` back, and rendering it to the SVG the SVG arm would have written.
 // ---------------------------------------------------------------------------------------------------
 
+/// One placed span of the invisible, selectable text layer: an offset within its run and the word it
+/// carries. See [`TselRun`].
+pub struct TselSpan {
+	pub gx:		f32,
+	pub gy:		f32,
+	pub text:	String,
+}
+
+/// A text run's contribution to the selectable-text layer: the run's baseline origin and size, and the
+/// spans placed against it. A visual [`PageSink`] ignores these; the SVG sink turns them into the page's
+/// one `.tsel` `<text>` element. Kept as structured data rather than pre-built markup so no sink but the
+/// SVG one ever handles a tspan.
+pub struct TselRun {
+	pub base_x:	f32,
+	pub base_y:	f32,
+	pub size:	f32,
+	pub spans:	Vec<TselSpan>,
+}
+
+/// A destination for a page's placed ink. The one leaf walk in [`PearlDoc::render_page_to`] drives a
+/// sink rather than building SVG inline, so the SVG writer and a direct rasteriser (`fe2o3_pearlite`'s
+/// pixmap sink) share that single walk instead of the rasteriser re-parsing the SVG. Every path arrives
+/// already placed in the page's point frame -- origin top-left, y down, one unit one point -- so a sink
+/// applies only its own device transform (a DPI scale, say) on top.
+pub trait PageSink {
+	/// Opens a page `w` by `h` points; a sink sizes its canvas and lays the white ground here.
+	fn begin(&mut self, w: usize, h: usize) -> Outcome<()>;
+	/// Fills the placed `path` with `colour`.
+	fn fill(&mut self, path: &Path, colour: Rgba) -> Outcome<()>;
+	/// Strokes the placed `path` with `colour` and pen `pen`.
+	fn stroke(&mut self, path: &Path, colour: Rgba, pen: &Stroke) -> Outcome<()>;
+	/// Places a base64 PNG at (`x`, `y`), `w` by `h` points.
+	fn image(&mut self, png_base64: &str, x: f32, y: f32, w: f32, h: f32) -> Outcome<()>;
+	/// The page's selectable-text runs, in placement order. A visual sink ignores them.
+	fn text_layer(&mut self, runs: &[TselRun]) -> Outcome<()>;
+	/// Closes the page.
+	fn end(&mut self) -> Outcome<()>;
+}
+
+/// The [`PageSink`] that reconstructs the SVG arm's own page markup, byte for byte. Every method writes
+/// through the very `write_path_data`, `presentation` and `.tsel` shapes the SVG arm uses, so a rendered
+/// page is that arm's output exactly.
+pub struct SvgSink {
+	out: String,
+}
+
+impl SvgSink {
+	pub fn new() -> Self {
+		Self { out: String::new() }
+	}
+
+	pub fn into_string(self) -> String {
+		self.out
+	}
+}
+
+impl Default for SvgSink {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+impl PageSink for SvgSink {
+	fn begin(&mut self, w: usize, h: usize) -> Outcome<()> {
+		self.out.push_str(&fmt!(
+			"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
+			w, h, w, h));
+		self.out.push_str(&fmt!(
+			"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
+		// Matches the SVG arm's own `.tsel` style declaration, emitted at the very same point.
+		self.out.push_str("<style>.tsel { fill: transparent; }</style>\n");
+		Ok(())
+	}
+
+	fn fill(&mut self, path: &Path, colour: Rgba) -> Outcome<()> {
+		self.out.push_str(&fmt!(
+			"  <path d=\"{}\" {}/>\n", write_path_data(path), presentation(Some(colour), None)));
+		Ok(())
+	}
+
+	fn stroke(&mut self, path: &Path, colour: Rgba, pen: &Stroke) -> Outcome<()> {
+		self.out.push_str(&fmt!(
+			"  <path d=\"{}\" {}/>\n", write_path_data(path), presentation(None, Some((colour, pen)))));
+		Ok(())
+	}
+
+	fn image(&mut self, png_base64: &str, x: f32, y: f32, w: f32, h: f32) -> Outcome<()> {
+		self.out.push_str(&fmt!(
+			"  <image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" \
+				href=\"data:image/png;base64,{}\"/>\n",
+			x, y, w, h, png_base64));
+		Ok(())
+	}
+
+	fn text_layer(&mut self, runs: &[TselRun]) -> Outcome<()> {
+		// One page-wide `.tsel` buffer: every run's tspans joining a single `<text>`, in placement order,
+		// with a leading space ahead of every run but the first to stand in for the interword gap Pearl's
+		// per-word leaves carry as pure position. One element rather than one per run sidesteps a
+		// `window.find` gap Chromium was found to have across sibling `<text>` elements once tspans carry
+		// per-glyph `x`/`y`.
+		let mut buf			= String::new();
+		let mut seen_text	= false;
+		for run in runs {
+			let mut tspans = String::new();
+			for s in &run.spans {
+				tspans.push_str(&fmt!(
+					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
+					run.base_x + s.gx, run.base_y - s.gy, run.size, xml_escape(&s.text)));
+			}
+			if tspans.is_empty() {
+				continue;
+			}
+			if seen_text {
+				buf.push_str(&fmt!(
+					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>",
+					run.base_x, run.base_y, run.size));
+			}
+			buf.push_str(&tspans);
+			seen_text = true;
+		}
+		if !buf.is_empty() {
+			self.out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", buf));
+		}
+		Ok(())
+	}
+
+	fn end(&mut self) -> Outcome<()> {
+		self.out.push_str("</svg>\n");
+		Ok(())
+	}
+}
+
 /// A decoded Pearl document, enough to render or query without the engine. The rendering below walks
 /// each page's block and its stored outlines through the very `write_path_data` and `presentation` the
 /// SVG arm uses, so a rendered page is that arm's output byte for byte.
@@ -578,6 +710,22 @@ impl PearlDoc {
 		Ok(res!(self.top.map_get_list(&dat!("index"))).len())
 	}
 
+	/// The media-box size of the page at `idx`, in whole points -- the same viewport
+	/// [`render_page`](Self::render_page) draws into. A reader lays pages out from these before rendering
+	/// any, so it need not raster a page merely to learn its size.
+	pub fn page_size(&self, idx: usize) -> Outcome<(usize, usize)> {
+		let index	= res!(self.top.map_get_list(&dat!("index")));
+		let entry	= res!(index.get(idx).ok_or_else(|| err!(
+			"Page index {} is past the {} pages the document holds.", idx, index.len(); Input, Range)));
+		let block_key	= res!(entry.map_get_string(&dat!("block")));
+		let blocks		= res!(self.top.map_get_must(&dat!("blocks")));
+		let block		= res!(blocks.map_get_must(&dat!(block_key)));
+		let geom	= res!(block.map_get_list(&dat!("geom")));
+		let w		= res!(sp_at(geom, 0)).to_pt().round() as usize;
+		let h		= res!(sp_at(geom, 1)).to_pt().round() as usize;
+		Ok((w, h))
+	}
+
 	/// The document's stable identity, or `None` for a `.prl` written without one -- every file that
 	/// predates the field, and any document a collaboration layer has not stamped. This is the key an
 	/// edit stream is folded against, and it survives re-pagination where a page number or block address
@@ -599,8 +747,18 @@ impl PearlDoc {
 	}
 
 	/// Renders the page at `idx` (zero-based) to a self-contained SVG document, reconstructing the SVG
-	/// arm's output from the stored geometry, glyph outlines and paint.
+	/// arm's output from the stored geometry, glyph outlines and paint. A thin wrapper over the shared
+	/// leaf walk [`render_page_to`](Self::render_page_to), driving an [`SvgSink`].
 	pub fn render_page(&self, idx: usize) -> Outcome<String> {
+		let mut sink = SvgSink::new();
+		res!(self.render_page_to(idx, &mut sink));
+		Ok(sink.into_string())
+	}
+
+	/// The one leaf walk for a page: loads the page's block and stores, then drives every placed leaf
+	/// through `sink`. The SVG writer and a direct rasteriser share this walk, so a page never needs
+	/// re-parsing from SVG to reach pixels. See [`PageSink`].
+	pub fn render_page_to<S: PageSink>(&self, idx: usize, sink: &mut S) -> Outcome<()> {
 		let index	= res!(self.top.map_get_list(&dat!("index")));
 		let entry	= res!(index.get(idx).ok_or_else(|| err!(
 			"Page index {} is past the {} pages the document holds.", idx, index.len(); Input, Range)));
@@ -613,17 +771,10 @@ impl PearlDoc {
 		// The viewport is the media box: the geometry's width and height rounded to whole points, exactly
 		// as `PageGeometry::media_box` does.
 		let geom	= res!(block.map_get_list(&dat!("geom")));
-		let w		= sp_at(geom, 0)?.to_pt().round() as usize;
-		let h		= sp_at(geom, 1)?.to_pt().round() as usize;
+		let w		= res!(sp_at(geom, 0)).to_pt().round() as usize;
+		let h		= res!(sp_at(geom, 1)).to_pt().round() as usize;
 
-		let mut out = String::new();
-		out.push_str(&fmt!(
-			"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
-			w, h, w, h));
-		out.push_str(&fmt!(
-			"<rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\" fill=\"#ffffff\"/>\n", w, h));
-		// Matches the SVG arm's own `.tsel` style declaration, emitted at the very same point.
-		out.push_str("<style>.tsel { fill: transparent; }</style>\n");
+		res!(sink.begin(w, h));
 
 		// A half-point grey pen for a reservation, matching the SVG arm's `pen`/`grey`.
 		let pen		= res!(Stroke::new(0.5));
@@ -636,9 +787,9 @@ impl PearlDoc {
 				"An empty leaf carries no kind tag."; Input, Invalid))).clone(), Str);
 			match tag.as_str() {
 				"text" => {
-					let x		= sp_at(&items, 1)?;
-					let y		= sp_at(&items, 2)?;
-					let height	= sp_at(&items, 4)?;
+					let x		= res!(sp_at(&items, 1));
+					let y		= res!(sp_at(&items, 2));
+					let height	= res!(sp_at(&items, 4));
 					let base_x	= x.to_pt() as f32;
 					let base_y	= (y + height).to_pt() as f32;
 					// The fill is an optional key in the leaf's metadata tail (see `text_leaf_meta`); a leaf
@@ -655,8 +806,8 @@ impl PearlDoc {
 						let gl	= try_extract_dat!(g.clone(), List);
 						let key	= try_extract_dat!(res!(gl.first().ok_or_else(|| err!(
 							"A glyph placement carries no outline key."; Input, Invalid))).clone(), Str);
-						let gx	= f32_at(&gl, 1)?;
-						let gy	= f32_at(&gl, 2)?;
+						let gx	= res!(f32_at(&gl, 1));
+						let gy	= res!(f32_at(&gl, 2));
 						let entry	= res!(glyphs.map_get_must(&dat!(key)));
 						let d		= res!(entry.map_get_string(&dat!("d")));
 						let path	= res!(path_data(&d));
@@ -668,17 +819,15 @@ impl PearlDoc {
 						let t = Transform::scale(1.0, -1.0)
 							.then(&Transform::translate(base_x + gx, base_y - gy));
 						let placed = res!(path.transform(&t));
-						out.push_str(&fmt!(
-							"  <path d=\"{}\" {}/>\n",
-							write_path_data(&placed), presentation(Some(colour), None)));
+						res!(sink.fill(&placed, colour));
 					}
 				},
 				"rule" | "reserved" => {
-					let x		= sp_at(&items, 1)?;
-					let y		= sp_at(&items, 2)?;
-					let width	= sp_at(&items, 3)?;
-					let height	= sp_at(&items, 4)?;
-					let depth	= sp_at(&items, 5)?;
+					let x		= res!(sp_at(&items, 1));
+					let y		= res!(sp_at(&items, 2));
+					let width	= res!(sp_at(&items, 3));
+					let height	= res!(sp_at(&items, 4));
+					let depth	= res!(sp_at(&items, 5));
 					let x0 = x.to_pt() as f32;
 					let y0 = y.to_pt() as f32;
 					let x1 = (x + width).to_pt() as f32;
@@ -688,59 +837,51 @@ impl PearlDoc {
 					if x1 <= x0 || y1 <= y0 {
 						continue;
 					}
-					let path	= res!(Path::rect(Bounds::new(x0, y0, x1, y1)));
-					let d		= write_path_data(&path);
-					let attrs	= if tag == "rule" {
-						presentation(Some(Rgba::BLACK), None)
+					let path = res!(Path::rect(Bounds::new(x0, y0, x1, y1)));
+					if tag == "rule" {
+						res!(sink.fill(&path, Rgba::BLACK));
 					} else {
-						presentation(None, Some((grey, &pen)))
-					};
-					out.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
+						res!(sink.stroke(&path, grey, &pen));
+					}
 				},
 				"fill" => {
-					let bx		= sp_at(&items, 1)?;
-					let by		= sp_at(&items, 2)?;
+					let bx		= res!(sp_at(&items, 1));
+					let by		= res!(sp_at(&items, 2));
 					let d		= try_extract_dat!(res!(items.get(3).ok_or_else(|| err!(
 						"A fill leaf is missing its path."; Input, Invalid))).clone(), Str);
 					let colour	= res!(rgba_from_dat(res!(items.get(4).ok_or_else(|| err!(
 						"A fill leaf is missing its colour."; Input, Invalid)))));
 					let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
 					let p = res!(res!(path_data(&d)).transform(&t));
-					out.push_str(&fmt!(
-						"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(Some(colour), None)));
+					res!(sink.fill(&p, colour));
 				},
 				"stroke" => {
-					let bx		= sp_at(&items, 1)?;
-					let by		= sp_at(&items, 2)?;
+					let bx		= res!(sp_at(&items, 1));
+					let by		= res!(sp_at(&items, 2));
 					let d		= try_extract_dat!(res!(items.get(3).ok_or_else(|| err!(
 						"A stroke leaf is missing its path."; Input, Invalid))).clone(), Str);
 					let colour	= res!(rgba_from_dat(res!(items.get(4).ok_or_else(|| err!(
 						"A stroke leaf is missing its colour."; Input, Invalid)))));
-					let width	= f32_at(&items, 5)?;
+					let width	= res!(f32_at(&items, 5));
 					let stroke	= res!(Stroke::new(width));
 					let t = Transform::translate(bx.to_pt() as f32, by.to_pt() as f32);
 					let p = res!(res!(path_data(&d)).transform(&t));
-					out.push_str(&fmt!(
-						"  <path d=\"{}\" {}/>\n",
-						write_path_data(&p), presentation(None, Some((colour, &stroke)))));
+					res!(sink.stroke(&p, colour, &stroke));
 				},
 				"image" => {
-					let bx	= sp_at(&items, 1)?;
-					let by	= sp_at(&items, 2)?;
-					let x	= f32_at(&items, 3)?;
-					let y	= f32_at(&items, 4)?;
-					let iw	= f32_at(&items, 5)?;
-					let ih	= f32_at(&items, 6)?;
+					let bx	= res!(sp_at(&items, 1));
+					let by	= res!(sp_at(&items, 2));
+					let x	= res!(f32_at(&items, 3));
+					let y	= res!(f32_at(&items, 4));
+					let iw	= res!(f32_at(&items, 5));
+					let ih	= res!(f32_at(&items, 6));
 					let key	= try_extract_dat!(res!(items.get(7).ok_or_else(|| err!(
 						"An image leaf is missing its raster key."; Input, Invalid))).clone(), Str);
 					let entry	= res!(images.map_get_must(&dat!(key)));
 					let b64		= res!(entry.map_get_string(&dat!("png")));
 					let ox = bx.to_pt() as f32;
 					let oy = by.to_pt() as f32;
-					out.push_str(&fmt!(
-						"  <image x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" preserveAspectRatio=\"none\" \
-							href=\"data:image/png;base64,{}\"/>\n",
-						ox + x, oy + y, iw, ih, b64));
+					res!(sink.image(&b64, ox + x, oy + y, iw, ih));
 				},
 				// A link leaf places no ink: the SVG arm draws no clickable annotation, so rendering skips it and
 				// the page stays byte-identical to that arm's output. A reader that wants the links reads them
@@ -751,15 +892,11 @@ impl PearlDoc {
 			}
 		}
 
-		// A second pass builds every text leaf's invisible, selectable tspans into ONE page-wide `.tsel`
-		// text buffer, matching the SVG arm's own second pass in `svg::run_text_layer`: all the outlines
-		// first, then every run's tspans joining a single `<text>` at the end, in placement order. One
-		// element rather than one per run sidesteps a `window.find` gap Chromium was found to have across
-		// sibling `<text>` elements once tspans carry per-glyph `x`/`y` -- see that function's own comment.
-		// A leading space is inserted ahead of every run but the page's first, to stand in for the
-		// interword gap Pearl's per-word leaves carry as pure position, not a stored glyph.
-		let mut tsel_buf	= String::new();
-		let mut seen_text	= false;
+		// A second pass collects every text leaf's selectable spans, in placement order, and hands them to
+		// the sink as the page's selectable-text layer. The SVG sink turns them into one page-wide `.tsel`
+		// `<text>`; a visual sink ignores them (the ink is already placed above). The runs carry structured
+		// span data, not markup, so no sink but the SVG one ever handles a tspan.
+		let mut runs: Vec<TselRun> = Vec::new();
 		for leaf in leaves {
 			let items	= try_extract_dat!(leaf.clone(), List);
 			let tag		= try_extract_dat!(res!(items.first().ok_or_else(|| err!(
@@ -777,33 +914,21 @@ impl PearlDoc {
 			let size		= res!(f32_from(size_dat));
 			let spans		= try_extract_dat!(res!(meta.map_get_must(&dat!("spans"))).clone(), List);
 
-			let mut tspans = String::new();
+			let mut out_spans: Vec<TselSpan> = Vec::new();
 			for s in &spans {
 				let sl		= try_extract_dat!(s.clone(), List);
 				let gx		= res!(f32_at(&sl, 0));
 				let gy		= res!(f32_at(&sl, 1));
 				let text	= try_extract_dat!(res!(sl.get(2).ok_or_else(|| err!(
 					"A selectable span is missing its text."; Input, Invalid))).clone(), Str);
-				tspans.push_str(&fmt!(
-					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\">{}</tspan>",
-					base_x + gx, base_y - gy, size, xml_escape(&text)));
+				out_spans.push(TselSpan { gx, gy, text });
 			}
-			if tspans.is_empty() {
-				continue;
-			}
-			if seen_text {
-				tsel_buf.push_str(&fmt!(
-					"<tspan x=\"{}\" y=\"{}\" font-size=\"{}\"> </tspan>", base_x, base_y, size));
-			}
-			tsel_buf.push_str(&tspans);
-			seen_text = true;
+			runs.push(TselRun { base_x, base_y, size, spans: out_spans });
 		}
-		if !tsel_buf.is_empty() {
-			out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tsel_buf));
-		}
+		res!(sink.text_layer(&runs));
 
-		out.push_str("</svg>\n");
-		Ok(out)
+		res!(sink.end());
+		Ok(())
 	}
 
 	/// The links on the page at `idx` (zero-based): each `link` leaf's rectangle and target, in the order
