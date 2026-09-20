@@ -1006,6 +1006,31 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 				continue;
 			}
 		}
+		// Typst's smartypants: a run of hyphens in markup text becomes em/en dashes, longest match first
+		// (`---` before `--`), and three-or-more dots become an ellipsis. Every other branch above has
+		// already claimed `` ` `` and `$` before falling through here, so this never touches a raw code
+		// span or a maths span -- only ordinary prose reaches this fallback. A `\-`/`\.` was already turned
+		// into a literal above and never joins a run counted here, matching Typst's own escape.
+		if c == '-' || c == '.' {
+			let mut run = 0usize;
+			while chars.get(i + run) == Some(&c) { run += 1; }
+			let mut left = run;
+			if c == '-' {
+				while left > 0 {
+					if left >= 3			{ plain.push('\u{2014}'); left -= 3; }	// --- em dash
+					else if left == 2		{ plain.push('\u{2013}'); left = 0; }	// -- en dash
+					else					{ plain.push('-'); left = 0; }
+				}
+			} else if left >= 3 {
+				plain.push('\u{2026}');	// ... ellipsis
+				left -= 3;
+				for _ in 0..left { plain.push('.'); }
+			} else {
+				for _ in 0..left { plain.push('.'); }
+			}
+			i += run;
+			continue;
+		}
 		plain.push(c);
 		i += 1;
 	}
@@ -3807,6 +3832,44 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		// A line-leading link is prose the inline scanner reads, not a standalone call the line scanner drops.
 		assert!(is_inline_call("link"));
 		assert!(code_skip("#link(\"https://x.io\")[click]").is_none());
+	}
+
+	/// Typst's smartypants: `--` becomes an en dash and `---` an em dash in ordinary prose, matched
+	/// longest-first, but a raw code span, a maths span and an escaped hyphen are all left untouched.
+	#[test]
+	fn dash_runs_become_en_and_em_dashes_in_prose() {
+		assert_eq!(flatten_markup("a--b"), "a\u{2013}b");
+		assert_eq!(flatten_markup("a---b"), "a\u{2014}b");
+		// Four hyphens is an em dash plus a literal hyphen, greedy left to right, not two en dashes.
+		assert_eq!(flatten_markup("a----b"), "a\u{2014}-b");
+		assert_eq!(flatten_markup("Council of Trent (1545--1563)"), "Council of Trent (1545\u{2013}1563)");
+		// A raw code span keeps its `--` literal: the inline scanner claims `` ` `` before this fallback
+		// is ever reached, so the substitution never sees the span's characters.
+		let runs = parse_inlines("see `a--b` here");
+		assert!(runs.iter().any(|r| matches!(r, Inline::Code(t) if t == "a--b")),
+			"raw span lost or converted: {:?}", runs);
+		// A maths span keeps its `-` as subtraction, for the same reason.
+		let runs = parse_inlines("$a-b$");
+		assert!(matches!(runs.as_slice(), [Inline::Math(_)]), "maths span not read as maths: {:?}", runs);
+		// A `\-` escape is consumed on its own, so it never joins the hyphen after it into a run: the
+		// pair stays two literal ASCII hyphens rather than folding to the single en-dash glyph `a--b`
+		// (unescaped) becomes.
+		assert_eq!(flatten_markup("a\\--b"), "a--b");
+		// `#link`'s destination is dropped entirely (austenite renders no clickable URL), so a `--` inside
+		// one is never seen at all -- the strictest match to Typst leaving an auto-linked URL unconverted.
+		assert_eq!(flatten_markup("see #link(\"https://x--y.com\")[the site]"), "see the site");
+	}
+
+	/// The same fallback trivially covers Typst's other markup substitution on dots: three or more become
+	/// an ellipsis, fewer stay literal, and the rule is still skipped inside code and maths.
+	#[test]
+	fn dot_runs_become_ellipsis_in_prose() {
+		assert_eq!(flatten_markup("wait..."), "wait\u{2026}");
+		assert_eq!(flatten_markup("a....b"), "a\u{2026}.b");
+		assert_eq!(flatten_markup("a..b"), "a..b");	// two dots: no defined symbol, left alone
+		assert_eq!(flatten_markup("v1.2.3"), "v1.2.3");	// scattered single dots: unaffected
+		let runs = parse_inlines("`a...b`");
+		assert!(matches!(runs.as_slice(), [Inline::Code(t)] if t == "a...b"), "raw span converted: {:?}", runs);
 	}
 
 	/// The term-dictionary aliases set their argument text with the styling of their `gs` siblings: `g`/`gi`
