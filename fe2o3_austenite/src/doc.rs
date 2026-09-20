@@ -579,6 +579,7 @@ struct Authoring<'a> {
 	want_index:		bool,			// a `Block::Index` placeholder was met, so the index is built after the walk
 	claim_gather:	ClaimGather,	// the reverse claim index's references, gathered in document order
 	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
+	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
 }
 
 /// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
@@ -1087,10 +1088,12 @@ impl<'a> Authoring<'a> {
 				// so `author` builds the entry list from the markers gathered walking the body once the walk
 				// ends. The heading above it (a `Block::BackMatterHeading`) opens the section and lists it.
 				Block::Index => { self.want_index = true; i += 1; },
-				// The reverse claim-reference index placeholder: like `Block::Index` it sets nothing here, only
-				// marks that the claim index is wanted, so `author` builds it from the references gathered walking
-				// the body once the walk ends. The heading above it opens the section and lists it.
-				Block::ClaimIndex => { self.want_claim_index = true; i += 1; },
+				// The reverse claim-reference index placeholder: it sets nothing here, but unlike `Block::Index`
+				// the listing is set IN FLOW at this source position (the `#context { ... collect-claim-refs() }`
+				// block sits in the Logic appendix, before the bibliography), not appended as back matter. So the
+				// body-node position is recorded now and the listing spliced in once the walk has gathered every
+				// reference, so its heading and intro are never stranded on a page ahead of a headless listing.
+				Block::ClaimIndex => { self.want_claim_index = true; self.claim_index_at = Some(self.nodes.len()); i += 1; },
 				// A scope is handled by the recursion at the loop top; named here only for exhaustiveness.
 				Block::Scoped { .. } => { i += 1; },
 				Block::Space(sp) => {
@@ -1152,6 +1155,7 @@ pub fn author(
 		want_index:		false,
 		claim_gather:	ClaimGather::default(),
 		want_claim_index:	false,
+		claim_index_at:	None,
 	};
 	// The top level has no parent continuation; the returned "consumed" flag is meaningless here and dropped.
 	res!(authoring.walk(blocks, style, None));
@@ -1172,11 +1176,21 @@ pub fn author(
 	// The reverse claim-reference index, built from the references gathered walking the body once the
 	// `Block::ClaimIndex` placeholder has been met. It sets in a single column (Typst's appendix wraps it in
 	// no `columns`), one wrapped paragraph per code, each code's pages read back from the ledger as forward
-	// references, so it is set after the body it points into, as back matter.
-	if authoring.want_claim_index && !authoring.claim_gather.occ.is_empty() {
-		let occ		= std::mem::take(&mut authoring.claim_gather.occ);
-		let entries	= res!(claim_index_nodes(&fonts, style, authoring.measure, &occ));
-		authoring.nodes.extend(entries);
+	// references. Unlike the back-matter index it is spliced in flow at the placeholder's own source position
+	// -- the `#context` block sits in the Logic appendix before the bibliography, so the §heading and intro
+	// above it must be followed immediately by the listing, not by a headless run of entries pages later.
+	if let Some(at) = authoring.claim_index_at {
+		if !authoring.claim_gather.occ.is_empty() {
+			let occ			= std::mem::take(&mut authoring.claim_gather.occ);
+			let entries		= res!(claim_index_nodes(&fonts, style, authoring.measure, &occ));
+			// The parbreak gap Typst leaves between the appendix intro paragraph and the first listing entry,
+			// the same block skip an authored paragraph takes above it.
+			let mut spliced: Vec<Node> = Vec::with_capacity(entries.len() + 1);
+			spliced.push(Node::Glue(Glue::fixed(style.par.skip)));
+			spliced.extend(entries);
+			let at = at.min(authoring.nodes.len());
+			authoring.nodes.splice(at..at, spliced);
+		}
 	}
 	let heads = authoring.heads;
 
@@ -3671,11 +3685,6 @@ fn claim_index_nodes(
 
 	let size	= style.text.body_size;
 	let leading	= style.text.leading;
-	// The body's own interline pitch, so entries stack the way successive prose lines do -- the gap a
-	// `linebreak()` leaves between two entries, read from a plain body line's ascent and descent.
-	let probe	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "Ag"));
-	let pd		= probe.dims();
-	let entry_gap	= if leading > pd.height + pd.depth { leading - pd.height - pd.depth } else { Sp::ZERO };
 
 	// One folio slot's reserved width: three digits at the index size, so a resolved page never outgrows it.
 	// Keyed `claim-slot-{n}` -- its OWN prefix, distinct from `ref_slot`'s `ref-{n}` (a body cross-reference)
@@ -3685,10 +3694,13 @@ fn claim_index_nodes(
 	let slot_dims	= slot_probe.dims();
 	let mut nodes:	Vec<Node>	= Vec::new();
 	let mut slot_no				= 0u32;
+	// The depth of the previous entry's last set line, so the glue to the next entry seats its baseline
+	// `leading` below -- the body's own interline pitch, exactly the rule `set_lines` applies within a
+	// paragraph. Reading the real box metrics (not a probe glyph's) is what keeps the entries at body leading:
+	// the block-edge model caps a single-line entry's own height and depth, so a fixed probe-derived gap would
+	// stack them far tighter than the body sets its lines.
+	let mut prev_depth: Option<Sp>	= None;
 	for (code, ids) in groups.iter() {
-		if !nodes.is_empty() {
-			nodes.push(Node::Glue(Glue::fixed(entry_gap)));
-		}
 		let mut pieces: Vec<Piece> = Vec::with_capacity(ids.len() * 2 + 3);
 		pieces.push(Piece::Text { text: code.clone(), role: Role::Bold });
 		pieces.push(Piece::Text { text: ": ".to_string(), role: Role::Body });
@@ -3706,7 +3718,18 @@ fn claim_index_nodes(
 		let lines = res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, size, &pieces, measure, leading,
 			style.text.justify, style.text.hyphenate, style.text.fill, Some(cap_edge(style, size))));
+		// This entry's first set line's height and last set line's depth, from the boxes as they will draw.
+		let first_h	= lines.iter().find_map(|n| if let Node::HBox(b) = n { Some(b.dims.height) } else { None }).unwrap_or(Sp::ZERO);
+		let last_d	= lines.iter().rev().find_map(|n| if let Node::HBox(b) = n { Some(b.dims.depth) } else { None }).unwrap_or(Sp::ZERO);
+		if let Some(pd) = prev_depth {
+			// Seat this entry's baseline `leading` below the previous entry's: gap = leading - depth above -
+			// height below, the same measure `set_lines` uses between two lines of one paragraph.
+			let want	= leading - pd - first_h;
+			let gap		= if want > Sp::ZERO { want } else { Sp::ZERO };
+			nodes.push(Node::Glue(Glue::fixed(gap)));
+		}
 		nodes.extend(lines);
+		prev_depth = Some(last_d);
 	}
 	Ok(nodes)
 }

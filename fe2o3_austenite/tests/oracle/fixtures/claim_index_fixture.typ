@@ -122,3 +122,12 @@ is invoked.
  }
  }
 }
+
+== Sources
+
+A section set after the reverse index, so its placement pins the listing above. In Typst the
+`#context { ... collect-claim-refs() ... }` block sets in flow at its heading, so this section opens directly
+beneath the last claim entry. A listing appended as back matter instead -- after every later section -- would
+strand these entries below this heading rather than above it, leaving the "Index of Body References" heading
+and its intro paragraph orphaned pages ahead of a headless run of codes. The section is here so the reverse
+index's in-flow placement is a fact the oracle can see, not an assertion the comment alone carries.
