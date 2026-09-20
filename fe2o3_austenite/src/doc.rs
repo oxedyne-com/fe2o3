@@ -1178,7 +1178,7 @@ fn indent_piece(indent: Sp) -> Piece {
 /// calibrates ([`ThemeCalibration::line_box_em`](crate::theme::ThemeCalibration)). Passed to the
 /// paragraph breakers as the block-edge model's top, so a paragraph's first line seats its top at the cap
 /// height and its inter-block glue attaches where Typst's does.
-fn cap_edge(style: &Theme, size: Sp) -> Sp {
+pub(crate) fn cap_edge(style: &Theme, size: Sp) -> Sp {
 	Sp((size.raw() as f64 * style.calibration.line_box_em).round() as i32)
 }
 

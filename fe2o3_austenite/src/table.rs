@@ -190,6 +190,11 @@ fn table_row_groups(
 		style.table.line_gap
 	};
 	let cell_leading	= Sp::from_pt(size.to_pt() * 1.2);	// dropped by `break_cell`, but a sane interline base
+	// A breakable table (the glossary) measures its rows to Typst's cap-height/baseline extent, so a
+	// one-line row is the cap-to-baseline height rather than the taller ascender-to-descender box -- the
+	// ~4.4pt-per-row overshoot the earlier `cap: None` left. A plain table keeps its own inset-based row
+	// heights (`None`), so every non-breakable table renders byte-identically to before.
+	let cell_cap	= if table.breakable { Some(crate::doc::cap_edge(style, size)) } else { None };
 	let rows	= &table.rows;
 	if rows.is_empty() {
 		return Err(err!("A table needs at least one row."; Input, Invalid, Missing));
@@ -248,7 +253,7 @@ fn table_row_groups(
 		let mut bands = 0usize;
 		for c in 0..ncols {
 			let mut lines = res!(break_cell(
-				fonts.clone(), bases[r], size, &piece_grid[r][c], colwidth[c], cell_leading));
+				fonts.clone(), bases[r], size, &piece_grid[r][c], colwidth[c], cell_leading, cell_cap));
 			// An image mark stacked beneath the cell's text takes its own band under the last line. A mark
 			// whose image will not load leaves the cell to its text alone, as a title logo degrades.
 			if let Some(mark) = rows[r].cells.get(c).and_then(|cell| cell.mark.as_ref()) {
@@ -366,6 +371,12 @@ pub fn lower(
 /// row past the first page would overflow off the bottom and clip. The glue is the breakpoint that lets the
 /// breaker paginate between rows; being zero it adds no space, and the leading glue at a page top is
 /// discarded like any other.
+///
+/// When the table has a header row, that row's box is emitted first, then a [`Node::RepeatHead`] armed with
+/// a clone of it, and a matching `RepeatHead(None)` is emitted after the last row. The driver stamps the
+/// armed header at the top of every fresh page the body rows spill onto, so the column heads repeat down a
+/// multi-page run -- Typst's repeated `table.header`. The first-page header is the emitted box, not the
+/// repeat, so it is never doubled there.
 pub fn lower_rows(
 	fonts:		Arc<FontSet>,
 	style: &Theme,
@@ -376,12 +387,31 @@ pub fn lower_rows(
 	-> Outcome<Vec<Node>>
 {
 	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
-	let mut out: Vec<Node> = Vec::with_capacity(groups.len() * 2);
+	let mut out: Vec<Node> = Vec::with_capacity(groups.len() * 2 + 2);
+	let mut groups = groups.into_iter();
+
+	// The header row's group, when the table has one: emitted as the first box, then armed as the repeat so
+	// every continuation page reprints it. Without a header the loop below just weaves the rows as before.
+	let mut armed = false;
+	if table.header {
+		if let Some((nodes, h)) = groups.next() {
+			let header = BoxNode::new(nodes, Dims::new(table_width, h, Sp::ZERO));
+			out.push(Node::VBox(header.clone()));
+			out.push(Node::RepeatHead(Some(Box::new(header))));
+			armed = true;
+		}
+	}
+
 	for (nodes, h) in groups {
 		if !out.is_empty() {
 			out.push(Node::Glue(Glue::fixed(Sp::ZERO)));	// the legal breakpoint between rows
 		}
 		out.push(Node::VBox(BoxNode::new(nodes, Dims::new(table_width, h, Sp::ZERO))));
+	}
+
+	// Disarm the repeat after the last row, so material below the table (should any follow) gets no header.
+	if armed {
+		out.push(Node::RepeatHead(None));
 	}
 	Ok(out)
 }
@@ -653,7 +683,9 @@ fn measure_cell(
 	-> Outcome<Sp>
 {
 	let mut m = Sp::ZERO;
-	for line in res!(break_cell(fonts, base, size, pieces, measure, size)) {
+	// Width only: the block-edge model touches height and depth, never width or the break points, so the
+	// measurement is taken with the plain ascender/descender edges (`None`) whatever the table's own model.
+	for line in res!(break_cell(fonts, base, size, pieces, measure, size, None)) {
 		if line.width > m {
 			m = line.width;
 		}
@@ -672,6 +704,12 @@ fn break_cell(
 	pieces:		&[Piece],
 	colwidth:	Sp,
 	leading:	Sp,
+	// The block-edge model for the cell's first and last lines. `Some(cap)` seats the cell's top edge at the
+	// cap height and its bottom edge at the baseline -- Typst's default `top-edge: "cap-height", bottom-edge:
+	// "baseline"`, which its `measure` of a cell's content uses, so a one-line row is the cap-to-baseline
+	// extent, not the taller ascender-to-descender box. `None` keeps the ascender/descender edges (a table
+	// whose row heights are set from its own inset, or a width-only measurement where the edges do not matter).
+	cap:		Option<Sp>,
 )
 	-> Outcome<Vec<CellLine>>
 {
@@ -680,10 +718,11 @@ fn break_cell(
 	}
 	// A cell is set ragged (`justify = false`): every space keeps its natural width, so the band's own
 	// justification to the table width -- for which the cells would otherwise hold the only stretchable
-	// glue -- cannot stretch or collapse the words within a cell. Typst sets table cells left-aligned.
-	// A cell's box edges are its own inset, not the flow's block edges, so the cap-height/baseline model is
-	// off here (`None`): the cell keeps the ascender/descender extent its row height is measured from.
-	let nodes = res!(break_paragraph_pieces(fonts.clone(), base, Dir::Ltr, size, pieces, colwidth, leading, false, true, Rgba::BLACK, None));
+	// glue -- cannot stretch or collapse the words within a cell. Typst sets table cells left-aligned. The
+	// block-edge model (`cap`) is threaded through so a breakable table (the glossary) measures its rows to
+	// the cap-height/baseline extent Typst does; the breaker already raises the first line's glyphs to match
+	// the lifted top edge and drops the last line's depth to the baseline, so the returned lines carry it.
+	let nodes = res!(break_paragraph_pieces(fonts.clone(), base, Dir::Ltr, size, pieces, colwidth, leading, false, true, Rgba::BLACK, cap));
 	let mut out = Vec::new();
 	for n in nodes {
 		if let Node::HBox(b) = n {
@@ -708,9 +747,39 @@ fn break_cell(
 	let overfull = out.iter().any(|l| l.width > colwidth);
 	let has_math = pieces.iter().any(|p| matches!(p, Piece::Math { .. }));
 	if overfull && !has_math {
-		return greedy_break_cell(fonts, base, size, pieces, colwidth);
+		let mut lines = res!(greedy_break_cell(fonts, base, size, pieces, colwidth));
+		// The greedy fallback builds its lines directly rather than through the breaker, so it applies the
+		// same block-edge model itself: the first line's glyphs are raised to the cap-height top and its box
+		// height dropped to the cap, and the last line's depth is dropped to the baseline. Greedy carries no
+		// maths (see above), so a text cell's baseline bottom is a plain zero depth.
+		if let Some(cap) = cap {
+			apply_cell_block_edges(&mut lines, cap);
+		}
+		return Ok(lines);
 	}
 	Ok(out)
+}
+
+/// Applies the cap-height/baseline block-edge model to a greedily-broken cell: the first line's box top is
+/// lifted from the face ascender to `cap` and its glyphs raised by the same amount so they still seat on
+/// their baseline, and the last line's depth is dropped from the descender to the baseline. It mirrors what
+/// [`set_lines`](crate::linebreak) does for the breaker's own output, for the fallback path that does not
+/// pass through it. A single-line cell is both first and last and takes both edges.
+fn apply_cell_block_edges(lines: &mut [CellLine], cap: Sp) {
+	if let Some(first) = lines.first_mut() {
+		if first.height > cap {
+			let drop = first.height - cap;
+			for child in &mut first.children {
+				if let Node::Leaf(l) = child {
+					l.shift = l.shift - drop;	// negative lowers nothing, raises the glyph to the lifted top
+				}
+			}
+			first.height = cap;
+		}
+	}
+	if let Some(last) = lines.last_mut() {
+		last.depth = Sp::ZERO;	// baseline bottom edge; the greedy path carries no maths hanging below it
+	}
 }
 
 /// One shaped word (or a superscript mark) with the breakable space that precedes it, ready to be packed
@@ -927,4 +996,44 @@ fn fill_band(width: Sp, height: Sp, colour: Rgba) -> Option<Leaf> {
 fn push_hrule(children: &mut Vec<Node>, total_h: &mut Sp, width: Sp, thick: Sp) {
 	children.push(Node::Leaf(Leaf::rule(Dims::new(width, thick, Sp::ZERO))));
 	*total_h += thick;
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::theme::Theme;
+
+	/// The cell cap-edge (Unit D3-B) shortens a one-line 9pt glossary cell from the face
+	/// ascender/descender extent to the cap-height/baseline extent Typst measures against. This both
+	/// guards the fix and records the measured drop the brief asks be proved (~22.3pt -> ~17.9pt row, the
+	/// ~4.4pt-per-row overshoot): the height compared here is the cell's own line extent, before the row's
+	/// padding and rules are added around it.
+	#[test]
+	fn cell_cap_edge_shortens_a_one_line_row() -> Outcome<()> {
+		let fonts	= std::sync::Arc::new(res!(crate::fonts::libertinus()));
+		let size	= Sp::from_pt(9.0);					// GLOSSARY_TEXT_PT
+		let style	= Theme::default();
+		let cap		= crate::doc::cap_edge(&style, size);
+		let colwidth	= Sp::from_pt(200.0);			// wide enough that the term sets on one line
+		let pieces	= vec![Piece::Text { text: "Alpha".to_string(), role: Role::Body }];
+
+		let plain	= res!(break_cell(fonts.clone(), Role::Body, size, &pieces, colwidth, size, None));
+		let capped	= res!(break_cell(fonts.clone(), Role::Body, size, &pieces, colwidth, size, Some(cap)));
+		if plain.len() != 1 || capped.len() != 1 {
+			return Err(err!("Expected one line each: plain {}, capped {}.", plain.len(), capped.len(); Test, Mismatch));
+		}
+		let plain_v		= (plain[0].height + plain[0].depth).to_pt();
+		let capped_v	= (capped[0].height + capped[0].depth).to_pt();
+		eprintln!("[cap-edge] one-line 9pt cell extent: plain {:.2}pt -> capped {:.2}pt (drop {:.2}pt), cap {:.2}pt",
+			plain_v, capped_v, plain_v - capped_v, cap.to_pt());
+		// The capped extent must be strictly shorter (the whole point of the fix), and the last line's depth
+		// must drop to the baseline (zero) for a text cell.
+		if capped_v >= plain_v {
+			return Err(err!("The cap-edge did not shorten the cell: plain {:.2}pt, capped {:.2}pt.", plain_v, capped_v; Test, Mismatch));
+		}
+		if capped[0].depth != Sp::ZERO {
+			return Err(err!("The capped cell's last-line depth was not the baseline: {} sp.", capped[0].depth.raw(); Test, Mismatch));
+		}
+		Ok(())
+	}
 }

@@ -192,6 +192,12 @@ fn compose<M: Metrics>(
 	let mut pending:	Vec<FloatNode>	= Vec::new();
 	let mut bands					= FloatBands::empty();
 
+	// The header a breakable table asks repeated: armed by a `Node::RepeatHead(Some(head))` marker and
+	// cleared by `RepeatHead(None)`. While armed, every fresh page the flow breaks onto stamps this boxed
+	// header at its top before the body resumes, so a multi-page table's column heads repeat (Typst's
+	// repeated `table.header`). It is transparent to breakability, exactly as an anchor is.
+	let mut repeat:		Option<BoxNode>	= None;
+
 	// The page break is atom-aware, not line-by-line. A run of boxes with no legal breakpoint between them
 	// -- a paragraph's first two lines welded by the orphan penalty, its last two by the widow penalty (see
 	// [`doc::guard_widows`](crate::doc)) -- is an atom, weighed and placed whole: if the atom will not fit,
@@ -285,6 +291,12 @@ fn compose<M: Metrics>(
 				at_break	= true;
 				prev_box	= false;
 			},
+			Node::RepeatHead(head) => {
+				// Arm or disarm the repeated header. A `Some` clones the boxed header the lowerer built; a
+				// `None` clears it after the table's last row. Transparent to breakability, like an anchor:
+				// it neither opens nor closes an atom, so the rows either side break exactly as before.
+				repeat = head.as_ref().map(|b| (**b).clone());
+			},
 			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
 				// At an atom start, weigh the whole atom -- every box up to the next legal breakpoint, with the
 				// footnotes they introduce reserved from the foot -- and break before it if it will not fit. A
@@ -300,6 +312,16 @@ fn compose<M: Metrics>(
 						res!(flush_floats(
 							&mut pending, &mut frame, &mut y, &mut bands, Sp::ZERO, page_no, geom, top, bottom,
 							metrics, incoming, &mut ledger));
+						// A breakable table with a repeated header stamps that header at the top of the fresh
+						// page before the row that broke onto it, below any top float the flush stacked. It is
+						// placed like any keep box; the body then resumes below it. The first-page header is set
+						// as an ordinary box ahead of the arming marker, so this repeat never doubles it there.
+						if let Some(head) = &repeat {
+							res!(place_vbox(head, y, page_no, geom, metrics, incoming, &mut frame, &mut ledger));
+							y += head.dims.vextent();
+							// The atom that broke onto this page is placed just below, and sets `at_top` false
+							// itself; the header already made the page non-empty, so no leading is discarded.
+						}
 					}
 				}
 
@@ -454,6 +476,9 @@ fn flow_columns<M: Metrics>(
 				at_break	= false;
 				prev_box	= true;
 			},
+			// A repeated-header marker never carries vertical extent and never opens or closes an atom, so a
+			// columns block that happened to enclose one just passes it through untouched.
+			Node::RepeatHead(_) => (),
 			// A float or a nested columns block inside a columns block is a construction error the parser never
 			// builds, so it is transparent here rather than flattened.
 			Node::Float(_) | Node::Columns(_) => (),
@@ -617,6 +642,9 @@ fn place_float<M: Metrics>(
 			// A columns block is only ever a top-level document node; one nested in a float's body would be a
 			// construction error, so it draws nothing rather than being flattened here.
 			Node::Columns(_)	=> (),
+			// A repeated-header marker is a top-level control node; one in a float's body is a construction
+			// error the lowering never builds, so it is passed over rather than flattened.
+			Node::RepeatHead(_)	=> (),
 		}
 	}
 	ledger.leave_region(prev_region);
@@ -807,7 +835,8 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 				collect_marks(&nodes[j], &mut marks);
 				prev_box = true;
 			},
-			Node::Anchor(_) | Node::Float(_) | Node::Columns(_) => (),	// transparent to the atom
+			// Transparent to the atom: none opens or closes it, and a repeated-header marker carries no extent.
+			Node::Anchor(_) | Node::Float(_) | Node::Columns(_) | Node::RepeatHead(_) => (),
 		}
 		j += 1;
 	}
@@ -933,6 +962,9 @@ fn place_line<M: Metrics>(
 			// A columns block is a top-level node; one woven into a line would be a construction error, so it
 			// draws nothing rather than being flattened here.
 			Node::Columns(_) => (),
+			// A repeated-header marker is a top-level control node; nested here it is a construction
+			// error the lowering never builds, so it is passed over rather than flattened.
+			Node::RepeatHead(_) => (),
 		}
 	}
 	Ok(())
@@ -982,6 +1014,9 @@ fn place_vbox<M: Metrics>(
 			// A columns block never nests inside a keep box; one that did would be a construction error, so it
 			// draws nothing rather than being flattened into the box.
 			Node::Columns(_) => (),
+			// A repeated-header marker is a top-level control node; nested here it is a construction
+			// error the lowering never builds, so it is passed over rather than flattened.
+			Node::RepeatHead(_) => (),
 		}
 	}
 	Ok(())

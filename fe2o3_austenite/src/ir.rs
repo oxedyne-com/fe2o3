@@ -438,6 +438,12 @@ pub enum Node {
 	Anchor(AnchorId),	// a zero-size marker recording where an identity landed
 	Float(FloatNode),	// a block-level float, deferred by the driver to the top or foot of a later page
 	Columns(ColumnsNode),	// a block flowed into equal side-by-side columns, filled left to right
+	// A zero-size marker arming (Some) or disarming (None) a repeated header: while armed, the driver
+	// stamps the boxed header at the top of every fresh page the following material spills onto, so a
+	// breakable table's column heads repeat down a multi-page run (Typst's `table.header` repeat). It is
+	// never ToDat-serialised -- it is a driver-time control node the lowerer weaves, not shipped IR -- so
+	// adding it changes no on-disc format. Transparent to breakability, like `Anchor`.
+	RepeatHead(Option<Box<BoxNode>>),
 }
 
 impl Node {
@@ -458,6 +464,9 @@ impl Node {
 			// A columns block is flowed by the driver's own multi-column pass, which advances the cursor
 			// itself; it contributes no simple vertical extent to weigh where it stands.
 			Node::Columns(_)	=> Sp::ZERO,
+			// A repeated-header marker is a zero-size control node: it arms or disarms the driver's header
+			// repeat and occupies no vertical space where it stands.
+			Node::RepeatHead(_)	=> Sp::ZERO,
 		}
 	}
 
