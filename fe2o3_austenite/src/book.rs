@@ -306,13 +306,15 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// top-level `#set` -- lowers onto the theme. The config file's `#let` type scale is read separately
 	// by `read_config` above; this reads only the root's own top-level declarations.
 	lang::set::lower_root_declarations(root_src, &mut style);
-	// The book's `#let` furniture functions (`#pr-note`, `#aside-box`), collected once against the document's
-	// body size so every `em` in a definition resolves to an absolute, then threaded into every chapter the
-	// assembler reads so a call expands into its padded box rather than being tallied as a skipped construct.
-	let tfns = collect_book_template_fns(root_src, root_dir, style.text.body_size);
+	// The book's `#let` scope -- its furniture functions (`#pr-note`, `#aside-box`) and content bindings --
+	// collected once against the document's body size so every `em` in a furniture definition resolves to an
+	// absolute, then threaded into every chapter the assembler reads so a call expands rather than being
+	// tallied as a skipped construct.
+	let scope = collect_scope(root_src, root_dir, style.text.body_size);
+	let binds = lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns, &config_src));
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
@@ -413,10 +415,11 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 		Some(d)	=> d.join("assets").join("fonts"),
 		None	=> root_dir.join("assets").join("fonts"),
 	};
-	let tfns = collect_book_template_fns(root_src, root_dir, style.text.body_size);
+	let scope = collect_scope(root_src, root_dir, style.text.body_size);
+	let binds = lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, &tfns, ""));
+	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
@@ -1640,57 +1643,71 @@ fn content_field(src: &str, name: &str) -> Option<String> {
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
-// │ #let FURNITURE FUNCTIONS (collected across the whole book)                  │
+// │ #let SCOPE (furniture + content bindings, collected across the whole tree)  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Collects every `#let name(params) = block/box(...)` furniture definition the book declares -- in the
-/// root, in each `#include`d chapter (where `#pr-note` is defined, byte-identical, atop three chapters), and
-/// in the shared template chain the root imports (where `#aside-box` lives, and, two hops on, the
-/// `#let colours = (...)` palette it fills from) -- into one map, lowered against `body_size` so every `em`
-/// resolves to an absolute and every `colours.<name>` fill/stroke resolves against the palette. A call to
-/// one is then expanded rather than tallied as a skip. A tree that defines none yields an empty map.
+/// The owned `#let` bindings a document compiles against: the furniture functions ([`TemplateFns`]) and the
+/// content bindings ([`ContentFns`]). Held here so [`collect_scope`] can hand back both, and the caller
+/// borrows them into a [`lang::rules::Bindings`] to thread through the reader.
+pub struct Scope {
+	pub tfns:	lang::rules::TemplateFns,
+	pub cfns:	lang::rules::ContentFns,
+}
+
+/// Collects the whole `#let` scope a document compiles against -- furniture functions and content bindings
+/// alike -- from `main_src`, the template chain it `#import`s (imports-first, so a definition sees the
+/// palettes and bindings its own imports supply) and each chapter it `#include`s. Shared by the book/doc
+/// path and the lone-file path, so an `#import` resolves whether or not the document also carries an
+/// `#include`: a lone file has none, so the include walk is simply a no-op there.
 ///
-/// The template chain is walked imports-first so a file's own furniture is lowered only once the palettes it
-/// imports are in hand. A collected name that clashes with a built-in construct is refused inside
-/// [`lang::rules::collect_template_fns`], so a template's own `#let styled-box` never shadows the reader's.
-fn collect_book_template_fns(root_src: &str, root_dir: &Path, body_size: Sp) -> lang::rules::TemplateFns {
+/// Furniture is lowered against `body_size` so every `em` resolves to an absolute and every `colours.<name>`
+/// fill/stroke resolves against the palette; a furniture name that clashes with a built-in construct is
+/// refused inside [`lang::rules::collect_template_fns`], and a content-binding name likewise inside
+/// [`lang::rules::collect_content_fns`], so a template's own `#let styled-box` never shadows the reader's. A
+/// tree that defines neither yields two empty maps and reads exactly as before.
+pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	let mut palette	= lang::rules::Palette::new();
 	let mut tfns	= lang::rules::TemplateFns::new();
-	// The template chain the root imports: builds the palette and collects the template's furniture (aside-box).
-	for line in root_src.lines() {
+	let mut cfns	= lang::rules::ContentFns::new();
+	// The template chain the main source imports: builds the palette and collects furniture and content
+	// bindings (the `#aside-box` furniture, the `#greet` content binding, the palette they resolve against).
+	for line in main_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(rel) = first_quoted(rest) {
-				walk_template_imports(root_dir, &rel, body_size, &mut palette, &mut tfns, 0);
+				walk_template_imports(main_dir, &rel, body_size, &mut palette, &mut tfns, &mut cfns, 0);
 			}
 		}
 	}
-	// The root's own definitions, and each included chapter's (pr-note), with the palette now in hand.
-	lang::rules::collect_palette(root_src, &mut palette);
-	lang::rules::collect_template_fns(root_src, body_size, &palette, &mut tfns);
-	for line in root_src.lines() {
+	// The main source's own definitions, and each included chapter's (pr-note), with the palette now in hand.
+	lang::rules::collect_palette(main_src, &mut palette);
+	lang::rules::collect_template_fns(main_src, body_size, &palette, &mut tfns);
+	lang::rules::collect_content_fns(main_src, &mut cfns);
+	for line in main_src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
-				if let Ok(src) = vfs::read_to_string(&root_dir.join(&rel)) {
+				if let Ok(src) = vfs::read_to_string(&main_dir.join(&rel)) {
 					lang::rules::collect_template_fns(&src, body_size, &palette, &mut tfns);
+					lang::rules::collect_content_fns(&src, &mut cfns);
 				}
 			}
 		}
 	}
-	tfns
+	Scope { tfns, cfns }
 }
 
 /// Follows a local `#import "<rel>"` from `dir`, imports-first, collecting each file's `#let colours`
-/// palette and then its furniture definitions -- so a file's fills resolve against the palettes its own
-/// imports supply. A package import (`@preview/...`), a missing file, or a cycle past the depth cap is
-/// skipped.
+/// palette, its furniture definitions and its content bindings -- so a file's fills resolve against the
+/// palettes its own imports supply. A package import (`@preview/...`), a missing file, or a cycle past the
+/// depth cap is skipped.
 fn walk_template_imports(
 	dir:		&Path,
 	rel:		&str,
 	body_size:	Sp,
 	palette:	&mut lang::rules::Palette,
 	tfns:		&mut lang::rules::TemplateFns,
+	cfns:		&mut lang::rules::ContentFns,
 	depth:		u32,
 )
 {
@@ -1703,17 +1720,18 @@ fn walk_template_imports(
 		Err(_)	=> return,
 	};
 	let next_dir = path.parent().unwrap_or(dir);
-	// Imports first, so a palette or furniture this file depends on is collected before its own.
+	// Imports first, so a palette, furniture or binding this file depends on is collected before its own.
 	for line in src.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(inner_rel) = first_quoted(rest) {
-				walk_template_imports(next_dir, &inner_rel, body_size, palette, tfns, depth + 1);
+				walk_template_imports(next_dir, &inner_rel, body_size, palette, tfns, cfns, depth + 1);
 			}
 		}
 	}
 	lang::rules::collect_palette(&src, palette);
 	lang::rules::collect_template_fns(&src, body_size, palette, tfns);
+	lang::rules::collect_content_fns(&src, cfns);
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1847,12 +1865,12 @@ fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
 /// `config` is the book's `config.typ` source (empty for the documentation idiom, which has none), so a
 /// `#if <var> == "..."` include guard in a chapter can be resolved against the same scalars the config
 /// binds -- `media` above all -- and only the taken branch's includes followed. See [`assemble_into`].
-pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, tfns: &lang::rules::TemplateFns, config: &str)
+pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::rules::Bindings, config: &str)
 	-> Outcome<(Vec<Block>, lang::Refusals)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
 	let mut skips = lang::Refusals::default();
-	res!(assemble_into(root_src, root_dir, root_path, tfns, config, 0, &mut blocks, &mut skips));
+	res!(assemble_into(root_src, root_dir, root_path, binds, config, 0, &mut blocks, &mut skips));
 	Ok((blocks, skips))
 }
 
@@ -1866,7 +1884,7 @@ fn assemble_into(
 	src:	&str,
 	dir:	&Path,
 	path:	&Path,
-	tfns:	&lang::rules::TemplateFns,
+	binds:	lang::rules::Bindings,
 	config:	&str,
 	depth:	u32,
 	blocks:	&mut Vec<Block>,
@@ -1907,7 +1925,7 @@ fn assemble_into(
 		// branch -- is not the guard's own and falls through below, to the generic per-line scan and then
 		// to ordinary content. A lone `]` with no guard open at all is likewise ordinary content.
 		if marker == "]" && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			guards.pop();
 			continue;
 		}
@@ -1915,7 +1933,7 @@ fn assemble_into(
 		// branch. Its `]` closes the content bracket and its `[` reopens it, so the depth is unchanged and
 		// the state is left as it stands.
 		if is_guard_else(marker) && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			if let Some(top) = guards.last_mut() {
 				top.in_else = true;
 			}
@@ -1927,7 +1945,7 @@ fn assemble_into(
 		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
 		// never silently followed nor leaked.
 		if let Some(cond) = guard_open(marker) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			let parent_active = guards.iter().all(|g| g.emits());
 			let (live, then_taken) = if !parent_active {
 				(false, false)
@@ -1953,7 +1971,7 @@ fn assemble_into(
 		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
 		// space is left to the reader's own code-skip path.
 		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
 			skips.tag_file(&label);
 			let mut state = lang::parse::SkipState::new();
@@ -1976,7 +1994,7 @@ fn assemble_into(
 			lang::parse::scan_brackets(line, &mut top.state);
 			if !top.state.has_open_bracket() {
 				let refused = top.refused;
-				res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+				res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 				guards.pop();
 				if !refused {
 					skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
@@ -1991,7 +2009,7 @@ fn assemble_into(
 			continue;
 		}
 		if let Some(rest) = t.strip_prefix("#include") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
 					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
@@ -2008,7 +2026,7 @@ fn assemble_into(
 					let inc_dir = inc_path.parent().unwrap_or(dir);
 					let mut chap_blocks: Vec<Block> = Vec::new();
 					let mut chap_skips = lang::Refusals::default();
-					res!(assemble_into(&inc_src, inc_dir, &inc_path, tfns, config, depth + 1,
+					res!(assemble_into(&inc_src, inc_dir, &inc_path, binds, config, depth + 1,
 						&mut chap_blocks, &mut chap_skips));
 					// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
@@ -2031,7 +2049,7 @@ fn assemble_into(
 				},
 			}
 		} else if t.starts_with("#part-page") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
 			// its number across a part boundary and a part never appears in a running head.
@@ -2055,7 +2073,7 @@ fn assemble_into(
 	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
 	// include) closes with, if any.
-	res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+	res!(flush_inline(&mut buf, blocks, skips, &label, binds));
 	Ok(())
 }
 
@@ -2069,12 +2087,12 @@ fn flush_inline(
 	blocks:	&mut Vec<Block>,
 	skips:	&mut lang::Refusals,
 	file:	&str,
-	tfns:	&lang::rules::TemplateFns,
+	binds:	lang::rules::Bindings,
 )
 	-> Outcome<()>
 {
 	if !buf.trim().is_empty() {
-		let (b, mut s) = res!(lang::to_blocks_with_templates(buf, tfns));
+		let (b, mut s) = res!(lang::to_blocks_with_templates(buf, binds));
 		s.tag_file(file);
 		blocks.extend(b);
 		skips.merge(s);
@@ -2622,7 +2640,7 @@ mod tests {
 		// Austenite design's `= Purpose`). With no include present, only that inline markup is read; its
 		// heading and paragraph must both survive, and the template call above them must be skipped, not set.
 		let root = "#import \"template.typ\": *\n#show: doc.with(title: [X])\n\n= Purpose\n\nAustenite is an engine.\n";
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		assert!(
 			blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
 			"the root's inline level-1 heading is read into the flow");
@@ -2643,7 +2661,7 @@ mod tests {
 		let root = "#let media = \"ebook\"\n\nIntro paragraph.\n\n#if media == \"ebook\" [\nEbook only paragraph.\n] else [\nPrint only paragraph.\n]\n\nTail paragraph.\n";
 
 		// File-local `#let media = "ebook"`, no config: the then-branch is taken.
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Intro paragraph") && body.contains("Tail paragraph"),
 			"prose around the guard must survive: {}", body);
@@ -2654,14 +2672,14 @@ mod tests {
 
 		// The book config binds `media = "print"` and takes precedence over the file's own `#let`: the
 		// else-branch is taken instead, proving the config-first resolution the real books rely on.
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), "#let media = \"print\"\n"));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), "#let media = \"print\"\n"));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Print only paragraph"), "config `media` selects the else-branch: {}", body);
 		assert!(!body.contains("Ebook only paragraph"), "the ebook branch is dropped under the config: {}", body);
 
 		// An unsupported guard form is refused and reported, not followed nor leaked.
 		let odd = "#if media > 3 [\nSomething.\n]\n";
-		let (blocks, skips) = res!(assemble(odd, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, skips) = res!(assemble(odd, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(!body.contains("Something"), "a refused guard follows neither branch: {}", body);
 		assert!(skips.report().map(|r| r.contains("#if")).unwrap_or(false),
@@ -2677,7 +2695,7 @@ mod tests {
 	fn if_guard_bracket_extent_survives_an_inner_content_closer() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "#let media = \"ebook\"\n\n#if media == \"ebook\" [\nEbook lead-in with an aside: #emph[\nspanning more than one line\n]\nand the branch continues here.\n] else [\nPrint branch text.\n]\n\nTail paragraph.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Ebook lead-in") && body.contains("spanning more than one line")
 			&& body.contains("and the branch continues here"),
@@ -2700,7 +2718,7 @@ mod tests {
 	fn if_brace_bodied_form_is_refused_as_one_block_not_leaked() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "Intro.\n\n#if media == \"ebook\" {\n  let x = 1\n} else {\n  let x = 2\n}\n\nTail.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Intro") && body.contains("Tail"), "prose around the guard must survive: {}", body);
 		assert!(!body.contains("let x") && !body.contains("} else {"),
@@ -2713,7 +2731,7 @@ mod tests {
 	#[test]
 	fn test_a_part_page_divider_lifts_to_a_heading_03() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
-		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
 			Block::Heading { level, segments, .. } => {
@@ -2793,7 +2811,7 @@ mod tests {
 		let root_src	= "#include \"chap_a.typ\"\n#include \"chap_b.typ\"\n";
 		let root_path	= base.join("root.typ");
 
-		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, &lang::rules::TemplateFns::new(), ""));
+		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 
 		// Clean up before asserting, so a failed assertion leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
