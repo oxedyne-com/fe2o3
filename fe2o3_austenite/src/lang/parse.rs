@@ -234,7 +234,9 @@ pub fn document(src: &str) -> Outcome<Vec<Item>> {
 /// line-leading `#func(...)` call, a `#columns` wrapper, and any unhandled inline `#func[...]`. The
 /// caller prints the summary so a dropped construct is reported rather than lost silently.
 pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
-	document_with_templates(src, &crate::lang::rules::TemplateFns::new())
+	let tfns = crate::lang::rules::TemplateFns::new();
+	let cfns = crate::lang::rules::ContentFns::new();
+	document_with_templates(src, crate::lang::rules::Bindings::new(&tfns, &cfns))
 }
 
 /// Records a refusal for every claim reference (`#claim-refs`/`#claim-label`) that sits in a context the
@@ -293,19 +295,21 @@ fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, sk
 	}
 }
 
-/// As [`document_with_refusals`], with a set of bound `#let` furniture functions (`tfns`) in scope: a call
-/// to one -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- is expanded into a padded box rather
-/// than tallied as a skipped construct. A body re-parsed here carries the same `tfns`, so a furniture call
-/// nested inside another's body expands too. With an empty map this is exactly [`document_with_refusals`].
+/// As [`document_with_refusals`], with the `#let` bindings (`binds`) in scope: a call to a furniture
+/// function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- expands into a padded box, and a
+/// reference to a content binding -- `#greet("world")`, a bare `#intro` -- expands into its re-read markup,
+/// rather than either being tallied as a skipped construct. A body re-parsed here carries the same `binds`,
+/// so a call nested inside another's body expands too. With empty maps this is exactly
+/// [`document_with_refusals`].
 ///
 /// After the surface tree is built, [`flag_unindexed_claim_refs`] records a refusal for any claim reference
 /// that landed in a context the layout does not gather into the reverse claim index. This runs once, on the
 /// whole assembled tree -- the recursive re-parse of a `#columns`/`#styled-box` body reaches for
 /// [`parse_items`] directly, so a nested claim reference is flagged once here rather than again per level.
-pub fn document_with_templates(src: &str, tfns: &crate::lang::rules::TemplateFns)
+pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
-	let (items, mut skips) = res!(parse_items(src, tfns));
+	let (items, mut skips) = res!(parse_items(src, binds));
 	flag_unindexed_claim_refs(&items, &mut skips);
 	Ok((items, skips))
 }
@@ -313,7 +317,7 @@ pub fn document_with_templates(src: &str, tfns: &crate::lang::rules::TemplateFns
 /// The surface-tree parse proper, without the [`flag_unindexed_claim_refs`] post-pass -- so a recursively
 /// re-parsed body (a `#columns`/`#styled-box` wrapper's content) is not validated twice, once here and again
 /// when its parent walks the spliced items. [`document_with_templates`] wraps this with that one validation.
-fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
+fn parse_items(src: &str, binds: crate::lang::rules::Bindings)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
 	let mut skips:		Refusals	= Refusals::default();
@@ -405,7 +409,7 @@ fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 			if !cap.state.has_open_bracket() {
 				let done = capture.take();
 				if let Some(cap) = done {
-					dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);
+					dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
 				}
 			}
 			continue;
@@ -447,7 +451,7 @@ fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
 			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-		} else if let Some(kind) = capture_opener(trimmed, tfns) {
+		} else if let Some(kind) = capture_opener(trimmed, binds) {
 			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
 			// array feeding a table. It closes any open block, then its whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
@@ -460,7 +464,7 @@ fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 			buf.push('\n');
 			let cap = Capture { kind, buf, state, start };
 			if !cap.state.has_open_bracket() {
-				dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);	// the whole construct closed on one line
+				dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
 			}
@@ -495,6 +499,15 @@ fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
+		} else if is_bare_ident_ref(trimmed) {
+			// A line that is a bare `#name` binding to nothing the reader knows: a content binding was not in
+			// scope for it, and it is neither furniture nor an inline call (a bound `#name` is expanded by
+			// `capture_opener` above, before this arm). A bare identifier resolves to a value in Typst, so
+			// setting its source as literal prose would leak a `#` onto the page; it is refused with its span
+			// instead, exactly as a `#name(...)` call the reader cannot run already is.
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
+			flush_list(&mut items, &mut stack);
+			skips.record(&construct_name(trimmed), Span::new(start, end));
 		} else if trimmed.starts_with('=') && !math_block_open {
 			// A heading closes any paragraph or list above it, then stands on its own line.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
@@ -561,7 +574,7 @@ fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
 	// still yields its best-effort figure or table rather than swallowing the tail silently.
 	if let Some(cap) = capture {
-		dispatch_capture(cap, &mut items, &mut arrays, &mut skips, tfns);
+		dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
 	}
 	Ok((items, skips))
 }
@@ -1520,6 +1533,19 @@ fn opens_standalone_call(trimmed: &str) -> bool {
 	}
 }
 
+/// Is this already-left-trimmed line a bare identifier reference -- `#name` with nothing else on the line?
+/// A code keyword (`#let`, ...) has a trailing space and so is not one; a call (`#name(`/`#name[`) carries a
+/// delimiter and is not one; a lone `#` is not one. Used to refuse a line-leading value reference the reader
+/// holds no binding for, rather than leak its `#name` source into the prose. A bound `#name` is expanded
+/// upstream in [`capture_opener`], so this only ever sees an unresolved reference.
+fn is_bare_ident_ref(trimmed: &str) -> bool {
+	match trimmed.strip_prefix('#') {
+		Some(rest)	=> !rest.is_empty()
+			&& rest.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
+		None		=> false,
+	}
+}
+
 /// Is this identifier one of the book template's inline functions the reader sets in place -- a glossary
 /// or index call, a term-dictionary lookup, a hyperlink, a citation or an emphasis call? These emit body
 /// text (or an invisible marker) mid-paragraph, so a line that opens with one is prose the inline scanner
@@ -2132,19 +2158,27 @@ enum CaptureKind {
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
+	ContentCall(String),	// a `#name`, `#name(args)` or `#name[ ... ]` reference to a bound content binding, expanded into re-read markup spliced in
 	Context,		// a line-leading `#context { ... }`/`#context[ ... ]`: gathered whole, then either the reverse claim index (its body calls `collect-claim-refs(`) or a refusal
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
 /// bare `#table(`, or a `#let name = (` data array. `None` for any other line, which the caller then
 /// offers to [`code_skip`].
-fn capture_opener(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> Option<CaptureKind> {
+fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings) -> Option<CaptureKind> {
 	// A call to a bound `#let` furniture function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` --
 	// is expanded rather than skipped. Recognised before the generic openers so a furniture name never
 	// collides with one of them (none of the corpus names does), and only when the map holds it, so an
 	// unbound `#name[...]` still falls through to be tallied as a skip exactly as before.
-	if let Some(name) = template_call_name(trimmed, tfns) {
+	if let Some(name) = template_call_name(trimmed, binds.tfns) {
 		return Some(CaptureKind::TemplateCall(name));
+	}
+	// A reference to a bound content binding -- a bare `#intro`, a `#greet("world")`, a `#note[ ... ]` -- is
+	// gathered whole and expanded into its re-read markup. Recognised only when the map holds the name and it
+	// is not one of the inline-call family (a content binding named `idx`/`g` must not shadow the inline call
+	// the scanner sets in place), so an unbound or inline reference still falls through unchanged.
+	if let Some(name) = content_call_name(trimmed, binds.cfns) {
+		return Some(CaptureKind::ContentCall(name));
 	}
 	// A line-leading `#context { ... }` (or the bracket twin `#context[ ... ]`): gathered whole so its body
 	// can be inspected for the `collect-claim-refs(` signature that marks the reverse claim index, and
@@ -2232,6 +2266,30 @@ fn template_call_name(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> 
 	}
 }
 
+/// If this line opens a reference to a bound content binding -- `#<name>`, `#<name>(args)` or `#<name>[..]`
+/// where `<name>` is a key of `cfns` and not one of the inline-call family -- that name; else `None`. A bare
+/// `#name` matches only when the whole trimmed line is exactly `#name`, so an inline `#name` mid-prose is
+/// left to the inline scanner; a `#name(` or `#name[` matches as a standalone call opener whatever trails
+/// it, the same latitude [`template_call_name`] allows a furniture call. The inline-call guard mirrors
+/// [`opens_standalone_call`]'s: a binding named `idx`/`g` must never shadow the inline call the scanner sets.
+fn content_call_name(trimmed: &str, cfns: &crate::lang::rules::ContentFns) -> Option<String> {
+	let rest = trimmed.strip_prefix('#')?;
+	let name_len = rest.chars().take_while(|&c| c.is_alphanumeric() || c == '-' || c == '_').count();
+	if name_len == 0 {
+		return None;
+	}
+	let name: String = rest.chars().take(name_len).collect();
+	if is_inline_call(&name) || !cfns.contains_key(&name) {
+		return None;
+	}
+	let after: String = rest.chars().skip(name_len).collect();
+	match after.trim_end().chars().next() {
+		None					=> Some(name),	// a bare `#name` line
+		Some('(') | Some('[')	=> Some(name),	// a standalone `#name(...)` or `#name[...]` call
+		_						=> None,		// `#name` followed by prose is an inline reference
+	}
+}
+
 /// The `[ ... ]` body of a captured furniture call, and its keyword arguments if any. `#name[ body ]` has
 /// no arguments (`args` empty); `#name(title: [..])[ body ]` carries the argument group before the body.
 /// `None` when no `[ ... ]` content group follows the name, so a malformed call contributes no body.
@@ -2315,7 +2373,7 @@ fn dispatch_capture(
 	items:	&mut Vec<Item>,
 	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
 	skips:	&mut Refusals,
-	tfns:	&crate::lang::rules::TemplateFns,
+	binds:	crate::lang::rules::Bindings,
 )
 {
 	match cap.kind {
@@ -2358,7 +2416,7 @@ fn dispatch_capture(
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, tfns) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
 					skips.merge(sub);
 					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -2378,7 +2436,7 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((inner, sub)) = parse_items(&body, tfns) {
+				if let Ok((inner, sub)) = parse_items(&body, binds) {
 					skips.merge(sub);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
@@ -2419,13 +2477,13 @@ fn dispatch_capture(
 			// wrapped in a single `Item::Box` under the definition's lowered patch -- the callout geometry and
 			// the inner-set overlay. A `title:` argument becomes a leading bold paragraph in the box. The call
 			// is set, not skipped, so it is not tallied; a refusal inside the body still folds in.
-			let tf = match tfns.get(&name) {
+			let tf = match binds.tfns.get(&name) {
 				Some(tf)	=> tf,
 				None		=> return,	// the opener only fires for a bound name, so this cannot happen
 			};
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, tfns) {
+					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
 						skips.merge(sub);
 						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
 						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
@@ -2458,7 +2516,129 @@ fn dispatch_capture(
 				None => skips.record(&fmt!("#{}", name), Span::new(cap.start, cap.start)),
 			}
 		},
+		CaptureKind::ContentCall(name) => {
+			// A reference to a bound content binding. Its positional arguments (none for a bare reference) are
+			// read and substituted for each `#param` in the body, then the expanded markup is read through the
+			// document parser again -- with the same bindings in scope, so a nested call expands too -- and its
+			// blocks are spliced in flat. Unlike a furniture call, the body is arbitrary block markup, not a
+			// wrap, so a heading in the binding becomes a real heading rather than a boxed paragraph. The call
+			// is set, not skipped, so it is not tallied; a refusal inside the expanded body still folds in.
+			let cf = match binds.cfns.get(&name) {
+				Some(cf)	=> cf,
+				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+			};
+			let args		= content_call_args(&cap.buf, &name);
+			let expanded	= expand_content_body(cf, &args);
+			if let Ok((mut inner, sub)) = parse_items(&expanded, binds) {
+				skips.merge(sub);
+				items.append(&mut inner);
+			}
+		},
 	}
+}
+
+/// The positional arguments of a captured content-binding reference, each evaluated to its substitution
+/// text: a `"quoted string"` yields its contents, a `[bracketed content]` its inner markup, and any other
+/// value (a number, an identifier) its trimmed source. A bare `#name` reference, or a `#name[ ... ]` whose
+/// single argument is the bracket body, is handled too. An empty list when the reference takes none.
+fn content_call_args(buf: &str, name: &str) -> Vec<String> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let at = match find_lit(&chars, &fmt!("#{}", name)) {
+		Some(a)	=> a,
+		None	=> return Vec::new(),
+	};
+	let j = at + name.chars().count() + 1;	// past `#name`
+	match chars.get(j) {
+		Some('(') => {
+			match read_group(&chars, j) {
+				Some((inner, _))	=> split_arg_commas(&inner).into_iter()
+										.map(|a| content_arg_value(a.trim()))
+										.collect(),
+				None				=> Vec::new(),
+			}
+		},
+		// A `#name[ ... ]` call: the bracket body is the single positional argument.
+		Some('[') => match read_group(&chars, j) {
+			Some((inner, _))	=> vec![inner],
+			None				=> Vec::new(),
+		},
+		_ => Vec::new(),	// a bare `#name` reference
+	}
+}
+
+/// Evaluates one content-binding argument to its substitution text: a `"..."` string is unquoted, a
+/// `[ ... ]` content block is unwrapped to its inner markup, and any other value is kept as its trimmed
+/// source.
+fn content_arg_value(arg: &str) -> String {
+	let t = arg.trim();
+	if t.starts_with('[') {
+		let chars: Vec<char> = t.chars().collect();
+		if let Some((inner, _)) = read_group(&chars, 0) {
+			return inner;
+		}
+	}
+	unwrap_arg(t)
+}
+
+/// Splits an argument list on its top-level commas, honouring `(`/`[`/`{` nesting and `"..."` strings so a
+/// comma inside a bracketed or quoted argument does not split it.
+fn split_arg_commas(s: &str) -> Vec<String> {
+	let mut out		= Vec::new();
+	let mut depth	= 0i32;
+	let mut in_str	= false;
+	let mut esc		= false;
+	let mut cur		= String::new();
+	for c in s.chars() {
+		if in_str {
+			cur.push(c);
+			if esc				{ esc = false; }
+			else if c == '\\'	{ esc = true; }
+			else if c == '"'	{ in_str = false; }
+			continue;
+		}
+		match c {
+			'"'					=> { in_str = true; cur.push(c); },
+			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
+			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
+			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
+			_					=> cur.push(c),
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
+	}
+	out
+}
+
+/// Substitutes a content binding's positional arguments into its body: each line-leading or inline `#param`
+/// token whose identifier names a parameter is replaced by the matching argument's text (a parameter with no
+/// argument supplied substitutes empty). A `#` that opens no parameter name -- an inline call, an escaped
+/// literal -- is left untouched, so the body's own markup survives the substitution. A binding with no
+/// parameters returns its body verbatim.
+fn expand_content_body(cf: &crate::lang::rules::ContentFn, args: &[String]) -> String {
+	if cf.params.is_empty() {
+		return cf.body.clone();
+	}
+	let chars:	Vec<char>	= cf.body.chars().collect();
+	let mut out	= String::new();
+	let mut i	= 0usize;
+	while i < chars.len() {
+		if chars[i] == '#' {
+			let mut j = i + 1;
+			while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+				j += 1;
+			}
+			let ident: String = chars[i + 1..j].iter().collect();
+			if let Some(pos) = cf.params.iter().position(|p| *p == ident) {
+				out.push_str(args.get(pos).map(|s| s.as_str()).unwrap_or(""));
+				i = j;
+				continue;
+			}
+		}
+		out.push(chars[i]);
+		i += 1;
+	}
+	out
 }
 
 /// The content of a `key: [ ... ]` keyword argument, without its brackets. Used to read a furniture call's
@@ -3565,7 +3745,7 @@ mod tests {
 		assert!(tfns.contains_key("pr-note"), "the definition is collected");
 
 		let src = "Lead prose.\n\n#pr-note[\n*Baseline:* one measure.\n\nA second paragraph.\n]\n\nTrailing prose.\n";
-		let (items, skips) = res!(document_with_templates(src, &tfns));
+		let (items, skips) = res!(document_with_templates(src, crate::lang::rules::Bindings::new(&tfns, &crate::lang::rules::ContentFns::new())));
 		let (inner, patch) = res!(items.iter().find_map(|it| match it {
 			Item::Box { items, patch, .. }	=> Some((items.clone(), patch.clone())),
 			_							=> None,
@@ -3610,7 +3790,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert!(tf.patch.callout.stroke_left_w.is_some(), "the left stroke width is set");
 
 		let src = "Lead.\n\n#aside-box(title: [The welfare theorems])[\nMarket efficiency proved.\n]\n\nTail.\n";
-		let (items, skips) = res!(document_with_templates(src, &tfns));
+		let (items, skips) = res!(document_with_templates(src, crate::lang::rules::Bindings::new(&tfns, &crate::lang::rules::ContentFns::new())));
 		let inner = res!(items.iter().find_map(|it| match it {
 			Item::Box { items, .. }	=> Some(items.clone()),
 			_					=> None,
@@ -3626,7 +3806,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert!(!skips.entries().iter().any(|(n, _)| n == "#aside-box"), "the call is not a skip");
 
 		// A bound call with no `[body]` is tallied as a skip, not dropped.
-		let (_it, skips2) = res!(document_with_templates("#aside-box(title: [X])\n", &tfns));
+		let (_it, skips2) = res!(document_with_templates("#aside-box(title: [X])\n", crate::lang::rules::Bindings::new(&tfns, &crate::lang::rules::ContentFns::new())));
 		assert!(skips2.entries().iter().any(|(n, _)| n == "#aside-box"),
 			"an argument-only bound call with no body is tallied as a skip");
 		Ok(())

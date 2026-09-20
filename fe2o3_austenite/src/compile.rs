@@ -129,15 +129,15 @@ where
 	// resolves its `em` insets against the file's own body size.
 	let mut style = Theme::default();
 	lang::set::lower_root_declarations(&src, &mut style);
-	// Collect the file's own `#let` furniture (an `#aside-box`/`#pr-note` defined in the lone file) and its
-	// `#let colours` palette, so a lone chapter honours its own furniture exactly as the book assembler does
-	// for a whole book -- a call to one expands into its padded box (or floating figure) rather than being
-	// dropped as an unknown construct.
-	let mut palette	= lang::rules::Palette::new();
-	let mut tfns	= lang::rules::TemplateFns::new();
-	lang::rules::collect_palette(&src, &mut palette);
-	lang::rules::collect_template_fns(&src, style.text.body_size, &palette, &mut tfns);
-	let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, &tfns));
+	// Collect the lone file's whole `#let` scope -- its own furniture (an `#aside-box`/`#pr-note` defined in
+	// the file), its content bindings, and everything the files it `#import`s supply -- so a lone chapter
+	// honours its furniture and content bindings exactly as the book assembler does for a whole book. A
+	// furniture call expands into its padded box (or floating figure) and a content-binding reference into its
+	// re-read markup, rather than being dropped as an unknown construct. The import walk resolves an `#import`
+	// even with no `#include` present, which the lone path by definition has none of.
+	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
+	let binds	= lang::rules::Bindings::new(&scope.tfns, &scope.cfns);
+	let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, binds));
 	skips.tag_file(&main_path.display().to_string());
 	let skip_line	= terse_skip_line(&skips);
 	let mut refusals	= skips;

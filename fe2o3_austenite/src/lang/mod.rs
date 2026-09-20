@@ -74,11 +74,13 @@ pub fn to_blocks_with_refusals(src: &str) -> Outcome<(Vec<Block>, Refusals)> {
 	Ok((lower::blocks(&items), skips))
 }
 
-/// As [`to_blocks_with_refusals`], with a set of bound `#let` furniture functions in scope: a call to one
-/// (`#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]`) expands into a padded box rather than a skip. The
-/// book assembler collects the definitions once and threads them into every chapter it reads.
-pub fn to_blocks_with_templates(src: &str, tfns: &rules::TemplateFns) -> Outcome<(Vec<Block>, Refusals)> {
-	let (items, skips) = res!(parse::document_with_templates(src, tfns));
+/// As [`to_blocks_with_refusals`], with the `#let` bindings in scope: a furniture call (`#pr-note[ ... ]`,
+/// `#aside-box(title: [..])[ ... ]`) expands into a padded box, and a content-binding reference
+/// (`#greet("world")`, a bare `#intro`) expands into its re-read markup, rather than either being tallied as
+/// a skip. The assembler collects the definitions once (see [`crate::book::collect_scope`]) and threads them
+/// into every chapter and lone file it reads.
+pub fn to_blocks_with_templates(src: &str, binds: rules::Bindings) -> Outcome<(Vec<Block>, Refusals)> {
+	let (items, skips) = res!(parse::document_with_templates(src, binds));
 	Ok((lower::blocks(&items), skips))
 }
 
