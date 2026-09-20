@@ -2495,6 +2495,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxedyne_fe2o3_pearlite"
+version = "0.5.0"
+dependencies = [
+ "oxedyne_fe2o3_austenite",
+ "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_graphics",
+]
+
+[[package]]
 name = "oxedyne_fe2o3_sbj"
 version = "0.5.0"
 dependencies = [
