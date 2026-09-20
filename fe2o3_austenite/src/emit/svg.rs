@@ -13,8 +13,13 @@ use crate::ir::{
 	Graphic,
 	Sp,
 };
+use crate::memo::{
+	Fnv,
+	Memo,
+};
 use crate::page::{
 	Page,
+	Placed,
 	PlacedKind,
 };
 
@@ -36,17 +41,115 @@ use oxedyne_fe2o3_graphics::{
 use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
-/// Renders one page as a self-contained SVG document.
+/// Renders one page as a self-contained SVG document. This is the whole-frame path, unchanged in its
+/// bytes: it renders every placed item -- body and furniture alike -- as one slice.
 pub fn render_page(page: &Page) -> Outcome<String> {
+	let mut ink		= String::new();
+	let mut tspans	= String::new();
+	let mut seen	= false;
+	res!(render_slice(&page.frame.placed, &mut ink, &mut tspans, &mut seen));
+	Ok(assemble(page, &ink, &tspans))
+}
+
+/// Renders one page through the emit memo. The body frame (`placed[..body_len]`) is content-hashed;
+/// a hit reuses its previously rendered ink and selectable-text tspans, a miss renders and stores them.
+/// The furniture beyond the body -- the running head and folio, whose folio differs page to page -- is
+/// always drawn fresh and concatenated on, so the assembled bytes are identical to a whole-frame render
+/// of the same page. A page with no recorded body split (`body_len == usize::MAX`, every non-memo path)
+/// treats its whole frame as body, so a first, cold compile caches exactly what it drew.
+pub fn render_page_memo(page: &Page, memo: &mut Memo) -> Outcome<String> {
+	let split	= page.body_len();
+	let body	= &page.frame.placed[..split];
+	let furn	= &page.frame.placed[split..];
+
+	let key = page_key(page, body);
+	let (body_ink, body_tspans, seen_after) = match memo.page_lookup(key) {
+		Some(e)	=> (e.body_ink, e.body_tspans, e.seen_text),
+		None	=> {
+			let mut ink		= String::new();
+			let mut tspans	= String::new();
+			let mut seen	= false;
+			res!(render_slice(body, &mut ink, &mut tspans, &mut seen));
+			memo.page_store(key, ink.clone(), tspans.clone(), seen);
+			(ink, tspans, seen)
+		},
+	};
+
+	// The furniture, drawn fresh, its selectable tspans continuing the body's interword spacing.
+	let mut furn_ink	= String::new();
+	let mut furn_tspans	= String::new();
+	let mut seen		= seen_after;
+	res!(render_slice(furn, &mut furn_ink, &mut furn_tspans, &mut seen));
+
+	let ink		= fmt!("{}{}", body_ink, furn_ink);
+	let tspans	= fmt!("{}{}", body_tspans, furn_tspans);
+	Ok(assemble(page, &ink, &tspans))
+}
+
+/// The content key of a page's body frame: its geometry and every body-placed item's position, size and
+/// ink. Furniture is excluded (it hashes nothing here); the verso mirror shift is already baked into the
+/// placed positions, so a page that changes parity hashes differently and misses, which is correct -- its
+/// body sits at different coordinates. Theme is not in the key because it is baked into the shaped runs
+/// (a run's glyph ids and colour already reflect it) and into the caller's global fingerprint besides.
+fn page_key(page: &Page, body: &[Placed]) -> u64 {
+	let mut h = Fnv::new();
+	h.write(b"page");
+	let size = page.geom.media_box();
+	h.write_usize(size.x.as_usize());
+	h.write_usize(size.y.as_usize());
+	for p in body {
+		h.write_i32(p.x.raw());
+		h.write_i32(p.y.raw());
+		h.write_i32(p.dims.width.raw());
+		h.write_i32(p.dims.height.raw());
+		h.write_i32(p.dims.depth.raw());
+		match &p.kind {
+			PlacedKind::Rule		=> h.write_u8(0),
+			PlacedKind::Reserved	=> h.write_u8(1),
+			PlacedKind::Text(s)		=> { h.write_u8(2); s.hash_into(&mut h); },
+			PlacedKind::Graphic(g)	=> { h.write_u8(3); hash_graphic(g, &mut h); },
+		}
+	}
+	h.finish()
+}
+
+/// Folds a placed graphic into a page key: each op by its kind, its paint, and its geometry. A path is
+/// hashed by the very `d` string the writer emits, so two paths hash alike exactly when they draw alike.
+fn hash_graphic(g: &Graphic, h: &mut Fnv) {
+	for op in &g.ops {
+		match op {
+			DrawOp::Fill { path, colour } => {
+				h.write_u8(0);
+				h.write_str(&write_path_data(path));
+				h.write(&[colour.r, colour.g, colour.b, colour.a]);
+			},
+			DrawOp::Stroke { path, colour, width } => {
+				h.write_u8(1);
+				h.write_str(&write_path_data(path));
+				h.write(&[colour.r, colour.g, colour.b, colour.a]);
+				h.write_f32(*width);
+			},
+			DrawOp::Image { image, x, y, w, h: ht } => {
+				h.write_u8(2);
+				h.write_usize(image.width);
+				h.write_usize(image.height);
+				h.write(&image.rgba);
+				h.write_f32(*x);
+				h.write_f32(*y);
+				h.write_f32(*w);
+				h.write_f32(*ht);
+			},
+		}
+	}
+}
+
+/// Wraps the visible ink and the selectable tspans of a page in the SVG document shell -- the `<svg>`
+/// viewport, the white backing rectangle, the `.tsel` style, and the one page-wide `<text>` layer -- so
+/// every render path, memo or not, produces the same bytes for the same content.
+fn assemble(page: &Page, ink: &str, tspans: &str) -> String {
 	let size	= page.geom.media_box();
 	let w		= size.x.as_usize();
 	let h		= size.y.as_usize();
-
-	// A half-point grey pen outlines a reservation, so a proof shows where a resolved value will sit
-	// without the box reading as content.
-	let pen		= res!(Stroke::new(0.5));
-	let grey	= Rgba::new(176, 176, 176, 255);
-
 	let mut out = String::new();
 	out.push_str(&fmt!(
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
@@ -57,23 +160,55 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 	// so it draws nothing over the glyph outlines below, and pointer-events left at the SVG default
 	// (not `none`) so a mouse drag still hits real text nodes rather than only outline paths.
 	out.push_str("<style>.tsel { fill: transparent; }</style>\n");
+	out.push_str(ink);
+	if !tspans.is_empty() {
+		out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tspans));
+	}
+	out.push_str("</svg>\n");
+	out
+}
 
-	for placed in &page.frame.placed {
-		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
-		// rectangle.
-		if let PlacedKind::Text(shaped) = &placed.kind {
-			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
+/// Renders one slice of a page's placed items into two buffers: `ink` gets the visible glyph outlines,
+/// rules and graphics; `tspans` gets the invisible selectable text layer. `seen_text` threads across
+/// slices, so the furniture's first run takes its leading interword space exactly as it would in a
+/// single-pass whole-frame render. This is the per-item logic [`render_page`] always ran, split out so
+/// the body and the furniture can be rendered -- and the body cached -- independently.
+///
+/// The visible pass runs first, in item order, then the selectable pass: Austenite's SVG carries only
+/// glyph outlines, which a browser can render but neither select nor search, so Typst.ts's answer -- a
+/// transparent text layer at the same baseline positions -- is mirrored on top. Every run's tspans join
+/// ONE page-wide `<text>` (assembled by [`assemble`]): Chromium's `window.find` was tested to fail across
+/// a boundary between two sibling `<text>` elements once their tspans carry per-glyph `x`/`y`, so a single
+/// element sidesteps it. The line breaker leaves the interword gap as pure position, not a space glyph, so
+/// a single invisible space is inserted ahead of every run but the first to restore it for search and copy.
+fn render_slice(
+	placed:		&[Placed],
+	ink:		&mut String,
+	tspans:		&mut String,
+	seen_text:	&mut bool,
+)
+	-> Outcome<()>
+{
+	// A half-point grey pen outlines a reservation, so a proof shows where a resolved value will sit
+	// without the box reading as content.
+	let pen		= res!(Stroke::new(0.5));
+	let grey	= Rgba::new(176, 176, 176, 255);
+
+	for p in placed {
+		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one rectangle.
+		if let PlacedKind::Text(shaped) = &p.kind {
+			res!(draw_text(ink, p.x, p.y, p.dims.height, shaped));
 			continue;
 		}
-		if let PlacedKind::Graphic(g) = &placed.kind {
-			res!(draw_graphic(&mut out, placed.x, placed.y, g));
+		if let PlacedKind::Graphic(g) = &p.kind {
+			res!(draw_graphic(ink, p.x, p.y, g));
 			continue;
 		}
 
-		let x0 = placed.x.to_pt() as f32;
-		let y0 = placed.y.to_pt() as f32;
-		let x1 = (placed.x + placed.dims.width).to_pt() as f32;
-		let y1 = (placed.y + placed.dims.height + placed.dims.depth).to_pt() as f32;
+		let x0 = p.x.to_pt() as f32;
+		let y0 = p.y.to_pt() as f32;
+		let x1 = (p.x + p.dims.width).to_pt() as f32;
+		let y1 = (p.y + p.dims.height + p.dims.depth).to_pt() as f32;
 
 		// A zero-area box has nothing to draw, and `Path::rect` would reject it.
 		if x1 <= x0 || y1 <= y0 {
@@ -81,51 +216,23 @@ pub fn render_page(page: &Page) -> Outcome<String> {
 		}
 		let path	= res!(Path::rect(Bounds::new(x0, y0, x1, y1)));
 		let d		= write_path_data(&path);
-		let attrs	= match &placed.kind {
+		let attrs	= match &p.kind {
 			PlacedKind::Rule		=> presentation(Some(Rgba::BLACK), None),
 			PlacedKind::Reserved	=> presentation(None, Some((grey, &pen))),
 			PlacedKind::Text(_)		=> continue,	// drawn above
 			PlacedKind::Graphic(_)	=> continue,	// drawn above
 		};
-		out.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
+		ink.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
 	}
 
-	// The running head and folio are shaped runs placed into the frame's margins by
-	// `doc::decorate`, so they arrive here as `PlacedKind::Text` and are drawn as glyph outlines with
-	// the body, above. This writer adds no page furniture of its own.
-
-	// A second pass draws every run's invisible, selectable twin on top of the outlines it has already
-	// placed: Austenite's SVG carries only glyph outlines, which a browser can render but neither select
-	// nor search, so Typst.ts's answer -- a transparent text layer at the same baseline positions -- is
-	// mirrored here. See `run_text_layer`.
-	//
-	// Every run's tspans join ONE `<text>` for the whole page, rather than a `<text>` per run: Chromium's
-	// `window.find`/`Ctrl+F` was tested (see the task's headless check) to fail across a boundary between
-	// two sibling `<text>` elements once their tspans carry per-glyph `x`/`y` -- exactly what accurate
-	// glyph-position selection needs -- even though the very same search succeeds across tspans inside
-	// one `<text>`. A single page-wide `<text>` sidesteps the boundary entirely; each tspan still carries
-	// its own `font-size`, so a heading and a caption of different sizes cost nothing by sharing it.
-	//
-	// The line breaker (see `linebreak.rs`) places each word as its own run with the interword gap left
-	// as pure position, not a shaped space glyph -- so two adjacent words carry nothing between them in
-	// the DOM. Left alone, a browser's flattened text content runs their words together with no space,
-	// which breaks a multi-word search or a copied sentence. A single invisible space is inserted ahead
-	// of every run but the page's first, restoring the gap without affecting anything visible.
-	let mut tspans		= String::new();
-	let mut seen_text	= false;
-	for placed in &page.frame.placed {
-		if let PlacedKind::Text(shaped) = &placed.kind {
-			if res!(run_text_layer(&mut tspans, placed.x, placed.y, placed.dims.height, shaped, seen_text)) {
-				seen_text = true;
+	for p in placed {
+		if let PlacedKind::Text(shaped) = &p.kind {
+			if res!(run_text_layer(tspans, p.x, p.y, p.dims.height, shaped, *seen_text)) {
+				*seen_text = true;
 			}
 		}
 	}
-	if !tspans.is_empty() {
-		out.push_str(&fmt!("  <text class=\"tsel\">{}</text>\n", tspans));
-	}
-
-	out.push_str("</svg>\n");
-	Ok(out)
+	Ok(())
 }
 
 /// Draws a placed graphic: each op's path translated from the graphic's own frame to where the graphic

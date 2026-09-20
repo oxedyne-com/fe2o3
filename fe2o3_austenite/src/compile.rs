@@ -180,10 +180,26 @@ where
 /// running head and folio, and mirrors the verso margins. The result carries the resolved pages, their
 /// ledger and pass count, the heading table and the geometry, ready for either caller's emit stage.
 pub fn author_and_run(a: Assembled) -> Outcome<Rendered> {
-	let (document, heads) = res!(doc::author(
-		a.fonts.clone(), a.geom, &a.style, &a.faces, &a.blocks, a.front.as_ref(), a.bib.as_ref()));
+	author_and_run_memo(a, None)
+}
+
+/// [`author_and_run`] with the incremental memo threaded through the authoring stage, and the body/
+/// furniture split point recorded on each page for the page-emit memo. Passing `None` is exactly
+/// [`author_and_run`], byte for byte. The caller reuses one [`Memo`](crate::memo::Memo) across recompiles
+/// of the same document (see the native `--watch` path); the emit stage then renders each page through
+/// [`crate::emit::svg::render_page_memo`] against that same memo.
+pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -> Outcome<Rendered> {
+	let (document, heads) = res!(doc::author_memo(
+		a.fonts.clone(), a.geom, &a.style, &a.faces, &a.blocks, a.front.as_ref(), a.bib.as_ref(), memo));
 	let metrics		= FontMetrics::new(a.fonts.clone(), Role::Body, Dir::Ltr, a.style.text.body_size);
 	let mut out		= res!(driver::run(&document, &metrics, Config::default()));
+	// Record where each page's body ends before decoration appends its running head and folio, so the
+	// page-emit memo hashes the body alone and draws the furniture (whose folio differs page to page)
+	// fresh. Recorded here, at the one point the split is known; a page never decorated leaves it at the
+	// whole frame, which the non-memo emit path ignores.
+	for page in &mut out.pages {
+		page.set_body_len(page.frame.placed.len());
+	}
 	let footer_logo	= a.front.as_ref().and_then(|f| f.footer_logo.as_deref());
 	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo));
 

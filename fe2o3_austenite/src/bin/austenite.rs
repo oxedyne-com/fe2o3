@@ -23,6 +23,7 @@ use oxedyne_fe2o3_austenite::{
 	ir::DrawOp,
 	ledger::Ledger,
 	lang,
+	memo::Memo,
 	page::{
 		Frame,
 		Page,
@@ -101,11 +102,15 @@ struct CompileStats {
 /// Renders one page to both artefacts, the pure work a chunk runs across the cores. The SVG is written
 /// to its file here and dropped; the PDF draw list is built here -- fetching each glyph's outline, the
 /// bulk of the cost -- and returned for the ordered writer to serialise and frame in page order.
-fn render_page_pair(page: &Page, out_dir: &str) -> Outcome<Prepared> {
-	let svg			= res!(svg::render_page(page));
-	let path		= fmt!("{}/page-{:03}.svg", out_dir, page.number);
-	res!(std::fs::write(&path, &svg));
-	drop(svg);
+fn render_page_pair(page: &Page, out_dir: &str, write_svg: bool) -> Outcome<Prepared> {
+	// When the memo drives the run (the `--watch` loop), the SVG is emitted sequentially through the memo
+	// in a pre-pass, so the parallel worker here builds only the PDF; a one-shot compile writes both.
+	if write_svg {
+		let svg		= res!(svg::render_page(page));
+		let path	= fmt!("{}/page-{:03}.svg", out_dir, page.number);
+		res!(std::fs::write(&path, &svg));
+		drop(svg);
+	}
 
 	let pdf			= res!(emit::pdf::render_page(page));
 	Ok(Prepared { pdf })
@@ -190,7 +195,15 @@ fn ledger_dump_json(ledger: &Ledger) -> Outcome<String> {
 /// dump ([`ledger_dump_json`]) the oracle harness compares against a Typst `query`. Returns the counts
 /// and the terse skip line for the caller to report; prints nothing itself save the phase profile when
 /// `AUS_PROFILE` is set.
-fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -> Outcome<CompileStats> {
+fn compile(
+	source:		&str,
+	out_dir:	&str,
+	pearl:		bool,
+	ledger_out:	Option<&str>,
+	mut memo:	Option<&mut Memo>,
+)
+	-> Outcome<CompileStats>
+{
 	// Phase timing, gated on AUS_PROFILE so a normal run is untouched. Each phase reports its wall time
 	// to stderr, leaving stdout (and every emitted byte) exactly as it was.
 	let prof = std::env::var("AUS_PROFILE").is_ok();
@@ -213,10 +226,26 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 	mark("parse+lower+fonts", t_parse);
 
 	let t_author = std::time::Instant::now();
-	let compile::Rendered { mut out, heads, geom } = res!(compile::author_and_run(assembled));
+	let compile::Rendered { mut out, heads, geom } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
 	mark("author+run+decorate", t_author);
 
 	res!(std::fs::create_dir_all(out_dir));
+
+	// The incremental SVG emit, when a memo drives the run (the `--watch` loop): each page's body is
+	// content-hashed and an unedited page reuses its rendered SVG, so an edit re-renders only the pages the
+	// cascade reaches. It runs sequentially, ahead of the PDF pass below, because the memo is a single
+	// shared cache; that is exactly the live-view latency this increment targets. The SVG bytes are
+	// identical to the parallel path's, so the emitted files do not depend on which path wrote them.
+	let svg_in_worker = memo.is_none();
+	if let Some(m) = memo.as_deref_mut() {
+		let t_svg = std::time::Instant::now();
+		for page in &out.pages {
+			let svg		= res!(svg::render_page_memo(page, m));
+			let path	= fmt!("{}/page-{:03}.svg", out_dir, page.number);
+			res!(std::fs::write(&path, &svg));
+		}
+		mark("emit(svg, memo)", t_svg);
+	}
 
 	// The ledger is small and independent of the pages, so it is written first and out of the way.
 	let ledger_path = fmt!("{}/ledger.jdat", out_dir);
@@ -311,7 +340,7 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		let out_ref = out_dir;
 		let rendered: Vec<Outcome<Prepared>> = std::thread::scope(|scope| {
 			let handles: Vec<_> = slice.iter()
-				.map(|page| scope.spawn(move || render_page_pair(page, out_ref)))
+				.map(|page| scope.spawn(move || render_page_pair(page, out_ref, svg_in_worker)))
 				.collect();
 			handles.into_iter()
 				.map(|h| match h.join() {
@@ -352,6 +381,11 @@ fn compile(source: &str, out_dir: &str, pearl: bool, ledger_out: Option<&str>) -
 		eprintln!("[profile]   write (in order) {:>8.1} ms", t_write_ms);
 		eprintln!("[profile]   width/budgetMB    {:>8}", width);
 		eprintln!("[profile] {:<22} {:>8.1} ms", "TOTAL", t_all.elapsed().as_secs_f64() * 1000.0);
+	}
+
+	// Close the memo generation now the pages are emitted, dropping entries untouched for two compiles.
+	if let Some(m) = memo.as_deref_mut() {
+		m.sweep();
 	}
 
 	Ok(CompileStats {
@@ -499,11 +533,14 @@ fn main() -> Outcome<()> {
 		let out			= out_dir.clone();
 		let ledger_out_w	= ledger_out.clone();	// the build closure owns this
 		println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", source, out_dir);
+		// One memo lives across every rebuild of the watch, so an edit re-authors and re-emits only the
+		// blocks and pages it actually changes -- the incremental live-view loop the wasm swap needs.
+		let mut memo = Memo::new();
 		return watch::run(
 			move || watch_set(&src_files),
 			move || {
 				let t = std::time::Instant::now();
-				match compile(&src_build, &out, pearl, ledger_out_w.as_deref()) {
+				match compile(&src_build, &out, pearl, ledger_out_w.as_deref(), Some(&mut memo)) {
 					Ok(stats)	=> {
 						// The skip line is folded into the status line, so the rebuild is one line.
 						print_status(&src_build, &out, &stats, t.elapsed());
@@ -517,7 +554,7 @@ fn main() -> Outcome<()> {
 	}
 
 	let t = std::time::Instant::now();
-	let stats = res!(compile(&source, &out_dir, pearl, ledger_out.as_deref()));
+	let stats = res!(compile(&source, &out_dir, pearl, ledger_out.as_deref(), None));
 	if explain {
 		print!("{}", explain_refusals(&stats.refusals));
 	} else if let Some(skip) = &stats.skip_line {

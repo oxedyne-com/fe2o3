@@ -157,6 +157,7 @@ impl Reference {
 }
 
 /// A parsed bibliography and the record of which keys a document has cited.
+#[derive(Debug)]
 pub struct Bibliography {
 	entries: Vec<Entry>,			// in file order
 	index:   BTreeMap<String, usize>,	// key -> position in `entries`

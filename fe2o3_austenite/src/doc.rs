@@ -45,6 +45,12 @@ use crate::ledger::{
 	Ledger,
 	Ref,
 };
+use crate::memo::{
+	BlockEntry,
+	BlockState,
+	Fnv,
+	Memo,
+};
 use crate::linebreak::{
 	break_paragraph,
 	break_paragraph_pieces,
@@ -584,6 +590,7 @@ struct Authoring<'a> {
 	claim_gather:	ClaimGather,	// the reverse claim index's references, gathered in document order
 	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
 	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
+	global_fp:		u64,			// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
 }
 
 /// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
@@ -629,12 +636,32 @@ impl<'a> Authoring<'a> {
 	/// the slice's final heading pulled that continuation paragraph into its keep box -- the caller then skips
 	/// the paragraph rather than setting it a second time, so a heading alone in a scope still keeps with the
 	/// sibling paragraph beyond the scope edge.
-	fn walk(&mut self, blocks: &[Block], style: &Theme, cont: Option<Cont<'_>>) -> Outcome<bool> {
+	fn walk(
+		&mut self,
+		blocks:	&[Block],
+		style:	&Theme,
+		cont:	Option<Cont<'_>>,
+		memo:	&mut Option<&mut Memo>,
+	)
+		-> Outcome<bool>
+	{
 		// Set when the final heading of this slice keeps with the parent's continuation paragraph, so the
 		// caller skips that paragraph rather than setting it twice.
 		let mut consumed_cont = false;
 		let mut i = 0usize;
+		// The block-authoring memo runs only at the top level, where `style` is the document theme every
+		// key is fingerprinted under and there is no parent continuation to reach across; a scoped subtree
+		// (an included chapter that declares its own styling -- rare) recurses with the memo switched off,
+		// so it is always authored fresh and stays byte-identical. `pending` holds the markers of a block
+		// currently being authored on a cache miss: its delta is captured and stored at the top of the next
+		// iteration (or after the loop), which is where a `continue`-ing arm -- a chapter opener -- lands.
+		let use_memo = cont.is_none() && memo.is_some();
+		let mut pending: Option<PendingBlock> = None;
 		while i < blocks.len() {
+			// Close out the block authored on the previous miss, now that `i` has advanced past it.
+			if let Some(p) = pending.take() {
+				self.memo_capture(memo, p, i);
+			}
 			if let Block::Scoped { patch, blocks: inner } = &blocks[i] {
 				let scoped = { let mut t = style.clone(); t.apply(patch); t };
 				// The scoped slice's continuation is the block that follows the scope at THIS level, set under
@@ -649,7 +676,9 @@ impl<'a> Authoring<'a> {
 				} else {
 					cont
 				};
-				let ate = res!(self.walk(inner, &scoped, inner_cont));
+				// A scoped subtree is authored fresh (the memo is switched off inside it), so its render stays
+				// byte-identical whether or not the memo is present.
+				let ate = res!(self.walk(inner, &scoped, inner_cont, &mut None));
 				if ate {
 					if has_sibling {
 						// The inner walk pulled this slice's next sibling into its keep box: skip it here.
@@ -664,6 +693,40 @@ impl<'a> Authoring<'a> {
 					i += 1;
 				}
 				continue;
+			}
+
+			// The block-authoring memo: at the top level, before authoring the block, look it up by its
+			// content and the counter state it enters under. A hit splices the previously authored nodes,
+			// heads and index/claim occurrences straight back and restores the exit state, skipping the
+			// shaping and line breaking entirely; a miss records the markers and captures the delta once the
+			// block has been authored (at the next iteration's top). A block whose output is position- or
+			// flag-dependent -- the index and claim-index placeholders -- is never memoised.
+			if use_memo && memoisable(&blocks[i]) {
+				let look = if matches!(&blocks[i], Block::Heading { .. }) {
+					blocks.get(i + 1)
+				} else {
+					None
+				};
+				let key = self.block_key(&blocks[i], look);
+				if let Some(m) = memo.as_deref_mut() {
+					if let Some(entry) = m.block_lookup(key) {
+						let consume = entry.consume;
+						self.apply_block_entry(entry);
+						i += consume;
+						continue;
+					}
+				}
+				// A miss: remember where authoring this block begins, so its delta can be captured after.
+				pending = Some(PendingBlock {
+					key,
+					i_before:		i,
+					nodes_before:	self.nodes.len(),
+					heads_before:	self.heads.len(),
+					index_before:	self.index_gather.occ.len(),
+					claim_before:	self.claim_gather.occ.len(),
+					seen_before:	self.seen.clone(),
+					counters_before:	self.counters.clone(),
+				});
 			}
 			match &blocks[i] {
 				Block::Heading { level, segments, label } => {
@@ -1110,8 +1173,168 @@ impl<'a> Authoring<'a> {
 				},
 			}
 		}
+		// Capture the last authored block's delta, which has no next iteration to close it.
+		if let Some(p) = pending.take() {
+			self.memo_capture(memo, p, blocks.len());
+		}
 		Ok(consumed_cont)
 	}
+
+	/// Snapshots the scalar authoring counters as they stand: the state a block enters under (folded into
+	/// its memo key) or leaves (stored in its memo value and restored on a hit).
+	fn block_state(&self) -> BlockState {
+		BlockState {
+			first:			self.first,
+			prev_para:		self.prev_para,
+			pending_banner:	self.pending_banner,
+			sec:			self.sec,
+			part_no:		self.part_no,
+			foot_no:		self.foot_no,
+			ref_no:			self.ref_no,
+			margin_no:		self.margin_no,
+			eq_no:			self.eq_no,
+			fig_no:			self.fig_no,
+			heads_len:		self.heads.len() as u32,
+			index_no:		self.index_gather.no,
+		}
+	}
+
+	/// Restores the scalar counters to a cached block's exit state on a hit. The heading and index/claim
+	/// occurrence vectors are extended separately, so `heads.len()` and the index counter already stand
+	/// where the exit state records them; the rest are set here.
+	fn restore_state(&mut self, s: &BlockState) {
+		self.first			= s.first;
+		self.prev_para		= s.prev_para;
+		self.pending_banner	= s.pending_banner;
+		self.sec			= s.sec;
+		self.part_no		= s.part_no;
+		self.foot_no		= s.foot_no;
+		self.ref_no			= s.ref_no;
+		self.margin_no		= s.margin_no;
+		self.eq_no			= s.eq_no;
+		self.fig_no			= s.fig_no;
+		self.index_gather.no	= s.index_no;
+	}
+
+	/// An order-independent fingerprint of the glossary first-use set: a block that sets a term bold-italic
+	/// on its first use and plain after depends on exactly which terms have already been seen, so the set is
+	/// in every key. The fold is by XOR of each term's hash, which needs no sort and updates in step with a
+	/// growing set without ever caring about insertion order.
+	fn seen_hash(&self) -> u64 {
+		let mut acc = 0u64;
+		for term in &self.seen {
+			let mut h = Fnv::new();
+			h.write_str(term);
+			acc ^= h.finish();
+		}
+		acc
+	}
+
+	/// An order-independent fingerprint of the per-supplement counters (Figure, Table, aside), each folded
+	/// with its current value, so a block that stamps the next figure or table number keys on the number it
+	/// will actually stamp.
+	fn counters_hash(&self) -> u64 {
+		let mut acc = 0u64;
+		for (k, v) in &self.counters {
+			let mut h = Fnv::new();
+			h.write_str(k);
+			h.write_u32(*v);
+			acc ^= h.finish();
+		}
+		acc
+	}
+
+	/// The memo key of a block at the current position: the compile-wide fingerprint, the measure, the
+	/// block's own content (and, for a heading, the following block it may keep the first line of), and the
+	/// counter state it enters under. Two compiles that reach a block with the same content and the same
+	/// entering state produce byte-identical nodes, so they must share a key; an edit that shifts any of
+	/// those must not.
+	fn block_key(&self, block: &Block, look: Option<&Block>) -> u64 {
+		let mut h = Fnv::new();
+		h.write(b"block");
+		h.write_u64(self.global_fp);
+		h.write_i32(self.measure.raw());
+		// The block's full content. The derived `Debug` is a faithful, total structural rendering -- it can
+		// never silently drop a field the way a hand-written walker can -- and no type reachable from a
+		// `Block` carries a lossy `Debug` (the one that summarises, `ShapedText`, appears only after
+		// authoring, in `Node`). Formatting a block's `Debug` costs a fraction of shaping and breaking it.
+		h.write_str(&fmt!("{:?}", block));
+		if let Some(la) = look {
+			h.write_str(&fmt!("{:?}", la));
+		}
+		self.block_state().hash_into(&mut h);
+		h.write_u64(self.seen_hash());
+		h.write_u64(self.counters_hash());
+		h.finish()
+	}
+
+	/// Applies a cached block result on a hit: splices its authored nodes, heading records and index/claim
+	/// occurrences back in, advances the glossary and supplement accumulators by the deltas the block made,
+	/// and restores the exit counter state -- so the authoring state stands exactly where a fresh authoring
+	/// of the same block would have left it.
+	fn apply_block_entry(&mut self, entry: BlockEntry) {
+		self.nodes.extend(entry.nodes);
+		self.heads.extend(entry.heads);
+		self.index_gather.occ.extend(entry.index_occ);
+		self.claim_gather.occ.extend(entry.claim_occ);
+		for term in entry.seen_add {
+			self.seen.insert(term);
+		}
+		for (k, v) in entry.counters_set {
+			self.counters.insert(k, v);
+		}
+		self.restore_state(&entry.exit);
+	}
+
+	/// Captures the delta a just-authored block produced and stores it under its key: the nodes, heads and
+	/// occurrences it appended, the source blocks it consumed, the glossary terms it newly marked seen, the
+	/// supplement counters it changed, and its exit counter state. `i_end` is the position after the block,
+	/// so the consumed count carries a chapter heading's swallowed paragraph.
+	fn memo_capture(&mut self, memo: &mut Option<&mut Memo>, p: PendingBlock, i_end: usize) {
+		let m = match memo.as_deref_mut() {
+			Some(m)	=> m,
+			None	=> return,
+		};
+		let seen_add: Vec<String> = self.seen.iter()
+			.filter(|t| !p.seen_before.contains(*t))
+			.cloned()
+			.collect();
+		let counters_set: Vec<(String, u32)> = self.counters.iter()
+			.filter(|(k, v)| p.counters_before.get(*k) != Some(*v))
+			.map(|(k, v)| (k.clone(), *v))
+			.collect();
+		let entry = BlockEntry::new(
+			i_end - p.i_before,
+			self.nodes[p.nodes_before..].to_vec(),
+			self.heads[p.heads_before..].to_vec(),
+			self.index_gather.occ[p.index_before..].to_vec(),
+			self.claim_gather.occ[p.claim_before..].to_vec(),
+			seen_add,
+			counters_set,
+			self.block_state(),
+		);
+		m.block_store(p.key, entry);
+	}
+}
+
+/// Is a block one the authoring memo caches? A scope recurses (and is authored fresh), and the index and
+/// claim-index placeholders set nothing but a document-position or a flag the post-walk assembly reads, so
+/// neither is cached; every other block is a self-contained authoring unit keyed on its content and state.
+fn memoisable(block: &Block) -> bool {
+	!matches!(block, Block::Scoped { .. } | Block::Index | Block::ClaimIndex | Block::Glossary)
+}
+
+/// The markers of a block being authored on a cache miss: its key, where it starts in each accumulator,
+/// and the glossary and supplement state before it ran, so the delta it makes can be captured once it has.
+struct PendingBlock {
+	key:				u64,
+	i_before:			usize,
+	nodes_before:		usize,
+	heads_before:		usize,
+	index_before:		usize,
+	claim_before:		usize,
+	seen_before:		HashSet<String>,
+	counters_before:	HashMap<String, u32>,
 }
 
 /// Turns an authored block list into the composed document, and the heading table the running heads
@@ -1131,9 +1354,40 @@ pub fn author(
 )
 	-> Outcome<(Document, Vec<Heading>)>
 {
+	author_memo(fonts, geom, style, faces, blocks, front, bib, None)
+}
+
+/// [`author`] with the incremental block-authoring memo threaded through: a live edit-and-re-render loop
+/// hands the same [`Memo`] each compile so an unchanged block splices its previously authored nodes back
+/// rather than re-shaping and re-breaking them. Passing `None` is exactly [`author`], byte for byte -- the
+/// memo path never runs -- which is why every other caller keeps calling `author`.
+///
+/// The memo's fingerprint scopes it to one (fonts, faces, geometry, theme, cross-reference) configuration;
+/// the caller opens each compile with [`Memo::begin`] carrying that fingerprint (see [`memo_fingerprint`]),
+/// so a change to any of those clears the stale cache rather than serving it.
+#[allow(clippy::too_many_arguments)]
+pub fn author_memo(
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
+	style: &Theme,
+	faces:		&FaceResolver,
+	blocks:		&[Block],
+	front:		Option<&FrontMatter>,
+	bib:		Option<&Bibliography>,
+	mut memo:	Option<&mut Memo>,
+)
+	-> Outcome<(Document, Vec<Heading>)>
+{
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
 	let refs = ref_targets(blocks, style);
+	// The compile-wide fingerprint every block key folds in, so a change to the theme, the geometry, the
+	// cross-reference targets (a renumbered chapter a `@ref` points at) or the bibliography (the text a
+	// `#cite` resolves to) invalidates the whole cache.
+	let global_fp = memo_fingerprint(style, geom, &refs, bib);
+	if let Some(m) = memo.as_deref_mut() {
+		m.begin(global_fp);
+	}
 	let mut authoring = Authoring {
 		fonts:		fonts.clone(),
 		geom,
@@ -1160,9 +1414,10 @@ pub fn author(
 		claim_gather:	ClaimGather::default(),
 		want_claim_index:	false,
 		claim_index_at:	None,
+		global_fp,
 	};
 	// The top level has no parent continuation; the returned "consumed" flag is meaningless here and dropped.
-	res!(authoring.walk(blocks, style, None));
+	res!(authoring.walk(blocks, style, None, &mut memo));
 	// The back-matter index, built from the markers gathered walking the body once the `Block::Index`
 	// placeholder has been met and every occurrence's anchor is woven in. Its entries read their pages back
 	// from the ledger after convergence, so they are set after the body they point into, as back matter.
@@ -1213,7 +1468,56 @@ pub fn author(
 
 	let mut document = Document::new(stream, geom);
 	document.foot = foot_style(style);
+	// The two-generation sweep is deferred to the caller, after the emit stage: the page-emit cache is
+	// touched during emit, which runs after this returns, so sweeping here would drop last compile's page
+	// entries before this compile's emit could reuse them. `Memo::begin` (called above) opened the
+	// generation; `Memo::sweep`, called once the pages are emitted, closes it.
+	let _ = memo;
 	Ok((document, heads))
+}
+
+/// The compile-wide fingerprint the block-authoring memo scopes every key to: the theme, the page
+/// geometry, the settled cross-reference targets and the bibliography. A change to any of them changes
+/// what every block authors -- the theme decides sizes and faces; the geometry decides the measure; a
+/// `@ref`'s resolved text changes when the thing it points at is renumbered; a `#cite` resolves against
+/// the bibliography -- so it must invalidate the cache wholesale. The document's fonts and faces are held
+/// constant by the memo's per-document contract: a font or face change takes a fresh [`Memo`], not this one.
+pub fn memo_fingerprint(
+	style:	&Theme,
+	geom:	PageGeometry,
+	refs:	&HashMap<String, String>,
+	bib:	Option<&Bibliography>,
+)
+	-> u64
+{
+	let mut h = Fnv::new();
+	h.write(b"global");
+	// The theme as data. Its derived `Debug` renders every styled value in a canonical field order, so
+	// two identical themes fingerprint alike and any change to one shows.
+	h.write_str(&fmt!("{:?}", style));
+	h.write_i32(geom.width.raw());
+	h.write_i32(geom.height.raw());
+	h.write_i32(geom.inside.raw());
+	h.write_i32(geom.outside.raw());
+	h.write_i32(geom.top.raw());
+	h.write_i32(geom.bottom.raw());
+	// The cross-reference targets, folded order-independently: a label maps to its resolved "Chapter 4"
+	// text, and that text changing (a renumber) must miss every block that sets a reference.
+	let mut rf = 0u64;
+	for (k, v) in refs {
+		let mut e = Fnv::new();
+		e.write_str(k);
+		e.write_str(v);
+		rf ^= e.finish();
+	}
+	h.write_u64(rf);
+	// The bibliography as data, so editing a `.bib` (which changes the text a `#cite` resolves to without
+	// touching any block's own content) misses every citation-bearing block rather than serving it stale.
+	h.write_bool(bib.is_some());
+	if let Some(b) = bib {
+		h.write_str(&fmt!("{:?}", b));
+	}
+	h.finish()
 }
 
 /// The foot spacing derived from the block style, so the separator rule and the gaps around the notes

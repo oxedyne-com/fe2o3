@@ -45,6 +45,7 @@ pub mod ledger;
 pub mod linebreak;
 pub mod math;
 pub mod mathtable;
+pub mod memo;
 pub mod page;
 pub mod plot;
 pub mod table;

@@ -193,10 +193,23 @@ pub struct Page {
 	pub number:	u32,
 	pub geom:	PageGeometry,
 	pub frame:	Frame,
+	// The count of placed items that are body, recorded before `doc::decorate` appends the running head
+	// and folio. The page-emit memo keys on `placed[..body_len]` and draws the furniture beyond it fresh,
+	// so an unedited page reuses its body SVG while its folio still renders per page. `usize::MAX` means
+	// the whole frame is body (nothing decorated it), which is what every non-memo path leaves it at.
+	body_len:	usize,
 }
 
 impl Page {
 	pub fn new(number: u32, geom: PageGeometry, frame: Frame) -> Self {
-		Self { number, geom, frame }
+		Self { number, geom, frame, body_len: usize::MAX }
 	}
+
+	/// Records the body/furniture split point: the placed count at the moment before decoration. Called
+	/// once, by the memo-threading compile path, just before `doc::decorate` stamps the furniture on.
+	pub fn set_body_len(&mut self, n: usize) { self.body_len = n; }
+
+	/// The split point clamped to the current frame, so `placed[..body_len()]` is always in bounds even
+	/// after the verso mirror shift has moved items around (it never adds or removes any).
+	pub fn body_len(&self) -> usize { self.body_len.min(self.frame.placed.len()) }
 }

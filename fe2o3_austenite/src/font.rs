@@ -156,6 +156,26 @@ impl ShapedText {
 	/// The size the run was shaped at, in device points.
 	pub fn size(&self) -> f32 { self.size }
 
+	/// Folds this run's content into a page-emit key: its size, its fill, its source string and every
+	/// glyph's identity and placed position. This is what the page memo hashes to decide a body frame is
+	/// unchanged. The theme is not folded in as such -- it never needs to be, because it has already
+	/// decided these very glyph ids, their positions and the fill, so two runs that hash alike here draw
+	/// identically whatever theme produced them.
+	pub fn hash_into(&self, h: &mut crate::memo::Fnv) {
+		h.write_f32(self.size);
+		h.write(&[self.colour.r, self.colour.g, self.colour.b, self.colour.a]);
+		h.write_str(&self.text);
+		h.write_u64(self.run.glyphs.len() as u64);
+		for g in &self.run.glyphs {
+			h.write_u32(g.id);
+			h.write_u8(g.face);
+			h.write_f32(g.x);
+			h.write_f32(g.y);
+			h.write_f32(g.adv);
+			h.write_usize(g.cluster);
+		}
+	}
+
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
 		self.src.font().outline(glyph.face, glyph.id, self.size)
