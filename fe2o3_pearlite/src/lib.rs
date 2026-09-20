@@ -7,8 +7,11 @@
 //! loopback app shell that serves the existing browser reader to a local tab so the same one JS reader
 //! is the desktop app too ([`shell`]).
 //!
-//! Two phases only. A true OS window (rather than a browser tab) and any collaboration feature are later,
-//! separately decided work -- not attempted here.
+//! The reader is two phases: the pixmap-driving raster loop and the loopback app shell. Beside them sits
+//! the first increment of a [`collab`] backend -- a signed, mergeable edit stream over a document's
+//! annotations, keyed by a stable document identity -- whose transport and browser UI are a later,
+//! separately decided increment.
 
+pub mod collab;
 pub mod raster;
 pub mod shell;

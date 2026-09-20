@@ -18,3 +18,20 @@ path = "src/bin/pearlite.rs"
 oxedyne_fe2o3_austenite	= { path = "../fe2o3_austenite" }
 oxedyne_fe2o3_graphics	= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_core		= { path = "../fe2o3_core" }
+# Collaboration backend: signed operation history (ore), the neutral serialisation
+# it and the store speak (jdat), the wasm-clean P-256 verifier (crypto, p256
+# feature only), the hub store (o3db) and the thin blocking database trait it is
+# reached through (iop_db). No new external crates: the p256 feature enables a
+# dependency fe2o3_crypto already declares.
+oxedyne_fe2o3_ore		= { path = "../fe2o3_ore" }
+oxedyne_fe2o3_jdat		= { path = "../fe2o3_jdat" }
+oxedyne_fe2o3_crypto	= { path = "../fe2o3_crypto", features = ["p256"] }
+oxedyne_fe2o3_o3db_sync	= { path = "../fe2o3_o3db_sync" }
+oxedyne_fe2o3_iop_db	= { path = "../fe2o3_iop_db" }
+
+[dev-dependencies]
+# The native P-256 signer that stands in for a browser's WebCrypto key in the
+# integration test (ring-backed, already in the tree), and the hash and checksum
+# schemes an o3db instance is parameterised over.
+oxedyne_fe2o3_net	= { path = "../fe2o3_net" }
+oxedyne_fe2o3_hash	= { path = "../fe2o3_hash" }

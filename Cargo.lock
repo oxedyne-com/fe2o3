@@ -2500,7 +2500,14 @@ version = "0.5.0"
 dependencies = [
  "oxedyne_fe2o3_austenite",
  "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_crypto",
  "oxedyne_fe2o3_graphics",
+ "oxedyne_fe2o3_hash",
+ "oxedyne_fe2o3_iop_db",
+ "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_net",
+ "oxedyne_fe2o3_o3db_sync",
+ "oxedyne_fe2o3_ore",
 ]
 
 [[package]]

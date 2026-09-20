@@ -279,6 +279,7 @@ pub struct PearlBuilder {
 	index:	Vec<Dat>,				// [{ "page", "block" }, ...], in page order
 	geom:	Dat,					// the document geometry, [w, h, inside, outside, top, bottom]
 	ledger:	Ledger,					// shipped inside, and used to resolve internal link targets
+	doc_id:	Option<String>,			// author-minted stable identity, written only when set (see with_doc_id)
 }
 
 impl PearlBuilder {
@@ -290,7 +291,19 @@ impl PearlBuilder {
 			index:	Vec::new(),
 			geom:	geometry_to_dat(&geom),
 			ledger:	ledger.clone(),
+			doc_id:	None,
 		})
+	}
+
+	/// Stamps the document with a stable, author-minted identity, carried in the `.prl` header as an
+	/// optional `doc_id` field. This is the key a collaboration layer folds a document's edit stream
+	/// against, and it is chosen to survive re-pagination -- unlike a page number or a block address,
+	/// which move when the document is recomposed. A builder that is never given one writes no `doc_id`
+	/// key at all, so a document without collaboration is byte-identical to what this writer emitted
+	/// before the field existed; see [`PearlBuilder::into_dat`].
+	pub fn with_doc_id<S: Into<String>>(mut self, id: S) -> Self {
+		self.doc_id = Some(id.into());
+		self
 	}
 
 	/// Serialises one page into a content block, folding its glyphs and rasters into the shared stores
@@ -445,11 +458,16 @@ impl PearlBuilder {
 
 	/// The whole document as one jdat map, ready to encode. The `annotations` section opens empty: the
 	/// engine authors none, and a reader adds them through [`PearlDoc::add_annotation`].
+	///
+	/// A `doc_id` key is added only when one was set through [`PearlBuilder::with_doc_id`]. A document
+	/// without a doc_id therefore emits exactly the keys, in exactly the order, this writer emitted
+	/// before the field existed, so its bytes are unchanged -- the property the `.prl`/`.tsel` oracle
+	/// relies on.
 	pub fn into_dat(self) -> Outcome<Dat> {
 		let glyphs	= create_dat_ordmap(self.glyphs.into_iter().map(|(k, v)| (dat!(k), v)).collect());
 		let images	= create_dat_ordmap(self.images.into_iter().map(|(k, v)| (dat!(k), v)).collect());
 		let blocks	= create_dat_ordmap(self.blocks.into_iter().map(|(k, v)| (dat!(k), v)).collect());
-		Ok(omapdat!{
+		let mut top = omapdat!{
 			"pearl"			=> dat!(PEARL_VERSION),
 			"index"			=> Dat::List(self.index),
 			"glyphs"		=> glyphs,
@@ -458,7 +476,11 @@ impl PearlBuilder {
 			"ledger"		=> res!(self.ledger.to_dat()),
 			"geom"			=> self.geom,
 			"annotations"	=> Dat::List(Vec::new()),
-		})
+		};
+		if let Some(id) = self.doc_id {
+			res!(top.map_put(dat!("doc_id"), dat!(id)));
+		}
+		Ok(top)
 	}
 
 	/// The whole document encoded as text jdat, the same encoding the ledger uses.
@@ -536,6 +558,26 @@ impl PearlDoc {
 	/// The number of pages in the document's index.
 	pub fn page_count(&self) -> Outcome<usize> {
 		Ok(res!(self.top.map_get_list(&dat!("index"))).len())
+	}
+
+	/// The document's stable identity, or `None` for a `.prl` written without one -- every file that
+	/// predates the field, and any document a collaboration layer has not stamped. This is the key an
+	/// edit stream is folded against, and it survives re-pagination where a page number or block address
+	/// would not; see [`PearlBuilder::with_doc_id`].
+	pub fn doc_id(&self) -> Outcome<Option<String>> {
+		match res!(self.top.map_get(&dat!("doc_id"))) {
+			Some(d)	=> Ok(Some(try_extract_dat!(d.clone(), Str))),
+			None	=> Ok(None),
+		}
+	}
+
+	/// Stamps a decoded document with a stable identity, so a reader that opened a `.prl` written
+	/// without one can mint an identity and write it back through [`to_string`](Self::to_string) or
+	/// [`write_file`](Self::write_file). An identity already present is overwritten, which is how a
+	/// document minted twice is reconciled onto a single agreed key.
+	pub fn set_doc_id<S: Into<String>>(&mut self, id: S) -> Outcome<()> {
+		res!(self.top.map_put(dat!("doc_id"), dat!(id.into())));
+		Ok(())
 	}
 
 	/// Renders the page at `idx` (zero-based) to a self-contained SVG document, reconstructing the SVG
@@ -1109,6 +1151,53 @@ mod tests {
 		// A second re-emit keeps them still, so the section is stable under repeated rewrites.
 		let doc3 = res!(PearlDoc::from_string(res!(doc2.to_string())));
 		assert_eq!(res!(doc3.annotations()).len(), 2, "annotations persist across a second re-emit");
+		Ok(())
+	}
+
+	// A document given a doc_id carries it through the encode/decode round trip, and a document given
+	// none reports none and writes no `doc_id` key at all -- so the bytes of a doc without one are
+	// exactly what they were before the field existed, which is what the `.prl`/`.tsel` oracle depends
+	// on. Two builders over the same page, one stamped and one not, must agree byte for byte once the
+	// stamped one's single added key is discounted; the plain one must be unchanged.
+	#[test]
+	fn test_doc_id_round_trips_and_is_absent_by_default_05() -> Outcome<()> {
+		let geom = PageGeometry::a4();
+
+		// A one-page document, built once with a doc_id and once without.
+		let build = |id: Option<&str>| -> Outcome<String> {
+			let mut frame = Frame::new();
+			let g = res!(dot_graphic(None));
+			frame.push(Placed::new(
+				Sp::from_pt(40.0), Sp::from_pt(40.0), g.dims, PlacedKind::Graphic(Arc::new(g))));
+			let mut b = res!(PearlBuilder::new(&Ledger::new(), geom));
+			if let Some(id) = id {
+				b = b.with_doc_id(id);
+			}
+			res!(b.add_page(&Page::new(1, geom, frame)));
+			b.to_string()
+		};
+
+		// A doc without a doc_id writes no such key, and reads back as None.
+		let plain = res!(build(None));
+		assert!(!plain.contains("doc_id"), "a document with no doc_id must emit no doc_id key");
+		let plain_doc = res!(PearlDoc::from_string(plain.clone()));
+		assert_eq!(res!(plain_doc.doc_id()), None, "a document with no doc_id reads back None");
+
+		// A doc with a doc_id carries it verbatim through the round trip.
+		let stamped = res!(build(Some("prl-abc123")));
+		let stamped_doc = res!(PearlDoc::from_string(stamped));
+		assert_eq!(res!(stamped_doc.doc_id()), Some("prl-abc123".to_string()),
+			"a document with a doc_id round-trips it");
+		// And that stamped document still reads as a document: the added key disturbs nothing else.
+		assert_eq!(res!(stamped_doc.page_count()), 1);
+
+		// A reader can stamp a doc that arrived without one, and it then round-trips.
+		let mut minted = res!(PearlDoc::from_string(plain));
+		assert_eq!(res!(minted.doc_id()), None);
+		res!(minted.set_doc_id("prl-minted"));
+		let reread = res!(PearlDoc::from_string(res!(minted.to_string())));
+		assert_eq!(res!(reread.doc_id()), Some("prl-minted".to_string()),
+			"a minted doc_id survives a write-back and re-read");
 		Ok(())
 	}
 
