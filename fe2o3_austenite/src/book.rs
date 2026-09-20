@@ -1233,10 +1233,23 @@ fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
 			},
 			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
 			Block::Scoped { blocks, .. }		=> out.extend(collect_cite_keys(blocks)),
+			// A table cell is set through the body's own segment pipeline, so a `#cite` in a cell renders and
+			// must be marked cited too, or its work would render but its reference vanish from the list.
+			Block::Table(t)						=> collect_cite_from_table(t, &mut out),
+			Block::TableFigure { table, .. }	=> collect_cite_from_table(table, &mut out),
 			_									=> {},
 		}
 	}
 	out
+}
+
+/// Pushes the keys of every citation in any cell of a table onto `out`.
+fn collect_cite_from_table(table: &Table, out: &mut Vec<Vec<String>>) {
+	for row in &table.rows {
+		for cell in &row.cells {
+			collect_cite_segments(&cell.content, out);
+		}
+	}
 }
 
 /// Pushes the keys of every citation segment in `segments` onto `out`.
@@ -2967,6 +2980,37 @@ mod tests {
 		assert_eq!(skips.total(), 1, "the scoped bold heading in a Regular-only face must be noted exactly once");
 		assert!(skips.sites()[0].name.contains("TestFace") && skips.sites()[0].name.contains("bold"),
 			"the note must name the face and the missing slant, found {:?}", skips.sites()[0].name);
+		Ok(())
+	}
+
+	/// A citation that sits only inside a table cell is still marked cited, so it appears in the Chicago
+	/// reference list -- the fix for the silent loss where 15 cell-only bibliography entries vanished from the
+	/// whole document. Reverting `collect_cite_keys` to skip `Block::Table` reds this: the reference list
+	/// comes back empty because the cell's key is never marked.
+	#[test]
+	fn cite_in_a_table_cell_is_marked_for_the_bibliography() -> Outcome<()> {
+		const MINI_BIB: &str = r#"
+@book{scott1976moral,
+  author    = {Scott, James C.},
+  title     = {The Moral Economy of the Peasant},
+  year      = {1976},
+  publisher = {Yale University Press}
+}
+"#;
+		let bib = res!(Bibliography::parse(MINI_BIB));
+		// A document whose only citation is inside a table cell.
+		let cell = Cell::rich(vec![
+			Segment::text("Author "),
+			Segment::cite(vec!["scott1976moral".to_string()]),
+		], Align::Left);
+		let mut blocks = vec![Block::Table(Table::new(false, vec![Row::new(vec![cell])]))];
+
+		let marked = append_bibliography(bib, &mut blocks);
+		let refs = marked.reference_list();
+		if refs.len() != 1 {
+			return Err(err!("A #cite inside a table cell was not marked for the bibliography: the reference \
+				list holds {} entries, expected 1.", refs.len(); Test, Mismatch));
+		}
 		Ok(())
 	}
 }

@@ -238,13 +238,13 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 }
 
 /// Records a refusal for every claim reference (`#claim-refs`/`#claim-label`) that sits in a context the
-/// layout does not gather into the reverse claim index. Only a top-level body run -- a paragraph, a list
-/// entry, a callout body -- feeds the index (see `doc::build_pieces`); a claim code in a heading title, a
-/// figure or table caption, a table cell or a footnote body is dropped by the layout, so it would otherwise
-/// vanish from the index (and, for a `#claim-label`, from the margin) with no trace. Making it a refusal
-/// keeps the silent-loss class this project guards against out of the reverse index. Gathering from those
-/// contexts needs anchor support there -- the same limitation as a `#claim-label` in a table cell not being
-/// drawn -- and is a later increment; until then the code is reported, not dropped.
+/// layout does not gather into the reverse claim index. A top-level body run -- a paragraph, a list entry, a
+/// callout body -- and a table cell both feed the index (see `doc::build_pieces`, reached for a cell through
+/// `doc::build_grid`); a claim code in a heading title, a figure or table caption, or a footnote body is
+/// dropped by the layout, so it would otherwise vanish from the index (and, for a `#claim-label`, from the
+/// margin) with no trace. Making that a refusal keeps the silent-loss class this project guards against out
+/// of the reverse index. Gathering from a heading or caption needs anchor support there and is a later
+/// increment; until then the code is reported, not dropped.
 fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
 	for item in items {
 		match item {
@@ -256,17 +256,14 @@ fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
 			// only its non-body sub-contexts (a caption, a footnote) are flagged.
 			Item::Box { items: inner, .. }		=> flag_unindexed_claim_refs(inner, skips),
 			Item::Scoped { items: inner, .. }	=> flag_unindexed_claim_refs(inner, skips),
-			// None of the following is gathered: a heading title, a caption, or a table cell.
+			// A heading title and a caption are still not gathered, so a claim reference in either is refused.
+			// A table cell now runs through the body's own segment pipeline (`doc::build_grid` ->
+			// `doc::build_pieces`), which weaves the cell's `#claim-refs`/`#claim-label` anchor into the reverse
+			// claim index exactly as a body run does, so it is no longer refused.
 			Item::Heading { runs, span, .. }	=> scan_claim_refs(runs, false, *span, "a heading title", skips),
-			Item::Table { spec, span }			=> for cell in &spec.cells { scan_claim_refs(cell, false, *span, "a table cell", skips); },
-			Item::Figure { body, caption, span, .. } => {
+			Item::Figure { caption, span, .. } => {
 				if let Some(cap) = caption {
 					scan_claim_refs(cap, false, *span, "a figure caption", skips);
-				}
-				if let FigureBody::Table(spec) = body {
-					for cell in &spec.cells {
-						scan_claim_refs(cell, false, *span, "a table cell", skips);
-					}
 				}
 			},
 			_ => {},

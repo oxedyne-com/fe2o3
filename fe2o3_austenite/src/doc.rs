@@ -532,9 +532,9 @@ pub struct MetaRow {
 /// back from the ledger after convergence. A throwaway one is handed to a measurement flow, whose markers
 /// never reach the document.
 #[derive(Default)]
-struct IndexGather {
-	no:		u32,
-	occ:	Vec<(String, Option<String>, AnchorId)>,
+pub(crate) struct IndexGather {
+	pub(crate) no:	u32,
+	pub(crate) occ:	Vec<(String, Option<String>, AnchorId)>,
 }
 
 /// The claim references gathered walking the body: one `(code, anchor)` pair per code named in a
@@ -543,8 +543,8 @@ struct IndexGather {
 /// after convergence, exactly as the back-matter index reads its folios. A throwaway one is handed to a
 /// measurement flow, whose references never reach the document.
 #[derive(Default)]
-struct ClaimGather {
-	occ:	Vec<(String, AnchorId)>,
+pub(crate) struct ClaimGather {
+	pub(crate) occ:	Vec<(String, AnchorId)>,
 }
 
 /// The mutable authoring state and immutable context of one document render, so the block walk can
@@ -816,7 +816,7 @@ impl<'a> Authoring<'a> {
 						pieces.push(indent_piece(style.par.indent));
 					}
 					pieces.extend(res!(build_pieces(
-						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
+						self.fonts.clone(), self.geom, style, segments, Role::Body, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
@@ -852,9 +852,15 @@ impl<'a> Authoring<'a> {
 						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 					}
 					if t.breakable {
-						self.nodes.extend(res!(table::lower_rows(self.fonts.clone(), style, self.measure, t, &self.refs)));
+						self.nodes.extend(res!(table::lower_rows(
+							self.fonts.clone(), self.geom, style, self.measure, t,
+							&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
+							&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
 					} else {
-						self.nodes.push(res!(table::lower(self.fonts.clone(), style, self.measure, t, &self.refs)));
+						self.nodes.push(res!(table::lower(
+							self.fonts.clone(), self.geom, style, self.measure, t,
+							&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
+							&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
 					}
 					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 					i += 1;
@@ -900,8 +906,10 @@ impl<'a> Authoring<'a> {
 						Some(p) => {
 							let mut mid = Vec::new();
 							res!(table_figure(
-								&mut mid, self.fonts.clone(), style, self.measure, table,
-								caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
+								&mut mid, self.fonts.clone(), self.geom, style, self.measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(),
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
+								&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
@@ -909,8 +917,10 @@ impl<'a> Authoring<'a> {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
 							res!(table_figure(
-								&mut self.nodes, self.fonts.clone(), style, self.measure, table,
-								caption.as_deref(), supplement, number, label.as_deref(), &self.refs));
+								&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(),
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
+								&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
@@ -1341,13 +1351,17 @@ fn ref_targets_walk(
 /// its number from the running fold and setting its note as a small paragraph at the foot measure, and
 /// each cross-reference a reserved inline slot the driver resolves in pass B. A text segment is a piece
 /// as it stands; a footnote becomes a superscript mark piece carrying the set note; a page reference or
-/// a total-pages call becomes a shrink-to-fit reserved leaf, unique by the running `ref_no`.
+/// a total-pages call becomes a shrink-to-fit reserved leaf, unique by the running `ref_no`. `base` is the
+/// face plain text and a resolved reference take: `Role::Body` in the running flow, a header row's `Role::Bold`
+/// when a table cell is built through this same path, so a cell renders, cites, gathers its index markers and
+/// records its claim anchors exactly as a body paragraph does.
 #[allow(clippy::too_many_arguments)]
-fn build_pieces(
+pub(crate) fn build_pieces(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
 	style: &Theme,
 	segments:	&[Segment],
+	base:		Role,
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
 	margin_no:	&mut u32,
@@ -1364,13 +1378,13 @@ fn build_pieces(
 	for seg in segments {
 		match seg {
 			Segment::Text(text) => {
-				pieces.push(Piece::Text { text: text.clone(), role: Role::Body });
+				pieces.push(Piece::Text { text: text.clone(), role: base });
 			},
 			Segment::Strong(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::Bold });
 			},
 			Segment::Emph(text) => {
-				pieces.push(Piece::Text { text: text.clone(), role: Role::Italic });
+				pieces.push(Piece::Text { text: text.clone(), role: crate::table::emph_role(base) });
 			},
 			Segment::BoldItalic(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::BoldItalic });
@@ -1422,7 +1436,7 @@ fn build_pieces(
 				// page-number slot the driver resolves in pass B, so the reference still reads rather than
 				// vanishing.
 				match refs.get(label) {
-					Some(text)	=> pieces.push(Piece::Text { text: text.clone(), role: Role::Body }),
+					Some(text)	=> pieces.push(Piece::Text { text: text.clone(), role: base }),
 					None		=> pieces.push(Piece::Mark(res!(ref_slot(
 						fonts.clone(), style, ref_no,
 						Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone())))))),
@@ -1435,7 +1449,7 @@ fn build_pieces(
 				// The first mention of a term is set bold-italic, matching the template's `*_term_*`;
 				// every later mention is plain body text. Document order is the traversal order, so the
 				// set alone decides, with no second pass.
-				let role = if seen.insert(term.clone()) { Role::BoldItalic } else { Role::Body };
+				let role = if seen.insert(term.clone()) { Role::BoldItalic } else { base };
 				pieces.push(Piece::Text { text: display.clone(), role });
 			},
 			Segment::Cite(keys) => {
@@ -1449,7 +1463,7 @@ fn build_pieces(
 					},
 					None => fmt!("({})", keys.join("; ")),
 				};
-				pieces.push(Piece::Text { text, role: Role::Body });
+				pieces.push(Piece::Text { text, role: base });
 			},
 			Segment::MarginNote { display, codes } => {
 				// A margin note sets nothing in the body column: it weaves a zero-width anchor into the line
@@ -1578,7 +1592,7 @@ fn list(
 		if ei > 0 {
 			nodes.push(Node::Glue(Glue::fixed(item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, Role::Body, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK,
 			Some(cap_edge(style, style.text.body_size))));
@@ -1956,6 +1970,7 @@ fn next_number(counters: &mut HashMap<String, u32>, supplement: &str) -> u32 {
 fn table_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
@@ -1963,12 +1978,21 @@ fn table_figure(
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	margin_no:	&mut u32,
+	seen:		&mut HashSet<String>,
+	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
+	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<()>
 {
 	figure_anchors(nodes, supplement, number, label);
-	nodes.push(res!(table::lower(fonts.clone(), style, measure, table, refs)));
+	nodes.push(res!(table::lower(
+		fonts.clone(), geom, style, measure, table,
+		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
 	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
 	Ok(())
@@ -3118,7 +3142,18 @@ fn fm_doc_meta_page(
 	// the top margin.
 	let table	= res!(build_meta_table(fm));
 	let refs:	HashMap<String, String>	= HashMap::new();
-	let tnode	= res!(table::lower(fonts.clone(), style, measure, &table, &refs));
+	// The colophon table carries only plain text (version, date, author, notes), so its cells raise no
+	// footnote, cross-reference, citation, index marker or claim anchor; throwaway counters and gathers
+	// absorb what the shared cell path would record and are discarded with the front matter.
+	let mut foot_no		= 0u32;
+	let mut ref_no		= 0u32;
+	let mut margin_no	= 0u32;
+	let mut seen:	HashSet<String>	= HashSet::new();
+	let mut idx			= IndexGather::default();
+	let mut claim		= ClaimGather::default();
+	let tnode	= res!(table::lower(
+		fonts.clone(), geom, style, measure, &table,
+		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, None, &refs));
 	let table_h	= node_vext(&tnode);
 	nodes.push(tnode);
 
@@ -4723,7 +4758,7 @@ fn box_flow_scoped(
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
-					fonts.clone(), geom, style, segments, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+					fonts.clone(), geom, style, segments, Role::Body, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));

@@ -16,11 +16,14 @@
 //! several lines simply contributes to several bands. The whole grid is thus leaves in HBoxes stacked
 //! in one VBox, which is the only shape the driver draws as real glyphs throughout.
 
+use crate::bib::Bibliography;
 use crate::doc::{
+	ClaimGather,
+	IndexGather,
 	Segment,
-	subscript,
-	superscript,
+	build_pieces,
 };
+use crate::page::PageGeometry;
 use crate::theme::Theme;
 use crate::font::ShapedText;
 use crate::ir::{
@@ -37,7 +40,6 @@ use crate::linebreak::{
 	Piece,
 	break_paragraph_pieces,
 };
-use crate::math;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
@@ -53,7 +55,10 @@ use oxedyne_fe2o3_graphics::{
 	},
 };
 
-use std::collections::HashMap;
+use std::collections::{
+	HashMap,
+	HashSet,
+};
 use std::sync::Arc;
 
 /// How a cell's text sits within its column width.
@@ -168,11 +173,20 @@ struct CellLine {
 /// own keep box so a tall table (a glossary) paginates between rows. The measure is the width a table
 /// spanning the full text block may use; a table whose natural columns are narrower is set narrower, flush
 /// left. The returned `Sp` is the table's laid width, shared by both callers.
+#[allow(clippy::too_many_arguments)]
 fn table_row_groups(
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	margin_no:	&mut u32,
+	seen:		&mut HashSet<String>,
+	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
+	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<(Vec<(Vec<Node>, Sp)>, Sp)>
@@ -225,7 +239,9 @@ fn table_row_groups(
 	// text in its face, a maths cluster, a superscript mark -- and reused for measuring the columns and for
 	// the final wrap, so a cell shapes its faces only once. The base role per row is bold in a header row,
 	// so a plain header label still sets bold, and body elsewhere.
-	let (piece_grid, bases) = res!(build_grid(fonts.clone(), style, table, ncols, refs));
+	let (piece_grid, bases) = res!(build_grid(
+		fonts.clone(), geom, style, table, ncols,
+		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 	let colwidth = res!(size_columns(
 		fonts.clone(), size, &piece_grid, &bases, ncols, available, &table.weights));
 
@@ -342,16 +358,27 @@ fn table_row_groups(
 /// Lowers a table to one keep box: every row group stacked into a single [`Node::VBox`], so the driver's
 /// greedy page breaker moves the whole table to the next page when it will not fit. This is the shape every
 /// plain table sets in.
+#[allow(clippy::too_many_arguments)]
 pub fn lower(
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	margin_no:	&mut u32,
+	seen:		&mut HashSet<String>,
+	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
+	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<Node>
 {
-	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
+	let (groups, table_width) = res!(table_row_groups(
+		fonts, geom, style, measure, table,
+		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 	let mut children:	Vec<Node> = Vec::new();
 	let mut total_h		= Sp::ZERO;
 	for (nodes, h) in groups {
@@ -377,16 +404,27 @@ pub fn lower(
 /// armed header at the top of every fresh page the body rows spill onto, so the column heads repeat down a
 /// multi-page run -- Typst's repeated `table.header`. The first-page header is the emitted box, not the
 /// repeat, so it is never doubled there.
+#[allow(clippy::too_many_arguments)]
 pub fn lower_rows(
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	margin_no:	&mut u32,
+	seen:		&mut HashSet<String>,
+	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
+	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<Vec<Node>>
 {
-	let (groups, table_width) = res!(table_row_groups(fonts, style, measure, table, refs));
+	let (groups, table_width) = res!(table_row_groups(
+		fonts, geom, style, measure, table,
+		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 	let mut out: Vec<Node> = Vec::with_capacity(groups.len() * 2 + 2);
 	let mut groups = groups.into_iter();
 
@@ -458,13 +496,28 @@ fn base_role(table: &Table, r: usize) -> Role {
 }
 
 /// Builds every cell's pieces once, and the base role of each row. A missing cell (a ragged row shorter
-/// than the widest) gives an empty piece list, so the column simply carries nothing there.
+/// than the widest) gives an empty piece list, so the column simply carries nothing there. Each cell's
+/// segments run through the body's own [`build_pieces`](crate::doc::build_pieces), so a citation renders to
+/// its author-year text against the bibliography, an index marker weaves its zero-width gather anchor, and a
+/// `#claim-refs`/`#claim-label` records its reverse-index anchor -- exactly as a body paragraph does, rather
+/// than being dropped. The document-order counters (`foot_no`, `ref_no`, `margin_no`, the glossary first-use
+/// `seen`), the index and claim gathers and the bibliography are threaded in so a cell counts and gathers in
+/// step with the surrounding flow.
+#[allow(clippy::too_many_arguments)]
 fn build_grid(
-	fonts:	Arc<FontSet>,
+	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
-	table:	&Table,
-	ncols:	usize,
-	refs:	&HashMap<String, String>,
+	table:		&Table,
+	ncols:		usize,
+	foot_no:	&mut u32,
+	ref_no:		&mut u32,
+	margin_no:	&mut u32,
+	seen:		&mut HashSet<String>,
+	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
 )
 	-> Outcome<(Vec<Vec<Vec<Piece>>>, Vec<Role>)>
 {
@@ -476,7 +529,9 @@ fn build_grid(
 		let mut cols = Vec::with_capacity(ncols);
 		for c in 0..ncols {
 			let pieces = match row.cells.get(c) {
-				Some(cell)	=> res!(cell_pieces(fonts.clone(), style, &cell.content, base, refs)),
+				Some(cell)	=> res!(build_pieces(
+					fonts.clone(), geom, style, &cell.content, base,
+					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs)),
 				None		=> Vec::new(),
 			};
 			cols.push(pieces);
@@ -486,77 +541,9 @@ fn build_grid(
 	Ok((grid, bases))
 }
 
-/// Turns a cell's rich segments into the pieces the line breaker weaves. Plain text takes the row's base
-/// role -- a header cell's bold, a body cell's body; `*strong*`, `_emph_`, a `#super[...]`/`#sub[...]`,
-/// inline code and an in-cell maths span keep their own faces, so a cell sets exactly as a run of prose
-/// would. A footnote or a cross-reference in a cell -- rare -- is not set here; a citation falls back to
-/// its keys.
-fn cell_pieces(
-	fonts:		Arc<FontSet>,
-	style: &Theme,
-	segments:	&[Segment],
-	base:		Role,
-	refs:		&HashMap<String, String>,
-)
-	-> Outcome<Vec<Piece>>
-{
-	let size = style.text.body_size;
-	let mut pieces = Vec::with_capacity(segments.len());
-	for seg in segments {
-		match seg {
-			Segment::Text(t)		=> pieces.push(Piece::Text { text: t.clone(), role: base }),
-			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
-			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: emph_role(base) }),
-			Segment::BoldItalic(t)	=> pieces.push(Piece::Text { text: t.clone(), role: Role::BoldItalic }),
-			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
-			Segment::Glossary { display, .. }
-									=> pieces.push(Piece::Text { text: display.clone(), role: base }),
-			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: base }),
-			Segment::PageRef(label) => {
-				// A cross-reference resolves to Typst's own supplement-and-number text -- "Chapter 13",
-				// "Table 1" -- fixed by the document-order pre-pass and set as the cell's base face. A label
-				// the pre-pass did not record sets nothing; a cell has no reserved page-number slot the driver
-				// could later fill, so an unresolved reference is dropped rather than left as a gap.
-				if let Some(text) = refs.get(label) {
-					pieces.push(Piece::Text { text: text.clone(), role: base });
-				}
-			},
-			Segment::Footnote { .. }	=> {},	// a footnote in a cell is not set at this increment
-			Segment::MarginNote { .. }	=> {},	// a margin note in a cell sets nothing here
-			Segment::Index { .. }	=> {},	// an index marker in a cell sets nothing here
-			Segment::Super(t) => {
-				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));
-				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
-			},
-			Segment::Sub(t) => {
-				let (shaped, dims) = res!(subscript(fonts.clone(), base, size, t));
-				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
-			},
-			Segment::Math(expr) => {
-				// The inline box is flattened to leaves and glue by the maths layout; its children weave into
-				// the line as real glyphs, its baseline seated on the text baseline.
-				let node = res!(math::layout(fonts.clone(), style, expr, false));
-				if let Node::HBox(b) = node {
-					let ascent	= res!(ShapedText::new(
-						fonts.clone(), base, Dir::Ltr, size, "0")).dims().height;
-					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
-					pieces.push(Piece::Math {
-						nodes:	b.list,
-						width:	b.dims.width,
-						height:	ascent,
-						depth:	b.dims.depth,
-						over,
-					});
-				}
-			},
-		}
-	}
-	Ok(pieces)
-}
-
 /// The face an emphasised run takes over a base: bold-italic within a header (whose base is bold), plain
 /// italic elsewhere.
-fn emph_role(base: Role) -> Role {
+pub(crate) fn emph_role(base: Role) -> Role {
 	if base == Role::Bold { Role::BoldItalic } else { Role::Italic }
 }
 
@@ -1033,6 +1020,68 @@ mod tests {
 		}
 		if capped[0].depth != Sp::ZERO {
 			return Err(err!("The capped cell's last-line depth was not the baseline: {} sp.", capped[0].depth.raw(); Test, Mismatch));
+		}
+		Ok(())
+	}
+
+	// A one-entry bibliography, enough to resolve one in-text citation to its Chicago author-year form.
+	const CELL_BIB: &str = r#"
+@book{scott1976moral,
+  author    = {Scott, James C.},
+  title     = {The Moral Economy of the Peasant},
+  year      = {1976},
+  publisher = {Yale University Press}
+}
+"#;
+
+	/// A table cell now runs through the body's own segment pipeline, so a `#cite` in a cell renders to its
+	/// author-year text against the bibliography, an `#index[...]` marker is gathered into the back-matter
+	/// index, and a `#claim-refs`/`#claim-label` code reaches the reverse claim index -- the three inline
+	/// kinds a cell used to drop silently. Reverting `build_grid` to the old `cell_pieces` reds this test: the
+	/// citation would render as the bare key `(scott1976moral)`, and both gathers would stay empty.
+	#[test]
+	fn table_cell_cite_renders_and_index_and_claim_are_gathered() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let style	= Theme::default();
+		let geom	= PageGeometry::a4();
+		let bib		= res!(Bibliography::parse(CELL_BIB));
+
+		let cell = Cell::rich(vec![
+			Segment::text("See "),
+			Segment::cite(vec!["scott1976moral".to_string()]),
+			Segment::index("Peasant economy", None),
+			Segment::margin_note("", vec!["C7".to_string()]),
+		], Align::Left);
+		let table = Table::new(false, vec![Row::new(vec![cell])]);
+
+		let mut foot_no		= 0u32;
+		let mut ref_no		= 0u32;
+		let mut margin_no	= 0u32;
+		let mut seen:		HashSet<String>			= HashSet::new();
+		let mut idx			= IndexGather::default();
+		let mut claim		= ClaimGather::default();
+		let refs:			HashMap<String, String>	= HashMap::new();
+
+		let (grid, _bases) = res!(build_grid(
+			fonts, geom, &style, &table, 1,
+			&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, Some(&bib), &refs));
+
+		// The citation renders to its Chicago author-year form, not the bracketed raw key.
+		let texts: Vec<&str> = grid[0][0].iter().filter_map(|p| match p {
+			Piece::Text { text, .. }	=> Some(text.as_str()),
+			_							=> None,
+		}).collect();
+		if !texts.iter().any(|t| *t == "(Scott 1976)") {
+			return Err(err!("The table cell's #cite did not render to its author-year text; \
+				text pieces were {:?}.", texts; Test, Mismatch));
+		}
+		// The index marker was gathered, so the back-matter index will list the term with the page it lands on.
+		if !idx.occ.iter().any(|(term, _, _)| term == "Peasant economy") {
+			return Err(err!("The table cell's #index marker was not gathered into the back-matter index."; Test, Mismatch));
+		}
+		// The claim code reached the reverse claim index.
+		if !claim.occ.iter().any(|(code, _)| code == "C7") {
+			return Err(err!("The table cell's claim reference did not reach the reverse claim index."; Test, Mismatch));
 		}
 		Ok(())
 	}
