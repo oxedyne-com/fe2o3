@@ -207,6 +207,17 @@ impl Memo {
 
 	pub fn global_fp(&self) -> u64 { self.global_fp }
 
+	/// The number of page-emit entries currently held. The changed-only delta path renders through
+	/// [`crate::emit::svg::render_page`], which never touches this cache, so a wasm delta instance keeps
+	/// this at zero: it retains the block-authoring working set (the incremental recompile) but never the
+	/// rendered page SVG (the consumer holds that). A residency assertion reads it to prove the wasm heap
+	/// does not grow with the rendered document.
+	pub fn cached_pages(&self) -> usize { self.pages.len() }
+
+	/// The number of block-authoring entries currently held -- the working set the two-generation
+	/// [`sweep`](Self::sweep) bounds to roughly one document.
+	pub fn cached_blocks(&self) -> usize { self.blocks.len() }
+
 	/// Drops every entry not touched in the current or the immediately preceding generation, so the two
 	/// caches hold at most the working sets of the last two compiles -- roughly twice the live document,
 	/// never an unbounded accumulation of stale edits.

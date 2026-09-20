@@ -17,6 +17,7 @@
 
 use oxedyne_fe2o3_austenite::compile::{
 	author_and_run,
+	author_and_run_memo,
 	Assembled,
 };
 use oxedyne_fe2o3_austenite::delta;
@@ -26,6 +27,7 @@ use oxedyne_fe2o3_austenite::fonts::{
 	self,
 	FaceResolver,
 };
+use oxedyne_fe2o3_austenite::memo::Memo;
 use oxedyne_fe2o3_austenite::ir::{
 	Dims,
 	Sp,
@@ -43,6 +45,7 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ REAL COMPILE FIXTURES                                                       │
@@ -295,5 +298,128 @@ fn retained_state_is_ids_only() -> Outcome<()> {
 	// The SVG that WAS rendered lives only in `changed`, to be handed over and dropped -- it is not reachable
 	// from anything a caller would keep (`order`), which is the residency the swap depends on.
 	assert!(!d.changed.is_empty(), "the reset rendered pages into changed, to be sent and then dropped");
+	Ok(())
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE WASM DELTA PATH: PERSISTENT BLOCK MEMO + PAGE-SVG RESIDENCY             │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// The delta path the browser drives is `author_and_run_memo(Some(&mut memo))` -> `delta::compute` ->
+// `memo.sweep()`: the block-authoring memo is retained across recompiles (so an unedited block splices its
+// cached layout -- the incremental recompile), while each changed page is rendered through
+// `svg::render_page`, NOT the page-emit memo. These tests hold that path to the two properties the swap
+// rests on: a warm recompile is byte-identical to a cold compile of the edited source, and the retained
+// heap holds the block working set alone -- never a page's rendered SVG (the consumer holds those).
+
+/// Authors and runs a document to its resolved pages through the memo, exactly as the wasm delta path does:
+/// `author_and_run_memo` threads the block memo through authoring, and the pages are returned for the delta
+/// to render itself (through `svg::render_page`, not the page-emit memo). `None` is the cold, un-memoised
+/// compile -- the byte reference and the straight-swap latency baseline.
+fn author_pages(blocks: Vec<Block>, memo: Option<&mut Memo>) -> Outcome<Vec<Page>> {
+	let fonts	= Arc::new(res!(fonts::libertinus()));
+	let assembled = Assembled {
+		blocks,
+		fonts,
+		geom:	PageGeometry::a4(),
+		style:	Theme::default(),
+		title:	String::new(),
+		faces:	FaceResolver::default(),
+		front:	None,
+		bib:	None,
+	};
+	Ok(res!(author_and_run_memo(assembled, memo)).out.pages)
+}
+
+/// The whole delta contract in one test: priming the memo on the original, then warm-recompiling a
+/// one-block edit, must (1) render byte-identical pages to a cold compile of the edited source, (2) hit the
+/// block-authoring cache on every block but the edited one, and (3) leave the page-emit cache untouched --
+/// the residency invariant that keeps the wasm heap holding the block working set, never the rendered
+/// document. The delta itself must resend only the pages the edit reached.
+#[test]
+fn the_delta_path_reuses_blocks_and_never_retains_page_svg() -> Outcome<()> {
+	let n		= 40;
+	let edit_at	= 34;	// late, so many earlier pages fall outside the pagination cascade
+
+	// The cold reference: the edited source compiled with no memo, rendered whole (the straight swap).
+	let cold_pages	= res!(author_pages(build_doc(n, Some(edit_at)), None));
+	let cold_svgs: Vec<String> = res!(cold_pages.iter().map(svg::render_page).collect());
+
+	// Prime the memo on the original document -- the first open, before the edit loop.
+	let mut memo	= Memo::new();
+	let orig_pages	= res!(author_pages(build_doc(n, None), Some(&mut memo)));
+	let d1			= res!(delta::compute(&orig_pages, &[], 0));
+	memo.sweep();
+	assert_eq!(memo.cached_pages(), 0, "priming through the delta path fills no page-emit entry");
+	assert_eq!(memo.page_hits + memo.page_misses, 0, "the page-emit memo is never consulted on the delta path");
+
+	// Warm recompile the edited source, the consumer's prior ids being the priming compile's order.
+	let warm_pages	= res!(author_pages(build_doc(n, Some(edit_at)), Some(&mut memo)));
+	let d2			= res!(delta::compute(&warm_pages, &d1.order, d1.version));
+	memo.sweep();
+
+	// (1) Byte identity: the memo must not change one output byte of any page.
+	let warm_svgs: Vec<String> = res!(warm_pages.iter().map(svg::render_page).collect());
+	assert_eq!(warm_svgs, cold_svgs,
+		"a warm memo recompile must render byte-identical pages to a cold compile of the edited source");
+
+	// (2) The block-authoring cache: only the edited block misses (Memo::begin resets the tallies each
+	// compile, so these count the warm recompile alone).
+	assert_eq!(memo.block_misses, 1,
+		"only the one edited block should miss the authoring cache, found {}", memo.block_misses);
+	assert_eq!(memo.block_hits as usize, n - 1,
+		"every block but the edited one should hit, found {}", memo.block_hits);
+
+	// (3) Residency: the page-emit cache is STILL empty and was never consulted, so the retained heap holds
+	// blocks alone -- the bounded working set the two-generation sweep keeps -- never a page's rendered SVG.
+	assert_eq!(memo.cached_pages(), 0,
+		"the wasm delta path must never retain a page's SVG in the memo, found {} entries", memo.cached_pages());
+	assert_eq!(memo.page_hits + memo.page_misses, 0, "the page-emit memo stays unconsulted across recompiles");
+	assert!(memo.cached_blocks() <= n + 2,
+		"the block cache is bounded to roughly the document, found {} for {} blocks", memo.cached_blocks(), n);
+
+	// The delta resends only the pages the edit reached, not the whole document.
+	assert!(!d2.changed.is_empty() && d2.changed.len() < d2.order.len(),
+		"a late edit resends only its cascade: {} changed of {} pages", d2.changed.len(), d2.order.len());
+	Ok(())
+}
+
+/// The number the swap rests on: the warm live-view recompile the delta path pays per keystroke against the
+/// cold full compile a straight Typst-wasm swap would pay. Cold authors and renders the whole document; warm
+/// reuses the block cache and renders only the changed pages. Not an assertion -- machines differ -- but it
+/// prints the speedup daimond-a needs. Run with `--nocapture` to read it.
+#[test]
+fn measure_delta_cold_versus_warm_recompile() -> Outcome<()> {
+	let n		= 260;
+	let edit_at	= 130;
+
+	// Cold: a full compile with no memo, rendering every page -- the latency a straight swap pays each edit.
+	let t0		= Instant::now();
+	let cold	= res!(author_pages(build_doc(n, Some(edit_at)), None));
+	let cold_svgs: Vec<String> = res!(cold.iter().map(svg::render_page).collect());
+	let cold_ms	= t0.elapsed().as_secs_f64() * 1000.0;
+
+	// Prime the memo on the original document (the first open, not the edit loop).
+	let mut memo	= Memo::new();
+	let orig		= res!(author_pages(build_doc(n, None), Some(&mut memo)));
+	let d1			= res!(delta::compute(&orig, &[], 0));
+	memo.sweep();
+
+	// Warm: the edit-and-re-render a keystroke triggers -- reuse the block cache, render only changed pages.
+	let t1		= Instant::now();
+	let warm	= res!(author_pages(build_doc(n, Some(edit_at)), Some(&mut memo)));
+	let d2		= res!(delta::compute(&warm, &d1.order, d1.version));
+	let warm_ms	= t1.elapsed().as_secs_f64() * 1000.0;
+	memo.sweep();
+
+	// The warm pages must still be byte-identical to the cold render of the edited source.
+	let warm_svgs: Vec<String> = res!(warm.iter().map(svg::render_page).collect());
+	assert_eq!(warm_svgs, cold_svgs, "the measured warm recompile must still be byte-identical");
+	assert_eq!(memo.cached_pages(), 0, "the measurement path retains no page SVG either");
+
+	eprintln!(
+		"[delta] {} pages: cold {:.1} ms, warm {:.1} ms, speedup {:.1}x (block {}/{} hit, {} of {} pages resent)",
+		cold.len(), cold_ms, warm_ms, cold_ms / warm_ms.max(0.001),
+		memo.block_hits, n - 1, d2.changed.len(), d2.order.len());
 	Ok(())
 }
