@@ -1291,16 +1291,39 @@ pub type ContentFns = std::collections::HashMap<String, ContentFn>;
 /// The `#let` bindings a parse resolves a call against: the furniture functions ([`TemplateFns`], expanded
 /// into a padded box) and the content bindings ([`ContentFns`], spliced as markup). Threaded as one through
 /// the reader so a caller passes both together and a nested body carries the same scope. Borrowed, so it is
-/// [`Copy`] and travels without a clone; [`Bindings::empty`] carries two empty maps for a bare parse.
+/// [`Copy`] and travels without a clone.
+///
+/// `active` is the stack of content-binding names currently being expanded, innermost last. A reference to a
+/// name already on it is a cycle (`#let a = [#a]`, or the mutual `#let a = [#b]`/`#let b = [#a]`) and is
+/// refused at once -- so a cycle recurses only to its own length, never until the native stack or the wasm
+/// shadow stack overflows. Its length also caps a pathological non-cyclic chain (see the reader's own cap).
 #[derive(Clone, Copy)]
-pub struct Bindings<'a> {
+pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
 	pub cfns:	&'a ContentFns,
+	pub active:	&'b [String],
 }
 
-impl<'a> Bindings<'a> {
+impl<'a> Bindings<'a, 'static> {
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns }
+		Self { tfns, cfns, active: &[] }
+	}
+}
+
+impl<'a, 'b> Bindings<'a, 'b> {
+	/// Is `name` already being expanded -- a content-binding cycle?
+	pub fn expanding(&self, name: &str) -> bool {
+		self.active.iter().any(|n| n == name)
+	}
+
+	/// The number of content-binding expansions currently open.
+	pub fn depth(&self) -> usize {
+		self.active.len()
+	}
+
+	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
+	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
+		Bindings { tfns: self.tfns, cfns: self.cfns, active }
 	}
 }
 

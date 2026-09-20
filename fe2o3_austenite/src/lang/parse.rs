@@ -306,7 +306,7 @@ fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, sk
 /// that landed in a context the layout does not gather into the reverse claim index. This runs once, on the
 /// whole assembled tree -- the recursive re-parse of a `#columns`/`#styled-box` body reaches for
 /// [`parse_items`] directly, so a nested claim reference is flagged once here rather than again per level.
-pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings)
+pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
 	let (items, mut skips) = res!(parse_items(src, binds));
@@ -317,7 +317,7 @@ pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings)
 /// The surface-tree parse proper, without the [`flag_unindexed_claim_refs`] post-pass -- so a recursively
 /// re-parsed body (a `#columns`/`#styled-box` wrapper's content) is not validated twice, once here and again
 /// when its parent walks the spliced items. [`document_with_templates`] wraps this with that one validation.
-fn parse_items(src: &str, binds: crate::lang::rules::Bindings)
+fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
 	let mut skips:		Refusals	= Refusals::default();
@@ -451,9 +451,17 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings)
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
 			// line -- flushes it first, so two lists parted by real content still restart.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
-		} else if let Some(kind) = capture_opener(trimmed, binds) {
-			// A multi-line construct the reader sets rather than skips -- a figure, a bare table, or a data
-			// array feeding a table. It closes any open block, then its whole text is gathered by the check
+		} else if let Some(kind) = capture_opener(trimmed, binds)
+			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
+		{
+			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
+			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
+			// splices its expanded blocks (the `filter` above lets an open-paragraph `#name` fall through to
+			// the paragraph arm). Every other capture kind -- a figure, a bare table, a data array -- flushes
+			// the paragraph and is gathered as before.
+			//
+			// A multi-line construct the reader sets rather than skips. It closes any open block, then its
+			// whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut stack);
@@ -499,12 +507,15 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings)
 			if let CodeSkip::Multi(state) = decision {
 				skip = Some(state);
 			}
-		} else if is_bare_ident_ref(trimmed) {
-			// A line that is a bare `#name` binding to nothing the reader knows: a content binding was not in
-			// scope for it, and it is neither furniture nor an inline call (a bound `#name` is expanded by
-			// `capture_opener` above, before this arm). A bare identifier resolves to a value in Typst, so
-			// setting its source as literal prose would leak a `#` onto the page; it is refused with its span
-			// instead, exactly as a `#name(...)` call the reader cannot run already is.
+		} else if lines.is_empty() && is_code_reference(trimmed) {
+			// A line-leading code-mode reference the reader cannot run -- a bare `#name` bound to nothing, a
+			// field/method access `#name.foo`, an `#if`/`#for`/`#while` control keyword, or an anonymous
+			// `#{ ... }`/`#( ... )` block. A bound `#name` was expanded by `capture_opener` above; a
+			// `#name(`/`#name[` call and the `#let`/`#set`/`#show`/`#import` keywords were refused by
+			// `code_skip`. Each of these resolves to a value or runs code in Typst, so setting its source as
+			// literal prose would leak a `#` onto the page (the very thing an expanded content-binding body
+			// carrying `#if`/`#{` would do); it is refused with its span instead. The `lines.is_empty()` guard
+			// keeps a reference mid-paragraph joining the line inline, as Typst does, rather than refusing it.
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips);
 			flush_list(&mut items, &mut stack);
 			skips.record(&construct_name(trimmed), Span::new(start, end));
@@ -1533,16 +1544,45 @@ fn opens_standalone_call(trimmed: &str) -> bool {
 	}
 }
 
-/// Is this already-left-trimmed line a bare identifier reference -- `#name` with nothing else on the line?
-/// A code keyword (`#let`, ...) has a trailing space and so is not one; a call (`#name(`/`#name[`) carries a
-/// delimiter and is not one; a lone `#` is not one. Used to refuse a line-leading value reference the reader
-/// holds no binding for, rather than leak its `#name` source into the prose. A bound `#name` is expanded
-/// upstream in [`capture_opener`], so this only ever sees an unresolved reference.
-fn is_bare_ident_ref(trimmed: &str) -> bool {
-	match trimmed.strip_prefix('#') {
-		Some(rest)	=> !rest.is_empty()
-			&& rest.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_'),
-		None		=> false,
+/// Is this already-left-trimmed line a line-leading code-mode reference the reader cannot run and must
+/// refuse rather than leak as prose? Recognises an anonymous `#{ ... }`/`#( ... )` block, an `#if`/`#for`/
+/// `#while` control keyword, a field or method access `#name.foo`, and a bare `#name` (with only whitespace
+/// after -- a `// comment` is stripped upstream). A `#name(`/`#name[` standalone call and the `#let`/`#set`/
+/// `#show`/`#import` keywords are refused earlier by [`code_skip`], and a bound `#name` is expanded by
+/// [`capture_opener`], so this catches exactly what is left -- above all a `#if`/`#{` surfacing in a re-read
+/// content-binding body, which must be refused, not set with its leading `#`.
+fn is_code_reference(trimmed: &str) -> bool {
+	let rest = match trimmed.strip_prefix('#') {
+		Some(r)	=> r,
+		None	=> return false,
+	};
+	let chars: Vec<char> = rest.chars().collect();
+	// An anonymous code block or expression.
+	if matches!(chars.first(), Some('{') | Some('(')) {
+		return true;
+	}
+	// A control keyword: `#if`/`#for`/`#while` followed by whitespace, `(` or `{`.
+	for kw in ["if", "for", "while"] {
+		if let Some(after) = rest.strip_prefix(kw) {
+			match after.chars().next() {
+				Some(c) if c.is_whitespace() || c == '(' || c == '{'	=> return true,
+				_													=> {},
+			}
+		}
+	}
+	// A bare identifier, or a field/method access on one.
+	let name_len = chars.iter().take_while(|&&c| c.is_alphanumeric() || c == '-' || c == '_').count();
+	if name_len == 0 {
+		return false;
+	}
+	match chars.get(name_len) {
+		None			=> true,	// a bare `#name`
+		Some('.')		=> true,	// a field or method access `#name.foo`
+		// A bare `#name` with only whitespace trailing it (a comment was stripped upstream); a `#name` with
+		// trailing prose is an inline reference the paragraph keeps, and a `#name(`/`#name[` is a call handled
+		// elsewhere.
+		Some(c) if c.is_whitespace()	=> chars[name_len..].iter().all(|c| c.is_whitespace()),
+		_				=> false,
 	}
 }
 
@@ -2147,6 +2187,12 @@ struct Capture {
 	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
 }
 
+/// The backstop cap on content-binding expansion depth, for a pathological *non-cyclic* chain of distinct
+/// bindings (a cycle is already caught precisely by the name stack, at its own length). Set well above any
+/// honest nesting yet well below the level at which the reader's own frames overflow the wasm shadow stack --
+/// a depth-64 cap alone was found to overflow, so it would trap rather than refuse, defeating its purpose.
+const MAX_EXPANSION_DEPTH: usize = 32;
+
 /// Which multi-line construct is being gathered.
 enum CaptureKind {
 	Figure,			// a `#figure(...)` call, possibly wrapping a table or an image
@@ -2165,7 +2211,7 @@ enum CaptureKind {
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
 /// bare `#table(`, or a `#let name = (` data array. `None` for any other line, which the caller then
 /// offers to [`code_skip`].
-fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings) -> Option<CaptureKind> {
+fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) -> Option<CaptureKind> {
 	// A call to a bound `#let` furniture function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` --
 	// is expanded rather than skipped. Recognised before the generic openers so a furniture name never
 	// collides with one of them (none of the corpus names does), and only when the map holds it, so an
@@ -2266,27 +2312,39 @@ fn template_call_name(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> 
 	}
 }
 
-/// If this line opens a reference to a bound content binding -- `#<name>`, `#<name>(args)` or `#<name>[..]`
-/// where `<name>` is a key of `cfns` and not one of the inline-call family -- that name; else `None`. A bare
-/// `#name` matches only when the whole trimmed line is exactly `#name`, so an inline `#name` mid-prose is
-/// left to the inline scanner; a `#name(` or `#name[` matches as a standalone call opener whatever trails
-/// it, the same latitude [`template_call_name`] allows a furniture call. The inline-call guard mirrors
-/// [`opens_standalone_call`]'s: a binding named `idx`/`g` must never shadow the inline call the scanner sets.
+/// If this line is a *standalone* reference to a bound content binding -- a bare `#name`, a `#name(args)`, a
+/// `#name[body]` or a `#name(args)[body]` whose balanced group(s) are followed by nothing but whitespace --
+/// where `<name>` is a key of `cfns` and not one of the inline-call family, that name; else `None`. The
+/// only-whitespace-after rule is the guard against silent word loss: `#em[Note] the rest.` carries trailing
+/// prose, so it is NOT a standalone call -- it falls through to the paragraph, where the trailing words
+/// survive, rather than being expanded with the rest of the sentence discarded. The inline-call guard
+/// mirrors [`opens_standalone_call`]'s: a binding named `idx`/`g` must never shadow the inline call.
 fn content_call_name(trimmed: &str, cfns: &crate::lang::rules::ContentFns) -> Option<String> {
 	let rest = trimmed.strip_prefix('#')?;
-	let name_len = rest.chars().take_while(|&c| c.is_alphanumeric() || c == '-' || c == '_').count();
+	let chars: Vec<char> = rest.chars().collect();
+	let name_len = chars.iter().take_while(|&&c| c.is_alphanumeric() || c == '-' || c == '_').count();
 	if name_len == 0 {
 		return None;
 	}
-	let name: String = rest.chars().take(name_len).collect();
+	let name: String = chars[..name_len].iter().collect();
 	if is_inline_call(&name) || !cfns.contains_key(&name) {
 		return None;
 	}
-	let after: String = rest.chars().skip(name_len).collect();
-	match after.trim_end().chars().next() {
-		None					=> Some(name),	// a bare `#name` line
-		Some('(') | Some('[')	=> Some(name),	// a standalone `#name(...)` or `#name[...]` call
-		_						=> None,		// `#name` followed by prose is an inline reference
+	// Step past the call's balanced group(s): a `(args)` optionally followed by a `[body]`, or a lone
+	// `[body]`. A bare `#name` opens neither.
+	let mut j = name_len;
+	if chars.get(j) == Some(&'(') {
+		j = read_group(&chars, j)?.1;
+	}
+	if chars.get(j) == Some(&'[') {
+		j = read_group(&chars, j)?.1;
+	}
+	// Only when nothing but whitespace trails the reference is it standalone; a trailing character makes it
+	// an inline reference the paragraph keeps whole.
+	if chars[j..].iter().all(|c| c.is_whitespace()) {
+		Some(name)
+	} else {
+		None
 	}
 }
 
@@ -2373,7 +2431,7 @@ fn dispatch_capture(
 	items:	&mut Vec<Item>,
 	arrays:	&mut HashMap<String, Vec<Vec<Inline>>>,
 	skips:	&mut Refusals,
-	binds:	crate::lang::rules::Bindings,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
 )
 {
 	match cap.kind {
@@ -2527,9 +2585,28 @@ fn dispatch_capture(
 				Some(cf)	=> cf,
 				None		=> return,	// the opener only fires for a bound name, so this cannot happen
 			};
+			// A self- or mutually-referential binding (`#let a = [#a]`, `#let a = [#b]`/`#let b = [#a]`, or a
+			// function form `#let f(n) = [x #f(n)]`) would re-expand without bound. The name stack catches it
+			// the instant a name recurs -- so a cycle unwinds at its own length, never deep enough to overflow
+			// the native stack or the wasm shadow stack -- and the depth cap is the backstop for a pathological
+			// non-cyclic chain of distinct bindings. Either way an unbounded re-read becomes a recorded refusal.
+			if binds.expanding(&name) {
+				skips.record(
+					&fmt!("#{} (cycle: content binding refers back to itself)", name),
+					Span::new(cap.start, cap.start));
+				return;
+			}
+			if binds.depth() >= MAX_EXPANSION_DEPTH {
+				skips.record(
+					&fmt!("#{} (cycle: expansion depth exceeds {})", name, MAX_EXPANSION_DEPTH),
+					Span::new(cap.start, cap.start));
+				return;
+			}
 			let args		= content_call_args(&cap.buf, &name);
 			let expanded	= expand_content_body(cf, &args);
-			if let Ok((mut inner, sub)) = parse_items(&expanded, binds) {
+			let mut nested: Vec<String> = binds.active.to_vec();
+			nested.push(name.clone());
+			if let Ok((mut inner, sub)) = parse_items(&expanded, binds.with_active(&nested)) {
 				skips.merge(sub);
 				items.append(&mut inner);
 			}

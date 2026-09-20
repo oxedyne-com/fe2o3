@@ -211,13 +211,31 @@ enum Product {
 	Svg(Vec<String>),
 }
 
+/// Runs a compile closure under [`std::panic::catch_unwind`], turning a panic into an ordinary error rather
+/// than letting it escape as a wasm trap. A trap unwinds no Rust state and leaves the instance's shadow
+/// stack unrestored, so a single panicked compile would corrupt the [`DaimondTypst`] instance until the page
+/// reloaded; catching it here keeps the instance usable and surfaces an `{ error }` object instead. The
+/// engine's own cycle and depth caps mean a well-formed document never panics -- this is the net for the
+/// unforeseen. (Under a `panic = "abort"` build the abort still traps; the guard is effective wherever
+/// unwinding is enabled, and is harmless otherwise.)
+fn catch_compile<T, F>(f: F, main: &str) -> Outcome<T>
+where
+	F: FnOnce() -> Outcome<T>,
+{
+	match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+		Ok(outcome)	=> outcome,
+		Err(_)		=> Err(err!(
+			"The compiler panicked while assembling {:?}; the document was not produced.", main; Bug)),
+	}
+}
+
 impl DaimondTypst {
 	/// Runs a compile and clears the source map before returning either way, so one instance compiles many
 	/// documents in turn without a stale file leaking between them. Composes the engine's message with the
 	/// main file for the app's `file:line: message` diagnostic.
 	fn run(&mut self, project: &JsValue, mode: Mode) -> Result<Product, String> {
 		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
-		let outcome = self.run_inner(project, &main, mode);
+		let outcome = catch_compile(|| self.run_inner(project, &main, mode), &main);
 		let _ = vfs::clear();
 		match outcome {
 			Ok(p)	=> Ok(p),
@@ -231,7 +249,7 @@ impl DaimondTypst {
 	/// into the delta, and dropped.
 	fn run_delta(&mut self, project: &JsValue) -> Result<DeltaOut, String> {
 		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
-		let outcome = self.run_delta_inner(project, &main);
+		let outcome = catch_compile(|| self.run_delta_inner(project, &main), &main);
 		let _ = vfs::clear();
 		match outcome {
 			Ok(out)	=> Ok(out),
