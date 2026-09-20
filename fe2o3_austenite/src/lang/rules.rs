@@ -1273,6 +1273,37 @@ pub struct TemplateFn {
 /// a source with none reads exactly as before.
 pub type TemplateFns = std::collections::HashMap<String, TemplateFn>;
 
+/// A `#let name = [ ... ]` (value) or `#let name(p, ...) = [ ... ]` (function) content binding: markup
+/// captured verbatim and, at each reference, expanded by substituting the call's positional arguments for
+/// each `#param` in the body and re-reading the result as document markup. Unlike a [`TemplateFn`], whose
+/// body is a furniture wrap the reader lowers to a padded box, a content binding's body is arbitrary block
+/// markup -- headings, paragraphs, nested calls -- so its blocks are spliced into the stream, not boxed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContentFn {
+	pub params:	Vec<String>,	// the positional parameter names, empty for a value binding
+	pub body:	String,			// the bracketed markup, its `[` `]` delimiters stripped
+}
+
+/// The content bindings in scope for a source, by name. Empty until a document's definitions are collected;
+/// a source with none reads exactly as before.
+pub type ContentFns = std::collections::HashMap<String, ContentFn>;
+
+/// The `#let` bindings a parse resolves a call against: the furniture functions ([`TemplateFns`], expanded
+/// into a padded box) and the content bindings ([`ContentFns`], spliced as markup). Threaded as one through
+/// the reader so a caller passes both together and a nested body carries the same scope. Borrowed, so it is
+/// [`Copy`] and travels without a clone; [`Bindings::empty`] carries two empty maps for a bare parse.
+#[derive(Clone, Copy)]
+pub struct Bindings<'a> {
+	pub tfns:	&'a TemplateFns,
+	pub cfns:	&'a ContentFns,
+}
+
+impl<'a> Bindings<'a> {
+	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
+		Self { tfns, cfns }
+	}
+}
+
 /// Collects every `#let name(params) = block/box(...)` furniture definition in `src` into `tfns`, lowering
 /// each against `body_size` so its `em` lengths resolve to absolutes. A definition whose body this reader
 /// cannot lower (not a `block`/`box` wrap, or naming a length it cannot resolve) is passed over silently --
@@ -1302,6 +1333,74 @@ pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &
 		}
 		i += 1;
 	}
+}
+
+/// Collects every `#let name = [ ... ]` and `#let name(params) = [ ... ]` content binding in `src` into
+/// `cfns`. The body is a bracket-balanced `[ ... ]`, captured verbatim with its parameter names, so a
+/// reference expands into re-read markup. A `#let` whose body is a furniture wrap (`= block/box(...)`), a
+/// data array (`= (...)`) or a scalar is passed over here -- the furniture and array readers keep those --
+/// and a name the reader already handles as a built-in construct is not overridden. A binding seen twice
+/// re-inserts the same value, so the map is definition-order-independent.
+pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
+	let chars:	Vec<char>	= src.chars().collect();
+	let mut i	= 0usize;
+	while i < chars.len() {
+		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+			if let Some((name, params, body, next)) = read_let_content(&chars, i) {
+				if !is_reserved_construct(&name) {
+					cfns.insert(name, ContentFn { params, body });
+				}
+				i = next;
+				continue;
+			}
+		}
+		i += 1;
+	}
+}
+
+/// Reads a `#let name = [ ... ]` or `#let name(params) = [ ... ]` content binding beginning at `at` (the
+/// `#`), returning the name, its positional parameter names (empty for a value binding), the bracketed body
+/// with its delimiters stripped, and the index just past it. `None` when the line is not a content-binding
+/// `#let`: a furniture `= block/box(...)`, a data array `= (...)` and a scalar all fail the `[` check after
+/// the `=`, so this reader leaves them to the furniture and array readers.
+fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, usize)> {
+	let mut j = at + "#let ".chars().count();
+	let name_start = j;
+	while j < chars.len() && is_ident_char(chars[j]) {
+		j += 1;
+	}
+	let name: String = chars[name_start..j].iter().collect();
+	if name.is_empty() {
+		return None;
+	}
+	// An optional parameter list `( ... )` for a function binding. Only a bare positional identifier is a
+	// substitutable parameter; a keyword default (`title: ...`) or a spread is not, so it is passed over.
+	let mut params = Vec::new();
+	if chars.get(j) == Some(&'(') {
+		let (plist, after) = read_paren_group(chars, j)?;
+		params = split_top_commas_str(&plist).into_iter().filter_map(|p| {
+			let p = p.trim();
+			if !p.is_empty() && p.chars().all(is_ident_char) { Some(p.to_string()) } else { None }
+		}).collect();
+		j = after;
+	}
+	// The `=` separating the signature from the body.
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	if chars.get(j) != Some(&'=') {
+		return None;
+	}
+	j += 1;
+	while j < chars.len() && chars[j].is_whitespace() {
+		j += 1;
+	}
+	// The body must open with `[` to be a content binding; a `block(`/`box(`/`(` body is not ours.
+	if chars.get(j) != Some(&'[') {
+		return None;
+	}
+	let (body, next) = read_delim_group(chars, j)?;
+	Some((name, params, body, next))
 }
 
 /// Is `name` a construct the reader already captures specially, so a `#let` of that name must not shadow
