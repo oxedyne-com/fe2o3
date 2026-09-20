@@ -119,7 +119,10 @@ pub enum Segment {
 	Code(String),	// an inline code span, set in the mono face
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use, plain after
 	Cite(Vec<String>),	// a citation, resolved to "(Author Year)" against the bibliography
-	MarginNote(String),	// a `#claim-label(...)`'s compressed code, drawn in the outside margin; sets nothing in the body column
+	// A `#claim-label(...)` or `#claim-refs(...)`: a zero-width margin anchor setting nothing in the body
+	// column. `display` is the compressed code a label draws in the outside margin (empty for a metadata-only
+	// reference); `codes` are the raw codes a reference registers for the reverse claim index (empty for a label).
+	MarginNote { display: String, codes: Vec<String> },
 	// An index marker: records the term's occurrence for the back-matter index and sets nothing in the body.
 	// `sub` carries a nested entry's child term. The back-matter index reads every occurrence's page back
 	// from the ledger post-convergence.
@@ -175,8 +178,8 @@ impl Segment {
 		Self::Cite(keys)
 	}
 
-	pub fn margin_note<S: Into<String>>(display: S) -> Self {
-		Self::MarginNote(display.into())
+	pub fn margin_note<S: Into<String>>(display: S, codes: Vec<String>) -> Self {
+		Self::MarginNote { display: display.into(), codes }
 	}
 
 	pub fn index<T: Into<String>>(term: T, sub: Option<String>) -> Self {
@@ -261,6 +264,12 @@ pub enum Block {
 	// nothing itself; [`author`] builds the alphabetical entry list from the index-marker occurrences it
 	// gathered walking the body, each entry's page list read back from the ledger post-convergence.
 	Index,
+	// The reverse claim-reference index placeholder: a marker a line-leading `#context { ... collect-claim-refs()
+	// ... }` in the Logic appendix lowers to. It sets nothing itself; [`author`] groups the claim references
+	// gathered walking the body by code (byte order, matching Typst's `.sorted()`) and sets one wrapped paragraph
+	// per code -- the bold code, a colon, and the deduplicated pages it was referenced on -- each page read back
+	// from the ledger post-convergence, exactly as the index folios are.
+	ClaimIndex,
 	// A `#styled-box[...]` callout: its inner blocks set inside a padded box that runs the full measure,
 	// washed the template's `colours.veronica.lighten(90%)` (a pale violet) with a 4 pt corner radius. The
 	// callout is laid out as one keep box, so it moves whole to the next page rather than splitting the wash
@@ -527,6 +536,16 @@ struct IndexGather {
 	occ:	Vec<(String, Option<String>, AnchorId)>,
 }
 
+/// The claim references gathered walking the body: one `(code, anchor)` pair per code named in a
+/// `#claim-refs(...)` call, the anchor the zero-width margin anchor recorded at the reference point. The
+/// reverse claim index groups these by code, and each entry reads its references' pages back from the ledger
+/// after convergence, exactly as the back-matter index reads its folios. A throwaway one is handed to a
+/// measurement flow, whose references never reach the document.
+#[derive(Default)]
+struct ClaimGather {
+	occ:	Vec<(String, AnchorId)>,
+}
+
 /// The mutable authoring state and immutable context of one document render, so the block walk can
 /// recurse into a [`Block::Scoped`] subtree -- setting its blocks under the scoped theme while every
 /// document-order counter (headings, footnotes, figures, the glossary first-use set) keeps counting
@@ -557,6 +576,8 @@ struct Authoring<'a> {
 	seen:			HashSet<String>,
 	index_gather:	IndexGather,	// the back-matter index's markers, gathered in document order
 	want_index:		bool,			// a `Block::Index` placeholder was met, so the index is built after the walk
+	claim_gather:	ClaimGather,	// the reverse claim index's references, gathered in document order
+	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
 }
 
 /// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
@@ -794,7 +815,7 @@ impl<'a> Authoring<'a> {
 						pieces.push(indent_piece(style.par.indent));
 					}
 					pieces.extend(res!(build_pieces(
-						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, self.bib, &self.refs)));
+						self.fonts.clone(), self.geom, style, segments, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
@@ -807,7 +828,7 @@ impl<'a> Authoring<'a> {
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
-					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, self.bib, &self.refs));
+					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -970,10 +991,14 @@ impl<'a> Authoring<'a> {
 					self.prev_para = false;
 				},
 				Block::Reference { runs } => {
-					// The reference list is tight, entry under entry, so entries part by the interline leading
-					// rather than the paragraph skip.
+					// Typst joins bibliography entries with a paragraph break, so they part by the bibliography's
+					// own paragraph spacing, not by a footnote interline gap. The book template sets the reference
+					// list at `text(size: 0.85em)`, and paragraph spacing scales with the text size, so the gap is
+					// the body paragraph skip (`par.skip`, 1.2 em at the body size) scaled by the same 0.85 -- the
+					// earlier fix sized the entry text and leading this way but left this gap on the footnote metric,
+					// which set the entries far too tight.
 					if !self.first {
-						let gap = if style.furniture.foot_leading > style.furniture.foot_size { style.furniture.foot_leading - style.furniture.foot_size } else { style.table.line_gap };
+						let gap = Sp(style.par.skip.raw() * 85 / 100);
 						self.nodes.push(Node::Glue(Glue::fixed(gap)));
 					}
 					res!(reference_block(&mut self.nodes, self.fonts.clone(), style, self.measure, runs));
@@ -1027,7 +1052,7 @@ impl<'a> Authoring<'a> {
 							mid.push(Node::Anchor(AnchorId::new(AnchorKind::Float, fmt!("aside-{}", n))));
 							res!(styled_box(
 								&mut mid, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, self.bib, &self.refs));
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
@@ -1036,7 +1061,7 @@ impl<'a> Authoring<'a> {
 							}
 							res!(styled_box(
 								&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, self.bib, &self.refs));
+								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 						},
 					}
@@ -1051,6 +1076,10 @@ impl<'a> Authoring<'a> {
 				// so `author` builds the entry list from the markers gathered walking the body once the walk
 				// ends. The heading above it (a `Block::BackMatterHeading`) opens the section and lists it.
 				Block::Index => { self.want_index = true; i += 1; },
+				// The reverse claim-reference index placeholder: like `Block::Index` it sets nothing here, only
+				// marks that the claim index is wanted, so `author` builds it from the references gathered walking
+				// the body once the walk ends. The heading above it opens the section and lists it.
+				Block::ClaimIndex => { self.want_claim_index = true; i += 1; },
 				// A scope is handled by the recursion at the loop top; named here only for exhaustiveness.
 				Block::Scoped { .. } => { i += 1; },
 				Block::Space(sp) => {
@@ -1110,6 +1139,8 @@ pub fn author(
 		seen:		HashSet::new(),
 		index_gather:	IndexGather::default(),
 		want_index:		false,
+		claim_gather:	ClaimGather::default(),
+		want_claim_index:	false,
 	};
 	// The top level has no parent continuation; the returned "consumed" flag is meaningless here and dropped.
 	res!(authoring.walk(blocks, style, None));
@@ -1126,6 +1157,15 @@ pub fn author(
 		let col_measure	= geom.column_slice(0, 2, gutter).content_width();
 		let entries		= res!(index_nodes(&fonts, style, col_measure, &occ));
 		authoring.nodes.push(Node::Columns(ColumnsNode::new(entries, 2, gutter)));
+	}
+	// The reverse claim-reference index, built from the references gathered walking the body once the
+	// `Block::ClaimIndex` placeholder has been met. It sets in a single column (Typst's appendix wraps it in
+	// no `columns`), one wrapped paragraph per code, each code's pages read back from the ledger as forward
+	// references, so it is set after the body it points into, as back matter.
+	if authoring.want_claim_index && !authoring.claim_gather.occ.is_empty() {
+		let occ		= std::mem::take(&mut authoring.claim_gather.occ);
+		let entries	= res!(claim_index_nodes(&fonts, style, authoring.measure, &occ));
+		authoring.nodes.extend(entries);
 	}
 	let heads = authoring.heads;
 
@@ -1312,6 +1352,7 @@ fn build_pieces(
 	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
@@ -1409,15 +1450,23 @@ fn build_pieces(
 				};
 				pieces.push(Piece::Text { text, role: Role::Body });
 			},
-			Segment::MarginNote(display) => {
+			Segment::MarginNote { display, codes } => {
 				// A margin note sets nothing in the body column: it weaves a zero-width anchor into the line
 				// at this point, recording where it landed so `decorate` draws the compressed code in the
 				// outside margin after convergence. The identity carries a document-order ordinal, so two
 				// identical codes stay distinct in the ledger, and the display text itself, which `decorate`
-				// reads back from the key -- no side table has to be threaded out of the layout.
+				// reads back from the key -- no side table has to be threaded out of the layout. A metadata-only
+				// `#claim-refs` carries an empty display, so `decorate` draws nothing for it, but the anchor is
+				// still recorded so the reverse claim index can read the page each of its codes was referenced on.
 				*margin_no += 1;
 				let key = fmt!("{}\u{1f}{}", *margin_no, display);
-				pieces.push(Piece::Anchor(AnchorId::new(AnchorKind::MarginNote, key)));
+				let id	= AnchorId::new(AnchorKind::MarginNote, key);
+				// Each referenced code is remembered against this anchor, so the reverse claim index groups the
+				// references by code and reads their pages back from the ledger, exactly as the index does its folios.
+				for code in codes {
+					claim.occ.push((code.clone(), id.clone()));
+				}
+				pieces.push(Piece::Anchor(id));
 			},
 			Segment::Index { term, sub } => {
 				// An index marker sets nothing in the body column: it weaves a zero-width anchor into the line
@@ -1488,6 +1537,7 @@ fn list(
 	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
@@ -1527,7 +1577,7 @@ fn list(
 		if ei > 0 {
 			nodes.push(Node::Glue(Glue::fixed(item_skip)));
 		}
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, margin_no, seen, idx, bib, refs));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK,
 			Some(cap_edge(style, style.text.body_size))));
@@ -1540,7 +1590,7 @@ fn list(
 				nodes.push(Node::Glue(Glue::fixed(item_skip)));
 				let mut sub: Vec<Node> = Vec::new();
 				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
-					foot_no, ref_no, margin_no, seen, idx, bib, refs));
+					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 				shift_nodes(&mut sub, indent);
 				nodes.extend(sub);
 			}
@@ -1686,7 +1736,7 @@ fn footnote_pieces(
 			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: Role::Body }),
 			Segment::PageRef(_)		=> {},	// a cross-reference in a note carries no reserved slot here
 			Segment::Footnote { .. }	=> {},	// a nested footnote is not set within a footnote
-			Segment::MarginNote(_)	=> {},	// a margin note is not set within a footnote's own body
+			Segment::MarginNote { .. }	=> {},	// a margin note is not set within a footnote's own body
 			Segment::Index { .. }	=> {},	// an index marker in a note is not recorded here
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
@@ -2318,7 +2368,7 @@ fn captioned(
 										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")))),
 				Segment::PageRef(_)		=> {},	// a cross-reference in a caption is not resolved here
 				Segment::Footnote { .. }	=> {},	// a footnote in a caption is not set here
-				Segment::MarginNote(_)	=> {},	// a margin note in a caption sets nothing here
+				Segment::MarginNote { .. }	=> {},	// a margin note in a caption sets nothing here
 				Segment::Index { .. }	=> {},	// an index marker in a caption sets nothing here
 				Segment::Super(t) => {
 					let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
@@ -3211,7 +3261,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 				Segment::Glossary { display, .. }		=> count_str(display, n),
 				Segment::Footnote { note }				=> count_segs(note, n),
 				Segment::Cite(keys)						=> for k in keys { count_str(k, n); },
-				Segment::PageRef(_) | Segment::Math(_) | Segment::MarginNote(_) | Segment::Index { .. }	=> {},
+				Segment::PageRef(_) | Segment::Math(_) | Segment::MarginNote { .. } | Segment::Index { .. }	=> {},
 			}
 		}
 	}
@@ -3247,7 +3297,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			// A scope carries its words in its own nested blocks, counted here rather than as flat siblings.
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::Space(_)	=> {},
+			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex | Block::Space(_)	=> {},
 		}
 	}
 	n
@@ -3560,6 +3610,61 @@ fn index_entry_line(
 	Ok(())
 }
 
+/// Sets the reverse claim-reference index: one wrapped paragraph per code, the codes in byte order (Typst's
+/// `.sorted()`), each the bold code, a colon and space, then the pages the code was referenced on -- one
+/// reserved [`FolioOf`](Ref::FolioOf) slot per reference in document order, parted by `", "`, and a closing
+/// full stop. This is the Logic appendix's `[#strong(code): #pages.join(", ").]` line for line, and the
+/// per-reference slots (rather than one range-compressed slot) are what let a long page list wrap across
+/// lines the way Typst's does, so the section runs to the same length. Entries stack at the body's own
+/// interline pitch, matching Typst's `linebreak()` between them. `measure` is the full text measure, since
+/// the appendix sets the index in a single column.
+fn claim_index_nodes(
+	fonts:	&Arc<FontSet>,
+	style: &Theme,
+	measure:	Sp,
+	occ:	&[(String, AnchorId)],
+)
+	-> Outcome<Vec<Node>>
+{
+	// Group by code, keeping each code's references in the order they were gathered (document order), so the
+	// page list reads in the order Typst's query returns them. Byte order over the keys matches `.sorted()`.
+	let mut groups: std::collections::BTreeMap<String, Vec<AnchorId>> = std::collections::BTreeMap::new();
+	for (code, id) in occ {
+		groups.entry(code.clone()).or_default().push(id.clone());
+	}
+
+	let size	= style.text.body_size;
+	let leading	= style.text.leading;
+	// The body's own interline pitch, so entries stack the way successive prose lines do -- the gap a
+	// `linebreak()` leaves between two entries, read from a plain body line's ascent and descent.
+	let probe	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "Ag"));
+	let pd		= probe.dims();
+	let entry_gap	= if leading > pd.height + pd.depth { leading - pd.height - pd.depth } else { Sp::ZERO };
+
+	let mut nodes:	Vec<Node>	= Vec::new();
+	let mut ref_no				= 0u32;
+	for (code, ids) in groups.iter() {
+		if !nodes.is_empty() {
+			nodes.push(Node::Glue(Glue::fixed(entry_gap)));
+		}
+		let mut pieces: Vec<Piece> = Vec::with_capacity(ids.len() * 2 + 3);
+		pieces.push(Piece::Text { text: code.clone(), role: Role::Bold });
+		pieces.push(Piece::Text { text: ": ".to_string(), role: Role::Body });
+		for (n, id) in ids.iter().enumerate() {
+			if n > 0 {
+				pieces.push(Piece::Text { text: ", ".to_string(), role: Role::Body });
+			}
+			pieces.push(Piece::Mark(res!(ref_slot(fonts.clone(), style, &mut ref_no, Ref::FolioOf(id.clone())))));
+		}
+		pieces.push(Piece::Text { text: ".".to_string(), role: Role::Body });
+		let lines = res!(break_paragraph_pieces(
+			fonts.clone(), Role::Body, Dir::Ltr, size, &pieces, measure, leading,
+			style.text.justify, style.text.hyphenate, style.text.fill, Some(cap_edge(style, size))));
+		nodes.extend(lines);
+	}
+	Ok(nodes)
+}
+
 /// Sets one bibliography reference: its runs woven into justified lines at the book template's
 /// body-relative reference size, with a hanging indent -- the first line flush left, every continuation
 /// line indented, as a Chicago reference list sets. The runs' italic flag chooses the face, so a book or
@@ -3578,7 +3683,7 @@ fn reference_block(
 {
 	let ref_size	= Sp(style.text.body_size.raw() * 85 / 100);	// the template's 0.85em bibliography size
 	let ref_leading	= Sp(style.text.leading.raw() * 85 / 100);	// the body baseline scaled by the same 0.85
-	let hang	= Sp(style.text.body_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take
+	let hang	= Sp(ref_size.raw() * 3 / 2);	// the 1.5 em hang the continuation lines take, at the reference size
 	let inner	= if measure > hang { measure - hang } else { measure };
 
 	let mut pieces: Vec<Piece> = Vec::with_capacity(runs.len());
@@ -3637,7 +3742,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::PageRef(_)				=> {},
 			Segment::Footnote { .. }		=> {},
 			Segment::Cite(_)				=> {},
-			Segment::MarginNote(_)			=> {},	// the margin code is not part of the flattened body text
+			Segment::MarginNote { .. }			=> {},	// the margin code is not part of the flattened body text
 			Segment::Index { .. }	=> {},	// an index marker is not part of the flattened body text
 		}
 	}
@@ -3689,7 +3794,7 @@ fn inline_segments(
 				}
 				continue;
 			},
-			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_) | Segment::MarginNote(_) | Segment::Index { .. }	=> continue,
+			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_) | Segment::MarginNote { .. } | Segment::Index { .. }	=> continue,
 		};
 		let sh	= res!(ShapedText::new(fonts.clone(), r, Dir::Ltr, size, text));
 		let w	= sh.dims().width;
@@ -4023,7 +4128,7 @@ fn subheading_hbox(
 			Segment::Footnote { .. }	=> {},
 			Segment::PageRef(_)			=> {},
 			Segment::Cite(_)			=> {},
-			Segment::MarginNote(_)		=> {},
+			Segment::MarginNote { .. }		=> {},
 			Segment::Index { .. }	=> {},	// an index marker in a heading is not recorded
 		}
 	}
@@ -4432,6 +4537,7 @@ fn styled_box(
 	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
@@ -4455,7 +4561,7 @@ fn styled_box(
 	// glue: `place_vbox` seats every child at the content left, so the horizontal inset rides inside the line
 	// rather than on the box.
 	let mut inner:	Vec<Node>	= Vec::new();
-	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, margin_no, seen, idx, bib, refs));
+	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 	for node in inner.iter_mut() {
 		if let Node::HBox(b) = node {
 			b.list.insert(0, Node::Glue(Glue::fixed(inset_left)));
@@ -4521,11 +4627,12 @@ pub fn measure_blocks(
 	let mut ref_no						= 0u32;
 	let mut margin_no					= 0u32;
 	let mut seen:		HashSet<String>	= HashSet::new();
-	// A scratch measurement flow numbers nothing that reaches the document, so its index markers are gathered
-	// into a throwaway that is dropped -- they must not join the real back-matter index.
+	// A scratch measurement flow numbers nothing that reaches the document, so its index markers and claim
+	// references are gathered into throwaways that are dropped -- they must not join the real back matter.
 	let mut idx			= IndexGather::default();
+	let mut claim		= ClaimGather::default();
 	res!(box_flow(&mut nodes, fonts, geom, style, measure, blocks,
-		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, bib, refs));
+		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, bib, refs));
 	let mut height = Sp::ZERO;
 	for n in &nodes {
 		height += n.vextent();
@@ -4550,13 +4657,14 @@ fn box_flow(
 	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 )
 	-> Outcome<()>
 {
 	let mut first = true;
-	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, margin_no, seen, idx, bib, refs, &mut first));
+	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs, &mut first));
 	Ok(())
 }
 
@@ -4577,6 +4685,7 @@ fn box_flow_scoped(
 	margin_no:	&mut u32,
 	seen:		&mut HashSet<String>,
 	idx:		&mut IndexGather,
+	claim:		&mut ClaimGather,
 	bib:		Option<&Bibliography>,
 	refs:		&HashMap<String, String>,
 	first:		&mut bool,
@@ -4587,7 +4696,7 @@ fn box_flow_scoped(
 		if let Block::Scoped { patch, blocks: inner } = block {
 			let scoped = { let mut t = style.clone(); t.apply(patch); t };
 			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner,
-				foot_no, ref_no, margin_no, seen, idx, bib, refs, first));
+				foot_no, ref_no, margin_no, seen, idx, claim, bib, refs, first));
 			continue;
 		}
 		if !*first {
@@ -4603,7 +4712,7 @@ fn box_flow_scoped(
 			},
 			Block::RichParagraph { segments } => {
 				let pieces = res!(build_pieces(
-					fonts.clone(), geom, style, segments, foot_no, ref_no, margin_no, seen, idx, bib, refs));
+					fonts.clone(), geom, style, segments, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
@@ -4612,7 +4721,7 @@ fn box_flow_scoped(
 			Block::List { ordered, items } => {
 				res!(list(
 					nodes, fonts.clone(), geom, style, measure, *ordered, items,
-					foot_no, ref_no, margin_no, seen, idx, bib, refs));
+					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 			},
 			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
 			// set in the mono face at the scoped `code.size`, the same as a top-level code block. Without this
@@ -5342,7 +5451,7 @@ an interior line justification fills to the measure while ragged setting does no
 		let plain	= vec![Block::rich(vec![Segment::text(body)])];
 		let (head, tail) = body.split_at(body.find("amid").unwrap_or(0) + 4);
 		let noted	= vec![Block::rich(vec![
-			Segment::text(head), Segment::margin_note("A1"), Segment::text(tail)])];
+			Segment::text(head), Segment::margin_note("A1", vec!["A1".to_string()]), Segment::text(tail)])];
 
 		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 		let (doc_p, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &plain, None, None));

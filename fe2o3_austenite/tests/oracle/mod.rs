@@ -190,6 +190,36 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_symbol_patch:	false,
 		},
 		CorpusRoot {
+			// This crate's own reverse-claim-index fixture -- the D2 regression root. Its body references a small
+			// set of claim codes across two pages (one code referenced on both), and a line-leading
+			// `#context { ... collect-claim-refs() ... }` appendix builds the reverse index: each code, in byte
+			// order, followed by the pages it was referenced on. Typst renders the index by running the query;
+			// austenite recognises the `collect-claim-refs(` signature and builds the same index from the claim
+			// references it gathered walking the body, without evaluating the block. Self-contained (a local
+			// `#let claim-refs`/`claim-label`/`collect-claim-refs`, plain-text body), so it needs no
+			// symbol-modifier patch. A regression that lost the references, mis-sorted the codes or failed to
+			// resolve their pages would move the pinned hash.
+			name:				"claim-index-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/claim_index_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// The bibliography-density regression root (D3-A). A minimal book on the real elearnity template (as
+			// `glossary-oracle` is) whose chapter cites a handful of works and whose `meta-data.bibliography`
+			// names the shared `/refs.bib`, so the back matter is a Chicago reference list of the cited entries.
+			// It is the gate for the inter-entry spacing fix in the `Block::Reference` arm: before it, entries
+			// parted by the footnote interline gap (~1.8 pt) rather than the bibliography's paragraph spacing
+			// (~11.2 pt), setting the list far too tight against Typst's. A regression that reverts to the
+			// footnote metric collapses the list's height, moving the page count and the pinned hash. Its front
+			// matter is spare (no cover, no about-author) so the bibliography dominates the count. Uses the shared
+			// elearnity template and `/refs.bib`, so it needs the elearnity typst root, like `glossary-oracle`.
+			name:				"backmatter-oracle",
+			path:				"/home/jason/usr/books/elearnity/CheapThinking/backmatter_oracle.typ",
+			typst_root:			Some("/home/jason/usr/books/elearnity"),
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
 			// This crate's own `#if media`-guarded include fixture -- the regression root for the elearnity
 			// Sources-chapter bug, where the assembler followed BOTH branches of a `#if media == "ebook" [ ... ]
 			// else [ ... ]` guard and printed the marker lines as prose. It now evaluates the guard and follows

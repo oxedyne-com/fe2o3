@@ -28,6 +28,11 @@ pub enum Item {
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
+	// A line-leading `#context { ... collect-claim-refs() ... }`: the reverse claim-reference index the Logic
+	// appendix builds. Recognised by the signature `collect-claim-refs(` in the block, not by evaluating the
+	// `#context` (the reader is hard-stratified and runs no query); it lowers to a `Block::ClaimIndex` the
+	// author fills from the claim references gathered walking the body.
+	ClaimIndex { span: Span },
 	// a `#styled-box[...]` callout: its body re-parsed into items, set in a filled padded box, plus the
 	// theme patch its body's own top-level `#set` declarations lower to, scoped to the box (H3). placement is
 	// Some when the furniture floats its body (an `#aside-box(float: true)` re-wrapped in a floating figure).
@@ -287,5 +292,8 @@ pub enum Inline {
 	Index { term: String, sub: Option<String> },
 	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
-	MarginNote(String),	// #claim-label(<code>..), its compressed code drawn in the outside margin, nothing in the body
+	// #claim-label(<code>..) or #claim-refs(<code>..): a zero-width margin anchor. `display` is the compressed
+	// code a `#claim-label` draws in the outside margin (empty for a metadata-only `#claim-refs`); `codes` are
+	// the raw reference codes a `#claim-refs` registers for the reverse claim index (empty for a `#claim-label`).
+	MarginNote { display: String, codes: Vec<String> },
 }

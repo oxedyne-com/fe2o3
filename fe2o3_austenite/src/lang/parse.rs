@@ -848,12 +848,14 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 		// only, with no visible output, so it is consumed and emits nothing. Either way the body prose closes
 		// over the marker's place, matching Typst's own body flow.
 		if c == '#' {
-			if let Some((note, next)) = claim_call(&chars, i) {
-				if let Some(display) = note {
+			if let Some((display, codes, next)) = claim_call(&chars, i) {
+				// A call naming a margin display or any reference code emits a MarginNote; a call naming
+				// neither is consumed and sets nothing.
+				if !display.is_empty() || !codes.is_empty() {
 					if !plain.is_empty() {
 						runs.push(Inline::Text(std::mem::take(&mut plain)));
 					}
-					runs.push(Inline::MarginNote(display));
+					runs.push(Inline::MarginNote { display, codes });
 				}
 				i = next;
 				continue;
@@ -1539,15 +1541,17 @@ fn cite_keys(inner: &str) -> Vec<String> {
 }
 
 /// Reads an inline `#claim-label(...)` or `#claim-refs(...)` at `i` (a `#`), returning the compressed
-/// margin code it sets (if any) and the index just past the closing `)`. `#claim-label(..codes)` places a
-/// compressed code string in the outside margin, so it yields `Some(display)`: the codes joined, with a
-/// run of three or more consecutive same-prefix codes collapsed to a range (`B1 B2 B3 B4` -> `B1–4`),
-/// matching the book's `claims.typ` `_compress-codes`. `#claim-refs(..codes)` registers reverse-index
-/// metadata only, with no visible output, so it yields `None` for the code while still being consumed.
-/// Neither sets anything in the body text column, so the surrounding prose closes over the marker's place
-/// as Typst's own body flow does. The outer `None` is returned when the shape is not a claim call or its
-/// parentheses do not close.
-fn claim_call(chars: &[char], i: usize) -> Option<(Option<String>, usize)> {
+/// margin code it sets, the raw reference codes it registers for the reverse claim index, and the index
+/// just past the closing `)`. `#claim-label(..codes)` places a compressed code string in the outside
+/// margin, so its display is the codes joined with a run of three or more consecutive same-prefix codes
+/// collapsed to a range (`B1 B2 B3 B4` -> `B1–4`), matching the book's `claims.typ` `_compress-codes`;
+/// `#claim-refs(..codes)` sets no visible margin code (empty display). Both register each of their raw codes
+/// for the reverse index, matching `claims.typ`, where a label and a bare reference both emit the
+/// `<claim-ref>` metadata `collect-claim-refs()` queries -- so a code contributes to the page list whether it
+/// was labelled or merely referenced. Neither sets anything in the body text column, so the surrounding prose
+/// closes over the marker's place as Typst's own body flow does. The outer `None` is returned when the shape
+/// is not a claim call or its parentheses do not close.
+fn claim_call(chars: &[char], i: usize) -> Option<(String, Vec<String>, usize)> {
 	let (open, is_label) = match at_lit(chars, i, "#claim-label") {
 		Some(o)	=> (o, true),
 		None	=> (at_lit(chars, i, "#claim-refs")?, false),
@@ -1556,12 +1560,9 @@ fn claim_call(chars: &[char], i: usize) -> Option<(Option<String>, usize)> {
 		return None;
 	}
 	let (inner, next) = read_group(chars, open)?;
-	if !is_label {
-		return Some((None, next));	// metadata-only: consumed, nothing set
-	}
-	let display = compress_codes(&claim_codes(&inner));
-	let out = if display.trim().is_empty() { None } else { Some(display) };
-	Some((out, next))
+	let codes	= claim_codes(&inner);
+	let display	= if is_label { compress_codes(&codes) } else { String::new() };
+	Some((display, codes, next))
 }
 
 /// The claim codes named inside a `#claim-label`/`#claim-refs` argument list, in source order: each
@@ -1690,7 +1691,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::Math(_)					=> {},	// maths is dropped from a flattened string
 			Inline::Footnote(_)				=> {},	// a nested footnote is not set within a flattened string
 			Inline::Cite(_)					=> {},	// a citation has no plain form before the bibliography resolves it
-			Inline::MarginNote(_)			=> {},	// a margin code is not part of the flattened body text
+			Inline::MarginNote { .. }		=> {},	// a margin code is not part of the flattened body text
 			Inline::Index { .. }			=> {},	// an index marker sets no words in the body text
 		}
 	}
@@ -1979,6 +1980,7 @@ enum CaptureKind {
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
+	Context,		// a line-leading `#context { ... }`/`#context[ ... ]`: gathered whole, then either the reverse claim index (its body calls `collect-claim-refs(`) or a refusal
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -1991,6 +1993,13 @@ fn capture_opener(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> Opti
 	// unbound `#name[...]` still falls through to be tallied as a skip exactly as before.
 	if let Some(name) = template_call_name(trimmed, tfns) {
 		return Some(CaptureKind::TemplateCall(name));
+	}
+	// A line-leading `#context { ... }` (or the bracket twin `#context[ ... ]`): gathered whole so its body
+	// can be inspected for the `collect-claim-refs(` signature that marks the reverse claim index, and
+	// otherwise refused exactly as before. Recognised here, ahead of `code_skip`, so the block reaches
+	// [`dispatch_capture`] rather than being skipped and lost -- the reader still evaluates no `#context`.
+	if is_context_opener(trimmed) {
+		return Some(CaptureKind::Context);
 	}
 	if trimmed.starts_with("#figure(") {
 		return Some(CaptureKind::Figure);
@@ -2033,6 +2042,23 @@ fn capture_opener(trimmed: &str, tfns: &crate::lang::rules::TemplateFns) -> Opti
 		return Some(CaptureKind::DeclStyle);
 	}
 	let_array_name(trimmed).map(CaptureKind::Let)
+}
+
+/// Does this already-left-trimmed line open a line-leading `#context` code block -- `#context {`,
+/// `#context{` or `#context[` -- the shape the Logic appendix's reverse claim index is written with, and
+/// the shape whose brace form once leaked verbatim as prose? The identifier must be exactly `context`
+/// (`#contextual` does not match), and the delimiter must be a `{` (with any run of spaces before it, the
+/// way Typst attaches a code block to its keyword) or an immediate `[`. Recognising it here routes the
+/// whole block through [`dispatch_capture`], which either builds the index (its body calls
+/// `collect-claim-refs(`) or refuses it, rather than skipping it as an opaque code span.
+fn is_context_opener(trimmed: &str) -> bool {
+	let rest = match trimmed.strip_prefix("#context") {
+		Some(r)	=> r,
+		None	=> return false,
+	};
+	// `#context[` -- the bracket twin -- attaches with no space; `#context {` -- the code block -- attaches
+	// across any run of spaces, the way Typst binds a block to its keyword.
+	rest.starts_with('[') || rest.trim_start().starts_with('{')
 }
 
 /// If this line opens a call to a bound furniture function -- `#<name>(` or `#<name>[` where `<name>` is a
@@ -2220,6 +2246,19 @@ fn dispatch_capture(
 			// `#show: doc.with(...)`, record nothing.
 			if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
 				skips.record(&name, Span::new(cap.start, cap.start));
+			}
+		},
+		CaptureKind::Context => {
+			// A gathered `#context { ... }` block. The reader evaluates no `#context` -- it is hard-stratified
+			// and runs no `query` -- so the decision is by signature alone: a block whose body calls
+			// `collect-claim-refs(` is the Logic appendix's reverse claim index, lowered to a `Block::ClaimIndex`
+			// the author fills from the references gathered walking the body (like recognising `#print-glossary(`,
+			// not like running it). Any other `#context` block is refused exactly as before, recorded once by
+			// name so the section renders absent-but-reported rather than leaking its source as prose.
+			if cap.buf.contains("collect-claim-refs(") {
+				items.push(Item::ClaimIndex { span: Span::new(cap.start, cap.start) });
+			} else {
+				skips.record("#context", Span::new(cap.start, cap.start));
 			}
 		},
 		CaptureKind::TemplateCall(name) => {
@@ -3237,18 +3276,24 @@ mod tests {
 	use super::*;
 	use crate::math::{Atom, MatKind};
 
-	/// A `#claim-label` emits a `MarginNote` carrying its compressed code and sets nothing in the body
-	/// column; a `#claim-refs` is metadata-only and emits nothing. The body prose on either side closes over
-	/// the gap when flattened, so no raw markup leaks.
+	/// A `#claim-label` emits a `MarginNote` carrying its compressed code as the margin display and its raw
+	/// code for the reverse index, setting nothing in the body column; a `#claim-refs` emits a `MarginNote`
+	/// with an empty display (nothing drawn) carrying its raw reference codes. The body prose on either side
+	/// closes over the gap when flattened, so no raw markup leaks.
 	#[test]
 	fn claim_label_emits_a_margin_note_and_sets_nothing_inline() {
 		let runs = parse_inlines("clinical authority#claim-label(<LS8>) bites hardest.");
 		assert_eq!(runs.len(), 3, "text, margin note, text: got {:?}", runs);
 		assert!(matches!(&runs[0], Inline::Text(t) if t == "clinical authority"));
-		assert!(matches!(&runs[1], Inline::MarginNote(d) if d == "LS8"),
-			"the claim code rides in a margin note: {:?}", runs[1]);
+		assert!(matches!(&runs[1], Inline::MarginNote { display, codes } if display == "LS8" && codes == &vec!["LS8".to_string()]),
+			"the claim code rides in a margin note and registers for the reverse index: {:?}", runs[1]);
 		assert!(matches!(&runs[2], Inline::Text(t) if t == " bites hardest."));
-		// The margin code is not part of the flattened body text; a metadata-only `claim-refs` emits nothing.
+		// A `#claim-refs` emits a margin note with an empty display carrying its reference codes.
+		let refs = parse_inlines("formalised#claim-refs(<A1>, <A2>).");
+		assert!(refs.iter().any(|r| matches!(r, Inline::MarginNote { display, codes }
+			if display.is_empty() && codes == &vec!["A1".to_string(), "A2".to_string()])),
+			"a claim-refs registers its raw codes with no margin ink: {:?}", refs);
+		// Neither the margin code nor a reference is part of the flattened body text.
 		assert_eq!(
 			flatten_markup("margins#claim-label(<CD14>, <CD15>, <CD4>) formalised#claim-refs(<A1>)."),
 			"margins formalised.");
@@ -3259,7 +3304,7 @@ mod tests {
 	#[test]
 	fn claim_codes_compress_consecutive_runs() {
 		let display = |s: &str| parse_inlines(s).into_iter()
-			.find_map(|r| match r { Inline::MarginNote(d) => Some(d), _ => None })
+			.find_map(|r| match r { Inline::MarginNote { display, .. } => Some(display), _ => None })
 			.unwrap_or_default();
 		assert_eq!(display("x#claim-label(<B1>, <B2>, <B3>, <B4>)"), "B1\u{2013}4");	// B1–4
 		assert_eq!(display("x#claim-label(<A1>, <A2>)"), "A1 A2");
@@ -3844,7 +3889,9 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	}
 
 	/// A line-leading `#context[...]` -- Typst's self-observation entry point -- is refused as exactly
-	/// one site, classed `Introspective`, spanning the line it stands on.
+	/// one site, classed `Introspective`. It is now gathered as a capture (so its body can be inspected for
+	/// the reverse-claim-index signature) and refused when that signature is absent, so its span is the
+	/// zero-width caret at the construct's opening offset, as the reader's other capture refusals record.
 	#[test]
 	fn context_call_is_one_introspective_refusal() {
 		let src = "#context[whatever]\n";
@@ -3853,7 +3900,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let site = &refusals.sites()[0];
 		assert_eq!(site.name, "#context");
 		assert_eq!(site.class, RefusalClass::Introspective);
-		assert_eq!(site.span, Span::new(0, src.len() as u32 - 1), "span should cover the line, sans its newline");
+		assert_eq!(site.span, Span::new(0, 0), "a captured-construct refusal records the caret at its opening offset");
 	}
 
 	/// The brace twin of the above -- a line-leading `#context{ ... }` code-block call, the shape a book's
@@ -3871,10 +3918,11 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert!(!items.iter().any(|it| matches!(it, Item::Paragraph { .. })),
 			"a #context{{}} block must not survive as body text: {:?}", items);
 
-		// Several lines, with a space before the brace -- the real Lucronics ch29.8 shape (`#context {`).
-		// The whole block, including its own `[...]` and nested `{...}`, is consumed by the multi-line
-		// skip, not one line of it set as prose.
-		let many = "Before.\n\n#context {\n let refs = collect-claim-refs()\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
+		// Several lines, with a space before the brace -- a multi-line `#context {` block that does NOT call
+		// `collect-claim-refs(` (so it is a plain introspective refusal, not the reverse claim index). The
+		// whole block, including its own `[...]` and nested `{...}`, is consumed by the capture, not one line
+		// of it set as prose.
+		let many = "Before.\n\n#context {\n let by = (:)\n if by.len() == 0 [\n _None._\n ] else {\n let n = 1\n }\n}\n\nAfter.\n";
 		let (items, refusals) = document_with_refusals(many).expect("parse");
 		assert_eq!(refusals.total(), 1, "the multi-line brace block is one refusal: {:?}", refusals.sites());
 		assert_eq!(refusals.sites()[0].name, "#context");
@@ -3882,7 +3930,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			Item::Paragraph { runs, .. } => Some(fmt!("{:?}", runs)),
 			_ => None,
 		}).collect();
-		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("by-code")),
+		assert!(!bodies.iter().any(|b| b.contains("None") || b.contains("let by") || b.contains("by-code")),
 			"no line of the #context{{}} block may leak into a paragraph: {:?}", bodies);
 		// The two real paragraphs around it still set.
 		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
@@ -3891,10 +3939,13 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	/// A `//` or `/* ... */` comment inside a `#context { ... }` body must not fold its own `}`/`]` into the
 	/// skip scanner's bracket balance -- the G3 fix. Before it, `let c = 1 // }` popped the outer brace early,
 	/// so the tail of the block (the `if`/`else` and the closing `}`) leaked into the body as raw prose; this
-	/// reds on a reverted `step` exactly the way the earlier form's leak did.
+	/// reds on a reverted `step` exactly the way the earlier form's leak did. The body calls a non-claim query
+	/// (`counter(page).display()`, not `collect-claim-refs(`), so it stays a plain introspective refusal and
+	/// does not trip the reverse-claim-index recognition covered by
+	/// `context_collect_claim_refs_lowers_to_a_claim_index` below.
 	#[test]
 	fn context_brace_block_comment_does_not_close_early() {
-		let many = "Before.\n\n#context {\n let refs = collect-claim-refs()\n let c = 1 // }\n /* a note about } */\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
+		let many = "Before.\n\n#context {\n let refs = counter(page).display()\n let c = 1 // }\n /* a note about } */\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
 		let (items, refusals) = document_with_refusals(many).expect("parse");
 		assert_eq!(refusals.total(), 1, "the whole commented block is still one refusal: {:?}", refusals.sites());
 		assert_eq!(refusals.sites()[0].name, "#context");
@@ -3902,8 +3953,27 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			Item::Paragraph { runs, .. } => Some(fmt!("{:?}", runs)),
 			_ => None,
 		}).collect();
-		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("let by")),
+		assert!(!bodies.iter().any(|b| b.contains("counter") || b.contains("let refs") || b.contains("let by")),
 			"a comment's `}}` must not close the guard early and leak its tail: {:?}", bodies);
+		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
+	}
+
+	/// The one `#context { ... }` block the reader does not refuse: the Logic appendix's reverse claim index,
+	/// recognised by the `collect-claim-refs(` signature in its body (never by evaluating the `#context`). It
+	/// lowers to a single `Item::ClaimIndex`, records no refusal, and leaks no line of its source as prose.
+	#[test]
+	fn context_collect_claim_refs_lowers_to_a_claim_index() {
+		let src = "Before.\n\n#context {\n let refs = collect-claim-refs()\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
+		let (items, refusals) = document_with_refusals(src).expect("parse");
+		assert_eq!(refusals.total(), 0, "the reverse claim index is recognised, not refused: {:?}", refusals.sites());
+		assert_eq!(items.iter().filter(|it| matches!(it, Item::ClaimIndex { .. })).count(), 1,
+			"the collect-claim-refs block lowers to exactly one ClaimIndex: {:?}", items);
+		let bodies: Vec<String> = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(fmt!("{:?}", runs)),
+			_ => None,
+		}).collect();
+		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("None")),
+			"no line of the block may leak into a paragraph: {:?}", bodies);
 		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
 	}
 

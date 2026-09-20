@@ -522,7 +522,7 @@ fn cell_pieces(
 				}
 			},
 			Segment::Footnote { .. }	=> {},	// a footnote in a cell is not set at this increment
-			Segment::MarginNote(_)	=> {},	// a margin note in a cell sets nothing here
+			Segment::MarginNote { .. }	=> {},	// a margin note in a cell sets nothing here
 			Segment::Index { .. }	=> {},	// an index marker in a cell sets nothing here
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), base, size, t));

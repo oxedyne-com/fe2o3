@@ -57,6 +57,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 				Block::image(path.clone(), *width, *height, *scale)),
 			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
 			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
+			Item::ClaimIndex { .. }				=> out.push(Block::ClaimIndex),
 			Item::Box { items, patch, placement, .. }	=> out.push(match placement {
 				Some(p)	=> Block::box_callout_float(blocks(items), patch.clone(), *p),
 				None	=> Block::box_callout(blocks(items), patch.clone()),
@@ -209,7 +210,7 @@ fn lower_inline(run: &Inline) -> Segment {
 								=> Segment::index(term.clone(), sub.clone()),
 		Inline::Footnote(note)	=> Segment::footnote(lower_runs(note)),
 		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
-		Inline::MarginNote(display)	=> Segment::margin_note(display.clone()),
+		Inline::MarginNote { display, codes }	=> Segment::margin_note(display.clone(), codes.clone()),
 	}
 }
 
