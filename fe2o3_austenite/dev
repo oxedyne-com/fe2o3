@@ -35,6 +35,7 @@ SLOT="${RC_SLOT:-solo}"
 TARGET="${CARGO_TARGET_DIR:-$HOME/.cache/cargo-targets/$SLOT/austenite}"
 PREVIEW="$TARGET/dev-preview"
 AUSTENITE="$TARGET/debug/austenite"
+LOCALSERVE="$TARGET/debug/localserve"
 
 rm -rf "$PREVIEW"
 mkdir -p "$PREVIEW"
@@ -47,6 +48,15 @@ echo "dev: building austenite ..."
 ( cd "$CRATE" && cargo build -q -p oxedyne_fe2o3_austenite --bin austenite )
 if [[ ! -x "$AUSTENITE" ]]; then
 	echo "dev: austenite binary not found at $AUSTENITE after build." >&2
+	exit 1
+fi
+
+# The static preview server: fe2o3's own std-only loopback/LAN server, built lean
+# (no async runtime, no TLS) as a drop-in for `python3 -m http.server`.
+echo "dev: building localserve ..."
+( cd "$CRATE" && cargo build -q -p oxedyne_fe2o3_net --no-default-features --bin localserve )
+if [[ ! -x "$LOCALSERVE" ]]; then
+	echo "dev: localserve binary not found at $LOCALSERVE after build." >&2
 	exit 1
 fi
 
@@ -134,8 +144,9 @@ compile() {
 	date +%s%N > "$PREVIEW/version.txt"
 }
 
-# Serve the preview directory.
-( cd "$PREVIEW" && exec python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &
+# Serve the preview directory. `--lan` binds 0.0.0.0 so a phone on the same network
+# can reach the preview, matching what the python server did before.
+( exec "$LOCALSERVE" "$PREVIEW" --port "$PORT" --lan >/dev/null 2>&1 ) &
 
 compile	# first render, so the page is there the moment the browser opens
 

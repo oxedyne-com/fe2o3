@@ -1,3 +1,4 @@
+#![cfg(feature = "async")]
 //! What a caller may and may not tell an upstream about the hop it took.
 //!
 //! A reverse proxy appends `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host` and RFC 7239

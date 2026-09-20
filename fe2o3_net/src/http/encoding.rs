@@ -449,6 +449,7 @@ pub fn is_encodable(msg: &HttpMessage) -> bool {
 ///
 /// `Vary` is set either way, because a cache must key on the coding whether or
 /// not this particular response carried one.
+#[cfg(feature = "async")]
 pub async fn encode(
     mut msg:    HttpMessage,
     coding:     ContentCoding,
@@ -495,6 +496,8 @@ pub async fn encode(
 mod tests {
     use super::*;
 
+    // Used only by the async `encode` tests below; the sync tests need none of it.
+    #[cfg(feature = "async")]
     use crate::http::status::HttpStatus;
 
     /// RFC 9110 §12.5.3: a request that names no coding is offered none.
@@ -674,6 +677,7 @@ mod tests {
     /// A `HEAD` answer is not encoded, and keeps the length of the identity
     /// representation -- which is what a `GET` accepting no coding would be told,
     /// and what anyone asking how big a thing is wants to know.
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn a_head_answer_is_not_encoded() -> Outcome<()> {
         let body = "<p>a paragraph of markup</p>\n".repeat(500).into_bytes();
@@ -702,6 +706,7 @@ mod tests {
     /// The file a `HEAD` answer names is never opened, which is the cost the guard
     /// is there to save: encoding a window means reading it off the disk first, and
     /// a `HEAD` throws the result away unsent.
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn a_head_answer_leaves_its_file_unread() -> Outcome<()> {
         use crate::http::msg::FileWindow;

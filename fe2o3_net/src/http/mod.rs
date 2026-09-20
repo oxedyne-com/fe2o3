@@ -1,3 +1,4 @@
+#[cfg(feature = "async")]
 pub mod client;
 pub mod data_url;
 pub mod encoding;
@@ -6,6 +7,7 @@ pub mod fwd;
 pub mod handler;
 pub mod header;
 pub mod loc;
+pub mod local;
 pub mod msg;
 pub mod pct;
 pub mod range;

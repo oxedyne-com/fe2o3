@@ -16,14 +16,17 @@ use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
     fmt,
-    pin::Pin,
     str::FromStr,
 };
+// `Pin` is only the async `HttpHeader::read`'s.
+#[cfg(feature = "async")]
+use std::pin::Pin;
 
 use strum::{
     Display,
     EnumString,
 };
+#[cfg(feature = "async")]
 use tokio::{
     io::{
         AsyncRead,
@@ -244,6 +247,7 @@ impl HttpHeader {
     /// read, and the caller resumes it three bytes back from the join, so a
     /// terminator split across two reads in any of its three places is still
     /// found.
+    #[cfg(feature = "async")]
     fn find_terminator(bytes: &[u8], from: usize) -> Option<usize> {
         bytes[from..]
             .windows(4)
@@ -251,6 +255,7 @@ impl HttpHeader {
             .map(|pos| from + pos)
     }
 
+    #[cfg(feature = "async")]
     pub async fn read<
         'a,
         const CHUNK_SIZE: usize,
@@ -378,6 +383,7 @@ impl HttpHeader {
         }
     }
     
+    #[cfg(feature = "async")]
     fn parse_header_str(header_bytes: &[u8]) -> Outcome<(String, usize)> {
         let header_str = match std::str::from_utf8(header_bytes) {
             Ok(s) => s.to_string(),
@@ -469,7 +475,7 @@ impl HttpHeader {
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, feature = "async"))]
 mod reader_tests {
     use super::*;
 
