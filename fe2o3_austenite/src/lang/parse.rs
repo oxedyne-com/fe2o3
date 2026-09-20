@@ -2206,6 +2206,17 @@ enum CaptureKind {
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
 	ContentCall(String),	// a `#name`, `#name(args)` or `#name[ ... ]` reference to a bound content binding, expanded into re-read markup spliced in
 	Context,		// a line-leading `#context { ... }`/`#context[ ... ]`: gathered whole, then either the reverse claim index (its body calls `collect-claim-refs(`) or a refusal
+	Builtin(BuiltinKind),	// a line-leading Typst markup builtin the reader now sets rather than skips (`#pagebreak`, `#lorem`, `#v`)
+}
+
+/// A line-leading Typst markup builtin the reader recognises and sets on the block path, rather than
+/// tallying as a skipped construct. Each is dispatched by [`dispatch_capture`], which reads the call's
+/// arguments from the gathered buffer -- so a builtin whose parentheses run across several lines is still
+/// read whole.
+enum BuiltinKind {
+	PageBreak,	// `#pagebreak()` / `#pagebreak(weak: true)`: a forced page eject
+	Lorem,		// `#lorem(<n>)`: n words of the standard lorem-ipsum placeholder, set as a paragraph
+	Vspace,		// `#v(<abs len>)`: a fixed vertical space, absolute units only
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -2232,6 +2243,14 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// [`dispatch_capture`] rather than being skipped and lost -- the reader still evaluates no `#context`.
 	if is_context_opener(trimmed) {
 		return Some(CaptureKind::Context);
+	}
+	// A line-leading Typst markup builtin -- `#pagebreak()`, `#lorem(60)`, `#v(12pt)` -- the reader now sets
+	// rather than skipping. Recognised here, ahead of `code_skip`, so the whole call reaches
+	// [`dispatch_capture`] (which reads its arguments) rather than being tallied as an unsupported construct
+	// and dropped. None of these names can be a bound furniture or content function -- they are reserved by
+	// [`crate::lang::rules::is_reserved_construct`] -- so this never shadows a corpus binding.
+	if let Some(kind) = builtin_opener(trimmed) {
+		return Some(CaptureKind::Builtin(kind));
 	}
 	if trimmed.starts_with("#figure(") {
 		return Some(CaptureKind::Figure);
@@ -2291,6 +2310,26 @@ fn is_context_opener(trimmed: &str) -> bool {
 	// `#context[` -- the bracket twin -- attaches with no space; `#context {` -- the code block -- attaches
 	// across any run of spaces, the way Typst binds a block to its keyword.
 	rest.starts_with('[') || rest.trim_start().starts_with('{')
+}
+
+/// If this already-left-trimmed line opens a supported Typst markup builtin -- `#pagebreak(`, `#lorem(` or
+/// `#v(` -- the builtin it names; else `None`. The name must be followed immediately by `(`, so `#voluptas(`
+/// (a content-mode word that happens to start with `v`) does not match `#v`, and only a genuine call is
+/// caught.
+fn builtin_opener(trimmed: &str) -> Option<BuiltinKind> {
+	let rest = trimmed.strip_prefix('#')?;
+	for (name, kind) in [
+		("pagebreak",	BuiltinKind::PageBreak),
+		("lorem",		BuiltinKind::Lorem),
+		("v",			BuiltinKind::Vspace),
+	] {
+		if let Some(after) = rest.strip_prefix(name) {
+			if after.starts_with('(') {
+				return Some(kind);
+			}
+		}
+	}
+	None
 }
 
 /// If this line opens a call to a bound furniture function -- `#<name>(` or `#<name>[` where `<name>` is a
@@ -2611,7 +2650,91 @@ fn dispatch_capture(
 				items.append(&mut inner);
 			}
 		},
+		CaptureKind::Builtin(kind) => {
+			let span = Span::new(cap.start, cap.start);
+			match kind {
+				// `#pagebreak()` / `#pagebreak(weak: true)`: a forced eject. The `weak` argument is not
+				// distinguished -- the eject is dropped at an already-fresh page top regardless, which is the
+				// weak behaviour; a strong break on an already-empty page (Typst would open a blank one) is a
+				// documented limitation, not exercised by any corpus.
+				BuiltinKind::PageBreak => items.push(Item::PageBreak { span }),
+				// `#lorem(<n>)`: n words of the standard placeholder, set as one plain paragraph. A malformed
+				// count stays a visible refusal; a zero count sets nothing; a huge count is capped at the
+				// embedded corpus by [`lorem_words`], so generation stays bounded.
+				BuiltinKind::Lorem => {
+					if let Some(n) = lorem_arg(&cap.buf) {
+						let text = lorem_words(n);
+						if !text.is_empty() {
+							items.push(Item::Paragraph { runs: vec![Inline::Text(text)], label: None, span });
+						}
+					} else {
+						skips.record("#lorem", span);	// a non-numeric argument stays a visible refusal
+					}
+				},
+				// `#v(<abs len>)`: a fixed vertical space. Only absolute units (pt/mm/cm/in) are set; an `em`,
+				// `%` or `fr` length has no running size here and is left a visible refusal rather than set
+				// wrongly, exactly as the heading-template spacer does (see [`crate::lang::rules`]).
+				BuiltinKind::Vspace => {
+					match vspace_length(&cap.buf) {
+						Some(height)	=> items.push(Item::Space { height, span }),
+						None			=> skips.record("#v", span),
+					}
+				},
+			}
+		},
 	}
+}
+
+/// The standard lorem-ipsum passage Typst's `#lorem` draws from, the opening of Cicero's *De Finibus* as
+/// the `lipsum` crate carries it, word for word as `typst 0.15.1` renders it. Held to the first 120 words:
+/// every one is plain Latin with only commas and full stops, so a placeholder of any realistic length sets
+/// byte-identically to the oracle, while the later passage's quotation marks, question marks and en dash --
+/// which would need their own glyph handling to match -- are left out. `#lorem(n)` for n beyond this is
+/// capped here, so a huge count generates a bounded, sane amount rather than looping.
+const LOREM_CORPUS: &str = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magnam aliquam quaerat voluptatem. Ut enim aeque doleamus animo, cum corpore dolemus, fieri tamen permagna accessio potest, si aliquod aeternum et infinitum impendere malum nobis opinemur. Quod idem licet transferre in voluptatem, ut postea variari voluptas distinguique possit, augeri amplificarique non possit. At etiam Athenis, ut e patre audiebam facete et urbane Stoicos irridente, statua est in quo a nobis philosophia defensa et collaudata est, cum id, quod maxime placeat, facere possimus, omnis voluptas assumenda est, omnis dolor repellendus. Temporibus autem quibusdam et aut officiis debitis aut rerum necessitatibus saepe eveniet, ut et voluptates repudiandae sint et molestiae non recusandae. Itaque earum rerum";
+
+/// The first `n` words of [`LOREM_CORPUS`], joined by single spaces, with the final word's trailing
+/// punctuation replaced by a full stop -- the shape Typst's `#lorem(n)` produces. `n` is capped at the
+/// corpus length, so a very large count returns the whole embedded passage rather than looping unboundedly.
+/// An `n` of zero yields the empty string, so the caller sets no paragraph.
+fn lorem_words(n: usize) -> String {
+	let words: Vec<&str> = LOREM_CORPUS.split_whitespace().collect();
+	let take = n.min(words.len());
+	if take == 0 {
+		return String::new();
+	}
+	let mut out = words[..take].join(" ");
+	// Typst ends the blind text with a full stop, dropping any comma, colon or semicolon the last word
+	// carried in the source.
+	let trimmed = out.trim_end_matches([',', ';', ':', '.']);
+	out.truncate(trimmed.len());
+	out.push('.');
+	out
+}
+
+/// The word count of a `#lorem(<n>)` call read from the gathered buffer: the first positional argument
+/// parsed as a non-negative integer. `None` when the argument is absent or not a number, so the caller
+/// records a refusal rather than guessing.
+fn lorem_arg(buf: &str) -> Option<usize> {
+	let inner = call_inner(buf, "lorem")?;
+	first_arg(&inner).trim().parse::<usize>().ok()
+}
+
+/// The scaled-point height of a `#v(<len>)` call read from the gathered buffer: its first positional
+/// argument, parsed as an absolute length. `None` for an `em`/`%`/`fr` length or a malformed argument, so
+/// the caller leaves it a visible refusal rather than setting the wrong space.
+fn vspace_length(buf: &str) -> Option<crate::ir::Sp> {
+	let inner = call_inner(buf, "v")?;
+	match parse_length(first_arg(&inner).trim()) {
+		Some(Length::Abs(pt))	=> Some(crate::ir::Sp::from_pt(pt)),
+		_						=> None,
+	}
+}
+
+/// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
+/// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
+fn first_arg(inner: &str) -> String {
+	split_arg_commas(inner).into_iter().next().unwrap_or_default()
 }
 
 /// The positional arguments of a captured content-binding reference, each evaluated to its substitution
@@ -3706,6 +3829,49 @@ mod tests {
 		assert_eq!(
 			flatten_markup("margins#claim-label(<CD14>, <CD15>, <CD4>) formalised#claim-refs(<A1>)."),
 			"margins formalised.");
+	}
+
+	/// `lorem_words` reproduces `typst 0.15.1`'s `#lorem(n)` verbatim: the classic opening for small counts,
+	/// the last word's trailing punctuation replaced by a full stop, a zero count empty, and a huge count
+	/// capped at the embedded corpus rather than looping. The pinned strings are the exact oracle output
+	/// (checked against the installed typst), so a regression in the corpus or the join reds here.
+	#[test]
+	fn lorem_matches_the_typst_oracle() {
+		assert_eq!(lorem_words(1), "Lorem.");
+		assert_eq!(lorem_words(5), "Lorem ipsum dolor sit amet.");
+		// Word 20 ("quaerat") carries no source punctuation; the full stop is appended.
+		assert_eq!(lorem_words(20),
+			"Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magnam aliquam quaerat.");
+		// Word 49 ("voluptatem,") carries a comma in the source, replaced by the terminal full stop.
+		assert!(lorem_words(49).ends_with("transferre in voluptatem."),
+			"the terminal comma must become a full stop: {:?}", lorem_words(49));
+		assert_eq!(lorem_words(0), "");
+		// A count past the corpus is capped, not looped: it returns the whole embedded passage, ending in a
+		// full stop, with exactly the corpus's word count.
+		let corpus_len = LOREM_CORPUS.split_whitespace().count();
+		assert_eq!(lorem_words(100_000).split_whitespace().count(), corpus_len);
+		assert!(lorem_words(100_000).ends_with('.'));
+	}
+
+	/// An own-line `#pagebreak()`, `#lorem(n)` and `#v(<abs len>)` are set on the block path rather than
+	/// tallied as skipped constructs: the page break lowers to an `Item::PageBreak`, the lorem call to a
+	/// plain paragraph of the oracle text, and the absolute vertical space to an `Item::Space`. A relative
+	/// `#v(2em)` has no running size here, so it stays a visible refusal.
+	#[test]
+	fn block_builtins_are_set_not_skipped() -> Outcome<()> {
+		let src = "Opening prose.\n\n#lorem(5)\n\n#v(12pt)\n\n#pagebreak()\n\nAfter.\n";
+		let (items, skips) = res!(document_with_refusals(src));
+		assert!(skips.report().is_none(), "no builtin should be tallied as skipped: {:?}", skips.report());
+		assert!(items.iter().any(|it| matches!(it, Item::PageBreak { .. })), "the page break is set: {:?}", items);
+		assert!(items.iter().any(|it| matches!(it, Item::Space { .. })), "the absolute #v is set: {:?}", items);
+		assert!(items.iter().any(|it| matches!(it,
+			Item::Paragraph { runs, .. } if matches!(runs.as_slice(), [Inline::Text(t)] if t == "Lorem ipsum dolor sit amet."))),
+			"the #lorem call sets its oracle text as a paragraph: {:?}", items);
+		// A relative `#v(2em)` cannot be resolved here, so it stays a visible refusal rather than a wrong space.
+		let (items2, skips2) = res!(document_with_refusals("#v(2em)\n"));
+		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a relative #v must not be set: {:?}", items2);
+		assert!(skips2.report().is_some(), "a relative #v is refused visibly");
+		Ok(())
 	}
 
 	/// `_compress-codes`: a run of three or more consecutive same-prefix codes collapses to an en-dash

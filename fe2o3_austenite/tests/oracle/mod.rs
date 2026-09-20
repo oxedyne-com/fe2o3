@@ -253,6 +253,16 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own markup-builtins fixture -- the block-position `#pagebreak()`, `#lorem(n)` and
+			// `#v(<abs len>)` builtins the reader now sets rather than skipping. Two pages (the forced break)
+			// and two headings (the anchor order-match); reverting the recognition collapses it to one page and
+			// drops the `#lorem` paragraphs, moving the pinned hash. See the fixture file for the full shape.
+			name:				"builtins-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/builtins_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

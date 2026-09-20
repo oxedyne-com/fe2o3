@@ -299,6 +299,11 @@ pub enum Block {
 	// A vertical space a `#show` template's `v(<len>)` lowers to: a fixed leading emitted as a sibling
 	// before or after the element the template wraps. It carries no words and anchors no reference.
 	Space(Sp),
+	// A line-leading `#pagebreak()` (or `#pagebreak(weak: true)`): a forced page eject at this point in the
+	// flow. Emitted as a forced break penalty, which the driver drops when the page is already fresh, so a
+	// break that lands at a page top never opens a blank page -- the weak semantics Typst's own default and
+	// its section furniture already rely on (see the `SectionBanner` arm, which turns the page the same way).
+	PageBreak,
 }
 
 impl Block {
@@ -347,6 +352,8 @@ impl Block {
 	}
 
 	pub fn space(height: Sp) -> Self { Self::Space(height) }
+
+	pub fn page_break() -> Self { Self::PageBreak }
 
 	/// A `#styled-box[...]` callout: the inner blocks set in a padded box washed the template's pale
 	/// violet. The wash is the theme's `callout.fill` at render (its default that pale violet), so a
@@ -1172,6 +1179,14 @@ impl<'a> Authoring<'a> {
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
+				},
+				Block::PageBreak => {
+					// A line-leading `#pagebreak()`: a forced eject, exactly as the section banner turns the
+					// page. The driver drops the break when the frame is already empty, so one landing at a page
+					// top opens no blank page. `first`/`prev_para` are left untouched -- the break sets no ink,
+					// so the block that follows leads against the page top, not against a paragraph.
+					self.nodes.push(Node::Penalty(Penalty::eject()));
+					i += 1;
 				},
 			}
 		}
@@ -3659,7 +3674,8 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			// A scope carries its words in its own nested blocks, counted here rather than as flat siblings.
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
-			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex | Block::Space(_)	=> {},
+			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex
+			| Block::Space(_) | Block::PageBreak	=> {},
 		}
 	}
 	n

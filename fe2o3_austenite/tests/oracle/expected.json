@@ -14,5 +14,6 @@
 	{ "name": "context-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "7ecd0af10e6558ed485d84b395f719a7d8eeb81e18ba24f1371dd6735fbd9e53" },
 	{ "name": "media-guard-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "70c9e927c6802bdd9a2fcc5b672a87a9ca78fd32fe1475ddcd14f0db160abeaf" },
 	{ "name": "media-bracket-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "7ede0c2ff6359356e40ec8e2c6f105f39d24a9e99dcb81363c8e374c9a7c856f" },
-	{ "name": "context-comment-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "f730c8ac233af6bd308e012fd5d7c284686b68e760d3d16c8aed09ebeeba1f50" }
+	{ "name": "context-comment-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "f730c8ac233af6bd308e012fd5d7c284686b68e760d3d16c8aed09ebeeba1f50" },
+	{ "name": "builtins-fixture", "pages": 2, "anchors": 2, "pdf_sha256": "5349d95656491f716170205ecab51779bafea0046e364befb88165cc434f3d4a" }
 ]}
