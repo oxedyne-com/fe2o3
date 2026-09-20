@@ -10,5 +10,7 @@
 	{ "name": "index-oracle", "pages": 7, "anchors": 108, "pdf_sha256": "bb9f747ccbd653ac8f9ca541faef895c041c5f3adee4381cabc9b9149b157dc2" },
 	{ "name": "include-fixture", "pages": 3, "anchors": 3, "pdf_sha256": "6fce53c00232dbeb9d3a425d7c025c69abba322b3daf94edea4da7bf4856364e" },
 	{ "name": "context-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "7ecd0af10e6558ed485d84b395f719a7d8eeb81e18ba24f1371dd6735fbd9e53" },
-	{ "name": "media-guard-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "70c9e927c6802bdd9a2fcc5b672a87a9ca78fd32fe1475ddcd14f0db160abeaf" }
+	{ "name": "media-guard-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "70c9e927c6802bdd9a2fcc5b672a87a9ca78fd32fe1475ddcd14f0db160abeaf" },
+	{ "name": "media-bracket-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "88edcc912e6a824b5ccc439ff40aaf5fc99be04af16d09dbf0496e198b444a6a" },
+	{ "name": "context-comment-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "f730c8ac233af6bd308e012fd5d7c284686b68e760d3d16c8aed09ebeeba1f50" }
 ]}

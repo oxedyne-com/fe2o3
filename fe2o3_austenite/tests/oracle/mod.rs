@@ -201,6 +201,27 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own bracket-aware guard-extent fixture (G1) -- the real elearnity Sources-chapter
+			// shape, where the guarded `#include` sits inside a `#block[ #align(center)[ ... ] ]` wrapper.
+			// A line-marker guard extent closes on the wrapper's own inner `]` rather than the guard's own,
+			// following both branches; the bracket-depth extent tells them apart by nesting depth. See the
+			// fixture file for the full shape and why it is self-contained.
+			name:				"media-bracket-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/media_bracket_fixture/root.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
+		CorpusRoot {
+			// This crate's own comment-aware skip-scanner fixture (G3) -- a `#context { ... }` block whose
+			// body carries a `//` line comment and a `/* ... */` block comment, each mentioning a `}`. The
+			// pre-fix skip scanner had no comment awareness, so the commented brace closed the block early
+			// and its tail leaked as prose; see the fixture file for the full shape.
+			name:				"context-comment-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/context_comment_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

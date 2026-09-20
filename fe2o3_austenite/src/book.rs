@@ -1700,10 +1700,21 @@ const MAX_INCLUDE_DEPTH: u32 = 64;
 /// the evaluator could resolve. A guard nested inside a dropped branch, or one whose form was refused, is
 /// not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else` tracks which of
 /// the two branches the walk is currently inside.
+///
+/// `state` is the guard's own bracket balance, seeded from its opener line so it starts at depth one: a
+/// lone `]` deeper inside the branch (a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer) is then told
+/// apart from the guard's own matching closer by depth alone, rather than by line text -- the marker-based
+/// extent this replaces treated any bare `]` line as the guard's end, following both branches once one
+/// closed early and leaking the markers and the truncated tail as prose. `refused` marks a guard pushed
+/// only to keep this bracket balance for an unsupported form already reported at its opener, so the
+/// balance reaching zero on an ordinary body line (its own closer, not the guard's `]`/`else` shape) is not
+/// reported a second time.
 struct GuardFrame {
 	live:		bool,
 	then_taken:	bool,
 	in_else:	bool,
+	refused:	bool,
+	state:		lang::parse::SkipState,
 }
 
 impl GuardFrame {
@@ -1842,19 +1853,38 @@ fn assemble_into(
 	// includes are followed only when every guard on the stack is keeping its currently-open branch;
 	// otherwise they are dropped (reported once at the guard, never leaked as prose). See [`GuardFrame`].
 	let mut guards: Vec<GuardFrame> = Vec::new();
-	for line in src.lines() {
+	let mut byte: u32 = 0;	// running byte offset, so a refusal's span points at its own line (G4)
+	for raw in src.split_inclusive('\n') {
+		let start = byte;
+		byte = byte.saturating_add(raw.len() as u32);
+		// Strip the line terminator without treating it as a real character, exactly as the reader's own
+		// line loop does (`lang::parse::to_blocks`), so the span below covers the line, not its newline.
+		let mut line = raw;
+		if let Some(s) = line.strip_suffix('\n') { line = s; }
+		if let Some(s) = line.strip_suffix('\r') { line = s; }
+		let end	= start.saturating_add(line.len() as u32);
+		let span	= crate::ir::Span::new(start, end);
+
 		let t = line.trim_start();
 		let marker = t.trim_end();	// a guard marker line, matched clear of trailing whitespace
+		// The innermost open guard's own bracket depth (`None` with no guard open at all). Seeded from the
+		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
+		// inside its branch -- see [`GuardFrame`].
+		let guard_depth = guards.last().map(|g| g.state.open_brackets());
 
-		// A guard closer `]` on its own line: close the innermost open guard. A lone `]` with no guard
-		// open is ordinary content (a multi-line content block's closer), left to fall through below.
-		if marker == "]" && !guards.is_empty() {
+		// A guard closer `]` on its own line, exactly at the guard's own depth: close the innermost open
+		// guard. A `]` deeper than that -- a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer inside the
+		// branch -- is not the guard's own and falls through below, to the generic per-line scan and then
+		// to ordinary content. A lone `]` with no guard open at all is likewise ordinary content.
+		if marker == "]" && guard_depth == Some(1) {
 			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
 			guards.pop();
 			continue;
 		}
-		// A guard divider `] else [`: switch the innermost guard to its else branch.
-		if is_guard_else(marker) && !guards.is_empty() {
+		// A guard divider `] else [`, at the guard's own depth: switch the innermost guard to its else
+		// branch. Its `]` closes the content bracket and its `[` reopens it, so the depth is unchanged and
+		// the state is left as it stands.
+		if is_guard_else(marker) && guard_depth == Some(1) {
 			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
 			if let Some(top) = guards.last_mut() {
 				top.in_else = true;
@@ -1862,9 +1892,10 @@ fn assemble_into(
 			continue;
 		}
 		// A guard opener `#if <cond> [`: evaluate the condition against the config (and this file's own
-		// `#let` bindings) and open a guard. A guard opened inside a dropped branch, or one whose form or
-		// variable the evaluator cannot resolve, keeps neither branch -- the latter is reported, so an
-		// unsupported guard form is never silently followed nor leaked.
+		// `#let` bindings) and open a guard, seeding its bracket state from this opener line so it starts
+		// at depth one. A guard opened inside a dropped branch, or one whose form or variable the evaluator
+		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
+		// never silently followed nor leaked.
 		if let Some(cond) = guard_open(marker) {
 			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
 			let parent_active = guards.iter().all(|g| g.emits());
@@ -1874,23 +1905,55 @@ fn assemble_into(
 				match eval_guard(cond, config, src) {
 					Some(taken)	=> (true, taken),
 					None		=> {
-						skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), crate::ir::Span::new(0, 0));
+						skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), span);
 						skips.tag_file(&label);
 						(false, false)
 					},
 				}
 			};
-			guards.push(GuardFrame { live, then_taken, in_else: false });
+			let mut state = lang::parse::SkipState::new();
+			lang::parse::scan_brackets(marker, &mut state);
+			guards.push(GuardFrame { live, then_taken, in_else: false, refused: false, state });
 			continue;
 		}
 		// Any other `#if ...` line is a guard form the assembler does not evaluate (a one-line
-		// `#if c [..] else [..]`, a non-bracket body): refuse and drop it rather than let its raw source
-		// or an untaken branch leak. `#if(` with no space is left to the reader's own code-skip path.
+		// `#if c [..] else [..]`, or a brace-bodied `#if cond {`): refuse and drop it rather than let its
+		// raw source leak. A balanced one-liner refuses just this line, as before; a brace body still open
+		// at the line's end pushes a refused guard so the generic per-line scan below consumes the whole
+		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
+		// space is left to the reader's own code-skip path.
 		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
 			res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
-			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), crate::ir::Span::new(0, 0));
+			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
 			skips.tag_file(&label);
+			let mut state = lang::parse::SkipState::new();
+			lang::parse::scan_brackets(marker, &mut state);
+			if state.has_open_bracket() {
+				guards.push(GuardFrame { live: false, then_taken: false, in_else: false, refused: true, state });
+			}
 			continue;
+		}
+		// Any other line while a guard is open: fold its own brackets into the innermost guard's state,
+		// whether or not the branch it stands in emits -- a dropped branch's own `#block[...]`/`{...}` still
+		// balances the stack, so a later real closer is not mistaken for one of these (or vice versa). If
+		// the state closes to zero here, rather than through one of the recognised `]`/`else`/`#if` shapes
+		// above, the guard's own bracket has just ended on an ordinary body line: a refused guard already
+		// reported its opener, so this is its expected close and stays silent; any other guard closing this
+		// way is a shape the guard did not predict, so it is reported rather than left to leak whatever
+		// follows as prose. Either way the line itself is the guard's own structural end, not content, so
+		// it is consumed here rather than falling through to the buffer below.
+		if let Some(top) = guards.last_mut() {
+			lang::parse::scan_brackets(line, &mut top.state);
+			if !top.state.has_open_bracket() {
+				let refused = top.refused;
+				res!(flush_inline(&mut buf, blocks, skips, &label, tfns));
+				guards.pop();
+				if !refused {
+					skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
+					skips.tag_file(&label);
+				}
+				continue;
+			}
 		}
 		// Inside a dropped or refused branch: the content is the untaken alternative, dropped silently
 		// (the guard already carries the report). Markers above are still tracked so the stack balances.
@@ -1902,7 +1965,7 @@ fn assemble_into(
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
 					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
-						crate::ir::Span::new(0, 0));
+						span);
 					skips.tag_file(&label);
 				},
 				Some(rel) => {
@@ -1933,7 +1996,7 @@ fn assemble_into(
 				None => {
 					// A malformed `#include` with no quoted path: reported, not left to fall through as a
 					// literal line of body text.
-					skips.record("#include", crate::ir::Span::new(0, 0));
+					skips.record("#include", span);
 					skips.tag_file(&label);
 				},
 			}
@@ -1948,6 +2011,16 @@ fn assemble_into(
 		} else {
 			buf.push_str(line);
 			buf.push('\n');
+		}
+	}
+	// A guard still open at end of file never met its own closer: reported so a truncated branch is never
+	// silently accepted as complete. A refused guard already reported its opener, so only a guard that was
+	// genuinely live and open is reported here, to avoid a duplicate on the one already-reported form.
+	let eof = crate::ir::Span::new(byte, byte);
+	for g in &guards {
+		if !g.refused {
+			skips.record("#if guard never closed (end of file)", eof);
+			skips.tag_file(&label);
 		}
 	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
@@ -2563,6 +2636,47 @@ mod tests {
 		assert!(!body.contains("Something"), "a refused guard follows neither branch: {}", body);
 		assert!(skips.report().map(|r| r.contains("#if")).unwrap_or(false),
 			"a refused guard form must be reported: {:?}", skips.report());
+		Ok(())
+	}
+
+	/// A lone `]` line deeper inside a taken branch -- here an `#emph[...]` aside's own closer -- must not
+	/// be mistaken for the guard's own closing bracket (G1). Before the bracket-depth extent, ANY bare `]`
+	/// line closed the guard: the aside's closer ended it early, so the rest of the taken branch, the
+	/// guard's own markers and the untaken branch all leaked into the body as prose from that point on.
+	#[test]
+	fn if_guard_bracket_extent_survives_an_inner_content_closer() -> Outcome<()> {
+		let dir = std::path::Path::new("/nonexistent");
+		let root = "#let media = \"ebook\"\n\n#if media == \"ebook\" [\nEbook lead-in with an aside: #emph[\nspanning more than one line\n]\nand the branch continues here.\n] else [\nPrint branch text.\n]\n\nTail paragraph.\n";
+		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("Ebook lead-in") && body.contains("spanning more than one line")
+			&& body.contains("and the branch continues here"),
+			"the taken branch's own content, before AND after the inner closer, must all survive: {}", body);
+		assert!(body.contains("Tail paragraph"), "prose after the guard must still survive: {}", body);
+		assert!(!body.contains("Print branch text"), "the untaken branch must stay dropped: {}", body);
+		assert!(!body.contains("] else [") && !body.contains("#if "),
+			"no guard marker line may leak as prose: {}", body);
+		// The reader's own `#let` skip is expected and unrelated; the guard itself must report nothing.
+		assert!(!skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", skips.report());
+		Ok(())
+	}
+
+	/// A brace-bodied `#if <cond> { ... } else { ... }` guard is a form the assembler does not evaluate,
+	/// but its refusal must consume the whole block -- body, `} else {` divider and closing `}` -- rather
+	/// than only the opener line (G2). Before the fix, only `#if ... {` itself was refused; everything
+	/// after it fell through as ordinary prose.
+	#[test]
+	fn if_brace_bodied_form_is_refused_as_one_block_not_leaked() -> Outcome<()> {
+		let dir = std::path::Path::new("/nonexistent");
+		let root = "Intro.\n\n#if media == \"ebook\" {\n  let x = 1\n} else {\n  let x = 2\n}\n\nTail.\n";
+		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), &lang::rules::TemplateFns::new(), ""));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("Intro") && body.contains("Tail"), "prose around the guard must survive: {}", body);
+		assert!(!body.contains("let x") && !body.contains("} else {"),
+			"the brace-bodied guard's body and its else divider must not leak as prose: {}", body);
+		assert_eq!(skips.total(), 1,
+			"exactly one refusal for the whole brace-bodied guard, not one per leaked line: {:?}", skips.sites());
 		Ok(())
 	}
 

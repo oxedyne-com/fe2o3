@@ -1158,6 +1158,7 @@ enum Frame {
 	Content,	// a `[...]` content block: only `[` `]` nest; author `(` `)` `{` `}` are literal prose
 	Str,		// a `"..."` string literal: every character is literal until the closing quote
 	Math,		// a `$...$` maths span: every character is literal until the closing `$`
+	Comment,	// a `/* ... */` block comment: every character, brackets included, is literal until `*/`
 }
 
 /// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
@@ -1168,6 +1169,13 @@ enum Frame {
 pub(crate) struct SkipState {
 	frames:		Vec<Frame>,
 	escaped:	bool,
+}
+
+/// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
+/// Mirrors the `://` exception in [`strip_comments`]: a `/` immediately after a `:` never starts a
+/// comment, in code or in content prose alike.
+fn is_line_comment(chars: &[char], i: usize) -> bool {
+	chars.get(i + 1) == Some(&'/') && !(i > 0 && chars[i - 1] == ':')
 }
 
 impl SkipState {
@@ -1189,6 +1197,14 @@ impl SkipState {
 		self.frames.iter().any(|f| matches!(f, Frame::Code | Frame::Content))
 	}
 
+	/// How many structural `(`/`{`/`[` frames are nested right now -- the depth [`has_open_bracket`] only
+	/// asks a yes/no of. A guard tracking its own single opening bracket uses this to tell its own matching
+	/// closer (depth falls to 1) from an inner content block's closer (depth still above 1) on the same
+	/// `]` text.
+	pub(crate) fn open_brackets(&self) -> usize {
+		self.frames.iter().filter(|f| matches!(f, Frame::Code | Frame::Content)).count()
+	}
+
 	/// Folds the character (or, in content mode, the `#ident` run) at `i` into the stack, returning how
 	/// many characters were consumed from `chars` -- always at least one, more for a `#name(`/`#name[`/`#x`
 	/// run whose opener decides the frame it enters. All four scanners share this one transition so a
@@ -1208,6 +1224,13 @@ impl SkipState {
 				else if c == '$'		{ self.frames.pop(); }
 				1
 			},
+			// A `/* ... */` block comment: every character, including a stray `}`/`]`/`)` an author's note
+			// mentions, is literal until the comment's own closer -- the twin of Str/Math above, so a
+			// `#context` guard's brace balance is never corrupted by a comment inside its body.
+			Some(Frame::Comment) => {
+				if c == '*' && chars.get(i + 1) == Some(&'/')	{ self.frames.pop(); 2 }
+				else											{ 1 }
+			},
 			Some(Frame::Content) => {
 				// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over
 				// before any of the structural cases below can act on it.
@@ -1221,6 +1244,12 @@ impl SkipState {
 					']'		=> { self.frames.pop(); 1 },
 					'$'		=> { self.frames.push(Frame::Math); 1 },
 					'#'		=> self.content_hash(chars, i),
+					// A line comment runs to the line's own end (this call sees one line at a time, so
+					// consuming the rest of `chars` is consuming to the newline); the `://` exception mirrors
+					// `strip_comments`, so a bare URL's slashes stay literal prose. A block comment opens a
+					// `Comment` frame that can straddle the line break, same as Str/Math above.
+					'/' if is_line_comment(chars, i)	=> chars.len() - i,
+					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
 					// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole
 					// point of tracking the frame, so a caption's unbalanced paren does not stick.
 					_		=> 1,
@@ -1230,14 +1259,15 @@ impl SkipState {
 			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span.
 			_ => {
 				match c {
-					'"'				=> { self.frames.push(Frame::Str); },
-					'(' | '{'		=> { self.frames.push(Frame::Code); },
-					'['				=> { self.frames.push(Frame::Content); },
-					'$'				=> { self.frames.push(Frame::Math); },
-					')' | '}'		=> { self.frames.pop(); },
-					_				=> {},
+					'"'									=> { self.frames.push(Frame::Str); 1 },
+					'(' | '{'							=> { self.frames.push(Frame::Code); 1 },
+					'['									=> { self.frames.push(Frame::Content); 1 },
+					'$'									=> { self.frames.push(Frame::Math); 1 },
+					')' | '}'							=> { self.frames.pop(); 1 },
+					'/' if is_line_comment(chars, i)	=> chars.len() - i,
+					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
+					_									=> 1,
 				}
-				1
 			},
 		}
 	}
@@ -3855,6 +3885,25 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("by-code")),
 			"no line of the #context{{}} block may leak into a paragraph: {:?}", bodies);
 		// The two real paragraphs around it still set.
+		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
+	}
+
+	/// A `//` or `/* ... */` comment inside a `#context { ... }` body must not fold its own `}`/`]` into the
+	/// skip scanner's bracket balance -- the G3 fix. Before it, `let c = 1 // }` popped the outer brace early,
+	/// so the tail of the block (the `if`/`else` and the closing `}`) leaked into the body as raw prose; this
+	/// reds on a reverted `step` exactly the way the earlier form's leak did.
+	#[test]
+	fn context_brace_block_comment_does_not_close_early() {
+		let many = "Before.\n\n#context {\n let refs = collect-claim-refs()\n let c = 1 // }\n /* a note about } */\n if refs.len() == 0 [\n _None._\n ] else {\n let by = (:)\n }\n}\n\nAfter.\n";
+		let (items, refusals) = document_with_refusals(many).expect("parse");
+		assert_eq!(refusals.total(), 1, "the whole commented block is still one refusal: {:?}", refusals.sites());
+		assert_eq!(refusals.sites()[0].name, "#context");
+		let bodies: Vec<String> = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(fmt!("{:?}", runs)),
+			_ => None,
+		}).collect();
+		assert!(!bodies.iter().any(|b| b.contains("collect") || b.contains("let refs") || b.contains("let by")),
+			"a comment's `}}` must not close the guard early and leak its tail: {:?}", bodies);
 		assert_eq!(bodies.len(), 2, "the prose on either side of the block must still set: {:?}", bodies);
 	}
 
