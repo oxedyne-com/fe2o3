@@ -276,14 +276,16 @@ impl Graphic {
 }
 
 /// What an atomic box draws. `Reserved` holds open the width a forward reference will need once the
-/// ledger resolves it, which is what lets two passes suffice by construction. Its `bool` is whether the
-/// slot holds that reserved width even when the resolved value is narrower: true for right-aligned
+/// ledger resolves it, which is what lets two passes suffice by construction. Its first `bool` is whether
+/// the slot holds that reserved width even when the resolved value is narrower: true for right-aligned
 /// furniture (a table-of-contents folio), whose column must stay put, and false for a reference set in
-/// running prose, which shrinks to the value so it reads without a gap.
+/// running prose, which shrinks to the value so it reads without a gap. Its second `bool` is whether the
+/// resolved value sets bold rather than in the body face -- a main index reference's folio, reproducing
+/// in-dexter's `index-main = index.with(fmt: strong)`.
 #[derive(Clone, Debug)]
 pub enum LeafKind {
 	Rule,
-	Reserved(AnchorId, Ref, bool),	// a forward reference: its identity, what it resolves to, whether it holds width
+	Reserved(AnchorId, Ref, bool, bool),	// a forward reference: its identity, what it resolves to, whether it holds width, whether it sets bold
 	Text(ShapedText),			// a shaped run of real text, drawn as glyph outlines
 	Mark(Footnote),				// a footnote reference mark; its note is set at the page foot
 	Graphic(Arc<Graphic>),		// a self-contained figure, its ops drawn at the leaf's placement
@@ -306,13 +308,20 @@ impl Leaf {
 	/// A forward reference whose slot holds its reserved width even when the value comes out narrower --
 	/// for a right-aligned folio in a table of contents, where the column must not move.
 	pub fn reserved(id: AnchorId, refr: Ref, dims: Dims) -> Self {
-		Self { kind: LeafKind::Reserved(id, refr, true), dims, shift: Sp::ZERO, span: None }
+		Self { kind: LeafKind::Reserved(id, refr, true, false), dims, shift: Sp::ZERO, span: None }
 	}
 
 	/// A forward reference set in running prose: its slot shrinks to the resolved value, so a page number
 	/// reads tightly in the sentence rather than trailing a gap the reservation held open.
 	pub fn reserved_inline(id: AnchorId, refr: Ref, dims: Dims) -> Self {
-		Self { kind: LeafKind::Reserved(id, refr, false), dims, shift: Sp::ZERO, span: None }
+		Self { kind: LeafKind::Reserved(id, refr, false, false), dims, shift: Sp::ZERO, span: None }
+	}
+
+	/// A forward reference set in running prose whose resolved value sets bold -- a main index reference's
+	/// folio, reproducing in-dexter's `index-main = index.with(fmt: strong)`. It shrinks to the value like
+	/// any inline reference.
+	pub fn reserved_inline_bold(id: AnchorId, refr: Ref, dims: Dims) -> Self {
+		Self { kind: LeafKind::Reserved(id, refr, false, true), dims, shift: Sp::ZERO, span: None }
 	}
 
 	/// A leaf of real shaped text, taking its dimensions from the run.
@@ -491,6 +500,10 @@ pub trait Metrics {
 	/// stub. A forward reference resolved against a font metric is shaped and drawn here as real
 	/// glyphs; against the stub it stays a reservation, measured but not drawn.
 	fn shape(&self, text: &str) -> Outcome<Option<ShapedText>>;
+
+	/// Shapes text in the bold face rather than the metric's own -- a main index reference's folio, which
+	/// in-dexter sets `strong`. The fontless stub ignores the face and behaves as [`shape`](Metrics::shape).
+	fn shape_bold(&self, text: &str) -> Outcome<Option<ShapedText>>;
 }
 
 /// A placeholder metric: every character one fixed em wide, one em tall, a fixed depth. It runs the
@@ -515,5 +528,9 @@ impl Metrics for StubMetrics {
 
 	fn shape(&self, _text: &str) -> Outcome<Option<ShapedText>> {
 		Ok(None)	// no font behind the stub, so nothing to shape into glyphs
+	}
+
+	fn shape_bold(&self, _text: &str) -> Outcome<Option<ShapedText>> {
+		Ok(None)	// no font behind the stub, so the face makes no difference
 	}
 }

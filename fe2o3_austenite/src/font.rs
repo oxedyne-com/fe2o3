@@ -53,6 +53,10 @@ impl Metrics for FontMetrics {
 	fn shape(&self, text: &str) -> Outcome<Option<ShapedText>> {
 		Ok(Some(res!(ShapedText::shape(self.fonts.clone(), self.role, self.dir, self.size, text))))
 	}
+
+	fn shape_bold(&self, text: &str) -> Outcome<Option<ShapedText>> {
+		Ok(Some(res!(ShapedText::shape(self.fonts.clone(), Role::Bold, self.dir, self.size, text))))
+	}
 }
 
 /// Where a shaped run draws its glyphs from: a role in the reader's set, or a standalone font handed

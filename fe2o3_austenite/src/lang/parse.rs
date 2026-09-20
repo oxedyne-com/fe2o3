@@ -868,7 +868,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 							// The display markup becomes its own runs, so the index page sets an emphasised entry
 							// italic and a display/sort split shows the display -- parsed exactly as the body's is.
 							let display = parse_inlines_in(&k.display, span, skips);
-							runs.push(Inline::Index { term: k.term, sub: k.sub, display });
+							runs.push(Inline::Index { term: k.term, sub: k.sub, display, main: k.main });
 						}
 					};
 					match call {
@@ -1839,6 +1839,7 @@ struct IndexKey {
 	term:		String,			// the sort key (markup flattened), e.g. "March, James"
 	sub:		Option<String>,
 	display:	String,			// the display markup the index page sets, e.g. "James March" or "_Browder v. Gayle_"
+	main:		bool,			// a primary reference (`idx-main`/`index-main`/`idx-main-as`); its folio sets bold
 }
 
 /// What an inline glossary or index call sets into the running text. `index` carries the term the call
@@ -1894,7 +1895,12 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 		// The first argument is the sort key ("March, James"), the second the display shown in the body and
 		// set in the index ("James March"); the sort key is flattened so any markup in it does not misfile it.
 		let display = unwrap_arg(&a2);
-		let index = Some(IndexKey { term: flatten_markup(&unwrap_arg(&a1)), sub: None, display: display.clone() });
+		let index = Some(IndexKey {
+			term:		flatten_markup(&unwrap_arg(&a1)),
+			sub:		None,
+			display:	display.clone(),
+			main:		name == "idx-main-as",	// `idx-main-as` marks a primary reference, its folio bold
+		});
 		return Some((Call::Visible { display, index }, next2));
 	}
 	// A nested index entry is a pure marker of `parent > child`; its second argument is the child term.
@@ -1904,7 +1910,7 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 			None			=> (None, next1),
 		};
 		let parent = unwrap_arg(&a1);
-		let index = Some(IndexKey { term: flatten_markup(&parent), sub: child, display: parent });
+		let index = Some(IndexKey { term: flatten_markup(&parent), sub: child, display: parent, main: false });
 		return Some((Call::Invisible { index }, end));
 	}
 
@@ -1913,7 +1919,9 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 	// suffix families and the `glossind`/`glossindcap` and `idx`/`index` families are the indexing ones,
 	// mirroring the template's `#index`/`#index-main` calls inside each. The display carries the value's own
 	// markup (the index page sets it), and the sort key is that value flattened to plain text.
-	let idx_of = |value: String| Some(IndexKey { term: flatten_markup(&value), sub: None, display: value });
+	let idx_of = |value: String| Some(IndexKey { term: flatten_markup(&value), sub: None, display: value, main: false });
+	// A primary reference (`idx-main`/`index-main`): the same key, marked `main` so its folio sets bold.
+	let idx_of_main = |value: String| Some(IndexKey { term: flatten_markup(&value), sub: None, display: value, main: true });
 	let call = match name.as_str() {
 		// The simple family keys its own display text (a `term-defs` entry), so no translation applies.
 		"gs"									=> Call::Glossary { term: arg.clone(), display: arg, index: None },
@@ -1946,8 +1954,10 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 		},
 		"t" | "graw"							=> Call::Visible { display: resolve_term(&arg, &name, span, skips), index: None },
 		"tcap"									=> Call::Visible { display: cap_first(&resolve_term(&arg, &name, span, skips)), index: None },
-		"idx" | "idx-main"						=> Call::Visible { display: arg.clone(), index: idx_of(arg) },
-		"index" | "index-main"					=> Call::Invisible { index: idx_of(arg) },
+		"idx"									=> Call::Visible { display: arg.clone(), index: idx_of(arg) },
+		"idx-main"								=> Call::Visible { display: arg.clone(), index: idx_of_main(arg) },
+		"index"									=> Call::Invisible { index: idx_of(arg) },
+		"index-main"							=> Call::Invisible { index: idx_of_main(arg) },
 		_									=> return None,
 	};
 	Some((call, next1))
@@ -3683,7 +3693,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let runs = parse_inlines("The sociologist #idx-as[Abbott, Andrew][Andrew Abbott] wrote widely.");
 		let mut found = false;
 		for r in &runs {
-			if let Inline::Index { term, sub, display } = r {
+			if let Inline::Index { term, sub, display, .. } = r {
 				assert_eq!(term, "Abbott, Andrew", "sort key wrong: {:?}", runs);
 				assert!(sub.is_none());
 				assert!(matches!(display.as_slice(), [Inline::Text(t)] if t == "Andrew Abbott"),
