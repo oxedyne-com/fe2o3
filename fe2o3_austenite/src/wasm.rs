@@ -18,6 +18,7 @@
 //! glyph outlines, emitted by [`crate::emit::svg`] -- which is what [`DaimondTypst::compile_project_vector`]
 //! returns and the section rail selects over.
 
+use crate::book;
 use crate::compile;
 use crate::delta;
 use crate::doc::Heading;
@@ -26,7 +27,9 @@ use crate::emit::{
 	svg,
 };
 use crate::fonts;
+use crate::lang;
 use crate::ledger::Ledger;
+use crate::memo::Memo;
 use crate::page::Frame;
 use crate::vfs;
 
@@ -36,7 +39,10 @@ use oxedyne_fe2o3_font::set::FontSet;
 use oxedyne_fe2o3_graphics::pdf::PdfPage;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{
+	Path,
+	PathBuf,
+};
 use std::sync::Arc;
 
 use wasm_bindgen::prelude::*;
@@ -59,6 +65,13 @@ pub struct DaimondTypst {
 	// supplied on each compile -- only a counter, so a consumer can discard a stale async return by version.
 	// Zero until the first delta.
 	version:		u32,
+	// The incremental block-authoring memo, retained across delta compiles so an unedited block splices its
+	// previously authored nodes back rather than re-shaping and re-breaking its paragraphs -- the whole point
+	// of the swap (see `compile_project_delta`). Only the BLOCK-authoring layer fills here: the delta renders
+	// each changed page through `svg::render_page` (not the page-emit memo), so the page-SVG cache stays empty
+	// and the heap holds the working set of blocks, never the rendered document (the consumer holds that). The
+	// non-delta `compileProject`/`compileProjectVector` paths pass no memo, so their bytes are untouched.
+	memo:			Memo,
 }
 
 #[wasm_bindgen]
@@ -72,6 +85,7 @@ impl DaimondTypst {
 			last_ledger:	None,
 			last_heads:		Vec::new(),
 			version:		0,
+			memo:			Memo::new(),
 		}
 	}
 
@@ -108,10 +122,15 @@ impl DaimondTypst {
 	/// than a blank preview against a cache that no longer holds anything. The memory-frugal successor to
 	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
 	/// Ids are opaque decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
+	/// The return also carries a `diagnostics: [{ file, line, col, message }]` array and, when non-empty, a
+	/// terse `skipped` summary line: every construct the reader refused, each at its real source span, so a
+	/// caller composes a `file:line:col` diagnostic exactly as the native `--explain` does rather than seeing
+	/// the bare `<main>:0:` a swallowed refusal used to collapse to. These are additive -- the success fields
+	/// `{ version, order, changed, reset }` are unchanged -- and `diagnostics` is empty on a clean compile.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.run_delta(project) {
-			Ok(d)		=> ok_delta(&d),
+			Ok(out)		=> ok_delta(&out),
 			Err(msg)	=> err_obj(&msg),
 		}
 	}
@@ -210,25 +229,36 @@ impl DaimondTypst {
 	/// computes the changed-only delta of this compile against the consumer's supplied `known` ids. The
 	/// compiler retains no prior id set; only the rendered SVG of a newly-changed page is built, carried
 	/// into the delta, and dropped.
-	fn run_delta(&mut self, project: &JsValue) -> Result<delta::PageDelta, String> {
+	fn run_delta(&mut self, project: &JsValue) -> Result<DeltaOut, String> {
 		let main = string_field(project, "main").unwrap_or_else(|| "/main.typ".to_string());
 		let outcome = self.run_delta_inner(project, &main);
 		let _ = vfs::clear();
 		match outcome {
-			Ok(d)	=> Ok(d),
+			Ok(out)	=> Ok(out),
 			Err(e)	=> Err(fmt!("{}:0: {}", main, e)),
 		}
 	}
 
-	fn run_delta_inner(&mut self, project: &JsValue, main: &str) -> Outcome<delta::PageDelta> {
+	fn run_delta_inner(&mut self, project: &JsValue, main: &str) -> Outcome<DeltaOut> {
 		// The consumer owns the SVG cache, so it -- not this instance -- is the authority on which page ids
 		// are already held. It supplies them as `known`; a page whose id is not among them is resent. Holding
 		// the prior set here would blank the preview whenever the consumer cleared its cache (a document
 		// close or switch) while this singleton compiler lived on: the delta would report nothing changed
 		// against a cache holding nothing. So `reset` is `known.is_empty()` by construction -- true exactly
 		// when the consumer has nothing to reuse, and a cleared cache recovers with a full resend.
-		let known		= parse_known(project);
-		let rendered	= res!(self.assemble_and_run(project, main));
+		let known						= parse_known(project);
+		// The delta path passes the persistent block-authoring memo, so an unedited block splices its cached
+		// nodes rather than re-authoring: the incremental recompile the swap exists for. The refusal table and
+		// skip line are carried out here (not discarded) for the diagnostics field.
+		let (rendered, refusals, skip)	= res!(self.assemble_and_run(project, main, true));
+		// Close the memo generation now the authoring pass is done, dropping block entries untouched for two
+		// compiles. `author_and_run_memo` opened it with `Memo::begin`; the page-emit cache is never touched on
+		// this path (the delta renders through `svg::render_page`), so nothing but blocks is swept, and the
+		// retained heap is the working set of blocks -- never the rendered page SVG.
+		self.memo.sweep();
+		// Read each refused site's line and column from the source it was tagged with, still in the source map
+		// here (the caller clears it after this returns), so a diagnostic carries a real `file:line:col`.
+		let diagnostics	= diagnostics_from_refusals(&refusals);
 		let d			= res!(delta::compute(&rendered.out.pages, &known, self.version));
 		// The version is the one piece of delta state this instance keeps: a strictly monotonic tick, so a
 		// consumer that dispatches compiles without awaiting each can discard a stale async return by its
@@ -236,43 +266,56 @@ impl DaimondTypst {
 		// would carry the same supplied version and could not be ordered -- and a cache clear does not
 		// disturb it, since recovery is driven by an empty `known`, not by the counter.
 		self.version	= d.version;
-		Ok(d)
+		Ok(DeltaOut { delta: d, diagnostics, skip })
 	}
 
 	/// Assembles, authors, runs, decorates and mirror-shifts a project through the shared pipeline -- the
 	/// same code the native binary drives, so the two surfaces cannot drift -- and keeps the resolved ledger
 	/// and heading table for a later section-rail query. The lone-file path takes this instance's once-built
 	/// reading set rather than rebuilding it; the base directory for `/assets/...` figures is set inside
-	/// `assemble`. The refusal table and skip line are not surfaced by this lane, so they are discarded. The
+	/// `assemble`. It returns the refusal table and terse skip line for the delta path's diagnostics; the
 	/// caller clears the source map (through [`Self::run`] or [`Self::run_delta`]) once it has the result.
-	fn assemble_and_run(&mut self, project: &JsValue, main: &str) -> Outcome<compile::Rendered> {
+	///
+	/// `use_memo` threads this instance's persistent block-authoring memo through the authoring stage (the
+	/// delta path), so an unedited block reuses its cached layout across recompiles; the non-memo paths pass
+	/// `false` and stay byte-identical to the native production compile.
+	fn assemble_and_run(&mut self, project: &JsValue, main: &str, use_memo: bool)
+		-> Outcome<(compile::Rendered, lang::Refusals, Option<String>)>
+	{
 		let fonts = match &self.fonts {
 			Some(f)	=> f.clone(),
 			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
 		};
 
+		let main_path = PathBuf::from(main);
 		// Every source, asset and font becomes a source-map entry; the main path names the root among them.
 		let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 		read_text_pairs(project, "sources", &mut files);
 		read_byte_pairs(project, "assets", &mut files);
-		read_byte_pairs(project, "fonts", &mut files);
-		let main_path = PathBuf::from(main);
+		// A font is installed at the path the consumer named AND at the location the lone-file face resolver
+		// reads, so a face the document names resolves whatever path the consumer chose (see `read_font_pairs`).
+		read_font_pairs(project, &main_path, &mut files);
 		if !files.contains_key(&main_path) {
 			return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing));
 		}
 		res!(vfs::install(files));
 
-		let (assembled, _refusals, _skip)	= res!(compile::assemble(&main_path, || Ok(fonts.clone())));
-		let rendered						= res!(compile::author_and_run(assembled));
+		let (assembled, refusals, skip)	= res!(compile::assemble(&main_path, || Ok(fonts.clone())));
+		let rendered = if use_memo {
+			res!(compile::author_and_run_memo(assembled, Some(&mut self.memo)))
+		} else {
+			res!(compile::author_and_run(assembled))
+		};
 
 		// Keep the resolved ledger and heading table for a later section-rail query.
 		self.last_ledger	= Some(rendered.out.ledger.clone());
 		self.last_heads		= rendered.heads.clone();
-		Ok(rendered)
+		Ok((rendered, refusals, skip))
 	}
 
 	fn run_inner(&mut self, project: &JsValue, main: &str, mode: Mode) -> Outcome<Product> {
-		let compile::Rendered { mut out, heads, geom: _ } = res!(self.assemble_and_run(project, main));
+		let (rendered, _refusals, _skip)	= res!(self.assemble_and_run(project, main, false));
+		let compile::Rendered { mut out, heads, geom: _ } = rendered;
 
 		match mode {
 			Mode::Svg => {
@@ -349,6 +392,35 @@ fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<
 	}
 }
 
+/// Reads the project's `fonts: [[path, bytes], ...]` into the source map, each installed at the path the
+/// consumer named AND -- so the lone-file face resolver discovers it whatever path was chosen -- at the
+/// resolver's own `<root>/assets/fonts/<basename>` location (see [`book::project_font_path`]). Without the
+/// second placement an injected font is present in the map but invisible to the resolver, which reads only
+/// its own directory: a face the document names would silently fall back to the reading role. The consumer
+/// still names a usable face by its `<Family>-<Variant>.{ttf,otf}` basename and declares that family as a
+/// heading face; this makes such a font resolve regardless of the path it was injected under.
+fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) {
+	let arr = match array_field(project, "fonts") {
+		Some(a)	=> a,
+		None	=> return,
+	};
+	for entry in arr.iter() {
+		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
+			if let Some(path) = pair.get(0).as_string() {
+				if let Some(bytes) = to_bytes(&pair.get(1)) {
+					let given = PathBuf::from(path);
+					if let Some(routed) = book::project_font_path(main_path, &given) {
+						if routed != given {
+							out.insert(routed, bytes.clone());
+						}
+					}
+					out.insert(given, bytes);
+				}
+			}
+		}
+	}
+}
+
 /// The bytes of a `Uint8Array` or an `ArrayBuffer`, or `None` for anything else.
 fn to_bytes(v: &JsValue) -> Option<Vec<u8>> {
 	if let Ok(u8arr) = v.clone().dyn_into::<js_sys::Uint8Array>() {
@@ -408,10 +480,56 @@ fn ok_svg(pages: Vec<String>) -> JsValue {
 	obj.into()
 }
 
-/// `{ version, order: string[], changed: [{ id, svg }], reset }` -- the changed-only delta. Ids (page
-/// content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and would
-/// silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
-fn ok_delta(d: &delta::PageDelta) -> JsValue {
+/// One refused construct, resolved to the source position a caller shows the user: the file it was read
+/// from, the 1-based line and column its span starts at, and a message naming the construct and why it was
+/// refused. The wasm delta return carries a list of these so a swallowed refusal reads back as a real
+/// `file:line:col` diagnostic rather than the bare `<main>:0:` it used to collapse to.
+struct Diagnostic {
+	file:	String,
+	line:	usize,
+	col:	usize,
+	message:	String,
+}
+
+/// A delta compile's result plus the diagnostics the delta path now surfaces: the changed-only page delta,
+/// every refused site at its source span, and the terse skip summary (`None` when nothing was skipped).
+struct DeltaOut {
+	delta:	delta::PageDelta,
+	diagnostics:	Vec<Diagnostic>,
+	skip:	Option<String>,
+}
+
+/// Resolves each refused site to a [`Diagnostic`], reading the tagged source file's line and column from
+/// the source map (still installed when this runs, before the caller clears it). A site whose source is not
+/// in the map -- which should not happen, every refusal is tagged with an injected file -- still reports,
+/// at column one, so a refusal is never silently dropped.
+fn diagnostics_from_refusals(refusals: &lang::Refusals) -> Vec<Diagnostic> {
+	let mut out = Vec::new();
+	let mut cache: HashMap<String, Option<String>> = HashMap::new();
+	for r in refusals.sites() {
+		let src = cache.entry(r.file.clone())
+			.or_insert_with(|| vfs::read_to_string(&PathBuf::from(&r.file)).ok());
+		let (line, col) = match src {
+			Some(text)	=> { let (l, c, _) = lang::line_col_of(text, r.span.start); (l, c) },
+			None		=> (0, 1),
+		};
+		out.push(Diagnostic {
+			file:		r.file.clone(),
+			line,
+			col,
+			message:	fmt!("skipped {} ({})", r.name, r.class.label()),
+		});
+	}
+	out
+}
+
+/// `{ version, order: string[], changed: [{ id, svg }], reset, diagnostics: [{ file, line, col, message }],
+/// skipped? }` -- the changed-only delta with its diagnostics. Ids (page content hashes) are decimal
+/// strings, since a JavaScript number holds only 53 bits exactly and would silently corrupt a 64-bit hash;
+/// the consumer treats them as opaque keys. `diagnostics` is always present (empty on a clean compile);
+/// `skipped` is set only when the reader passed over a construct.
+fn ok_delta(out: &DeltaOut) -> JsValue {
+	let d = &out.delta;
 	let obj = js_sys::Object::new();
 	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("version"), &JsValue::from_f64(d.version as f64));
 	let order = js_sys::Array::new();
@@ -428,6 +546,19 @@ fn ok_delta(d: &delta::PageDelta) -> JsValue {
 	}
 	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("changed"), &changed);
 	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("reset"), &JsValue::from_bool(d.reset));
+	let diags = js_sys::Array::new();
+	for diag in &out.diagnostics {
+		let entry = js_sys::Object::new();
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("file"), &JsValue::from_str(&diag.file));
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("line"), &JsValue::from_f64(diag.line as f64));
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("col"), &JsValue::from_f64(diag.col as f64));
+		let _ = js_sys::Reflect::set(&entry, &JsValue::from_str("message"), &JsValue::from_str(&diag.message));
+		diags.push(&entry);
+	}
+	let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("diagnostics"), &diags);
+	if let Some(skip) = &out.skip {
+		let _ = js_sys::Reflect::set(&obj, &JsValue::from_str("skipped"), &JsValue::from_str(skip));
+	}
 	obj.into()
 }
 

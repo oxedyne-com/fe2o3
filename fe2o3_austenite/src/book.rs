@@ -215,11 +215,28 @@ fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceR
 /// face resolves here too and not only when a whole book assembles it. A lone file with no such directory,
 /// or naming only its body family, yields an empty resolver, so its headings set in the body role as before.
 pub fn face_resolver(root_dir: &Path, theme: &Theme, blocks: &[Block]) -> FaceResolver {
-	let assets_fonts = match root_dir.parent() {
+	FaceResolver::load(&lone_font_dir(root_dir), &all_face_names(theme, blocks))
+}
+
+/// The directory a lone document's [`face_resolver`] reads its display faces from: the tree's
+/// `assets/fonts`, one level up from the root (beside a shared template), or under the root itself when it
+/// has no parent. Shared with the wasm surface, which routes a document's injected fonts here so a named
+/// face resolves whatever path the consumer chose to inject its file under (see [`project_font_path`]).
+pub fn lone_font_dir(root_dir: &Path) -> PathBuf {
+	match root_dir.parent() {
 		Some(d)	=> d.join("assets").join("fonts"),
 		None	=> root_dir.join("assets").join("fonts"),
-	};
-	FaceResolver::load(&assets_fonts, &all_face_names(theme, blocks))
+	}
+}
+
+/// Where an injected project font must sit for the lone-file [`face_resolver`] to discover it: the
+/// resolver's [`lone_font_dir`] joined with the font file's own basename, so `Radley-Regular.otf` injected
+/// under any path is found as the `Radley` face's Regular variant. `None` when `given` has no file name.
+/// The resolver keys a face on its `<Family>-<Variant>.{ttf,otf}` basename and the family name a document
+/// declares (a heading face), so the injected file's basename must follow that convention to be usable.
+pub fn project_font_path(main_path: &Path, given: &Path) -> Option<PathBuf> {
+	let root_dir = main_path.parent().unwrap_or(main_path);
+	given.file_name().map(|name| lone_font_dir(root_dir).join(name))
 }
 
 /// Assembles the document rooted at `root_path` into a [`BookSpec`], recognising both root idioms the

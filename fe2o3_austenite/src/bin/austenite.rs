@@ -131,7 +131,7 @@ fn explain_refusals(refusals: &lang::Refusals) -> String {
 			.or_insert_with(|| std::fs::read_to_string(&r.file).ok());
 		match text {
 			Some(src) => {
-				let (line_no, col, line_text) = line_col_of(src, r.span.start);
+				let (line_no, col, line_text) = lang::line_col_of(src, r.span.start);
 				out.push_str(&fmt!("{}:{}:{}: {}: skipped {}\n", r.file, line_no, col, r.class.label(), r.name));
 				out.push_str(line_text);
 				out.push('\n');
@@ -145,27 +145,6 @@ fn explain_refusals(refusals: &lang::Refusals) -> String {
 		}
 	}
 	out
-}
-
-/// The 1-based line and column a byte offset falls on within `src`, and the full text of that line (its
-/// trailing newline trimmed), for a `--explain` caret. The column is a byte offset within the line, not
-/// a character count, matching [`crate::ir::Span`]'s own byte-based accounting.
-fn line_col_of(src: &str, offset: u32) -> (usize, usize, &str) {
-	let offset = (offset as usize).min(src.len());
-	let mut line_no		= 1usize;
-	let mut line_start	= 0usize;
-	for (i, b) in src.bytes().enumerate() {
-		if i >= offset {
-			break;
-		}
-		if b == b'\n' {
-			line_no += 1;
-			line_start = i + 1;
-		}
-	}
-	let line_end = src[line_start..].find('\n').map(|p| line_start + p).unwrap_or(src.len());
-	let col = offset.saturating_sub(line_start) + 1;
-	(line_no, col, &src[line_start..line_end])
 }
 
 /// Each ledger anchor's kind, label (its content key) and resolved page, as a small JSON array -- the
@@ -571,27 +550,6 @@ mod tests {
 	use super::*;
 	use oxedyne_fe2o3_austenite::ir::Span;
 	use oxedyne_fe2o3_austenite::lang::{Refusal, RefusalClass, Refusals};
-
-	/// A pure check of the byte-offset-to-line/column arithmetic `--explain`'s caret depends on, with no
-	/// file on disk involved: the third line, its fifth byte (the `d` of "third").
-	#[test]
-	fn line_col_of_finds_the_right_line_and_column() {
-		let src = "first\nsecond\nthird line\n";
-		let offset = src.find("d line").expect("fixture text") as u32;
-		let (line_no, col, text) = line_col_of(src, offset);
-		assert_eq!(line_no, 3, "wrong line for offset {}", offset);
-		assert_eq!(col, 5, "wrong column for offset {}", offset);
-		assert_eq!(text, "third line");
-	}
-
-	/// `line_col_of` on the very first byte reports line 1, column 1 -- the boundary a fencepost error
-	/// would miss.
-	#[test]
-	fn line_col_of_handles_the_first_byte() {
-		let (line_no, col, text) = line_col_of("hello\nworld\n", 0);
-		assert_eq!((line_no, col), (1, 1));
-		assert_eq!(text, "hello");
-	}
 
 	/// `--explain`'s report for a site whose file can no longer be read (moved, deleted -- a rare race,
 	/// not the common case) degrades to a one-line note naming the class and construct, rather than

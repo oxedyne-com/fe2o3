@@ -27,6 +27,28 @@ pub use parse::Refusals;
 
 use oxedyne_fe2o3_core::prelude::*;
 
+/// The 1-based line and column a byte offset falls on within `src`, and the full text of that line (its
+/// trailing newline trimmed). The column is a byte offset within the line, not a character count, matching
+/// [`crate::ir::Span`]'s own byte-based accounting. Shared by the native binary's `--explain` caret and the
+/// wasm surface's `file:line:col` diagnostics, so a refused site reads back to the same position on both.
+pub fn line_col_of(src: &str, offset: u32) -> (usize, usize, &str) {
+	let offset = (offset as usize).min(src.len());
+	let mut line_no		= 1usize;
+	let mut line_start	= 0usize;
+	for (i, b) in src.bytes().enumerate() {
+		if i >= offset {
+			break;
+		}
+		if b == b'\n' {
+			line_no += 1;
+			line_start = i + 1;
+		}
+	}
+	let line_end = src[line_start..].find('\n').map(|p| line_start + p).unwrap_or(src.len());
+	let col = offset.saturating_sub(line_start) + 1;
+	(line_no, col, &src[line_start..line_end])
+}
+
 /// Reads one run of Typst inline markup -- prose with `*strong*`, `_emph_`, a maths span or a glossary
 /// term -- into the [`Segment`]s the block layer sets, without a surrounding block. The book layer uses
 /// it to turn a `term-defs` definition (Typst content, `[...]`) into the runs of a glossary table cell.
@@ -58,4 +80,29 @@ pub fn to_blocks_with_refusals(src: &str) -> Outcome<(Vec<Block>, Refusals)> {
 pub fn to_blocks_with_templates(src: &str, tfns: &rules::TemplateFns) -> Outcome<(Vec<Block>, Refusals)> {
 	let (items, skips) = res!(parse::document_with_templates(src, tfns));
 	Ok((lower::blocks(&items), skips))
+}
+
+#[cfg(test)]
+mod tests {
+	use super::line_col_of;
+
+	/// A pure check of the byte-offset-to-line/column arithmetic the `--explain` caret and the wasm
+	/// diagnostics both depend on, with no file involved: the third line, its fifth byte (the `d` of "third").
+	#[test]
+	fn line_col_of_finds_the_right_line_and_column() {
+		let src = "first\nsecond\nthird line\n";
+		let offset = src.find("d line").expect("fixture text") as u32;
+		let (line_no, col, text) = line_col_of(src, offset);
+		assert_eq!(line_no, 3, "wrong line for offset {}", offset);
+		assert_eq!(col, 5, "wrong column for offset {}", offset);
+		assert_eq!(text, "third line");
+	}
+
+	/// The very first byte reports line 1, column 1 -- the boundary a fencepost error would miss.
+	#[test]
+	fn line_col_of_handles_the_first_byte() {
+		let (line_no, col, text) = line_col_of("hello\nworld\n", 0);
+		assert_eq!((line_no, col), (1, 1));
+		assert_eq!(text, "hello");
+	}
 }
