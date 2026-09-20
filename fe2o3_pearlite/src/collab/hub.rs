@@ -20,6 +20,7 @@ use crate::collab::{
 	op,
 	sign,
 	DocId,
+	MAX_DOC_BYTES,
 	MAX_OP_BYTES,
 	MAX_OPS_PER_DOC,
 	MAX_TIME_SKEW_SECS,
@@ -225,21 +226,41 @@ where
 				Invalid, Input, Excessive, Size));
 		}
 		// Verify the signature, decode the record under bounds, and check the header's replica is the
-		// one the signer's key derives -- so the identity the operation is stored under is one the
-		// signer actually signed for, taken from the record and never from the caller.
-		let opened	= res!(sign::open(env));
-		let id		= opened.record.id();
-		res!(validate_ingest(doc, &opened.record));
+		// one the signer's key derives under this document -- so the identity the operation is stored
+		// under is one the signer actually signed for in this document, taken from the record and never
+		// from the caller, and an operation minted for another document is refused here.
+		let opened	= res!(sign::open(env, doc));
+		let id		= opened.record().id();
+		res!(validate_ingest(doc, opened.record()));
 
 		let mut entries = res!(self.load(doc));
-		if entries.iter().any(|(stored, _)| *stored == id) {
-			return Ok(id);
+		if let Some((_, stored_env)) = entries.iter().find(|(stored, _)| *stored == id) {
+			// A redelivery of the very same envelope is a no-op; the same identity carrying a different
+			// envelope is a squat or a two-device-same-key race, and is surfaced rather than silently
+			// dropped -- the first-seen operation would otherwise vanish the second, or the reverse.
+			if stored_env == env {
+				return Ok(id);
+			}
+			return Err(err!(
+				"The document {} already holds an operation identified {} with a different envelope; a \
+				second, differing operation under the same identity is a squat or a same-key race, and \
+				is refused rather than either being dropped silently.", doc, id;
+				Invalid, Input, Security, Conflict));
 		}
 		// The count is bounded so a peer cannot exhaust the store by appending without end.
 		if entries.len() >= MAX_OPS_PER_DOC {
 			return Err(err!(
 				"The document {} already holds {} operations, the maximum a single log may hold; a \
 				further operation is refused.", doc, entries.len();
+				Invalid, Input, Excessive, Size));
+		}
+		// The total size is bounded too, so a log's real cost is capped and not only its length.
+		let total: usize = entries.iter().map(|(_, e)| e.payload().len()).sum();
+		if total.saturating_add(env.payload().len()) > MAX_DOC_BYTES {
+			return Err(err!(
+				"The document {} holds {} operation payload bytes; a further {} would pass the {}-byte \
+				maximum a single log may reach, and is refused.",
+				doc, total, env.payload().len(), MAX_DOC_BYTES;
 				Invalid, Input, Excessive, Size));
 		}
 		entries.push((id, env.clone()));

@@ -66,22 +66,38 @@ pub const MAX_OP_BYTES: usize = 1024 * 1024;
 /// a peer cannot exhaust a store by appending without end.
 pub const MAX_OPS_PER_DOC: usize = 100_000;
 
+/// The greatest total size, in bytes of sealed envelope payloads, a single document's log may reach
+/// before the hub refuses more. The op-count cap alone leaves a peer room to store a hundred thousand
+/// mebibyte operations -- a hundred gibibytes -- so a total-bytes cap bounds the log's real cost
+/// rather than only its length.
+pub const MAX_DOC_BYTES: usize = 64 * 1024 * 1024;
+
 /// The furthest ahead of the receiving replica's own clock an operation's author-stated time may be,
 /// in seconds, before the hub refuses it. An author's clock genuinely differs from a reader's, so some
 /// skew is allowed; a `time` far in the future is a bid to win a last-writer-wins ordering forever, and
 /// is refused rather than honoured.
 pub const MAX_TIME_SKEW_SECS: u64 = 24 * 60 * 60;
 
-/// Derives a replica identity from a signer's public key: the first eight bytes of the SHA-256 of the
-/// key, read big-endian.
+/// Derives a replica identity from a signer's public key **and the document it writes in**: the first
+/// eight bytes of the SHA-256 of the key followed by the document identity, read big-endian.
 ///
-/// This is what binds an operation's name to the key that signed it. A [`ReplicaId`] a peer picks for
-/// itself is worthless -- it could pick anyone's -- so it is not picked but computed, here, from the
-/// one thing a peer cannot forge without the private key behind it. A record whose header names a
-/// replica this does not derive from its signer is refused at [`sign::seal`] and [`sign::open`], which
-/// is what closes both the identity squatting and the counter poisoning the free-form identity allowed.
-pub fn replica_of(pubkey: &[u8]) -> ReplicaId {
-	let digest = oxedyne_fe2o3_hash::sha256::digest(pubkey);
+/// This is what binds an operation's name both to the key that signed it and to the one document it
+/// belongs to. A [`ReplicaId`] a peer picks for itself is worthless -- it could pick anyone's -- so it
+/// is not picked but computed, here, from the two things a peer cannot forge: the private key behind
+/// the public one, and the document being written. A record whose header names a replica this does not
+/// derive from its signer *under the document in hand* is refused at [`sign::seal`] and [`sign::open`].
+///
+/// Folding the document into the replica is what closes cross-document replay for every operation kind
+/// at once, the settlement and the reply included, without a wire-format change: the same key signing
+/// in document A and in document B mints two different replica identities, so an operation lifted from
+/// A and appended to B fails the binding check under B. It also makes an honest counter overlap between
+/// two documents impossible -- each document is its own replica space -- and raises identity squatting
+/// from guessing a key to guessing a `(key, document)` pair.
+pub fn replica_of(pubkey: &[u8], doc: &DocId) -> ReplicaId {
+	let mut msg = Vec::with_capacity(pubkey.len() + doc.as_str().len());
+	msg.extend_from_slice(pubkey);
+	msg.extend_from_slice(doc.as_str().as_bytes());
+	let digest = oxedyne_fe2o3_hash::sha256::digest(&msg);
 	let mut bytes = [0u8; 8];
 	bytes.copy_from_slice(&digest[..8]);
 	ReplicaId::new(u64::from_be_bytes(bytes))

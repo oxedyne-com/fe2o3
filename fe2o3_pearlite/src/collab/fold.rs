@@ -35,6 +35,7 @@
 
 use crate::collab::{
 	op,
+	replica_of,
 	sign::Opened,
 	DocId,
 	Keyring,
@@ -89,8 +90,8 @@ pub fn fold(opened: &[Opened], doc: &DocId, keyring: &Keyring) -> FoldReport {
 	// on every replica whatever order the operations were assembled in.
 	let mut recs: Vec<&Opened> = opened.iter().collect();
 	recs.sort_by(|a, b| {
-		op::time_of(&a.record.op).cmp(&op::time_of(&b.record.op))
-			.then_with(|| a.record.id().cmp(&b.record.id()))
+		op::time_of(&a.record().op).cmp(&op::time_of(&b.record().op))
+			.then_with(|| a.record().id().cmp(&b.record().id()))
 	});
 
 	// Annotations keyed by their opening proposal's order key, so iterating the map yields them in
@@ -105,9 +106,21 @@ pub fn fold(opened: &[Opened], doc: &DocId, keyring: &Keyring) -> FoldReport {
 	let mut skipped:	Vec<Skipped>						= Vec::new();
 
 	for opened in recs {
-		let rec		= &opened.record;
+		let rec		= opened.record();
 		let id		= rec.id();
-		let signer	= &opened.signer;
+		let signer	= opened.signer();
+		// Belt and braces to the ingest check: an [`Opened`] is meant to have been opened for this
+		// document, but the fold re-derives the binding rather than trust that it was, so an operation
+		// from another document -- a settlement or reply lifted across, which carries no body stamp --
+		// is skipped here even if it reached the set unopened for this document.
+		if rec.id().replica != replica_of(signer, doc) {
+			skipped.push(Skipped {
+				id,
+				reason: fmt!("its replica {} is not the one its signer derives under document {}; it \
+					belongs to another document and is not folded here", rec.id().replica, doc),
+			});
+			continue;
+		}
 		match &rec.op {
 			Op::Proposal { body, .. } => {
 				let ann = match decode_for_doc(body, doc) {
@@ -119,7 +132,7 @@ pub fn fold(opened: &[Opened], doc: &DocId, keyring: &Keyring) -> FoldReport {
 				};
 				let key = (op::time_of(&rec.op), id);
 				key_of.insert(id, key);
-				signer_of.insert(id, signer.clone());
+				signer_of.insert(id, signer.to_vec());
 				anns.insert(key, attribute(ann, signer, keyring));
 			},
 			Op::Amended { on, body, .. } => {
@@ -139,7 +152,7 @@ pub fn fold(opened: &[Opened], doc: &DocId, keyring: &Keyring) -> FoldReport {
 				}
 				// Only the proposal's own signer may restate it. An amendment from any other key is a
 				// stranger editing someone else's annotation, and is refused.
-				if signer_of.get(on).map(|s| s.as_slice()) != Some(signer.as_slice()) {
+				if signer_of.get(on).map(|s| s.as_slice()) != Some(signer) {
 					skipped.push(Skipped {
 						id,
 						reason: fmt!("amends the proposal {}, whose signer it does not match; an \
@@ -163,7 +176,7 @@ pub fn fold(opened: &[Opened], doc: &DocId, keyring: &Keyring) -> FoldReport {
 				};
 				// Only the proposal's own signer may settle it, for the reason an amendment is so
 				// confined: a stranger does not get to withdraw or resolve another author's annotation.
-				if signer_of.get(on).map(|s| s.as_slice()) != Some(signer.as_slice()) {
+				if signer_of.get(on).map(|s| s.as_slice()) != Some(signer) {
 					skipped.push(Skipped {
 						id,
 						reason: fmt!("settles the proposal {}, whose signer it does not match; a \

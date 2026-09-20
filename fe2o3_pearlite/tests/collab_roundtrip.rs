@@ -96,10 +96,10 @@ fn sealed_create(
 	-> Outcome<Envelope>
 {
 	let op		= res!(op::create(doc, ann, time));
-	let replica	= replica_of(&key.public_key());
+	let replica	= replica_of(&key.public_key(), doc);
 	let rec		= Record::root(OpId::new(replica, counter), op);
 	let sig		= res!(key.sign(&res!(sign::signing_bytes(&rec))));
-	sign::seal(&rec, key.public_key(), sig)
+	sign::seal(&rec, key.public_key(), sig, doc)
 }
 
 #[test]
@@ -143,9 +143,10 @@ fn collaboration_backend_round_trips_two_authors_through_the_hub() -> Outcome<()
 
 	// A signature presented against the wrong author's key is refused at the seal, so nothing
 	// unattributable is ever built.
-	let rec_a	= Record::root(OpId::new(replica_of(&key_a.public_key()), 1), res!(op::create(&doc_id, &ann_a, 1000)));
+	let rec_a	= Record::root(
+		OpId::new(replica_of(&key_a.public_key(), &doc_id), 1), res!(op::create(&doc_id, &ann_a, 1000)));
 	let cross_sig = res!(key_a.sign(&res!(sign::signing_bytes(&rec_a))));
-	assert!(sign::seal(&rec_a, key_b.public_key(), cross_sig).is_err(),
+	assert!(sign::seal(&rec_a, key_b.public_key(), cross_sig, &doc_id).is_err(),
 		"a record signed by A but presented with B's public key must not seal");
 
 	// Start a throwaway o3db instance under a process-unique root, with every zone inside it.
@@ -183,7 +184,7 @@ fn collaboration_backend_round_trips_two_authors_through_the_hub() -> Outcome<()
 	let mut opened = Vec::new();
 	for (_id, env) in &loaded {
 		assert!(res!(sign::verify(env)), "a stored envelope must verify against its own key");
-		opened.push(res!(sign::open(env)));
+		opened.push(res!(sign::open(env, &doc_id)));
 	}
 
 	// Fold the log: both annotations materialise, in (time, id) order -- A before B -- and the author
@@ -216,7 +217,7 @@ fn collaboration_backend_round_trips_two_authors_through_the_hub() -> Outcome<()
 	bad_sig[10] ^= 0x01;
 	let tampered_sig = Envelope::new(env_a.payload().to_vec(), env_a.signer().to_vec(), bad_sig);
 	assert!(!res!(sign::verify(&tampered_sig)), "a tampered signature must not verify");
-	assert!(sign::open(&tampered_sig).is_err(), "opening a tampered envelope must error");
+	assert!(sign::open(&tampered_sig, &doc_id).is_err(), "opening a tampered envelope must error");
 
 	let mut bad_payload = env_a.payload().to_vec();
 	bad_payload[0] ^= 0x01;

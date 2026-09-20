@@ -42,22 +42,24 @@ fn annotation(anchor: &str, author: &str) -> Annotation {
 
 /// Seals `op` as a root record under the replica the signer's own key derives, the way an honest peer
 /// would, and returns the envelope.
-fn seal_honest(key: &P256KeyPair, counter: u64, op: Op) -> Outcome<oxedyne_fe2o3_ore::envelope::Envelope> {
-	let rec = Record::root(OpId::new(replica_of(&key.public_key()), counter), op);
+fn seal_honest(doc: &DocId, key: &P256KeyPair, counter: u64, op: Op)
+	-> Outcome<oxedyne_fe2o3_ore::envelope::Envelope>
+{
+	let rec = Record::root(OpId::new(replica_of(&key.public_key(), doc), counter), op);
 	let sig = res!(key.sign(&res!(sign::signing_bytes(&rec))));
-	sign::seal(&rec, key.public_key(), sig)
+	sign::seal(&rec, key.public_key(), sig, doc)
 }
 
-/// Opens a freshly sealed operation into the verified, signer-bound form the fold consumes.
-fn opened(key: &P256KeyPair, counter: u64, op: Op) -> Outcome<Opened> {
-	sign::open(&res!(seal_honest(key, counter, op)))
+/// Opens a freshly sealed operation, for `doc`, into the verified, signer-bound form the fold consumes.
+fn opened(doc: &DocId, key: &P256KeyPair, counter: u64, op: Op) -> Outcome<Opened> {
+	sign::open(&res!(seal_honest(doc, key, counter, op)), doc)
 }
 
 /// A proposal opening an annotation stamped for `doc`.
 fn proposal(doc: &DocId, key: &P256KeyPair, counter: u64, anchor: &str, author: &str, time: u64)
 	-> Outcome<Opened>
 {
-	opened(key, counter, res!(op::create(doc, &annotation(anchor, author), time)))
+	opened(doc, key, counter, res!(op::create(doc, &annotation(anchor, author), time)))
 }
 
 
@@ -87,16 +89,16 @@ fn a_forged_author_string_is_ignored_and_the_signer_is_shown() -> Outcome<()> {
 fn a_squatted_replica_id_is_refused_at_seal_and_open() -> Outcome<()> {
 	let attacker	= res!(P256KeyPair::generate());
 	let victim		= res!(P256KeyPair::generate());
-	let victim_rep	= replica_of(&victim.public_key());
+	let doc		= DocId::new("doc-squat");
+	let victim_rep	= replica_of(&victim.public_key(), &doc);
 
 	// The attacker builds a record under the victim's replica and signs it with their own key.
-	let doc	= DocId::new("doc-squat");
 	let op	= res!(op::create(&doc, &annotation("block-1", "victim"), 100));
 	let rec	= Record::root(OpId::new(victim_rep, 1), op);
 	let sig	= res!(attacker.sign(&res!(sign::signing_bytes(&rec))));
 
 	// Sealing with the attacker's key is refused: the header's replica is not the one that key derives.
-	assert!(sign::seal(&rec, attacker.public_key(), sig.clone()).is_err(),
+	assert!(sign::seal(&rec, attacker.public_key(), sig.clone(), &doc).is_err(),
 		"a record whose replica is not the signer's must not seal");
 
 	// And a hand-built envelope carrying the same claim is refused at the open, though its signature is
@@ -104,7 +106,7 @@ fn a_squatted_replica_id_is_refused_at_seal_and_open() -> Outcome<()> {
 	let payload	= res!(sign::signing_bytes(&rec));
 	let forged	= oxedyne_fe2o3_ore::envelope::Envelope::new(payload, attacker.public_key(), sig);
 	assert!(res!(sign::verify(&forged)), "the forged envelope's signature does hold over its bytes");
-	assert!(sign::open(&forged).is_err(),
+	assert!(sign::open(&forged, &doc).is_err(),
 		"opening an envelope whose replica is not its signer's must be refused");
 	Ok(())
 }
@@ -120,12 +122,12 @@ fn a_counter_poison_op_cannot_be_opened() -> Outcome<()> {
 	let doc	= DocId::new("doc-poison");
 	let op	= res!(op::create(&doc, &annotation("block-1", "victim"), 100));
 	// The poison: the victim's replica, a counter far past anything they will mint.
-	let rec	= Record::root(OpId::new(replica_of(&victim.public_key()), 1_000_000_000), op);
+	let rec	= Record::root(OpId::new(replica_of(&victim.public_key(), &doc), 1_000_000_000), op);
 	let sig	= res!(attacker.sign(&res!(sign::signing_bytes(&rec))));
 	let env	= oxedyne_fe2o3_ore::envelope::Envelope::new(
 		res!(sign::signing_bytes(&rec)), attacker.public_key(), sig);
 
-	assert!(sign::open(&env).is_err(),
+	assert!(sign::open(&env, &doc).is_err(),
 		"a counter-poison op forging the victim's replica is refused at the open and never folds");
 	Ok(())
 }
@@ -155,7 +157,7 @@ fn a_deeply_nested_body_is_refused_and_skipped_not_fatal() -> Outcome<()> {
 		"a deeply nested body is refused by the bounded decoder");
 
 	// A validly-signed proposal carrying it is skipped; a good proposal beside it still folds.
-	let bad	= res!(opened(&bad_key, 1, Op::Proposal {
+	let bad	= res!(opened(&doc, &bad_key, 1, Op::Proposal {
 		title:	"block-x".to_string(),
 		body:	deep,
 		voice:	op::VOICE.to_string(),
@@ -179,7 +181,7 @@ fn a_malformed_signed_body_is_skipped_not_fatal() -> Outcome<()> {
 
 	// A well-formed daticle that is simply not an Annotation map.
 	let not_ann	= res!(dat!("just a string, not an annotation").to_bytes(Vec::new()));
-	let bad	= res!(opened(&bad_key, 1, Op::Proposal {
+	let bad	= res!(opened(&doc, &bad_key, 1, Op::Proposal {
 		title:	"block-x".to_string(),
 		body:	not_ann,
 		voice:	op::VOICE.to_string(),
@@ -218,10 +220,10 @@ fn a_foreign_amendment_is_rejected() -> Outcome<()> {
 	let stranger	= res!(P256KeyPair::generate());
 
 	let create	= res!(proposal(&doc, &owner, 1, "block-1", "owner", 100));
-	let on		= create.record.id();
+	let on		= create.record().id();
 
 	// The stranger, with a perfectly valid key and signature of their own, amends the owner's proposal.
-	let amend	= res!(opened(&stranger, 1, res!(op::edit(
+	let amend	= res!(opened(&doc, &stranger, 1, res!(op::edit(
 		&doc, on, &annotation("block-1", "stranger's rewrite"), 200))));
 
 	let report	= fold::fold(&[create, amend], &doc, &Keyring::new());
@@ -240,22 +242,66 @@ fn a_withdrawn_proposal_cannot_be_resurrected_by_an_amendment() -> Outcome<()> {
 	let owner	= res!(P256KeyPair::generate());
 
 	let create	= res!(proposal(&doc, &owner, 1, "block-1", "owner", 100));
-	let on		= create.record.id();
+	let on		= create.record().id();
 
 	// The author withdraws it, then -- later -- tries to amend it back into existence.
-	let withdraw	= res!(opened(&owner, 2, Op::Settled {
+	let withdraw	= res!(opened(&doc, &owner, 2, Op::Settled {
 		on,
 		state:	Settled::Declined,
 		mark:	None,
 		time:	200,
 	}));
-	let amend	= res!(opened(&owner, 3, res!(op::edit(
+	let amend	= res!(opened(&doc, &owner, 3, res!(op::edit(
 		&doc, on, &annotation("block-1", "back from the dead"), 300))));
-	let amend_id	= amend.record.id();
+	let amend_id	= amend.record().id();
 
 	let report	= fold::fold(&[create, withdraw, amend], &doc, &Keyring::new());
 	req!(0, report.annotations.len(), "a withdrawn proposal stays withdrawn despite a later amendment");
 	assert!(report.skipped.iter().any(|s| s.id == amend_id),
 		"the resurrection attempt is reported as skipped");
+	Ok(())
+}
+
+/// A validly-signed Settled (and a Said), authored by a key in one document, cannot be replayed into
+/// another to withdraw or disturb that key's annotation there -- even though the signature holds and
+/// the key is the same. The per-document replica binding refuses it at the open, and the fold skips it
+/// belt-and-braces. This is the residual the earlier body-`doc_id` stamp missed: a Settled carries no
+/// body to stamp, and its `on` identifier is not inert across documents, Ore minting counters per log.
+#[test]
+fn a_settled_or_said_from_another_document_cannot_be_replayed() -> Outcome<()> {
+	let doc_a	= DocId::new("doc-A");
+	let doc_b	= DocId::new("doc-B");
+	let owner	= res!(P256KeyPair::generate());
+
+	// The owner's genuine annotation lives in document B.
+	let create_b	= res!(proposal(&doc_b, &owner, 1, "block-1", "owner", 100));
+	let on_b		= create_b.record().id();
+
+	// A settlement the owner validly signed in document A, naming that identifier. A relay peer of A
+	// lifts it and tries to apply it to B, which -- before the per-document binding -- would have
+	// declined and tombstoned the owner's B annotation, unrecoverable.
+	let settled_a_env = res!(seal_honest(&doc_a, &owner, 2, Op::Settled {
+		on:		on_b,
+		state:	Settled::Declined,
+		mark:	None,
+		time:	200,
+	}));
+	// Replayed into B, it is refused at the open: its replica is the owner's under A, not under B.
+	assert!(sign::open(&settled_a_env, &doc_b).is_err(),
+		"a settlement authored in another document must not open here");
+
+	// Belt and braces: opened legitimately for its own document A, then handed to a fold for document
+	// B, it is skipped -- not applied -- so the victim's annotation stands.
+	let settled_a	= res!(sign::open(&settled_a_env, &doc_a));
+	let settled_id	= settled_a.record().id();
+	let report		= fold::fold(&[create_b, settled_a], &doc_b, &Keyring::new());
+	req!(1, report.annotations.len(), "the victim's annotation survives a cross-document settlement");
+	assert!(report.skipped.iter().any(|s| s.id == settled_id),
+		"the replayed settlement is reported as skipped, not applied");
+
+	// The same holds for a reply, which also carries no body to stamp.
+	let said_a_env = res!(seal_honest(&doc_a, &owner, 3, op::reply(on_b, "a reply from doc A", 210)));
+	assert!(sign::open(&said_a_env, &doc_b).is_err(),
+		"a reply authored in another document must not open here either");
 	Ok(())
 }
