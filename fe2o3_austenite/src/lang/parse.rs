@@ -237,11 +237,86 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 	document_with_templates(src, &crate::lang::rules::TemplateFns::new())
 }
 
+/// Records a refusal for every claim reference (`#claim-refs`/`#claim-label`) that sits in a context the
+/// layout does not gather into the reverse claim index. Only a top-level body run -- a paragraph, a list
+/// entry, a callout body -- feeds the index (see `doc::build_pieces`); a claim code in a heading title, a
+/// figure or table caption, a table cell or a footnote body is dropped by the layout, so it would otherwise
+/// vanish from the index (and, for a `#claim-label`, from the margin) with no trace. Making it a refusal
+/// keeps the silent-loss class this project guards against out of the reverse index. Gathering from those
+/// contexts needs anchor support there -- the same limitation as a `#claim-label` in a table cell not being
+/// drawn -- and is a later increment; until then the code is reported, not dropped.
+fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
+	for item in items {
+		match item {
+			// A body run and a list entry are gathered; only a claim reference nested inside a footnote of one
+			// escapes the index, so the top-level runs are scanned as indexed and their footnotes are not.
+			Item::Paragraph { runs, span, .. }	=> scan_claim_refs(runs, true, *span, "a paragraph", skips),
+			Item::List { items: entries, .. }	=> for e in entries { flag_list_item_claim_refs(e, skips); },
+			// A callout body is gathered like the main flow; recurse so a claim reference in it is indexed and
+			// only its non-body sub-contexts (a caption, a footnote) are flagged.
+			Item::Box { items: inner, .. }		=> flag_unindexed_claim_refs(inner, skips),
+			Item::Scoped { items: inner, .. }	=> flag_unindexed_claim_refs(inner, skips),
+			// None of the following is gathered: a heading title, a caption, or a table cell.
+			Item::Heading { runs, span, .. }	=> scan_claim_refs(runs, false, *span, "a heading title", skips),
+			Item::Table { spec, span }			=> for cell in &spec.cells { scan_claim_refs(cell, false, *span, "a table cell", skips); },
+			Item::Figure { body, caption, span, .. } => {
+				if let Some(cap) = caption {
+					scan_claim_refs(cap, false, *span, "a figure caption", skips);
+				}
+				if let FigureBody::Table(spec) = body {
+					for cell in &spec.cells {
+						scan_claim_refs(cell, false, *span, "a table cell", skips);
+					}
+				}
+			},
+			_ => {},
+		}
+	}
+}
+
+/// [`flag_unindexed_claim_refs`] for one list entry: its own runs are gathered (indexed), and its nested
+/// child items are walked as their own contexts.
+fn flag_list_item_claim_refs(entry: &ListItem, skips: &mut Refusals) {
+	scan_claim_refs(&entry.runs, true, Span::new(0, 0), "a list entry", skips);
+	flag_unindexed_claim_refs(&entry.children, skips);
+}
+
+/// Scans an inline run for claim references and records a refusal for each that will not reach the reverse
+/// index. `indexed` is true for a top-level body run (a paragraph, list entry or callout body), where a
+/// claim reference IS gathered and so is left alone; a footnote body is never gathered, so its own runs are
+/// always scanned as unindexed regardless of where the footnote sits.
+fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, skips: &mut Refusals) {
+	for run in runs {
+		match run {
+			Inline::MarginNote { codes, .. } if !indexed && !codes.is_empty() =>
+				skips.record(&fmt!("claim reference in {} is not indexed", context), span),
+			Inline::Footnote(inner) => scan_claim_refs(inner, false, span, "a footnote body", skips),
+			_ => {},
+		}
+	}
+}
+
 /// As [`document_with_refusals`], with a set of bound `#let` furniture functions (`tfns`) in scope: a call
 /// to one -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- is expanded into a padded box rather
 /// than tallied as a skipped construct. A body re-parsed here carries the same `tfns`, so a furniture call
 /// nested inside another's body expands too. With an empty map this is exactly [`document_with_refusals`].
+///
+/// After the surface tree is built, [`flag_unindexed_claim_refs`] records a refusal for any claim reference
+/// that landed in a context the layout does not gather into the reverse claim index. This runs once, on the
+/// whole assembled tree -- the recursive re-parse of a `#columns`/`#styled-box` body reaches for
+/// [`parse_items`] directly, so a nested claim reference is flagged once here rather than again per level.
 pub fn document_with_templates(src: &str, tfns: &crate::lang::rules::TemplateFns)
+	-> Outcome<(Vec<Item>, Refusals)>
+{
+	let (items, mut skips) = res!(parse_items(src, tfns));
+	flag_unindexed_claim_refs(&items, &mut skips);
+	Ok((items, skips))
+}
+
+/// The surface-tree parse proper, without the [`flag_unindexed_claim_refs`] post-pass -- so a recursively
+/// re-parsed body (a `#columns`/`#styled-box` wrapper's content) is not validated twice, once here and again
+/// when its parent walks the spliced items. [`document_with_templates`] wraps this with that one validation.
+fn parse_items(src: &str, tfns: &crate::lang::rules::TemplateFns)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
 	let mut skips:		Refusals	= Refusals::default();
@@ -2206,7 +2281,7 @@ fn dispatch_capture(
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
+				if let Ok((mut inner, sub)) = parse_items(&body, tfns) {
 					skips.merge(sub);
 					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -2226,7 +2301,7 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((inner, sub)) = document_with_templates(&body, tfns) {
+				if let Ok((inner, sub)) = parse_items(&body, tfns) {
 					skips.merge(sub);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
@@ -2273,7 +2348,7 @@ fn dispatch_capture(
 			};
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
-					if let Ok((mut inner, sub)) = document_with_templates(&body, tfns) {
+					if let Ok((mut inner, sub)) = parse_items(&body, tfns) {
 						skips.merge(sub);
 						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
 						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
@@ -3319,6 +3394,20 @@ mod tests {
 		assert!(is_inline_call("claim-label"));
 		assert!(is_inline_call("claim-refs"));
 		assert!(code_skip("#claim-label(<CD18>). Equilibrium appropriation follows.").is_none());
+	}
+
+	/// A claim reference in a context the layout does not gather into the reverse claim index -- here a
+	/// heading title -- is recorded as a refusal rather than dropped silently, while the same reference in a
+	/// body paragraph (which IS gathered) draws no refusal. Guards the silent-loss path the audit flagged.
+	#[test]
+	fn claim_ref_in_a_non_body_context_is_refused_not_dropped() {
+		let (_items, skips) = document_with_refusals("= Heading #claim-refs(<Z9>) here\n\nBody text follows.\n").expect("parse");
+		assert!(skips.sites().iter().any(|s| s.name.contains("claim reference") && s.name.contains("heading")),
+			"a claim reference in a heading title must be a refusal: {:?}", skips.sites());
+		// A claim reference in a body paragraph is gathered into the index, so it is NOT refused.
+		let (_i2, skips2) = document_with_refusals("Body carrying a reference#claim-refs(<Z9>) here.\n").expect("parse");
+		assert!(!skips2.sites().iter().any(|s| s.name.contains("claim reference")),
+			"a body claim reference is indexed, not refused: {:?}", skips2.sites());
 	}
 
 	/// A line-leading `#padded-image(...)` (a section opener's logo) is set as an [`Item::Image`] carrying

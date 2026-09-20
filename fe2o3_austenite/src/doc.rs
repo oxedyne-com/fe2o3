@@ -267,8 +267,9 @@ pub enum Block {
 	// The reverse claim-reference index placeholder: a marker a line-leading `#context { ... collect-claim-refs()
 	// ... }` in the Logic appendix lowers to. It sets nothing itself; [`author`] groups the claim references
 	// gathered walking the body by code (byte order, matching Typst's `.sorted()`) and sets one wrapped paragraph
-	// per code -- the bold code, a colon, and the deduplicated pages it was referenced on -- each page read back
-	// from the ledger post-convergence, exactly as the index folios are.
+	// per code -- the bold code, a colon, and one page per reference in document order (NOT deduplicated: a code
+	// referenced twice on a page lists that page twice, as `claims.typ`'s `pages.join(", ")` does), each page read
+	// back from the ledger post-convergence.
 	ClaimIndex,
 	// A `#styled-box[...]` callout: its inner blocks set inside a padded box that runs the full measure,
 	// washed the template's `colours.veronica.lighten(90%)` (a pale violet) with a 4 pt corner radius. The
@@ -3641,8 +3642,14 @@ fn claim_index_nodes(
 	let pd		= probe.dims();
 	let entry_gap	= if leading > pd.height + pd.depth { leading - pd.height - pd.depth } else { Sp::ZERO };
 
+	// One folio slot's reserved width: three digits at the index size, so a resolved page never outgrows it.
+	// Keyed `claim-slot-{n}` -- its OWN prefix, distinct from `ref_slot`'s `ref-{n}` (a body cross-reference)
+	// and `index_nodes`'s `index-slot-{n}` -- so a book carrying a `#pageref`-style slot AND a claim index does
+	// not have one silently overwrite the other in the ledger's by-id map.
+	let slot_probe	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "000"));
+	let slot_dims	= slot_probe.dims();
 	let mut nodes:	Vec<Node>	= Vec::new();
-	let mut ref_no				= 0u32;
+	let mut slot_no				= 0u32;
 	for (code, ids) in groups.iter() {
 		if !nodes.is_empty() {
 			nodes.push(Node::Glue(Glue::fixed(entry_gap)));
@@ -3654,7 +3661,11 @@ fn claim_index_nodes(
 			if n > 0 {
 				pieces.push(Piece::Text { text: ", ".to_string(), role: Role::Body });
 			}
-			pieces.push(Piece::Mark(res!(ref_slot(fonts.clone(), style, &mut ref_no, Ref::FolioOf(id.clone())))));
+			slot_no += 1;
+			let slot_id	= AnchorId::new(AnchorKind::Label, fmt!("claim-slot-{}", slot_no));
+			let leaf	= Leaf::reserved_inline(slot_id, Ref::FolioOf(id.clone()),
+				Dims::new(slot_dims.width, slot_dims.height, slot_dims.depth));
+			pieces.push(Piece::Mark(leaf));
 		}
 		pieces.push(Piece::Text { text: ".".to_string(), role: Role::Body });
 		let lines = res!(break_paragraph_pieces(
@@ -5473,6 +5484,39 @@ an interior line justification fills to the measure while ragged setting does no
 			.filter(|a| a.id.kind == crate::ledger::AnchorKind::MarginNote).count();
 		assert_eq!(count(&out_n), 1, "the claim label records one margin anchor");
 		assert_eq!(count(&out_p), 0, "the plain body records none");
+		Ok(())
+	}
+
+	/// A body cross-reference slot (keyed `ref-N`) and a reverse-claim-index folio slot must not collide in
+	/// the ledger's by-id map: the claim index keys its slots `claim-slot-N`, distinct from `ref_slot`'s
+	/// `ref-N`, so a document carrying both an unresolved `#pageref`-style slot AND a claim index records
+	/// both anchors rather than one silently overwriting the other (a lost slot, an under-converged folio).
+	#[test]
+	fn claim_index_slots_do_not_collide_with_body_pagerefs_in_the_ledger() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let geom	= PageGeometry::a4();
+		let style	= Theme::default();
+		let blocks	= vec![
+			Block::heading(1, "Body"),
+			// An unresolved cross-reference (its label names no target, so it falls back to a `ref-1` slot) and
+			// a claim reference (gathered into the index) in the same body paragraph.
+			Block::rich(vec![
+				Segment::text("See "),
+				Segment::page_ref("undefined-target"),
+				Segment::text(" while claim "),
+				Segment::margin_note("", vec!["X1".to_string()]),
+				Segment::text(" is referenced here."),
+			]),
+			Block::ClaimIndex,
+		];
+		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
+		let (doc, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+		let out			= res!(crate::driver::run(&doc, &metrics, crate::driver::Config::default()));
+		let keys: Vec<String> = out.ledger.anchors().map(|a| a.id.key.clone()).collect();
+		assert!(keys.iter().any(|k| k == "ref-1"),
+			"the body cross-reference records its own ref-1 slot: {:?}", keys);
+		assert!(keys.iter().any(|k| k == "claim-slot-1"),
+			"the claim index records a distinct claim-slot-1 slot, not colliding with ref-1: {:?}", keys);
 		Ok(())
 	}
 
