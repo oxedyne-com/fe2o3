@@ -1236,6 +1236,7 @@ enum Frame {
 	Str,		// a `"..."` string literal: every character is literal until the closing quote
 	Math,		// a `$...$` maths span: every character is literal until the closing `$`
 	Comment,	// a `/* ... */` block comment: every character, brackets included, is literal until `*/`
+	Raw,		// a `` `...` `` code span: every character, `//`/`/*` included, is literal until the closing backtick
 }
 
 /// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
@@ -1246,6 +1247,7 @@ enum Frame {
 pub(crate) struct SkipState {
 	frames:		Vec<Frame>,
 	escaped:	bool,
+	in_quote:	bool,	// an odd number of literal `"` seen since the start of the current line, in Content mode
 }
 
 /// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
@@ -1255,9 +1257,20 @@ fn is_line_comment(chars: &[char], i: usize) -> bool {
 	chars.get(i + 1) == Some(&'/') && !(i > 0 && chars[i - 1] == ':')
 }
 
+/// How many characters a `//` line comment opened at `i` consumes. `chars` may be a whole multi-line
+/// capture buffer -- [`read_group`], [`split_top_args`] and [`named_arg`] all run on one -- so the comment
+/// is bounded to the next `'\n'`, not to the end of the slice; a `//` on one line must never eat the lines
+/// that follow it.
+fn line_comment_len(chars: &[char], i: usize) -> usize {
+	match chars[i..].iter().position(|&c| c == '\n') {
+		Some(off)	=> off,
+		None		=> chars.len() - i,
+	}
+}
+
 impl SkipState {
 	pub(crate) fn new() -> Self {
-		SkipState { frames: Vec::new(), escaped: false }
+		SkipState { frames: Vec::new(), escaped: false, in_quote: false }
 	}
 
 	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
@@ -1308,6 +1321,18 @@ impl SkipState {
 				if c == '*' && chars.get(i + 1) == Some(&'/')	{ self.frames.pop(); 2 }
 				else											{ 1 }
 			},
+			// A `` `...` `` code span: literal until the closing backtick, the twin of Comment above, so a
+			// `//`/`/*` a prose note quotes as a raw code token (`` the `//` operator ``) is never mistaken
+			// for a comment opener. Mirrors [`strip_comments`]' `in_raw`, which does not persist an
+			// unterminated span past its own line, so an unclosed backtick is dropped at the newline rather
+			// than swallowing the lines that follow.
+			Some(Frame::Raw) => {
+				match c {
+					'`'		=> { self.frames.pop(); 1 },
+					'\n'	=> { self.frames.pop(); 1 },
+					_		=> 1,
+				}
+			},
 			Some(Frame::Content) => {
 				// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over
 				// before any of the structural cases below can act on it.
@@ -1321,27 +1346,38 @@ impl SkipState {
 					']'		=> { self.frames.pop(); 1 },
 					'$'		=> { self.frames.push(Frame::Math); 1 },
 					'#'		=> self.content_hash(chars, i),
-					// A line comment runs to the line's own end (this call sees one line at a time, so
-					// consuming the rest of `chars` is consuming to the newline); the `://` exception mirrors
-					// `strip_comments`, so a bare URL's slashes stay literal prose. A block comment opens a
-					// `Comment` frame that can straddle the line break, same as Str/Math above.
-					'/' if is_line_comment(chars, i)	=> chars.len() - i,
-					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
+					'`'		=> { self.frames.push(Frame::Raw); 1 },
+					// A literal `"` in prose is not a string (content mode never opens `Frame::Str`), but
+					// `strip_comments` still treats a quoted phrase as opaque to `//`/`/*`, so a bare count
+					// mirrors that here without disturbing the bracket balance a real quote would otherwise
+					// leave alone. Line-scoped, as `strip_comments` is called once per line.
+					'"'		=> { self.in_quote = !self.in_quote; 1 },
+					'\n'	=> { self.in_quote = false; 1 },
+					// A line comment runs to the next `\n` in `chars` (which may hold a whole multi-line
+					// capture buffer, not just this one line) -- never past it, and never at all inside a
+					// quoted phrase or a raw span. The `://` exception mirrors `strip_comments`, so a bare
+					// URL's slashes stay literal prose. A block comment opens a `Comment` frame that can
+					// straddle the line break, same as Str/Math above.
+					'/' if is_line_comment(chars, i) && !self.in_quote		=> line_comment_len(chars, i),
+					'/' if chars.get(i + 1) == Some(&'*') && !self.in_quote	=> { self.frames.push(Frame::Comment); 2 },
 					// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole
 					// point of tracking the frame, so a caption's unbalanced paren does not stick.
 					_		=> 1,
 				}
 			},
 			// A code frame, or the top level (an empty stack): brackets nest as the flat counter had them,
-			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span.
+			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span. A `"`
+			// opens a real `Str` frame here, which already keeps a `//`/`/*` inside it literal, so no
+			// separate quote count is needed the way Content mode's prose-only quote does.
 			_ => {
 				match c {
 					'"'									=> { self.frames.push(Frame::Str); 1 },
+					'`'									=> { self.frames.push(Frame::Raw); 1 },
 					'(' | '{'							=> { self.frames.push(Frame::Code); 1 },
 					'['									=> { self.frames.push(Frame::Content); 1 },
 					'$'									=> { self.frames.push(Frame::Math); 1 },
 					')' | '}'							=> { self.frames.pop(); 1 },
-					'/' if is_line_comment(chars, i)	=> chars.len() - i,
+					'/' if is_line_comment(chars, i)		=> line_comment_len(chars, i),
 					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
 					_									=> 1,
 				}
@@ -4350,6 +4386,33 @@ bound\".\n";
 		assert!(text.contains("no way to express"),
 			"the prose after an inline #raw was swallowed as a skip: {:?}", items);
 		assert!(text.contains("bound"), "the continuation line was swallowed: {:?}", items);
+		Ok(())
+	}
+
+	/// A `` `//` `` and `` `/* */` `` inside a backtick code span, in a prose caption naming the operators
+	/// themselves, must not be read as comment openers: [`Frame::Raw`] keeps the span literal, so the group
+	/// still closes at its own `]` and the raw span survives verbatim in the inner text.
+	#[test]
+	fn read_group_protects_backtick_span_with_comment_markers() -> Outcome<()> {
+		let s: Vec<char> = "[the `//` and `/* */` operators]".chars().collect();
+		let (inner, next) = res!(read_group(&s, 0)
+			.ok_or_else(|| err!("the backtick span made the group mis-scan as a comment"; Test, Bug)));
+		assert_eq!(inner, "the `//` and `/* */` operators",
+			"the raw span was not kept literal: {:?}", inner);
+		assert_eq!(next, s.len(), "the group did not close at its own bracket");
+		Ok(())
+	}
+
+	/// A `//` on one line of a multi-line capture buffer must be bounded to that line's own end, not eat
+	/// every line after it: the buffer's real closing bracket, on the following line, must still be found.
+	#[test]
+	fn read_group_line_comment_does_not_eat_the_next_line() -> Outcome<()> {
+		let s: Vec<char> = "[first line // trailing\nsecond line]".chars().collect();
+		let (inner, next) = res!(read_group(&s, 0)
+			.ok_or_else(|| err!("the // comment ate past its own line and swallowed the closer"; Test, Bug)));
+		assert_eq!(inner, "first line // trailing\nsecond line",
+			"the buffer content around the line comment was misread: {:?}", inner);
+		assert_eq!(next, s.len(), "the group did not close at its own bracket");
 		Ok(())
 	}
 }
