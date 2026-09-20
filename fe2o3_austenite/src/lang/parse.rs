@@ -860,24 +860,27 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 			if let Some((call, next)) = glossary_call(&chars, i, span, skips) {
 					// An index marker is a run of its own, woven in before the display so the block layer
 					// records the term's occurrence at this point; the display, where the call has one, follows.
-					let push_index = |runs: &mut Vec<Inline>, plain: &mut String, index: Option<IndexKey>| {
+					let push_index = |runs: &mut Vec<Inline>, plain: &mut String, index: Option<IndexKey>, skips: &mut Refusals| {
 						if let Some(k) = index {
 							if !plain.is_empty() {
 								runs.push(Inline::Text(std::mem::take(plain)));
 							}
-							runs.push(Inline::Index { term: k.term, sub: k.sub });
+							// The display markup becomes its own runs, so the index page sets an emphasised entry
+							// italic and a display/sort split shows the display -- parsed exactly as the body's is.
+							let display = parse_inlines_in(&k.display, span, skips);
+							runs.push(Inline::Index { term: k.term, sub: k.sub, display });
 						}
 					};
 					match call {
 						Call::Glossary { term, display, index } => {
-							push_index(&mut runs, &mut plain, index);
+							push_index(&mut runs, &mut plain, index, skips);
 							if !plain.is_empty() {
 								runs.push(Inline::Text(std::mem::take(&mut plain)));
 							}
 							runs.push(Inline::Glossary { term, display });
 						},
 						Call::Visible { display, index } => {
-							push_index(&mut runs, &mut plain, index);
+							push_index(&mut runs, &mut plain, index, skips);
 							let sub = parse_inlines_in(&display, span, skips);
 							// A plain display folds back into the running text, keeping the fast single-run
 							// path; a display carrying markup becomes its own runs.
@@ -891,7 +894,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 							}
 						},
 						Call::Invisible { index } => {
-							push_index(&mut runs, &mut plain, index);
+							push_index(&mut runs, &mut plain, index, skips);
 						},
 					}
 				i = next;
@@ -1833,8 +1836,9 @@ pub fn flatten_markup(text: &str) -> String {
 
 /// The index term a call records, with a nested entry's child term where one was given.
 struct IndexKey {
-	term:	String,
-	sub:	Option<String>,
+	term:		String,			// the sort key (markup flattened), e.g. "March, James"
+	sub:		Option<String>,
+	display:	String,			// the display markup the index page sets, e.g. "James March" or "_Browder v. Gayle_"
 }
 
 /// What an inline glossary or index call sets into the running text. `index` carries the term the call
@@ -1887,8 +1891,11 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 	// visible text (`#idx-as("publicani")[tax farmers]` sets "tax farmers", indexes "publicani").
 	if name == "idx-as" || name == "idx-main-as" {
 		let (a2, next2) = read_group(chars, next1)?;
-		let index = Some(IndexKey { term: unwrap_arg(&a1), sub: None });
-		return Some((Call::Visible { display: unwrap_arg(&a2), index }, next2));
+		// The first argument is the sort key ("March, James"), the second the display shown in the body and
+		// set in the index ("James March"); the sort key is flattened so any markup in it does not misfile it.
+		let display = unwrap_arg(&a2);
+		let index = Some(IndexKey { term: flatten_markup(&unwrap_arg(&a1)), sub: None, display: display.clone() });
+		return Some((Call::Visible { display, index }, next2));
 	}
 	// A nested index entry is a pure marker of `parent > child`; its second argument is the child term.
 	if name == "idx-nested" {
@@ -1896,15 +1903,17 @@ fn glossary_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 			Some((c, n2))	=> (Some(unwrap_arg(&c)), n2),
 			None			=> (None, next1),
 		};
-		let index = Some(IndexKey { term: unwrap_arg(&a1), sub: child });
+		let parent = unwrap_arg(&a1);
+		let index = Some(IndexKey { term: flatten_markup(&parent), sub: child, display: parent });
 		return Some((Call::Invisible { index }, end));
 	}
 
 	let arg = unwrap_arg(&a1);
 	// A glossary+index call indexes the term it displays; a glossary-only call indexes nothing. The `-i`
 	// suffix families and the `glossind`/`glossindcap` and `idx`/`index` families are the indexing ones,
-	// mirroring the template's `#index`/`#index-main` calls inside each.
-	let idx_of = |term: String| Some(IndexKey { term, sub: None });
+	// mirroring the template's `#index`/`#index-main` calls inside each. The display carries the value's own
+	// markup (the index page sets it), and the sort key is that value flattened to plain text.
+	let idx_of = |value: String| Some(IndexKey { term: flatten_markup(&value), sub: None, display: value });
 	let call = match name.as_str() {
 		// The simple family keys its own display text (a `term-defs` entry), so no translation applies.
 		"gs"									=> Call::Glossary { term: arg.clone(), display: arg, index: None },
@@ -3662,6 +3671,43 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let nested = parse_inlines("#emph[the #idx[Harvard Business Review] weekly]");
 		assert!(nested.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#emph") || t.contains("#idx"))),
 			"raw markup leaked from nested emph: {:?}", nested);
+	}
+
+	/// An index marker carries a sort key distinct from its display: `#idx-as[Abbott, Andrew][Andrew Abbott]`
+	/// files under the surname but shows "Andrew Abbott" (in the body and on the index page), and `#idx[_x_]`
+	/// keeps its emphasis as an [`Inline::Emph`] display run while its sort key is the flattened plain text --
+	/// so the index sets the display, not the sort key, and an emphasised entry italicises rather than printing
+	/// literal underscores.
+	#[test]
+	fn index_marker_splits_sort_key_from_styled_display() {
+		let runs = parse_inlines("The sociologist #idx-as[Abbott, Andrew][Andrew Abbott] wrote widely.");
+		let mut found = false;
+		for r in &runs {
+			if let Inline::Index { term, sub, display } = r {
+				assert_eq!(term, "Abbott, Andrew", "sort key wrong: {:?}", runs);
+				assert!(sub.is_none());
+				assert!(matches!(display.as_slice(), [Inline::Text(t)] if t == "Andrew Abbott"),
+					"display wrong: {:?}", display);
+				found = true;
+			}
+		}
+		assert!(found, "no index marker found: {:?}", runs);
+		// The visible display "Andrew Abbott" is set in the body beside the marker.
+		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Andrew Abbott"))),
+			"body display missing: {:?}", runs);
+
+		// An emphasised entry: the sort key is flattened, the display keeps the emphasis.
+		let ital = parse_inlines("the ruling #idx[_Browder v. Gayle_] held.");
+		let mut seen = false;
+		for r in &ital {
+			if let Inline::Index { term, display, .. } = r {
+				assert_eq!(term, "Browder v. Gayle", "italic sort key not flattened: {:?}", ital);
+				assert!(matches!(display.as_slice(), [Inline::Emph(t)] if t == "Browder v. Gayle"),
+					"italic display lost its emphasis: {:?}", display);
+				seen = true;
+			}
+		}
+		assert!(seen, "no italic index marker found: {:?}", ital);
 	}
 
 	/// `#strong[...]` and `#strong("...")` are the call forms of `*...*`: both yield an [`Inline::Strong`]

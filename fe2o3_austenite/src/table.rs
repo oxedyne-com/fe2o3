@@ -1049,7 +1049,7 @@ mod tests {
 		let cell = Cell::rich(vec![
 			Segment::text("See "),
 			Segment::cite(vec!["scott1976moral".to_string()]),
-			Segment::index("Peasant economy", None),
+			Segment::index("Peasant economy", None, vec![Segment::text("Peasant economy")]),
 			Segment::margin_note("", vec!["C7".to_string()]),
 		], Align::Left);
 		let table = Table::new(false, vec![Row::new(vec![cell])]);
@@ -1076,7 +1076,7 @@ mod tests {
 				text pieces were {:?}.", texts; Test, Mismatch));
 		}
 		// The index marker was gathered, so the back-matter index will list the term with the page it lands on.
-		if !idx.occ.iter().any(|(term, _, _)| term == "Peasant economy") {
+		if !idx.occ.iter().any(|(term, _, _, _)| term == "Peasant economy") {
 			return Err(err!("The table cell's #index marker was not gathered into the back-matter index."; Test, Mismatch));
 		}
 		// The claim code reached the reverse claim index.

@@ -287,9 +287,11 @@ pub enum Inline {
 	Math(Atom),		// $...$, parsed to the engine's maths tree
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use
 	// An index marker (`#index`, `#idx`, `#gsi`, `#idx-nested`, ...): records the term's occurrence for the
-	// back-matter index and sets nothing itself. `sub` carries a nested entry's child term. The visible or
-	// glossary display, where the call has one, is a separate run beside this marker.
-	Index { term: String, sub: Option<String> },
+	// back-matter index and sets nothing itself in the body. `term` is the sort key (markup flattened); `sub`
+	// carries a nested entry's child term; `display` is the styled runs the index page sets for this entry, so
+	// a `#idx-as[March, James][James March]` prints "James March" and a `#idx[_Case_]` sets italic there. A
+	// visible call sets that same display in the body too, as a separate run beside this marker.
+	Index { term: String, sub: Option<String>, display: Vec<Inline> },
 	Footnote(Vec<Inline>),	// #footnote[...], its note markup set at the foot of the page its mark lands on
 	Cite(Vec<String>),	// #cite(<key>) or #cite(<a>, <b>), resolved to (Author Year) against the bibliography
 	// #claim-label(<code>..) or #claim-refs(<code>..): a zero-width margin anchor. `display` is the compressed
