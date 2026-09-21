@@ -86,6 +86,7 @@ pub struct VhostRuntime<
     pub ws_routes:      Vec<WsRoute>,
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
     pub uses_sessions:  bool,
+    pub permissions_policy: Option<String>, // replaces the default Permissions-Policy header when set
 }
 
 impl<

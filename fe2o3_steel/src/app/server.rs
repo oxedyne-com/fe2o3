@@ -694,6 +694,7 @@ impl AppShellContext {
                 ws_routes:      vh.ws_routes.clone(),
                 term_manager:   term_manager.clone(),
                 uses_sessions:  vh.uses_sessions(),
+                permissions_policy: vh.permissions_policy.clone(),
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();

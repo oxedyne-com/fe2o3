@@ -877,6 +877,13 @@ pub struct VhostConfig {
     // source. `None` leaves the default `<head>` untouched. Taken as a raw URL and rendered as
     // `<script src="{url}" defer></script>`.
     pub head_injection_url:     Option<String>,
+    // A per-vhost `Permissions-Policy` header value that replaces the locked-down default Steel
+    // emits on every response. `None` -- the default, and what every config written before this
+    // existed says -- keeps that default, which denies every sensor feature. A site that must call
+    // a browser capability from its own pages (the camera for a capture ceremony, say) sets the
+    // FULL policy string it wants here, so a browser-capability grant is explicit and per-site
+    // rather than a code default that would loosen every deployment at once.
+    pub permissions_policy:     Option<String>,
     // Each route forwards every request under a path prefix to an upstream server, with WebSocket
     // tunnelling and streaming responses. Checked after redirects but before static files and API
     // routes; the longest prefix wins.
@@ -946,6 +953,7 @@ impl Default for VhostConfig {
             egress_allowed:         Vec::new(),
             admin_keys:             Vec::new(),
             head_injection_url:     None,
+            permissions_policy:     None,
             proxy_routes:           Vec::new(),
             ws_routes:              Vec::new(),
             term_config:            None,
@@ -1197,6 +1205,14 @@ impl VhostConfig {
                 "VhostConfig: 'head_injection_url' must be a string.";
                 Invalid, Input, Mismatch)),
         };
+        // Per-vhost Permissions-Policy override (optional).
+        let permissions_policy = match m.get(&dat!("permissions_policy")) {
+            Some(Dat::Str(s)) => Some(s.clone()),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'permissions_policy' must be a string.";
+                Invalid, Input, Mismatch)),
+        };
         // Reverse proxy routes (optional).
         let proxy_routes = match m.get(&dat!("proxy_routes")) {
             Some(Dat::List(list)) => {
@@ -1295,6 +1311,7 @@ impl VhostConfig {
             egress_allowed,
             admin_keys,
             head_injection_url,
+            permissions_policy,
             proxy_routes,
             ws_routes,
             term_config,

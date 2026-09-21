@@ -718,17 +718,22 @@ impl<
                                     None,
                                 );
                                 // Permissions-Policy: deny every sensor
-                                // feature by default. Apps that need any
-                                // of camera / microphone / geolocation /
-                                // payment can override by tweaking this
-                                // string (future per-vhost config).
+                                // feature by default. A vhost may replace the
+                                // whole policy through its `permissions_policy`
+                                // config -- a capture ceremony sets
+                                // `camera=(self)`, say -- so a browser-capability
+                                // grant is explicit and per-site, never a code
+                                // default that loosens every deployment at once.
+                                let permissions_policy = vhost.permissions_policy
+                                    .as_deref()
+                                    .unwrap_or("accelerometer=(), camera=(), \
+                                        geolocation=(), gyroscope=(), \
+                                        magnetometer=(), microphone=(), \
+                                        payment=(), usb=()");
                                 msg.header.fields.insert(
                                     HeaderName::PermissionsPolicy,
                                     HeaderFieldValue::Generic(
-                                        "accelerometer=(), camera=(), \
-                                        geolocation=(), gyroscope=(), \
-                                        magnetometer=(), microphone=(), \
-                                        payment=(), usb=()".to_string()),
+                                        permissions_policy.to_string()),
                                     None,
                                 );
                             }
