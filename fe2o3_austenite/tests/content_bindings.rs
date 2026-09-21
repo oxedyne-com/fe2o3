@@ -277,6 +277,62 @@ fn inline_content_call_cycle_is_refused_and_terminates() -> Outcome<()> {
 	Ok(())
 }
 
+/// A content function whose body is wrapped in a STYLED BOX -- `#let stamp(s) = box(fill: ..)[*v: #s*]` --
+/// must SET its inner text, never drop it silently: the box's styling this reader cannot draw is recorded as
+/// a visible skip, but "v: v2" appears on the page. This is the silent-content-loss SEV: before the fix the
+/// definition was captured by neither the furniture nor the content reader, so the call rendered an empty
+/// gap. Both the inline call (prose either side) and the own-line call are proved, for `box`, `rect` and
+/// `block` wrappers alike. NON-VACUOUS at render level: the assertions read the SET text, not merely "no
+/// error" -- reverting the fix leaves the text absent and reddens them.
+#[test]
+fn styled_box_content_fn_sets_its_text_and_flags_the_styling() -> Outcome<()> {
+	// INLINE, `box`: prose before, the call, prose after. The inner `*v: #s*` sets bold "v: v2" in place.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nText before #stamp(\"v2\") and text after.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(s) = box(fill: luma(240), outset: 2pt, radius: 3pt)[*v: #s*]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Text before v: v2 and text after."),
+		"the inline styled-box `#stamp(\"v2\")` must set `v: v2` between its surrounding prose, got: {:?}",
+		blocks);
+	assert!(names.iter().any(|n| n.contains("#box")),
+		"the dropped box styling must record a visible skip, got refusals: {:?}", names);
+	res!(assert_no_hash_leak(&blocks));
+
+	// OWN-LINE, `box`: the call stands alone on its line and still sets its inner text.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\n#stamp(\"v2\")\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(s) = box(fill: luma(240), outset: 2pt, radius: 3pt)[*v: #s*]\n"),
+	]));
+	assert!(has_block_text(&blocks, "v: v2"),
+		"the own-line styled-box `#stamp(\"v2\")` must set `v: v2` as a block, got: {:?}", blocks);
+	assert!(names.iter().any(|n| n.contains("#box")),
+		"the own-line dropped box styling must record a visible skip, got refusals: {:?}", names);
+	res!(assert_no_hash_leak(&blocks));
+
+	// `rect` and `block` wrappers behave the same: the text is kept, the wrapper flagged.
+	for (wrap, defn) in [
+		("#rect", "#let stamp(s) = rect(stroke: 1pt)[*v: #s*]\n"),
+		("#block", "#let stamp(s) = block(inset: 6pt)[*v: #s*]\n"),
+	] {
+		let (blocks, names) = res!(assemble_full(&[
+			("/__vfs__/main.typ", "#import \"s.typ\": stamp\n\nSee #stamp(\"v2\") here.\n"),
+			("/__vfs__/s.typ", defn),
+		]));
+		let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+		assert!(joined.contains("See v: v2 here."),
+			"the {} wrapper must keep its inner text, got: {:?}", wrap, blocks);
+		assert!(names.iter().any(|n| n.contains(wrap)),
+			"the {} wrapper's dropped styling must record a visible skip, got refusals: {:?}", wrap, names);
+		res!(assert_no_hash_leak(&blocks));
+	}
+	Ok(())
+}
+
 /// A code-mode form surfacing in a re-read content-binding body -- `#if`/`#for` -- must be refused with a
 /// span, not leaked onto the page with its leading `#`. (Risk 4 -- code-mode leak.)
 #[test]

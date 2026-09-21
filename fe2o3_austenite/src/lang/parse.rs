@@ -2718,6 +2718,12 @@ fn dispatch_capture(
 			}
 			let args		= content_call_args(&cap.buf, &name);
 			let expanded	= expand_content_body(cf, &args);
+			// A styled-box content binding (`#let stamp(s) = box(fill: ..)[*v: #s*]`): the inner text is set,
+			// but the box's own styling this reader cannot draw is recorded as a visible skip here, so the
+			// styling is never silently lost -- only the text is kept, and it is kept, never dropped.
+			if let Some(w) = &cf.wrapper {
+				skips.record(&fmt!("#{} (styling dropped; content set)", w), Span::new(cap.start, cap.start));
+			}
 			let mut nested: Vec<String> = binds.active.to_vec();
 			nested.push(name.clone());
 			if let Ok((mut inner, sub)) = parse_items(&expanded, binds.with_active(&nested)) {
@@ -3150,6 +3156,12 @@ pub(crate) fn substitute_content_calls(
 							continue;
 						}
 						let expanded		= expand_content_body(cf, &args);
+						// A styled-box content binding used inline (`see #stamp("v2") for details`): the inner text
+						// is spliced into the surrounding prose, and the box's own styling this reader cannot draw
+						// is recorded as a visible skip -- the styling is never silently lost, the text never dropped.
+						if let Some(w) = &cf.wrapper {
+							skips.record(&fmt!("#{} (styling dropped; content set)", w), span);
+						}
 						let mut nested:	Vec<String>	= binds.active.to_vec();
 						nested.push(name.clone());
 						// The expanded body may itself reference another binding inline, so it is expanded in
@@ -5016,8 +5028,9 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		install_test_terms();
 		let mut cfns = crate::lang::rules::ContentFns::new();
 		cfns.insert("cite-term".to_string(), crate::lang::rules::ContentFn {
-			params:	vec!["w".to_string()],
-			body:	"Learn about #t(w).".to_string(),
+			params:		vec!["w".to_string()],
+			body:		"Learn about #t(w).".to_string(),
+			wrapper:	None,
 		});
 		let tfns	= crate::lang::rules::TemplateFns::new();
 		let binds	= crate::lang::rules::Bindings::new(&tfns, &cfns);
@@ -5036,8 +5049,9 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	#[test]
 	fn call_arg_substitution_does_not_touch_ordinary_prose() {
 		let cf = crate::lang::rules::ContentFn {
-			params:	vec!["w".to_string()],
-			body:	"The word w on its own is prose, not #t(w).".to_string(),
+			params:		vec!["w".to_string()],
+			body:		"The word w on its own is prose, not #t(w).".to_string(),
+			wrapper:	None,
 		};
 		let expanded = expand_content_body(&cf, &["website".to_string()]);
 		assert_eq!(expanded, "The word w on its own is prose, not #t(\"website\").",

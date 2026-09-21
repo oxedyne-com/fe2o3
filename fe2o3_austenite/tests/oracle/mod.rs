@@ -304,6 +304,22 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own styled-box content-fn fixture -- the silent-content-loss SEV's regression root. A
+			// content function whose body is wrapped in a styled `box(...)`/`rect(...)`/`block(...)` (`#let
+			// stamp(s) = box(fill: .., outset: .., radius: ..)[*v: #s*]`), called BOTH inline and own-line, must
+			// SET its inner text rather than dropping it silently: before the fix the definition was captured by
+			// neither the furniture nor the content reader, so the call rendered an empty gap with a clean
+			// compile. The reader now keeps the inner content and records the box styling it cannot draw as a
+			// visible skip. The engines part on the box styling (typst draws it, austenite sets the text plain),
+			// so this root is not pinned in expected.json -- it bootstraps and guards the RENDERED TEXT and page
+			// shape; the render-level non-vacuous proof that the text is present and the styling flagged lives in
+			// `content_bindings.rs`. Self-contained, so it needs no symbol-modifier patch.
+			name:				"box-content-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/box_content_fn_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 

@@ -1280,8 +1280,9 @@ pub type TemplateFns = std::collections::HashMap<String, TemplateFn>;
 /// markup -- headings, paragraphs, nested calls -- so its blocks are spliced into the stream, not boxed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContentFn {
-	pub params:	Vec<String>,	// the positional parameter names, empty for a value binding
-	pub body:	String,			// the bracketed markup, its `[` `]` delimiters stripped
+	pub params:		Vec<String>,		// the positional parameter names, empty for a value binding
+	pub body:		String,				// the bracketed markup, its `[` `]` delimiters stripped
+	pub wrapper:	Option<String>,		// a `box`/`rect`/`block` styling wrap the body was lifted out of
 }
 
 /// The content bindings in scope for a source, by name. Empty until a document's definitions are collected;
@@ -1402,18 +1403,27 @@ pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &
 
 /// Collects every `#let name = [ ... ]` and `#let name(params) = [ ... ]` content binding in `src` into
 /// `cfns`. The body is a bracket-balanced `[ ... ]`, captured verbatim with its parameter names, so a
-/// reference expands into re-read markup. A `#let` whose body is a furniture wrap (`= block/box(...)`), a
-/// data array (`= (...)`) or a scalar is passed over here -- the furniture and array readers keep those --
-/// and a name the reader already handles as a built-in construct is not overridden. A binding seen twice
-/// re-inserts the same value, so the map is definition-order-independent.
+/// reference expands into re-read markup. A `#let` whose body is a data array (`= (...)`) or a scalar is
+/// passed over here -- the array and scalar readers keep those -- and a name the reader already handles as
+/// a built-in construct is not overridden. A binding seen twice re-inserts the same value, so the map is
+/// definition-order-independent.
+///
+/// A body that is a `box(...)[ ... ]`, `rect(...)[ ... ]` or `block(...)[ ... ]` styling wrap -- a content
+/// function whose text is set inside a styled box, `#let stamp(s) = box(fill: ..)[*v: #s*]` -- is captured
+/// as a content binding of its INNER `[ ... ]` content, with the wrapper name held so the styling this
+/// reader cannot draw is recorded as a visible skip when the binding expands. The inner text is kept and
+/// set, never silently dropped. This is distinct from a furniture wrap (`#pr-note`, whose content block
+/// sits INSIDE the call's parens and the [`collect_template_fns`] reader draws as a styled block): a
+/// furniture definition carries no `[ ... ]` group TRAILING the wrap's closing `)`, so the two shapes do
+/// not collide, and where a name were somehow read by both, the furniture map wins at every call site.
 pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 	let chars:	Vec<char>	= src.chars().collect();
 	let mut i	= 0usize;
 	while i < chars.len() {
 		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
-			if let Some((name, params, body, next)) = read_let_content(&chars, i) {
+			if let Some((name, params, body, wrapper, next)) = read_let_content(&chars, i) {
 				if !is_reserved_construct(&name) {
-					cfns.insert(name, ContentFn { params, body });
+					cfns.insert(name, ContentFn { params, body, wrapper });
 				}
 				i = next;
 				continue;
@@ -1425,10 +1435,17 @@ pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 
 /// Reads a `#let name = [ ... ]` or `#let name(params) = [ ... ]` content binding beginning at `at` (the
 /// `#`), returning the name, its positional parameter names (empty for a value binding), the bracketed body
-/// with its delimiters stripped, and the index just past it. `None` when the line is not a content-binding
-/// `#let`: a furniture `= block/box(...)`, a data array `= (...)` and a scalar all fail the `[` check after
-/// the `=`, so this reader leaves them to the furniture, array and scalar readers.
-fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, usize)> {
+/// with its delimiters stripped, the styling wrapper the body was lifted out of (`Some("box")` and kin, or
+/// `None` for a plain bracket body), and the index just past it. `None` when the line is not a
+/// content-binding `#let`: a data array `= (...)` and a scalar fail the body check below, so this reader
+/// leaves them to the array and scalar readers.
+///
+/// The recognised body is either a bare `[ ... ]`, or a `box(...)[ ... ]`, `rect(...)[ ... ]` or
+/// `block(...)[ ... ]` styling wrap whose content group TRAILS the wrap's closing `)` -- a content function
+/// styled by a box. The trailing group tells this shape apart from a furniture definition, whose content
+/// block sits inside the wrap's parens; a furniture `= block(...)` with no trailing `[ ... ]` fails the
+/// check here and is left to [`collect_template_fns`].
+fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, Option<String>, usize)> {
 	let mut j = at + "#let ".chars().count();
 	let name_start = j;
 	while j < chars.len() && is_ident_char(chars[j]) {
@@ -1460,12 +1477,33 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	while j < chars.len() && chars[j].is_whitespace() {
 		j += 1;
 	}
-	// The body must open with `[` to be a content binding; a `block(`/`box(`/`(` body is not ours.
-	if chars.get(j) != Some(&'[') {
-		return None;
+	// A bare bracket body `[ ... ]` -- the plain content binding.
+	if chars.get(j) == Some(&'[') {
+		let (body, next) = read_delim_group(chars, j)?;
+		return Some((name, params, body, None, next));
 	}
-	let (body, next) = read_delim_group(chars, j)?;
-	Some((name, params, body, next))
+	// A styling wrap `box(...)[ ... ]` / `rect(...)[ ... ]` / `block(...)[ ... ]`: a content function whose
+	// text is set inside a styled box. The inner `[ ... ]` content is the binding's body; the wrapper name is
+	// carried so the styling this reader cannot draw records a visible skip when the binding expands. The
+	// content group must TRAIL the wrap's closing `)` -- a furniture definition (`#pr-note`) carries its
+	// content block inside the parens and has no trailing group, so it fails here and stays with the
+	// furniture reader.
+	for wrap in ["box", "rect", "block"] {
+		if starts_with_at(chars, j, wrap) {
+			let after_name = j + wrap.chars().count();
+			// A genuine wrap call: the name is followed immediately by `(`, not part of a longer identifier.
+			if chars.get(after_name) != Some(&'(') {
+				continue;
+			}
+			if let Some((_, after_args)) = read_delim_group(chars, after_name) {
+				if chars.get(after_args) == Some(&'[') {
+					let (body, next) = read_delim_group(chars, after_args)?;
+					return Some((name, params, body, Some(wrap.to_string()), next));
+				}
+			}
+		}
+	}
+	None
 }
 
 /// Collects every `#let name = <literal>` scalar value binding in `src` into `sfns`: a bare `"..."` string,
@@ -2857,6 +2895,43 @@ mod tests {
 		// reduced 8.8pt size (0.55 * 8.8 = 4.84pt), tracking Typst -- not against the outer body (which gave 5.5).
 		assert_eq!(tf.patch.par.skip, Some(Sp::from_pt(4.84)), "0.55em against the reduced 8.8pt size");
 		assert_eq!(tf.patch.par.indent, Some(Sp::from_pt(0.0)), "set par(first-line-indent: 0em)");
+	}
+
+	/// A `#let name(s) = box(fill: ..)[content]` styled-box content function collects as a CONTENT binding of
+	/// its inner `[content]`, with the wrapper name carried, so the text is set and the box styling records a
+	/// visible skip -- rather than being lost to neither the furniture nor the content reader (the silent
+	/// content-loss bug). `rect` and `block` trailing-bracket forms collect the same way; the furniture
+	/// `#pr-note` (content INSIDE the parens, no trailing bracket) is NOT stolen into the content map.
+	#[test]
+	fn collect_captures_a_styled_box_content_fn_but_not_furniture() {
+		let src = "\
+#let stamp(s) = box(fill: luma(240), outset: 2pt, radius: 3pt)[*v: #s*]
+#let tag(s) = rect(stroke: 1pt)[tag #s]
+#let panel(s) = block(inset: 6pt)[panel #s]
+#let pr-note(body) = block(inset: (left: 1.2em), { set text(size: 0.9em); body })
+";
+		let mut cfns = ContentFns::new();
+		collect_content_fns(src, &mut cfns);
+
+		let stamp = cfns.get("stamp").expect("a box-wrapped content fn collects as a content binding");
+		assert_eq!(stamp.params, vec!["s".to_string()]);
+		assert_eq!(stamp.body, "*v: #s*", "the INNER content is the body, not the box call");
+		assert_eq!(stamp.wrapper.as_deref(), Some("box"), "the wrapper name is carried for the styling skip");
+
+		assert_eq!(cfns.get("tag").and_then(|c| c.wrapper.as_deref()), Some("rect"), "rect wraps collect too");
+		assert_eq!(cfns.get("tag").map(|c| c.body.as_str()), Some("tag #s"));
+		assert_eq!(cfns.get("panel").and_then(|c| c.wrapper.as_deref()), Some("block"), "block wraps collect too");
+		assert_eq!(cfns.get("panel").map(|c| c.body.as_str()), Some("panel #s"));
+
+		// The furniture pr-note (content block inside the parens, no trailing bracket) is NOT a content binding.
+		assert!(cfns.get("pr-note").is_none(),
+			"a furniture definition must stay with the template reader, not be stolen into the content map");
+
+		// And it DOES still lower as furniture, so the styled block is drawn as before -- byte-identity held.
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
+		assert!(tfns.get("pr-note").is_some(), "pr-note still lowers as furniture");
+		assert!(tfns.get("stamp").is_none(), "the styled-box content fn is not a furniture wrap");
 	}
 
 	/// A furniture body that never names its content parameter is not a wrap -- it lowers to nothing, so a
