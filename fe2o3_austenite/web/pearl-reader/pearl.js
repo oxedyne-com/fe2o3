@@ -244,6 +244,39 @@ function annotationsForBlock(doc, blockHash) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// The outline: the heading tree carried in the `.prl` header, and the ledger lookup that fixes each
+// heading to a page and a y -- the same anchor resolution `resolveLink` performs for a cross-reference,
+// so a table-of-contents entry and a link to the same heading land in the same place.
+// ---------------------------------------------------------------------------------------------------
+
+// Resolves a stored anchor `{ kind, key }` through the shipped ledger to `{ page, y }` -- the 1-based
+// page and the y within it, both as the ledger recorded them -- or null when the ledger never fixed it,
+// exactly the dangling case `resolveLink` returns null for. Unlike `resolveLink` this keeps the y, so a
+// jump lands on the heading's own line rather than the page top.
+function resolveAnchor(doc, anchor) {
+	const a = (doc.ledger.anchors || []).find(x => x.id.kind === anchor.kind && x.id.key === anchor.key);
+	if (!a) return null;
+	return { page: a.page, y: a.y };
+}
+
+// The document's heading outline as an array of `{ level, number, title, page, y }`, each entry resolved
+// through the ledger, mirroring `PearlDoc::outline` on the Rust side. `page`/`y` are null for a heading
+// the ledger never fixed. A `.prl` without an outline section (a headless manuscript, or a file that
+// predates the field) yields an empty array.
+function outlineEntries(doc) {
+	return (doc.outline || []).map(e => {
+		const loc = resolveAnchor(doc, e.anchor);
+		return {
+			level:  e.level,
+			number: e.number || "",
+			title:  e.title || "",
+			page:   loc ? loc.page : null,
+			y:      loc ? loc.y : null,
+		};
+	});
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Rendering the document, plus an overlay layer per page carrying link hotspots and annotations. The
 // SVG is authored in points and drawn at 1 user unit = 1 px (its width/height attributes are the point
 // dimensions), so a scaled-point length converts to a CSS pixel through `sp()` alone -- no page scale to
@@ -391,5 +424,6 @@ async function loadAndRender(url, container) {
 window.Pearl = {
 	renderDocument, renderPage, renderText, loadAndRender,
 	linksOnPage, resolveLink, annotationsForBlock, renderAnnotation,
+	resolveAnchor, outlineEntries,
 	sp, SP_PER_PT,
 };

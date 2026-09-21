@@ -23,6 +23,7 @@
 //! its index. A keyed map has no index to shift, so a future field joins it without another version
 //! bump.
 
+use crate::doc::Heading;
 use crate::ir::{
 	DrawOp,
 	LinkTarget,
@@ -149,6 +150,20 @@ pub struct PearlLink {
 pub enum LinkResolution {
 	Uri(String),
 	Block { block: String, page: u32 },
+}
+
+/// One resolved heading of the document outline: its level (1 for a chapter or part, 2 for a section,
+/// and so on), the dotted number a numbered heading shows (empty otherwise), the display title, and
+/// where it landed -- the 1-based page and the y within it -- resolved through the shipped ledger. An
+/// entry whose anchor the ledger never fixed carries `None` for its location, the dangling case a reader
+/// greys rather than jumps to, mirroring [`PearlDoc::resolve_link`]'s `None`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlineEntry {
+	pub level:	u8,
+	pub number:	String,
+	pub title:	String,
+	pub page:	Option<u32>,	// the page the heading landed on, or None when the ledger never fixed it
+	pub y:		Option<Sp>,		// the y within that page, paired with page
 }
 
 /// What an annotation is. A kind the reader does not know is a limit it declares, not a gap it hides, so
@@ -298,6 +313,7 @@ pub struct PearlBuilder {
 	geom:	Dat,					// the document geometry, [w, h, inside, outside, top, bottom]
 	ledger:	Ledger,					// shipped inside, and used to resolve internal link targets
 	doc_id:	Option<String>,			// author-minted stable identity, written only when set (see with_doc_id)
+	outline: Vec<Dat>,				// the heading outline, one entry per fixed heading, written only when non-empty (see with_outline)
 }
 
 impl PearlBuilder {
@@ -310,6 +326,7 @@ impl PearlBuilder {
 			geom:	geometry_to_dat(&geom),
 			ledger:	ledger.clone(),
 			doc_id:	None,
+			outline: Vec::new(),
 		})
 	}
 
@@ -321,6 +338,35 @@ impl PearlBuilder {
 	/// before the field existed; see [`PearlBuilder::into_dat`].
 	pub fn with_doc_id<S: Into<String>>(mut self, id: S) -> Self {
 		self.doc_id = Some(id.into());
+		self
+	}
+
+	/// Records the document's heading outline, carried in the `.prl` header as an `outline` list -- one
+	/// entry per heading in document order, each `{ level, number, title, anchor }`. The anchor is the
+	/// heading's own identity, the same `{ kind, key }` shape a link target rides, so a reader resolves
+	/// an entry to its page and y through the shipped ledger exactly as it follows a link (see
+	/// [`PearlDoc::outline`]). A heading the ledger never fixed still lists here -- its anchor simply
+	/// resolves to nothing, the dangling case the reader reports rather than jumps to -- so the outline
+	/// mirrors the document's structure whatever the pagination did. A builder given no headings, or an
+	/// empty set, writes no `outline` key at all, so a document without one is byte-identical to what this
+	/// writer emitted before the field existed; see [`PearlBuilder::into_dat`].
+	pub fn with_outline(mut self, heads: &[Heading]) -> Self {
+		let mut out = Vec::with_capacity(heads.len());
+		for h in heads {
+			// The anchor's own `ToDat` form, the same `{ kind, key }` a link target rides. It cannot fail
+			// for a heading identity, so a stray error drops just that entry rather than the whole outline.
+			let anchor = match h.id.to_dat() {
+				Ok(a)	=> a,
+				Err(_)	=> continue,
+			};
+			out.push(omapdat!{
+				"level"		=> dat!(h.level),
+				"number"	=> dat!(h.number.clone()),
+				"title"		=> dat!(h.title.clone()),
+				"anchor"	=> anchor,
+			});
+		}
+		self.outline = out;
 		self
 	}
 
@@ -497,6 +543,11 @@ impl PearlBuilder {
 		};
 		if let Some(id) = self.doc_id {
 			res!(top.map_put(dat!("doc_id"), dat!(id)));
+		}
+		// The heading outline, only when the document has headings, so a headless manuscript stays
+		// byte-identical to what this writer emitted before the field existed.
+		if !self.outline.is_empty() {
+			res!(top.map_put(dat!("outline"), Dat::List(self.outline)));
 		}
 		Ok(top)
 	}
@@ -735,6 +786,32 @@ impl PearlDoc {
 			Some(d)	=> Ok(Some(try_extract_dat!(d.clone(), Str))),
 			None	=> Ok(None),
 		}
+	}
+
+	/// The document's heading outline, each entry resolved through the shipped ledger to the page and y it
+	/// landed on -- the same ledger lookup [`resolve_link`](Self::resolve_link) follows for a cross-reference,
+	/// so a table of contents and a link agree about where a heading is. A `.prl` written without an
+	/// outline (a headless manuscript, or a file that predates the field) returns an empty vector. An
+	/// entry the ledger never fixed keeps its level, number and title but resolves its location to `None`.
+	pub fn outline(&self) -> Outcome<Vec<OutlineEntry>> {
+		let list = match res!(self.top.map_get(&dat!("outline"))) {
+			Some(d)	=> try_extract_dat!(d.clone(), List),
+			None	=> return Ok(Vec::new()),
+		};
+		let ledger = res!(Ledger::from_dat(res!(self.top.map_get_must(&dat!("ledger"))).clone()));
+		let mut out = Vec::with_capacity(list.len());
+		for entry in &list {
+			let level	= try_extract_dat!(res!(entry.map_get_must(&dat!("level"))).clone(), U8);
+			let number	= res!(entry.map_get_string(&dat!("number")));
+			let title	= res!(entry.map_get_string(&dat!("title")));
+			let id		= res!(AnchorId::from_dat(res!(entry.map_get_must(&dat!("anchor"))).clone()));
+			let (page, y) = match ledger.get(&id) {
+				Some(a)	=> (Some(a.pos.page), Some(a.pos.y)),
+				None	=> (None, None),
+			};
+			out.push(OutlineEntry { level, number, title, page, y });
+		}
+		Ok(out)
 	}
 
 	/// Stamps a decoded document with a stable identity, so a reader that opened a `.prl` written

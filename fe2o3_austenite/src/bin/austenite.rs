@@ -237,7 +237,7 @@ fn compile(
 	// Pearl, when asked: a content-addressed `.prl` accumulated across the streaming emit loop, each page
 	// folded in before its frame is dropped, so it streams exactly as the SVG and PDF arms do.
 	let mut pearl_builder = if pearl {
-		Some(res!(emit::pearl::PearlBuilder::new(&out.ledger, geom)))
+		Some(res!(emit::pearl::PearlBuilder::new(&out.ledger, geom)).with_outline(&heads))
 	} else {
 		None
 	};
