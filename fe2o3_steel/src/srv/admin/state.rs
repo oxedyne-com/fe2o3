@@ -45,6 +45,7 @@ use crate::srv::{
     },
     alert::Alerter,
     cfg::AdminKey,
+    health::RollingCounter,
 };
 
 use oxedyne_fe2o3_core::{
@@ -67,7 +68,10 @@ use std::{
             Ordering,
         },
     },
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use secrecy::ExposeSecret;
@@ -155,6 +159,17 @@ pub struct AdminState {
     // vhost's `head_injection_url` at start-up. `None` leaves the default head
     // untouched.
     pub head_injection_url: Arc<Option<String>>,
+    // When the process began serving, so the health body can report uptime.
+    pub started:        Instant,
+    // Whether the address guard reported armed by its in-process self-test at
+    // start-up, surfaced as `guard_selftest` in the health body so a box proves
+    // its own admission control is live without an external synthetic probe.
+    pub guard_selftest: bool,
+    // Rolling one-minute counts of `429`s emitted and connections dropped at
+    // admission, surfaced as `r429_1m` / `dropped_1m`. The accept loop and the
+    // 429 site increment these; the health route reads them.
+    pub r429:           Arc<RollingCounter>,
+    pub dropped:        Arc<RollingCounter>,
 }
 
 impl AdminState {
@@ -198,6 +213,10 @@ impl AdminState {
             crate::srv::admin::signed_login::SIGNED_LOGIN_FRESHNESS_SECS,
         ));
         let sealed = master_key.is_none();
+        // Run the guard's in-process self-test once, at construction, so the
+        // health body can report armed/not without an external probe a live
+        // guard would blacklist.
+        let guard_selftest = addr_guard.self_test();
         Ok(Self {
             wallet,
             wallet_path,
@@ -214,6 +233,10 @@ impl AdminState {
             admin_keys:         Arc::new(admin_keys),
             nonce_tracker:      Arc::new(Mutex::new(tracker)),
             head_injection_url: Arc::new(head_injection_url),
+            started:            Instant::now(),
+            guard_selftest,
+            r429:               RollingCounter::new_shared(),
+            dropped:            RollingCounter::new_shared(),
         })
     }
 

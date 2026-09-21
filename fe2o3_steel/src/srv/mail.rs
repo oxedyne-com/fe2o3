@@ -18,6 +18,10 @@ use oxedyne_fe2o3_net::{
         SmtpMode,
         SmtpServer,
     },
+    tls::{
+        BoundedTlsAcceptor,
+        Handshake,
+    },
 };
 
 use std::{
@@ -26,7 +30,6 @@ use std::{
 };
 
 use tokio::net::TcpListener;
-use tokio_rustls::TlsAcceptor;
 
 
 /// Runs the accept loop forever. An error on an individual accept is logged and
@@ -69,7 +72,7 @@ pub async fn run_smtp_listener(
 /// entering the IMAP state machine.
 pub async fn run_imap_listener(
     addr:           SocketAddr,
-    tls_acceptor:   TlsAcceptor,
+    tls_acceptor:   BoundedTlsAcceptor,
     server:         ImapServer<
         oxedyne_fe2o3_mail::maildir::MaildirStore,
         PasswdFileUserStore,
@@ -99,8 +102,12 @@ pub async fn run_imap_listener(
         let server = server.clone();
         tokio::spawn(async move {
             let tls = match acceptor.accept(stream).await {
-                Ok(t) => t,
-                Err(e) => {
+                Handshake::Ok(t) => t,
+                Handshake::TimedOut => {
+                    warn!("IMAP TLS handshake from {} timed out.", peer);
+                    return;
+                }
+                Handshake::Failed(e) => {
                     warn!("IMAP TLS handshake from {} failed: {}", peer, e);
                     return;
                 }
@@ -126,7 +133,7 @@ pub type AppImapServer = ImapServer<
 pub fn build_smtp_servers(
     handler:        AppMailHandler,
     users:          PasswdFileUserStore,
-    tls_acceptor:   Option<TlsAcceptor>,
+    tls_acceptor:   Option<BoundedTlsAcceptor>,
     hostname:       Arc<String>,
 )
     -> (AppSmtpServer, AppSmtpServer)

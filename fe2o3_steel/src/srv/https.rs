@@ -92,6 +92,73 @@ impl<
 >
     ServerContext<UIDL, UID, ENC, KH, DB, WH, WSH>
 {
+    /// The token-gated health body, or `None` when the request is not for the
+    /// health path (so the caller falls through to normal dispatch).
+    ///
+    /// When the path *is* the health path this always answers -- a `200` with the
+    /// integer body to a caller presenting the right token, a `404` to anyone
+    /// else -- and never falls through, so the path never reaches a file router
+    /// that might serve something at the same location. A missing token and a
+    /// wrong token take the identical `404` path, compared in constant time, so
+    /// the route leaks no timing oracle and its existence stays invisible. The
+    /// body is served even while the box is sealed (the watcher reads a `503` as
+    /// down), and the caller answers this before it logs the request, so the
+    /// token in the header is never written to a log.
+    fn health_response(&self, request: &HttpMessage) -> Option<HttpMessage> {
+        // Both a path and a token must be configured; a path without a token is
+        // a body with no gate, which the config contract disables.
+        if self.cfg.health_path.is_empty() || self.cfg.health_token.is_empty() {
+            return None;
+        }
+        let path = match &request.header.headline {
+            HttpHeadline::Request { loc, .. } => loc.path.as_string().to_string(),
+            _ => return None,
+        };
+        if path != self.cfg.health_path {
+            return None;
+        }
+        // A 404 that is byte-for-byte the unauthorised answer, reused for both
+        // the no-admin-state and wrong-token cases so neither is distinguishable.
+        let not_found = || HttpMessage::respond_with_text(
+            HttpStatus::NotFound, "Not Found");
+        let admin = match self.admin_state.as_ref() {
+            Some(a) => a,
+            None    => return Some(not_found()),
+        };
+        let presented = match request.header.fields.get_one(
+            &HeaderName::NonStandard("x-steel-health-token".to_string()))
+        {
+            Some(v) => fmt!("{}", v),
+            None    => String::new(),
+        };
+        // Constant-time, so a missing and a wrong token are one path.
+        if !oxedyne_fe2o3_core::byte::ct_eq(
+            presented.as_bytes(), self.cfg.health_token.as_bytes())
+        {
+            return Some(not_found());
+        }
+        let host = admin.host_sampler.health_metrics().ok().flatten();
+        let body = crate::srv::health::HealthBody::assemble(
+            host,
+            admin.addr_guard.live_conns(),
+            admin.r429.last(60),
+            admin.dropped.last(60),
+            admin.guard_selftest,
+            admin.started.elapsed().as_secs(),
+            admin.is_sealed(),
+        );
+        Some(HttpMessage::new_response(HttpStatus::OK)
+            .with_field(
+                HeaderName::ContentType,
+                HeaderFieldValue::Generic("application/json; charset=utf-8".to_string()),
+            )
+            .with_field(
+                HeaderName::CacheControl,
+                HeaderFieldValue::Generic("no-store".to_string()),
+            )
+            .with_body(body.to_json().into_bytes()))
+    }
+
     pub async fn handle_https(
         self,
         mut stream: TlsStream<TcpStream>,
@@ -152,6 +219,17 @@ impl<
             let req_started_at = Instant::now();
             match result {
                 Some(Ok(request)) => {
+                    // Health route, answered before anything is logged so the
+                    // token in the header is never written to a log, and before
+                    // vhost/Host dispatch so it needs no vhost of its own. When
+                    // it answers, the connection is done.
+                    if let Some(mut resp) = self.health_response(&request) {
+                        resp.set_connection_close(true);
+                        if let Err(e) = resp.write_all(&mut write_stream).await {
+                            warn!("{}: could not send health response: {}", id, e);
+                        }
+                        break;
+                    }
                     log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
                     request.log(log_get_level!());
 
@@ -435,6 +513,7 @@ impl<
                                     Ok(d) if d.should_drop() => {
                                         warn!("{}: auth guard dropping {} from {}: {:?}",
                                             id, path_str, src_addr, d);
+                                        admin.r429.incr();
                                         let mut resp = HttpMessage::respond_with_text(
                                             HttpStatus::TooManyRequests,
                                             "Too many authentication attempts. \

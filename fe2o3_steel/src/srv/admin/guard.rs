@@ -25,7 +25,10 @@ use oxedyne_fe2o3_net::guard::addr::{
 
 use std::{
     collections::BTreeMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::AtomicUsize,
+    },
     time::Duration,
 };
 
@@ -73,6 +76,8 @@ pub struct AddrGuardSettings {
     pub tsunset_base:       Duration,   // base throttle cooldown
     pub tsunset_spread:     Duration,   // jitter added to `tsunset_base`, spreading cooldown expiry
     pub blist_cnt:          u16,        // throttle episodes before auto-blacklisting
+    pub conn_max:           usize,      // concurrent connections from one IP; 0 disables the cap
+    pub decay_after:        Duration,   // quiet spell before throttle history decays; 0 disables
 }
 
 impl Default for AddrGuardSettings {
@@ -83,6 +88,8 @@ impl Default for AddrGuardSettings {
             tsunset_base:   DEFAULT_TSUNSET_BASE,
             tsunset_spread: DEFAULT_TSUNSET_SPREAD,
             blist_cnt:      DEFAULT_BLIST_CNT,
+            conn_max:       0,      // inert until a deployment opts in
+            decay_after:    Duration::ZERO, // no decay until a deployment opts in
         }
     }
 }
@@ -113,6 +120,9 @@ pub fn new_shared_with(settings: AddrGuardSettings) -> Outcome<Arc<SteelAddressG
         tsunset_base:   settings.tsunset_base,
         tsunset_spread: settings.tsunset_spread,
         blist_cnt:      settings.blist_cnt,
+        conn_max:       settings.conn_max,
+        live_total:     Arc::new(AtomicUsize::new(0)),
+        decay_after:    settings.decay_after,
     };
     Ok(Arc::new(guard))
 }

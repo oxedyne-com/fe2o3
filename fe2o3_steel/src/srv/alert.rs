@@ -108,6 +108,26 @@ pub enum AlertEvent {
         away_secs:  u64,
         noticed_by: String,
     },
+    // A peer that is answering but reports itself unwell: a health-body class has
+    // stayed over its distress threshold. Distinct from `PeerDown` -- the box is
+    // up, so this goes by email rather than waking somebody with an SMS -- and it
+    // names the class that fired so the reader knows which resource is short.
+    PeerDistress {
+        peer:       String,
+        url:        String,
+        classes:    String,     // e.g. "mem_pct 94, swap_pct 71"
+        since_secs: u64,
+        noticed_by: String,
+    },
+    // The end of a distress episode, owed for the same reason as a recovery from
+    // down: an operator told a box was unwell wants to know it came back under
+    // its thresholds.
+    PeerDistressCleared {
+        peer:       String,
+        url:        String,
+        were_secs:  u64,        // how long the peer was distressed
+        noticed_by: String,
+    },
     // Proof that the alerting path itself still works, and the point of it is
     // that it is boring. A path used twice a year is broken when it is needed
     // -- an expired credential, a rotated key, a changed number, a dormant
@@ -147,6 +167,9 @@ impl AlertEvent {
             Self::SealedStart { .. }		=> Severity::Notice,
             Self::Unsealed { .. }		=> Severity::Notice,
             Self::FailedUnseals { .. }		=> Severity::Notice,
+            // A distressed peer is up, so it is worth a record, not a phone call.
+            Self::PeerDistress { .. }		=> Severity::Notice,
+            Self::PeerDistressCleared { .. }	=> Severity::Notice,
         }
     }
 
@@ -182,6 +205,10 @@ impl AlertEvent {
                 "[steel:{}] {} IS DOWN ({}m)", host, peer, down_secs / 60),
             Self::PeerRecovered { peer, away_secs, .. } => fmt!(
                 "[steel:{}] {} recovered after {}m", host, peer, away_secs / 60),
+            Self::PeerDistress { peer, classes, .. } => fmt!(
+                "[steel:{}] {} in distress ({})", host, peer, classes),
+            Self::PeerDistressCleared { peer, were_secs, .. } => fmt!(
+                "[steel:{}] {} distress cleared after {}m", host, peer, were_secs / 60),
             Self::Heartbeat { peers_ok, peers_total, .. } => fmt!(
                 "[steel:{}] alerting alive, {}/{} peers answering",
                 host, peers_ok, peers_total),
@@ -246,6 +273,26 @@ impl AlertEvent {
                 it. Worth reading the log for what stopped it, because a fault \
                 that cleared itself is a fault that can return.\n",
                 peer = peer, url = url, mins = away_secs / 60, noticed_by = noticed_by),
+            Self::PeerDistress { peer, url, classes, since_secs, noticed_by } => fmt!(
+                "{peer} is answering but reports itself unwell.\n\n\
+                Over threshold: {classes}\n\
+                Probed:   {url}\n\
+                For:      {mins} minute(s)\n\
+                Noticed by: {noticed_by}\n\n\
+                The box is up and serving; a resource it depends on is short. This \
+                is not an outage, which is why it arrives by email and not as a \
+                text -- but a box under sustained pressure is one on its way to an \
+                outage, and it is cheaper to look now. The figures are read from \
+                the box's own health body; nothing here has acted on it.\n",
+                peer = peer, url = url, classes = classes,
+                mins = since_secs / 60, noticed_by = noticed_by),
+            Self::PeerDistressCleared { peer, url, were_secs, noticed_by } => fmt!(
+                "{peer} is back under its thresholds after {mins} minute(s).\n\n\
+                Probed:   {url}\n\
+                Noticed by: {noticed_by}\n\n\
+                The resource that was short has recovered. Worth a glance at what \
+                drove it, because pressure that cleared itself can build again.\n",
+                peer = peer, url = url, mins = were_secs / 60, noticed_by = noticed_by),
             Self::Heartbeat { uptime_secs, peers_ok, peers_total } => fmt!(
                 "Alerting on {host} is alive. Nothing is wrong.\n\n\
                 Uptime:  {days} day(s)\n\

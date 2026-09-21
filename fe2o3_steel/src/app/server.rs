@@ -105,7 +105,17 @@ impl AppShellContext {
             .absolute();
 
         info!("Reading server config...");
-        let server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+        let mut server_cfg = res!(ServerConfig::from_datmap(self.app_cfg.server_cfg.clone()));
+
+        // Resolve the health token's `{file:...}` reference at load, from a path
+        // outside the tree, so the secret compared on both sides is the file's
+        // bytes and not the literal reference text -- and so it is readable while
+        // the box is sealed. A token stored verbatim would make the path the
+        // secret, which is exactly the leak the file-homing rule exists to stop.
+        if !server_cfg.health_token.is_empty() {
+            server_cfg.health_token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+                &server_cfg.health_token, root_path.as_ref()));
+        }
 
         info!("Reading dev config...");
         let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
@@ -131,6 +141,21 @@ impl AppShellContext {
                 warn!("Server configuration validation issues: {}", e);
                 info!("Continuing with available routes...");
             }
+        }
+
+        // A handshake semaphore without a deadline is a slowloris amplifier -- a
+        // permit held across a drip-fed handshake is never returned -- so this
+        // combination is a hard refusal to start, not a warning to serve past.
+        // (The general `validate` above is advisory in this harness; admission
+        // safety is not.)
+        if server_cfg.max_tls_handshakes > 0 && server_cfg.tls_handshake_timeout_ms == 0 {
+            return Err(err!(
+                "Refusing to start: max_tls_handshakes is {} but \
+                tls_handshake_timeout_ms is 0. Bounding handshake concurrency \
+                without a per-handshake deadline turns the bound into a \
+                denial-of-service vector. Set tls_handshake_timeout_ms (e.g. 10000).",
+                server_cfg.max_tls_handshakes;
+                Configuration, Invalid, Input));
         }
 
         if dev_mode {
@@ -392,6 +417,20 @@ impl AppShellContext {
         let auth_guard = res!(crate::srv::admin::guard::new_shared_with(
             auth_settings,
         ));
+        // Durable whitelist: addresses that bypass the rate guard entirely,
+        // written in config so they survive a restart rather than living only in
+        // the in-memory map. Applied to both the general and the auth guard, so a
+        // whitelisted address is never throttled on either path. Parsed already
+        // at validation, so an unparseable entry has failed before here.
+        let whitelist_ips = res!(server_cfg.get_whitelist_ips());
+        for ip in &whitelist_ips {
+            res!(addr_guard.whitelist(ip));
+            res!(auth_guard.whitelist(ip));
+        }
+        if !whitelist_ips.is_empty() {
+            info!("Whitelisted {} address(es) from config; they bypass the rate guard \
+                across restarts.", whitelist_ips.len());
+        }
         // The periodic traffic and host samplers are spawned inside
         // Server::start (not here) because this function runs in a
         // sync context -- the tokio runtime `rt` has been built but
@@ -491,7 +530,20 @@ impl AppShellContext {
         // are said out loud rather than logged at debug, since the operator who
         // configured a watch believes they are covered.
         match res!(server_cfg.get_watch()) {
-            Some(wcfg) => match (&alerter, &tls_client) {
+            Some(mut wcfg) => {
+                // Resolve each peer's health-token `{file:...}` at load, the same
+                // reason the server's own token is resolved: the secret must be
+                // the file's bytes, not the reference text, or the watcher would
+                // present the literal `{file:/x}` string as its token.
+                for p in &mut wcfg.peers {
+                    if let Some(tok) = &p.token {
+                        if !tok.is_empty() {
+                            p.token = Some(res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
+                                tok, root_path.as_ref())));
+                        }
+                    }
+                }
+                match (&alerter, &tls_client) {
                 (Some(a), Some(tls)) => {
                     let w = res!(crate::srv::watch::Watcher::new(
                         Arc::new(wcfg),
@@ -516,6 +568,7 @@ impl AppShellContext {
                 (_, None) => warn!("A watch list is configured but this Steel has no \
                     outbound TLS client, so it cannot probe anything. The watcher \
                     was not started."),
+                }
             },
             None => {},
         }

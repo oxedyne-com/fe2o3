@@ -5,6 +5,7 @@ pub mod cache;
 pub mod cert;
 pub mod cfg;
 pub mod console;
+pub mod health;
 pub mod constant;
 pub mod context;
 pub mod dev;

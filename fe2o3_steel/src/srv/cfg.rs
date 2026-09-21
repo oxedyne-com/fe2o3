@@ -1925,6 +1925,19 @@ pub struct WatchPeer {
     // writes it, and never a global switch: see `crate::srv::watch` for the single case it is
     // meant for.
     pub plain_ok: bool,
+    // Health-body field -> the value at or above which that class is in distress. Empty -- the
+    // default -- leaves the peer as plain up/down, so an existing peer list keeps working
+    // unchanged. Every field is "higher is worse" (memory per cent, load, dropped connections),
+    // so distress is an at-or-above test.
+    pub distress: BTreeMap<String, i64>,
+    // Health-body field -> the value at or below which that class has cleared, giving hysteresis:
+    // a peer enters distress at `distress` and leaves it only under `clear`. A field named in
+    // `distress` but not here uses its distress value as the clear boundary, i.e. no dead-band.
+    pub clear:    BTreeMap<String, i64>,
+    // The shared secret to present in the `x-steel-health-token` header, so the peer serves its
+    // body rather than a 404. `None` sends no header and reads only liveness. Supports
+    // `{file:...}`, resolved at start-up.
+    pub token:    Option<String>,
 }
 
 /// Watching the other machines in the estate.
@@ -2082,7 +2095,44 @@ impl WatchConfig {
                 // Absent means false, so every peer written before this key existed keeps
                 // demanding TLS, which is the answer a silent config should give.
                 let plain_ok = matches!(pm.get(&dat!("plain_ok")), Some(Dat::Bool(true)));
-                out.peers.push(WatchPeer { name, url, plain_ok });
+                // Distress / clear threshold maps: field -> integer. Absent leaves the peer plain
+                // up/down. A non-integer value is refused rather than skipped, so a typo in a
+                // threshold is a start-up failure and not a silently unwatched class.
+                let thresholds = |key: &str| -> Outcome<BTreeMap<String, i64>> {
+                    let mut out = BTreeMap::new();
+                    if let Some(Dat::Map(tm)) = pm.get(&dat!(key)) {
+                        for (k, v) in tm.iter() {
+                            let field = match k {
+                                Dat::Str(s) => s.clone(),
+                                _ => return Err(err!(
+                                    "watch.peers entry {} '{}' has a non-string field name.", i, key;
+                                    Configuration, Invalid, Input)),
+                            };
+                            let value = match v {
+                                Dat::I64(n) => *n,
+                                Dat::U64(n) => *n as i64,
+                                Dat::U32(n) => *n as i64,
+                                Dat::U16(n) => *n as i64,
+                                Dat::U8(n)  => *n as i64,
+                                Dat::I32(n) => *n as i64,
+                                Dat::I16(n) => *n as i64,
+                                Dat::I8(n)  => *n as i64,
+                                _ => return Err(err!(
+                                    "watch.peers entry {} '{}.{}' is not an integer.", i, key, field;
+                                    Configuration, Invalid, Input)),
+                            };
+                            out.insert(field, value);
+                        }
+                    }
+                    Ok(out)
+                };
+                let distress = res!(thresholds("distress"));
+                let clear = res!(thresholds("clear"));
+                let token = match pm.get(&dat!("token")) {
+                    Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                };
+                out.peers.push(WatchPeer { name, url, plain_ok, distress, clear, token });
             }
         }
         if out.enabled {
@@ -2367,6 +2417,66 @@ pub struct ServerConfig {
     #[optional]
     pub trusted_proxies:                Vec<String>,
 
+    // ── Admission control ─────────────────────────────────────────────────
+    //
+    // Three concurrency bounds on the accept path, all `#[optional]` and all
+    // inert at their defaults: a fresh binary changes nothing until a deployment
+    // sets them to its own vCPU and RAM. They are concurrency limits, orthogonal
+    // to the per-IP *rate* guard (`addr_guard`), and together they close the
+    // distributed-flood, slow-hold and handshake-flood shapes a rate limiter
+    // alone cannot see.
+
+    // Maximum concurrent connections in flight across every address. A
+    // connection beyond it is dropped before the handshake. 0 disables the cap.
+    #[optional]
+    pub max_conn:                       u64,
+    // Maximum concurrent connections from any one address, enforced by the
+    // generic `fe2o3_net` guard's `acquire`. 0 disables the cap.
+    #[optional]
+    pub max_conn_per_ip:                u64,
+    // Maximum TLS handshakes running at once, the CPU-exhaustion bound on a
+    // single-vCPU box. A flood then queues handshakes rather than melting the
+    // core. 0 disables the semaphore.
+    #[optional]
+    pub max_tls_handshakes:             u64,
+    // Deadline on each TLS handshake, and on the wait for a handshake permit,
+    // in milliseconds. Without it a drip-fed handshake pins a permit for ever and
+    // turns `max_tls_handshakes` into a slowloris amplifier, so a non-zero
+    // `max_tls_handshakes` requires a non-zero deadline here (checked at load).
+    // 0 leaves handshakes untimed, which is safe only when the semaphore is also
+    // off. A timed-out handshake counts as a dropped connection.
+    #[optional]
+    pub tls_handshake_timeout_ms:       u64,
+
+    // ── Health body ───────────────────────────────────────────────────────
+    //
+    // The path a token-gated integer health body is served at (see
+    // `crate::srv::health`). Empty -- the default -- serves no health body and
+    // the path is a plain 404 like any other. A deployment opts in by naming a
+    // path, e.g. `/_steel/health`.
+    #[optional]
+    pub health_path:                    String,
+    // The per-peer shared secret a caller must present in the
+    // `x-steel-health-token` header to be served the body; anyone else gets a
+    // 404, so the path stays invisible. Supports `{file:...}`, resolved at
+    // start-up so it is readable while the box is sealed. Empty disables the body
+    // even when a path is set, since a body with no token is a body with no gate.
+    #[optional]
+    pub health_token:                   String,
+
+    // ── Address whitelist ─────────────────────────────────────────────────
+    //
+    // IP addresses that are never rate-limited, throttled or blacklisted -- the
+    // guard's `Whitelist` state, but written down so it survives a restart. The
+    // runtime `whitelist()` call alone lives only in the in-memory map and is
+    // lost when the process ends, which is how a shared home NAT address ends up
+    // stuck blocked after a busy spell. Each entry is parsed to an `IpAddr` at
+    // start-up (an unparseable one is a start-up failure, like `trusted_proxies`),
+    // and applied to the guard as the process comes up. Empty -- the default --
+    // whitelists nobody.
+    #[optional]
+    pub whitelist_ips:                  Vec<String>,
+
     // --- Virtual hosts ------------------------------------------------------
     // Stored as a `Dat::List` of `Dat::Map` entries and parsed via `get_vhosts()`.
     pub vhosts:                         Dat,
@@ -2460,6 +2570,13 @@ impl Default for ServerConfig {
             ],
             auth_rps_max:                   5,
             trusted_proxies:                Vec::new(), // Trust nobody: always strip.
+            max_conn:                       0,      // no total ceiling by default
+            max_conn_per_ip:                0,      // no per-IP concurrency cap by default
+            max_tls_handshakes:             0,      // handshakes unbounded by default
+            tls_handshake_timeout_ms:       0,      // untimed by default (safe while the sem is off)
+            health_path:                    String::new(), // no health body by default
+            health_token:                   String::new(), // no token, so no body served
+            whitelist_ips:                  Vec::new(), // nothing whitelisted by default
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
@@ -2501,7 +2618,35 @@ impl ServerConfig {
         // was skipped would leave an allow-list that looks populated and trusts nobody -- or, read
         // the other way round, an operator who believes their CDN is named here when it is not.
         let _ = res!(self.get_forwarded_policy());
+        // A mistyped whitelist address is likewise a start-up failure, since the whole point of
+        // the entry is to keep a real address reachable.
+        let _ = res!(self.get_whitelist_ips());
+        // The handshake semaphore is a slowloris amplifier without a deadline: a permit held
+        // across a drip-fed handshake is never returned. Refuse the unsafe combination at start-up
+        // rather than discover it as an outage.
+        if self.max_tls_handshakes > 0 && self.tls_handshake_timeout_ms == 0 {
+            return Err(err!(
+                "ServerConfig: max_tls_handshakes is {} but tls_handshake_timeout_ms is 0. A \
+                bounded handshake count without a deadline lets one slow client pin a permit for \
+                ever, turning the defence into a denial-of-service. Set a timeout (e.g. 10000).",
+                self.max_tls_handshakes;
+                Configuration, Invalid, Input));
+        }
         Ok(())
+    }
+
+    /// The configured whitelist addresses, parsed. An unparseable entry is an
+    /// error rather than a skip, so a typo cannot silently leave a real address
+    /// exposed to the rate limiter it was meant to bypass.
+    pub fn get_whitelist_ips(&self) -> Outcome<Vec<std::net::IpAddr>> {
+        let mut out = Vec::with_capacity(self.whitelist_ips.len());
+        for entry in &self.whitelist_ips {
+            let ip: std::net::IpAddr = res!(entry.trim().parse().map_err(|_| err!(
+                "ServerConfig: whitelist_ips entry '{}' is not a valid IP address.", entry;
+                Configuration, Invalid, Input)));
+            out.push(ip);
+        }
+        Ok(out)
     }
 
     /// Which immediate peers are entitled to speak the forwarding headers.
@@ -2625,6 +2770,12 @@ impl ServerConfig {
         if let Some(v) = take_u64("blist_cnt") {
             s.blist_cnt = v.min(u16::MAX as u64) as u16;
         }
+        if let Some(v) = take_u64("decay_secs") {
+            s.decay_after = Duration::from_secs(v);
+        }
+        // The per-IP concurrency cap is a top-level admission knob, not part of
+        // the rate-guard block, but it is enforced by the same guard object.
+        s.conn_max = self.max_conn_per_ip as usize;
         s
     }
 
@@ -2781,6 +2932,22 @@ impl AdminKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A whitelist address parses to an `IpAddr`, and a malformed one is a hard
+    /// error rather than a silent skip -- the whole point of the entry is to keep
+    /// a real address reachable, so a typo must be loud.
+    #[test]
+    fn whitelist_ips_parse_and_reject() {
+        let mut cfg = ServerConfig::default();
+        cfg.whitelist_ips = vec![fmt!("203.0.113.7"), fmt!("2001:db8::1")];
+        let ips = cfg.get_whitelist_ips().expect("valid addresses must parse");
+        assert_eq!(ips.len(), 2);
+        assert!(ips.iter().any(|ip| ip.to_string() == "203.0.113.7"));
+
+        cfg.whitelist_ips = vec![fmt!("not-an-ip")];
+        assert!(cfg.get_whitelist_ips().is_err(),
+            "a malformed whitelist address must be a start-up failure, not a skip");
+    }
 
     /// A field added to `ServerConfig` without `#[optional]` invalidates every
     /// config file already on disk, which is an outage rather than a feature.

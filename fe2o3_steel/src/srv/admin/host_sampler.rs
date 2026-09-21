@@ -60,6 +60,16 @@ pub struct DerivedHostPoint {
     pub net_bps:    f64,    // aggregate non-loopback rx + tx, bytes per second
 }
 
+/// The four host figures the health body carries, already reduced to the
+/// integers it emits. See [`HostSampler::health_metrics`].
+#[derive(Clone, Copy, Debug)]
+pub struct HealthHostMetrics {
+    pub mem_pct:    i64,
+    pub swap_pct:   i64,
+    pub disk_iops:  i64,
+    pub load1:      i64,    // 1-minute load average x100
+}
+
 /// Bounded ring of host snapshots, cheaply cloneable via `Arc` and shared
 /// between the periodic sampler task spawned in [`crate::srv::server::Server::start`] and every
 /// dashboard request handler.
@@ -123,6 +133,53 @@ impl HostSampler {
     pub fn latest(&self) -> Outcome<Option<HostSample>> {
         let hist = lock_read!(self.history);
         Ok(hist.back().cloned())
+    }
+
+    /// The integer-ready host figures for the health body, or `None` when the
+    /// ring is empty. `disk_iops` needs two adjacent samples for its rate and is
+    /// zero until a second sample has landed; the level figures need only the
+    /// latest.
+    pub fn health_metrics(&self) -> Outcome<Option<HealthHostMetrics>> {
+        let hist = lock_read!(self.history);
+        let last = match hist.back() {
+            Some(s) => s,
+            None    => return Ok(None),
+        };
+        let mem_pct  = (last.snapshot.mem.used_fraction() * 100.0).round() as i64;
+        let swap_pct = if last.snapshot.mem.swap_total == 0 {
+            0
+        } else {
+            (last.snapshot.mem.swap_used() as f64
+                / last.snapshot.mem.swap_total as f64 * 100.0).round() as i64
+        };
+        // Load average times a hundred, so a fractional load survives the
+        // integer contract: 250 is a load of 2.50.
+        let load1 = (last.snapshot.load.one * 100.0).round() as i64;
+        // Completed reads + writes per second, summed over every device, from the
+        // two most recent samples.
+        let disk_iops = match hist.len() >= 2 {
+            true => {
+                let prev = &hist[hist.len() - 2];
+                let elapsed = last.when_secs.saturating_sub(prev.when_secs);
+                if elapsed == 0 {
+                    0
+                } else {
+                    let mut ops: u64 = 0;
+                    for dev in &last.snapshot.disk.devices {
+                        if let Some(p) = prev.snapshot.disk.devices.iter()
+                            .find(|d| d.name == dev.name)
+                        {
+                            ops = ops
+                                .saturating_add(dev.reads.saturating_sub(p.reads))
+                                .saturating_add(dev.writes.saturating_sub(p.writes));
+                        }
+                    }
+                    (ops / elapsed) as i64
+                }
+            },
+            false => 0,
+        };
+        Ok(Some(HealthHostMetrics { mem_pct, swap_pct, disk_iops, load1 }))
     }
 
     /// Each entry carries the later-of-pair timestamp, because the rate-based

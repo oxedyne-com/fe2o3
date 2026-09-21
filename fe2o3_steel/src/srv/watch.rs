@@ -73,9 +73,12 @@ use crate::srv::{
         WatchConfig,
         WatchPeer,
     },
+    health::HealthBody,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+
+use std::collections::BTreeMap;
 use oxedyne_fe2o3_net::http::{
     client::{
         http_request,
@@ -101,29 +104,87 @@ use tokio_rustls::rustls::ClientConfig;
 
 
 /// What this node currently believes about one peer.
+///
+/// Liveness (`Up` / `Down`) and distress (`Distressed`) are the two things a peer
+/// can be wrong about, and they are distinct: `Down` is a peer that stops
+/// answering, `Distressed` is one that answers but reports itself unwell. A peer
+/// cannot be both, because distress is read from a body a dead peer never sends.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Health {
-    // The count on `Up` is consecutive failures seen since the last success, which is not yet
-    // enough to call the peer down.
+    // The count on `Up` is consecutive probe failures since the last success, not yet enough to
+    // call the peer down.
     Up { failures: u32 },
+    // Answering, but a health-body class has stayed over its distress threshold. `over` is the
+    // consecutive over-threshold readings that tipped it in; `failures` is the consecutive probe
+    // failures counted since, so a peer that stops answering while distressed still reaches `Down`
+    // by the same rule an `Up` peer does.
+    Distressed { over: u32, failures: u32 },
     Down,
 }
 
 /// One peer's running state.
 struct PeerState {
-    health:      Health,
-    failing_at:  Option<Instant>,   // first seen to be failing, so a recovery can say how long
-    told_at:     Option<Instant>,   // last told, so a lasting outage is a reminder not a stream
+    health:             Health,
+    failing_at:         Option<Instant>,    // first seen failing, so a recovery can say how long
+    told_at:            Option<Instant>,    // last told down, so a lasting outage reminds not streams
+    // Consecutive over-threshold readings while still `Up`, so distress needs the same run of
+    // agreeing evidence that a death does before it wakes anyone.
+    distress_rising:    u32,
+    distress_at:        Option<Instant>,    // when the distress run began, for the recovery line
+    distress_told_at:   Option<Instant>,    // last told distressed, for the repeat cadence
+    last_body:          Option<HealthBody>, // the last body seen, for the alarm text and a reader
 }
 
 impl Default for PeerState {
     fn default() -> Self {
         Self {
-            health:     Health::Up { failures: 0 },
-            failing_at: None,
-            told_at:    None,
+            health:             Health::Up { failures: 0 },
+            failing_at:         None,
+            told_at:            None,
+            distress_rising:    0,
+            distress_at:        None,
+            distress_told_at:   None,
+            last_body:          None,
         }
     }
+}
+
+/// The distress classes a body is currently over, as `(field, value)` pairs.
+fn classes_breaching(distress: &BTreeMap<String, i64>, body: &HealthBody) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for (field, threshold) in distress {
+        if let Some(v) = body.get(field) {
+            if v >= *threshold {
+                out.push((field.clone(), v));
+            }
+        }
+    }
+    out
+}
+
+/// Is every distress class at or below its clear boundary?
+///
+/// The clear boundary is a field's `clear` value where one is given, and its
+/// `distress` value otherwise -- so a peer with no `clear` map has no dead-band
+/// and leaves distress the moment it drops back under the entry threshold.
+fn is_below_clear(peer: &WatchPeer, body: &HealthBody) -> bool {
+    for (field, dthresh) in &peer.distress {
+        let boundary = peer.clear.get(field).copied().unwrap_or(*dthresh);
+        if let Some(v) = body.get(field) {
+            if v > boundary {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// The firing classes as one line for an alarm, e.g. `mem_pct 94, swap_pct 71`.
+fn classes_text(classes: &[(String, i64)]) -> String {
+    classes.iter()
+        .map(|(f, v)| fmt!("{} {}", f, v))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The peer watcher.
@@ -216,11 +277,13 @@ impl Watcher {
             tokio::time::sleep(every).await;
             let mut ok_count = 0usize;
             for peer in self.cfg.peers.clone() {
-                let ok = self.probe(&peer.url).await;
+                let (ok, body, dur) = self.probe(&peer).await;
                 if ok {
                     ok_count += 1;
                 }
-                self.judge(&peer.name, &peer.url, ok, repeat);
+                debug!("Watch: {} answered ok={} in {}ms.",
+                    peer.name, ok, dur.as_millis());
+                self.judge(&peer, ok, body, repeat);
             }
             // Proof of life, on the same loop that does the watching -- so a
             // heartbeat arriving is evidence the watcher is running and not
@@ -236,18 +299,24 @@ impl Watcher {
         }
     }
 
-    /// Ask one peer whether it is well.
+    /// Ask one peer whether it is well, returning liveness, its health body when
+    /// one was served, and how long the probe took.
     ///
     /// Any answer that is not a `2xx` is a failure, including a `503`: a Steel that is up and
-    /// sealed is answering, and it is still not serving the databases behind it.
-    async fn probe(&self, url: &str) -> bool {
+    /// sealed is answering, and it is still not serving the databases behind it. The body is
+    /// present only when the peer carries a `token` (so the gate opens) and the answer parsed;
+    /// its absence never fails the liveness check, so a peer that answers `200` without a body is
+    /// still up. The duration is measured here, not self-reported by the peer.
+    async fn probe(&self, peer: &WatchPeer) -> (bool, Option<HealthBody>, std::time::Duration) {
+        let url = &peer.url;
+        let started = Instant::now();
         let loc = match Url::parse(url) {
             Ok(l) => l,
             // Refused at construction, so this cannot happen -- and if it ever does, a peer
             // that cannot be addressed is a peer that is not answering.
             Err(e) => {
                 warn!("The watch URL {} stopped parsing: {}", url, e);
-                return false;
+                return (false, None, started.elapsed());
             },
         };
         let host = loc.host.clone();
@@ -255,7 +324,15 @@ impl Watcher {
         let path = loc.target.clone();
         let timeout = Duration::from_secs(self.cfg.timeout_secs.max(2));
 
-        let headers = [("Connection", "close"), ("User-Agent", "steel-watch")];
+        // The token, when the operator gave one, opens the peer's health gate. Without it the
+        // peer answers a 404 for the health path, so the probe reads liveness only.
+        let mut headers: Vec<(&str, &str)> = vec![
+            ("Connection", "close"),
+            ("User-Agent", "steel-watch"),
+        ];
+        if let Some(tok) = &peer.token {
+            headers.push(("x-steel-health-token", tok.as_str()));
+        }
         // The scheme decides, and `new` has already refused a plain URL that nobody opted in
         // to -- so by the time a probe runs, `http` here means the operator wrote it down.
         let reply = if loc.scheme.is_tls() {
@@ -267,6 +344,7 @@ impl Watcher {
             let call = http_request(&host, port, HttpMethod::GET, &path, &headers, &[]);
             tokio::time::timeout(timeout, call).await
         };
+        let elapsed = started.elapsed();
         match reply {
             Ok(Ok(reply)) => {
                 let code = match &reply.header.headline {
@@ -276,19 +354,28 @@ impl Watcher {
                     _ => 0,
                 };
                 if (200..300).contains(&code) {
-                    true
+                    let body = match String::from_utf8(reply.body.clone()) {
+                        Ok(s) => match HealthBody::parse(&s) {
+                            Ok(b) => Some(b),
+                            // A 200 that does not parse as a health body is a peer that is up but
+                            // served something else (no token, a plain page): still alive.
+                            Err(_) => None,
+                        },
+                        Err(_) => None,
+                    };
+                    (true, body, elapsed)
                 } else {
                     debug!("Watch: {} answered {}.", url, code);
-                    false
+                    (false, None, elapsed)
                 }
             },
             Ok(Err(e)) => {
                 debug!("Watch: {} did not answer: {}", url, e);
-                false
+                (false, None, elapsed)
             },
             Err(_) => {
                 debug!("Watch: {} did not answer within {}s.", url, timeout.as_secs());
-                false
+                (false, None, elapsed)
             },
         }
     }
@@ -298,72 +385,234 @@ impl Watcher {
     /// Separated from the polling so the state machine can be tested without a network: the
     /// interesting behaviour is entirely here, and a test that had to stand up a peer to reach
     /// it would test tokio rather than the rule.
-    fn judge(&mut self, name: &str, url: &str, ok: bool, repeat: Duration) {
+    fn judge(
+        &mut self,
+        peer:   &WatchPeer,
+        ok:     bool,
+        body:   Option<HealthBody>,
+        repeat: Duration,
+    ) {
         let threshold = self.cfg.fail_threshold.max(1);
         let now = Instant::now();
-        let st = self.state.entry(name.to_string()).or_default();
-
-        if ok {
-            if st.health == Health::Down {
-                let away = st.failing_at.map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
-                *st = PeerState::default();
-                self.alerter.raise(AlertEvent::PeerRecovered {
-                    peer:      name.to_string(),
-                    url:       url.to_string(),
-                    away_secs: away,
-                    noticed_by: self.whoami.clone(),
-                });
-            } else {
-                // A run of failures that did not reach the threshold is forgotten rather than
-                // carried. Two isolated timeouts a day apart are not a fault, and a counter that
-                // never resets turns them into one eventually.
-                *st = PeerState::default();
-            }
-            return;
+        let whoami = self.whoami.clone();
+        let st = self.state.entry(peer.name.clone()).or_default();
+        for event in decide(threshold, &whoami, peer, st, ok, body, repeat, now) {
+            self.alerter.raise(event);
         }
+    }
+}
 
-        match st.health {
-            Health::Up { failures } => {
-                let failures = failures + 1;
-                if st.failing_at.is_none() {
-                    st.failing_at = Some(now);
-                }
-                if failures >= threshold {
-                    st.health = Health::Down;
-                    st.told_at = Some(now);
-                    let down_secs = st.failing_at
-                        .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
-                    self.alerter.raise(AlertEvent::PeerDown {
-                        peer:       name.to_string(),
-                        url:        url.to_string(),
-                        failures,
-                        down_secs,
-                        noticed_by: self.whoami.clone(),
-                    });
-                } else {
-                    st.health = Health::Up { failures };
-                }
-            },
-            Health::Down => {
-                // Still down. Remind, but only on the repeat interval -- an alarm that fires
-                // every poll is an alarm that gets silenced, and the SMS leg of this costs money
-                // per message.
-                let due = st.told_at.map(|t| now.duration_since(t) >= repeat).unwrap_or(true);
-                if due {
-                    st.told_at = Some(now);
-                    let down_secs = st.failing_at
-                        .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
-                    self.alerter.raise(AlertEvent::PeerDown {
-                        peer:       name.to_string(),
-                        url:        url.to_string(),
-                        failures:   threshold,
-                        down_secs,
-                        noticed_by: self.whoami.clone(),
-                    });
+/// The peer-state transition, separated from the polling and the alerter.
+///
+/// This is the whole of the interesting behaviour -- when an operator is told, and about what --
+/// and it is a pure function of the current state and one probe result. It returns the alerts to
+/// raise rather than raising them, so a test can drive it directly with a `PeerState` and no
+/// network, no SMTP client, and no alerter standing up behind it.
+fn decide(
+    threshold: u32,
+    whoami:    &str,
+    peer:      &WatchPeer,
+    st:        &mut PeerState,
+    ok:        bool,
+    body:      Option<HealthBody>,
+    repeat:    Duration,
+    now:       Instant,
+)
+    -> Vec<AlertEvent>
+{
+    let mut out = Vec::new();
+    let name = &peer.name;
+    let url = &peer.url;
+    // Whether this peer even asks to be watched for distress: a token to open the gate and at
+    // least one threshold to test. A peer without both is plain up/down, exactly as before.
+    let watches_distress = peer.token.is_some() && !peer.distress.is_empty();
+    if let Some(b) = &body {
+        st.last_body = Some(b.clone());
+    }
+
+    // A peer that asked for distress watching but gave us nothing to test is a misconfiguration
+    // worth saying out loud every poll, not silently reading as well: the operator believes the
+    // class is watched. Only warned on a live answer, since a dead peer's missing body is the
+    // outage itself, not a config fault.
+    if ok && watches_distress {
+        match &body {
+            None => warn!("Watch: {} answered but served no parseable health body, so its \
+                distress thresholds cannot be evaluated -- check the health token and path.",
+                name),
+            Some(b) => {
+                let missing: Vec<String> = peer.distress.keys()
+                    .filter(|f| b.get(f).is_none())
+                    .cloned()
+                    .collect();
+                if !missing.is_empty() {
+                    warn!("Watch: {}'s health body is missing distress field(s) {:?}, so \
+                        those classes cannot be evaluated.", name, missing);
                 }
             },
         }
     }
+
+    if ok {
+        // Any successful probe clears the liveness-failure marker; distress is a separate run.
+        if st.health == Health::Down {
+            let away = st.failing_at.map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+            *st = PeerState::default();
+            out.push(AlertEvent::PeerRecovered {
+                peer:       name.clone(),
+                url:        url.clone(),
+                away_secs:  away,
+                noticed_by: whoami.to_string(),
+            });
+            return out;
+        }
+        st.failing_at = None;
+
+        // The classes currently over threshold, and whether we have a reading at all.
+        let breaching = match &body {
+            Some(b) if watches_distress => classes_breaching(&peer.distress, b),
+            _ => Vec::new(),
+        };
+        let have_reading = watches_distress && body.is_some();
+
+        match st.health {
+            Health::Up { .. } => {
+                if !have_reading {
+                    // Healthy liveness, nothing to assess.
+                    st.health = Health::Up { failures: 0 };
+                    st.distress_rising = 0;
+                    return out;
+                }
+                if breaching.is_empty() {
+                    // Under threshold: the rising run is broken.
+                    st.distress_rising = 0;
+                    st.health = Health::Up { failures: 0 };
+                    return out;
+                }
+                // Over threshold: distress needs the same run of agreeing evidence a death does.
+                st.distress_rising += 1;
+                if st.distress_rising >= threshold {
+                    st.health = Health::Distressed { over: st.distress_rising, failures: 0 };
+                    st.distress_at = Some(now);
+                    st.distress_told_at = Some(now);
+                    out.push(AlertEvent::PeerDistress {
+                        peer:       name.clone(),
+                        url:        url.clone(),
+                        classes:    classes_text(&breaching),
+                        since_secs: 0,
+                        noticed_by: whoami.to_string(),
+                    });
+                } else {
+                    st.health = Health::Up { failures: 0 };
+                }
+            },
+            Health::Distressed { over, .. } => {
+                // A live probe resets the distress-phase failure counter. Whether distress clears
+                // is a question only a reading under the clear boundary can answer; with no reading
+                // we hold distress rather than guess it away.
+                let cleared = match &body {
+                    Some(b) if watches_distress => is_below_clear(peer, b),
+                    _ => false,
+                };
+                if cleared {
+                    let were = st.distress_at
+                        .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                    out.push(AlertEvent::PeerDistressCleared {
+                        peer:       name.clone(),
+                        url:        url.clone(),
+                        were_secs:  were,
+                        noticed_by: whoami.to_string(),
+                    });
+                    *st = PeerState::default();
+                } else {
+                    st.health = Health::Distressed { over, failures: 0 };
+                    // Remind on the repeat interval, as a lasting outage does.
+                    let due = st.distress_told_at
+                        .map(|t| now.duration_since(t) >= repeat).unwrap_or(true);
+                    if due && !breaching.is_empty() {
+                        st.distress_told_at = Some(now);
+                        let since = st.distress_at
+                            .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                        out.push(AlertEvent::PeerDistress {
+                            peer:       name.clone(),
+                            url:        url.clone(),
+                            classes:    classes_text(&breaching),
+                            since_secs: since,
+                            noticed_by: whoami.to_string(),
+                        });
+                    }
+                }
+            },
+            // Handled by the recovery return above; defensive and inert.
+            Health::Down => {},
+        }
+        return out;
+    }
+
+    // The probe failed.
+    match st.health {
+        Health::Up { failures } => {
+            let failures = failures + 1;
+            if st.failing_at.is_none() {
+                st.failing_at = Some(now);
+            }
+            if failures >= threshold {
+                st.health = Health::Down;
+                st.told_at = Some(now);
+                let down_secs = st.failing_at
+                    .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                out.push(AlertEvent::PeerDown {
+                    peer:       name.clone(),
+                    url:        url.clone(),
+                    failures,
+                    down_secs,
+                    noticed_by: whoami.to_string(),
+                });
+            } else {
+                st.health = Health::Up { failures };
+            }
+        },
+        Health::Distressed { over, failures } => {
+            // A distressed peer that stops answering reaches Down by the same rule an Up one does:
+            // the distress episode gives way to the outage it foreshadowed.
+            let failures = failures + 1;
+            if st.failing_at.is_none() {
+                st.failing_at = Some(now);
+            }
+            if failures >= threshold {
+                st.health = Health::Down;
+                st.told_at = Some(now);
+                let down_secs = st.failing_at
+                    .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                out.push(AlertEvent::PeerDown {
+                    peer:       name.clone(),
+                    url:        url.clone(),
+                    failures,
+                    down_secs,
+                    noticed_by: whoami.to_string(),
+                });
+            } else {
+                st.health = Health::Distressed { over, failures };
+            }
+        },
+        Health::Down => {
+            // Still down. Remind, but only on the repeat interval -- an alarm that fires every
+            // poll is an alarm that gets silenced, and the SMS leg of this costs money per message.
+            let due = st.told_at.map(|t| now.duration_since(t) >= repeat).unwrap_or(true);
+            if due {
+                st.told_at = Some(now);
+                let down_secs = st.failing_at
+                    .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                out.push(AlertEvent::PeerDown {
+                    peer:       name.clone(),
+                    url:        url.clone(),
+                    failures:   threshold,
+                    down_secs,
+                    noticed_by: whoami.to_string(),
+                });
+            }
+        },
+    }
+    out
 }
 
 
@@ -371,19 +620,50 @@ impl Watcher {
 mod tests {
     use super::*;
 
+    /// A plain up/down peer: no token and no thresholds, so distress is never assessed.
+    fn plain_peer(name: &str, url: &str) -> WatchPeer {
+        WatchPeer {
+            name:     name.to_string(),
+            url:      url.to_string(),
+            plain_ok: false,
+            distress: BTreeMap::new(),
+            clear:    BTreeMap::new(),
+            token:    None,
+        }
+    }
+
+    /// A peer that watches distress: a token opens the gate, and one or more thresholds are tested.
+    fn distress_peer(
+        name:     &str,
+        distress: &[(&str, i64)],
+        clear:    &[(&str, i64)],
+    )
+        -> WatchPeer
+    {
+        let mut p = plain_peer(name, "https://example.test/_steel/health");
+        p.token = Some(fmt!("a-shared-secret"));
+        p.distress = distress.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        p.clear = clear.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        p
+    }
+
+    fn body_of(fields: &[(&str, i64)]) -> HealthBody {
+        let mut b = HealthBody::new();
+        for (k, v) in fields {
+            b.set(k, *v);
+        }
+        b
+    }
+
     /// The state machine, without a network.
     ///
-    /// `judge` is driven directly and the alerter is absent, so what is under test is the rule
+    /// `decide` is driven directly and no alerter stands up, so what is under test is the rule
     /// about when an operator is told -- which is the part that costs money when it is wrong in
     /// one direction and costs an outage when it is wrong in the other.
     fn machine(threshold: u32) -> (WatchConfig, PeerState) {
         let cfg = WatchConfig {
             enabled:        true,
-            peers:          vec![WatchPeer {
-                name:     fmt!("jarrah"),
-                url:      fmt!("https://example.test/api/health"),
-                plain_ok: false,
-            }],
+            peers:          vec![plain_peer("jarrah", "https://example.test/api/health")],
             interval_secs:  60,
             fail_threshold: threshold,
             timeout_secs:   10,
@@ -422,11 +702,7 @@ mod tests {
     #[test]
     fn a_peer_list_is_data_so_the_estate_can_change_without_a_rebuild() {
         let (mut cfg, _) = machine(2);
-        cfg.peers.push(WatchPeer {
-            name:     fmt!("conifer"),
-            url:      fmt!("https://ontheism.org/health"),
-            plain_ok: false,
-        });
+        cfg.peers.push(plain_peer("conifer", "https://ontheism.org/health"));
         assert_eq!(cfg.peers.len(), 2,
             "adding a machine must be a configuration change and nothing else");
     }
@@ -435,32 +711,125 @@ mod tests {
     /// config whose author never thought about it.
     #[test]
     fn a_plain_url_is_refused_unless_the_operator_wrote_it_down() {
-        let refused = vet(&WatchPeer {
-            name:     fmt!("birch"),
-            url:      fmt!("http://65.21.145.109:9109/forge/fresh"),
-            plain_ok: false,
-        });
+        let refused = vet(&plain_peer("birch", "http://65.21.145.109:9109/forge/fresh"));
         assert!(refused.is_err(), "a plain http peer was accepted without plain_ok");
         let msg = fmt!("{}", refused.err().unwrap());
         assert!(msg.contains("plain_ok"),
             "the refusal must name the key that would allow it, or the operator has to read \
             the source to find out: got '{}'", msg);
 
-        assert!(vet(&WatchPeer {
-            name:     fmt!("birch"),
-            url:      fmt!("http://65.21.145.109:9109/forge/fresh"),
-            plain_ok: true,
-        }).is_ok(), "a plain http peer was refused although plain_ok was set");
+        let mut allowed = plain_peer("birch", "http://65.21.145.109:9109/forge/fresh");
+        allowed.plain_ok = true;
+        assert!(vet(&allowed).is_ok(),
+            "a plain http peer was refused although plain_ok was set");
     }
 
     /// A malformed URL is refused whatever the peer says about its wire, so `plain_ok` cannot be
     /// read as a general relaxation.
     #[test]
     fn plain_ok_does_not_excuse_a_url_that_cannot_be_parsed() {
-        assert!(vet(&WatchPeer {
-            name:     fmt!("nowhere"),
-            url:      fmt!("not a url at all"),
-            plain_ok: true,
-        }).is_err(), "plain_ok let an unparseable URL through");
+        let mut p = plain_peer("nowhere", "not a url at all");
+        p.plain_ok = true;
+        assert!(vet(&p).is_err(), "plain_ok let an unparseable URL through");
+    }
+
+    // ── Distress state machine (A6) ──────────────────────────────────────────
+
+    fn kinds(events: &[AlertEvent]) -> Vec<&'static str> {
+        events.iter().map(|e| match e {
+            AlertEvent::PeerDown { .. }            => "down",
+            AlertEvent::PeerRecovered { .. }       => "recovered",
+            AlertEvent::PeerDistress { .. }        => "distress",
+            AlertEvent::PeerDistressCleared { .. } => "cleared",
+            _                                      => "other",
+        }).collect()
+    }
+
+    /// A peer stays up until a run of over-threshold readings as long as the fail threshold, then
+    /// enters distress once -- not on the first reading, and not repeatedly.
+    #[test]
+    fn up_to_distressed_needs_the_same_run_as_a_death() {
+        let peer = distress_peer("jarrah", &[("mem_pct", 90)], &[("mem_pct", 80)]);
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        let hot = body_of(&[("mem_pct", 94)]);
+
+        // Two over-threshold readings against a threshold of three: still up, no alert.
+        for _ in 0..2 {
+            let ev = decide(3, "argonaut", &peer, &mut st, true, Some(hot.clone()),
+                Duration::from_secs(900), now);
+            assert!(ev.is_empty(), "distress fired before the run was long enough");
+            assert!(matches!(st.health, Health::Up { .. }));
+        }
+        // The third tips it into distress, exactly once.
+        let ev = decide(3, "argonaut", &peer, &mut st, true, Some(hot.clone()),
+            Duration::from_secs(900), now);
+        assert_eq!(kinds(&ev), vec!["distress"]);
+        assert!(matches!(st.health, Health::Distressed { .. }));
+    }
+
+    /// Hysteresis: once distressed, a reading must fall under the *clear* boundary, not merely back
+    /// under the entry threshold, before the peer is called well again.
+    #[test]
+    fn distress_clears_only_under_the_clear_boundary() {
+        let peer = distress_peer("jarrah", &[("mem_pct", 90)], &[("mem_pct", 80)]);
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        // Enter distress at threshold 1 for brevity.
+        let _ = decide(1, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 95)])),
+            Duration::from_secs(900), now);
+        assert!(matches!(st.health, Health::Distressed { .. }));
+
+        // 85 is under the 90 entry threshold but still over the 80 clear boundary: holds distress.
+        let ev = decide(1, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 85)])),
+            Duration::from_secs(900), now);
+        assert!(matches!(st.health, Health::Distressed { .. }),
+            "distress cleared before crossing the clear boundary -- no hysteresis");
+        assert!(!kinds(&ev).contains(&"cleared"));
+
+        // 78 is under the clear boundary: now it clears.
+        let ev = decide(1, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 78)])),
+            Duration::from_secs(900), now);
+        assert_eq!(kinds(&ev), vec!["cleared"]);
+        assert!(matches!(st.health, Health::Up { .. }));
+    }
+
+    /// A distressed peer that stops answering reaches Down by the failure counter, the same rule an
+    /// Up peer follows.
+    #[test]
+    fn distressed_to_down_via_the_failure_counter() {
+        let peer = distress_peer("jarrah", &[("mem_pct", 90)], &[("mem_pct", 80)]);
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        let _ = decide(2, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 95)])),
+            Duration::from_secs(900), now);
+        let _ = decide(2, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 95)])),
+            Duration::from_secs(900), now);
+        assert!(matches!(st.health, Health::Distressed { .. }));
+
+        // One failure: still distressed, counting.
+        let ev = decide(2, "argonaut", &peer, &mut st, false, None,
+            Duration::from_secs(900), now);
+        assert!(ev.is_empty());
+        assert!(matches!(st.health, Health::Distressed { failures: 1, .. }));
+        // Second failure reaches the threshold: Down.
+        let ev = decide(2, "argonaut", &peer, &mut st, false, None,
+            Duration::from_secs(900), now);
+        assert_eq!(kinds(&ev), vec!["down"]);
+        assert_eq!(st.health, Health::Down);
+    }
+
+    /// A peer with no thresholds is plain up/down: a hot body never makes it distressed.
+    #[test]
+    fn a_peer_without_thresholds_never_goes_distressed() {
+        let peer = plain_peer("jarrah", "https://example.test/api/health");
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        for _ in 0..5 {
+            let ev = decide(1, "argonaut", &peer, &mut st, true, Some(body_of(&[("mem_pct", 99)])),
+                Duration::from_secs(900), now);
+            assert!(ev.is_empty());
+            assert!(matches!(st.health, Health::Up { .. }));
+        }
     }
 }
