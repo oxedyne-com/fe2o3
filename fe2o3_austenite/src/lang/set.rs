@@ -211,7 +211,7 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 		},
 		"list" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
-				patch.list.item_skip = Some(Sp::from_pt(pt));
+				patch.list.item_skip = Some(Some(Sp::from_pt(pt)));
 				used.push("spacing");
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {
@@ -221,7 +221,7 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 		},
 		"enum" => {
 			if let Some(pt) = named_length_pt(args, "spacing") {
-				patch.enumeration.item_skip = Some(Sp::from_pt(pt));
+				patch.enumeration.item_skip = Some(Some(Sp::from_pt(pt)));
 				used.push("spacing");
 			}
 			if let Some(pt) = named_length_pt(args, "indent") {

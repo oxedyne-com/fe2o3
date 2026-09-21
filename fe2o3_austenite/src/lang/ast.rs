@@ -20,7 +20,7 @@ use crate::theme::ThemePatch;
 pub enum Item {
 	Heading { level: u8, runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, runs: the title's inline markup
 	Paragraph { runs: Vec<Inline>, label: Option<String>, span: Span },	// label: a trailing <name>, anchoring a display equation for cross-reference
-	List { ordered: bool, items: Vec<ListItem>, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent
+	List { ordered: bool, items: Vec<ListItem>, loose: bool, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent; loose when a blank line parts its items
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
 	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`)

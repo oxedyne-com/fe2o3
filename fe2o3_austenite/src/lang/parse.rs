@@ -449,7 +449,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// (or bullet list) across a blank line between items, restarting the numbering only when other
 			// content intervenes. The list is therefore held open here; the marker branch joins a following
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
-			// line -- flushes it first, so two lists parted by real content still restart.
+			// line -- flushes it first, so two lists parted by real content still restart. A blank line held
+			// between two items of the open level marks it loose: Typst then sets its items with block
+			// spacing rather than the tight body pitch a blank-free list takes.
+			if let Some(top) = stack.last_mut() {
+				top.saw_blank = true;
+			}
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
 			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
@@ -665,6 +670,8 @@ struct ListFrame {
 	indent:		usize,
 	ordered:	bool,
 	items:		Vec<ListItem>,
+	loose:		bool,	// a blank line parted two of this level's items, so Typst sets it loose (block-spaced)
+	saw_blank:	bool,	// a blank line is pending since the last item; it makes the level loose only if a sibling follows
 	start:		u32,
 	end:		u32,
 }
@@ -692,7 +699,12 @@ fn list_marker(
 	}
 	match stack.last_mut() {
 		Some(top) if top.indent == indent && top.ordered == ord => {
-			// Same level, same kind: another item of the open list.
+			// Same level, same kind: another item of the open list. A blank line pending since the previous
+			// item was a genuine inter-item gap, so the level sets loose.
+			if top.saw_blank {
+				top.loose = true;
+			}
+			top.saw_blank = false;
 			top.items.push(ListItem { runs, children: Vec::new() });
 			top.end = end;
 		},
@@ -702,12 +714,12 @@ fn list_marker(
 				fold(items, stack, frame);
 			}
 			stack.push(ListFrame {
-				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], start, end });
+				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end });
 		},
 		// Deeper than the current level (a sub-list), or the first marker of a list: open a new level. A
 		// deeper level becomes a child of the current item when it folds.
 		_ => stack.push(ListFrame {
-			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], start, end }),
+			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end }),
 	}
 }
 
@@ -717,6 +729,7 @@ fn fold(items: &mut Vec<Item>, stack: &mut Vec<ListFrame>, frame: ListFrame) {
 	let list = Item::List {
 		ordered:	frame.ordered,
 		items:		frame.items,
+		loose:		frame.loose,
 		span:		Span::new(frame.start, frame.end),
 	};
 	match stack.last_mut() {

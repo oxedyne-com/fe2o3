@@ -37,7 +37,7 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::Heading { level, runs, label, .. }	=> out.push(
 				Block::heading_rich(*level, lower_runs(runs), label.clone())),
 			Item::Paragraph { runs, label, .. }	=> out.push(lower_paragraph(runs, label.clone())),
-			Item::List { ordered, items, .. }	=> out.push(lower_list(*ordered, items)),
+			Item::List { ordered, items, loose, .. }	=> out.push(lower_list(*ordered, items, *loose)),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
 			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
@@ -73,11 +73,11 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 /// Lowers a surface list, nesting and all, to a [`Block::List`]: each entry carries its own lowered runs
 /// and its sub-lists, themselves lowered to nested [`Block::List`]s by [`blocks`]. The parent list keeps
 /// its ordering regardless of what a child carries.
-fn lower_list(ordered: bool, items: &[ListItem]) -> Block {
+fn lower_list(ordered: bool, items: &[ListItem], loose: bool) -> Block {
 	let entries = items.iter()
 		.map(|it| ListEntry { segments: lower_runs(&it.runs), children: blocks(&it.children) })
 		.collect();
-	Block::list(ordered, entries)
+	Block::list(ordered, entries, loose)
 }
 
 /// Builds a [`Table`] from the parsed spec: the flat cells are chunked into rows of `ncols`, each cell

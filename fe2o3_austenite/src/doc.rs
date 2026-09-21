@@ -212,7 +212,7 @@ pub enum Block {
 	Heading { level: u8, segments: Vec<Segment>, label: Option<String> },	// segments: the title's rich runs; label: an author anchor a `#ref` resolves to
 	Paragraph { text: String },
 	RichParagraph { segments: Vec<Segment> },	// a paragraph carrying footnote marks
-	List { ordered: bool, items: Vec<ListEntry> },	// a bullet or numbered list; an entry may nest sub-lists
+	List { ordered: bool, items: Vec<ListEntry>, loose: bool },	// a bullet or numbered list; an entry may nest sub-lists; loose when a blank line parts its items
 	Code { lines: Vec<String> },	// a verbatim code block, set in the mono face, whitespace preserved
 	Table(Table),
 	Equation { expr: Atom, numbered: bool, label: Option<String> },	// a display equation on its own centred line; label anchors an @-reference
@@ -334,8 +334,8 @@ impl Block {
 
 	/// A bullet (`ordered` false) or numbered (`ordered` true) list. Each entry carries its run sequence --
 	/// emphasis, a footnote or inline maths, as a rich paragraph does -- and any sub-lists nested beneath it.
-	pub fn list(ordered: bool, items: Vec<ListEntry>) -> Self {
-		Self::List { ordered, items }
+	pub fn list(ordered: bool, items: Vec<ListEntry>, loose: bool) -> Self {
+		Self::List { ordered, items, loose }
 	}
 
 	/// A verbatim code block: each line set in the mono face with its whitespace preserved and no
@@ -903,11 +903,11 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = true;
 				},
-				Block::List { ordered, items } => {
+				Block::List { ordered, items, loose } => {
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
-					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, *loose, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -1892,6 +1892,7 @@ fn list(
 	measure:	Sp,
 	ordered:	bool,
 	items:		&[ListEntry],
+	loose:		bool,
 	foot_no:	&mut u32,
 	ref_no:		&mut u32,
 	margin_no:	&mut u32,
@@ -1906,11 +1907,21 @@ fn list(
 	// An ordered list takes its metrics and marker pattern from the `enumeration` group, a bulleted list
 	// from `list`. The two groups' defaults match, so an untouched theme sets either alike; a
 	// `#set enum(...)` reaches the ordered branch alone.
-	let (marker_gap, item_skip) = if ordered {
+	let (marker_gap, spacing) = if ordered {
 		(style.enumeration.marker_gap, style.enumeration.item_skip)
 	} else {
 		(style.list.marker_gap, style.list.item_skip)
 	};
+	// The extra vertical space stacked on top of the baselineskip between items. Typst's `spacing` is
+	// `auto` by default: a tight list (no blank line parts its items) then sets at the body pitch alone,
+	// so the extra is zero; a loose one adds the paragraph block spacing. A `#set list(spacing:)` /
+	// `#set enum(spacing:)` overrides both to a fixed value.
+	let item_skip = match spacing {
+		Some(s)				=> s,
+		None if loose		=> style.par.skip,
+		None				=> Sp::ZERO,
+	};
+	let leading	= style.text.leading;
 	// Shape every marker once and keep the widest, so each item's text starts at the one indent. The
 	// number counts across every entry regardless of any sub-list, so an ordered list stays 1..N.
 	let mut markers:	Vec<ShapedText>	= Vec::with_capacity(items.len());
@@ -1933,30 +1944,70 @@ fn list(
 	let indent	= marker_w + marker_gap;
 	let inner	= if measure > indent { measure - indent } else { measure };
 
+	// The depth of the last line this list has appended so far, kept so the gap to the next item (or to a
+	// nested sub-list) can be sized by the baselineskip rule. `None` before the first block: the list's
+	// space from its neighbours is the caller's, so the first item takes no inter-item gap.
+	let mut prev_depth: Option<Sp> = None;
 	for (ei, entry) in items.iter().enumerate() {
-		if ei > 0 {
-			nodes.push(Node::Glue(Glue::fixed(item_skip)));
-		}
 		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, Role::Body, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK,
 			Some(cap_edge(style, style.text.body_size))));
 		indent_item(&mut lines, Leaf::text(markers[ei].clone()), indent);
-		nodes.extend(guard_widows(lines));
+		let block = guard_widows(lines);
+		push_item_gap(nodes, &block, &mut prev_depth, leading, item_skip);
+		nodes.extend(block);
 		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
 		// it is laid out within the item's inner measure and then shifted right by this list's indent.
 		for child in &entry.children {
-			if let Block::List { ordered: cord, items: citems } = child {
-				nodes.push(Node::Glue(Glue::fixed(item_skip)));
+			if let Block::List { ordered: cord, items: citems, loose: cloose } = child {
 				let mut sub: Vec<Node> = Vec::new();
-				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems,
+				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems, *cloose,
 					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 				shift_nodes(&mut sub, indent);
+				push_item_gap(nodes, &sub, &mut prev_depth, leading, item_skip);
 				nodes.extend(sub);
 			}
 		}
 	}
 	Ok(())
+}
+
+/// The height of the first line box in a laid-out block, or `None` when it holds no line -- so the
+/// baselineskip gap to it can read the height the cap-edge model left on its first line.
+fn first_box_height(nodes: &[Node]) -> Option<Sp> {
+	nodes.iter().find_map(|n| match n {
+		Node::HBox(b)	=> Some(b.dims.height),
+		_				=> None,
+	})
+}
+
+/// The depth of the last line box in a laid-out block, or `None` when it holds no line -- the lower
+/// term the baselineskip gap from it reads, taken after the cap-edge model has trimmed it to the
+/// baseline (or to inline maths' true depth).
+fn last_box_depth(nodes: &[Node]) -> Option<Sp> {
+	nodes.iter().rev().find_map(|n| match n {
+		Node::HBox(b)	=> Some(b.dims.depth),
+		_				=> None,
+	})
+}
+
+/// Separates a list's next block -- an item or its nested sub-list -- from the previous one by the same
+/// baselineskip rule [`set_lines`] uses between prose lines, then adds the list's `item_skip`. The gap
+/// is sized from the previous block's last-line depth and the next block's first-line height, both read
+/// after the cap-edge model has trimmed them, so item-to-item baseline pitch is the body pitch (a tight
+/// list, `item_skip` zero) or the body pitch plus the block spacing (a loose one) -- never the raw skip
+/// stacked on cap-trimmed edges, which set the items tighter than the body they sit in. The first block
+/// takes no gap: its `prev_depth` is `None`, and the list's space from its neighbours is the caller's.
+fn push_item_gap(nodes: &mut Vec<Node>, block: &[Node], prev_depth: &mut Option<Sp>, leading: Sp, item_skip: Sp) {
+	if let Some(pd) = *prev_depth {
+		let fh		= first_box_height(block).unwrap_or(Sp::ZERO);
+		let base	= if leading > pd + fh { leading - pd - fh } else { Sp::ZERO };
+		nodes.push(Node::Glue(Glue::fixed(base + item_skip)));
+	}
+	if let Some(ld) = last_box_depth(block) {
+		*prev_depth = Some(ld);
+	}
 }
 
 /// Shifts every line box in `nodes` right by `by`, inserting a leading glue and growing the box width, so
@@ -2013,11 +2064,23 @@ fn code_block(
 /// rest of the indent; every line takes a leading glue that shifts it right by the indent; each line's
 /// box grows to the full measure. The item was broken at `measure - indent`, so the right edge lands on
 /// the measure. Only [`Node::HBox`] lines are shifted -- the interline glue between them is left alone.
-fn indent_item(lines: &mut [Node], marker: Leaf, indent: Sp) {
+fn indent_item(lines: &mut [Node], mut marker: Leaf, indent: Sp) {
 	let mut first = true;
 	for line in lines.iter_mut() {
 		if let Node::HBox(b) = line {
 			if first {
+				// Seat the marker on the line's text baseline. The cap-edge model has already raised the
+				// line's text leaves by `drop = ascender - cap` (a negative shift); the marker was shaped
+				// at the body ascender like them, so without the same shift the emitter -- which draws a run
+				// at `line_top + height + shift` -- would seat it `drop` (~0.4-0.5 em) below the text. Copying
+				// the first text leaf's shift puts the bullet's own baseline on the text's, where U+2022
+				// x-height-centres by font design and an enumerator's digits sit on the baseline, matching
+				// Typst. A line whose leaves carry no raise (the cap model off) leaves the shift zero.
+				let text_shift = b.list.iter().find_map(|n| match n {
+					Node::Leaf(l)	=> Some(l.shift),
+					_				=> None,
+				}).unwrap_or(Sp::ZERO);
+				marker.shift = text_shift;
 				let gap = if indent > marker.dims.width { indent - marker.dims.width } else { Sp::ZERO };
 				b.list.insert(0, Node::Glue(Glue::fixed(gap)));
 				b.list.insert(0, Node::Leaf(marker.clone()));
@@ -5183,9 +5246,9 @@ fn box_flow_scoped(
 						Some(cap_edge(style, style.text.body_size))));
 				nodes.extend(lines);
 			},
-			Block::List { ordered, items } => {
+			Block::List { ordered, items, loose } => {
 				res!(list(
-					nodes, fonts.clone(), geom, style, measure, *ordered, items,
+					nodes, fonts.clone(), geom, style, measure, *ordered, items, *loose,
 					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
 			},
 			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
@@ -5460,7 +5523,7 @@ mod tests {
 		let blocks = vec![
 			Block::Heading { level: 1, segments: vec![Segment::text("The Purpose")], label: None },
 			Block::Paragraph { text: "It reads a document and writes 42 pages.".to_string() },
-			Block::List { ordered: false, items: vec![
+			Block::List { ordered: false, loose: false, items: vec![
 				ListEntry { segments: vec![Segment::strong("one two")], children: vec![] }] },
 		];
 		// Heading: 2; paragraph: "It reads a document and writes pages" = 7 (the "42" counts none);
@@ -5809,7 +5872,7 @@ an interior line justification fills to the measure while ragged setting does no
 			ListEntry { segments: vec![Segment::text("First item.")], children: vec![] },
 			ListEntry { segments: vec![Segment::text("Second item.")], children: vec![] },
 		];
-		let blocks	= vec![Block::list(true, items())];
+		let blocks	= vec![Block::list(true, items(), false)];
 
 		// The width of the first list item's leading marker leaf.
 		fn first_marker_width(doc: &Document) -> Sp {

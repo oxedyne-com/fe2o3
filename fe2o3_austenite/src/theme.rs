@@ -249,15 +249,15 @@ impl Default for ThemeOpener {
 /// Bulleted lists: the gap after a marker and the space between one item and the next.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeList {
-	pub marker_gap:	Sp,	// space between a list marker and the item text it introduces
-	pub item_skip:	Sp,	// vertical space set between one list item and the next
+	pub marker_gap:	Sp,			// space between a list marker and the item text it introduces
+	pub item_skip:	Option<Sp>,	// `#set list(spacing:)` override; None keeps Typst's auto (tight body pitch, loose block spacing)
 }
 
 impl Default for ThemeList {
 	fn default() -> Self {
 		Self {
 			marker_gap:	Sp::from_pt(6.0),
-			item_skip:	Sp::from_pt(3.0),
+			item_skip:	None,
 		}
 	}
 }
@@ -267,7 +267,7 @@ impl Default for ThemeList {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ThemeEnum {
 	pub marker_gap:	Sp,
-	pub item_skip:	Sp,
+	pub item_skip:	Option<Sp>,	// `#set enum(spacing:)` override; None keeps Typst's auto (tight body pitch, loose block spacing)
 	pub numbering:	Option<String>,	// reserved: a Typst numbering pattern, e.g. "1."
 }
 
@@ -275,7 +275,7 @@ impl Default for ThemeEnum {
 	fn default() -> Self {
 		Self {
 			marker_gap:	Sp::from_pt(6.0),
-			item_skip:	Sp::from_pt(3.0),
+			item_skip:	None,
 			numbering:	None,
 		}
 	}
@@ -569,13 +569,13 @@ pub struct ThemeOpenerPatch {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemeListPatch {
 	pub marker_gap:	Option<Sp>,
-	pub item_skip:	Option<Sp>,
+	pub item_skip:	Option<Option<Sp>>,	// outer: was the spacing set; inner: the override value (None never occurs from set)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemeEnumPatch {
 	pub marker_gap:	Option<Sp>,
-	pub item_skip:	Option<Sp>,
+	pub item_skip:	Option<Option<Sp>>,	// outer: was the spacing set; inner: the override value
 	pub numbering:	Option<Option<String>>,
 }
 
@@ -1139,13 +1139,13 @@ impl ThemeList {
 	fn to_dat(&self) -> Outcome<Dat> {
 		Ok(omapdat!{
 			"marker_gap"	=> sp_dat(self.marker_gap),
-			"item_skip"		=> sp_dat(self.item_skip),
+			"item_skip"		=> opt_sp_dat(self.item_skip),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		Ok(Self {
 			marker_gap:	res!(sp_from(res!(map_must(&mut d, "marker_gap")))),
-			item_skip:	res!(sp_from(res!(map_must(&mut d, "item_skip")))),
+			item_skip:	res!(opt_sp_from(res!(map_must(&mut d, "item_skip")))),
 		})
 	}
 }
@@ -1154,14 +1154,14 @@ impl ThemeEnum {
 	fn to_dat(&self) -> Outcome<Dat> {
 		Ok(omapdat!{
 			"marker_gap"	=> sp_dat(self.marker_gap),
-			"item_skip"		=> sp_dat(self.item_skip),
+			"item_skip"		=> opt_sp_dat(self.item_skip),
 			"numbering"		=> opt_str_dat(&self.numbering),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		Ok(Self {
 			marker_gap:	res!(sp_from(res!(map_must(&mut d, "marker_gap")))),
-			item_skip:	res!(sp_from(res!(map_must(&mut d, "item_skip")))),
+			item_skip:	res!(opt_sp_from(res!(map_must(&mut d, "item_skip")))),
 			numbering:	res!(opt_str_from(res!(map_must(&mut d, "numbering")))),
 		})
 	}
