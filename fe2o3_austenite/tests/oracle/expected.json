@@ -1,7 +1,7 @@
 { "roots": [
 	{ "name": "cheapthinking-ch03", "pages": 5, "anchors": 16, "pdf_sha256": "c269680891f395382907e33f0cc763658fb90609bba44dc5c04f7e426de1eaa0" },
 	{ "name": "oxeweb-overview", "pages": 38, "anchors": 131, "pdf_sha256": "fec38d1c5f1829b004014f64b3c5cb24115ae2bbae5e54a676f05748bc5e6ed1" },
-	{ "name": "oxeweb-techspec", "pages": 141, "anchors": 574, "pdf_sha256": "9a142b10b67a29a48cf151e9705bb90d6911ab3dbf8f56cc89c4f705185d400d" },
+	{ "name": "oxeweb-techspec", "pages": 141, "anchors": 574, "pdf_sha256": "18c263888e8cc159cce1b96cbf9cc9fee1617eeb56a99ed9dff1e9fc48e44708", "note": "re-pinned 2026-09-21 for inline mid-prose content-fn expansion (reader-completeness item 3); self-pin root, no typst oracle (utils.typ uses 0.15.1-removed symbol modifiers); change is raw #oxe leak -> tallied refusal, visually verified -- see fixtures/oxeweb_techspec_repin_20260921/NOTE.md" },
 	{ "name": "styling-fixture", "pages": 1, "anchors": 4, "pdf_sha256": "d035bd3c146435ef5571d26708f274b94dc412e9914317bbc98624c5db45d53f" },
 	{ "name": "marginalia-fixture", "pages": 2, "anchors": 4, "pdf_sha256": "d693d7e992a31481a6b1a70cff6050ea9c70fefb9a275a5f662ee4ccb9d23381" },
 	{ "name": "claim-index-fixture", "pages": 2, "anchors": 15, "pdf_sha256": "cde7903636412305c8bcd8e09d9dbda45a08d2530cc82164b8f9b3e7e1a86410" },
@@ -15,5 +15,6 @@
 	{ "name": "media-guard-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "70c9e927c6802bdd9a2fcc5b672a87a9ca78fd32fe1475ddcd14f0db160abeaf" },
 	{ "name": "media-bracket-fixture", "pages": 3, "anchors": 6, "pdf_sha256": "7ede0c2ff6359356e40ec8e2c6f105f39d24a9e99dcb81363c8e374c9a7c856f" },
 	{ "name": "context-comment-fixture", "pages": 1, "anchors": 2, "pdf_sha256": "f730c8ac233af6bd308e012fd5d7c284686b68e760d3d16c8aed09ebeeba1f50" },
-	{ "name": "builtins-fixture", "pages": 2, "anchors": 2, "pdf_sha256": "5349d95656491f716170205ecab51779bafea0046e364befb88165cc434f3d4a" }
+	{ "name": "builtins-fixture", "pages": 2, "anchors": 2, "pdf_sha256": "5349d95656491f716170205ecab51779bafea0046e364befb88165cc434f3d4a" },
+	{ "name": "inline-content-fn-fixture", "pages": 1, "anchors": 1, "pdf_sha256": "4bdfe9d571c52eb8be3d3bdae61b4f9ad8c205a048542bb3ba72964a91ac59d3" }
 ]}

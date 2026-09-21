@@ -184,18 +184,95 @@ fn content_binding_cycle_is_refused_and_terminates() -> Outcome<()> {
 
 /// An inline-shaped content function used mid-line -- `#em[Note] the rest.` -- must not discard the trailing
 /// prose: the only-whitespace-after rule keeps the reference from being taken as a standalone splice, so the
-/// sentence's tail survives in the paragraph. (Risk 3 -- silent word loss.)
+/// sentence's tail survives in the paragraph. (Risk 3 -- silent word loss.) The binding body wraps its
+/// parameter in an `#emph[ ... ]` call: a bare `_#x_` reads its trailing `_` as part of the identifier `x_`
+/// (`_` is a valid identifier character), which Typst 0.15.1 itself rejects as an unclosed delimiter -- so
+/// the emphasis is expressed the way Typst accepts, now that the inline path genuinely expands the body.
 #[test]
 fn inline_shaped_content_fn_keeps_trailing_prose() -> Outcome<()> {
 	let blocks = res!(assemble_blocks(&[
 		("/__vfs__/main.typ",
 			"#import \"e.typ\": em\n\n#em[Note] the rest of this sentence survives.\n"),
 		("/__vfs__/e.typ",
-			"#let em(x) = [_#x_]\n"),
+			"#let em(x) = [#emph[#x]]\n"),
 	]));
 	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
 	assert!(joined.contains("the rest of this sentence survives."),
 		"the trailing prose after `#em[Note]` must survive, got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A content-binding reference used INLINE within a running paragraph -- prose before AND after it on the
+/// same line -- splices its argument-substituted body into the sentence at the position it stood, keeping
+/// both stretches of surrounding prose. This is reader-completeness item 3: before it, an inline reference
+/// leaked its raw `#name` (a bare reference) or folded only a `[...]` body while dropping paren arguments,
+/// never expanding the binding the way an own-line reference does.
+#[test]
+fn inline_mid_prose_content_call_splices_with_prose_either_side() -> Outcome<()> {
+	// An argument-taking call mid-sentence: prose before, the call, prose after.
+	let blocks = res!(assemble_blocks(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nText before #stamp(\"v2\") and text after.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(ver) = [version #ver]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Text before version v2 and text after."),
+		"the inline `#stamp(\"v2\")` must expand to `version v2` between its surrounding prose, got: {:?}",
+		blocks);
+	res!(assert_no_hash_leak(&blocks));
+
+	// A bare (no-argument) reference wedged between two words with no spaces -- the `M#oxe` shape -- must
+	// expand in place, keeping the character before and the words after.
+	let blocks = res!(assemble_blocks(&[
+		("/__vfs__/main.typ",
+			"#import \"m.typ\": mark\n\nWritten as pre#mark and read aloud.\n"),
+		("/__vfs__/m.typ",
+			"#let mark = [OK]\n"),
+	]));
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Written as preOK and read aloud."),
+		"the bare inline `#mark` must expand to `OK` in place, keeping `pre` before and the words after, \
+		got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// An UNKNOWN call used inline mid-prose -- a name no binding defines -- stays a VISIBLE refusal, recorded by
+/// name, with the surrounding prose kept: the inline expander must not swallow it silently, and it must not
+/// leak its raw `#name` onto the page.
+#[test]
+fn inline_unknown_call_is_refused_and_prose_kept() -> Outcome<()> {
+	// A bound binding is in scope, so the inline expander runs, but the unknown call is not it.
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"s.typ\": stamp\n\nSee #widget(3) between the words here.\n"),
+		("/__vfs__/s.typ",
+			"#let stamp(ver) = [version #ver]\n"),
+	]));
+	assert!(names.iter().any(|n| n == "#widget"),
+		"the unknown inline `#widget(3)` must be recorded as a refusal, got refusals: {:?}", names);
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("See") && joined.contains("between the words here."),
+		"the prose around the refused inline call must survive, got: {:?}", blocks);
+	res!(assert_no_hash_leak(&blocks));
+	Ok(())
+}
+
+/// A self-referential binding referenced INLINE (not own-line) must be refused as a cycle and terminate, with
+/// the surrounding prose kept -- the inline path carries the same name-stack guard the own-line path does.
+#[test]
+fn inline_content_call_cycle_is_refused_and_terminates() -> Outcome<()> {
+	let (blocks, names) = res!(assemble_full(&[
+		("/__vfs__/main.typ",	"#import \"a.typ\": a\n\nPrefix #a suffix here.\n"),
+		("/__vfs__/a.typ",		"#let a = [loop #a end]\n"),
+	]));
+	assert!(names.iter().any(|n| n.contains("cycle")),
+		"an inline self-referential binding must record a cycle refusal, got refusals: {:?}", names);
+	let joined: String = flatten(&blocks).into_iter().map(block_text).collect::<Vec<_>>().join(" ");
+	assert!(joined.contains("Prefix") && joined.contains("suffix here."),
+		"the prose around the refused inline cycle must survive, got: {:?}", blocks);
 	res!(assert_no_hash_leak(&blocks));
 	Ok(())
 }

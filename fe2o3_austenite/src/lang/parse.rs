@@ -429,7 +429,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		if is_fence(trimmed) {
 			// An opening fence closes any paragraph or list, then begins a verbatim block. The fence line
 			// itself (and any language tag on it) is not kept.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			code = Some((Vec::new(), start));
 			continue;
@@ -450,7 +450,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// content intervenes. The list is therefore held open here; the marker branch joins a following
 			// item of the same kind, while any other line -- a paragraph, heading, figure, fence or code
 			// line -- flushes it first, so two lists parted by real content still restart.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
 			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
 		{
@@ -470,7 +470,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A multi-line construct the reader sets rather than skips. It closes any open block, then its
 			// whole text is gathered by the check
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			let mut state	= SkipState::new();
 			scan_brackets(line, &mut state);
@@ -487,7 +487,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A standalone `#line(length:.., stroke:..)` horizontal divider (the appendix brackets a note
 			// with one above and below). It closes any open block and sets a stroked rule; a multi-line
 			// `#line(` that does not close on this line falls through to the skip path below.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			if let Some(rule) = parse_line_rule(trimmed) {
 				items.push(rule);
@@ -496,7 +496,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// A line-leading `#print-glossary()`: the glossary section's Term/Definition table. It closes any
 			// open block and emits a placeholder the book layer fills once the whole document's glossary terms
 			// are known -- unlike the surrounding template calls it is set in place, not recorded as a skip.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			items.push(Item::PrintGlossary { span: Span::new(start, end) });
 		} else if let Some(decision) = code_skip(trimmed) {
@@ -505,7 +505,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// The styling and computation layer is a later increment; the prose around it still sets. When
 			// its delimiters do not balance on this line, the multi-line span is consumed by the check at the
 			// top of the loop until they do.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			// The recorded span is the opening line alone, even for a construct whose delimiters run on
 			// for several more: that is where a reader wants `--explain`'s caret to land, and the true
@@ -527,12 +527,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// paragraph arm below, where `flush_para`'s own `substitute_scalars` replaces it with the bound
 			// value, so a scalar standing alone on its line sets its value just as one mid-prose already does.
 			// An UNBOUND standalone name is not exempt, so it stays the visible refusal it has always been.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			skips.record(&construct_name(trimmed), Span::new(start, end));
 		} else if trimmed.starts_with('=') && !math_block_open {
 			// A heading closes any paragraph or list above it, then stands on its own line.
-			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
@@ -548,10 +548,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			}
 			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
 			// maths span in a heading sets its display text rather than leaking its raw source into the head
-			// and the table of contents. A bare `#name` naming a scalar `#let` value binding (`= Product
-			// #version`) substitutes its display text first, the same as a paragraph's.
-			let title = substitute_scalars(&title, binds.sfns);
+			// and the table of contents. An inline reference to a content binding (`= Product #stamp`) splices
+			// its expanded body first, and a bare `#name` naming a scalar `#let` value binding (`= Product
+			// #version`) substitutes its display text next, the same as a paragraph's.
 			let head_span = Span::new(start, end);
+			let title = substitute_content_calls(&title, binds, &mut skips, head_span);
+			let title = substitute_scalars(&title, binds.sfns);
 			items.push(Item::Heading {
 				level:	level as u8,
 				runs:	parse_inlines_in(&title, head_span, &mut skips),
@@ -568,9 +570,15 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					// a deeper marker opens a sub-list under the current item, a shallower one closes back to
 					// the matching level, and a same-indent marker of the other kind ends the list and starts
 					// one of the new kind. The item's text carries inline emphasis like any run.
-					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+					flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 					let indent = line.chars().take_while(|c| c.is_whitespace()).count();
-					let runs = parse_inlines_in(&text, Span::new(start, end), &mut skips);
+					// A list item is running prose like a paragraph, so an inline content-fn reference in it --
+					// `+ ... written as M#oxe.` -- splices its expanded body first, exactly as `flush_para` does
+					// for a paragraph. Without this the item bypassed the pre-pass and leaked a raw `#oxe`/`#name`
+					// while the same reference in a paragraph beside it expanded, an inconsistency a reader sees.
+					let item_span	= Span::new(start, end);
+					let text		= substitute_content_calls(&text, binds, &mut skips, item_span);
+					let runs		= parse_inlines_in(&text, item_span, &mut skips);
 					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 				},
 				None => {
@@ -590,7 +598,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 
 	// A source that ends without a closing blank line still closes its last paragraph or list; an
 	// unterminated code fence still yields the block it had gathered.
-	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds.sfns);
+	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 	flush_list(&mut items, &mut stack);
 	if let Some((buf, cstart)) = code {
 		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
@@ -743,7 +751,7 @@ fn flush_para(
 	start:	u32,
 	end:	u32,
 	skips:	&mut Refusals,
-	sfns:	&crate::lang::rules::ScalarFns,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
 )
 {
 	if lines.is_empty() {
@@ -755,13 +763,19 @@ fn flush_para(
 	// rather than a rich paragraph. Ordinary prose ends in a full stop, so the conservative `split_label`
 	// (a single whitespace-free token in angle brackets at the very end) does not fire on it.
 	let (body, label) = split_label(&text);
+	let span = Span::new(start, end);
+	// An inline mid-prose reference to a bound content binding -- `M#oxe`, `see #stamp("v2") for details` --
+	// splices its argument-substituted body into the surrounding prose here, before the scalar pass and the
+	// inline scanner, exactly as the own-line reference splices its blocks: the words before and after the
+	// call are kept, and the body's own markup is then read by the one downstream scanner. Runs first so a
+	// scalar reference the body carries still substitutes below.
+	let body = substitute_content_calls(&body, binds, skips, span);
 	// A bare `#name` naming a scalar `#let` value binding substitutes its display text before the inline
 	// scanner runs, so "Version #version." reads the same as if the number or string had been typed in
 	// place. Runs before `parse_inlines_in`, never inside it, so it never touches a raw code span, inline
 	// maths, or any other captured construct (a table, a figure, a `#context` block) -- those are gathered
 	// and dispatched on a wholly separate path and never reach here.
-	let body = substitute_scalars(&body, sfns);
-	let span = Span::new(start, end);
+	let body = substitute_scalars(&body, binds.sfns);
 	let runs = parse_inlines_in(&body, span, skips);
 	items.push(Item::Paragraph { runs, label, span });
 	lines.clear();
@@ -3007,6 +3021,145 @@ fn substitute_call_args(inner: &str, params: &[String], args: &[String]) -> Stri
 			}
 			i = j;
 			continue;
+		}
+		out.push(c);
+		i += 1;
+	}
+	out
+}
+
+/// Expands every inline mid-prose reference to a bound content binding within a run of already-joined
+/// paragraph (or heading) text, splicing each call's argument-substituted, re-expanded body into the
+/// surrounding prose at the position it stood -- the inline twin of the own-line [`CaptureKind::ContentCall`]
+/// path (which splices a binding referenced alone on its line as blocks). A `M#oxe`, a
+/// `see #stamp("v2") for details` or a `#note[x]` mid-sentence therefore sets its expansion with the words
+/// before AND after it kept, rather than leaking its raw `#name` onto the page or refusing the call and
+/// losing it.
+///
+/// Runs as a textual pre-pass in [`flush_para`] (and on a heading title), BEFORE [`substitute_scalars`] and
+/// [`parse_inlines_in`] -- the same shape the scalar pass takes, and for the same reason: a content binding's
+/// value is markup that must be re-read as the surrounding prose's own, so expanding it here lets the one
+/// inline scanner downstream read the spliced result. A glossary term, an emphasis or a maths span in the
+/// body sets exactly as if it had been typed in place, and an unrenderable primitive in the body (a `#h`, a
+/// `#box`) reaches that scanner's own visible-refusal path rather than a parallel one here -- so the root fix
+/// reuses [`expand_content_body`] and the block path's cycle rule rather than building a second expander.
+///
+/// `active` (carried on `binds`, seeded from an enclosing block-level expansion) is the stack of binding
+/// names currently expanding: a reference to a name already on it is refused as a cycle, exactly as the block
+/// path refuses one, so a self- or mutually-referential body unwinds at its own length rather than looping;
+/// [`MAX_EXPANSION_DEPTH`] is the backstop for a pathological non-cyclic chain. A `#name` that names no
+/// content binding, that is one of the inline-call family (so a binding named `g`/`idx` never shadows the
+/// inline call the scanner sets in place), that is a field/method access (`#name.foo`), or that sits in a raw
+/// `` `...` `` span, a `$...$` maths span or behind a `\`-escape is left untouched, so the downstream scanner
+/// still sets or refuses it exactly as before. A binding referenced own-line is handled earlier by
+/// [`capture_opener`], so this only ever sees a genuinely mid-prose reference.
+pub(crate) fn substitute_content_calls(
+	text:	&str,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
+	skips:	&mut Refusals,
+	span:	Span,
+)
+	-> String
+{
+	// The common case, no content bindings in scope: costs nothing beyond the check, so a document that uses
+	// none reads exactly as before.
+	if binds.cfns.is_empty() {
+		return text.to_string();
+	}
+	let chars:	Vec<char>	= text.chars().collect();
+	let mut out		= String::new();
+	let mut i		= 0usize;
+	let mut in_raw	= false;
+	let mut in_math	= false;
+	while i < chars.len() {
+		let c = chars[i];
+		// An escaped `\#` (or any `\`-escape) is literal: the backslash and its character are passed straight
+		// through, so the downstream scanner still turns `\#` into a literal `#`.
+		if c == '\\' && i + 1 < chars.len() {
+			out.push(c);
+			out.push(chars[i + 1]);
+			i += 2;
+			continue;
+		}
+		if c == '`' {
+			in_raw = !in_raw;
+			out.push(c);
+			i += 1;
+			continue;
+		}
+		if c == '$' && !in_raw {
+			in_math = !in_math;
+			out.push(c);
+			i += 1;
+			continue;
+		}
+		if c == '#' && !in_raw && !in_math {
+			let start	= i + 1;
+			let mut j	= start;
+			while j < chars.len() && (chars[j].is_alphanumeric() || chars[j] == '-' || chars[j] == '_') {
+				j += 1;
+			}
+			if j > start {
+				let name: String = chars[start..j].iter().collect();
+				// A field or method access on the name -- `#name.foo` -- is a code-mode expression, not a bare
+				// content reference: leave it for the downstream refusal path rather than expanding the name and
+				// stranding the `.foo`. Only a `.` FOLLOWED BY an identifier is an access, though: a `.` before
+				// whitespace, end of input or punctuation is a sentence's full stop, which Typst sets literally
+				// after expanding the reference (`M#oxe.` sets `MX.`), so it must not block the expansion.
+				let field_access = chars.get(j) == Some(&'.')
+					&& chars.get(j + 1).map_or(false, |c| c.is_alphabetic() || *c == '_');
+				if !field_access && !is_inline_call(&name) {
+					if let Some(cf) = binds.cfns.get(&name) {
+						// Step over the call's balanced group(s) -- a `(args)` optionally followed by a `[body]`,
+						// or a lone `[body]` -- reading its positional arguments the same way [`content_call_args`]
+						// reads a captured own-line call's, so both paths substitute identically.
+						let mut k		= j;
+						let mut args:	Vec<String>	= Vec::new();
+						if chars.get(k) == Some(&'(') {
+							if let Some((inner, after)) = read_group(&chars, k) {
+								args = split_arg_commas(&inner).into_iter()
+									.map(|a| content_arg_value(a.trim()))
+									.collect();
+								k = after;
+							}
+						}
+						if chars.get(k) == Some(&'[') {
+							if let Some((inner, after)) = read_group(&chars, k) {
+								// A `#name[ ... ]` call with no paren group: the bracket body is the single
+								// positional argument, mirroring [`content_call_args`]'s own bracket arm.
+								if args.is_empty() {
+									args = vec![inner];
+								}
+								k = after;
+							}
+						}
+						// A self- or mutually-referential binding is refused the instant its name recurs, so a
+						// cycle unwinds at its own length; the depth cap is the backstop for a pathological chain
+						// of distinct bindings. Either way the call is consumed (the surrounding prose is kept)
+						// and a visible refusal recorded, exactly as the own-line path does.
+						if binds.expanding(&name) {
+							skips.record(
+								&fmt!("#{} (cycle: content binding refers back to itself)", name), span);
+							i = k;
+							continue;
+						}
+						if binds.depth() >= MAX_EXPANSION_DEPTH {
+							skips.record(
+								&fmt!("#{} (cycle: expansion depth exceeds {})", name, MAX_EXPANSION_DEPTH), span);
+							i = k;
+							continue;
+						}
+						let expanded		= expand_content_body(cf, &args);
+						let mut nested:	Vec<String>	= binds.active.to_vec();
+						nested.push(name.clone());
+						// The expanded body may itself reference another binding inline, so it is expanded in
+						// turn with this name pushed onto the active stack -- the recursion the cycle guard bounds.
+						out.push_str(&substitute_content_calls(&expanded, binds.with_active(&nested), skips, span));
+						i = k;
+						continue;
+					}
+				}
+			}
 		}
 		out.push(c);
 		i += 1;

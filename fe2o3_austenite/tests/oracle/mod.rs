@@ -289,6 +289,21 @@ pub fn corpus() -> Vec<CorpusRoot> {
 			typst_root:			None,
 			typst_symbol_patch:	false,
 		},
+		CorpusRoot {
+			// This crate's own inline mid-prose content-fn fixture (reader-completeness item 3) -- the
+			// regression root for a content-fn CALL used within a running paragraph (`see #term("website") for
+			// details`) or a bare content binding wedged into prose (`#brand`), splicing its argument-substituted
+			// body into the sentence with the words before AND after it kept. Before the fix, an own-line
+			// reference expanded but a mid-prose one was refused (its arguments dropped) or leaked its raw
+			// `#name`. Two `#term(...)` calls with different arguments must render two different italic words,
+			// proving the argument substitution is genuine, and a `#brand` reference must expand in both running
+			// prose and a heading title. Reverting the fix drops the calls' set text and moves the pinned hash.
+			// See the fixture file for the full shape and why it needs no symbol-modifier patch.
+			name:				"inline-content-fn-fixture",
+			path:				concat!(env!("CARGO_MANIFEST_DIR"), "/tests/oracle/fixtures/inline_content_fn_fixture.typ"),
+			typst_root:			None,
+			typst_symbol_patch:	false,
+		},
 	]
 }
 
