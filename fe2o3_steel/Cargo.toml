@@ -52,17 +52,17 @@ zeroize = { version = "1.4.2", features = ["zeroize_derive"] }
 
 # App dev js bundling.
 anyhow = "1.0"
-swc = "8.0.0"
-swc_bundler = "6.0.0"
-swc_common = { version = "5.0.0", features = ["tty-emitter"] }
-swc_config = "1.0.0"
-swc_ecma_loader = { version = "5.0.0", features = ["node", "cache"] }
-swc_ecma_parser = "6.0.0"
-swc_ecma_codegen = "5.0.0"
-swc_ecma_transforms_module = "6.0.0"
-swc_ecma_visit = "5.0.0"
-swc_ecma_ast = "5.0.0"
-swc_ecma_transforms_base = "6.0.0"
+swc = "78.0.0"
+swc_bundler = "56.0.1"
+swc_common = { version = "26.0.0", features = ["tty-emitter"] }
+swc_config = "6.0.0"
+swc_ecma_loader = { version = "27.0.0", features = ["node", "cache"] }
+swc_ecma_parser = "45.1.4"
+swc_ecma_codegen = "32.0.3"
+swc_ecma_transforms_module = "56.0.0"
+swc_ecma_visit = "29.0.0"
+swc_ecma_ast = "29.0.2"
+swc_ecma_transforms_base = "49.0.1"
 
 # App sass compilation to css.
 grass = "0.13"
