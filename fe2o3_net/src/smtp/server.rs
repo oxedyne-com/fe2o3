@@ -49,9 +49,11 @@ use tokio::{
     },
     net::TcpStream,
 };
-use tokio_rustls::{
-    TlsAcceptor,
-    server::TlsStream,
+use tokio_rustls::server::TlsStream;
+
+use crate::tls::{
+    BoundedTlsAcceptor,
+    Handshake,
 };
 
 
@@ -227,8 +229,10 @@ impl SmtpSession {
 pub struct SmtpServer<H: SmtpHandler, U: UserStore> {
     pub handler:        H,
     pub users:          U,                      // read by the AUTH path
-    // `None` disables STARTTLS; a submission listener must always have one.
-    pub tls_acceptor:   Option<TlsAcceptor>,
+    // `None` disables STARTTLS; a submission listener must always have one. The
+    // acceptor is bounded, so a STARTTLS handshake shares the same concurrency
+    // cap and deadline as every other TLS listener on the host.
+    pub tls_acceptor:   Option<BoundedTlsAcceptor>,
     // Advertised in the 220 banner and the `Received:` header, so it should be the public MX
     // hostname.
     pub hostname:       Arc<String>,
@@ -279,8 +283,11 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                             Invalid, Bug)),
                     };
                     let tls = match acceptor.accept(plain).await {
-                        Ok(t) => t,
-                        Err(e) => return Err(err!(e,
+                        Handshake::Ok(t) => t,
+                        Handshake::TimedOut => return Err(err!(
+                            "STARTTLS handshake timed out for {:?}.", peer;
+                            IO, Network, Init)),
+                        Handshake::Failed(e) => return Err(err!(e,
                             "STARTTLS handshake failed for {:?}.", peer;
                             IO, Network, Init)),
                     };

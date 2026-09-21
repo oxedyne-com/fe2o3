@@ -26,6 +26,8 @@ use std::{
     },
 };
 
+use std::time::Duration;
+
 use tokio::{
     io::{
         AsyncRead,
@@ -33,6 +35,7 @@ use tokio::{
         ReadBuf,
     },
     net::TcpStream,
+    sync::Semaphore,
 };
 use tokio_rustls::{
     rustls::{
@@ -43,8 +46,121 @@ use tokio_rustls::{
         },
         RootCertStore,
     },
+    TlsAcceptor,
     TlsConnector,
 };
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ BOUNDED SERVER-SIDE TLS ACCEPTOR                                          │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The result of a bounded handshake, distinguishing the two ways it can fail.
+///
+/// A `TimedOut` is an admission event -- the permit wait or the handshake ran
+/// past the deadline -- and a caller that keeps admission counters records it as
+/// a drop. A `Failed` is an ordinary broken handshake (a client that hung up, a
+/// malformed record) and is logged, not counted against admission.
+pub enum Handshake<IO> {
+    Ok(tokio_rustls::server::TlsStream<IO>),
+    TimedOut,
+    Failed(Error<ErrTag>),
+}
+
+/// A `TlsAcceptor` with a shared cap on how many handshakes run at once and a
+/// deadline on each.
+///
+/// The same rustls server configuration serves HTTPS and the mail listeners
+/// (SMTP STARTTLS, implicit-TLS IMAP), so the bound lives here, once, and every
+/// listener shares one `BoundedTlsAcceptor` rather than each carrying its own.
+/// Two shapes are closed together: a flood of concurrent handshakes exhausting
+/// the CPU on a single-vCPU box (the semaphore), and a drip-fed handshake that
+/// pins a permit indefinitely and turns the semaphore itself into a slowloris
+/// amplifier (the deadline, which covers both the wait for a permit and the
+/// handshake it guards). Both bounds are optional: a zero permit count or an
+/// absent deadline disables that half, which is the inert default.
+#[derive(Clone)]
+pub struct BoundedTlsAcceptor {
+    acceptor:   TlsAcceptor,
+    sem:        Option<std::sync::Arc<Semaphore>>,  // None disables the concurrency bound
+    deadline:   Option<Duration>,                    // None disables the handshake deadline
+}
+
+impl BoundedTlsAcceptor {
+
+    /// `max_handshakes` of 0 leaves handshake concurrency unbounded; a `None`
+    /// deadline leaves each handshake untimed. Both are the inert defaults, so a
+    /// caller that opts into neither gets exactly a bare `TlsAcceptor`'s behaviour.
+    pub fn new(
+        acceptor:       TlsAcceptor,
+        max_handshakes: usize,
+        deadline:       Option<Duration>,
+    )
+        -> Self
+    {
+        let sem = if max_handshakes == 0 {
+            None
+        } else {
+            Some(std::sync::Arc::new(Semaphore::new(max_handshakes)))
+        };
+        Self { acceptor, sem, deadline }
+    }
+
+    /// An acceptor with neither bound, for a caller that wants the plain thing.
+    pub fn unbounded(acceptor: TlsAcceptor) -> Self {
+        Self { acceptor, sem: None, deadline: None }
+    }
+
+    /// The per-handshake deadline, so a caller can time an adjacent step (a peek
+    /// before the handshake, say) to the same bound.
+    pub fn deadline(&self) -> Option<Duration> {
+        self.deadline
+    }
+
+    /// Complete one server-side handshake within the shared concurrency cap and
+    /// the deadline.
+    ///
+    /// A permit is taken immediately before the handshake and released the moment
+    /// it returns, so it bounds only the expensive handshake and never the whole
+    /// session that follows. The deadline wraps both the wait for a permit and
+    /// the handshake, so no single connection can hold a slot open indefinitely.
+    pub async fn accept<IO>(&self, stream: IO) -> Handshake<IO>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        // A permit, bounded by the deadline. Held across the handshake below and
+        // dropped when this function returns.
+        let _permit = match &self.sem {
+            Some(sem) => match self.deadline {
+                Some(d) => match tokio::time::timeout(d, sem.acquire()).await {
+                    Ok(Ok(p))  => Some(p),
+                    Ok(Err(_)) => return Handshake::Failed(err!(
+                        "The TLS handshake semaphore was closed."; Bug, Network)),
+                    Err(_)     => return Handshake::TimedOut,
+                },
+                None => match sem.acquire().await {
+                    Ok(p)  => Some(p),
+                    Err(_) => return Handshake::Failed(err!(
+                        "The TLS handshake semaphore was closed."; Bug, Network)),
+                },
+            },
+            None => None,
+        };
+        match self.deadline {
+            Some(d) => match tokio::time::timeout(d, self.acceptor.accept(stream)).await {
+                Ok(Ok(tls)) => Handshake::Ok(tls),
+                Ok(Err(e))  => Handshake::Failed(err!(e,
+                    "TLS handshake failed."; IO, Network, Init)),
+                Err(_)      => Handshake::TimedOut,
+            },
+            None => match self.acceptor.accept(stream).await {
+                Ok(tls) => Handshake::Ok(tls),
+                Err(e)  => Handshake::Failed(err!(e,
+                    "TLS handshake failed."; IO, Network, Init)),
+            },
+        }
+    }
+}
 
 
 /// Either a plain TCP stream or a client-side TLS-wrapped TCP stream.
