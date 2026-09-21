@@ -21,6 +21,27 @@ pub fn byte_slices_equal(a: &[u8], b: &[u8]) -> Outcome<()> {
     Ok(())
 }
 
+/// Constant-time equality of two byte slices.
+///
+/// The running time depends only on the length of the slices, never on where or
+/// whether their contents first differ, so comparing a secret against attacker-
+/// supplied bytes leaks no timing oracle about how many leading bytes matched. A
+/// length mismatch returns `false` immediately -- the length of a token is not
+/// the secret its bytes are, and a short-circuit there reveals nothing an
+/// attacker could not measure from the response size anyway. Written to resist
+/// the compiler's urge to short-circuit by accumulating a difference over every
+/// byte and testing it once at the end.
+pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 new_type!(B32, [u8; 32], Clone, Default);
 
 impl std::marker::Copy for B32 {}
@@ -228,8 +249,22 @@ impl From<u8> for Encoding {
     fn from(b: u8) -> Self {
         match b {
             1 => Self::Binary,
-            2 => Self::UTF8, 
+            2 => Self::UTF8,
             _ => Self::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ct_eq_matches_semantics_of_ordinary_equality() {
+        assert!(ct_eq(b"secret-token", b"secret-token"));
+        assert!(!ct_eq(b"secret-token", b"secret-tokeX"));
+        assert!(!ct_eq(b"secret-token", b"secret"));   // different lengths
+        assert!(!ct_eq(b"", b"x"));
+        assert!(ct_eq(b"", b""));                        // both empty are equal
     }
 }
