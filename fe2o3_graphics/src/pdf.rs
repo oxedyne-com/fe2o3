@@ -1,11 +1,11 @@
-//! A minimal PDF writer: pages of filled and stroked outline paths.
+//! A minimal PDF writer: pages of filled and stroked outline paths, and text in embedded fonts.
 //!
-//! The typesetter above this crate turns every glyph into a filled outline [`Path`] -- the Pearl
-//! principle, that a font is a set of outlines and not a program -- so a page is a list of filled
-//! paths and nothing else. This writer leans on that entirely: it embeds no font, no CMap and no font
-//! program, and writes each glyph as ordinary path-construction and fill operators in a content
-//! stream. That is the whole simplification, and it is why the file this module produces is small and
-//! self-contained.
+//! Text reaches the page in one of two ways. A glyph from an embeddable font file ([`FontProgram`]) is
+//! shown by `TJ` from a `Type0` font over a subset of that very file, so a viewer renders the designer's
+//! outlines with its own rasteriser and copies, searches and reads aloud the text through the font's
+//! `/ToUnicode`. A glyph whose font cannot be embedded -- a variable `CFF2` face, or a licence that
+//! forbids it -- falls back to its filled outline, stored once in a Type-3 font that carries a
+//! `/ToUnicode` of its own, so it too stays extractable.
 //!
 //! The geometry and colour are the crate's own [`Path`], [`Pt`], [`Seg`] and [`Rgba`]; nothing here
 //! defines a parallel type. A quadratic segment is elevated to a cubic on the way out, since PDF has
@@ -20,6 +20,11 @@
 //! Anthropic Claude
 
 use crate::colour::Rgba;
+use crate::pdf_font::{
+	FontFile,
+	FontProgram,
+	Outlines,
+};
 use crate::path::{
 	Path,
 	Pt,
@@ -27,8 +32,11 @@ use crate::path::{
 };
 use crate::transform::Transform;
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::Write;
+use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -90,6 +98,15 @@ pub enum Draw {
 		colour:		Rgba,
 		text:		String,		// source scalar(s) this glyph stands for, for /ToUnicode; may be empty
 	},
+	Text {
+		font:		Arc<FontProgram>,
+		gid:		u16,		// glyph id in the program, shown as the CID of the same number
+		x:			f32,		// pen x in the engine frame (top-left, y down), points
+		y:			f32,		// the baseline in the engine frame, points
+		size:		f32,		// point size
+		colour:		Rgba,
+		text:		String,		// source scalar(s), for /ToUnicode; may be empty
+	},
 }
 
 impl Draw {
@@ -101,6 +118,7 @@ impl Draw {
 			Draw::Fill { colour, .. }	=> *colour,
 			Draw::Stroke { colour, .. }	=> *colour,
 			Draw::Glyph { colour, .. }	=> *colour,
+			Draw::Text { colour, .. }	=> *colour,
 			Draw::Image { .. }			=> Rgba::new(0, 0, 0, 255),
 		}
 	}
@@ -184,6 +202,24 @@ impl PdfPage {
 	/// outline once.
 	pub fn glyph(&mut self, outline: Path, x: f32, y: f32, size: f32, adv: f32, colour: Rgba, text: String) {
 		self.draws.push(Draw::Glyph { outline, x, y, size, adv, colour, text });
+	}
+
+	/// Adds glyph `gid` of an embeddable font at pen `(x, y)` -- `x` the left, `y` the baseline, in the
+	/// engine's top-left, y-down point frame -- shown at `size` points and painted `colour`. `text` is the
+	/// source it stands for, recorded in the font's `/ToUnicode`; the first non-empty text a glyph is met
+	/// with is the one it keeps. The font is embedded once, subset to the glyphs the document shows.
+	#[allow(clippy::too_many_arguments)]
+	pub fn text(
+		&mut self,
+		font:	Arc<FontProgram>,
+		gid:	u16,
+		x:		f32,
+		y:		f32,
+		size:	f32,
+		colour:	Rgba,
+		text:	String,
+	) {
+		self.draws.push(Draw::Text { font, gid, x, y, size, colour, text });
 	}
 }
 
@@ -343,11 +379,11 @@ impl PdfWriter {
 /// page -- names every page object and their count. The deterministic `/ID` is a hash of the body,
 /// folded here as each byte is written rather than over a finished buffer, so no buffer is needed.
 ///
-/// Text is written as Type-3 fonts: each distinct glyph outline is stored once as a `CharProc` and
-/// shown per occurrence by a one-byte code, rather than its outline written inline every time. The
-/// glyph store and the fonts are filled as pages are written -- in page order, on the writer's thread,
-/// so a code is assigned once and deterministically -- and the font objects themselves are written in
-/// [`finish`](Self::finish) after the last page, on numbers reserved as each font is first needed.
+/// Text is written in fonts gathered as pages are written -- in page order, on the writer's thread, so
+/// every number and code is assigned once and deterministically. An embedded font records the glyph ids
+/// shown from it and is subset to them in [`finish`](Self::finish), when the set is complete; an outline
+/// glyph is stored once as a Type-3 `CharProc` and shown by a one-byte code. Both kinds of font object
+/// are written after the last page, on numbers reserved as each font is first needed.
 pub struct PdfStream<W: Write> {
 	out:		W,
 	compress:	bool,
@@ -362,6 +398,90 @@ pub struct PdfStream<W: Write> {
 	outline_root:	usize,		// object number of the /Outlines dict, zero when there is no outline
 	glyph_slots:	HashMap<u64, (usize, u8)>,	// outline content key -> (font index, code)
 	fonts:		Vec<Type3Font>,	// one Type-3 font per 256 distinct glyphs, in assignment order
+	cid_slots:	HashMap<u64, usize>,	// font program key -> index into `cid_fonts`
+	cid_fonts:	Vec<CidFont>,	// one embedded font per program, in order of first use
+}
+
+/// One embedded font: the program, the glyphs shown from it with the text each stands for, and the
+/// object number reserved for its `Type0` dictionary when it was first needed.
+struct CidFont {
+	obj:	usize,
+	prog:	Arc<FontProgram>,
+	used:	BTreeMap<u16, String>,
+}
+
+/// The text-object state of a content stream being built: whether a `BT` is open, the font, size and
+/// colour last set in it, and the `TJ` run being gathered.
+#[derive(Default)]
+struct TextState {
+	open:	bool,
+	font:	Option<(String, f32)>,
+	colour:	Option<Rgba>,
+	run:	Option<TjRun>,
+}
+
+/// Consecutive embedded glyphs on one baseline, shown by a single `TJ` whose numbers carry the
+/// difference between each glyph's placed position and where the font's own advance leaves the pen.
+struct TjRun {
+	y:		f32,
+	pen:	f64,	// where the viewer's pen stands after the last glyph, points
+	items:	String,
+	hex:	bool,	// a hex string is open in `items`
+	adj:	bool,	// `items` holds a number, so it needs the array form
+}
+
+impl TextState {
+
+	fn flush(&mut self, s: &mut String) {
+		if let Some(mut run) = self.run.take() {
+			if run.hex {
+				run.items.push('>');
+			}
+			if run.adj {
+				s.push_str(&fmt!("[{}] TJ\n", run.items));
+			} else {
+				s.push_str(&fmt!("{} Tj\n", run.items));
+			}
+		}
+	}
+
+	fn close(&mut self, s: &mut String) {
+		self.flush(s);
+		if self.open {
+			s.push_str("ET\n");
+		}
+		self.open	= false;
+		self.font	= None;
+		self.colour	= None;
+	}
+
+	/// Opens a text object if none is, and sets the colour and font when they differ from what is set.
+	fn begin(
+		&mut self,
+		s:			&mut String,
+		translucent:	bool,
+		alpha:		&mut Option<u8>,
+		colour:		Rgba,
+		font:		&str,
+		size:		f32,
+	) {
+		if !self.open {
+			s.push_str("BT\n");
+			self.open = true;
+		}
+		if self.colour != Some(colour) {
+			if translucent {
+				set_alpha(s, alpha, colour.a);
+			}
+			s.push_str(&fmt!("{} {} {} rg\n", chan(colour.r), chan(colour.g), chan(colour.b)));
+			self.colour = Some(colour);
+		}
+		let want = (font.to_string(), size);
+		if self.font.as_ref() != Some(&want) {
+			s.push_str(&fmt!("/{} {} Tf\n", font, numf32(size)));
+			self.font = Some(want);
+		}
+	}
 }
 
 /// One Type-3 font: up to 256 distinct glyphs, and the object number reserved for its font dictionary
@@ -423,6 +543,8 @@ impl<W: Write> PdfStream<W> {
 			outline_root,
 			glyph_slots:	HashMap::new(),
 			fonts:		Vec::new(),
+			cid_slots:	HashMap::new(),
+			cid_fonts:	Vec::new(),
 		};
 
 		res!(s.body(b"%PDF-1.7\n"));
@@ -508,10 +630,7 @@ impl<W: Write> PdfStream<W> {
 		// Build the content stream, which assigns each new glyph a Type-3 code and reserves a font-dictionary
 		// object number the first time a font is needed. The used fonts come back so the page's resources can
 		// name them by forward reference, exactly as the page tree forward-references its pages.
-		let (raw, page_font_idxs) = res!(self.build_content(page));
-		let page_fonts: Vec<(usize, usize)> = page_font_idxs.iter()
-			.map(|&k| (k, self.fonts[k].obj))
-			.collect();
+		let (raw, page_fonts) = res!(self.build_content(page));
 
 		// The content stream is now serialised, so its `/Length` is known before the object that wraps it;
 		// only the optional compression is left to do here.
@@ -567,32 +686,27 @@ impl<W: Write> PdfStream<W> {
 	}
 
 	/// Builds one page's content stream: the flip, then every shape's paint. A vector fill or stroke is
-	/// written inline as before; a glyph is shown by a Type-3 text operator against a code assigned here.
-	/// Returns the serialised bytes and the distinct font indices the page used, so the caller can name
-	/// them in the page's `/Resources`.
+	/// written inline; an embedded glyph joins a `TJ` run; an outline glyph is shown by a Type-3 text
+	/// operator against a code assigned here. Returns the serialised bytes and the fonts the page used, by
+	/// resource name and object number, so the caller can name them in the page's `/Resources`.
 	///
-	/// Glyph codes are assigned in draw order, on this (the writer's) thread and in page order across the
-	/// document, so the assignment is a deterministic function of the page sequence. Consecutive glyphs of
-	/// one font, colour and size share a single `BT ... ET` text object; every glyph carries its own text
-	/// matrix, so the font's own advances never move the pen and a per-glyph offset is exact.
-	fn build_content(&mut self, page: &PdfPage) -> Outcome<(Vec<u8>, Vec<usize>)> {
+	/// Codes and fonts are assigned in draw order, on this (the writer's) thread and in page order across
+	/// the document, so the assignment is a deterministic function of the page sequence. Consecutive
+	/// glyphs share a `BT ... ET` text object while nothing else is drawn between them.
+	fn build_content(&mut self, page: &PdfPage) -> Outcome<(Vec<u8>, Vec<(String, usize)>)> {
 		let mut s = String::new();
 		s.push_str(&fmt!("1 0 0 -1 0 {} cm\n", numf(page.height)));
 
 		let translucent = page.draws.iter().any(|d| d.colour().a != 255);
 		let mut cur_alpha: Option<u8> = None;
 		let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
-		let mut used_fonts: Vec<usize> = Vec::new();
-
-		// The open text object, if any: the font index, colour and size its `BT` set. A glyph reuses it when
-		// all three match, else the block is closed and a fresh one opened.
-		let mut open: Option<(usize, Rgba, f32)> = None;
+		let mut used: Vec<(String, usize)> = Vec::new();
+		let mut ts = TextState::default();
 
 		for d in &page.draws {
-			// A non-glyph draw ends any run of glyphs first, so the text object is well formed.
-			if !matches!(d, Draw::Glyph { .. }) && open.is_some() {
-				s.push_str("ET\n");
-				open = None;
+			// A non-text draw ends any text object first, so it is well formed.
+			if !matches!(d, Draw::Glyph { .. } | Draw::Text { .. }) {
+				ts.close(&mut s);
 			}
 			match d {
 				Draw::Image { x, y, w, h, .. } => {
@@ -629,35 +743,92 @@ impl<W: Write> PdfStream<W> {
 				},
 				Draw::Glyph { outline, x, y, size, adv, colour, text } => {
 					let (font_idx, code) = self.assign_glyph(outline, *adv, *size, text);
-					if !used_fonts.contains(&font_idx) {
-						used_fonts.push(font_idx);
+					let name = fmt!("F{}", font_idx);
+					let obj = self.fonts[font_idx].obj;
+					if !used.iter().any(|(n, _)| n == &name) {
+						used.push((name.clone(), obj));
 					}
-					// Open a fresh text object when the font, colour or size changes.
-					if open != Some((font_idx, *colour, *size)) {
-						if open.is_some() {
-							s.push_str("ET\n");
-						}
-						if translucent {
-							set_alpha(&mut s, &mut cur_alpha, colour.a);
-						}
-						// Under `d1` a Type-3 glyph paints with the text state's fill colour, set here once.
-						s.push_str(&fmt!("{} {} {} rg\n",
-							chan(colour.r), chan(colour.g), chan(colour.b)));
-						s.push_str(&fmt!("BT\n/F{} {} Tf\n", font_idx, numf32(*size)));
-						open = Some((font_idx, *colour, *size));
-					}
+					ts.flush(&mut s);
+					// Under `d1` a Type-3 glyph paints with the text state's fill colour, set by `begin`.
+					ts.begin(&mut s, translucent, &mut cur_alpha, *colour, &name, *size);
 					// The text matrix places the glyph and flips it back to y up: the page CTM flips the whole
 					// page in y, and this `[1 0 0 -1 x y]` flips the text within it, so the glyph reads upright.
 					// A per-glyph matrix means the font's advance never moves the pen -- the offset is exact.
 					s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
 					s.push_str(&fmt!("<{:02x}> Tj\n", code));
 				},
+				Draw::Text { font, gid, x, y, size, colour, text } => {
+					let idx		= self.assign_text(font, *gid, text);
+					let name	= fmt!("C{}", idx);
+					let obj		= self.cid_fonts[idx].obj;
+					if !used.iter().any(|(n, _)| n == &name) {
+						used.push((name.clone(), obj));
+					}
+					let same_state = ts.open
+						&& ts.colour == Some(*colour)
+						&& ts.font.as_ref().map_or(false, |(n, z)| n == &name && z == size);
+					let same_line = same_state && ts.run.as_ref().map_or(false, |r| r.y == *y);
+					if !same_line {
+						ts.flush(&mut s);
+						ts.begin(&mut s, translucent, &mut cur_alpha, *colour, &name, *size);
+						// One text matrix per run, flipped back to y up within the page's flip; the glyphs
+						// after the first are placed by the font's advances and the run's adjustments.
+						s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
+						ts.run = Some(TjRun {
+							y:		*y,
+							pen:	((*x as f64) * 1000.0).round() / 1000.0,	// as the `Tm` above writes it
+							items:	String::new(),
+							hex:	false,
+							adj:	false,
+						});
+					}
+					if let Some(run) = ts.run.as_mut() {
+						let z = *size as f64;
+						// The number that moves the pen from where the last advance left it to this glyph's
+						// placed x, in thousandths of the em, positive to the left as `TJ` has it.
+						let adj = if z > 0.0 { ((run.pen - *x as f64) * 1000.0 / z).round() as i64 } else { 0 };
+						if adj != 0 {
+							if run.hex {
+								run.items.push('>');
+								run.hex = false;
+							}
+							run.items.push_str(&fmt!("{}", adj));
+							run.adj = true;
+							run.pen -= adj as f64 * z / 1000.0;
+						}
+						if !run.hex {
+							run.items.push('<');
+							run.hex = true;
+						}
+						run.items.push_str(&fmt!("{:04X}", gid));
+						run.pen += font.width(*gid) as f64 * z / 1000.0;
+					}
+				},
 			}
 		}
-		if open.is_some() {
-			s.push_str("ET\n");
+		ts.close(&mut s);
+		Ok((s.into_bytes(), used))
+	}
+
+	/// Records glyph `gid` of an embedded font as shown, reserving the font's `Type0` dictionary number
+	/// the first time the program is met. The first non-empty source text a glyph arrives with is kept.
+	fn assign_text(&mut self, font: &Arc<FontProgram>, gid: u16, text: &str) -> usize {
+		let idx = match self.cid_slots.get(&font.key()) {
+			Some(&i)	=> i,
+			None		=> {
+				let obj = self.next_extra;
+				self.next_extra += 1;
+				self.cid_fonts.push(CidFont { obj, prog: font.clone(), used: BTreeMap::new() });
+				let i = self.cid_fonts.len() - 1;
+				self.cid_slots.insert(font.key(), i);
+				i
+			},
+		};
+		let entry = self.cid_fonts[idx].used.entry(gid).or_default();
+		if entry.is_empty() && !text.is_empty() {
+			*entry = text.to_string();
 		}
-		Ok((s.into_bytes(), used_fonts))
+		idx
 	}
 
 	/// Assigns a glyph its Type-3 font index and code, storing the outline once. The key is the content of
@@ -748,6 +919,114 @@ impl<W: Write> PdfStream<W> {
 				numf32(bbox.0), numf32(bbox.1), numf32(bbox.2), numf32(bbox.3),
 				char_procs, diffs, last, widths, tu_obj);
 			res!(self.body(dict.as_bytes()));
+		}
+		Ok(())
+	}
+
+	/// Writes the embedded fonts: for each program, a `Type0` font over one `CIDFont` whose CIDs are the
+	/// program's glyph ids (`Identity-H` encoding, and for TrueType an identity `/CIDToGIDMap`), a font
+	/// descriptor naming the subset program, and a `/ToUnicode` CMap from each shown glyph to its text.
+	fn write_cid_fonts(&mut self) -> Outcome<()> {
+		let fonts = std::mem::take(&mut self.cid_fonts);
+		for font in &fonts {
+			let prog = &font.prog;
+			let gids: BTreeSet<u16> = font.used.keys().copied().collect();
+			let file = prog.subset(&gids);
+
+			// The six-letter subset tag, from the program and the glyph set, so it is stable across runs yet
+			// differs between two subsets of one font.
+			let mut h = FNV_BASIS_A ^ prog.key();
+			for g in &gids {
+				for b in g.to_be_bytes() {
+					h ^= b as u64;
+					h = h.wrapping_mul(FNV_PRIME);
+				}
+			}
+			let mut tag = String::new();
+			for _ in 0..6 {
+				tag.push((b'A' + (h % 26) as u8) as char);
+				h /= 26;
+			}
+			let base = fmt!("{}+{}", tag, prog.name());
+
+			let cid_obj	= self.next_extra;
+			let fd_obj	= cid_obj + 1;
+			let ff_obj	= cid_obj + 2;
+			let tu_obj	= cid_obj + 3;
+			self.next_extra += 4;
+
+			self.set_extra_offset(font.obj);
+			let type0 = fmt!(
+				"{} 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /{} /Encoding /Identity-H \
+					/DescendantFonts [{} 0 R] /ToUnicode {} 0 R >>\nendobj\n",
+				font.obj, base, cid_obj, tu_obj);
+			res!(self.body(type0.as_bytes()));
+
+			// Widths, one bracketed run per stretch of consecutive glyph ids.
+			let mut w = String::new();
+			let mut prev: Option<u16> = None;
+			for &g in &gids {
+				match prev {
+					Some(p) if p.checked_add(1) == Some(g) => w.push_str(&fmt!(" {}", prog.width(g))),
+					Some(_) => w.push_str(&fmt!("] {} [{}", g, prog.width(g))),
+					None => w.push_str(&fmt!("{} [{}", g, prog.width(g))),
+				}
+				prev = Some(g);
+			}
+			if prev.is_some() {
+				w.push(']');
+			}
+			let (subtype, extra) = match prog.outlines() {
+				Outlines::TrueType	=> ("CIDFontType2", " /CIDToGIDMap /Identity"),
+				Outlines::Cff		=> ("CIDFontType0", ""),
+			};
+			let cid = fmt!(
+				"{} 0 obj\n<< /Type /Font /Subtype /{} /BaseFont /{} \
+					/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >> \
+					/FontDescriptor {} 0 R /W [{}]{} >>\nendobj\n",
+				cid_obj, subtype, base, fd_obj, w, extra);
+			self.set_extra_offset(cid_obj);
+			res!(self.body(cid.as_bytes()));
+
+			// Symbolic (bit 3), since the glyphs are reached by id rather than a standard encoding; fixed
+			// pitch (bit 1) and italic (bit 7) as the program declares them.
+			let mut flags = 4u32;
+			if prog.fixed_pitch() { flags |= 1; }
+			if prog.italic_angle() != 0.0 { flags |= 64; }
+			let bb = prog.bbox();
+			let stem_v = if prog.weight() >= 600 { 120 } else { 80 };
+			let file_key = match file {
+				FontFile::TrueType(_)	=> "FontFile2",
+				_						=> "FontFile3",
+			};
+			let fd = fmt!(
+				"{} 0 obj\n<< /Type /FontDescriptor /FontName /{} /Flags {} /FontBBox [{} {} {} {}] \
+					/ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV {} /{} {} 0 R >>\nendobj\n",
+				fd_obj, base, flags, bb[0], bb[1], bb[2], bb[3], numf32(prog.italic_angle()),
+				prog.ascent(), prog.descent(), prog.cap_height(), stem_v, file_key, ff_obj);
+			self.set_extra_offset(fd_obj);
+			res!(self.body(fd.as_bytes()));
+
+			// The program itself, always compressed: it is binary whatever the content streams are.
+			let (data, dict) = match &file {
+				FontFile::TrueType(b)	=> (b, fmt!("/Length1 {}", b.len())),
+				FontFile::Cff(b)		=> (b, "/Subtype /CIDFontType0C".to_string()),
+				FontFile::OpenType(b)	=> (b, "/Subtype /OpenType".to_string()),
+			};
+			let packed = res!(deflate(data));
+			self.set_extra_offset(ff_obj);
+			let head = fmt!("{} 0 obj\n<< {} /Length {} /Filter /FlateDecode >>\nstream\n",
+				ff_obj, dict, packed.len());
+			res!(self.body(head.as_bytes()));
+			res!(self.body(&packed));
+			res!(self.body(b"\nendstream\nendobj\n"));
+
+			let maps: Vec<(u32, &str)> = font.used.iter()
+				.filter(|(_, t)| !t.is_empty())
+				.map(|(g, t)| (*g as u32, t.as_str()))
+				.collect();
+			let cmap = tounicode_cmap(2, &maps);
+			res!(self.write_stream(tu_obj, cmap.as_bytes()));
 		}
 		Ok(())
 	}
@@ -913,6 +1192,12 @@ impl<W: Write> PdfStream<W> {
 			res!(self.write_fonts());
 		}
 
+		// The embedded fonts, each subset to the glyphs shown: its Type0 dictionary on the number reserved
+		// at first use, then the CIDFont, descriptor, font file and /ToUnicode on fresh numbers.
+		if !self.cid_fonts.is_empty() {
+			res!(self.write_cid_fonts());
+		}
+
 		// The fixed page/content block is `2 + 2n` objects; the outline, every image and soft mask, and the
 		// Type-3 fonts took further numbers past it, so the highest object written is one below the next free
 		// number. A document with no outline, image or text leaves `next_extra` at `2 + 2n + 1`, the original.
@@ -957,32 +1242,41 @@ impl<W: Write> PdfStream<W> {
 }
 
 /// Builds the `/ToUnicode` CMap for a Type-3 font: one `bfchar` mapping per glyph whose source text is
-/// known, the code as a one-byte hex string and the destination as UTF-16BE, so a viewer extracts the
-/// real words rather than the font's private codes. A glyph with no known source (a decoration, or the
-/// tail of a decomposed cluster) is left out. The `bfchar` entries are batched under a hundred, the CMap
-/// operator's limit.
+/// known, the code as a one-byte hex string. A glyph with no known source (a decoration, or the tail of a
+/// decomposed cluster) is left out.
 fn build_tounicode(glyphs: &[GlyphEntry]) -> String {
-	let mut maps: Vec<(usize, String)> = Vec::new();
-	for (code, g) in glyphs.iter().enumerate() {
-		if g.text.is_empty() {
-			continue;
-		}
-		let mut hex = String::new();
-		for u in g.text.encode_utf16() {
-			hex.push_str(&fmt!("{:04X}", u));
-		}
-		maps.push((code, hex));
-	}
+	let maps: Vec<(u32, &str)> = glyphs.iter().enumerate()
+		.filter(|(_, g)| !g.text.is_empty())
+		.map(|(code, g)| (code as u32, g.text.as_str()))
+		.collect();
+	tounicode_cmap(1, &maps)
+}
 
+/// A `/ToUnicode` CMap over codes `width` bytes wide, each mapped to its text as UTF-16BE, so a viewer
+/// extracts the real words rather than the font's private codes. A ligature maps its one code to every
+/// character it joins. The `bfchar` entries are batched under a hundred, the CMap operator's limit.
+fn tounicode_cmap(width: usize, maps: &[(u32, &str)]) -> String {
 	let mut s = String::new();
 	s.push_str("/CIDInit /ProcSet findresource begin\n12 dict begin\nbegincmap\n");
 	s.push_str("/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def\n");
 	s.push_str("/CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n");
-	s.push_str("1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+	if width == 1 {
+		s.push_str("1 begincodespacerange\n<00> <FF>\nendcodespacerange\n");
+	} else {
+		s.push_str("1 begincodespacerange\n<0000> <FFFF>\nendcodespacerange\n");
+	}
 	for chunk in maps.chunks(100) {
 		s.push_str(&fmt!("{} beginbfchar\n", chunk.len()));
-		for (code, hex) in chunk {
-			s.push_str(&fmt!("<{:02X}> <{}>\n", code, hex));
+		for (code, text) in chunk {
+			let mut hex = String::new();
+			for u in text.encode_utf16() {
+				hex.push_str(&fmt!("{:04X}", u));
+			}
+			if width == 1 {
+				s.push_str(&fmt!("<{:02X}> <{}>\n", code, hex));
+			} else {
+				s.push_str(&fmt!("<{:04X}> <{}>\n", code, hex));
+			}
 		}
 		s.push_str("endbfchar\n");
 	}
@@ -1040,9 +1334,10 @@ fn path_ops(s: &mut String, path: &Path) {
 
 /// The page's `/Resources`: an `/ExtGState` for each distinct alpha when a shape is translucent, an
 /// `/XObject` dict naming each image `/Im{k}` by the object number assigned in [`PdfStream::page`], and a
-/// `/Font` dict naming each Type-3 font `/F{k}` this page shows text from. An all-opaque page with no
+/// `/Font` dict naming each font this page shows text from, `/F{k}` for a Type-3 font and `/C{k}` for an
+/// embedded one. An all-opaque page with no
 /// image and no text carries an empty resource dictionary -- byte for byte the original.
-fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[(usize, usize)]) -> String {
+fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[(String, usize)]) -> String {
 	let translucent = page.draws.iter().any(|d| d.colour().a != 255);
 
 	// The image resource dict, `/Im{k}` in draw order to match the content stream's `Do` names.
@@ -1057,13 +1352,13 @@ fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[
 		x
 	};
 
-	// The font resource dict, `/F{idx}` by the global font index the content stream names.
+	// The font resource dict, by the names the content stream uses.
 	let fonts = if page_fonts.is_empty() {
 		String::new()
 	} else {
 		let mut f = String::from(" /Font << ");
-		for (idx, obj) in page_fonts {
-			f.push_str(&fmt!("/F{} {} 0 R ", idx, obj));
+		for (name, obj) in page_fonts {
+			f.push_str(&fmt!("/{} {} 0 R ", name, obj));
 		}
 		f.push_str(">>");
 		f
@@ -1471,6 +1766,61 @@ mod tests {
 		assert!(text.contains("beginbfchar"), "the CMap carries character mappings");
 		assert!(text.contains("<00> <004F>"), "code 0 maps to 'O' (U+004F)");
 		assert!(text.contains("<01> <0078>"), "code 1 maps to 'x' (U+0078)");
+		Ok(())
+	}
+
+	/// Every xref entry of `bytes` points at the object it names.
+	fn xref_lands(bytes: &[u8]) -> Outcome<usize> {
+		let needle = b"xref\n0 ";
+		let marker = match bytes.windows(needle.len()).position(|w| w == needle) {
+			Some(i)	=> i,
+			None	=> return Err(err!("no xref section in the file"; Test)),
+		};
+		let nl2 = match bytes[marker + needle.len()..].iter().position(|&b| b == b'\n') {
+			Some(i)	=> marker + needle.len() + i,
+			None	=> return Err(err!("the xref header is malformed"; Test)),
+		};
+		let count = res!(res!(std::str::from_utf8(&bytes[marker + needle.len()..nl2])).trim().parse::<usize>());
+		let entries = &bytes[nl2 + 1..];
+		for obj in 1..count {
+			let off = res!(res!(std::str::from_utf8(&entries[obj * 20..obj * 20 + 10])).parse::<usize>());
+			let want = fmt!("{} 0 obj", obj);
+			assert!(bytes[off..].starts_with(want.as_bytes()), "object {} is not at offset {}", obj, off);
+		}
+		Ok(count - 1)
+	}
+
+	#[test]
+	fn test_embedded_text_runs_as_one_tj_with_exact_adjustments_15() -> Outcome<()> {
+		// Three glyphs of a TrueType face on one baseline: the second sits exactly where the first's advance
+		// leaves the pen, the third two points further. One text matrix, one TJ, and a single adjustment of
+		// -2pt at 12pt, which is -2 * 1000 / 12 = -167 thousandths of the em.
+		let data = Arc::new(include_bytes!("../../fe2o3_font/fonts/DejaVuSans.ttf").to_vec());
+		let prog = match res!(FontProgram::parse(data)) {
+			Some(p)	=> Arc::new(p),
+			None	=> return Err(err!("DejaVu Sans should be embeddable"; Test)),
+		};
+		let (a, b, c) = (36u16, 37u16, 38u16);
+		let xa = 10.0f32;
+		let xb = xa + prog.width(a) as f32 * 12.0 / 1000.0;
+		let xc = xb + prog.width(b) as f32 * 12.0 / 1000.0 + 2.0;
+		let mut page = PdfPage::new(200.0, 200.0);
+		for (g, x, t) in [(a, xa, "A"), (b, xb, "B"), (c, xc, "C")] {
+			page.text(prog.clone(), g, x, 50.0, 12.0, Rgba::BLACK, t.into());
+		}
+		let mut w = PdfWriter::new();
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert_eq!(text.matches(" Tm\n").count(), 1, "one text matrix for the run");
+		assert!(text.contains("[<00240025>-167<0026>] TJ"), "one TJ with one adjustment, found: {}", text);
+		assert!(text.contains("/Subtype /Type0"), "a composite font");
+		assert!(text.contains("/Subtype /CIDFontType2"), "over a TrueType CIDFont");
+		assert!(text.contains("/CIDToGIDMap /Identity"), "whose CIDs are its glyph ids");
+		assert!(text.contains(&fmt!("/W [36 [{} {} {}]]", prog.width(a), prog.width(b), prog.width(c))),
+			"the widths of the three glyphs, found: {}", text);
+		assert!(text.contains("<0024> <0041>"), "the ToUnicode maps glyph 36 to 'A'");
+		assert!(res!(xref_lands(&bytes)) > 8, "the font objects are in the xref");
 		Ok(())
 	}
 

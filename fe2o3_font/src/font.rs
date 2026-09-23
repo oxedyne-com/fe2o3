@@ -75,8 +75,8 @@ impl Font {
 		}
 	}
 
-	/// The face at a place in the chain.
-	fn face(&self, i: u8) -> Outcome<&Face> {
+	/// The face at a place in the chain, as a glyph's `face` names it.
+	pub fn face(&self, i: u8) -> Outcome<&Face> {
 		match self.faces.get(i as usize) {
 			Some(face) => Ok(face),
 			None => Err(err!(

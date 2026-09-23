@@ -12,6 +12,7 @@ use crate::shape::{
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::prelude::*;
+use oxedyne_fe2o3_graphics::pdf_font::FontProgram;
 
 use harfrust::{
 	FontRef as ShapeFont,
@@ -36,7 +37,10 @@ use skrifa::{
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::RwLock;
+use std::sync::{
+	Arc,
+	RwLock,
+};
 
 /// The part a font plays. A document names a role; the reader's font set decides what it looks like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,7 +72,8 @@ impl Metrics {
 /// One typeface, at any size: a single font file. Its bytes are owned and lent to both third-party
 /// parsers when needed; the shaper's tables, the costly part to build, are cached.
 pub struct Face {
-	bytes:		Vec<u8>,		// the font file
+	bytes:		Arc<Vec<u8>>,	// the font file, shared with its embeddable program
+	program:	Option<Arc<FontProgram>>,	// the file as a PDF embeds it; `None` when it cannot be
 	shaper:		ShaperData,		// the shaper's cached view, built once
 	upem:		f32,			// font units per em, what every measurement in the file is in terms of
 	covers:		HashSet<u32>,	// every character the face can draw, read once (asked per character)
@@ -104,13 +109,25 @@ impl Face {
 		}
 		let covers: HashSet<u32> = of.charmap().mappings().map(|(c, _)| c).collect();
 		drop(of);
+		drop(sf);
+		let bytes = Arc::new(bytes);
+		// A file the embedding reader cannot follow is still a face to shape and outline; it is drawn as
+		// outlines in a PDF rather than embedded, so the failure is not the caller's.
+		let program = FontProgram::parse(bytes.clone()).ok().flatten().map(Arc::new);
 		Ok(Self {
 			bytes,
+			program,
 			shaper,
 			upem,
 			covers,
 			outlines:	RwLock::new(HashMap::new()),
 		})
+	}
+
+	/// The face's file as a PDF embeds it, or `None` for a face that cannot be embedded -- a variable
+	/// `CFF2` face, or one whose licence forbids it -- and must be drawn as outlines.
+	pub fn program(&self) -> Option<&Arc<FontProgram>> {
+		self.program.as_ref()
 	}
 
 	/// Can the face draw this character?
@@ -120,7 +137,7 @@ impl Face {
 
 	/// The font as the shaper reads it.
 	fn shape_font(&self) -> Outcome<ShapeFont<'_>> {
-		match ShapeFont::new(&self.bytes) {
+		match ShapeFont::new(&self.bytes[..]) {
 			Ok(f) => Ok(f),
 			Err(e) => Err(err!("The font could not be re-read for shaping: {:?}.", e; Bug)),
 		}
@@ -128,7 +145,7 @@ impl Face {
 
 	/// The font as the outline reader reads it.
 	fn outline_font(&self) -> Outcome<OutlineFont<'_>> {
-		match OutlineFont::new(&self.bytes) {
+		match OutlineFont::new(&self.bytes[..]) {
 			Ok(f) => Ok(f),
 			Err(e) => Err(err!("The font could not be re-read for outlines: {:?}.", e; Bug)),
 		}
