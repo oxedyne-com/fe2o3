@@ -14,6 +14,7 @@
 //! is invisible next to the rest of a segmentation pass.
 
 pub mod bidi;
+pub mod cat;
 pub mod lb;
 pub mod norm;
 pub mod prop;

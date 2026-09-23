@@ -1,10 +1,11 @@
 //! The PDF page writer.
 //!
-//! The parallel of [`super::svg`], over the very same placed frames. Where the SVG writer renders each
-//! box and glyph outline as a `<path>` element, this one hands the same [`Path`] and [`Rgba`] to
-//! `fe2o3_graphics`'s [`PdfWriter`], which emits them as fill and stroke operators in a page's content
-//! stream. No font is embedded: a glyph is a filled outline path, exactly as it is for SVG, which is
-//! the whole reason a PDF writer here is short.
+//! The parallel of [`super::svg`], over the very same placed frames. Boxes and graphics go to
+//! `fe2o3_graphics`'s [`PdfWriter`] as fill and stroke operators. Text goes as text: each glyph is shown
+//! by id from its face's own font file, embedded once and subset to the glyphs the document uses, with a
+//! `/ToUnicode` from the same [`ShapedText::glyph_text`] the SVG text layer reads, so the PDF's text
+//! selects, copies and searches. A face that cannot be embedded falls back to filled outlines in a Type-3
+//! font, which still extracts.
 //!
 //! A document is one file across all its pages, not a string per page, so this module's entry point is
 //! [`render_document`] rather than the per-page `render_page` the [`super::Emitter`] enum uses for
@@ -82,10 +83,9 @@ pub fn write_page<W: Write>(stream: &mut PdfStream<W>, page: &Page) -> Outcome<(
 	stream.page(&res!(render_page(page)))
 }
 
-/// Writes a page whose draw list was built elsewhere -- on a worker thread, so the outline fetches and
-/// the SVG the same walk produces run off the writer's thread. The content stream is serialised here, in
-/// page order, because that is where a glyph's Type-3 code is assigned deterministically; with text now a
-/// few bytes of text operators rather than full inline outlines, that serialisation is cheap.
+/// Writes a page whose draw list was built elsewhere -- on a worker thread, so the SVG the same walk
+/// produces runs off the writer's thread. The content stream is serialised here, in page order, because
+/// that is where a font's object number and a Type-3 glyph's code are assigned deterministically.
 pub fn write_built_page<W: Write>(stream: &mut PdfStream<W>, pdf_page: &PdfPage) -> Outcome<()> {
 	stream.page(pdf_page)
 }
@@ -107,8 +107,7 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 	let grey = Rgba::new(176, 176, 176, 255);
 
 	for placed in &page.frame.placed {
-		// Real text is drawn glyph by glyph as filled outlines; a rule or a reservation as one
-		// rectangle.
+		// Real text is shown glyph by glyph; a rule or a reservation is one rectangle.
 		if let PlacedKind::Text(shaped) = &placed.kind {
 			res!(draw_text(&mut out, placed.x, placed.y, placed.dims.height, shaped));
 			continue;
@@ -136,8 +135,7 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 		}
 	}
 
-	// The running head and folio arrive as `PlacedKind::Text` and are drawn as glyph outlines with the
-	// body, above. This writer adds no page furniture of its own.
+	// The running head and folio arrive as `PlacedKind::Text` and are shown with the body, above. This writer adds no page furniture of its own.
 	Ok(out)
 }
 
@@ -183,7 +181,8 @@ fn draw_graphic(
 	Ok(())
 }
 
-/// Draws a placed run as filled glyph outlines. `height` is the line's own HBox height -- the face
+/// Shows a placed run: each glyph by id from its embedded face, or as a filled outline when the face
+/// cannot be embedded. `height` is the line's own HBox height -- the face
 /// ascent for an ordinary line, or the cap height for a first line raised under the block-edge model
 /// (see `linebreak::set_lines`), whose glyphs then carry a compensating negative shift -- so
 /// `by + height` is the baseline either way. `bx`/`by` are the box's top-left.
@@ -204,6 +203,19 @@ fn draw_text(
 	let texts = shaped.glyph_text();
 
 	for (glyph, text) in shaped.run().glyphs.iter().zip(texts.into_iter()) {
+		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame.
+		let x = base_x + glyph.x;
+		let y = base_y - glyph.y;
+		if let Some(prog) = res!(shaped.program(glyph)) {
+			// Every glyph is shown, a space included: its text is what puts the word gap into a copy.
+			let gid = match u16::try_from(glyph.id) {
+				Ok(g)	=> g,
+				Err(_)	=> return Err(err!(
+					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range)),
+			};
+			out.text(prog, gid, x, y, shaped.size(), shaped.colour(), text);
+			continue;
+		}
 		// The writer stores this canonical outline once and shows it at the run's point size. A glyph with
 		// no ink -- a space -- has an empty outline and is skipped, exactly as the SVG writer skips it, so the
 		// two arms place the same marks; the viewer infers word gaps from the glyph positions.
@@ -211,9 +223,8 @@ fn draw_text(
 		if outline.is_empty() {
 			continue;
 		}
-		// The pen: x the glyph's left, y its baseline, in the engine's top-left y-down frame. The writer
-		// flips the outline back to y up within the page's y-flip, so the glyph reads upright.
-		out.glyph(outline, base_x + glyph.x, base_y - glyph.y, shaped.size(), glyph.adv, shaped.colour(), text);
+		// The writer flips the outline back to y up within the page's y-flip, so the glyph reads upright.
+		out.glyph(outline, x, y, shaped.size(), glyph.adv, shaped.colour(), text);
 	}
 	Ok(())
 }
@@ -237,10 +248,10 @@ mod tests {
 	use std::sync::Arc;
 
 	#[test]
-	fn text_is_type3_and_extractable_via_tounicode() -> Outcome<()> {
-		// A shaped word is drawn as a Type-3 font, and the font's /ToUnicode CMap maps its codes back to the
-		// source characters, so a viewer extracts the real word rather than the font's private codes. Built
-		// uncompressed, so the CMap is readable straight from the bytes.
+	fn text_embeds_its_font_and_extracts_via_tounicode() -> Outcome<()> {
+		// A shaped word is shown from its embedded CFF face, and the font's /ToUnicode CMap maps its glyph
+		// ids back to the source characters, so a viewer extracts the real word. Built uncompressed, so the
+		// CMap is readable straight from the bytes.
 		use crate::font::ShapedText;
 		use oxedyne_fe2o3_font::{
 			face::Role,
@@ -261,12 +272,16 @@ mod tests {
 		let bytes	= res!(w.to_bytes());
 		let text	= String::from_utf8_lossy(&bytes);
 
-		assert!(text.contains("/Subtype /Type3"), "the word is drawn as a Type-3 font");
-		assert!(text.contains(" Tj\n"), "the glyphs are shown with text operators");
+		assert!(text.contains("/Subtype /Type0"), "the word is shown from a composite font");
+		assert!(text.contains("/Subtype /CIDFontType0 "), "over a CFF CIDFont");
+		assert!(text.contains("/Subtype /CIDFontType0C"), "whose program is embedded");
+		assert!(text.contains("+LibertinusSerif-Regular"), "under a subset tag and its PostScript name");
+		assert!(!text.contains("/Subtype /Type3"), "no glyph falls back to outlines");
+		assert!(text.contains(" Tj\n") || text.contains(" TJ\n"), "the glyphs are shown with text operators");
 		assert!(text.contains("beginbfchar"), "a ToUnicode CMap carries character mappings");
 		// The distinct letters of "Oxegen" appear as UTF-16BE destinations in the CMap.
 		for (ch, hex) in [('O', "004F"), ('x', "0078"), ('e', "0065"), ('g', "0067"), ('n', "006E")] {
-			assert!(text.contains(&fmt!("<{}>", hex)),
+			assert!(text.contains(&fmt!("> <{}>", hex)),
 				"the CMap maps '{}' (U+{}) so the word is extractable", ch, hex);
 		}
 		Ok(())

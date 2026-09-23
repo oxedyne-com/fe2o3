@@ -10,7 +10,7 @@
 //! rectangle. The one returned HBox is unwrapped by the caller: [`doc`](crate::doc) weaves its leaves
 //! into a paragraph line for inline maths, or centres them on their own line for a display equation.
 //!
-//! The MATH-font boundary, stated plainly. Latin Modern Math carries a real OpenType MATH table, and
+//! The MATH-font boundary, stated plainly. New Computer Modern Math carries a real OpenType MATH table, and
 //! this module now sets to it: the maths italic alphabet, the axis height, the fraction rule thickness,
 //! the display-style fraction shifts and gaps, the script shifts and their minima, and the two script
 //! scale-down percentages are all read from the font, and a delimiter or a radical grows to its content
@@ -52,12 +52,12 @@ use std::sync::{
 	OnceLock,
 };
 
-// The maths font: Latin Modern Math, the OpenType form of Computer Modern -- the faces TeX sets
-// mathematics in -- so a variable, an operator and a radical wear the letterforms a reader knows from
-// every mathematics paper. It carries the Mathematical Italic block, the upright operators and the
-// large symbols, and an OpenType MATH table of layout constants and grown-delimiter variants, which
-// this module reads for its shifts, gaps and variants (see the header).
-const MATH_FONT: &[u8] = include_bytes!("../fonts/latinmodern-math.otf");
+// The maths font: New Computer Modern Math, embedded in `crate::fonts` -- Typst's own default for an
+// equation, so a variable, an operator and a radical wear the letterforms the oracle sets. It carries the
+// Mathematical Italic block, the upright operators and the large symbols, and an OpenType MATH table of
+// layout constants and grown-delimiter variants, which this module reads for its shifts, gaps and variants
+// (see the header). Until 2026-09-23 this was Latin Modern Math; some tuning notes below still name it.
+const MATH_FONT: &[u8] = crate::fonts::MATH;
 
 /// The parsed maths font, built once and shared. Parsing the face is the costly part, so it is cached
 /// behind a [`OnceLock`]; a lost race merely parses twice and keeps the first.
@@ -281,8 +281,9 @@ impl Level {
 }
 
 /// The type size at a level: the body size at text, and the two smaller sizes from the maths font's
-/// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. Latin Modern's are 70 and 50, the
-/// plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a MATH table.
+/// own `scriptPercentScaleDown` and `scriptScriptPercentScaleDown`. The Computer Modern maths faces use
+/// 70 and 50, the plain-TeX ratios, but a font may choose otherwise; the font's word is taken when it has a
+/// MATH table.
 fn size_for(style: &Theme, level: Level) -> Sp {
 	let body = style.text.body_size.raw();
 	let (s_pct, ss_pct) = script_percents();
@@ -474,7 +475,7 @@ fn build_bigop(text: &str, size: Sp) -> Outcome<Option<MBox>> {
 	let size_pt		= size.to_pt() as f32;
 	let base		= res!(glyph_id(&font, size, text));
 	// A display big operator is about the next size up; ask for a variant around 1.4x the running size
-	// and take the tallest the font offers below that, which is Latin Modern's display form.
+	// and take the tallest the font offers below that, which is the Computer Modern display form.
 	let target		= Sp(size.raw() * 7 / 5);
 	let variant		= match tb.variant_for(base as u16, target.to_pt() as f32, size_pt) {
 		Some(g) if g as u32 != base	=> g as u32,

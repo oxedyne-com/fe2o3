@@ -42,6 +42,12 @@ pub fn blocks(items: &[Item]) -> Vec<Block> {
 			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
 			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
 			Item::PageBreak { weak, .. }		=> out.push(Block::page_break(*weak)),
+			Item::ColBreak { weak, .. }			=> out.push(Block::ColBreak { weak: *weak }),
+			Item::Place { items, floating, clearance, .. }	=> out.push(Block::Place {
+				blocks:		blocks(items),
+				floating:	*floating,
+				clearance:	*clearance,
+			}),
 			Item::Space { height, .. }			=> out.push(Block::space(*height)),
 			Item::Figure { body, caption, supplement, label, placement, .. }	=> {
 				let caption = caption.as_ref().map(|runs| lower_runs(runs));
@@ -202,6 +208,7 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Emph(text)		=> Segment::emph(text.clone()),
 		Inline::BoldItalic(text)	=> Segment::bold_italic(text.clone()),
 		Inline::Super(text)		=> Segment::superscript(text.clone()),
+		Inline::SmallCaps(text)	=> Segment::SmallCaps(text.clone()),
 		Inline::Sub(text)		=> Segment::subscript(text.clone()),
 		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),

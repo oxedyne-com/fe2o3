@@ -20,6 +20,26 @@ impl Dir {
 	}
 }
 
+/// An OpenType feature applied across a whole run: `smcp` for small capitals, `onum` for old-style
+/// figures. The value is the feature's setting -- 0 switches it off, 1 on, and a higher value picks an
+/// alternate where the feature offers several.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Feature {
+	pub tag:	[u8; 4],
+	pub value:	u32,
+}
+
+impl Feature {
+
+	/// The feature switched on.
+	pub const fn on(tag: &[u8; 4]) -> Self {
+		Self { tag: *tag, value: 1 }
+	}
+
+	/// Small capitals from lower case: what Typst's `smallcaps` asks the font for.
+	pub const SMALL_CAPS: Self = Self::on(b"smcp");
+}
+
 /// One glyph, placed in pixels relative to the run's start and baseline, y up as the font has it.
 /// Painting flips it.
 #[derive(Clone, Copy, Debug, PartialEq)]

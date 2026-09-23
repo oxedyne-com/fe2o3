@@ -99,6 +99,7 @@ pub mod matroska;
 pub mod mp4;
 pub mod path;
 pub mod pdf;
+pub mod pdf_font;
 pub mod pixmap;
 pub mod png;
 pub mod prelude;

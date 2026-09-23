@@ -116,6 +116,8 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 term_config:            None,
                 publish:                None,
                 site_admins:            Vec::new(),
+                tiles:                  None,
+                access_log:             true,
                 permissions_policy:     None,
             };
 
@@ -150,6 +152,8 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 term_manager:   None,
                 uses_sessions:  vhost_cfg.uses_sessions(),
                 permissions_policy: vhost_cfg.permissions_policy.clone(),
+                tiles:          None,
+                access_log:     vhost_cfg.access_log,
             });
 
             let mut vhosts = HashMap::new();

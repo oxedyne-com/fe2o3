@@ -1437,9 +1437,10 @@ macro_rules! enum_getter_numeric {
                     bigint.to_f32().map(Float32)
                 },
                 Self::Adec(bigdec) => {
-                    // Convert BigDecimal to f32 (may lose precision).
-                    use num_traits::ToPrimitive;
-                    bigdec.to_f32().map(Float32)
+                    // Through the decimal text, which the standard parser rounds correctly.
+                    // `BigDecimal::to_f32` scales by a power of ten in floating point and
+                    // rounds twice.
+                    bigdec.to_string().parse::<f32>().ok().map(Float32)
                 },
                 _ => None,
             }
@@ -1467,9 +1468,10 @@ macro_rules! enum_getter_numeric {
                     bigint.to_f64().map(Float64)
                 },
                 Self::Adec(bigdec) => {
-                    // Convert BigDecimal to f64 (may lose precision).
-                    use num_traits::ToPrimitive;
-                    bigdec.to_f64().map(Float64)
+                    // Through the decimal text, which the standard parser rounds correctly.
+                    // `BigDecimal::to_f64` scales by a power of ten in floating point and
+                    // rounds twice, so 0.3 came back as 0.30000000000000004.
+                    bigdec.to_string().parse::<f64>().ok().map(Float64)
                 },
                 _ => None,
             }

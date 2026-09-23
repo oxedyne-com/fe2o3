@@ -33,11 +33,12 @@ fn face_bytes() -> Vec<u8> {
 }
 
 /// Assembles the lone document with the given font pairs installed into the source map, returning whether
-/// the assembled document's face resolver holds `Testface`. When `route` is set, each font is additionally
+/// the assembled document's face resolver holds `Testface` -- or the assembly error, which a heading face
+/// the document names but no injected font supplies now is (the missing-family precheck). When `route` is set, each font is additionally
 /// installed at [`book::project_font_path`] -- exactly what the wasm surface's `read_font_pairs` now does --
 /// so the test exercises the real routing rather than a copy of it. Mirrors the wasm `assemble_and_run`
 /// otherwise: the embedded reading set is the lone-file provider, and the map is cleared afterwards.
-fn resolves_injected(font_pairs: &[(&str, Vec<u8>)], route: bool) -> Outcome<bool> {
+fn resolves_injected(font_pairs: &[(&str, Vec<u8>)], route: bool) -> Outcome<Result<bool, String>> {
 	let main = PathBuf::from("/main.typ");
 	let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 	files.insert(main.clone(), SRC.as_bytes().to_vec());
@@ -54,8 +55,10 @@ fn resolves_injected(font_pairs: &[(&str, Vec<u8>)], route: bool) -> Outcome<boo
 	let fonts	= Arc::new(res!(fonts::libertinus()));
 	let outcome	= compile::assemble(&main, || Ok(fonts.clone()));
 	let _		= vfs::clear();
-	let (assembled, _refusals, _skip) = res!(outcome);
-	Ok(assembled.faces.resolves("Testface"))
+	Ok(match outcome {
+		Ok((assembled, _refusals, _skip))	=> Ok(assembled.faces.resolves("Testface")),
+		Err(e)								=> Err(fmt!("{}", e)),
+	})
 }
 
 /// Pins the whole story in one test (the shared source-map global forbids two at once): the resolver reads
@@ -74,12 +77,18 @@ fn injected_fonts_resolve_once_routed_to_the_resolver_path() -> Outcome<()> {
 	let routed_basename = res!(resolves_injected(&[("Testface-Regular.otf", face_bytes())], true));
 
 	eprintln!(
-		"[font-inject] unrouted /fonts -> {}, unrouted /assets/fonts -> {}, routed /fonts -> {}, routed basename -> {}",
+		"[font-inject] unrouted /fonts -> {:?}, unrouted /assets/fonts -> {:?}, routed /fonts -> {:?}, routed basename -> {:?}",
 		unrouted_bare, unrouted_at_assets, routed_bare, routed_basename);
 
-	assert!(!unrouted_bare, "without routing, a font outside /assets/fonts is invisible -- the gap");
-	assert!(unrouted_at_assets, "a font injected exactly at /assets/fonts/<Name>-Regular.otf always resolved");
-	assert!(routed_bare, "routing makes an arbitrarily-pathed injected font resolve -- the fix");
-	assert!(routed_basename, "routing makes a bare-basename injected font resolve too");
+	// Without routing, a font outside /assets/fonts is invisible; the heading face the document names is
+	// then missing, which is a hard error naming it rather than a silent fall-back to the body role.
+	match &unrouted_bare {
+		Err(msg)	=> assert!(msg.contains("Testface"), "the error must name the missing family: {}", msg),
+		Ok(r)		=> return Err(err!(
+			"An unrouted, invisible font must fail the precheck, but assembly gave {}.", r; Test, Mismatch)),
+	}
+	assert_eq!(unrouted_at_assets, Ok(true), "a font injected exactly at /assets/fonts/<Name>-Regular.otf always resolved");
+	assert_eq!(routed_bare, Ok(true), "routing makes an arbitrarily-pathed injected font resolve -- the fix");
+	assert_eq!(routed_basename, Ok(true), "routing makes a bare-basename injected font resolve too");
 	Ok(())
 }

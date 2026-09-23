@@ -17,6 +17,7 @@ use oxedyne_fe2o3_font::{
 	set::FontSet,
 	shape::{
 		Dir,
+		Feature,
 		Glyph,
 		Run,
 	},
@@ -103,6 +104,21 @@ impl ShapedText {
 		Self::shape(fonts, role, dir, size.to_pt() as f32, text)
 	}
 
+	/// As [`ShapedText::new`], with OpenType features applied across the run -- `smcp` for a
+	/// `#smallcaps[...]` run.
+	pub fn new_with_features(
+		fonts:		Arc<FontSet>,
+		role:		Role,
+		dir:		Dir,
+		size:		Sp,
+		text:		&str,
+		features:	&[Feature],
+	)
+		-> Outcome<Self>
+	{
+		Self::from_source_with(Source::Set { fonts, role }, dir, size.to_pt() as f32, text, features)
+	}
+
 	/// Shapes in the shaper's own unit, shared by measurement and placement.
 	fn shape(
 		fonts:	Arc<FontSet>,
@@ -130,8 +146,12 @@ impl ShapedText {
 	}
 
 	fn from_source(src: Source, dir: Dir, size: f32, text: &str) -> Outcome<Self> {
+		Self::from_source_with(src, dir, size, text, &[])
+	}
+
+	fn from_source_with(src: Source, dir: Dir, size: f32, text: &str, features: &[Feature]) -> Outcome<Self> {
 		let font	= src.font();
-		let run		= res!(font.shape(text, size, dir));
+		let run		= res!(font.shape_with(text, size, dir, features));
 		let vm		= res!(font.metrics(size));
 		let dims	= Dims::new(
 			Sp::from_pt(run.advance as f64),	// the width the shaper's advances sum to
@@ -156,6 +176,12 @@ impl ShapedText {
 
 	/// The shaped source string, whose byte offsets a glyph's [`cluster`](Glyph::cluster) indexes.
 	pub fn source(&self) -> &str { &self.text }
+
+	/// The family, weight and slant of the face heading the run's font chain: the face the run was set in
+	/// wherever that face covered its characters.
+	pub fn face_info(&self) -> Outcome<oxedyne_fe2o3_font::face::FaceInfo> {
+		self.src.font().info()
+	}
 
 	/// The size the run was shaped at, in device points.
 	pub fn size(&self) -> f32 { self.size }
@@ -183,6 +209,12 @@ impl ShapedText {
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
 		self.src.font().outline(glyph.face, glyph.id, self.size)
+	}
+
+	/// The embeddable program of the face that shaped `glyph`, or `None` when that face must be drawn as
+	/// outlines instead.
+	pub fn program(&self, glyph: &Glyph) -> Outcome<Option<Arc<oxedyne_fe2o3_graphics::pdf_font::FontProgram>>> {
+		Ok(res!(self.src.font().face(glyph.face)).program().cloned())
 	}
 
 	/// One glyph's outline at a canonical thousand units per em, in the font frame (origin at the glyph, y

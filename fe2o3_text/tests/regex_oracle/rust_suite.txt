@@ -1,0 +1,4504 @@
+T	anchored.toml/greedy	a
+P	(abc)+
+H	abcabcabc
+L	-
+M	0,9 6,9
+E
+T	anchored.toml/word-boundary-unicode-01	a
+P	\\b\\w+\\b
+H	βββ☃
+L	-
+M	0,6
+E
+T	anchored.toml/no-match-at-start	a
+P	.c
+H	abc
+L	-
+E
+T	anchored.toml/no-match-at-start-reverse-inner	a
+P	.c[a-z]
+H	abcz
+L	-
+E
+T	anchored.toml/no-match-at-start-reverse-anchored	a
+P	.c[a-z]$
+H	abcz
+L	-
+E
+T	crazy.toml/float1	-
+P	[-+]?[0-9]*\\.?[0-9]+
+H	0.1
+L	-
+M	0,3
+E
+T	crazy.toml/float2	-
+P	[-+]?[0-9]*\\.?[0-9]+
+H	0.1.2
+L	1
+M	0,3
+E
+T	crazy.toml/float3	-
+P	[-+]?[0-9]*\\.?[0-9]+
+H	a1.2
+L	-
+M	1,4
+E
+T	crazy.toml/float4	-
+P	[-+]?[0-9]*\\.?[0-9]+
+H	1.a
+L	-
+M	0,1
+E
+T	crazy.toml/float5	-
+P	^[-+]?[0-9]*\\.?[0-9]+$
+H	1.a
+L	-
+E
+T	crazy.toml/email-big	-
+P	[a-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\\.[a-z0-9!#$%&'*+/=?^_`{|}~-]+)*@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?
+H	mine is jam.slam@gmail.com 
+L	-
+M	8,26
+E
+T	crazy.toml/start-end-empty	-
+P	^$
+H	
+L	-
+M	0,0
+E
+T	crazy.toml/start-end-empty-rev	-
+P	$^
+H	
+L	-
+M	0,0
+E
+T	crazy.toml/start-end-empty-many-1	-
+P	^$^$^$
+H	
+L	-
+M	0,0
+E
+T	crazy.toml/start-end-empty-many-2	-
+P	^^^$$$
+H	
+L	-
+M	0,0
+E
+T	crazy.toml/start-end-empty-rep	-
+P	(?:^$)*
+H	a\nb\nc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+E
+T	crazy.toml/start-end-empty-rep-rev	-
+P	(?:$^)*
+H	a\nb\nc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+E
+T	crazy.toml/neg-class-letter	-
+P	[^ac]
+H	acx
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-letter-comma	-
+P	[^a,]
+H	a,x
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-letter-space	-
+P	[^a[:space:]]
+H	a x
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-comma	-
+P	[^,]
+H	,,x
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-space	-
+P	[^[:space:]]
+H	 a
+L	-
+M	1,2
+E
+T	crazy.toml/neg-class-space-comma	-
+P	[^,[:space:]]
+H	, a
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-comma-space	-
+P	[^[:space:],]
+H	 ,a
+L	-
+M	2,3
+E
+T	crazy.toml/neg-class-ascii	-
+P	[^[:alpha:]Z]
+H	A1
+L	-
+M	1,2
+E
+T	crazy.toml/lazy-many-many	-
+P	(?:(?:.*)*?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/lazy-many-optional	-
+P	(?:(?:.?)*?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/lazy-one-many-many	-
+P	(?:(?:.*)+?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/lazy-one-many-optional	-
+P	(?:(?:.?)+?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/lazy-range-min-many	-
+P	(?:(?:.*){1,}?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/lazy-range-many	-
+P	(?:(?:.*){1,2}?)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-many-many	-
+P	(?:(?:.*)*)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-many-optional	-
+P	(?:(?:.?)*)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-one-many-many	-
+P	(?:(?:.*)+)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-one-many-optional	-
+P	(?:(?:.?)+)=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-range-min-many	-
+P	(?:(?:.*){1,})=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/greedy-range-many	-
+P	(?:(?:.*){1,2})=
+H	a=b
+L	-
+M	0,2
+E
+T	crazy.toml/empty1	-
+P	
+H	
+L	-
+M	0,0
+E
+T	crazy.toml/empty2	-
+P	
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty3	-
+P	(?:)
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty4	-
+P	(?:)*
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty5	-
+P	(?:)+
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty6	-
+P	(?:)?
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty7	-
+P	(?:)(?:)
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty8	-
+P	(?:)+|z
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty9	-
+P	z|(?:)+
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty10	-
+P	(?:)+|b
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	crazy.toml/empty11	-
+P	b|(?:)+
+H	abc
+L	-
+M	0,0
+M	1,2
+M	3,3
+E
+T	empty.toml/100	-
+P	|b
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/110	-
+P	b|
+H	abc
+L	-
+M	0,0
+M	1,2
+M	3,3
+E
+T	empty.toml/120	-
+P	|z
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/130	-
+P	z|
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/200	-
+P	|
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/210	-
+P	||
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/220	-
+P	||b
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/230	-
+P	b||
+H	abc
+L	-
+M	0,0
+M	1,2
+M	3,3
+E
+T	empty.toml/240	-
+P	||z
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/300	-
+P	(?:)|b
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/310	-
+P	b|(?:)
+H	abc
+L	-
+M	0,0
+M	1,2
+M	3,3
+E
+T	empty.toml/320	-
+P	(?:|)
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/330	-
+P	(?:|)|z
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/400	-
+P	a(?:)|b
+H	abc
+L	-
+M	0,1
+M	1,2
+E
+T	empty.toml/500	-
+P	
+H	
+L	-
+M	0,0
+E
+T	empty.toml/510	-
+P	
+H	a
+L	-
+M	0,0
+M	1,1
+E
+T	empty.toml/520	-
+P	
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/600	-
+P	(?:|a)*
+H	aaa
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	empty.toml/610	-
+P	(?:|a)+
+H	aaa
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	expensive.toml/regression-many-repeat-no-stack-overflow	-
+P	^.{1,2500}
+H	a
+L	-
+M	0,1
+E
+T	expensive.toml/backtrack-blow-visited-capacity	-
+P	\\pL{50}
+H	abcdefghijklmnopqrstuvwxyabcdefghijklmnopqrstuvwxyabcdefghijklmnopqrstuvwxyabcdefghijklmnopqrstuvwxyabcdefghijklmnopqrstuvwxyabcdefghijklmnopqrstuvwxyZZ
+L	-
+M	0,50
+M	50,100
+M	100,150
+E
+T	flags.toml/1	-
+P	(?i)abc
+H	ABC
+L	-
+M	0,3
+E
+T	flags.toml/2	-
+P	(?i)a(?-i)bc
+H	Abc
+L	-
+M	0,3
+E
+T	flags.toml/3	-
+P	(?i)a(?-i)bc
+H	ABC
+L	-
+E
+T	flags.toml/4	-
+P	(?is)a.
+H	A\n
+L	-
+M	0,2
+E
+T	flags.toml/5	-
+P	(?is)a.(?-is)a.
+H	A\nab
+L	-
+M	0,4
+E
+T	flags.toml/6	-
+P	(?is)a.(?-is)a.
+H	A\na\n
+L	-
+E
+T	flags.toml/7	-
+P	(?is)a.(?-is:a.)?
+H	A\na\n
+L	1
+M	0,2
+E
+T	flags.toml/8	-
+P	(?U)a+
+H	aa
+L	1
+M	0,1
+E
+T	flags.toml/9	-
+P	(?U)a+?
+H	aa
+L	-
+M	0,2
+E
+T	flags.toml/10	-
+P	(?U)(?-U)a+
+H	aa
+L	-
+M	0,2
+E
+T	iter.toml/1	-
+P	a
+H	aaa
+L	-
+M	0,1
+M	1,2
+M	2,3
+E
+T	iter.toml/2	-
+P	a
+H	aba
+L	-
+M	0,1
+M	2,3
+E
+T	iter.toml/empty1	-
+P	
+H	
+L	-
+M	0,0
+E
+T	iter.toml/empty2	-
+P	
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty3	-
+P	(?:)
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty4	-
+P	(?:)*
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty5	-
+P	(?:)+
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty6	-
+P	(?:)?
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty7	-
+P	(?:)(?:)
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty8	-
+P	(?:)+|z
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty9	-
+P	z|(?:)+
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty10	-
+P	(?:)+|b
+H	abc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+E
+T	iter.toml/empty11	-
+P	b|(?:)+
+H	abc
+L	-
+M	0,0
+M	1,2
+M	3,3
+E
+T	iter.toml/start1	-
+P	^a
+H	a
+L	-
+M	0,1
+E
+T	iter.toml/start2	-
+P	^a
+H	aa
+L	-
+M	0,1
+E
+T	iter.toml/anchored1	a
+P	a
+H	a
+L	-
+M	0,1
+E
+T	iter.toml/nonempty-followedby-empty	-
+P	abc|.*?
+H	abczzz
+L	-
+M	0,3
+M	4,4
+M	5,5
+M	6,6
+E
+T	iter.toml/nonempty-followedby-oneempty	-
+P	abc|.*?
+H	abcz
+L	-
+M	0,3
+M	4,4
+E
+T	iter.toml/nonempty-followedby-onemixed	-
+P	abc|.*?
+H	abczabc
+L	-
+M	0,3
+M	4,7
+E
+T	iter.toml/nonempty-followedby-twomixed	-
+P	abc|.*?
+H	abczzabc
+L	-
+M	0,3
+M	4,4
+M	5,8
+E
+T	misc.toml/ascii-literal	-
+P	a
+H	a
+L	-
+M	0,1
+E
+T	misc.toml/ascii-literal-not	-
+P	a
+H	z
+L	-
+E
+T	misc.toml/ascii-literal-anchored	a
+P	a
+H	a
+L	-
+M	0,1
+E
+T	misc.toml/ascii-literal-anchored-not	a
+P	a
+H	z
+L	-
+E
+T	misc.toml/anchor-start-end-line	-
+P	(?m)^bar$
+H	foo\nbar\nbaz
+L	-
+M	4,7
+E
+T	misc.toml/prefix-literal-match	-
+P	^abc
+H	abc
+L	-
+M	0,3
+E
+T	misc.toml/prefix-literal-no-match	-
+P	^abc
+H	zabc
+L	-
+E
+T	misc.toml/one-literal-edge	-
+P	abc
+H	xxxxxab
+L	-
+E
+T	misc.toml/terminates	-
+P	a$
+H	a
+L	-
+M	0,1
+E
+T	misc.toml/suffix-100	-
+P	.*abcd
+H	abcd
+L	-
+M	0,4
+E
+T	misc.toml/suffix-200	-
+P	.*(?:abcd)+
+H	abcd
+L	-
+M	0,4
+E
+T	misc.toml/suffix-300	-
+P	.*(?:abcd)+
+H	abcdabcd
+L	-
+M	0,8
+E
+T	misc.toml/suffix-400	-
+P	.*(?:abcd)+
+H	abcdxabcd
+L	-
+M	0,9
+E
+T	misc.toml/suffix-500	-
+P	.*x(?:abcd)+
+H	abcdxabcd
+L	-
+M	0,9
+E
+T	misc.toml/suffix-600	-
+P	[^abcd]*x(?:abcd)+
+H	abcdxabcd
+L	-
+M	4,9
+E
+T	multiline.toml/basic1	-
+P	(?m)^[a-z]+$
+H	abc\ndef\nxyz
+L	-
+M	0,3
+M	4,7
+M	8,11
+E
+T	multiline.toml/basic2	-
+P	(?m)^$
+H	abc\ndef\nxyz
+L	-
+E
+T	multiline.toml/basic3	-
+P	(?m)^
+H	abc\ndef\nxyz
+L	-
+M	0,0
+M	4,4
+M	8,8
+E
+T	multiline.toml/basic4	-
+P	(?m)$
+H	abc\ndef\nxyz
+L	-
+M	3,3
+M	7,7
+M	11,11
+E
+T	multiline.toml/basic5	-
+P	(?m)^[a-z]
+H	abc\ndef\nxyz
+L	-
+M	0,1
+M	4,5
+M	8,9
+E
+T	multiline.toml/basic6	-
+P	(?m)[a-z]^
+H	abc\ndef\nxyz
+L	-
+E
+T	multiline.toml/basic7	-
+P	(?m)[a-z]$
+H	abc\ndef\nxyz
+L	-
+M	2,3
+M	6,7
+M	10,11
+E
+T	multiline.toml/basic8	-
+P	(?m)$[a-z]
+H	abc\ndef\nxyz
+L	-
+E
+T	multiline.toml/basic9	-
+P	(?m)^$
+H	
+L	-
+M	0,0
+E
+T	multiline.toml/repeat1	-
+P	(?m)(?:^$)*
+H	a\nb\nc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+E
+T	multiline.toml/repeat1-no-multi	-
+P	(?:^$)*
+H	a\nb\nc
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+E
+T	multiline.toml/repeat2	-
+P	(?m)(?:^|a)+
+H	a\naaa\n
+L	-
+M	0,0
+M	2,2
+M	3,5
+M	6,6
+E
+T	multiline.toml/repeat2-no-multi	-
+P	(?:^|a)+
+H	a\naaa\n
+L	-
+M	0,0
+M	2,5
+E
+T	multiline.toml/repeat3	-
+P	(?m)(?:^|a)*
+H	a\naaa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,5
+M	6,6
+E
+T	multiline.toml/repeat3-no-multi	-
+P	(?:^|a)*
+H	a\naaa\n
+L	-
+M	0,0
+M	1,1
+M	2,5
+M	6,6
+E
+T	multiline.toml/repeat4	-
+P	(?m)(?:^|a+)
+H	a\naaa\n
+L	-
+M	0,0
+M	2,2
+M	3,5
+M	6,6
+E
+T	multiline.toml/repeat4-no-multi	-
+P	(?:^|a+)
+H	a\naaa\n
+L	-
+M	0,0
+M	2,5
+E
+T	multiline.toml/repeat5	-
+P	(?m)(?:^|a*)
+H	a\naaa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,5
+M	6,6
+E
+T	multiline.toml/repeat5-no-multi	-
+P	(?:^|a*)
+H	a\naaa\n
+L	-
+M	0,0
+M	1,1
+M	2,5
+M	6,6
+E
+T	multiline.toml/repeat6	-
+P	(?m)(?:^[a-z])+
+H	abc\ndef\nxyz
+L	-
+M	0,1
+M	4,5
+M	8,9
+E
+T	multiline.toml/repeat6-no-multi	-
+P	(?:^[a-z])+
+H	abc\ndef\nxyz
+L	-
+M	0,1
+E
+T	multiline.toml/repeat7	-
+P	(?m)(?:^[a-z]{3}\\n?)+
+H	abc\ndef\nxyz
+L	-
+M	0,11
+E
+T	multiline.toml/repeat7-no-multi	-
+P	(?:^[a-z]{3}\\n?)+
+H	abc\ndef\nxyz
+L	-
+M	0,4
+E
+T	multiline.toml/repeat8	-
+P	(?m)(?:^[a-z]{3}\\n?)*
+H	abc\ndef\nxyz
+L	-
+M	0,11
+E
+T	multiline.toml/repeat8-no-multi	-
+P	(?:^[a-z]{3}\\n?)*
+H	abc\ndef\nxyz
+L	-
+M	0,4
+M	5,5
+M	6,6
+M	7,7
+M	8,8
+M	9,9
+M	10,10
+M	11,11
+E
+T	multiline.toml/repeat9	-
+P	(?m)(?:\\n?[a-z]{3}$)+
+H	abc\ndef\nxyz
+L	-
+M	0,11
+E
+T	multiline.toml/repeat9-no-multi	-
+P	(?:\\n?[a-z]{3}$)+
+H	abc\ndef\nxyz
+L	-
+M	7,11
+E
+T	multiline.toml/repeat10	-
+P	(?m)(?:\\n?[a-z]{3}$)*
+H	abc\ndef\nxyz
+L	-
+M	0,11
+E
+T	multiline.toml/repeat10-no-multi	-
+P	(?:\\n?[a-z]{3}$)*
+H	abc\ndef\nxyz
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+M	6,6
+M	7,11
+E
+T	multiline.toml/repeat11	-
+P	(?m)^*
+H	\naa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+E
+T	multiline.toml/repeat11-no-multi	-
+P	^*
+H	\naa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+E
+T	multiline.toml/repeat12	-
+P	(?m)^+
+H	\naa\n
+L	-
+M	0,0
+M	1,1
+M	4,4
+E
+T	multiline.toml/repeat12-no-multi	-
+P	^+
+H	\naa\n
+L	-
+M	0,0
+E
+T	multiline.toml/repeat13	-
+P	(?m)$*
+H	\naa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+E
+T	multiline.toml/repeat13-no-multi	-
+P	$*
+H	\naa\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+E
+T	multiline.toml/repeat14	-
+P	(?m)$+
+H	\naa\n
+L	-
+M	0,0
+M	3,3
+M	4,4
+E
+T	multiline.toml/repeat14-no-multi	-
+P	$+
+H	\naa\n
+L	-
+M	4,4
+E
+T	multiline.toml/repeat15	-
+P	(?m)(?:$\\n)+
+H	\n\naaa\n\n
+L	-
+M	0,2
+M	5,7
+E
+T	multiline.toml/repeat15-no-multi	-
+P	(?:$\\n)+
+H	\n\naaa\n\n
+L	-
+E
+T	multiline.toml/repeat16	-
+P	(?m)(?:$\\n)*
+H	\n\naaa\n\n
+L	-
+M	0,2
+M	3,3
+M	4,4
+M	5,7
+E
+T	multiline.toml/repeat16-no-multi	-
+P	(?:$\\n)*
+H	\n\naaa\n\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+M	6,6
+M	7,7
+E
+T	multiline.toml/repeat17	-
+P	(?m)(?:$\\n^)+
+H	\n\naaa\n\n
+L	-
+M	0,2
+M	5,7
+E
+T	multiline.toml/repeat17-no-multi	-
+P	(?:$\\n^)+
+H	\n\naaa\n\n
+L	-
+E
+T	multiline.toml/repeat18	-
+P	(?m)(?:^|$)+
+H	\n\naaa\n\n
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	5,5
+M	6,6
+M	7,7
+E
+T	multiline.toml/repeat18-no-multi	-
+P	(?:^|$)+
+H	\n\naaa\n\n
+L	-
+M	0,0
+M	7,7
+E
+T	multiline.toml/match-line-100	-
+P	(?m)^.+$
+H	aa\naaaaaaaaaaaaaaaaaaa\n
+L	-
+M	0,2
+M	3,22
+E
+T	no-unicode.toml/case3	i
+P	[a-z]+
+H	aAKaA
+L	-
+M	0,7
+E
+T	no-unicode.toml/negate1	-
+P	[^a]
+H	δ
+L	-
+M	0,2
+E
+T	no-unicode.toml/word-unicode	-
+P	\\w+
+H	aδ
+L	-
+M	0,3
+E
+T	no-unicode.toml/decimal-unicode	-
+P	\\d+
+H	1२३9
+L	-
+M	0,8
+E
+T	no-unicode.toml/space-unicode	-
+P	\\s+
+H	  
+L	-
+M	0,4
+E
+T	no-unicode.toml/iter1-utf8	-
+P	
+H	☃
+L	-
+M	0,0
+M	3,3
+E
+T	regression.toml/invalid-regex-no-crash-100	-
+P	(*)
+H	
+C
+E
+T	regression.toml/invalid-regex-no-crash-200	-
+P	(?:?)
+H	
+C
+E
+T	regression.toml/invalid-regex-no-crash-300	-
+P	(?)
+H	
+C
+E
+T	regression.toml/invalid-regex-no-crash-400	-
+P	*
+H	
+C
+E
+T	regression.toml/unicode-case-lower-nocase-flag	-
+P	(?i)\\p{Ll}+
+H	ΛΘΓΔα
+L	-
+M	0,10
+E
+T	regression.toml/negated-char-class-100	-
+P	(?i)[^x]
+H	x
+L	-
+E
+T	regression.toml/negated-char-class-200	-
+P	(?i)[^x]
+H	X
+L	-
+E
+T	regression.toml/ascii-word-underscore	-
+P	[[:word:]]
+H	_
+L	-
+M	0,1
+E
+T	regression.toml/captures-repeat	-
+P	([a-f]){2}(?P<foo>[x-z])
+H	abx
+L	-
+M	0,3 1,2 2,3
+E
+T	regression.toml/alt-in-alt-100	-
+P	ab?|$
+H	az
+L	-
+M	0,1
+M	2,2
+E
+T	regression.toml/alt-in-alt-200	-
+P	^(?:.*?)(?:\\n|\\r\\n?|$)
+H	ab\rcd
+L	-
+M	0,3
+E
+T	regression.toml/leftmost-first-prefix	-
+P	z*azb
+H	azb
+L	-
+M	0,3
+E
+T	regression.toml/many-alternates	-
+P	1|2|3|4|5|6|7|8|9|10|int
+H	int
+L	-
+M	0,3
+E
+T	regression.toml/word-boundary-alone-100	-
+P	\\b
+H	Should this (work?)
+L	-
+M	0,0
+M	6,6
+M	7,7
+M	11,11
+M	13,13
+M	17,17
+E
+T	regression.toml/word-boundary-alone-200	-
+P	\\b
+H	a b c
+L	-
+M	0,0
+M	1,1
+M	2,2
+M	3,3
+M	4,4
+M	5,5
+E
+T	regression.toml/partial-anchor	-
+P	^a|b
+H	ba
+L	-
+M	0,1
+E
+T	regression.toml/partial-anchor-alternate-begin	-
+P	^a|z
+H	yyyyya
+L	-
+E
+T	regression.toml/partial-anchor-alternate-end	-
+P	a$|z
+H	ayyyyy
+L	-
+E
+T	regression.toml/lits-unambiguous-100	-
+P	(?:ABC|CDA|BC)X
+H	CDAX
+L	-
+M	0,4
+E
+T	regression.toml/lits-unambiguous-200	-
+P	((IMG|CAM|MG|MB2)_|(DSCN|CIMG))(?P<n>[0-9]+)$
+H	CIMG2341
+L	-
+M	0,8 0,4 - 0,4 4,8
+E
+T	regression.toml/strange-anchor-non-complete-prefix	-
+P	a^{2}
+H	
+L	-
+E
+T	regression.toml/strange-anchor-non-complete-suffix	-
+P	${2}a
+H	
+L	-
+E
+T	regression.toml/captures-after-dfa-premature-end-100	-
+P	a(b*(X|$))?
+H	abcbX
+L	-
+M	0,1 - -
+E
+T	regression.toml/captures-after-dfa-premature-end-200	-
+P	a(bc*(X|$))?
+H	abcbX
+L	-
+M	0,1 - -
+E
+T	regression.toml/captures-after-dfa-premature-end-300	-
+P	(aa$)?
+H	aaz
+L	-
+M	0,0 -
+M	1,1 -
+M	2,2 -
+M	3,3 -
+E
+T	regression.toml/captures-after-dfa-premature-end-400	-
+P	(a)\\d*\\.?\\d+\\b
+H	a0.0c
+L	-
+M	0,2 0,1
+E
+T	regression.toml/literal-panic	-
+P	typename type\\-parameter\\-[0-9]+\\-[0-9]+::.+
+H	test
+L	-
+E
+T	regression.toml/empty-flag-expr	-
+P	(?:(?:(?x)))
+H	
+L	-
+M	0,0
+E
+T	regression.toml/invalid-repetition	-
+P	(?m){1,1}
+H	
+C
+E
+T	regression.toml/flags-are-unset	-
+P	(?:(?i)foo)|Bar
+H	foo Foo bar Bar
+L	-
+M	0,3
+M	4,7
+M	12,15
+E
+T	regression.toml/empty-group-with-unicode	-
+P	(?:)Ј01
+H	zЈ01
+L	-
+M	1,5
+E
+T	regression.toml/word-boundary-weird	-
+P	\\b..\\b
+H	I have 12, he has 2!
+L	-
+M	0,2
+M	7,9
+M	9,11
+M	11,13
+M	17,19
+E
+T	regression.toml/reverse-suffix-100	-
+P	[0-4][0-4][0-4]000
+H	153.230000
+L	-
+M	4,10
+E
+T	regression.toml/reverse-suffix-200	-
+P	[0-9][0-9][0-9]000
+H	153.230000\n
+L	-
+M	4,10
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-010	-
+P	.abb|b
+H	zabb
+L	-
+M	0,4
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-011	-
+P	.bb|b
+H	zabb
+L	-
+M	1,4
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-012	-
+P	.abb|b
+H	zzzabbz
+L	-
+M	2,6
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-020	-
+P	\\s+\\w+bb|b
+H	 zabb
+L	-
+M	0,5
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-030	-
+P	(?:[a-wyz]{3}|[a-wyz]).b
+H	xaaabb
+L	-
+M	1,6
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-040	-
+P	(?:[ac-z]{2}b[ac-z])?[ac-z]b
+H	!aabaab
+L	-
+M	1,7
+E
+T	regression.toml/reverse-suffix-start-of-match-failure-050	-
+P	(?:[a-z]cb|c)[a-z]*b
+H	!acbzb
+L	-
+M	1,6
+E
+T	regression.toml/reverse-suffix-rejected-fallback-prefilter-010	-
+P	(?:ab|c)*c
+H	cabac
+L	1
+M	0,1
+E
+T	regression.toml/reverse-suffix-required-class-separator-010	-
+P	\\w+\\s+Holmes
+H	abcHolmes xyz Holmes
+L	-
+M	10,20
+E
+T	regression.toml/reverse-suffix-required-class-separator-020	-
+P	(?:.abc)?a+b+c
+H	xabcabc
+L	-
+M	0,7
+E
+T	regression.toml/adjacent-line-boundary-100	-
+P	(?m)^(?:[^ ]+?)$
+H	line1\nline2
+L	-
+M	0,5
+M	6,11
+E
+T	regression.toml/adjacent-line-boundary-200	-
+P	(?m)^(?:[^ ]+?)$
+H	A\nB
+L	-
+M	0,1
+M	2,3
+E
+T	regression.toml/anchored-prefix-100	-
+P	^a[[:^space:]]
+H	a 
+L	-
+E
+T	regression.toml/anchored-prefix-200	-
+P	^a[[:^space:]]
+H	foo boo a
+L	-
+E
+T	regression.toml/anchored-prefix-300	-
+P	^-[a-z]
+H	r-f
+L	-
+E
+T	regression.toml/aho-corasick-100	-
+P	samwise|sam|a|b|c|d|e|f|g|h|i|j|k|l|m|n|o|p|q|r|s|t|u|v|w|x|y|z|A|B|C|D|E|F|G|H|I|J|K|L|M|N|O|P|Q|R|S|T|U|V|W|X|Y|Z
+H	samwise
+L	-
+M	0,7
+E
+T	regression.toml/interior-anchor-capture	-
+P	(a$)b$
+H	ab
+L	-
+E
+T	regression.toml/fowler-basic154-unanchored	-
+P	a([bc]*)c*
+H	abc
+L	-
+M	0,3 1,3
+E
+T	regression.toml/word-boundary-interact-poorly-with-literal-optimizations	-
+P	(?i:(?:\\b|_)win(?:32|64|dows)?(?:\\b|_))
+H	ubi-Darwin-x86_64.tar.gz
+L	-
+E
+T	regression.toml/impossible-branch	-
+P	.*[^\\s\\S]A|B
+H	B
+L	-
+M	0,1
+E
+T	regression.toml/captures-wrong-order	-
+P	(a){0}(a)
+H	a
+L	-
+M	0,1 - 0,1
+E
+T	regression.toml/negated-unicode-word-boundary-dfa-fail	-
+P	\\B.*
+H	!˗
+L	-
+M	0,3
+E
+T	regression.toml/missed-match	-
+P	e..+e.ee>
+H	Zeee.eZZZZZZZZeee>eeeeeee>
+L	-
+M	1,26
+E
+T	regression.toml/reverse-inner-plus-shorter-than-expected	-
+P	(?:(\\d+)[:.])?(\\d{1,2})[:.](\\d{2})
+H	102:12:39
+L	-
+M	0,9 0,3 4,6 7,9
+E
+T	regression.toml/reverse-inner-short	-
+P	(?:([0-9][0-9][0-9]):)?([0-9][0-9]):([0-9][0-9])
+H	102:12:39
+L	-
+M	0,9 0,3 4,6 7,9
+E
+T	regression.toml/reverse-inner-start-of-match-failure-010	-
+P	(?:..acbb|b)a(?:c|d)
+H	xzbacbbac
+L	-
+M	1,9
+E
+T	regression.toml/reverse-inner-start-of-match-failure-011	-
+P	(?:\\s+.\\w+acbb|b)a(?:c|d)
+H	 xzbacbbac
+L	-
+M	0,10
+E
+T	regression.toml/reverse-inner-later-literal-010	-
+P	(?:..acbb|b)a(?:c|d)
+H	xzbacbbac
+L	-
+M	1,9
+E
+T	regression.toml/reverse-inner-start-of-match-failure-020	-
+P	(?:[ac-z]{3}|[ac-z])(?:aba|baa)
+H	!aaabaa
+L	-
+M	1,7
+E
+T	regression.toml/reverse-inner-rejected-fallback-prefilter-010	-
+P	(?:ab|c)*c[de]*
+H	cabac
+L	1
+M	0,1
+E
+T	regression.toml/reverse-inner-required-class-separator-010	-
+P	\\w+\\s+Holmes\\s+\\w+
+H	abcHolmes xyz Holmes tail
+L	-
+M	10,25
+E
+T	regression.toml/reverse-inner-required-class-separator-020	-
+P	(?:.abc)?a+b+c.*
+H	xabcabc
+L	-
+M	0,7
+E
+T	regression.toml/reverse-inner-leading-class-separator-010	-
+P	\\s[A-Za-z]{0,12}ing\\s
+H	 xingabcing 
+L	-
+M	0,12
+E
+T	regression.toml/non-prefix-literal-quit-state	-
+P	.+\\b\\n
+H	β77\n
+L	-
+M	0,5
+E
+T	regression.toml/hir-optimization-out-of-order-class	-
+P	^[[:alnum:]./-]+$
+H	a-b
+L	-
+M	0,3
+E
+T	regression.toml/improper-reverse-suffix-optimization	-
+P	(\\\\N\\{[^}]+})|([{}])
+H	hiya \\N{snowman} bye
+L	-
+M	5,16 5,16 -
+E
+T	unicode.toml/literal1	-
+P	☃
+H	☃
+L	-
+M	0,3
+E
+T	unicode.toml/literal2	-
+P	☃+
+H	☃
+L	-
+M	0,3
+E
+T	unicode.toml/literal3	i
+P	☃+
+H	☃
+L	-
+M	0,3
+E
+T	unicode.toml/literal4	i
+P	Δ
+H	δ
+L	-
+M	0,2
+E
+T	unicode.toml/wb-100	-
+P	\\d\\b
+H	6δ
+L	-
+E
+T	unicode.toml/wb-200	-
+P	\\d\\b
+H	6 
+L	-
+M	0,1
+E
+T	unicode.toml/wb-300	-
+P	\\d\\B
+H	6δ
+L	-
+M	0,1
+E
+T	unicode.toml/wb-400	-
+P	\\d\\B
+H	6 
+L	-
+E
+T	unicode.toml/class1	-
+P	[☃Ⅰ]+
+H	☃
+L	-
+M	0,3
+E
+T	unicode.toml/class2	-
+P	\\pN
+H	Ⅰ
+L	-
+M	0,3
+E
+T	unicode.toml/class3	-
+P	\\pN+
+H	Ⅰ1Ⅱ2
+L	-
+M	0,8
+E
+T	unicode.toml/class4	-
+P	\\PN+
+H	abⅠ
+L	-
+M	0,2
+E
+T	unicode.toml/class5	-
+P	[\\PN]+
+H	abⅠ
+L	-
+M	0,2
+E
+T	unicode.toml/class6	-
+P	[^\\PN]+
+H	abⅠ
+L	-
+M	2,5
+E
+T	unicode.toml/class7	-
+P	\\p{Lu}+
+H	ΛΘΓΔα
+L	-
+M	0,8
+E
+T	unicode.toml/class8	i
+P	\\p{Lu}+
+H	ΛΘΓΔα
+L	-
+M	0,10
+E
+T	unicode.toml/class9	-
+P	\\pL+
+H	ΛΘΓΔα
+L	-
+M	0,10
+E
+T	unicode.toml/class10	-
+P	\\p{Ll}+
+H	ΛΘΓΔα
+L	-
+M	8,10
+E
+T	unicode.toml/perl1	-
+P	\\w+
+H	dδd
+L	-
+M	0,4
+E
+T	unicode.toml/perl2	-
+P	\\w+
+H	⥡
+L	-
+E
+T	unicode.toml/perl3	-
+P	\\W+
+H	⥡
+L	-
+M	0,3
+E
+T	unicode.toml/perl4	-
+P	\\d+
+H	1२३9
+L	-
+M	0,8
+E
+T	unicode.toml/perl5	-
+P	\\d+
+H	Ⅱ
+L	-
+E
+T	unicode.toml/perl6	-
+P	\\D+
+H	Ⅱ
+L	-
+M	0,3
+E
+T	unicode.toml/perl7	-
+P	\\s+
+H	 
+L	-
+M	0,3
+E
+T	unicode.toml/perl8	-
+P	\\s+
+H	☃
+L	-
+E
+T	unicode.toml/perl9	-
+P	\\S+
+H	☃
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat1	-
+P	\\p{Cased_Letter}
+H	Ａ
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat2	-
+P	\\p{Close_Punctuation}
+H	❯
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat3	-
+P	\\p{Connector_Punctuation}
+H	⁀
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat4	-
+P	\\p{Control}
+H	
+L	-
+M	0,2
+E
+T	unicode.toml/class-gencat5	-
+P	\\p{Currency_Symbol}
+H	￡
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat6	-
+P	\\p{Dash_Punctuation}
+H	〰
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat7	-
+P	\\p{Decimal_Number}
+H	𑓙
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat8	-
+P	\\p{Enclosing_Mark}
+H	꙲
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat9	-
+P	\\p{Final_Punctuation}
+H	⸡
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat10	-
+P	\\p{Format}
+H	󠁿
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat11	-
+P	\\p{Initial_Punctuation}
+H	⸜
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat12	-
+P	\\p{Letter}
+H	Έ
+L	-
+M	0,2
+E
+T	unicode.toml/class-gencat13	-
+P	\\p{Letter_Number}
+H	ↂ
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat14	-
+P	\\p{Line_Separator}
+H	 
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat15	-
+P	\\p{Lowercase_Letter}
+H	ϛ
+L	-
+M	0,2
+E
+T	unicode.toml/class-gencat16	-
+P	\\p{Mark}
+H	󠇯
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat17	-
+P	\\p{Math}
+H	⋿
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat18	-
+P	\\p{Modifier_Letter}
+H	𖭃
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat19	-
+P	\\p{Modifier_Symbol}
+H	🏿
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat20	-
+P	\\p{Nonspacing_Mark}
+H	𞥊
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat21	-
+P	\\p{Number}
+H	⓿
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat22	-
+P	\\p{Open_Punctuation}
+H	｟
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat23	-
+P	\\p{Other}
+H	௉
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat24	-
+P	\\p{Other_Letter}
+H	ꓷ
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat25	-
+P	\\p{Other_Number}
+H	㉏
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat26	-
+P	\\p{Other_Punctuation}
+H	𞥞
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat27	-
+P	\\p{Other_Symbol}
+H	⅌
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat28	-
+P	\\p{Paragraph_Separator}
+H	 
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat29	-
+P	\\p{Private_Use}
+H	􏿽
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat30	-
+P	\\p{Punctuation}
+H	𑁍
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat31	-
+P	\\p{Separator}
+H	　
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat32	-
+P	\\p{Space_Separator}
+H	 
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat33	-
+P	\\p{Spacing_Mark}
+H	𖽾
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat34	-
+P	\\p{Symbol}
+H	⯈
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat35	-
+P	\\p{Titlecase_Letter}
+H	ῼ
+L	-
+M	0,3
+E
+T	unicode.toml/class-gencat36	-
+P	\\p{Unassigned}
+H	􏿿
+L	-
+M	0,4
+E
+T	unicode.toml/class-gencat37	-
+P	\\p{Uppercase_Letter}
+H	Ꝋ
+L	-
+M	0,3
+E
+T	unicode.toml/class-emoji1	-
+P	\\p{Emoji}
+H	⏩
+L	-
+M	0,3
+E
+T	unicode.toml/class-emoji2	-
+P	\\p{emoji}
+H	🈚
+L	-
+M	0,4
+E
+T	unicode.toml/class-emoji3	-
+P	\\p{extendedpictographic}
+H	🩮
+L	-
+M	0,4
+E
+T	unicode.toml/class-emoji4	-
+P	\\p{extendedpictographic}
+H	🿽
+L	-
+M	0,4
+E
+T	unicode.toml/class-gcb1	-
+P	\\p{grapheme_cluster_break=prepend}
+H	𑵆
+L	-
+M	0,4
+E
+T	unicode.toml/class-gcb2	-
+P	\\p{gcb=regional_indicator}
+H	🇦
+L	-
+M	0,4
+E
+T	unicode.toml/class-gcb3	-
+P	\\p{gcb=ri}
+H	🇧
+L	-
+M	0,4
+E
+T	unicode.toml/class-gcb4	-
+P	\\p{regionalindicator}
+H	🇿
+L	-
+M	0,4
+E
+T	unicode.toml/class-gcb5	-
+P	\\p{gcb=lvt}
+H	즉
+L	-
+M	0,3
+E
+T	unicode.toml/class-gcb6	-
+P	\\p{gcb=zwj}
+H	‍
+L	-
+M	0,3
+E
+T	unicode.toml/class-word-break1	-
+P	\\p{word_break=Hebrew_Letter}
+H	צּ
+L	-
+M	0,3
+E
+T	unicode.toml/class-word-break2	-
+P	\\p{wb=hebrewletter}
+H	צּ
+L	-
+M	0,3
+E
+T	unicode.toml/class-word-break3	-
+P	\\p{wb=ExtendNumLet}
+H	＿
+L	-
+M	0,3
+E
+T	unicode.toml/class-word-break4	-
+P	\\p{wb=WSegSpace}
+H	　
+L	-
+M	0,3
+E
+T	unicode.toml/class-word-break5	-
+P	\\p{wb=numeric}
+H	𞥐
+L	-
+M	0,4
+E
+T	unicode.toml/class-sentence-break1	-
+P	\\p{sentence_break=Lower}
+H	ѩ
+L	-
+M	0,2
+E
+T	unicode.toml/class-sentence-break2	-
+P	\\p{sb=lower}
+H	ѩ
+L	-
+M	0,2
+E
+T	unicode.toml/class-sentence-break3	-
+P	\\p{sb=Close}
+H	｠
+L	-
+M	0,3
+E
+T	unicode.toml/class-sentence-break4	-
+P	\\p{sb=Close}
+H	🙷
+L	-
+M	0,4
+E
+T	unicode.toml/class-sentence-break5	-
+P	\\p{sb=SContinue}
+H	､
+L	-
+M	0,3
+E
+T	utf8.toml/empty-utf8yes	-
+P	
+H	☃
+L	-
+M	0,0
+M	3,3
+E
+T	utf8.toml/empty-utf8yes-anchored	a
+P	
+H	𝛃
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-010	-
+P	\\b{start}
+H	a
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-020	-
+P	\\b{start}
+H	a 
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-030	-
+P	\\b{start}
+H	 a 
+L	-
+M	1,1
+E
+T	word-boundary-special.toml/word-start-unicode-040	-
+P	\\b{start}
+H	
+L	-
+E
+T	word-boundary-special.toml/word-start-unicode-050	-
+P	\\b{start}
+H	ab
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-060	-
+P	\\b{start}
+H	𝛃
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-070	-
+P	\\b{start}
+H	 𝛃 
+L	-
+M	1,1
+E
+T	word-boundary-special.toml/word-start-unicode-080	-
+P	\\b{start}
+H	𝛃𐆀
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-090	-
+P	\\b{start}
+H	𝛃b
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-unicode-110	-
+P	\\b{start}
+H	b𝛃
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-end-unicode-010	-
+P	\\b{end}
+H	a
+L	-
+M	1,1
+E
+T	word-boundary-special.toml/word-end-unicode-020	-
+P	\\b{end}
+H	a 
+L	-
+M	1,1
+E
+T	word-boundary-special.toml/word-end-unicode-030	-
+P	\\b{end}
+H	 a 
+L	-
+M	2,2
+E
+T	word-boundary-special.toml/word-end-unicode-040	-
+P	\\b{end}
+H	
+L	-
+E
+T	word-boundary-special.toml/word-end-unicode-050	-
+P	\\b{end}
+H	ab
+L	-
+M	2,2
+E
+T	word-boundary-special.toml/word-end-unicode-060	-
+P	\\b{end}
+H	𝛃
+L	-
+M	4,4
+E
+T	word-boundary-special.toml/word-end-unicode-070	-
+P	\\b{end}
+H	 𝛃 
+L	-
+M	5,5
+E
+T	word-boundary-special.toml/word-end-unicode-080	-
+P	\\b{end}
+H	𝛃𐆀
+L	-
+M	4,4
+E
+T	word-boundary-special.toml/word-end-unicode-090	-
+P	\\b{end}
+H	𝛃b
+L	-
+M	5,5
+E
+T	word-boundary-special.toml/word-end-unicode-110	-
+P	\\b{end}
+H	b𝛃
+L	-
+M	5,5
+E
+T	word-boundary-special.toml/word-start-half-unicode-010	-
+P	\\b{start-half}
+H	a
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-half-unicode-020	-
+P	\\b{start-half}
+H	a 
+L	-
+M	0,0
+M	2,2
+E
+T	word-boundary-special.toml/word-start-half-unicode-030	-
+P	\\b{start-half}
+H	 a 
+L	-
+M	0,0
+M	1,1
+M	3,3
+E
+T	word-boundary-special.toml/word-start-half-unicode-040	-
+P	\\b{start-half}
+H	
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-half-unicode-050	-
+P	\\b{start-half}
+H	ab
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-half-unicode-060	-
+P	\\b{start-half}
+H	𝛃
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-half-unicode-070	-
+P	\\b{start-half}
+H	 𝛃 
+L	-
+M	0,0
+M	1,1
+M	6,6
+E
+T	word-boundary-special.toml/word-start-half-unicode-080	-
+P	\\b{start-half}
+H	𝛃𐆀
+L	-
+M	0,0
+M	8,8
+E
+T	word-boundary-special.toml/word-start-half-unicode-090	-
+P	\\b{start-half}
+H	𝛃b
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-start-half-unicode-110	-
+P	\\b{start-half}
+H	b𝛃
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-end-half-unicode-010	-
+P	\\b{end-half}
+H	a
+L	-
+M	1,1
+E
+T	word-boundary-special.toml/word-end-half-unicode-020	-
+P	\\b{end-half}
+H	a 
+L	-
+M	1,1
+M	2,2
+E
+T	word-boundary-special.toml/word-end-half-unicode-030	-
+P	\\b{end-half}
+H	 a 
+L	-
+M	0,0
+M	2,2
+M	3,3
+E
+T	word-boundary-special.toml/word-end-half-unicode-040	-
+P	\\b{end-half}
+H	
+L	-
+M	0,0
+E
+T	word-boundary-special.toml/word-end-half-unicode-050	-
+P	\\b{end-half}
+H	ab
+L	-
+M	2,2
+E
+T	word-boundary-special.toml/word-end-half-unicode-060	-
+P	\\b{end-half}
+H	𝛃
+L	-
+M	4,4
+E
+T	word-boundary-special.toml/word-end-half-unicode-070	-
+P	\\b{end-half}
+H	 𝛃 
+L	-
+M	0,0
+M	5,5
+M	6,6
+E
+T	word-boundary-special.toml/word-end-half-unicode-080	-
+P	\\b{end-half}
+H	𝛃𐆀
+L	-
+M	4,4
+M	8,8
+E
+T	word-boundary-special.toml/word-end-half-unicode-090	-
+P	\\b{end-half}
+H	𝛃b
+L	-
+M	5,5
+E
+T	word-boundary-special.toml/word-end-half-unicode-110	-
+P	\\b{end-half}
+H	b𝛃
+L	-
+M	5,5
+E
+T	word-boundary.toml/unicode1	-
+P	\\bx\\b
+H	«x
+L	-
+M	2,3
+E
+T	word-boundary.toml/unicode2	-
+P	\\bx\\b
+H	x»
+L	-
+M	0,1
+E
+T	word-boundary.toml/unicode3	-
+P	\\bx\\b
+H	áxβ
+L	-
+E
+T	word-boundary.toml/unicode4	-
+P	\\Bx\\B
+H	áxβ
+L	-
+M	2,3
+E
+T	word-boundary.toml/unicode5	-
+P	\\b
+H	0񾽞
+L	-
+M	0,0
+M	1,1
+E
+T	word-boundary.toml/unicode5-not	-
+P	\\B
+H	0񾽞
+L	-
+M	5,5
+E
+T	word-boundary.toml/unicode6	-
+P	\\b[0-9]+\\b
+H	foo 123 bar 456 quux 789
+L	-
+M	4,7
+M	12,15
+M	21,24
+E
+T	word-boundary.toml/unicode7	-
+P	\\b[0-9]+\\b
+H	foo 123 bar a456 quux 789
+L	-
+M	4,7
+M	22,25
+E
+T	word-boundary.toml/unicode8	-
+P	\\b[0-9]+\\b
+H	foo 123 bar 456a quux 789
+L	-
+M	4,7
+M	22,25
+E
+T	fowler/basic.toml/basic3	-
+P	abracadabra$
+H	abracadabracadabra
+L	1
+M	7,18
+E
+T	fowler/basic.toml/basic4	-
+P	a...b
+H	abababbb
+L	1
+M	2,7
+E
+T	fowler/basic.toml/basic5	-
+P	XXXXXX
+H	..XXXXXX
+L	1
+M	2,8
+E
+T	fowler/basic.toml/basic6	-
+P	\\)
+H	()
+L	1
+M	1,2
+E
+T	fowler/basic.toml/basic7	a
+P	a]
+H	a]a
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic9	a
+P	\\}
+H	}
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic10	a
+P	\\]
+H	]
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic12	a
+P	]
+H	]
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic15	a
+P	^a
+H	ax
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic16	-
+P	\\^a
+H	a^a
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic17	a
+P	a\\^
+H	a^
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic18	-
+P	a$
+H	aa
+L	1
+M	1,2
+E
+T	fowler/basic.toml/basic19	a
+P	a\\$
+H	a$
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic20	a
+P	^$
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic21	a
+P	$^
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic22	-
+P	a($)
+H	aa
+L	1
+M	1,2 2,2
+E
+T	fowler/basic.toml/basic23	a
+P	a*(^a)
+H	aa
+L	1
+M	0,1 0,1
+E
+T	fowler/basic.toml/basic24	a
+P	(..)*(...)*
+H	a
+L	1
+M	0,0 - -
+E
+T	fowler/basic.toml/basic25	a
+P	(..)*(...)*
+H	abcd
+L	1
+M	0,4 2,4 -
+E
+T	fowler/basic.toml/basic26	a
+P	(ab|a)(bc|c)
+H	abc
+L	1
+M	0,3 0,2 2,3
+E
+T	fowler/basic.toml/basic27	a
+P	(ab)c|abc
+H	abc
+L	1
+M	0,3 0,2
+E
+T	fowler/basic.toml/basic28	-
+P	a{0}b
+H	ab
+L	1
+M	1,2
+E
+T	fowler/basic.toml/basic29	a
+P	(a*)(b?)(b+)b{3}
+H	aaabbbbbbb
+L	1
+M	0,10 0,3 3,4 4,7
+E
+T	fowler/basic.toml/basic30	a
+P	(a*)(b{0,1})(b{1,})b{3}
+H	aaabbbbbbb
+L	1
+M	0,10 0,3 3,4 4,7
+E
+T	fowler/basic.toml/basic32	a
+P	((a|a)|a)
+H	a
+L	1
+M	0,1 0,1 0,1
+E
+T	fowler/basic.toml/basic33	a
+P	(a*)(a|aa)
+H	aaaa
+L	1
+M	0,4 0,3 3,4
+E
+T	fowler/basic.toml/basic34	a
+P	a*(a.|aa)
+H	aaaa
+L	1
+M	0,4 2,4
+E
+T	fowler/basic.toml/basic35	a
+P	a(b)|c(d)|a(e)f
+H	aef
+L	1
+M	0,3 - - 1,2
+E
+T	fowler/basic.toml/basic36	a
+P	(a|b)?.*
+H	b
+L	1
+M	0,1 0,1
+E
+T	fowler/basic.toml/basic37	a
+P	(a|b)c|a(b|c)
+H	ac
+L	1
+M	0,2 0,1 -
+E
+T	fowler/basic.toml/basic38	a
+P	(a|b)c|a(b|c)
+H	ab
+L	1
+M	0,2 - 1,2
+E
+T	fowler/basic.toml/basic39	a
+P	(a|b)*c|(a|ab)*c
+H	abc
+L	1
+M	0,3 1,2 -
+E
+T	fowler/basic.toml/basic40	-
+P	(a|b)*c|(a|ab)*c
+H	xc
+L	1
+M	1,2 - -
+E
+T	fowler/basic.toml/basic41	a
+P	(.a|.b).*|.*(.a|.b)
+H	xa
+L	1
+M	0,2 0,2 -
+E
+T	fowler/basic.toml/basic42	a
+P	a?(ab|ba)ab
+H	abab
+L	1
+M	0,4 0,2
+E
+T	fowler/basic.toml/basic43	a
+P	a?(ac{0}b|ba)ab
+H	abab
+L	1
+M	0,4 0,2
+E
+T	fowler/basic.toml/basic44	a
+P	ab|abab
+H	abbabab
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic45	-
+P	aba|bab|bba
+H	baaabbbaba
+L	1
+M	5,8
+E
+T	fowler/basic.toml/basic46	-
+P	aba|bab
+H	baaabbbaba
+L	1
+M	6,9
+E
+T	fowler/basic.toml/basic47	a
+P	(aa|aaa)*|(a|aaaaa)
+H	aa
+L	1
+M	0,2 0,2 -
+E
+T	fowler/basic.toml/basic48	a
+P	(a.|.a.)*|(a|.a...)
+H	aa
+L	1
+M	0,2 0,2 -
+E
+T	fowler/basic.toml/basic49	-
+P	ab|a
+H	xabc
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic50	-
+P	ab|a
+H	xxabc
+L	1
+M	2,4
+E
+T	fowler/basic.toml/basic51	ia
+P	(Ab|cD)*
+H	aBcD
+L	1
+M	0,4 2,4
+E
+T	fowler/basic.toml/basic52	-
+P	[^-]
+H	--a
+L	1
+M	2,3
+E
+T	fowler/basic.toml/basic53	a
+P	[a-]*
+H	--a
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic54	a
+P	[a-m-]*
+H	--amoma--
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic55	-
+P	:::1:::0:|:::1:1:0:
+H	:::0:::1:::1:::0:
+L	1
+M	8,17
+E
+T	fowler/basic.toml/basic56	-
+P	:::1:::0:|:::1:1:1:
+H	:::0:::1:::1:::0:
+L	1
+M	8,17
+E
+T	fowler/basic.toml/basic57	a
+P	[[:upper:]]
+H	A
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic58	-
+P	[[:lower:]]+
+H	`az{
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic59	-
+P	[[:upper:]]+
+H	@AZ[
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic65	a
+P	\\n
+H	\n
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic66	a
+P	\\n
+H	\n
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic67	a
+P	[^a]
+H	\n
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic68	a
+P	\\na
+H	\na
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic69	a
+P	(a)(b)(c)
+H	abc
+L	1
+M	0,3 0,1 1,2 2,3
+E
+T	fowler/basic.toml/basic70	a
+P	xxx
+H	xxx
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic72	a
+P	(?:^|[ (,;])(?:(?:(?:[Ff]eb[^ ]* *|0*2/|\\* */?)0*[6-7]))(?:[^0-9]|$)
+H	feb 6,
+L	1
+M	0,6
+E
+T	fowler/basic.toml/basic74	a
+P	(?:^|[ (,;])(?:(?:(?:[Ff]eb[^ ]* *|0*2/|\\* */?)0*[6-7]))(?:[^0-9]|$)
+H	2/7
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic76	-
+P	(?:^|[ (,;])(?:(?:(?:[Ff]eb[^ ]* *|0*2/|\\* */?)0*[6-7]))(?:[^0-9]|$)
+H	feb 1,Feb 6
+L	1
+M	5,11
+E
+T	fowler/basic.toml/basic78	a
+P	(((?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:x))))))))))))))))))))))))))))))
+H	x
+L	1
+M	0,1 0,1 0,1
+E
+T	fowler/basic.toml/basic80	a
+P	(((?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:(?:x))))))))))))))))))))))))))))))*
+H	xx
+L	1
+M	0,2 1,2 1,2
+E
+T	fowler/basic.toml/basic81	a
+P	a?(ab|ba)*
+H	ababababababababababababababababababababababababababababababababababababababababa
+L	1
+M	0,81 79,81
+E
+T	fowler/basic.toml/basic82	-
+P	abaa|abbaa|abbbaa|abbbbaa
+H	ababbabbbabbbabbbbabbbbaa
+L	1
+M	18,25
+E
+T	fowler/basic.toml/basic83	-
+P	abaa|abbaa|abbbaa|abbbbaa
+H	ababbabbbabbbabbbbabaa
+L	1
+M	18,22
+E
+T	fowler/basic.toml/basic84	-
+P	aaac|aabc|abac|abbc|baac|babc|bbac|bbbc
+H	baaabbbabac
+L	1
+M	7,11
+E
+T	fowler/basic.toml/basic86	a
+P	.*
+H	
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic87	-
+P	aaaa|bbbb|cccc|ddddd|eeeeee|fffffff|gggg|hhhh|iiiii|jjjjj|kkkkk|llll
+H	XaaaXbbbXcccXdddXeeeXfffXgggXhhhXiiiXjjjXkkkXlllXcbaXaaaa
+L	1
+M	53,57
+E
+T	fowler/basic.toml/basic89	a
+P	a*a*a*a*a*b
+H	aaaaaaaaab
+L	1
+M	0,10
+E
+T	fowler/basic.toml/basic90	a
+P	^
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic91	a
+P	$
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic92	a
+P	^$
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic93	a
+P	^a$
+H	a
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic94	a
+P	abc
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic95	-
+P	abc
+H	xabcy
+L	1
+M	1,4
+E
+T	fowler/basic.toml/basic96	-
+P	abc
+H	ababc
+L	1
+M	2,5
+E
+T	fowler/basic.toml/basic97	a
+P	ab*c
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic98	a
+P	ab*bc
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic99	a
+P	ab*bc
+H	abbc
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic100	a
+P	ab*bc
+H	abbbbc
+L	1
+M	0,6
+E
+T	fowler/basic.toml/basic101	a
+P	ab+bc
+H	abbc
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic102	a
+P	ab+bc
+H	abbbbc
+L	1
+M	0,6
+E
+T	fowler/basic.toml/basic103	a
+P	ab?bc
+H	abbc
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic104	a
+P	ab?bc
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic105	a
+P	ab?c
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic106	a
+P	^abc$
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic107	a
+P	^abc
+H	abcc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic108	-
+P	abc$
+H	aabc
+L	1
+M	1,4
+E
+T	fowler/basic.toml/basic109	a
+P	^
+H	abc
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic110	-
+P	$
+H	abc
+L	1
+M	3,3
+E
+T	fowler/basic.toml/basic111	a
+P	a.c
+H	abc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic112	a
+P	a.c
+H	axc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic113	a
+P	a.*c
+H	axyzc
+L	1
+M	0,5
+E
+T	fowler/basic.toml/basic114	a
+P	a[bc]d
+H	abd
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic115	a
+P	a[b-d]e
+H	ace
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic116	-
+P	a[b-d]
+H	aac
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic117	a
+P	a[-b]
+H	a-
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic118	a
+P	a[b-]
+H	a-
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic119	a
+P	a]
+H	a]
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic120	a
+P	a[]]b
+H	a]b
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic121	a
+P	a[^bc]d
+H	aed
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic122	a
+P	a[^-b]c
+H	adc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic123	a
+P	a[^]b]c
+H	adc
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic124	a
+P	ab|cd
+H	abc
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic125	a
+P	ab|cd
+H	abcd
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic126	a
+P	a\\(b
+H	a(b
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic127	a
+P	a\\(*b
+H	ab
+L	1
+M	0,2
+E
+T	fowler/basic.toml/basic128	a
+P	a\\(*b
+H	a((b
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic129	a
+P	((a))
+H	abc
+L	1
+M	0,1 0,1 0,1
+E
+T	fowler/basic.toml/basic130	a
+P	(a)b(c)
+H	abc
+L	1
+M	0,3 0,1 2,3
+E
+T	fowler/basic.toml/basic131	-
+P	a+b+c
+H	aabbabc
+L	1
+M	4,7
+E
+T	fowler/basic.toml/basic132	a
+P	a*
+H	aaa
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic133	a
+P	(a*)*
+H	-
+L	1
+M	0,0 0,0
+E
+T	fowler/basic.toml/basic134	a
+P	(a*)+
+H	-
+L	1
+M	0,0 0,0
+E
+T	fowler/basic.toml/basic135	a
+P	(a*|b)*
+H	-
+L	1
+M	0,0 0,0
+E
+T	fowler/basic.toml/basic136	a
+P	(a+|b)*
+H	ab
+L	1
+M	0,2 1,2
+E
+T	fowler/basic.toml/basic137	a
+P	(a+|b)+
+H	ab
+L	1
+M	0,2 1,2
+E
+T	fowler/basic.toml/basic138	a
+P	(a+|b)?
+H	ab
+L	1
+M	0,1 0,1
+E
+T	fowler/basic.toml/basic139	a
+P	[^ab]*
+H	cde
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic140	a
+P	(^)*
+H	-
+L	1
+M	0,0 0,0
+E
+T	fowler/basic.toml/basic141	a
+P	a*
+H	
+L	1
+M	0,0
+E
+T	fowler/basic.toml/basic142	a
+P	([abc])*d
+H	abbbcd
+L	1
+M	0,6 4,5
+E
+T	fowler/basic.toml/basic143	a
+P	([abc])*bcd
+H	abcd
+L	1
+M	0,4 0,1
+E
+T	fowler/basic.toml/basic144	a
+P	a|b|c|d|e
+H	e
+L	1
+M	0,1
+E
+T	fowler/basic.toml/basic145	a
+P	(a|b|c|d|e)f
+H	ef
+L	1
+M	0,2 0,1
+E
+T	fowler/basic.toml/basic146	a
+P	((a*|b))*
+H	-
+L	1
+M	0,0 0,0 0,0
+E
+T	fowler/basic.toml/basic147	a
+P	abcd*efg
+H	abcdefg
+L	1
+M	0,7
+E
+T	fowler/basic.toml/basic148	-
+P	ab*
+H	xabyabbbz
+L	1
+M	1,3
+E
+T	fowler/basic.toml/basic149	-
+P	ab*
+H	xayabbbz
+L	1
+M	1,2
+E
+T	fowler/basic.toml/basic150	-
+P	(ab|cd)e
+H	abcde
+L	1
+M	2,5 2,4
+E
+T	fowler/basic.toml/basic151	a
+P	[abhgefdc]ij
+H	hij
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic152	-
+P	(a|b)c*d
+H	abcd
+L	1
+M	1,4 1,2
+E
+T	fowler/basic.toml/basic153	a
+P	(ab|ab*)bc
+H	abc
+L	1
+M	0,3 0,1
+E
+T	fowler/basic.toml/basic154	a
+P	a([bc]*)c*
+H	abc
+L	1
+M	0,3 1,3
+E
+T	fowler/basic.toml/basic155	a
+P	a([bc]*)(c*d)
+H	abcd
+L	1
+M	0,4 1,3 3,4
+E
+T	fowler/basic.toml/basic156	a
+P	a([bc]+)(c*d)
+H	abcd
+L	1
+M	0,4 1,3 3,4
+E
+T	fowler/basic.toml/basic157	a
+P	a([bc]*)(c+d)
+H	abcd
+L	1
+M	0,4 1,2 2,4
+E
+T	fowler/basic.toml/basic158	a
+P	a[bcd]*dcdcde
+H	adcdcde
+L	1
+M	0,7
+E
+T	fowler/basic.toml/basic159	a
+P	(ab|a)b*c
+H	abc
+L	1
+M	0,3 0,2
+E
+T	fowler/basic.toml/basic160	a
+P	((a)(b)c)(d)
+H	abcd
+L	1
+M	0,4 0,3 0,1 1,2 3,4
+E
+T	fowler/basic.toml/basic161	a
+P	[A-Za-z_][A-Za-z0-9_]*
+H	alpha
+L	1
+M	0,5
+E
+T	fowler/basic.toml/basic162	-
+P	^a(bc+|b[eh])g|.h$
+H	abh
+L	1
+M	1,3 -
+E
+T	fowler/basic.toml/basic163	a
+P	(bc+d$|ef*g.|h?i(j|k))
+H	effgz
+L	1
+M	0,5 0,5 -
+E
+T	fowler/basic.toml/basic164	a
+P	(bc+d$|ef*g.|h?i(j|k))
+H	ij
+L	1
+M	0,2 0,2 1,2
+E
+T	fowler/basic.toml/basic165	-
+P	(bc+d$|ef*g.|h?i(j|k))
+H	reffgz
+L	1
+M	1,6 1,6 -
+E
+T	fowler/basic.toml/basic166	a
+P	(((((((((a)))))))))
+H	a
+L	1
+M	0,1 0,1 0,1 0,1 0,1 0,1 0,1 0,1 0,1 0,1
+E
+T	fowler/basic.toml/basic167	a
+P	multiple words
+H	multiple words yeah
+L	1
+M	0,14
+E
+T	fowler/basic.toml/basic168	a
+P	(.*)c(.*)
+H	abcde
+L	1
+M	0,5 0,2 3,5
+E
+T	fowler/basic.toml/basic169	a
+P	abcd
+H	abcd
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic170	a
+P	a(bc)d
+H	abcd
+L	1
+M	0,4 1,3
+E
+T	fowler/basic.toml/basic171	a
+P	a[\\x01-\\x03]?c
+H	ac
+L	1
+M	0,3
+E
+T	fowler/basic.toml/basic172	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Qaddafi
+L	1
+M	0,15 - 10,12
+E
+T	fowler/basic.toml/basic173	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Mo'ammar Gadhafi
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic174	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Kaddafi
+L	1
+M	0,15 - 10,12
+E
+T	fowler/basic.toml/basic175	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Qadhafi
+L	1
+M	0,15 - 10,12
+E
+T	fowler/basic.toml/basic176	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Gadafi
+L	1
+M	0,14 - 10,11
+E
+T	fowler/basic.toml/basic177	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Mu'ammar Qadafi
+L	1
+M	0,15 - 11,12
+E
+T	fowler/basic.toml/basic178	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Moamar Gaddafi
+L	1
+M	0,14 - 9,11
+E
+T	fowler/basic.toml/basic179	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Mu'ammar Qadhdhafi
+L	1
+M	0,18 - 13,15
+E
+T	fowler/basic.toml/basic180	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Khaddafi
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic181	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Ghaddafy
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic182	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Ghadafi
+L	1
+M	0,15 - 11,12
+E
+T	fowler/basic.toml/basic183	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Ghaddafi
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic184	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muamar Kaddafi
+L	1
+M	0,14 - 9,11
+E
+T	fowler/basic.toml/basic185	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Quathafi
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic186	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Muammar Gheddafi
+L	1
+M	0,16 - 11,13
+E
+T	fowler/basic.toml/basic187	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Moammar Khadafy
+L	1
+M	0,15 - 11,12
+E
+T	fowler/basic.toml/basic188	a
+P	M[ou]'?am+[ae]r .*([AEae]l[- ])?[GKQ]h?[aeu]+([dtz][dhz]?)+af[iy]
+H	Moammar Qudhafi
+L	1
+M	0,15 - 10,12
+E
+T	fowler/basic.toml/basic189	a
+P	a+(b|c)*d+
+H	aabcdd
+L	1
+M	0,6 3,4
+E
+T	fowler/basic.toml/basic190	a
+P	^.+$
+H	vivi
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic191	a
+P	^(.+)$
+H	vivi
+L	1
+M	0,4 0,4
+E
+T	fowler/basic.toml/basic192	a
+P	^([^!.]+).att.com!(.+)$
+H	gryphon.att.com!eby
+L	1
+M	0,19 0,7 16,19
+E
+T	fowler/basic.toml/basic193	a
+P	^([^!]+!)?([^!]+)$
+H	bas
+L	1
+M	0,3 - 0,3
+E
+T	fowler/basic.toml/basic194	a
+P	^([^!]+!)?([^!]+)$
+H	bar!bas
+L	1
+M	0,7 0,4 4,7
+E
+T	fowler/basic.toml/basic195	a
+P	^([^!]+!)?([^!]+)$
+H	foo!bas
+L	1
+M	0,7 0,4 4,7
+E
+T	fowler/basic.toml/basic196	a
+P	^.+!([^!]+!)([^!]+)$
+H	foo!bar!bas
+L	1
+M	0,11 4,8 8,11
+E
+T	fowler/basic.toml/basic197	a
+P	((foo)|(bar))!bas
+H	bar!bas
+L	1
+M	0,7 0,3 - 0,3
+E
+T	fowler/basic.toml/basic198	-
+P	((foo)|(bar))!bas
+H	foo!bar!bas
+L	1
+M	4,11 4,7 - 4,7
+E
+T	fowler/basic.toml/basic199	a
+P	((foo)|(bar))!bas
+H	foo!bas
+L	1
+M	0,7 0,3 0,3 -
+E
+T	fowler/basic.toml/basic200	a
+P	((foo)|bar)!bas
+H	bar!bas
+L	1
+M	0,7 0,3 -
+E
+T	fowler/basic.toml/basic201	-
+P	((foo)|bar)!bas
+H	foo!bar!bas
+L	1
+M	4,11 4,7 -
+E
+T	fowler/basic.toml/basic202	a
+P	((foo)|bar)!bas
+H	foo!bas
+L	1
+M	0,7 0,3 0,3
+E
+T	fowler/basic.toml/basic203	a
+P	(foo|(bar))!bas
+H	bar!bas
+L	1
+M	0,7 0,3 0,3
+E
+T	fowler/basic.toml/basic204	-
+P	(foo|(bar))!bas
+H	foo!bar!bas
+L	1
+M	4,11 4,7 4,7
+E
+T	fowler/basic.toml/basic205	a
+P	(foo|(bar))!bas
+H	foo!bas
+L	1
+M	0,7 0,3 -
+E
+T	fowler/basic.toml/basic206	a
+P	(foo|bar)!bas
+H	bar!bas
+L	1
+M	0,7 0,3
+E
+T	fowler/basic.toml/basic207	-
+P	(foo|bar)!bas
+H	foo!bar!bas
+L	1
+M	4,11 4,7
+E
+T	fowler/basic.toml/basic208	a
+P	(foo|bar)!bas
+H	foo!bas
+L	1
+M	0,7 0,3
+E
+T	fowler/basic.toml/basic209	a
+P	^(([^!]+!)?([^!]+)|.+!([^!]+!)([^!]+))$
+H	foo!bar!bas
+L	1
+M	0,11 0,11 - - 4,8 8,11
+E
+T	fowler/basic.toml/basic210	a
+P	^([^!]+!)?([^!]+)$|^.+!([^!]+!)([^!]+)$
+H	bas
+L	1
+M	0,3 - 0,3 - -
+E
+T	fowler/basic.toml/basic211	a
+P	^([^!]+!)?([^!]+)$|^.+!([^!]+!)([^!]+)$
+H	bar!bas
+L	1
+M	0,7 0,4 4,7 - -
+E
+T	fowler/basic.toml/basic212	a
+P	^([^!]+!)?([^!]+)$|^.+!([^!]+!)([^!]+)$
+H	foo!bar!bas
+L	1
+M	0,11 - - 4,8 8,11
+E
+T	fowler/basic.toml/basic213	a
+P	^([^!]+!)?([^!]+)$|^.+!([^!]+!)([^!]+)$
+H	foo!bas
+L	1
+M	0,7 0,4 4,7 - -
+E
+T	fowler/basic.toml/basic214	a
+P	^(([^!]+!)?([^!]+)|.+!([^!]+!)([^!]+))$
+H	bas
+L	1
+M	0,3 0,3 - 0,3 - -
+E
+T	fowler/basic.toml/basic215	a
+P	^(([^!]+!)?([^!]+)|.+!([^!]+!)([^!]+))$
+H	bar!bas
+L	1
+M	0,7 0,7 0,4 4,7 - -
+E
+T	fowler/basic.toml/basic216	a
+P	^(([^!]+!)?([^!]+)|.+!([^!]+!)([^!]+))$
+H	foo!bar!bas
+L	1
+M	0,11 0,11 - - 4,8 8,11
+E
+T	fowler/basic.toml/basic217	a
+P	^(([^!]+!)?([^!]+)|.+!([^!]+!)([^!]+))$
+H	foo!bas
+L	1
+M	0,7 0,7 0,4 4,7 - -
+E
+T	fowler/basic.toml/basic218	a
+P	.*(/XXX).*
+H	/XXX
+L	1
+M	0,4 0,4
+E
+T	fowler/basic.toml/basic219	a
+P	.*(\\\\XXX).*
+H	\\XXX
+L	1
+M	0,4 0,4
+E
+T	fowler/basic.toml/basic220	a
+P	\\\\XXX
+H	\\XXX
+L	1
+M	0,4
+E
+T	fowler/basic.toml/basic221	a
+P	.*(/000).*
+H	/000
+L	1
+M	0,4 0,4
+E
+T	fowler/basic.toml/basic222	a
+P	.*(\\\\000).*
+H	\\000
+L	1
+M	0,4 0,4
+E
+T	fowler/basic.toml/basic223	a
+P	\\\\000
+H	\\000
+L	1
+M	0,4
+E
+T	fowler/nullsubexpr.toml/nullsubexpr3	a
+P	(a*)*
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr4	a
+P	(a*)*
+H	x
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr5	a
+P	(a*)*
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr6	a
+P	(a*)*
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr7	a
+P	(a*)+
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr8	a
+P	(a*)+
+H	x
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr9	a
+P	(a*)+
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr10	a
+P	(a*)+
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr11	a
+P	(a+)*
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr12	a
+P	(a+)*
+H	x
+L	1
+M	0,0 -
+E
+T	fowler/nullsubexpr.toml/nullsubexpr13	a
+P	(a+)*
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr14	a
+P	(a+)*
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr15	a
+P	(a+)+
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr16	-
+P	(a+)+
+H	x
+L	1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr17	a
+P	(a+)+
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr18	a
+P	(a+)+
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr20	a
+P	([a]*)*
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr21	a
+P	([a]*)*
+H	x
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr22	a
+P	([a]*)*
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr23	a
+P	([a]*)*
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr24	a
+P	([a]*)+
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr25	a
+P	([a]*)+
+H	x
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr26	a
+P	([a]*)+
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr27	a
+P	([a]*)+
+H	aaaaaax
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr28	a
+P	([^b]*)*
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr29	a
+P	([^b]*)*
+H	b
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr30	a
+P	([^b]*)*
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr31	a
+P	([^b]*)*
+H	aaaaaab
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr32	a
+P	([ab]*)*
+H	a
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr33	a
+P	([ab]*)*
+H	aaaaaa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr34	a
+P	([ab]*)*
+H	ababab
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr35	a
+P	([ab]*)*
+H	bababa
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr36	a
+P	([ab]*)*
+H	b
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr37	a
+P	([ab]*)*
+H	bbbbbb
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr38	a
+P	([ab]*)*
+H	aaaabcde
+L	1
+M	0,5 0,5
+E
+T	fowler/nullsubexpr.toml/nullsubexpr39	a
+P	([^a]*)*
+H	b
+L	1
+M	0,1 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr40	a
+P	([^a]*)*
+H	bbbbbb
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr41	a
+P	([^a]*)*
+H	aaaaaa
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr42	a
+P	([^ab]*)*
+H	ccccxx
+L	1
+M	0,6 0,6
+E
+T	fowler/nullsubexpr.toml/nullsubexpr43	a
+P	([^ab]*)*
+H	ababab
+L	1
+M	0,0 0,0
+E
+T	fowler/nullsubexpr.toml/nullsubexpr46	a
+P	((z)+|a)*
+H	zabcde
+L	1
+M	0,2 1,2 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr64	a
+P	(a*)*(x)
+H	x
+L	1
+M	0,1 0,0 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr65	a
+P	(a*)*(x)
+H	ax
+L	1
+M	0,2 0,1 1,2
+E
+T	fowler/nullsubexpr.toml/nullsubexpr66	a
+P	(a*)*(x)
+H	axa
+L	1
+M	0,2 0,1 1,2
+E
+T	fowler/nullsubexpr.toml/nullsubexpr68	a
+P	(a*)+(x)
+H	x
+L	1
+M	0,1 0,0 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr69	a
+P	(a*)+(x)
+H	ax
+L	1
+M	0,2 0,1 1,2
+E
+T	fowler/nullsubexpr.toml/nullsubexpr70	a
+P	(a*)+(x)
+H	axa
+L	1
+M	0,2 0,1 1,2
+E
+T	fowler/nullsubexpr.toml/nullsubexpr72	a
+P	(a*){2}(x)
+H	x
+L	1
+M	0,1 0,0 0,1
+E
+T	fowler/nullsubexpr.toml/nullsubexpr73	a
+P	(a*){2}(x)
+H	ax
+L	1
+M	0,2 1,1 1,2
+E
+T	fowler/nullsubexpr.toml/nullsubexpr74	a
+P	(a*){2}(x)
+H	axa
+L	1
+M	0,2 1,1 1,2
+E
+T	fowler/repetition.toml/repetition10	-
+P	((..)|(.))
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition11	-
+P	((..)|(.))((..)|(.))
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition12	-
+P	((..)|(.))((..)|(.))((..)|(.))
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition14	-
+P	((..)|(.)){1}
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition15	-
+P	((..)|(.)){2}
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition16	-
+P	((..)|(.)){3}
+H	
+L	1
+E
+T	fowler/repetition.toml/repetition18	a
+P	((..)|(.))*
+H	
+L	1
+M	0,0 - - -
+E
+T	fowler/repetition.toml/repetition20	a
+P	((..)|(.))
+H	a
+L	1
+M	0,1 0,1 - 0,1
+E
+T	fowler/repetition.toml/repetition21	-
+P	((..)|(.))((..)|(.))
+H	a
+L	1
+E
+T	fowler/repetition.toml/repetition22	-
+P	((..)|(.))((..)|(.))((..)|(.))
+H	a
+L	1
+E
+T	fowler/repetition.toml/repetition24	a
+P	((..)|(.)){1}
+H	a
+L	1
+M	0,1 0,1 - 0,1
+E
+T	fowler/repetition.toml/repetition25	-
+P	((..)|(.)){2}
+H	a
+L	1
+E
+T	fowler/repetition.toml/repetition26	-
+P	((..)|(.)){3}
+H	a
+L	1
+E
+T	fowler/repetition.toml/repetition28	a
+P	((..)|(.))*
+H	a
+L	1
+M	0,1 0,1 - 0,1
+E
+T	fowler/repetition.toml/repetition30	a
+P	((..)|(.))
+H	aa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition31	a
+P	((..)|(.))((..)|(.))
+H	aa
+L	1
+M	0,2 0,1 - 0,1 1,2 - 1,2
+E
+T	fowler/repetition.toml/repetition32	-
+P	((..)|(.))((..)|(.))((..)|(.))
+H	aa
+L	1
+E
+T	fowler/repetition.toml/repetition34	a
+P	((..)|(.)){1}
+H	aa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition35	a
+P	((..)|(.)){2}
+H	aa
+L	1
+M	0,2 1,2 - 1,2
+E
+T	fowler/repetition.toml/repetition36	-
+P	((..)|(.)){3}
+H	aa
+L	1
+E
+T	fowler/repetition.toml/repetition38	a
+P	((..)|(.))*
+H	aa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition40	a
+P	((..)|(.))
+H	aaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition41	a
+P	((..)|(.))((..)|(.))
+H	aaa
+L	1
+M	0,3 0,2 0,2 - 2,3 - 2,3
+E
+T	fowler/repetition.toml/repetition42	a
+P	((..)|(.))((..)|(.))((..)|(.))
+H	aaa
+L	1
+M	0,3 0,1 - 0,1 1,2 - 1,2 2,3 - 2,3
+E
+T	fowler/repetition.toml/repetition44	a
+P	((..)|(.)){1}
+H	aaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition46	a
+P	((..)|(.)){2}
+H	aaa
+L	1
+M	0,3 2,3 0,2 2,3
+E
+T	fowler/repetition.toml/repetition47	a
+P	((..)|(.)){3}
+H	aaa
+L	1
+M	0,3 2,3 - 2,3
+E
+T	fowler/repetition.toml/repetition50	a
+P	((..)|(.))*
+H	aaa
+L	1
+M	0,3 2,3 0,2 2,3
+E
+T	fowler/repetition.toml/repetition52	a
+P	((..)|(.))
+H	aaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition53	a
+P	((..)|(.))((..)|(.))
+H	aaaa
+L	1
+M	0,4 0,2 0,2 - 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition54	a
+P	((..)|(.))((..)|(.))((..)|(.))
+H	aaaa
+L	1
+M	0,4 0,2 0,2 - 2,3 - 2,3 3,4 - 3,4
+E
+T	fowler/repetition.toml/repetition56	a
+P	((..)|(.)){1}
+H	aaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition57	a
+P	((..)|(.)){2}
+H	aaaa
+L	1
+M	0,4 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition59	a
+P	((..)|(.)){3}
+H	aaaa
+L	1
+M	0,4 3,4 0,2 3,4
+E
+T	fowler/repetition.toml/repetition61	a
+P	((..)|(.))*
+H	aaaa
+L	1
+M	0,4 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition63	a
+P	((..)|(.))
+H	aaaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition64	a
+P	((..)|(.))((..)|(.))
+H	aaaaa
+L	1
+M	0,4 0,2 0,2 - 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition65	a
+P	((..)|(.))((..)|(.))((..)|(.))
+H	aaaaa
+L	1
+M	0,5 0,2 0,2 - 2,4 2,4 - 4,5 - 4,5
+E
+T	fowler/repetition.toml/repetition67	a
+P	((..)|(.)){1}
+H	aaaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition68	a
+P	((..)|(.)){2}
+H	aaaaa
+L	1
+M	0,4 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition70	a
+P	((..)|(.)){3}
+H	aaaaa
+L	1
+M	0,5 4,5 2,4 4,5
+E
+T	fowler/repetition.toml/repetition73	a
+P	((..)|(.))*
+H	aaaaa
+L	1
+M	0,5 4,5 2,4 4,5
+E
+T	fowler/repetition.toml/repetition75	a
+P	((..)|(.))
+H	aaaaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition76	a
+P	((..)|(.))((..)|(.))
+H	aaaaaa
+L	1
+M	0,4 0,2 0,2 - 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition77	a
+P	((..)|(.))((..)|(.))((..)|(.))
+H	aaaaaa
+L	1
+M	0,6 0,2 0,2 - 2,4 2,4 - 4,6 4,6 -
+E
+T	fowler/repetition.toml/repetition79	a
+P	((..)|(.)){1}
+H	aaaaaa
+L	1
+M	0,2 0,2 0,2 -
+E
+T	fowler/repetition.toml/repetition80	a
+P	((..)|(.)){2}
+H	aaaaaa
+L	1
+M	0,4 2,4 2,4 -
+E
+T	fowler/repetition.toml/repetition81	a
+P	((..)|(.)){3}
+H	aaaaaa
+L	1
+M	0,6 4,6 4,6 -
+E
+T	fowler/repetition.toml/repetition83	a
+P	((..)|(.))*
+H	aaaaaa
+L	1
+M	0,6 4,6 4,6 -
+E
+T	fowler/repetition.toml/repetition-expensive90	a
+P	X(.?){0,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive91	a
+P	X(.?){1,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive92	a
+P	X(.?){2,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive93	a
+P	X(.?){3,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive94	a
+P	X(.?){4,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive95	a
+P	X(.?){5,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive96	a
+P	X(.?){6,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive97	a
+P	X(.?){7,}Y
+H	X1234567Y
+L	1
+M	0,9 7,8
+E
+T	fowler/repetition.toml/repetition-expensive98	a
+P	X(.?){8,}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive100	a
+P	X(.?){0,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive102	a
+P	X(.?){1,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive104	a
+P	X(.?){2,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive106	a
+P	X(.?){3,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive108	a
+P	X(.?){4,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive110	a
+P	X(.?){5,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive112	a
+P	X(.?){6,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive114	a
+P	X(.?){7,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive115	a
+P	X(.?){8,8}Y
+H	X1234567Y
+L	1
+M	0,9 8,8
+E
+T	fowler/repetition.toml/repetition-expensive127	a
+P	(a|ab|c|bcd){0,}(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive129	a
+P	(a|ab|c|bcd){1,}(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive130	a
+P	(a|ab|c|bcd){2,}(d*)
+H	ababcd
+L	1
+M	0,6 3,6 6,6
+E
+T	fowler/repetition.toml/repetition-expensive131	a
+P	(a|ab|c|bcd){3,}(d*)
+H	ababcd
+L	1
+M	0,6 3,6 6,6
+E
+T	fowler/repetition.toml/repetition-expensive132	-
+P	(a|ab|c|bcd){4,}(d*)
+H	ababcd
+L	1
+E
+T	fowler/repetition.toml/repetition-expensive134	a
+P	(a|ab|c|bcd){0,10}(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive136	a
+P	(a|ab|c|bcd){1,10}(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive137	a
+P	(a|ab|c|bcd){2,10}(d*)
+H	ababcd
+L	1
+M	0,6 3,6 6,6
+E
+T	fowler/repetition.toml/repetition-expensive138	a
+P	(a|ab|c|bcd){3,10}(d*)
+H	ababcd
+L	1
+M	0,6 3,6 6,6
+E
+T	fowler/repetition.toml/repetition-expensive139	-
+P	(a|ab|c|bcd){4,10}(d*)
+H	ababcd
+L	1
+E
+T	fowler/repetition.toml/repetition-expensive141	a
+P	(a|ab|c|bcd)*(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive143	a
+P	(a|ab|c|bcd)+(d*)
+H	ababcd
+L	1
+M	0,1 0,1 1,1
+E
+T	fowler/repetition.toml/repetition-expensive149	a
+P	(ab|a|c|bcd){0,}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive151	a
+P	(ab|a|c|bcd){1,}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive153	a
+P	(ab|a|c|bcd){2,}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive155	a
+P	(ab|a|c|bcd){3,}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive156	-
+P	(ab|a|c|bcd){4,}(d*)
+H	ababcd
+L	1
+E
+T	fowler/repetition.toml/repetition-expensive158	a
+P	(ab|a|c|bcd){0,10}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive160	a
+P	(ab|a|c|bcd){1,10}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive162	a
+P	(ab|a|c|bcd){2,10}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive164	a
+P	(ab|a|c|bcd){3,10}(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive165	-
+P	(ab|a|c|bcd){4,10}(d*)
+H	ababcd
+L	1
+E
+T	fowler/repetition.toml/repetition-expensive167	a
+P	(ab|a|c|bcd)*(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E
+T	fowler/repetition.toml/repetition-expensive169	a
+P	(ab|a|c|bcd)+(d*)
+H	ababcd
+L	1
+M	0,6 4,5 5,6
+E

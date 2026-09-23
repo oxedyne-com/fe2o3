@@ -798,6 +798,137 @@ impl WsRoute {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TILE CONFIG                                                               │
+// │                                                                           │
+// │ Map tiles served from local archives under a prefix, one archive per      │
+// │ build. See `srv::tiles` for what the route keeps, which is nothing.       │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// A vhost's tile route: `{prefix}/{build}/{z}/{x}/{y}.{ext}` and `{prefix}/tiles.json`.
+///
+/// Each build names an archive by absolute path, which keeps a file of tens or hundreds of
+/// gigabytes out of the app tree. Several builds may be served at once so that a client holding
+/// the previous build's URLs keeps working across a refresh; `current` is the one the index
+/// advertises.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TileConfig {
+    pub prefix:         String,                 // e.g. `/t`, no trailing slash
+    pub current:        String,                 // the build `tiles.json` names
+    pub builds:         BTreeMap<String, PathBuf>,
+    pub allow_origins:  Vec<String>,            // exact `scheme://host[:port]` matches
+    pub attribution:    String,                 // shown by the map, carried in the index
+}
+
+pub const TILE_ATTRIBUTION_DEFAULT: &str = "© OpenStreetMap";
+
+impl TileConfig {
+    pub fn from_datmap(m: &DaticleMap) -> Outcome<Self> {
+        let prefix = match m.get(&dat!("prefix")) {
+            Some(Dat::Str(s)) => s.clone(),
+            None => fmt!("/t"),
+            _ => return Err(err!(
+                "TileConfig: 'prefix' must be a string."; Invalid, Input, Mismatch)),
+        };
+        if !prefix.starts_with('/') || prefix.len() < 2 || prefix.ends_with('/') {
+            return Err(err!(
+                "TileConfig: 'prefix' '{}' must start with '/', name at least one character \
+                and not end with '/'.", prefix; Invalid, Input));
+        }
+        let current = match m.get(&dat!("current")) {
+            Some(Dat::Str(s)) => s.clone(),
+            _ => return Err(err!(
+                "TileConfig: 'current' is required and must be a build id string.";
+                Invalid, Input, Missing)),
+        };
+        let mut builds = BTreeMap::new();
+        match m.get(&dat!("builds")) {
+            Some(Dat::Map(sub)) => for (k, v) in sub {
+                let (build, path) = match (k, v) {
+                    (Dat::Str(b), Dat::Str(p)) => (b.clone(), PathBuf::from(p)),
+                    _ => return Err(err!(
+                        "TileConfig: each 'builds' entry must map a build id string to a \
+                        path string."; Invalid, Input, Mismatch)),
+                };
+                res!(Self::check_build_id(&build));
+                if !path.is_absolute() {
+                    return Err(err!(
+                        "TileConfig: build '{}' names {:?}, which is not an absolute path. \
+                        An archive belongs outside the app tree.", build, path;
+                        Invalid, Input, Path));
+                }
+                builds.insert(build, path);
+            },
+            _ => return Err(err!(
+                "TileConfig: 'builds' is required and must map build ids to archive paths.";
+                Invalid, Input, Missing)),
+        }
+        if !builds.contains_key(&current) {
+            return Err(err!(
+                "TileConfig: 'current' build '{}' is not among 'builds' {:?}.",
+                current, builds.keys().collect::<Vec<_>>(); Invalid, Input, Missing));
+        }
+        let mut allow_origins = Vec::new();
+        match m.get(&dat!("allow_origins")) {
+            Some(Dat::List(list)) => for item in list {
+                match item {
+                    Dat::Str(s) => {
+                        res!(Self::check_origin(s));
+                        allow_origins.push(s.clone());
+                    }
+                    _ => return Err(err!(
+                        "TileConfig: 'allow_origins' entries must be strings.";
+                        Invalid, Input, Mismatch)),
+                }
+            },
+            None => (),
+            _ => return Err(err!(
+                "TileConfig: 'allow_origins' must be a list of strings.";
+                Invalid, Input, Mismatch)),
+        }
+        let attribution = match m.get(&dat!("attribution")) {
+            Some(Dat::Str(s)) => s.clone(),
+            None => TILE_ATTRIBUTION_DEFAULT.to_string(),
+            _ => return Err(err!(
+                "TileConfig: 'attribution' must be a string."; Invalid, Input, Mismatch)),
+        };
+        Ok(Self { prefix, current, builds, allow_origins, attribution })
+    }
+
+    // A build id is one URL path segment, so it is kept to a plain alphabet.
+    fn check_build_id(build: &str) -> Outcome<()> {
+        if build.is_empty() || build.len() > 64 || !build.bytes().all(|b|
+            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
+            || build.starts_with('.')
+        {
+            return Err(err!(
+                "TileConfig: build id '{}' must be 1 to 64 characters of letters, digits, \
+                '-', '_' or '.', not starting with '.'.", build; Invalid, Input));
+        }
+        Ok(())
+    }
+
+    // An origin as a browser sends it: a scheme, a host, perhaps a port, and nothing after.
+    // A wildcard is refused, since the point of the list is who may draw the tiles.
+    fn check_origin(origin: &str) -> Outcome<()> {
+        let rest = match origin.strip_prefix("https://")
+            .or_else(|| origin.strip_prefix("http://"))
+        {
+            Some(r) => r,
+            None => return Err(err!(
+                "TileConfig: origin '{}' must start with 'https://' or 'http://'.", origin;
+                Invalid, Input)),
+        };
+        if rest.is_empty() || rest.contains('/') || rest.contains('*') {
+            return Err(err!(
+                "TileConfig: origin '{}' must be 'scheme://host[:port]' with no path and no \
+                wildcard.", origin; Invalid, Input));
+        }
+        Ok(())
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ TERMINAL CONFIG                                                           │
 // │                                                                           │
 // │ Enables terminal session management for a vhost.  When configured,        │
@@ -913,6 +1044,12 @@ pub struct VhostConfig {
     // such a bug stays content and never becomes authority. Empty -- the default, and what every
     // config written before this existed says -- means the site has no console.
     pub site_admins:            Vec<String>,
+    // Map tiles from local archives under a prefix. `None` serves none.
+    pub tiles:                  Option<TileConfig>,
+    // Whether requests on this vhost reach the log and the traffic recorder at all. `false`
+    // writes no connection line, request line or traffic record, which a vhost serving tiles
+    // must set, since its requests say where each viewer looked. Defaults to `true`.
+    pub access_log:             bool,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -958,6 +1095,8 @@ impl Default for VhostConfig {
             ws_routes:              Vec::new(),
             term_config:            None,
             site_admins:            Vec::new(),
+            tiles:                  None,
+            access_log:             true,
         }
     }
 }
@@ -1299,6 +1438,29 @@ impl VhostConfig {
                 "VhostConfig: 'site_admins' must be a list of strings.";
                 Invalid, Input, Mismatch)),
         };
+        let tiles = match m.get(&dat!("tiles")) {
+            Some(Dat::Map(sub)) => Some(res!(TileConfig::from_datmap(sub))),
+            None => None,
+            _ => return Err(err!(
+                "VhostConfig: 'tiles' must be a map.";
+                Invalid, Input, Mismatch)),
+        };
+        let access_log = match m.get(&dat!("access_log")) {
+            Some(Dat::Bool(b)) => *b,
+            None => true,
+            _ => return Err(err!(
+                "VhostConfig: 'access_log' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
+        // A tile request names where its viewer looked, so a vhost serving tiles may not keep
+        // even the connection lines that would pair a viewer's address with the time.
+        if tiles.is_some() && access_log {
+            return Err(err!(
+                "VhostConfig '{}': a vhost serving 'tiles' must set 'access_log': false, so \
+                that no request from a map viewer is written to the log.",
+                hostnames.first().map(|s| s.as_str()).unwrap_or("");
+                Invalid, Input, Security, Configuration));
+        }
         Ok(Self {
             hostnames,
             public_dir_rel,
@@ -1317,6 +1479,8 @@ impl VhostConfig {
             term_config,
             publish,
             site_admins,
+            tiles,
+            access_log,
         })
     }
 

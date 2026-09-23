@@ -32,11 +32,13 @@
 //! in the summary, and its bracketed body folded in, so its words survive but its raw markup never leaks.
 
 use crate::ir::FloatPlacement;
+use crate::ir::FloatScope;
+use crate::ir::Floating;
 use crate::ir::Length;
 use crate::ir::Span;
 use crate::table::Align;
 
-use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, ListItem, TableSpec};
+use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, ListItem, Spacing, TableSpec};
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -923,6 +925,18 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 				continue;
 			}
 		}
+		// Typst's `#smallcaps[...]` or `#smallcaps("...")`: its content reduces to display text here and is
+		// shaped with the font's small-capitals feature by the block layer, as Typst asks the font for it.
+		if c == '#' {
+			if let Some((text, next)) = smallcaps_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::SmallCaps(text));
+				i = next;
+				continue;
+			}
+		}
 		// An inline glossary or index call defined in the book template. A glossary term is a run of its
 		// own, so [`doc::author`] can set it bold-italic on first use; a visible index call sets its
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
@@ -1775,6 +1789,18 @@ fn sub_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 	Some((flatten_markup(&unwrap_arg(&inner)), next))
 }
 
+/// Reads an inline `#smallcaps[...]` or `#smallcaps("...")` at `i` (a `#`), returning its content reduced
+/// to display text by [`flatten_markup`] and the index just past the closing bracket. `None` when the shape
+/// is not a smallcaps call or its argument does not close.
+fn smallcaps_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let Some(open) = at_lit(chars, i, "#smallcaps") else { return None; };
+	match chars.get(open) {
+		Some('[') | Some('(')	=> {},
+		_						=> return None,
+	}
+	read_group(chars, open).map(|(inner, next)| (flatten_markup(&unwrap_arg(&inner)), next))
+}
+
 /// Reads an inline `#cite(...)` at `i` (a `#`), returning the citation keys and the index past the
 /// closing `)`. Every `<label>` token inside the parentheses is a key; a named argument such as
 /// `form: "prose"` carries no label and is ignored. `None` when the shape is not a cite call or its
@@ -1958,6 +1984,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::BoldItalic(t)			=> out.push_str(&t),	// already the flat inner of a nested run
 			Inline::Super(t)				=> out.push_str(&t),	// a flattened string cannot raise; keep its text
 			Inline::Sub(t)					=> out.push_str(&t),	// a flattened string cannot drop; keep its text
+			Inline::SmallCaps(t)			=> out.push_str(&t),	// a flattened string has no small capitals; keep its text
 			Inline::Code(t)					=> out.push_str(&t),
 			Inline::Glossary { display, .. }	=> out.push_str(&display),
 			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
@@ -2277,6 +2304,7 @@ enum CaptureKind {
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
 	ContentCall(String),	// a `#name`, `#name(args)` or `#name[ ... ]` reference to a bound content binding, expanded into re-read markup spliced in
 	Context,		// a line-leading `#context { ... }`/`#context[ ... ]`: gathered whole, then either the reverse claim index (its body calls `collect-claim-refs(`) or a refusal
+	Place,			// a line-leading `#place(...)[ ... ]`: a float, set spanning its column or the page, or a refused overlay
 	Builtin(BuiltinKind),	// a line-leading Typst markup builtin the reader now sets rather than skips (`#pagebreak`, `#lorem`, `#v`)
 }
 
@@ -2288,6 +2316,7 @@ enum BuiltinKind {
 	PageBreak,	// `#pagebreak()` / `#pagebreak(weak: true)`: a forced page eject
 	Lorem,		// `#lorem(<n>)`: n words of the standard lorem-ipsum placeholder, set as a paragraph
 	Vspace,		// `#v(<abs len>)`: a fixed vertical space, absolute units only
+	ColBreak,	// `#colbreak()` / `#colbreak(weak: true)`: a forced column break
 }
 
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
@@ -2341,6 +2370,11 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	}
 	if trimmed.starts_with("#columns(") {
 		return Some(CaptureKind::Columns);
+	}
+	// A `#place(...)[ ... ]` is gathered whole: a floating one is set, spanning its column or the page; an
+	// absolutely placed overlay is refused visibly at dispatch.
+	if trimmed.starts_with("#place(") {
+		return Some(CaptureKind::Place);
 	}
 	// A `#styled-box[ ... ]` callout: a full-measure filled box wrapping running prose. Its body opens with
 	// the `[` on this line and closes on a later one, so it is gathered whole and re-parsed rather than
@@ -2401,6 +2435,7 @@ fn builtin_opener(trimmed: &str) -> Option<BuiltinKind> {
 	let rest = trimmed.strip_prefix('#')?;
 	for (name, kind) in [
 		("pagebreak",	BuiltinKind::PageBreak),
+		("colbreak",	BuiltinKind::ColBreak),
 		("lorem",		BuiltinKind::Lorem),
 		("v",			BuiltinKind::Vspace),
 	] {
@@ -2582,6 +2617,25 @@ fn dispatch_capture(
 			// The first positional argument is the logo path; a call naming none draws nothing.
 			if let Some(path) = call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
 				items.push(Item::SectionBanner { path, span: Span::new(0, 0) });
+			}
+		},
+		CaptureKind::Place => {
+			// A floating `#place`: its body is a block sequence, read through the document parser again and
+			// set as one float. A place that does not float -- an overlay at an absolute position -- or names a
+			// side a float cannot take is refused visibly, its body dropped with it as Typst would draw it
+			// elsewhere, not in the flow.
+			let span = Span::new(cap.start, cap.start);
+			match place_float_call(&cap.buf) {
+				Some((floating, clearance, body)) => {
+					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+						skips.merge(sub);
+						// A float is laid out as one unit, so a page or column break inside it cannot be
+						// honoured; it is refused visibly rather than dropped.
+						refuse_nested_page_breaks(&mut inner, skips);
+						items.push(Item::Place { items: inner, floating, clearance, span });
+					}
+				},
+				None => skips.record("#place", span),
 			}
 		},
 		CaptureKind::Columns => {
@@ -2778,6 +2832,12 @@ fn dispatch_capture(
 				// an `em`, `%` or `fr` length has no running size here, and a `weak:` argument asks for a
 				// collapsing space the reader does not model -- either is refused visibly rather than set as the
 				// wrong space, exactly as the heading-template spacer does (see [`crate::lang::rules`]).
+				// `#colbreak()` or `#colbreak(weak: true)`: a forced column break, which on a page of one column
+				// breaks the page, as Typst makes it.
+				BuiltinKind::ColBreak => {
+					let inner = call_inner(&cap.buf, "colbreak").unwrap_or_default();
+					items.push(Item::ColBreak { weak: pagebreak_is_weak(&inner), span });
+				},
 				BuiltinKind::Vspace => {
 					let inner = call_inner(&cap.buf, "v").unwrap_or_default();
 					match parse_length(first_arg(&inner).trim()) {
@@ -2853,7 +2913,9 @@ fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
 	for mut item in items.drain(..) {
 		match &mut item {
 			Item::PageBreak { span, .. }	=> { skips.record("#pagebreak", *span); continue; },
+			Item::ColBreak { span, .. }		=> { skips.record("#colbreak", *span); continue; },
 			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
+			Item::Place { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
 			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
 			_								=> {},
 		}
@@ -3305,6 +3367,88 @@ fn columns_body(buf: &str) -> Option<String> {
 		return None;
 	}
 	read_group(&chars, j).map(|(body, _)| body)
+}
+
+/// Reads a captured `#place(...)[ ... ]` as a float: its side from the alignment argument (`top`, `bottom`
+/// or `auto`, any horizontal part aside), its `scope:` and `clearance:`, and its body for re-parsing. `None`
+/// for a place that does not float (`float:` absent or false -- an overlay at an absolute position the
+/// reader does not set), one naming no side a float can take, one carrying an offset (`dx:`, `dy:`), or
+/// one with no body.
+fn place_float_call(buf: &str) -> Option<(Floating, Option<Spacing>, String)> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let Some(at)			= find_lit(&chars, "#place") else { return None; };
+	let open				= at + "#place".chars().count();
+	if chars.get(open) != Some(&'(') {
+		return None;
+	}
+	let Some((inner, after))	= read_group(&chars, open) else { return None; };
+	let mut side		= None;
+	let mut float		= false;
+	let mut scope		= FloatScope::Column;
+	let mut clearance	= None;
+	let mut body		= None;
+	for arg in split_top_args(&inner) {
+		let a = arg.trim();
+		if a.is_empty() {
+			continue;
+		}
+		if let Some((key, val)) = named_arg(a) {
+			match key.as_str() {
+				"float"		=> float = val.trim() == "true",
+				"scope"		=> scope = parse_scope(&val),
+				"clearance"	=> match parse_spacing(&val) {
+					Some(c)	=> clearance = Some(c),
+					None	=> return None,
+				},
+				_			=> return None,
+			}
+			continue;
+		}
+		if a.starts_with('[') {
+			let ac: Vec<char> = a.chars().collect();
+			body = read_group(&ac, 0).map(|(b, _)| b);
+			continue;
+		}
+		// The alignment: its vertical part decides the side; a horizontal part does not move a float.
+		for part in a.split('+') {
+			match part.trim() {
+				"top"		=> side = Some(FloatPlacement::Top),
+				"bottom"	=> side = Some(FloatPlacement::Bottom),
+				"auto"		=> side = Some(FloatPlacement::Auto),
+				"left" | "center" | "right" | "start" | "end"	=> {},
+				_			=> return None,
+			}
+		}
+	}
+	if !float {
+		return None;
+	}
+	// The trailing content block, `#place(...)[ ... ]`, when the body was not passed as an argument.
+	if body.is_none() {
+		let mut j = after;
+		while j < chars.len() && chars[j].is_whitespace() {
+			j += 1;
+		}
+		if chars.get(j) == Some(&'[') {
+			body = read_group(&chars, j).map(|(b, _)| b);
+		}
+	}
+	// A float with no side named takes `auto`, the default a floating `place` resolves its alignment to.
+	let side = side.unwrap_or(FloatPlacement::Auto);
+	body.map(|b| (Floating { side, scope }, clearance, b))
+}
+
+/// Reads a length that may be relative to the text size: `1.5em` in ems, anything [`parse_length`] reads
+/// as points. `None` for a percentage or an unreadable value.
+fn parse_spacing(val: &str) -> Option<Spacing> {
+	let v = val.trim();
+	if let Some(em) = v.strip_suffix("em") {
+		return em.trim().parse::<f64>().ok().map(Spacing::Em);
+	}
+	match parse_length(v) {
+		Some(Length::Abs(pt))	=> Some(Spacing::Pt(pt)),
+		_						=> None,
+	}
 }
 
 /// The `[ ... ]` body of a captured `#styled-box[ ... ]` callout, returned for re-parsing. The call takes
@@ -3807,6 +3951,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 	let mut kind:		Option<String>	= None;
 	let mut positional:	Option<String>	= None;
 	let mut placement:	Option<FloatPlacement>	= None;
+	let mut scope							= FloatScope::Column;
 	for arg in split_top_args(&inner) {
 		let a = arg.trim();
 		if a.is_empty() {
@@ -3818,6 +3963,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 				"supplement"	=> supplement = Some(unquote(&val)),
 				"kind"			=> kind = Some(unquote(&val)),
 				"placement"		=> placement = parse_placement(&val),
+				"scope"			=> scope = parse_scope(&val),
 				_				=> {},	// the rest do not affect the set figure
 			}
 			continue;
@@ -3833,7 +3979,18 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 		Some("table")	=> "Table".to_string(),
 		_				=> "Figure".to_string(),
 	});
+	// A scope matters only to a float: Typst accepts `scope: "parent"` on a floating figure alone.
+	let placement = placement.map(|side| Floating { side, scope });
 	Some(Item::Figure { body, caption, supplement, label, placement, span: Span::new(0, 0) })
+}
+
+/// Reads a float's `scope:` value: `"parent"` spans every column of the page, anything else -- `"column"`,
+/// Typst's default -- keeps it within its column.
+fn parse_scope(val: &str) -> FloatScope {
+	match unquote(val).as_str() {
+		"parent"	=> FloatScope::Parent,
+		_			=> FloatScope::Column,
+	}
 }
 
 /// Reads a `#figure` `placement:` value into a float placement. `auto` and `top` float to the page top,
@@ -4853,6 +5010,38 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		}
 	}
 
+	/// A floating `#place` reads its side, scope, clearance and body; one that does not float, or carries an
+	/// offset, is not a float and is refused at dispatch.
+	#[test]
+	fn place_reads_as_a_float_or_not_at_all() {
+		match place_float_call("#place(top + center, scope: \"parent\", float: true, clearance: 2em)[Wide.]") {
+			Some((f, c, body))	=> {
+				assert_eq!(f, Floating { side: FloatPlacement::Top, scope: FloatScope::Parent });
+				assert_eq!(c, Some(Spacing::Em(2.0)));
+				assert_eq!(body, "Wide.");
+			},
+			None				=> panic!("a floating place must read"),
+		}
+		assert!(matches!(place_float_call("#place(bottom, float: true)[Low.]"),
+			Some((Floating { side: FloatPlacement::Bottom, scope: FloatScope::Column }, None, _))));
+		assert!(place_float_call("#place(top)[Overlay.]").is_none(), "a non-floating place is an overlay");
+		assert!(place_float_call("#place(top, float: true, dx: 2pt)[Moved.]").is_none(), "an offset is not set");
+	}
+
+	/// `#smallcaps[...]` yields an [`Inline::SmallCaps`] run of its content, in both argument forms, and
+	/// never leaves raw source behind.
+	#[test]
+	fn smallcaps_call_reads_as_small_caps() {
+		let runs = parse_inlines("The #smallcaps[Nato] treaty, and #smallcaps(\"un\") too.");
+		let sc: Vec<&String> = runs.iter().filter_map(|r| match r {
+			Inline::SmallCaps(t) => Some(t),
+			_ => None,
+		}).collect();
+		assert_eq!(sc, vec!["Nato", "un"], "unexpected small-caps runs: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps"))),
+			"raw #smallcaps leaked: {:?}", runs);
+	}
+
 	/// `#super[...]` yields an [`Inline::Super`] run of its content, in both the bracket and the string
 	/// argument forms, and never leaves raw source behind.
 	#[test]
@@ -5156,14 +5345,14 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	#[test]
 	fn unknown_inline_call_is_recorded_not_leaked() {
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("a #smallcaps[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
-		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps") || t.contains("#v("))),
+		let runs = parse_inlines_in("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#overline") || t.contains("#v("))),
 			"raw unknown call leaked: {:?}", runs);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
-			"smallcaps body dropped: {:?}", runs);
+			"overline body dropped: {:?}", runs);
 		assert_eq!(skips.total(), 2);
 		let names: Vec<String> = skips.entries().into_iter().map(|(n, _)| n).collect();
-		assert!(names.contains(&"#smallcaps".to_string()) && names.contains(&"#v".to_string()),
+		assert!(names.contains(&"#overline".to_string()) && names.contains(&"#v".to_string()),
 			"unexpected skip names: {:?}", names);
 	}
 
@@ -5344,7 +5533,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert_eq!(RefusalClass::classify("#let"), RefusalClass::FixedPoint);
 		assert_eq!(RefusalClass::classify("#show"), RefusalClass::FixedPoint);
 		assert_eq!(RefusalClass::classify("#columns"), RefusalClass::Unsupported);
-		assert_eq!(RefusalClass::classify("#smallcaps"), RefusalClass::Unsupported);
+		assert_eq!(RefusalClass::classify("#overline"), RefusalClass::Unsupported);
 	}
 
 	/// A `#columns(n)[ ... ]` wrapper is recorded as skipped and its body set single-column, so the words
