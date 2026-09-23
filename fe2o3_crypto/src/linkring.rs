@@ -247,7 +247,9 @@ impl Ring {
                 multiple of {}.", list.len(), KEY_LEN; Invalid, Input, Size));
         }
         let n = list.len() / KEY_LEN;
-        if n > 1usize << 32 {
+        // Compared as u64: `1usize << 32` overflows where usize is 32 bits, and
+        // that is a compile error on wasm32, which this crate builds for.
+        if n as u64 > 1u64 << 32 {
             return Err(err!("linkring: a ring of {} keys exceeds 2^32.", n; Invalid, Input, Size));
         }
         let mut keys = Vec::with_capacity(n);
