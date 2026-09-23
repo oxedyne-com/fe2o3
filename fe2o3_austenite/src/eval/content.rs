@@ -642,8 +642,9 @@ pub fn fold_custom(kind: ElemKind, field: &str, inner: Value, outer: Value) -> O
 pub fn display(engine: &mut Engine, v: Value, span: Span) -> Outcome<Content> {
 	Ok(match v {
 		Value::None			=> Content::empty(),
-		Value::Int(_) | Value::Float(_) | Value::Version(_)
-							=> Content::text(&lib::foundations::repr(&v)).with_span(span),
+		// Numbers show with a typographic minus and a decimal as its digits, not as their `repr`.
+		Value::Int(_) | Value::Float(_) | Value::Decimal(_) | Value::Version(_)
+							=> Content::text(&lib::foundations::display(&v).unwrap_or_default()).with_span(span),
 		Value::Str(s)		=> Content::text(&s).with_span(span),
 		Value::Symbol(s)	=> Content::symbol(&crate::eval::ops::symbol_text(&s)).with_span(span),
 		Value::Content(c)	=> if c.span().is_detached() { c.with_span(span) } else { c },

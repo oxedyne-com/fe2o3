@@ -8,6 +8,7 @@ use crate::eval::content::{
 	Sequence,
 };
 use crate::eval::func::Func;
+use crate::eval::lib::decimal::Decimal;
 use crate::eval::lib::foundations::repr;
 use crate::eval::value::{
 	Alignment,
@@ -22,7 +23,6 @@ use crate::eval::value::{
 	Ratio,
 	Relative,
 	Stroke,
-	SymVariants,
 	Symbol,
 	Value,
 };
@@ -47,8 +47,8 @@ fn too_large() -> Error<ErrTag> { fail("value is too large".to_string()) }
 
 pub fn pos(v: Value) -> Outcome<Value> {
 	match v {
-		Value::Int(_) | Value::Float(_) | Value::Length(_) | Value::Angle(_) | Value::Ratio(_)
-			| Value::Relative(_) | Value::Fraction(_) => Ok(v),
+		Value::Int(_) | Value::Float(_) | Value::Decimal(_) | Value::Length(_) | Value::Angle(_)
+			| Value::Ratio(_) | Value::Relative(_) | Value::Fraction(_) => Ok(v),
 		other => Err(fail(fmt!("cannot apply unary '+' to {}", other.ty().long_name()))),
 	}
 }
@@ -57,6 +57,7 @@ pub fn neg(v: Value) -> Outcome<Value> {
 	Ok(match v {
 		Value::Int(i)		=> Value::Int(res!(i.checked_neg().ok_or_else(too_large))),
 		Value::Float(f)		=> Value::Float(-f),
+		Value::Decimal(d)	=> Value::Decimal(d.neg()),
 		Value::Length(l)	=> Value::Length(len_neg(l)),
 		Value::Angle(a)		=> Value::Angle(Angle(-a.0)),
 		Value::Ratio(r)		=> Value::Ratio(Ratio(-r.0)),
@@ -92,9 +93,12 @@ pub fn or(a: Value, b: Value) -> Outcome<Value> {
 
 // Unit arithmetic
 
-fn len_add(a: Length, b: Length) -> Length { Length { abs: a.abs + b.abs, em: a.em + b.em } }
+// Typst's `Scalar`: a NaN from `0 * inf` or `inf - inf` becomes zero, so `1pt * float.inf` has no em part.
+fn scalar(x: f64) -> f64 { if x.is_nan() { 0.0 } else { x } }
+
+fn len_add(a: Length, b: Length) -> Length { Length { abs: scalar(a.abs + b.abs), em: scalar(a.em + b.em) } }
 fn len_neg(a: Length) -> Length { Length { abs: -a.abs, em: -a.em } }
-fn len_scale(a: Length, k: f64) -> Length { Length { abs: a.abs * k, em: a.em * k } }
+fn len_scale(a: Length, k: f64) -> Length { Length { abs: scalar(a.abs * k), em: scalar(a.em * k) } }
 fn len_is_zero(a: Length) -> bool { a.abs == 0.0 && a.em == 0.0 }
 
 fn rel(rel: Ratio, abs: Length) -> Value { Value::Relative(Relative { rel, abs }) }
@@ -105,7 +109,7 @@ fn rel_add(a: Relative, b: Relative) -> Relative {
 
 fn rel_neg(a: Relative) -> Relative { Relative { rel: Ratio(-a.rel.0), abs: len_neg(a.abs) } }
 
-fn rel_scale(a: Relative, k: f64) -> Relative { Relative { rel: Ratio(a.rel.0 * k), abs: len_scale(a.abs, k) } }
+fn rel_scale(a: Relative, k: f64) -> Relative { Relative { rel: Ratio(scalar(a.rel.0 * k)), abs: len_scale(a.abs, k) } }
 
 fn as_rel(v: &Value) -> Option<Relative> {
 	match v {
@@ -134,6 +138,8 @@ pub fn add(a: Value, b: Value) -> Outcome<Value> {
 		(Value::Int(x), Value::Float(y))		=> Value::Float(x as f64 + y),
 		(Value::Float(x), Value::Int(y))		=> Value::Float(x + y as f64),
 		(Value::Float(x), Value::Float(y))		=> Value::Float(x + y),
+		(a @ (Value::Decimal(_) | Value::Int(_)), b @ Value::Decimal(_))
+		| (a @ Value::Decimal(_), b @ Value::Int(_)) => res!(dec_op(&a, &b, Decimal::checked_add)),
 		(Value::Angle(x), Value::Angle(y))		=> Value::Angle(Angle(x.0 + y.0)),
 		(Value::Length(x), Value::Length(y))	=> Value::Length(len_add(x, y)),
 		(Value::Ratio(x), Value::Ratio(y))		=> Value::Ratio(Ratio(x.0 + y.0)),
@@ -192,6 +198,8 @@ pub fn sub(a: Value, b: Value) -> Outcome<Value> {
 		(Value::Int(x), Value::Float(y))		=> Value::Float(x as f64 - y),
 		(Value::Float(x), Value::Int(y))		=> Value::Float(x - y as f64),
 		(Value::Float(x), Value::Float(y))		=> Value::Float(x - y),
+		(a @ (Value::Decimal(_) | Value::Int(_)), b @ Value::Decimal(_))
+		| (a @ Value::Decimal(_), b @ Value::Int(_)) => res!(dec_op(&a, &b, Decimal::checked_sub)),
 		(Value::Angle(x), Value::Angle(y))		=> Value::Angle(Angle(x.0 - y.0)),
 		(Value::Length(x), Value::Length(y))	=> Value::Length(len_add(x, len_neg(y))),
 		(Value::Ratio(x), Value::Ratio(y))		=> Value::Ratio(Ratio(x.0 - y.0)),
@@ -216,6 +224,8 @@ pub fn mul(a: Value, b: Value) -> Outcome<Value> {
 		(Value::Int(x), Value::Float(y))		=> Value::Float(x as f64 * y),
 		(Value::Float(x), Value::Int(y))		=> Value::Float(x * y as f64),
 		(Value::Float(x), Value::Float(y))		=> Value::Float(x * y),
+		(a @ (Value::Decimal(_) | Value::Int(_)), b @ Value::Decimal(_))
+		| (a @ Value::Decimal(_), b @ Value::Int(_)) => res!(dec_op(&a, &b, Decimal::checked_mul)),
 		(Value::Length(l), k @ (Value::Int(_) | Value::Float(_)))
 		| (k @ (Value::Int(_) | Value::Float(_)), Value::Length(l)) => Value::Length(len_scale(l, num(&k).unwrap_or(0.0))),
 		(Value::Length(l), Value::Ratio(r)) | (Value::Ratio(r), Value::Length(l))
@@ -263,10 +273,24 @@ fn count(n: i64) -> Outcome<usize> {
 	Ok(n as usize)
 }
 
+// A decimal operation with an integer operand widened, "value is too large" when it overflows.
+fn dec_op(a: &Value, b: &Value, op: fn(Decimal, Decimal) -> Option<Decimal>) -> Outcome<Value> {
+	let d = |v: &Value| match v {
+		Value::Decimal(d)	=> *d,
+		Value::Int(i)		=> Decimal::from(*i),
+		_					=> Decimal::ZERO,
+	};
+	match op(d(a), d(b)) {
+		Some(r)	=> Ok(Value::Decimal(r)),
+		None	=> Err(too_large()),
+	}
+}
+
 fn is_zero(v: &Value) -> bool {
 	match v {
 		Value::Int(i)		=> *i == 0,
 		Value::Float(f)		=> *f == 0.0,
+		Value::Decimal(d)	=> d.is_zero(),
 		Value::Length(l)	=> len_is_zero(*l),
 		Value::Angle(a)		=> a.0 == 0.0,
 		Value::Ratio(r)		=> r.0 == 0.0,
@@ -295,6 +319,8 @@ pub fn div(a: Value, b: Value) -> Outcome<Value> {
 	Ok(match (a, b) {
 		(a @ (Value::Int(_) | Value::Float(_)), b @ (Value::Int(_) | Value::Float(_)))
 			=> Value::Float(num(&a).unwrap_or(0.0) / num(&b).unwrap_or(1.0)),
+		(a @ (Value::Decimal(_) | Value::Int(_)), b @ Value::Decimal(_))
+		| (a @ Value::Decimal(_), b @ Value::Int(_)) => res!(dec_op(&a, &b, Decimal::checked_div)),
 		(Value::Length(l), k @ (Value::Int(_) | Value::Float(_)))
 			=> Value::Length(len_scale(l, 1.0 / num(&k).unwrap_or(1.0))),
 		(Value::Length(x), Value::Length(y))	=> Value::Float(res!(len_div(x, y))),
@@ -477,47 +503,11 @@ fn datetime_diff(a: Datetime, b: Datetime) -> Outcome<Duration> {
 
 // Symbols
 
-/// The text of a symbol under its modifiers: the variant carrying every requested modifier with the
-/// fewest others, the first on a tie, as Typst resolves `arrow.r`.
-pub fn symbol_text(s: &Symbol) -> String {
-	symbol_pick(s).unwrap_or_default()
-}
-
-fn symbol_variants(s: &Symbol) -> Vec<(&str, &str)> {
-	match &s.variants {
-		SymVariants::Single(t)	=> vec![("", *t)],
-		SymVariants::Static(v)	=> v.iter().map(|(m, t)| (*m, *t)).collect(),
-		SymVariants::Runtime(v)	=> v.iter().map(|(m, t)| (m.as_str(), t.as_str())).collect(),
-	}
-}
-
-fn mods_of(m: &str) -> Vec<&str> { m.split('.').filter(|p| !p.is_empty()).collect() }
-
-fn symbol_pick(s: &Symbol) -> Option<String> {
-	let want = mods_of(&s.modifiers);
-	let mut best: Option<(usize, &str)> = None;
-	for (m, t) in symbol_variants(s) {
-		let have = mods_of(m);
-		if want.iter().all(|w| have.contains(w)) {
-			let extra = have.len() - want.len().min(have.len());
-			if best.map(|(e, _)| extra < e).unwrap_or(true) {
-				best = Some((extra, t));
-			}
-		}
-	}
-	best.map(|(_, t)| t.to_string())
-}
+/// The text of a symbol under its modifiers; the resolution is `lib::sym`'s, the one place it lives.
+pub fn symbol_text(s: &Symbol) -> String { crate::eval::lib::sym::text(s).to_string() }
 
 /// `sym.arrow.r`: the symbol with one more modifier, `None` when no variant carries them all.
-pub fn symbol_modified(s: &Symbol, modifier: &str) -> Option<Symbol> {
-	let modifiers = if s.modifiers.is_empty() {
-		modifier.to_string()
-	} else {
-		fmt!("{}.{}", s.modifiers, modifier)
-	};
-	let next = Symbol { variants: s.variants.clone(), modifiers: Arc::new(modifiers) };
-	symbol_pick(&next).map(|_| next)
-}
+pub fn symbol_modified(s: &Symbol, modifier: &str) -> Option<Symbol> { crate::eval::lib::sym::modify(s, modifier) }
 
 // Comparison
 
@@ -543,6 +533,9 @@ pub fn compare(a: &Value, b: &Value) -> Outcome<Ordering> {
 		(Value::Float(x), Value::Float(y))		=> cmp_f64(*x, *y, a, b),
 		(Value::Int(x), Value::Float(y))		=> cmp_f64(*x as f64, *y, a, b),
 		(Value::Float(x), Value::Int(y))		=> cmp_f64(*x, *y as f64, a, b),
+		(Value::Decimal(x), Value::Decimal(y))	=> Ok(x.cmp(y)),
+		(Value::Int(x), Value::Decimal(y))		=> Ok(Decimal::from(*x).cmp(y)),
+		(Value::Decimal(x), Value::Int(y))		=> Ok(x.cmp(&Decimal::from(*y))),
 		(Value::Length(x), Value::Length(y))	=> cmp_len(*x, *y, a, b),
 		(Value::Angle(x), Value::Angle(y))		=> cmp_f64(x.0, y.0, a, b),
 		(Value::Ratio(x), Value::Ratio(y))		=> cmp_f64(x.0, y.0, a, b),
@@ -617,6 +610,8 @@ pub fn equal(a: &Value, b: &Value) -> bool {
 		(Value::Float(x), Value::Float(y))		=> x == y,
 		(Value::Int(x), Value::Float(y))		=> (*x as f64) == *y,
 		(Value::Float(x), Value::Int(y))		=> *x == (*y as f64),
+		(Value::Decimal(x), Value::Decimal(y))	=> x == y,
+		(Value::Int(i), Value::Decimal(d)) | (Value::Decimal(d), Value::Int(i))	=> Decimal::from(*i) == *d,
 		(Value::Length(x), Value::Length(y))	=> x == y,
 		(Value::Angle(x), Value::Angle(y))		=> x == y,
 		(Value::Ratio(x), Value::Ratio(y))		=> x == y,

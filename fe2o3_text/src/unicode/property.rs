@@ -27,6 +27,9 @@ use crate::unicode::{
 	tables::cat::{
 		BIN_ALPHABETIC,
 		BIN_JOIN_CONTROL,
+		BIN_MATH,
+		BIN_XID_CONTINUE,
+		BIN_XID_START,
 		BIN_LONG,
 		BIN_NAMES,
 		BIN_OFFS,
@@ -91,6 +94,9 @@ impl Binary {
 	pub const ALPHABETIC:	Self = Self(BIN_ALPHABETIC);
 	pub const JOIN_CONTROL:	Self = Self(BIN_JOIN_CONTROL);
 	pub const WHITE_SPACE:	Self = Self(BIN_WHITE_SPACE);
+	pub const XID_START:	Self = Self(BIN_XID_START);
+	pub const XID_CONTINUE:	Self = Self(BIN_XID_CONTINUE);
+	pub const MATH:			Self = Self(BIN_MATH);
 
 	/// Every binary property the tables carry.
 	pub fn all() -> impl Iterator<Item = Self> {
@@ -254,6 +260,22 @@ pub fn is_word(c: char) -> bool {
 		| GeneralCategory::Pc	=> true,
 		_ => Binary::ALPHABETIC.contains(c) || Binary::JOIN_CONTROL.contains(c),
 	}
+}
+
+/// Can `c` begin an identifier, by UAX #31's XID_Start?
+pub fn is_xid_start(c: char) -> bool {
+	if c.is_ascii() {
+		return c.is_ascii_alphabetic();
+	}
+	Binary::XID_START.contains(c)
+}
+
+/// Can `c` continue an identifier, by UAX #31's XID_Continue?
+pub fn is_xid_continue(c: char) -> bool {
+	if c.is_ascii() {
+		return c.is_ascii_alphanumeric() || c == '_';
+	}
+	Binary::XID_CONTINUE.contains(c)
 }
 
 /// Is `c` white space, the White_Space property that `\s` stands for?

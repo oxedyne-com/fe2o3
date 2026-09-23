@@ -5,6 +5,7 @@
 use crate::eval::args::Args;
 use crate::eval::content::Content;
 use crate::eval::func::Func;
+use crate::eval::lib::decimal::Decimal;
 use crate::eval::intro::{
 	Counter,
 	State,
@@ -28,6 +29,7 @@ pub enum Value {
 	Bool(bool),
 	Int(i64),
 	Float(f64),
+	Decimal(Decimal),
 	Length(Length),
 	Angle(Angle),
 	Ratio(Ratio),
@@ -69,6 +71,7 @@ pub enum Type {
 	Bool,
 	Int,
 	Float,
+	Decimal,
 	Length,
 	Angle,
 	Ratio,
@@ -111,6 +114,7 @@ impl Type {
 			Type::Bool		=> "bool",
 			Type::Int		=> "int",
 			Type::Float		=> "float",
+			Type::Decimal	=> "decimal",
 			Type::Length	=> "length",
 			Type::Angle		=> "angle",
 			Type::Ratio		=> "ratio",
@@ -165,6 +169,7 @@ impl Value {
 			Value::Bool(_)		=> Type::Bool,
 			Value::Int(_)		=> Type::Int,
 			Value::Float(_)		=> Type::Float,
+			Value::Decimal(_)	=> Type::Decimal,
 			Value::Length(_)	=> Type::Length,
 			Value::Angle(_)		=> Type::Angle,
 			Value::Ratio(_)		=> Type::Ratio,

@@ -446,3 +446,18 @@ fn test_a_group_in_a_repetition_keeps_its_last_capture() {
 		assert_eq!(spans(c.spans()), want, "'{}' on '{}'", pat, hay);
 	}
 }
+
+/// `overlapping_iter` restarts one character after each match's start, so it sees matches the plain
+/// iterator steps over, and keeps leftmost-first priority from each start.
+#[test]
+fn test_overlapping_matches() {
+	let re = match Regex::new("aa") { Ok(r) => r, Err(e) => panic!("{}", e) };
+	let got: Vec<(usize, usize)> = re.overlapping_iter("aaaa").filter_map(|m| m.ok()).map(|m| (m.start, m.end)).collect();
+	assert_eq!(got, vec![(0, 2), (1, 3), (2, 4)]);
+	let re = match Regex::new("a|ab") { Ok(r) => r, Err(e) => panic!("{}", e) };
+	let got: Vec<(usize, usize)> = re.overlapping_iter("ab").filter_map(|m| m.ok()).map(|m| (m.start, m.end)).collect();
+	assert_eq!(got, vec![(0, 1)]);
+	let re = match Regex::new("l+o") { Ok(r) => r, Err(e) => panic!("{}", e) };
+	let got: Vec<(usize, usize)> = re.overlapping_iter("héllo").filter_map(|m| m.ok()).map(|m| (m.start, m.end)).collect();
+	assert_eq!(got, vec![(3, 6), (4, 6)]);
+}

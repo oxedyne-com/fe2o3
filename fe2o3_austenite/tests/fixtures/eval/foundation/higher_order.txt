@@ -1,0 +1,65 @@
+// methods that take a function, and the operator-backed ones, through the evaluator proper.
+(1, 2, 3).map(x => x * 2)
+(1, 2, 3, 4).filter(calc.even)
+(1, 2, 3).find(x => x > 1)
+(1, 2, 3).find(x => x > 5)
+(1, 2, 3).position(x => x == 3)
+(1, 2, 3).any(x => x > 2)
+(1, 2, 3).all(x => x > 0)
+(1, 2, 3).fold(0, (a, b) => a + b)
+(1, 2, 3).reduce((a, b) => a * b)
+().reduce((a, b) => a * b)
+(1, 2, 3).sum()
+().sum(default: 0pt)
+(1pt, 2pt).sum()
+("a", "b").sum()
+(2, 3, 4).product()
+(1.5, 2).product()
+("a", "b", "c").join(", ")
+("a", "b", "c").join(", ", last: " and ")
+((1,), (2,)).join()
+([a], [b]).join([ ])
+(3, 1, 2).sorted()
+("b", "A", "a").sorted()
+(3, 1, 2).sorted(key: x => -x)
+((1, "b"), (1, "a"), (0, "c")).sorted(key: p => p.at(0))
+(3, 1, 2).sorted(by: (a, b) => a > b)
+(1, 1, 2, 1).dedup()
+(1, 2, 3, 4).dedup(key: x => calc.rem(x, 2))
+((1, 2), (3, 4)).map(((a, b)) => a + b)
+(a: 1, b: 2).pairs().map(((k, v)) => k + str(v))
+(a: 1, b: 2, c: 3).filter(v => v > 1)
+(a: 1, b: 2).map(v => v * 2)
+"a,b".split(",").map(s => s + s)
+"hello world".replace(regex("o"), m => m.text + "!")
+"a1b22".replace(regex("\\d+"), m => str(int(m.text) * 2))
+"abc".replace("b", m => m.text + m.text)
+calc.max(1, 2.5, -3)
+calc.min("b", "a")
+calc.max(1pt, 3pt)
+(1, 2, 3).map(str).join()
+range(5).map(i => i * i).filter(i => calc.odd(i))
+{let a = (1, 2, 3); let r = a.push(4); (r, a)}
+{let a = (1, 2, 3); let r = a.pop(); (r, a)}
+{let a = (1, 2, 3); let r = a.insert(1, 9); (r, a)}
+{let a = (1, 2, 3); let r = a.insert(3, 9); (r, a)}
+{let a = (1, 2, 3); let r = a.insert(-1, 9); (r, a)}
+{let a = (1, 2, 3); let r = a.remove(0); (r, a)}
+{let a = (1, 2, 3); let r = a.remove(-1); (r, a)}
+{let a = (1, 2, 3); let r = a.remove(5, default: 9); (r, a)}
+{let a = (a: 1); let r = a.insert("b", 2); (r, a)}
+{let a = (a: 1, b: 2); let r = a.insert("a", 3); (r, a)}
+{let a = (a: 1, b: 2); let r = a.remove("a"); (r, a)}
+{let a = (a: 1); let r = a.remove("z", default: 0); (r, a)}
+!(1, 2).map(x => x.foo)
+!(1, "a").sum()
+!((1, "a"), (1, 2)).sorted()
+!(1, "a").sorted()
+!(1, 2).fold(0)
+!().pop()
+!(1,).map((a, b) => a)
+"\\d".len()
+"a1b22".matches(regex("\\d+")).len()
+"a1b22".replace(regex("[0-9]+"), m => str(int(m.text) * 2))
+(1, 2, 3).map(str)
+(a: 1).map(repr)
