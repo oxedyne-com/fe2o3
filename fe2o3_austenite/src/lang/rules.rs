@@ -397,10 +397,10 @@ fn lower_transform(selector: &Selector, body: &str) -> Transform {
 	// size -- the field the renderer consumes -- affecting only that level (or every level, for an
 	// unpredicated rule). Every other case lowers straight through `set::lower_set`.
 	let patch = if selector.kind == ElementKind::Heading && target == "text" {
-		match heading_size_patch(selector, args) {
+		match heading_text_patch(selector, args) {
 			Some(p)	=> p,
 			None	=> return Transform::Refused(fmt!(
-				"set text on {} named no size the renderer can consume", selector_label(selector))),
+				"set text on {} named no size or font the renderer can consume", selector_label(selector))),
 		}
 	} else {
 		set::lower_set(target, args)
@@ -413,26 +413,37 @@ fn lower_transform(selector: &Selector, body: &str) -> Transform {
 	Transform::SetFields(patch)
 }
 
-/// The heading-group patch a `set text(size: ...)` on a heading selector lowers to: the size the renderer
+/// The heading-group patch a `set text(size: ..., font: ...)` on a heading selector lowers to: the size the
+/// renderer
 /// reads for a heading is its own level size ([`Theme::heading_size`]), so the text size is redirected
 /// there rather than into `text.body_size`, which a heading never reads. A `level: N` predicate targets
 /// that one level; an unpredicated heading selector sizes every level alike (`size_all`). `None` when the
 /// set names no size, or a size that does not convert to points (an `em`, which needs a running size this
 /// lowering has not) -- the caller then refuses it rather than wrapping to no effect.
-fn heading_size_patch(selector: &Selector, args: &str) -> Option<ThemePatch> {
-	// Reuse the body-size reader: `set text(size: 30pt)` lowers its size into `text.body_size`, and that
-	// point value is exactly the size to redirect into the heading level.
-	let size = set::lower_set("text", args).text.body_size?;
+fn heading_text_patch(selector: &Selector, args: &str) -> Option<ThemePatch> {
+	// Reuse the body readers: `set text(size: 30pt, font: "Felipa")` lowers its size into `text.body_size`
+	// and its family list into `text.faces.body`, and those are exactly what to redirect into the heading
+	// level. A heading draws in one named face, so the list's first family is its face; the fall-back
+	// families after it are not carried (a heading's uncovered glyphs fall to the body role instead).
+	let text	= set::lower_set("text", args).text;
+	let face	= text.faces.body.as_ref().and_then(|l| l.first().cloned());
+	if text.body_size.is_none() && face.is_none() {
+		return None;
+	}
 	let mut patch = ThemePatch::default();
 	match level_predicate(selector) {
 		Some(n)	=> {
 			let idx = (n.max(1) as usize) - 1;	// level 0/1 both index 0, as the theme maps them
 			let mut levels: Vec<ThemeHeadingLevelPatch> = Vec::with_capacity(idx + 1);
 			levels.resize_with(idx + 1, Default::default);
-			levels[idx].size = Some(size);
+			levels[idx].size = text.body_size;
+			levels[idx].face = face.map(Some);
 			patch.heading.levels = levels;
 		},
-		None	=> patch.heading.size_all = Some(size),
+		None	=> {
+			patch.heading.size_all = text.body_size;
+			patch.heading.face_all = face.map(Some);
+		},
 	}
 	Some(patch)
 }
@@ -476,7 +487,7 @@ fn selector_label(selector: &Selector) -> String {
 /// no effect. `None` when every field it names is one the renderer reads for that element. Selector-aware:
 /// a heading renders one shaped line from the `heading` group, so a `text` field that only styles running
 /// body text is refused under a heading selector, whereas the heading's own size passes (it is redirected
-/// into the heading group by [`heading_size_patch`]).
+/// into the heading group by [`heading_text_patch`]).
 fn unread_field_reason(selector: &Selector, target: &str, args: &str) -> Option<String> {
 	let has = |key: &str| names_arg(args, key);
 	// A heading's only renderable `text` field is its size; the rest style running body text a heading
@@ -484,7 +495,6 @@ fn unread_field_reason(selector: &Selector, target: &str, args: &str) -> Option<
 	if selector.kind == ElementKind::Heading && target == "text" {
 		if has("tracking")	{ return Some(fmt!("text.tracking is not read for {}", selector_label(selector))); }
 		if has("ligatures")	{ return Some(fmt!("text.ligatures is not read for {}", selector_label(selector))); }
-		if has("font")		{ return Some(fmt!("a heading font is resolved elsewhere, not from {}", selector_label(selector))); }
 		if has("hyphenate")	{ return Some(fmt!("text.hyphenate is not read for {}", selector_label(selector))); }
 		return None;
 	}
@@ -492,7 +502,6 @@ fn unread_field_reason(selector: &Selector, target: &str, args: &str) -> Option<
 		"text" => {
 			if has("tracking")	{ return Some("text.tracking is not read by the renderer".to_string()); }
 			if has("ligatures")	{ return Some("text.ligatures is not read by the renderer".to_string()); }
-			if has("font")		{ return Some("text.faces.* (a body font) is not read by the renderer".to_string()); }
 			None
 		},
 		"heading" => {
@@ -914,6 +923,7 @@ fn merge_patch(dst: &mut ThemePatch, src: &ThemePatch) {
 	// The heading group, folded leaf by leaf so a level's spacing set elsewhere survives.
 	if src.heading.numbering_all.is_some()	{ dst.heading.numbering_all = src.heading.numbering_all.clone(); }
 	if src.heading.size_all.is_some()		{ dst.heading.size_all = src.heading.size_all; }
+	if src.heading.face_all.is_some()		{ dst.heading.face_all = src.heading.face_all.clone(); }
 	if src.heading.face.is_some()			{ dst.heading.face = src.heading.face.clone(); }
 	if src.heading.kind.is_some()			{ dst.heading.kind = src.heading.kind; }
 	for (i, lvl) in src.heading.levels.iter().enumerate() {

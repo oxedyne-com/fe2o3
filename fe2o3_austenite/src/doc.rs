@@ -86,7 +86,10 @@ use oxedyne_fe2o3_font::{
 	face::Role,
 	font::Font,
 	set::FontSet,
-	shape::Dir,
+	shape::{
+		Dir,
+		Feature,
+	},
 };
 use oxedyne_fe2o3_graphics::{
 	colour::Rgba,
@@ -119,6 +122,7 @@ pub enum Segment {
 	BoldItalic(String),	// `*_x_*`/`_*x*_`, set in the bold-italic face
 	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
 	Sub(String),	// #sub[...], set dropped and smaller, its baseline lowered below the line's
+	SmallCaps(String),	// #smallcaps[...], shaped with the font's small-capitals (`smcp`) feature
 	Footnote { note: Vec<Segment> },
 	Math(Atom),	// an inline maths expression, set within the running line
 	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
@@ -636,6 +640,22 @@ fn keep_with_next_para<'a>(look: &'a Block, theme: &Theme) -> Option<(&'a str, T
 }
 
 impl<'a> Authoring<'a> {
+	/// The reading set a scope's patch puts in force: the enclosing set unless the patch names a body
+	/// family list, in which case that list's set, required (and so built) at assembly.
+	fn fonts_for(&self, patch: &ThemePatch) -> Outcome<Arc<FontSet>> {
+		let families = match &patch.text.faces.body {
+			Some(f)	=> f,
+			None	=> return Ok(self.fonts.clone()),
+		};
+		match res!(self.faces.scope_set(families)) {
+			Some(set)	=> Ok(set),
+			None		=> Err(err!(
+				"The scoped body family list {:?} was never required at assembly, so no reading set was built \
+				for it; every assembly path runs `FaceResolver::require` over the families the tree names.",
+				families; Bug, Missing)),
+		}
+	}
+
 	/// Sets a block slice under `style`, the theme in force for it. A [`Block::Scoped`] overlays its patch
 	/// on `style` and recurses over its own blocks under that scoped theme, so a `#set` inside an included
 	/// chapter (or any bracketed subtree) styles only that subtree; the shared counters count on across the
@@ -687,8 +707,12 @@ impl<'a> Authoring<'a> {
 					cont
 				};
 				// A scoped subtree is authored fresh (the memo is switched off inside it), so its render stays
-				// byte-identical whether or not the memo is present.
+				// byte-identical whether or not the memo is present. A scope naming its own body family sets
+				// its blocks in that family's reading set, lifted again when the scope ends.
+				let scoped_fonts	= res!(self.fonts_for(patch));
+				let outer_fonts		= std::mem::replace(&mut self.fonts, scoped_fonts);
 				let ate = res!(self.walk(inner, &scoped, inner_cont, &mut None));
+				self.fonts = outer_fonts;
 				if ate {
 					if has_sibling {
 						// The inner walk pulled this slice's next sibling into its keep box: skip it here.
@@ -1130,6 +1154,7 @@ impl<'a> Authoring<'a> {
 					// nothing renders byte-identically. The wash is the scoped theme's `callout.fill`.
 					let scoped = { let mut t = style.clone(); t.apply(patch); t };
 					let fill = scoped.callout.fill;
+					let box_fonts = res!(self.fonts_for(patch));
 					match placement {
 						Some(p) => {
 							// A floated callout is a `figure(placement: ...)` under the bonnet, so it records a
@@ -1140,7 +1165,7 @@ impl<'a> Authoring<'a> {
 							let n = next_number(&mut self.counters, "aside");
 							mid.push(Node::Anchor(AnchorId::new(AnchorKind::Float, fmt!("aside-{}", n))));
 							res!(styled_box(
-								&mut mid, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
+								&mut mid, box_fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
 								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
@@ -1149,7 +1174,7 @@ impl<'a> Authoring<'a> {
 								self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 							}
 							res!(styled_box(
-								&mut self.nodes, self.fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
+								&mut self.nodes, box_fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
 								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
 							self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 						},
@@ -1732,6 +1757,9 @@ pub(crate) fn build_pieces(
 			Segment::BoldItalic(text) => {
 				pieces.push(Piece::Text { text: text.clone(), role: Role::BoldItalic });
 			},
+			Segment::SmallCaps(text) => {
+				pieces.push(Piece::SmallCaps { text: text.clone(), role: base });
+			},
 			Segment::Super(text) => {
 				// The same raise the footnote mark rides: a run shaped at 0.7x, its box shortened so the
 				// emitter seats its baseline above the line's. It is rigid and never breaks -- the space
@@ -2153,6 +2181,7 @@ fn footnote_pieces(
 			Segment::Strong(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Bold }),
 			Segment::Emph(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Italic }),
 			Segment::BoldItalic(t)	=> pieces.push(Piece::Text { text: t.clone(), role: Role::BoldItalic }),
+			Segment::SmallCaps(t)	=> pieces.push(Piece::SmallCaps { text: t.clone(), role: Role::Body }),
 			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
 			Segment::Glossary { display, .. }
 									=> pieces.push(Piece::Text { text: display.clone(), role: Role::Body }),
@@ -2786,19 +2815,21 @@ fn captioned(
 
 	let mut toks:	Vec<CapTok>	= Vec::new();
 	let mut pending				= false;
-	res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, &prefix));
+	res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, &prefix, &[]));
 	if let Some(segs) = caption {
 		for seg in segs {
 			match seg {
-				Segment::Text(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, t)),
-				Segment::Strong(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Bold, size, t)),
-				Segment::Emph(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Italic, size, t)),
-				Segment::BoldItalic(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::BoldItalic, size, t)),
-				Segment::Code(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Mono, size, t)),
+				Segment::Text(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, t, &[])),
+				Segment::Strong(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Bold, size, t, &[])),
+				Segment::Emph(t)		=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Italic, size, t, &[])),
+				Segment::BoldItalic(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::BoldItalic, size, t, &[])),
+				Segment::Code(t)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Mono, size, t, &[])),
+				Segment::SmallCaps(t)	=> res!(push_caption_text(
+										&mut toks, &mut pending, fonts.clone(), Role::Body, size, t, &[Feature::SMALL_CAPS])),
 				Segment::Glossary { display, .. }
-									=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, display)),
+									=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, display, &[])),
 				Segment::Cite(keys)	=> res!(push_caption_text(
-										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")))),
+										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")), &[])),
 				Segment::PageRef(_)		=> {},	// a cross-reference in a caption is not resolved here
 				Segment::Footnote { .. }	=> {},	// a footnote in a caption is not set here
 				Segment::MarginNote { .. }	=> {},	// a margin note in a caption sets nothing here
@@ -2867,6 +2898,7 @@ fn push_caption_text(
 	role:		Role,
 	size:		Sp,
 	text:		&str,
+	features:	&[Feature],
 )
 	-> Outcome<()>
 {
@@ -2874,7 +2906,7 @@ fn push_caption_text(
 	for c in text.chars() {
 		if c.is_whitespace() {
 			if !word.is_empty() {
-				res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word));
+				res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word, features));
 			}
 			*pending = true;
 		} else {
@@ -2882,7 +2914,7 @@ fn push_caption_text(
 		}
 	}
 	if !word.is_empty() {
-		res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word));
+		res!(flush_caption_word(toks, pending, fonts.clone(), role, size, &mut word, features));
 	}
 	Ok(())
 }
@@ -2895,10 +2927,11 @@ fn flush_caption_word(
 	role:		Role,
 	size:		Sp,
 	word:		&mut String,
+	features:	&[Feature],
 )
 	-> Outcome<()>
 {
-	let shaped	= res!(ShapedText::new(fonts, role, Dir::Ltr, size, word));
+	let shaped	= res!(ShapedText::new_with_features(fonts, role, Dir::Ltr, size, word, features));
 	let d		= shaped.dims();
 	push_caption_box(toks, pending, vec![Node::Leaf(Leaf::text(shaped))], d.width, d.height, d.depth);
 	word.clear();
@@ -3701,7 +3734,7 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 		for seg in segs {
 			match seg {
 				Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t)
-				| Segment::Super(t) | Segment::Sub(t) | Segment::Code(t)	=> count_str(t, n),
+				| Segment::Super(t) | Segment::Sub(t) | Segment::Code(t) | Segment::SmallCaps(t)	=> count_str(t, n),
 				Segment::Glossary { display, .. }		=> count_str(display, n),
 				Segment::Footnote { note }				=> count_segs(note, n),
 				Segment::Cite(keys)						=> for k in keys { count_str(k, n); },
@@ -4264,6 +4297,7 @@ fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::BoldItalic(t)			=> out.push_str(t),
 			Segment::Super(t)				=> out.push_str(t),
 			Segment::Sub(t)					=> out.push_str(t),
+			Segment::SmallCaps(t)			=> out.push_str(t),
 			Segment::Code(t)				=> out.push_str(t),
 			Segment::Glossary { display, .. }	=> out.push_str(display),
 			Segment::Math(_)				=> {},
@@ -4304,8 +4338,10 @@ fn inline_segments(
 		// A maths span is unwrapped and its leaves woven straight into the line; every other run resolves to
 		// a text string set in a face chosen against the base role, so an emphasis in an italic running head
 		// toggles upright as Typst sets it.
+		let mut features: &[Feature] = &[];
 		let (text, r): (&str, Role) = match seg {
 			Segment::Text(t)		=> (t, role),
+			Segment::SmallCaps(t)	=> { features = &[Feature::SMALL_CAPS]; (t, role) },
 			Segment::Strong(t)		=> (t, if italic { Role::BoldItalic } else { Role::Bold }),
 			Segment::Emph(t)		=> (t, if italic { Role::Body } else { Role::Italic }),
 			Segment::BoldItalic(t)	=> (t, if italic { Role::Bold } else { Role::BoldItalic }),
@@ -4324,7 +4360,7 @@ fn inline_segments(
 			},
 			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_) | Segment::MarginNote { .. } | Segment::Index { .. }	=> continue,
 		};
-		let sh	= res!(ShapedText::new(fonts.clone(), r, Dir::Ltr, size, text));
+		let sh	= res!(ShapedText::new_with_features(fonts.clone(), r, Dir::Ltr, size, text, features));
 		let w	= sh.dims().width;
 		children.push(Node::Leaf(Leaf::text_dims(sh, Dims::new(w, asc, dep))));
 		width += w;
@@ -4631,6 +4667,10 @@ fn subheading_hbox(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
 			Segment::Sub(t)		=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
+			// A `#smallcaps[...]` in a heading takes the heading line's own small-capitals setting -- the
+			// same one a small-capped heading level uses -- since a display face need carry no `smcp`.
+			Segment::SmallCaps(t)	=> res!(push_head_text(
+				&mut children, &mut width, &fonts, &face, size, small_size, true, t, asc, dep)),
 			Segment::Code(t)	=> res!(push_head_text(
 				&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, t, asc, dep)),
 			Segment::Glossary { term, display: disp }	=> {

@@ -9,6 +9,7 @@ use crate::face::{
 };
 use crate::shape::{
 	Dir,
+	Feature,
 	Glyph,
 	Run,
 };
@@ -84,6 +85,11 @@ impl Font {
 		}
 	}
 
+	/// The family, weight and slant of the face at the head of the chain -- the one the reader reads.
+	pub fn info(&self) -> Outcome<crate::face::FaceInfo> {
+		res!(self.first()).info()
+	}
+
 	/// The vertical metrics at a size, in pixels. They are the FIRST face's, never the tallest used:
 	/// a line's height must not change because one arrow in it came from further down the chain. The
 	/// faces behind the first are chosen to sit within its box.
@@ -139,6 +145,12 @@ impl Font {
 	/// Shapes a string, each face in the chain drawing what the one before it could not. The common
 	/// case by far is a string one face draws the whole of: one shaping call.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir) -> Outcome<Run> {
+		self.shape_with(text, size, dir, &[])
+	}
+
+	/// As [`Font::shape`], with OpenType features applied across the whole string. A face down the chain
+	/// that lacks a feature simply draws without it, as every shaper does.
+	pub fn shape_with(&self, text: &str, size: f32, dir: Dir, features: &[Feature]) -> Outcome<Run> {
 		if text.is_empty() {
 			return Ok(Run {
 				glyphs:		Vec::new(),
@@ -148,7 +160,7 @@ impl Font {
 		}
 		let segs = self.segment(text);
 		if let [seg] = segs[..] {
-			return res!(self.face(seg.face)).shape(text, size, dir, seg.face, 0);
+			return res!(self.face(seg.face)).shape_with(text, size, dir, seg.face, 0, features);
 		}
 
 		// More than one face is needed, so each stretch is shaped by its own and the results are laid
@@ -163,7 +175,7 @@ impl Font {
 					seg.start, seg.end;
 				Bug)),
 			};
-			runs.push(res!(res!(self.face(seg.face)).shape(sub, size, dir, seg.face, seg.start)));
+			runs.push(res!(res!(self.face(seg.face)).shape_with(sub, size, dir, seg.face, seg.start, features)));
 		}
 
 		// The stretches are laid out in VISUAL order, which for right-to-left text is the reverse of

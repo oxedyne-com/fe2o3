@@ -285,6 +285,7 @@ pub enum Inline {
 	BoldItalic(String),	// *_x_* or _*x*_, the two faces nested, lowered to a bold-italic segment
 	Super(String),	// #super[...], lowered to a raised, smaller segment
 	Sub(String),	// #sub[...], lowered to a dropped, smaller segment
+	SmallCaps(String),	// #smallcaps[...], lowered to a segment shaped with the font's `smcp` feature
 	PageRef(String),	// @label, resolving to the labelled anchor's page number
 	Code(String),	// `raw` or #raw("..."), set in the mono face
 	Math(Atom),		// $...$, parsed to the engine's maths tree

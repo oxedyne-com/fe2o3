@@ -6,6 +6,7 @@
 
 use crate::shape::{
 	Dir,
+	Feature,
 	Glyph,
 	Run,
 };
@@ -15,6 +16,7 @@ use oxedyne_fe2o3_graphics::prelude::*;
 use oxedyne_fe2o3_graphics::pdf_font::FontProgram;
 
 use harfrust::{
+	Feature as ShapeFeature,
 	FontRef as ShapeFont,
 	ShapeOptions,
 	ShaperData,
@@ -30,6 +32,8 @@ use skrifa::{
 		DrawSettings,
 		OutlinePen,
 	},
+	attribute::Style,
+	string::StringId,
 	FontRef as OutlineFont,
 	GlyphId,
 	MetadataProvider,
@@ -66,6 +70,47 @@ impl Metrics {
 	/// The distance from one baseline to the next.
 	pub fn line_height(&self) -> f32 {
 		self.ascent + self.descent + self.leading
+	}
+}
+
+/// What a font file says about itself: the family it belongs to and where in that family it sits. This
+/// is what a document's `font: "Name"` is matched against, so a face is found by the name its designer
+/// gave it rather than by whatever its file happens to be called.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceInfo {
+	pub family:	String,	// the typographic family (name ID 16), else the legacy family (name ID 1)
+	pub weight:	u16,	// OS/2 weight class, 100-900; 400 regular, 700 bold
+	pub italic:	bool,	// italic or oblique
+}
+
+impl FaceInfo {
+
+	/// Reads a font file's family, weight and slant without building a shaper, so a directory of fonts
+	/// can be indexed cheaply before any of them is needed.
+	pub fn read(bytes: &[u8]) -> Outcome<Self> {
+		let of = match OutlineFont::new(bytes) {
+			Ok(f) => f,
+			Err(e) => return Err(err!(
+				"The {} bytes given are not a font whose names can be read: {:?}.", bytes.len(), e;
+			Invalid, Input)),
+		};
+		// The typographic family groups every weight and width under one name ("Noto Sans"), where the
+		// legacy family splits them four to a family ("Noto Sans SemiBold"); prefer it where present.
+		let family = of.localized_strings(StringId::TYPOGRAPHIC_FAMILY_NAME).english_or_first()
+			.or_else(|| of.localized_strings(StringId::FAMILY_NAME).english_or_first())
+			.map(|s| s.to_string());
+		let family = match family {
+			Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+			_ => return Err(err!(
+				"The font of {} bytes names no family in its name table.", bytes.len();
+			Invalid, Input, Missing)),
+		};
+		let attrs = of.attributes();
+		Ok(Self {
+			family,
+			weight:	attrs.weight.value().round().clamp(1.0, 1000.0) as u16,
+			italic:	!matches!(attrs.style, Style::Normal),
+		})
 	}
 }
 
@@ -130,6 +175,11 @@ impl Face {
 		self.program.as_ref()
 	}
 
+	/// The family, weight and slant the file declares.
+	pub fn info(&self) -> Outcome<FaceInfo> {
+		FaceInfo::read(&self.bytes)
+	}
+
 	/// Can the face draw this character?
 	pub fn covers(&self, ch: char) -> bool {
 		self.covers.contains(&(ch as u32))
@@ -167,6 +217,21 @@ impl Face {
 	/// outline to ask for; `at` is the string's byte offset in the one it was cut from, added to each
 	/// cluster so a caret reads offsets into the original text rather than into this fragment.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir, face: u8, at: usize) -> Outcome<Run> {
+		self.shape_with(text, size, dir, face, at, &[])
+	}
+
+	/// As [`Face::shape`], with OpenType features applied across the whole string.
+	pub fn shape_with(
+		&self,
+		text:		&str,
+		size:		f32,
+		dir:		Dir,
+		face:		u8,
+		at:			usize,
+		features:	&[Feature],
+	)
+		-> Outcome<Run>
+	{
 		if text.is_empty() {
 			return Ok(Run {
 				glyphs:		Vec::new(),
@@ -185,7 +250,10 @@ impl Face {
 		});
 		buf.guess_segment_properties();
 
-		let out = shaper.shape(buf, ShapeOptions::new());
+		let feats: Vec<ShapeFeature> = features.iter()
+			.map(|f| ShapeFeature::new(harfrust::Tag::new(&f.tag), f.value, ..))
+			.collect();
+		let out = shaper.shape(buf, ShapeOptions::new().features(&feats));
 		let infos = out.glyph_infos();
 		let posns = out.glyph_positions();
 

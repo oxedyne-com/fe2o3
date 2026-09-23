@@ -45,7 +45,10 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
 	set::FontSet,
-	shape::Dir,
+	shape::{
+		Dir,
+		Feature,
+	},
 };
 use oxedyne_fe2o3_graphics::{
 	colour::Rgba,
@@ -801,12 +804,17 @@ fn greedy_break_cell(
 	let mut pending:	i32			= 0;	// spaces seen but not yet attached to the next word
 	for piece in pieces {
 		match piece {
-			Piece::Text { text, role } => {
+			Piece::Text { text, role } | Piece::SmallCaps { text, role } => {
+				// A small-caps run is broken into words exactly as a text run, each shaped with `smcp`.
+				let features: &[Feature] = match piece {
+					Piece::SmallCaps { .. }	=> &[Feature::SMALL_CAPS],
+					_						=> &[],
+				};
 				let mut word = String::new();
 				for ch in text.chars() {
 					if ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' {
 						if !word.is_empty() {
-							res!(push_word_unit(&mut units, fonts.clone(), *role, size, &word, Sp(sp_w.raw() * pending)));
+							res!(push_word_unit(&mut units, fonts.clone(), *role, size, &word, Sp(sp_w.raw() * pending), features));
 							word.clear();
 							pending = 0;
 						}
@@ -818,7 +826,7 @@ fn greedy_break_cell(
 					}
 				}
 				if !word.is_empty() {
-					res!(push_word_unit(&mut units, fonts.clone(), *role, size, &word, Sp(sp_w.raw() * pending)));
+					res!(push_word_unit(&mut units, fonts.clone(), *role, size, &word, Sp(sp_w.raw() * pending), features));
 					pending = 0;
 				}
 			},
@@ -889,10 +897,11 @@ fn push_word_unit(
 	size:			Sp,
 	word:			&str,
 	space_before:	Sp,
+	features:		&[Feature],
 )
 	-> Outcome<()>
 {
-	let shaped	= res!(ShapedText::new(fonts, role, Dir::Ltr, size, word));
+	let shaped	= res!(ShapedText::new_with_features(fonts, role, Dir::Ltr, size, word, features));
 	let d		= shaped.dims();
 	units.push(Unit {
 		node:	Node::Leaf(Leaf::text(shaped)),

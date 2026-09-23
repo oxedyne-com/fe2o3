@@ -923,6 +923,18 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 				continue;
 			}
 		}
+		// Typst's `#smallcaps[...]` or `#smallcaps("...")`: its content reduces to display text here and is
+		// shaped with the font's small-capitals feature by the block layer, as Typst asks the font for it.
+		if c == '#' {
+			if let Some((text, next)) = smallcaps_call(&chars, i) {
+				if !plain.is_empty() {
+					runs.push(Inline::Text(std::mem::take(&mut plain)));
+				}
+				runs.push(Inline::SmallCaps(text));
+				i = next;
+				continue;
+			}
+		}
 		// An inline glossary or index call defined in the book template. A glossary term is a run of its
 		// own, so [`doc::author`] can set it bold-italic on first use; a visible index call sets its
 		// display text, which may itself carry markup, so it is parsed and folded in; a pure index marker
@@ -1775,6 +1787,19 @@ fn sub_call(chars: &[char], i: usize) -> Option<(String, usize)> {
 	Some((flatten_markup(&unwrap_arg(&inner)), next))
 }
 
+/// Reads an inline `#smallcaps[...]` or `#smallcaps("...")` at `i` (a `#`), returning its content reduced
+/// to display text by [`flatten_markup`] and the index just past the closing bracket. `None` when the shape
+/// is not a smallcaps call or its argument does not close.
+fn smallcaps_call(chars: &[char], i: usize) -> Option<(String, usize)> {
+	let open = at_lit(chars, i, "#smallcaps")?;
+	match chars.get(open) {
+		Some('[') | Some('(')	=> {},
+		_						=> return None,
+	}
+	let (inner, next) = read_group(chars, open)?;
+	Some((flatten_markup(&unwrap_arg(&inner)), next))
+}
+
 /// Reads an inline `#cite(...)` at `i` (a `#`), returning the citation keys and the index past the
 /// closing `)`. Every `<label>` token inside the parentheses is a key; a named argument such as
 /// `form: "prose"` carries no label and is ignored. `None` when the shape is not a cite call or its
@@ -1958,6 +1983,7 @@ pub fn flatten_markup(text: &str) -> String {
 			Inline::BoldItalic(t)			=> out.push_str(&t),	// already the flat inner of a nested run
 			Inline::Super(t)				=> out.push_str(&t),	// a flattened string cannot raise; keep its text
 			Inline::Sub(t)					=> out.push_str(&t),	// a flattened string cannot drop; keep its text
+			Inline::SmallCaps(t)			=> out.push_str(&t),	// a flattened string has no small capitals; keep its text
 			Inline::Code(t)					=> out.push_str(&t),
 			Inline::Glossary { display, .. }	=> out.push_str(&display),
 			Inline::PageRef(_)				=> {},	// a page number has no plain form before layout
@@ -4853,6 +4879,20 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		}
 	}
 
+	/// `#smallcaps[...]` yields an [`Inline::SmallCaps`] run of its content, in both argument forms, and
+	/// never leaves raw source behind.
+	#[test]
+	fn smallcaps_call_reads_as_small_caps() {
+		let runs = parse_inlines("The #smallcaps[Nato] treaty, and #smallcaps(\"un\") too.");
+		let sc: Vec<&String> = runs.iter().filter_map(|r| match r {
+			Inline::SmallCaps(t) => Some(t),
+			_ => None,
+		}).collect();
+		assert_eq!(sc, vec!["Nato", "un"], "unexpected small-caps runs: {:?}", runs);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps"))),
+			"raw #smallcaps leaked: {:?}", runs);
+	}
+
 	/// `#super[...]` yields an [`Inline::Super`] run of its content, in both the bracket and the string
 	/// argument forms, and never leaves raw source behind.
 	#[test]
@@ -5156,14 +5196,14 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	#[test]
 	fn unknown_inline_call_is_recorded_not_leaked() {
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("a #smallcaps[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
-		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#smallcaps") || t.contains("#v("))),
+		let runs = parse_inlines_in("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
+		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#overline") || t.contains("#v("))),
 			"raw unknown call leaked: {:?}", runs);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
-			"smallcaps body dropped: {:?}", runs);
+			"overline body dropped: {:?}", runs);
 		assert_eq!(skips.total(), 2);
 		let names: Vec<String> = skips.entries().into_iter().map(|(n, _)| n).collect();
-		assert!(names.contains(&"#smallcaps".to_string()) && names.contains(&"#v".to_string()),
+		assert!(names.contains(&"#overline".to_string()) && names.contains(&"#v".to_string()),
 			"unexpected skip names: {:?}", names);
 	}
 
@@ -5344,7 +5384,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		assert_eq!(RefusalClass::classify("#let"), RefusalClass::FixedPoint);
 		assert_eq!(RefusalClass::classify("#show"), RefusalClass::FixedPoint);
 		assert_eq!(RefusalClass::classify("#columns"), RefusalClass::Unsupported);
-		assert_eq!(RefusalClass::classify("#smallcaps"), RefusalClass::Unsupported);
+		assert_eq!(RefusalClass::classify("#overline"), RefusalClass::Unsupported);
 	}
 
 	/// A `#columns(n)[ ... ]` wrapper is recorded as skipped and its body set single-column, so the words

@@ -134,8 +134,7 @@ const DEFAULT_BODY_PT: f64 = 11.0;
 fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: f64) -> Vec<&'static str> {
 	// The argument keys this set applied AND the renderer consumes -- the invariant is that every lowered
 	// field is either read by the renderer or refused with a diagnostic, never written-and-ignored. A key
-	// that lowers into a field nothing reads yet (a body `font`, an equation `numbering`, a `page`
-	// dimension) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
+	// that lowers into a field nothing reads yet (an equation `numbering`, a `page` dimension) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
 	// unapplied and records a visible "not yet supported" rather than a silent no-op. A key present in the
 	// source but absent for any other reason (unrecognised for the target, an `em` length, a bare `none`)
 	// is likewise not pushed.
@@ -146,12 +145,13 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 				patch.text.body_size = Some(Sp::from_pt(pt));
 				used.push("size");
 			}
-			// The body family lowers into the theme, but no renderer reads `text.faces.body` yet (the face
-			// resolver reaches heading faces only), so `font` is left unmarked and a lone `#set text(font:)`
-			// is refused rather than silently ignored.
-			if let Some(font) = named_string(args, "font") {
-				if !font.is_empty() {
-					patch.text.faces.body = Some(Some(font));
+			// The body family list: `font: "Name"` or the fallback array `font: ("A", "B")`. Resolved against
+			// the document's fonts at assembly, where a family no font declares is a hard error (Typst's
+			// missing-family precheck), so nothing named here ever falls back silently.
+			if let Some(expr) = named_value(args, "font") {
+				if let Some(families) = font_families(&expr) {
+					patch.text.faces.body = Some(families);
+					used.push("font");
 				}
 			}
 			if let Some(b) = named_bool(args, "hyphenate") {
@@ -484,6 +484,30 @@ fn named_string(args: &str, key: &str) -> Option<String> {
 	None
 }
 
+/// The family list a `font:` value names: a lone string, or an array of strings (Typst's fallback list,
+/// tried in order). `None` for anything else -- a variable, a dictionary form, an empty name -- so the
+/// argument stays unapplied and the `#set` is refused rather than set wrongly.
+fn font_families(expr: &str) -> Option<Vec<String>> {
+	let e = expr.trim();
+	let inner = match e.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+		Some(i)	=> i,
+		None	=> e,
+	};
+	let mut out: Vec<String> = Vec::new();
+	for part in inner.split(',') {
+		let p = part.trim();
+		if p.is_empty() {
+			continue;	// the trailing comma of a one-element array, `("A",)`
+		}
+		let name = p.strip_prefix('"').and_then(|r| r.strip_suffix('"'))?;
+		if name.trim().is_empty() || name.contains('"') {
+			return None;
+		}
+		out.push(name.trim().to_string());
+	}
+	if out.is_empty() { None } else { Some(out) }
+}
+
 /// The raw value expression a `key:` names, read to the next top-level comma -- one not nested inside a
 /// `(...)`, `[...]`, `{...}` or `"..."` -- and trimmed. Unlike [`named_string`] it keeps the value's own
 /// delimiters, so a call like `rgb("#ff0000")`, an argument list `rgb(0, 0, 0)` or a modifier chain
@@ -618,7 +642,12 @@ mod tests {
 		let mut theme = Theme::default();
 		theme.apply(&patch);
 		assert_eq!(theme.text.body_size, Sp::from_pt(12.0));
-		assert_eq!(theme.text.faces.body, Some("Libertinus Serif".to_string()));
+		assert_eq!(theme.text.faces.body, vec!["Libertinus Serif".to_string()]);
+		// A fallback array lowers to the list in order.
+		let listed = lower_set("text", "font: (\"Felipa\", \"Libertinus Serif\",)");
+		assert_eq!(listed.text.faces.body, Some(vec!["Felipa".to_string(), "Libertinus Serif".to_string()]));
+		// A value that is not a literal family is left unapplied, so the set is refused.
+		assert_eq!(lower_set("text", "font: fonts.display").text.faces.body, None);
 		// The leading was not named, so it kept its default.
 		assert_eq!(theme.text.leading, Theme::default().text.leading);
 	}
@@ -762,7 +791,7 @@ mod tests {
 	}
 
 	/// H2: a lowerable `#set` whose named arguments the renderer does not consume -- an unknown key, an
-	/// unconvertible `em`, a bare `none`, or a field lowered but not yet read (a body `font`, an equation
+	/// unconvertible `em`, a bare `none`, or a field lowered but not yet read (an equation
 	/// `numbering`, a `page` dimension) -- is flagged for refusal, so it is a visible "not yet supported"
 	/// rather than a silent no-op; a set every one of whose arguments the renderer consumes is not.
 	#[test]
@@ -781,9 +810,10 @@ mod tests {
 		assert!(set_refusal_reason("heading", "numbering: none").is_some());
 		// A partially-applied set is still flagged, for the argument it dropped.
 		assert!(set_refusal_reason("text", "size: 12pt, weight: 700").is_some());
+		// A body font is read by the renderer now, so it is consumed; one that is not a literal family is not.
+		assert_eq!(set_refusal_reason("text", "font: \"Radley\""), None);
+		assert!(set_refusal_reason("text", "font: fonts.display").is_some());
 		// Lowered-but-unread fields are flagged, so a `#set` into one alone is refused rather than a no-op.
-		assert!(set_refusal_reason("text", "font: \"Radley\"").is_some(),
-			"a body font lowers but no renderer reads it yet, so it must be refused");
 		assert!(set_refusal_reason("math.equation", "numbering: \"(1)\"").is_some(),
 			"equation numbering lowers but the renderer always sets (N), so it must be refused");
 		assert!(set_refusal_reason("page", "width: 200mm").is_some(),

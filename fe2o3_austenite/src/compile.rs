@@ -109,9 +109,12 @@ where
 		// terse line the lone-file path prints, and `--explain` walks every chapter's sites.
 		let spec		= res!(book::load(main_path));
 		let skip_line	= terse_skip_line(&spec.skips);
+		// A root `#set text(font: ...)` sets the whole document in that family's reading set, in place of the
+		// idiom's own; a document naming no family keeps its set untouched, byte for byte.
+		let fonts = spec.faces.body_set(&spec.style.text.faces.body).unwrap_or(spec.fonts);
 		let assembled = Assembled {
 			blocks:	spec.blocks,
-			fonts:	spec.fonts,
+			fonts,
 			geom:	spec.geom,
 			style:	spec.style,
 			title:	spec.title,
@@ -163,11 +166,17 @@ where
 	// block tree may name one; resolve against the union of both against the tree's assets, the same way a
 	// whole book or doc does, so a lone chapter's heading face reaches the page whichever source names it. A
 	// heading asking for a weight/slant the tree ships no file for is noted, as for a book.
-	let faces = match main_path.parent() {
+	let mut faces = match main_path.parent() {
 		Some(dir)	=> book::face_resolver(dir, &style, &blocks),
 		None		=> FaceResolver::default(),
 	};
+	// Every family the file names must be declared by a font it was given: a hard error otherwise, never a
+	// silent fall-back (see `FaceResolver::require`).
+	let (bodies, headings) = book::named_families(&style, &blocks);
+	let font_dir = book::lone_font_dir(main_path.parent().unwrap_or_else(|| Path::new(".")));
+	res!(faces.require(&font_dir, &bodies, &headings));
 	book::note_missing_face_variants(&style, &blocks, &faces, &mut refusals);
+	let fonts = faces.body_set(&style.text.faces.body).unwrap_or(fonts);
 	let assembled = Assembled {
 		blocks,
 		fonts,

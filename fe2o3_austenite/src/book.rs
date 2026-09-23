@@ -140,10 +140,50 @@ fn patch_face_names(patch: &crate::theme::ThemePatch, out: &mut Vec<String>) {
 	if let Some(Some(n)) = &patch.heading.face {
 		if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
 	}
+	if let Some(Some(n)) = &patch.heading.face_all {
+		if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
+	}
 	for l in &patch.heading.levels {
 		if let Some(Some(n)) = &l.face {
 			if !n.is_empty() && !out.contains(n) { out.push(n.clone()); }
 		}
+	}
+}
+
+/// Every font family the document names itself, for the missing-family precheck
+/// ([`FaceResolver::require`]): the body family lists its `text(font: ...)` sets name, at the root and in
+/// every scope, and the heading faces it names per level (a `doc.with(heading-font:)` argument, a
+/// `#show heading: set text(font:)` rule). The root theme's role-default heading face is left out: it is
+/// the idiom's own preference (the book idiom's Radley, used where the tree ships it), not a family the
+/// author wrote, so its absence is the ordinary fall-back to the body role rather than an error.
+pub fn named_families(root: &Theme, blocks: &[Block]) -> (Vec<Vec<String>>, Vec<String>) {
+	let mut bodies:		Vec<Vec<String>>	= Vec::new();
+	let mut headings:	Vec<String>			= Vec::new();
+	if !root.text.faces.body.is_empty() {
+		bodies.push(root.text.faces.body.clone());
+	}
+	for l in &root.heading.levels {
+		if let Some(n) = &l.face {
+			if !n.is_empty() && !headings.contains(n) { headings.push(n.clone()); }
+		}
+	}
+	collect_named_families(blocks, &mut bodies, &mut headings);
+	(bodies, headings)
+}
+
+/// Adds the families every scoped or box subtree's patch names, descending through nested subtrees.
+fn collect_named_families(blocks: &[Block], bodies: &mut Vec<Vec<String>>, headings: &mut Vec<String>) {
+	for b in blocks {
+		let (patch, inner) = match b {
+			Block::Scoped { patch, blocks }		=> (patch, blocks),
+			Block::Box { patch, blocks, .. }	=> (patch, blocks),
+			_									=> continue,
+		};
+		if let Some(list) = &patch.text.faces.body {
+			if !bodies.contains(list) { bodies.push(list.clone()); }
+		}
+		patch_face_names(patch, headings);
+		collect_named_families(inner, bodies, headings);
 	}
 }
 
@@ -327,7 +367,9 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
 	// no file for.
-	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	let (bodies, headings) = named_families(&style, &blocks);
+	res!(faces.require(&assets_fonts, &bodies, &headings));
 	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks, false);
@@ -427,7 +469,9 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
 	// file is noted rather than silently set in Regular.
-	let faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
+	let (bodies, headings) = named_families(&style, &blocks);
+	res!(faces.require(&assets_fonts, &bodies, &headings));
 	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
