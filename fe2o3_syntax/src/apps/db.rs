@@ -27,16 +27,16 @@ pub fn generic_database(
     
     let arg_msg_cmd_id = Arg::from(ArgConfig {
         name:   fmt!("msg_cmd_id"),
-        hyph1:  fmt!("mcid"),
-        vals:   vec![(mcid_kind, fmt!("Message command identifier value"))],
+        hyph1:  Some(fmt!("mcid")),
+        vals:   vec![(mcid_kind, fmt!("Message command identifier value")).into()],
         reqd:   true,
         help:   Some(fmt!("Message command identifier")),
         ..Default::default()
     });
     let arg_usr_id = Arg::from(ArgConfig {
         name:   fmt!("usr_id"),
-        hyph1:  fmt!("uid"),
-        vals:   vec![(uid_kind, fmt!("User identifier value"))],
+        hyph1:  Some(fmt!("uid")),
+        vals:   vec![(uid_kind, fmt!("User identifier value")).into()],
         reqd:   true,
         help:   Some(fmt!("User identifier")),
         ..Default::default()
@@ -49,8 +49,8 @@ pub fn generic_database(
         name:   fmt!("insert"),
         help:   Some(fmt!("Insert (key, value) daticles into database")),
         vals:   vec![
-            (Kind::Unknown, fmt!("Key")),
-            (Kind::Unknown, fmt!("Value")),
+            (Kind::Unknown, fmt!("Key")).into(),
+            (Kind::Unknown, fmt!("Value")).into(),
         ],
         cat:    fmt!("Database"),
         ..Default::default()
@@ -66,7 +66,7 @@ pub fn generic_database(
     let mut cmd = Cmd::from(CmdConfig {
         name:   fmt!("get"),
         help:   Some(fmt!("Get database value for given key daticle")),
-        vals:   vec![(Kind::Unknown, fmt!("Key"))],
+        vals:   vec![(Kind::Unknown, fmt!("Key")).into()],
         cat:    fmt!("Database"),
         ..Default::default()
     });
@@ -80,7 +80,7 @@ pub fn generic_database(
     let mut cmd = Cmd::from(CmdConfig {
         name:   fmt!("delete"),
         help:   Some(fmt!("Delete given key from database")),
-        vals:   vec![(Kind::Unknown, fmt!("Key"))],
+        vals:   vec![(Kind::Unknown, fmt!("Key")).into()],
         cat:    fmt!("Database"),
         ..Default::default()
     });

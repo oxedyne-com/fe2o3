@@ -18,6 +18,7 @@
 //!     cmd::{Cmd, CmdConfig},
 //!     core::{Syntax, SyntaxConfig, SyntaxRef},
 //!     msg::Msg,
+//!     val::Val,
 //! };
 //! use oxedyne_fe2o3_jdat::prelude::*;
 //! use oxedyne_fe2o3_core::prelude::*;
@@ -29,7 +30,7 @@
 //! });
 //! let cmd = Cmd::from(CmdConfig {
 //!     name:   fmt!("connect"),
-//!     vals:   vec![(Kind::Str, fmt!("Host to connect to"))],
+//!     vals:   vec![Val::text("host").help("Host to connect to")],
 //!     help:   Some(fmt!("Connect to a remote host")),
 //!     ..Default::default()
 //! });
@@ -74,11 +75,19 @@
 //! ```
 //!
 //! An argument comes in three possible versions, its prefixless name, or prefixed with one or two
-//! hyphens.  An argument without a value is an option (or "switch").  Values are decoded as
-//! `Daticles` which protect single and double quotes by default, and allow type specification,
-//! e.g. `(i16|-42)`.  Arguments are optional unless specified otherwise.  Note that because values
-//! are daticles, you can use compound daticles like `Kind::MAP` and `Kind::LIST` to embed a
-//! variable number of values.  
+//! hyphens; either hyphenated form may be absent.  An argument without a value is an option (or
+//! "switch").  Values from a REPL line or the wire are decoded as `Daticles` which protect single
+//! and double quotes by default, and allow type specification, e.g. `(i16|-42)`.  Arguments are
+//! optional unless specified otherwise.  Because values are daticles, you can use compound
+//! daticles like `Kind::MAP` and `Kind::LIST` to embed a variable number of values.
+//!
+//! # Process command lines
+//!
+//! A syntax can also read a process's own arguments through [`argv::parse`], which answers
+//! `help`, `--help` and `--version` itself.  Set `SyntaxConfig::one_cmd` so that the command line
+//! names exactly one command and its values may follow its options.  There, a word the shell has
+//! already unquoted is taken as it stands when a string is expected, a value may be optional or
+//! repeated ([`val::Arity`]), and a command may take the words after `--` as its `rest`.
 //!
 //! `Syntax` attempts to unify:
 //! - command line text interfaces (CLI or TUI) including one-time invocation with argument
@@ -104,7 +113,7 @@
 //!             .hyph1("p"))
 //!             .hyph2("path"))
 //!             .required(true)
-//!             .expected_vals(vec![Kind::Str])
+//!             .expected_vals(vec![(Kind::Str, "Directory path")])
 //!             .help("Directory path")
 //!         ))
 //!     ));
@@ -129,10 +138,10 @@
 //! });
 //! let a = Arg::from(ArgConfig {
 //!     name:   fmt!("dir"),
-//!     hyph1:  fmt!("p"),
+//!     hyph1:  Some(fmt!("p")),
 //!     hyph2:  Some(fmt!("path")),
 //!     reqd:   true,
-//!     evals:  vec![Kind::Str],
+//!     vals:   vec![Val::text("dir")],
 //!     help:   Some(fmt!("Directory path")),
 //!     ..Default::default()
 //! });
@@ -154,12 +163,14 @@
 #![forbid(unsafe_code)]
 pub mod apps;
 pub mod arg;
+pub mod argv;
 pub mod cmd;
 pub mod core;
 pub mod help;
 pub mod key;
 pub mod msg;
 pub mod opt;
+pub mod val;
 
 pub use core::{
     Syntax,

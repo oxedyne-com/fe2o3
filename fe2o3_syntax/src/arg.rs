@@ -5,14 +5,13 @@ use crate::{
     },
     core::SyntaxPrefs,
     key::Key,
+    val::Val,
 };
 
 use oxedyne_fe2o3_core::{
     prelude::*,
     map::Recursive,
 };
-use oxedyne_fe2o3_jdat::kind::Kind;
-
 use std::{
     collections::BTreeMap,
     fmt,
@@ -28,10 +27,10 @@ pub struct Arg {
 #[derive(Clone, Debug, Default)]
 pub struct ArgConfig {
     pub name:   String,             // For internal use only.
-    pub vals:   Vec<(Kind, String)>,// Expected value kindicles, with help text.
+    pub vals:   Vec<Val>,           // Expected values.
     pub reqd:   bool,               // The argument is required?
     // CLI
-    pub hyph1:  String,             // Short form switch.
+    pub hyph1:  Option<String>,     // Short form switch.
     pub hyph2:  Option<String>,     // Long form switch.
     pub help:   Option<String>,     // Argument help text.
     pub prefs:  SyntaxPrefs,
@@ -71,15 +70,39 @@ impl Arg {
         self.cfg.name.clone()
     }
 
-    /// The argument's short name as it is written on a command line, hyphen
-    /// and all.
+    /// The argument's shortest name as it is written on a command line, hyphens
+    /// and all: the short form, else the long form, else the canonical name.
     ///
     /// This is what a message prints itself with, because the canonical name is
     /// the one it is filed under and not one a reader could type back.
     pub fn short_name(&self) -> String {
-        let mut s = self.cfg.prefs.arg_hyph1_pfx.clone();
-        s.push_str(&self.cfg.hyph1);
-        s
+        match (&self.cfg.hyph1, &self.cfg.hyph2) {
+            (Some(h1), _)       => fmt!("{}{}", self.cfg.prefs.arg_hyph1_pfx, h1),
+            (None, Some(h2))    => fmt!("{}{}", self.cfg.prefs.arg_hyph2_pfx, h2),
+            (None, None)        => self.cfg.name.clone(),
+        }
+    }
+
+    /// The argument's longest hyphenated name: the long form, else the short form, else the
+    /// canonical name.
+    pub fn long_name(&self) -> String {
+        match (&self.cfg.hyph1, &self.cfg.hyph2) {
+            (_, Some(h2))       => fmt!("{}{}", self.cfg.prefs.arg_hyph2_pfx, h2),
+            (Some(h1), None)    => fmt!("{}{}", self.cfg.prefs.arg_hyph1_pfx, h1),
+            (None, None)        => self.cfg.name.clone(),
+        }
+    }
+
+    /// Every hyphenated name the argument answers to, short form first.
+    pub fn hyphenated_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(h1) = &self.cfg.hyph1 {
+            names.push(fmt!("{}{}", self.cfg.prefs.arg_hyph1_pfx, h1));
+        }
+        if let Some(h2) = &self.cfg.hyph2 {
+            names.push(fmt!("{}{}", self.cfg.prefs.arg_hyph2_pfx, h2));
+        }
+        names
     }
 
     pub fn hyphen_check(&self, s: &str) -> Outcome<()> {
@@ -96,7 +119,7 @@ impl Arg {
     pub fn hyph1<S: Into<String>>(mut self, s: S) -> Outcome<Self> {
         let s = s.into();
         res!(self.hyphen_check(s.as_str()));
-        self.cfg.hyph1 = s;
+        self.cfg.hyph1 = Some(s);
         Ok(self)
     }
 
@@ -107,8 +130,8 @@ impl Arg {
         Ok(self)
     }
 
-    pub fn expected_vals(mut self, vals: Vec<(Kind, String)>) -> Self {
-        self.cfg.vals = vals;
+    pub fn expected_vals<V: Into<Val>>(mut self, vals: Vec<V>) -> Self {
+        self.cfg.vals = vals.into_iter().map(|v| v.into()).collect();
         self
     }
 
@@ -126,29 +149,23 @@ impl Arg {
         -> Outcome<()>
     {
         let required = self.config().reqd;
+        res!(Val::check_shape(&self.config().vals, &fmt!("argument '{}'", self.config().name)));
         // Complete possible many-to-one mappings use the Arg before it gets moved when inserted.
-        map.insert(
-            Key::Str(self.canonical_name()),
-            Recursive::Key(Key::Id(self.id)),
-        );
-        
-        let hyph1 = &self.config().hyph1;
-        let mut s = self.config().prefs.arg_hyph1_pfx.clone();
-        s.push_str(hyph1);
-        map.insert(
-            Key::Str(s),
-            Recursive::Key(Key::Id(self.id)),
-        );
-        
-        if let Some(hyph2) = &self.config().hyph2 {
-            let mut s = self.config().prefs.arg_hyph2_pfx.clone();
-            s.push_str(hyph2);
-            map.insert(
-                Key::Str(s),
-                Recursive::Key(Key::Id(self.id)),
-            );
+        // A missing short form registers nothing: it used to register a bare "-".
+        let mut keys = self.hyphenated_names();
+        keys.push(self.canonical_name());
+        for k in keys {
+            let k = Key::Str(k);
+            if let Some(Recursive::Key(Key::Id(other))) = map.get(&k) {
+                if *other != self.id {
+                    return Err(err!(
+                        "The argument '{}' would answer to '{}', which another argument \
+                        already answers to.", self.config().name, k;
+                    Input, Exists));
+                }
+            }
+            map.insert(k, Recursive::Key(Key::Id(self.id)));
         }
-        map.insert(Key::Str(self.config().name.clone()), Recursive::Key(Key::Id(self.id)));
         if required {
             rargs.push(self.canonical_name());
         }
@@ -159,9 +176,13 @@ impl Arg {
 
 impl fmt::Display for Arg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        ok!(write!(f, "'{}'", self.config().hyph1));
-        if let Some(long) = &self.config().hyph2 {
-            ok!(write!(f, ", '{}'", long));
+        let names = self.hyphenated_names();
+        if names.is_empty() {
+            ok!(write!(f, "'{}'", self.config().name));
+        }
+        for (i, name) in names.iter().enumerate() {
+            if i > 0 { ok!(write!(f, ", ")); }
+            ok!(write!(f, "'{}'", name));
         }
         Ok(())
     }
