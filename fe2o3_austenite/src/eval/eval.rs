@@ -30,13 +30,7 @@ use crate::eval::func::{
 };
 use crate::eval::import;
 use crate::eval::lib;
-use crate::eval::lib::foundations::FoundFn;
-use crate::eval::lib::{
-	datetime::DatetimeFn,
-	intro::IntroFn,
-	sym::SymFn,
-	visual::VisualFn,
-};
+use crate::eval::lib::foundations;
 use crate::eval::methods;
 use crate::eval::ops;
 use crate::eval::scope::{
@@ -46,7 +40,6 @@ use crate::eval::scope::{
 use crate::eval::select::{
 	self,
 	Selector,
-	StyleFn,
 };
 use crate::eval::styles::{
 	self,
@@ -56,20 +49,14 @@ use crate::eval::styles::{
 	Transformation,
 };
 use crate::eval::value::{
-	Alignment,
 	Angle,
 	Dict,
 	Fraction,
 	Label,
-	LineCap,
-	LineJoin,
 	Length,
 	Module,
-	Paint,
 	Ratio,
-	Type,
 	Value,
-	DashItem,
 };
 use crate::eval::Engine;
 use crate::syntax::{
@@ -468,47 +455,18 @@ fn math_shorthand(s: &str) -> &str {
 	}
 }
 
-// Type constructors: calling a type value calls these, and a constructor function's scope is its type's.
-const CONSTRUCTORS: &[(Type, NativeFunc)] = &[
-	(Type::Int,			NativeFunc::Found(FoundFn::Int)),
-	(Type::Float,		NativeFunc::Found(FoundFn::Float)),
-	(Type::Str,			NativeFunc::Found(FoundFn::Str)),
-	(Type::Bool,		NativeFunc::Found(FoundFn::Bool)),
-	(Type::Label,		NativeFunc::Found(FoundFn::Label)),
-	(Type::Regex,		NativeFunc::Found(FoundFn::Regex)),
-	(Type::Version,		NativeFunc::Found(FoundFn::Version)),
-	(Type::Bytes,		NativeFunc::Found(FoundFn::Bytes)),
-	(Type::Args,		NativeFunc::Found(FoundFn::Arguments)),
-	(Type::Type,		NativeFunc::Found(FoundFn::Type)),
-	(Type::Datetime,	NativeFunc::Datetime(DatetimeFn::Datetime)),
-	(Type::Duration,	NativeFunc::Datetime(DatetimeFn::Duration)),
-	(Type::Symbol,		NativeFunc::Sym(SymFn::Symbol)),
-	(Type::Selector,	NativeFunc::Style(StyleFn::Selector)),
-	(Type::Counter,		NativeFunc::Intro(IntroFn::Counter)),
-	(Type::State,		NativeFunc::Intro(IntroFn::State)),
-	(Type::Stroke,		NativeFunc::Visual(VisualFn::Stroke)),
-	(Type::Tiling,		NativeFunc::Visual(VisualFn::Tiling)),
-];
-
-fn constructor(t: Type) -> Option<NativeFunc> {
-	CONSTRUCTORS.iter().find(|(ty, _)| *ty == t).map(|(_, f)| *f)
-}
-
-fn constructed_type(f: NativeFunc) -> Option<Type> {
-	CONSTRUCTORS.iter().find(|(_, g)| *g == f).map(|(t, _)| *t)
-}
-
 /// A name a function value carries as a scope member: `list.item`, `assert.eq`, `str.from-unicode`.
 pub fn func_field(f: &Func, name: &str) -> Option<Func> {
 	match f {
-		Func::Element(k)	=> k.scoped(name).map(Func::Element),
-		Func::Native(NativeFunc::Found(FoundFn::Assert)) => match name {
-			"eq"	=> Some(Func::Native(NativeFunc::Found(FoundFn::AssertEq))),
-			"ne"	=> Some(Func::Native(NativeFunc::Found(FoundFn::AssertNe))),
-			_		=> None,
+		Func::Element(k)	=> match k.scoped(name) {
+			Some(e)	=> Some(Func::Element(e)),
+			None	=> lib::visual::scoped(*k, name).map(|v| Func::Native(NativeFunc::Visual(v))),
 		},
-		Func::Native(n)		=> constructed_type(*n)
-			.and_then(|t| methods::type_method(t, name)).map(Func::Native),
+		Func::Native(n)		=> match foundations::func_scope(f, name) {
+			Some(Value::Func(g))	=> Some(g),
+			_						=> foundations::constructed_type(*n)
+				.and_then(|t| methods::type_method(t, name)).map(Func::Native),
+		},
 		Func::With(w)		=> func_field(&w.0, name),
 		Func::Closure(_)	=> None,
 	}
@@ -1927,7 +1885,7 @@ impl<'a> Vm<'a> {
 	{
 		match callee {
 			Value::Func(f)	=> self.engine.call_func(&f, args),
-			Value::Type(t)	=> match constructor(t) {
+			Value::Type(t)	=> match foundations::constructor(t) {
 				Some(f)	=> self.engine.call_func(&Func::Native(f), args),
 				None	=> Err(self.error(callee_node.span(), fmt!("type {} is not callable", t.name()))),
 			},
@@ -1969,11 +1927,9 @@ impl<'a> Vm<'a> {
 				Some(m)	=> Some(Value::Symbol(m)),
 				None	=> return Err(self.error(span, "unknown symbol modifier")),
 			},
-			Value::Version(parts) => match name {
-				"major"	=> Some(Value::Int(parts.first().copied().unwrap_or(0) as i64)),
-				"minor"	=> Some(Value::Int(parts.get(1).copied().unwrap_or(0) as i64)),
-				"patch"	=> Some(Value::Int(parts.get(2).copied().unwrap_or(0) as i64)),
-				_		=> None,
+			Value::Version(_)	=> match foundations::field(&v, name) {
+				Some(x)	=> Some(x),
+				None	=> return Err(self.error(span, "unknown version component")),
 			},
 			Value::Dict(d)		=> match d.get(name) {
 				Some(v)	=> Some(v.clone()),
@@ -1984,9 +1940,9 @@ impl<'a> Vm<'a> {
 				None	=> return Err(self.error(span, fmt!(
 					"{} does not have field \"{}\"", methods::content_name(c), name))),
 			},
-			Value::Type(t)		=> match methods::type_method(*t, name) {
-				Some(f)	=> Some(Value::Func(Func::Native(f))),
-				None	=> return Err(self.error(span, fmt!("type {} does not contain field `{}`", t.name(), name))),
+			Value::Type(t)		=> match foundations::type_scope(*t, name) {
+				Some(x)	=> Some(x),
+				None	=> return Err(self.error(span, fmt!("type {} does not contain field `{}`", t.long_name(), name))),
 			},
 			Value::Func(f)		=> match func_field(f, name) {
 				Some(g)	=> Some(Value::Func(g)),
@@ -1999,55 +1955,8 @@ impl<'a> Vm<'a> {
 				Some(v)	=> Some(v.clone()),
 				None	=> return Err(self.error(span, fmt!("module `{}` does not contain `{}`", m.name, name))),
 			},
-			Value::Length(l)	=> match name {
-				"abs"	=> Some(Value::Length(Length::pt(l.abs))),
-				"em"	=> Some(Value::Float(l.em)),
-				_		=> None,
-			},
-			Value::Relative(r)	=> match name {
-				"ratio"		=> Some(Value::Ratio(r.rel)),
-				"length"	=> Some(Value::Length(r.abs)),
-				_			=> None,
-			},
-			Value::Alignment(a)	=> match name {
-				"x"	=> Some(a.x.map(|x| Value::Alignment(Alignment { x: Some(x), y: None })).unwrap_or(Value::None)),
-				"y"	=> Some(a.y.map(|y| Value::Alignment(Alignment { x: None, y: Some(y) })).unwrap_or(Value::None)),
-				_	=> None,
-			},
-			Value::Stroke(s)	=> match name {
-				"paint"			=> Some(match &s.paint {
-					Some(Paint::Color(c))		=> Value::Color(*c),
-					Some(Paint::Gradient(g))	=> Value::Gradient(g.clone()),
-					Some(Paint::Tiling(t))		=> Value::Tiling(t.clone()),
-					None						=> Value::Auto,
-				}),
-				"thickness"		=> Some(s.thickness.map(Value::Length).unwrap_or(Value::Auto)),
-				"cap"			=> Some(s.cap.map(|c| Value::str(match c {
-					LineCap::Butt	=> "butt",
-					LineCap::Round	=> "round",
-					LineCap::Square	=> "square",
-				})).unwrap_or(Value::Auto)),
-				"join"			=> Some(s.join.map(|j| Value::str(match j {
-					LineJoin::Miter	=> "miter",
-					LineJoin::Round	=> "round",
-					LineJoin::Bevel	=> "bevel",
-				})).unwrap_or(Value::Auto)),
-				"dash"			=> Some(match &s.dash {
-					None			=> Value::Auto,
-					Some(None)		=> Value::None,
-					Some(Some(d))	=> {
-						let mut dd = Dict::new();
-						dd.insert("array", Value::array(d.array.iter().map(|i| match i {
-							DashItem::Len(l)	=> Value::Length(*l),
-							DashItem::Dot		=> Value::str("dot"),
-						}).collect()));
-						dd.insert("phase", Value::Length(d.phase));
-						Value::dict(dd)
-					}
-				}),
-				"miter-limit"	=> Some(s.miter_limit.map(Value::Float).unwrap_or(Value::Auto)),
-				_				=> None,
-			},
+			Value::Length(_) | Value::Relative(_) | Value::Alignment(_) | Value::Stroke(_)
+								=> foundations::field(&v, name),
 			_ => return Err(self.error(span, fmt!("cannot access fields on type {}", ty.long_name()))),
 		};
 		match found {
