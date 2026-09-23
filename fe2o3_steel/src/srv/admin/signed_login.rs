@@ -14,10 +14,11 @@
 //!
 //! # Replay protection
 //!
-//! The handler owns a small [`NonceTracker`] that rejects duplicate
-//! `(signer_id, nonce)` pairs within the freshness window. The
-//! tracker evicts expired entries lazily on each insert, so no
-//! background thread is required. The window is
+//! The handler owns a small
+//! [`NonceTracker`](oxedyne_fe2o3_net::guard::nonce::NonceTracker) that rejects duplicate
+//! `(signer_id, nonce)` pairs within the freshness window, keyed by
+//! the signer. The tracker evicts expired entries lazily on each
+//! insert, so no background thread is required. The window is
 //! [`SIGNED_LOGIN_FRESHNESS_SECS`] (120 s by default); a command
 //! whose timestamp is outside this window is rejected up front
 //! by [`SignedCommand::verify_fresh`].
@@ -53,13 +54,10 @@ use oxedyne_fe2o3_net::http::{
     status::HttpStatus,
 };
 
-use std::{
-    collections::HashMap,
-    time::{
-        Duration,
-        SystemTime,
-        UNIX_EPOCH,
-    },
+use std::time::{
+    Duration,
+    SystemTime,
+    UNIX_EPOCH,
 };
 
 
@@ -69,55 +67,6 @@ pub const CMD_ADMIN_LOGIN:             &str = "admin_login";
 // The signed-login session does not auto-renew: the caller presents a new
 // SignedCommand once it expires.
 pub const SIGNED_LOGIN_SESSION_SECS:   u64 = 3600;
-
-
-/// Records the timestamp of every inbound `(signer_id, nonce)` pair and rejects
-/// a re-presentation of the same pair, lazily evicting entries older than
-/// `window` on each insert. Sized for the admin-login rate, not a
-/// general-purpose rate limiter.
-#[derive(Debug)]
-pub struct NonceTracker {
-    seen:   HashMap<(Vec<u8>, [u8; 32]), u64>,
-    window: Duration,
-}
-
-impl NonceTracker {
-    pub fn new(window: Duration) -> Self {
-        Self {
-            seen:   HashMap::new(),
-            window,
-        }
-    }
-
-    pub fn record(
-        &mut self,
-        signer_id:  &[u8],
-        nonce:      &[u8; 32],
-        now:        u64,
-    )
-        -> Outcome<()>
-    {
-        self.evict_expired(now);
-        let key = (signer_id.to_vec(), *nonce);
-        if self.seen.contains_key(&key) {
-            return Err(err!(
-                "Signed-login nonce already seen for this signer inside \
-                the {} s replay window.", self.window.as_secs();
-                Invalid, Security, Duplicate));
-        }
-        self.seen.insert(key, now);
-        Ok(())
-    }
-
-    pub fn len(&self) -> usize {
-        self.seen.len()
-    }
-
-    fn evict_expired(&mut self, now: u64) {
-        let window_secs = self.window.as_secs();
-        self.seen.retain(|_, ts| now.saturating_sub(*ts) <= window_secs);
-    }
-}
 
 
 /// Builds the challenge response, a JDAT map carrying:
@@ -305,41 +254,64 @@ pub fn audit_signed_login(outcome: &SignedLoginOutcome) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::srv::admin::{
+        guard,
+        host_sampler::HostSampler,
+        traffic::TrafficRecorder,
+    };
 
-    #[test]
-    fn nonce_tracker_accepts_distinct_and_rejects_repeat() -> Outcome<()> {
-        let mut t = NonceTracker::new(Duration::from_secs(60));
-        let signer = b"alice".to_vec();
-        let n1 = [0x11u8; 32];
-        let n2 = [0x22u8; 32];
-        res!(t.record(&signer, &n1, 1000));
-        res!(t.record(&signer, &n2, 1000));
-        assert!(t.record(&signer, &n1, 1000).is_err(),
-            "re-presenting the same nonce inside the window must fail");
-        Ok(())
-    }
+    use oxedyne_fe2o3_crypto::{
+        keystore::Wallet,
+        sign::SignatureScheme,
+    };
+    use oxedyne_fe2o3_iop_crypto::keys::KeyManager;
 
-    #[test]
-    fn nonce_tracker_evicts_after_window() -> Outcome<()> {
-        let mut t = NonceTracker::new(Duration::from_secs(60));
-        let signer = b"alice".to_vec();
-        let n = [0x33u8; 32];
-        res!(t.record(&signer, &n, 1000));
-        // Same signer + nonce, but 61 seconds later: eviction kicks
-        // in on the insert and the record succeeds.
-        res!(t.record(&signer, &n, 1061));
-        Ok(())
-    }
+    use std::{
+        path::PathBuf,
+        sync::{
+            Arc,
+            RwLock,
+        },
+    };
 
+    /// The replay guard is wired into the signed login, wherever the tracker
+    /// lives: one signed envelope logs in once, and its second showing inside
+    /// the window is refused.
     #[test]
-    fn nonce_tracker_scopes_by_signer() -> Outcome<()> {
-        let mut t = NonceTracker::new(Duration::from_secs(60));
-        let a = b"alice".to_vec();
-        let b = b"bob".to_vec();
-        let n = [0x44u8; 32];
-        res!(t.record(&a, &n, 1000));
-        // Different signer, same nonce -- allowed.
-        res!(t.record(&b, &n, 1000));
+    fn test_a_replayed_signed_login_is_refused_00() -> Outcome<()> {
+        let key = SignatureScheme::new_ed25519();
+        let public = match res!(key.get_public_key()) {
+            Some(pk) => pk.to_vec(),
+            None => return Err(err!("A new Ed25519 key has no public half."; Test, Missing)),
+        };
+        let state = res!(AdminState::new(
+            Arc::new(RwLock::new(Wallet::default())),
+            PathBuf::from("./wallet.jdat"),
+            Some([0u8; 32].to_vec()),
+            0,      // no databases
+            None,   // no alerter
+            TrafficRecorder::new_shared(0),
+            HostSampler::new_shared(),
+            res!(guard::new_shared()),
+            res!(guard::new_shared()),
+            vec![AdminKey {
+                name:       "ops".to_string(),
+                public_key: public.clone(),
+                scheme:     "Ed25519".to_string(),
+                scopes:     vec![SCOPE_WILDCARD.to_string()],
+            }],
+            None,
+        ));
+        let env = res!(SignedCommand::sign(public, CMD_ADMIN_LOGIN, Dat::Empty, &key));
+        let body = res!(res!(env.to_dat()).as_bytes());
+        match verify_signed_login(&state, &body) {
+            SignedLoginOutcome::Ok(principal) => req!(principal.name, "ops".to_string()),
+            other => return Err(err!("A fresh signed login earned {:?}.", other; Test)),
+        }
+        match verify_signed_login(&state, &body) {
+            SignedLoginOutcome::ReplayedNonce => (),
+            other => return Err(err!("The same signed login shown twice earned {:?}.", other; Test)),
+        }
         Ok(())
     }
 }
