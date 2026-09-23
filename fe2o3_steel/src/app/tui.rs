@@ -274,6 +274,8 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
     let wallet_path = Path::new("./").join(constant::WALLET_NAME);
     let (wallet, db_default_enc_key, unlocked_admin_name, unlocked_admin_scopes) =
     if wallet_path.is_file() {
+        // Tighten a wallet that predates `save_secret` before loading it.
+        res!(core_file::restrict_secret(&wallet_path));
         let wallet = res!(Wallet::load(
             wallet_path,
             Some(DecoderConfig::<(), ()>::default()),

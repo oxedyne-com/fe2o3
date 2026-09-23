@@ -32,7 +32,6 @@ use std::{
     collections::HashMap,
     fs::{
         self,
-        create_dir_all,
         File,
     },
     io::{
@@ -609,7 +608,8 @@ impl Certificate {
                 "Could not get parent directory from {:?}.", cert_path;
                 Path)),
         };
-        res!(create_dir_all(dir_path));
+        // Key directory: 0700, not the default create mode.
+        res!(core_file::create_secret_dir(dir_path));
 
         // The private key: 0600 whatever the umask, via the secret path
         // rather than `write_to_file`, which the public chain below keeps.

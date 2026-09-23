@@ -57,10 +57,10 @@ pub struct AcmeDiskCache {
 
 impl AcmeDiskCache {
 
-    /// Creates the root directory if it is not already there.
+    /// Creates the root directory, at mode 0700, if it is not already there.
     pub fn new<P: AsRef<Path>>(root: P) -> Outcome<Self> {
         let root = root.as_ref().to_path_buf();
-        if let Err(e) = fs::create_dir_all(&root) {
+        if let Err(e) = core_file::create_secret_dir(&root) {
             return Err(err!(e,
                 "Failed to create ACME cache directory {:?}.", root;
                 File, IO, Init));
@@ -89,6 +89,9 @@ impl AcmeDiskCache {
         if !path.exists() {
             return Ok(None);
         }
+        // Tighten a key that predates `save_secret`, or that arrived at a
+        // wider mode some other way, before it is ever read.
+        res!(core_file::restrict_secret(&path));
         let bytes = match fs::read(&path) {
             Ok(b) => b,
             Err(e) => return Err(err!(e,
@@ -121,6 +124,9 @@ impl AcmeDiskCache {
                 "Failed to read cached certificate at {:?}.", cert_path;
                 File, IO, Read)),
         };
+        // Tighten the private key before reading it; the certificate above
+        // stays untouched, since it is public.
+        res!(core_file::restrict_secret(&key_path));
         let key = match fs::read(&key_path) {
             Ok(b) => b,
             Err(e) => return Err(err!(e,
@@ -410,11 +416,23 @@ mod tests {
                 Test, Mismatch));
         }
 
+        // cert.pem must end up at whatever mode an ordinary, non-secret write
+        // gets in this environment -- not specifically 0600 -- since a strict
+        // umask (0077, as under this fleet's `UMask=` hardening) puts a plain
+        // `fs::write` at 0600 too. Comparing against a control file written
+        // the same ordinary way, rather than asserting `!= 0o600` outright,
+        // is what actually distinguishes "not specially restricted" from
+        // "happens to match the secret mode under this umask".
+        let control_path = scratch.path.join("control.pem");
+        res!(fs::write(&control_path, b"not a secret"));
+        let control_mode = res!(fs::metadata(&control_path)).permissions().mode() & 0o777;
+
         let cert_mode = res!(fs::metadata(cache.certificate_path()))
             .permissions().mode() & 0o777;
-        if cert_mode == 0o600 {
+        if cert_mode != control_mode {
             return Err(err!(
-                "cert.pem also ended at 0600; only key material should be restricted.";
+                "cert.pem saved at mode {:o}, but an ordinary write here lands at {:o}: \
+                cert.pem is being restricted like a secret.", cert_mode, control_mode;
                 Test, Mismatch));
         }
         Ok(())
