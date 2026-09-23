@@ -60,6 +60,14 @@ pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
 /// earlier one field by field, as in Typst.
 pub fn document_info(src: &str) -> crate::doc::DocInfo {
 	let mut info = crate::doc::DocInfo::default();
+	fold_document_info(src, &mut info);
+	info
+}
+
+/// Applies each top-level `#set document(...)` of `src` to `info` in source order, field by field, so a
+/// caller walking a document's files in document order -- a root, then each file it includes where the
+/// include stands -- builds the dictionary Typst builds.
+pub fn fold_document_info(src: &str, info: &mut crate::doc::DocInfo) {
 	for (target, args) in top_level_sets(src) {
 		if target != "document" {
 			continue;
@@ -76,7 +84,11 @@ pub fn document_info(src: &str) -> crate::doc::DocInfo {
 			}
 		}
 	}
-	info
+}
+
+/// Is this captured construct a `#set document(...)`?
+pub fn sets_document(buf: &str) -> bool {
+	top_level_sets(buf).first().map_or(false, |(target, _)| target == "document")
 }
 
 /// The [`ThemePatch`] a source's own top-level declarations lower to, without applying it: a `#show:

@@ -2714,7 +2714,7 @@ fn dispatch_capture(
 			let span = Span::new(cap.start, cap.start);
 			match place_float_call(&cap.buf) {
 				Some((floating, clearance, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+					if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
 						skips.merge(sub);
 						// A float is laid out as one unit, so a page or column break inside it cannot be
 						// honoured; it is refused visibly rather than dropped.
@@ -2735,7 +2735,7 @@ fn dispatch_capture(
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
 					skips.merge(sub);
 					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -2755,7 +2755,7 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
 					skips.merge(sub);
 					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
 					// keep unit -- so it is refused visibly rather than dropped silently at render (see
@@ -2777,7 +2777,13 @@ fn dispatch_capture(
 			// applying no argument, or naming an unrecognised or unconvertible one -- is recorded as a
 			// refusal (H2), so it is visible rather than a silent no-op; a `#set` that fully lowers, and a
 			// `#show: doc.with(...)`, record nothing.
-			if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
+			//
+			// A `#set document` is applied from a file's own top level alone, where the assembler folds it into
+			// the Info dictionary. Inside a container Typst refuses one, and inside an expanded binding it
+			// would reach no dictionary here, so in any body it is refused rather than passed over.
+			if binds.body && crate::lang::set::sets_document(&cap.buf) {
+				skips.record("#set document (inside a body, where it is not applied)", Span::new(cap.start, cap.start));
+			} else if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
 				skips.record(&name, Span::new(cap.start, cap.start));
 			}
 		},
@@ -2806,7 +2812,7 @@ fn dispatch_capture(
 			};
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+					if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
 						skips.merge(sub);
 						// A `#pagebreak()` nested in a furniture callout body cannot be honoured -- the box is one
 						// keep unit -- so it is refused visibly rather than dropped silently at render.
@@ -5928,5 +5934,23 @@ bound\".\n";
 		assert!(state.in_literal(), "a shorter run inside a four-backtick block is its text");
 		scan_brackets("````\n", &mut state);
 		assert!(!state.in_literal(), "the matching run closes it");
+	}
+
+	/// A `#set document` is applied from a file's own top level alone: one re-read from a container's body
+	/// or from an expanded binding is refused, while one at the top level refuses nothing.
+	#[test]
+	fn a_set_document_in_a_body_is_refused() -> Outcome<()> {
+		let named = |skips: &Refusals| skips.sites().iter().any(|s| s.name.starts_with("#set document"));
+		let (_, skips) = res!(document_with_refusals("#set document(title: \"Top\")\n\nText.\n"));
+		assert!(!named(&skips), "a top-level one is applied: {:?}", skips.sites());
+		let (_, skips) = res!(document_with_refusals("#columns(2)[\n#set document(title: \"Cols\")\nText.\n]\n"));
+		assert!(named(&skips), "a container's is refused: {:?}", skips.sites());
+		let mut cfns = crate::lang::rules::ContentFns::new();
+		crate::lang::rules::collect_content_fns("#let intro = [\n#set document(title: \"Bound\")\nHello.\n]\n", &mut cfns);
+		assert!(cfns.contains_key("intro"), "the binding is collected");
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let (_, skips) = res!(document_with_templates("#intro\n", crate::lang::rules::Bindings::new(&tfns, &cfns)));
+		assert!(named(&skips), "an expanded binding's is refused: {:?}", skips.sites());
+		Ok(())
 	}
 }

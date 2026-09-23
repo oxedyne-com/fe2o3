@@ -1334,25 +1334,29 @@ pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
 /// name already on it is a cycle (`#let a = [#a]`, or the mutual `#let a = [#b]`/`#let b = [#a]`) and is
 /// refused at once -- so a cycle recurses only to its own length, never until the native stack or the wasm
 /// shadow stack overflows. Its length also caps a pathological non-cyclic chain (see the reader's own cap).
+///
+/// `body` is set while a body is re-read -- a container's, a float's or an expanded binding's -- rather than
+/// a file's own top level, where alone a `#set document` is applied.
 #[derive(Clone, Copy)]
 pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
 	pub cfns:	&'a ContentFns,
 	pub sfns:	&'a ScalarFns,
 	pub active:	&'b [String],
+	pub body:	bool,
 }
 
 impl<'a> Bindings<'a, 'static> {
 	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
 	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[] }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[], body: false }
 	}
 
 	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
 	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
 	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
-		Self { tfns, cfns, sfns, active: &[] }
+		Self { tfns, cfns, sfns, active: &[], body: false }
 	}
 }
 
@@ -1369,7 +1373,12 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active }
+		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active, body: true }
+	}
+
+	/// The same bindings for re-reading a container's or a float's body.
+	pub fn in_body(self) -> Self {
+		Bindings { body: true, ..self }
 	}
 }
 

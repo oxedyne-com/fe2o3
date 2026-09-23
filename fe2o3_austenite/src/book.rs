@@ -25,6 +25,7 @@ use crate::bib::{
 };
 use crate::doc::{
 	Block,
+	DocInfo,
 	FrontMatter,
 	HeadingStyle,
 	Segment,
@@ -88,6 +89,7 @@ pub struct BookSpec {
 	// The constructs the reader skipped across every chapter, merged into one tally, so the binary reports
 	// a book or doc compile's skipped constructs on the same terse line a lone file already prints.
 	pub skips:		lang::Refusals,
+	pub doc_info:	DocInfo,	// the Info dictionary every file's own top-level `#set document` builds, in document order
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -355,7 +357,8 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	let binds = scope.bindings();
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
+	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
+	let Gathered { skips: mut skips, doc_info } = got;
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
@@ -386,7 +389,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// but uses no glossary or index term emits neither section, matching the template's own gate.
 	append_flag_back_matter(root_src, &mut blocks);
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips, doc_info })
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -462,7 +465,8 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	let binds = scope.bindings();
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
+	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
+	let Gathered { skips: mut skips, doc_info } = got;
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
@@ -486,7 +490,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 
 	// A doc tree names its bibliography, glossary and index through raw Typst calls the reader skips, not
 	// the book's `meta-data.bibliography` field, so no reference back matter is assembled here.
-	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips, doc_info })
 }
 
 /// Which level-1 opener idiom a doc template uses, read from its `show heading` block. A grid template
@@ -1930,12 +1934,21 @@ fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
 /// `#if <var> == "..."` include guard in a chapter can be resolved against the same scalars the config
 /// binds -- `media` above all -- and only the taken branch's includes followed. See [`assemble_into`].
 pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::rules::Bindings, config: &str)
-	-> Outcome<(Vec<Block>, lang::Refusals)>
+	-> Outcome<(Vec<Block>, Gathered)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
-	let mut skips = lang::Refusals::default();
-	res!(assemble_into(root_src, root_dir, root_path, binds, config, 0, &mut blocks, &mut skips));
-	Ok((blocks, skips))
+	let mut got = Gathered::default();
+	res!(assemble_into(root_src, root_dir, root_path, binds, config, 0, &mut blocks, &mut got));
+	Ok((blocks, got))
+}
+
+/// What the include walk gathers beside the blocks, in document order: every site not set as written, and
+/// the Info dictionary each file's own top-level `#set document` builds where the file stands -- a root's
+/// rules before an `#include`, then the included file's, then the root's after it -- as Typst applies them.
+#[derive(Default)]
+pub struct Gathered {
+	pub skips:		lang::Refusals,
+	pub doc_info:	DocInfo,
 }
 
 /// The recursive body of [`assemble`]. `dir` is the directory `src` was itself read from -- the book
@@ -1952,7 +1965,7 @@ fn assemble_into(
 	config:	&str,
 	depth:	u32,
 	blocks:	&mut Vec<Block>,
-	skips:	&mut lang::Refusals,
+	got:	&mut Gathered,
 )
 	-> Outcome<()>
 {
@@ -1989,7 +2002,7 @@ fn assemble_into(
 		// branch -- is not the guard's own and falls through below, to the generic per-line scan and then
 		// to ordinary content. A lone `]` with no guard open at all is likewise ordinary content.
 		if marker == "]" && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			guards.pop();
 			continue;
 		}
@@ -1997,7 +2010,7 @@ fn assemble_into(
 		// branch. Its `]` closes the content bracket and its `[` reopens it, so the depth is unchanged and
 		// the state is left as it stands.
 		if is_guard_else(marker) && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			if let Some(top) = guards.last_mut() {
 				top.in_else = true;
 			}
@@ -2009,7 +2022,7 @@ fn assemble_into(
 		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
 		// never silently followed nor leaked.
 		if let Some(cond) = guard_open(marker) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			let parent_active = guards.iter().all(|g| g.emits());
 			let (live, then_taken) = if !parent_active {
 				(false, false)
@@ -2017,8 +2030,8 @@ fn assemble_into(
 				match eval_guard(cond, config, src) {
 					Some(taken)	=> (true, taken),
 					None		=> {
-						skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), span);
-						skips.tag_file(&label);
+						got.skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), span);
+						got.skips.tag_file(&label);
 						(false, false)
 					},
 				}
@@ -2035,9 +2048,9 @@ fn assemble_into(
 		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
 		// space is left to the reader's own code-skip path.
 		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
-			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
-			skips.tag_file(&label);
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
+			got.skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
+			got.skips.tag_file(&label);
 			let mut state = lang::parse::SkipState::new();
 			lang::parse::scan_brackets(marker, &mut state);
 			if state.has_open_bracket() {
@@ -2058,11 +2071,11 @@ fn assemble_into(
 			lang::parse::scan_brackets(line, &mut top.state);
 			if !top.state.has_open_bracket() {
 				let refused = top.refused;
-				res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				guards.pop();
 				if !refused {
-					skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
-					skips.tag_file(&label);
+					got.skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
+					got.skips.tag_file(&label);
 				}
 				continue;
 			}
@@ -2073,12 +2086,12 @@ fn assemble_into(
 			continue;
 		}
 		if let Some(rest) = t.strip_prefix("#include") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
-					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
+					got.skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
 						span);
-					skips.tag_file(&label);
+					got.skips.tag_file(&label);
 				},
 				Some(rel) => {
 					let inc_path = dir.join(&rel);
@@ -2096,9 +2109,8 @@ fn assemble_into(
 					};
 					let inc_dir = inc_path.parent().unwrap_or(dir);
 					let mut chap_blocks: Vec<Block> = Vec::new();
-					let mut chap_skips = lang::Refusals::default();
 					res!(assemble_into(&inc_src, inc_dir, &inc_path, binds, config, depth + 1,
-						&mut chap_blocks, &mut chap_skips));
+						&mut chap_blocks, got));
 					// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
 					// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
@@ -2110,17 +2122,16 @@ fn assemble_into(
 					} else {
 						blocks.push(Block::Scoped { patch: chap_patch, blocks: chap_blocks });
 					}
-					skips.merge(chap_skips);
 				},
 				None => {
 					// A malformed `#include` with no quoted path: reported, not left to fall through as a
 					// literal line of body text.
-					skips.record("#include", span);
-					skips.tag_file(&label);
+					got.skips.record("#include", span);
+					got.skips.tag_file(&label);
 				},
 			}
 		} else if t.starts_with("#part-page") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
 			// its number across a part boundary and a part never appears in a running head.
@@ -2137,13 +2148,13 @@ fn assemble_into(
 	let eof = crate::ir::Span::new(byte, byte);
 	for g in &guards {
 		if !g.refused {
-			skips.record("#if guard never closed (end of file)", eof);
-			skips.tag_file(&label);
+			got.skips.record("#if guard never closed (end of file)", eof);
+			got.skips.tag_file(&label);
 		}
 	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
 	// include) closes with, if any.
-	res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+	res!(flush_inline(&mut buf, blocks, got, &label, binds));
 	Ok(())
 }
 
@@ -2169,14 +2180,14 @@ impl Chunk {
 }
 
 /// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips
-/// (tagged with `file`, the root's own path -- this buffer is always the root's inline text, never a
-/// chapter's, which is tagged separately where it is read), then clears the buffer. A buffer holding
+/// (tagged with `file`, the path of the file the buffer was gathered from), folds its top-level `#set
+/// document` rules into the Info dictionary where they stand, then clears the buffer. A buffer holding
 /// only code and whitespace yields no blocks -- a book root's template call reduces to nothing, so the
 /// book path is unchanged.
 fn flush_inline(
 	buf:	&mut Chunk,
 	blocks:	&mut Vec<Block>,
-	skips:	&mut lang::Refusals,
+	got:	&mut Gathered,
 	file:	&str,
 	binds:	lang::rules::Bindings,
 )
@@ -2187,7 +2198,8 @@ fn flush_inline(
 		s.shift(buf.at);
 		s.tag_file(file);
 		blocks.extend(b);
-		skips.merge(s);
+		got.skips.merge(s);
+		lang::set::fold_document_info(&buf.text, &mut got.doc_info);
 	}
 	buf.text.clear();
 	Ok(())
@@ -2771,11 +2783,11 @@ mod tests {
 
 		// An unsupported guard form is refused and reported, not followed nor leaked.
 		let odd = "#if media > 3 [\nSomething.\n]\n";
-		let (blocks, skips) = res!(assemble(odd, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(odd, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(!body.contains("Something"), "a refused guard follows neither branch: {}", body);
-		assert!(skips.report().map(|r| r.contains("#if")).unwrap_or(false),
-			"a refused guard form must be reported: {:?}", skips.report());
+		assert!(got.skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a refused guard form must be reported: {:?}", got.skips.report());
 		Ok(())
 	}
 
@@ -2787,7 +2799,7 @@ mod tests {
 	fn if_guard_bracket_extent_survives_an_inner_content_closer() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "#let media = \"ebook\"\n\n#if media == \"ebook\" [\nEbook lead-in with an aside: #emph[\nspanning more than one line\n]\nand the branch continues here.\n] else [\nPrint branch text.\n]\n\nTail paragraph.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Ebook lead-in") && body.contains("spanning more than one line")
 			&& body.contains("and the branch continues here"),
@@ -2797,8 +2809,8 @@ mod tests {
 		assert!(!body.contains("] else [") && !body.contains("#if "),
 			"no guard marker line may leak as prose: {}", body);
 		// The reader's own `#let` skip is expected and unrelated; the guard itself must report nothing.
-		assert!(!skips.report().map(|r| r.contains("#if")).unwrap_or(false),
-			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", skips.report());
+		assert!(!got.skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", got.skips.report());
 		Ok(())
 	}
 
@@ -2810,13 +2822,13 @@ mod tests {
 	fn if_brace_bodied_form_is_refused_as_one_block_not_leaked() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "Intro.\n\n#if media == \"ebook\" {\n  let x = 1\n} else {\n  let x = 2\n}\n\nTail.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Intro") && body.contains("Tail"), "prose around the guard must survive: {}", body);
 		assert!(!body.contains("let x") && !body.contains("} else {"),
 			"the brace-bodied guard's body and its else divider must not leak as prose: {}", body);
-		assert_eq!(skips.total(), 1,
-			"exactly one refusal for the whole brace-bodied guard, not one per leaked line: {:?}", skips.sites());
+		assert_eq!(got.skips.total(), 1,
+			"exactly one refusal for the whole brace-bodied guard, not one per leaked line: {:?}", got.skips.sites());
 		Ok(())
 	}
 

@@ -66,7 +66,7 @@ pub struct Assembled {
 	pub faces:		FaceResolver,
 	pub front:		Option<FrontMatter>,
 	pub bib:		Option<Bibliography>,
-	pub doc_info:	DocInfo,	// the Info dictionary, from the root's own `#set document(...)`
+	pub doc_info:	DocInfo,	// the Info dictionary, from each file's own top-level `#set document(...)`
 }
 
 /// The resolved output of a compile: the decorated, mirror-shifted pages with their ledger and pass count,
@@ -101,8 +101,6 @@ where
 		Err(e)	=> return Err(err!(e,
 			"Could not read the source file {:?}.", main_path; File, Read)),
 	};
-	// Both paths read the Info dictionary from the root file alone.
-	let doc_info = crate::lang::set::document_info(&src);
 
 	// A figure's `/assets/...` image path is root-relative in Typst, not filesystem-absolute; the image
 	// loader resolves it against this directory and, failing that, its ancestors, so a chapter compiled on
@@ -129,7 +127,8 @@ where
 			faces:	spec.faces,
 			front:	Some(spec.front),
 			bib:	spec.bib,
-			doc_info,
+			// Folded during assembly, from the root and every file it includes, where each stands.
+			doc_info:	spec.doc_info,
 		};
 		return Ok((assembled, spec.skips, skip_line));
 	}
@@ -195,7 +194,7 @@ where
 		faces,
 		front:	None,
 		bib,
-		doc_info,
+		doc_info:	crate::lang::set::document_info(&src),
 	};
 	Ok((assembled, refusals, skip_line))
 }

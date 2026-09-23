@@ -41,6 +41,59 @@ fn compile_pdf(src: &str) -> Outcome<Vec<u8>> {
 	compile::emit_pdf(&mut out, &rendered.heads, &rendered.doc_info)
 }
 
+/// Compiles a project of several sources, rooted at the first, as `compile_pdf` compiles a lone one.
+fn compile_project(files: &[(&str, &str)]) -> Outcome<Vec<u8>> {
+	let _turn = VFS.lock().unwrap_or_else(|p| p.into_inner());
+	let main = match files.first() {
+		Some((path, _))	=> PathBuf::from(path),
+		None			=> return Err(err!("A project needs a root source."; Test, Missing)),
+	};
+	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	for (path, text) in files {
+		map.insert(PathBuf::from(path), text.as_bytes().to_vec());
+	}
+	res!(vfs::install(map));
+	let set		= Arc::new(res!(fonts::libertinus()));
+	let result	= compile::assemble(&main, || Ok(set.clone()))
+		.and_then(|(a, _, _)| compile::author_and_run(a));
+	let _ = vfs::clear();
+	let rendered = res!(result);
+	let mut out = rendered.out;
+	compile::emit_pdf(&mut out, &rendered.heads, &rendered.doc_info)
+}
+
+/// Typst's own Info fields for the project `files`, written by their file names into a scratch directory
+/// of their own and compiled from the first, or `None` when no `typst` is installed to ask.
+fn typst_project_info(files: &[(&str, &str)], name: &str) -> Outcome<Option<BTreeMap<String, String>>> {
+	let dir = scratch(&fmt!("pdf_info_{}", name));
+	res!(std::fs::create_dir_all(&dir));
+	let mut root: Option<PathBuf> = None;
+	for (path, text) in files {
+		let file = match Path::new(path).file_name() {
+			Some(f)	=> dir.join(f),
+			None	=> return Err(err!("{:?} names no file.", path; Test, Invalid)),
+		};
+		res!(std::fs::write(&file, text));
+		root.get_or_insert(file);
+	}
+	let root = match root {
+		Some(r)	=> r,
+		None	=> return Err(err!("A project needs a root source."; Test, Missing)),
+	};
+	let pdf = dir.join("typst.pdf");
+	let out = match Command::new("typst").arg("compile").arg(&root).arg(&pdf).output() {
+		Ok(o)	=> o,
+		Err(_)	=> {
+			eprintln!("SKIP: `typst` is not installed, so {} is not compared with it.", name);
+			return Ok(None);
+		},
+	};
+	if !out.status.success() {
+		return Err(err!("typst refused {}: {}", name, String::from_utf8_lossy(&out.stderr); Test));
+	}
+	Ok(Some(res!(info_of(&pdf))))
+}
+
 fn scratch(name: &str) -> PathBuf {
 	PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name)
 }
@@ -127,6 +180,30 @@ fn a_shown_or_commented_set_document_writes_no_info() -> Outcome<()> {
 	assert!(METADATA.iter().all(|k| !ours.contains_key(*k)), "no field was set: {:?}", ours);
 	if let Some(theirs) = res!(typst_info(src, "shown")) {
 		assert!(METADATA.iter().all(|k| !theirs.contains_key(*k)), "typst sets none either: {:?}", theirs);
+	}
+	Ok(())
+}
+
+/// An included file's own top-level `#set document` is applied where the include stands, between the root's
+/// rules before and after it, field by field, as Typst applies it.
+#[test]
+fn an_included_files_set_document_is_applied_where_it_stands() -> Outcome<()> {
+	let files = [
+		("/doc/main.typ", "#set document(title: \"Root Title\", author: \"Root Author\")\n= H\n\nBody.\n\n\
+			#include \"ch1.typ\"\n\n#set document(keywords: \"after\")\n"),
+		("/doc/ch1.typ", "#set document(title: \"From Chapter\")\n== Sub\n\nText.\n"),
+	];
+	let pdf = scratch("pdf_info_included.pdf");
+	res!(std::fs::write(&pdf, res!(compile_project(&files))));
+	let ours = res!(info_of(&pdf));
+	let want = [("Title", "From Chapter"), ("Author", "Root Author"), ("Keywords", "after")];
+	for (key, value) in want {
+		assert_eq!(ours.get(key).map(|s| s.as_str()), Some(value), "{}: {:?}", key, ours);
+	}
+	if let Some(theirs) = res!(typst_project_info(&files, "included")) {
+		for key in METADATA {
+			assert_eq!(ours.get(key), theirs.get(key), "{} (ours {:?}, typst {:?})", key, ours, theirs);
+		}
 	}
 	Ok(())
 }

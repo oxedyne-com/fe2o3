@@ -323,6 +323,23 @@ fn a_missing_image_is_reported_where_it_is_named_and_a_present_one_is_not() -> O
 	Ok(())
 }
 
+/// A `#set document` inside a container is not applied -- Typst refuses one there -- so it is reported at its
+/// site as a construct not set as written, which strict refuses, and the Info dictionary takes nothing from it.
+#[test]
+fn a_set_document_in_a_container_is_refused() -> Outcome<()> {
+	let _turn = turn();
+	let src = b"= H\n\n#styled-box[\n#set document(title: \"Boxed\")\nInside.\n]\n\nAfter.\n";
+	let (report, pdf) = res!(done(res!(compile_pdf(&[(MAIN, &src[..])]))));
+	let d = match report.diagnostics.iter().find(|d| d.message.contains("#set document")) {
+		Some(d)	=> d.clone(),
+		None	=> return Err(err!("a #set document in a box must be reported: {:?}", report.diagnostics; Test)),
+	};
+	assert_eq!((d.severity, d.kind, d.file.as_str()), (Severity::Warning, DiagnosticKind::Unsupported, MAIN), "{}", d);
+	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
+	assert!(!pdf.windows(5).any(|w| w == b"Boxed"), "no Info entry is written from inside the box");
+	Ok(())
+}
+
 /// Strict mode decides by severity and kind: an error always refuses, a warning only where its kind says
 /// the document was not set as written, and any other warning stands beside the PDF.
 #[test]
