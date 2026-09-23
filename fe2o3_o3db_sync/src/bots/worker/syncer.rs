@@ -272,10 +272,10 @@ impl<
 
     /// Releases one record, and with it the run queued behind it where every record waits on a
     /// barrier of its own: one barrier covers every record appended before it begins.  That is
-    /// always so under `sync_on_write`, and under the interval policy while the last barrier has
-    /// failed.  Batched only under the first, a disk failing its syncs slowly took one barrier per
-    /// record under the second, one after another, and with writes arriving faster than it failed
-    /// the queue grew without bound (2026-09-23).
+    /// always so under `sync_on_write`, and under the interval and every-n policies while the last
+    /// barrier has failed.  Batched only under the first, a disk failing its syncs slowly took one
+    /// barrier per record under the others, one after another, and with writes arriving faster
+    /// than it failed the queue grew without bound (2026-09-23, every-n 2026-09-24).
     fn records(
         &mut self,
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
@@ -285,9 +285,9 @@ impl<
     ) {
         let mut run = vec![(cbot, insert, resp)];
         let alone = match policy {
-            SyncPolicy::EveryWrite  => true,
-            SyncPolicy::Interval(_) => self.failed.is_some(),
-            _                       => false,
+            SyncPolicy::EveryWrite                          => true,
+            SyncPolicy::EveryN(_) | SyncPolicy::Interval(_) => self.failed.is_some(),
+            SyncPolicy::Never                               => false,
         };
         if alone {
             while let Some(Handed::Record { policy: next, .. }) = self.queue.front() {
