@@ -6,6 +6,18 @@
 //! and the submission path (port 587, AUTH required after STARTTLS, may
 //! relay anywhere).
 //!
+//! # Submission binds the sender to the account
+//!
+//! Until 2026-09-23 an authenticated account could send as any address: the
+//! envelope and the header were never compared with the login, and the relay
+//! DKIM-signs what it forwards, so one leaked password sent validly signed mail
+//! as anybody in the relay's domain. Now `MAIL FROM` and every address in the
+//! header `From` (and `Sender`) must be the account's own or one its entry lists
+//! under `send_as` (see [`MailUser::may_send_as`]), or the command is refused
+//! with `550 5.7.1`. The header is bound as well as the envelope because DMARC,
+//! and the reader, go by the header. A null `MAIL FROM:<>` is allowed, since it
+//! names nobody and the header is bound all the same.
+//!
 //! The session loop runs over an enum-based `MaybeTls` stream so that a
 //! plain TCP connection can be transparently swapped to TLS in response
 //! to `STARTTLS` without duplicating the rest of the state machine.
@@ -14,6 +26,11 @@
 //! Anthropic Claude
 
 use crate::{
+    email::header::{
+        addresses,
+        header_fields,
+        split_headers_body,
+    },
     smtp::{
         cmd::SmtpCommand,
         codes::SmtpResponseCode,
@@ -23,7 +40,10 @@ use crate::{
             SmtpTransaction,
         },
     },
-    mail::user::UserStore,
+    mail::{
+        store::MailUser,
+        user::UserStore,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -440,6 +460,18 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                         ).await);
                         continue;
                     }
+                    if let (SmtpMode::Submission, Some(user)) = (self.mode, &session.auth_user) {
+                        if let Some(why) = envelope_refusal(user, &addr) {
+                            warn!("SMTP submission from {:?}: {} refused: {}",
+                                peer, user.address(), why);
+                            res!(write_response(
+                                stream,
+                                SmtpResponseCode::MailboxUnavailableOrAccessDenied,
+                                &fmt!("5.7.1 {}", why),
+                            ).await);
+                            continue;
+                        }
+                    }
                     session.mail_from = addr;
                     session.phase = SmtpPhase::MailFrom;
                     res!(write_response(
@@ -505,6 +537,19 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                                 IO, Network, Read));
                         }
                     };
+                    if let (SmtpMode::Submission, Some(user)) = (self.mode, &session.auth_user) {
+                        if let Some(why) = header_refusal(user, &body) {
+                            warn!("SMTP submission from {:?}: {} refused: {}",
+                                peer, user.address(), why);
+                            res!(write_response(
+                                stream,
+                                SmtpResponseCode::MailboxUnavailableOrAccessDenied,
+                                &fmt!("5.7.1 {}", why),
+                            ).await);
+                            session.reset_transaction();
+                            continue;
+                        }
+                    }
                     let txn = SmtpTransaction {
                         mail_from:      session.mail_from.clone(),
                         rcpt_to:        session.rcpt_to.clone(),
@@ -898,6 +943,62 @@ pub async fn read_data<S: AsyncRead + Unpin>(
     }
 }
 
+/// Why this account may not use `mail_from` as its envelope sender, or `None` when it may.
+///
+/// The null reverse-path is allowed: it names nobody, and the header is bound all the same.
+fn envelope_refusal(user: &MailUser, mail_from: &str) -> Option<String> {
+    if mail_from.is_empty() || user.may_send_as(mail_from) {
+        return None;
+    }
+    Some(fmt!("<{}> is not an address {} may send as", mail_from, user.address()))
+}
+
+/// Why this account may not send `message` under its header, or `None` when it may.
+///
+/// There must be exactly one `From`, and every address in it, and in `Sender` where there is
+/// one, must be one the account may send as. A second `From` is refused rather than checked,
+/// since which one a reader or a verifier heeds is theirs to choose. A redirect, which keeps
+/// the author's `From` and adds a `Resent-From`, is refused with the rest: `Resent-From` is not
+/// what DMARC or the reader goes by. A header section or an address list that cannot be read
+/// as RFC 5322 reads it is refused, never passed, so the addresses checked are the ones a
+/// receiver's parser reports.
+fn header_refusal(user: &MailUser, message: &[u8]) -> Option<String> {
+    let (head, _) = split_headers_body(message);
+    let fields = match header_fields(head) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("SMTP submission: the header section cannot be read: {}", e);
+            return Some(fmt!("the header section cannot be read as RFC 5322"));
+        },
+    };
+    let from: Vec<&(String, String)> = fields.iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("From"))
+        .collect();
+    match from.len() {
+        0 => return Some(fmt!("the message has no From field")),
+        1 => {},
+        n => return Some(fmt!("the message has {} From fields, and may have one", n)),
+    }
+    for (name, value) in fields.iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case("From") || n.eq_ignore_ascii_case("Sender"))
+    {
+        let list = match addresses(value) {
+            Ok(l) => l,
+            Err(_) => return Some(fmt!("the {} field cannot be read", name)),
+        };
+        if list.is_empty() {
+            return Some(fmt!("the {} field names nobody", name));
+        }
+        for a in list {
+            if !user.may_send_as(&a) {
+                return Some(fmt!("{}: <{}> is not an address {} may send as",
+                    name, a, user.address()));
+            }
+        }
+    }
+    None
+}
+
 /// The payload is `authzid \0 authcid \0 passwd`, and the `authzid` is ignored.
 fn parse_plain(raw: &[u8]) -> Option<(String, String)> {
     let mut nuls = raw.iter().enumerate().filter_map(|(i, b)| {
@@ -908,4 +1009,253 @@ fn parse_plain(raw: &[u8]) -> Option<(String, String)> {
     let user = ok!(String::from_utf8(raw[first + 1..second].to_vec()).ok());
     let pass = ok!(String::from_utf8(raw[second + 1..].to_vec()).ok());
     Some((user, pass))
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ TESTS                                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        imap::client::Security,
+        smtp::client::{
+            OutboundClient,
+            SubmissionConfig,
+        },
+        tls::BoundedTlsAcceptor,
+    };
+
+    use std::sync::Mutex;
+
+    use tokio::net::TcpListener;
+    use tokio_rustls::{
+        rustls::{
+            ClientConfig,
+            RootCertStore,
+            ServerConfig,
+            pki_types::{
+                CertificateDer,
+                PrivateKeyDer,
+                PrivatePkcs8KeyDer,
+            },
+        },
+        TlsAcceptor,
+    };
+
+    const HOST: &str = "mail.test.local";
+
+    /// An account that lists one identity besides its own.
+    fn hello() -> MailUser {
+        MailUser {
+            local:          fmt!("hello"),
+            domain:         fmt!("oxegen.test"),
+            delivery_key:   fmt!("oxegen.test/hello"),
+            send_as:        vec![fmt!("news@oxegen.test")],
+        }
+    }
+
+    #[test]
+    fn the_envelope_is_bound_to_the_account_00() {
+        let u = hello();
+        assert_eq!(envelope_refusal(&u, "hello@oxegen.test"), None);
+        assert_eq!(envelope_refusal(&u, "Hello@OXEGEN.test"), None, "case does not matter");
+        assert_eq!(envelope_refusal(&u, "news@oxegen.test"), None, "a listed identity");
+        assert_eq!(envelope_refusal(&u, ""), None, "the null reverse-path names nobody");
+        match envelope_refusal(&u, "ceo@oxegen.test") {
+            Some(why) => assert!(why.contains("ceo@oxegen.test") && why.contains("hello@oxegen.test"),
+                "the refusal must name the address and the account: {}", why),
+            None => panic!("another address in the relay's own domain was let through"),
+        }
+    }
+
+    fn message(headers: &str) -> Vec<u8> {
+        fmt!("{}\r\nSubject: s\r\n\r\nbody\r\n", headers).into_bytes()
+    }
+
+    #[test]
+    fn the_header_from_is_bound_to_the_account_00() {
+        let u = hello();
+        for fine in [
+            "From: hello@oxegen.test",
+            "From: Jason Hoogland <hello@oxegen.test>",
+            "From: Jason\r\n <hello@oxegen.test>",
+            "From:\r\n\t\"Hoogland, Jason\"\r\n <hello@oxegen.test>",
+            "From: \"Oxegen News\" <News@oxegen.test>",
+            "From: \"The CEO <ceo@oxegen.test>: urgent\" <hello@oxegen.test>",
+            "From : hello@oxegen.test",
+            "from: hello@oxegen.test\r\nSender: news@oxegen.test",
+        ] {
+            assert_eq!(header_refusal(&u, &message(fine)), None, "{:?} was refused", fine);
+        }
+        for (bad, says) in [
+            ("From: The CEO <ceo@oxegen.test>", "ceo@oxegen.test"),
+            ("From: hello@oxegen.test, ceo@oxegen.test", "ceo@oxegen.test"),
+            ("From: hello@oxegen.test\r\nSender: ceo@oxegen.test", "Sender"),
+            ("From: hello@oxegen.test\r\nFrom: ceo@oxegen.test", "2 From"),
+            ("To: bob@example.org", "no From"),
+            ("From: Jason Hoogland", "cannot be read"),
+            ("From: undisclosed-recipients:;", "names nobody"),
+            // A redirect keeps the author's From, which DMARC and the reader go by.
+            ("From: ceo@oxegen.test\r\nResent-From: hello@oxegen.test", "ceo@oxegen.test"),
+            // D-06 audit F4-1: forms a receiver's parser reads otherwise than the old checker did.
+            ("From: ceo@oxegen.test:hello@oxegen.test;", "From field cannot be read"),
+            ("From: ceo@oxegen.test\rX: hello@oxegen.test", "header section cannot be read"),
+            ("From: ceo@oxegen.test\r<hello@oxegen.test>", "header section cannot be read"),
+            ("From\r\n : ceo@oxegen.test\r\nFrom: hello@oxegen.test", "2 From"),
+            ("From: ceo@oxegen.test <hello@oxegen.test>", "From field cannot be read"),
+            ("From: hello@oxegen.test\nFrom: ceo@oxegen.test", "header section cannot be read"),
+            ("\r\nFrom: hello@oxegen.test", "header section cannot be read"),
+            ("From: hello@oxegen.test\r\nSender: ceo@oxegen.test:hello@oxegen.test;",
+                "Sender field cannot be read"),
+        ] {
+            match header_refusal(&u, &message(bad)) {
+                Some(why) => assert!(why.contains(says), "{:?} refused as {:?}", bad, why),
+                None => panic!("{:?} was let through", bad),
+            }
+        }
+    }
+
+    /// One account, with the password "pw".
+    #[derive(Clone)]
+    struct Accounts;
+
+    impl UserStore for Accounts {
+        fn authenticate(&self, address: &str, password: &str) -> Outcome<Option<MailUser>> {
+            if password != "pw" {
+                return Ok(None);
+            }
+            self.lookup(address)
+        }
+
+        fn lookup(&self, address: &str) -> Outcome<Option<MailUser>> {
+            Ok(if address.eq_ignore_ascii_case("hello@oxegen.test") { Some(hello()) } else { None })
+        }
+    }
+
+    /// Takes every submitted message, so the test can see what got past the server.
+    #[derive(Clone, Default)]
+    struct Taken(Arc<Mutex<Vec<SmtpTransaction>>>);
+
+    impl SmtpHandler for Taken {
+        fn deliver_inbound(&self, _txn: SmtpTransaction) -> Outcome<HandlerOutcome> {
+            Ok(HandlerOutcome::RejectPermanent(fmt!("not a receiving server")))
+        }
+
+        fn submit_outbound(&self, txn: SmtpTransaction) -> Outcome<HandlerOutcome> {
+            match self.0.lock() {
+                Ok(mut g) => g.push(txn),
+                Err(_) => return Err(err!("The test handler's lock was poisoned."; Test, Lock)),
+            }
+            Ok(HandlerOutcome::Accepted(fmt!("T1")))
+        }
+
+        fn rcpt_acceptable(&self, _address: &str) -> bool {
+            false
+        }
+    }
+
+    /// A submission listener on loopback, with a certificate for [`HOST`], and a client TLS
+    /// configuration that trusts it.
+    async fn submission_server(taken: Taken)
+        -> Outcome<(std::net::SocketAddr, Arc<ClientConfig>)>
+    {
+        crate::tls::ensure_crypto_provider();
+        let cert = res!(rcgen::generate_simple_self_signed(vec![HOST.to_string()]), Init);
+        let der = res!(cert.serialize_der(), Init);
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.serialize_private_key_der()));
+        let server_tls = res!(ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![CertificateDer::from(der.clone())], key), Init);
+        let mut roots = RootCertStore::empty();
+        res!(roots.add(CertificateDer::from(der)), Init);
+        let client_tls = ClientConfig::builder().with_root_certificates(roots).with_no_client_auth();
+
+        let server = SmtpServer {
+            handler:        taken,
+            users:          Accounts,
+            tls_acceptor:   Some(BoundedTlsAcceptor::unbounded(
+                                TlsAcceptor::from(Arc::new(server_tls)))),
+            hostname:       Arc::new(HOST.to_string()),
+            mode:           SmtpMode::Submission,
+        };
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await, IO, Network);
+        let addr = res!(listener.local_addr(), IO, Network);
+        tokio::spawn(async move {
+            loop {
+                let (sock, peer) = match listener.accept().await {
+                    Ok(x) => x,
+                    Err(_) => return,
+                };
+                let s = server.clone();
+                tokio::spawn(async move {
+                    let _ = s.run(sock, peer).await;
+                });
+            }
+        });
+        Ok((addr, Arc::new(client_tls)))
+    }
+
+    /// End to end, the real client against the real server over STARTTLS and AUTH: an account
+    /// sends as itself, as the identity it lists, and under the null envelope, and a forged
+    /// sender is refused `550 5.7.1` in the envelope and in the header alike, before the handler,
+    /// and so the signer, sees it.
+    #[tokio::test]
+    async fn a_submission_may_send_only_as_its_account_00() -> Outcome<()> {
+        let taken = Taken::default();
+        let (addr, client_tls) = res!(submission_server(taken.clone()).await);
+        let client = OutboundClient {
+            hostname:   Arc::new(fmt!("client.test.local")),
+            tls_config: client_tls,
+        };
+        let cfg = SubmissionConfig::new(
+            HOST.to_string(), addr.port(), Security::StartTls,
+            fmt!("hello@oxegen.test"), fmt!("pw")).with_addr(addr);
+        let rcpt = vec![fmt!("bob@example.org")];
+        let body = |from: &str| fmt!(
+            "From: {}\r\nTo: bob@example.org\r\nSubject: s\r\n\r\nhi\r\n", from);
+
+        res!(client.submit(&cfg, "hello@oxegen.test", &rcpt,
+            body("Jason <hello@oxegen.test>").as_bytes()).await);
+        res!(client.submit(&cfg, "news@oxegen.test", &rcpt,
+            body("news@oxegen.test").as_bytes()).await);
+        res!(client.submit(&cfg, "", &rcpt,
+            body("\"The CEO <ceo@oxegen.test>: urgent\" <hello@oxegen.test>").as_bytes()).await);
+
+        for (envelope, from, which) in [
+            ("ceo@oxegen.test", "hello@oxegen.test", "envelope"),
+            ("hello@oxegen.test", "The CEO <ceo@oxegen.test>", "header"),
+        ] {
+            match client.submit(&cfg, envelope, &rcpt, body(from).as_bytes()).await {
+                Ok(q) => return Err(err!(
+                    "A forged {} sender was accepted, queued as {}.", which, q; Test)),
+                Err(e) => {
+                    let s = fmt!("{}", e);
+                    assert!(s.contains("550") && s.contains("5.7.1") && s.contains("ceo@oxegen.test"),
+                        "the {} refusal must be a 550 5.7.1 naming the address: {}", which, s);
+                },
+            }
+        }
+        // D-06 audit F4-1: the header a receiver's parser reads as from ceo@.
+        match client.submit(&cfg, "hello@oxegen.test", &rcpt,
+            body("ceo@oxegen.test:hello@oxegen.test;").as_bytes()).await
+        {
+            Ok(q) => return Err(err!(
+                "A From the checker cannot read was accepted, queued as {}.", q; Test)),
+            Err(e) => {
+                let s = fmt!("{}", e);
+                assert!(s.contains("550") && s.contains("5.7.1"),
+                    "an unreadable From must be refused 550 5.7.1: {}", s);
+            },
+        }
+        let got = match taken.0.lock() {
+            Ok(g) => g.iter().map(|t| t.mail_from.clone()).collect::<Vec<_>>(),
+            Err(_) => Vec::new(),
+        };
+        assert_eq!(got, vec![fmt!("hello@oxegen.test"), fmt!("news@oxegen.test"), fmt!("")],
+            "only the three honest messages may reach the handler, the null envelope's included");
+        Ok(())
+    }
 }

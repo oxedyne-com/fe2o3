@@ -49,7 +49,22 @@ use tokio_rustls::rustls::ClientConfig;
 
 
 // Generous, because some receiving MX hosts greylist or impose multi-second waits before 220.
+// It bounds each step of a conversation, not the whole of it.
 pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
+
+// The reply to the final "." may take this long whatever the step deadline, as RFC 5321
+// §4.5.3.2.6 allows. A sender that gives up while the receiver is still accepting sends the
+// message again on its next try, and the receiver ends up with both.
+const DATA_DONE_TIMEOUT: Duration = Duration::from_secs(600);
+
+// Once the message is accepted, QUIT is a courtesy, and no step of it waits longer than this. A
+// whole step spent on it could run out a caller's own deadline and report an accepted message as
+// failed, which is a false alarm and, where the caller retries, a duplicate.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+// The message goes over in pieces of this size, each held to the deadline on its own, so a large
+// message on a slow link is bounded by its progress rather than cut off for its size.
+const SEND_PIECE: usize = 64 * 1024;
 
 
 /// Where to post a message, and how to prove you may.
@@ -66,7 +81,10 @@ pub struct SubmissionConfig {
     // For a provider with two-factor authentication this is an application password, not the
     // password the human types into a browser.
     pub password:   String,
-    pub timeout:    Duration,   // per IO
+    // Each step: the connect, the TLS handshake, each command and each reply. The reply to the
+    // message itself may take DATA_DONE_TIMEOUT where that is longer, and QUIT no more than
+    // QUIT_TIMEOUT.
+    pub timeout:    Duration,
     // Dialled instead of resolving `host`. The certificate is still validated against `host`, so
     // pinning the address weakens nothing -- and a server connecting on behalf of a user must vet
     // the address it dials rather than hand the name to the resolver twice.
@@ -211,7 +229,7 @@ impl OutboundClient {
                 });
             }
         }
-        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body).await
+        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT).await
     }
 
     /// The delivery loop itself, given the exchanges rather than resolving them.
@@ -221,13 +239,15 @@ impl OutboundClient {
     /// whether the collapsed error is permanent -- could not be exercised at all. It carries
     /// jarrah's outbound mail and had no test until 2026-08-17. Private, and takes the exchanges as
     /// an argument rather than reading them from anywhere: this is not a way to configure where mail
-    /// goes, it is a way for a fixture to stand in as an exchange.
+    /// goes, it is a way for a fixture to stand in as an exchange. `deadline` bounds each step of
+    /// each conversation, and is an argument so a fixture need not wait a minute to see one pass.
     async fn deliver_to_exchanges(
         &self,
         targets:    &[DeliveryTarget],
         mail_from:  &str,
         rcpt_to:    &[String],
         body:       &[u8],
+        deadline:   Duration,
     )
         -> Outcome<String>
     {
@@ -246,7 +266,7 @@ impl OutboundClient {
         // trying. A 4xx, a timeout or a connection error is transient and carries no such tag.
         let mut permanent = false;
         for tgt in &targets {
-            match self.try_one(tgt, mail_from, rcpt_to, body).await {
+            match self.try_one(tgt, mail_from, rcpt_to, body, deadline).await {
                 Ok(qid) => return Ok(qid),
                 Err(e) => {
                     if is_permanent(&e) {
@@ -315,31 +335,21 @@ impl OutboundClient {
             },
         };
 
-        let connect = TcpStream::connect(addr);
-        let plain = match timeout(cfg.timeout, connect).await {
-            Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to the submission host {} at {}.", cfg.host, addr; IO, Network)),
-            Err(_)     => return Err(err!(
-                "Timeout connecting to the submission host {} at {}.", cfg.host, addr;
-                IO, Network)),
-        };
+        let mut conv = res!(Conversation::connect(addr, &cfg.host, cfg.timeout).await);
 
         // TLS from the first byte, or in the clear until STARTTLS lifts it.
-        let mut stream = match cfg.security {
-            Security::ImplicitTls =>
-                res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await),
-            _ => ClientStream::Plain(plain),
-        };
+        if cfg.security == Security::ImplicitTls {
+            conv = res!(conv.upgrade(self.tls_config.clone()).await);
+        }
 
-        let banner = res!(read_smtp_response(&mut stream).await);
+        let banner = res!(conv.reply().await);
         if banner.code != 220 {
             return Err(err!(
                 "Expected a 220 banner from {}, got {} {}", cfg.host, banner.code, banner.text;
                 IO, Network, Wire));
         }
 
-        let mut ehlo = res!(self.ehlo(&mut stream).await);
+        let mut ehlo = res!(self.ehlo(&mut conv).await);
 
         if cfg.security == Security::StartTls {
             let offered = ehlo.text.lines().any(|l| l.trim().eq_ignore_ascii_case("STARTTLS"));
@@ -349,23 +359,17 @@ impl OutboundClient {
                     without being readable on the wire.", cfg.host;
                     IO, Network, Invalid));
             }
-            res!(write_command(&mut stream, "STARTTLS").await);
-            let resp = res!(read_smtp_response(&mut stream).await);
+            res!(conv.command("STARTTLS").await);
+            let resp = res!(conv.reply().await);
             if resp.code != 220 {
                 return Err(err!(
                     "{} refused STARTTLS: {} {}", cfg.host, resp.code, resp.text;
                     IO, Network, Wire));
             }
-            let plain = match stream.into_plain() {
-                Some(s) => s,
-                None => return Err(err!(
-                    "STARTTLS response received on an already-encrypted stream.";
-                    Invalid, Bug)),
-            };
-            stream = res!(tls::upgrade(plain, &cfg.host, self.tls_config.clone()).await);
+            conv = res!(conv.upgrade(self.tls_config.clone()).await);
             // The extension list before the upgrade cannot be trusted, and AUTH is usually only
             // offered after it, so ask again inside TLS.
-            ehlo = res!(self.ehlo(&mut stream).await);
+            ehlo = res!(self.ehlo(&mut conv).await);
         }
 
         if cfg.security == Security::Plain {
@@ -373,17 +377,16 @@ impl OutboundClient {
                 the clear. Only a loopback test server should ever be reached this way.", cfg.host);
         }
 
-        res!(authenticate(&mut stream, &ehlo, &cfg.user, &cfg.password).await);
-        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+        res!(authenticate(&mut conv, &ehlo, &cfg.user, &cfg.password).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        let _ = write_command(&mut stream, "QUIT").await;
-        let _ = read_smtp_response(&mut stream).await;
+        conv.quit().await;
         Ok(queue_id)
     }
 
-    async fn ehlo(&self, stream: &mut ClientStream) -> Outcome<SmtpResponse> {
-        res!(write_command(stream, &fmt!("EHLO {}", self.hostname)).await);
-        let resp = res!(read_smtp_response(stream).await);
+    async fn ehlo(&self, conv: &mut Conversation) -> Outcome<SmtpResponse> {
+        res!(conv.command(&fmt!("EHLO {}", self.hostname)).await);
+        let resp = res!(conv.reply().await);
         if resp.code != 250 {
             return Err(err!(
                 "EHLO rejected: {} {}", resp.code, resp.text;
@@ -398,24 +401,15 @@ impl OutboundClient {
         mail_from:  &str,
         rcpt_to:    &[String],
         body:       &[u8],
+        deadline:   Duration,
     )
         -> Outcome<String>
     {
-        let addr = std::net::SocketAddr::new(tgt.addr, tgt.port);
-        let connect = TcpStream::connect(addr);
-        let plain = match timeout(SMTP_CLIENT_TIMEOUT, connect).await {
-            Ok(Ok(s))  => s,
-            Ok(Err(e)) => return Err(err!(e,
-                "Connecting to {}.", addr; IO, Network)),
-            Err(_)     => return Err(err!(
-                "Timeout connecting to {}.", addr;
-                IO, Network)),
-        };
-
-        let mut stream = ClientStream::Plain(plain);
+        let addr = SocketAddr::new(tgt.addr, tgt.port);
+        let mut conv = res!(Conversation::connect(addr, &tgt.host, deadline).await);
 
         // Read the 220 banner.
-        let banner = res!(read_smtp_response(&mut stream).await);
+        let banner = res!(conv.reply().await);
         if banner.code != 220 {
             return Err(err!(
                 "Expected 220 banner, got {} {}", banner.code, banner.text;
@@ -423,43 +417,123 @@ impl OutboundClient {
         }
 
         // EHLO, then look at extensions.
-        res!(write_command(&mut stream, &fmt!("EHLO {}", self.hostname)).await);
-        let ehlo = res!(read_smtp_response(&mut stream).await);
-        if ehlo.code != 250 {
-            return Err(err!(
-                "EHLO rejected: {} {}", ehlo.code, ehlo.text;
-                IO, Network, Wire));
-        }
+        let ehlo = res!(self.ehlo(&mut conv).await);
         let supports_starttls = ehlo.text.lines().any(|l| {
             l.trim().eq_ignore_ascii_case("STARTTLS")
         });
 
         // Opportunistic STARTTLS.
         if supports_starttls {
-            res!(write_command(&mut stream, "STARTTLS").await);
-            let resp = res!(read_smtp_response(&mut stream).await);
+            res!(conv.command("STARTTLS").await);
+            let resp = res!(conv.reply().await);
             if resp.code == 220 {
-                let plain = match stream.into_plain() {
-                    Some(s) => s,
-                    None => return Err(err!(
-                        "STARTTLS response received on already-TLS stream.";
-                        Invalid, Bug)),
-                };
-                stream = res!(tls::upgrade(plain, &tgt.host, self.tls_config.clone()).await);
+                conv = res!(conv.upgrade(self.tls_config.clone()).await);
 
                 // Re-issue EHLO inside TLS.
-                res!(write_command(&mut stream, &fmt!("EHLO {}", self.hostname)).await);
-                let _ = res!(read_smtp_response(&mut stream).await);
+                res!(conv.command(&fmt!("EHLO {}", self.hostname)).await);
+                let _ = res!(conv.reply().await);
             }
         }
 
-        let queue_id = res!(transact(&mut stream, mail_from, rcpt_to, body).await);
+        let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        // QUIT.
-        let _ = write_command(&mut stream, "QUIT").await;
-        let _ = read_smtp_response(&mut stream).await;
-
+        conv.quit().await;
         Ok(queue_id)
+    }
+}
+
+/// One SMTP conversation: the stream, and the deadline every step on it is held to.
+///
+/// Every read, write and handshake goes through here, so no step can wait for ever. Until
+/// 2026-09-24 only the TCP connect was timed, and a server that took the connection and never
+/// spoke held `submit` for as long as the socket lived, whatever its timeout said -- and with it
+/// the text an alert sends beside its mail (D-06 audit A2).
+struct Conversation {
+    stream:     ClientStream,
+    peer:       String,     // named in errors, and the name a certificate is validated against
+    timeout:    Duration,   // per step
+}
+
+impl Conversation {
+
+    async fn connect(addr: SocketAddr, peer: &str, deadline: Duration) -> Outcome<Self> {
+        let plain = match timeout(deadline, TcpStream::connect(addr)).await {
+            Ok(Ok(s))  => s,
+            Ok(Err(e)) => return Err(err!(e,
+                "Connecting to {} at {}.", peer, addr; IO, Network)),
+            Err(_)     => return Err(err!(
+                "Timeout connecting to {} at {}.", peer, addr; IO, Network, Timeout)),
+        };
+        Ok(Self { stream: ClientStream::Plain(plain), peer: peer.to_string(), timeout: deadline })
+    }
+
+    /// TLS over the plain stream, from the first byte or once STARTTLS has been agreed.
+    async fn upgrade(self, tls_config: Arc<ClientConfig>) -> Outcome<Self> {
+        let plain = match self.stream.into_plain() {
+            Some(s) => s,
+            None => return Err(err!(
+                "A TLS upgrade was asked of the stream to {}, which is already encrypted.",
+                self.peer; Invalid, Bug)),
+        };
+        let stream = res!(tls::upgrade(plain, &self.peer, tls_config, self.timeout).await);
+        Ok(Self { stream, peer: self.peer, timeout: self.timeout })
+    }
+
+    /// All of one reply, however many lines it runs to, within the step deadline.
+    async fn reply(&mut self) -> Outcome<SmtpResponse> {
+        let deadline = self.timeout;
+        self.reply_within(deadline).await
+    }
+
+    async fn reply_within(&mut self, deadline: Duration) -> Outcome<SmtpResponse> {
+        match timeout(deadline, read_smtp_response(&mut self.stream)).await {
+            Ok(r)  => r,
+            Err(_) => Err(err!(
+                "{} sent no reply within {:?}.", self.peer, deadline;
+                IO, Network, Read, Timeout)),
+        }
+    }
+
+    /// Ends the conversation once the message is accepted. The message is the receiver's by now,
+    /// so a QUIT that stalls or fails is logged and changes nothing.
+    async fn quit(mut self) {
+        self.timeout = self.timeout.min(QUIT_TIMEOUT);
+        let said = match self.command("QUIT").await {
+            Ok(()) => self.reply().await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = said {
+            debug!("{} accepted the message and then did not see QUIT through; the message \
+                stands: {}", self.peer, e);
+        }
+    }
+
+    /// CRLF-terminated, and flushed. The command is never named in an error, since AUTH carries
+    /// the credential.
+    async fn command(&mut self, cmd: &str) -> Outcome<()> {
+        self.send(fmt!("{}\r\n", cmd).as_bytes(), "a command").await
+    }
+
+    /// Written and flushed, each piece within the deadline.
+    async fn send(&mut self, bytes: &[u8], what: &str) -> Outcome<()> {
+        for piece in bytes.chunks(SEND_PIECE) {
+            match timeout(self.timeout, self.stream.write_all(piece)).await {
+                Ok(Ok(()))  => (),
+                Ok(Err(e))  => return Err(err!(e,
+                    "Writing {} to {}.", what, self.peer; IO, Network, Write)),
+                Err(_)      => return Err(err!(
+                    "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
+                    IO, Network, Write, Timeout)),
+            }
+        }
+        match timeout(self.timeout, self.stream.flush()).await {
+            Ok(Ok(()))  => Ok(()),
+            Ok(Err(e))  => Err(err!(e,
+                "Flushing {} to {}.", what, self.peer; IO, Network, Write)),
+            Err(_)      => Err(err!(
+                "{} took no more of {} within {:?}.", self.peer, what, self.timeout;
+                IO, Network, Write, Timeout)),
+        }
     }
 }
 
@@ -468,15 +542,15 @@ impl OutboundClient {
 /// what they do once they are here, so they share the transaction rather than each keeping a copy
 /// of it -- the second copy is where the dot-stuffing gets forgotten.
 async fn transact(
-    stream:     &mut ClientStream,
+    conv:       &mut Conversation,
     mail_from:  &str,
     rcpt_to:    &[String],
     body:       &[u8],
 )
     -> Outcome<String>
 {
-    res!(write_command(stream, &fmt!("MAIL FROM:<{}>", mail_from)).await);
-    let resp = res!(read_smtp_response(stream).await);
+    res!(conv.command(&fmt!("MAIL FROM:<{}>", mail_from)).await);
+    let resp = res!(conv.reply().await);
     if resp.code / 100 != 2 {
         // A 5xx is a permanent refusal, tagged so the caller can suppress rather than retry; a 4xx is
         // transient and carries no such tag.
@@ -490,8 +564,8 @@ async fn transact(
             IO, Network, Wire));
     }
     for r in rcpt_to {
-        res!(write_command(stream, &fmt!("RCPT TO:<{}>", r)).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&fmt!("RCPT TO:<{}>", r)).await);
+        let resp = res!(conv.reply().await);
         if resp.code / 100 != 2 {
             // A 5xx here is the no-such-mailbox case: permanent for this recipient, so it is tagged for
             // suppression. A 4xx (greylisting, a full mailbox) is transient and is not.
@@ -505,32 +579,27 @@ async fn transact(
                 IO, Network, Wire));
         }
     }
-    res!(write_command(stream, "DATA").await);
-    let resp = res!(read_smtp_response(stream).await);
+    res!(conv.command("DATA").await);
+    let resp = res!(conv.reply().await);
     if resp.code != 354 {
         return Err(err!(
             "DATA rejected: {} {}", resp.code, resp.text;
             IO, Network, Wire));
     }
 
-    // A line of the body that begins with a full stop would otherwise end the message.
-    let stuffed = dot_stuff(body);
-    if let Err(e) = stream.write_all(&stuffed).await {
-        return Err(err!(e, "Writing DATA body."; IO, Network, Write));
-    }
+    // A line of the body that begins with a full stop would otherwise end the message, and the
+    // terminator goes on a line of its own however the body ends.
+    let mut stuffed = dot_stuff(body);
     if !body.ends_with(b"\r\n") {
-        if let Err(e) = stream.write_all(b"\r\n").await {
-            return Err(err!(e, "Writing CRLF tail."; IO, Network, Write));
-        }
+        stuffed.extend_from_slice(b"\r\n");
     }
-    if let Err(e) = stream.write_all(b".\r\n").await {
-        return Err(err!(e, "Writing DATA terminator."; IO, Network, Write));
-    }
-    if let Err(e) = stream.flush().await {
-        return Err(err!(e, "Flushing DATA."; IO, Network, Write));
-    }
+    stuffed.extend_from_slice(b".\r\n");
+    res!(conv.send(&stuffed, "the message").await);
 
-    let resp = res!(read_smtp_response(stream).await);
+    // The receiver may be filtering the message before it answers, and giving up on it here is
+    // how it comes to be delivered twice.
+    let done = conv.timeout.max(DATA_DONE_TIMEOUT);
+    let resp = res!(conv.reply_within(done).await);
     if resp.code / 100 != 2 {
         // A 5xx on the message itself -- refused content, a policy block -- will not be cured by resending
         // the same message, so it is tagged permanent for the caller to suppress on.
@@ -585,7 +654,7 @@ pub fn is_permanent(e: &Error<ErrTag>) -> bool {
 /// caller establishes that first and refuses to proceed without it. `ehlo` is the extension list
 /// the server advertised inside TLS.
 async fn authenticate(
-    stream:     &mut ClientStream,
+    conv:       &mut Conversation,
     ehlo:       &SmtpResponse,
     user:       &str,
     password:   &str,
@@ -614,28 +683,28 @@ async fn authenticate(
         // each separated by a NUL.
         let raw = fmt!("\0{}\0{}", user, password);
         let cmd = fmt!("AUTH PLAIN {}", base64::encode(raw.as_bytes()));
-        res!(write_command(stream, &cmd).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&cmd).await);
+        let resp = res!(conv.reply().await);
         return check_auth(&resp);
     }
 
     if mechanisms.iter().any(|m| m == "LOGIN") {
-        res!(write_command(stream, "AUTH LOGIN").await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command("AUTH LOGIN").await);
+        let resp = res!(conv.reply().await);
         if resp.code != 334 {
             return Err(err!(
                 "AUTH LOGIN was refused before the username: {} {}", resp.code, resp.text;
                 IO, Network, Wire));
         }
-        res!(write_command(stream, &base64::encode(user.as_bytes())).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&base64::encode(user.as_bytes())).await);
+        let resp = res!(conv.reply().await);
         if resp.code != 334 {
             return Err(err!(
                 "The server rejected the username: {} {}", resp.code, resp.text;
                 IO, Network, Wire));
         }
-        res!(write_command(stream, &base64::encode(password.as_bytes())).await);
-        let resp = res!(read_smtp_response(stream).await);
+        res!(conv.command(&base64::encode(password.as_bytes())).await);
+        let resp = res!(conv.reply().await);
         return check_auth(&resp);
     }
 
@@ -671,7 +740,8 @@ struct SmtpResponse {
     text: String,   // the text lines, joined by '\n'
 }
 
-/// A response ends at the line whose fourth byte is a space rather than a hyphen.
+/// A response ends at the line whose fourth byte is a space rather than a hyphen. Untimed, so it
+/// is read only through [`Conversation::reply`].
 async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> {
     let mut text = String::new();
     let mut code: u16 = 0;
@@ -712,18 +782,6 @@ async fn read_smtp_response(stream: &mut ClientStream) -> Outcome<SmtpResponse> 
         }
     }
     Ok(SmtpResponse { code, text })
-}
-
-/// CRLF-terminated, and flushed.
-async fn write_command(stream: &mut ClientStream, cmd: &str) -> Outcome<()> {
-    let line = fmt!("{}\r\n", cmd);
-    if let Err(e) = stream.write_all(line.as_bytes()).await {
-        return Err(err!(e, "Writing SMTP command."; IO, Network, Write));
-    }
-    if let Err(e) = stream.flush().await {
-        return Err(err!(e, "Flushing SMTP command."; IO, Network, Write));
-    }
-    Ok(())
 }
 
 /// RFC 5321 §4.5.2: any line whose first character is `.` gets a second one prepended, so the
@@ -782,6 +840,7 @@ mod tests {
     const USER: &str = "alice@example.com";
     const PASS: &str = "app-password-not-a-real-one";
     const EHLO: &str = "sender.test";
+    const WAIT: Duration = Duration::from_secs(10);     // each step, where nothing should stall
 
 
     /// What the stand-in server does when it is spoken to.
@@ -802,6 +861,8 @@ mod tests {
         banner:     u16,            // 220 is ready for mail; 421 refuses the connection
         rcpt_code:  u16,            // 250 accepts the recipient
         data_code:  u16,            // 250 accepts the message
+        stall:      &'static str,   // the command after which it goes silent; empty for never
+        slow_done:  Duration,       // how long the reply to the final "." is held back
     }
 
     impl Provider {
@@ -815,6 +876,8 @@ mod tests {
                 banner:      220,
                 rcpt_code:   250,
                 data_code:   250,
+                stall:       "",
+                slow_done:   Duration::ZERO,
             }
         }
 
@@ -863,6 +926,7 @@ mod tests {
             let mut in_data    = false;
             let mut await_user = false;
             let mut await_pass = false;
+            let mut silent     = false;
             let verdict = if p.auth_ok {
                 &b"235 2.7.0 Accepted\r\n"[..]
             } else {
@@ -873,9 +937,16 @@ mod tests {
                 if let Ok(mut g) = log.lock() {
                     g.push(line.clone());
                 }
+                if !p.stall.is_empty() && line.to_uppercase().starts_with(p.stall) {
+                    silent = true;
+                }
+                if silent {
+                    continue;   // reads on, and answers nothing
+                }
                 if in_data {
                     if line == "." {
                         in_data = false;
+                        tokio::time::sleep(p.slow_done).await;
                         let _ = w.write_all(fmt!("{} 2.0.0 Ok: queued as STANDIN1\r\n",
                             p.data_code).as_bytes()).await;
                     }
@@ -1470,7 +1541,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(Provider::accepting(), 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "postmaster@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
         req!(true, qid.contains("STANDIN1"));
 
         let lines = res!(lines_of(&seen));
@@ -1503,7 +1574,7 @@ mod tests {
         let (bad,  saw_bad)  = res!(exchange_at(dead, 10).await);
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 20).await);
         let qid = res!(c.deliver_to_exchanges(&[good.clone(), bad.clone()],
-            "a@example.com", &[fmt!("bob@example.net")], &body()).await);
+            "a@example.com", &[fmt!("bob@example.net")], &body(), WAIT).await);
         req!(true, qid.contains("STANDIN1"));
         req!(true, res!(lines_of(&saw_bad)).iter().any(|l| l.starts_with("RCPT TO")),
             "the preferred exchange was skipped: it was never offered the recipient");
@@ -1515,7 +1586,7 @@ mod tests {
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 10).await);
         let (bad,  saw_bad)  = res!(exchange_at(dead, 20).await);
         res!(c.deliver_to_exchanges(&[bad, good], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
         req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."));
         req!(true, res!(lines_of(&saw_bad)).is_empty(),
             "a less-preferred exchange was used while a better one worked");
@@ -1533,7 +1604,7 @@ mod tests {
         let (b, _) = res!(exchange_at(dead, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT).await
         {
             Ok(_)  => Err(err!("Two 550s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1554,7 +1625,7 @@ mod tests {
         let (b, _) = res!(exchange_at(busy, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await
+            &[fmt!("bob@example.net")], &body(), WAIT).await
         {
             Ok(_)  => Err(err!("Two 450s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1577,7 +1648,7 @@ mod tests {
             Provider { banner: 421, ..Provider::exchange() }, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[dead, refusing], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT).await
         {
             Ok(_)  => Err(err!("A 550 and a 421 were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1598,7 +1669,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(p, 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await);
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
         req!(true, qid.contains("STANDIN1"), "a refused STARTTLS stopped the delivery");
 
         let lines = res!(lines_of(&seen));
@@ -1614,7 +1685,7 @@ mod tests {
     async fn test_no_exchange_is_a_named_failure_00() -> Outcome<()> {
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[], "a@example.com",
-            &[fmt!("bob@example.net")], &body()).await
+            &[fmt!("bob@example.net")], &body(), WAIT).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!(
@@ -1634,13 +1705,162 @@ mod tests {
         let host = a.host.clone();
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[a], "a@example.com",
-            &[fmt!("nobody@example.net")], &body()).await
+            &[fmt!("nobody@example.net")], &body(), WAIT).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!("A 550 was a delivery."; Test, Invalid)),
         };
         req!(true, msg.contains(&host), "the failing exchange was not named: {}", msg);
         req!(true, msg.contains("550"), "the server's code was dropped: {}", msg);
+        Ok(())
+    }
+
+    // ── A peer that stops talking ─────────────────────────────────
+
+    /// A server that takes every connection and never says a word, as a wedged relay does while
+    /// its kernel still completes the handshake. Each connection is held open, and silent.
+    async fn mute_server() -> Outcome<SocketAddr> {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+            .map_err(|e| err!(e, "Binding the mute server."; IO, Network)));
+        let addr = res!(listener.local_addr()
+            .map_err(|e| err!(e, "Reading the mute server's address."; IO, Network)));
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        Ok(addr)
+    }
+
+    /// Runs one conversation against a peer that stalls, and requires it to fail, to fail
+    /// within a few deadlines rather than hang, and to say that it timed out.
+    async fn fails_in_time<F>(what: &str, conversation: F) -> Outcome<()>
+    where
+        F: std::future::Future<Output = Outcome<String>>,
+    {
+        let start = std::time::Instant::now();
+        let out = match timeout(Duration::from_secs(10), conversation).await {
+            Ok(o)  => o,
+            Err(_) => return Err(err!(
+                "{}: still waiting after 10s, on a deadline of {:?}.", what, STALL;
+                Test, Timeout)),
+        };
+        let took = start.elapsed();
+        let msg = match out {
+            Ok(_)  => return Err(err!(
+                "{}: a peer that stopped talking was reported to have taken the message.", what;
+                Test, Invalid)),
+            Err(e) => fmt!("{}", e),
+        };
+        req!(true, took < Duration::from_secs(5),
+            "{}: took {:?} to fail on a deadline of {:?}", what, took, STALL);
+        req!(true, msg.contains("within"), "{}: the error did not say it timed out: {}", what, msg);
+        Ok(())
+    }
+
+    const STALL: Duration = Duration::from_millis(500);
+
+    /// THE HANG THAT WAS D-06 A2: a relay that takes the connection and never greets. `submit`
+    /// waited on the banner for as long as the socket lived, whatever its timeout said, and an
+    /// alert's text waited behind it. The same peer met with TLS from the first byte stalls the
+    /// handshake instead, which is timed by the same deadline.
+    #[tokio::test]
+    async fn test_a_server_that_never_speaks_fails_submission_in_time_00() -> Outcome<()> {
+        let addr = res!(mute_server().await);
+        let c = res!(client().await);
+        for security in [Security::Plain, Security::ImplicitTls] {
+            let cfg = cfg(addr, security).with_timeout(STALL);
+            res!(fails_in_time(&fmt!("{:?}", security),
+                c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body())).await);
+        }
+        Ok(())
+    }
+
+    /// A server that greets, takes the login and then goes silent is held to the same deadline:
+    /// every reply is timed, not only the first.
+    #[tokio::test]
+    async fn test_a_server_that_stops_mid_conversation_fails_in_time_00() -> Outcome<()> {
+        let (addr, seen) = res!(provider(
+            Provider { stall: "MAIL FROM", ..Provider::accepting() }).await);
+        let c = res!(client().await);
+        let cfg = cfg(addr, Security::Plain).with_timeout(STALL);
+        res!(fails_in_time("stalled at MAIL FROM",
+            c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body())).await);
+        let lines = res!(lines_of(&seen));
+        req!(true, lines.iter().any(|l| l.to_uppercase().starts_with("AUTH")),
+            "the stall came before the login, so a later step was not tested: {:?}", lines);
+        req!(false, lines.iter().any(|l| l.to_uppercase().starts_with("RCPT TO")),
+            "the client talked on past a reply that never came: {:?}", lines);
+        Ok(())
+    }
+
+    /// Delivery meets the same mute peer as an exchange, and is held to its deadline too.
+    #[tokio::test]
+    async fn test_an_exchange_that_never_speaks_fails_delivery_in_time_00() -> Outcome<()> {
+        let addr = res!(mute_server().await);
+        let tgt = DeliveryTarget {
+            host:       fmt!("mx10.example.net"),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference: 10,
+        };
+        let c = res!(client().await);
+        res!(fails_in_time("delivery",
+            c.deliver_to_exchanges(&[tgt], "a@example.com", &[fmt!("bob@example.net")],
+                &body(), STALL)).await);
+        Ok(())
+    }
+
+    // ── The ends of the transaction, which must not be cut short ──
+
+    /// A receiver that filters the message before it answers the final "." is waited for,
+    /// beyond the step deadline. Cut off at the step deadline, as it was from 4f0e16c until
+    /// D-06 audit R1, a receiver that accepted late was sent the message again on every retry.
+    #[tokio::test]
+    async fn test_a_slow_acceptance_is_waited_for_00() -> Outcome<()> {
+        let slow = Provider { slow_done: STALL * 3, ..Provider::exchange() };
+        let (tgt, seen) = res!(exchange_at(slow, 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), STALL).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        req!(1, res!(lines_of(&seen)).iter().filter(|l| *l == ".").count());
+
+        let (addr, _) = res!(provider(
+            Provider { slow_done: STALL * 3, ..Provider::accepting() }).await);
+        let cfg = cfg(addr, Security::Plain).with_timeout(STALL);
+        let qid = res!(c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        Ok(())
+    }
+
+    /// Once the message is accepted, a receiver that goes silent at QUIT cannot turn the send
+    /// into a failure, nor hold it for a whole step: the caller would report an accepted message
+    /// as lost, and send it again.
+    #[tokio::test]
+    async fn test_a_silent_quit_does_not_fail_an_accepted_message_00() -> Outcome<()> {
+        let mute_at_quit = Provider { stall: "QUIT", ..Provider::exchange() };
+        let c = res!(client().await);
+
+        let (tgt, seen) = res!(exchange_at(mute_at_quit, 10).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.to_uppercase() == "QUIT"),
+            "the client never said QUIT");
+        req!(true, took < WAIT / 2, "delivery waited {:?} on a silent QUIT", took);
+
+        let (addr, _) = res!(provider(
+            Provider { stall: "QUIT", ..Provider::accepting() }).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, took < WAIT / 2, "submission waited {:?} on a silent QUIT", took);
         Ok(())
     }
 }

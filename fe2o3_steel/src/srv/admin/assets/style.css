@@ -13,6 +13,9 @@
  *   --green    rgb(46, 125,  50)   2xx status
  *   --orange   rgb(237, 108,   2)  3xx status
  *   --red      rgb(198,  40,  40)  5xx status
+ *   --amber    rgb(191, 128,   0)  Fleet: over clear, under distress
+ *   --pane-a   rgb( 51, 102, 204)  Fleet: host resources (the blue family)
+ *   --pane-b   rgb(237, 108,   2)  Fleet: traffic and attack (the orange family)
  *
  * Typography:
  *   Libertinus Serif > Georgia > Times for body and headings.
@@ -52,6 +55,9 @@
     --green:        rgb(46, 125,  50);
     --orange:       rgb(237, 108,   2);
     --red:          rgb(198,  40,  40);
+    --amber:        rgb(191, 128,   0);
+    --pane-a:       rgb( 51, 102, 204);
+    --pane-b:       rgb(237, 108,   2);
     --inline-code-bg:   rgb(171, 202, 222);
     --inline-code-fg:   rgb(20, 40, 60);
     --shadow-card:      0 1px 3px rgba(0, 0, 0, 0.05);
@@ -77,6 +83,9 @@ html.dark {
     --green:        rgb(120, 200, 130);
     --orange:       rgb(250, 170,  90);
     --red:          rgb(255, 120, 140);
+    --amber:        rgb(240, 190,  80);
+    --pane-a:       rgb(130, 170, 240);
+    --pane-b:       rgb(250, 170,  90);
     --inline-code-bg:   rgb(52, 72, 92);
     --inline-code-fg:   rgb(200, 220, 240);
     --shadow-card:      0 1px 3px rgba(0, 0, 0, 0.45);
@@ -788,6 +797,185 @@ table.steel-table td.status.chip-server   { color: var(--red); }
     white-space:    pre-wrap;
     max-height:     18rem;
     overflow:       auto;
+}
+
+/* ──────────────────────────────────────────────────────────────────────── */
+/* Fleet view                                                               */
+/* ──────────────────────────────────────────────────────────────────────── */
+
+/* One row per host, two panes per row. The pane is told by its family colour
+ * (blue for resources, orange for traffic), the judgement by the cell's top
+ * border (green, amber, red, or the plain grey of no threshold), so the two
+ * never read as one scale. */
+
+.fleet-rows {
+    display:        flex;
+    flex-direction: column;
+    gap:            1.1rem;
+    margin:         1rem 0 0.5rem;
+}
+
+.fleet-rows.is-behind {
+    opacity:        0.6;
+}
+
+.fleet-row {
+    background:     var(--bg-card);
+    border:         1px solid var(--border-soft);
+    box-shadow:     var(--shadow-card);
+    padding:        0.7rem 0.9rem 0.8rem;
+}
+
+.fleet-row-head {
+    display:        flex;
+    flex-wrap:      wrap;
+    align-items:    baseline;
+    gap:            0.3rem 0.8rem;
+    margin-bottom:  0.6rem;
+}
+
+.fleet-host {
+    font-family:    'Oxanium', "Libertinus Serif", Georgia, serif;
+    font-weight:    600;
+    font-size:      1.25rem;
+    color:          var(--text-heading);
+}
+
+.fleet-state {
+    font-size:      0.78rem;
+    font-weight:    bold;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color:          var(--text-muted);
+}
+
+.fleet-state-up         { color: var(--green); }
+.fleet-state-distressed { color: var(--amber); }
+.fleet-state-sealed,
+.fleet-state-down       { color: var(--red); }
+
+.fleet-row-meta {
+    font-size:      0.85rem;
+    color:          var(--text-muted);
+}
+
+.fleet-panes {
+    display:        grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+    gap:            0.8rem;
+}
+
+.fleet-pane {
+    border-left:    3px solid var(--border-firm);
+    padding-left:   0.6rem;
+    min-width:      0;
+}
+
+.fleet-pane-a { border-left-color: var(--pane-a); }
+.fleet-pane-b { border-left-color: var(--pane-b); }
+.fleet-pane-c { border-left-color: var(--border-firm); }
+
+.fleet-pane-title {
+    font-size:      0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin-bottom:  0.35rem;
+}
+
+.fleet-pane-a .fleet-pane-title { color: var(--pane-a); }
+.fleet-pane-b .fleet-pane-title { color: var(--pane-b); }
+.fleet-pane-c .fleet-pane-title { color: var(--text-muted); }
+
+.fleet-cells {
+    display:        grid;
+    grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr));
+    gap:            0.5rem;
+}
+
+.fleet-cell {
+    background:     var(--bg-inset);
+    border-top:     3px solid var(--border-firm);
+    padding:        0.35rem 0.5rem 0.3rem;
+    min-width:      0;
+}
+
+.fleet-cell.tone-green  { border-top-color: var(--green); }
+.fleet-cell.tone-amber  { border-top-color: var(--amber); }
+.fleet-cell.tone-red    { border-top-color: var(--red); }
+
+.fleet-cell-label {
+    font-size:      0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color:          var(--text-muted);
+    overflow:       hidden;
+    text-overflow:  ellipsis;
+    white-space:    nowrap;
+}
+
+.fleet-cell-value {
+    font-size:      1.05rem;
+    font-weight:    600;
+    color:          var(--text-heading);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap:  anywhere;
+}
+
+.fleet-cell.tone-red .fleet-cell-value { color: var(--red); }
+
+.fleet-cell-sub {
+    font-size:      0.72rem;
+    color:          var(--text-muted);
+}
+
+.fleet-spark {
+    display:        block;
+    width:          100%;
+    height:         24px;
+    margin-top:     0.2rem;
+}
+
+.fleet-spark path {
+    fill:           none;
+    stroke-width:   1.4;
+    vector-effect:  non-scaling-stroke;
+}
+
+.fleet-pane-a .fleet-spark path { stroke: var(--pane-a); }
+.fleet-pane-b .fleet-spark path { stroke: var(--pane-b); }
+.fleet-pane-c .fleet-spark path { stroke: var(--text-muted); }
+
+/* A row with no current reading keeps its last numbers, greyed; no colour
+ * survives, because green is a claim that fresh data was read and judged. */
+.fleet-row.is-dim .fleet-cell,
+.fleet-row.is-dim .fleet-pane-title {
+    opacity:        0.5;
+}
+
+.fleet-services {
+    display:        flex;
+    flex-wrap:      wrap;
+    align-items:    baseline;
+    gap:            0.3rem 0.9rem;
+    margin-top:     0.6rem;
+    padding-top:    0.5rem;
+    border-top:     1px solid var(--border-soft);
+    font-size:      0.85rem;
+}
+
+.fleet-services-label {
+    font-size:      0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color:          var(--text-muted);
+}
+
+.fleet-service {
+    font-weight:    600;
+}
+
+.fleet-stamp {
+    margin-top:     0.8rem;
 }
 
 /* ──────────────────────────────────────────────────────────────────────── */

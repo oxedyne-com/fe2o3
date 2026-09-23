@@ -70,6 +70,7 @@ impl UserStore for OneUser {
             local:        fmt!("alice"),
             domain:       fmt!("test.local"),
             delivery_key: self.delivery_key.clone(),
+            send_as:      Vec::new(),
         }))
     }
 }

@@ -36,6 +36,16 @@
 //! username and an API key, an account identifier and an auth token. [`Credential`] carries the
 //! two without adopting any one vendor's names for them.
 //!
+//! # A receipt means the vendor took the message
+//!
+//! [`Provider::parse`] returns a [`Receipt`] only for a message the vendor accepted. Every
+//! refusal is an error that carries the vendor's own words, and a refusal can arrive three ways:
+//! an HTTP status that is not `2xx`, an error document, or a per-message status inside an
+//! otherwise successful reply. ClickSend uses the third for an unfunded account. It answers
+//! `200` and `response_code: SUCCESS` for the call, and marks the message itself
+//! `INSUFFICIENT_CREDIT`. Until 2026-09-23 that status was passed through as a receipt, and from
+//! 2026-08-31 every text in one estate was refused and logged as sent.
+//!
 //! # What is not here
 //!
 //! No delivery receipts, no inbound messages, no scheduling, no templates, no contact lists. An
@@ -110,6 +120,9 @@ pub struct SmsCall {
 
 /// What a gateway said when it took the message.
 ///
+/// Only an accepted message has one: a refusal is an error from [`Provider::parse`], never a
+/// receipt with a refusing status in it.
+///
 /// Every field is a string except the count, because the three vendors disagree about the type
 /// of every one of them -- a price arrives as a number from one and as a quoted decimal from
 /// another -- and a receipt that reformatted them would be asserting a precision none of them
@@ -119,7 +132,7 @@ pub struct SmsCall {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Receipt {
 	pub id:		String,		// the vendor's own, for a support ticket
-	// What the vendor called the outcome, not normalised: `SUCCESS`, `queued` and
+	// The vendor's word for an accepted message, not normalised: `SUCCESS`, `queued` and
 	// `message(s) queued` all mean accepted, and flattening them into one word would throw away
 	// the only text a person can quote back to the vendor.
 	pub status:	String,
@@ -264,25 +277,37 @@ impl Provider {
 		}
 	}
 
-	/// An error document is surfaced with the provider's own words rather than a summary, since
-	/// that text is where a vendor explains a rejected credential or an unfunded account.
-	pub fn parse(&self, body: &[u8]) -> Outcome<Receipt> {
+	/// Read a gateway's answer to one call: a [`Receipt`] when the vendor took the message, and an
+	/// error in the vendor's own words when it did not.
+	///
+	/// `status` is the HTTP status the answer came with. A refusal is surfaced with the provider's
+	/// own words rather than a summary, since that text is where a vendor explains a rejected
+	/// credential or an unfunded account.
+	pub fn parse(&self, status: u16, body: &[u8]) -> Outcome<Receipt> {
+		let refused = !(200..300).contains(&status);
 		let txt = match std::str::from_utf8(body) {
 			Ok(s) => s,
 			Err(e) => return Err(err!(e,
-				"{} answered with something that is not text.", self.id(); Invalid, Input)),
+				"{} answered HTTP {} with something that is not text.", self.id(), status;
+				Network, Data, Decode)),
 		};
 		let dat = match Dat::decode_string_with_config(txt.to_string(), &json_decoder()) {
 			Ok(d) => d,
-			Err(e) => return Err(err!(e,
-				"{} answered with something that is not JSON: {}", self.id(), clip(txt);
-				Network, Data, Decode)),
+			// A refusal from a proxy in front of the vendor is often a page rather than JSON. It is
+			// still a refusal, and its text is still the best explanation to hand.
+			Err(e) => return Err(if refused {
+				err!(e, "{} refused the message with HTTP {}: {}", self.id(), status, clip(txt);
+					Network, Invalid)
+			} else {
+				err!(e, "{} answered with something that is not JSON: {}", self.id(), clip(txt);
+					Network, Data, Decode)
+			}),
 		};
 		let map = match &dat {
 			Dat::Map(m)	=> m,
 			other		=> return Err(err!(
-				"{} answered with a JSON {:?} rather than an object: {}",
-				self.id(), other.kind(), clip(txt); Network, Data, Mismatch)),
+				"{} answered HTTP {} with a JSON {:?} rather than an object: {}",
+				self.id(), status, other.kind(), clip(txt); Network, Data, Mismatch)),
 		};
 
 		// The error document first, and before the happy path, because two of these vendors
@@ -290,36 +315,82 @@ impl Provider {
 		// success fields first would find them absent and report a shape problem, hiding the
 		// sentence that says the account is out of credit.
 		if let Some(msg) = error_text(map) {
-			return Err(err!("{} refused the message: {}", self.id(), msg; Invalid, Input));
+			return Err(err!("{} refused the message: {}", self.id(), msg; Network, Invalid));
+		}
+		// A status that is not a success is a refusal whatever the body holds. `message` is read
+		// here although `error_text` passes it over: on a refusal it is the explanation, while on
+		// one vendor's success it is the success text.
+		if refused {
+			let msg = text(map, "message");
+			return Err(err!("{} refused the message with HTTP {}: {}", self.id(), status,
+				if msg.is_empty() { clip(txt) } else { msg };
+				Network, Invalid));
 		}
 
 		match self {
 			Self::ClickSend => {
-				// data.messages[0]
+				// data.messages[0]. The call can succeed while the message is refused: an unfunded
+				// account is `response_code: SUCCESS` for the call and `INSUFFICIENT_CREDIT` for
+				// the message. `SUCCESS` is the one status that means the message was taken.
 				let one = res!(first_message(map, "data", "messages").ok_or_else(|| err!(
 					"{} answered with no message record: {}", self.id(), clip(txt);
-					Invalid, Input, Missing)));
+					Network, Data, Missing)));
+				let st = text(&one, "status");
+				if !st.eq_ignore_ascii_case("SUCCESS") {
+					return Err(err!("{} refused the message: {}", self.id(),
+						if st.is_empty() { fmt!("no status given, {}", clip(txt)) } else { st };
+						Network, Invalid));
+				}
 				Ok(Receipt {
 					id:	text(&one, "message_id"),
-					status:	text(&one, "status"),
+					status:	st,
 					parts:	number(&one, "message_parts"),
 					price:	text(&one, "message_price"),
 				})
 			},
-			Self::Twilio => Ok(Receipt {
-				id:	text(map, "sid"),
-				status:	text(map, "status"),
-				parts:	number(map, "num_segments"),
-				price:	text(map, "price"),
-			}),
+			Self::Twilio => {
+				// A created message carries its `sid`. One that failed at once says so in its
+				// `status`, with an `error_code` and the vendor's `error_message`.
+				let sid = text(map, "sid");
+				if sid.is_empty() {
+					return Err(err!(
+						"{} answered with no message record: {}", self.id(), clip(txt);
+						Network, Data, Missing));
+				}
+				let st = text(map, "status");
+				let code = text(map, "error_code");
+				let failed = ["failed", "undelivered", "canceled"].iter()
+					.any(|f| st.eq_ignore_ascii_case(f));
+				if failed || !code.is_empty() {
+					let words: Vec<String> = [
+						st.clone(),
+						if code.is_empty() { String::new() } else { fmt!("error {}", code) },
+						text(map, "error_message"),
+					].into_iter().filter(|w| !w.is_empty()).collect();
+					return Err(err!("{} refused the message: {}", self.id(), words.join(", ");
+						Network, Invalid));
+				}
+				Ok(Receipt {
+					id:	sid,
+					status:	st,
+					parts:	number(map, "num_segments"),
+					price:	text(map, "price"),
+				})
+			},
 			Self::Plivo => {
 				// The identifier arrives as a list of one, since the endpoint can take several
-				// destinations. This module sends to one.
+				// destinations. This module sends to one, and a message with no identifier is one
+				// the vendor did not queue.
 				let id = match map.get(&dat!("message_uuid")) {
 					Some(Dat::List(l)) => l.first().map(scalar_text).unwrap_or_default(),
 					Some(d) => scalar_text(d),
 					None => String::new(),
 				};
+				if id.is_empty() {
+					return Err(err!(
+						"{} answered with no message identifier: {}", self.id(), clip(txt);
+						Network, Data, Missing));
+				}
 				Ok(Receipt {
 					id,
 					status:	text(map, "message"),
@@ -359,7 +430,13 @@ fn clip(s: &str) -> String {
 	if s.len() <= 200 {
 		return s.to_string();
 	}
-	fmt!("{}...", &s[..200])
+	// Back to a character boundary: a byte slice through a multi-byte character panics, and
+	// this runs in the alerting path, on text a vendor wrote.
+	let mut end = 200;
+	while !s.is_char_boundary(end) {
+		end -= 1;
+	}
+	fmt!("{}...", &s[..end])
 }
 
 /// A scalar as text, whatever the vendor made it.
@@ -375,6 +452,12 @@ fn scalar_text(d: &Dat) -> String {
 	match d {
 		Dat::Str(s)	=> s.clone(),
 		Dat::Empty	=> String::new(),
+		// JSON's `null` decodes as an absent option, and it means the vendor said nothing. Left
+		// to the fallback it read "(none)", so a Twilio receipt carried that as its price.
+		Dat::Opt(o)	=> match &**o {
+			Some(inner)	=> scalar_text(inner),
+			None		=> String::new(),
+		},
 		Dat::U8(n)	=> fmt!("{}", n),
 		Dat::U16(n)	=> fmt!("{}", n),
 		Dat::U32(n)	=> fmt!("{}", n),
@@ -442,17 +525,20 @@ fn error_text(map: &DaticleMap) -> Option<String> {
 		}
 	}
 	// Otherwise a message-shaped error field, under whichever name the vendor uses. `message`
-	// is not among them: one vendor uses it for the SUCCESS text.
+	// is not among them: one vendor uses it for the SUCCESS text. The vendor's error code goes
+	// with the words where the document carries one, since it is what a support ticket quotes.
 	for k in ["error", "error_message", "error-message", "detail"] {
-		match map.get(&dat!(k)) {
-			Some(Dat::Str(s)) if !s.is_empty() => return Some(s.clone()),
-			Some(Dat::Map(m)) => {
-				let msg = text(m, "message");
-				if !msg.is_empty() {
-					return Some(msg);
-				}
-			},
-			_ => {},
+		let msg = match map.get(&dat!(k)) {
+			Some(Dat::Str(s)) if !s.is_empty() => s.clone(),
+			Some(Dat::Map(m)) => text(m, "message"),
+			_ => String::new(),
+		};
+		if !msg.is_empty() {
+			let code = match text(map, "error_code") {
+				c if !c.is_empty() => c,
+				_ => text(map, "code"),
+			};
+			return Some(if code.is_empty() { msg } else { fmt!("{} (error {})", msg, code) });
 		}
 	}
 	None
@@ -569,19 +655,22 @@ mod tests {
 	fn a_receipt_is_read_from_each_vendors_own_shape() {
 		let cs = br#"{"http_code":200,"response_code":"SUCCESS","data":{"messages":[
 			{"message_id":"ABC-123","status":"SUCCESS","message_parts":1,"message_price":"0.0790"}]}}"#;
-		let r = res_unwrap(Provider::ClickSend.parse(cs), Provider::ClickSend);
+		let r = res_unwrap(Provider::ClickSend.parse(200, cs), Provider::ClickSend);
 		assert_eq!(r.id, "ABC-123");
+		assert_eq!(r.status, "SUCCESS");
 		assert_eq!(r.parts, 1);
 		assert_eq!(r.price, "0.0790", "the price is passed through verbatim");
 
-		let tw = br#"{"sid":"SM9","status":"queued","num_segments":"2","price":null}"#;
-		let r = res_unwrap(Provider::Twilio.parse(tw), Provider::Twilio);
+		let tw = br#"{"sid":"SM9","status":"queued","num_segments":"2","price":null,
+			"error_code":null,"error_message":null}"#;
+		let r = res_unwrap(Provider::Twilio.parse(201, tw), Provider::Twilio);
 		assert_eq!(r.id, "SM9");
 		assert_eq!(r.status, "queued");
 		assert_eq!(r.parts, 2, "a count quoted as a string is still a count");
+		assert_eq!(r.price, "", "a null price is no price, not the text of a null");
 
 		let pl = br#"{"message_uuid":["uu-1"],"message":"message(s) queued"}"#;
-		let r = res_unwrap(Provider::Plivo.parse(pl), Provider::Plivo);
+		let r = res_unwrap(Provider::Plivo.parse(202, pl), Provider::Plivo);
 		assert_eq!(r.id, "uu-1", "the identifier is lifted out of its list of one");
 	}
 
@@ -590,7 +679,7 @@ mod tests {
 	fn an_error_document_is_an_error_and_repeats_the_vendors_words() {
 		let out_of_credit = br#"{"http_code":400,"response_code":"NO_CREDIT",
 			"response_msg":"Insufficient credit"}"#;
-		match Provider::ClickSend.parse(out_of_credit) {
+		match Provider::ClickSend.parse(200, out_of_credit) {
 			Ok(r) => panic!("an unfunded account read as a receipt: {:?}", r),
 			Err(e) => {
 				let s = e.to_string();
@@ -599,8 +688,99 @@ mod tests {
 			},
 		}
 		let bad_key = br#"{"status":401,"message":"Authenticate","error":"authentication failed"}"#;
-		assert!(Provider::Twilio.parse(bad_key).is_err(),
+		assert!(Provider::Twilio.parse(200, bad_key).is_err(),
 			"a rejected credential read as a receipt");
+	}
+
+	/// THE FAULT OF 2026-08-31: the call succeeds and the message inside it is refused. This is
+	/// the shape ClickSend answers an unfunded account with, `SUCCESS` for the call and
+	/// `INSUFFICIENT_CREDIT` for the message, and every such text was logged as sent for three
+	/// weeks. It is a refusal, and it names the vendor's status.
+	#[test]
+	fn a_message_refused_inside_a_successful_call_is_a_refusal() {
+		let unfunded = br#"{"http_code":200,"response_code":"SUCCESS",
+			"response_msg":"Messages queued for delivery.","data":{"total_price":0,"total_count":1,
+			"queued_count":0,"messages":[{"direction":"out","date":1756600000,"to":"+61400000000",
+			"body":"birch copy is DOWN","from":"","schedule":0,
+			"message_id":"4C1F2D3E-5A6B-4C7D-8E9F-0A1B2C3D4E5F","message_parts":1,
+			"message_price":"0.0000","from_email":null,"list_id":null,"custom_string":"",
+			"contact_id":null,"user_id":1,"subaccount_id":1,"country":"AU","carrier":"Telstra",
+			"status":"INSUFFICIENT_CREDIT"}],"_currency":{"currency_name_short":"AUD",
+			"currency_prefix_d":"$","currency_prefix_c":"c",
+			"currency_name_long":"Australian Dollars"}}}"#;
+		match Provider::ClickSend.parse(200, unfunded) {
+			Ok(r) => panic!("a text refused for want of credit read as sent: {:?}", r),
+			Err(e) => {
+				let s = e.to_string();
+				assert!(s.contains("INSUFFICIENT_CREDIT") && s.contains("clicksend"),
+					"the refusal must name the vendor and its status: {}", s);
+			},
+		}
+		// Any status but SUCCESS is a refusal, and so is none at all.
+		let bad_number = br#"{"response_code":"SUCCESS","data":{"messages":[
+			{"message_id":"X","status":"INVALID_RECIPIENT"}]}}"#;
+		assert!(Provider::ClickSend.parse(200, bad_number).is_err());
+		let silent = br#"{"response_code":"SUCCESS","data":{"messages":[{"message_id":"X"}]}}"#;
+		assert!(Provider::ClickSend.parse(200, silent).is_err(),
+			"a message with no status is not a message the vendor took");
+	}
+
+	/// A status that is not a `2xx` is a refusal whatever the body holds, in the vendor's words
+	/// where it wrote any and in the page's own text where it did not.
+	#[test]
+	fn a_status_that_is_not_a_success_is_a_refusal_in_the_vendors_words() {
+		let bad_to = br#"{"code":21211,"message":"Invalid 'To' Phone Number: +6140000000",
+			"more_info":"https://www.twilio.com/docs/errors/21211","status":400}"#;
+		match Provider::Twilio.parse(400, bad_to) {
+			Ok(r) => panic!("a 400 read as a receipt: {:?}", r),
+			Err(e) => {
+				let s = e.to_string();
+				assert!(s.contains("Invalid 'To' Phone Number") && s.contains("400"),
+					"the vendor's explanation and the status were thrown away: {}", s);
+			},
+		}
+		let page = b"<html><body>502 Bad Gateway</body></html>";
+		match Provider::Plivo.parse(502, page) {
+			Ok(r) => panic!("a proxy's error page read as a receipt: {:?}", r),
+			Err(e) => assert!(e.to_string().contains("502 Bad Gateway"),
+				"the page's own text is the best explanation to hand: {}", e),
+		}
+		// A body that would be a receipt under a 2xx is still refused under a 5xx.
+		let looks_fine = br#"{"message_uuid":["uu-1"],"message":"message(s) queued"}"#;
+		assert!(Provider::Plivo.parse(503, looks_fine).is_err());
+	}
+
+	/// A message the vendor created and failed at once is a refusal, with its code and words;
+	/// an answer with no message in it at all is no receipt either.
+	#[test]
+	fn a_message_that_failed_at_once_or_was_never_made_is_a_refusal() {
+		let filtered = br#"{"sid":"SM10","status":"failed","error_code":30007,
+			"error_message":"Message filtered","num_segments":"1","price":null}"#;
+		match Provider::Twilio.parse(201, filtered) {
+			Ok(r) => panic!("a failed message read as a receipt: {:?}", r),
+			Err(e) => {
+				let s = e.to_string();
+				assert!(s.contains("30007") && s.contains("Message filtered"),
+					"the code and the words were thrown away: {}", s);
+			},
+		}
+		assert!(Provider::Twilio.parse(201, br#"{"status":"queued"}"#).is_err(),
+			"no sid means no message was made");
+		assert!(Provider::Plivo.parse(202, br#"{"message":"message(s) queued"}"#).is_err(),
+			"no identifier means nothing was queued");
+		assert!(Provider::Plivo.parse(202, br#"{"message_uuid":[]}"#).is_err());
+	}
+
+	/// An error message quotes at most 200 bytes of a reply, and never cuts a character in half:
+	/// a panic here would take the alerting task with it.
+	#[test]
+	fn a_long_reply_is_clipped_on_a_character_boundary() {
+		let long = "\u{00e9}".repeat(150); // 300 bytes, each character two
+		let c = clip(&long);
+		assert!(c.ends_with("..."));
+		assert!(c.len() <= 203);
+		let refusal = fmt!("<p>{}</p>", "\u{20ac}".repeat(100)); // three bytes a character
+		assert!(Provider::Twilio.parse(500, refusal.as_bytes()).is_err());
 	}
 
 	/// Unwrap in a test, naming which provider failed.

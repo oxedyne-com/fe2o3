@@ -29,6 +29,11 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use crate::email::header::{
+    header_fields,
+    split_headers_body,
+};
+
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_text::base64;
 
@@ -302,8 +307,10 @@ impl DkimSigner {
             headers_to_sign.to_vec()
         };
 
-        let (raw_headers, body) = res!(split_headers_body(message));
-        let parsed_headers = parse_header_block(raw_headers);
+        let (raw_headers, body) = split_headers_body(message);
+        // A header the submission server could not read is not signed either: a receiver would
+        // canonicalise other fields than these.
+        let parsed_headers = res!(header_fields(raw_headers));
 
         let body_canon = canonicalise_body_relaxed(body);
         let body_hash = sha(&SHA256, &body_canon);
@@ -392,71 +399,6 @@ impl DkimSigner {
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MESSAGE PARSING + CANONICALISATION                                        │
 // └───────────────────────────────────────────────────────────────────────────┘
-
-/// Splits an RFC 5322 message at the first blank line. The headers exclude the
-/// blank line that terminates the block; the body is the rest of the buffer,
-/// untouched.
-fn split_headers_body(message: &[u8]) -> Outcome<(&[u8], &[u8])> {
-    // Look for "\r\n\r\n" first; tolerate "\n\n" as a fallback.
-    if let Some(i) = find_subseq(message, b"\r\n\r\n") {
-        return Ok((&message[..i], &message[i + 4..]));
-    }
-    if let Some(i) = find_subseq(message, b"\n\n") {
-        return Ok((&message[..i], &message[i + 2..]));
-    }
-    // No blank line: treat the whole thing as headers (body empty).
-    Ok((message, &[]))
-}
-
-fn find_subseq(hay: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() || needle.len() > hay.len() { return None; }
-    for i in 0..=hay.len() - needle.len() {
-        if &hay[i..i + needle.len()] == needle {
-            return Some(i);
-        }
-    }
-    None
-}
-
-/// `(name, unfolded_value)` pairs, in the order they appeared. A continuation
-/// line, one starting with WSP, is joined onto the previous value with its
-/// leading WSP kept -- canonicalisation collapses that later.
-fn parse_header_block(headers: &[u8]) -> Vec<(String, String)> {
-    let text = String::from_utf8_lossy(headers);
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut name = String::new();
-    let mut value = String::new();
-    let mut have_current = false;
-    for line in text.split('\n') {
-        // Strip a trailing CR if present.
-        let line = line.strip_suffix('\r').unwrap_or(line);
-        if line.is_empty() {
-            continue;
-        }
-        if line.starts_with(' ') || line.starts_with('\t') {
-            // Continuation.
-            if have_current {
-                value.push_str(line);
-            }
-            continue;
-        }
-        // Flush previous.
-        if have_current {
-            out.push((std::mem::take(&mut name), std::mem::take(&mut value)));
-        }
-        if let Some(i) = line.find(':') {
-            name = line[..i].trim().to_string();
-            value = line[i + 1..].to_string();
-            have_current = true;
-        } else {
-            have_current = false;
-        }
-    }
-    if have_current {
-        out.push((name, value));
-    }
-    out
-}
 
 /// RFC 6376 §3.4.4.
 fn canonicalise_body_relaxed(body: &[u8]) -> Vec<u8> {
@@ -958,16 +900,17 @@ mod tests {
     ///
     /// This is the gap the ed25519 fix left behind.  `test_rfc8463_ed25519_signature_vector_00`
     /// signs `rfc8463_signing_input()`, which is **hand-typed** -- it bypasses
-    /// `parse_header_block` and `relaxed_value` entirely, so the functions that canonicalise
+    /// `header_fields` and `relaxed_value` entirely, so the functions that canonicalise
     /// every real message were pinned by nothing at all.
     #[test]
     fn test_rfc6376_relaxed_header_canonicalisation_00() {
-        let (raw_headers, _body) = match split_headers_body(RFC6376_EXAMPLE) {
-            Ok(pair) => pair,
-            Err(e) => panic!("split: {}", e),
+        let (raw_headers, _body) = split_headers_body(RFC6376_EXAMPLE);
+        let fields = match header_fields(raw_headers) {
+            Ok(f) => f,
+            Err(e) => panic!("the RFC 6376 example header would not read: {}", e),
         };
         let mut canon = String::new();
-        for (name, value) in parse_header_block(raw_headers) {
+        for (name, value) in fields {
             canon.push_str(&relaxed_header(&name, &value));
         }
         assert_eq!(canon, "a:X\r\nb:Y Z\r\n",
@@ -977,10 +920,7 @@ mod tests {
     /// Relaxed *body* canonicalisation must reproduce the same example's body output.
     #[test]
     fn test_rfc6376_relaxed_body_canonicalisation_00() {
-        let (_raw_headers, body) = match split_headers_body(RFC6376_EXAMPLE) {
-            Ok(pair) => pair,
-            Err(e) => panic!("split: {}", e),
-        };
+        let (_raw_headers, body) = split_headers_body(RFC6376_EXAMPLE);
         assert_eq!(canonicalise_body_relaxed(body), b" C\r\nD E\r\n".to_vec(),
             "relaxed body canonicalisation disagrees with RFC 6376 §3.4.5");
     }

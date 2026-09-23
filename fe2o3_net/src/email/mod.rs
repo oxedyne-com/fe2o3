@@ -3,4 +3,5 @@
 // `smtp::cmd` needs whether or not the async half of the crate is compiled.
 #[cfg(feature = "async")]
 pub mod file;
+pub mod header;
 pub mod msg;
