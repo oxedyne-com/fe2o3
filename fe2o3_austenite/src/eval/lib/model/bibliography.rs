@@ -63,6 +63,7 @@ static BIBLIOGRAPHY: [FieldSpec; 8] = [
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
 	match kind {
 		ElemKind::Bibliography	=> &BIBLIOGRAPHY,
+		ElemKind::CiteGroup		=> &CITE_GROUP,
 		_						=> &[],
 	}
 }
@@ -92,6 +93,18 @@ pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 		_			=> Ok(v),
 	}
 }
+
+/// `cite-group`'s one field: the citations realisation gathered.
+pub fn cast_group(name: &str, v: Value) -> Result<Value, CastErr> {
+	match name {
+		"children"	=> expect(&v, &[K::Array]).map(|_| v),
+		_			=> Ok(v),
+	}
+}
+
+static CITE_GROUP: [FieldSpec; 1] = [
+	FieldSpec::required("children",	ANY),
+];
 
 /// Checks a style name: one Austenite sets; one of Typst's other built-in styles, refused as not yet
 /// supported; anything else unknown, as Typst says. A path to a `.csl` file is refused too.
@@ -364,6 +377,16 @@ const COLUMN_GUTTER:	f64 = 0.65;	// em, between a numbered entry's prefix and it
 const HANGING_INDENT:	f64 = 1.5;	// em, of an unnumbered entry's second and later lines
 
 pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<Option<Content>> {
+	if elem.is(ElemKind::CiteGroup) {
+		let cites: Vec<Content> = match elem.field("children") {
+			Some(Value::Array(a)) => a.iter().filter_map(|v| match v {
+				Value::Content(c)	=> Some(c.clone()),
+				_					=> None,
+			}).collect(),
+			_ => Vec::new(),
+		};
+		return show_cite_group(engine, &cites, styles).map(Some);
+	}
 	let span = elem.span();
 	let mut seq = Vec::new();
 	let title = match res!(common::get(elem, styles, "title")) {

@@ -134,7 +134,7 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 	}
 }
 
-pub fn cast(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Span) -> Result<Value, CastErr> {
+pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match (kind, name) {
 		(_, "tight") | (ElemKind::Enum, "full") | (ElemKind::Enum, "reversed")
 			=> expect(&v, &[K::Bool]).map(|_| v),
@@ -152,8 +152,8 @@ pub fn cast(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Spa
 		},
 		(ElemKind::Terms, "separator")	=> expect(&v, &[K::Content]).map(|_| to_content(v)),
 		(ElemKind::List, "children")	=> list_child(v),
-		(ElemKind::Enum, "children")	=> enum_child(engine, v, span),
-		(ElemKind::Terms, "children")	=> term_child(engine, v, span),
+		(ElemKind::Enum, "children")	=> enum_child(v),
+		(ElemKind::Terms, "children")	=> term_child(v),
 		(_, "body") | (_, "term") | (_, "description")
 			=> expect(&v, &[K::Content]).map(|_| to_content(v)),
 		_								=> Ok(v),
@@ -182,9 +182,8 @@ fn list_child(v: Value) -> Result<Value, CastErr> {
 	}
 }
 
-fn enum_child(engine: &mut Engine, v: Value, span: Span) -> Result<Value, CastErr> {
+fn enum_child(v: Value) -> Result<Value, CastErr> {
 	if let Value::Array(a) = &v {
-		engine.warn(span, "implicit conversion from array to `enum.item` is deprecated");
 		if a.len() != 2 {
 			return Err(CastErr::Value("array must contain exactly two entries".to_string()));
 		}
@@ -205,9 +204,8 @@ fn enum_child(engine: &mut Engine, v: Value, span: Span) -> Result<Value, CastEr
 	}
 }
 
-fn term_child(engine: &mut Engine, v: Value, span: Span) -> Result<Value, CastErr> {
+fn term_child(v: Value) -> Result<Value, CastErr> {
 	if let Value::Array(a) = &v {
-		engine.warn(span, "implicit conversion from array to `terms.item` is deprecated");
 		if a.len() != 2 {
 			return Err(CastErr::Value("array must contain exactly two entries".to_string()));
 		}

@@ -37,7 +37,7 @@ static PAR: [FieldSpec; 8] = [
 	FieldSpec::named("justify",					BOOL,	FieldDefault::Bool(false)),
 	FieldSpec::named("justification-limits",	ANY,	FieldDefault::Computed).fold(Fold::Custom),
 	FieldSpec::named("linebreaks",				ANY,	FieldDefault::Auto),
-	FieldSpec::named("first-line-indent",		ANY,	FieldDefault::Computed).fold(Fold::Merge),
+	FieldSpec::named("first-line-indent",		ANY,	FieldDefault::Computed).fold(Fold::Keyed("amount")),
 	FieldSpec::named("hanging-indent",			LENGTH,	FieldDefault::Pt(0.0)),
 	FieldSpec::required("body",					FieldType::Content),
 ];

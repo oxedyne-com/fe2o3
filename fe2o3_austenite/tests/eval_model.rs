@@ -9,8 +9,9 @@
 //! * local names -- each language's supplements and titles against what Typst synthesises;
 //! * bibliographies -- IEEE and Chicago author-date entries and citations against Typst's HTML export.
 //!
-//! Preparation is done here the way realisation's `prepare` does it, plus the two family hooks this unit
-//! adds (computed defaults, synthesis), because realisation does not call them yet (see the U5 report).
+//! Preparation is done here the way realisation's `prepare` does it -- location, fields from the chain,
+//! then `content::synthesise` -- over the evaluated content, without show rules, which the fixtures do
+//! not use and which run after preparation in any case.
 //! A case needing another unit is marked `%%[U3]` and checked from the moment that unit is present.
 //! `EVAL_ORACLE_SKIP=1` skips explicitly; a missing `typst` otherwise fails.
 
@@ -347,7 +348,7 @@ const TYPST_LOCATABLE: &[ElemKind] = &[ElemKind::Par, ElemKind::Strong, ElemKind
 fn located(k: ElemKind) -> bool { k.locatable() || TYPST_LOCATABLE.contains(&k) }
 
 /// Realisation's preparation: a location for a locatable or labelled element, unset settable fields
-/// from the chain (or the model's computed default), then the model's synthesis.
+/// from the chain, then the family's synthesis (which also materialises the computed defaults).
 fn prepare(engine: &mut Engine, c: &Content, chain: &StyleChain) -> Outcome<Content> {
 	let mut out = c.clone();
 	if let Content::Elem(e) = &mut out {
@@ -360,19 +361,14 @@ fn prepare(engine: &mut Engine, c: &Content, chain: &StyleChain) -> Outcome<Cont
 			if !spec.settable || e.fields.iter().any(|(f, _)| *f == id) {
 				continue;
 			}
-			let v = match res!(chain.get(e.kind, id)) {
-				Some(v)	=> Some(v),
-				None if e.kind.family() == Family::Model => model::default_value(e.kind, spec.name),
-				None	=> None,
-			};
-			if let Some(v) = v {
+			if let Some(v) = res!(chain.get(e.kind, id)) {
 				e.fields.push((id, v));
 			}
 		}
 		e.prepared = true;
 	}
 	if out.kind().map(|k| k.family() == Family::Model).unwrap_or(false) {
-		res!(model::synthesise(engine, &mut out, chain));
+		res!(oxedyne_fe2o3_austenite::eval::content::synthesise(engine, &mut out, chain));
 	}
 	Ok(out)
 }

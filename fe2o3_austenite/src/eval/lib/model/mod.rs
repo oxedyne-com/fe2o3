@@ -90,7 +90,7 @@ pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
 		ElemKind::Figure | ElemKind::FigureCaption				=> figure::fields(kind),
 		ElemKind::Outline | ElemKind::OutlineEntry				=> outline::fields(kind),
 		ElemKind::Quote											=> quote::fields(kind),
-		ElemKind::Bibliography									=> bibliography::fields(kind),
+		ElemKind::Bibliography | ElemKind::CiteGroup			=> bibliography::fields(kind),
 		ElemKind::Document										=> document::fields(kind),
 		_														=> &[],
 	}
@@ -131,14 +131,14 @@ pub fn is_internal(kind: ElemKind, name: &str) -> bool {
 
 /// Checks, and where Typst does normalises, a value given for a field: what `construct` applies to an
 /// argument and a `set` rule should apply to its value.
-pub fn cast(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Span) -> Result<Value, CastErr> {
+pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match kind {
 		ElemKind::Par | ElemKind::ParLine | ElemKind::Parbreak	=> par::cast(kind, name, v),
 		ElemKind::Strong | ElemKind::Emph						=> emph::cast(kind, name, v),
 		ElemKind::Raw | ElemKind::RawLine						=> raw::cast(kind, name, v),
 		ElemKind::Heading | ElemKind::Title						=> heading::cast(kind, name, v),
 		ElemKind::List | ElemKind::ListItem | ElemKind::Enum | ElemKind::EnumItem
-			| ElemKind::Terms | ElemKind::TermItem				=> list::cast(engine, kind, name, v, span),
+			| ElemKind::Terms | ElemKind::TermItem				=> list::cast(kind, name, v),
 		ElemKind::Link											=> link::cast(kind, name, v),
 		ElemKind::Ref | ElemKind::Cite							=> reference::cast(kind, name, v),
 		ElemKind::Footnote | ElemKind::FootnoteEntry			=> footnote::cast(kind, name, v),
@@ -147,7 +147,31 @@ pub fn cast(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Spa
 		ElemKind::Quote											=> quote::cast(kind, name, v),
 		ElemKind::Bibliography									=> bibliography::cast(kind, name, v),
 		ElemKind::Document										=> document::cast(kind, name, v),
+		ElemKind::CiteGroup										=> bibliography::cast_group(name, v),
 		_														=> Ok(v),
+	}
+}
+
+/// A `set` rule's value for a field, checked as the constructor checks it.
+pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
+	match cast(kind, name, v) {
+		Ok(v)	=> Ok(v),
+		Err(e)	=> Err(err!("{}", e.message(); Input, Invalid)),
+	}
+}
+
+/// Folds a `Fold::Custom` field: `par.justification-limits`, whose `spacing` and `tracking` are each
+/// kept from the outer value where the inner one does not give them.
+pub fn fold(kind: ElemKind, field: &str, inner: Value, outer: Value) -> Outcome<Value> {
+	match (kind, field, &inner, &outer) {
+		(ElemKind::Par, "justification-limits", Value::Dict(i), Value::Dict(o)) => {
+			let mut d = (**o).clone();
+			for (k, v) in i.iter() {
+				d.insert(k, v.clone());
+			}
+			Ok(Value::dict(d))
+		}
+		_ => Ok(inner),
 	}
 }
 
@@ -191,7 +215,7 @@ pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) ->
 			while p < args.items.len() {
 				if args.items[p].name.is_none() {
 					let v = args.items[p].value.clone();
-					match cast(engine, kind, spec.name, v, args.items[p].span) {
+					match cast(kind, spec.name, v) {
 						Err(CastErr::Type(_))	=> (),
 						Err(CastErr::Value(m))	=> return Err(engine.error(args.items[p].span, m)),
 						Ok(v)					=> {
@@ -226,7 +250,15 @@ pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) ->
 }
 
 fn cast_arg(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Span) -> Outcome<Value> {
-	match cast(engine, kind, name, v, span) {
+	// Typst still takes an array as an enumeration or term list item, with a warning.
+	if matches!(v, Value::Array(_)) && name == "children" {
+		match kind {
+			ElemKind::Enum	=> engine.warn(span, "implicit conversion from array to `enum.item` is deprecated"),
+			ElemKind::Terms	=> engine.warn(span, "implicit conversion from array to `terms.item` is deprecated"),
+			_				=> (),
+		}
+	}
+	match cast(kind, name, v) {
 		Ok(v)	=> Ok(v),
 		Err(e)	=> Err(engine.error(span, e.message())),
 	}
@@ -251,6 +283,21 @@ pub fn finish(engine: &mut Engine, args: &mut Args) -> Outcome<()> {
 /// resolved level and supplement, a figure's kind and counter, a reference's target). Realisation calls
 /// it once the element has its location and its unset fields are materialised from `styles`.
 pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
+	// A default no schema constant holds is materialised here, as the chain cannot supply it.
+	if let (Some(kind), Content::Elem(e)) = (elem.kind(), &mut *elem) {
+		let e = std::sync::Arc::make_mut(e);
+		for (i, spec) in kind.fields().iter().enumerate() {
+			let id = FieldId(i as u8);
+			if !spec.settable || spec.default != crate::eval::content::FieldDefault::Computed
+				|| e.fields.iter().any(|(f, _)| *f == id)
+			{
+				continue;
+			}
+			if let Some(v) = default_value(kind, spec.name) {
+				e.fields.push((id, v));
+			}
+		}
+	}
 	match elem.kind() {
 		Some(ElemKind::Heading)			=> heading::synthesise(engine, elem, styles),
 		Some(ElemKind::Figure)			=> figure::synthesise(engine, elem, styles),
@@ -333,7 +380,7 @@ pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		ElemKind::Figure | ElemKind::FigureCaption				=> figure::show(engine, elem, styles),
 		ElemKind::Outline | ElemKind::OutlineEntry				=> outline::show(engine, elem, styles),
 		ElemKind::Quote											=> quote::show(engine, elem, styles),
-		ElemKind::Bibliography									=> bibliography::show(engine, elem, styles),
+		ElemKind::Bibliography | ElemKind::CiteGroup			=> bibliography::show(engine, elem, styles),
 		ElemKind::Document										=> document::show(engine, elem, styles),
 		_ => Err(err!("{} is not a model element", kind.path(); Bug)),
 	}
