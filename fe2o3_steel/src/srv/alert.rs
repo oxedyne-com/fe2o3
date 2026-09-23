@@ -91,6 +91,10 @@ const CHANNEL_REMIND: Duration = Duration::from_secs(86_400);
 // log, not as a task that waits for ever with its text neither sent nor refused.
 const SMS_TIMEOUT: Duration = Duration::from_secs(30);
 
+// How long an alert's mail may take, from the lookup to the relay's or the exchange's acceptance.
+// The SMTP client holds each step to its own deadline; this bounds the whole leg.
+const MAIL_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// A way this host reaches its operator.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Channel {
@@ -714,9 +718,24 @@ impl Alerter {
     /// different reasons -- mail needs a working MX and a mailbox somebody reads, a text needs a
     /// funded account and a carrier -- and an alerter that abandoned the second because the
     /// first threw would have exactly one channel on the night both were needed.
+    ///
+    /// Nor may either wait on the other, so the legs run side by side, each bounded and each
+    /// settled the moment it ends. Until 2026-09-24 the text went after the mail, and a relay
+    /// that took the connection and never spoke held it back for ever (D-06 audit A2): a wedged
+    /// karri would have stopped conifer texting that karri was down.
     async fn deliver(&self, event: AlertEvent, route: Route) {
-        if route.mail {
-            match self.send(&event).await {
+        let mail = async {
+            if !route.mail {
+                return;
+            }
+            let sent = match tokio::time::timeout(MAIL_TIMEOUT, self.send(&event)).await {
+                Ok(r)  => r,
+                Err(_) => Err(err!(
+                    "The alert mail was not accepted within {}s, so it is not known to have \
+                    been sent.", MAIL_TIMEOUT.as_secs();
+                    Network, Timeout)),
+            };
+            match sent {
                 Ok(()) => self.settle(Channel::Mail, None, &event),
                 Err(e) => {
                     self.settle(Channel::Mail, Some(e.plain()), &event);
@@ -726,8 +745,12 @@ impl Alerter {
                         event.subject(&self.host));
                 },
             }
-        }
-        if route.sms {
+        };
+        // Bounded per number by SMS_TIMEOUT, since every number is tried.
+        let sms = async {
+            if !route.sms {
+                return;
+            }
             match self.send_sms(&event).await {
                 Ok(()) => self.settle(Channel::Sms, None, &event),
                 Err(e) => {
@@ -736,7 +759,8 @@ impl Alerter {
                         event.subject(&self.host));
                 },
             }
-        }
+        };
+        tokio::join!(mail, sms);
     }
 
     /// Record how a channel did, and raise the report that is owed: a channel that has started
@@ -1430,6 +1454,79 @@ mod tests {
         assert!(transcript.contains("Last lost: [steel:example.com] birch IS DOWN (3m)"),
             "the report must name the alert that was lost:\n{}", transcript);
         let _ = jh.join();
+    }
+
+    /// THE STALL THAT WAS D-06 A2: the relay takes the connection and never speaks, as a wedged
+    /// karri would while its kernel still completes handshakes. The text leg must settle while
+    /// the mail leg is still waiting, not after it; the mail leg must then end as a failure; and
+    /// that failure must be told by text. The text leg fails here for want of an outbound TLS
+    /// client, a failure met before any gateway is asked, which is enough to show it ran.
+    #[test]
+    fn test_a_stuck_mail_leg_does_not_delay_the_text_leg_00() {
+        let rt = runtime();
+        let a = rt.block_on(async {
+            let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+                Ok(l) => l,
+                Err(e) => panic!("bind: {}", e),
+            };
+            let addr = match listener.local_addr() {
+                Ok(a) => a,
+                Err(e) => panic!("addr: {}", e),
+            };
+            // Every connection is held open, and nothing is ever written to it.
+            tokio::spawn(async move {
+                let mut held = Vec::new();
+                while let Ok((sock, _)) = listener.accept().await {
+                    held.push(sock);
+                }
+            });
+            let mut a = alerter_via(addr, Some(texting("+61400000000")));
+            // Each SMTP step waits this long, so the mail leg is still stuck when the text leg
+            // settles unless the text waited behind it.
+            let stuck = Duration::from_secs(3);
+            a.submission = a.submission.map(|s| Arc::new((*s).clone().with_timeout(stuck)));
+            a
+        });
+        let book = |a: &Alerter| -> (Option<Failing>, Option<Failing>) {
+            match a.channels.lock() {
+                Ok(g) => (g.mail.clone(), g.sms.clone()),
+                Err(_) => panic!("the channel book was poisoned"),
+            }
+        };
+        rt.block_on(async {
+            let start = Instant::now();
+            a.raise(AlertEvent::PeerDown {
+                peer:       fmt!("karri"),
+                url:        fmt!("https://mail.oxegen.io/health"),
+                failures:   3,
+                down_secs:  180,
+                noticed_by: fmt!("conifer"),
+            });
+            let deadline = start + Duration::from_secs(20);
+            let (mail, sms) = loop {
+                let (mail, sms) = book(&a);
+                if sms.is_some() || Instant::now() > deadline {
+                    break (mail, sms);
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            assert!(sms.is_some(), "the text leg never settled while the mail leg was stuck");
+            assert!(mail.is_none(),
+                "the text leg settled only after the mail leg had ended, {:?} in: it waited \
+                behind a relay that never spoke", start.elapsed());
+
+            // The mail leg ends, as a failure, and the failure is told by the other channel.
+            loop {
+                let (mail, sms) = book(&a);
+                let told = sms.map(|f| f.failures >= 2).unwrap_or(false);
+                if (mail.is_some() && told) || Instant::now() > deadline {
+                    assert!(mail.is_some(), "the stuck mail leg never ended");
+                    assert!(told, "the failing mail was not told by text");
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
     }
 
     /// The message must never carry an action link. An authorisation that
