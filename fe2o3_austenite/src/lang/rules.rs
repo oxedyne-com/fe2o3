@@ -559,7 +559,7 @@ fn short(body: &str) -> String {
 /// Lowers a `#show <selector>: <body>` whose body is not a bare `set` to a [`Transform::Template`], or
 /// refuses it. The recognised shapes are the corpus's shared template forms: a `block.with(fill:, inset:,
 /// radius:)` (or `block(fill: ...)[#it]`) wash around the element -- a callout frame; a `block(...)[ #set
-/// text(...) #it.body ]` whose inner `#set` overlays the element (the hole patch); and `v(<len>)` / `line(...)`
+/// text(...) #it ]` whose inner `#set` overlays the element (the hole patch); and `v(<len>)` / `line(...)`
 /// statements set as siblings before or after the element (`pre` / `post`). An inline wrap (`underline`) and a
 /// text rewrite (`regex`) have no block lowering and are refused; a page-reading body is already refused
 /// upstream. Under a heading selector a `v(<len>)` folds into the matched level's `space_above` / `space_below`
@@ -818,8 +818,13 @@ fn stroke_grey(v: &str) -> Option<u8> {
 fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<TemplateFrame>) -> Outcome<()> {
 	let is_wrap = s.starts_with("block") || s.starts_with("box");
 	if !is_wrap {
-		// A bare `it` / `it.body` -- the element passes through untouched.
-		return Ok(());
+		// Only the element itself passes through untouched. Anything else that names it -- `it.body`, which
+		// drops a heading's number, or content set beside the element -- changes what the page shows, and
+		// this reader runs none of it, so it is refused rather than passed through as though it were `it`.
+		if is_bare_it(s) {
+			return Ok(());
+		}
+		return Err(err!("a template statement this reader does not run: {}", short(s); Invalid, Input));
 	}
 	// The wrap's argument list -- `block.with(<args>)` or `block(<args>)[...]`.
 	let head = s.strip_prefix("block").or_else(|| s.strip_prefix("box")).unwrap_or(s);
@@ -853,10 +858,54 @@ fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<TemplateFrame
 		if !mentions_word(&content, "it") {
 			return Err(err!("a template wrap's content does not place the element `it`: {}", short(s); Invalid, Input));
 		}
+		// The overlay and the element are all this reader sets of a wrap's content; anything more -- words
+		// beside the element, `it.body` for `it` -- would be dropped, so it is refused instead.
+		if !only_sets_and_it(&content) {
+			return Err(err!("a template wrap sets content this reader does not run: {}", short(&content); Invalid, Input));
+		}
 	} else if !has_partial {
 		return Err(err!("a template wrap places no element `it`: {}", short(s); Invalid, Input));
 	}
 	Ok(())
+}
+
+/// Is this statement the element and nothing more: `it`, `#it` or `[#it]`?
+fn is_bare_it(s: &str) -> bool {
+	let t = s.trim().trim_start_matches('#').trim();
+	let t = match t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+		Some(inner)	=> inner.trim().trim_start_matches('#').trim(),
+		None		=> t,
+	};
+	t == "it"
+}
+
+/// Is a wrap's `[...]` content only `#set` rules and the element `#it`, with nothing else set?
+fn only_sets_and_it(content: &str) -> bool {
+	let chars: Vec<char> = content.chars().collect();
+	let at = |i: usize, lit: &str| lit.chars().enumerate().all(|(k, c)| chars.get(i + k) == Some(&c));
+	let mut placed = false;
+	let mut i = 0usize;
+	while i < chars.len() {
+		if chars[i].is_whitespace() || chars[i] == ';' {
+			i += 1;
+		} else if at(i, "#set ") {
+			// Past the rule's target and its balanced argument list.
+			let open = match chars[i..].iter().position(|&c| c == '(') {
+				Some(o)	=> i + o,
+				None	=> return false,
+			};
+			match crate::lang::parse::read_group(&chars, open) {
+				Some((_, next))	=> i = next,
+				None			=> return false,
+			}
+		} else if at(i, "#it") && chars.get(i + 3).map_or(true, |c| !(c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')) {
+			placed = true;
+			i += 3;
+		} else {
+			return false;
+		}
+	}
+	placed
 }
 
 /// Reads a `block.with(inset: ...)` argument into `tf`: a scalar length (`inset: 8pt`) pads every side
@@ -2540,7 +2589,7 @@ mod tests {
 			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
-			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			let (doc, _, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			let mut out = Vec::new();
 			for n in &doc.nodes {
 				if let Node::VBox(b) = n {
@@ -2599,7 +2648,7 @@ mod tests {
 			"#show heading.where(level: 1): set heading(numbering: \"A\")\n", 0, &mut refusals);
 		let mut blocks = vec![heading(1), heading(2)];
 		apply_rules(&mut blocks, &rules, geom.content_width());
-		let (_, heads) = res!(crate::doc::author(
+		let (_, heads, _) = res!(crate::doc::author(
 			fonts, geom, &style, &crate::fonts::FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads[0].number, "A", "the level-1 rule renumbers only the level-1 heading");
 		assert_eq!(heads[1].number, "1.1", "the level-2 heading, outside the rule, keeps the default number");
@@ -2638,7 +2687,7 @@ mod tests {
 			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
-			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			let (doc, _, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			for n in &doc.nodes {
 				if let Node::VBox(b) = n {
 					return Ok(b.list.iter().filter_map(|c| match c {
@@ -3113,5 +3162,22 @@ mod tests {
 		let mut palette = Palette::new();
 		collect_palette(src, &mut palette);
 		assert!(palette.get("yellow").is_none(), "colours_x must not be read as the colours palette");
+	}
+
+	/// A template passes the element through untouched only when it names the element alone; one that sets
+	/// its body, or anything beside it, is refused rather than passed through as though it were `it`, and a
+	/// wrap's content may hold `#set` rules and `#it`, nothing more.
+	#[test]
+	fn a_template_passes_the_element_through_only_when_it_names_it_alone() {
+		let h1 = Selector { kind: ElementKind::Heading, predicates: vec![FieldPredicate::Level(1)] };
+		assert!(matches!(lower_transform(&h1, "it => it"), Transform::Template(_)));
+		assert!(matches!(lower_transform(&h1, "it => [#it]"), Transform::Template(_)));
+		for body in ["it => it.body", "it => [#it.body #here().page()]", "it => emph(it)",
+			"it => block(fill: luma(240))[#it.body]", "it => block(fill: luma(240))[Note: #it]"]
+		{
+			assert!(matches!(lower_transform(&h1, body), Transform::Refused(_)), "{} must be refused", body);
+		}
+		assert!(matches!(lower_transform(&h1, "it => block(fill: luma(240))[#set text(size: 9pt)\n#it]"),
+			Transform::Template(_)));
 	}
 }

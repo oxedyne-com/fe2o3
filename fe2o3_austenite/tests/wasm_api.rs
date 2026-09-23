@@ -171,7 +171,7 @@ fn strict_refuses_an_empty_source_and_zero_pages() -> Outcome<()> {
 	};
 	assert_eq!(fmt!("{}", head), "/proj/main.typ:1:1: strict: the source sets no content.");
 
-	let none = Report { pages: 0, diagnostics: Vec::new(), skipped: None, empty: false };
+	let none = Report { pages: 0, diagnostics: Vec::new(), skipped: None, summary: None, empty: false };
 	let head = match none.strict_failure(Path::new(MAIN)) {
 		Some(h)	=> h,
 		None	=> return Err(err!("strict must refuse zero pages"; Test)),
@@ -381,7 +381,7 @@ fn strict_refuses_by_severity_and_kind() {
 		kind,
 		hint:		None,
 	};
-	let report = |d: Diagnostic| Report { pages: 1, diagnostics: vec![d], skipped: None, empty: false };
+	let report = |d: Diagnostic| Report { pages: 1, diagnostics: vec![d], skipped: None, summary: None, empty: false };
 	for kind in [DiagnosticKind::Unsupported, DiagnosticKind::MissingFile, DiagnosticKind::Package,
 		DiagnosticKind::MissingFont]
 	{

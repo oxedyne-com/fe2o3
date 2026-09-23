@@ -66,6 +66,23 @@ impl CodeFigure {
 			CodeFigure::Lines(plot)						=> plot.build(fonts),
 		}
 	}
+
+	/// A hash of the figure's whole content, the same wherever the figure stands, so a figure the reader
+	/// read and the one authoring drew are known to be the same figure.
+	pub fn fingerprint(&self) -> u64 {
+		let mut h = crate::memo::Fnv::new();
+		h.write_str(&fmt!("{:?}", self));
+		h.finish()
+	}
+
+	/// What the figure draws, in a diagnostic's words.
+	pub fn kind_name(&self) -> &'static str {
+		match self {
+			CodeFigure::Flowchart { .. }	=> "diagram",
+			CodeFigure::Bars(_)				=> "bar chart",
+			CodeFigure::Lines(_)			=> "line plot",
+		}
+	}
 }
 
 /// Parses a `#figure` body's source into a [`CodeFigure`], or `None` when the body is not one of the code

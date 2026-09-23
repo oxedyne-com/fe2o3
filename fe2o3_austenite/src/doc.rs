@@ -507,6 +507,27 @@ pub struct DocInfo {
 	pub keywords:	Option<String>,	// Typst's `keywords:`, an array joined with ", "
 }
 
+/// What authoring could not set as its block asked and set a stand-in for instead: an image that would not
+/// load, or a figure drawn by code that would not build. Known by what was asked for rather than where, so
+/// a block's fallbacks travel unchanged through the authoring memo; the compile joins them with the sites
+/// that asked ([`crate::lang::Ask`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Unmet {
+	Image { path: String, missing: bool, reason: String },	// `missing` when no file answers to the path
+	Figure { fingerprint: u64, reason: String },
+}
+
+impl Unmet {
+	/// The fallback for the image at `path`, which `e` stopped from loading.
+	fn image(path: &str, e: &Error<ErrTag>) -> Self {
+		Unmet::Image {
+			path:		path.to_string(),
+			missing:	matches!(crate::image::resolve(path), Ok(None)),
+			reason:		e.plain(),
+		}
+	}
+}
+
 /// The book's front matter, read from the root's template call: the title, subtitle and author the
 /// title page sets, the cover raster a development build carries, and the imprint the meta page prints.
 /// A field a book omits is `None` and its line is not set. The whole struct is `None` for a lone
@@ -626,6 +647,7 @@ struct Authoring<'a> {
 	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
 	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
 	global_fp:		u64,			// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
+	unmet:			Vec<Unmet>,		// every stand-in set, in document order; a memo hit replays its block's
 }
 
 /// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
@@ -845,6 +867,7 @@ impl<'a> Authoring<'a> {
 					heads_before:	self.heads.len(),
 					index_before:	self.index_gather.occ.len(),
 					claim_before:	self.claim_gather.occ.len(),
+					unmet_before:	self.unmet.len(),
 					seen_before:	self.seen.clone(),
 					counters_before:	self.counters.clone(),
 				});
@@ -1123,7 +1146,7 @@ impl<'a> Authoring<'a> {
 							let mut mid = Vec::new();
 							res!(image_figure(
 								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), path, *width, *height, *scale,
-								caption.as_deref(), supplement, number, label.as_deref()));
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
@@ -1132,7 +1155,7 @@ impl<'a> Authoring<'a> {
 							}
 							res!(image_figure(
 								&mut self.nodes, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
-								caption.as_deref(), supplement, number, label.as_deref()));
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
@@ -1146,7 +1169,7 @@ impl<'a> Authoring<'a> {
 							let mut mid = Vec::new();
 							res!(code_figure(
 								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), figure,
-								caption.as_deref(), supplement, number, label.as_deref()));
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
@@ -1155,7 +1178,7 @@ impl<'a> Authoring<'a> {
 							}
 							res!(code_figure(
 								&mut self.nodes, self.fonts.clone(), style, self.measure, figure,
-								caption.as_deref(), supplement, number, label.as_deref()));
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
@@ -1217,7 +1240,7 @@ impl<'a> Authoring<'a> {
 					self.prev_para = false;
 				},
 				Block::Image { path, width, height, scale } => {
-					res!(plain_image(&mut self.nodes, self.fonts.clone(), self.measure, path, *width, *height, *scale));
+					res!(plain_image(&mut self.nodes, self.fonts.clone(), self.measure, path, *width, *height, *scale, &mut self.unmet));
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -1226,7 +1249,7 @@ impl<'a> Authoring<'a> {
 					// The template's `#section-banner` turns the page first (`pagebreak(weak: true)`); a forced
 					// eject the driver drops when the page is already fresh, so it never opens a blank one.
 					self.nodes.push(Node::Penalty(Penalty::eject()));
-					res!(section_banner(&mut self.nodes, self.fonts.clone(), self.geom, self.measure, path));
+					res!(section_banner(&mut self.nodes, self.fonts.clone(), self.geom, self.measure, path, &mut self.unmet));
 					self.pending_banner = true;	// the section's level-1 heading follows and opens beneath this banner
 					i += 1;
 					self.first = false;
@@ -1427,6 +1450,8 @@ impl<'a> Authoring<'a> {
 	fn apply_block_entry(&mut self, entry: BlockEntry) {
 		self.nodes.extend(entry.nodes);
 		self.heads.extend(entry.heads);
+		// A cached block that set a stand-in reports it again, so a hit is never a silent pass.
+		self.unmet.extend(entry.unmet);
 		self.index_gather.occ.extend(entry.index_occ);
 		self.claim_gather.occ.extend(entry.claim_occ);
 		for term in entry.seen_add {
@@ -1464,6 +1489,7 @@ impl<'a> Authoring<'a> {
 			seen_add,
 			counters_set,
 			self.block_state(),
+			self.unmet[p.unmet_before..].to_vec(),
 		);
 		m.block_store(p.key, entry);
 	}
@@ -1485,6 +1511,7 @@ struct PendingBlock {
 	heads_before:		usize,
 	index_before:		usize,
 	claim_before:		usize,
+	unmet_before:		usize,
 	seen_before:		HashSet<String>,
 	counters_before:	HashMap<String, u32>,
 }
@@ -1504,7 +1531,7 @@ pub fn author(
 	front:		Option<&FrontMatter>,
 	bib:		Option<&Bibliography>,
 )
-	-> Outcome<(Document, Vec<Heading>)>
+	-> Outcome<(Document, Vec<Heading>, Vec<Unmet>)>
 {
 	author_memo(fonts, geom, style, faces, blocks, front, bib, None)
 }
@@ -1528,7 +1555,7 @@ pub fn author_memo(
 	bib:		Option<&Bibliography>,
 	mut memo:	Option<&mut Memo>,
 )
-	-> Outcome<(Document, Vec<Heading>)>
+	-> Outcome<(Document, Vec<Heading>, Vec<Unmet>)>
 {
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
@@ -1567,6 +1594,7 @@ pub fn author_memo(
 		want_claim_index:	false,
 		claim_index_at:	None,
 		global_fp,
+		unmet:			Vec::new(),
 	};
 	// A body set in several columns (`#set page(columns: n)`) opens with the layout marker, so the front
 	// matter composed ahead of it keeps the single-column page, and every block is set at the column measure.
@@ -1620,13 +1648,14 @@ pub fn author_memo(
 		}
 	}
 	let heads = authoring.heads;
+	let mut unmet = authoring.unmet;
 
 	// The front matter is composed ahead of the body so its cover, title, imprint and note leaves take
 	// the physical pages before the body opens; the body then carries no heading anchor of the front
 	// matter's, so the driver fixes the folio restart at the first body heading.
 	let mut stream: Vec<Node> = Vec::new();
 	if let Some(fm) = front {
-		res!(front_matter(&mut stream, &fonts, faces, geom, style, fm));
+		res!(front_matter(&mut stream, &fonts, faces, geom, style, fm, &mut unmet));
 		// The contents follows the front matter and precedes the body, resolving each entry's folio as a
 		// forward reference into the body the driver has not composed yet.
 		stream.extend(res!(contents(
@@ -1641,7 +1670,7 @@ pub fn author_memo(
 	// entries before this compile's emit could reuse them. `Memo::begin` (called above) opened the
 	// generation; `Memo::sweep`, called once the pages are emitted, closes it.
 	let _ = memo;
-	Ok((document, heads))
+	Ok((document, heads, unmet))
 }
 
 /// The compile-wide fingerprint the block-authoring memo scopes every key to: the theme, the page
@@ -1762,7 +1791,7 @@ fn guard_widows(lines: Vec<Node>) -> Vec<Node> {
 /// figure and equation counters are stepped exactly as [`author`] steps them, so a label's number here is
 /// the number the block itself sets -- a chapter, section, figure, table or "Equation N". A label the
 /// pre-pass never records is left for the caller's page-number fallback.
-fn ref_targets(blocks: &[Block], style: &Theme) -> HashMap<String, String> {
+pub(crate) fn ref_targets(blocks: &[Block], style: &Theme) -> HashMap<String, String> {
 	let mut out:		HashMap<String, String>	= HashMap::new();
 	let mut sec:		[u32; 6]				= [0; 6];
 	let mut counters:	HashMap<String, u32>	= HashMap::new();
@@ -2579,18 +2608,22 @@ fn image_figure(
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
+	unmet:		&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
 	figure_anchors(nodes, supplement, number, label);
 
 	// The loaded figure sized to the measure, or the placeholder box when nothing loads. A load failure
-	// is not fatal: the figure keeps its space and its caption, and the missing ink is a reported gap. A
-	// raster fills a rectangle; an SVG is drawn as its own scaled paths.
+	// is not fatal: the figure keeps its space and its caption, and the stand-in is reported. A raster
+	// fills a rectangle; an SVG is drawn as its own scaled paths.
 	let graphic = match crate::image::load_figure(path) {
 		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
 		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale)),
-		Err(_)									=> res!(placeholder(measure)),
+		Err(e)									=> {
+			unmet.push(Unmet::image(path, &e));
+			res!(placeholder(measure))
+		},
 	};
 	let leaf	= Leaf::graphic(graphic);
 	let gw		= leaf.dims.width;
@@ -2619,13 +2652,17 @@ fn plain_image(
 	width:		Option<Length>,
 	height:		Option<Length>,
 	scale:		Option<f64>,
+	unmet:		&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
 	let graphic = match crate::image::load_figure(path) {
 		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
 		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale)),
-		Err(_)									=> res!(placeholder(measure)),
+		Err(e)									=> {
+			unmet.push(Unmet::image(path, &e));
+			res!(placeholder(measure))
+		},
 	};
 	let pad = Sp::from_pt(10.0);	// the template's `padded-image` padding, above and below
 	nodes.push(Node::Glue(Glue::fixed(pad)));
@@ -2657,6 +2694,7 @@ fn code_figure(
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
+	unmet:		&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -2664,7 +2702,10 @@ fn code_figure(
 
 	let graphic = match figure.build(fonts.clone()) {
 		Ok(g)	=> res!(fit_graphic(g, measure)),
-		Err(_)	=> res!(placeholder(measure)),
+		Err(e)	=> {
+			unmet.push(Unmet::Figure { fingerprint: figure.fingerprint(), reason: e.plain() });
+			res!(placeholder(measure))
+		},
 	};
 	let leaf	= Leaf::graphic(graphic);
 	let gw		= leaf.dims.width;
@@ -3169,6 +3210,7 @@ fn front_matter(
 	geom:		PageGeometry,
 	style: &Theme,
 	fm:			&FrontMatter,
+	unmet:		&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -3176,11 +3218,14 @@ fn front_matter(
 	// display face, in which case the title helpers set in the body role exactly as before.
 	let display = head_solo(&resolved_head_face(1, style, faces, is_doc_heading(style)));
 	// Cover: the raster filling the content box, a development build only. A path that will not load
-	// (an SVG, or a missing file) sets no cover page rather than a placeholder.
+	// (an SVG, or a missing file) sets no cover page rather than a placeholder, and is reported.
 	if let Some(path) = &fm.cover_image {
-		if let Ok(node) = fm_cover_node(geom, path) {
-			nodes.push(node);
-			nodes.push(Node::Penalty(Penalty::eject()));
+		match fm_cover_node(geom, path) {
+			Ok(node)	=> {
+				nodes.push(node);
+				nodes.push(Node::Penalty(Penalty::eject()));
+			},
+			Err(e)		=> unmet.push(Unmet::image(path, &e)),
 		}
 	}
 
@@ -3190,9 +3235,9 @@ fn front_matter(
 	// stays out of the running heads and the contents.
 	nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, "frontmatter:title")));
 	if fm.sidebar_grey.is_some() {
-		res!(fm_doc_title_page(nodes, fonts, geom, fm));
+		res!(fm_doc_title_page(nodes, fonts, geom, fm, unmet));
 	} else {
-		res!(fm_title_page(nodes, fonts, geom, style, fm));
+		res!(fm_title_page(nodes, fonts, geom, style, fm, unmet));
 	}
 	nodes.push(Node::Penalty(Penalty::eject()));
 
@@ -3201,7 +3246,7 @@ fn front_matter(
 	if fm.sidebar_grey.is_some() {
 		if fm_has_doc_meta(fm) {
 			nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, "frontmatter:meta")));
-			res!(fm_doc_meta_page(nodes, fonts, geom, style, fm));
+			res!(fm_doc_meta_page(nodes, fonts, geom, style, fm, unmet));
 			nodes.push(Node::Penalty(Penalty::eject()));
 		}
 	} else if fm_has_imprint(fm) {
@@ -3350,6 +3395,7 @@ fn fm_title_page(
 	geom:	PageGeometry,
 	style: &Theme,
 	fm:		&FrontMatter,
+	unmet:	&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -3377,14 +3423,18 @@ fn fm_title_page(
 		y += res!(fm_centred_line(nodes, fonts, None, Role::Italic, fm.subtitle_size, sub, measure));
 	}
 
-	// The publisher logo near the foot, when it loads (an SVG logo does not, and is simply omitted).
+	// The publisher logo near the foot, when it loads; one that does not (an SVG logo, which this path
+	// reads no vectors for) is left off the page and reported.
 	if let Some(logo) = &fm.logo_image {
-		if let Ok(node) = fm_logo_node(fonts, geom, style, logo) {
-			let target = Sp(h.raw() * 84 / 100);
-			if target > y {
-				nodes.push(fm_spacer(target - y));
-			}
-			nodes.push(node);
+		match fm_logo_node(fonts, geom, style, logo) {
+			Ok(node)	=> {
+				let target = Sp(h.raw() * 84 / 100);
+				if target > y {
+					nodes.push(fm_spacer(target - y));
+				}
+				nodes.push(node);
+			},
+			Err(e)		=> unmet.push(Unmet::image(logo, &e)),
 		}
 	}
 	Ok(())
@@ -3421,6 +3471,7 @@ fn fm_doc_title_page(
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
 	fm:		&FrontMatter,
+	unmet:	&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -3446,21 +3497,25 @@ fn fm_doc_title_page(
 	// The top logo, centred across the sidebar, its top edge one `margins.a4` down from the page top -- which
 	// equals the top margin, so its box-frame top is zero. The bottom logo sits one `margins.a4` up from the
 	// page foot. Both are drawn at the width the `doc.with` call declared; a logo that will not load is left
-	// out, as the template's own missing-image path would leave a gap.
+	// out, as the template's own missing-image path would leave a gap, and reported.
 	let side_mid_box	= -il + side_w / 2.0;	// the sidebar's horizontal centre, in the box frame
 	if let Some(path) = &fm.top_logo {
 		let w = fm.top_logo_width.to_pt() as f32;
-		if let Ok((logo, _)) = logo_ops(fonts, path, w, side_mid_box - w / 2.0, 0.0) {
-			ops.extend(logo);
+		match logo_ops(fonts, path, w, side_mid_box - w / 2.0, 0.0) {
+			Ok((logo, _))	=> ops.extend(logo),
+			Err(e)			=> unmet.push(Unmet::image(path, &e)),
 		}
 	}
 	if let Some(path) = &fm.bottom_logo {
 		let w = fm.bottom_logo_width.to_pt() as f32;
-		if let Ok((logo, lh)) = logo_ops(fonts, path, w, 0.0, 0.0) {
-			// Re-place now the height is known: bottom edge one `margins.a4` up from the page foot.
-			let dy = (ph - it) - it - lh;
-			let placed = res!(translate_ops(logo, side_mid_box - w / 2.0, dy));
-			ops.extend(placed);
+		match logo_ops(fonts, path, w, 0.0, 0.0) {
+			Ok((logo, lh))	=> {
+				// Re-place now the height is known: bottom edge one `margins.a4` up from the page foot.
+				let dy = (ph - it) - it - lh;
+				let placed = res!(translate_ops(logo, side_mid_box - w / 2.0, dy));
+				ops.extend(placed);
+			},
+			Err(e)			=> unmet.push(Unmet::image(path, &e)),
 		}
 	}
 
@@ -3700,6 +3755,7 @@ fn fm_doc_meta_page(
 	geom:	PageGeometry,
 	style: &Theme,
 	fm:		&FrontMatter,
+	unmet:	&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -3757,13 +3813,16 @@ fn fm_doc_meta_page(
 		foot.extend(broken);
 	}
 	if let Some(path) = &fm.footer_logo {
-		if let Ok(graphic) = image_at_height(fonts, path, 18.0) {
-			let logo = Leaf::graphic(graphic);
-			let lh	 = logo.dims.height + logo.dims.depth;
-			let big	 = Sp(style.text.body_size.raw() * 3 / 2);	// a little more air above the logo
-			foot.push(Node::Glue(Glue::fixed(big)));
-			foot_h += big + lh;
-			foot.push(Node::HBox(BoxNode::new(vec![Node::Leaf(logo)], Dims::new(measure, lh, Sp::ZERO))));
+		match image_at_height(fonts, path, 18.0) {
+			Ok(graphic)	=> {
+				let logo = Leaf::graphic(graphic);
+				let lh	 = logo.dims.height + logo.dims.depth;
+				let big	 = Sp(style.text.body_size.raw() * 3 / 2);	// a little more air above the logo
+				foot.push(Node::Glue(Glue::fixed(big)));
+				foot_h += big + lh;
+				foot.push(Node::HBox(BoxNode::new(vec![Node::Leaf(logo)], Dims::new(measure, lh, Sp::ZERO))));
+			},
+			Err(e)		=> unmet.push(Unmet::image(path, &e)),
 		}
 	}
 
@@ -5157,6 +5216,7 @@ fn section_banner(
 	geom:		PageGeometry,
 	measure:	Sp,
 	path:		&str,
+	unmet:		&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -5179,8 +5239,15 @@ fn section_banner(
 
 	// The logo, loaded 30 pt tall, its right edge one page margin in from the page's right edge (the content
 	// right edge) and its box centred on the band's vertical middle. Its own ops are in a top-left frame,
-	// y down; a plain translation seats them. A logo that will not load draws the bar alone.
-	if let Ok(logo) = image_at_height(&fonts, path, logo_h as f64) {
+	// y down; a plain translation seats them. A logo that will not load draws the bar alone, and is reported.
+	let logo = match image_at_height(&fonts, path, logo_h as f64) {
+		Ok(g)	=> Some(g),
+		Err(e)	=> {
+			unmet.push(Unmet::image(path, &e));
+			None
+		},
+	};
+	if let Some(logo) = logo {
 		let lw			= logo.dims.width.to_pt() as f32;
 		let lh			= (logo.dims.height + logo.dims.depth).to_pt() as f32;
 		let right		= x1 - inside_pt;			// 2.5 cm in from the page right edge = the content right edge
@@ -5501,6 +5568,7 @@ pub fn decorate(
 	geom:			PageGeometry,
 	book_title:		&str,
 	footer_logo:	Option<&str>,
+	unmet:			&mut Vec<Unmet>,
 )
 	-> Outcome<()>
 {
@@ -5508,8 +5576,18 @@ pub fn decorate(
 	let content_left	= geom.content_left();
 	let content_width	= geom.content_width();
 	// The documentation template seats a logo at the left of every page footer. It is loaded once and
-	// placed on each body page; a logo that will not load leaves the footer to the folio alone.
-	let footer = footer_logo.and_then(|p| image_at_height(fonts, p, 18.0).ok().map(Arc::new));
+	// placed on each body page; a logo that will not load leaves the footer to the folio alone, and is
+	// reported.
+	let footer = match footer_logo {
+		Some(p)	=> match image_at_height(fonts, p, 18.0) {
+			Ok(g)	=> Some(Arc::new(g)),
+			Err(e)	=> {
+				unmet.push(Unmet::image(p, &e));
+				None
+			},
+		},
+		None	=> None,
+	};
 	// The body opens on this physical page; the printed folio restarts at one here, so a body page's
 	// folio is its physical page less the front matter before it. A run with no headings (a lone
 	// manuscript) leaves `body_start_page` zero, so the whole document is body and the folio is physical.
@@ -5685,6 +5763,22 @@ fn centre_x(geom: PageGeometry, w: Sp) -> Sp {
 mod tests {
 	use super::*;
 
+	/// A figure drawn by code that will not build is set as a placeholder and reported as a fallback known by
+	/// the figure's own fingerprint, so the compile charges it to the `#figure` that asked for it.
+	#[test]
+	fn a_figure_that_will_not_build_is_reported_by_its_fingerprint() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let mut d	= crate::diagram::Diagram::new();
+		d.node_at("a", "A", Sp::ZERO, Sp::ZERO, crate::diagram::shape::Shape::Box);
+		d.node_at("a", "B", Sp::ZERO, Sp::from_pt(40.0), crate::diagram::shape::Shape::Box);
+		let figure	= crate::lang::codefig::CodeFigure::Flowchart { diagram: d, style: crate::diagram::DiagramStyle::default() };
+		let blocks	= vec![Block::code_figure(figure.clone(), None, "Figure".to_string(), None, None)];
+		let (_, _, unmet) = res!(author(fonts, PageGeometry::a4(), &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		assert!(matches!(unmet.as_slice(), [Unmet::Figure { fingerprint, .. }] if *fingerprint == figure.fingerprint()),
+			"{:?}", unmet);
+		Ok(())
+	}
+
 	#[test]
 	fn count_words_counts_letter_runs_across_blocks() {
 		// Letter runs, as the template's `\p{L}+` counter steps: "don't" is two runs, a bare number none.
@@ -5772,7 +5866,7 @@ mod tests {
 			Block::Heading { level: 1, segments: vec![Segment::text("Pearlite")], label: None },
 			Block::Paragraph { text: "Pearlite is the format.".to_string() },
 		];
-		let (doc, heads) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
+		let (doc, heads, _) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
 		assert!(heads.iter().any(|h| h.level == 1 && h.title == "Pearlite" && h.banner),
 			"the level-1 heading after a #section-banner carries the banner flag");
 		let forced = doc.nodes.iter()
@@ -5814,12 +5908,12 @@ mod tests {
 			Block::Scoped { patch: scope_patch, blocks: vec![para()] },
 			para(),
 		];
-		let (doc, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &scoped, None, None));
+		let (doc, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &scoped, None, None));
 		let (min_s, max_s) = line_heights(&doc);
 
 		// A control with no scope: both paragraphs at the document's 11 pt, so every line is the same height.
 		let plain = vec![para(), para()];
-		let (doc_p, _)	= res!(author(fonts, geom, &style, &FaceResolver::default(), &plain, None, None));
+		let (doc_p, _, _)	= res!(author(fonts, geom, &style, &FaceResolver::default(), &plain, None, None));
 		let (min_p, max_p) = line_heights(&doc_p);
 
 		assert_eq!(min_p, max_p, "the unscoped control must set every paragraph at one size");
@@ -5883,12 +5977,12 @@ mod tests {
 		let geom	= PageGeometry::a4();
 		let blocks	= vec![Block::Heading { level: 1, segments: vec![Segment::text("Alpha")], label: None }];
 
-		let (_, heads_d) = res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let (_, heads_d, _) = res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads_d[0].number, "1", "the default heading number is the plain arabic count");
 
 		let mut alpha = Theme::default();
 		for l in &mut alpha.heading.levels { l.numbering = Some("A".to_string()); }
-		let (_, heads_a) = res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
+		let (_, heads_a, _) = res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads_a[0].number, "A", "a heading numbering pattern must reach the rendered number");
 		Ok(())
 	}
@@ -5921,7 +6015,7 @@ mod tests {
 			"a cross-reference into a scope must resolve the scoped heading's own number");
 
 		// And the headings number 1, 2 in document order across the scope boundary.
-		let (_, heads) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
+		let (_, heads, _) = res!(author(fonts, geom, &style, &FaceResolver::default(), &blocks, None, None));
 		let nums: Vec<&str> = heads.iter().map(|h| h.number.as_str()).collect();
 		assert_eq!(nums, vec!["1", "2"], "headings number in document order across a scope edge");
 		Ok(())
@@ -5957,14 +6051,14 @@ mod tests {
 		}
 
 		let flat = vec![para("Intro."), h2(), para(body)];
-		let (doc_flat, _) = res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &flat, None, None));
+		let (doc_flat, _, _) = res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &flat, None, None));
 
 		let wrapped = vec![
 			para("Intro."),
 			Block::Scoped { patch: ThemePatch::default(), blocks: vec![h2()] },
 			para(body),
 		];
-		let (doc_wrap, _) = res!(author(fonts, geom, &style, &FaceResolver::default(), &wrapped, None, None));
+		let (doc_wrap, _, _) = res!(author(fonts, geom, &style, &FaceResolver::default(), &wrapped, None, None));
 
 		assert_eq!(sig(&doc_flat), sig(&doc_wrap),
 			"a heading alone in a scope must keep with the sibling paragraph beyond it, exactly as the flat pairing does");
@@ -5991,10 +6085,10 @@ an interior line justification fills to the measure while ragged setting does no
 			}).unwrap_or(Sp::ZERO)
 		}
 
-		let (dj, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let (dj, _, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
 		let mut ragged = Theme::default();
 		ragged.text.justify = false;
-		let (dr, _)	= res!(author(fonts, geom, &ragged, &FaceResolver::default(), &blocks, None, None));
+		let (dr, _, _)	= res!(author(fonts, geom, &ragged, &FaceResolver::default(), &blocks, None, None));
 
 		// The justified interior line fills to the measure; the ragged one leaves its slack on the right.
 		assert!(first_line_ink(&dj) > first_line_ink(&dr),
@@ -6019,10 +6113,10 @@ an interior line justification fills to the measure while ragged setting does no
 			doc.nodes.iter().filter(|n| matches!(n, Node::HBox(b) if b.dims.height > Sp::ZERO)).count()
 		}
 
-		let (on, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let (on, _, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
 		let mut no_hyph = Theme::default();
 		no_hyph.text.hyphenate = false;
-		let (off, _) = res!(author(fonts, geom, &no_hyph, &FaceResolver::default(), &blocks, None, None));
+		let (off, _, _) = res!(author(fonts, geom, &no_hyph, &FaceResolver::default(), &blocks, None, None));
 
 		assert!(line_count(&on) > line_count(&off),
 			"hyphenation on must split the long words into more lines than off ({} vs {})",
@@ -6054,10 +6148,10 @@ an interior line justification fills to the measure while ragged setting does no
 			Sp::ZERO
 		}
 
-		let (dd, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let (dd, _, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &FaceResolver::default(), &blocks, None, None));
 		let mut alpha = Theme::default();
 		alpha.enumeration.numbering = Some("(a)".to_string());
-		let (da, _)	= res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
+		let (da, _, _)	= res!(author(fonts, geom, &alpha, &FaceResolver::default(), &blocks, None, None));
 
 		assert!(first_marker_width(&dd) > Sp::ZERO, "the default ordered marker has width");
 		assert_ne!(first_marker_width(&dd), first_marker_width(&da),
@@ -6076,10 +6170,10 @@ an interior line justification fills to the measure while ragged setting does no
 
 		// Code size: a taller `code.size` sets taller code lines.
 		let code_blocks	= vec![Block::Code { lines: vec!["let x = 1;".to_string()] }];
-		let (cd, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &faces, &code_blocks, None, None));
+		let (cd, _, _)	= res!(author(fonts.clone(), geom, &Theme::default(), &faces, &code_blocks, None, None));
 		let mut big_code = Theme::default();
 		big_code.code.size = Sp::from_pt(20.0);
-		let (cb, _)	= res!(author(fonts.clone(), geom, &big_code, &faces, &code_blocks, None, None));
+		let (cb, _, _)	= res!(author(fonts.clone(), geom, &big_code, &faces, &code_blocks, None, None));
 		let tallest = |doc: &Document| doc.nodes.iter().filter_map(|n| match n {
 			Node::HBox(b) if b.dims.height > Sp::ZERO => Some(b.dims.height), _ => None,
 		}).fold(Sp::ZERO, |a, h| if h > a { h } else { a });
@@ -6090,7 +6184,7 @@ an interior line justification fills to the measure while ragged setting does no
 			vec![Block::Paragraph { text: "Inside a callout.".to_string() }], ThemePatch::default())];
 		let mut red = Theme::default();
 		red.callout.fill = Rgba::opaque(200, 20, 20);
-		let (bd, _)	= res!(author(fonts, geom, &red, &faces, &box_blocks, None, None));
+		let (bd, _, _)	= res!(author(fonts, geom, &red, &faces, &box_blocks, None, None));
 		let mut fills = Vec::new();
 		collect_fills(&bd.nodes, &mut fills);
 		assert!(fills.contains(&Rgba::opaque(200, 20, 20)),
@@ -6155,8 +6249,8 @@ an interior line justification fills to the measure while ragged setting does no
 			Segment::text(head), Segment::margin_note("A1", vec!["A1".to_string()]), Segment::text(tail)])];
 
 		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
-		let (doc_p, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &plain, None, None));
-		let (doc_n, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &noted, None, None));
+		let (doc_p, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &plain, None, None));
+		let (doc_n, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &noted, None, None));
 		let out_p		= res!(crate::driver::run(&doc_p, &metrics, crate::driver::Config::default()));
 		let out_n		= res!(crate::driver::run(&doc_n, &metrics, crate::driver::Config::default()));
 
@@ -6200,7 +6294,7 @@ an interior line justification fills to the measure while ragged setting does no
 			Block::ClaimIndex,
 		];
 		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
-		let (doc, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+		let (doc, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 		let out			= res!(crate::driver::run(&doc, &metrics, crate::driver::Config::default()));
 		let keys: Vec<String> = out.ledger.anchors().map(|a| a.id.key.clone()).collect();
 		assert!(keys.iter().any(|k| k == "ref-1"),
@@ -6288,7 +6382,7 @@ an interior line justification fills to the measure while ragged setting does no
 
 		let pages = |src: &str| -> Outcome<usize> {
 			let blocks	= res!(crate::lang::to_blocks(src));
-			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let (d, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
 			Ok(o.pages.len())
 		};
@@ -6325,7 +6419,7 @@ an interior line justification fills to the measure while ragged setting does no
 
 		let pages = |src: &str| -> Outcome<usize> {
 			let blocks	= res!(crate::lang::to_blocks(src));
-			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let (d, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
 			Ok(o.pages.len())
 		};
@@ -6364,7 +6458,7 @@ an interior line justification fills to the measure while ragged setting does no
 		// lower, so its line y is the smallest placed y strictly greater than the first line's.
 		let second_para_y = |src: &str| -> Outcome<Sp> {
 			let blocks	= res!(crate::lang::to_blocks(src));
-			let (d, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+			let (d, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 			let o		= res!(crate::driver::run(&d, &metrics, crate::driver::Config::default()));
 			let p		= res!(o.pages.first().ok_or_else(|| err!("no page was laid"; Missing)));
 			let first	= res!(p.frame.placed.first().ok_or_else(|| err!("no content was placed"; Missing))).y;

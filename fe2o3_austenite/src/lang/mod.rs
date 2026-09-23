@@ -21,6 +21,9 @@ pub mod set;
 use crate::doc::Block;
 use crate::doc::Segment;
 
+pub use parse::Ask;
+pub use parse::Asked;
+pub use parse::ImageRole;
 pub use parse::Refusal;
 pub use parse::RefusalClass;
 pub use parse::Refusals;

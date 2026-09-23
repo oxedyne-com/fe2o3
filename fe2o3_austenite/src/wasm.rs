@@ -12,8 +12,10 @@
 //! <message>", diagnostics, skipped }` -- `0:0` where the cause could not be traced to a source line --
 //! never a bare access-denied line and never a JavaScript exception, so a caller composes its diagnostics
 //! from a value it always receives. A project carrying `strict: true` turns a result that was not set as
-//! written -- a construct passed over, a file, package or font family missing -- or that produced no pages
-//! or set no content into such a failure, so a partial PDF never reads as success.
+//! written -- a construct passed over, a stand-in set for something asked for (an image or a logo that will
+//! not load, a figure that will not build, a label or a citation that resolves to nothing), a file or font
+//! family missing -- or that produced no pages or set no content into such a failure, so a partial PDF never
+//! reads as success.
 //!
 //! One capability is deliberately out of this lane and documented as a gap rather than stubbed: a recompile
 //! is from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not
@@ -94,9 +96,9 @@ impl DaimondTypst {
 	/// message, severity, kind, hint }], skipped: string | null }` on success, `{ error, diagnostics,
 	/// skipped }` otherwise. `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes],
 	/// ...], fonts: [[path, bytes], ...], strict?: bool }`; every entry is injected into the source map and
-	/// nothing outside it is read. `diagnostics` lists every site the reader did not set as written; under
-	/// `strict` a warning of a refusing kind, zero pages or a source setting no content is returned as
-	/// `{ error }` instead of a PDF.
+	/// nothing outside it is read. `diagnostics` lists every site not set as written, and `skipped` the
+	/// constructs passed over among them; under `strict` a warning of a refusing kind, zero pages or a source
+	/// setting no content is returned as `{ error }` instead of a PDF.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
 		match self.run(project, Mode::Pdf) {

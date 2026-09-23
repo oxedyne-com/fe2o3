@@ -72,8 +72,9 @@ pub(crate) fn term_value(key: &str) -> Option<String> {
 	}
 }
 
-/// Why a construct was refused rather than set: the axis a per-site diagnostic reports alongside its
-/// name and location, so a reader can tell a categorical limit from a todo.
+/// Why a site was not set as written: the axis a per-site diagnostic reports alongside its name and
+/// location. The first three name a construct the reader passed over; the rest a site that was set with
+/// something standing in for what it asked for, the page built all the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalClass {
 	// Typst's own general evaluation primitives -- `#import`, `#let`, `#set`, `#show` -- which run an
@@ -90,8 +91,12 @@ pub enum RefusalClass {
 	// Anything else skipped: a specific call or wrapper (`#columns`, an unknown standalone or inline
 	// `#func`, an unknown term-dictionary key) that names no fundamental barrier -- just not yet read.
 	Unsupported,
-	// A file the construct names that the project does not hold: an image set as a placeholder.
+	// A file the construct names that the project does not hold, set with a stand-in or left out.
 	MissingFile,
+	// Something the construct asked for that is there but could not be used -- an image that will not
+	// decode, a figure that will not build, a label or citation key that resolves to nothing -- set with a
+	// stand-in in its place.
+	Unusable,
 }
 
 impl RefusalClass {
@@ -121,36 +126,120 @@ impl RefusalClass {
 			RefusalClass::Introspective	=> "introspective",
 			RefusalClass::Unsupported		=> "unsupported",
 			RefusalClass::MissingFile		=> "missing-file",
+			RefusalClass::Unusable			=> "unusable",
 		}
+	}
+
+	/// Was the construct passed over, rather than set with a stand-in?
+	pub fn passed_over(&self) -> bool {
+		matches!(self, RefusalClass::FixedPoint | RefusalClass::Introspective | RefusalClass::Unsupported)
 	}
 }
 
-/// One site the reader passed over rather than set: the source name it was written with (carrying its
-/// leading `#`, so it reads back as source), the byte span it was found at, and why it was refused.
-/// The span is the whole containing line for a code statement or standalone call, or the whole
-/// containing item (a paragraph, a heading) for an inline call found within one -- Austenite's inline
-/// scanner does not keep the fine per-character offset once a paragraph's lines have been joined and its
-/// whitespace collapsed, so the enclosing item is the finest boundary available without a deeper rework
-/// of the reader than this diagnostic upgrade is for.
+/// One site not set as written: the source name it was written with (carrying its leading `#`, so it
+/// reads back as source), the byte span it was found at, and why. The span is the whole containing line
+/// for a code statement or standalone call, or the whole containing item (a paragraph, a heading) for an
+/// inline call found within one -- Austenite's inline scanner does not keep the fine per-character offset
+/// once a paragraph's lines have been joined and its whitespace collapsed, so the enclosing item is the
+/// finest boundary available without a deeper rework of the reader than this diagnostic upgrade is for.
 #[derive(Clone, Debug)]
 pub struct Refusal {
 	pub name:	String,
 	pub span:	Span,
 	pub class:	RefusalClass,
-	// The source file this site was read from, for `--explain`'s "file:line:col". Empty immediately
-	// after parsing, since a lone parse of a source string carries no filename of its own; the book
-	// assembler ([`crate::book::assemble`]) tags each chapter's (and the root's own) refusals with the
-	// real path once assembly is back in a context that has one -- see [`Refusals::tag_file`].
+	// The source file this site was read from, for `--explain`'s "file:line:col". Empty immediately after
+	// a parse, since a parse of a source string carries no filename of its own; its caller tags the table
+	// with the real path at once (see [`Refusals::tag_file`]), and every other collector records its sites
+	// with their file ([`Refusals::record_in`]).
+	pub file:	String,
+	pub note:	Option<String>,	// for a site set with a stand-in, what went wrong and what stands in its place
+}
+
+/// What a construct asked for that only a later stage can say it got: an image authoring loads, a figure
+/// it draws, a label the laid-out document places, a key the bibliography holds. The reader records each
+/// where it is written; the compile joins them with what authoring reports and records a site for every
+/// one that fell back ([`crate::compile::record_fallbacks`]).
+#[derive(Clone, Debug)]
+pub struct Ask {
+	pub what:	Asked,
+	pub span:	Span,
 	pub file:	String,
 }
 
-/// Every site the reader refused across one parse (or, once [`Refusals::merge`] has folded chapters
-/// together, across a whole book). Kept as a flat list of [`Refusal`]s rather than the old name-keyed
-/// tally, so a caller can still print the terse one-line [`Refusals::report`] but can also walk every
-/// site for `--explain`'s per-site listing. Empty when the reader set everything it met.
+/// The thing an [`Ask`] asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Asked {
+	Image { path: String, role: ImageRole },
+	Figure { fingerprint: u64, name: &'static str },	// a figure drawn by code, known by its content
+	Ref(String),		// a label, from `@label`
+	Cite(Vec<String>),	// the keys of a `#cite`
+}
+
+/// Where an asked-for image is drawn, which decides what stands in when it cannot be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageRole {
+	Figure,			// a `#figure(image(...))`, or a line-leading `#image`/`#padded-image`
+	BannerLogo,		// a `#section-banner`'s logo
+	Cover,			// a book's cover raster
+	TitleLogo,		// a logo on the title page
+	FooterLogo,		// the logo a documentation tree seats in its footers
+}
+
+impl ImageRole {
+	/// The words naming the image in a diagnostic.
+	fn noun(&self) -> &'static str {
+		match self {
+			ImageRole::Figure		=> "image",
+			ImageRole::BannerLogo	=> "banner logo",
+			ImageRole::Cover		=> "cover image",
+			ImageRole::TitleLogo	=> "title-page logo",
+			ImageRole::FooterLogo	=> "footer logo",
+		}
+	}
+
+	/// What is set in the image's place.
+	fn stand_in(&self) -> &'static str {
+		match self {
+			ImageRole::Figure		=> "a placeholder is set",
+			ImageRole::BannerLogo	=> "the banner is drawn without it",
+			ImageRole::Cover		=> "no cover page is set",
+			ImageRole::TitleLogo	=> "the title page is set without it",
+			ImageRole::FooterLogo	=> "the footers are set without it",
+		}
+	}
+}
+
+impl Asked {
+	/// The site's name, as a diagnostic and a summary line give it.
+	pub fn name(&self) -> String {
+		match self {
+			Asked::Image { path, role }	=> fmt!("{} {:?}", role.noun(), path),
+			Asked::Figure { name, .. }	=> fmt!("#figure ({})", name),
+			Asked::Ref(label)			=> fmt!("@{}", label),
+			Asked::Cite(keys)			=> fmt!("#cite({})", keys.iter().map(|k| fmt!("<{}>", k)).collect::<Vec<_>>().join(", ")),
+		}
+	}
+
+	/// What stands in when an image cannot be drawn: `missing` for a file the project does not hold,
+	/// `reason` otherwise. `None` for an ask that is no image.
+	pub fn image_note(&self, missing: bool, reason: &str) -> Option<String> {
+		match self {
+			Asked::Image { role, .. } if missing	=> Some(fmt!("is not in the project, so {}", role.stand_in())),
+			Asked::Image { role, .. }				=> Some(fmt!("will not load ({}), so {}", reason, role.stand_in())),
+			_										=> None,
+		}
+	}
+}
+
+/// Every site not set as written across one parse (or, once [`Refusals::merge`] has folded chapters
+/// together, across a whole compile), and what the parse asked for that a later stage must confirm. Kept
+/// as a flat list of [`Refusal`]s rather than the old name-keyed tally, so a caller can still print the
+/// terse one-line [`Refusals::skip_line`] but can also walk every site for `--explain`'s per-site listing.
+/// Empty when the reader set everything it met.
 #[derive(Clone, Debug, Default)]
 pub struct Refusals {
-	sites: Vec<Refusal>,
+	sites:	Vec<Refusal>,
+	asks:	Vec<Ask>,
 }
 
 impl Refusals {
@@ -158,68 +247,101 @@ impl Refusals {
 	/// the span it was found at, classifying it from the name.
 	pub(crate) fn record(&mut self, name: &str, span: Span) {
 		let class = RefusalClass::classify(name);
-		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new() });
-	}
-
-	/// Records a construct naming a file the project does not hold.
-	pub(crate) fn record_missing(&mut self, name: &str, span: Span) {
-		self.sites.push(Refusal { name: name.to_string(), span, class: RefusalClass::MissingFile, file: String::new() });
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new(), note: None });
 	}
 
 	/// Records a refused construct already known to stand in `file`, for a collector recording into a table
 	/// that holds other files' sites, so the site never waits for a later tagging to say where it is.
 	pub(crate) fn record_in(&mut self, file: &str, name: &str, span: Span) {
 		let class = RefusalClass::classify(name);
-		self.sites.push(Refusal { name: name.to_string(), span, class, file: file.to_string() });
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: file.to_string(), note: None });
+	}
+
+	/// Records a site set with a stand-in: `class` says why, `note` what went wrong and what stands in.
+	pub(crate) fn record_stand_in(&mut self, name: &str, span: Span, class: RefusalClass, note: &str) {
+		self.record_stand_in_in("", name, span, class, note);
+	}
+
+	/// As [`Self::record_stand_in`], for a site already known to stand in `file`.
+	pub(crate) fn record_stand_in_in(&mut self, file: &str, name: &str, span: Span, class: RefusalClass, note: &str) {
+		self.sites.push(Refusal {
+			name:	name.to_string(),
+			span,
+			class,
+			file:	file.to_string(),
+			note:	Some(note.to_string()),
+		});
+	}
+
+	/// Records what a construct asks for, for a later stage to confirm ([`Ask`]).
+	pub(crate) fn ask(&mut self, what: Asked, span: Span) {
+		self.asks.push(Ask { what, span, file: String::new() });
+	}
+
+	/// As [`Self::ask`], for a construct already known to stand in `file`.
+	pub(crate) fn ask_in(&mut self, file: &str, what: Asked, span: Span) {
+		self.asks.push(Ask { what, span, file: file.to_string() });
 	}
 
 	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
 	/// the parser) that wants a known `Refusals` without driving a real parse to produce one.
 	pub fn from_sites(sites: Vec<Refusal>) -> Self {
-		Self { sites }
+		Self { sites, asks: Vec::new() }
 	}
 
 	pub fn is_empty(&self) -> bool { self.sites.is_empty() }
 
-	/// Sets every site's `file` that is not already set, so a caller assembling several chapters can tag
-	/// each chapter's refusals with its own path right after parsing it, before folding them into the
-	/// book's running total with [`merge`](Self::merge) -- at which point every site already carries the
-	/// file it came from, and a second tagging (the root's own trailing markup, read after every
-	/// include) touches only the sites still unset.
+	/// Sets every site's and ask's `file` that is not already set, so a caller parsing a file's source tags
+	/// the parse's table with the file's path at once, before it joins any other file's.
 	pub fn tag_file(&mut self, file: &str) {
 		for r in &mut self.sites {
 			if r.file.is_empty() {
 				r.file = file.to_string();
 			}
 		}
+		for a in &mut self.asks {
+			if a.file.is_empty() {
+				a.file = file.to_string();
+			}
+		}
 	}
 
-	/// Moves every site on by `by` bytes, placing a parse of a fragment in the file it was cut from.
+	/// Moves every site and ask on by `by` bytes, placing a parse of a fragment in the file it was cut from.
 	pub(crate) fn shift(&mut self, by: u32) {
 		for r in &mut self.sites {
 			r.span = Span::new(r.span.start.saturating_add(by), r.span.end.saturating_add(by));
 		}
+		for a in &mut self.asks {
+			a.span = Span::new(a.span.start.saturating_add(by), a.span.end.saturating_add(by));
+		}
 	}
 
-	/// Every refused site, in the order the reader met them.
+	/// Every site not set as written, in the order they were met.
 	pub fn sites(&self) -> &[Refusal] { &self.sites }
 
-	/// The number of distinct construct names refused.
+	/// Everything the table's parses asked for, in the order they were met.
+	pub fn asks(&self) -> &[Ask] { &self.asks }
+
+	/// Takes the asks out, for the stage that answers them.
+	pub(crate) fn take_asks(&mut self) -> Vec<Ask> {
+		std::mem::take(&mut self.asks)
+	}
+
+	/// The number of distinct construct names passed over.
 	pub fn kinds(&self) -> usize { self.entries().len() }
 
-	/// The total count of refused sites across every name.
+	/// The total count of sites across every name.
 	pub fn total(&self) -> usize { self.sites.len() }
 
-	/// Each refused construct name with its count, ordered by descending count then name, so the report
-	/// leads with the construct that cost the most.
+	/// Each construct name passed over, with its count, ordered by descending count then name, so the
+	/// report leads with the construct that cost the most.
 	pub fn entries(&self) -> Vec<(String, usize)> {
-		let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-		for r in &self.sites {
-			*counts.entry(r.name.as_str()).or_insert(0) += 1;
-		}
-		let mut v: Vec<(String, usize)> = counts.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
-		v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-		v
+		tally(self.sites.iter().filter(|r| r.class.passed_over()))
+	}
+
+	/// Each site set with a stand-in, by name, with its count, ordered as [`Self::entries`] orders them.
+	pub fn stand_ins(&self) -> Vec<(String, usize)> {
+		tally(self.sites.iter().filter(|r| !r.class.passed_over()))
 	}
 
 	/// Folds another parse's refusals into this one, so a caller assembling several chapters reports one
@@ -227,35 +349,64 @@ impl Refusals {
 	/// just-parsed chapter's refusals into the book's running total has no further use for its own copy.
 	pub fn merge(&mut self, other: Refusals) {
 		self.sites.extend(other.sites);
+		self.asks.extend(other.asks);
 	}
 
-	/// The terse line -- `skipped: #show ×2, #columns ×1` -- from the per-name counts, ordered as
-	/// [`Refusals::entries`] orders them, or `None` when nothing was refused.
+	/// The terse line of the constructs passed over -- `skipped: #show ×2, #columns ×1` -- ordered as
+	/// [`Refusals::entries`] orders them, or `None` when none was. A site set with a stand-in was not
+	/// skipped, so it is not on the line.
 	pub fn skip_line(&self) -> Option<String> {
-		if self.sites.is_empty() {
+		let entries = self.entries();
+		if entries.is_empty() {
 			return None;
 		}
-		let parts: Vec<String> = self.entries().into_iter()
-			.map(|(n, c)| fmt!("{} ×{}", n, c))
-			.collect();
-		Some(fmt!("skipped: {}", parts.join(", ")))
+		Some(fmt!("skipped: {}", counted(&entries)))
 	}
 
-	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- or `None` when
-	/// nothing was skipped, so a caller prints the line only when it has something to say. Unchanged in
-	/// wording from before this unit: `--explain` is the new, detailed report, this terse one stays the
-	/// default.
+	/// The line of every site not set as written: the [`skip line`](Self::skip_line), then the sites set
+	/// with a stand-in -- `skipped: #columns ×1; substituted: image "gone.png" ×1` -- or `None` for none.
+	pub fn summary(&self) -> Option<String> {
+		let mut parts: Vec<String> = Vec::new();
+		if let Some(line) = self.skip_line() {
+			parts.push(line);
+		}
+		let stand_ins = self.stand_ins();
+		if !stand_ins.is_empty() {
+			parts.push(fmt!("substituted: {}", counted(&stand_ins)));
+		}
+		if parts.is_empty() { None } else { Some(parts.join("; ")) }
+	}
+
+	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- of the constructs
+	/// passed over, or `None` when none was, so a caller prints the line only when it has something to say.
 	pub fn report(&self) -> Option<String> {
-		if self.sites.is_empty() {
+		let entries = self.entries();
+		if entries.is_empty() {
 			return None;
 		}
-		let parts: Vec<String> = self.entries().into_iter()
+		let parts: Vec<String> = entries.into_iter()
 			.map(|(n, c)| fmt!("{} ({})", n, c))
 			.collect();
-		let n = self.total();
+		let n: usize = self.sites.iter().filter(|r| r.class.passed_over()).count();
 		Some(fmt!("skipped {} unsupported construct{}: {}",
 			n, if n == 1 { "" } else { "s" }, parts.join(", ")))
 	}
+}
+
+/// Each name among `sites` with its count, by descending count then name.
+fn tally<'a, I: Iterator<Item = &'a Refusal>>(sites: I) -> Vec<(String, usize)> {
+	let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+	for r in sites {
+		*counts.entry(r.name.as_str()).or_insert(0) += 1;
+	}
+	let mut v: Vec<(String, usize)> = counts.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
+	v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+	v
+}
+
+/// `name ×count` pairs joined with commas.
+fn counted(entries: &[(String, usize)]) -> String {
+	entries.iter().map(|(n, c)| fmt!("{} ×{}", n, c)).collect::<Vec<_>>().join(", ")
 }
 
 /// Parses a whole Ingot source string into its surface items. The only error is an empty heading --
@@ -309,25 +460,55 @@ fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
 	}
 }
 
-/// Records every image a figure, a plain `#image` or a section banner names that the project does not
-/// hold. The page still draws a placeholder in a figure's place, and a banner without its logo, so without
-/// the record a missing image would pass unreported.
-fn flag_missing_images(items: &[Item], skips: &mut Refusals) {
+/// Records what each item asks for that only a later stage can confirm ([`Ask`]): the image a figure, a
+/// plain `#image` or a section banner draws, a figure drawn by code, and every `@label` and `#cite` in an
+/// item's runs -- a paragraph's, a heading's, a list's, a caption's or a table cell's -- at the item. A
+/// figure whose body is none this reader draws asks for nothing and is set as a placeholder, so it is
+/// recorded here at once.
+fn flag_asks(items: &[Item], skips: &mut Refusals) {
 	for item in items {
-		let (path, span) = match item {
-			Item::Figure { body: FigureBody::Image { path, .. }, span, .. }	=> (path, *span),
-			Item::Image { path, span, .. }									=> (path, *span),
-			Item::SectionBanner { path, span }								=> (path, *span),
+		match item {
+			Item::Figure { body, caption, span, .. } => {
+				match body {
+					FigureBody::Image { path, .. } if path.is_empty()	=> skips.record_stand_in("#figure", *span,
+						RefusalClass::Unusable, "has no image, table or diagram this reader draws, so a placeholder is set"),
+					FigureBody::Image { path, .. }	=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::Figure }, *span),
+					FigureBody::Code(cf)			=> skips.ask(Asked::Figure { fingerprint: cf.fingerprint(), name: cf.kind_name() }, *span),
+					FigureBody::Table(spec)			=> for cell in &spec.cells { ask_runs(cell, *span, skips); },
+				}
+				if let Some(cap) = caption {
+					ask_runs(cap, *span, skips);
+				}
+			},
+			Item::Image { path, span, .. }		=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::Figure }, *span),
+			Item::SectionBanner { path, span }	=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::BannerLogo }, *span),
+			Item::Paragraph { runs, span, .. }
+			| Item::Heading { runs, span, .. }	=> ask_runs(runs, *span, skips),
+			Item::List { items: entries, span, .. }	=> for e in entries { ask_list_item(e, *span, skips); },
+			Item::Table { spec, span }			=> for cell in &spec.cells { ask_runs(cell, *span, skips); },
 			Item::Box { items: inner, .. }
 			| Item::Scoped { items: inner, .. }
-			| Item::Place { items: inner, .. }								=> {
-				flag_missing_images(inner, skips);
-				continue;
-			},
-			_																=> continue,
-		};
-		if crate::image::is_missing(path) {
-			skips.record_missing(&fmt!("image {:?}", path), span);
+			| Item::Place { items: inner, .. }	=> flag_asks(inner, skips),
+			_									=> {},
+		}
+	}
+}
+
+/// [`flag_asks`] for one list entry: its own runs at the list, and the lists nested beneath it.
+fn ask_list_item(entry: &ListItem, span: Span, skips: &mut Refusals) {
+	ask_runs(&entry.runs, span, skips);
+	flag_asks(&entry.children, skips);
+}
+
+/// Asks for the label of every `@label` and the keys of every `#cite` in `runs`, a footnote's included.
+fn ask_runs(runs: &[Inline], span: Span, skips: &mut Refusals) {
+	for run in runs {
+		match run {
+			Inline::PageRef(label)			=> skips.ask(Asked::Ref(label.clone()), span),
+			Inline::Cite(keys)				=> skips.ask(Asked::Cite(keys.clone()), span),
+			Inline::Footnote(inner)			=> ask_runs(inner, span, skips),
+			Inline::Index { display, .. }	=> ask_runs(display, span, skips),
+			_								=> {},
 		}
 	}
 }
@@ -370,7 +551,7 @@ pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings<'_
 {
 	let (items, mut skips) = res!(parse_items(src, binds));
 	flag_unindexed_claim_refs(&items, &mut skips);
-	flag_missing_images(&items, &mut skips);
+	flag_asks(&items, &mut skips);
 	Ok((items, skips))
 }
 
@@ -2699,30 +2880,36 @@ fn dispatch_capture(
 		CaptureKind::Let(name) => {
 			arrays.insert(name, parse_let_array(&cap.buf));
 		},
+		// A construct the reader cannot read -- a table whose arguments do not parse, a malformed figure call,
+		// an image or banner naming no path -- sets nothing, so each is refused where it stands rather than
+		// dropped without a trace.
 		CaptureKind::Table => {
-			if let Some(inner) = call_inner(&cap.buf, "table") {
-				if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(&cap.buf)) {
-					items.push(Item::Table { spec, span: Span::new(cap.start, cap.start) });
-				}
+			match call_inner(&cap.buf, "table").and_then(|inner| parse_table_spec(&inner, arrays, outer_text_size(&cap.buf))) {
+				Some(spec)	=> items.push(Item::Table { spec, span: Span::new(cap.start, cap.start) }),
+				None		=> skips.record("#table", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::Figure => {
-			if let Some(item) = parse_figure(&cap.buf, arrays, Span::new(cap.start, cap.start)) {
-				items.push(item);
+			match parse_figure(&cap.buf, arrays, Span::new(cap.start, cap.start)) {
+				Some(item)	=> items.push(item),
+				None		=> skips.record("#figure", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::Image => {
 			// A line-leading image call: its path and sizing are read the same way a figure's image body is,
-			// then set as a plain centred image with no figure number. A call naming no path draws nothing.
+			// then set as a plain centred image with no figure number.
 			let (path, width, height, scale) = image_call(&cap.buf);
-			if !path.is_empty() {
+			if path.is_empty() {
+				skips.record("#image", Span::new(cap.start, cap.start));
+			} else {
 				items.push(Item::Image { path, width, height, scale, span: Span::new(cap.start, cap.start) });
 			}
 		},
 		CaptureKind::SectionBanner => {
-			// The first positional argument is the logo path; a call naming none draws nothing.
-			if let Some(path) = call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
-				items.push(Item::SectionBanner { path, span: Span::new(cap.start, cap.start) });
+			// The first positional argument is the logo path.
+			match call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
+				Some(path)	=> items.push(Item::SectionBanner { path, span: Span::new(cap.start, cap.start) }),
+				None		=> skips.record("#section-banner", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::Place => {
@@ -5970,6 +6157,40 @@ bound\".\n";
 		let tfns = crate::lang::rules::TemplateFns::new();
 		let (_, skips) = res!(document_with_templates("#intro\n", crate::lang::rules::Bindings::new(&tfns, &cfns)));
 		assert!(named(&skips), "an expanded binding's is refused: {:?}", skips.sites());
+		Ok(())
+	}
+
+	/// The reader asks for what only a later stage can confirm -- a figure's image, a plain image, a banner's
+	/// logo, a drawn figure, and every `@label` and `#cite` in a paragraph, a heading, a caption or a table
+	/// cell -- each at its item, and refuses at once a construct it cannot read, which sets nothing.
+	#[test]
+	fn the_reader_asks_for_what_a_later_stage_confirms() -> Outcome<()> {
+		let src = "= Title @head\n\n#figure(image(\"a.png\"), caption: [See @cap.])\n\n#image(\"b.png\")\n\n\
+			#section-banner(\"c.svg\")\n\nA #cite(<k1>, <k2>) and @para.\n\n\
+			#figure(diagram(node((0, 0), [A]), edge(), node((0, 1), [B])), caption: [Flow.])\n";
+		let (_, skips) = res!(document_with_refusals(src));
+		let asked: Vec<&Asked> = skips.asks().iter().map(|a| &a.what).collect();
+		for want in [
+			Asked::Ref("head".to_string()),
+			Asked::Image { path: "a.png".to_string(), role: ImageRole::Figure },
+			Asked::Ref("cap".to_string()),
+			Asked::Image { path: "b.png".to_string(), role: ImageRole::Figure },
+			Asked::Image { path: "c.svg".to_string(), role: ImageRole::BannerLogo },
+			Asked::Cite(vec!["k1".to_string(), "k2".to_string()]),
+			Asked::Ref("para".to_string()),
+		] {
+			assert!(asked.contains(&&want), "{:?} is asked for: {:?}", want, asked);
+		}
+		assert!(asked.iter().any(|a| matches!(a, Asked::Figure { name: "diagram", .. })), "{:?}", asked);
+		assert!(skips.is_empty(), "asking refuses nothing: {:?}", skips.sites());
+
+		let refused = |src: &str| -> Outcome<Vec<String>> {
+			let (_, skips) = res!(document_with_refusals(src));
+			Ok(skips.sites().iter().map(|r| r.name.clone()).collect())
+		};
+		assert_eq!(res!(refused("#image()\n")), ["#image"]);
+		assert_eq!(res!(refused("#section-banner()\n")), ["#section-banner"]);
+		assert_eq!(res!(refused("#figure(rect(width: 1cm), caption: [A box.])\n")), ["#figure"]);
 		Ok(())
 	}
 }

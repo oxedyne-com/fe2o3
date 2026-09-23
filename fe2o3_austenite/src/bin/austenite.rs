@@ -116,8 +116,9 @@ fn render_page_pair(page: &Page, out_dir: &str, write_svg: bool) -> Outcome<Prep
 	Ok(Prepared { pdf })
 }
 
-/// The detailed report `--explain` prints: every refused site, one per line, as `file:line:col: <class>:
-/// skipped <name>` with the source line beneath it and a `^` caret under the column the span starts at.
+/// The detailed report `--explain` prints: every site not set as written, one per line, as
+/// `file:line:col: <class>: skipped <name>` -- or, for a site set with a stand-in, `<name> <what stands
+/// in>` -- with the source line beneath it and a `^` caret under the column the span starts at.
 /// Each referenced file is read at most once, cached by path, and a file that has since moved or gone
 /// (a rare race, not the common case) yields a one-line note in its place rather than failing the whole
 /// report -- `--explain` is a diagnostic, and a diagnostic that can fail is a worse tool than one that
@@ -127,20 +128,24 @@ fn explain_refusals(refusals: &lang::Refusals) -> String {
 	let mut cache: std::collections::HashMap<String, Option<String>> = std::collections::HashMap::new();
 	let mut out = String::new();
 	for r in refusals.sites() {
+		let what = match &r.note {
+			Some(note)	=> fmt!("{} {}", r.name, note),
+			None		=> fmt!("skipped {}", r.name),
+		};
 		let text = cache.entry(r.file.clone())
 			.or_insert_with(|| std::fs::read_to_string(&r.file).ok());
 		match text {
 			Some(src) => {
 				let (line_no, col, line_text) = lang::line_col_of(src, r.span.start);
-				out.push_str(&fmt!("{}:{}:{}: {}: skipped {}\n", r.file, line_no, col, r.class.label(), r.name));
+				out.push_str(&fmt!("{}:{}:{}: {}: {}\n", r.file, line_no, col, r.class.label(), what));
 				out.push_str(line_text);
 				out.push('\n');
 				for _ in 1..col { out.push(' '); }
 				out.push_str("^\n");
 			},
 			None => {
-				out.push_str(&fmt!("{}: {}: skipped {} (source no longer readable for a caret)\n",
-					r.file, r.class.label(), r.name));
+				out.push_str(&fmt!("{}: {}: {} (source no longer readable for a caret)\n",
+					r.file, r.class.label(), what));
 			},
 		}
 	}
@@ -216,7 +221,8 @@ fn compile(
 
 	let t_author = std::time::Instant::now();
 	let compile::Rendered { mut out, heads, geom, doc_info, refusals } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
-	let skip_line = refusals.skip_line();
+	// The terse line names every site not set as written: the constructs skipped, then the stand-ins set.
+	let skip_line = refusals.summary();
 	mark("author+run+decorate", t_author);
 
 	res!(std::fs::create_dir_all(out_dir));
@@ -626,6 +632,7 @@ mod tests {
 			span:	Span::new(0, 0),
 			class:	RefusalClass::Introspective,
 			file:	"/nonexistent/path/for/an/austenite/explain/test.typ".to_string(),
+			note:	None,
 		}]);
 		let report = explain_refusals(&refusals);
 		assert!(report.contains("introspective"), "class label missing: {:?}", report);
@@ -651,6 +658,7 @@ mod tests {
 			span:	Span::new(offset, offset + "#context[whatever]".len() as u32),
 			class:	RefusalClass::Introspective,
 			file:	path.display().to_string(),
+			note:	None,
 		}]);
 		let report = explain_refusals(&refusals);
 

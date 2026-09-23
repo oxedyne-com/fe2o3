@@ -20,6 +20,7 @@ use crate::doc::{
 	DocInfo,
 	FrontMatter,
 	Heading,
+	Unmet,
 };
 use crate::driver::{
 	self,
@@ -132,9 +133,10 @@ where
 
 	// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
 	// `#t`/`#g` term calls resolve to their values just as in a whole-book compile.
+	let main_file		= main_path.display().to_string();
+	let mut refusals	= lang::Refusals::default();
 	if let Some(dir) = main_path.parent() {
-		res!(book::install_term_dict(dir));
-		res!(book::install_term_defs(dir));
+		res!(book::install_terms(dir, &mut refusals));
 	}
 	// A lone file may carry its own `#show: doc.with(...)` or a lowerable top-level `#set`; the reader
 	// captures those rather than refusing them, so their styling is lowered onto the theme here -- otherwise
@@ -150,14 +152,14 @@ where
 	// even with no `#include` present, which the lone path by definition has none of.
 	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
 	let binds	= scope.bindings();
-	let main_file = main_path.display().to_string();
-	let (mut blocks, mut refusals)	= res!(lang::to_blocks_with_templates(&src, binds));
-	refusals.tag_file(&main_file);
+	let (mut blocks, mut parsed)	= res!(lang::to_blocks_with_templates(&src, binds));
+	parsed.tag_file(&main_file);
+	refusals.merge(parsed);
 	// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
 	book::resolve_glossary(&mut blocks, false);
 	// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile sets
 	// Chicago author-year in text and a reference list at the end rather than the raw cite key.
-	let bib		= res!(book::load_lone_bibliography(main_path, &mut blocks));
+	let bib		= res!(book::load_lone_bibliography(main_path, &mut blocks, &mut refusals));
 	let fonts	= res!(lone_fonts());
 	// The styling rule engine runs over the lone chapter's block tree here, at the blocks->author seam,
 	// before its faces are resolved -- so a rule-named face reaches the resolver. The default rules re-assert
@@ -210,7 +212,7 @@ pub fn author_and_run(a: Assembled) -> Outcome<Rendered> {
 /// of the same document (see the native `--watch` path); the emit stage then renders each page through
 /// [`crate::emit::svg::render_page_memo`] against that same memo.
 pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -> Outcome<Rendered> {
-	let (document, heads) = res!(doc::author_memo(
+	let (document, heads, mut unmet) = res!(doc::author_memo(
 		a.fonts.clone(), a.geom, &a.style, &a.faces, &a.blocks, a.front.as_ref(), a.bib.as_ref(), memo));
 	let metrics		= FontMetrics::new(a.fonts.clone(), Role::Body, Dir::Ltr, a.style.text.body_size);
 	let mut out		= res!(driver::run(&document, &metrics, Config::default()));
@@ -222,7 +224,7 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 		page.set_body_len(page.frame.placed.len());
 	}
 	let footer_logo	= a.front.as_ref().and_then(|f| f.footer_logo.as_deref());
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo));
+	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo, &mut unmet));
 
 	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso page
 	// -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits at the
@@ -238,7 +240,80 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 		}
 	}
 
-	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info, refusals: a.refusals })
+	// Every site that asked for something the page stood a fallback in for is recorded now, at the site,
+	// with the ledger that decides whether a reference found its label.
+	let refs			= doc::ref_targets(&a.blocks, &a.style);
+	let mut refusals	= a.refusals;
+	record_fallbacks(&mut refusals, &unmet, a.bib.as_ref(), &refs, &out.ledger);
+	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info, refusals })
+}
+
+/// Records a site for everything a construct asked for that the compile could not give it
+/// ([`lang::Ask`]): an image or a drawn figure authoring set a stand-in for ([`Unmet`]), a label the
+/// laid-out document never placed, a citation the bibliography cannot resolve. Each is judged by the test
+/// that set the stand-in -- the loader's own failure, [`Bibliography::format_citation`], the targets and the
+/// ledger a reference is set from -- so a site is recorded exactly where the page fell back, in the file
+/// and at the line that asked.
+pub(crate) fn record_fallbacks(
+	refusals:	&mut lang::Refusals,
+	unmet:		&[Unmet],
+	bib:		Option<&Bibliography>,
+	refs:		&HashMap<String, String>,
+	ledger:		&Ledger,
+)
+{
+	for ask in refusals.take_asks() {
+		let name = ask.what.name();
+		let (class, note) = match &ask.what {
+			lang::Asked::Image { path, .. } => {
+				let fell = unmet.iter().find_map(|u| match u {
+					Unmet::Image { path: p, missing, reason } if p == path	=> Some((*missing, reason.as_str())),
+					_														=> None,
+				});
+				match fell {
+					Some((missing, reason)) => {
+						let class = if missing { lang::RefusalClass::MissingFile } else { lang::RefusalClass::Unusable };
+						(class, ask.what.image_note(missing, reason))
+					},
+					None => continue,
+				}
+			},
+			lang::Asked::Figure { fingerprint, .. } => {
+				let fell = unmet.iter().find_map(|u| match u {
+					Unmet::Figure { fingerprint: f, reason } if f == fingerprint	=> Some(reason),
+					_																=> None,
+				});
+				match fell {
+					Some(reason)	=> (lang::RefusalClass::Unusable, Some(fmt!("will not build ({}), so a placeholder is set", reason))),
+					None			=> continue,
+				}
+			},
+			lang::Asked::Ref(label) => {
+				let placed = refs.contains_key(label)
+					|| ledger.page_of(&AnchorId::new(AnchorKind::Label, label.clone())).is_some();
+				if placed {
+					continue;
+				}
+				(lang::RefusalClass::Unusable, Some("names no label in the document, so an empty space is set in its place".to_string()))
+			},
+			lang::Asked::Cite(keys) => {
+				let note = match bib {
+					None	=> "has no bibliography to resolve against, so its keys are set in brackets",
+					Some(b)	=> {
+						let ks: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+						if b.format_citation(&ks).is_ok() {
+							continue;
+						}
+						"names a key the bibliography does not hold, so its keys are set in brackets"
+					},
+				};
+				(lang::RefusalClass::Unusable, Some(note.to_string()))
+			},
+		};
+		if let Some(note) = note {
+			refusals.record_stand_in_in(&ask.file, &name, ask.span, class, &note);
+		}
+	}
 }
 
 /// Builds the PDF document outline (the viewer's bookmark side panel) from the resolved ledger: the three
@@ -308,7 +383,7 @@ pub enum DiagnosticKind {
 	UnknownVariable,	// a name with no binding in scope
 	Package,			// a package import the host has not supplied
 	Limit,				// a limit of the engine reached: layout that will not settle, a depth or a loop bound
-	Unsupported,		// a construct passed over, refused, or not applied as Typst applies it
+	Unsupported,		// a construct passed over or refused, or one set with a stand-in for what it asked for
 	Internal,			// no pages, no content, or an error raised with no more specific tag
 }
 
@@ -340,6 +415,7 @@ impl DiagnosticKind {
 			lang::RefusalClass::Introspective	=> Self::Unsupported,
 			lang::RefusalClass::Unsupported		=> Self::Unsupported,
 			lang::RefusalClass::MissingFile		=> Self::MissingFile,
+			lang::RefusalClass::Unusable		=> Self::Unsupported,
 		}
 	}
 
@@ -408,15 +484,22 @@ impl fmt::Display for Diagnostic {
 pub struct Report {
 	pub pages:			usize,
 	pub diagnostics:	Vec<Diagnostic>,
-	pub skipped:		Option<String>,
+	pub skipped:		Option<String>,	// the terse line of the constructs passed over
+	pub summary:		Option<String>,	// the line of every site not set as written, stand-ins included
 	pub empty:			bool,	// no content block was read
 }
 
 impl Report {
 	/// The report of a compile whose every site not set as written is in `refusals`: its diagnostics, and
-	/// the terse line taken from the same finished table, so the two cannot disagree.
+	/// the lines taken from the same finished table, so the three cannot disagree.
 	pub fn new(pages: usize, refusals: &lang::Refusals, empty: bool) -> Self {
-		Self { pages, diagnostics: diagnostics(refusals), skipped: refusals.skip_line(), empty }
+		Self {
+			pages,
+			diagnostics:	diagnostics(refusals),
+			skipped:		refusals.skip_line(),
+			summary:		refusals.summary(),
+			empty,
+		}
 	}
 
 	/// Why a strict compile must refuse this result, or `None` when it may stand. A strict caller wants no
@@ -437,9 +520,9 @@ impl Report {
 			.filter(|d| d.severity == Severity::Error || d.kind.refuses_strict())
 			.collect();
 		if let Some(first) = refusing.first() {
-			let line = self.skipped.clone().unwrap_or_else(|| fmt!("skipped: {} site(s)", refusing.len()));
+			let line = self.summary.clone().unwrap_or_else(|| fmt!("{} site(s)", refusing.len()));
 			return Some(Diagnostic {
-				message:	fmt!("strict: {} construct site(s) were not set ({}); first: {}",
+				message:	fmt!("strict: {} site(s) were not set as written ({}); first: {}",
 					refusing.len(), line, first.message),
 				severity:	Severity::Error,
 				hint:		Some(line),
@@ -472,9 +555,10 @@ pub fn diagnostics(refusals: &lang::Refusals) -> Vec<Diagnostic> {
 			file:		r.file.clone(),
 			line,
 			col,
-			message:	match r.class {
-				lang::RefusalClass::MissingFile	=> fmt!("{} is not in the project, so a placeholder is set", r.name),
-				_								=> fmt!("skipped {} ({})", r.name, r.class.label()),
+			// A construct passed over says so; a site set with a stand-in says what went wrong and what stands in.
+			message:	match &r.note {
+				Some(note)	=> fmt!("{} {}", r.name, note),
+				None		=> fmt!("skipped {} ({})", r.name, r.class.label()),
 			},
 			severity:	Severity::Warning,
 			kind:		DiagnosticKind::from_refusal_class(r.class),
@@ -561,3 +645,38 @@ pub fn engine_version() -> &'static str { env!("CARGO_PKG_VERSION") }
 /// The git commit the engine was built from (12 hex digits, with `-dirty` when the crate's tree had
 /// uncommitted changes), or `unknown` when the build had no git to ask. Captured by `build.rs`.
 pub fn engine_git_hash() -> &'static str { env!("AUSTENITE_GIT_HASH") }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::ir::Span;
+
+	/// Each ask is judged by the fallback authoring reported for the same thing: a drawn figure known by its
+	/// fingerprint and an image known by its path become sites at the construct that asked, an image
+	/// authoring loaded is none, and one the project does not hold is `missing_file` where one that will not
+	/// load is not.
+	#[test]
+	fn a_fallback_is_charged_to_the_construct_that_asked() {
+		let mut refusals = lang::Refusals::default();
+		let image = |path: &str| lang::Asked::Image { path: path.to_string(), role: lang::ImageRole::Figure };
+		refusals.ask_in("/p/a.typ", lang::Asked::Figure { fingerprint: 7, name: "diagram" }, Span::new(10, 10));
+		refusals.ask_in("/p/a.typ", image("x.png"), Span::new(20, 20));
+		refusals.ask_in("/p/a.typ", image("y.png"), Span::new(30, 30));
+		refusals.ask_in("/p/a.typ", image("fine.png"), Span::new(40, 40));
+		let unmet = vec![
+			Unmet::Figure { fingerprint: 7, reason: "two nodes share an id".to_string() },
+			Unmet::Image { path: "x.png".to_string(), missing: true, reason: String::new() },
+			Unmet::Image { path: "y.png".to_string(), missing: false, reason: "not a PNG".to_string() },
+		];
+		record_fallbacks(&mut refusals, &unmet, None, &HashMap::new(), &Ledger::new());
+		let got: Vec<(&str, &str, u32, lang::RefusalClass)> = refusals.sites().iter()
+			.map(|r| (r.file.as_str(), r.name.as_str(), r.span.start, r.class))
+			.collect();
+		assert_eq!(got, [
+			("/p/a.typ", "#figure (diagram)", 10, lang::RefusalClass::Unusable),
+			("/p/a.typ", "image \"x.png\"", 20, lang::RefusalClass::MissingFile),
+			("/p/a.typ", "image \"y.png\"", 30, lang::RefusalClass::Unusable),
+		]);
+		assert!(refusals.asks().is_empty(), "every ask is answered");
+	}
+}

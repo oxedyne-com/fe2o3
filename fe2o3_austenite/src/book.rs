@@ -266,7 +266,8 @@ fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, sites: 
 				(false, false)	=> "regular",
 			};
 			let (file, span) = sites.site_of(name);
-			skips.record_in(file, &fmt!("heading face {:?} level {}: no {} file, set in Regular", name, i + 1, slant), span);
+			skips.record_stand_in_in(file, &fmt!("heading face {:?} level {}", name, i + 1), span,
+				lang::RefusalClass::Unusable, &fmt!("has no {} file, so it is set in Regular", slant));
 		}
 	}
 }
@@ -357,21 +358,72 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	// Install the book's `term-dict` and `term-defs` from a `terms.typ` beside or above the root: the
 	// dictionary so the glossary family resolves each key to its value as the chapters are read, and the
 	// definitions so a `#print-glossary()` can be filled once the document's used terms are known.
-	res!(install_term_dict(&root_dir));
-	res!(install_term_defs(&root_dir));
+	let mut skips = lang::Refusals::default();
+	res!(install_terms(&root_dir, &mut skips));
 
 	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
 	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
 	let config_path = root_dir.join("config.typ");
 	if !vfs::exists(&config_path) {
-		return load_doc(root_path, &root_dir, &root_src);
+		return load_doc(root_path, &root_dir, &root_src, skips);
 	}
-	load_book(root_path, &root_dir, &root_src)
+	load_book(root_path, &root_dir, &root_src, skips)
+}
+
+/// Reads a file an idiom looks for but does not require -- a `terms.typ`, a `template.typ`, a `refs.bib`
+/// found beside a chapter. `None` when it is not there, as the idiom allows; `None` with a site recorded
+/// when it is there but will not read, so what it held is never dropped without a trace. `stand_in` says
+/// what the document is set with instead.
+fn read_found(path: &Path, stand_in: &str, skips: &mut lang::Refusals) -> Option<String> {
+	if !vfs::exists(path) {
+		return None;
+	}
+	match vfs::read_to_string(path) {
+		Ok(s)	=> Some(s),
+		Err(e)	=> {
+			let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string());
+			skips.record_stand_in_in(&path.display().to_string(), &name, Span::new(0, 0),
+				lang::RefusalClass::Unusable, &fmt!("will not read ({}), so {}", e, stand_in));
+			None
+		},
+	}
+}
+
+/// The span of the first `name:` field in `src`, where [`string_field`] reads it, to charge a site to the
+/// field that named what could not be had.
+fn field_span(src: &str, name: &str) -> Span {
+	let at = src.find(&fmt!("{}:", name)).unwrap_or(0) as u32;
+	Span::new(at, at)
+}
+
+/// Asks for each image the front matter draws ([`lang::Ask`]), at the field that names it: a book's
+/// cover in its config's `cover-image-path`, and the logos in the root's template application.
+fn ask_front_images(
+	skips:		&mut lang::Refusals,
+	fm:			&FrontMatter,
+	root_file:	&str,
+	root_src:	&str,
+	config:		Option<(&str, &str)>,	// the config's path and source, for a book
+)
+{
+	let mut ask = |path: &Option<String>, file: &str, span: Span, role: lang::ImageRole| {
+		if let Some(p) = path {
+			skips.ask_in(file, lang::Asked::Image { path: p.clone(), role }, span);
+		}
+	};
+	if let Some((config_file, config_src)) = config {
+		let at = config_src.find("cover-image-path").unwrap_or(0) as u32;
+		ask(&fm.cover_image, config_file, Span::new(at, at), lang::ImageRole::Cover);
+	}
+	ask(&fm.logo_image, root_file, field_span(root_src, "title-logo-path"), lang::ImageRole::TitleLogo);
+	ask(&fm.top_logo, root_file, field_span(root_src, "title-top-logo-path"), lang::ImageRole::TitleLogo);
+	ask(&fm.bottom_logo, root_file, field_span(root_src, "title-bottom-logo-path"), lang::ImageRole::TitleLogo);
+	ask(&fm.footer_logo, root_file, field_span(root_src, "footer-left-logo-path"), lang::ImageRole::FooterLogo);
 }
 
 /// The book (`format`-switch) path: reads the `config.typ` beside the root, loads the shared Libertinus
 /// faces by path from the project assets tree, and follows the root's includes into one block stream.
-fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
+fn load_book(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::Refusals) -> Outcome<BookSpec> {
 	// The config sits beside the root; the assets tree is one level up (the project root), holding the
 	// Libertinus directory both books share.
 	let config_path	= root_dir.join("config.typ");
@@ -407,7 +459,8 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
-	let Gathered { mut skips, doc_info, faces: chapter_faces } = got;
+	let Gathered { skips: walked, doc_info, faces: chapter_faces } = got;
+	skips.merge(walked);
 	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
@@ -430,10 +483,12 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	resolve_glossary(&mut blocks, false);
 	let title		= content_field(root_src, "title").unwrap_or_default();
 	let front		= read_front_matter(root_src, &config_src, &title);
+	let config_file	= config_path.display().to_string();
+	ask_front_images(&mut skips, &front, &root_file, root_src, Some((&config_file, &config_src)));
 
 	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
-	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
+	let bib = res!(load_bibliography(root_src, &root_file, &project_dir, &mut blocks, &mut skips));
 
 	// The glossary and index back matter the root's `meta-data.glossary`/`meta-data.index` flags ask for,
 	// after the bibliography and gated on the body actually carrying the content -- a book that sets a flag
@@ -479,8 +534,12 @@ fn ai_declaration_mark(slug: &str) -> Option<(String, String)> {
 /// from those two sources; the body font is the embedded Libertinus, which is the doc body and heading
 /// family both (a doc heading is Libertinus bold, so no separate display face is loaded); and the
 /// includes are followed exactly as for a book. A field the tree omits keeps a readable default.
-fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
-	let (geom, raw, opener)	= res!(read_doc_config(root_dir, root_src));
+fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::Refusals) -> Outcome<BookSpec> {
+	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm and the
+	// template's own defaults, and one that will not read is reported.
+	let template = read_found(&root_dir.join("template.typ"), "the page and type defaults stand in for it", &mut skips)
+		.unwrap_or_default();
+	let (geom, raw, opener)	= res!(read_doc_config(&template, root_src));
 	let mut style	= build_style(&raw);
 	// The doc root's own `#show: doc.with(...)` application (and any lowerable top-level `#set`) lowers
 	// onto the theme; its per-format type scale is read from the config by `read_doc_config` above.
@@ -517,7 +576,8 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
-	let Gathered { mut skips, doc_info, faces: chapter_faces } = got;
+	let Gathered { skips: walked, doc_info, faces: chapter_faces } = got;
+	skips.merge(walked);
 	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
@@ -534,7 +594,8 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks, false);
-	let mut front	= read_doc_front_matter(root_dir, root_src, &raw, &title);
+	let mut front	= read_doc_front_matter(&template, root_src, &raw, &title);
+	ask_front_images(&mut skips, &front, &root_file, root_src, None);
 
 	// The reading time the meta page appends to its notes cell: the whole-document word count over the
 	// template's 230 words/min, rounded up, matching its `calc.ceil(words.final() / avg_reading_speed)`.
@@ -560,15 +621,13 @@ enum DocOpener {
 /// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
 /// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
 /// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
-fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
-	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
-	let template = vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
+fn read_doc_config(template: &str, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
 
-	let paper_name	= first_quoted_after(&template, "paper:").unwrap_or_else(|| "a4".to_string());
+	let paper_name	= first_quoted_after(template, "paper:").unwrap_or_else(|| "a4".to_string());
 	let (pw_mm, ph_mm)	= paper_dims_mm(&paper_name);
 
 	// The uniform margin: the `a4:` entry of the template's `#let margins = (...)` dictionary, a length.
-	let margin_pt	= let_dict_field(&template, "margins", "a4")
+	let margin_pt	= let_dict_field(template, "margins", "a4")
 		.and_then(|v| parse_len_pt(&v))
 		.unwrap_or(2.5 * 10.0 * MM_PER_PT);	// 2.5 cm default
 	let foot_extra	= 0.25 * 10.0 * MM_PER_PT;	// the template's `bottom: margins.a4 + 0.25cm`
@@ -584,7 +643,7 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 
 	// The body size the doc.with call sets, else the template's own `text-size: 11pt` default.
 	let body_pt	= first_len_after(root_src, "text-size:")
-		.or_else(|| first_len_after(&template, "text-size:"))
+		.or_else(|| first_len_after(template, "text-size:"))
 		.unwrap_or(11.0);
 
 	// The doc template inherits Typst's default leading (0.65 em) but its OWN paragraph spacing: the
@@ -634,7 +693,7 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 /// colour, the two sidebar logos with their declared widths, the small-caps flag, and the footer logo --
 /// read from the `#show: doc.with(...)` call and the shared `template.typ`. A doc tree carries no imprint
 /// (no ISBN, publisher or copyright tuple), so only a title page and the contents are composed from this.
-fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title: &str) -> FrontMatter {
+fn read_doc_front_matter(template: &str, root_src: &str, raw: &RawStyle, title: &str) -> FrontMatter {
 	let subtitle	= content_field(root_src, "subtitle");
 	let meta		= meta_block(root_src).unwrap_or_default();
 	let author		= string_field(&meta, "authors").unwrap_or_default();
@@ -642,9 +701,8 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The AI scheme address the mark links to, `<scheme>/<slug>/<medium>`, read from the shared template's
 	// `ai-scheme-url` and `ai-medium` lets (the template's `link(ai-scheme-url + "/" + slug + "/" +
 	// ai-medium, ..)`). A tree without the template falls back to the scheme's permanent home and doc medium.
-	let template		= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
-	let ai_scheme_url	= first_quoted_after(&template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
-	let ai_medium		= first_quoted_after(&template, "ai-medium").unwrap_or_else(|| "doc".to_string());
+	let ai_scheme_url	= first_quoted_after(template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
+	let ai_medium		= first_quoted_after(template, "ai-medium").unwrap_or_else(|| "doc".to_string());
 
 	// The revision rows the template's meta/colophon page draws: each row's version, date, notes, and the
 	// AI declaration whose slug picks the mark image, its caption (a `declaration-words` field rescopes the
@@ -682,8 +740,7 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The sidebar width is `margins.title_page` in the shared template (a percentage of the page); the fill
 	// is the `title-colour` the call names, resolved to a grey level. A doc tree always draws the sidebar,
 	// so `sidebar_grey` is set here (marking the two-column idiom) even when the call omits its colour.
-	let template	= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
-	let sidebar_frac	= let_dict_field(&template, "margins", "title_page")
+	let sidebar_frac	= let_dict_field(template, "margins", "title_page")
 		.and_then(|v| parse_percent(&v))
 		.unwrap_or(0.45);
 	let colour_name	= string_field(root_src, "title-colour").unwrap_or_default();
@@ -755,7 +812,15 @@ fn parse_percent(s: &str) -> Option<f64> {
 /// and appends the Bibliography back matter (a heading and the sorted, cited-only reference list) to the
 /// block stream. Returns the marked bibliography for the in-text citation formatter, or `None` when the
 /// book names no bibliography or the file cannot be read.
-fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+fn load_bibliography(
+	root_src:		&str,
+	root_file:		&str,
+	project_dir:	&Path,
+	blocks:			&mut Vec<Block>,
+	skips:			&mut lang::Refusals,
+)
+	-> Outcome<Option<Bibliography>>
+{
 	let meta = match meta_block(root_src) {
 		Some(m)	=> m,
 		None	=> return Ok(None),
@@ -770,7 +835,20 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 	let bib_path	= project_dir.join(rel);
 	let src = match vfs::read_to_string(&bib_path) {
 		Ok(s)	=> s,
-		Err(_)	=> return Ok(None),	// a named bibliography that will not read is a reported gap, not a failure
+		Err(e)	=> {
+			// Named but not had: the book is set without its reference list, and each citation as its keys,
+			// and the field that named the file is where that is charged.
+			let name	= fmt!("bibliography {:?}", path_str);
+			let span	= field_span(root_src, "bibliography");
+			if vfs::exists(&bib_path) {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::Unusable,
+					&fmt!("will not read ({}), so no reference list is set", e));
+			} else {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::MissingFile,
+					"is not in the project, so no reference list is set");
+			}
+			return Ok(None);
+		},
 	};
 	let bib = res!(Bibliography::parse(&src));
 	Ok(Some(append_bibliography(bib, blocks)))
@@ -880,8 +958,11 @@ fn table_has_index(table: &Table) -> bool {
 /// Locates a `refs.bib` beside a lone chapter or in an ancestor directory, parses it, marks the keys the
 /// chapter cited, appends the reference list as back matter, and returns the marked bibliography so the
 /// block layer resolves each in-text `#cite` to Chicago author-year -- as a whole-book compile does.
-/// `None` when no `refs.bib` is found or it will not read, in which case the raw cite key stands as before.
-pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+/// `None` when no `refs.bib` is found, or when one is found that will not read, which is recorded in
+/// `skips`; each citation then stands as its key, and is reported where it is written.
+pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>, skips: &mut lang::Refusals)
+	-> Outcome<Option<Bibliography>>
+{
 	let start = match source.parent() {
 		Some(d)	=> d,
 		None	=> return Ok(None),
@@ -890,9 +971,9 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 		Some(p)	=> p,
 		None	=> return Ok(None),
 	};
-	let src = match vfs::read_to_string(&bib_path) {
-		Ok(s)	=> s,
-		Err(_)	=> return Ok(None),	// a bibliography found but unreadable is a reported gap, not a failure
+	let src = match read_found(&bib_path, "no reference list is set", skips) {
+		Some(s)	=> s,
+		None	=> return Ok(None),
 	};
 	let bib = res!(Bibliography::parse(&src));
 	Ok(Some(append_bibliography(bib, blocks)))
@@ -902,28 +983,19 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 // │ TERM DICTIONARY                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Reads the book's `term-dict` from a `terms.typ` beside or above `start_dir` and installs it, so the
-/// term-dictionary glossary family (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`) resolves each key to
-/// its value while the chapters are read. An absent or `term-dict`-less `terms.typ` installs an empty
-/// map, under which every key falls back to its own text.
-pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
+/// Reads the book's `terms.typ` beside or above `start_dir` and installs its `term-dict` and `term-defs`:
+/// the dictionary so the term-dictionary glossary family (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`)
+/// resolves each key to its value while the chapters are read, and the definitions so
+/// [`resolve_glossary`] can give each glossary term used in the document its definition row. An absent
+/// `terms.typ`, or one naming neither, installs empty maps, under which every key falls back to its own
+/// text and the glossary sets its header alone -- the same early return the template's style makes for an
+/// undefined key. One that is there but will not read is recorded in `skips` and installs the same.
+pub fn install_terms(start_dir: &Path, skips: &mut lang::Refusals) -> Outcome<()> {
 	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
+		Some(p)	=> read_found(&p, "its terms are set as their keys", skips).unwrap_or_default(),
 		None	=> String::new(),
 	};
 	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
-	Ok(())
-}
-
-/// Reads the book's `term-defs` from a `terms.typ` beside or above `start_dir` and installs it, so
-/// [`resolve_glossary`] can give each glossary term used in the document its definition row. An absent or
-/// `term-defs`-less `terms.typ` installs an empty map, under which every term contributes no row and the
-/// glossary sets its header alone -- the same early return the template's style makes for an undefined key.
-pub fn install_term_defs(start_dir: &Path) -> Outcome<()> {
-	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
-		None	=> String::new(),
-	};
 	let mut defs: HashMap<String, Vec<Segment>> = HashMap::new();
 	for (key, content) in parse_term_defs(&src) {
 		defs.insert(key, lang::inline_segments(&content));
@@ -2682,7 +2754,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.title, "Austenite");
 		assert_eq!(fm.subtitle.as_deref(), Some("Design Document"));
 		assert_eq!(fm.author, "J. D. Hoogland");
@@ -2718,7 +2790,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.meta_rows.len(), 1, "one revision row");
 		let mr = &fm.meta_rows[0];
 		assert_eq!(mr.date.as_deref(), Some("12026-08-08"));
@@ -2745,7 +2817,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Hematite");
+		let fm = read_doc_front_matter("", root, &raw, "Hematite");
 		assert_eq!(fm.meta_rows.len(), 2, "both revision rows are read");
 		assert_eq!(fm.meta_rows[0].version.as_deref(), Some("2.0.0"));
 		// A `declaration-words` rescopes the caption without changing the mark image.
@@ -2779,7 +2851,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.sidebar_grey, Some(240), "lightgrey resolves to luma 240");
 		assert!(fm.title_smallcaps, "the title sets in small caps");
 		assert_eq!(fm.top_logo.as_deref(), Some("assets/svg/austenite_logo_text_right.svg"));
@@ -2938,7 +3010,7 @@ mod tests {
 		res!(std::fs::write(&chapter, "cited here"));
 
 		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite(vec!["smith2020".to_string()])] }];
-		let bib = res!(load_lone_bibliography(&chapter, &mut blocks));
+		let bib = res!(load_lone_bibliography(&chapter, &mut blocks, &mut lang::Refusals::default()));
 
 		// Clean up before asserting, so a failed assertion still leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
@@ -3169,8 +3241,9 @@ mod tests {
 		let mut skips = lang::Refusals::default();
 		note_missing_face_variants(&theme, &blocks, &faces, &FaceSites::new("root.typ", "", &[], Vec::new()), &mut skips);
 		assert_eq!(skips.total(), 1, "the scoped bold heading in a Regular-only face must be noted exactly once");
-		assert!(skips.sites()[0].name.contains("TestFace") && skips.sites()[0].name.contains("bold"),
-			"the note must name the face and the missing slant, found {:?}", skips.sites()[0].name);
+		assert!(skips.sites()[0].name.contains("TestFace")
+			&& skips.sites()[0].note.as_deref().map_or(false, |n| n.contains("bold")),
+			"the note must name the face and the missing slant, found {:?}", skips.sites()[0]);
 		Ok(())
 	}
 

@@ -285,7 +285,7 @@ fn a_scoped_column_layout_turns_the_page_both_ways() -> Outcome<()> {
 	let fonts	= Arc::new(res!(fonts::libertinus()));
 	let geom	= PageGeometry::a4();
 	let style	= Theme::default();
-	let (document, _) = res!(doc::author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
+	let (document, _, _) = res!(doc::author(fonts.clone(), geom, &style, &FaceResolver::default(), &blocks, None, None));
 	let metrics	= FontMetrics::new(fonts, Role::Body, Dir::Ltr, style.text.body_size);
 	let out		= res!(driver::run(&document, &metrics, Config::default()));
 	let mut runs: Vec<Run> = Vec::new();
