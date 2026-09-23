@@ -308,7 +308,9 @@ impl DkimSigner {
         };
 
         let (raw_headers, body) = split_headers_body(message);
-        let parsed_headers = header_fields(raw_headers);
+        // A header the submission server could not read is not signed either: a receiver would
+        // canonicalise other fields than these.
+        let parsed_headers = res!(header_fields(raw_headers));
 
         let body_canon = canonicalise_body_relaxed(body);
         let body_hash = sha(&SHA256, &body_canon);
@@ -903,8 +905,12 @@ mod tests {
     #[test]
     fn test_rfc6376_relaxed_header_canonicalisation_00() {
         let (raw_headers, _body) = split_headers_body(RFC6376_EXAMPLE);
+        let fields = match header_fields(raw_headers) {
+            Ok(f) => f,
+            Err(e) => panic!("the RFC 6376 example header would not read: {}", e),
+        };
         let mut canon = String::new();
-        for (name, value) in header_fields(raw_headers) {
+        for (name, value) in fields {
             canon.push_str(&relaxed_header(&name, &value));
         }
         assert_eq!(canon, "a:X\r\nb:Y Z\r\n",

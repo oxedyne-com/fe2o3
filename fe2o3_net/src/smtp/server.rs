@@ -959,10 +959,18 @@ fn envelope_refusal(user: &MailUser, mail_from: &str) -> Option<String> {
 /// one, must be one the account may send as. A second `From` is refused rather than checked,
 /// since which one a reader or a verifier heeds is theirs to choose. A redirect, which keeps
 /// the author's `From` and adds a `Resent-From`, is refused with the rest: `Resent-From` is not
-/// what DMARC or the reader goes by.
+/// what DMARC or the reader goes by. A header section or an address list that cannot be read
+/// as RFC 5322 reads it is refused, never passed, so the addresses checked are the ones a
+/// receiver's parser reports.
 fn header_refusal(user: &MailUser, message: &[u8]) -> Option<String> {
     let (head, _) = split_headers_body(message);
-    let fields = header_fields(head);
+    let fields = match header_fields(head) {
+        Ok(f) => f,
+        Err(e) => {
+            debug!("SMTP submission: the header section cannot be read: {}", e);
+            return Some(fmt!("the header section cannot be read as RFC 5322"));
+        },
+    };
     let from: Vec<&(String, String)> = fields.iter()
         .filter(|(n, _)| n.eq_ignore_ascii_case("From"))
         .collect();
@@ -1072,8 +1080,12 @@ mod tests {
         let u = hello();
         for fine in [
             "From: hello@oxegen.test",
+            "From: Jason Hoogland <hello@oxegen.test>",
             "From: Jason\r\n <hello@oxegen.test>",
+            "From:\r\n\t\"Hoogland, Jason\"\r\n <hello@oxegen.test>",
             "From: \"Oxegen News\" <News@oxegen.test>",
+            "From: \"The CEO <ceo@oxegen.test>: urgent\" <hello@oxegen.test>",
+            "From : hello@oxegen.test",
             "from: hello@oxegen.test\r\nSender: news@oxegen.test",
         ] {
             assert_eq!(header_refusal(&u, &message(fine)), None, "{:?} was refused", fine);
@@ -1088,6 +1100,16 @@ mod tests {
             ("From: undisclosed-recipients:;", "names nobody"),
             // A redirect keeps the author's From, which DMARC and the reader go by.
             ("From: ceo@oxegen.test\r\nResent-From: hello@oxegen.test", "ceo@oxegen.test"),
+            // D-06 audit F4-1: forms a receiver's parser reads otherwise than the old checker did.
+            ("From: ceo@oxegen.test:hello@oxegen.test;", "From field cannot be read"),
+            ("From: ceo@oxegen.test\rX: hello@oxegen.test", "header section cannot be read"),
+            ("From: ceo@oxegen.test\r<hello@oxegen.test>", "header section cannot be read"),
+            ("From\r\n : ceo@oxegen.test\r\nFrom: hello@oxegen.test", "2 From"),
+            ("From: ceo@oxegen.test <hello@oxegen.test>", "From field cannot be read"),
+            ("From: hello@oxegen.test\nFrom: ceo@oxegen.test", "header section cannot be read"),
+            ("\r\nFrom: hello@oxegen.test", "header section cannot be read"),
+            ("From: hello@oxegen.test\r\nSender: ceo@oxegen.test:hello@oxegen.test;",
+                "Sender field cannot be read"),
         ] {
             match header_refusal(&u, &message(bad)) {
                 Some(why) => assert!(why.contains(says), "{:?} refused as {:?}", bad, why),
@@ -1177,8 +1199,9 @@ mod tests {
     }
 
     /// End to end, the real client against the real server over STARTTLS and AUTH: an account
-    /// sends as itself and as the identity it lists, and a forged sender is refused `550 5.7.1`
-    /// in the envelope and in the header alike, before the handler, and so the signer, sees it.
+    /// sends as itself, as the identity it lists, and under the null envelope, and a forged
+    /// sender is refused `550 5.7.1` in the envelope and in the header alike, before the handler,
+    /// and so the signer, sees it.
     #[tokio::test]
     async fn a_submission_may_send_only_as_its_account_00() -> Outcome<()> {
         let taken = Taken::default();
@@ -1198,6 +1221,8 @@ mod tests {
             body("Jason <hello@oxegen.test>").as_bytes()).await);
         res!(client.submit(&cfg, "news@oxegen.test", &rcpt,
             body("news@oxegen.test").as_bytes()).await);
+        res!(client.submit(&cfg, "", &rcpt,
+            body("\"The CEO <ceo@oxegen.test>: urgent\" <hello@oxegen.test>").as_bytes()).await);
 
         for (envelope, from, which) in [
             ("ceo@oxegen.test", "hello@oxegen.test", "envelope"),
@@ -1213,12 +1238,24 @@ mod tests {
                 },
             }
         }
+        // D-06 audit F4-1: the header a receiver's parser reads as from ceo@.
+        match client.submit(&cfg, "hello@oxegen.test", &rcpt,
+            body("ceo@oxegen.test:hello@oxegen.test;").as_bytes()).await
+        {
+            Ok(q) => return Err(err!(
+                "A From the checker cannot read was accepted, queued as {}.", q; Test)),
+            Err(e) => {
+                let s = fmt!("{}", e);
+                assert!(s.contains("550") && s.contains("5.7.1"),
+                    "an unreadable From must be refused 550 5.7.1: {}", s);
+            },
+        }
         let got = match taken.0.lock() {
             Ok(g) => g.iter().map(|t| t.mail_from.clone()).collect::<Vec<_>>(),
             Err(_) => Vec::new(),
         };
-        assert_eq!(got, vec![fmt!("hello@oxegen.test"), fmt!("news@oxegen.test")],
-            "only the two honest messages may reach the handler");
+        assert_eq!(got, vec![fmt!("hello@oxegen.test"), fmt!("news@oxegen.test"), fmt!("")],
+            "only the three honest messages may reach the handler, the null envelope's included");
         Ok(())
     }
 }
