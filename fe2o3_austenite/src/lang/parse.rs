@@ -93,6 +93,8 @@ pub enum RefusalClass {
 	Unsupported,
 	// A file the construct names that the project does not hold, set with a stand-in or left out.
 	MissingFile,
+	// A text file that is there but is not valid UTF-8, its content left out.
+	Encoding,
 	// Something the construct asked for that is there but could not be used -- an image that will not
 	// decode, a figure that will not build, a label or citation key that resolves to nothing -- set with a
 	// stand-in in its place.
@@ -127,6 +129,7 @@ impl RefusalClass {
 			RefusalClass::Unsupported		=> "unsupported",
 			RefusalClass::MissingFile		=> "missing-file",
 			RefusalClass::Unusable			=> "unusable",
+			RefusalClass::Encoding			=> "encoding",
 		}
 	}
 

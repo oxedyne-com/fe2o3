@@ -250,8 +250,8 @@ fn a_show_rule_this_reader_does_not_run_is_refused() -> Outcome<()> {
 	Ok(())
 }
 
-/// A `terms.typ` that is there but will not read is reported against the file, where it once became an
-/// empty dictionary without a word.
+/// A `terms.typ` that is there but is not UTF-8 text is reported against the file, as `encoding`, where it
+/// once became an empty dictionary without a word.
 #[test]
 fn a_terms_file_that_will_not_read_is_reported() -> Outcome<()> {
 	let _turn = turn();
@@ -259,8 +259,8 @@ fn a_terms_file_that_will_not_read_is_reported() -> Outcome<()> {
 	let terms: &[u8] = b"#let term-dict = (\"org\": \"Oxedyne \xff\xfe\")\n";
 	let report = res!(report_of(MAIN, &[(MAIN, &src[..]), ("/proj/terms.typ", terms)], None));
 	let d = res!(site(&report, "terms.typ"));
-	assert_eq!((d.severity, d.file.as_str()), (Severity::Warning, "/proj/terms.typ"), "{}", d);
-	assert!(d.message.contains("will not read"), "{}", d);
+	assert_eq!((d.severity, d.kind, d.file.as_str()), (Severity::Warning, DiagnosticKind::Encoding, "/proj/terms.typ"), "{}", d);
+	assert!(d.message.contains("is not valid UTF-8"), "{}", d);
 	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
 	Ok(())
 }

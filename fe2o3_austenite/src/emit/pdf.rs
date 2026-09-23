@@ -228,7 +228,7 @@ fn draw_text(
 			let gid = match u16::try_from(glyph.id) {
 				Ok(g)	=> g,
 				Err(_)	=> return Err(err!(
-					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range)),
+					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range, LimitReached)),
 			};
 			out.text(prog, gid, x, y, shaped.size(), shaped.colour(), text);
 			continue;

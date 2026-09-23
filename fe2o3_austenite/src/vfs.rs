@@ -84,6 +84,13 @@ pub fn read_to_string(path: &Path) -> io::Result<String> {
 	}
 }
 
+/// Did a [`read_to_string`] fail because the file is not valid UTF-8 text, rather than because it could not
+/// be read at all? The remedy differs -- re-save the file, not supply it -- so a caller tags the two apart.
+pub fn is_not_utf8(e: &io::Error) -> bool {
+	e.kind() == io::ErrorKind::InvalidData
+		&& e.get_ref().map_or(false, |inner| inner.is::<std::string::FromUtf8Error>())
+}
+
 /// Writes a file's bytes: into the installed source map where one is present (so a later read in the same
 /// compile sees it), else to the real filesystem. With no map installed this is exactly [`std::fs::write`].
 pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {

@@ -352,6 +352,8 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	};
 	let root_src = match vfs::read_to_string(root_path) {
 		Ok(s)	=> s,
+		Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(e,
+			"The book root {:?} is not valid UTF-8 text.", root_path; File, Decode, UTF8)),
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
 
@@ -382,8 +384,14 @@ fn read_found(path: &Path, stand_in: &str, skips: &mut lang::Refusals) -> Option
 		Ok(s)	=> Some(s),
 		Err(e)	=> {
 			let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string());
-			skips.record_stand_in_in(&path.display().to_string(), &name, Span::new(0, 0),
-				lang::RefusalClass::Unusable, &fmt!("will not read ({}), so {}", e, stand_in));
+			let file = path.display().to_string();
+			if vfs::is_not_utf8(&e) {
+				skips.record_stand_in_in(&file, &name, Span::new(0, 0), lang::RefusalClass::Encoding,
+					&fmt!("is not valid UTF-8 text, so {}", stand_in));
+			} else {
+				skips.record_stand_in_in(&file, &name, Span::new(0, 0), lang::RefusalClass::Unusable,
+					&fmt!("will not read ({}), so {}", e, stand_in));
+			}
 			None
 		},
 	}
@@ -429,6 +437,8 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang:
 	let config_path	= root_dir.join("config.typ");
 	let config_src	= match vfs::read_to_string(&config_path) {
 		Ok(s)	=> s,
+		Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(e,
+			"The book config {:?} is not valid UTF-8 text.", config_path; File, Decode, UTF8)),
 		Err(e)	=> return Err(err!(e, "Could not read the book config {:?}.", config_path; File, Read)),
 	};
 	let project_dir = match root_dir.parent() {
@@ -840,7 +850,10 @@ fn load_bibliography(
 			// and the field that named the file is where that is charged.
 			let name	= fmt!("bibliography {:?}", path_str);
 			let span	= field_span(root_src, "bibliography");
-			if vfs::exists(&bib_path) {
+			if vfs::is_not_utf8(&e) {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::Encoding,
+					"is not valid UTF-8 text, so no reference list is set");
+			} else if vfs::exists(&bib_path) {
 				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::Unusable,
 					&fmt!("will not read ({}), so no reference list is set", e));
 			} else {
@@ -2221,10 +2234,14 @@ fn assemble_into(
 						Ok(s)	=> s,
 						Err(e)	=> {
 							// Charged to the path literal, as Typst charges it, while this file's text is in
-							// hand.
+							// hand. A chapter that is there but not UTF-8 text is told from one that is not.
 							let lead	= line.len() - t.len() + "#include".len();
 							let quote	= rest.find('"').map_or(lead, |q| lead + q);
 							let (l, c, _)	= lang::line_col_of(src, start.saturating_add(quote as u32));
+							if vfs::is_not_utf8(&e) {
+								return Err(err!(crate::compile::Cited::new(&label, l, c, e),
+									"The included chapter {:?} is not valid UTF-8 text.", inc_path; File, Decode, UTF8));
+							}
 							return Err(err!(crate::compile::Cited::new(&label, l, c, e),
 								"Could not read the included chapter {:?}.", inc_path; File, Read));
 						},

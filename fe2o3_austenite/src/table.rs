@@ -235,7 +235,7 @@ fn table_row_groups(
 	if available <= 0 {
 		return Err(err!(
 			"A table of {} columns leaves no width for text within the measure of {} sp; \
-			reduce the columns or the padding.", ncols, measure.raw(); Input, Invalid, TooBig));
+			reduce the columns or the padding.", ncols, measure.raw(); Input, Invalid, TooBig, LimitReached));
 	}
 
 	// Each cell's inline content is built once into the pieces the line breaker weaves -- a run of shaped

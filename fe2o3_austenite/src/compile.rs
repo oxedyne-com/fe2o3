@@ -96,6 +96,8 @@ where
 {
 	let src = match vfs::read_to_string(main_path) {
 		Ok(s)	=> s,
+		Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(e,
+			"The source file {:?} is not valid UTF-8 text.", main_path; File, Decode, UTF8)),
 		Err(e)	=> return Err(err!(e,
 			"Could not read the source file {:?}.", main_path; File, Read)),
 	};
@@ -377,6 +379,7 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiagnosticKind {
 	MissingFile,		// a source, chapter, image or other file could not be found or read
+	Encoding,			// a source or other text file that is there but is not valid UTF-8 text
 	MissingFont,		// a named family that no supplied or embedded font declares
 	Syntax,				// source that does not parse
 	Type,				// a value of the wrong type
@@ -392,6 +395,7 @@ impl DiagnosticKind {
 	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::MissingFile		=> "missing_file",
+			Self::Encoding			=> "encoding",
 			Self::MissingFont		=> "missing_font",
 			Self::Syntax			=> "syntax",
 			Self::Type				=> "type",
@@ -404,9 +408,10 @@ impl DiagnosticKind {
 	}
 
 	/// Does a warning of this kind refuse a strict compile? It does where the document was not set as
-	/// written: a construct passed over, or a file, package or font family missing.
+	/// written: a construct passed over or set with a stand-in, or a file, its text, a package or a font
+	/// family missing.
 	pub fn refuses_strict(&self) -> bool {
-		matches!(self, Self::Unsupported | Self::MissingFile | Self::Package | Self::MissingFont)
+		matches!(self, Self::Unsupported | Self::MissingFile | Self::Encoding | Self::Package | Self::MissingFont)
 	}
 
 	fn from_refusal_class(class: lang::RefusalClass) -> Self {
@@ -416,14 +421,18 @@ impl DiagnosticKind {
 			lang::RefusalClass::Unsupported		=> Self::Unsupported,
 			lang::RefusalClass::MissingFile		=> Self::MissingFile,
 			lang::RefusalClass::Unusable		=> Self::Unsupported,
+			lang::RefusalClass::Encoding		=> Self::Encoding,
 		}
 	}
 
-	/// A hard error's kind, from the tags it was raised with anywhere in its chain.
+	/// A hard error's kind, from the tags it was raised with anywhere in its chain. A file that is there
+	/// but not UTF-8 text is told from one that cannot be read at all, since the remedy differs.
 	fn from_error_tags(e: &Error<ErrTag>) -> Self {
 		let tags = e.tags();
 		if tags.contains(&ErrTag::Font) {
 			Self::MissingFont
+		} else if tags.contains(&ErrTag::UTF8) {
+			Self::Encoding
 		} else if tags.contains(&ErrTag::File) {
 			Self::MissingFile
 		} else if tags.contains(&ErrTag::LimitReached) {

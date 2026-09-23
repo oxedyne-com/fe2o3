@@ -368,6 +368,34 @@ fn a_refused_show_rule_is_placed_in_its_own_file_and_line() -> Outcome<()> {
 	Ok(())
 }
 
+/// A source that is there but is not valid UTF-8 text is an error of its own kind, `encoding`, whose remedy
+/// is to re-save the file rather than supply it: at 0:0 for the main file, at the path of its `#include` for
+/// a chapter.
+#[test]
+fn a_file_that_is_not_utf8_is_an_encoding_error() -> Outcome<()> {
+	let _turn = turn();
+	let bad: &[u8] = b"= H\n\nCaf\xe9.\n";
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, bad)]))));
+	assert_eq!((d.severity, d.kind, d.line, d.col), (Severity::Error, DiagnosticKind::Encoding, 0, 0), "{}", d);
+	assert!(d.message.contains("not valid UTF-8"), "{}", d);
+	let root = b"= H\n\n#include \"ch1.typ\"\n";
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, &root[..]), ("/proj/ch1.typ", bad)]))));
+	assert_eq!((d.kind, d.file.as_str(), d.line, d.col), (DiagnosticKind::Encoding, MAIN, 3, 10), "{}", d);
+	Ok(())
+}
+
+/// A table too wide for its measure is one of the engine's own limits, reported as `limit` as layout that
+/// will not settle is.
+#[test]
+fn a_table_too_wide_for_its_measure_is_a_limit() -> Outcome<()> {
+	let _turn = turn();
+	let cells: String = (0..80).map(|_| "[x], ").collect();
+	let src = fmt!("= H\n\n#table(columns: 80, {})\n", cells);
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, src.as_bytes())]))));
+	assert_eq!((d.severity, d.kind), (Severity::Error, DiagnosticKind::Limit), "{}", d);
+	Ok(())
+}
+
 /// Strict mode decides by severity and kind: an error always refuses, a warning only where its kind says
 /// the document was not set as written, and any other warning stands beside the PDF.
 #[test]
@@ -382,8 +410,8 @@ fn strict_refuses_by_severity_and_kind() {
 		hint:		None,
 	};
 	let report = |d: Diagnostic| Report { pages: 1, diagnostics: vec![d], skipped: None, summary: None, empty: false };
-	for kind in [DiagnosticKind::Unsupported, DiagnosticKind::MissingFile, DiagnosticKind::Package,
-		DiagnosticKind::MissingFont]
+	for kind in [DiagnosticKind::Unsupported, DiagnosticKind::MissingFile, DiagnosticKind::Encoding,
+		DiagnosticKind::Package, DiagnosticKind::MissingFont]
 	{
 		assert!(report(site(Severity::Warning, kind)).strict_failure(Path::new(MAIN)).is_some(), "{}", kind);
 	}
@@ -400,6 +428,7 @@ fn strict_refuses_by_severity_and_kind() {
 fn the_kind_and_severity_words_are_the_wire_contract() {
 	let words: Vec<&str> = [
 		DiagnosticKind::MissingFile,
+		DiagnosticKind::Encoding,
 		DiagnosticKind::MissingFont,
 		DiagnosticKind::Syntax,
 		DiagnosticKind::Type,
@@ -409,8 +438,8 @@ fn the_kind_and_severity_words_are_the_wire_contract() {
 		DiagnosticKind::Unsupported,
 		DiagnosticKind::Internal,
 	].iter().map(|k| k.as_str()).collect();
-	assert_eq!(words, ["missing_file", "missing_font", "syntax", "type", "unknown_variable", "package",
-		"limit", "unsupported", "internal"]);
+	assert_eq!(words, ["missing_file", "encoding", "missing_font", "syntax", "type", "unknown_variable",
+		"package", "limit", "unsupported", "internal"]);
 	assert_eq!([Severity::Error.as_str(), Severity::Warning.as_str()], ["error", "warning"]);
 }
 
