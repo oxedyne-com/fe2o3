@@ -66,8 +66,8 @@
 //! A watcher on a home connection loses its link for an hour, or wakes from sleep before its
 //! Wi-Fi does. Judged peer by peer, that is every peer `DOWN` at once -- messages that cannot be
 //! sent -- and then every peer `is back` for outages that never happened. So a round in which
-//! two or more peers were asked and not one answered at all is read as this watcher's link and
-//! judged not at all (see [`is_own_link_down`]). An answer of any kind, an error page included,
+//! peers on two or more hosts, none of them already `DOWN`, were asked and not one answered at
+//! all is read as this watcher's link and judged not at all (see [`is_own_link_down`]). An answer of any kind, an error page included,
 //! proves the link, so a round of refusals is still news about the peers.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
@@ -96,7 +96,10 @@ use crate::srv::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use std::collections::BTreeMap;
+use std::collections::{
+    BTreeMap,
+    BTreeSet,
+};
 use oxedyne_fe2o3_net::http::{
     client::{
         http_request,
@@ -170,11 +173,22 @@ impl Probe {
 
 /// Is a round in which nobody answered this watcher's own link, rather than news about peers?
 ///
-/// Two or more peers asked and not one answer back is the watcher's link, not a coincidence of
-/// outages. A single peer's silence is judged as ever: with one peer the two cannot be told
-/// apart, and an outage must not be the thing explained away.
-fn is_own_link_down(round: &[Probe]) -> bool {
-    round.len() >= 2 && round.iter().all(|p| !p.answered())
+/// Two or more hosts that were answering asked and not one answer back is the watcher's link,
+/// not a coincidence of outages. Hosts, not entries, since two entries on one machine fall silent
+/// together when it dies. And only peers not already `Down`, since a peer told dead is silent
+/// anyway: counting it would let one outage hide the next. A single live host's silence is judged
+/// as ever: with one the two cannot be told apart, and an outage must not be the thing explained
+/// away.
+fn is_own_link_down(peers: &[WatchPeer], state: &[PeerState], round: &[Probe]) -> bool {
+    if round.iter().any(Probe::answered) {
+        return false;
+    }
+    let live: BTreeSet<&str> = peers.iter()
+        .zip(state)
+        .filter(|(_, st)| st.health != Health::Down)
+        .map(|(p, _)| p.host.as_str())
+        .collect();
+    live.len() >= 2
 }
 
 /// The peers whose distress this host would notice and tell nobody.
@@ -517,12 +531,12 @@ fn judge_round(
     -> (Vec<AlertEvent>, Vec<(usize, ProbeSample)>)
 {
     let (probes, took): (Vec<Probe>, Vec<Duration>) = round.into_iter().unzip();
-    if is_own_link_down(&probes) {
+    if is_own_link_down(&cfg.peers, state, &probes) {
         if !*link_down {
             *link_down = true;
-            warn!("Watch: none of the {} peers answered at all this round, so it is this \
-                watcher's own link that is down, not every peer at once. Nothing is judged \
-                until one answers.", probes.len());
+            warn!("Watch: none of the {} peers answered at all this round, across two or more \
+                hosts still thought up, so it is this watcher's own link that is down, not \
+                every peer at once. Nothing is judged until one answers.", probes.len());
         }
         return (Vec::new(), Vec::new());
     }
@@ -1247,6 +1261,85 @@ mod tests {
         }
         assert_eq!(kinds(&raised), vec!["down"]);
         assert!(!link_down);
+    }
+
+    /// A peer already `DOWN` is silent anyway, so it is no evidence about the watcher's link:
+    /// with jarrah down, birch falling silent is birch's outage, and is told (D-06 audit W1).
+    #[test]
+    fn a_peer_already_down_does_not_hide_the_next_outage() {
+        let cfg = watch_of(&["jarrah", "birch"], 2);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let mut raised = Vec::new();
+        for i in 0..2u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Up(None)]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            raised.extend(ev);
+        }
+        assert_eq!(kinds(&raised), vec!["down"]);
+        assert_eq!(state[0].health, Health::Down);
+
+        let mut raised = Vec::new();
+        for i in 2..4u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Silent]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            assert!(!link_down, "round {}: birch's silence was read as karri's own link", i);
+            raised.extend(ev);
+        }
+        match raised.as_slice() {
+            [AlertEvent::PeerDown { peer, .. }] => assert_eq!(peer, "birch"),
+            other => panic!("expected birch down alone, got {:?}", kinds(other)),
+        }
+        assert_eq!(state[1].health, Health::Down);
+    }
+
+    /// Two entries on one machine are one host: when it dies both fall silent together, and
+    /// that is its death, not the watcher's link (D-06 audit W1).
+    #[test]
+    fn two_entries_on_one_host_are_judged_as_one_host() {
+        let mut cfg = watch_of(&["jarrah", "forge"], 2);
+        cfg.peers[1].host = fmt!("jarrah");
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let mut raised = Vec::new();
+        for i in 0..2u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Silent]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            raised.extend(ev);
+        }
+        assert_eq!(kinds(&raised), vec!["down", "down"]);
+        assert!(!link_down);
+    }
+
+    /// The rule still holds over the hosts left: with jarrah down, karri and birch silent
+    /// together is the watcher's link, judged not at all.
+    #[test]
+    fn with_one_peer_down_every_live_host_silent_is_still_the_watchers_link() {
+        let cfg = watch_of(&["jarrah", "karri", "birch"], 2);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let mut raised = Vec::new();
+        for i in 0..2u64 {
+            let (ev, _) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Up(None), Probe::Up(None)]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            raised.extend(ev);
+        }
+        assert_eq!(kinds(&raised), vec!["down"]);
+        for i in 2..10u64 {
+            let (ev, samples) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Silent, Probe::Silent]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            assert!(ev.is_empty() && samples.is_empty() && link_down, "round {} was judged", i);
+        }
+        assert_eq!(state[1].health, Health::Up { failures: 0 });
+        assert_eq!(state[2].health, Health::Up { failures: 0 });
     }
 
     /// Distress is told by mail alone, so a host with no mail recipient names the peers whose
