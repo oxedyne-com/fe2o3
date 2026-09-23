@@ -31,7 +31,7 @@ use oxedyne_fe2o3_austenite::eval::fixpoint::{
 use oxedyne_fe2o3_austenite::eval::lib::foundations;
 use oxedyne_fe2o3_austenite::eval::ops;
 use oxedyne_fe2o3_austenite::eval::realise::{
-	realise,
+	realise_structure,
 	RealiseMode,
 };
 use oxedyne_fe2o3_austenite::eval::select::Selector;
@@ -382,7 +382,7 @@ fn walk(
 	if depth > 128 {
 		return Err(err!("the realised tree is deeper than 128 levels"; Excessive));
 	}
-	let pairs = res!(realise(engine, content, styles, mode));
+	let pairs = res!(realise_structure(engine, content, styles, mode));
 	for p in pairs {
 		res!(element(engine, &p.content, &p.styles, mode, out, depth + 1));
 	}

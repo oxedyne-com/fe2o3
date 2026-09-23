@@ -54,6 +54,7 @@ use oxedyne_fe2o3_austenite::eval::value::{
 	Value,
 };
 use oxedyne_fe2o3_austenite::eval::{
+	eval_source,
 	Engine,
 	World,
 };
@@ -323,14 +324,14 @@ fn dict(entries: &[(&str, Value)]) -> Value {
 // Typst's schema for the fields the fold cases set: name, default and fold rule.
 const TEXT_SIZE:		FieldSpec = FieldSpec::named("size", FieldType::Of(Type::Length), FieldDefault::Pt(11.0)).fold(Fold::Add);
 const TEXT_FEATURES:	FieldSpec = FieldSpec::named("features", FieldType::Any, FieldDefault::Computed).fold(Fold::Add);
-const LINE_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::Computed).fold(Fold::Merge);
-const RECT_INSET:		FieldSpec = FieldSpec::named("inset", FieldType::Any, FieldDefault::Pt(5.0)).fold(Fold::Merge);
-const RECT_RADIUS:		FieldSpec = FieldSpec::named("radius", FieldType::Any, FieldDefault::Computed).fold(Fold::Merge);
-const RECT_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::Computed).fold(Fold::Merge);
+const LINE_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::Computed).fold(Fold::Stroke);
+const RECT_INSET:		FieldSpec = FieldSpec::named("inset", FieldType::Any, FieldDefault::Pt(5.0)).fold(Fold::Sides);
+const RECT_RADIUS:		FieldSpec = FieldSpec::named("radius", FieldType::Any, FieldDefault::Computed).fold(Fold::Corners);
+const RECT_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::Computed).fold(Fold::Sides);
 const RECT_FILL:		FieldSpec = FieldSpec::named("fill", FieldType::Any, FieldDefault::None);
-const BLOCK_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::None).fold(Fold::Merge);
-const PAR_INDENT:		FieldSpec = FieldSpec::named("first-line-indent", FieldType::Any, FieldDefault::Computed).fold(Fold::Merge);
-const PAGE_MARGIN:		FieldSpec = FieldSpec::named("margin", FieldType::Any, FieldDefault::Auto).fold(Fold::Merge);
+const BLOCK_STROKE:		FieldSpec = FieldSpec::named("stroke", FieldType::Any, FieldDefault::None).fold(Fold::Sides);
+const PAR_INDENT:		FieldSpec = FieldSpec::named("first-line-indent", FieldType::Any, FieldDefault::Computed).fold(Fold::Keyed("amount"));
+const PAGE_MARGIN:		FieldSpec = FieldSpec::named("margin", FieldType::Any, FieldDefault::Auto).fold(Fold::Sides);
 
 /// Sets `values` outer to inner and folds them as the chain would.
 fn folded(spec: &FieldSpec, outer_to_inner: &[Value]) -> Value {
@@ -701,4 +702,27 @@ fn selector_functions_build_selectors() {
 	assert!(matches!(&v, Value::Selector(s) if matches!(**s, Selector::After { inclusive: false, .. })));
 	assert_eq!(select::method("where"), Some(StyleFn::Where));
 	assert_eq!(select::method("fields"), None);
+}
+
+// Labelled sequences, evaluated from source
+
+/// The fixture evaluated by the parser and evaluator, then realised as a paragraph's children.
+fn evaluated_inline(name: &str) -> String {
+	let path = fixture(name);
+	let root = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+	let mut world = World::new(root);
+	let id = world.load(&path).unwrap_or_else(|e| panic!("load {}: {:?}", name, e));
+	let mut e = Engine::new(world);
+	let module = eval_source(&mut e, id).unwrap_or_else(|err| panic!("eval {}: {:?} {:?}", name, err, e.diags));
+	let pairs = realise(&mut e, &module.content, &StyleChain::root(), RealiseMode::Inline)
+		.unwrap_or_else(|err| panic!("realise {}: {:?} {:?}", name, err, e.diags));
+	plain(&pairs).trim().to_string()
+}
+
+#[test]
+fn a_label_rule_applies_once_to_each_labelled_sequence() {
+	// Each labelled sequence is its own target, guarded against the rule's output: the outer one's
+	// output does not hide the inner one from the rule, and neither is transformed twice.
+	check_html("label_once.typ", evaluated_inline("label_once.typ"));
+	check_html("label_nested.typ", evaluated_inline("label_nested.typ"));
 }

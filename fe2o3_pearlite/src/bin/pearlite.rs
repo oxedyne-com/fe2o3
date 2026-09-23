@@ -1,6 +1,8 @@
-//! `pearlite` -- the native `.prl` reader's command line.
+//! `pearlite` -- the native `.prl` reader's command line, and its desktop launcher.
 //!
-//! Three subcommands, one per phase this crate covers:
+//! Run with no argument, or with a document path and no subcommand, it is a desktop application: a
+//! path opens straight into the native window, and no argument brings up the open-file dialog, so a
+//! double-click or a file association needs nothing more (with the `gui` feature). The subcommands:
 //!
 //! - `render <DOC.prl> [OUT_DIR]` -- per-page SVG, via `PearlDoc::render_page` alone (Phase 0's own
 //!   round trip, exposed here as a convenience alongside the other two).
@@ -8,9 +10,13 @@
 //! - `serve <DOC.prl> [--port N] [--no-open]` -- a loopback browser-shell app serving the existing
 //!   `pearl-reader` web assets against this one document (Phase 2, [`shell`]).
 //! - `open <DOC.prl>` -- a true native window rendering the document with the CPU rasteriser, no webview
-//!   (Phase 3, [`window`](oxedyne_fe2o3_pearlite::window); behind the default-off `gui` feature).
+//!   (Phase 3, [`window`](oxedyne_fe2o3_pearlite::window); behind the default-off `gui` feature). With no
+//!   path the open-file dialog asks for one.
+//! - `register` -- associates `.prl` documents with this binary for the current user
+//!   ([`register`](oxedyne_fe2o3_pearlite::register)).
 
 use oxedyne_fe2o3_pearlite::raster;
+use oxedyne_fe2o3_pearlite::register;
 use oxedyne_fe2o3_pearlite::shell::{
 	self,
 	Shell,
@@ -24,15 +30,25 @@ fn main() -> Outcome<()> {
 	let args: Vec<String> = std::env::args().skip(1).collect();
 	let cmd = match args.first() {
 		Some(c)	=> c.as_str(),
-		None	=> return usage(),
+		None	=> return cmd_launch(None),
 	};
 	match cmd {
-		"render"	=> cmd_render(&args[1..]),
-		"png"		=> cmd_png(&args[1..]),
-		"serve"		=> cmd_serve(&args[1..]),
-		"open"		=> cmd_open(&args[1..]),
-		_			=> usage(),
+		"render"					=> cmd_render(&args[1..]),
+		"png"						=> cmd_png(&args[1..]),
+		"serve"						=> cmd_serve(&args[1..]),
+		"open"						=> cmd_open(&args[1..]),
+		"register"					=> cmd_register(),
+		"help" | "--help" | "-h"	=> usage(),
+		// A desktop passes the document itself, with no subcommand, when a `.prl` is opened.
+		c if is_document(c)			=> cmd_launch(Some(c)),
+		_							=> usage(),
 	}
+}
+
+/// Does the argument name a document rather than a subcommand: an existing file, or a `.prl` path?
+fn is_document(arg: &str) -> bool {
+	let p = std::path::Path::new(arg);
+	p.is_file() || p.extension().map(|e| e.eq_ignore_ascii_case("prl")).unwrap_or(false)
 }
 
 fn usage() -> Outcome<()> {
@@ -40,28 +56,48 @@ fn usage() -> Outcome<()> {
 	println!("  pearlite render <DOC.prl> [OUT_DIR]");
 	println!("  pearlite png <DOC.prl> [OUT_DIR] [--dpi N]");
 	println!("  pearlite serve <DOC.prl> [--port N] [--no-open]");
-	println!("  pearlite open <DOC.prl>              (native window; build with --features gui)");
+	println!("  pearlite open [DOC.prl]              (native window; build with --features gui)");
+	println!("  pearlite register                    (associate .prl documents with this reader)");
+	println!("  pearlite [DOC.prl]                   (desktop launch: the window, or the open dialog)");
 	Ok(())
 }
 
-/// Opens the document in a native window. The reader itself lives behind the `gui` feature so the other
-/// subcommands pull in neither winit nor softbuffer; without the feature this arm says how to get it.
+/// Writes the current user's `.prl` association and application entry, pointing at this executable.
+fn cmd_register() -> Outcome<()> {
+	let steps = res!(register::plan());
+	for line in res!(register::execute(&steps)) {
+		println!("pearlite register: {}", line);
+	}
+	println!("pearlite register: .prl documents now open in {}", res!(register::handler_exe()).display());
+	Ok(())
+}
+
+/// The desktop launch: the document when one is named, otherwise the open-file dialog. Failures are shown
+/// on screen, since a double-click has no terminal.
+#[cfg(feature = "gui")]
+fn cmd_launch(path: Option<&str>) -> Outcome<()> {
+	oxedyne_fe2o3_pearlite::launch::run(path.map(std::path::PathBuf::from))
+}
+
+#[cfg(not(feature = "gui"))]
+fn cmd_launch(path: Option<&str>) -> Outcome<()> {
+	match path {
+		None	=> usage(),
+		Some(_)	=> cmd_open(&[]),
+	}
+}
+
+/// Opens the document in a native window, or asks for one when none is named. The reader lives behind
+/// the `gui` feature so the other subcommands pull in neither winit nor softbuffer; without the feature
+/// this arm says how to get it.
 #[cfg(feature = "gui")]
 fn cmd_open(args: &[String]) -> Outcome<()> {
-	use oxedyne_fe2o3_pearlite::window;
+	use oxedyne_fe2o3_pearlite::launch;
 
-	let source = match args.first() {
-		Some(s)	=> s.clone(),
-		None	=> return Err(err!("A .prl path is required."; Input, Missing)),
-	};
-	let doc = res!(PearlDoc::read_file(&source));
-	// The format carries no title of its own, so the file stem stands as the window title.
-	let title = std::path::Path::new(&source)
-		.file_stem()
-		.map(|n| n.to_string_lossy().into_owned())
-		.filter(|s| !s.is_empty())
-		.unwrap_or_else(|| "Pearlite".to_string());
-	window::open(doc, title)
+	match args.first() {
+		Some(s)	=> launch::open_path(std::path::Path::new(s)),
+		None	=> launch::run(None),
+	}
 }
 
 #[cfg(not(feature = "gui"))]

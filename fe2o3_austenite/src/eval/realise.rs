@@ -2,20 +2,25 @@
 // locations assigned and inline runs grouped. Flow calls it again for each container's body, so one call
 // realises one level, not the whole tree.
 //
-// A port of Typst 0.15's `typst-realize`: show-rule verdicts with guards, preparation (location,
-// materialised fields), text and regex rules over merged text runs, and the grouping rules (textual, par,
-// list, enum, terms) with their priorities and interruptions. Three things differ, each for want of a
-// shared-file change (see the U4 report): cite groups are not formed (no `ElemKind` for one); an element's
-// built-in show-set styles and synthesised fields have no family hook yet; and a location tag is a `Pair`
-// with `tag` set, not an element, so tags that fall inside a paragraph or list are lifted out of it (a
-// start before the group element, an end after it).
+// A port of Typst 0.15's `typst-realize`: show-rule verdicts with guards, preparation (location, built-in
+// show-set styles, materialised and synthesised fields), text and regex rules over merged text runs, and
+// the grouping rules (textual, par, cites, list, enum, terms) with their priorities and interruptions.
+// A location tag is a `Pair` with `tag` set in the stream and a `tag` element in content, so tags inside
+// a paragraph stay in its body; tags inside a list or a cite group are lifted out of it (a start before
+// the group element, an end after it). This file also answers for the `Realise` family: `tag`,
+// `sequence` and `styled`, the kinds of what realisation makes and of plain content.
 
+use crate::eval::args::Args;
 use crate::eval::content::{
+	self,
 	native_show,
 	Content,
 	ElemKind,
 	Family,
+	FieldDefault,
 	FieldId,
+	FieldSpec,
+	FieldType,
 };
 use crate::eval::locate::Location;
 use crate::eval::styles::{
@@ -30,6 +35,7 @@ use crate::eval::styles::{
 };
 use crate::eval::value::{
 	Label,
+	Type,
 	Value,
 };
 use crate::eval::Engine;
@@ -57,6 +63,91 @@ pub enum RealiseMode {
 pub enum Tag {
 	Start(Content),
 	End(Location),
+}
+
+impl Tag {
+	/// The tag as a `tag` element, how it sits inside content such as a paragraph's body.
+	pub fn to_content(&self) -> Content {
+		match self {
+			Tag::Start(c)	=> Content::new(ElemKind::Tag, vec![(TAG_START, Value::Content(c.clone()))], c.span()),
+			Tag::End(l)		=> Content::new(ElemKind::Tag, vec![(TAG_END, Value::Location(*l))], Span::detached()),
+		}
+	}
+
+	/// The tag a `tag` element carries.
+	pub fn from_content(c: &Content) -> Option<Tag> {
+		if !c.is(ElemKind::Tag) {
+			return None;
+		}
+		match (c.get(TAG_START), c.get(TAG_END)) {
+			(Some(Value::Content(e)), _)	=> Some(Tag::Start(e.clone())),
+			(_, Some(Value::Location(l)))	=> Some(Tag::End(*l)),
+			_								=> None,
+		}
+	}
+}
+
+// The `Realise` family's schemas.
+const TAG_START:	FieldId = FieldId(0);
+const TAG_END:		FieldId = FieldId(1);
+
+const TAG: &[FieldSpec] = &[
+	FieldSpec::named("start",	FieldType::Of(Type::Content),	FieldDefault::None).unsettable(),
+	FieldSpec::named("end",		FieldType::Of(Type::Location),	FieldDefault::None).unsettable(),
+];
+const SEQUENCE: &[FieldSpec] = &[
+	FieldSpec::required("children", FieldType::Of(Type::Array)),
+];
+const STYLED: &[FieldSpec] = &[
+	FieldSpec::required("child", FieldType::Content),
+	FieldSpec::required("styles", FieldType::Of(Type::Styles)),
+];
+
+pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
+	match kind {
+		ElemKind::Tag		=> TAG,
+		ElemKind::Sequence	=> SEQUENCE,
+		ElemKind::Styled	=> STYLED,
+		_					=> &[],
+	}
+}
+
+/// `sequence(children)` and `styled(child, styles)` build plain content, as the functions
+/// `content.func()` returns for it do in Typst; a tag is made only by realisation.
+pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcome<Option<Content>> {
+	let span = args.span;
+	let built = match kind {
+		ElemKind::Sequence => {
+			let items = res!(args.expect::<Value>("children"));
+			let items = match items {
+				Value::Array(a)	=> a,
+				other			=> return Err(engine.error(span, fmt!(
+					"expected array, found {}", other.ty().long_name()))),
+			};
+			let mut children = Vec::with_capacity(items.len());
+			for v in items.iter() {
+				match v {
+					Value::Content(c)	=> children.push(c.clone()),
+					other				=> return Err(engine.error(span, fmt!(
+						"expected content, found {}", other.ty().long_name()))),
+				}
+			}
+			Content::sequence(children)
+		}
+		ElemKind::Styled => {
+			let child = res!(args.expect::<Value>("child"));
+			let styles = res!(args.expect::<Value>("styles"));
+			let child = res!(content::display(engine, child, span));
+			match styles {
+				Value::Styles(s)	=> child.styled(s),
+				other				=> return Err(engine.error(span, fmt!(
+					"expected styles, found {}", other.ty().long_name()))),
+			}
+		}
+		_ => return Err(engine.error(span, fmt!("`{}` is made by realisation, not called", kind.path()))),
+	};
+	res!(std::mem::take(args).finish());
+	Ok(Some(built))
 }
 
 /// One realised element and the styles it is laid out under. A tag pair has empty content and `tag` set;
@@ -87,9 +178,37 @@ pub fn realise(
 )
 	-> Outcome<Vec<Pair>>
 {
+	realise_with(engine, content, styles, mode, false)
+}
+
+/// Realises as `realise` does, but leaves model elements (headings, paragraphs, lists, strong and
+/// emphasised text, figures and the like) standing where no user show rule replaces them, instead of
+/// expanding them by their built-in show, as Typst's HTML export keeps them. The structure a reader
+/// sees can then be compared with that export.
+pub fn realise_structure(
+	engine:		&mut Engine,
+	content:	&Content,
+	styles:		&StyleChain,
+	mode:		RealiseMode,
+)
+	-> Outcome<Vec<Pair>>
+{
+	realise_with(engine, content, styles, mode, true)
+}
+
+fn realise_with(
+	engine:		&mut Engine,
+	content:	&Content,
+	styles:		&StyleChain,
+	mode:		RealiseMode,
+	keep_model:	bool,
+)
+	-> Outcome<Vec<Pair>>
+{
 	let mut s = State {
 		engine,
 		mode,
+		keep_model,
 		sink:			Vec::new(),
 		groupings:		Vec::new(),
 		outside:		mode == RealiseMode::Document,
@@ -113,6 +232,7 @@ pub fn is_inline(content: &Content) -> bool {
 enum Rule {
 	Textual,
 	Par,
+	Cites,
 	List,
 	Enum,
 	Terms,
@@ -122,7 +242,7 @@ impl Rule {
 	fn priority(self) -> u8 {
 		match self {
 			Rule::Textual						=> 3,
-			Rule::List | Rule::Enum | Rule::Terms	=> 2,
+			Rule::Cites | Rule::List | Rule::Enum | Rule::Terms	=> 2,
 			Rule::Par							=> 1,
 		}
 	}
@@ -142,6 +262,7 @@ impl Rule {
 				ElemKind::Equation	=> !matches!(c.field("block"), Some(Value::Bool(true))),
 				_					=> false,
 			},
+			Rule::Cites	=> k == ElemKind::Cite,
 			Rule::List	=> k == ElemKind::ListItem,
 			Rule::Enum	=> k == ElemKind::EnumItem,
 			Rule::Terms	=> k == ElemKind::TermItem,
@@ -151,7 +272,7 @@ impl Rule {
 	/// May the element sit inside such a group without opening one?
 	fn inner(self, c: &Content) -> bool {
 		match self {
-			Rule::Textual | Rule::Par				=> c.is(ElemKind::Space),
+			Rule::Textual | Rule::Par | Rule::Cites	=> c.is(ElemKind::Space),
 			Rule::List | Rule::Enum | Rule::Terms	=> c.is(ElemKind::Space) || c.is(ElemKind::Parbreak),
 		}
 	}
@@ -161,6 +282,7 @@ impl Rule {
 		match self {
 			Rule::Textual	=> true,
 			Rule::Par		=> matches!(k, ElemKind::Par | ElemKind::Align),
+			Rule::Cites		=> matches!(k, ElemKind::CiteGroup | ElemKind::Cite),
 			Rule::List		=> matches!(k, ElemKind::List | ElemKind::Align),
 			Rule::Enum		=> matches!(k, ElemKind::Enum | ElemKind::Align),
 			Rule::Terms		=> matches!(k, ElemKind::Terms | ElemKind::Align),
@@ -168,9 +290,9 @@ impl Rule {
 	}
 }
 
-const LAYOUT_RULES:	&[Rule] = &[Rule::Textual, Rule::Par, Rule::List, Rule::Enum, Rule::Terms];
-const PAR_RULES:	&[Rule] = &[Rule::Textual, Rule::List, Rule::Enum, Rule::Terms];
-const MATH_RULES:	&[Rule] = &[Rule::List, Rule::Enum, Rule::Terms];
+const LAYOUT_RULES:	&[Rule] = &[Rule::Textual, Rule::Par, Rule::Cites, Rule::List, Rule::Enum, Rule::Terms];
+const PAR_RULES:	&[Rule] = &[Rule::Textual, Rule::Cites, Rule::List, Rule::Enum, Rule::Terms];
+const MATH_RULES:	&[Rule] = &[Rule::Cites, Rule::List, Rule::Enum, Rule::Terms];
 
 #[derive(Clone, Copy, Debug)]
 struct Grouping {
@@ -202,6 +324,7 @@ struct RegexMatch {
 struct State<'e> {
 	engine:			&'e mut Engine,
 	mode:			RealiseMode,
+	keep_model:		bool,	// model elements stand unexpanded (`realise_structure`)
 	sink:			Vec<Pair>,
 	groupings:		Vec<Grouping>,
 	outside:		bool,	// at the document's top level, not inside a container or show-rule output
@@ -220,6 +343,11 @@ impl State<'_> {
 	}
 
 	fn visit(&mut self, content: &Content, styles: &StyleChain) -> Outcome<()> {
+		// A tag carried in content (a paragraph's body) goes back into the stream where it stands.
+		if let Some(tag) = Tag::from_content(content) {
+			self.push_tag(tag, styles);
+			return Ok(());
+		}
 		if res!(self.visit_kind_rules(content, styles)) {
 			return Ok(());
 		}
@@ -334,7 +462,7 @@ impl State<'_> {
 		let mut output = target.clone();
 		let mut tags = None;
 		if !prepared {
-			tags = res!(self.prepare(&mut output, &map, styles));
+			tags = res!(self.prepare(&mut output, &mut map, styles));
 		}
 		let chained = styles.chain(&map);
 		let result = match step {
@@ -344,7 +472,7 @@ impl State<'_> {
 				}
 				res!(apply_recipe(self.engine, &recipe, output.clone(), &chained))
 			}
-			Step::Builtin => match res!(native_show(self.engine, &output, &chained)) {
+			Step::Builtin => match res!(self.builtin_show(&output, &chained)) {
 				Some(c) => spanned(c, output.span()),
 				None => {
 					// A primitive: flow lays it out itself.
@@ -369,38 +497,74 @@ impl State<'_> {
 		Ok(true)
 	}
 
-	/// A labelled sequence meets label rules too. It has no guard set, so an applied recipe (and every
-	/// show-set rule, which must not apply twice) is revoked for its output.
+	// The element's built-in show, or `None` for a primitive -- and for a model element when the
+	// structure is being kept.
+	fn builtin_show(&mut self, elem: &Content, styles: &StyleChain) -> Outcome<Option<Content>> {
+		if self.keep_model && elem.kind().map(|k| k.family() == Family::Model).unwrap_or(false) {
+			return Ok(None);
+		}
+		native_show(self.engine, elem, styles)
+	}
+
+	/// A labelled sequence meets label rules too, and is located and guarded as an element is: its
+	/// location is assigned once, and a recipe applied to it is not applied to its output again.
 	fn show_labelled(&mut self, target: &Content, styles: &StyleChain) -> Outcome<bool> {
+		let (prepared, guards) = match target {
+			Content::Sequence(seq)	=> (seq.location.is_some(), seq.guards.clone()),
+			_						=> return Ok(false),
+		};
 		let mut map = Styles::new();
-		let mut applied = Vec::new();
 		let mut step = None;
 		for (index, recipe) in styles.recipes() {
 			if !res!(recipe.applicable(target, styles)) {
 				continue;
 			}
 			if let Transformation::Style(set) = &recipe.transform {
-				map.apply_outer(set);
-				applied.push(index);
+				if !prepared {
+					map.apply_outer(set);
+				}
 				continue;
 			}
-			if step.is_none() {
-				step = Some((recipe.clone(), index));
-				applied.push(index);
+			if step.is_some() || guards.contains(&index) {
+				continue;
+			}
+			step = Some((recipe.clone(), index));
+			if prepared {
+				break;
 			}
 		}
-		if step.is_none() && map.is_empty() {
+		if prepared && step.is_none() {
 			return Ok(false);
 		}
-		let chained = styles.chain(&map);
-		let result = match step {
-			Some((recipe, _))	=> res!(apply_recipe(self.engine, &recipe, target.clone(), &chained)),
-			None				=> Content::sequence(target.children().to_vec()),
-		};
-		for index in applied {
-			map.push(Style::Revocation(index));
+		let mut output = target.clone();
+		let mut tags = None;
+		if let Content::Sequence(seq) = &mut output {
+			let seq = Arc::make_mut(seq);
+			if seq.location.is_none() {
+				let loc = self.engine.locator.locate(ElemKind::Sequence, seq.span);
+				seq.location = Some(loc);
+				tags = Some(loc);
+			}
+			if let Some((_, index)) = &step {
+				seq.guards.push(*index);
+			}
 		}
-		res!(self.visit_output(target, &result, &map, styles));
+		if tags.is_some() {
+			self.push_tag(Tag::Start(output.clone()), styles);
+		}
+		match step {
+			Some((recipe, _)) => {
+				let chained = styles.chain(&map);
+				let result = res!(apply_recipe(self.engine, &recipe, output.clone(), &chained));
+				res!(self.visit_output(target, &result, &map, styles));
+			}
+			// No recipe: the located sequence itself, which the next visit walks into at this level,
+			// so page rules inside it still reach the page.
+			None => res!(self.visit_styled(&output, &map, styles, false)),
+		}
+		if let Some(loc) = tags {
+			self.push_tag(Tag::End(loc), styles);
+		}
 		Ok(true)
 	}
 
@@ -423,7 +587,7 @@ impl State<'_> {
 
 	/// Gives the element its location (when locatable or labelled) and copies the style chain's values
 	/// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
-	fn prepare(&mut self, target: &mut Content, map: &Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
+	fn prepare(&mut self, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
 		let e = match target {
 			Content::Elem(e)	=> Arc::make_mut(e),
 			_					=> return Ok(None),
@@ -431,6 +595,9 @@ impl State<'_> {
 		if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
 			e.location = Some(self.engine.locator.locate(e.kind, e.span));
 		}
+		// Built-in show-set styles sit outside the user's, which override them.
+		let builtin = res!(content::show_set(e.kind, styles));
+		map.apply_outer(&builtin);
 		let chain = styles.chain(map);
 		for (i, spec) in e.kind.fields().iter().enumerate() {
 			let id = FieldId(i as u8);
@@ -441,8 +608,15 @@ impl State<'_> {
 				e.fields.push((id, v));
 			}
 		}
-		e.prepared = true;
-		let loc = e.location;
+		res!(content::synthesise(self.engine, target, &chain));
+		let loc = match target {
+			Content::Elem(e)	=> {
+				let e = Arc::make_mut(e);
+				e.prepared = true;
+				e.location
+			}
+			_					=> None,
+		};
 		Ok(loc.map(|l| (Tag::Start(target.clone()), Tag::End(l))))
 	}
 
@@ -630,6 +804,7 @@ impl State<'_> {
 		match g.rule {
 			Rule::Textual						=> res!(self.finish_textual(g.start)),
 			Rule::Par							=> res!(self.finish_par(g.start)),
+			Rule::Cites							=> res!(self.finish_cites(g.start)),
 			Rule::List | Rule::Enum | Rule::Terms	=> res!(self.finish_list(g.start, g.rule)),
 		}
 		for p in tail {
@@ -704,15 +879,29 @@ impl State<'_> {
 		Ok(())
 	}
 
+	/// A paragraph keeps the tags that fall inside it in its body, as `tag` elements, so a located
+	/// element in running text is found where it is set.
 	fn finish_par(&mut self, start: usize) -> Outcome<()> {
 		res!(collapse_spaces(&mut self.sink, start));
 		let elems = self.sink.split_off(start);
-		let (members, tags): (Vec<Pair>, Vec<Pair>) = elems.into_iter().partition(|p| !p.is_tag());
-		let span = select_span(&members);
-		let (body, trunk) = repack(&members);
+		let span = select_span(&elems);
+		let (body, trunk) = repack(&elems);
 		let id = res!(field(ElemKind::Par, "body"));
 		let par = Content::new(ElemKind::Par, vec![(id, Value::Content(body))], span);
-		self.around_tags(tags, |s| s.visit(&par, &trunk))
+		self.visit(&par, &trunk)
+	}
+
+	/// Adjacent citations, with only spaces between them, become one cite group.
+	fn finish_cites(&mut self, start: usize) -> Outcome<()> {
+		let elems = self.sink.split_off(start);
+		let (cites, rest): (Vec<Pair>, Vec<Pair>) = elems.into_iter().partition(|p| p.content.is(ElemKind::Cite));
+		let tags: Vec<Pair> = rest.into_iter().filter(|p| p.is_tag()).collect();
+		let span = select_span(&cites);
+		let trunk = StyleChain::trunk(cites.iter().map(|p| &p.styles));
+		let children = cites.iter().map(|p| Value::Content(p.content.clone())).collect();
+		let id = res!(field(ElemKind::CiteGroup, "children"));
+		let group = Content::new(ElemKind::CiteGroup, vec![(id, Value::array(children))], span);
+		self.around_tags(tags, |s| s.visit(&group, &trunk))
 	}
 
 	fn finish_list(&mut self, start: usize, rule: Rule) -> Outcome<()> {
@@ -804,13 +993,20 @@ fn slice_text(c: &Content, t: &str, from: usize, to: usize) -> Content {
 }
 
 fn select_span(pairs: &[Pair]) -> Span {
-	pairs.iter().map(|p| p.content.span()).find(|s| !s.is_detached()).unwrap_or(Span::detached())
+	pairs.iter().filter(|p| !p.is_tag()).map(|p| p.content.span()).find(|s| !s.is_detached())
+		.unwrap_or(Span::detached())
 }
 
 /// Rebuilds content from grouped pairs: each run of members under one chain becomes a sequence styled
 /// with what its chain has beyond the group's trunk, and the trunk is returned for the group itself.
+/// A tag among them becomes a `tag` element; the trunk is taken over the members alone.
 fn repack(pairs: &[Pair]) -> (Content, StyleChain) {
-	let trunk = StyleChain::trunk(pairs.iter().map(|p| &p.styles));
+	let members: Vec<&Pair> = pairs.iter().filter(|p| !p.is_tag()).collect();
+	let trunk = if members.is_empty() {
+		StyleChain::trunk(pairs.iter().map(|p| &p.styles))
+	} else {
+		StyleChain::trunk(members.iter().map(|p| &p.styles))
+	};
 	let depth = trunk.depth();
 	let mut children = Vec::new();
 	let mut i = 0;
@@ -819,7 +1015,10 @@ fn repack(pairs: &[Pair]) -> (Content, StyleChain) {
 		while j < pairs.len() && pairs[j].styles.ptr_eq(&pairs[i].styles) {
 			j += 1;
 		}
-		let run: Vec<Content> = pairs[i..j].iter().map(|p| p.content.clone()).collect();
+		let run: Vec<Content> = pairs[i..j].iter().map(|p| match &p.tag {
+			Some(t)	=> t.to_content(),
+			None	=> p.content.clone(),
+		}).collect();
 		children.push(Content::sequence(run).styled(pairs[i].styles.suffix(depth)));
 		i = j;
 	}
