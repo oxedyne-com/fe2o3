@@ -1,9 +1,7 @@
 //! Ported from typst-syntax 0.15.1 (`src/lexer.rs`, Apache-2.0, (c) the Typst authors), token for token:
 //! the same modes, the same kinds, the same error messages and hints, so a document lexes as Typst
 //! lexes it. The Unicode predicates it needs (XID identifiers, the CJK scripts, the maths delimiter
-//! classes) come from the generated tables in `lexer/unicode.rs` rather than crates.
-
-mod unicode;
+//! classes, grapheme clusters) come from `fe2o3_text::unicode` rather than crates.
 
 use crate::syntax::{
 	SyntaxKind,
@@ -11,6 +9,13 @@ use crate::syntax::{
 	Span,
 };
 
+use oxedyne_fe2o3_text::unicode::lookup::Partitioned;
+use oxedyne_fe2o3_text::unicode::math::{
+	self,
+	MathClass,
+};
+use oxedyne_fe2o3_text::unicode::prop::Script;
+use oxedyne_fe2o3_text::unicode::property;
 use oxedyne_fe2o3_text::unicode::segment;
 
 /// The three lexical modes Typst switches between.
@@ -1046,15 +1051,6 @@ fn keyword(ident: &str) -> Option<SyntaxKind> {
 // │ Character classes                                                                         │
 // └───────────────────────────────────────────────────────────────────────────────────────────┘
 
-fn in_table(table: &[(u32, u32)], c: char) -> bool {
-	let c = c as u32;
-	let i = table.partition_point(|(a, _)| *a <= c);
-	match i.checked_sub(1).and_then(|i| table.get(i)) {
-		Some((_, b))	=> c <= *b,
-		None			=> false,
-	}
-}
-
 fn is_space(c: char, mode: LexMode) -> bool {
 	match mode {
 		LexMode::Markup	=> matches!(c, ' ' | '\t') || is_newline(c),
@@ -1067,13 +1063,9 @@ pub fn is_newline(c: char) -> bool {
 	matches!(c, '\n' | '\x0B' | '\x0C' | '\r' | '\u{0085}' | '\u{2028}' | '\u{2029}')
 }
 
-pub fn is_xid_start(c: char) -> bool {
-	if c.is_ascii() { c.is_ascii_alphabetic() } else { in_table(unicode::XID_START, c) }
-}
+pub fn is_xid_start(c: char) -> bool { property::is_xid_start(c) }
 
-pub fn is_xid_continue(c: char) -> bool {
-	if c.is_ascii() { c.is_ascii_alphanumeric() || c == '_' } else { in_table(unicode::XID_CONTINUE, c) }
-}
+pub fn is_xid_continue(c: char) -> bool { property::is_xid_continue(c) }
 
 /// Can the char start an identifier? XID_Start plus the underscore.
 pub fn is_id_start(c: char) -> bool { is_xid_start(c) || c == '_' }
@@ -1102,38 +1094,19 @@ pub fn is_valid_label_literal_id(id: &str) -> bool {
 }
 
 /// Is the char in the Han, Hiragana, Katakana or Hangul script, where `*` and `_` never sit inside a word?
-fn is_cjk(c: char) -> bool { !c.is_ascii() && in_table(unicode::CJK, c) }
+fn is_cjk(c: char) -> bool {
+	!c.is_ascii() && matches!(Script::of(c), Script::Han | Script::Hiragana | Script::Katakana | Script::Hangul)
+}
 
-pub fn is_math_opening(c: char) -> bool { in_table(unicode::MATH_OPENING, c) }
+pub fn is_math_opening(c: char) -> bool { math::class(c) == Some(MathClass::Opening) }
 
-pub fn is_math_closing(c: char) -> bool { in_table(unicode::MATH_CLOSING, c) }
+pub fn is_math_closing(c: char) -> bool { math::class(c) == Some(MathClass::Closing) }
 
 /// Does the char have the Unicode maths class Alphabetic? Typst's own class overrides touch no letter.
-pub fn is_math_alphabetic_class(c: char) -> bool { in_table(unicode::MATH_ALPHABETIC, c) }
+pub fn is_math_alphabetic_class(c: char) -> bool { math::class(c) == Some(MathClass::Alphabetic) }
 
-/// The byte length of the first extended grapheme cluster of `s`.
-pub fn grapheme_len(s: &str) -> usize {
-	let mut chars = s.char_indices();
-	let first = match chars.next() {
-		Some((_, c))	=> c,
-		None			=> return 0,
-	};
-	// A cluster always ends between two ASCII chars other than CR LF, so the search needs only the text up
-	// to the first such pair; that keeps it linear over a long line of maths.
-	let mut prev = first;
-	let mut cut = s.len();
-	for (i, c) in chars {
-		if prev.is_ascii() && c.is_ascii() && !(prev == '\r' && c == '\n') {
-			cut = i;
-			break;
-		}
-		prev = c;
-	}
-	match s.get(..cut) {
-		Some(head)	=> segment::next_grapheme(head, 0),
-		None		=> first.len_utf8(),
-	}
-}
+/// The byte length of the first extended grapheme cluster of `s`, reading only that cluster.
+pub fn grapheme_len(s: &str) -> usize { segment::grapheme_len_at(s, 0) }
 
 /// The prefix of `text` that an automatic link takes, and whether its brackets balance. Trailing
 /// punctuation likely to be prose is left out.

@@ -51,13 +51,47 @@ pub fn apply(engine: &mut Engine, numbering: &Value, nums: &[u64]) -> Outcome<Va
 	apply_at(engine, Span::detached(), numbering, nums)
 }
 
-fn apply_at(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64]) -> Outcome<Value> {
+/// As [`apply`], a pattern without its first prefix and its suffix: a reference to a heading numbered
+/// `"1."` reads "1". A numbering function is called as it is.
+pub fn apply_trimmed(engine: &mut Engine, numbering: &Value, nums: &[u64]) -> Outcome<Value> {
+	apply_with(engine, Span::detached(), numbering, nums, true)
+}
+
+/// One number at nesting depth `k` (from zero), as an enumeration item shows it: the pattern's first
+/// prefix, the `k`th counting symbol (the last one repeating past the end) and the suffix. A
+/// numbering function is called with the number alone.
+pub fn apply_kth(engine: &mut Engine, numbering: &Value, k: usize, n: u64) -> Outcome<Value> {
+	let span = Span::detached();
 	match numbering {
 		Value::Str(s) => {
 			let pat = match Pattern::parse(s) {
 				Some(p)	=> p,
 				None	=> return Err(engine.error(span, "invalid numbering pattern")),
 			};
+			let kind = pat.kind_at(k);
+			if n == 0 {
+				if let Some(name) = kind.zeroless_name() {
+					engine.warn(span, fmt!("the numeral system `{}` cannot represent zero", name));
+				}
+			}
+			Ok(Value::str(pat.apply_kth(k, n)))
+		}
+		_ => apply_at(engine, span, numbering, &[n]),
+	}
+}
+
+fn apply_at(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64]) -> Outcome<Value> {
+	apply_with(engine, span, numbering, nums, false)
+}
+
+fn apply_with(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64], trimmed: bool) -> Outcome<Value> {
+	match numbering {
+		Value::Str(s) => {
+			let mut pat = match Pattern::parse(s) {
+				Some(p)	=> p,
+				None	=> return Err(engine.error(span, "invalid numbering pattern")),
+			};
+			pat.trimmed = trimmed;
 			for (i, n) in nums.iter().enumerate() {
 				if *n == 0 {
 					let kind = pat.kind_at(i);
@@ -103,11 +137,22 @@ impl Pattern {
 		Some(Self { pieces, suffix: s[handled..].to_string(), trimmed: false })
 	}
 
-	fn kind_at(&self, i: usize) -> Kind {
+	pub fn kind_at(&self, i: usize) -> Kind {
 		match self.pieces.get(i).or(self.pieces.last()) {
 			Some((_, k))	=> *k,
 			None			=> Kind::Arabic,
 		}
+	}
+
+	/// The `k`th counting symbol alone, between the first prefix and the suffix.
+	pub fn apply_kth(&self, k: usize, n: u64) -> String {
+		let mut out = String::new();
+		if let Some((prefix, _)) = self.pieces.first() {
+			out.push_str(prefix);
+		}
+		out.push_str(&self.kind_at(k).apply(n));
+		out.push_str(&self.suffix);
+		out
 	}
 
 	pub fn apply(&self, nums: &[u64]) -> String {

@@ -523,6 +523,34 @@ fn space_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<ColorSpace> {
 	}
 }
 
+// Typst's `luma`: a colour anywhere among the arguments converts; otherwise the grey component, whose
+// failed cast or absence Typst quietly takes as 100%, then an optional ratio alpha.
+fn luma(engine: &mut Engine, span: Span, mut vals: Vec<Value>) -> Outcome<Color> {
+	if let Some(i) = vals.iter().position(|v| matches!(v, Value::Color(_))) {
+		let c = vals.remove(i);
+		if !vals.is_empty() {
+			return Err(engine.error(span, "unexpected argument"));
+		}
+		if let Value::Color(c) = c {
+			return Ok(to_space(&c, ColorSpace::Luma));
+		}
+	}
+	let mut it = vals.into_iter();
+	let l = match it.next() {
+		Some(Value::Int(i)) if (0..=255).contains(&i)				=> i as f32 / 255.0,
+		Some(Value::Ratio(r)) if (0.0..=1.0).contains(&r.0)			=> r.0 as f32,
+		_															=> 1.0,
+	};
+	let a = match it.next() {
+		None	=> 1.0,
+		Some(v)	=> res!(ratio_only(engine, span, v)),
+	};
+	if it.next().is_some() {
+		return Err(engine.error(span, "unexpected argument"));
+	}
+	Ok(Color { space: ColorSpace::Luma, c: [l, 0.0, 0.0, 0.0], alpha: a })
+}
+
 // Constructors' component casts.
 
 // An eight-bit int or a ratio.
@@ -601,6 +629,9 @@ fn parse_hex(engine: &mut Engine, span: Span, s: &str) -> Outcome<Color> {
 fn construct(f: ColorFn, engine: &mut Engine, args: &mut Args) -> Outcome<Color> {
 	let span = args.span;
 	let vals = res!(args.all::<Value>());
+	if f == ColorFn::Luma {
+		return luma(engine, span, vals);
+	}
 	if vals.len() == 1 {
 		if let Value::Color(c) = &vals[0] {
 			let space = match f {

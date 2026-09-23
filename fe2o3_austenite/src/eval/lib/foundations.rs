@@ -25,6 +25,7 @@ use crate::eval::intro::{
 	CounterKey,
 	State,
 };
+use crate::eval::lib::decimal::Decimal;
 use crate::eval::lib::{
 	array,
 	color,
@@ -113,7 +114,7 @@ const TYPST_VERSION: [u32; 3] = [0, 15, 1];
 
 pub fn define(scope: &mut Scope) {
 	for ty in [
-		Type::Bool, Type::Int, Type::Float, Type::Str, Type::Label, Type::Bytes, Type::Content,
+		Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Str, Type::Label, Type::Bytes, Type::Content,
 		Type::Array, Type::Dict, Type::Func, Type::Args, Type::Type, Type::Module, Type::Regex,
 		Type::Selector, Type::Datetime, Type::Symbol, Type::Duration, Type::Version, Type::Length,
 		Type::Angle, Type::Ratio, Type::Relative, Type::Fraction, Type::Direction, Type::Alignment,
@@ -157,6 +158,7 @@ pub fn constructor(ty: Type) -> Option<NativeFunc> {
 		Type::Bool		=> Some(NativeFunc::Found(FoundFn::Bool)),
 		Type::Int		=> Some(NativeFunc::Found(FoundFn::Int)),
 		Type::Float		=> Some(NativeFunc::Found(FoundFn::Float)),
+		Type::Decimal	=> Some(NativeFunc::Found(FoundFn::Decimal)),
 		Type::Str		=> Some(NativeFunc::Found(FoundFn::Str)),
 		Type::Label		=> Some(NativeFunc::Found(FoundFn::Label)),
 		Type::Regex		=> Some(NativeFunc::Found(FoundFn::Regex)),
@@ -190,8 +192,8 @@ pub fn as_func(v: &Value) -> Option<Func> {
 /// The type whose constructor `f` is, for a constructor function's scope (`str.from-unicode` read
 /// through a function bound to `str`).
 pub fn constructed_type(f: NativeFunc) -> Option<Type> {
-	const TYPES: [Type; 20] = [
-		Type::Bool, Type::Int, Type::Float, Type::Str, Type::Label, Type::Regex, Type::Version,
+	const TYPES: [Type; 21] = [
+		Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Str, Type::Label, Type::Regex, Type::Version,
 		Type::Bytes, Type::Args, Type::Type, Type::Array, Type::Dict, Type::Datetime, Type::Duration,
 		Type::Symbol, Type::Stroke, Type::Tiling, Type::Selector, Type::Counter, Type::State,
 	];
@@ -545,8 +547,12 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let s = res!(str_of(engine, span, v));
 			match RegexValue::new(&s) {
 				Ok(r)	=> Value::Regex(Arc::new(r)),
-				Err(e)	=> return Err(engine.error(span, fmt!("invalid regular expression: {}",
-					e.msgs().last().cloned().unwrap_or_default()))),
+				// The `regex` crate's layout: a heading line, the pattern, then the fault.
+				Err(e)	=> {
+					let m = e.msgs().last().cloned().unwrap_or_default();
+					let m = m.strip_prefix("regex: ").unwrap_or(&m).trim_end_matches('.').to_string();
+					return Err(engine.error(span, fmt!("regex parse error:\n    {}\nerror: {}", s, m)));
+				}
 			}
 		}
 		FoundFn::Version => {
@@ -586,11 +592,31 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		FoundFn::Plugin => return Err(engine.error_hint(span,
 			"wasm plugins are not supported by Austenite",
 			"a package that needs a plugin cannot be compiled here")),
-		FoundFn::Decimal => return Err(engine.error_hint(span,
-			"the decimal type is not supported by Austenite yet",
-			"use a float, or an integer scaled to the precision you need")),
+		FoundFn::Decimal => {
+			let v = res!(need(engine, &mut args, "value"));
+			res!(finish(engine, args));
+			match v {
+				Value::Decimal(d)	=> Value::Decimal(d),
+				Value::Int(i)		=> Value::Decimal(Decimal::from(i)),
+				Value::Bool(b)		=> Value::Decimal(Decimal::from(b as i64)),
+				Value::Float(f)		=> match Decimal::from_f64(f) {
+					Some(d)	=> Value::Decimal(d),
+					None	=> return Err(engine.error(span, fmt!("float is not a valid decimal: {}",
+						format_float(f, None, true, "")))),
+				},
+				Value::Str(s)		=> match Decimal::parse(&s.replace(MINUS, "-")) {
+					Some(d)	=> Value::Decimal(d),
+					None	=> return Err(engine.error(span, fmt!("invalid decimal: {}", s))),
+				},
+				other => return Err(mismatch(engine, span, "decimal, integer, boolean, float, or string", &other)),
+			}
+		}
 		FoundFn::Target => {
 			res!(finish(engine, args));
+			if engine.context.styles.is_none() && engine.context.location.is_none() {
+				return Err(engine.error_hint(span, "can only be used when context is known",
+					"try wrapping this in a `context` expression"));
+			}
 			Value::str("paged")
 		}
 		FoundFn::At if recv_ty == Some(Type::Version) => {
@@ -948,6 +974,10 @@ fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 	match v {
 		Value::Int(i)	=> Ok(Value::Int(i)),
 		Value::Bool(b)	=> Ok(Value::Int(b as i64)),
+		Value::Decimal(d)	=> match d.to_i64() {
+			Some(i)	=> Ok(Value::Int(i)),
+			None	=> Err(engine.error(span, "number too large")),
+		},
 		Value::Float(f)	=> {
 			let t = f.trunc();
 			if t.is_nan() || t < -9.223372036854776e18 || t >= 9.223372036854776e18 {
@@ -989,6 +1019,7 @@ fn to_float(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 		Value::Int(i)	=> Ok(Value::Float(i as f64)),
 		Value::Bool(b)	=> Ok(Value::Float(if b { 1.0 } else { 0.0 })),
 		Value::Ratio(r)	=> Ok(Value::Float(r.0)),
+		Value::Decimal(d)	=> Ok(Value::Float(d.to_f64())),
 		Value::Str(s)	=> {
 			let t = s.replace('\u{2212}', "-");
 			match parse_float(&t) {
@@ -1034,6 +1065,7 @@ fn to_str(engine: &mut Engine, span: Span, v: Value, base: Option<Value>) -> Out
 	let s = match v {
 		Value::Int(i)		=> format_int_with_base(i, 10),
 		Value::Float(f)		=> display_float(f),
+		Value::Decimal(d)	=> d.display(),
 		Value::Str(s)		=> (*s).clone(),
 		Value::Label(l)		=> l.as_str().to_string(),
 		Value::Type(t)		=> type_desc(t).to_string(),
@@ -1082,11 +1114,8 @@ pub fn display_float(f: f64) -> String {
 	if f.is_infinite() {
 		return if f < 0.0 { fmt!("{}∞", MINUS) } else { "∞".to_string() };
 	}
-	let s = fmt!("{}", f);
-	match s.strip_prefix('-') {
-		Some(r)	=> fmt!("{}{}", MINUS, r),
-		None	=> s,
-	}
+	// Typst prints the magnitude, so a negative zero shows as `0`.
+	if f < 0.0 { fmt!("{}{}", MINUS, f.abs()) } else { fmt!("{}", f.abs()) }
 }
 
 pub fn version_text(p: &[u32]) -> String {
@@ -1122,11 +1151,13 @@ pub fn format_float(value: f64, precision: Option<u8>, force_separator: bool, su
 		Some(p)	=> round_with_precision(value, p as i16),
 		None	=> value,
 	};
+	// A unit after a non-finite number is written as a product: `float.inf * 1pt`.
+	let times = if suffix.is_empty() { "" } else { " * 1" };
 	if v.is_nan() {
-		return "NaN".to_string();
+		return fmt!("float.nan{}{}", times, suffix);
 	}
 	if v.is_infinite() {
-		return fmt!("{}inf{}", if v < 0.0 { "-" } else { "" }, suffix);
+		return fmt!("{}float.inf{}{}", if v < 0.0 { "-" } else { "" }, times, suffix);
 	}
 	if force_separator {
 		fmt!("{:?}{}", v, suffix)
@@ -1161,6 +1192,7 @@ pub fn repr(v: &Value) -> String {
 		Value::Bool(b)			=> b.to_string(),
 		Value::Int(i)			=> i.to_string(),
 		Value::Float(f)			=> repr_float(*f),
+		Value::Decimal(d)		=> fmt!("decimal({})", repr_str(&d.text())),
 		Value::Length(l)		=> repr_length(l),
 		Value::Angle(a)			=> repr_angle(*a),
 		Value::Ratio(r)			=> repr_ratio(*r),
@@ -1307,28 +1339,13 @@ pub fn is_unprintable(c: char) -> bool {
 		|| matches!(u, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
 }
 
-/// Can `s` be written as a bare identifier (a dict key without quotes, a label in angle brackets)?
-pub fn is_ident(s: &str) -> bool {
-	let mut cs = s.chars();
-	match cs.next() {
-		Some(c) if c.is_alphabetic() || c == '_' => (),
-		_ => return false,
-	}
-	cs.all(|c| c.is_alphanumeric() || c == '_' || c == '-' || is_mark(c))
-}
-
-// Combining marks and joiners count as identifier-continue characters, as XID_Continue has them.
-fn is_mark(c: char) -> bool {
-	matches!(c as u32, 0x300..=0x36F | 0x483..=0x487 | 0x591..=0x5BD | 0x610..=0x61A | 0x64B..=0x65F
-		| 0x900..=0x903 | 0x93A..=0x94F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x200C | 0x200D
-		| 0x20D0..=0x20FF | 0xFE00..=0xFE0F | 0xFE20..=0xFE2F)
-}
-
-fn is_label_char(c: char) -> bool { c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':') || is_mark(c) }
+/// Can `s` be written as a bare identifier (a dict key without quotes)? Typst's own rule: XID_Start or
+/// `_`, then XID_Continue, `_` or `-`.
+pub fn is_ident(s: &str) -> bool { crate::syntax::lexer::is_ident(s) }
 
 fn repr_label(l: &Label) -> String {
 	let s = l.as_str();
-	if !s.is_empty() && s.chars().all(is_label_char) {
+	if crate::syntax::lexer::is_valid_label_literal_id(s) {
 		fmt!("<{}>", s)
 	} else {
 		fmt!("label({})", repr_str(s))
@@ -1575,6 +1592,8 @@ pub fn display(v: &Value) -> Option<String> {
 		Value::Str(s)		=> (**s).clone(),
 		Value::Int(i)		=> format_int_with_base(*i, 10),
 		Value::Float(f)		=> display_float(*f),
+		Value::Decimal(d)	=> d.display(),
+		Value::Version(p)	=> version_text(p),
 		Value::Symbol(s)	=> sym::text(s).to_string(),
 		Value::Label(_) | Value::Content(_)	=> return None,
 		other				=> repr(other),

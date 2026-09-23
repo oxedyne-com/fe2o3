@@ -1,6 +1,5 @@
-// U3 owns this file. Methods on `array`. `push`, `pop`, `insert` and `remove` mutate their receiver and
-// arrive through `call_mut` (the evaluator's `call_method_mut` holds the place); called through
-// `NativeFunc::call` on a temporary they fail as Typst's do. Comparison, equality, addition and joining
+// U3 owns this file. Methods on `array`. `push`, `pop`, `insert` and `remove` are not here: they change
+// a place, which only the evaluator holds, so `methods.rs` carries them out. Comparison, equality, addition and joining
 // are `ops.rs`'s, so `sorted`, `dedup`, `sum` and `join` agree with the operators by construction.
 
 use crate::eval::args::Args;
@@ -8,7 +7,6 @@ use crate::eval::func::Func;
 use crate::eval::lib::foundations::{
 	finish,
 	int_of,
-	locate_bound,
 	locate_index,
 	mismatch,
 	named_bool,
@@ -38,10 +36,6 @@ native_fns! {
 		First			=> "first",
 		Last			=> "last",
 		At				=> "at",
-		Push			=> "push",
-		Pop				=> "pop",
-		Insert			=> "insert",
-		Remove			=> "remove",
 		Slice			=> "slice",
 		Contains		=> "contains",
 		Find			=> "find",
@@ -75,15 +69,7 @@ pub fn method(name: &str) -> Option<ArrayFn> {
 	ArrayFn::ALL.iter().copied().find(|f| f.name() == name && *f != ArrayFn::Construct)
 }
 
-impl ArrayFn {
-	pub fn mutates(self) -> bool {
-		matches!(self, ArrayFn::Push | ArrayFn::Pop | ArrayFn::Insert | ArrayFn::Remove)
-	}
-}
 
-fn out_of_bounds(engine: &mut Engine, span: Span, i: i64, len: usize) -> Error<ErrTag> {
-	engine.error(span, fmt!("array index out of bounds (index: {}, len: {})", i, len))
-}
 
 fn no_default(engine: &mut Engine, span: Span, i: i64, len: usize) -> Error<ErrTag> {
 	engine.error(span, fmt!(
@@ -119,49 +105,6 @@ fn op_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrTag> 
 	engine.error(span, w)
 }
 
-/// A mutating method on a place: `arr.push(x)`. The evaluator passes the variable's value in place.
-pub fn call_mut(f: ArrayFn, engine: &mut Engine, recv: &mut Value, mut args: Args) -> Outcome<Value> {
-	let span = args.span;
-	let arr = match recv {
-		Value::Array(a)	=> Arc::make_mut(a),
-		other			=> return Err(mismatch(engine, span, "array", other)),
-	};
-	let out = match f {
-		ArrayFn::Push => {
-			let v = res!(need(engine, &mut args, "value"));
-			arr.push(v);
-			Value::None
-		}
-		ArrayFn::Pop => match arr.pop() {
-			Some(v)	=> v,
-			None	=> return Err(engine.error(span, "array is empty")),
-		},
-		ArrayFn::Insert => {
-			let i = res!(need(engine, &mut args, "index"));
-			let i = res!(int_of(engine, span, i));
-			let v = res!(need(engine, &mut args, "value"));
-			match res!(locate_bound(engine, span, i, arr.len(), &|_| true)) {
-				Some(k)	=> arr.insert(k, v),
-				None	=> return Err(out_of_bounds(engine, span, i, arr.len())),
-			}
-			Value::None
-		}
-		ArrayFn::Remove => {
-			let i = res!(need(engine, &mut args, "index"));
-			let i = res!(int_of(engine, span, i));
-			let default = res!(args.named::<Value>("default"));
-			match (locate_index(i, arr.len()), default) {
-				(Some(k), _)	=> arr.remove(k),
-				(None, Some(d))	=> d,
-				(None, None)	=> return Err(no_default(engine, span, i, arr.len())),
-			}
-		}
-		_ => return Err(engine.error(span, fmt!("array.{} does not mutate its receiver", f.name()))),
-	};
-	res!(finish(engine, args));
-	Ok(out)
-}
-
 pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
 	if f == ArrayFn::Construct {
@@ -173,9 +116,6 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			Value::Version(p)	=> Ok(Value::array(p.iter().map(|x| Value::Int(*x as i64)).collect())),
 			other				=> Err(mismatch(engine, span, "array, bytes, or version", &other)),
 		};
-	}
-	if f.mutates() {
-		return Err(engine.error(span, "cannot mutate a temporary value"));
 	}
 	let recv = res!(receiver(&mut args));
 	let arr = match recv {
@@ -445,7 +385,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			}
 			Value::dict(d)
 		}
-		ArrayFn::Construct | ArrayFn::Push | ArrayFn::Pop | ArrayFn::Insert | ArrayFn::Remove => Value::None,
+		ArrayFn::Construct => Value::None,
 	};
 	res!(finish(engine, args));
 	Ok(out)

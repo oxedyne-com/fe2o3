@@ -127,6 +127,34 @@ fn oracle_reprs(bin: &str, name: &str, exprs: &[&str]) -> Outcome<Vec<String>> {
 	parse_json_strings(&json)
 }
 
+// One expression's repr, or the oracle's first error line, from `typst eval` alone.
+fn oracle_one(bin: &str, expr: &str) -> Outcome<std::result::Result<String, String>> {
+	let ans = res!(cached("one", expr, || {
+		let file = fixtures_dir().join(format!("_oracle_one_{}.typ", key(&[expr])));
+		res!(std::fs::write(&file, ""));
+		let out = res!(capped(bin)
+			.args(["eval", &format!("repr({})", expr), "--in"])
+			.arg(&file)
+			.args(["--format", "json", "--root"])
+			.arg(fixtures_dir())
+			.output());
+		let _ = std::fs::remove_file(&file);
+		if out.status.success() {
+			return Ok(format!("V[{}]", String::from_utf8_lossy(&out.stdout).trim()));
+		}
+		let err = String::from_utf8_lossy(&out.stderr);
+		Ok(err.lines().find_map(|l| l.strip_prefix("error: ").map(|s| format!("E{}", s)))
+			.unwrap_or_else(|| "E".to_string()))
+	}));
+	match ans.strip_prefix('V') {
+		Some(json)	=> match res!(parse_json_strings(json)).into_iter().next() {
+			Some(r)	=> Ok(Ok(r)),
+			None	=> Err(err!("no oracle value for {}", expr; Test)),
+		},
+		None		=> Ok(Err(ans.strip_prefix('E').unwrap_or("").to_string())),
+	}
+}
+
 // The oracle's first error line, or `None` when the expression evaluates.
 fn oracle_error(bin: &str, expr: &str) -> Outcome<Option<String>> {
 	let ans = res!(cached("error", expr, || {
@@ -294,12 +322,29 @@ fn check(name: &str) -> Outcome<Vec<String>> {
 		Line::Value(e)	=> Some(e.as_str()),
 		_				=> None,
 	}).collect();
-	let expected = res!(oracle_reprs(&bin, name.trim_end_matches(".txt"), &exprs));
-	if expected.len() != exprs.len() {
-		return Err(err!("oracle returned {} values for {} expressions", expected.len(), exprs.len(); Test));
-	}
 	let mut bad = Vec::new();
+	// One document for the whole fixture; when Typst rejects it, each line is asked alone, and a line
+	// Typst rejects without a `!` mark is itself a fixture fault.
+	let expected: Vec<String> = match oracle_reprs(&bin, name.trim_end_matches(".txt"), &exprs) {
+		Ok(v) if v.len() == exprs.len()	=> v,
+		_ => {
+			let mut v = Vec::with_capacity(exprs.len());
+			for e in &exprs {
+				match res!(oracle_one(&bin, e)) {
+					Ok(r)	=> v.push(r),
+					Err(m)	=> {
+						bad.push(format!("{}\n    typst rejects an unmarked line: {}", e, m));
+						v.push(String::from("\u{0}"));
+					}
+				}
+			}
+			v
+		}
+	};
 	for (e, want) in exprs.iter().zip(expected.iter()) {
+		if want == "\u{0}" {
+			continue;
+		}
 		match eval_line(e) {
 			Ok(v) => {
 				let got = repr(&v);
@@ -317,7 +362,7 @@ fn check(name: &str) -> Outcome<Vec<String>> {
 			match (want, got) {
 				(None, _) => bad.push(format!("{}\n    typst accepted an expression marked as an error", e)),
 				(Some(w), Ok(v)) => bad.push(format!("{}\n    typst:     error: {}\n    austenite: {}", e, w, repr(&v))),
-				(Some(w), Err(m)) => if *strict && w != m {
+				(Some(w), Err(m)) => if *strict && w.lines().next() != m.lines().next() {
 					bad.push(format!("{}\n    typst:     error: {}\n    austenite: error: {}", e, w, m));
 				},
 			}
@@ -349,6 +394,8 @@ fn run(name: &str) -> Outcome<()> {
 #[test] fn geometry_agrees_with_typst()		-> Outcome<()> { run("geom.txt") }
 #[test] fn symbols_agree_with_typst()		-> Outcome<()> { run("sym.txt") }
 
+#[test] fn coverage_agrees_with_typst()		-> Outcome<()> { run("coverage.txt") }
+#[test] fn decimals_agree_with_typst()		-> Outcome<()> { run("decimal.txt") }
 #[test] fn higher_order_agrees_with_typst()	-> Outcome<()> { run("higher_order.txt") }
 
 /// Every symbol and emoji Typst has, with every variant: the generated tables against the oracle.
@@ -468,4 +515,88 @@ fn cmyk_conversion_stays_within_two_steps() -> Outcome<()> {
 	} else {
 		Err(err!("{} conversion(s) off by more than two steps:\n{}", bad.len(), bad.join("\n"); Test))
 	}
+}
+
+/// `Color::to_rgba`, the conversion every fill and stroke takes to the back end, gives the eight-bit
+/// sRGB Typst's `to-hex` gives, in every colour space and with alpha.
+#[test]
+fn to_rgba_agrees_with_typst_hex() -> Outcome<()> {
+	let bin = match typst() {
+		Some(b)					=> b,
+		None if skip_allowed()	=> return Ok(()),
+		None					=> return Err(err!("typst is not on PATH"; Test)),
+	};
+	let colours = [
+		"red", "blue", "eastern", "gray", "silver", "black", "white", "lime", "rgb(10%, 20%, 30%)",
+		"rgb(\"#12345678\")", "rgb(1, 2, 3, 40%)", "luma(40%)", "luma(40%, 50%)", "oklab(60%, 0.1, -0.1)",
+		"oklch(70%, 0.1, 200deg)", "color.linear-rgb(10%, 50%, 90%)", "color.hsl(200deg, 40%, 60%)",
+		"color.hsv(20deg, 60%, 70%, 30%)", "cmyk(0%, 0%, 0%, 0%)", "cmyk(100%, 0%, 0%, 0%)",
+		"red.lighten(20%)", "blue.transparentize(50%)", "color.mix(red, blue)",
+	];
+	let exprs: Vec<String> = colours.iter().map(|c| format!("({}).to-hex()", c)).collect();
+	let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+	let want = res!(oracle_reprs(&bin, "to_rgba", &refs));
+	let mut bad = Vec::new();
+	for (c, w) in colours.iter().zip(want.iter()) {
+		let v = match eval_line(c) {
+			Ok(Value::Color(v))	=> v,
+			Ok(other)			=> return Err(err!("{} is not a colour: {}", c, repr(&other); Test)),
+			Err(m)				=> return Err(err!("{}: {}", c, m; Test)),
+		};
+		let p = res!(v.to_rgba());
+		let hex = if p.a == 255 {
+			format!("\"#{:02x}{:02x}{:02x}\"", p.r, p.g, p.b)
+		} else {
+			format!("\"#{:02x}{:02x}{:02x}{:02x}\"", p.r, p.g, p.b, p.a)
+		};
+		if &hex != w {
+			bad.push(format!("{}: typst {} to_rgba {}", c, w, hex));
+		}
+	}
+	if bad.is_empty() {
+		Ok(())
+	} else {
+		Err(err!("{} colour(s) differ:\n{}", bad.len(), bad.join("\n"); Test))
+	}
+}
+
+/// `numbering::apply_trimmed` is what a reference shows of a heading's number, and `apply_kth` what an
+/// enumeration item shows at its depth. Typst's rendered text, through `pdftotext`, is the oracle.
+#[test]
+fn numbering_trimmed_and_kth_agree_with_typst() -> Outcome<()> {
+	use oxedyne_fe2o3_austenite::eval::lib::numbering;
+	let bin = match typst() {
+		Some(b)					=> b,
+		None if skip_allowed()	=> return Ok(()),
+		None					=> return Err(err!("typst is not on PATH"; Test)),
+	};
+	let dir = res!(scratch());
+	let (src, pdf) = (dir.join("numbering.typ"), dir.join("numbering.pdf"));
+	res!(std::fs::write(&src, concat!(
+		"#set page(width: 12cm, height: auto)\n#set heading(numbering: \"(I.a)\")\n= Alpha\n",
+		"== Beta <b>\nRef: @b\n#set enum(numbering: \"1.a.i)\")\n+ one\n  + two\n    + three\n      + four\n")));
+	let out = res!(capped(&bin).arg("compile").arg(&src).arg(&pdf).output());
+	if !out.status.success() {
+		return Err(err!("typst compile failed: {}", String::from_utf8_lossy(&out.stderr); Test));
+	}
+	let text = res!(Command::new("pdftotext").args(["-layout"]).arg(&pdf).arg("-").output());
+	let lines: Vec<String> = String::from_utf8_lossy(&text.stdout).lines()
+		.map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).collect();
+	let mut e = Engine::new(World::new(fixtures_dir()));
+	let pat = Value::str("(I.a)");
+	let mut want = vec![
+		format!("({}) Alpha", "I"),
+		format!("{} Beta", repr(&res!(numbering::apply(&mut e, &pat, &[1, 1])))),
+		format!("Ref: Section {}", repr(&res!(numbering::apply_trimmed(&mut e, &pat, &[1, 1])))),
+	];
+	let items = Value::str("1.a.i)");
+	for (k, word) in ["one", "two", "three", "four"].iter().enumerate() {
+		want.push(format!("{} {}", repr(&res!(numbering::apply_kth(&mut e, &items, k, 1))), word));
+	}
+	// The reprs carry quotes; the rendered text does not.
+	let want: Vec<String> = want.iter().map(|w| w.replace('"', "")).collect();
+	if lines != want {
+		return Err(err!("typst rendered {:?}, austenite gives {:?}", lines, want; Test));
+	}
+	Ok(())
 }

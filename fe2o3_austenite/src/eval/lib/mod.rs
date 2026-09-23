@@ -12,6 +12,7 @@ pub mod calc;
 pub mod color;
 pub mod data;
 pub mod datetime;
+pub mod decimal;
 pub mod dict;
 pub mod foundations;
 pub mod geom;

@@ -400,10 +400,10 @@ impl<'a> JsonParser<'a> {
 				loop {
 					self.ws();
 					if self.s.get(self.at) != Some(&b'"') {
-						return if self.s.get(self.at) == Some(&b'}') {
-							self.err("trailing comma")
-						} else {
-							self.err("key must be a string")
+						return match self.s.get(self.at) {
+							Some(b'}')	=> self.err("trailing comma"),
+							None		=> self.err("EOF while parsing an object"),
+							Some(_)		=> self.err("key must be a string"),
 						};
 					}
 					let k = res!(self.string());
@@ -1155,7 +1155,7 @@ impl TVal {
 	}
 }
 
-fn toml_parse(s: &str) -> std::result::Result<Value, (usize, String)> {
+pub(crate) fn toml_parse(s: &str) -> std::result::Result<Value, (usize, String)> {
 	let mut p = Toml { s, b: s.as_bytes(), at: 0, fail: None };
 	match toml_document(&mut p) {
 		Ok(v)	=> Ok(v),
