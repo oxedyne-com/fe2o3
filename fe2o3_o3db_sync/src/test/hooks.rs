@@ -15,6 +15,7 @@ use std::{
 static BARRIER_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each barrier
 static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels are handed over
 static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each garbage collection
+static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
 static SYNCER_STOPS:     AtomicBool = AtomicBool::new(false); // syncers stop after their next batch
@@ -37,6 +38,13 @@ pub fn set_publish_delay(d: Duration) {
 /// disk would take, so that writes can be made to land while a file is being collected.
 pub fn set_collect_delay(d: Duration) {
     COLLECT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a file bot this long before it forwards a supersession to the file bot of the superseded
+/// record's file, as a file bot behind a long queue would, so that the supersession can reach a
+/// file after a collection of it has finished.
+pub fn set_forward_delay(d: Duration) {
+    FORWARD_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Makes every durability barrier fail without syncing, as a disk that has started returning
@@ -77,6 +85,10 @@ pub(crate) fn publish_delay() {
 
 pub(crate) fn collect_delay() {
     pause(&COLLECT_DELAY_MS);
+}
+
+pub(crate) fn forward_delay() {
+    pause(&FORWARD_DELAY_MS);
 }
 
 /// Is this syncer to stop now?  Counted when it is.

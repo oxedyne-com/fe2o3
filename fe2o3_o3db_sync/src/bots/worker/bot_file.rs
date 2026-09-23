@@ -14,6 +14,7 @@ use crate::{
         },
         state::FileStateMap,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -670,6 +671,7 @@ impl<
                 }
             } else {
                 // Or another fbot.
+                hooks::forward_delay();
                 res!(bot.send(OzoneMsg::ScheduleOld(
                     *floc_old,
                     from.clone(),
