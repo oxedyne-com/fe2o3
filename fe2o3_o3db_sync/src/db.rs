@@ -40,7 +40,10 @@ use oxedyne_fe2o3_core::{
     },
     path::NormalPath,
     rand::RanDef,
-    thread::thread_channel,
+    thread::{
+        Sentinel,
+        thread_channel,
+    },
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
@@ -64,9 +67,13 @@ use std::{
         Arc,
         Mutex,
         RwLock,
+        mpsc,
     },
     thread,
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use crossbeam_utils::sync::WaitGroup;
@@ -298,7 +305,9 @@ impl<
         Ok(())
     }
 
-    /// Start the Ozone database.
+    /// Start the Ozone database.  Returns once every zone has surveyed its files and loaded its
+    /// caches, bounded by `constant::CONTROL_REQUEST_TIMEOUT`.  A start that fails returns once the
+    /// bots it brought up have stopped, so the directory can be opened again at once.
     pub fn start<
         S: Into<String>,
     >(
@@ -364,18 +373,123 @@ impl<
 
         let handle = Handle::new(
             Some(sup_ozid),
-            sentinel,
+            sentinel.clone(),
             Some(self.chans().sup().clone()),
         );
-        
-        thread::sleep(Duration::from_secs(1));
 
-        //// Initialise users.
-        //res!(self.init_users());
+        if let Err(e) = self.await_ready(&sentinel) {
+            // A supervisor that failed to start the database stops its bots itself.  One still
+            // starting is asked to once it is done, since nobody will use what it starts.
+            let stop = OzoneMsg::Shutdown(self.ozid().clone(), Responder::none(Some(self.ozid())));
+            if let Err(e2) = self.chans().sup().send(stop) {
+                error!(sync_log::stream(), err!(e2,
+                    "{}: Asking the supervisor to stop after a failed start.", self.ozid();
+                    Channel, Write));
+            }
+            // Nothing is left for a close to do.
+            let wg = {
+                let mut closing = lock_mutex!(self.closing,
+                    "Taking the shutdown record after a failed start.");
+                closing.done = true;
+                closing.wg.take()
+            };
+            // The caller may open the directory again as soon as this returns, as Oregami's
+            // forge does on its next request, so it returns once the bots are gone.  It returned
+            // while they were still stopping, and the next open could bring up a second set over
+            // the same files (2026-09-23).  Their stopping is start-up work, held to the control
+            // deadline like the rest of it.
+            if sentinel.was_interrupted() {
+                // A supervisor that panicked stops nothing, so there is nothing to wait for.
+                return Err(err!(e,
+                    "{}: The database did not start, and its supervisor panicked, leaving the \
+                    bots it had brought up running.", self.ozid();
+                    Init, Thread, Panic));
+            }
+            if let Some(wg) = wg {
+                if !res!(Self::await_stopped(wg, constant::CONTROL_REQUEST_TIMEOUT)) {
+                    return Err(err!(e,
+                        "{}: The database did not start, and the bots it brought up had not all \
+                        stopped {:?} later.", self.ozid(), constant::CONTROL_REQUEST_TIMEOUT;
+                        Init, Timeout));
+                }
+            }
+            return Err(e);
+        }
 
         info!(sync_log::stream(), "Database initialisation and activation complete.");
         
         Ok(handle)
+    }
+
+    /// Takes the channels the supervisor hands over and waits for it to say every zone is ready.
+    ///
+    /// This was a one-second sleep, after which the caller read whatever had arrived.  A slower
+    /// start -- a starved machine spawning a few dozen threads -- left this handle with the
+    /// channels it was built with, which no bot reads, and its first request timed out on nothing
+    /// (2026-09-23).  A get issued before a zone had loaded its cache could also find nothing.
+    fn await_ready(&mut self, sentinel: &Sentinel) -> Outcome<()> {
+        let begun = Instant::now();
+        loop {
+            match self.chan_inbox.recv_timeout(constant::CHECK_INTERVAL) {
+                Recv::Empty => {
+                    if sentinel.is_finished() {
+                        return Err(err!(
+                            "{}: The supervisor stopped before the database was ready.",
+                            self.ozid();
+                            Init, Thread));
+                    }
+                    if begun.elapsed() > constant::CONTROL_REQUEST_TIMEOUT {
+                        return Err(err!(
+                            "{}: The database was not ready within {:?} of starting.  A zone \
+                            surveying a very large store can take long; this deadline is \
+                            constant::CONTROL_REQUEST_TIMEOUT.", self.ozid(),
+                            constant::CONTROL_REQUEST_TIMEOUT;
+                            Init, Timeout));
+                    }
+                },
+                Recv::Result(Err(e)) => return Err(err!(e,
+                    "{}: While waiting for the supervisor to start the database.", self.ozid();
+                    Init, Channel, Read)),
+                Recv::Result(Ok(msg)) => match msg {
+                    OzoneMsg::Channels(chans, resp) => {
+                        self.api.chans = chans;
+                        res!(resp.send(OzoneMsg::ChannelsReceived(self.api.ozid.clone())));
+                    },
+                    OzoneMsg::Config(cfg) => self.api.cfg = cfg,
+                    OzoneMsg::Ready => return Ok(()),
+                    OzoneMsg::Error(e) => return Err(err!(e,
+                        "{}: The database did not start.", self.ozid();
+                        Init)),
+                    msg => return Err(err!(
+                        "{}: Unexpected message while the database was starting: {:?}.",
+                        self.ozid(), msg;
+                        Init, Channel, Unexpected)),
+                },
+            }
+        }
+    }
+
+    /// Waits for every thread holding a clone of the wait group to let it go, for at most
+    /// `within`.  `WaitGroup::wait` has no deadline, so the waiting is done by a thread of its own.
+    fn await_stopped(wg: WaitGroup, within: Duration) -> Outcome<bool> {
+        let (tx, rx) = mpsc::channel();
+        let waiter = res!(thread::Builder::new()
+            .name(fmt!("o3db-stopping"))
+            .spawn(move || {
+                wg.wait();
+                // A caller whose wait ran out has gone, and there is no one else to tell.
+                let _ = tx.send(());
+            }));
+        match rx.recv_timeout(within) {
+            Ok(()) => match waiter.join() {
+                // Joined, so that it is not itself still running when the caller looks.
+                Ok(()) => Ok(true),
+                Err(_) => Err(err!(
+                    "The thread waiting for the database's bots to stop panicked.";
+                    Thread, Panic)),
+            },
+            Err(_) => Ok(false),
+        }
     }
 
     /// Find all data and index files of the existing database.

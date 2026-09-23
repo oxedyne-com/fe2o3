@@ -25,6 +25,7 @@ use crate::{
             StoredValue,
         },
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_iop_db::api::Meta;
@@ -732,6 +733,7 @@ impl<
     {
         // [19] Perform transcription from data_reader to data_writer.
 
+        hooks::collect_delay();
         trace!(sync_log::stream(), "{}: Performing garbage collection on file {}...", self.ozid(), fnum);
         let typ = FileType::Data;
         // 1. Open the data file for reading.

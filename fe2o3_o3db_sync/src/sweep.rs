@@ -209,7 +209,8 @@ pub fn sweep_orphans<
     // 4. Retire each orphan through the ordinary supersession path: an unencrypted deleted-kind
     //    tombstone at the chunk key, which supersedes the chunk record at the same stored key so the
     //    running collector flags its bytes old and reclaims them.  One shared responder collects one
-    //    acknowledgement per tombstone, so the function returns only once every write has landed.
+    //    acknowledgement per tombstone, so the function returns only once every write has landed,
+    //    and a writer that fails one says so rather than being counted as an answer.
     let mut orphans_retired = 0usize;
     if orphans_found > 0 {
         let resp = api.responder();
@@ -217,8 +218,9 @@ pub fn sweep_orphans<
             res!(api.tombstone_chunk_key(ck, user, schms2, resp.clone()));
             orphans_retired += 1;
         }
-        let ack_wait = dup_wait(&scan_wait);
-        res!(resp.recv_number(orphans_retired, ack_wait));
+        let liveness = scan_wait.max_wait;
+        let durability = std::cmp::max(liveness, constant::DURABILITY_TIMEOUT);
+        res!(resp.recv_write_acks(orphans_retired, liveness, durability));
     }
 
     // The function returns here, as soon as every tombstone is acknowledged.  It does NOT wait for

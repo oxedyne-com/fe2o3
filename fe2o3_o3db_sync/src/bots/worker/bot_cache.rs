@@ -289,12 +289,23 @@ impl<
     {
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
-        let floc_old_opt = res!(self.cache.insert(
+        let floc_old_opt = match self.cache.insert(
             key,
             val,
             floc,
             meta,
-        ));
+        ) {
+            Ok(floc_old_opt) => floc_old_opt,
+            Err(e) => {
+                // The caller is waiting on this answer.  Only logged, a failure here reached it
+                // as an expired durability deadline, which says the write is on its way.
+                let e = err!(e,
+                    "{}: A written record could not be entered in the cache.", self.ozid();
+                    Data, Write);
+                self.respond(Err(e.clone()), &resp_w1);
+                return Err(e);
+            },
+        };
 
         let key_present = floc_old_opt.is_some();
         

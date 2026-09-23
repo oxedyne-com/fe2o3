@@ -30,9 +30,17 @@ use std::{
         Index,
         IndexMut,
     },
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use rand::Rng;
+
+// How often a shutdown looks to see whether the writers have ended.  Finer than
+// `constant::CHECK_INTERVAL`, since a close waits on it and a writer usually ends at once.
+const WRITERS_CHECK_INTERVAL: Duration = Duration::from_millis(5);
 
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -312,13 +320,18 @@ impl<
         self.wbots.dump_pending_messages("wbot", zopt);
     }
 
-    pub fn finish_all(&self) -> Outcome<()> {
+    /// Finishes the zone's writers, which release everything their syncers hold as they end.
+    pub fn finish_writers(&self) -> Outcome<()> {
+        self.wbots.finish_all()
+    }
+
+    /// Finishes every worker but the writers, which `finish_writers` has finished already.
+    pub fn finish_the_rest(&self) -> Outcome<()> {
         res!(self.cbots.finish_all());
         res!(self.fbots.finish_all());
         res!(self.igbots.finish_all());
         res!(self.rbots.finish_all());
         res!(self.scbots.finish_all());
-        res!(self.wbots.finish_all());
         Ok(())
     }
 
@@ -570,17 +583,53 @@ impl<
     }
 
     /// Send a finish message to all bots, except the Supervisor, and wait until all their message
-    /// queues fall to zero.
-    pub fn finish_all(&self) -> Outcome<()> {
+    /// queues fall to zero.  The writers are finished first, and `writers_ended` is asked until
+    /// they have: each releases everything its syncer holds to the cache bots as it ends, and no
+    /// channel counts those records, so cache bots finished alongside the writers left them
+    /// unanswered and their callers waited out the durability deadline (2026-09-23).  The waits
+    /// share one `constant::SHUTDOWN_MAX_WAIT` between them.
+    pub fn finish_all<F: Fn() -> bool>(&self, writers_ended: F) -> Outcome<()> {
+        let begun = Instant::now();
         // Starve servers.
         res!(self.sbots.send_to_all(OzoneMsg::Finish));
 
         // Now wait for all bots to become idle.
         warn!(sync_log::stream(), "Shutdown: Completion request sent to server, waiting up \
             to {:?} for all other bots to become idle...", constant::SHUTDOWN_MAX_WAIT);
+        res!(self.await_idle(begun));
+
+        for z in 0..self.nz {
+            res!(self.zwbots[z].finish_writers());
+        }
+        let left = constant::SHUTDOWN_MAX_WAIT.saturating_sub(begun.elapsed());
         let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
-            constant::CHECK_INTERVAL,
-            constant::SHUTDOWN_MAX_WAIT,
+            WRITERS_CHECK_INTERVAL.min(left),
+            left,
+            || writers_ended(),
+        ));
+        if timed_out {
+            warn!(sync_log::stream(), "Shutdown: The writers had not all ended after {:?}, so \
+                records their syncers still hold may go unanswered.", start.elapsed());
+        }
+        // The cache bots answer what the writers released.
+        res!(self.await_idle(begun));
+
+        for z in 0..self.nz {
+            res!(self.zwbots[z].finish_the_rest());
+        }
+        res!(self.zbots.finish_all());
+        res!(self.cfg().send(OzoneMsg::Finish));
+
+        Ok(())
+    }
+
+    /// Waits for every zone bot's queue to empty, until `constant::SHUTDOWN_MAX_WAIT` after
+    /// `begun`, and says what is still pending if they do not.
+    fn await_idle(&self, begun: Instant) -> Outcome<()> {
+        let left = constant::SHUTDOWN_MAX_WAIT.saturating_sub(begun.elapsed());
+        let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
+            constant::CHECK_INTERVAL.min(left),
+            left,
             || { self.msg_count().total_zone() == 0 },
         ));
         if !timed_out {
@@ -596,13 +645,6 @@ impl<
                 self.zwbots[z].dump_pending_messages(Some(z));
             }
         }
-
-        for z in 0..self.nz {
-            res!(self.zwbots[z].finish_all());
-        }
-        res!(self.zbots.finish_all());
-        res!(self.cfg().send(OzoneMsg::Finish));
-
         Ok(())
     }
 

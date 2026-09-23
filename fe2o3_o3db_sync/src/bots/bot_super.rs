@@ -35,11 +35,15 @@ use crate::{
             worker_deps::*,
         },
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_bot::Bot;
 use oxedyne_fe2o3_core::{
-    channels::simplex,
+    channels::{
+        simplex,
+        Recv,
+    },
     thread::thread_channel,
 };
 use oxedyne_fe2o3_jdat::id::NumIdDat;
@@ -97,26 +101,19 @@ impl<
         sync_log::set_stream(self.log_stream_id());
 
         if self.no_init() { return; }
-        let result = self.start_db();
-        self.result(&result);
-        // Send channels back to Master for the first time.
-        let resp = Responder::new(Some(&self.ozid()));
-        if let Err(e) = self.chan_out.send(
-            OzoneMsg::Channels(
-                self.chans().clone(),
-                resp.clone(),
-            )
-        ) {
-            self.err_cannot_send(err!(e,
-                "{}: Sending channels to master", self.ozid();
-                IO, Channel));
-        }
-        match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-            Err(e) => self.error(e),
-            Ok(OzoneMsg::ChannelsReceived(_)) => (),
-            m => self.error(err!(
-                "{}: Received {:?}, expecting ChannelsReceived confirmation.", self.ozid(), m;
-                Channel)),
+        // The master is blocked in `O3db::start` until it hears one or the other of these.
+        if let Err(e) = self.bring_up() {
+            self.error(e.clone());
+            if let Err(e2) = self.chan_out.send(OzoneMsg::Error(e)) {
+                self.err_cannot_send(err!(e2,
+                    "{}: Telling the master the database did not start.", self.ozid();
+                    IO, Channel));
+            }
+            // A start that failed leaves no bots running over the directory.
+            let requester = fmt!("{} after a failed start", self.ozid());
+            let result = self.shutdown(requester).map(|_| ());
+            self.result(&result);
+            return;
         }
         self.now_listening();
         loop {
@@ -568,7 +565,7 @@ impl<
                         WorkerType::InitGarbage => Box::new(InitGarbageBot::new(args)),
                         WorkerType::Reader      => Box::new(ReaderBot::new(args)),
                         WorkerType::Scan        => Box::new(ScanBot::new(args)),
-                        WorkerType::Writer      => Box::new(WriterBot::new(args)),
+                        WorkerType::Writer      => Box::new(res!(WriterBot::new(args))),
                     };
                     
                     res!(bot.init());
@@ -724,8 +721,10 @@ impl<
         res!(self.chans().fwd_to_all_zones(msg.clone()));
         
         trace!(sync_log::stream(), "expecting {} channel receipt confirmations", nz+1);
+        // Start-up work, held to the control deadline: a zone bot confirms only once each of its
+        // workers has, and on a starved machine a thread just spawned may not run for a while.
         for i in 0..nz + 1 {
-            match res!(resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT)) {
+            match res!(resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT)) {
                 OzoneMsg::ChannelsReceived(ozid) => {
                     info!(sync_log::stream(), "{}: Channels received by {}", self.ozid(), ozid);
                 }
@@ -740,10 +739,69 @@ impl<
         }
         info!(sync_log::stream(), "{}: All channel updates received by config bot and zone bots.", self.label());
 
-        res!(self.chans().cfg().send(OzoneMsg::ZoneInitTrigger));
+        Ok(())
+    }
 
+    /// Starts every bot, has every zone survey its files and load its caches, hands the master the
+    /// channels the bots listen on, and tells it the database is ready once every zone is.
+    ///
+    /// The master used to sleep for a second and read whatever had arrived by then, so a start that
+    /// took longer -- a starved machine spawning a few dozen threads -- left it holding channels no
+    /// bot reads, and its first request timed out on nothing.  It now waits on `OzoneMsg::Ready`.
+    fn bring_up(&mut self) -> Outcome<()> {
+        res!(self.start_db());
+
+        // 1. The zones start surveying at once, and answer on `zones` when they are done.
+        let zones = Responder::new(Some(self.ozid()));
+        res!(self.chans().cfg().send(OzoneMsg::ZoneInitTrigger(zones.clone())));
+
+        // 2. Meanwhile, the master is given the channels.
+        hooks::publish_delay();
+        let resp = Responder::new(Some(self.ozid()));
+        res!(self.chan_out.send(OzoneMsg::Channels(self.chans().clone(), resp.clone())));
+        match res!(resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT)) {
+            OzoneMsg::ChannelsReceived(_) => (),
+            m => return Err(err!(
+                "{}: Received {:?}, expecting ChannelsReceived confirmation.", self.ozid(), m;
+                Channel, Unexpected)),
+        }
+
+        // 3. Every zone has to be ready before the database is.  The first failure is reported
+        //    as it arrives rather than after the rest, since the database cannot start either way.
+        let nz = self.cfg().num_zones();
+        let chan = match zones.channel() {
+            Some(chan) => chan,
+            None => return Err(err!(
+                "{}: The responder for zone readiness has no channel.", self.ozid();
+                Bug, Missing)),
+        };
+        let begun = Instant::now();
+        let mut ready = 0;
+        while ready < nz {
+            let left = constant::CONTROL_REQUEST_TIMEOUT.saturating_sub(begun.elapsed());
+            if left.is_zero() {
+                return Err(err!(
+                    "{}: Only {} of {} zones finished surveying their files and loading their \
+                    caches within {:?}.", self.ozid(), ready, nz, constant::CONTROL_REQUEST_TIMEOUT;
+                    Init, Timeout));
+            }
+            match chan.recv_timeout(left) {
+                Recv::Empty => (), // Out of time, which the next pass reports.
+                Recv::Result(Err(e)) => return Err(err!(e,
+                    "{}: While waiting for the zones to report themselves ready.", self.ozid();
+                    Channel, Read)),
+                Recv::Result(Ok(OzoneMsg::Ok)) => ready += 1,
+                Recv::Result(Ok(OzoneMsg::Error(e))) => return Err(err!(e,
+                    "{}: A zone could not be initialised.", self.ozid();
+                    Init)),
+                Recv::Result(Ok(m)) => return Err(err!(
+                    "{}: Received {:?}, expecting a zone to report itself ready.", self.ozid(), m;
+                    Channel, Unexpected)),
+            }
+        }
+
+        res!(self.chan_out.send(OzoneMsg::Ready));
         info!(sync_log::stream(), "{}: Ozone database start up complete.", self.label());
-
         Ok(())
     }
 
@@ -953,7 +1011,7 @@ impl<
     /// Gracefully shut down the database.
     pub fn shutdown(&self, requester: String) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
         warn!(sync_log::stream(), "{}: Shutdown requested by {}, commencing...", self.label(), requester);
-        res!(self.chans().finish_all());
+        res!(self.chans().finish_all(|| self.handles().writers_ended()));
         thread::sleep(Duration::from_secs(1));
         self.handles().report_status();
         Ok(OzoneMsg::Ok)
