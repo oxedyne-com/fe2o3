@@ -152,3 +152,12 @@ x
 (CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (ModuleImport Import f Colon (ImportItems (ImportItemPath a)))) RightBrace)
 %% {import 1: a}
 (CodeBlock LeftBrace (Code (ModuleImport Import 1 Colon (ImportItems (ImportItemPath a)))) RightBrace)
+;; Set rules cast their values as construction does (no hand tree: parser only).
+%% [#set rect(stroke: 5)]
+%% [#set rect(radius: "a")]
+%%[U3] [#set rect(inset: red)]
+%% [#set line(start: 3)]
+%% [#set curve(fill-rule: "x")]
+%% [#set rotate(origin: 5)]
+%% [#set repeat(gap: 50%)]
+%% [#set rect(fill: 1pt)]

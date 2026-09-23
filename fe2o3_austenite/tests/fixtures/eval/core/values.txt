@@ -293,3 +293,7 @@
 (ContentBlock LeftBracket (Markup Hash (ShowRule Show (Label '<l>') Colon none) Semicolon Space (Text 'a')) RightBracket)
 %% [#show "x": [y]; a]
 (ContentBlock LeftBracket (Markup Hash (ShowRule Show "x" Colon (ContentBlock LeftBracket (Markup (Text 'y')) RightBracket)) Semicolon Space (Text 'a')) RightBracket)
+;; Plain content reports `sequence` and `styled` as its function (no hand tree: parser only).
+%% [#[a b] <l>].func() == [#[c d] <e>].func()
+%%[U6a] {set text(red); [a]}.func() == [#[a b] <l>].func()
+%%[U6a] {set text(red); [a]}.func() == {set text(blue); [b]}.func()
