@@ -332,26 +332,22 @@ impl<
                     &msg,
                     processing_buffer,
                 ) { 
-                    // <9> Decrement the reader count now that a read has completed.
-                    let (result, unread) = match self.states_mut().get_state_mut(*fnum) {
+                    // <9> Decrement the reader count now that a read has completed.  The last read
+                    // finishing does not look at the file for collection (see `maybe_collect`).
+                    let result = match self.states_mut().get_state_mut(*fnum) {
                         Ok(fstat) => {
                             let result = fstat.dec_readers();
-                            (result, fstat.no_readers())
+                            result
                         },
                         Err(_) => {
                             warn!(sync_log::stream(), 
                                 "A read completion for file {} has been received, but the file state \
                                 no longer exists, ignoring.", fnum,
                             );
-                            (Ok(()), false)
+                            Ok(())
                         },
                     };
                     self.result(&result);
-                    // A read in flight holds a collection off, so the last one lets it start.
-                    if unread {
-                        let result = self.maybe_collect(*fnum);
-                        self.result(&result);
-                    }
                 }
             }
             _ => return true,
@@ -518,14 +514,21 @@ impl<
     }
 
     /// Starts a collection of the file if it is eligible now.  A file deferred on any input to
-    /// eligibility is looked at again only when something calls this, so the changes that make
-    /// a file eligible do: a supersession, a seal, a record landing in a sealed file, the last
-    /// read finishing.  Until 2026-09-23 only a supersession did, and a file that crossed the
-    /// trigger while it was live, or while a write or read was in flight, kept its garbage until
-    /// a later supersession happened to land in it: for a file whose remaining records are never
-    /// superseded, for ever.  Switching collection on is deliberately not a caller.  It would hand
-    /// every file a start-up load had found garbage in to the collectors at once, and a read of a
-    /// file waiting its turn waits with it, so such a file still waits for a supersession.
+    /// eligibility is looked at again only when something calls this: a supersession, a seal, a
+    /// record landing in a sealed file.  Until 2026-09-23 only a supersession did, and a file that
+    /// crossed the trigger while it was live, or before its last writes had drained, kept its
+    /// garbage until a later supersession happened to land in it: for a file whose remaining
+    /// records are never superseded, for ever.
+    ///
+    /// Two changes that can make a file eligible deliberately do not call this.  The last read
+    /// finishing would start a collection in the middle of a burst of reads of the file, a chunked
+    /// value's, and a read queued behind the collection can be replayed at its old offset with
+    /// nothing to remap it, since the collection re-anchored its cache entry and dropped the move;
+    /// with records of one size that offset holds another valid record, and the reader, which
+    /// checks the checksum but not the key, returns it.  Starting collections there failed the
+    /// first read of a same-key churn's value after a restart in 5 to 8 runs of 12, a read a moment
+    /// later being right.  Switching collection on would hand every file a start-up load had found
+    /// garbage in to the collectors at once, and a read of a file waiting its turn waits with it.
     fn maybe_collect(&mut self, fnum: FileNum) -> Outcome<()> {
         let self_id = self.ozid().clone();
         if self.gc_on {
