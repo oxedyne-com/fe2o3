@@ -235,7 +235,7 @@ fn method_types(f: FoundFn) -> &'static [Type] {
 
 /// "type integer has no method `is-nan`": a method reached through a name another type owns.
 pub fn no_method(engine: &mut Engine, span: Span, ty: Type, name: &str) -> Error<ErrTag> {
-	engine.error(span, fmt!("type {} has no method `{}`", crate::eval::ops::long_name(ty), name))
+	engine.error(span, fmt!("type {} has no method `{}`", ty.long_name(), name))
 }
 
 /// `ty.name`: a type's static members (`float.inf`, `str.from-unicode`, `color.hsl`, `datetime.today`),
@@ -376,20 +376,7 @@ pub fn mismatch(engine: &mut Engine, span: Span, expected: &str, found: &Value) 
 }
 
 /// A type as Typst names it in "expected ..., found ..." messages.
-pub fn type_desc(ty: Type) -> &'static str {
-	match ty {
-		Type::None		=> "none",
-		Type::Auto		=> "auto",
-		Type::Bool		=> "boolean",
-		Type::Int		=> "integer",
-		Type::Float		=> "float",
-		Type::Str		=> "string",
-		Type::Dict		=> "dictionary",
-		Type::Func		=> "function",
-		Type::Args		=> "arguments",
-		other			=> other.name(),
-	}
-}
+pub fn type_desc(ty: Type) -> &'static str { ty.long_name() }
 
 /// Rejects arguments left over after a native took what it reads.
 pub fn finish(engine: &mut Engine, args: Args) -> Outcome<()> {
@@ -1163,6 +1150,9 @@ pub fn repr_float(f: f64) -> String {
 
 // repr
 
+// An array or dictionary longer than this prints its first items and a count of the rest.
+const REPR_MAX_ITEMS: usize = 40;
+
 /// `repr(value)`, as Typst prints it.
 pub fn repr(v: &Value) -> String {
 	match v {
@@ -1193,7 +1183,10 @@ pub fn repr(v: &Value) -> String {
 		Value::Regex(r)			=> fmt!("regex({})", repr_str(&r.pattern)),
 		Value::Content(c)		=> repr_content(c),
 		Value::Array(a)			=> {
-			let parts: Vec<String> = a.iter().map(repr).collect();
+			let mut parts: Vec<String> = a.iter().take(REPR_MAX_ITEMS).map(repr).collect();
+			if a.len() > REPR_MAX_ITEMS {
+				parts.push(fmt!(".. ({} items omitted)", a.len() - REPR_MAX_ITEMS));
+			}
 			pretty_array_like(&parts, a.len() == 1)
 		}
 		Value::Dict(d)			=> repr_dict(d),
@@ -1346,10 +1339,13 @@ fn repr_dict(d: &Dict) -> String {
 	if d.is_empty() {
 		return "(:)".to_string();
 	}
-	let parts: Vec<String> = d.iter().map(|(k, v)| {
+	let mut parts: Vec<String> = d.iter().take(REPR_MAX_ITEMS).map(|(k, v)| {
 		let key = if is_ident(k) { k.to_string() } else { repr_str(k) };
 		fmt!("{}: {}", key, repr(v))
 	}).collect();
+	if d.len() > REPR_MAX_ITEMS {
+		parts.push(fmt!(".. ({} pairs omitted)", d.len() - REPR_MAX_ITEMS));
+	}
 	pretty_array_like(&parts, false)
 }
 

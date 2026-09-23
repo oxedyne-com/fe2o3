@@ -174,3 +174,6 @@ version(1, 2, 3).patch
 !type(1).foo
 bool
 !bool(1)
+type(polygon.regular)
+range(45)
+(range(41).map(i => (str(i), i))).to-dict().len()

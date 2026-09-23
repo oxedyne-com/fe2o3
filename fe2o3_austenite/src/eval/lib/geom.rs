@@ -157,7 +157,7 @@ fn text_size(engine: &mut Engine, span: Span) -> Outcome<f64> {
 			"try wrapping this in a `context` expression")),
 	};
 	let size = match ElemKind::Text.field_id("size") {
-		Some(id)	=> styles.get(ElemKind::Text, id),
+		Some(id)	=> res!(styles.get(ElemKind::Text, id)),
 		None		=> None,
 	};
 	Ok(match size {
