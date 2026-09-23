@@ -51,20 +51,34 @@ const THREAD_NAME: &str = "fe2o3-stop";
 /// Whether a listener has already been installed in this process.
 static LISTENING: AtomicBool = AtomicBool::new(false);
 
+/// Which ask reached the process.
+///
+/// One enum for every platform, rather than a `cfg`'d set of variants, so a
+/// caller matches once and the match stays exhaustive everywhere. `Hangup` is
+/// only ever produced on unix (§ the table on [`on_stop_request`]); nothing
+/// stops a caller elsewhere from naming it, it simply never arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    Interrupt,	// Ctrl-C: SIGINT on unix, ctrl_c on Windows and elsewhere.
+    Terminate,	// a service manager or a reboot: SIGTERM, or Windows closing the console or going down.
+    Hangup,	// SIGHUP: the controlling terminal went away, or a `kill -HUP` asking for a clean re-read.
+}
+
 /// Calls `on_ask` every time the operating system asks this process to stop.
 ///
 /// What counts as an ask depends on the platform:
 ///
-/// | Platform	| Heard                                                  |
-/// |-----------|--------------------------------------------------------|
-/// | Unix	| `SIGINT` and `SIGTERM`                                 |
-/// | Windows	| Ctrl-C, the console window closing, the machine going  |
-/// | Other	| Ctrl-C                                                 |
+/// | Platform	| Heard                                                            |
+/// |-----------|-------------------------------------------------------------------|
+/// | Unix	| `SIGINT`, `SIGTERM` and `SIGHUP`                                   |
+/// | Windows	| Ctrl-C, the console window closing, the machine going              |
+/// | Other	| Ctrl-C                                                             |
 ///
 /// The call returns as soon as the listener is installed, and the listening is
 /// done on a thread of its own. `on_ask` is called **once per ask**, not once
 /// and then never again: a program that reads a second ask as a firmer one --
-/// the first polite, the second immediate -- gets to see both.
+/// the first polite, the second immediate -- gets to see both, and is told
+/// which one arrived each time.
 ///
 /// One listener to a process, because a signal arrives at a process rather than
 /// at an object. A second call is refused rather than quietly stacking a second
@@ -82,12 +96,13 @@ static LISTENING: AtomicBool = AtomicBool::new(false);
 ///
 /// ```no_run
 /// use oxedyne_fe2o3_core::prelude::*;
+/// use oxedyne_fe2o3_core::stop::Stop;
 /// use std::sync::atomic::{AtomicUsize, Ordering};
 ///
 /// static ASKS: AtomicUsize = AtomicUsize::new(0);
 ///
 /// fn main() -> Outcome<()> {
-///     res!(oxedyne_fe2o3_core::stop::on_stop_request(|| {
+///     res!(oxedyne_fe2o3_core::stop::on_stop_request(|_which: Stop| {
 ///         // The first ask is polite; the second means now.
 ///         if ASKS.fetch_add(1, Ordering::Relaxed) > 0 {
 ///             std::process::exit(130);
@@ -101,7 +116,7 @@ static LISTENING: AtomicBool = AtomicBool::new(false);
 /// ```
 pub fn on_stop_request<F>(on_ask: F) -> Outcome<()>
 where
-    F: Fn() + Send + 'static,
+    F: Fn(Stop) + Send + 'static,
 {
     if LISTENING.swap(true, Ordering::SeqCst) {
         return Err(err!(
@@ -136,7 +151,7 @@ where
 /// anywhere, which is most of them, can still be asked to stop.
 fn listen<F>(on_ask: &F) -> Outcome<()>
 where
-    F: Fn(),
+    F: Fn(Stop),
 {
     let rt = res!(tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -144,16 +159,18 @@ where
     rt.block_on(wait(on_ask))
 }
 
-/// Waits on `SIGINT` and `SIGTERM`, answering each until the process ends.
+/// Waits on `SIGINT`, `SIGTERM` and `SIGHUP`, answering each until the process
+/// ends.
 ///
-/// `SIGINT` is Ctrl-C at a terminal and `SIGTERM` is what a service manager, and
-/// every reboot, sends first. Both are asks rather than orders: the kill that
-/// cannot be caught is `SIGKILL`, and by then it is too late to do anything at
-/// all.
+/// `SIGINT` is Ctrl-C at a terminal, `SIGTERM` is what a service manager, and
+/// every reboot, sends first, and `SIGHUP` is the controlling terminal going
+/// away, or a `kill -HUP` asking for a clean re-read. All three are asks rather
+/// than orders: the kill that cannot be caught is `SIGKILL`, and by then it is
+/// too late to do anything at all.
 #[cfg(unix)]
 async fn wait<F>(on_ask: &F) -> Outcome<()>
 where
-    F: Fn(),
+    F: Fn(Stop),
 {
     use tokio::signal::unix::{
         signal,
@@ -162,17 +179,19 @@ where
 
     let mut int		= res!(signal(SignalKind::interrupt()), Init, System);
     let mut term	= res!(signal(SignalKind::terminate()), Init, System);
+    let mut hup		= res!(signal(SignalKind::hangup()), Init, System);
     loop {
-        // Both arms are cancel-safe, which is what makes this loop legitimate:
-        // the arm not taken is dropped part way through its wait and loses
-        // nothing by it.
+        // All three arms are cancel-safe, which is what makes this loop
+        // legitimate: the arms not taken are dropped part way through their
+        // wait and lose nothing by it.
         let heard = tokio::select! {
-            got = int.recv()	=> got,
-            got = term.recv()	=> got,
+            got = int.recv()	=> got.map(|()| Stop::Interrupt),
+            got = term.recv()	=> got.map(|()| Stop::Terminate),
+            got = hup.recv()	=> got.map(|()| Stop::Hangup),
         };
         match heard {
-            Some(()) => on_ask(),
-            // Neither stream ends while the process lives. If one somehow did,
+            Some(which) => on_ask(which),
+            // No stream ends while the process lives. If one somehow did,
             // there would be nothing left to hear and going round again would
             // only spin.
             None => return Ok(()),
@@ -182,14 +201,15 @@ where
 
 /// Waits on the three console events Windows sends, answering each.
 ///
-/// Ctrl-C, the console window being closed, and the machine shutting down.
-/// The last two are on a clock: Windows gives the process a few seconds after
-/// them and then ends it regardless, so whatever `on_ask` sets in motion should
-/// be brief.
+/// Ctrl-C, the console window being closed, and the machine shutting down. The
+/// last two are read as [`Stop::Terminate`], because both mean the same thing
+/// `SIGTERM` does on unix: wind up, something else is ending this process. They
+/// are on a clock: Windows gives the process a few seconds after them and then
+/// ends it regardless, so whatever `on_ask` sets in motion should be brief.
 #[cfg(windows)]
 async fn wait<F>(on_ask: &F) -> Outcome<()>
 where
-    F: Fn(),
+    F: Fn(Stop),
 {
     use tokio::signal::windows::{
         ctrl_c,
@@ -202,12 +222,12 @@ where
     let mut down	= res!(ctrl_shutdown(), Init, System);
     loop {
         let heard = tokio::select! {
-            got = int.recv()	=> got,
-            got = closed.recv()	=> got,
-            got = down.recv()	=> got,
+            got = int.recv()		=> got.map(|()| Stop::Interrupt),
+            got = closed.recv()	=> got.map(|()| Stop::Terminate),
+            got = down.recv()	=> got.map(|()| Stop::Terminate),
         };
         match heard {
-            Some(()) => on_ask(),
+            Some(which) => on_ask(which),
             None => return Ok(()),
         }
     }
@@ -217,11 +237,11 @@ where
 #[cfg(not(any(unix, windows)))]
 async fn wait<F>(on_ask: &F) -> Outcome<()>
 where
-    F: Fn(),
+    F: Fn(Stop),
 {
     loop {
         res!(tokio::signal::ctrl_c().await, IO, System);
-        on_ask();
+        on_ask(Stop::Interrupt);
     }
 }
 
@@ -234,12 +254,12 @@ mod tests {
     /// What this can check in-process, and no more. A test cannot send itself a
     /// signal and go on being a test: the closure would run in whichever test
     /// binary happened to be sharing the process. The claim that a real signal
-    /// reaches a real program is a process-level test, and belongs to whoever
-    /// has a program to stop.
+    /// reaches a real program, and is told apart correctly, is a process-level
+    /// test and lives in `tests/stop_signal.rs`.
     #[test]
     fn test_a_listener_installs_once_00() -> Outcome<()> {
-        res!(on_stop_request(|| {}));
-        let again = on_stop_request(|| {});
+        res!(on_stop_request(|_: Stop| {}));
+        let again = on_stop_request(|_: Stop| {});
         req!(again.is_err(), true,
             "A second listener was installed. Two threads would then answer \
             the same signal.");
