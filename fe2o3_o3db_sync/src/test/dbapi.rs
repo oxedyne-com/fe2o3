@@ -1,7 +1,6 @@
 use crate::{
     prelude::*,
     base::constant,
-    comm::msg::OzoneMsg,
     test::{
         data::{
             compare_values,
@@ -219,21 +218,16 @@ pub fn store_chunked_data<
         user,
         Some(&schms2),
     ));
-    let acks = res!(resp.recv_write_acks(
-        num_chunks,
-        constant::USER_REQUEST_TIMEOUT,
-        constant::DURABILITY_TIMEOUT,
-    ));
-    for msg in acks {
-        match msg {
-            OzoneMsg::KeyChunkExists(b, 0) => {
-                if b != false {
-                    return Err(err!("This key should not exist."; Test, Unexpected));
-                }
-                break;
-            },
-            _ => (),
-        }
+    // The record count comes first, and every record is then answered.  Counting the count as
+    // one of the answers, as this once did, returned before the last record was acknowledged.
+    let (exists, n) = res!(resp.recv_store_ack());
+    if n != num_chunks {
+        return Err(err!(
+            "The store reported {} records, the caller was told {}.", n, num_chunks;
+            Test, Mismatch));
+    }
+    if exists {
+        return Err(err!("This key should not exist."; Test, Unexpected));
     }
     Ok(())
 }

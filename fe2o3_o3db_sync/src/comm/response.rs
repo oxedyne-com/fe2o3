@@ -249,10 +249,12 @@ impl<
         }
     }
 
-    /// Collects the final answers to `n` records written under this responder, both deadlines
-    /// counted from the call.  Each record is first confirmed written, which is the writer's own
-    /// work and so is held to `liveness`, and then confirmed durable and readable, which waits on
-    /// the disk and is held to `durability`.
+    /// Collects the final answers to `n` records written under this responder.  Each record is
+    /// first confirmed written, which is the writer's own work and so is held to `liveness`, and
+    /// then confirmed durable and readable, which waits on the disk and is held to `durability`.
+    /// Both deadlines measure silence, counted from the last answer of any kind: a value of many
+    /// chunks is not failed for taking long while its writers keep answering, nor a busy disk
+    /// for being slow while its barriers keep completing.
     ///
     /// Expiry of the first says a writer did not answer, so whether its record lands is unknown.
     /// Expiry of the second says every record is written but not all are confirmed durable, which
@@ -270,25 +272,26 @@ impl<
             Some(chan) => chan,
             None => return Err(err!("This responder does not have a channel."; Channel, Missing)),
         };
-        let begun = Instant::now();
+        let mut heard = Instant::now(); // the last answer, or the call
         let mut written = 0;
         let mut acks = Vec::with_capacity(n);
         while acks.len() < n {
             let deadline = if written < n { liveness } else { durability };
-            let left = deadline.saturating_sub(begun.elapsed());
+            let left = deadline.saturating_sub(heard.elapsed());
             if left.is_zero() {
                 if written < n {
                     return Err(err!(
-                        "{} of {} records of this write were confirmed written within {:?}, and \
-                        the writer holding the rest has not answered, so whether they land is \
-                        not known.", written, n, liveness;
+                        "{} of {} records of this write were confirmed written, and the writer \
+                        holding the rest has said nothing for {:?}, so whether they land is not \
+                        known.", written, n, liveness;
                         Channel, Timeout));
                 }
                 return Err(err!(
                     "All {} records of this write were written, but {} of them were not \
-                    confirmed durable within {:?}.  The write has not failed: its records are in \
-                    the store's files and become durable, and readable, when the disk completes \
-                    them, unless the machine stops first.", n, n - acks.len(), durability;
+                    confirmed durable, the disk having completed nothing for {:?}.  The write \
+                    has not failed: its records are in the store's files and become durable, \
+                    and readable, when the disk completes them, unless the machine stops first.",
+                    n, n - acks.len(), durability;
                     Write, Timeout));
             }
             match chan.recv_timeout(left) {
@@ -297,9 +300,15 @@ impl<
                     "Could not read from responder channel.";
                     Channel, Read)),
                 Recv::Result(Ok(msg)) => match msg {
-                    OzoneMsg::Written => written += 1,
+                    OzoneMsg::Written => {
+                        written += 1;
+                        heard = Instant::now();
+                    },
                     OzoneMsg::KeyExists(_) |
-                    OzoneMsg::KeyChunkExists(..) => acks.push(msg),
+                    OzoneMsg::KeyChunkExists(..) => {
+                        acks.push(msg);
+                        heard = Instant::now();
+                    },
                     OzoneMsg::Finish => (),
                     OzoneMsg::Error(e) => return Err(e),
                     msg => return Err(err!(
