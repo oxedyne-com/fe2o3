@@ -38,12 +38,26 @@ use std::{
     str,
 };
 
+#[cfg(feature = "batch")]
+use curve25519_dalek::{
+    constants::ED25519_BASEPOINT_POINT,
+    traits::VartimeMultiscalarMul,
+};
+use curve25519_dalek::{
+    edwards::{
+        CompressedEdwardsY,
+        EdwardsPoint,
+    },
+    scalar::Scalar,
+    traits::IsIdentity,
+};
 use ed25519_dalek::{
-    Signature,
     SigningKey,
     Signer as DalekSigner,
-    Verifier,
-    VerifyingKey,
+};
+use sha2::{
+    Digest,
+    Sha512,
 };
 
 #[cfg(feature = "pq")]
@@ -201,14 +215,7 @@ impl Signer for SignatureScheme {
     fn verify(&self, msg: &[u8], sig: &[u8]) -> Outcome<bool> {
         Ok(match self {
             Self::Ed25519(keys) => match keys {
-                Keys { pk: Some(pk), .. } => { 
-                    let verifying_key = res!(VerifyingKey::from_bytes(pk));
-                    let signature = res!(Signature::from_slice(sig));
-                    match verifying_key.verify(msg, &signature) {
-                        Ok(()) => true,
-                        _ => false,
-                    }
-                },
+                Keys { pk: Some(pk), .. } => res!(verify_ed25519(&pk[..], msg, sig)),
                 _ => return Err(err!("Require public key to verify."; Missing, Configuration)),
             },
             #[cfg(feature = "pq")]
@@ -240,9 +247,11 @@ impl Signer for SignatureScheme {
     ///
     /// Ed25519 is checked by [`verify_batch_ed25519`], which decompresses each
     /// distinct public key once and, where the build carries the `batch`
-    /// feature, puts the whole set to one verification equation. The scheme's
-    /// own keys are not consulted: every item names its own signer, which is
-    /// what a batch drawn from a history signed by several people needs.
+    /// feature, puts the whole set to one verification equation. Either way it
+    /// holds each item to the rules of [`verify_ed25519`] and accepts a set
+    /// exactly when that accepts every member. The scheme's own keys are not
+    /// consulted: every item names its own signer, which is what a batch drawn
+    /// from a history signed by several people needs.
     ///
     /// The Dilithium schemes have no batch equation here, so they are checked
     /// one at a time and the result is the same as it always was.
@@ -260,6 +269,114 @@ impl Signer for SignatureScheme {
     }
 }
 
+/// Does `sig` verify as an Ed25519 signature by `public` over `msg`?
+///
+/// Verification is strict: RFC 8032 §5.1.7 with nothing left optional, plus the
+/// one refusal the RFC leaves to the verifier.
+///
+/// - `public` and R must each be the canonical encoding of a point (§5.1.3), so
+///   one key and one signature each have exactly one spelling.
+/// - S must lie below the group order L, so a signature cannot be re-spelt as
+///   S + L.
+/// - A public key or R of small order is refused. The identity as a public key,
+///   with R the identity and S zero, satisfies the group equation over every
+///   message, so a verifier that took it would let anyone sign as that key.
+/// - The group equation is the cofactored `[8][S]B = [8]R + [8][k]A`, the form
+///   the RFC gives first. It is the only form a batch can check exactly, which is
+///   what lets [`SignatureScheme::verify_batch`] promise to accept precisely the
+///   signatures this accepts.
+///
+/// No honest signer is affected: a key and an R made by signing are canonical,
+/// of large order and free of any small-order component. A key or signature of
+/// the wrong length, or a key that encodes no curve point at all, is an error;
+/// every other failure is `false`.
+pub fn verify_ed25519(public: &[u8], msg: &[u8], sig: &[u8]) -> Outcome<bool> {
+    let key = match res!(strict_key(public)) {
+        Some(key) => key,
+        None => return Ok(false),
+    };
+    let parts = match res!(strict_sig(sig)) {
+        Some(parts) => parts,
+        None => return Ok(false),
+    };
+    let k = Scalar::from_bytes_mod_order_wide(&challenge(&parts.r_bytes, public, msg));
+    Ok(equation_holds(&key, &parts, &k))
+}
+
+/// R and S of a signature that has passed the strict checks.
+struct SigParts {
+    r_bytes:    [u8; 32],       // R as signed, which the challenge hashes
+    r:          EdwardsPoint,
+    s:          Scalar,
+}
+
+/// Decodes a public key for verification: an error where it has the wrong
+/// length or encodes no point, `None` where a strict verifier refuses it.
+fn strict_key(public: &[u8]) -> Outcome<Option<EdwardsPoint>> {
+    let byts = match <[u8; SignatureScheme::ED25519_PK_LEN]>::try_from(public) {
+        Ok(byts) => byts,
+        Err(_) => return Err(err!(
+            "An Ed25519 public key is {} bytes, and {} were given.",
+            SignatureScheme::ED25519_PK_LEN, public.len();
+            Invalid, Input, Size)),
+    };
+    let point = match CompressedEdwardsY(byts).decompress() {
+        Some(point) => point,
+        None => return Err(err!(
+            "The {} bytes given as an Ed25519 public key encode no curve point.",
+            SignatureScheme::ED25519_PK_LEN;
+            Invalid, Input)),
+    };
+    if !is_canonical_point(&byts) || point.is_small_order() {
+        return Ok(None);
+    }
+    Ok(Some(point))
+}
+
+/// Decodes a signature for verification: an error where it has the wrong
+/// length, `None` where a strict verifier refuses it.
+fn strict_sig(sig: &[u8]) -> Outcome<Option<SigParts>> {
+    if sig.len() != SignatureScheme::ED25519_SIG_LEN {
+        return Err(err!(
+            "An Ed25519 signature is {} bytes, and {} were given.",
+            SignatureScheme::ED25519_SIG_LEN, sig.len();
+            Invalid, Input, Size));
+    }
+    let mut r_bytes = [0u8; 32];
+    r_bytes.copy_from_slice(&sig[..32]);
+    let mut s_bytes = [0u8; 32];
+    s_bytes.copy_from_slice(&sig[32..]);
+    if !is_canonical_point(&r_bytes) {
+        return Ok(None);
+    }
+    let r = match CompressedEdwardsY(r_bytes).decompress() {
+        Some(r) if !r.is_small_order() => r,
+        _ => return Ok(None),
+    };
+    let s = match Option::<Scalar>::from(Scalar::from_canonical_bytes(s_bytes)) {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+    Ok(Some(SigParts { r_bytes, r, s }))
+}
+
+/// SHA-512(R ‖ A ‖ M), the 64 bytes RFC 8032 reads as the integer k.
+fn challenge(r_bytes: &[u8; 32], public: &[u8], msg: &[u8]) -> [u8; 64] {
+    let mut h = Sha512::new();
+    h.update(r_bytes);
+    h.update(public);
+    h.update(msg);
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&h.finalize());
+    out
+}
+
+/// Is `[8]([S]B - R - [k]A)` the identity?
+fn equation_holds(key: &EdwardsPoint, parts: &SigParts, k: &Scalar) -> bool {
+    let sb_ka = EdwardsPoint::vartime_double_scalar_mul_basepoint(k, &-key, &parts.s);
+    (sb_ka - parts.r).mul_by_cofactor().is_identity()
+}
+
 /// The field modulus p = 2^255 - 19, little endian, against which a compressed
 /// curve point's y coordinate is measured for canonicity.
 const FIELD_MODULUS: [u8; 32] = [
@@ -273,18 +390,9 @@ const FIELD_MODULUS: [u8; 32] = [
 /// Edwards point, which is to say the one and only encoding that point
 /// compresses back to.
 ///
-/// # Why this is here
-///
-/// Ed25519 has two verification equations that agree on every signature anyone
-/// would produce and disagree on a handful nobody would. The single-signature
-/// check in `ed25519-dalek` recomputes R and compares its *bytes* to the
-/// signature's, which rejects a non-canonically encoded R; batch verification
-/// decompresses R to a point instead, and a non-canonical encoding decompresses
-/// to the same point as the canonical one. Without this check a batch would
-/// therefore accept a re-encoded signature that checking one at a time refuses,
-/// and the two would no longer be the same test.
-///
-/// Two things make an encoding non-canonical, and both are refused:
+/// RFC 8032 §5.1.3 fails the decoding of any other, and `curve25519-dalek`
+/// decompresses them without complaint, so the check is made here, for the
+/// public key and for R alike. Two things make an encoding non-canonical:
 ///
 /// - a y coordinate not less than p, which is reduced on decompression and so
 ///   compresses back to different bytes, and
@@ -324,38 +432,95 @@ fn is_canonical_point(bytes: &[u8]) -> bool {
     true
 }
 
-/// Puts the collected triples to the batch verification equation where the
-/// build has one, and to the ordinary check one at a time where it does not.
-///
-/// The `batch` feature is what decides. Without it the public key cache above
-/// still stands, so a build that cannot batch is still spared decompressing one
-/// signer's key once per signature.
-#[cfg(feature = "batch")]
-fn check_collected(msgs: &[&[u8]], sigs: &[Signature], keys: &[VerifyingKey]) -> bool {
-    ed25519_dalek::verify_batch(msgs, sigs, keys).is_ok()
+/// One item of a batch, decoded and passed by the strict checks.
+struct Check {
+    key:    usize,      // index into the batch's distinct keys
+    parts:  SigParts,
+    hram:   [u8; 64],   // the challenge, before reduction
 }
 
-/// Checks the collected triples one at a time. See the `batch` variant above.
+// Domain separation for the batch coefficients
+#[cfg(feature = "batch")]
+const BATCH_DST: &[u8] = b"fe2o3 ed25519 batch/1";
+
+/// Puts the checked items to one equation: the sum of each item's own
+/// cofactored equation, weighted by a 128-bit coefficient.
+///
+/// ```text
+///     [8]( [Σ z_i·S_i]B − Σ z_i·R_i − Σ_j (Σ_{i→j} z_i·k_i)·A_j ) = identity
+/// ```
+///
+/// The coefficients are drawn by hashing every input, so a signer cannot pick a
+/// signature knowing its coefficient, and nothing asks the operating system for
+/// randomness, so this runs on wasm32. Each term is multiplied by the cofactor,
+/// so a residue of small order, which the single check also absorbs, can
+/// neither be cancelled nor exposed by a coefficient: the batch accepts a set
+/// exactly when every member passes [`verify_ed25519`], short of a 2^-128
+/// chance. The cofactorless batch it replaces accepted, whenever a coefficient
+/// happened to annihilate it, a residue that the single check refused, and a
+/// signer could arrange that by trying messages.
+#[cfg(feature = "batch")]
+fn holds(keys: &[EdwardsPoint], checks: &[Check]) -> bool {
+    let mut h = Sha512::new();
+    h.update(BATCH_DST);
+    h.update(&(checks.len() as u64).to_le_bytes());
+    for c in checks {
+        h.update(&c.hram); // Binds R, A and the message.
+        h.update(c.parts.s.as_bytes());
+    }
+    let seed = h.finalize();
+    let mut b_coef = Scalar::ZERO;
+    let mut a_coefs = vec![Scalar::ZERO; keys.len()];
+    let mut scalars = Vec::with_capacity(1 + checks.len() + keys.len());
+    let mut points = Vec::with_capacity(1 + checks.len() + keys.len());
+    for (i, c) in checks.iter().enumerate() {
+        let mut h = Sha512::new();
+        h.update(&seed);
+        h.update(&(i as u64).to_le_bytes());
+        let mut z = [0u8; 16];
+        z.copy_from_slice(&h.finalize()[..16]);
+        let z = Scalar::from(u128::from_le_bytes(z));
+        b_coef += z * c.parts.s;
+        a_coefs[c.key] -= z * Scalar::from_bytes_mod_order_wide(&c.hram);
+        scalars.push(-z);
+        points.push(c.parts.r);
+    }
+    scalars.push(b_coef);
+    points.push(ED25519_BASEPOINT_POINT);
+    for (a_coef, key) in a_coefs.iter().zip(keys.iter()) {
+        scalars.push(*a_coef);
+        points.push(*key);
+    }
+    EdwardsPoint::vartime_multiscalar_mul(scalars.iter(), points.iter())
+        .mul_by_cofactor()
+        .is_identity()
+}
+
+/// Checks the items one at a time, each by its own equation. See the `batch`
+/// variant above.
 #[cfg(not(feature = "batch"))]
-fn check_collected(msgs: &[&[u8]], sigs: &[Signature], keys: &[VerifyingKey]) -> bool {
-    for i in 0..sigs.len() {
-        if keys[i].verify(msgs[i], &sigs[i]).is_err() {
+fn holds(keys: &[EdwardsPoint], checks: &[Check]) -> bool {
+    for c in checks {
+        let k = Scalar::from_bytes_mod_order_wide(&c.hram);
+        if !equation_holds(&keys[c.key], &c.parts, &k) {
             return false;
         }
     }
     true
 }
 
-/// Checks a batch of Ed25519 signatures, decompressing each distinct public key
-/// once.
+/// Checks a batch of Ed25519 signatures under the rules of [`verify_ed25519`],
+/// decompressing each distinct public key once.
 ///
 /// # The public key cache
 ///
 /// Decompressing a public key costs a field inversion and a square root, and a
 /// version control history is typically signed by a handful of people over
 /// thousands of operations. Doing it once per *key* rather than once per
-/// *signature* is the whole of the saving, and it does not depend on the batch
-/// equation being available.
+/// *signature* saves that much, and it does not depend on the batch equation
+/// being available. The batch equation also gathers every signature by one key
+/// into a single term, so a key costs one point in the sum however often it
+/// signed.
 ///
 /// # What the result means
 ///
@@ -371,33 +536,31 @@ fn verify_batch_ed25519(items: &[BatchItem<'_>])
     if items.is_empty() {
         return Ok(true);
     }
-    let mut cache: BTreeMap<&[u8], VerifyingKey> = BTreeMap::new();
-    let mut keys: Vec<VerifyingKey> = Vec::with_capacity(items.len());
-    let mut sigs: Vec<Signature> = Vec::with_capacity(items.len());
-    let mut msgs: Vec<&[u8]> = Vec::with_capacity(items.len());
+    let mut index: BTreeMap<&[u8], usize> = BTreeMap::new();
+    let mut keys: Vec<EdwardsPoint> = Vec::new();
+    let mut checks: Vec<Check> = Vec::with_capacity(items.len());
     for item in items {
-        let key = match cache.get(item.public) {
+        // The key first and then the signature, the order `verify_ed25519`
+        // takes them in, so an item earns the same error or `false` here.
+        let key = match index.get(item.public) {
             Some(key) => *key,
-            None => {
-                let byts = res!(<[u8; SignatureScheme::ED25519_PK_LEN]>::try_from(item.public));
-                let key = res!(VerifyingKey::from_bytes(&byts));
-                cache.insert(item.public, key);
-                key
+            None => match res!(strict_key(item.public)) {
+                Some(point) => {
+                    keys.push(point);
+                    index.insert(item.public, keys.len() - 1);
+                    keys.len() - 1
+                },
+                None => return Ok(false),
             },
         };
-        // Built first, so that a signature of the wrong length is the error it
-        // has always been rather than a bare `false`.
-        let sig = res!(Signature::from_slice(item.sig));
-        // A non-canonically encoded R would part the batch equation from the
-        // single one; see `is_canonical_point`.
-        if !is_canonical_point(&item.sig[..32]) {
-            return Ok(false);
-        }
-        keys.push(key);
-        sigs.push(sig);
-        msgs.push(item.msg);
+        let parts = match res!(strict_sig(item.sig)) {
+            Some(parts) => parts,
+            None => return Ok(false),
+        };
+        let hram = challenge(&parts.r_bytes, item.public, item.msg);
+        checks.push(Check { key, parts, hram });
     }
-    Ok(check_collected(&msgs, &sigs, &keys))
+    Ok(holds(&keys, &checks))
 }
 
 impl KeyManager for SignatureScheme {
@@ -608,6 +771,7 @@ impl SignatureScheme {
 
     pub const ED25519_PK_LEN:           usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
     pub const ED25519_SK_LEN:           usize = ed25519_dalek::SECRET_KEY_LENGTH;
+    pub const ED25519_SIG_LEN:          usize = ed25519_dalek::SIGNATURE_LENGTH;
     // These are the C implementation's own sizes, so they can only be asked of it when it is here.
     #[cfg(feature = "pq")]
     pub const DILITHIUM2_PK_LEN:        usize = dilithium2::public_key_bytes();
@@ -841,20 +1005,33 @@ mod tests {
             sig[..32].copy_from_slice(&FIELD_MODULUS);
             sig
         };
-        let cases: Vec<(&str, &[u8], &[u8], &[u8])> = vec![
-            ("sound",               &a.public, &msg,         &sound),
-            ("another's key",       &b.public, &msg,         &sound),
-            ("altered message",     &a.public, &spoiled_msg, &sound),
-            ("altered R",           &a.public, &msg,         &spoiled_sig_r),
-            ("altered s",           &a.public, &msg,         &spoiled_sig_s),
-            ("non canonical R",     &a.public, &msg,         &non_canonical_r),
+        // The identity as a key, R the identity and S zero: the cofactorless
+        // equation holds for every message.
+        let mut identity = [0u8; 32];
+        identity[0] = 0x01;
+        let mut forged = [0u8; 64];
+        forged[0] = 0x01;
+        // A point of order four, y = 0, as a key.
+        let order_four = [0u8; 32];
+        let cases: Vec<(&str, &[u8], &[u8], &[u8], bool)> = vec![
+            ("sound",               &a.public,      &msg,         &sound,           true),
+            ("another's key",       &b.public,      &msg,         &sound,           false),
+            ("altered message",     &a.public,      &spoiled_msg, &sound,           false),
+            ("altered R",           &a.public,      &msg,         &spoiled_sig_r,   false),
+            ("altered s",           &a.public,      &msg,         &spoiled_sig_s,   false),
+            ("non canonical R",     &a.public,      &msg,         &non_canonical_r, false),
+            ("identity key forgery",&identity,      &msg,         &forged,          false),
+            ("order four key",      &order_four,    &msg,         &forged,          false),
         ];
-        for (what, public, message, sig) in cases {
+        for (what, public, message, sig, verdict) in cases {
             let items = vec![BatchItem { public, msg: message, sig }];
             let batched = res!(algorithm.verify_batch(&items));
             let single = res!(singly(public, message, sig));
             assert_eq!(batched, single,
                 "the batch and the single check disagree about the {} case", what);
+            assert_eq!(single, verdict, "the {} case earned the wrong verdict", what);
+            assert_eq!(res!(verify_ed25519(public, message, sig)), single,
+                "the free function and the scheme disagree about the {} case", what);
         }
         Ok(())
     }

@@ -20,17 +20,18 @@ mode2 = []
 mode3 = []
 
 # Ed25519 batch verification, which checks a whole set of signatures for far
-# less than the sum of the parts. It adds one dependency, `merlin`, from which
-# the batch draws its challenge scalars by hashing the inputs themselves rather
-# than by asking the operating system for randomness. That is what makes it safe
-# here: `merlin` is pure Rust with no `getrandom` beneath it, so this compiles to
-# wasm32 along with the rest of the pure-Rust subset, and a reader in a browser
-# verifies a history rather than trusting a server to have done it.
+# less than the sum of the parts: one multi-scalar equation, the cofactored sum
+# of each signature's own equation under a 128-bit coefficient (`sign.rs`,
+# `holds`). The coefficients are drawn by hashing the inputs themselves rather
+# than by asking the operating system for randomness, so this compiles to wasm32
+# along with the rest of the pure-Rust subset, and a reader in a browser verifies
+# a history rather than trusting a server to have done it. It needs nothing
+# beyond `curve25519-dalek` and `sha2`, already here.
 #
-# Turn it off and `SignatureScheme::verify_batch` still deduplicates public key
-# decompression and then checks the set one signature at a time. The set of
+# Turn it off and `SignatureScheme::verify_batch` still decompresses each public
+# key once and then checks the set one signature at a time. The set of
 # signatures accepted is the same either way; only the cost differs.
-batch = [ "ed25519-dalek/batch" ]
+batch = []
 
 # ECDSA P-256 (NIST secp256r1) signature *verification*, pure Rust and wasm-clean.
 # Verify only: signing and key generation stay host-side (WebCrypto, Secure
@@ -72,7 +73,8 @@ aes-gcm = { version = "0.10.3", features = ["std"] }
 
 console_error_panic_hook= "0.1.6"
 # Already in the graph through ed25519-dalek, and named here so that
-# `agree` can reach MontgomeryPoint. Nothing new is compiled for it.
+# `agree` can reach MontgomeryPoint and `sign` can verify Ed25519 strictly
+# with its own equations. Nothing new is compiled for it.
 curve25519-dalek = "4.1.3"
 ed25519-dalek = { version = "2.0.0", features = ["rand_core"] }
 # P-256 ECDSA verification only; see the `p256` feature. `default-features` is off
@@ -84,8 +86,9 @@ pqcrypto-traits = { version = "0.3.4", optional = true }
 rand_core = { version = "0.6.3", features = ["std"] }
 rand = { version = "0.8.4" }
 secrecy = "0.8.0"
-# SHA-512 for linkring's RFC 9380 hash to ristretto255. Already compiled
-# for ed25519-dalek, so nothing new is built.
+# SHA-512 for linkring's RFC 9380 hash to ristretto255 and for the Ed25519
+# challenge in strict verification. Already compiled for ed25519-dalek, so
+# nothing new is built.
 sha2 = { version = "0.10", default-features = false }
 tiny-keccak = { version = "2.0.2", features = ["sha3", "shake"] }
 wasm-bindgen = "0.2.71"

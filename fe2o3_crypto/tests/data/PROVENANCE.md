@@ -27,3 +27,23 @@ construction, so these stand in for them. `tests/linkring.rs` re-signs each case
 in Rust and requires the same ring, digest, tag and body byte for byte, and,
 where `python3` is present, also runs the oracle live on fresh random cases.
 Written for this crate; no third-party licence applies.
+
+# `ed25519vectors.json`
+
+The C2SP Community Cryptography Test Vectors (CCTV) for Ed25519 verification
+edge cases, vendored verbatim from
+`https://github.com/C2SP/CCTV/blob/5ea85644bd035c555900a2f707f7e4c31ea65ced/ed25519vectors/ed25519vectors.json`
+(SHA-256 `b38e84caf3e7e89170ff520292dbeae421b0a794c27408ce5ce973018fe3d7f9`), the
+commit `ed25519-dalek` cites for its own validation tests. Each of the 914
+vectors gives a public key, a signature and a message, and flags the edge cases
+it exercises: low-order or non-canonical A and R, low-order components, a
+low-order residue, a re-encoded k. `tests/ed25519_strict.rs` derives the verdict
+a strict verifier owes each vector from its flags alone and asserts it, singly
+and in batches.
+
+## Licence
+
+Copyright 2019 Google LLC and 2022 Filippo Valsorda, under the three-clause BSD
+licence reproduced in `ed25519vectors_LICENSE.txt`, which travels with the file.
+It is included here only as a test oracle and is not part of the compiled
+library.
