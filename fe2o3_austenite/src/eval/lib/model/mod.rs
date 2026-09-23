@@ -2,8 +2,17 @@
 //! native show live in the submodule named for it, and this file only dispatches by `ElemKind`. A native
 //! show reproduces Typst's own default (heading sizes, list indents, figure supplement), never Austenite's
 //! old `Theme`; `par` and `parbreak` are primitives flow sets, so their show is `None`.
+//!
+//! Beyond the contract's `fields`/`construct`/`show`, the family answers the hooks Typst's element traits
+//! give it, each a plain function realisation and introspection call by kind: `cast` (a field's value
+//! check, as `construct` and `set` apply it), `default_value` (the defaults no `static` can hold),
+//! `synthesise` (Typst's `Synthesize`), `show_set` (`ShowSet`, the built-in styles a show rule sees),
+//! `count_step` (`Count`) and `method` (functions scoped to an element, `outline.entry.indented`).
+//! Schemas list Typst's public fields in Typst's order; a style-only internal field (`list`'s depth) is
+//! unsettable so it is never materialised, and [`is_internal`] names the few that are.
 
 pub mod bibliography;
+pub mod common;
 pub mod document;
 pub mod emph;
 pub mod figure;
@@ -11,6 +20,8 @@ pub mod footnote;
 pub mod heading;
 pub mod link;
 pub mod list;
+pub mod local;
+pub mod lookup;
 pub mod outline;
 pub mod par;
 pub mod quote;
@@ -21,25 +32,48 @@ use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
 	ElemKind,
+	FieldId,
 	FieldSpec,
 };
-use crate::eval::func::unimplemented;
 use crate::eval::scope::Scope;
-use crate::eval::styles::StyleChain;
+use crate::eval::styles::{
+	StyleChain,
+	Styles,
+};
 use crate::eval::value::Value;
 use crate::eval::Engine;
+use crate::syntax::Span;
+
+use common::CastErr;
 
 use oxedyne_fe2o3_core::prelude::*;
 
 native_fns! {
 	pub enum ModelFn {
+		EntryIndented	=> "indented",
+		EntryPrefix		=> "prefix",
+		EntryInner		=> "inner",
+		EntryBody		=> "body",
+		EntryPage		=> "page",
 	}
 }
 
 pub fn define(_scope: &mut Scope) {}
 
-pub fn call(f: ModelFn, _engine: &mut Engine, _args: Args) -> Outcome<Value> {
-	match f {}
+pub fn call(f: ModelFn, engine: &mut Engine, args: Args) -> Outcome<Value> {
+	match f {
+		ModelFn::EntryIndented | ModelFn::EntryPrefix | ModelFn::EntryInner | ModelFn::EntryBody
+			| ModelFn::EntryPage	=> outline::call(f, engine, args),
+	}
+}
+
+/// The function scoped to an element that a method call on such content reaches:
+/// `it.indented(it.prefix(), it.inner())` on an `outline.entry`.
+pub fn method(kind: ElemKind, name: &str) -> Option<ModelFn> {
+	match kind {
+		ElemKind::OutlineEntry	=> outline::method(name),
+		_						=> None,
+	}
 }
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
@@ -62,8 +96,223 @@ pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
 	}
 }
 
-pub fn construct(_engine: &mut Engine, _kind: ElemKind, _args: &mut Args) -> Outcome<Option<Content>> {
-	Ok(None)
+/// A field's default: the schema's, or the one the model computes where no `static` can hold it (a
+/// list's marker array, `terms`'s separator, `outline`'s target selector).
+pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
+	let computed = match kind {
+		ElemKind::Par | ElemKind::ParLine						=> par::default_value(kind, name),
+		ElemKind::List | ElemKind::Enum | ElemKind::Terms		=> list::default_value(kind, name),
+		ElemKind::FootnoteEntry									=> footnote::default_value(kind, name),
+		ElemKind::Raw											=> raw::default_value(kind, name),
+		ElemKind::FigureCaption									=> figure::default_value(kind, name),
+		ElemKind::Outline | ElemKind::OutlineEntry				=> outline::default_value(kind, name),
+		_														=> None,
+	};
+	if computed.is_some() {
+		return computed;
+	}
+	kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value())
+}
+
+/// Is the field Typst-internal, kept from `fields()`, `repr` and `set`?
+pub fn is_internal(kind: ElemKind, name: &str) -> bool {
+	matches!((kind, name),
+		(ElemKind::List, "depth")
+		| (ElemKind::Enum, "parents")
+		| (ElemKind::Terms, "within")
+		| (ElemKind::Quote, "depth")
+		| (ElemKind::Link, "current")
+		| (ElemKind::OutlineEntry, "parent")
+		| (ElemKind::FigureCaption, "figure-location")
+		| (ElemKind::Outline, "prefix-widths")
+		| (ElemKind::Bibliography, "keys")
+		| (ElemKind::Bibliography, "data"))
+}
+
+/// Checks, and where Typst does normalises, a value given for a field: what `construct` applies to an
+/// argument and a `set` rule should apply to its value.
+pub fn cast(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Span) -> Result<Value, CastErr> {
+	match kind {
+		ElemKind::Par | ElemKind::ParLine | ElemKind::Parbreak	=> par::cast(kind, name, v),
+		ElemKind::Strong | ElemKind::Emph						=> emph::cast(kind, name, v),
+		ElemKind::Raw | ElemKind::RawLine						=> raw::cast(kind, name, v),
+		ElemKind::Heading | ElemKind::Title						=> heading::cast(kind, name, v),
+		ElemKind::List | ElemKind::ListItem | ElemKind::Enum | ElemKind::EnumItem
+			| ElemKind::Terms | ElemKind::TermItem				=> list::cast(engine, kind, name, v, span),
+		ElemKind::Link											=> link::cast(kind, name, v),
+		ElemKind::Ref | ElemKind::Cite							=> reference::cast(kind, name, v),
+		ElemKind::Footnote | ElemKind::FootnoteEntry			=> footnote::cast(kind, name, v),
+		ElemKind::Figure | ElemKind::FigureCaption				=> figure::cast(kind, name, v),
+		ElemKind::Outline | ElemKind::OutlineEntry				=> outline::cast(kind, name, v),
+		ElemKind::Quote											=> quote::cast(kind, name, v),
+		ElemKind::Bibliography									=> bibliography::cast(kind, name, v),
+		ElemKind::Document										=> document::cast(kind, name, v),
+		_														=> Ok(v),
+	}
+}
+
+pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcome<Option<Content>> {
+	match kind {
+		ElemKind::ParLine		=> Err(engine.error(args.span, "cannot be constructed manually")),
+		ElemKind::Link			=> link::construct(engine, args).map(Some),
+		ElemKind::Bibliography	=> bibliography::construct(engine, args).map(Some),
+		ElemKind::Cite			=> reference::construct_cite(engine, args).map(Some),
+		_						=> construct_schema(engine, kind, args).map(Some),
+	}
+}
+
+/// Typst's generated constructor: required positionals in order, an optional positional from the
+/// first argument of a castable type, variadics from the rest, named fields by name; then anything left
+/// over is an unexpected argument. Each value passes the field's `cast`.
+pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcome<Content> {
+	let span = args.span;
+	let mut fields = Vec::new();
+	for (i, spec) in kind.fields().iter().enumerate() {
+		if spec.synthesised || is_internal(kind, spec.name) {
+			continue;
+		}
+		let id = FieldId(i as u8);
+		if spec.variadic {
+			let mut items = Vec::new();
+			while let Some(p) = args.items.iter().position(|a| a.name.is_none()) {
+				let a = args.items.remove(p);
+				items.push(res!(cast_arg(engine, kind, spec.name, a.value, a.span)));
+			}
+			fields.push((id, Value::array(items)));
+		} else if spec.positional && spec.required {
+			let a = match args.items.iter().position(|a| a.name.is_none()) {
+				Some(p)	=> args.items.remove(p),
+				None	=> return Err(engine.error(span, fmt!("missing argument: {}", spec.name))),
+			};
+			fields.push((id, res!(cast_arg(engine, kind, spec.name, a.value, a.span))));
+		} else if spec.positional {
+			let mut taken = None;
+			let mut p = 0;
+			while p < args.items.len() {
+				if args.items[p].name.is_none() {
+					let v = args.items[p].value.clone();
+					match cast(engine, kind, spec.name, v, args.items[p].span) {
+						Err(CastErr::Type(_))	=> (),
+						Err(CastErr::Value(m))	=> return Err(engine.error(args.items[p].span, m)),
+						Ok(v)					=> {
+							taken = Some(v);
+							args.items.remove(p);
+							break;
+						}
+					}
+				}
+				p += 1;
+			}
+			if let Some(v) = taken {
+				fields.push((id, v));
+			}
+		} else {
+			let mut found = None;
+			let mut p = 0;
+			while p < args.items.len() {
+				if args.items[p].name.as_deref() == Some(spec.name) {
+					found = Some(args.items.remove(p));
+				} else {
+					p += 1;
+				}
+			}
+			if let Some(a) = found {
+				fields.push((id, res!(cast_arg(engine, kind, spec.name, a.value, a.span))));
+			}
+		}
+	}
+	res!(finish(engine, args));
+	Ok(Content::new(kind, fields, span))
+}
+
+fn cast_arg(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Span) -> Outcome<Value> {
+	match cast(engine, kind, name, v, span) {
+		Ok(v)	=> Ok(v),
+		Err(e)	=> Err(engine.error(span, e.message())),
+	}
+}
+
+/// Refuses any argument left: Typst's `Args::finish`.
+pub fn finish(engine: &mut Engine, args: &mut Args) -> Outcome<()> {
+	match args.items.first() {
+		None	=> Ok(()),
+		Some(a)	=> {
+			let span = if a.span.is_detached() { args.span } else { a.span };
+			let msg = match &a.name {
+				Some(n)	=> fmt!("unexpected argument: {}", n),
+				None	=> "unexpected argument".to_string(),
+			};
+			Err(engine.error(span, msg))
+		}
+	}
+}
+
+/// Typst's `Synthesize`: fills the fields a show rule sees that only realisation can know (a heading's
+/// resolved level and supplement, a figure's kind and counter, a reference's target). Realisation calls
+/// it once the element has its location and its unset fields are materialised from `styles`.
+pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
+	match elem.kind() {
+		Some(ElemKind::Heading)			=> heading::synthesise(engine, elem, styles),
+		Some(ElemKind::Figure)			=> figure::synthesise(engine, elem, styles),
+		Some(ElemKind::FigureCaption)	=> figure::synthesise_caption(elem, styles),
+		Some(ElemKind::Ref)				=> reference::synthesise(engine, elem, styles),
+		Some(ElemKind::Raw)				=> raw::synthesise(elem, styles),
+		_								=> Ok(()),
+	}
+}
+
+/// Typst's `ShowSet`: the styles an element's own default applies to it and its show-rule output,
+/// visible inside a user's `show` rule for it (a heading's size and weight).
+pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
+	match elem.kind() {
+		Some(ElemKind::Heading)			=> heading::show_set(elem, styles),
+		Some(ElemKind::Title)			=> heading::show_set_title(),
+		Some(ElemKind::Raw)				=> raw::show_set(elem, styles),
+		Some(ElemKind::Link)			=> link::show_set(),
+		Some(ElemKind::FootnoteEntry)	=> footnote::show_set_entry(),
+		Some(ElemKind::Figure)			=> figure::show_set(),
+		Some(ElemKind::Outline)			=> outline::show_set(elem, styles),
+		Some(ElemKind::Quote)			=> quote::show_set(elem, styles),
+		Some(ElemKind::Bibliography)	=> bibliography::show_set(),
+		_								=> Ok(Styles::new()),
+	}
+}
+
+/// Typst's `Count`: the level at which a realised element steps its own counter, if it does. A heading
+/// steps at its level, a numbered figure, footnote or equation at level one.
+pub fn count_step(elem: &Content) -> Option<usize> {
+	match elem.kind() {
+		Some(ElemKind::Heading) => {
+			if matches!(elem.field("numbering"), None | Some(Value::None)) {
+				return None;
+			}
+			match elem.field("level") {
+				Some(Value::Int(l)) if *l > 0	=> Some(*l as usize),
+				_ => {
+					let depth = match elem.field("depth") { Some(Value::Int(d)) => *d, _ => 1 };
+					let offset = match elem.field("offset") { Some(Value::Int(o)) => *o, _ => 0 };
+					Some((depth + offset).max(1) as usize)
+				}
+			}
+		}
+		Some(ElemKind::Figure) => match elem.field("numbering") {
+			None | Some(Value::None)	=> None,
+			Some(_)						=> Some(1),
+		},
+		// Only a numbered block equation counts.
+		Some(ElemKind::Equation) => {
+			let block = matches!(elem.field("block"), Some(Value::Bool(true)));
+			match elem.field("numbering") {
+				Some(n) if block && !n.is_none()	=> Some(1),
+				_									=> None,
+			}
+		}
+		Some(ElemKind::Footnote) => match elem.field("body") {
+			Some(Value::Label(_))	=> None,
+			_						=> Some(1),
+		},
+		_ => None,
+	}
 }
 
 pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<Option<Content>> {
@@ -85,7 +334,7 @@ pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		ElemKind::Outline | ElemKind::OutlineEntry				=> outline::show(engine, elem, styles),
 		ElemKind::Quote											=> quote::show(engine, elem, styles),
 		ElemKind::Bibliography									=> bibliography::show(engine, elem, styles),
-		ElemKind::Document										=> Ok(None),
-		_ => Err(unimplemented("model", kind.path())),
+		ElemKind::Document										=> document::show(engine, elem, styles),
+		_ => Err(err!("{} is not a model element", kind.path(); Bug)),
 	}
 }

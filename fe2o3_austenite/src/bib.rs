@@ -32,6 +32,8 @@ pub enum EntryKind {
 	Report,
 	Online,
 	Unpublished,
+	PhdThesis,
+	MastersThesis,
 	Misc,
 }
 
@@ -46,6 +48,8 @@ impl EntryKind {
 			"report"				=> Self::Report,
 			"online" | "electronic" | "misc"	=> Self::Online,
 			"unpublished"				=> Self::Unpublished,
+			"phdthesis" | "thesis"			=> Self::PhdThesis,
+			"mastersthesis"				=> Self::MastersThesis,
 			_					=> Self::Misc,
 		}
 	}
@@ -136,6 +140,8 @@ pub struct RefRun {
 pub enum RefStyle {
 	Normal,
 	Italic,
+	Link,	// the text is a URL, linked to itself
+	Doi,	// the text is a DOI, linked through `https://doi.org/`
 }
 
 /// One formatted reference: the entry key and its runs, ready for the block layer.
@@ -872,6 +878,8 @@ impl RunBuilder {
 
 	fn normal(&mut self, text: &str) { self.push(text, RefStyle::Normal); }
 	fn italic(&mut self, text: &str) { self.push(text, RefStyle::Italic); }
+	fn link(&mut self, text: &str) { self.push(text, RefStyle::Link); }
+	fn doi(&mut self, text: &str) { self.push(text, RefStyle::Doi); }
 
 	fn finish(mut self, key: &str) -> Reference {
 		smartquote_runs(&mut self.runs);
@@ -900,9 +908,11 @@ fn format_reference(entry: &Entry, suffix: &str) -> Reference {
 	}
 	match entry.kind {
 		EntryKind::Article => format_article(&mut b, entry),
-		EntryKind::InCollection | EntryKind::InProceedings => format_incollection(&mut b, entry),
+		EntryKind::InCollection => format_incollection(&mut b, entry),
+		EntryKind::InProceedings => format_inproceedings(&mut b, entry),
 		EntryKind::TechReport | EntryKind::Report => format_report(&mut b, entry),
 		EntryKind::Online => format_online(&mut b, entry),
+		EntryKind::PhdThesis | EntryKind::MastersThesis => format_thesis(&mut b, entry),
 		_ => format_book(&mut b, entry),
 	}
 	b.finish(entry.key())
@@ -913,6 +923,8 @@ fn format_reference(entry: &Entry, suffix: &str) -> Reference {
 fn author_list(names: &[Name], is_editor: bool) -> String {
 	let body = match names.len() {
 		0 => String::new(),
+		// Seven or more names: the first three, then et al., as Typst's Chicago sets them.
+		n if n >= 7 => fmt!("{}, {}, {}, et al.", names[0].inverted(), names[1].natural(), names[2].natural()),
 		1 => names[0].inverted(),
 		2 => fmt!("{}, and {}", names[0].inverted(), names[1].natural()),
 		_ => {
@@ -939,6 +951,9 @@ fn format_book(b: &mut RunBuilder, entry: &Entry) {
 		b.italic(&chicago_title_case(t));
 		b.normal(". ");
 	}
+	if let Some(ed) = entry.field("edition") {
+		b.normal(&fmt!("{} ed. ", ordinal(ed)));
+	}
 	// Chicago author-date omits the place for a book with a named publisher.
 	if let Some(p) = entry.field("publisher") {
 		b.normal(p);
@@ -962,11 +977,14 @@ fn format_article(b: &mut RunBuilder, entry: &Entry) {
 			Some(v) => {
 				b.normal(" ");
 				b.normal(v);
-				if let Some(num) = entry.field("number") {
-					b.normal(&fmt!(" ({})", num));
+				let num = entry.field("number");
+				if let Some(n) = num {
+					b.normal(&fmt!(" ({})", n));
 				}
 				if let Some(p) = entry.field("pages") {
-					b.normal(&fmt!(": {}", compress_pages(p)));
+					// Typst sets a spaced colon when there is no issue number.
+					b.normal(if num.is_some() { ": " } else { " : " });
+					b.normal(&compress_pages(p));
 				}
 				b.normal(".");
 			}
@@ -977,6 +995,8 @@ fn format_article(b: &mut RunBuilder, entry: &Entry) {
 	append_url(b, entry);
 }
 
+/// A chapter: Typst's Chicago names the collection twice, after `In` and after its editors, and sets
+/// neither its pages nor its place.
 fn format_incollection(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(t) = entry.field("title") {
 		b.normal("\u{201C}");
@@ -984,80 +1004,124 @@ fn format_incollection(b: &mut RunBuilder, entry: &Entry) {
 		b.normal(".\u{201D} ");
 	}
 	b.normal("In ");
-	if let Some(bt) = entry.field("booktitle") {
-		b.italic(&chicago_title_case(bt));
+	let bt = entry.field("booktitle").map(chicago_title_case);
+	if let Some(bt) = &bt {
+		b.italic(bt);
 	}
 	if let Some(ed) = entry.field("editor") {
 		let eds = parse_names(ed);
 		b.normal(&fmt!(", edited by {}", natural_join(&eds)));
 	}
-	if let Some(p) = entry.field("pages") {
-		b.normal(&fmt!(", {}", compress_pages(p)));
+	if let Some(bt) = &bt {
+		b.normal(", ");
+		b.italic(bt);
 	}
 	b.normal(". ");
 	if let Some(p) = entry.field("publisher") {
 		b.normal(p);
 		b.normal(".");
-	} else if let Some(a) = entry.field("address") {
-		b.normal(a);
-		b.normal(".");
 	}
 	append_url(b, entry);
 }
 
+/// A paper in proceedings: Typst's Chicago sets the proceedings as a special issue, quoted and then
+/// italic, with the place in parentheses and no publisher.
+fn format_inproceedings(b: &mut RunBuilder, entry: &Entry) {
+	if let Some(t) = entry.field("title") {
+		b.normal("\u{201C}");
+		b.normal(&chicago_title_case(t));
+		b.normal(".\u{201D} ");
+	}
+	if let Some(bt) = entry.field("booktitle") {
+		let bt = chicago_title_case(bt);
+		b.normal(&fmt!("In \u{201C}{}.\u{201D} Special issue, ", bt));
+		b.italic(&bt);
+	}
+	if let Some(a) = entry.field("address") {
+		b.normal(&fmt!(" ({})", a));
+	}
+	if let Some(p) = entry.field("pages") {
+		b.normal(&fmt!(", {}", compress_pages(p)));
+	}
+	b.normal(".");
+	append_url(b, entry);
+}
+
+/// A report: its kind (`Technical Report` with a number, `Technical report` without, unless a `type`
+/// is given) and number, then its place; Typst's Chicago does not set the institution.
 fn format_report(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(t) = entry.field("title") {
 		b.italic(&chicago_title_case(t));
 		b.normal(". ");
 	}
-	let kind = entry.field("type").unwrap_or("Working Paper");
 	match entry.field("number") {
-		Some(num) => b.normal(&fmt!("{} No. {}. ", kind, num)),
+		Some(num) => b.normal(&fmt!("{} No. {}.", entry.field("type").unwrap_or("Technical Report"), num)),
 		None => {
-			b.normal(kind);
-			b.normal(". ");
+			b.normal(entry.field("type").unwrap_or("Technical report"));
+			b.normal(".");
 		}
 	}
-	if let Some(inst) = entry.field("institution") {
-		// The address stands in for the imprint when present; otherwise the institution.
-		match entry.field("address") {
-			Some(a) => {
-				b.normal(a);
-				b.normal(".");
-			}
-			None => {
-				b.normal(inst);
-				b.normal(".");
-			}
-		}
-	} else if let Some(a) = entry.field("address") {
+	if let Some(a) = entry.field("address") {
+		b.normal(" ");
 		b.normal(a);
 		b.normal(".");
 	}
 	append_url(b, entry);
 }
 
+/// A thesis: the title quoted, then the kind of thesis.
+fn format_thesis(b: &mut RunBuilder, entry: &Entry) {
+	if let Some(t) = entry.field("title") {
+		b.normal("\u{201C}");
+		b.normal(&chicago_title_case(t));
+		b.normal(".\u{201D} ");
+	}
+	b.normal(thesis_word(entry));
+	b.normal(".");
+	append_url(b, entry);
+}
+
+/// What a thesis is called: its `type` field, else Doctoral dissertation or Master's thesis.
+fn thesis_word(entry: &Entry) -> &str {
+	match entry.field("type") {
+		Some(t)	=> t,
+		None	=> match entry.kind {
+			EntryKind::MastersThesis	=> "Master\u{2019}s thesis",
+			_							=> "Doctoral dissertation",
+		},
+	}
+}
+
+/// A web page or other work: its title quoted and closed by a full stop outside the marks too, then the
+/// URL.
 fn format_online(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(t) = entry.field("title") {
-		b.italic(&chicago_title_case(t));
-		b.normal(". ");
+		b.normal("\u{201C}");
+		b.normal(&chicago_title_case(t));
+		b.normal(".\u{201D}.");
 	}
-	if let Some(pubr) = entry.field("publisher").or_else(|| entry.field("organization")) {
-		b.normal(pubr);
-		b.normal(". ");
-	}
-	if let Some(u) = entry.field("url") {
-		b.normal(u);
-		b.normal(".");
-	}
+	append_url(b, entry);
 }
 
 /// Appends a DOI (as an `https://doi.org/` URL) or a bare URL, whichever is present.
 fn append_url(b: &mut RunBuilder, entry: &Entry) {
 	if let Some(doi) = entry.field("doi") {
-		b.normal(&fmt!(" https://doi.org/{}.", doi.trim()));
+		b.normal(" ");
+		b.link(&fmt!("https://doi.org/{}", doi.trim()));
+		b.normal(".");
 	} else if let Some(u) = entry.field("url") {
-		b.normal(&fmt!(" {}.", u.trim()));
+		b.normal(" ");
+		b.link(&normal_url(u));
+		b.normal(".");
+	}
+}
+
+/// A URL as Typst prints it: a bare host gains its root path (`https://x.org/`).
+fn normal_url(u: &str) -> String {
+	let u = u.trim();
+	match u.find("://") {
+		Some(i) if !u[i + 3..].contains('/') => fmt!("{}/", u),
+		_ => u.to_string(),
 	}
 }
 
@@ -1094,7 +1158,8 @@ fn sort_entries(entries: &mut [&Entry]) {
 
 fn sort_key(entry: &Entry) -> (String, usize, Vec<String>, i64, String) {
 	let names = entry.credited();
-	let first = names.first().map(|n| fold_key(n.family())).unwrap_or_default();
+	// The first author's whole name, surname first, so namesakes order by given name.
+	let first = names.first().map(|n| fmt!("{} {}", fold_key(n.family()), fold_key(n.given()))).unwrap_or_default();
 	let count = names.len();
 	let rest: Vec<String> = names.iter().skip(1).map(|n| fold_key(n.family())).collect();
 	let year  = entry.year().unwrap_or(i64::MAX);
@@ -1196,7 +1261,7 @@ const MINOR_WORDS: &[&str] = &[
 /// Turns straight apostrophes and straight double quotes in the runs into curly quotes, matching
 /// Typst's smart-quote pass. TeX quote pairs were already converted in [`decode_value`].
 fn smartquote_runs(runs: &mut [RefRun]) {
-	for run in runs.iter_mut() {
+	for run in runs.iter_mut().filter(|r| matches!(r.style, RefStyle::Normal | RefStyle::Italic)) {
 		run.text = smartquote(&run.text);
 	}
 }
@@ -1230,6 +1295,479 @@ fn smartquote(s: &str) -> String {
 	}
 	out
 }
+
+// ---------------------------------------------------------------------------------------------
+// Styles and citation forms.
+// ---------------------------------------------------------------------------------------------
+
+/// The citation styles Austenite sets. Typst's default is IEEE; any other CSL style is refused by name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiteStyle {
+	Ieee,
+	ChicagoAuthorDate,
+}
+
+impl CiteStyle {
+	pub fn by_name(name: &str) -> Option<Self> {
+		match name {
+			"ieee" | "institute-of-electrical-and-electronics-engineers"	=> Some(Self::Ieee),
+			"chicago-author-date"											=> Some(Self::ChicagoAuthorDate),
+			_																=> None,
+		}
+	}
+
+	/// Does the style number its works and cite them by number?
+	pub fn is_numeric(self) -> bool { matches!(self, Self::Ieee) }
+
+	/// Does the reference list hang its entries (author-date), rather than prefix them with a number?
+	pub fn hangs(self) -> bool { matches!(self, Self::ChicagoAuthorDate) }
+}
+
+/// The form a citation takes, Typst's `cite(form: ..)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiteForm {
+	Normal,
+	Prose,
+	Full,
+	Author,
+	Year,
+}
+
+impl CiteForm {
+	pub fn by_name(name: &str) -> Option<Self> {
+		match name {
+			"normal"	=> Some(Self::Normal),
+			"prose"		=> Some(Self::Prose),
+			"full"		=> Some(Self::Full),
+			"author"	=> Some(Self::Author),
+			"year"		=> Some(Self::Year),
+			_			=> None,
+		}
+	}
+}
+
+/// One entry of a rendered reference list: its number prefix in a numeric style, and its runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListEntry {
+	pub prefix:	Option<String>,
+	pub body:	Reference,
+}
+
+impl Bibliography {
+	/// Every key, in file order.
+	pub fn keys(&self) -> Vec<&str> { self.entries.iter().map(|e| e.key()).collect() }
+
+	pub fn has(&self, key: &str) -> bool { self.index.contains_key(key) }
+
+	/// The reference list in `style` for works cited in `cited` order (first citation first), with every
+	/// uncited work after them when `full`.
+	pub fn render_list(&self, style: CiteStyle, cited: &[String], full: bool) -> Vec<ListEntry> {
+		let mut order: Vec<&Entry> = cited.iter().filter_map(|k| self.entry(k)).collect();
+		if full {
+			for e in &self.entries {
+				if !order.iter().any(|o| o.key() == e.key()) {
+					order.push(e);
+				}
+			}
+		}
+		match style {
+			CiteStyle::Ieee => order.iter().enumerate().map(|(i, e)| ListEntry {
+				prefix:	Some(fmt!("[{}]", i + 1)),
+				body:	format_ieee(e),
+			}).collect(),
+			CiteStyle::ChicagoAuthorDate => {
+				sort_entries(&mut order);
+				let suffixes = year_suffixes(&order);
+				order.iter().map(|e| ListEntry {
+					prefix:	None,
+					body:	format_reference(e, suffixes.get(e.key()).map(|s| s.as_str()).unwrap_or("")),
+				}).collect()
+			}
+		}
+	}
+
+	/// The runs of one citation of `key` in `style` and `form`, with an optional supplement (`p. 5`).
+	/// `cited` is every cited key in first-citation order, which numbers IEEE citations and decides
+	/// author-date year suffixes.
+	pub fn render_citation(
+		&self,
+		style:		CiteStyle,
+		key:		&str,
+		form:		CiteForm,
+		supplement:	Option<&str>,
+		cited:		&[String],
+	)
+		-> Outcome<Vec<RefRun>>
+	{
+		let entry = res!(self.entry(key).ok_or_else(||
+			err!("Citation key {:?} is not in the bibliography.", key; Input, Missing)));
+		let mut b = RunBuilder::new();
+		match style {
+			CiteStyle::Ieee => {
+				let n = cited.iter().position(|k| k == key).map(|p| p + 1).unwrap_or(cited.len() + 1);
+				let number = match supplement {
+					Some(s)	=> fmt!("[{}, {}]", n, s),
+					None	=> fmt!("[{}]", n),
+				};
+				match form {
+					CiteForm::Normal	=> b.normal(&number),
+					CiteForm::Prose		=> {
+						ieee_authors(&mut b, &entry.credited());
+						b.normal(" ");
+						b.normal(&number);
+					}
+					CiteForm::Author	=> ieee_authors(&mut b, &entry.credited()),
+					CiteForm::Year		=> b.normal(&entry.field("year").map(year_display).unwrap_or_default()),
+					CiteForm::Full		=> {
+						b.normal(&fmt!("[{}] ", n));
+						for r in format_ieee(entry).runs {
+							b.push(&r.text, r.style);
+						}
+					}
+				}
+			}
+			CiteStyle::ChicagoAuthorDate => {
+				let mut refs: Vec<&Entry> = cited.iter().filter_map(|k| self.entry(k)).collect();
+				sort_entries(&mut refs);
+				let suffixes = year_suffixes(&refs);
+				let suffix = suffixes.get(key).map(|s| s.as_str()).unwrap_or("");
+				let year = fmt!("{}{}", entry.field("year").map(year_display).unwrap_or_else(|| "n.d.".to_string()), suffix);
+				let who = cite_who(entry);
+				let tail = match supplement {
+					Some(s)	=> fmt!(", {}", s),
+					None	=> String::new(),
+				};
+				match form {
+					CiteForm::Normal	=> b.normal(&fmt!("({}{})", cite_label(entry, suffix), tail)),
+					CiteForm::Prose		=> b.normal(&fmt!("{} ({}{})", who, year, tail)),
+					CiteForm::Author	=> b.normal(&who),
+					CiteForm::Year		=> b.normal(&year),
+					CiteForm::Full		=> for r in format_reference(entry, suffix).runs {
+						b.push(&r.text, r.style);
+					},
+				}
+			}
+		}
+		Ok(b.finish(key).runs)
+	}
+
+	/// Several citations cited together, as Typst groups adjacent citations: IEEE joins the numbers with
+	/// commas, author-date joins the labels with semicolons inside one pair of parentheses.
+	pub fn render_group(
+		&self,
+		style:	CiteStyle,
+		items:	&[(&str, Option<&str>)],
+		cited:	&[String],
+	)
+		-> Outcome<Vec<Vec<RefRun>>>
+	{
+		let mut out = Vec::with_capacity(items.len());
+		match style {
+			CiteStyle::Ieee => for (k, sup) in items {
+				out.push(res!(self.render_citation(style, k, CiteForm::Normal, *sup, cited)));
+			},
+			CiteStyle::ChicagoAuthorDate => {
+				let mut refs: Vec<&Entry> = cited.iter().filter_map(|k| self.entry(k)).collect();
+				sort_entries(&mut refs);
+				let suffixes = year_suffixes(&refs);
+				let last = items.len().saturating_sub(1);
+				for (i, (k, sup)) in items.iter().enumerate() {
+					let entry = res!(self.entry(k).ok_or_else(||
+						err!("Citation key {:?} is not in the bibliography.", k; Input, Missing)));
+					let suffix = suffixes.get(*k).map(|s| s.as_str()).unwrap_or("");
+					let mut t = cite_label(entry, suffix);
+					if let Some(s) = sup {
+						t.push_str(", ");
+						t.push_str(s);
+					}
+					if i == 0 {
+						t.insert(0, '(');
+					}
+					t.push_str(if i == last { ")" } else { ";" });
+					out.push(vec![RefRun { text: t, style: RefStyle::Normal }]);
+				}
+			}
+		}
+		Ok(out)
+	}
+}
+
+/// The separator Typst sets between the citations of a group in `style`.
+pub fn group_separator(style: CiteStyle) -> &'static str {
+	match style {
+		CiteStyle::Ieee					=> ", ",
+		CiteStyle::ChicagoAuthorDate	=> " ",
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// IEEE.
+// ---------------------------------------------------------------------------------------------
+
+/// A name as IEEE sets it: given names reduced to initials before the surname, `J.-P. Sartre`.
+fn ieee_name(n: &Name) -> String {
+	if n.corporate || n.given.is_empty() {
+		return n.family.clone();
+	}
+	let mut initials = Vec::new();
+	for part in n.given.split_whitespace() {
+		let pieces: Vec<String> = part.split('-')
+			.filter(|p| !p.is_empty())
+			.map(|p| {
+				let first: String = p.chars().take(1).collect();
+				fmt!("{}.", first)
+			})
+			.collect();
+		initials.push(pieces.join("-"));
+	}
+	fmt!("{} {}", initials.join(" "), n.family)
+}
+
+/// IEEE's author list: one, `A and B`, `A, B, and C` up to six, then the first and *et al.*
+fn ieee_authors(b: &mut RunBuilder, names: &[Name]) {
+	let set: Vec<String> = names.iter().map(ieee_name).collect();
+	match set.len() {
+		0 => (),
+		1 => b.normal(&set[0]),
+		2 => b.normal(&fmt!("{} and {}", set[0], set[1])),
+		n if n <= 6 => {
+			b.normal(&set[..n - 1].join(", "));
+			b.normal(", and ");
+			b.normal(&set[n - 1]);
+		}
+		_ => {
+			b.normal(&set[0]);
+			b.normal(" ");
+			b.italic("et al.");
+		}
+	}
+}
+
+/// Pages as IEEE sets them: `pp. 45–67` for a range, `p. 5` for one page.
+fn ieee_pages(pages: &str) -> String {
+	let norm = pages.replace("--", "\u{2013}").replace('-', "\u{2013}");
+	if norm.contains('\u{2013}') {
+		fmt!("pp. {}", norm.trim())
+	} else {
+		fmt!("p. {}", norm.trim())
+	}
+}
+
+/// An ISO date (`2022-01-05`) as IEEE writes it: `Jan. 05, 2022`.
+fn ieee_date(iso: &str) -> String {
+	const MONTHS: [&str; 12] = ["Jan.", "Feb.", "Mar.", "Apr.", "May", "Jun.", "Jul.", "Aug.", "Sep.", "Oct.",
+		"Nov.", "Dec."];
+	let parts: Vec<&str> = iso.trim().split('-').collect();
+	match parts.as_slice() {
+		[y, m, d] => match m.parse::<usize>() {
+			Ok(mi) if (1..=12).contains(&mi) => fmt!("{} {}, {}", MONTHS[mi - 1], d, y),
+			_ => iso.trim().to_string(),
+		},
+		[y, m] => match m.parse::<usize>() {
+			Ok(mi) if (1..=12).contains(&mi) => fmt!("{} {}", MONTHS[mi - 1], y),
+			_ => iso.trim().to_string(),
+		},
+		_ => iso.trim().to_string(),
+	}
+}
+
+/// A title in quotation marks, closed by `close` inside the marks, as IEEE quotes article titles.
+fn ieee_quoted(b: &mut RunBuilder, title: &str, close: &str) {
+	b.normal("\u{201C}");
+	b.normal(title);
+	b.normal(close);
+	b.normal("\u{201D}");
+}
+
+/// Formats one entry as an IEEE reference, following the shapes Typst 0.15.1's IEEE style gives the
+/// common entry types.
+fn format_ieee(entry: &Entry) -> Reference {
+	let mut b = RunBuilder::new();
+	let names = entry.credited();
+	let authored = !names.is_empty() && entry.field("author").is_some();
+	if authored {
+		ieee_authors(&mut b, &names);
+		b.normal(", ");
+	}
+	let title = entry.field("title").unwrap_or("");
+	let year = entry.field("year").map(year_display);
+	match entry.kind {
+		EntryKind::Article => {
+			ieee_quoted(&mut b, title, ",");
+			let mut parts: Vec<(String, bool)> = Vec::new();
+			if let Some(j) = entry.field("journal").or_else(|| entry.field("journaltitle")) {
+				parts.push((j.to_string(), true));
+			}
+			if let Some(v) = entry.field("volume") {
+				parts.push((fmt!("vol. {}", v), false));
+			}
+			if let Some(n) = entry.field("number").or_else(|| entry.field("issue")) {
+				parts.push((fmt!("no. {}", n), false));
+			}
+			if let Some(p) = entry.field("pages") {
+				parts.push((ieee_pages(p), false));
+			}
+			if let Some(y) = &year {
+				parts.push((y.clone(), false));
+			}
+			ieee_parts(&mut b, &parts);
+			ieee_doi(&mut b, entry);
+		}
+		EntryKind::InProceedings | EntryKind::InCollection => {
+			ieee_quoted(&mut b, title, ",");
+			b.normal(" in ");
+			if let Some(bt) = entry.field("booktitle") {
+				b.italic(bt);
+			}
+			if let Some(ed) = entry.field("editor") {
+				let eds = parse_names(ed);
+				b.normal(", ");
+				ieee_authors(&mut b, &eds);
+				b.normal(if eds.len() > 1 { ", Eds." } else { ", Ed." });
+			}
+			let publisher = entry.field("publisher").or_else(|| entry.field("organization"));
+			match (entry.field("address"), publisher) {
+				(Some(a), Some(p))	=> b.normal(&fmt!(", {}: {}", a, p)),
+				(Some(a), None)		=> b.normal(&fmt!(", {}", a)),
+				(None, Some(p))		=> b.normal(&fmt!(", {}", p)),
+				(None, None)		=> (),
+			}
+			if let Some(y) = &year {
+				// Typst's IEEE sets two spaces before a proceedings paper's year.
+				let proceedings = entry.kind == EntryKind::InProceedings && publisher.is_some();
+				b.normal(if proceedings { ",  " } else { ", " });
+				b.normal(y);
+			}
+			if let Some(p) = entry.field("pages") {
+				b.normal(", ");
+				b.normal(&ieee_pages(p));
+			}
+			b.normal(".");
+			ieee_doi(&mut b, entry);
+		}
+		EntryKind::TechReport | EntryKind::Report => {
+			ieee_quoted(&mut b, title, ",");
+			if let Some(a) = entry.field("address") {
+				b.normal(" ");
+				b.normal(a);
+				b.normal(",");
+			}
+			b.normal(" ");
+			b.normal(entry.field("type").unwrap_or("technical report"));
+			if let Some(n) = entry.field("number") {
+				b.normal(" ");
+				b.normal(n);
+			}
+			if let Some(y) = &year {
+				b.normal(", ");
+				b.normal(y);
+			}
+			b.normal(".");
+			ieee_doi(&mut b, entry);
+		}
+		EntryKind::PhdThesis | EntryKind::MastersThesis => {
+			ieee_quoted(&mut b, title, ",");
+			b.normal(" ");
+			b.normal(thesis_word(entry));
+			if let Some(y) = &year {
+				b.normal(", ");
+				b.normal(y);
+			}
+			b.normal(".");
+			ieee_doi(&mut b, entry);
+		}
+		EntryKind::Online | EntryKind::Unpublished if entry.field("url").is_some() => {
+			ieee_quoted(&mut b, title, ".");
+			if let Some(d) = entry.field("urldate") {
+				b.normal(&fmt!(" Accessed: {}.", ieee_date(d)));
+			}
+			b.normal(" [Online]. Available: ");
+			if let Some(u) = entry.field("url") {
+				b.link(&normal_url(u));
+			}
+		}
+		EntryKind::Online | EntryKind::Unpublished => {
+			ieee_quoted(&mut b, title, ".");
+			if let Some(y) = &year {
+				b.normal(" ");
+				b.normal(y);
+			}
+			b.normal(".");
+		}
+		_ => {
+			b.italic(title);
+			if let Some(ed) = entry.field("edition") {
+				b.normal(&fmt!(", {} ed", ordinal(ed)));
+			}
+			b.normal(".");
+			let publisher = entry.field("publisher");
+			match (entry.field("address"), publisher) {
+				(Some(a), Some(p))	=> b.normal(&fmt!(" {}: {}", a, p)),
+				(Some(a), None)		=> b.normal(&fmt!(" {}", a)),
+				(None, Some(p))		=> b.normal(&fmt!(" {}", p)),
+				(None, None)		=> (),
+			}
+			if let Some(y) = &year {
+				b.normal(if publisher.is_some() || entry.field("address").is_some() { ", " } else { " " });
+				b.normal(y);
+			}
+			b.normal(".");
+			ieee_doi(&mut b, entry);
+		}
+	}
+	b.finish(entry.key())
+}
+
+/// An edition number as an English ordinal (`2` is `2nd`); anything else as written.
+fn ordinal(ed: &str) -> String {
+	match ed.trim().parse::<u64>() {
+		Ok(n) => {
+			let suffix = match (n % 10, n % 100) {
+				(1, r) if r != 11	=> "st",
+				(2, r) if r != 12	=> "nd",
+				(3, r) if r != 13	=> "rd",
+				_					=> "th",
+			};
+			fmt!("{}{}", n, suffix)
+		}
+		Err(_) => ed.trim().to_string(),
+	}
+}
+
+/// The comma-separated tail of an article: `*Journal*, vol. 1, no. 2, pp. 3–4, 2020`, then a full stop.
+fn ieee_parts(b: &mut RunBuilder, parts: &[(String, bool)]) {
+	for (text, italic) in parts {
+		b.normal(" ");
+		if *italic {
+			b.italic(text);
+		} else {
+			b.normal(text);
+		}
+		b.normal(",");
+	}
+	// The last comma becomes the full stop, unless a DOI follows (it keeps the comma).
+	if let Some(last) = b.runs.last_mut() {
+		if last.text.ends_with(',') {
+			last.text.pop();
+		}
+	}
+	b.normal(".");
+}
+
+/// `doi: 10.1000/xyz`, before the final full stop.
+fn ieee_doi(b: &mut RunBuilder, entry: &Entry) {
+	if let Some(doi) = entry.field("doi") {
+		if let Some(last) = b.runs.last_mut() {
+			if last.text.ends_with('.') {
+				last.text.pop();
+			}
+		}
+		b.normal(", doi: ");
+		b.doi(doi.trim());
+		b.normal(".");
+	}
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1484,7 +2022,7 @@ mod tests {
 		let r = format_reference(b.entry("tilly1985war").expect("present"), "");
 		assert_eq!(
 			r.plain(),
-			"Tilly, Charles. 1985. \u{201C}War Making and State Making as Organized Crime.\u{201D} In Bringing the State Back in, edited by Peter B. Evans, Dietrich Rueschemeyer, and Theda Skocpol, 169\u{2013}91. Cambridge University Press.");
+			"Tilly, Charles. 1985. \u{201C}War Making and State Making as Organized Crime.\u{201D} In Bringing the State Back in, edited by Peter B. Evans, Dietrich Rueschemeyer, and Theda Skocpol, Bringing the State Back in. Cambridge University Press.");
 	}
 
 	#[test]
