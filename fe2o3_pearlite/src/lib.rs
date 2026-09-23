@@ -15,9 +15,13 @@
 pub mod collab;
 pub mod contents;
 pub mod raster;
+pub mod register;
 pub mod shell;
 
 // Phase 3, the native windowed reader (winit + softbuffer). Behind the default-off `gui` feature, the
 // sole gate on those two dependencies, so every other path builds without them.
 #[cfg(feature = "gui")]
 pub mod window;
+// The desktop launch around the window: a named document, or the native open-file dialog (rfd).
+#[cfg(feature = "gui")]
+pub mod launch;

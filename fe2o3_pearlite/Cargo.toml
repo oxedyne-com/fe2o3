@@ -14,13 +14,21 @@ path = "src/lib.rs"
 name = "pearlite"
 path = "src/bin/pearlite.rs"
 
+# The windowed reader as a GUI application with no console: on Windows the binary is linked for the
+# GUI subsystem, so a double-click or a file association opens the window and nothing else. Elsewhere
+# it is the same launcher the bare `pearlite` runs.
+[[bin]]
+name = "pearlite-reader"
+path = "src/bin/pearlite-reader.rs"
+required-features = ["gui"]
+
 [features]
 # The native windowed reader (Phase 3), default-off so `render`, `png`, the loopback shell and every
 # other consumer of the crate pull in neither winit nor softbuffer. It is the sole gate on those two
 # dependencies -- verify with `cargo tree -p oxedyne_fe2o3_pearlite -e normal | grep -E 'winit|softbuffer'`
-# (empty without `--features gui`). The same gate carries the shaper the contents sidebar sets its
-# titles with.
-gui = ["dep:winit", "dep:softbuffer", "dep:oxedyne_fe2o3_font"]
+# (empty without `--features gui`). The same gate carries the native open-file dialog (rfd) and the
+# shaper the contents sidebar sets its titles with.
+gui = ["dep:winit", "dep:softbuffer", "dep:rfd", "dep:oxedyne_fe2o3_font"]
 
 [dependencies]
 oxedyne_fe2o3_austenite	= { path = "../fe2o3_austenite" }
@@ -54,6 +62,10 @@ oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false }
 # of them. Cross-OS by construction (x11/wayland, macOS, Windows); only Linux is runtime-verified here.
 winit		= { version = "0.30", optional = true }
 softbuffer	= { version = "0.4", optional = true }
+# The native open-file dialog a no-argument launch shows: the XDG desktop portal (zenity when no
+# portal answers) on Linux, the common item dialog on Windows. The portal backend is pure Rust over
+# D-Bus, so the reader links no GTK and still cross-links against an older glibc.
+rfd			= { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 # The embedded reading faces' shaper, for the contents sidebar's titles; already in the tree through
 # fe2o3_austenite.
 oxedyne_fe2o3_font	= { path = "../fe2o3_font", optional = true }
