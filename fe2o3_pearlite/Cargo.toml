@@ -18,8 +18,9 @@ path = "src/bin/pearlite.rs"
 # The native windowed reader (Phase 3), default-off so `render`, `png`, the loopback shell and every
 # other consumer of the crate pull in neither winit nor softbuffer. It is the sole gate on those two
 # dependencies -- verify with `cargo tree -p oxedyne_fe2o3_pearlite -e normal | grep -E 'winit|softbuffer'`
-# (empty without `--features gui`).
-gui = ["dep:winit", "dep:softbuffer"]
+# (empty without `--features gui`). The same gate carries the shaper the contents sidebar sets its
+# titles with.
+gui = ["dep:winit", "dep:softbuffer", "dep:oxedyne_fe2o3_font"]
 
 [dependencies]
 oxedyne_fe2o3_austenite	= { path = "../fe2o3_austenite" }
@@ -53,6 +54,9 @@ oxedyne_fe2o3_net		= { path = "../fe2o3_net", default-features = false }
 # of them. Cross-OS by construction (x11/wayland, macOS, Windows); only Linux is runtime-verified here.
 winit		= { version = "0.30", optional = true }
 softbuffer	= { version = "0.4", optional = true }
+# The embedded reading faces' shaper, for the contents sidebar's titles; already in the tree through
+# fe2o3_austenite.
+oxedyne_fe2o3_font	= { path = "../fe2o3_font", optional = true }
 
 [dev-dependencies]
 # The checksum scheme an o3db instance is parameterised over comes from

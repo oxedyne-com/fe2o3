@@ -13,6 +13,7 @@
 //! separately decided increment.
 
 pub mod collab;
+pub mod contents;
 pub mod raster;
 pub mod shell;
 
