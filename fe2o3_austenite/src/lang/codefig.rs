@@ -151,18 +151,18 @@ fn parse_flowchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 		if a.is_empty() {
 			continue;
 		}
-		// A diagram-level named argument (spacing, node-stroke, debug), told apart from a node/edge call by
-		// having a top-level colon.
+		// A diagram-level named argument, told apart from a node/edge call by having a top-level colon. The
+		// spacing and the node stroke are drawn; any other, or a value neither reads, is drawn without.
 		if let Some((key, val)) = named_arg(a) {
-			match key.as_str() {
-				"spacing"		=> if let Some(v) = em_value(&val) { spacing_em = v; },
-				"node-stroke"	=> if let Some(v) = pt_value(&val) { node_stroke = v as f32; },
-				_				=> {},
+			match (key.as_str(), em_value(&val), pt_value(&val)) {
+				("spacing", Some(v), _)		=> spacing_em = v,
+				("node-stroke", _, Some(v))	=> node_stroke = v as f32,
+				_							=> without.push(unread(a)),
 			}
 			continue;
 		}
 		if a.starts_with("node(") {
-			match parse_node(a) {
+			match parse_node(a, &mut without) {
 				Some(nd) => {
 					let idx = nodes.len();
 					nodes.push(nd);
@@ -185,7 +185,7 @@ fn parse_flowchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 					continue;
 				},
 			};
-			let (route, label) = parse_edge(a);
+			let (route, label) = parse_edge(a, &mut without);
 			match route {
 				ParsedRoute::Chain => pending.push((from, label)),
 				ParsedRoute::Feedback { u, cols } => {
@@ -260,6 +260,12 @@ fn parse_flowchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	Some((CodeFigure::Flowchart { diagram: d, style }, without))
 }
 
+/// An argument a drawing does not draw as written, in a diagnostic's words: one it does not read, or one
+/// whose value it cannot read.
+fn unread(a: &str) -> String {
+	fmt!("an argument it does not draw, {}", short_arg(a))
+}
+
 /// A figure argument in a diagnostic's words: its whitespace run together, cut at forty characters.
 fn short_arg(a: &str) -> String {
 	let t = a.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -270,8 +276,9 @@ fn short_arg(a: &str) -> String {
 	}
 }
 
-/// Parses one `node((c, r), label, fill: .., shape: .., width: .., height: ..)` call.
-fn parse_node(arg: &str) -> Option<NodeDef> {
+/// Parses one `node((c, r), label, fill: .., shape: .., width: .., height: ..)` call, noting in `without`
+/// each argument of it that is not drawn as written.
+fn parse_node(arg: &str, without: &mut Vec<String>) -> Option<NodeDef> {
 	let inner	= call_inner(arg, "node")?;
 	let parts	= split_top_args(&inner);
 	let mut coord:	Option<String>	= None;
@@ -286,12 +293,15 @@ fn parse_node(arg: &str) -> Option<NodeDef> {
 			continue;
 		}
 		if let Some((key, val)) = named_arg(pt) {
-			match key.as_str() {
-				"fill"		=> fill = resolve_colour(&val),
-				"shape"		=> shape = resolve_shape(&val),
-				"width"		=> w_em = em_value(&val),
-				"height"	=> h_em = em_value(&val),
-				_			=> {},
+			let read = match key.as_str() {
+				"fill"		=> { fill = resolve_colour(&val); fill.is_some() },
+				"shape"		=> match resolve_shape(&val) { Some(s) => { shape = s; true }, None => false },
+				"width"		=> { w_em = em_value(&val); w_em.is_some() },
+				"height"	=> { h_em = em_value(&val); h_em.is_some() },
+				_			=> false,
+			};
+			if !read {
+				without.push(unread(pt));
 			}
 			continue;
 		}
@@ -299,6 +309,8 @@ fn parse_node(arg: &str) -> Option<NodeDef> {
 			coord = Some(pt.to_string());
 		} else if label.is_none() {
 			label = Some(clean_label(pt));
+		} else {
+			without.push(unread(pt));
 		}
 	}
 	let coord	= coord?;
@@ -313,37 +325,53 @@ enum ParsedRoute {
 	Feedback { u: i64, cols: i64 },
 }
 
-/// Parses one `edge(...)` call into its route and optional branch label. A first positional that is a
-/// direction path (`"r,r,u,u,l,l"`) marks a feedback loop; otherwise it is a marks string (`"-|>"`) and
-/// the edge chains to the next node. A bracketed positional (`[N]`) is the branch label.
-fn parse_edge(arg: &str) -> (ParsedRoute, Option<String>) {
+/// Parses one `edge(...)` call into its route and optional branch label, noting in `without` each argument
+/// of it that is not drawn as written. A first positional that is a direction path (`"r,r,u,u,l,l"`) marks a
+/// feedback loop; a marks string that ends in an arrow (`"-|>"`, `"->"`) is the arrowhead every edge is
+/// drawn with; and a bracketed positional (`[N]`), or `label: [N]`, is the branch label. The edge chains to
+/// the next node, so coordinates, other marks and every other named argument are drawn without.
+fn parse_edge(arg: &str, without: &mut Vec<String>) -> (ParsedRoute, Option<String>) {
 	let inner = match call_inner(arg, "edge") {
 		Some(i)	=> i,
-		None	=> return (ParsedRoute::Chain, None),
+		None	=> {
+			without.push(unread(arg));
+			return (ParsedRoute::Chain, None);
+		},
 	};
-	let parts = split_top_args(&inner);
-	let mut positionals: Vec<String> = Vec::new();
-	for p in &parts {
+	let mut route			= ParsedRoute::Chain;
+	let mut label: Option<String>	= None;
+	let mut first			= true;	// the first positional, which alone may be a direction path
+	for p in &split_top_args(&inner) {
 		let pt = p.trim();
-		if pt.is_empty() || named_arg(pt).is_some() {
-			continue;	// label-pos and the rest do not change the topology
+		if pt.is_empty() {
+			continue;
 		}
-		positionals.push(pt.to_string());
-	}
-	let mut label: Option<String> = None;
-	for p in &positionals {
-		if p.starts_with('[') {
-			label = Some(clean_label(p));
+		if let Some((key, val)) = named_arg(pt) {
+			if key == "label" && val.starts_with('[') {
+				label = Some(clean_label(&val));
+			} else {
+				without.push(unread(pt));
+			}
+			continue;
+		}
+		let was_first = std::mem::replace(&mut first, false);
+		if pt.starts_with('[') {
+			label = Some(clean_label(pt));
+			continue;
+		}
+		if was_first {
+			if let Some(path) = direction_path(pt) {
+				let u		= path.iter().filter(|&&c| c == 'u').count() as i64;
+				let cols	= path.iter().filter(|&&c| c == 'r').count() as i64;
+				route = ParsedRoute::Feedback { u, cols };
+				continue;
+			}
+		}
+		if !matches!(unquote(pt).as_str(), "->" | "-|>") || !pt.starts_with('"') {
+			without.push(unread(pt));
 		}
 	}
-	if let Some(first) = positionals.first() {
-		if let Some(path) = direction_path(first) {
-			let u		= path.iter().filter(|&&c| c == 'u').count() as i64;
-			let cols	= path.iter().filter(|&&c| c == 'r').count() as i64;
-			return (ParsedRoute::Feedback { u, cols }, label);
-		}
-	}
-	(ParsedRoute::Chain, label)
+	(route, label)
 }
 
 /// The direction letters of a route path (`"r,r,u,u,l,l"`), or `None` when the string is a marks spec
@@ -378,17 +406,19 @@ fn grid_row(coord: &str) -> Option<i64> {
 }
 
 /// Maps a Fletcher shape argument to a [`Shape`]: `shapes.hexagon`/`hexagon` to a hexagon, `diamond` to a
-/// diamond, anything else (the default rectangle) to a box.
-fn resolve_shape(val: &str) -> Shape {
+/// diamond, `pill` or `stadium` to a stadium and `rect` to a box. `None` for a shape it does not draw.
+fn resolve_shape(val: &str) -> Option<Shape> {
 	let v = val.trim();
 	if v.ends_with("hexagon") {
-		Shape::Hexagon
+		Some(Shape::Hexagon)
 	} else if v.ends_with("diamond") {
-		Shape::Diamond
+		Some(Shape::Diamond)
 	} else if v.ends_with("pill") || v.ends_with("stadium") {
-		Shape::Stadium
+		Some(Shape::Stadium)
+	} else if v.ends_with("rect") {
+		Some(Shape::Box)
 	} else {
-		Shape::Box
+		None
 	}
 }
 
@@ -407,31 +437,45 @@ fn parse_barchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	let mut bar_frac	= 0.8f64;
 	let mut x_label:	Option<String>	= None;
 	let mut size:		Option<(f64, f64)>	= None;
+	let mut unread_args: Vec<String>	= Vec::new();
 	for p in &parts {
 		let pt = p.trim();
 		if pt.is_empty() {
 			continue;
 		}
 		if let Some((key, val)) = named_arg(pt) {
-			match key.as_str() {
-				"bar-width"	=> if let Some(v) = plain_f64(&val) { bar_frac = v; },
-				"x-label"	=> x_label = content_opt(&val),
-				"size"		=> size = pair_f64(&val),
-				_			=> {},
+			let read = match key.as_str() {
+				"bar-width"	=> match plain_f64(&val) { Some(v) => { bar_frac = v; true }, None => false },
+				"x-label"	=> { x_label = content_opt(&val); x_label.is_some() || val.trim() == "none" },
+				"size"		=> { size = pair_f64(&val); size.is_some() },
+				// cetz-plot's own defaults, which the chart is drawn with.
+				"mode"		=> unquote(&val) == "basic",
+				"label-key"	=> val.trim() == "0",
+				"value-key"	=> val.trim() == "1",
+				"y-label"	=> val.trim() == "none",
+				_			=> false,
+			};
+			if !read {
+				unread_args.push(unread(pt));
 			}
 			continue;
 		}
-		data_expr = Some(pt.to_string());	// the last positional is the data array
+		// The first positional is the data array; any other is drawn without.
+		match data_expr {
+			None	=> data_expr = Some(pt.to_string()),
+			Some(_)	=> unread_args.push(unread(pt)),
+		}
 	}
 
 	let data_src = match data_expr {
 		Some(name) => lets.get(name.trim()).cloned().unwrap_or(name),
 		None       => return None,
 	};
-	let (bars, without) = parse_bar_data(&data_src);
+	let (bars, mut without) = parse_bar_data(&data_src);
 	if bars.is_empty() {
 		return None;
 	}
+	without.extend(unread_args);
 
 	let (w, h)			= size.unwrap_or((8.0, 4.0));
 	let data_max		= bars.iter().fold(0.0f64, |m, (_, v)| m.max(*v));
@@ -522,36 +566,51 @@ fn parse_lineplot(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	let mut legend	= false;
 	let mut left	= false;
 	let mut body:	Option<String>	= None;
+	let mut unread_args: Vec<String>	= Vec::new();
 	for p in &parts {
 		let pt = p.trim();
 		if pt.is_empty() {
 			continue;
 		}
 		if let Some((key, val)) = named_arg(pt) {
-			match key.as_str() {
-				"x-min"			=> if let Some(v) = plain_f64(&val) { x_min = v; },
-				"x-max"			=> if let Some(v) = plain_f64(&val) { x_max = v; },
-				"y-min"			=> if let Some(v) = plain_f64(&val) { y_min = v; },
-				"y-max"			=> if let Some(v) = plain_f64(&val) { y_max = v; },
-				"x-tick-step"	=> x_step = plain_f64(&val),
-				"y-tick-step"	=> y_step = plain_f64(&val),
-				"size"			=> size = pair_f64(&val),
-				"legend"		=> legend = val.trim() != "none",
-				"axis-style"	=> left = unquote(&val) == "left",
-				_				=> {},
+			let num = plain_f64(&val);
+			let read = match key.as_str() {
+				"x-min"			=> { x_min = num.unwrap_or(x_min); num.is_some() },
+				"x-max"			=> { x_max = num.unwrap_or(x_max); num.is_some() },
+				"y-min"			=> { y_min = num.unwrap_or(y_min); num.is_some() },
+				"y-max"			=> { y_max = num.unwrap_or(y_max); num.is_some() },
+				"x-tick-step"	=> { x_step = num; num.is_some() },
+				"y-tick-step"	=> { y_step = num; num.is_some() },
+				"size"			=> { size = pair_f64(&val); size.is_some() },
+				// The legend is drawn inset at the top left, so only that corner, or none, is as written.
+				"legend"		=> {
+					legend = val.trim() != "none";
+					!legend || unquote(&val).ends_with("north-west")
+				},
+				"axis-style"	=> {
+					left = unquote(&val) == "left";
+					left || unquote(&val) == "scientific"
+				},
+				_				=> false,
+			};
+			if !read {
+				unread_args.push(unread(pt));
 			}
 			continue;
 		}
 		if pt.starts_with('{') {
 			body = Some(pt.to_string());	// the plot body block, holding the plot.add calls
+		} else {
+			unread_args.push(unread(pt));
 		}
 	}
 
-	let body				= body?;
-	let (series, without)	= parse_plot_adds(&body, &lets);
+	let body					= body?;
+	let (series, mut without)	= parse_plot_adds(&body, &lets);
 	if series.is_empty() {
 		return None;
 	}
+	without.extend(unread_args);
 
 	let (w, h)	= size.unwrap_or((8.0, 5.0));
 	let x_ticks	= ticks(x_min, x_max, x_step);
@@ -600,17 +659,27 @@ fn parse_plot_adds(body: &str, lets: &HashMap<String, String>) -> (Vec<Series>, 
 				continue;
 			}
 			if let Some((key, val)) = named_arg(pt) {
-				match key.as_str() {
-					"label"	=> label = content_opt(&val),
+				let read = match key.as_str() {
+					"label"	=> { label = content_opt(&val); label.is_some() },
+					// A series is drawn in black, dashed or solid, at a thickness, so a style naming anything
+					// more -- a paint, a stroke given as a sum or a colour -- is not drawn as written.
 					"style"	=> {
 						if val.contains("dash") { dashed = true; }
 						if let Some(t) = thickness_pt(&val) { width = t as f32; }
+						style_is_drawn(&val)
 					},
-					_		=> {},
+					_		=> false,
+				};
+				if !read {
+					without.push(fmt!("a series' argument it does not draw, {}", short_arg(pt)));
 				}
 				continue;
 			}
-			data_expr = Some(pt.to_string());
+			// The first positional is the data; any other is drawn without.
+			match data_expr {
+				None	=> data_expr = Some(pt.to_string()),
+				Some(_)	=> without.push(fmt!("a series' argument it does not draw, {}", short_arg(pt))),
+			}
 		}
 		let data_src = match data_expr {
 			Some(name) => lets.get(name.trim()).cloned().unwrap_or(name),
@@ -943,6 +1012,59 @@ fn thickness_pt(val: &str) -> Option<f64> {
 	num.parse::<f64>().ok()
 }
 
+/// Does a series' `style:` name only what a series is drawn with -- a stroke dictionary of a dash, a
+/// thickness and a black paint, or a stroke that is a bare thickness? Any other key, another paint, or a
+/// stroke shorthand carrying a paint is not.
+fn style_is_drawn(val: &str) -> bool {
+	let chars:	Vec<char>	= val.chars().collect();
+	let mut i				= 0usize;
+	let mut in_str			= false;
+	while i < chars.len() {
+		let c = chars[i];
+		if c == '"' {
+			in_str = !in_str;
+		}
+		if !in_str && (c.is_alphabetic() || c == '-') && (i == 0 || !(chars[i - 1].is_alphanumeric() || chars[i - 1] == '-')) {
+			let start = i;
+			while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '-') {
+				i += 1;
+			}
+			let word: String = chars[start..i].iter().collect();
+			let mut j = i;
+			while j < chars.len() && chars[j].is_whitespace() {
+				j += 1;
+			}
+			if chars.get(j) == Some(&':') {
+				if !matches!(word.as_str(), "stroke" | "dash" | "thickness" | "paint") {
+					return false;
+				}
+				// A series is drawn black, so black is the one paint drawn as written.
+				if word == "paint" {
+					let rest: String = chars[j + 1..].iter().collect();
+					let paint: String = rest.chars().take_while(|&c| c != ',' && c != ')').collect();
+					if paint.trim() != "black" {
+						return false;
+					}
+				}
+				// A stroke that is not a dictionary is a shorthand, which is as drawn only as a bare thickness.
+				if word == "stroke" {
+					let rest: String = chars[j + 1..].iter().collect();
+					let rest = rest.trim_start();
+					if !rest.starts_with('(') {
+						let short: String = rest.chars().take_while(|&c| c != ',' && c != ')').collect();
+						if pt_value(&short).is_none() && short.trim() != "black" {
+							return false;
+						}
+					}
+				}
+			}
+			continue;
+		}
+		i += 1;
+	}
+	true
+}
+
 /// A plain number, ignoring a trailing unit, or `None`.
 fn plain_f64(val: &str) -> Option<f64> {
 	let v = val.trim();
@@ -1103,5 +1225,50 @@ mod tests {
 			None		=> panic!("the plot is read"),
 		};
 		assert_eq!(without, ["a point it cannot read, `(3, x)`"]);
+	}
+
+	/// What a drawing is written with and does not draw is named too: a diagram, node or edge argument it
+	/// does not read or whose value it cannot read, a shape it does not draw, marks other than an arrow to the
+	/// target, an edge's coordinates, and a chart's, a plot's or a series' argument it does not draw.
+	#[test]
+	fn what_a_drawing_does_not_draw_is_named() {
+		let flow = "diagram(debug: 1, spacing: 2cm, node((0,0), [A], stroke: red, shape: circle), \
+			edge(\"<->\", bend: 20deg), node((0,1), [B], fill: 42), edge((0,1), (0,2), \"->\"), node((0,2), [C]))";
+		let without = match parse_code_figure(flow) {
+			Some((_, w))	=> w,
+			None			=> panic!("the diagram is read"),
+		};
+		assert_eq!(without, [
+			"an argument it does not draw, `debug: 1`",
+			"an argument it does not draw, `spacing: 2cm`",
+			"an argument it does not draw, `stroke: red`",
+			"an argument it does not draw, `shape: circle`",
+			"an argument it does not draw, `\"<->\"`",
+			"an argument it does not draw, `bend: 20deg`",
+			"an argument it does not draw, `fill: 42`",
+			"an argument it does not draw, `(0,1)`",
+			"an argument it does not draw, `(0,2)`",
+		]);
+		let bar = "cetz.canvas({ let data = (([A], 1), ([B], 2)); chart.barchart(mode: \"clustered\", bar-style: red, data) })";
+		let without = match parse_code_figure(bar) {
+			Some((_, w))	=> w,
+			None			=> panic!("the chart is read"),
+		};
+		assert_eq!(without, [
+			"an argument it does not draw, `mode: \"clustered\"`",
+			"an argument it does not draw, `bar-style: red`",
+		]);
+		let line = "cetz.canvas({ let a = ((1, 2), (3, 4)); plot.plot(size: (8, 5), x-label: [t], legend: \"south\", \
+			{ plot.add(style: (stroke: red), mark: \"o\", a) }) })";
+		let without = match parse_code_figure(line) {
+			Some((_, w))	=> w,
+			None			=> panic!("the plot is read"),
+		};
+		assert_eq!(without, [
+			"a series' argument it does not draw, `style: (stroke: red)`",
+			"a series' argument it does not draw, `mark: \"o\"`",
+			"an argument it does not draw, `x-label: [t]`",
+			"an argument it does not draw, `legend: \"south\"`",
+		]);
 	}
 }

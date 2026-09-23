@@ -351,7 +351,6 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	let mut para_start:	u32			= 0;			// byte offset of the paragraph's first line
 	let mut para_end:	u32			= 0;			// byte offset just past its last line's content
 	let mut offset:		u32			= 0;			// running byte offset of the current line's start
-	let mut line_no					= 0usize;		// 1-based, for a diagnostic
 
 	// The stack of open list levels, innermost last. Each level records the leading-space indent of its
 	// markers, so a deeper marker opens a sub-list under the current item and a shallower one closes back
@@ -368,7 +367,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// still open across the lines consumed so far, and whether a string literal is currently open. `None`
 	// when not skipping. While it is `Some`, every line is consumed and nothing is set until the delimiters
 	// balance.
-	let mut skip:		Option<SkipState>	= None;
+	let mut skip:		Option<(SkipState, Span, String)>	= None;	// with its opening line and its name
 
 	// A multi-line construct whose whole text is gathered so it can be parsed rather than skipped: a
 	// `#figure(...)`, a bare `#table(...)`, or a `#let name = (...)` data array feeding a table. `None`
@@ -387,7 +386,6 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
-		line_no += 1;
 		let start = offset;
 		offset = offset.saturating_add(raw.len() as u32);
 
@@ -416,9 +414,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// bracket nesting across `()`, `[]` and `{}` and respecting string literals, until the delimiters
 		// balance. Nothing between the opener and its close is set. This takes precedence over every other
 		// rule, since the span is code, not markup.
-		if let Some(state) = skip.as_mut() {
+		if let Some((state, at, name)) = skip.as_mut() {
 			scan_brackets(line, state);
 			if !state.has_open_bracket() {
+				skips.record(name, *at);
 				skip = None;
 			}
 			continue;
@@ -434,7 +433,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			if !cap.state.has_open_bracket() {
 				let done = capture.take();
 				if let Some(cap) = done {
-					dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
+					res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));
 				}
 			}
 			continue;
@@ -509,7 +508,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			buf.push('\n');
 			let cap = Capture { kind, buf, state, start };
 			if !cap.state.has_open_bracket() {
-				dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);	// the whole construct closed on one line
+				res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
 			}
@@ -540,9 +539,13 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// The recorded span is the opening line alone, even for a construct whose delimiters run on
 			// for several more: that is where a reader wants `--explain`'s caret to land, and the true
 			// closing offset is not known until the multi-line skip above closes, several iterations on.
-			skips.record(&construct_name(trimmed), Span::new(start, end));
-			if let CodeSkip::Multi(state) = decision {
-				skip = Some(state);
+			// A statement that closes on a later line is recorded when it closes, or at the end of the source
+			// when it never does, so the one site says which.
+			let name	= construct_name(trimmed);
+			let at		= Span::new(start, end);
+			match decision {
+				CodeSkip::Line			=> skips.record(&name, at),
+				CodeSkip::Multi(state)	=> skip = Some((state, at, name)),
 			}
 		} else if lines.is_empty() && is_code_reference(trimmed) && !names_scalar_alone(trimmed, binds.sfns) {
 			// A line-leading code-mode reference the reader cannot run -- a bare `#name` bound to nothing, a
@@ -566,15 +569,13 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			flush_list(&mut items, &mut stack);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
-			if raw.is_empty() {
-				return Err(err!(
-					"Empty heading on line {}: a `=` marker must be followed by a title.", line_no;
-					Input, Invalid, Missing));
-			}
+			// Typst sets a heading with no title as an empty heading; this reader sets none, so the marker is
+			// refused where it stands, in a body as at the top level, and the rest of the file still sets.
 			let (title, label) = split_label(raw);
 			if title.is_empty() {
-				return Err(err!(
-					"Heading on line {} has a label but no title.", line_no; Input, Invalid, Missing));
+				let why = if label.is_some() { "with a label but no title" } else { "with no title" };
+				skips.record(&fmt!("= (a heading {})", why), Span::new(start, end));
+				continue;
 			}
 			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
 			// maths span in a heading sets its display text rather than leaking its raw source into the head
@@ -630,13 +631,19 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// unterminated code fence still yields the block it had gathered.
 	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 	flush_list(&mut items, &mut stack);
-	if let Some((buf, cstart)) = code {
-		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
+	// A construct still open at the end of the source never closed, so everything after its opener was taken
+	// into it, where Typst refuses the file: a raw block, a gathered call or a skipped statement is refused
+	// where it opens, and nothing it took in is set.
+	let never = "never closes, so nothing from it to the end of the file is set";
+	if let Some((_, cstart)) = code {
+		skips.record_stand_in("``` (a raw block)", Span::new(cstart, cstart), RefusalClass::Unsupported, never);
 	}
-	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
-	// still yields its best-effort figure or table rather than swallowing the tail silently.
 	if let Some(cap) = capture {
-		dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
+		let first = cap.buf.lines().next().unwrap_or("").trim_start();
+		skips.record_stand_in(&construct_name(first), Span::new(cap.start, cap.start), RefusalClass::Unsupported, never);
+	}
+	if let Some((_, at, name)) = skip {
+		skips.record_stand_in(&name, at, RefusalClass::Unsupported, never);
 	}
 	Ok((items, skips))
 }
@@ -860,18 +867,33 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 			continue;
 		}
 		// An inline maths span between dollars. A `\$` was already turned into a literal above, so a `$`
-		// reaching here opens maths. If it parses, it is a maths run; if not, the literal `$...$` is kept.
+		// reaching here opens maths. If it parses, it is a maths run; if not, or if it never closes, the
+		// literal `$...$` is kept, a stand-in recorded where the item stands.
 		if c == '$' {
-			if let Some(close) = (i + 1..n).find(|&j| chars[j] == '$') {
-				let inner: String = chars[i + 1..close].iter().collect();
-				if let Ok(atom) = mathparse::parse(&inner) {
-					if !plain.is_empty() {
-						runs.push(Inline::Text(std::mem::take(&mut plain)));
+			match (i + 1..n).find(|&j| chars[j] == '$') {
+				Some(close) => {
+					let inner: String = chars[i + 1..close].iter().collect();
+					match mathparse::parse(&inner) {
+						Ok(atom) => {
+							if !plain.is_empty() {
+								runs.push(Inline::Text(std::mem::take(&mut plain)));
+							}
+							runs.push(Inline::Math(atom));
+							i = close + 1;
+							continue;
+						},
+						Err(_) => {
+							// The span is set whole as its source, so its closing `$` opens nothing.
+							skips.record_stand_in("inline maths", span, RefusalClass::Unusable,
+								"is not read by this reader's maths, so its source is set as text");
+							plain.extend(chars[i..=close].iter());
+							i = close + 1;
+							continue;
+						},
 					}
-					runs.push(Inline::Math(atom));
-					i = close + 1;
-					continue;
-				}
+				},
+				None => skips.record_stand_in("inline maths", span, RefusalClass::Unusable,
+					"never closes, so its `$` is set as text"),
 			}
 		}
 		// An inline code span, `raw` between backticks: its content is verbatim, no markup within.
@@ -2716,8 +2738,10 @@ fn let_array_name(trimmed: &str) -> Option<String> {
 }
 
 /// Dispatches a completed capture: a data array is evaluated and stored under its name; a table or a
-/// figure is parsed into an [`Item`]. A construct that does not parse -- an unresolved spread, an empty
-/// table -- yields no item rather than an error, so a stray call never fails the whole document.
+/// figure is parsed into an [`Item`]. A construct that does not read -- an unresolved spread, an empty
+/// table, a container with no body -- yields no item and is refused where it stands, so a stray call never
+/// fails the whole document and is never dropped in silence. A container's body is read as the file is, and
+/// what fails there fails the file.
 fn dispatch_capture(
 	cap:	Capture,
 	items:	&mut Vec<Item>,
@@ -2725,6 +2749,7 @@ fn dispatch_capture(
 	skips:	&mut Refusals,
 	binds:	crate::lang::rules::Bindings<'_, '_>,
 )
+	-> Outcome<()>
 {
 	match cap.kind {
 		CaptureKind::Let(name) => {
@@ -2789,13 +2814,12 @@ fn dispatch_capture(
 			let span = Span::new(cap.start, cap.start);
 			match place_float_call(&cap.buf) {
 				Some((floating, clearance, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
-						skips.merge(sub);
-						// A float is laid out as one unit, so a page or column break inside it cannot be
-						// honoured; it is refused visibly rather than dropped.
-						refuse_nested_page_breaks(&mut inner, skips);
-						items.push(Item::Place { items: inner, floating, clearance, span });
-					}
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
+					skips.merge(sub);
+					// A float is laid out as one unit, so a page or column break inside it cannot be
+					// honoured; it is refused visibly rather than dropped.
+					refuse_nested_page_breaks(&mut inner, skips);
+					items.push(Item::Place { items: inner, floating, clearance, span });
 				},
 				None => skips.record("#place", span),
 			}
@@ -2808,19 +2832,20 @@ fn dispatch_capture(
 			// The span is the wrapper's own opening line; a refusal recorded inside the re-parsed body
 			// carries a span relative to that body text alone, not the enclosing document -- a known,
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
+			// A wrapper with no trailing `[ ... ]` body the reader finds is passed over whole, body and all, on
+			// the same record.
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_scoped_body()) {
-					skips.merge(sub);
-					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
-					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
-					// brackets them. An empty patch -- a body that declares no styling -- adds no markers.
-					let patch = crate::lang::set::lower_declarations(&body);
-					if patch == crate::theme::ThemePatch::default() {
-						items.append(&mut inner);
-					} else {
-						items.push(Item::Scoped { patch, items: inner });
-					}
+				let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body()));
+				skips.merge(sub);
+				// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
+				// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
+				// brackets them. An empty patch -- a body that declares no styling -- adds no markers.
+				let patch = crate::lang::set::lower_declarations(&body);
+				if patch == crate::theme::ThemePatch::default() {
+					items.append(&mut inner);
+				} else {
+					items.push(Item::Scoped { patch, items: inner });
 				}
 			}
 		},
@@ -2829,8 +2854,9 @@ fn dispatch_capture(
 			// parser again and wrapped in a single [`Item::Box`] the lowering sets in a filled, padded box --
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
-			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_scoped_body()) {
+			match styled_box_body(&cap.buf) {
+				Some(body) => {
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body()));
 					skips.merge(sub);
 					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
 					// keep unit -- so it is refused visibly rather than dropped silently at render (see
@@ -2839,8 +2865,9 @@ fn dispatch_capture(
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
 					let patch = crate::lang::set::lower_declarations(&body);
-					items.push(Item::Box { items: inner, patch, placement: None, span: Span::new(0, 0) });
-				}
+					items.push(Item::Box { items: inner, patch, placement: None, span: Span::new(cap.start, cap.start) });
+				},
+				None => skips.record("#styled-box", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::DeclStyle => {
@@ -2888,11 +2915,12 @@ fn dispatch_capture(
 			// is set, not skipped, so it is not tallied; a refusal inside the body still folds in.
 			let tf = match binds.tfns.get(&name) {
 				Some(tf)	=> tf,
-				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+				None		=> return Err(err!("The furniture call #{} was gathered with no binding for it.", name; Bug, Missing)),
 			};
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
+					{
+						let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
 						skips.merge(sub);
 						// A `#pagebreak()` nested in a furniture callout body cannot be honoured -- the box is one
 						// keep unit -- so it is refused visibly rather than dropped silently at render.
@@ -2937,7 +2965,7 @@ fn dispatch_capture(
 			// is set, not skipped, so it is not tallied; a refusal inside the expanded body still folds in.
 			let cf = match binds.cfns.get(&name) {
 				Some(cf)	=> cf,
-				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+				None		=> return Err(err!("The content binding #{} was gathered with no binding for it.", name; Bug, Missing)),
 			};
 			// A self- or mutually-referential binding (`#let a = [#a]`, `#let a = [#b]`/`#let b = [#a]`, or a
 			// function form `#let f(n) = [x #f(n)]`) would re-expand without bound. The name stack catches it
@@ -2948,13 +2976,13 @@ fn dispatch_capture(
 				skips.record(
 					&fmt!("#{} (cycle: content binding refers back to itself)", name),
 					Span::new(cap.start, cap.start));
-				return;
+				return Ok(());
 			}
 			if binds.depth() >= MAX_EXPANSION_DEPTH {
 				skips.record(
 					&fmt!("#{} (cycle: expansion depth exceeds {})", name, MAX_EXPANSION_DEPTH),
 					Span::new(cap.start, cap.start));
-				return;
+				return Ok(());
 			}
 			let args		= content_call_args(&cap.buf, &name);
 			let expanded	= expand_content_body(cf, &args);
@@ -2966,10 +2994,9 @@ fn dispatch_capture(
 			}
 			let mut nested: Vec<String> = binds.active.to_vec();
 			nested.push(name.clone());
-			if let Ok((mut inner, sub)) = parse_items(&expanded, binds.with_active(&nested)) {
-				skips.merge(sub);
-				items.append(&mut inner);
-			}
+			let (mut inner, sub) = res!(parse_items(&expanded, binds.with_active(&nested)));
+			skips.merge(sub);
+			items.append(&mut inner);
 		},
 		CaptureKind::Builtin(kind) => {
 			let span = Span::new(cap.start, cap.start);
@@ -3022,6 +3049,7 @@ fn dispatch_capture(
 			}
 		},
 	}
+	Ok(())
 }
 
 /// The standard lorem-ipsum passage Typst's `#lorem` draws from, the opening of Cicero's *De Finibus* as
@@ -6098,6 +6126,54 @@ bound\".\n";
 			"#show heading (inside a body, where it is not applied)",
 			"#set text (inside a body, where it is not applied)",
 		]);
+		Ok(())
+	}
+
+	/// A container's body is read as the file is: a heading with no title in a callout is refused where it
+	/// stands and the callout is still set with the rest of its body, and at the top level the file goes on
+	/// to set after one. Before, the body's failed read dropped the whole callout in silence.
+	#[test]
+	fn a_body_that_does_not_read_is_refused_where_it_stands() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("#styled-box[\n=\n\nIn the box.\n]\n\n= <lbl>\n\nAfter.\n"));
+		assert!(matches!(items.first(), Some(Item::Box { items: inner, .. }) if inner.len() == 1), "{:?}", items);
+		assert!(matches!(items.last(), Some(Item::Paragraph { .. })), "{:?}", items);
+		let names: Vec<&str> = skips.sites().iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, ["= (a heading with no title)", "= (a heading with a label but no title)"]);
+		Ok(())
+	}
+
+	/// A construct that never closes took everything after it in, where Typst refuses the file: each is
+	/// refused where it opens, and nothing it took in is set.
+	#[test]
+	fn a_construct_that_never_closes_is_refused_where_it_opens() -> Outcome<()> {
+		for (src, name) in [
+			("Before.\n\n#styled-box[\nInside.\n\nAfter.\n",	"#styled-box"),
+			("Before.\n\n#let x = (\n  1,\n\nAfter.\n",		"#let"),
+			("Before.\n\n#pagebreak(\n\nAfter.\n",			"#pagebreak"),
+			("Before.\n\n```\ncode\n\nAfter.\n",			"``` (a raw block)"),
+			("Before.\n\n#foo(\n\nAfter.\n",				"#foo"),
+		] {
+			let (items, skips) = res!(document_with_refusals(src));
+			assert_eq!(items.len(), 1, "{:?}: only the paragraph before it is set: {:?}", src, items);
+			let sites: Vec<(&str, Option<&str>)> = skips.sites().iter()
+				.map(|r| (r.name.as_str(), r.note.as_deref()))
+				.collect();
+			assert_eq!(sites, [(name, Some("never closes, so nothing from it to the end of the file is set"))], "{:?}", src);
+		}
+		Ok(())
+	}
+
+	/// A `$` that never closes is set as text and recorded where its item stands, rather than passed as text
+	/// in silence; closed maths records nothing.
+	#[test]
+	fn a_dollar_that_never_closes_is_recorded() -> Outcome<()> {
+		let (_, skips) = res!(document_with_refusals("Worth $5 today.\n"));
+		let notes: Vec<(&str, Option<&str>)> = skips.sites().iter()
+			.map(|r| (r.name.as_str(), r.note.as_deref()))
+			.collect();
+		assert_eq!(notes, [("inline maths", Some("never closes, so its `$` is set as text"))]);
+		let (_, skips) = res!(document_with_refusals("Then $x$ and $y$.\n"));
+		assert!(skips.is_empty(), "{:?}", skips.sites());
 		Ok(())
 	}
 }

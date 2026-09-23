@@ -1280,9 +1280,10 @@ fn replace_first_glossary(blocks: &mut [Block], table: Block) -> Result<(), Bloc
 }
 
 /// Walks one block's rich runs, recording each glossary term key on its first appearance -- in document
-/// order, deduplicated -- when the key carries a `term-defs` definition. Headings, paragraphs, list items
-/// and table cells all carry glossary terms, and a term inside a footnote counts as a use, so each is
-/// walked. A term with no definition is passed over, so the ordered set holds only rows the glossary sets.
+/// order, deduplicated -- when the key carries a `term-defs` definition. Headings, paragraphs, list items,
+/// table cells and captions all carry glossary terms, and a term inside a footnote counts as a use, so each
+/// is walked; the walk names every block, as [`crate::doc::asks_of`] does, so none is passed by a wildcard.
+/// A term with no definition is passed over, so the ordered set holds only rows the glossary sets.
 fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &mut Vec<String>) {
 	match block {
 		Block::Heading { segments, .. }			=> collect_from_segments(segments, seen, ordered),
@@ -1292,11 +1293,33 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 			for child in &it.children { collect_glossary_terms(child, seen, ordered); }
 		},
 		Block::Table(t)							=> collect_from_table(t, seen, ordered),
-		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
+		// A figure's body comes before its caption, as Typst sets them.
+		Block::TableFigure { table, caption, .. } => {
+			collect_from_table(table, seen, ordered);
+			if let Some(c) = caption { collect_from_segments(c, seen, ordered); }
+		},
+		Block::ImageFigure { caption, .. }
+		| Block::CodeFigure { caption, .. }		=> if let Some(c) = caption { collect_from_segments(c, seen, ordered); },
 		Block::Box { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		Block::Scoped { blocks, .. }			=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		Block::Place { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
-		_										=> {},
+		// These carry no glossary run: plain words, verbatim code, a display equation, a figure the engine
+		// draws, the back matter it composes, images, spacing and breaks, and placeholders.
+		Block::Paragraph { .. }
+		| Block::Code { .. }
+		| Block::Equation { .. }
+		| Block::Figure { .. }
+		| Block::BackMatterHeading { .. }
+		| Block::Reference { .. }
+		| Block::Rule { .. }
+		| Block::Image { .. }
+		| Block::SectionBanner { .. }
+		| Block::Glossary
+		| Block::Index
+		| Block::ClaimIndex
+		| Block::Space(_)
+		| Block::PageBreak { .. }
+		| Block::ColBreak { .. }				=> {},
 	}
 }
 
@@ -3094,7 +3117,8 @@ mod tests {
 
 	/// `#print-glossary()` collects the document's glossary terms in first-appearance order, deduplicated
 	/// by key, dropping a term with no definition, and fills the placeholder with a Term/Definition table
-	/// whose Term column is the term-dictionary value where the key has one and the key itself otherwise.
+	/// whose Term column is the term-dictionary value where the key has one and the key itself otherwise. A
+	/// term used only in a figure's caption is a use like any other.
 	#[test]
 	fn test_resolve_glossary_orders_dedupes_and_skips_undefined_11() -> Outcome<()> {
 		// The term-dictionary gives the `g`-family its display value; `meet` has none, so its Term column is
@@ -3107,6 +3131,7 @@ mod tests {
 			let mut m: HashMap<String, Vec<Segment>> = HashMap::new();
 			m.insert("org".to_string(),  vec![Segment::text("The Foundation.")]);
 			m.insert("meet".to_string(), vec![Segment::text("To oxedize.")]);
+			m.insert("cap".to_string(),  vec![Segment::text("Said only in a caption.")]);
 			*guard = Some(m);
 		}
 		let mut blocks = vec![
@@ -3115,6 +3140,8 @@ mod tests {
 				Segment::text(" then "),
 				Segment::glossary("org", "Oxegence Foundation"),
 			]),
+			Block::image_figure(String::new(), None, None, None, Some(vec![Segment::glossary("cap", "cap")]),
+				"Figure".to_string(), None, None, crate::ir::Site::default()),
 			Block::rich(vec![
 				Segment::glossary("meet", "oxedize"),		// a second use adds no row
 				Segment::glossary("surplus", "surplus"),	// no definition, so no row
@@ -3123,13 +3150,13 @@ mod tests {
 		];
 		resolve_glossary(&mut blocks, false);
 
-		let table = match &blocks[2] {
+		let table = match &blocks[3] {
 			Block::Table(t)	=> t,
 			other			=> return Err(err!("expected a glossary table, found {:?}", other; Test, Bug)),
 		};
 		assert!(table.header, "the glossary sets a header row");
 		assert_eq!(table.weights, vec![1.0, 3.0], "columns are 1fr / 3fr");
-		assert_eq!(table.rows.len(), 3, "header plus the two defined terms");
+		assert_eq!(table.rows.len(), 4, "header plus the three defined terms");
 
 		// The Term column of a body row, flattened to its text.
 		let term_of = |r: usize| -> String {
@@ -3140,6 +3167,7 @@ mod tests {
 		};
 		assert_eq!(term_of(1), "meet", "first appearance, a key with no dict value shows the key itself");
 		assert_eq!(term_of(2), "Oxegence Foundation", "second appearance, a key with a dict value shows it");
+		assert_eq!(term_of(3), "cap", "a term said only in a caption has its row, in its place");
 		Ok(())
 	}
 
