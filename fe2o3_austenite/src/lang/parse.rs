@@ -1564,6 +1564,18 @@ fn construct_name(trimmed: &str) -> String {
 	trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
 }
 
+/// A declarative styling construct's name as a report gives it: `#set <target>`, `#show <selector>` or
+/// `#show:`, read from its opening line.
+fn decl_name(first: &str) -> String {
+	if let Some(name) = crate::lang::rules::rule_name(first) {
+		return name;
+	}
+	match first.find('(') {
+		Some(p) if first.starts_with("#set ")	=> first[..p].split_whitespace().collect::<Vec<_>>().join(" "),
+		_										=> construct_name(first),
+	}
+}
+
 /// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
 fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	let mut k = i;
@@ -1642,6 +1654,21 @@ impl SkipState {
 	/// no declaration, whatever it reads like.
 	pub(crate) fn in_literal(&self) -> bool {
 		self.frames.iter().any(|f| matches!(f, Frame::Comment | Frame::RawBlock(_)))
+	}
+
+	/// Is the innermost frame a comment or raw text, whose characters are text rather than markup or code?
+	fn in_text(&self) -> bool {
+		matches!(self.frames.last(), Some(Frame::Comment) | Some(Frame::Raw) | Some(Frame::RawBlock(_)))
+	}
+
+	/// Folds the step at `i` as [`Self::step`] does, and says whether the characters it consumed are text a
+	/// comment or raw text holds, delimiters included. A `//` line comment is the one step that consumes
+	/// such text while opening no frame: its whole run is taken at once.
+	fn step_literal(&mut self, chars: &[char], i: usize) -> (usize, bool) {
+		let was		= self.in_text();
+		let n		= self.step(chars, i);
+		let literal	= was || self.in_text() || (chars[i] == '/' && n >= 2);
+		(n, literal)
 	}
 
 	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
@@ -1987,6 +2014,45 @@ pub(crate) fn scan_brackets(line: &str, state: &mut SkipState) {
 	while i < chars.len() {
 		i += state.step(&chars, i);
 	}
+}
+
+/// Which characters of `src` a comment or raw text holds, read as the reader reads a file: every character
+/// of a `//` or `/* */` comment and of a `` ` `` raw span or raw block, delimiters included. One entry per
+/// character of `src`.
+pub(crate) fn literal_chars(src: &str) -> Vec<bool> {
+	let chars: Vec<char>	= src.chars().collect();
+	let mut mask			= vec![false; chars.len()];
+	let mut state			= SkipState::markup();
+	let mut i				= 0usize;
+	while i < chars.len() {
+		let (n, literal)	= state.step_literal(&chars, i);
+		let end				= i.saturating_add(n.max(1)).min(chars.len());
+		if literal {
+			for m in &mut mask[i..end] {
+				*m = true;
+			}
+		}
+		i = end;
+	}
+	mask
+}
+
+/// `src` with every character a comment or raw text holds ([`literal_chars`]) blanked to spaces and every
+/// line break kept, so each byte offset and line of the result is the source's own. A scan that finds a
+/// declaration, an `#include` or a field in this text finds none a comment holds or a raw block shows.
+pub(crate) fn live_text(src: &str) -> String {
+	let mask	= literal_chars(src);
+	let mut out	= String::with_capacity(src.len());
+	for (c, literal) in src.chars().zip(mask) {
+		if literal && c != '\n' && c != '\r' {
+			for _ in 0..c.len_utf8() {
+				out.push(' ');
+			}
+		} else {
+			out.push(c);
+		}
+	}
+	out
 }
 
 /// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
@@ -2944,7 +3010,7 @@ fn dispatch_capture(
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_scoped_body()) {
 					skips.merge(sub);
 					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -2964,7 +3030,7 @@ fn dispatch_capture(
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_body()) {
+				if let Ok((mut inner, sub)) = parse_items(&body, binds.in_scoped_body()) {
 					skips.merge(sub);
 					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
 					// keep unit -- so it is refused visibly rather than dropped silently at render (see
@@ -2989,11 +3055,16 @@ fn dispatch_capture(
 			//
 			// A `#set document` is applied from a file's own top level alone, where the assembler folds it into
 			// the Info dictionary. Inside a container Typst refuses one, and inside an expanded binding it
-			// would reach no dictionary here, so in any body it is refused rather than passed over.
-			if binds.body && crate::lang::set::sets_document(&cap.buf) {
-				skips.record("#set document (inside a body, where it is not applied)", Span::new(cap.start, cap.start));
+			// would reach no dictionary here, so in any body it is refused rather than passed over. A `#show`
+			// rule is collected from a file's top level alone, and a `#set` or `doc.with` only from a file's or
+			// a scoped body's (a `#styled-box`'s, a `#columns`'), so one in any other body is refused too.
+			let first	= cap.buf.lines().next().unwrap_or("").trim_start();
+			let rule	= crate::lang::rules::is_rule_line(first);
+			let at		= Span::new(cap.start, cap.start);
+			if binds.body && (crate::lang::set::sets_document(&cap.buf) || rule || !binds.scoped) {
+				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
 			} else if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
-				skips.record(&name, Span::new(cap.start, cap.start));
+				skips.record(&name, at);
 			}
 		},
 		CaptureKind::Context => {
@@ -6194,6 +6265,43 @@ bound\".\n";
 		assert_eq!(res!(refused("#image()\n")), ["#image"]);
 		assert_eq!(res!(refused("#section-banner()\n")), ["#section-banner"]);
 		assert_eq!(res!(refused("#figure(rect(width: 1cm), caption: [A box.])\n")), ["#figure"]);
+		Ok(())
+	}
+
+	/// The live text blanks what a comment holds and what raw text shows, delimiters and all, and keeps
+	/// every other character, every line break and every byte offset where the source has them.
+	#[test]
+	fn live_text_blanks_comments_and_raw_text_and_keeps_offsets() {
+		let src = "A /* x\ny */ b // c\n```typst\n#include \"x.typ\"\n```\n`#set` d \u{e9}\n#include \"real.typ\"\n";
+		let live = live_text(src);
+		assert_eq!(live.len(), src.len(), "byte offsets are kept");
+		assert_eq!(live.lines().count(), src.lines().count(), "lines are kept");
+		let blank = |n: usize| " ".repeat(n);
+		assert_eq!(live.lines().map(|l| l.to_string()).collect::<Vec<_>>(), [
+			fmt!("A{}", blank(5)),
+			fmt!("{}b{}", blank(5), blank(5)),
+			blank(8),
+			blank(16),
+			blank(3),
+			fmt!("{}d \u{e9}", blank(7)),
+			"#include \"real.typ\"".to_string(),
+		]);
+		// A URL's slashes are no comment, and a quoted `//` in prose stays prose, as the reader reads them.
+		assert_eq!(live_text("See https://x.io here.\n"), "See https://x.io here.\n");
+	}
+
+	/// A `#show` rule or a `#set` in a body that applies none of its own declarations is refused where the
+	/// body is read, while a `#styled-box` body lowers its own `#set` and refuses only its `#show`.
+	#[test]
+	fn a_declaration_a_body_does_not_apply_is_refused() -> Outcome<()> {
+		let src = "#styled-box[\n#show heading: set text(size: 30pt)\n#set text(size: 9pt)\n= Boxed\n]\n\n\
+			#place(top, float: true)[\n#set text(size: 9pt)\nFloat.\n]\n";
+		let (_, skips) = res!(document_with_refusals(src));
+		let names: Vec<&str> = skips.sites().iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, [
+			"#show heading (inside a body, where it is not applied)",
+			"#set text (inside a body, where it is not applied)",
+		]);
 		Ok(())
 	}
 }

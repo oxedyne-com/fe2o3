@@ -451,7 +451,7 @@ pub fn heading_font_site(src: &str) -> Option<(String, Span)> {
 ///
 /// The balance is folded through the reader's own scanner over the file's markup, so a paren, a brace or
 /// a quotation mark in prose is a character and leaves the lines after it at the top level.
-fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
+pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
 	let mut out		= Vec::new();
 	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
 	let mut state	= crate::lang::parse::SkipState::markup();

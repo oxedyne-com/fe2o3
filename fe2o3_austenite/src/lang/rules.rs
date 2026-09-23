@@ -196,10 +196,12 @@ pub fn default_rule_set(theme: &Theme) -> Vec<Rule> {
 /// appending them after the default set keeps every [`RuleId`] distinct.
 pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) -> Vec<Rule> {
 	let mut rules	= Vec::new();
-	let mut offset	= 0usize;	// running byte offset of the current line's start
-	for raw in src.split_inclusive('\n') {
-		let line_start	= offset;
-		offset			= offset.saturating_add(raw.len());
+	// The rules a file declares stand at its top level, as the reader meets them: one inside a bracketed
+	// body is that body's own and is refused where the body is read, and one a comment holds or a raw block
+	// shows is text. A trailing comment is blanked too, so it never reads as part of the transform.
+	let live = crate::lang::parse::live_text(src);
+	for (line_start, raw) in crate::lang::set::top_level_lines(&live) {
+		let offset		= line_start.saturating_add(raw.len());
 		let trimmed		= raw.trim_start();
 		// A per-element show rule opens `#show <selector>:` -- a selector between `#show ` and the colon.
 		// `#show:` (no selector) is the whole-document application, not ours.
@@ -246,6 +248,14 @@ pub fn is_rule_line(trimmed: &str) -> bool {
 		Some((sel_text, _))	=> parse_selector(sel_text.trim()).is_some(),
 		None				=> false,
 	}
+}
+
+/// The `#show <selector>` a rule line opens with, as a report names it, or `None` when the line declares no
+/// rule [`is_rule_line`] recognises.
+pub(crate) fn rule_name(trimmed: &str) -> Option<String> {
+	let after		= trimmed.strip_prefix("#show ")?;
+	let (sel, _)	= split_at_top_level_colon(after)?;
+	parse_selector(sel.trim()).map(|_| fmt!("#show {}", sel.trim()))
 }
 
 /// The `(selector, transform)` split of a `#show <selector>: <transform>` body at the first colon that is
@@ -1156,11 +1166,12 @@ pub(crate) fn parse_colour_pal(expr: &str, palette: &Palette) -> Option<Rgba> {
 /// resolve is passed over; a source with no such binding adds nothing.
 pub fn collect_palette(src: &str, palette: &mut Palette) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::parse::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// The literal must name `colours` exactly, not merely start with it -- `#let colours_x = (...)`
 		// is a different binding and must not be read as the palette.
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let colours")
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let colours")
 			&& !chars.get(i + "#let colours".chars().count()).is_some_and(|&c| is_ident_char(c))
 		{
 			// The dict opens at the first `(` after the `=`.
@@ -1396,19 +1407,20 @@ pub struct Bindings<'a, 'b> {
 	pub sfns:	&'a ScalarFns,
 	pub active:	&'b [String],
 	pub body:	bool,
+	pub scoped:	bool,	// the body re-read lowers its own top-level `#set` and `doc.with` onto its scope
 }
 
 impl<'a> Bindings<'a, 'static> {
 	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
 	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[], body: false }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[], body: false, scoped: false }
 	}
 
 	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
 	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
 	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
-		Self { tfns, cfns, sfns, active: &[], body: false }
+		Self { tfns, cfns, sfns, active: &[], body: false, scoped: false }
 	}
 }
 
@@ -1425,12 +1437,19 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active, body: true }
+		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active, body: true, scoped: false }
 	}
 
-	/// The same bindings for re-reading a container's or a float's body.
+	/// The same bindings for re-reading a float's or a furniture call's body, which applies none of its own
+	/// declarations.
 	pub fn in_body(self) -> Self {
-		Bindings { body: true, ..self }
+		Bindings { body: true, scoped: false, ..self }
+	}
+
+	/// The same bindings for re-reading a body whose own top-level `#set` and `doc.with` declarations are
+	/// lowered onto its scope: a `#styled-box`'s or a `#columns`'.
+	pub fn in_scoped_body(self) -> Self {
+		Bindings { body: true, scoped: true, ..self }
 	}
 }
 
@@ -1449,12 +1468,13 @@ fn empty_scalar_fns() -> &'static ScalarFns {
 /// same value, so the map is definition-order-independent.
 pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &mut TemplateFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::parse::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// A definition opens at a line-leading `#let <ident>(` -- a function `#let`, whose name is followed by
 		// a parameter list. (`#let name = (...)` -- a value binding -- has no `(` right after the name and is
-		// left to the data-array reader.)
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+		// left to the data-array reader.) One a comment holds or a raw block shows is text, not a definition.
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
 			if let Some((name, params, expr, next)) = read_let_fn(&chars, i) {
 				// A name the reader already handles as a built-in construct (`styled-box`, `padded-image`,
 				// `part-page`, ...) is NOT overridden by a collected definition, so the built-in path stays
@@ -1489,9 +1509,10 @@ pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &
 /// not collide, and where a name were somehow read by both, the furniture map wins at every call site.
 pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::parse::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
 			if let Some((name, params, body, wrapper, next)) = read_let_content(&chars, i) {
 				if !is_reserved_construct(&name) {
 					cfns.insert(name, ContentFn { params, body, wrapper });
@@ -1586,9 +1607,10 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 /// same value, so the map is definition-order-independent.
 pub fn collect_scalar_fns(src: &str, sfns: &mut ScalarFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::parse::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
 			if let Some((name, value, next)) = read_let_scalar(&chars, i) {
 				if !is_reserved_construct(&name) {
 					sfns.insert(name, value);
@@ -2540,6 +2562,20 @@ mod tests {
 		assert_eq!(rules.len(), 1, "only the per-element rule is a rule; #show: is the doc application");
 		assert_eq!(rules[0].selector.kind, ElementKind::Heading);
 		assert!(matches!(rules[0].transform, Transform::SetFields(_)));
+	}
+
+	/// A rule is collected from a file's top level alone: one a raw block shows, one a comment holds and one
+	/// inside a body is none of the file's, and the file's own rule after them all is.
+	#[test]
+	fn a_rule_is_collected_from_the_top_level_alone() {
+		let src = "```typst\n#show heading: set text(size: 30pt)\n```\n/*\n#show heading: set text(size: 31pt)\n*/\n\
+			#styled-box[\n#show heading: set text(size: 32pt)\n]\n#show heading: set text(size: 33pt) // a note\n";
+		let mut refusals = Refusals::default();
+		let rules = collect_from_source(src, 0, &mut refusals);
+		assert_eq!(rules.len(), 1, "{:?}", rules.iter().map(|r| r.source.clone()).collect::<Vec<_>>());
+		assert!(refusals.is_empty(), "{:?}", refusals.sites());
+		let line = src.find("#show heading: set text(size: 33pt)").unwrap_or(0) as u32;
+		assert_eq!(rules[0].span.start, line, "the rule is placed at its own line");
 	}
 
 	/// A page-reading rule is collected as a refusal, not applied, and its reason recorded.

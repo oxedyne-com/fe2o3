@@ -96,7 +96,8 @@ pub struct BookSpec {
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
 /// A single manuscript has none, so the binary can tell a book from a lone file by the source itself.
 pub fn is_book_root(src: &str) -> bool {
-	src.lines().any(|l| l.trim_start().starts_with("#include"))
+	// An `#include` a comment holds or a raw block shows is text, and makes no book.
+	lang::parse::live_text(src).lines().any(|l| l.trim_start().starts_with("#include"))
 }
 
 /// The heading display-face names a theme carries, for the resolver to load: the role-default heading
@@ -400,8 +401,31 @@ fn read_found(path: &Path, stand_in: &str, skips: &mut lang::Refusals) -> Option
 /// The span of the first `name:` field in `src`, where [`string_field`] reads it, to charge a site to the
 /// field that named what could not be had.
 fn field_span(src: &str, name: &str) -> Span {
-	let at = src.find(&fmt!("{}:", name)).unwrap_or(0) as u32;
+	let at = find_live(src, &fmt!("{}:", name)).unwrap_or(0) as u32;
 	Span::new(at, at)
+}
+
+/// The byte offset of the first `needle` in `src` a reader would meet: not in a comment or raw text, and,
+/// for a needle that opens with a name, such as a `title:` field, not the tail of a longer name, so
+/// `title:` is never found inside `subtitle:`. Every field, setting and binding the front matter, the
+/// config and the template are read by is found this way, and its value then read from `src` itself.
+fn find_live(src: &str, needle: &str) -> Option<usize> {
+	let live	= lang::parse::live_text(src);
+	let named	= needle.chars().next().map_or(false, is_name_char);
+	let mut from	= 0usize;
+	while let Some(rel) = live[from..].find(needle) {
+		let at = from + rel;
+		if !named || live[..at].chars().next_back().map_or(true, |c| !is_name_char(c)) {
+			return Some(at);
+		}
+		from = at + needle.len();
+	}
+	None
+}
+
+/// Can `c` stand in a Typst name, a field's or a binding's?
+fn is_name_char(c: char) -> bool {
+	c.is_alphanumeric() || c == '-' || c == '_'
 }
 
 /// Asks for each image the front matter draws ([`lang::Ask`]), at the field that names it: a book's
@@ -420,7 +444,7 @@ fn ask_front_images(
 		}
 	};
 	if let Some((config_file, config_src)) = config {
-		let at = config_src.find("cover-image-path").unwrap_or(0) as u32;
+		let at = find_live(config_src, "cover-image-path").unwrap_or(0) as u32;
 		ask(&fm.cover_image, config_file, Span::new(at, at), lang::ImageRole::Cover);
 	}
 	ask(&fm.logo_image, root_file, field_span(root_src, "title-logo-path"), lang::ImageRole::TitleLogo);
@@ -673,7 +697,7 @@ fn read_doc_config(template: &str, root_src: &str) -> Outcome<(PageGeometry, Raw
 	// `show heading: it =>`, not the bare words: the banner template carries a `//` comment naming
 	// `show heading`/`set heading`, and matching that comment (with a `rows:` tuple anywhere after it) would
 	// misread the banner as a grid.
-	let head_tail	= template.find("show heading: it =>").map(|at| &template[at..]);
+	let head_tail	= find_live(template, "show heading: it =>").map(|at| &template[at..]);
 	let grid_rows	= head_tail.and_then(|t| tuple_after(t, "rows:")).filter(|r| r.len() >= 4);
 	let (opener, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt) = match grid_rows {
 		Some(rows)	=> {
@@ -1396,8 +1420,9 @@ fn parse_term_dict(src: &str) -> HashMap<String, String> {
 /// non-whitespace character after it is `=`. Skips a mention of the name in a comment or another context
 /// (say `// name: ...`), returning the first true assignment, or `None` when there is none.
 fn assignment_offset(src: &str, name: &str) -> Option<usize> {
-	let mut from = 0;
-	while let Some(rel) = src[from..].find(name) {
+	let live		= lang::parse::live_text(src);
+	let mut from	= 0;
+	while let Some(rel) = live[from..].find(name) {
 		let at		= from + rel;
 		let after	= at + name.len();
 		let rest	= src[after..].trim_start();
@@ -1550,7 +1575,7 @@ fn read_front_matter(root_src: &str, config_src: &str, title: &str) -> FrontMatt
 /// The inner text of the root's `meta-data: ( ... )` argument, balanced across nested groups and
 /// strings, or `None` when the root sets no `meta-data`.
 fn meta_block(src: &str) -> Option<String> {
-	let at		= src.find("meta-data:")?;
+	let at		= find_live(src, "meta-data:")?;
 	let rest	= &src[at + "meta-data:".len()..];
 	let open	= rest.find('(')?;
 	let bytes	= rest.as_bytes();
@@ -1627,7 +1652,7 @@ fn meta_rows(block: &str) -> Vec<String> {
 /// string literal -- a `name: none` reads as absent -- so a later field's value is never read by mistake.
 fn string_field(src: &str, name: &str) -> Option<String> {
 	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	// Bound the value at the next depth-zero comma, respecting strings, so the search stays in this field.
 	let bytes	= rest.as_bytes();
@@ -1660,7 +1685,7 @@ fn string_field(src: &str, name: &str) -> Option<String> {
 /// The `Copyright © YEAR HOLDER. NOTICE` line the template composes from the `copyright: (year, [holder],
 /// notice)` tuple, or `None` when the book sets no copyright tuple.
 fn copyright_line(meta: &str) -> Option<String> {
-	let at		= meta.find("copyright:")?;
+	let at		= find_live(meta, "copyright:")?;
 	let rest	= &meta[at + "copyright:".len()..];
 	let open	= rest.find('(')?;
 	// The tuple's three parts: a year string, a `[holder]` content, and a notice string.
@@ -1751,7 +1776,7 @@ fn unquote_or_content(part: &str) -> String {
 /// Whether a `name: true` boolean field is set true.
 fn bool_field(src: &str, name: &str) -> bool {
 	let needle	= fmt!("{}:", name);
-	match src.find(&needle) {
+	match find_live(src, &needle) {
 		Some(at)	=> {
 			let rest	= &src[at + needle.len()..];
 			let end		= rest.find(',').unwrap_or(rest.len());
@@ -1766,7 +1791,7 @@ fn bool_field(src: &str, name: &str) -> bool {
 /// default for the `auto` case.
 fn tri_bool(src: &str, name: &str) -> Option<bool> {
 	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	let end		= rest.find(',').unwrap_or(rest.len());
 	let val		= rest[..end].trim();
@@ -1810,7 +1835,7 @@ fn clean_content(s: &str) -> String {
 /// group does not close it early.
 fn content_field(src: &str, name: &str) -> Option<String> {
 	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	let open	= rest.find('[')?;
 	let bytes	= rest.as_bytes();
@@ -1873,7 +1898,9 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	// The template chain the main source imports: builds the palette and collects furniture, content and
 	// scalar bindings (the `#aside-box` furniture, the `#greet` content binding, a `#let title = "..."`
 	// scalar, the palette they resolve against).
-	for line in main_src.lines() {
+	// An `#import` or `#include` a comment holds or a raw block shows is text, and is not followed.
+	let main_live = lang::parse::live_text(main_src);
+	for line in main_live.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(rel) = first_quoted(rest) {
@@ -1886,7 +1913,7 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	lang::rules::collect_template_fns(main_src, body_size, &palette, &mut tfns);
 	lang::rules::collect_content_fns(main_src, &mut cfns);
 	lang::rules::collect_scalar_fns(main_src, &mut sfns);
-	for line in main_src.lines() {
+	for line in main_live.lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
@@ -1926,7 +1953,7 @@ fn walk_template_imports(
 	};
 	let next_dir = path.parent().unwrap_or(dir);
 	// Imports first, so a palette, furniture or binding this file depends on is collected before its own.
-	for line in src.lines() {
+	for line in lang::parse::live_text(&src).lines() {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(inner_rel) = first_quoted(rest) {
@@ -2118,12 +2145,16 @@ fn assemble_into(
 	// otherwise they are dropped (reported once at the guard, never leaked as prose). See [`GuardFrame`].
 	let mut guards: Vec<GuardFrame> = Vec::new();
 	let mut byte: u32 = 0;	// running byte offset, so a refusal's span points at its own line (G4)
-	for raw in src.split_inclusive('\n') {
+	// Each line is read for its structure -- a guard, an `#include`, a part page -- as the reader meets it:
+	// one a comment holds or a raw block shows is text, and is none of them. The live text keeps every
+	// offset and line of the file, and the file's own line is what is gathered for the reader.
+	let live = lang::parse::live_text(src);
+	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
 		// Strip the line terminator without treating it as a real character, exactly as the reader's own
 		// line loop does (`lang::parse::to_blocks`), so the span below covers the line, not its newline.
-		let mut line = raw;
+		let mut line = raw_live;
 		if let Some(s) = line.strip_suffix('\n') { line = s; }
 		if let Some(s) = line.strip_suffix('\r') { line = s; }
 		let end	= start.saturating_add(line.len() as u32);
@@ -2482,7 +2513,7 @@ fn build_style(raw: &RawStyle) -> Theme {
 /// The string a `#let <name> = "..."` binds, if the config sets one as a plain literal.
 fn read_let_string(src: &str, name: &str) -> Option<String> {
 	let needle	= fmt!("#let {} =", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	first_quoted(rest)
 }
@@ -2492,7 +2523,7 @@ fn read_let_string(src: &str, name: &str) -> Option<String> {
 /// yields `None` and the guard refuses rather than inventing a truth value.
 fn read_let_bool(src: &str, name: &str) -> Option<bool> {
 	let needle		= fmt!("#let {} =", name);
-	let Some(at)	= src.find(&needle) else { return None; };
+	let Some(at)	= find_live(src, &needle) else { return None; };
 	let rest	= src[at + needle.len()..].trim_start();
 	let tok: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
 	match tok.as_str() {
@@ -2507,14 +2538,14 @@ fn read_let_bool(src: &str, name: &str) -> Option<bool> {
 /// the arm whose condition tests this format, and returns its balanced `{...}` body.
 fn arm(src: &str, name: &str, fmt: &str) -> Option<String> {
 	let needle	= fmt!("#let {} =", name);
-	let start	= src.find(&needle)?;
+	let start	= find_live(src, &needle)?;
 	let tail	= &src[start + needle.len()..];
 	// The binding ends at the next top-level `#let`, or the end of the file.
-	let end		= tail.find("\n#let ").unwrap_or(tail.len());
+	let end		= find_live(tail, "\n#let ").unwrap_or(tail.len());
 	let block	= &tail[..end];
 
 	let cond	= fmt!("== \"{}\"", fmt);
-	let at		= block.find(&cond)?;
+	let at		= find_live(block, &cond)?;
 	let after	= &block[at..];
 	let brace	= after.find('{')?;
 	balanced_braces(&after[brace..])
@@ -2545,7 +2576,7 @@ fn balanced_braces(s: &str) -> Option<String> {
 /// The first number after `key` in `s` -- the digits and one decimal point that follow the key. The
 /// unit (`mm`, `pt`, `em`) is known from the key, so it is read off and dropped.
 fn num_after(s: &str, key: &str) -> Option<f64> {
-	let at	= s.find(key)?;
+	let at	= find_live(s, key)?;
 	first_num(&s[at + key.len()..])
 }
 
@@ -2571,7 +2602,7 @@ fn first_num(s: &str) -> Option<f64> {
 /// The numbers of the first `( ... )` tuple after `key` -- `sub-headings: (15pt, 12.5pt, ...)` reads as
 /// `[15.0, 12.5, ...]`.
 fn tuple_after(s: &str, key: &str) -> Option<Vec<f64>> {
-	let at		= s.find(key)?;
+	let at		= find_live(s, key)?;
 	let after	= &s[at + key.len()..];
 	let open	= after.find('(')?;
 	let close	= after[open..].find(')')?;
@@ -2600,7 +2631,7 @@ fn paper_dims_mm(name: &str) -> (f64, f64) {
 /// The first `"..."` string after `key` anywhere in `src` -- `paper: "a4"` reads as `a4`. Used to read a
 /// bare `name: "value"` setting that is not bounded by the field machinery the book path needs.
 fn first_quoted_after(src: &str, key: &str) -> Option<String> {
-	let at = src.find(key)?;
+	let at = find_live(src, key)?;
 	first_quoted(&src[at + key.len()..])
 }
 
@@ -2609,13 +2640,13 @@ fn first_quoted_after(src: &str, key: &str) -> Option<String> {
 /// the `#let`, and the field's value runs to the next depth-zero comma, so a nested group does not end it.
 fn let_dict_field(src: &str, dict: &str, field: &str) -> Option<String> {
 	let needle	= fmt!("#let {} =", dict);
-	let start	= src.find(&needle)?;
+	let start	= find_live(src, &needle)?;
 	let tail	= &src[start + needle.len()..];
 	let open	= tail.find('(')?;
 	let body	= balanced_parens(&tail[open..])?;
 	// Within the dictionary body, find `field:` and take its value up to the next top-level comma.
 	let key		= fmt!("{}:", field);
-	let at		= body.find(&key)?;
+	let at		= find_live(&body, &key)?;
 	let rest	= &body[at + key.len()..];
 	let bytes	= rest.as_bytes();
 	let mut depth	= 0i32;
@@ -2652,7 +2683,7 @@ fn parse_len_pt(s: &str) -> Option<f64> {
 
 /// The first length after `key` in `src`, in points -- `text-size: 11pt` reads as `11.0`.
 fn first_len_after(src: &str, key: &str) -> Option<f64> {
-	let at = src.find(key)?;
+	let at = find_live(src, key)?;
 	parse_len_pt(&src[at + key.len()..])
 }
 
@@ -2716,6 +2747,21 @@ mod tests {
 	fn test_a_root_with_includes_reads_as_a_book_02() {
 		assert!(is_book_root("#show: doc.with()\n#include \"chap_01.typ\"\n"));
 		assert!(!is_book_root("= A lone heading\n\nSome prose.\n"));
+		// An `#include` a comment holds or a raw block shows is text, and makes no book.
+		assert!(!is_book_root("= Lone\n\n```typst\n#include \"chapter.typ\"\n```\n"));
+		assert!(!is_book_root("= Lone\n\n/*\n#include \"draft.typ\"\n*/\n// #include \"x.typ\"\n"));
+	}
+
+	/// A field is read where a reader meets it: not in a comment, not in a raw block, and not as the tail of
+	/// a longer field's name.
+	#[test]
+	fn a_field_is_read_where_the_reader_meets_it() {
+		let src = "#show: doc.with(\n  subtitle: [Sub],\n  // title-top-logo-path: \"old.png\",\n  \
+			/* title: [Commented] */\n  title: [Real],\n  title-top-logo-path: \"new.png\",\n)\n";
+		assert_eq!(content_field(src, "title").as_deref(), Some("Real"));
+		assert_eq!(content_field(src, "subtitle").as_deref(), Some("Sub"));
+		assert_eq!(string_field(src, "title-top-logo-path").as_deref(), Some("new.png"));
+		assert_eq!(string_field("// cover: \"x.png\"\n", "cover"), None);
 	}
 
 	#[test]
