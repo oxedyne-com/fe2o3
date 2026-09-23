@@ -59,6 +59,8 @@ type TestDb = O3db<
 const PERIOD_MS:        u64 = 200;                                  // the interval policy's
 const WATCH:            Duration = Duration::from_millis(1_500);    // a failing disk watched
 const ANSWERED_WITHIN:  Duration = Duration::from_secs(10);         // a closing store's last write
+const SLOW_WRITES:      u8 = 20;                                    // arriving at a failing disk
+const SLOW_BARRIERS:    u64 = 6;                                    // enough for them, and more
 
 #[test]
 fn main() -> Outcome<()> {
@@ -72,8 +74,14 @@ fn main() -> Outcome<()> {
     hooks::set_pair_hand_failure(false);
     let closing = close_answers_what_the_syncer_holds();
     hooks::set_barrier_delay(Duration::ZERO);
+    let slowly = slowly_failing_disk_answers_waiting_writes_together();
+    hooks::set_barrier_failure(false);
+    hooks::set_barrier_delay(Duration::ZERO);
+    let queued = close_answers_what_a_slow_cache_bot_holds();
+    hooks::set_barrier_delay(Duration::ZERO);
+    hooks::set_insert_delay(Duration::ZERO);
     log_finish_wait!();
-    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff, closing].into_iter()
+    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff, closing, slowly, queued].into_iter()
         .filter_map(|r| r.err())
         .collect();
     match failed.len() {
@@ -144,6 +152,16 @@ fn failing_disk_is_retried_once_a_period() -> Outcome<()> {
                     was told: {}", text;
                     Test, Mismatch));
             }
+            // Written, so a caller must be able to tell it from a write that never landed
+            // without reading the words.
+            if !e.tags().contains(&ErrTag::Unconfirmed) {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "A write whose barrier failed after it was written reached its caller tagged \
+                    {:?}, which does not say Unconfirmed: a caller cannot tell it from a write that \
+                    never landed.", e.tags();
+                    Test, Mismatch));
+            }
         },
     }
     // The record is in the files all the same, and readable.
@@ -194,7 +212,18 @@ fn stopped_syncer_refuses_writes_before_appending() -> Outcome<()> {
                 "A write through a writer whose syncer had stopped was confirmed.";
                 Test, Unexpected));
         },
-        Err(e) => fmt!("{:?}", e),
+        Err(e) => {
+            // Refused before anything was written, so a retry is needed, and nothing may say
+            // otherwise.
+            if e.tags().contains(&ErrTag::Unconfirmed) {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "A write refused before anything was written is tagged Unconfirmed, as a \
+                    written one would be.";
+                    Test, Mismatch));
+            }
+            fmt!("{:?}", e)
+        },
     };
     res!(db.close());
 
@@ -347,6 +376,128 @@ fn close_answers_what_the_syncer_holds() -> Outcome<()> {
             return Err(err!(
                 "A write answered as the store closed is missing after a restart."; Test, Missing));
         },
+    }
+    res!(db.close());
+    Ok(())
+}
+
+/// The disk fails every sync, slowly, under the interval policy, and twenty writes arrive at once.
+/// While the last barrier has failed each write waits on a barrier, and those waiting together
+/// share one, as they do under `sync_on_write`.  Each had a barrier of its own, one after
+/// another, so a disk taking its time to fail answered twenty writes ten times slower, and with
+/// writes arriving faster than it failed the queue grew without bound.
+fn slowly_failing_disk_answers_waiting_writes_together() -> Outcome<()> {
+    let root = res!(fresh("./test_db_syncer_faults_slowly"));
+    let mut cfg = res!(config());
+    cfg.sync_interval_ms = PERIOD_MS;
+    let db = res!(open(&root, cfg));
+    res!(db.insert(key(41), dat!(41u8), Uid::default(), None));
+
+    hooks::set_barrier_delay(Duration::from_millis(PERIOD_MS));
+    hooks::set_barrier_failure(true);
+    // Owed a barrier at once, which fails.
+    let _ = db.insert(key(42), dat!(42u8), Uid::default(), None);
+    let counted = hooks::barriers_failed();
+    let mut resps = Vec::new();
+    for i in 0..SLOW_WRITES {
+        resps.push(res!(db.api().store(key(50 + i), dat!(50 + i), Uid::default())));
+    }
+    let mut told = 0;
+    for resp in resps {
+        let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+            OzoneMsg::Chunks(n) => n,
+            msg => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "Expected the record count, received {:?}.", msg; Test, Unexpected));
+            },
+        };
+        if resp.recv_write_acks(n, constant::USER_REQUEST_TIMEOUT, ANSWERED_WITHIN).is_err() {
+            told += 1;
+        }
+    }
+    let tries = hooks::barriers_failed() - counted;
+    hooks::set_barrier_failure(false);
+    hooks::set_barrier_delay(Duration::ZERO);
+    res!(db.close());
+    if told != SLOW_WRITES {
+        return Err(err!(
+            "{} of {} writes made while the disk failed were told their barrier failed.",
+            told, SLOW_WRITES;
+            Test, Mismatch));
+    }
+    if tries > SLOW_BARRIERS {
+        return Err(err!(
+            "{} writes arriving together while the disk failed each sync slowly took {} \
+            barriers, where waiting together they share one, and a few more is the most: they \
+            were answered one barrier at a time.", SLOW_WRITES, tries;
+            Test, Mismatch));
+    }
+    Ok(())
+}
+
+/// The store is closed while its one cache bot works through a queue of written records, and the
+/// shutdown's time runs out with one still queued behind the barrier that ends the writers.  That
+/// record is answered.  Its queue used to be drained into the log when the time ran out, which
+/// destroyed it, and its caller waited out the durability deadline for a write that had landed.
+fn close_answers_what_a_slow_cache_bot_holds() -> Outcome<()> {
+    let root = res!(fresh("./test_db_syncer_faults_queued"));
+    let mut cfg = res!(config());
+    cfg.num_cbots_per_zone = 1;
+    cfg.sync_interval_ms = PERIOD_MS;
+    let db = res!(open(&root, cfg.clone()));
+
+    // The first write waits on the barrier the policy owes it at once, the second behind it, and
+    // both reach the cache bot as the barrier ends, after the close has begun.
+    hooks::set_barrier_delay(Duration::from_millis(2_000));
+    hooks::set_insert_delay(Duration::from_millis(1_500));
+    let mut writers = Vec::new();
+    for i in [61u8, 62] {
+        let writing = db.clone();
+        writers.push(res!(thread::Builder::new()
+            .name(fmt!("syncer faults writer {}", i))
+            .spawn(move || -> Outcome<()> {
+                let resp = res!(writing.api().store(key(i), dat!(i), Uid::default()));
+                let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+                    OzoneMsg::Chunks(n) => n,
+                    msg => return Err(err!(
+                        "Expected the record count, received {:?}.", msg; Test, Unexpected)),
+                };
+                res!(resp.recv_write_acks(n, constant::USER_REQUEST_TIMEOUT, ANSWERED_WITHIN));
+                Ok(())
+            })));
+        thread::sleep(Duration::from_millis(50));
+    }
+    thread::sleep(Duration::from_millis(100));
+    let closed = db.close();
+    let mut unanswered = Vec::new();
+    for (i, writer) in writers.into_iter().enumerate() {
+        match writer.join() {
+            Ok(Ok(())) => (),
+            Ok(Err(e)) => unanswered.push(fmt!("write {}: {}", i + 1, e)),
+            Err(_) => unanswered.push(fmt!("write {}: the writing thread panicked", i + 1)),
+        }
+    }
+    hooks::set_barrier_delay(Duration::ZERO);
+    hooks::set_insert_delay(Duration::ZERO);
+    res!(closed);
+    if !unanswered.is_empty() {
+        return Err(err!(
+            "Writes queued at the cache bot when the store closed were not answered: {:?}",
+            unanswered;
+            Test, Missing));
+    }
+    let db = res!(open(&root, cfg));
+    for i in [61u8, 62] {
+        match res!(db.get(&key(i), None)) {
+            Some((v, _)) => req!(v, dat!(i), "A write answered as the store closed."),
+            None => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "Write {} answered as the store closed is missing after a restart.", i;
+                    Test, Missing));
+            },
+        }
     }
     res!(db.close());
     Ok(())

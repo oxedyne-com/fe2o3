@@ -750,6 +750,7 @@ impl<
     /// bot reads, and its first request timed out on nothing.  It now waits on `OzoneMsg::Ready`.
     fn bring_up(&mut self) -> Outcome<()> {
         res!(self.start_db());
+        hooks::supervisor_panic();
 
         // 1. The zones start surveying at once, and answer on `zones` when they are done.
         let zones = Responder::new(Some(self.ozid()));

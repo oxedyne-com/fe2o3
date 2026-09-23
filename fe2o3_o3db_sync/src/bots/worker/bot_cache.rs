@@ -18,6 +18,7 @@ use crate::{
         floc::FileLocation,
         stored::RecordId,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -297,6 +298,7 @@ impl<
     )
         -> Outcome<()>
     {
+        hooks::insert_delay();
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
         let floc_old_opt = match self.cache.insert(

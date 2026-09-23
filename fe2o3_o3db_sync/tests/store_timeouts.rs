@@ -59,6 +59,7 @@ fn main() -> Outcome<()> {
     // Whatever failed, the next binary must not inherit a slow store.
     hooks::set_barrier_delay(Duration::ZERO);
     hooks::set_publish_delay(Duration::ZERO);
+    hooks::set_supervisor_panic(false);
     log_finish_wait!();
     outcome
 }
@@ -69,6 +70,9 @@ fn run() -> Outcome<()> {
     res!(durability_deadline_reports_written());
     res!(writer_failure_reaches_the_caller());
     res!(failed_zone_fails_the_start());
+    let panicked = panicked_supervisor_stops_its_bots();
+    hooks::set_supervisor_panic(false);
+    res!(panicked);
     Ok(())
 }
 
@@ -213,6 +217,13 @@ fn durability_deadline_reports_written() -> Outcome<()> {
                     "The durability deadline of {:?} took {:?} to expire.", durability, took;
                     Test, Timeout));
             }
+            if !e.tags().contains(&ErrTag::Unconfirmed) {
+                return Err(err!(
+                    "An expired durability deadline is tagged {:?}, which does not say \
+                    Unconfirmed: a caller cannot tell it from a write that never landed without \
+                    reading the words.", e.tags();
+                    Test, Mismatch));
+            }
         },
     }
     // What the error said: the write lands when the disk completes it.
@@ -321,6 +332,46 @@ fn failed_zone_fails_the_start() -> Outcome<()> {
             Test, Unexpected));
     }
     // Nothing is left running for a close to wait on.
+    let begun = Instant::now();
+    res!(db.close());
+    if begun.elapsed() >= Duration::from_secs(1) {
+        return Err(err!(
+            "Closing a store whose start failed took {:?}.", begun.elapsed(); Test, Timeout));
+    }
+    Ok(())
+}
+
+/// The supervisor panics once it has brought the bots up, before the database is ready.  The
+/// start fails and returns once those bots have stopped.  It returned at once, with every bot
+/// still running and nothing left that would stop them, so the directory could be opened again
+/// beside them.
+fn panicked_supervisor_stops_its_bots() -> Outcome<()> {
+    let root = res!(fresh("./test_db_store_timeouts_panic"));
+    let cfg = res!(config());
+    let before = res!(threads());
+    hooks::set_supervisor_panic(true);
+    let mut db = res!(TestDb::new(root.clone(), Some(cfg), schemes(), Uid::default()));
+    let started = db.start("test");
+    hooks::set_supervisor_panic(false);
+    if started.is_ok() {
+        return Err(err!(
+            "A store whose supervisor panicked while starting it started."; Test, Unexpected));
+    }
+    // A thread that has let go of its bot ends a moment later, so the count gets that moment.
+    let at_return = res!(threads());
+    let settled = Instant::now() + Duration::from_millis(100);
+    let mut after = at_return;
+    while after > before && Instant::now() < settled {
+        thread::sleep(Duration::from_millis(5));
+        after = res!(threads());
+    }
+    if after > before {
+        return Err(err!(
+            "A start whose supervisor panicked returned with {} threads running, {} a moment \
+            later, where there were {} before it: the bots it brought up were still running.",
+            at_return, after, before;
+            Test, Unexpected));
+    }
     let begun = Instant::now();
     res!(db.close());
     if begun.elapsed() >= Duration::from_secs(1) {
