@@ -6,7 +6,7 @@ use crate::{
             FileLocation,
             FileNum,
         },
-        stored::RecordId,
+        stored::RecordDigest,
     },
 };
 
@@ -45,7 +45,7 @@ impl std::fmt::Display for DataState {
 #[derive(Clone, Copy, Debug)]
 pub struct Move {
     to:     u64,
-    rid:    RecordId,
+    rid:    RecordDigest,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -310,7 +310,7 @@ impl FileState {
         &mut self,
         dloc:       &DataLocation,
         new_start:  u64,
-        rid:        RecordId,
+        rid:        RecordDigest,
     ) {
         self.mmap.insert(dloc.start, Move { to: new_start, rid });
         self.dmap.remove(&dloc.start);
@@ -429,7 +429,7 @@ impl FileState {
     pub fn moved_to(
         &self,
         dloc:   &DataLocation,
-        rid:    &RecordId,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {
@@ -445,7 +445,7 @@ impl FileState {
     pub fn map_and_remove(
         &mut self,
         dloc:   &DataLocation,
-        rid:    &RecordId,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {

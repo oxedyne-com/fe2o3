@@ -13,7 +13,7 @@ use crate::{
             FileNum,
         },
         state::FileStateMap,
-        stored::RecordId,
+        stored::RecordDigest,
     },
     test::hooks,
 };
@@ -300,7 +300,7 @@ impl<
                             // leaves the entry: it is kept for the record's supersession, which
                             // finding it gone flagged whatever now sits at the old offset as old.
                             if !fstat.no_pending_moves() {
-                                match RecordId::new(kbyts, mloc.meta()) {
+                                match RecordDigest::new(kbyts, mloc.meta()) {
                                     Ok(rid) => {
                                         let dloc = mloc2.file_location().keyval();
                                         if let Some(new_start) = fstat.moved_to(&dloc, &rid) {
@@ -500,7 +500,7 @@ impl<
     fn schedule_deletion(
         &mut self,
         floc:   &FileLocation,
-        rid:    &RecordId,
+        rid:    &RecordDigest,
         from:   &OzoneBotId,
     )
         -> Outcome<()>
@@ -547,8 +547,9 @@ impl<
     /// With records of one size that offset holds another valid record, which the reader returned
     /// until it confirmed key and stamp (2026-09-23): starting collections there failed the first
     /// read of a same-key churn's value after a restart in 5 to 8 runs of 12.  The reader now
-    /// retries such a read, but the trigger stays withdrawn until that is measured.  Switching collection on would hand every file a start-up load had found
-    /// garbage in to the collectors at once, and a read of a file waiting its turn waits with it.
+    /// retries such a read, but the trigger stays withdrawn until that is measured.  Switching
+    /// collection on would hand every file a start-up load had found garbage in to the collectors
+    /// at once, and a read of a file waiting its turn waits with it.
     fn maybe_collect(&mut self, fnum: FileNum) -> Outcome<()> {
         let self_id = self.ozid().clone();
         if self.gc_on {
@@ -655,7 +656,7 @@ impl<
         &mut self,
         floc_new:       &FileLocation,
         ilen:           usize,
-        floc_old_opt:   Option<&(FileLocation, RecordId)>,
+        floc_old_opt:   Option<&(FileLocation, RecordDigest)>,
         from:           &OzoneBotId,
     )
         -> Outcome<()>

@@ -20,7 +20,7 @@ use crate::{
             FileState,
         },
         stored::{
-            RecordId,
+            RecordDigest,
             StoredIndex,
             StoredKey,
             StoredValue,
@@ -794,7 +794,7 @@ impl<
                                 &mut &buf[..],
                                 self.api().schemes().checksummer().clone(),
                             )) {
-                                Some((skey, _, _)) => res!(RecordId::new(
+                                Some((skey, _, _)) => res!(RecordDigest::new(
                                     skey.key().as_bytes(),
                                     skey.meta(),
                                 )),

@@ -16,7 +16,7 @@ use crate::{
     },
     file::{
         floc::FileLocation,
-        stored::RecordId,
+        stored::RecordDigest,
     },
     test::hooks,
 };
@@ -154,7 +154,7 @@ impl<
                             let mut old_flocs = Vec::new();
                             for (key, floc, meta) in buf {
                                 if let Some(old_floc) = self.cache_mut().reanchor(&key, &floc, &meta) {
-                                    match RecordId::new(&key, &meta) {
+                                    match RecordDigest::new(&key, &meta) {
                                         Ok(rid) => old_flocs.push((old_floc, rid)),
                                         // Its move entry stays, and keeps the file from being
                                         // collected again; the location itself is right.

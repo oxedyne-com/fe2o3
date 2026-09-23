@@ -35,7 +35,7 @@ use crate::{
             FileLocation,
             FileNum,
         },
-        stored::RecordId,
+        stored::RecordDigest,
         state::{
             FileState,
             FileStateMap,
@@ -83,12 +83,12 @@ pub enum OzoneMsg<
     MessageCount(usize),
     NewFileStates(FileStateMap),
     ReadFinished(FileNum),
-    ScheduleOld(FileLocation, RecordId, OzoneBotId),
+    ScheduleOld(FileLocation, RecordDigest, OzoneBotId),
     ShardFileSize(usize, usize),
     UpdateData {
         floc_new:       FileLocation,
         ilen:           usize,
-        floc_old_opt:   Option<(FileLocation, RecordId)>, // the record superseded
+        floc_old_opt:   Option<(FileLocation, RecordDigest)>, // the record superseded
         from_id:        OzoneBotId,
     },
     ZoneDir(ZoneInd, ZoneDir),
@@ -175,7 +175,7 @@ pub enum OzoneMsg<
     DumpFileStatesResponse(WorkerInd, FileStateMap),
     Error(Error<ErrTag>),
     Files(ZoneInd, BTreeMap<String, FileEntry>),
-    GcCacheUpdateResponse(Vec<(FileLocation, RecordId)>), // re-anchored, from where
+    GcCacheUpdateResponse(Vec<(FileLocation, RecordDigest)>), // re-anchored, from where
     KeyExists(bool),
     KeyChunkExists(bool, usize), // includes chunk index
     Ok,

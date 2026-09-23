@@ -301,7 +301,7 @@ impl<
         // The retry is bounded, so that a file a supersession burst keeps collecting cannot spin
         // a reader for ever; each attempt holds the reader-count pin (see the `ReadFileRequest`
         // arm in bot_file.rs), so the attempts converge as soon as the file settles.
-        for attempt in 0..constant::MAX_POSTGC_READ_ATTEMPTS {
+        for attempt in 0..constant::MAX_READ_ATTEMPTS {
 
             // <2> Send read request to cbot.
             let resp_r2 = Responder::new(Some(self.ozid()));
@@ -395,12 +395,17 @@ impl<
                     // through disagree on which generation of the file they belong to, or the
                     // offset was taken before a collection moved the record.  The final attempt
                     // never returns bytes it could not confirm, so it fails loud.
-                    if attempt + 1 == constant::MAX_POSTGC_READ_ATTEMPTS {
-                        return Err(err!(e,
-                            "{}: While reading {:?} file {} (postgc {}, attempt {} of {}).",
-                            self.ozid(), FileType::Data, fnum, postgc,
-                            attempt + 1, constant::MAX_POSTGC_READ_ATTEMPTS;
-                            IO, File, Read));
+                    if attempt + 1 == constant::MAX_READ_ATTEMPTS {
+                        let what = fmt!("{}: While reading {:?} file {} (postgc {}, attempt {} of \
+                            {}).", self.ozid(), FileType::Data, fnum, postgc,
+                            attempt + 1, constant::MAX_READ_ATTEMPTS);
+                        // Tagged with its cause where that is a record other than the one named,
+                        // since `Error::tags` reports only the outermost error's tags.
+                        return Err(if e.tags().contains(&ErrTag::Mismatch) {
+                            err!(e, "{}", what; Data, Mismatch)
+                        } else {
+                            err!(e, "{}", what; IO, File, Read)
+                        });
                     }
                     trace!(sync_log::stream(), "{}: Retrying a read of {:?} file {} at {} \
                         (postgc {}, attempt {}): {}", self.ozid(), FileType::Data, fnum,

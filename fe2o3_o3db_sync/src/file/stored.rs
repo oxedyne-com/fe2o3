@@ -33,9 +33,9 @@ use std::{
 /// with records of one size a new offset can equal an old one still in use elsewhere, so a
 /// location matched by offset alone can be taken for another record (2026-09-23).
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-pub struct RecordId(u64);
+pub struct RecordDigest(u64);
 
-impl RecordId {
+impl RecordDigest {
 
     pub fn new<
         const UIDL: usize,

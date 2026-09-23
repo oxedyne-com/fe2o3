@@ -6,7 +6,7 @@ use crate::{
     },
     base::id::OzoneBotId,
     data::core::Key,
-    file::stored::RecordId,
+    file::stored::RecordDigest,
 };
 
 use oxedyne_fe2o3_data::time::Timestamp;
@@ -203,7 +203,7 @@ impl<
         floc:   FileLocation,
         meta:   Meta<UIDL, UID>,
     )
-        -> Outcome<Option<(FileLocation, RecordId)>>
+        -> Outcome<Option<(FileLocation, RecordDigest)>>
     {
         let klen = kbyts.len();
         // 1. Make space in the cache if we are going to exceed the size limit. We could just
@@ -261,7 +261,7 @@ impl<
                         no newer than the cached {:?}, so the offered copy is superseded.",
                         self.ozid.clone(), kbyts, floc, meta.time, mloc.meta.time,
                     );
-                    let rid = res!(RecordId::new(&kbyts, &meta));
+                    let rid = res!(RecordDigest::new(&kbyts, &meta));
                     return Ok(Some((floc, rid)));
                 }
                 // 2.2 It does, insert the new info and return the old floc.
@@ -269,7 +269,7 @@ impl<
                     meta: meta.clone(),
                     floc,
                 };
-                let old = (mloc.file_location().clone(), res!(RecordId::new(&kbyts, mloc.meta())));
+                let old = (mloc.file_location().clone(), res!(RecordDigest::new(&kbyts, mloc.meta())));
                 *mloc = new_mloc;
                 match val {
                     Some(v) => {

@@ -85,10 +85,11 @@ pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins
 pub const MAX_CACHED_FILES:             usize = 200;
 
-// A read handed a post-collection (`postgc`) location may find that location already superseded by
-// a second collection of the same file, and retries with a freshly fetched location.  This bounds
-// those retries so a file a supersession burst keeps collecting cannot spin a reader for ever.
-pub const MAX_POSTGC_READ_ATTEMPTS:     usize = 8;
+// A read whose record is not the one its cache bot named -- a location a collection has moved, or
+// one read through the handle of the file's previous generation -- retries with a freshly fetched
+// location.  This bounds those retries, for every read, so a file a supersession burst keeps
+// collecting cannot spin a reader for ever.
+pub const MAX_READ_ATTEMPTS:            usize = 8;
 
 // Resource management.
 pub const CACHE_JETTISON_FRAC_OF_LIM:   f64 = 0.20;
