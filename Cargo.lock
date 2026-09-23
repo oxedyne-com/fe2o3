@@ -3157,6 +3157,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ring",
  "secrecy",
+ "sha2",
  "sha3",
  "tiny-keccak",
  "wasm-bindgen",
