@@ -52,6 +52,16 @@ use tokio_rustls::rustls::ClientConfig;
 // It bounds each step of a conversation, not the whole of it.
 pub const SMTP_CLIENT_TIMEOUT: Duration = Duration::from_secs(60);
 
+// The reply to the final "." may take this long whatever the step deadline, as RFC 5321
+// §4.5.3.2.6 allows. A sender that gives up while the receiver is still accepting sends the
+// message again on its next try, and the receiver ends up with both.
+const DATA_DONE_TIMEOUT: Duration = Duration::from_secs(600);
+
+// Once the message is accepted, QUIT is a courtesy, and no step of it waits longer than this. A
+// whole step spent on it could run out a caller's own deadline and report an accepted message as
+// failed, which is a false alarm and, where the caller retries, a duplicate.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
 // The message goes over in pieces of this size, each held to the deadline on its own, so a large
 // message on a slow link is bounded by its progress rather than cut off for its size.
 const SEND_PIECE: usize = 64 * 1024;
@@ -71,7 +81,10 @@ pub struct SubmissionConfig {
     // For a provider with two-factor authentication this is an application password, not the
     // password the human types into a browser.
     pub password:   String,
-    pub timeout:    Duration,   // each step: connect, TLS handshake, command, reply
+    // Each step: the connect, the TLS handshake, each command and each reply. The reply to the
+    // message itself may take DATA_DONE_TIMEOUT where that is longer, and QUIT no more than
+    // QUIT_TIMEOUT.
+    pub timeout:    Duration,
     // Dialled instead of resolving `host`. The certificate is still validated against `host`, so
     // pinning the address weakens nothing -- and a server connecting on behalf of a user must vet
     // the address it dials rather than hand the name to the resolver twice.
@@ -367,8 +380,7 @@ impl OutboundClient {
         res!(authenticate(&mut conv, &ehlo, &cfg.user, &cfg.password).await);
         let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        let _ = conv.command("QUIT").await;
-        let _ = conv.reply().await;
+        conv.quit().await;
         Ok(queue_id)
     }
 
@@ -425,10 +437,7 @@ impl OutboundClient {
 
         let queue_id = res!(transact(&mut conv, mail_from, rcpt_to, body).await);
 
-        // QUIT.
-        let _ = conv.command("QUIT").await;
-        let _ = conv.reply().await;
-
+        conv.quit().await;
         Ok(queue_id)
     }
 }
@@ -470,13 +479,32 @@ impl Conversation {
         Ok(Self { stream, peer: self.peer, timeout: self.timeout })
     }
 
-    /// All of one reply, however many lines it runs to, within the deadline.
+    /// All of one reply, however many lines it runs to, within the step deadline.
     async fn reply(&mut self) -> Outcome<SmtpResponse> {
-        match timeout(self.timeout, read_smtp_response(&mut self.stream)).await {
+        let deadline = self.timeout;
+        self.reply_within(deadline).await
+    }
+
+    async fn reply_within(&mut self, deadline: Duration) -> Outcome<SmtpResponse> {
+        match timeout(deadline, read_smtp_response(&mut self.stream)).await {
             Ok(r)  => r,
             Err(_) => Err(err!(
-                "{} sent no reply within {:?}.", self.peer, self.timeout;
+                "{} sent no reply within {:?}.", self.peer, deadline;
                 IO, Network, Read, Timeout)),
+        }
+    }
+
+    /// Ends the conversation once the message is accepted. The message is the receiver's by now,
+    /// so a QUIT that stalls or fails is logged and changes nothing.
+    async fn quit(mut self) {
+        self.timeout = self.timeout.min(QUIT_TIMEOUT);
+        let said = match self.command("QUIT").await {
+            Ok(()) => self.reply().await.map(|_| ()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = said {
+            debug!("{} accepted the message and then did not see QUIT through; the message \
+                stands: {}", self.peer, e);
         }
     }
 
@@ -568,7 +596,10 @@ async fn transact(
     stuffed.extend_from_slice(b".\r\n");
     res!(conv.send(&stuffed, "the message").await);
 
-    let resp = res!(conv.reply().await);
+    // The receiver may be filtering the message before it answers, and giving up on it here is
+    // how it comes to be delivered twice.
+    let done = conv.timeout.max(DATA_DONE_TIMEOUT);
+    let resp = res!(conv.reply_within(done).await);
     if resp.code / 100 != 2 {
         // A 5xx on the message itself -- refused content, a policy block -- will not be cured by resending
         // the same message, so it is tagged permanent for the caller to suppress on.
@@ -831,6 +862,7 @@ mod tests {
         rcpt_code:  u16,            // 250 accepts the recipient
         data_code:  u16,            // 250 accepts the message
         stall:      &'static str,   // the command after which it goes silent; empty for never
+        slow_done:  Duration,       // how long the reply to the final "." is held back
     }
 
     impl Provider {
@@ -845,6 +877,7 @@ mod tests {
                 rcpt_code:   250,
                 data_code:   250,
                 stall:       "",
+                slow_done:   Duration::ZERO,
             }
         }
 
@@ -913,6 +946,7 @@ mod tests {
                 if in_data {
                     if line == "." {
                         in_data = false;
+                        tokio::time::sleep(p.slow_done).await;
                         let _ = w.write_all(fmt!("{} 2.0.0 Ok: queued as STANDIN1\r\n",
                             p.data_code).as_bytes()).await;
                     }
@@ -1775,6 +1809,58 @@ mod tests {
         res!(fails_in_time("delivery",
             c.deliver_to_exchanges(&[tgt], "a@example.com", &[fmt!("bob@example.net")],
                 &body(), STALL)).await);
+        Ok(())
+    }
+
+    // ── The ends of the transaction, which must not be cut short ──
+
+    /// A receiver that filters the message before it answers the final "." is waited for,
+    /// beyond the step deadline. Cut off at the step deadline, as it was from 4f0e16c until
+    /// D-06 audit R1, a receiver that accepted late was sent the message again on every retry.
+    #[tokio::test]
+    async fn test_a_slow_acceptance_is_waited_for_00() -> Outcome<()> {
+        let slow = Provider { slow_done: STALL * 3, ..Provider::exchange() };
+        let (tgt, seen) = res!(exchange_at(slow, 10).await);
+        let c = res!(client().await);
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), STALL).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        req!(1, res!(lines_of(&seen)).iter().filter(|l| *l == ".").count());
+
+        let (addr, _) = res!(provider(
+            Provider { slow_done: STALL * 3, ..Provider::accepting() }).await);
+        let cfg = cfg(addr, Security::Plain).with_timeout(STALL);
+        let qid = res!(c.submit(&cfg, USER, &[fmt!("bob@example.net")], &body()).await);
+        req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
+        Ok(())
+    }
+
+    /// Once the message is accepted, a receiver that goes silent at QUIT cannot turn the send
+    /// into a failure, nor hold it for a whole step: the caller would report an accepted message
+    /// as lost, and send it again.
+    #[tokio::test]
+    async fn test_a_silent_quit_does_not_fail_an_accepted_message_00() -> Outcome<()> {
+        let mute_at_quit = Provider { stall: "QUIT", ..Provider::exchange() };
+        let c = res!(client().await);
+
+        let (tgt, seen) = res!(exchange_at(mute_at_quit, 10).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l.to_uppercase() == "QUIT"),
+            "the client never said QUIT");
+        req!(true, took < WAIT / 2, "delivery waited {:?} on a silent QUIT", took);
+
+        let (addr, _) = res!(provider(
+            Provider { stall: "QUIT", ..Provider::accepting() }).await);
+        let start = std::time::Instant::now();
+        let qid = res!(c.submit(&cfg(addr, Security::Plain), USER,
+            &[fmt!("bob@example.net")], &body()).await);
+        let took = start.elapsed();
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, took < WAIT / 2, "submission waited {:?} on a silent QUIT", took);
         Ok(())
     }
 }
