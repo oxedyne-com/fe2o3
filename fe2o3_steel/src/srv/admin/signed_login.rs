@@ -16,12 +16,13 @@
 //!
 //! The handler owns a small
 //! [`NonceTracker`](oxedyne_fe2o3_net::guard::nonce::NonceTracker) that rejects duplicate
-//! `(signer_id, nonce)` pairs within the freshness window, keyed by
-//! the signer. The tracker evicts expired entries lazily on each
-//! insert, so no background thread is required. The window is
-//! [`SIGNED_LOGIN_FRESHNESS_SECS`] (120 s by default); a command
-//! whose timestamp is outside this window is rejected up front
-//! by [`SignedCommand::verify_fresh`].
+//! `(signer_id, nonce)` pairs, keyed by the signer. A command whose
+//! timestamp is more than [`SIGNED_LOGIN_FRESHNESS_SECS`] (120 s)
+//! either side of now is rejected up front by
+//! [`SignedCommand::verify_fresh_at`], and the tracker holds each pair
+//! until that window after the later of the command's timestamp and
+//! its first showing, which is as long as the freshness check could
+//! still accept it. Both read one clock value.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -129,6 +130,23 @@ pub fn verify_signed_login(
 )
     -> SignedLoginOutcome
 {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    verify_signed_login_at(state, body, now)
+}
+
+/// As [`verify_signed_login`], at `now` in unix seconds. The freshness check
+/// and the replay record read the same clock value, so a pair the tracker has
+/// let go of is one freshness would refuse.
+pub fn verify_signed_login_at(
+    state:  &AdminState,
+    body:   &[u8],
+    now:    u64,
+)
+    -> SignedLoginOutcome
+{
     // Parse the envelope.
     let (dat, _) = match Dat::from_bytes(body) {
         Ok(v) => v,
@@ -153,8 +171,9 @@ pub fn verify_signed_login(
     };
 
     // Verify signature + freshness.
-    if let Err(e) = env.verify_fresh(
+    if let Err(e) = env.verify_fresh_at(
         &admin_key.public_key,
+        now,
         Duration::from_secs(SIGNED_LOGIN_FRESHNESS_SECS),
     ) {
         return SignedLoginOutcome::BadSignature {
@@ -163,10 +182,6 @@ pub fn verify_signed_login(
     }
 
     // Reject replays.
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     {
         let mut tracker = match state.nonce_tracker.lock() {
             Ok(t) => t,
@@ -174,7 +189,7 @@ pub fn verify_signed_login(
                 reason: "nonce tracker poisoned".to_string(),
             },
         };
-        if tracker.record(&env.signer_id, &env.nonce, now).is_err() {
+        if tracker.record(&env.signer_id, &env.nonce, env.timestamp, now).is_err() {
             return SignedLoginOutcome::ReplayedNonce;
         }
     }
@@ -274,11 +289,8 @@ mod tests {
         },
     };
 
-    /// The replay guard is wired into the signed login, wherever the tracker
-    /// lives: one signed envelope logs in once, and its second showing inside
-    /// the window is refused.
-    #[test]
-    fn test_a_replayed_signed_login_is_refused_00() -> Outcome<()> {
+    /// An admin state with one Ed25519 admin key of every scope, and that key.
+    fn ops_state() -> Outcome<(AdminState, SignatureScheme, Vec<u8>)> {
         let key = SignatureScheme::new_ed25519();
         let public = match res!(key.get_public_key()) {
             Some(pk) => pk.to_vec(),
@@ -302,6 +314,15 @@ mod tests {
             }],
             None,
         ));
+        Ok((state, key, public))
+    }
+
+    /// The replay guard is wired into the signed login, wherever the tracker
+    /// lives: one signed envelope logs in once, and its second showing inside
+    /// the window is refused.
+    #[test]
+    fn test_a_replayed_signed_login_is_refused_00() -> Outcome<()> {
+        let (state, key, public) = res!(ops_state());
         let env = res!(SignedCommand::sign(public, CMD_ADMIN_LOGIN, Dat::Empty, &key));
         let body = res!(res!(env.to_dat()).as_bytes());
         match verify_signed_login(&state, &body) {
@@ -311,6 +332,31 @@ mod tests {
         match verify_signed_login(&state, &body) {
             SignedLoginOutcome::ReplayedNonce => (),
             other => return Err(err!("The same signed login shown twice earned {:?}.", other; Test)),
+        }
+        Ok(())
+    }
+
+    /// An envelope stamped 110 s ahead is fresh until 230 s after it is first
+    /// shown, so the tracker must hold its nonce that long. Shown at `t` and
+    /// again at `t + 121`, the second showing is a replay.
+    #[test]
+    fn test_a_future_stamped_signed_login_is_not_replayed_00() -> Outcome<()> {
+        let (state, key, public) = res!(ops_state());
+        let t = 1_800_000_000;
+        let env = res!(SignedCommand::sign_with(
+            public, CMD_ADMIN_LOGIN.to_string(), Dat::Empty, &key, t + 110, [7u8; 32]));
+        let body = res!(res!(env.to_dat()).as_bytes());
+        match verify_signed_login_at(&state, &body, t) {
+            SignedLoginOutcome::Ok(_) => (),
+            other => return Err(err!("A signed login stamped 110 s ahead earned {:?}.", other; Test)),
+        }
+        match verify_signed_login_at(&state, &body, t + 121) {
+            SignedLoginOutcome::ReplayedNonce => (),
+            other => return Err(err!("Its replay 121 s later earned {:?}.", other; Test)),
+        }
+        match verify_signed_login_at(&state, &body, t + 231) {
+            SignedLoginOutcome::BadSignature { .. } => (),
+            other => return Err(err!("Its replay once stale earned {:?}.", other; Test)),
         }
         Ok(())
     }

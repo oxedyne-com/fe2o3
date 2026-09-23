@@ -205,10 +205,12 @@ impl AdminState {
         Rand::fill_u8(&mut session_key);
         let session_enc = res!(
             EncryptionScheme::new_aes_256_gcm_with_key(&session_key));
-        // The replay-window matches the signed-login freshness
-        // window -- an envelope older than the window would fail
-        // the verify_fresh check anyway, so there is no point
-        // tracking nonces past that horizon.
+        // The replay window is the signed-login freshness window. The
+        // tracker holds each nonce until that window after the later
+        // of the envelope's stamp and its first showing: an envelope
+        // stamped ahead of the clock stays fresh until its stamp plus
+        // the window, so a window from the first showing alone would
+        // let it replay.
         let tracker = NonceTracker::new(Duration::from_secs(
             crate::srv::admin::signed_login::SIGNED_LOGIN_FRESHNESS_SECS,
         ));
