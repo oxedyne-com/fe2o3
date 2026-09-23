@@ -32,8 +32,6 @@ use oxedyne_fe2o3_hash::{
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     O3db,
-    base::constant,
-    comm::msg::OzoneMsg,
     data::core::RestSchemesInput,
     test::setup::{
         self,
@@ -90,12 +88,9 @@ fn run() -> Outcome<()> {
 
         let user = Default::default();
         let resp = res!(db.api().store(the_key(), the_value(), user));
-        for _ in 0..2 {
-            match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-                OzoneMsg::Error(e) => return Err(err!(e,
-                    "The database refused the write this test is built on."; Test, IO)),
-                _ => {},
-            }
+        if let Err(e) = resp.recv_store_ack() {
+            return Err(err!(e,
+                "The database refused the write this test is built on."; Test, IO));
         }
         match res!(db.api().get_wait(&the_key(), None)) {
             Some((v, _meta)) => req!(v, the_value(),

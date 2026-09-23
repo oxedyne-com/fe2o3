@@ -52,21 +52,12 @@ pub fn simple<
         schms2,
         resp.clone(),
     ));
-    match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) => if n != 1 {
-            return Err(err!("There should only be one chunk."; Test, Size));
-        },
-        msg => return Err(err!(
-            "Unrecognised response: {:?}", msg;
-            Test, Channel, Read, Unexpected)),
+    let (exists, n) = res!(resp.recv_store_ack());
+    if n != 1 {
+        return Err(err!("There should only be one chunk."; Test, Size));
     }
-    match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::KeyExists(b) => if b == true {
-            return Err(err!("This key should not exist."; Test, Unexpected));
-        },
-        msg => return Err(err!(
-            "Unrecognised response: {:?}", msg;
-            Test, Channel, Read, Unexpected)),
+    if exists {
+        return Err(err!("This key should not exist."; Test, Unexpected));
     }
 
     thread::sleep(Duration::from_secs(1));
@@ -80,23 +71,14 @@ pub fn simple<
         user,
         schms2,
     ));
-    match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) => if n != 1 {
-            return Err(err!("There should only be one chunk."; Test, Size));
-        },
-        msg => return Err(err!(
-            "Unrecognised response: {:?}", msg;
-            Test, Channel, Read, Unexpected)),
+    let (exists, n) = res!(resp.recv_store_ack());
+    if n != 1 {
+        return Err(err!("There should only be one chunk."; Test, Size));
     }
-    match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::KeyExists(b) => if b == false {
-            return Err(err!(
-                "This key should exist.";
-                Test, Data, Missing));
-        },
-        msg => return Err(err!(
-            "Unrecognised response: {:?}", msg;
-            Test, Channel, Read, Unexpected)),
+    if !exists {
+        return Err(err!(
+            "This key should exist.";
+            Test, Data, Missing));
     }
 
     // Now retrieve it.
@@ -237,8 +219,12 @@ pub fn store_chunked_data<
         user,
         Some(&schms2),
     ));
-    let (_, msgs) = res!(resp.recv_number(num_chunks, constant::USER_REQUEST_WAIT));
-    for msg in msgs {
+    let acks = res!(resp.recv_write_acks(
+        num_chunks,
+        constant::USER_REQUEST_TIMEOUT,
+        constant::DURABILITY_TIMEOUT,
+    ));
+    for msg in acks {
         match msg {
             OzoneMsg::KeyChunkExists(b, 0) => {
                 if b != false {
@@ -380,7 +366,7 @@ pub fn store<
         vs[n - 1].clone(),
         user,
         schms2,
-    )).recv_timeout(constant::USER_REQUEST_TIMEOUT));
+    )).recv_store_ack());
 
     let elapsed = start.elapsed().as_secs_f64();
     Ok(stopwatch(elapsed, n, byts))

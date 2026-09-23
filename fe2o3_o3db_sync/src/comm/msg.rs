@@ -91,8 +91,8 @@ pub enum OzoneMsg<
         from_id:        OzoneBotId,
     },
     ZoneDir(ZoneInd, ZoneDir),
-    ZoneInitTrigger,
-    ZoneInit(ZoneDir, ZoneConfig),
+    ZoneInitTrigger(Responder<UIDL, UID, ENC, KH>), // sup -> cfg, each zone answers when ready
+    ZoneInit(ZoneDir, ZoneConfig, Responder<UIDL, UID, ENC, KH>),
     ZoneState(usize, ZoneState),
     // Command
     GcControl(GcControl, Responder<UIDL, UID, ENC, KH>), // sup -> gbot, control gc activation
@@ -183,6 +183,7 @@ pub enum OzoneMsg<
     //UserKeys(Vec<(u128, Dat)>),
     UseLiveFile(FileNum),
     Value(Value<UIDL, UID>),
+    Written, // a write's record is appended; its durable answer follows
     ReadResult(ReadResult<UIDL, UID>),
     // Wrap
     ProcessGcBuffer(Box<OzoneMsg<UIDL, UID, ENC, KH>>),

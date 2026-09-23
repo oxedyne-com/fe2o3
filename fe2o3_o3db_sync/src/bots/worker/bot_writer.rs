@@ -3,7 +3,14 @@ use crate::{
     base::constant,
     bots::{
         base::bot_deps::*,
-        worker::worker_deps::*,
+        worker::{
+            syncer::{
+                Handed,
+                SyncPolicy,
+                Syncer,
+            },
+            worker_deps::*,
+        },
     },
     file::{
         core::FileType,
@@ -26,7 +33,6 @@ use std::{
         Write,
     },
     sync::Arc,
-    time::Instant,
 };
 
 /// Each `WriterBot` in a zone has its own `LivePair`.
@@ -55,12 +61,7 @@ pub struct WriterBot<
     active:     bool,
     inited:     bool,
     lpair:      LivePair,
-    // Durability barrier counters -- track how many writes have gone
-    // through since the last fsync and when that fsync happened, so
-    // the group-commit and interval policies can make a local decision
-    // without touching shared state.
-    writes_since_sync:  u32,
-    last_sync_at:       Option<Instant>,
+    syncer:     Option<Syncer<UIDL, UID, ENC, KH>>, // makes each record durable, then releases it
 }
 
 impl<
@@ -106,6 +107,16 @@ impl<
         sync_log::set_stream(self.log_stream_id());
 
         if self.no_init() { return; }
+        match Syncer::start(self.label(), self.log_stream_id()) {
+            Ok(syncer) => self.syncer = Some(syncer),
+            Err(e) => {
+                // A writer that can append but never confirm is worse than none.
+                self.error(err!(e,
+                    "{}: The durability barrier thread could not be started.", self.ozid();
+                    Thread, Init));
+                return;
+            },
+        }
         self.now_listening();
         loop {
             if self.wind().b() < self.cfg().num_bots_per_zone((&self).wtyp()) {
@@ -114,6 +125,12 @@ impl<
                 // This bot is to be terminated. Forward incoming messages to the remaining bots of
                 // this type.
             }
+        }
+        // Everything written is released, and made durable where the policy owes it, before this
+        // bot ends, so a database closed after a write has that write on disk.
+        if let Some(mut syncer) = self.syncer.take() {
+            let result = syncer.finish();
+            self.result(&result);
         }
     }
 
@@ -153,7 +170,8 @@ impl<
                             cbpind,
                             resp: resp_w1,
                         } => {
-                            let result = self.write(
+                            let resp = resp_w1.clone();
+                            if let Err(e) = self.write(
                                 kstored,
                                 vstored,
                                 klen_cache,
@@ -161,8 +179,12 @@ impl<
                                 meta,
                                 cbpind,
                                 resp_w1,
-                            );
-                            self.result(&result);
+                            ) {
+                                // The caller is waiting on this answer.  Only logged, a failure
+                                // here reached it as a responder timeout that named no cause.
+                                self.error(e.clone());
+                                self.respond(Err(e), &resp);
+                            }
                         }
                         //OzoneMsg::Delete(kv, resp_w1) => {
                         //    let result = self.write(kv, resp_w1);
@@ -206,11 +228,10 @@ impl<
             chan_in:    args.chan_in,
             api:        args.api,
             // State
-            active:             false,
-            inited:             false,
-            lpair:              LivePair::default(),
-            writes_since_sync:  0,
-            last_sync_at:       None,
+            active:     false,
+            inited:     false,
+            lpair:      LivePair::default(),
+            syncer:     None,
         }
     }
 
@@ -284,20 +305,20 @@ impl<
         // Append key and location to the current index file.
         res!(self.write_to_file(FileType::Index, vec![&kbyts[..], &istored[..]]));
 
-        // Honour the configured durability barrier: force the data and
-        // index files to stable storage before a cbot (or any other
-        // observer) sees the newly inserted key. The sync policy is
-        // evaluated once per (kbyts, vstored) write, so caches, index
-        // files and the acknowledgement to the caller all live on the
-        // same side of the barrier.
-        res!(self.maybe_sync_files());
+        // [11] The record is in the live pair, so say so before anything waits on the disk.  The
+        //      caller holds this answer to the short deadline, which then measures whether the
+        //      writer is alive rather than how busy the machine's disk happens to be.
+        self.respond(Ok(OzoneMsg::Written), &resp_w1);
 
-        // [11] Send the data to a cbot.
+        // [12] The syncer releases the record to a cbot once the barrier the policy asks for is
+        //      behind it, so no observer sees a key before it is as durable as configured.  The
+        //      cbot then makes it readable and gives the caller its final answer.
         let cbots = res!(self.cbots());
-        let bot = res!(cbots.get_bot(cbpind));
+        let cbot = res!(cbots.get_bot(cbpind)).clone();
         kbyts.drain(..constant::CACHE_HASH_BYTES); // remove data pathway hash used to identify cbot
         kbyts.truncate(klen_cache); // remove metadata
-        res!(bot.send(OzoneMsg::Insert(
+        let resp = resp_w1.clone();
+        let insert = OzoneMsg::Insert(
             kbyts,
             Some(vstored),
             cind,
@@ -305,15 +326,45 @@ impl<
             istored.len(),
             meta,
             resp_w1, // The cbot responds to the caller.
-        )));
+        );
+        let policy = SyncPolicy::of(self.cfg());
+        res!(res!(self.syncer()).hand(Handed::Record { cbot, insert, resp, policy }));
         
+        Ok(())
+    }
+
+    fn syncer(&self) -> Outcome<&Syncer<UIDL, UID, ENC, KH>> {
+        match &self.syncer {
+            Some(syncer) => Ok(syncer),
+            None => Err(err!(
+                "{}: This writer has no durability barrier thread.", self.ozid();
+                Bug, Missing)),
+        }
+    }
+
+    /// Hands the syncer the live pair every record from here on is appended to.  It syncs through
+    /// handles of its own, which reach the same open files.
+    fn hand_pair(&self) -> Outcome<()> {
+        let dat = match &self.lpair.dat.file {
+            Some(file) => res!(file.try_clone()),
+            None => return Err(err!(
+                "{}: The live data file {:?} is not open.", self.ozid(), self.lpair.dat.path;
+                Bug, Missing)),
+        };
+        let ind = match &self.lpair.ind.file {
+            Some(file) => res!(file.try_clone()),
+            None => return Err(err!(
+                "{}: The live index file {:?} is not open.", self.ozid(), self.lpair.ind.path;
+                Bug, Missing)),
+        };
+        res!(res!(self.syncer()).hand(Handed::Pair(dat, ind)));
         Ok(())
     }
 
     fn open_live_pair(&mut self) -> Outcome<()> {
         self.lpair.close();
         self.lpair = res!(self.zdir().open_live(self.lpair.fnum));
-        Ok(())
+        self.hand_pair()
     }
 
     fn new_live_pair(&mut self) -> Outcome<(FileNum, u64)> {
@@ -347,6 +398,7 @@ impl<
         res!(self.sync_sealed_pair());
         self.lpair.close();
         self.lpair = res!(self.zdir().open_live(fnum_new));
+        res!(self.hand_pair());
         let start = self.lpair().dat.size;
 
         // [5] Tell the fbot for the previous live file of the change and wait for the response.
@@ -534,59 +586,6 @@ impl<
                     IO, File, Write));
             }
         }
-        Ok(())
-    }
-
-    fn maybe_sync_files(&mut self) -> Outcome<()> {
-        let cfg = self.cfg();
-        let sync_on_write = cfg.sync_on_write;
-        let sync_every_n  = cfg.sync_every_n_writes;
-        let sync_interval = cfg.sync_interval_ms;
-
-        self.writes_since_sync = self.writes_since_sync.saturating_add(1);
-        let now = Instant::now();
-        let mut do_sync = false;
-        if sync_on_write {
-            do_sync = true;
-        } else if sync_every_n > 0 {
-            if self.writes_since_sync >= sync_every_n {
-                do_sync = true;
-            }
-        } else if sync_interval > 0 {
-            match self.last_sync_at {
-                None => do_sync = true,
-                Some(prev) => {
-                    let elapsed_ms = now.duration_since(prev).as_millis() as u64;
-                    if elapsed_ms >= sync_interval {
-                        do_sync = true;
-                    }
-                },
-            }
-        }
-
-        if !do_sync {
-            return Ok(());
-        }
-
-        // Sync the data file.
-        if let Some(file) = self.lpair_mut().dat.file.as_mut() {
-            if let Err(e) = file.sync_data() {
-                return Err(err!(e,
-                    "{}: sync_data on data file failed.", self.ozid();
-                    IO, File, Write));
-            }
-        }
-        // Sync the index file.
-        if let Some(file) = self.lpair_mut().ind.file.as_mut() {
-            if let Err(e) = file.sync_data() {
-                return Err(err!(e,
-                    "{}: sync_data on index file failed.", self.ozid();
-                    IO, File, Write));
-            }
-        }
-
-        self.writes_since_sync = 0;
-        self.last_sync_at = Some(now);
         Ok(())
     }
 

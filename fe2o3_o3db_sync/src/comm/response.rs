@@ -205,6 +205,112 @@ impl<
         }
     }
 
+    /// Waits for the answers to a store dispatched with this responder: the count of records it
+    /// was split into, then each record confirmed written and all of them confirmed durable.
+    /// Returns whether the key already held a value, and the number of records.
+    pub fn recv_store_ack(&self) -> Outcome<(bool, usize)> {
+        // The count is sent before anything is dispatched, so it is waiting already.
+        let n = match res!(self.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+            OzoneMsg::Chunks(n) => n,
+            OzoneMsg::Error(e) => return Err(e),
+            msg => return Err(err!(
+                "Expected an OzoneMsg::Chunks counting the records of a store, received {:?}.", msg;
+                Channel, Unexpected)),
+        };
+        let acks = res!(self.recv_write_acks(
+            n,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        ));
+        let mut exists = false;
+        for ack in acks {
+            match ack {
+                OzoneMsg::KeyExists(b)          => exists = b,
+                OzoneMsg::KeyChunkExists(b, 0)  => exists = b, // the bunch key
+                _ => (),
+            }
+        }
+        Ok((exists, n))
+    }
+
+    /// Waits for the answer to a delete dispatched with this responder, and returns whether the
+    /// key held a value.
+    pub fn recv_delete_ack(&self) -> Outcome<bool> {
+        let acks = res!(self.recv_write_acks(
+            1,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        ));
+        match acks.first() {
+            Some(OzoneMsg::KeyExists(b)) => Ok(*b),
+            msg => Err(err!(
+                "Expected an OzoneMsg::KeyExists answering a delete, received {:?}.", msg;
+                Channel, Unexpected)),
+        }
+    }
+
+    /// Collects the final answers to `n` records written under this responder, both deadlines
+    /// counted from the call.  Each record is first confirmed written, which is the writer's own
+    /// work and so is held to `liveness`, and then confirmed durable and readable, which waits on
+    /// the disk and is held to `durability`.
+    ///
+    /// Expiry of the first says a writer did not answer, so whether its record lands is unknown.
+    /// Expiry of the second says every record is written but not all are confirmed durable, which
+    /// is not a failure: the records are in the files and become durable, and readable, when the
+    /// disk completes them.
+    pub fn recv_write_acks(
+        &self,
+        n:          usize,
+        liveness:   Duration,
+        durability: Duration,
+    )
+        -> Outcome<Vec<OzoneMsg<UIDL, UID, ENC, KH>>>
+    {
+        let chan = match self.channel() {
+            Some(chan) => chan,
+            None => return Err(err!("This responder does not have a channel."; Channel, Missing)),
+        };
+        let begun = Instant::now();
+        let mut written = 0;
+        let mut acks = Vec::with_capacity(n);
+        while acks.len() < n {
+            let deadline = if written < n { liveness } else { durability };
+            let left = deadline.saturating_sub(begun.elapsed());
+            if left.is_zero() {
+                if written < n {
+                    return Err(err!(
+                        "{} of {} records of this write were confirmed written within {:?}, and \
+                        the writer holding the rest has not answered, so whether they land is \
+                        not known.", written, n, liveness;
+                        Channel, Timeout));
+                }
+                return Err(err!(
+                    "All {} records of this write were written, but {} of them were not \
+                    confirmed durable within {:?}.  The write has not failed: its records are in \
+                    the store's files and become durable, and readable, when the disk completes \
+                    them, unless the machine stops first.", n, n - acks.len(), durability;
+                    Write, Timeout));
+            }
+            match chan.recv_timeout(left) {
+                Recv::Empty => (), // Out of time, which the next pass reports.
+                Recv::Result(Err(e)) => return Err(err!(e,
+                    "Could not read from responder channel.";
+                    Channel, Read)),
+                Recv::Result(Ok(msg)) => match msg {
+                    OzoneMsg::Written => written += 1,
+                    OzoneMsg::KeyExists(_) |
+                    OzoneMsg::KeyChunkExists(..) => acks.push(msg),
+                    OzoneMsg::Finish => (),
+                    OzoneMsg::Error(e) => return Err(e),
+                    msg => return Err(err!(
+                        "Expected the answer to a write, received {:?}.", msg;
+                        Channel, Unexpected)),
+                },
+            }
+        }
+        Ok(acks)
+    }
+
     /// Collect replies within a given time.
     pub fn recv_number(
         &self,
@@ -227,8 +333,11 @@ impl<
                         Recv::Result(Err(e)) => return Err(err!(e,
                             "Could not read from responder channel.";
                             Channel, Read)),
-                        Recv::Result(Ok(OzoneMsg::Finish)) => {
-                            continue; // Don't count Finish messages.
+                        // Neither is an answer: `Finish` trails one, and `Written` precedes a
+                        // write's final answer, which is what a caller counting answers wants.
+                        Recv::Result(Ok(OzoneMsg::Finish)) |
+                        Recv::Result(Ok(OzoneMsg::Written)) => {
+                            continue;
                         }
                         Recv::Result(Ok(msg)) => {
                             msgs.push(msg);

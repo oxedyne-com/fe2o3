@@ -12,8 +12,6 @@ use oxedyne_fe2o3_jdat::{
 use std::{
     mem,
     path::PathBuf,
-    thread,
-    time::Duration,
 };
 
 pub fn default_cfg() -> Outcome<OzoneConfig> {
@@ -116,10 +114,9 @@ pub fn start_db<
         }
     }
     test!(sync_log::stream(), "Starting db...");
+    // `start` returns once every zone is ready, so nothing has to be slept off here.
     res!(db.start("test"));
     res!(ok!(db.updated_api()).activate_gc(gc_on));
-
-    thread::sleep(Duration::from_secs(1));
 
     // Ping all bots.
     let (start, msgs) = res!(db.api().ping_bots(constant::USER_REQUEST_WAIT));

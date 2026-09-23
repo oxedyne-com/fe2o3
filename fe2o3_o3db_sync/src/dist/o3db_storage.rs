@@ -13,9 +13,10 @@
 //!   the application-opaque bytes.
 //!
 //! Reads block on the responder channel through the synchronous
-//! [`OzoneApi::get_wait`] wrapper. Writes and deletes block on the
-//! responder for the `Chunks` and `KeyExists` messages the store path
-//! emits, surfacing any error along the way as an [`Outcome`] error.
+//! [`OzoneApi::get_wait`] wrapper. Writes and deletes block on
+//! `Responder::recv_store_ack`, which waits for each record to be
+//! written and then durable, surfacing any error along the way as an
+//! [`Outcome`] error.
 //!
 //! # Performance notes
 //!
@@ -43,11 +44,7 @@ use super::record::{
 use super::storage::Storage;
 
 use crate::O3db;
-use crate::base::{
-	constant,
-	id::usr_kind_id_deleted,
-};
-use crate::comm::msg::OzoneMsg;
+use crate::base::id::usr_kind_id_deleted;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -143,32 +140,15 @@ impl<
 		Ok(RecordId::from_bytes(arr))
 	}
 
-	/// Drains the two-message acknowledgement a successful store emits:
-	/// `Chunks(_)` then `KeyExists(_)`.
+	/// Waits for the store's acknowledgement: its record count, each record written and
+	/// then durable.  Whether the key existed is not needed here.
 	fn drain_store_ack(
 		resp:	&crate::comm::response::Responder<UIDL, UID, ENC, KH>,
 	)
 		-> Outcome<()>
 	{
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::Chunks(_) => {},
-			OzoneMsg::Error(e) => return Err(err!(e,
-				"O3dbStorage: store ack failed at Chunks phase.";
-				IO, Write)),
-			other => return Err(err!(
-				"O3dbStorage: unexpected message at Chunks phase: {:?}.", other;
-				Unexpected, Channel)),
-		}
-		match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-			OzoneMsg::KeyExists(_) => Ok(()),
-			OzoneMsg::Error(e) => Err(err!(e,
-				"O3dbStorage: store ack failed at KeyExists phase.";
-				IO, Write)),
-			other => Err(err!(
-				"O3dbStorage: unexpected message at KeyExists phase: {:?}.",
-				other;
-				Unexpected, Channel)),
-		}
+		res!(resp.recv_store_ack());
+		Ok(())
 	}
 
 	/// Accepts the whole unsigned-bytes family: the store path always writes

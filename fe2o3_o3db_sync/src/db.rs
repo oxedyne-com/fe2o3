@@ -40,7 +40,10 @@ use oxedyne_fe2o3_core::{
     },
     path::NormalPath,
     rand::RanDef,
-    thread::thread_channel,
+    thread::{
+        Sentinel,
+        thread_channel,
+    },
 };
 use oxedyne_fe2o3_jdat::{
     prelude::*,
@@ -66,7 +69,7 @@ use std::{
         RwLock,
     },
     thread,
-    time::Duration,
+    time::Instant,
 };
 
 use crossbeam_utils::sync::WaitGroup;
@@ -364,18 +367,63 @@ impl<
 
         let handle = Handle::new(
             Some(sup_ozid),
-            sentinel,
+            sentinel.clone(),
             Some(self.chans().sup().clone()),
         );
-        
-        thread::sleep(Duration::from_secs(1));
 
-        //// Initialise users.
-        //res!(self.init_users());
+        res!(self.await_ready(&sentinel));
 
         info!(sync_log::stream(), "Database initialisation and activation complete.");
         
         Ok(handle)
+    }
+
+    /// Takes the channels the supervisor hands over and waits for it to say every zone is ready.
+    ///
+    /// This was a one-second sleep, after which the caller read whatever had arrived.  A slower
+    /// start -- a starved machine spawning a few dozen threads -- left this handle with the
+    /// channels it was built with, which no bot reads, and its first request timed out on nothing
+    /// (2026-09-23).  A get issued before a zone had loaded its cache could also find nothing.
+    fn await_ready(&mut self, sentinel: &Sentinel) -> Outcome<()> {
+        let begun = Instant::now();
+        loop {
+            match self.chan_inbox.recv_timeout(constant::CHECK_INTERVAL) {
+                Recv::Empty => {
+                    if sentinel.is_finished() {
+                        return Err(err!(
+                            "{}: The supervisor stopped before the database was ready.",
+                            self.ozid();
+                            Init, Thread));
+                    }
+                    if begun.elapsed() > constant::CONTROL_REQUEST_TIMEOUT {
+                        return Err(err!(
+                            "{}: The database was not ready within {:?} of starting.  A zone \
+                            surveying a very large store can take long; this deadline is \
+                            constant::CONTROL_REQUEST_TIMEOUT.", self.ozid(),
+                            constant::CONTROL_REQUEST_TIMEOUT;
+                            Init, Timeout));
+                    }
+                },
+                Recv::Result(Err(e)) => return Err(err!(e,
+                    "{}: While waiting for the supervisor to start the database.", self.ozid();
+                    Init, Channel, Read)),
+                Recv::Result(Ok(msg)) => match msg {
+                    OzoneMsg::Channels(chans, resp) => {
+                        self.api.chans = chans;
+                        res!(resp.send(OzoneMsg::ChannelsReceived(self.api.ozid.clone())));
+                    },
+                    OzoneMsg::Config(cfg) => self.api.cfg = cfg,
+                    OzoneMsg::Ready => return Ok(()),
+                    OzoneMsg::Error(e) => return Err(err!(e,
+                        "{}: The database did not start.", self.ozid();
+                        Init)),
+                    msg => return Err(err!(
+                        "{}: Unexpected message while the database was starting: {:?}.",
+                        self.ozid(), msg;
+                        Init, Channel, Unexpected)),
+                },
+            }
+        }
     }
 
     /// Find all data and index files of the existing database.

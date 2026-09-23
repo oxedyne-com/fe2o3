@@ -42,6 +42,15 @@ impl OzoneConfig {
                 CONTROL_REQUEST_TIMEOUT, USER_REQUEST_TIMEOUT;
             Invalid, Input));
         }
+        if DURABILITY_TIMEOUT <= USER_REQUEST_TIMEOUT || DURABILITY_TIMEOUT > CONTROL_REQUEST_TIMEOUT {
+            return Err(err!(
+                "The durability timeout, {:?}, must exceed the user request timeout, {:?}, and \
+                not exceed the control operation timeout, {:?}.  It waits on the disk, which \
+                answers more slowly than any bot, and it is a request's deadline, which a \
+                start-up control operation outlasts.",
+                DURABILITY_TIMEOUT, USER_REQUEST_TIMEOUT, CONTROL_REQUEST_TIMEOUT;
+            Invalid, Input));
+        }
         Ok(())
     }
 }
@@ -115,6 +124,14 @@ pub const BOT_REQUEST_WAIT:                     Wait = Wait {
     max_wait:       BOT_REQUEST_TIMEOUT,
     check_interval: CHECK_INTERVAL,
 };
+// A write is answered twice.  `OzoneMsg::Written` says its record is appended, which is the
+// writer's own work and is held to USER_REQUEST_TIMEOUT like any request.  The final answer says
+// the record is durable under the store's sync policy and readable, and that waits on the disk:
+// an fsync queued behind everything else a busy machine is writing took over eleven seconds when
+// measured (2026-09-23), and a six-second deadline then reported as failed a write that went on
+// to land.  So this deadline marks a disk that has stopped rather than one that is busy, and what
+// its expiry reports is a write not confirmed durable, never a write that failed.
+pub const DURABILITY_TIMEOUT:                   Duration = Duration::from_secs(120);
 // A control operation -- activating garbage collection, rolling every writer onto a fresh live
 // file -- is issued once, by whoever owns the database, and usually while it is still starting.
 // Its message queues behind whatever the zone bots are already doing, and the initial survey of
