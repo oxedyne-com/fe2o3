@@ -3193,6 +3193,7 @@ name = "oxedyne_fe2o3_geom"
 version = "0.5.0"
 dependencies = [
  "oxedyne_fe2o3_core",
+ "oxedyne_fe2o3_jdat",
 ]
 
 [[package]]
