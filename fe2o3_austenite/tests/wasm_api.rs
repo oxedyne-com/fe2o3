@@ -55,10 +55,10 @@ fn compile_pdf(files: &[(&str, &[u8])]) -> Outcome<Compiled> {
 	let main	= PathBuf::from(MAIN);
 	let fonts	= Arc::new(res!(fonts::libertinus()));
 	let run = || -> Outcome<(Report, Vec<u8>)> {
-		let (assembled, refusals, skip)	= res!(compile::assemble(&main, || Ok(fonts.clone())));
-		let empty						= assembled.blocks.is_empty();
-		let mut rendered				= res!(compile::author_and_run(assembled));
-		let report	= Report::new(rendered.out.pages.len(), &refusals, skip, empty);
+		let assembled		= res!(compile::assemble(&main, || Ok(fonts.clone())));
+		let empty			= assembled.blocks.is_empty();
+		let mut rendered	= res!(compile::author_and_run(assembled));
+		let report	= Report::new(rendered.out.pages.len(), &rendered.refusals, empty);
 		let pdf		= res!(compile::emit_pdf(&mut rendered.out, &rendered.heads, &rendered.doc_info));
 		Ok((report, pdf))
 	};
@@ -337,6 +337,34 @@ fn a_set_document_in_a_container_is_refused() -> Outcome<()> {
 	assert_eq!((d.severity, d.kind, d.file.as_str()), (Severity::Warning, DiagnosticKind::Unsupported, MAIN), "{}", d);
 	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
 	assert!(!pdf.windows(5).any(|w| w == b"Boxed"), "no Info entry is written from inside the box");
+	Ok(())
+}
+
+/// A refused show rule is placed in the file it is written in and at its own line, on the lone path and the
+/// book path alike, and it is on the terse line: the rule engine records its sites with their file, though
+/// it runs after the reader's own sites were tagged.
+#[test]
+fn a_refused_show_rule_is_placed_in_its_own_file_and_line() -> Outcome<()> {
+	let _turn = turn();
+	let rule = "#show heading: set text(fill: rgb(\"#ff0000\"))";
+	let lone = fmt!("= H\n\n{}\n\nBody.\n", rule);
+	let root = fmt!("= H\n\n{}\n\n#include \"a.typ\"\n", rule);
+	let chapter = "== A\n\nText.\n";
+	for files in [vec![(MAIN, lone.as_bytes())], vec![(MAIN, root.as_bytes()), ("/proj/a.typ", chapter.as_bytes())]] {
+		let (report, _) = res!(done(res!(compile_pdf(&files))));
+		let d = match report.diagnostics.iter().find(|d| d.message.contains("#show heading")) {
+			Some(d)	=> d.clone(),
+			None	=> return Err(err!("the refused rule must be reported: {:?}", report.diagnostics; Test)),
+		};
+		assert_eq!((d.file.as_str(), d.line, d.col), (MAIN, 3, 1), "{}", d);
+		assert!(report.skipped.as_deref().map_or(false, |s| s.contains("#show heading")),
+			"the terse line names it: {:?}", report.skipped);
+		let head = match report.strict_failure(Path::new(MAIN)) {
+			Some(h)	=> h,
+			None	=> return Err(err!("strict must refuse a refused rule"; Test)),
+		};
+		assert!(fmt!("{}", head).starts_with("/proj/main.typ:3:1: strict:"), "{}", head);
+	}
 	Ok(())
 }
 

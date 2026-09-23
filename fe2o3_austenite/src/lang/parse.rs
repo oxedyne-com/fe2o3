@@ -166,6 +166,13 @@ impl Refusals {
 		self.sites.push(Refusal { name: name.to_string(), span, class: RefusalClass::MissingFile, file: String::new() });
 	}
 
+	/// Records a refused construct already known to stand in `file`, for a collector recording into a table
+	/// that holds other files' sites, so the site never waits for a later tagging to say where it is.
+	pub(crate) fn record_in(&mut self, file: &str, name: &str, span: Span) {
+		let class = RefusalClass::classify(name);
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: file.to_string() });
+	}
+
 	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
 	/// the parser) that wants a known `Refusals` without driving a real parse to produce one.
 	pub fn from_sites(sites: Vec<Refusal>) -> Self {
@@ -220,6 +227,18 @@ impl Refusals {
 	/// just-parsed chapter's refusals into the book's running total has no further use for its own copy.
 	pub fn merge(&mut self, other: Refusals) {
 		self.sites.extend(other.sites);
+	}
+
+	/// The terse line -- `skipped: #show ×2, #columns ×1` -- from the per-name counts, ordered as
+	/// [`Refusals::entries`] orders them, or `None` when nothing was refused.
+	pub fn skip_line(&self) -> Option<String> {
+		if self.sites.is_empty() {
+			return None;
+		}
+		let parts: Vec<String> = self.entries().into_iter()
+			.map(|(n, c)| fmt!("{} ×{}", n, c))
+			.collect();
+		Some(fmt!("skipped: {}", parts.join(", ")))
 	}
 
 	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- or `None` when

@@ -2379,12 +2379,41 @@ fn resolve_avail(block: Block, avail: Sp) -> Block {
 
 /// The default rule set followed by a source's own rules, ready to apply. The default set uses `theme`
 /// (the document theme in force) to re-assert each heading level's own size; the source's rules are
-/// appended after, so an authored rule overrides the default for the elements it matches.
-pub fn rule_set_for(theme: &Theme, src: &str, refusals: &mut Refusals) -> Vec<Rule> {
-	let mut rules = default_rule_set(theme);
-	let own = collect_from_source(src, rules.len(), refusals);
+/// appended after, so an authored rule overrides the default for the elements it matches. A refused rule
+/// is recorded against `file`, the path `src` was read from.
+pub fn rule_set_for(theme: &Theme, src: &str, file: &str, refusals: &mut Refusals) -> Vec<Rule> {
+	let mut rules	= default_rule_set(theme);
+	let mut own_sites	= Refusals::default();
+	let own			= collect_from_source(src, rules.len(), &mut own_sites);
+	own_sites.tag_file(file);
+	refusals.merge(own_sites);
 	rules.extend(own);
 	rules
+}
+
+/// Each heading face a rule names, with the rule's own span: a `#show heading: set text(font: ...)` wraps
+/// its headings in that face, so a note about the face belongs at the rule.
+pub fn heading_face_sites(rules: &[Rule]) -> Vec<(String, Span)> {
+	let mut out: Vec<(String, Span)> = Vec::new();
+	for rule in rules {
+		let patch = match &rule.transform {
+			Transform::SetFields(p)	=> p,
+			_						=> continue,
+		};
+		let mut names: Vec<&String> = Vec::new();
+		if let Some(Some(n)) = &patch.heading.face_all {
+			names.push(n);
+		}
+		for level in &patch.heading.levels {
+			if let Some(Some(n)) = &level.face {
+				names.push(n);
+			}
+		}
+		for n in names {
+			out.push((n.clone(), rule.span));
+		}
+	}
+	out
 }
 
 #[cfg(test)]
@@ -2508,7 +2537,7 @@ mod tests {
 		// heading's keep box -- so a body line set right beside the resized heading is measured too.
 		let render = |base: &Theme, rules_src: &str| -> Outcome<Vec<(i32, Option<i32>)>> {
 			let mut refusals	= Refusals::default();
-			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
 			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
@@ -2606,7 +2635,7 @@ mod tests {
 		// the following paragraph's first line, pulled into the keep box.
 		let keep_hboxes = |base: &Theme, rules_src: &str| -> Outcome<Vec<i32>> {
 			let mut refusals	= Refusals::default();
-			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
 			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));

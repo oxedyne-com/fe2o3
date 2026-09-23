@@ -384,14 +384,14 @@ impl DaimondTypst {
 			Some(f)	=> f.clone(),
 			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
 		};
-		let (assembled, refusals, skip)	= res!(compile::assemble(main_path, || Ok(fonts.clone())));
-		let empty = assembled.blocks.is_empty();
+		let assembled	= res!(compile::assemble(main_path, || Ok(fonts.clone())));
+		let empty		= assembled.blocks.is_empty();
 		let rendered = if use_memo {
 			res!(compile::author_and_run_memo(assembled, Some(&mut self.memo)))
 		} else {
 			res!(compile::author_and_run(assembled))
 		};
-		let report = Report::new(rendered.out.pages.len(), &refusals, skip, empty);
+		let report = Report::new(rendered.out.pages.len(), &rendered.refusals, empty);
 
 		// Keep the resolved ledger and heading table for a later section-rail query.
 		self.last_ledger	= Some(rendered.out.ledger.clone());
@@ -407,7 +407,7 @@ impl DaimondTypst {
 				return Ok(Ran::Refused(head, report));
 			}
 		}
-		let compile::Rendered { mut out, heads, geom: _, doc_info } = rendered;
+		let compile::Rendered { mut out, heads, geom: _, doc_info, refusals: _ } = rendered;
 		let product = match mode {
 			Mode::Svg => {
 				let mut pages: Vec<String> = Vec::with_capacity(out.pages.len());

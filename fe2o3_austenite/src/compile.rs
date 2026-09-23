@@ -67,32 +67,29 @@ pub struct Assembled {
 	pub front:		Option<FrontMatter>,
 	pub bib:		Option<Bibliography>,
 	pub doc_info:	DocInfo,	// the Info dictionary, from each file's own top-level `#set document(...)`
+	pub refusals:	lang::Refusals,	// every site not set as written, each already carrying its file
 }
 
 /// The resolved output of a compile: the decorated, mirror-shifted pages with their ledger and pass count,
 /// the heading table (for an outline or a section-rail query), the geometry and the Info dictionary the
-/// emit stage reads.
+/// emit stage reads, and every site of the compile not set as written.
 pub struct Rendered {
 	pub out:		CompileOutput,
 	pub heads:		Vec<Heading>,
 	pub geom:		PageGeometry,
 	pub doc_info:	DocInfo,
+	pub refusals:	lang::Refusals,
 }
 
 /// Assembles the source at `main_path`: a book or doc root through [`book::load`], a lone file through the
-/// reader with the lone-file styling, furniture, glossary and bibliography steps. Returns the document
-/// pieces, the full refusal table (every refused site, for the binary's `--explain`) and the terse skip
-/// line (`skipped: #show ×2, ...`, or `None` when the reader set everything it met).
+/// reader with the lone-file styling, furniture, glossary and bibliography steps. The result carries the
+/// document pieces and the refusal table, every site assembly did not set as written, each recorded with
+/// the file it stands in; authoring adds its own sites to the same table ([`author_and_run`]).
 ///
 /// `lone_fonts` supplies the reading set for the lone-file path only -- the embedded Libertinus -- and is
 /// not called on the book path, which carries its own fonts. It is a thunk so the native binary builds the
 /// set only when it is a lone file, while the wasm surface hands back its once-built cached instance.
-///
-/// The skip line and the refusal table are not the same object on the lone path: the line is snapshotted
-/// from the block-reading refusals alone, before the styling rules and the missing-face check append their
-/// own sites, so a lone compile's terse line matches what it always printed while `--explain` still walks
-/// every site. On the book path the two coincide, both taken after the whole assembly.
-pub fn assemble<F>(main_path: &Path, lone_fonts: F) -> Outcome<(Assembled, lang::Refusals, Option<String>)>
+pub fn assemble<F>(main_path: &Path, lone_fonts: F) -> Outcome<Assembled>
 where
 	F: FnOnce() -> Outcome<Arc<FontSet>>,
 {
@@ -114,7 +111,6 @@ where
 		// table into one, so a whole-book or whole-doc compile reports its skipped constructs on the same
 		// terse line the lone-file path prints, and `--explain` walks every chapter's sites.
 		let spec		= res!(book::load(main_path));
-		let skip_line	= terse_skip_line(&spec.skips);
 		// A root `#set text(font: ...)` sets the whole document in that family's reading set, in place of the
 		// idiom's own; a document naming no family keeps its set untouched, byte for byte.
 		let fonts = spec.faces.body_set(&spec.style.text.faces.body).unwrap_or(spec.fonts);
@@ -129,8 +125,9 @@ where
 			bib:	spec.bib,
 			// Folded during assembly, from the root and every file it includes, where each stands.
 			doc_info:	spec.doc_info,
+			refusals:	spec.skips,
 		};
-		return Ok((assembled, spec.skips, skip_line));
+		return Ok(assembled);
 	}
 
 	// A lone chapter installs the shared `term-dict` from a `terms.typ` beside or above it, so its
@@ -153,10 +150,9 @@ where
 	// even with no `#include` present, which the lone path by definition has none of.
 	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
 	let binds	= scope.bindings();
-	let (mut blocks, mut skips)	= res!(lang::to_blocks_with_templates(&src, binds));
-	skips.tag_file(&main_path.display().to_string());
-	let skip_line	= terse_skip_line(&skips);
-	let mut refusals	= skips;
+	let main_file = main_path.display().to_string();
+	let (mut blocks, mut refusals)	= res!(lang::to_blocks_with_templates(&src, binds));
+	refusals.tag_file(&main_file);
 	// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
 	book::resolve_glossary(&mut blocks, false);
 	// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile sets
@@ -167,7 +163,7 @@ where
 	// before its faces are resolved -- so a rule-named face reaches the resolver. The default rules re-assert
 	// the theme's own heading sizes (byte-neutral); the file's own `#show <selector>: <transform>` rules are
 	// appended, refused where a transform reads the page or an unread field.
-	let rules = lang::rules::rule_set_for(&style, &src, &mut refusals);
+	let rules = lang::rules::rule_set_for(&style, &src, &main_file, &mut refusals);
 	// A lone file sets on A4 (its geometry below), so the placement width a template resolves against is A4's.
 	lang::rules::apply_rules(&mut blocks, &rules, PageGeometry::a4().content_width());
 	// A lone file may name a heading font in its own `#show: doc.with(...)`, or a rule/scope inside its own
@@ -183,7 +179,8 @@ where
 	let (bodies, headings) = book::named_families(&style, &blocks);
 	let font_dir = book::lone_font_dir(main_path.parent().unwrap_or_else(|| Path::new(".")));
 	res!(faces.require(&font_dir, &bodies, &headings));
-	book::note_missing_face_variants(&style, &blocks, &faces, &mut refusals);
+	let sites = book::FaceSites::new(&main_file, &src, &rules, Vec::new());
+	book::note_missing_face_variants(&style, &blocks, &faces, &sites, &mut refusals);
 	let fonts = faces.body_set(&style.text.faces.body).unwrap_or(fonts);
 	let assembled = Assembled {
 		blocks,
@@ -195,8 +192,9 @@ where
 		front:	None,
 		bib,
 		doc_info:	crate::lang::set::document_info(&src),
+		refusals,
 	};
-	Ok((assembled, refusals, skip_line))
+	Ok(assembled)
 }
 
 /// Authors the assembled blocks, runs the two-pass driver to its fixed point, decorates each page with a
@@ -240,7 +238,7 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 		}
 	}
 
-	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info })
+	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info, refusals: a.refusals })
 }
 
 /// Builds the PDF document outline (the viewer's bookmark side panel) from the resolved ledger: the three
@@ -276,19 +274,6 @@ pub fn build_outline(heads: &[Heading], ledger: &Ledger) -> Vec<OutlineItem> {
 		}
 	}
 	items
-}
-
-/// The one terse skip line -- `skipped: #show ×2, #columns ×1` -- built from the summary's per-name counts,
-/// or `None` when the reader set everything it met. Ordered by the summary (descending count, then name),
-/// so the line leads with the construct that cost the most.
-fn terse_skip_line(skips: &lang::Refusals) -> Option<String> {
-	if skips.is_empty() {
-		return None;
-	}
-	let parts: Vec<String> = skips.entries().into_iter()
-		.map(|(n, c)| fmt!("{} ×{}", n, c))
-		.collect();
-	Some(fmt!("skipped: {}", parts.join(", ")))
 }
 
 /// Builds the PDF for resolved pages in one sequential, in-memory pass: the document outline from the
@@ -428,8 +413,10 @@ pub struct Report {
 }
 
 impl Report {
-	pub fn new(pages: usize, refusals: &lang::Refusals, skipped: Option<String>, empty: bool) -> Self {
-		Self { pages, diagnostics: diagnostics(refusals), skipped, empty }
+	/// The report of a compile whose every site not set as written is in `refusals`: its diagnostics, and
+	/// the terse line taken from the same finished table, so the two cannot disagree.
+	pub fn new(pages: usize, refusals: &lang::Refusals, empty: bool) -> Self {
+		Self { pages, diagnostics: diagnostics(refusals), skipped: refusals.skip_line(), empty }
 	}
 
 	/// Why a strict compile must refuse this result, or `None` when it may stand. A strict caller wants no

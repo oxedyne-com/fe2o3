@@ -436,6 +436,13 @@ fn show_doc_with_args(src: &str) -> Option<String> {
 	show_doc_with(src).map(|(args, _)| args)
 }
 
+/// The heading face a source's own `#show: <template>.with(heading-font: ...)` names, with the span of the
+/// line the application opens on, so a note about that face is charged to the declaration that named it.
+pub fn heading_font_site(src: &str) -> Option<(String, Span)> {
+	let (args, span) = show_doc_with(src)?;
+	named_string(&args, "heading-font").filter(|f| !f.is_empty()).map(|f| (f, span))
+}
+
 /// The lines of `src` that stand at its top level, each with the byte offset it starts at, as the reader
 /// meets them: a line opening inside a bracketed body, a block comment or a raw block is none of them. A
 /// `#set` in a `#styled-box[...]`/`#columns[...]` body is that body's own declaration, lowered onto its

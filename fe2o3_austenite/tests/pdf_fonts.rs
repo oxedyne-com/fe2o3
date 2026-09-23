@@ -103,7 +103,7 @@ fn gs_clean(path: &PathBuf) -> Outcome<()> {
 /// Compiles a sample through the real assemble/author/run path to one PDF.
 fn sample_pdf(name: &str) -> Outcome<Vec<u8>> {
 	let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples").join(fmt!("{}.typ", name));
-	let (assembled, _refusals, _skip) = res!(compile::assemble(
+	let assembled = res!(compile::assemble(
 		&path,
 		|| Ok(Arc::new(res!(fonts::libertinus()))),
 	));
@@ -242,7 +242,7 @@ fn embedded_output_is_deterministic() -> Outcome<()> {
 	assert!(a == b, "two compiles of one sample differ");
 	// The streaming writer the binary uses must agree with the buffered one to the byte.
 	let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples").join("maths.typ");
-	let (assembled, _refusals, _skip) = res!(compile::assemble(
+	let assembled = res!(compile::assemble(
 		&path,
 		|| Ok(Arc::new(res!(fonts::libertinus()))),
 	));

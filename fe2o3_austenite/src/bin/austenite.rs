@@ -208,14 +208,15 @@ fn compile(
 	// verbatim with the wasm surface so the two cannot drift. The lone-file path builds the embedded
 	// Libertinus through the thunk, only when it is in fact a lone file.
 	let t_parse = std::time::Instant::now();
-	let (assembled, refusals, skip_line) = res!(compile::assemble(
+	let assembled = res!(compile::assemble(
 		std::path::Path::new(source),
 		|| Ok(Arc::new(res!(oxedyne_fe2o3_austenite::fonts::libertinus()))),
 	));
 	mark("parse+lower+fonts", t_parse);
 
 	let t_author = std::time::Instant::now();
-	let compile::Rendered { mut out, heads, geom, doc_info } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
+	let compile::Rendered { mut out, heads, geom, doc_info, refusals } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
+	let skip_line = refusals.skip_line();
 	mark("author+run+decorate", t_author);
 
 	res!(std::fs::create_dir_all(out_dir));

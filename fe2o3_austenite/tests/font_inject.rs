@@ -56,8 +56,8 @@ fn resolves_injected(font_pairs: &[(&str, Vec<u8>)], route: bool) -> Outcome<Res
 	let outcome	= compile::assemble(&main, || Ok(fonts.clone()));
 	let _		= vfs::clear();
 	Ok(match outcome {
-		Ok((assembled, _refusals, _skip))	=> Ok(assembled.faces.resolves("Testface")),
-		Err(e)								=> Err(fmt!("{}", e)),
+		Ok(assembled)	=> Ok(assembled.faces.resolves("Testface")),
+		Err(e)			=> Err(fmt!("{}", e)),
 	})
 }
 

@@ -71,8 +71,8 @@ fn assemble_full(sources: &[(&str, &str)]) -> Outcome<(Vec<Block>, Vec<String>)>
 	let fonts	= Arc::new(res!(fonts::libertinus()));
 	let outcome	= compile::assemble(&PathBuf::from("/__vfs__/main.typ"), || Ok(fonts.clone()));
 	let _		= vfs::clear();
-	let (assembled, refusals, _skip) = res!(outcome);
-	let names = refusals.entries().into_iter().map(|(n, _)| n).collect();
+	let assembled = res!(outcome);
+	let names = assembled.refusals.entries().into_iter().map(|(n, _)| n).collect();
 	Ok((assembled.blocks, names))
 }
 

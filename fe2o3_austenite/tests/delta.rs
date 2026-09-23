@@ -30,6 +30,7 @@ use oxedyne_fe2o3_austenite::fonts::{
 	self,
 	FaceResolver,
 };
+use oxedyne_fe2o3_austenite::lang::Refusals;
 use oxedyne_fe2o3_austenite::memo::Memo;
 use oxedyne_fe2o3_austenite::ir::{
 	Dims,
@@ -93,6 +94,7 @@ fn compile_pages(blocks: Vec<Block>) -> Outcome<Vec<Page>> {
 		front:		None,
 		bib:		None,
 		doc_info:	DocInfo::default(),
+		refusals:	Refusals::default(),
 	};
 	Ok(res!(author_and_run(assembled)).out.pages)
 }
@@ -332,6 +334,7 @@ fn author_pages(blocks: Vec<Block>, memo: Option<&mut Memo>) -> Outcome<Vec<Page
 		front:		None,
 		bib:		None,
 		doc_info:	DocInfo::default(),
+		refusals:	Refusals::default(),
 	};
 	Ok(res!(author_and_run_memo(assembled, memo)).out.pages)
 }

@@ -24,6 +24,7 @@ use oxedyne_fe2o3_austenite::fonts::{
 	self,
 	FaceResolver,
 };
+use oxedyne_fe2o3_austenite::lang::Refusals;
 use oxedyne_fe2o3_austenite::memo::Memo;
 use oxedyne_fe2o3_austenite::page::PageGeometry;
 use oxedyne_fe2o3_austenite::theme::Theme;
@@ -90,6 +91,7 @@ fn compile_pages(blocks: Vec<Block>, bib: Option<Bibliography>, memo: Option<&mu
 		front:		None,
 		bib,
 		doc_info:	DocInfo::default(),
+		refusals:	Refusals::default(),
 	};
 	let mut memo	= memo;
 	let rendered	= res!(author_and_run_memo(assembled, memo.as_deref_mut()));

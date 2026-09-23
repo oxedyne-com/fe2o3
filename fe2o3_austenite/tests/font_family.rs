@@ -74,7 +74,7 @@ fn compile(src: &str, fonts: &[(String, Vec<u8>)]) -> Outcome<(Vec<Run>, Vec<Str
 	res!(vfs::install(files));
 	let set		= Arc::new(res!(fonts::libertinus()));
 	let result	= compile::assemble(&main, || Ok(set.clone()))
-		.and_then(|(a, _, _)| compile::author_and_run(a));
+		.and_then(compile::author_and_run);
 	let _ = vfs::clear();
 	let rendered = res!(result);
 

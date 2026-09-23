@@ -37,6 +37,7 @@ use crate::theme::{
 use crate::fonts;
 use crate::fonts::FaceResolver;
 use crate::ir::Sp;
+use crate::ir::Span;
 use crate::lang::parse::flatten_markup;
 use crate::lang;
 use crate::page::PageGeometry;
@@ -191,20 +192,62 @@ fn collect_named_families(blocks: &[Block], bodies: &mut Vec<Vec<String>>, headi
 	}
 }
 
+/// Where each heading face a document names was named: a `#show: doc.with(heading-font: ...)` in the root
+/// or in a file it includes, or a `#show heading: set text(font: ...)` rule. A note about a face is charged
+/// to the first declaration naming it. A face no declaration names -- an idiom's own preference -- is charged
+/// to the root's template application, which is what brings the idiom, or to the root's top without one.
+pub struct FaceSites {
+	named:		Vec<(String, String, Span)>,	// the face, the file and span of its declaration
+	fallback:	(String, Span),
+}
+
+impl FaceSites {
+	/// The declarations of the root at `root_file` -- its template application and its `rules` -- and then
+	/// `included`, each included file's own.
+	pub fn new(root_file: &str, root_src: &str, rules: &[lang::rules::Rule], included: Vec<(String, String, Span)>) -> Self {
+		let mut named: Vec<(String, String, Span)> = Vec::new();
+		if let Some((face, span)) = lang::set::heading_font_site(root_src) {
+			named.push((face, root_file.to_string(), span));
+		}
+		for (face, span) in lang::rules::heading_face_sites(rules) {
+			named.push((face, root_file.to_string(), span));
+		}
+		named.extend(included);
+		let template = lang::set::show_doc_with(root_src).map_or(Span::new(0, 0), |(_, span)| span);
+		Self { named, fallback: (root_file.to_string(), template) }
+	}
+
+	/// The file and span of the declaration that named `face`.
+	fn site_of(&self, face: &str) -> (&str, Span) {
+		match self.named.iter().find(|(n, _, _)| n == face) {
+			Some((_, file, span))	=> (file.as_str(), *span),
+			None					=> (self.fallback.0.as_str(), self.fallback.1),
+		}
+	}
+}
+
 /// Records a note for each heading level that names a face and asks for a weight or slant the book ships
-/// no file for -- so a bold or italic heading falling back to Regular is visible rather than silent. Checks
-/// the root theme's own levels, then descends every scoped or box subtree, folding its patch onto the theme
-/// in force at that point (mirroring the merge [`Theme::apply`] performs) so a rule- or chapter-scoped face
-/// is checked with the same weight/italic the renderer would set, not only the root's own. A level whose
-/// face has no file at all is not noted here: that is the ordinary role fall-back, not a missing variant.
-pub fn note_missing_face_variants(theme: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
-	note_missing_variants_for_levels(theme, faces, skips);
-	note_missing_face_variants_in(theme, blocks, faces, skips);
+/// no file for -- so a bold or italic heading falling back to Regular is visible rather than silent -- at
+/// the declaration that named the face ([`FaceSites`]). Checks the root theme's own levels, then descends
+/// every scoped or box subtree, folding its patch onto the theme in force at that point (mirroring the
+/// merge [`Theme::apply`] performs) so a rule- or chapter-scoped face is checked with the same weight/italic
+/// the renderer would set, not only the root's own. A level whose face has no file at all is not noted
+/// here: that is the ordinary role fall-back, not a missing variant.
+pub fn note_missing_face_variants(
+	theme:	&Theme,
+	blocks:	&[Block],
+	faces:	&FaceResolver,
+	sites:	&FaceSites,
+	skips:	&mut lang::Refusals,
+)
+{
+	note_missing_variants_for_levels(theme, faces, sites, skips);
+	note_missing_face_variants_in(theme, blocks, faces, sites, skips);
 }
 
 /// The per-level check [`note_missing_face_variants`] runs at the root and, folded onto a scope's merged
 /// theme, at every scoped or box subtree.
-fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
+fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, sites: &FaceSites, skips: &mut lang::Refusals) {
 	for (i, l) in theme.heading.levels.iter().enumerate() {
 		let name = match l.face.as_deref().or(theme.heading.face.as_deref()) {
 			Some(n)	=> n,
@@ -222,9 +265,8 @@ fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: 
 				(false, true)	=> "italic",
 				(false, false)	=> "regular",
 			};
-			skips.record(
-				&fmt!("heading face {:?} level {}: no {} file, set in Regular", name, i + 1, slant),
-				crate::ir::Span::new(0, 0));
+			let (file, span) = sites.site_of(name);
+			skips.record_in(file, &fmt!("heading face {:?} level {}: no {} file, set in Regular", name, i + 1, slant), span);
 		}
 	}
 }
@@ -232,22 +274,29 @@ fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: 
 /// Descends every [`Block::Scoped`]/[`Block::Box`] subtree, folding its patch onto `parent` (the theme in
 /// force at that point) before checking the merged levels and recursing, so a nested scope's own patch
 /// folds onto its immediate parent's, not the document root's.
-fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
+fn note_missing_face_variants_in(
+	parent:	&Theme,
+	blocks:	&[Block],
+	faces:	&FaceResolver,
+	sites:	&FaceSites,
+	skips:	&mut lang::Refusals,
+)
+{
 	for b in blocks {
 		match b {
 			Block::Scoped { patch, blocks }	=> {
 				let mut scoped = parent.clone();
 				scoped.apply(patch);
-				note_missing_variants_for_levels(&scoped, faces, skips);
-				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+				note_missing_variants_for_levels(&scoped, faces, sites, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, sites, skips);
 			},
 			Block::Box { patch, blocks, .. }	=> {
 				let mut scoped = parent.clone();
 				scoped.apply(patch);
-				note_missing_variants_for_levels(&scoped, faces, skips);
-				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+				note_missing_variants_for_levels(&scoped, faces, sites, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, sites, skips);
 			},
-			Block::Place { blocks, .. }			=> note_missing_face_variants_in(parent, blocks, faces, skips),
+			Block::Place { blocks, .. }			=> note_missing_face_variants_in(parent, blocks, faces, sites, skips),
 			_							=> {},
 		}
 	}
@@ -358,23 +407,25 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
-	let Gathered { mut skips, doc_info } = got;
+	let Gathered { mut skips, doc_info, faces: chapter_faces } = got;
+	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
 	// union is taken. The default rules re-assert the theme's own heading sizes (byte-neutral); the root's
 	// own `#show <selector>: <transform>` rules are appended, refused where a transform reads the page or
 	// patches a field the renderer does not read.
-	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	let rules = lang::rules::rule_set_for(&style, root_src, &root_file, &mut skips);
 	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver is built from every heading face the document can name -- the root theme's, and every
 	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
-	// no file for.
+	// no file for, at the declaration that named the face.
 	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
 	let (bodies, headings) = named_families(&style, &blocks);
 	res!(faces.require(&assets_fonts, &bodies, &headings));
-	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
+	let sites = FaceSites::new(&root_file, root_src, &rules, chapter_faces);
+	note_missing_face_variants(&style, &blocks, &faces, &sites, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks, false);
 	let title		= content_field(root_src, "title").unwrap_or_default();
@@ -466,18 +517,20 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
-	let Gathered { mut skips, doc_info } = got;
+	let Gathered { mut skips, doc_info, faces: chapter_faces } = got;
+	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
-	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	let rules = lang::rules::rule_set_for(&style, root_src, &root_file, &mut skips);
 	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
-	// file is noted rather than silently set in Regular.
+	// file is noted rather than silently set in Regular, at the declaration that named the face.
 	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
 	let (bodies, headings) = named_families(&style, &blocks);
 	res!(faces.require(&assets_fonts, &bodies, &headings));
-	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
+	let sites = FaceSites::new(&root_file, root_src, &rules, chapter_faces);
+	note_missing_face_variants(&style, &blocks, &faces, &sites, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks, false);
@@ -1949,6 +2002,7 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::
 pub struct Gathered {
 	pub skips:		lang::Refusals,
 	pub doc_info:	DocInfo,
+	pub faces:		Vec<(String, String, Span)>,	// each included file's heading face, with where it was named
 }
 
 /// The recursive body of [`assemble`]. `dir` is the directory `src` was itself read from -- the book
@@ -2030,8 +2084,7 @@ fn assemble_into(
 				match eval_guard(cond, config, src) {
 					Some(taken)	=> (true, taken),
 					None		=> {
-						got.skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), span);
-						got.skips.tag_file(&label);
+						got.skips.record_in(&label, &fmt!("#if {} (unsupported include-guard form)", cond), span);
 						(false, false)
 					},
 				}
@@ -2049,8 +2102,7 @@ fn assemble_into(
 		// space is left to the reader's own code-skip path.
 		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			got.skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
-			got.skips.tag_file(&label);
+			got.skips.record_in(&label, &fmt!("#if (unsupported include-guard form): {:?}", marker), span);
 			let mut state = lang::parse::SkipState::new();
 			lang::parse::scan_brackets(marker, &mut state);
 			if state.has_open_bracket() {
@@ -2074,8 +2126,7 @@ fn assemble_into(
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				guards.pop();
 				if !refused {
-					got.skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
-					got.skips.tag_file(&label);
+					got.skips.record_in(&label, &fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
 				}
 				continue;
 			}
@@ -2089,9 +2140,8 @@ fn assemble_into(
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
-					got.skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
+					got.skips.record_in(&label, &fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
 						span);
-					got.skips.tag_file(&label);
 				},
 				Some(rel) => {
 					let inc_path = dir.join(&rel);
@@ -2117,6 +2167,10 @@ fn assemble_into(
 					// no styling -- every corpus chapter today -- lowers to an empty patch and nests nothing,
 					// splicing its blocks in flat and keeping the block stream and the render byte-identical.
 					let chap_patch = lang::set::lower_declarations(&inc_src);
+					// A heading face the chapter's own template application names is charged there by a note.
+					if let Some((face, at)) = lang::set::heading_font_site(&inc_src) {
+						got.faces.push((face, inc_path.display().to_string(), at));
+					}
 					if chap_patch == ThemePatch::default() {
 						blocks.extend(chap_blocks);
 					} else {
@@ -2126,8 +2180,7 @@ fn assemble_into(
 				None => {
 					// A malformed `#include` with no quoted path: reported, not left to fall through as a
 					// literal line of body text.
-					got.skips.record("#include", span);
-					got.skips.tag_file(&label);
+					got.skips.record_in(&label, "#include", span);
 				},
 			}
 		} else if t.starts_with("#part-page") {
@@ -2148,8 +2201,7 @@ fn assemble_into(
 	let eof = crate::ir::Span::new(byte, byte);
 	for g in &guards {
 		if !g.refused {
-			got.skips.record("#if guard never closed (end of file)", eof);
-			got.skips.tag_file(&label);
+			got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
 		}
 	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
@@ -3115,10 +3167,49 @@ mod tests {
 			},
 		];
 		let mut skips = lang::Refusals::default();
-		note_missing_face_variants(&theme, &blocks, &faces, &mut skips);
+		note_missing_face_variants(&theme, &blocks, &faces, &FaceSites::new("root.typ", "", &[], Vec::new()), &mut skips);
 		assert_eq!(skips.total(), 1, "the scoped bold heading in a Regular-only face must be noted exactly once");
 		assert!(skips.sites()[0].name.contains("TestFace") && skips.sites()[0].name.contains("bold"),
 			"the note must name the face and the missing slant, found {:?}", skips.sites()[0].name);
+		Ok(())
+	}
+
+	/// A note about a heading face is charged to the declaration that named the face -- the template
+	/// application's line, a rule's, or an included file's own -- and a face no declaration names falls to the
+	/// root's template application, which brings the idiom that prefers it.
+	#[test]
+	fn a_face_note_is_charged_to_the_declaration_that_named_the_face() -> Outcome<()> {
+		let root = "= Title\n#show: doc.with(heading-font: \"TestFace\")\n#show heading.where(level: 2): set text(font: \"RuleFace\")\n";
+		let mut refusals = lang::Refusals::default();
+		let rules = lang::rules::rule_set_for(&Theme::default(), root, "/r/main.typ", &mut refusals);
+		let sites = FaceSites::new("/r/main.typ", root, &rules,
+			vec![("ChapFace".to_string(), "/r/ch.typ".to_string(), Span::new(5, 9))]);
+		let line = |span: Span| lang::line_col_of(root, span.start).0;
+		let (file, span) = sites.site_of("TestFace");
+		assert_eq!((file, line(span)), ("/r/main.typ", 2), "the template application names it");
+		let (file, span) = sites.site_of("RuleFace");
+		assert_eq!((file, line(span)), ("/r/main.typ", 3), "the rule names it");
+		assert_eq!(sites.site_of("ChapFace"), ("/r/ch.typ", Span::new(5, 9)), "the included file names it");
+		let (file, span) = sites.site_of("Radley");
+		assert_eq!((file, line(span)), ("/r/main.typ", 2), "an idiom's own face falls to the template line");
+
+		// The note itself lands there, in its file, for a bold heading in a face shipped Regular only.
+		let base = std::env::temp_dir().join(fmt!("austenite-facesite-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		res!(std::fs::create_dir_all(&base));
+		let src_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf");
+		res!(std::fs::copy(&src_font, base.join("TestFace-Regular.otf")));
+		let faces = FaceResolver::load(&base, &["TestFace".to_string()]);
+		let _ = std::fs::remove_dir_all(&base);
+		let mut theme = Theme::default();
+		lang::set::lower_root_declarations(root, &mut theme);
+		theme.heading.levels[0].weight = Some(700);
+		let mut skips = lang::Refusals::default();
+		note_missing_face_variants(&theme, &[], &faces, &sites, &mut skips);
+		assert_eq!(skips.total(), 1, "{:?}", skips.sites());
+		let site = &skips.sites()[0];
+		assert_eq!((site.file.as_str(), line(site.span)), ("/r/main.typ", 2), "{:?}", site);
 		Ok(())
 	}
 
