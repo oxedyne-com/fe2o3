@@ -1069,11 +1069,7 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 				continue;
 			}
 			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
-				i += 2;
-				while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
-					i += 1;
-				}
-				i = (i + 2).min(n);
+				i += lang::parse::block_comment_len(&chars, i);
 				continue;
 			}
 			break;
@@ -3023,6 +3019,15 @@ mod tests {
 		assert_eq!(map.get("website").map(String::as_str), Some("elearnity.oxegen.io"));
 		assert_eq!(map.get("iniverse").map(String::as_str), Some("iniverse"));
 		assert_eq!(map.len(), 3, "unexpected entries: {:?}", map);
+	}
+
+	/// A block comment between definitions nests as Typst nests one: a `)` after the inner comment's `*/`
+	/// is still comment text, so it does not end the literal, and the definition after the comment is read.
+	#[test]
+	fn term_defs_reader_skips_a_nested_comment() {
+		let src = "#let term-defs = (\n  \"a\": [Alpha.],\n  /* outer /* inner */ still a comment ) */\n  \"b\": [Beta.],\n)\n";
+		let defs = parse_term_defs(src);
+		assert_eq!(defs, vec![("a".to_string(), "Alpha.".to_string()), ("b".to_string(), "Beta.".to_string())]);
 	}
 
 	/// A lone chapter finds a `refs.bib` in an ancestor directory, marks the key it cited, and returns a

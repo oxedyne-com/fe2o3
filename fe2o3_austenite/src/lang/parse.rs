@@ -379,9 +379,9 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// Populated as the arrays are read, so a later figure resolves its cells against them.
 	let mut arrays:		HashMap<String, Vec<Vec<Inline>>>	= HashMap::new();
 
-	// Whether a `/* ... */` block comment is open across the line break. A `//` line comment never
+	// How deeply `/* ... */` block comments are open across the line break. A `//` line comment never
 	// straddles a line, so it needs no carried state.
-	let mut comment	= CommentState { in_block: false };
+	let mut comment	= CommentState { depth: 0 };
 
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
@@ -1402,7 +1402,7 @@ enum Frame {
 	Content,	// a `[...]` content block: only `[` `]` nest; author `(` `)` `{` `}` are literal prose
 	Str,		// a `"..."` string literal: every character is literal until the closing quote
 	Math,		// a `$...$` maths span: every character is literal until the closing `$`
-	Comment,	// a `/* ... */` block comment: every character, brackets included, is literal until `*/`
+	Comment,	// a `/* ... */` block comment, one frame per level of nesting: every character, brackets included, is literal until its own `*/`
 	Raw,		// a `` `...` `` code span: every character, `//`/`/*` included, is literal until the closing backtick
 	RawBlock(usize),	// a raw block opened by a run of three or more backticks: literal across lines until a run as long
 }
@@ -1417,6 +1417,31 @@ pub(crate) struct SkipState {
 	escaped:	bool,
 	in_quote:	bool,	// an odd number of literal `"` seen since the start of the current line, in Content mode
 	markup:		bool,	// the level beneath every frame is a file's markup, not code
+}
+
+/// One step of a block comment's scan at `i`, as Typst's lexer counts one: a `/*` opens a comment nested one
+/// deeper, a `*/` closes the innermost, and any other character is the comment's text. Returns the characters
+/// consumed and the depth after them; the comment ends when the depth falls to zero. Every scanner that
+/// passes a block comment over steps through it here, so none closes a nested comment at its first `*/`.
+pub(crate) fn comment_step(chars: &[char], i: usize, depth: u32) -> (usize, u32) {
+	match (chars[i], chars.get(i + 1)) {
+		('*', Some('/'))	=> (2, depth.saturating_sub(1)),
+		('/', Some('*'))	=> (2, depth.saturating_add(1)),
+		_					=> (1, depth),
+	}
+}
+
+/// The length of the block comment opening at `i` (its `/*`), the comments nested in it included, or of the
+/// rest of `chars` when it never closes.
+pub(crate) fn block_comment_len(chars: &[char], i: usize) -> usize {
+	let mut j		= i.saturating_add(2);
+	let mut depth	= 1u32;
+	while depth > 0 && j < chars.len() {
+		let (n, d) = comment_step(chars, j, depth);
+		j		+= n;
+		depth	= d;
+	}
+	j.min(chars.len()) - i
 }
 
 /// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
@@ -1517,10 +1542,16 @@ impl SkipState {
 			},
 			// A `/* ... */` block comment: every character, including a stray `}`/`]`/`)` an author's note
 			// mentions, is literal until the comment's own closer -- the twin of Str/Math above, so a
-			// `#context` guard's brace balance is never corrupted by a comment inside its body.
+			// `#context` guard's brace balance is never corrupted by a comment inside its body. A `/*` in it
+			// opens a comment nested one deeper, as Typst nests them, so the first `*/` closes that one alone.
 			Some(Frame::Comment) => {
-				if c == '*' && chars.get(i + 1) == Some(&'/')	{ self.frames.pop(); 2 }
-				else											{ 1 }
+				let (n, depth) = comment_step(chars, i, 1);
+				match depth {
+					0	=> { self.frames.pop(); },
+					1	=> {},
+					_	=> self.frames.push(Frame::Comment),
+				}
+				n
 			},
 			// A `` `...` `` code span: literal until the closing backtick, the twin of Comment above, so a
 			// `//`/`/*` a prose note quotes as a raw code token (`` the `//` operator ``) is never mistaken
@@ -2353,14 +2384,14 @@ fn cap_first(s: &str) -> String {
 	}
 }
 
-/// Whether a `/* ... */` block comment is open across the line break.
+/// How deeply `/* ... */` block comments are nested across the line break: zero when none is open.
 struct CommentState {
-	in_block:	bool,
+	depth:	u32,
 }
 
-/// Removes Typst comments from one line: a `//` to the line's end, and any `/* ... */` span, which may
-/// have opened on an earlier line ([`CommentState::in_block`] carries that across). A `//` or `/*`
-/// inside a `"..."` string or a `` `code` `` span is not a comment and is kept, and a `//` immediately
+/// Removes Typst comments from one line: a `//` to the line's end, and any `/* ... */` span, nested ones
+/// included, which may have opened on an earlier line ([`CommentState::depth`] carries that across). A `//`
+/// or `/*` inside a `"..."` string or a `` `code` `` span is not a comment and is kept, and a `//` immediately
 /// after `:` is kept so a bare URL survives. Quotes and backticks are treated as span delimiters here,
 /// which is what the reader's markup needs; a real Typst code line with string literals is skipped whole
 /// by the caller, so stripping it never reaches the output.
@@ -2373,14 +2404,13 @@ fn strip_comments(line: &str, st: &mut CommentState) -> String {
 	let mut i				= 0usize;
 	while i < chars.len() {
 		let c = chars[i];
-		if st.in_block {
-			if c == '*' && chars.get(i + 1) == Some(&'/') {
-				st.in_block = false;
-				i += 2;
+		if st.depth > 0 {
+			let (n, depth) = comment_step(&chars, i, st.depth);
+			st.depth = depth;
+			i += n;
+			if depth == 0 {
 				prev = '\0';
-				continue;
 			}
-			i += 1;
 			continue;
 		}
 		if in_str {
@@ -2421,7 +2451,7 @@ fn strip_comments(line: &str, st: &mut CommentState) -> String {
 			break;	// a line comment: drop the rest of the line
 		}
 		if c == '/' && chars.get(i + 1) == Some(&'*') {
-			st.in_block = true;
+			st.depth = 1;
 			i += 2;
 			prev = '\0';
 			continue;
@@ -6119,6 +6149,22 @@ bound\".\n";
 		assert_eq!(res!(refused("#section-banner()\n")), ["#section-banner"]);
 		assert_eq!(res!(refused("#figure(rect(width: 1cm), caption: [A box.])\n")), ["#figure"]);
 		Ok(())
+	}
+
+	/// A block comment nests, as Typst nests one, in every scanner that passes one over: the first `*/` in a
+	/// comment holding another closes the inner one alone.
+	#[test]
+	fn block_comments_nest_in_every_scanner() {
+		let chars: Vec<char> = "/* a /* b */ c */ d".chars().collect();
+		assert_eq!(block_comment_len(&chars, 0), 17, "the outer `*/` closes the comment");
+		let open: Vec<char> = "/* a /* b */ c".chars().collect();
+		assert_eq!(block_comment_len(&open, 0), open.len(), "an unclosed comment runs to the end");
+		// The reader's line scan and the bracket scan agree: the outer comment holds the lines between.
+		let mut st = CommentState { depth: 0 };
+		assert_eq!(strip_comments("x /* a /* b */ c", &mut st), "x ");
+		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &mut st), " y");
+		assert_eq!(st.depth, 0);
+		assert_eq!(live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
 	}
 
 	/// The live text blanks what a comment holds and what raw text shows, delimiters and all, and keeps

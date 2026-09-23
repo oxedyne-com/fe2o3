@@ -110,6 +110,35 @@ fn a_commented_include_is_not_followed() -> Outcome<()> {
 	Ok(())
 }
 
+/// A block comment nests, as Typst nests one: a `#set document`, a `#show` rule and an `#include` in a comment
+/// that holds another are text, the outer comment's closer is not set as prose, and nothing is reported --
+/// where the first `*/` once closed the comment, and the title, the rule and the draft all took effect.
+#[test]
+fn a_nested_comment_holds_its_declarations_and_includes() -> Outcome<()> {
+	let _turn = turn();
+	let root = "/* outer /* inner */\n#set document(title: \"Commented Out\")\n\
+		#show heading: set text(size: 30pt)\n#include \"draft.typ\"\n*/\n#include \"ch1.typ\"\n";
+	let files = [
+		("/proj/root.typ",	root),
+		("/proj/ch1.typ",	"= Chapter\n\nCHAPTERWORDS are set.\n"),
+		("/proj/draft.typ",	"= Draft\n\nDRAFTWORDS never shown.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let set		= runs(&rendered);
+	let text	= set.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("CHAPTERWORDS"), "the chapter is set: {}", text);
+	assert!(!text.contains("DRAFTWORDS") && !text.contains("Draft"), "the draft is not: {}", text);
+	assert!(!text.contains("*/"), "the outer closer is not prose: {}", text);
+	assert_eq!(rendered.doc_info.title, None, "the commented title is not written");
+	let size = match set.iter().find(|(t, _)| t.contains("Chapter")) {
+		Some((_, size))	=> *size,
+		None			=> return Err(err!("the heading is set: {}", text; Test, Missing)),
+	};
+	assert!(size < 29.0, "the commented rule sizes no heading: {}", size);
+	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
 /// A lone file that shows an `#include` in a raw block is compiled as the lone file it is: no chapter is
 /// looked for, so the absent one is no error, and no contents page is set.
 #[test]
