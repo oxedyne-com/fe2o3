@@ -312,15 +312,78 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 // │ DIAGNOSTICS AND STRICT MODE                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+/// Why a diagnostic was raised, fixed where its refusal or error is raised and never read back from the
+/// message's wording, which drifts. [`DiagnosticKind::as_str`] is the word a caller switches on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiagnosticKind {
+	MissingFile,		// a source, chapter, image or other file could not be found or read
+	MissingFont,		// a named family that no supplied or embedded font declares
+	Syntax,				// source that does not parse
+	Type,				// a value of the wrong type
+	UnknownVariable,	// a name with no binding in scope
+	Package,			// a package import the host has not supplied
+	Limit,				// a limit of the engine reached: layout that will not settle, a depth or a loop bound
+	Unsupported,		// a construct passed over, refused, or not applied as Typst applies it
+	Internal,			// no pages, no content, or an error raised with no more specific tag
+}
+
+impl DiagnosticKind {
+	/// The word the kind is carried as. A caller switches on it, so it never changes.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::MissingFile		=> "missing_file",
+			Self::MissingFont		=> "missing_font",
+			Self::Syntax			=> "syntax",
+			Self::Type				=> "type",
+			Self::UnknownVariable	=> "unknown_variable",
+			Self::Package			=> "package",
+			Self::Limit				=> "limit",
+			Self::Unsupported		=> "unsupported",
+			Self::Internal			=> "internal",
+		}
+	}
+
+	fn from_refusal_class(class: lang::RefusalClass) -> Self {
+		match class {
+			lang::RefusalClass::FixedPoint		=> Self::Unsupported,
+			lang::RefusalClass::Introspective	=> Self::Unsupported,
+			lang::RefusalClass::Unsupported		=> Self::Unsupported,
+		}
+	}
+
+	/// A hard error's kind, from the tags it was raised with anywhere in its chain.
+	fn from_error_tags(e: &Error<ErrTag>) -> Self {
+		let tags = e.tags();
+		if tags.contains(&ErrTag::Font) {
+			Self::MissingFont
+		} else if tags.contains(&ErrTag::File) {
+			Self::MissingFile
+		} else if tags.contains(&ErrTag::LimitReached) {
+			Self::Limit
+		} else {
+			Self::Internal
+		}
+	}
+}
+
+impl fmt::Display for DiagnosticKind {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{}", self.as_str())
+	}
+}
+
 /// One problem at the source position a caller shows the user. `line` and `col` are 1-based; a hard error
 /// whose cause could not be traced to a source line reports `0:0` against the main file rather than a
-/// guessed position.
+/// guessed position. `hint` is extra remedial detail, such as a strict refusal's summary of what was
+/// skipped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
 	pub file:		String,
 	pub line:		usize,
 	pub col:		usize,
 	pub message:	String,
+	pub kind:		DiagnosticKind,
+	pub hint:		Option<String>,
 }
 
 impl fmt::Display for Diagnostic {
@@ -354,12 +417,15 @@ impl Report {
 			line:		1,
 			col:		1,
 			message,
+			kind:		DiagnosticKind::Internal,
+			hint:		None,
 		};
 		if let Some(first) = self.diagnostics.first() {
 			let line = self.skipped.clone().unwrap_or_else(|| fmt!("skipped: {} site(s)", self.diagnostics.len()));
 			return Some(Diagnostic {
-				message: fmt!("strict: {} construct site(s) were not set ({}); first: {}",
+				message:	fmt!("strict: {} construct site(s) were not set ({}); first: {}",
 					self.diagnostics.len(), line, first.message),
+				hint:		Some(line),
 				..first.clone()
 			});
 		}
@@ -390,6 +456,8 @@ pub fn diagnostics(refusals: &lang::Refusals) -> Vec<Diagnostic> {
 			line,
 			col,
 			message:	fmt!("skipped {} ({})", r.name, r.class.label()),
+			kind:		DiagnosticKind::from_refusal_class(r.class),
+			hint:		None,
 		});
 	}
 	out
@@ -403,6 +471,7 @@ pub fn diagnostics(refusals: &lang::Refusals) -> Vec<Diagnostic> {
 /// words, free of source-code frames and colour.
 pub fn locate_error(e: &Error<ErrTag>, main: &Path, sources: &[PathBuf]) -> Diagnostic {
 	let message = e.plain();
+	let kind = DiagnosticKind::from_error_tags(e);
 	for cited in quoted_literals(&message) {
 		let target = match vfs::canonicalize(Path::new(&cited.1)) {
 			Ok(p)	=> p,
@@ -421,12 +490,12 @@ pub fn locate_error(e: &Error<ErrTag>, main: &Path, sources: &[PathBuf]) -> Diag
 				};
 				if resolved == target {
 					let (line, col, _) = lang::line_col_of(&text, off as u32);
-					return Diagnostic { file: src_path.display().to_string(), line, col, message };
+					return Diagnostic { file: src_path.display().to_string(), line, col, message, kind, hint: None };
 				}
 			}
 		}
 	}
-	Diagnostic { file: main.display().to_string(), line: 0, col: 0, message }
+	Diagnostic { file: main.display().to_string(), line: 0, col: 0, message, kind, hint: None }
 }
 
 /// Every double-quoted literal in `s` with the byte offset of its opening quote. No escape handling beyond

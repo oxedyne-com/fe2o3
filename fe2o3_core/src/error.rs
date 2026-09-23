@@ -124,6 +124,7 @@ pub enum ErrTag {
     Exists,
     Fatal,
     File,
+    Font, // A typeface or font-family resolution failure specifically, distinct from a general Missing/Input.
     Format,
     Identifier,
     Index,

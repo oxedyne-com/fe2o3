@@ -6,6 +6,7 @@
 use oxedyne_fe2o3_austenite::compile::{
 	self,
 	Diagnostic,
+	DiagnosticKind,
 	Report,
 };
 use oxedyne_fe2o3_austenite::fonts;
@@ -199,7 +200,78 @@ fn an_error_citing_no_source_path_reports_zero_zero() -> Outcome<()> {
 	let e = err!("Something failed with no path."; Test);
 	let d = compile::locate_error(&e, Path::new(MAIN), &[]);
 	assert_eq!(fmt!("{}", d), "/proj/main.typ:0:0: Something failed with no path.");
+	assert_eq!(d.kind, DiagnosticKind::Internal);
 	Ok(())
+}
+
+/// Each kind is fixed where its fault is raised: a site not set as written by the reader's refusal class,
+/// a hard error by the tags it was raised with, however many frames it then crossed, and a strict refusal
+/// by its cause.
+#[test]
+fn each_diagnostic_kind_is_fixed_where_its_fault_is_raised() -> Outcome<()> {
+	let _turn = turn();
+
+	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"= H\n\n#columns(2)[a]\n")]))));
+	let d = &report.diagnostics[0];
+	assert_eq!((d.kind, d.hint.as_deref()), (DiagnosticKind::Unsupported, None), "{}", d);
+	let head = match report.strict_failure(Path::new(MAIN)) {
+		Some(h)	=> h,
+		None	=> return Err(err!("strict must refuse a skipped construct"; Test)),
+	};
+	assert_eq!(head.kind, DiagnosticKind::Unsupported, "{}", head);
+	assert_eq!(head.hint.as_deref(), Some("skipped: #columns ×1"), "{}", head);
+
+	// Passed over, like any other construct the reader does not set.
+	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"= H\n\n#import \"t.typ\": *\n\nBody.\n")]))));
+	assert_eq!(report.diagnostics[0].kind, DiagnosticKind::Unsupported, "{}", report.diagnostics[0]);
+
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, b"= H\n\n#include \"ch1.typ\"\n")]))));
+	assert_eq!(d.kind, DiagnosticKind::MissingFile, "{}", d);
+
+	let src = b"#set text(font: \"Nonesuch Sans\")\n\n= H\n\nBody.\n";
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, src)]))));
+	assert_eq!(d.kind, DiagnosticKind::MissingFont, "{}", d);
+	assert!(d.message.contains("Nonesuch Sans"), "{}", d);
+
+	// A bound reached, as layout that will not settle is raised, crossing frames on its way out.
+	fn settle() -> Outcome<()> {
+		Err(err!("Composition did not converge."; Data, Excessive, LimitReached))
+	}
+	fn compose() -> Outcome<()> {
+		res!(settle());
+		Ok(())
+	}
+	let e = match compose() {
+		Ok(())	=> return Err(err!("The error was supposed to propagate."; Bug)),
+		Err(e)	=> e,
+	};
+	assert_eq!(compile::locate_error(&e, Path::new(MAIN), &[]).kind, DiagnosticKind::Limit);
+
+	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"")]))));
+	let head = match report.strict_failure(Path::new(MAIN)) {
+		Some(h)	=> h,
+		None	=> return Err(err!("strict must refuse a source that sets nothing"; Test)),
+	};
+	assert_eq!(head.kind, DiagnosticKind::Internal, "{}", head);
+	Ok(())
+}
+
+/// The words a caller switches on. A change here breaks every consumer's mapping.
+#[test]
+fn the_kind_words_are_the_wire_contract() {
+	let words: Vec<&str> = [
+		DiagnosticKind::MissingFile,
+		DiagnosticKind::MissingFont,
+		DiagnosticKind::Syntax,
+		DiagnosticKind::Type,
+		DiagnosticKind::UnknownVariable,
+		DiagnosticKind::Package,
+		DiagnosticKind::Limit,
+		DiagnosticKind::Unsupported,
+		DiagnosticKind::Internal,
+	].iter().map(|k| k.as_str()).collect();
+	assert_eq!(words, ["missing_file", "missing_font", "syntax", "type", "unknown_variable", "package",
+		"limit", "unsupported", "internal"]);
 }
 
 /// The family name `fc-scan` reads from a font file's own name table.

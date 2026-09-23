@@ -389,7 +389,7 @@ fn missing_family(name: &str, site: &str, dir: &Path, lib: &FontLibrary) -> Erro
 	let offered = if offered.is_empty() { "none".to_string() } else { offered.join(", ") };
 	err!("The font family {:?} named by {} is not declared by any font file under {:?}; the families \
 		there are: {}. Supply the font (a wasm project passes it in `fonts`) or correct the name.",
-		name, site, dir, offered; Missing, Input)
+		name, site, dir, offered; Missing, Input, Font)
 }
 
 /// The reading set for a body family list: each role a chain of the listed families' nearest variant for

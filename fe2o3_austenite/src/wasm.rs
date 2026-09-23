@@ -91,11 +91,11 @@ impl DaimondTypst {
 	}
 
 	/// Compiles a project to a single PDF: `{ pdf: Uint8Array, pages, diagnostics: [{ file, line, col,
-	/// message }], skipped: string | null }` on success, `{ error, diagnostics, skipped }` otherwise.
-	/// `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts: [[path,
-	/// bytes], ...], strict?: bool }`; every entry is injected into the source map and nothing outside it
-	/// is read. `diagnostics` lists every construct the reader passed over; under `strict` any such site,
-	/// zero pages or a source setting no content is returned as `{ error }` instead of a PDF.
+	/// message, kind, hint }], skipped: string | null }` on success, `{ error, diagnostics, skipped }`
+	/// otherwise. `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts:
+	/// [[path, bytes], ...], strict?: bool }`; every entry is injected into the source map and nothing
+	/// outside it is read. `diagnostics` lists every construct the reader passed over; under `strict` any
+	/// such site, zero pages or a source setting no content is returned as `{ error }` instead of a PDF.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
 		match self.run(project, Mode::Pdf) {
@@ -127,9 +127,9 @@ impl DaimondTypst {
 	/// than a blank preview against a cache that no longer holds anything. The memory-frugal successor to
 	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
 	/// Ids are opaque decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
-	/// The return also carries `pages`, `diagnostics: [{ file, line, col, message }]` and `skipped` (the
-	/// terse summary line, or `null`) exactly as [`Self::compile_project`] does, and honours `strict` the
-	/// same way. On a strict refusal the version does not step, so the consumer's cache stays valid.
+	/// The return also carries `pages`, `diagnostics` and `skipped` exactly as [`Self::compile_project`]
+	/// does, and honours `strict` the same way. On a strict refusal the version does not step, so the
+	/// consumer's cache stays valid.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.run_delta(project) {
@@ -432,7 +432,7 @@ fn install_project(project: &JsValue, main_path: &Path) -> Outcome<Vec<PathBuf>>
 	// reads, so a face the document names resolves whatever path the consumer chose (see `read_font_pairs`).
 	let _ = read_font_pairs(project, main_path, &mut files);
 	if !files.contains_key(main_path) {
-		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing));
+		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing, File));
 	}
 	let mut paths: Vec<PathBuf> = files.keys().cloned().collect();
 	paths.sort();
@@ -448,7 +448,14 @@ fn main_of(project: &JsValue) -> String {
 /// A failure the engine itself caused, with no source position to give.
 fn internal(msg: &str) -> Failure {
 	Failure {
-		head:	Diagnostic { file: String::new(), line: 0, col: 0, message: fmt!("internal: {}", msg) },
+		head:	Diagnostic {
+			file:		String::new(),
+			line:		0,
+			col:		0,
+			message:	fmt!("internal: {}", msg),
+			kind:		compile::DiagnosticKind::Internal,
+			hint:		None,
+		},
 		report:	None,
 	}
 }
@@ -585,8 +592,8 @@ fn set(obj: &js_sys::Object, key: &str, val: &JsValue) {
 	let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), val);
 }
 
-/// Sets `pages`, `diagnostics: [{ file, line, col, message }]` and `skipped` (string or `null`) from a
-/// report, the fields every compile result carries.
+/// Sets `pages`, `diagnostics: [{ file, line, col, message, kind, hint }]` and `skipped` (string or
+/// `null`) from a report, the fields every compile result carries.
 fn set_report(obj: &js_sys::Object, rep: &Report) {
 	set(obj, "pages", &JsValue::from_f64(rep.pages as f64));
 	set(obj, "diagnostics", &diagnostics_array(&rep.diagnostics));
@@ -605,6 +612,12 @@ fn diagnostics_array(diags: &[Diagnostic]) -> js_sys::Array {
 		set(&entry, "line",		&JsValue::from_f64(d.line as f64));
 		set(&entry, "col",		&JsValue::from_f64(d.col as f64));
 		set(&entry, "message",	&JsValue::from_str(&d.message));
+		set(&entry, "kind",		&JsValue::from_str(d.kind.as_str()));
+		let hint = match &d.hint {
+			Some(h)	=> JsValue::from_str(h),
+			None	=> JsValue::NULL,
+		};
+		set(&entry, "hint", &hint);
 		arr.push(&entry);
 	}
 	arr
