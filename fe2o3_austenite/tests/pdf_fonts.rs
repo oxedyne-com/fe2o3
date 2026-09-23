@@ -164,7 +164,7 @@ fn maths_embeds_its_own_font_and_extracts_its_symbols() -> Outcome<()> {
 	let path = res!(write("maths.pdf", &res!(sample_pdf("maths"))));
 	res!(gs_clean(&path));
 	let rows = res!(font_rows(&path));
-	assert!(rows.iter().any(|r| r.0 == "LatinModernMath-Regular" && r.1 == "CID Type 0C" && r.2 && r.4),
+	assert!(rows.iter().any(|r| r.0 == "NewCMMath-Regular" && r.1 == "CID Type 0C" && r.2 && r.4),
 		"the maths font is not embedded with a ToUnicode: {:?}", rows);
 	let text = res!(extract(&path));
 	// A mathematical italic a (U+1D44E) is a character outside the Basic Multilingual Plane, so this also

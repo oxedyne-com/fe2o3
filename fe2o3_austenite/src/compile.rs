@@ -26,6 +26,7 @@ use crate::driver::{
 	Config,
 };
 use crate::font::FontMetrics;
+use crate::fonts;
 use crate::fonts::FaceResolver;
 use crate::ledger::{
 	AnchorId,
@@ -456,7 +457,7 @@ fn quoted_literals(s: &str) -> Vec<(usize, String)> {
 pub const EMBEDDED_FAMILIES: [&str; 3] = [
 	"Libertinus Serif",
 	"Libertinus Mono",
-	"Latin Modern Math",
+	"New Computer Modern Math",
 ];
 
 // The weight/slant suffixes the named-face resolver loads, `<Family>-<Variant>.{ttf,otf}`.
@@ -469,7 +470,7 @@ const FACE_VARIANTS: [&str; 4] = ["Regular", "Bold", "Italic", "BoldItalic"];
 /// A file not named `<Family>-<Variant>.{ttf,otf}`, or one that will not parse, is not a family the engine
 /// can resolve by name, so it is not listed.
 pub fn font_families(main: &Path, injected: &[PathBuf]) -> Vec<String> {
-	let mut out: Vec<String> = EMBEDDED_FAMILIES.iter().map(|s| s.to_string()).collect();
+	let mut out: Vec<String> = fonts::embedded_families();
 	for given in injected {
 		let routed = match book::project_font_path(main, given) {
 			Some(p)	=> p,

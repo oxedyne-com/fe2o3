@@ -139,7 +139,7 @@ impl DaimondTypst {
 	}
 
 	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
-	/// families (`Libertinus Serif`, `Libertinus Mono`, `Latin Modern Math`) and the family of each
+	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family of each
 	/// `project.fonts` entry named `<Family>-<Variant>.{ttf,otf}` that the engine's face resolver loads.
 	/// `project` is optional; with none, or with no fonts, only the embedded families are listed. For a
 	/// missing-font pre-check before a compile.

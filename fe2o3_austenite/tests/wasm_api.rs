@@ -212,13 +212,19 @@ fn fc_family(path: &Path) -> Outcome<String> {
 fn embedded_families_are_the_names_in_the_font_files() -> Outcome<()> {
 	let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts");
 	let mut read = Vec::new();
-	for f in ["LibertinusSerif-Regular.otf", "LibertinusMono-Regular.otf", "latinmodern-math.otf"] {
+	for f in ["LibertinusSerif-Regular.otf", "LibertinusMono-Regular.otf", "NewCMMath-Regular.otf"] {
 		read.push(res!(fc_family(&dir.join(f))));
 	}
 	let mut listed: Vec<String> = compile::EMBEDDED_FAMILIES.iter().map(|s| s.to_string()).collect();
 	read.sort();
 	listed.sort();
-	assert_eq!(listed, read, "the embedded list must be the files' own family names");
+	// Same-family rather than a literal match: the New Computer Modern files declare `NewComputerModern
+	// Math` in their own name table, where the embedded list and every document write it `New Computer
+	// Modern Math` (see `fonts::same_family`'s own doc comment for why).
+	assert_eq!(listed.len(), read.len(), "the embedded list must name exactly the files' own families");
+	for (l, r) in listed.iter().zip(read.iter()) {
+		assert!(fonts::same_family(l, r), "{:?} is not the family {:?} declares", l, r);
+	}
 	Ok(())
 }
 
