@@ -194,7 +194,8 @@ fn classify<M>(
     match got {
         Err(e) => {
             let n = c.read_errs.fetch_add(1, Ordering::Relaxed);
-            if n < 5 { test!(sync_log::stream(), "{} read error on key {}: {}", who, i, e); }
+            // Not a silent fault, but worth seeing: a read that gave up says why.
+            if n < 5 { msg!("{} read error on key {}: {}", who, i, e); }
         },
         Ok(None) => {
             if lo > 0 {
