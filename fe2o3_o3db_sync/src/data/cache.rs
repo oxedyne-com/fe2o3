@@ -6,6 +6,7 @@ use crate::{
     },
     base::id::OzoneBotId,
     data::core::Key,
+    file::stored::RecordId,
 };
 
 use oxedyne_fe2o3_data::time::Timestamp;
@@ -191,10 +192,10 @@ impl<
 
     /// Insert key, value and location into the cache.
     ///
-    /// Returns the location of whichever copy of the key is now superseded, for the caller
-    /// to schedule for garbage collection, or `None` when nothing was superseded.  That is
-    /// usually the copy the cache held, but when the offered copy is the older of the two
-    /// the cache keeps what it has and the offered location comes back instead.
+    /// Returns the location of whichever copy of the key is now superseded, and the record it
+    /// holds, for the caller to schedule for garbage collection, or `None` when nothing was
+    /// superseded.  That is usually the copy the cache held, but when the offered copy is the
+    /// older of the two the cache keeps what it has and the offered location comes back instead.
     pub fn insert(
         &mut self,
         kbyts:  Vec<u8>,
@@ -202,7 +203,7 @@ impl<
         floc:   FileLocation,
         meta:   Meta<UIDL, UID>,
     )
-        -> Outcome<Option<FileLocation>>
+        -> Outcome<Option<(FileLocation, RecordId)>>
     {
         let klen = kbyts.len();
         // 1. Make space in the cache if we are going to exceed the size limit. We could just
@@ -260,14 +261,15 @@ impl<
                         no newer than the cached {:?}, so the offered copy is superseded.",
                         self.ozid.clone(), kbyts, floc, meta.time, mloc.meta.time,
                     );
-                    return Ok(Some(floc));
+                    let rid = res!(RecordId::new(&kbyts, &meta));
+                    return Ok(Some((floc, rid)));
                 }
                 // 2.2 It does, insert the new info and return the old floc.
                 let new_mloc = MetaLocation {
                     meta: meta.clone(),
                     floc,
                 };
-                let old_floc = mloc.file_location().clone();
+                let old = (mloc.file_location().clone(), res!(RecordId::new(&kbyts, mloc.meta())));
                 *mloc = new_mloc;
                 match val {
                     Some(v) => {
@@ -282,7 +284,7 @@ impl<
                     },
                     None => (), // leave any existing value untouched
                 }
-                Ok(Some(old_floc))
+                Ok(Some(old))
             },
             None |
             Some(CacheEntry::Deleted(_)) => {
@@ -335,19 +337,24 @@ impl<
         }
     }
 
-    /// Update file location information for a key.
-    pub fn update_if_same_fnum(
+    /// Moves the cached location of a record a collection has carried to its new start, if the
+    /// cache still names that record, and gives the location it named before.  A record is its
+    /// key and its stamp: matched by file alone, a key with two records in the file, the older
+    /// carried because its supersession had yet to arrive, had its location moved to the older
+    /// record's and back, and the move entries were spent against the wrong offsets.
+    pub fn reanchor(
         &mut self,
         k:      &Vec<u8>,
         loc:    &FileLocation,
+        meta:   &Meta<UIDL, UID>,
     )
-        -> Option<FileLocation> // updated
+        -> Option<FileLocation>
     {
         match self.map.get_mut(k) {
-            Some(CacheEntry::LocatedValue(MetaLocation { floc, .. }, _)) => {
-                let old_floc = floc.clone();
-                if floc.fnum == loc.fnum {
-                    floc.start = loc.start;
+            Some(CacheEntry::LocatedValue(mloc, _)) => {
+                if mloc.floc.fnum == loc.fnum && mloc.meta == *meta {
+                    let old_floc = mloc.floc.clone();
+                    mloc.floc.start = loc.start;
                     return Some(old_floc);
                 }
                 None

@@ -409,8 +409,9 @@ fn run(dir: &str, plan: Plan) -> Outcome<()> {
         lines.push(line);
     }
     res!(db.close());
+    // The counts are the finding, so they are shown whichever way the run goes.
     for line in &lines {
-        test!(sync_log::stream(), "{}", line);
+        msg!("{}", line);
     }
     log_finish_wait!();
     if silent > 0 {

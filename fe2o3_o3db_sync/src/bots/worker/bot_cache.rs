@@ -14,7 +14,10 @@ use crate::{
         },
         core::Key,
     },
-    file::floc::FileLocation,
+    file::{
+        floc::FileLocation,
+        stored::RecordId,
+    },
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -148,9 +151,16 @@ impl<
                         // WRITE
                         OzoneMsg::GcCacheUpdateRequest(buf, resp_g1) => {
                             let mut old_flocs = Vec::new();
-                            for (key, floc) in buf {
-                                if let Some(old_floc) = self.cache_mut().update_if_same_fnum(&key, &floc) {
-                                    old_flocs.push(old_floc);
+                            for (key, floc, meta) in buf {
+                                if let Some(old_floc) = self.cache_mut().reanchor(&key, &floc, &meta) {
+                                    match RecordId::new(&key, &meta) {
+                                        Ok(rid) => old_flocs.push((old_floc, rid)),
+                                        // Its move entry stays, and keeps the file from being
+                                        // collected again; the location itself is right.
+                                        Err(e) => self.error(err!(e,
+                                            "{}: Naming a record a collection re-anchored.", self.ozid();
+                                            Data, Encode)),
+                                    }
                                 }
                             }
                             if let Err(e) = resp_g1.send(
@@ -211,7 +221,7 @@ impl<
                         //    self.respond(Ok(OzoneMsg::UserKeys(kuserdat)), &resp);
                         //},
                         OzoneMsg::ReadCache(key, resp_r2) => {
-                            let result = self.read(&key, resp_r2);
+                            let result = self.read(key, resp_r2);
                             self.result(&result);
                         },
                         _ => return self.listen_more(msg),
@@ -333,7 +343,7 @@ impl<
 
     pub fn read(
         &mut self,
-        key:        &Key,
+        key:        Key,
         resp_r2:    Responder<UIDL, UID, ENC, KH>,
     )
         -> Outcome<()>
@@ -348,10 +358,13 @@ impl<
                         let fnum = mloc.file_number();
                         let bots = res!(self.fbots());
                         let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
+                        // The key goes with the location, so that a move entry at the same
+                        // offset is taken only if it is this record's.
                         res!(bot.send(
                             OzoneMsg::ReadFileRequest(
                                 fnum,
-                                mloc.clone(),
+                                key.into_bytes(),
+                                mloc,
                                 resp_r2,
                         )));
                     },

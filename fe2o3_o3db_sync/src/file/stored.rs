@@ -28,6 +28,32 @@ use std::{
     },
 };
 
+/// Names one record, by a digest of its key and the stamp it was written with.  An offset names a
+/// record only within one generation of its file: a collection moves the records it keeps, and
+/// with records of one size a new offset can equal an old one still in use elsewhere, so a
+/// location matched by offset alone can be taken for another record (2026-09-23).
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RecordId(u64);
+
+impl RecordId {
+
+    pub fn new<
+        const UIDL: usize,
+        UID: NumIdDat<UIDL>,
+    >(
+        key:    &[u8],
+        meta:   &Meta<UIDL, UID>,
+    )
+        -> Outcome<Self>
+    {
+        // The key bytes are a daticle, which ends itself, so the stamp cannot run into it.
+        let mut buf = Vec::with_capacity(key.len() + Meta::<UIDL, UID>::BYTE_LEN);
+        buf.extend_from_slice(key);
+        buf = res!(meta.to_bytes(buf));
+        Ok(Self(seahash::hash(&buf)))
+    }
+}
+
 #[derive(Debug)]
 pub struct StoredKey<
     const UIDL: usize,

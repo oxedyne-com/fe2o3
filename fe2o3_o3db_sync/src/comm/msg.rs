@@ -35,6 +35,7 @@ use crate::{
             FileLocation,
             FileNum,
         },
+        stored::RecordId,
         state::{
             FileState,
             FileStateMap,
@@ -82,12 +83,12 @@ pub enum OzoneMsg<
     MessageCount(usize),
     NewFileStates(FileStateMap),
     ReadFinished(FileNum),
-    ScheduleOld(FileLocation, OzoneBotId),
+    ScheduleOld(FileLocation, RecordId, OzoneBotId),
     ShardFileSize(usize, usize),
     UpdateData {
         floc_new:       FileLocation,
         ilen:           usize,
-        floc_old_opt:   Option<FileLocation>,
+        floc_old_opt:   Option<(FileLocation, RecordId)>, // the record superseded
         from_id:        OzoneBotId,
     },
     ZoneDir(ZoneInd, ZoneDir),
@@ -131,7 +132,7 @@ pub enum OzoneMsg<
     DumpCacheRequest(Responder<UIDL, UID, ENC, KH>),
     DumpFiles(Responder<UIDL, UID, ENC, KH>),
     DumpFileStatesRequest(Responder<UIDL, UID, ENC, KH>),
-    GcCacheUpdateRequest(Vec<(Vec<u8>, FileLocation)>, Responder<UIDL, UID, ENC, KH>),
+    GcCacheUpdateRequest(Vec<(Vec<u8>, FileLocation, Meta<UIDL, UID>)>, Responder<UIDL, UID, ENC, KH>),
     //GetUsers(Responder<UIDL, UID, ENC, KH>),
     GetZoneDir(Responder<UIDL, UID, ENC, KH>),
     Insert(
@@ -151,7 +152,7 @@ pub enum OzoneMsg<
     Read(Key, usize, Responder<UIDL, UID, ENC, KH>),
     Ready,
     ReadCache(Key, Responder<UIDL, UID, ENC, KH>),
-    ReadFileRequest(FileNum, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>),
+    ReadFileRequest(FileNum, Vec<u8>, MetaLocation<UIDL, UID>, Responder<UIDL, UID, ENC, KH>), // key bytes
     ScanRequest {
         opts:   ScanOpts,
         schms2: Option<RestSchemesOverride<ENC, KH>>,
@@ -173,7 +174,7 @@ pub enum OzoneMsg<
     DumpFileStatesResponse(WorkerInd, FileStateMap),
     Error(Error<ErrTag>),
     Files(ZoneInd, BTreeMap<String, FileEntry>),
-    GcCacheUpdateResponse(Vec<FileLocation>),
+    GcCacheUpdateResponse(Vec<(FileLocation, RecordId)>), // re-anchored, from where
     KeyExists(bool),
     KeyChunkExists(bool, usize), // includes chunk index
     Ok,
