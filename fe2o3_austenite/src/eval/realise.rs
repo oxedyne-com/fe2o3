@@ -588,6 +588,8 @@ impl State<'_> {
 	/// Gives the element its location (when locatable or labelled) and copies the style chain's values
 	/// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
 	fn prepare(&mut self, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
+		// Built-in show-set styles sit outside the user's, which override them.
+		let builtin = res!(content::show_set(target, styles));
 		let e = match target {
 			Content::Elem(e)	=> Arc::make_mut(e),
 			_					=> return Ok(None),
@@ -595,8 +597,6 @@ impl State<'_> {
 		if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
 			e.location = Some(self.engine.locator.locate(e.kind, e.span));
 		}
-		// Built-in show-set styles sit outside the user's, which override them.
-		let builtin = res!(content::show_set(e.kind, styles));
 		map.apply_outer(&builtin);
 		let chain = styles.chain(map);
 		for (i, spec) in e.kind.fields().iter().enumerate() {

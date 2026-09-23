@@ -620,6 +620,7 @@ impl Content {
 pub fn fold_custom(kind: ElemKind, field: &str, inner: Value, outer: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::fold(kind, field, inner, outer),
+		Family::Model	=> lib::model::fold(kind, field, inner, outer),
 		_				=> Err(err!(
 			"`{}.{}` is declared `Fold::Custom`, but its family has no fold in `content::fold_custom`",
 			kind.path(), field; Unimplemented)),
@@ -734,31 +735,37 @@ pub fn native_show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> 
 pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::cast_field(kind, name, v),
+		Family::Model	=> lib::model::cast_field(kind, name, v),
 		_				=> Ok(v),
 	}
 }
 
 /// An element's built-in show-set styles, Typst's `ShowSet`: applied outside the user's own show-set
 /// rules when the element is prepared, so a heading's weight is visible to `show heading: it => ..`
-/// and a user rule still overrides it. A family whose elements have them gains an arm here.
-pub fn show_set(kind: ElemKind, _styles: &StyleChain) -> Outcome<Styles> {
+/// and a user rule still overrides it. The styles may depend on the element's own fields (a heading's
+/// level), so the element is passed. A family whose elements have them gains an arm here.
+pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
+	let kind = match elem.kind() {
+		Some(k)	=> k,
+		None	=> return Ok(Styles::new()),
+	};
 	match kind.family() {
-		// None has built-in show-set styles yet.
-		Family::Text | Family::Model | Family::Layout | Family::Grid | Family::Visual | Family::Math
+		Family::Model	=> lib::model::show_set(elem, styles),
+		Family::Text | Family::Layout | Family::Grid | Family::Visual | Family::Math
 			| Family::Intro | Family::Realise	=> Ok(Styles::new()),
 	}
 }
 
 /// Fills an element's synthesised fields once its styles are known, Typst's `Synthesize`: a heading's
 /// resolved numbering, a figure's kind and supplement. A family with such fields gains an arm here.
-pub fn synthesise(_engine: &mut Engine, elem: &mut Content, _styles: &StyleChain) -> Outcome<()> {
+pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
 	let family = match elem.kind() {
 		Some(k)	=> k.family(),
 		None	=> return Ok(()),
 	};
 	match family {
-		// None synthesises fields yet.
-		Family::Text | Family::Model | Family::Layout | Family::Grid | Family::Visual | Family::Math
+		Family::Model	=> lib::model::synthesise(engine, elem, styles),
+		Family::Text | Family::Layout | Family::Grid | Family::Visual | Family::Math
 			| Family::Intro | Family::Realise	=> Ok(()),
 	}
 }
