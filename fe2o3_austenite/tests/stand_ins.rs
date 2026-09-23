@@ -16,6 +16,8 @@ use oxedyne_fe2o3_austenite::memo::Memo;
 use oxedyne_fe2o3_austenite::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::pixmap::Pixmap;
 
 use std::collections::HashMap;
 use std::path::{
@@ -276,5 +278,42 @@ fn an_edge_a_diagram_cannot_place_is_refused() -> Outcome<()> {
 	assert_eq!((d.severity, d.kind, d.line), (Severity::Warning, DiagnosticKind::Unsupported, 3), "{}", d);
 	assert!(d.message.contains("is drawn without an edge written before any node"), "{}", d);
 	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
+	Ok(())
+}
+
+/// The live view's authoring memo keys a block by what the images it draws hold, not only by their names:
+/// an image deleted, corrupted or supplied again between two compiles through one memo is authored afresh
+/// and reported as it now stands, never served from a cache made when it was otherwise; an unchanged image
+/// is still served from the memo.
+#[test]
+fn a_memo_hit_follows_what_a_blocks_images_hold() -> Outcome<()> {
+	let _turn	= turn();
+	let src		= b"= H\n\n#figure(image(\"pic.png\"), caption: [Pic.])\n\nBody.\n";
+	let png		= res!(res!(Pixmap::filled(8, 8, Rgba::opaque(200, 0, 0))).to_png());
+	let present: [(&str, &[u8]); 2]		= [(MAIN, &src[..]), ("/proj/pic.png", &png[..])];
+	let deleted: [(&str, &[u8]); 1]		= [(MAIN, &src[..])];
+	let corrupt: [(&str, &[u8]); 2]		= [(MAIN, &src[..]), ("/proj/pic.png", BAD_PNG)];
+	let mut memo = Memo::new();
+
+	let first = res!(report_of(MAIN, &present, Some(&mut memo)));
+	memo.sweep();
+	assert!(first.diagnostics.is_empty(), "{:?}", first.diagnostics);
+	let hits = memo.block_hits;
+	let again = res!(report_of(MAIN, &present, Some(&mut memo)));
+	memo.sweep();
+	assert!(again.diagnostics.is_empty() && memo.block_hits > hits, "an unchanged image is served from the memo");
+
+	let gone = res!(report_of(MAIN, &deleted, Some(&mut memo)));
+	memo.sweep();
+	let d = res!(site(&gone, "\"pic.png\""));
+	assert_eq!(d.kind, DiagnosticKind::MissingFile, "a deleted image is missing, not served stale: {}", d);
+
+	let bad = res!(report_of(MAIN, &corrupt, Some(&mut memo)));
+	memo.sweep();
+	let d = res!(site(&bad, "\"pic.png\""));
+	assert!(d.kind == DiagnosticKind::Unsupported && d.message.contains("will not load"), "{}", d);
+
+	let back = res!(report_of(MAIN, &present, Some(&mut memo)));
+	assert!(back.diagnostics.is_empty(), "an image supplied again is drawn: {:?}", back.diagnostics);
 	Ok(())
 }

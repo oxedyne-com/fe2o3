@@ -857,6 +857,25 @@ struct Authoring<'a> {
 	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
 	global_fp:		u64,			// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
 	answers:		Vec<Answered>,	// every answer a setter gave, in document order; a memo hit replays its block's
+	assets:			HashMap<String, u64>,	// each image path's fingerprint this compile ([`asset_fp`]), read once
+}
+
+/// The fingerprint of the image at `path` as it now stands: the file it resolves to and its bytes, or a
+/// mark that no file answers to it, or that the file will not read.
+fn asset_fp(path: &str) -> u64 {
+	let mut h = Fnv::new();
+	match crate::image::resolve(path) {
+		Ok(Some(file)) => {
+			h.write_str(&file.display().to_string());
+			match crate::vfs::read(&file) {
+				Ok(bytes)	=> h.write(&bytes),
+				Err(_)		=> h.write(b"unreadable"),
+			}
+		},
+		Ok(None)	=> h.write(b"missing"),
+		Err(_)		=> h.write(b"unresolved"),
+	}
+	h.finish()
 }
 
 /// The document-order state a run of inline content is set against -- the footnote, reference and margin
@@ -949,6 +968,7 @@ impl<'a> Authoring<'a> {
 			claim_index_at:		None,
 			global_fp,
 			answers:			Vec::new(),
+			assets:				HashMap::new(),
 		}
 	}
 
@@ -1145,7 +1165,8 @@ impl<'a> Authoring<'a> {
 				} else {
 					None
 				};
-				let key = self.block_key(&blocks[i], look);
+				let assets	= self.assets_fp(&blocks[i]);
+				let key		= self.block_key(&blocks[i], look, assets);
 				if let Some(m) = memo.as_deref_mut() {
 					if let Some(entry) = m.block_lookup(key) {
 						let consume = entry.consume;
@@ -1739,7 +1760,7 @@ impl<'a> Authoring<'a> {
 	/// counter state it enters under. Two compiles that reach a block with the same content and the same
 	/// entering state produce byte-identical nodes, so they must share a key; an edit that shifts any of
 	/// those must not.
-	fn block_key(&self, block: &Block, look: Option<&Block>) -> u64 {
+	fn block_key(&self, block: &Block, look: Option<&Block>, assets: u64) -> u64 {
 		let mut h = Fnv::new();
 		h.write(b"block");
 		h.write_u64(self.global_fp);
@@ -1747,14 +1768,40 @@ impl<'a> Authoring<'a> {
 		// The block's full content. The derived `Debug` is a faithful, total structural rendering -- it can
 		// never silently drop a field the way a hand-written walker can -- and no type reachable from a
 		// `Block` carries a lossy `Debug` (the one that summarises, `ShapedText`, appears only after
-		// authoring, in `Node`). Formatting a block's `Debug` costs a fraction of shaping and breaking it.
+		// authoring, in `Node`), save [`Site`], which on purpose names no position: where a block was written
+		// does not change what it sets. Formatting a block's `Debug` costs a fraction of shaping and breaking it.
 		h.write_str(&fmt!("{:?}", block));
 		if let Some(la) = look {
 			h.write_str(&fmt!("{:?}", la));
 		}
+		// What the block's images hold, not only their names: an image replaced, deleted or supplied under
+		// the same path changes what the block sets, so it must miss.
+		h.write_u64(assets);
 		self.block_state().hash_into(&mut h);
 		h.write_u64(self.seen_hash());
 		h.write_u64(self.counters_hash());
+		h.finish()
+	}
+
+	/// A fingerprint of every image `block` draws, as each now stands: the file its path resolves to and
+	/// that file's bytes, or that none answers to it. Each file is read and hashed once per compile.
+	fn assets_fp(&mut self, block: &Block) -> u64 {
+		let mut asks = Vec::new();
+		asks_of(std::slice::from_ref(block), &mut asks);
+		let mut h = Fnv::new();
+		for (_, what) in &asks {
+			if let Asked::Image { path, .. } = what {
+				let fp = match self.assets.get(path) {
+					Some(fp)	=> *fp,
+					None		=> {
+						let fp = asset_fp(path);
+						self.assets.insert(path.clone(), fp);
+						fp
+					},
+				};
+				h.write_u64(fp);
+			}
+		}
 		h.finish()
 	}
 
