@@ -84,6 +84,9 @@ pqcrypto-traits = { version = "0.3.4", optional = true }
 rand_core = { version = "0.6.3", features = ["std"] }
 rand = { version = "0.8.4" }
 secrecy = "0.8.0"
+# SHA-512 for linkring's RFC 9380 hash to ristretto255. Already compiled
+# for ed25519-dalek, so nothing new is built.
+sha2 = { version = "0.10", default-features = false }
 tiny-keccak = { version = "2.0.2", features = ["sha3", "shake"] }
 wasm-bindgen = "0.2.71"
 zeroize = { version = "1.4.2", features = ["zeroize_derive"] }
