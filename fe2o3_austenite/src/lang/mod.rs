@@ -21,9 +21,6 @@ pub mod set;
 use crate::doc::Block;
 use crate::doc::Segment;
 
-pub use parse::Ask;
-pub use parse::Asked;
-pub use parse::ImageRole;
 pub use parse::Refusal;
 pub use parse::RefusalClass;
 pub use parse::Refusals;
@@ -59,6 +56,11 @@ pub fn inline_segments(text: &str) -> Vec<Segment> {
 	lower::lower_runs(&parse::parse_inlines(text))
 }
 
+/// As [`inline_segments`], each run that asks for something answered for at `site`.
+pub fn inline_segments_in(text: &str, site: &crate::ir::Site) -> Vec<Segment> {
+	lower::lower_runs_in(&parse::parse_inlines(text), site)
+}
+
 /// Parses Typst source and lowers it to the block list the driver authors from, in one step. The usual
 /// entry point: a caller that wants the surface tree in between reaches for [`parse::document`] and
 /// [`lower::blocks`] directly, and one that wants the report of skipped constructs reaches for
@@ -85,6 +87,16 @@ pub fn to_blocks_with_refusals(src: &str) -> Outcome<(Vec<Block>, Refusals)> {
 pub fn to_blocks_with_templates(src: &str, binds: rules::Bindings) -> Outcome<(Vec<Block>, Refusals)> {
 	let (items, skips) = res!(parse::document_with_templates(src, binds));
 	Ok((lower::blocks(&items), skips))
+}
+
+/// As [`to_blocks_with_templates`], for text read from `file` starting at byte `at` of it: every site the
+/// parse records, and every construct in the blocks that asks for something, stands at its place in the
+/// file.
+pub fn to_blocks_in(src: &str, binds: rules::Bindings, file: &str, at: u32) -> Outcome<(Vec<Block>, Refusals)> {
+	let (items, mut skips) = res!(parse::document_with_templates(src, binds));
+	skips.shift(at);
+	skips.tag_file(file);
+	Ok((lower::blocks_in(&items, &lower::SiteBase::new(file, at)), skips))
 }
 
 #[cfg(test)]

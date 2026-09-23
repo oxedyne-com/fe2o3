@@ -16,10 +16,9 @@
 //! several lines simply contributes to several bands. The whole grid is thus leaves in HBoxes stacked
 //! in one VBox, which is the only shape the driver draws as real glyphs throughout.
 
-use crate::bib::Bibliography;
 use crate::doc::{
-	ClaimGather,
-	IndexGather,
+	Claims,
+	Runs,
 	Segment,
 	build_pieces,
 };
@@ -58,10 +57,6 @@ use oxedyne_fe2o3_graphics::{
 	},
 };
 
-use std::collections::{
-	HashMap,
-	HashSet,
-};
 use std::sync::Arc;
 
 /// How a cell's text sits within its column width.
@@ -183,14 +178,7 @@ fn table_row_groups(
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<(Vec<(Vec<Node>, Sp)>, Sp)>
 {
@@ -244,7 +232,7 @@ fn table_row_groups(
 	// so a plain header label still sets bold, and body elsewhere.
 	let (piece_grid, bases) = res!(build_grid(
 		fonts.clone(), geom, style, table, ncols,
-		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+		runs));
 	let colwidth = res!(size_columns(
 		fonts.clone(), size, &piece_grid, &bases, ncols, available, &table.weights));
 
@@ -368,20 +356,13 @@ pub fn lower(
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Node>
 {
 	let (groups, table_width) = res!(table_row_groups(
 		fonts, geom, style, measure, table,
-		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+		runs));
 	let mut children:	Vec<Node> = Vec::new();
 	let mut total_h		= Sp::ZERO;
 	for (nodes, h) in groups {
@@ -414,20 +395,13 @@ pub fn lower_rows(
 	style: &Theme,
 	measure:	Sp,
 	table:		&Table,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Vec<Node>>
 {
 	let (groups, table_width) = res!(table_row_groups(
 		fonts, geom, style, measure, table,
-		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+		runs));
 	let mut out: Vec<Node> = Vec::with_capacity(groups.len() * 2 + 2);
 	let mut groups = groups.into_iter();
 
@@ -513,14 +487,7 @@ fn build_grid(
 	style: &Theme,
 	table:		&Table,
 	ncols:		usize,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<(Vec<Vec<Vec<Piece>>>, Vec<Role>)>
 {
@@ -532,9 +499,7 @@ fn build_grid(
 		let mut cols = Vec::with_capacity(ncols);
 		for c in 0..ncols {
 			let pieces = match row.cells.get(c) {
-				Some(cell)	=> res!(build_pieces(
-					fonts.clone(), geom, style, &cell.content, base,
-					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs)),
+				Some(cell)	=> res!(build_pieces(fonts.clone(), geom, style, &cell.content, base, Claims::Gathered, runs)),
 				None		=> Vec::new(),
 			};
 			cols.push(pieces);
@@ -997,7 +962,13 @@ fn push_hrule(children: &mut Vec<Node>, total_h: &mut Sp, width: Sp, thick: Sp) 
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::bib::Bibliography;
 	use crate::theme::Theme;
+
+	use std::collections::{
+		HashMap,
+		HashSet,
+	};
 
 	/// The cell cap-edge (Unit D3-B) shortens a one-line 9pt glossary cell from the face
 	/// ascender/descender extent to the cap-height/baseline extent Typst measures against. This both
@@ -1055,11 +1026,12 @@ mod tests {
 		let geom	= PageGeometry::a4();
 		let bib		= res!(Bibliography::parse(CELL_BIB));
 
+		let site = crate::ir::Site::none();
 		let cell = Cell::rich(vec![
 			Segment::text("See "),
-			Segment::cite(vec!["scott1976moral".to_string()]),
-			Segment::index("Peasant economy", None, false, vec![Segment::text("Peasant economy")]),
-			Segment::margin_note("", vec!["C7".to_string()]),
+			Segment::cite(vec!["scott1976moral".to_string()], site.clone()),
+			Segment::index("Peasant economy", None, false, vec![Segment::text("Peasant economy")], site.clone()),
+			Segment::margin_note("", vec!["C7".to_string()], site),
 		], Align::Left);
 		let table = Table::new(false, vec![Row::new(vec![cell])]);
 
@@ -1067,13 +1039,23 @@ mod tests {
 		let mut ref_no		= 0u32;
 		let mut margin_no	= 0u32;
 		let mut seen:		HashSet<String>			= HashSet::new();
-		let mut idx			= IndexGather::default();
-		let mut claim		= ClaimGather::default();
+		let mut idx			= crate::doc::IndexGather::default();
+		let mut claim		= crate::doc::ClaimGather::default();
 		let refs:			HashMap<String, String>	= HashMap::new();
+		let mut answers		= Vec::new();
 
-		let (grid, _bases) = res!(build_grid(
-			fonts, geom, &style, &table, 1,
-			&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, Some(&bib), &refs));
+		let (grid, _bases) = res!(build_grid(fonts, geom, &style, &table, 1, &mut Runs {
+			foot_no:	&mut foot_no,
+			ref_no:		&mut ref_no,
+			margin_no:	&mut margin_no,
+			seen:		&mut seen,
+			idx:		&mut idx,
+			claim:		&mut claim,
+			bib:		Some(&bib),
+			refs:		&refs,
+			answers:	&mut answers,
+		}));
+		assert_eq!(answers.len(), 3, "the citation, the index marker and the claim reference are each answered");
 
 		// The citation renders to its Chicago author-year form, not the bracketed raw key.
 		let texts: Vec<&str> = grid[0][0].iter().filter_map(|p| match p {

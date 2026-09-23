@@ -158,91 +158,13 @@ pub struct Refusal {
 	pub note:	Option<String>,	// for a site set with a stand-in, what went wrong and what stands in its place
 }
 
-/// What a construct asked for that only a later stage can say it got: an image authoring loads, a figure
-/// it draws, a label the laid-out document places, a key the bibliography holds. The reader records each
-/// where it is written; the compile joins them with what authoring reports and records a site for every
-/// one that fell back ([`crate::compile::record_fallbacks`]).
-#[derive(Clone, Debug)]
-pub struct Ask {
-	pub what:	Asked,
-	pub span:	Span,
-	pub file:	String,
-}
-
-/// The thing an [`Ask`] asks for.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Asked {
-	Image { path: String, role: ImageRole },
-	Figure { fingerprint: u64, name: &'static str },	// a figure drawn by code, known by its content
-	Ref(String),		// a label, from `@label`
-	Cite(Vec<String>),	// the keys of a `#cite`
-}
-
-/// Where an asked-for image is drawn, which decides what stands in when it cannot be.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ImageRole {
-	Figure,			// a `#figure(image(...))`, or a line-leading `#image`/`#padded-image`
-	BannerLogo,		// a `#section-banner`'s logo
-	Cover,			// a book's cover raster
-	TitleLogo,		// a logo on the title page
-	FooterLogo,		// the logo a documentation tree seats in its footers
-}
-
-impl ImageRole {
-	/// The words naming the image in a diagnostic.
-	fn noun(&self) -> &'static str {
-		match self {
-			ImageRole::Figure		=> "image",
-			ImageRole::BannerLogo	=> "banner logo",
-			ImageRole::Cover		=> "cover image",
-			ImageRole::TitleLogo	=> "title-page logo",
-			ImageRole::FooterLogo	=> "footer logo",
-		}
-	}
-
-	/// What is set in the image's place.
-	fn stand_in(&self) -> &'static str {
-		match self {
-			ImageRole::Figure		=> "a placeholder is set",
-			ImageRole::BannerLogo	=> "the banner is drawn without it",
-			ImageRole::Cover		=> "no cover page is set",
-			ImageRole::TitleLogo	=> "the title page is set without it",
-			ImageRole::FooterLogo	=> "the footers are set without it",
-		}
-	}
-}
-
-impl Asked {
-	/// The site's name, as a diagnostic and a summary line give it.
-	pub fn name(&self) -> String {
-		match self {
-			Asked::Image { path, role }	=> fmt!("{} {:?}", role.noun(), path),
-			Asked::Figure { name, .. }	=> fmt!("#figure ({})", name),
-			Asked::Ref(label)			=> fmt!("@{}", label),
-			Asked::Cite(keys)			=> fmt!("#cite({})", keys.iter().map(|k| fmt!("<{}>", k)).collect::<Vec<_>>().join(", ")),
-		}
-	}
-
-	/// What stands in when an image cannot be drawn: `missing` for a file the project does not hold,
-	/// `reason` otherwise. `None` for an ask that is no image.
-	pub fn image_note(&self, missing: bool, reason: &str) -> Option<String> {
-		match self {
-			Asked::Image { role, .. } if missing	=> Some(fmt!("is not in the project, so {}", role.stand_in())),
-			Asked::Image { role, .. }				=> Some(fmt!("will not load ({}), so {}", reason, role.stand_in())),
-			_										=> None,
-		}
-	}
-}
-
 /// Every site not set as written across one parse (or, once [`Refusals::merge`] has folded chapters
-/// together, across a whole compile), and what the parse asked for that a later stage must confirm. Kept
-/// as a flat list of [`Refusal`]s rather than the old name-keyed tally, so a caller can still print the
-/// terse one-line [`Refusals::skip_line`] but can also walk every site for `--explain`'s per-site listing.
-/// Empty when the reader set everything it met.
+/// together, across a whole compile). Kept as a flat list of [`Refusal`]s rather than the old name-keyed
+/// tally, so a caller can still print the terse one-line [`Refusals::skip_line`] but can also walk every
+/// site for `--explain`'s per-site listing. Empty when the reader set everything it met.
 #[derive(Clone, Debug, Default)]
 pub struct Refusals {
 	sites:	Vec<Refusal>,
-	asks:	Vec<Ask>,
 }
 
 impl Refusals {
@@ -276,59 +198,33 @@ impl Refusals {
 		});
 	}
 
-	/// Records what a construct asks for, for a later stage to confirm ([`Ask`]).
-	pub(crate) fn ask(&mut self, what: Asked, span: Span) {
-		self.asks.push(Ask { what, span, file: String::new() });
-	}
-
-	/// As [`Self::ask`], for a construct already known to stand in `file`.
-	pub(crate) fn ask_in(&mut self, file: &str, what: Asked, span: Span) {
-		self.asks.push(Ask { what, span, file: file.to_string() });
-	}
-
 	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
 	/// the parser) that wants a known `Refusals` without driving a real parse to produce one.
 	pub fn from_sites(sites: Vec<Refusal>) -> Self {
-		Self { sites, asks: Vec::new() }
+		Self { sites }
 	}
 
 	pub fn is_empty(&self) -> bool { self.sites.is_empty() }
 
-	/// Sets every site's and ask's `file` that is not already set, so a caller parsing a file's source tags
-	/// the parse's table with the file's path at once, before it joins any other file's.
+	/// Sets every site's `file` that is not already set, so a caller parsing a file's source tags the
+	/// parse's table with the file's path at once, before it joins any other file's.
 	pub fn tag_file(&mut self, file: &str) {
 		for r in &mut self.sites {
 			if r.file.is_empty() {
 				r.file = file.to_string();
 			}
 		}
-		for a in &mut self.asks {
-			if a.file.is_empty() {
-				a.file = file.to_string();
-			}
-		}
 	}
 
-	/// Moves every site and ask on by `by` bytes, placing a parse of a fragment in the file it was cut from.
+	/// Moves every site on by `by` bytes, placing a parse of a fragment in the file it was cut from.
 	pub(crate) fn shift(&mut self, by: u32) {
 		for r in &mut self.sites {
 			r.span = Span::new(r.span.start.saturating_add(by), r.span.end.saturating_add(by));
-		}
-		for a in &mut self.asks {
-			a.span = Span::new(a.span.start.saturating_add(by), a.span.end.saturating_add(by));
 		}
 	}
 
 	/// Every site not set as written, in the order they were met.
 	pub fn sites(&self) -> &[Refusal] { &self.sites }
-
-	/// Everything the table's parses asked for, in the order they were met.
-	pub fn asks(&self) -> &[Ask] { &self.asks }
-
-	/// Takes the asks out, for the stage that answers them.
-	pub(crate) fn take_asks(&mut self) -> Vec<Ask> {
-		std::mem::take(&mut self.asks)
-	}
 
 	/// The number of distinct construct names passed over.
 	pub fn kinds(&self) -> usize { self.entries().len() }
@@ -352,7 +248,6 @@ impl Refusals {
 	/// just-parsed chapter's refusals into the book's running total has no further use for its own copy.
 	pub fn merge(&mut self, other: Refusals) {
 		self.sites.extend(other.sites);
-		self.asks.extend(other.asks);
 	}
 
 	/// The terse line of the constructs passed over -- `skipped: #show ×2, #columns ×1` -- ordered as
@@ -429,115 +324,6 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 	document_with_templates(src, crate::lang::rules::Bindings::new(&tfns, &cfns))
 }
 
-/// Records a refusal for every claim reference (`#claim-refs`/`#claim-label`) that sits in a context the
-/// layout does not gather into the reverse claim index. A top-level body run -- a paragraph, a list entry, a
-/// callout body -- and a table cell both feed the index (see `doc::build_pieces`, reached for a cell through
-/// `doc::build_grid`); a claim code in a heading title, a figure or table caption, or a footnote body is
-/// dropped by the layout, so it would otherwise vanish from the index (and, for a `#claim-label`, from the
-/// margin) with no trace. Making that a refusal keeps the silent-loss class this project guards against out
-/// of the reverse index. Gathering from a heading or caption needs anchor support there and is a later
-/// increment; until then the code is reported, not dropped.
-fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
-	for item in items {
-		match item {
-			// A body run and a list entry are gathered; only a claim reference nested inside a footnote of one
-			// escapes the index, so the top-level runs are scanned as indexed and their footnotes are not.
-			Item::Paragraph { runs, span, .. }	=> scan_claim_refs(runs, true, *span, "a paragraph", skips),
-			Item::List { items: entries, .. }	=> for e in entries { flag_list_item_claim_refs(e, skips); },
-			// A callout body is gathered like the main flow; recurse so a claim reference in it is indexed and
-			// only its non-body sub-contexts (a caption, a footnote) are flagged.
-			Item::Box { items: inner, .. }		=> flag_unindexed_claim_refs(inner, skips),
-			Item::Scoped { items: inner, .. }	=> flag_unindexed_claim_refs(inner, skips),
-			// A heading title and a caption are still not gathered, so a claim reference in either is refused.
-			// A table cell now runs through the body's own segment pipeline (`doc::build_grid` ->
-			// `doc::build_pieces`), which weaves the cell's `#claim-refs`/`#claim-label` anchor into the reverse
-			// claim index exactly as a body run does, so it is no longer refused.
-			Item::Heading { runs, span, .. }	=> scan_claim_refs(runs, false, *span, "a heading title", skips),
-			Item::Figure { caption, span, .. } => {
-				if let Some(cap) = caption {
-					scan_claim_refs(cap, false, *span, "a figure caption", skips);
-				}
-			},
-			_ => {},
-		}
-	}
-}
-
-/// Records what each item asks for that only a later stage can confirm ([`Ask`]): the image a figure, a
-/// plain `#image` or a section banner draws, a figure drawn by code, and every `@label` and `#cite` in an
-/// item's runs -- a paragraph's, a heading's, a list's, a caption's or a table cell's -- at the item. A
-/// figure whose body is none this reader draws asks for nothing and is set as a placeholder, so it is
-/// recorded here at once.
-fn flag_asks(items: &[Item], skips: &mut Refusals) {
-	for item in items {
-		match item {
-			Item::Figure { body, caption, span, .. } => {
-				match body {
-					FigureBody::Image { path, .. } if path.is_empty()	=> skips.record_stand_in("#figure", *span,
-						RefusalClass::Unusable, "has no image, table or diagram this reader draws, so a placeholder is set"),
-					FigureBody::Image { path, .. }	=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::Figure }, *span),
-					FigureBody::Code(cf)			=> skips.ask(Asked::Figure { fingerprint: cf.fingerprint(), name: cf.kind_name() }, *span),
-					FigureBody::Table(spec)			=> for cell in &spec.cells { ask_runs(cell, *span, skips); },
-				}
-				if let Some(cap) = caption {
-					ask_runs(cap, *span, skips);
-				}
-			},
-			Item::Image { path, span, .. }		=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::Figure }, *span),
-			Item::SectionBanner { path, span }	=> skips.ask(Asked::Image { path: path.clone(), role: ImageRole::BannerLogo }, *span),
-			Item::Paragraph { runs, span, .. }
-			| Item::Heading { runs, span, .. }	=> ask_runs(runs, *span, skips),
-			Item::List { items: entries, span, .. }	=> for e in entries { ask_list_item(e, *span, skips); },
-			Item::Table { spec, span }			=> for cell in &spec.cells { ask_runs(cell, *span, skips); },
-			Item::Box { items: inner, .. }
-			| Item::Scoped { items: inner, .. }
-			| Item::Place { items: inner, .. }	=> flag_asks(inner, skips),
-			_									=> {},
-		}
-	}
-}
-
-/// [`flag_asks`] for one list entry: its own runs at the list, and the lists nested beneath it.
-fn ask_list_item(entry: &ListItem, span: Span, skips: &mut Refusals) {
-	ask_runs(&entry.runs, span, skips);
-	flag_asks(&entry.children, skips);
-}
-
-/// Asks for the label of every `@label` and the keys of every `#cite` in `runs`, a footnote's included.
-fn ask_runs(runs: &[Inline], span: Span, skips: &mut Refusals) {
-	for run in runs {
-		match run {
-			Inline::PageRef(label)			=> skips.ask(Asked::Ref(label.clone()), span),
-			Inline::Cite(keys)				=> skips.ask(Asked::Cite(keys.clone()), span),
-			Inline::Footnote(inner)			=> ask_runs(inner, span, skips),
-			Inline::Index { display, .. }	=> ask_runs(display, span, skips),
-			_								=> {},
-		}
-	}
-}
-
-/// [`flag_unindexed_claim_refs`] for one list entry: its own runs are gathered (indexed), and its nested
-/// child items are walked as their own contexts.
-fn flag_list_item_claim_refs(entry: &ListItem, skips: &mut Refusals) {
-	scan_claim_refs(&entry.runs, true, Span::new(0, 0), "a list entry", skips);
-	flag_unindexed_claim_refs(&entry.children, skips);
-}
-
-/// Scans an inline run for claim references and records a refusal for each that will not reach the reverse
-/// index. `indexed` is true for a top-level body run (a paragraph, list entry or callout body), where a
-/// claim reference IS gathered and so is left alone; a footnote body is never gathered, so its own runs are
-/// always scanned as unindexed regardless of where the footnote sits.
-fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, skips: &mut Refusals) {
-	for run in runs {
-		match run {
-			Inline::MarginNote { codes, .. } if !indexed && !codes.is_empty() =>
-				skips.record(&fmt!("claim reference in {} is not indexed", context), span),
-			Inline::Footnote(inner) => scan_claim_refs(inner, false, span, "a footnote body", skips),
-			_ => {},
-		}
-	}
-}
-
 /// As [`document_with_refusals`], with the `#let` bindings (`binds`) in scope: a call to a furniture
 /// function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- expands into a padded box, and a
 /// reference to a content binding -- `#greet("world")`, a bare `#intro` -- expands into its re-read markup,
@@ -545,17 +331,12 @@ fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, sk
 /// so a call nested inside another's body expands too. With empty maps this is exactly
 /// [`document_with_refusals`].
 ///
-/// After the surface tree is built, [`flag_unindexed_claim_refs`] records a refusal for any claim reference
-/// that landed in a context the layout does not gather into the reverse claim index. This runs once, on the
-/// whole assembled tree -- the recursive re-parse of a `#columns`/`#styled-box` body reaches for
-/// [`parse_items`] directly, so a nested claim reference is flagged once here rather than again per level.
+/// A claim reference in a context the reverse claim index does not gather -- a heading title, a caption, a
+/// footnote body -- is answered where it is set ([`crate::doc::asks_of`]), not judged here.
 pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
-	let (items, mut skips) = res!(parse_items(src, binds));
-	flag_unindexed_claim_refs(&items, &mut skips);
-	flag_asks(&items, &mut skips);
-	Ok((items, skips))
+	parse_items(src, binds)
 }
 
 /// The surface-tree parse proper, without the [`flag_unindexed_claim_refs`] post-pass -- so a recursively
@@ -2963,12 +2744,20 @@ fn dispatch_capture(
 			match parse_figure(&cap.buf, arrays, at) {
 				Some((item, without)) => {
 					// A figure drawn by code is drawn with what the reader could place; each thing it is drawn
-					// without is refused where the figure stands.
-					if let Item::Figure { body: FigureBody::Code(cf), .. } = &item {
-						for w in &without {
-							skips.record_stand_in(&fmt!("#figure ({})", cf.kind_name()), at,
-								RefusalClass::Unsupported, &fmt!("is drawn without {}", w));
-						}
+					// without is refused where the figure stands. A figure whose body is none this reader draws
+					// is set as a placeholder, and recorded at once.
+					match &item {
+						Item::Figure { body: FigureBody::Code(cf), .. } => {
+							for w in &without {
+								skips.record_stand_in(&fmt!("#figure ({})", cf.kind_name()), at,
+									RefusalClass::Unsupported, &fmt!("is drawn without {}", w));
+							}
+						},
+						Item::Figure { body: FigureBody::Image { path, .. }, .. } if path.is_empty() => {
+							skips.record_stand_in("#figure", at, RefusalClass::Unusable,
+								"has no image, table or diagram this reader draws, so a placeholder is set");
+						},
+						_ => {},
 					}
 					items.push(item);
 				},
@@ -5066,20 +4855,6 @@ mod tests {
 		assert!(code_skip("#claim-label(<CD18>). Equilibrium appropriation follows.").is_none());
 	}
 
-	/// A claim reference in a context the layout does not gather into the reverse claim index -- here a
-	/// heading title -- is recorded as a refusal rather than dropped silently, while the same reference in a
-	/// body paragraph (which IS gathered) draws no refusal. Guards the silent-loss path the audit flagged.
-	#[test]
-	fn claim_ref_in_a_non_body_context_is_refused_not_dropped() {
-		let (_items, skips) = document_with_refusals("= Heading #claim-refs(<Z9>) here\n\nBody text follows.\n").expect("parse");
-		assert!(skips.sites().iter().any(|s| s.name.contains("claim reference") && s.name.contains("heading")),
-			"a claim reference in a heading title must be a refusal: {:?}", skips.sites());
-		// A claim reference in a body paragraph is gathered into the index, so it is NOT refused.
-		let (_i2, skips2) = document_with_refusals("Body carrying a reference#claim-refs(<Z9>) here.\n").expect("parse");
-		assert!(!skips2.sites().iter().any(|s| s.name.contains("claim reference")),
-			"a body claim reference is indexed, not refused: {:?}", skips2.sites());
-	}
-
 	/// A line-leading `#padded-image(...)` (a section opener's logo) is set as an [`Item::Image`] carrying
 	/// its path and scale, not skipped as a template call and not wrapped in a numbered figure.
 	#[test]
@@ -6246,28 +6021,34 @@ bound\".\n";
 		Ok(())
 	}
 
-	/// The reader asks for what only a later stage can confirm -- a figure's image, a plain image, a banner's
-	/// logo, a drawn figure, and every `@label` and `#cite` in a paragraph, a heading, a caption or a table
-	/// cell -- each at its item, and refuses at once a construct it cannot read, which sets nothing.
+	/// Every construct that asks for something only setting it can give -- a figure's image, a plain image, a
+	/// banner's logo, a drawn figure, and every `@label`, `#cite`, footnote and maths span in a paragraph, a
+	/// heading, a caption or a table cell -- carries the site of its item in its file, and the reader refuses
+	/// at once a construct it cannot read, which sets nothing.
 	#[test]
-	fn the_reader_asks_for_what_a_later_stage_confirms() -> Outcome<()> {
+	fn every_construct_that_asks_carries_its_site() -> Outcome<()> {
+		use crate::doc::{Asked, ImageRole};
 		let src = "= Title @head\n\n#figure(image(\"a.png\"), caption: [See @cap.])\n\n#image(\"b.png\")\n\n\
-			#section-banner(\"c.svg\")\n\nA #cite(<k1>, <k2>) and @para.\n\n\
+			#section-banner(\"c.svg\")\n\nA #cite(<k1>, <k2>) and @para#footnote[$x$].\n\n\
 			#figure(diagram(node((0, 0), [A]), edge(), node((0, 1), [B])), caption: [Flow.])\n";
-		let (_, skips) = res!(document_with_refusals(src));
-		let asked: Vec<&Asked> = skips.asks().iter().map(|a| &a.what).collect();
-		for want in [
-			Asked::Ref("head".to_string()),
-			Asked::Image { path: "a.png".to_string(), role: ImageRole::Figure },
-			Asked::Ref("cap".to_string()),
-			Asked::Image { path: "b.png".to_string(), role: ImageRole::Figure },
-			Asked::Image { path: "c.svg".to_string(), role: ImageRole::BannerLogo },
-			Asked::Cite(vec!["k1".to_string(), "k2".to_string()]),
-			Asked::Ref("para".to_string()),
-		] {
-			assert!(asked.contains(&&want), "{:?} is asked for: {:?}", want, asked);
-		}
-		assert!(asked.iter().any(|a| matches!(a, Asked::Figure { name: "diagram", .. })), "{:?}", asked);
+		let (items, skips)	= res!(document_with_refusals(src));
+		let blocks			= crate::lang::lower::blocks_in(&items, &crate::lang::lower::SiteBase::new("/p/a.typ", 100));
+		let mut asks		= Vec::new();
+		crate::doc::asks_of(&blocks, &mut asks);
+		let at = |needle: &str| src.find(needle).map_or(0, |p| p as u32 + 100);
+		let got: Vec<(&str, u32, &Asked)> = asks.iter().map(|(site, what)| (&*site.file, site.span.start, what)).collect();
+		assert_eq!(got, [
+			("/p/a.typ", at("= Title"), &Asked::Ref("head".to_string())),
+			("/p/a.typ", at("#figure(image"), &Asked::Image { path: "a.png".to_string(), role: ImageRole::Figure }),
+			("/p/a.typ", at("#figure(image"), &Asked::Ref("cap".to_string())),
+			("/p/a.typ", at("#image(\"b"), &Asked::Image { path: "b.png".to_string(), role: ImageRole::Figure }),
+			("/p/a.typ", at("#section-banner"), &Asked::Image { path: "c.svg".to_string(), role: ImageRole::BannerLogo }),
+			("/p/a.typ", at("A #cite"), &Asked::Cite(vec!["k1".to_string(), "k2".to_string()])),
+			("/p/a.typ", at("A #cite"), &Asked::Ref("para".to_string())),
+			("/p/a.typ", at("A #cite"), &Asked::Footnote),
+			("/p/a.typ", at("A #cite"), &Asked::Math),
+			("/p/a.typ", at("#figure(diagram"), &Asked::Figure { kind: "diagram" }),
+		]);
 		assert!(skips.is_empty(), "asking refuses nothing: {:?}", skips.sites());
 
 		let refused = |src: &str| -> Outcome<Vec<String>> {

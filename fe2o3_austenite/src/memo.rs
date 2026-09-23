@@ -27,7 +27,7 @@
 use crate::doc::{
 	Heading,
 	Segment,
-	Unmet,
+	Answer,
 };
 use crate::ir::Node;
 use crate::ledger::AnchorId;
@@ -137,7 +137,9 @@ pub struct BlockEntry {
 	pub seen_add:		Vec<String>,
 	pub counters_set:	Vec<(String, u32)>,
 	pub exit:			BlockState,
-	pub unmet:			Vec<Unmet>,	// the stand-ins the block set, reported again on every hit
+	// The answers the block gave, each by its ask's place in the block's own asks (`doc::asks_of`), given
+	// again on every hit at the sites of the block served.
+	pub answers:		Vec<(usize, Answer)>,
 	last_gen:			u64,	// the generation this entry was last touched, for the two-generation sweep
 }
 
@@ -152,11 +154,11 @@ impl BlockEntry {
 		seen_add:		Vec<String>,
 		counters_set:	Vec<(String, u32)>,
 		exit:			BlockState,
-		unmet:			Vec<Unmet>,
+		answers:		Vec<(usize, Answer)>,
 	)
 		-> Self
 	{
-		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, unmet, last_gen: 0 }
+		Self { consume, nodes, heads, index_occ, claim_occ, seen_add, counters_set, exit, answers, last_gen: 0 }
 	}
 }
 

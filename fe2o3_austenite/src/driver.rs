@@ -1283,11 +1283,17 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 
 /// Gathers the footnotes whose marks fall anywhere within `node`, in the document order they were set,
 /// by walking its boxes. A mark is a [`LeafKind::Mark`] leaf; the note it carries is what the page
-/// breaker reserves foot space for and what the closing page sets at its foot.
+/// breaker reserves foot space for and what the closing page sets at its foot. A footnote set in a note is
+/// the same page's, gathered straight after the note that holds it, as Typst sets it.
 fn collect_marks(node: &Node, out: &mut Vec<Footnote>) {
 	match node {
 		Node::HBox(b) | Node::VBox(b)	=> for child in &b.list { collect_marks(child, out); },
-		Node::Leaf(l)					=> if let LeafKind::Mark(f) = &l.kind { out.push(f.clone()); },
+		Node::Leaf(l)					=> if let LeafKind::Mark(f) = &l.kind {
+			out.push(f.clone());
+			for line in &f.note {
+				collect_marks(line, out);
+			}
+		},
 		_								=> (),
 	}
 }

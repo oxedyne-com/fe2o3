@@ -40,6 +40,7 @@ use crate::ir::{
 	Node,
 	Penalty,
 	RasterImage,
+	Site,
 	Sp,
 };
 use crate::ledger::{
@@ -77,6 +78,7 @@ use crate::page::{
 	Placed,
 	PlacedKind,
 };
+use crate::lang::RefusalClass;
 use crate::theme::{
 	Theme,
 	ThemePatch,
@@ -127,23 +129,26 @@ pub enum Segment {
 	Super(String),	// #super[...], set raised and smaller, its baseline lifted above the line's
 	Sub(String),	// #sub[...], set dropped and smaller, its baseline lowered below the line's
 	SmallCaps(String),	// #smallcaps[...], shaped with the font's small-capitals (`smcp`) feature
-	Footnote { note: Vec<Segment> },
-	Math(Atom),	// an inline maths expression, set within the running line
-	PageRef(String),	// a cross-reference to a labelled anchor, resolving to its page number
+	// A run that asks for what only setting it can give -- a footnote, a maths span, a reference, a citation,
+	// a margin note or an index marker -- carries the site it was written at, which its setter answers for
+	// (see [`Answered`]).
+	Footnote { note: Vec<Segment>, site: Site },
+	Math { expr: Atom, site: Site },	// an inline maths expression, set within the running line
+	PageRef { label: String, site: Site },	// a cross-reference to a labelled anchor, resolving to its page number
 	Code(String),	// an inline code span, set in the mono face
 	Glossary { term: String, display: String },	// a glossary term: bold-italic on its first document use, plain after
-	Cite(Vec<String>),	// a citation, resolved to "(Author Year)" against the bibliography
+	Cite { keys: Vec<String>, site: Site },	// a citation, resolved to "(Author Year)" against the bibliography
 	// A `#claim-label(...)` or `#claim-refs(...)`: a zero-width margin anchor setting nothing in the body
 	// column. `display` is the compressed code a label draws in the outside margin (empty for a metadata-only
 	// reference); `codes` are the raw codes a reference registers for the reverse claim index (empty for a label).
-	MarginNote { display: String, codes: Vec<String> },
+	MarginNote { display: String, codes: Vec<String>, site: Site },
 	// An index marker: records the term's occurrence for the back-matter index and sets nothing in the body.
 	// `term` is the sort key (markup flattened, e.g. "March, James"); `display` is the styled text the index
 	// page sets (e.g. "James March", or an italicised case name), so the index prints the display and never
 	// the sort key. `sub` carries a nested entry's child term. `main` marks a primary reference (`#idx-main`),
 	// whose folio the index page sets bold, as in-dexter's `index-main = index.with(fmt: strong)` does. The
 	// back-matter index reads every occurrence's page back from the ledger post-convergence.
-	Index { term: String, sub: Option<String>, display: Vec<Segment>, main: bool },
+	Index { term: String, sub: Option<String>, display: Vec<Segment>, main: bool, site: Site },
 }
 
 impl Segment {
@@ -171,16 +176,16 @@ impl Segment {
 		Self::Sub(text.into())
 	}
 
-	pub fn footnote(note: Vec<Segment>) -> Self {
-		Self::Footnote { note }
+	pub fn footnote(note: Vec<Segment>, site: Site) -> Self {
+		Self::Footnote { note, site }
 	}
 
-	pub fn math(expr: Atom) -> Self {
-		Self::Math(expr)
+	pub fn math(expr: Atom, site: Site) -> Self {
+		Self::Math { expr, site }
 	}
 
-	pub fn page_ref<S: Into<String>>(label: S) -> Self {
-		Self::PageRef(label.into())
+	pub fn page_ref<S: Into<String>>(label: S, site: Site) -> Self {
+		Self::PageRef { label: label.into(), site }
 	}
 
 	pub fn code<S: Into<String>>(text: S) -> Self {
@@ -191,16 +196,16 @@ impl Segment {
 		Self::Glossary { term: term.into(), display: display.into() }
 	}
 
-	pub fn cite(keys: Vec<String>) -> Self {
-		Self::Cite(keys)
+	pub fn cite(keys: Vec<String>, site: Site) -> Self {
+		Self::Cite { keys, site }
 	}
 
-	pub fn margin_note<S: Into<String>>(display: S, codes: Vec<String>) -> Self {
-		Self::MarginNote { display: display.into(), codes }
+	pub fn margin_note<S: Into<String>>(display: S, codes: Vec<String>, site: Site) -> Self {
+		Self::MarginNote { display: display.into(), codes, site }
 	}
 
-	pub fn index<T: Into<String>>(term: T, sub: Option<String>, main: bool, display: Vec<Segment>) -> Self {
-		Self::Index { term: term.into(), sub, display, main }
+	pub fn index<T: Into<String>>(term: T, sub: Option<String>, main: bool, display: Vec<Segment>, site: Site) -> Self {
+		Self::Index { term: term.into(), sub, display, main, site }
 	}
 }
 
@@ -244,6 +249,7 @@ pub enum Block {
 		supplement:	String,
 		label:		Option<String>,
 		placement:	Option<Floating>,
+		site:		Site,	// where the figure was written, which its image is answered for
 	},
 	// A `#figure(...)` whose body is drawn by code -- a CeTZ/Fletcher diagram, a bar chart or a line plot.
 	// The graphic is built at render time from the document's font set and placed like an image figure,
@@ -254,6 +260,7 @@ pub enum Block {
 		supplement:	String,
 		label:		Option<String>,
 		placement:	Option<Floating>,
+		site:		Site,	// where the figure was written, which its drawing is answered for
 	},
 	// A back-matter section title (the Bibliography) on its own page, set left in the display face and
 	// unnumbered. It records a heading anchor so the contents lists it, and a back-matter marker so the
@@ -267,10 +274,10 @@ pub enum Block {
 	Rule { width: Length, thickness: f64, grey: u8 },
 	// A line-leading `#padded-image(...)`/`#image(...)`: the loaded image centred in the measure with a
 	// little space either side, carrying no figure number or caption -- a section opener's logo, not a float.
-	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64> },
+	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, site: Site },
 	// A line-leading `#section-banner("logo")`: a fresh page, then the template's full-width grey bar hanging
 	// into the top and side margins, carrying the section's logo right-aligned on the band's vertical middle.
-	SectionBanner { path: String },
+	SectionBanner { path: String, site: Site },
 	// A line-leading `#print-glossary()` before the book layer resolves it: a placeholder the assembler
 	// replaces in place with a [`Table`] of the document's glossary terms and their definitions. It never
 	// survives to layout -- `book::resolve_glossary` walks the assembled blocks and swaps it out -- so the
@@ -425,10 +432,11 @@ impl Block {
 		supplement:	String,
 		label:		Option<String>,
 		placement:	Option<Floating>,
+		site:		Site,
 	)
 		-> Self
 	{
-		Self::ImageFigure { path, width, height, scale, caption, supplement, label, placement }
+		Self::ImageFigure { path, width, height, scale, caption, supplement, label, placement, site }
 	}
 
 	/// A figure drawn by code (a diagram, bar chart or line plot): its builder, numbered caption, and the
@@ -439,10 +447,11 @@ impl Block {
 		supplement:	String,
 		label:		Option<String>,
 		placement:	Option<Floating>,
+		site:		Site,
 	)
 		-> Self
 	{
-		Self::CodeFigure { figure, caption, supplement, label, placement }
+		Self::CodeFigure { figure, caption, supplement, label, placement, site }
 	}
 
 	/// A back-matter section heading (the Bibliography), on its own page, unnumbered.
@@ -456,14 +465,14 @@ impl Block {
 	}
 
 	/// A plain centred image (a `#padded-image`/`#image` section logo), with any declared sizing.
-	pub fn image(path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>) -> Self {
-		Self::Image { path, width, height, scale }
+	pub fn image(path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, site: Site) -> Self {
+		Self::Image { path, width, height, scale, site }
 	}
 
 	/// A documentation section's opening banner: a fresh page carrying the template's full-width grey bar
 	/// with the logo at `path` right-aligned on it.
-	pub fn section_banner(path: String) -> Self {
-		Self::SectionBanner { path }
+	pub fn section_banner(path: String, site: Site) -> Self {
+		Self::SectionBanner { path, site }
 	}
 }
 
@@ -507,23 +516,194 @@ pub struct DocInfo {
 	pub keywords:	Option<String>,	// Typst's `keywords:`, an array joined with ", "
 }
 
-/// What authoring could not set as its block asked and set a stand-in for instead: an image that would not
-/// load, or a figure drawn by code that would not build. Known by what was asked for rather than where, so
-/// a block's fallbacks travel unchanged through the authoring memo; the compile joins them with the sites
-/// that asked ([`crate::lang::Ask`]).
-#[derive(Clone, Debug, PartialEq)]
-pub enum Unmet {
-	Image { path: String, missing: bool, reason: String },	// `missing` when no file answers to the path
-	Figure { fingerprint: u64, reason: String },
+/// What a construct asks for that only setting it can give: an image loaded, a figure drawn, a label
+/// resolved, a citation formatted, a footnote, a maths span, an index marker or a margin note set where it
+/// stands. [`asks_of`] lists every one the document holds, each at its [`Site`]; the setter that meets it
+/// gives an [`Answer`], and an ask no setter answered is a site the compile records, so a setter that drops
+/// what it was given cannot do so in silence.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Asked {
+	Image { path: String, role: ImageRole },
+	Figure { kind: &'static str },	// a figure drawn by code, by what it draws
+	Ref(String),					// a label, from `@label`
+	Cite(Vec<String>),				// the keys of a `#cite`
+	Footnote,
+	Math,							// an inline maths span
+	Index(String),					// an index marker, by its term
+	ClaimRef,						// a `#claim-label` or `#claim-refs` margin note
 }
 
-impl Unmet {
-	/// The fallback for the image at `path`, which `e` stopped from loading.
-	fn image(path: &str, e: &Error<ErrTag>) -> Self {
-		Unmet::Image {
-			path:		path.to_string(),
-			missing:	matches!(crate::image::resolve(path), Ok(None)),
-			reason:		e.plain(),
+/// Where an asked-for image is drawn, which decides what stands in when it cannot be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ImageRole {
+	Figure,			// a `#figure(image(...))`, or a line-leading `#image`/`#padded-image`
+	BannerLogo,		// a `#section-banner`'s logo
+	Cover,			// a book's cover raster
+	TitleLogo,		// a logo on the title page
+	FooterLogo,		// the logo a documentation tree seats in its footers
+}
+
+impl ImageRole {
+	/// The words naming the image in a diagnostic.
+	fn noun(&self) -> &'static str {
+		match self {
+			ImageRole::Figure		=> "image",
+			ImageRole::BannerLogo	=> "banner logo",
+			ImageRole::Cover		=> "cover image",
+			ImageRole::TitleLogo	=> "title-page logo",
+			ImageRole::FooterLogo	=> "footer logo",
+		}
+	}
+
+	/// What is set in the image's place.
+	fn stand_in(&self) -> &'static str {
+		match self {
+			ImageRole::Figure		=> "a placeholder is set",
+			ImageRole::BannerLogo	=> "the banner is drawn without it",
+			ImageRole::Cover		=> "no cover page is set",
+			ImageRole::TitleLogo	=> "the title page is set without it",
+			ImageRole::FooterLogo	=> "the footers are set without it",
+		}
+	}
+}
+
+impl Asked {
+	/// The site's name, as a diagnostic and a summary line give it.
+	pub fn name(&self) -> String {
+		match self {
+			Asked::Image { path, role }	=> fmt!("{} {:?}", role.noun(), path),
+			Asked::Figure { kind }		=> fmt!("#figure ({})", kind),
+			Asked::Ref(label)			=> fmt!("@{}", label),
+			Asked::Cite(keys)			=> fmt!("#cite({})", keys.iter().map(|k| fmt!("<{}>", k)).collect::<Vec<_>>().join(", ")),
+			Asked::Footnote				=> "#footnote".to_string(),
+			Asked::Math					=> "inline maths".to_string(),
+			Asked::Index(term)			=> fmt!("index marker {:?}", term),
+			Asked::ClaimRef				=> "claim reference".to_string(),
+		}
+	}
+}
+
+/// What a setter did with a construct that asked for something.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Answer {
+	Set,							// set as written
+	Slot(String),					// a reference set as a page slot: as written if the laid-out document places the label
+	StandIn(RefusalClass, String),	// something else set in its place: why, and what stands in
+	Passed(String),					// not set where it stands, under the name the report gives it
+}
+
+/// One setter's answer for one construct, at the site the construct was written.
+#[derive(Clone, Debug)]
+pub struct Answered {
+	pub site:	Site,
+	pub what:	Asked,
+	pub answer:	Answer,
+}
+
+/// Gives `answer` for the construct at `site` that asked for `what`.
+fn answer(answers: &mut Vec<Answered>, site: &Site, what: Asked, answer: Answer) {
+	answers.push(Answered { site: site.clone(), what, answer });
+}
+
+/// The answer for an image at `path`, drawn as `role`, that `e` stopped from loading: `missing_file` where
+/// no file answers to the path, and what stands in either way.
+fn image_stand_in(path: &str, role: ImageRole, e: &Error<ErrTag>) -> Answer {
+	if matches!(crate::image::resolve(path), Ok(None)) {
+		return Answer::StandIn(RefusalClass::MissingFile, fmt!("is not in the project, so {}", role.stand_in()));
+	}
+	Answer::StandIn(RefusalClass::Unusable, fmt!("will not load ({}), so {}", e.plain(), role.stand_in()))
+}
+
+/// Every construct `blocks` holds that asks for something, at its site, in document order: the one list a
+/// compile's answers are checked against. The walk is total -- every block and every run is named, none
+/// passed by a wildcard -- so a construct can reach no setter without first being asked for here.
+pub fn asks_of(blocks: &[Block], out: &mut Vec<(Site, Asked)>) {
+	for block in blocks {
+		match block {
+			Block::Heading { segments, .. }
+			| Block::RichParagraph { segments }		=> asks_in(segments, out),
+			Block::List { items, .. }				=> for entry in items {
+				asks_in(&entry.segments, out);
+				asks_of(&entry.children, out);
+			},
+			Block::Table(t)							=> asks_in_table(t, out),
+			Block::TableFigure { table, caption, .. } => {
+				asks_in_table(table, out);
+				if let Some(c) = caption {
+					asks_in(c, out);
+				}
+			},
+			Block::ImageFigure { path, caption, site, .. } => {
+				// A figure with no image the reader can draw was refused where it was read, and asks for none.
+				if !path.is_empty() {
+					out.push((site.clone(), Asked::Image { path: path.clone(), role: ImageRole::Figure }));
+				}
+				if let Some(c) = caption {
+					asks_in(c, out);
+				}
+			},
+			Block::CodeFigure { figure, caption, site, .. } => {
+				out.push((site.clone(), Asked::Figure { kind: figure.kind_name() }));
+				if let Some(c) = caption {
+					asks_in(c, out);
+				}
+			},
+			Block::Image { path, site, .. }			=> out.push((site.clone(), Asked::Image { path: path.clone(), role: ImageRole::Figure })),
+			Block::SectionBanner { path, site }		=> out.push((site.clone(), Asked::Image { path: path.clone(), role: ImageRole::BannerLogo })),
+			Block::Box { blocks, .. }
+			| Block::Scoped { blocks, .. }
+			| Block::Place { blocks, .. }			=> asks_of(blocks, out),
+			// These carry no run and no asset: plain words, verbatim code, a display equation, a figure the
+			// engine draws itself, the back matter the engine composes, spacing and breaks, and placeholders.
+			Block::Paragraph { .. }
+			| Block::Code { .. }
+			| Block::Equation { .. }
+			| Block::Figure { .. }
+			| Block::BackMatterHeading { .. }
+			| Block::Reference { .. }
+			| Block::Rule { .. }
+			| Block::Glossary
+			| Block::Index
+			| Block::ClaimIndex
+			| Block::Space(_)
+			| Block::PageBreak { .. }
+			| Block::ColBreak { .. }				=> {},
+		}
+	}
+}
+
+/// [`asks_of`] for a table's cells, row by row.
+fn asks_in_table(table: &Table, out: &mut Vec<(Site, Asked)>) {
+	for row in &table.rows {
+		for cell in &row.cells {
+			asks_in(&cell.content, out);
+		}
+	}
+}
+
+/// [`asks_of`] for a run of segments, a footnote's own runs included. An index marker's display is the
+/// words the index page sets for it, not a run of the text, so it is not walked.
+fn asks_in(segments: &[Segment], out: &mut Vec<(Site, Asked)>) {
+	for seg in segments {
+		match seg {
+			Segment::Footnote { note, site }	=> {
+				out.push((site.clone(), Asked::Footnote));
+				asks_in(note, out);
+			},
+			Segment::Math { site, .. }			=> out.push((site.clone(), Asked::Math)),
+			Segment::PageRef { label, site }	=> out.push((site.clone(), Asked::Ref(label.clone()))),
+			Segment::Cite { keys, site }		=> out.push((site.clone(), Asked::Cite(keys.clone()))),
+			Segment::MarginNote { site, .. }	=> out.push((site.clone(), Asked::ClaimRef)),
+			Segment::Index { term, site, .. }	=> out.push((site.clone(), Asked::Index(term.clone()))),
+			Segment::Text(_)
+			| Segment::Strong(_)
+			| Segment::Emph(_)
+			| Segment::BoldItalic(_)
+			| Segment::Super(_)
+			| Segment::Sub(_)
+			| Segment::SmallCaps(_)
+			| Segment::Code(_)
+			| Segment::Glossary { .. }			=> {},
 		}
 	}
 }
@@ -573,6 +753,35 @@ pub struct FrontMatter {
 	pub meta_rows:			Vec<MetaRow>,	// the revision rows the version table sets, in source order
 	pub reading_min:		Option<u32>,	// the whole-document reading time in minutes, appended to the last row's notes
 	pub acknowledgement:	Option<String>,	// the acknowledgement paragraph set near the page foot
+	pub sites:				FrontSites,		// where each image the front matter draws was named
+}
+
+/// Where each image the front matter draws was named: the field or setting that names it, which a stand-in
+/// set in its place is charged to.
+#[derive(Clone, Debug, Default)]
+pub struct FrontSites {
+	pub cover:			Site,
+	pub logo:			Site,
+	pub top_logo:		Site,
+	pub bottom_logo:	Site,
+	pub footer_logo:	Site,
+}
+
+impl FrontMatter {
+	/// Every image the front matter asks for, at the field that names it.
+	pub fn asks(&self, out: &mut Vec<(Site, Asked)>) {
+		for (path, site, role) in [
+			(&self.cover_image, &self.sites.cover, ImageRole::Cover),
+			(&self.logo_image, &self.sites.logo, ImageRole::TitleLogo),
+			(&self.top_logo, &self.sites.top_logo, ImageRole::TitleLogo),
+			(&self.bottom_logo, &self.sites.bottom_logo, ImageRole::TitleLogo),
+			(&self.footer_logo, &self.sites.footer_logo, ImageRole::FooterLogo),
+		] {
+			if let Some(p) = path {
+				out.push((site.clone(), Asked::Image { path: p.clone(), role }));
+			}
+		}
+	}
 }
 
 /// One revision row of the documentation meta/colophon table: its version, date, author(s), notes, and
@@ -647,7 +856,24 @@ struct Authoring<'a> {
 	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
 	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
 	global_fp:		u64,			// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
-	unmet:			Vec<Unmet>,		// every stand-in set, in document order; a memo hit replays its block's
+	answers:		Vec<Answered>,	// every answer a setter gave, in document order; a memo hit replays its block's
+}
+
+/// The document-order state a run of inline content is set against -- the footnote, reference and margin
+/// counters, the glossary first-use set and the index and claim gathers -- with what references and
+/// citations resolve to, and the answers each run that asks for something is given. One context threads
+/// through every place a run is set, so a caption, a footnote or a heading sets a reference, a citation or
+/// a footnote exactly as a paragraph does.
+pub(crate) struct Runs<'r> {
+	pub(crate) foot_no:		&'r mut u32,
+	pub(crate) ref_no:		&'r mut u32,
+	pub(crate) margin_no:	&'r mut u32,
+	pub(crate) seen:		&'r mut HashSet<String>,
+	pub(crate) idx:			&'r mut IndexGather,
+	pub(crate) claim:		&'r mut ClaimGather,
+	pub(crate) bib:			Option<&'r Bibliography>,
+	pub(crate) refs:		&'r HashMap<String, String>,
+	pub(crate) answers:		&'r mut Vec<Answered>,
 }
 
 /// A continuation handed to [`Authoring::walk`]: the block that follows the walked slice at its parent's
@@ -683,6 +909,21 @@ fn keep_with_next_para<'a>(look: &'a Block, theme: &Theme) -> Option<(&'a str, T
 }
 
 impl<'a> Authoring<'a> {
+	/// The inline context over this authoring's own counters, gathers and answers.
+	fn runs(&mut self) -> Runs<'_> {
+		Runs {
+			foot_no:	&mut self.foot_no,
+			ref_no:		&mut self.ref_no,
+			margin_no:	&mut self.margin_no,
+			seen:		&mut self.seen,
+			idx:		&mut self.index_gather,
+			claim:		&mut self.claim_gather,
+			bib:		self.bib,
+			refs:		&self.refs,
+			answers:	&mut self.answers,
+		}
+	}
+
 	/// Authors a float's blocks into material of their own: the whole block walk, headings, figures and all,
 	/// at the float's measure, with every document-order counter counting on across it. The material is laid
 	/// as one unit that never breaks, so its penalties and repeated-header markers are dropped; a float, a
@@ -783,7 +1024,7 @@ impl<'a> Authoring<'a> {
 		while i < blocks.len() {
 			// Close out the block authored on the previous miss, now that `i` has advanced past it.
 			if let Some(p) = pending.take() {
-				self.memo_capture(memo, p, i);
+				self.memo_capture(memo, p, i, blocks);
 			}
 			if let Block::Scoped { patch, blocks: inner } = &blocks[i] {
 				let scoped = { let mut t = style.clone(); t.apply(patch); t };
@@ -854,7 +1095,7 @@ impl<'a> Authoring<'a> {
 				if let Some(m) = memo.as_deref_mut() {
 					if let Some(entry) = m.block_lookup(key) {
 						let consume = entry.consume;
-						self.apply_block_entry(entry);
+						self.apply_block_entry(entry, &blocks[i..]);
 						i += consume;
 						continue;
 					}
@@ -867,7 +1108,7 @@ impl<'a> Authoring<'a> {
 					heads_before:	self.heads.len(),
 					index_before:	self.index_gather.occ.len(),
 					claim_before:	self.claim_gather.occ.len(),
-					unmet_before:	self.unmet.len(),
+					answers_before:	self.answers.len(),
 					seen_before:	self.seen.clone(),
 					counters_before:	self.counters.clone(),
 				});
@@ -928,9 +1169,15 @@ impl<'a> Authoring<'a> {
 						} else {
 							String::new()
 						};
+						// The opener sets its title as one run of words: a reference or a citation is set as the words
+						// it resolves to, an index marker as an anchor beside the title, and a construct with no
+						// words to give -- a footnote, a maths span, a reference with no number -- is answered as not
+						// set, never dropped in silence.
+						let (shown, markers) = res!(opener_title(segments, &mut self.runs()));
 						res!(chapter_opener(
-							&mut self.nodes, &self.fonts, self.faces, style, self.geom, self.measure, *level, &number, &title,
+							&mut self.nodes, &self.fonts, self.faces, style, self.geom, self.measure, *level, &number, &shown,
 							&part_label, &id, label.as_deref()));
+						self.nodes.extend(markers.into_iter().map(Node::Anchor));
 						i += 1;
 						self.first = false;
 						self.prev_para = false;	// the opener is not a paragraph, so the first body line takes no indent
@@ -944,8 +1191,8 @@ impl<'a> Authoring<'a> {
 						self.nodes.push(Node::Glue(Glue::fixed(style.space_above(*level))));
 					}
 
-					let hbox = res!(subheading_hbox(
-						self.fonts.clone(), self.faces, style, *level, &number, segments, &mut self.seen));
+					let (fonts, faces) = (self.fonts.clone(), self.faces);
+					let hbox = res!(subheading_hbox(fonts, faces, self.geom, style, *level, &number, segments, &mut self.runs()));
 
 					let mut keep:	Vec<Node> = vec![Node::Anchor(id)];
 					if let Some(l) = label {
@@ -1027,8 +1274,8 @@ impl<'a> Authoring<'a> {
 					if self.prev_para && style.par.indent.raw() > 0 {
 						pieces.push(indent_piece(style.par.indent));
 					}
-					pieces.extend(res!(build_pieces(
-						self.fonts.clone(), self.geom, style, segments, Role::Body, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
+					let (fonts, geom) = (self.fonts.clone(), self.geom);
+					pieces.extend(res!(build_pieces(fonts, geom, style, segments, Role::Body, Claims::Gathered, &mut self.runs())));
 					let lines = res!(break_paragraph_pieces(
 						self.fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, self.measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
@@ -1041,7 +1288,11 @@ impl<'a> Authoring<'a> {
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 					}
-					res!(list(&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, *ordered, items, *loose, &mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+					let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
+					let mut nodes = std::mem::take(&mut self.nodes);
+					let set = list(&mut nodes, fonts, geom, style, measure, *ordered, items, *loose, &mut self.runs());
+					self.nodes = nodes;
+					res!(set);
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -1063,16 +1314,13 @@ impl<'a> Authoring<'a> {
 					if !self.first {
 						self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 					}
+					let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
 					if t.breakable {
-						self.nodes.extend(res!(table::lower_rows(
-							self.fonts.clone(), self.geom, style, self.measure, t,
-							&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
-							&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
+						let rows = res!(table::lower_rows(fonts, geom, style, measure, t, &mut self.runs()));
+						self.nodes.extend(rows);
 					} else {
-						self.nodes.push(res!(table::lower(
-							self.fonts.clone(), self.geom, style, self.measure, t,
-							&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
-							&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs)));
+						let lowered = res!(table::lower(fonts, geom, style, measure, t, &mut self.runs()));
+						self.nodes.push(lowered);
 					}
 					self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 					i += 1;
@@ -1117,68 +1365,77 @@ impl<'a> Authoring<'a> {
 					match placement {
 						Some(p) => {
 							let mut mid = Vec::new();
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.float_measure(p.scope));
 							res!(table_figure(
-								&mut mid, self.fonts.clone(), self.geom, style, self.float_measure(p.scope), table,
-								caption.as_deref(), supplement, number, label.as_deref(),
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
-								&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+								&mut mid, fonts, geom, style, measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.runs()));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
-							res!(table_figure(
-								&mut self.nodes, self.fonts.clone(), self.geom, style, self.measure, table,
-								caption.as_deref(), supplement, number, label.as_deref(),
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
-								&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
+							let mut nodes = std::mem::take(&mut self.nodes);
+							let set = table_figure(
+								&mut nodes, fonts, geom, style, measure, table,
+								caption.as_deref(), supplement, number, label.as_deref(), &mut self.runs());
+							self.nodes = nodes;
+							res!(set);
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
 					i += 1;
 					self.first = false;
 				},
-				Block::ImageFigure { path, width, height, scale, caption, supplement, label, placement } => {
+				Block::ImageFigure { path, width, height, scale, caption, supplement, label, placement, site } => {
 					let number = next_number(&mut self.counters, supplement);
+					let fig = Fig { supplement, number, label: label.as_deref(), site };
 					match placement {
 						Some(p) => {
 							let mut mid = Vec::new();
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.float_measure(p.scope));
 							res!(image_figure(
-								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), path, *width, *height, *scale,
-								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
+								&mut mid, fonts, geom, style, measure, path, *width, *height, *scale,
+								caption.as_deref(), &fig, &mut self.runs()));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
-							res!(image_figure(
-								&mut self.nodes, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
-								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
+							let mut nodes = std::mem::take(&mut self.nodes);
+							let set = image_figure(
+								&mut nodes, fonts, geom, style, measure, path, *width, *height, *scale,
+								caption.as_deref(), &fig, &mut self.runs());
+							self.nodes = nodes;
+							res!(set);
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
 					i += 1;
 					self.first = false;
 				},
-				Block::CodeFigure { figure, caption, supplement, label, placement } => {
+				Block::CodeFigure { figure, caption, supplement, label, placement, site } => {
 					let number = next_number(&mut self.counters, supplement);
+					let fig = Fig { supplement, number, label: label.as_deref(), site };
 					match placement {
 						Some(p) => {
 							let mut mid = Vec::new();
-							res!(code_figure(
-								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), figure,
-								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.float_measure(p.scope));
+							res!(code_figure(&mut mid, fonts, geom, style, measure, figure, caption.as_deref(), &fig, &mut self.runs()));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
 							if !self.first {
 								self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 							}
-							res!(code_figure(
-								&mut self.nodes, self.fonts.clone(), style, self.measure, figure,
-								caption.as_deref(), supplement, number, label.as_deref(), &mut self.unmet));
+							let (fonts, geom, measure) = (self.fonts.clone(), self.geom, self.measure);
+							let mut nodes = std::mem::take(&mut self.nodes);
+							let set = code_figure(&mut nodes, fonts, geom, style, measure, figure, caption.as_deref(), &fig, &mut self.runs());
+							self.nodes = nodes;
+							res!(set);
 							self.nodes.push(Node::Glue(Glue::fixed(style.table.skip)));
 						},
 					}
@@ -1239,17 +1496,17 @@ impl<'a> Authoring<'a> {
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::Image { path, width, height, scale } => {
-					res!(plain_image(&mut self.nodes, self.fonts.clone(), self.measure, path, *width, *height, *scale, &mut self.unmet));
+				Block::Image { path, width, height, scale, site } => {
+					res!(plain_image(&mut self.nodes, self.fonts.clone(), self.measure, path, *width, *height, *scale, site, &mut self.answers));
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
 				},
-				Block::SectionBanner { path } => {
+				Block::SectionBanner { path, site } => {
 					// The template's `#section-banner` turns the page first (`pagebreak(weak: true)`); a forced
 					// eject the driver drops when the page is already fresh, so it never opens a blank one.
 					self.nodes.push(Node::Penalty(Penalty::eject()));
-					res!(section_banner(&mut self.nodes, self.fonts.clone(), self.geom, self.measure, path, &mut self.unmet));
+					res!(section_banner(&mut self.nodes, self.fonts.clone(), self.geom, self.measure, path, site, &mut self.answers));
 					self.pending_banner = true;	// the section's level-1 heading follows and opens beneath this banner
 					i += 1;
 					self.first = false;
@@ -1274,18 +1531,19 @@ impl<'a> Authoring<'a> {
 							let mut mid = Vec::new();
 							let n = next_number(&mut self.counters, "aside");
 							mid.push(Node::Anchor(AnchorId::new(AnchorKind::Float, fmt!("aside-{}", n))));
-							res!(styled_box(
-								&mut mid, box_fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+							let (geom, measure) = (self.geom, self.measure);
+							res!(styled_box(&mut mid, box_fonts.clone(), geom, &scoped, measure, inner, fill, &mut self.runs()));
 							push_float(&mut self.nodes, mid, float_clearance(style), Floating::column(*p));
 						},
 						None => {
 							if !self.first {
 								self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 							}
-							res!(styled_box(
-								&mut self.nodes, box_fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
-								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
+							let (geom, measure) = (self.geom, self.measure);
+							let mut nodes = std::mem::take(&mut self.nodes);
+							let set = styled_box(&mut nodes, box_fonts.clone(), geom, &scoped, measure, inner, fill, &mut self.runs());
+							self.nodes = nodes;
+							res!(set);
 							self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 						},
 					}
@@ -1350,7 +1608,7 @@ impl<'a> Authoring<'a> {
 		}
 		// Capture the last authored block's delta, which has no next iteration to close it.
 		if let Some(p) = pending.take() {
-			self.memo_capture(memo, p, blocks.len());
+			self.memo_capture(memo, p, blocks.len(), blocks);
 		}
 		Ok(consumed_cont)
 	}
@@ -1447,11 +1705,20 @@ impl<'a> Authoring<'a> {
 	/// occurrences back in, advances the glossary and supplement accumulators by the deltas the block made,
 	/// and restores the exit counter state -- so the authoring state stands exactly where a fresh authoring
 	/// of the same block would have left it.
-	fn apply_block_entry(&mut self, entry: BlockEntry) {
+	fn apply_block_entry(&mut self, entry: BlockEntry, from: &[Block]) {
+		// The cached block's answers are given again, at the sites of the blocks now being served: those
+		// blocks set as the cached ones did, so their asks stand in the same order, and each answer is known
+		// by its place in that order. A hit is never a silent pass, and never charged to where a block stood
+		// before an edit moved it.
+		let mut asks = Vec::new();
+		asks_of(&from[..entry.consume.min(from.len())], &mut asks);
+		for (k, a) in entry.answers {
+			if let Some((site, what)) = asks.get(k) {
+				self.answers.push(Answered { site: site.clone(), what: what.clone(), answer: a });
+			}
+		}
 		self.nodes.extend(entry.nodes);
 		self.heads.extend(entry.heads);
-		// A cached block that set a stand-in reports it again, so a hit is never a silent pass.
-		self.unmet.extend(entry.unmet);
 		self.index_gather.occ.extend(entry.index_occ);
 		self.claim_gather.occ.extend(entry.claim_occ);
 		for term in entry.seen_add {
@@ -1467,11 +1734,26 @@ impl<'a> Authoring<'a> {
 	/// occurrences it appended, the source blocks it consumed, the glossary terms it newly marked seen, the
 	/// supplement counters it changed, and its exit counter state. `i_end` is the position after the block,
 	/// so the consumed count carries a chapter heading's swallowed paragraph.
-	fn memo_capture(&mut self, memo: &mut Option<&mut Memo>, p: PendingBlock, i_end: usize) {
+	fn memo_capture(&mut self, memo: &mut Option<&mut Memo>, p: PendingBlock, i_end: usize, blocks: &[Block]) {
 		let m = match memo.as_deref_mut() {
 			Some(m)	=> m,
 			None	=> return,
 		};
+		// Each answer the block gave is stored by its ask's place in the block's own asks, so a hit re-sites
+		// it against the block it is served for. An answer beyond the block's asks -- a logo a setter drew
+		// twice -- answers nothing more, and is not kept.
+		let mut asks = Vec::new();
+		asks_of(&blocks[p.i_before..i_end.min(blocks.len())], &mut asks);
+		let mut taken = vec![false; asks.len()];
+		let mut answers: Vec<(usize, Answer)> = Vec::new();
+		for a in &self.answers[p.answers_before..] {
+			let slot = asks.iter().enumerate()
+				.position(|(k, (site, what))| !taken[k] && *site == a.site && *what == a.what);
+			if let Some(k) = slot {
+				taken[k] = true;
+				answers.push((k, a.answer.clone()));
+			}
+		}
 		let seen_add: Vec<String> = self.seen.iter()
 			.filter(|t| !p.seen_before.contains(*t))
 			.cloned()
@@ -1489,7 +1771,7 @@ impl<'a> Authoring<'a> {
 			seen_add,
 			counters_set,
 			self.block_state(),
-			self.unmet[p.unmet_before..].to_vec(),
+			answers,
 		);
 		m.block_store(p.key, entry);
 	}
@@ -1511,7 +1793,7 @@ struct PendingBlock {
 	heads_before:		usize,
 	index_before:		usize,
 	claim_before:		usize,
-	unmet_before:		usize,
+	answers_before:		usize,
 	seen_before:		HashSet<String>,
 	counters_before:	HashMap<String, u32>,
 }
@@ -1531,7 +1813,7 @@ pub fn author(
 	front:		Option<&FrontMatter>,
 	bib:		Option<&Bibliography>,
 )
-	-> Outcome<(Document, Vec<Heading>, Vec<Unmet>)>
+	-> Outcome<(Document, Vec<Heading>, Vec<Answered>)>
 {
 	author_memo(fonts, geom, style, faces, blocks, front, bib, None)
 }
@@ -1555,7 +1837,7 @@ pub fn author_memo(
 	bib:		Option<&Bibliography>,
 	mut memo:	Option<&mut Memo>,
 )
-	-> Outcome<(Document, Vec<Heading>, Vec<Unmet>)>
+	-> Outcome<(Document, Vec<Heading>, Vec<Answered>)>
 {
 	// The text every labelled cross-reference resolves to, settled once from document order so a forward
 	// reference reads its referent's supplement and number without a layout round-trip.
@@ -1594,7 +1876,7 @@ pub fn author_memo(
 		want_claim_index:	false,
 		claim_index_at:	None,
 		global_fp,
-		unmet:			Vec::new(),
+		answers:		Vec::new(),
 	};
 	// A body set in several columns (`#set page(columns: n)`) opens with the layout marker, so the front
 	// matter composed ahead of it keeps the single-column page, and every block is set at the column measure.
@@ -1648,14 +1930,14 @@ pub fn author_memo(
 		}
 	}
 	let heads = authoring.heads;
-	let mut unmet = authoring.unmet;
+	let mut answers = authoring.answers;
 
 	// The front matter is composed ahead of the body so its cover, title, imprint and note leaves take
 	// the physical pages before the body opens; the body then carries no heading anchor of the front
 	// matter's, so the driver fixes the folio restart at the first body heading.
 	let mut stream: Vec<Node> = Vec::new();
 	if let Some(fm) = front {
-		res!(front_matter(&mut stream, &fonts, faces, geom, style, fm, &mut unmet));
+		res!(front_matter(&mut stream, &fonts, faces, geom, style, fm, &mut answers));
 		// The contents follows the front matter and precedes the body, resolving each entry's folio as a
 		// forward reference into the body the driver has not composed yet.
 		stream.extend(res!(contents(
@@ -1670,7 +1952,7 @@ pub fn author_memo(
 	// entries before this compile's emit could reuse them. `Memo::begin` (called above) opened the
 	// generation; `Memo::sweep`, called once the pages are emitted, closes it.
 	let _ = memo;
-	Ok((document, heads, unmet))
+	Ok((document, heads, answers))
 }
 
 /// The compile-wide fingerprint the block-authoring memo scopes every key to: the theme, the page
@@ -1871,34 +2153,151 @@ fn ref_targets_walk(
 	}
 }
 
-/// Turns a rich paragraph's segments into the pieces the line breaker weaves, assigning each footnote
-/// its number from the running fold and setting its note as a small paragraph at the foot measure, and
-/// each cross-reference a reserved inline slot the driver resolves in pass B. A text segment is a piece
-/// as it stands; a footnote becomes a superscript mark piece carrying the set note; a page reference or
-/// a total-pages call becomes a shrink-to-fit reserved leaf, unique by the running `ref_no`. `base` is the
-/// face plain text and a resolved reference take: `Role::Body` in the running flow, a header row's `Role::Bold`
-/// when a table cell is built through this same path, so a cell renders, cites, gathers its index markers and
-/// records its claim anchors exactly as a body paragraph does.
-#[allow(clippy::too_many_arguments)]
+/// Whether a context gathers the claim references its margin notes register into the reverse claim index.
+/// A body run, a list entry, a table cell and a callout body do; a heading title, a figure caption and a
+/// footnote body do not, and a margin note there is passed over and named.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Claims {
+	Gathered,
+	Passed(&'static str),	// the context, as the report names it: "a heading title", "a footnote body"
+}
+
+/// A cross-reference as set: the words its label resolves to, or the slot the driver fills with the page
+/// the label lands on.
+enum RefSet {
+	Words(String),
+	Slot(Leaf),
+}
+
+/// Sets the cross-reference to `label` written at `site`: Typst's own supplement-and-number text --
+/// "Chapter 4", "Section 7.7", "Figure 2", "Equation 9" -- where the document-order pre-pass numbered the
+/// label, else a reserved slot the driver fills with the page the label lands on. Either is answered: the
+/// words as set, the slot as set only if the laid-out document places the label.
+fn set_ref(fonts: &Arc<FontSet>, style: &Theme, label: &str, site: &Site, runs: &mut Runs<'_>) -> Outcome<RefSet> {
+	let what = Asked::Ref(label.to_string());
+	match runs.refs.get(label) {
+		Some(text) => {
+			answer(runs.answers, site, what, Answer::Set);
+			Ok(RefSet::Words(text.clone()))
+		},
+		None => {
+			let refr	= Ref::PageOf(AnchorId::new(AnchorKind::Label, label.to_string()));
+			let slot	= res!(ref_slot(fonts.clone(), style, runs.ref_no, refr));
+			answer(runs.answers, site, what, Answer::Slot(label.to_string()));
+			Ok(RefSet::Slot(slot))
+		},
+	}
+}
+
+/// Sets the citation of `keys` written at `site`: the "(Author Year)" text the bibliography formats, or --
+/// with no bibliography, or a key it does not hold -- the keys in brackets, answered as a stand-in.
+fn set_cite(keys: &[String], site: &Site, runs: &mut Runs<'_>) -> String {
+	let what	= Asked::Cite(keys.to_vec());
+	let raw		= fmt!("({})", keys.join("; "));
+	let stand_in = |note: &str| Answer::StandIn(RefusalClass::Unusable, note.to_string());
+	match runs.bib {
+		Some(b) => {
+			let ks: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+			match b.format_citation(&ks) {
+				Ok(text) => {
+					answer(runs.answers, site, what, Answer::Set);
+					text
+				},
+				Err(_) => {
+					answer(runs.answers, site, what,
+						stand_in("names a key the bibliography does not hold, so its keys are set in brackets"));
+					raw
+				},
+			}
+		},
+		None => {
+			answer(runs.answers, site, what, stand_in("has no bibliography to resolve against, so its keys are set in brackets"));
+			raw
+		},
+	}
+}
+
+/// Sets the footnote written at `site`: its number is the next of the running count, taken before its note
+/// is set so a footnote in the note numbers after it, as Typst numbers it; the note is set as a small
+/// paragraph at the foot measure, its own references, citations and footnotes set as a paragraph's are.
+/// Returns the mark for the line, raised at `size`, carrying the note the driver sets at the page foot.
+fn set_footnote(
+	fonts:	&Arc<FontSet>,
+	geom:	PageGeometry,
+	style: &Theme,
+	size:	Sp,
+	note:	&[Segment],
+	site:	&Site,
+	runs:	&mut Runs<'_>,
+)
+	-> Outcome<Leaf>
+{
+	*runs.foot_no += 1;
+	let number			= *runs.foot_no;
+	let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, size, &fmt!("{}", number)));
+	let footnote		= res!(build_footnote(fonts.clone(), geom, style, geom.content_width(), number, note, mark, runs));
+	answer(runs.answers, site, Asked::Footnote, Answer::Set);
+	Ok(Leaf::mark(footnote, dims))
+}
+
+/// Sets the index marker for `term` written at `site`: a zero-width anchor recording the folio it lands on,
+/// its occurrence remembered for the back-matter index. The ordinal makes each occurrence's identity
+/// unique, so two mentions of one term on one page stay distinct until the entry deduplicates their folios;
+/// the styled display travels with it so the index page sets the display words, and `main` so a primary
+/// reference's folio sets bold.
+fn set_index(term: &str, sub: &Option<String>, display: &[Segment], main: bool, site: &Site, runs: &mut Runs<'_>) -> AnchorId {
+	runs.idx.no += 1;
+	let key	= fmt!("{}\u{1f}{}\u{1f}{}", runs.idx.no, term, sub.as_deref().unwrap_or(""));
+	let id	= AnchorId::new(AnchorKind::IndexEntry, key);
+	runs.idx.occ.push((term.to_string(), sub.clone(), display.to_vec(), id.clone(), main));
+	answer(runs.answers, site, Asked::Index(term.to_string()), Answer::Set);
+	id
+}
+
+/// Sets the margin note written at `site` where `claims` gathers it: a zero-width anchor recording where it
+/// landed, so `decorate` draws the compressed code in the outside margin after convergence, and each code it
+/// references remembered against the anchor for the reverse claim index. The identity carries a
+/// document-order ordinal, so two identical codes stay distinct, and the display text, which `decorate`
+/// reads back from the key. Where `claims` passes it, nothing is set and it is answered by name.
+fn set_claim(display: &str, codes: &[String], site: &Site, claims: Claims, runs: &mut Runs<'_>) -> Option<AnchorId> {
+	match claims {
+		Claims::Gathered => {
+			*runs.margin_no += 1;
+			let key	= fmt!("{}\u{1f}{}", *runs.margin_no, display);
+			let id	= AnchorId::new(AnchorKind::MarginNote, key);
+			for code in codes {
+				runs.claim.occ.push((code.clone(), id.clone()));
+			}
+			answer(runs.answers, site, Asked::ClaimRef, Answer::Set);
+			Some(id)
+		},
+		Claims::Passed(context) => {
+			answer(runs.answers, site, Asked::ClaimRef,
+				Answer::Passed(fmt!("claim reference in {} is not indexed", context)));
+			None
+		},
+	}
+}
+
+/// Turns a rich paragraph's segments into the pieces the line breaker weaves: a text segment as it stands,
+/// in `base` or its own face; a footnote a raised mark carrying its set note; a cross-reference its words or
+/// a reserved slot; a citation its formatted text; an index marker or a gathered margin note a zero-width
+/// anchor. `base` is the face plain text and a resolved reference take: `Role::Body` in the running flow, a
+/// header row's `Role::Bold` when a table cell is built through this same path, so a cell renders, cites,
+/// gathers its index markers and records its claim anchors exactly as a body paragraph does. Every segment
+/// that asks for something is answered at its site through `runs`.
 pub(crate) fn build_pieces(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
 	style: &Theme,
 	segments:	&[Segment],
 	base:		Role,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	claims:		Claims,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Vec<Piece>>
 {
-	let measure			= geom.content_width();
-	let mut pieces		= Vec::with_capacity(segments.len());
+	let mut pieces = Vec::with_capacity(segments.len());
 	for seg in segments {
 		match seg {
 			Segment::Text(text) => {
@@ -1929,44 +2328,27 @@ pub(crate) fn build_pieces(
 				let (shaped, dims)	= res!(subscript(fonts.clone(), Role::Body, style.text.body_size, text));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
-			Segment::Footnote { note } => {
-				*foot_no += 1;
-				let label			= fmt!("{}", *foot_no);
-				let (mark, dims)	= res!(superscript(fonts.clone(), Role::Body, style.text.body_size, &label));
-				let footnote		= res!(build_footnote(fonts.clone(), style, measure, *foot_no, note, mark));
-				pieces.push(Piece::Mark(Leaf::mark(footnote, dims)));
+			Segment::Footnote { note, site } => {
+				let mark = res!(set_footnote(&fonts, geom, style, style.text.body_size, note, site, runs));
+				pieces.push(Piece::Mark(mark));
 			},
-			Segment::Math(expr) => {
-				// The inline box is flattened to leaves and glue by the maths layout; unwrap the HBox it
-				// returns and weave its children into the line, so they draw as real glyphs rather than as
-				// a nested rectangle. The box seats its baseline on the text baseline -- a body ascent
-				// below the line top -- so the line asks for that ascent as its height; anything the maths
-				// reaches above it is the overshoot the line above must open for.
-				let node = res!(math::layout(fonts.clone(), style, expr, false));
-				if let Node::HBox(b) = node {
-					let ascent	= res!(ShapedText::new(
-						fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "0")).dims().height;
-					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
-					pieces.push(Piece::Math {
-						nodes:	b.list,
-						width:	b.dims.width,
-						height:	ascent,
-						depth:	b.dims.depth,
-						over,
-					});
-				}
+			Segment::Math { expr, site } => {
+				// The inline box is flattened to leaves and glue by the maths layout, and its children woven
+				// into the line, so they draw as real glyphs rather than as a nested rectangle. The box seats
+				// its baseline on the text baseline -- a body ascent below the line top -- so the line asks for
+				// that ascent as its height; anything the maths reaches above it is the overshoot the line
+				// above must open for.
+				let b		= res!(math::layout_box(fonts.clone(), style, expr, false));
+				let ascent	= res!(ShapedText::new(
+					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, "0")).dims().height;
+				let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
+				pieces.push(Piece::Math { nodes: b.list, width: b.dims.width, height: ascent, depth: b.dims.depth, over });
+				answer(runs.answers, site, Asked::Math, Answer::Set);
 			},
-			Segment::PageRef(label) => {
-				// A cross-reference resolves to Typst's own supplement-and-number text -- "Chapter 4",
-				// "Section 7.7", "Figure 2", "Table 1", "Equation 9" -- fixed by the document-order pre-pass
-				// and set as body text. A label the pre-pass did not record falls back to the reserved
-				// page-number slot the driver resolves in pass B, so the reference still reads rather than
-				// vanishing.
-				match refs.get(label) {
-					Some(text)	=> pieces.push(Piece::Text { text: text.clone(), role: base }),
-					None		=> pieces.push(Piece::Mark(res!(ref_slot(
-						fonts.clone(), style, ref_no,
-						Ref::PageOf(AnchorId::new(AnchorKind::Label, label.clone())))))),
+			Segment::PageRef { label, site } => {
+				match res!(set_ref(&fonts, style, label, site, runs)) {
+					RefSet::Words(text)	=> pieces.push(Piece::Text { text, role: base }),
+					RefSet::Slot(slot)	=> pieces.push(Piece::Mark(slot)),
 				}
 			},
 			Segment::Code(text) => {
@@ -1976,53 +2358,25 @@ pub(crate) fn build_pieces(
 				// The first mention of a term is set bold-italic, matching the template's `*_term_*`;
 				// every later mention is plain body text. Document order is the traversal order, so the
 				// set alone decides, with no second pass.
-				let role = if seen.insert(term.clone()) { Role::BoldItalic } else { base };
+				let role = if runs.seen.insert(term.clone()) { Role::BoldItalic } else { base };
 				pieces.push(Piece::Text { text: display.clone(), role });
 			},
-			Segment::Cite(keys) => {
-				// Resolve the citation to "(Author Year)" against the bibliography, set as body text. A
-				// key the bibliography does not hold, or a run with no bibliography loaded, falls back to
-				// the bracketed keys so the citation still reads rather than vanishing.
-				let text = match bib {
-					Some(b) => {
-						let refs: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
-						b.format_citation(&refs).unwrap_or_else(|_| fmt!("({})", keys.join("; ")))
-					},
-					None => fmt!("({})", keys.join("; ")),
-				};
-				pieces.push(Piece::Text { text, role: base });
+			Segment::Cite { keys, site } => {
+				pieces.push(Piece::Text { text: set_cite(keys, site, runs), role: base });
 			},
-			Segment::MarginNote { display, codes } => {
-				// A margin note sets nothing in the body column: it weaves a zero-width anchor into the line
-				// at this point, recording where it landed so `decorate` draws the compressed code in the
-				// outside margin after convergence. The identity carries a document-order ordinal, so two
-				// identical codes stay distinct in the ledger, and the display text itself, which `decorate`
-				// reads back from the key -- no side table has to be threaded out of the layout. A metadata-only
-				// `#claim-refs` carries an empty display, so `decorate` draws nothing for it, but the anchor is
-				// still recorded so the reverse claim index can read the page each of its codes was referenced on.
-				*margin_no += 1;
-				let key = fmt!("{}\u{1f}{}", *margin_no, display);
-				let id	= AnchorId::new(AnchorKind::MarginNote, key);
-				// Each referenced code is remembered against this anchor, so the reverse claim index groups the
-				// references by code and reads their pages back from the ledger, exactly as the index does its folios.
-				for code in codes {
-					claim.occ.push((code.clone(), id.clone()));
+			Segment::MarginNote { display, codes, site } => {
+				// A margin note sets nothing in the body column; where the context gathers it, a zero-width
+				// anchor is woven into the line at this point. A metadata-only `#claim-refs` carries an empty
+				// display, so `decorate` draws nothing for it, but the anchor is still recorded so the reverse
+				// claim index can read the page each of its codes was referenced on.
+				if let Some(id) = set_claim(display, codes, site, claims, runs) {
+					pieces.push(Piece::Anchor(id));
 				}
-				pieces.push(Piece::Anchor(id));
 			},
-			Segment::Index { term, sub, display, main } => {
+			Segment::Index { term, sub, display, main, site } => {
 				// An index marker sets nothing in the body column: it weaves a zero-width anchor into the line
-				// at this point, so the driver records the folio it lands on, and remembers the occurrence so
-				// the back-matter index lists the term with the page. The ordinal makes each occurrence's
-				// identity unique, so two mentions of one term on one page stay distinct until the entry
-				// deduplicates their resolved folios. The styled display travels with the occurrence so the
-				// index page sets the display words, not the sort key; `main` travels too, so a primary
-				// reference's folio sets bold on the index page.
-				idx.no += 1;
-				let key = fmt!("{}\u{1f}{}\u{1f}{}", idx.no, term, sub.as_deref().unwrap_or(""));
-				let id	= AnchorId::new(AnchorKind::IndexEntry, key);
-				idx.occ.push((term.clone(), sub.clone(), display.clone(), id.clone(), *main));
-				pieces.push(Piece::Anchor(id));
+				// at this point, so the driver records the folio it lands on.
+				pieces.push(Piece::Anchor(set_index(term, sub, display, *main, site, runs)));
 			},
 		}
 	}
@@ -2077,14 +2431,7 @@ fn list(
 	ordered:	bool,
 	items:		&[ListEntry],
 	loose:		bool,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
@@ -2133,7 +2480,7 @@ fn list(
 	// space from its neighbours is the caller's, so the first item takes no inter-item gap.
 	let mut prev_depth: Option<Sp> = None;
 	for (ei, entry) in items.iter().enumerate() {
-		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, Role::Body, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+		let pieces		= res!(build_pieces(fonts.clone(), geom, style, &entry.segments, Role::Body, Claims::Gathered, runs));
 		let mut lines	= res!(break_paragraph_pieces(
 			fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, inner, style.text.leading, style.text.justify, style.text.hyphenate, Rgba::BLACK,
 			Some(cap_edge(style, style.text.body_size))));
@@ -2142,15 +2489,20 @@ fn list(
 		push_item_gap(nodes, &block, &mut prev_depth, leading, item_skip);
 		nodes.extend(block);
 		// A list nested under this item sets at an increased left indent, with its own kind and numbering:
-		// it is laid out within the item's inner measure and then shifted right by this list's indent.
+		// it is laid out within the item's inner measure and then shifted right by this list's indent. The
+		// reader nests only a list under an item; anything else there is an error, never a silent drop.
 		for child in &entry.children {
-			if let Block::List { ordered: cord, items: citems, loose: cloose } = child {
-				let mut sub: Vec<Node> = Vec::new();
-				res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems, *cloose,
-					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
-				shift_nodes(&mut sub, indent);
-				push_item_gap(nodes, &sub, &mut prev_depth, leading, item_skip);
-				nodes.extend(sub);
+			match child {
+				Block::List { ordered: cord, items: citems, loose: cloose } => {
+					let mut sub: Vec<Node> = Vec::new();
+					res!(list(&mut sub, fonts.clone(), geom, style, inner, *cord, citems, *cloose, runs));
+					shift_nodes(&mut sub, indent);
+					push_item_gap(nodes, &sub, &mut prev_depth, leading, item_skip);
+					nodes.extend(sub);
+				},
+				other => return Err(err!(
+					"A block other than a list is nested under a list item, which sets only a list there: {:?}.",
+					other; Bug, Unexpected)),
 			}
 		}
 	}
@@ -2280,20 +2632,23 @@ fn indent_item(lines: &mut [Node], mut marker: Leaf, indent: Sp) {
 /// Builds a footnote from its already-shaped body mark and its note text. The note is set as a small
 /// paragraph at the foot measure, prefixed by the number as a hanging superscript, and its stacked
 /// height noted so the page breaker can reserve it.
+#[allow(clippy::too_many_arguments)]
 fn build_footnote(
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	number:		u32,
 	note:		&[Segment],
 	mark:		ShapedText,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Footnote>
 {
 	// The note's own inline runs, so a `*strong*` or `_emph_` term in the note sets with its own face
-	// rather than flattening to upright text. A nested footnote or a cross-reference in a note -- rare --
-	// sets nothing here, as a footnote carries no counter or reserved slot of its own.
-	let pieces = res!(footnote_pieces(fonts.clone(), style, note));
+	// rather than flattening to upright text, and a reference, a citation or a footnote in the note is set
+	// as a paragraph sets one.
+	let pieces = res!(footnote_pieces(fonts.clone(), geom, style, note, runs));
 
 	// The number sets as a small superscript that hangs to the left of the note: the note breaks at a
 	// measure reduced by the mark's hang, its first line carries the mark and a gap that together fill the
@@ -2319,13 +2674,16 @@ fn build_footnote(
 
 /// Turns a footnote's inline runs into the pieces the line breaker weaves: a text run keeps its face, a
 /// `*strong*` sets bold, an `_emph_` italic, a superscript rides raised, a code span sets mono, an in-note
-/// maths span is flattened to leaves, and a glossary term sets its display text. A nested footnote, a
-/// cross-reference and a citation are set as plain text or dropped, since a footnote carries no counter,
-/// reserved page slot or bibliography of its own at this increment.
+/// maths span is flattened to leaves at the note's size, and a glossary term sets its display text. A
+/// reference, a citation, a footnote in the note and an index marker are set as a paragraph sets them, the
+/// nested footnote numbered after the note that holds it; a margin note is not gathered from a note, and is
+/// passed over by name.
 fn footnote_pieces(
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	segments:	&[Segment],
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Vec<Piece>>
 {
@@ -2341,11 +2699,23 @@ fn footnote_pieces(
 			Segment::Code(t)		=> pieces.push(Piece::Text { text: t.clone(), role: Role::Mono }),
 			Segment::Glossary { display, .. }
 									=> pieces.push(Piece::Text { text: display.clone(), role: Role::Body }),
-			Segment::Cite(keys)		=> pieces.push(Piece::Text { text: fmt!("({})", keys.join("; ")), role: Role::Body }),
-			Segment::PageRef(_)		=> {},	// a cross-reference in a note carries no reserved slot here
-			Segment::Footnote { .. }	=> {},	// a nested footnote is not set within a footnote
-			Segment::MarginNote { .. }	=> {},	// a margin note is not set within a footnote's own body
-			Segment::Index { .. }	=> {},	// an index marker in a note is not recorded here
+			Segment::Cite { keys, site }	=> pieces.push(Piece::Text { text: set_cite(keys, site, runs), role: Role::Body }),
+			Segment::PageRef { label, site } => match res!(set_ref(&fonts, style, label, site, runs)) {
+				RefSet::Words(text)	=> pieces.push(Piece::Text { text, role: Role::Body }),
+				RefSet::Slot(slot)	=> pieces.push(Piece::Mark(slot)),
+			},
+			Segment::Footnote { note, site } => {
+				let mark = res!(set_footnote(&fonts, geom, style, size, note, site, runs));
+				pieces.push(Piece::Mark(mark));
+			},
+			Segment::MarginNote { display, codes, site } => {
+				if let Some(id) = set_claim(display, codes, site, Claims::Passed("a footnote body"), runs) {
+					pieces.push(Piece::Anchor(id));
+				}
+			},
+			Segment::Index { term, sub, display, main, site } => {
+				pieces.push(Piece::Anchor(set_index(term, sub, display, *main, site, runs)));
+			},
 			Segment::Super(t) => {
 				let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
@@ -2354,13 +2724,12 @@ fn footnote_pieces(
 				let (shaped, dims) = res!(subscript(fonts.clone(), Role::Body, size, t));
 				pieces.push(Piece::Mark(Leaf::text_dims(shaped, dims)));
 			},
-			Segment::Math(expr) => {
-				let node = res!(math::layout(fonts.clone(), style, expr, false));
-				if let Node::HBox(b) = node {
-					let ascent	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "0")).dims().height;
-					let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
-					pieces.push(Piece::Math { nodes: b.list, width: b.dims.width, height: ascent, depth: b.dims.depth, over });
-				}
+			Segment::Math { expr, site } => {
+				let b		= res!(math::layout_box(fonts.clone(), style, expr, false));
+				let ascent	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, "0")).dims().height;
+				let over	= if b.dims.height > ascent { b.dims.height - ascent } else { Sp::ZERO };
+				pieces.push(Piece::Math { nodes: b.list, width: b.dims.width, height: ascent, depth: b.dims.depth, over });
+				answer(runs.answers, site, Asked::Math, Answer::Set);
 			},
 		}
 	}
@@ -2434,12 +2803,8 @@ fn equation(
 )
 	-> Outcome<()>
 {
-	let node = res!(math::layout(fonts.clone(), style, expr, true));
-	let (list, dims) = match node {
-		Node::HBox(b)	=> (b.list, b.dims),
-		_				=> return Err(err!(
-			"Maths layout returned a non-HBox node for a display equation."; Bug)),
-	};
+	let laid			= res!(math::layout_box(fonts.clone(), style, expr, true));
+	let (list, dims)	= (laid.list, laid.dims);
 
 	let w		= dims.width;
 	let centre	= if measure > w { Sp((measure.raw() - w.raw()) / 2) } else { Sp::ZERO };
@@ -2571,24 +2936,24 @@ fn table_figure(
 	supplement:	&str,
 	number:		u32,
 	label:		Option<&str>,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
 	figure_anchors(nodes, supplement, number, label);
-	nodes.push(res!(table::lower(
-		fonts.clone(), geom, style, measure, table,
-		foot_no, ref_no, margin_no, seen, idx, claim, bib, refs)));
+	nodes.push(res!(table::lower(fonts.clone(), geom, style, measure, table, runs)));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
-	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	res!(captioned(nodes, fonts, geom, style, measure, supplement, number, caption, runs));
 	Ok(())
+}
+
+/// A numbered figure's identity: its supplement and number, the label a reference resolves to, and the site
+/// it was written at, which what it draws is answered for.
+struct Fig<'f> {
+	supplement:	&'f str,
+	number:		u32,
+	label:		Option<&'f str>,
+	site:		&'f Site,
 }
 
 /// Sets an image wrapped in a figure: the figure's anchors, the loaded raster centred in the measure,
@@ -2598,6 +2963,7 @@ fn table_figure(
 fn image_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	path:		&str,
@@ -2605,25 +2971,35 @@ fn image_figure(
 	height:		Option<Length>,
 	scale:		Option<f64>,
 	caption:	Option<&[Segment]>,
-	supplement:	&str,
-	number:		u32,
-	label:		Option<&str>,
-	unmet:		&mut Vec<Unmet>,
+	fig:		&Fig<'_>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
-	figure_anchors(nodes, supplement, number, label);
+	figure_anchors(nodes, fig.supplement, fig.number, fig.label);
 
 	// The loaded figure sized to the measure, or the placeholder box when nothing loads. A load failure
-	// is not fatal: the figure keeps its space and its caption, and the stand-in is reported. A raster
-	// fills a rectangle; an SVG is drawn as its own scaled paths.
-	let graphic = match crate::image::load_figure(path) {
-		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
-		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale)),
-		Err(e)									=> {
-			unmet.push(Unmet::image(path, &e));
-			res!(placeholder(measure))
-		},
+	// is not fatal: the figure keeps its space and its caption, and the stand-in is answered for. A raster
+	// fills a rectangle; an SVG is drawn as its own scaled paths. A figure the reader found no image in was
+	// refused where it was read, and asks for none.
+	let graphic = if path.is_empty() {
+		res!(placeholder(measure))
+	} else {
+		let what = Asked::Image { path: path.to_string(), role: ImageRole::Figure };
+		match crate::image::load_figure(path) {
+			Ok(crate::image::Figure::Raster(img))	=> {
+				answer(runs.answers, fig.site, what, Answer::Set);
+				res!(image_graphic(measure, img, width, height, scale))
+			},
+			Ok(crate::image::Figure::Vector(pic))	=> {
+				answer(runs.answers, fig.site, what, Answer::Set);
+				res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale))
+			},
+			Err(e)									=> {
+				answer(runs.answers, fig.site, what, image_stand_in(path, ImageRole::Figure, &e));
+				res!(placeholder(measure))
+			},
+		}
 	};
 	let leaf	= Leaf::graphic(graphic);
 	let gw		= leaf.dims.width;
@@ -2636,7 +3012,7 @@ fn image_figure(
 	row.push(Node::Leaf(leaf));
 	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, gh, Sp::ZERO))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
-	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	res!(captioned(nodes, fonts, geom, style, measure, fig.supplement, fig.number, caption, runs));
 	Ok(())
 }
 
@@ -2652,15 +3028,23 @@ fn plain_image(
 	width:		Option<Length>,
 	height:		Option<Length>,
 	scale:		Option<f64>,
-	unmet:		&mut Vec<Unmet>,
+	site:		&Site,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
+	let what = Asked::Image { path: path.to_string(), role: ImageRole::Figure };
 	let graphic = match crate::image::load_figure(path) {
-		Ok(crate::image::Figure::Raster(img))	=> res!(image_graphic(measure, img, width, height, scale)),
-		Ok(crate::image::Figure::Vector(pic))	=> res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale)),
+		Ok(crate::image::Figure::Raster(img))	=> {
+			answer(answers, site, what, Answer::Set);
+			res!(image_graphic(measure, img, width, height, scale))
+		},
+		Ok(crate::image::Figure::Vector(pic))	=> {
+			answer(answers, site, what, Answer::Set);
+			res!(svg_graphic(fonts.clone(), measure, pic, width, height, scale))
+		},
 		Err(e)									=> {
-			unmet.push(Unmet::image(path, &e));
+			answer(answers, site, what, image_stand_in(path, ImageRole::Figure, &e));
 			res!(placeholder(measure))
 		},
 	};
@@ -2687,23 +3071,27 @@ fn plain_image(
 fn code_figure(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	figure:		&crate::lang::codefig::CodeFigure,
 	caption:	Option<&[Segment]>,
-	supplement:	&str,
-	number:		u32,
-	label:		Option<&str>,
-	unmet:		&mut Vec<Unmet>,
+	fig:		&Fig<'_>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
-	figure_anchors(nodes, supplement, number, label);
+	figure_anchors(nodes, fig.supplement, fig.number, fig.label);
 
+	let what = Asked::Figure { kind: figure.kind_name() };
 	let graphic = match figure.build(fonts.clone()) {
-		Ok(g)	=> res!(fit_graphic(g, measure)),
+		Ok(g)	=> {
+			answer(runs.answers, fig.site, what, Answer::Set);
+			res!(fit_graphic(g, measure))
+		},
 		Err(e)	=> {
-			unmet.push(Unmet::Figure { fingerprint: figure.fingerprint(), reason: e.plain() });
+			answer(runs.answers, fig.site, what, Answer::StandIn(RefusalClass::Unusable,
+				fmt!("will not build ({}), so a placeholder is set", e.plain())));
 			res!(placeholder(measure))
 		},
 	};
@@ -2718,7 +3106,7 @@ fn code_figure(
 	row.push(Node::Leaf(leaf));
 	nodes.push(Node::HBox(BoxNode::new(row, Dims::new(measure, gh, Sp::ZERO))));
 	nodes.push(Node::Glue(Glue::fixed(Sp::from_pt(5.0))));
-	res!(captioned(nodes, fonts, style, measure, supplement, number, caption));
+	res!(captioned(nodes, fonts, geom, style, measure, fig.supplement, fig.number, caption, runs));
 	Ok(())
 }
 
@@ -2960,15 +3348,20 @@ enum CapTok {
 /// Sets a figure caption -- "{supplement} {number}: {caption}" -- centred beneath the figure, wrapped
 /// greedily into ragged centred lines at the body size. The caption's own runs are set with their faces,
 /// so an emphasised word, a superscript or an in-caption maths span renders rather than flattening to
-/// upright text or vanishing. A caption with no text sets just its number.
+/// upright text or vanishing; a reference, a citation, a footnote and an index marker are set as a
+/// paragraph sets them, and a margin note, which a caption does not gather, is passed over by name. A
+/// caption with no text sets just its number.
+#[allow(clippy::too_many_arguments)]
 fn captioned(
 	nodes:		&mut Vec<Node>,
 	fonts:		Arc<FontSet>,
+	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
 	supplement:	&str,
 	number:		u32,
 	caption:	Option<&[Segment]>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
@@ -2996,12 +3389,31 @@ fn captioned(
 										&mut toks, &mut pending, fonts.clone(), Role::Body, size, t, &[Feature::SMALL_CAPS])),
 				Segment::Glossary { display, .. }
 									=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, display, &[])),
-				Segment::Cite(keys)	=> res!(push_caption_text(
-										&mut toks, &mut pending, fonts.clone(), Role::Body, size, &fmt!("({})", keys.join("; ")), &[])),
-				Segment::PageRef(_)		=> {},	// a cross-reference in a caption is not resolved here
-				Segment::Footnote { .. }	=> {},	// a footnote in a caption is not set here
-				Segment::MarginNote { .. }	=> {},	// a margin note in a caption sets nothing here
-				Segment::Index { .. }	=> {},	// an index marker in a caption sets nothing here
+				Segment::Cite { keys, site }	=> {
+					let text = set_cite(keys, site, runs);
+					res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, &text, &[]));
+				},
+				Segment::PageRef { label, site }	=> match res!(set_ref(&fonts, style, label, site, runs)) {
+					RefSet::Words(text)	=> res!(push_caption_text(&mut toks, &mut pending, fonts.clone(), Role::Body, size, &text, &[])),
+					RefSet::Slot(slot)	=> {
+						let d = slot.dims;
+						push_caption_box(&mut toks, &mut pending, vec![Node::Leaf(slot)], d.width, d.height, d.depth);
+					},
+				},
+				Segment::Footnote { note, site }	=> {
+					let mark	= res!(set_footnote(&fonts, geom, style, size, note, site, runs));
+					let d		= mark.dims;
+					push_caption_box(&mut toks, &mut pending, vec![Node::Leaf(mark)], d.width, d.height, d.depth);
+				},
+				Segment::MarginNote { display, codes, site }	=> {
+					if let Some(id) = set_claim(display, codes, site, Claims::Passed("a figure caption"), runs) {
+						caption_anchor(&mut toks, id);
+					}
+				},
+				Segment::Index { term, sub, display, main, site }	=> {
+					let id = set_index(term, sub, display, *main, site, runs);
+					caption_anchor(&mut toks, id);
+				},
 				Segment::Super(t) => {
 					let (shaped, dims) = res!(superscript(fonts.clone(), Role::Body, size, t));
 					push_caption_box(&mut toks, &mut pending,
@@ -3012,11 +3424,10 @@ fn captioned(
 					push_caption_box(&mut toks, &mut pending,
 						vec![Node::Leaf(Leaf::text_dims(shaped, dims))], dims.width, dims.height, dims.depth);
 				},
-				Segment::Math(expr) => {
-					let node = res!(math::layout(fonts.clone(), style, expr, false));
-					if let Node::HBox(b) = node {
-						push_caption_box(&mut toks, &mut pending, b.list, b.dims.width, b.dims.height, b.dims.depth);
-					}
+				Segment::Math { expr, site } => {
+					let b = res!(math::layout_box(fonts.clone(), style, expr, false));
+					push_caption_box(&mut toks, &mut pending, b.list, b.dims.width, b.dims.height, b.dims.depth);
+					answer(runs.answers, site, Asked::Math, Answer::Set);
 				},
 			}
 		}
@@ -3046,14 +3457,24 @@ fn captioned(
 }
 
 /// Whether any caption segment carries visible text, so the colon prefix is set only for a real caption.
+/// A reference and a footnote mark are visible too; a margin note and an index marker set nothing.
 fn segments_have_text(segs: &[Segment]) -> bool {
 	segs.iter().any(|s| match s {
-		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t) | Segment::Code(t) | Segment::Super(t) | Segment::Sub(t)
-							=> !t.trim().is_empty(),
+		Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t) | Segment::Code(t)
+		| Segment::Super(t) | Segment::Sub(t) | Segment::SmallCaps(t)	=> !t.trim().is_empty(),
 		Segment::Glossary { display, .. }	=> !display.trim().is_empty(),
-		Segment::Math(_) | Segment::Cite(_)	=> true,
-		_									=> false,
+		Segment::Math { .. } | Segment::Cite { .. } | Segment::PageRef { .. } | Segment::Footnote { .. }	=> true,
+		Segment::MarginNote { .. } | Segment::Index { .. }	=> false,
 	})
+}
+
+/// Weaves a zero-width anchor into the caption: it rides the unit before it, so it takes no space of its
+/// own and parts no word from the next. The caption's leading number is always a unit before it.
+fn caption_anchor(toks: &mut Vec<CapTok>, id: AnchorId) {
+	match toks.last_mut() {
+		Some(CapTok::Unit { nodes, .. })	=> nodes.push(Node::Anchor(id)),
+		_									=> toks.push(CapTok::Unit { nodes: vec![Node::Anchor(id)], width: Sp::ZERO, height: Sp::ZERO, depth: Sp::ZERO }),
+	}
 }
 
 /// Tokenises a text run into word units and interword spaces, in the given face, appending to `toks`. A
@@ -3210,7 +3631,7 @@ fn front_matter(
 	geom:		PageGeometry,
 	style: &Theme,
 	fm:			&FrontMatter,
-	unmet:		&mut Vec<Unmet>,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -3220,12 +3641,14 @@ fn front_matter(
 	// Cover: the raster filling the content box, a development build only. A path that will not load
 	// (an SVG, or a missing file) sets no cover page rather than a placeholder, and is reported.
 	if let Some(path) = &fm.cover_image {
+		let what = Asked::Image { path: path.clone(), role: ImageRole::Cover };
 		match fm_cover_node(geom, path) {
 			Ok(node)	=> {
 				nodes.push(node);
 				nodes.push(Node::Penalty(Penalty::eject()));
+				answer(answers, &fm.sites.cover, what, Answer::Set);
 			},
-			Err(e)		=> unmet.push(Unmet::image(path, &e)),
+			Err(e)		=> answer(answers, &fm.sites.cover, what, image_stand_in(path, ImageRole::Cover, &e)),
 		}
 	}
 
@@ -3235,9 +3658,9 @@ fn front_matter(
 	// stays out of the running heads and the contents.
 	nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, "frontmatter:title")));
 	if fm.sidebar_grey.is_some() {
-		res!(fm_doc_title_page(nodes, fonts, geom, fm, unmet));
+		res!(fm_doc_title_page(nodes, fonts, geom, fm, answers));
 	} else {
-		res!(fm_title_page(nodes, fonts, geom, style, fm, unmet));
+		res!(fm_title_page(nodes, fonts, geom, style, fm, answers));
 	}
 	nodes.push(Node::Penalty(Penalty::eject()));
 
@@ -3246,7 +3669,7 @@ fn front_matter(
 	if fm.sidebar_grey.is_some() {
 		if fm_has_doc_meta(fm) {
 			nodes.push(Node::Anchor(AnchorId::new(AnchorKind::Label, "frontmatter:meta")));
-			res!(fm_doc_meta_page(nodes, fonts, geom, style, fm, unmet));
+			res!(fm_doc_meta_page(nodes, fonts, geom, style, fm, answers));
 			nodes.push(Node::Penalty(Penalty::eject()));
 		}
 	} else if fm_has_imprint(fm) {
@@ -3395,7 +3818,7 @@ fn fm_title_page(
 	geom:	PageGeometry,
 	style: &Theme,
 	fm:		&FrontMatter,
-	unmet:	&mut Vec<Unmet>,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -3426,6 +3849,7 @@ fn fm_title_page(
 	// The publisher logo near the foot, when it loads; one that does not (an SVG logo, which this path
 	// reads no vectors for) is left off the page and reported.
 	if let Some(logo) = &fm.logo_image {
+		let what = Asked::Image { path: logo.clone(), role: ImageRole::TitleLogo };
 		match fm_logo_node(fonts, geom, style, logo) {
 			Ok(node)	=> {
 				let target = Sp(h.raw() * 84 / 100);
@@ -3433,8 +3857,9 @@ fn fm_title_page(
 					nodes.push(fm_spacer(target - y));
 				}
 				nodes.push(node);
+				answer(answers, &fm.sites.logo, what, Answer::Set);
 			},
-			Err(e)		=> unmet.push(Unmet::image(logo, &e)),
+			Err(e)		=> answer(answers, &fm.sites.logo, what, image_stand_in(logo, ImageRole::TitleLogo, &e)),
 		}
 	}
 	Ok(())
@@ -3471,7 +3896,7 @@ fn fm_doc_title_page(
 	fonts:	&Arc<FontSet>,
 	geom:	PageGeometry,
 	fm:		&FrontMatter,
-	unmet:	&mut Vec<Unmet>,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -3500,22 +3925,28 @@ fn fm_doc_title_page(
 	// out, as the template's own missing-image path would leave a gap, and reported.
 	let side_mid_box	= -il + side_w / 2.0;	// the sidebar's horizontal centre, in the box frame
 	if let Some(path) = &fm.top_logo {
-		let w = fm.top_logo_width.to_pt() as f32;
+		let w		= fm.top_logo_width.to_pt() as f32;
+		let what	= Asked::Image { path: path.clone(), role: ImageRole::TitleLogo };
 		match logo_ops(fonts, path, w, side_mid_box - w / 2.0, 0.0) {
-			Ok((logo, _))	=> ops.extend(logo),
-			Err(e)			=> unmet.push(Unmet::image(path, &e)),
+			Ok((logo, _))	=> {
+				ops.extend(logo);
+				answer(answers, &fm.sites.top_logo, what, Answer::Set);
+			},
+			Err(e)			=> answer(answers, &fm.sites.top_logo, what, image_stand_in(path, ImageRole::TitleLogo, &e)),
 		}
 	}
 	if let Some(path) = &fm.bottom_logo {
-		let w = fm.bottom_logo_width.to_pt() as f32;
+		let w		= fm.bottom_logo_width.to_pt() as f32;
+		let what	= Asked::Image { path: path.clone(), role: ImageRole::TitleLogo };
 		match logo_ops(fonts, path, w, 0.0, 0.0) {
 			Ok((logo, lh))	=> {
 				// Re-place now the height is known: bottom edge one `margins.a4` up from the page foot.
 				let dy = (ph - it) - it - lh;
 				let placed = res!(translate_ops(logo, side_mid_box - w / 2.0, dy));
 				ops.extend(placed);
+				answer(answers, &fm.sites.bottom_logo, what, Answer::Set);
 			},
-			Err(e)			=> unmet.push(Unmet::image(path, &e)),
+			Err(e)			=> answer(answers, &fm.sites.bottom_logo, what, image_stand_in(path, ImageRole::TitleLogo, &e)),
 		}
 	}
 
@@ -3755,7 +4186,7 @@ fn fm_doc_meta_page(
 	geom:	PageGeometry,
 	style: &Theme,
 	fm:		&FrontMatter,
-	unmet:	&mut Vec<Unmet>,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -3775,9 +4206,18 @@ fn fm_doc_meta_page(
 	let mut seen:	HashSet<String>	= HashSet::new();
 	let mut idx			= IndexGather::default();
 	let mut claim		= ClaimGather::default();
-	let tnode	= res!(table::lower(
-		fonts.clone(), geom, style, measure, &table,
-		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, None, &refs));
+	let mut throwaway	= Vec::new();	// plain text asks for nothing, so nothing is answered
+	let tnode	= res!(table::lower(fonts.clone(), geom, style, measure, &table, &mut Runs {
+		foot_no:	&mut foot_no,
+		ref_no:		&mut ref_no,
+		margin_no:	&mut margin_no,
+		seen:		&mut seen,
+		idx:		&mut idx,
+		claim:		&mut claim,
+		bib:		None,
+		refs:		&refs,
+		answers:	&mut throwaway,
+	}));
 	let table_h	= node_vext(&tnode);
 	nodes.push(tnode);
 
@@ -3821,8 +4261,11 @@ fn fm_doc_meta_page(
 				foot.push(Node::Glue(Glue::fixed(big)));
 				foot_h += big + lh;
 				foot.push(Node::HBox(BoxNode::new(vec![Node::Leaf(logo)], Dims::new(measure, lh, Sp::ZERO))));
+				answer(answers, &fm.sites.footer_logo,
+					Asked::Image { path: path.clone(), role: ImageRole::FooterLogo }, Answer::Set);
 			},
-			Err(e)		=> unmet.push(Unmet::image(path, &e)),
+			Err(e)		=> answer(answers, &fm.sites.footer_logo,
+				Asked::Image { path: path.clone(), role: ImageRole::FooterLogo }, image_stand_in(path, ImageRole::FooterLogo, &e)),
 		}
 	}
 
@@ -3922,9 +4365,9 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 				Segment::Text(t) | Segment::Strong(t) | Segment::Emph(t) | Segment::BoldItalic(t)
 				| Segment::Super(t) | Segment::Sub(t) | Segment::Code(t) | Segment::SmallCaps(t)	=> count_str(t, n),
 				Segment::Glossary { display, .. }		=> count_str(display, n),
-				Segment::Footnote { note }				=> count_segs(note, n),
-				Segment::Cite(keys)						=> for k in keys { count_str(k, n); },
-				Segment::PageRef(_) | Segment::Math(_) | Segment::MarginNote { .. } | Segment::Index { .. }	=> {},
+				Segment::Footnote { note, .. }			=> count_segs(note, n),
+				Segment::Cite { keys, .. }				=> for k in keys { count_str(k, n); },
+				Segment::PageRef { .. } | Segment::Math { .. } | Segment::MarginNote { .. } | Segment::Index { .. }	=> {},
 			}
 		}
 	}
@@ -4487,15 +4930,55 @@ pub(crate) fn flatten_segments(segments: &[Segment]) -> String {
 			Segment::SmallCaps(t)			=> out.push_str(t),
 			Segment::Code(t)				=> out.push_str(t),
 			Segment::Glossary { display, .. }	=> out.push_str(display),
-			Segment::Math(_)				=> {},
-			Segment::PageRef(_)				=> {},
+			Segment::Math { .. }			=> {},
+			Segment::PageRef { .. }			=> {},
 			Segment::Footnote { .. }		=> {},
-			Segment::Cite(_)				=> {},
+			Segment::Cite { .. }			=> {},
 			Segment::MarginNote { .. }			=> {},	// the margin code is not part of the flattened body text
 			Segment::Index { .. }	=> {},	// an index marker is not part of the flattened body text
 		}
 	}
 	out
+}
+
+/// The words a chapter or part opener sets for its title, and the anchors of the index markers it holds. The
+/// opener sets its title as one run, so a reference and a citation are set as the words they resolve to, and
+/// each index marker as an anchor beside the title; a footnote, a maths span, a reference with no number to
+/// give and a margin note have no words in one run, and are answered as not set, never dropped in silence.
+fn opener_title(segments: &[Segment], runs: &mut Runs<'_>) -> Outcome<(String, Vec<AnchorId>)> {
+	let mut out		= String::new();
+	let mut anchors	= Vec::new();
+	for seg in segments {
+		match seg {
+			Segment::Text(t)
+			| Segment::Strong(t)
+			| Segment::Emph(t)
+			| Segment::BoldItalic(t)
+			| Segment::Super(t)
+			| Segment::Sub(t)
+			| Segment::SmallCaps(t)
+			| Segment::Code(t)					=> out.push_str(t),
+			Segment::Glossary { display, .. }	=> out.push_str(display),
+			Segment::Cite { keys, site }		=> out.push_str(&set_cite(keys, site, runs)),
+			Segment::PageRef { label, site }	=> match runs.refs.get(label) {
+				Some(text) => {
+					out.push_str(text);
+					answer(runs.answers, site, Asked::Ref(label.clone()), Answer::Set);
+				},
+				None => answer(runs.answers, site, Asked::Ref(label.clone()),
+					Answer::Passed(fmt!("@{} (in a chapter title, which sets no page number)", label))),
+			},
+			Segment::Footnote { site, .. }		=> answer(runs.answers, site, Asked::Footnote,
+				Answer::Passed("#footnote (in a chapter title, which sets no footnote)".to_string())),
+			Segment::Math { site, .. }			=> answer(runs.answers, site, Asked::Math,
+				Answer::Passed("inline maths (in a chapter title, which sets no maths)".to_string())),
+			Segment::MarginNote { display, codes, site } => {
+				let _ = set_claim(display, codes, site, Claims::Passed("a heading title"), runs);
+			},
+			Segment::Index { term, sub, display, main, site } => anchors.push(set_index(term, sub, display, *main, site, runs)),
+		}
+	}
+	Ok((out, anchors))
 }
 
 /// Sets a title's rich runs into one horizontal line at `size` in `role`, so a running head or a
@@ -4536,16 +5019,15 @@ fn inline_segments(
 			Segment::Sub(t)			=> (t, role),
 			Segment::Code(t)		=> (t, Role::Mono),
 			Segment::Glossary { display, .. }	=> (display, role),
-			Segment::Math(atom)	=> {
+			Segment::Math { expr: atom, .. }	=> {
 				let mut hs = style.clone();
 				hs.text.body_size = size;
-				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
-					width += b.dims.width;
-					children.extend(b.list);
-				}
+				let b = res!(math::layout_box(fonts.clone(), &hs, atom, false));
+				width += b.dims.width;
+				children.extend(b.list);
 				continue;
 			},
-			Segment::PageRef(_) | Segment::Footnote { .. } | Segment::Cite(_) | Segment::MarginNote { .. } | Segment::Index { .. }	=> continue,
+			Segment::PageRef { .. } | Segment::Footnote { .. } | Segment::Cite { .. } | Segment::MarginNote { .. } | Segment::Index { .. }	=> continue,
 		};
 		let sh	= res!(ShapedText::new_with_features(fonts.clone(), r, Dir::Ltr, size, text, features));
 		let w	= sh.dims().width;
@@ -4802,14 +5284,16 @@ fn smallcaps_runs(text: &str) -> Vec<(String, bool)> {
 /// level. A glossary term keeps its own first-use bold-italic (recorded in `seen`, shared with the body
 /// so document order decides), emphasis its face, and a maths span is set at the heading size and its
 /// glyphs woven into the line -- so a call in a heading renders rather than leaking its raw source.
+#[allow(clippy::too_many_arguments)]
 fn subheading_hbox(
 	fonts:		Arc<FontSet>,
 	faces:		&FaceResolver,
+	geom:		PageGeometry,
 	style: &Theme,
 	level:		u8,
 	number:		&str,
 	segments:	&[Segment],
-	seen:		&mut HashSet<String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<Node>
 {
@@ -4864,27 +5348,48 @@ fn subheading_hbox(
 				// First use is set bold-italic, matching the template's `*_term_*`; a later use takes the
 				// heading's own face. The set is the body's, so a term first seen in a heading is plain in
 				// the prose after it, exactly as document order dictates.
-				let f = if seen.insert(term.clone()) { head_run_face(&face, HeadRun::Gloss) } else { face };
+				let f = if runs.seen.insert(term.clone()) { head_run_face(&face, HeadRun::Gloss) } else { face };
 				res!(push_head_text(
 					&mut children, &mut width, &fonts, &f, size, small_size, smallcaps, disp, asc, dep));
 			},
-			Segment::Math(atom)	=> {
+			Segment::Math { expr, site }	=> {
 				// The span is set at the heading size and unwrapped, its leaves woven into the line as the
 				// body sets inline maths, so a subscripted variable in a heading draws as real glyphs.
 				let mut hs = style.clone();
 				hs.text.body_size = size;
-				if let Node::HBox(b) = res!(math::layout(fonts.clone(), &hs, atom, false)) {
-					width += b.dims.width;
-					children.extend(b.list);
+				let b = res!(math::layout_box(fonts.clone(), &hs, expr, false));
+				width += b.dims.width;
+				children.extend(b.list);
+				answer(runs.answers, site, Asked::Math, Answer::Set);
+			},
+			// A reference and a citation are set as the words they resolve to, in the heading's face, or as the
+			// slot the driver fills with a page; a footnote as its raised mark, its note set at the page foot;
+			// an index marker as an anchor. A margin note is not gathered from a heading, and is named.
+			Segment::PageRef { label, site }	=> match res!(set_ref(&fonts, style, label, site, runs)) {
+				RefSet::Words(text)	=> res!(push_head_text(
+					&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, &text, asc, dep)),
+				RefSet::Slot(slot)	=> {
+					width += slot.dims.width;
+					children.push(Node::Leaf(slot));
+				},
+			},
+			Segment::Cite { keys, site }	=> {
+				let text = set_cite(keys, site, runs);
+				res!(push_head_text(&mut children, &mut width, &fonts, &face, size, small_size, smallcaps, &text, asc, dep));
+			},
+			Segment::Footnote { note, site }	=> {
+				let mark = res!(set_footnote(&fonts, geom, style, size, note, site, runs));
+				width += mark.dims.width;
+				children.push(Node::Leaf(mark));
+			},
+			Segment::MarginNote { display, codes, site }	=> {
+				if let Some(id) = set_claim(display, codes, site, Claims::Passed("a heading title"), runs) {
+					children.push(Node::Anchor(id));
 				}
 			},
-			// A footnote, cross-reference, citation or margin note in a heading is vanishingly rare and has no
-			// display form here; it is dropped rather than set, leaving the heading its words.
-			Segment::Footnote { .. }	=> {},
-			Segment::PageRef(_)			=> {},
-			Segment::Cite(_)			=> {},
-			Segment::MarginNote { .. }		=> {},
-			Segment::Index { .. }	=> {},	// an index marker in a heading is not recorded
+			Segment::Index { term, sub, display, main, site }	=> {
+				children.push(Node::Anchor(set_index(term, sub, display, *main, site, runs)));
+			},
 		}
 	}
 
@@ -5216,7 +5721,8 @@ fn section_banner(
 	geom:		PageGeometry,
 	measure:	Sp,
 	path:		&str,
-	unmet:		&mut Vec<Unmet>,
+	site:		&Site,
+	answers:	&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -5240,10 +5746,14 @@ fn section_banner(
 	// The logo, loaded 30 pt tall, its right edge one page margin in from the page's right edge (the content
 	// right edge) and its box centred on the band's vertical middle. Its own ops are in a top-left frame,
 	// y down; a plain translation seats them. A logo that will not load draws the bar alone, and is reported.
+	let what = Asked::Image { path: path.to_string(), role: ImageRole::BannerLogo };
 	let logo = match image_at_height(&fonts, path, logo_h as f64) {
-		Ok(g)	=> Some(g),
+		Ok(g)	=> {
+			answer(answers, site, what, Answer::Set);
+			Some(g)
+		},
 		Err(e)	=> {
-			unmet.push(Unmet::image(path, &e));
+			answer(answers, site, what, image_stand_in(path, ImageRole::BannerLogo, &e));
 			None
 		},
 	};
@@ -5295,14 +5805,7 @@ fn styled_box(
 	measure:	Sp,
 	blocks:		&[Block],
 	fill:		Rgba,
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
@@ -5324,7 +5827,7 @@ fn styled_box(
 	// glue: `place_vbox` seats every child at the content left, so the horizontal inset rides inside the line
 	// rather than on the box.
 	let mut inner:	Vec<Node>	= Vec::new();
-	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, runs));
 	for node in inner.iter_mut() {
 		if let Node::HBox(b) = node {
 			b.list.insert(0, Node::Glue(Glue::fixed(inset_left)));
@@ -5394,8 +5897,19 @@ pub fn measure_blocks(
 	// references are gathered into throwaways that are dropped -- they must not join the real back matter.
 	let mut idx			= IndexGather::default();
 	let mut claim		= ClaimGather::default();
-	res!(box_flow(&mut nodes, fonts, geom, style, measure, blocks,
-		&mut foot_no, &mut ref_no, &mut margin_no, &mut seen, &mut idx, &mut claim, bib, refs));
+	let mut answers		= Vec::new();	// a measure sets nothing the document shows, so it answers for nothing
+	let mut runs		= Runs {
+		foot_no:	&mut foot_no,
+		ref_no:		&mut ref_no,
+		margin_no:	&mut margin_no,
+		seen:		&mut seen,
+		idx:		&mut idx,
+		claim:		&mut claim,
+		bib,
+		refs,
+		answers:	&mut answers,
+	};
+	res!(box_flow(&mut nodes, fonts, geom, style, measure, blocks, &mut runs));
 	let mut height = Sp::ZERO;
 	for n in &nodes {
 		height += n.vextent();
@@ -5415,19 +5929,12 @@ fn box_flow(
 	style: &Theme,
 	measure:	Sp,
 	blocks:		&[Block],
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
 	let mut first = true;
-	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs, &mut first));
+	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, runs, &mut first));
 	Ok(())
 }
 
@@ -5443,14 +5950,7 @@ fn box_flow_scoped(
 	style: &Theme,
 	measure:	Sp,
 	blocks:		&[Block],
-	foot_no:	&mut u32,
-	ref_no:		&mut u32,
-	margin_no:	&mut u32,
-	seen:		&mut HashSet<String>,
-	idx:		&mut IndexGather,
-	claim:		&mut ClaimGather,
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	runs:		&mut Runs<'_>,
 	first:		&mut bool,
 )
 	-> Outcome<()>
@@ -5458,8 +5958,7 @@ fn box_flow_scoped(
 	for block in blocks {
 		if let Block::Scoped { patch, blocks: inner } = block {
 			let scoped = { let mut t = style.clone(); t.apply(patch); t };
-			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner,
-				foot_no, ref_no, margin_no, seen, idx, claim, bib, refs, first));
+			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner, runs, first));
 			continue;
 		}
 		if !*first {
@@ -5474,17 +5973,14 @@ fn box_flow_scoped(
 				nodes.extend(lines);
 			},
 			Block::RichParagraph { segments } => {
-				let pieces = res!(build_pieces(
-					fonts.clone(), geom, style, segments, Role::Body, foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, Role::Body, Claims::Gathered, runs));
 				let lines = res!(break_paragraph_pieces(
 					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
 						Some(cap_edge(style, style.text.body_size))));
 				nodes.extend(lines);
 			},
 			Block::List { ordered, items, loose } => {
-				res!(list(
-					nodes, fonts.clone(), geom, style, measure, *ordered, items, *loose,
-					foot_no, ref_no, margin_no, seen, idx, claim, bib, refs));
+				res!(list(nodes, fonts.clone(), geom, style, measure, *ordered, items, *loose, runs));
 			},
 			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
 			// set in the mono face at the scoped `code.size`, the same as a top-level code block. Without this
@@ -5567,8 +6063,8 @@ pub fn decorate(
 	style: &Theme,
 	geom:			PageGeometry,
 	book_title:		&str,
-	footer_logo:	Option<&str>,
-	unmet:			&mut Vec<Unmet>,
+	footer_logo:	Option<(&str, &Site)>,	// the footer logo's path and the field that names it
+	answers:		&mut Vec<Answered>,
 )
 	-> Outcome<()>
 {
@@ -5579,12 +6075,18 @@ pub fn decorate(
 	// placed on each body page; a logo that will not load leaves the footer to the folio alone, and is
 	// reported.
 	let footer = match footer_logo {
-		Some(p)	=> match image_at_height(fonts, p, 18.0) {
-			Ok(g)	=> Some(Arc::new(g)),
-			Err(e)	=> {
-				unmet.push(Unmet::image(p, &e));
-				None
-			},
+		Some((p, site))	=> {
+			let what = Asked::Image { path: p.to_string(), role: ImageRole::FooterLogo };
+			match image_at_height(fonts, p, 18.0) {
+				Ok(g)	=> {
+					answer(answers, site, what, Answer::Set);
+					Some(Arc::new(g))
+				},
+				Err(e)	=> {
+					answer(answers, site, what, image_stand_in(p, ImageRole::FooterLogo, &e));
+					None
+				},
+			}
 		},
 		None	=> None,
 	};
@@ -5762,20 +6264,44 @@ fn centre_x(geom: PageGeometry, w: Sp) -> Sp {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::ir::Span;
 
-	/// A figure drawn by code that will not build is set as a placeholder and reported as a fallback known by
-	/// the figure's own fingerprint, so the compile charges it to the `#figure` that asked for it.
+	/// A claim reference in a context the reverse claim index does not gather -- a heading title -- is
+	/// answered as passed over by its setter, never dropped in silence, while the same reference in a body
+	/// paragraph, which is gathered, is answered as set.
 	#[test]
-	fn a_figure_that_will_not_build_is_reported_by_its_fingerprint() -> Outcome<()> {
+	fn a_claim_reference_a_heading_does_not_gather_is_answered_as_passed() -> Outcome<()> {
+		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
+		let (blocks, _) = res!(crate::lang::to_blocks_in(
+			"= Heading #claim-refs(<Z9>) here\n\n== Sub #claim-refs(<Z8>)\n\nBody #claim-refs(<Z7>) here.\n",
+			crate::lang::rules::Bindings::new(&crate::lang::rules::TemplateFns::new(), &crate::lang::rules::ContentFns::new()),
+			"/p/a.typ", 0));
+		let (_, _, answers) = res!(author(fonts, PageGeometry::a4(), &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		let claims: Vec<&Answer> = answers.iter().filter(|a| a.what == Asked::ClaimRef).map(|a| &a.answer).collect();
+		assert_eq!(claims, [
+			&Answer::Passed("claim reference in a heading title is not indexed".to_string()),
+			&Answer::Passed("claim reference in a heading title is not indexed".to_string()),
+			&Answer::Set,
+		]);
+		Ok(())
+	}
+
+	/// A figure drawn by code that will not build is set as a placeholder and answered as a stand-in at the
+	/// site the figure was written, so the compile charges it to the `#figure` that asked for it.
+	#[test]
+	fn a_figure_that_will_not_build_is_answered_at_its_site() -> Outcome<()> {
 		let fonts	= Arc::new(res!(crate::fonts::libertinus()));
 		let mut d	= crate::diagram::Diagram::new();
 		d.node_at("a", "A", Sp::ZERO, Sp::ZERO, crate::diagram::shape::Shape::Box);
 		d.node_at("a", "B", Sp::ZERO, Sp::from_pt(40.0), crate::diagram::shape::Shape::Box);
 		let figure	= crate::lang::codefig::CodeFigure::Flowchart { diagram: d, style: crate::diagram::DiagramStyle::default() };
-		let blocks	= vec![Block::code_figure(figure.clone(), None, "Figure".to_string(), None, None)];
-		let (_, _, unmet) = res!(author(fonts, PageGeometry::a4(), &Theme::default(), &FaceResolver::default(), &blocks, None, None));
-		assert!(matches!(unmet.as_slice(), [Unmet::Figure { fingerprint, .. }] if *fingerprint == figure.fingerprint()),
-			"{:?}", unmet);
+		let site	= Site::new(&Arc::from("/p/a.typ"), Span::new(12, 12));
+		let blocks	= vec![Block::code_figure(figure, None, "Figure".to_string(), None, None, site.clone())];
+		let (_, _, answers) = res!(author(fonts, PageGeometry::a4(), &Theme::default(), &FaceResolver::default(), &blocks, None, None));
+		assert_eq!(answers.len(), 1, "{:?}", answers);
+		assert_eq!((&answers[0].site, &answers[0].what), (&site, &Asked::Figure { kind: "diagram" }));
+		assert!(matches!(&answers[0].answer, Answer::StandIn(RefusalClass::Unusable, note) if note.starts_with("will not build")),
+			"{:?}", answers[0].answer);
 		Ok(())
 	}
 
@@ -5834,6 +6360,7 @@ mod tests {
 			}],
 			reading_min:	Some(51),
 			acknowledgement:	Some("We acknowledge...".to_string()),
+			sites:			FrontSites::default(),
 		};
 		let table = build_meta_table(&fm).expect("meta table builds");
 		assert_eq!(table.rows.len(), 2, "one header row and one revision row");
@@ -5862,7 +6389,7 @@ mod tests {
 		style.heading.kind = HeadingStyle::DocBanner;
 		let blocks = vec![
 			Block::Paragraph { text: "Intro before the section.".to_string() },
-			Block::section_banner("assets/svg/pearlite_logo_text_right.svg".to_string()),
+			Block::section_banner("assets/svg/pearlite_logo_text_right.svg".to_string(), Site::none()),
 			Block::Heading { level: 1, segments: vec![Segment::text("Pearlite")], label: None },
 			Block::Paragraph { text: "Pearlite is the format.".to_string() },
 		];
@@ -6005,7 +6532,7 @@ mod tests {
 		let blocks = vec![
 			Block::Scoped { patch: ThemePatch::default(), blocks: vec![heading("A", Some("a"))] },
 			heading("B", None),
-			Block::RichParagraph { segments: vec![Segment::page_ref("a".to_string())] },
+			Block::RichParagraph { segments: vec![Segment::page_ref("a".to_string(), Site::none())] },
 		];
 
 		// The reference pre-pass sees the heading inside the scope: `@a` resolves to "Chapter 1", the number
@@ -6246,7 +6773,7 @@ an interior line justification fills to the measure while ragged setting does no
 		let plain	= vec![Block::rich(vec![Segment::text(body)])];
 		let (head, tail) = body.split_at(body.find("amid").unwrap_or(0) + 4);
 		let noted	= vec![Block::rich(vec![
-			Segment::text(head), Segment::margin_note("A1", vec!["A1".to_string()]), Segment::text(tail)])];
+			Segment::text(head), Segment::margin_note("A1", vec!["A1".to_string()], Site::none()), Segment::text(tail)])];
 
 		let metrics		= crate::font::FontMetrics::new(fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size);
 		let (doc_p, _, _)	= res!(author(fonts.clone(), geom, &style, &FaceResolver::default(), &plain, None, None));
@@ -6286,9 +6813,9 @@ an interior line justification fills to the measure while ragged setting does no
 			// a claim reference (gathered into the index) in the same body paragraph.
 			Block::rich(vec![
 				Segment::text("See "),
-				Segment::page_ref("undefined-target"),
+				Segment::page_ref("undefined-target", Site::none()),
 				Segment::text(" while claim "),
-				Segment::margin_note("", vec!["X1".to_string()]),
+				Segment::margin_note("", vec!["X1".to_string()], Site::none()),
 				Segment::text(" is referenced here."),
 			]),
 			Block::ClaimIndex,

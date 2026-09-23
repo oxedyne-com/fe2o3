@@ -428,29 +428,26 @@ fn is_name_char(c: char) -> bool {
 	c.is_alphanumeric() || c == '-' || c == '_'
 }
 
-/// Asks for each image the front matter draws ([`lang::Ask`]), at the field that names it: a book's
-/// cover in its config's `cover-image-path`, and the logos in the root's template application.
-fn ask_front_images(
-	skips:		&mut lang::Refusals,
-	fm:			&FrontMatter,
+/// Places each image the front matter draws at the field that names it: a book's cover in its config's
+/// `cover-image-path`, and the logos in the root's template application, so a stand-in set in an image's
+/// place is charged there.
+fn place_front_images(
+	fm:			&mut FrontMatter,
 	root_file:	&str,
 	root_src:	&str,
 	config:		Option<(&str, &str)>,	// the config's path and source, for a book
 )
 {
-	let mut ask = |path: &Option<String>, file: &str, span: Span, role: lang::ImageRole| {
-		if let Some(p) = path {
-			skips.ask_in(file, lang::Asked::Image { path: p.clone(), role }, span);
-		}
-	};
+	let root	= Arc::<str>::from(root_file);
+	let at		= |name: &str| crate::ir::Site::new(&root, field_span(root_src, name));
 	if let Some((config_file, config_src)) = config {
-		let at = find_live(config_src, "cover-image-path").unwrap_or(0) as u32;
-		ask(&fm.cover_image, config_file, Span::new(at, at), lang::ImageRole::Cover);
+		let c	= find_live(config_src, "cover-image-path").unwrap_or(0) as u32;
+		fm.sites.cover = crate::ir::Site::new(&Arc::from(config_file), Span::new(c, c));
 	}
-	ask(&fm.logo_image, root_file, field_span(root_src, "title-logo-path"), lang::ImageRole::TitleLogo);
-	ask(&fm.top_logo, root_file, field_span(root_src, "title-top-logo-path"), lang::ImageRole::TitleLogo);
-	ask(&fm.bottom_logo, root_file, field_span(root_src, "title-bottom-logo-path"), lang::ImageRole::TitleLogo);
-	ask(&fm.footer_logo, root_file, field_span(root_src, "footer-left-logo-path"), lang::ImageRole::FooterLogo);
+	fm.sites.logo			= at("title-logo-path");
+	fm.sites.top_logo		= at("title-top-logo-path");
+	fm.sites.bottom_logo	= at("title-bottom-logo-path");
+	fm.sites.footer_logo	= at("footer-left-logo-path");
 }
 
 /// The book (`format`-switch) path: reads the `config.typ` beside the root, loads the shared Libertinus
@@ -516,9 +513,9 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang:
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks, false);
 	let title		= content_field(root_src, "title").unwrap_or_default();
-	let front		= read_front_matter(root_src, &config_src, &title);
+	let mut front	= read_front_matter(root_src, &config_src, &title);
 	let config_file	= config_path.display().to_string();
-	ask_front_images(&mut skips, &front, &root_file, root_src, Some((&config_file, &config_src)));
+	place_front_images(&mut front, &root_file, root_src, Some((&config_file, &config_src)));
 
 	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
@@ -629,7 +626,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks, false);
 	let mut front	= read_doc_front_matter(&template, root_src, &raw, &title);
-	ask_front_images(&mut skips, &front, &root_file, root_src, None);
+	place_front_images(&mut front, &root_file, root_src, None);
 
 	// The reading time the meta page appends to its notes cell: the whole-document word count over the
 	// template's 230 words/min, rounded up, matching its `calc.ceil(words.final() / avg_reading_speed)`.
@@ -819,6 +816,7 @@ fn read_doc_front_matter(template: &str, root_src: &str, raw: &RawStyle, title: 
 		meta_rows,
 		reading_min:	None,	// set by `load_doc`, which has the body blocks to count
 		acknowledgement,
+		sites:			crate::doc::FrontSites::default(),	// placed by `load_doc` against the root's fields
 	}
 }
 
@@ -955,41 +953,14 @@ fn has_defined_glossary_terms(blocks: &[Block]) -> bool {
 	!ordered.is_empty()
 }
 
-/// Does the body carry at least one index marker anywhere -- in a heading, paragraph, list item, table cell
-/// or callout, or a footnote's own runs? The gate that keeps the index section from being set for a book
-/// that asks for one but marks no term.
+/// Does the body carry at least one index marker anywhere -- in a heading, a paragraph, a list item, a table
+/// cell, a caption, a callout or a footnote's own runs? The gate that keeps the index section from being set
+/// for a book that asks for one but marks no term, read from the one walk that lists what the document asks
+/// for, so a marker in any place a setter sets it counts.
 fn has_index_occurrences(blocks: &[Block]) -> bool {
-	blocks.iter().any(block_has_index)
-}
-
-/// Whether one block, or anything nested in it, carries an index marker segment.
-fn block_has_index(block: &Block) -> bool {
-	match block {
-		Block::Heading { segments, .. }		=> segments_have_index(segments),
-		Block::RichParagraph { segments }	=> segments_have_index(segments),
-		Block::List { items, .. }			=> items.iter().any(|it|
-			segments_have_index(&it.segments) || it.children.iter().any(block_has_index)),
-		Block::Table(t)						=> table_has_index(t),
-		Block::TableFigure { table, .. }	=> table_has_index(table),
-		Block::Box { blocks, .. }			=> blocks.iter().any(block_has_index),
-		Block::Scoped { blocks, .. }		=> blocks.iter().any(block_has_index),
-		Block::Place { blocks, .. }			=> blocks.iter().any(block_has_index),
-		_									=> false,
-	}
-}
-
-/// Whether a run of segments carries an index marker, descending into a footnote's own runs.
-fn segments_have_index(segments: &[Segment]) -> bool {
-	segments.iter().any(|seg| match seg {
-		Segment::Index { .. }		=> true,
-		Segment::Footnote { note }	=> segments_have_index(note),
-		_						=> false,
-	})
-}
-
-/// Whether any cell of a table carries an index marker.
-fn table_has_index(table: &Table) -> bool {
-	table.rows.iter().any(|row| row.cells.iter().any(|cell| segments_have_index(&cell.content)))
+	let mut asks = Vec::new();
+	crate::doc::asks_of(blocks, &mut asks);
+	asks.iter().any(|(_, what)| matches!(what, crate::doc::Asked::Index(_)))
 }
 
 /// Locates a `refs.bib` beside a lone chapter or in an ancestor directory, parses it, marks the keys the
@@ -1028,14 +999,17 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>, skips: &mu
 /// text and the glossary sets its header alone -- the same early return the template's style makes for an
 /// undefined key. One that is there but will not read is recorded in `skips` and installs the same.
 pub fn install_terms(start_dir: &Path, skips: &mut lang::Refusals) -> Outcome<()> {
-	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> read_found(&p, "its terms are set as their keys", skips).unwrap_or_default(),
-		None	=> String::new(),
+	let (src, file) = match find_up(start_dir, "terms.typ") {
+		Some(p)	=> (read_found(&p, "its terms are set as their keys", skips).unwrap_or_default(), p.display().to_string()),
+		None	=> (String::new(), String::new()),
 	};
 	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
+	// A definition's reference or citation is set in the glossary's table, and answered for at the file
+	// that defines it.
+	let site = crate::ir::Site::new(&Arc::from(file.as_str()), Span::default());
 	let mut defs: HashMap<String, Vec<Segment>> = HashMap::new();
 	for (key, content) in parse_term_defs(&src) {
-		defs.insert(key, lang::inline_segments(&content));
+		defs.insert(key, lang::inline_segments_in(&content, &site));
 	}
 	let mut guard = lock_write!(TERM_DEFS, "While recording the term definitions");
 	*guard = Some(defs);
@@ -1336,7 +1310,7 @@ fn collect_from_segments(segments: &[Segment], seen: &mut HashSet<String>, order
 					ordered.push(term.clone());
 				}
 			},
-			Segment::Footnote { note }		=> collect_from_segments(note, seen, ordered),
+			Segment::Footnote { note, .. }	=> collect_from_segments(note, seen, ordered),
 			_								=> {},
 		}
 	}
@@ -1457,43 +1431,15 @@ fn find_up(start: &Path, name: &str) -> Option<PathBuf> {
 
 /// Gathers the citation keys the body's blocks carry, in document order, so each can be marked cited.
 fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
-	let mut out = Vec::new();
-	for block in blocks {
-		match block {
-			Block::RichParagraph { segments }	=> collect_cite_segments(segments, &mut out),
-			Block::List { items, .. }			=> for item in items {
-				collect_cite_segments(&item.segments, &mut out);
-				out.extend(collect_cite_keys(&item.children));
-			},
-			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
-			Block::Scoped { blocks, .. }		=> out.extend(collect_cite_keys(blocks)),
-			Block::Place { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
-			// A table cell is set through the body's own segment pipeline, so a `#cite` in a cell renders and
-			// must be marked cited too, or its work would render but its reference vanish from the list.
-			Block::Table(t)						=> collect_cite_from_table(t, &mut out),
-			Block::TableFigure { table, .. }	=> collect_cite_from_table(table, &mut out),
-			_									=> {},
-		}
-	}
-	out
-}
-
-/// Pushes the keys of every citation in any cell of a table onto `out`.
-fn collect_cite_from_table(table: &Table, out: &mut Vec<Vec<String>>) {
-	for row in &table.rows {
-		for cell in &row.cells {
-			collect_cite_segments(&cell.content, out);
-		}
-	}
-}
-
-/// Pushes the keys of every citation segment in `segments` onto `out`.
-fn collect_cite_segments(segments: &[Segment], out: &mut Vec<Vec<String>>) {
-	for seg in segments {
-		if let Segment::Cite(keys) = seg {
-			out.push(keys.clone());
-		}
-	}
+	// Every citation the document sets, wherever it is written -- a paragraph, a list, a cell, a caption, a
+	// heading or a footnote -- read from the one walk that lists what the document asks for, so a work cited
+	// only in a caption or a note is listed too.
+	let mut asks = Vec::new();
+	crate::doc::asks_of(blocks, &mut asks);
+	asks.into_iter().filter_map(|(_, what)| match what {
+		crate::doc::Asked::Cite(keys)	=> Some(keys),
+		_								=> None,
+	}).collect()
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1569,6 +1515,7 @@ fn read_front_matter(root_src: &str, config_src: &str, title: &str) -> FrontMatt
 		meta_rows:			Vec::new(),
 		reading_min:		None,
 		acknowledgement:	None,
+		sites:				crate::doc::FrontSites::default(),	// placed by `load_book` against the root's fields
 	}
 }
 
@@ -2366,9 +2313,7 @@ fn flush_inline(
 	-> Outcome<()>
 {
 	if !buf.text.trim().is_empty() {
-		let (b, mut s) = res!(lang::to_blocks_with_templates(&buf.text, binds));
-		s.shift(buf.at);
-		s.tag_file(file);
+		let (b, s) = res!(lang::to_blocks_in(&buf.text, binds, file, buf.at));
 		blocks.extend(b);
 		got.skips.merge(s);
 		lang::set::fold_document_info(&buf.text, &mut got.doc_info);
@@ -3072,7 +3017,7 @@ mod tests {
 		let chapter = sub.join("chap.typ");
 		res!(std::fs::write(&chapter, "cited here"));
 
-		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite(vec!["smith2020".to_string()])] }];
+		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite { keys: vec!["smith2020".to_string()], site: crate::ir::Site::none() }] }];
 		let bib = res!(load_lone_bibliography(&chapter, &mut blocks, &mut lang::Refusals::default()));
 
 		// Clean up before asserting, so a failed assertion still leaves no scratch behind.
@@ -3367,7 +3312,7 @@ mod tests {
 		// A document whose only citation is inside a table cell.
 		let cell = Cell::rich(vec![
 			Segment::text("Author "),
-			Segment::cite(vec!["scott1976moral".to_string()]),
+			Segment::cite(vec!["scott1976moral".to_string()], crate::ir::Site::none()),
 		], Align::Left);
 		let mut blocks = vec![Block::Table(Table::new(false, vec![Row::new(vec![cell])]))];
 

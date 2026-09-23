@@ -16,11 +16,13 @@ use crate::bib::Bibliography;
 use crate::book;
 use crate::doc::{
 	self,
+	Answer,
+	Answered,
+	Asked,
 	Block,
 	DocInfo,
 	FrontMatter,
 	Heading,
-	Unmet,
 };
 use crate::driver::{
 	self,
@@ -154,8 +156,7 @@ where
 	// even with no `#include` present, which the lone path by definition has none of.
 	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
 	let binds	= scope.bindings();
-	let (mut blocks, mut parsed)	= res!(lang::to_blocks_with_templates(&src, binds));
-	parsed.tag_file(&main_file);
+	let (mut blocks, parsed)	= res!(lang::to_blocks_in(&src, binds, &main_file, 0));
 	refusals.merge(parsed);
 	// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
 	book::resolve_glossary(&mut blocks, false);
@@ -214,7 +215,7 @@ pub fn author_and_run(a: Assembled) -> Outcome<Rendered> {
 /// of the same document (see the native `--watch` path); the emit stage then renders each page through
 /// [`crate::emit::svg::render_page_memo`] against that same memo.
 pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -> Outcome<Rendered> {
-	let (document, heads, mut unmet) = res!(doc::author_memo(
+	let (document, heads, mut answers) = res!(doc::author_memo(
 		a.fonts.clone(), a.geom, &a.style, &a.faces, &a.blocks, a.front.as_ref(), a.bib.as_ref(), memo));
 	let metrics		= FontMetrics::new(a.fonts.clone(), Role::Body, Dir::Ltr, a.style.text.body_size);
 	let mut out		= res!(driver::run(&document, &metrics, Config::default()));
@@ -225,8 +226,8 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 	for page in &mut out.pages {
 		page.set_body_len(page.frame.placed.len());
 	}
-	let footer_logo	= a.front.as_ref().and_then(|f| f.footer_logo.as_deref());
-	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo, &mut unmet));
+	let footer_logo	= a.front.as_ref().and_then(|f| f.footer_logo.as_deref().map(|p| (p, &f.sites.footer_logo)));
+	res!(doc::decorate(&mut out.pages, &out.ledger, &heads, &a.fonts, &a.style, a.geom, &a.title, footer_logo, &mut answers));
 
 	// Mirror the margins: the driver laid every page at the recto split (binding on the left). A verso page
 	// -- an even folio -- is that whole frame shifted to the fore-edge, so the binding margin sits at the
@@ -242,78 +243,52 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 		}
 	}
 
-	// Every site that asked for something the page stood a fallback in for is recorded now, at the site,
-	// with the ledger that decides whether a reference found its label.
-	let refs			= doc::ref_targets(&a.blocks, &a.style);
-	let mut refusals	= a.refusals;
-	record_fallbacks(&mut refusals, &unmet, a.bib.as_ref(), &refs, &out.ledger);
+	// Every construct that asked for something is checked against what its setter answered, now the ledger
+	// can say whether a reference set as a page slot found its label.
+	let mut asks = Vec::new();
+	doc::asks_of(&a.blocks, &mut asks);
+	if let Some(fm) = &a.front {
+		fm.asks(&mut asks);
+	}
+	let mut refusals = a.refusals;
+	record_answers(&mut refusals, asks, answers, &out.ledger);
 	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info, refusals })
 }
 
-/// Records a site for everything a construct asked for that the compile could not give it
-/// ([`lang::Ask`]): an image or a drawn figure authoring set a stand-in for ([`Unmet`]), a label the
-/// laid-out document never placed, a citation the bibliography cannot resolve. Each is judged by the test
-/// that set the stand-in -- the loader's own failure, [`Bibliography::format_citation`], the targets and the
-/// ledger a reference is set from -- so a site is recorded exactly where the page fell back, in the file
-/// and at the line that asked.
-pub(crate) fn record_fallbacks(
+/// Records a site for every construct that asked for something ([`doc::asks_of`]) and did not get it,
+/// by what its setter answered ([`Answered`]): a stand-in set in its place, a construct passed over where it
+/// stands, a reference set as a page slot for a label the laid-out document never placed -- and an ask no
+/// setter answered at all, which a setter dropped. The default is refusal: only a setter's own answer that
+/// it set the construct as written clears an ask, so a setter that passes a construct over in silence is a
+/// site, never a pass. An answer for the same construct beyond its asks -- a footer logo drawn on every
+/// page -- answers nothing more.
+pub(crate) fn record_answers(
 	refusals:	&mut lang::Refusals,
-	unmet:		&[Unmet],
-	bib:		Option<&Bibliography>,
-	refs:		&HashMap<String, String>,
+	asks:		Vec<(crate::ir::Site, Asked)>,
+	answers:	Vec<Answered>,
 	ledger:		&Ledger,
 )
 {
-	for ask in refusals.take_asks() {
-		let name = ask.what.name();
-		let (class, note) = match &ask.what {
-			lang::Asked::Image { path, .. } => {
-				let fell = unmet.iter().find_map(|u| match u {
-					Unmet::Image { path: p, missing, reason } if p == path	=> Some((*missing, reason.as_str())),
-					_														=> None,
-				});
-				match fell {
-					Some((missing, reason)) => {
-						let class = if missing { lang::RefusalClass::MissingFile } else { lang::RefusalClass::Unusable };
-						(class, ask.what.image_note(missing, reason))
-					},
-					None => continue,
+	let mut given: HashMap<(crate::ir::Site, Asked), std::collections::VecDeque<Answer>> = HashMap::new();
+	for a in answers {
+		given.entry((a.site, a.what)).or_default().push_back(a.answer);
+	}
+	for (site, what) in asks {
+		let answer	= given.get_mut(&(site.clone(), what.clone())).and_then(|q| q.pop_front());
+		let name	= what.name();
+		let file	= site.file.to_string();
+		match answer {
+			Some(Answer::Set) => {},
+			Some(Answer::Slot(label)) => {
+				if ledger.page_of(&AnchorId::new(AnchorKind::Label, label)).is_none() {
+					refusals.record_stand_in_in(&file, &name, site.span, lang::RefusalClass::Unusable,
+						"names no label in the document, so an empty space is set in its place");
 				}
 			},
-			lang::Asked::Figure { fingerprint, .. } => {
-				let fell = unmet.iter().find_map(|u| match u {
-					Unmet::Figure { fingerprint: f, reason } if f == fingerprint	=> Some(reason),
-					_																=> None,
-				});
-				match fell {
-					Some(reason)	=> (lang::RefusalClass::Unusable, Some(fmt!("will not build ({}), so a placeholder is set", reason))),
-					None			=> continue,
-				}
-			},
-			lang::Asked::Ref(label) => {
-				let placed = refs.contains_key(label)
-					|| ledger.page_of(&AnchorId::new(AnchorKind::Label, label.clone())).is_some();
-				if placed {
-					continue;
-				}
-				(lang::RefusalClass::Unusable, Some("names no label in the document, so an empty space is set in its place".to_string()))
-			},
-			lang::Asked::Cite(keys) => {
-				let note = match bib {
-					None	=> "has no bibliography to resolve against, so its keys are set in brackets",
-					Some(b)	=> {
-						let ks: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
-						if b.format_citation(&ks).is_ok() {
-							continue;
-						}
-						"names a key the bibliography does not hold, so its keys are set in brackets"
-					},
-				};
-				(lang::RefusalClass::Unusable, Some(note.to_string()))
-			},
-		};
-		if let Some(note) = note {
-			refusals.record_stand_in_in(&ask.file, &name, ask.span, class, &note);
+			Some(Answer::StandIn(class, note))	=> refusals.record_stand_in_in(&file, &name, site.span, class, &note),
+			Some(Answer::Passed(passed))		=> refusals.record_in(&file, &passed, site.span),
+			None => refusals.record_stand_in_in(&file, &name, site.span, lang::RefusalClass::Unsupported,
+				"is not set where it stands"),
 		}
 	}
 }
@@ -660,32 +635,52 @@ mod tests {
 	use super::*;
 	use crate::ir::Span;
 
-	/// Each ask is judged by the fallback authoring reported for the same thing: a drawn figure known by its
-	/// fingerprint and an image known by its path become sites at the construct that asked, an image
-	/// authoring loaded is none, and one the project does not hold is `missing_file` where one that will not
-	/// load is not.
+	/// Each ask is judged by what its setter answered at its site: a stand-in and a construct passed over are
+	/// sites at the construct that asked, a slot is one only when the ledger never placed its label, an ask
+	/// no setter answered is one, and an ask answered as set, or a second answer for one ask, is none. Two
+	/// asks alike at one site take one answer each, in order.
 	#[test]
-	fn a_fallback_is_charged_to_the_construct_that_asked() {
-		let mut refusals = lang::Refusals::default();
-		let image = |path: &str| lang::Asked::Image { path: path.to_string(), role: lang::ImageRole::Figure };
-		refusals.ask_in("/p/a.typ", lang::Asked::Figure { fingerprint: 7, name: "diagram" }, Span::new(10, 10));
-		refusals.ask_in("/p/a.typ", image("x.png"), Span::new(20, 20));
-		refusals.ask_in("/p/a.typ", image("y.png"), Span::new(30, 30));
-		refusals.ask_in("/p/a.typ", image("fine.png"), Span::new(40, 40));
-		let unmet = vec![
-			Unmet::Figure { fingerprint: 7, reason: "two nodes share an id".to_string() },
-			Unmet::Image { path: "x.png".to_string(), missing: true, reason: String::new() },
-			Unmet::Image { path: "y.png".to_string(), missing: false, reason: "not a PNG".to_string() },
+	fn every_ask_is_charged_by_its_own_answer() {
+		let file: std::sync::Arc<str> = std::sync::Arc::from("/p/a.typ");
+		let site = |at: u32| crate::ir::Site::new(&file, Span::new(at, at));
+		let image = |path: &str| Asked::Image { path: path.to_string(), role: doc::ImageRole::Figure };
+		let asks = vec![
+			(site(10), Asked::Figure { kind: "diagram" }),
+			(site(20), image("x.png")),
+			(site(30), image("fine.png")),
+			(site(40), Asked::Ref("placed".to_string())),
+			(site(40), Asked::Ref("gone".to_string())),
+			(site(50), Asked::Footnote),
+			(site(60), Asked::ClaimRef),
+			(site(70), Asked::Math),
+			(site(70), Asked::Math),
 		];
-		record_fallbacks(&mut refusals, &unmet, None, &HashMap::new(), &Ledger::new());
+		let answered = |at: u32, what: Asked, answer: Answer| Answered { site: site(at), what, answer };
+		let answers = vec![
+			answered(10, Asked::Figure { kind: "diagram" }, Answer::StandIn(lang::RefusalClass::Unusable, "will not build".to_string())),
+			answered(20, image("x.png"), Answer::StandIn(lang::RefusalClass::MissingFile, "is not in the project".to_string())),
+			answered(30, image("fine.png"), Answer::Set),
+			answered(30, image("fine.png"), Answer::StandIn(lang::RefusalClass::Unusable, "a second answer".to_string())),
+			answered(40, Asked::Ref("placed".to_string()), Answer::Slot("placed".to_string())),
+			answered(40, Asked::Ref("gone".to_string()), Answer::Slot("gone".to_string())),
+			answered(60, Asked::ClaimRef, Answer::Passed("claim reference in a heading title is not indexed".to_string())),
+			answered(70, Asked::Math, Answer::Set),
+		];
+		let mut ledger = Ledger::new();
+		ledger.record(crate::ledger::Anchor::new(AnchorId::new(AnchorKind::Label, "placed"),
+			crate::ledger::Position::new(1, crate::ir::Sp::ZERO, crate::ir::Sp::ZERO)));
+		let mut refusals = lang::Refusals::default();
+		record_answers(&mut refusals, asks, answers, &ledger);
 		let got: Vec<(&str, &str, u32, lang::RefusalClass)> = refusals.sites().iter()
 			.map(|r| (r.file.as_str(), r.name.as_str(), r.span.start, r.class))
 			.collect();
 		assert_eq!(got, [
 			("/p/a.typ", "#figure (diagram)", 10, lang::RefusalClass::Unusable),
 			("/p/a.typ", "image \"x.png\"", 20, lang::RefusalClass::MissingFile),
-			("/p/a.typ", "image \"y.png\"", 30, lang::RefusalClass::Unusable),
+			("/p/a.typ", "@gone", 40, lang::RefusalClass::Unusable),
+			("/p/a.typ", "#footnote", 50, lang::RefusalClass::Unsupported),
+			("/p/a.typ", "claim reference in a heading title is not indexed", 60, lang::RefusalClass::Unsupported),
+			("/p/a.typ", "inline maths", 70, lang::RefusalClass::Unsupported),
 		]);
-		assert!(refusals.asks().is_empty(), "every ask is answered");
 	}
 }
