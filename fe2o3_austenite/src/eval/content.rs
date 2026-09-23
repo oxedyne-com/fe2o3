@@ -82,6 +82,7 @@ elem_kinds! {
 	Highlight		=> ("highlight",			Text,	false),
 	Super			=> ("super",				Text,	false),
 	Sub				=> ("sub",					Text,	false),
+	Symbol			=> ("symbol",				Text,	false),
 	// Model (U5)
 	Par				=> ("par",					Model,	false),
 	ParLine			=> ("par.line",				Model,	false),
@@ -207,8 +208,12 @@ impl ElemKind {
 	}
 
 	/// The element reached as a top-level global (`heading`), not through a parent (`list.item`) or the
-	/// `math` module (`math.frac`).
-	pub fn is_global(self) -> bool { !self.path().contains('.') }
+	/// `math` module (`math.frac`). Typst binds no global to `space`, keeps `context` as a keyword, and
+	/// gives the names `symbol` and `path` to types, so those elements are reached only as values.
+	pub fn is_global(self) -> bool {
+		!self.path().contains('.')
+			&& !matches!(self, ElemKind::Space | ElemKind::Symbol | ElemKind::Path | ElemKind::Context)
+	}
 
 	/// The element scoped under this one's function: `ElemKind::List.scoped("item")` is `ListItem`.
 	pub fn scoped(self, name: &str) -> Option<ElemKind> {
@@ -413,6 +418,12 @@ impl Content {
 		Content::new(ElemKind::Text, vec![(FieldId(0), Value::str(s))], Span::detached())
 	}
 
+	/// A symbol element, what Typst makes of a symbol value, an escape, a shorthand or one maths
+	/// character. By contract `symbol`'s field 0 is its text (`lib/text.rs`).
+	pub fn symbol(s: &str) -> Self {
+		Content::new(ElemKind::Symbol, vec![(FieldId(0), Value::str(s))], Span::detached())
+	}
+
 	/// An element with no fields set, for markers such as `parbreak()` and `linebreak()`.
 	pub fn marker(kind: ElemKind, span: Span) -> Self { Content::new(kind, Vec::new(), span) }
 
@@ -557,7 +568,7 @@ impl Content {
 			Content::Sequence(seq)	=> for c in &seq.children { c.push_plain(s); },
 			Content::Styled(st)		=> st.child.push_plain(s),
 			Content::Elem(e) => match e.kind {
-				ElemKind::Text => if let Some(Value::Str(t)) = self.get(FieldId(0)) {
+				ElemKind::Text | ElemKind::Symbol => if let Some(Value::Str(t)) = self.get(FieldId(0)) {
 					s.push_str(t);
 				},
 				ElemKind::Space | ElemKind::Linebreak	=> s.push(' '),
@@ -570,6 +581,54 @@ impl Content {
 			},
 		}
 	}
+}
+
+/// Folds a `Fold::Custom` field's inner value onto its outer one, by the family that declared it. A
+/// family declaring a `Custom` field gains an arm here with its fold.
+pub fn fold_custom(kind: ElemKind, field: &str, inner: Value, outer: Value) -> Outcome<Value> {
+	match kind.family() {
+		Family::Visual	=> lib::visual::fold(kind, field, inner, outer),
+		_				=> Err(err!(
+			"`{}.{}` is declared `Fold::Custom`, but its family has no fold in `content::fold_custom`",
+			kind.path(), field; Unimplemented)),
+	}
+}
+
+/// Typst's `Value::display`, how a value shows when placed in markup: numbers and versions as their
+/// `repr` in text, a string as text, a symbol as a symbol element, a module as its content, and
+/// anything else as its `repr` in inline `typc` raw.
+pub fn display(engine: &mut Engine, v: Value, span: Span) -> Outcome<Content> {
+	Ok(match v {
+		Value::None			=> Content::empty(),
+		Value::Int(_) | Value::Float(_) | Value::Version(_)
+							=> Content::text(&lib::foundations::repr(&v)).with_span(span),
+		Value::Str(s)		=> Content::text(&s).with_span(span),
+		Value::Symbol(s)	=> Content::symbol(&crate::eval::ops::symbol_text(&s)).with_span(span),
+		Value::Content(c)	=> if c.span().is_detached() { c.with_span(span) } else { c },
+		Value::Module(m)	=> m.content.clone(),
+		other				=> {
+			let text = lib::foundations::repr(&other);
+			res!(build(engine, ElemKind::Raw, vec![
+				("text",	Value::str(text)),
+				("block",	Value::Bool(false)),
+				("lang",	Value::str("typc")),
+			], span))
+		}
+	})
+}
+
+/// Builds an element with its fields named as Typst names them. A name the owning unit's schema lacks
+/// is a contract fault, reported rather than dropped.
+pub fn build(engine: &mut Engine, kind: ElemKind, fields: Vec<(&str, Value)>, span: Span) -> Outcome<Content> {
+	let mut fv = Vec::with_capacity(fields.len());
+	for (name, v) in fields {
+		match kind.field_id(name) {
+			Some(id)	=> fv.push((id, v)),
+			None		=> return Err(engine.error(span, fmt!(
+				"element `{}` has no field `{}` in its schema", kind.path(), name))),
+		}
+	}
+	Ok(Content::new(kind, fv, span))
 }
 
 // Family dispatch

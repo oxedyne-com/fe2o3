@@ -24,7 +24,6 @@ use crate::eval::value::{
 	Stroke,
 	SymVariants,
 	Symbol,
-	Type,
 	Value,
 };
 
@@ -34,22 +33,12 @@ use std::cmp::Ordering;
 use std::sync::Arc;
 
 /// The name a Typst diagnostic gives a type: `integer` where `repr(type(1))` is `int`.
-pub fn long_name(t: Type) -> &'static str {
-	match t {
-		Type::Bool		=> "boolean",
-		Type::Int		=> "integer",
-		Type::Str		=> "string",
-		Type::Relative	=> "relative length",
-		other			=> other.name(),
-	}
-}
-
 fn fail(msg: String) -> Error<ErrTag> {
 	err!("{}", msg; Input, Invalid)
 }
 
 fn mismatch(verb: &str, a: &Value, joiner: &str, b: &Value) -> Error<ErrTag> {
-	fail(fmt!("cannot {} {} {} {}", verb, long_name(a.ty()), joiner, long_name(b.ty())))
+	fail(fmt!("cannot {} {} {} {}", verb, a.ty().long_name(), joiner, b.ty().long_name()))
 }
 
 fn too_large() -> Error<ErrTag> { fail("value is too large".to_string()) }
@@ -60,7 +49,7 @@ pub fn pos(v: Value) -> Outcome<Value> {
 	match v {
 		Value::Int(_) | Value::Float(_) | Value::Length(_) | Value::Angle(_) | Value::Ratio(_)
 			| Value::Relative(_) | Value::Fraction(_) => Ok(v),
-		other => Err(fail(fmt!("cannot apply unary '+' to {}", long_name(other.ty())))),
+		other => Err(fail(fmt!("cannot apply unary '+' to {}", other.ty().long_name()))),
 	}
 }
 
@@ -74,14 +63,14 @@ pub fn neg(v: Value) -> Outcome<Value> {
 		Value::Relative(r)	=> Value::Relative(Relative { rel: Ratio(-r.rel.0), abs: len_neg(r.abs) }),
 		Value::Fraction(f)	=> Value::Fraction(Fraction(-f.0)),
 		Value::Duration(d)	=> Value::Duration(Duration { secs: -d.secs }),
-		other => return Err(fail(fmt!("cannot apply '-' to {}", long_name(other.ty())))),
+		other => return Err(fail(fmt!("cannot apply '-' to {}", other.ty().long_name()))),
 	})
 }
 
 pub fn not(v: Value) -> Outcome<Value> {
 	match v {
 		Value::Bool(b)	=> Ok(Value::Bool(!b)),
-		other			=> Err(fail(fmt!("cannot apply 'not' to {}", long_name(other.ty())))),
+		other			=> Err(fail(fmt!("cannot apply 'not' to {}", other.ty().long_name()))),
 	}
 }
 
@@ -617,7 +606,7 @@ pub fn contains(a: &Value, b: &Value) -> Outcome<bool> {
 		(Value::Regex(r), Value::Str(y))	=> r.re.is_match(y),
 		(Value::Str(x), Value::Dict(d))		=> Ok(d.contains(x)),
 		(x, Value::Array(arr))				=> Ok(arr.iter().any(|v| equal(x, v))),
-		_ => Err(fail(fmt!("cannot apply 'in' to {} and {}", long_name(a.ty()), long_name(b.ty())))),
+		_ => Err(fail(fmt!("cannot apply 'in' to {} and {}", a.ty().long_name(), b.ty().long_name()))),
 	}
 }
 

@@ -29,6 +29,7 @@ use oxedyne_fe2o3_austenite::eval::fixpoint::{
 	Laid,
 };
 use oxedyne_fe2o3_austenite::eval::lib::foundations;
+use oxedyne_fe2o3_austenite::eval::ops;
 use oxedyne_fe2o3_austenite::eval::realise::{
 	realise,
 	RealiseMode,
@@ -38,8 +39,6 @@ use oxedyne_fe2o3_austenite::eval::styles::StyleChain;
 use oxedyne_fe2o3_austenite::eval::value::{
 	Label,
 	Module,
-	SymVariants,
-	Symbol,
 	Value,
 };
 use oxedyne_fe2o3_austenite::eval::{
@@ -68,6 +67,7 @@ pub struct AusOut {
 	pub eval:		Option<String>,	// the evaluation failure, if any
 	pub layout:		Option<String>,	// the fixpoint failure, if any
 	pub diags:		Vec<String>,
+	pub first_error:	Option<(String, Option<(usize, usize)>)>,	// message, then line and column
 	pub probes:		Option<std::result::Result<(Vec<J>, ProbeSource), String>>,
 	pub positions:	Option<std::result::Result<Vec<PosRow>, String>>,
 	pub skeleton:	Option<std::result::Result<Vec<Sk>, String>>,
@@ -140,6 +140,7 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 		Err(e)	=> {
 			out.eval = Some(plain(&e));
 			out.diags = render_diags(&engine);
+			out.first_error = first_error(&engine);
 			return out;
 		}
 	};
@@ -169,11 +170,22 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 		});
 	}
 	out.diags = render_diags(&engine);
+	out.first_error = first_error(&engine);
 	out
 }
 
 fn render_diags(engine: &Engine) -> Vec<String> {
 	engine.diags.iter().take(8).map(|d| d.render(&engine.world.sources)).collect()
+}
+
+// The first error diagnostic's message and 1-based line and column, as Typst reports them.
+fn first_error(engine: &Engine) -> Option<(String, Option<(usize, usize)>)> {
+	engine.diags.iter().find(|d| d.is_error()).map(|d| {
+		let pos = engine.world.sources.iter()
+			.find(|src| src.id == d.span.file && !d.span.is_detached())
+			.map(|src| src.line_col(d.span.start));
+		(d.message.clone(), pos)
+	})
 }
 
 // Level 1
@@ -262,7 +274,7 @@ pub fn to_json(v: &Value) -> J {
 		Value::Int(i)		=> J::Int(*i),
 		Value::Float(f)		=> if f.is_finite() { J::Float(*f) } else { J::Null },
 		Value::Str(s)		=> J::Str(s.to_string()),
-		Value::Symbol(s)	=> J::Str(symbol_text(s)),
+		Value::Symbol(s)	=> J::Str(ops::symbol_text(s)),
 		Value::Array(a)		=> J::Arr(a.iter().map(to_json).collect()),
 		Value::Dict(d)		=> J::Obj(d.iter().map(|(k, x)| (k.to_string(), to_json(x))).collect()),
 		Value::Content(c)	=> content_json(c),
@@ -299,33 +311,6 @@ fn content_json(c: &Content) -> J {
 		kv.push(("label".to_string(), J::Str(fmt!("<{}>", l.as_str()))));
 	}
 	J::Obj(kv)
-}
-
-/// The text a symbol shows with its modifiers applied: the variant carrying exactly those
-/// modifiers, else the one carrying all of them with the fewest others, else the default.
-fn symbol_text(s: &Symbol) -> String {
-	let want: Vec<&str> = s.modifiers.split('.').filter(|m| !m.is_empty()).collect();
-	let pick = |list: &[(&str, &str)]| -> String {
-		let mut best: Option<(usize, &str)> = None;
-		for (mods, text) in list {
-			let have: Vec<&str> = mods.split('.').filter(|m| !m.is_empty()).collect();
-			if want.iter().all(|w| have.contains(w)) {
-				let extra = have.len() - want.len().min(have.len());
-				if best.map(|(e, _)| extra < e).unwrap_or(true) {
-					best = Some((extra, text));
-				}
-			}
-		}
-		best.map(|(_, t)| t.to_string()).or_else(|| list.first().map(|(_, t)| t.to_string())).unwrap_or_default()
-	};
-	match &s.variants {
-		SymVariants::Single(t)	=> t.to_string(),
-		SymVariants::Static(list)	=> pick(list),
-		SymVariants::Runtime(list)	=> {
-			let v: Vec<(&str, &str)> = list.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-			pick(&v)
-		}
-	}
 }
 
 // Level 2

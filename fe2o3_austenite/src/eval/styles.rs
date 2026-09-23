@@ -11,6 +11,7 @@
 use crate::diag::Diagnostic;
 use crate::eval::args::Args;
 use crate::eval::content::{
+	self,
 	Content,
 	ElemKind,
 	FieldId,
@@ -19,7 +20,6 @@ use crate::eval::content::{
 	Fold,
 };
 use crate::eval::func::Func;
-use crate::eval::lib::foundations;
 use crate::eval::ops;
 use crate::eval::select::Selector;
 use crate::eval::value::{
@@ -32,9 +32,6 @@ use crate::eval::value::{
 	LineJoin,
 	Paint,
 	Stroke,
-	SymVariants,
-	Symbol,
-	Type,
 	Value,
 };
 use crate::eval::{
@@ -284,18 +281,18 @@ impl StyleChain {
 	}
 
 	/// The value of `elem.field` in force: the set values folded by the field's schema rule onto the
-	/// schema default, or the innermost set value for `Replace` and `Custom`.
-	pub fn get(&self, elem: ElemKind, field: FieldId) -> Option<Value> {
-		let spec = elem.field_spec(field);
+	/// schema default, the innermost set value for `Replace`, and the owning family's fold for `Custom`.
+	pub fn get(&self, elem: ElemKind, field: FieldId) -> Outcome<Option<Value>> {
 		let values = self.values(elem, field);
-		match spec {
-			Some(s)	=> fold_all(s, &values),
-			None	=> values.first().map(|v| (*v).clone()),
+		match elem.field_spec(field) {
+			Some(s) if s.fold == Fold::Custom	=> fold_custom_all(elem, s, &values),
+			Some(s)								=> Ok(fold_all(s, &values)),
+			None								=> Ok(values.first().map(|v| (*v).clone())),
 		}
 	}
 
 	pub fn get_as<T: FromValue>(&self, elem: ElemKind, field: FieldId) -> Outcome<Option<T>> {
-		match self.get(elem, field) {
+		match res!(self.get(elem, field)) {
 			Some(v)	=> Ok(Some(res!(T::from_value(v)))),
 			None	=> Ok(None),
 		}
@@ -304,31 +301,37 @@ impl StyleChain {
 	/// The value for an element in hand: its own field if set -- folded onto the chain's value for a
 	/// folding field, as `rect(stroke: 2pt)` under `set rect(stroke: red)` is a red 2pt stroke -- else the
 	/// chain's.
-	pub fn resolve(&self, elem: &Content, field: FieldId) -> Option<Value> {
-		let kind = elem.kind();
-		match elem.get(field) {
-			Some(own) => {
-				let spec = kind.and_then(|k| k.field_spec(field));
-				match spec {
-					Some(s) if matches!(s.fold, Fold::Add | Fold::Merge) => {
-						match kind.and_then(|k| self.get(k, field)) {
-							Some(outer) => {
-								let is_def = kind.map(|k| self.values(k, field).is_empty()).unwrap_or(false);
-								Some(fold(s, own, &outer, is_def))
-							}
-							None => Some(own.clone()),
-						}
-					}
-					_ => Some(own.clone()),
-				}
-			}
-			None => kind.and_then(|k| self.get(k, field)),
+	pub fn resolve(&self, elem: &Content, field: FieldId) -> Outcome<Option<Value>> {
+		let kind = match elem.kind() {
+			Some(k)	=> k,
+			None	=> return Ok(elem.get(field).cloned()),
+		};
+		let own = match elem.get(field) {
+			Some(own)	=> own,
+			None		=> return self.get(kind, field),
+		};
+		let spec = match kind.field_spec(field) {
+			Some(s) if s.fold != Fold::Replace	=> s,
+			_									=> return Ok(Some(own.clone())),
+		};
+		let outer = match res!(self.get(kind, field)) {
+			Some(o)	=> o,
+			None	=> return Ok(Some(own.clone())),
+		};
+		if spec.fold == Fold::Custom {
+			return Ok(Some(res!(content::fold_custom(kind, spec.name, own.clone(), outer))));
 		}
+		let is_def = self.values(kind, field).is_empty();
+		Ok(Some(fold(spec, own, &outer, is_def)))
 	}
 
 	/// The font size in force, in points: `text.size` folded, Typst's 11pt when the schema is silent.
 	pub fn font_size(&self) -> f64 {
-		let size = ElemKind::Text.field_id("size").and_then(|id| self.get(ElemKind::Text, id));
+		// `text.size` folds by `Add`, which cannot fail.
+		let size = ElemKind::Text.field_id("size").and_then(|id| match ElemKind::Text.field_spec(id) {
+			Some(s) if s.fold != Fold::Custom	=> fold_all(s, &self.values(ElemKind::Text, id)),
+			_									=> None,
+		});
 		match size {
 			Some(Value::Length(l))	=> l.abs + l.em * DEFAULT_FONT_SIZE_PT,
 			_						=> DEFAULT_FONT_SIZE_PT,
@@ -347,7 +350,7 @@ impl StyleChain {
 // Folding
 
 /// The value of a field set to `values` (innermost first) on top of its schema default: folded by the
-/// field's rule, or the innermost value for `Replace` and `Custom`.
+/// field's rule, or the innermost value for `Replace` (and for `Custom`, which `fold_custom_all` folds).
 pub fn fold_all(spec: &FieldSpec, values: &[&Value]) -> Option<Value> {
 	let default = spec.default.to_value();
 	if !matches!(spec.fold, Fold::Add | Fold::Merge) {
@@ -364,6 +367,19 @@ pub fn fold_all(spec: &FieldSpec, values: &[&Value]) -> Option<Value> {
 		});
 	}
 	acc.map(|(v, _)| v)
+}
+
+/// A `Custom` field's values (innermost first) folded outward-in by the owning family onto the schema
+/// default.
+fn fold_custom_all(kind: ElemKind, spec: &FieldSpec, values: &[&Value]) -> Outcome<Option<Value>> {
+	let mut acc = spec.default.to_value();
+	for v in values.iter().rev() {
+		acc = Some(match acc {
+			None	=> (*v).clone(),
+			Some(o)	=> res!(content::fold_custom(kind, spec.name, (*v).clone(), o)),
+		});
+	}
+	Ok(acc)
 }
 
 /// Folds an inner value onto an outer one by the field's rule. `outer_default` says the outer value is
@@ -708,17 +724,6 @@ fn merge_stroke(inner: Stroke, outer: Stroke) -> Stroke {
 
 // Set rules
 
-/// The name Typst's cast errors use for a type: `integer`, `string`, not the `repr` names.
-pub fn long_name(t: Type) -> &'static str {
-	match t {
-		Type::Int		=> "integer",
-		Type::Str		=> "string",
-		Type::Bool		=> "boolean",
-		Type::Relative	=> "relative length",
-		other			=> other.name(),
-	}
-}
-
 /// "A, B, or C", as Typst lists the types a cast accepts.
 fn list_types(ts: &[&str]) -> String {
 	match ts.len() {
@@ -733,11 +738,11 @@ fn list_types(ts: &[&str]) -> String {
 pub fn expected_message(ty: FieldType, found: &Value) -> String {
 	let expected = match ty {
 		FieldType::Any			=> "any value".to_string(),
-		FieldType::Of(t)		=> long_name(t).to_string(),
-		FieldType::OneOf(ts)	=> list_types(&ts.iter().map(|t| long_name(*t)).collect::<Vec<_>>()),
+		FieldType::Of(t)		=> t.long_name().to_string(),
+		FieldType::OneOf(ts)	=> list_types(&ts.iter().map(|t| t.long_name()).collect::<Vec<_>>()),
 		FieldType::Content		=> "content".to_string(),
 	};
-	fmt!("expected {}, found {}", expected, long_name(found.ty()))
+	fmt!("expected {}, found {}", expected, found.ty().long_name())
 }
 
 /// `set elem(args)`: the settable fields given, as styles, in schema order. A positional settable field
@@ -823,7 +828,7 @@ pub fn apply_recipe(engine: &mut Engine, recipe: &Recipe, target: Content, chain
 			let result = engine.call_func(f, args);
 			engine.context = saved;
 			match result {
-				Ok(v)	=> Ok(display(v)),
+				Ok(v)	=> content::display(engine, v, span),
 				Err(e)	=> {
 					if recipe.selector.is_some() {
 						let note = fmt!("error occurred while applying show rule to this {}", name);
@@ -836,44 +841,6 @@ pub fn apply_recipe(engine: &mut Engine, recipe: &Recipe, target: Content, chain
 			}
 		}
 	}
-}
-
-/// A value as content, Typst's `Value::display`: content as is, `none` empty, a string or symbol as
-/// text, a number as its `repr`, anything else as its `repr` in text.
-pub fn display(v: Value) -> Content {
-	match v {
-		Value::Content(c)	=> c,
-		Value::None			=> Content::empty(),
-		Value::Str(s)		=> Content::text(&s),
-		Value::Symbol(s)	=> Content::text(&symbol_text(&s)),
-		other				=> Content::text(&foundations::repr(&other)),
-	}
-}
-
-/// The text of a symbol under its applied modifiers: of the variants carrying every applied modifier,
-/// the one with fewest modifiers, the first on a tie.
-pub fn symbol_text(s: &Symbol) -> String {
-	let applied: Vec<&str> = s.modifiers.split('.').filter(|m| !m.is_empty()).collect();
-	let found = match &s.variants {
-		SymVariants::Single(t)		=> Some(t.to_string()),
-		SymVariants::Static(vs)		=> pick_variant(vs.iter().map(|(m, t)| (*m, *t)), &applied),
-		SymVariants::Runtime(vs)	=> pick_variant(vs.iter().map(|(m, t)| (m.as_str(), t.as_str())), &applied),
-	};
-	found.unwrap_or_default()
-}
-
-fn pick_variant<'a, I: Iterator<Item = (&'a str, &'a str)>>(variants: I, applied: &[&str]) -> Option<String> {
-	let mut best: Option<(usize, &'a str)> = None;
-	for (mods, text) in variants {
-		let ms: Vec<&str> = mods.split('.').filter(|m| !m.is_empty()).collect();
-		if !applied.iter().all(|a| ms.contains(a)) {
-			continue;
-		}
-		if best.map(|(n, _)| ms.len() < n).unwrap_or(true) {
-			best = Some((ms.len(), text));
-		}
-	}
-	best.map(|(_, t)| t.to_string())
 }
 
 /// Records an error with several hints and returns it.

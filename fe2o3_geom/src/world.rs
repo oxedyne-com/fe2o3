@@ -38,6 +38,7 @@
 
 use crate::proj::{
     EARTH_RADIUS_M,
+    Viewport,
     unit_vec,
 };
 
@@ -126,6 +127,87 @@ impl World {
     /// The number of levels of detail, one more than the finest.
     pub fn details(&self) -> u8 {
         self.layers.iter().map(|l| l.detail.saturating_add(1)).max().unwrap_or(0)
+    }
+
+    /// The level of detail to draw at `m_per_px` ground metres per pixel: the coarsest whose
+    /// rings stray from the truth by at most `max_px` pixels, or the finest held when none is
+    /// that fine.  `None` for a world with no rings.
+    ///
+    /// Past the finest level's tolerance the coastline is still drawn, but the eye begins to
+    /// see the simplification rather than the coast, which is the caller's cue to fade it.
+    pub fn detail_for(&self, m_per_px: f64, max_px: f64) -> Option<u8> {
+        let mut levels: Vec<(u8, f64)> = self.layers.iter()
+            .filter(|l| l.kind != LayerKind::Label)
+            .map(|l| (l.detail, l.tol_m))
+            .collect();
+        levels.sort_by(|a, b| a.0.cmp(&b.0));
+        levels.dedup_by_key(|l| l.0);
+        let finest = match levels.last() {
+            Some(l) => l.0,
+            None    => return None,
+        };
+        let reach = m_per_px * max_px;
+        for (detail, tol_m) in levels.iter() {
+            if *tol_m <= reach {
+                return Some(*detail);
+            }
+        }
+        Some(finest)
+    }
+
+    /// Adds another world's layers to this one, a layer of the same name and level of detail
+    /// replacing the one held.  A coarse world loaded first and a finer one fetched later
+    /// become one world this way, and a finer file's labels supersede a coarse file's.
+    pub fn merge(&mut self, other: World) {
+        for layer in other.layers {
+            match self.layers.iter_mut().find(|l| l.name == layer.name && l.detail == layer.detail) {
+                Some(held)  => *held = layer,
+                None        => self.layers.push(layer),
+            }
+        }
+    }
+}
+
+/// A label the screen shows, placed by [`Viewport::place_labels`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placed {
+    pub x:      f32,    // screen pixels
+    pub y:      f32,
+    pub index:  usize,  // into the labels given
+}
+
+impl Viewport {
+    /// The labels to draw, in the order given, each kept only if it lands on the screen and
+    /// at least `gap_px` from every label already kept, until `max` are kept.
+    ///
+    /// Given most important first, as a world file holds them, this is the greedy
+    /// declutter that keeps a capital over the suburbs around it.  Text widths are the
+    /// painter's, so the gap is a radius rather than a box.
+    pub fn place_labels(&self, labels: &[Label], gap_px: f64, max: usize) -> Vec<Placed> {
+        let mut kept: Vec<Placed> = Vec::new();
+        if self.check().is_err() || max == 0 {
+            return kept;
+        }
+        let f = self.frame();
+        let g2 = (gap_px.max(0.0) * gap_px.max(0.0)) as f32;
+        for (index, label) in labels.iter().enumerate() {
+            let p = match self.forward_in(&f, label.lat, label.lng) {
+                Some(p) => p,
+                None    => continue,
+            };
+            if !(p.x >= 0.0 && p.y >= 0.0 && p.x <= self.w && p.y <= self.h) {
+                continue;
+            }
+            let (x, y) = (p.x as f32, p.y as f32);
+            if kept.iter().any(|k| (k.x - x) * (k.x - x) + (k.y - y) * (k.y - y) < g2) {
+                continue;
+            }
+            kept.push(Placed { x, y, index });
+            if kept.len() >= max {
+                break;
+            }
+        }
+        kept
     }
 }
 

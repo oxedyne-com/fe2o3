@@ -713,10 +713,10 @@ pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcom
 
 /// Is content under these styles hidden by an enclosing `hide`? Every producer of ink asks this and
 /// lays the content out without drawing it.
-pub fn is_hidden(styles: &StyleChain) -> bool {
+pub fn is_hidden(styles: &StyleChain) -> Outcome<bool> {
 	match ElemKind::Hide.field_id("hidden") {
-		Some(id)	=> matches!(styles.get(ElemKind::Hide, id), Some(Value::Bool(true))),
-		None		=> false,
+		Some(id)	=> Ok(matches!(res!(styles.get(ElemKind::Hide, id)), Some(Value::Bool(true)))),
+		None		=> Ok(false),
 	}
 }
 

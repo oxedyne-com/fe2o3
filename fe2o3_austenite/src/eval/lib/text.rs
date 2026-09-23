@@ -32,6 +32,11 @@ const TEXT: &[FieldSpec] = &[
 	FieldSpec::required("text", FieldType::Of(Type::Str)),
 ];
 
+// By contract field 0, as `Content::symbol` builds it.
+const SYMBOL: &[FieldSpec] = &[
+	FieldSpec::required("text", FieldType::Of(Type::Str)),
+];
+
 pub fn define(_scope: &mut Scope) {}
 
 pub fn call(f: TextFn, _engine: &mut Engine, _args: Args) -> Outcome<Value> {
@@ -40,8 +45,9 @@ pub fn call(f: TextFn, _engine: &mut Engine, _args: Args) -> Outcome<Value> {
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
 	match kind {
-		ElemKind::Text	=> TEXT,
-		_				=> &[],
+		ElemKind::Text		=> TEXT,
+		ElemKind::Symbol	=> SYMBOL,
+		_					=> &[],
 	}
 }
 

@@ -13,7 +13,6 @@ pub mod parser;
 pub use kind::SyntaxKind;
 pub use node::SyntaxNode;
 
-use crate::lang;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,9 +78,15 @@ impl Source {
 		Self { id, path, text: Arc::new(text), root }
 	}
 
-	/// The 1-based line and byte column of an offset.
+	/// The 1-based line and character column of a byte offset, as Typst counts them: a column is a
+	/// count of `char`s, so `é` is one column, not two.
 	pub fn line_col(&self, offset: u32) -> (usize, usize) {
-		let (l, c, _) = lang::line_col_of(&self.text, offset);
-		(l, c)
+		let mut end = (offset as usize).min(self.text.len());
+		while !self.text.is_char_boundary(end) {
+			end -= 1;
+		}
+		let before = &self.text[..end];
+		let start = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+		(before.matches('\n').count() + 1, before[start..].chars().count() + 1)
 	}
 }

@@ -189,14 +189,14 @@ pub fn computed_default(kind: ElemKind, field: FieldId) -> Option<Value> {
 
 /// A field in force for an element in hand: its own value, a `set` rule's, or the default, computed
 /// defaults included.
-pub fn resolve(styles: &StyleChain, elem: &Content, field: FieldId) -> Value {
-	if let Some(v) = styles.resolve(elem, field) {
-		return v;
+pub fn resolve(styles: &StyleChain, elem: &Content, field: FieldId) -> Outcome<Value> {
+	if let Some(v) = res!(styles.resolve(elem, field)) {
+		return Ok(v);
 	}
-	match elem.kind() {
+	Ok(match elem.kind() {
 		Some(k)	=> computed_default(k, field).unwrap_or(Value::None),
 		None	=> Value::None,
-	}
+	})
 }
 
 /// Does the grid family hold this element as a child of a grid or table?
@@ -293,19 +293,8 @@ fn cell_content(v: Value) -> Outcome<Content> {
 		Value::Str(s)		=> Ok(Content::text(&s)),
 		Value::Int(i)		=> Ok(Content::text(&fmt!("{}", i))),
 		Value::Float(f)		=> Ok(Content::text(&fmt!("{}", f))),
-		Value::Symbol(s)	=> Ok(Content::text(&symbol_text(&s))),
+		Value::Symbol(s)	=> Ok(Content::symbol(&crate::eval::ops::symbol_text(&s))),
 		other				=> Err(err!("expected content, found {}", other.ty().name(); Input, Mismatch)),
-	}
-}
-
-fn symbol_text(s: &crate::eval::value::Symbol) -> String {
-	use crate::eval::value::SymVariants;
-	match &s.variants {
-		SymVariants::Single(t)	=> t.to_string(),
-		SymVariants::Static(v)	=> v.iter().find(|(m, _)| *m == s.modifiers.as_str())
-			.or_else(|| v.first()).map(|(_, t)| t.to_string()).unwrap_or_default(),
-		SymVariants::Runtime(v)	=> v.iter().find(|(m, _)| m.as_str() == s.modifiers.as_str())
-			.or_else(|| v.first()).map(|(_, t)| t.clone()).unwrap_or_default(),
 	}
 }
 

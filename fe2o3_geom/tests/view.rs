@@ -650,3 +650,76 @@ fn test_cover_cap_at_street_level_13() -> Outcome<()> {
     req!(refused, true, "A cap of a radian at level 9 was walked into a cover of 100.");
     Ok(())
 }
+
+#[test]
+fn test_a_level_side_is_the_root_of_its_mean_area_14() -> Outcome<()> {
+    // The oracle is the cells' own spherical areas: every one of the 384 level-3 cells.
+    let mut sum = 0.0;
+    let mut n = 0.0;
+    for face in 0..6u8 {
+        for i in 0..8u32 {
+            for j in 0..8u32 {
+                sum += res!(Cell::from_face_ij(face, 3, i, j)).area();
+                n += 1.0;
+            }
+        }
+    }
+    req!((((sum / n).sqrt() * EARTH_RADIUS_M - cell::mean_side_m(3)).abs() < 1.0), true);
+    req!(((cell::mean_side_m(0) - 9_220_000.0).abs() < 1_000.0), true);
+    // At about 9 m a pixel, a 28-pixel grid is level 15 (281 m cells), as the map plan has it.
+    req!(cell::level_for_scale(9.0, 28.0), 15);
+    for m_per_px in [0.01, 0.3, 9.0, 1_000.0, 100_000.0] {
+        let l = cell::level_for_scale(m_per_px, 28.0);
+        req!((cell::mean_side_m(l) >= m_per_px * 28.0 || l == 0), true);
+        req!((l == cell::MAX_LEVEL || cell::mean_side_m(l + 1) < m_per_px * 28.0), true);
+    }
+    req!(cell::level_for_scale(1.0e9, 28.0), 0);
+    req!(cell::level_for_scale(1.0e-9, 28.0), cell::MAX_LEVEL);
+    Ok(())
+}
+
+#[test]
+fn test_placed_labels_are_on_screen_apart_and_in_rank_order_15() -> Outcome<()> {
+    let mut rng = Rng(15);
+    let mut labels = Vec::new();
+    for k in 0..3000 {
+        let lat = (2.0 * rng.unit() - 1.0).asin().to_degrees();
+        let lng = 360.0 * rng.unit() - 180.0;
+        labels.push(world::Label { lat, lng, rank: (k / 300) as u8, name: fmt!("p{}", k) });
+    }
+    for kind in [Projection::WebMercator, Projection::Orthographic] {
+        for m_per_px in [20_000.0, 2_000.0] {
+            let vp = res!(Viewport::new(kind, -30.0, 140.0, 20.0, m_per_px, 390.0, 700.0));
+            let kept = vp.place_labels(&labels, 40.0, 60);
+            req!(kept.is_empty(), false);
+            req!((kept.len() <= 60), true);
+            let mut last = 0usize;
+            for (a, p) in kept.iter().enumerate() {
+                req!((p.x >= 0.0 && p.y >= 0.0 && p.x <= 390.0 && p.y <= 700.0), true);
+                // Where it says the label is, the projection agrees.
+                let l = &labels[p.index];
+                let q = res!(vp.forward(l.lat, l.lng).ok_or_else(|| err!("behind"; Missing)));
+                req!(((q.x as f32 - p.x).abs() < 0.01 && (q.y as f32 - p.y).abs() < 0.01), true);
+                req!((a == 0 || p.index > last), true);
+                last = p.index;
+                for b in kept.iter().take(a) {
+                    req!(((b.x - p.x).hypot(b.y - p.y) >= 40.0), true);
+                }
+            }
+            // Nothing dropped that could have been kept: every unkept visible label is near a
+            // kept one of lower index, unless the budget ran out.
+            if kept.len() < 60 {
+                for (i, l) in labels.iter().enumerate() {
+                    if let Some(q) = vp.forward(l.lat, l.lng) {
+                        if q.x >= 0.0 && q.y >= 0.0 && q.x <= 390.0 && q.y <= 700.0 {
+                            let near = kept.iter().any(|k| k.index <= i
+                                && (k.x - q.x as f32).hypot(k.y - q.y as f32) < 40.0);
+                            req!((near), true);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}

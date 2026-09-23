@@ -264,6 +264,18 @@ impl Viewport {
         Ok(out.into_iter().map(|(_, t)| t).collect())
     }
 
+    /// The zoom, fractional, at which a tile `tile_px` pixels across is drawn one tile pixel
+    /// to one screen pixel at the centre.  Both projections share their scale at the centre,
+    /// so the globe asks for the same tiles as the flat map with the same camera.
+    pub fn tile_zoom(&self, tile_px: f64) -> f64 {
+        let flat = Viewport { kind: Projection::WebMercator, ..*self };
+        if flat.check().is_err() || !(tile_px > 0.0) {
+            return 0.0;
+        }
+        let f = flat.frame();
+        (TAU * f.r_px / tile_px).log2()
+    }
+
     /// The transform that paints a tile's bitmap, from its own coordinates -- `u` across and
     /// `v` down, 0 to 1 -- onto the screen, with how far it strays from the true projection in
     /// pixels.

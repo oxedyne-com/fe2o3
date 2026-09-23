@@ -1,3 +1,4 @@
+// oracle: none
 Hello, world! It's "quoted" -- and --- dashes... ~ nbsp -? soft -1 minus
 // ---- case ----
 *strong* _emph_ *nested _both_ here* and *multi word strong*

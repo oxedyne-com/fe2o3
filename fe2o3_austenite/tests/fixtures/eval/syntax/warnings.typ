@@ -1,3 +1,4 @@
+// oracle: none
 a ** b __ c
 // ---- case ----
 ```C++ x```

@@ -30,10 +30,7 @@ use crate::eval::func::{
 };
 use crate::eval::import;
 use crate::eval::lib;
-use crate::eval::lib::foundations::{
-	repr,
-	FoundFn,
-};
+use crate::eval::lib::foundations::FoundFn;
 use crate::eval::lib::{
 	datetime::DatetimeFn,
 	intro::IntroFn,
@@ -42,12 +39,12 @@ use crate::eval::lib::{
 };
 use crate::eval::methods;
 use crate::eval::ops;
-use crate::eval::ops::long_name;
 use crate::eval::scope::{
 	Binding,
 	Scope,
 };
 use crate::eval::select::{
+	self,
 	Selector,
 	StyleFn,
 };
@@ -559,12 +556,12 @@ fn slot<'b>(
 						};
 					}
 					Value::Symbol(_) | Value::Content(_) | Value::Module(_) | Value::Func(_) => return Err((*sp,
-						fmt!("cannot mutate fields on {}", long_name(ty)), None)),
+						fmt!("cannot mutate fields on {}", ty.long_name()), None)),
 					Value::Length(_) | Value::Relative(_) | Value::Alignment(_) | Value::Stroke(_)
 						| Value::Version(_) => return Err((*sp,
-						fmt!("fields on {} are not yet mutable", long_name(ty)),
-						Some(fmt!("try creating a new {} with the updated field value instead", long_name(ty))))),
-					_ => return Err((*sp, fmt!("{} does not have accessible fields", long_name(ty)), None)),
+						fmt!("fields on {} are not yet mutable", ty.long_name()),
+						Some(fmt!("try creating a new {} with the updated field value instead", ty.long_name())))),
+					_ => return Err((*sp, fmt!("{} does not have accessible fields", ty.long_name()), None)),
 				}
 			}
 			Step::At(key, sp) => {
@@ -591,10 +588,10 @@ fn slot<'b>(
 						};
 					}
 					(Value::Array(_), other) => return Err((*sp,
-						fmt!("expected integer, found {}", long_name(other.ty())), None)),
+						fmt!("expected integer, found {}", other.ty().long_name()), None)),
 					(Value::Dict(_), other) => return Err((*sp,
-						fmt!("expected string, found {}", long_name(other.ty())), None)),
-					_ => return Err((*sp, fmt!("cannot mutate a temporary value of type {}", long_name(ty)), None)),
+						fmt!("expected string, found {}", other.ty().long_name()), None)),
+					_ => return Err((*sp, fmt!("cannot mutate a temporary value of type {}", ty.long_name()), None)),
 				}
 			}
 		}
@@ -705,46 +702,18 @@ impl<'a> Vm<'a> {
 		}
 	}
 
-	/// Builds an element with its fields named as Typst names them; a name the owning unit's schema
-	/// lacks is a contract fault, reported rather than dropped.
 	fn elem(&mut self, kind: ElemKind, fields: Vec<(&str, Value)>, span: Span) -> Outcome<Content> {
-		let mut fv = Vec::with_capacity(fields.len());
-		for (name, v) in fields {
-			match kind.field_id(name) {
-				Some(id)	=> fv.push((id, v)),
-				None		=> return Err(self.error(span, fmt!(
-					"element `{}` has no field `{}` in its schema", kind.path(), name))),
-			}
-		}
-		Ok(Content::new(kind, fv, span))
+		content::build(self.engine, kind, fields, span)
 	}
 
-	/// Typst's `Value::display`: how a value shows when placed in markup.
 	fn display(&mut self, v: Value, span: Span) -> Outcome<Content> {
-		let c = match v {
-			Value::None			=> Content::empty(),
-			Value::Int(_) | Value::Float(_) | Value::Version(_)
-								=> Content::text(&repr(&v)).with_span(span),
-			Value::Str(s)		=> Content::text(&s).with_span(span),
-			Value::Symbol(s)	=> Content::text(&ops::symbol_text(&s)).with_span(span),
-			Value::Content(c)	=> if c.span().is_detached() { c.with_span(span) } else { c },
-			Value::Module(m)	=> m.content.clone(),
-			other				=> {
-				let text = repr(&other);
-				res!(self.elem(ElemKind::Raw, vec![
-					("text",	Value::str(text)),
-					("block",	Value::Bool(false)),
-					("lang",	Value::str("typc")),
-				], span))
-			}
-		};
-		Ok(c)
+		content::display(self.engine, v, span)
 	}
 
 	fn expect_bool(&mut self, node: &SyntaxNode) -> Outcome<bool> {
 		match res!(self.eval(node)) {
 			Value::Bool(b)	=> Ok(b),
-			other			=> Err(self.error(node.span(), fmt!("expected boolean, found {}", long_name(other.ty())))),
+			other			=> Err(self.error(node.span(), fmt!("expected boolean, found {}", other.ty().long_name()))),
 		}
 	}
 
@@ -858,20 +827,7 @@ impl<'a> Vm<'a> {
 	fn apply_pending(&mut self, content: Content, pending: Pending) -> Outcome<Content> {
 		match pending {
 			Pending::Styles(s)	=> Ok(content.styled(s)),
-			Pending::Recipe(r)	=> match (&r.selector, r.transform) {
-				(None, Transformation::Content(c))	=> Ok(c),
-				(None, Transformation::Style(s))	=> Ok(content.styled(s)),
-				(None, Transformation::Func(f))		=> {
-					let mut args = Args::new(r.span);
-					args.push(r.span, Value::Content(content));
-					let v = res!(self.engine.call_func(&f, args));
-					self.display(v, r.span)
-				}
-				(Some(_), transform) => {
-					let recipe = Recipe { selector: r.selector, transform, span: r.span };
-					Ok(content.styled(Styles::from_style(Style::Recipe(recipe))))
-				}
-			},
+			Pending::Recipe(r)	=> styles::styled_with_recipe(self.engine, content, r),
 		}
 	}
 
@@ -893,8 +849,8 @@ impl<'a> Vm<'a> {
 			K::Space		=> Ok(Value::Content(Content::marker(ElemKind::Space, span))),
 			K::Linebreak	=> Ok(Value::Content(Content::marker(ElemKind::Linebreak, span))),
 			K::Parbreak		=> Ok(Value::Content(Content::marker(ElemKind::Parbreak, span))),
-			K::Escape		=> Ok(Value::Content(Content::text(&unescape_markup(node.text())).with_span(span))),
-			K::Shorthand	=> Ok(Value::Content(Content::text(markup_shorthand(node.text())).with_span(span))),
+			K::Escape		=> Ok(Value::Content(Content::symbol(&unescape_markup(node.text())).with_span(span))),
+			K::Shorthand	=> Ok(Value::Content(Content::symbol(markup_shorthand(node.text())).with_span(span))),
 			K::SmartQuote	=> self.elem(ElemKind::SmartQuote, vec![
 				("double", Value::Bool(node.text() == "\"")),
 			], span).map(Value::Content),
@@ -916,9 +872,13 @@ impl<'a> Vm<'a> {
 			K::Markup		=> self.eval_markup(node.children()).map(Value::Content),
 			// Maths
 			K::Math			=> self.eval_math_seq(node.children()).map(Value::Content),
-			K::MathText		=> Ok(Value::Content(Content::text(node.text()).with_span(span))),
+			// One character is a symbol, a number is text, as Typst's `MathText` evaluates.
+			K::MathText		=> Ok(Value::Content(match node.text().chars().next() {
+				Some(c) if c.is_numeric()	=> Content::text(node.text()),
+				_							=> Content::symbol(node.text()),
+			}.with_span(span))),
 			K::MathIdent	=> self.eval_math_ident(node),
-			K::MathShorthand	=> Ok(Value::Content(Content::text(math_shorthand(node.text())).with_span(span))),
+			K::MathShorthand	=> Ok(Value::Content(Content::symbol(math_shorthand(node.text())).with_span(span))),
 			K::MathAlignPoint	=> Ok(Value::Content(Content::marker(ElemKind::MathAlignPoint, span))),
 			K::MathDelimited	=> self.eval_math_delimited(node),
 			K::MathAttach	=> self.eval_math_attach(node),
@@ -1337,7 +1297,7 @@ impl<'a> Vm<'a> {
 							"cannot spread dictionary into array",
 							fmt!("add a colon to create a dictionary instead: `(: {},)`", c.full_text().trim()))),
 						other				=> return Err(self.error(c.span(),
-							fmt!("cannot spread {} into array", long_name(other.ty())))),
+							fmt!("cannot spread {} into array", other.ty().long_name()))),
 					}
 				}
 				k if is_code_expr(k) => out.push(res!(self.eval(c))),
@@ -1369,7 +1329,7 @@ impl<'a> Vm<'a> {
 					let key = match res!(self.eval(&k)) {
 						Value::Str(s)	=> s,
 						other			=> return Err(self.error(k.span(),
-							fmt!("expected string, found {}", long_name(other.ty())))),
+							fmt!("expected string, found {}", other.ty().long_name()))),
 					};
 					let v = res!(self.eval(&e));
 					d.insert(&key, v);
@@ -1385,7 +1345,7 @@ impl<'a> Vm<'a> {
 							d.insert(k, v.clone());
 						},
 						other			=> return Err(self.error(c.span(),
-							fmt!("cannot spread {} into dictionary", long_name(other.ty())))),
+							fmt!("cannot spread {} into dictionary", other.ty().long_name()))),
 					}
 				}
 				_ => (),
@@ -1632,7 +1592,7 @@ impl<'a> Vm<'a> {
 			SyntaxKind::Destructuring	=> match v {
 				Value::Array(a)	=> self.destructure_array(pat, &a, mode),
 				Value::Dict(d)	=> self.destructure_dict(pat, &d, mode),
-				other			=> Err(self.error(pat.span(), fmt!("cannot destructure {}", long_name(other.ty())))),
+				other			=> Err(self.error(pat.span(), fmt!("cannot destructure {}", other.ty().long_name()))),
 			},
 			SyntaxKind::Ident if mode == Bind::Define => {
 				self.define(pat.text(), v, pat.span());
@@ -1888,7 +1848,7 @@ impl<'a> Vm<'a> {
 						},
 						Value::Args(a)	=> args.items.extend(a.items.iter().cloned()),
 						other			=> return Err(self.error(c.span(),
-							fmt!("cannot spread {}", long_name(other.ty())))),
+							fmt!("cannot spread {}", other.ty().long_name()))),
 					}
 				}
 				k if is_code_expr(k) => {
@@ -1947,7 +1907,7 @@ impl<'a> Vm<'a> {
 					"to call the stored function, wrap the field access in parentheses: `({})(..)`",
 					callee.full_text().trim()))),
 				other => Err(self.error(callee.span(),
-					fmt!("type {} has no method `{}`", long_name(other.ty()), field))),
+					fmt!("type {} has no method `{}`", other.ty().long_name(), field))),
 			};
 		}
 		let cv = res!(self.eval(&callee));
@@ -1996,7 +1956,7 @@ impl<'a> Vm<'a> {
 				Ok(Value::Content(Content::sequence(vec![head, lr])))
 			}
 			other => Err(self.error(callee_node.span(),
-				fmt!("expected function, found {}", long_name(other.ty())))),
+				fmt!("expected function, found {}", other.ty().long_name()))),
 		}
 	}
 
@@ -2088,11 +2048,11 @@ impl<'a> Vm<'a> {
 				"miter-limit"	=> Some(s.miter_limit.map(Value::Float).unwrap_or(Value::Auto)),
 				_				=> None,
 			},
-			_ => return Err(self.error(span, fmt!("cannot access fields on type {}", long_name(ty)))),
+			_ => return Err(self.error(span, fmt!("cannot access fields on type {}", ty.long_name()))),
 		};
 		match found {
 			Some(v)	=> Ok(v),
-			None	=> Err(self.error(span, fmt!("{} does not contain field \"{}\"", long_name(ty), name))),
+			None	=> Err(self.error(span, fmt!("{} does not contain field \"{}\"", ty.long_name(), name))),
 		}
 	}
 
@@ -2116,7 +2076,7 @@ impl<'a> Vm<'a> {
 				None	=> return Err(self.error(target.span(), "only element functions can be used in set rules")),
 			},
 			other	=> return Err(self.error(target.span(),
-				fmt!("expected function, found {}", long_name(other.ty())))),
+				fmt!("expected function, found {}", other.ty().long_name()))),
 		};
 		let args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
 		let mark = self.engine.diags.len();
@@ -2154,43 +2114,15 @@ impl<'a> Vm<'a> {
 				v @ (Value::None | Value::Str(_) | Value::Symbol(_))
 									=> Transformation::Content(res!(self.display(v, transform_node.span()))),
 				other				=> return Err(self.error(transform_node.span(),
-					fmt!("expected content or function, found {}", long_name(other.ty())))),
+					fmt!("expected content or function, found {}", other.ty().long_name()))),
 			}
 		};
 		Ok(Recipe { selector, transform, span })
 	}
 
 	fn eval_selector(&mut self, node: &SyntaxNode) -> Outcome<Selector> {
-		let span = node.span();
-		match res!(self.eval(node)) {
-			Value::Func(f)		=> match f.element() {
-				Some(k)	=> Ok(Selector::Elem(k, None)),
-				None	=> Err(self.error(span, "only element functions can be used as selectors")),
-			},
-			Value::Str(s)		=> {
-				if s.is_empty() {
-					return Err(self.error(span, "text selector is empty"));
-				}
-				Ok(Selector::Text((*s).clone()))
-			}
-			Value::Symbol(s)	=> Ok(Selector::Text(ops::symbol_text(&s))),
-			Value::Label(l)		=> Ok(Selector::Label(l)),
-			Value::Regex(r)		=> {
-				if r.pattern.is_empty() {
-					return Err(self.error(span, "regex selector is empty"));
-				}
-				Ok(Selector::Regex(r))
-			}
-			Value::Selector(s)	=> {
-				if !showable(&s) {
-					return Err(self.error(span, "this selector cannot be used with show"));
-				}
-				Ok((*s).clone())
-			}
-			Value::Location(_)	=> Err(self.error(span, "this selector cannot be used with show")),
-			other				=> Err(self.error(span, fmt!(
-				"expected symbol, string, label, function, regex, or selector, found {}", long_name(other.ty())))),
-		}
+		let v = res!(self.eval(node));
+		select::cast_showable(self.engine, node.span(), v)
 	}
 
 	fn eval_context(&mut self, node: &SyntaxNode) -> Outcome<Value> {
@@ -2288,8 +2220,8 @@ impl<'a> Vm<'a> {
 			Value::Str(s) if !destructuring	=> segment::graphemes(&s).into_iter().map(Value::str).collect(),
 			Value::Bytes(b) if !destructuring	=> b.iter().map(|x| Value::Int(*x as i64)).collect(),
 			v @ (Value::Str(_) | Value::Bytes(_))	=> return Err(self.error(pattern.span(),
-				fmt!("cannot destructure values of {}", long_name(v.ty())))),
-			other => return Err(self.error(iterable.span(), fmt!("cannot loop over {}", long_name(other.ty())))),
+				fmt!("cannot destructure values of {}", v.ty().long_name()))),
+			other => return Err(self.error(iterable.span(), fmt!("cannot loop over {}", other.ty().long_name()))),
 		};
 		let outer = self.flow.take();
 		let mut output = Value::None;
@@ -2359,7 +2291,7 @@ impl<'a> Vm<'a> {
 			Value::Func(Func::Closure(_)) => return Err(self.error(src_span, "cannot import from user-defined functions")),
 			v @ (Value::Module(_) | Value::Func(_) | Value::Type(_)) => v,
 			other => return Err(self.error(src_span, fmt!(
-				"expected path, module, function, or type, found {}", long_name(other.ty())))),
+				"expected path, module, function, or type, found {}", other.ty().long_name()))),
 		};
 		let new_name = node.children().iter().skip_while(|c| c.kind() != SyntaxKind::As)
 			.skip(1).find(|c| c.kind() == SyntaxKind::Ident).cloned();
@@ -2447,7 +2379,7 @@ impl<'a> Vm<'a> {
 							Some(v) => {
 								if i + 1 < path.len() && !matches!(v, Value::Module(_) | Value::Func(_) | Value::Type(_)) {
 									failed = Some(self.error(comp.span(), fmt!(
-										"expected module, function, or type, found {}", long_name(v.ty()))));
+										"expected module, function, or type, found {}", v.ty().long_name())));
 									ok = false;
 									break;
 								}
@@ -2487,16 +2419,8 @@ impl<'a> Vm<'a> {
 				}
 			}
 			Value::Module(m)	=> Ok(Value::Content(m.content.clone())),
-			other				=> Err(self.error(span, fmt!("expected path or module, found {}", long_name(other.ty())))),
+			other				=> Err(self.error(span, fmt!("expected path or module, found {}", other.ty().long_name()))),
 		}
-	}
-}
-
-fn showable(s: &Selector) -> bool {
-	match s {
-		Selector::Elem(..) | Selector::Label(_) | Selector::Text(_) | Selector::Regex(_)	=> true,
-		Selector::Or(v) | Selector::And(v)	=> v.iter().all(showable),
-		_									=> false,
 	}
 }
 

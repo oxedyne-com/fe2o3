@@ -16,7 +16,9 @@
 //     EVAL_ORACLE_CAP=3G|none     the memory cap each typst run is given
 //
 // A panic or an unbounded run on Austenite's side, and a fixture Typst itself rejects, fail the
-// suite whatever the strictness: the first two are engine faults, the last a corpus fault.
+// suite whatever the strictness: the first two are engine faults, the last a corpus fault. A fixture
+// marked `oracle: rejects` inverts the last: Typst must reject it, and it is compared on the first
+// error alone (the `Err` column), message and line:column both.
 
 pub mod austenite;
 pub mod corpus;
@@ -31,7 +33,10 @@ use austenite::{
 	RunEnd,
 	Want,
 };
-use corpus::Fixture;
+use corpus::{
+	Expect,
+	Fixture,
+};
 use json::J;
 use oracle::Oracle;
 
@@ -78,6 +83,7 @@ pub struct FixtureReport {
 	pub id:			String,
 	pub area:		String,
 	pub levels:		[Verdict; 4],
+	pub rejection:	Verdict,	// first error against Typst's, for an `oracle: rejects` fixture
 	pub fault:		Option<String>,	// panic, timeout or an oracle rejection: fails the suite always
 	pub notes:		Vec<String>,	// Austenite's evaluation and layout errors, and its diagnostics
 	pub probe_src:	Option<ProbeSource>,
@@ -94,6 +100,7 @@ pub fn check(fx: &Fixture, oracle: &Oracle, limit: Duration) -> Outcome<FixtureR
 		id:			fx.id(),
 		area:		fx.area.clone(),
 		levels:		[Verdict::NotRequested, Verdict::NotRequested, Verdict::NotRequested, Verdict::NotRequested],
+		rejection:	Verdict::NotRequested,
 		fault:		None,
 		notes:		Vec::new(),
 		probe_src:	None,
@@ -102,9 +109,20 @@ pub fn check(fx: &Fixture, oracle: &Oracle, limit: Duration) -> Outcome<FixtureR
 		rep.fault = Some(f);
 		return Ok(rep);
 	}
-	if let Err(e) = res!(oracle.compiles(fx)) {
-		rep.fault = Some(fmt!("typst rejects the fixture: {}", e));
-		return Ok(rep);
+	match (res!(oracle.compiles(fx)), fx.expect) {
+		(Err(e), Expect::Accepts)	=> {
+			rep.fault = Some(fmt!("typst rejects the fixture: {}", e));
+			return Ok(rep);
+		}
+		(Ok(()), Expect::Rejects)	=> {
+			rep.fault = Some("typst accepts a fixture marked `oracle: rejects`".to_string());
+			return Ok(rep);
+		}
+		(Err(e), Expect::Rejects)	=> {
+			rep.rejection = check_rejection(fx, &e, limit, &mut rep);
+			return Ok(rep);
+		}
+		(Ok(()), Expect::Accepts)	=> (),
 	}
 
 	// The oracle first: what it has nothing to say about, Austenite is not asked.
@@ -215,6 +233,70 @@ pub fn check(fx: &Fixture, oracle: &Oracle, limit: Duration) -> Outcome<FixtureR
 	Ok(rep)
 }
 
+// Typst's first error, as `oracle::first_error` keeps it (`error: <message> ┌─ <file>:<line>:<col>`),
+// against Austenite's first error diagnostic.
+fn check_rejection(fx: &Fixture, typst: &str, limit: Duration, rep: &mut FixtureReport) -> Verdict {
+	let (want_msg, want_pos) = split_first_error(typst);
+	let out = match austenite::run(fx, Want { levels: [false; 4] }, limit) {
+		RunEnd::Done(out)	=> out,
+		RunEnd::Panic(p)	=> {
+			rep.fault = Some(fmt!("austenite panicked: {}", p));
+			return Verdict::NotRequested;
+		}
+		RunEnd::Timeout(s)	=> {
+			rep.fault = Some(fmt!("austenite did not finish within {}s", s));
+			return Verdict::NotRequested;
+		}
+	};
+	rep.notes.extend(out.diags.iter().map(|d| fmt!("diagnostic: {}", d)));
+	compare_first_error(&want_msg, want_pos, out.first_error.as_ref())
+}
+
+/// Austenite's first error against Typst's: the same message and, where Typst gives one, the same
+/// line and column.
+pub fn compare_first_error(
+	want_msg:	&str,
+	want_pos:	Option<(usize, usize)>,
+	got:		Option<&(String, Option<(usize, usize)>)>,
+)
+	-> Verdict
+{
+	match got {
+		None				=> Verdict::Fail(vec![fmt!("austenite accepts it; typst: {}", want_msg)]),
+		Some((msg, pos))	=> {
+			let mut d = Vec::new();
+			if msg != want_msg {
+				d.push(fmt!("message: typst `{}`, austenite `{}`", want_msg, msg));
+			}
+			if want_pos.is_some() && *pos != want_pos {
+				d.push(fmt!("position: typst {:?}, austenite {:?}", want_pos, pos));
+			}
+			if d.is_empty() { Verdict::Pass } else { Verdict::Fail(d) }
+		}
+	}
+}
+
+/// Typst's first error split into its message and, when it has one, its line and column, both 1-based.
+/// The CLI prints the line 1-based but the column as a 0-based character index (`ab #panic()` fails
+/// at `1:4`, the `p`), so the column is shifted to match `Source::line_col`.
+pub fn split_first_error(s: &str) -> (String, Option<(usize, usize)>) {
+	let s = s.trim().trim_start_matches("error:").trim();
+	let (msg, loc) = match s.split_once(" ┌─ ") {
+		Some((m, l))	=> (m.trim(), Some(l.trim())),
+		None			=> (s, None),
+	};
+	let pos = loc.and_then(|l| {
+		let mut parts = l.rsplitn(3, ':');
+		let col = parts.next().and_then(|c| c.parse::<usize>().ok());
+		let line = parts.next().and_then(|c| c.parse::<usize>().ok());
+		match (line, col) {
+			(Some(l), Some(c))	=> Some((l, c + 1)),
+			_					=> None,
+		}
+	});
+	(msg.to_string(), pos)
+}
+
 /// Level-2 differences: the same elements in the same order, on the same page, within [`POS_TOL`].
 pub fn compare_positions(want: &[PosRow], got: &[PosRow]) -> Vec<String> {
 	let mut out = Vec::new();
@@ -258,12 +340,16 @@ pub struct Board {
 }
 
 impl Board {
-	/// Passes and compared fixtures for one level, over the reports `pick` admits.
+	/// Passes and compared fixtures for one column (0-3 the levels, 4 the first error), over the
+	/// reports `pick` admits.
 	pub fn score<F: Fn(&FixtureReport) -> bool>(&self, level: usize, pick: F) -> (usize, usize) {
 		let mut pass = 0;
 		let mut n = 0;
 		for r in self.reports.iter().filter(|r| pick(r)) {
-			let v = &r.levels[level];
+			let v = match r.levels.get(level) {
+				Some(v)	=> v,
+				None	=> &r.rejection,
+			};
 			if v.counts() {
 				n += 1;
 				if v.is_pass() {
@@ -281,14 +367,14 @@ impl Board {
 	}
 
 	pub fn print(&self) {
-		println!("[eval-oracle] {:<36} {:>5} {:>5} {:>5} {:>5}  notes", "fixture", "L1", "L2", "L3", "L4");
+		println!("[eval-oracle] {:<36} {:>5} {:>5} {:>5} {:>5} {:>5}  notes", "fixture", "L1", "L2", "L3", "L4", "Err");
 		for r in &self.reports {
 			let src = match r.probe_src {
 				Some(ProbeSource::Content)	=> " (L1 read from evaluated content)",
 				_							=> "",
 			};
-			println!("[eval-oracle] {:<36} {:>5} {:>5} {:>5} {:>5}  {}{}", r.id,
-				r.levels[0].tag(), r.levels[1].tag(), r.levels[2].tag(), r.levels[3].tag(),
+			println!("[eval-oracle] {:<36} {:>5} {:>5} {:>5} {:>5} {:>5}  {}{}", r.id,
+				r.levels[0].tag(), r.levels[1].tag(), r.levels[2].tag(), r.levels[3].tag(), r.rejection.tag(),
 				r.fault.clone().unwrap_or_default(), src);
 			for (i, v) in r.levels.iter().enumerate() {
 				match v {
@@ -299,21 +385,26 @@ impl Board {
 					_							=> (),
 				}
 			}
+			if let Verdict::Fail(d) = &r.rejection {
+				for m in d.iter().take(6) {
+					println!("[eval-oracle]     Err: {}", m);
+				}
+			}
 			for n in r.notes.iter().take(4) {
 				println!("[eval-oracle]     {}", json::clip(n));
 			}
 		}
 		for area in self.areas() {
-			let cells: Vec<String> = (0..4).map(|l| {
+			let cells: Vec<String> = (0..5).map(|l| {
 				let (p, n) = self.score(l, |r| r.area == area);
-				fmt!("L{} {}/{}", l + 1, p, n)
+				fmt!("{} {}/{}", column(l), p, n)
 			}).collect();
 			println!("[eval-oracle] area {:<16} {}{}", area, cells.join("  "),
 				if strict(&area) { "  (strict)" } else { "" });
 		}
-		let cells: Vec<String> = (0..4).map(|l| {
+		let cells: Vec<String> = (0..5).map(|l| {
 			let (p, n) = self.score(l, |_| true);
-			fmt!("L{} {}/{}", l + 1, p, n)
+			fmt!("{} {}/{}", column(l), p, n)
 		}).collect();
 		println!("[eval-oracle] conformance        {}", cells.join("  "));
 	}
@@ -321,7 +412,7 @@ impl Board {
 	/// The machine-readable scoreboard, for the orchestrator and the U11 gate.
 	pub fn to_json(&self) -> J {
 		let fixtures = self.reports.iter().map(|r| {
-			let levels = r.levels.iter().map(|v| match v {
+			let levels = r.levels.iter().chain(std::iter::once(&r.rejection)).map(|v| match v {
 				Verdict::Fail(d)			=> J::Obj(vec![
 					("verdict".to_string(), J::str("fail")),
 					("why".to_string(), J::Arr(d.iter().map(|m| J::Str(m.clone())).collect())),
@@ -339,7 +430,7 @@ impl Board {
 				("notes".to_string(), J::Arr(r.notes.iter().map(|n| J::Str(n.clone())).collect())),
 			])
 		}).collect();
-		let totals = (0..4).map(|l| {
+		let totals = (0..5).map(|l| {
 			let (p, n) = self.score(l, |_| true);
 			J::Obj(vec![("pass".to_string(), J::Int(p as i64)), ("compared".to_string(), J::Int(n as i64))])
 		}).collect();
@@ -354,13 +445,18 @@ impl Board {
 				out.push(fmt!("{}: {}", r.id, f));
 			}
 			if strict(&r.area) {
-				for (i, v) in r.levels.iter().enumerate() {
+				for (i, v) in r.levels.iter().chain(std::iter::once(&r.rejection)).enumerate() {
 					if let Verdict::Fail(d) = v {
-						out.push(fmt!("{} L{}: {}", r.id, i + 1, d.first().cloned().unwrap_or_default()));
+						out.push(fmt!("{} {}: {}", r.id, column(i), d.first().cloned().unwrap_or_default()));
 					}
 				}
 			}
 		}
 		out
 	}
+}
+
+// A scoreboard column's name: `L1`-`L4` for the levels, `Err` for the first error.
+fn column(i: usize) -> String {
+	if i < 4 { fmt!("L{}", i + 1) } else { "Err".to_string() }
 }

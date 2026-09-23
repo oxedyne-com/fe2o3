@@ -735,3 +735,24 @@ fn test_features_sort_into_style_classes_08() -> Outcome<()> {
     }
     Ok(())
 }
+
+#[test]
+fn test_the_tile_zoom_draws_a_tile_pixel_to_a_screen_pixel_10() -> Outcome<()> {
+    let world_m = 2.0 * std::f64::consts::PI * oxedyne_fe2o3_geom::proj::EARTH_RADIUS_M;
+    // At the equator one 256-pixel tile holds the world at zoom 0.
+    let vp = res!(Viewport::new(Projection::WebMercator, 0.0, 0.0, 0.0, world_m / 256.0, 390.0, 700.0));
+    req!((vp.tile_zoom(256.0).abs() < 1.0e-9), true);
+    for (kind, lat, z) in [(Projection::WebMercator, -33.87, 15u8), (Projection::Orthographic, 51.5, 9),
+        (Projection::WebMercator, 70.0, 4)]
+    {
+        // Find the scale at which zoom z is exact, then check a tile of z is 256 pixels across.
+        let probe = res!(Viewport::new(kind, lat, 151.2, 30.0, 1.0, 390.0, 700.0));
+        let m_per_px = 2f64.powf(probe.tile_zoom(256.0) - z as f64);
+        let vp = res!(Viewport::new(kind, lat, 151.2, 30.0, m_per_px, 390.0, 700.0));
+        req!(((vp.tile_zoom(256.0) - z as f64).abs() < 1.0e-9), true);
+        let t = res!(TileId::at(lat, 151.2, z));
+        let (aff, _) = res!(vp.tile_affine(&t).ok_or_else(|| err!("no affine"; Missing)));
+        req!(((aff.a.hypot(aff.b) - 256.0).abs() < 1.0e-6), true);
+    }
+    Ok(())
+}

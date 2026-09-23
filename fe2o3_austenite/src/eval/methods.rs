@@ -14,7 +14,6 @@ use crate::eval::func::{
 	NativeFunc,
 };
 use crate::eval::lib;
-use crate::eval::ops::long_name;
 use crate::eval::select;
 use crate::eval::value::{
 	Dict,
@@ -145,7 +144,7 @@ pub fn call(f: CoreFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				}
 				Value::Str(s) => a.items.iter().rev().find(|x| x.name.as_deref() == Some(s.as_str()))
 					.map(|x| x.value.clone()),
-				other => return Err(fail(fmt!("expected integer or string, found {}", long_name(other.ty())))),
+				other => return Err(fail(fmt!("expected integer or string, found {}", other.ty().long_name()))),
 			};
 			match (found, default, key) {
 				(Some(v), _, _)				=> v,
@@ -157,7 +156,7 @@ pub fn call(f: CoreFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				(None, None, _)				=> Value::None,
 			}
 		}
-		(f, other) => return Err(fail(fmt!("type {} has no method `{}`", long_name(other.ty()), f.name()))),
+		(f, other) => return Err(fail(fmt!("type {} has no method `{}`", other.ty().long_name(), f.name()))),
 	};
 	res!(args.finish());
 	Ok(out)
@@ -237,7 +236,7 @@ pub fn call_method(
 			args.prepend(span, receiver);
 			engine.call_func(&Func::Native(f), args)
 		}
-		None => Err(engine.error(span, fmt!("type {} has no method `{}`", long_name(receiver.ty()), name))),
+		None => Err(engine.error(span, fmt!("type {} has no method `{}`", receiver.ty().long_name(), name))),
 	}
 }
 

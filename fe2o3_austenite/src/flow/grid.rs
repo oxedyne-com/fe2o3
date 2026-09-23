@@ -258,13 +258,8 @@ fn int_of(v: &Value) -> Option<i64> {
 	}
 }
 
-/// The font size in force, for `em` lengths. `text.size` is read by name so the text schema stays U6a's.
-pub fn font_size_pt(styles: &StyleChain) -> f64 {
-	match ElemKind::Text.field_id("size").and_then(|id| styles.get(ElemKind::Text, id)) {
-		Some(Value::Length(l))	=> l.resolve(11.0),
-		_						=> 11.0,
-	}
-}
+/// The font size in force, for `em` lengths.
+pub fn font_size_pt(styles: &StyleChain) -> f64 { styles.font_size() }
 
 /// A per-cell property as Typst's `Celled`: a value, an array cycling by column, or a function of x and y.
 fn celled(engine: &mut Engine, v: &Value, x: usize, y: usize, span: Span) -> Outcome<Value> {
@@ -538,10 +533,10 @@ fn place_cell(
 	-> Outcome<()>
 {
 	let span	= elem.span();
-	let fx		= int_of(&schema::resolve(styles, &elem, fid::X));
-	let fy		= int_of(&schema::resolve(styles, &elem, fid::Y));
-	let colspan	= int_of(&schema::resolve(styles, &elem, fid::COLSPAN)).unwrap_or(1).max(1) as usize;
-	let rowspan	= int_of(&schema::resolve(styles, &elem, fid::ROWSPAN)).unwrap_or(1).max(1) as usize;
+	let fx		= int_of(&res!(schema::resolve(styles, &elem, fid::X)));
+	let fy		= int_of(&res!(schema::resolve(styles, &elem, fid::Y)));
+	let colspan	= int_of(&res!(schema::resolve(styles, &elem, fid::COLSPAN))).unwrap_or(1).max(1) as usize;
+	let rowspan	= int_of(&res!(schema::resolve(styles, &elem, fid::ROWSPAN))).unwrap_or(1).max(1) as usize;
 	for v in [fx, fy].into_iter().flatten() {
 		if v < 0 {
 			return Err(engine.error(span, "number must be at least zero"));
@@ -645,28 +640,28 @@ fn pending_line(
 	-> Outcome<PendingLine>
 {
 	let span = elem.span();
-	let at = match schema::resolve(styles, elem, fid::LINE_AT) {
+	let at = match res!(schema::resolve(styles, elem, fid::LINE_AT)) {
 		Value::Int(i) if i >= 0 => i as usize,
 		Value::Int(_) => return Err(engine.error(span, "number must be at least zero")),
 		// After the latest automatically positioned cell: below its row, or right of it.
 		_ if vertical	=> if auto == 0 { 0 } else { (auto - 1) % c + 1 },
 		_				=> auto.div_ceil(c),
 	};
-	let start = match schema::resolve(styles, elem, fid::LINE_START) {
+	let start = match res!(schema::resolve(styles, elem, fid::LINE_START)) {
 		Value::Int(i) if i >= 0	=> i as usize,
 		_						=> 0,
 	};
-	let end = match schema::resolve(styles, elem, fid::LINE_END) {
+	let end = match res!(schema::resolve(styles, elem, fid::LINE_END)) {
 		Value::Int(i) if i >= 0	=> Some(i as usize),
 		_						=> None,
 	};
 	// A line's stroke is not folded with its default: parts it leaves unset come from the cell strokes it
 	// overrides (`hline(stroke: red)` over a 1.5pt cell edge draws red at 1.5pt, as in Typst).
-	let stroke = match schema::resolve(styles, elem, fid::LINE_STROKE) {
+	let stroke = match res!(schema::resolve(styles, elem, fid::LINE_STROKE)) {
 		Value::None	=> None,
 		v			=> Some(res!(stroke_of(engine, span, &v))),
 	};
-	let after = match schema::resolve(styles, elem, fid::LINE_POS) {
+	let after = match res!(schema::resolve(styles, elem, fid::LINE_POS)) {
 		Value::Alignment(a) => match (vertical, a.x, a.y) {
 			(true, Some(crate::eval::value::HAlign::End), _)			=> true,
 			(true, Some(crate::eval::value::HAlign::Right), _)		=> true,
@@ -689,7 +684,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	let font_pt = font_size_pt(styles);
 
 	let sizings = |engine: &mut Engine, id| -> Outcome<Vec<Sizing>> {
-		match schema::resolve(styles, elem, id) {
+		match res!(schema::resolve(styles, elem, id)) {
 			Value::Array(a) => {
 				let mut out = Vec::new();
 				for v in a.iter() {
@@ -714,7 +709,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	let row_g	= res!(sizings(engine, fid::ROW_GUTTER));
 	let c		= col_t.len().max(1);
 
-	let children = match schema::resolve(styles, elem, fid::CHILDREN) {
+	let children = match res!(schema::resolve(styles, elem, fid::CHILDREN)) {
 		Value::Array(a)	=> a,
 		_				=> Arc::new(Vec::new()),
 	};
@@ -746,7 +741,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 			let first		= placed.len();
 			let mut local	= row * c;
 			let at			= if is_head { fid::HEAD_CHILDREN } else { fid::FOOT_CHILDREN };
-			let parts = match schema::resolve(styles, &child, at) {
+			let parts = match res!(schema::resolve(styles, &child, at)) {
 				Value::Array(a)	=> a,
 				_				=> Arc::new(Vec::new()),
 			};
@@ -761,9 +756,9 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 			}
 			let end = placed[first..].iter().map(|p| p.y + p.rowspan).max().unwrap_or(row).max(row);
 			let start = placed[first..].iter().map(|p| p.y).min().unwrap_or(row).min(row);
-			let repeat = matches!(schema::resolve(styles, &child, fid::REPEAT), Value::Bool(true));
+			let repeat = matches!(res!(schema::resolve(styles, &child, fid::REPEAT)), Value::Bool(true));
 			let part = if is_head {
-				let level = int_of(&schema::resolve(styles, &child, fid::LEVEL)).unwrap_or(1);
+				let level = int_of(&res!(schema::resolve(styles, &child, fid::LEVEL))).unwrap_or(1);
 				Part::Header { level, repeat }
 			} else {
 				Part::Footer { repeat }
@@ -821,10 +816,10 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	}
 
 	// Properties: the cell's own value, else the grid's resolved at the cell's position.
-	let g_fill		= schema::resolve(styles, elem, fid::FILL);
-	let g_align		= schema::resolve(styles, elem, fid::ALIGN);
-	let g_inset		= schema::resolve(styles, elem, fid::INSET);
-	let g_stroke	= schema::resolve(styles, elem, fid::STROKE);
+	let g_fill		= res!(schema::resolve(styles, elem, fid::FILL));
+	let g_align		= res!(schema::resolve(styles, elem, fid::ALIGN));
+	let g_inset		= res!(schema::resolve(styles, elem, fid::INSET));
+	let g_stroke	= res!(schema::resolve(styles, elem, fid::STROKE));
 	// A table's side left unspecified is a stroke with no part set: drawn as `1pt + black`, but in a fold
 	// at a shared edge it yields every part to the neighbour's specified stroke. So `stroke: (bottom:
 	// olive)` draws olive between rows and black only where no neighbour speaks, as Typst does.
@@ -836,20 +831,20 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	for p in placed {
 		let cspan	= p.elem.span();
 		let mut el	= p.elem;
-		let fill = match schema::resolve(styles, &el, fid::CELL_FILL) {
+		let fill = match res!(schema::resolve(styles, &el, fid::CELL_FILL)) {
 			Value::Auto	=> {
 				let v = res!(celled(engine, &g_fill, p.x, p.y, cspan));
 				res!(paint_of(engine, cspan, &v))
 			}
 			v => res!(paint_of(engine, cspan, &v)),
 		};
-		let own_a	= res!(align_of(engine, cspan, &schema::resolve(styles, &el, fid::CELL_ALIGN)));
+		let own_a	= res!(align_of(engine, cspan, &res!(schema::resolve(styles, &el, fid::CELL_ALIGN))));
 		let grid_a	= {
 			let v = res!(celled(engine, &g_align, p.x, p.y, cspan));
 			res!(align_of(engine, cspan, &v))
 		};
 		let align = Alignment { x: own_a.x.or(grid_a.x), y: own_a.y.or(grid_a.y) };
-		let own_i	= res!(sides_inset(engine, cspan, &schema::resolve(styles, &el, fid::CELL_INSET)));
+		let own_i	= res!(sides_inset(engine, cspan, &res!(schema::resolve(styles, &el, fid::CELL_INSET))));
 		let grid_i	= {
 			let v = res!(celled(engine, &g_inset, p.x, p.y, cspan));
 			res!(sides_inset(engine, cspan, &v))
@@ -860,7 +855,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 			right:	own_i.right.or(grid_i.right).unwrap_or_default(),
 			bottom:	own_i.bottom.or(grid_i.bottom).unwrap_or_default(),
 		};
-		let own_s	= res!(sides_stroke(engine, cspan, &schema::resolve(styles, &el, fid::CELL_STROKE)));
+		let own_s	= res!(sides_stroke(engine, cspan, &res!(schema::resolve(styles, &el, fid::CELL_STROKE))));
 		let grid_s	= {
 			let v = res!(celled(engine, &g_stroke, p.x, p.y, cspan));
 			let s = res!(sides_stroke(engine, cspan, &v));
