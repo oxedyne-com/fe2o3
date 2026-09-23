@@ -172,6 +172,7 @@ struct Barrier<
     dirty:  bool,               // the pair holds records no barrier has covered
     since:  u32,                // records released since the last barrier
     last:   Option<Instant>,    // when the last barrier completed
+    failed: Option<Instant>,    // when the last barrier failed, until one completes
 }
 
 impl<
@@ -197,6 +198,7 @@ impl<
             dirty:  false,
             since:  0,
             last:   None,
+            failed: None,
         }
     }
 
@@ -264,10 +266,12 @@ impl<
         self.policy = policy;
         self.dirty = true;
         self.since = self.since.saturating_add(run.len() as u32);
+        // While the disk is failing a record waits on a barrier of its own, so that its caller
+        // hears so rather than being answered as if its period will make it durable.
         let due = match policy {
             SyncPolicy::EveryWrite  => true,
             SyncPolicy::EveryN(n)   => self.since >= n,
-            SyncPolicy::Interval(p) => match self.last {
+            SyncPolicy::Interval(p) => self.failed.is_some() || match self.last {
                 None        => true,
                 Some(last)  => last.elapsed() >= p,
             },
@@ -294,25 +298,44 @@ impl<
 
     /// Forces the current pair to stable storage.
     fn barrier(&mut self) -> Outcome<()> {
+        if let Err(e) = self.sync_pair() {
+            self.failed = Some(Instant::now());
+            return Err(e);
+        }
+        self.dirty = false;
+        self.since = 0;
+        self.last = Some(Instant::now());
+        self.failed = None;
+        Ok(())
+    }
+
+    fn sync_pair(&self) -> Outcome<()> {
         if let Some((dat, ind)) = &self.pair {
             hooks::barrier_delay();
-            if let Err(e) = dat.sync_data() {
+            if let Err(e) = Self::sync(dat) {
                 return Err(err!(e,
                     "{}: sync_data on the live data file failed, so records written to it are not \
                     confirmed durable.", self.label;
                     IO, File, Write));
             }
-            if let Err(e) = ind.sync_data() {
+            if let Err(e) = Self::sync(ind) {
                 return Err(err!(e,
                     "{}: sync_data on the live index file failed, so records written to it are \
                     not confirmed durable.", self.label;
                     IO, File, Write));
             }
         }
-        self.dirty = false;
-        self.since = 0;
-        self.last = Some(Instant::now());
         Ok(())
+    }
+
+    /// `File::sync_data`, or the failure a test has asked for (`test::hooks`).  A barrier stops at
+    /// its first failed sync, so a barrier the hook fails is counted once.
+    fn sync(file: &File) -> std::io::Result<()> {
+        if hooks::sync_fails() {
+            return Err(std::io::Error::other(
+                "the disk failed the sync (test::hooks::set_barrier_failure)"));
+        }
+        file.sync_data()
     }
 
     /// A barrier nobody is waiting on, whose failure can only be logged.
@@ -322,10 +345,13 @@ impl<
         }
     }
 
-    /// How long until the interval policy owes a barrier, while it owes one.
+    /// How long until the interval policy owes a barrier, while it owes one.  A failed barrier is
+    /// retried a period after it failed: counted from the last one that completed, a disk refusing
+    /// every sync had this thread retry it as fast as the disk could refuse, a million times in
+    /// three seconds with an error logged for each (2026-09-23).
     fn owed_in(&self) -> Option<Duration> {
-        match (self.dirty, self.policy, self.last) {
-            (true, SyncPolicy::Interval(p), Some(last)) => Some(p.saturating_sub(last.elapsed())),
+        match (self.dirty, self.policy, self.failed.or(self.last)) {
+            (true, SyncPolicy::Interval(p), Some(t))    => Some(p.saturating_sub(t.elapsed())),
             (true, SyncPolicy::Interval(_), None)       => Some(Duration::ZERO),
             _                                           => None,
         }
