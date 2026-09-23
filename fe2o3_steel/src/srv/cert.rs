@@ -9,6 +9,7 @@ use crate::srv::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    file as core_file,
     path::{
         NormalPath,
         NormPathBuf,
@@ -610,8 +611,10 @@ impl Certificate {
         };
         res!(create_dir_all(dir_path));
 
-        res!(Self::write_to_file(
-            Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "privkey", "pem"),
+        // The private key: 0600 whatever the umask, via the secret path
+        // rather than `write_to_file`, which the public chain below keeps.
+        res!(core_file::save_secret(
+            &Self::filepath(root, &cfg.tls_dir_rel, constant::TLS_DIR_DEV, "privkey", "pem"),
             cert.serialize_private_key_pem().as_bytes(),
         ));
         res!(Self::write_to_file(

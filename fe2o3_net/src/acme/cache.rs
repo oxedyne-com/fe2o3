@@ -19,14 +19,20 @@
 //!
 //! All writes go through an atomic write-then-rename helper so a crashed
 //! or killed process cannot leave a partial file behind that the next
-//! start-up would read as truncated garbage.
+//! start-up would read as truncated garbage. The two private keys go
+//! through `fe2o3_core`'s secret variant on top of that, so they land at
+//! mode 0600 whatever the umask; `cert.pem` is public and keeps the plain
+//! atomic write.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use crate::acme::jose::JwsSigner;
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file as core_file,
+};
 
 use std::{
     fs,
@@ -92,10 +98,11 @@ impl AcmeDiskCache {
         Ok(Some(res!(JwsSigner::from_pkcs8(&bytes))))
     }
 
-    /// The write is atomic and replaces any existing key.
+    /// The write is atomic, replaces any existing key, and leaves the file
+    /// at mode 0600 whatever the umask: this is the account's private key.
     pub fn store_account_key(&self, signer: &JwsSigner) -> Outcome<()> {
         let path = self.root.join(ACCOUNT_KEY_FILE);
-        res!(write_atomic(&path, signer.pkcs8_bytes()));
+        res!(core_file::save_secret(&path, signer.pkcs8_bytes()));
         Ok(())
     }
 
@@ -124,7 +131,9 @@ impl AcmeDiskCache {
     }
 
     /// Each file is written atomically, but the pair is not: an interruption
-    /// between the two leaves a new certificate beside the old key.
+    /// between the two leaves a new certificate beside the old key. The
+    /// certificate is public, so it keeps the ordinary atomic write; the key
+    /// goes through the secret path and lands at mode 0600.
     pub fn store_certificate(
         &self,
         cert_pem:   &[u8],
@@ -133,7 +142,7 @@ impl AcmeDiskCache {
         -> Outcome<()>
     {
         res!(write_atomic(&self.root.join(CERT_PEM_FILE), cert_pem));
-        res!(write_atomic(&self.root.join(CERT_KEY_FILE), key_pkcs8));
+        res!(core_file::save_secret(&self.root.join(CERT_KEY_FILE), key_pkcs8));
         Ok(())
     }
 }
@@ -366,6 +375,46 @@ mod tests {
             return Err(err!(
                 "key did not overwrite: got {:?}.",
                 String::from_utf8_lossy(&key);
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// The two private keys must be readable only by their owner; the
+    /// certificate is public and must not be locked down by the same change.
+    #[test]
+    #[cfg(unix)]
+    fn test_key_files_are_saved_0600_and_cert_pem_is_not() -> Outcome<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let scratch = ScratchDir::new("mode");
+        let cache = res!(AcmeDiskCache::new(&scratch.path));
+        let signer = res!(JwsSigner::new_es256());
+
+        res!(cache.store_account_key(&signer));
+        res!(cache.store_certificate(b"cert bytes", b"key bytes"));
+
+        let account_mode = res!(fs::metadata(cache.account_key_path()))
+            .permissions().mode() & 0o777;
+        if account_mode != 0o600 {
+            return Err(err!(
+                "account_key.pkcs8 saved at mode {:o}, not 0600.", account_mode;
+                Test, Mismatch));
+        }
+
+        let key_path = scratch.path.join(CERT_KEY_FILE);
+        let key_mode = res!(fs::metadata(&key_path)).permissions().mode() & 0o777;
+        if key_mode != 0o600 {
+            return Err(err!(
+                "cert_key.pkcs8 saved at mode {:o}, not 0600.", key_mode;
+                Test, Mismatch));
+        }
+
+        let cert_mode = res!(fs::metadata(cache.certificate_path()))
+            .permissions().mode() & 0o777;
+        if cert_mode == 0o600 {
+            return Err(err!(
+                "cert.pem also ended at 0600; only key material should be restricted.";
                 Test, Mismatch));
         }
         Ok(())

@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    file as core_file,
     mem::Extract,
     path::NormalPath,
 };
@@ -277,7 +278,7 @@ impl AppShellContext {
                         } else {
                             w.enc_secs_mut().insert(name.clone(), dat!(map));
                         }
-                        res!(w.save(
+                        res!(w.save_secret(
                             &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
                         ));
                     }
@@ -523,14 +524,18 @@ impl AppShellContext {
         ));
         let new_wallet = Wallet::new(metadata, vec![admin], DaticleMap::new());
 
-        // Back up the old wallet first.
+        // Back up the old wallet first. A plain `fs::copy` would carry the
+        // source's mode, so the backup holds the same passphrase verifier
+        // and key-derivation material at a wider mode than the original.
         let backup_path = Path::new("./").join(fmt!("{}.pre-admins", app_const::WALLET_NAME));
-        if let Err(e) = std::fs::copy(&wallet_path, &backup_path) {
-            return Err(err!(e,
-                "Backing up {:?} to {:?}.", wallet_path, backup_path;
-                IO, File, Write));
-        }
-        res!(new_wallet.save(
+        let old_wallet_bytes = match std::fs::read(&wallet_path) {
+            Ok(b) => b,
+            Err(e) => return Err(err!(e,
+                "Reading {:?} to back it up before the admin-user migration.", wallet_path;
+                IO, File, Read)),
+        };
+        res!(core_file::save_secret(&backup_path, &old_wallet_bytes));
+        res!(new_wallet.save_secret(
             &wallet_path,
             "  ",
             Some(EncoderConfig::<(), ()>::default()),
@@ -672,7 +677,7 @@ impl AppShellContext {
                     &fmt!("reason={}", e));
                 return Err(e);
             }
-            res!(w.save(
+            res!(w.save_secret(
                 &wallet_path,
                 "  ",
                 Some(EncoderConfig::<(), ()>::default()),
@@ -756,7 +761,7 @@ impl AppShellContext {
                     &fmt!("target={} reason={}", new_name, e));
                 return Err(e);
             }
-            res!(w.save(
+            res!(w.save_secret(
                 &wallet_path,
                 "  ",
                 Some(EncoderConfig::<(), ()>::default()),
@@ -791,7 +796,7 @@ impl AppShellContext {
                     &fmt!("target={} reason={}", target_name, e));
                 return Err(e);
             }
-            res!(w.save(
+            res!(w.save_secret(
                 &wallet_path,
                 "  ",
                 Some(EncoderConfig::<(), ()>::default()),

@@ -40,7 +40,10 @@ use oxedyne_fe2o3_net::{
     },
 };
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+    prelude::*,
+    file as core_file,
+};
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_iop_hash::api::Hasher;
@@ -807,7 +810,8 @@ pub fn load_dkim_signers(
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if let Err(e) = std::fs::write(&path, s.pkcs8_bytes()) {
+            // Key material: 0600 whatever the umask, not the default create mode.
+            if let Err(e) = core_file::save_secret(&path, s.pkcs8_bytes()) {
                 return Err(err!(e,
                     "Writing DKIM key {:?}.", path;
                     IO, File, Write));

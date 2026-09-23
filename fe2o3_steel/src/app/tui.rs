@@ -25,6 +25,7 @@ use std::sync::{
 
 use oxedyne_fe2o3_core::{
     prelude::*,
+    file as core_file,
     log::{
         bot::FileConfig,
     },
@@ -353,7 +354,7 @@ pub fn run_with_extension<E: AppExtension>(extension: E) -> Outcome<()> {
                     pass_bytes,
                     DEFAULT_WALLET_KDF_NAME,
                 ));
-                res!(wallet.save(
+                res!(wallet.save_secret(
                     &wallet_path,
                     "  ",
                     Some(EncoderConfig::<(), ()>::default()),
@@ -583,13 +584,18 @@ fn migrate_legacy_wallet_inline(_cfg: &AppConfig) -> Outcome<()> {
     ));
     let new_wallet = Wallet::new(metadata, vec![admin], DaticleMap::new());
 
+    // A plain `fs::copy` would carry the source's mode, so the backup holds
+    // the same passphrase verifier and key-derivation material at a wider
+    // mode than the original.
     let backup_path = Path::new("./").join(fmt!("{}.pre-admins", constant::WALLET_NAME));
-    if let Err(e) = std::fs::copy(&wallet_path, &backup_path) {
-        return Err(err!(e,
-            "Backing up {:?} to {:?}.", wallet_path, backup_path;
-            IO, File, Write));
-    }
-    res!(new_wallet.save(
+    let old_wallet_bytes = match std::fs::read(&wallet_path) {
+        Ok(b) => b,
+        Err(e) => return Err(err!(e,
+            "Reading {:?} to back it up before the admin-user migration.", wallet_path;
+            IO, File, Read)),
+    };
+    res!(core_file::save_secret(&backup_path, &old_wallet_bytes));
+    res!(new_wallet.save_secret(
         &wallet_path,
         "  ",
         Some(EncoderConfig::<(), ()>::default()),

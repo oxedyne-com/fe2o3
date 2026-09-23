@@ -1393,7 +1393,7 @@ fn handle_admin_add(
                 message: fmt!("Failed to enrol '{}': {}", new_name, e),
             };
         }
-        w.save(
+        w.save_secret(
             &state.wallet_path,
             "  ",
             Some(EncoderConfig::<(), ()>::default()),
@@ -1463,7 +1463,7 @@ fn handle_admin_remove(
                 message: fmt!("Failed to remove '{}': {}", target, e),
             };
         }
-        w.save(
+        w.save_secret(
             &state.wallet_path,
             "  ",
             Some(EncoderConfig::<(), ()>::default()),
