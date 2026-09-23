@@ -59,6 +59,11 @@ use crate::eval::value::{
 	Value,
 };
 use crate::eval::Engine;
+use crate::syntax::ast::{
+	self,
+	AstNode,
+	BareImportError,
+};
 use crate::syntax::{
 	parser,
 	FileId,
@@ -242,7 +247,7 @@ fn call_closure(engine: &mut Engine, c: &Arc<Closure>, func: &Func, args: Args) 
 enum Flow {
 	Break(Span),
 	Continue(Span),
-	Return(Span, Option<Value>),
+	Return(Span, Option<Value>, bool),	// the value, and whether an `if` or a loop lies between
 }
 
 // A style that applies to the rest of a block once the rest is known.
@@ -656,7 +661,7 @@ impl<'a> Vm<'a> {
 			None						=> Ok(()),
 			Some(Flow::Break(s))		=> Err(self.error(s, "cannot break outside of loop")),
 			Some(Flow::Continue(s))		=> Err(self.error(s, "cannot continue outside of loop")),
-			Some(Flow::Return(s, _))	=> Err(self.error(s, "cannot return outside of function")),
+			Some(Flow::Return(s, _, _))	=> Err(self.error(s, "cannot return outside of function")),
 		}
 	}
 
@@ -765,6 +770,7 @@ impl<'a> Vm<'a> {
 				_ => (),
 			}
 			if self.flow.is_some() {
+				self.warn_discarded(&output);
 				break;
 			}
 		}
@@ -930,7 +936,7 @@ impl<'a> Vm<'a> {
 					None	=> None,
 				};
 				if self.flow.is_none() {
-					self.flow = Some(Flow::Return(span, v));
+					self.flow = Some(Flow::Return(span, v, false));
 				}
 				Ok(Value::None)
 			}
@@ -1767,8 +1773,8 @@ impl<'a> Vm<'a> {
 		let out = res!(self.eval(body));
 		match self.flow.take() {
 			None							=> Ok(out),
-			Some(Flow::Return(_, Some(v)))	=> Ok(v),
-			Some(Flow::Return(_, None))		=> Ok(out),
+			Some(Flow::Return(_, Some(v), _))	=> Ok(v),
+			Some(Flow::Return(_, None, _))		=> Ok(out),
 			Some(Flow::Break(s))			=> Err(self.error(s, "cannot break outside of loop")),
 			Some(Flow::Continue(s))			=> Err(self.error(s, "cannot continue outside of loop")),
 		}
@@ -2054,14 +2060,41 @@ impl<'a> Vm<'a> {
 			_					=> return Err(self.error(node.span(), "incomplete conditional")),
 		};
 		let otherwise = expr_after(node, SyntaxKind::Else).cloned();
-		if res!(self.expect_bool(&cond)) {
-			self.eval(&then)
+		let out = if res!(self.expect_bool(&cond)) {
+			res!(self.eval(&then))
 		} else {
 			match otherwise {
-				Some(e)	=> self.eval(&e),
-				None	=> Ok(Value::None),
+				Some(e)	=> res!(self.eval(&e)),
+				None	=> Value::None,
 			}
+		};
+		self.mark_return_conditional();
+		Ok(out)
+	}
+
+	/// A `return` inside an `if` or a loop may not have run, so it discards nothing for certain.
+	fn mark_return_conditional(&mut self) {
+		if let Some(Flow::Return(_, _, conditional)) = &mut self.flow {
+			*conditional = true;
 		}
+	}
+
+	/// Typst's warning for a `return` that throws away content the block had already produced.
+	fn warn_discarded(&mut self, output: &Value) {
+		let span = match &self.flow {
+			Some(Flow::Return(span, Some(_), false))	=> *span,
+			_											=> return,
+		};
+		let tree = match output {
+			Value::Content(c)	=> c,
+			_					=> return,
+		};
+		let mut d = Diagnostic::warning(self.fix(span), "this return unconditionally discards the content before it")
+			.with_hint("try omitting the `return` to automatically join all values");
+		if contains_update(tree, 0) {
+			d = d.with_hint("state/counter updates are content that must end up in the document to have an effect");
+		}
+		self.engine.diags.push(d);
 	}
 
 	fn eval_while(&mut self, node: &SyntaxNode) -> Outcome<Value> {
@@ -2092,7 +2125,10 @@ impl<'a> Vm<'a> {
 					break;
 				}
 				Some(Flow::Continue(_))	=> self.flow = None,
-				Some(Flow::Return(..))	=> break,
+				Some(Flow::Return(..))	=> {
+					self.mark_return_conditional();
+					break;
+				}
 				None					=> (),
 			}
 			i += 1;
@@ -2165,7 +2201,10 @@ impl<'a> Vm<'a> {
 					break;
 				}
 				Some(Flow::Continue(_))	=> self.flow = None,
-				Some(Flow::Return(..))	=> break,
+				Some(Flow::Return(..))	=> {
+					self.mark_return_conditional();
+					break;
+				}
 				None					=> (),
 			}
 		}
@@ -2211,6 +2250,9 @@ impl<'a> Vm<'a> {
 			.map(|(c, a)| c < a).unwrap_or(false);
 		let new_name = if colon_seen_before_as { None } else { new_name };
 		if let Some(n) = &new_name {
+			if src_node.kind() == SyntaxKind::Ident && src_node.text() == n.text() {
+				self.engine.warn(self.fix(n.span()), "unnecessary import rename to same name");
+			}
 			self.define(n.text(), source.clone(), n.span());
 		}
 		let imports = node.children().iter().skip_while(|c| c.kind() != SyntaxKind::Colon).skip(1)
@@ -2218,19 +2260,20 @@ impl<'a> Vm<'a> {
 		match imports {
 			None => {
 				if new_name.is_none() {
-					let bare = match (&src_node.kind(), &source) {
-						(SyntaxKind::Str, Value::Module(m)) => bare_name(&unescape_str(src_node.text()))
-							.or_else(|| Some((*m.name).clone())),
-						(SyntaxKind::Ident, _)			=> Some(src_node.text().to_string()),
-						(SyntaxKind::FieldAccess, _)	=> ident_text(&src_node).map(|s| s.to_string()),
-						_								=> None,
+					let bare = match ast::ModuleImport::from_untyped(node) {
+						Some(m)	=> m.bare_name(),
+						None	=> Err(BareImportError::Dynamic),
 					};
 					match bare {
-						Some(b) if is_ident(&b)	=> self.define(&b, source, src_span),
-						Some(_)	=> return Err(self.error_hint(src_span,
-							"module name would not be a valid identifier", "you can rename the import with `as`")),
-						None	=> return Err(self.error_hint(src_span,
+						// `import calc` binds `calc` to itself.
+						Ok(_) if src_node.kind() == SyntaxKind::Ident	=> {
+							self.engine.warn(self.fix(src_span), "this import has no effect");
+						}
+						Ok(b)	=> self.define(&b, source, src_span),
+						Err(BareImportError::Dynamic)	=> return Err(self.error_hint(src_span,
 							"dynamic import requires an explicit name", "you can name the import with `as`")),
+						Err(_)	=> return Err(self.error_hint(src_span,
+							"module name would not be a valid identifier", "you can rename the import with `as`")),
 					}
 				}
 			}
@@ -2275,7 +2318,12 @@ impl<'a> Vm<'a> {
 							let b = item.children().iter().skip_while(|c| c.kind() != SyntaxKind::As).skip(1)
 								.find(|c| c.kind() == SyntaxKind::Ident).cloned();
 							match b {
-								Some(b)	=> (p, b),
+								Some(b)	=> {
+									if p.last().map(|l| l.text() == b.text()).unwrap_or(false) {
+										self.engine.warn(self.fix(b.span()), "unnecessary import rename to same name");
+									}
+									(p, b)
+								}
 								None	=> continue,
 							}
 						}
@@ -2344,18 +2392,19 @@ fn scope_member(v: &Value, name: &str) -> Option<Value> {
 }
 
 // The name a bare `import "path"` binds: the package name or the file stem.
-fn bare_name(spec: &str) -> Option<String> {
-	if let Some(pkg) = spec.strip_prefix('@') {
-		return pkg.split_once('/').map(|(_, rest)| rest.split(':').next().unwrap_or(rest).to_string());
-	}
-	let file = spec.rsplit('/').next().unwrap_or(spec);
-	Some(file.split('.').next().unwrap_or(file).to_string())
-}
 
-fn is_ident(s: &str) -> bool {
-	let mut chars = s.chars();
-	match chars.next() {
-		Some(c) if c.is_alphabetic() || c == '_'	=> chars.all(|c| c.is_alphanumeric() || c == '_' || c == '-'),
-		_											=> false,
+// Does the content hold a counter or state update, anywhere in its tree?
+fn contains_update(c: &Content, depth: usize) -> bool {
+	if depth > 256 {
+		return false;
+	}
+	match c {
+		Content::Sequence(seq)	=> seq.children.iter().any(|k| contains_update(k, depth + 1)),
+		Content::Styled(st)		=> contains_update(&st.child, depth + 1),
+		Content::Elem(e)		=> matches!(e.kind, ElemKind::CounterUpdate | ElemKind::StateUpdate)
+			|| e.fields.iter().any(|(_, v)| match v {
+				Value::Content(k)	=> contains_update(k, depth + 1),
+				_					=> false,
+			}),
 	}
 }

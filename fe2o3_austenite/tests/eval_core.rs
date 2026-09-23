@@ -689,8 +689,11 @@ fn values_match_the_typst_oracle() -> Outcome<()> {
 			failures.push(fmt!("{}\n  oracle failed: {}", c.code, expected));
 			continue;
 		}
-		let tree = res!(evaluate(&c.tree));
-		for (how, (engine, got)) in [("tree", tree), ("parsed", evaluate_parsed(&c.code))] {
+		let mut runs = vec![("parsed", evaluate_parsed(&c.code))];
+		if !c.tree.trim().is_empty() {
+			runs.insert(0, ("tree", res!(evaluate(&c.tree))));
+		}
+		for (how, (engine, got)) in runs {
 			match got {
 				Ok(v) => {
 					let got = to_json(&v);
@@ -734,8 +737,11 @@ fn errors_match_the_typst_oracle() -> Outcome<()> {
 			failures.push(fmt!("{}\n  oracle succeeded with {}; not an error case", c.code, expected));
 			continue;
 		}
-		let tree = res!(evaluate(&c.tree));
-		for (how, (engine, got)) in [("tree", tree), ("parsed", evaluate_parsed(&c.code))] {
+		let mut runs = vec![("parsed", evaluate_parsed(&c.code))];
+		if !c.tree.trim().is_empty() {
+			runs.insert(0, ("tree", res!(evaluate(&c.tree))));
+		}
+		for (how, (engine, got)) in runs {
 			match got {
 				Ok(v)	=> failures.push(fmt!("{} ({})\n  typst:     error: {}\n  austenite: {}",
 					c.code, how, expected, to_json(&v))),
@@ -757,7 +763,7 @@ fn errors_match_the_typst_oracle() -> Outcome<()> {
 #[test]
 fn every_error_is_positioned_in_the_source() -> Outcome<()> {
 	for c in res!(cases("errors.txt")) {
-		if c.dep.as_deref().map(|d| !available(d)).unwrap_or(false) {
+		if c.dep.as_deref().map(|d| !available(d)).unwrap_or(false) || c.tree.trim().is_empty() {
 			continue;
 		}
 		let (engine, got) = res!(evaluate(&c.tree));
@@ -765,5 +771,113 @@ fn every_error_is_positioned_in_the_source() -> Outcome<()> {
 		let d = engine.diags.iter().find(|d| d.is_error());
 		assert!(d.map(|d| !d.span.is_detached()).unwrap_or(false), "{}: error without a position", c.code);
 	}
+	Ok(())
+}
+
+// Warnings
+
+/// One warning as both sides report it: message, 1-based line and column, hints.
+type Warning = (String, usize, usize, Vec<String>);
+
+fn warning_cases() -> Outcome<Vec<String>> {
+	let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/core/warnings.txt");
+	let text = res!(std::fs::read_to_string(&path).map_err(|e| err!(
+		"Could not read {}: {}", path.display(), e; IO, File, Read)));
+	let mut out: Vec<String> = Vec::new();
+	for line in text.lines() {
+		if line.starts_with(";;") {
+			continue;
+		}
+		if line == "%%" {
+			out.push(String::new());
+		} else if let Some(doc) = out.last_mut() {
+			doc.push_str(line);
+			doc.push('\n');
+		}
+	}
+	Ok(out)
+}
+
+fn work_dir() -> Outcome<PathBuf> {
+	let d = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("eval_core_warnings");
+	res!(std::fs::create_dir_all(&d).map_err(|e| err!("Cannot create {}: {}", d.display(), e; IO, File, Write)));
+	Ok(d)
+}
+
+// `typst compile`'s warnings. Its location line gives a 0-based character column.
+fn oracle_warnings(doc: &str, n: usize) -> Outcome<Vec<Warning>> {
+	let dir = res!(work_dir());
+	let src = dir.join(fmt!("w{}.typ", n));
+	res!(std::fs::write(&src, doc).map_err(|e| err!("Cannot write {}: {}", src.display(), e; IO, File, Write)));
+	let pdf = dir.join(fmt!("w{}.pdf", n));
+	let out = res!(Command::new("systemd-run")
+		.args(["--user", "--scope", "--quiet", "-p", "MemoryMax=3G", "--slice=claude-rc.slice", "typst", "compile"])
+		.arg(&src).arg(&pdf).output()
+		.map_err(|e| err!("The typst oracle could not run: {}", e; IO, Missing)));
+	let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+	if !out.status.success() {
+		return Err(err!("typst rejects warning case {}: {}", n, stderr; Input, Invalid));
+	}
+	let mut ws: Vec<Warning> = Vec::new();
+	let mut lines = stderr.lines().peekable();
+	while let Some(l) = lines.next() {
+		if let Some(msg) = l.strip_prefix("warning: ") {
+			let mut w = (msg.to_string(), 0, 0, Vec::new());
+			if let Some(loc) = lines.peek().and_then(|n| n.trim().strip_prefix("┌─ ")) {
+				let mut parts = loc.rsplitn(3, ':');
+				let col = parts.next().and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+				let line = parts.next().and_then(|c| c.parse::<usize>().ok()).unwrap_or(0);
+				w.1 = line;
+				w.2 = col + 1;
+			}
+			ws.push(w);
+		} else if let Some(h) = l.trim().strip_prefix("= hint: ") {
+			if let Some(w) = ws.last_mut() {
+				w.3.push(h.to_string());
+			}
+		}
+	}
+	Ok(ws)
+}
+
+fn austenite_warnings(doc: &str) -> Outcome<Vec<Warning>> {
+	let mut world = World::new(PathBuf::from("/"));
+	let id = res!(world.add_source(PathBuf::from("/case.typ"), doc.to_string()));
+	let mut engine = Engine::new(world);
+	if let Err(e) = eval_source(&mut engine, id) {
+		return Err(err!("evaluation failed: {} ({:?})", first_error(&engine), e; Invalid));
+	}
+	let src = match engine.world.source(id) {
+		Some(s)	=> s,
+		None	=> return Err(err!("the case's source vanished"; Bug)),
+	};
+	Ok(engine.diags.iter().filter(|d| !d.is_error()).map(|d| {
+		let (l, c) = src.line_col(d.span.start);
+		(d.message.clone(), l, c, d.hints.clone())
+	}).collect())
+}
+
+#[test]
+fn warnings_match_the_typst_oracle() -> Outcome<()> {
+	if skip() {
+		println!("EVAL_ORACLE_SKIP=1: oracle comparison skipped");
+		return Ok(());
+	}
+	let docs = res!(warning_cases());
+	assert!(docs.len() >= 10, "the warning corpus shrank to {}", docs.len());
+	let mut warned = 0;
+	let mut failures = Vec::new();
+	for (n, doc) in docs.iter().enumerate() {
+		let want = res!(oracle_warnings(doc, n));
+		warned += want.len();
+		match austenite_warnings(doc) {
+			Ok(got) if got == want	=> (),
+			Ok(got)					=> failures.push(fmt!("{}\n  typst:     {:?}\n  austenite: {:?}", doc, want, got)),
+			Err(e)					=> failures.push(fmt!("{}\n  austenite: {}", doc, e)),
+		}
+	}
+	// The corpus must hold warnings to compare, or agreement means nothing.
+	assert!(warned >= 5, "only {} warnings in the corpus", warned);
+	assert!(failures.is_empty(), "{} of {} warning cases differ:\n{}", failures.len(), docs.len(), failures.join("\n"));
 	Ok(())
 }

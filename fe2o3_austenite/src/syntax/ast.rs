@@ -1596,9 +1596,9 @@ impl<'a> ModuleImport<'a> {
 			Expr::Str(string)			=> {
 				let string = string.get();
 				let name = if string.starts_with('@') {
-					match package_name(&string) {
-						Some(n)			=> n,
-						Option::None	=> return Err(BareImportError::PackageInvalid),
+					match crate::eval::package::parse_spec(&string) {
+						Ok(spec)	=> spec.name,
+						Err(_)		=> return Err(BareImportError::PackageInvalid),
 					}
 				} else {
 					match Path::new(&string).file_stem().and_then(|p| p.to_str()) {
@@ -1620,20 +1620,6 @@ impl<'a> ModuleImport<'a> {
 			.skip_while(|c| c.kind() != SyntaxKind::As)
 			.find_map(|c| c.cast())
 	}
-}
-
-// The name in `@namespace/name:major.minor.patch`, when the whole specification is well formed.
-fn package_name(spec: &str) -> Option<String> {
-	let parsed = spec.strip_prefix('@')
-		.and_then(|rest| rest.split_once('/'))
-		.and_then(|(namespace, rest)| rest.split_once(':').map(|(name, version)| (namespace, name, version)));
-	let (namespace, name, version) = match parsed {
-		Some(p)			=> p,
-		Option::None	=> return Option::None,
-	};
-	let parts: Vec<&str> = version.split('.').collect();
-	let version_ok = parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.parse::<u32>().is_ok());
-	if is_ident(namespace) && is_ident(name) && version_ok { Some(name.to_string()) } else { Option::None }
 }
 
 /// Why a bare import has no name to bind.

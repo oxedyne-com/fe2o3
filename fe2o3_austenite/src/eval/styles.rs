@@ -353,7 +353,7 @@ impl StyleChain {
 /// field's rule, or the innermost value for `Replace` (and for `Custom`, which `fold_custom_all` folds).
 pub fn fold_all(spec: &FieldSpec, values: &[&Value]) -> Option<Value> {
 	let default = spec.default.to_value();
-	if !matches!(spec.fold, Fold::Add | Fold::Merge) {
+	if matches!(spec.fold, Fold::Replace | Fold::Custom) {
 		return match values.first() {
 			Some(v)	=> Some((*v).clone()),
 			None	=> default,
@@ -389,7 +389,10 @@ pub fn fold(spec: &FieldSpec, inner: &Value, outer: &Value, outer_default: bool)
 	match spec.fold {
 		Fold::Replace | Fold::Custom	=> inner.clone(),
 		Fold::Add						=> fold_add(inner, outer),
-		Fold::Merge						=> fold_merge(Shape::of(spec), inner, outer, outer_default),
+		Fold::Sides						=> fold_merge(Shape::Sides, inner, outer, outer_default),
+		Fold::Corners					=> fold_merge(Shape::Corners, inner, outer, outer_default),
+		Fold::Keyed(key)				=> fold_merge(Shape::Keyed(key), inner, outer, outer_default),
+		Fold::Stroke					=> fold_stroke(inner, outer),
 	}
 }
 
@@ -410,22 +413,12 @@ fn fold_add(inner: &Value, outer: &Value) -> Value {
 	}
 }
 
-/// The parts a `Merge` field folds by.
+/// The parts a part-wise field folds by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shape {
 	Sides,
 	Corners,
 	Keyed(&'static str),	// a dictionary whose bare-value form is this key (`first-line-indent`'s amount)
-}
-
-impl Shape {
-	fn of(spec: &FieldSpec) -> Shape {
-		match spec.name {
-			"radius"			=> Shape::Corners,
-			"first-line-indent"	=> Shape::Keyed("amount"),
-			_					=> Shape::Sides,
-		}
-	}
 }
 
 const SIDE_KEYS:	&[&str] = &["left", "top", "right", "bottom", "x", "y", "rest", "inside", "outside"];
@@ -477,6 +470,14 @@ fn fold_merge(shape: Shape, inner: &Value, outer: &Value, outer_default: bool) -
 			collapse(shape, merged, named)
 		}
 	}
+}
+
+// One stroke: `none` and `auto` replace, anything else folds part-wise.
+fn fold_stroke(inner: &Value, outer: &Value) -> Value {
+	if matches!(inner, Value::None | Value::Auto) {
+		return inner.clone();
+	}
+	fold_part(inner, outer)
 }
 
 /// Folds one part: strokes part-wise, anything else inner-wins.
@@ -777,7 +778,12 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 				let msg = expected_message(spec.ty, &arg.value);
 				return Err(engine.error(arg.span, msg));
 			}
-			styles.push(Style::Property(Property::new(kind, id, arg.value, arg.span)));
+			// Cast as construction casts, so `set` refuses at the rule what the element would refuse.
+			let value = match content::cast_field(kind, spec.name, arg.value) {
+				Ok(v)	=> v,
+				Err(e)	=> return Err(engine.error(arg.span, crate::diag::message_of(&e))),
+			};
+			styles.push(Style::Property(Property::new(kind, id, value, arg.span)));
 		}
 	}
 	if let Some(a) = args.items.first() {

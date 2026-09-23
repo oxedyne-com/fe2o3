@@ -33,6 +33,7 @@ pub enum Family {
 	Visual,	// lib/visual.rs, U6d
 	Math,	// lib/math.rs, U7
 	Intro,	// lib/intro.rs, U8
+	Realise,	// realise.rs, U4: what realisation itself makes (tags) and the kinds of plain content
 }
 
 macro_rules! elem_kinds {
@@ -110,6 +111,7 @@ elem_kinds! {
 	OutlineEntry	=> ("outline.entry",		Model,	false),
 	Quote			=> ("quote",				Model,	false),
 	Bibliography	=> ("bibliography",			Model,	true),
+	CiteGroup		=> ("cite-group",			Model,	false),
 	Document		=> ("document",				Model,	false),
 	// Layout (U6b)
 	Box				=> ("box",					Layout,	false),
@@ -195,6 +197,10 @@ elem_kinds! {
 	StateUpdate		=> ("state.update",			Intro,	true),
 	Context			=> ("context",				Intro,	true),
 	Layout			=> ("layout",				Intro,	true),
+	// Realisation (U4)
+	Sequence		=> ("sequence",				Realise,	false),
+	Styled			=> ("styled",				Realise,	false),
+	Tag				=> ("tag",					Realise,	false),
 }
 
 impl ElemKind {
@@ -208,11 +214,13 @@ impl ElemKind {
 	}
 
 	/// The element reached as a top-level global (`heading`), not through a parent (`list.item`) or the
-	/// `math` module (`math.frac`). Typst binds no global to `space`, keeps `context` as a keyword, and
-	/// gives the names `symbol` and `path` to types, so those elements are reached only as values.
+	/// `math` module (`math.frac`). Typst binds no global to `space`, to its internal cite groups, tags,
+	/// sequences and styled content, keeps `context` as a keyword, and gives the names `symbol` and `path`
+	/// to types, so those elements are reached only as values.
 	pub fn is_global(self) -> bool {
-		!self.path().contains('.')
-			&& !matches!(self, ElemKind::Space | ElemKind::Symbol | ElemKind::Path | ElemKind::Context)
+		!self.path().contains('.') && !matches!(self,
+			ElemKind::Space | ElemKind::Symbol | ElemKind::Path | ElemKind::Context | ElemKind::CiteGroup
+				| ElemKind::Sequence | ElemKind::Styled | ElemKind::Tag)
 	}
 
 	/// The element scoped under this one's function: `ElemKind::List.scoped("item")` is `ListItem`.
@@ -237,6 +245,7 @@ impl ElemKind {
 			Family::Visual	=> lib::visual::fields(self),
 			Family::Math	=> lib::math::fields(self),
 			Family::Intro	=> lib::intro::fields(self),
+			Family::Realise	=> crate::eval::realise::fields(self),
 		}
 	}
 
@@ -298,10 +307,13 @@ pub enum FieldDefault {
 /// How successive `set` values of a field combine along the style chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fold {
-	Replace,	// innermost wins
-	Add,		// accumulates, e.g. `text.size` em-relative
-	Merge,		// part-wise: strokes, sides, corners, `par.first-line-indent`
-	Custom,		// the owning unit folds it in code
+	Replace,				// innermost wins
+	Add,					// accumulates, e.g. `text.size` em-relative
+	Sides,					// side by side, each side's stroke part-wise (`inset`, `margin`, `rect.stroke`)
+	Corners,				// corner by corner (`radius`)
+	Stroke,					// one stroke, part-wise (`line.stroke`)
+	Keyed(&'static str),	// a dictionary whose bare-value form is this key (`first-line-indent`'s amount)
+	Custom,					// the owning unit folds it in code
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -377,11 +389,21 @@ pub struct Elem {
 	pub prepared:	bool,	// synthesised fields filled and location assigned
 }
 
+/// Content in order. A labelled sequence is located and guarded as an element is, so show rules on
+/// its label apply once and it can be found by its location.
 #[derive(Clone, Debug)]
 pub struct Sequence {
 	pub children:	Vec<Content>,
 	pub label:		Option<Label>,
 	pub span:		Span,
+	pub location:	Option<Location>,
+	pub guards:		Vec<RecipeIndex>,
+}
+
+impl Sequence {
+	pub fn new(children: Vec<Content>) -> Self {
+		Self { children, label: None, span: Span::detached(), location: None, guards: Vec::new() }
+	}
 }
 
 #[derive(Clone, Debug)]
@@ -404,7 +426,7 @@ impl Default for Content {
 
 impl Content {
 	pub fn empty() -> Self {
-		Content::Sequence(Arc::new(Sequence { children: Vec::new(), label: None, span: Span::detached() }))
+		Content::Sequence(Arc::new(Sequence::new(Vec::new())))
 	}
 
 	pub fn new(kind: ElemKind, fields: Vec<(FieldId, Value)>, span: Span) -> Self {
@@ -434,7 +456,7 @@ impl Content {
 			}
 			return Content::empty();
 		}
-		Content::Sequence(Arc::new(Sequence { children, label: None, span: Span::detached() }))
+		Content::Sequence(Arc::new(Sequence::new(children)))
 	}
 
 	pub fn styled(self, styles: Styles) -> Self {
@@ -507,8 +529,18 @@ impl Content {
 
 	pub fn location(&self) -> Option<Location> {
 		match self {
-			Content::Elem(e)	=> e.location,
-			_					=> None,
+			Content::Elem(e)		=> e.location,
+			Content::Sequence(s)	=> s.location,
+			Content::Styled(_)		=> None,
+		}
+	}
+
+	/// The kind `content.func()` reports: the element's, or `sequence` and `styled` for plain content.
+	pub fn func_kind(&self) -> ElemKind {
+		match self {
+			Content::Elem(e)		=> e.kind,
+			Content::Sequence(_)	=> ElemKind::Sequence,
+			Content::Styled(_)		=> ElemKind::Styled,
 		}
 	}
 
@@ -644,6 +676,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 		Family::Visual	=> res!(lib::visual::construct(engine, kind, args)),
 		Family::Math	=> res!(lib::math::construct(engine, kind, args)),
 		Family::Intro	=> res!(lib::intro::construct(engine, kind, args)),
+		Family::Realise	=> res!(crate::eval::realise::construct(engine, kind, args)),
 	};
 	if let Some(c) = custom {
 		return Ok(c);
@@ -669,7 +702,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 				return Err(engine.error(span, fmt!(
 					"{}: field `{}` does not accept {}", kind.path(), spec.name, v.ty().name())));
 			}
-			fields.push((id, v));
+			fields.push((id, res!(cast_field(kind, spec.name, v))));
 		}
 	}
 	res!(std::mem::take(args).finish());
@@ -691,5 +724,41 @@ pub fn native_show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> 
 		Family::Visual	=> lib::visual::show(engine, elem, styles),
 		Family::Math	=> lib::math::show(engine, elem, styles),
 		Family::Intro	=> lib::intro::show(engine, elem, styles),
+		Family::Realise	=> Ok(None),
+	}
+}
+
+/// Casts a value into an element's field as its family casts it. Construction and `set` rules both
+/// cast through here, so a value one accepts the other accepts. A family whose fields need no more
+/// than their schema type takes the value as it is.
+pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
+	match kind.family() {
+		Family::Visual	=> lib::visual::cast_field(kind, name, v),
+		_				=> Ok(v),
+	}
+}
+
+/// An element's built-in show-set styles, Typst's `ShowSet`: applied outside the user's own show-set
+/// rules when the element is prepared, so a heading's weight is visible to `show heading: it => ..`
+/// and a user rule still overrides it. A family whose elements have them gains an arm here.
+pub fn show_set(kind: ElemKind, _styles: &StyleChain) -> Outcome<Styles> {
+	match kind.family() {
+		// None has built-in show-set styles yet.
+		Family::Text | Family::Model | Family::Layout | Family::Grid | Family::Visual | Family::Math
+			| Family::Intro | Family::Realise	=> Ok(Styles::new()),
+	}
+}
+
+/// Fills an element's synthesised fields once its styles are known, Typst's `Synthesize`: a heading's
+/// resolved numbering, a figure's kind and supplement. A family with such fields gains an arm here.
+pub fn synthesise(_engine: &mut Engine, elem: &mut Content, _styles: &StyleChain) -> Outcome<()> {
+	let family = match elem.kind() {
+		Some(k)	=> k.family(),
+		None	=> return Ok(()),
+	};
+	match family {
+		// None synthesises fields yet.
+		Family::Text | Family::Model | Family::Layout | Family::Grid | Family::Visual | Family::Math
+			| Family::Intro | Family::Realise	=> Ok(()),
 	}
 }
