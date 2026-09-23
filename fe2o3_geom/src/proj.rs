@@ -482,6 +482,11 @@ impl Viewport {
             return None;
         }
         let f = self.frame();
+        self.forward_in(&f, lat, lng)
+    }
+
+    /// [`Viewport::forward`] with the frame already made, for a caller projecting many points.
+    pub(crate) fn forward_in(&self, f: &Frame, lat: f64, lng: f64) -> Option<Pt> {
         match self.kind {
             Projection::Orthographic => {
                 let p = unit_vec(lat, lng);

@@ -53,9 +53,10 @@ use oxedyne_fe2o3_core::prelude::*;
 ///   run diffs against; a later run that DOES drift fails unless `ORACLE_ACCEPT=1` is set, in which case
 ///   the drift is printed and the baseline is re-recorded rather than the run failing.
 ///
-/// A root whose oracle comparison could not run at all (`oxeweb-techspec`, at the time of writing -- see
-/// [`driver::corpus`]'s doc comment) is reported, not failed: the Austenite-only checks above still ran
-/// for it.
+/// A root whose oracle comparison could not run at all (a missing `typst` binary, or a template/helper
+/// incompatibility this crate does not own -- see [`driver::corpus`]'s doc comment for the one such case
+/// found and the re-check that closed it) is reported, not failed: the Austenite-only checks above still
+/// ran for it. No root in the corpus is in that state as of 2026-09-23.
 #[test]
 fn corpus_roots_compile_and_match_the_typst_oracle() -> Outcome<()> {
 	let work_dir	= res!(qc_dir());
