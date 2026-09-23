@@ -1,0 +1,636 @@
+// U0 owns this file. The `ElemKind` list is closed: an element Typst has and this list lacks is added
+// here (one line in the table below) by agreement, never worked around. Each element's field schema,
+// custom constructor and native show live with the unit that lays it out, reached through `Family`.
+
+use crate::eval::args::Args;
+use crate::eval::lib;
+use crate::eval::locate::Location;
+use crate::eval::styles::{
+	RecipeIndex,
+	StyleChain,
+	Styles,
+};
+use crate::eval::value::{
+	FromValue,
+	Label,
+	Value,
+	Type,
+};
+use crate::eval::Engine;
+use crate::syntax::Span;
+
+use oxedyne_fe2o3_core::prelude::*;
+
+use std::sync::Arc;
+
+/// Which unit's files hold an element's schema, constructor and native show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Family {
+	Text,	// lib/text.rs, U6a
+	Model,	// lib/model/, U5
+	Layout,	// lib/layout.rs, U6b
+	Grid,	// lib/grid.rs, U6c
+	Visual,	// lib/visual.rs, U6d
+	Math,	// lib/math.rs, U7
+	Intro,	// lib/intro.rs, U8
+}
+
+macro_rules! elem_kinds {
+	($($v:ident => ($path:literal, $fam:ident, $loc:literal),)*) => {
+		#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+		pub enum ElemKind {
+			$($v,)*
+		}
+
+		impl ElemKind {
+			pub const ALL: &'static [ElemKind] = &[$(ElemKind::$v,)*];
+
+			/// The dotted path Typst code reaches the element function by: `heading`, `list.item`,
+			/// `math.frac`.
+			pub fn path(self) -> &'static str {
+				match self {
+					$(ElemKind::$v => $path,)*
+				}
+			}
+
+			pub fn family(self) -> Family {
+				match self {
+					$(ElemKind::$v => Family::$fam,)*
+				}
+			}
+
+			/// Does realisation give every instance a location, labelled or not?
+			pub fn locatable(self) -> bool {
+				match self {
+					$(ElemKind::$v => $loc,)*
+				}
+			}
+		}
+	};
+}
+
+elem_kinds! {
+	// Text (U6a)
+	Text			=> ("text",					Text,	false),
+	Space			=> ("space",				Text,	false),
+	Linebreak		=> ("linebreak",			Text,	false),
+	SmartQuote		=> ("smartquote",			Text,	false),
+	Smallcaps		=> ("smallcaps",			Text,	false),
+	Underline		=> ("underline",			Text,	false),
+	Overline		=> ("overline",				Text,	false),
+	Strike			=> ("strike",				Text,	false),
+	Highlight		=> ("highlight",			Text,	false),
+	Super			=> ("super",				Text,	false),
+	Sub				=> ("sub",					Text,	false),
+	// Model (U5)
+	Par				=> ("par",					Model,	false),
+	ParLine			=> ("par.line",				Model,	false),
+	Parbreak		=> ("parbreak",				Model,	false),
+	Strong			=> ("strong",				Model,	false),
+	Emph			=> ("emph",					Model,	false),
+	Raw				=> ("raw",					Model,	false),
+	RawLine			=> ("raw.line",				Model,	false),
+	Heading			=> ("heading",				Model,	true),
+	Title			=> ("title",				Model,	false),
+	List			=> ("list",					Model,	false),
+	ListItem		=> ("list.item",			Model,	false),
+	Enum			=> ("enum",					Model,	false),
+	EnumItem		=> ("enum.item",			Model,	false),
+	Terms			=> ("terms",				Model,	false),
+	TermItem		=> ("terms.item",			Model,	false),
+	Link			=> ("link",					Model,	false),
+	Ref				=> ("ref",					Model,	false),
+	Cite			=> ("cite",					Model,	true),
+	Footnote		=> ("footnote",				Model,	true),
+	FootnoteEntry	=> ("footnote.entry",		Model,	false),
+	Figure			=> ("figure",				Model,	true),
+	FigureCaption	=> ("figure.caption",		Model,	false),
+	Outline			=> ("outline",				Model,	true),
+	OutlineEntry	=> ("outline.entry",		Model,	false),
+	Quote			=> ("quote",				Model,	false),
+	Bibliography	=> ("bibliography",			Model,	true),
+	Document		=> ("document",				Model,	false),
+	// Layout (U6b)
+	Box				=> ("box",					Layout,	false),
+	Block			=> ("block",				Layout,	false),
+	Align			=> ("align",				Layout,	false),
+	Pad				=> ("pad",					Layout,	false),
+	Stack			=> ("stack",				Layout,	false),
+	H				=> ("h",					Layout,	false),
+	V				=> ("v",					Layout,	false),
+	Place			=> ("place",				Layout,	false),
+	PlaceFlush		=> ("place.flush",			Layout,	false),
+	Columns			=> ("columns",				Layout,	false),
+	Colbreak		=> ("colbreak",				Layout,	false),
+	Pagebreak		=> ("pagebreak",			Layout,	false),
+	Page			=> ("page",					Layout,	false),
+	// Grid and table (U6c)
+	Grid			=> ("grid",					Grid,	false),
+	GridCell		=> ("grid.cell",			Grid,	false),
+	GridHeader		=> ("grid.header",			Grid,	false),
+	GridFooter		=> ("grid.footer",			Grid,	false),
+	GridHLine		=> ("grid.hline",			Grid,	false),
+	GridVLine		=> ("grid.vline",			Grid,	false),
+	Table			=> ("table",				Grid,	false),
+	TableCell		=> ("table.cell",			Grid,	false),
+	TableHeader		=> ("table.header",			Grid,	false),
+	TableFooter		=> ("table.footer",			Grid,	false),
+	TableHLine		=> ("table.hline",			Grid,	false),
+	TableVLine		=> ("table.vline",			Grid,	false),
+	// Visual (U6d)
+	Image			=> ("image",				Visual,	false),
+	Line			=> ("line",					Visual,	false),
+	Rect			=> ("rect",					Visual,	false),
+	Square			=> ("square",				Visual,	false),
+	Circle			=> ("circle",				Visual,	false),
+	Ellipse			=> ("ellipse",				Visual,	false),
+	Polygon			=> ("polygon",				Visual,	false),
+	Curve			=> ("curve",				Visual,	false),
+	CurveMove		=> ("curve.move",			Visual,	false),
+	CurveLine		=> ("curve.line",			Visual,	false),
+	CurveQuad		=> ("curve.quad",			Visual,	false),
+	CurveCubic		=> ("curve.cubic",			Visual,	false),
+	CurveClose		=> ("curve.close",			Visual,	false),
+	Path			=> ("path",					Visual,	false),
+	Move			=> ("move",					Visual,	false),
+	Scale			=> ("scale",				Visual,	false),
+	Rotate			=> ("rotate",				Visual,	false),
+	Skew			=> ("skew",					Visual,	false),
+	Hide			=> ("hide",					Visual,	false),
+	Repeat			=> ("repeat",				Visual,	false),
+	// Maths (U7)
+	Equation		=> ("math.equation",		Math,	true),
+	MathAlignPoint	=> ("math.align-point",		Math,	false),
+	MathAttach		=> ("math.attach",			Math,	false),
+	MathScripts		=> ("math.scripts",			Math,	false),
+	MathLimits		=> ("math.limits",			Math,	false),
+	MathPrimes		=> ("math.primes",			Math,	false),
+	MathFrac		=> ("math.frac",			Math,	false),
+	MathBinom		=> ("math.binom",			Math,	false),
+	MathLr			=> ("math.lr",				Math,	false),
+	MathMid			=> ("math.mid",				Math,	false),
+	MathMat			=> ("math.mat",				Math,	false),
+	MathVec			=> ("math.vec",				Math,	false),
+	MathCases		=> ("math.cases",			Math,	false),
+	MathRoot		=> ("math.root",			Math,	false),
+	MathAccent		=> ("math.accent",			Math,	false),
+	MathOp			=> ("math.op",				Math,	false),
+	MathClass		=> ("math.class",			Math,	false),
+	MathCancel		=> ("math.cancel",			Math,	false),
+	MathStretch		=> ("math.stretch",			Math,	false),
+	MathUnderline	=> ("math.underline",		Math,	false),
+	MathOverline	=> ("math.overline",		Math,	false),
+	MathUnderbrace	=> ("math.underbrace",		Math,	false),
+	MathOverbrace	=> ("math.overbrace",		Math,	false),
+	MathUnderbracket	=> ("math.underbracket",	Math,	false),
+	MathOverbracket	=> ("math.overbracket",		Math,	false),
+	MathUnderparen	=> ("math.underparen",		Math,	false),
+	MathOverparen	=> ("math.overparen",		Math,	false),
+	MathUndershell	=> ("math.undershell",		Math,	false),
+	MathOvershell	=> ("math.overshell",		Math,	false),
+	// Introspection (U8)
+	Metadata		=> ("metadata",				Intro,	true),
+	CounterUpdate	=> ("counter.update",		Intro,	true),
+	StateUpdate		=> ("state.update",			Intro,	true),
+	Context			=> ("context",				Intro,	true),
+	Layout			=> ("layout",				Intro,	true),
+}
+
+impl ElemKind {
+	/// The last path segment, what `repr` of the element function prints (`item` for `list.item`).
+	pub fn name(self) -> &'static str {
+		let p = self.path();
+		match p.rfind('.') {
+			Some(i)	=> &p[i + 1..],
+			None	=> p,
+		}
+	}
+
+	/// The element reached as a top-level global (`heading`), not through a parent (`list.item`) or the
+	/// `math` module (`math.frac`).
+	pub fn is_global(self) -> bool { !self.path().contains('.') }
+
+	/// The element scoped under this one's function: `ElemKind::List.scoped("item")` is `ListItem`.
+	pub fn scoped(self, name: &str) -> Option<ElemKind> {
+		let parent = self.path();
+		ElemKind::ALL.iter().copied().find(|k| {
+			let p = k.path();
+			p.len() == parent.len() + 1 + name.len()
+				&& p.starts_with(parent)
+				&& p.as_bytes().get(parent.len()) == Some(&b'.')
+				&& p.ends_with(name)
+		})
+	}
+
+	/// The element's field schema, from the owning unit.
+	pub fn fields(self) -> &'static [FieldSpec] {
+		match self.family() {
+			Family::Text	=> lib::text::fields(self),
+			Family::Model	=> lib::model::fields(self),
+			Family::Layout	=> lib::layout::fields(self),
+			Family::Grid	=> lib::grid::fields(self),
+			Family::Visual	=> lib::visual::fields(self),
+			Family::Math	=> lib::math::fields(self),
+			Family::Intro	=> lib::intro::fields(self),
+		}
+	}
+
+	pub fn field_id(self, name: &str) -> Option<FieldId> {
+		self.fields().iter().position(|f| f.name == name).map(|i| FieldId(i as u8))
+	}
+
+	pub fn field_spec(self, id: FieldId) -> Option<&'static FieldSpec> {
+		self.fields().get(id.0 as usize)
+	}
+}
+
+// Field schema
+
+/// A field's index into its element's schema slice. Stable for a build, never serialised.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldId(pub u8);
+
+/// What a field accepts. `Any` defers checking to the owning unit's typed accessor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldType {
+	Any,
+	Of(Type),
+	OneOf(&'static [Type]),
+	Content,	// content, str, symbol or number, displayed
+}
+
+impl FieldType {
+	pub fn accepts(self, v: &Value) -> bool {
+		match self {
+			FieldType::Any			=> true,
+			FieldType::Of(t)		=> v.ty() == t,
+			FieldType::OneOf(ts)	=> ts.contains(&v.ty()),
+			FieldType::Content		=> matches!(v.ty(),
+				Type::Content | Type::Str | Type::Symbol | Type::Int | Type::Float | Type::None),
+		}
+	}
+}
+
+/// A default a `static` schema can hold. `Computed` means the owning unit resolves it in code (Typst's
+/// heading `numbering` depends on nothing static, `text.lang`'s region on the language, and so on).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FieldDefault {
+	None,
+	Auto,
+	Bool(bool),
+	Int(i64),
+	Float(f64),
+	Pt(f64),
+	Em(f64),
+	Ratio(f64),
+	Str(&'static str),
+	EmptyContent,
+	EmptyArray,
+	Computed,
+	Required,	// no default: construction fails without it
+}
+
+/// How successive `set` values of a field combine along the style chain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fold {
+	Replace,	// innermost wins
+	Add,		// accumulates, e.g. `text.size` em-relative
+	Merge,		// part-wise: strokes, sides, corners, `par.first-line-indent`
+	Custom,		// the owning unit folds it in code
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FieldSpec {
+	pub name:			&'static str,
+	pub ty:				FieldType,
+	pub default:		FieldDefault,
+	pub fold:			Fold,
+	pub positional:		bool,
+	pub required:		bool,
+	pub variadic:		bool,	// takes all remaining positional arguments (`list(..children)`)
+	pub settable:		bool,
+	pub synthesised:	bool,	// filled during realisation, never passed (`heading.level` when auto, `counter`)
+}
+
+impl FieldSpec {
+	/// A settable, named, optional field: the common case.
+	pub const fn named(name: &'static str, ty: FieldType, default: FieldDefault) -> Self {
+		Self { name, ty, default, fold: Fold::Replace, positional: false, required: false,
+			variadic: false, settable: true, synthesised: false }
+	}
+
+	/// A required positional field, not settable: a body, a text, a destination.
+	pub const fn required(name: &'static str, ty: FieldType) -> Self {
+		Self { name, ty, default: FieldDefault::Required, fold: Fold::Replace, positional: true,
+			required: true, variadic: false, settable: false, synthesised: false }
+	}
+
+	pub const fn fold(mut self, fold: Fold) -> Self { self.fold = fold; self }
+	pub const fn positional(mut self) -> Self { self.positional = true; self }
+	pub const fn variadic(mut self) -> Self { self.variadic = true; self.positional = true; self }
+	pub const fn unsettable(mut self) -> Self { self.settable = false; self }
+	pub const fn synthesised(mut self) -> Self { self.synthesised = true; self.settable = false; self }
+}
+
+impl FieldDefault {
+	/// The default as a value, `None` for one only code can compute or a required field.
+	pub fn to_value(self) -> Option<Value> {
+		use crate::eval::value::{
+			Length,
+			Ratio,
+		};
+		match self {
+			FieldDefault::None			=> Some(Value::None),
+			FieldDefault::Auto			=> Some(Value::Auto),
+			FieldDefault::Bool(b)		=> Some(Value::Bool(b)),
+			FieldDefault::Int(i)		=> Some(Value::Int(i)),
+			FieldDefault::Float(f)		=> Some(Value::Float(f)),
+			FieldDefault::Pt(p)			=> Some(Value::Length(Length::pt(p))),
+			FieldDefault::Em(e)			=> Some(Value::Length(Length::em(e))),
+			FieldDefault::Ratio(r)		=> Some(Value::Ratio(Ratio(r))),
+			FieldDefault::Str(s)		=> Some(Value::str(s)),
+			FieldDefault::EmptyContent	=> Some(Value::Content(Content::empty())),
+			FieldDefault::EmptyArray	=> Some(Value::array(Vec::new())),
+			FieldDefault::Computed		=> None,
+			FieldDefault::Required		=> None,
+		}
+	}
+}
+
+// Content
+
+/// One element instance. `guards` are the recipes already applied to it, Typst's defence against a
+/// show rule re-matching its own output.
+#[derive(Clone, Debug)]
+pub struct Elem {
+	pub kind:		ElemKind,
+	pub fields:		Vec<(FieldId, Value)>,
+	pub label:		Option<Label>,
+	pub location:	Option<Location>,
+	pub span:		Span,
+	pub guards:		Vec<RecipeIndex>,
+	pub prepared:	bool,	// synthesised fields filled and location assigned
+}
+
+#[derive(Clone, Debug)]
+pub struct Sequence {
+	pub children:	Vec<Content>,
+	pub label:		Option<Label>,
+	pub span:		Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct Styled {
+	pub child:	Content,
+	pub styles:	Styles,
+}
+
+/// Typst's `content` value: an element, a sequence of content, or content under local styles.
+#[derive(Clone, Debug)]
+pub enum Content {
+	Elem(Arc<Elem>),
+	Sequence(Arc<Sequence>),
+	Styled(Arc<Styled>),
+}
+
+impl Default for Content {
+	fn default() -> Self { Content::empty() }
+}
+
+impl Content {
+	pub fn empty() -> Self {
+		Content::Sequence(Arc::new(Sequence { children: Vec::new(), label: None, span: Span::detached() }))
+	}
+
+	pub fn new(kind: ElemKind, fields: Vec<(FieldId, Value)>, span: Span) -> Self {
+		Content::Elem(Arc::new(Elem {
+			kind, fields, label: None, location: None, span, guards: Vec::new(), prepared: false,
+		}))
+	}
+
+	/// A text element. By contract `text`'s field 0 is its string (`lib/text.rs`).
+	pub fn text(s: &str) -> Self {
+		Content::new(ElemKind::Text, vec![(FieldId(0), Value::str(s))], Span::detached())
+	}
+
+	/// An element with no fields set, for markers such as `parbreak()` and `linebreak()`.
+	pub fn marker(kind: ElemKind, span: Span) -> Self { Content::new(kind, Vec::new(), span) }
+
+	pub fn sequence(children: Vec<Content>) -> Self {
+		if children.len() == 1 {
+			if let Some(c) = children.into_iter().next() {
+				return c;
+			}
+			return Content::empty();
+		}
+		Content::Sequence(Arc::new(Sequence { children, label: None, span: Span::detached() }))
+	}
+
+	pub fn styled(self, styles: Styles) -> Self {
+		if styles.is_empty() {
+			return self;
+		}
+		Content::Styled(Arc::new(Styled { child: self, styles }))
+	}
+
+	pub fn kind(&self) -> Option<ElemKind> {
+		match self {
+			Content::Elem(e)	=> Some(e.kind),
+			_					=> None,
+		}
+	}
+
+	pub fn is(&self, kind: ElemKind) -> bool { self.kind() == Some(kind) }
+
+	pub fn elem(&self) -> Option<&Elem> {
+		match self {
+			Content::Elem(e)	=> Some(e),
+			_					=> None,
+		}
+	}
+
+	pub fn is_empty(&self) -> bool {
+		match self {
+			Content::Sequence(s)	=> s.children.iter().all(|c| c.is_empty()),
+			Content::Styled(s)		=> s.child.is_empty(),
+			Content::Elem(_)		=> false,
+		}
+	}
+
+	pub fn span(&self) -> Span {
+		match self {
+			Content::Elem(e)		=> e.span,
+			Content::Sequence(s)	=> s.span,
+			Content::Styled(s)		=> s.child.span(),
+		}
+	}
+
+	pub fn with_span(mut self, span: Span) -> Self {
+		match &mut self {
+			Content::Elem(e)		=> Arc::make_mut(e).span = span,
+			Content::Sequence(s)	=> Arc::make_mut(s).span = span,
+			Content::Styled(_)		=> (),
+		}
+		self
+	}
+
+	pub fn label(&self) -> Option<&Label> {
+		match self {
+			Content::Elem(e)		=> e.label.as_ref(),
+			Content::Sequence(s)	=> s.label.as_ref(),
+			Content::Styled(s)		=> s.child.label(),
+		}
+	}
+
+	pub fn labelled(mut self, label: Label) -> Self {
+		match &mut self {
+			Content::Elem(e)		=> Arc::make_mut(e).label = Some(label),
+			Content::Sequence(s)	=> Arc::make_mut(s).label = Some(label),
+			Content::Styled(s)		=> {
+				let st = Arc::make_mut(s);
+				st.child = st.child.clone().labelled(label);
+			}
+		}
+		self
+	}
+
+	pub fn location(&self) -> Option<Location> {
+		match self {
+			Content::Elem(e)	=> e.location,
+			_					=> None,
+		}
+	}
+
+	/// A field's stored value, `None` when unset (not the default; styles and schema supply that).
+	pub fn get(&self, id: FieldId) -> Option<&Value> {
+		match self {
+			Content::Elem(e)	=> e.fields.iter().find(|(f, _)| *f == id).map(|(_, v)| v),
+			_					=> None,
+		}
+	}
+
+	pub fn get_as<T: FromValue>(&self, id: FieldId) -> Outcome<Option<T>> {
+		match self.get(id) {
+			Some(v)	=> Ok(Some(res!(T::from_value(v.clone())))),
+			None	=> Ok(None),
+		}
+	}
+
+	/// A field by name, as `it.body` reads it.
+	pub fn field(&self, name: &str) -> Option<&Value> {
+		match self {
+			Content::Elem(e)	=> e.kind.field_id(name).and_then(|id| self.get(id)),
+			_					=> None,
+		}
+	}
+
+	/// Sets a field in place (copy on write); a no-op on a sequence or styled content.
+	pub fn set(&mut self, id: FieldId, value: Value) {
+		if let Content::Elem(e) = self {
+			let e = Arc::make_mut(e);
+			match e.fields.iter_mut().find(|(f, _)| *f == id) {
+				Some(slot)	=> slot.1 = value,
+				None		=> e.fields.push((id, value)),
+			}
+		}
+	}
+
+	/// Direct children of a sequence or styled content; an element's body is a field, not a child.
+	pub fn children(&self) -> &[Content] {
+		match self {
+			Content::Sequence(s)	=> &s.children,
+			Content::Styled(s)		=> std::slice::from_ref(&s.child),
+			Content::Elem(_)		=> &[],
+		}
+	}
+
+	/// The text a reader would see, ignoring styles, as Typst's `plain-text` does for text, spaces and
+	/// breaks. Other elements contribute their `body` or `text` field when they have one.
+	pub fn plain_text(&self) -> String {
+		let mut s = String::new();
+		self.push_plain(&mut s);
+		s
+	}
+
+	fn push_plain(&self, s: &mut String) {
+		match self {
+			Content::Sequence(seq)	=> for c in &seq.children { c.push_plain(s); },
+			Content::Styled(st)		=> st.child.push_plain(s),
+			Content::Elem(e) => match e.kind {
+				ElemKind::Text => if let Some(Value::Str(t)) = self.get(FieldId(0)) {
+					s.push_str(t);
+				},
+				ElemKind::Space | ElemKind::Linebreak	=> s.push(' '),
+				ElemKind::Parbreak						=> s.push_str("\n\n"),
+				_ => match self.field("body").or_else(|| self.field("text")) {
+					Some(Value::Content(c))	=> c.push_plain(s),
+					Some(Value::Str(t))		=> s.push_str(t),
+					_						=> (),
+				},
+			},
+		}
+	}
+}
+
+// Family dispatch
+
+/// Builds an element from call arguments: the owning unit's custom constructor if it has one, else the
+/// generic schema walk (required positionals, optional positionals, variadics, then named fields).
+pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcome<Content> {
+	let custom = match kind.family() {
+		Family::Text	=> res!(lib::text::construct(engine, kind, args)),
+		Family::Model	=> res!(lib::model::construct(engine, kind, args)),
+		Family::Layout	=> res!(lib::layout::construct(engine, kind, args)),
+		Family::Grid	=> res!(lib::grid::construct(engine, kind, args)),
+		Family::Visual	=> res!(lib::visual::construct(engine, kind, args)),
+		Family::Math	=> res!(lib::math::construct(engine, kind, args)),
+		Family::Intro	=> res!(lib::intro::construct(engine, kind, args)),
+	};
+	if let Some(c) = custom {
+		return Ok(c);
+	}
+	let span = args.span;
+	let mut fields = Vec::new();
+	for (i, spec) in kind.fields().iter().enumerate() {
+		let id = FieldId(i as u8);
+		if spec.synthesised {
+			continue;
+		}
+		let value = if spec.variadic {
+			Some(Value::array(res!(args.all::<Value>())))
+		} else if spec.positional && spec.required {
+			Some(res!(args.expect::<Value>(spec.name)))
+		} else if spec.positional {
+			res!(args.find::<Value>(|v| spec.ty.accepts(v)))
+		} else {
+			res!(args.named::<Value>(spec.name))
+		};
+		if let Some(v) = value {
+			if !spec.ty.accepts(&v) {
+				return Err(engine.error(span, fmt!(
+					"{}: field `{}` does not accept {}", kind.path(), spec.name, v.ty().name())));
+			}
+			fields.push((id, v));
+		}
+	}
+	res!(std::mem::take(args).finish());
+	Ok(Content::new(kind, fields, span))
+}
+
+/// The element's native show: its default realisation into other elements, or `None` for a primitive
+/// that flow lays out itself.
+pub fn native_show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<Option<Content>> {
+	let kind = match elem.kind() {
+		Some(k)	=> k,
+		None	=> return Ok(None),
+	};
+	match kind.family() {
+		Family::Text	=> lib::text::show(engine, elem, styles),
+		Family::Model	=> lib::model::show(engine, elem, styles),
+		Family::Layout	=> lib::layout::show(engine, elem, styles),
+		Family::Grid	=> lib::grid::show(engine, elem, styles),
+		Family::Visual	=> lib::visual::show(engine, elem, styles),
+		Family::Math	=> lib::math::show(engine, elem, styles),
+		Family::Intro	=> lib::intro::show(engine, elem, styles),
+	}
+}

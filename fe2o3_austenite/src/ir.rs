@@ -444,6 +444,63 @@ impl ColumnsNode {
 	}
 }
 
+/// A 2D affine map `(x, y) -> (a x + c y + e, b x + d y + f)`, in points, y down, as PDF's `cm`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+	pub a:	f64,
+	pub b:	f64,
+	pub c:	f64,
+	pub d:	f64,
+	pub e:	f64,
+	pub f:	f64,
+}
+
+impl Transform {
+	pub fn identity() -> Self { Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 } }
+
+	pub fn translate(x: f64, y: f64) -> Self { Self { e: x, f: y, ..Self::identity() } }
+
+	pub fn scale(sx: f64, sy: f64) -> Self { Self { a: sx, d: sy, ..Self::identity() } }
+
+	pub fn rotate(radians: f64) -> Self {
+		let (s, c) = radians.sin_cos();
+		Self { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
+	}
+
+	/// `self` applied after `inner`.
+	pub fn then(&self, inner: &Transform) -> Transform {
+		Transform {
+			a:	self.a * inner.a + self.c * inner.b,
+			b:	self.b * inner.a + self.d * inner.b,
+			c:	self.a * inner.c + self.c * inner.d,
+			d:	self.b * inner.c + self.d * inner.d,
+			e:	self.a * inner.e + self.c * inner.f + self.e,
+			f:	self.b * inner.e + self.d * inner.f + self.f,
+		}
+	}
+}
+
+/// Material drawn under a transform (`move`, `scale`, `rotate`, `skew`). `dims` is the layout footprint
+/// the flow reserves, which Typst keeps as the untransformed size unless `reflow` is set.
+///
+/// Not yet a [`Node`] variant: adding one forces the driver's exhaustive matches to change, so U6b wires
+/// it in with its `driver.rs` work. Declared here now so U6d builds against it.
+#[derive(Clone, Debug)]
+pub struct TransformNode {
+	pub transform:	Transform,
+	pub list:		Vec<Node>,
+	pub dims:		Dims,
+}
+
+/// Material clipped to its box, or to `path` when given (a rounded `block(clip: true, radius: ..)`).
+/// Wired into [`Node`] by U6b, as [`TransformNode`] is.
+#[derive(Clone, Debug)]
+pub struct ClipNode {
+	pub list:	Vec<Node>,
+	pub dims:	Dims,
+	pub path:	Option<Path>,	// in the box's own frame, points, y down
+}
+
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
 #[derive(Clone, Debug)]
 pub enum Node {

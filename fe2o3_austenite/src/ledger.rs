@@ -30,6 +30,7 @@ pub enum AnchorKind {
 	Citation,	// a bibliographic reference
 	Equation,	// a numbered display equation
 	MarginNote,	// a marginal claim-code annotation, drawn post-convergence in the outside margin
+	Location,	// an evaluator element's location (`eval::locate::Location`), keyed by its hex hash
 }
 
 impl AnchorKind {
@@ -42,6 +43,7 @@ impl AnchorKind {
 			AnchorKind::Citation	=> 4,
 			AnchorKind::Equation	=> 5,
 			AnchorKind::MarginNote	=> 6,
+			AnchorKind::Location	=> 7,
 		}
 	}
 
@@ -54,8 +56,9 @@ impl AnchorKind {
 			4 => Ok(AnchorKind::Citation),
 			5 => Ok(AnchorKind::Equation),
 			6 => Ok(AnchorKind::MarginNote),
+			7 => Ok(AnchorKind::Location),
 			_ => Err(err!(
-				"Anchor kind tag {} is not one of the seven known kinds.", tag; Input, Invalid)),
+				"Anchor kind tag {} is not one of the eight known kinds.", tag; Input, Invalid)),
 		}
 	}
 
@@ -70,6 +73,7 @@ impl AnchorKind {
 			AnchorKind::Citation	=> "citation",
 			AnchorKind::Equation	=> "equation",
 			AnchorKind::MarginNote	=> "margin_note",
+			AnchorKind::Location	=> "location",
 		}
 	}
 }
