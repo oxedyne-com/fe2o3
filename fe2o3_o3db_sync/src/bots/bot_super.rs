@@ -49,6 +49,10 @@ use oxedyne_fe2o3_core::{
 use oxedyne_fe2o3_jdat::id::NumIdDat;
 
 use std::{
+    panic::{
+        self,
+        AssertUnwindSafe,
+    },
     sync::Arc,
     time::{
         Duration,
@@ -101,8 +105,17 @@ impl<
         sync_log::set_stream(self.log_stream_id());
 
         if self.no_init() { return; }
-        // The master is blocked in `O3db::start` until it hears one or the other of these.
-        if let Err(e) = self.bring_up() {
+        // The master is blocked in `O3db::start` until it hears one or the other of these.  A
+        // panic while bringing the database up is a failed start like any other, so the bots
+        // already up are stopped: unwound out of this thread, it left them running with nothing
+        // to stop them, and `start` returned with them still over the directory (2026-09-23).
+        let brought_up = match panic::catch_unwind(AssertUnwindSafe(|| self.bring_up())) {
+            Ok(result) => result,
+            Err(_) => Err(err!(
+                "{}: The supervisor panicked while bringing the database up.", self.ozid();
+                Init, Thread, Panic)),
+        };
+        if let Err(e) = brought_up {
             self.error(e.clone());
             if let Err(e2) = self.chan_out.send(OzoneMsg::Error(e)) {
                 self.err_cannot_send(err!(e2,
