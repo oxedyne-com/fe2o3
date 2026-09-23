@@ -50,8 +50,8 @@ pub fn define(scope: &mut Scope) {
 
 fn module(name: &str, table: &'static [(&'static str, SymDef)]) -> Module {
 	let mut s = Scope::new();
-	for (k, def) in table {
-		s.define(*k, def_value(k, *def));
+	for (n, (k, def)) in table.iter().enumerate() {
+		crate::eval::lib::foundations::define_nth(&mut s, n, k, def_value(k, *def));
 	}
 	Module::new(name, s)
 }

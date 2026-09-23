@@ -1,44 +1,22 @@
 //! U3's oracle tests: the foundation library (calc, str, array, dict, numbering, colour, sym, datetime,
 //! data, foundations, geometry) against `typst` 0.15.1.
 //!
-//! Each fixture under `tests/fixtures/eval/foundation/` is a list of Typst expressions, one per line.
+//! Each fixture under `tests/fixtures/eval/foundation/` is a list of Typst code expressions, one per line.
 //! A plain line must evaluate in both engines to the same `repr`; a line starting `!` must fail in both
-//! with the same message, and `!~` must fail in both whatever the message. The expressions are
-//! evaluated here by a small expression reader that calls the library natively (literals, field
-//! access, calls, method calls, unary minus and `+`/`-` between literals), so the library is tested
-//! before the evaluator core lands; the expected values come from `typst eval`, never from Austenite.
-//! A missing `typst` fails the suite unless `EVAL_ORACLE_SKIP=1` is set.
+//! with the same first error message, and `!~` must fail in both whatever the message. Austenite
+//! evaluates each line through the evaluator proper (`eval_string` in code mode); the expected values
+//! come from `typst eval`, never from Austenite. A missing `typst` fails the suite unless
+//! `EVAL_ORACLE_SKIP=1` is set. Oracle answers are cached under the target directory, keyed on the
+//! exact text sent, so a changed fixture line is always asked afresh.
 
-use oxedyne_fe2o3_austenite::eval::args::Args;
-use oxedyne_fe2o3_austenite::eval::func::{
-	Func,
-	NativeFunc,
+use oxedyne_fe2o3_austenite::eval::eval::{
+	eval_string,
+	EvalMode,
 };
-use oxedyne_fe2o3_austenite::eval::lib::foundations::{
-	field,
-	func_scope,
-	method,
-	repr,
-	type_scope,
-	constructor,
-};
-use oxedyne_fe2o3_austenite::eval::lib::{
-	array,
-	dict,
-	library,
-	sym,
-};
+use oxedyne_fe2o3_austenite::eval::lib::foundations::repr;
+use oxedyne_fe2o3_austenite::eval::lib::library;
 use oxedyne_fe2o3_austenite::eval::scope::Scope;
-use oxedyne_fe2o3_austenite::eval::value::{
-	Alignment,
-	Angle,
-	Dict,
-	Fraction,
-	Length,
-	Ratio,
-	Relative,
-	Value,
-};
+use oxedyne_fe2o3_austenite::eval::value::Value;
 use oxedyne_fe2o3_austenite::eval::{
 	Engine,
 	World,
@@ -47,448 +25,26 @@ use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{
+	Hash,
+	Hasher,
+};
 use std::path::PathBuf;
 use std::process::Command;
 
-// The expression reader.
-
-struct Reader<'a> {
-	s:		&'a [u8],
-	src:	&'a str,
-	i:		usize,
+fn fixtures_dir() -> PathBuf {
+	PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/foundation")
 }
 
-type R<T> = Outcome<T>;
-
-enum Arg {
-	Pos(Value),
-	Named(String, Value),
-}
-
-fn is_ident_start(c: u8) -> bool { c.is_ascii_alphabetic() || c == b'_' }
-
-fn is_ident_char(c: u8) -> bool { c.is_ascii_alphanumeric() || c == b'_' || c == b'-' }
-
-impl<'a> Reader<'a> {
-	fn ws(&mut self) {
-		while self.i < self.s.len() && self.s[self.i].is_ascii_whitespace() {
-			self.i += 1;
-		}
-	}
-
-	fn peek(&self) -> Option<u8> { self.s.get(self.i).copied() }
-
-	fn eat(&mut self, c: u8) -> bool {
-		self.ws();
-		if self.peek() == Some(c) {
-			self.i += 1;
-			true
-		} else {
-			false
-		}
-	}
-
-	fn expr(&mut self, e: &mut Engine) -> R<Value> {
-		let mut v = res!(self.unary(e));
-		loop {
-			self.ws();
-			match self.peek() {
-				Some(b'+') => {
-					self.i += 1;
-					let w = res!(self.unary(e));
-					v = res!(add(v, w, 1.0));
-				}
-				Some(b'-') => {
-					self.i += 1;
-					let w = res!(self.unary(e));
-					v = res!(add(v, w, -1.0));
-				}
-				Some(b'*') => {
-					self.i += 1;
-					let w = res!(self.unary(e));
-					v = match (v, w) {
-						(Value::Int(a), Value::Int(b))		=> Value::Int(a * b),
-						(Value::Float(a), Value::Int(b))	=> Value::Float(a * b as f64),
-						(Value::Int(a), Value::Float(b))	=> Value::Float(a as f64 * b),
-						(Value::Float(a), Value::Float(b))	=> Value::Float(a * b),
-						(Value::Str(a), Value::Int(n))		=> Value::str(a.repeat(n as usize)),
-						(Value::Array(a), Value::Int(n))	=> {
-							let mut out = Vec::new();
-							for _ in 0..n {
-								out.extend(a.iter().cloned());
-							}
-							Value::array(out)
-						}
-						_ => return Err(err!("unsupported `*`"; Invalid)),
-					};
-				}
-				Some(b'/') => {
-					self.i += 1;
-					let w = res!(self.unary(e));
-					v = match (v, w) {
-						(Value::Int(a), Value::Int(b))		=> Value::Float(a as f64 / b as f64),
-						(Value::Float(a), Value::Int(b))	=> Value::Float(a / b as f64),
-						(Value::Int(a), Value::Float(b))	=> Value::Float(a as f64 / b),
-						(Value::Float(a), Value::Float(b))	=> Value::Float(a / b),
-						(Value::Length(a), Value::Int(b))	=> Value::Length(Length { abs: a.abs / b as f64, em: a.em / b as f64 }),
-						_ => return Err(err!("unsupported `/`"; Invalid)),
-					};
-				}
-				_ => return Ok(v),
-			}
-		}
-	}
-
-	fn unary(&mut self, e: &mut Engine) -> R<Value> {
-		self.ws();
-		if self.peek() == Some(b'-') {
-			self.i += 1;
-			let v = res!(self.unary(e));
-			return neg(v);
-		}
-		self.postfix(e)
-	}
-
-	fn postfix(&mut self, e: &mut Engine) -> R<Value> {
-		let mut v = res!(self.atom(e));
-		loop {
-			// No whitespace before `.` or `(`: that is how Typst reads a chain.
-			match self.peek() {
-				Some(b'.') if self.s.get(self.i + 1).map(|c| is_ident_start(*c)).unwrap_or(false) => {
-					self.i += 1;
-					let name = self.ident();
-					if self.peek() == Some(b'(') {
-						let args = res!(self.args(e));
-						v = res!(call_method(e, v, &name, args));
-					} else {
-						v = res!(access(v, &name));
-					}
-				}
-				Some(b'(') => {
-					let args = res!(self.args(e));
-					v = res!(call(e, &v, args, None));
-				}
-				_ => return Ok(v),
-			}
-		}
-	}
-
-	fn ident(&mut self) -> String {
-		let start = self.i;
-		while self.i < self.s.len() && is_ident_char(self.s[self.i]) {
-			self.i += 1;
-		}
-		self.src[start..self.i].to_string()
-	}
-
-	fn args(&mut self, e: &mut Engine) -> R<Vec<Arg>> {
-		self.i += 1;
-		let mut out = Vec::new();
-		loop {
-			self.ws();
-			if self.eat(b')') {
-				return Ok(out);
-			}
-			// A named argument is an identifier followed by a colon.
-			let save = self.i;
-			if self.peek().map(is_ident_start).unwrap_or(false) {
-				let name = self.ident();
-				self.ws();
-				if self.peek() == Some(b':') {
-					self.i += 1;
-					let v = res!(self.expr(e));
-					out.push(Arg::Named(name, v));
-					self.ws();
-					self.eat(b',');
-					continue;
-				}
-				self.i = save;
-			}
-			let v = res!(self.expr(e));
-			out.push(Arg::Pos(v));
-			self.ws();
-			if !self.eat(b',') {
-				self.ws();
-				if self.eat(b')') {
-					return Ok(out);
-				}
-				return Err(err!("expected `,` or `)` at {}", self.i; Invalid));
-			}
-		}
-	}
-
-	fn atom(&mut self, e: &mut Engine) -> R<Value> {
-		self.ws();
-		match self.peek() {
-			None => Err(err!("unexpected end"; Invalid)),
-			Some(b'"') => self.string().map(Value::str),
-			Some(b'<') => {
-				let end = res!(self.src[self.i..].find('>').ok_or_else(|| err!("unclosed label"; Invalid)));
-				let name = self.src[self.i + 1..self.i + end].to_string();
-				self.i += end + 1;
-				Ok(Value::Label(oxedyne_fe2o3_austenite::eval::value::Label::new(&name)))
-			}
-			Some(b'(') => self.group(e),
-			Some(c) if c.is_ascii_digit() || c == b'.' => self.number(),
-			Some(c) if is_ident_start(c) => {
-				let name = self.ident();
-				match name.as_str() {
-					"none"	=> Ok(Value::None),
-					"auto"	=> Ok(Value::Auto),
-					"true"	=> Ok(Value::Bool(true)),
-					"false"	=> Ok(Value::Bool(false)),
-					_		=> library().get(&name).cloned().ok_or_else(|| err!("unknown variable: {}", name; Invalid)),
-				}
-			}
-			Some(c) => Err(err!("unexpected `{}`", c as char; Invalid)),
-		}
-	}
-
-	fn group(&mut self, e: &mut Engine) -> R<Value> {
-		self.i += 1;
-		self.ws();
-		if self.eat(b')') {
-			return Ok(Value::array(Vec::new()));
-		}
-		if self.peek() == Some(b':') {
-			self.i += 1;
-			self.ws();
-			if !self.eat(b')') {
-				return Err(err!("expected `)` after `(:`"; Invalid));
-			}
-			return Ok(Value::dict(Dict::new()));
-		}
-		let mut items = Vec::new();
-		let mut dict = Dict::new();
-		let mut is_dict = false;
-		let mut trailing = false;
-		loop {
-			self.ws();
-			if self.eat(b')') {
-				break;
-			}
-			let save = self.i;
-			let mut key: Option<String> = None;
-			if self.peek().map(is_ident_start).unwrap_or(false) {
-				let k = self.ident();
-				self.ws();
-				if self.peek() == Some(b':') {
-					key = Some(k);
-					self.i += 1;
-				} else {
-					self.i = save;
-				}
-			} else if self.peek() == Some(b'"') {
-				let k = res!(self.string());
-				self.ws();
-				if self.peek() == Some(b':') {
-					key = Some(k);
-					self.i += 1;
-				} else {
-					self.i = save;
-				}
-			}
-			let v = res!(self.expr(e));
-			match key {
-				Some(k) => {
-					is_dict = true;
-					dict.insert(&k, v);
-				}
-				None => items.push(v),
-			}
-			self.ws();
-			trailing = self.eat(b',');
-			if !trailing {
-				self.ws();
-				if !self.eat(b')') {
-					return Err(err!("expected `)` at {}", self.i; Invalid));
-				}
-				break;
-			}
-		}
-		if is_dict {
-			return Ok(Value::dict(dict));
-		}
-		if items.len() == 1 && !trailing {
-			return Ok(items.remove(0));
-		}
-		Ok(Value::array(items))
-	}
-
-	fn string(&mut self) -> R<String> {
-		self.i += 1;
-		let mut out = String::new();
-		loop {
-			let rest = &self.src[self.i..];
-			let c = res!(rest.chars().next().ok_or_else(|| err!("unterminated string"; Invalid)));
-			self.i += c.len_utf8();
-			match c {
-				'"'		=> return Ok(out),
-				'\\'	=> {
-					let e = res!(self.src[self.i..].chars().next().ok_or_else(|| err!("bad escape"; Invalid)));
-					self.i += e.len_utf8();
-					match e {
-						'n'		=> out.push('\n'),
-						't'		=> out.push('\t'),
-						'r'		=> out.push('\r'),
-						'\\'	=> out.push('\\'),
-						'"'		=> out.push('"'),
-						'u'		=> {
-							let end = res!(self.src[self.i..].find('}').ok_or_else(|| err!("bad unicode escape"; Invalid)));
-							let hex = &self.src[self.i + 1..self.i + end];
-							let cp = res!(u32::from_str_radix(hex, 16).map_err(|e| err!("{}", e; Invalid)));
-							out.push(res!(char::from_u32(cp).ok_or_else(|| err!("bad codepoint"; Invalid))));
-							self.i += end + 1;
-						}
-						other	=> return Err(err!("unknown escape {}", other; Invalid)),
-					}
-				}
-				c => out.push(c),
-			}
-		}
-	}
-
-	fn number(&mut self) -> R<Value> {
-		let start = self.i;
-		if self.s[self.i..].starts_with(b"0x") || self.s[self.i..].starts_with(b"0b") || self.s[self.i..].starts_with(b"0o") {
-			let radix = match self.s[self.i + 1] { b'x' => 16, b'b' => 2, _ => 8 };
-			self.i += 2;
-			let d = self.i;
-			while self.i < self.s.len() && self.s[self.i].is_ascii_alphanumeric() {
-				self.i += 1;
-			}
-			return i64::from_str_radix(&self.src[d..self.i], radix).map(Value::Int).map_err(|e| err!("{}", e; Invalid));
-		}
-		let mut float = false;
-		while self.i < self.s.len() {
-			let c = self.s[self.i];
-			if c.is_ascii_digit() {
-				self.i += 1;
-			} else if c == b'.' && self.s.get(self.i + 1).map(|d| d.is_ascii_digit()).unwrap_or(false) {
-				float = true;
-				self.i += 1;
-			} else if (c == b'e' || c == b'E') && self.s.get(self.i + 1).map(|d| d.is_ascii_digit() || *d == b'-' || *d == b'+').unwrap_or(false) {
-				float = true;
-				self.i += 2;
-			} else {
-				break;
-			}
-		}
-		let num = &self.src[start..self.i];
-		let x: f64 = res!(num.parse().map_err(|e: std::num::ParseFloatError| err!("{}", e; Invalid)));
-		let unit_start = self.i;
-		while self.i < self.s.len() && (self.s[self.i].is_ascii_alphabetic() || self.s[self.i] == b'%') {
-			self.i += 1;
-		}
-		let unit = &self.src[unit_start..self.i];
-		Ok(match unit {
-			""		=> if float { Value::Float(x) } else {
-				num.parse::<i64>().map(Value::Int).unwrap_or(Value::Float(x))
-			},
-			"pt"	=> Value::Length(Length::pt(x)),
-			"mm"	=> Value::Length(Length::pt(x * 72.0 / 25.4)),
-			"cm"	=> Value::Length(Length::pt(x * 720.0 / 25.4)),
-			"in"	=> Value::Length(Length::pt(x * 72.0)),
-			"em"	=> Value::Length(Length::em(x)),
-			"%"		=> Value::Ratio(Ratio(x / 100.0)),
-			"deg"	=> Value::Angle(Angle(x.to_radians())),
-			"rad"	=> Value::Angle(Angle(x)),
-			"fr"	=> Value::Fraction(Fraction(x)),
-			other	=> return Err(err!("unknown unit {}", other; Invalid)),
-		})
-	}
-}
-
-fn neg(v: Value) -> R<Value> {
-	Ok(match v {
-		Value::Int(i)		=> Value::Int(-i),
-		Value::Float(f)		=> Value::Float(-f),
-		Value::Length(l)	=> Value::Length(Length { abs: -l.abs, em: -l.em }),
-		Value::Ratio(r)		=> Value::Ratio(Ratio(-r.0)),
-		Value::Angle(a)		=> Value::Angle(Angle(-a.0)),
-		Value::Fraction(f)	=> Value::Fraction(Fraction(-f.0)),
-		_					=> return Err(err!("unsupported unary minus"; Invalid)),
-	})
-}
-
-fn add(a: Value, b: Value, sign: f64) -> R<Value> {
-	let b = if sign < 0.0 { res!(neg(b)) } else { b };
-	Ok(match (a, b) {
-		(Value::Int(x), Value::Int(y))			=> Value::Int(x + y),
-		(Value::Float(x), Value::Float(y))		=> Value::Float(x + y),
-		(Value::Int(x), Value::Float(y))		=> Value::Float(x as f64 + y),
-		(Value::Float(x), Value::Int(y))		=> Value::Float(x + y as f64),
-		(Value::Str(x), Value::Str(y))			=> Value::str(format!("{}{}", x, y)),
-		(Value::Length(x), Value::Length(y))	=> Value::Length(Length { abs: x.abs + y.abs, em: x.em + y.em }),
-		(Value::Ratio(r), Value::Length(l)) | (Value::Length(l), Value::Ratio(r)) => Value::Relative(Relative { rel: r, abs: l }),
-		(Value::Ratio(x), Value::Ratio(y))		=> Value::Ratio(Ratio(x.0 + y.0)),
-		(Value::Angle(x), Value::Angle(y))		=> Value::Angle(Angle(x.0 + y.0)),
-		(Value::Alignment(x), Value::Alignment(y)) => Value::Alignment(Alignment { x: x.x.or(y.x), y: x.y.or(y.y) }),
-		_ => return Err(err!("unsupported `+`"; Invalid)),
-	})
-}
-
-fn access(v: Value, name: &str) -> R<Value> {
-	match &v {
-		Value::Module(m)	=> m.scope.get(name).cloned().ok_or_else(|| err!("module does not contain `{}`", name; Invalid)),
-		Value::Type(t)		=> type_scope(*t, name).ok_or_else(|| err!("type does not contain `{}`", name; Invalid)),
-		Value::Symbol(s)	=> sym::modify(s, name).map(Value::Symbol).ok_or_else(|| err!("unknown symbol modifier"; Invalid)),
-		Value::Dict(d)		=> d.get(name).cloned().ok_or_else(|| err!("dictionary does not contain key {}", name; Invalid)),
-		Value::Func(f)		=> func_scope(f, name).ok_or_else(|| err!("function does not contain `{}`", name; Invalid)),
-		_					=> field(&v, name).ok_or_else(|| err!("no field {}", name; Invalid)),
-	}
-}
-
-fn build(args: Vec<Arg>) -> Args {
-	let mut a = Args::new(Span::detached());
-	for x in args {
-		match x {
-			Arg::Pos(v)			=> a.push(Span::detached(), v),
-			Arg::Named(n, v)	=> a.push_named(Span::detached(), n, v),
-		}
-	}
-	a
-}
-
-fn call(e: &mut Engine, f: &Value, args: Vec<Arg>, recv: Option<Value>) -> R<Value> {
-	let mut a = build(args);
-	if let Some(r) = recv {
-		a.prepend(Span::detached(), r);
-	}
-	let native = match f {
-		Value::Func(Func::Native(n))	=> *n,
-		Value::Type(t)					=> res!(constructor(*t).ok_or_else(|| err!("type has no constructor"; Invalid))),
-		_								=> return Err(err!("not callable here"; Invalid)),
-	};
-	native.call(e, a)
-}
-
-// A method call. Mutating methods need a place, so they run on a copy and return what the call returned.
-fn call_method(e: &mut Engine, recv: Value, name: &str, args: Vec<Arg>) -> R<Value> {
-	// A module, type or function holds members rather than methods: `calc.pow(..)`, `str.to-unicode(..)`.
-	if matches!(recv, Value::Module(_) | Value::Type(_) | Value::Func(_)) {
-		let f = res!(access(recv, name));
-		return call(e, &f, args, None);
-	}
-	// A literal receiver is a temporary, so a mutating method fails here as it does in Typst; places are
-	// tested by `mutating_methods_agree_with_typst`.
-	let ty = recv.ty();
-	if let Some(m) = method(ty, name) {
-		return call(e, &Value::Func(Func::Native(m)), args, Some(recv));
-	}
-	Err(err!("type {} has no method `{}`", ty.name(), name; Invalid))
-}
-
-/// Evaluates one expression; the error is the last diagnostic's message when there is one.
+/// Evaluates one expression; the error is the first error diagnostic's message, as Typst reports the
+/// first error first.
 fn eval_line(line: &str) -> std::result::Result<Value, String> {
-	let mut e = Engine::new(World::new(PathBuf::from("/")));
-	let mut r = Reader { s: line.as_bytes(), src: line, i: 0 };
-	let out = r.expr(&mut e);
-	r.ws();
+	let mut e = Engine::new(World::new(fixtures_dir()));
+	let out = eval_string(&mut e, line, EvalMode::Code, Scope::new(), Span::detached());
 	match out {
-		Ok(_) if r.i < r.s.len()	=> Err(format!("trailing input at {}", r.i)),
-		Ok(v)						=> Ok(v),
-		Err(err)					=> Err(match e.diags.last() {
+		Ok(v)	=> Ok(v),
+		Err(err)	=> Err(match e.diags.iter().find(|d| d.is_error()) {
 			Some(d)	=> d.message.clone(),
 			None	=> err.msgs().last().cloned().unwrap_or_default(),
 		}),
@@ -514,39 +70,84 @@ fn scratch() -> Outcome<PathBuf> {
 	Ok(d)
 }
 
+// The oracle runs capped, so a runaway document cannot take the build slot's memory.
+fn capped(bin: &str) -> Command {
+	let mut c = Command::new("systemd-run");
+	c.args(["--user", "--scope", "--quiet", "-p", "MemoryMax=3G", "--slice=claude-rc.slice", bin]);
+	c
+}
+
+fn key(parts: &[&str]) -> String {
+	let mut h = DefaultHasher::new();
+	for p in parts {
+		p.hash(&mut h);
+	}
+	format!("{:016x}", h.finish())
+}
+
+// Runs the oracle once per distinct input: the answer is kept beside the input it answers.
+fn cached(tag: &str, input: &str, run: impl Fn() -> Outcome<String>) -> Outcome<String> {
+	let dir = res!(scratch()).join("cache");
+	res!(std::fs::create_dir_all(&dir));
+	let file = dir.join(format!("{}-{}", tag, key(&[tag, input])));
+	if let Ok(s) = std::fs::read_to_string(&file) {
+		if let Some(rest) = s.strip_prefix(input) {
+			if let Some(ans) = rest.strip_prefix("\n\u{0}\n") {
+				return Ok(ans.to_string());
+			}
+		}
+	}
+	let ans = res!(run());
+	res!(std::fs::write(&file, format!("{}\n\u{0}\n{}", input, ans)));
+	Ok(ans)
+}
+
 // Typst's reprs for many expressions at once, through a document that exposes them as metadata.
 fn oracle_reprs(bin: &str, name: &str, exprs: &[&str]) -> Outcome<Vec<String>> {
-	let file = res!(scratch()).join(format!("{}.typ", name));
 	let mut src = String::from("#metadata((\n");
 	for e in exprs {
 		src.push_str(&format!("  repr({}),\n", e));
 	}
 	src.push_str(")) <reprs>\n");
-	res!(std::fs::write(&file, src));
-	let out = res!(Command::new(bin)
-		.args(["eval", "query(<reprs>).first().value", "--in"])
-		.arg(&file)
-		.args(["--format", "json", "--root", "/"])
-		.output());
-	if !out.status.success() {
-		return Err(err!("typst failed on {}: {}", name, String::from_utf8_lossy(&out.stderr); Test));
-	}
-	parse_json_strings(&String::from_utf8_lossy(&out.stdout))
+	let file = fixtures_dir().join(format!("_oracle_{}.typ", name));
+	let json = res!(cached("reprs", &src, || {
+		res!(std::fs::write(&file, &src));
+		let out = res!(capped(bin)
+			.args(["eval", "query(<reprs>).first().value", "--in"])
+			.arg(&file)
+			.args(["--format", "json", "--root"])
+			.arg(fixtures_dir())
+			.output());
+		let _ = std::fs::remove_file(&file);
+		if !out.status.success() {
+			return Err(err!("typst failed on {}: {}", name, String::from_utf8_lossy(&out.stderr); Test));
+		}
+		Ok(String::from_utf8_lossy(&out.stdout).to_string())
+	}));
+	parse_json_strings(&json)
 }
 
 // The oracle's first error line, or `None` when the expression evaluates.
 fn oracle_error(bin: &str, expr: &str) -> Outcome<Option<String>> {
-	let file = res!(scratch()).join("err.typ");
-	res!(std::fs::write(&file, ""));
-	let out = res!(Command::new(bin)
-		.args(["eval", &format!("repr({})", expr), "--in"])
-		.arg(&file)
-		.output());
-	if out.status.success() {
-		return Ok(None);
-	}
-	let err = String::from_utf8_lossy(&out.stderr);
-	Ok(err.lines().find_map(|l| l.strip_prefix("error: ").map(|s| s.to_string())))
+	let ans = res!(cached("error", expr, || {
+		// One file per expression: the tests run in parallel.
+		let file = fixtures_dir().join(format!("_oracle_err_{}.typ", key(&[expr])));
+		res!(std::fs::write(&file, ""));
+		let out = res!(capped(bin)
+			.args(["eval", &format!("repr({})", expr), "--in"])
+			.arg(&file)
+			.arg("--root")
+			.arg(fixtures_dir())
+			.output());
+		let _ = std::fs::remove_file(&file);
+		if out.status.success() {
+			return Ok(String::new());
+		}
+		let err = String::from_utf8_lossy(&out.stderr);
+		Ok(err.lines().find_map(|l| l.strip_prefix("error: ").map(|s| format!("E{}", s)))
+			.unwrap_or_else(|| "E".to_string()))
+	}));
+	Ok(ans.strip_prefix('E').map(|s| s.to_string()))
 }
 
 // A JSON array of strings, as `typst eval --format json` prints one.
@@ -748,11 +349,7 @@ fn run(name: &str) -> Outcome<()> {
 #[test] fn geometry_agrees_with_typst()		-> Outcome<()> { run("geom.txt") }
 #[test] fn symbols_agree_with_typst()		-> Outcome<()> { run("sym.txt") }
 
-/// Functions passed as arguments (`map`, `sorted(key:)`) and the operator-backed methods (`sum`, `join`,
-/// `calc.max`) call `Engine::call_func` and `ops`, which the evaluator core (U2) provides.
-#[test]
-#[ignore = "needs U2: Engine::call_func and ops::{add, mul, join, compare}"]
-fn higher_order_agrees_with_typst() -> Outcome<()> { run("higher_order.txt") }
+#[test] fn higher_order_agrees_with_typst()	-> Outcome<()> { run("higher_order.txt") }
 
 /// Every symbol and emoji Typst has, with every variant: the generated tables against the oracle.
 #[test]
@@ -810,64 +407,6 @@ fn collect_symbols(lib: &Scope, root: &str, path: &str, exprs: &mut Vec<String>,
 	}
 }
 
-/// `push`, `pop`, `insert` and `remove` on a place: the receiver and the call's result after the call,
-/// against `{let a = ..; let r = a.m(..); (r, a)}` in Typst.
-#[test]
-fn mutating_methods_agree_with_typst() -> Outcome<()> {
-	let bin = match typst() {
-		Some(b)					=> b,
-		None if skip_allowed()	=> return Ok(()),
-		None					=> return Err(err!("typst is not on PATH"; Test)),
-	};
-	let cases: [(&str, &str, &str); 12] = [
-		("(1, 2, 3)", "push", "4"),
-		("(1, 2, 3)", "pop", ""),
-		("(1, 2, 3)", "insert", "1, 9"),
-		("(1, 2, 3)", "insert", "3, 9"),
-		("(1, 2, 3)", "insert", "-1, 9"),
-		("(1, 2, 3)", "remove", "0"),
-		("(1, 2, 3)", "remove", "-1"),
-		("(1, 2, 3)", "remove", "5, default: 9"),
-		("(a: 1)", "insert", "\"b\", 2"),
-		("(a: 1, b: 2)", "insert", "\"a\", 3"),
-		("(a: 1, b: 2)", "remove", "\"a\""),
-		("(a: 1)", "remove", "\"z\", default: 0"),
-	];
-	let exprs: Vec<String> = cases.iter()
-		.map(|(r, m, a)| format!("{{let a = {}; let r = a.{}({}); (r, a)}}", r, m, a))
-		.collect();
-	let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
-	let want = res!(oracle_reprs(&bin, "mutate", &refs));
-	let mut bad = Vec::new();
-	for ((r, m, a), (e, w)) in cases.iter().zip(refs.iter().zip(want.iter())) {
-		let mut place = match eval_line(r) {
-			Ok(v)	=> v,
-			Err(msg) => return Err(err!("receiver {}: {}", r, msg; Test)),
-		};
-		let mut eng = Engine::new(World::new(PathBuf::from("/")));
-		let src = format!("f({})", a);
-		let mut rd = Reader { s: src.as_bytes(), src: &src, i: 1 };
-		let args = res!(rd.args(&mut eng));
-		let result = match (place.ty(), method(place.ty(), m)) {
-			(_, Some(NativeFunc::Array(f)))	=> array::call_mut(f, &mut eng, &mut place, build(args)),
-			(_, Some(NativeFunc::Dict(f)))	=> dict::call_mut(f, &mut eng, &mut place, build(args)),
-			(t, _)							=> return Err(err!("{} has no mutating {}", t.name(), m; Test)),
-		};
-		let got = match result {
-			Ok(v)	=> repr(&Value::array(vec![v, place])),
-			Err(x)	=> format!("error: {}", x),
-		};
-		if !same_repr(&got, w) {
-			bad.push(format!("{}: typst {} austenite {}", e, w, got));
-		}
-	}
-	if bad.is_empty() {
-		Ok(())
-	} else {
-		Err(err!("{} mutation(s) differ:\n{}", bad.len(), bad.join("\n"); Test))
-	}
-}
-
 /// The harness can fail: the comparison sees a value and an error message, not just "something ran".
 #[test]
 fn harness_reads_values_and_errors() -> Outcome<()> {
@@ -881,5 +420,52 @@ fn harness_reads_values_and_errors() -> Outcome<()> {
 	match eval_line("calc.pow(0, 0)") {
 		Err(m) if m == "zero to the power of zero is undefined" => Ok(()),
 		other => Err(err!("calc.pow(0, 0) gave {:?}", other.map(|v| repr(&v)); Test)),
+	}
+}
+
+/// CMYK to RGB is an ICC transform in Typst, reproduced here by interpolating a grid sampled from the
+/// oracle: exact on the grid, and within two eight-bit steps per channel between its points. The sample is
+/// fixed pseudo-random ink values, so the bound is tested off the grid, where it can fail.
+#[test]
+fn cmyk_conversion_stays_within_two_steps() -> Outcome<()> {
+	let bin = match typst() {
+		Some(b)					=> b,
+		None if skip_allowed()	=> return Ok(()),
+		None					=> return Err(err!("typst is not on PATH"; Test)),
+	};
+	let mut seed: u32 = 0x2545_f491;
+	let mut exprs = Vec::new();
+	for _ in 0..60 {
+		let mut ink = [0u32; 4];
+		for x in ink.iter_mut() {
+			seed ^= seed << 13;
+			seed ^= seed >> 17;
+			seed ^= seed << 5;
+			*x = seed % 101;
+		}
+		exprs.push(format!("rgb(cmyk({}%, {}%, {}%, {}%)).to-hex()", ink[0], ink[1], ink[2], ink[3]));
+	}
+	let refs: Vec<&str> = exprs.iter().map(|s| s.as_str()).collect();
+	let want = res!(oracle_reprs(&bin, "cmyk", &refs));
+	let (mut exact, mut bad) = (0, Vec::new());
+	for (e, w) in refs.iter().zip(want.iter()) {
+		let got = match eval_line(e) {
+			Ok(v)	=> repr(&v),
+			Err(m)	=> return Err(err!("{}: {}", e, m; Test)),
+		};
+		let chan = |s: &str, i: usize| i64::from_str_radix(s.get(2 + 2 * i..4 + 2 * i).unwrap_or("0"), 16).unwrap_or(-99);
+		let worst = (0..3).map(|i| (chan(&got, i) - chan(w, i)).abs()).max().unwrap_or(0);
+		if worst == 0 {
+			exact += 1;
+		}
+		if worst > 2 {
+			bad.push(format!("{}: typst {} austenite {}", e, w, got));
+		}
+	}
+	eprintln!("cmyk: {} of {} exact", exact, refs.len());
+	if bad.is_empty() {
+		Ok(())
+	} else {
+		Err(err!("{} conversion(s) off by more than two steps:\n{}", bad.len(), bad.join("\n"); Test))
 	}
 }

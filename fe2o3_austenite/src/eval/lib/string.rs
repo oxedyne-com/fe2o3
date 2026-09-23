@@ -1,8 +1,7 @@
 // U3 owns this file. Methods on `str` (and `str.to-unicode`/`str.from-unicode`). Indices are byte
-// offsets and `first`/`last`/`at`/`rev` work in grapheme clusters, as in Typst. Regex matching goes
-// through `find_at` alone, so U3b's `fe2o3_text::regex` extension (a start offset and capture groups)
-// lands in one place: today a search from an offset searches the tail, so `^` and `\b` see the tail's
-// start as the text's, and `captures` is always empty.
+// offsets and `first`/`last`/`at`/`rev` work in grapheme clusters, as in Typst. Regex matching walks
+// `fe2o3_text::regex`'s iterators once over the whole text, so `^` and `\b` see the true context and a
+// long text is not searched afresh from every match.
 
 use crate::eval::args::Args;
 use crate::eval::lib::foundations::{
@@ -88,78 +87,60 @@ fn pattern(engine: &mut Engine, span: Span, v: Value) -> Outcome<Pattern> {
 	}
 }
 
-/// The leftmost regex match at or after byte `at`: the one call into `fe2o3_text::regex`.
-pub fn find_at(engine: &mut Engine, span: Span, re: &RegexValue, hay: &str, at: usize) -> Outcome<Option<(usize, usize)>> {
-	let tail = match hay.get(at..) {
-		Some(t)	=> t,
-		None	=> return Ok(None),
-	};
-	match re.re.find(tail) {
-		Ok(Some(m))	=> Ok(Some((at + m.start, at + m.end))),
-		Ok(None)	=> Ok(None),
-		Err(e)		=> Err(engine.error(span, fmt!("regex search failed: {}",
-			e.msgs().last().cloned().unwrap_or_default()))),
-	}
+/// A match: its byte range and, for a regex, its groups' texts (`none` for a group that took no part).
+struct Hit {
+	a:		usize,
+	b:		usize,
+	caps:	Vec<Value>,
 }
 
-/// Every non-overlapping match, left to right, as byte ranges. An empty match directly after the previous
-/// match is skipped, as Rust's `regex` iterates.
-fn find_all(engine: &mut Engine, span: Span, pat: &Pattern, hay: &str) -> Outcome<Vec<(usize, usize)>> {
+fn regex_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
+	engine.error(span, fmt!("regex search failed: {}", e.msgs().last().cloned().unwrap_or_default()))
+}
+
+fn hit(c: &oxedyne_fe2o3_text::regex::Captures) -> Hit {
+	let w = c.whole();
+	let caps = (1..c.len()).map(|i| match c.text(i) {
+		Some(t)	=> Value::str(t),
+		None	=> Value::None,
+	}).collect();
+	Hit { a: w.start, b: w.end, caps }
+}
+
+/// The first `limit` non-overlapping matches, left to right, by the `regex` crate's iteration rule (an
+/// empty match directly after the previous match is passed over). One pass over the text.
+fn find_all(engine: &mut Engine, span: Span, pat: &Pattern, hay: &str, limit: usize) -> Outcome<Vec<Hit>> {
 	let mut out = Vec::new();
 	match pat {
-		Pattern::Str(p) => {
-			for (i, m) in hay.match_indices(p.as_str()) {
-				out.push((i, i + m.len()));
+		Pattern::Str(p) => for (i, m) in hay.match_indices(p.as_str()).take(limit) {
+			out.push(Hit { a: i, b: i + m.len(), caps: Vec::new() });
+		},
+		Pattern::Regex(re) => for c in re.re.captures_iter(hay).take(limit) {
+			match c {
+				Ok(c)	=> out.push(hit(&c)),
+				Err(e)	=> return Err(regex_error(engine, span, e)),
 			}
-		}
-		Pattern::Regex(re) => {
-			let mut pos = 0;
-			let mut last_end: Option<usize> = None;
-			while pos <= hay.len() {
-				res!(engine.burn(span));
-				let (s, e) = match res!(find_at(engine, span, re, hay, pos)) {
-					Some(m)	=> m,
-					None	=> break,
-				};
-				if s == e && last_end == Some(s) {
-					pos = next_char(hay, s);
-					if pos > hay.len() {
-						break;
-					}
-					continue;
-				}
-				out.push((s, e));
-				last_end = Some(e);
-				pos = if e > s { e } else { next_char(hay, e) };
-				if s == e && pos > hay.len() {
-					break;
-				}
-			}
-		}
+		},
 	}
 	Ok(out)
 }
 
-fn first_match(engine: &mut Engine, span: Span, pat: &Pattern, hay: &str) -> Outcome<Option<(usize, usize)>> {
+fn first_match(engine: &mut Engine, span: Span, pat: &Pattern, hay: &str) -> Outcome<Option<Hit>> {
 	match pat {
-		Pattern::Str(p)		=> Ok(hay.find(p.as_str()).map(|i| (i, i + p.len()))),
-		Pattern::Regex(re)	=> find_at(engine, span, re, hay, 0),
+		Pattern::Str(p)		=> Ok(hay.find(p.as_str()).map(|i| Hit { a: i, b: i + p.len(), caps: Vec::new() })),
+		Pattern::Regex(re)	=> match re.re.captures(hay) {
+			Ok(c)	=> Ok(c.map(|c| hit(&c))),
+			Err(e)	=> Err(regex_error(engine, span, e)),
+		},
 	}
 }
 
-fn next_char(s: &str, at: usize) -> usize {
-	match s.get(at..).and_then(|t| t.chars().next()) {
-		Some(c)	=> at + c.len_utf8(),
-		None	=> at + 1,
-	}
-}
-
-fn match_dict(hay: &str, (s, e): (usize, usize)) -> Value {
+fn match_dict(hay: &str, h: Hit) -> Value {
 	let mut d = Dict::new();
-	d.insert("start", Value::Int(s as i64));
-	d.insert("end", Value::Int(e as i64));
-	d.insert("text", Value::str(&hay[s..e]));
-	d.insert("captures", Value::array(Vec::new()));
+	d.insert("start", Value::Int(h.a as i64));
+	d.insert("end", Value::Int(h.b as i64));
+	d.insert("text", Value::str(hay.get(h.a..h.b).unwrap_or("")));
+	d.insert("captures", Value::array(h.caps));
 	Value::dict(d)
 }
 
@@ -231,20 +212,31 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				StrFn::Contains		=> Value::Bool(res!(first_match(engine, span, &p, &s)).is_some()),
 				StrFn::StartsWith	=> Value::Bool(match &p {
 					Pattern::Str(q)		=> s.starts_with(q.as_str()),
-					Pattern::Regex(re)	=> matches!(res!(find_at(engine, span, re, &s, 0)), Some((0, _))),
+					Pattern::Regex(_)	=> matches!(res!(first_match(engine, span, &p, &s)), Some(Hit { a: 0, .. })),
 				}),
+				// A regex ends the string when a search from some position finds first a match ending
+				// there, as Typst restarts its search one character past each match's start.
 				StrFn::EndsWith		=> Value::Bool(match &p {
 					Pattern::Str(q)		=> s.ends_with(q.as_str()),
-					Pattern::Regex(_)	=> res!(find_all(engine, span, &p, &s))
-						.iter().any(|(_, e)| *e == s.len()),
+					Pattern::Regex(re)	=> {
+						let mut found = false;
+						for m in re.re.overlapping_iter(&s) {
+							match m {
+								Ok(m) if m.end == s.len()	=> { found = true; break; }
+								Ok(_)						=> (),
+								Err(e)						=> return Err(regex_error(engine, span, e)),
+							}
+						}
+						found
+					}
 				}),
 				StrFn::Find			=> match res!(first_match(engine, span, &p, &s)) {
-					Some((a, b))	=> Value::str(&s[a..b]),
-					None			=> Value::None,
+					Some(h)	=> Value::str(&s[h.a..h.b]),
+					None	=> Value::None,
 				},
 				StrFn::Position		=> match res!(first_match(engine, span, &p, &s)) {
-					Some((a, _))	=> Value::Int(a as i64),
-					None			=> Value::None,
+					Some(h)	=> Value::Int(h.a as i64),
+					None	=> Value::None,
 				},
 				_					=> match res!(first_match(engine, span, &p, &s)) {
 					Some(m)	=> match_dict(&s, m),
@@ -255,7 +247,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		StrFn::Matches => {
 			let p = res!(need(engine, &mut args, "pattern"));
 			let p = res!(pattern(engine, span, p));
-			let ms = res!(find_all(engine, span, &p, &s));
+			let ms = res!(find_all(engine, span, &p, &s, usize::MAX));
 			Value::array(ms.into_iter().map(|m| match_dict(&s, m)).collect())
 		}
 		StrFn::Replace => {
@@ -289,12 +281,12 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					match &p {
 						Pattern::Str(q) => Value::array(s.split(q.as_str()).map(Value::str).collect()),
 						Pattern::Regex(_) => {
-							let ms = res!(find_all(engine, span, &p, &s));
+							let ms = res!(find_all(engine, span, &p, &s, usize::MAX));
 							let mut out = Vec::with_capacity(ms.len() + 1);
 							let mut last = 0;
-							for (a, b) in ms {
-								out.push(Value::str(&s[last..a]));
-								last = b;
+							for h in ms {
+								out.push(Value::str(&s[last..h.a]));
+								last = h.b;
 							}
 							out.push(Value::str(&s[last..]));
 							Value::array(out)
@@ -343,19 +335,19 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 }
 
 fn replace(engine: &mut Engine, span: Span, s: &str, p: &Pattern, with: Value, count: usize) -> Outcome<Value> {
-	let ms = res!(find_all(engine, span, p, s));
+	let ms = res!(find_all(engine, span, p, s, count));
 	let mut out = String::with_capacity(s.len());
 	let mut last = 0;
-	for (k, (a, b)) in ms.into_iter().enumerate() {
-		if k >= count {
-			break;
-		}
+	for h in ms {
+		let (a, b) = (h.a, h.b);
 		out.push_str(&s[last..a]);
 		match &with {
 			Value::Str(r)	=> out.push_str(r),
-			Value::Func(f)	=> {
+			Value::Func(_) | Value::Type(_)	=> {
+				let f = res!(crate::eval::lib::array::func_of(engine, span, with.clone()));
+				let f = &f;
 				let mut fa = Args::new(span);
-				fa.push(span, match_dict(s, (a, b)));
+				fa.push(span, match_dict(s, h));
 				let r = res!(engine.call_func(f, fa));
 				match r {
 					Value::Str(r)	=> out.push_str(&r),
@@ -392,10 +384,10 @@ fn trim(engine: &mut Engine, span: Span, s: &str, p: Option<Pattern>, at: Option
 			t
 		}
 		Some(p @ Pattern::Regex(_)) => {
-			let ms = res!(find_all(engine, span, &p, s));
+			let ms = res!(find_all(engine, span, &p, s, usize::MAX));
 			let mut last: Option<usize> = None;
 			let (mut lo, mut hi) = (0, s.len());
-			for (a, b) in ms {
+			for Hit { a, b, .. } in ms {
 				let consecutive = last == Some(a);
 				start &= a == 0 || consecutive;
 				if start {

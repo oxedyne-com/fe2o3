@@ -90,15 +90,15 @@ fn no_default(engine: &mut Engine, span: Span, i: i64, len: usize) -> Error<ErrT
 		"array index out of bounds (index: {}, len: {}) and no default value was specified", i, len))
 }
 
-fn func_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Func> {
-	match v {
-		Value::Func(f)	=> Ok(f),
-		other			=> Err(mismatch(engine, span, "function", &other)),
+pub fn func_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Func> {
+	match crate::eval::lib::foundations::as_func(&v) {
+		Some(f)	=> Ok(f),
+		None	=> Err(mismatch(engine, span, "function", &v)),
 	}
 }
 
 /// Calls `f` with the given positional arguments.
-fn apply(engine: &mut Engine, span: Span, f: &Func, vals: Vec<Value>) -> Outcome<Value> {
+pub fn apply(engine: &mut Engine, span: Span, f: &Func, vals: Vec<Value>) -> Outcome<Value> {
 	let mut a = Args::new(span);
 	for v in vals {
 		a.push(span, v);

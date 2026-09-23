@@ -150,3 +150,27 @@ assert.ne(1, 2)
 !panic()
 !panic("oh", 1)
 !type(1, 2)
+// Routing through the evaluator: type scopes, function scopes and type constructors.
+float.inf
+float.nan.is-nan()
+str.from-unicode(65)
+str.to-unicode("A")
+color.hsl(10deg, 20%, 30%)
+color.mix(red, blue)
+color.map.magma.len()
+gradient.linear(red, blue).kind()
+datetime.today
+json.encode((1, 2), pretty: false)
+assert.eq
+dictionary(sys).keys()
+array(bytes("ab"))
+array((1, 2))
+direction.from(left)
+direction.to(top)
+version(1, 2).minor
+version(1, 2, 3).patch
+!version(1).minor
+!version(1).patch
+!type(1).foo
+bool
+!bool(1)

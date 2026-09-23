@@ -18,6 +18,7 @@ use crate::eval::lib::foundations::{
 	format_float,
 	mismatch,
 	need,
+	no_method,
 	receiver,
 	repr_angle,
 	repr_ratio,
@@ -34,6 +35,7 @@ use crate::eval::value::{
 	Module,
 	Ratio,
 	RelativeTo,
+	Type,
 	Value,
 };
 use crate::eval::Engine;
@@ -91,25 +93,27 @@ mod data {
 static CMYK_GRID: &[u8] = include_bytes!("cmyk_srgb.bin");
 const GRID: usize = 17;
 
+// Typst's own literals, not eight-bit values over 255: `red`'s green is 0.254902, not 65/255, and a mix
+// or conversion rounds on that difference.
 const NAMED: [(&str, ColorSpace, [f32; 3]); 18] = [
 	("black",	ColorSpace::Luma,	[0.0, 0.0, 0.0]),
-	("gray",	ColorSpace::Luma,	[170.0, 0.0, 0.0]),
-	("silver",	ColorSpace::Luma,	[221.0, 0.0, 0.0]),
-	("white",	ColorSpace::Luma,	[255.0, 0.0, 0.0]),
-	("navy",	ColorSpace::Rgb,	[0.0, 31.0, 63.0]),
-	("blue",	ColorSpace::Rgb,	[0.0, 116.0, 217.0]),
-	("aqua",	ColorSpace::Rgb,	[127.0, 219.0, 255.0]),
-	("teal",	ColorSpace::Rgb,	[57.0, 204.0, 204.0]),
-	("eastern",	ColorSpace::Rgb,	[35.0, 157.0, 173.0]),
-	("purple",	ColorSpace::Rgb,	[177.0, 13.0, 201.0]),
-	("fuchsia",	ColorSpace::Rgb,	[240.0, 18.0, 190.0]),
-	("maroon",	ColorSpace::Rgb,	[133.0, 20.0, 75.0]),
-	("red",		ColorSpace::Rgb,	[255.0, 65.0, 54.0]),
-	("orange",	ColorSpace::Rgb,	[255.0, 133.0, 27.0]),
-	("yellow",	ColorSpace::Rgb,	[255.0, 220.0, 0.0]),
-	("olive",	ColorSpace::Rgb,	[61.0, 153.0, 112.0]),
-	("green",	ColorSpace::Rgb,	[46.0, 204.0, 64.0]),
-	("lime",	ColorSpace::Rgb,	[1.0, 255.0, 112.0]),
+	("gray",	ColorSpace::Luma,	[0.6666666, 0.0, 0.0]),
+	("silver",	ColorSpace::Luma,	[0.8666667, 0.0, 0.0]),
+	("white",	ColorSpace::Luma,	[1.0, 0.0, 0.0]),
+	("navy",	ColorSpace::Rgb,	[0.0, 0.121569, 0.247059]),
+	("blue",	ColorSpace::Rgb,	[0.0, 0.454902, 0.85098]),
+	("aqua",	ColorSpace::Rgb,	[0.4980392, 0.858823, 1.0]),
+	("teal",	ColorSpace::Rgb,	[0.223529, 0.8, 0.8]),
+	("eastern",	ColorSpace::Rgb,	[0.13725, 0.615686, 0.678431]),
+	("purple",	ColorSpace::Rgb,	[0.694118, 0.050980, 0.788235]),
+	("fuchsia",	ColorSpace::Rgb,	[0.941177, 0.070588, 0.745098]),
+	("maroon",	ColorSpace::Rgb,	[0.521569, 0.078431, 0.294118]),
+	("red",		ColorSpace::Rgb,	[1.0, 0.254902, 0.211765]),
+	("orange",	ColorSpace::Rgb,	[1.0, 0.521569, 0.105882]),
+	("yellow",	ColorSpace::Rgb,	[1.0, 0.8627451, 0.0]),
+	("olive",	ColorSpace::Rgb,	[0.239216, 0.6, 0.4392157]),
+	("green",	ColorSpace::Rgb,	[0.1803922, 0.8, 0.2509804]),
+	("lime",	ColorSpace::Rgb,	[0.0039216, 1.0, 0.4392157]),
 ];
 
 fn func(f: ColorFn) -> Value { Value::Func(Func::Native(NativeFunc::Color(f))) }
@@ -119,7 +123,7 @@ pub fn define(scope: &mut Scope) {
 		scope.define(f.name(), func(f));
 	}
 	for (name, space, c) in NAMED {
-		let col = Color { space, c: [c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 0.0], alpha: 1.0 };
+		let col = Color { space, c: [c[0], c[1], c[2], 0.0], alpha: 1.0 };
 		scope.define(name, Value::Color(col));
 	}
 }
@@ -144,9 +148,9 @@ pub fn color_static(name: &str) -> Option<Value> {
 
 fn color_maps() -> Module {
 	let mut s = Scope::new();
-	for (name, cols) in data::COLOR_MAPS {
+	for (n, (name, cols)) in data::COLOR_MAPS.iter().enumerate() {
 		let arr = cols.iter().map(|c| Value::Color(rgb8(c[0], c[1], c[2], 255))).collect();
-		s.define(*name, Value::array(arr));
+		crate::eval::lib::foundations::define_nth(&mut s, n, name, Value::array(arr));
 	}
 	Module::new("map", s)
 }
@@ -174,7 +178,7 @@ pub fn method(name: &str) -> Option<ColorFn> {
 		"to-hex"			=> ColorFn::ToHex,
 		"transparentize"	=> ColorFn::Transparentize,
 		"opacify"			=> ColorFn::Opacify,
-		_					=> return None,
+		other				=> return gradient_method(other),
 	};
 	Some(f)
 }
@@ -1235,6 +1239,26 @@ fn gradient_call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 
 pub fn call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	// Colour and gradient share one method table; `space` is both types', every other name one type's.
+	let recv_ty = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value.ty());
+	let f = match (f, recv_ty) {
+		(ColorFn::Space, Some(Type::Gradient))	=> ColorFn::GradientSpace,
+		(f, _)									=> f,
+	};
+	if let Some(ty) = recv_ty {
+		let owner = if gradient_method(f.name()) == Some(f) {
+			Some(Type::Gradient)
+		} else if method(f.name()) == Some(f) {
+			Some(Type::Color)
+		} else {
+			None
+		};
+		if let Some(owner) = owner {
+			if owner != ty {
+				return Err(no_method(engine, span, ty, f.name()));
+			}
+		}
+	}
 	match f {
 		ColorFn::Rgb | ColorFn::Luma | ColorFn::Cmyk | ColorFn::Oklab | ColorFn::Oklch
 			| ColorFn::LinearRgb | ColorFn::Hsl | ColorFn::Hsv => {

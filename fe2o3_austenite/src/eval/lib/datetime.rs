@@ -11,12 +11,14 @@ use crate::eval::func::{
 use crate::eval::lib::foundations::{
 	finish,
 	mismatch,
+	no_method,
 	receiver,
 };
 use crate::eval::scope::Scope;
 use crate::eval::value::{
 	Datetime,
 	Duration,
+	Type,
 	Value,
 };
 use crate::eval::Engine;
@@ -59,7 +61,7 @@ pub fn method(name: &str) -> Option<DatetimeFn> {
 		"minute"	=> DatetimeFn::Minute,
 		"second"	=> DatetimeFn::Second,
 		"ordinal"	=> DatetimeFn::Ordinal,
-		_			=> return None,
+		other		=> return duration_method(other),
 	};
 	Some(f)
 }
@@ -248,6 +250,20 @@ fn opt(v: Option<u8>) -> Value { v.map(|x| Value::Int(x as i64)).unwrap_or(Value
 
 pub fn call(f: DatetimeFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	// Datetime and duration share one method table; each name belongs to one of the two types.
+	let owner = if duration_method(f.name()) == Some(f) {
+		Some(Type::Duration)
+	} else if method(f.name()) == Some(f) {
+		Some(Type::Datetime)
+	} else {
+		None
+	};
+	if let (Some(owner), Some(a)) = (owner, args.items.iter().find(|a| a.name.is_none())) {
+		let ty = a.value.ty();
+		if ty != owner {
+			return Err(no_method(engine, span, ty, f.name()));
+		}
+	}
 	let out = match f {
 		DatetimeFn::Datetime	=> {
 			let y = res!(args.named::<Value>("year"));

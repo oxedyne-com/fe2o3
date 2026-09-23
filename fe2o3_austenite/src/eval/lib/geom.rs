@@ -8,6 +8,8 @@ use crate::eval::content::ElemKind;
 use crate::eval::lib::foundations::{
 	finish,
 	mismatch,
+	need,
+	no_method,
 	receiver,
 	repr_length,
 };
@@ -40,8 +42,8 @@ native_fns! {
 		Start			=> "start",
 		End				=> "end",
 		Sign			=> "sign",
-		X				=> "x",
-		Y				=> "y",
+		From			=> "from",
+		To				=> "to",
 	}
 }
 
@@ -64,25 +66,44 @@ pub fn define(scope: &mut Scope) {
 	scope.define("btt", Value::Direction(Direction::Btt));
 }
 
-pub fn method(ty: Type, name: &str) -> Option<GeomFn> {
-	let f = match (ty, name) {
-		(Type::Length, "pt")			=> GeomFn::Pt,
-		(Type::Length, "mm")			=> GeomFn::Mm,
-		(Type::Length, "cm")			=> GeomFn::Cm,
-		(Type::Length, "inches")		=> GeomFn::Inches,
-		(Type::Length, "to-absolute")	=> GeomFn::ToAbsolute,
-		(Type::Angle, "deg")			=> GeomFn::Deg,
-		(Type::Angle, "rad")			=> GeomFn::Rad,
-		(Type::Alignment, "axis")		=> GeomFn::Axis,
-		(Type::Alignment, "inv")		=> GeomFn::Inv,
-		(Type::Direction, "axis")		=> GeomFn::Axis,
-		(Type::Direction, "inv")		=> GeomFn::Inv,
-		(Type::Direction, "start")		=> GeomFn::Start,
-		(Type::Direction, "end")		=> GeomFn::End,
-		(Type::Direction, "sign")		=> GeomFn::Sign,
-		_								=> return None,
+/// The methods of length, angle, alignment and direction, by name; `axis` and `inv` serve both alignment
+/// and direction.
+pub fn method(name: &str) -> Option<GeomFn> {
+	let f = match name {
+		"pt"			=> GeomFn::Pt,
+		"mm"			=> GeomFn::Mm,
+		"cm"			=> GeomFn::Cm,
+		"inches"		=> GeomFn::Inches,
+		"to-absolute"	=> GeomFn::ToAbsolute,
+		"deg"			=> GeomFn::Deg,
+		"rad"			=> GeomFn::Rad,
+		"axis"			=> GeomFn::Axis,
+		"inv"			=> GeomFn::Inv,
+		"start"			=> GeomFn::Start,
+		"end"			=> GeomFn::End,
+		"sign"			=> GeomFn::Sign,
+		_				=> return None,
 	};
 	Some(f)
+}
+
+/// `direction.from(side)` and `direction.to(side)`, the direction's static functions.
+pub fn type_static(ty: Type, name: &str) -> Option<GeomFn> {
+	match (ty, name) {
+		(Type::Direction, "from")	=> Some(GeomFn::From),
+		(Type::Direction, "to")		=> Some(GeomFn::To),
+		_							=> None,
+	}
+}
+
+fn method_types(f: GeomFn) -> &'static [Type] {
+	match f {
+		GeomFn::Pt | GeomFn::Mm | GeomFn::Cm | GeomFn::Inches | GeomFn::ToAbsolute	=> &[Type::Length],
+		GeomFn::Deg | GeomFn::Rad				=> &[Type::Angle],
+		GeomFn::Axis | GeomFn::Inv				=> &[Type::Alignment, Type::Direction],
+		GeomFn::Start | GeomFn::End | GeomFn::Sign	=> &[Type::Direction],
+		GeomFn::From | GeomFn::To				=> &[],
+	}
 }
 
 pub fn inv_h(h: HAlign) -> HAlign {
@@ -147,7 +168,28 @@ fn text_size(engine: &mut Engine, span: Span) -> Outcome<f64> {
 
 pub fn call(f: GeomFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	if matches!(f, GeomFn::From | GeomFn::To) {
+		let side = res!(need(engine, &mut args, "side"));
+		res!(finish(engine, args));
+		let a = match side {
+			Value::Alignment(a) => a,
+			other => return Err(mismatch(engine, span, "alignment", &other)),
+		};
+		// A side is one of left, right, top and bottom; `to` names the side a direction travels to.
+		let d = match (a.x, a.y) {
+			(Some(HAlign::Left), None)		=> Direction::Ltr,
+			(Some(HAlign::Right), None)		=> Direction::Rtl,
+			(None, Some(VAlign::Top))		=> Direction::Ttb,
+			(None, Some(VAlign::Bottom))	=> Direction::Btt,
+			_ => return Err(engine.error(span, "expected `left`, `right`, `top`, or `bottom`")),
+		};
+		return Ok(Value::Direction(if f == GeomFn::To { inv_dir(d) } else { d }));
+	}
 	let recv = res!(receiver(&mut args));
+	let ty = recv.ty();
+	if !method_types(f).contains(&ty) {
+		return Err(no_method(engine, span, ty, f.name()));
+	}
 	let out = match (f, &recv) {
 		(GeomFn::Pt, Value::Length(l))		=> Value::Float(res!(pt_of(engine, span, l, "pt"))),
 		(GeomFn::Mm, Value::Length(l))		=> Value::Float(res!(pt_of(engine, span, l, "mm")) / 72.0 * 25.4),
@@ -184,8 +226,6 @@ pub fn call(f: GeomFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			Direction::Ltr | Direction::Ttb	=> 1,
 			_								=> -1,
 		}),
-		(GeomFn::X, Value::Alignment(a))	=> a.x.map(|x| Value::Alignment(Alignment { x: Some(x), y: None })).unwrap_or(Value::None),
-		(GeomFn::Y, Value::Alignment(a))	=> a.y.map(|y| Value::Alignment(Alignment { x: None, y: Some(y) })).unwrap_or(Value::None),
 		(_, other) => return Err(mismatch(engine, span, "length, angle, alignment, or direction", other)),
 	};
 	res!(finish(engine, args));

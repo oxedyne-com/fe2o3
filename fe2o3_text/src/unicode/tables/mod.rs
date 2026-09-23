@@ -16,6 +16,7 @@
 pub mod bidi;
 pub mod cat;
 pub mod lb;
+pub mod math;
 pub mod norm;
 pub mod prop;
 pub mod seg;

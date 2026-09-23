@@ -34,7 +34,6 @@ use crate::eval::lib::{
 	string,
 	sym,
 };
-use crate::eval::lib;
 use crate::eval::scope::Scope;
 use crate::eval::select::Selector;
 use crate::eval::value::{
@@ -91,23 +90,20 @@ native_fns! {
 		Plugin			=> "plugin",
 		Decimal			=> "decimal",
 		Target			=> "target",
-		VersionAt		=> "at",
-		BytesLen		=> "len",
-		BytesAt			=> "at",
-		BytesSlice		=> "slice",
-		IntSignum		=> "signum",
+		At				=> "at",
+		Len				=> "len",
+		Slice			=> "slice",
+		Signum			=> "signum",
 		IntBitNot		=> "bit-not",
 		IntBitAnd		=> "bit-and",
 		IntBitOr		=> "bit-or",
 		IntBitXor		=> "bit-xor",
 		IntBitLshift	=> "bit-lshift",
 		IntBitRshift	=> "bit-rshift",
-		IntToBytes		=> "to-bytes",
+		ToBytes			=> "to-bytes",
 		IntFromBytes	=> "from-bytes",
 		FloatIsNan		=> "is-nan",
 		FloatIsInfinite	=> "is-infinite",
-		FloatSignum		=> "signum",
-		FloatToBytes	=> "to-bytes",
 		FloatFromBytes	=> "from-bytes",
 	}
 }
@@ -138,9 +134,17 @@ fn native(f: FoundFn) -> Value { Value::Func(Func::Native(NativeFunc::Found(f)))
 
 fn sys_module() -> Module {
 	let mut s = Scope::new();
-	s.define("version", Value::Version(Arc::new(TYPST_VERSION.to_vec())));
-	s.define("inputs", Value::dict(Dict::new()));
+	define_nth(&mut s, 0, "version", Value::Version(Arc::new(TYPST_VERSION.to_vec())));
+	define_nth(&mut s, 1, "inputs", Value::dict(Dict::new()));
 	Module::new("sys", s)
+}
+
+/// Binds the `n`th member of a native module. The binding's detached span carries the ordinal, so
+/// `dictionary(module)`, which orders a module's bindings by where they were bound, lists a native
+/// module in Typst's definition order.
+pub fn define_nth(scope: &mut Scope, n: usize, name: &str, value: Value) {
+	let at = n as u32;
+	scope.define_at(name, value, Span { file: crate::syntax::FileId::DETACHED, start: at, end: at });
 }
 
 /// What calling a type value runs: `int("3")`, `datetime(..)`, `counter(heading)`. `None` for a type
@@ -150,6 +154,7 @@ pub fn constructor(ty: Type) -> Option<NativeFunc> {
 	use crate::eval::lib::visual::VisualFn;
 	use crate::eval::select::StyleFn;
 	match ty {
+		Type::Bool		=> Some(NativeFunc::Found(FoundFn::Bool)),
 		Type::Int		=> Some(NativeFunc::Found(FoundFn::Int)),
 		Type::Float		=> Some(NativeFunc::Found(FoundFn::Float)),
 		Type::Str		=> Some(NativeFunc::Found(FoundFn::Str)),
@@ -173,50 +178,64 @@ pub fn constructor(ty: Type) -> Option<NativeFunc> {
 	}
 }
 
-/// The method `name` on a receiver of type `ty`: the one table the evaluator's method call and a type's
-/// unbound methods (`str.len("ab")`) both read.
-pub fn method(ty: Type, name: &str) -> Option<NativeFunc> {
-	match ty {
-		Type::Str		=> string::method(name).map(NativeFunc::Str),
-		Type::Array		=> array::method(name).map(NativeFunc::Array),
-		Type::Dict		=> dict::method(name).map(NativeFunc::Dict),
-		Type::Color		=> color::method(name).map(NativeFunc::Color),
-		Type::Gradient	=> color::gradient_method(name).map(NativeFunc::Color),
-		Type::Datetime	=> datetime::method(name).map(NativeFunc::Datetime),
-		Type::Duration	=> datetime::duration_method(name).map(NativeFunc::Datetime),
-		Type::Symbol	=> sym::method(name).map(NativeFunc::Sym),
-		Type::Length | Type::Angle | Type::Ratio | Type::Relative | Type::Fraction
-			| Type::Alignment | Type::Direction => geom::method(ty, name).map(NativeFunc::Geom),
-		Type::Selector	=> crate::eval::select::method(name).map(NativeFunc::Style),
-		Type::Counter | Type::State | Type::Location
-						=> lib::intro::method(name).map(NativeFunc::Intro),
-		Type::Int | Type::Float | Type::Version | Type::Bytes
-						=> found_method(ty, name).map(NativeFunc::Found),
+/// A value that can be called: a function, or a type with a constructor (`(1, 2).map(str)`).
+pub fn as_func(v: &Value) -> Option<Func> {
+	match v {
+		Value::Func(f)	=> Some(f.clone()),
+		Value::Type(t)	=> constructor(*t).map(Func::Native),
 		_				=> None,
 	}
 }
 
-fn found_method(ty: Type, name: &str) -> Option<FoundFn> {
-	let f = match (ty, name) {
-		(Type::Int, "signum")			=> FoundFn::IntSignum,
-		(Type::Int, "bit-not")			=> FoundFn::IntBitNot,
-		(Type::Int, "bit-and")			=> FoundFn::IntBitAnd,
-		(Type::Int, "bit-or")			=> FoundFn::IntBitOr,
-		(Type::Int, "bit-xor")			=> FoundFn::IntBitXor,
-		(Type::Int, "bit-lshift")		=> FoundFn::IntBitLshift,
-		(Type::Int, "bit-rshift")		=> FoundFn::IntBitRshift,
-		(Type::Int, "to-bytes")			=> FoundFn::IntToBytes,
-		(Type::Float, "is-nan")			=> FoundFn::FloatIsNan,
-		(Type::Float, "is-infinite")	=> FoundFn::FloatIsInfinite,
-		(Type::Float, "signum")			=> FoundFn::FloatSignum,
-		(Type::Float, "to-bytes")		=> FoundFn::FloatToBytes,
-		(Type::Version, "at")			=> FoundFn::VersionAt,
-		(Type::Bytes, "len")			=> FoundFn::BytesLen,
-		(Type::Bytes, "at")				=> FoundFn::BytesAt,
-		(Type::Bytes, "slice")			=> FoundFn::BytesSlice,
-		_								=> return None,
+/// The type whose constructor `f` is, for a constructor function's scope (`str.from-unicode` read
+/// through a function bound to `str`).
+pub fn constructed_type(f: NativeFunc) -> Option<Type> {
+	const TYPES: [Type; 20] = [
+		Type::Bool, Type::Int, Type::Float, Type::Str, Type::Label, Type::Regex, Type::Version,
+		Type::Bytes, Type::Args, Type::Type, Type::Array, Type::Dict, Type::Datetime, Type::Duration,
+		Type::Symbol, Type::Stroke, Type::Tiling, Type::Selector, Type::Counter, Type::State,
+	];
+	TYPES.iter().copied().find(|t| constructor(*t) == Some(f))
+}
+
+/// The methods of int, float, version and bytes, by name. A name several of these types share (`at`,
+/// `signum`, `to-bytes`) is one function that dispatches on its receiver.
+pub fn method(name: &str) -> Option<FoundFn> {
+	let f = match name {
+		"at"			=> FoundFn::At,
+		"len"			=> FoundFn::Len,
+		"slice"			=> FoundFn::Slice,
+		"signum"		=> FoundFn::Signum,
+		"bit-not"		=> FoundFn::IntBitNot,
+		"bit-and"		=> FoundFn::IntBitAnd,
+		"bit-or"		=> FoundFn::IntBitOr,
+		"bit-xor"		=> FoundFn::IntBitXor,
+		"bit-lshift"	=> FoundFn::IntBitLshift,
+		"bit-rshift"	=> FoundFn::IntBitRshift,
+		"to-bytes"		=> FoundFn::ToBytes,
+		"is-nan"		=> FoundFn::FloatIsNan,
+		"is-infinite"	=> FoundFn::FloatIsInfinite,
+		_				=> return None,
 	};
 	Some(f)
+}
+
+// The receiver types each method of this area accepts.
+fn method_types(f: FoundFn) -> &'static [Type] {
+	match f {
+		FoundFn::At					=> &[Type::Version, Type::Bytes],
+		FoundFn::Len | FoundFn::Slice	=> &[Type::Bytes],
+		FoundFn::Signum | FoundFn::ToBytes	=> &[Type::Int, Type::Float],
+		FoundFn::IntBitNot | FoundFn::IntBitAnd | FoundFn::IntBitOr | FoundFn::IntBitXor
+			| FoundFn::IntBitLshift | FoundFn::IntBitRshift	=> &[Type::Int],
+		FoundFn::FloatIsNan | FoundFn::FloatIsInfinite	=> &[Type::Float],
+		_							=> &[],
+	}
+}
+
+/// "type integer has no method `is-nan`": a method reached through a name another type owns.
+pub fn no_method(engine: &mut Engine, span: Span, ty: Type, name: &str) -> Error<ErrTag> {
+	engine.error(span, fmt!("type {} has no method `{}`", crate::eval::ops::long_name(ty), name))
 }
 
 /// `ty.name`: a type's static members (`float.inf`, `str.from-unicode`, `color.hsl`, `datetime.today`),
@@ -234,11 +253,13 @@ pub fn type_scope(ty: Type, name: &str) -> Option<Value> {
 		(Type::Gradient, _)					=> color::gradient_static(name),
 		(Type::Datetime, "today")			=> Some(Value::Func(Func::Native(
 			NativeFunc::Datetime(datetime::DatetimeFn::Today)))),
+		(Type::Direction, _)				=> geom::type_static(ty, name)
+			.map(|f| Value::Func(Func::Native(NativeFunc::Geom(f)))),
 		_									=> None,
 	};
 	match stat {
 		Some(v)	=> Some(v),
-		None	=> method(ty, name).map(|f| Value::Func(Func::Native(f))),
+		None	=> crate::eval::methods::type_method(ty, name).map(|f| Value::Func(Func::Native(f))),
 	}
 }
 
@@ -420,6 +441,15 @@ pub fn str_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<String>>
 
 pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	let types = method_types(f);
+	let recv_ty = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value.ty());
+	if !types.is_empty() {
+		if let Some(ty) = recv_ty {
+			if !types.contains(&ty) {
+				return Err(no_method(engine, span, ty, f.name()));
+			}
+		}
+	}
 	let v = match f {
 		FoundFn::Type => {
 			let v = res!(need(engine, &mut args, "value"));
@@ -576,7 +606,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			res!(finish(engine, args));
 			Value::str("paged")
 		}
-		FoundFn::VersionAt => {
+		FoundFn::At if recv_ty == Some(Type::Version) => {
 			let v = res!(receiver(&mut args));
 			let i = res!(need(engine, &mut args, "index"));
 			let i = res!(int_of(engine, span, i));
@@ -592,12 +622,12 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			}
 			Value::Int(parts.get(idx as usize).copied().unwrap_or(0) as i64)
 		}
-		FoundFn::BytesLen => {
+		FoundFn::Len => {
 			let b = res!(bytes_recv(engine, &mut args));
 			res!(finish(engine, args));
 			Value::Int(b.len() as i64)
 		}
-		FoundFn::BytesAt => {
+		FoundFn::At => {
 			let b = res!(bytes_recv(engine, &mut args));
 			let i = res!(need(engine, &mut args, "index"));
 			let i = res!(int_of(engine, span, i));
@@ -613,13 +643,13 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				},
 			}
 		}
-		FoundFn::BytesSlice => {
+		FoundFn::Slice => {
 			let b = res!(bytes_recv(engine, &mut args));
 			let (s, e) = res!(slice_bounds(engine, &mut args, b.len(), "byte", |_| true));
 			res!(finish(engine, args));
 			Value::Bytes(Arc::new(b[s..e].to_vec()))
 		}
-		FoundFn::IntSignum => {
+		FoundFn::Signum if recv_ty == Some(Type::Int) => {
 			let i = res!(int_recv(engine, &mut args));
 			res!(finish(engine, args));
 			Value::Int(i.signum())
@@ -670,7 +700,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Value::Int(i >> n)
 			}
 		}
-		FoundFn::IntToBytes => {
+		FoundFn::ToBytes if recv_ty == Some(Type::Int) => {
 			let i = res!(int_recv(engine, &mut args));
 			let big = res!(endian(engine, &mut args));
 			let size = match res!(args.named::<Value>("size")) {
@@ -723,12 +753,12 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			res!(finish(engine, args));
 			Value::Bool(x.is_infinite())
 		}
-		FoundFn::FloatSignum => {
+		FoundFn::Signum => {
 			let x = res!(float_recv(engine, &mut args));
 			res!(finish(engine, args));
 			Value::Float(x.signum())
 		}
-		FoundFn::FloatToBytes => {
+		FoundFn::ToBytes => {
 			let x = res!(float_recv(engine, &mut args));
 			let big = res!(endian(engine, &mut args));
 			let size = match res!(args.named::<Value>("size")) {

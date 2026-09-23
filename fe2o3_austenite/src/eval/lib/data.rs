@@ -778,39 +778,82 @@ fn xml_value(engine: &mut Engine, span: Span, text: &str) -> Outcome<Value> {
 		Err(e)	=> return Err(engine.error(span, fmt!("failed to parse XML ({})",
 			e.msgs().last().cloned().unwrap_or_default()))),
 	};
-	fn node(doc: &Xml, n: &Node) -> Option<Value> {
+	// Typst reads XML through roxmltree, whose tree this reproduces: adjacent text and CDATA merge
+	// into one string, a comment or a processing instruction is a node with an empty tag, and the XML
+	// declaration and the document type are not nodes at all.
+	fn empty_node() -> Value {
+		let mut d = Dict::new();
+		d.insert("namespace", Value::None);
+		d.insert("tag", Value::str(""));
+		d.insert("attrs", Value::dict(Dict::new()));
+		d.insert("children", Value::array(Vec::new()));
+		Value::dict(d)
+	}
+	fn is_decl(doc: &Xml, n: &Node) -> bool {
 		match n {
-			Node::Elem(e) => {
-				let mut d = Dict::new();
-				d.insert("namespace", match e.name.ns.and_then(|i| doc.uris().get(i)) {
-					Some(u)	=> Value::str(u.as_str()),
-					None	=> Value::None,
-				});
-				d.insert("tag", Value::str(e.name.local()));
-				let mut attrs = Dict::new();
-				for a in &e.attrs {
-					if a.name.qname == "xmlns" || a.name.qname.starts_with("xmlns:") {
-						continue;
-					}
-					attrs.insert(a.name.local(), Value::str(oxedyne_fe2o3_text::xml::write::decode(&a.value)));
-				}
-				d.insert("attrs", Value::dict(attrs));
-				let kids: Vec<Value> = e.kids.iter().filter_map(|k| node(doc, k)).collect();
-				d.insert("children", Value::array(kids));
-				Some(Value::dict(d))
-			}
-			Node::Text(s) => Some(Value::str(doc.text(s))),
-			Node::CData(s) => {
+			Node::Pi(s)		=> {
 				let raw = doc.raw(s);
-				let inner = raw.strip_prefix("<![CDATA[").and_then(|r| r.strip_suffix("]]>")).unwrap_or(raw);
-				Some(Value::str(inner))
+				raw.starts_with("<?xml") && raw[5..].starts_with(|c: char| c.is_whitespace() || c == '?')
 			}
-			_ => None,
+			Node::DocType(_)	=> true,
+			_				=> false,
 		}
 	}
-	let out: Vec<Value> = doc.nodes.iter().filter(|n| matches!(n, Node::Elem(_)))
-		.filter_map(|n| node(&doc, n)).collect();
-	Ok(Value::array(out))
+	fn children(doc: &Xml, nodes: &[Node], top: bool) -> Vec<Value> {
+		let mut out = Vec::new();
+		let mut text: Option<String> = None;
+		for n in nodes {
+			let piece = match n {
+				Node::Text(s)	=> Some(doc.text(s).to_string()),
+				Node::CData(s)	=> {
+					let raw = doc.raw(s);
+					Some(raw.strip_prefix("<![CDATA[").and_then(|r| r.strip_suffix("]]>")).unwrap_or(raw).to_string())
+				}
+				_				=> None,
+			};
+			match piece {
+				Some(p) => {
+					if !top {
+						text.get_or_insert_with(String::new).push_str(&p);
+					}
+					continue;
+				}
+				None => if let Some(t) = text.take() {
+					out.push(Value::str(t));
+				},
+			}
+			if is_decl(doc, n) {
+				continue;
+			}
+			out.push(match n {
+				Node::Elem(e)	=> elem(doc, e),
+				_				=> empty_node(),
+			});
+		}
+		if let Some(t) = text.take() {
+			out.push(Value::str(t));
+		}
+		out
+	}
+	fn elem(doc: &Xml, e: &oxedyne_fe2o3_text::xml::Elem) -> Value {
+		let mut d = Dict::new();
+		d.insert("namespace", match e.name.ns.and_then(|i| doc.uris().get(i)) {
+			Some(u)	=> Value::str(u.as_str()),
+			None	=> Value::None,
+		});
+		d.insert("tag", Value::str(e.name.local()));
+		let mut attrs = Dict::new();
+		for a in &e.attrs {
+			if a.name.qname == "xmlns" || a.name.qname.starts_with("xmlns:") {
+				continue;
+			}
+			attrs.insert(a.name.local(), Value::str(oxedyne_fe2o3_text::xml::write::decode(&a.value)));
+		}
+		d.insert("attrs", Value::dict(attrs));
+		d.insert("children", Value::array(children(doc, &e.kids, false)));
+		Value::dict(d)
+	}
+	Ok(Value::array(children(&doc, &doc.nodes, true)))
 }
 
 // CBOR
@@ -864,11 +907,11 @@ impl<'a> CborReader<'a> {
 		let (major, info) = (ib >> 5, ib & 0x1f);
 		match major {
 			0 => {
-				let n = res!(self.arg(info))res!(.ok_or_else(|| err!("indefinite integer"; Decode, Input)));
+				let n = res!(res!(self.arg(info)).ok_or_else(|| err!("indefinite integer"; Decode, Input)));
 				i64::try_from(n).map(Value::Int).map_err(|_| err!("integer too large"; Decode, Input))
 			}
 			1 => {
-				let n = res!(self.arg(info))res!(.ok_or_else(|| err!("indefinite integer"; Decode, Input)));
+				let n = res!(res!(self.arg(info)).ok_or_else(|| err!("indefinite integer"; Decode, Input)));
 				i64::try_from(n).map(|x| Value::Int(-1 - x)).map_err(|_| err!("integer too large"; Decode, Input))
 			}
 			2 | 3 => {
@@ -884,7 +927,7 @@ impl<'a> CborReader<'a> {
 						if ib2 >> 5 != major {
 							return Err(err!("invalid chunk in indefinite string"; Decode, Input));
 						}
-						let n = res!(self.arg(ib2 & 0x1f))res!(.ok_or_else(|| err!("nested indefinite string"; Decode, Input)));
+						let n = res!(res!(self.arg(ib2 & 0x1f)).ok_or_else(|| err!("nested indefinite string"; Decode, Input)));
 						buf.extend_from_slice(res!(self.take(n as usize)));
 					},
 				}
@@ -1178,13 +1221,13 @@ fn toml_document(p: &mut Toml) -> Outcome<Value> {
 fn toml_current<'t>(root: &'t mut TTable, path: &[String]) -> Option<&'t mut TTable> {
 	let mut t = root;
 	for k in path {
-		t = match res!(t.get_mut(k)) {
-			TVal::Table(x)		=> x,
-			TVal::Array(a, _)	=> match res!(a.last_mut()) {
-				TVal::Table(x)	=> x,
-				_				=> return None,
+		t = match t.get_mut(k) {
+			Some(TVal::Table(x))		=> x,
+			Some(TVal::Array(a, _))	=> match a.last_mut() {
+				Some(TVal::Table(x))	=> x,
+				_						=> return None,
 			},
-			TVal::Val(_)		=> return None,
+			_						=> return None,
 		};
 	}
 	Some(t)
@@ -1974,10 +2017,15 @@ impl<'a> Yaml<'a> {
 	}
 
 	// A node starting at the current line, which sits at column `col`.
-	fn item(&mut self, col: usize) -> Outcome<Value> {
-		let l = self.lines[self.i].clone();
+	// A sequence item's content starting on the dash's line, at column `col`; a block scalar there is
+	// indented relative to the sequence's own indentation `parent`, not to the item's column.
+	fn item(&mut self, col: usize, parent: usize) -> Outcome<Value> {
+		let l = match self.lines.get(self.i) {
+			Some(l)	=> l.clone(),
+			None	=> return Ok(Value::None),
+		};
 		let t = strip_comment(l.text);
-		if let Some(v) = res!(self.block_scalar(t, col)) {
+		if let Some(v) = res!(self.block_scalar(t, parent)) {
 			return Ok(v);
 		}
 		self.block(col)

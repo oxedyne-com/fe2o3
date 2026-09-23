@@ -80,13 +80,14 @@ native_fns! {
 
 pub fn define(scope: &mut Scope) {
 	let mut s = Scope::new();
-	for f in CalcFn::ALL {
-		s.define(f.name(), Value::Func(Func::Native(NativeFunc::Calc(*f))));
+	for (n, f) in CalcFn::ALL.iter().enumerate() {
+		crate::eval::lib::foundations::define_nth(&mut s, n, f.name(), Value::Func(Func::Native(NativeFunc::Calc(*f))));
 	}
-	s.define("inf", Value::Float(f64::INFINITY));
-	s.define("pi", Value::Float(std::f64::consts::PI));
-	s.define("tau", Value::Float(std::f64::consts::TAU));
-	s.define("e", Value::Float(std::f64::consts::E));
+	let n = CalcFn::ALL.len();
+	crate::eval::lib::foundations::define_nth(&mut s, n, "inf", Value::Float(f64::INFINITY));
+	crate::eval::lib::foundations::define_nth(&mut s, n + 1, "pi", Value::Float(std::f64::consts::PI));
+	crate::eval::lib::foundations::define_nth(&mut s, n + 2, "tau", Value::Float(std::f64::consts::TAU));
+	crate::eval::lib::foundations::define_nth(&mut s, n + 3, "e", Value::Float(std::f64::consts::E));
 	scope.define("calc", Value::Module(Arc::new(Module::new("calc", s))));
 }
 
