@@ -849,9 +849,10 @@ table.steel-table td.status.chip-server   { color: var(--red); }
     color:          var(--text-muted);
 }
 
+/* Red is the watcher's own call, the one that alarms. A sealed peer still answers, so
+   nothing alarms on the word; its Seal cell is coloured where a threshold judges it. */
 .fleet-state-up         { color: var(--green); }
 .fleet-state-distressed { color: var(--amber); }
-.fleet-state-sealed,
 .fleet-state-down       { color: var(--red); }
 
 .fleet-row-meta {
