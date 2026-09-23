@@ -14,7 +14,8 @@ Usage:
     linkring_oracle.py selftest
     linkring_oracle.py sign   < cases     (case blocks, see parse_blocks)
     linkring_oracle.py verify < cases
-    linkring_oracle.py vectors            (writes golden vectors to stdout)
+
+The vectors in tests/data/linkring_vectors.txt are `sign` output.
 """
 import hashlib
 import sys
@@ -417,19 +418,19 @@ RFC9496_MULTIPLES = [
 ]
 
 
-def selftest():
+def selftest(out=sys.stdout):
     acc = IDENT
     for i, want in enumerate(RFC9496_MULTIPLES):
         got = encode(acc).hex()
         if got != want:
-            print(f"FAIL multiple {i}: {got} != {want}")
+            print(f"FAIL multiple {i}: {got} != {want}", file=out)
             return 1
         rt = decode(bytes.fromhex(want))
         if rt is None or not eq(rt, acc):
-            print(f"FAIL decode {i}")
+            print(f"FAIL decode {i}", file=out)
             return 1
         acc = add(acc, G)
-    print("selftest ok")
+    print("selftest ok", file=out)
     return 0
 
 # ── Block I/O ───────────────────────────────────────────────────────────────
@@ -469,7 +470,7 @@ def main():
     mode = sys.argv[1] if len(sys.argv) > 1 else "selftest"
     if mode == "selftest":
         return selftest()
-    if selftest() != 0:
+    if selftest(sys.stderr) != 0:
         return 1
     if mode == "sign":
         for c in parse_blocks(sys.stdin.read()):
