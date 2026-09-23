@@ -398,6 +398,13 @@ impl<
             // while they were still stopping, and the next open could bring up a second set over
             // the same files (2026-09-23).  Their stopping is start-up work, held to the control
             // deadline like the rest of it.
+            if sentinel.was_interrupted() {
+                // A supervisor that panicked stops nothing, so there is nothing to wait for.
+                return Err(err!(e,
+                    "{}: The database did not start, and its supervisor panicked, leaving the \
+                    bots it had brought up running.", self.ozid();
+                    Init, Thread, Panic));
+            }
             if let Some(wg) = wg {
                 if !res!(Self::await_stopped(wg, constant::CONTROL_REQUEST_TIMEOUT)) {
                     return Err(err!(e,
