@@ -468,15 +468,11 @@ pub const EMBEDDED_FAMILIES: [&str; 3] = [
 	"New Computer Modern Math",
 ];
 
-// The weight/slant suffixes the named-face resolver loads, `<Family>-<Variant>.{ttf,otf}`.
-const FACE_VARIANTS: [&str; 4] = ["Regular", "Bold", "Italic", "BoldItalic"];
-
-/// The font families a compile of the project rooted at `main` can set: the embedded families, then each
-/// injected font's family that the engine's own face resolver actually loads, sorted and deduplicated.
-/// `injected` are the paths the consumer gave its fonts under; each is looked for where the wasm surface
-/// routes it ([`book::project_font_path`]), so the source map must be installed as a compile installs it.
-/// A file not named `<Family>-<Variant>.{ttf,otf}`, or one that will not parse, is not a family the engine
-/// can resolve by name, so it is not listed.
+/// The font families a compile of the project rooted at `main` can set: the embedded families, then every
+/// family each face of each injected font file declares in its own name table, as the resolver matches
+/// them, sorted and deduplicated. `injected` are the paths the consumer gave its fonts under; each is read
+/// where the wasm surface routes it ([`book::project_font_path`]), so the source map must be installed as
+/// a compile installs it.
 pub fn font_families(main: &Path, injected: &[PathBuf]) -> Vec<String> {
 	let mut out: Vec<String> = fonts::embedded_families();
 	for given in injected {
@@ -484,37 +480,19 @@ pub fn font_families(main: &Path, injected: &[PathBuf]) -> Vec<String> {
 			Some(p)	=> p,
 			None	=> continue,
 		};
-		let family = match face_family(&routed) {
-			Some(f)	=> f,
-			None	=> continue,
+		let bytes = match vfs::read(&routed) {
+			Ok(b)	=> b,
+			Err(_)	=> continue,
 		};
-		let dir = routed.parent().unwrap_or_else(|| Path::new("/"));
-		// SWITCH: the one call site to move to the font lane's family-list accessor on `FaceResolver`
-		// once it lands; until then a family counts when the resolver itself loads it by that name.
-		if FaceResolver::load(dir, &[family.clone()]).resolves(&family) {
-			out.push(family);
-		}
+		let families = match fonts::declared_families(&bytes) {
+			Ok(f)	=> f,
+			Err(_)	=> continue,
+		};
+		out.extend(families);
 	}
 	out.sort();
 	out.dedup();
 	out
-}
-
-/// The family named by a `<Family>-<Variant>.{ttf,otf}` file, or `None` for any other name.
-fn face_family(path: &Path) -> Option<String> {
-	let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-	if !matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
-		return None;
-	}
-	let stem = match path.file_stem().and_then(|s| s.to_str()) {
-		Some(s)	=> s,
-		None	=> return None,
-	};
-	match stem.rsplit_once('-') {
-		Some((family, variant)) if !family.is_empty() && FACE_VARIANTS.contains(&variant)
-			=> Some(family.to_string()),
-		_	=> None,
-	}
 }
 
 /// The crate version, as released.

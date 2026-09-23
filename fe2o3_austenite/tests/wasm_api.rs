@@ -228,21 +228,38 @@ fn embedded_families_are_the_names_in_the_font_files() -> Outcome<()> {
 	Ok(())
 }
 
+/// `fontFamilies()` (`compile::font_families`) must report the family a font file *declares in its own
+/// name table*, never one guessed from the file's own name (M3): a file named `<Family>-<Variant>` that
+/// declares something else lists the declared name, and a file with no such name (`felipa.ttf`'s own
+/// shape) is no longer excluded for lacking one.
 #[test]
-fn injected_families_are_listed_only_when_the_resolver_loads_them() -> Outcome<()> {
+fn injected_families_are_read_from_content_not_the_file_name() -> Outcome<()> {
 	let _turn = turn();
-	let face = res!(std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf")));
+	let libertinus = res!(std::fs::read(
+		PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf")));
+	let noto = res!(std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+		.join("..").join("fe2o3_font").join("fonts").join("NotoSans-Regular.ttf")));
 	let main = PathBuf::from(MAIN);
 	let given = [
-		PathBuf::from("/fonts/Testface-Regular.otf"),	// a usable face under an arbitrary path
-		PathBuf::from("Otherface-Bold.ttf"),			// a bare basename, bold only
-		PathBuf::from("/fonts/Broken-Regular.ttf"),		// will not parse
-		PathBuf::from("/fonts/nameless.otf"),			// no <Family>-<Variant> name
+		// Named as though it were "Otherface", but its bytes declare Noto Sans -- proves the list is not
+		// read from the file name.
+		PathBuf::from("/fonts/Otherface-Bold.ttf"),
+		// No `<Family>-<Variant>` shape at all -- felipa.ttf's own shape -- yet declares Libertinus Serif.
+		PathBuf::from("/fonts/nameless.otf"),
+		// Will not parse as a font at all, so it contributes nothing either way.
+		PathBuf::from("/fonts/Broken-Regular.ttf"),
 	];
 	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 	map.insert(main.clone(), b"= H\n".to_vec());
 	for g in &given {
-		let bytes = if g.to_string_lossy().contains("Broken") { b"not a font".to_vec() } else { face.clone() };
+		let name = g.to_string_lossy();
+		let bytes = if name.contains("Otherface") {
+			noto.clone()
+		} else if name.contains("Broken") {
+			b"not a font".to_vec()
+		} else {
+			libertinus.clone()
+		};
 		// Installed as the wasm surface installs a font: at the given path and at the resolver's path.
 		if let Some(routed) = oxedyne_fe2o3_austenite::book::project_font_path(&main, g) {
 			map.insert(routed, bytes.clone());
@@ -257,10 +274,65 @@ fn injected_families_are_listed_only_when_the_resolver_loads_them() -> Outcome<(
 	let mut want: Vec<String> = compile::EMBEDDED_FAMILIES.iter().map(|s| s.to_string()).collect();
 	want.sort();
 	assert_eq!(bare, want, "with nothing injected only the embedded families are listed");
-	want.push("Otherface".to_string());
-	want.push("Testface".to_string());
-	want.sort();
-	assert_eq!(families, want);
+
+	// Noto Sans is new; Libertinus Serif was already embedded, so the nameless file's declared family
+	// changes nothing observable in the list besides no longer being silently dropped from the read.
+	let mut want_injected = want.clone();
+	want_injected.push("Noto Sans".to_string());
+	want_injected.sort();
+	want_injected.dedup();
+	assert_eq!(families, want_injected, "families are read from content, never guessed from a file name");
+	assert!(!families.iter().any(|f| f == "Otherface"), "the misleading file name must not appear: {:?}", families);
+	Ok(())
+}
+
+/// The PostScript names `pdffonts` reads from a PDF's embedded fonts, subset tags removed.
+fn pdffonts_names(pdf: &[u8], name: &str) -> Outcome<Vec<String>> {
+	let path = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(fmt!("{}.pdf", name));
+	res!(std::fs::write(&path, pdf));
+	let out = res!(Command::new("pdffonts").arg(&path).output());
+	let text = res!(String::from_utf8(out.stdout));
+	Ok(text.lines().skip(2)
+		.filter_map(|l| l.split_whitespace().next())
+		.map(|n| n.split_once('+').map_or(n, |(_, rest)| rest).to_string())
+		.collect())
+}
+
+/// Every family the list names is one a compile sets, the faces of a collection included: the list and
+/// the resolver read the same name tables.
+#[test]
+fn every_listed_family_is_set_by_a_compile_including_a_collections_faces() -> Outcome<()> {
+	let _turn = turn();
+	let dir		= PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("fe2o3_font").join("fonts");
+	let noto	= res!(std::fs::read(dir.join("NotoSans-Regular.ttf")));
+	let mono	= res!(std::fs::read(dir.join("DejaVuSansMono.ttf")));
+	let ttc		= res!(oxedyne_fe2o3_graphics::pdf_font::collection_of(&[&noto, &mono]));
+	let main	= PathBuf::from(MAIN);
+	let given	= PathBuf::from("/fonts/pair.ttc");
+	let routed	= match oxedyne_fe2o3_austenite::book::project_font_path(&main, &given) {
+		Some(p)	=> p,
+		None	=> return Err(err!("A font path with a file name must route somewhere."; Test)),
+	};
+
+	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	map.insert(main.clone(), b"= H\n".to_vec());
+	map.insert(routed.clone(), ttc.clone());
+	res!(vfs::install(map));
+	let families = compile::font_families(&main, &[given]);
+	res!(vfs::clear());
+	let injected: Vec<&String> = families.iter()
+		.filter(|f| !compile::EMBEDDED_FAMILIES.contains(&f.as_str()))
+		.collect();
+	assert_eq!(injected, ["DejaVu Sans Mono", "Noto Sans"], "one entry per face: {:?}", families);
+
+	let routed = routed.to_string_lossy().to_string();
+	for (family, postscript) in [("Noto Sans", "NotoSans-Regular"), ("DejaVu Sans Mono", "DejaVuSansMono")] {
+		let src = fmt!("#set text(font: \"{}\")\n\nHamburgefonts.\n", family);
+		let (report, pdf) = res!(done(res!(compile_pdf(&[(MAIN, src.as_bytes()), (routed.as_str(), ttc.as_slice())]))));
+		assert!(report.diagnostics.is_empty(), "{}: {:?}", family, report.diagnostics);
+		let fonts = res!(pdffonts_names(&pdf, &fmt!("wasm_api_ttc_{}", postscript)));
+		assert!(fonts.iter().any(|f| f == postscript), "{} is embedded from the collection: {:?}", family, fonts);
+	}
 	Ok(())
 }
 

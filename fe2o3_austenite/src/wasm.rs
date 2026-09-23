@@ -139,10 +139,10 @@ impl DaimondTypst {
 	}
 
 	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
-	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family of each
-	/// `project.fonts` entry named `<Family>-<Variant>.{ttf,otf}` that the engine's face resolver loads.
-	/// `project` is optional; with none, or with no fonts, only the embedded families are listed. For a
-	/// missing-font pre-check before a compile.
+	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family each face
+	/// of each `project.fonts` file declares, one per face of a `.ttc`. `project` is optional; with none, or
+	/// with no fonts, only the embedded families are listed. For a missing-font pre-check before a compile,
+	/// matching names as the engine does, ignoring case and white space.
 	#[wasm_bindgen(js_name = fontFamilies)]
 	pub fn font_families(&self, project: &JsValue) -> JsValue {
 		let main_path	= PathBuf::from(main_of(project));
@@ -506,10 +506,7 @@ fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<
 /// consumer named AND -- so the lone-file face resolver discovers it whatever path was chosen -- at the
 /// resolver's own `<root>/assets/fonts/<basename>` location (see [`book::project_font_path`]). Without the
 /// second placement an injected font is present in the map but invisible to the resolver, which reads only
-/// its own directory: a face the document names would silently fall back to the reading role. The consumer
-/// still names a usable face by its `<Family>-<Variant>.{ttf,otf}` basename and declares that family as a
-/// heading face; this makes such a font resolve regardless of the path it was injected under. Returns the
-/// paths as the consumer gave them.
+/// its own directory. Returns the paths as the consumer gave them.
 fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) -> Vec<PathBuf> {
 	let mut given_paths = Vec::new();
 	let arr = match array_field(project, "fonts") {

@@ -81,19 +81,50 @@ pub struct FaceInfo {
 	pub family:	String,	// the typographic family (name ID 16), else the legacy family (name ID 1)
 	pub weight:	u16,	// OS/2 weight class, 100-900; 400 regular, 700 bold
 	pub italic:	bool,	// italic or oblique
+	pub index:	u32,	// which face of its file: 0 but in a collection (`.ttc`)
 }
 
 impl FaceInfo {
 
 	/// Reads a font file's family, weight and slant without building a shaper, so a directory of fonts
-	/// can be indexed cheaply before any of them is needed.
+	/// can be indexed cheaply before any of them is needed. A collection answers for its first face.
 	pub fn read(bytes: &[u8]) -> Outcome<Self> {
-		let of = match OutlineFont::new(bytes) {
+		let of = match OutlineFont::from_index(bytes, 0) {
 			Ok(f) => f,
 			Err(e) => return Err(err!(
 				"The {} bytes given are not a font whose names can be read: {:?}.", bytes.len(), e;
 			Invalid, Input)),
 		};
+		Self::of_face(&of, 0, bytes.len())
+	}
+
+	/// Every face of a file, one for a lone font and one per face of a collection. A face naming no family
+	/// is left out rather than hiding its siblings; only a file with no readable face is an error.
+	pub fn read_all(bytes: &[u8]) -> Outcome<Vec<Self>> {
+		let mut out = Vec::new();
+		let mut last_err: Option<Error<ErrTag>> = None;
+		for i in 0.. {
+			let of = match OutlineFont::from_index(bytes, i) {
+				Ok(f)	=> f,
+				Err(_)	=> break,	// past the last face, or not a font at all
+			};
+			match Self::of_face(&of, i, bytes.len()) {
+				Ok(info)	=> out.push(info),
+				Err(e)		=> last_err = Some(e),
+			}
+		}
+		if out.is_empty() {
+			return Err(match last_err {
+				Some(e)	=> e,
+				None	=> err!(
+					"The {} bytes given are not a font whose names can be read.", bytes.len();
+				Invalid, Input),
+			});
+		}
+		Ok(out)
+	}
+
+	fn of_face(of: &OutlineFont, index: u32, len: usize) -> Outcome<Self> {
 		// The typographic family groups every weight and width under one name ("Noto Sans"), where the
 		// legacy family splits them four to a family ("Noto Sans SemiBold"); prefer it where present.
 		let family = of.localized_strings(StringId::TYPOGRAPHIC_FAMILY_NAME).english_or_first()
@@ -102,7 +133,7 @@ impl FaceInfo {
 		let family = match family {
 			Some(f) if !f.trim().is_empty() => f.trim().to_string(),
 			_ => return Err(err!(
-				"The font of {} bytes names no family in its name table.", bytes.len();
+				"Face {} of the {} byte font names no family in its name table.", index, len;
 			Invalid, Input, Missing)),
 		};
 		let attrs = of.attributes();
@@ -110,6 +141,7 @@ impl FaceInfo {
 			family,
 			weight:	attrs.weight.value().round().clamp(1.0, 1000.0) as u16,
 			italic:	!matches!(attrs.style, Style::Normal),
+			index,
 		})
 	}
 }
@@ -351,5 +383,65 @@ impl OutlinePen for Pen {
 
 	fn close(&mut self) {
 		self.pb.close();
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use oxedyne_fe2o3_graphics::pdf_font::{
+		collection_face,
+		collection_of,
+	};
+
+	const NOTO_SANS:	&[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
+	const DEJAVU_MONO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
+
+	#[test]
+	fn read_reads_the_family_weight_and_slant_from_the_name_table() -> Outcome<()> {
+		let info = res!(FaceInfo::read(NOTO_SANS));
+		assert_eq!(info, FaceInfo { family: "Noto Sans".to_string(), weight: 400, italic: false, index: 0 });
+		assert_eq!(res!(FaceInfo::read_all(NOTO_SANS)), vec![info], "a lone font is one face");
+		Ok(())
+	}
+
+	/// Every face a collection lists can be cut out and built into a face that shapes, so a family read
+	/// from a `.ttc` is one a document can be set in.
+	#[test]
+	fn every_face_of_a_collection_is_read_and_can_be_built() -> Outcome<()> {
+		let ttc = res!(collection_of(&[NOTO_SANS, DEJAVU_MONO]));
+		let all = res!(FaceInfo::read_all(&ttc));
+		let names: Vec<(&str, u32)> = all.iter().map(|i| (i.family.as_str(), i.index)).collect();
+		assert_eq!(names, vec![("Noto Sans", 0), ("DejaVu Sans Mono", 1)]);
+		assert_eq!(res!(FaceInfo::read(&ttc)), all[0], "a collection answers `read` for its first face");
+		assert!(Face::new(ttc.clone()).is_err(), "a collection is not itself one face");
+		for info in &all {
+			let face = res!(Face::new(res!(collection_face(&ttc, info.index as usize))));
+			let got = res!(face.info());
+			assert_eq!((got.family.as_str(), got.index), (info.family.as_str(), 0));
+			assert!(res!(face.shape("Hamburgefonts", 12.0, Dir::Ltr, 0, 0)).glyphs.len() > 0);
+			assert!(face.program().is_some(), "face {} embeds in a PDF", info.index);
+		}
+		Ok(())
+	}
+
+	/// A real collection, where the machine has one: Debian's `fonts-noto-cjk`, too large to check in.
+	#[test]
+	fn a_system_collection_lists_every_face() -> Outcome<()> {
+		let path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc";
+		let bytes = match std::fs::read(path) {
+			Ok(b)	=> b,
+			Err(_)	=> {
+				eprintln!("SKIP: {} is not installed, so the .ttc case cannot run.", path);
+				return Ok(());
+			},
+		};
+		let all = res!(FaceInfo::read_all(&bytes));
+		assert!(all.len() > 1, "several regional faces: {:?}", all);
+		for (i, info) in all.iter().enumerate() {
+			assert_eq!(info.index as usize, i);
+			assert!(!info.family.trim().is_empty(), "every face names a family: {:?}", all);
+		}
+		Ok(())
 	}
 }

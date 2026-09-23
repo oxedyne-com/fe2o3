@@ -273,10 +273,8 @@ pub fn lone_font_dir(root_dir: &Path) -> PathBuf {
 }
 
 /// Where an injected project font must sit for the lone-file [`face_resolver`] to discover it: the
-/// resolver's [`lone_font_dir`] joined with the font file's own basename, so `Radley-Regular.otf` injected
-/// under any path is found as the `Radley` face's Regular variant. `None` when `given` has no file name.
-/// The resolver keys a face on its `<Family>-<Variant>.{ttf,otf}` basename and the family name a document
-/// declares (a heading face), so the injected file's basename must follow that convention to be usable.
+/// resolver's [`lone_font_dir`] joined with the font file's own basename. `None` when `given` has no file
+/// name.
 pub fn project_font_path(main_path: &Path, given: &Path) -> Option<PathBuf> {
 	let root_dir = main_path.parent().unwrap_or(main_path);
 	given.file_name().map(|name| lone_font_dir(root_dir).join(name))

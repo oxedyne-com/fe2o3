@@ -127,7 +127,7 @@ impl FontProgram {
 		let d = &data[..];
 		let key = fingerprint(d);
 		let version = res!(rd_u32(d, 0));
-		if version == 0x7474_6366 {	// 'ttcf', a collection: its faces arrive one by one elsewhere
+		if version == TTCF {	// a collection: each face is cut out by `collection_face` first
 			return Ok(None);
 		}
 		let count = res!(rd_u16(d, 4)) as usize;
@@ -434,6 +434,91 @@ impl FontProgram {
 		}
 		Ok(write_sfnt(0x0001_0000, out_tables))
 	}
+}
+
+const TTCF: u32 = 0x7474_6366;	// 'ttcf', the tag a font collection opens with
+
+/// Does the file open as a font collection (`.ttc`)?
+pub fn is_collection(data: &[u8]) -> bool {
+	rd_u32(data, 0).map(|tag| tag == TTCF).unwrap_or(false)
+}
+
+/// Face `index` of a font collection as a lone `sfnt`, its tables copied out under a rebuilt directory,
+/// so a shaper, an outline reader and a PDF font file each read it as any other font. A lone font file is
+/// its own face 0 and comes back unchanged.
+pub fn collection_face(data: &[u8], index: usize) -> Outcome<Vec<u8>> {
+	if !is_collection(data) {
+		if index == 0 {
+			return Ok(data.to_vec());
+		}
+		return Err(err!("A lone font file holds one face, so it has no face {}.", index;
+			Invalid, Input, Range));
+	}
+	let count = res!(rd_u32(data, 8)) as usize;
+	if index >= count {
+		return Err(err!("The collection holds {} faces, so it has no face {}.", count, index;
+			Invalid, Input, Range));
+	}
+	let dir		= res!(rd_u32(data, 12 + 4 * index)) as usize;
+	let version	= res!(rd_u32(data, dir));
+	let n		= res!(rd_u16(data, dir + 4)) as usize;
+	let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::with_capacity(n);
+	for i in 0..n {
+		let rec		= dir + 12 + 16 * i;
+		let tag		= res!(slice(data, rec, 4));
+		let off		= res!(rd_u32(data, rec + 8)) as usize;
+		let len		= res!(rd_u32(data, rec + 12)) as usize;
+		let mut body = res!(slice(data, off, len)).to_vec();
+		if tag == b"head" {
+			// The whole-file adjustment belongs to the file the face now stands in, so it is taken afresh.
+			match body.get_mut(8..12) {
+				Some(adj)	=> adj.copy_from_slice(&[0, 0, 0, 0]),
+				None		=> return Err(err!("The head table is {} bytes, too short.", len;
+					Invalid, Input, Size)),
+			}
+		}
+		tables.push(([tag[0], tag[1], tag[2], tag[3]], body));
+	}
+	tables.sort_by(|a, b| a.0.cmp(&b.0));
+	Ok(write_sfnt(version, tables))
+}
+
+/// A collection of lone fonts, the inverse of [`collection_face`]: each font stored whole, its directory's
+/// offsets moved to where it now sits.
+pub fn collection_of(fonts: &[&[u8]]) -> Outcome<Vec<u8>> {
+	let head = 12 + 4 * fonts.len();
+	let mut body: Vec<u8> = Vec::new();
+	let mut dirs: Vec<u32> = Vec::with_capacity(fonts.len());
+	for f in fonts {
+		if is_collection(f) {
+			return Err(err!("A collection cannot hold another collection."; Invalid, Input));
+		}
+		let at = head + body.len();
+		dirs.push(at as u32);
+		let start = body.len();
+		body.extend_from_slice(f);
+		let n = res!(rd_u16(f, 4)) as usize;
+		for i in 0..n {
+			let rec = start + 12 + 16 * i + 8;
+			let off = res!(rd_u32(f, 12 + 16 * i + 8)) as usize + at;
+			match body.get_mut(rec..rec + 4) {
+				Some(slot)	=> slot.copy_from_slice(&(off as u32).to_be_bytes()),
+				None		=> return Err(err!("A font's table directory runs past its end."; Invalid, Input, Size)),
+			}
+		}
+		while body.len() % 4 != 0 {
+			body.push(0);
+		}
+	}
+	let mut out: Vec<u8> = Vec::with_capacity(head + body.len());
+	out.extend_from_slice(&TTCF.to_be_bytes());
+	out.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+	out.extend_from_slice(&(fonts.len() as u32).to_be_bytes());
+	for d in dirs {
+		out.extend_from_slice(&d.to_be_bytes());
+	}
+	out.extend_from_slice(&body);
+	Ok(out)
 }
 
 /// The sum of a table's big-endian words, zero padded, as `sfnt` checksums are taken.
@@ -1064,6 +1149,53 @@ mod tests {
 		assert_eq!(e[0].ints, vec![100, 200]);
 		assert_eq!(e[1].op, OP_ROS);
 		assert_eq!(e[1].ints, vec![1, 2, 0]);
+		Ok(())
+	}
+
+	const NOTO: &[u8] = include_bytes!("../../fe2o3_font/fonts/NotoSans-Regular.ttf");
+	const DEJAVU: &[u8] = include_bytes!("../../fe2o3_font/fonts/DejaVuSansMono.ttf");
+
+	/// Every table of a lone font, by tag, with `head`'s whole-file adjustment zeroed.
+	fn tables_of(font: &[u8]) -> Outcome<Vec<([u8; 4], Vec<u8>)>> {
+		let n = res!(rd_u16(font, 4)) as usize;
+		let mut out = Vec::with_capacity(n);
+		for i in 0..n {
+			let rec = 12 + 16 * i;
+			let tag = res!(slice(font, rec, 4));
+			let mut body = res!(slice(font, res!(rd_u32(font, rec + 8)) as usize,
+				res!(rd_u32(font, rec + 12)) as usize)).to_vec();
+			if tag == b"head" {
+				body[8..12].copy_from_slice(&[0, 0, 0, 0]);
+			}
+			out.push(([tag[0], tag[1], tag[2], tag[3]], body));
+		}
+		out.sort_by(|a, b| a.0.cmp(&b.0));
+		Ok(out)
+	}
+
+	#[test]
+	fn test_a_collection_face_is_the_font_it_was_made_from_02() -> Outcome<()> {
+		let ttc = res!(collection_of(&[NOTO, DEJAVU]));
+		assert!(is_collection(&ttc) && !is_collection(NOTO));
+		for (i, lone) in [NOTO, DEJAVU].iter().enumerate() {
+			let face = res!(collection_face(&ttc, i));
+			assert!(!is_collection(&face));
+			assert_eq!(res!(tables_of(&face)), res!(tables_of(lone)), "face {} keeps every table", i);
+			// The file it now stands in sums to the sfnt magic, as a lone font must.
+			assert_eq!(checksum(&face), 0xb1b0_afba, "face {} carries a whole-file adjustment", i);
+			let prog = match res!(FontProgram::parse(std::sync::Arc::new(face))) {
+				Some(p)	=> p,
+				None	=> return Err(err!("Face {} would not embed.", i; Test)),
+			};
+			let own = match res!(FontProgram::parse(std::sync::Arc::new(lone.to_vec()))) {
+				Some(p)	=> p,
+				None	=> return Err(err!("Font {} would not embed on its own.", i; Test)),
+			};
+			assert_eq!((prog.name.as_str(), prog.num_glyphs), (own.name.as_str(), own.num_glyphs));
+		}
+		assert!(collection_face(&ttc, 2).is_err(), "past the last face");
+		assert_eq!(res!(collection_face(NOTO, 0)), NOTO.to_vec(), "a lone font is its own face 0");
+		assert!(collection_face(NOTO, 1).is_err());
 		Ok(())
 	}
 }

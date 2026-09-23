@@ -21,6 +21,10 @@ use oxedyne_fe2o3_font::{
 	font::Font,
 	set::FontSet,
 };
+use oxedyne_fe2o3_graphics::pdf_font::{
+	collection_face,
+	is_collection,
+};
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -107,10 +111,10 @@ struct FontLibrary {
 }
 
 impl FontLibrary {
-	/// Reads every `.ttf`/`.otf` file beneath `dir`, at any depth, after the faces the crate embeds -- so a
-	/// document may name an embedded family without supplying it, as Typst's own embedded fonts need no
-	/// file. A file that will not parse, or declares no family, is left out: it cannot answer to any name,
-	/// so it can neither match nor mislead.
+	/// Reads every `.ttf`/`.otf`/`.ttc` file beneath `dir`, at any depth, after the faces the crate embeds --
+	/// so a document may name an embedded family without supplying it, as Typst's own embedded fonts need no
+	/// file. Each face of a collection is its own entry. A file that will not parse, or declares no family,
+	/// is left out: it cannot answer to any name, so it can neither match nor mislead.
 	fn scan(dir: &Path) -> Self {
 		let mut faces: Vec<Declared> = Vec::new();
 		for bytes in EMBEDDED {
@@ -120,15 +124,18 @@ impl FontLibrary {
 		}
 		for path in vfs::list_files(dir) {
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-			if !matches!(ext.as_deref(), Some("ttf") | Some("otf")) {
+			if !matches!(ext.as_deref(), Some("ttf") | Some("otf") | Some("ttc")) {
 				continue;
 			}
 			let bytes = match vfs::read(&path) {
 				Ok(b)	=> b,
 				Err(_)	=> continue,
 			};
-			if let Ok(info) = FaceInfo::read(&bytes) {
-				faces.push(Declared { info, bytes: Arc::new(bytes) });
+			let bytes = Arc::new(bytes);
+			if let Ok(infos) = FaceInfo::read_all(&bytes) {
+				for info in infos {
+					faces.push(Declared { info, bytes: bytes.clone() });
+				}
 			}
 		}
 		Self { faces }
@@ -159,8 +166,15 @@ impl FontLibrary {
 			let i		= (bold as usize) * 2 + italic as usize;
 			if best[i].map_or(true, |b| dist < b) {
 				best[i] = Some(dist);
-				let font = Arc::new(res!(Font::new(d.bytes.as_ref().clone())));
-				*fam.slot_mut(bold, italic) = Some(Variant { font, bytes: d.bytes.clone() });
+				// A face of a collection is cut out into a file of its own, so the shaper, the outline
+				// reader and the PDF font file all read it as a lone font.
+				let bytes = if is_collection(&d.bytes) {
+					Arc::new(res!(collection_face(&d.bytes, d.info.index as usize)))
+				} else {
+					d.bytes.clone()
+				};
+				let font = Arc::new(res!(Font::new(bytes.as_ref().clone())));
+				*fam.slot_mut(bold, italic) = Some(Variant { font, bytes });
 			}
 		}
 		Ok(fam)
@@ -190,6 +204,11 @@ pub fn embedded_families() -> Vec<String> {
 /// [`same_family`], with the families a document names before it compiles.
 pub fn declared_family(bytes: &[u8]) -> Outcome<String> {
 	Ok(res!(FaceInfo::read(bytes)).family)
+}
+
+/// Every family a font file declares, one per face of a collection.
+pub fn declared_families(bytes: &[u8]) -> Outcome<Vec<String>> {
+	Ok(res!(FaceInfo::read_all(bytes)).into_iter().map(|info| info.family).collect())
 }
 
 /// Is `name` the family of the embedded reading set? A document naming it asks for what it already has,
