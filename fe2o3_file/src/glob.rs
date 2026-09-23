@@ -386,3 +386,36 @@ impl IgnoreFile {
         line
     }
 }
+
+
+/// Filenames a terminal editor drops beside the file it is working on, as ignore rules in git's
+/// glob syntax, one per line.
+///
+/// A tool such as `ore edit` captures the whole working copy while a session is open, so an
+/// editor's swap file, write probe, autosave or backup becomes a create-then-delete operation in
+/// signed history if nothing keeps it out -- and emacs's lock file is a symlink to a target that
+/// never exists, which a capture can refuse the whole command over rather than merely record. A
+/// caller layers this list beneath a repository's own rules exactly as
+/// `oxedyne_fe2o3_text::secret::SECRET_PATHS` is layered: `IgnoreFile::parse` the joined lines
+/// first, so that the repository's own `!*~` or `!.#*` still re-includes anything here by name.
+///
+/// Compiled and matched against real names in this crate's tests, since the matcher that proves it
+/// lives right here.
+pub const EDITOR_DROPPINGS: &[&str] = &[
+	// Vim: swap files across crash generations, and the transient probe it writes to check that a
+	// directory will accept a new file before it opens the real one.
+	"*.swp",
+	"*.swo",
+	"*.swx",
+	"4913",
+	// Emacs: the autosave copy, and the lock file -- a symlink, held only while the buffer is open,
+	// to a target that is never actually there. The autosave name starts with `#`, which
+	// `IgnoreFile::parse` would otherwise read as a comment line, so it is escaped here exactly as
+	// a repository's own `.oreignore` would have to.
+	"\\#*#",
+	".#*",
+	// A backup convention several editors share.
+	"*~",
+	// Kate.
+	"*.kate-swp",
+];

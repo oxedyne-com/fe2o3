@@ -32,11 +32,17 @@
 //! depends on `fe2o3_text`, so `fe2o3_text` can never depend on anything that depends on `fe2o3_jdat`,
 //! and the archive does. This crate is on the other side of that line and can use both.
 //!
+//! [`quiet`] answers a different question: given a reading of something changing -- taken by the
+//! caller, not this crate -- has it gone still? It is a pure state machine with no I/O, for a poll
+//! loop such as `ore edit`'s tree-capture trigger, or `fe2o3_austenite`'s rebuild-on-change watch,
+//! to debounce against.
+//!
 //! [Written with AI](https://need2know.ai/with-ai/code)\
 //! Anthropic Claude
 
 pub mod exif;
 pub mod glob;
 pub mod office;
+pub mod quiet;
 pub mod tree;
 pub mod zip;

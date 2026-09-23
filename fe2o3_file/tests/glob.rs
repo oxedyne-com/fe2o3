@@ -4,6 +4,7 @@
 use oxedyne_fe2o3_file::glob::{
     Glob,
     IgnoreFile,
+    EDITOR_DROPPINGS,
 };
 use oxedyne_fe2o3_text::secret;
 
@@ -182,6 +183,33 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         }
         assert!(f.excludes(b"keys", true), "the directory itself");
         assert!(!f.excludes(b"keys", false), "and not a file of that name");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Editor droppings are rules, and keep out real editor names 000", "all",
+        "glob", "editor"], ||
+    {
+        for line in EDITOR_DROPPINGS {
+            res!(Glob::new(line.as_bytes()));
+        }
+        let f = IgnoreFile::parse(EDITOR_DROPPINGS.join("\n").as_bytes());
+        for path in [
+            "ch3.typ.swp", ".ch3.typ.swp", "ch3.typ.swo", "ch3.typ.swx", "4913",
+            "#ch3.typ#", ".#ch3.typ", "ch3.typ~", "notes.kate-swp",
+        ] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is an editor dropping", path);
+        }
+        for path in [
+            "ch3.typ", "src/main.rs", "swp.rs", "4913.rs", "sharpe.txt", "README~ish",
+        ] {
+            assert!(!f.excludes(path.as_bytes(), false), "{} is not", path);
+        }
+        // The repository's own rules still win: a `!` line re-includes a dropping by name.
+        let mut lines: Vec<&str> = EDITOR_DROPPINGS.to_vec();
+        lines.push("!ch3.typ~");
+        let f = IgnoreFile::parse(lines.join("\n").as_bytes());
+        assert!(!f.excludes(b"ch3.typ~", false), "a repo rule re-included it");
+        assert!(f.excludes(b"other.typ~", false), "everything else is still kept out");
         Ok(())
     }));
 
