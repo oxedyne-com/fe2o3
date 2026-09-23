@@ -75,7 +75,7 @@ pub fn blocks_in(items: &[Item], base: &SiteBase) -> Vec<Block> {
 			Item::Heading { level, runs, label, span }	=> out.push(
 				Block::heading_rich(*level, lower_runs_in(runs, &base.site(*span)), label.clone())),
 			Item::Paragraph { runs, label, span }	=> out.push(lower_paragraph(runs, label.clone(), &base.site(*span))),
-			Item::List { ordered, items, loose, span }	=> out.push(lower_list(*ordered, items, *loose, &base.site(*span), base)),
+			Item::List { ordered, items, loose, .. }	=> out.push(lower_list(*ordered, items, *loose, base)),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
 			Item::Table { spec, span }			=> out.push(Block::table(build_table(spec, &base.site(*span)))),
 			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
@@ -116,11 +116,14 @@ pub fn blocks_in(items: &[Item], base: &SiteBase) -> Vec<Block> {
 }
 
 /// Lowers a surface list, nesting and all, to a [`Block::List`]: each entry carries its own lowered runs,
-/// at the list's site, and its sub-lists, themselves lowered to nested [`Block::List`]s. The parent list
-/// keeps its ordering regardless of what a child carries.
-fn lower_list(ordered: bool, items: &[ListItem], loose: bool, site: &Site, base: &SiteBase) -> Block {
+/// at its own item's site, and its sub-lists, themselves lowered to nested [`Block::List`]s whose items stand
+/// at theirs. The parent list keeps its ordering regardless of what a child carries.
+fn lower_list(ordered: bool, items: &[ListItem], loose: bool, base: &SiteBase) -> Block {
 	let entries = items.iter()
-		.map(|it| ListEntry { segments: lower_runs_in(&it.runs, site), children: blocks_in(&it.children, base) })
+		.map(|it| ListEntry {
+			segments:	lower_runs_in(&it.runs, &base.site(it.span)),
+			children:	blocks_in(&it.children, base),
+		})
 		.collect();
 	Block::list(ordered, entries, loose)
 }

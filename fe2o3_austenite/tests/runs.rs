@@ -288,3 +288,18 @@ fn a_float_sets_its_footnotes_on_the_page_it_lands_on() -> Outcome<()> {
 	}
 	Ok(())
 }
+
+/// What a list item asks for is answered at that item's own line, and a nested item's at its own, as the
+/// reader places an unknown call in the same item -- where every item's once stood at the list's first line.
+#[test]
+fn a_list_item_answers_at_its_own_line() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Top\n\n- first item\n- second item\n- third #foo(1) item and @gone\n  - nested @alsogone\n";
+	let (_, report) = res!(compile_of(&[(MAIN, src)]));
+	let got: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+	assert_eq!(got.len(), 3, "{:?}", got);
+	assert!(got.iter().any(|(l, m)| *l == 5 && m.contains("#foo")), "{:?}", got);
+	assert!(got.iter().any(|(l, m)| *l == 5 && m.starts_with("@gone")), "{:?}", got);
+	assert!(got.iter().any(|(l, m)| *l == 6 && m.starts_with("@alsogone")), "{:?}", got);
+	Ok(())
+}

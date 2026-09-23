@@ -67,6 +67,7 @@ pub enum Spacing {
 pub struct ListItem {
 	pub runs:		Vec<Inline>,
 	pub children:	Vec<Item>,
+	pub span:		Span,	// the item's own marker line, where what its runs ask for is answered
 }
 
 /// What a `#figure(...)` wraps: a `#table(...)` this reader sets in full, or an image call whose ink is

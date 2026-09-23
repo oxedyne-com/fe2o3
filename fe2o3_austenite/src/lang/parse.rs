@@ -742,7 +742,7 @@ fn list_marker(
 				top.loose = true;
 			}
 			top.saw_blank = false;
-			top.items.push(ListItem { runs, children: Vec::new() });
+			top.items.push(ListItem { runs, children: Vec::new(), span: Span::new(start, end) });
 			top.end = end;
 		},
 		Some(top) if top.indent == indent => {
@@ -751,12 +751,12 @@ fn list_marker(
 				fold(items, stack, frame);
 			}
 			stack.push(ListFrame {
-				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end });
+				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new(), span: Span::new(start, end) }], loose: false, saw_blank: false, start, end });
 		},
 		// Deeper than the current level (a sub-list), or the first marker of a list: open a new level. A
 		// deeper level becomes a child of the current item when it folds.
 		_ => stack.push(ListFrame {
-			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end }),
+			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new(), span: Span::new(start, end) }], loose: false, saw_blank: false, start, end }),
 	}
 }
 
