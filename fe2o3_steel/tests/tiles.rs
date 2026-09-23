@@ -357,6 +357,20 @@ fn a_tile_vhost_must_turn_its_access_log_off() -> Outcome<()> {
 }
 
 #[test]
+fn allow_origins_reads_the_same_in_either_list_shape() -> Outcome<()> {
+    let vek = "\"tiles\": {\"current\": \"20260922\", \
+        \"builds\": {\"20260922\": \"/srv/tiles/20260922.pmtiles\"}, \
+        \"allow_origins\": (vek|[\"https://oxegen.io\", \"https://test.oxegen.io\"])},";
+    let v = res!(vhost(vek, "\"access_log\": false"));
+    let t = res!(v.tiles.ok_or_else(|| err!("The tiles block was dropped."; Test, Missing)));
+    assert_eq!(t.allow_origins, vec!["https://oxegen.io".to_string(), "https://test.oxegen.io".to_string()]);
+    let v = res!(vhost(TILES, "\"access_log\": false"));
+    let t = res!(v.tiles.ok_or_else(|| err!("The tiles block was dropped."; Test, Missing)));
+    assert_eq!(t.allow_origins, vec!["https://oxegen.io".to_string()]);
+    Ok(())
+}
+
+#[test]
 fn tile_config_refuses_what_it_cannot_honour() -> Outcome<()> {
     for (why, tiles) in [
         ("relative path", "\"tiles\": {\"current\": \"a\", \"builds\": {\"a\": \"tiles/a.pmtiles\"}},"),
