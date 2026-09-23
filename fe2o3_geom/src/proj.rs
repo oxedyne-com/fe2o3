@@ -323,33 +323,33 @@ pub struct Viewport {
 const CLIP_MARGIN_PX: f64 = 8.0;
 
 /// A viewport's numbers turned into the arithmetic that draws with them, once per call.
-struct Frame {
-    cx:         f64,        // screen centre
-    cy:         f64,
-    ch:         f64,        // cosine and sine of the heading
-    sh:         f64,
-    r_px:       f64,        // the sphere's radius in pixels (Mercator: at the equator)
-    c:          [f64; 3],   // orthographic basis: centre, east, north
-    e:          [f64; 3],
-    n:          [f64; 3],
-    cos_clip:   f64,        // orthographic clip cap, as the cosine of its radius
-    rho_clip:   f64,        // and as a circle on the screen, in pixels
-    lam_0:      f64,        // Mercator central meridian, radians
-    y_0:        f64,        // Mercator ordinate of the centre, pixels
-    x_lo:       f64,        // Mercator: the screen and its margin on the unturned plane
-    x_hi:       f64,
-    y_lo:       f64,
-    y_hi:       f64,
+pub(crate) struct Frame {
+    pub(crate) cx:         f64,        // screen centre
+    pub(crate) cy:         f64,
+    pub(crate) ch:         f64,        // cosine and sine of the heading
+    pub(crate) sh:         f64,
+    pub(crate) r_px:       f64,        // the sphere's radius in pixels (Mercator: at the equator)
+    pub(crate) c:          [f64; 3],   // orthographic basis: centre, east, north
+    pub(crate) e:          [f64; 3],
+    pub(crate) n:          [f64; 3],
+    pub(crate) cos_clip:   f64,        // orthographic clip cap, as the cosine of its radius
+    pub(crate) rho_clip:   f64,        // and as a circle on the screen, in pixels
+    pub(crate) lam_0:      f64,        // Mercator central meridian, radians
+    pub(crate) y_0:        f64,        // Mercator ordinate of the centre, pixels
+    pub(crate) x_lo:       f64,        // Mercator: the screen and its margin on the unturned plane
+    pub(crate) x_hi:       f64,
+    pub(crate) y_lo:       f64,
+    pub(crate) y_hi:       f64,
 }
 
 impl Frame {
     /// A point on the unturned plane, `yd` already downward, to the screen.
-    fn to_screen(&self, x: f64, yd: f64) -> (f64, f64) {
+    pub(crate) fn to_screen(&self, x: f64, yd: f64) -> (f64, f64) {
         (self.cx + x * self.ch + yd * self.sh, self.cy - x * self.sh + yd * self.ch)
     }
 
     /// A screen point back to the unturned plane, `yd` downward.
-    fn from_screen(&self, sx: f64, sy: f64) -> (f64, f64) {
+    pub(crate) fn from_screen(&self, sx: f64, sy: f64) -> (f64, f64) {
         let (dx, dy) = (sx - self.cx, sy - self.cy);
         (dx * self.ch - dy * self.sh, dx * self.sh + dy * self.ch)
     }
@@ -402,7 +402,7 @@ impl Viewport {
         Ok(v)
     }
 
-    fn check(&self) -> Outcome<()> {
+    pub(crate) fn check(&self) -> Outcome<()> {
         let finite = self.lat_0.is_finite() && self.lon_0.is_finite() && self.heading.is_finite();
         if !finite {
             return Err(err!("A viewport centred on {}, {} with heading {} is not a place.",
@@ -419,7 +419,7 @@ impl Viewport {
         Ok(())
     }
 
-    fn frame(&self) -> Frame {
+    pub(crate) fn frame(&self) -> Frame {
         let lat_0 = self.lat_0.clamp(-90.0, 90.0);
         let (phi, lam) = (lat_0.to_radians(), self.lon_0.to_radians());
         let hd = self.heading.to_radians();
