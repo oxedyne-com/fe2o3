@@ -13,6 +13,7 @@ use std::{
 
 static BARRIER_DELAY_MS: AtomicU64 = AtomicU64::new(0); // before each durability barrier
 static PUBLISH_DELAY_MS: AtomicU64 = AtomicU64::new(0); // before the supervisor hands over channels
+static COLLECT_DELAY_MS: AtomicU64 = AtomicU64::new(0); // before each garbage collection
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -26,12 +27,22 @@ pub fn set_publish_delay(d: Duration) {
     PUBLISH_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
+/// Holds every garbage collection this long before it reads the file, as a large file on a busy
+/// disk would take, so that writes can be made to land while a file is being collected.
+pub fn set_collect_delay(d: Duration) {
+    COLLECT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
 pub(crate) fn barrier_delay() {
     pause(&BARRIER_DELAY_MS);
 }
 
 pub(crate) fn publish_delay() {
     pause(&PUBLISH_DELAY_MS);
+}
+
+pub(crate) fn collect_delay() {
+    pause(&COLLECT_DELAY_MS);
 }
 
 fn millis(d: Duration) -> u64 {
