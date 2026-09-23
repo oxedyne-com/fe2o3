@@ -9,7 +9,11 @@ use oxedyne_fe2o3_hash::{
     csum::ChecksumScheme,
     hash::HashScheme,
 };
-use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_data::time::Timestamp;
+use oxedyne_fe2o3_iop_db::api::{
+    Database,
+    Meta,
+};
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     O3db,
@@ -18,9 +22,13 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
-    data::core::RestSchemesInput,
+    data::{
+        cache::Cache,
+        core::RestSchemesInput,
+    },
     file::{
         core::FileType,
+        floc::FileLocation,
         zdir::ZoneDir,
     },
     test::{
@@ -69,8 +77,11 @@ fn main() -> Outcome<()> {
     let pending = new_offset_equal_to_a_pending_old_one_is_not_remapped();
     hooks::set_collect_delay(Duration::ZERO);
     hooks::set_forward_delay(Duration::ZERO);
+    let carried = read_of_a_carried_record_leaves_its_move_for_its_supersession();
+    hooks::set_collect_delay(Duration::ZERO);
+    hooks::set_forward_delay(Duration::ZERO);
     log_finish_wait!();
-    let failed: Vec<Error<ErrTag>> = [queued, pending].into_iter()
+    let failed: Vec<Error<ErrTag>> = [queued, pending, carried].into_iter()
         .filter_map(|r| r.err())
         .collect();
     match failed.len() {
@@ -80,7 +91,7 @@ fn main() -> Outcome<()> {
             None    => Ok(()), // unreachable
         },
         n => Err(err!(
-            "{} of the 2 checks failed: {:?}", n, failed;
+            "{} of the 3 checks failed: {:?}", n, failed;
             Test)),
     }
 }
@@ -177,6 +188,114 @@ fn new_offset_equal_to_a_pending_old_one_is_not_remapped() -> Outcome<()> {
     Ok(())
 }
 
+/// As in the check before, file 1's collection is held open while c is superseded by a write to
+/// file 2 whose supersession is held back, so the collection carries c and leaves its move entry
+/// for that supersession.  This time a read of c, given c's old offset before the write, waits for
+/// the collection and is remapped through c's entry.  A read that spent the entry left the
+/// supersession to find it gone, and the supersession then flagged the record at c's old offset,
+/// which is e's now, as old: the next collection dropped e, and kept the c it had been sent for.
+fn read_of_a_carried_record_leaves_its_move_for_its_supersession() -> Outcome<()> {
+    let len = res!(record_len());
+    let cfg = res!(config(2, 5 * len + len / 2));
+    let root = res!(fresh("./test_db_record_identity_carried"));
+    let db = res!(open(&root, cfg.clone()));
+    res!(fill_file_1(&db, &root, len));
+    let f1 = data_file(&root, 1);
+
+    res!(db.insert(key(0), value(0, 2), Uid::default(), None));
+    hooks::set_collect_delay(HOLD);
+    res!(db.insert(key(1), value(1, 2), Uid::default(), None));
+    res!(wait_for_collection(&db, 1));
+    // The read takes c's old offset from the cache bot and waits at the file bot.
+    res!(clear_values(&db));
+    let reading = db.clone();
+    let reader = res!(thread::Builder::new().name(fmt!("record identity reader")).spawn(
+        move || reading.get(&key(2), None)));
+    thread::sleep(Duration::from_millis(100));
+    // Superseded before the collection updates the caches, and passed on after it has finished.
+    hooks::set_forward_delay(FORWARD);
+    let forwarded = Instant::now();
+    res!(db.insert(key(2), value(2, 2), Uid::default(), None));
+    hooks::set_collect_delay(Duration::ZERO);
+    let early = match reader.join() {
+        // Asked before the write, so the version it was given, whichever that was.
+        Ok(got) => match judge(got.clone(), 2, 1, "A read of c queued behind the collection") {
+            Ok(()) => Ok(()),
+            Err(_) => judge(got, 2, 2, "A read of c queued behind the collection"),
+        },
+        Err(_) => Err(err!("The reading thread panicked."; Test, Thread)),
+    };
+    if !settle_to(&f1, 3 * len) {
+        let _ = db.close();
+        return Err(err!(
+            "Data file 1 did not settle at the three records its collection carries, {} bytes, \
+            within {:?}: it is {} bytes.", 3 * len, SETTLE, size(&f1);
+            Test, Timeout));
+    }
+    if forwarded.elapsed() >= FORWARD {
+        let _ = db.close();
+        return Err(err!(
+            "The collection ended {:?} after c's supersession was held back for {:?}, so the \
+            check did not test what it says.", forwarded.elapsed(), FORWARD;
+            Test, Timeout));
+    }
+    // The supersession of c arrives, and is applied to its own record.
+    thread::sleep(FORWARD.saturating_sub(forwarded.elapsed()) + Duration::from_millis(500));
+    hooks::set_forward_delay(Duration::ZERO);
+
+    // d superseded too: a second collection of file 1, which carries e alone.
+    res!(db.insert(key(3), value(3, 2), Uid::default(), None));
+    let _ = settle_to(&f1, len); // judged by the reads below
+    res!(clear_values(&db));
+    let late = judge(db.get(&key(4), None), 4, 1, "A read of e after a second collection");
+    res!(db.close());
+
+    let db = res!(open_again(&root, cfg));
+    let mut after = Vec::new();
+    for (i, ver) in [(0, 2), (1, 2), (2, 2), (3, 2), (4, 1), (5, 1)] {
+        after.push(judge(db.get(&key(i), None), i, ver, "A read after a restart"));
+    }
+    res!(db.close());
+    res!(early);
+    res!(late);
+    for result in after {
+        res!(result);
+    }
+    Ok(())
+}
+
+/// A key with two records in one collected file, the older carried because its supersession has
+/// yet to arrive, and the cache naming the newer.  The collection's update for the older record
+/// leaves the cached location alone, and the newer record's update moves it and gives back where
+/// it was, for its move entry to be spent.  Matched by file alone, the older record's update
+/// moved the location to the older record's new offset, and the entries were spent against the
+/// wrong offsets.
+#[test]
+fn reanchor_moves_only_the_record_the_cache_names() -> Outcome<()> {
+    let mut cache = Cache::<{ UID_LEN }, Uid>::new(None);
+    let k = res!(key(9).as_bytes());
+    let older = Meta { time: res!(Timestamp::now()), user: Uid::default() };
+    thread::sleep(Duration::from_millis(2));
+    let newer = Meta { time: res!(Timestamp::now()), user: Uid::default() };
+    let at = |start: u64| FileLocation { fnum: 1, start, klen: 30, vlen: 100 };
+    res!(cache.insert(k.clone(), None, at(260), older.clone()));
+    res!(cache.insert(k.clone(), None, at(390), newer.clone()));
+    // The collection carries both, the older to 0 and the newer to 130.
+    if let Some(was) = cache.reanchor(&k, &at(0), &older) {
+        return Err(err!(
+            "The update for the older of a key's two records in a collected file moved the \
+            location the cache holds for the newer, from {:?} to offset 0.", was;
+            Test, Mismatch));
+    }
+    match cache.reanchor(&k, &at(130), &newer) {
+        Some(was) if was.start == 390 => Ok(()),
+        other => Err(err!(
+            "The update for the newer of a key's two records in a collected file gave back {:?} \
+            as where the cache had it, where that was offset 390.", other;
+            Test, Mismatch)),
+    }
+}
+
 /// Writes a to e, which fill data file 1, and f, which seals it.
 fn fill_file_1(db: &TestDb, root: &Path, len: u64) -> Outcome<()> {
     for i in 0..6 {
@@ -195,7 +314,7 @@ fn fill_file_1(db: &TestDb, root: &Path, len: u64) -> Outcome<()> {
 
 /// The value read must be the one written for this key at this version.
 fn judge(
-    got:    Outcome<Option<(Dat, oxedyne_fe2o3_iop_db::api::Meta<{ UID_LEN }, Uid>)>>,
+    got:    Outcome<Option<(Dat, Meta<{ UID_LEN }, Uid>)>>,
     i:      usize,
     ver:    u8,
     what:   &str,
