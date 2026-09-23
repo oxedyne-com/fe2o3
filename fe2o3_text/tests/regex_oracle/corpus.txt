@@ -1,0 +1,387 @@
+# The regular expression corpus that oracle.pl runs through Perl to write expected.txt.
+#
+#   P  a pattern, in the syntax of the Rust `regex` crate
+#   Q  the same pattern in Perl's syntax, where the two differ (`\p{Greek}` is Script in Rust
+#      and Script_Extensions in Perl; `\u{..}`, `\<` and class set operations are Rust's only)
+#   R  a replacement template, expanded as the `regex` crate expands one
+#   H  a haystack; `\n`, `\t` and `\x{..}` are decoded, so a haystack cannot hold a backslash
+#
+# Every H is run against the P above it.  A group inside a repetition keeps its capture from an
+# earlier iteration in the `regex` crate (and in Python) but is reset in Perl, so no such case is
+# here; tests/regex.rs checks those against Python's answers.  Nor is a repetition whose later
+# iteration can match nothing, `(a*)+`, where Perl and Python report the empty last iteration and
+# the crate does not; rust_suite.txt carries the crate's own cases for that.  Perl's `$` also matches before a final newline and
+# Rust's does not, so no haystack under a `$` pattern ends in one; Perl's case-insensitivity
+# folds `ß` to `ss` and Rust's does not, so no case-insensitive pattern meets an `ß`.
+
+# Literals and dot
+P abc
+H xxabcxxabc
+H ab
+P a.c
+H abc a\nc a\x{3bb}c
+P (?s)a.c
+H a\nc abc
+
+# Classes
+P [a-c]+
+H zzabcbazz ab c
+P [^a-c\s]+
+H ab xyz\tcab
+P [\d.]+x
+H 3.14x and 1x
+P [\]\-]+
+H a]-]b
+P [a-z&&[^aeiou]]+
+Q (?:(?![aeiou])[a-z])+
+H rhythm and blues
+P [a-z--[aeiou]]+
+Q (?:(?![aeiou])[a-z])+
+H strengths
+P [a-f~~c-h]+
+Q [abgh]+
+H abcdefghij
+P [[:alpha:]]+
+Q [A-Za-z]+
+H abc\x{3bb}\x{3bc}DEF12
+P [[:^digit:][:space:]]+
+Q [^0-9]+
+H 12ab 34
+P [[:punct:]]+
+Q [!-\/:-\@\[-`{-~]+
+H a,b;c!?d
+
+# Unicode shorthands
+P \d+
+H x\x{661}\x{662}\x{663}y 42 \x{ff11}\x{ff12} \x{966}\x{967}
+P \w+
+H caf\x{e9} na\x{ef}ve \x{3bb}\x{3cc}\x{3b3}\x{3bf}\x{3c2} e\x{301}t\x{e9} a_b \x{4e2d}\x{6587}
+P \s+
+H a\x{a0}b\x{3000}c\x{2028}d\x{85}e\x{1680}f
+P \S+
+H a\x{a0}b\x{3000}c
+P \W+
+H ab, \x{3bb}; \x{200d}!
+P \D+
+H \x{661}a\x{662}
+
+# Boundaries
+P \bcat\b
+H cat concat cat. (cat)
+P \Bcat\B
+H concatenate cat
+P \b\w+\b
+H \x{3bb}\x{3cc}\x{3b3}\x{3bf}\x{3c2} \x{3ba}\x{3b1}\x{3b9}! caf\x{e9}
+P \b
+H ab cd
+P \B
+H ab c
+P \<\w+
+Q (?<!\w)(?=\w)\w+
+H ab cd, ef
+P \w+\>
+Q \w+(?<=\w)(?!\w)
+H ab cd, ef
+P \b{start}.
+Q (?<!\w)(?=\w).
+H x y,z
+P .\b{end}
+Q .(?<=\w)(?!\w)
+H x y,z
+P \b{start-half}.
+Q (?<!\w).
+H ab c
+P .\b{end-half}
+Q .(?!\w)
+H ab c
+
+# Anchors and multi-line
+P ^\w+
+H ab cd
+H \x{3bb}x
+P \w+$
+H ab cd
+P (?m)^\w+
+H ab\ncd\nef
+P (?m)\w+$
+H ab\ncd\nef
+P \A\w
+H ab
+P \w\z
+H ab
+P (?m)^$
+H a\n\nb
+
+# Quantifiers
+P a{2,3}
+H aaaaaaa
+P a{2,}?
+H aaaaa
+P a{3}
+H aaaaaaa
+P a+?b
+H aaab
+P <.*?>
+H <a><bc>
+P <.*>
+H <a><bc>
+P x*
+H axxb
+P (ab)*c
+H abababc c abc
+P a?
+H baa
+
+# Alternation
+P a|ab
+H ab
+P ab|a
+H ab
+P cat|dog|bird
+H a dog and a bird and a cat
+P (?:a|b)+c
+H abbac
+
+# Capture groups
+P (\w+)@(\w+)\.com
+H mail joe@site.com and ann@web.com
+P (a)|(b)
+H ab
+P (a|(b))+
+H ba
+P (?P<year>\d{4})-(?P<month>\d{2})
+R $month/$year
+H 2026-09 and 1999-12
+P (?<first>\w)(?<rest>\w*)
+R ${rest}${first}ay
+H pig latin
+P (\d)(\d)?
+R [$2$1]
+H 1 23 456
+P (a*)*
+H b
+P ()
+H ab
+P (x)?y
+H y xy
+P (\p{Lu})(\p{Ll}+)
+R $2$1
+H Alpha Beta gamma \x{394}\x{3ad}\x{3bb}\x{3c4}\x{3b1}
+
+# Unicode properties
+P \p{L}+
+H ab12\x{3bb}\x{3bc}-\x{4e2d}\x{6587} \x{627}\x{644}
+P \pL+
+H ab12\x{3bb}
+P \PL+
+H ab12\x{3bb}--c
+P \p{Lu}
+H aBc\x{394}\x{3b4}
+P \p{Ll}+
+H aBc\x{394}\x{3b4}
+P \p{Uppercase_Letter}+
+H aBC\x{394}\x{3b4}
+P \p{gc=Nd}+
+H ab\x{661}\x{662}12
+P \p{General_Category=Decimal_Number}+
+H ab\x{661}\x{662}12
+P \p{Letter}+
+H x1y
+P \p{N}+
+H x\x{bd}\x{2163}9y
+P \p{Nl}
+H x\x{2163}9y
+P \p{No}
+H x\x{bd}9y
+P \p{P}+
+H a,.!?b\x{201c}c\x{201d}
+P \p{Ps}\p{Pe}
+H ()[]{}
+P \p{S}+
+H a+\x{20ac}$\x{a9}b
+P \p{Sc}
+H a$\x{20ac}\x{a3}b
+P \p{Z}+
+H a \x{a0}\x{2028}b
+P \p{Zs}+
+H a \x{a0}\x{2028}b
+P \p{Cc}+
+H a\tb\x{7f}c
+P \p{Cf}
+H a\x{200b}\x{ad}b
+P \p{M}+
+H e\x{301}\x{302}a\x{93f}
+P \p{Mn}+
+H e\x{301}\x{302}a\x{93f}
+P \p{Mc}
+H e\x{301}a\x{93f}
+P \p{LC}+
+H a\x{2c6}B\x{1c5}
+P \p{gc!=L}+
+Q \P{L}+
+H ab12cd
+P \p{Greek}+
+Q \p{sc=Greek}+
+H abc\x{3bb}\x{3cc}\x{3b3}\x{3bf}\x{3c2}\x{b7}x
+P \p{sc=Grek}+
+H \x{3bb}\x{3cc}\x{342}\x{3b3}
+P \p{scx=Grek}+
+H \x{3bb}\x{3cc}\x{342}\x{3b3}
+P \p{Script_Extensions=Greek}+
+Q \p{scx=Grek}+
+H \x{3bb}\x{3cc}\x{342}\x{3b3}
+P \p{Latin}+
+Q \p{sc=Latin}+
+H caf\x{e9} \x{3bb}
+P \p{Han}+
+Q \p{sc=Han}+
+H \x{4e2d}\x{6587}\x{3001}x
+P \p{scx=Hani}+
+H \x{4e2d}\x{6587}\x{3001}x
+P \p{Cyrillic}+
+Q \p{sc=Cyrillic}+
+H \x{41f}\x{440}\x{438}\x{432}\x{435}\x{442} mir
+P \p{Arabic}+
+Q \p{sc=Arabic}+
+H \x{627}\x{644}\x{633}\x{644}\x{627}\x{645} \x{660}
+P \p{scx=Arab}+
+H \x{627}\x{644}\x{60c}\x{660}
+P \p{Common}+
+Q \p{sc=Common}+
+H ab 12,\x{3000}
+P \p{Inherited}+
+Q \p{sc=Inherited}+
+H e\x{301}\x{302}x
+P \p{Devanagari}+
+Q \p{sc=Devanagari}+
+H \x{928}\x{92e}\x{938}\x{94d}\x{924}\x{947} \x{966}
+P \p{Hiragana}+
+Q \p{sc=Hiragana}+
+H \x{3072}\x{3089}\x{304c}\x{306a}\x{30ab}\x{30bf}
+P \P{Greek}+
+Q \P{sc=Greek}+
+H ab\x{3bb}cd
+P \p{sc!=Latin}+
+Q \P{sc=Latin}+
+H ab\x{3bb}\x{3bc}cd
+P \p{Alphabetic}+
+H x\x{2163}y1
+P \p{Alpha}+
+Q \p{Alphabetic}+
+H x\x{2163}y1
+P \p{White_Space}+
+H a \x{85}\x{2029}b
+P \p{WSpace}+
+Q \p{White_Space}+
+H a \x{85}b
+P \p{Uppercase}+
+H a\x{2160}B\x{24b6}c
+P \p{Lowercase}+
+H A\x{aa}b\x{2170}C
+P \p{Emoji}+
+H a\x{1f600}\x{2764}#1
+P \p{Extended_Pictographic}+
+H a\x{1f600}\x{2764}\x{a9}#1
+P \p{Emoji_Presentation}+
+H a\x{1f600}\x{2764}#
+P \p{Ideographic}+
+H \x{4e2d}\x{3007}a
+P \p{Math}+
+H a+\x{2211}=b
+P \p{Dash}+
+H a-\x{2014}b
+P \p{Hex_Digit}+
+H xyzAF09\x{ff21}g
+P \p{Any}+
+H a\x{3bb}\n\x{1f600}
+P \p{ASCII}+
+H ab\x{3bb}cd
+P \p{Assigned}+
+H ab\x{378}cd
+P \p{Cn}+
+H ab\x{378}\x{379}cd
+P \p{is Greek}+
+Q \p{sc=Greek}+
+H ab\x{3bb}
+P \p{ letter }+
+Q \p{L}+
+H 1ab2
+P \p{lowercase-letter}+
+Q \p{Ll}+
+H ABcdEF
+P \p{gc=lowercaseletter}+
+Q \p{Ll}+
+H ABcdEF
+P [\p{Greek}\d]+
+Q [\p{sc=Greek}\d]+
+H ab\x{3bb}12\x{3bc}c
+P [^\p{L}\s]+
+H ab, 12 \x{3bb};
+P [\p{L}&&\p{Greek}]+
+Q (?:(?=\p{sc=Greek})\p{L})+
+H a\x{3bb}\x{375}\x{3bc}b
+P [\p{L}--\p{Latin}]+
+Q (?:(?!\p{sc=Latin})\p{L})+
+H ab\x{3bb}\x{3bc}\x{4e2d}c
+P [\P{L}a]+
+H xa1b2
+P [\w--\d]+
+Q (?:(?!\d)\w)+
+H ab12c_d3
+
+# Flags
+P (?i)hello
+H say HeLLo there
+P (?i)[a-c]+
+H xABCy
+P (?i)[^a]
+H aAb
+P (?i)\x{3a3}\x{39f}\x{3a6}
+H \x{3c3}\x{3bf}\x{3c6} \x{3c2}\x{3bf}\x{3c6}
+P (?i)k
+H K\x{212a}k
+P (?i)s
+H \x{17f}S
+P (?i)\p{Lu}+
+H aBc
+P (?i)\P{Lu}+
+Q (?i)[^\p{Lu}\p{Ll}\p{Lt}]+
+H aB1c;
+P a(?i:b)c
+H abc aBc abC
+P (?i)a(?-i)b
+H Ab AB ab
+P (?i:a|b)c
+H Ac Bc aC
+P (?x) a \s+ b  # comment
+Q (?x) a \s+ b
+H a   b ab
+P (?x) \d{2} - \d{2}
+H 12-34
+P (?s:.)+
+H a\nb
+P (?m:^b)
+H a\nb
+
+# Escapes
+P \x41\x{3bb}\u{3bc}
+Q \x41\x{3bb}\x{3bc}
+H xA\x{3bb}\x{3bc}y
+P A\U0001F600
+Q \x{41}\x{1f600}
+H A\x{1f600}
+P \t\x{0A}
+H a\t\nb
+P \.\+\*\?\(\)\|\[\]\{\}\^\$\#\&\-\~
+Q \.\+\*\?\(\)\|\[\]\{\}\^\$\#\&\-\~
+H .+*?()|[]{}^$#&-~
+
+# Multibyte haystacks
+P \x{1f600}+
+H a\x{1f600}\x{1f600}b\x{1f600}
+P \w+
+H \x{928}\x{92e}\x{938}\x{94d}\x{924}\x{947} \x{1f600}x
+P .
+H \x{1f600}\x{e9}a
+P .\x{301}
+H e\x{301}

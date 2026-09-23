@@ -1,0 +1,2075 @@
+P	abc
+H	xxabcxxabc
+A	0	2,5
+A	1	2,5
+A	2	2,5
+A	3	7,10
+A	4	7,10
+A	5	7,10
+A	6	7,10
+A	7	7,10
+A	8	none
+A	9	none
+A	10	none
+M	2,5
+M	7,10
+S	xxxx
+E
+P	abc
+H	ab
+A	0	none
+A	1	none
+A	2	none
+S	ab
+E
+P	a.c
+H	abc a\nc aλc
+A	0	0,3
+A	1	8,12
+A	2	8,12
+A	3	8,12
+A	4	8,12
+A	5	8,12
+A	6	8,12
+A	7	8,12
+A	8	8,12
+A	9	none
+A	11	none
+A	12	none
+M	0,3
+M	8,12
+S	 a\nc 
+E
+P	(?s)a.c
+H	a\nc abc
+A	0	0,3
+A	1	4,7
+A	2	4,7
+A	3	4,7
+A	4	4,7
+A	5	none
+A	6	none
+A	7	none
+M	0,3
+M	4,7
+S	 
+E
+P	[a-c]+
+H	zzabcbazz ab c
+A	0	2,7
+A	1	2,7
+A	2	2,7
+A	3	3,7
+A	4	4,7
+A	5	5,7
+A	6	6,7
+A	7	10,12
+A	8	10,12
+A	9	10,12
+A	10	10,12
+A	11	11,12
+A	12	13,14
+A	13	13,14
+A	14	none
+M	2,7
+M	10,12
+M	13,14
+S	zzzz  
+E
+P	[^a-c\\s]+
+H	ab xyz\tcab
+A	0	3,6
+A	1	3,6
+A	2	3,6
+A	3	3,6
+A	4	4,6
+A	5	5,6
+A	6	none
+A	7	none
+A	8	none
+A	9	none
+A	10	none
+M	3,6
+S	ab \tcab
+E
+P	[\\d.]+x
+H	3.14x and 1x
+A	0	0,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	4	10,12
+A	5	10,12
+A	6	10,12
+A	7	10,12
+A	8	10,12
+A	9	10,12
+A	10	10,12
+A	11	none
+A	12	none
+M	0,5
+M	10,12
+S	 and 
+E
+P	[\\]\\-]+
+H	a]-]b
+A	0	1,4
+A	1	1,4
+A	2	2,4
+A	3	3,4
+A	4	none
+A	5	none
+M	1,4
+S	ab
+E
+P	[a-z&&[^aeiou]]+
+H	rhythm and blues
+A	0	0,6
+A	1	1,6
+A	2	2,6
+A	3	3,6
+A	4	4,6
+A	5	5,6
+A	6	8,10
+A	7	8,10
+A	8	8,10
+A	9	9,10
+A	10	11,13
+A	11	11,13
+A	12	12,13
+A	13	15,16
+A	14	15,16
+A	15	15,16
+A	16	none
+M	0,6
+M	8,10
+M	11,13
+M	15,16
+S	 a ue
+E
+P	[a-z--[aeiou]]+
+H	strengths
+A	0	0,3
+A	1	1,3
+A	2	2,3
+A	3	4,9
+A	4	4,9
+A	5	5,9
+A	6	6,9
+A	7	7,9
+A	8	8,9
+A	9	none
+M	0,3
+M	4,9
+S	e
+E
+P	[a-f~~c-h]+
+H	abcdefghij
+A	0	0,2
+A	1	1,2
+A	2	6,8
+A	3	6,8
+A	4	6,8
+A	5	6,8
+A	6	6,8
+A	7	7,8
+A	8	none
+A	9	none
+A	10	none
+M	0,2
+M	6,8
+S	cdefij
+E
+P	[[:alpha:]]+
+H	abcλμDEF12
+A	0	0,3
+A	1	1,3
+A	2	2,3
+A	3	7,10
+A	5	7,10
+A	7	7,10
+A	8	8,10
+A	9	9,10
+A	10	none
+A	11	none
+A	12	none
+M	0,3
+M	7,10
+S	λμ12
+E
+P	[[:^digit:][:space:]]+
+H	12ab 34
+A	0	2,5
+A	1	2,5
+A	2	2,5
+A	3	3,5
+A	4	4,5
+A	5	none
+A	6	none
+A	7	none
+M	2,5
+S	1234
+E
+P	[[:punct:]]+
+H	a,b;c!?d
+A	0	1,2
+A	1	1,2
+A	2	3,4
+A	3	3,4
+A	4	5,7
+A	5	5,7
+A	6	6,7
+A	7	none
+A	8	none
+M	1,2
+M	3,4
+M	5,7
+S	abcd
+E
+P	\\d+
+H	x١٢٣y 42 １２ ०१
+A	0	1,7
+A	1	1,7
+A	3	3,7
+A	5	5,7
+A	7	9,11
+A	8	9,11
+A	9	9,11
+A	10	10,11
+A	11	12,18
+A	12	12,18
+A	15	15,18
+A	18	19,25
+A	19	19,25
+A	22	22,25
+A	25	none
+M	1,7
+M	9,11
+M	12,18
+M	19,25
+S	xy   
+E
+P	\\w+
+H	café naïve λόγος été a_b 中文
+A	0	0,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	5	6,12
+A	6	6,12
+A	7	7,12
+A	8	8,12
+A	10	10,12
+A	11	11,12
+A	12	13,23
+A	13	13,23
+A	15	15,23
+A	17	17,23
+A	19	19,23
+A	21	21,23
+A	23	24,30
+A	24	24,30
+A	25	25,30
+A	27	27,30
+A	28	28,30
+A	30	31,34
+A	31	31,34
+A	32	32,34
+A	33	33,34
+A	34	35,41
+A	35	35,41
+A	38	38,41
+A	41	none
+M	0,5
+M	6,12
+M	13,23
+M	24,30
+M	31,34
+M	35,41
+S	     
+E
+P	\\s+
+H	a b　c de f
+A	0	1,3
+A	1	1,3
+A	3	4,7
+A	4	4,7
+A	7	8,11
+A	8	8,11
+A	11	12,14
+A	12	12,14
+A	14	15,18
+A	15	15,18
+A	18	none
+A	19	none
+M	1,3
+M	4,7
+M	8,11
+M	12,14
+M	15,18
+S	abcdef
+E
+P	\\S+
+H	a b　c
+A	0	0,1
+A	1	3,4
+A	3	3,4
+A	4	7,8
+A	7	7,8
+A	8	none
+M	0,1
+M	3,4
+M	7,8
+S	 　
+E
+P	\\W+
+H	ab, λ; ‍!
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	3	3,4
+A	4	6,8
+A	6	6,8
+A	7	7,8
+A	8	11,12
+A	11	11,12
+A	12	none
+M	2,4
+M	6,8
+M	11,12
+S	abλ‍
+E
+P	\\D+
+H	١a٢
+A	0	2,3
+A	2	2,3
+A	3	none
+A	5	none
+M	2,3
+S	١٢
+E
+P	\\bcat\\b
+H	cat concat cat. (cat)
+A	0	0,3
+A	1	11,14
+A	2	11,14
+A	3	11,14
+A	4	11,14
+A	5	11,14
+A	6	11,14
+A	7	11,14
+A	8	11,14
+A	9	11,14
+A	10	11,14
+A	11	11,14
+A	12	17,20
+A	13	17,20
+A	14	17,20
+A	15	17,20
+A	16	17,20
+A	17	17,20
+A	18	none
+A	19	none
+A	20	none
+A	21	none
+M	0,3
+M	11,14
+M	17,20
+S	 concat . ()
+E
+P	\\Bcat\\B
+H	concatenate cat
+A	0	3,6
+A	1	3,6
+A	2	3,6
+A	3	3,6
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+A	9	none
+A	10	none
+A	11	none
+A	12	none
+A	13	none
+A	14	none
+A	15	none
+M	3,6
+S	conenate cat
+E
+P	\\b\\w+\\b
+H	λόγος και! café
+A	0	0,10
+A	2	11,17
+A	4	11,17
+A	6	11,17
+A	8	11,17
+A	10	11,17
+A	11	11,17
+A	13	19,24
+A	15	19,24
+A	17	19,24
+A	18	19,24
+A	19	19,24
+A	20	none
+A	21	none
+A	22	none
+A	24	none
+M	0,10
+M	11,17
+M	19,24
+S	 ! 
+E
+P	\\b
+H	ab cd
+A	0	0,0
+A	1	2,2
+A	2	2,2
+A	3	3,3
+A	4	5,5
+A	5	5,5
+M	0,0
+M	2,2
+M	3,3
+M	5,5
+S	ab cd
+E
+P	\\B
+H	ab c
+A	0	1,1
+A	1	1,1
+A	2	none
+A	3	none
+A	4	none
+M	1,1
+S	ab c
+E
+P	\\<\\w+
+H	ab cd, ef
+A	0	0,2
+A	1	3,5
+A	2	3,5
+A	3	3,5
+A	4	7,9
+A	5	7,9
+A	6	7,9
+A	7	7,9
+A	8	none
+A	9	none
+M	0,2
+M	3,5
+M	7,9
+S	 , 
+E
+P	\\w+\\>
+H	ab cd, ef
+A	0	0,2
+A	1	1,2
+A	2	3,5
+A	3	3,5
+A	4	4,5
+A	5	7,9
+A	6	7,9
+A	7	7,9
+A	8	8,9
+A	9	none
+M	0,2
+M	3,5
+M	7,9
+S	 , 
+E
+P	\\b{start}.
+H	x y,z
+A	0	0,1
+A	1	2,3
+A	2	2,3
+A	3	4,5
+A	4	4,5
+A	5	none
+M	0,1
+M	2,3
+M	4,5
+S	 ,
+E
+P	.\\b{end}
+H	x y,z
+A	0	0,1
+A	1	2,3
+A	2	2,3
+A	3	4,5
+A	4	4,5
+A	5	none
+M	0,1
+M	2,3
+M	4,5
+S	 ,
+E
+P	\\b{start-half}.
+H	ab c
+A	0	0,1
+A	1	3,4
+A	2	3,4
+A	3	3,4
+A	4	none
+M	0,1
+M	3,4
+S	b 
+E
+P	.\\b{end-half}
+H	ab c
+A	0	1,2
+A	1	1,2
+A	2	3,4
+A	3	3,4
+A	4	none
+M	1,2
+M	3,4
+S	a 
+E
+P	^\\w+
+H	ab cd
+A	0	0,2
+A	1	none
+A	2	none
+A	3	none
+A	4	none
+A	5	none
+M	0,2
+S	 cd
+E
+P	^\\w+
+H	λx
+A	0	0,3
+A	2	none
+A	3	none
+M	0,3
+S	
+E
+P	\\w+$
+H	ab cd
+A	0	3,5
+A	1	3,5
+A	2	3,5
+A	3	3,5
+A	4	4,5
+A	5	none
+M	3,5
+S	ab 
+E
+P	(?m)^\\w+
+H	ab\ncd\nef
+A	0	0,2
+A	1	3,5
+A	2	3,5
+A	3	3,5
+A	4	6,8
+A	5	6,8
+A	6	6,8
+A	7	none
+A	8	none
+M	0,2
+M	3,5
+M	6,8
+S	\n\n
+E
+P	(?m)\\w+$
+H	ab\ncd\nef
+A	0	0,2
+A	1	1,2
+A	2	3,5
+A	3	3,5
+A	4	4,5
+A	5	6,8
+A	6	6,8
+A	7	7,8
+A	8	none
+M	0,2
+M	3,5
+M	6,8
+S	\n\n
+E
+P	\\A\\w
+H	ab
+A	0	0,1
+A	1	none
+A	2	none
+M	0,1
+S	b
+E
+P	\\w\\z
+H	ab
+A	0	1,2
+A	1	1,2
+A	2	none
+M	1,2
+S	a
+E
+P	(?m)^$
+H	a\n\nb
+A	0	2,2
+A	1	2,2
+A	2	2,2
+A	3	none
+A	4	none
+M	2,2
+S	a\n\nb
+E
+P	a{2,3}
+H	aaaaaaa
+A	0	0,3
+A	1	1,4
+A	2	2,5
+A	3	3,6
+A	4	4,7
+A	5	5,7
+A	6	none
+A	7	none
+M	0,3
+M	3,6
+S	a
+E
+P	a{2,}?
+H	aaaaa
+A	0	0,2
+A	1	1,3
+A	2	2,4
+A	3	3,5
+A	4	none
+A	5	none
+M	0,2
+M	2,4
+S	a
+E
+P	a{3}
+H	aaaaaaa
+A	0	0,3
+A	1	1,4
+A	2	2,5
+A	3	3,6
+A	4	4,7
+A	5	none
+A	6	none
+A	7	none
+M	0,3
+M	3,6
+S	a
+E
+P	a+?b
+H	aaab
+A	0	0,4
+A	1	1,4
+A	2	2,4
+A	3	none
+A	4	none
+M	0,4
+S	
+E
+P	<.*?>
+H	<a><bc>
+A	0	0,3
+A	1	3,7
+A	2	3,7
+A	3	3,7
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+M	0,3
+M	3,7
+S	
+E
+P	<.*>
+H	<a><bc>
+A	0	0,7
+A	1	3,7
+A	2	3,7
+A	3	3,7
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+M	0,7
+S	
+E
+P	x*
+H	axxb
+A	0	0,0
+A	1	1,3
+A	2	2,3
+A	3	3,3
+A	4	4,4
+M	0,0
+M	1,3
+M	4,4
+S	ab
+E
+P	(ab)*c
+H	abababc c abc
+A	0	0,7 4,6
+A	1	2,7 4,6
+A	2	2,7 4,6
+A	3	4,7 4,6
+A	4	4,7 4,6
+A	5	6,7 -
+A	6	6,7 -
+A	7	8,9 -
+A	8	8,9 -
+A	9	10,13 10,12
+A	10	10,13 10,12
+A	11	12,13 -
+A	12	12,13 -
+A	13	none
+M	0,7 4,6
+M	8,9 -
+M	10,13 10,12
+S	  
+E
+P	a?
+H	baa
+A	0	0,0
+A	1	1,2
+A	2	2,3
+A	3	3,3
+M	0,0
+M	1,2
+M	2,3
+S	b
+E
+P	a|ab
+H	ab
+A	0	0,1
+A	1	none
+A	2	none
+M	0,1
+S	b
+E
+P	ab|a
+H	ab
+A	0	0,2
+A	1	none
+A	2	none
+M	0,2
+S	
+E
+P	cat|dog|bird
+H	a dog and a bird and a cat
+A	0	2,5
+A	1	2,5
+A	2	2,5
+A	3	12,16
+A	4	12,16
+A	5	12,16
+A	6	12,16
+A	7	12,16
+A	8	12,16
+A	9	12,16
+A	10	12,16
+A	11	12,16
+A	12	12,16
+A	13	23,26
+A	14	23,26
+A	15	23,26
+A	16	23,26
+A	17	23,26
+A	18	23,26
+A	19	23,26
+A	20	23,26
+A	21	23,26
+A	22	23,26
+A	23	23,26
+A	24	none
+A	25	none
+A	26	none
+M	2,5
+M	12,16
+M	23,26
+S	a  and a  and a 
+E
+P	(?:a|b)+c
+H	abbac
+A	0	0,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	4	none
+A	5	none
+M	0,5
+S	
+E
+P	(\\w+)@(\\w+)\\.com
+H	mail joe@site.com and ann@web.com
+A	0	5,17 5,8 9,13
+A	1	5,17 5,8 9,13
+A	2	5,17 5,8 9,13
+A	3	5,17 5,8 9,13
+A	4	5,17 5,8 9,13
+A	5	5,17 5,8 9,13
+A	6	6,17 6,8 9,13
+A	7	7,17 7,8 9,13
+A	8	22,33 22,25 26,29
+A	9	22,33 22,25 26,29
+A	10	22,33 22,25 26,29
+A	11	22,33 22,25 26,29
+A	12	22,33 22,25 26,29
+A	13	22,33 22,25 26,29
+A	14	22,33 22,25 26,29
+A	15	22,33 22,25 26,29
+A	16	22,33 22,25 26,29
+A	17	22,33 22,25 26,29
+A	18	22,33 22,25 26,29
+A	19	22,33 22,25 26,29
+A	20	22,33 22,25 26,29
+A	21	22,33 22,25 26,29
+A	22	22,33 22,25 26,29
+A	23	23,33 23,25 26,29
+A	24	24,33 24,25 26,29
+A	25	none
+A	26	none
+A	27	none
+A	28	none
+A	29	none
+A	30	none
+A	31	none
+A	32	none
+A	33	none
+M	5,17 5,8 9,13
+M	22,33 22,25 26,29
+S	mail  and 
+E
+P	(a)|(b)
+H	ab
+A	0	0,1 0,1 -
+A	1	1,2 - 1,2
+A	2	none
+M	0,1 0,1 -
+M	1,2 - 1,2
+S	
+E
+P	(a|(b))+
+H	ba
+A	0	0,2 1,2 0,1
+A	1	1,2 1,2 -
+A	2	none
+M	0,2 1,2 0,1
+S	
+E
+P	(?P<year>\\d{4})-(?P<month>\\d{2})
+H	2026-09 and 1999-12
+A	0	0,7 0,4 5,7
+A	1	12,19 12,16 17,19
+A	2	12,19 12,16 17,19
+A	3	12,19 12,16 17,19
+A	4	12,19 12,16 17,19
+A	5	12,19 12,16 17,19
+A	6	12,19 12,16 17,19
+A	7	12,19 12,16 17,19
+A	8	12,19 12,16 17,19
+A	9	12,19 12,16 17,19
+A	10	12,19 12,16 17,19
+A	11	12,19 12,16 17,19
+A	12	12,19 12,16 17,19
+A	13	none
+A	14	none
+A	15	none
+A	16	none
+A	17	none
+A	18	none
+A	19	none
+M	0,7 0,4 5,7
+M	12,19 12,16 17,19
+S	 and 
+R	$month/$year	09/2026 and 12/1999
+E
+P	(?<first>\\w)(?<rest>\\w*)
+H	pig latin
+A	0	0,3 0,1 1,3
+A	1	1,3 1,2 2,3
+A	2	2,3 2,3 3,3
+A	3	4,9 4,5 5,9
+A	4	4,9 4,5 5,9
+A	5	5,9 5,6 6,9
+A	6	6,9 6,7 7,9
+A	7	7,9 7,8 8,9
+A	8	8,9 8,9 9,9
+A	9	none
+M	0,3 0,1 1,3
+M	4,9 4,5 5,9
+S	 
+R	${rest}${first}ay	igpay atinlay
+E
+P	(\\d)(\\d)?
+H	1 23 456
+A	0	0,1 0,1 -
+A	1	2,4 2,3 3,4
+A	2	2,4 2,3 3,4
+A	3	3,4 3,4 -
+A	4	5,7 5,6 6,7
+A	5	5,7 5,6 6,7
+A	6	6,8 6,7 7,8
+A	7	7,8 7,8 -
+A	8	none
+M	0,1 0,1 -
+M	2,4 2,3 3,4
+M	5,7 5,6 6,7
+M	7,8 7,8 -
+S	  
+R	[$2$1]	[1] [32] [54][6]
+E
+P	(a*)*
+H	b
+A	0	0,0 0,0
+A	1	1,1 1,1
+M	0,0 0,0
+M	1,1 1,1
+S	b
+E
+P	()
+H	ab
+A	0	0,0 0,0
+A	1	1,1 1,1
+A	2	2,2 2,2
+M	0,0 0,0
+M	1,1 1,1
+M	2,2 2,2
+S	ab
+E
+P	(x)?y
+H	y xy
+A	0	0,1 -
+A	1	2,4 2,3
+A	2	2,4 2,3
+A	3	3,4 -
+A	4	none
+M	0,1 -
+M	2,4 2,3
+S	 
+E
+P	(\\p{Lu})(\\p{Ll}+)
+H	Alpha Beta gamma Δέλτα
+A	0	0,5 0,1 1,5
+A	1	6,10 6,7 7,10
+A	2	6,10 6,7 7,10
+A	3	6,10 6,7 7,10
+A	4	6,10 6,7 7,10
+A	5	6,10 6,7 7,10
+A	6	6,10 6,7 7,10
+A	7	17,27 17,19 19,27
+A	8	17,27 17,19 19,27
+A	9	17,27 17,19 19,27
+A	10	17,27 17,19 19,27
+A	11	17,27 17,19 19,27
+A	12	17,27 17,19 19,27
+A	13	17,27 17,19 19,27
+A	14	17,27 17,19 19,27
+A	15	17,27 17,19 19,27
+A	16	17,27 17,19 19,27
+A	17	17,27 17,19 19,27
+A	19	none
+A	21	none
+A	23	none
+A	25	none
+A	27	none
+M	0,5 0,1 1,5
+M	6,10 6,7 7,10
+M	17,27 17,19 19,27
+S	  gamma 
+R	$2$1	lphaA etaB gamma έλταΔ
+E
+P	\\p{L}+
+H	ab12λμ-中文 ال
+A	0	0,2
+A	1	1,2
+A	2	4,8
+A	3	4,8
+A	4	4,8
+A	6	6,8
+A	8	9,15
+A	9	9,15
+A	12	12,15
+A	15	16,20
+A	16	16,20
+A	18	18,20
+A	20	none
+M	0,2
+M	4,8
+M	9,15
+M	16,20
+S	12- 
+E
+P	\\pL+
+H	ab12λ
+A	0	0,2
+A	1	1,2
+A	2	4,6
+A	3	4,6
+A	4	4,6
+A	6	none
+M	0,2
+M	4,6
+S	12
+E
+P	\\PL+
+H	ab12λ--c
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	3	3,4
+A	4	6,8
+A	6	6,8
+A	7	7,8
+A	8	none
+A	9	none
+M	2,4
+M	6,8
+S	abλc
+E
+P	\\p{Lu}
+H	aBcΔδ
+A	0	1,2
+A	1	1,2
+A	2	3,5
+A	3	3,5
+A	5	none
+A	7	none
+M	1,2
+M	3,5
+S	acδ
+E
+P	\\p{Ll}+
+H	aBcΔδ
+A	0	0,1
+A	1	2,3
+A	2	2,3
+A	3	5,7
+A	5	5,7
+A	7	none
+M	0,1
+M	2,3
+M	5,7
+S	BΔ
+E
+P	\\p{Uppercase_Letter}+
+H	aBCΔδ
+A	0	1,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	5	none
+A	7	none
+M	1,5
+S	aδ
+E
+P	\\p{gc=Nd}+
+H	ab١٢12
+A	0	2,8
+A	1	2,8
+A	2	2,8
+A	4	4,8
+A	6	6,8
+A	7	7,8
+A	8	none
+M	2,8
+S	ab
+E
+P	\\p{General_Category=Decimal_Number}+
+H	ab١٢12
+A	0	2,8
+A	1	2,8
+A	2	2,8
+A	4	4,8
+A	6	6,8
+A	7	7,8
+A	8	none
+M	2,8
+S	ab
+E
+P	\\p{Letter}+
+H	x1y
+A	0	0,1
+A	1	2,3
+A	2	2,3
+A	3	none
+M	0,1
+M	2,3
+S	1
+E
+P	\\p{N}+
+H	x½Ⅳ9y
+A	0	1,7
+A	1	1,7
+A	3	3,7
+A	6	6,7
+A	7	none
+A	8	none
+M	1,7
+S	xy
+E
+P	\\p{Nl}
+H	xⅣ9y
+A	0	1,4
+A	1	1,4
+A	4	none
+A	5	none
+A	6	none
+M	1,4
+S	x9y
+E
+P	\\p{No}
+H	x½9y
+A	0	1,3
+A	1	1,3
+A	3	none
+A	4	none
+A	5	none
+M	1,3
+S	x9y
+E
+P	\\p{P}+
+H	a,.!?b“c”
+A	0	1,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	4	4,5
+A	5	6,9
+A	6	6,9
+A	9	10,13
+A	10	10,13
+A	13	none
+M	1,5
+M	6,9
+M	10,13
+S	abc
+E
+P	\\p{Ps}\\p{Pe}
+H	()[]{}
+A	0	0,2
+A	1	2,4
+A	2	2,4
+A	3	4,6
+A	4	4,6
+A	5	none
+A	6	none
+M	0,2
+M	2,4
+M	4,6
+S	
+E
+P	\\p{S}+
+H	a+€$©b
+A	0	1,8
+A	1	1,8
+A	2	2,8
+A	5	5,8
+A	6	6,8
+A	8	none
+A	9	none
+M	1,8
+S	ab
+E
+P	\\p{Sc}
+H	a$€£b
+A	0	1,2
+A	1	1,2
+A	2	2,5
+A	5	5,7
+A	7	none
+A	8	none
+M	1,2
+M	2,5
+M	5,7
+S	ab
+E
+P	\\p{Z}+
+H	a   b
+A	0	1,7
+A	1	1,7
+A	2	2,7
+A	4	4,7
+A	7	none
+A	8	none
+M	1,7
+S	ab
+E
+P	\\p{Zs}+
+H	a   b
+A	0	1,4
+A	1	1,4
+A	2	2,4
+A	4	none
+A	7	none
+A	8	none
+M	1,4
+S	a b
+E
+P	\\p{Cc}+
+H	a\tbc
+A	0	1,2
+A	1	1,2
+A	2	3,4
+A	3	3,4
+A	4	none
+A	5	none
+M	1,2
+M	3,4
+S	abc
+E
+P	\\p{Cf}
+H	a​­b
+A	0	1,4
+A	1	1,4
+A	4	4,6
+A	6	none
+A	7	none
+M	1,4
+M	4,6
+S	ab
+E
+P	\\p{M}+
+H	é̂aि
+A	0	1,5
+A	1	1,5
+A	3	3,5
+A	5	6,9
+A	6	6,9
+A	9	none
+M	1,5
+M	6,9
+S	ea
+E
+P	\\p{Mn}+
+H	é̂aि
+A	0	1,5
+A	1	1,5
+A	3	3,5
+A	5	none
+A	6	none
+A	9	none
+M	1,5
+S	eaि
+E
+P	\\p{Mc}
+H	éaि
+A	0	4,7
+A	1	4,7
+A	3	4,7
+A	4	4,7
+A	7	none
+M	4,7
+S	éa
+E
+P	\\p{LC}+
+H	aˆBǅ
+A	0	0,1
+A	1	3,6
+A	3	3,6
+A	4	4,6
+A	6	none
+M	0,1
+M	3,6
+S	ˆ
+E
+P	\\p{gc!=L}+
+H	ab12cd
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	3	3,4
+A	4	none
+A	5	none
+A	6	none
+M	2,4
+S	abcd
+E
+P	\\p{Greek}+
+H	abcλόγος·x
+A	0	3,13
+A	1	3,13
+A	2	3,13
+A	3	3,13
+A	5	5,13
+A	7	7,13
+A	9	9,13
+A	11	11,13
+A	13	none
+A	15	none
+A	16	none
+M	3,13
+S	abc·x
+E
+P	\\p{sc=Grek}+
+H	λό͂γ
+A	0	0,4
+A	2	2,4
+A	4	6,8
+A	6	6,8
+A	8	none
+M	0,4
+M	6,8
+S	͂
+E
+P	\\p{scx=Grek}+
+H	λό͂γ
+A	0	0,8
+A	2	2,8
+A	4	4,8
+A	6	6,8
+A	8	none
+M	0,8
+S	
+E
+P	\\p{Script_Extensions=Greek}+
+H	λό͂γ
+A	0	0,8
+A	2	2,8
+A	4	4,8
+A	6	6,8
+A	8	none
+M	0,8
+S	
+E
+P	\\p{Latin}+
+H	café λ
+A	0	0,5
+A	1	1,5
+A	2	2,5
+A	3	3,5
+A	5	none
+A	6	none
+A	8	none
+M	0,5
+S	 λ
+E
+P	\\p{Han}+
+H	中文、x
+A	0	0,6
+A	3	3,6
+A	6	none
+A	9	none
+A	10	none
+M	0,6
+S	、x
+E
+P	\\p{scx=Hani}+
+H	中文、x
+A	0	0,9
+A	3	3,9
+A	6	6,9
+A	9	none
+A	10	none
+M	0,9
+S	x
+E
+P	\\p{Cyrillic}+
+H	Привет mir
+A	0	0,12
+A	2	2,12
+A	4	4,12
+A	6	6,12
+A	8	8,12
+A	10	10,12
+A	12	none
+A	13	none
+A	14	none
+A	15	none
+A	16	none
+M	0,12
+S	 mir
+E
+P	\\p{Arabic}+
+H	السلام ٠
+A	0	0,12
+A	2	2,12
+A	4	4,12
+A	6	6,12
+A	8	8,12
+A	10	10,12
+A	12	13,15
+A	13	13,15
+A	15	none
+M	0,12
+M	13,15
+S	 
+E
+P	\\p{scx=Arab}+
+H	ال،٠
+A	0	0,8
+A	2	2,8
+A	4	4,8
+A	6	6,8
+A	8	none
+M	0,8
+S	
+E
+P	\\p{Common}+
+H	ab 12,　
+A	0	2,9
+A	1	2,9
+A	2	2,9
+A	3	3,9
+A	4	4,9
+A	5	5,9
+A	6	6,9
+A	9	none
+M	2,9
+S	ab
+E
+P	\\p{Inherited}+
+H	é̂x
+A	0	1,5
+A	1	1,5
+A	3	3,5
+A	5	none
+A	6	none
+M	1,5
+S	ex
+E
+P	\\p{Devanagari}+
+H	नमस्ते ०
+A	0	0,18
+A	3	3,18
+A	6	6,18
+A	9	9,18
+A	12	12,18
+A	15	15,18
+A	18	19,22
+A	19	19,22
+A	22	none
+M	0,18
+M	19,22
+S	 
+E
+P	\\p{Hiragana}+
+H	ひらがなカタ
+A	0	0,12
+A	3	3,12
+A	6	6,12
+A	9	9,12
+A	12	none
+A	15	none
+A	18	none
+M	0,12
+S	カタ
+E
+P	\\P{Greek}+
+H	abλcd
+A	0	0,2
+A	1	1,2
+A	2	4,6
+A	4	4,6
+A	5	5,6
+A	6	none
+M	0,2
+M	4,6
+S	λ
+E
+P	\\p{sc!=Latin}+
+H	abλμcd
+A	0	2,6
+A	1	2,6
+A	2	2,6
+A	4	4,6
+A	6	none
+A	7	none
+A	8	none
+M	2,6
+S	abcd
+E
+P	\\p{Alphabetic}+
+H	xⅣy1
+A	0	0,5
+A	1	1,5
+A	4	4,5
+A	5	none
+A	6	none
+M	0,5
+S	1
+E
+P	\\p{Alpha}+
+H	xⅣy1
+A	0	0,5
+A	1	1,5
+A	4	4,5
+A	5	none
+A	6	none
+M	0,5
+S	1
+E
+P	\\p{White_Space}+
+H	a  b
+A	0	1,7
+A	1	1,7
+A	2	2,7
+A	4	4,7
+A	7	none
+A	8	none
+M	1,7
+S	ab
+E
+P	\\p{WSpace}+
+H	a b
+A	0	1,4
+A	1	1,4
+A	2	2,4
+A	4	none
+A	5	none
+M	1,4
+S	ab
+E
+P	\\p{Uppercase}+
+H	aⅠBⒶc
+A	0	1,8
+A	1	1,8
+A	4	4,8
+A	5	5,8
+A	8	none
+A	9	none
+M	1,8
+S	ac
+E
+P	\\p{Lowercase}+
+H	AªbⅰC
+A	0	1,7
+A	1	1,7
+A	3	3,7
+A	4	4,7
+A	7	none
+A	8	none
+M	1,7
+S	AC
+E
+P	\\p{Emoji}+
+H	a😀❤#1
+A	0	1,10
+A	1	1,10
+A	5	5,10
+A	8	8,10
+A	9	9,10
+A	10	none
+M	1,10
+S	a
+E
+P	\\p{Extended_Pictographic}+
+H	a😀❤©#1
+A	0	1,10
+A	1	1,10
+A	5	5,10
+A	8	8,10
+A	10	none
+A	11	none
+A	12	none
+M	1,10
+S	a#1
+E
+P	\\p{Emoji_Presentation}+
+H	a😀❤#
+A	0	1,5
+A	1	1,5
+A	5	none
+A	8	none
+A	9	none
+M	1,5
+S	a❤#
+E
+P	\\p{Ideographic}+
+H	中〇a
+A	0	0,6
+A	3	3,6
+A	6	none
+A	7	none
+M	0,6
+S	a
+E
+P	\\p{Math}+
+H	a+∑=b
+A	0	1,6
+A	1	1,6
+A	2	2,6
+A	5	5,6
+A	6	none
+A	7	none
+M	1,6
+S	ab
+E
+P	\\p{Dash}+
+H	a-—b
+A	0	1,5
+A	1	1,5
+A	2	2,5
+A	5	none
+A	6	none
+M	1,5
+S	ab
+E
+P	\\p{Hex_Digit}+
+H	xyzAF09Ａg
+A	0	3,10
+A	1	3,10
+A	2	3,10
+A	3	3,10
+A	4	4,10
+A	5	5,10
+A	6	6,10
+A	7	7,10
+A	10	none
+A	11	none
+M	3,10
+S	xyzg
+E
+P	\\p{Any}+
+H	aλ\n😀
+A	0	0,8
+A	1	1,8
+A	3	3,8
+A	4	4,8
+A	8	none
+M	0,8
+S	
+E
+P	\\p{ASCII}+
+H	abλcd
+A	0	0,2
+A	1	1,2
+A	2	4,6
+A	4	4,6
+A	5	5,6
+A	6	none
+M	0,2
+M	4,6
+S	λ
+E
+P	\\p{Assigned}+
+H	ab͸cd
+A	0	0,2
+A	1	1,2
+A	2	4,6
+A	4	4,6
+A	5	5,6
+A	6	none
+M	0,2
+M	4,6
+S	͸
+E
+P	\\p{Cn}+
+H	ab͸͹cd
+A	0	2,6
+A	1	2,6
+A	2	2,6
+A	4	4,6
+A	6	none
+A	7	none
+A	8	none
+M	2,6
+S	abcd
+E
+P	\\p{is Greek}+
+H	abλ
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	4	none
+M	2,4
+S	ab
+E
+P	\\p{ letter }+
+H	1ab2
+A	0	1,3
+A	1	1,3
+A	2	2,3
+A	3	none
+A	4	none
+M	1,3
+S	12
+E
+P	\\p{lowercase-letter}+
+H	ABcdEF
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	3	3,4
+A	4	none
+A	5	none
+A	6	none
+M	2,4
+S	ABEF
+E
+P	\\p{gc=lowercaseletter}+
+H	ABcdEF
+A	0	2,4
+A	1	2,4
+A	2	2,4
+A	3	3,4
+A	4	none
+A	5	none
+A	6	none
+M	2,4
+S	ABEF
+E
+P	[\\p{Greek}\\d]+
+H	abλ12μc
+A	0	2,8
+A	1	2,8
+A	2	2,8
+A	4	4,8
+A	5	5,8
+A	6	6,8
+A	8	none
+A	9	none
+M	2,8
+S	abc
+E
+P	[^\\p{L}\\s]+
+H	ab, 12 λ;
+A	0	2,3
+A	1	2,3
+A	2	2,3
+A	3	4,6
+A	4	4,6
+A	5	5,6
+A	6	9,10
+A	7	9,10
+A	9	9,10
+A	10	none
+M	2,3
+M	4,6
+M	9,10
+S	ab  λ
+E
+P	[\\p{L}&&\\p{Greek}]+
+H	aλ͵μb
+A	0	1,3
+A	1	1,3
+A	3	5,7
+A	5	5,7
+A	7	none
+A	8	none
+M	1,3
+M	5,7
+S	a͵b
+E
+P	[\\p{L}--\\p{Latin}]+
+H	abλμ中c
+A	0	2,9
+A	1	2,9
+A	2	2,9
+A	4	4,9
+A	6	6,9
+A	9	none
+A	10	none
+M	2,9
+S	abc
+E
+P	[\\P{L}a]+
+H	xa1b2
+A	0	1,3
+A	1	1,3
+A	2	2,3
+A	3	4,5
+A	4	4,5
+A	5	none
+M	1,3
+M	4,5
+S	xb
+E
+P	[\\w--\\d]+
+H	ab12c_d3
+A	0	0,2
+A	1	1,2
+A	2	4,7
+A	3	4,7
+A	4	4,7
+A	5	5,7
+A	6	6,7
+A	7	none
+A	8	none
+M	0,2
+M	4,7
+S	123
+E
+P	(?i)hello
+H	say HeLLo there
+A	0	4,9
+A	1	4,9
+A	2	4,9
+A	3	4,9
+A	4	4,9
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+A	9	none
+A	10	none
+A	11	none
+A	12	none
+A	13	none
+A	14	none
+A	15	none
+M	4,9
+S	say  there
+E
+P	(?i)[a-c]+
+H	xABCy
+A	0	1,4
+A	1	1,4
+A	2	2,4
+A	3	3,4
+A	4	none
+A	5	none
+M	1,4
+S	xy
+E
+P	(?i)[^a]
+H	aAb
+A	0	2,3
+A	1	2,3
+A	2	2,3
+A	3	none
+M	2,3
+S	aA
+E
+P	(?i)\\x{3a3}\\x{39f}\\x{3a6}
+H	σοφ ςοφ
+A	0	0,6
+A	2	7,13
+A	4	7,13
+A	6	7,13
+A	7	7,13
+A	9	none
+A	11	none
+A	13	none
+M	0,6
+M	7,13
+S	 
+E
+P	(?i)k
+H	KKk
+A	0	0,1
+A	1	1,4
+A	4	4,5
+A	5	none
+M	0,1
+M	1,4
+M	4,5
+S	
+E
+P	(?i)s
+H	ſS
+A	0	0,2
+A	2	2,3
+A	3	none
+M	0,2
+M	2,3
+S	
+E
+P	(?i)\\p{Lu}+
+H	aBc
+A	0	0,3
+A	1	1,3
+A	2	2,3
+A	3	none
+M	0,3
+S	
+E
+P	(?i)\\P{Lu}+
+H	aB1c;
+A	0	2,3
+A	1	2,3
+A	2	2,3
+A	3	4,5
+A	4	4,5
+A	5	none
+M	2,3
+M	4,5
+S	aBc
+E
+P	a(?i:b)c
+H	abc aBc abC
+A	0	0,3
+A	1	4,7
+A	2	4,7
+A	3	4,7
+A	4	4,7
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+A	9	none
+A	10	none
+A	11	none
+M	0,3
+M	4,7
+S	  abC
+E
+P	(?i)a(?-i)b
+H	Ab AB ab
+A	0	0,2
+A	1	6,8
+A	2	6,8
+A	3	6,8
+A	4	6,8
+A	5	6,8
+A	6	6,8
+A	7	none
+A	8	none
+M	0,2
+M	6,8
+S	 AB 
+E
+P	(?i:a|b)c
+H	Ac Bc aC
+A	0	0,2
+A	1	3,5
+A	2	3,5
+A	3	3,5
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+M	0,2
+M	3,5
+S	  aC
+E
+P	(?x) a \\s+ b  # comment
+H	a   b ab
+A	0	0,5
+A	1	none
+A	2	none
+A	3	none
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+M	0,5
+S	 ab
+E
+P	(?x) \\d{2} - \\d{2}
+H	12-34
+A	0	0,5
+A	1	none
+A	2	none
+A	3	none
+A	4	none
+A	5	none
+M	0,5
+S	
+E
+P	(?s:.)+
+H	a\nb
+A	0	0,3
+A	1	1,3
+A	2	2,3
+A	3	none
+M	0,3
+S	
+E
+P	(?m:^b)
+H	a\nb
+A	0	2,3
+A	1	2,3
+A	2	2,3
+A	3	none
+M	2,3
+S	a\n
+E
+P	\\x41\\x{3bb}\\u{3bc}
+H	xAλμy
+A	0	1,6
+A	1	1,6
+A	2	none
+A	4	none
+A	6	none
+A	7	none
+M	1,6
+S	xy
+E
+P	A\\U0001F600
+H	A😀
+A	0	0,5
+A	1	none
+A	5	none
+M	0,5
+S	
+E
+P	\\t\\x{0A}
+H	a\t\nb
+A	0	1,3
+A	1	1,3
+A	2	none
+A	3	none
+A	4	none
+M	1,3
+S	ab
+E
+P	\\.\\+\\*\\?\\(\\)\\|\\[\\]\\{\\}\\^\\$\\#\\&\\-\\~
+H	.+*?()|[]{}^$#&-~
+A	0	0,17
+A	1	none
+A	2	none
+A	3	none
+A	4	none
+A	5	none
+A	6	none
+A	7	none
+A	8	none
+A	9	none
+A	10	none
+A	11	none
+A	12	none
+A	13	none
+A	14	none
+A	15	none
+A	16	none
+A	17	none
+M	0,17
+S	
+E
+P	\\x{1f600}+
+H	a😀😀b😀
+A	0	1,9
+A	1	1,9
+A	5	5,9
+A	9	10,14
+A	10	10,14
+A	14	none
+M	1,9
+M	10,14
+S	ab
+E
+P	\\w+
+H	नमस्ते 😀x
+A	0	0,18
+A	3	3,18
+A	6	6,18
+A	9	9,18
+A	12	12,18
+A	15	15,18
+A	18	23,24
+A	19	23,24
+A	23	23,24
+A	24	none
+M	0,18
+M	23,24
+S	 😀
+E
+P	.
+H	😀éa
+A	0	0,4
+A	4	4,6
+A	6	6,7
+A	7	none
+M	0,4
+M	4,6
+M	6,7
+S	
+E
+P	.\\x{301}
+H	é
+A	0	0,3
+A	1	none
+A	3	none
+M	0,3
+S	
+E
