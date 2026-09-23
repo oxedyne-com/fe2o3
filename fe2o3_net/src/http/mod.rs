@@ -11,4 +11,6 @@ pub mod local;
 pub mod msg;
 pub mod pct;
 pub mod range;
+#[cfg(feature = "async")]
+pub mod range_source;
 pub mod status;
