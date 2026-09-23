@@ -56,8 +56,8 @@ static BIBLIOGRAPHY: [FieldSpec; 8] = [
 	FieldSpec::named("style",			ANY,	FieldDefault::Str("ieee")),
 	FieldSpec::named("target",			ANY,	FieldDefault::Auto),
 	FieldSpec::named("group",			ANY,	FieldDefault::Auto),
-	FieldSpec::named("keys",			ANY,	FieldDefault::EmptyArray).synthesised(),
-	FieldSpec::named("data",			ANY,	FieldDefault::EmptyArray).synthesised(),
+	FieldSpec::named("keys",			ANY,	FieldDefault::EmptyArray).synthesised().internal(),
+	FieldSpec::named("data",			ANY,	FieldDefault::EmptyArray).synthesised().internal(),
 ];
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {

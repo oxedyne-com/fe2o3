@@ -44,6 +44,39 @@ fn element_paths_are_unique_and_scoped() {
 	assert_eq!(ElemKind::ListItem.name(), "item");
 }
 
+// What `#context query(<elem>)` does under typst 0.15.1 for the elements whose flag changed from U0's
+// first table: true where it answers, false where it says "<elem> is not locatable".
+const QUERYABLE_IN_TYPST: [(ElemKind, bool); 16] = [
+	(ElemKind::Par,				true),
+	(ElemKind::ParLine,			true),
+	(ElemKind::Strong,			true),
+	(ElemKind::Raw,				true),
+	(ElemKind::List,			true),
+	(ElemKind::ListItem,		false),
+	(ElemKind::Link,			true),
+	(ElemKind::FigureCaption,	true),
+	(ElemKind::Underline,		true),
+	(ElemKind::Table,			true),
+	(ElemKind::TableCell,		false),
+	(ElemKind::Image,			true),
+	(ElemKind::Place,			false),
+	(ElemKind::Divider,			false),
+	(ElemKind::Text,			false),
+	(ElemKind::Block,			false),
+];
+
+#[test]
+fn queryable_elements_match_typst_and_are_located() {
+	for (kind, want) in QUERYABLE_IN_TYPST {
+		assert_eq!(kind.queryable(), want, "query({}) under typst 0.15.1", kind.path());
+	}
+	for k in ElemKind::ALL {
+		assert!(!k.queryable() || k.locatable(), "{} is queryable but never located", k.path());
+	}
+	// Located for float bookkeeping, as Typst's `PlaceElem` is, though no query may name it.
+	assert!(ElemKind::Place.locatable());
+}
+
 #[test]
 fn library_defines_global_elements_only() {
 	let lib = library();

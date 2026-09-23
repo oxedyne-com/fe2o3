@@ -34,7 +34,7 @@ const ANY: FieldType = FieldType::Any;
 static LINK: [FieldSpec; 3] = [
 	FieldSpec::required("dest",		ANY),
 	FieldSpec::required("body",		ANY),
-	FieldSpec::named("current",		ANY,	FieldDefault::None).unsettable(),
+	FieldSpec::named("current",		ANY,	FieldDefault::None).internal(),
 ];
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {

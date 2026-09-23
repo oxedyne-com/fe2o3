@@ -8,11 +8,12 @@
 //! check, as `construct` and `set` apply it), `default_value` (the defaults no `static` can hold),
 //! `synthesise` (Typst's `Synthesize`), `show_set` (`ShowSet`, the built-in styles a show rule sees),
 //! `count_step` (`Count`) and `method` (functions scoped to an element, `outline.entry.indented`).
-//! Schemas list Typst's public fields in Typst's order; a style-only internal field (`list`'s depth) is
-//! unsettable so it is never materialised, and [`is_internal`] names the few that are.
+//! Schemas list Typst's public fields in Typst's order; a Typst-internal field (`list`'s depth) is marked
+//! `internal`, so it is never set, constructed, materialised or shown by `fields()` and `repr`.
 
 pub mod bibliography;
 pub mod common;
+pub mod divider;
 pub mod document;
 pub mod emph;
 pub mod figure;
@@ -114,21 +115,6 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 	kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value())
 }
 
-/// Is the field Typst-internal, kept from `fields()`, `repr` and `set`?
-pub fn is_internal(kind: ElemKind, name: &str) -> bool {
-	matches!((kind, name),
-		(ElemKind::List, "depth")
-		| (ElemKind::Enum, "parents")
-		| (ElemKind::Terms, "within")
-		| (ElemKind::Quote, "depth")
-		| (ElemKind::Link, "current")
-		| (ElemKind::OutlineEntry, "parent")
-		| (ElemKind::FigureCaption, "figure-location")
-		| (ElemKind::Outline, "prefix-widths")
-		| (ElemKind::Bibliography, "keys")
-		| (ElemKind::Bibliography, "data"))
-}
-
 /// Checks, and where Typst does normalises, a value given for a field: what `construct` applies to an
 /// argument and a `set` rule should apply to its value.
 pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
@@ -192,7 +178,7 @@ pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) ->
 	let span = args.span;
 	let mut fields = Vec::new();
 	for (i, spec) in kind.fields().iter().enumerate() {
-		if spec.synthesised || is_internal(kind, spec.name) {
+		if spec.synthesised || spec.internal {
 			continue;
 		}
 		let id = FieldId(i as u8);
@@ -321,6 +307,7 @@ pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
 		Some(ElemKind::Outline)			=> outline::show_set(elem, styles),
 		Some(ElemKind::Quote)			=> quote::show_set(elem, styles),
 		Some(ElemKind::Bibliography)	=> bibliography::show_set(),
+		Some(ElemKind::Divider)			=> divider::show_set(),
 		_								=> Ok(Styles::new()),
 	}
 }
@@ -382,6 +369,7 @@ pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		ElemKind::Quote											=> quote::show(engine, elem, styles),
 		ElemKind::Bibliography | ElemKind::CiteGroup			=> bibliography::show(engine, elem, styles),
 		ElemKind::Document										=> document::show(engine, elem, styles),
+		ElemKind::Divider										=> divider::show(elem),
 		_ => Err(err!("{} is not a model element", kind.path(); Bug)),
 	}
 }

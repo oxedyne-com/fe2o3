@@ -300,8 +300,10 @@ fn content_json(c: &Content) -> J {
 			fields.sort_by_key(|(id, _)| id.0);
 			for (id, v) in fields {
 				let name = match e.kind.field_spec(*id) {
-					Some(spec)	=> spec.name.to_string(),
-					None		=> fmt!("<field {} of {} outside its schema>", id.0, e.kind.path()),
+					// Typst serialises only the fields `fields()` shows.
+					Some(spec) if spec.internal	=> continue,
+					Some(spec)					=> spec.name.to_string(),
+					None						=> fmt!("<field {} of {} outside its schema>", id.0, e.kind.path()),
 				};
 				kv.push((name, to_json(v)));
 			}
@@ -510,6 +512,7 @@ fn element(
 		ElemKind::TableCell		=> res!(tagged("td", field_content(c, "body"), flow, engine, out)),
 		ElemKind::Equation		=> out.push(Sk::Tag("math".to_string(), Vec::new())),
 		ElemKind::Image			=> out.push(Sk::Tag("img".to_string(), Vec::new())),
+		ElemKind::Divider		=> out.push(Sk::Tag("hr".to_string(), Vec::new())),
 		// Left to levels 2 and 4 (see `structure.rs`), and invisible.
 		ElemKind::Footnote | ElemKind::FootnoteEntry | ElemKind::Metadata | ElemKind::CounterUpdate
 			| ElemKind::StateUpdate | ElemKind::Parbreak => (),

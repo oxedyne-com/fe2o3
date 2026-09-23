@@ -174,7 +174,11 @@ pub fn content_field(c: &Content, name: &str) -> Option<Value> {
 		return c.label().map(|l| Value::Label(l.clone()));
 	}
 	match c {
-		Content::Elem(_)		=> c.field(name).cloned(),
+		// A Typst-internal field is not reachable from code, as in Typst.
+		Content::Elem(e)		=> match e.kind.field_id(name).and_then(|id| e.kind.field_spec(id)) {
+			Some(spec) if spec.internal	=> None,
+			_							=> c.field(name).cloned(),
+		},
 		Content::Sequence(s)	=> match name {
 			"children"	=> Some(Value::array(s.children.iter().cloned().map(Value::Content).collect())),
 			_			=> None,
@@ -195,8 +199,9 @@ pub fn content_fields(c: &Content) -> Dict {
 			let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().collect();
 			fields.sort_by_key(|(id, _)| *id);
 			for (id, v) in fields {
-				if let Some(spec) = e.kind.field_spec(*id) {
-					d.insert(spec.name, v.clone());
+				match e.kind.field_spec(*id) {
+					Some(spec) if !spec.internal	=> d.insert(spec.name, v.clone()),
+					_								=> (),
 				}
 			}
 		}
@@ -227,12 +232,21 @@ pub fn call_method(
 	if is_mutating(name) && matches!(receiver, Value::Array(_) | Value::Dict(_)) {
 		return Err(engine.error(span, "cannot mutate a temporary value"));
 	}
-	match type_method(receiver.ty(), name) {
+	match type_method(receiver.ty(), name).or_else(|| element_method(&receiver, name)) {
 		Some(f) => {
 			args.prepend(span, receiver);
 			engine.call_func(&Func::Native(f), args)
 		}
 		None => Err(engine.error(span, fmt!("type {} has no method `{}`", receiver.ty().long_name(), name))),
+	}
+}
+
+/// A function in the scope of the receiver's element, which Typst lets content call as a method after
+/// the content type's own: `it.indented(it.prefix(), it.inner())` on an `outline.entry`.
+fn element_method(receiver: &Value, name: &str) -> Option<NativeFunc> {
+	match receiver {
+		Value::Content(Content::Elem(e))	=> lib::model::method(e.kind, name).map(NativeFunc::Model),
+		_									=> None,
 	}
 }
 

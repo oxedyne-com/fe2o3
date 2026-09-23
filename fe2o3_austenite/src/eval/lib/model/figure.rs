@@ -68,7 +68,7 @@ static CAPTION: [FieldSpec; 8] = [
 	FieldSpec::named("supplement",		ANY,	FieldDefault::None).synthesised(),
 	FieldSpec::named("numbering",		ANY,	FieldDefault::None).synthesised(),
 	FieldSpec::named("counter",			ANY,	FieldDefault::None).synthesised(),
-	FieldSpec::named("figure-location",	ANY,	FieldDefault::None).synthesised(),
+	FieldSpec::named("figure-location",	ANY,	FieldDefault::None).synthesised().internal(),
 ];
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {

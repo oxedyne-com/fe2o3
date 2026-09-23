@@ -64,14 +64,14 @@ static OUTLINE: [FieldSpec; 5] = [
 	FieldSpec::named("target",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("depth",			ANY,	FieldDefault::None),
 	FieldSpec::named("indent",			ANY,	FieldDefault::Auto),
-	FieldSpec::named("prefix-widths",	ANY,	FieldDefault::EmptyArray).synthesised(),
+	FieldSpec::named("prefix-widths",	ANY,	FieldDefault::EmptyArray).synthesised().internal(),
 ];
 
 static ENTRY: [FieldSpec; 4] = [
 	FieldSpec::required("level",		ANY),
 	FieldSpec::required("element",		ANY),
 	FieldSpec::named("fill",			ANY,	FieldDefault::Computed),
-	FieldSpec::named("parent",			ANY,	FieldDefault::None).unsettable(),
+	FieldSpec::named("parent",			ANY,	FieldDefault::None).internal(),
 ];
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {

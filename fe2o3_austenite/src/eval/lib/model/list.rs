@@ -55,7 +55,7 @@ static LIST: [FieldSpec; 8] = [
 	FieldSpec::named("spacing",			FieldType::OneOf(&[Type::Length, Type::Auto]),	FieldDefault::Auto),
 	FieldSpec::named("marker-align",	ANY,	FieldDefault::Computed),
 	FieldSpec::named("children",		ANY,	FieldDefault::EmptyArray).variadic().unsettable(),
-	FieldSpec::named("depth",			ANY,	FieldDefault::Int(0)).unsettable(),
+	FieldSpec::named("depth",			ANY,	FieldDefault::Int(0)).internal(),
 ];
 
 static LIST_ITEM: [FieldSpec; 1] = [
@@ -73,7 +73,7 @@ static ENUM: [FieldSpec; 11] = [
 	FieldSpec::named("spacing",			FieldType::OneOf(&[Type::Length, Type::Auto]),	FieldDefault::Auto),
 	FieldSpec::named("number-align",	ANY,	FieldDefault::Computed),
 	FieldSpec::named("children",		ANY,	FieldDefault::EmptyArray).variadic().unsettable(),
-	FieldSpec::named("parents",			ANY,	FieldDefault::EmptyArray).unsettable(),
+	FieldSpec::named("parents",			ANY,	FieldDefault::EmptyArray).internal(),
 ];
 
 static ENUM_ITEM: [FieldSpec; 2] = [
@@ -88,7 +88,7 @@ static TERMS: [FieldSpec; 7] = [
 	FieldSpec::named("hanging-indent",	LENGTH,	FieldDefault::Em(2.0)),
 	FieldSpec::named("spacing",			FieldType::OneOf(&[Type::Length, Type::Auto]),	FieldDefault::Auto),
 	FieldSpec::named("children",		ANY,	FieldDefault::EmptyArray).variadic().unsettable(),
-	FieldSpec::named("within",			ANY,	FieldDefault::Bool(false)).unsettable(),
+	FieldSpec::named("within",			ANY,	FieldDefault::Bool(false)).internal(),
 ];
 
 static TERM_ITEM: [FieldSpec; 2] = [

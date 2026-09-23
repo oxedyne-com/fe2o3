@@ -77,42 +77,43 @@ elem_kinds! {
 	Linebreak		=> ("linebreak",			Text,	false),
 	SmartQuote		=> ("smartquote",			Text,	false),
 	Smallcaps		=> ("smallcaps",			Text,	false),
-	Underline		=> ("underline",			Text,	false),
-	Overline		=> ("overline",				Text,	false),
-	Strike			=> ("strike",				Text,	false),
-	Highlight		=> ("highlight",			Text,	false),
+	Underline		=> ("underline",			Text,	true),
+	Overline		=> ("overline",				Text,	true),
+	Strike			=> ("strike",				Text,	true),
+	Highlight		=> ("highlight",			Text,	true),
 	Super			=> ("super",				Text,	false),
 	Sub				=> ("sub",					Text,	false),
 	Symbol			=> ("symbol",				Text,	false),
 	// Model (U5)
-	Par				=> ("par",					Model,	false),
-	ParLine			=> ("par.line",				Model,	false),
+	Par				=> ("par",					Model,	true),
+	ParLine			=> ("par.line",				Model,	true),
 	Parbreak		=> ("parbreak",				Model,	false),
-	Strong			=> ("strong",				Model,	false),
-	Emph			=> ("emph",					Model,	false),
-	Raw				=> ("raw",					Model,	false),
+	Strong			=> ("strong",				Model,	true),
+	Emph			=> ("emph",					Model,	true),
+	Raw				=> ("raw",					Model,	true),
 	RawLine			=> ("raw.line",				Model,	false),
 	Heading			=> ("heading",				Model,	true),
-	Title			=> ("title",				Model,	false),
-	List			=> ("list",					Model,	false),
+	Title			=> ("title",				Model,	true),
+	List			=> ("list",					Model,	true),
 	ListItem		=> ("list.item",			Model,	false),
-	Enum			=> ("enum",					Model,	false),
+	Enum			=> ("enum",					Model,	true),
 	EnumItem		=> ("enum.item",			Model,	false),
-	Terms			=> ("terms",				Model,	false),
+	Terms			=> ("terms",				Model,	true),
 	TermItem		=> ("terms.item",			Model,	false),
-	Link			=> ("link",					Model,	false),
-	Ref				=> ("ref",					Model,	false),
+	Link			=> ("link",					Model,	true),
+	Ref				=> ("ref",					Model,	true),
 	Cite			=> ("cite",					Model,	true),
 	Footnote		=> ("footnote",				Model,	true),
-	FootnoteEntry	=> ("footnote.entry",		Model,	false),
+	FootnoteEntry	=> ("footnote.entry",		Model,	true),
 	Figure			=> ("figure",				Model,	true),
-	FigureCaption	=> ("figure.caption",		Model,	false),
+	FigureCaption	=> ("figure.caption",		Model,	true),
 	Outline			=> ("outline",				Model,	true),
-	OutlineEntry	=> ("outline.entry",		Model,	false),
-	Quote			=> ("quote",				Model,	false),
+	OutlineEntry	=> ("outline.entry",		Model,	true),
+	Quote			=> ("quote",				Model,	true),
 	Bibliography	=> ("bibliography",			Model,	true),
-	CiteGroup		=> ("cite-group",			Model,	false),
-	Document		=> ("document",				Model,	false),
+	CiteGroup		=> ("cite-group",			Model,	true),
+	Document		=> ("document",				Model,	true),
+	Divider			=> ("divider",				Model,	false),
 	// Layout (U6b)
 	Box				=> ("box",					Layout,	false),
 	Block			=> ("block",				Layout,	false),
@@ -121,7 +122,7 @@ elem_kinds! {
 	Stack			=> ("stack",				Layout,	false),
 	H				=> ("h",					Layout,	false),
 	V				=> ("v",					Layout,	false),
-	Place			=> ("place",				Layout,	false),
+	Place			=> ("place",				Layout,	true),
 	PlaceFlush		=> ("place.flush",			Layout,	false),
 	Columns			=> ("columns",				Layout,	false),
 	Colbreak		=> ("colbreak",				Layout,	false),
@@ -134,14 +135,14 @@ elem_kinds! {
 	GridFooter		=> ("grid.footer",			Grid,	false),
 	GridHLine		=> ("grid.hline",			Grid,	false),
 	GridVLine		=> ("grid.vline",			Grid,	false),
-	Table			=> ("table",				Grid,	false),
+	Table			=> ("table",				Grid,	true),
 	TableCell		=> ("table.cell",			Grid,	false),
 	TableHeader		=> ("table.header",			Grid,	false),
 	TableFooter		=> ("table.footer",			Grid,	false),
 	TableHLine		=> ("table.hline",			Grid,	false),
 	TableVLine		=> ("table.vline",			Grid,	false),
 	// Visual (U6d)
-	Image			=> ("image",				Visual,	false),
+	Image			=> ("image",				Visual,	true),
 	Line			=> ("line",					Visual,	false),
 	Rect			=> ("rect",					Visual,	false),
 	Square			=> ("square",				Visual,	false),
@@ -221,6 +222,12 @@ impl ElemKind {
 		!self.path().contains('.') && !matches!(self,
 			ElemKind::Space | ElemKind::Symbol | ElemKind::Path | ElemKind::Context | ElemKind::CiteGroup
 				| ElemKind::Sequence | ElemKind::Styled | ElemKind::Tag)
+	}
+
+	/// Can a user's `query`, `locate` or selector name the element? Typst locates `place` for the flow's
+	/// float bookkeeping, yet refuses it in a query: "place is not locatable".
+	pub fn queryable(self) -> bool {
+		self.locatable() && !matches!(self, ElemKind::Place)
 	}
 
 	/// The element scoped under this one's function: `ElemKind::List.scoped("item")` is `ListItem`.
@@ -327,19 +334,20 @@ pub struct FieldSpec {
 	pub variadic:		bool,	// takes all remaining positional arguments (`list(..children)`)
 	pub settable:		bool,
 	pub synthesised:	bool,	// filled during realisation, never passed (`heading.level` when auto, `counter`)
+	pub internal:		bool,	// Typst-internal: hidden from `fields()`, field access, `repr`, `set` and construction
 }
 
 impl FieldSpec {
 	/// A settable, named, optional field: the common case.
 	pub const fn named(name: &'static str, ty: FieldType, default: FieldDefault) -> Self {
 		Self { name, ty, default, fold: Fold::Replace, positional: false, required: false,
-			variadic: false, settable: true, synthesised: false }
+			variadic: false, settable: true, synthesised: false, internal: false }
 	}
 
 	/// A required positional field, not settable: a body, a text, a destination.
 	pub const fn required(name: &'static str, ty: FieldType) -> Self {
 		Self { name, ty, default: FieldDefault::Required, fold: Fold::Replace, positional: true,
-			required: true, variadic: false, settable: false, synthesised: false }
+			required: true, variadic: false, settable: false, synthesised: false, internal: false }
 	}
 
 	pub const fn fold(mut self, fold: Fold) -> Self { self.fold = fold; self }
@@ -347,6 +355,7 @@ impl FieldSpec {
 	pub const fn variadic(mut self) -> Self { self.variadic = true; self.positional = true; self }
 	pub const fn unsettable(mut self) -> Self { self.settable = false; self }
 	pub const fn synthesised(mut self) -> Self { self.synthesised = true; self.settable = false; self }
+	pub const fn internal(mut self) -> Self { self.internal = true; self.settable = false; self }
 }
 
 impl FieldDefault {
@@ -686,7 +695,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 	let mut fields = Vec::new();
 	for (i, spec) in kind.fields().iter().enumerate() {
 		let id = FieldId(i as u8);
-		if spec.synthesised {
+		if spec.synthesised || spec.internal {
 			continue;
 		}
 		let value = if spec.variadic {

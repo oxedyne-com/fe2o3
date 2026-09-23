@@ -41,7 +41,6 @@ use oxedyne_fe2o3_austenite::eval::intro::{
 	Introspector,
 };
 use oxedyne_fe2o3_austenite::eval::lib::foundations::repr;
-use oxedyne_fe2o3_austenite::eval::lib::model;
 use oxedyne_fe2o3_austenite::eval::lib::model::local::local_name;
 use oxedyne_fe2o3_austenite::eval::scope::Scope;
 use oxedyne_fe2o3_austenite::eval::select::Selector;
@@ -204,10 +203,11 @@ fn content_json(c: &Content) -> J {
 			let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().collect();
 			fields.sort_by_key(|(id, _)| id.0);
 			for (id, v) in fields {
-				let name = e.kind.field_spec(*id).map(|s| s.name).unwrap_or("?");
-				if e.kind.family() == Family::Model && model::is_internal(e.kind, name) {
+				let spec = e.kind.field_spec(*id);
+				if spec.map(|s| s.internal).unwrap_or(false) {
 					continue;
 				}
+				let name = spec.map(|s| s.name).unwrap_or("?");
 				kv.push((name.to_string(), to_json(v)));
 			}
 		}

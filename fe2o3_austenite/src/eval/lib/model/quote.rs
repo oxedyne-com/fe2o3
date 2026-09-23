@@ -39,7 +39,7 @@ static QUOTE: [FieldSpec; 5] = [
 	FieldSpec::named("quotes",			FieldType::OneOf(&[Type::Bool, Type::Auto]),	FieldDefault::Auto),
 	FieldSpec::named("attribution",		ANY,	FieldDefault::None),
 	FieldSpec::required("body",			ANY),
-	FieldSpec::named("depth",			ANY,	FieldDefault::Int(0)).unsettable(),
+	FieldSpec::named("depth",			ANY,	FieldDefault::Int(0)).internal(),
 ];
 
 pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
