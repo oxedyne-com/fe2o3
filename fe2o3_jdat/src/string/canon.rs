@@ -50,6 +50,25 @@ impl Dat {
         res!(write_canonical(self, &mut out));
         Ok(out)
     }
+
+    /// Encode this object as canonical JSON with the named top-level members left out.
+    ///
+    /// These are the bytes a signature covers when the signature itself, and any envelope around
+    /// the signed body, travel inside the object they sign. A name that is absent is no fault, so
+    /// the bare body and the whole envelope give the same bytes.
+    pub fn json_canonical_without(&self, omit: &[&str]) -> Outcome<String> {
+        match self {
+            Dat::Map(m) => {
+                let mut out = String::new();
+                res!(write_map(m, omit, &mut out));
+                Ok(out)
+            },
+            other => Err(err!(
+                "Only an object has members to leave out of its canonical JSON, and this \
+                daticle is of kind {:?}.", other.kind();
+                Invalid, Input, Mismatch)),
+        }
+    }
 }
 
 /// Append the canonical JSON encoding of `dat` to `out`.
@@ -83,7 +102,7 @@ fn write_canonical(dat: &Dat, out: &mut String) -> Outcome<()> {
             }
             out.push(']');
         },
-        Dat::Map(m)     => res!(write_map(m, out)),
+        Dat::Map(m)     => res!(write_map(m, &[], out)),
         other => return Err(err!(
             "A daticle of kind {:?} has no canonical JSON form. If a signature must cover \
             it, carry it as a string.", other.kind();
@@ -92,11 +111,13 @@ fn write_canonical(dat: &Dat, out: &mut String) -> Outcome<()> {
     Ok(())
 }
 
-/// Append an object, its members ordered by their keys' UTF-16 code units.
-fn write_map(m: &DaticleMap, out: &mut String) -> Outcome<()> {
+/// Append an object less the members named in `omit`, its members ordered by their keys' UTF-16
+/// code units.
+fn write_map(m: &DaticleMap, omit: &[&str], out: &mut String) -> Outcome<()> {
     let mut entries: Vec<(&String, &Dat)> = Vec::with_capacity(m.len());
     for (k, v) in m.iter() {
         match k {
+            Dat::Str(s) if omit.contains(&s.as_str()) => (),
             Dat::Str(s) => entries.push((s, v)),
             other => return Err(err!(
                 "A JSON object key must be a string, and this one is of kind {:?}.",
@@ -262,6 +283,28 @@ mod tests {
         m.insert(dat!(1u8), dat!("one"));
         assert!(Dat::Map(m).json_canonical().is_err(),
             "an integer object key has no JSON form");
+        Ok(())
+    }
+
+    /// The named members are left out at the top level only, a nested member of the same name
+    /// stays, and the bare body and the whole envelope give the same bytes.
+    #[test]
+    fn test_json_canonical_without_leaves_out_top_level_members_00() -> Outcome<()> {
+        let envelope = res!(Dat::decode_string(
+            "{\"id\":7,\"kind\":\"Claim\",\"body\":{\"sig\":\"kept\",\"a\":1},\"b\":true,\"sig\":\"xyz\"}"));
+        let bare = res!(Dat::decode_string("{\"b\":true,\"body\":{\"a\":1,\"sig\":\"kept\"}}"));
+        let want = "{\"b\":true,\"body\":{\"a\":1,\"sig\":\"kept\"}}";
+        assert_eq!(res!(envelope.json_canonical_without(&["id", "kind", "sig"])), want);
+        assert_eq!(res!(bare.json_canonical_without(&["id", "kind", "sig"])), want);
+        assert_eq!(res!(bare.json_canonical_without(&[])), res!(bare.json_canonical()));
+        Ok(())
+    }
+
+    /// Only an object has members to leave out.
+    #[test]
+    fn test_json_canonical_without_refuses_a_non_object_00() -> Outcome<()> {
+        assert!(listdat!["sig"].json_canonical_without(&["sig"]).is_err(),
+            "a list has no members to leave out");
         Ok(())
     }
 }
