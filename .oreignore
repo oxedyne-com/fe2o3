@@ -5,8 +5,12 @@
 # Compiled output lives under target/, which is named below.
 
 # Agent worktrees. These are a checkout apiece, so a blanket `git add` in a tree
-# several sessions share would commit a copy of the repository into itself.
+# several sessions share would commit a copy of the repository into itself, and
+# an `ore mark` would capture one just as permanently. .gitignore has excluded
+# `.wt/` since bbc59ec; ore reads only this file, never .gitignore, so the line
+# is repeated here.
 .claude/worktrees/
+.wt/
 
 # Rust
 /target/
