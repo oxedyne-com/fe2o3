@@ -149,7 +149,7 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
             resp.clone(),
         ));
         let mut timer = Timer::new();
-        res!(resp.recv_all(wait)); // Wait to ensure it was stored.
+        res!(resp.recv_store_ack()); // written, durable and readable
         debug!(sync_log::stream(), "Storage confirmation delay: {:?}", res!(timer.split_micros()));
 
         test!(sync_log::stream(), "Listing files and cache after direct insertion...");
@@ -169,7 +169,7 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
         let (key, val) = doc.clone().into_dats();
         let mut timer = Timer::new();
         let resp = res!(db.api().put(key, val, user, None));
-        res!(resp.recv_all(wait)); // Wait to ensure it was stored.
+        res!(resp.recv_store_ack()); // written, durable and readable
         debug!(sync_log::stream(), "Storage confirmation: {:?}", res!(timer.split_micros()));
         
         test!(sync_log::stream(), "Listing files and cache after insertion via server...");
@@ -180,7 +180,7 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
         let (key, val) = doc.clone().into_dats();
         timer.reset();
         let resp = res!(db.api().put(key, val, user, None));
-        res!(resp.recv_all(wait)); // Wait to ensure it was stored.
+        res!(resp.recv_store_ack()); // written, durable and readable
         debug!(sync_log::stream(), "Storage confirmation: {:?}", res!(timer.split_micros()));
         
         test!(sync_log::stream(), "Listing files and cache after repeat insertion via server...");
