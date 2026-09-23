@@ -12,15 +12,26 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 # servers and clients, the ACME and TLS machinery, and everything that links
 # tokio, tokio-rustls or rcgen. On by default, so every existing caller is
 # unchanged. A caller that only needs the tokio-free surface -- the std-only
-# `http::local` server, the `ecdsa`/`hmac` verifiers, the address and media
-# types -- turns it off with `default-features = false` and links none of that.
-default = ["async"]
-async = ["dep:tokio", "dep:tokio-rustls", "dep:rcgen"]
+# `http::local` server, the address and media types, the presentation shapes --
+# turns it off with `default-features = false` and links none of that. TLS and
+# ACME rest on `ring`, so this takes it too.
+default = ["async", "ring"]
+async = ["ring", "dep:tokio", "dep:tokio-rustls", "dep:rcgen"]
+
+# The modules that rest on `ring`, a library of C and assembly: ACME and JOSE,
+# DKIM, the ECDSA and HMAC verifiers and WebAuthn. On by default. With
+# `default-features = false` the crate carries none of it and compiles to
+# wasm32-unknown-unknown, which is how a browser client reaches
+# `presentation::shape` and builds the bytes a verifier here rebuilds.
+ring = ["dep:ring"]
 
 [dependencies]
-oxedyne_fe2o3_bot 					= { path = "../fe2o3_bot" }
 oxedyne_fe2o3_core 					= { path = "../fe2o3_core" }
-oxedyne_fe2o3_crypto				= { path = "../fe2o3_crypto" }
+# Only `mode2` is asked for: `presentation` needs Ed25519 and `linkring`, and
+# nothing here uses the C post-quantum code of crypto's default `pq`. That keeps
+# `pq` out of a wasm32 build only. Natively, `fe2o3_iop_db` takes crypto with its
+# defaults, so a native build of this crate still builds the C code.
+oxedyne_fe2o3_crypto				= { path = "../fe2o3_crypto", default-features = false, features = ["mode2"] }
 oxedyne_fe2o3_data 					= { path = "../fe2o3_data" }
 oxedyne_fe2o3_geom 					= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_jdat 					= { path = "../fe2o3_jdat" }
@@ -36,7 +47,7 @@ base64 = "0.13.0"
 chrono = "0.4"
 flate2 = "1.0"
 rcgen = { version = "0.12.0", optional = true }
-ring = "0.17"
+ring = { version = "0.17", optional = true }
 secrecy = "0.8.0"
 sha1 = "0.10.6"
 strum = { version = "0.25", features = ["derive"] }

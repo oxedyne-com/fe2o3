@@ -43,6 +43,12 @@
 //! - Phone number handling with country codes
 //! - Generic contact address abstraction
 //!
+//! ## Presentations
+//! - A relying party's challenge to a browser session, and the verification of the
+//!   signed answer: a public name under Ed25519, or a pseudonym and linking tag
+//!   proved by a ring signature over a whole member set (`presentation`)
+//! - Shapes that compile to wasm32 with the default features off
+//!
 //! ## Content Management
 //! - Comprehensive media type system
 //! - Character set handling for major encodings
@@ -85,21 +91,25 @@
 //! error handling through the `Outcome` type.
 //!
 #![forbid(unsafe_code)]
-// `acme` stays present: its `jose` (JWS/base64url), `cache` and `rfc8555` layers
-// are tokio-free and reused by the tokio-free `webauthn` verifier; only its
-// tokio/rcgen submodules are gated, inside the module.
+// The `ring` modules. `acme`'s `jose` (JWS/base64url), `cache` and `rfc8555`
+// layers are tokio-free and reused by the tokio-free `webauthn` verifier; only
+// its tokio/rcgen submodules are gated, inside the module.
+#[cfg(feature = "ring")]
 pub mod acme;
 pub mod addr;
 pub mod conc;
 pub mod charset;
 pub mod constant;
+#[cfg(feature = "ring")]
 pub mod dkim;
 pub mod dns;
 pub mod dns_resolver;
+#[cfg(feature = "ring")]
 pub mod ecdsa;
 pub mod email;
 pub mod file;
 pub mod guard;
+#[cfg(feature = "ring")]
 pub mod hmac;
 pub mod http;
 pub mod id;
@@ -109,6 +119,7 @@ pub mod imap;
 pub mod llm;
 pub mod mail;
 pub mod media;
+pub mod presentation;
 pub mod search;
 pub mod sms;
 pub mod smtp;
@@ -121,6 +132,7 @@ pub mod tls;
 // discovery responder and its `Target` type, so it goes behind the same gate.
 #[cfg(feature = "async")]
 pub mod upnp;
+#[cfg(feature = "ring")]
 pub mod webauthn;
 pub mod ws;
 
