@@ -100,13 +100,21 @@ impl FaceInfo {
 
 	/// Every face of a file, one for a lone font and one per face of a collection. A face naming no family
 	/// is left out rather than hiding its siblings; only a file with no readable face is an error.
+	///
+	/// A collection's header states its own face count, and that is not believed: a face is read once for
+	/// each table directory the file holds, however often the header lists it, and no more faces are read
+	/// than the file has bytes for directories, so a crafted count costs no more than the file's length.
 	pub fn read_all(bytes: &[u8]) -> Outcome<Vec<Self>> {
+		let indices = match collection_faces(bytes) {
+			Some(ix)	=> ix,
+			None		=> vec![0],
+		};
 		let mut out = Vec::new();
 		let mut last_err: Option<Error<ErrTag>> = None;
-		for i in 0.. {
+		for i in indices {
 			let of = match OutlineFont::from_index(bytes, i) {
 				Ok(f)	=> f,
-				Err(_)	=> break,	// past the last face, or not a font at all
+				Err(_)	=> continue,	// a listed face the file does not hold, or no font at all
 			};
 			match Self::of_face(&of, i, bytes.len()) {
 				Ok(info)	=> out.push(info),
@@ -144,6 +152,36 @@ impl FaceInfo {
 			index,
 		})
 	}
+}
+
+/// The smallest table directory a face can have, its 12-byte header alone.
+const MIN_DIRECTORY: usize = 12;
+
+/// The faces of a collection worth reading, by index: each one whose table directory no earlier index
+/// shares, and no more than the file has room for directories. `None` for a file that is not a collection.
+fn collection_faces(bytes: &[u8]) -> Option<Vec<u32>> {
+	if bytes.get(0..4) != Some(&b"ttcf"[..]) {
+		return None;
+	}
+	let be32 = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+	// The offsets follow the 12-byte header, four bytes each; a count the file cannot hold is cut to what
+	// it can.
+	let count	= be32(8).unwrap_or(0) as usize;
+	let listed	= count.min(bytes.len().saturating_sub(12) / 4);
+	let room	= bytes.len() / MIN_DIRECTORY;
+	let mut seen:	HashSet<u32>	= HashSet::new();
+	let mut out:	Vec<u32>		= Vec::new();
+	for i in 0..listed {
+		if out.len() >= room {
+			break;
+		}
+		if let Some(offset) = be32(12 + 4 * i) {
+			if seen.insert(offset) {
+				out.push(i as u32);
+			}
+		}
+	}
+	Some(out)
 }
 
 /// One typeface, at any size: a single font file. Its bytes are owned and lent to both third-party
@@ -422,6 +460,34 @@ mod tests {
 			assert!(res!(face.shape("Hamburgefonts", 12.0, Dir::Ltr, 0, 0)).glyphs.len() > 0);
 			assert!(face.program().is_some(), "face {} embeds in a PDF", info.index);
 		}
+		Ok(())
+	}
+
+	/// A collection's header count is not believed: a crafted file listing one table directory a hundred
+	/// thousand times holds one face, and it is read once.
+	#[test]
+	fn a_collection_listing_one_directory_many_times_is_one_face() -> Outcome<()> {
+		let n		= 100_000usize;
+		let head	= 12 + 4 * n;
+		// The lone font, moved to sit after the header, its table offsets moved with it.
+		let mut font = NOTO_SANS.to_vec();
+		let tables = u16::from_be_bytes([font[4], font[5]]) as usize;
+		for t in 0..tables {
+			let at	= 12 + 16 * t + 8;
+			let off	= u32::from_be_bytes([font[at], font[at + 1], font[at + 2], font[at + 3]]) + head as u32;
+			font[at..at + 4].copy_from_slice(&off.to_be_bytes());
+		}
+		let mut ttc: Vec<u8> = Vec::with_capacity(head + font.len());
+		ttc.extend_from_slice(b"ttcf");
+		ttc.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+		ttc.extend_from_slice(&(n as u32).to_be_bytes());
+		for _ in 0..n {
+			ttc.extend_from_slice(&(head as u32).to_be_bytes());
+		}
+		ttc.extend_from_slice(&font);
+		let all = res!(FaceInfo::read_all(&ttc));
+		let names: Vec<(&str, u32)> = all.iter().map(|i| (i.family.as_str(), i.index)).collect();
+		assert_eq!(names, vec![("Noto Sans", 0)], "one directory is one face");
 		Ok(())
 	}
 

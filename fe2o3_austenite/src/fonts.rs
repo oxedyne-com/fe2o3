@@ -111,10 +111,11 @@ struct FontLibrary {
 }
 
 impl FontLibrary {
-	/// Reads every `.ttf`/`.otf`/`.ttc` file beneath `dir`, at any depth, after the faces the crate embeds --
-	/// so a document may name an embedded family without supplying it, as Typst's own embedded fonts need no
-	/// file. Each face of a collection is its own entry. A file that will not parse, or declares no family,
-	/// is left out: it cannot answer to any name, so it can neither match nor mislead.
+	/// Reads every `.ttf`/`.otf`/`.ttc`/`.otc` file beneath `dir`, at any depth and in any case, after the
+	/// faces the crate embeds -- so a document may name an embedded family without supplying it, as Typst's
+	/// own embedded fonts need no file. Each face of a collection is its own entry. A file that will not
+	/// parse, or declares no family, is left out: it cannot answer to any name, so it can neither match nor
+	/// mislead.
 	fn scan(dir: &Path) -> Self {
 		let mut faces: Vec<Declared> = Vec::new();
 		for bytes in EMBEDDED {
@@ -124,7 +125,7 @@ impl FontLibrary {
 		}
 		for path in vfs::list_files(dir) {
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
-			if !matches!(ext.as_deref(), Some("ttf") | Some("otf") | Some("ttc")) {
+			if !matches!(ext.as_deref(), Some("ttf") | Some("otf") | Some("ttc") | Some("otc")) {
 				continue;
 			}
 			let bytes = match vfs::read(&path) {
@@ -197,6 +198,21 @@ pub fn embedded_families() -> Vec<String> {
 		"Libertinus Mono".to_string(),
 		"New Computer Modern Math".to_string(),
 	]
+}
+
+/// The families a document under the font directory `dir` can name: the embedded ones, under the names
+/// Typst lists them by, and every family a face beneath `dir` declares, read by the one scan the resolver
+/// matches a `font:` against, so a family is listed exactly when a compile can set it. Sorted, each family
+/// once.
+pub fn available_families(dir: &Path) -> Vec<String> {
+	let mut out = embedded_families();
+	for family in FontLibrary::scan(dir).families() {
+		if !out.iter().any(|f| same_family(f, &family)) {
+			out.push(family);
+		}
+	}
+	out.sort();
+	out
 }
 
 /// The family a font file declares in its own name table: the name a document's `font:` is matched

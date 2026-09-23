@@ -358,7 +358,7 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
 	// `#if media == "..."` include guard follows only its taken branch.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
-	let Gathered { skips: mut skips, doc_info } = got;
+	let Gathered { mut skips, doc_info } = got;
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
@@ -466,7 +466,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
 	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
 	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
-	let Gathered { skips: mut skips, doc_info } = got;
+	let Gathered { mut skips, doc_info } = got;
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
 	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);

@@ -450,9 +450,9 @@ fn injected_families_are_read_from_content_not_the_file_name() -> Outcome<()> {
 		}
 		map.insert(g.clone(), bytes);
 	}
-	let bare = compile::font_families(&main, &[]);
+	let bare = compile::font_families(&main);
 	res!(vfs::install(map));
-	let families = compile::font_families(&main, &given);
+	let families = compile::font_families(&main);
 	res!(vfs::clear());
 
 	let mut want: Vec<String> = compile::EMBEDDED_FAMILIES.iter().map(|s| s.to_string()).collect();
@@ -502,7 +502,7 @@ fn every_listed_family_is_set_by_a_compile_including_a_collections_faces() -> Ou
 	map.insert(main.clone(), b"= H\n".to_vec());
 	map.insert(routed.clone(), ttc.clone());
 	res!(vfs::install(map));
-	let families = compile::font_families(&main, &[given]);
+	let families = compile::font_families(&main);
 	res!(vfs::clear());
 	let injected: Vec<&String> = families.iter()
 		.filter(|f| !compile::EMBEDDED_FAMILIES.contains(&f.as_str()))
@@ -516,6 +516,54 @@ fn every_listed_family_is_set_by_a_compile_including_a_collections_faces() -> Ou
 		assert!(report.diagnostics.is_empty(), "{}: {:?}", family, report.diagnostics);
 		let fonts = res!(pdffonts_names(&pdf, &fmt!("wasm_api_ttc_{}", postscript)));
 		assert!(fonts.iter().any(|f| f == postscript), "{} is embedded from the collection: {:?}", family, fonts);
+	}
+	Ok(())
+}
+
+/// Every family the list names resolves in a compile, because the list is read by the resolver's own scan:
+/// a `.otc` collection's faces and an upper-case `.TTF` are listed and set, and a file with no font
+/// extension, which the resolver never loads, is not listed at all.
+#[test]
+fn every_listed_family_resolves_and_an_unloadable_file_is_not_listed() -> Outcome<()> {
+	let _turn = turn();
+	let dir		= PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("fe2o3_font").join("fonts");
+	let noto	= res!(std::fs::read(dir.join("NotoSans-Regular.ttf")));
+	let mono	= res!(std::fs::read(dir.join("DejaVuSansMono.ttf")));
+	let wide	= res!(std::fs::read(dir.join("DejaVuSans.ttf")));
+	let nmono	= res!(std::fs::read(dir.join("NotoSansMono-Regular.ttf")));
+	let otc		= res!(oxedyne_fe2o3_graphics::pdf_font::collection_of(&[&noto, &mono]));
+	let main	= PathBuf::from(MAIN);
+	let mut fonts: Vec<(String, Vec<u8>)> = Vec::new();
+	for (given, bytes) in [("/fonts/pair.otc", &otc), ("/fonts/DejaVuSans", &wide), ("/fonts/Mono.TTF", &nmono)] {
+		// Placed where the wasm surface routes an injected font.
+		let routed = match oxedyne_fe2o3_austenite::book::project_font_path(&main, Path::new(given)) {
+			Some(p)	=> p,
+			None	=> return Err(err!("{} must route somewhere.", given; Test)),
+		};
+		fonts.push((routed.to_string_lossy().to_string(), bytes.clone()));
+	}
+
+	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	map.insert(main.clone(), b"= H\n".to_vec());
+	for (path, bytes) in &fonts {
+		map.insert(PathBuf::from(path), bytes.clone());
+	}
+	res!(vfs::install(map));
+	let families = compile::font_families(&main);
+	res!(vfs::clear());
+	for want in ["Noto Sans", "DejaVu Sans Mono", "Noto Sans Mono"] {
+		assert!(families.iter().any(|f| f == want), "{} is listed: {:?}", want, families);
+	}
+	assert!(!families.iter().any(|f| f == "DejaVu Sans"), "a file the resolver never loads is not listed: {:?}", families);
+
+	for family in &families {
+		let src = fmt!("#set text(font: \"{}\")\n\nHamburgefonts.\n", family);
+		let mut files: Vec<(&str, &[u8])> = vec![(MAIN, src.as_bytes())];
+		for (path, bytes) in &fonts {
+			files.push((path.as_str(), bytes.as_slice()));
+		}
+		let (report, _) = res!(done(res!(compile_pdf(&files))));
+		assert!(report.diagnostics.is_empty(), "{} is listed, so it sets: {:?}", family, report.diagnostics);
 	}
 	Ok(())
 }

@@ -560,30 +560,12 @@ pub const EMBEDDED_FAMILIES: [&str; 3] = [
 ];
 
 /// The font families a compile of the project rooted at `main` can set: the embedded families, then every
-/// family each face of each injected font file declares in its own name table, as the resolver matches
-/// them, sorted and deduplicated. `injected` are the paths the consumer gave its fonts under; each is read
-/// where the wasm surface routes it ([`book::project_font_path`]), so the source map must be installed as
-/// a compile installs it.
-pub fn font_families(main: &Path, injected: &[PathBuf]) -> Vec<String> {
-	let mut out: Vec<String> = fonts::embedded_families();
-	for given in injected {
-		let routed = match book::project_font_path(main, given) {
-			Some(p)	=> p,
-			None	=> continue,
-		};
-		let bytes = match vfs::read(&routed) {
-			Ok(b)	=> b,
-			Err(_)	=> continue,
-		};
-		let families = match fonts::declared_families(&bytes) {
-			Ok(f)	=> f,
-			Err(_)	=> continue,
-		};
-		out.extend(families);
-	}
-	out.sort();
-	out.dedup();
-	out
+/// family a face under the project's font directory declares, where the wasm surface routes its injected
+/// fonts ([`book::project_font_path`]). Read by the resolver's own scan, so a family is listed exactly when
+/// a compile resolves it, and sorted, each once. The source map must be installed as a compile installs it.
+pub fn font_families(main: &Path) -> Vec<String> {
+	let root_dir = main.parent().unwrap_or_else(|| Path::new("."));
+	fonts::available_families(&book::lone_font_dir(root_dir))
 }
 
 /// The crate version, as released.

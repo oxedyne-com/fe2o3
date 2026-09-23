@@ -141,24 +141,26 @@ impl DaimondTypst {
 
 	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
 	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family each face
-	/// of each `project.fonts` file declares, one per face of a `.ttc`. `project` is optional; with none, or
-	/// with no fonts, only the embedded families are listed. For a missing-font pre-check before a compile,
-	/// matching names as the engine does, ignoring case and white space.
+	/// of each `project.fonts` file declares, one per face of a collection. The list is read by the scan the
+	/// compile resolves `font:` against, so a file the engine does not load -- one without a `.ttf`, `.otf`,
+	/// `.ttc` or `.otc` name -- is not listed. `project` is optional; with none, or with no fonts, only the
+	/// embedded families are listed. For a missing-font pre-check before a compile, matching names as the
+	/// engine does, ignoring case and white space.
 	#[wasm_bindgen(js_name = fontFamilies)]
 	pub fn font_families(&self, project: &JsValue) -> JsValue {
 		let main_path	= PathBuf::from(main_of(project));
 		let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-		let injected	= read_font_pairs(project, &main_path, &mut files);
+		read_font_pairs(project, &main_path, &mut files);
 		let families	= if files.is_empty() {
-			compile::font_families(&main_path, &[])
+			compile::font_families(&main_path)
 		} else {
 			match vfs::install(files) {
 				Ok(())	=> {
-					let f = compile::font_families(&main_path, &injected);
+					let f = compile::font_families(&main_path);
 					let _ = vfs::clear();
 					f
 				},
-				Err(_)	=> compile::font_families(&main_path, &[]),
+				Err(_)	=> compile::font_families(&main_path),
 			}
 		};
 		let arr = js_sys::Array::new();
@@ -428,7 +430,7 @@ fn install_project(project: &JsValue, main_path: &Path) -> Outcome<()> {
 	read_byte_pairs(project, "assets", &mut files);
 	// A font is installed at the path the consumer named AND at the location the lone-file face resolver
 	// reads, so a face the document names resolves whatever path the consumer chose (see `read_font_pairs`).
-	let _ = read_font_pairs(project, main_path, &mut files);
+	read_font_pairs(project, main_path, &mut files);
 	if !files.contains_key(main_path) {
 		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing, File));
 	}
@@ -510,12 +512,11 @@ fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<
 /// consumer named AND -- so the lone-file face resolver discovers it whatever path was chosen -- at the
 /// resolver's own `<root>/assets/fonts/<basename>` location (see [`book::project_font_path`]). Without the
 /// second placement an injected font is present in the map but invisible to the resolver, which reads only
-/// its own directory. Returns the paths as the consumer gave them.
-fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) -> Vec<PathBuf> {
-	let mut given_paths = Vec::new();
+/// its own directory.
+fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) {
 	let arr = match array_field(project, "fonts") {
 		Some(a)	=> a,
-		None	=> return given_paths,
+		None	=> return,
 	};
 	for entry in arr.iter() {
 		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
@@ -527,13 +528,11 @@ fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBu
 							out.insert(routed, bytes.clone());
 						}
 					}
-					given_paths.push(given.clone());
 					out.insert(given, bytes);
 				}
 			}
 		}
 	}
-	given_paths
 }
 
 /// The bytes of a `Uint8Array` or an `ArrayBuffer`, or `None` for anything else.
