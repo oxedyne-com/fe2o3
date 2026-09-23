@@ -11,8 +11,8 @@
 //! - No response sets a cookie, and a failed read logs the build, never the tile.
 //!
 //! The archive is reached through [`TileArchive`] alone: the directory index and the byte-range
-//! read belong to the PMTiles reader in `fe2o3_geom`, and this module asks it only for the bytes
-//! stored for one tile.
+//! read belong to the PMTiles reader in `fe2o3_geom::tile::pmtiles`, and this module asks it only
+//! for the bytes stored for one tile.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -20,6 +20,12 @@
 use crate::srv::cfg::TileConfig;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_geom::tile::pmtiles::{
+    Archive,
+    Compression,
+    FileSource,
+    TileType,
+};
 use oxedyne_fe2o3_jdat::string::enc::escape_json_string;
 use oxedyne_fe2o3_net::http::{
     encoding::{
@@ -103,25 +109,72 @@ pub trait TileArchive: Send + Sync + 'static {
 }
 
 /// The archive readers this build of Steel can open.
-///
-/// The PMTiles reader is `fe2o3_geom::tile::pmtiles` (unit F3). Until it lands this enum has no
-/// variant, so no value of it can exist and [`TileSource::open`] refuses every configured build
-/// at start-up. Wiring it is a `Pmtiles` variant, its two arms below and the open call.
-#[derive(Debug)]
-pub enum TileSource {}
+pub enum TileSource {
+    Pmtiles {
+        archive:    Archive<FileSource>,
+        info:       TileInfo,
+    },
+}
+
+impl std::fmt::Debug for TileSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pmtiles { info, .. } => write!(f, "TileSource::Pmtiles({:?})", info),
+        }
+    }
+}
 
 impl TileSource {
+    /// Opens a build's PMTiles archive, refusing one this route cannot serve as it stands: a
+    /// tile kind with no media type here, or a compression other than none and gzip.  The
+    /// errors name the build and the file, never a tile.
     pub fn open(build: &str, path: &Path) -> Outcome<Self> {
-        Err(err!(
-            "Tiles: build '{}' at {:?} cannot be served: this build of Steel has no PMTiles \
-            reader yet. It arrives with fe2o3_geom::tile::pmtiles.", build, path;
-            Unimplemented, Configuration))
+        let archive = match FileSource::open(path).and_then(Archive::open) {
+            Ok(a) => a,
+            Err(e) => return Err(err!(e,
+                "Tiles: build '{}' at {:?} cannot be opened as a PMTiles archive.", build, path;
+                Configuration, File)),
+        };
+        let h = archive.header();
+        let kind = match h.tile_type {
+            TileType::Mvt   => TileKind::Mvt,
+            TileType::Png   => TileKind::Png,
+            TileType::Jpeg  => TileKind::Jpeg,
+            TileType::Webp  => TileKind::Webp,
+            TileType::Avif  => TileKind::Avif,
+            other => return Err(err!(
+                "Tiles: build '{}' at {:?} holds {:?} tiles, which this route does not serve.",
+                build, path, other; Unimplemented, Configuration)),
+        };
+        let coding = match h.tile_compression {
+            Compression::None   => ContentCoding::Identity,
+            Compression::Gzip   => ContentCoding::Gzip,
+            other => return Err(err!(
+                "Tiles: build '{}' at {:?} stores its tiles with {:?} compression; only none and \
+                gzip are served.", build, path, other; Unimplemented, Configuration)),
+        };
+        let info = TileInfo {
+            kind,
+            coding,
+            min_zoom:   h.min_zoom,
+            max_zoom:   h.max_zoom,
+            bounds_e7:  h.bounds_e7(),
+        };
+        Ok(Self::Pmtiles { archive, info })
     }
 }
 
 impl TileArchive for TileSource {
-    fn info(&self) -> TileInfo { match *self {} }
-    fn tile(&self, _z: u8, _x: u32, _y: u32) -> Outcome<Option<Vec<u8>>> { match *self {} }
+    fn info(&self) -> TileInfo {
+        match self {
+            Self::Pmtiles { info, .. } => *info,
+        }
+    }
+    fn tile(&self, z: u8, x: u32, y: u32) -> Outcome<Option<Vec<u8>>> {
+        match self {
+            Self::Pmtiles { archive, .. } => archive.tile(z, x, y),
+        }
+    }
 }
 
 /// Everything the route reads from a request. A cookie, an `Authorization` field or the peer's

@@ -373,13 +373,31 @@ fn tile_config_refuses_what_it_cannot_honour() -> Outcome<()> {
     Ok(())
 }
 
+fn sample() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../fe2o3_geom/tests/data/protomaps/sample.pmtiles")
+}
+
 #[test]
-fn no_archive_opens_until_the_pmtiles_reader_lands() -> Outcome<()> {
+fn a_missing_archive_stops_start_up_and_a_real_one_opens() -> Outcome<()> {
+    // The configured path does not exist, so start-up is refused, naming the build.
     let r = TileService::<TileSource>::new(&config(), "tiles.oxegen.io", 0, TileSource::open);
     let e = match r {
-        Ok(_) => return Err(err!("An archive opened with no reader to open it."; Test)),
+        Ok(_) => return Err(err!("An archive that is not there opened."; Test)),
         Err(e) => e,
     };
-    assert!(fmt!("{}", e).contains("PMTiles"), "{}", e);
+    assert!(fmt!("{:?}", e).contains("20260922"), "{:?}", e);
+    // A real archive, written by the reference Python writer, opens and says what it holds.
+    let src = res!(TileSource::open("sample", &sample()));
+    let info = src.info();
+    assert_eq!(info.kind, TileKind::Mvt);
+    assert_eq!(info.coding, ContentCoding::Gzip);
+    assert_eq!((info.min_zoom, info.max_zoom), (12, 15));
+    assert_eq!(info.bounds_e7, [1_156_000_000, -326_000_000, 1_163_000_000, -316_000_000]);
+    let stored = res!(src.tile(13, 6729, 4865));
+    let plain = res!(encoding::gunzip(&res!(stored.ok_or_else(|| err!("No tile."; Test)))));
+    let want = res!(std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../fe2o3_geom/tests/data/protomaps/13_6729_4865.mvt")));
+    assert_eq!(plain, want);
+    assert_eq!(res!(src.tile(13, 0, 0)), None);
     Ok(())
 }
