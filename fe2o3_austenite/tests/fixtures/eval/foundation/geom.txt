@@ -1,0 +1,44 @@
+// length, angle, alignment and direction methods and fields.
+(1pt + 1em).abs
+(10pt).pt()
+(72pt).inches()
+(10pt).mm()
+(10pt).cm()
+(1cm).mm()
+(1in).pt()
+
+(90deg).rad()
+(1rad).deg()
+(-45deg).deg()
+left.axis()
+top.axis()
+(left + top).axis()
+left.inv()
+start.inv()
+center.inv()
+horizon.inv()
+(left + bottom).inv()
+ltr.axis()
+ttb.axis()
+ltr.start()
+rtl.start()
+ttb.end()
+btt.start()
+ltr.inv()
+ttb.inv()
+ttb.sign()
+btt.sign()
+rtl.sign()
+ltr.sign()
+(left + top).x
+(left + top).y
+left.y
+top.x
+(50% + 1pt).ratio
+(50% + 1pt).length
+(1pt + 2em).abs
+(1pt + 2em).em
+(2em).abs
+!(1pt + 1em).pt()
+!(1em).pt()
+!(1em).mm()
