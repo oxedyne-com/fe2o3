@@ -1011,7 +1011,7 @@ impl<
     /// Gracefully shut down the database.
     pub fn shutdown(&self, requester: String) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
         warn!(sync_log::stream(), "{}: Shutdown requested by {}, commencing...", self.label(), requester);
-        res!(self.chans().finish_all());
+        res!(self.chans().finish_all(|| self.handles().writers_ended()));
         thread::sleep(Duration::from_secs(1));
         self.handles().report_status();
         Ok(OzoneMsg::Ok)

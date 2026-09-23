@@ -18,7 +18,10 @@ use oxedyne_fe2o3_o3db_sync::{
         cfg::OzoneConfig,
         constant,
     },
-    comm::response::Wait,
+    comm::{
+        msg::OzoneMsg,
+        response::Wait,
+    },
     data::core::RestSchemesInput,
     file::floc::FileNum,
     test::{
@@ -53,8 +56,9 @@ type TestDb = O3db<
     ChecksumScheme,
 >;
 
-const PERIOD_MS:    u64 = 200;                          // the interval policy's period
-const WATCH:        Duration = Duration::from_millis(1_500);  // how long a failing disk is watched
+const PERIOD_MS:        u64 = 200;                                  // the interval policy's
+const WATCH:            Duration = Duration::from_millis(1_500);    // a failing disk watched
+const ANSWERED_WITHIN:  Duration = Duration::from_secs(10);         // a closing store's last write
 
 #[test]
 fn main() -> Outcome<()> {
@@ -66,8 +70,10 @@ fn main() -> Outcome<()> {
     hooks::set_syncer_stop(false);
     let handoff = failed_hand_off_keeps_the_writer_on_its_pair();
     hooks::set_pair_hand_failure(false);
+    let closing = close_answers_what_the_syncer_holds();
+    hooks::set_barrier_delay(Duration::ZERO);
     log_finish_wait!();
-    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff].into_iter()
+    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff, closing].into_iter()
         .filter_map(|r| r.err())
         .collect();
     match failed.len() {
@@ -207,7 +213,8 @@ fn stopped_syncer_refuses_writes_before_appending() -> Outcome<()> {
                 let _ = db.close(); // the check has failed already, and says why
                 return Err(err!(
                     "Write {}, reported failed because the syncer had stopped, came back after a \
-                    restart: it had been written before it was refused.  It was told: {}", k, refused;
+                    restart: it had been written before it was refused.  It was told: {}",
+                    k, refused;
                     Test, Unexpected));
             },
         }
@@ -288,6 +295,58 @@ fn failed_hand_off_keeps_the_writer_on_its_pair() -> Outcome<()> {
                     Test, Mismatch));
             },
         }
+    }
+    res!(db.close());
+    Ok(())
+}
+
+/// The store is closed while a syncer holds a written record, its barrier still running.  The
+/// record is answered before the store's bots stop.  The cache bots used to be stopped first, and
+/// nothing counted what a syncer held, so the record it released afterwards was never answered:
+/// its caller waited out the durability deadline and was told that a durable write was not
+/// confirmed.
+fn close_answers_what_the_syncer_holds() -> Outcome<()> {
+    let root = res!(fresh("./test_db_syncer_faults_close"));
+    let mut cfg = res!(config());
+    cfg.sync_on_write = true;
+    let db = res!(open(&root, cfg.clone()));
+
+    hooks::set_barrier_delay(Duration::from_millis(1_500));
+    let writing = db.clone();
+    let writer = res!(thread::Builder::new()
+        .name(fmt!("syncer faults writer"))
+        .spawn(move || -> Outcome<()> {
+            let resp = res!(writing.api().store(key(31), dat!(31u8), Uid::default()));
+            let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+                OzoneMsg::Chunks(n) => n,
+                msg => return Err(err!(
+                    "Expected the record count, received {:?}.", msg; Test, Unexpected)),
+            };
+            // A durability deadline short enough to report an unanswered record in seconds.
+            res!(resp.recv_write_acks(n, constant::USER_REQUEST_TIMEOUT, ANSWERED_WITHIN));
+            Ok(())
+        }));
+    // Written by now, and waiting on its barrier.
+    thread::sleep(Duration::from_millis(300));
+    let closed = db.close();
+    hooks::set_barrier_delay(Duration::ZERO);
+    res!(closed);
+    match writer.join() {
+        Ok(Ok(())) => (),
+        Ok(Err(e)) => return Err(err!(e,
+            "A write its syncer held when the store was closed was not answered."; Test, Missing)),
+        Err(_) => return Err(err!("The writing thread panicked."; Test, Thread)),
+    }
+
+    // And it is on disk.
+    let db = res!(open(&root, cfg));
+    match res!(db.get(&key(31), None)) {
+        Some((v, _)) => req!(v, dat!(31u8), "A write answered as the store closed."),
+        None => {
+            let _ = db.close(); // the check has failed already, and says why
+            return Err(err!(
+                "A write answered as the store closed is missing after a restart."; Test, Missing));
+        },
     }
     res!(db.close());
     Ok(())

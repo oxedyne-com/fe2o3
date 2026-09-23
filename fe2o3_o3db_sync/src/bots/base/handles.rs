@@ -283,6 +283,11 @@ impl<
     }
     pub fn set_cfg(&mut self, hand: Handle<UIDL, UID, ENC, KH>) { self.cfg = hand; }
 
+    /// Have all the writer bots ended?
+    pub fn writers_ended(&self) -> bool {
+        self.wbots.iter().all(|zone| zone.iter().all(|h| h.sentinel().is_finished()))
+    }
+
     pub fn wait_init(self) {
         self.wait_init.wait();
     }
