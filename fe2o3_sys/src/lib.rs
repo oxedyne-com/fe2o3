@@ -25,6 +25,7 @@ pub mod mem;
 pub mod net;
 pub mod parse;
 pub mod proc_self;
+pub mod resident;
 pub mod snapshot;
 pub mod uptime;
 
