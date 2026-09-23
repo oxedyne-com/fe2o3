@@ -40,6 +40,7 @@ pub const LOWERABLE_SET_TARGETS: &[&str] = &[
 	"list",
 	"enum",
 	"math.equation",
+	"columns",
 ];
 
 /// Lowers a source's own top-level declarations onto `theme`: its `#show: <template>.with(...)`
@@ -249,6 +250,25 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 			}
 			if let Some(pt) = named_length_mm_or_pt(args, "height") {
 				patch.page.body.default.height = Some(Some(pt));
+			}
+			// The column count the body flows in, read by the author and the driver: a whole number of at
+			// least one.
+			if let Some(expr) = named_value(args, "columns") {
+				if let Ok(n) = expr.trim().parse::<usize>() {
+					if n >= 1 {
+						patch.page.columns = Some(n);
+						used.push("columns");
+					}
+				}
+			}
+		},
+		"columns" => {
+			// The space between two columns: a percentage of the content width, or an absolute length.
+			if let Some(expr) = named_value(args, "gutter") {
+				if let Some(len) = crate::lang::parse::parse_length(&expr) {
+					patch.page.column_gutter = Some(len);
+					used.push("gutter");
+				}
 			}
 		},
 		_ => {},
@@ -499,7 +519,7 @@ fn font_families(expr: &str) -> Option<Vec<String>> {
 		if p.is_empty() {
 			continue;	// the trailing comma of a one-element array, `("A",)`
 		}
-		let name = p.strip_prefix('"').and_then(|r| r.strip_suffix('"'))?;
+		let Some(name) = p.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else { return None; };
 		if name.trim().is_empty() || name.contains('"') {
 			return None;
 		}
@@ -650,6 +670,17 @@ mod tests {
 		assert_eq!(lower_set("text", "font: fonts.display").text.faces.body, None);
 		// The leading was not named, so it kept its default.
 		assert_eq!(theme.text.leading, Theme::default().text.leading);
+	}
+
+	/// `#set page(columns: n)` lowers the body's column count and `#set columns(gutter: ..)` the space between
+	/// two, both consumed, so neither is refused; a count that is not a whole number is left unapplied.
+	#[test]
+	fn set_page_columns_and_gutter_lower() {
+		assert_eq!(lower_set("page", "columns: 2").page.columns, Some(2));
+		assert_eq!(set_refusal_reason("page", "columns: 2"), None);
+		assert_eq!(lower_set("columns", "gutter: 12pt").page.column_gutter, Some(crate::ir::Length::Abs(12.0)));
+		assert_eq!(lower_set("columns", "gutter: 5%").page.column_gutter, Some(crate::ir::Length::Rel(0.05)));
+		assert!(set_refusal_reason("page", "columns: auto").is_some());
 	}
 
 	/// A `#set par(...)` lowers its pure-length metrics (`spacing`, `first-line-indent`) in `em` against the

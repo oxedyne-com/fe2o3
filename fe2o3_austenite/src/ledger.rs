@@ -369,6 +369,18 @@ impl Ledger {
 		}
 	}
 
+	/// As [`Ledger::shift_region_anchors`], for the anchors whose x lies in `[x0, x1)` only: the ledger's half
+	/// of a column float's insertion, which moves the material of its own column and not the columns beside
+	/// it. Columns do not overlap, so an anchor's x places it in exactly one.
+	pub fn shift_region_anchors_within(&mut self, page: u32, by: Sp, region: Region, x0: Sp, x1: Sp) {
+		for anchor in self.entries.values_mut() {
+			let p = &anchor.pos;
+			if p.page == page && anchor.region == region && p.x >= x0 && p.x < x1 {
+				anchor.pos.y = anchor.pos.y + by;
+			}
+		}
+	}
+
 	/// Every resolved anchor, in identity order -- for a caller that reports or dumps the whole table
 	/// rather than looking up one entry, such as the oracle harness's per-anchor page comparison.
 	pub fn anchors(&self) -> impl Iterator<Item = &Anchor> {

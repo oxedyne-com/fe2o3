@@ -28,6 +28,9 @@ use crate::ir::{
 	DrawOp,
 	FloatNode,
 	FloatPlacement,
+	FloatScope,
+	Floating,
+	PageColumns,
 	Footnote,
 	Glue,
 	Graphic,
@@ -81,6 +84,7 @@ use crate::theme::{
 
 use oxedyne_fe2o3_core::prelude::*;
 use crate::fonts::FaceResolver;
+use crate::lang::ast::Spacing;
 
 use oxedyne_fe2o3_font::{
 	face::Role,
@@ -224,10 +228,10 @@ pub enum Block {
 	// (`figure(placement: auto | top | bottom)`): the driver then sets it at the top or foot of the next
 	// page it fits on rather than in the flow. `None` (the Typst default, and `placement: none`) sets it
 	// where it stands.
-	Figure { graphic: Graphic, caption: Option<String>, placement: Option<FloatPlacement> },
+	Figure { graphic: Graphic, caption: Option<String>, placement: Option<Floating> },
 	// A `#figure(...)` wrapping a `#table(...)`: the ruled table, then a numbered caption beneath. The
 	// supplement is the caption's leading word ("Table"/"Figure"); the label anchors a cross-reference.
-	TableFigure { table: Table, caption: Option<Vec<Segment>>, supplement: String, label: Option<String>, placement: Option<FloatPlacement> },
+	TableFigure { table: Table, caption: Option<Vec<Segment>>, supplement: String, label: Option<String>, placement: Option<Floating> },
 	// A `#figure(...)` wrapping an image: the loaded raster centred in the measure with the numbered
 	// caption beneath, or -- when the path resolves to nothing or is a vector SVG with no raster beside
 	// it -- a sized placeholder box in its place. The sizing hints size the drawn image.
@@ -239,7 +243,7 @@ pub enum Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
-		placement:	Option<FloatPlacement>,
+		placement:	Option<Floating>,
 	},
 	// A `#figure(...)` whose body is drawn by code -- a CeTZ/Fletcher diagram, a bar chart or a line plot.
 	// The graphic is built at render time from the document's font set and placed like an image figure,
@@ -249,7 +253,7 @@ pub enum Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
-		placement:	Option<FloatPlacement>,
+		placement:	Option<Floating>,
 	},
 	// A back-matter section title (the Bibliography) on its own page, set left in the display face and
 	// unnumbered. It records a heading anchor so the contents lists it, and a back-matter marker so the
@@ -309,6 +313,13 @@ pub enum Block {
 	// a page that carries content -- the same drop-on-fresh-page semantics the section furniture turns the page
 	// with (see the `SectionBanner` arm), which stays weak. The flag is honoured in the driver's compose.
 	PageBreak { weak: bool },
+	// A line-leading `#colbreak()`: a forced column break, strong unless `weak`. On a page of one column the
+	// driver turns the page, as Typst does.
+	ColBreak { weak: bool },
+	// A floating `#place(...)[ ... ]`: its blocks set as one float at the top or foot of its column, or --
+	// `scope: "parent"` -- spanning every column of the page. `clearance` is the gap to the body, Typst's
+	// 1.5em when the source names none.
+	Place { blocks: Vec<Block>, floating: Floating, clearance: Option<Spacing> },
 }
 
 impl Block {
@@ -383,7 +394,7 @@ impl Block {
 
 	/// A drawn figure, centred on its own line and captioned "Figure N" beneath, its identity recorded
 	/// as a [`Float`](crate::ledger::AnchorKind::Float) anchor so a cross-reference resolves its page.
-	pub fn figure(graphic: Graphic, caption: Option<String>, placement: Option<FloatPlacement>) -> Self {
+	pub fn figure(graphic: Graphic, caption: Option<String>, placement: Option<Floating>) -> Self {
 		Self::Figure { graphic, caption, placement }
 	}
 
@@ -394,7 +405,7 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
-		placement:	Option<FloatPlacement>,
+		placement:	Option<Floating>,
 	)
 		-> Self
 	{
@@ -413,7 +424,7 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
-		placement:	Option<FloatPlacement>,
+		placement:	Option<Floating>,
 	)
 		-> Self
 	{
@@ -427,7 +438,7 @@ impl Block {
 		caption:	Option<Vec<Segment>>,
 		supplement:	String,
 		label:		Option<String>,
-		placement:	Option<FloatPlacement>,
+		placement:	Option<Floating>,
 	)
 		-> Self
 	{
@@ -640,6 +651,56 @@ fn keep_with_next_para<'a>(look: &'a Block, theme: &Theme) -> Option<(&'a str, T
 }
 
 impl<'a> Authoring<'a> {
+	/// Authors a float's blocks into material of their own: the whole block walk, headings, figures and all,
+	/// at the float's measure, with every document-order counter counting on across it. The material is laid
+	/// as one unit that never breaks, so its penalties and repeated-header markers are dropped; a float, a
+	/// columns block or a column-layout change inside it has no band or column of its own, and is refused.
+	fn float_material(&mut self, blocks: &[Block], style: &Theme, scope: FloatScope) -> Outcome<Vec<Node>> {
+		let outer_nodes		= std::mem::take(&mut self.nodes);
+		let outer_measure	= self.measure;
+		let outer_first		= self.first;
+		let outer_para		= self.prev_para;
+		self.measure	= self.float_measure(scope);
+		self.first		= true;
+		self.prev_para	= false;
+		let walked		= self.walk(blocks, style, None, &mut None);
+		let material	= std::mem::replace(&mut self.nodes, outer_nodes);
+		self.measure	= outer_measure;
+		self.first		= outer_first;
+		self.prev_para	= outer_para;
+		let _ = res!(walked);
+		let mut out: Vec<Node> = Vec::with_capacity(material.len());
+		for node in material {
+			match node {
+				// A penalty marks a break the unit never takes -- an author's page or column break was already
+				// refused at parse time, and an opener's own eject has no page to turn here.
+				Node::RepeatHead(_) | Node::Penalty(_)	=> {},
+				Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) => return Err(err!(
+					"A float, a columns block or a page-column change inside a floating place cannot be set: the \
+					float is laid out as one unit, with no band or column of its own."; Input, Invalid)),
+				other				=> out.push(other),
+			}
+		}
+		Ok(out)
+	}
+
+	/// The column layout a theme sets the body in, and the measure one column of it gives.
+	fn page_columns(&self, t: &Theme) -> (PageColumns, Sp) {
+		let count	= t.page.columns.max(1);
+		let gutter	= if count > 1 { t.page.gutter_for(self.geom.content_width()) } else { Sp::ZERO };
+		let cols	= PageColumns::new(count, gutter);
+		(cols, self.geom.column_slice(0, count, gutter).content_width())
+	}
+
+	/// The measure a float's material is set to: the column's, or the whole page's for one spanning every
+	/// column (`scope: "parent"`). On a page of one column the two are the same.
+	fn float_measure(&self, scope: FloatScope) -> Sp {
+		match scope {
+			FloatScope::Column	=> self.measure,
+			FloatScope::Parent	=> self.geom.content_width(),
+		}
+	}
+
 	/// The reading set a scope's patch puts in force: the enclosing set unless the patch names a body
 	/// family list, in which case that list's set, required (and so built) at assembly.
 	fn fonts_for(&self, patch: &ThemePatch) -> Outcome<Arc<FontSet>> {
@@ -711,7 +772,23 @@ impl<'a> Authoring<'a> {
 				// its blocks in that family's reading set, lifted again when the scope ends.
 				let scoped_fonts	= res!(self.fonts_for(patch));
 				let outer_fonts		= std::mem::replace(&mut self.fonts, scoped_fonts);
+				// A scope setting its own page columns starts them on a fresh page and returns to the enclosing
+				// layout on another when it ends, as Typst's `set page` inside a scope does; its blocks are set
+				// at the scope's column measure.
+				let relaid			= scoped.page.columns != style.page.columns
+										|| scoped.page.column_gutter != style.page.column_gutter;
+				let outer_measure	= self.measure;
+				if relaid {
+					let (cols, measure) = self.page_columns(&scoped);
+					self.nodes.push(Node::PageColumns(cols));
+					self.measure = measure;
+				}
 				let ate = res!(self.walk(inner, &scoped, inner_cont, &mut None));
+				if relaid {
+					let (cols, _) = self.page_columns(style);
+					self.nodes.push(Node::PageColumns(cols));
+					self.measure = outer_measure;
+				}
 				self.fonts = outer_fonts;
 				if ate {
 					if has_sibling {
@@ -988,7 +1065,7 @@ impl<'a> Authoring<'a> {
 					match placement {
 						Some(p) => {
 							let mut mid = Vec::new();
-							res!(figure(&mut mid, self.fonts.clone(), style, self.measure, graphic.clone(), caption.as_deref(), self.fig_no));
+							res!(figure(&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), graphic.clone(), caption.as_deref(), self.fig_no));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
 						None => {
@@ -1008,7 +1085,7 @@ impl<'a> Authoring<'a> {
 						Some(p) => {
 							let mut mid = Vec::new();
 							res!(table_figure(
-								&mut mid, self.fonts.clone(), self.geom, style, self.measure, table,
+								&mut mid, self.fonts.clone(), self.geom, style, self.float_measure(p.scope), table,
 								caption.as_deref(), supplement, number, label.as_deref(),
 								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen,
 								&mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
@@ -1035,7 +1112,7 @@ impl<'a> Authoring<'a> {
 						Some(p) => {
 							let mut mid = Vec::new();
 							res!(image_figure(
-								&mut mid, self.fonts.clone(), style, self.measure, path, *width, *height, *scale,
+								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), path, *width, *height, *scale,
 								caption.as_deref(), supplement, number, label.as_deref()));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
@@ -1058,7 +1135,7 @@ impl<'a> Authoring<'a> {
 						Some(p) => {
 							let mut mid = Vec::new();
 							res!(code_figure(
-								&mut mid, self.fonts.clone(), style, self.measure, figure,
+								&mut mid, self.fonts.clone(), style, self.float_measure(p.scope), figure,
 								caption.as_deref(), supplement, number, label.as_deref()));
 							push_float(&mut self.nodes, mid, float_clearance(style), *p);
 						},
@@ -1167,7 +1244,7 @@ impl<'a> Authoring<'a> {
 							res!(styled_box(
 								&mut mid, box_fonts.clone(), self.geom, &scoped, self.measure, inner, fill,
 								&mut self.foot_no, &mut self.ref_no, &mut self.margin_no, &mut self.seen, &mut self.index_gather, &mut self.claim_gather, self.bib, &self.refs));
-							push_float(&mut self.nodes, mid, float_clearance(style), *p);
+							push_float(&mut self.nodes, mid, float_clearance(style), Floating::column(*p));
 						},
 						None => {
 							if !self.first {
@@ -1202,6 +1279,25 @@ impl<'a> Authoring<'a> {
 					// A template's `v(<len>)`, set as a fixed leading between its siblings. Not discarded at a
 					// page top: the author asked for it, so it holds like any authored space.
 					self.nodes.push(Node::Glue(Glue::fixed(*sp)));
+					i += 1;
+					self.first = false;
+					self.prev_para = false;
+				},
+				Block::ColBreak { weak } => {
+					// A column break sets no ink, so the block that follows leads against the column top.
+					self.nodes.push(Node::Penalty(Penalty::column_eject(*weak)));
+					i += 1;
+				},
+				Block::Place { blocks: inner, floating, clearance } => {
+					// A floating `#place`: its blocks authored at the float's measure -- the column's, or the
+					// page's for a parent-scoped float -- into material of their own, then deferred to a band.
+					let mid = res!(self.float_material(inner, style, floating.scope));
+					let clr = match clearance {
+						Some(Spacing::Pt(pt))	=> Sp::from_pt(*pt),
+						Some(Spacing::Em(em))	=> Sp::from_pt(style.text.body_size.to_pt() * em),
+						None					=> float_clearance(style),
+					};
+					push_float(&mut self.nodes, mid, clr, *floating);
 					i += 1;
 					self.first = false;
 					self.prev_para = false;
@@ -1462,6 +1558,13 @@ pub fn author_memo(
 		claim_index_at:	None,
 		global_fp,
 	};
+	// A body set in several columns (`#set page(columns: n)`) opens with the layout marker, so the front
+	// matter composed ahead of it keeps the single-column page, and every block is set at the column measure.
+	if style.page.columns > 1 {
+		let (cols, measure)	= authoring.page_columns(style);
+		authoring.measure	= measure;
+		authoring.nodes.push(Node::PageColumns(cols));
+	}
 	// The top level has no parent continuation; the returned "consumed" flag is meaningless here and dropped.
 	res!(authoring.walk(blocks, style, None, &mut memo));
 	// The back-matter index, built from the markers gathered walking the body once the `Block::Index`
@@ -1473,10 +1576,19 @@ pub fn author_memo(
 		// `columns(2)`. The gutter is 4% of the page measure; each entry is set to the resulting column
 		// width, so a folio list fills its own column rather than the whole page. The driver's multi-column
 		// pass flows the entries down the first column, then the second, breaking to a fresh page as needed.
-		let gutter		= Sp(geom.content_width().raw() * 4 / 100);
-		let col_measure	= geom.column_slice(0, 2, gutter).content_width();
-		let entries		= res!(index_nodes(&fonts, style, col_measure, &occ));
-		authoring.nodes.push(Node::Columns(ColumnsNode::new(entries, 2, gutter)));
+		//
+		// A body already set in page columns flows the index in those same columns, at the column measure,
+		// rather than nesting a second column layout inside one column: the idiom's two-column index then
+		// reads as the page's own columns.
+		if style.page.columns > 1 {
+			let entries = res!(index_nodes(&fonts, style, authoring.measure, &occ));
+			authoring.nodes.extend(entries);
+		} else {
+			let gutter		= Sp(geom.content_width().raw() * 4 / 100);
+			let col_measure	= geom.column_slice(0, 2, gutter).content_width();
+			let entries		= res!(index_nodes(&fonts, style, col_measure, &occ));
+			authoring.nodes.push(Node::Columns(ColumnsNode::new(entries, 2, gutter)));
+		}
 	}
 	// The reverse claim-reference index, built from the references gathered walking the body once the
 	// `Block::ClaimIndex` placeholder has been met. It sets in a single column (Typst's appendix wraps it in
@@ -1668,6 +1780,11 @@ fn ref_targets_walk(
 			Block::Scoped { patch, blocks: inner } => {
 				let scoped = { let mut t = style.clone(); t.apply(patch); t };
 				ref_targets_walk(inner, &scoped, out, sec, counters, eq_no);
+			},
+			// A floating place is authored through the whole block walk, so its headings, figures and
+			// equations are numbered in document order where the place stands.
+			Block::Place { blocks: inner, .. } => {
+				ref_targets_walk(inner, style, out, sec, counters, eq_no);
 			},
 			Block::Heading { level, label, .. } => {
 				if *level >= 1 {
@@ -2328,12 +2445,12 @@ fn equation(
 /// [`Node::Float`]. No block spacing is added around it: Typst frames a float with `clearance` (default
 /// 1.5em of the float's font size), which the driver lays as the gap between the float and the body, so
 /// the committed height the break weighs is `mid` alone.
-fn push_float(nodes: &mut Vec<Node>, mid: Vec<Node>, clearance: Sp, placement: FloatPlacement) {
+fn push_float(nodes: &mut Vec<Node>, mid: Vec<Node>, clearance: Sp, floating: Floating) {
 	let mut h = Sp::ZERO;
 	for n in &mid {
 		h += n.vextent();
 	}
-	nodes.push(Node::Float(FloatNode::new(mid, h, clearance, placement)));
+	nodes.push(Node::Float(FloatNode::new(mid, h, clearance, floating)));
 }
 
 /// The clearance a float is framed with -- Typst's `place.clearance` default, 1.5em of the float's font
@@ -3775,7 +3892,8 @@ pub(crate) fn count_words(blocks: &[Block]) -> usize {
 			Block::Scoped { blocks, .. }		=> n += count_words(blocks),
 			Block::Equation { .. } | Block::Rule { .. } | Block::Image { .. }
 			| Block::SectionBanner { .. } | Block::Glossary | Block::Index | Block::ClaimIndex
-			| Block::Space(_) | Block::PageBreak { .. }	=> {},
+			| Block::Space(_) | Block::PageBreak { .. } | Block::ColBreak { .. }	=> {},
+			Block::Place { blocks, .. }			=> n += count_words(blocks),
 		}
 	}
 	n

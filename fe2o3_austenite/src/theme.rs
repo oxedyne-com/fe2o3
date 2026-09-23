@@ -29,6 +29,7 @@
 //! this file is exactly that identity.
 
 use crate::doc::HeadingStyle;
+use crate::ir::Length;
 use crate::ir::Sp;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -412,12 +413,38 @@ pub struct ThemePagePart {
 	pub opener:		ThemePageGeom,
 }
 
-/// Page geometry per part of the book, each part per page class. Reserved; see [`ThemePagePart`].
-#[derive(Clone, Debug, PartialEq, Default)]
+/// Page geometry per part of the book, each part per page class (reserved; see [`ThemePagePart`]), and the
+/// columns the body flows in: Typst's `page.columns`, and `columns.gutter` between two, a fraction of the
+/// content width (4% by default) or an absolute length.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ThemePage {
-	pub front:	ThemePagePart,
-	pub body:	ThemePagePart,
-	pub back:	ThemePagePart,
+	pub front:			ThemePagePart,
+	pub body:			ThemePagePart,
+	pub back:			ThemePagePart,
+	pub columns:		usize,
+	pub column_gutter:	Length,
+}
+
+impl Default for ThemePage {
+	fn default() -> Self {
+		Self {
+			front:			ThemePagePart::default(),
+			body:			ThemePagePart::default(),
+			back:			ThemePagePart::default(),
+			columns:		1,
+			column_gutter:	Length::Rel(0.04),
+		}
+	}
+}
+
+impl ThemePage {
+	/// The gutter between two columns of a content block `width` wide.
+	pub fn gutter_for(&self, width: Sp) -> Sp {
+		match self.column_gutter {
+			Length::Rel(f)	=> Sp::from_pt(width.to_pt() * f),
+			Length::Abs(pt)	=> Sp::from_pt(pt),
+		}
+	}
 }
 
 /// Page furniture: the running head, the folio, and the footnote text metrics.
@@ -641,9 +668,11 @@ pub struct ThemePagePartPatch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemePagePatch {
-	pub front:	ThemePagePartPatch,
-	pub body:	ThemePagePartPatch,
-	pub back:	ThemePagePartPatch,
+	pub front:			ThemePagePartPatch,
+	pub body:			ThemePagePartPatch,
+	pub back:			ThemePagePartPatch,
+	pub columns:		Option<usize>,
+	pub column_gutter:	Option<Length>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -861,6 +890,8 @@ impl ThemePagePatch {
 		self.front.apply(&mut t.front);
 		self.body.apply(&mut t.body);
 		self.back.apply(&mut t.back);
+		patch_merge!(self.columns, t.columns);
+		patch_merge!(self.column_gutter, t.column_gutter);
 	}
 }
 
@@ -1319,17 +1350,35 @@ impl ThemePagePart {
 
 impl ThemePage {
 	fn to_dat(&self) -> Outcome<Dat> {
+		let (kind, value) = match self.column_gutter {
+			Length::Rel(f)	=> ("rel", f),
+			Length::Abs(pt)	=> ("abs", pt),
+		};
 		Ok(omapdat!{
-			"front"	=> res!(self.front.to_dat()),
-			"body"	=> res!(self.body.to_dat()),
-			"back"	=> res!(self.back.to_dat()),
+			"front"			=> res!(self.front.to_dat()),
+			"body"			=> res!(self.body.to_dat()),
+			"back"			=> res!(self.back.to_dat()),
+			"columns"		=> dat!(self.columns as u64),
+			"gutter_kind"	=> dat!(kind.to_string()),
+			"gutter_bits"	=> dat!(value.to_bits()),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		let columns	= try_extract_dat!(res!(map_must(&mut d, "columns")), U64) as usize;
+		let kind	= try_extract_dat!(res!(map_must(&mut d, "gutter_kind")), Str);
+		let value	= f64::from_bits(try_extract_dat!(res!(map_must(&mut d, "gutter_bits")), U64));
+		let column_gutter = match kind.as_str() {
+			"rel"	=> Length::Rel(value),
+			"abs"	=> Length::Abs(value),
+			other	=> return Err(err!(
+				"A theme column gutter must be of kind rel or abs, found {:?}.", other; Input, Invalid)),
+		};
 		Ok(Self {
 			front:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "front")))),
 			body:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "body")))),
 			back:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "back")))),
+			columns,
+			column_gutter,
 		})
 	}
 }
@@ -1516,6 +1565,8 @@ mod tests {
 		theme.equation.numbering		= Some("(1)".to_string());
 		theme.page.body.default.margin_inside	= Some(Sp::from_pt(19.0));
 		theme.page.body.opener.margin_top		= Some(Sp::from_pt(40.0));
+		theme.page.columns				= 2;
+		theme.page.column_gutter		= Length::Abs(12.0);
 		theme.calibration.line_box_em	= 0.682;
 		let dat		= res!(theme.to_dat());
 		let back	= res!(Theme::from_dat(dat));

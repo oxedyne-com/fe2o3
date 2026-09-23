@@ -129,6 +129,7 @@ fn collect_patch_face_names(blocks: &[Block], out: &mut Vec<String>) {
 		match b {
 			Block::Scoped { patch, blocks }	=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
 			Block::Box { patch, blocks, .. }	=> { patch_face_names(patch, out); collect_patch_face_names(blocks, out); },
+			Block::Place { blocks, .. }			=> collect_patch_face_names(blocks, out),
 			_							=> {},
 		}
 	}
@@ -177,6 +178,7 @@ fn collect_named_families(blocks: &[Block], bodies: &mut Vec<Vec<String>>, headi
 		let (patch, inner) = match b {
 			Block::Scoped { patch, blocks }		=> (patch, blocks),
 			Block::Box { patch, blocks, .. }	=> (patch, blocks),
+			Block::Place { blocks, .. }			=> { collect_named_families(blocks, bodies, headings); continue; },
 			_									=> continue,
 		};
 		if let Some(list) = &patch.text.faces.body {
@@ -243,6 +245,7 @@ fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceR
 				note_missing_variants_for_levels(&scoped, faces, skips);
 				note_missing_face_variants_in(&scoped, blocks, faces, skips);
 			},
+			Block::Place { blocks, .. }			=> note_missing_face_variants_in(parent, blocks, faces, skips),
 			_							=> {},
 		}
 	}
@@ -800,6 +803,7 @@ fn block_has_index(block: &Block) -> bool {
 		Block::TableFigure { table, .. }	=> table_has_index(table),
 		Block::Box { blocks, .. }			=> blocks.iter().any(block_has_index),
 		Block::Scoped { blocks, .. }		=> blocks.iter().any(block_has_index),
+		Block::Place { blocks, .. }			=> blocks.iter().any(block_has_index),
 		_									=> false,
 	}
 }
@@ -1112,7 +1116,7 @@ pub fn resolve_glossary(blocks: &mut Vec<Block>, breakable: bool) {
 fn any_glossary(blocks: &[Block]) -> bool {
 	blocks.iter().any(|b| match b {
 		Block::Glossary									=> true,
-		Block::Scoped { blocks, .. } | Block::Box { blocks, .. }	=> any_glossary(blocks),
+		Block::Scoped { blocks, .. } | Block::Box { blocks, .. } | Block::Place { blocks, .. }	=> any_glossary(blocks),
 		_											=> false,
 	})
 }
@@ -1127,7 +1131,7 @@ fn replace_first_glossary(blocks: &mut [Block], table: Block) -> Result<(), Bloc
 			*b = slot;
 			return Ok(());
 		}
-		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } = b {
+		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } | Block::Place { blocks: inner, .. } = b {
 			match replace_first_glossary(inner, slot) {
 				Ok(())			=> return Ok(()),
 				Err(returned)	=> slot = returned,	// not in this subtree; keep the table and walk on
@@ -1153,6 +1157,7 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
 		Block::Box { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		Block::Scoped { blocks, .. }			=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
+		Block::Place { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		_										=> {},
 	}
 }
@@ -1297,6 +1302,7 @@ fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
 			},
 			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
 			Block::Scoped { blocks, .. }		=> out.extend(collect_cite_keys(blocks)),
+			Block::Place { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
 			// A table cell is set through the body's own segment pipeline, so a `#cite` in a cell renders and
 			// must be marked cited too, or its work would render but its reference vanish from the list.
 			Block::Table(t)						=> collect_cite_from_table(t, &mut out),

@@ -6,6 +6,7 @@
 //! tree names only what the engine can already set.
 
 use crate::ir::FloatPlacement;
+use crate::ir::Floating;
 use crate::ir::Length;
 use crate::ir::Span;
 use crate::ir::Sp;
@@ -23,12 +24,17 @@ pub enum Item {
 	List { ordered: bool, items: Vec<ListItem>, loose: bool, span: Span },	// `-` bullets or `+` numbered; items may nest sub-lists by indent; loose when a blank line parts its items
 	Code { lines: Vec<String>, span: Span },	// a ```-fenced block, set verbatim in the mono face
 	Table { spec: TableSpec, span: Span },	// a bare `#table(...)`, not wrapped in a figure
-	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`)
-	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, placement: Option<FloatPlacement>, span: Span },
+	// caption: the caption's inline markup; placement: Some when floated (`figure(placement: auto|top|bottom)`),
+	// carrying its `scope:` -- a parent-scoped float spans every column of the page
+	Figure { body: FigureBody, caption: Option<Vec<Inline>>, supplement: String, label: Option<String>, placement: Option<Floating>, span: Span },
 	Image { path: String, width: Option<Length>, height: Option<Length>, scale: Option<f64>, span: Span },	// a line-leading `#padded-image(...)`/`#image(...)`, set centred without a figure number
 	SectionBanner { path: String, span: Span },	// a line-leading `#section-banner("logo")`, a full-width grey bar carrying a right-aligned section logo
 	Rule { width: Length, thickness: f64, grey: u8, span: Span },	// a standalone `#line(length:.., stroke:..)` horizontal divider
-	PageBreak { weak: bool, span: Span },	// a line-leading `#pagebreak()` (strong) or `#pagebreak(weak: true)`; a strong break always ejects, a weak one only a page carrying content
+	PageBreak { weak: bool, span: Span },
+	ColBreak { weak: bool, span: Span },	// a line-leading `#colbreak()`: the next column, or a page break on a page of one column
+	// A line-leading `#place(<side>, float: true, scope: .., clearance: ..)[ ... ]`: its body set as a float at
+	// the top or foot of its column, or -- `scope: "parent"` -- spanning every column of the page.
+	Place { items: Vec<Item>, floating: Floating, clearance: Option<Spacing>, span: Span },	// a line-leading `#pagebreak()` (strong) or `#pagebreak(weak: true)`; a strong break always ejects, a weak one only a page carrying content
 	Space { height: Sp, span: Span },	// a line-leading `#v(<abs len>)`, a fixed vertical space (absolute units only)
 	PrintGlossary { span: Span },	// a line-leading `#print-glossary()`, a placeholder the book layer fills with the Term/Definition table
 	// A line-leading `#context { ... collect-claim-refs() ... }`: the reverse claim-reference index the Logic
@@ -45,6 +51,13 @@ pub enum Item {
 	// open/close marker makes an unmatched or missing close structurally impossible. Lowered to
 	// `Block::Scoped`.
 	Scoped { patch: ThemePatch, items: Vec<Item> },
+}
+
+/// A length that may be relative to the font size: absolute points, or ems of the text size in force.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Spacing {
+	Pt(f64),
+	Em(f64),
 }
 
 /// One item of an [`Item::List`]: its own inline runs, and any lists nested beneath it by deeper marker

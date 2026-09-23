@@ -1623,7 +1623,8 @@ fn is_reserved_construct(name: &str) -> bool {
 		"styled-box" | "figure" | "table" | "columns" | "image" | "padded-image"
 		| "section-banner" | "print-glossary" | "line" | "part-page"
 		// Common Typst built-ins a corpus must not be able to redefine into a wrap the reader would expand.
-		| "v" | "h" | "pagebreak" | "lorem" | "outline" | "box" | "block" | "text" | "align" | "grid" | "stack")
+		| "v" | "h" | "pagebreak" | "colbreak" | "place" | "lorem" | "outline" | "box" | "block" | "text" | "align"
+		| "grid" | "stack")
 }
 
 /// Is `at` the start of a line (position 0, or just after a newline)?
@@ -2278,7 +2279,7 @@ fn predicate_holds(p: &FieldPredicate, block: &Block) -> bool {
 pub fn apply_rules(blocks: &mut Vec<Block>, rules: &[Rule], avail: Sp) {
 	// Descend into existing nesting subtrees first, so their own elements are matched too.
 	for b in blocks.iter_mut() {
-		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } = b {
+		if let Block::Scoped { blocks: inner, .. } | Block::Box { blocks: inner, .. } | Block::Place { blocks: inner, .. } = b {
 			apply_rules(inner, rules, avail);
 		}
 	}
