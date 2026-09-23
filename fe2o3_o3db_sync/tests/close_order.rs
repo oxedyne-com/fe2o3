@@ -192,13 +192,17 @@ fn close_tells_a_write_its_barrier_failed() -> Outcome<()> {
     hooks::set_barrier_failure(true);
     let writer = res!(write_during_close(&db, key(2), dat!(2u64)));
     thread::sleep(Duration::from_millis(100));
+    let begun = Instant::now();
     let closed = db.close();
+    let took = begun.elapsed();
     let heard = match writer.join() {
         Ok(heard) => heard,
         Err(_) => return Err(err!("The writing thread panicked."; Test, Thread)),
     };
     hooks::set_barrier_failure(false);
     hooks::set_barrier_delay(Duration::ZERO);
+    msg!("A close with a write behind a barrier failing after {:?} took {:?}; the write heard \
+        after {:?}.", HOLD, took, heard.0);
     res!(closed);
     match heard {
         (_, Ok(())) => Err(err!(
@@ -237,12 +241,16 @@ fn close_confirms_a_write_behind_a_slow_barrier() -> Outcome<()> {
     hooks::set_barrier_delay(HOLD);
     let writer = res!(write_during_close(&db, key(3), dat!(3u64)));
     thread::sleep(Duration::from_millis(100));
+    let begun = Instant::now();
     let closed = db.close();
+    let took = begun.elapsed();
     let heard = match writer.join() {
         Ok(heard) => heard,
         Err(_) => return Err(err!("The writing thread panicked."; Test, Thread)),
     };
     hooks::set_barrier_delay(Duration::ZERO);
+    msg!("A close with a write behind a barrier succeeding after {:?} took {:?}; the write heard \
+        after {:?}.", HOLD, took, heard.0);
     res!(closed);
     match heard {
         (took, Err(e)) => return Err(err!(
