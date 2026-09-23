@@ -2087,6 +2087,10 @@ pub struct WatchPeer {
     // What to call it in an alert: a person's name for the machine, not a hostname, since the
     // alert is read on a phone in the dark.
     pub name:     String,
+    // The machine this entry probes something on, which is the row the Fleet page draws it in.
+    // A gateway's `/api/health` and the Steel health body on the same box are two entries and
+    // one row. Absent in configuration, it is the entry's own name.
+    pub host:     String,
     pub url:      String,   // the health URL, `https` unless `plain_ok` is set
     // Whether a plain `http` URL is acceptable for this one peer. Off unless the operator
     // writes it, and never a global switch: see `crate::srv::watch` for the single case it is
@@ -2259,6 +2263,10 @@ impl WatchConfig {
                         "watch.peers entry {} needs both a 'name' and a 'url'.", i;
                         Configuration, Invalid, Missing));
                 }
+                let host = match get("host") {
+                    h if h.is_empty() => name.clone(),
+                    h => h,
+                };
                 // Absent means false, so every peer written before this key existed keeps
                 // demanding TLS, which is the answer a silent config should give.
                 let plain_ok = matches!(pm.get(&dat!("plain_ok")), Some(Dat::Bool(true)));
@@ -2299,7 +2307,7 @@ impl WatchConfig {
                     Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
                     _ => None,
                 };
-                out.peers.push(WatchPeer { name, url, plain_ok, distress, clear, token });
+                out.peers.push(WatchPeer { name, host, url, plain_ok, distress, clear, token });
             }
         }
         if out.enabled {
@@ -2644,6 +2652,16 @@ pub struct ServerConfig {
     #[optional]
     pub whitelist_ips:                  Vec<String>,
 
+    // ── Health residents ──────────────────────────────────────────────────
+    //
+    // Process names whose resident memory the health body reports, one
+    // `res.<name>.*` group each (see `crate::srv::health`), e.g. `["steel",
+    // "daimond_gateway"]`. Matched on the kernel's command name, which keeps
+    // fifteen bytes. A name is letters, digits, `_`, `-` and `.`, checked at
+    // load. Empty -- the default -- reports no residents.
+    #[optional]
+    pub health_residents:               Vec<String>,
+
     // --- Virtual hosts ------------------------------------------------------
     // Stored as a `Dat::List` of `Dat::Map` entries and parsed via `get_vhosts()`.
     pub vhosts:                         Dat,
@@ -2744,6 +2762,7 @@ impl Default for ServerConfig {
             health_path:                    String::new(), // no health body by default
             health_token:                   String::new(), // no token, so no body served
             whitelist_ips:                  Vec::new(), // nothing whitelisted by default
+            health_residents:               Vec::new(), // no residents reported
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
             acme:                           AcmeConfig::default().to_datmap(),
             mail:                           DaticleMap::new(),
@@ -2781,6 +2800,9 @@ impl ServerConfig {
             res!(vh.validate_egress());
         }
         let _ = res!(self.get_acme());
+        // A resident name that cannot ride in a flattened body key is refused here, rather than
+        // silently missing from every body the host serves.
+        let _ = res!(self.get_health_residents());
         // A mistyped trusted proxy must be a start-up failure. An entry that failed to parse and
         // was skipped would leave an allow-list that looks populated and trusts nobody -- or, read
         // the other way round, an operator who believes their CDN is named here when it is not.
@@ -2888,6 +2910,24 @@ impl ServerConfig {
             return Ok(None);
         }
         Ok(Some(cfg))
+    }
+
+    /// The configured health residents, each checked to be a name that can ride in a
+    /// `res.<name>.<figure>` key.
+    pub fn get_health_residents(&self) -> Outcome<Vec<String>> {
+        let mut out = Vec::with_capacity(self.health_residents.len());
+        for name in &self.health_residents {
+            let name = name.trim();
+            if !crate::srv::health::is_resident_name(name) {
+                return Err(err!(
+                    "ServerConfig: health_residents entry '{}' is not a usable process name. It \
+                    becomes part of a health-body key, so it must be 1 to {} of letters, digits, \
+                    '_', '-' and '.'.", name, crate::srv::health::RES_NAME_MAX;
+                    Configuration, Invalid, Input));
+            }
+            out.push(name.to_string());
+        }
+        Ok(out)
     }
 
     /// Parse the `alerts` block. An empty map, or an `enabled: false` map, disables alerting.
@@ -3149,6 +3189,83 @@ mod tests {
             "compression must be on for a config that says nothing about it");
         assert_eq!(cfg.compression_min_bytes, 1024);
         assert_eq!(cfg.fingerprint_max_age_secs, 31_536_000);
+        Ok(())
+    }
+
+    /// Every production `config.jdat` predates `health_residents`, so one without it must load
+    /// and report no residents, and one that names residents must read them in both list forms.
+    #[test]
+    fn a_config_without_health_residents_still_loads() -> Outcome<()> {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("tls_dir_rel"),                 dat!("./tls"));
+        m.insert(dat!("log_level"),                   dat!("info"));
+        m.insert(dat!("server_address"),              dat!("0.0.0.0"));
+        m.insert(dat!("server_port_tcp"),             Dat::U16(8443));
+        m.insert(dat!("server_port_tcp_plaintext"),   Dat::U16(80));
+        m.insert(dat!("hsts_max_age_secs"),           Dat::U32(0));
+        m.insert(dat!("session_expiry_default_secs"), Dat::U32(604_800));
+        m.insert(dat!("ws_ping_interval_secs"),       Dat::U8(30));
+        m.insert(dat!("server_max_errors_allowed"),   Dat::U8(30));
+        m.insert(dat!("allow_anonymous_sessions"),    Dat::Bool(true));
+        // The fields the 2026-09-21 deploy added, as karri, jarrah and birch carry them now.
+        m.insert(dat!("health_path"),                 dat!("/_steel/health"));
+        m.insert(dat!("health_token"),                dat!("a-token"));
+        m.insert(dat!("max_conn"),                    Dat::U64(512));
+        m.insert(dat!("vhosts"),                      Dat::List(Vec::new()));
+        m.insert(dat!("acme"),                        Dat::Map(DaticleMap::new()));
+        m.insert(dat!("mail"),                        Dat::Map(DaticleMap::new()));
+
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert!(cfg.health_residents.is_empty());
+        assert!(res!(cfg.get_health_residents()).is_empty());
+
+        m.insert(dat!("health_residents"), Dat::List(vec![dat!("steel"), dat!("daimond_gateway")]));
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert_eq!(res!(cfg.get_health_residents()), vec![fmt!("steel"), fmt!("daimond_gateway")]);
+
+        m.insert(dat!("health_residents"), Dat::Vek(Vek(vec![dat!("steel")])));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        assert_eq!(res!(cfg.get_health_residents()), vec![fmt!("steel")],
+            "the (vek|[...]) form must read the same as a plain list");
+        Ok(())
+    }
+
+    /// A resident name that could break the body is a start-up failure, not a silently
+    /// missing resident.
+    #[test]
+    fn a_health_resident_that_cannot_ride_in_a_key_is_refused() {
+        let mut cfg = ServerConfig::default();
+        cfg.health_residents = vec![fmt!("steel"), fmt!("bad:name")];
+        let msg = match cfg.get_health_residents() {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("bad:name"),
+            "the name must be refused, and the refusal must name it, got: '{}'", msg);
+    }
+
+    /// A watch entry names the machine it probes on, and an entry that does not is its own.
+    #[test]
+    fn a_watch_peer_host_defaults_to_its_name() -> Outcome<()> {
+        let peer = |name: &str, host: Option<&str>| -> Dat {
+            let mut pm = DaticleMap::new();
+            pm.insert(dat!("name"), dat!(name));
+            pm.insert(dat!("url"), dat!("https://example.test/health"));
+            if let Some(h) = host {
+                pm.insert(dat!("host"), dat!(h));
+            }
+            Dat::Map(pm)
+        };
+        let mut m = DaticleMap::new();
+        m.insert(dat!("enabled"), Dat::Bool(true));
+        m.insert(dat!("peers"), Dat::List(vec![
+            peer("jarrah", None),
+            peer("daimond gateway", Some("jarrah")),
+        ]));
+        let w = res!(WatchConfig::from_datmap(&m));
+        assert_eq!(w.peers[0].host, "jarrah");
+        assert_eq!(w.peers[1].name, "daimond gateway");
+        assert_eq!(w.peers[1].host, "jarrah", "the gateway sits on jarrah's row");
         Ok(())
     }
 

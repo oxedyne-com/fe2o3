@@ -87,6 +87,8 @@ pub const PATH_TRAFFIC:       &str = "/admin/traffic";
 pub const PATH_HOST_JSON:     &str = "/admin/host.json";
 pub const PATH_TRAFFIC_JSON:  &str = "/admin/traffic.json";
 pub const PATH_SECURITY:      &str = "/admin/security";
+pub const PATH_FLEET:         &str = "/admin/fleet";
+pub const PATH_FLEET_JSON:    &str = "/admin/fleet.json";
 pub const PATH_ADMINS:        &str = "/admin/admins";
 // Served unauthenticated, so the login page can use the font for headings
 // before the visitor has a session.
@@ -123,6 +125,8 @@ pub async fn handle_get(
         PATH_HOST_JSON => Ok(render_host_json(state, headers)),
         PATH_TRAFFIC_JSON => Ok(render_traffic_json(state, headers)),
         PATH_SECURITY => Ok(render_security(state, headers, None)),
+        PATH_FLEET => Ok(crate::srv::admin::fleet_view::render_fleet_page(state, headers)),
+        PATH_FLEET_JSON => Ok(crate::srv::admin::fleet_view::render_fleet_json(state, headers)),
         PATH_ADMINS => Ok(render_admins(state, headers, None)),
         PATH_CHALLENGE => Ok(
             crate::srv::admin::signed_login::handle_challenge(state),
@@ -389,6 +393,9 @@ fn render_home(
         {host}\
         <h2>Live views</h2>\n\
         <ul>\n\
+            <li><a href=\"/admin/fleet\">Fleet</a> &mdash; \
+                this host and every machine its watcher reads, judged against \
+                the alarm's own thresholds (requires <code>dashboard.admin</code>).</li>\n\
             <li><a href=\"/admin/traffic\">Traffic</a> &mdash; \
                 recent requests across every vhost on this host.</li>\n\
             <li><a href=\"/admin/database\">Database</a> &mdash; \
@@ -658,9 +665,9 @@ fn render_traffic_json(
         .with_body(body.into_bytes())
 }
 
-/// Covers only the characters actually reachable through `RequestRecord`:
-/// backslash, double quote, control characters. Not a general JSON encoder.
-fn json_escape(s: &str) -> String {
+/// Escapes what a JSON string cannot hold raw: backslash, double quote and the
+/// control characters. Everything else, non-ASCII included, is legal as it is.
+pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

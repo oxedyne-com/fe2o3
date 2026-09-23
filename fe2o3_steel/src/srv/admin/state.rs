@@ -44,7 +44,15 @@ use crate::srv::{
     },
     alert::Alerter,
     cfg::AdminKey,
-    health::RollingCounter,
+    fleet::Fleet,
+    health::{
+        F_DISK_PCT,
+        F_MAIL_DOWN,
+        F_SEALED_DBS,
+        HealthBody,
+        RollingCounter,
+    },
+    mail::ListenerTally,
 };
 
 use oxedyne_fe2o3_core::{
@@ -170,6 +178,12 @@ pub struct AdminState {
     // 429 site increment these; the health route reads them.
     pub r429:           Arc<RollingCounter>,
     pub dropped:        Arc<RollingCounter>,
+    // Mail listeners asked for against those bound, surfaced as `mail_down`. The
+    // mail spawner in `Server::start` counts into it.
+    pub mail:           Arc<ListenerTally>,
+    // What this host's watcher saw of each peer, drawn by `/admin/fleet`. The
+    // watcher writes the same `Arc`; an empty fleet on a host that watches nobody.
+    pub fleet:          Arc<Fleet>,
 }
 
 impl AdminState {
@@ -239,7 +253,49 @@ impl AdminState {
             guard_selftest,
             r429:               RollingCounter::new_shared(),
             dropped:            RollingCounter::new_shared(),
+            mail:               ListenerTally::new_shared(),
+            fleet:              Fleet::new_shared(String::new(), None),
         })
+    }
+
+    /// Hands the dashboard the rings the watcher writes, and this host's name for
+    /// the page's own row. A state built without one has an empty fleet, as a host
+    /// that watches nobody does.
+    pub fn with_fleet(mut self, fleet: Arc<Fleet>) -> Self {
+        self.fleet = fleet;
+        self
+    }
+
+    /// This host's health body: what the health route serves, and what the Fleet
+    /// page draws in this host's own row.
+    ///
+    /// `assemble` makes the original fields; the ones the Fleet view added are
+    /// set here, from state this struct holds. Each is absent rather than zero
+    /// when it was never read, so no watcher mistakes a missing figure for a
+    /// good one.
+    pub fn health_body(&self) -> HealthBody {
+        let host = self.host_sampler.health_metrics().ok().flatten();
+        let mut b = HealthBody::assemble(
+            host,
+            self.addr_guard.live_conns(),
+            self.r429.last(60),
+            self.dropped.last(60),
+            self.guard_selftest,
+            self.started.elapsed().as_secs(),
+            self.is_sealed(),
+        );
+        let sealed_dbs = if self.seal_withholds_data() { self.db_count } else { 0 };
+        b.set(F_SEALED_DBS, sealed_dbs as i64);
+        if let Some(pct) = self.host_sampler.disk_pct().ok().flatten() {
+            b.set(F_DISK_PCT, pct);
+        }
+        if let Some(n) = self.mail.down() {
+            b.set(F_MAIL_DOWN, n as i64);
+        }
+        for r in self.host_sampler.residents().unwrap_or_default() {
+            b.set_resident(&r);
+        }
+        b
     }
 
     /// True while no master key is known, so the databases are shut and

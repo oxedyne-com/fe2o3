@@ -22,6 +22,7 @@
 use crate::srv::admin::host_sampler::HealthHostMetrics;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_sys::resident::Resident;
 
 use std::{
     collections::{
@@ -54,6 +55,69 @@ pub const F_SEALED:         &str = "sealed";
 // How long a rolling counter keeps its per-second buckets. Two minutes so a
 // one-minute query is always fully covered without an off-by-one at the boundary.
 const ROLL_KEEP_SECS: u64 = 120;
+
+// ── Fleet fields ─────────────────────────────────────────────────────────────
+//
+// The fields the Fleet view added (2026-09-23), beside the originals above.
+pub const F_DISK_PCT:       &str = "disk_pct";      // the app root's filesystem, as `df` puts it
+pub const F_SEALED_DBS:     &str = "sealed_dbs";    // databases the seal holds shut
+pub const F_MAIL_DOWN:      &str = "mail_down";     // mail listeners asked for, not bound
+// Written by the watcher into the body it read, never served by a peer: the time
+// the probe took, measured at the watching end.
+pub const F_PROBE_MS:       &str = "probe_ms";
+
+// The per-process figures for the services named in `health_residents` are a list
+// in spirit, and the format has no lists. Each resident is therefore flattened
+// into keys of the form `res.<name>.<figure>` -- `res.steel.rss_kb`,
+// `res.daimond_gateway.cap_pct` -- so a resident is an ordinary field to the
+// parser and an ordinary threshold to a watcher's `distress` map. A name is
+// letters, digits, `_`, `-` and `.`, so none can break the object, and the split
+// back into name and figure is taken at the last dot. `procs` is always present,
+// so a service that is not running reads as zero processes rather than as a
+// service nobody asked about; `rss_kb` is in the kernel's kB, which are KiB;
+// `cap_kb` and `cap_pct` appear only when the service's cgroup sets a limit.
+pub const RES_PREFIX:       &str = "res.";
+pub const RES_PROCS:        &str = "procs";
+pub const RES_RSS_KB:       &str = "rss_kb";
+pub const RES_CAP_KB:       &str = "cap_kb";
+pub const RES_CAP_PCT:      &str = "cap_pct";
+pub const RES_NAME_MAX:     usize = 64;
+
+/// Can this name ride in a flattened resident key?
+pub fn is_resident_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= RES_NAME_MAX
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.')
+}
+
+pub fn resident_key(name: &str, figure: &str) -> String {
+    fmt!("{}{}.{}", RES_PREFIX, name, figure)
+}
+
+/// The resident name and figure a flattened key carries, or `None` for any other
+/// key. The split is at the last dot, since a name may hold dots and a figure
+/// never does.
+pub fn split_resident_key(key: &str) -> Option<(&str, &str)> {
+    let rest = ok!(key.strip_prefix(RES_PREFIX));
+    let (name, figure) = ok!(rest.rsplit_once('.'));
+    if name.is_empty() || figure.is_empty() {
+        return None;
+    }
+    Some((name, figure))
+}
+
+/// One resident's figures as a body carries them, keyed by figure.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ResidentFigures {
+    pub name:       String,
+    pub figures:    BTreeMap<String, i64>,
+}
+
+impl ResidentFigures {
+    pub fn get(&self, figure: &str) -> Option<i64> {
+        self.figures.get(figure).copied()
+    }
+}
 
 fn unix_secs() -> u64 {
     SystemTime::now()
@@ -224,10 +288,105 @@ impl HealthBody {
     }
 }
 
+impl HealthBody {
+    /// Flatten one resident into its `res.<name>.*` keys. A name that cannot
+    /// ride in a key is skipped: configuration refuses one at start-up, so
+    /// reaching here with one is a caller bypassing that check.
+    pub fn set_resident(&mut self, r: &Resident) {
+        if !is_resident_name(&r.name) {
+            return;
+        }
+        let clamp = |v: u64| -> i64 { v.min(i64::MAX as u64) as i64 };
+        self.set(&resident_key(&r.name, RES_PROCS),  r.procs as i64);
+        self.set(&resident_key(&r.name, RES_RSS_KB), clamp(r.rss_kib));
+        if let Some(cap) = r.cap_kib {
+            self.set(&resident_key(&r.name, RES_CAP_KB), clamp(cap));
+        }
+        if let Some(pct) = r.cap_pct() {
+            self.set(&resident_key(&r.name, RES_CAP_PCT), clamp(pct));
+        }
+    }
+
+    /// The residents a body carries, gathered back from their flattened keys, in
+    /// name order.
+    pub fn residents(&self) -> Vec<ResidentFigures> {
+        let mut by_name: BTreeMap<&str, BTreeMap<String, i64>> = BTreeMap::new();
+        for (k, v) in &self.fields {
+            if let Some((name, figure)) = split_resident_key(k) {
+                by_name.entry(name).or_default().insert(figure.to_string(), *v);
+            }
+        }
+        by_name.into_iter()
+            .map(|(name, figures)| ResidentFigures { name: name.to_string(), figures })
+            .collect()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Residents flatten into ordinary integer keys, survive the wire, and gather
+    /// back into the same figures -- including a name that holds a dot, and a
+    /// service that is not running, which must still say so.
+    #[test]
+    fn residents_flatten_and_gather_back_across_the_wire() -> Outcome<()> {
+        let running = Resident {
+            name:       fmt!("daimond_gateway"),
+            procs:      1,
+            rss_kib:    412_000,
+            cap_kib:    Some(524_288),
+        };
+        let uncapped = Resident {
+            name:       fmt!("python3.11"),
+            procs:      2,
+            rss_kib:    90_000,
+            cap_kib:    None,
+        };
+        let absent = Resident { name: fmt!("steel"), ..Resident::default() };
+        let mut body = HealthBody::assemble(None, 3, 0, 0, true, 60, false);
+        for r in [&running, &uncapped, &absent] {
+            body.set_resident(r);
+        }
+
+        let json = body.to_json();
+        assert!(json.contains("\"res.daimond_gateway.rss_kb\":412000"), "got {}", json);
+        assert!(json.contains("\"res.daimond_gateway.cap_pct\":78"), "got {}", json);
+        let back = res!(HealthBody::parse(&json));
+        assert_eq!(back, body, "the flattened body must round-trip exactly");
+
+        let gathered = back.residents();
+        let names: Vec<&str> = gathered.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["daimond_gateway", "python3.11", "steel"]);
+        assert_eq!(gathered[0].get(RES_CAP_KB), Some(524_288));
+        assert_eq!(gathered[0].get(RES_CAP_PCT), Some(78));
+        assert_eq!(gathered[1].get(RES_RSS_KB), Some(90_000),
+            "a dot in the name must not split it: the split is at the last dot");
+        assert_eq!(gathered[1].get(RES_CAP_PCT), None, "no cap, no percentage");
+        assert_eq!(gathered[2].get(RES_PROCS), Some(0),
+            "a service that is not running still reports, as zero processes");
+        Ok(())
+    }
+
+    /// A resident key is recognised only in its full shape, and a name that could
+    /// break the object is refused before it can become one.
+    #[test]
+    fn resident_keys_split_only_in_their_own_shape() {
+        assert_eq!(split_resident_key("res.steel.rss_kb"), Some(("steel", "rss_kb")));
+        assert_eq!(split_resident_key("res.a.b.cap_pct"), Some(("a.b", "cap_pct")));
+        assert_eq!(split_resident_key("mem_pct"), None);
+        assert_eq!(split_resident_key("res.steel"), None);
+        assert_eq!(split_resident_key("res..rss_kb"), None);
+        assert!(is_resident_name("daimond_gateway"));
+        assert!(!is_resident_name(""));
+        assert!(!is_resident_name("a\"b"), "a quote would end the JSON key");
+        assert!(!is_resident_name("a:b"), "a colon would split the field");
+        assert!(!is_resident_name("a,b"), "a comma would split the object");
+        let mut b = HealthBody::new();
+        b.set_resident(&Resident { name: fmt!("bad,name"), procs: 1, ..Resident::default() });
+        assert!(b.fields.is_empty(), "an unsafe name must never reach the body");
+    }
 
     #[test]
     fn json_round_trips() {

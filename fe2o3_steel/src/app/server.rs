@@ -407,7 +407,14 @@ impl AppShellContext {
         // recorder so dashboard reads and request-pipeline writes
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
-        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
+        // The sampler also reads what the health body needs beyond its snapshot --
+        // the `health_residents` processes on a slower cadence of its own, and how
+        // full the app root's filesystem is -- so a request formats figures rather
+        // than walking `/proc`. Resident names were checked at validation.
+        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared_for_health(
+            res!(server_cfg.get_health_residents()),
+            Some(PathBuf::from(&root_path)),
+        );
         let addr_guard = res!(crate::srv::admin::guard::new_shared_with(
             server_cfg.get_addr_guard_settings(),
         ));
@@ -533,7 +540,11 @@ impl AppShellContext {
         // an outbound TLS client for the same practical reason. Both absences
         // are said out loud rather than logged at debug, since the operator who
         // configured a watch believes they are covered.
-        match res!(server_cfg.get_watch()) {
+        //
+        // What the watcher sees goes into the shared fleet rings too, which the
+        // dashboard's Fleet page draws. A host that watches nobody still gets an
+        // empty fleet, since the page always has this host's own row to show.
+        let fleet = match res!(server_cfg.get_watch()) {
             Some(mut wcfg) => {
                 // Resolve each peer's health-token `{file:...}` at load, the same
                 // reason the server's own token is resolved: the secret must be
@@ -547,6 +558,8 @@ impl AppShellContext {
                         }
                     }
                 }
+                let fleet = crate::srv::fleet::Fleet::new_shared(
+                    alert_host.clone(), Some(&wcfg));
                 match (&alerter, &tls_client) {
                 (Some(a), Some(tls)) => {
                     let w = res!(crate::srv::watch::Watcher::new(
@@ -554,6 +567,7 @@ impl AppShellContext {
                         Arc::new(a.clone()),
                         tls.clone(),
                         alert_host.to_string(),
+                        fleet.clone(),
                     ));
                     // `rt.spawn`, NOT `tokio::spawn`. This function is sync: the
                     // runtime is built at the top and is not current until
@@ -573,9 +587,10 @@ impl AppShellContext {
                     outbound TLS client, so it cannot probe anything. The watcher \
                     was not started."),
                 }
+                fleet
             },
-            None => {},
-        }
+            None => crate::srv::fleet::Fleet::new_shared(alert_host.clone(), None),
+        };
 
         // The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built
         // from the same mail configuration the mail server and the alerter use, and shared by every
@@ -629,7 +644,7 @@ impl AppShellContext {
             auth_guard.clone(),
             admin_keys_cfg,
             head_injection_url_cfg,
-        ));
+        )).with_fleet(fleet);
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
             (traffic ring capacity {}; host sampler capacity {}).",

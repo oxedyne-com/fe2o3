@@ -73,7 +73,16 @@ use crate::srv::{
         WatchConfig,
         WatchPeer,
     },
-    health::HealthBody,
+    fleet::{
+        Fleet,
+        PeerHealth,
+        ProbeSample,
+        unix_secs,
+    },
+    health::{
+        F_PROBE_MS,
+        HealthBody,
+    },
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -92,7 +101,6 @@ use oxedyne_fe2o3_net::http::{
 };
 
 use std::{
-    collections::HashMap,
     sync::Arc,
     time::{
         Duration,
@@ -122,6 +130,16 @@ enum Health {
     Down,
 }
 
+impl From<Health> for PeerHealth {
+    fn from(h: Health) -> Self {
+        match h {
+            Health::Up { .. }           => Self::Up,
+            Health::Distressed { .. }   => Self::Distressed,
+            Health::Down                => Self::Down,
+        }
+    }
+}
+
 /// One peer's running state.
 struct PeerState {
     health:             Health,
@@ -132,7 +150,6 @@ struct PeerState {
     distress_rising:    u32,
     distress_at:        Option<Instant>,    // when the distress run began, for the recovery line
     distress_told_at:   Option<Instant>,    // last told distressed, for the repeat cadence
-    last_body:          Option<HealthBody>, // the last body seen, for the alarm text and a reader
 }
 
 impl Default for PeerState {
@@ -144,9 +161,22 @@ impl Default for PeerState {
             distress_rising:    0,
             distress_at:        None,
             distress_told_at:   None,
-            last_body:          None,
         }
     }
+}
+
+/// Is a reading over its distress threshold?
+///
+/// The alarm and the Fleet page's red both ask this one function, and whether a
+/// reading has cleared both ask [`is_cleared`], so the page cannot draw a colour
+/// the alarm would not have agreed with.
+pub(crate) fn is_over(value: i64, distress: i64) -> bool {
+    value >= distress
+}
+
+/// Is a reading at or under its clear boundary?
+pub(crate) fn is_cleared(value: i64, boundary: i64) -> bool {
+    value <= boundary
 }
 
 /// The distress classes a body is currently over, as `(field, value)` pairs.
@@ -154,7 +184,7 @@ fn classes_breaching(distress: &BTreeMap<String, i64>, body: &HealthBody) -> Vec
     let mut out = Vec::new();
     for (field, threshold) in distress {
         if let Some(v) = body.get(field) {
-            if v >= *threshold {
+            if is_over(v, *threshold) {
                 out.push((field.clone(), v));
             }
         }
@@ -171,7 +201,7 @@ fn is_below_clear(peer: &WatchPeer, body: &HealthBody) -> bool {
     for (field, dthresh) in &peer.distress {
         let boundary = peer.clear.get(field).copied().unwrap_or(*dthresh);
         if let Some(v) = body.get(field) {
-            if v > boundary {
+            if !is_cleared(v, boundary) {
                 return false;
             }
         }
@@ -189,8 +219,9 @@ fn classes_text(classes: &[(String, i64)]) -> String {
 
 /// The peer watcher.
 ///
-/// Owns nothing but its configuration, its TLS client and its beliefs. Constructed once at
-/// start-up and driven by [`Self::run`], which never returns.
+/// Owns its configuration, its TLS client and its beliefs, and writes what it saw into the
+/// shared [`Fleet`] for the dashboard to draw. Constructed once at start-up and driven by
+/// [`Self::run`], which never returns.
 pub struct Watcher {
     cfg:        Arc<WatchConfig>,
     alerter:    Arc<Alerter>,
@@ -198,7 +229,10 @@ pub struct Watcher {
     // This node's own name, so an alert says who noticed as well as what happened. Two nodes
     // watching a third send two messages, and without this they are indistinguishable.
     whoami:     String,
-    state:      HashMap<String, PeerState>,
+    // One per peer, in `cfg.peers` order. Kept by position rather than by name, because
+    // nothing makes a name unique, and two entries sharing one would share one set of beliefs.
+    state:      Vec<PeerState>,
+    fleet:      Arc<Fleet>,
 }
 
 /// Refuse a peer whose URL this cannot honestly probe.
@@ -237,15 +271,16 @@ impl Watcher {
         alerter: Arc<Alerter>,
         tls:     Arc<ClientConfig>,
         whoami:  String,
+        fleet:   Arc<Fleet>,
     )
         -> Outcome<Self>
     {
-        let mut state = HashMap::new();
+        let mut state = Vec::with_capacity(cfg.peers.len());
         for p in &cfg.peers {
             res!(vet(p));
-            state.insert(p.name.clone(), PeerState::default());
+            state.push(PeerState::default());
         }
-        Ok(Self { cfg, alerter, tls, whoami, state })
+        Ok(Self { cfg, alerter, tls, whoami, state, fleet })
     }
 
     /// Poll every peer for ever.
@@ -273,17 +308,19 @@ impl Watcher {
         let beat = Duration::from_secs(self.cfg.heartbeat_secs);
         let started = Instant::now();
         let mut last_beat = started;
+        self.fleet.set_watching(true);
         loop {
             tokio::time::sleep(every).await;
             let mut ok_count = 0usize;
-            for peer in self.cfg.peers.clone() {
-                let (ok, body, dur) = self.probe(&peer).await;
+            let cfg = self.cfg.clone();
+            for (i, peer) in cfg.peers.iter().enumerate() {
+                let (ok, body, dur) = self.probe(peer).await;
                 if ok {
                     ok_count += 1;
                 }
                 debug!("Watch: {} answered ok={} in {}ms.",
                     peer.name, ok, dur.as_millis());
-                self.judge(&peer, ok, body, repeat);
+                self.judge(i, peer, ok, body, dur, repeat);
             }
             // Proof of life, on the same loop that does the watching -- so a
             // heartbeat arriving is evidence the watcher is running and not
@@ -380,26 +417,76 @@ impl Watcher {
         }
     }
 
-    /// Fold one probe result into what this node believes, and alert on a change.
+    /// Fold one probe result into what this node believes, alert on a change, and keep the
+    /// sample for the dashboard.
     ///
-    /// Separated from the polling so the state machine can be tested without a network: the
-    /// interesting behaviour is entirely here, and a test that had to stand up a peer to reach
-    /// it would test tokio rather than the rule.
+    /// The dashboard's copy is written after the alerts are raised and a failure to write it is
+    /// only logged, so nothing the page does can delay or silence an alarm.
     fn judge(
         &mut self,
+        i:      usize,
         peer:   &WatchPeer,
         ok:     bool,
         body:   Option<HealthBody>,
+        took:   Duration,
         repeat: Duration,
     ) {
         let threshold = self.cfg.fail_threshold.max(1);
         let now = Instant::now();
-        let whoami = self.whoami.clone();
-        let st = self.state.entry(peer.name.clone()).or_default();
-        for event in decide(threshold, &whoami, peer, st, ok, body, repeat, now) {
+        let st = match self.state.get_mut(i) {
+            Some(st) => st,
+            // Built one per peer at construction, so unreachable; a peer with no beliefs is
+            // one this cannot judge, and saying so beats judging it against another's.
+            None => {
+                warn!("Watch: no state for peer {} ('{}'); skipped.", i, peer.name);
+                return;
+            },
+        };
+        let (events, sample) = assess(
+            threshold, &self.whoami, peer, st, ok, body, took, repeat, now, unix_secs());
+        for event in events {
             self.alerter.raise(event);
         }
+        if let Err(e) = self.fleet.record(i, sample) {
+            warn!("Watch: the dashboard's copy of {}'s probe was not kept: {}", peer.name, e);
+        }
     }
+}
+
+/// One probe result in; the alerts it raises and the sample the dashboard keeps out.
+///
+/// The probe time is measured here rather than reported by the peer, and it is written into the
+/// body before the body is judged, so a `probe_ms` threshold in a peer's `distress` map is an
+/// ordinary class with no special case. A peer that serves no body has nothing to carry it and
+/// no distress to judge; the sample still records the time.
+fn assess(
+    threshold: u32,
+    whoami:    &str,
+    peer:      &WatchPeer,
+    st:        &mut PeerState,
+    ok:        bool,
+    body:      Option<HealthBody>,
+    took:      Duration,
+    repeat:    Duration,
+    now:       Instant,
+    t_secs:    u64,
+)
+    -> (Vec<AlertEvent>, ProbeSample)
+{
+    let probe_ms = took.as_millis().min(i64::MAX as u128) as u64;
+    let body = body.map(|mut b| {
+        b.set(F_PROBE_MS, probe_ms as i64);
+        b
+    });
+    let events = decide(threshold, whoami, peer, st, ok, body.clone(), repeat, now);
+    let sample = ProbeSample {
+        t_secs,
+        ok,
+        probe_ms,
+        body,
+        health: st.health.into(),
+    };
+    (events, sample)
 }
 
 /// The peer-state transition, separated from the polling and the alerter.
@@ -426,9 +513,6 @@ fn decide(
     // Whether this peer even asks to be watched for distress: a token to open the gate and at
     // least one threshold to test. A peer without both is plain up/down, exactly as before.
     let watches_distress = peer.token.is_some() && !peer.distress.is_empty();
-    if let Some(b) = &body {
-        st.last_body = Some(b.clone());
-    }
 
     // A peer that asked for distress watching but gave us nothing to test is a misconfiguration
     // worth saying out loud every poll, not silently reading as well: the operator believes the
@@ -624,6 +708,7 @@ mod tests {
     fn plain_peer(name: &str, url: &str) -> WatchPeer {
         WatchPeer {
             name:     name.to_string(),
+            host:     name.to_string(),
             url:      url.to_string(),
             plain_ok: false,
             distress: BTreeMap::new(),
@@ -817,6 +902,46 @@ mod tests {
             Duration::from_secs(900), now);
         assert_eq!(kinds(&ev), vec!["down"]);
         assert_eq!(st.health, Health::Down);
+    }
+
+    /// The probe time the watcher measured reaches `decide` as an ordinary field: a slow answer
+    /// over the peer's `probe_ms` threshold is distress, named with the time measured here, and
+    /// a figure the peer put in its own body under that name is not believed.
+    #[test]
+    fn probe_ms_is_folded_in_before_the_body_is_judged() {
+        let peer = distress_peer("jarrah", &[("probe_ms", 3000)], &[("probe_ms", 1500)]);
+        let mut st = PeerState::default();
+        let now = Instant::now();
+        let repeat = Duration::from_secs(900);
+        // The peer claims a 1 ms probe; the watcher measured 3.5 s.
+        let claimed = body_of(&[("mem_pct", 40), ("probe_ms", 1)]);
+
+        let (ev, sample) = assess(1, "karri", &peer, &mut st, true, Some(claimed),
+            Duration::from_millis(3_500), repeat, now, 1_000);
+        assert_eq!(kinds(&ev), vec!["distress"],
+            "a probe over its threshold must reach decide and raise distress");
+        match &ev[0] {
+            AlertEvent::PeerDistress { classes, .. } => assert_eq!(classes, "probe_ms 3500"),
+            _ => panic!("expected a distress event"),
+        }
+        assert_eq!(sample.probe_ms, 3_500);
+        assert_eq!(sample.body.as_ref().and_then(|b| b.get("probe_ms")), Some(3_500),
+            "the body the dashboard keeps must carry the measured time, not the claimed one");
+        assert_eq!(sample.health, PeerHealth::Distressed);
+        assert_eq!(sample.t_secs, 1_000);
+
+        // A fast answer under the clear boundary lifts it.
+        let (ev, sample) = assess(1, "karri", &peer, &mut st, true,
+            Some(body_of(&[("mem_pct", 40)])), Duration::from_millis(200), repeat, now, 1_060);
+        assert_eq!(kinds(&ev), vec!["cleared"]);
+        assert_eq!(sample.health, PeerHealth::Up);
+
+        // No body, nothing to judge: the time is still kept.
+        let (ev, sample) = assess(1, "karri", &peer, &mut st, true, None,
+            Duration::from_millis(4_000), repeat, now, 1_120);
+        assert!(ev.is_empty());
+        assert!(sample.body.is_none());
+        assert_eq!(sample.probe_ms, 4_000);
     }
 
     /// A peer with no thresholds is plain up/down: a hot body never makes it distressed.

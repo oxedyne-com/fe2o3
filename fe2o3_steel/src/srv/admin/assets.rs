@@ -169,6 +169,219 @@ pub const AUTO_REFRESH_JS: &str = r#"
 })();
 "#;
 
+// The Fleet page. Draws the rows from the JSON blob the page was served with,
+// then from `/admin/fleet.json` every thirty seconds while the tab is visible --
+// the watcher reads its peers once a minute, so faster would redraw the same
+// numbers. Every string is placed with `textContent`, never parsed as markup:
+// host names and notes come from configuration on another machine. The stamp
+// under the rows says when the page last drew and from what, so a tab that has
+// stopped refreshing cannot pass for a fleet that has stopped changing.
+pub const FLEET_JS: &str = r#"
+(function() {
+    var REFRESH_MS = 30000;
+    var SVGNS = 'http://www.w3.org/2000/svg';
+    var rowsEl = document.getElementById('fleet-rows');
+    var noticeEl = document.getElementById('fleet-notice');
+    var stampEl = document.getElementById('fleet-stamp');
+    var dataEl = document.getElementById('fleet-data');
+    var lastData = null;
+    if (!rowsEl) return;
+    function el(tag, cls, text) {
+        var e = document.createElement(tag);
+        if (cls) e.className = cls;
+        if (text !== undefined && text !== null) e.textContent = text;
+        return e;
+    }
+    function none(v) { return v === null || v === undefined; }
+    function clock(secs) { return new Date(secs * 1000).toLocaleTimeString(); }
+    function kib(k) {
+        if (none(k)) return '—';
+        if (k < 1024) return k + ' KiB';
+        if (k < 1048576) return Math.round(k / 1024) + ' MiB';
+        return (k / 1048576).toFixed(2) + ' GiB';
+    }
+    function ago(s) {
+        if (s < 90) return s + ' s ago';
+        if (s < 5400) return Math.round(s / 60) + ' min ago';
+        if (s < 172800) return Math.round(s / 3600) + ' h ago';
+        return Math.round(s / 86400) + ' d ago';
+    }
+    function lasted(s) {
+        if (s < 3600) return Math.floor(s / 60) + ' min';
+        if (s < 172800) return Math.floor(s / 3600) + ' h';
+        return Math.floor(s / 86400) + ' d';
+    }
+    function span(s) {
+        if (s < 120) return s + ' s';
+        if (s < 7200) return Math.round(s / 60) + ' min';
+        if (s < 172800) return Math.floor(s / 3600) + ' h ' + Math.round((s % 3600) / 60) + ' min';
+        return Math.floor(s / 86400) + ' d ' + Math.round((s % 86400) / 3600) + ' h';
+    }
+    function shown(cell) {
+        var v = cell.v;
+        if (none(v)) return '—';
+        switch (cell.unit) {
+            case 'pct':   return v + '%';
+            case 'load':  return (v / 100).toFixed(2);
+            case 'ms':    return v + ' ms';
+            case 'guard': return v >= 1 ? 'ok' : 'failed';
+            case 'mail':  return v === 0 ? 'all bound' : v + ' not bound';
+            case 'secs':  return span(v);
+            case 'kib':   return kib(v);
+            case 'seal':
+                if (v > 0) return v + (v === 1 ? ' database shut' : ' databases shut');
+                return cell.sealed === 1 ? 'sealed, holds none' : 'open';
+            case 'res':
+                if (cell.procs === 0) return 'not running';
+                return none(cell.cap) ? kib(cell.rss) : kib(cell.rss) + ' of ' + kib(cell.cap);
+            default:      return String(v);
+        }
+    }
+    function under(cell, local) {
+        if (cell.unit === 'res' && cell.procs > 0) {
+            var parts = [none(cell.pct) ? 'no cap set' : cell.pct + '% of its cap'];
+            if (cell.procs > 1) parts.push(cell.procs + ' processes');
+            return parts.join(' · ');
+        }
+        if (cell.unit === 'ms' && local) return 'not probed: this host';
+        if (cell.unit === 'seal' && cell.v === 0 && cell.sealed === 1) return 'no database to open';
+        return '';
+    }
+    function hint(cell) {
+        if (cell.unit === 'guard') {
+            return 'The address guard’s own self-test. Failed is red whatever the '
+                + 'thresholds say: the rest of this pane is then decoration.';
+        }
+        if (none(cell.d)) return cell.k + ': no threshold for this peer, so no colour.';
+        return cell.k + ': distress at ' + cell.d
+            + (none(cell.c) ? ', no separate clear' : ', clears at ' + cell.c) + '.';
+    }
+    function spark(series) {
+        var svg = document.createElementNS(SVGNS, 'svg');
+        svg.setAttribute('class', 'fleet-spark');
+        svg.setAttribute('viewBox', '0 0 120 24');
+        svg.setAttribute('preserveAspectRatio', 'none');
+        svg.setAttribute('aria-hidden', 'true');
+        var lo = null, hi = null, i, v;
+        for (i = 0; i < series.length; i++) {
+            v = series[i];
+            if (none(v)) continue;
+            if (lo === null || v < lo) lo = v;
+            if (hi === null || v > hi) hi = v;
+        }
+        if (lo === null) return svg;
+        var range = (hi - lo) || 1;
+        var d = '', pen = false, last = series.length - 1 || 1;
+        for (i = 0; i < series.length; i++) {
+            v = series[i];
+            if (none(v)) { pen = false; continue; }
+            var x = (i / last) * 120;
+            var y = 22 - ((v - lo) / range) * 20;
+            d += (pen ? 'L' : 'M') + x.toFixed(1) + ' ' + y.toFixed(1);
+            pen = true;
+        }
+        var path = document.createElementNS(SVGNS, 'path');
+        path.setAttribute('d', d);
+        svg.appendChild(path);
+        return svg;
+    }
+    function cellEl(cell, local) {
+        var c = el('div', 'fleet-cell' + (cell.tone ? ' tone-' + cell.tone : ''));
+        c.title = hint(cell);
+        c.appendChild(el('div', 'fleet-cell-label', cell.label));
+        c.appendChild(el('div', 'fleet-cell-value', shown(cell)));
+        var u = under(cell, local);
+        if (u) c.appendChild(el('div', 'fleet-cell-sub', u));
+        if (cell.s && cell.s.length > 1) c.appendChild(spark(cell.s));
+        return c;
+    }
+    function rowEl(row) {
+        var r = el('section', 'fleet-row' + (row.dim ? ' is-dim' : ''));
+        var head = el('div', 'fleet-row-head');
+        head.appendChild(el('span', 'fleet-host', row.host));
+        head.appendChild(el('span', 'fleet-state fleet-state-' + row.state, row.state));
+        var meta = [];
+        if (row.local) meta.push('this host, read locally');
+        else if (!none(row.age)) meta.push('read ' + ago(row.age));
+        if (!none(row.uptime)) meta.push('up ' + lasted(row.uptime));
+        if (row.note) meta.push(row.note);
+        head.appendChild(el('span', 'fleet-row-meta', meta.join(' · ')));
+        r.appendChild(head);
+        if (row.panes.length) {
+            var panes = el('div', 'fleet-panes');
+            row.panes.forEach(function(pane) {
+                var p = el('div', 'fleet-pane fleet-pane-' + pane.id);
+                p.appendChild(el('div', 'fleet-pane-title', pane.title));
+                var cells = el('div', 'fleet-cells');
+                pane.cells.forEach(function(cell) { cells.appendChild(cellEl(cell, row.local)); });
+                p.appendChild(cells);
+                panes.appendChild(p);
+            });
+            r.appendChild(panes);
+        }
+        if (row.services.length) {
+            var sv = el('div', 'fleet-services');
+            sv.appendChild(el('span', 'fleet-services-label', 'Also watched on this host'));
+            row.services.forEach(function(s) {
+                var text = s.name + ' ' + s.state + (none(s.probe_ms) ? '' : ' · ' + s.probe_ms + ' ms');
+                var item = el('span', 'fleet-service fleet-state-' + s.state, text);
+                if (s.note) item.title = s.note;
+                sv.appendChild(item);
+            });
+            r.appendChild(sv);
+        }
+        return r;
+    }
+    function notice(data) {
+        noticeEl.textContent = '';
+        var text = '';
+        if (data.peers === 0) {
+            text = 'This host watches no other machine, so only its own row is shown. '
+                + 'The machines it watches are listed under watch.peers in its configuration.';
+        } else if (!data.watching) {
+            text = 'A watch list is configured, but this host’s watcher is not running '
+                + '(it needs alerting and an outbound TLS client), so no peer has been read.';
+        }
+        if (text) noticeEl.appendChild(el('p', 'notice warn', text));
+    }
+    function draw(data, failed) {
+        if (data) {
+            lastData = data;
+            notice(data);
+            var frag = document.createDocumentFragment();
+            data.rows.forEach(function(row) { frag.appendChild(rowEl(row)); });
+            rowsEl.textContent = '';
+            rowsEl.appendChild(frag);
+        }
+        if (!stampEl || !lastData) return;
+        var now = Math.floor(Date.now() / 1000);
+        var who = lastData.whoami || 'this host';
+        stampEl.textContent = failed
+            ? 'Refresh failed at ' + clock(now) + '; still showing what ' + who
+                + ' read at ' + clock(lastData.now) + '. Signing in again may be needed.'
+            : 'Drawn at ' + clock(now) + ' from what ' + who + ' read at '
+                + clock(lastData.now) + '. Peers are read every ' + lastData.interval_secs
+                + ' s; this page asks again every ' + (REFRESH_MS / 1000) + ' s.';
+        rowsEl.classList.toggle('is-behind', !!failed);
+    }
+    function load() {
+        fetch('/admin/fleet.json', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function(r) { return r.ok ? r.json() : null; })
+            .then(function(data) { draw(data, !data); })
+            .catch(function() { draw(null, true); });
+    }
+    try {
+        draw(JSON.parse(dataEl.textContent), false);
+    } catch (e) {
+        load();
+    }
+    setInterval(function() { if (!document.hidden) load(); }, REFRESH_MS);
+    document.addEventListener('visibilitychange', function() {
+        if (!document.hidden) load();
+    });
+})();
+"#;
+
 // Reads the persisted theme preference from `localStorage` and applies the
 // `dark` class to `<html>`, hooked to the theme toggle button by id. Runs
 // synchronously in `<head>`, so the class lands before first paint and a user
@@ -220,6 +433,7 @@ pub struct NavEntry {
 
 pub const NAV: &[NavEntry] = &[
     NavEntry { label: "Overview",   href: "/admin",             group: Some("Dashboard") },
+    NavEntry { label: "Fleet",      href: "/admin/fleet",       group: None },
     NavEntry { label: "Database",   href: "/admin/database",    group: None },
     NavEntry { label: "Traffic",    href: "/admin/traffic",     group: None },
     NavEntry { label: "Security",   href: "/admin/security",    group: None },

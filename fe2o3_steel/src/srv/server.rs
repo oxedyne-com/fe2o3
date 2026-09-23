@@ -19,6 +19,7 @@ use crate::{
             run_imap_listener,
             run_smtp_listener,
             AppImapServer,
+            ListenerTally,
         },
         stop,
     },
@@ -342,11 +343,15 @@ impl<
         // for.
         if let Some(mail_cfg) = res!(self.context.cfg.get_mail()) {
             if mail_cfg.enabled {
+                // Counted into the health body's `mail_down`, so a listener that
+                // failed to bind is visible to every watcher, not only in this log.
+                let tally = self.context.admin_state.as_ref().map(|a| a.mail.clone());
                 if let Err(e) = spawn_mail_listeners(
                     &mail_cfg,
                     &self.context.root,
                     bounded_acceptor.clone(),
                     &self.context.cfg.server_address,
+                    tally,
                 ).await {
                     error!(err!(e,
                         "Failed to spawn mail listeners.";
@@ -616,11 +621,23 @@ async fn spawn_mail_listeners(
     root:           &oxedyne_fe2o3_core::path::NormPathBuf,
     tls_acceptor:   BoundedTlsAcceptor,
     bind_address:   &str,
+    tally:          Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
     use oxedyne_fe2o3_core::path::NormalPath;
     use std::path::{Path, PathBuf};
+
+    // Every listener asked for is counted before anything below can fail, so a
+    // set-up that dies before binding shows each of them as down rather than
+    // showing no mail server at all.
+    if let Some(t) = &tally {
+        for port in [cfg.smtp_port, cfg.submission_port, cfg.imap_port] {
+            if port != 0 {
+                t.want();
+            }
+        }
+    }
 
     // Resolve paths under the app root.
     let resolve = |rel: &str| -> PathBuf {
@@ -698,8 +715,9 @@ async fn spawn_mail_listeners(
     if cfg.smtp_port != 0 {
         let addr = SocketAddr::new(bind_ip, cfg.smtp_port);
         let server = recv_server.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_smtp_listener(addr, server).await {
+            if let Err(e) = run_smtp_listener(addr, server, tally).await {
                 error!(err!(e, "SMTP receive listener exited."; IO, Network));
             }
         });
@@ -708,8 +726,9 @@ async fn spawn_mail_listeners(
     if cfg.submission_port != 0 {
         let addr = SocketAddr::new(bind_ip, cfg.submission_port);
         let server = sub_server.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_smtp_listener(addr, server).await {
+            if let Err(e) = run_smtp_listener(addr, server, tally).await {
                 error!(err!(e, "SMTP submission listener exited."; IO, Network));
             }
         });
@@ -723,8 +742,9 @@ async fn spawn_mail_listeners(
             hostname: hostname.clone(),
         };
         let acceptor = tls_acceptor.clone();
+        let tally = tally.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_imap_listener(addr, acceptor, server).await {
+            if let Err(e) = run_imap_listener(addr, acceptor, server, tally).await {
                 error!(err!(e, "IMAP listener exited."; IO, Network));
             }
         });
