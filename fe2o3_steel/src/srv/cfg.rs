@@ -2109,6 +2109,11 @@ pub struct WatchPeer {
     // body rather than a 404. `None` sends no header and reads only liveness. Supports
     // `{file:...}`, resolved at start-up.
     pub token:    Option<String>,
+    // Seconds between reminders about this peer alone, down or distressed, in place of
+    // `watch.repeat_secs`. `None` -- the default -- uses the watcher's. A peer whose fault is
+    // known and slow to mend, such as a stale backup, reminds every six hours rather than
+    // texting every fifteen minutes for a fortnight.
+    pub repeat_secs: Option<u64>,
 }
 
 /// Watching the other machines in the estate.
@@ -2307,7 +2312,24 @@ impl WatchConfig {
                     Some(Dat::Str(s)) if !s.is_empty() => Some(s.clone()),
                     _ => None,
                 };
-                out.peers.push(WatchPeer { name, host, url, plain_ok, distress, clear, token });
+                // Any unsigned integer width, as a threshold takes; anything else is refused, so
+                // a mistyped cadence is a start-up failure rather than the watcher's default.
+                let repeat_secs = match pm.get(&dat!("repeat_secs")) {
+                    None                => None,
+                    Some(Dat::U64(n))   => Some(*n),
+                    Some(Dat::U32(n))   => Some(*n as u64),
+                    Some(Dat::U16(n))   => Some(*n as u64),
+                    Some(Dat::U8(n))    => Some(*n as u64),
+                    Some(Dat::I64(n)) if *n >= 0 => Some(*n as u64),
+                    Some(Dat::I32(n)) if *n >= 0 => Some(*n as u64),
+                    Some(other) => return Err(err!(
+                        "watch.peers entry {} ('{}') has repeat_secs {:?}, which is not a \
+                        count of seconds.", i, name, other;
+                        Configuration, Invalid, Input)),
+                };
+                out.peers.push(WatchPeer {
+                    name, host, url, plain_ok, distress, clear, token, repeat_secs,
+                });
             }
         }
         if out.enabled {
@@ -2638,6 +2660,15 @@ pub struct ServerConfig {
     // even when a path is set, since a body with no token is a body with no gate.
     #[optional]
     pub health_token:                   String,
+    // Job stamps whose ages the body reports: field name -> absolute path, e.g.
+    // `{ "forge_state_age_s": "/home/jason/usr/oregami-copy/stamp/state.ok" }`. Each is
+    // `lstat`ed on every authorised request and reported in whole seconds since its mtime;
+    // a stamp that is missing, unreadable or a symlink reads as never written (see
+    // `crate::srv::health::stamp_age_secs`). Checked at start-up: names of lower-case
+    // letters, digits and `_`, none a built-in field, absolute paths, at most 16. Empty --
+    // the default -- reports none.
+    #[optional]
+    pub health_stamps:                  DaticleMap,
 
     // ── Address whitelist ─────────────────────────────────────────────────
     //
@@ -2670,7 +2701,10 @@ pub struct ServerConfig {
     pub acme:                           DaticleMap,     // parsed via `get_acme()`
 
     // --- Mail ---------------------------------------------------------------
-    // Parsed via `get_mail()`. An empty map disables the mail server entirely.
+    // Parsed via `get_mail()`. Absent, or an empty map, disables the mail server entirely.
+    // `#[optional]` since 2026-09-23, so a host that runs no mail -- a watcher, a forge proxy
+    // -- need not carry a disabled block to satisfy the loader.
+    #[optional]
     pub mail:                           DaticleMap,
 
     // --- Alerts -------------------------------------------------------------
@@ -2761,6 +2795,7 @@ impl Default for ServerConfig {
             tls_handshake_timeout_ms:       0,      // untimed by default (safe while the sem is off)
             health_path:                    String::new(), // no health body by default
             health_token:                   String::new(), // no token, so no body served
+            health_stamps:                  DaticleMap::new(), // no stamp ages reported
             whitelist_ips:                  Vec::new(), // nothing whitelisted by default
             health_residents:               Vec::new(), // no residents reported
             vhosts:                         Dat::List(vec![Dat::Map(vhost_map)]),
@@ -2834,6 +2869,68 @@ impl ServerConfig {
                 "ServerConfig: whitelist_ips entry '{}' is not a valid IP address.", entry;
                 Configuration, Invalid, Input)));
             out.push(ip);
+        }
+        Ok(out)
+    }
+
+    /// The configured health stamps, each a field the body can carry and an absolute path.
+    ///
+    /// A bad entry is an error rather than a skip, and the server refuses to start on one:
+    /// a stamp dropped here would be a field silently absent from every body, and an absent
+    /// field trips no watcher's threshold.
+    pub fn get_health_stamps(&self) -> Outcome<Vec<crate::srv::health::HealthStamp>> {
+        use crate::srv::health::{
+            BUILTIN_FIELDS,
+            HealthStamp,
+            STAMP_NAME_MAX,
+            STAMPS_MAX,
+            is_stamp_name,
+        };
+        if self.health_stamps.len() > STAMPS_MAX {
+            return Err(err!(
+                "ServerConfig: health_stamps names {} stamps, and at most {} are read, since each \
+                is an lstat on every health request.", self.health_stamps.len(), STAMPS_MAX;
+                Configuration, Invalid, Range));
+        }
+        let mut out = Vec::with_capacity(self.health_stamps.len());
+        for (k, v) in self.health_stamps.iter() {
+            let field = match k {
+                Dat::Str(s) => s.clone(),
+                other => return Err(err!(
+                    "ServerConfig: health_stamps has a field name {:?} that is not a string.",
+                    other.kind();
+                    Configuration, Invalid, Input)),
+            };
+            if BUILTIN_FIELDS.contains(&field.as_str()) {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' is one of the health body's own \
+                    fields, and a stamp under that name would replace the reading a watcher's \
+                    threshold was written for. Name it for its job, e.g. 'forge_state_age_s'.",
+                    field;
+                    Configuration, Invalid, Input));
+            }
+            if !is_stamp_name(&field) {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' is not a usable name. It becomes a \
+                    key in the health body, so it must be 1 to {} of lower-case letters, digits \
+                    and '_'.", field, STAMP_NAME_MAX;
+                    Configuration, Invalid, Input));
+            }
+            let path = match v {
+                Dat::Str(s) => PathBuf::from(s),
+                other => return Err(err!(
+                    "ServerConfig: health_stamps field '{}' must name its stamp's path as a \
+                    string, got {:?}.", field, other.kind();
+                    Configuration, Invalid, Input)),
+            };
+            if !path.is_absolute() {
+                return Err(err!(
+                    "ServerConfig: health_stamps field '{}' names {:?}, which is not an absolute \
+                    path. A stamp belongs to another job's tree rather than this app's root, so \
+                    it is written out in full.", field, path;
+                    Configuration, Invalid, Input, Path));
+            }
+            out.push(HealthStamp { field, path });
         }
         Ok(out)
     }
@@ -3192,10 +3289,9 @@ mod tests {
         Ok(())
     }
 
-    /// Every production `config.jdat` predates `health_residents`, so one without it must load
-    /// and report no residents, and one that names residents must read them in both list forms.
-    #[test]
-    fn a_config_without_health_residents_still_loads() -> Outcome<()> {
+    /// A server config as karri, jarrah and birch carried it after the 2026-09-21 deploy, before
+    /// `health_residents`, `health_stamps` or anything else added since.
+    fn deployed_config_map() -> DaticleMap {
         let mut m = DaticleMap::new();
         m.insert(dat!("tls_dir_rel"),                 dat!("./tls"));
         m.insert(dat!("log_level"),                   dat!("info"));
@@ -3214,6 +3310,14 @@ mod tests {
         m.insert(dat!("vhosts"),                      Dat::List(Vec::new()));
         m.insert(dat!("acme"),                        Dat::Map(DaticleMap::new()));
         m.insert(dat!("mail"),                        Dat::Map(DaticleMap::new()));
+        m
+    }
+
+    /// Every production `config.jdat` predates `health_residents`, so one without it must load
+    /// and report no residents, and one that names residents must read them in both list forms.
+    #[test]
+    fn a_config_without_health_residents_still_loads() -> Outcome<()> {
+        let mut m = deployed_config_map();
 
         let cfg = res!(ServerConfig::from_datmap(m.clone()));
         assert!(cfg.health_residents.is_empty());
@@ -3266,6 +3370,114 @@ mod tests {
         assert_eq!(w.peers[0].host, "jarrah");
         assert_eq!(w.peers[1].name, "daimond gateway");
         assert_eq!(w.peers[1].host, "jarrah", "the gateway sits on jarrah's row");
+        Ok(())
+    }
+
+    /// Every production config predates `health_stamps`, so one without it must load and
+    /// report no stamps, and one that names stamps must read them as written.
+    #[test]
+    fn a_config_without_health_stamps_still_loads() -> Outcome<()> {
+        let mut m = deployed_config_map();
+        let cfg = res!(ServerConfig::from_datmap(m.clone()));
+        assert!(cfg.health_stamps.is_empty());
+        assert!(res!(cfg.get_health_stamps()).is_empty());
+
+        let mut stamps = DaticleMap::new();
+        stamps.insert(dat!("forge_state_age_s"), dat!("/home/jason/usr/oregami-copy/stamp/state.ok"));
+        stamps.insert(dat!("forge_repos_age_s"), dat!("/home/jason/usr/oregami-copy/stamp/repos.ok"));
+        m.insert(dat!("health_stamps"), Dat::Map(stamps));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        let got = res!(cfg.get_health_stamps());
+        let fields: Vec<&str> = got.iter().map(|s| s.field.as_str()).collect();
+        assert_eq!(fields, vec!["forge_repos_age_s", "forge_state_age_s"]);
+        assert_eq!(got[1].path, PathBuf::from("/home/jason/usr/oregami-copy/stamp/state.ok"));
+        Ok(())
+    }
+
+    /// A stamp that cannot be served as written is a start-up failure that names it, not a field
+    /// silently missing from every body.
+    #[test]
+    fn a_bad_health_stamp_is_refused_and_named() {
+        let refusal = |field: &str, path: Dat| -> String {
+            let mut cfg = ServerConfig::default();
+            cfg.health_stamps.insert(dat!(field), path);
+            match cfg.get_health_stamps() {
+                Err(e)  => fmt!("{}", e),
+                Ok(_)   => String::new(),
+            }
+        };
+        let msg = refusal("mem_pct", dat!("/var/lib/job/ok"));
+        assert!(msg.contains("mem_pct") && msg.contains("own"),
+            "a built-in name must be refused as such, got: '{}'", msg);
+        // The Fleet view's fields are the body's own as well, and the watcher writes its measured
+        // `probe_ms` over whatever the body carried under that name.
+        for field in ["disk_pct", "sealed_dbs", "mail_down", "probe_ms"] {
+            let msg = refusal(field, dat!("/var/lib/job/ok"));
+            assert!(msg.contains(field) && msg.contains("own"),
+                "the Fleet field '{}' must be refused as the body's own, got: '{}'", field, msg);
+        }
+        for bad in ["Forge_Age", "forge-age", "res.x.procs", "a:b"] {
+            let msg = refusal(bad, dat!("/var/lib/job/ok"));
+            assert!(msg.contains(bad), "'{}' must be refused by name, got: '{}'", bad, msg);
+        }
+        let msg = refusal("job_age_s", dat!("stamp/ok"));
+        assert!(msg.contains("absolute"), "a relative path must be refused, got: '{}'", msg);
+        let msg = refusal("job_age_s", Dat::U64(3));
+        assert!(msg.contains("job_age_s"), "a non-string path must be refused, got: '{}'", msg);
+
+        let mut cfg = ServerConfig::default();
+        for i in 0..=crate::srv::health::STAMPS_MAX {
+            cfg.health_stamps.insert(dat!(fmt!("job{}_age_s", i)), dat!(fmt!("/var/lib/{}", i)));
+        }
+        assert!(cfg.get_health_stamps().is_err(), "more than STAMPS_MAX stamps must be refused");
+    }
+
+    /// A host that runs no mail need not carry a disabled block, and one without it has mail off.
+    #[test]
+    fn a_config_without_a_mail_block_loads_with_mail_off() -> Outcome<()> {
+        let mut m = deployed_config_map();
+        m.remove(&dat!("mail"));
+        let cfg = res!(ServerConfig::from_datmap(m));
+        assert!(res!(cfg.get_mail()).is_none());
+        assert!(res!(cfg.get_mail_any()).is_none());
+        Ok(())
+    }
+
+    /// A peer's own reminder cadence is read in any unsigned width, an absent one leaves the
+    /// watcher's, and one that is not a count of seconds is refused rather than defaulted.
+    #[test]
+    fn a_peer_repeat_is_read_and_a_bad_one_refused() -> Outcome<()> {
+        let peer = |name: &str, repeat: Option<Dat>| -> Dat {
+            let mut pm = DaticleMap::new();
+            pm.insert(dat!("name"), dat!(name));
+            pm.insert(dat!("url"), dat!("https://example.test/_steel/health"));
+            if let Some(r) = repeat {
+                pm.insert(dat!("repeat_secs"), r);
+            }
+            Dat::Map(pm)
+        };
+        let watch = |peers: Vec<Dat>| -> DaticleMap {
+            let mut m = DaticleMap::new();
+            m.insert(dat!("enabled"), Dat::Bool(true));
+            m.insert(dat!("peers"), Dat::List(peers));
+            m
+        };
+        let w = res!(WatchConfig::from_datmap(&watch(vec![
+            peer("jarrah", None),
+            peer("jarrah forge copy", Some(Dat::U64(21_600))),
+            peer("birch", Some(Dat::U32(3_600))),
+        ])));
+        assert_eq!(w.peers[0].repeat_secs, None, "absent must leave the watcher's cadence");
+        assert_eq!(w.peers[1].repeat_secs, Some(21_600));
+        assert_eq!(w.peers[2].repeat_secs, Some(3_600));
+
+        let refused = WatchConfig::from_datmap(&watch(vec![peer("karri", Some(dat!("6h")))]));
+        let msg = match refused {
+            Err(e)  => fmt!("{}", e),
+            Ok(_)   => String::new(),
+        };
+        assert!(msg.contains("karri") && msg.contains("repeat_secs"),
+            "a cadence that is not seconds must be refused by peer, got: '{}'", msg);
         Ok(())
     }
 

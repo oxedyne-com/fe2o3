@@ -16,6 +16,15 @@
 //! `2.50`), so a fractional load survives the integer contract without a float on
 //! the wire.
 //!
+//! # Stamp ages, read at request time
+//!
+//! A job elsewhere on the box -- a backup pull, say -- proves each good run by
+//! touching a stamp file. The body reports each configured stamp's age in whole
+//! seconds (see [`HealthStamp`]), measured when the body is asked for rather than
+//! sampled, so a job whose timer has died shows an age that keeps growing instead
+//! of a figure frozen at its last run. Nothing has to stay alive for the alarm to
+//! hold, which is the property a freshness file in a web root lacks.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
@@ -28,6 +37,10 @@ use std::{
     collections::{
         BTreeMap,
         VecDeque,
+    },
+    path::{
+        Path,
+        PathBuf,
     },
     sync::{
         Arc,
@@ -65,6 +78,27 @@ pub const F_MAIL_DOWN:      &str = "mail_down";     // mail listeners asked for,
 // Written by the watcher into the body it read, never served by a peer: the time
 // the probe took, measured at the watching end.
 pub const F_PROBE_MS:       &str = "probe_ms";
+
+// Every field the body carries of its own accord: the ten `assemble` makes, the
+// three `AdminState::health_body` sets beside them, and the probe time a watcher
+// writes into what it read. A stamp may not take one of these names: it would
+// replace the reading a watcher's threshold was written for.
+pub const BUILTIN_FIELDS: [&str; 14] = [
+    F_MEM_PCT,
+    F_SWAP_PCT,
+    F_DISK_IOPS,
+    F_LOAD1,
+    F_CONNS,
+    F_R429_1M,
+    F_DROPPED_1M,
+    F_GUARD_SELFTEST,
+    F_UPTIME_S,
+    F_SEALED,
+    F_DISK_PCT,
+    F_SEALED_DBS,
+    F_MAIL_DOWN,
+    F_PROBE_MS,
+];
 
 // The per-process figures for the services named in `health_residents` are a list
 // in spirit, and the format has no lists. Each resident is therefore flattened
@@ -117,6 +151,45 @@ impl ResidentFigures {
     pub fn get(&self, figure: &str) -> Option<i64> {
         self.figures.get(figure).copied()
     }
+}
+
+// Stamp limits
+pub const STAMP_NAME_MAX:   usize = 64;
+pub const STAMPS_MAX:       usize = 16;     // each is an `lstat` on every health request
+
+/// Can this name be a stamp's key in the body?
+///
+/// Lower-case letters, digits and `_` only, so it can neither break the object
+/// nor be mistaken for a flattened resident key, and none of [`BUILTIN_FIELDS`].
+pub fn is_stamp_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= STAMP_NAME_MAX
+        && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !BUILTIN_FIELDS.contains(&name)
+}
+
+/// A job's freshness stamp, reported in the body as its age.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HealthStamp {
+    pub field:  String,     // the body key, e.g. `forge_state_age_s`
+    pub path:   PathBuf,    // absolute, and never followed through a symlink
+}
+
+/// Whole seconds since a stamp was last written, as the body reports it.
+///
+/// The rule the forge copy's own `freshness.sh` applies: the mtime alone, never
+/// the content, and never through a symlink, so a link planted where the stamp
+/// should be cannot lend it another file's freshness. Anything that is not a
+/// regular file read by `lstat` -- missing, unreachable, a symlink, a directory
+/// -- reads as written at the epoch, an age of `now` that trips any threshold.
+/// An mtime in the future reads as `0` rather than as a negative age.
+pub fn stamp_age_secs(path: &Path, now: SystemTime) -> i64 {
+    let written = match std::fs::symlink_metadata(path) {
+        Ok(m) if m.file_type().is_file() => m.modified().unwrap_or(UNIX_EPOCH),
+        _ => UNIX_EPOCH,
+    };
+    let age = now.duration_since(written).map(|d| d.as_secs()).unwrap_or(0);
+    age.min(i64::MAX as u64) as i64
 }
 
 fn unix_secs() -> u64 {
@@ -255,6 +328,14 @@ impl HealthBody {
         b.set(F_UPTIME_S,       uptime_s as i64);
         b.set(F_SEALED,         if sealed { 1 } else { 0 });
         b
+    }
+
+    /// Each stamp's age in whole seconds, under its own field. See
+    /// [`stamp_age_secs`] for what a missing or suspect stamp reads as.
+    pub fn set_stamps(&mut self, stamps: &[HealthStamp], now: SystemTime) {
+        for s in stamps {
+            self.set(&s.field, stamp_age_secs(&s.path, now));
+        }
     }
 
     /// Parse the flat integer object this crate emits. Deliberately narrow: it
@@ -413,6 +494,119 @@ mod tests {
     fn parse_rejects_a_non_object() {
         assert!(HealthBody::parse("not json").is_err());
         assert!(HealthBody::parse("{\"a\":notint}").is_err());
+    }
+
+    /// A fresh scratch directory for stamp files, removed by the caller.
+    fn stamp_dir(tag: &str) -> Outcome<PathBuf> {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let dir = std::env::temp_dir().join(fmt!(
+            "fe2o3_steel_stamps_{}_{}_{}", tag, std::process::id(), nanos));
+        res!(std::fs::create_dir_all(&dir), IO, File);
+        Ok(dir)
+    }
+
+    /// Write a stamp and set its mtime to `when`, the way a job's `touch` would.
+    fn stamp_at(path: &Path, when: SystemTime) -> Outcome<()> {
+        res!(std::fs::write(path, b"ok\n"), IO, File);
+        let f = res!(std::fs::OpenOptions::new().write(true).open(path), IO, File);
+        res!(f.set_modified(when), IO, File);
+        Ok(())
+    }
+
+    /// The age is the mtime's, to the second; a stamp that is not there, or that
+    /// is not a plain file, reads as never written, and so trips any threshold.
+    #[test]
+    fn a_stamp_reads_its_age_and_anything_suspect_reads_as_never() -> Outcome<()> {
+        let dir = res!(stamp_dir("age"));
+        let now = SystemTime::now();
+        let never = res!(now.duration_since(UNIX_EPOCH).map_err(|e| err!(e,
+            "The clock is before the epoch."; Test))).as_secs() as i64;
+
+        let fresh = dir.join("state.ok");
+        res!(stamp_at(&fresh, now - std::time::Duration::from_secs(3_700)));
+        let age = stamp_age_secs(&fresh, now);
+        assert!((3_699..=3_701).contains(&age), "a stamp written 3700 s ago read {}", age);
+
+        assert_eq!(stamp_age_secs(&dir.join("absent.ok"), now), never,
+            "a missing stamp must read as never written, not as fresh or absent");
+
+        // A symlink to a perfectly fresh stamp still reads as never: a link must not
+        // lend the stamp another file's freshness.
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.ok");
+            res!(std::os::unix::fs::symlink(&fresh, &link), IO, File);
+            res!(stamp_at(&fresh, now));
+            assert_eq!(stamp_age_secs(&fresh, now), 0);
+            assert_eq!(stamp_age_secs(&link, now), never,
+                "a symlinked stamp was followed to its target");
+        }
+
+        let subdir = dir.join("a_directory");
+        res!(std::fs::create_dir_all(&subdir), IO, File);
+        assert_eq!(stamp_age_secs(&subdir, now), never, "a directory is not a stamp");
+
+        let future = dir.join("future.ok");
+        res!(stamp_at(&future, now + std::time::Duration::from_secs(600)));
+        assert_eq!(stamp_age_secs(&future, now), 0, "a future mtime reads as 0, not negative");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// Stamp ages are ordinary integer fields: they survive the wire beside the
+    /// built-in fields and are read back by the parser a watcher uses.
+    #[test]
+    fn stamp_ages_ride_the_body_and_round_trip() -> Outcome<()> {
+        let dir = res!(stamp_dir("body"));
+        let now = SystemTime::now();
+        let state = dir.join("state.ok");
+        res!(stamp_at(&state, now - std::time::Duration::from_secs(120)));
+        let stamps = vec![
+            HealthStamp { field: fmt!("forge_state_age_s"), path: state },
+            HealthStamp { field: fmt!("forge_repos_age_s"), path: dir.join("repos.ok") },
+        ];
+        let mut body = HealthBody::assemble(None, 3, 0, 0, true, 60, false);
+        body.set_stamps(&stamps, now);
+
+        let back = res!(HealthBody::parse(&body.to_json()));
+        assert_eq!(back, body, "the body with stamps must round-trip exactly");
+        let state_age = back.get("forge_state_age_s").unwrap_or(-1);
+        assert!((119..=121).contains(&state_age), "state stamp read {}", state_age);
+        assert!(back.get("forge_repos_age_s").unwrap_or(0) > 1_000_000_000,
+            "the missing repos stamp must read as never, a very large age");
+        assert_eq!(back.get(F_CONNS), Some(3), "the built-in fields are untouched");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn a_stamp_name_cannot_break_the_body_or_take_a_builtin() {
+        assert!(is_stamp_name("forge_state_age_s"));
+        assert!(is_stamp_name("backup2_age_s"));
+        for bad in ["", "Forge_age", "forge-age", "forge.age", "a:b", "a,b", "a\"b", "a b"] {
+            assert!(!is_stamp_name(bad), "'{}' was accepted as a stamp name", bad);
+        }
+        assert!(!is_stamp_name(&"a".repeat(STAMP_NAME_MAX + 1)));
+        for builtin in BUILTIN_FIELDS {
+            assert!(!is_stamp_name(builtin), "the built-in '{}' was accepted", builtin);
+        }
+    }
+
+    /// The reserved list is the body's own output, so a field added to `assemble`
+    /// without joining the list is a failing test rather than a name a stamp can
+    /// quietly take. The four set outside `assemble` are named here; the served
+    /// body is held to the list by `AdminState::health_body`'s own test.
+    #[test]
+    fn the_builtin_list_is_what_assemble_emits_and_the_four_set_beside_it() {
+        let host = HealthHostMetrics { mem_pct: 40, swap_pct: 1, disk_iops: 2, load1: 50 };
+        let body = HealthBody::assemble(Some(host), 1, 0, 0, true, 60, false);
+        let mut emitted: Vec<&str> = body.fields.keys().map(|k| k.as_str()).collect();
+        emitted.extend([F_DISK_PCT, F_SEALED_DBS, F_MAIL_DOWN, F_PROBE_MS]);
+        emitted.sort();
+        let mut reserved: Vec<&str> = BUILTIN_FIELDS.to_vec();
+        reserved.sort();
+        assert_eq!(emitted, reserved);
     }
 
     #[test]

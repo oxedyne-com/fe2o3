@@ -120,6 +120,17 @@ impl AppShellContext {
             server_cfg.health_token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
                 &server_cfg.health_token, root_path.as_ref()));
         }
+        // A stamp with an unusable name or a relative path is a refusal to start, not a
+        // warning: served past, it would be a field that is quietly never in the body, and an
+        // absent field trips no watcher's threshold, so the job it watches could stop unheard.
+        let health_stamps = res!(server_cfg.get_health_stamps());
+        if !health_stamps.is_empty() {
+            info!("The health body reports the age of {} stamp(s): {}.",
+                health_stamps.len(),
+                health_stamps.iter()
+                    .map(|s| fmt!("{} <- {:?}", s.field, s.path))
+                    .collect::<Vec<_>>().join(", "));
+        }
 
         info!("Reading dev config...");
         let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
@@ -644,7 +655,7 @@ impl AppShellContext {
             auth_guard.clone(),
             admin_keys_cfg,
             head_injection_url_cfg,
-        )).with_fleet(fleet);
+        )).with_fleet(fleet).with_health_stamps(health_stamps);
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
             (traffic ring capacity {}; host sampler capacity {}).",

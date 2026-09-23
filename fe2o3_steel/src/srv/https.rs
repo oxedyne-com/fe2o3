@@ -148,6 +148,8 @@ impl<
         {
             return Some(not_found());
         }
+        // Assembled per request, stamp ages included: each stamp is read now rather than
+        // sampled, so a job whose timer has died shows an age that keeps growing.
         let body = admin.health_body();
         Some(HttpMessage::new_response(HttpStatus::OK)
             .with_field(

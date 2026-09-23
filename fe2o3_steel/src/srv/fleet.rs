@@ -121,6 +121,10 @@ pub struct Fleet {
     // started -- no alerter, no outbound TLS -- says so rather than showing every
     // peer as never heard from.
     watching:       AtomicBool,
+    // Set by the watcher after each round: no peer answered at all, so the round
+    // was read as its own link and kept out of the rings, and the page can say
+    // why its rows are ageing rather than leave that to be guessed.
+    link_down:      AtomicBool,
     rings:          RwLock<Vec<RingBuffer<RING_LEN, ProbeSample>>>, // one per peer, in order
 }
 
@@ -148,6 +152,7 @@ impl Fleet {
             fail_threshold,
             peers,
             watching:       AtomicBool::new(false),
+            link_down:      AtomicBool::new(false),
             rings:          RwLock::new(rings),
         }
     }
@@ -168,6 +173,15 @@ impl Fleet {
 
     pub fn is_watching(&self) -> bool {
         self.watching.load(Ordering::Acquire)
+    }
+
+    pub fn set_link_down(&self, down: bool) {
+        self.link_down.store(down, Ordering::Release);
+    }
+
+    /// Was the watcher's last round its own link going quiet?
+    pub fn is_link_down(&self) -> bool {
+        self.link_down.load(Ordering::Acquire)
     }
 
     /// Keep one probe of peer `i`, displacing the oldest once the ring is full.
@@ -369,6 +383,7 @@ mod tests {
                 distress:   BTreeMap::new(),
                 clear:      BTreeMap::new(),
                 token:      Some(fmt!("secret")),
+                repeat_secs: None,
             });
         }
         Fleet::new(fmt!("karri"), Some(&cfg))

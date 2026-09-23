@@ -249,12 +249,13 @@ pub fn fleet_json(state: &AdminState) -> String {
     }
 
     fmt!(
-        "{{\"now\":{now},\"whoami\":{who},\"watching\":{watching},\"peers\":{peers},\
-        \"interval_secs\":{interval},\"fail_threshold\":{fail},\"started\":{started},\
-        \"rows\":[{rows}]}}",
+        "{{\"now\":{now},\"whoami\":{who},\"watching\":{watching},\"link_down\":{link},\
+        \"peers\":{peers},\"interval_secs\":{interval},\"fail_threshold\":{fail},\
+        \"started\":{started},\"rows\":[{rows}]}}",
         now      = now,
         who      = jstr(whoami),
         watching = fleet.is_watching(),
+        link     = fleet.is_link_down(),
         peers    = fleet.peers().len(),
         interval = fleet.interval_secs(),
         fail     = fleet.fail_threshold(),
@@ -332,14 +333,50 @@ fn host_row_json(
 
     let last_read = samples.iter().rev().find(|s| s.body.is_some());
     let age = last_read.map(|s| now.saturating_sub(s.t_secs));
+    let (distress, clear) = host_thresholds(group, lead);
     let (panes, uptime) = match (row_state, last_read.and_then(|s| s.body.as_ref())) {
         (RowState::Down, _) | (RowState::Never, _) | (_, None) => (String::new(), None),
         (st, Some(body)) => (
-            panes_json(Some(body), samples, &peer.distress, &peer.clear, st.is_fresh()),
+            panes_json(Some(body), samples, &distress, &clear, st.is_fresh()),
             body.get(F_UPTIME_S),
         ),
     };
     row_json(host, false, row_state, &note, age, uptime, &panes, &services)
+}
+
+/// The thresholds a host's row is coloured from: the lead entry's, then, for each field the
+/// lead does not judge, the first other entry on the host that reads a body and does.
+///
+/// Two entries on one host read the same body -- jarrah's own figures and its forge copy's
+/// stamp ages, say -- and each alarm judges only its own fields, so each cell takes its colour
+/// from the entry whose alarm judges that field. A field's clear boundary always comes from the
+/// same entry as its distress value, so no dead-band is assembled from two alarms.
+fn host_thresholds(
+    group:  &[&(FleetPeer, Vec<ProbeSample>)],
+    lead:   usize,
+)
+    -> (BTreeMap<String, i64>, BTreeMap<String, i64>)
+{
+    let mut distress = BTreeMap::new();
+    let mut clear = BTreeMap::new();
+    let order = std::iter::once(lead).chain((0..group.len()).filter(|i| *i != lead));
+    for i in order {
+        let peer = match group.get(i) {
+            // An entry with no token never reads a body, so its thresholds judge nothing.
+            Some((p, _)) if p.has_token => p,
+            _ => continue,
+        };
+        for (field, d) in &peer.distress {
+            if distress.contains_key(field) {
+                continue;
+            }
+            distress.insert(field.clone(), *d);
+            if let Some(c) = peer.clear.get(field) {
+                clear.insert(field.clone(), *c);
+            }
+        }
+    }
+    (distress, clear)
 }
 
 fn last_ok_age(samples: &[ProbeSample], now: u64) -> Option<u64> {
@@ -621,6 +658,7 @@ mod tests {
             distress:   [(fmt!("mem_pct"), 90)].into_iter().collect(),
             clear:      [(fmt!("mem_pct"), 75)].into_iter().collect(),
             token:      token.map(|t| t.to_string()),
+            repeat_secs: None,
         };
         cfg.peers.push(peer("jarrah", "jarrah", Some("the-mesh-token")));
         cfg.peers.push(peer("gateway", "jarrah", None));
@@ -675,6 +713,52 @@ mod tests {
             \"tone\":\"amber\",\"d\":90,\"c\":75"), "80 sits between clear 75 and distress 90: {}",
             json);
         assert!(!json.contains("the-mesh-token"), "a token must never reach the page");
+        Ok(())
+    }
+
+    /// A host watched by two entries that read one body -- jarrah's figures and its forge copy's
+    /// stamp ages -- draws both on its one row, each field coloured from the entry that judges
+    /// it, the lead's own thresholds standing where both name a field.
+    #[test]
+    fn a_hosts_row_colours_each_field_from_the_entry_that_judges_it() -> Outcome<()> {
+        let mut cfg = WatchConfig::default();
+        let entry = |name: &str, distress: &[(&str, i64)], clear: &[(&str, i64)]| WatchPeer {
+            name:       name.to_string(),
+            host:       fmt!("jarrah"),
+            url:        fmt!("https://oxedyne.test/_steel/health"),
+            plain_ok:   false,
+            distress:   distress.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            clear:      clear.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
+            token:      Some(fmt!("the-mesh-token")),
+            repeat_secs: None,
+        };
+        cfg.peers.push(entry("jarrah", &[("mem_pct", 90)], &[("mem_pct", 75)]));
+        cfg.peers.push(entry("jarrah forge copy",
+            &[("forge_state_age_s", 10_800), ("forge_repos_age_s", 10_800), ("mem_pct", 50)],
+            &[("forge_state_age_s", 7_200), ("forge_repos_age_s", 7_200)]));
+        let fleet = Fleet::new_shared(fmt!("karri"), Some(&cfg));
+        let now = unix_secs();
+        let mut body = HealthBody::new();
+        body.set(F_MEM_PCT, 80);
+        body.set("forge_state_age_s", 12_000);
+        body.set("forge_repos_age_s", 900);
+        for i in 0..2 {
+            res!(fleet.record(i, ProbeSample { t_secs: now, ok: true, probe_ms: 90,
+                body: Some(body.clone()), health: PeerHealth::Up }));
+        }
+        let json = fleet_json(&res!(mkstate(fleet)));
+
+        assert_eq!(json.matches("\"host\":\"jarrah\"").count(), 1, "{}", json);
+        assert!(json.contains("{\"k\":\"forge_state_age_s\",\"label\":\"forge_state_age_s\",\
+            \"unit\":\"secs\",\"v\":12000,\"tone\":\"red\",\"d\":10800,\"c\":7200"),
+            "a stale stamp is red by the forge copy's own thresholds: {}", json);
+        assert!(json.contains("{\"k\":\"forge_repos_age_s\",\"label\":\"forge_repos_age_s\",\
+            \"unit\":\"secs\",\"v\":900,\"tone\":\"green\""), "{}", json);
+        assert!(json.contains("\"k\":\"mem_pct\",\"label\":\"Memory\",\"unit\":\"pct\",\"v\":80,\
+            \"tone\":\"amber\",\"d\":90,\"c\":75"),
+            "where both entries name a field, the lead's thresholds stand: {}", json);
+        assert!(json.contains("\"name\":\"jarrah forge copy\",\"state\":\"up\""), "{}", json);
+        assert!(json.contains("\"link_down\":false"), "{}", json);
         Ok(())
     }
 

@@ -431,6 +431,12 @@ impl Alerter {
         }))
     }
 
+    /// Does this alerter have a mail recipient? Without one, a `Notice` event -- distress among
+    /// them -- has no channel at all.
+    pub fn sends_mail(&self) -> bool {
+        !self.cfg.to.is_empty() && !self.cfg.from.is_empty()
+    }
+
     /// Send an alert, without blocking the caller.
     ///
     /// Delivery runs on its own task. The request path must never wait on an

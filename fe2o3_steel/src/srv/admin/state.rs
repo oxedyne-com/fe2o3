@@ -50,6 +50,7 @@ use crate::srv::{
         F_MAIL_DOWN,
         F_SEALED_DBS,
         HealthBody,
+        HealthStamp,
         RollingCounter,
     },
     mail::ListenerTally,
@@ -79,6 +80,7 @@ use std::{
     time::{
         Duration,
         Instant,
+        SystemTime,
     },
 };
 
@@ -184,6 +186,9 @@ pub struct AdminState {
     // What this host's watcher saw of each peer, drawn by `/admin/fleet`. The
     // watcher writes the same `Arc`; an empty fleet on a host that watches nobody.
     pub fleet:          Arc<Fleet>,
+    // Job stamps whose ages the health body reports, vetted at start-up by
+    // `ServerConfig::get_health_stamps`; empty on a host that names none.
+    pub health_stamps:  Arc<Vec<HealthStamp>>,
 }
 
 impl AdminState {
@@ -255,6 +260,7 @@ impl AdminState {
             dropped:            RollingCounter::new_shared(),
             mail:               ListenerTally::new_shared(),
             fleet:              Fleet::new_shared(String::new(), None),
+            health_stamps:      Arc::new(Vec::new()),
         })
     }
 
@@ -266,13 +272,19 @@ impl AdminState {
         self
     }
 
+    pub fn with_health_stamps(mut self, stamps: Vec<HealthStamp>) -> Self {
+        self.health_stamps = Arc::new(stamps);
+        self
+    }
+
     /// This host's health body: what the health route serves, and what the Fleet
     /// page draws in this host's own row.
     ///
     /// `assemble` makes the original fields; the ones the Fleet view added are
     /// set here, from state this struct holds. Each is absent rather than zero
     /// when it was never read, so no watcher mistakes a missing figure for a
-    /// good one.
+    /// good one. The stamp ages are the exception by design: each is read at
+    /// this call, and a stamp that cannot be read reports as never written.
     pub fn health_body(&self) -> HealthBody {
         let host = self.host_sampler.health_metrics().ok().flatten();
         let mut b = HealthBody::assemble(
@@ -295,6 +307,7 @@ impl AdminState {
         for r in self.host_sampler.residents().unwrap_or_default() {
             b.set_resident(&r);
         }
+        b.set_stamps(&self.health_stamps, SystemTime::now());
         b
     }
 
@@ -391,5 +404,49 @@ impl AdminState {
             }
             notified.await;
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::srv::health::BUILTIN_FIELDS;
+
+    /// Every field the served body carries of its own accord is on the reserved list, so a stamp
+    /// can take none of them, and the stamps the state was handed ride beside them, a stamp that
+    /// is not there reading as never written.
+    #[test]
+    fn the_served_body_is_the_builtin_list_and_the_stamps() -> Outcome<()> {
+        let state = res!(AdminState::new(
+            Arc::new(RwLock::new(Wallet::default())),
+            PathBuf::from("./wallet.jdat"),
+            Some([0u8; 32].to_vec()),
+            1,
+            None,
+            TrafficRecorder::new_shared(0),
+            HostSampler::new_shared(),
+            res!(crate::srv::admin::guard::new_shared()),
+            res!(crate::srv::admin::guard::new_shared()),
+            Vec::new(),
+            None,
+        ));
+        let plain = state.health_body();
+        for k in plain.fields.keys() {
+            assert!(BUILTIN_FIELDS.contains(&k.as_str()),
+                "the served body carries '{}', which BUILTIN_FIELDS does not reserve", k);
+        }
+
+        let state = state.with_health_stamps(vec![HealthStamp {
+            field:  fmt!("forge_state_age_s"),
+            path:   PathBuf::from("/nonexistent/fe2o3_steel/stamp/state.ok"),
+        }]);
+        let body = state.health_body();
+        assert!(body.get("forge_state_age_s").unwrap_or(0) > 1_000_000_000,
+            "a missing stamp must read as never written, a very large age");
+        assert_eq!(body.fields.len(), plain.fields.len() + 1,
+            "the stamp rides beside the built-in fields and displaces none");
+        Ok(())
     }
 }

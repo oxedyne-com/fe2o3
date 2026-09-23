@@ -341,6 +341,11 @@ pub const FLEET_JS: &str = r#"
         } else if (!data.watching) {
             text = 'A watch list is configured, but this host’s watcher is not running '
                 + '(it needs alerting and an outbound TLS client), so no peer has been read.';
+        } else if (data.link_down) {
+            text = 'No machine answered this host’s watcher at all in its last round, so the '
+                + 'silence is read as this host’s own link rather than every machine at once. '
+                + 'Nothing is judged until one answers, and each row keeps the last reading '
+                + 'heard, greyed as it ages.';
         }
         if (text) noticeEl.appendChild(el('p', 'notice warn', text));
     }

@@ -61,6 +61,15 @@
 //! a loop at three in the morning and hide the fault it was built to reveal; and a decision to
 //! restart a payments process belongs to a person who has read why it stopped.
 //!
+//! # When nobody answers, the silence is the watcher's own
+//!
+//! A watcher on a home connection loses its link for an hour, or wakes from sleep before its
+//! Wi-Fi does. Judged peer by peer, that is every peer `DOWN` at once -- messages that cannot be
+//! sent -- and then every peer `is back` for outages that never happened. So a round in which
+//! two or more peers were asked and not one answered at all is read as this watcher's link and
+//! judged not at all (see [`is_own_link_down`]). An answer of any kind, an error page included,
+//! proves the link, so a round of refusals is still news about the peers.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
@@ -138,6 +147,48 @@ impl From<Health> for PeerHealth {
             Health::Down                => Self::Down,
         }
     }
+}
+
+/// What one probe came back with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum Probe {
+    Up(Option<HealthBody>), // a `2xx`, with its body when one was served and parsed
+    Refused(u16),           // an answer that is not a `2xx`: reachable, and not well
+    Silent,                 // no answer at all: no connection, no handshake, or the timeout
+}
+
+impl Probe {
+    fn is_up(&self) -> bool {
+        matches!(self, Self::Up(_))
+    }
+
+    /// Did anything answer? A refusal did: it proves the path to the peer works.
+    fn answered(&self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+}
+
+/// Is a round in which nobody answered this watcher's own link, rather than news about peers?
+///
+/// Two or more peers asked and not one answer back is the watcher's link, not a coincidence of
+/// outages. A single peer's silence is judged as ever: with one peer the two cannot be told
+/// apart, and an outage must not be the thing explained away.
+fn is_own_link_down(round: &[Probe]) -> bool {
+    round.len() >= 2 && round.iter().all(|p| !p.answered())
+}
+
+/// The peers whose distress this host would notice and tell nobody.
+///
+/// Distress is told by mail alone (`Severity::Notice`), so a peer with thresholds, on a host
+/// whose alerter has no mail recipient, is a watch that looks like cover and is not.
+fn distress_unheard(peers: &[WatchPeer], mails: bool) -> Vec<String> {
+    if mails {
+        return Vec::new();
+    }
+    peers.iter()
+        .filter(|p| !p.distress.is_empty())
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// One peer's running state.
@@ -232,6 +283,7 @@ pub struct Watcher {
     // One per peer, in `cfg.peers` order. Kept by position rather than by name, because
     // nothing makes a name unique, and two entries sharing one would share one set of beliefs.
     state:      Vec<PeerState>,
+    link_down:  bool,   // the last round was this watcher's own link, so the episode is said once
     fleet:      Arc<Fleet>,
 }
 
@@ -280,7 +332,14 @@ impl Watcher {
             res!(vet(p));
             state.push(PeerState::default());
         }
-        Ok(Self { cfg, alerter, tls, whoami, state, fleet })
+        let unheard = distress_unheard(&cfg.peers, alerter.sends_mail());
+        if !unheard.is_empty() {
+            warn!("Watch: {} carry distress thresholds, but this host's alerts have no mail \
+                recipient, and distress is told by mail alone. Their distress would be noticed \
+                and told to nobody: give 'alerts' a 'from' and a 'to', with a 'submission' relay \
+                where this host cannot send direct.", unheard.join(", "));
+        }
+        Ok(Self { cfg, alerter, tls, whoami, state, link_down: false, fleet })
     }
 
     /// Poll every peer for ever.
@@ -290,7 +349,6 @@ impl Watcher {
     /// the silence this is meant to break.
     pub async fn run(mut self) {
         let every = Duration::from_secs(self.cfg.interval_secs.max(5));
-        let repeat = Duration::from_secs(self.cfg.repeat_secs.max(60));
         // A peer probed over plain http is named as such here, so that the concession shows in
         // the log an operator actually reads rather than only in a configuration file nobody
         // opens between incidents.
@@ -311,16 +369,30 @@ impl Watcher {
         self.fleet.set_watching(true);
         loop {
             tokio::time::sleep(every).await;
-            let mut ok_count = 0usize;
-            let cfg = self.cfg.clone();
-            for (i, peer) in cfg.peers.iter().enumerate() {
-                let (ok, body, dur) = self.probe(peer).await;
-                if ok {
-                    ok_count += 1;
+            // Every peer is asked before any is judged, so a round in which nobody answered can
+            // be told from one in which some did.
+            let mut round = Vec::with_capacity(self.cfg.peers.len());
+            for peer in self.cfg.peers.iter() {
+                let (probe, dur) = self.probe(peer).await;
+                debug!("Watch: {} up={} answered={} in {}ms.",
+                    peer.name, probe.is_up(), probe.answered(), dur.as_millis());
+                round.push((probe, dur));
+            }
+            let ok_count = round.iter().filter(|(p, _)| p.is_up()).count();
+            let (events, samples) = judge_round(
+                &self.cfg, &self.whoami, &mut self.state, &mut self.link_down,
+                round, Instant::now(), unix_secs());
+            for event in events {
+                self.alerter.raise(event);
+            }
+            // The dashboard's copy is written after the alerts are raised, and a failure to write
+            // it is only logged, so nothing the page does can delay or silence an alarm.
+            self.fleet.set_link_down(self.link_down);
+            for (i, sample) in samples {
+                if let Err(e) = self.fleet.record(i, sample) {
+                    let name = self.cfg.peers.get(i).map(|p| p.name.as_str()).unwrap_or("?");
+                    warn!("Watch: the dashboard's copy of {}'s probe was not kept: {}", name, e);
                 }
-                debug!("Watch: {} answered ok={} in {}ms.",
-                    peer.name, ok, dur.as_millis());
-                self.judge(i, peer, ok, body, dur, repeat);
             }
             // Proof of life, on the same loop that does the watching -- so a
             // heartbeat arriving is evidence the watcher is running and not
@@ -336,15 +408,16 @@ impl Watcher {
         }
     }
 
-    /// Ask one peer whether it is well, returning liveness, its health body when
-    /// one was served, and how long the probe took.
+    /// Ask one peer whether it is well, returning what came back and how long the probe took.
     ///
     /// Any answer that is not a `2xx` is a failure, including a `503`: a Steel that is up and
-    /// sealed is answering, and it is still not serving the databases behind it. The body is
-    /// present only when the peer carries a `token` (so the gate opens) and the answer parsed;
-    /// its absence never fails the liveness check, so a peer that answers `200` without a body is
-    /// still up. The duration is measured here, not self-reported by the peer.
-    async fn probe(&self, peer: &WatchPeer) -> (bool, Option<HealthBody>, std::time::Duration) {
+    /// sealed is answering, and it is still not serving the databases behind it. It is a
+    /// [`Probe::Refused`] rather than [`Probe::Silent`] all the same, because an answer proves
+    /// the path to the peer. The body is present only when the peer carries a `token` (so the
+    /// gate opens) and the answer parsed; its absence never fails the liveness check, so a peer
+    /// that answers `200` without a body is still up. The duration is measured here, not
+    /// self-reported by the peer.
+    async fn probe(&self, peer: &WatchPeer) -> (Probe, std::time::Duration) {
         let url = &peer.url;
         let started = Instant::now();
         let loc = match Url::parse(url) {
@@ -353,7 +426,7 @@ impl Watcher {
             // that cannot be addressed is a peer that is not answering.
             Err(e) => {
                 warn!("The watch URL {} stopped parsing: {}", url, e);
-                return (false, None, started.elapsed());
+                return (Probe::Silent, started.elapsed());
             },
         };
         let host = loc.host.clone();
@@ -400,57 +473,88 @@ impl Watcher {
                         },
                         Err(_) => None,
                     };
-                    (true, body, elapsed)
+                    (Probe::Up(body), elapsed)
                 } else {
                     debug!("Watch: {} answered {}.", url, code);
-                    (false, None, elapsed)
+                    (Probe::Refused(code), elapsed)
                 }
             },
             Ok(Err(e)) => {
                 debug!("Watch: {} did not answer: {}", url, e);
-                (false, None, elapsed)
+                (Probe::Silent, elapsed)
             },
             Err(_) => {
                 debug!("Watch: {} did not answer within {}s.", url, timeout.as_secs());
-                (false, None, elapsed)
+                (Probe::Silent, elapsed)
             },
         }
     }
+}
 
-    /// Fold one probe result into what this node believes, alert on a change, and keep the
-    /// sample for the dashboard.
-    ///
-    /// The dashboard's copy is written after the alerts are raised and a failure to write it is
-    /// only logged, so nothing the page does can delay or silence an alarm.
-    fn judge(
-        &mut self,
-        i:      usize,
-        peer:   &WatchPeer,
-        ok:     bool,
-        body:   Option<HealthBody>,
-        took:   Duration,
-        repeat: Duration,
-    ) {
-        let threshold = self.cfg.fail_threshold.max(1);
-        let now = Instant::now();
-        let st = match self.state.get_mut(i) {
+/// Fold one round of probes into what this node believes, returning the alerts owed and the
+/// samples the dashboard keeps.
+///
+/// `round` holds one probe, with the time it took, per entry of `cfg.peers`, in order; `state`
+/// holds one set of beliefs per entry in the same order. A round that is this watcher's own link
+/// (see [`is_own_link_down`]) is not judged at all: no failure is counted against any peer, and
+/// none is forgotten, so a link that drops for an hour yields neither `DOWN` messages that cannot
+/// be sent nor, afterwards, `is back` messages about outages that never happened. Nor does such
+/// a round reach the dashboard: each peer's ring keeps the last readings actually heard, which
+/// the page greys as they age, rather than an hour of silence displacing them. `link_down`
+/// carries the verdict from round to round, so each episode is logged once.
+///
+/// Separated from the polling so the rule can be tested without a network, on the same path the
+/// loop takes; each peer of a judged round goes through [`assess`].
+fn judge_round(
+    cfg:        &WatchConfig,
+    whoami:     &str,
+    state:      &mut [PeerState],
+    link_down:  &mut bool,
+    round:      Vec<(Probe, Duration)>,
+    now:        Instant,
+    t_secs:     u64,
+)
+    -> (Vec<AlertEvent>, Vec<(usize, ProbeSample)>)
+{
+    let (probes, took): (Vec<Probe>, Vec<Duration>) = round.into_iter().unzip();
+    if is_own_link_down(&probes) {
+        if !*link_down {
+            *link_down = true;
+            warn!("Watch: none of the {} peers answered at all this round, so it is this \
+                watcher's own link that is down, not every peer at once. Nothing is judged \
+                until one answers.", probes.len());
+        }
+        return (Vec::new(), Vec::new());
+    }
+    if *link_down {
+        *link_down = false;
+        info!("Watch: peers are answering again, so judging resumes.");
+    }
+    let threshold = cfg.fail_threshold.max(1);
+    let repeat = Duration::from_secs(cfg.repeat_secs.max(60));
+    let mut events = Vec::new();
+    let mut samples = Vec::with_capacity(probes.len());
+    for (i, ((peer, probe), took)) in cfg.peers.iter().zip(probes).zip(took).enumerate() {
+        let st = match state.get_mut(i) {
             Some(st) => st,
             // Built one per peer at construction, so unreachable; a peer with no beliefs is
             // one this cannot judge, and saying so beats judging it against another's.
             None => {
                 warn!("Watch: no state for peer {} ('{}'); skipped.", i, peer.name);
-                return;
+                continue;
             },
         };
-        let (events, sample) = assess(
-            threshold, &self.whoami, peer, st, ok, body, took, repeat, now, unix_secs());
-        for event in events {
-            self.alerter.raise(event);
-        }
-        if let Err(e) = self.fleet.record(i, sample) {
-            warn!("Watch: the dashboard's copy of {}'s probe was not kept: {}", peer.name, e);
-        }
+        let ok = probe.is_up();
+        let body = match probe {
+            Probe::Up(b) => b,
+            _            => None,
+        };
+        let (ev, sample) = assess(
+            threshold, whoami, peer, st, ok, body, took, repeat, now, t_secs);
+        events.extend(ev);
+        samples.push((i, sample));
     }
+    (events, samples)
 }
 
 /// One probe result in; the alerts it raises and the sample the dashboard keeps out.
@@ -507,6 +611,12 @@ fn decide(
 )
     -> Vec<AlertEvent>
 {
+    // The peer's own cadence, where it names one, for both kinds of reminder; floored as the
+    // watcher's is, so no entry can remind every round.
+    let repeat = match peer.repeat_secs {
+        Some(s) => Duration::from_secs(s.max(60)),
+        None    => repeat,
+    };
     let mut out = Vec::new();
     let name = &peer.name;
     let url = &peer.url;
@@ -714,6 +824,7 @@ mod tests {
             distress: BTreeMap::new(),
             clear:    BTreeMap::new(),
             token:    None,
+            repeat_secs: None,
         }
     }
 
@@ -956,5 +1067,197 @@ mod tests {
             assert!(ev.is_empty());
             assert!(matches!(st.health, Health::Up { .. }));
         }
+    }
+
+    // ── Per-peer reminder cadence (F2) ──────────────────────────────────────
+
+    /// A peer's own `repeat_secs` sets its reminders, down or distressed, in place of the
+    /// watcher's; a peer without one keeps the watcher's.
+    #[test]
+    fn a_peers_own_repeat_overrides_the_watchers() {
+        let global = Duration::from_secs(900);
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+
+        let mut slow = plain_peer("jarrah forge copy", "https://example.test/_steel/health");
+        slow.repeat_secs = Some(21_600);
+        let quick = plain_peer("jarrah", "https://example.test/api/health");
+        let (mut st_slow, mut st_quick) = (PeerState::default(), PeerState::default());
+        assert_eq!(kinds(&decide(1, "conifer", &slow, &mut st_slow, false, None, global, t0)),
+            vec!["down"]);
+        assert_eq!(kinds(&decide(1, "conifer", &quick, &mut st_quick, false, None, global, t0)),
+            vec!["down"]);
+
+        // At the watcher's fifteen minutes the plain peer reminds and the slow one does not.
+        assert_eq!(kinds(&decide(1, "conifer", &quick, &mut st_quick, false, None, global,
+            at(900))), vec!["down"]);
+        assert!(decide(1, "conifer", &slow, &mut st_slow, false, None, global, at(900)).is_empty(),
+            "the peer's own six hours must beat the watcher's fifteen minutes");
+        assert!(decide(1, "conifer", &slow, &mut st_slow, false, None, global, at(21_599))
+            .is_empty());
+        assert_eq!(kinds(&decide(1, "conifer", &slow, &mut st_slow, false, None, global,
+            at(21_600))), vec!["down"], "and it must still remind once its own interval is up");
+
+        // Distress reminders follow the same cadence.
+        let mut hot = distress_peer("jarrah forge copy", &[("forge_state_age_s", 10_800)], &[]);
+        hot.repeat_secs = Some(21_600);
+        let mut st = PeerState::default();
+        let stale = body_of(&[("forge_state_age_s", 12_000)]);
+        assert_eq!(kinds(&decide(1, "conifer", &hot, &mut st, true, Some(stale.clone()), global,
+            t0)), vec!["distress"]);
+        assert!(decide(1, "conifer", &hot, &mut st, true, Some(stale.clone()), global, at(900))
+            .is_empty(), "a distress reminder at the watcher's cadence, not the peer's");
+        assert_eq!(kinds(&decide(1, "conifer", &hot, &mut st, true, Some(stale), global,
+            at(21_600))), vec!["distress"]);
+    }
+
+    /// A cadence under a minute is floored, as the watcher's own is, so no entry can remind
+    /// every round.
+    #[test]
+    fn a_peers_repeat_is_floored_at_a_minute() {
+        let t0 = Instant::now();
+        let mut p = plain_peer("jarrah", "https://example.test/api/health");
+        p.repeat_secs = Some(0);
+        let mut st = PeerState::default();
+        let _ = decide(1, "conifer", &p, &mut st, false, None, Duration::from_secs(900), t0);
+        assert!(decide(1, "conifer", &p, &mut st, false, None, Duration::from_secs(900),
+            t0 + Duration::from_secs(59)).is_empty());
+        assert_eq!(kinds(&decide(1, "conifer", &p, &mut st, false, None, Duration::from_secs(900),
+            t0 + Duration::from_secs(60))), vec!["down"]);
+    }
+
+    // ── The watcher's own link (F5) ─────────────────────────────────────────
+
+    fn watch_of(names: &[&str], threshold: u32) -> WatchConfig {
+        let (mut cfg, _) = machine(threshold);
+        cfg.peers = names.iter()
+            .map(|n| plain_peer(n, &fmt!("https://{}.example.test/health", n)))
+            .collect();
+        cfg
+    }
+
+    fn states_for(cfg: &WatchConfig) -> Vec<PeerState> {
+        cfg.peers.iter().map(|_| PeerState::default()).collect()
+    }
+
+    /// A round as the loop hands it over, each probe with an ordinary measured time.
+    fn round_of(probes: Vec<Probe>) -> Vec<(Probe, Duration)> {
+        probes.into_iter().map(|p| (p, Duration::from_millis(80))).collect()
+    }
+
+    /// Rounds in which no peer answered at all judge nothing: no `DOWN` however long it lasts,
+    /// no `is back` when the link returns, and no failure counted against any peer.
+    #[test]
+    fn a_round_in_which_nobody_answered_judges_nothing() {
+        let cfg = watch_of(&["karri", "jarrah", "birch"], 3);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        for i in 0..30u64 {
+            let (ev, samples) = judge_round(&cfg, "argonaut", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent, Probe::Silent, Probe::Silent]),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            assert!(ev.is_empty(), "round {} raised {:?} while the watcher's own link was down",
+                i, kinds(&ev));
+            assert!(samples.is_empty(),
+                "a round that was the watcher's own link displaced readings in the dashboard's rings");
+            assert!(link_down);
+        }
+        assert!(state.iter().all(|st| st.health == Health::Up { failures: 0 }),
+            "a round that was the watcher's own link counted a failure against a peer");
+
+        let (ev, samples) = judge_round(&cfg, "argonaut", &mut state, &mut link_down,
+            round_of(vec![Probe::Up(None), Probe::Up(None), Probe::Up(None)]),
+            t0 + Duration::from_secs(1_860), 2_860);
+        assert!(ev.is_empty(), "the link coming back is not a recovery of anything: {:?}",
+            kinds(&ev));
+        assert_eq!(samples.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![0, 1, 2],
+            "once judging resumes, every peer's probe is kept, each under its own position");
+        assert!(!link_down);
+    }
+
+    /// One peer failing while the others answer still reaches `DOWN` at the usual threshold, and
+    /// a round of the watcher's own silence in between neither advances nor forgets its count.
+    #[test]
+    fn one_silent_peer_still_alarms() {
+        let cfg = watch_of(&["karri", "jarrah", "birch"], 3);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let jarrah_silent = || round_of(vec![Probe::Up(None), Probe::Silent, Probe::Up(None)]);
+
+        for i in 0..2u64 {
+            let (ev, _) = judge_round(&cfg, "conifer", &mut state, &mut link_down, jarrah_silent(),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            assert!(ev.is_empty());
+        }
+        let (ev, _) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+            round_of(vec![Probe::Silent, Probe::Silent, Probe::Silent]),
+            t0 + Duration::from_secs(120), 1_120);
+        assert!(ev.is_empty() && link_down);
+
+        let (ev, samples) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+            jarrah_silent(), t0 + Duration::from_secs(180), 1_180);
+        assert_eq!(kinds(&ev), vec!["down"], "the third judged failure must call jarrah down");
+        match &ev[0] {
+            AlertEvent::PeerDown { peer, .. } => assert_eq!(peer, "jarrah"),
+            other => panic!("expected jarrah down, got {:?}", other),
+        }
+        // The dashboard keeps the belief the alarm reached, beside the peers that answered.
+        let (i, jarrah) = &samples[1];
+        assert_eq!(*i, 1);
+        assert!(!jarrah.ok);
+        assert_eq!(jarrah.health, PeerHealth::Down);
+        assert_eq!(jarrah.t_secs, 1_180);
+        assert_eq!(samples[0].1.health, PeerHealth::Up);
+        assert_eq!(samples[0].1.probe_ms, 80, "the measured time must reach the sample");
+    }
+
+    /// A refusal is an answer, so a round in which every peer refused is news about the peers --
+    /// every Steel crash-looping behind its proxy, say -- and is judged.
+    #[test]
+    fn a_round_of_refusals_is_still_judged() {
+        let cfg = watch_of(&["karri", "jarrah"], 2);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let (_, samples) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+            round_of(vec![Probe::Refused(502), Probe::Refused(503)]), t0, 1_000);
+        assert_eq!(samples.len(), 2, "a round of refusals is news, so it reaches the dashboard");
+        let (ev, _) = judge_round(&cfg, "conifer", &mut state, &mut link_down,
+            round_of(vec![Probe::Refused(502), Probe::Silent]), t0 + Duration::from_secs(60),
+            1_060);
+        assert_eq!(kinds(&ev), vec!["down", "down"]);
+        assert!(!link_down);
+    }
+
+    /// With a single peer the watcher cannot tell its own link from the peer's death, and the
+    /// outage is not the thing to explain away.
+    #[test]
+    fn a_single_silent_peer_is_judged() {
+        let cfg = watch_of(&["jarrah"], 3);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let mut raised = Vec::new();
+        for i in 0..3u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+                round_of(vec![Probe::Silent]), t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            raised.extend(ev);
+        }
+        assert_eq!(kinds(&raised), vec!["down"]);
+        assert!(!link_down);
+    }
+
+    /// Distress is told by mail alone, so a host with no mail recipient names the peers whose
+    /// distress it would keep to itself, and a host with one names none.
+    #[test]
+    fn distress_on_a_host_without_mail_is_named_at_start() {
+        let peers = vec![
+            plain_peer("karri", "https://karri.example.test/"),
+            distress_peer("jarrah", &[("mem_pct", 85)], &[("mem_pct", 70)]),
+        ];
+        assert_eq!(distress_unheard(&peers, false), vec![fmt!("jarrah")]);
+        assert!(distress_unheard(&peers, true).is_empty());
     }
 }
