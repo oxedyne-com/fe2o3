@@ -291,7 +291,7 @@ fn decode_one(pos: usize, k: &[u8; KEY_LEN]) -> Outcome<RistrettoPoint> {
 }
 
 fn decode_all(keys: &[[u8; KEY_LEN]], threads: usize) -> Outcome<Vec<RistrettoPoint>> {
-    if threads <= 1 || keys.len() < 2 * CHUNK {
+    if threads <= 1 || keys.len() < threads * 256 {
         let mut pts = Vec::with_capacity(keys.len());
         for (pos, k) in keys.iter().enumerate() {
             pts.push(res!(decode_one(pos, k)));
@@ -341,6 +341,29 @@ fn decode_all(keys: &[[u8; KEY_LEN]], threads: usize) -> Outcome<Vec<RistrettoPo
     Ok(pts)
 }
 
+// ── Guards ──────────────────────────────────────────────────────────────────
+
+// Each check in `verify` has a bit here. The unit tests switch one off, on
+// their own thread only, to prove the attack it stops then succeeds.
+const G_MSG:        u32 = 1;    // message in the transcript
+const G_DIGEST:     u32 = 2;    // ring digest in the transcript
+const G_DIGITS_AB:  u32 = 4;    // A + x·B = Com(f; z_A)
+const G_DIGITS_CD:  u32 = 8;    // x·C + D = Com(f(x − f); z_C)
+const G_TAG:        u32 = 16;   // tag relation
+const G_RING:       u32 = 32;   // ring relation
+
+#[cfg(test)]
+thread_local! {
+    static SKIP: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn on(g: u32) -> bool { SKIP.with(|s| s.get() & g == 0) }
+
+#[cfg(not(test))]
+#[inline(always)]
+fn on(_g: u32) -> bool { true }
+
 // ── Transcript ──────────────────────────────────────────────────────────────
 
 struct Commit {
@@ -367,12 +390,16 @@ fn challenge(
     h.update((RADIX as u32).to_le_bytes());
     h.update((m as u32).to_le_bytes());
     h.update((ring.len() as u64).to_le_bytes());
-    h.update(ring.digest);
+    if on(G_DIGEST) {
+        h.update(ring.digest);
+    }
     h.update((scope.len() as u64).to_le_bytes());
     h.update(scope);
     h.update(tau);
-    h.update((msg.len() as u64).to_le_bytes());
-    h.update(msg);
+    if on(G_MSG) {
+        h.update((msg.len() as u64).to_le_bytes());
+        h.update(msg);
+    }
     for p in [&com.a, &com.b, &com.c, &com.d].into_iter().chain(com.g.iter()).chain(com.y.iter()) {
         h.update(p.compress().as_bytes());
     }
@@ -755,10 +782,10 @@ pub fn verify_par(
     s2.push(-Scalar::ONE);
     let p1 = std::iter::once(&g).chain(gens.iter()).chain([&com.a, &com.b]);
     let p2 = std::iter::once(&g).chain(gens.iter()).chain([&com.c, &com.d]);
-    if !RistrettoPoint::vartime_multiscalar_mul(&s1, p1).is_identity() {
+    if on(G_DIGITS_AB) && !RistrettoPoint::vartime_multiscalar_mul(&s1, p1).is_identity() {
         return Ok(false);
     }
-    if !RistrettoPoint::vartime_multiscalar_mul(&s2, p2).is_identity() {
+    if on(G_DIGITS_CD) && !RistrettoPoint::vartime_multiscalar_mul(&s2, p2).is_identity() {
         return Ok(false);
     }
 
@@ -777,11 +804,14 @@ pub fn verify_par(
     }
     st.push(-z);
     let pt = std::iter::once(&tau_pt).chain(com.y.iter()).chain(std::iter::once(&u));
-    if !RistrettoPoint::vartime_multiscalar_mul(&st, pt).is_identity() {
+    if on(G_TAG) && !RistrettoPoint::vartime_multiscalar_mul(&st, pt).is_identity() {
         return Ok(false);
     }
 
     // Ring check: Σ p_i(x)·P_i + pad·P_{N−1} − Σ x^k·G_k − z·G = 0.
+    if !on(G_RING) {
+        return Ok(true);
+    }
     let (sum_pt, sum_p) = res!(ring_sum(ring, &f, m, threads.max(1)));
     let mut sr = Vec::with_capacity(m + 2);
     sr.push(xpow[m] - sum_p);
@@ -804,7 +834,7 @@ fn ring_sum(
     -> Outcome<(RistrettoPoint, Scalar)>
 {
     let n = ring.len();
-    if threads <= 1 || n < 2 * CHUNK {
+    if threads <= 1 || n < threads * 256 {
         return Ok(ring_sum_range(ring, f, m, 0, n));
     }
     let per = ((n + threads - 1) / threads).max(1);
@@ -896,21 +926,132 @@ mod tests {
         Ok((keys, ring))
     }
 
-    // No-frame: a member cannot carry another member's tag, even one it has
-    // seen, because the tag relation extracts the signer's own key.
+    fn with_skip<T>(g: u32, f: impl FnOnce() -> T) -> T {
+        SKIP.with(|s| s.set(g));
+        let out = f();
+        SKIP.with(|s| s.set(0));
+        out
+    }
+
+    fn scalar_at(body: &[u8], off: usize) -> Scalar {
+        let mut b = [0u8; 32];
+        b.copy_from_slice(&body[off..off + 32]);
+        Scalar::from_bytes_mod_order(b)
+    }
+
+    fn put_scalar(body: &mut [u8], off: usize, s: Scalar) {
+        body[off..off + 32].copy_from_slice(s.as_bytes());
+    }
+
+    // Offsets of z_A, z_C and z in a body of m digits.
+    fn z_offsets(m: usize) -> (usize, usize, usize) {
+        let base = 1 + 32 * (4 + 2 * m + 15 * m);
+        (base, base + 32, base + 64)
+    }
+
+    // Guard G_MSG: the message is bound only by the transcript.
     #[test]
-    fn test_no_frame() -> Outcome<()> {
+    fn test_guard_message() -> Outcome<()> {
+        let (keys, ring) = res!(ring_of(5));
+        let (t, b) = res!(with_skip(G_MSG, || sign_with_aux(&ring, &keys[2], b"s", b"m1", b"")));
+        req!(res!(with_skip(G_MSG, || verify(&ring, b"s", b"m2", &t, &b))), true, "guard off");
+        let (t, b) = res!(sign_with_aux(&ring, &keys[2], b"s", b"m1", b""));
+        req!(res!(verify(&ring, b"s", b"m2", &t, &b)), false, "guard on");
+        Ok(())
+    }
+
+    // Guards G_DIGITS_AB and G_DIGITS_CD: z_A and z_C sit in no other check.
+    #[test]
+    fn test_guard_digit_checks() -> Outcome<()> {
+        let (keys, ring) = res!(ring_of(5));
+        let (t, b) = res!(sign_with_aux(&ring, &keys[1], b"s", b"m", b""));
+        let (oa, oc, _) = z_offsets(1);
+        for (g, off) in [(G_DIGITS_AB, oa), (G_DIGITS_CD, oc)] {
+            let mut bad = b.clone();
+            put_scalar(&mut bad, off, scalar_at(&b, off) + Scalar::ONE);
+            req!(res!(with_skip(g, || verify(&ring, b"s", b"m", &t, &bad))), true, "guard {} off", g);
+            req!(res!(verify(&ring, b"s", b"m", &t, &bad)), false, "guard {} on", g);
+        }
+        Ok(())
+    }
+
+    // Guard G_TAG, and the no-frame property: a member cannot carry another
+    // member's tag, even one it has seen, because the tag relation extracts
+    // the signer's own key.
+    #[test]
+    fn test_guard_tag_no_frame() -> Outcome<()> {
         let (keys, ring) = res!(ring_of(20));
         let scope = b"present/1:https://app.example";
         let msg = b"m";
         let u = res!(scope_base(scope));
         let tau_b = u * keys[7].0;
-        let body = res!(prove(&ring, 3, &keys[3].0, &tau_b, &u, scope, msg, b""));
         let tb = tau_b.compress().to_bytes();
-        req!(res!(verify(&ring, scope, msg, &tb, &body)), false);
-        // And the honest proof by the tag's own key verifies.
+        let body = res!(prove(&ring, 3, &keys[3].0, &tau_b, &u, scope, msg, b""));
+        req!(res!(with_skip(G_TAG, || verify(&ring, scope, msg, &tb, &body))), true, "guard off");
+        req!(res!(verify(&ring, scope, msg, &tb, &body)), false, "guard on");
+        // The tag's own key proves it.
         let body = res!(prove(&ring, 7, &keys[7].0, &tau_b, &u, scope, msg, b""));
-        req!(res!(verify(&ring, scope, msg, &tb, &body)), true);
+        req!(res!(verify(&ring, scope, msg, &tb, &body)), true, "honest");
+        Ok(())
+    }
+
+    // Guard G_RING: without the ring relation anyone signs with no key at
+    // all, by proving a made-up secret against the tag base alone.
+    #[test]
+    fn test_guard_ring_keyless_forgery() -> Outcome<()> {
+        let (_, ring) = res!(ring_of(20));
+        let fake = res!(SecretKey::from_seed(b"not in the ring"));
+        let u = res!(scope_base(b"s"));
+        let tau = u * fake.0;
+        let tb = tau.compress().to_bytes();
+        let body = res!(prove(&ring, 4, &fake.0, &tau, &u, b"s", b"m", b""));
+        req!(res!(with_skip(G_RING, || verify(&ring, b"s", b"m", &tb, &body))), true, "guard off");
+        req!(res!(verify(&ring, b"s", b"m", &tb, &body)), false, "guard on");
+        Ok(())
+    }
+
+    // Guard G_DIGEST: without the ring in the transcript a forger fixes the
+    // proof first and then solves for a ring key that satisfies it.
+    #[test]
+    fn test_guard_digest_ring_after_challenge() -> Outcome<()> {
+        let (keys, _) = res!(ring_of(2));
+        let p0 = keys[0].public_key();
+        let q = res!(SecretKey::from_seed(b"placeholder")).public_key();
+        let fake = res!(SecretKey::from_seed(b"forger"));
+        let u = res!(scope_base(b"s"));
+        let tau = u * fake.0;
+        let tb = tau.compress().to_bytes();
+        let forge = |guard_off: bool| -> Outcome<bool> {
+            let skip = if guard_off { G_DIGEST } else { 0 };
+            with_skip(skip, || {
+                let placeholder = res!(Ring::from_keys(&[p0, q]));
+                let body = res!(prove(&placeholder, 1, &fake.0, &tau, &u, b"s", b"m", b""));
+                // Recompute x as the verifier will, then solve for P_1 in
+                // f_0·P_0 + (Σ_{i≥1} f_i)·P_1 − G_0 = z·G.
+                let mut pts = Vec::new();
+                for i in 0..6 {
+                    let c = res!(CompressedRistretto::from_slice(&body[1 + 32 * i..33 + 32 * i])
+                        .map_err(|_| err!("slice"; Test)));
+                    pts.push(res!(c.decompress().ok_or_else(|| err!("point"; Test))));
+                }
+                let com = Commit { a: pts[0], b: pts[1], c: pts[2], d: pts[3],
+                    g: vec![pts[4]], y: vec![pts[5]] };
+                let x = challenge(&placeholder, 1, b"s", &tb, b"m", &com);
+                let mut rest = Scalar::ZERO;
+                for i in 0..15 {
+                    rest += scalar_at(&body, 1 + 32 * 6 + 32 * i);
+                }
+                let f0 = x - rest;
+                let (_, _, oz) = z_offsets(1);
+                let z = scalar_at(&body, oz);
+                let p0_pt = placeholder.points[0];
+                let p1 = (RISTRETTO_BASEPOINT_POINT * z + com.g[0] - p0_pt * f0) * rest.invert();
+                let ring = res!(Ring::from_keys(&[p0, p1.compress().to_bytes()]));
+                verify(&ring, b"s", b"m", &tb, &body)
+            })
+        };
+        req!(res!(forge(true)), true, "guard off");
+        req!(res!(forge(false)), false, "guard on");
         Ok(())
     }
 
