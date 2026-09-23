@@ -9,8 +9,8 @@
 //!    error. This is the strongest-guarantee policy and is the one
 //!    most operators will reach for.
 //! 2. Repeating the exercise with `sync_every_n_writes = 3` and
-//!    with `sync_interval_ms = 50`, so all three policy branches of
-//!    `WriterBot::maybe_sync_files` run under test.
+//!    with `sync_interval_ms = 50`, so all three policies of a
+//!    writer's syncer (`bots::worker::syncer`) run under test.
 //!
 //! The test does not attempt to measure actual disk sync (that
 //! requires strace or a kernel tracepoint and is tied to the
