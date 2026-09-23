@@ -49,6 +49,7 @@ use oxedyne_fe2o3_graphics::pdf::OutlineItem;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io;
 use std::path::{
 	Path,
 	PathBuf,
@@ -373,9 +374,8 @@ impl fmt::Display for DiagnosticKind {
 }
 
 /// One problem at the source position a caller shows the user. `line` and `col` are 1-based; a hard error
-/// whose cause could not be traced to a source line reports `0:0` against the main file rather than a
-/// guessed position. `hint` is extra remedial detail, such as a strict refusal's summary of what was
-/// skipped.
+/// carrying no site reports `0:0` against the main file rather than a guessed position. `hint` is extra
+/// remedial detail, such as a strict refusal's summary of what was skipped.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Diagnostic {
 	pub file:		String,
@@ -463,66 +463,53 @@ pub fn diagnostics(refusals: &lang::Refusals) -> Vec<Diagnostic> {
 	out
 }
 
-/// Places a hard compile error at a source position. The engine's file errors name the path they could not
-/// read (`Could not read the included chapter "/p/ch1.typ".`) but not the line that asked for it, so each
-/// quoted path in the message is looked for among the string literals of `sources` -- resolved against the
-/// citing file's directory, as the reader resolves them -- and the first citing literal gives the position.
-/// An error naming no source-cited path reports `0:0` against `main`. The message is the error's plain
-/// words, free of source-code frames and colour.
-pub fn locate_error(e: &Error<ErrTag>, main: &Path, sources: &[PathBuf]) -> Diagnostic {
-	let message = e.plain();
-	let kind = DiagnosticKind::from_error_tags(e);
-	for cited in quoted_literals(&message) {
-		let target = match vfs::canonicalize(Path::new(&cited.1)) {
-			Ok(p)	=> p,
-			Err(_)	=> PathBuf::from(&cited.1),
-		};
-		for src_path in sources {
-			let text = match vfs::read_to_string(src_path) {
-				Ok(t)	=> t,
-				Err(_)	=> continue,
-			};
-			let dir = src_path.parent().unwrap_or_else(|| Path::new("/"));
-			for (off, lit) in quoted_literals(&text) {
-				let resolved = match vfs::canonicalize(&dir.join(&lit)) {
-					Ok(p)	=> p,
-					Err(_)	=> dir.join(&lit),
-				};
-				if resolved == target {
-					let (line, col, _) = lang::line_col_of(&text, off as u32);
-					return Diagnostic { file: src_path.display().to_string(), line, col, message, kind, hint: None };
-				}
-			}
-		}
-	}
-	Diagnostic { file: main.display().to_string(), line: 0, col: 0, message, kind, hint: None }
+/// A failure charged to the construct that asked for what could not be had: its file, line and column.
+/// Raised as a cause in the failure's own chain, so the report reads the site back rather than
+/// reconstructing it from the message.
+#[derive(Debug)]
+pub struct Cited {
+	file:	String,
+	line:	usize,
+	col:	usize,
+	cause:	io::Error,	// why it could not be had
 }
 
-/// Every double-quoted literal in `s` with the byte offset of its opening quote. No escape handling beyond
-/// a backslash-quote, which is all a path literal needs.
-fn quoted_literals(s: &str) -> Vec<(usize, String)> {
-	let mut out = Vec::new();
-	let bytes = s.as_bytes();
-	let mut i = 0;
-	while i < bytes.len() {
-		if bytes[i] == b'"' {
-			let start = i;
-			let mut j = i + 1;
-			while j < bytes.len() && bytes[j] != b'"' && bytes[j] != b'\n' {
-				if bytes[j] == b'\\' {
-					j += 1;
-				}
-				j += 1;
-			}
-			if j < bytes.len() && bytes[j] == b'"' {
-				out.push((start, s[start + 1..j].to_string()));
-				i = j + 1;
-				continue;
-			}
-		}
-		i += 1;
+impl Cited {
+	pub fn new(file: &str, line: usize, col: usize, cause: io::Error) -> Self {
+		Self { file: file.to_string(), line, col, cause }
 	}
-	out
+}
+
+impl fmt::Display for Cited {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		// The words only: the site is the diagnostic's to print.
+		write!(f, "{}", self.cause)
+	}
+}
+
+impl std::error::Error for Cited {
+	fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+		Some(&self.cause)
+	}
+}
+
+impl Diagnostic {
+	/// A hard compile error as a caller shows it: at the site it was raised with ([`Cited`]), else at
+	/// `0:0` against `main`. The message is the error's plain words, free of frames and colour.
+	pub fn from_error(e: &Error<ErrTag>, main: &Path) -> Self {
+		let (file, line, col) = match e.find_cause::<Cited>() {
+			Some(c)	=> (c.file.clone(), c.line, c.col),
+			None	=> (main.display().to_string(), 0, 0),
+		};
+		Self {
+			file,
+			line,
+			col,
+			message:	e.plain(),
+			kind:		DiagnosticKind::from_error_tags(e),
+			hint:		None,
+		}
+	}
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

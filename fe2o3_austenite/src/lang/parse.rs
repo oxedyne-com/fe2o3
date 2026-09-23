@@ -179,6 +179,13 @@ impl Refusals {
 		}
 	}
 
+	/// Moves every site on by `by` bytes, placing a parse of a fragment in the file it was cut from.
+	pub(crate) fn shift(&mut self, by: u32) {
+		for r in &mut self.sites {
+			r.span = Span::new(r.span.start.saturating_add(by), r.span.end.saturating_add(by));
+		}
+	}
+
 	/// Every refused site, in the order the reader met them.
 	pub fn sites(&self) -> &[Refusal] { &self.sites }
 

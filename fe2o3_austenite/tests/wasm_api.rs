@@ -48,7 +48,6 @@ fn compile_pdf(files: &[(&str, &[u8])]) -> Outcome<Compiled> {
 	for (p, b) in files {
 		map.insert(PathBuf::from(p), b.to_vec());
 	}
-	let sources: Vec<PathBuf> = map.keys().cloned().collect();
 	res!(vfs::install(map));
 	let main	= PathBuf::from(MAIN);
 	let fonts	= Arc::new(res!(fonts::libertinus()));
@@ -62,7 +61,7 @@ fn compile_pdf(files: &[(&str, &[u8])]) -> Outcome<Compiled> {
 	};
 	let out = match run() {
 		Ok((r, pdf))	=> Compiled::Done(r, pdf),
-		Err(e)			=> Compiled::Failed(compile::locate_error(&e, &main, &sources)),
+		Err(e)			=> Compiled::Failed(Diagnostic::from_error(&e, &main)),
 	};
 	res!(vfs::clear());
 	Ok(out)
@@ -195,10 +194,34 @@ fn a_missing_include_is_placed_at_the_line_that_cites_it() -> Outcome<()> {
 	Ok(())
 }
 
+/// The site travels in the error from the read that failed, so a path quoted earlier in an unrelated
+/// line cannot draw the report to itself, as a search of the sources for the path's text would.
 #[test]
-fn an_error_citing_no_source_path_reports_zero_zero() -> Outcome<()> {
+fn a_missing_include_is_placed_at_its_own_line_when_an_earlier_line_quotes_the_same_path() -> Outcome<()> {
+	let _turn = turn();
+	let root = "= H\n\nSee \"gone.typ\" for background.\n\n#include \"gone.typ\"\n";
+	let d = res!(failed(res!(compile_pdf(&[(MAIN, root.as_bytes())]))));
+	assert_eq!((d.file.as_str(), d.line, d.col), (MAIN, 5, 10), "{}", d);
+	Ok(())
+}
+
+/// A site in a book root is placed at its own line, past an `#include` as before one.
+#[test]
+fn a_site_after_an_include_is_placed_at_its_own_line() -> Outcome<()> {
+	let _turn = turn();
+	let root = "= H\n\nIntro.\n\n#include \"a.typ\"\n\nAfter.\n\n#columns(2)[x]\n";
+	let chap = "== A\n\nText.\n";
+	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, root.as_bytes()), ("/proj/a.typ", chap.as_bytes())]))));
+	assert_eq!(report.diagnostics.len(), 1, "{:?}", report.diagnostics);
+	let d = &report.diagnostics[0];
+	assert_eq!((d.file.as_str(), d.line, d.col), (MAIN, 9, 1), "{}", d);
+	Ok(())
+}
+
+#[test]
+fn an_error_carrying_no_site_reports_zero_zero() -> Outcome<()> {
 	let e = err!("Something failed with no path."; Test);
-	let d = compile::locate_error(&e, Path::new(MAIN), &[]);
+	let d = Diagnostic::from_error(&e, Path::new(MAIN));
 	assert_eq!(fmt!("{}", d), "/proj/main.typ:0:0: Something failed with no path.");
 	assert_eq!(d.kind, DiagnosticKind::Internal);
 	Ok(())
@@ -245,7 +268,7 @@ fn each_diagnostic_kind_is_fixed_where_its_fault_is_raised() -> Outcome<()> {
 		Ok(())	=> return Err(err!("The error was supposed to propagate."; Bug)),
 		Err(e)	=> e,
 	};
-	assert_eq!(compile::locate_error(&e, Path::new(MAIN), &[]).kind, DiagnosticKind::Limit);
+	assert_eq!(Diagnostic::from_error(&e, Path::new(MAIN)).kind, DiagnosticKind::Limit);
 
 	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"")]))));
 	let head = match report.strict_failure(Path::new(MAIN)) {

@@ -1956,7 +1956,7 @@ fn assemble_into(
 )
 	-> Outcome<()>
 {
-	let mut buf = String::new();	// this file's own inline markup gathered since the last boundary
+	let mut buf = Chunk::default();	// this file's own inline markup gathered since the last boundary
 	// This file's own inline markup (its opening section, any tail after its last include) is tagged with
 	// its own path, exactly as an included chapter's blocks are tagged with theirs -- see `Refusal`'s doc
 	// comment on why the span alone does not already say which file it came from.
@@ -2084,8 +2084,15 @@ fn assemble_into(
 					let inc_path = dir.join(&rel);
 					let inc_src = match vfs::read_to_string(&inc_path) {
 						Ok(s)	=> s,
-						Err(e)	=> return Err(err!(e,
-							"Could not read the included chapter {:?}.", inc_path; File, Read)),
+						Err(e)	=> {
+							// Charged to the path literal, as Typst charges it, while this file's text is in
+							// hand.
+							let lead	= line.len() - t.len() + "#include".len();
+							let quote	= rest.find('"').map_or(lead, |q| lead + q);
+							let (l, c, _)	= lang::line_col_of(src, start.saturating_add(quote as u32));
+							return Err(err!(crate::compile::Cited::new(&label, l, c, e),
+								"Could not read the included chapter {:?}.", inc_path; File, Read));
+						},
 					};
 					let inc_dir = inc_path.parent().unwrap_or(dir);
 					let mut chap_blocks: Vec<Block> = Vec::new();
@@ -2121,8 +2128,7 @@ fn assemble_into(
 				blocks.push(Block::heading(0, title));
 			}
 		} else {
-			buf.push_str(line);
-			buf.push('\n');
+			buf.push(raw, start);
 		}
 	}
 	// A guard still open at end of file never met its own closer: reported so a truncated branch is never
@@ -2141,13 +2147,34 @@ fn assemble_into(
 	Ok(())
 }
 
+/// A file's own inline markup gathered since the last boundary, and the byte offset in the file it
+/// starts at, so a site its parse records is placed in the file's own lines.
+#[derive(Default)]
+struct Chunk {
+	text:	String,
+	at:		u32,
+}
+
+impl Chunk {
+	/// Adds a line as the file holds it, terminator and all, so the chunk's offsets stay the file's.
+	fn push(&mut self, raw: &str, start: u32) {
+		if self.text.is_empty() {
+			self.at = start;
+		}
+		self.text.push_str(raw);
+		if !raw.ends_with('\n') {
+			self.text.push('\n');
+		}
+	}
+}
+
 /// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips
 /// (tagged with `file`, the root's own path -- this buffer is always the root's inline text, never a
 /// chapter's, which is tagged separately where it is read), then clears the buffer. A buffer holding
 /// only code and whitespace yields no blocks -- a book root's template call reduces to nothing, so the
 /// book path is unchanged.
 fn flush_inline(
-	buf:	&mut String,
+	buf:	&mut Chunk,
 	blocks:	&mut Vec<Block>,
 	skips:	&mut lang::Refusals,
 	file:	&str,
@@ -2155,13 +2182,14 @@ fn flush_inline(
 )
 	-> Outcome<()>
 {
-	if !buf.trim().is_empty() {
-		let (b, mut s) = res!(lang::to_blocks_with_templates(buf, binds));
+	if !buf.text.trim().is_empty() {
+		let (b, mut s) = res!(lang::to_blocks_with_templates(&buf.text, binds));
+		s.shift(buf.at);
 		s.tag_file(file);
 		blocks.extend(b);
 		skips.merge(s);
 	}
-	buf.clear();
+	buf.text.clear();
 	Ok(())
 }
 

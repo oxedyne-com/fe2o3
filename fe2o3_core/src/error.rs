@@ -264,6 +264,29 @@ impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
         }
     }
 
+    /// The first cause of type `C` in the error's chain, outermost first: how a caller reads back a
+    /// typed fact the fault was raised with, such as the source site it is charged to.
+    pub fn find_cause<C: std::error::Error + 'static>(&self) -> Option<&C> {
+        match self {
+            Error::Local(_) | Error::Other(_) => None,
+            Error::Upstream(arc_e, _) => {
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(arc_e.as_ref());
+                while let Some(c) = cause {
+                    if let Some(found) = c.downcast_ref::<C>() {
+                        return Some(found);
+                    }
+                    // One of ours may be a collection, which has no single source to follow.
+                    if let Some(e) = c.downcast_ref::<Error<T>>() {
+                        return e.find_cause::<C>();
+                    }
+                    cause = c.source();
+                }
+                None
+            },
+            Error::Collection(boxerrs) => boxerrs.iter().find_map(|e| e.find_cause::<C>()),
+        }
+    }
+
     pub fn msgs(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.gather(&mut out);
@@ -847,6 +870,63 @@ mod tests {
         let e = Error::Upstream(Arc::new(e), ErrMsg { tags: &[], msg: errmsg!() });
         assert_eq!(e.tags(), vec![ErrTag::IO, ErrTag::Input, ErrTag::TooBig],
             "the walk goes on through the foreign frame to the error it wraps");
+        Ok(())
+    }
+
+    // Somebody else's error type that wraps one of ours, as a typed source-site frame does.
+    #[derive(Debug)]
+    struct Site {
+        line:   usize,
+        inner:  Error<ErrTag>,
+    }
+
+    impl fmt::Display for Site {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.inner.plain())
+        }
+    }
+
+    impl std::error::Error for Site {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.inner)
+        }
+    }
+
+    fn propagated(e: Error<ErrTag>) -> Error<ErrTag> {
+        fn pass(e: Error<ErrTag>) -> Outcome<()> {
+            res!(Err::<(), Error<ErrTag>>(e));
+            Ok(())
+        }
+        match pass(e) {
+            Ok(()) => err!("The error was supposed to propagate."; Bug),
+            Err(e) => e,
+        }
+    }
+
+    #[test]
+    fn test_a_typed_cause_is_found_and_tags_pass_through_it() -> Outcome<()> {
+        let fault = err!("The chapter could not be read."; File, Read);
+        let sited = err!(Site { line: 4, inner: fault }, "Assembly stopped."; Input);
+        let e = propagated(propagated(sited));
+
+        assert_eq!(e.find_cause::<Site>().map(|s| s.line), Some(4), "the site, three frames down");
+        assert!(e.find_cause::<io::Error>().is_none(), "no cause of a type the chain does not hold");
+        assert_eq!(e.tags(), vec![ErrTag::Input, ErrTag::File, ErrTag::Read],
+            "the walk goes on through a foreign frame to the error it wraps");
+
+        let gone = io::Error::new(io::ErrorKind::NotFound, "no such file");
+        let e = propagated(err!(gone, "Could not read the chapter."; File, Read));
+        assert_eq!(e.find_cause::<io::Error>().map(|io| io.kind()), Some(io::ErrorKind::NotFound));
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_collection_gathers_and_searches_every_member() -> Outcome<()> {
+        let a = propagated(err!("First."; Input));
+        let b = propagated(err!(Site { line: 9, inner: err!("Second."; Missing) }, "Wrapped."; File));
+        let e = Error::Collection(vec![Box::new(a), Box::new(b)]);
+        assert_eq!(e.tags(), vec![ErrTag::Input, ErrTag::File, ErrTag::Missing]);
+        assert_eq!(e.find_cause::<Site>().map(|s| s.line), Some(9));
         Ok(())
     }
 }

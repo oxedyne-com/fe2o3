@@ -316,19 +316,16 @@ impl DaimondTypst {
 		F: FnOnce(&mut Self, &Path) -> Outcome<Ran<T>>,
 	{
 		let main_path	= PathBuf::from(main);
-		let sources		= match install_project(project, &main_path) {
-			Ok(s)	=> s,
-			Err(e)	=> {
-				let _ = vfs::clear();
-				return Err(Failure { head: compile::locate_error(&e, &main_path, &[]), report: None });
-			},
-		};
+		if let Err(e) = install_project(project, &main_path) {
+			let _ = vfs::clear();
+			return Err(Failure { head: Diagnostic::from_error(&e, &main_path), report: None });
+		}
 		let outcome	= catch_compile(|| body(self, &main_path), main);
 		let result	= match outcome {
 			Ok(Ran::Done(t, report))		=> Ok((t, report)),
 			Ok(Ran::Refused(head, report))	=> Err(Failure { head, report: Some(report) }),
 			Err(e)							=> Err(Failure {
-				head:	compile::locate_error(&e, &main_path, &sources),
+				head:	Diagnostic::from_error(&e, &main_path),
 				report:	None,
 			}),
 		};
@@ -423,8 +420,8 @@ impl DaimondTypst {
 }
 
 /// Installs every source, asset and font of `project` into the source map, the main path naming the root
-/// among them, and returns the installed paths for placing a later error.
-fn install_project(project: &JsValue, main_path: &Path) -> Outcome<Vec<PathBuf>> {
+/// among them.
+fn install_project(project: &JsValue, main_path: &Path) -> Outcome<()> {
 	let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 	read_text_pairs(project, "sources", &mut files);
 	read_byte_pairs(project, "assets", &mut files);
@@ -434,10 +431,8 @@ fn install_project(project: &JsValue, main_path: &Path) -> Outcome<Vec<PathBuf>>
 	if !files.contains_key(main_path) {
 		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing, File));
 	}
-	let mut paths: Vec<PathBuf> = files.keys().cloned().collect();
-	paths.sort();
 	res!(vfs::install(files));
-	Ok(paths)
+	Ok(())
 }
 
 /// The project's main path, `/main.typ` when it names none.
