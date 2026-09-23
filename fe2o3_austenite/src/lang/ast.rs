@@ -50,7 +50,7 @@ pub enum Item {
 	// scope to it (H1's flat-splice sibling). Nesting the items rather than bracketing them with a separate
 	// open/close marker makes an unmatched or missing close structurally impossible. Lowered to
 	// `Block::Scoped`.
-	Scoped { patch: ThemePatch, items: Vec<Item> },
+	Scoped { patch: ThemePatch, items: Vec<Item>, span: Span },
 }
 
 /// A length that may be relative to the font size: absolute points, or ems of the text size in force.

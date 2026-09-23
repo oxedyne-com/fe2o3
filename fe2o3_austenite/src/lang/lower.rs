@@ -109,7 +109,7 @@ pub fn blocks_in(items: &[Item], base: &SiteBase) -> Vec<Block> {
 				Some(p)	=> Block::box_callout_float(blocks_in(items, base), patch.clone(), *p),
 				None	=> Block::box_callout(blocks_in(items, base), patch.clone()),
 			}),
-			Item::Scoped { patch, items }		=> out.push(Block::Scoped { patch: patch.clone(), blocks: blocks_in(items, base) }),
+			Item::Scoped { patch, items, .. }	=> out.push(Block::Scoped { patch: patch.clone(), blocks: blocks_in(items, base) }),
 		}
 	}
 	out

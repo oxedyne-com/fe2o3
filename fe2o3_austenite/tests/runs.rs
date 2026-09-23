@@ -152,16 +152,81 @@ fn a_callout_body_sets_every_block_it_holds() -> Outcome<()> {
 	Ok(())
 }
 
-/// A floating `#place` inside a callout, which a callout laid out whole has no band to float, is refused
-/// where the reader builds the callout, and the rest of the body is set.
+/// A floating `#place` inside a callout, which a callout laid out whole has no band to float, has its float
+/// refused where the reader builds the callout, and its body is set where it stands with the rest.
 #[test]
 fn a_float_inside_a_callout_is_refused() -> Outcome<()> {
 	let _turn = turn();
 	let src = "= Top\n\n#styled-box[\nBefore.\n\n#place(top, float: true)[Floated words.]\n\nAfter.\n]\n";
 	let (rendered, report) = res!(compile_of(&[(MAIN, src)]));
 	let text = words(&rendered);
-	assert!(text.contains("Before.") && text.contains("After."), "{}", text);
+	assert!(text.contains("Before. Floated words. After."), "{}", text);
 	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
-	assert_eq!(names, ["skipped #place (inside a container, which cannot float one) (unsupported)"]);
+	assert_eq!(names, ["#place float inside a container is refused, so its body is set where it stands"]);
+	Ok(())
+}
+
+const IN_PLACE: &str = "#figure placement inside a container is refused, so the figure is set where it stands";
+
+/// The position of each of `words` in `text`, in order, failing unless each follows the one before.
+fn in_order(text: &str, words: &[&str]) -> Outcome<()> {
+	let mut from = 0usize;
+	for w in words {
+		match text[from..].find(w) {
+			Some(at)	=> from += at + w.len(),
+			None		=> return Err(err!("{:?} does not follow {:?} in: {}", w, &text[..from], text; Test, Missing)),
+		}
+	}
+	Ok(())
+}
+
+/// A floating figure or table in a callout, and a floating figure in a floating `#place`, are set where they
+/// stand, each placement refused at its figure, where the compile once ended with no PDF. Strict refuses them.
+#[test]
+fn a_floating_figure_inside_a_container_is_set_where_it_stands() -> Outcome<()> {
+	let _turn = turn();
+	let png = res!(res!(Pixmap::filled(8, 8, Rgba::opaque(200, 0, 0))).to_png());
+	let src = "= Top\n\n#styled-box[\nBefore.\n\n\
+		#figure(image(\"pic.png\", width: 2cm), caption: [Boxed float.], placement: top)\n\n\
+		#figure(table(columns: 1, [Cell]), caption: [Boxed table.], placement: auto)\n\nAfter.\n]\n\n\
+		#place(top, float: true)[\nPlaced.\n\n#figure(table(columns: 1, [Inner]), caption: [Placed table.], placement: bottom)\n]\n\n\
+		Body.\n";
+	let (rendered, report) = res!(compile_bytes(&[(MAIN, src.as_bytes()), ("/proj/pic.png", &png)]));
+	let text = words(&rendered);
+	res!(in_order(&text, &["Before.", "Boxed float.", "Boxed table.", "After."]));
+	res!(in_order(&text, &["Placed.", "Inner", "Placed table."]));
+	let drawn = rendered.out.pages.iter().flat_map(|p| p.frame.placed.iter()).any(|pl| match &pl.kind {
+		PlacedKind::Graphic(g)	=> g.ops.iter().any(|op| matches!(op, DrawOp::Image { .. })),
+		_						=> false,
+	});
+	assert!(drawn, "the boxed figure's image is drawn");
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, [IN_PLACE, IN_PLACE, IN_PLACE]);
+	assert!(report.diagnostics.iter().all(|d| d.kind == DiagnosticKind::Unsupported), "{:?}", report.diagnostics);
+	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses a placement not honoured");
+	Ok(())
+}
+
+/// A floating callout in a callout is set where it stands, its float refused, and a column change in a
+/// `#columns` body inside a callout is refused, its body set in the callout's one column: neither ends the
+/// compile.
+#[test]
+fn a_floating_callout_or_a_column_change_inside_a_callout_is_set_in_place() -> Outcome<()> {
+	let _turn = turn();
+	let src = "#let aside-box(title: none, float: true, body) = {\n\
+		\tlet inner = box(width: 100%, inset: 1em, fill: luma(240), [#text(size: 0.85em)[#body]])\n\
+		\tif float { figure(placement: auto, inner) } else { inner }\n}\n\n\
+		= Top\n\n#styled-box[\nBefore.\n\n#aside-box[Aside words.]\n\n\
+		#columns(2)[\n#set columns(gutter: 8pt)\nColumned words.\n]\n\nAfter.\n]\n";
+	let (rendered, report) = res!(compile_of(&[(MAIN, src)]));
+	let text = words(&rendered);
+	res!(in_order(&text, &["Before.", "Aside words.", "Columned words.", "After."]));
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, [
+		"skipped #let (fixed-point)",
+		"skipped #columns (unsupported)",
+		"callout float inside a container is refused, so the callout is set where it stands",
+		"column change inside a container is refused, so its body is set in the container's one column",
+	]);
 	Ok(())
 }

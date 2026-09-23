@@ -2816,9 +2816,9 @@ fn dispatch_capture(
 				Some((floating, clearance, body)) => {
 					let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
 					skips.merge(sub);
-					// A float is laid out as one unit, so a page or column break inside it cannot be
-					// honoured; it is refused visibly rather than dropped.
-					refuse_nested_page_breaks(&mut inner, skips);
+					// A float is laid out as one unit, so a break inside it is refused, and a float inside it
+					// is set in place with its placement refused (see [`settle_container_body`]).
+					settle_container_body(&mut inner, skips);
 					items.push(Item::Place { items: inner, floating, clearance, span });
 				},
 				None => skips.record("#place", span),
@@ -2845,7 +2845,7 @@ fn dispatch_capture(
 				if patch == crate::theme::ThemePatch::default() {
 					items.append(&mut inner);
 				} else {
-					items.push(Item::Scoped { patch, items: inner });
+					items.push(Item::Scoped { patch, items: inner, span: Span::new(cap.start, cap.start) });
 				}
 			}
 		},
@@ -2858,10 +2858,9 @@ fn dispatch_capture(
 				Some(body) => {
 					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body()));
 					skips.merge(sub);
-					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
-					// keep unit -- so it is refused visibly rather than dropped silently at render (see
-					// [`refuse_nested_page_breaks`]).
-					refuse_nested_page_breaks(&mut inner, skips);
+					// The box is laid out as one keep unit, so a break in its body is refused, and a float in it
+					// is set in place with its placement refused (see [`settle_container_body`]).
+					settle_container_body(&mut inner, skips);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
 					let patch = crate::lang::set::lower_declarations(&body);
@@ -2922,9 +2921,9 @@ fn dispatch_capture(
 					{
 						let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
 						skips.merge(sub);
-						// A `#pagebreak()` nested in a furniture callout body cannot be honoured -- the box is one
-						// keep unit -- so it is refused visibly rather than dropped silently at render.
-						refuse_nested_page_breaks(&mut inner, skips);
+						// The box is one keep unit, so a break in its body is refused, and a float in it is set
+						// in place with its placement refused.
+						settle_container_body(&mut inner, skips);
 						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
 						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
 						// title larger or smaller than the body reads at its own size.
@@ -2940,7 +2939,7 @@ fn dispatch_capture(
 									Some(sz)	=> {
 										let mut patch = crate::theme::ThemePatch::default();
 										patch.text.body_size = Some(sz);
-										Item::Scoped { patch, items: vec![para] }
+										Item::Scoped { patch, items: vec![para], span: Span::new(cap.start, cap.start) }
 									},
 									None		=> para,
 								};
@@ -3104,24 +3103,54 @@ fn first_arg(inner: &str) -> String {
 	split_arg_commas(inner).into_iter().next().unwrap_or_default()
 }
 
-/// Records a visible refusal for, and removes, everything nested in a container's body -- a callout's or a
-/// float's -- that a unit laid out whole cannot hold: a `#pagebreak()` or a `#colbreak()`, which has no page
-/// or column to turn there, and a floating `#place`, which has no band of its own there. Each is refused
-/// where the reader builds the container rather than dropped at render. Recurses through a nested scope or a
-/// nested box, so one buried in either is caught too. The document top level and a `#columns` body (which
-/// splices into the main flow, not a container) are untouched: a break or a float there is honoured.
-fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
+/// Settles a container's body -- a callout's or a float's -- for a unit laid out whole, where the reader
+/// builds the container. A `#pagebreak()` or a `#colbreak()` has no page or column to turn there, so it is
+/// refused and removed. A float has no band of its own there: a floating figure or table, a floating callout
+/// and a floating `#place` each have their placement refused, and are set where they stand -- a `#place`'s
+/// body spliced into the container's flow -- so a float in a container is neither lost nor fatal. A scope
+/// changing the page's columns has no page to change there, so the change is refused in the same way. Recurses
+/// through a nested scope and a nested box, so one buried in either is caught too. The document top level and
+/// a `#columns` body (which splices into the main flow, not a container) are untouched: a break or a float
+/// there is honoured.
+fn settle_container_body(items: &mut Vec<Item>, skips: &mut Refusals) {
+	let in_place = "inside a container is refused, so";
 	let mut kept = Vec::with_capacity(items.len());
 	for mut item in items.drain(..) {
 		match &mut item {
 			Item::PageBreak { span, .. }	=> { skips.record("#pagebreak", *span); continue; },
 			Item::ColBreak { span, .. }		=> { skips.record("#colbreak", *span); continue; },
-			Item::Place { span, .. }		=> { skips.record("#place (inside a container, which cannot float one)", *span); continue; },
-			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
+			Item::Place { items: inner, span, .. }	=> {
+				skips.record_stand_in("#place float", *span, RefusalClass::Unsupported,
+					&fmt!("{} its body is set where it stands", in_place));
+				settle_container_body(inner, skips);
+				kept.append(inner);
+				continue;
+			},
+			Item::Figure { placement, span, .. }	=> if placement.take().is_some() {
+				skips.record_stand_in("#figure placement", *span, RefusalClass::Unsupported,
+					&fmt!("{} the figure is set where it stands", in_place));
+			},
+			Item::Box { items: inner, placement, span, .. }	=> {
+				if placement.take().is_some() {
+					skips.record_stand_in("callout float", *span, RefusalClass::Unsupported,
+						&fmt!("{} the callout is set where it stands", in_place));
+				}
+				settle_container_body(inner, skips);
+			},
+			// A scope changing the page's columns has no page to change in a unit laid out whole, so the change
+			// is refused and the scope's blocks are set in the container's one column.
+			Item::Scoped { patch, items: inner, span }	=> {
+				let cols	= patch.page.columns.take().is_some();
+				let gutter	= patch.page.column_gutter.take().is_some();
+				if cols || gutter {
+					skips.record_stand_in("column change", *span, RefusalClass::Unsupported,
+						&fmt!("{} its body is set in the container's one column", in_place));
+				}
+				settle_container_body(inner, skips);
+			},
 			Item::Heading { .. } | Item::Paragraph { .. } | Item::List { .. } | Item::Code { .. } | Item::Table { .. }
-			| Item::Figure { .. } | Item::Image { .. } | Item::SectionBanner { .. } | Item::Rule { .. }
-			| Item::Space { .. } | Item::PrintGlossary { .. } | Item::ClaimIndex { .. }	=> {},
+			| Item::Image { .. } | Item::SectionBanner { .. } | Item::Rule { .. } | Item::Space { .. }
+			| Item::PrintGlossary { .. } | Item::ClaimIndex { .. }	=> {},
 		}
 		kept.push(item);
 	}
@@ -5039,7 +5068,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let (items, _skips) = res!(document_with_refusals(
 			"#columns(2)[\n#set text(size: 20pt)\n\nScoped body.\n]\n"));
 		let (patch, inner) = res!(items.iter().find_map(|it| match it {
-			Item::Scoped { patch, items }	=> Some((patch.clone(), items)),
+			Item::Scoped { patch, items, .. }	=> Some((patch.clone(), items)),
 			_								=> None,
 		}).ok_or_else(|| err!("no Item::Scoped was produced for a columns body with a #set"; Test, Bug)));
 		assert_eq!(patch.text.body_size, Some(crate::ir::Sp::from_pt(20.0)),

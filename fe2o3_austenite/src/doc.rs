@@ -1001,7 +1001,8 @@ impl<'a> Authoring<'a> {
 	/// document-order counter counting on across it and every construct answered where it is set. The
 	/// material is laid as one unit that never breaks, so its penalties and repeated-header markers are
 	/// dropped; a float, a columns block or a column-layout change inside it has no band or column of its own.
-	/// The reader refuses a break or a float in a container's body, so meeting one here is an error.
+	/// The reader refuses a break in a container's body, and sets a float or a column change there in place,
+	/// so meeting one here is a bug.
 	fn material(&mut self, blocks: &[Block], style: &Theme, measure: Sp, container: &str) -> Outcome<Vec<Node>> {
 		let outer_nodes		= std::mem::take(&mut self.nodes);
 		let outer_measure	= self.measure;
@@ -1023,8 +1024,9 @@ impl<'a> Authoring<'a> {
 				// refused at parse time, and an opener's own eject has no page to turn here.
 				Node::RepeatHead(_) | Node::Penalty(_)	=> {},
 				Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) => return Err(err!(
-					"A float, a columns block or a page-column change inside {} cannot be set: it is laid out as \
-					one unit, with no band or column of its own.", container; Input, Invalid)),
+					"A float, a columns block or a page-column change reached {}, which is laid out as one unit \
+					with no band or column of its own; the reader sets a float in a container in place.",
+					container; Bug, Invalid)),
 				other				=> out.push(other),
 			}
 		}
