@@ -21,7 +21,10 @@ use oxedyne_fe2o3_austenite::compile::{
 	Assembled,
 };
 use oxedyne_fe2o3_austenite::delta;
-use oxedyne_fe2o3_austenite::doc::Block;
+use oxedyne_fe2o3_austenite::doc::{
+	Block,
+	DocInfo,
+};
 use oxedyne_fe2o3_austenite::emit::svg;
 use oxedyne_fe2o3_austenite::fonts::{
 	self,
@@ -83,12 +86,13 @@ fn compile_pages(blocks: Vec<Block>) -> Outcome<Vec<Page>> {
 	let assembled = Assembled {
 		blocks,
 		fonts,
-		geom:	PageGeometry::a4(),
-		style:	Theme::default(),
-		title:	String::new(),
-		faces:	FaceResolver::default(),
-		front:	None,
-		bib:	None,
+		geom:		PageGeometry::a4(),
+		style:		Theme::default(),
+		title:		String::new(),
+		faces:		FaceResolver::default(),
+		front:		None,
+		bib:		None,
+		doc_info:	DocInfo::default(),
 	};
 	Ok(res!(author_and_run(assembled)).out.pages)
 }
@@ -321,12 +325,13 @@ fn author_pages(blocks: Vec<Block>, memo: Option<&mut Memo>) -> Outcome<Vec<Page
 	let assembled = Assembled {
 		blocks,
 		fonts,
-		geom:	PageGeometry::a4(),
-		style:	Theme::default(),
-		title:	String::new(),
-		faces:	FaceResolver::default(),
-		front:	None,
-		bib:	None,
+		geom:		PageGeometry::a4(),
+		style:		Theme::default(),
+		title:		String::new(),
+		faces:		FaceResolver::default(),
+		front:		None,
+		bib:		None,
+		doc_info:	DocInfo::default(),
 	};
 	Ok(res!(author_and_run_memo(assembled, memo)).out.pages)
 }

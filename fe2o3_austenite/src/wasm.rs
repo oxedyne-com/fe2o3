@@ -407,7 +407,7 @@ impl DaimondTypst {
 				return Ok(Ran::Refused(head, report));
 			}
 		}
-		let compile::Rendered { mut out, heads, geom: _ } = rendered;
+		let compile::Rendered { mut out, heads, geom: _, doc_info } = rendered;
 		let product = match mode {
 			Mode::Svg => {
 				let mut pages: Vec<String> = Vec::with_capacity(out.pages.len());
@@ -416,7 +416,7 @@ impl DaimondTypst {
 				}
 				Product::Svg(pages)
 			},
-			Mode::Pdf => Product::Pdf(res!(compile::emit_pdf(&mut out, &heads))),
+			Mode::Pdf => Product::Pdf(res!(compile::emit_pdf(&mut out, &heads, &doc_info))),
 		};
 		Ok(Ran::Done(product, report))
 	}

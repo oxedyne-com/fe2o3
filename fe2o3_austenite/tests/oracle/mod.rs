@@ -1381,7 +1381,7 @@ pub fn baseline_path(work_dir: &Path) -> PathBuf {
 /// A missing or malformed `expected.json` is a hard error, not a swallowed `None`: the tracked reference
 /// is authoritative, so a broken file must fail the run loudly rather than silently reverting a pinned
 /// root to the always-pass bootstrap it exists to forbid.
-fn expected_baseline() -> Outcome<Baseline> {
+pub fn expected_baseline() -> Outcome<Baseline> {
 	let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("oracle").join("expected.json");
 	Baseline::read_from_file(&path)
 }

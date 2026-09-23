@@ -215,7 +215,7 @@ fn compile(
 	mark("parse+lower+fonts", t_parse);
 
 	let t_author = std::time::Instant::now();
-	let compile::Rendered { mut out, heads, geom } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
+	let compile::Rendered { mut out, heads, geom, doc_info } = res!(compile::author_and_run_memo(assembled, memo.as_deref_mut()));
 	mark("author+run+decorate", t_author);
 
 	res!(std::fs::create_dir_all(out_dir));
@@ -269,7 +269,7 @@ fn compile(
 	let pdf_file	= res!(File::create(fmt!("{}/document.pdf", out_dir)));
 	let outline		= compile::build_outline(&heads, &out.ledger);
 	let mut pdf		= res!(emit::pdf::open_document_with_outline(
-		BufWriter::new(pdf_file), out.pages.len(), outline));
+		BufWriter::new(pdf_file), out.pages.len(), outline, &doc_info));
 
 	// Emit is by far the costliest phase and is embarrassingly parallel: each page's outline transforms
 	// and serialisation are a pure function of its frame, independent of every other page. But a rendered

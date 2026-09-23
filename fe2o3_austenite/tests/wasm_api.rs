@@ -56,7 +56,7 @@ fn compile_pdf(files: &[(&str, &[u8])]) -> Outcome<Compiled> {
 		let empty						= assembled.blocks.is_empty();
 		let mut rendered				= res!(compile::author_and_run(assembled));
 		let report	= Report::new(rendered.out.pages.len(), &refusals, skip, empty);
-		let pdf		= res!(compile::emit_pdf(&mut rendered.out, &rendered.heads));
+		let pdf		= res!(compile::emit_pdf(&mut rendered.out, &rendered.heads, &rendered.doc_info));
 		Ok((report, pdf))
 	};
 	let out = match run() {

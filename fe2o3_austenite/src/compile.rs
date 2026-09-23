@@ -17,6 +17,7 @@ use crate::book;
 use crate::doc::{
 	self,
 	Block,
+	DocInfo,
 	FrontMatter,
 	Heading,
 };
@@ -56,22 +57,25 @@ use std::sync::Arc;
 
 /// The pieces a compile needs after assembly, from either the whole-book path or the lone-file path.
 pub struct Assembled {
-	pub blocks:	Vec<Block>,
-	pub fonts:	Arc<FontSet>,
-	pub geom:	PageGeometry,
-	pub style:	Theme,
-	pub title:	String,
-	pub faces:	FaceResolver,
-	pub front:	Option<FrontMatter>,
-	pub bib:	Option<Bibliography>,
+	pub blocks:		Vec<Block>,
+	pub fonts:		Arc<FontSet>,
+	pub geom:		PageGeometry,
+	pub style:		Theme,
+	pub title:		String,
+	pub faces:		FaceResolver,
+	pub front:		Option<FrontMatter>,
+	pub bib:		Option<Bibliography>,
+	pub doc_info:	DocInfo,	// the Info dictionary, from the root's own `#set document(...)`
 }
 
 /// The resolved output of a compile: the decorated, mirror-shifted pages with their ledger and pass count,
-/// the heading table (for an outline or a section-rail query) and the geometry the emit stage reads.
+/// the heading table (for an outline or a section-rail query), the geometry and the Info dictionary the
+/// emit stage reads.
 pub struct Rendered {
-	pub out:	CompileOutput,
-	pub heads:	Vec<Heading>,
-	pub geom:	PageGeometry,
+	pub out:		CompileOutput,
+	pub heads:		Vec<Heading>,
+	pub geom:		PageGeometry,
+	pub doc_info:	DocInfo,
 }
 
 /// Assembles the source at `main_path`: a book or doc root through [`book::load`], a lone file through the
@@ -96,6 +100,8 @@ where
 		Err(e)	=> return Err(err!(e,
 			"Could not read the source file {:?}.", main_path; File, Read)),
 	};
+	// Both paths read the Info dictionary from the root file alone.
+	let doc_info = crate::lang::set::document_info(&src);
 
 	// A figure's `/assets/...` image path is root-relative in Typst, not filesystem-absolute; the image
 	// loader resolves it against this directory and, failing that, its ancestors, so a chapter compiled on
@@ -122,6 +128,7 @@ where
 			faces:	spec.faces,
 			front:	Some(spec.front),
 			bib:	spec.bib,
+			doc_info,
 		};
 		return Ok((assembled, spec.skips, skip_line));
 	}
@@ -187,6 +194,7 @@ where
 		faces,
 		front:	None,
 		bib,
+		doc_info,
 	};
 	Ok((assembled, refusals, skip_line))
 }
@@ -232,7 +240,7 @@ pub fn author_and_run_memo(a: Assembled, memo: Option<&mut crate::memo::Memo>) -
 		}
 	}
 
-	Ok(Rendered { out, heads, geom: a.geom })
+	Ok(Rendered { out, heads, geom: a.geom, doc_info: a.doc_info })
 }
 
 /// Builds the PDF document outline (the viewer's bookmark side panel) from the resolved ledger: the three
@@ -287,10 +295,10 @@ fn terse_skip_line(skips: &lang::Refusals) -> Option<String> {
 /// heading table, then each page rendered and folded in, its frame freed as soon as it is written. The
 /// browser has no threads, so this is the wasm surface's emit; the native binary chunks the same calls in
 /// parallel.
-pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading]) -> Outcome<Vec<u8>> {
+pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) -> Outcome<Vec<u8>> {
 	let mut buf: Vec<u8> = Vec::new();
 	let outline = build_outline(heads, &out.ledger);
-	let mut pdf = res!(crate::emit::pdf::open_document_with_outline(&mut buf, out.pages.len(), outline));
+	let mut pdf = res!(crate::emit::pdf::open_document_with_outline(&mut buf, out.pages.len(), outline, doc_info));
 	for page in &mut out.pages {
 		let built = res!(crate::emit::pdf::render_page(page));
 		res!(crate::emit::pdf::write_built_page(&mut pdf, &built));

@@ -497,6 +497,16 @@ pub struct Heading {
 	pub banner:		bool,	// set inline beneath a `#section-banner`, so the page suppresses its running head like a chapter opener
 }
 
+/// The PDF Info dictionary's fields, from the source's own `#set document(...)`. `Creator` and `Producer`
+/// are the engine's own and not read from source; an unset field writes no entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DocInfo {
+	pub title:		Option<String>,
+	pub author:		Option<String>,
+	pub subject:	Option<String>,	// Typst's `description:`
+	pub keywords:	Option<String>,	// Typst's `keywords:`, an array joined with ", "
+}
+
 /// The book's front matter, read from the root's template call: the title, subtitle and author the
 /// title page sets, the cover raster a development build carries, and the imprint the meta page prints.
 /// A field a book omits is `None` and its line is not set. The whole struct is `None` for a lone
@@ -4405,7 +4415,7 @@ fn vbox(list: Vec<Node>, width: Sp) -> Node {
 /// the anchor slug, the table-of-contents entry and the running head read the rendered title rather than
 /// its raw source. A glossary term contributes its display, emphasis and code their inner words; a maths
 /// span, a cross-reference, a footnote and a citation have no plain form here and contribute nothing.
-fn flatten_segments(segments: &[Segment]) -> String {
+pub(crate) fn flatten_segments(segments: &[Segment]) -> String {
 	let mut out = String::new();
 	for seg in segments {
 		match seg {

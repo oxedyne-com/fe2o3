@@ -41,6 +41,7 @@ pub const LOWERABLE_SET_TARGETS: &[&str] = &[
 	"enum",
 	"math.equation",
 	"columns",
+	"document",	// metadata, read by `document_info`; lowers to no theme field
 ];
 
 /// Lowers a source's own top-level declarations onto `theme`: its `#show: <template>.with(...)`
@@ -52,6 +53,29 @@ pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
 	// The theme's own body size seeds the `em` base: a root that sets no `text(size:)` of its own resolves a
 	// `#set par(spacing: <em>)` against the size the theme already carries, not the raw house default.
 	theme.apply(&lower_declarations_seeded(src, theme.text.body_size.to_pt()));
+}
+
+/// The PDF Info fields a source's own top-level `#set document(...)` names. A later `#set` overrides an
+/// earlier one field by field, as in Typst.
+pub fn document_info(src: &str) -> crate::doc::DocInfo {
+	let mut info = crate::doc::DocInfo::default();
+	for (target, args) in top_level_sets(src) {
+		if target != "document" {
+			continue;
+		}
+		let fields: [(&str, &mut Option<String>); 4] = [
+			("title",		&mut info.title),
+			("author",		&mut info.author),
+			("description",	&mut info.subject),
+			("keywords",	&mut info.keywords),
+		];
+		for (key, slot) in fields {
+			if let Some(value) = document_field(&args, key) {
+				*slot = value;
+			}
+		}
+	}
+	info
 }
 
 /// The [`ThemePatch`] a source's own top-level declarations lower to, without applying it: a `#show:
@@ -269,6 +293,19 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 					patch.page.column_gutter = Some(len);
 					used.push("gutter");
 				}
+			}
+		},
+		"document" => {
+			// Metadata, not styling: a field counts as applied only when `document_info` can read its
+			// value, so one it cannot is refused rather than dropped from the Info dictionary. No date is
+			// ever written, which is what `date: none` asks for.
+			for key in ["title", "author", "description", "keywords"] {
+				if document_field(args, key).is_some() {
+					used.push(key);
+				}
+			}
+			if named_value(args, "date").as_deref() == Some("none") {
+				used.push("date");
 			}
 		},
 		_ => {},
@@ -526,6 +563,74 @@ fn font_families(expr: &str) -> Option<Vec<String>> {
 		out.push(name.trim().to_string());
 	}
 	if out.is_empty() { None } else { Some(out) }
+}
+
+/// A `#set document(...)` field as its Info entry: `Some(None)` for `none`, else a string, a content
+/// block's plain text, or an array of strings joined with ", " as Typst joins an author or keyword list.
+/// `None` when the key is absent or its value is one the reader cannot evaluate.
+fn document_field(args: &str, key: &str) -> Option<Option<String>> {
+	let raw = match named_value(args, key) {
+		Some(r)	=> r,
+		None	=> return None,
+	};
+	if raw == "none" {
+		return Some(None);
+	}
+	if let Some(s) = string_value(&raw) {
+		return Some(Some(s));
+	}
+	if let Some(markup) = raw.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+		let plain = crate::doc::flatten_segments(&crate::lang::inline_segments(markup.trim()));
+		return Some(Some(plain));
+	}
+	if let Some(inner) = raw.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
+		let mut items: Vec<String> = Vec::new();
+		for item in crate::lang::parse::split_top_args(inner) {
+			let item = item.trim();
+			if item.is_empty() {
+				continue;	// the trailing comma of a one-element array
+			}
+			match string_value(item) {
+				Some(s)	=> items.push(s),
+				None	=> return None,
+			}
+		}
+		return Some(if items.is_empty() { None } else { Some(items.join(", ")) });
+	}
+	None
+}
+
+/// The value of a `"..."` string literal filling the whole of `expr`, its escapes resolved, or `None`
+/// when `expr` is not one.
+fn string_value(expr: &str) -> Option<String> {
+	let inner = match expr.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+		Some(i)	=> i,
+		None	=> return None,
+	};
+	let mut out		= String::with_capacity(inner.len());
+	let mut chars	= inner.chars();
+	while let Some(c) = chars.next() {
+		match c {
+			'"'		=> return None,	// an unescaped quote ends the literal early, so this is not one
+			'\\'	=> match chars.next() {
+				Some('\\')	=> out.push('\\'),
+				Some('"')	=> out.push('"'),
+				Some('n')	=> out.push('\n'),
+				Some('r')	=> out.push('\r'),
+				Some('t')	=> out.push('\t'),
+				Some('u')	=> {
+					let hex: String = chars.by_ref().skip_while(|c| *c == '{').take_while(|c| *c != '}').collect();
+					match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+						Some(ch)	=> out.push(ch),
+						None		=> return None,
+					}
+				},
+				_			=> return None,
+			},
+			other	=> out.push(other),
+		}
+	}
+	Some(out)
 }
 
 /// The raw value expression a `key:` names, read to the next top-level comma -- one not nested inside a
@@ -855,5 +960,36 @@ mod tests {
 		assert_eq!(declstyle_refusal("#set text(size: 12pt)\n"), None);
 		assert_eq!(declstyle_refusal("#set text(lang: \"de\")\n"), Some("#set text".to_string()));
 		assert_eq!(declstyle_refusal("#show: doc.with(title: [X])\n"), None);
+	}
+
+	#[test]
+	fn document_info_reads_each_field_as_typst_writes_it() {
+		let src = "#set document(\n\ttitle: [A *bold* Title],\n\tauthor: (\"Ann Author\", \"Bob\"),\n\t\
+			description: \"A \\\"quoted\\\" line\",\n\tkeywords: (\"one\", \"two\",),\n)\n= Body\n";
+		let info = document_info(src);
+		assert_eq!(info.title.as_deref(), Some("A bold Title"), "content reads as its plain text");
+		assert_eq!(info.author.as_deref(), Some("Ann Author, Bob"));
+		assert_eq!(info.subject.as_deref(), Some("A \"quoted\" line"), "escapes resolve");
+		assert_eq!(info.keywords.as_deref(), Some("one, two"));
+
+		assert_eq!(document_info("#set document(author: \"Solo\")\n").author.as_deref(), Some("Solo"));
+		assert_eq!(document_info("= Body\n#set text(size: 12pt)\n"), crate::doc::DocInfo::default());
+
+		// A later `#set` overrides field by field, and `none` clears.
+		let two = document_info("#set document(title: \"One\", author: \"A\")\n#set document(title: none)\n");
+		assert_eq!((two.title, two.author.as_deref()), (None, Some("A")));
+	}
+
+	/// A field counts as applied only when its value was read, so one the reader cannot evaluate is refused
+	/// rather than silently missing from the Info dictionary.
+	#[test]
+	fn set_document_refuses_what_it_cannot_read() {
+		assert_eq!(set_refusal_reason("document", "title: \"X\", author: (\"Y\", \"Z\")"), None);
+		assert_eq!(set_refusal_reason("document", "title: \"X\", date: none"), None);
+		assert!(set_refusal_reason("document", "title: my-title").is_some(), "a variable");
+		assert!(set_refusal_reason("document", "keywords: (\"a\", b)").is_some(), "a non-string item");
+		assert!(set_refusal_reason("document", "date: auto").is_some(), "a date is never written");
+		assert!(set_refusal_reason("document", "title: \"X\", lang: \"de\"").is_some());
+		assert_eq!(declstyle_refusal("#set document(title: \"X\")\n"), None);
 	}
 }

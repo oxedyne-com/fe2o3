@@ -16,6 +16,7 @@ use oxedyne_fe2o3_austenite::compile::{
 };
 use oxedyne_fe2o3_austenite::doc::{
 	Block,
+	DocInfo,
 	Segment,
 };
 use oxedyne_fe2o3_austenite::emit::svg;
@@ -83,11 +84,12 @@ fn compile_pages(blocks: Vec<Block>, bib: Option<Bibliography>, memo: Option<&mu
 		blocks,
 		fonts,
 		geom,
-		style:	Theme::default(),
-		title:	String::new(),
-		faces:	FaceResolver::default(),
-		front:	None,
+		style:		Theme::default(),
+		title:		String::new(),
+		faces:		FaceResolver::default(),
+		front:		None,
 		bib,
+		doc_info:	DocInfo::default(),
 	};
 	let mut memo	= memo;
 	let rendered	= res!(author_and_run_memo(assembled, memo.as_deref_mut()));
