@@ -139,6 +139,48 @@ fn a_nested_comment_holds_its_declarations_and_includes() -> Outcome<()> {
 	Ok(())
 }
 
+/// An `#include` in a callout's body is the body's: the file is the lone file it is, with no contents page,
+/// the callout is read whole and set, its include refused where it stands, and nothing after it is refused
+/// as never closing -- where the include was once followed as the file's own, the callout cut at it, and its
+/// `]` set as prose. A binding the unfollowed file defines is not in scope.
+#[test]
+fn an_include_in_a_body_is_refused_where_it_stands() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Lone\n\n#styled-box[\nBoxed words.\n#include \"ch1.typ\"\n]\n\nAfter words.\n\n#chapword\n";
+	let files = [
+		("/proj/main.typ",	src),
+		("/proj/ch1.typ",	"#let chapword = [CHAPTERWORDS bound.]\n= Chapter\n\nCHAPTERWORDS are set.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert_eq!(rendered.out.pages.len(), 1, "one page, no contents: {}", text);
+	assert!(text.contains("Boxed") && text.contains("After"), "the callout and what follows are set: {}", text);
+	assert!(!text.contains("CHAPTERWORDS") && !text.contains(']'), "{}", text);
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #include (inside a body, where it is not followed) (unsupported)", "skipped #chapword (unsupported)"]);
+	Ok(())
+}
+
+/// An `#include` in a binding's body is the binding's: a binding never used sets nothing from the file, as
+/// Typst sets nothing, its `]` is not prose, and the binding is not refused as never closing.
+#[test]
+fn an_include_in_an_unused_binding_is_not_followed() -> Outcome<()> {
+	let _turn = turn();
+	let root = "#let later = [\n#include \"draft.typ\"\n]\n#include \"ch1.typ\"\n";
+	let files = [
+		("/proj/root.typ",	root),
+		("/proj/ch1.typ",	"= Chapter\n\nCHAPTERWORDS are set.\n"),
+		("/proj/draft.typ",	"= Draft\n\nDRAFTWORDS never shown.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("CHAPTERWORDS"), "the chapter is set: {}", text);
+	assert!(!text.contains("DRAFTWORDS") && !text.contains("Draft") && !text.contains(']'), "{}", text);
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #let (fixed-point)"]);
+	Ok(())
+}
+
 /// A lone file that shows an `#include` in a raw block is compiled as the lone file it is: no chapter is
 /// looked for, so the absent one is no error, and no contents page is set.
 #[test]

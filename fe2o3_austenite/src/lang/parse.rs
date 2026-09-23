@@ -541,7 +541,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// closing offset is not known until the multi-line skip above closes, several iterations on.
 			// A statement that closes on a later line is recorded when it closes, or at the end of the source
 			// when it never does, so the one site says which.
-			let name	= construct_name(trimmed);
+			// An `#include` at a file's top level is followed by the assembler, so one met here stands in a
+			// body, where Typst sets the file; this reader does not follow it, and refuses it where it stands.
+			let name	= match construct_name(trimmed) {
+				n if n == "#include" && binds.body	=> "#include (inside a body, where it is not followed)".to_string(),
+				n									=> n,
+			};
 			let at		= Span::new(start, end);
 			match decision {
 				CodeSkip::Line			=> skips.record(&name, at),

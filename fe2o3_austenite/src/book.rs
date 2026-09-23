@@ -96,8 +96,17 @@ pub struct BookSpec {
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
 /// A single manuscript has none, so the binary can tell a book from a lone file by the source itself.
 pub fn is_book_root(src: &str) -> bool {
-	// An `#include` a comment holds or a raw block shows is text, and makes no book.
-	lang::parse::live_text(src).lines().any(|l| l.trim_start().starts_with("#include"))
+	// An `#include` a comment holds or a raw block shows is text, and one in a body is the body's: only one at
+	// the file's top level makes a book.
+	top_live_lines(src).iter().any(|l| l.trim_start().starts_with("#include"))
+}
+
+/// The lines of `src` that stand at its top level, as the reader meets them, with what a comment holds and
+/// what raw text shows blanked: the lines an `#import` or an `#include` is read from, so one a comment holds,
+/// a raw block shows or a bracketed body holds is never followed as the file's own.
+fn top_live_lines(src: &str) -> Vec<String> {
+	let live = lang::parse::live_text(src);
+	lang::set::top_level_lines(&live).into_iter().map(|(_, l)| l.to_string()).collect()
 }
 
 /// The heading display-face names a theme carries, for the resolver to load: the role-default heading
@@ -1864,9 +1873,9 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	// The template chain the main source imports: builds the palette and collects furniture, content and
 	// scalar bindings (the `#aside-box` furniture, the `#greet` content binding, a `#let title = "..."`
 	// scalar, the palette they resolve against).
-	// An `#import` or `#include` a comment holds or a raw block shows is text, and is not followed.
-	let main_live = lang::parse::live_text(main_src);
-	for line in main_live.lines() {
+	// An `#import` or `#include` a comment holds, a raw block shows or a body holds is not followed.
+	let main_top = top_live_lines(main_src);
+	for line in &main_top {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(rel) = first_quoted(rest) {
@@ -1879,7 +1888,7 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	lang::rules::collect_template_fns(main_src, body_size, &palette, &mut tfns);
 	lang::rules::collect_content_fns(main_src, &mut cfns);
 	lang::rules::collect_scalar_fns(main_src, &mut sfns);
-	for line in main_live.lines() {
+	for line in &main_top {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
@@ -1919,7 +1928,7 @@ fn walk_template_imports(
 	};
 	let next_dir = path.parent().unwrap_or(dir);
 	// Imports first, so a palette, furniture or binding this file depends on is collected before its own.
-	for line in lang::parse::live_text(&src).lines() {
+	for line in &top_live_lines(&src) {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(inner_rel) = first_quoted(rest) {
@@ -2114,7 +2123,11 @@ fn assemble_into(
 	// Each line is read for its structure -- a guard, an `#include`, a part page -- as the reader meets it:
 	// one a comment holds or a raw block shows is text, and is none of them. The live text keeps every
 	// offset and line of the file, and the file's own line is what is gathered for the reader.
+	// A guard, an `#include` or a part page is read only where it stands at the file's top level, or directly
+	// in an open guard's branch: one in a bracketed body is the body's, gathered for the reader with it, so a
+	// callout holding an `#include` is read whole and the include is refused where it stands.
 	let live = lang::parse::live_text(src);
+	let top: HashSet<usize> = lang::set::top_level_lines(&live).into_iter().map(|(at, _)| at).collect();
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
@@ -2132,6 +2145,10 @@ fn assemble_into(
 		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
 		// inside its branch -- see [`GuardFrame`].
 		let guard_depth = guards.last().map(|g| g.state.open_brackets());
+		let structural	= match guard_depth {
+			Some(d)	=> d == 1,
+			None	=> top.contains(&(start as usize)),
+		};
 
 		// A guard closer `]` on its own line, exactly at the guard's own depth: close the innermost open
 		// guard. A `]` deeper than that -- a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer inside the
@@ -2157,7 +2174,7 @@ fn assemble_into(
 		// at depth one. A guard opened inside a dropped branch, or one whose form or variable the evaluator
 		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
 		// never silently followed nor leaked.
-		if let Some(cond) = guard_open(marker) {
+		if let Some(cond) = guard_open(marker).filter(|_| structural) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			let parent_active = guards.iter().all(|g| g.emits());
 			let (live, then_taken) = if !parent_active {
@@ -2182,7 +2199,7 @@ fn assemble_into(
 		// at the line's end pushes a refused guard so the generic per-line scan below consumes the whole
 		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
 		// space is left to the reader's own code-skip path.
-		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
+		if structural && marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			got.skips.record_in(&label, &fmt!("#if (unsupported include-guard form): {:?}", marker), span);
 			let mut state = lang::parse::SkipState::new();
@@ -2218,7 +2235,7 @@ fn assemble_into(
 		if !guards.iter().all(|g| g.emits()) {
 			continue;
 		}
-		if let Some(rest) = t.strip_prefix("#include") {
+		if let Some(rest) = t.strip_prefix("#include").filter(|_| structural) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
@@ -2269,7 +2286,7 @@ fn assemble_into(
 					got.skips.record_in(&label, "#include", span);
 				},
 			}
-		} else if t.starts_with("#part-page") {
+		} else if structural && t.starts_with("#part-page") {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
