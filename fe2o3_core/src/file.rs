@@ -204,17 +204,26 @@ pub fn create_secret_dir(path: &Path) -> Outcome<()> {
     Ok(())
 }
 
-/// Narrows an existing file's mode to 0600 if it is currently wider, for a
-/// key file that predates this codebase's atomic `save_secret` writes, or
-/// that arrived by some other route -- a backup restore, an `scp`, a
-/// deploy step -- at whatever mode its source held.
+/// Narrows an existing file's mode to its owner read/write bits, dropping
+/// group, other and execute bits, for a key file that predates this
+/// codebase's atomic `save_secret` writes, or that arrived by some other
+/// route -- a backup restore, an `scp`, a deploy step -- at whatever mode
+/// its source held.
 ///
 /// Unlike widening a mode, narrowing one has no window to close: the file
 /// already exists at its current mode throughout, and `chmod` only ever
 /// removes bits, so there is no intermediate state where the file is any
 /// more exposed than it already was. A no-op when the mode is already 0600
 /// or narrower, and a no-op entirely off unix, where there are no POSIX mode
-/// bits to narrow.
+/// bits to narrow. Only ever removes bits from the owner's read/write pair
+/// too -- a 0440 key ends at 0400, never gaining the write bit it did not
+/// have.
+///
+/// A failed narrowing warns and returns `Ok(())` rather than erroring: the
+/// file was already readable at whatever mode it held, so refusing to start
+/// over a `chmod` this process cannot make -- EPERM on a key it can read but
+/// does not own, EROFS on a read-only mount -- would trade a narrower mode
+/// for no service at all.
 #[cfg(unix)]
 pub fn restrict_secret(path: &Path) -> Outcome<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -229,11 +238,12 @@ pub fn restrict_secret(path: &Path) -> Outcome<()> {
     if mode & !0o600 == 0 {
         return Ok(());
     }
-    warn!("Narrowing key file {:?} from mode {:04o} to 0600.", path, mode);
-    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        return Err(err!(e,
-            "Could not narrow {:?} from mode {:04o} to 0600.", path, mode;
-            File, IO, Write));
+    let narrowed = mode & 0o600; // keep only the owner rw bits already present, never add one
+    warn!("Narrowing key file {:?} from mode {:04o} to {:04o}.", path, mode, narrowed);
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(narrowed)) {
+        warn!("Could not narrow {:?} from mode {:04o} to {:04o}: {}. Leaving the key at its \
+            current, already-readable mode rather than refusing to start.", path, mode, narrowed, e);
+        return Ok(());
     }
     Ok(())
 }
