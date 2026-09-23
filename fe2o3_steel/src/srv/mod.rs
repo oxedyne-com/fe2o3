@@ -17,6 +17,7 @@ pub mod publish;
 pub mod server;
 //pub mod smtps;
 pub mod stop;
+pub mod tiles;
 pub mod watch;
 pub mod webhook;
 pub mod ws;

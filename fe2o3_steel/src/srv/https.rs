@@ -11,6 +11,7 @@ use crate::srv::{
     },
     constant,
     context::ServerContext,
+    tiles::TileRequest,
     wsproxy,
 };
 
@@ -80,6 +81,16 @@ use tokio::{
 };
 use tokio_rustls::server::TlsStream;
 
+
+// A log line about one connection or request, written only where the vhost
+// keeps an access log.
+macro_rules! alog {
+    ($on:expr, $($arg:tt)+) => {
+        if $on {
+            log!($($arg)+);
+        }
+    };
+}
 
 impl<
     const UIDL: usize,
@@ -174,7 +185,10 @@ impl<
         // which matches how every HTTP/1.1 and HTTP/2 client behaves.
         let vhost = self.vhost_for(sni.as_deref());
         let log_level = res!(self.cfg.log_level());
-        log!(log_level, "{}: connection from {:?}, sni={:?}, vhost='{}'.",
+        // A vhost with its access log off writes no line naming a peer or a
+        // request, and gives the traffic recorder nothing.
+        let logged = vhost.access_log;
+        alog!(logged, log_level, "{}: connection from {:?}, sni={:?}, vhost='{}'.",
             id, src_addr, sni, vhost.primary_hostname());
 
         let (mut read_stream, mut write_stream) = tokio::io::split(&mut stream);
@@ -230,20 +244,6 @@ impl<
                         }
                         break;
                     }
-                    log!(log_level, "{}: Incoming from {:?}:", id, src_addr);
-                    request.log(log_get_level!());
-
-                    // Pull method+path out for traffic recording
-                    // before the request is moved into the dispatch
-                    // chain. Both are cheap clones.
-                    let (rec_method, rec_path) = match &request.header.headline {
-                        HttpHeadline::Request { method, loc } => (
-                            fmt!("{}", method),
-                            loc.path.as_string().to_string(),
-                        ),
-                        _ => (String::new(), String::new()),
-                    };
-
                     // Validate the Host header against the vhost hostnames.
                     // A mismatch means an SNI/Host disagreement, which is a
                     // misdirected client; we return 421.
@@ -268,6 +268,48 @@ impl<
                             break;
                         }
                     }
+
+                    // Tiles, answered before the request is logged, before the
+                    // session cookie is read and before the traffic recorder
+                    // sees it, since a tile request says where its viewer
+                    // looked. See `srv::tiles`. The connection stays open for
+                    // the next tile unless the client asked to close it.
+                    if let Some(tiles) = vhost.tiles.as_ref() {
+                        if let Some(treq) = TileRequest::of(&request) {
+                            if let Some(mut resp) = tiles.respond(treq).await {
+                                let close = request.get_connection_close();
+                                if close {
+                                    resp.set_connection_close(true);
+                                }
+                                match resp.write_all(&mut write_stream).await {
+                                    Ok(()) => (),
+                                    Err(e) => return Err(err!(e,
+                                        "{}: Could not send a tile response.", id;
+                                        IO, Network, Wire, Write)),
+                                }
+                                if close {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
+                    }
+
+                    alog!(logged, log_level, "{}: Incoming from {:?}:", id, src_addr);
+                    if logged {
+                        request.log(log_get_level!());
+                    }
+
+                    // Pull method+path out for traffic recording
+                    // before the request is moved into the dispatch
+                    // chain. Both are cheap clones.
+                    let (rec_method, rec_path) = match &request.header.headline {
+                        HttpHeadline::Request { method, loc } => (
+                            fmt!("{}", method),
+                            loc.path.as_string().to_string(),
+                        ),
+                        _ => (String::new(), String::new()),
+                    };
 
                     // What content codings the client will take, kept as a
                     // string because the request itself is moved into the
@@ -305,7 +347,7 @@ impl<
                                 issued_cookie = Some(
                                     self.cfg.session_cookie_default(s.clone()),
                                 );
-                                log!(log_level,
+                                alog!(logged, log_level,
                                     "{}: issuing anonymous session {}.", id, s);
                                 (Some(new_sid), Some(s))
                             } else {
@@ -329,7 +371,7 @@ impl<
                                 if let Some(ws_route) = vhost.ws_routes.iter()
                                     .find(|r| r.matches(&ws_path))
                                 {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: ws route {} -> ws://{}:{}{}",
                                         id, ws_path,
                                         ws_route.upstream_host,
@@ -362,7 +404,7 @@ impl<
                                     .filter(|r| proxy_path.starts_with(&r.path_prefix))
                                     .max_by_key(|r| r.path_prefix.len())
                                 {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: proxy ws {} -> {}:{}{}",
                                         id, proxy_path,
                                         proxy_route.upstream_host,
@@ -398,7 +440,7 @@ impl<
                                     .unwrap_or("")
                                     .to_string();
                                 if session_name.is_empty() {
-                                    log!(log_level,
+                                    alog!(logged, log_level,
                                         "{}: terminal WS missing session name.", id);
                                     let mut resp = HttpMessage::respond_with_text(
                                         HttpStatus::BadRequest,
@@ -446,7 +488,7 @@ impl<
                                     }
                                     TerminalGate::Dispatch => (),
                                 }
-                                log!(log_level,
+                                alog!(logged, log_level,
                                     "{}: terminal ws -> '{}'", id, session_name);
                                 let reunited = read_stream.unsplit(write_stream);
                                 return crate::srv::ws::term::handle_terminal_websocket::<
@@ -459,7 +501,7 @@ impl<
                                 ).await;
                             }
                         }
-                        log!(log_level, "Connection upgrading to websocket...");
+                        alog!(logged, log_level, "Connection upgrading to websocket...");
                         // The raw sid string is enough for the WS handler:
                         // it only needs a stable per-client key prefix, not
                         // the typed numeric identifier.
@@ -546,7 +588,7 @@ impl<
                                 &request_uri,
                             ) {
                                 let target = rule.resolve_target(&request_uri);
-                                log!(log_level,
+                                alog!(logged, log_level,
                                     "{}: redirect {} {} -> {} ({})",
                                     id, rule.status, request_uri, target,
                                     match rule.match_kind {
@@ -580,7 +622,7 @@ impl<
                                         .filter(|r| proxy_path.starts_with(&r.path_prefix))
                                         .max_by_key(|r| r.path_prefix.len())
                                     {
-                                        log!(log_level,
+                                        alog!(logged, log_level,
                                             "{}: proxy {} -> {}:{}{}",
                                             id, proxy_path,
                                             proxy_route.upstream_host,
@@ -627,7 +669,7 @@ impl<
                                         };
 
                                         // Record traffic for the proxied request.
-                                        if let Some(recorder) = self.traffic.as_ref() {
+                                        if let Some(recorder) = self.traffic.as_ref().filter(|_| logged) {
                                             let dur_us = req_started_at
                                                 .elapsed().as_micros() as u64;
                                             let record = RequestRecord {
@@ -747,7 +789,7 @@ impl<
                         _ => fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline),
                     }
 
-                    log!(log_level, "Outgoing HTTPS message:");
+                    alog!(logged, log_level, "Outgoing HTTPS message:");
                     let mut rec_status: u16 = 0;
                     let mut rec_bytes: Option<u64> = None;
                     match response {
@@ -905,7 +947,7 @@ impl<
                                     IO, Network, Wire, Write)),
                             }
                         }
-                        None => log!(log_level, " None"),
+                        None => alog!(logged, log_level, " None"),
                     }
 
                     // Emit a traffic record for this request now that
@@ -914,7 +956,7 @@ impl<
                     // are logged but never propagated, since the
                     // request itself succeeded and we do not want
                     // the dashboard to break the data path.
-                    if let Some(recorder) = self.traffic.as_ref() {
+                    if let Some(recorder) = self.traffic.as_ref().filter(|_| logged) {
                         let dur_us = req_started_at.elapsed().as_micros() as u64;
                         let record = RequestRecord {
                             when_ns:        traffic::now_ns(),
@@ -972,7 +1014,7 @@ impl<
         if let Err(e) = result {
             error!(e.into());
         }
-        log!(log_level, "{}: Connection with {:?} closed.", id, src_addr);
+        alog!(logged, log_level, "{}: Connection with {:?} closed.", id, src_addr);
 
         Ok(())
     }

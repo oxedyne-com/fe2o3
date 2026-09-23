@@ -10,6 +10,10 @@ use crate::srv::{
         WsRoute,
     },
     id,
+    tiles::{
+        TileService,
+        TileSource,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -87,6 +91,8 @@ pub struct VhostRuntime<
     pub term_manager:   Option<Arc<crate::srv::ws::term::TerminalManager>>,
     pub uses_sessions:  bool,
     pub permissions_policy: Option<String>, // replaces the default Permissions-Policy header when set
+    pub tiles:          Option<Arc<TileService<TileSource>>>,
+    pub access_log:     bool,   // `false` keeps this vhost's requests out of the log and the recorder
 }
 
 impl<
