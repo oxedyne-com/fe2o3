@@ -1,3 +1,4 @@
+// oracle: none
 #let x = (1, 2
 // ---- case ----
 *unclosed strong

@@ -6,7 +6,7 @@
 //! oracle on fixtures whose answer is fixed by construction, and prove each comparator goes red on a
 //! difference -- a harness that cannot fail measures nothing. The conformance test runs every
 //! fixture and prints the scoreboard; it fails on any Austenite panic or unbounded run, on any
-//! fixture Typst rejects, and, in the areas `EVAL_ORACLE_STRICT` names, on any shortfall.
+//! fixture Typst rejects (or accepts, when it is marked `oracle: rejects`), and, in the areas `EVAL_ORACLE_STRICT` names, on any shortfall.
 //!
 //!     cargo test -p oxedyne_fe2o3_austenite --test eval_oracle -- --nocapture
 //!     EVAL_ORACLE_AREA=general EVAL_ORACLE_STRICT=general cargo test ... --test eval_oracle
@@ -22,6 +22,7 @@ use harness::austenite::{
 };
 use harness::corpus::{
 	self,
+	Expect,
 	Filter,
 };
 use harness::json::{
@@ -123,8 +124,10 @@ fn fixture_corpus_is_synthetic_and_accepted_by_typst() -> Outcome<()> {
 			bad.push(f);
 			continue;
 		}
-		if let Err(e) = res!(o.compiles(fx)) {
-			bad.push(fmt!("{}: typst rejects it: {}", fx.id(), e));
+		match (res!(o.compiles(fx)), fx.expect) {
+			(Err(e), Expect::Accepts)	=> bad.push(fmt!("{}: typst rejects it: {}", fx.id(), e)),
+			(Ok(()), Expect::Rejects)	=> bad.push(fmt!("{}: marked `oracle: rejects`, but typst accepts it", fx.id())),
+			_							=> (),
 		}
 	}
 	assert!(bad.is_empty(), "corpus faults:\n{}", bad.join("\n"));
@@ -443,6 +446,34 @@ fn austenite_side_readers_agree_with_the_oracle_on_hand_built_layout() -> Outcom
 		Err(e)	=> return Err(err!("positions: {}", e; Invalid)),
 	};
 	assert!(!harness::compare_positions(&want_pos, &pos).is_empty(), "a lost probe label must fail level 2");
+	Ok(())
+}
+
+// `harness/rejects.typ` fails at a place fixed by construction: line 2, column 4 -- the `p` of `panic`,
+// since an embedded expression's span leaves out its `#`, and counted in characters, so the two-byte
+// `é` before it is one column.
+#[test]
+fn first_error_reader_and_comparator_agree_with_the_oracle_and_go_red_on_a_difference() -> Outcome<()> {
+	let o = match res!(oracle()) {
+		Some(o)	=> o,
+		None	=> return Ok(()),
+	};
+	let fx = res!(harness_fixture("rejects"));
+	assert_eq!(fx.expect, Expect::Rejects, "harness/rejects.typ must carry `oracle: rejects`");
+	let said = match res!(o.compiles(&fx)) {
+		Ok(())	=> return Err(err!("typst accepts harness/rejects.typ"; Invalid)),
+		Err(e)	=> e,
+	};
+	let (msg, pos) = harness::split_first_error(&said);
+	assert!(msg.contains("rejected on purpose"), "message read as `{}`", msg);
+	assert_eq!(pos, Some((2, 4)), "position read from `{}`", said);
+	let same = (msg.clone(), pos);
+	assert!(harness::compare_first_error(&msg, pos, Some(&same)).is_pass());
+	let moved = (msg.clone(), Some((2, 5)));
+	assert!(!harness::compare_first_error(&msg, pos, Some(&moved)).is_pass(), "a moved error must fail");
+	let reworded = ("rejected".to_string(), pos);
+	assert!(!harness::compare_first_error(&msg, pos, Some(&reworded)).is_pass(), "a reworded error must fail");
+	assert!(!harness::compare_first_error(&msg, pos, None).is_pass(), "accepting it must fail");
 	Ok(())
 }
 

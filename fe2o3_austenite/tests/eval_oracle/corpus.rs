@@ -7,6 +7,8 @@
 //
 //     // oracle: levels 1 2      compare values and positions only
 //     // oracle: no-html         skip level 3 (Typst's HTML export cannot express the construct)
+//     // oracle: rejects         Typst must reject it; Austenite must fail with the same first error
+//     // oracle: none            not a document (a unit's case file), so not in the corpus
 //
 // Levels: 1 values (`#metadata(..) <probe>`), 2 positions of headings, figures, equations,
 // footnotes and probes, 3 realised structure against Typst's HTML export, 4 layout (page count,
@@ -27,6 +29,14 @@ pub struct Fixture {
 	pub root:	PathBuf,	// the area directory: `--root` for typst, `World::root` for Austenite
 	pub text:	String,
 	pub levels:	[bool; 4],
+	pub expect:	Expect,
+}
+
+/// What Typst is expected to do with a fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expect {
+	Accepts,
+	Rejects,	// compared on the first error's message and position, not on any level
 }
 
 impl Fixture {
@@ -114,15 +124,20 @@ pub fn discover(filter: &Filter) -> Outcome<Vec<Fixture>> {
 			}
 			let text = res!(std::fs::read_to_string(&path).map_err(|e| err!(
 				"Cannot read fixture {}: {}", path.display(), e; IO, File, Read)));
-			let levels = directives(&text);
-			out.push(Fixture { area: area.clone(), name, path, root: dir.clone(), text, levels });
+			let (levels, expect) = match directives(&text) {
+				Some(d)	=> d,
+				None	=> continue,
+			};
+			out.push(Fixture { area: area.clone(), name, path, root: dir.clone(), text, levels, expect });
 		}
 	}
 	Ok(out)
 }
 
-fn directives(text: &str) -> [bool; 4] {
+// The levels and expectation a fixture's leading directives ask for, or `None` for `oracle: none`.
+fn directives(text: &str) -> Option<([bool; 4], Expect)> {
 	let mut levels = [true; 4];
+	let mut expect = Expect::Accepts;
 	for line in text.lines() {
 		let t = line.trim();
 		if !t.starts_with("//") {
@@ -147,9 +162,13 @@ fn directives(text: &str) -> [bool; 4] {
 			}
 		} else if d == "no-html" {
 			levels[2] = false;
+		} else if d == "rejects" {
+			expect = Expect::Rejects;
+		} else if d == "none" {
+			return None;
 		}
 	}
-	levels
+	Some((levels, expect))
 }
 
 /// Why a fixture cannot be in the corpus, if it cannot: it must be synthetic, so it may not name a

@@ -300,9 +300,10 @@ fn scratch() -> PathBuf {
 	PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("eval_grid")
 }
 
-/// Writes or checks the case's fixture, then runs `typst` over it.
-fn oracle_source(case: &Case) -> Outcome<PathBuf> {
-	let src	= case.typst();
+/// Writes or checks the case's fixture, then runs `typst` over it. A case Typst must reject is marked
+/// so for the structure oracle's corpus.
+fn oracle_source(case: &Case, rejects: bool) -> Outcome<PathBuf> {
+	let src	= if rejects { format!("// oracle: rejects\n{}", case.typst()) } else { case.typst() };
 	let dir	= fixtures();
 	let path = dir.join(format!("{}.typ", case.name));
 	if std::env::var("GRID_FIXTURES_WRITE").is_ok() {
@@ -446,7 +447,7 @@ fn region() -> Region { Region::new(Sp::from_pt(200.0), Sp::from_pt(400.0)) }
 
 /// Lays the case out both ways and compares positions, fills and lines. Returns the plan for extra checks.
 fn check(case: &Case) -> Outcome<GridPlan> {
-	let src = res!(oracle_source(case));
+	let src = res!(oracle_source(case, false));
 	let src_s = src.to_string_lossy().into_owned();
 	let (ok, out, err) = res!(typst(&["eval",
 		"query(<m>).map(m => (m.value, m.location().position().x.pt(), m.location().position().y.pt(), m.location().page()))",
@@ -516,7 +517,7 @@ fn check(case: &Case) -> Outcome<GridPlan> {
 
 /// A case Typst refuses: the evaluator must refuse it with Typst's message.
 fn check_error(case: &Case) -> Outcome<()> {
-	let src = res!(oracle_source(case));
+	let src = res!(oracle_source(case, true));
 	let (ok, _, err) = res!(typst(&["compile", &src.to_string_lossy(), &scratch().join("err.pdf").to_string_lossy()]));
 	assert!(!ok, "{}: typst accepted it", case.name);
 	let theirs = err.lines().next().unwrap_or("").trim_start_matches("error: ").to_string();
