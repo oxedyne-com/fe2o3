@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// S0 incremental edit-latency bench: a scripted one-character edit to a
-// paragraph, timed to the recompiled page -- Austenite's compileProjectDelta
+// S0 incremental edit-latency bench: scripted typing, one character per edit
+// into a word at each of several paragraphs in turn, each edit timed to the
+// recompiled page -- Austenite's compileProjectDelta
 // (changed-only) against typst.ts's real Daimond wiring, which is a full
 // recompile to the `vector` format on every edit (see lib/wasm_common.mjs and
 // tools/bench/README.md; Daimond does not call typst.ts's incr_compile/
@@ -43,7 +44,9 @@ async function main() {
 		}
 	}
 	let text = fs.readFileSync(args.doc, 'utf8');
-	const tokens = [...text.matchAll(/EDITTOK(\d+)/g)].map((m) => m[0]);
+	// Each marker is followed by a space, so `EDITTOK1 ` names paragraph 1 alone and never the start of
+	// `EDITTOK10`; matching the bare marker would edit every paragraph whose number it prefixes.
+	const tokens = [...text.matchAll(/EDITTOK(\d+) /g)].map((m) => m[0].slice(0, -1));
 	const uniqueTokens = [...new Set(tokens)];
 	if (!uniqueTokens.length) {
 		process.stdout.write(JSON.stringify({ ok: false, error: 'no EDITTOK markers found; doc not from gen_synthetic.py' }) + '\n');
@@ -72,12 +75,18 @@ async function main() {
 	for (let i = 0; i < args.edits; i++) {
 		const tok = positions[i % positions.length];
 		editCounter += 1;
-		// A one-character edit: append a digit to the sentinel token, distinct
-		// each time, so the paragraph's text genuinely differs run to run.
-		const marker = `${tok}e${editCounter}`;
-		text = text.split(tok).join(marker);
-		// The token at this position now reads `marker`; later edits at the same
-		// position must search for that, not the original `EDITTOKn`.
+		// One keystroke: a letter typed onto the end of the word at this position, so each edit adds
+		// exactly one character and every source differs from every one before it.
+		const letter = String.fromCharCode(97 + (editCounter % 26));
+		const marker = `${tok}${letter}`;
+		const at = text.indexOf(`${tok} `);
+		if (at < 0) {
+			ok = false;
+			process.stderr.write(`edit_latency: marker ${tok} is gone from the source\n`);
+			break;
+		}
+		text = text.slice(0, at) + marker + text.slice(at + tok.length);
+		// The word at this position now reads `marker`; the next edit here types onto that.
 		positions[i % positions.length] = marker;
 
 		const project = { main: '/main.typ', sources: [['/main.typ', text]], known };

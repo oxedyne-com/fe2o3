@@ -4,6 +4,10 @@
 # every engine equally, each run capped at 3G and timed under
 # `/usr/bin/time -v`. See tools/bench/README.md for the full protocol and the
 # owner-decision pass line this feeds.
+#
+# Every invocation here is a fresh process (a `typst compile`, a fresh
+# `austenite` run), so the native leg is cold by construction -- there is no
+# memoised-instance leg to label here as there is for the wasm legs.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +15,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/lib/host.sh"
 
 AUSTENITE_BIN="${AUSTENITE_BIN:?set AUSTENITE_BIN to the built austenite binary}"
-TYPST_BIN="${TYPST_BIN:-typst}"
+# Prefer the pinned CLI at ~/bin/typst (0.15.1) over whatever "typst" resolves
+# to on PATH, so a different install elsewhere on the host cannot silently
+# change the oracle version this bench compares against.
+TYPST_BIN="${TYPST_BIN:-$([[ -x "$HOME/bin/typst" ]] && echo "$HOME/bin/typst" || echo typst)}"
 WARMUPS="${WARMUPS:-1}"
 RUNS="${RUNS:-3}"
 OUT_DIR="${OUT_DIR:?set OUT_DIR}"

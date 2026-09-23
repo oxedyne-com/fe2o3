@@ -2,10 +2,19 @@
 
 The harness behind unit S0 of
 `~/usr/code/ai/claude/notes/austenite_typesetter_tail_plan_20260923.md`. It compares
-native Austenite against `typst compile` (`-j1` and `-j16`), and -- where Daimond's
-vendored wasm copies exist -- Austenite wasm against typst.ts wasm in node, including
-incremental edit latency. It writes a JSON report plus a markdown summary and refuses
-to present numbers taken while the host was loaded unless told to anyway.
+native Austenite against `typst compile` (`-j1` and `-j16`, pinned to `~/bin/typst`
+0.15.1), and -- where Daimond's vendored wasm copies exist -- Austenite wasm against
+typst.ts wasm in node, in three labelled modes (below), plus incremental edit latency.
+It writes a JSON report plus a markdown summary and refuses to present numbers taken
+while the host was loaded unless told to anyway.
+
+**A withdrawn figure shaped this harness.** An earlier "70x slower" wasm result
+compared a cold Austenite compile against a typst.ts run that hit its own comemo
+cache, because both engines were run through the same long-lived instance on
+unchanged input. That ratio was never a real comparison, and it is withdrawn.
+Every wasm leg below is now measured under a mode label that says which cache
+state it was taken in, so the two engines are never compared cache-hit-against-
+cold-compile again.
 
 ## Quick start
 
@@ -50,18 +59,40 @@ baseline.
   equally over the course of the run. Each run is capped with `systemd-run --user
   --scope --quiet -p MemoryMax=3G --slice=claude-rc.slice` and timed with
   `/usr/bin/time -v`, which gives wall clock and peak RSS in one pass.
+- **Cold vs unchanged recompile (native)**: every native run is its own process --
+  a fresh `typst compile` invocation, a fresh `austenite` run -- so the native leg is
+  cold by construction. There is nothing to label here.
+- **Cold, unchanged and edit (wasm)**: `wasm_bench.mjs` runs one of three modes, named
+  as check G11 names them and set with `--mode` (`wasm_bench_runner.sh` runs all three
+  by default; narrow with `WASM_MODES`, e.g. `WASM_MODES=edit`):
+  - `cold` -- one process per measured run, each loading a fresh wasm instance (new
+    linear memory: a new compiler object on an old instance would keep its statics, and
+    typst.ts's comemo cache is one of them). The compile is timed; the instance load is
+    reported beside it (`load_s`).
+  - `unchanged` -- one long-lived instance, every warm-up and measured run against the
+    *same unchanged* project. For an engine that memoises unchanged input (typst.ts's
+    comemo) this times its cache hit, which is what an idle live view costs.
+  - `edit` -- one long-lived instance, warmed on the unchanged project; before each
+    measured run one more letter is typed into a word near the middle of the document,
+    so every source is new and a memoising engine recompiles only what the edit reaches.
+
+  `aggregate.py` reports `wasm-<engine>-<mode>` as separate rows and computes the
+  austenite/typst.ts ratio per mode -- never across modes.
 - **Load flagging**: before and after every run, the harness reads `/proc/loadavg` (the
   1-minute average) and `some avg10` from `/proc/pressure/cpu` and `/proc/pressure/
   memory`. A run is flagged (`flagged_under_load: true`) when the load average was
-  above `BENCH_LOAD_THRESHOLD` (default 2) on either side. `aggregate.py` refuses to
+  above `BENCH_LOAD_THRESHOLD` (default 20; the plan's 2 is never met on the 16-thread
+  fleet host, and interleaving puts whatever load there is on every engine alike) on
+  either side. `aggregate.py` refuses to
   print a report's numbers -- it writes a "REFUSED" json/md pair instead -- when any run
   in the batch was flagged, unless `--force` is passed, in which case the report is
   produced but headed "TAKEN UNDER LOAD" in bold, in the markdown and as `under_load:
   true` in the JSON.
 - **Incremental edit latency**: `edit_latency.mjs` keeps one compiler instance alive
-  across a scripted run of one-character edits to five positions in the document (the
-  synthetic generator tags every paragraph with a stable `EDITTOKn` marker so a
-  position can be found and mutated by string search), timing each edit's recompile.
+  across a scripted run of keystrokes at five positions in turn, each typing one letter
+  onto the end of a word, and times each edit's recompile (the synthetic generator tags
+  every paragraph with a stable `EDITTOKn` marker, found with its trailing space so that
+  `EDITTOK1` never matches the start of `EDITTOK10`).
   Austenite's leg calls `compileProjectDelta` with the `known`-id cache carried forward
   edit to edit, exactly as the real watch loop does. **typst.ts's leg is a full
   recompile to the `vector` format on every edit, not a call to typst.ts's
@@ -105,7 +136,7 @@ baseline.
 |---|---|
 | `run_bench.sh` | top-level driver: generates the synthetic doc, runs every leg, aggregates |
 | `speed_bench.sh` | native leg: typst -j16/-j1 vs austenite, interleaved, capped, timed |
-| `wasm_bench.mjs` / `wasm_bench_runner.sh` | wasm full-compile leg (node process per engine per doc, capped by the runner) |
+| `wasm_bench.mjs` / `wasm_bench_runner.sh` | wasm full-compile leg (node process per engine per doc per mode, capped by the runner; modes: `cold`, `unchanged`, `edit`) |
 | `edit_latency.mjs` / `edit_latency_runner.sh` | incremental edit-latency leg |
 | `gen_synthetic.py` | deterministic synthetic `.typ` generator, any page count |
 | `aggregate.py` | merges the three legs' JSONL into `bench_report.json` + `bench_report.md`, and the load gate |
@@ -114,7 +145,10 @@ baseline.
 
 ## Wasm legs are best-effort
 
-The wasm legs run only when Daimond's vendored copies are present:
+The wasm legs run the tree's own build when `--aust-vendor DIR` (or `AUST_VENDOR`) names a
+`wasm-pack build fe2o3_austenite --release --target web --features wasm` output, and otherwise
+Daimond's vendored copies, which are whatever was last shipped. They run only when the copies
+are present:
 `~/usr/code/web/apps/oxedyne/daimond/www/vendor/austenite/` and `.../vendor/typst/`.
 Both are hand-shipped (not built by any `cargo`/`npm` step in this repo -- see the
 Daimond integration plan's decision on `vendor/austenite`), so their absence on a

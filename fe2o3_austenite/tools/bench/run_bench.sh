@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # S0 bench harness top-level driver. Runs the native comparison
-# (typst -j16 / -j1 vs the austenite binary) and, when the vendored wasm is
-# present, the wasm comparison (Austenite wasm vs typst.ts wasm in node) and
-# the incremental edit-latency bench, on the sample docs plus a generated
-# 300-page synthetic document, then aggregates everything into one JSON
-# report and one markdown summary.
+# (typst -j16 / -j1 vs the austenite binary, cold by construction) and, when
+# the vendored wasm is present, the wasm comparison (Austenite wasm vs
+# typst.ts wasm in node, in each of `cold`/`unchanged`/`edit` -- see
+# wasm_bench.mjs) and the incremental edit-latency bench, on the sample
+# docs plus a generated 300-page synthetic document, then aggregates
+# everything into one JSON report and one markdown summary.
 #
 # Defaults to SMOKE mode: 1 warm-up, 3 measured runs, a small synthetic doc,
 # few edits. Pass --full for the real S0 protocol (2 warm-ups, 7 runs, the
@@ -13,6 +14,12 @@
 #
 # Usage: run_bench.sh --austenite-bin PATH [--full] [--force]
 #                      [--out DIR] [--docs 'glob'] [--skip-wasm]
+#                      [--wasm-modes 'cold unchanged edit']
+#                      [--aust-vendor DIR] [--typst-vendor DIR]
+#
+# --aust-vendor points the wasm legs at a wasm-pack `--target web` output of
+# the tree under test instead of Daimond's vendored copy, which is whatever
+# was last shipped (AUST_VENDOR / TYPST_VENDOR in the environment do the same).
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,13 +33,14 @@ FORCE=false
 OUT_DIR="$HERE/out/$(date -u +%Y%m%dT%H%M%SZ)"
 SKIP_WASM=false
 DOCS_GLOB=""
+WASM_MODES=""
 
 # Daimond's vendored wasm -- see tools/bench/README.md for how these paths
 # were found; both are hand-shipped, not part of any build, so their absence
 # is normal on a fresh checkout and just means the wasm legs are skipped.
 DAIMOND_WWW="$HOME/usr/code/web/apps/oxedyne/daimond/www"
-AUST_VENDOR="$DAIMOND_WWW/vendor/austenite"
-TYPST_VENDOR="$DAIMOND_WWW/vendor/typst"
+AUST_VENDOR="${AUST_VENDOR:-$DAIMOND_WWW/vendor/austenite}"
+TYPST_VENDOR="${TYPST_VENDOR:-$DAIMOND_WWW/vendor/typst}"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -42,6 +50,9 @@ while [[ $# -gt 0 ]]; do
 		--out) OUT_DIR="$2"; shift 2 ;;
 		--docs) DOCS_GLOB="$2"; shift 2 ;;
 		--skip-wasm) SKIP_WASM=true; shift ;;
+		--wasm-modes) WASM_MODES="$2"; shift 2 ;;
+		--aust-vendor) AUST_VENDOR="$2"; shift 2 ;;
+		--typst-vendor) TYPST_VENDOR="$2"; shift 2 ;;
 		*) echo "run_bench.sh: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
@@ -53,6 +64,7 @@ fi
 
 mkdir -p "$OUT_DIR"
 export OUT_DIR AUSTENITE_BIN AUST_VENDOR TYPST_VENDOR
+[[ -n "$WASM_MODES" ]] && export WASM_MODES
 
 if $FULL; then
 	export WARMUPS=2 RUNS=7 EDITS=50 POSITIONS=5
@@ -92,8 +104,10 @@ if ! $SKIP_WASM && [[ -f "$AUST_VENDOR/oxedyne_fe2o3_austenite_bg.wasm" && \
                        -f "$TYPST_VENDOR/typst_ts_web_compiler_bg.wasm" ]]; then
 	bash "$HERE/wasm_bench_runner.sh" "${DOCS[@]}"
 	bash "$HERE/edit_latency_runner.sh" "${DOCS[@]}"
+elif $SKIP_WASM; then
+	echo "[run_bench] skipping wasm legs (--skip-wasm)" >&2
 else
-	echo "[run_bench] skipping wasm legs: vendored wasm not found under $DAIMOND_WWW/vendor" >&2
+	echo "[run_bench] skipping wasm legs: no wasm at $AUST_VENDOR and $TYPST_VENDOR" >&2
 fi
 
 LABEL="mode=$($FULL && echo full || echo smoke); host load 1-min before finish: $(loadavg1); $(date -u +%FT%TZ)"

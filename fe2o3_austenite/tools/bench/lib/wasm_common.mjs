@@ -26,14 +26,24 @@ export function projectFromFile(typPath) {
 	return { main: '/main.typ', sources: [['/main.typ', text]] };
 }
 
+// A glue module is cached by URL, and its init keeps the first wasm instance it
+// made, so importing it again yields the same linear memory and every static
+// cache in it -- typst.ts's comemo among them. A distinct query string makes a
+// distinct module, and so a new instance with fresh memory: a truly cold engine.
+let freshCount = 0;
+function glueUrl(file, fresh) {
+	const url = pathToFileURL(file).href;
+	return fresh ? `${url}?fresh=${process.pid}-${++freshCount}` : url;
+}
+
 /// Builds the Austenite wasm instance from a vendor directory containing
 /// `oxedyne_fe2o3_austenite.js` and `..._bg.wasm`, exactly as `getAustenite()`
-/// does in `www/js/typst.js`.
-export async function loadAustenite(vendorDir) {
-	const glue = pathToFileURL(path.join(vendorDir, 'oxedyne_fe2o3_austenite.js')).href;
+/// does in `www/js/typst.js`. `fresh` gives it a wasm instance of its own.
+export async function loadAustenite(vendorDir, fresh = false) {
+	const glue = glueUrl(path.join(vendorDir, 'oxedyne_fe2o3_austenite.js'), fresh);
 	const wasmPath = path.join(vendorDir, 'oxedyne_fe2o3_austenite_bg.wasm');
 	const mod = await import(glue);
-	await mod.default(fs.readFileSync(wasmPath));
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
 	const instance = new mod.DaimondTypst();
 	return {
 		engine: 'austenite',
@@ -56,9 +66,9 @@ export async function loadAustenite(vendorDir) {
 /// `typst_ts_web_compiler.mjs`/`..._bg.wasm` and a `fonts/` subdirectory with
 /// the bundled font set, exactly as `getCompiler()` does in `www/js/typst.js`:
 /// a dummy access model (sources are injected, nothing is read from disk) and
-/// the same five bundled fonts.
-export async function loadTypstTs(vendorDir) {
-	const glue = pathToFileURL(path.join(vendorDir, 'typst_ts_web_compiler.mjs')).href;
+/// the same five bundled fonts. `fresh` gives it a wasm instance of its own.
+export async function loadTypstTs(vendorDir, fresh = false) {
+	const glue = glueUrl(path.join(vendorDir, 'typst_ts_web_compiler.mjs'), fresh);
 	const wasmPath = path.join(vendorDir, 'typst_ts_web_compiler_bg.wasm');
 	const mod = await import(glue);
 	await mod.default(fs.readFileSync(wasmPath));
@@ -111,9 +121,9 @@ export async function loadTypstTs(vendorDir) {
 	};
 }
 
-export async function loadEngine(kind, vendorDir) {
-	if (kind === 'austenite') return loadAustenite(vendorDir);
-	if (kind === 'typstts') return loadTypstTs(vendorDir);
+export async function loadEngine(kind, vendorDir, fresh = false) {
+	if (kind === 'austenite') return loadAustenite(vendorDir, fresh);
+	if (kind === 'typstts') return loadTypstTs(vendorDir, fresh);
 	throw new Error(`unknown engine ${kind}`);
 }
 
