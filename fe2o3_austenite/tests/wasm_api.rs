@@ -8,11 +8,14 @@ use oxedyne_fe2o3_austenite::compile::{
 	Diagnostic,
 	DiagnosticKind,
 	Report,
+	Severity,
 };
 use oxedyne_fe2o3_austenite::fonts;
 use oxedyne_fe2o3_austenite::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::pixmap::Pixmap;
 
 use std::collections::HashMap;
 use std::path::{
@@ -229,31 +232,44 @@ fn an_error_carrying_no_site_reports_zero_zero() -> Outcome<()> {
 
 /// Each kind is fixed where its fault is raised: a site not set as written by the reader's refusal class,
 /// a hard error by the tags it was raised with, however many frames it then crossed, and a strict refusal
-/// by its cause.
+/// by its cause. A site is a warning and a hard error an error.
 #[test]
 fn each_diagnostic_kind_is_fixed_where_its_fault_is_raised() -> Outcome<()> {
 	let _turn = turn();
 
 	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"= H\n\n#columns(2)[a]\n")]))));
 	let d = &report.diagnostics[0];
-	assert_eq!((d.kind, d.hint.as_deref()), (DiagnosticKind::Unsupported, None), "{}", d);
+	assert_eq!((d.severity, d.kind, d.hint.as_deref()), (Severity::Warning, DiagnosticKind::Unsupported, None), "{}", d);
 	let head = match report.strict_failure(Path::new(MAIN)) {
 		Some(h)	=> h,
 		None	=> return Err(err!("strict must refuse a skipped construct"; Test)),
 	};
-	assert_eq!(head.kind, DiagnosticKind::Unsupported, "{}", head);
+	assert_eq!((head.severity, head.kind), (Severity::Error, DiagnosticKind::Unsupported), "{}", head);
 	assert_eq!(head.hint.as_deref(), Some("skipped: #columns ×1"), "{}", head);
 
 	// Passed over, like any other construct the reader does not set.
 	let (report, _) = res!(done(res!(compile_pdf(&[(MAIN, b"= H\n\n#import \"t.typ\": *\n\nBody.\n")]))));
 	assert_eq!(report.diagnostics[0].kind, DiagnosticKind::Unsupported, "{}", report.diagnostics[0]);
 
+	// A missing image is set as a placeholder with a warning, at its own line, which strict refuses.
+	let src = b"= H\n\nBody.\n\n#figure(image(\"gone.png\"), caption: [A figure.])\n";
+	let (report, pdf) = res!(done(res!(compile_pdf(&[(MAIN, src)]))));
+	assert!(pdf.starts_with(b"%PDF-"), "the placeholder still sets");
+	let d = &report.diagnostics[0];
+	assert_eq!((d.severity, d.kind, d.file.as_str(), d.line), (Severity::Warning, DiagnosticKind::MissingFile, MAIN, 5), "{}", d);
+	assert!(d.message.contains("gone.png"), "{}", d);
+	let head = match report.strict_failure(Path::new(MAIN)) {
+		Some(h)	=> h,
+		None	=> return Err(err!("strict must refuse a missing image"; Test)),
+	};
+	assert_eq!((head.kind, head.line), (DiagnosticKind::MissingFile, 5), "{}", head);
+
 	let d = res!(failed(res!(compile_pdf(&[(MAIN, b"= H\n\n#include \"ch1.typ\"\n")]))));
-	assert_eq!(d.kind, DiagnosticKind::MissingFile, "{}", d);
+	assert_eq!((d.severity, d.kind), (Severity::Error, DiagnosticKind::MissingFile), "{}", d);
 
 	let src = b"#set text(font: \"Nonesuch Sans\")\n\n= H\n\nBody.\n";
 	let d = res!(failed(res!(compile_pdf(&[(MAIN, src)]))));
-	assert_eq!(d.kind, DiagnosticKind::MissingFont, "{}", d);
+	assert_eq!((d.severity, d.kind), (Severity::Error, DiagnosticKind::MissingFont), "{}", d);
 	assert!(d.message.contains("Nonesuch Sans"), "{}", d);
 
 	// A bound reached, as layout that will not settle is raised, crossing frames on its way out.
@@ -275,13 +291,68 @@ fn each_diagnostic_kind_is_fixed_where_its_fault_is_raised() -> Outcome<()> {
 		Some(h)	=> h,
 		None	=> return Err(err!("strict must refuse a source that sets nothing"; Test)),
 	};
-	assert_eq!(head.kind, DiagnosticKind::Internal, "{}", head);
+	assert_eq!((head.severity, head.kind), (Severity::Error, DiagnosticKind::Internal), "{}", head);
 	Ok(())
+}
+
+/// An image the project does not hold is set as a placeholder, and a section banner without its logo, and
+/// each is reported where it is named as a missing file, which strict refuses. An image the project holds
+/// is reported nowhere.
+#[test]
+fn a_missing_image_is_reported_where_it_is_named_and_a_present_one_is_not() -> Outcome<()> {
+	let _turn = turn();
+	let png = res!(res!(Pixmap::filled(4, 4, Rgba::BLACK)).to_png());
+	let src = b"= H\n\n#figure(image(\"here.png\"), caption: [Present.])\n\n#image(\"gone.png\")\n\n\
+		#section-banner(\"logo.svg\")\n\nBody.\n";
+	let (report, pdf) = res!(done(res!(compile_pdf(&[(MAIN, &src[..]), ("/proj/here.png", png.as_slice())]))));
+	assert!(pdf.starts_with(b"%PDF-"), "a non-strict compile still sets the page");
+	let sites: Vec<(Severity, DiagnosticKind, &str, usize, usize)> = report.diagnostics.iter()
+		.map(|d| (d.severity, d.kind, d.file.as_str(), d.line, d.col))
+		.collect();
+	assert_eq!(sites, [
+		(Severity::Warning, DiagnosticKind::MissingFile, MAIN, 5, 1),
+		(Severity::Warning, DiagnosticKind::MissingFile, MAIN, 7, 1),
+	], "{:?}", report.diagnostics);
+	assert!(report.diagnostics[0].message.contains("gone.png"), "{}", report.diagnostics[0]);
+	assert!(report.diagnostics[1].message.contains("logo.svg"), "{}", report.diagnostics[1]);
+	let head = match report.strict_failure(Path::new(MAIN)) {
+		Some(h)	=> h,
+		None	=> return Err(err!("strict must refuse a missing image"; Test)),
+	};
+	assert_eq!((head.severity, head.kind, head.line), (Severity::Error, DiagnosticKind::MissingFile, 5), "{}", head);
+	Ok(())
+}
+
+/// Strict mode decides by severity and kind: an error always refuses, a warning only where its kind says
+/// the document was not set as written, and any other warning stands beside the PDF.
+#[test]
+fn strict_refuses_by_severity_and_kind() {
+	let site = |severity: Severity, kind: DiagnosticKind| Diagnostic {
+		file:		MAIN.to_string(),
+		line:		3,
+		col:		1,
+		message:	"a site".to_string(),
+		severity,
+		kind,
+		hint:		None,
+	};
+	let report = |d: Diagnostic| Report { pages: 1, diagnostics: vec![d], skipped: None, empty: false };
+	for kind in [DiagnosticKind::Unsupported, DiagnosticKind::MissingFile, DiagnosticKind::Package,
+		DiagnosticKind::MissingFont]
+	{
+		assert!(report(site(Severity::Warning, kind)).strict_failure(Path::new(MAIN)).is_some(), "{}", kind);
+	}
+	for kind in [DiagnosticKind::Limit, DiagnosticKind::Syntax, DiagnosticKind::Type,
+		DiagnosticKind::UnknownVariable, DiagnosticKind::Internal]
+	{
+		assert_eq!(report(site(Severity::Warning, kind)).strict_failure(Path::new(MAIN)), None, "{}", kind);
+		assert!(report(site(Severity::Error, kind)).strict_failure(Path::new(MAIN)).is_some(), "{}", kind);
+	}
 }
 
 /// The words a caller switches on. A change here breaks every consumer's mapping.
 #[test]
-fn the_kind_words_are_the_wire_contract() {
+fn the_kind_and_severity_words_are_the_wire_contract() {
 	let words: Vec<&str> = [
 		DiagnosticKind::MissingFile,
 		DiagnosticKind::MissingFont,
@@ -295,6 +366,7 @@ fn the_kind_words_are_the_wire_contract() {
 	].iter().map(|k| k.as_str()).collect();
 	assert_eq!(words, ["missing_file", "missing_font", "syntax", "type", "unknown_variable", "package",
 		"limit", "unsupported", "internal"]);
+	assert_eq!([Severity::Error.as_str(), Severity::Warning.as_str()], ["error", "warning"]);
 }
 
 /// The family name `fc-scan` reads from a font file's own name table.

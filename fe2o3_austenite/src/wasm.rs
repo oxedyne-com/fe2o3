@@ -11,9 +11,9 @@
 //! Every method resolves; none rejects or throws. A failure returns `{ error: "<file>:<line>:<col>:
 //! <message>", diagnostics, skipped }` -- `0:0` where the cause could not be traced to a source line --
 //! never a bare access-denied line and never a JavaScript exception, so a caller composes its diagnostics
-//! from a value it always receives. A project carrying `strict: true` turns a result that passed over a
-//! construct, produced no pages or set no content into such a failure, so a partial PDF never reads as
-//! success.
+//! from a value it always receives. A project carrying `strict: true` turns a result that was not set as
+//! written -- a construct passed over, a file, package or font family missing -- or that produced no pages
+//! or set no content into such a failure, so a partial PDF never reads as success.
 //!
 //! One capability is deliberately out of this lane and documented as a gap rather than stubbed: a recompile
 //! is from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not
@@ -91,11 +91,12 @@ impl DaimondTypst {
 	}
 
 	/// Compiles a project to a single PDF: `{ pdf: Uint8Array, pages, diagnostics: [{ file, line, col,
-	/// message, kind, hint }], skipped: string | null }` on success, `{ error, diagnostics, skipped }`
-	/// otherwise. `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts:
-	/// [[path, bytes], ...], strict?: bool }`; every entry is injected into the source map and nothing
-	/// outside it is read. `diagnostics` lists every construct the reader passed over; under `strict` any
-	/// such site, zero pages or a source setting no content is returned as `{ error }` instead of a PDF.
+	/// message, severity, kind, hint }], skipped: string | null }` on success, `{ error, diagnostics,
+	/// skipped }` otherwise. `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes],
+	/// ...], fonts: [[path, bytes], ...], strict?: bool }`; every entry is injected into the source map and
+	/// nothing outside it is read. `diagnostics` lists every site the reader did not set as written; under
+	/// `strict` a warning of a refusing kind, zero pages or a source setting no content is returned as
+	/// `{ error }` instead of a PDF.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
 		match self.run(project, Mode::Pdf) {
@@ -448,6 +449,7 @@ fn internal(msg: &str) -> Failure {
 			line:		0,
 			col:		0,
 			message:	fmt!("internal: {}", msg),
+			severity:	compile::Severity::Error,
 			kind:		compile::DiagnosticKind::Internal,
 			hint:		None,
 		},
@@ -587,8 +589,8 @@ fn set(obj: &js_sys::Object, key: &str, val: &JsValue) {
 	let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), val);
 }
 
-/// Sets `pages`, `diagnostics: [{ file, line, col, message, kind, hint }]` and `skipped` (string or
-/// `null`) from a report, the fields every compile result carries.
+/// Sets `pages`, `diagnostics: [{ file, line, col, message, severity, kind, hint }]` and `skipped`
+/// (string or `null`) from a report, the fields every compile result carries.
 fn set_report(obj: &js_sys::Object, rep: &Report) {
 	set(obj, "pages", &JsValue::from_f64(rep.pages as f64));
 	set(obj, "diagnostics", &diagnostics_array(&rep.diagnostics));
@@ -607,6 +609,7 @@ fn diagnostics_array(diags: &[Diagnostic]) -> js_sys::Array {
 		set(&entry, "line",		&JsValue::from_f64(d.line as f64));
 		set(&entry, "col",		&JsValue::from_f64(d.col as f64));
 		set(&entry, "message",	&JsValue::from_str(&d.message));
+		set(&entry, "severity",	&JsValue::from_str(d.severity.as_str()));
 		set(&entry, "kind",		&JsValue::from_str(d.kind.as_str()));
 		let hint = match &d.hint {
 			Some(h)	=> JsValue::from_str(h),

@@ -90,6 +90,8 @@ pub enum RefusalClass {
 	// Anything else skipped: a specific call or wrapper (`#columns`, an unknown standalone or inline
 	// `#func`, an unknown term-dictionary key) that names no fundamental barrier -- just not yet read.
 	Unsupported,
+	// A file the construct names that the project does not hold: an image set as a placeholder.
+	MissingFile,
 }
 
 impl RefusalClass {
@@ -118,6 +120,7 @@ impl RefusalClass {
 			RefusalClass::FixedPoint		=> "fixed-point",
 			RefusalClass::Introspective	=> "introspective",
 			RefusalClass::Unsupported		=> "unsupported",
+			RefusalClass::MissingFile		=> "missing-file",
 		}
 	}
 }
@@ -156,6 +159,11 @@ impl Refusals {
 	pub(crate) fn record(&mut self, name: &str, span: Span) {
 		let class = RefusalClass::classify(name);
 		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new() });
+	}
+
+	/// Records a construct naming a file the project does not hold.
+	pub(crate) fn record_missing(&mut self, name: &str, span: Span) {
+		self.sites.push(Refusal { name: name.to_string(), span, class: RefusalClass::MissingFile, file: String::new() });
 	}
 
 	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
@@ -282,6 +290,29 @@ fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
 	}
 }
 
+/// Records every image a figure, a plain `#image` or a section banner names that the project does not
+/// hold. The page still draws a placeholder in a figure's place, and a banner without its logo, so without
+/// the record a missing image would pass unreported.
+fn flag_missing_images(items: &[Item], skips: &mut Refusals) {
+	for item in items {
+		let (path, span) = match item {
+			Item::Figure { body: FigureBody::Image { path, .. }, span, .. }	=> (path, *span),
+			Item::Image { path, span, .. }									=> (path, *span),
+			Item::SectionBanner { path, span }								=> (path, *span),
+			Item::Box { items: inner, .. }
+			| Item::Scoped { items: inner, .. }
+			| Item::Place { items: inner, .. }								=> {
+				flag_missing_images(inner, skips);
+				continue;
+			},
+			_																=> continue,
+		};
+		if crate::image::is_missing(path) {
+			skips.record_missing(&fmt!("image {:?}", path), span);
+		}
+	}
+}
+
 /// [`flag_unindexed_claim_refs`] for one list entry: its own runs are gathered (indexed), and its nested
 /// child items are walked as their own contexts.
 fn flag_list_item_claim_refs(entry: &ListItem, skips: &mut Refusals) {
@@ -320,6 +351,7 @@ pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings<'_
 {
 	let (items, mut skips) = res!(parse_items(src, binds));
 	flag_unindexed_claim_refs(&items, &mut skips);
+	flag_missing_images(&items, &mut skips);
 	Ok((items, skips))
 }
 
@@ -2603,12 +2635,12 @@ fn dispatch_capture(
 		CaptureKind::Table => {
 			if let Some(inner) = call_inner(&cap.buf, "table") {
 				if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(&cap.buf)) {
-					items.push(Item::Table { spec, span: Span::new(0, 0) });
+					items.push(Item::Table { spec, span: Span::new(cap.start, cap.start) });
 				}
 			}
 		},
 		CaptureKind::Figure => {
-			if let Some(item) = parse_figure(&cap.buf, arrays) {
+			if let Some(item) = parse_figure(&cap.buf, arrays, Span::new(cap.start, cap.start)) {
 				items.push(item);
 			}
 		},
@@ -2617,13 +2649,13 @@ fn dispatch_capture(
 			// then set as a plain centred image with no figure number. A call naming no path draws nothing.
 			let (path, width, height, scale) = image_call(&cap.buf);
 			if !path.is_empty() {
-				items.push(Item::Image { path, width, height, scale, span: Span::new(0, 0) });
+				items.push(Item::Image { path, width, height, scale, span: Span::new(cap.start, cap.start) });
 			}
 		},
 		CaptureKind::SectionBanner => {
 			// The first positional argument is the logo path; a call naming none draws nothing.
 			if let Some(path) = call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
-				items.push(Item::SectionBanner { path, span: Span::new(0, 0) });
+				items.push(Item::SectionBanner { path, span: Span::new(cap.start, cap.start) });
 			}
 		},
 		CaptureKind::Place => {
@@ -3949,7 +3981,7 @@ fn outer_text_size(text: &str) -> Option<f64> {
 /// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
 /// positional argument is the body -- a wrapped `#table(...)` set in full, or an image call stood in for
 /// by a placeholder; `caption:` sets the caption, `supplement:`/`kind:` the "Figure" or "Table" label.
-fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option<Item> {
+fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>, span: Span) -> Option<Item> {
 	let (body_src, label)	= strip_trailing_label(buf);
 	let inner				= call_inner(&body_src, "figure")?;
 
@@ -3988,7 +4020,7 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 	});
 	// A scope matters only to a float: Typst accepts `scope: "parent"` on a floating figure alone.
 	let placement = placement.map(|side| Floating { side, scope });
-	Some(Item::Figure { body, caption, supplement, label, placement, span: Span::new(0, 0) })
+	Some(Item::Figure { body, caption, supplement, label, placement, span })
 }
 
 /// Reads a float's `scope:` value: `"parent"` spans every column of the page, anything else -- `"column"`,

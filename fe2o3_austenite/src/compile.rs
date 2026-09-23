@@ -344,11 +344,18 @@ impl DiagnosticKind {
 		}
 	}
 
+	/// Does a warning of this kind refuse a strict compile? It does where the document was not set as
+	/// written: a construct passed over, or a file, package or font family missing.
+	pub fn refuses_strict(&self) -> bool {
+		matches!(self, Self::Unsupported | Self::MissingFile | Self::Package | Self::MissingFont)
+	}
+
 	fn from_refusal_class(class: lang::RefusalClass) -> Self {
 		match class {
 			lang::RefusalClass::FixedPoint		=> Self::Unsupported,
 			lang::RefusalClass::Introspective	=> Self::Unsupported,
 			lang::RefusalClass::Unsupported		=> Self::Unsupported,
+			lang::RefusalClass::MissingFile		=> Self::MissingFile,
 		}
 	}
 
@@ -373,6 +380,23 @@ impl fmt::Display for DiagnosticKind {
 	}
 }
 
+/// How a diagnostic bears on the compile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+	Error,		// refuses the compile, strict or not
+	Warning,	// stands beside the PDF, unless strict mode refuses its kind
+}
+
+impl Severity {
+	/// The word the severity is carried as.
+	pub fn as_str(&self) -> &'static str {
+		match self {
+			Self::Error		=> "error",
+			Self::Warning	=> "warning",
+		}
+	}
+}
+
 /// One problem at the source position a caller shows the user. `line` and `col` are 1-based; a hard error
 /// carrying no site reports `0:0` against the main file rather than a guessed position. `hint` is extra
 /// remedial detail, such as a strict refusal's summary of what was skipped.
@@ -382,6 +406,7 @@ pub struct Diagnostic {
 	pub line:		usize,
 	pub col:		usize,
 	pub message:	String,
+	pub severity:	Severity,
 	pub kind:		DiagnosticKind,
 	pub hint:		Option<String>,
 }
@@ -409,24 +434,30 @@ impl Report {
 	}
 
 	/// Why a strict compile must refuse this result, or `None` when it may stand. A strict caller wants no
-	/// false green: a PDF that silently passed over a construct, that has no pages, or that set nothing is
-	/// an error, reported at the first refused site or, failing one, at the top of the main file.
+	/// false green: an error, a warning of a kind the document was not set as written by
+	/// ([`DiagnosticKind::refuses_strict`]), no pages or no content is refused, at the first such site or,
+	/// failing one, at the top of the main file. Any other warning stands beside the PDF.
 	pub fn strict_failure(&self, main: &Path) -> Option<Diagnostic> {
 		let at_main = |message: String| Diagnostic {
 			file:		main.display().to_string(),
 			line:		1,
 			col:		1,
 			message,
+			severity:	Severity::Error,
 			kind:		DiagnosticKind::Internal,
 			hint:		None,
 		};
-		if let Some(first) = self.diagnostics.first() {
-			let line = self.skipped.clone().unwrap_or_else(|| fmt!("skipped: {} site(s)", self.diagnostics.len()));
+		let refusing: Vec<&Diagnostic> = self.diagnostics.iter()
+			.filter(|d| d.severity == Severity::Error || d.kind.refuses_strict())
+			.collect();
+		if let Some(first) = refusing.first() {
+			let line = self.skipped.clone().unwrap_or_else(|| fmt!("skipped: {} site(s)", refusing.len()));
 			return Some(Diagnostic {
 				message:	fmt!("strict: {} construct site(s) were not set ({}); first: {}",
-					self.diagnostics.len(), line, first.message),
+					refusing.len(), line, first.message),
+				severity:	Severity::Error,
 				hint:		Some(line),
-				..first.clone()
+				..(*first).clone()
 			});
 		}
 		if self.pages == 0 {
@@ -455,7 +486,11 @@ pub fn diagnostics(refusals: &lang::Refusals) -> Vec<Diagnostic> {
 			file:		r.file.clone(),
 			line,
 			col,
-			message:	fmt!("skipped {} ({})", r.name, r.class.label()),
+			message:	match r.class {
+				lang::RefusalClass::MissingFile	=> fmt!("{} is not in the project, so a placeholder is set", r.name),
+				_								=> fmt!("skipped {} ({})", r.name, r.class.label()),
+			},
+			severity:	Severity::Warning,
 			kind:		DiagnosticKind::from_refusal_class(r.class),
 			hint:		None,
 		});
@@ -506,6 +541,7 @@ impl Diagnostic {
 			line,
 			col,
 			message:	e.plain(),
+			severity:	Severity::Error,
 			kind:		DiagnosticKind::from_error_tags(e),
 			hint:		None,
 		}
