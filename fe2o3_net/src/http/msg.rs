@@ -434,7 +434,7 @@ impl HttpMessage {
                 if let Some(lim) = limits.and_then(|l| l.max_body_bytes) {
                     if content_length > lim {
                         return Err(err!(
-                            "HTTP request body of {} bytes exceeds the \
+                            "HTTP body of {} bytes exceeds the \
                             configured limit of {}.", content_length, lim;
                             IO, Network, Input, TooBig));
                     }
@@ -516,7 +516,7 @@ impl HttpMessage {
                                 {
                                     if bytes_read > lim {
                                         return Err(err!(
-                                            "HTTP request body overflowed \
+                                            "HTTP body overflowed \
                                             the configured limit of {} \
                                             bytes during read.", lim;
                                             IO, Network, Input, TooBig));
