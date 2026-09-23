@@ -253,9 +253,9 @@ pub fn is_rule_line(trimmed: &str) -> bool {
 /// The `#show <selector>` a rule line opens with, as a report names it, or `None` when the line declares no
 /// rule [`is_rule_line`] recognises.
 pub(crate) fn rule_name(trimmed: &str) -> Option<String> {
-	let after		= trimmed.strip_prefix("#show ")?;
-	let (sel, _)	= split_at_top_level_colon(after)?;
-	parse_selector(sel.trim()).map(|_| fmt!("#show {}", sel.trim()))
+	trimmed.strip_prefix("#show ")
+		.and_then(|after| split_at_top_level_colon(after))
+		.and_then(|(sel, _)| parse_selector(sel.trim()).map(|_| fmt!("#show {}", sel.trim())))
 }
 
 /// The `(selector, transform)` split of a `#show <selector>: <transform>` body at the first colon that is

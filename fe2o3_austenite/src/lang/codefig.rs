@@ -528,11 +528,11 @@ fn data_entries(src: &str) -> Vec<String> {
 
 /// The fields of one `(x, y)` entry, when it is a group of at least two.
 fn pair_fields(entry: &str) -> Option<Vec<String>> {
-	let ec: Vec<char>	= entry.trim().chars().collect();
-	let eo				= ec.iter().position(|&c| c == '(')?;
-	let (einner, _)		= read_group(&ec, eo)?;
-	let fields			= split_top_args(&einner);
-	if fields.len() < 2 { None } else { Some(fields) }
+	let ec: Vec<char> = entry.trim().chars().collect();
+	ec.iter().position(|&c| c == '(')
+		.and_then(|eo| read_group(&ec, eo))
+		.map(|(einner, _)| split_top_args(&einner))
+		.filter(|fields| fields.len() >= 2)
 }
 
 /// A red-family palette cycled across the bars, echoing cetz-plot's default warm sequence closely enough
