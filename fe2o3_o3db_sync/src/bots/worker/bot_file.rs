@@ -374,14 +374,19 @@ impl<
                 new_ind_size,
                 resp,
             } => {
-                let result = self.close_old_live_file_state(
+                // The writer rolling over waits on this, and would otherwise wait out its deadline
+                // on a failure only logged here.
+                let caller = resp.clone();
+                if let Err(e) = self.close_old_live_file_state(
                     fnum_old,
                     fnum_new,
                     new_dat_size,
                     new_ind_size,
                     resp,
-                );
-                self.result(&result);
+                ) {
+                    self.error(e.clone());
+                    self.respond(Err(e), &caller);
+                }
             },
             OzoneMsg::OpenNewLiveFileState {
                 fnum_new,

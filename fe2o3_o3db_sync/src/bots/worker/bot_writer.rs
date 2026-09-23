@@ -343,10 +343,43 @@ impl<
         self.syncer.hand(Handed::Pair(dat, ind))
     }
 
+    /// Takes the live file the zone assigned at start-up, new or partly written.
     fn open_live_pair(&mut self) -> Outcome<()> {
         self.lpair.close();
         self.lpair = res!(self.zdir().open_live(self.lpair.fnum));
-        self.hand_pair()
+        res!(self.hand_pair());
+        self.register_live_file(self.lpair.fnum)
+    }
+
+    /// Tells the file's bot that the file is live, as a rollover does for the file it opens.  The
+    /// bot otherwise first heard of a new file from its first record, which reaches it through the
+    /// syncer and a cache bot, so a writer could seal the file before the bot knew it existed and
+    /// the seal failed; and a partly written file taken over at start-up was never flagged live,
+    /// leaving it open to collection while it was still being written.  Its accounting starts
+    /// empty, since the records already in such a file are counted as the zone loads them.
+    fn register_live_file(&self, fnum: FileNum) -> Outcome<()> {
+        let resp = Responder::new(Some(self.ozid()));
+        let bots = res!(self.fbots());
+        let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
+        res!(bot.send(OzoneMsg::OpenNewLiveFileState {
+            fnum_new:       fnum,
+            new_dat_size:   0,
+            new_ind_size:   0,
+            resp:           resp.clone(),
+        }));
+        // Start-up work, held to the control deadline: see constant::CONTROL_REQUEST_TIMEOUT.
+        match resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT) {
+            Err(e) => Err(err!(e,
+                "{}: While registering live file {} with its file bot.", self.ozid(), fnum;
+                IO, Channel, Read)),
+            Ok(OzoneMsg::Ok) => Ok(()),
+            Ok(OzoneMsg::Error(e)) => Err(err!(e,
+                "{}: The file bot could not register live file {}.", self.ozid(), fnum;
+                IO, File)),
+            Ok(msg) => Err(err!(
+                "{}: Unrecognised response to registering live file {}: {:?}", self.ozid(), fnum, msg;
+                Channel, Unexpected)),
+        }
     }
 
     fn new_live_pair(&mut self) -> Outcome<(FileNum, u64)> {
