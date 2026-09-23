@@ -12,10 +12,11 @@
 //!   sealed.
 //!
 //! Each is reproduced on one zone with one file bot, so that every supersession is one the bot
-//! handles itself, and judged by the size of the data file on disk.  `test::hooks` holds
-//! collections open, for the first so that supersessions land during one and for the second so
-//! that the file can be measured before one, and the hooks are process-wide, which is why this is
-//! a test binary of its own.
+//! handles itself, and judged by the size of the data file on disk.  The second is checked twice,
+//! once with the file drained when it is sealed and once with its last records still on their way,
+//! which only their landing can follow up.  `test::hooks` holds collections open, so that
+//! supersessions land during one or a file can be measured before one, and holds durability
+//! barriers; the hooks are process-wide, which is why this is a test binary of its own.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::{
@@ -83,12 +84,21 @@ fn main() -> Outcome<()> {
     hooks::set_collect_delay(Duration::ZERO);
     let sealed = garbage_made_while_live_is_collected_once_sealed();
     hooks::set_collect_delay(Duration::ZERO);
+    let landed = garbage_is_collected_when_the_last_write_lands();
+    hooks::set_collect_delay(Duration::ZERO);
+    hooks::set_barrier_delay(Duration::ZERO);
     log_finish_wait!();
-    match (during, sealed) {
-        (Ok(()), Ok(()))                    => Ok(()),
-        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
-        (Err(e1), Err(e2))                  => Err(err!(e1,
-            "Both checks failed.  The second: {}", e2;
+    let failed: Vec<Error<ErrTag>> = [during, sealed, landed].into_iter()
+        .filter_map(|r| r.err())
+        .collect();
+    match failed.len() {
+        0 => Ok(()),
+        1 => match failed.into_iter().next() {
+            Some(e) => Err(e),
+            None    => Ok(()), // unreachable
+        },
+        n => Err(err!(
+            "{} of the 3 checks failed: {:?}", n, failed;
             Test)),
     }
 }
@@ -194,6 +204,62 @@ fn garbage_made_while_live_is_collected_once_sealed() -> Outcome<()> {
     Ok(())
 }
 
+/// As the previous check, but the file's last records are still on their way to their file bot
+/// when it is sealed: every durability barrier is held, so the seal finds the file not yet drained
+/// and cannot collect it.  The last of those records landing must.  Before, nothing looked at the
+/// file again.
+fn garbage_is_collected_when_the_last_write_lands() -> Outcome<()> {
+    let root = res!(fresh("./test_db_gc_reevaluate_landed"));
+    let mut cfg = res!(config());
+    cfg.sync_on_write = true;
+    let db = res!(setup::start_db(root.clone(), Some(cfg), schemes(), None, true, true));
+    let f1 = res!(data_file(&root, 1));
+
+    for i in 0..NKEYS {
+        res!(db.insert(key(i), value(i, VALUE_BYTES), Uid::default(), None));
+    }
+    let kbytes = size(&f1);
+    for i in 0..NKEYS {
+        res!(db.insert(key(i), value(i, 8), Uid::default(), None));
+    }
+    // The fillers are sent together, so the one that seals the file is written while the records
+    // before it wait on their barrier.  The collection is held until the file has been measured.
+    hooks::set_barrier_delay(HOLD);
+    hooks::set_collect_delay(HOLD);
+    let mut resps = Vec::new();
+    for i in 0..NFILL {
+        resps.push(res!(db.api().store(filler(i), value(i, VALUE_BYTES), Uid::default())));
+    }
+    // Measured once sealed, while its last records still wait on their barrier.
+    let sealed = res!(wait_until_sealed(&root, &f1));
+    for resp in resps {
+        res!(resp.recv_store_ack());
+    }
+    hooks::set_barrier_delay(Duration::ZERO);
+    hooks::set_collect_delay(Duration::ZERO);
+
+    let want = res!(garbage_removed(sealed, kbytes));
+    let got = settle_to(&f1, want);
+    if got != want {
+        let _ = db.close();
+        return Err(err!(
+            "Data file 1 was sealed at {} bytes before its last records had landed, {} of them \
+            ten records superseded while it was live.  It should have settled at {} bytes once \
+            they landed, but after {:?} it is {}.",
+            sealed, kbytes, want, SETTLE, got;
+            Test, Mismatch, Size));
+    }
+    for i in 0..NFILL {
+        match res!(db.get(&filler(i), None)) {
+            Some((v, _)) => req!(v, value(i, VALUE_BYTES), "A filler that sealed a collected file."),
+            None => return Err(err!("Filler {} is missing after the collection.", i; Test, Missing)),
+        }
+    }
+    res!(db.close());
+    test!(sync_log::stream(), "Garbage was collected when the last write landed: {} -> {} bytes.", sealed, got);
+    Ok(())
+}
+
 fn key(i: usize) -> Dat { dat!(fmt!("gc reevaluate key {:02}", i)) }
 fn filler(i: usize) -> Dat { dat!(fmt!("gc reevaluate filler {:02}", i)) }
 
@@ -269,6 +335,22 @@ fn sealed_size(root: &Path, f1: &Path) -> Outcome<u64> {
         return Err(err!(
             "The fillers did not seal data file 1: there is no data file 2 at {:?}.", f2;
             Test, Missing));
+    }
+    Ok(size(f1))
+}
+
+/// Waits for the writer to move on to data file 2, then gives the size of data file 1.
+fn wait_until_sealed(root: &Path, f1: &Path) -> Outcome<u64> {
+    let f2 = res!(data_file(root, 2));
+    let begun = Instant::now();
+    while !f2.is_file() {
+        if begun.elapsed() >= SETTLE {
+            return Err(err!(
+                "The fillers did not seal data file 1 within {:?}: there is no data file 2 at {:?}.",
+                SETTLE, f2;
+                Test, Timeout));
+        }
+        thread::sleep(Duration::from_millis(5));
     }
     Ok(size(f1))
 }
