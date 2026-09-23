@@ -3323,7 +3323,6 @@ dependencies = [
  "base64 0.13.1",
  "chrono",
  "flate2",
- "oxedyne_fe2o3_bot",
  "oxedyne_fe2o3_core",
  "oxedyne_fe2o3_crypto",
  "oxedyne_fe2o3_data",
