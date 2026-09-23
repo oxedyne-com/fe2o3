@@ -181,6 +181,26 @@ fn an_include_in_an_unused_binding_is_not_followed() -> Outcome<()> {
 	Ok(())
 }
 
+/// An `#include` directly in an `#if` include guard's branch is the file's own: a root whose only includes
+/// stand in a guard is a book, and the taken branch's chapter is set while the other is not.
+#[test]
+fn an_include_in_a_guard_branch_is_followed() -> Outcome<()> {
+	let _turn = turn();
+	let root = "#let media = \"ebook\"\n\n= Sources\n\n#if media == \"ebook\" [\n  #include \"ebook.typ\"\n] else [\n\
+		  #include \"print.typ\"\n]\n";
+	let files = [
+		("/proj/root.typ",	root),
+		("/proj/ebook.typ",	"EBOOKWORDS are set.\n"),
+		("/proj/print.typ",	"PRINTWORDS are not.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("EBOOKWORDS") && !text.contains("PRINTWORDS"), "{}", text);
+	assert!(report.diagnostics.iter().all(|d| !d.message.contains("#include") && !d.message.contains("#if")),
+		"{:?}", report.diagnostics);
+	Ok(())
+}
+
 /// A lone file that shows an `#include` in a raw block is compiled as the lone file it is: no chapter is
 /// looked for, so the absent one is no error, and no contents page is set.
 #[test]

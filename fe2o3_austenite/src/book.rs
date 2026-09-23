@@ -101,12 +101,30 @@ pub fn is_book_root(src: &str) -> bool {
 	top_live_lines(src).iter().any(|l| l.trim_start().starts_with("#include"))
 }
 
-/// The lines of `src` that stand at its top level, as the reader meets them, with what a comment holds and
-/// what raw text shows blanked: the lines an `#import` or an `#include` is read from, so one a comment holds,
-/// a raw block shows or a bracketed body holds is never followed as the file's own.
+/// The lines of `src` the include walk reads for its structure, with what a comment holds and what raw text
+/// shows blanked: a line at the file's top level, or directly in the branch of an `#if` include guard opened
+/// on such a line, as [`assemble_into`] reads them. These are the lines an `#import` or an `#include` is read
+/// from, so one a comment holds, a raw block shows or any other bracketed body holds is never followed as the
+/// file's own.
 fn top_live_lines(src: &str) -> Vec<String> {
-	let live = lang::parse::live_text(src);
-	lang::set::top_level_lines(&live).into_iter().map(|(_, l)| l.to_string()).collect()
+	let live		= lang::parse::live_text(src);
+	let mut out		= Vec::new();
+	let mut state	= lang::parse::SkipState::markup();
+	let mut guards: Vec<usize> = Vec::new();	// the bracket depth each open guard's branch stands at
+	for raw in live.split_inclusive('\n') {
+		let depth = state.open_brackets();
+		while guards.last().map_or(false, |&g| depth < g) {
+			guards.pop();
+		}
+		if !state.in_literal() && (depth == 0 || guards.last() == Some(&depth)) {
+			if guard_open(raw.trim()).is_some() {
+				guards.push(depth + 1);
+			}
+			out.push(raw.to_string());
+		}
+		lang::parse::scan_brackets(raw, &mut state);
+	}
+	out
 }
 
 /// The heading display-face names a theme carries, for the resolver to load: the role-default heading
