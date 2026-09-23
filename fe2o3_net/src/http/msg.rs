@@ -556,11 +556,13 @@ impl HttpMessage {
         // `HeaderFields::insert` refuses a `Content-Length` while a
         // `Transfer-Encoding` stands, so a message that really is chunked keeps
         // its own framing and does not acquire a second, contradictory one.
-        let _ = self.insert(
-            HeaderName::ContentLength,
-            HeaderFieldValue::ContentLength(self.body_len()),
-            Some(HeaderFieldCategory::Entity as u16),
-        );
+        if !self.is_bodiless_status() {
+            let _ = self.insert(
+                HeaderName::ContentLength,
+                HeaderFieldValue::ContentLength(self.body_len()),
+                Some(HeaderFieldCategory::Entity as u16),
+            );
+        }
         self.log(log_get_level!());
         let result = stream.write_all(&self.header.as_vec()).await;
         res!(result);
@@ -597,6 +599,21 @@ impl HttpMessage {
         match &self.file {
             Some(window)    => window.len as usize,
             None            => self.body.len(),
+        }
+    }
+
+    /// Is this a response whose status forbids a `Content-Length` of zero?
+    ///
+    /// RFC 9110 §8.6 forbids the field on a `1xx` or `204`, and on a `304` it
+    /// would have to state the length of the representation not sent, which a
+    /// zero here would misstate.
+    pub fn is_bodiless_status(&self) -> bool {
+        match &self.header.headline {
+            HttpHeadline::Response { status } => {
+                let code = *status as u16;
+                code < 200 || code == 204 || code == 304
+            }
+            HttpHeadline::Request { .. } => false,
         }
     }
 
