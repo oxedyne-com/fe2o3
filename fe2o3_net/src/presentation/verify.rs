@@ -31,7 +31,10 @@ use oxedyne_fe2o3_crypto::{
 use oxedyne_fe2o3_hash::sha256;
 
 use std::{
-    collections::HashMap,
+    collections::{
+        BTreeSet,
+        HashMap,
+    },
     sync::{
         Arc,
         Mutex,
@@ -155,32 +158,115 @@ struct Issued {
     spent:      bool,       // shown once already, pass or fail
 }
 
+type Slot = (u64, [u8; NONCE_LEN]); // (exp, nonce), so a set of slots lapses in order
+
+/// The challenges outstanding, indexed by nonce, and by lapse overall and per
+/// session, so nothing is found or dropped by a scan.
 struct Challenges {
-    issued: HashMap<[u8; NONCE_LEN], Issued>,
+    issued:     HashMap<[u8; NONCE_LEN], Issued>,
+    by_exp:     BTreeSet<Slot>,
+    by_session: HashMap<[u8; 32], BTreeSet<Slot>>,
 }
 
 impl Challenges {
-    /// Drops the challenges whose requests have lapsed.
-    fn evict(&mut self, now: u64) {
-        self.issued.retain(|_, issued| issued.req.exp >= now);
+
+    fn new() -> Self {
+        Self {
+            issued:     HashMap::new(),
+            by_exp:     BTreeSet::new(),
+            by_session: HashMap::new(),
+        }
+    }
+
+    /// Drops the challenges whose requests have lapsed by `now`, soonest first.
+    fn drop_lapsed(&mut self, now: u64) {
+        while let Some((exp, nonce)) = self.by_exp.first().copied() {
+            if exp >= now {
+                break;
+            }
+            self.remove(&nonce);
+        }
+    }
+
+    fn remove(&mut self, nonce: &[u8; NONCE_LEN]) {
+        if let Some(issued) = self.issued.remove(nonce) {
+            let slot = (issued.req.exp, *nonce);
+            self.by_exp.remove(&slot);
+            let emptied = match self.by_session.get_mut(&issued.session) {
+                Some(slots) => {
+                    slots.remove(&slot);
+                    slots.is_empty()
+                },
+                None => false,
+            };
+            if emptied {
+                self.by_session.remove(&issued.session);
+            }
+        }
+    }
+
+    /// Files a challenge, first letting the session's own soonest to lapse go
+    /// while it holds `per_session`, then the store's while it holds `max`, so
+    /// a flood from one session costs other sessions nothing and a flood from
+    /// many shortens the life of the oldest challenges rather than refusing new
+    /// ones.
+    fn insert(
+        &mut self,
+        nonce:          [u8; NONCE_LEN],
+        issued:         Issued,
+        max:            usize,
+        per_session:    usize,
+    ) {
+        // A nonce drawn twice would leave its first slot behind; keep the
+        // indexes whole however unlikely that is.
+        self.remove(&nonce);
+        loop {
+            let first = match self.by_session.get(&issued.session) {
+                Some(slots) if slots.len() >= per_session => slots.first().copied(),
+                _ => None,
+            };
+            match first {
+                Some((_, old)) => self.remove(&old),
+                None => break,
+            }
+        }
+        while self.issued.len() >= max {
+            match self.by_exp.first().copied() {
+                Some((_, old)) => self.remove(&old),
+                None => break,
+            }
+        }
+        let slot = (issued.req.exp, nonce);
+        self.by_exp.insert(slot);
+        self.by_session.entry(issued.session).or_default().insert(slot);
+        self.issued.insert(nonce, issued);
     }
 }
 
 /// A relying party's presentation verifier, for one origin. Its methods take
 /// `&self`, and the challenge store's lock is held only while a nonce is looked
 /// up and spent, so a pass over a large ring never holds up another session.
+///
+/// It holds at most `MAX_ISSUED` challenges, and at most `MAX_PER_SESSION` for
+/// one session. A session's challenge beyond its bound lets that session's
+/// soonest to lapse go, and one beyond the store's lets the store's soonest go,
+/// so an issue is never refused for want of room. A challenge let go early
+/// reads `unknown_nonce`. Limiting how fast one address may ask is the
+/// caller's.
 pub struct Verifier<L: Lookup> {
-    rp_id:      String,
-    issuers:    Vec<[u8; 32]>,
-    lookup:     L,
-    threads:    usize,
-    max_issued: usize,
-    challenges: Mutex<Challenges>,
+    rp_id:              String,
+    issuers:            Vec<[u8; 32]>,
+    lookup:             L,
+    threads:            usize,
+    max_issued:         usize,
+    max_per_session:    usize,
+    challenges:         Mutex<Challenges>,
 }
 
 impl<L: Lookup> Verifier<L> {
 
-    pub const MAX_ISSUED: usize = 1 << 16;
+    pub const MAX_ISSUED:       usize = 1 << 16;
+    pub const MAX_PER_SESSION:  usize = 8;
 
     /// A verifier for the relying party at `rp_id`, which trusts heads signed
     /// by `issuers`, Ed25519 keys.
@@ -205,19 +291,25 @@ impl<L: Lookup> Verifier<L> {
                 Invalid, Input, Missing));
         }
         Ok(Self {
-            rp_id:      rp_id.to_string(),
+            rp_id:              rp_id.to_string(),
             issuers,
             lookup,
-            threads:    threads.max(1),
-            max_issued: Self::MAX_ISSUED,
-            challenges: Mutex::new(Challenges { issued: HashMap::new() }),
+            threads:            threads.max(1),
+            max_issued:         Self::MAX_ISSUED,
+            max_per_session:    Self::MAX_PER_SESSION,
+            challenges:         Mutex::new(Challenges::new()),
         })
     }
 
-    /// Caps the challenges outstanding at once. An issue beyond the cap is
-    /// refused until older challenges lapse.
+    /// Caps the challenges outstanding at once, at least one.
     pub fn with_max_issued(mut self, max_issued: usize) -> Self {
-        self.max_issued = max_issued;
+        self.max_issued = max_issued.max(1);
+        self
+    }
+
+    /// Caps the challenges one session holds at once, at least one.
+    pub fn with_max_per_session(mut self, max_per_session: usize) -> Self {
+        self.max_per_session = max_per_session.max(1);
         self
     }
 
@@ -225,7 +317,9 @@ impl<L: Lookup> Verifier<L> {
     pub fn lookup(&self) -> &L { &self.lookup }
 
     /// Issues a challenge to one browser session: a fresh nonce, and the
-    /// request that carries it, which lapses T_G after `now`.
+    /// request that carries it, which lapses T_G after `now`. The session is
+    /// whatever the caller binds a browser by, such as its session cookie, and
+    /// is refused when empty.
     pub fn issue(
         &self,
         session:    &[u8],
@@ -237,6 +331,7 @@ impl<L: Lookup> Verifier<L> {
     )
         -> Outcome<Request>
     {
+        res!(Self::bound(session));
         let mut nonce = [0u8; NONCE_LEN];
         Rand::fill_u8(&mut nonce);
         let req = Request {
@@ -250,26 +345,31 @@ impl<L: Lookup> Verifier<L> {
         };
         res!(req.check());
         let mut ch = lock_mutex!(self.challenges);
-        ch.evict(now);
-        if ch.issued.len() >= self.max_issued {
-            return Err(err!(
-                "{} challenges are outstanding at {}, the most this verifier holds, so no \
-                more are issued until some lapse.", ch.issued.len(), self.rp_id;
-                Excessive, Size));
-        }
-        ch.issued.insert(nonce, Issued {
+        ch.drop_lapsed(now);
+        ch.insert(nonce, Issued {
             session:    sha256::digest(session),
             req:        req.clone(),
             spent:      false,
-        });
+        }, self.max_issued, self.max_per_session);
         Ok(req)
+    }
+
+    /// Refuses an empty session, which would bind a challenge to every browser
+    /// that sends none.
+    fn bound(session: &[u8]) -> Outcome<()> {
+        if session.is_empty() {
+            return Err(err!(
+                "A challenge is bound to a browser session, and the session given is empty.";
+                Invalid, Input, Missing));
+        }
+        Ok(())
     }
 
     /// Verifies a presentation that arrived in `session` at `now` (unix
     /// seconds). The nonce is spent by the first presentation to reach that
     /// check, whether or not it goes on to pass, so a presentation is accepted
-    /// once at most. An error is this verifier's own fault, never the
-    /// presentation's.
+    /// once at most. An error is the fault of this verifier or its caller, such
+    /// as an empty session, never the presentation's.
     pub fn verify(
         &self,
         session:    &[u8],
@@ -278,6 +378,7 @@ impl<L: Lookup> Verifier<L> {
     )
         -> Outcome<Verdict>
     {
+        res!(Self::bound(session));
         let p = match std::str::from_utf8(body) {
             Ok(text) => match Presentation::parse(text) {
                 Ok(p)   => p,
@@ -290,7 +391,7 @@ impl<L: Lookup> Verifier<L> {
         }
         let req = {
             let mut ch = lock_mutex!(self.challenges);
-            ch.evict(now);
+            ch.drop_lapsed(now);
             let issued = match ch.issued.get_mut(&p.nonce) {
                 Some(issued)    => issued,
                 None            => return Ok(Verdict::Refused(Refusal::UnknownNonce)),
@@ -419,10 +520,12 @@ impl<L: Lookup> Verifier<L> {
         }
     }
 
-    /// Checks that `settlement` shows `invoice`, which this relying party
-    /// issued, paid: signed by an issuer, naming the invoice's id and amount,
-    /// and made no later than the invoice expired. A relying party credits its
-    /// own ledger on this, never on the word of the member's page.
+    /// Checks that `settlement` shows `invoice` paid: signed by an issuer,
+    /// naming the invoice's id and amount, and made while the invoice ran, from
+    /// its issue to its expiry. `invoice` must come from this relying party's
+    /// own store of what it issued, never from the member's page, and the
+    /// caller credits it once per invoice id, since a settlement verifies again
+    /// every time it is shown.
     pub fn verify_settlement(
         &self,
         settlement: &Settlement,
@@ -460,6 +563,12 @@ impl<L: Lookup> Verifier<L> {
             return Err(err!(
                 "The settlement at {} is after the invoice expired at {}.",
                 settlement.ts, invoice.expires;
+                Invalid, Input));
+        }
+        if settlement.ts < invoice.ts {
+            return Err(err!(
+                "The settlement at {} is before the invoice was issued at {}.",
+                settlement.ts, invoice.ts;
                 Invalid, Input));
         }
         Ok(())

@@ -27,8 +27,10 @@ ring = ["dep:ring"]
 
 [dependencies]
 oxedyne_fe2o3_core 					= { path = "../fe2o3_core" }
-# Its defaults would build the C post-quantum code, which nothing here uses and
-# which cannot target wasm32. `presentation` needs only Ed25519 and `linkring`.
+# Only `mode2` is asked for: `presentation` needs Ed25519 and `linkring`, and
+# nothing here uses the C post-quantum code of crypto's default `pq`. That keeps
+# `pq` out of a wasm32 build only. Natively, `fe2o3_iop_db` takes crypto with its
+# defaults, so a native build of this crate still builds the C code.
 oxedyne_fe2o3_crypto				= { path = "../fe2o3_crypto", default-features = false, features = ["mode2"] }
 oxedyne_fe2o3_data 					= { path = "../fe2o3_data" }
 oxedyne_fe2o3_geom 					= { path = "../fe2o3_geom" }

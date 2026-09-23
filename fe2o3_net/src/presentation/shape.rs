@@ -4,7 +4,6 @@ use oxedyne_fe2o3_hash::sha256;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     bdat::DecodeLimits,
-    string::dec::DecoderConfig,
 };
 use oxedyne_fe2o3_text::base64;
 
@@ -36,7 +35,7 @@ pub const WORDS_MAX:            usize   = 16;
 pub const JSON_MAX_BYTES:       usize   = 64 * 1024;
 pub const MAX_INT:              u64     = 9_007_199_254_740_991;    // 2^53 - 1
 
-const JSON_MAX_DEPTH:           usize   = 16;       // text nesting a parse descends to
+const JSON_MAX_DEPTH:           usize   = 16;       // value nesting a parse descends to
 
 // Members, by shape
 const REQUEST_MEMBERS: [&str; 8] =
@@ -61,7 +60,8 @@ const SETTLEMENT_MEMBERS: [&str; 7] = ["v", "invoice", "entry", "oxes", "ts", "s
 /// one way a verifier compares it, byte for byte: `scheme "://" host [":" port]`,
 /// scheme and host lowercase, the default port omitted, and no path, trailing
 /// slash or user information. The scheme is `https`, or `http` with a host of
-/// `localhost` or `127.0.0.1` for development. An IPv6 literal is not accepted.
+/// `localhost` or `127.0.0.1` for development. An IPv6 literal is not accepted,
+/// and an IPv4 address only as a dotted quad.
 pub fn check_origin(origin: &str) -> Outcome<()> {
     let (scheme, rest) = match origin.split_once("://") {
         Some(parts) => parts,
@@ -105,6 +105,15 @@ pub fn check_origin(origin: &str) -> Outcome<()> {
                 Invalid, Input));
         }
     }
+    // A browser reads a host whose last label is a number, decimal or hex, as
+    // an IPv4 address and serialises it as a dotted quad, so `https://127.1` is
+    // `https://127.0.0.1` there (WHATWG URL, "ends in a number").
+    if ends_in_a_number(host) && !is_dotted_quad(host) {
+        return Err(err!(
+            "The origin '{}' has a host that a browser reads as an IPv4 address, and \
+            serialises otherwise than as written; only a dotted quad is.", origin;
+            Invalid, Input));
+    }
     if scheme == "http" && host != "localhost" && host != "127.0.0.1" {
         return Err(err!(
             "The origin '{}' is plain http on a host other than localhost or 127.0.0.1.",
@@ -132,6 +141,33 @@ pub fn check_origin(origin: &str) -> Outcome<()> {
         }
     }
     Ok(())
+}
+
+/// Does the host's last label read as a number, all decimal digits or `0x` and
+/// hex digits?
+fn ends_in_a_number(host: &str) -> bool {
+    let last = match host.rsplit('.').next() {
+        Some(last) => last,
+        None => return false,
+    };
+    if !last.is_empty() && last.bytes().all(|b| b.is_ascii_digit()) {
+        return true;
+    }
+    match last.strip_prefix("0x") {
+        Some(hex) => hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        None => false,
+    }
+}
+
+/// Is the host four decimal numbers from 0 to 255, without leading zeros?
+fn is_dotted_quad(host: &str) -> bool {
+    let parts: Vec<&str> = host.split('.').collect();
+    parts.len() == 4 && parts.iter().all(|p| {
+        !p.is_empty()
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && (p.len() == 1 || !p.starts_with('0'))
+            && matches!(p.parse::<u16>(), Ok(n) if n <= 255)
+    })
 }
 
 /// The key id a public key earns: the first ten lowercase hex characters of
@@ -751,7 +787,8 @@ impl Status {
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
-/// Decodes a JSON document within the size and nesting these shapes need.
+/// Decodes a JSON document within the size and nesting these shapes need, as
+/// RFC 8259 JSON and nothing else: none of JDAT's typed, hex or unquoted forms.
 fn decode_json(json: &str, what: &str) -> Outcome<Dat> {
     if json.len() > JSON_MAX_BYTES {
         return Err(err!(
@@ -759,9 +796,7 @@ fn decode_json(json: &str, what: &str) -> Outcome<Dat> {
             JSON_MAX_BYTES;
             Invalid, Input, Size));
     }
-    let cfg = DecoderConfig::<(), ()>::json(None)
-        .with_limits(DecodeLimits::new(JSON_MAX_DEPTH, JSON_MAX_BYTES));
-    Ok(res!(Dat::decode_string_with_config(json, &cfg)))
+    Ok(res!(Dat::decode_json_strict(json, &DecodeLimits::new(JSON_MAX_DEPTH, JSON_MAX_BYTES))))
 }
 
 fn words_dat(words: &[String]) -> Dat {

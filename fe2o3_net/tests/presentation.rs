@@ -431,6 +431,71 @@ fn a_showing_in_another_session_spends_nothing() -> Outcome<()> {
     Ok(())
 }
 
+/// An empty session is refused at issue and at verification, since it would
+/// bind a challenge to every browser that sends none. The refusal spends
+/// nothing.
+#[test]
+fn an_empty_session_is_refused() -> Outcome<()> {
+    let (w, book) = res!(world());
+    let v = res!(verifier(&w, book));
+    let issued = v.issue(b"", Accept::PairwiseOrNamed, &[], None, None, NOW).is_err();
+    req!(issued, true, "an issue to an empty session");
+    let req = res!(v.issue(b"s", Accept::PairwiseOrNamed, &[], None, None, NOW));
+    let p = res!(named(&req, &w.member, &w.head));
+    let verified = v.verify(b"", &res!(body(&p)), NOW).is_err();
+    req!(verified, true, "a verification in an empty session");
+    let got = res!(refusal(v.verify(b"s", &res!(body(&p)), NOW)));
+    req!(got, None::<Refusal>, "the session it was issued to");
+    Ok(())
+}
+
+/// A session that fills the challenge store does not shut another out: the
+/// challenge nearest its lapse makes room, and it alone is lost.
+#[test]
+fn a_full_challenge_store_still_serves_another_session() -> Outcome<()> {
+    let (w, book) = res!(world());
+    let v = res!(verifier(&w, book)).with_max_issued(4);
+    let mut flood = Vec::new();
+    for i in 0..4 {
+        flood.push(res!(v.issue(b"flood", Accept::PairwiseOrNamed, &[], None, None, NOW - 4 + i)));
+    }
+    let req = res!(v.issue(b"alice", Accept::PairwiseOrNamed, &[], None, None, NOW));
+    let p = res!(named(&req, &w.member, &w.head));
+    let got = res!(refusal(v.verify(b"alice", &res!(body(&p)), NOW)));
+    req!(got, None::<Refusal>, "the other session");
+    let p = res!(named(&flood[0], &w.member, &w.head));
+    let got = res!(refusal(v.verify(b"flood", &res!(body(&p)), NOW)));
+    req!(got, Some(Refusal::UnknownNonce), "the challenge that made room");
+    let p = res!(named(&flood[1], &w.member, &w.head));
+    let got = res!(refusal(v.verify(b"flood", &res!(body(&p)), NOW)));
+    req!(got, None::<Refusal>, "the flood's later challenges still stand");
+    Ok(())
+}
+
+/// One session holds a bounded number of challenges: another beyond the bound
+/// lets that session's own soonest to lapse go, and no other session's.
+#[test]
+fn a_session_holds_a_bounded_number_of_challenges() -> Outcome<()> {
+    let (w, book) = res!(world());
+    let v = res!(verifier(&w, book)).with_max_per_session(2);
+    let other = res!(v.issue(b"other", Accept::PairwiseOrNamed, &[], None, None, NOW - 5));
+    let mut own = Vec::new();
+    for i in 0..3 {
+        own.push(res!(v.issue(b"s", Accept::PairwiseOrNamed, &[], None, None, NOW - 2 + i)));
+    }
+    for (what, session, req, want) in [
+        ("the session's first, let go",  b"s".as_slice(),     &own[0], Some(Refusal::UnknownNonce)),
+        ("the session's second",         b"s".as_slice(),     &own[1], None),
+        ("the session's third",          b"s".as_slice(),     &own[2], None),
+        ("the other session's, older",   b"other".as_slice(), &other,  None),
+    ] {
+        let p = res!(named(req, &w.member, &w.head));
+        let got = res!(refusal(v.verify(session, &res!(body(&p)), NOW)));
+        req!(got, want, "{}", what);
+    }
+    Ok(())
+}
+
 /// A caller that keeps its own store of challenges still has the lapse of the
 /// request asserted, as well as its audience and nonce.
 #[test]
@@ -580,10 +645,14 @@ fn each_pairwise_tamper_is_refused() -> Outcome<()> {
     let got = res!(refusal(v.verify(b"s", &res!(body(&p)), NOW)));
     req!(got, Some(Refusal::BadProof), "ring");
 
-    // The ring served for the head is not the head's.
+    // A ring served for the head that is not the head's: the attacker's own
+    // two keys, with a sound proof over them. Only the check of the ring
+    // against the head's length and digest stands in the way.
     let req = res!(fresh(&v));
-    let p = res!(pairwise(&req, &sub, &w.keys[1], &w.ring, &w.head, APP));
-    v.lookup().rings.borrow_mut().insert(w.head.id, short.clone());
+    let own = vec![res!(SecretKey::random()), res!(SecretKey::random())];
+    let own_ring = res!(ring_of(&own));
+    let p = res!(pairwise(&req, &sub, &own[0], &own_ring, &w.head, APP));
+    v.lookup().rings.borrow_mut().insert(w.head.id, own_ring.clone());
     let got = res!(refusal(v.verify(b"s", &res!(body(&p)), NOW)));
     req!(got, Some(Refusal::BadProof), "served ring");
     v.lookup().rings.borrow_mut().insert(w.head.id, w.ring.clone());
@@ -747,11 +816,25 @@ fn malformed_presentations_are_refused() -> Outcome<()> {
         ("a pairwise pub",      pair_text.replace("{", &fmt!("{{\"pub\":\"{}\",", pub_b64))),
         ("a proof member extra", pair_text.replace("\"alg\":", "\"x\":1,\"alg\":")),
         ("a duplicate member",  named_text.replace("{", &fmt!("{{\"ts\":{},", NOW))),
+        // The forms JDAT reads and JSON does not.
+        ("a typed integer",     named_text.replace(&fmt!("\"ts\":{}", NOW), &fmt!("\"ts\":(u64|{})", NOW))),
+        ("a hex integer",       named_text.replace(&fmt!("\"ts\":{}", NOW), &fmt!("\"ts\":0x{:x}", NOW))),
+        ("a typed string",      named_text.replace("\"v\":\"present/1\"", "\"v\":(str|\"present/1\")")),
+        ("an unquoted word",    named_text.replace("\"mode\":\"named\"", "\"mode\":named")),
+        ("a single-quoted string", named_text.replace("\"mode\":\"named\"", "\"mode\":'named'")),
+        ("digits split by a space", named_text.replace(&fmt!("\"ts\":{}", NOW), "\"ts\":1800 000000")),
+        ("a leading zero",      named_text.replace(&fmt!("\"ts\":{}", NOW), &fmt!("\"ts\":0{}", NOW))),
+        ("a trailing comma",    fmt!("{},}}", &named_text[..named_text.len() - 1])),
+        ("a second value after", fmt!("{} {{}}", named_text)),
     ];
+    let mut wrong = Vec::new();
     for (what, text) in edits {
         let got = res!(refusal(v.verify(b"s", text.as_bytes(), NOW)));
-        req!(got, Some(Refusal::Malformed), "{}", what);
+        if got != Some(Refusal::Malformed) {
+            wrong.push(fmt!("{} ({:?})", what, got));
+        }
     }
+    req!(wrong, Vec::<String>::new(), "every case must be malformed");
     let got = res!(refusal(v.verify(b"s", &[0xff, 0xfe, 0x00], NOW)));
     req!(got, Some(Refusal::Malformed), "not UTF-8");
     Ok(())
@@ -799,6 +882,73 @@ fn the_signed_bytes_are_the_canonical_json() -> Outcome<()> {
     Ok(())
 }
 
+/// The other signed bodies, each written out from the contract by hand: a
+/// pairwise presentation, which signs `sub` and `tag` and neither `proof` nor
+/// `sig`; a settlement; and a head with `prev` set, whose id is checked against
+/// a SHA-256 taken outside this crate.
+#[test]
+fn the_other_signed_bytes_are_the_canonical_json() -> Outcome<()> {
+    let p = Presentation {
+        rp_id:      APP.to_string(),
+        nonce:      [0x01u8; 32],
+        subject:    Subject::Pairwise {
+            key:    [0xffu8; 32],
+            tag:    [0xfbu8; 32],
+            proof:  Proof { alg: linkring::ALG.to_string(), body: vec![1, 2, 3] },
+        },
+        predicates: vec!["adult".to_string()],
+        head:       [0u8; 32],
+        ts:         1_700_000_000,
+        sig:        [7u8; 64],
+    };
+    let want = "{\"head\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"mode\":\"pairwise\",\
+        \"nonce\":\"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE\",\"predicates\":[\"adult\"],\
+        \"rp_id\":\"https://app.example\",\"sub\":\"__________________________________________8\",\
+        \"tag\":\"-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_v7-_s\",\"ts\":1700000000,\
+        \"v\":\"present/1\"}";
+    req!(String::from_utf8_lossy(&res!(p.signed_bytes())).to_string(), want.to_string(), "pairwise");
+
+    let settlement = Settlement {
+        invoice:    [0x11u8; 32],
+        entry:      [0x22u8; 32],
+        amount:     500,
+        ts:         1_700_000_060,
+        signer:     [0x33u8; 32],
+        sig:        [7u8; 64],
+    };
+    let want = "{\"entry\":\"IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI\",\
+        \"invoice\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"oxes\":500,\
+        \"signer\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM\",\"ts\":1700000060,\
+        \"v\":\"settle/1\"}";
+    req!(String::from_utf8_lossy(&res!(settlement.signed_bytes())).to_string(), want.to_string(),
+        "settlement");
+
+    let head = Head {
+        id:             [0u8; 32],
+        epoch:          4,
+        prev:           Some([0x44u8; 32]),
+        ts:             6,
+        salt:           [0u8; 16],
+        members:        3,
+        ring_n:         2,
+        ring_digest:    [0x11u8; 32],
+        signer:         [0x33u8; 32],
+        sig:            [7u8; 64],
+    };
+    let want = "{\"epoch\":4,\"members\":3,\"prev\":\"REREREREREREREREREREREREREREREREREREREREREQ\",\
+        \"ring_digest\":\"ERERERERERERERERERERERERERERERERERERERERERE\",\"ring_n\":2,\
+        \"salt\":\"AAAAAAAAAAAAAAAAAAAAAA\",\
+        \"signer\":\"MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM\",\"ts\":6,\"v\":\"head/1\"}";
+    req!(String::from_utf8_lossy(&res!(head.signed_bytes())).to_string(), want.to_string(), "head");
+    // sha256sum of those bytes, taken outside this crate.
+    let id: [u8; 32] = [
+        0x5f, 0x01, 0x5f, 0x92, 0x74, 0x49, 0x63, 0x3e, 0x07, 0x9e, 0xae, 0x70, 0x29, 0xda, 0x00, 0x6b,
+        0xe4, 0x99, 0x35, 0xb3, 0x0e, 0x6c, 0x9d, 0x15, 0x90, 0xa7, 0x89, 0x99, 0x17, 0xc0, 0x94, 0x21,
+    ];
+    req!(res!(head.compute_id()), id, "head id");
+    Ok(())
+}
+
 #[test]
 fn a_key_id_is_the_head_of_its_sha256() -> Outcome<()> {
     // SHA-256("abc") begins ba7816bf8f (FIPS 180-4).
@@ -820,6 +970,10 @@ fn origins_are_read_as_serialised() -> Outcome<()> {
         "http://localhost:8080",
         "http://127.0.0.1:3000",
         "https://xn--bcher-kva.example",
+        "https://192.168.0.1",          // a dotted quad
+        "https://0.0.0.0",
+        "https://example.1a",           // a last label that is not a number
+        "https://1a.example",
     ] {
         if shape::check_origin(good).is_err() {
             return Err(err!("'{}' was refused.", good; Test));
@@ -841,6 +995,16 @@ fn origins_are_read_as_serialised() -> Outcome<()> {
         "https://-app.example",         // hyphen at a label's edge
         "https://[::1]",                // IPv6 literal
         "https://app.example?x=1",      // query
+        "https://1234",                 // an IPv4 host not written as a dotted quad
+        "https://127.1",
+        "https://0x7f.1",
+        "https://0x7f.0.0.1",
+        "https://1.2.3",
+        "https://01.2.3.4",             // a leading zero, read as octal
+        "https://256.1.1.1",            // a part beyond 255
+        "https://1.2.3.4.5",
+        "https://app.1",                // a numeric last label on a name
+        "https://app.0x1f",
         "app.example",                  // no scheme
         "https://",                     // no host
     ] {
@@ -975,6 +1139,7 @@ fn a_settlement_verifies_and_each_fault_is_refused() -> Outcome<()> {
         ("another invoice",     res!(settle(&w.peer, [9u8; 32], 500, NOW + 60)), &invoice),
         ("another amount",      res!(settle(&w.peer, id, 499, NOW + 60)), &invoice),
         ("after expiry",        res!(settle(&w.peer, id, 500, NOW + 3_601)), &invoice),
+        ("before issue",        res!(settle(&w.peer, id, 500, NOW - 1)), &invoice),
         ("another's invoice",   good.clone(), &other_invoice),
     ] {
         req!(v.verify_settlement(&s, inv).is_err(), true, "{}", what);
