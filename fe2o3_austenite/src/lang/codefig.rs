@@ -88,21 +88,23 @@ impl CodeFigure {
 /// Parses a `#figure` body's source into a [`CodeFigure`], or `None` when the body is not one of the code
 /// figures this reader draws (an image, a table, or a construct outside the subset). The three kinds are
 /// told apart by the call each uses: a Fletcher `diagram(...)`, a cetz-plot `barchart(...)`, or a
-/// cetz-plot `plot.plot(...)`.
-pub(crate) fn parse_code_figure(text: &str) -> Option<CodeFigure> {
+/// cetz-plot `plot.plot(...)`. Beside the figure comes what it is drawn without -- each argument, node,
+/// edge, bar, series or point the reader could not read or place, in a diagnostic's words -- so the reader
+/// refuses each where the figure stands rather than drawing less than was written in silence.
+pub(crate) fn parse_code_figure(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	if text.contains("diagram(") {
-		if let Some(cf) = parse_flowchart(text) {
-			return Some(cf);
+		if let Some(drawn) = parse_flowchart(text) {
+			return Some(drawn);
 		}
 	}
 	if text.contains("barchart") {
-		if let Some(cf) = parse_barchart(text) {
-			return Some(cf);
+		if let Some(drawn) = parse_barchart(text) {
+			return Some(drawn);
 		}
 	}
 	if text.contains("plot.add") || text.contains("plot.plot") {
-		if let Some(cf) = parse_lineplot(text) {
-			return Some(cf);
+		if let Some(drawn) = parse_lineplot(text) {
+			return Some(drawn);
 		}
 	}
 	None
@@ -131,9 +133,10 @@ enum EdgeDef {
 /// nodes lie in one column, so they are placed top to bottom with the gap between two nodes set by the
 /// difference of their grid rows; a plain `edge` chains one node to the next, and an `edge` given a
 /// direction path (`"r,r,u,u,l,l"`) is a feedback loop back up to the node the path's `u` steps reach.
-fn parse_flowchart(text: &str) -> Option<CodeFigure> {
+fn parse_flowchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	let inner	= call_inner(text, "diagram")?;
 	let args	= split_top_args(&inner);
+	let mut without: Vec<String> = Vec::new();	// what the diagram is drawn without
 
 	let mut spacing_em	= 1.0f64;
 	let mut node_stroke	= 1.0f32;
@@ -159,34 +162,48 @@ fn parse_flowchart(text: &str) -> Option<CodeFigure> {
 			continue;
 		}
 		if a.starts_with("node(") {
-			if let Some(nd) = parse_node(a) {
-				let idx = nodes.len();
-				nodes.push(nd);
-				// Resolve every chain edge waiting on the next node.
-				for (from, label) in pending.drain(..) {
-					edges.push(EdgeDef::Chain { from, to: idx, label });
-				}
-				last_node = Some(idx);
+			match parse_node(a) {
+				Some(nd) => {
+					let idx = nodes.len();
+					nodes.push(nd);
+					// Resolve every chain edge waiting on the next node.
+					for (from, label) in pending.drain(..) {
+						edges.push(EdgeDef::Chain { from, to: idx, label });
+					}
+					last_node = Some(idx);
+				},
+				None => without.push(fmt!("a node it cannot read, {}", short_arg(a))),
 			}
 			continue;
 		}
 		if a.starts_with("edge(") {
+			// The edges chain from the last node read, so one written before any node has none to leave from.
 			let from = match last_node {
 				Some(i)	=> i,
-				None	=> continue,	// an edge before any node has nothing to leave from
+				None	=> {
+					without.push(fmt!("an edge written before any node, {}", short_arg(a)));
+					continue;
+				},
 			};
 			let (route, label) = parse_edge(a);
 			match route {
 				ParsedRoute::Chain => pending.push((from, label)),
 				ParsedRoute::Feedback { u, cols } => {
 					let target_row = nodes[from].row - u;
-					if let Some(to) = nodes.iter().position(|n| n.row == target_row) {
-						edges.push(EdgeDef::Feedback { from, to, label, cols });
+					match nodes.iter().position(|n| n.row == target_row) {
+						Some(to)	=> edges.push(EdgeDef::Feedback { from, to, label, cols }),
+						None		=> without.push(fmt!(
+							"a feedback edge to row {}, where no node stands, {}", target_row, short_arg(a))),
 					}
 				},
 			}
 			continue;
 		}
+		without.push(fmt!("an argument it does not draw, {}", short_arg(a)));
+	}
+	// A chain edge waits for the next node; one still waiting at the end has no node to reach.
+	for _ in &pending {
+		without.push("an edge written after the last node, with no node to reach".to_string());
 	}
 
 	if nodes.is_empty() {
@@ -240,7 +257,17 @@ fn parse_flowchart(text: &str) -> Option<CodeFigure> {
 	style.node_fill		= None;	// an unfilled node is white; every filled node carries its own wash
 	style.node_stroke	= node_stroke;
 	style.label_size	= Sp::from_pt(EM);
-	Some(CodeFigure::Flowchart { diagram: d, style })
+	Some((CodeFigure::Flowchart { diagram: d, style }, without))
+}
+
+/// A figure argument in a diagnostic's words: its whitespace run together, cut at forty characters.
+fn short_arg(a: &str) -> String {
+	let t = a.split_whitespace().collect::<Vec<_>>().join(" ");
+	if t.chars().count() > 40 {
+		fmt!("`{}...`", t.chars().take(40).collect::<String>())
+	} else {
+		fmt!("`{}`", t)
+	}
 }
 
 /// Parses one `node((c, r), label, fill: .., shape: .., width: .., height: ..)` call.
@@ -370,7 +397,7 @@ fn resolve_shape(val: &str) -> Shape {
 /// Parses a cetz-plot `chart.barchart(...)` inside a `cetz.canvas` block into a [`BarChart`]. The bar
 /// data is a `let`-bound array of `([label], value)` tuples referenced by name in the call; the value
 /// axis is sized to the data with a nice tick step.
-fn parse_barchart(text: &str) -> Option<CodeFigure> {
+fn parse_barchart(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	let block	= canvas_block(text)?;
 	let lets	= let_bindings(&block);
 	let inner	= call_inner(&block, "barchart")?;
@@ -401,7 +428,7 @@ fn parse_barchart(text: &str) -> Option<CodeFigure> {
 		Some(name) => lets.get(name.trim()).cloned().unwrap_or(name),
 		None       => return None,
 	};
-	let bars = parse_bar_data(&data_src);
+	let (bars, without) = parse_bar_data(&data_src);
 	if bars.is_empty() {
 		return None;
 	}
@@ -410,7 +437,7 @@ fn parse_barchart(text: &str) -> Option<CodeFigure> {
 	let data_max		= bars.iter().fold(0.0f64, |m, (_, v)| m.max(*v));
 	let (x_max, x_ticks)	= nice_bar_axis(data_max);
 
-	Some(CodeFigure::Bars(BarChart {
+	Some((CodeFigure::Bars(BarChart {
 		width:		(w * CM) as f32,
 		height:		(h * CM) as f32,
 		bars,
@@ -419,41 +446,49 @@ fn parse_barchart(text: &str) -> Option<CodeFigure> {
 		x_label,
 		bar_frac,
 		fills:		bar_palette(),
-	}))
+	}), without))
 }
 
-/// Parses a `(([US], 60), ([UK], 25), ...)` array into label/value pairs, in order.
-fn parse_bar_data(src: &str) -> Vec<(String, f64)> {
+/// Parses a `(([US], 60), ([UK], 25), ...)` array into label/value pairs, in order, and each entry it
+/// cannot read as a `([label], value)` pair, in a diagnostic's words.
+fn parse_bar_data(src: &str) -> (Vec<(String, f64)>, Vec<String>) {
+	let mut out		= Vec::new();
+	let mut without	= Vec::new();
+	for entry in data_entries(src) {
+		match pair_fields(&entry) {
+			Some(fields) => {
+				let label = clean_label(fields[0].trim());
+				match plain_f64(fields[1].trim()) {
+					Some(v)	=> out.push((label, v)),
+					None	=> without.push(fmt!("a bar it cannot read, {}", short_arg(&entry))),
+				}
+			},
+			None => without.push(fmt!("a bar it cannot read, {}", short_arg(&entry))),
+		}
+	}
+	(out, without)
+}
+
+/// The entries of an `(a, b, ...)` data array, each as written; none when the source holds no array.
+fn data_entries(src: &str) -> Vec<String> {
 	let chars: Vec<char> = src.trim().chars().collect();
 	let open = match chars.iter().position(|&c| c == '(') {
 		Some(i)	=> i,
 		None	=> return Vec::new(),
 	};
-	let inner = match read_group(&chars, open) {
-		Some((s, _))	=> s,
-		None			=> return Vec::new(),
-	};
-	let mut out = Vec::new();
-	for entry in split_top_args(&inner) {
-		let ec: Vec<char> = entry.trim().chars().collect();
-		let eo = match ec.iter().position(|&c| c == '(') {
-			Some(i)	=> i,
-			None	=> continue,
-		};
-		let einner = match read_group(&ec, eo) {
-			Some((s, _))	=> s,
-			None			=> continue,
-		};
-		let fields = split_top_args(&einner);
-		if fields.len() < 2 {
-			continue;
-		}
-		let label = clean_label(fields[0].trim());
-		if let Some(v) = plain_f64(fields[1].trim()) {
-			out.push((label, v));
-		}
+	match read_group(&chars, open) {
+		Some((inner, _))	=> split_top_args(&inner).into_iter().filter(|e| !e.trim().is_empty()).collect(),
+		None				=> Vec::new(),
 	}
-	out
+}
+
+/// The fields of one `(x, y)` entry, when it is a group of at least two.
+fn pair_fields(entry: &str) -> Option<Vec<String>> {
+	let ec: Vec<char>	= entry.trim().chars().collect();
+	let eo				= ec.iter().position(|&c| c == '(')?;
+	let (einner, _)		= read_group(&ec, eo)?;
+	let fields			= split_top_args(&einner);
+	if fields.len() < 2 { None } else { Some(fields) }
 }
 
 /// A red-family palette cycled across the bars, echoing cetz-plot's default warm sequence closely enough
@@ -473,7 +508,7 @@ fn bar_palette() -> Vec<Rgba> {
 /// Parses a cetz-plot `plot.plot(...)` inside a `cetz.canvas` block into a [`Plot`] of line series. Each
 /// `plot.add` in the plot body names a `let`-bound array of `(x, y)` samples, a label and a style whose
 /// dash marks the series dashed; the axis ranges, tick steps and legend come from the call's arguments.
-fn parse_lineplot(text: &str) -> Option<CodeFigure> {
+fn parse_lineplot(text: &str) -> Option<(CodeFigure, Vec<String>)> {
 	let block	= canvas_block(text)?;
 	let lets	= let_bindings(&block);
 	let inner	= call_inner(&block, "plot")?;
@@ -512,8 +547,8 @@ fn parse_lineplot(text: &str) -> Option<CodeFigure> {
 		}
 	}
 
-	let body	= body?;
-	let series	= parse_plot_adds(&body, &lets);
+	let body				= body?;
+	let (series, without)	= parse_plot_adds(&body, &lets);
 	if series.is_empty() {
 		return None;
 	}
@@ -523,7 +558,7 @@ fn parse_lineplot(text: &str) -> Option<CodeFigure> {
 	let y_ticks	= ticks(y_min, y_max, y_step);
 
 	// The overall figure is the plot area plus the margins the plot builder reserves for labels.
-	Some(CodeFigure::Lines(Plot {
+	Some((CodeFigure::Lines(Plot {
 		width:		(w * CM) as f32 + 48.0,
 		height:		(h * CM) as f32 + 34.0,
 		x_range:	(x_min, x_max),
@@ -535,13 +570,14 @@ fn parse_lineplot(text: &str) -> Option<CodeFigure> {
 		x_label:	None,
 		y_label:	None,
 		legend,
-	}))
+	}), without))
 }
 
 /// Parses the `plot.add(...)` calls in a plot body into line series, resolving each data reference against
-/// the `let` bindings.
-fn parse_plot_adds(body: &str, lets: &HashMap<String, String>) -> Vec<Series> {
-	let mut out = Vec::new();
+/// the `let` bindings, and each series or point it cannot read, in a diagnostic's words.
+fn parse_plot_adds(body: &str, lets: &HashMap<String, String>) -> (Vec<Series>, Vec<String>) {
+	let mut out		= Vec::new();
+	let mut without	= Vec::new();
 	let chars: Vec<char> = body.chars().collect();
 	let mut from = 0usize;
 	// Walk every `plot.add(` in order; call_inner from a moving offset would re-find the first, so scan by
@@ -578,45 +614,33 @@ fn parse_plot_adds(body: &str, lets: &HashMap<String, String>) -> Vec<Series> {
 		}
 		let data_src = match data_expr {
 			Some(name) => lets.get(name.trim()).cloned().unwrap_or(name),
-			None       => continue,
+			None       => {
+				without.push(fmt!("a series naming no data, {}", short_arg(&inner)));
+				continue;
+			},
 		};
-		let points = parse_xy(&data_src);
+		let points = parse_xy(&data_src, &mut without);
 		if points.is_empty() {
+			without.push(fmt!("a series with no point it can read, {}", short_arg(&inner)));
 			continue;
 		}
 		out.push(Series { points, colour: Rgba::opaque(20, 20, 20), width, dashed, label });
 	}
-	out
+	(out, without)
 }
 
-/// Parses an `((x, y), (x, y), ...)` array into sample points, in order.
-fn parse_xy(src: &str) -> Vec<(f64, f64)> {
-	let chars: Vec<char> = src.trim().chars().collect();
-	let open = match chars.iter().position(|&c| c == '(') {
-		Some(i)	=> i,
-		None	=> return Vec::new(),
-	};
-	let inner = match read_group(&chars, open) {
-		Some((s, _))	=> s,
-		None			=> return Vec::new(),
-	};
+/// Parses an `((x, y), (x, y), ...)` array into sample points, in order, noting in `without` each entry it
+/// cannot read as a pair of numbers.
+fn parse_xy(src: &str, without: &mut Vec<String>) -> Vec<(f64, f64)> {
 	let mut out = Vec::new();
-	for entry in split_top_args(&inner) {
-		let ec: Vec<char> = entry.trim().chars().collect();
-		let eo = match ec.iter().position(|&c| c == '(') {
-			Some(i)	=> i,
-			None	=> continue,
-		};
-		let einner = match read_group(&ec, eo) {
-			Some((s, _))	=> s,
-			None			=> continue,
-		};
-		let fields = split_top_args(&einner);
-		if fields.len() < 2 {
-			continue;
-		}
-		if let (Some(x), Some(y)) = (plain_f64(fields[0].trim()), plain_f64(fields[1].trim())) {
-			out.push((x, y));
+	for entry in data_entries(src) {
+		let point = pair_fields(&entry).and_then(|f| match (plain_f64(f[0].trim()), plain_f64(f[1].trim())) {
+			(Some(x), Some(y))	=> Some((x, y)),
+			_					=> None,
+		});
+		match point {
+			Some(p)	=> out.push(p),
+			None	=> without.push(fmt!("a point it cannot read, {}", short_arg(&entry))),
 		}
 	}
 	out
@@ -977,7 +1001,8 @@ mod tests {
 	#[test]
 	fn parses_barchart_data_in_order() {
 		let src = "(([US], 60), ([UK], 25), ([NZ], 20))";
-		let bars = parse_bar_data(src);
+		let (bars, without) = parse_bar_data(src);
+		assert!(without.is_empty(), "{:?}", without);
 		assert_eq!(bars, vec![
 			("US".to_string(), 60.0),
 			("UK".to_string(), 25.0),
@@ -987,8 +1012,10 @@ mod tests {
 
 	#[test]
 	fn parses_xy_samples() {
-		let pts = parse_xy("((1979, 100), (1983, 105))");
+		let mut without = Vec::new();
+		let pts = parse_xy("((1979, 100), (1983, 105))", &mut without);
 		assert_eq!(pts, vec![(1979.0, 100.0), (1983.0, 105.0)]);
+		assert!(without.is_empty(), "{:?}", without);
 	}
 
 	#[test]
@@ -1000,7 +1027,7 @@ mod tests {
 			chart.barchart(mode: "basic", size: (8, 4), label-key: 0, value-key: 1,
 				bar-width: 0.6, x-label: [%], y-label: none, data)
 		}))"#;
-		match parse_code_figure(bar) {
+		match parse_code_figure(bar).map(|(cf, _)| cf) {
 			Some(CodeFigure::Bars(b)) => {
 				assert_eq!(b.bars.len(), 2);
 				assert_eq!(b.bars[0], ("US".to_string(), 60.0));
@@ -1020,7 +1047,7 @@ mod tests {
 					plot.add(style: (stroke: (paint: black, thickness: 1.5pt, dash: "dashed")), label: [Median hourly wages], b)
 				})
 		}))"#;
-		match parse_code_figure(line) {
+		match parse_code_figure(line).map(|(cf, _)| cf) {
 			Some(CodeFigure::Lines(p)) => {
 				assert_eq!(p.series.len(), 2);
 				assert!(!p.series[0].dashed);
@@ -1041,6 +1068,40 @@ mod tests {
 			edge("-|>", [Y]),
 			node((0,6), [End]),
 		)])"#;
-		assert!(matches!(parse_code_figure(flow), Some(CodeFigure::Flowchart { .. })));
+		assert!(matches!(parse_code_figure(flow), Some((CodeFigure::Flowchart { .. }, ref w)) if w.is_empty()));
+	}
+
+	/// What a drawing cannot place is named, not dropped: an edge before any node, a feedback edge to a row
+	/// no node holds, an edge after the last node, a node it cannot read, a bar it cannot read and a point it
+	/// cannot read are each listed as what the figure is drawn without, and the rest is still drawn.
+	#[test]
+	fn what_a_drawing_cannot_place_is_named() {
+		let flow = "diagram(edge((0,0), (0,1), \"->\"), node((0,0), [A]), node(), edge(\"u,u,u,r\", \"-|>\"), \
+			node((0,1), [B]), edge(\"-|>\"))";
+		let (fig, without) = match parse_code_figure(flow) {
+			Some(drawn)	=> drawn,
+			None		=> panic!("the diagram is read"),
+		};
+		assert!(matches!(fig, CodeFigure::Flowchart { .. }));
+		assert_eq!(without.len(), 4, "{:?}", without);
+		assert!(without[0].starts_with("an edge written before any node"), "{:?}", without);
+		assert!(without[1].starts_with("a node it cannot read"), "{:?}", without);
+		assert!(without[2].starts_with("a feedback edge to row -3, where no node stands"), "{:?}", without);
+		assert_eq!(without[3], "an edge written after the last node, with no node to reach");
+
+		let bar = "cetz.canvas({ chart.barchart(size: (8, 4), (([US], 60), ([UK], many), ([FR], 30))) })";
+		let (fig, without) = match parse_code_figure(bar) {
+			Some(drawn)	=> drawn,
+			None		=> panic!("the bar chart is read"),
+		};
+		assert!(matches!(fig, CodeFigure::Bars(ref b) if b.bars.len() == 2));
+		assert_eq!(without, ["a bar it cannot read, `([UK], many)`"]);
+
+		let line = "cetz.canvas({ plot.plot(size: (8, 5), { plot.add(((1, 2), (3, x), (5, 6))) }) })";
+		let (_, without) = match parse_code_figure(line) {
+			Some(drawn)	=> drawn,
+			None		=> panic!("the plot is read"),
+		};
+		assert_eq!(without, ["a point it cannot read, `(3, x)`"]);
 	}
 }

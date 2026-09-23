@@ -264,3 +264,17 @@ fn a_terms_file_that_will_not_read_is_reported() -> Outcome<()> {
 	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
 	Ok(())
 }
+
+/// A Fletcher edge written before any node, which the diagram has no node to draw from, is refused where
+/// the figure stands, so strict refuses a figure not drawn as written; the nodes are still drawn.
+#[test]
+fn an_edge_a_diagram_cannot_place_is_refused() -> Outcome<()> {
+	let _turn = turn();
+	let src = b"= H\n\n#figure(diagram(edge((0,0), (0,1), \"->\"), node((0,0), [A]), node((0,1), [B])), caption: [Flow.])\n";
+	let report = res!(report_of(MAIN, &[(MAIN, &src[..])], None));
+	let d = res!(site(&report, "#figure (diagram)"));
+	assert_eq!((d.severity, d.kind, d.line), (Severity::Warning, DiagnosticKind::Unsupported, 3), "{}", d);
+	assert!(d.message.contains("is drawn without an edge written before any node"), "{}", d);
+	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses it");
+	Ok(())
+}

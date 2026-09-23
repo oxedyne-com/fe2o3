@@ -2959,9 +2959,20 @@ fn dispatch_capture(
 			}
 		},
 		CaptureKind::Figure => {
-			match parse_figure(&cap.buf, arrays, Span::new(cap.start, cap.start)) {
-				Some(item)	=> items.push(item),
-				None		=> skips.record("#figure", Span::new(cap.start, cap.start)),
+			let at = Span::new(cap.start, cap.start);
+			match parse_figure(&cap.buf, arrays, at) {
+				Some((item, without)) => {
+					// A figure drawn by code is drawn with what the reader could place; each thing it is drawn
+					// without is refused where the figure stands.
+					if let Item::Figure { body: FigureBody::Code(cf), .. } = &item {
+						for w in &without {
+							skips.record_stand_in(&fmt!("#figure ({})", cf.kind_name()), at,
+								RefusalClass::Unsupported, &fmt!("is drawn without {}", w));
+						}
+					}
+					items.push(item);
+				},
+				None => skips.record("#figure", at),
 			}
 		},
 		CaptureKind::Image => {
@@ -4315,7 +4326,7 @@ fn outer_text_size(text: &str) -> Option<f64> {
 /// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
 /// positional argument is the body -- a wrapped `#table(...)` set in full, or an image call stood in for
 /// by a placeholder; `caption:` sets the caption, `supplement:`/`kind:` the "Figure" or "Table" label.
-fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>, span: Span) -> Option<Item> {
+fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>, span: Span) -> Option<(Item, Vec<String>)> {
 	let (body_src, label)	= strip_trailing_label(buf);
 	let inner				= call_inner(&body_src, "figure")?;
 
@@ -4346,15 +4357,15 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>, span: Spa
 		}
 	}
 
-	let body_text	= positional.unwrap_or_default();
-	let body		= figure_body(&body_text, arrays);
+	let body_text			= positional.unwrap_or_default();
+	let (body, without)		= figure_body(&body_text, arrays);
 	let supplement	= supplement.unwrap_or_else(|| match kind.as_deref() {
 		Some("table")	=> "Table".to_string(),
 		_				=> "Figure".to_string(),
 	});
 	// A scope matters only to a float: Typst accepts `scope: "parent"` on a floating figure alone.
 	let placement = placement.map(|side| Floating { side, scope });
-	Some(Item::Figure { body, caption, supplement, label, placement, span })
+	Some((Item::Figure { body, caption, supplement, label, placement, span }, without))
 }
 
 /// Reads a float's `scope:` value: `"parent"` spans every column of the page, anything else -- `"column"`,
@@ -4380,19 +4391,20 @@ fn parse_placement(val: &str) -> Option<FloatPlacement> {
 
 /// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
 /// parses, otherwise an image carrying the path and any declared sizing (empty path when none is found).
-fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> FigureBody {
+/// Beside it, what a figure drawn by code is drawn without ([`super::codefig::parse_code_figure`]).
+fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> (FigureBody, Vec<String>) {
 	if let Some(inner) = call_inner(text, "table") {
 		if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(text)) {
-			return FigureBody::Table(spec);
+			return (FigureBody::Table(spec), Vec::new());
 		}
 	}
 	// A CeTZ/Fletcher diagram, bar chart or line plot drawn inline is read into a builder that draws it
 	// for real; only when the body is none of these does it fall through to the image/placeholder path.
-	if let Some(cf) = super::codefig::parse_code_figure(text) {
-		return FigureBody::Code(cf);
+	if let Some((cf, without)) = super::codefig::parse_code_figure(text) {
+		return (FigureBody::Code(cf), without);
 	}
 	let (path, width, height, scale) = image_call(text);
-	FigureBody::Image { path, width, height, scale }
+	(FigureBody::Image { path, width, height, scale }, Vec::new())
 }
 
 /// The path and sizing of a `padded-image("...")` or `image("...")` call in `text`. The custom wrapper is
