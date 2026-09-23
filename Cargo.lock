@@ -1253,7 +1253,6 @@ checksum = "4a3daa8e81a3963a60642bcc1f90a670680bd4a77535faa384e9d1c79d620871"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
- "merlin",
  "rand_core 0.6.4",
  "serde",
  "sha2",
@@ -2403,18 +2402,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "merlin"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58c38e2799fc0978b65dfff8023ec7843e2330bb462f19198840b34b6582397d"
-dependencies = [
- "byteorder",
- "keccak",
- "rand_core 0.6.4",
- "zeroize",
-]
-
-[[package]]
 name = "miette"
 version = "7.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3157,6 +3144,7 @@ dependencies = [
  "rand_core 0.6.4",
  "ring",
  "secrecy",
+ "sha2",
  "sha3",
  "tiny-keccak",
  "wasm-bindgen",
