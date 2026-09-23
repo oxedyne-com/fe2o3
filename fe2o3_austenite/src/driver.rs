@@ -208,6 +208,7 @@ struct Checkpoint {
 	pending:		Vec<FloatNode>,
 	cpending:		Vec<FloatNode>,
 	repeat:			Option<BoxNode>,
+	notes:			Vec<Footnote>,	// the notes of the floats seated as the page opened
 	strong_open:	bool,
 	stamp:			bool,	// the page opened on an overflow, so its first column restamps a repeated header
 	marks:			(u32, u32),	// the ledger's first-heading and back-matter pages when the page opened
@@ -303,6 +304,7 @@ impl<'a, M: Metrics> Flow<'a, M> {
 				pending:		Vec::new(),
 				cpending:		Vec::new(),
 				repeat:			None,
+				notes:			Vec::new(),
 				strong_open:	false,
 				stamp:			false,
 				marks,
@@ -350,6 +352,7 @@ impl<'a, M: Metrics> Flow<'a, M> {
 			pending:		self.pending.clone(),
 			cpending:		self.cpending.clone(),
 			repeat:			self.repeat.clone(),
+			notes:			self.notes.clone(),
 			strong_open:	self.strong_open,
 			stamp,
 			marks:			(self.ledger.body_start_page, self.ledger.back_matter_start_page),
@@ -359,7 +362,8 @@ impl<'a, M: Metrics> Flow<'a, M> {
 	/// Rewinds to where the page opened, its first column not yet open, and returns the stream index to
 	/// replay from. The anchors laid since are simply re-recorded as the replay lays them again -- the ledger
 	/// keeps the last placement of each identity -- so only its first-heading and back-matter marks, which
-	/// a rewound anchor may have fixed, need restoring.
+	/// a rewound anchor may have fixed, need restoring. The notes go back to those of the floats seated as the
+	/// page opened, and the replay gathers the rest again.
 	fn rewind(&mut self) -> usize {
 		let c = self.check.clone();
 		self.frame			= c.frame;
@@ -371,7 +375,7 @@ impl<'a, M: Metrics> Flow<'a, M> {
 		self.cbands			= c.cbands;
 		self.pending		= c.pending;
 		self.cpending		= c.cpending;
-		self.notes			= Vec::new();
+		self.notes			= c.notes;
 		self.repeat			= c.repeat;
 		self.strong_open	= c.strong_open;
 		self.at_top			= true;
@@ -404,8 +408,8 @@ impl<'a, M: Metrics> Flow<'a, M> {
 		self.y = self.top;
 		self.bands = FloatBands::empty();
 		res!(flush_floats(
-			&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, Sp::ZERO, self.page_no, self.geom,
-			self.top, self.bottom, self.metrics, self.incoming, &mut self.ledger));
+			&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, &mut self.notes, &self.doc.foot,
+			self.page_no, self.geom, self.top, self.bottom, self.metrics, self.incoming, &mut self.ledger));
 		self.mark(idx, stamp);
 		self.open_columns(stamp)
 	}
@@ -493,7 +497,8 @@ impl<'a, M: Metrics> Flow<'a, M> {
 		let g			= self.col_geom();
 		let x0			= g.content_left();
 		let x1			= g.content_left() + g.content_width();
-		let foot_now	= foot_reserve(&self.notes, &[], &self.doc.foot);
+		let mut marks	= float_marks(f);
+		let foot_now	= foot_reserve(&self.notes, &marks, &self.doc.foot);
 		let base		= (self.bottom - self.bands.bot_reserve) - self.col_top;	// the column's own height
 		let band		= f.height + f.clearance;
 		let need_fit	= f.height + if clearance_flag { f.clearance } else { Sp::ZERO };
@@ -530,6 +535,7 @@ impl<'a, M: Metrics> Flow<'a, M> {
 				self.y += band;
 			},
 		}
+		self.notes.append(&mut marks);	// the float's notes are set at the foot of the column it lands in
 		Ok(true)
 	}
 
@@ -543,7 +549,8 @@ impl<'a, M: Metrics> Flow<'a, M> {
 			self.pending.push(f.clone());
 			return Ok(idx + 1);
 		}
-		let free		= (self.bottom - self.bands.bot_reserve) - (self.top + self.bands.top_used);
+		let free		= (self.bottom - self.bands.bot_reserve) - (self.top + self.bands.top_used)
+							- foot_reserve(&self.check.notes, &float_marks(f), &self.doc.foot);
 		let base		= self.geom.content_height();
 		let fresh		= self.check.frame.is_empty();	// the page opened with nothing on it
 		if f.height > free && !fresh {
@@ -564,8 +571,8 @@ impl<'a, M: Metrics> Flow<'a, M> {
 		// The rewound page carries no flow content, so the clearance does not count in the fit (as a re-queued
 		// float's does not); the fit was checked above, so the float is seated even should it overflow.
 		res!(try_insert_float(
-			&seat, false, true, &mut self.y, &mut self.bands, Sp::ZERO, self.page_no, self.geom, self.top,
-			self.bottom, self.metrics, self.incoming, &mut self.frame, &mut self.ledger));
+			&seat, false, true, &mut self.y, &mut self.bands, &mut self.notes, &self.doc.foot, self.page_no,
+			self.geom, self.top, self.bottom, self.metrics, self.incoming, &mut self.frame, &mut self.ledger));
 		self.seated.insert(idx);
 		self.mark(resume, stamp);
 		res!(self.open_columns(stamp));
@@ -659,13 +666,13 @@ impl<'a, M: Metrics> Flow<'a, M> {
 					self.pending.push(f.clone());
 				} else {
 					let was_empty	= self.frame.is_empty();
-					let foot_now	= foot_reserve(&self.notes, &[], &self.doc.foot);
 					// Clearance counts in the fit only when the page already carries FLOW content -- `at_top`
 					// tracks its absence. An empty page seats the float regardless and overflows rather than
 					// deferring forever.
 					let ok = res!(try_insert_float(
-						f, !self.at_top, was_empty, &mut self.y, &mut self.bands, foot_now, self.page_no, self.geom,
-						self.top, self.bottom, self.metrics, self.incoming, &mut self.frame, &mut self.ledger));
+						f, !self.at_top, was_empty, &mut self.y, &mut self.bands, &mut self.notes, &self.doc.foot,
+						self.page_no, self.geom, self.top, self.bottom, self.metrics, self.incoming, &mut self.frame,
+						&mut self.ledger));
 					if !ok {
 						self.pending.push(f.clone());
 					}
@@ -709,8 +716,9 @@ impl<'a, M: Metrics> Flow<'a, M> {
 					self.cols = *pc;
 					if self.frame.is_empty() {
 						res!(flush_floats(
-							&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, Sp::ZERO, self.page_no,
-							self.geom, self.top, self.bottom, self.metrics, self.incoming, &mut self.ledger));
+							&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, &mut self.notes,
+							&self.doc.foot, self.page_no, self.geom, self.top, self.bottom, self.metrics, self.incoming,
+							&mut self.ledger));
 					}
 					self.mark(idx + 1, false);
 					res!(self.open_columns(false));
@@ -774,10 +782,9 @@ impl<'a, M: Metrics> Flow<'a, M> {
 		// carries), then a fresh page per remaining batch. A fresh, empty page seats at least its front float,
 		// so `pending` shrinks by at least one per fresh page and the loop terminates.
 		loop {
-			let foot_now = foot_reserve(&self.notes, &[], &self.doc.foot);
 			res!(flush_floats(
-				&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, foot_now, self.page_no, self.geom,
-				self.top, self.bottom, self.metrics, self.incoming, &mut self.ledger));
+				&mut self.pending, &mut self.frame, &mut self.y, &mut self.bands, &mut self.notes, &self.doc.foot,
+				self.page_no, self.geom, self.top, self.bottom, self.metrics, self.incoming, &mut self.ledger));
 			if self.pending.is_empty() {
 				break;
 			}
@@ -977,7 +984,7 @@ fn column_hop<M: Metrics>(
 			pages, frame, page_no, y, top, geom, notes, foot, bottom, bands.bot_reserve, metrics, incoming, ledger));
 		*bands = FloatBands::empty();
 		res!(flush_floats(
-			pending, frame, y, bands, Sp::ZERO, *page_no, geom, top, bottom, metrics, incoming, ledger));
+			pending, frame, y, bands, notes, foot, *page_no, geom, top, bottom, metrics, incoming, ledger));
 		*col		= 0;
 		*col_top	= *y;	// finish_page reset y to the region top; flush_floats advanced it past any top floats
 		*yy			= *col_top;
@@ -1107,8 +1114,10 @@ impl FloatBands {
 /// midpoint budget: Typst sets it only when the page already carries flow content, and a re-queued float is
 /// re-processed with it false. The clearance is ALWAYS laid in the band, per Typst's finalize. `force`
 /// seats the float even when it will not fit (an empty page's front float, which overflows rather than
-/// deferring forever). `foot_now` is the footnote furniture already reserved, so a float never lands over
-/// the notes. Returns `true` when placed, `false` when it does not fit and `force` is unset.
+/// deferring forever). `notes` are the page's footnotes so far: the fit reserves their furniture and the
+/// float's own notes', so a float never lands over the notes, and a float placed adds its notes to them, to
+/// be set at the foot of the page it lands on. Returns `true` when placed, `false` when it does not fit and
+/// `force` is unset.
 #[allow(clippy::too_many_arguments)]
 fn try_insert_float<M: Metrics>(
 	f:				&FloatNode,
@@ -1116,7 +1125,8 @@ fn try_insert_float<M: Metrics>(
 	force:			bool,
 	y:				&mut Sp,
 	bands:			&mut FloatBands,
-	foot_now:		Sp,
+	notes:			&mut Vec<Footnote>,
+	foot:			&FootStyle,
 	page_no:		u32,
 	geom:			PageGeometry,
 	top:			Sp,
@@ -1128,6 +1138,8 @@ fn try_insert_float<M: Metrics>(
 )
 	-> Outcome<bool>
 {
+	let mut marks	= float_marks(f);
+	let foot_now	= foot_reserve(notes, &marks, foot);
 	let base		= geom.content_height();
 	let band		= f.height + f.clearance;	// finalize always lays the clearance
 	let need_fit	= f.height + if clearance_flag { f.clearance } else { Sp::ZERO };
@@ -1171,22 +1183,25 @@ fn try_insert_float<M: Metrics>(
 			*y += band;
 		},
 	}
+	notes.append(&mut marks);
 	Ok(true)
 }
 
 /// Sets the queued floats that fit on the current page, in document order, updating its [`FloatBands`].
 /// A queued float is re-processed with `clearance_flag` false (Typst's relayout does the same); the front
 /// float of an empty page is seated even when it will not fit, so the queue always drains, and flushing
-/// stops at the first float that will not fit so a float never jumps ahead of an earlier one. `foot_now` is
-/// the footnote furniture already on the page (zero on a freshly opened one), so a float never lands over
-/// the notes -- the end-of-document drain calls this on a part-filled page and must respect them.
+/// stops at the first float that will not fit so a float never jumps ahead of an earlier one. `notes` are the
+/// footnotes already on the page (none on a freshly opened one), so a float never lands over them -- the
+/// end-of-document drain calls this on a part-filled page and must respect them -- and each float seated adds
+/// its own notes to them.
 #[allow(clippy::too_many_arguments)]
 fn flush_floats<M: Metrics>(
 	pending:	&mut Vec<FloatNode>,
 	frame:		&mut Frame,
 	y:			&mut Sp,
 	bands:		&mut FloatBands,
-	foot_now:	Sp,
+	notes:		&mut Vec<Footnote>,
+	foot:		&FootStyle,
 	page_no:	u32,
 	geom:		PageGeometry,
 	top:		Sp,
@@ -1202,7 +1217,7 @@ fn flush_floats<M: Metrics>(
 		let force = frame.is_empty() && !placed_any;
 		let f = pending[0].clone();
 		let ok = res!(try_insert_float(
-			&f, false, force, y, bands, foot_now, page_no, geom, top, bottom, metrics, incoming, frame, ledger));
+			&f, false, force, y, bands, notes, foot, page_no, geom, top, bottom, metrics, incoming, frame, ledger));
 		if ok {
 			pending.remove(0);
 			placed_any = true;
@@ -1281,10 +1296,22 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 	(ext, foot_reserve(notes, &marks, foot))
 }
 
+/// The footnotes whose marks a float's material holds, in the order they were set. They are gathered where
+/// the float is placed, not where it stands in the stream, so each is set at the foot of the page or column
+/// the float lands on.
+fn float_marks(f: &FloatNode) -> Vec<Footnote> {
+	let mut marks = Vec::new();
+	for child in &f.list {
+		collect_marks(child, &mut marks);
+	}
+	marks
+}
+
 /// Gathers the footnotes whose marks fall anywhere within `node`, in the document order they were set,
 /// by walking its boxes. A mark is a [`LeafKind::Mark`] leaf; the note it carries is what the page
 /// breaker reserves foot space for and what the closing page sets at its foot. A footnote set in a note is
-/// the same page's, gathered straight after the note that holds it, as Typst sets it.
+/// the same page's, gathered straight after the note that holds it, as Typst sets it. A float is passed
+/// over: its marks are gathered where it is placed ([`float_marks`]).
 fn collect_marks(node: &Node, out: &mut Vec<Footnote>) {
 	match node {
 		Node::HBox(b) | Node::VBox(b)	=> for child in &b.list { collect_marks(child, out); },

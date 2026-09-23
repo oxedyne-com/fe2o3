@@ -230,3 +230,61 @@ fn a_floating_callout_or_a_column_change_inside_a_callout_is_set_in_place() -> O
 	]);
 	Ok(())
 }
+
+/// The first 1-based page whose runs, joined, hold `word`, or `None` when no page does. A word may be set
+/// as several runs, parted at a kerning pair or a ligature, so the runs are joined with nothing between.
+fn page_of(rendered: &Rendered, word: &str) -> Option<usize> {
+	rendered.out.pages.iter().position(|page| {
+		let joined: String = page.frame.placed.iter().filter_map(|placed| match &placed.kind {
+			PlacedKind::Text(t)	=> Some(t.source()),
+			_					=> None,
+		}).collect();
+		joined.contains(word)
+	}).map(|i| i + 1)
+}
+
+const ASIDE: &str = "#let aside-box(title: none, float: true, body) = {\n\
+	\tlet inner = box(width: 100%, inset: 1em, fill: luma(240), [#text(size: 0.85em)[#body]])\n\
+	\tif float { figure(placement: auto, inner) } else { inner }\n}\n\n";
+
+/// A footnote in a float -- a floating figure's caption, a floating `#place`'s body, a floating callout's
+/// body -- is set at the foot of the page the float lands on, where it was answered "set" and laid nowhere;
+/// a float deferred to a later page takes its note there, in one column or two.
+#[test]
+fn a_float_sets_its_footnotes_on_the_page_it_lands_on() -> Outcome<()> {
+	let _turn = turn();
+	let filler: String = (1..=40).map(|n| fmt!("Filler paragraph {} of the page{}.\n\n", n,
+		if n == 40 { " Fortieth" } else { "" })).collect();
+	// A float too tall for any page that already carries a few paragraphs, so it waits for the next.
+	let rows: String = (1..=34).map(|n| fmt!("[Row {}], ", n)).collect();
+	let one = fmt!("{}= Top\n\n\
+		#figure(table(columns: 1, [Cell]), caption: [Alphafloat.#footnote[Alphanote.]], placement: top)\n\n\
+		#place(bottom, float: true)[Betaplace.#footnote[Betanote.]]\n\n\
+		#aside-box[Gammaaside.#footnote[Gammanote.]]\n\n\
+		{}#figure(table(columns: 1, {}), caption: [Deltadeferred.#footnote[Deltanote.]], placement: top)\n\n\
+		{}", ASIDE, filler, rows, filler);
+	let two = fmt!("#set page(columns: 2)\n\n= Top\n\n\
+		#figure(table(columns: 1, [Cell]), caption: [Epsilonparent.#footnote[Epsilonnote.]], placement: top, scope: \"parent\")\n\n\
+		#figure(table(columns: 1, [Cell]), caption: [Thetaparent.#footnote[Thetanote.]], placement: bottom, scope: \"parent\")\n\n\
+		#figure(table(columns: 1, [Cell]), caption: [Zetacolumn.#footnote[Zetanote.]], placement: bottom)\n\n\
+		{}#figure(table(columns: 1, {}), caption: [Etadeferred.#footnote[Etanote.]], placement: top)\n\n\
+		{}{}", filler, rows, filler, filler);
+	for (src, pairs, deferred) in [
+		(one.as_str(), vec![("Alphafloat", "Alphanote"), ("Betaplace", "Betanote"), ("Gammaaside", "Gammanote"),
+			("Deltadeferred", "Deltanote")], "Deltadeferred"),
+		(two.as_str(), vec![("Epsilonparent", "Epsilonnote"), ("Thetaparent", "Thetanote"), ("Zetacolumn", "Zetanote"),
+			("Etadeferred", "Etanote")],
+			"Etadeferred"),
+	] {
+		let (rendered, report) = res!(compile_of(&[(MAIN, src)]));
+		for (float, note) in pairs {
+			let at = page_of(&rendered, float);
+			assert!(at.is_some(), "{:?} is set", float);
+			assert_eq!(page_of(&rendered, note), at, "{:?} is set on the page {:?} lands on", note, float);
+		}
+		assert!(page_of(&rendered, deferred) > page_of(&rendered, "Fortieth"), "{:?} is deferred past the filler: {:?} {:?}",
+			deferred, page_of(&rendered, deferred), page_of(&rendered, "Fortieth"));
+		assert!(report.diagnostics.iter().all(|d| d.message.starts_with("skipped #let")), "{:?}", report.diagnostics);
+	}
+	Ok(())
+}
