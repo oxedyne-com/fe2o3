@@ -1,5 +1,5 @@
-// U2 owns this file. U0 wrote working bodies because every native function in every unit parses its
-// arguments through these methods; keep their names and semantics (Typst's `Args`), refine freely.
+// U2 owns this file. Every native function in every unit parses its arguments through these methods;
+// their names and semantics are Typst's `Args`.
 
 use crate::eval::value::{
 	FromValue,
@@ -94,6 +94,16 @@ impl Args {
 			None	=> Ok(None),
 		}
 	}
+
+	/// Every argument, positional and named, moved out; the span stays.
+	pub fn take(&mut self) -> Args {
+		Args { span: self.span, items: std::mem::take(&mut self.items) }
+	}
+
+	/// How many positional arguments remain.
+	pub fn pos_count(&self) -> usize { self.items.iter().filter(|a| a.name.is_none()).count() }
+
+	pub fn is_empty(&self) -> bool { self.items.is_empty() }
 
 	/// Fails on any argument not taken.
 	pub fn finish(self) -> Outcome<()> {

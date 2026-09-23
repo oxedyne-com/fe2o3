@@ -3,7 +3,7 @@
 //! Sets each exemplar expression as a single centred display equation on its own page and writes it as
 //! a one-page PDF, so each can be turned into a tightly-cropped PNG and set beside the Typst oracle that
 //! uses the identical font. This is the living comparison harness for tuning the maths layout against
-//! Latin Modern Math: every difference between our render and the oracle is a layout error to close.
+//! New Computer Modern Math: every difference between our render and the oracle is a layout error to close.
 //!
 //! Usage: `mathgallery [OUTPUT_DIR]` (default `mathgallery-out`). Each expression `N` is written to
 //! `eqN.pdf`; convert to PNG in the shell with `pdftoppm -png -r 300 eqN.pdf eqN` then trim.

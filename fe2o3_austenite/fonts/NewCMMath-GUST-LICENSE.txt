@@ -1,3 +1,7 @@
+% New Computer Modern Math (NewCMMath-Regular.otf, version 4.0), (C) 2019-2026 Antonis Tsolomitis.
+% Released under the GUST Font License, reproduced below from the font's own name table reference:
+% http://tug.org/fonts/licenses/GUST-FONT-LICENSE.txt
+%
 % This is a preliminary version (2006-09-30), barring acceptance from
 % the LaTeX Project Team and other feedback, of the GUST Font License.
 % (GUST is the Polish TeX Users Group, http://www.gust.org.pl)

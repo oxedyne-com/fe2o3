@@ -29,6 +29,7 @@
 //! this file is exactly that identity.
 
 use crate::doc::HeadingStyle;
+use crate::ir::Length;
 use crate::ir::Sp;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -125,7 +126,7 @@ pub struct ThemeText {
 	pub hyphenate:	bool,	// reserved
 	pub justify:	bool,	// reserved
 	pub fill:		Rgba,	// prose text colour from `#set text(fill:)`, default black
-	pub faces:		FaceSet,	// reserved: role -> family name, resolved to a loaded face at render
+	pub faces:		FaceSet,	// role -> family names, resolved to loaded faces at render
 }
 
 impl Default for ThemeText {
@@ -143,13 +144,13 @@ impl Default for ThemeText {
 	}
 }
 
-/// Reserved: the family name each text role is set in, or `None` to take the loaded default. A later
-/// unit lowers `set text(font: ...)` and `show <role>: set text(...)` into these; the renderer does
-/// not read them yet. The heading display face is not here -- it is read for headings, so it lives in the
-/// `heading` group ([`ThemeHeading::face`]) where a heading block's read-set finds it.
+/// The family each text role is set in. `body` is Typst's `text.font`: a fallback list, tried in order for
+/// each character, and empty to take the loaded default (Libertinus Serif). `emphasis` and `mono` are
+/// reserved; nothing lowers into them yet. The heading display face is not here -- it is read for headings,
+/// so it lives in the `heading` group ([`ThemeHeading::face`]) where a heading block's read-set finds it.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct FaceSet {
-	pub body:		Option<String>,
+	pub body:		Vec<String>,
 	pub emphasis:	Option<String>,
 	pub mono:		Option<String>,
 }
@@ -412,12 +413,38 @@ pub struct ThemePagePart {
 	pub opener:		ThemePageGeom,
 }
 
-/// Page geometry per part of the book, each part per page class. Reserved; see [`ThemePagePart`].
-#[derive(Clone, Debug, PartialEq, Default)]
+/// Page geometry per part of the book, each part per page class (reserved; see [`ThemePagePart`]), and the
+/// columns the body flows in: Typst's `page.columns`, and `columns.gutter` between two, a fraction of the
+/// content width (4% by default) or an absolute length.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ThemePage {
-	pub front:	ThemePagePart,
-	pub body:	ThemePagePart,
-	pub back:	ThemePagePart,
+	pub front:			ThemePagePart,
+	pub body:			ThemePagePart,
+	pub back:			ThemePagePart,
+	pub columns:		usize,
+	pub column_gutter:	Length,
+}
+
+impl Default for ThemePage {
+	fn default() -> Self {
+		Self {
+			front:			ThemePagePart::default(),
+			body:			ThemePagePart::default(),
+			back:			ThemePagePart::default(),
+			columns:		1,
+			column_gutter:	Length::Rel(0.04),
+		}
+	}
+}
+
+impl ThemePage {
+	/// The gutter between two columns of a content block `width` wide.
+	pub fn gutter_for(&self, width: Sp) -> Sp {
+		match self.column_gutter {
+			Length::Rel(f)	=> Sp::from_pt(width.to_pt() * f),
+			Length::Abs(pt)	=> Sp::from_pt(pt),
+		}
+	}
 }
 
 /// Page furniture: the running head, the folio, and the footnote text metrics.
@@ -510,7 +537,7 @@ pub struct ThemePatch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FaceSetPatch {
-	pub body:		Option<Option<String>>,
+	pub body:		Option<Vec<String>>,
 	pub emphasis:	Option<Option<String>>,
 	pub mono:		Option<Option<String>>,
 }
@@ -555,6 +582,8 @@ pub struct ThemeHeadingPatch {
 	// A `#show heading: set text(size: ...)` with no `level:` predicate sizes every level alike, the way
 	// `numbering_all` numbers them alike; a level-predicated rule uses a per-level `levels` entry instead.
 	pub size_all:		Option<Sp>,
+	// A `#show heading: set text(font: ...)` with no `level:` predicate sets every level in the family alike.
+	pub face_all:		Option<Option<String>>,
 	// Per-level overrides, index i onto theme level i; shorter than the theme's `levels` leaves the deeper
 	// levels untouched, longer ignores the surplus.
 	pub levels:			Vec<ThemeHeadingLevelPatch>,
@@ -639,9 +668,11 @@ pub struct ThemePagePartPatch {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThemePagePatch {
-	pub front:	ThemePagePartPatch,
-	pub body:	ThemePagePartPatch,
-	pub back:	ThemePagePartPatch,
+	pub front:			ThemePagePartPatch,
+	pub body:			ThemePagePartPatch,
+	pub back:			ThemePagePartPatch,
+	pub columns:		Option<usize>,
+	pub column_gutter:	Option<Length>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -753,6 +784,12 @@ impl ThemeHeadingPatch {
 				l.size = s;
 			}
 		}
+		// A uniform face likewise, overriding any per-level face set before it.
+		if let Some(f) = &self.face_all {
+			for l in &mut h.levels {
+				l.face = f.clone();
+			}
+		}
 		for (p, l) in self.levels.iter().zip(h.levels.iter_mut()) {
 			p.apply(l);
 		}
@@ -853,6 +890,8 @@ impl ThemePagePatch {
 		self.front.apply(&mut t.front);
 		self.body.apply(&mut t.body);
 		self.back.apply(&mut t.back);
+		patch_merge!(self.columns, t.columns);
+		patch_merge!(self.column_gutter, t.column_gutter);
 	}
 }
 
@@ -961,6 +1000,15 @@ fn opt_rgba_from(d: Dat) -> Outcome<Option<Rgba>> {
 	}
 }
 
+fn strs_from(d: Dat) -> Outcome<Vec<String>> {
+	let list = try_extract_dat!(d, List);
+	let mut out = Vec::with_capacity(list.len());
+	for item in list {
+		out.push(try_extract_dat!(item, Str));
+	}
+	Ok(out)
+}
+
 fn sp4_dat(a: &[Sp; 4]) -> Dat {
 	Dat::List(a.iter().map(|s| sp_dat(*s)).collect())
 }
@@ -1010,14 +1058,14 @@ fn map_must(d: &mut Dat, key: &str) -> Outcome<Dat> {
 impl FaceSet {
 	fn to_dat(&self) -> Outcome<Dat> {
 		Ok(omapdat!{
-			"body"		=> opt_str_dat(&self.body),
+			"body"		=> Dat::List(self.body.iter().map(|f| dat!(f.clone())).collect()),
 			"emphasis"	=> opt_str_dat(&self.emphasis),
 			"mono"		=> opt_str_dat(&self.mono),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
 		Ok(Self {
-			body:		res!(opt_str_from(res!(map_must(&mut d, "body")))),
+			body:		res!(strs_from(res!(map_must(&mut d, "body")))),
 			emphasis:	res!(opt_str_from(res!(map_must(&mut d, "emphasis")))),
 			mono:		res!(opt_str_from(res!(map_must(&mut d, "mono")))),
 		})
@@ -1302,17 +1350,35 @@ impl ThemePagePart {
 
 impl ThemePage {
 	fn to_dat(&self) -> Outcome<Dat> {
+		let (kind, value) = match self.column_gutter {
+			Length::Rel(f)	=> ("rel", f),
+			Length::Abs(pt)	=> ("abs", pt),
+		};
 		Ok(omapdat!{
-			"front"	=> res!(self.front.to_dat()),
-			"body"	=> res!(self.body.to_dat()),
-			"back"	=> res!(self.back.to_dat()),
+			"front"			=> res!(self.front.to_dat()),
+			"body"			=> res!(self.body.to_dat()),
+			"back"			=> res!(self.back.to_dat()),
+			"columns"		=> dat!(self.columns as u64),
+			"gutter_kind"	=> dat!(kind.to_string()),
+			"gutter_bits"	=> dat!(value.to_bits()),
 		})
 	}
 	fn from_dat(mut d: Dat) -> Outcome<Self> {
+		let columns	= try_extract_dat!(res!(map_must(&mut d, "columns")), U64) as usize;
+		let kind	= try_extract_dat!(res!(map_must(&mut d, "gutter_kind")), Str);
+		let value	= f64::from_bits(try_extract_dat!(res!(map_must(&mut d, "gutter_bits")), U64));
+		let column_gutter = match kind.as_str() {
+			"rel"	=> Length::Rel(value),
+			"abs"	=> Length::Abs(value),
+			other	=> return Err(err!(
+				"A theme column gutter must be of kind rel or abs, found {:?}.", other; Input, Invalid)),
+		};
 		Ok(Self {
 			front:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "front")))),
 			body:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "body")))),
 			back:	res!(ThemePagePart::from_dat(res!(map_must(&mut d, "back")))),
+			columns,
+			column_gutter,
 		})
 	}
 }
@@ -1491,7 +1557,7 @@ mod tests {
 		let mut theme = Theme::default();
 		theme.text.tracking			= Sp::from_pt(0.5);
 		theme.text.justify				= false;
-		theme.text.faces.body			= Some("Libertinus Serif".to_string());
+		theme.text.faces.body			= vec!["Felipa".to_string(), "Libertinus Serif".to_string()];
 		theme.heading.kind				= HeadingStyle::DocInline;
 		theme.heading.levels[0].numbering	= Some("1.1".to_string());
 		theme.heading.levels[2].weight		= Some(700);
@@ -1499,6 +1565,8 @@ mod tests {
 		theme.equation.numbering		= Some("(1)".to_string());
 		theme.page.body.default.margin_inside	= Some(Sp::from_pt(19.0));
 		theme.page.body.opener.margin_top		= Some(Sp::from_pt(40.0));
+		theme.page.columns				= 2;
+		theme.page.column_gutter		= Length::Abs(12.0);
 		theme.calibration.line_box_em	= 0.682;
 		let dat		= res!(theme.to_dat());
 		let back	= res!(Theme::from_dat(dat));
@@ -1524,7 +1592,7 @@ mod tests {
 		// onto every level; a per-level override targets one; the opener and page groups take their own.
 		let mut patch = ThemePatch::default();
 		patch.text.body_size				= Some(Sp::from_pt(12.0));
-		patch.text.faces.body				= Some(Some("Libertinus Serif".to_string()));
+		patch.text.faces.body				= Some(vec!["Libertinus Serif".to_string()]);
 		patch.par.indent					= Some(Sp::from_pt(18.0));
 		patch.heading.numbering_all			= Some(Some("1.1".to_string()));
 		patch.opener.chap_num_size			= Some(Sp::from_pt(48.0));
@@ -1533,7 +1601,7 @@ mod tests {
 		theme.apply(&patch);
 
 		assert_eq!(theme.text.body_size,				Sp::from_pt(12.0));
-		assert_eq!(theme.text.faces.body,				Some("Libertinus Serif".to_string()));
+		assert_eq!(theme.text.faces.body,				vec!["Libertinus Serif".to_string()]);
 		assert_eq!(theme.par.indent,					Sp::from_pt(18.0));
 		// numbering_all reached every level, not just the first.
 		assert_eq!(theme.heading.levels[0].numbering,	Some("1.1".to_string()));
@@ -1545,11 +1613,15 @@ mod tests {
 		assert_eq!(theme.text.leading,					Theme::default().text.leading);
 		assert_eq!(theme.page.body.recto.width,			None);
 
-		// An `Option<Option<..>>` leaf set to `Some(None)` clears the theme's own value.
+		// An `Option<Option<..>>` leaf set to `Some(None)` clears the theme's own value, and an empty family
+		// list returns the body to the loaded default.
+		theme.text.faces.mono = Some("Libertinus Mono".to_string());
 		let mut clear = ThemePatch::default();
-		clear.text.faces.body = Some(None);
+		clear.text.faces.mono = Some(None);
+		clear.text.faces.body = Some(Vec::new());
 		theme.apply(&clear);
-		assert_eq!(theme.text.faces.body, None);
+		assert_eq!(theme.text.faces.mono, None);
+		assert!(theme.text.faces.body.is_empty());
 	}
 
 	/// `group_dat` returns one group's daticle, so a block address over one group is unmoved by a change

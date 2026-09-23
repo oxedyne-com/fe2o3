@@ -125,6 +125,27 @@ pub fn is_file(path: &Path) -> bool {
 	}
 }
 
+/// Every file beneath `dir`, at any depth, in a stable (sorted) order: the injected map's keys under that
+/// directory where a map is installed, together with whatever the real filesystem holds there. A directory
+/// that does not exist lists nothing, so a caller scanning an optional directory needs no existence check.
+pub fn list_files(dir: &Path) -> Vec<PathBuf> {
+	let root = normalise(dir);
+	let mut out: Vec<PathBuf> = Vec::new();
+	if let Ok(guard) = SOURCES.read() {
+		if let Some(map) = guard.as_ref() {
+			for k in map.keys() {
+				if k.starts_with(&root) && k != &root {
+					out.push(k.clone());
+				}
+			}
+		}
+	}
+	native_list(dir, &mut out, LIST_DEPTH);
+	out.sort();
+	out.dedup();
+	out
+}
+
 /// Resolves a path to an absolute, canonical form. Under an installed map there is no filesystem to walk,
 /// so the path is normalised lexically (`.` and `..` folded); exactly [`std::fs::canonicalize`] on the
 /// native default path.
@@ -203,6 +224,32 @@ fn native_is_file(path: &Path) -> bool {
 fn native_is_file(_path: &Path) -> bool {
 	false
 }
+
+// How deep [`list_files`] descends: deep enough for any font tree, shallow enough that a symlink cycle
+// ends rather than recursing without bound.
+const LIST_DEPTH: u32 = 8;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_list(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
+	if depth == 0 {
+		return;
+	}
+	let entries = match std::fs::read_dir(dir) {
+		Ok(e)	=> e,
+		Err(_)	=> return,
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		if path.is_dir() {
+			native_list(&path, out, depth - 1);
+		} else if path.is_file() {
+			out.push(path);
+		}
+	}
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_list(_dir: &Path, _out: &mut Vec<PathBuf>, _depth: u32) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn native_canonicalize(path: &Path) -> io::Result<PathBuf> {

@@ -1,0 +1,2 @@
+#set page(width: auto, height: auto, margin: 0pt, fill: none)
+#image(bytes("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"40\" height=\"20\" viewBox=\"0 0 40 20\"><rect x=\"0\" y=\"0\" width=\"40\" height=\"20\" fill=\"#0000ff\"/></svg>"))

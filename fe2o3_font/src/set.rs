@@ -263,4 +263,37 @@ mod tests {
 		);
 		Ok(())
 	}
+
+	/// A face reports the family its designer named and where it sits in it, so a document's
+	/// `font: "Name"` can be matched against the file rather than its filename.
+	#[test]
+	fn test_a_face_reports_its_family_weight_and_slant_11() -> Outcome<()> {
+		let fs = res!(FontSet::embedded());
+		let body = res!(fs.get(Role::Body).info());
+		assert_eq!(body.family, "Noto Sans");
+		assert_eq!(body.weight, 400);
+		assert!(!body.italic);
+		let bi = res!(fs.get(Role::BoldItalic).info());
+		assert_eq!(bi.family, "Noto Sans", "the bold italic belongs to the same family");
+		assert_eq!(bi.weight, 700);
+		assert!(bi.italic);
+		assert!(crate::face::FaceInfo::read(b"not a font").is_err(), "garbage is refused, not guessed");
+		Ok(())
+	}
+
+	/// A run shaped with a feature the face carries draws different glyphs from the plain run, and a run
+	/// shaped with no features is exactly the plain run.
+	#[test]
+	fn test_a_feature_changes_the_glyphs_it_governs_12() -> Outcome<()> {
+		use crate::shape::Feature;
+		let fs = res!(FontSet::embedded());
+		let font = fs.get(Role::Body);
+		let plain = res!(font.shape("small", 16.0, Dir::Ltr));
+		let none = res!(font.shape_with("small", 16.0, Dir::Ltr, &[]));
+		let ids = |r: &crate::shape::Run| r.glyphs.iter().map(|g| g.id).collect::<Vec<u32>>();
+		assert_eq!(ids(&plain), ids(&none), "no features is the plain shaping");
+		let smcp = res!(font.shape_with("small", 16.0, Dir::Ltr, &[Feature::SMALL_CAPS]));
+		assert_ne!(ids(&plain), ids(&smcp), "smcp swaps the lower-case letters for small capitals");
+		Ok(())
+	}
 }

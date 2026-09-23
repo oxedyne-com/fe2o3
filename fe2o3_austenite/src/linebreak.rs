@@ -29,7 +29,10 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::{
 	face::Role,
 	set::FontSet,
-	shape::Dir,
+	shape::{
+		Dir,
+		Feature,
+	},
 };
 use oxedyne_fe2o3_graphics::colour::Rgba;
 use oxedyne_fe2o3_text::unicode::linebreak::{
@@ -81,6 +84,9 @@ pub fn break_paragraph(
 /// `Bold` piece, `/emph/` as an `Italic` one, the surrounding prose as `Body`.
 pub enum Piece {
 	Text { text: String, role: Role },
+	// A `#smallcaps[...]` run: shaped in `role` with the font's small-capitals feature, and otherwise
+	// broken exactly as a text run -- words, interword glue and hyphenation alike.
+	SmallCaps { text: String, role: Role },
 	Mark(Leaf),	// a footnote mark, already shaped as a raised superscript (LeafKind::Mark)
 	// A zero-width anchor woven into the line at the point it was authored, recording where an identity
 	// landed without occupying any horizontal space -- the marginalia anchor, whose margin note is drawn
@@ -130,7 +136,12 @@ pub fn break_paragraph_pieces(
 				// The run shapes in its own face; the interword glue keeps the paragraph's role, so a space
 				// beside an emphasised word stays the body space (TeX sets the space in the surrounding font).
 				res!(push_text_run(
-					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate));
+					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate, &[]));
+			},
+			Piece::SmallCaps { text, role: run } => {
+				res!(push_text_run(
+					&mut items, fonts.clone(), *run, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate,
+					&[Feature::SMALL_CAPS]));
 			},
 			Piece::Mark(leaf) => {
 				items.push(Item {
@@ -207,7 +218,7 @@ fn build_items(
 	let hyph = Hyphenator::en_us();
 
 	let mut items = Vec::new();
-	res!(push_text_run(&mut items, fonts, role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate));
+	res!(push_text_run(&mut items, fonts, role, dir, size, text, sp_w, stretch, shrink, &hyph, &hyphen, hyphenate, &[]));
 	push_finish(&mut items);
 	Ok(items)
 }
@@ -260,6 +271,7 @@ fn push_text_run(
 	hyph:	&Hyphenator,
 	hyphen:	&ShapedText,
 	hyphenate:	bool,
+	features:	&[Feature],	// OpenType features every word of the run is shaped with
 )
 	-> Outcome<()>
 {
@@ -287,7 +299,7 @@ fn push_text_run(
 		let word	= seg.trim_end_matches(|c: char| matches!(c, ' ' | '\t' | '\n' | '\r'));
 		let tail	= &seg[word.len()..];
 		if !word.is_empty() {
-			res!(push_word(items, fonts.clone(), role, dir, size, word, hyph, hyphen, hyphenate));
+			res!(push_word(items, fonts.clone(), role, dir, size, word, hyph, hyphen, hyphenate, features));
 		}
 		let spaces = tail.chars().filter(|c| *c == ' ').count() as i32;
 		match opp.kind {
@@ -338,6 +350,7 @@ fn push_word(
 	hyph:	&Hyphenator,
 	hyphen:	&ShapedText,
 	hyphenate:	bool,
+	features:	&[Feature],
 )
 	-> Outcome<()>
 {
@@ -348,7 +361,7 @@ fn push_word(
 	let points	= if hyphenate && core.chars().count() >= HYPHEN_MIN { hyph.hyphenate(core) } else { Vec::new() };
 
 	if points.is_empty() {
-		let shaped	= res!(ShapedText::new(fonts, role, dir, size, word));
+		let shaped	= res!(ShapedText::new_with_features(fonts, role, dir, size, word, features));
 		let w		= shaped.dims().width;
 		items.push(Item {
 			kind: Kind::Boxed(shaped), width: w, stretch: Sp::ZERO, shrink: Sp::ZERO,
@@ -369,7 +382,7 @@ fn push_word(
 
 	for w in bounds.windows(2) {
 		let frag	= &word[w[0]..w[1]];
-		let shaped	= res!(ShapedText::new(fonts.clone(), role, dir, size, frag));
+		let shaped	= res!(ShapedText::new_with_features(fonts.clone(), role, dir, size, frag, features));
 		let fw		= shaped.dims().width;
 		items.push(Item {
 			kind: Kind::Boxed(shaped), width: fw, stretch: Sp::ZERO, shrink: Sp::ZERO,

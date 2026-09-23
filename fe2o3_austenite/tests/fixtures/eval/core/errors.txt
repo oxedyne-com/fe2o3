@@ -1,0 +1,154 @@
+;; U2 error cases, in the same form as `values.txt`. The expected text is the first `error:` line
+;; `typst eval` prints for the code.
+%% 1 + "a"
+(Binary 1 Plus "a")
+%% 1 / 0
+(Binary 1 Slash 0)
+%% 1 < "a"
+(Binary 1 Lt "a")
+%% not 1
+(Unary Not 1)
+%% x
+x
+%% {let x = 1; let f() = { x = 2 }; f()}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1) Semicolon (LetBinding Let (Closure f (Params LeftParen RightParen) Eq (CodeBlock LeftBrace (Code (Binary x Eq 2)) RightBrace))) Semicolon (FuncCall f (Args LeftParen RightParen))) RightBrace)
+%% {let (a, b) = (1,); a}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma b RightParen) Eq (Array LeftParen 1 Comma RightParen)) Semicolon a) RightBrace)
+%% {let (a, b) = (1, 2, 3); a}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma b RightParen) Eq (Array LeftParen 1 Comma 2 Comma 3 RightParen)) Semicolon a) RightBrace)
+%% {let (x, y) = 3; x}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen x Comma y RightParen) Eq 3) Semicolon x) RightBrace)
+%% {let (a: b) = (1, 2); b}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen (Named a Colon b) RightParen) Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon b) RightBrace)
+%% {let (a, (b, c)) = (a: 1); a}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma (Destructuring LeftParen b Comma c RightParen) RightParen) Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon a) RightBrace)
+%% {let (z,) = (a: 1); z}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen z Comma RightParen) Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon z) RightBrace)
+%% heading = 3
+(Binary heading Eq 3)
+%% {break}
+(CodeBlock LeftBrace (Code (LoopBreak Break)) RightBrace)
+%% {continue}
+(CodeBlock LeftBrace (Code (LoopContinue Continue)) RightBrace)
+%% {return 1}
+(CodeBlock LeftBrace (Code (FuncReturn Return 1)) RightBrace)
+%% (1, 2).nope()
+(FuncCall (FieldAccess (Array LeftParen 1 Comma 2 RightParen) Dot nope) (Args LeftParen RightParen))
+%% {let d = (f: x => x); d.f(1)}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named f Colon (Closure (Params x) Arrow x)) RightParen)) Semicolon (FuncCall (FieldAccess d Dot f) (Args LeftParen 1 RightParen))) RightBrace)
+%% 9223372036854775807 + 1
+(Binary 9223372036854775807 Plus 1)
+%% {let d = (a: 1); d.at("b") = 2; d}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (Binary (FuncCall (FieldAccess d Dot at) (Args LeftParen "b" RightParen)) Eq 2) Semicolon d) RightBrace)
+%% {let a = (1, 2); a.at(5) = 2; a}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon (Binary (FuncCall (FieldAccess a Dot at) (Args LeftParen 5 RightParen)) Eq 2) Semicolon a) RightBrace)
+%% {let d = (a: 1); d.b += 1}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (Binary (FieldAccess d Dot b) PlusEq 1)) RightBrace)
+%% {let f(x) = x; f()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (FuncCall f (Args LeftParen RightParen))) RightBrace)
+%% {let f(x) = x; f(1, 2)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (FuncCall f (Args LeftParen 1 Comma 2 RightParen))) RightBrace)
+%% {let f(x) = x; f(1, a: 2)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (FuncCall f (Args LeftParen 1 Comma (Named a Colon 2) RightParen))) RightBrace)
+%% (1,).push(2)
+(FuncCall (FieldAccess (Array LeftParen 1 Comma RightParen) Dot push) (Args LeftParen 2 RightParen))
+%% {let a = (); a.pop()}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen RightParen)) Semicolon (FuncCall (FieldAccess a Dot pop) (Args LeftParen RightParen))) RightBrace)
+%% {let a = (1, 2); a.remove(5)}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon (FuncCall (FieldAccess a Dot remove) (Args LeftParen 5 RightParen))) RightBrace)
+%% {let a = (1, 2); a.insert(3, 0)}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon (FuncCall (FieldAccess a Dot insert) (Args LeftParen 3 Comma 0 RightParen))) RightBrace)
+%% {let d = (a: 1); d.remove("b")}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (FuncCall (FieldAccess d Dot remove) (Args LeftParen "b" RightParen))) RightBrace)
+%% {let s = "abc"; s.push(1)}
+(CodeBlock LeftBrace (Code (LetBinding Let s Eq "abc") Semicolon (FuncCall (FieldAccess s Dot push) (Args LeftParen 1 RightParen))) RightBrace)
+%% {let x = 1pt; x.abs = 2pt}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1pt) Semicolon (Binary (FieldAccess x Dot abs) Eq 2pt)) RightBrace)
+%% {let x = [a]; x.body = 2pt}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket)) Semicolon (Binary (FieldAccess x Dot body) Eq 2pt)) RightBrace)
+%% {let x = 1; x.y = 2}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1) Semicolon (Binary (FieldAccess x Dot y) Eq 2)) RightBrace)
+%% (1 + 2) = 3
+(Binary (Parenthesized LeftParen (Binary 1 Plus 2) RightParen) Eq 3)
+%% if 1 {}
+(Conditional If 1 (CodeBlock LeftBrace (Code) RightBrace))
+%% {let i = 0; while i < 20000 { i += 1 }; i}
+(CodeBlock LeftBrace (Code (LetBinding Let i Eq 0) Semicolon (WhileLoop While (Binary i Lt 20000) (CodeBlock LeftBrace (Code (Binary i PlusEq 1)) RightBrace)) Semicolon i) RightBrace)
+%% {while true {}}
+(CodeBlock LeftBrace (Code (WhileLoop While true (CodeBlock LeftBrace (Code) RightBrace))) RightBrace)
+%% for x in 1 {}
+(ForLoop For x In 1 (CodeBlock LeftBrace (Code) RightBrace))
+%% {for (a, b) in "ab" {}}
+(CodeBlock LeftBrace (Code (ForLoop For (Destructuring LeftParen a Comma b RightParen) In "ab" (CodeBlock LeftBrace (Code) RightBrace))) RightBrace)
+%% (1).nope()
+(FuncCall (FieldAccess (Parenthesized LeftParen 1 RightParen) Dot nope) (Args LeftParen RightParen))
+%% 3()
+(FuncCall 3 (Args LeftParen RightParen))
+%% none.x
+(FieldAccess none Dot x)
+%% (1pt).nope
+(FieldAccess (Parenthesized LeftParen 1pt RightParen) Dot nope)
+%% (a: 1).b
+(FieldAccess (Dict LeftParen (Named a Colon 1) RightParen) Dot b)
+%% "a".b
+(FieldAccess "a" Dot b)
+%% heading.nope
+(FieldAccess heading Dot nope)
+%% [x].nope
+(FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot nope)
+%% [x].at("y")
+(FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot at) (Args LeftParen "y" RightParen))
+%% (..(a: 1),)
+(Array LeftParen (Spread Dots (Dict LeftParen (Named a Colon 1) RightParen)) Comma RightParen)
+%% (a: 1, ..(1,))
+(Dict LeftParen (Named a Colon 1) Comma (Spread Dots (Array LeftParen 1 Comma RightParen)) RightParen)
+%% {let f(..r) = r; f(..1)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) RightParen) Eq r)) Semicolon (FuncCall f (Args LeftParen (Spread Dots 1) RightParen))) RightBrace)
+%% {show "": it => it}
+(CodeBlock LeftBrace (Code (ShowRule Show "" Colon (Closure (Params it) Arrow it))) RightBrace)
+%% {show heading: 5}
+(CodeBlock LeftBrace (Code (ShowRule Show heading Colon 5)) RightBrace)
+%% {show 1: it => it}
+(CodeBlock LeftBrace (Code (ShowRule Show 1 Colon (Closure (Params it) Arrow it))) RightBrace)
+%% {set heading(level: 1) if 1}
+(CodeBlock LeftBrace (Code (SetRule Set heading (Args LeftParen (Named level Colon 1) RightParen) If 1)) RightBrace)
+%% {let f(x) = x; set f(x: 1)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (SetRule Set f (Args LeftParen (Named x Colon 1) RightParen))) RightBrace)
+%% true and 1
+(Binary true And 1)
+%% 1 or true
+(Binary 1 Or true)
+%% +"a"
+(Unary Plus "a")
+%% -"a"
+(Unary Minus "a")
+%% 2 - 1pt
+(Binary 2 Minus 1pt)
+%% 1pt * 1pt
+(Binary 1pt Star 1pt)
+%% "a" / 2
+(Binary "a" Slash 2)
+%% {1; 2}
+(CodeBlock LeftBrace (Code 1 Semicolon 2) RightBrace)
+%% {[a]; 2}
+(CodeBlock LeftBrace (Code (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket) Semicolon 2) RightBrace)
+%% "a" * -1
+(Binary "a" Star (Unary Minus 1))
+%% 1 in 2
+(Binary 1 In 2)
+%% (1pt + 1em) / 1pt
+(Binary (Parenthesized LeftParen (Binary 1pt Plus 1em) RightParen) Slash 1pt)
+%% {let f(n) = f(n + 1); f(0)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen n RightParen) Eq (FuncCall f (Args LeftParen (Binary n Plus 1) RightParen)))) Semicolon (FuncCall f (Args LeftParen 0 RightParen))) RightBrace)
+%% {for x in (1, 2) { x }}
+(CodeBlock LeftBrace (Code (ForLoop For x In (Array LeftParen 1 Comma 2 RightParen) (CodeBlock LeftBrace (Code x) RightBrace))) RightBrace)
+%% [a <l>].label
+(FieldAccess (ContentBlock LeftBracket (Markup (Text 'a') Space (Label '<l>')) RightBracket) Dot label)
+%% {let f(..r) = r; f(1, a: 2).at(3)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) RightParen) Eq r)) Semicolon (FuncCall (FieldAccess (FuncCall f (Args LeftParen 1 Comma (Named a Colon 2) RightParen)) Dot at) (Args LeftParen 3 RightParen))) RightBrace)
+%% {import list: nope}
+(CodeBlock LeftBrace (Code (ModuleImport Import list Colon (ImportItems (ImportItemPath nope)))) RightBrace)
+%% {let f(x) = x; import f: a}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq x)) Semicolon (ModuleImport Import f Colon (ImportItems (ImportItemPath a)))) RightBrace)
+%% {import 1: a}
+(CodeBlock LeftBrace (Code (ModuleImport Import 1 Colon (ImportItems (ImportItemPath a)))) RightBrace)

@@ -199,7 +199,7 @@ fn a_cold_memo_compile_matches_a_no_memo_compile_on_mixed_blocks() -> Outcome<()
 		Block::paragraph(paragraph_text(1, false)),
 		Block::heading(2, "Line Breaking"),
 		Block::paragraph(paragraph_text(2, false)),
-		Block::list(false, vec![]),
+		Block::list(false, vec![], false),
 		Block::code(vec!["let x = 1;".to_string(), "let y = x + 1;".to_string()]),
 		Block::paragraph(paragraph_text(3, false)),
 	];

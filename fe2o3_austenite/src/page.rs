@@ -176,6 +176,16 @@ impl Frame {
 		}
 	}
 
+	/// As [`Frame::shift_region`], for the items from index `from` on only: a column float shifts the material
+	/// of its own column -- everything placed since the column opened -- and not the columns beside it.
+	pub fn shift_region_from(&mut self, from: usize, by: Sp, region: Region) {
+		for item in self.placed.iter_mut().skip(from) {
+			if item.region == region {
+				item.y = item.y + by;
+			}
+		}
+	}
+
 	/// Reclaims every item from index `from` to the end for `region`. A float's material is placed through
 	/// the ordinary helpers, which stamp it `Body`; the caller records the frame length before placing the
 	/// float and calls this after, so exactly the float's own items join its band and the body items already

@@ -32,6 +32,10 @@ use crate::{
         id,
         server::Server,
         stop,
+        tiles::{
+            TileService,
+            TileSource,
+        },
         ws::{
             handler::AppWebSocketHandler,
             syntax::WebSocketSyntax,
@@ -734,6 +738,23 @@ impl AppShellContext {
                     &tc.launch_command,
                 )
             ));
+            // Every build is opened now, so a missing or unreadable archive stops start-up
+            // rather than surfacing as failed tiles. None of this names a tile.
+            let tiles = match &vh.tiles {
+                Some(tc) => {
+                    let svc = res!(TileService::new(
+                        tc,
+                        vh.primary_hostname(),
+                        server_cfg.hsts_max_age_secs as u64,
+                        TileSource::open,
+                    ));
+                    info!("Vhost '{}': tiles under {} from {} build(s), current '{}'; \
+                        access log off.", vh.primary_hostname(), svc.prefix(),
+                        tc.builds.len(), svc.current());
+                    Some(Arc::new(svc))
+                }
+                None => None,
+            };
             let runtime = Arc::new(VhostRuntime {
                 hostnames:      vh.hostnames.clone(),
                 web_handler,
@@ -748,6 +769,8 @@ impl AppShellContext {
                 term_manager:   term_manager.clone(),
                 uses_sessions:  vh.uses_sessions(),
                 permissions_policy: vh.permissions_policy.clone(),
+                tiles,
+                access_log:     vh.access_log,
             });
 
             let primary_lc = vh.primary_hostname().to_lowercase();

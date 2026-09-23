@@ -6,14 +6,17 @@
 
 use crate::shape::{
 	Dir,
+	Feature,
 	Glyph,
 	Run,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::prelude::*;
+use oxedyne_fe2o3_graphics::pdf_font::FontProgram;
 
 use harfrust::{
+	Feature as ShapeFeature,
 	FontRef as ShapeFont,
 	ShapeOptions,
 	ShaperData,
@@ -29,6 +32,8 @@ use skrifa::{
 		DrawSettings,
 		OutlinePen,
 	},
+	attribute::Style,
+	string::StringId,
 	FontRef as OutlineFont,
 	GlyphId,
 	MetadataProvider,
@@ -36,7 +41,10 @@ use skrifa::{
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::RwLock;
+use std::sync::{
+	Arc,
+	RwLock,
+};
 
 /// The part a font plays. A document names a role; the reader's font set decides what it looks like.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -65,10 +73,52 @@ impl Metrics {
 	}
 }
 
+/// What a font file says about itself: the family it belongs to and where in that family it sits. This
+/// is what a document's `font: "Name"` is matched against, so a face is found by the name its designer
+/// gave it rather than by whatever its file happens to be called.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceInfo {
+	pub family:	String,	// the typographic family (name ID 16), else the legacy family (name ID 1)
+	pub weight:	u16,	// OS/2 weight class, 100-900; 400 regular, 700 bold
+	pub italic:	bool,	// italic or oblique
+}
+
+impl FaceInfo {
+
+	/// Reads a font file's family, weight and slant without building a shaper, so a directory of fonts
+	/// can be indexed cheaply before any of them is needed.
+	pub fn read(bytes: &[u8]) -> Outcome<Self> {
+		let of = match OutlineFont::new(bytes) {
+			Ok(f) => f,
+			Err(e) => return Err(err!(
+				"The {} bytes given are not a font whose names can be read: {:?}.", bytes.len(), e;
+			Invalid, Input)),
+		};
+		// The typographic family groups every weight and width under one name ("Noto Sans"), where the
+		// legacy family splits them four to a family ("Noto Sans SemiBold"); prefer it where present.
+		let family = of.localized_strings(StringId::TYPOGRAPHIC_FAMILY_NAME).english_or_first()
+			.or_else(|| of.localized_strings(StringId::FAMILY_NAME).english_or_first())
+			.map(|s| s.to_string());
+		let family = match family {
+			Some(f) if !f.trim().is_empty() => f.trim().to_string(),
+			_ => return Err(err!(
+				"The font of {} bytes names no family in its name table.", bytes.len();
+			Invalid, Input, Missing)),
+		};
+		let attrs = of.attributes();
+		Ok(Self {
+			family,
+			weight:	attrs.weight.value().round().clamp(1.0, 1000.0) as u16,
+			italic:	!matches!(attrs.style, Style::Normal),
+		})
+	}
+}
+
 /// One typeface, at any size: a single font file. Its bytes are owned and lent to both third-party
 /// parsers when needed; the shaper's tables, the costly part to build, are cached.
 pub struct Face {
-	bytes:		Vec<u8>,		// the font file
+	bytes:		Arc<Vec<u8>>,	// the font file, shared with its embeddable program
+	program:	Option<Arc<FontProgram>>,	// the file as a PDF embeds it; `None` when it cannot be
 	shaper:		ShaperData,		// the shaper's cached view, built once
 	upem:		f32,			// font units per em, what every measurement in the file is in terms of
 	covers:		HashSet<u32>,	// every character the face can draw, read once (asked per character)
@@ -104,13 +154,30 @@ impl Face {
 		}
 		let covers: HashSet<u32> = of.charmap().mappings().map(|(c, _)| c).collect();
 		drop(of);
+		drop(sf);
+		let bytes = Arc::new(bytes);
+		// A file the embedding reader cannot follow is still a face to shape and outline; it is drawn as
+		// outlines in a PDF rather than embedded, so the failure is not the caller's.
+		let program = FontProgram::parse(bytes.clone()).ok().flatten().map(Arc::new);
 		Ok(Self {
 			bytes,
+			program,
 			shaper,
 			upem,
 			covers,
 			outlines:	RwLock::new(HashMap::new()),
 		})
+	}
+
+	/// The face's file as a PDF embeds it, or `None` for a face that cannot be embedded -- a variable
+	/// `CFF2` face, or one whose licence forbids it -- and must be drawn as outlines.
+	pub fn program(&self) -> Option<&Arc<FontProgram>> {
+		self.program.as_ref()
+	}
+
+	/// The family, weight and slant the file declares.
+	pub fn info(&self) -> Outcome<FaceInfo> {
+		FaceInfo::read(&self.bytes)
 	}
 
 	/// Can the face draw this character?
@@ -120,7 +187,7 @@ impl Face {
 
 	/// The font as the shaper reads it.
 	fn shape_font(&self) -> Outcome<ShapeFont<'_>> {
-		match ShapeFont::new(&self.bytes) {
+		match ShapeFont::new(&self.bytes[..]) {
 			Ok(f) => Ok(f),
 			Err(e) => Err(err!("The font could not be re-read for shaping: {:?}.", e; Bug)),
 		}
@@ -128,7 +195,7 @@ impl Face {
 
 	/// The font as the outline reader reads it.
 	fn outline_font(&self) -> Outcome<OutlineFont<'_>> {
-		match OutlineFont::new(&self.bytes) {
+		match OutlineFont::new(&self.bytes[..]) {
 			Ok(f) => Ok(f),
 			Err(e) => Err(err!("The font could not be re-read for outlines: {:?}.", e; Bug)),
 		}
@@ -150,6 +217,21 @@ impl Face {
 	/// outline to ask for; `at` is the string's byte offset in the one it was cut from, added to each
 	/// cluster so a caret reads offsets into the original text rather than into this fragment.
 	pub fn shape(&self, text: &str, size: f32, dir: Dir, face: u8, at: usize) -> Outcome<Run> {
+		self.shape_with(text, size, dir, face, at, &[])
+	}
+
+	/// As [`Face::shape`], with OpenType features applied across the whole string.
+	pub fn shape_with(
+		&self,
+		text:		&str,
+		size:		f32,
+		dir:		Dir,
+		face:		u8,
+		at:			usize,
+		features:	&[Feature],
+	)
+		-> Outcome<Run>
+	{
 		if text.is_empty() {
 			return Ok(Run {
 				glyphs:		Vec::new(),
@@ -168,7 +250,10 @@ impl Face {
 		});
 		buf.guess_segment_properties();
 
-		let out = shaper.shape(buf, ShapeOptions::new());
+		let feats: Vec<ShapeFeature> = features.iter()
+			.map(|f| ShapeFeature::new(harfrust::Tag::new(&f.tag), f.value, ..))
+			.collect();
+		let out = shaper.shape(buf, ShapeOptions::new().features(&feats));
 		let infos = out.glyph_infos();
 		let posns = out.glyph_positions();
 

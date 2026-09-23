@@ -1,5 +1,5 @@
-// U2 owns this file. U0 wrote `define` and `get` for real because every library area's `define`
-// registers through them.
+// U2 owns this file. The evaluator keeps its block frames as plain maps above a base `Scope`; a `Scope`
+// chain is what a closure captures and what a module exports.
 
 use crate::eval::value::Value;
 use crate::syntax::Span;
@@ -41,6 +41,12 @@ impl Scope {
 			None	=> self.parent.as_ref().and_then(|p| p.get(name)),
 		}
 	}
+
+	/// The binding of a name in this frame only, with where it was bound.
+	pub fn binding(&self, name: &str) -> Option<&Binding> { self.map.get(name) }
+
+	/// This frame's bindings, in no particular order.
+	pub fn iter(&self) -> impl Iterator<Item = (&String, &Binding)> { self.map.iter() }
 
 	/// A binding in this frame only, for assignment (`x = 1` may not reach through a closure's capture).
 	pub fn get_mut(&mut self, name: &str) -> Option<&mut Value> {
