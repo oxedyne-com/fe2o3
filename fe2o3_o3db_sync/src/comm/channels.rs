@@ -38,7 +38,21 @@ use std::{
 
 use rand::Rng;
 
-const WRITERS_CHECK_INTERVAL: Duration = Duration::from_millis(5); // finer than CHECK_INTERVAL: a close waits on it
+const FINISH_CHECK_INTERVAL: Duration = Duration::from_millis(5); // finer than CHECK_INTERVAL: a close waits on it
+
+// The order in which a close finishes each zone's workers.  A stage is sent its `Finish` only
+// once every worker of the stage before it has ended, since those are the ones that send it work
+// and wait on its answers.  Finished together, a read or collection still queued behind the
+// `Finish` of its reader or collector met a cache bot that had already ended, and waited out
+// `BOT_REQUEST_TIMEOUT` for an answer nobody would send; and a record a syncer released late, a
+// failed barrier's error among them, reached a cache bot that had ended, so its caller waited out
+// the durability deadline (2026-09-24).
+const FINISH_ORDER: [&[WorkerType]; 4] = [
+    &[WorkerType::Reader, WorkerType::Scan, WorkerType::InitGarbage],   // ask the others
+    &[WorkerType::Writer],                                              // release to the caches
+    &[WorkerType::Cache],                                               // tell the file bots
+    &[WorkerType::File],
+];
 
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -302,18 +316,11 @@ impl<
         self.wbots.msg_count_non_zero()
     }
 
-    /// Finishes the zone's writers, which release everything their syncers hold as they end.
-    pub fn finish_writers(&self) -> Outcome<()> {
-        self.wbots.finish_all()
-    }
-
-    /// Finishes every worker but the writers, which `finish_writers` has finished already.
-    pub fn finish_the_rest(&self) -> Outcome<()> {
-        res!(self.cbots.finish_all());
-        res!(self.fbots.finish_all());
-        res!(self.igbots.finish_all());
-        res!(self.rbots.finish_all());
-        res!(self.scbots.finish_all());
+    /// Finishes the zone's workers of the given types.
+    pub fn finish(&self, typs: &[WorkerType]) -> Outcome<()> {
+        for typ in typs {
+            res!(self[typ].finish_all());
+        }
         Ok(())
     }
 
@@ -564,65 +571,67 @@ impl<
         Ok(())
     }
 
-    /// Send a finish message to all bots, except the Supervisor, and wait until all their message
-    /// queues fall to zero.  The writers are finished first, and `writers_ended` is asked until
-    /// they have: each releases everything its syncer holds to the cache bots as it ends, and no
-    /// channel counts those records, so cache bots finished alongside the writers left them
-    /// unanswered and their callers waited out the durability deadline (2026-09-23).  The waits
-    /// share one `constant::SHUTDOWN_MAX_WAIT` between them.
-    pub fn finish_all<F: Fn() -> bool>(&self, writers_ended: F) -> Outcome<()> {
-        let begun = Instant::now();
+    /// Sends a `Finish` to every bot but the supervisor: the servers first, then each zone's
+    /// workers stage by stage in `FINISH_ORDER`, then the zone bots and the config bot.  Before
+    /// each stage it waits until `ended` says every worker of the stage before it has ended.  It
+    /// stops waiting at `until` and returns the stage it was waiting on, already finished, for
+    /// `finish_from` to carry on from; `None` once every bot has been sent its `Finish`.
+    pub fn finish_all<F: Fn(&[WorkerType]) -> bool>(
+        &self,
+        ended:  F,
+        until:  Instant,
+    )
+        -> Outcome<Option<usize>>
+    {
         // Starve servers.
         res!(self.sbots.send_to_all(OzoneMsg::Finish));
+        warn!(sync_log::stream(), "Shutdown: Completion request sent to server, finishing the \
+            other bots in order, waiting up to {:?} for them.",
+            until.saturating_duration_since(Instant::now()));
+        res!(self.finish_stage(0));
+        self.finish_from(0, ended, until)
+    }
 
-        // Now wait for all bots to become idle.
-        warn!(sync_log::stream(), "Shutdown: Completion request sent to server, waiting up \
-            to {:?} for all other bots to become idle...", constant::SHUTDOWN_MAX_WAIT);
-        res!(self.await_idle(begun));
-
-        for z in 0..self.nz {
-            res!(self.zwbots[z].finish_writers());
-        }
-        let left = constant::SHUTDOWN_MAX_WAIT.saturating_sub(begun.elapsed());
-        let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
-            WRITERS_CHECK_INTERVAL.min(left),
-            left,
-            || writers_ended(),
-        ));
-        if timed_out {
-            warn!(sync_log::stream(), "Shutdown: The writers had not all ended after {:?}, so \
-                records their syncers still hold may go unanswered.", start.elapsed());
-        }
-        // The cache bots answer what the writers released.
-        res!(self.await_idle(begun));
-
-        for z in 0..self.nz {
-            res!(self.zwbots[z].finish_the_rest());
+    /// Carries on the `finish_all` that stopped waiting on `stage`.  An `ended` that is always
+    /// true finishes everything left at once.
+    pub fn finish_from<F: Fn(&[WorkerType]) -> bool>(
+        &self,
+        stage:  usize,
+        ended:  F,
+        until:  Instant,
+    )
+        -> Outcome<Option<usize>>
+    {
+        let mut stage = stage;
+        while stage + 1 < FINISH_ORDER.len() {
+            let left = until.saturating_duration_since(Instant::now());
+            let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
+                FINISH_CHECK_INTERVAL.min(left),
+                left,
+                || ended(FINISH_ORDER[stage]),
+            ));
+            if timed_out {
+                // Counted, not listed: a channel can only be read by taking its messages, and
+                // taken to be listed here, the records the writers had just released were
+                // destroyed, and their callers waited out the durability deadline for writes that
+                // had landed (2026-09-23).
+                warn!(sync_log::stream(), "Shutdown: The {:?} bots had not all ended after {:?}, \
+                    so those after them wait; pending: {:?}",
+                    FINISH_ORDER[stage], start.elapsed(), self.msg_count());
+                return Ok(Some(stage));
+            }
+            stage += 1;
+            res!(self.finish_stage(stage));
         }
         res!(self.zbots.finish_all());
         res!(self.cfg().send(OzoneMsg::Finish));
-
-        Ok(())
+        warn!(sync_log::stream(), "Shutdown: Every bot has been sent its completion request.");
+        Ok(None)
     }
 
-    /// Waits for every zone bot's queue to empty, until `constant::SHUTDOWN_MAX_WAIT` after
-    /// `begun`, and says what is still pending if they do not.
-    fn await_idle(&self, begun: Instant) -> Outcome<()> {
-        let left = constant::SHUTDOWN_MAX_WAIT.saturating_sub(begun.elapsed());
-        let (start, timed_out) = res!(oxedyne_fe2o3_core::time::wait_for_true(
-            constant::CHECK_INTERVAL.min(left),
-            left,
-            || { self.msg_count().total_zone() == 0 },
-        ));
-        if !timed_out {
-            warn!(sync_log::stream(), "Shutdown: All zone bots are now idle after {:?}.", start.elapsed());
-        } else {
-            // Counted, not listed: a channel can only be read by taking its messages, and those
-            // left are answered once their bots reach the `Finish` queued behind them.  Taken to
-            // be listed here, the records the writers had just released were destroyed, and their
-            // callers waited out the durability deadline for writes that had landed (2026-09-23).
-            warn!(sync_log::stream(), "Shutdown: There are still zone work messages pending after \
-                {:?}, which their bots answer before they finish: {:?}", start.elapsed(), self.msg_count());
+    fn finish_stage(&self, stage: usize) -> Outcome<()> {
+        for zone in &self.zwbots {
+            res!(zone.finish(FINISH_ORDER[stage]));
         }
         Ok(())
     }

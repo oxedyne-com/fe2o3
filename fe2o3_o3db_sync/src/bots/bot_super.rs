@@ -124,7 +124,7 @@ impl<
             }
             // A start that failed leaves no bots running over the directory.
             let requester = fmt!("{} after a failed start", self.ozid());
-            let result = self.shutdown(requester).map(|_| ());
+            let result = self.shutdown(requester, None);
             self.result(&result);
             return;
         }
@@ -166,7 +166,8 @@ impl<
                 },
                 OzoneMsg::Shutdown(ozid, resp) => {
                     if let OzoneBotId::Master(_) = ozid {
-                        self.respond(self.shutdown(fmt!("{}", ozid)), &resp);
+                        let result = self.shutdown(fmt!("{}", ozid), Some(&resp));
+                        self.result(&result);
                         return LoopBreak(true);
                     } else {
                         self.respond(Err(err!(
@@ -1022,13 +1023,44 @@ impl<
         Ok(())
     }
 
-    /// Gracefully shut down the database.
-    pub fn shutdown(&self, requester: String) -> Outcome<OzoneMsg<UIDL, UID, ENC, KH>> {
+    /// Gracefully shuts down the database.  The bots are finished in order, each kind once those
+    /// sending it work have ended (`BotChannels::finish_all`), and `resp` is answered when they
+    /// have been, or when `constant::SHUTDOWN_MAX_WAIT` runs out, whichever comes first.  What is
+    /// left is then finished in the same order, however long the bots take to end, up to
+    /// `constant::CONTROL_REQUEST_TIMEOUT` for each kind: finished early, the ones still waiting
+    /// on them could only time out (2026-09-24).  The master's wait for every thread to end
+    /// covers this, since this thread is one of them.
+    pub fn shutdown(
+        &self,
+        requester:  String,
+        resp:       Option<&Responder<UIDL, UID, ENC, KH>>,
+    )
+        -> Outcome<()>
+    {
         warn!(sync_log::stream(), "{}: Shutdown requested by {}, commencing...", self.label(), requester);
-        res!(self.chans().finish_all(|| self.handles().writers_ended()));
+        let ended = |typs: &[WorkerType]| self.handles().ended(typs);
+        let begun = Instant::now();
+        let left = self.chans().finish_all(&ended, begun + constant::SHUTDOWN_MAX_WAIT);
         thread::sleep(Duration::from_secs(1));
         self.handles().report_status();
-        Ok(OzoneMsg::Ok)
+        if let Some(resp) = resp {
+            self.respond(left.clone().map(|_| OzoneMsg::Ok), resp);
+        }
+        let mut left = res!(left);
+        while let Some(stage) = left {
+            left = res!(self.chans().finish_from(
+                stage, &ended, Instant::now() + constant::CONTROL_REQUEST_TIMEOUT));
+            if let Some(stage) = left {
+                self.error(err!(
+                    "{}: Shutdown: Bots of stage {} had not ended after {:?}, so the rest are \
+                    finished without waiting for them.", self.ozid(), stage,
+                    constant::CONTROL_REQUEST_TIMEOUT;
+                    Thread, Timeout));
+                left = res!(self.chans().finish_from(stage, |_: &[WorkerType]| true, Instant::now()));
+            }
+        }
+        self.handles().report_status();
+        Ok(())
     }
 }
 
