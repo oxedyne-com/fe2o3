@@ -274,7 +274,10 @@ fn writer_failure_reaches_the_caller() -> Outcome<()> {
 
 /// A zone that cannot be initialised fails the start.  It used to be logged, and the store came
 /// up with that zone's writer holding no directory, so its writes landed in the working directory
-/// of whatever process had opened it.
+/// of whatever process had opened it.  The failed start returns once the bots it brought up have
+/// stopped: it returned with 32 threads running where there had been 4, and a caller that opens
+/// the directory again at once, as Oregami's forge does on its next request, could have two sets
+/// of bots over one directory.
 fn failed_zone_fails_the_start() -> Outcome<()> {
     let root = res!(fresh("./test_db_store_timeouts_zone"));
     let mut cfg = res!(config());
@@ -284,6 +287,7 @@ fn failed_zone_fails_the_start() -> Outcome<()> {
             "max_size"  => 1_000_000u64,
         },
     }.get_map().ok_or_else(|| err!("The zone override is not a map."; Test, Bug)));
+    let before = res!(threads());
     let begun = Instant::now();
     let mut db = res!(TestDb::new(root.clone(), Some(cfg), schemes(), Uid::default()));
     match db.start("test") {
@@ -302,6 +306,20 @@ fn failed_zone_fails_the_start() -> Outcome<()> {
     if took >= constant::USER_REQUEST_TIMEOUT {
         return Err(err!("The failed start took {:?} to report.", took; Test, Timeout));
     }
+    // A thread that has let go of its bot ends a moment later, so the count gets that moment.
+    let at_return = res!(threads());
+    let settled = Instant::now() + Duration::from_millis(100);
+    let mut after = at_return;
+    while after > before && Instant::now() < settled {
+        thread::sleep(Duration::from_millis(5));
+        after = res!(threads());
+    }
+    if after > before {
+        return Err(err!(
+            "A failed start returned with {} threads running, {} a moment later, where there were \
+            {} before it: the bots it brought up were still running.", at_return, after, before;
+            Test, Unexpected));
+    }
     // Nothing is left running for a close to wait on.
     let begun = Instant::now();
     res!(db.close());
@@ -314,6 +332,11 @@ fn failed_zone_fails_the_start() -> Outcome<()> {
 
 fn key(i: u8) -> Dat {
     dat!(fmt!("store timeouts key {}", i))
+}
+
+/// The threads this process is running.
+fn threads() -> Outcome<usize> {
+    Ok(res!(std::fs::read_dir("/proc/self/task")).count())
 }
 
 /// The crate's test configuration, with every zone inside the test's own directory.

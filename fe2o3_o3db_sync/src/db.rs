@@ -67,9 +67,13 @@ use std::{
         Arc,
         Mutex,
         RwLock,
+        mpsc,
     },
     thread,
-    time::Instant,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use crossbeam_utils::sync::WaitGroup;
@@ -301,7 +305,9 @@ impl<
         Ok(())
     }
 
-    /// Start the Ozone database.
+    /// Start the Ozone database.  Returns once every zone has surveyed its files and loaded its
+    /// caches, bounded by `constant::CONTROL_REQUEST_TIMEOUT`.  A start that fails returns once the
+    /// bots it brought up have stopped, so the directory can be opened again at once.
     pub fn start<
         S: Into<String>,
     >(
@@ -381,10 +387,25 @@ impl<
                     Channel, Write));
             }
             // Nothing is left for a close to do.
-            let mut closing = lock_mutex!(self.closing,
-                "Taking the shutdown record after a failed start.");
-            closing.wg = None;
-            closing.done = true;
+            let wg = {
+                let mut closing = lock_mutex!(self.closing,
+                    "Taking the shutdown record after a failed start.");
+                closing.done = true;
+                closing.wg.take()
+            };
+            // The caller may open the directory again as soon as this returns, as Oregami's
+            // forge does on its next request, so it returns once the bots are gone.  It returned
+            // while they were still stopping, and the next open could bring up a second set over
+            // the same files (2026-09-23).  Their stopping is start-up work, held to the control
+            // deadline like the rest of it.
+            if let Some(wg) = wg {
+                if !res!(Self::await_stopped(wg, constant::CONTROL_REQUEST_TIMEOUT)) {
+                    return Err(err!(e,
+                        "{}: The database did not start, and the bots it brought up had not all \
+                        stopped {:?} later.", self.ozid(), constant::CONTROL_REQUEST_TIMEOUT;
+                        Init, Timeout));
+                }
+            }
             return Err(e);
         }
 
@@ -438,6 +459,29 @@ impl<
                         Init, Channel, Unexpected)),
                 },
             }
+        }
+    }
+
+    /// Waits for every thread holding a clone of the wait group to let it go, for at most
+    /// `within`.  `WaitGroup::wait` has no deadline, so the waiting is done by a thread of its own.
+    fn await_stopped(wg: WaitGroup, within: Duration) -> Outcome<bool> {
+        let (tx, rx) = mpsc::channel();
+        let waiter = res!(thread::Builder::new()
+            .name(fmt!("o3db-stopping"))
+            .spawn(move || {
+                wg.wait();
+                // A caller whose wait ran out has gone, and there is no one else to tell.
+                let _ = tx.send(());
+            }));
+        match rx.recv_timeout(within) {
+            Ok(()) => match waiter.join() {
+                // Joined, so that it is not itself still running when the caller looks.
+                Ok(()) => Ok(true),
+                Err(_) => Err(err!(
+                    "The thread waiting for the database's bots to stop panicked.";
+                    Thread, Panic)),
+            },
+            Err(_) => Ok(false),
         }
     }
 
