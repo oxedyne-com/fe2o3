@@ -11,3 +11,4 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 oxedyne_fe2o3_core 		   		= { path = "../fe2o3_core" }
 
 [dev-dependencies]
+oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
