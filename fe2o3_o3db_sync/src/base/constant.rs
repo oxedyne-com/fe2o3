@@ -99,7 +99,8 @@ pub const BOT_ERR_COUNT_WARNING:        usize = 10;
 pub const STACK_SIZE:                   usize = 2 * 1024 * 1024;
 
 // Shutdown.
-// Wait for all bots to idle after shutting off server.
+// How long a close waits for the bots to finish in order before the supervisor answers it; any
+// still running are finished afterwards, in the same order (`Supervisor::shutdown`).
 pub const SHUTDOWN_MAX_WAIT:            Duration = Duration::from_secs(3);
 
 // Intervals.
