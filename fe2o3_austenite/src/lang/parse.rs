@@ -1386,6 +1386,7 @@ enum Frame {
 	Math,		// a `$...$` maths span: every character is literal until the closing `$`
 	Comment,	// a `/* ... */` block comment: every character, brackets included, is literal until `*/`
 	Raw,		// a `` `...` `` code span: every character, `//`/`/*` included, is literal until the closing backtick
+	RawBlock(usize),	// a raw block opened by a run of three or more backticks: literal across lines until a run as long
 }
 
 /// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
@@ -1397,6 +1398,7 @@ pub(crate) struct SkipState {
 	frames:		Vec<Frame>,
 	escaped:	bool,
 	in_quote:	bool,	// an odd number of literal `"` seen since the start of the current line, in Content mode
+	markup:		bool,	// the level beneath every frame is a file's markup, not code
 }
 
 /// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
@@ -1417,9 +1419,26 @@ fn line_comment_len(chars: &[char], i: usize) -> usize {
 	}
 }
 
+/// The length of the run of backticks starting at `i`.
+fn backtick_run(chars: &[char], i: usize) -> usize {
+	chars[i..].iter().take_while(|&&c| c == '`').count()
+}
+
 impl SkipState {
 	pub(crate) fn new() -> Self {
-		SkipState { frames: Vec::new(), escaped: false, in_quote: false }
+		SkipState { frames: Vec::new(), escaped: false, in_quote: false, markup: false }
+	}
+
+	/// A scan of a whole file, whose outermost level is markup, as the reader reads it: a paren, a brace or
+	/// a quote in prose is a character, a `#name(`/`#name[` opens a group, and a stray `]` closes nothing.
+	pub(crate) fn markup() -> Self {
+		SkipState { frames: Vec::new(), escaped: false, in_quote: false, markup: true }
+	}
+
+	/// Is a block comment or a raw block open? Everything inside one is text, so a line starting there is
+	/// no declaration, whatever it reads like.
+	pub(crate) fn in_literal(&self) -> bool {
+		self.frames.iter().any(|f| matches!(f, Frame::Comment | Frame::RawBlock(_)))
 	}
 
 	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
@@ -1482,38 +1501,21 @@ impl SkipState {
 					_		=> 1,
 				}
 			},
-			Some(Frame::Content) => {
-				// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over
-				// before any of the structural cases below can act on it.
-				if self.escaped {
-					self.escaped = false;
-					return 1;
-				}
-				match c {
-					'\\'	=> { self.escaped = true; 1 },
-					'['		=> { self.frames.push(Frame::Content); 1 },
-					']'		=> { self.frames.pop(); 1 },
-					'$'		=> { self.frames.push(Frame::Math); 1 },
-					'#'		=> self.content_hash(chars, i),
-					'`'		=> { self.frames.push(Frame::Raw); 1 },
-					// A literal `"` in prose is not a string (content mode never opens `Frame::Str`), but
-					// `strip_comments` still treats a quoted phrase as opaque to `//`/`/*`, so a bare count
-					// mirrors that here without disturbing the bracket balance a real quote would otherwise
-					// leave alone. Line-scoped, as `strip_comments` is called once per line.
-					'"'		=> { self.in_quote = !self.in_quote; 1 },
-					'\n'	=> { self.in_quote = false; 1 },
-					// A line comment runs to the next `\n` in `chars` (which may hold a whole multi-line
-					// capture buffer, not just this one line) -- never past it, and never at all inside a
-					// quoted phrase or a raw span. The `://` exception mirrors `strip_comments`, so a bare
-					// URL's slashes stay literal prose. A block comment opens a `Comment` frame that can
-					// straddle the line break, same as Str/Math above.
-					'/' if is_line_comment(chars, i) && !self.in_quote		=> line_comment_len(chars, i),
-					'/' if chars.get(i + 1) == Some(&'*') && !self.in_quote	=> { self.frames.push(Frame::Comment); 2 },
-					// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole
-					// point of tracking the frame, so a caption's unbalanced paren does not stick.
-					_		=> 1,
+			// A raw block, as Typst lexes one: literal, line breaks included, until a run of backticks as long
+			// as the one that opened it. A `#set` shown inside a ```` ```typst ```` example is its text.
+			Some(Frame::RawBlock(n)) => {
+				let run = backtick_run(chars, i);
+				if run >= n {
+					self.frames.pop();
+					n
+				} else {
+					run.max(1)
 				}
 			},
+			Some(Frame::Content)	=> self.content_step(chars, i, false),
+			// The outermost level of a file read as markup: a content block's rules, except that a stray `]`
+			// has no block to close.
+			None if self.markup		=> self.content_step(chars, i, true),
 			// A code frame, or the top level (an empty stack): brackets nest as the flat counter had them,
 			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span. A `"`
 			// opens a real `Str` frame here, which already keeps a `//`/`/*` inside it literal, so no
@@ -1521,7 +1523,7 @@ impl SkipState {
 			_ => {
 				match c {
 					'"'									=> { self.frames.push(Frame::Str); 1 },
-					'`'									=> { self.frames.push(Frame::Raw); 1 },
+					'`'									=> self.open_raw(chars, i),
 					'(' | '{'							=> { self.frames.push(Frame::Code); 1 },
 					'['									=> { self.frames.push(Frame::Content); 1 },
 					'$'									=> { self.frames.push(Frame::Math); 1 },
@@ -1531,6 +1533,52 @@ impl SkipState {
 					_									=> 1,
 				}
 			},
+		}
+	}
+
+	/// One character of content: the inside of a `[...]` block, or, with `base` set, a file's own markup,
+	/// where a `]` with no block open is a character.
+	fn content_step(&mut self, chars: &[char], i: usize, base: bool) -> usize {
+		// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over before any
+		// of the structural cases below can act on it.
+		if self.escaped {
+			self.escaped = false;
+			return 1;
+		}
+		match chars[i] {
+			'\\'			=> { self.escaped = true; 1 },
+			'['				=> { self.frames.push(Frame::Content); 1 },
+			']' if base		=> 1,
+			']'				=> { self.frames.pop(); 1 },
+			'$'				=> { self.frames.push(Frame::Math); 1 },
+			'#'				=> self.content_hash(chars, i),
+			'`'				=> self.open_raw(chars, i),
+			// A literal `"` in prose is not a string (content mode never opens `Frame::Str`), but
+			// `strip_comments` still treats a quoted phrase as opaque to `//`/`/*`, so a bare count mirrors
+			// that here without disturbing the bracket balance a real quote would otherwise leave alone.
+			// Line-scoped, as `strip_comments` is called once per line.
+			'"'				=> { self.in_quote = !self.in_quote; 1 },
+			'\n'			=> { self.in_quote = false; 1 },
+			// A line comment runs to the next `\n` in `chars` (which may hold a whole multi-line capture
+			// buffer, not just this one line) -- never past it, and never at all inside a quoted phrase or a
+			// raw span. The `://` exception mirrors `strip_comments`, so a bare URL's slashes stay literal
+			// prose. A block comment opens a `Comment` frame that can straddle the line break, same as
+			// Str/Math above.
+			'/' if is_line_comment(chars, i) && !self.in_quote		=> line_comment_len(chars, i),
+			'/' if chars.get(i + 1) == Some(&'*') && !self.in_quote	=> { self.frames.push(Frame::Comment); 2 },
+			// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole point of
+			// tracking the frame, so a caption's unbalanced paren does not stick.
+			_				=> 1,
+		}
+	}
+
+	/// Opens raw text at a backtick, as Typst's lexer does: one backtick an inline span, two an empty one,
+	/// three or more a raw block that runs until the same count closes it.
+	fn open_raw(&mut self, chars: &[char], i: usize) -> usize {
+		match backtick_run(chars, i) {
+			1	=> { self.frames.push(Frame::Raw); 1 },
+			2	=> 2,
+			n	=> { self.frames.push(Frame::RawBlock(n)); n },
 		}
 	}
 
@@ -5851,5 +5899,34 @@ bound\".\n";
 			"the buffer content around the line comment was misread: {:?}", inner);
 		assert_eq!(next, s.len(), "the group did not close at its own bracket");
 		Ok(())
+	}
+
+	/// A raw block inside a callout body is text to the scanner, as it is to Typst: a `]` shown in a
+	/// ```` ``` ```` example closes nothing, so the callout ends at its own bracket and the prose after it
+	/// stays outside.
+	#[test]
+	fn a_raw_block_in_a_body_closes_nothing() -> Outcome<()> {
+		let src = "#styled-box[\n```\nlet s = `x ]`\n]\n```\n]\n\nAfter the box.\n";
+		let (items, _) = res!(document_with_refusals(src));
+		let inner = res!(items.iter().find_map(|it| match it {
+			Item::Box { items, .. }	=> Some(items.clone()),
+			_						=> None,
+		}).ok_or_else(|| err!("no Item::Box was produced"; Test, Bug)));
+		assert!(inner.iter().any(|it| matches!(it, Item::Code { lines, .. } if lines.len() == 2)),
+			"the shown code stays whole inside the box: {:?}", inner);
+		assert!(matches!(items.last(), Some(Item::Paragraph { runs, .. })
+			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("After the box.")))),
+			"the prose after the box is outside it: {:?}", items);
+		Ok(())
+	}
+
+	/// A block raw closes only on a run of backticks as long as its opener, as Typst lexes one.
+	#[test]
+	fn a_raw_block_closes_on_its_own_length() {
+		let mut state = SkipState::markup();
+		scan_brackets("````\n```\n#set text(size: 30pt)\n```\n", &mut state);
+		assert!(state.in_literal(), "a shorter run inside a four-backtick block is its text");
+		scan_brackets("````\n", &mut state);
+		assert!(!state.in_literal(), "the matching run closes it");
 	}
 }

@@ -20,6 +20,7 @@
 //! fields those write are populated here only where a `#show: doc.with(...)` names them directly.
 
 use crate::ir::Sp;
+use crate::ir::Span;
 use crate::theme::{
 	Theme,
 	ThemeHeadingLevelPatch,
@@ -399,26 +400,57 @@ pub fn declstyle_refusal(buf: &str) -> Option<String> {
 // │ EXTRACTING A CONSTRUCT'S ARGUMENTS FROM SOURCE                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The balanced argument text of the first `#show: <ident>.with(...)` application in `src`, without its
-/// enclosing parentheses. `None` when the source has no such application.
-fn show_doc_with_args(src: &str) -> Option<String> {
-	let mut from = 0usize;
-	while let Some(rel) = src[from..].find("#show:") {
-		let at		= from + rel;
-		let rest	= &src[at..];
-		// The application is `#show: <ident>.with(` -- find the `.with(` that follows, on the same line.
-		let line_end	= rest.find('\n').map(|n| at + n).unwrap_or(src.len());
-		if let Some(wrel) = src[at..line_end].find(".with(") {
-			let open = at + wrel + ".with".len();	// the '(' of the argument list
-			return balanced_parens(&src[open..]);
+/// The balanced argument text of the first top-level `#show: <ident>.with(...)` application in `src`,
+/// without its enclosing parentheses, and the span of the line it opens on. `None` when the source has no
+/// such application at its top level.
+pub(crate) fn show_doc_with(src: &str) -> Option<(String, Span)> {
+	for (start, raw) in top_level_lines(src) {
+		let indent	= raw.len() - raw.trim_start().len();
+		let trimmed	= raw.trim_start();
+		if !trimmed.starts_with("#show:") {
+			continue;
 		}
-		from = line_end.max(at + 1);
+		// The application is `#show: <ident>.with(` -- the `.with(` follows on the same line.
+		if let Some(wrel) = trimmed.trim_end().find(".with(") {
+			let open = start + indent + wrel + ".with".len();	// the '(' of the argument list
+			let end = start + raw.trim_end().len();
+			return balanced_parens(&src[open..]).map(|args| (args, Span::new(start as u32, end as u32)));
+		}
 	}
 	None
 }
 
+fn show_doc_with_args(src: &str) -> Option<String> {
+	show_doc_with(src).map(|(args, _)| args)
+}
+
+/// The lines of `src` that stand at its top level, each with the byte offset it starts at, as the reader
+/// meets them: a line opening inside a bracketed body, a block comment or a raw block is none of them. A
+/// `#set` in a `#styled-box[...]`/`#columns[...]` body is that body's own declaration, lowered onto its
+/// scope when the body is re-parsed, and one inside a comment or a ```` ```typst ```` example is text, so
+/// a declaration scan that read either would apply what the document never applies.
+///
+/// The balance is folded through the reader's own scanner over the file's markup, so a paren, a brace or
+/// a quotation mark in prose is a character and leaves the lines after it at the top level.
+fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
+	let mut out		= Vec::new();
+	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
+	let mut state	= crate::lang::parse::SkipState::markup();
+	for raw in src.split_inclusive('\n') {
+		let line_start	= offset;
+		offset			= offset.saturating_add(raw.len());
+		// Whether the line starts nested, before its own delimiters are folded in.
+		let nested = state.has_open_bracket() || state.in_literal();
+		crate::lang::parse::scan_brackets(raw, &mut state);
+		if !nested {
+			out.push((line_start, raw));
+		}
+	}
+	out
+}
+
 /// Every top-level `#set <target>(...)` in `src`, as `(target, args)` pairs with the argument text
-/// stripped of its enclosing parentheses. "Top-level" is by line: a line whose trimmed text opens with
+/// stripped of its enclosing parentheses: a line of [`top_level_lines`] whose trimmed text opens with
 /// `#set `. A malformed set (no balanced parentheses) is skipped.
 ///
 /// The `(`'s position is found by tracking the running byte offset of each line rather than by searching
@@ -427,25 +459,8 @@ fn show_doc_with_args(src: &str) -> Option<String> {
 /// balanced scan starts at this line's own `(` and reads its own arguments, even when they run on across
 /// several following lines.
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
-	let mut out		= Vec::new();
-	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
-	// The running bracket balance across lines, folded through the reader's own content-aware scanner. A
-	// `#set` on a line that opens inside a `#styled-box[...]`/`#columns[...]` body -- a bracket still open at
-	// the line's start -- is that body's own declaration, lowered onto its scope when the body is re-parsed;
-	// capturing it here too would apply it to the enclosing scope as well. Only a `#set` at true top level
-	// (no open bracket) lowers to this source's scope.
-	let mut state	= crate::lang::parse::SkipState::new();
-	for raw in src.split_inclusive('\n') {
-		let line_start	= offset;
-		offset			= offset.saturating_add(raw.len());
-
-		// The depth in force at this line's start, before its own delimiters are folded in.
-		let nested = state.has_open_bracket();
-		crate::lang::parse::scan_brackets(raw, &mut state);
-		if nested {
-			continue;
-		}
-
+	let mut out = Vec::new();
+	for (line_start, raw) in top_level_lines(src) {
 		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
 		let trimmed	= raw.trim_start();
 		let after	= match trimmed.strip_prefix("#set ") {
@@ -991,5 +1006,38 @@ mod tests {
 		assert!(set_refusal_reason("document", "date: auto").is_some(), "a date is never written");
 		assert!(set_refusal_reason("document", "title: \"X\", lang: \"de\"").is_some());
 		assert_eq!(declstyle_refusal("#set document(title: \"X\")\n"), None);
+	}
+
+	/// A `#set` shown in a raw block or written in a comment is text, not a rule: neither the theme nor the
+	/// Info dictionary reads one, while a declaration after them still applies.
+	#[test]
+	fn raw_blocks_and_comments_hold_no_declarations() {
+		let src = "```typst\n#set document(title: \"Example Title\")\n#set text(size: 30pt)\n```\n\
+			/*\n#set document(title: \"Commented Out\")\n#set text(size: 31pt)\n*/\n\
+			#set text(size: 12pt)\n= Body\n";
+		assert_eq!(document_info(src), crate::doc::DocInfo::default());
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(12.0)));
+		// A comment opened after a declaration holds the lines after it, not the one it opens on.
+		let src = "#set text(size: 12pt) /* the old size:\n#set text(size: 30pt)\n*/\n";
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(12.0)));
+	}
+
+	/// A file's top level is markup: a paren, brace or quotation mark in its prose is a character, so a
+	/// `#set` on a later line still applies.
+	#[test]
+	fn prose_punctuation_leaves_a_later_set_at_the_top_level() {
+		let src = "A ruler (and {more, 12\" long\n\n#set text(size: 13pt)\n";
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(13.0)));
+	}
+
+	/// The template application is read from the top level alone, so one commented out or shown in a raw
+	/// block names no heading face.
+	#[test]
+	fn a_shown_or_commented_template_application_is_not_applied() {
+		let src = "// #show: doc.with(heading-font: \"Old\")\n```\n#show: doc.with(heading-font: \"Shown\")\n```\n\
+			#show: doc.with(heading-font: \"Real\")\n";
+		let mut theme = Theme::default();
+		lower_root_declarations(src, &mut theme);
+		assert_eq!(theme.heading.levels[0].face, Some("Real".to_string()));
 	}
 }

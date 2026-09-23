@@ -114,3 +114,19 @@ fn the_info_dictionary_is_typsts_for_the_same_source() -> Outcome<()> {
 	assert!(METADATA.iter().all(|k| !none.contains_key(*k)), "an unset field writes no entry: {:?}", none);
 	Ok(())
 }
+
+/// A `#set document` shown in a raw block or written in a comment is text, so it writes no Info entry, as
+/// in Typst.
+#[test]
+fn a_shown_or_commented_set_document_writes_no_info() -> Outcome<()> {
+	let src = "```typst\n#set document(title: \"Example Title\")\n```\n\
+		/*\n#set document(author: \"Commented Out\")\n*/\n= Heading\n\nBody.\n";
+	let pdf = scratch("pdf_info_shown.pdf");
+	res!(std::fs::write(&pdf, res!(compile_pdf(src))));
+	let ours = res!(info_of(&pdf));
+	assert!(METADATA.iter().all(|k| !ours.contains_key(*k)), "no field was set: {:?}", ours);
+	if let Some(theirs) = res!(typst_info(src, "shown")) {
+		assert!(METADATA.iter().all(|k| !theirs.contains_key(*k)), "typst sets none either: {:?}", theirs);
+	}
+	Ok(())
+}
