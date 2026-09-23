@@ -909,6 +909,49 @@ fn keep_with_next_para<'a>(look: &'a Block, theme: &Theme) -> Option<(&'a str, T
 }
 
 impl<'a> Authoring<'a> {
+	/// A fresh authoring of a document at `measure`, every counter at its start.
+	fn new(
+		fonts:		Arc<FontSet>,
+		geom:		PageGeometry,
+		faces:		&'a FaceResolver,
+		measure:	Sp,
+		bib:		Option<&'a Bibliography>,
+		refs:		HashMap<String, String>,
+		global_fp:	u64,
+	)
+		-> Self
+	{
+		Authoring {
+			fonts,
+			geom,
+			faces,
+			measure,
+			bib,
+			refs,
+			nodes:				Vec::new(),
+			heads:				Vec::new(),
+			first:				true,
+			sec:				[0; 6],
+			prev_para:			false,
+			pending_banner:		false,
+			part_no:			0,
+			foot_no:			0,
+			ref_no:				0,
+			margin_no:			0,
+			eq_no:				0,
+			fig_no:				0,
+			counters:			HashMap::new(),
+			seen:				HashSet::new(),
+			index_gather:		IndexGather::default(),
+			want_index:			false,
+			claim_gather:		ClaimGather::default(),
+			want_claim_index:	false,
+			claim_index_at:		None,
+			global_fp,
+			answers:			Vec::new(),
+		}
+	}
+
 	/// The inline context over this authoring's own counters, gathers and answers.
 	fn runs(&mut self) -> Runs<'_> {
 		Runs {
@@ -929,11 +972,22 @@ impl<'a> Authoring<'a> {
 	/// as one unit that never breaks, so its penalties and repeated-header markers are dropped; a float, a
 	/// columns block or a column-layout change inside it has no band or column of its own, and is refused.
 	fn float_material(&mut self, blocks: &[Block], style: &Theme, scope: FloatScope) -> Outcome<Vec<Node>> {
+		let measure = self.float_measure(scope);
+		self.material(blocks, style, measure, "a floating place")
+	}
+
+	/// Authors a container's blocks -- a float's or a callout's -- into material of their own: the whole
+	/// block walk at `measure`, headings, figures, images, tables and equations all, with every
+	/// document-order counter counting on across it and every construct answered where it is set. The
+	/// material is laid as one unit that never breaks, so its penalties and repeated-header markers are
+	/// dropped; a float, a columns block or a column-layout change inside it has no band or column of its own.
+	/// The reader refuses a break or a float in a container's body, so meeting one here is an error.
+	fn material(&mut self, blocks: &[Block], style: &Theme, measure: Sp, container: &str) -> Outcome<Vec<Node>> {
 		let outer_nodes		= std::mem::take(&mut self.nodes);
 		let outer_measure	= self.measure;
 		let outer_first		= self.first;
 		let outer_para		= self.prev_para;
-		self.measure	= self.float_measure(scope);
+		self.measure	= measure;
 		self.first		= true;
 		self.prev_para	= false;
 		let walked		= self.walk(blocks, style, None, &mut None);
@@ -949,8 +1003,8 @@ impl<'a> Authoring<'a> {
 				// refused at parse time, and an opener's own eject has no page to turn here.
 				Node::RepeatHead(_) | Node::Penalty(_)	=> {},
 				Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) => return Err(err!(
-					"A float, a columns block or a page-column change inside a floating place cannot be set: the \
-					float is laid out as one unit, with no band or column of its own."; Input, Invalid)),
+					"A float, a columns block or a page-column change inside {} cannot be set: it is laid out as \
+					one unit, with no band or column of its own.", container; Input, Invalid)),
 				other				=> out.push(other),
 			}
 		}
@@ -1519,9 +1573,17 @@ impl<'a> Authoring<'a> {
 					// The box body is set with the document theme overlaid by the box's own `#set` declarations,
 					// scoped to the box (H3). An empty patch leaves the document theme, so a callout that declares
 					// nothing renders byte-identically. The wash is the scoped theme's `callout.fill`.
-					let scoped = { let mut t = style.clone(); t.apply(patch); t };
-					let fill = scoped.callout.fill;
-					let box_fonts = res!(self.fonts_for(patch));
+					let scoped		= { let mut t = style.clone(); t.apply(patch); t };
+					let fill		= scoped.callout.fill;
+					let frame		= CalloutFrame::of(&scoped, self.measure);
+					// The body is authored through the whole block walk at the box's inner measure, in its own
+					// reading set, so a heading, a figure, an image, a table or an equation in a callout is set
+					// and answered for as it is anywhere else.
+					let box_fonts	= res!(self.fonts_for(patch));
+					let outer_fonts	= std::mem::replace(&mut self.fonts, box_fonts);
+					let material	= self.material(inner, &scoped, frame.inner, "a callout");
+					self.fonts		= outer_fonts;
+					let material	= res!(material);
 					match placement {
 						Some(p) => {
 							// A floated callout is a `figure(placement: ...)` under the bonnet, so it records a
@@ -1531,19 +1593,14 @@ impl<'a> Authoring<'a> {
 							let mut mid = Vec::new();
 							let n = next_number(&mut self.counters, "aside");
 							mid.push(Node::Anchor(AnchorId::new(AnchorKind::Float, fmt!("aside-{}", n))));
-							let (geom, measure) = (self.geom, self.measure);
-							res!(styled_box(&mut mid, box_fonts.clone(), geom, &scoped, measure, inner, fill, &mut self.runs()));
+							res!(callout(&mut mid, &scoped, self.measure, &frame, material, fill));
 							push_float(&mut self.nodes, mid, float_clearance(style), Floating::column(*p));
 						},
 						None => {
 							if !self.first {
 								self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 							}
-							let (geom, measure) = (self.geom, self.measure);
-							let mut nodes = std::mem::take(&mut self.nodes);
-							let set = styled_box(&mut nodes, box_fonts.clone(), geom, &scoped, measure, inner, fill, &mut self.runs());
-							self.nodes = nodes;
-							res!(set);
+							res!(callout(&mut self.nodes, &scoped, self.measure, &frame, material, fill));
 							self.nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
 						},
 					}
@@ -1849,35 +1906,7 @@ pub fn author_memo(
 	if let Some(m) = memo.as_deref_mut() {
 		m.begin(global_fp);
 	}
-	let mut authoring = Authoring {
-		fonts:		fonts.clone(),
-		geom,
-		faces,
-		measure:	geom.content_width(),
-		bib,
-		refs,
-		nodes:		Vec::new(),
-		heads:		Vec::new(),
-		first:		true,
-		sec:		[0; 6],
-		prev_para:	false,
-		pending_banner:	false,
-		part_no:	0,
-		foot_no:	0,
-		ref_no:		0,
-		margin_no:	0,
-		eq_no:		0,
-		fig_no:		0,
-		counters:	HashMap::new(),
-		seen:		HashSet::new(),
-		index_gather:	IndexGather::default(),
-		want_index:		false,
-		claim_gather:	ClaimGather::default(),
-		want_claim_index:	false,
-		claim_index_at:	None,
-		global_fp,
-		answers:		Vec::new(),
-	};
+	let mut authoring = Authoring::new(fonts.clone(), geom, faces, geom.content_width(), bib, refs, global_fp);
 	// A body set in several columns (`#set page(columns: n)`) opens with the layout marker, so the front
 	// matter composed ahead of it keeps the single-column page, and every block is set at the column measure.
 	if style.page.columns > 1 {
@@ -5786,61 +5815,62 @@ fn vspacer(height: Sp) -> Node {
 	Node::HBox(BoxNode::new(vec![], Dims::new(Sp::ZERO, height, Sp::ZERO)))
 }
 
-/// Sets a `#styled-box[...]` callout: its inner blocks laid out at the measure less the horizontal insets,
-/// seated one inset in from the left and top, over a filled rounded rectangle that runs the full measure.
-/// The template's own box takes `inset: (x: 1em, y: 1em, bottom: 1.2em)`, so the sides and top pad one body
-/// em and the foot 1.2 em, and `radius: 4pt` rounds the corners; the wash is `colours.veronica.lighten(90%)`,
-/// a pale violet. A `#show` rule's `block.with(fill:, inset:, radius:)` can override any of the four on
-/// `style.callout` (each `None` until a rule names it), so this reads them off `style` and falls back to
-/// the template's own constants precisely where a rule left them unset -- the bare `#styled-box[...]` path,
-/// which sets no such rule, always takes every fallback and renders exactly as before. The wash draws first
+/// A callout's frame: the insets its body sits in, the corner radius of its wash, and the measure its body is
+/// authored at. The template's own box takes `inset: (x: 1em, y: 1em, bottom: 1.2em)` and `radius: 4pt`; a
+/// `#show` rule's `block.with(fill:, inset:, radius:)` can override any of them on `style.callout` (each
+/// `None` until a rule names it), and each falls back to the template's constant precisely where a rule left
+/// it unset. The left and right pads take an asymmetric `inset.left`/`inset.right` override first (a `#let`
+/// template block's `inset: (left:, right:)`), then the symmetric `inset.x`, then one body em.
+struct CalloutFrame {
+	left:	Sp,
+	top:	Sp,
+	bottom:	Sp,
+	radius:	f32,
+	inner:	Sp,	// the measure the body is authored at: the callout's less its two side insets
+}
+
+impl CalloutFrame {
+	fn of(style: &Theme, measure: Sp) -> Self {
+		let em		= style.text.body_size;
+		let left	= style.callout.inset_left.or(style.callout.inset_x).unwrap_or(em);
+		let right	= style.callout.inset_right.or(style.callout.inset_x).unwrap_or(em);
+		let two_x	= left + right;
+		CalloutFrame {
+			left,
+			top:	style.callout.inset_top.unwrap_or(em),
+			bottom:	style.callout.inset_bot.unwrap_or(Sp::from_pt(em.to_pt() * 1.2)),
+			radius:	style.callout.radius.map_or(4.0f32, |sp| sp.to_pt() as f32),
+			inner:	if measure > two_x { measure - two_x } else { measure },
+		}
+	}
+}
+
+/// Sets a callout -- a `#styled-box[...]` or a furniture call -- around its authored body: the body's lines
+/// seated one left inset in, over a filled rounded rectangle that runs the full measure, washed the
+/// template's `colours.veronica.lighten(90%)` (a pale violet) or the fill a rule names. The wash draws first
 /// with no vertical extent of its own, so the words overlay it, and the whole callout is one keep box -- the
 /// breaker moves it entire rather than splitting the wash from its text.
-#[allow(clippy::too_many_arguments)]
-fn styled_box(
+fn callout(
 	nodes:		&mut Vec<Node>,
-	fonts:		Arc<FontSet>,
-	geom:		PageGeometry,
 	style: &Theme,
 	measure:	Sp,
-	blocks:		&[Block],
+	frame:		&CalloutFrame,
+	material:	Vec<Node>,
 	fill:		Rgba,
-	runs:		&mut Runs<'_>,
 )
 	-> Outcome<()>
 {
-	let em			= style.text.body_size;
-	// Each falls back to the template's own constant precisely where a rule left it unset, so the bare
-	// `#styled-box[...]` path -- which sets no such rule -- takes every fallback and is unchanged. The left
-	// and right pads take an asymmetric `inset.left`/`inset.right` override first (a `#let` template block's
-	// `inset: (left:, right:)`), then the symmetric `inset.x`, then one body em -- so a callout that names
-	// neither is exactly as before.
-	let inset_left	= style.callout.inset_left.or(style.callout.inset_x).unwrap_or(em);	// `inset.left`, default one body em
-	let inset_right	= style.callout.inset_right.or(style.callout.inset_x).unwrap_or(em);	// `inset.right`, default one body em
-	let inset_top	= style.callout.inset_top.unwrap_or(em);							// `inset.y`, default one body em
-	let inset_bot	= style.callout.inset_bot.unwrap_or(Sp::from_pt(em.to_pt() * 1.2));	// `inset.bottom`, default 1.2 em
-	let radius		= style.callout.radius.map_or(4.0f32, |sp| sp.to_pt() as f32);		// `radius`, default 4pt
-	let two_x		= inset_left + inset_right;
-	let inner_w		= if measure > two_x { measure - two_x } else { measure };
-
-	// The inner blocks laid out at the reduced measure, then each line shifted one left inset in by a leading
-	// glue: `place_vbox` seats every child at the content left, so the horizontal inset rides inside the line
-	// rather than on the box.
-	let mut inner:	Vec<Node>	= Vec::new();
-	res!(box_flow(&mut inner, fonts.clone(), geom, style, inner_w, blocks, runs));
-	for node in inner.iter_mut() {
-		if let Node::HBox(b) = node {
-			b.list.insert(0, Node::Glue(Glue::fixed(inset_left)));
-			b.dims = Dims::new(b.dims.width + inset_left, b.dims.height, b.dims.depth);
-		}
-	}
+	// `place_vbox` seats every child at the content left, so the left inset rides inside each line rather
+	// than on the box, a heading's or a table's lines as well as a paragraph's.
+	let mut inner = material;
+	inset_nodes(&mut inner, frame.left);
 
 	// The stacked height of the inner content, so the wash encloses it plus the top and bottom insets.
 	let mut content_h = Sp::ZERO;
 	for node in &inner {
 		content_h += node.vextent();
 	}
-	let total = inset_top + content_h + inset_bot;
+	let total = frame.top + content_h + frame.bottom;
 
 	let mut children:	Vec<Node>	= Vec::new();
 	// The wash and the left rule, both drawn behind the words as one zero-extent graphic: a rounded rectangle
@@ -5851,7 +5881,7 @@ fn styled_box(
 	let mut ops: Vec<DrawOp> = Vec::new();
 	if fill.a != 0 {
 		let rect	= res!(Path::round_rect(
-			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), radius));
+			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), frame.radius));
 		ops.push(DrawOp::Fill { path: rect, colour: fill });
 	}
 	if let (Some(w), Some(col)) = (style.callout.stroke_left_w, style.callout.stroke_left_col) {
@@ -5864,19 +5894,40 @@ fn styled_box(
 		let graphic	= Graphic::new(ops, Dims::new(measure, Sp::ZERO, Sp::ZERO));
 		children.push(Node::Leaf(Leaf::graphic(graphic)));
 	}
-	children.push(Node::Glue(Glue::fixed(inset_top)));
+	children.push(Node::Glue(Glue::fixed(frame.top)));
 	children.append(&mut inner);
-	children.push(Node::Glue(Glue::fixed(inset_bot)));
+	children.push(Node::Glue(Glue::fixed(frame.bottom)));
 	nodes.push(vbox(children, measure));
 	Ok(())
 }
 
-/// Measures a block flow without placing it: the blocks are set at `measure` exactly as [`box_flow`] sets
-/// them, and the stacked vertical extent is returned as [`Dims`] -- `width` the measure, `height` the sum of
-/// the flow's node extents, `depth` zero. The overlay pass sizes a note this way before drawing it, the same
-/// measure Typst's own `measure(content)` gives. The document-order counters a full render threads are
-/// throwaway here (a measure numbers nothing), so a footnote or reference inside the measured blocks counts
-/// only within this scratch flow and never reaches the document.
+/// Moves every line of `nodes` right by `by`: a line gains a leading glue, and a keep box -- a heading's --
+/// has each of its lines moved, so every line of a callout's body sits inside its left inset.
+fn inset_nodes(nodes: &mut [Node], by: Sp) {
+	for node in nodes.iter_mut() {
+		match node {
+			Node::HBox(b) => {
+				b.list.insert(0, Node::Glue(Glue::fixed(by)));
+				b.dims = Dims::new(b.dims.width + by, b.dims.height, b.dims.depth);
+			},
+			Node::VBox(b) => {
+				inset_nodes(&mut b.list, by);
+				b.dims = Dims::new(b.dims.width + by, b.dims.height, b.dims.depth);
+			},
+			// Nothing else is drawn across the line: glue and a penalty take no width, an anchor records the
+			// callout's own left, and a float, a columns block or a column change never reach a callout.
+			Node::Leaf(_) | Node::Glue(_) | Node::Penalty(_) | Node::Anchor(_) | Node::Float(_)
+			| Node::Columns(_) | Node::PageColumns(_) | Node::RepeatHead(_) => {},
+		}
+	}
+}
+
+/// Measures a block flow without placing it: the blocks are set at `measure` through the whole block walk,
+/// as a callout's body is, and the stacked vertical extent is returned as [`Dims`] -- `width` the measure,
+/// `height` the sum of the flow's node extents, `depth` zero. The overlay pass sizes a note this way before
+/// drawing it, the same measure Typst's own `measure(content)` gives. The document-order counters and the
+/// answers a full render keeps are throwaway here (a measure numbers nothing and sets nothing the document
+/// shows), so a footnote or reference inside the measured blocks counts only within this scratch flow.
 pub fn measure_blocks(
 	fonts:		Arc<FontSet>,
 	geom:		PageGeometry,
@@ -5888,120 +5939,14 @@ pub fn measure_blocks(
 )
 	-> Outcome<Dims>
 {
-	let mut nodes:		Vec<Node>		= Vec::new();
-	let mut foot_no						= 0u32;
-	let mut ref_no						= 0u32;
-	let mut margin_no					= 0u32;
-	let mut seen:		HashSet<String>	= HashSet::new();
-	// A scratch measurement flow numbers nothing that reaches the document, so its index markers and claim
-	// references are gathered into throwaways that are dropped -- they must not join the real back matter.
-	let mut idx			= IndexGather::default();
-	let mut claim		= ClaimGather::default();
-	let mut answers		= Vec::new();	// a measure sets nothing the document shows, so it answers for nothing
-	let mut runs		= Runs {
-		foot_no:	&mut foot_no,
-		ref_no:		&mut ref_no,
-		margin_no:	&mut margin_no,
-		seen:		&mut seen,
-		idx:		&mut idx,
-		claim:		&mut claim,
-		bib,
-		refs,
-		answers:	&mut answers,
-	};
-	res!(box_flow(&mut nodes, fonts, geom, style, measure, blocks, &mut runs));
-	let mut height = Sp::ZERO;
+	let faces		= FaceResolver::default();
+	let mut scratch	= Authoring::new(fonts, geom, &faces, measure, bib, refs.clone(), 0);
+	let nodes		= res!(scratch.material(blocks, style, measure, "a measured flow"));
+	let mut height	= Sp::ZERO;
 	for n in &nodes {
 		height += n.vextent();
 	}
 	Ok(Dims::new(measure, height, Sp::ZERO))
-}
-
-/// Lays a callout's inner blocks into a flow of line nodes at `measure`: a plain or rich paragraph is
-/// woven into justified lines and a list set as its bullets, blocks parted by a paragraph skip. Only the
-/// block kinds a callout body carries are set -- a `#styled-box` wraps running prose, not a heading, a
-/// figure or a table -- so any other block is passed over.
-#[allow(clippy::too_many_arguments)]
-fn box_flow(
-	nodes:		&mut Vec<Node>,
-	fonts:		Arc<FontSet>,
-	geom:		PageGeometry,
-	style: &Theme,
-	measure:	Sp,
-	blocks:		&[Block],
-	runs:		&mut Runs<'_>,
-)
-	-> Outcome<()>
-{
-	let mut first = true;
-	res!(box_flow_scoped(nodes, fonts, geom, style, measure, blocks, runs, &mut first));
-	Ok(())
-}
-
-/// The recursive core of [`box_flow`]: sets a callout's blocks under `style`, descending into a
-/// [`Block::Scoped`] under its overlaid theme so a `#set` inside a callout body styles only its subtree
-/// rather than being dropped. `first` is shared across the recursion so the inter-block paragraph skip is
-/// placed on document order, not reset at a scope boundary.
-#[allow(clippy::too_many_arguments)]
-fn box_flow_scoped(
-	nodes:		&mut Vec<Node>,
-	fonts:		Arc<FontSet>,
-	geom:		PageGeometry,
-	style: &Theme,
-	measure:	Sp,
-	blocks:		&[Block],
-	runs:		&mut Runs<'_>,
-	first:		&mut bool,
-)
-	-> Outcome<()>
-{
-	for block in blocks {
-		if let Block::Scoped { patch, blocks: inner } = block {
-			let scoped = { let mut t = style.clone(); t.apply(patch); t };
-			res!(box_flow_scoped(nodes, fonts.clone(), geom, &scoped, measure, inner, runs, first));
-			continue;
-		}
-		if !*first {
-			nodes.push(Node::Glue(Glue::fixed(style.par.skip)));
-		}
-		match block {
-			Block::Paragraph { text } => {
-				let pieces = vec![Piece::Text { text: text.clone(), role: Role::Body }];
-				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
-						Some(cap_edge(style, style.text.body_size))));
-				nodes.extend(lines);
-			},
-			Block::RichParagraph { segments } => {
-				let pieces = res!(build_pieces(fonts.clone(), geom, style, segments, Role::Body, Claims::Gathered, runs));
-				let lines = res!(break_paragraph_pieces(
-					fonts.clone(), Role::Body, Dir::Ltr, style.text.body_size, &pieces, measure, style.text.leading, style.text.justify, style.text.hyphenate, style.text.fill,
-						Some(cap_edge(style, style.text.body_size))));
-				nodes.extend(lines);
-			},
-			Block::List { ordered, items, loose } => {
-				res!(list(nodes, fonts.clone(), geom, style, measure, *ordered, items, *loose, runs));
-			},
-			// A verbatim code block a template moved into a washed box (`#show raw: block.with(fill: ...)`):
-			// set in the mono face at the scoped `code.size`, the same as a top-level code block. Without this
-			// arm the box body dropped its code silently.
-			Block::Code { lines } => {
-				res!(code_block(nodes, fonts.clone(), style, lines));
-			},
-			// A nested space a template placed inside a boxed body.
-			Block::Space(sp) => {
-				nodes.push(Node::Glue(Glue::fixed(*sp)));
-			},
-			// A `#pagebreak()` inside a callout body has no page to turn, so it is refused visibly at parse
-			// time ([`crate::lang::parse::refuse_nested_page_breaks`]) and never reaches here. This explicit
-			// arm keeps it out of the silent catch-all below, so a future path that did route one here would
-			// surface as a compile-time non-exhaustiveness rather than a silent drop.
-			Block::PageBreak { .. } => {},
-			_ => {},
-		}
-		*first = false;
-	}
-	Ok(())
 }
 
 /// Appends a horizontal rule -- a standalone `#line(...)` divider -- as a filled grey bar of the given

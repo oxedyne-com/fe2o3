@@ -3076,21 +3076,24 @@ fn first_arg(inner: &str) -> String {
 	split_arg_commas(inner).into_iter().next().unwrap_or_default()
 }
 
-/// Records a visible refusal for, and removes, every `#pagebreak()` nested in a callout box's body. A
-/// forced page eject has no meaning inside a box the layout keeps whole -- the box-body renderer has no
-/// page to turn -- so it is refused rather than silently dropped at render. Recurses through a nested scope
-/// or a nested box, so a break buried in either is caught too. The document top level and a `#columns` body
-/// (which splices into the main flow, not a box) are untouched: a break there is honoured.
+/// Records a visible refusal for, and removes, everything nested in a container's body -- a callout's or a
+/// float's -- that a unit laid out whole cannot hold: a `#pagebreak()` or a `#colbreak()`, which has no page
+/// or column to turn there, and a floating `#place`, which has no band of its own there. Each is refused
+/// where the reader builds the container rather than dropped at render. Recurses through a nested scope or a
+/// nested box, so one buried in either is caught too. The document top level and a `#columns` body (which
+/// splices into the main flow, not a container) are untouched: a break or a float there is honoured.
 fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
 	let mut kept = Vec::with_capacity(items.len());
 	for mut item in items.drain(..) {
 		match &mut item {
 			Item::PageBreak { span, .. }	=> { skips.record("#pagebreak", *span); continue; },
 			Item::ColBreak { span, .. }		=> { skips.record("#colbreak", *span); continue; },
+			Item::Place { span, .. }		=> { skips.record("#place (inside a container, which cannot float one)", *span); continue; },
 			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			Item::Place { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
 			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			_								=> {},
+			Item::Heading { .. } | Item::Paragraph { .. } | Item::List { .. } | Item::Code { .. } | Item::Table { .. }
+			| Item::Figure { .. } | Item::Image { .. } | Item::SectionBanner { .. } | Item::Rule { .. }
+			| Item::Space { .. } | Item::PrintGlossary { .. } | Item::ClaimIndex { .. }	=> {},
 		}
 		kept.push(item);
 	}

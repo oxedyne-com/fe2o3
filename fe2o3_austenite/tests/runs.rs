@@ -5,18 +5,25 @@
 
 use oxedyne_fe2o3_austenite::compile::{
 	self,
+	DiagnosticKind,
 	Rendered,
 	Report,
 };
 use oxedyne_fe2o3_austenite::fonts;
+use oxedyne_fe2o3_austenite::ir::DrawOp;
 use oxedyne_fe2o3_austenite::ledger::AnchorKind;
 use oxedyne_fe2o3_austenite::page::PlacedKind;
 use oxedyne_fe2o3_austenite::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::pixmap::Pixmap;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{
+	Path,
+	PathBuf,
+};
 use std::sync::{
 	Arc,
 	Mutex,
@@ -36,9 +43,15 @@ const BIB: &str = "@article{smith2020, author = {Smith, John}, title = {A Study}
 /// Installs `files`, compiles `MAIN` as the wasm surface does, and returns the render and its report,
 /// clearing the map either way.
 fn compile_of(files: &[(&str, &str)]) -> Outcome<(Rendered, Report)> {
+	let bytes: Vec<(&str, &[u8])> = files.iter().map(|(p, b)| (*p, b.as_bytes())).collect();
+	compile_bytes(&bytes)
+}
+
+/// As [`compile_of`], for files given as bytes.
+fn compile_bytes(files: &[(&str, &[u8])]) -> Outcome<(Rendered, Report)> {
 	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 	for (p, b) in files {
-		map.insert(PathBuf::from(p), b.as_bytes().to_vec());
+		map.insert(PathBuf::from(p), b.to_vec());
 	}
 	res!(vfs::install(map));
 	let main	= PathBuf::from(MAIN);
@@ -108,5 +121,47 @@ fn what_a_caption_footnote_or_heading_cannot_resolve_is_reported() -> Outcome<()
 	assert!(lines[0].0 == 3 && lines[0].1.starts_with("#cite(<nobody>) names a key the bibliography does not hold"), "{:?}", lines);
 	assert!(lines[1].0 == 5 && lines[1].1.starts_with("#cite(<nokey>) names a key"), "{:?}", lines);
 	assert!(lines[2].0 == 7 && lines[2].1.starts_with("@nolabel names no label"), "{:?}", lines);
+	Ok(())
+}
+
+/// A callout's body is set through the whole block walk: a heading, a figure with its image, a display
+/// equation, a plain image and its prose are all set, and an image the project lacks is reported where it
+/// stands, so strict refuses the document -- where the callout once set its prose alone and dropped the rest
+/// with nothing said.
+#[test]
+fn a_callout_body_sets_every_block_it_holds() -> Outcome<()> {
+	let _turn = turn();
+	let png = res!(res!(Pixmap::filled(8, 8, Rgba::opaque(200, 0, 0))).to_png());
+	let src = "= Top\n\n#styled-box[\n= Boxed Heading\n\n#figure(image(\"pic.png\", width: 2cm), caption: [Boxed figure.])\n\n\
+		$ x^2 + y^2 $\n\n#image(\"gone-in-box.png\")\n\nBoxed words.\n]\n\nAfter.\n";
+	let (rendered, report) = res!(compile_bytes(&[(MAIN, src.as_bytes()), ("/proj/pic.png", &png)]));
+	let text = words(&rendered);
+	for want in ["Boxed Heading", "Figure 1: Boxed figure.", "Boxed words.", "After."] {
+		assert!(text.contains(want), "{:?} is set: {}", want, text);
+	}
+	assert!(text.contains('\u{1d465}') || text.contains(" x "), "the equation is set: {}", text);
+	let drawn = rendered.out.pages.iter().flat_map(|p| p.frame.placed.iter()).any(|pl| match &pl.kind {
+		PlacedKind::Graphic(g)	=> g.ops.iter().any(|op| matches!(op, DrawOp::Image { .. })),
+		_						=> false,
+	});
+	assert!(drawn, "the boxed figure's image is drawn");
+	let missing: Vec<_> = report.diagnostics.iter().filter(|d| d.message.contains("gone-in-box.png")).collect();
+	assert_eq!(missing.len(), 1, "{:?}", report.diagnostics);
+	assert_eq!(missing[0].kind, DiagnosticKind::MissingFile, "{}", missing[0]);
+	assert!(report.strict_failure(Path::new(MAIN)).is_some(), "strict refuses the missing image");
+	Ok(())
+}
+
+/// A floating `#place` inside a callout, which a callout laid out whole has no band to float, is refused
+/// where the reader builds the callout, and the rest of the body is set.
+#[test]
+fn a_float_inside_a_callout_is_refused() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Top\n\n#styled-box[\nBefore.\n\n#place(top, float: true)[Floated words.]\n\nAfter.\n]\n";
+	let (rendered, report) = res!(compile_of(&[(MAIN, src)]));
+	let text = words(&rendered);
+	assert!(text.contains("Before.") && text.contains("After."), "{}", text);
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #place (inside a container, which cannot float one) (unsupported)"]);
 	Ok(())
 }
