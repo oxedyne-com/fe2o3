@@ -423,10 +423,10 @@ impl<
     }
 
     /// Reads the record at the given location, key and value in one read, and returns it only if
-    /// it is the record the cache named: both checksums hold, and it carries the key asked for
-    /// with the stamp the cache has for it.  A key alone would pass an older version of the same
-    /// key.  Split out of `read` only so that the caller can report the read finished to the fbot
-    /// on the way out, whichever way this goes.
+    /// it is the record the cache named: it carries the key asked for with the stamp the cache has
+    /// for it, and its value's checksum holds.  A key alone would pass an older version of the
+    /// same key.  Split out of `read` only so that the caller can report the read finished to the
+    /// fbot on the way out, whichever way this goes.
     fn read_checked(
         &mut self,
         floc:   FileLocation,
@@ -438,26 +438,12 @@ impl<
         let rec = res!(self.read_from_file(floc));
         let klen = try_into!(usize, floc.klen);
         let csummer = self.api().schemes().checksummer().clone();
-        let mut kpart = &rec[..klen];
-        match res!(StoredKey::<UIDL, UID>::load(&mut kpart, csummer.clone())) {
-            Some((skey, _, n)) if n == klen => {
-                if skey.key().as_bytes() != key.as_bytes() || skey.meta() != meta {
-                    return Err(err!(
-                        "{}: The record at {} in data file {} is not the one its cache bot named: \
-                        it holds key {:?} stamped {:?}, where {:?} stamped {:?} was asked for.",
-                        self.ozid(), floc.start, floc.file_number(),
-                        skey.key(), skey.meta().time, key, meta.time;
-                        Data, Mismatch));
-                }
-            },
-            Some((_, _, n)) => return Err(err!(
-                "{}: The key at {} in data file {} is {} bytes long, where its location says {}.",
-                self.ozid(), floc.start, floc.file_number(), n, klen;
-                Data, Mismatch, Size)),
-            None => return Err(err!(
-                "{}: There is no key at {} in data file {}.",
-                self.ozid(), floc.start, floc.file_number();
-                Data, Missing)),
+        let csum_len = res!(csummer.len());
+        if !res!(StoredKey::<UIDL, UID>::holds(&rec[..klen], key.as_bytes(), meta, csum_len)) {
+            return Err(err!(
+                "{}: The record at {} in data file {} is not the one its cache bot named, {:?} \
+                stamped {:?}.", self.ozid(), floc.start, floc.file_number(), key, meta.time;
+                Data, Mismatch));
         }
         res!(csummer.verify(&rec[klen..]));
         Ok(rec)
