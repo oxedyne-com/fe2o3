@@ -243,7 +243,7 @@ impl State<'_> {
 		if res!(self.visit_grouping_rules(content, styles)) {
 			return Ok(());
 		}
-		if self.visit_filter_rules(content, styles) {
+		if res!(self.visit_filter_rules(content, styles)) {
 			return Ok(());
 		}
 		self.sink.push(Pair::new(content.clone(), styles.clone()));
@@ -334,7 +334,7 @@ impl State<'_> {
 		let mut output = target.clone();
 		let mut tags = None;
 		if !prepared {
-			tags = self.prepare(&mut output, &map, styles);
+			tags = res!(self.prepare(&mut output, &map, styles));
 		}
 		let chained = styles.chain(&map);
 		let result = match step {
@@ -423,10 +423,10 @@ impl State<'_> {
 
 	/// Gives the element its location (when locatable or labelled) and copies the style chain's values
 	/// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
-	fn prepare(&mut self, target: &mut Content, map: &Styles, styles: &StyleChain) -> Option<(Tag, Tag)> {
+	fn prepare(&mut self, target: &mut Content, map: &Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
 		let e = match target {
 			Content::Elem(e)	=> Arc::make_mut(e),
-			_					=> return None,
+			_					=> return Ok(None),
 		};
 		if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
 			e.location = Some(self.engine.locator.locate(e.kind, e.span));
@@ -437,13 +437,13 @@ impl State<'_> {
 			if !spec.settable || e.fields.iter().any(|(f, _)| *f == id) {
 				continue;
 			}
-			if let Some(v) = chain.get(e.kind, id) {
+			if let Some(v) = res!(chain.get(e.kind, id)) {
 				e.fields.push((id, v));
 			}
 		}
 		e.prepared = true;
 		let loc = e.location;
-		loc.map(|l| (Tag::Start(target.clone()), Tag::End(l)))
+		Ok(loc.map(|l| (Tag::Start(target.clone()), Tag::End(l))))
 	}
 
 	// Styled content
@@ -551,26 +551,29 @@ impl State<'_> {
 
 	/// Spaces and paragraph breaks left outside every group mean nothing to block flow; attached spacing
 	/// survives only straight after a paragraph.
-	fn visit_filter_rules(&mut self, content: &Content, styles: &StyleChain) -> bool {
+	fn visit_filter_rules(&mut self, content: &Content, styles: &StyleChain) -> Outcome<bool> {
 		if matches!(self.mode, RealiseMode::Inline | RealiseMode::Math) {
-			return false;
+			return Ok(false);
 		}
 		if content.is(ElemKind::Space) {
-			return true;
+			return Ok(true);
 		}
 		if content.is(ElemKind::Parbreak) {
 			self.may_attach = false;
 			self.saw_parbreak = true;
-			return true;
+			return Ok(true);
 		}
 		if !self.may_attach && content.is(ElemKind::V) {
-			let attach = ElemKind::V.field_id("attach").and_then(|id| styles.resolve(content, id));
+			let attach = match ElemKind::V.field_id("attach") {
+				Some(id)	=> res!(styles.resolve(content, id)),
+				None		=> None,
+			};
 			if matches!(attach, Some(Value::Bool(true))) {
-				return true;
+				return Ok(true);
 			}
 		}
 		self.may_attach = content.is(ElemKind::Par);
-		false
+		Ok(false)
 	}
 
 	/// Finishes groups until `keep` remain; a finished group may open others, so the steps are counted.
@@ -601,7 +604,7 @@ impl State<'_> {
 			}
 		}
 		if inline || matches!(self.mode, RealiseMode::Inline | RealiseMode::Math) {
-			collapse_spaces(&mut self.sink, 0);
+			res!(collapse_spaces(&mut self.sink, 0));
 		}
 		Ok(())
 	}
@@ -640,7 +643,7 @@ impl State<'_> {
 
 	fn finish_textual(&mut self, start: usize) -> Outcome<()> {
 		if let Some(m) = res!(find_regex_match_in_elems(&self.sink[start..])) {
-			collapse_spaces(&mut self.sink, start);
+			res!(collapse_spaces(&mut self.sink, start));
 			let elems = self.sink.split_off(start);
 			return self.visit_regex_match(elems, m);
 		}
@@ -702,7 +705,7 @@ impl State<'_> {
 	}
 
 	fn finish_par(&mut self, start: usize) -> Outcome<()> {
-		collapse_spaces(&mut self.sink, start);
+		res!(collapse_spaces(&mut self.sink, start));
 		let elems = self.sink.split_off(start);
 		let (members, tags): (Vec<Pair>, Vec<Pair>) = elems.into_iter().partition(|p| !p.is_tag());
 		let span = select_span(&members);
@@ -825,7 +828,7 @@ fn repack(pairs: &[Pair]) -> (Content, StyleChain) {
 
 /// Drops spaces at the edges of a run and next to breaks: after nothing, before or after a line break,
 /// and before a weak or fractional `h`.
-fn collapse_spaces(sink: &mut Vec<Pair>, start: usize) {
+fn collapse_spaces(sink: &mut Vec<Pair>, start: usize) -> Outcome<()> {
 	let tail = sink.split_off(start);
 	let mut state = SpaceState::Destructive;
 	for p in tail {
@@ -839,7 +842,7 @@ fn collapse_spaces(sink: &mut Vec<Pair>, start: usize) {
 			} else if c.is(ElemKind::Linebreak) {
 				destruct_space(sink, &mut state);
 			} else if c.is(ElemKind::H) {
-				if is_weak_or_fractional(c, &p.styles) {
+				if res!(is_weak_or_fractional(c, &p.styles)) {
 					destruct_space(sink, &mut state);
 				}
 			} else {
@@ -849,6 +852,7 @@ fn collapse_spaces(sink: &mut Vec<Pair>, start: usize) {
 		sink.push(p);
 	}
 	destruct_space(sink, &mut state);
+	Ok(())
 }
 
 fn destruct_space(sink: &mut Vec<Pair>, state: &mut SpaceState) {
@@ -860,10 +864,16 @@ fn destruct_space(sink: &mut Vec<Pair>, state: &mut SpaceState) {
 	*state = SpaceState::Destructive;
 }
 
-fn is_weak_or_fractional(h: &Content, styles: &StyleChain) -> bool {
-	let amount = ElemKind::H.field_id("amount").and_then(|id| styles.resolve(h, id));
-	let weak = ElemKind::H.field_id("weak").and_then(|id| styles.resolve(h, id));
-	matches!(amount, Some(Value::Fraction(_))) || matches!(weak, Some(Value::Bool(true)))
+fn is_weak_or_fractional(h: &Content, styles: &StyleChain) -> Outcome<bool> {
+	let field = |name: &str| -> Outcome<Option<Value>> {
+		match ElemKind::H.field_id(name) {
+			Some(id)	=> styles.resolve(h, id),
+			None		=> Ok(None),
+		}
+	};
+	let amount = res!(field("amount"));
+	let weak = res!(field("weak"));
+	Ok(matches!(amount, Some(Value::Fraction(_))) || matches!(weak, Some(Value::Bool(true))))
 }
 
 // Text and regex rules
@@ -908,7 +918,10 @@ fn find_regex_match_in_elems(elems: &[Pair]) -> Outcome<Option<RegexMatch>> {
 			buf.push('\n');
 			space = SpaceState::Destructive;
 		} else if c.is(ElemKind::SmartQuote) {
-			let double = ElemKind::SmartQuote.field_id("double").and_then(|id| p.styles.resolve(c, id));
+			let double = match ElemKind::SmartQuote.field_id("double") {
+				Some(id)	=> res!(p.styles.resolve(c, id)),
+				None		=> None,
+			};
 			buf.push(if matches!(double, Some(Value::Bool(false))) { '\'' } else { '"' });
 			space = SpaceState::Supportive;
 		} else if let Some(Value::Str(t)) = c.get(FieldId(0)) {

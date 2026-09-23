@@ -79,7 +79,6 @@ use std::sync::Arc;
 const INF_SP:		i32	= 1 << 30;	// region extents from here up are infinite
 const STROKE_TOL:	f32	= 0.01;		// flattening tolerance of a stroke outline, points
 const RAW_UNIT:		f64	= 1.0 / 127.0;	// Typst's raw length unit in points: a round cap's centre nudge
-const DEFAULT_FONT:	f64	= 11.0;		// Typst's `text.size` when no style sets it
 
 // Geometry
 
@@ -312,12 +311,7 @@ fn sp_of(pt: f64) -> Sp {
 // Style access
 
 /// The font size in points that resolves `em`: the chain's `text.size`, Typst's 11pt when none is set.
-pub fn font_size(styles: &StyleChain) -> f64 {
-	match ElemKind::Text.field_id("size").and_then(|id| styles.get(ElemKind::Text, id)) {
-		Some(Value::Length(l))	=> l.resolve(DEFAULT_FONT),
-		_						=> DEFAULT_FONT,
-	}
-}
+pub fn font_size(styles: &StyleChain) -> f64 { styles.font_size() }
 
 /// A relative length against a whole, as Typst's `relative_to`: a ratio of an infinite whole is zero, not
 /// NaN, so `0% + 5pt` in an unbounded region is 5pt.
@@ -336,7 +330,7 @@ struct Get<'a> {
 impl<'a> Get<'a> {
 	fn val(&self, name: &str) -> Outcome<Option<Value>> {
 		let id = res!(fid(self.kind, name));
-		Ok(self.styles.resolve(self.elem, id))
+		self.styles.resolve(self.elem, id)
 	}
 
 	fn rel(&self, r: Relative, whole: f64) -> f64 { rel_to(r, whole, self.fs) }
@@ -469,7 +463,7 @@ pub fn layout_frame_with<F>(
 	if pod.expand_y && pod.h.is_finite() {
 		frame.height = pod.h;
 	}
-	if vis::is_hidden(styles) {
+	if res!(vis::is_hidden(styles)) {
 		frame.hide();
 	}
 	Ok(frame)
@@ -1818,7 +1812,7 @@ fn layout_repeat<F>(engine: &mut Engine, g: &Get, pod: Pod, body_fn: &mut F) -> 
 	}
 	let mut offset = 0.0;
 	if count == 1.0 || !justify {
-		offset += align_x(g.styles) * remaining;
+		offset += res!(align_x(g.styles)) * remaining;
 	}
 	if width > 0.0 {
 		for _ in 0..(count.max(0.0) as usize).min(1000) {
@@ -1834,16 +1828,19 @@ fn layout_repeat<F>(engine: &mut Engine, g: &Get, pod: Pod, body_fn: &mut F) -> 
 }
 
 // The horizontal alignment in force (`align`'s `alignment`), as a fraction: start is 0 in left-to-right text.
-fn align_x(styles: &StyleChain) -> f64 {
-	let v = ElemKind::Align.field_id("alignment").and_then(|id| styles.get(ElemKind::Align, id));
-	match v {
+fn align_x(styles: &StyleChain) -> Outcome<f64> {
+	let v = match ElemKind::Align.field_id("alignment") {
+		Some(id)	=> res!(styles.get(ElemKind::Align, id)),
+		None		=> None,
+	};
+	Ok(match v {
 		Some(Value::Alignment(a)) => match a.x {
 			Some(HAlign::Center)					=> 0.5,
 			Some(HAlign::Right) | Some(HAlign::End)	=> 1.0,
 			_										=> 0.0,
 		},
 		_ => 0.0,
-	}
+	})
 }
 
 // Lowering to IR

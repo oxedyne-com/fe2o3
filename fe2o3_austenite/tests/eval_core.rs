@@ -3,6 +3,10 @@
 //! `typst eval`, the tree to Austenite's evaluator, and the two results are compared as JSON (values) or
 //! as the first error message (errors). Nothing expected is checked in: the oracle decides.
 //!
+//! Each case also runs through U1's parser, as `typst eval` itself does -- the code as a string to
+//! `eval_string` in code mode -- so the parser and the evaluator are checked together against the same
+//! oracle, and a hand tree that drifts from what the parser yields cannot hide a fault.
+//!
 //! `EVAL_ORACLE_SKIP=1` skips explicitly; a missing `typst` binary otherwise fails, so absence never
 //! reads as green.
 
@@ -16,6 +20,11 @@ use oxedyne_fe2o3_austenite::eval::value::{
 	Length,
 	Value,
 };
+use oxedyne_fe2o3_austenite::eval::eval::{
+	eval_string,
+	EvalMode,
+};
+use oxedyne_fe2o3_austenite::eval::scope::Scope;
 use oxedyne_fe2o3_austenite::eval::{
 	eval_source,
 	Engine,
@@ -325,6 +334,13 @@ fn evaluate(sexpr: &str) -> Outcome<(Engine, Outcome<Value>)> {
 	Ok((engine, out))
 }
 
+// The case's code through U1's parser, as `typst eval` takes it: a string evaluated in code mode.
+fn evaluate_parsed(code: &str) -> (Engine, Outcome<Value>) {
+	let mut engine = Engine::new(World::new(PathBuf::from("/")));
+	let out = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::detached());
+	(engine, out)
+}
+
 // Values as `typst eval` serialises them
 
 fn num(f: f64) -> String {
@@ -464,7 +480,7 @@ fn available(deps: &str) -> bool {
 		"U6a"		=> ElemKind::SmartQuote.field_id("double").is_some(),
 		"U7"		=> ElemKind::MathFrac.field_id("num").is_some() && ElemKind::MathAttach.field_id("base").is_some(),
 		"U8"		=> ElemKind::Context.field_id("func").is_some(),
-		"symbol"	=> ElemKind::ALL.iter().any(|k| k.path() == "symbol"),
+		"symbol"	=> ElemKind::Symbol.field_id("text").is_some(),
 		_			=> false,
 	})
 }
@@ -673,19 +689,22 @@ fn values_match_the_typst_oracle() -> Outcome<()> {
 			failures.push(fmt!("{}\n  oracle failed: {}", c.code, expected));
 			continue;
 		}
-		let (engine, got) = res!(evaluate(&c.tree));
-		match got {
-			Ok(v) => {
-				let got = to_json(&v);
-				let same = match (parse_json(&got), parse_json(&expected)) {
-					(Ok(a), Ok(b))	=> a == b,
-					_				=> got == expected,
-				};
-				if !same {
-					failures.push(fmt!("{}\n  typst:     {}\n  austenite: {}", c.code, expected, got));
+		let tree = res!(evaluate(&c.tree));
+		for (how, (engine, got)) in [("tree", tree), ("parsed", evaluate_parsed(&c.code))] {
+			match got {
+				Ok(v) => {
+					let got = to_json(&v);
+					let same = match (parse_json(&got), parse_json(&expected)) {
+						(Ok(a), Ok(b))	=> a == b,
+						_				=> got == expected,
+					};
+					if !same {
+						failures.push(fmt!("{} ({})\n  typst:     {}\n  austenite: {}", c.code, how, expected, got));
+					}
 				}
+				Err(_) => failures.push(fmt!("{} ({})\n  typst:     {}\n  austenite error: {}",
+					c.code, how, expected, first_error(&engine))),
 			}
-			Err(_) => failures.push(fmt!("{}\n  typst:     {}\n  austenite error: {}", c.code, expected, first_error(&engine))),
 		}
 	}
 	println!("{} value cases pending on other units:\n{}", pending.len(), pending.join("\n"));
@@ -715,13 +734,17 @@ fn errors_match_the_typst_oracle() -> Outcome<()> {
 			failures.push(fmt!("{}\n  oracle succeeded with {}; not an error case", c.code, expected));
 			continue;
 		}
-		let (engine, got) = res!(evaluate(&c.tree));
-		match got {
-			Ok(v)	=> failures.push(fmt!("{}\n  typst:     error: {}\n  austenite: {}", c.code, expected, to_json(&v))),
-			Err(_)	=> {
-				let msg = first_error(&engine);
-				if msg != expected {
-					failures.push(fmt!("{}\n  typst:     error: {}\n  austenite: error: {}", c.code, expected, msg));
+		let tree = res!(evaluate(&c.tree));
+		for (how, (engine, got)) in [("tree", tree), ("parsed", evaluate_parsed(&c.code))] {
+			match got {
+				Ok(v)	=> failures.push(fmt!("{} ({})\n  typst:     error: {}\n  austenite: {}",
+					c.code, how, expected, to_json(&v))),
+				Err(_)	=> {
+					let msg = first_error(&engine);
+					if msg != expected {
+						failures.push(fmt!("{} ({})\n  typst:     error: {}\n  austenite: error: {}",
+							c.code, how, expected, msg));
+					}
 				}
 			}
 		}

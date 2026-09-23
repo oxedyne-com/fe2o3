@@ -15,11 +15,7 @@ use crate::eval::func::{
 use crate::eval::locate::Location;
 use crate::eval::ops;
 use crate::eval::scope::Scope;
-use crate::eval::styles::{
-	long_name,
-	symbol_text,
-	StyleChain,
-};
+use crate::eval::styles::StyleChain;
 use crate::eval::value::{
 	Label,
 	RegexValue,
@@ -63,7 +59,7 @@ impl Selector {
 				let root = StyleChain::root();
 				let chain = styles.unwrap_or(&root);
 				for (id, want) in fields {
-					match chain.resolve(elem, *id) {
+					match res!(chain.resolve(elem, *id)) {
 						Some(have) if ops::equal(&have, want)	=> (),
 						_										=> return Ok(false),
 					}
@@ -138,7 +134,7 @@ pub fn cast(engine: &mut Engine, span: Span, v: Value) -> Outcome<Selector> {
 		Value::Regex(r)		=> Ok(Selector::Regex(r)),
 		Value::Location(l)	=> Ok(Selector::Location(l)),
 		other				=> Err(engine.error(span, fmt!(
-			"expected string, function, label, regex, location, or selector, found {}", long_name(other.ty())))),
+			"expected string, function, label, regex, location, or selector, found {}", other.ty().long_name()))),
 	}
 }
 
@@ -149,10 +145,10 @@ pub fn cast_showable(engine: &mut Engine, span: Span, v: Value) -> Outcome<Selec
 		Value::Func(f)		=> res!(func_selector(engine, span, &f)),
 		Value::Label(l)		=> Selector::Label(l),
 		Value::Str(s)		=> res!(text_selector(engine, span, &s)),
-		Value::Symbol(s)	=> res!(text_selector(engine, span, &symbol_text(&s))),
+		Value::Symbol(s)	=> res!(text_selector(engine, span, &ops::symbol_text(&s))),
 		Value::Regex(r)		=> Selector::Regex(r),
 		other				=> return Err(engine.error(span, fmt!(
-			"expected symbol, string, label, function, regex, or selector, found {}", long_name(other.ty())))),
+			"expected symbol, string, label, function, regex, or selector, found {}", other.ty().long_name()))),
 	};
 	if !sel.is_showable() {
 		return Err(engine.error(span, "this selector cannot be used with show"));
@@ -218,7 +214,7 @@ fn inclusive(engine: &mut Engine, args: &mut Args) -> Outcome<bool> {
 	match res!(args.named::<Value>("inclusive")) {
 		None				=> Ok(true),
 		Some(Value::Bool(b))	=> Ok(b),
-		Some(other)			=> Err(engine.error(args.span, fmt!("expected boolean, found {}", long_name(other.ty())))),
+		Some(other)			=> Err(engine.error(args.span, fmt!("expected boolean, found {}", other.ty().long_name()))),
 	}
 }
 

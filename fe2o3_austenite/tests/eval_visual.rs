@@ -97,26 +97,13 @@ fn el(e: &mut Engine, kind: ElemKind, pos: Vec<Value>, named: Vec<(&str, Value)>
 
 fn c(v: Content) -> Value { Value::Content(v) }
 
-// The PNG the image fixtures name: 20 by 10 pixels, each distinct, so a crop that is off shows.
+// The PNG the image fixtures name, kept beside them so the fixtures stand alone: 20 by 10 pixels,
+// each distinct, so a crop that is off shows.
 fn png_bytes() -> Vec<u8> {
-	let (w, h) = (20usize, 10usize);
-	let mut pm = match oxedyne_fe2o3_graphics::pixmap::Pixmap::new(w, h) {
-		Ok(p)	=> p,
-		Err(e)	=> panic!("pixmap: {}", e),
-	};
-	let data = pm.data_mut();
-	for y in 0..h {
-		for x in 0..w {
-			let o = (y * w + x) * 4;
-			data[o]		= ((x * 12) % 256) as u8;
-			data[o + 1]	= ((y * 25) % 256) as u8;
-			data[o + 2]	= 128;
-			data[o + 3]	= 255;
-		}
-	}
-	match oxedyne_fe2o3_graphics::png::encode(&pm) {
+	let p = fixture_dir().join("px.png");
+	match std::fs::read(&p) {
 		Ok(b)	=> b,
-		Err(e)	=> panic!("png: {}", e),
+		Err(e)	=> panic!("{}: {}", p.display(), e),
 	}
 }
 
@@ -490,7 +477,7 @@ fn oracle(name: &str, src: &str) -> Outcome<svg_doc::SvgPicture> {
 	let typ = dir.join(fmt!("{}.typ", name));
 	let svg = dir.join(fmt!("{}.svg", name));
 	res!(std::fs::write(&typ, src).map_err(|e| err!(e, "write fixture"; IO)));
-	res!(std::fs::write(dir.join("px.png"), png_bytes()).map_err(|e| err!(e, "write png"; IO)));
+	res!(std::fs::copy(fixture_dir().join("px.png"), dir.join("px.png")).map_err(|e| err!(e, "copy png"; IO)));
 	let out = res!(Command::new("typst").arg("compile").arg(&typ).arg(&svg).output()
 		.map_err(|e| err!(e, "run typst"; IO)));
 	if !out.status.success() {
@@ -674,7 +661,7 @@ fn frames_lower_to_one_box_of_the_frame_size() -> Outcome<()> {
 		Content::Styled(st)	=> (st.child.clone(), StyleChain::root().chain(&st.styles)),
 		_					=> return Err(err!("hide did not style its body"; Bug)),
 	};
-	assert!(visual::is_hidden(&styles));
+	assert!(res!(visual::is_hidden(&styles)));
 	let node = res!(layout_visual(&mut e, &inner, &styles, region));
 	match node {
 		Node::Leaf(l) => {

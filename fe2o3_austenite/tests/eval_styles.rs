@@ -383,7 +383,7 @@ fn chain_get_folds_and_resolve_folds_the_elements_own_value() {
 	let a = Styles::from_style(Style::Property(Property::new(ElemKind::Text, id, pt(1.0), Span::detached())));
 	let b = Styles::from_style(Style::Property(Property::new(ElemKind::Text, id, pt(2.0), Span::detached())));
 	let chain = StyleChain::root().chain(&a).chain(&b);
-	assert!(matches!(chain.get(ElemKind::Text, id), Some(Value::Length(l)) if l.abs == 2.0));
+	assert!(matches!(chain.get(ElemKind::Text, id), Ok(Some(Value::Length(l))) if l.abs == 2.0));
 	assert_eq!(chain.values(ElemKind::Text, id).len(), 2);
 	assert_eq!(chain.font_size(), 11.0);
 }
@@ -630,7 +630,7 @@ fn show_set_rules_collect_whichever_side_of_the_step_they_sit() {
 		let pairs = realise(&mut e, &target, &chain, RealiseMode::Inline).unwrap_or_else(|x| panic!("{:?}", x));
 		let text = pairs.iter().find(|p| p.content.is(ElemKind::Text)).unwrap_or_else(|| panic!("no text"));
 		assert_eq!(plain(&pairs), "X");
-		assert!(matches!(text.styles.get(ElemKind::Text, FieldId(9)), Some(Value::Color(c)) if c.c[2] > 0.8),
+		assert!(matches!(text.styles.get(ElemKind::Text, FieldId(9)), Ok(Some(Value::Color(c))) if c.c[2] > 0.8),
 			"innermost show-set (blue) wins, order {}", order);
 	}
 }

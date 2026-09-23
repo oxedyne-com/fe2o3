@@ -144,6 +144,17 @@ impl Type {
 			Type::Location	=> "location",
 		}
 	}
+
+	/// The name `str(type(x))` prints and error messages use: `integer` where `repr` says `int`.
+	pub fn long_name(self) -> &'static str {
+		match self {
+			Type::Bool		=> "boolean",
+			Type::Int		=> "integer",
+			Type::Str		=> "string",
+			Type::Relative	=> "relative length",
+			other			=> other.name(),
+		}
+	}
 }
 
 impl Value {
@@ -523,7 +534,7 @@ pub trait IntoValue {
 }
 
 fn mismatch(expected: &str, found: &Value) -> Error<ErrTag> {
-	err!("expected {}, found {}", expected, found.ty().name(); Input, Mismatch)
+	err!("expected {}, found {}", expected, found.ty().long_name(); Input, Mismatch)
 }
 
 impl FromValue for Value {
@@ -534,7 +545,7 @@ impl FromValue for bool {
 	fn from_value(v: Value) -> Outcome<Self> {
 		match v {
 			Value::Bool(b)	=> Ok(b),
-			other			=> Err(mismatch("bool", &other)),
+			other			=> Err(mismatch("boolean", &other)),
 		}
 	}
 }
@@ -543,7 +554,7 @@ impl FromValue for i64 {
 	fn from_value(v: Value) -> Outcome<Self> {
 		match v {
 			Value::Int(i)	=> Ok(i),
-			other			=> Err(mismatch("int", &other)),
+			other			=> Err(mismatch("integer", &other)),
 		}
 	}
 }
@@ -553,7 +564,7 @@ impl FromValue for usize {
 		match v {
 			Value::Int(i) if i >= 0	=> Ok(i as usize),
 			Value::Int(i)			=> Err(err!("number must be at least zero, found {}", i; Input, Range)),
-			other					=> Err(mismatch("int", &other)),
+			other					=> Err(mismatch("integer", &other)),
 		}
 	}
 }
