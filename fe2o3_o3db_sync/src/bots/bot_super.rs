@@ -1047,6 +1047,7 @@ impl<
             self.respond(left.clone().map(|_| OzoneMsg::Ok), resp);
         }
         let mut left = res!(left);
+        let unfinished = left.is_some();
         while let Some(stage) = left {
             left = res!(self.chans().finish_from(
                 stage, &ended, Instant::now() + constant::CONTROL_REQUEST_TIMEOUT));
@@ -1059,7 +1060,9 @@ impl<
                 left = res!(self.chans().finish_from(stage, |_: &[WorkerType]| true, Instant::now()));
             }
         }
-        self.handles().report_status();
+        if unfinished {
+            self.handles().report_status();
+        }
         Ok(())
     }
 }
