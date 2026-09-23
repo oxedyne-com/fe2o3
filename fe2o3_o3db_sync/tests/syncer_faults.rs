@@ -395,8 +395,17 @@ fn slowly_failing_disk_answers_waiting_writes_together() -> Outcome<()> {
 
     hooks::set_barrier_delay(Duration::from_millis(PERIOD_MS));
     hooks::set_barrier_failure(true);
-    // Owed a barrier at once, which fails.
+    // Released within the period of the barrier before it, and owed one, which fails.
     let _ = db.insert(key(42), dat!(42u8), Uid::default(), None);
+    let begun = Instant::now();
+    let counted = hooks::barriers_failed();
+    while hooks::barriers_failed() == counted {
+        if begun.elapsed() > constant::USER_REQUEST_TIMEOUT {
+            let _ = db.close(); // the check has failed already, and says why
+            return Err(err!("The barrier owed on a failing disk was never tried."; Test, Timeout));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
     let counted = hooks::barriers_failed();
     let mut resps = Vec::new();
     for i in 0..SLOW_WRITES {

@@ -64,16 +64,32 @@ fn main() -> Outcome<()> {
     outcome
 }
 
+/// Every check runs, whichever fail, and all that fail are reported.
 fn run() -> Outcome<()> {
-    res!(slow_start_hands_over_live_channels());
-    res!(slow_barrier_still_acknowledges());
-    res!(durability_deadline_reports_written());
-    res!(writer_failure_reaches_the_caller());
-    res!(failed_zone_fails_the_start());
+    let slow_start = slow_start_hands_over_live_channels();
+    hooks::set_publish_delay(Duration::ZERO);
+    let slow_barrier = slow_barrier_still_acknowledges();
+    hooks::set_barrier_delay(Duration::ZERO);
+    let deadline = durability_deadline_reports_written();
+    hooks::set_barrier_delay(Duration::ZERO);
+    let writer = writer_failure_reaches_the_caller();
+    let zone = failed_zone_fails_the_start();
     let panicked = panicked_supervisor_stops_its_bots();
     hooks::set_supervisor_panic(false);
-    res!(panicked);
-    Ok(())
+    let failed: Vec<Error<ErrTag>> = [slow_start, slow_barrier, deadline, writer, zone, panicked]
+        .into_iter()
+        .filter_map(|r| r.err())
+        .collect();
+    match failed.len() {
+        0 => Ok(()),
+        1 => match failed.into_iter().next() {
+            Some(e) => Err(e),
+            None    => Ok(()), // unreachable
+        },
+        n => Err(err!(
+            "{} checks failed: {:?}", n, failed;
+            Test)),
+    }
 }
 
 /// The supervisor takes longer to hand over its channels than the one second `start` used to
