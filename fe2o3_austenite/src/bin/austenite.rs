@@ -151,9 +151,19 @@ fn explain_refusals(refusals: &lang::Refusals) -> String {
 /// oracle harness's other half, compared against a Typst `query` dump of the same document's headings
 /// and figures. Kept separate from [`Ledger::to_file`]'s full jdat dump, which also carries the
 /// `reserved`/`realised` widths a Typst comparison has no equivalent for.
+///
+/// Rows are emitted in document order -- (page, y, x), the order Typst's own `query` returns its
+/// elements in -- never [`Ledger::anchors`]'s identity order. Identity order sorts by `AnchorId`, whose
+/// key is `{:02}-{slug}`: a two-digit, zero-padded ordinal that only sorts numerically within the first
+/// ninety-nine, after which `"100-…"` and `"18-…"` interleave lexicographically. The oracle harness zips
+/// this dump against Typst's headings position for position, so a document order and an identity order
+/// past that count agree on the set of headings but not the sequence, which read as page drift that was
+/// never real.
 fn ledger_dump_json(ledger: &Ledger) -> Outcome<String> {
-	let mut rows = Vec::with_capacity(ledger.len());
-	for a in ledger.anchors() {
+	let mut anchors: Vec<_> = ledger.anchors().collect();
+	anchors.sort_by_key(|a| (a.pos.page, a.pos.y, a.pos.x));
+	let mut rows = Vec::with_capacity(anchors.len());
+	for a in anchors {
 		rows.push(omapdat!{
 			"kind"	=> dat!(a.id.kind.name()),
 			"label"	=> dat!(a.id.key.clone()),
@@ -550,6 +560,60 @@ mod tests {
 	use super::*;
 	use oxedyne_fe2o3_austenite::ir::Span;
 	use oxedyne_fe2o3_austenite::lang::{Refusal, RefusalClass, Refusals};
+	use oxedyne_fe2o3_austenite::ledger::{Anchor, AnchorId, AnchorKind, Position};
+	use oxedyne_fe2o3_austenite::ir::Sp;
+
+	/// `ledger_dump_json` must emit rows in document order -- (page, y, x) -- never `Ledger::anchors`'s
+	/// identity order. Past ninety-nine headings, `AnchorId`'s key (`{:02}-{slug}`, unpadded once the
+	/// ordinal reaches three digits) stops sorting numerically -- `"100-…"` sorts before `"18-…"` -- so
+	/// identity order and document order diverge there, and the oracle harness (which zips this dump
+	/// against Typst's own document-order `query`, position for position) used to read that divergence as
+	/// spurious page drift on every heading past the hundredth.
+	///
+	/// This fixture synthesises a hundred and twenty headings, one per page, inserted in reverse page
+	/// order (so a dump that merely reused insertion or `BTreeMap` order could not pass by accident), and
+	/// checks two things: the dump's pages come out strictly increasing (document order), and -- from the
+	/// very same anchor set, sorted the OLD way, by key -- that order is NOT page order. The second check
+	/// is what makes the fixture non-vacuous: it proves this hundred-and-twenty-heading document really
+	/// does exercise the bug, so the first assertion would have failed before the fix.
+	#[test]
+	fn ledger_dump_json_orders_by_document_position_past_ninety_nine_headings() -> Outcome<()> {
+		const N: u32 = 120;
+		let mut ledger = Ledger::new();
+		for n in (1..=N).rev() {
+			let key	= fmt!("{:02}-heading-{}", n, n);	// the real key shape: doc.rs's `{:02}-{slug}`
+			let id	= AnchorId::new(AnchorKind::Heading, key);
+			let pos	= Position::new(n, Sp::ZERO, Sp::ZERO);
+			ledger.record(Anchor::new(id, pos));
+		}
+
+		let json	= res!(ledger_dump_json(&ledger));
+		let dat		= res!(Dat::decode_string(json));
+		let rows	= try_extract_dat!(dat, List);
+		assert_eq!(rows.len(), N as usize, "every heading should reach the dump");
+
+		let mut pages = Vec::with_capacity(rows.len());
+		for mut row in rows {
+			// The JSON round trip picks whichever integer width fits the value, not necessarily the `U32`
+			// `ledger_dump_json` wrote, so every width is accepted here exactly as the oracle harness does.
+			let page = try_extract_dat_as!(res!(row.map_remove_must(&dat!("page"))), u32, U8, U16, U32, U64);
+			pages.push(page);
+		}
+		let mut sorted = pages.clone();
+		sorted.sort_unstable();
+		assert_eq!(pages, sorted,
+			"ledger_dump_json must emit rows in document order (page, y, x), not identity order: {:?}", pages);
+		assert_eq!(pages, (1..=N).collect::<Vec<_>>(),
+			"document order for one-heading-per-page is exactly page order");
+
+		// Non-vacuous: the same anchor set, sorted the OLD way (by the anchor's own key -- exactly what
+		// `BTreeMap<AnchorId, _>` identity order does), is demonstrably NOT in page order past the
+		// hundredth heading.
+		let mut by_key: Vec<u32> = (1..=N).collect();
+		by_key.sort_by_key(|&n| fmt!("{:02}-heading-{}", n, n));
+		assert_ne!(by_key, sorted, "fixture is vacuous: identity order happens to already agree with page order");
+		Ok(())
+	}
 
 	/// `--explain`'s report for a site whose file can no longer be read (moved, deleted -- a rare race,
 	/// not the common case) degrades to a one-line note naming the class and construct, rather than
