@@ -90,9 +90,10 @@ function paragraph(r, words, rich) {
 	return out.join(' ');
 }
 
-// About 320 words to an A4 page of 11pt Libertinus with Typst's default margins, less the space the
-// headings and blocks take; the read-back page count is what is reported, not this estimate.
-const WORDS_PER_PAGE = 320;
+// Calibrated against typst.ts: about 590 of these words to an A4 page of 11pt Libertinus with
+// Typst's default margins, headings and blocks included; the read-back page count is what is
+// reported, not this estimate.
+const WORDS_PER_PAGE = 590;
 
 export function corpus(pages, rich) {
 	const r = rng(0x5eed + pages);
