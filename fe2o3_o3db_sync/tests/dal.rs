@@ -62,6 +62,7 @@ pub fn test_docs(filter: &'static str) -> Outcome<()> {
 
     res!(test_it(filter, &["Document data abstraction layer 000", "all", "docs"], || {
 
+        res!(std::fs::create_dir_all("./test_db"));
         let db_root = res!(Path::new("./test_db").canonicalize());
 
         let mut enckey = [0u8; 32];

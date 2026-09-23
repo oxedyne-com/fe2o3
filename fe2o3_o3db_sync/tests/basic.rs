@@ -48,6 +48,7 @@ const wait: Wait = constant::USER_REQUEST_WAIT;
 
 pub fn test_basic(_filter: &'static str) -> Outcome<()> {
 
+    res!(std::fs::create_dir_all("./test_db"));
     let db_root = res!(Path::new("./test_db").canonicalize());
     //              +         +         +         +
     //              1234567890123456789012345678901234

@@ -178,7 +178,9 @@ fn open(db_root: &PathBuf) -> Outcome<TestDb> {
         None::<HashScheme>,
         Some(ChecksumScheme::new_crc32()),
     );
-    let cfg = res!(setup::default_cfg());
+    let mut cfg = res!(setup::default_cfg());
+    // Every zone in this test's own directory, not the shared container the default names.
+    cfg.zone_overrides = Default::default();
     setup::start_db(
         db_root.clone(),
         Some(cfg),

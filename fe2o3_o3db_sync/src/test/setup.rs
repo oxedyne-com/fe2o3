@@ -75,7 +75,7 @@ pub fn start_db<
     db_root:        PathBuf,
     cfg_opt:        Option<OzoneConfig>,
     schms_input:    RestSchemesInput<ENC, KH, PR, CS>,
-    _zone_path:      Option<String>, // create a separate zone container in this directory
+    zone_path:      Option<String>, // a separate zone container, created here if missing
     gc_on:          bool,
     wipe:           bool,
 )
@@ -98,6 +98,10 @@ pub fn start_db<
     if wipe {
         let cfg_path = OzoneConfig::config_path(&db_root);
         let _ = std::fs::remove_file(&cfg_path);
+    }
+    // The store refuses a zone container that does not exist, and a start fails on it.
+    if let Some(dir) = &zone_path {
+        res!(std::fs::create_dir_all(dir));
     }
     let mut db = res!(O3db::new(
         db_root,
