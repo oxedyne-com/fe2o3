@@ -3286,6 +3286,7 @@ dependencies = [
  "oxedyne_fe2o3_text",
  "quote",
  "rand_core 0.6.4",
+ "serde_json",
  "syn 1.0.109",
 ]
 
