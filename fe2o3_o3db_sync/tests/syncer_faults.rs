@@ -61,6 +61,7 @@ const WATCH:            Duration = Duration::from_millis(1_500);    // a failing
 const ANSWERED_WITHIN:  Duration = Duration::from_secs(10);         // a closing store's last write
 const SLOW_WRITES:      u8 = 20;                                    // arriving at a failing disk
 const SLOW_BARRIERS:    u64 = 6;                                    // enough for them, and more
+const EVERY_N:          u32 = 2;                                    // `sync_every_n_writes`
 
 #[test]
 fn main() -> Outcome<()> {
@@ -74,14 +75,18 @@ fn main() -> Outcome<()> {
     hooks::set_pair_hand_failure(false);
     let closing = close_answers_what_the_syncer_holds();
     hooks::set_barrier_delay(Duration::ZERO);
-    let slowly = slowly_failing_disk_answers_waiting_writes_together();
+    let slowly = slowly_failing_disk_answers_waiting_writes_together(0);
+    hooks::set_barrier_failure(false);
+    hooks::set_barrier_delay(Duration::ZERO);
+    let every_n = slowly_failing_disk_answers_waiting_writes_together(EVERY_N);
     hooks::set_barrier_failure(false);
     hooks::set_barrier_delay(Duration::ZERO);
     let queued = close_answers_what_a_slow_cache_bot_holds();
     hooks::set_barrier_delay(Duration::ZERO);
     hooks::set_insert_delay(Duration::ZERO);
     log_finish_wait!();
-    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff, closing, slowly, queued].into_iter()
+    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff, closing, slowly, every_n, queued]
+        .into_iter()
         .filter_map(|r| r.err())
         .collect();
     match failed.len() {
@@ -381,24 +386,36 @@ fn close_answers_what_the_syncer_holds() -> Outcome<()> {
     Ok(())
 }
 
-/// The disk fails every sync, slowly, under the interval policy, and twenty writes arrive at once.
-/// While the last barrier has failed each write waits on a barrier, and those waiting together
-/// share one, as they do under `sync_on_write`.  Each had a barrier of its own, one after
-/// another, so a disk taking its time to fail answered twenty writes ten times slower, and with
-/// writes arriving faster than it failed the queue grew without bound.
-fn slowly_failing_disk_answers_waiting_writes_together() -> Outcome<()> {
-    let root = res!(fresh("./test_db_syncer_faults_slowly"));
+/// The disk fails every sync, slowly, under the interval policy, or under `sync_every_n_writes`
+/// when `every_n` is not zero, and twenty writes arrive at once.  While the last barrier has
+/// failed each write waits on a barrier, and those waiting together share one, as they do under
+/// `sync_on_write`.  Each had a barrier of its own, one after another, so a disk taking its time
+/// to fail answered twenty writes ten times slower, and with writes arriving faster than it
+/// failed the queue grew without bound.  Fixed for the interval policy on 2026-09-23 and for
+/// every-n, where a failed barrier leaves every later write due one, on 2026-09-24.
+fn slowly_failing_disk_answers_waiting_writes_together(every_n: u32) -> Outcome<()> {
+    let root = res!(fresh(if every_n == 0 {
+        "./test_db_syncer_faults_slowly"
+    } else {
+        "./test_db_syncer_faults_slowly_every_n"
+    }));
     let mut cfg = res!(config());
     cfg.sync_interval_ms = PERIOD_MS;
+    cfg.sync_every_n_writes = every_n;
+    let policy = match every_n {
+        0 => fmt!("the interval policy"),
+        n => fmt!("every {} writes", n),
+    };
     let db = res!(open(&root, cfg));
     res!(db.insert(key(41), dat!(41u8), Uid::default(), None));
 
     hooks::set_barrier_delay(Duration::from_millis(PERIOD_MS));
     hooks::set_barrier_failure(true);
-    // Released within the period of the barrier before it, and owed one, which fails.
-    let _ = db.insert(key(42), dat!(42u8), Uid::default(), None);
+    // Owed a barrier, which fails: under the interval policy it is released within the period of
+    // the barrier before it, and the barrier follows; under every-n it waits on it.
     let begun = Instant::now();
     let counted = hooks::barriers_failed();
+    let _ = db.insert(key(42), dat!(42u8), Uid::default(), None);
     while hooks::barriers_failed() == counted {
         if begun.elapsed() > constant::USER_REQUEST_TIMEOUT {
             let _ = db.close(); // the check has failed already, and says why
@@ -431,15 +448,15 @@ fn slowly_failing_disk_answers_waiting_writes_together() -> Outcome<()> {
     res!(db.close());
     if told != SLOW_WRITES {
         return Err(err!(
-            "{} of {} writes made while the disk failed were told their barrier failed.",
-            told, SLOW_WRITES;
+            "Under {}, {} of {} writes made while the disk failed were told their barrier \
+            failed.", policy, told, SLOW_WRITES;
             Test, Mismatch));
     }
     if tries > SLOW_BARRIERS {
         return Err(err!(
-            "{} writes arriving together while the disk failed each sync slowly took {} \
+            "Under {}, {} writes arriving together while the disk failed each sync slowly took {} \
             barriers, where waiting together they share one, and a few more is the most: they \
-            were answered one barrier at a time.", SLOW_WRITES, tries;
+            were answered one barrier at a time.", policy, SLOW_WRITES, tries;
             Test, Mismatch));
     }
     Ok(())
