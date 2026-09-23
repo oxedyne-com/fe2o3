@@ -2661,7 +2661,7 @@ pub struct ServerConfig {
     #[optional]
     pub health_token:                   String,
     // Job stamps whose ages the body reports: field name -> absolute path, e.g.
-    // `{ "forge_state_age_s": "/home/jason/usr/oregami-copy/stamp/state.ok" }`. Each is
+    // `{ "forge_state_age_s": "/var/lib/forge-pull/stamp/state.ok" }`. Each is
     // `lstat`ed on every authorised request and reported in whole seconds since its mtime;
     // a stamp that is missing, unreadable or a symlink reads as never written (see
     // `crate::srv::health::stamp_age_secs`). Checked at start-up: names of lower-case
@@ -3383,14 +3383,14 @@ mod tests {
         assert!(res!(cfg.get_health_stamps()).is_empty());
 
         let mut stamps = DaticleMap::new();
-        stamps.insert(dat!("forge_state_age_s"), dat!("/home/jason/usr/oregami-copy/stamp/state.ok"));
-        stamps.insert(dat!("forge_repos_age_s"), dat!("/home/jason/usr/oregami-copy/stamp/repos.ok"));
+        stamps.insert(dat!("forge_state_age_s"), dat!("/var/lib/forge-pull/stamp/state.ok"));
+        stamps.insert(dat!("forge_repos_age_s"), dat!("/var/lib/forge-pull/stamp/repos.ok"));
         m.insert(dat!("health_stamps"), Dat::Map(stamps));
         let cfg = res!(ServerConfig::from_datmap(m));
         let got = res!(cfg.get_health_stamps());
         let fields: Vec<&str> = got.iter().map(|s| s.field.as_str()).collect();
         assert_eq!(fields, vec!["forge_repos_age_s", "forge_state_age_s"]);
-        assert_eq!(got[1].path, PathBuf::from("/home/jason/usr/oregami-copy/stamp/state.ok"));
+        assert_eq!(got[1].path, PathBuf::from("/var/lib/forge-pull/stamp/state.ok"));
         Ok(())
     }
 
