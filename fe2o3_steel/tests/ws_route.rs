@@ -228,7 +228,7 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
     let upstream = res!(spawn_echo_upstream(saw.clone()).await);
 
     let (mut browser, mut steel) = tokio::io::duplex(8192);
-    let (request, key) = res!(connect_request("oxegen.example"));
+    let (request, key) = res!(connect_request("oxegen.example", "/ws", None));
     let src: SocketAddr = res!("203.0.113.9:51000".parse::<SocketAddr>(), Test);
 
     let relay = tokio::spawn(async move {
@@ -314,7 +314,7 @@ async fn test_ws_route_client_close_ends_the_tunnel_00() -> Outcome<()> {
     let upstream = res!(spawn_echo_upstream(saw).await);
 
     let (mut browser, mut steel) = tokio::io::duplex(8192);
-    let (request, _key) = res!(connect_request("oxegen.example"));
+    let (request, _key) = res!(connect_request("oxegen.example", "/ws", None));
     let src: SocketAddr = res!("203.0.113.9:51001".parse::<SocketAddr>(), Test);
 
     let relay = tokio::spawn(async move {
@@ -359,7 +359,7 @@ async fn test_ws_route_relays_a_refusal_00() -> Outcome<()> {
     });
 
     let (mut browser, mut steel) = tokio::io::duplex(8192);
-    let (request, _key) = res!(connect_request("oxegen.example"));
+    let (request, _key) = res!(connect_request("oxegen.example", "/ws", None));
     let src: SocketAddr = res!("203.0.113.9:51002".parse::<SocketAddr>(), Test);
     let relay = tokio::spawn(async move {
         tunnel_upgrade(
@@ -391,7 +391,7 @@ async fn test_ws_route_errors_when_upstream_is_absent_00() -> Outcome<()> {
     drop(listener);
 
     let (_browser, mut steel) = tokio::io::duplex(8192);
-    let (request, _key) = res!(connect_request("oxegen.example"));
+    let (request, _key) = res!(connect_request("oxegen.example", "/ws", None));
     let src: SocketAddr = res!("203.0.113.9:51003".parse::<SocketAddr>(), Test);
     let result = tunnel_upgrade(
         &mut steel, &request, "127.0.0.1", addr.port(), "/ws", src,

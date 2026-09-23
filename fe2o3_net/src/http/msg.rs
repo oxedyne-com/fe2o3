@@ -723,41 +723,48 @@ impl HttpMessage {
         trace!("is_websocket_request = {}", is_websocket_request);
         trace!("key_present = {}", key_present);
 
-        if self.has_websocket_headers() && key_present {
+        if is_websocket_request && self.has_websocket_headers() && key_present {
             true
         } else {
             false
         }
     }
 
+    /// Is this the `101` response that completes a websocket handshake whose key derives
+    /// `expected_accept_key`?
     pub fn is_websocket_handshake(&self, expected_accept_key: &str) -> bool {
+        self.check_websocket_handshake(expected_accept_key).is_ok()
+    }
 
-        let is_websocket_response = match self.header.headline {
-            HttpHeadline::Response { status } => {
-                match status {
-                    HttpStatus::SwitchingProtocols => {
-                        true
-                    }
-                    _ => false,
-                }
-            }
-            _ => false,
-        };
-
-        let key_correct = match self.header.get_the_field_value(&HeaderName::SecWebSocketAccept) { 
-            Ok(HeaderFieldValue::SecWebSocketKey(key)) => { 
-                key == expected_accept_key
-            },
-            _ => false,
-        };
-
-        trace!("is_websocket_response = {}", is_websocket_response);
-        trace!("key_correct = {}", key_correct);
-
-        if self.has_websocket_headers() && key_correct {
-            true
-        } else {
-            false
+    /// Checks that this response completes a websocket handshake, in the order a client needs to
+    /// hear about failure: the status first, since a refusal carries no accept key at all, then the
+    /// upgrade fields, then `Sec-WebSocket-Accept` against `expected_accept_key` (see
+    /// [`crate::ws::core::accept_key`]).
+    pub fn check_websocket_handshake(&self, expected_accept_key: &str) -> Outcome<()> {
+        match self.header.headline {
+            HttpHeadline::Response { status: HttpStatus::SwitchingProtocols } => (),
+            HttpHeadline::Response { status } => return Err(err!(
+                "The server answered the websocket upgrade with status {}, not 101.",
+                status;
+            IO, Network, Wire, Invalid, Input)),
+            _ => return Err(err!(
+                "Expected a response to the websocket upgrade request, found a request.";
+            IO, Network, Wire, Invalid, Input)),
+        }
+        if !self.has_websocket_headers() {
+            return Err(err!(
+                "The server's 101 response lacks 'Connection: Upgrade' or 'Upgrade: websocket'.";
+            IO, Network, Wire, Invalid, Input, Missing));
+        }
+        match self.header.get_the_field_value(&HeaderName::SecWebSocketAccept) {
+            Ok(HeaderFieldValue::SecWebSocketKey(key)) if key == expected_accept_key => Ok(()),
+            Ok(HeaderFieldValue::SecWebSocketKey(key)) => Err(err!(
+                "The server's Sec-WebSocket-Accept key '{}' is not '{}', the value derived from \
+                the key this client sent.", key, expected_accept_key;
+            IO, Network, Wire, Invalid, Input, Mismatch)),
+            _ => Err(err!(
+                "The server's 101 response has no Sec-WebSocket-Accept key.";
+            IO, Network, Wire, Invalid, Input, Missing)),
         }
     }
 }
