@@ -781,12 +781,16 @@ impl<
                                         ).await;
                                         response = res!(result);
                                     }
-                                    _ => fault!("{}: Unsupported HTTP request method '{}'.",
-                                        id, method),
+                                    _ => if logged {
+                                        fault!("{}: Unsupported HTTP request method '{}'.",
+                                            id, method);
+                                    },
                                 }
                             }
                         }
-                        _ => fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline),
+                        _ => if logged {
+                            fault!("{}: Unsupported HTTP '{:?}'.", id, request.header.headline);
+                        },
                     }
 
                     alog!(logged, log_level, "Outgoing HTTPS message:");
@@ -989,16 +993,21 @@ impl<
                         (HttpStatus::RequestTimeout,
                          "Request timed out while reading headers.")
                     } else {
+                        // Returned, the error is logged by the accept loop, so a vhost with its
+                        // access log off closes the connection quietly instead.
+                        if !logged {
+                            break;
+                        }
                         warn!("{}: HTTP read error: {}", id, e);
                         return Err(e);
                     };
-                    warn!("{}: dropping connection ({}): {}", id, status, e);
+                    alog!(logged, LogLevel::Warn, "{}: dropping connection ({}): {}", id, status, e);
                     let mut resp = HttpMessage::respond_with_text(status, msg);
                     resp.set_connection_close(true);
                     match resp.write_all(&mut write_stream).await {
                         Ok(()) => (),
-                        Err(we) => warn!("{}: failed to emit {} response: {}",
-                            id, status, we),
+                        Err(we) => alog!(logged, LogLevel::Warn,
+                            "{}: failed to emit {} response: {}", id, status, we),
                     }
                     break;
                 }
@@ -1011,8 +1020,12 @@ impl<
         // Gracefully close the TLS connection.
         let reunited_stream = read_stream.unsplit(write_stream);
         let result = reunited_stream.shutdown().await;
+        // A peer that has already gone makes this fail on most connections, and on a vhost
+        // with its access log off even a bare line per connection is a record of traffic.
         if let Err(e) = result {
-            error!(e.into());
+            if logged {
+                error!(e.into());
+            }
         }
         alog!(logged, log_level, "{}: Connection with {:?} closed.", id, src_addr);
 
