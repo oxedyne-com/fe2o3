@@ -407,13 +407,80 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 type Fields = Vec<(FieldId, Value)>;
 
 // Takes a named argument and casts it into the field of the same name.
-fn take_named<F>(fields: &mut Fields, kind: ElemKind, args: &mut Args, name: &str, cast: F) -> Outcome<()>
-	where F: Fn(Value) -> Outcome<Value>
-{
+fn take_named(fields: &mut Fields, kind: ElemKind, args: &mut Args, name: &str) -> Outcome<()> {
 	if let Some(v) = res!(args.named::<Value>(name)) {
-		fields.push((res!(fid(kind, name)), res!(cast(v))));
+		fields.push((res!(fid(kind, name)), res!(cast_field(kind, name, v))));
 	}
 	Ok(())
+}
+
+/// Casts a value into a visual element's field as Typst casts it. The constructors and `set` rules
+/// both cast through here, so a value `set` accepts is one construction accepts.
+pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
+	use ElemKind as K;
+	match (kind, name) {
+		(_, "width")						=> cast_smart_rel(v),
+		(_, "height")						=> cast_sizing(v),
+		(_, "fill")							=> cast_fill(v),
+		(_, "fill-rule")					=> cast_fill_rule(v),
+		(K::Rect | K::Square, "stroke")		=> cast_stroke_sides(v),
+		(K::Line, "stroke")					=> Ok(Value::Stroke(Arc::new(res!(cast_stroke(v))))),
+		(_, "stroke")						=> cast_smart_stroke(v),
+		(_, "radius")						=> cast_corners_rel(v),
+		(_, "inset") | (_, "outset")		=> cast_sides_rel(v),
+		(K::Line, "start")					=> cast_point(v),
+		(K::Line, "end")					=> if v.is_none() { Ok(v) } else { cast_point(v) },
+		(K::Line, "length")					=> Ok(Value::Relative(res!(cast_rel(v)))),
+		(K::Line, "angle") | (K::Rotate, "angle") | (K::Skew, "ax") | (K::Skew, "ay")
+											=> Ok(Value::Angle(res!(cast_angle(v)))),
+		(K::Move, "dx") | (K::Move, "dy")	=> Ok(Value::Relative(res!(cast_rel(v)))),
+		(K::Scale, "x") | (K::Scale, "y")	=> cast_scale_amount(v),
+		(_, "origin")						=> Ok(Value::Alignment(res!(v.cast::<Alignment>()))),
+		(_, "reflow") | (_, "relative") | (_, "justify")
+											=> Ok(Value::Bool(res!(v.cast::<bool>()))),
+		(K::Repeat, "gap")					=> Ok(Value::Length(res!(cast_length(v)))),
+		(K::CurveClose, "mode") => {
+			let s = res!(v.cast::<String>());
+			match s.as_str() {
+				"smooth" | "straight"	=> Ok(Value::str(s)),
+				_						=> Err(err!("expected \"smooth\" or \"straight\""; Input, Invalid)),
+			}
+		}
+		(K::Image, "format") => match v {
+			Value::Auto => Ok(v),
+			other => {
+				let s = res!(other.cast::<String>());
+				match s.as_str() {
+					"png" | "jpg" | "gif" | "webp" | "svg" | "pdf"	=> Ok(Value::str(s)),
+					_ => Err(err!("expected \"png\", \"jpg\", \"gif\", \"webp\", \"svg\", \"pdf\", \
+						dictionary, or auto"; Input, Invalid)),
+				}
+			},
+		},
+		(K::Image, "alt") => match v {
+			Value::None	=> Ok(v),
+			other		=> Ok(Value::str(res!(other.cast::<String>()))),
+		},
+		(K::Image, "page")					=> Ok(Value::Int(res!(v.cast::<i64>()))),
+		(K::Image, "fit") => {
+			let s = res!(v.cast::<String>());
+			match s.as_str() {
+				"cover" | "contain" | "stretch"	=> Ok(Value::str(s)),
+				_ => Err(err!("expected \"cover\", \"contain\", or \"stretch\""; Input, Invalid)),
+			}
+		}
+		(K::Image, "scaling") => match v {
+			Value::Auto => Ok(v),
+			other => {
+				let s = res!(other.cast::<String>());
+				match s.as_str() {
+					"smooth" | "pixelated"	=> Ok(Value::str(s)),
+					_ => Err(err!("expected \"smooth\", \"pixelated\", or auto"; Input, Invalid)),
+				}
+			},
+		},
+		_									=> Ok(v),
+	}
 }
 
 fn build_shape(kind: ElemKind, args: &mut Args) -> Outcome<Fields> {
@@ -449,20 +516,20 @@ fn build_shape(kind: ElemKind, args: &mut Args) -> Outcome<Fields> {
 		_ => (res!(args.named::<Value>("width")), res!(args.named::<Value>("height"))),
 	};
 	if let Some(v) = w {
-		f.push((res!(fid(kind, "width")), res!(cast_smart_rel(v))));
+		f.push((res!(fid(kind, "width")), res!(cast_field(kind, "width", v))));
 	}
 	if let Some(v) = h {
-		f.push((res!(fid(kind, "height")), res!(cast_sizing(v))));
+		f.push((res!(fid(kind, "height")), res!(cast_field(kind, "height", v))));
 	}
-	res!(take_named(&mut f, kind, args, "fill", cast_fill));
+	res!(take_named(&mut f, kind, args, "fill"));
 	if round {
-		res!(take_named(&mut f, kind, args, "stroke", cast_smart_stroke));
+		res!(take_named(&mut f, kind, args, "stroke"));
 	} else {
-		res!(take_named(&mut f, kind, args, "stroke", cast_stroke_sides));
-		res!(take_named(&mut f, kind, args, "radius", cast_corners_rel));
+		res!(take_named(&mut f, kind, args, "stroke"));
+		res!(take_named(&mut f, kind, args, "radius"));
 	}
-	res!(take_named(&mut f, kind, args, "inset", cast_sides_rel));
-	res!(take_named(&mut f, kind, args, "outset", cast_sides_rel));
+	res!(take_named(&mut f, kind, args, "inset"));
+	res!(take_named(&mut f, kind, args, "outset"));
 	if let Some(v) = res!(args.eat::<Value>()) {
 		f.push((res!(fid(kind, "body")), res!(cast_opt_content(v))));
 	}
@@ -472,20 +539,20 @@ fn build_shape(kind: ElemKind, args: &mut Args) -> Outcome<Fields> {
 fn build_line(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Line;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "start", cast_point));
-	res!(take_named(&mut f, kind, args, "end", |v| if v.is_none() { Ok(v) } else { cast_point(v) }));
-	res!(take_named(&mut f, kind, args, "length", |v| Ok(Value::Relative(res!(cast_rel(v))))));
-	res!(take_named(&mut f, kind, args, "angle", |v| Ok(Value::Angle(res!(cast_angle(v))))));
-	res!(take_named(&mut f, kind, args, "stroke", |v| Ok(Value::Stroke(Arc::new(res!(cast_stroke(v)))))));
+	res!(take_named(&mut f, kind, args, "start"));
+	res!(take_named(&mut f, kind, args, "end"));
+	res!(take_named(&mut f, kind, args, "length"));
+	res!(take_named(&mut f, kind, args, "angle"));
+	res!(take_named(&mut f, kind, args, "stroke"));
 	Ok(f)
 }
 
 fn build_polygon(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Polygon;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "fill", cast_fill));
-	res!(take_named(&mut f, kind, args, "fill-rule", cast_fill_rule));
-	res!(take_named(&mut f, kind, args, "stroke", cast_smart_stroke));
+	res!(take_named(&mut f, kind, args, "fill"));
+	res!(take_named(&mut f, kind, args, "fill-rule"));
+	res!(take_named(&mut f, kind, args, "stroke"));
 	let mut verts = Vec::new();
 	for v in res!(args.all::<Value>()) {
 		verts.push(res!(cast_point(v)));
@@ -497,9 +564,9 @@ fn build_polygon(args: &mut Args) -> Outcome<Fields> {
 fn build_curve(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Curve;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "fill", cast_fill));
-	res!(take_named(&mut f, kind, args, "fill-rule", cast_fill_rule));
-	res!(take_named(&mut f, kind, args, "stroke", cast_smart_stroke));
+	res!(take_named(&mut f, kind, args, "fill"));
+	res!(take_named(&mut f, kind, args, "fill-rule"));
+	res!(take_named(&mut f, kind, args, "stroke"));
 	let mut comps = Vec::new();
 	for v in res!(args.all::<Value>()) {
 		let ok = match &v {
@@ -508,7 +575,7 @@ fn build_curve(args: &mut Args) -> Outcome<Fields> {
 			_ => false,
 		};
 		if !ok {
-			return Err(err!("expected curve component, found {}", v.ty().name(); Input, Mismatch));
+			return Err(err!("expected curve component, found {}", v.ty().long_name(); Input, Mismatch));
 		}
 		comps.push(v);
 	}
@@ -535,20 +602,14 @@ fn build_component(kind: ElemKind, args: &mut Args, points: &[&str]) -> Outcome<
 		};
 		f.push((res!(fid(kind, name)), cast));
 	}
-	res!(take_named(&mut f, kind, args, "relative", |v| Ok(Value::Bool(res!(v.cast::<bool>())))));
+	res!(take_named(&mut f, kind, args, "relative"));
 	Ok(f)
 }
 
 fn build_close(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::CurveClose;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "mode", |v| {
-		let s = res!(v.cast::<String>());
-		match s.as_str() {
-			"smooth" | "straight"	=> Ok(Value::str(s)),
-			_						=> Err(err!("expected \"smooth\" or \"straight\""; Input, Invalid)),
-		}
-	}));
+	res!(take_named(&mut f, kind, args, "mode"));
 	Ok(f)
 }
 
@@ -559,16 +620,16 @@ fn take_body(f: &mut Fields, kind: ElemKind, args: &mut Args) -> Outcome<()> {
 }
 
 fn take_origin_reflow(f: &mut Fields, kind: ElemKind, args: &mut Args) -> Outcome<()> {
-	res!(take_named(f, kind, args, "origin", |v| Ok(Value::Alignment(res!(v.cast::<Alignment>())))));
-	res!(take_named(f, kind, args, "reflow", |v| Ok(Value::Bool(res!(v.cast::<bool>())))));
+	res!(take_named(f, kind, args, "origin"));
+	res!(take_named(f, kind, args, "reflow"));
 	Ok(())
 }
 
 fn build_move(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Move;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "dx", |v| Ok(Value::Relative(res!(cast_rel(v))))));
-	res!(take_named(&mut f, kind, args, "dy", |v| Ok(Value::Relative(res!(cast_rel(v))))));
+	res!(take_named(&mut f, kind, args, "dx"));
+	res!(take_named(&mut f, kind, args, "dy"));
 	res!(take_body(&mut f, kind, args));
 	Ok(f)
 }
@@ -580,7 +641,7 @@ fn build_rotate(args: &mut Args) -> Outcome<Fields> {
 	let named = res!(args.named::<Value>("angle"));
 	let pos = res!(args.find::<Value>(|v| matches!(v, Value::Angle(_))));
 	if let Some(v) = pos.or(named) {
-		f.push((res!(fid(kind, "angle")), Value::Angle(res!(cast_angle(v)))));
+		f.push((res!(fid(kind, "angle")), res!(cast_field(kind, "angle", v))));
 	}
 	res!(take_origin_reflow(&mut f, kind, args));
 	res!(take_body(&mut f, kind, args));
@@ -597,10 +658,10 @@ fn build_scale(args: &mut Args) -> Outcome<Fields> {
 	let x = res!(args.named::<Value>("x")).or_else(|| factor.clone());
 	let y = res!(args.named::<Value>("y")).or(factor);
 	if let Some(v) = x {
-		f.push((res!(fid(kind, "x")), res!(cast_scale_amount(v))));
+		f.push((res!(fid(kind, "x")), res!(cast_field(kind, "x", v))));
 	}
 	if let Some(v) = y {
-		f.push((res!(fid(kind, "y")), res!(cast_scale_amount(v))));
+		f.push((res!(fid(kind, "y")), res!(cast_field(kind, "y", v))));
 	}
 	res!(take_origin_reflow(&mut f, kind, args));
 	res!(take_body(&mut f, kind, args));
@@ -610,8 +671,8 @@ fn build_scale(args: &mut Args) -> Outcome<Fields> {
 fn build_skew(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Skew;
 	let mut f	= Vec::new();
-	res!(take_named(&mut f, kind, args, "ax", |v| Ok(Value::Angle(res!(cast_angle(v))))));
-	res!(take_named(&mut f, kind, args, "ay", |v| Ok(Value::Angle(res!(cast_angle(v))))));
+	res!(take_named(&mut f, kind, args, "ax"));
+	res!(take_named(&mut f, kind, args, "ay"));
 	res!(take_origin_reflow(&mut f, kind, args));
 	res!(take_body(&mut f, kind, args));
 	Ok(f)
@@ -627,8 +688,8 @@ fn build_repeat(args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Repeat;
 	let mut f	= Vec::new();
 	res!(take_body(&mut f, kind, args));
-	res!(take_named(&mut f, kind, args, "gap", |v| Ok(Value::Length(res!(cast_length(v))))));
-	res!(take_named(&mut f, kind, args, "justify", |v| Ok(Value::Bool(res!(v.cast::<bool>())))));
+	res!(take_named(&mut f, kind, args, "gap"));
+	res!(take_named(&mut f, kind, args, "justify"));
 	Ok(f)
 }
 
@@ -644,45 +705,17 @@ fn build_image(engine: &mut Engine, args: &mut Args) -> Outcome<Fields> {
 			let _ = res!(crate::eval::import::resolve_path(engine, p, span.file, span));
 		},
 		Value::Bytes(_) => (),
-		other => return Err(err!("expected string or bytes, found {}", other.ty().name(); Input, Mismatch)),
+		other => return Err(err!("expected string or bytes, found {}", other.ty().long_name(); Input, Mismatch)),
 	}
 	f.push((res!(fid(kind, "source")), source));
-	res!(take_named(&mut f, kind, args, "format", |v| match v {
-		Value::Auto => Ok(v),
-		other => {
-			let s = res!(other.cast::<String>());
-			match s.as_str() {
-				"png" | "jpg" | "gif" | "webp" | "svg" | "pdf"	=> Ok(Value::str(s)),
-				_ => Err(err!("expected \"png\", \"jpg\", \"gif\", \"webp\", \"svg\", \"pdf\", \
-					dictionary, or auto"; Input, Invalid)),
-			}
-		},
-	}));
-	res!(take_named(&mut f, kind, args, "width", cast_smart_rel));
-	res!(take_named(&mut f, kind, args, "height", cast_sizing));
-	res!(take_named(&mut f, kind, args, "alt", |v| match v {
-		Value::None	=> Ok(v),
-		other		=> Ok(Value::str(res!(other.cast::<String>()))),
-	}));
-	res!(take_named(&mut f, kind, args, "page", |v| Ok(Value::Int(res!(v.cast::<i64>())))));
-	res!(take_named(&mut f, kind, args, "fit", |v| {
-		let s = res!(v.cast::<String>());
-		match s.as_str() {
-			"cover" | "contain" | "stretch"	=> Ok(Value::str(s)),
-			_ => Err(err!("expected \"cover\", \"contain\", or \"stretch\""; Input, Invalid)),
-		}
-	}));
-	res!(take_named(&mut f, kind, args, "scaling", |v| match v {
-		Value::Auto => Ok(v),
-		other => {
-			let s = res!(other.cast::<String>());
-			match s.as_str() {
-				"smooth" | "pixelated"	=> Ok(Value::str(s)),
-				_ => Err(err!("expected \"smooth\", \"pixelated\", or auto"; Input, Invalid)),
-			}
-		},
-	}));
-	res!(take_named(&mut f, kind, args, "icc", Ok));
+	res!(take_named(&mut f, kind, args, "format"));
+	res!(take_named(&mut f, kind, args, "width"));
+	res!(take_named(&mut f, kind, args, "height"));
+	res!(take_named(&mut f, kind, args, "alt"));
+	res!(take_named(&mut f, kind, args, "page"));
+	res!(take_named(&mut f, kind, args, "fit"));
+	res!(take_named(&mut f, kind, args, "scaling"));
+	res!(take_named(&mut f, kind, args, "icc"));
 	Ok(f)
 }
 
@@ -802,7 +835,7 @@ fn fold_corners(inner: Value, outer: Value) -> Outcome<Value> {
 // Casts
 
 fn mismatch(expected: &str, found: &Value) -> Error<ErrTag> {
-	err!("expected {}, found {}", expected, found.ty().name(); Input, Mismatch)
+	err!("expected {}, found {}", expected, found.ty().long_name(); Input, Mismatch)
 }
 
 fn rel_of(l: Length) -> Relative { Relative { rel: Ratio(0.0), abs: l } }
@@ -1233,24 +1266,30 @@ const CORNER_KEYS:	[&str; 9] = ["top-left", "top-right", "bottom-right", "bottom
 
 // As Typst casts `Sides`: a dictionary naming any side key is sides (other keys then an error), an empty
 // one sets no side, and anything else, a stroke dictionary included, is one value for all four.
-fn cast_sides<F>(v: Value, cast: F) -> Outcome<Value>
+// A sides value. A plain value that fails the part cast is reported against everything the field
+// accepts, `expected`, as Typst reports a failed cast to `Sides<..>`.
+fn cast_sides<F>(v: Value, cast: F, expected: &str) -> Outcome<Value>
 	where F: Fn(Value) -> Outcome<Value>
 {
 	match v {
 		Value::Dict(d) if d.is_empty()								=> Ok(Value::dict(Dict::new())),
 		Value::Dict(d) if d.keys().any(|k| SIDE_KEYS.contains(&k))	=> Ok(sides_value(res!(expand_sides(&d, &cast)))),
-		other														=> cast(other),
+		other => match cast(other.clone()) {
+			Ok(v)	=> Ok(v),
+			Err(_)	=> Err(mismatch(expected, &other)),
+		},
 	}
 }
 
 /// `inset`/`outset`: a relative length or a sides dictionary of them.
-pub fn cast_sides_rel(v: Value) -> Outcome<Value> { cast_sides(v, cast_opt_rel) }
+pub fn cast_sides_rel(v: Value) -> Outcome<Value> { cast_sides(v, cast_opt_rel, "relative length or dictionary") }
 
 /// A rect's `stroke`: `auto`, or a stroke (or `none`) or a sides dictionary of them.
 pub fn cast_stroke_sides(v: Value) -> Outcome<Value> {
 	match v {
 		Value::Auto	=> Ok(v),
-		other		=> cast_sides(other, cast_opt_stroke),
+		other		=> cast_sides(other, cast_opt_stroke,
+			"length, color, gradient, tiling, dictionary, stroke, none, or auto"),
 	}
 }
 
@@ -1259,7 +1298,10 @@ pub fn cast_corners_rel(v: Value) -> Outcome<Value> {
 	match v {
 		Value::Dict(d) if d.is_empty()									=> Ok(Value::dict(Dict::new())),
 		Value::Dict(d) if d.keys().any(|k| CORNER_KEYS.contains(&k))	=> Ok(corners_value(res!(expand_corners(&d, &cast_opt_rel)))),
-		other															=> cast_opt_rel(other),
+		other => match cast_opt_rel(other.clone()) {
+			Ok(v)	=> Ok(v),
+			Err(_)	=> Err(mismatch("relative length or dictionary", &other)),
+		},
 	}
 }
 

@@ -66,3 +66,12 @@ impl Diagnostic {
 		s
 	}
 }
+
+/// An error's own message, the last one pushed, without the chain of places it passed through: the
+/// text a diagnostic shows for it.
+pub fn message_of(e: &Error<ErrTag>) -> String {
+	match e.msgs().into_iter().last() {
+		Some(m)	=> m,
+		None	=> fmt!("{}", e),
+	}
+}

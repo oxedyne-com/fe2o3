@@ -381,11 +381,7 @@ pub fn content_add(a: Content, b: Content) -> Content {
 			Arc::make_mut(&mut y).children.insert(0, a);
 			Content::Sequence(y)
 		}
-		(a, b) => Content::Sequence(Arc::new(Sequence {
-			children:	vec![a, b],
-			label:		None,
-			span:		crate::syntax::Span::detached(),
-		})),
+		(a, b) => Content::Sequence(Arc::new(Sequence::new(vec![a, b]))),
 	}
 }
 

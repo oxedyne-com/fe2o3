@@ -113,11 +113,7 @@ pub fn call(f: CoreFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					"{} does not have field \"{}\" and no default was specified", content_name(&c), name))),
 			}
 		}
-		(CoreFn::ContentFunc, Value::Content(c)) => match c.kind() {
-			Some(k)	=> Value::Func(Func::Element(k)),
-			None	=> return Err(fail(fmt!(
-				"the element function of {} content cannot be represented yet", content_name(&c)))),
-		},
+		(CoreFn::ContentFunc, Value::Content(c)) => Value::Func(Func::Element(c.func_kind())),
 		(CoreFn::ContentLocation, Value::Content(c)) => match c.location() {
 			Some(l)	=> Value::Location(l),
 			None	=> Value::None,
