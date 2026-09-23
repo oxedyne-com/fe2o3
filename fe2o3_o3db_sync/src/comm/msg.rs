@@ -143,6 +143,7 @@ pub enum OzoneMsg<
         usize, // stored index length
         Meta<UIDL, UID>,
         Responder<UIDL, UID, ENC, KH>,
+        Option<Error<ErrTag>>, // written, but its barrier failed: the caller's answer
     ),
     NewLiveFile(Option<FileNum>, Responder<UIDL, UID, ENC, KH>), // Explicit file number for init, None for routine new file.
     NextLiveFile(Responder<UIDL, UID, ENC, KH>), // A routine request by a wbot to the zbot for the next live file.

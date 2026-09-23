@@ -271,7 +271,11 @@ impl<
     }
 
     /// Releases one record, and with it the run queued behind it where every record waits on a
-    /// barrier of its own: one barrier covers every record appended before it begins.
+    /// barrier of its own: one barrier covers every record appended before it begins.  That is
+    /// always so under `sync_on_write`, and under the interval policy while the last barrier has
+    /// failed.  Batched only under the first, a disk failing its syncs slowly took one barrier per
+    /// record under the second, one after another, and with writes arriving faster than it failed
+    /// the queue grew without bound (2026-09-23).
     fn records(
         &mut self,
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
@@ -280,8 +284,16 @@ impl<
         policy: SyncPolicy,
     ) {
         let mut run = vec![(cbot, insert, resp)];
-        if policy == SyncPolicy::EveryWrite {
-            while let Some(Handed::Record { policy: SyncPolicy::EveryWrite, .. }) = self.queue.front() {
+        let alone = match policy {
+            SyncPolicy::EveryWrite  => true,
+            SyncPolicy::Interval(_) => self.failed.is_some(),
+            _                       => false,
+        };
+        if alone {
+            while let Some(Handed::Record { policy: next, .. }) = self.queue.front() {
+                if *next != policy {
+                    break;
+                }
                 if let Some(Handed::Record { cbot, insert, resp, .. }) = self.queue.pop_front() {
                     run.push((cbot, insert, resp));
                 }
@@ -303,13 +315,17 @@ impl<
         };
         let synced = if due { self.barrier() } else { Ok(()) };
         for (cbot, insert, resp) in run {
-            if let Err(e) = &synced {
-                // The caller hears that the barrier failed.  The record is released all the same:
-                // it is in the files whatever the barrier said, and holding it back would leave
-                // the cache disagreeing with them and its bytes accounted to no one, where no
-                // collection could ever reclaim them.
-                Self::tell(&resp, e.clone());
-            }
+            // The caller hears when the barrier failed, from the cache bot once the record is
+            // readable, as it hears of one that did not: told from here first, it could read its
+            // write back and not find it.  The record is released all the same: it is in the
+            // files whatever the barrier said, and holding it back would leave the cache
+            // disagreeing with them and its bytes accounted to no one, where no collection could
+            // ever reclaim them.
+            let insert = match (&synced, insert) {
+                (Err(e), OzoneMsg::Insert(k, v, c, f, i, m, r, _)) =>
+                    OzoneMsg::Insert(k, v, c, f, i, m, r, Some(Self::written(e.clone()))),
+                (_, insert) => insert,
+            };
             if let Err(e) = cbot.send(insert) {
                 let e = err!(e,
                     "{}: A written record could not be released to its cache bot.", self.label;
@@ -391,8 +407,14 @@ impl<
         // A caller that has already given up has dropped its end, and there is no one else to
         // tell.  A responder with no channel is an internal write nobody waits on.
         if resp.is_some() {
-            let _ = resp.send(OzoneMsg::Error(e));
+            let _ = resp.send(OzoneMsg::Error(Self::written(e)));
         }
+    }
+
+    /// What a written record's caller is told went wrong after the write: tagged `Unconfirmed`,
+    /// so that it can be told from a write that never landed without reading the words.
+    fn written(e: Error<ErrTag>) -> Error<ErrTag> {
+        err!(e, "The record is written, but not confirmed durable."; Write, Unconfirmed)
     }
 }
 

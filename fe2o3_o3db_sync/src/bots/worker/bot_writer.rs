@@ -328,6 +328,7 @@ impl<
             istored.len(),
             meta,
             resp_w1, // The cbot responds to the caller.
+            None,
         );
         let policy = SyncPolicy::of(self.cfg());
         if let Err(e) = self.syncer.hand(Handed::Record { cbot, insert, resp, policy }) {
@@ -335,7 +336,7 @@ impl<
             return Err(err!(e,
                 "{}: The record is written, but the durability barrier thread stopped before it \
                 could take it, so it is not confirmed durable.", self.ozid();
-                Thread, Write));
+                Thread, Write, Unconfirmed));
         }
 
         Ok(())

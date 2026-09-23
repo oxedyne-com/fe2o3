@@ -217,7 +217,10 @@ impl<
                 "Expected an OzoneMsg::Chunks counting the records of a store, received {:?}.", msg;
                 Channel, Unexpected)),
         };
-        let acks = res!(self.recv_write_acks(
+        // Passed on as it is, not wrapped: its tags are the caller's only way to tell a write
+        // that landed unconfirmed (`Unconfirmed`) from one that did not, and a wrapper's tags are
+        // all that `Error::tags` reports.
+        let acks = ok!(self.recv_write_acks(
             n,
             constant::USER_REQUEST_TIMEOUT,
             constant::DURABILITY_TIMEOUT,
@@ -236,7 +239,8 @@ impl<
     /// Waits for the answer to a delete dispatched with this responder, and returns whether the
     /// key held a value.
     pub fn recv_delete_ack(&self) -> Outcome<bool> {
-        let acks = res!(self.recv_write_acks(
+        // Passed on as it is, for its tags, as in `recv_store_ack`.
+        let acks = ok!(self.recv_write_acks(
             1,
             constant::USER_REQUEST_TIMEOUT,
             constant::DURABILITY_TIMEOUT,
@@ -259,7 +263,8 @@ impl<
     /// Expiry of the first says a writer did not answer, so whether its record lands is unknown.
     /// Expiry of the second says every record is written but not all are confirmed durable, which
     /// is not a failure: the records are in the files and become durable, and readable, when the
-    /// disk completes them.
+    /// disk completes them.  That, and every error a store sends about a record after writing it,
+    /// is tagged `Unconfirmed`, which nothing that fails a write before it lands is.
     pub fn recv_write_acks(
         &self,
         n:          usize,
@@ -292,7 +297,7 @@ impl<
                     has not failed: its records are in the store's files and become durable, \
                     and readable, when the disk completes them, unless the machine stops first.",
                     n, n - acks.len(), durability;
-                    Write, Timeout));
+                    Write, Timeout, Unconfirmed));
             }
             match chan.recv_timeout(left) {
                 Recv::Empty => (), // Out of time, which the next pass reports.

@@ -172,8 +172,8 @@ impl<
                                     IO, Channel));
                             }
                         },
-                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1) => {
-                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1);
+                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed) => {
+                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed);
                             self.result(&result);
                         },
                         // READ
@@ -295,6 +295,7 @@ impl<
         ilen:       usize,
         meta:       Meta<UIDL, UID>,
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
+        unconfirmed: Option<Error<ErrTag>>,
     )
         -> Outcome<()>
     {
@@ -313,7 +314,7 @@ impl<
                 // as an expired durability deadline, which says the write is on its way.
                 let e = err!(e,
                     "{}: A written record could not be entered in the cache.", self.ozid();
-                    Data, Write);
+                    Data, Write, Unconfirmed);
                 self.respond(Err(e.clone()), &resp_w1);
                 return Err(e);
             },
@@ -321,10 +322,13 @@ impl<
 
         let key_present = floc_old_opt.is_some();
         
-        // [13] Inform the caller of successful file write and cache insertion.
-        match cind {
-            Some(cind) => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
-            None => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
+        // [13] Inform the caller of successful file write and cache insertion, or of the barrier
+        // that failed after the write: told here, the caller can read its write back once it
+        // hears, as it can a confirmed one.
+        match (unconfirmed, cind) {
+            (Some(e), _)        => self.respond(Err(e), &resp_w1),
+            (None, Some(cind))  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
+            (None, None)        => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
         }
         self.respond(Ok(OzoneMsg::Finish), &resp_w1);
 

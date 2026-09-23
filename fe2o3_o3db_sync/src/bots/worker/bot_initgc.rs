@@ -376,6 +376,7 @@ impl<
                             sindex.ref_stored_file_location().buf.len(),
                             meta,
                             Responder::none(Some(self.ozid())),
+                            None,
                         )
                     ));
                 },
@@ -612,6 +613,7 @@ impl<
                             ibuf.len(),
                             meta,
                             Responder::none(Some(self.ozid())),
+                            None,
                         )
                     ));
 
