@@ -14,8 +14,13 @@ use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     O3db,
-    base::cfg::OzoneConfig,
+    base::{
+        cfg::OzoneConfig,
+        constant,
+    },
+    comm::response::Wait,
     data::core::RestSchemesInput,
+    file::floc::FileNum,
     test::{
         hooks,
         setup::{
@@ -33,7 +38,10 @@ use std::{
         PathBuf,
     },
     thread,
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 type TestDb = O3db<
@@ -51,11 +59,15 @@ const WATCH:        Duration = Duration::from_millis(1_500);  // how long a fail
 #[test]
 fn main() -> Outcome<()> {
     log_set_level!("warn");
+    // Whatever fails, the next check and the next binary must not inherit the fault.
     let failing = failing_disk_is_retried_once_a_period();
-    // Whatever failed, the next check and the next binary must not inherit a failing disk.
     hooks::set_barrier_failure(false);
+    let stopped = stopped_syncer_refuses_writes_before_appending();
+    hooks::set_syncer_stop(false);
+    let handoff = failed_hand_off_keeps_the_writer_on_its_pair();
+    hooks::set_pair_hand_failure(false);
     log_finish_wait!();
-    let failed: Vec<Error<ErrTag>> = [failing].into_iter()
+    let failed: Vec<Error<ErrTag>> = [failing, stopped, handoff].into_iter()
         .filter_map(|r| r.err())
         .collect();
     match failed.len() {
@@ -142,6 +154,160 @@ fn failing_disk_is_retried_once_a_period() -> Outcome<()> {
     res!(db.insert(key(4), dat!(4u8), Uid::default(), None));
     res!(db.close());
     Ok(())
+}
+
+/// A writer's syncer stops, as one that panicked would.  Every later write through that writer is
+/// refused before anything reaches the files.  Appended first, it was reported failed and came
+/// back at the next start.
+fn stopped_syncer_refuses_writes_before_appending() -> Outcome<()> {
+    let root = res!(fresh("./test_db_syncer_faults_stopped"));
+    let cfg = res!(config());
+    let db = res!(open(&root, cfg.clone()));
+    res!(db.insert(key(11), dat!(11u8), Uid::default(), None));
+
+    hooks::set_syncer_stop(true);
+    let counted = hooks::syncers_stopped();
+    // Released, and then its syncer stops.
+    res!(db.insert(key(12), dat!(12u8), Uid::default(), None));
+    let begun = Instant::now();
+    while hooks::syncers_stopped() == counted {
+        if begun.elapsed() > constant::USER_REQUEST_TIMEOUT {
+            let _ = db.close(); // the check has failed already, and says why
+            return Err(err!("The syncer did not stop when told to."; Test, Timeout));
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    hooks::set_syncer_stop(false);
+    // A moment for its thread to end.
+    thread::sleep(Duration::from_millis(100));
+
+    let refused = match db.insert(key(13), dat!(13u8), Uid::default(), None) {
+        Ok(_) => {
+            let _ = db.close(); // the check has failed already, and says why
+            return Err(err!(
+                "A write through a writer whose syncer had stopped was confirmed.";
+                Test, Unexpected));
+        },
+        Err(e) => fmt!("{:?}", e),
+    };
+    res!(db.close());
+
+    // Only what was confirmed is there after a restart.
+    let db = res!(open(&root, cfg));
+    for (k, v) in [(11u8, true), (12, true), (13, false)] {
+        match (res!(db.get(&key(k), None)), v) {
+            (Some(_), true) | (None, false) => (),
+            (None, true) => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "Write {}, confirmed before the syncer stopped, is missing after a restart.", k;
+                    Test, Missing));
+            },
+            (Some(_), false) => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "Write {}, reported failed because the syncer had stopped, came back after a \
+                    restart: it had been written before it was refused.  It was told: {}", k, refused;
+                    Test, Unexpected));
+            },
+        }
+    }
+    res!(db.close());
+    if !refused.contains("refused before anything was written") {
+        return Err(err!(
+            "A write refused because the syncer had stopped must say it was refused before \
+            anything was written, and it said: {}", refused;
+            Test, Mismatch));
+    }
+    Ok(())
+}
+
+/// Handing a writer's new live pair to its syncer fails, as running out of file descriptors would.
+/// The writer stays on the pair its syncer holds.  It used to switch to the new pair first, so its
+/// next records went to a file no barrier covered and its file bot never flagged live, while the
+/// file it had left stayed flagged live for good.
+fn failed_hand_off_keeps_the_writer_on_its_pair() -> Outcome<()> {
+    let root = res!(fresh("./test_db_syncer_faults_handoff"));
+    let cfg = res!(config());
+    let db = res!(open(&root, cfg.clone()));
+    let big = |i: u8| dat!(vec![i; 1_000]); // two of these overflow a 2,000 byte live file
+
+    res!(db.insert(key(21), big(21), Uid::default(), None));
+    hooks::set_pair_hand_failure(true);
+    // This one needs a new live file, whose pair cannot be handed over.
+    if db.insert(key(22), big(22), Uid::default(), None).is_ok() {
+        let _ = db.close(); // the check has failed already, and says why
+        return Err(err!(
+            "A write needing a live pair that could not be handed to the syncer was confirmed.";
+            Test, Unexpected));
+    }
+    // Small enough for the file the writer is on.
+    res!(db.insert(key(23), dat!(23u8), Uid::default(), None));
+    hooks::set_pair_hand_failure(false);
+    // Two rollovers that work.
+    res!(db.insert(key(24), big(24), Uid::default(), None));
+    res!(db.insert(key(25), big(25), Uid::default(), None));
+
+    // One file is flagged live, the one the writer is on.
+    let newest = res!(newest_data_file(&root, &cfg));
+    let states = res!(db.api().collect_file_states(Wait {
+        max_wait:       constant::USER_REQUEST_TIMEOUT,
+        check_interval: constant::CHECK_INTERVAL,
+    }));
+    let mut live: Vec<FileNum> = Vec::new();
+    for (_, shard) in &states {
+        for (fnum, fstat) in shard.map() {
+            if fstat.is_live() {
+                live.push(*fnum);
+            }
+        }
+    }
+    live.sort();
+    if live != vec![newest] {
+        let _ = db.close(); // the check has failed already, and says why
+        return Err(err!(
+            "After a live pair could not be handed to the syncer, files {:?} are flagged live, \
+            where the writer is on file {} alone.", live, newest;
+            Test, Mismatch));
+    }
+    res!(db.close());
+
+    // After a restart, every confirmed write is there and the refused one is not.
+    let db = res!(open(&root, cfg));
+    for (k, v) in [(21u8, Some(big(21))), (22, None), (23, Some(dat!(23u8))), (24, Some(big(24))),
+        (25, Some(big(25)))]
+    {
+        match (res!(db.get(&key(k), None)), v) {
+            (Some((got, _)), Some(want)) => req!(got, want, "A write around a failed hand-off."),
+            (None, None) => (),
+            (got, want) => {
+                let _ = db.close(); // the check has failed already, and says why
+                return Err(err!(
+                    "Write {} around a failed hand-off: after a restart it is {:?}, where it \
+                    should be {:?}.", k, got.map(|(v, _)| v), want;
+                    Test, Mismatch));
+            },
+        }
+    }
+    res!(db.close());
+    Ok(())
+}
+
+/// The highest-numbered data file in the one zone.
+fn newest_data_file(root: &Path, cfg: &OzoneConfig) -> Outcome<FileNum> {
+    let zdir = cfg.zone_root(root).join("zone_001");
+    let mut newest = None;
+    for entry in res!(std::fs::read_dir(&zdir)) {
+        let path = res!(entry).path();
+        if path.extension().map(|e| e == constant::DATA_FILE_EXT).unwrap_or(false) {
+            let digits: String = path.file_stem()
+                .map(|s| s.to_string_lossy().chars().filter(|c| c.is_ascii_digit()).collect())
+                .unwrap_or_default();
+            let fnum: FileNum = res!(digits.parse::<FileNum>());
+            newest = Some(newest.map_or(fnum, |n: FileNum| n.max(fnum)));
+        }
+    }
+    newest.ok_or_else(|| err!("There is no data file in {:?}.", zdir; Test, Missing))
 }
 
 fn key(i: u8) -> Dat {

@@ -17,6 +17,9 @@ static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels
 static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each garbage collection
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
+static SYNCER_STOPS:     AtomicBool = AtomicBool::new(false); // syncers stop after their next batch
+static SYNCERS_STOPPED:  AtomicU64  = AtomicU64::new(0);      // stopped by the switch above
+static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs cannot be handed over
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -47,6 +50,23 @@ pub fn barriers_failed() -> u64 {
     BARRIERS_FAILED.load(Ordering::Relaxed)
 }
 
+/// Makes each writer's syncer stop once it has released the records it holds, as one that had
+/// panicked would, and counts the syncers it stops.
+pub fn set_syncer_stop(on: bool) {
+    SYNCER_STOPS.store(on, Ordering::Relaxed);
+}
+
+/// How many syncers `set_syncer_stop` has stopped so far.
+pub fn syncers_stopped() -> u64 {
+    SYNCERS_STOPPED.load(Ordering::Relaxed)
+}
+
+/// Makes handing a writer's new live pair to its syncer fail, as running out of file descriptors
+/// to duplicate the pair's with would.
+pub fn set_pair_hand_failure(on: bool) {
+    PAIR_HAND_FAILS.store(on, Ordering::Relaxed);
+}
+
 pub(crate) fn barrier_delay() {
     pause(&BARRIER_DELAY_MS);
 }
@@ -57,6 +77,19 @@ pub(crate) fn publish_delay() {
 
 pub(crate) fn collect_delay() {
     pause(&COLLECT_DELAY_MS);
+}
+
+/// Is this syncer to stop now?  Counted when it is.
+pub(crate) fn syncer_stops() -> bool {
+    let stops = SYNCER_STOPS.load(Ordering::Relaxed);
+    if stops {
+        SYNCERS_STOPPED.fetch_add(1, Ordering::Relaxed);
+    }
+    stops
+}
+
+pub(crate) fn pair_hand_fails() -> bool {
+    PAIR_HAND_FAILS.load(Ordering::Relaxed)
 }
 
 /// Is the disk to fail this sync?  Counted when it is.

@@ -20,6 +20,7 @@ use crate::{
         },
         live::LivePair,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_iop_db::api::Meta;
@@ -282,6 +283,15 @@ impl<
     )
         -> Outcome<()>
     {
+        // A record appended now could be neither confirmed nor withdrawn, so a writer whose syncer
+        // has stopped refuses it before anything reaches the files.  Appended first, it was
+        // reported failed and came back at the next start (2026-09-23).
+        if !self.syncer.is_running() {
+            return Err(err!(
+                "{}: The durability barrier thread has stopped, so the write was refused before \
+                anything was written.", self.ozid();
+                Thread, Missing, Write));
+        }
         let start = res!(self.write_to_file(FileType::Data, vec![&kbyts[..], &vstored[..]]));
 
         // Define the location.
@@ -320,24 +330,36 @@ impl<
             resp_w1, // The cbot responds to the caller.
         );
         let policy = SyncPolicy::of(self.cfg());
-        res!(self.syncer.hand(Handed::Record { cbot, insert, resp, policy }));
+        if let Err(e) = self.syncer.hand(Handed::Record { cbot, insert, resp, policy }) {
+            // The syncer stopped after the check above, and the record is in the files.
+            return Err(err!(e,
+                "{}: The record is written, but the durability barrier thread stopped before it \
+                could take it, so it is not confirmed durable.", self.ozid();
+                Thread, Write));
+        }
 
         Ok(())
     }
 
     /// Hands the syncer the live pair every record from here on is appended to.  It syncs through
     /// handles of its own, which reach the same open files.
-    fn hand_pair(&self) -> Outcome<()> {
-        let dat = match &self.lpair.dat.file {
+    fn hand_pair(&self, lpair: &LivePair) -> Outcome<()> {
+        if hooks::pair_hand_fails() {
+            return Err(err!(
+                "{}: Live pair {} could not be duplicated for the syncer (test::hooks).",
+                self.ozid(), lpair.fnum;
+                IO, File));
+        }
+        let dat = match &lpair.dat.file {
             Some(file) => res!(file.try_clone()),
             None => return Err(err!(
-                "{}: The live data file {:?} is not open.", self.ozid(), self.lpair.dat.path;
+                "{}: The live data file {:?} is not open.", self.ozid(), lpair.dat.path;
                 Bug, Missing)),
         };
-        let ind = match &self.lpair.ind.file {
+        let ind = match &lpair.ind.file {
             Some(file) => res!(file.try_clone()),
             None => return Err(err!(
-                "{}: The live index file {:?} is not open.", self.ozid(), self.lpair.ind.path;
+                "{}: The live index file {:?} is not open.", self.ozid(), lpair.ind.path;
                 Bug, Missing)),
         };
         self.syncer.hand(Handed::Pair(dat, ind))
@@ -345,10 +367,28 @@ impl<
 
     /// Takes the live file the zone assigned at start-up, new or partly written.
     fn open_live_pair(&mut self) -> Outcome<()> {
+        let lpair = res!(self.zdir().open_live(self.lpair.fnum));
+        // The syncer has the pair before the writer does, as at a rollover.
+        res!(self.hand_pair(&lpair));
         self.lpair.close();
-        self.lpair = res!(self.zdir().open_live(self.lpair.fnum));
-        res!(self.hand_pair());
+        self.lpair = lpair;
         self.register_live_file(self.lpair.fnum)
+    }
+
+    /// Closes a pair opened for a rollover that did not happen, and removes its files, which
+    /// nothing was written to.
+    fn abandon(&self, mut lpair: LivePair) {
+        lpair.close();
+        if lpair.dat.size > 0 || lpair.ind.size > 0 {
+            return; // not new after all, so not this writer's to remove
+        }
+        for path in [&lpair.dat.path, &lpair.ind.path] {
+            if let Err(e) = std::fs::remove_file(path) {
+                warn!(sync_log::stream(),
+                    "{}: Could not remove {:?}, created for a rollover that did not happen: {}",
+                    self.ozid(), path, e);
+            }
+        }
     }
 
     /// Tells the file's bot that the file is live, as a rollover does for the file it opens.  The
@@ -406,13 +446,25 @@ impl<
                 Bug, Invalid, Input)),
         };
 
-        // The file being sealed is made durable by the syncer before it releases anything written
-        // to its successor, whatever the configured policy, so crash loss stays bounded by the
-        // live file's tail.  This writer does not wait for that: the disk is the syncer's to wait
-        // on, and a writer held by it would hold every record queued behind the rollover.
+        // The syncer is handed the new pair before this writer switches to it, and nothing after
+        // the hand-off can fail the switch.  Switched first, a writer whose hand-off failed went
+        // on appending to a pair its syncer did not hold: records confirmed durable that no
+        // barrier had covered, in a file its file bot never flagged live, while the file it had
+        // left stayed flagged live for good (2026-09-23).  The file being sealed is made durable
+        // by the syncer before it releases anything written to its successor, whatever the
+        // configured policy, so crash loss stays bounded by the live file's tail.  This writer
+        // does not wait for that: the disk is the syncer's to wait on, and a writer held by it
+        // would hold every record queued behind the rollover.
+        let lpair = res!(self.zdir().open_live(fnum_new));
+        if let Err(e) = self.hand_pair(&lpair) {
+            self.abandon(lpair);
+            return Err(err!(e,
+                "{}: New live file {} could not be handed to the durability barrier thread, so \
+                this writer stays on file {}.", self.ozid(), fnum_new, fnum_old;
+                IO, File));
+        }
         self.lpair.close();
-        self.lpair = res!(self.zdir().open_live(fnum_new));
-        res!(self.hand_pair());
+        self.lpair = lpair;
         let start = self.lpair().dat.size;
 
         // [5] Tell the fbot for the previous live file of the change and wait for the response.
@@ -432,6 +484,10 @@ impl<
                 "While advising fbot to update live file states.";
                 IO, Channel, Read)),
             Ok(OzoneMsg::Ok) => (),
+            Ok(OzoneMsg::Error(e)) => return Err(err!(e,
+                "{}: The file bot could not seal live file {} for file {}.",
+                self.ozid(), fnum_old, fnum_new;
+                IO, File)),
             Ok(msg) => return Err(err!(
                 "Unrecognised response after advising fbot to update live file states: {:?}", msg;
                 Channel)),

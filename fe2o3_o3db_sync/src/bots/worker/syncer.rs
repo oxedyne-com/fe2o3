@@ -28,11 +28,18 @@ use oxedyne_fe2o3_jdat::id::NumIdDat;
 use std::{
     collections::VecDeque,
     fs::File,
-    sync::mpsc::{
-        self,
-        Receiver,
-        RecvTimeoutError,
-        Sender,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+        mpsc::{
+            self,
+            Receiver,
+            RecvTimeoutError,
+            Sender,
+        },
     },
     thread::{
         self,
@@ -96,8 +103,9 @@ pub struct Syncer<
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    tx:     Sender<Handed<UIDL, UID, ENC, KH>>,
-    handle: Option<JoinHandle<()>>,
+    tx:         Sender<Handed<UIDL, UID, ENC, KH>>,
+    handle:     Option<JoinHandle<()>>,
+    running:    Arc<AtomicBool>,    // cleared by the thread's barrier as it goes, however it goes
 }
 
 impl<
@@ -118,17 +126,26 @@ impl<
         // learn from its own send that the syncer has gone, rather than queue records that nothing
         // will ever release.
         let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        let cleared = running.clone();
         let builder = thread::Builder::new()
             .name(fmt!("{}.sync", label))
             .stack_size(constant::STACK_SIZE);
         let handle = res!(builder.spawn(move || {
             sync_log::set_stream(log_stream_id);
-            Barrier::new(label, rx).run();
+            Barrier::new(label, rx, cleared).run();
         }));
         Ok(Self {
             tx,
-            handle: Some(handle),
+            handle:     Some(handle),
+            running,
         })
+    }
+
+    /// Is the syncer still taking records?  Once it is not, nothing more written through its
+    /// writer can be confirmed.
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
     }
 
     pub fn hand(&self, item: Handed<UIDL, UID, ENC, KH>) -> Outcome<()> {
@@ -164,15 +181,16 @@ struct Barrier<
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    label:  String,
-    rx:     Receiver<Handed<UIDL, UID, ENC, KH>>,
-    queue:  VecDeque<Handed<UIDL, UID, ENC, KH>>,
-    pair:   Option<(File, File)>,
-    policy: SyncPolicy,         // the latest record's
-    dirty:  bool,               // the pair holds records no barrier has covered
-    since:  u32,                // records released since the last barrier
-    last:   Option<Instant>,    // when the last barrier completed
-    failed: Option<Instant>,    // when the last barrier failed, until one completes
+    label:      String,
+    rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
+    queue:      VecDeque<Handed<UIDL, UID, ENC, KH>>,
+    pair:       Option<(File, File)>,
+    policy:     SyncPolicy,         // the latest record's
+    dirty:      bool,               // the pair holds records no barrier has covered
+    since:      u32,                // records released since the last barrier
+    last:       Option<Instant>,    // when the last barrier completed
+    failed:     Option<Instant>,    // when the last barrier failed, until one completes
+    running:    Arc<AtomicBool>,    // shared with the writer's handle
 }
 
 impl<
@@ -184,21 +202,23 @@ impl<
     Barrier<UIDL, UID, ENC, KH>
 {
     fn new(
-        label:  String,
-        rx:     Receiver<Handed<UIDL, UID, ENC, KH>>,
+        label:      String,
+        rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
+        running:    Arc<AtomicBool>,
     )
         -> Self
     {
         Self {
             label,
             rx,
-            queue:  VecDeque::new(),
-            pair:   None,
-            policy: SyncPolicy::Never,
-            dirty:  false,
-            since:  0,
-            last:   None,
-            failed: None,
+            queue:      VecDeque::new(),
+            pair:       None,
+            policy:     SyncPolicy::Never,
+            dirty:      false,
+            since:      0,
+            last:       None,
+            failed:     None,
+            running,
         }
     }
 
@@ -242,6 +262,10 @@ impl<
                         self.records(cbot, insert, resp, policy),
                     Handed::Finish => return self.end(),
                 }
+            }
+            // A syncer stopping as one that panicked would, with no last barrier.
+            if hooks::syncer_stops() {
+                return;
             }
         }
     }
@@ -369,5 +393,20 @@ impl<
         if resp.is_some() {
             let _ = resp.send(OzoneMsg::Error(e));
         }
+    }
+}
+
+impl<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+    ENC:    Encrypter,
+    KH:     Hasher,
+>
+    Drop for Barrier<UIDL, UID, ENC, KH>
+{
+    fn drop(&mut self) {
+        // However the thread ends, a panic included, and before the receiver is dropped: a writer
+        // never finds the channel gone while the flag still says the syncer is running.
+        self.running.store(false, Ordering::SeqCst);
     }
 }
