@@ -867,23 +867,26 @@ impl TileConfig {
                 "TileConfig: 'current' build '{}' is not among 'builds' {:?}.",
                 current, builds.keys().collect::<Vec<_>>(); Invalid, Input, Missing));
         }
-        let mut allow_origins = Vec::new();
-        match m.get(&dat!("allow_origins")) {
-            Some(Dat::List(list)) => for item in list {
-                match item {
-                    Dat::Str(s) => {
-                        res!(Self::check_origin(s));
-                        allow_origins.push(s.clone());
-                    }
-                    _ => return Err(err!(
-                        "TileConfig: 'allow_origins' entries must be strings.";
-                        Invalid, Input, Mismatch)),
-                }
-            },
-            None => (),
+        // Either list shape, since a config writes `(vek|[...])` as readily as `[...]`.
+        let items: &[Dat] = match m.get(&dat!("allow_origins")) {
+            Some(Dat::List(list))   => list,
+            Some(Dat::Vek(vek))     => vek.as_slice(),
+            None                    => &[],
             _ => return Err(err!(
                 "TileConfig: 'allow_origins' must be a list of strings.";
                 Invalid, Input, Mismatch)),
+        };
+        let mut allow_origins = Vec::new();
+        for item in items {
+            match item {
+                Dat::Str(s) => {
+                    res!(Self::check_origin(s));
+                    allow_origins.push(s.clone());
+                }
+                _ => return Err(err!(
+                    "TileConfig: 'allow_origins' entries must be strings, not {:?}.", item.kind();
+                    Invalid, Input, Mismatch)),
+            }
         }
         let attribution = match m.get(&dat!("attribution")) {
             Some(Dat::Str(s)) => s.clone(),
