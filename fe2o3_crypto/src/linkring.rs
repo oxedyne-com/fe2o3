@@ -29,9 +29,8 @@
 //!
 //! `H_p` is RFC 9380's `hash_to_ristretto255` (expand_message_xmd with SHA-512,
 //! then the RFC 9496 one-way map). The ring digest is SHA-256 over the
-//! concatenated 32-byte keys, in ring order. The design note with sizes and
-//! costs at 10^5 to 10^7 keys is `oxegen_linkring_design.md` in the Oxegen
-//! planning notes; the Hematite User Guide carries the same figures.
+//! concatenated 32-byte keys, in ring order. The Hematite User Guide gives the
+//! sizes and costs at 10^5 to 10^7 keys.
 //!
 //! # Encoding
 //!
