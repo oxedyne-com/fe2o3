@@ -185,6 +185,12 @@ impl ShapedText {
 		self.src.font().outline(glyph.face, glyph.id, self.size)
 	}
 
+	/// The embeddable program of the face that shaped `glyph`, or `None` when that face must be drawn as
+	/// outlines instead.
+	pub fn program(&self, glyph: &Glyph) -> Outcome<Option<Arc<oxedyne_fe2o3_graphics::pdf_font::FontProgram>>> {
+		Ok(res!(self.src.font().face(glyph.face)).program().cloned())
+	}
+
 	/// One glyph's outline at a canonical thousand units per em, in the font frame (origin at the glyph, y
 	/// up); empty for a space. The PDF writer stores this once and shows it at any point size, so the same
 	/// glyph in body and in a heading shares a single stored outline.
