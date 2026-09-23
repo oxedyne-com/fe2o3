@@ -591,14 +591,17 @@ fn lower_template(selector: &Selector, body: &str) -> Transform {
 			match make_spacer(selector, kind, s, seen_hole, heading, &mut hole) {
 				Ok(None)		=> {},	// folded into the level's spacing (a heading v)
 				Ok(Some(b))		=> if seen_hole { post.push(b); } else { pre.push(b); },
-				Err(e)			=> return Transform::Refused(fmt!("{}", e)),
+				Err(e)			=> return Transform::Refused(e.plain()),
 			}
 		} else if is_element_stmt(s) {
 			if seen_hole {
 				return Transform::Refused(fmt!("a template names the element `it` more than once: {}", short(body)));
 			}
+			// The reason reaches a diagnostic's message, the skip line and a strict hint, so it is the
+			// error's words alone: `Display` colours itself for a terminal and names the source file of
+			// every frame.
 			if let Err(e) = read_element(s, &mut hole, &mut frame) {
-				return Transform::Refused(fmt!("{}", e));
+				return Transform::Refused(e.plain());
 			}
 			seen_hole = true;
 		} else {
@@ -3179,5 +3182,22 @@ mod tests {
 		}
 		assert!(matches!(lower_transform(&h1, "it => block(fill: luma(240))[#set text(size: 9pt)\n#it]"),
 			Transform::Template(_)));
+	}
+
+	/// A refused template's reason is the error's words alone, as a browser shows them: no terminal colour
+	/// code and no source location of the engine's own, whichever statement it was refused at.
+	#[test]
+	fn a_refused_template_gives_its_reason_as_plain_words() {
+		let src = "#show heading: it => [#it.body #here().page()]\n\
+			#show heading.where(level: 2): it => block(fill: rgb(\"#zz\"))[#it]\n\
+			#show figure: it => block(fill: luma(240))[Note: #it]\n";
+		let mut refusals = Refusals::default();
+		let rules = collect_from_source(src, 0, &mut refusals);
+		assert_eq!(rules.len(), 3);
+		assert_eq!(refusals.sites().len(), 3, "each rule is refused: {:?}", refusals.sites());
+		for r in refusals.sites() {
+			assert!(!r.name.contains('\u{1b}') && !r.name.contains(".rs:"), "not plain: {:?}", r.name);
+			assert!(r.name.contains("a template"), "the reason is kept: {:?}", r.name);
+		}
 	}
 }
