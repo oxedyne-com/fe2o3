@@ -317,3 +317,28 @@ fn a_memo_hit_follows_what_a_blocks_images_hold() -> Outcome<()> {
 	assert!(back.diagnostics.is_empty(), "an image supplied again is drawn: {:?}", back.diagnostics);
 	Ok(())
 }
+
+/// A block served from the memo gives each answer again at its own ask in the block as it now stands: after
+/// a paragraph added above moves a list whose items ask for different things, each item's stand-in is
+/// reported at its own line, exactly as a fresh compile of the same source reports it.
+#[test]
+fn a_memo_hit_resites_each_answer_at_its_own_ask() -> Outcome<()> {
+	let _turn	= turn();
+	let before	= b"= H\n\nIntro.\n\n- first @gonea\n- second #cite(<nokey>)\n";
+	let after	= b"= H\n\nA paragraph added above.\n\nIntro.\n\n- first @gonea\n- second #cite(<nokey>)\n";
+	let bib		= b"@article{smith2020, author = {Smith, John}, title = {A Title}, year = {2020}, journal = {J}}\n";
+	let mut memo = Memo::new();
+	res!(report_of(MAIN, &[(MAIN, &before[..]), ("/proj/refs.bib", &bib[..])], Some(&mut memo)));
+	memo.sweep();
+	let hits	= memo.block_hits;
+	let warm	= res!(report_of(MAIN, &[(MAIN, &after[..]), ("/proj/refs.bib", &bib[..])], Some(&mut memo)));
+	assert!(memo.block_hits > hits, "the moved list is served from the memo");
+	let cold	= res!(report_of(MAIN, &[(MAIN, &after[..]), ("/proj/refs.bib", &bib[..])], None));
+	let placed	= |r: &Report| r.diagnostics.iter().map(|d| (d.line, d.col, d.message.clone())).collect::<Vec<_>>();
+	assert_eq!(placed(&warm), placed(&cold), "the hit reports what a fresh compile reports, where it reports it");
+	let lines: Vec<(usize, bool)> = cold.diagnostics.iter()
+		.map(|d| (d.line, d.message.starts_with("@gonea") || d.message.starts_with("#cite(<nokey>)")))
+		.collect();
+	assert_eq!(lines, [(7, true), (8, true)], "{:?}", cold.diagnostics);
+	Ok(())
+}
