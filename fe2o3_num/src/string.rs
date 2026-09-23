@@ -216,7 +216,8 @@ impl NumberString {
         let mut exp = 0i64;
         if self.exp.len() > 0 {
             match <i64>::from_str_radix(&self.exp, self.radix) {
-                Ok(n) => exp = n,
+                // The exponent is held as its absolute value beside its sign.
+                Ok(n) => exp = if self.expneg { -n } else { n },
                 Err(e) => return Err(err!(e,
                     "While trying to convert exp in {:?} to i64", self;
                 String, Input, Decode, Numeric)),
@@ -1296,6 +1297,19 @@ mod tests {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_negative_exponent_divides_015() -> Outcome<()> {
+        // Dated 2026-09-23: the exponent's sign was dropped, so 1e-7 read as ten million.
+        // The oracle is the bigdecimal crate's own parser.
+        for s in ["1e-7", "2.5e-3", "-1.5E-2", "5e-324", "1e7", "-0120.03450e+003", "0.3"] {
+            let ns = res!(NumberString::validate(s));
+            let got = res!(ns.as_bigdecimal());
+            let want = res!(BigDecimal::from_str(s), Decode, Numeric);
+            assert_eq!(got, want, "{} read as {}", s, got);
         }
         Ok(())
     }
