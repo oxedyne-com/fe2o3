@@ -177,3 +177,31 @@ fn test_the_simplifier_keeps_every_edge_within_its_tolerance_04() -> Outcome<()>
     req!(world::simplify_sphere(&pts[..5], 0.0), vec![0, 1, 2, 3, 4]);
     Ok(())
 }
+
+#[test]
+fn test_the_detail_drawn_follows_the_scale_and_worlds_merge_05() -> Outcome<()> {
+    let ring = |detail: u8, tol_m: f64, name: &str| Layer {
+        name: name.to_string(), kind: LayerKind::Fill, detail, tol_m,
+        rings: vec![vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)]], labels: Vec::new(),
+    };
+    let places = |n: usize| Layer {
+        name: "places".to_string(), kind: LayerKind::Label, detail: 0, tol_m: 0.0,
+        rings: Vec::new(),
+        labels: (0..n).map(|k| Label { lat: 0.0, lng: k as f64, rank: 0, name: fmt!("{}", k) }).collect(),
+    };
+    let mut w = World { layers: vec![ring(0, 30_000.0, "land"), places(2)] };
+    req!(World::default().detail_for(1_000.0, 2.5), None::<u8>);
+    req!(w.detail_for(1_000.0, 2.5), Some(0));
+    let fine = World { layers: vec![ring(1, 6_000.0, "land"), ring(1, 6_000.0, "lakes"), places(5)] };
+    w.merge(fine);
+    req!(w.details(), 2);
+    req!(w.layers.len(), 4);
+    // The finer file's places replace the coarse file's rather than doubling them.
+    req!(w.layer("places", 0).map(|l| l.labels.len()), Some(5));
+    // 30 km at 2.5 px wants 12 km a pixel; 6 km wants 2.4 km; finer than that, the finest.
+    req!(w.detail_for(12_000.0, 2.5), Some(0));
+    req!(w.detail_for(11_999.0, 2.5), Some(1));
+    req!(w.detail_for(2_400.0, 2.5), Some(1));
+    req!(w.detail_for(10.0, 2.5), Some(1));
+    Ok(())
+}

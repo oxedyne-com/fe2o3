@@ -30,10 +30,12 @@
 //! well.  The quadtree indexing, the `u64` layout, the exact-parent property and the
 //! re-indexing neighbour walk are this library's own.
 
+use crate::proj::EARTH_RADIUS_M;
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
-    f64::consts::{FRAC_2_PI, FRAC_PI_2},
+    f64::consts::{FRAC_2_PI, FRAC_PI_2, PI},
     fmt,
     str::FromStr,
 };
@@ -557,6 +559,28 @@ pub fn cover_cap(
         }
     }
     Ok(out)
+}
+
+/// The mean side of a level's cells in metres, on a sphere of [`EARTH_RADIUS_M`]: the square
+/// root of the mean cell area, about 9,220 km at level 0 and halving with each level.
+pub fn mean_side_m(level: u8) -> f64 {
+    EARTH_RADIUS_M * (2.0 * PI / 3.0).sqrt() / (1u64 << level.min(MAX_LEVEL)) as f64
+}
+
+/// The finest level whose mean cell side spans at least `min_px` pixels at a scale of
+/// `m_per_px` ground metres per pixel, which is the level a map draws its grid at.
+///
+/// Level 0 when even that is smaller, and [`MAX_LEVEL`] when every level is larger.
+pub fn level_for_scale(m_per_px: f64, min_px: f64) -> u8 {
+    if !(m_per_px > 0.0 && min_px > 0.0) || !(m_per_px * min_px).is_finite() {
+        return 0;
+    }
+    let want = m_per_px * min_px;
+    let mut level = 0u8;
+    while level < MAX_LEVEL && mean_side_m(level + 1) >= want {
+        level += 1;
+    }
+    level
 }
 
 /// The `(s, t)` coordinate representing a stepped neighbour along one axis.
