@@ -38,9 +38,7 @@ use std::{
 
 use rand::Rng;
 
-// How often a shutdown looks to see whether the writers have ended.  Finer than
-// `constant::CHECK_INTERVAL`, since a close waits on it and a writer usually ends at once.
-const WRITERS_CHECK_INTERVAL: Duration = Duration::from_millis(5);
+const WRITERS_CHECK_INTERVAL: Duration = Duration::from_millis(5); // finer than CHECK_INTERVAL: a close waits on it
 
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -179,13 +177,6 @@ impl<
         pending
     }
 
-    pub fn dump_pending_messages(&self, label: &str, z: Option<usize>) {
-        for b in 0..self.pool.len() {
-            let lines = self.pool[b].drain_messages();
-            BotChannels::<UIDL, UID, ENC, KH>::dump_pending_messages(lines, label, z, Some(b));
-        }
-    }
-
     /// Returns the number of messages sent.
     pub fn send_to_all(&self, msg: OzoneMsg<UIDL, UID, ENC, KH>) -> Outcome<usize> {
         for chan in &self.pool {
@@ -309,15 +300,6 @@ impl<
         self.rbots.msg_count_non_zero()   |
         self.scbots.msg_count_non_zero()  |
         self.wbots.msg_count_non_zero()
-    }
-
-    pub fn dump_pending_messages(&self, zopt: Option<usize>) {
-        self.cbots.dump_pending_messages("cbot", zopt);
-        self.fbots.dump_pending_messages("fbot", zopt);
-        self.igbots.dump_pending_messages("igbot", zopt);
-        self.rbots.dump_pending_messages("rbot", zopt);
-        self.scbots.dump_pending_messages("scbot", zopt);
-        self.wbots.dump_pending_messages("wbot", zopt);
     }
 
     /// Finishes the zone's writers, which release everything their syncers hold as they end.
@@ -635,15 +617,12 @@ impl<
         if !timed_out {
             warn!(sync_log::stream(), "Shutdown: All zone bots are now idle after {:?}.", start.elapsed());
         } else {
-            warn!(sync_log::stream(), "Shutdown: There are still zone work messages pending after {:?}.", start.elapsed());
-            warn!(sync_log::stream(), "{:?}", self.msg_count());
-            warn!(sync_log::stream(), "Dumping pending messages...");
-            warn!(sync_log::stream(), "Zone bots:");
-            self.zbots.dump_pending_messages("zbot", None);
-            for z in 0..self.nz {
-                warn!(sync_log::stream(), "Zone {} worker bots:", z+1);
-                self.zwbots[z].dump_pending_messages(Some(z));
-            }
+            // Counted, not listed: a channel can only be read by taking its messages, and those
+            // left are answered once their bots reach the `Finish` queued behind them.  Taken to
+            // be listed here, the records the writers had just released were destroyed, and their
+            // callers waited out the durability deadline for writes that had landed (2026-09-23).
+            warn!(sync_log::stream(), "Shutdown: There are still zone work messages pending after \
+                {:?}, which their bots answer before they finish: {:?}", start.elapsed(), self.msg_count());
         }
         Ok(())
     }
