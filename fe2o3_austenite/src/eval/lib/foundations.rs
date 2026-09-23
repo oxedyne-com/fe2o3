@@ -1,6 +1,6 @@
 // U3 owns this file. Foundations: `type`, `repr`, `assert`, `panic`, `eval`, `range`, the type
-// constructors, `plugin` (refused with a diagnostic, owner decision 3), and methods on int, float, version
-// and bytes. `repr` is the one text form every other unit prints a value by.
+// constructors, `plugin` (refused with a diagnostic, as an interim), and methods on int, float, version and
+// bytes. `repr` is the one text form every other unit prints a value by.
 //
 // Three entry points exist for the evaluator core (U2) beyond `call`: `constructor(ty)` is what calling a
 // type value runs (`int("3")`, `str(x)`), `type_scope(ty, name)` answers `str.from-unicode`, `float.inf`

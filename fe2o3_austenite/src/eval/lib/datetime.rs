@@ -477,11 +477,11 @@ pub fn display(dt: &Datetime, pat: &str) -> std::result::Result<String, String> 
 				}
 			}
 			"ordinal"	=> {
-				let (y, m, d) = (match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) });
+				let (y, m, d) = match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) };
 				pad(ordinal(y, m, d) as i64, 3)
 			}
 			"weekday"	=> {
-				let (y, m, d) = (match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) });
+				let (y, m, d) = match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) };
 				let wd = weekday(y, m, d);
 				let one = get("one_indexed").unwrap_or("true") != "false";
 				match get("repr").unwrap_or("long") {
@@ -492,7 +492,7 @@ pub fn display(dt: &Datetime, pat: &str) -> std::result::Result<String, String> 
 				}
 			}
 			"week_number" => {
-				let (y, m, d) = (match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) });
+				let (y, m, d) = match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) };
 				let ord = ordinal(y, m, d) as i64;
 				let wd = weekday(y, m, d) as i64;
 				let w = match get("repr").unwrap_or("iso") {
@@ -503,7 +503,7 @@ pub fn display(dt: &Datetime, pat: &str) -> std::result::Result<String, String> 
 				pad(w, 2)
 			}
 			"year"		=> {
-				let (y0, m, d) = (match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) });
+				let (y0, m, d) = match date { Some(x) => x, None => return Err(INSUFFICIENT.to_string()) };
 				let y = if get("base") == Some("iso_week") { iso_week(y0, m, d).0 } else { y0 };
 				let body = match get("repr").unwrap_or("full") {
 					"last_two"	=> pad(y.rem_euclid(100), 2),

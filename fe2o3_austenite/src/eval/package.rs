@@ -1,5 +1,6 @@
 // U10 owns this file. Packages are read from `/@<namespace>/<name>/<version>/` in the vfs, which the host
-// fills (owner decision 2); the engine never fetches. A package absent from the vfs is a hard error.
+// fills from its mirror of the package corpus; the engine never fetches. A package absent from the vfs is a
+// hard error.
 
 use crate::eval::func::unimplemented;
 use crate::eval::World;

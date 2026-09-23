@@ -912,10 +912,10 @@ fn stops_of(engine: &mut Engine, span: Span, vals: Vec<Value>, conic: bool) -> O
 				return Err(engine.error(span, "offset must be between 0 and 1"));
 			}
 		}
-		if out.first().map(|s| s.1 .0 != 0.0).unwrap_or(false) {
+		if out.first().map(|s| (s.1).0 != 0.0).unwrap_or(false) {
 			return Err(engine.error_hint(span, "first stop must have an offset of 0", "try setting this stop to `0%`"));
 		}
-		if out.last().map(|s| s.1 .0 != 1.0).unwrap_or(false) {
+		if out.last().map(|s| (s.1).0 != 1.0).unwrap_or(false) {
 			return Err(engine.error_hint(span, "last stop must have an offset of 100%", "try setting this stop to `100%`"));
 		}
 		return Ok(out);
@@ -995,7 +995,7 @@ fn make_gradient(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 				return Err(engine.error_hint(span, "the focal radius must be smaller than the end radius",
 					"try using a focal radius of `0%` instead"));
 			}
-			let d = ((focal_center.0 .0 - center.0 .0).powi(2) + (focal_center.1 .0 - center.1 .0).powi(2)).sqrt();
+			let d = (((focal_center.0).0 - (center.0).0).powi(2) + ((focal_center.1).0 - (center.1).0).powi(2)).sqrt();
 			if d + focal_radius.0 > radius.0 {
 				return Err(engine.error_hint(span, "the focal circle must be inside of the end circle",
 					"try using a focal center of `auto` instead"));
@@ -1030,7 +1030,7 @@ pub fn sample(g: &Gradient, t: f64) -> Color {
 	let mut hi = stops.len();
 	while lo < hi {
 		let mid = (lo + hi) / 2;
-		if stops[mid].1 .0 < t {
+		if (stops[mid].1).0 < t {
 			lo = mid + 1;
 		} else {
 			hi = mid;
@@ -1095,7 +1095,7 @@ pub fn repr_gradient(g: &Gradient) -> String {
 		}
 		GradientKind::Radial { center, radius, focal_center, focal_radius } => {
 			r.push_str("gradient.radial(");
-			if center.0 .0 != 0.5 || center.1 .0 != 0.5 {
+			if (center.0).0 != 0.5 || (center.1).0 != 0.5 {
 				r.push_str(&fmt!("center: {}, ", pair(*center)));
 			}
 			if radius.0 != 0.5 {
@@ -1113,7 +1113,7 @@ pub fn repr_gradient(g: &Gradient) -> String {
 			if angle.0 != 0.0 {
 				r.push_str(&fmt!("angle: {}, ", repr_angle(*angle)));
 			}
-			if center.0 .0 != 0.5 || center.1 .0 != 0.5 {
+			if (center.0).0 != 0.5 || (center.1).0 != 0.5 {
 				r.push_str(&fmt!("center: {}, ", pair(*center)));
 			}
 		}
