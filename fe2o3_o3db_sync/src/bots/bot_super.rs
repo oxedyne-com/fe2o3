@@ -35,6 +35,7 @@ use crate::{
             worker_deps::*,
         },
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_bot::Bot;
@@ -108,6 +109,11 @@ impl<
                     "{}: Telling the master the database did not start.", self.ozid();
                     IO, Channel));
             }
+            // A start that failed leaves no bots running over the directory.
+            let requester = fmt!("{} after a failed start", self.ozid());
+            let result = self.shutdown(requester).map(|_| ());
+            self.result(&result);
+            return;
         }
         self.now_listening();
         loop {
@@ -559,7 +565,7 @@ impl<
                         WorkerType::InitGarbage => Box::new(InitGarbageBot::new(args)),
                         WorkerType::Reader      => Box::new(ReaderBot::new(args)),
                         WorkerType::Scan        => Box::new(ScanBot::new(args)),
-                        WorkerType::Writer      => Box::new(WriterBot::new(args)),
+                        WorkerType::Writer      => Box::new(res!(WriterBot::new(args))),
                     };
                     
                     res!(bot.init());
@@ -750,6 +756,7 @@ impl<
         res!(self.chans().cfg().send(OzoneMsg::ZoneInitTrigger(zones.clone())));
 
         // 2. Meanwhile, the master is given the channels.
+        hooks::publish_delay();
         let resp = Responder::new(Some(self.ozid()));
         res!(self.chan_out.send(OzoneMsg::Channels(self.chans().clone(), resp.clone())));
         match res!(resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT)) {

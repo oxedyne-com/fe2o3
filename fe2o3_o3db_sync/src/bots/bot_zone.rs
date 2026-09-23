@@ -254,27 +254,38 @@ impl<
                     // are then not contiguous, which nothing depends on: a zone's files
                     // are found by reading the directory.
                     let mut fnum = self.fnum;
-                    let mut claimed = false;
+                    let mut claim = None;
                     // Bounded so that a directory in a state nobody expected stops the
                     // bot rather than spinning it.
                     for _ in 0..constant::LIVE_FILE_CLAIM_LIMIT {
                         fnum += 1;
                         match self.zdir().claim(fnum) {
-                            Ok(true) => { claimed = true; break; },
+                            Ok(true) => { claim = Some(Ok(fnum)); break; },
                             Ok(false) => (),
-                            Err(e) => { self.error(e); break; },
+                            Err(e) => { claim = Some(Err(e)); break; },
                         }
                     }
-                    if claimed {
-                        self.fnum = fnum;
-                        self.respond(Ok(OzoneMsg::UseLiveFile(self.fnum)), &resp);
-                    } else {
-                        self.error(err!(
+                    let result = match claim {
+                        Some(Ok(fnum)) => {
+                            self.fnum = fnum;
+                            Ok(OzoneMsg::UseLiveFile(fnum))
+                        },
+                        Some(Err(e)) => Err(err!(e,
+                            "{}: No live file could be claimed in zone {:?}.",
+                            self.ozid(), self.zdir();
+                        IO, File, Create)),
+                        None => Err(err!(
                             "{}: No live file number could be claimed in zone {:?} within {} \
                             attempts from {}; every number tried was already taken.",
                             self.ozid(), self.zdir(), constant::LIVE_FILE_CLAIM_LIMIT, self.fnum;
-                        IO, File, Create, Excessive));
+                        IO, File, Create, Excessive)),
+                    };
+                    // The writer asking is waiting on this, and so is the caller whose write
+                    // needed the new file, so a failure is answered rather than only logged.
+                    if let Err(e) = &result {
+                        self.error(e.clone());
                     }
+                    self.respond(result, &resp);
                 },
                 OzoneMsg::ShardFileSize(b, size) => {
                     if b+1 > self.zone_state().files.len() {

@@ -371,7 +371,22 @@ impl<
             Some(self.chans().sup().clone()),
         );
 
-        res!(self.await_ready(&sentinel));
+        if let Err(e) = self.await_ready(&sentinel) {
+            // A supervisor that failed to start the database stops its bots itself.  One still
+            // starting is asked to once it is done, since nobody will use what it starts.
+            let stop = OzoneMsg::Shutdown(self.ozid().clone(), Responder::none(Some(self.ozid())));
+            if let Err(e2) = self.chans().sup().send(stop) {
+                error!(sync_log::stream(), err!(e2,
+                    "{}: Asking the supervisor to stop after a failed start.", self.ozid();
+                    Channel, Write));
+            }
+            // Nothing is left for a close to do.
+            let mut closing = lock_mutex!(self.closing,
+                "Taking the shutdown record after a failed start.");
+            closing.wg = None;
+            closing.done = true;
+            return Err(e);
+        }
 
         info!(sync_log::stream(), "Database initialisation and activation complete.");
         

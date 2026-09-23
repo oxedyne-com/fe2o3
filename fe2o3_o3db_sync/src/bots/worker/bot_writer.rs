@@ -61,7 +61,7 @@ pub struct WriterBot<
     active:     bool,
     inited:     bool,
     lpair:      LivePair,
-    syncer:     Option<Syncer<UIDL, UID, ENC, KH>>, // makes each record durable, then releases it
+    syncer:     Syncer<UIDL, UID, ENC, KH>, // makes each record durable, then releases it
 }
 
 impl<
@@ -107,16 +107,6 @@ impl<
         sync_log::set_stream(self.log_stream_id());
 
         if self.no_init() { return; }
-        match Syncer::start(self.label(), self.log_stream_id()) {
-            Ok(syncer) => self.syncer = Some(syncer),
-            Err(e) => {
-                // A writer that can append but never confirm is worse than none.
-                self.error(err!(e,
-                    "{}: The durability barrier thread could not be started.", self.ozid();
-                    Thread, Init));
-                return;
-            },
-        }
         self.now_listening();
         loop {
             if self.wind().b() < self.cfg().num_bots_per_zone((&self).wtyp()) {
@@ -128,10 +118,8 @@ impl<
         }
         // Everything written is released, and made durable where the policy owes it, before this
         // bot ends, so a database closed after a write has that write on disk.
-        if let Some(mut syncer) = self.syncer.take() {
-            let result = syncer.finish();
-            self.result(&result);
-        }
+        let result = self.syncer.finish();
+        self.result(&result);
     }
 
     fn listen(&mut self) -> LoopBreak {
@@ -155,10 +143,11 @@ impl<
                                     self.new_live_pair().map(|_| ())
                                 }
                             };
-                            match result {
-                                Err(e) => self.error(e),
-                                Ok(_) => self.respond(Ok(OzoneMsg::Ok), &resp),
+                            // Answered either way: a zone starting up waits on every writer.
+                            if let Err(e) = &result {
+                                self.error(e.clone());
                             }
+                            self.respond(result.map(|()| OzoneMsg::Ok), &resp);
                         }
                         // WORK
                         OzoneMsg::Write{
@@ -209,12 +198,15 @@ impl<
 >
     WriterBot<UIDL, UID, ENC, KH, PR, CS>
 {
+    /// Starts the writer's durability barrier thread, so that a writer which could never confirm
+    /// a write fails the database's start instead of its first write.
     pub fn new(
         args: ZoneWorkerInitArgs<UIDL, UID, ENC, KH, PR, CS>,
     )
-        -> Self
+        -> Outcome<Self>
     {
-        Self {
+        let syncer = res!(Syncer::start(fmt!("{}", args.api.ozid), args.log_stream_id.clone()));
+        Ok(Self {
             // Identity
             wind:       args.wind,
             wtyp:       args.wtyp,
@@ -231,8 +223,8 @@ impl<
             active:     false,
             inited:     false,
             lpair:      LivePair::default(),
-            syncer:     None,
-        }
+            syncer,
+        })
     }
 
     fn lpair(&self)                 -> &LivePair                    { &self.lpair }
@@ -328,18 +320,9 @@ impl<
             resp_w1, // The cbot responds to the caller.
         );
         let policy = SyncPolicy::of(self.cfg());
-        res!(res!(self.syncer()).hand(Handed::Record { cbot, insert, resp, policy }));
-        
-        Ok(())
-    }
+        res!(self.syncer.hand(Handed::Record { cbot, insert, resp, policy }));
 
-    fn syncer(&self) -> Outcome<&Syncer<UIDL, UID, ENC, KH>> {
-        match &self.syncer {
-            Some(syncer) => Ok(syncer),
-            None => Err(err!(
-                "{}: This writer has no durability barrier thread.", self.ozid();
-                Bug, Missing)),
-        }
+        Ok(())
     }
 
     /// Hands the syncer the live pair every record from here on is appended to.  It syncs through
@@ -357,8 +340,7 @@ impl<
                 "{}: The live index file {:?} is not open.", self.ozid(), self.lpair.ind.path;
                 Bug, Missing)),
         };
-        res!(res!(self.syncer()).hand(Handed::Pair(dat, ind)));
-        Ok(())
+        self.syncer.hand(Handed::Pair(dat, ind))
     }
 
     fn open_live_pair(&mut self) -> Outcome<()> {
@@ -383,19 +365,18 @@ impl<
                 "While getting next live file info from zbot.";
                 IO, Channel, Read)),
             Ok(OzoneMsg::UseLiveFile(fnum)) => fnum,
+            Ok(OzoneMsg::Error(e)) => return Err(err!(e,
+                "{}: The zone could not give this writer a new live file.", self.ozid();
+                IO, File, Create)),
             Ok(msg) => return Err(err!(
                 "Unrecognised new live file request response: {:?}", msg;
                 Bug, Invalid, Input)),
         };
 
-        // Durability barrier on seal: force the data and index of the file
-        // about to be sealed to stable storage before it is closed and a fresh
-        // live pair takes over. This is unconditional, independent of the
-        // configured write sync policy, and bounds crash loss to the current
-        // live file's tail under any policy -- once a file is sealed it is
-        // durable. The cost is one fsync pair per ~`data_file_max_bytes` of
-        // writes, not one per write.
-        res!(self.sync_sealed_pair());
+        // The file being sealed is made durable by the syncer before it releases anything written
+        // to its successor, whatever the configured policy, so crash loss stays bounded by the
+        // live file's tail.  This writer does not wait for that: the disk is the syncer's to wait
+        // on, and a writer held by it would hold every record queued behind the rollover.
         self.lpair.close();
         self.lpair = res!(self.zdir().open_live(fnum_new));
         res!(self.hand_pair());
@@ -566,27 +547,6 @@ impl<
                 Ok(start)
             },
         }
-    }
-
-    /// Forces the current live pair's data and index files to stable storage.
-    /// Used as the unconditional barrier on seal/rollover, so a sealed file is
-    /// durable regardless of the configured write sync policy.
-    fn sync_sealed_pair(&mut self) -> Outcome<()> {
-        if let Some(file) = self.lpair_mut().dat.file.as_mut() {
-            if let Err(e) = file.sync_data() {
-                return Err(err!(e,
-                    "{}: sync_data on the sealed data file failed.", self.ozid();
-                    IO, File, Write));
-            }
-        }
-        if let Some(file) = self.lpair_mut().ind.file.as_mut() {
-            if let Err(e) = file.sync_data() {
-                return Err(err!(e,
-                    "{}: sync_data on the sealed index file failed.", self.ozid();
-                    IO, File, Write));
-            }
-        }
-        Ok(())
     }
 
     fn rewind_file_pos(

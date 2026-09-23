@@ -7,19 +7,19 @@
 //! 2026-09-23 -- held every record queued behind it past the caller's six-second deadline, and each
 //! was reported as failed although each went on to land.
 //!
-//! Records are released in the order they were written.  The unconditional barrier on sealing a
-//! full live file stays with the writer, which holds the file.
+//! Records are released in the order they were written, so a record reaches its cache bot, and
+//! its accounting reaches the file bots, only after every record written before it.  A file bot
+//! collects a sealed file only once the file's accounted size has caught up with its size on
+//! disk, so holding records here delays a collection and never races one.
 
 use crate::{
     prelude::*,
-    base::{
-        cfg::OzoneConfig,
-        constant,
-    },
+    base::cfg::OzoneConfig,
     comm::{
         msg::OzoneMsg,
         response::Responder,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Simplex;
@@ -76,7 +76,8 @@ pub enum Handed<
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    // The live data and index files every record after this one is appended to.
+    // The live data and index files every record after this one is appended to.  The pair they
+    // replace is sealed, and is made durable before any record written to them is released.
     Pair(File, File),
     // One appended record, and the insert that releases it to its cache bot.
     Record {
@@ -163,14 +164,14 @@ struct Barrier<
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    label:      String,
-    rx:         Receiver<Handed<UIDL, UID, ENC, KH>>,
-    queue:      VecDeque<Handed<UIDL, UID, ENC, KH>>,
-    pair:       Option<(File, File)>,
-    since:      u32,                // records released since the last barrier
-    unsynced:   bool,               // a record went out with no barrier behind it yet
-    last:       Option<Instant>,    // when the last barrier completed
-    period:     Option<Duration>,   // the interval policy's, while it is in force
+    label:  String,
+    rx:     Receiver<Handed<UIDL, UID, ENC, KH>>,
+    queue:  VecDeque<Handed<UIDL, UID, ENC, KH>>,
+    pair:   Option<(File, File)>,
+    policy: SyncPolicy,         // the latest record's
+    dirty:  bool,               // the pair holds records no barrier has covered
+    since:  u32,                // records released since the last barrier
+    last:   Option<Instant>,    // when the last barrier completed
 }
 
 impl<
@@ -190,12 +191,12 @@ impl<
         Self {
             label,
             rx,
-            queue:      VecDeque::new(),
-            pair:       None,
-            since:      0,
-            unsynced:   false,
-            last:       None,
-            period:     None,
+            queue:  VecDeque::new(),
+            pair:   None,
+            policy: SyncPolicy::Never,
+            dirty:  false,
+            since:  0,
+            last:   None,
         }
     }
 
@@ -203,7 +204,7 @@ impl<
         loop {
             if self.queue.is_empty() {
                 // The interval policy owes the disk a barrier on its period whether or not another
-                // record arrives: the writes that end a burst are made durable too.
+                // record arrives, so the writes that end a burst are made durable too.
                 let item = match self.owed_in() {
                     Some(wait) => match self.rx.recv_timeout(wait) {
                         Ok(item) => Some(item),
@@ -228,8 +229,9 @@ impl<
             while let Some(item) = self.queue.pop_front() {
                 match item {
                     Handed::Pair(dat, ind) => {
-                        // Whatever went out from the pair being left is made durable first.
-                        if self.unsynced {
+                        // Sealing is unconditional, whatever the policy: a file that is no
+                        // longer live is durable before anything written after it is released.
+                        if self.dirty {
                             self.barrier_or_log();
                         }
                         self.pair = Some((dat, ind));
@@ -259,27 +261,17 @@ impl<
                 }
             }
         }
+        self.policy = policy;
+        self.dirty = true;
         self.since = self.since.saturating_add(run.len() as u32);
         let due = match policy {
-            SyncPolicy::EveryWrite => {
-                self.period = None;
-                true
+            SyncPolicy::EveryWrite  => true,
+            SyncPolicy::EveryN(n)   => self.since >= n,
+            SyncPolicy::Interval(p) => match self.last {
+                None        => true,
+                Some(last)  => last.elapsed() >= p,
             },
-            SyncPolicy::EveryN(n) => {
-                self.period = None;
-                self.since >= n
-            },
-            SyncPolicy::Interval(p) => {
-                self.period = Some(p);
-                match self.last {
-                    None        => true,
-                    Some(last)  => last.elapsed() >= p,
-                }
-            },
-            SyncPolicy::Never => {
-                self.period = None;
-                false
-            },
+            SyncPolicy::Never       => false,
         };
         let synced = if due { self.barrier() } else { Ok(()) };
         for (cbot, insert, resp) in run {
@@ -298,14 +290,12 @@ impl<
                 Self::tell(&resp, e);
             }
         }
-        if !due && policy != SyncPolicy::Never {
-            self.unsynced = true;
-        }
     }
 
     /// Forces the current pair to stable storage.
     fn barrier(&mut self) -> Outcome<()> {
         if let Some((dat, ind)) = &self.pair {
+            hooks::barrier_delay();
             if let Err(e) = dat.sync_data() {
                 return Err(err!(e,
                     "{}: sync_data on the live data file failed, so records written to it are not \
@@ -319,8 +309,8 @@ impl<
                     IO, File, Write));
             }
         }
+        self.dirty = false;
         self.since = 0;
-        self.unsynced = false;
         self.last = Some(Instant::now());
         Ok(())
     }
@@ -334,15 +324,15 @@ impl<
 
     /// How long until the interval policy owes a barrier, while it owes one.
     fn owed_in(&self) -> Option<Duration> {
-        match (self.unsynced, self.period, self.last) {
-            (true, Some(p), Some(last))    => Some(p.saturating_sub(last.elapsed())),
-            (true, Some(_), None)          => Some(Duration::ZERO),
-            _                              => None,
+        match (self.dirty, self.policy, self.last) {
+            (true, SyncPolicy::Interval(p), Some(last)) => Some(p.saturating_sub(last.elapsed())),
+            (true, SyncPolicy::Interval(_), None)       => Some(Duration::ZERO),
+            _                                           => None,
         }
     }
 
     fn end(&mut self) {
-        if self.unsynced {
+        if self.dirty && self.policy != SyncPolicy::Never {
             self.barrier_or_log();
         }
     }
