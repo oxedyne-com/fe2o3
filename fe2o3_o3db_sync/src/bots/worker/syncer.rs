@@ -76,17 +76,17 @@ impl SyncPolicy {
     }
 }
 
-/// What a writer hands its syncer, in the order it wrote.
+/// What a writer hands its syncer, in the order it wrote.  A `Pair` names the live data and index
+/// files every later record is appended to; the pair it replaces is sealed, made durable before
+/// any record written to the new one is released.  A `Record` is one appended record with the
+/// insert that releases it to its cache bot.
 pub enum Handed<
     const UIDL: usize,
     UID:    NumIdDat<UIDL>,
     ENC:    Encrypter,
     KH:     Hasher,
 > {
-    // The live data and index files every record after this one is appended to.  The pair they
-    // replace is sealed, and is made durable before any record written to them is released.
-    Pair(File, File),
-    // One appended record, and the insert that releases it to its cache bot.
+    Pair(File, File),   // data, index
     Record {
         cbot:   Simplex<OzoneMsg<UIDL, UID, ENC, KH>>,
         insert: OzoneMsg<UIDL, UID, ENC, KH>,
