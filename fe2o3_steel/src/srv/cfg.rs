@@ -2087,9 +2087,10 @@ pub struct WatchPeer {
     // What to call it in an alert: a person's name for the machine, not a hostname, since the
     // alert is read on a phone in the dark.
     pub name:     String,
-    // The machine this entry probes something on, which is the row the Fleet page draws it in.
-    // A gateway's `/api/health` and the Steel health body on the same box are two entries and
-    // one row. Absent in configuration, it is the entry's own name.
+    // The machine this entry probes something on: the row the Fleet page draws it in, and the
+    // unit an outage is told by, so a gateway's `/api/health` and the Steel health body on the
+    // same box are two entries, one row and one text. Absent in configuration, it is the
+    // entry's own name.
     pub host:     String,
     pub url:      String,   // the health URL, `https` unless `plain_ok` is set
     // Whether a plain `http` URL is acceptable for this one peer. Off unless the operator
