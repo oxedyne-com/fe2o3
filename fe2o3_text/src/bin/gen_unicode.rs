@@ -57,6 +57,12 @@ const DATA_FILES: &[&str] = &[
 	"ucd/auxiliary/GraphemeBreakProperty.txt",
 	"ucd/auxiliary/WordBreakProperty.txt",
 	"ucd/emoji/emoji-data.txt",
+	"ucd/Scripts.txt",
+	"ucd/ScriptExtensions.txt",
+	"ucd/PropList.txt",
+	"ucd/PropertyAliases.txt",
+	"ucd/PropertyValueAliases.txt",
+	"ucd/auxiliary/SentenceBreakProperty.txt",
 ];
 
 /// Conformance test files vendored into `tests/unicode_data/`.
@@ -247,7 +253,10 @@ fn run() -> Outcome<()> {
 	res!(mkdir(&tables));
 
 	res!(write_file(&tables.join("mod.rs"),		&emit_mod()));
-	res!(write_file(&tables.join("prop.rs"),	&emit_prop()));
+	let cats = res!(Cats::parse(&src, &ucd));
+
+	res!(write_file(&tables.join("prop.rs"),	&emit_prop(&cats)));
+	res!(write_file(&tables.join("cat.rs"),		&res!(emit_cat(&cats))));
 	res!(write_file(&tables.join("norm.rs"),	&res!(emit_norm(&ucd))));
 	res!(write_file(&tables.join("lb.rs"),		&emit_lb(&ucd)));
 	res!(write_file(&tables.join("seg.rs"),		&emit_seg(&ucd)));
@@ -944,6 +953,7 @@ fn emit_mod() -> String {
 //! is invisible next to the rest of a segmentation pass.
 
 pub mod bidi;
+pub mod cat;
 pub mod lb;
 pub mod norm;
 pub mod prop;
@@ -993,7 +1003,7 @@ fn emit_enum(
 }
 
 /// Emits the property enums.
-fn emit_prop() -> String {
+fn emit_prop(cats: &Cats) -> String {
 
 	let mut out = header("The Unicode character property enums.");
 	out.push_str("\nuse crate::unicode::lookup::Partitioned;\n\n");
@@ -1030,7 +1040,9 @@ pub enum BracketKind {
 	/// A closing bracket.
 	Close,
 }
+
 ");
+	emit_cat_enums(&mut out, cats);
 	out
 }
 
@@ -1176,4 +1188,641 @@ fn emit_bidi(ucd: &Ucd) -> String {
 	emit_u8(&mut out, "BRACKET_KINDS", "The kind of each bracket: 0 opening, 1 closing.", &kinds);
 
 	out
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────────────────────┐
+// │ Character classes: General_Category, Script, Script_Extensions, binary properties         │
+// └───────────────────────────────────────────────────────────────────────────────────────────┘
+
+/// The General_Category values in the order the generated enum takes them. The groups (`L`, `LC`,
+/// ...) are not variants; they become bit masks over this order.
+const GC_CODES: &[&str] = &[
+	"Lu", "Ll", "Lt", "Lm", "Lo",
+	"Mn", "Mc", "Me",
+	"Nd", "Nl", "No",
+	"Pc", "Pd", "Ps", "Pe", "Pi", "Pf", "Po",
+	"Sm", "Sc", "Sk", "So",
+	"Zs", "Zl", "Zp",
+	"Cc", "Cf", "Cs", "Co", "Cn",
+];
+
+/// Normalises a property name or value alias by UAX44-LM3, less the `is` prefix, which the
+/// run time lookup tries both with and without: ASCII lower case, and no spaces, underscores
+/// or hyphens.
+fn loose(name: &str) -> String {
+	name.chars()
+		.filter(|c| *c != ' ' && *c != '_' && *c != '-')
+		.map(|c| c.to_ascii_lowercase())
+		.collect()
+}
+
+/// Sorts and merges a list of inclusive code point ranges, joining those that touch.
+fn merge(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+	ranges.sort();
+	let mut out: Vec<(u32, u32)> = Vec::with_capacity(ranges.len());
+	for (lo, hi) in ranges {
+		match out.last_mut() {
+			Some(last) if lo <= last.1.saturating_add(1) => {
+				if hi > last.1 {
+					last.1 = hi;
+				}
+			},
+			_ => out.push((lo, hi)),
+		}
+	}
+	out
+}
+
+/// Inserts an alias, refusing one that already names something else.
+fn alias<T: Copy + PartialEq + std::fmt::Debug>(
+	map:	&mut BTreeMap<String, T>,
+	name:	&str,
+	val:	T,
+	what:	&str,
+)
+	-> Outcome<()>
+{
+	let key = loose(name);
+	match map.get(&key) {
+		Some(old) if *old != val => Err(err!(
+			"The {} alias {:?} names both {:?} and {:?}.", what, name, old, val;
+			Invalid, Input, Mismatch)),
+		_ => {
+			map.insert(key, val);
+			Ok(())
+		},
+	}
+}
+
+/// The character class properties, parsed.
+struct Cats {
+	gc:			Vec<u8>,						// GC_CODES index per code point
+	gc_long:	Vec<String>,					// long name per GC_CODES entry
+	gc_alias:	BTreeMap<String, u32>,			// loose alias to category mask
+	scripts:	Vec<(String, String)>,			// (short, long), enum order
+	sc_alias:	BTreeMap<String, u8>,			// loose alias to script index
+	sc:			Vec<u8>,						// script index per code point
+	scx:		Vec<u16>,						// 0, or 1 + index into scx_sets
+	scx_sets:	Vec<Vec<u8>>,
+	bins:		BTreeMap<String, Vec<(u32, u32)>>,	// long name to merged ranges
+	bin_alias:	BTreeMap<String, u8>,			// loose alias to index in `bins`
+	gcb_alias:	BTreeMap<String, u8>,			// loose alias to GCB_CLASSES index
+	wb_alias:	BTreeMap<String, u8>,			// loose alias to WB_CLASSES index
+	sbs:		Vec<(String, String)>,			// Sentence_Break (short, long), enum order
+	sb_alias:	BTreeMap<String, u8>,
+	sb:			Vec<u8>,						// Sentence_Break index per code point
+}
+
+impl Cats {
+
+	fn parse(src: &BTreeMap<&str, String>, ucd: &Ucd) -> Outcome<Self> {
+
+		let get = |path: &str| -> Outcome<&String> {
+			match src.get(path) {
+				Some(text) => Ok(text),
+				None => Err(err!("The file {} was not downloaded.", path; Missing, Input)),
+			}
+		};
+		let pva = res!(get("ucd/PropertyValueAliases.txt"));
+
+		// General_Category names and groups.
+		let mut gc_long		= vec![String::new(); GC_CODES.len()];
+		let mut gc_alias	= BTreeMap::new();
+		for line in pva.lines() {
+			let (data, note) = match line.split_once('#') {
+				Some((d, n))	=> (d, n),
+				None			=> (line, ""),
+			};
+			let f: Vec<&str> = data.split(';').map(|x| x.trim()).collect();
+			if f.len() < 3 || f[0] != "gc" {
+				continue;
+			}
+			let mask = if note.contains('|') {
+				let mut m = 0u32;
+				for part in note.split('|') {
+					let code = part.trim();
+					match GC_CODES.iter().position(|c| *c == code) {
+						Some(i)	=> m |= 1 << i,
+						None	=> return Err(err!(
+							"The category group {} names an unknown member {:?}.", f[1], code;
+							Invalid, Input)),
+					}
+				}
+				m
+			} else {
+				match GC_CODES.iter().position(|c| *c == f[1]) {
+					Some(i) => {
+						gc_long[i] = f[2].to_string();
+						1 << i
+					},
+					None => return Err(err!(
+						"The general category {:?} is not known to the generator.", f[1];
+						Invalid, Input, Mismatch)),
+				}
+			};
+			for name in &f[1..] {
+				res!(alias(&mut gc_alias, name, mask, "General_Category"));
+			}
+		}
+		for (i, l) in gc_long.iter().enumerate() {
+			if l.is_empty() {
+				return Err(err!(
+					"PropertyValueAliases.txt gives no long name for {}.", GC_CODES[i];
+					Missing, Input));
+			}
+		}
+
+		let mut gc = vec![0u8; NUM_CP];
+		for (c, code) in ucd.gc.iter().enumerate() {
+			let code = String::from_utf8_lossy(code);
+			match GC_CODES.iter().position(|x| *x == code) {
+				Some(i)	=> gc[c] = i as u8,
+				None	=> return Err(err!(
+					"The general category {} at U+{:04X} is not known.", code, c; Invalid, Input)),
+			}
+		}
+
+		// Script names.
+		let mut scripts		= Vec::new();
+		let mut sc_alias	= BTreeMap::new();
+		for line in pva.lines() {
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 3 || f[0] != "sc" {
+				continue;
+			}
+			let i = scripts.len();
+			if i > 255 {
+				return Err(err!("There are more scripts than a byte can index."; Excessive));
+			}
+			scripts.push((f[1].to_string(), f[2].to_string()));
+			for name in &f[1..] {
+				res!(alias(&mut sc_alias, name, i as u8, "Script"));
+			}
+		}
+		let unknown = match scripts.iter().position(|(s, _)| s == "Zzzz") {
+			Some(i)	=> i as u8,
+			None	=> return Err(err!("No script Zzzz (Unknown) was listed."; Missing, Input)),
+		};
+		let by_long = |name: &str| -> Outcome<u8> {
+			match scripts.iter().position(|(_, l)| l == name) {
+				Some(i)	=> Ok(i as u8),
+				None	=> Err(err!("The script {:?} is not in PropertyValueAliases.txt.", name;
+					Invalid, Input, Mismatch)),
+			}
+		};
+		let by_short = |name: &str| -> Outcome<u8> {
+			match scripts.iter().position(|(s, _)| s == name) {
+				Some(i)	=> Ok(i as u8),
+				None	=> Err(err!("The script {:?} is not in PropertyValueAliases.txt.", name;
+					Invalid, Input, Mismatch)),
+			}
+		};
+
+		let mut sc = vec![unknown; NUM_CP];
+		for line in res!(get("ucd/Scripts.txt")).lines() {
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 2 {
+				continue;
+			}
+			let (lo, hi)	= res!(range(f[0]));
+			let v			= res!(by_long(f[1]));
+			for c in lo..=hi {
+				sc[c as usize] = v;
+			}
+		}
+
+		let mut scx			= vec![0u16; NUM_CP];
+		let mut scx_sets: Vec<Vec<u8>> = Vec::new();
+		for line in res!(get("ucd/ScriptExtensions.txt")).lines() {
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 2 {
+				continue;
+			}
+			let (lo, hi) = res!(range(f[0]));
+			let mut set = Vec::new();
+			for s in f[1].split_whitespace() {
+				set.push(res!(by_short(s)));
+			}
+			set.sort();
+			set.dedup();
+			let id = match scx_sets.iter().position(|x| *x == set) {
+				Some(i)	=> i,
+				None	=> {
+					scx_sets.push(set);
+					scx_sets.len() - 1
+				},
+			};
+			for c in lo..=hi {
+				scx[c as usize] = (id + 1) as u16;
+			}
+		}
+
+		// Binary properties.  The contributory `Other_*` properties are left out: UAX #44 says
+		// they exist to derive others and are not for use in their own right.
+		let mut raw: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
+		for path in [
+			"ucd/PropList.txt",
+			"ucd/DerivedCoreProperties.txt",
+			"ucd/emoji/emoji-data.txt",
+		] {
+			for line in res!(get(path)).lines() {
+				let f = match fields(line) {
+					Some(f) => f,
+					None	=> continue,
+				};
+				if f.len() != 2 || f[1].starts_with("Other_") {
+					continue;
+				}
+				let r = res!(range(f[0]));
+				raw.entry(f[1].to_string()).or_default().push(r);
+			}
+		}
+		let bins: BTreeMap<String, Vec<(u32, u32)>> =
+			raw.into_iter().map(|(k, v)| (k, merge(v))).collect();
+
+		let mut bin_alias = BTreeMap::new();
+		for (i, name) in bins.keys().enumerate() {
+			res!(alias(&mut bin_alias, name, i as u8, "binary property"));
+		}
+		let mut in_binary = false;
+		for line in res!(get("ucd/PropertyAliases.txt")).lines() {
+			if line.starts_with('#') {
+				if line.contains("Binary Properties") {
+					in_binary = true;
+				} else if line.contains("Properties") {
+					in_binary = false;
+				}
+				continue;
+			}
+			if !in_binary {
+				continue;
+			}
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 2 {
+				continue;
+			}
+			if let Some(i) = bins.keys().position(|k| k == f[1]) {
+				for name in &f {
+					res!(alias(&mut bin_alias, name, i as u8, "binary property"));
+				}
+			}
+		}
+
+		// The segmentation break properties, by the aliases a `\p{gcb=..}` may use.  A value
+		// no character takes (the retired emoji Word_Break values) is left out.
+		let mut gcb_alias	= BTreeMap::new();
+		let mut wb_alias	= BTreeMap::new();
+		let mut sbs			= Vec::new();
+		let mut sb_alias	= BTreeMap::new();
+		for line in pva.lines() {
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 3 {
+				continue;
+			}
+			let (list, map) = match f[0] {
+				"GCB"	=> (GCB_CLASSES, &mut gcb_alias),
+				"WB"	=> (WB_CLASSES, &mut wb_alias),
+				"SB"	=> {
+					let i = sbs.len() as u8;
+					sbs.push((f[1].to_string(), f[2].to_string()));
+					for name in &f[1..] {
+						res!(alias(&mut sb_alias, name, i, "Sentence_Break"));
+					}
+					continue;
+				},
+				_		=> continue,
+			};
+			if let Some(i) = list.iter().position(|(u, _, _)| *u == f[2] || *u == f[1]) {
+				for name in &f[1..] {
+					res!(alias(map, name, i as u8, f[0]));
+				}
+			}
+		}
+		let other = match sbs.iter().position(|(_, l)| l == "Other") {
+			Some(i)	=> i as u8,
+			None	=> return Err(err!("No Sentence_Break value Other was listed."; Missing, Input)),
+		};
+		let mut sb = vec![other; NUM_CP];
+		for line in res!(get("ucd/auxiliary/SentenceBreakProperty.txt")).lines() {
+			let f = match fields(line) {
+				Some(f) => f,
+				None	=> continue,
+			};
+			if f.len() < 2 {
+				continue;
+			}
+			let (lo, hi) = res!(range(f[0]));
+			let v = match sbs.iter().position(|(_, l)| l == f[1]) {
+				Some(i)	=> i as u8,
+				None	=> return Err(err!("The Sentence_Break value {:?} is not known.", f[1];
+					Invalid, Input, Mismatch)),
+			};
+			for c in lo..=hi {
+				sb[c as usize] = v;
+			}
+		}
+
+		Ok(Self {
+			gc, gc_long, gc_alias, scripts, sc_alias, sc, scx, scx_sets, bins, bin_alias,
+			gcb_alias, wb_alias, sbs, sb_alias, sb,
+		})
+	}
+
+	/// The Rust variant name of a script: its long name without underscores.
+	fn variant(&self, i: usize) -> String {
+		match self.scripts.get(i) {
+			Some((_, long))	=> long.replace('_', ""),
+			None			=> String::from("Unknown"),
+		}
+	}
+}
+
+/// Emits a `u16` array, twelve values to the line.
+fn emit_u16(out: &mut String, name: &str, doc: &str, vals: &[u16]) {
+	let _ = write!(out, "/// {}\npub static {}: [u16; {}] = [\n", doc, name, vals.len());
+	for chunk in vals.chunks(12) {
+		let mut line = String::from("\t");
+		for v in chunk {
+			let _ = write!(line, "{}, ", v);
+		}
+		let _ = write!(out, "{}\n", line.trim_end());
+	}
+	out.push_str("];\n\n");
+}
+
+/// Emits an array of variants of an enum whose variant names are given, eight to the line.
+fn emit_variants(
+	out:	&mut String,
+	name:	&str,
+	doc:	&str,
+	typ:	&str,
+	short:	&str,
+	names:	&[String],
+	vals:	&[u8],
+)
+	-> Outcome<()>
+{
+	let _ = write!(out, "/// {}\npub static {}: [{}; {}] = [\n", doc, name, typ, vals.len());
+	for chunk in vals.chunks(8) {
+		let mut line = String::from("\t");
+		for v in chunk {
+			match names.get(*v as usize) {
+				Some(n)	=> { let _ = write!(line, "{}::{}, ", short, n); },
+				None	=> return Err(err!(
+					"The index {} is out of range for {}.", v, typ; Bug, Index)),
+			}
+		}
+		let _ = write!(out, "{}\n", line.trim_end());
+	}
+	out.push_str("];\n\n");
+	Ok(())
+}
+
+/// Emits the General_Category and Script enums, into the property enum file.
+fn emit_cat_enums(out: &mut String, cats: &Cats) {
+
+	out.push_str(
+"/// The General_Category property of UAX #44, by its two letter abbreviation.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum GeneralCategory {
+");
+	for code in GC_CODES {
+		let _ = write!(out, "\t{},\n", code);
+	}
+	out.push_str("}\n\n");
+	out.push_str(
+"impl Partitioned for GeneralCategory {
+
+	const DEFAULT: Self = Self::Cn;
+
+	fn table() -> (&'static [u32], &'static [Self]) {
+		(&super::cat::GC_STARTS, &super::cat::GC_VALS)
+	}
+}
+
+impl GeneralCategory {
+
+	/// The long UCD name, `Uppercase_Letter` for `Lu`.
+	pub fn name(self) -> &'static str {
+		match self {
+");
+	for (i, code) in GC_CODES.iter().enumerate() {
+		let long = match cats.gc_long.get(i) {
+			Some(l)	=> l.as_str(),
+			None	=> "",
+		};
+		let _ = write!(out, "\t\t\tSelf::{}\t=> \"{}\",\n", code, long);
+	}
+	out.push_str("\t\t}\n\t}\n\n\t/// The two letter abbreviation.\n\tpub fn abbr(self) -> &'static str {\n\t\tmatch self {\n");
+	for code in GC_CODES {
+		let _ = write!(out, "\t\t\tSelf::{}\t=> \"{}\",\n", code, code);
+	}
+	out.push_str("\t\t}\n\t}\n}\n\n");
+
+	out.push_str(
+"/// The Script property of UAX #24. A character's Script_Extensions, the wider set of scripts it
+/// is used with, are in `unicode::property`.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Script {
+");
+	for i in 0..cats.scripts.len() {
+		let _ = write!(out, "\t{},\n", cats.variant(i));
+	}
+	out.push_str("}\n\n");
+	out.push_str(
+"impl Partitioned for Script {
+
+	const DEFAULT: Self = Self::Unknown;
+
+	fn table() -> (&'static [u32], &'static [Self]) {
+		(&super::cat::SC_STARTS, &super::cat::SC_VALS)
+	}
+}
+
+impl Script {
+
+	/// The long UCD name, `Old_Italic` for instance.
+	pub fn name(self) -> &'static str {
+		match self {
+");
+	for (i, (_, long)) in cats.scripts.iter().enumerate() {
+		let _ = write!(out, "\t\t\tSelf::{}\t=> \"{}\",\n", cats.variant(i), long);
+	}
+	out.push_str("\t\t}\n\t}\n\n\t/// The four letter ISO 15924 code, `Ital` for Old_Italic.\n\tpub fn code(self) -> &'static str {\n\t\tmatch self {\n");
+	for (i, (short, _)) in cats.scripts.iter().enumerate() {
+		let _ = write!(out, "\t\t\tSelf::{}\t=> \"{}\",\n", cats.variant(i), short);
+	}
+	out.push_str("\t\t}\n\t}\n}\n\n");
+
+	out.push_str(
+"/// The Sentence_Break property of UAX #29.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SentenceClass {
+");
+	for (_, long) in &cats.sbs {
+		let _ = write!(out, "\t{},\n", long.replace('_', ""));
+	}
+	out.push_str(
+"}
+
+impl Partitioned for SentenceClass {
+
+	const DEFAULT: Self = Self::Other;
+
+	fn table() -> (&'static [u32], &'static [Self]) {
+		(&super::cat::SB_STARTS, &super::cat::SB_VALS)
+	}
+}
+");
+}
+
+/// Emits the character class tables.
+fn emit_cat(cats: &Cats) -> Outcome<String> {
+
+	let mut out = header(
+		"Tables for the character classes of UAX #44 and UAX #24: General_Category, Script, \
+		 Script_Extensions and the binary properties.");
+	// Short aliases keep the long value arrays readable and the file a third smaller.
+	out.push_str("\nuse crate::unicode::prop::{\n\tGeneralCategory,\n\tGeneralCategory as G,\n\tGraphemeClass,\n\tScript,\n\tScript as S,\n\tSentenceClass,\n\tWordClass,\n};\n\n");
+
+	let gc_names: Vec<String> = GC_CODES.iter().map(|c| c.to_string()).collect();
+	let (starts, vals) = partition(&cats.gc);
+	emit_u32(&mut out, "GC_STARTS", "Start code points of the General_Category runs.", &starts);
+	res!(emit_variants(&mut out, "GC_VALS", "The General_Category of each run.",
+		"GeneralCategory", "G", &gc_names, &vals));
+
+	let _ = write!(out,
+		"/// Every General_Category alias, loosely normalised and sorted, with the categories it \
+		 names as a mask over the `GeneralCategory` variants.\npub static GC_NAMES: [(&str, u32); {}] = [\n",
+		cats.gc_alias.len());
+	for (k, v) in &cats.gc_alias {
+		let _ = write!(out, "\t(\"{}\", 0x{:08X}),\n", k, v);
+	}
+	out.push_str("];\n\n");
+
+	let sc_names: Vec<String> = (0..cats.scripts.len()).map(|i| cats.variant(i)).collect();
+	let (starts, vals) = partition(&cats.sc);
+	emit_u32(&mut out, "SC_STARTS", "Start code points of the Script runs.", &starts);
+	res!(emit_variants(&mut out, "SC_VALS", "The Script of each run.", "Script", "S", &sc_names, &vals));
+
+	let _ = write!(out,
+		"/// Every Script alias, loosely normalised and sorted.\npub static SCRIPT_NAMES: [(&str, Script); {}] = [\n",
+		cats.sc_alias.len());
+	for (k, v) in &cats.sc_alias {
+		let _ = write!(out, "\t(\"{}\", S::{}),\n", k, cats.variant(*v as usize));
+	}
+	out.push_str("];\n\n");
+
+	// Script_Extensions as a partition of set numbers, zero where a character's extensions are
+	// just its script.
+	let mut starts	= Vec::new();
+	let mut runs	= Vec::new();
+	let mut prev	= None;
+	for (c, v) in cats.scx.iter().enumerate() {
+		if prev != Some(*v) {
+			starts.push(c as u32);
+			runs.push(*v);
+			prev = Some(*v);
+		}
+	}
+	emit_u32(&mut out, "SCX_STARTS", "Start code points of the Script_Extensions runs.", &starts);
+	emit_u16(&mut out, "SCX_VALS",
+		"The Script_Extensions set of each run: zero for the character's own script alone, \
+		 otherwise one more than the set's index in `SCX_OFFS`.", &runs);
+	let mut offs: Vec<u16> = vec![0];
+	let mut pool: Vec<u8> = Vec::new();
+	for set in &cats.scx_sets {
+		pool.extend_from_slice(set);
+		offs.push(pool.len() as u16);
+	}
+	emit_u16(&mut out, "SCX_OFFS",
+		"Where each Script_Extensions set begins in `SCX_POOL`, with the end as the last entry.",
+		&offs);
+	res!(emit_variants(&mut out, "SCX_POOL", "The scripts of every Script_Extensions set, in turn.",
+		"Script", "S", &sc_names, &pool));
+
+	// Binary properties as inclusive range pairs.
+	let mut flat: Vec<u32>	= Vec::new();
+	let mut boffs: Vec<u32>	= vec![0];
+	let mut longs			= String::new();
+	for (name, ranges) in &cats.bins {
+		for (lo, hi) in ranges {
+			flat.push(*lo);
+			flat.push(*hi);
+		}
+		boffs.push(flat.len() as u32);
+		let _ = write!(longs, "\t\"{}\",\n", name);
+	}
+	emit_u32(&mut out, "BIN_RANGES",
+		"The binary properties as inclusive code point ranges, low then high, one property after \
+		 another.", &flat);
+	emit_u32(&mut out, "BIN_OFFS",
+		"Where each binary property's ranges begin in `BIN_RANGES`, with the end as the last entry.",
+		&boffs);
+	let _ = write!(out, "/// The long name of each binary property.\npub static BIN_LONG: [&str; {}] = [\n{}];\n\n",
+		cats.bins.len(), longs);
+	for (i, name) in cats.bins.keys().enumerate() {
+		let _ = write!(out, "pub const BIN_{}: u8 = {};\n", name.to_ascii_uppercase(), i);
+	}
+	out.push('\n');
+	let _ = write!(out,
+		"/// Every binary property alias, loosely normalised and sorted, with the property's index.\npub static BIN_NAMES: [(&str, u8); {}] = [\n",
+		cats.bin_alias.len());
+	for (k, v) in &cats.bin_alias {
+		let _ = write!(out, "\t(\"{}\", {}),\n", k, v);
+	}
+	out.push_str("];\n\n");
+
+	// The segmentation break properties' names; their values are in `seg`.
+	for (name, typ, list, map) in [
+		("GCB_NAMES", "GraphemeClass", GCB_CLASSES, &cats.gcb_alias),
+		("WB_NAMES", "WordClass", WB_CLASSES, &cats.wb_alias),
+	] {
+		let _ = write!(out,
+			"/// Every {} alias, loosely normalised and sorted.\npub static {}: [(&str, {}); {}] = [\n",
+			typ, name, typ, map.len());
+		for (k, v) in map {
+			let variant = match list.get(*v as usize) {
+				Some((_, rust, _))	=> *rust,
+				None				=> return Err(err!("Index {} is out of range for {}.", v, typ;
+					Bug, Index)),
+			};
+			let _ = write!(out, "\t(\"{}\", {}::{}),\n", k, typ, variant);
+		}
+		out.push_str("];\n\n");
+	}
+
+	let sb_names: Vec<String> = cats.sbs.iter().map(|(_, l)| l.replace('_', "")).collect();
+	let (starts, vals) = partition(&cats.sb);
+	emit_u32(&mut out, "SB_STARTS", "Start code points of the Sentence_Break runs.", &starts);
+	res!(emit_variants(&mut out, "SB_VALS", "The Sentence_Break of each run.", "SentenceClass",
+		"SentenceClass", &sb_names, &vals));
+	let _ = write!(out,
+		"/// Every Sentence_Break alias, loosely normalised and sorted.\npub static SB_NAMES: [(&str, SentenceClass); {}] = [\n",
+		cats.sb_alias.len());
+	for (k, v) in &cats.sb_alias {
+		let n = sb_names.get(*v as usize).cloned().unwrap_or_default();
+		let _ = write!(out, "\t(\"{}\", SentenceClass::{}),\n", k, n);
+	}
+	out.push_str("];\n");
+
+	Ok(out)
 }

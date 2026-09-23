@@ -12,6 +12,9 @@
 //! - [`bidi`], the bidirectional algorithm of UAX #9, which resolves embedding levels and the
 //!   visual order of a paragraph.
 //!
+//! Beside them, [`property`] answers which General_Category, Script, Script_Extensions and binary
+//! properties a character has, and resolves the `\p{...}` names a regular expression uses.
+//!
 //! The tables in [`tables`] are generated and committed, never fetched at build or run time. The
 //! Unicode version they come from is [`UCD_VERSION`]; the generator is
 //! `fe2o3_text/src/bin/gen_unicode.rs`, and it also vendors the Unicode Consortium conformance
@@ -31,6 +34,7 @@ pub mod bidi;
 pub mod linebreak;
 pub mod lookup;
 pub mod norm;
+pub mod property;
 pub mod segment;
 pub mod tables;
 
