@@ -824,12 +824,16 @@ async fn read_chunked<
     -> Outcome<(Vec<u8>, Vec<u8>)>
 {
     let max = limits.and_then(|l| l.max_body_bytes);
+    let max_trailer = limits.and_then(|l| l.max_header_bytes); // Same bound as the header block.
     let mut raw: Vec<u8> = remnant;   // Undecoded bytes not yet consumed.
     let mut out: Vec<u8> = Vec::new(); // The decoded body.
 
     loop {
-        // The chunk size line.
-        let line = match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+        // The chunk size line. Capped independently of any configured limits --
+        // see `HTTP_CHUNK_LINE_MAX`.
+        let line = match res!(take_line::<BODY_CHUNK_SIZE, _>(
+            stream.as_mut(), &mut raw, Some(constant::HTTP_CHUNK_LINE_MAX), "chunk-size",
+        ).await) {
             Some(l) => l,
             None => return Err(err!(
                 "The peer closed the connection in the middle of a chunked \
@@ -853,7 +857,9 @@ async fn read_chunked<
         // message begins, and are then discarded.
         if size == 0 {
             loop {
-                match res!(take_line::<BODY_CHUNK_SIZE, _>(stream.as_mut(), &mut raw).await) {
+                match res!(take_line::<BODY_CHUNK_SIZE, _>(
+                    stream.as_mut(), &mut raw, max_trailer, "trailer",
+                ).await) {
                     Some(l) if l.is_empty() => break,
                     Some(_)                 => continue,
                     // A peer that hangs up rather than closing off its
@@ -901,6 +907,15 @@ async fn read_chunked<
 
 /// Take the next CRLF-terminated line off the buffer, reading more from the
 /// stream until there is one. `None` means the peer closed first.
+///
+/// `max_len` rejects a line -- `TooBig` -- once `raw` passes it with no CRLF
+/// found; `None` leaves the line unbounded. `what` names the line kind (e.g.
+/// "chunk-size", "trailer") in that error.
+///
+/// Only the bytes not yet searched, plus one byte behind them for a CRLF
+/// split across a read boundary, are scanned on each pass -- rescanning the
+/// whole buffer from the front on every fill is quadratic in a peer that
+/// trickles one byte at a time.
 #[cfg(feature = "async")]
 async fn take_line<
     const BODY_CHUNK_SIZE: usize,
@@ -908,15 +923,29 @@ async fn take_line<
 >(
     mut stream: Pin<&mut R>,
     raw:        &mut Vec<u8>,
+    max_len:    Option<usize>,
+    what:       &str,
 )
     -> Outcome<Option<String>>
 {
+    let mut scanned = 0; // How much of `raw` has already turned up no CRLF.
     loop {
-        if let Some(i) = raw.windows(2).position(|w| w == b"\r\n") {
+        if let Some(i) = raw[scanned..].windows(2).position(|w| w == b"\r\n") {
+            let i = scanned + i;
             let line = String::from_utf8_lossy(&raw[..i]).to_string();
             raw.drain(..i + 2);
             return Ok(Some(line));
         }
+        if let Some(lim) = max_len {
+            if raw.len() > lim {
+                return Err(err!(
+                    "A chunked HTTP {} line ran to {} bytes with no \
+                    terminating CRLF, over the {}-byte limit.",
+                    what, raw.len(), lim;
+                    IO, Network, Input, TooBig));
+            }
+        }
+        scanned = raw.len().saturating_sub(1);
         if !res!(fill::<BODY_CHUNK_SIZE, _>(stream.as_mut(), raw).await) {
             return Ok(None);
         }
@@ -966,6 +995,28 @@ mod body_tests {
             &Vec::new(),
             is_request,
             None,
+        )));
+        Ok(msg)
+    }
+
+    /// Like `read_reply`, but with caller-chosen `ReadLimits` rather than none.
+    fn read_reply_with_limits(
+        wire:       &str,
+        is_request: Option<bool>,
+        limits:     &ReadLimits,
+    ) -> Outcome<Option<HttpMessage>> {
+        let bytes = wire.as_bytes();
+        let mut stream = std::io::Cursor::new(bytes);
+        let rt = res!(tokio::runtime::Runtime::new());
+        let (msg, _rest) = res!(rt.block_on(HttpMessage::read::<
+            { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
+            { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
+            _,
+        >(
+            Pin::new(&mut stream),
+            &Vec::new(),
+            is_request,
+            Some(limits),
         )));
         Ok(msg)
     }
@@ -1200,6 +1251,53 @@ mod body_tests {
             \r\n\
             ffffffffffffffff\r\n";
         assert!(read_reply(wire, Some(false)).is_err());
+        Ok(())
+    }
+
+    /// A chunk-size line is a hex length and maybe an extension: a few dozen
+    /// bytes. A peer that keeps extending it with no CRLF is not describing a
+    /// real chunk, it is growing the reader's buffer without limit, and gets
+    /// `TooBig` well short of the whole message ever landing in memory.
+    #[test]
+    fn test_an_endless_chunk_size_line_is_capped() -> Outcome<()> {
+        let junk = "a".repeat(constant::HTTP_CHUNK_LINE_MAX + 4_000);
+        let wire = fmt!("HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            {}", junk);
+        match read_reply(&wire, Some(false)) {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an endless chunk-size line raised the wrong error: {}", e),
+            Ok(_) => return Err(err!(
+                "An endless chunk-size line was read as if it had a CRLF.";
+                Test, Unreachable)),
+        }
+        Ok(())
+    }
+
+    /// A trailer is one more header-like field, so it is bounded the same way
+    /// the header block is: by `max_header_bytes`. Without the cap this loops
+    /// forever on the never-terminated line above `read_chunked`'s zero chunk.
+    #[test]
+    fn test_an_endless_trailer_line_is_capped() -> Outcome<()> {
+        // Comfortably above `HTTP_DEFAULT_HEADER_CHUNK_SIZE` (1,500), so the header
+        // phase's own bulk-read check never trips on a read that happens to reach
+        // past the header terminator into this body; comfortably below the junk
+        // length below, so it is this trailer cap, not that one, doing the work.
+        let limits = ReadLimits { max_header_bytes: Some(2_000), ..Default::default() };
+        let junk = "a".repeat(5_000);
+        let wire = fmt!("HTTP/1.1 200 OK\r\n\
+            Transfer-Encoding: chunked\r\n\
+            \r\n\
+            0\r\n\
+            {}", junk);
+        match read_reply_with_limits(&wire, Some(false), &limits) {
+            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
+                "an endless trailer line raised the wrong error: {}", e),
+            Ok(_) => return Err(err!(
+                "An endless trailer line was read as if it had a CRLF.";
+                Test, Unreachable)),
+        }
         Ok(())
     }
 }
