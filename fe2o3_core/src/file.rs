@@ -182,6 +182,93 @@ pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
     Ok(())
 }
 
+/// Creates `path` and any missing parents, as `create_dir_all` does, but at
+/// mode 0700 rather than the process default: a directory meant to hold key
+/// material must not be group- or world-searchable, since `create_dir_all`'s
+/// default mode is only ever narrowed by the umask, and umasks such as 002
+/// or 022 leave it group- or world-readable and -searchable, letting anyone
+/// in the group list, and on some setups swap, the keys inside.
+///
+/// Only directories this call actually creates get 0700; one that already
+/// exists is left at whatever mode it holds, since narrowing that is
+/// `restrict_secret`'s job. A plain `create_dir_all` off unix, where there
+/// is no mode to set.
+#[cfg(unix)]
+pub fn create_secret_dir(path: &Path) -> Outcome<()> {
+    use std::{
+        fs::DirBuilder,
+        os::unix::fs::DirBuilderExt,
+    };
+
+    if let Err(e) = DirBuilder::new().recursive(true).mode(0o700).create(path) {
+        return Err(err!(e,
+            "Could not create key directory {:?} at mode 0700.", path;
+            File, IO, Create));
+    }
+    Ok(())
+}
+
+/// A plain recursive create off unix: there is no mode to set.
+#[cfg(not(unix))]
+pub fn create_secret_dir(path: &Path) -> Outcome<()> {
+    if let Err(e) = fs::create_dir_all(path) {
+        return Err(err!(e,
+            "Could not create key directory {:?}.", path;
+            File, IO, Create));
+    }
+    Ok(())
+}
+
+/// Narrows an existing file's mode to its owner read/write bits, dropping
+/// group, other and execute bits, for a key file that predates this
+/// codebase's atomic `save_secret` writes, or that arrived by some other
+/// route -- a backup restore, an `scp`, a deploy step -- at whatever mode
+/// its source held.
+///
+/// Unlike widening a mode, narrowing one has no window to close: the file
+/// already exists at its current mode throughout, and `chmod` only ever
+/// removes bits, so there is no intermediate state where the file is any
+/// more exposed than it already was. A no-op when the mode is already 0600
+/// or narrower, and a no-op entirely off unix, where there are no POSIX mode
+/// bits to narrow. Only ever removes bits from the owner's read/write pair
+/// too -- a 0440 key ends at 0400, never gaining the write bit it did not
+/// have.
+///
+/// A failed narrowing warns and returns `Ok(())` rather than erroring: the
+/// file was already readable at whatever mode it held, so refusing to start
+/// over a `chmod` this process cannot make -- EPERM on a key it can read but
+/// does not own, EROFS on a read-only mount -- would trade a narrower mode
+/// for no service at all.
+#[cfg(unix)]
+pub fn restrict_secret(path: &Path) -> Outcome<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return Err(err!(e,
+            "Could not stat {:?} to check whether its mode needs narrowing.", path;
+            File, IO, Read)),
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & !0o600 == 0 {
+        return Ok(());
+    }
+    let narrowed = mode & 0o600; // keep only the owner rw bits already present, never add one
+    warn!("Narrowing key file {:?} from mode {:04o} to {:04o}.", path, mode, narrowed);
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(narrowed)) {
+        warn!("Could not narrow {:?} from mode {:04o} to {:04o}: {}. Leaving the key at its \
+            current, already-readable mode rather than refusing to start.", path, mode, narrowed, e);
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// A no-op off unix: there are no POSIX mode bits to narrow.
+#[cfg(not(unix))]
+pub fn restrict_secret(_path: &Path) -> Outcome<()> {
+    Ok(())
+}
+
 /// Fsyncs the directory holding `path`, after the rename that lands a secret
 /// there. Without this, the rename itself can survive a crash while the
 /// directory entry pointing at it does not, which can bring back a file --
@@ -310,21 +397,33 @@ mod tests {
         };
         let test_name = "file::tests::test_save_secret_ignores_a_permissive_umask";
         let script = fmt!("umask 002 && exec \"$0\" --exact {}", test_name);
-        let status = match Command::new("sh")
+        let output = match Command::new("sh")
             .arg("-c")
             .arg(&script)
             .arg(&exe)
             .env(UMASK_CHILD_ENV, "1")
-            .status()
+            .output()
         {
-            Ok(s) => s,
+            Ok(o) => o,
             Err(e) => return Err(err!(e,
                 "Could not spawn the umask-002 child re-running {:?}.", exe;
                 Test, IO)),
         };
-        if !status.success() {
+        if !output.status.success() {
             return Err(err!(
-                "The umask-002 child ({:?} --exact {}) failed: {:?}.", exe, test_name, status;
+                "The umask-002 child ({:?} --exact {}) failed: {:?}.", exe, test_name, output.status;
+                Test, Mismatch));
+        }
+        // `--exact {test_name}` matching nothing -- for example after a rename of
+        // this very test -- also exits 0, reporting "0 passed" for "running 0
+        // tests". That would make this test vacuously pass forever, so require
+        // the child to say it ran exactly the one test.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.contains("1 passed") {
+            return Err(err!(
+                "The umask-002 child ({:?} --exact {}) reported no matching test, so \
+                nothing was actually checked under umask 002. Child stdout: {}",
+                exe, test_name, stdout;
                 Test, Mismatch));
         }
         Ok(())
@@ -393,6 +492,61 @@ mod tests {
         if mode != 0o600 {
             return Err(err!(
                 "{:?} ended at {:o} despite a 0644 stale .tmp, not 0600.", path, mode;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A wider existing mode is narrowed to 0600, with the content untouched.
+    #[test]
+    fn test_restrict_secret_narrows_a_wide_mode() -> Outcome<()> {
+        let path = scratch_path("restrict_wide");
+        if let Err(e) = fs::write(&path, b"pre-existing key material") {
+            return Err(err!(e, "Could not pre-seed {:?}.", path; Test, File, IO, Write));
+        }
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o664)) {
+            return Err(err!(e, "Could not set 0664 on {:?}.", path; Test, File, IO));
+        }
+
+        res!(restrict_secret(&path));
+
+        let mode = res!(mode_of(&path));
+        let contents = fs::read(&path);
+        let _ = fs::remove_file(&path);
+        match contents {
+            Ok(c) if c == b"pre-existing key material" => (),
+            Ok(c) => return Err(err!(
+                "{:?} held {:?} after restrict_secret, which must not touch content.", path, c;
+                Test, Mismatch)),
+            Err(e) => return Err(err!(e, "Could not read back {:?}.", path; Test, File, IO)),
+        }
+        if mode != 0o600 {
+            return Err(err!(
+                "{:?} was 0664 and ended at {:o} after restrict_secret, not 0600.", path, mode;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A mode already at or narrower than 0600 is left exactly as it is.
+    #[test]
+    fn test_restrict_secret_is_a_noop_when_already_narrow() -> Outcome<()> {
+        let path = scratch_path("restrict_already_narrow");
+        if let Err(e) = fs::write(&path, b"already tight") {
+            return Err(err!(e, "Could not pre-seed {:?}.", path; Test, File, IO, Write));
+        }
+        if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(0o400)) {
+            return Err(err!(e, "Could not set 0400 on {:?}.", path; Test, File, IO));
+        }
+
+        res!(restrict_secret(&path));
+
+        let mode = res!(mode_of(&path));
+        let _ = fs::remove_file(&path);
+        if mode != 0o400 {
+            return Err(err!(
+                "{:?} was 0400 and ended at {:o} after restrict_secret, which should not widen it.",
+                path, mode;
                 Test, Mismatch));
         }
         Ok(())

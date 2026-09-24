@@ -39,7 +39,7 @@ use crate::srv::{
         F_DISK_IOPS,
         F_DISK_PCT,
         F_DROPPED_1M,
-        F_GUARD_SELFTEST,
+        F_GUARD_FAILED,
         F_LOAD1,
         F_MAIL_DOWN,
         F_MEM_PCT,
@@ -96,7 +96,7 @@ const PANE_B: &[CellSpec] = &[
     CellSpec { key: F_CONNS,            label: "Connections",   unit: "n",      always: true },
     CellSpec { key: F_R429_1M,          label: "429s / min",    unit: "n",      always: true },
     CellSpec { key: F_DROPPED_1M,       label: "Dropped / min", unit: "n",      always: true },
-    CellSpec { key: F_GUARD_SELFTEST,   label: "Guard",         unit: "guard",  always: true },
+    CellSpec { key: F_GUARD_FAILED,     label: "Guard",         unit: "guard",  always: true },
     CellSpec { key: F_PROBE_MS,         label: "Probe",         unit: "ms",     always: true },
     CellSpec { key: F_MAIL_DOWN,        label: "Mail",          unit: "mail",   always: false },
     // Carries the raw `sealed` beside it, so it accounts for both fields.
@@ -523,11 +523,11 @@ fn cell_json(
     let v = body.get(key);
     let d = distress.get(key).copied();
     let c = clear.get(key).copied();
+    // Every colour, the guard's included, is an alarm threshold: a failed self-test is red
+    // where a `distress` of 1 on `guard_failed` would tell someone, and plain where nothing
+    // would (D-06 audit D2).
     let t = match (fresh, v) {
         (false, _) | (_, None) => Tone::Plain,
-        // The one binary on the page: a failed self-test means the rest of the
-        // traffic pane is decoration, whatever any threshold says.
-        (true, Some(v)) if key == F_GUARD_SELFTEST => if v >= 1 { Tone::Green } else { Tone::Red },
         (true, Some(v)) => tone(v, d, c),
     };
     let series: Vec<String> = samples.iter()
@@ -689,6 +689,38 @@ mod tests {
         Ok(())
     }
 
+    /// Every red on the page has an alarm behind it. A failed guard self-test is red only where
+    /// a `distress` threshold on `guard_failed` would tell someone, and a sealed box's word is
+    /// not drawn red at all, since nothing alarms on it (D-06 audit D2).
+    #[test]
+    fn a_red_on_the_page_always_has_an_alarm_behind_it() {
+        let mut failed = HealthBody::new();
+        failed.set(F_GUARD_FAILED, 1);
+        let mut passed = HealthBody::new();
+        passed.set(F_GUARD_FAILED, 0);
+        let none = BTreeMap::new();
+        let judged: BTreeMap<String, i64> = [(F_GUARD_FAILED.to_string(), 1)].into_iter().collect();
+        let guard = |body: &HealthBody, d: &BTreeMap<String, i64>|
+            cell_json(F_GUARD_FAILED, "Guard", "guard", body, &[], d, &none, true, "");
+
+        let cell = guard(&failed, &none);
+        assert!(cell.contains("\"tone\":\"\""), "a failed guard nothing alarms on was coloured: {}",
+            cell);
+        let cell = guard(&failed, &judged);
+        assert!(cell.contains("\"tone\":\"red\""), "{}", cell);
+        assert!(crate::srv::watch::is_over(1, 1), "the threshold that reddens it must alarm");
+        let cell = guard(&passed, &judged);
+        assert!(cell.contains("\"tone\":\"green\""), "{}", cell);
+
+        // Only the watcher's own call, `down`, draws a row's word red.
+        for rule in crate::srv::admin::assets::STYLE_CSS.split('}') {
+            if rule.contains("var(--red)") {
+                assert!(!rule.contains(".fleet-state-sealed"),
+                    "a sealed row's word is drawn red, and nothing alarms on it: {}", rule);
+            }
+        }
+    }
+
     /// The document groups a host's entries into one row, colours from that peer's
     /// thresholds, and never carries a token.
     #[test]
@@ -697,7 +729,7 @@ mod tests {
         let now = unix_secs();
         let mut body = HealthBody::new();
         body.set(F_MEM_PCT, 80);
-        body.set(F_GUARD_SELFTEST, 1);
+        body.set(F_GUARD_FAILED, 0);
         res!(fleet.record(0, ProbeSample {
             t_secs: now, ok: true, probe_ms: 120, body: Some(body), health: PeerHealth::Up }));
         res!(fleet.record(1, ProbeSample {
