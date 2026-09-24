@@ -107,22 +107,24 @@ pub fn is_book_root(src: &str) -> bool {
 /// from, so one a comment holds, a raw block shows or any other bracketed body holds is never followed as the
 /// file's own.
 fn top_live_lines(src: &str) -> Vec<String> {
-	let live		= lang::parse::live_text(src);
+	let live		= lang::lex::live_text(src);
 	let mut out		= Vec::new();
-	let mut state	= lang::parse::SkipState::markup();
-	let mut guards: Vec<usize> = Vec::new();	// the bracket depth each open guard's branch stands at
-	for raw in live.split_inclusive('\n') {
-		let depth = state.open_brackets();
+	let mut state	= lang::lex::Lexer::markup();
+	let mut guards: Vec<usize> = Vec::new();	// the group depth each open guard's branch stands at
+	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
+		let depth = state.depth();
 		while guards.last().map_or(false, |&g| depth < g) {
 			guards.pop();
 		}
-		if !state.in_literal() && (depth == 0 || guards.last() == Some(&depth)) {
-			if guard_open(raw.trim()).is_some() {
+		// A line opening in markup, at the file's own level or directly in a guard's branch.
+		let level = state.markup_level();
+		if level == Some(0) || (level.is_some() && level == guards.last().copied()) {
+			if guard_open(raw_live.trim()).is_some() {
 				guards.push(depth + 1);
 			}
-			out.push(raw.to_string());
+			out.push(raw_live.to_string());
 		}
-		lang::parse::scan_brackets(raw, &mut state);
+		state.feed(raw);
 	}
 	out
 }
@@ -437,7 +439,7 @@ fn field_span(src: &str, name: &str) -> Span {
 /// `title:` is never found inside `subtitle:`. Every field, setting and binding the front matter, the
 /// config and the template are read by is found this way, and its value then read from `src` itself.
 fn find_live(src: &str, needle: &str) -> Option<usize> {
-	let live	= lang::parse::live_text(src);
+	let live	= lang::lex::live_text(src);
 	let named	= needle.chars().next().map_or(false, is_name_char);
 	let mut from	= 0usize;
 	while let Some(rel) = live[from..].find(needle) {
@@ -1066,7 +1068,10 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 		Some(a)	=> a,
 		None	=> return out,
 	};
-	let chars: Vec<char> = src[at..].chars().collect();
+	// The comments a term file carries between entries -- `// ...` banners, notes with a `)` or a quote in
+	// them -- are blanked as the lexer reads them, so none is read as part of the literal.
+	let text = lang::lex::uncommented(src);
+	let chars: Vec<char> = text[at..].chars().collect();
 	let n = chars.len();
 
 	// Advance to the opening parenthesis of the dictionary literal, then step past it.
@@ -1080,26 +1085,9 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 	i += 1;
 
 	loop {
-		// Skip the whitespace, commas and comments between entries; stop at the closing parenthesis or the
-		// source end. Comments must be skipped whole: `terms.typ` carries `// ...` banners and notes between
-		// term groups, and a `)` inside one (a parenthetical aside) would otherwise read as the literal's
-		// closing parenthesis and truncate the parse -- which dropped half of Lucronics' 346 definitions.
-		loop {
-			while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
-				i += 1;
-			}
-			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '/' {
-				i += 2;
-				while i < n && chars[i] != '\n' {
-					i += 1;
-				}
-				continue;
-			}
-			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
-				i += lang::parse::block_comment_len(&chars, i);
-				continue;
-			}
-			break;
+		// Skip the whitespace and commas between entries; stop at the closing parenthesis or the source end.
+		while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
+			i += 1;
 		}
 		if i >= n || chars[i] == ')' {
 			break;
@@ -1123,8 +1111,11 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 		}
 		// The value: a `[...]` content group is the definition; anything else is skipped to the next entry.
 		if i < n && chars[i] == '[' {
-			let (content, next) = read_content(&chars, i);
-			out.push((key, content));
+			// Read as Typst reads a content block: a quote in it is a character, and a `[` in its prose is
+			// balanced by a `]` there. One that never closes takes the rest of the literal.
+			let (content, next) = lang::parse::read_group(&chars, i)
+				.unwrap_or_else(|| (chars[i + 1..].iter().collect(), n));
+			out.push((key, content.trim().to_string()));
 			i = next;
 		} else {
 			// Not a content group: advance to the next top-level comma so the reader resynchronises.
@@ -1164,46 +1155,6 @@ fn read_string(chars: &[char], i: usize) -> (String, usize) {
 		j += 1;
 	}
 	(s, j)
-}
-
-/// Reads a `[...]` content group whose opening bracket sits at `i`, returning its inner source and the
-/// index just past the closing bracket. Brackets nested in the content (a `#emph[...]` inside a
-/// definition) are balanced, and a quoted string inside the content is skipped whole so a `]` within it
-/// does not close the group early.
-fn read_content(chars: &[char], i: usize) -> (String, usize) {
-	let mut depth	= 0i32;
-	let mut j		= i;
-	let mut inner	= String::new();
-	while j < chars.len() {
-		match chars[j] {
-			'['	=> {
-				depth += 1;
-				if depth > 1 {
-					inner.push('[');	// a nested opener is part of the content
-				}
-			},
-			']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					j += 1;
-					break;
-				}
-				inner.push(']');
-			},
-			'"'	=> {
-				// Copy the whole quoted string verbatim so a bracket inside it is not read as structure.
-				let (s, next) = read_string(chars, j);
-				inner.push('"');
-				inner.push_str(&s);
-				inner.push('"');
-				j = next;
-				continue;
-			},
-			c	=> inner.push(c),
-		}
-		j += 1;
-	}
-	(inner.trim().to_string(), j)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1385,7 +1336,10 @@ fn parse_term_dict(src: &str) -> HashMap<String, String> {
 		Some(a)	=> a,
 		None	=> return map,
 	};
-	let chars: Vec<char> = src[at..].chars().collect();
+	// A comment inside the literal is blanked as the lexer reads it, so a quoted word or a `)` in one
+	// neither shifts the pairs nor ends the literal.
+	let text = lang::lex::uncommented(src);
+	let chars: Vec<char> = text[at..].chars().collect();
 
 	// Advance to the opening parenthesis of the dictionary literal.
 	let mut i = 0;
@@ -1440,7 +1394,7 @@ fn parse_term_dict(src: &str) -> HashMap<String, String> {
 /// non-whitespace character after it is `=`. Skips a mention of the name in a comment or another context
 /// (say `// name: ...`), returning the first true assignment, or `None` when there is none.
 fn assignment_offset(src: &str, name: &str) -> Option<usize> {
-	let live		= lang::parse::live_text(src);
+	let live		= lang::lex::live_text(src);
 	let mut from	= 0;
 	while let Some(rel) = live[from..].find(name) {
 		let at		= from + rel;
@@ -1565,125 +1519,41 @@ fn read_front_matter(root_src: &str, config_src: &str, title: &str) -> FrontMatt
 	}
 }
 
-/// The inner text of the root's `meta-data: ( ... )` argument, balanced across nested groups and
-/// strings, or `None` when the root sets no `meta-data`.
+/// The inner text of the root's `meta-data: ( ... )` argument, read as code, or `None` when the root sets
+/// no `meta-data`.
 fn meta_block(src: &str) -> Option<String> {
-	let at		= find_live(src, "meta-data:")?;
-	let rest	= &src[at + "meta-data:".len()..];
-	let open	= rest.find('(')?;
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= open;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> depth += 1,
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(rest[open + 1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let Some(at)	= find_live(src, "meta-data:") else { return None; };
+	let rest		= &src[at + "meta-data:".len()..];
+	rest.find('(').and_then(|open| group_inner(&rest[open..]))
 }
 
-/// Splits a `meta-data` block into its revision rows: the text inside each top-level parenthesised tuple,
-/// in source order. Nested parentheses and strings are respected, so a row whose value carries a comma or
-/// a bracket is not split early. A block with no nested tuple (a bare single row) yields no rows.
+/// Splits a `meta-data` block into its revision rows: the text inside each parenthesised tuple the block
+/// lists, in source order, read as code, so a row whose value carries a comma, a bracket or a comment is
+/// not split early, and a tuple a comment holds is none. A block with no nested tuple (a bare single row)
+/// yields no rows.
 fn meta_rows(block: &str) -> Vec<String> {
-	let bytes	= block.as_bytes();
-	let mut rows:	Vec<String>	= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut start	= 0usize;
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> {
-				if depth == 0 { start = i + 1; }
-				depth += 1;
-			},
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					rows.push(block[start..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	rows
+	lang::lex::top_parens(block).into_iter().map(|(a, b)| block[a + 1..b - 1].to_string()).collect()
 }
 
 /// The string a `name: "..."` field binds: the first `"..."` in the field's value, which runs to the
 /// next top-level comma (a comma inside the string does not end it). `None` when the value holds no
 /// string literal -- a `name: none` reads as absent -- so a later field's value is never read by mistake.
 fn string_field(src: &str, name: &str) -> Option<String> {
-	let needle	= fmt!("{}:", name);
-	let at		= find_live(src, &needle)?;
-	let rest	= &src[at + needle.len()..];
-	// Bound the value at the next depth-zero comma, respecting strings, so the search stays in this field.
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut end		= rest.len();
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'					=> in_str = true,
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_					=> {},
-		}
-		i += 1;
-	}
-	first_quoted(&rest[..end])
+	let needle		= fmt!("{}:", name);
+	let Some(at)	= find_live(src, &needle) else { return None; };
+	let rest		= &src[at + needle.len()..];
+	// The value runs to the next comma at its own level, read as code, so the search stays in this field.
+	first_quoted(&rest[..lang::lex::top_comma(rest)])
 }
 
 /// The `Copyright © YEAR HOLDER. NOTICE` line the template composes from the `copyright: (year, [holder],
 /// notice)` tuple, or `None` when the book sets no copyright tuple.
 fn copyright_line(meta: &str) -> Option<String> {
-	let at		= find_live(meta, "copyright:")?;
-	let rest	= &meta[at + "copyright:".len()..];
-	let open	= rest.find('(')?;
+	let Some(at)	= find_live(meta, "copyright:") else { return None; };
+	let rest		= &meta[at + "copyright:".len()..];
 	// The tuple's three parts: a year string, a `[holder]` content, and a notice string.
-	let inner	= balanced_parens(&rest[open..])?;
-	let parts	= split_top(&inner);
+	let Some(inner)	= rest.find('(').and_then(|open| group_inner(&rest[open..])) else { return None; };
+	let parts		= lang::parse::split_top_args(&inner);
 	if parts.is_empty() {
 		return None;
 	}
@@ -1693,65 +1563,11 @@ fn copyright_line(meta: &str) -> Option<String> {
 	Some(fmt!("Copyright © {} {}. {}", year.trim(), holder.trim(), notice.trim()))
 }
 
-/// The contents of a `(...)` at the start of `s`, balanced across nesting and strings.
-fn balanced_parens(s: &str) -> Option<String> {
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> depth += 1,
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
-}
-
-/// Splits `s` at its top-level commas, respecting nesting and strings.
-fn split_top(s: &str) -> Vec<String> {
-	let mut out:	Vec<String>	= Vec::new();
-	let mut cur					= String::new();
-	let mut depth				= 0i32;
-	let mut in_str				= false;
-	let mut esc					= false;
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
+/// The inside of the group `s` opens with, a `(`, `[` or `{` read as code: its strings, content blocks,
+/// comments and raw text are what Typst reads them as, so a delimiter in one does not close it. `None`
+/// when it never closes.
+fn group_inner(s: &str) -> Option<String> {
+	lang::lex::group_end(s, 0).map(|end| s[1..end - 1].to_string())
 }
 
 /// Reads a tuple part as a plain string: a `"..."` literal unquoted, or a `[...]` content flattened.
@@ -1824,30 +1640,13 @@ fn clean_content(s: &str) -> String {
 }
 
 /// The text of a `name: [ ... ]` content field in the root's template call -- the book title, say --
-/// with the surrounding brackets dropped and inner whitespace trimmed. Bracket-balanced, so a nested
-/// group does not close it early.
+/// with the surrounding brackets dropped and inner whitespace trimmed. Read as Typst reads a content block,
+/// so a nested group, an escaped bracket or one in raw text or a comment does not close it early.
 fn content_field(src: &str, name: &str) -> Option<String> {
-	let needle	= fmt!("{}:", name);
-	let at		= find_live(src, &needle)?;
-	let rest	= &src[at + needle.len()..];
-	let open	= rest.find('[')?;
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= open;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'['	=> depth += 1,
-			b']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(rest[open + 1..i].trim().to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let needle		= fmt!("{}:", name);
+	let Some(at)	= find_live(src, &needle) else { return None; };
+	let rest		= &src[at + needle.len()..];
+	rest.find('[').and_then(|open| group_inner(&rest[open..])).map(|inner| inner.trim().to_string())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1988,7 +1787,7 @@ struct GuardFrame {
 	then_taken:	bool,
 	in_else:	bool,
 	refused:	bool,
-	state:		lang::parse::SkipState,
+	state:		lang::lex::Lexer,
 }
 
 impl GuardFrame {
@@ -2144,8 +1943,8 @@ fn assemble_into(
 	// A guard, an `#include` or a part page is read only where it stands at the file's top level, or directly
 	// in an open guard's branch: one in a bracketed body is the body's, gathered for the reader with it, so a
 	// callout holding an `#include` is read whole and the include is refused where it stands.
-	let live = lang::parse::live_text(src);
-	let top: HashSet<usize> = lang::set::top_level_lines(&live).into_iter().map(|(at, _)| at).collect();
+	let live = lang::lex::live_text(src);
+	let top: HashSet<usize> = lang::lex::top_level_lines(src).into_iter().map(|(at, _)| at).collect();
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
@@ -2162,7 +1961,7 @@ fn assemble_into(
 		// The innermost open guard's own bracket depth (`None` with no guard open at all). Seeded from the
 		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
 		// inside its branch -- see [`GuardFrame`].
-		let guard_depth = guards.last().map(|g| g.state.open_brackets());
+		let guard_depth = guards.last().map(|g| g.state.depth());
 		let structural	= match guard_depth {
 			Some(d)	=> d == 1,
 			None	=> top.contains(&(start as usize)),
@@ -2206,8 +2005,8 @@ fn assemble_into(
 					},
 				}
 			};
-			let mut state = lang::parse::SkipState::new();
-			lang::parse::scan_brackets(marker, &mut state);
+			let mut state = lang::lex::Lexer::markup();
+			state.feed_line(marker);
 			guards.push(GuardFrame { live, then_taken, in_else: false, refused: false, state });
 			continue;
 		}
@@ -2220,9 +2019,9 @@ fn assemble_into(
 		if structural && marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			got.skips.record_in(&label, &fmt!("#if (unsupported include-guard form): {:?}", marker), span);
-			let mut state = lang::parse::SkipState::new();
-			lang::parse::scan_brackets(marker, &mut state);
-			if state.has_open_bracket() {
+			let mut state = lang::lex::Lexer::markup();
+			state.feed_line(marker);
+			if state.is_open() {
 				guards.push(GuardFrame { live: false, then_taken: false, in_else: false, refused: true, state });
 			}
 			continue;
@@ -2237,8 +2036,8 @@ fn assemble_into(
 		// follows as prose. Either way the line itself is the guard's own structural end, not content, so
 		// it is consumed here rather than falling through to the buffer below.
 		if let Some(top) = guards.last_mut() {
-			lang::parse::scan_brackets(line, &mut top.state);
-			if !top.state.has_open_bracket() {
+			top.state.feed_line(line);
+			if !top.state.is_open() {
 				let refused = top.refused;
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				guards.pop();
@@ -2384,27 +2183,13 @@ fn first_quoted(s: &str) -> Option<String> {
 	Some(rest[..close].to_string())
 }
 
-/// The contents of the first `[...]` group in a line, balanced so a nested bracket does not close it
-/// early. Used to lift a `#part-page[Title]` divider's title.
+/// The contents of the first `[...]` group in a line, read as Typst reads a content block, so a bracket
+/// in its prose balanced within it does not close it early. Used to lift a `#part-page[Title]` divider's
+/// title.
 fn bracket_body(s: &str) -> Option<String> {
-	let open	= s.find('[')?;
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= open;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'['	=> depth += 1,
-			b']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[open + 1..i].trim().to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	s.find('[')
+		.and_then(|open| lang::lex::group_end(s, open).map(|end| (open, end)))
+		.map(|(open, end)| s[open + 1..end - 1].trim().to_string())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -2536,40 +2321,17 @@ fn read_let_bool(src: &str, name: &str) -> Option<bool> {
 /// `fmt`. Bounds the search to the one `#let` so a later binding's arms are not read by mistake, finds
 /// the arm whose condition tests this format, and returns its balanced `{...}` body.
 fn arm(src: &str, name: &str, fmt: &str) -> Option<String> {
-	let needle	= fmt!("#let {} =", name);
-	let start	= find_live(src, &needle)?;
-	let tail	= &src[start + needle.len()..];
+	let needle		= fmt!("#let {} =", name);
+	let Some(start)	= find_live(src, &needle) else { return None; };
+	let tail		= &src[start + needle.len()..];
 	// The binding ends at the next top-level `#let`, or the end of the file.
-	let end		= find_live(tail, "\n#let ").unwrap_or(tail.len());
-	let block	= &tail[..end];
+	let end			= find_live(tail, "\n#let ").unwrap_or(tail.len());
+	let block		= &tail[..end];
 
-	let cond	= fmt!("== \"{}\"", fmt);
-	let at		= find_live(block, &cond)?;
-	let after	= &block[at..];
-	let brace	= after.find('{')?;
-	balanced_braces(&after[brace..])
-}
-
-/// The contents of a `{...}` at the start of `s`, matched by brace depth so a nested record does not
-/// close it early.
-fn balanced_braces(s: &str) -> Option<String> {
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= 0usize;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'{'	=> depth += 1,
-			b'}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let cond		= fmt!("== \"{}\"", fmt);
+	let Some(at)	= find_live(block, &cond) else { return None; };
+	let after		= &block[at..];
+	after.find('{').and_then(|brace| group_inner(&after[brace..]))
 }
 
 /// The first number after `key` in `s` -- the digits and one decimal point that follow the key. The
@@ -2638,29 +2400,15 @@ fn first_quoted_after(src: &str, key: &str) -> Option<String> {
 /// the template's `#let margins = (a4: 2.5cm, ...)`, say. The dictionary is matched by paren depth from
 /// the `#let`, and the field's value runs to the next depth-zero comma, so a nested group does not end it.
 fn let_dict_field(src: &str, dict: &str, field: &str) -> Option<String> {
-	let needle	= fmt!("#let {} =", dict);
-	let start	= find_live(src, &needle)?;
-	let tail	= &src[start + needle.len()..];
-	let open	= tail.find('(')?;
-	let body	= balanced_parens(&tail[open..])?;
-	// Within the dictionary body, find `field:` and take its value up to the next top-level comma.
-	let key		= fmt!("{}:", field);
-	let at		= find_live(&body, &key)?;
-	let rest	= &body[at + key.len()..];
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut end		= rest.len();
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		match bytes[i] as char {
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_					=> {},
-		}
-		i += 1;
-	}
-	Some(rest[..end].trim().to_string())
+	let needle		= fmt!("#let {} =", dict);
+	let Some(start)	= find_live(src, &needle) else { return None; };
+	let tail		= &src[start + needle.len()..];
+	let Some(body)	= tail.find('(').and_then(|open| group_inner(&tail[open..])) else { return None; };
+	// Within the dictionary body, find `field:` and take its value up to the next comma at its own level.
+	let key			= fmt!("{}:", field);
+	let Some(at)	= find_live(&body, &key) else { return None; };
+	let rest		= &body[at + key.len()..];
+	Some(rest[..lang::lex::top_comma(rest)].trim().to_string())
 }
 
 /// A Typst length token as points: the leading number scaled by its unit (`cm`, `mm`, `in`, `pt`). A
@@ -2761,6 +2509,22 @@ mod tests {
 		assert_eq!(content_field(src, "subtitle").as_deref(), Some("Sub"));
 		assert_eq!(string_field(src, "title-top-logo-path").as_deref(), Some("new.png"));
 		assert_eq!(string_field("// cover: \"x.png\"\n", "cover"), None);
+	}
+
+	/// A front-matter field's group is read as Typst reads it: a `]` escaped, in raw text or in a comment does
+	/// not end a content field, a tuple a comment holds is no revision row and one with a comment before it
+	/// is, and a string field's value ends at the group it stands in, so a later string is never its value.
+	#[test]
+	fn a_front_matter_group_is_read_as_typst_reads_it() {
+		let src = "#show: doc.with(\n  title: [A \\] B `x]y` C /* ] */ D],\n  title-colour: none)\n#let c = \"red\"\n";
+		assert_eq!(content_field(src, "title").as_deref(), Some("A \\] B `x]y` C /* ] */ D"));
+		assert_eq!(string_field(src, "title-colour"), None);
+		let block = "\n  // ( version: \"0.9\"\n  ( version: \"2.0\", notes: \"Fix (a) and [b.\" ),\n  \
+			/* ( version: \"1.5\" ) */\n  ( version: \"1.0\", notes: [A ) in prose.] ),\n";
+		let rows = meta_rows(block);
+		let versions: Vec<Option<String>> = rows.iter().map(|r| string_field(r, "version")).collect();
+		assert_eq!(versions, [Some("2.0".to_string()), Some("1.0".to_string())], "{:?}", rows);
+		assert_eq!(string_field(&rows[0], "notes").as_deref(), Some("Fix (a) and [b."));
 	}
 
 	#[test]
@@ -3063,6 +2827,18 @@ mod tests {
 		let src = "#let term-defs = (\n  \"a\": [Alpha.],\n  /* outer /* inner */ still a comment ) */\n  \"b\": [Beta.],\n)\n";
 		let defs = parse_term_defs(src);
 		assert_eq!(defs, vec![("a".to_string(), "Alpha.".to_string()), ("b".to_string(), "Beta.".to_string())]);
+	}
+
+	/// A comment inside the `term-dict` literal is passed over as Typst's lexer passes one over: a quoted word
+	/// or a `)` in it neither shifts the key and value pairs nor ends the literal.
+	#[test]
+	fn term_dict_reader_skips_a_comment_inside_the_literal() {
+		let src = "#let term-dict = (\n  \"a\": \"Alpha\", // the \"first\" (of two)\n  /* a \"quoted\" ) note */\n  \
+			\"b\": \"Beta\",\n)\n";
+		let map = parse_term_dict(src);
+		assert_eq!(map.get("a").map(String::as_str), Some("Alpha"));
+		assert_eq!(map.get("b").map(String::as_str), Some("Beta"));
+		assert_eq!(map.len(), 2, "unexpected entries: {:?}", map);
 	}
 
 	/// A lone chapter finds a `refs.bib` in an ancestor directory, marks the key it cited, and returns a

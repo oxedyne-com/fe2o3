@@ -199,8 +199,9 @@ pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) 
 	// The rules a file declares stand at its top level, as the reader meets them: one inside a bracketed
 	// body is that body's own and is refused where the body is read, and one a comment holds or a raw block
 	// shows is text. A trailing comment is blanked too, so it never reads as part of the transform.
-	let live = crate::lang::parse::live_text(src);
-	for (line_start, raw) in crate::lang::set::top_level_lines(&live) {
+	let live = crate::lang::lex::live_text(src);
+	for (line_start, line) in crate::lang::lex::top_level_lines(src) {
+		let raw			= &live[line_start..line_start.saturating_add(line.len())];
 		let offset		= line_start.saturating_add(raw.len());
 		let trimmed		= raw.trim_start();
 		// A per-element show rule opens `#show <selector>:` -- a selector between `#show ` and the colon.
@@ -1166,7 +1167,7 @@ pub(crate) fn parse_colour_pal(expr: &str, palette: &Palette) -> Option<Rgba> {
 /// resolve is passed over; a source with no such binding adds nothing.
 pub fn collect_palette(src: &str, palette: &mut Palette) {
 	let chars:	Vec<char>	= src.chars().collect();
-	let lit		= crate::lang::parse::literal_chars(src);
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// The literal must name `colours` exactly, not merely start with it -- `#let colours_x = (...)`
@@ -1180,8 +1181,8 @@ pub fn collect_palette(src: &str, palette: &mut Palette) {
 				j += 1;
 			}
 			if chars.get(j) == Some(&'(') {
-				if let Some((inner, next)) = read_delim_group(&chars, j) {
-					for entry in split_top_commas_str(&inner) {
+				if let Some((inner, next)) = crate::lang::parse::read_group(&chars, j) {
+					for entry in crate::lang::parse::split_top_args(&inner) {
 						if let Some((name_part, val_part)) = entry.split_once(':') {
 							// The name is the last line of the key part, so a `//` comment line preceding the
 							// entry is dropped; the value is taken up to any trailing `//` line comment.
@@ -1468,7 +1469,7 @@ fn empty_scalar_fns() -> &'static ScalarFns {
 /// same value, so the map is definition-order-independent.
 pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &mut TemplateFns) {
 	let chars:	Vec<char>	= src.chars().collect();
-	let lit		= crate::lang::parse::literal_chars(src);
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// A definition opens at a line-leading `#let <ident>(` -- a function `#let`, whose name is followed by
@@ -1509,7 +1510,7 @@ pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &
 /// not collide, and where a name were somehow read by both, the furniture map wins at every call site.
 pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 	let chars:	Vec<char>	= src.chars().collect();
-	let lit		= crate::lang::parse::literal_chars(src);
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
@@ -1552,7 +1553,7 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	let mut params = Vec::new();
 	if chars.get(j) == Some(&'(') {
 		let (plist, after) = read_paren_group(chars, j)?;
-		params = split_top_commas_str(&plist).into_iter().filter_map(|p| {
+		params = crate::lang::parse::split_top_args(&plist).into_iter().filter_map(|p| {
 			let p = p.trim();
 			if !p.is_empty() && p.chars().all(is_ident_char) { Some(p.to_string()) } else { None }
 		}).collect();
@@ -1571,7 +1572,7 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	}
 	// A bare bracket body `[ ... ]` -- the plain content binding.
 	if chars.get(j) == Some(&'[') {
-		let (body, next) = read_delim_group(chars, j)?;
+		let Some((body, next)) = crate::lang::parse::read_group(chars, j) else { return None; };
 		return Some((name, params, body, None, next));
 	}
 	// A styling wrap `box(...)[ ... ]` / `rect(...)[ ... ]` / `block(...)[ ... ]`: a content function whose
@@ -1587,9 +1588,9 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 			if chars.get(after_name) != Some(&'(') {
 				continue;
 			}
-			if let Some((_, after_args)) = read_delim_group(chars, after_name) {
+			if let Some((_, after_args)) = crate::lang::parse::read_group(chars, after_name) {
 				if chars.get(after_args) == Some(&'[') {
-					let (body, next) = read_delim_group(chars, after_args)?;
+					let Some((body, next)) = crate::lang::parse::read_group(chars, after_args) else { return None; };
 					return Some((name, params, body, Some(wrap.to_string()), next));
 				}
 			}
@@ -1607,7 +1608,7 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 /// same value, so the map is definition-order-independent.
 pub fn collect_scalar_fns(src: &str, sfns: &mut ScalarFns) {
 	let chars:	Vec<char>	= src.chars().collect();
-	let lit		= crate::lang::parse::literal_chars(src);
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
@@ -1764,41 +1765,9 @@ fn read_paren_group(chars: &[char], open: usize) -> Option<(String, usize)> {
 	if chars.get(open) != Some(&'(') {
 		return None;
 	}
-	read_delim_group(chars, open)
+	crate::lang::parse::read_group(chars, open)
 }
 
-/// Reads the balanced group whose opener (`(`, `[` or `{`) sits at `open`, returning the inner text
-/// (without the delimiters) and the index just past its close. Nesting and string literals are honoured.
-fn read_delim_group(chars: &[char], open: usize) -> Option<(String, usize)> {
-	if !matches!(chars.get(open), Some('(') | Some('[') | Some('{')) {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for i in open..chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'				=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					let inner: String = chars[open + 1..i].iter().collect();
-					return Some((inner, i + 1));
-				}
-			},
-			_				=> {},
-		}
-	}
-	None
-}
 
 /// Reads the balanced group beginning at `from` -- a `name( ... )` call, a `( ... )`, a `[ ... ]` or a
 /// `{ ... }` -- returning the whole group's text (delimiters included) and the index just past its close.
@@ -1810,35 +1779,9 @@ fn read_balanced_from(chars: &[char], from: usize) -> Option<(String, usize)> {
 	while open < chars.len() && (is_ident_char(chars[open]) || chars[open] == '.') {
 		open += 1;
 	}
-	let opener = *chars.get(open)?;
-	if !matches!(opener, '(' | '[' | '{') {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for i in open..chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'				=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					let span: String = chars[from..=i].iter().collect();
-					return Some((span, i + 1));
-				}
-			},
-			_				=> {},
-		}
-	}
-	None
+	// The group read as Typst's lexer reads it, so a delimiter in a string, a content block's prose, a
+	// comment or raw text does not close it.
+	crate::lang::parse::read_group(chars, open).map(|(_, next)| (chars[from..next].iter().collect(), next))
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -2004,7 +1947,7 @@ fn body_wrapper_size(content: &str, body_param: &str, body_size: Sp) -> Option<S
 			k += 1;
 		}
 		let places_body = chars.get(k) == Some(&'[')
-			&& read_delim_group(&chars, k)
+			&& crate::lang::parse::read_group(&chars, k)
 				.map(|(inner, _)| mentions_word(&inner, body_param))
 				.unwrap_or(false);
 		if places_body {
@@ -2025,7 +1968,7 @@ fn body_wrapper_size(content: &str, body_param: &str, body_size: Sp) -> Option<S
 /// the call supplies. A named parameter (`title: none`, `float: true`) is a keyword the call may set, not
 /// the content hole. `None` when the list names no positional parameter.
 fn body_param_name(params: &str) -> Option<String> {
-	split_top_commas_str(params).into_iter().rev().find_map(|p| {
+	crate::lang::parse::split_top_args(params).into_iter().rev().find_map(|p| {
 		let p = p.trim();
 		if p.is_empty() || p.contains(':') {
 			None
@@ -2039,7 +1982,7 @@ fn body_param_name(params: &str) -> Option<String> {
 
 /// Every parameter's name (the identifier before any `:` default), for detecting a `title:` keyword.
 fn param_names(params: &str) -> Vec<String> {
-	split_top_commas_str(params).into_iter().filter_map(|p| {
+	crate::lang::parse::split_top_args(params).into_iter().filter_map(|p| {
 		let name = p.split(':').next().unwrap_or("").trim();
 		if !name.is_empty() && name.chars().all(is_ident_char) {
 			Some(name.to_string())
@@ -2160,7 +2103,7 @@ fn positional_content(args: &str) -> Option<(char, String)> {
 			'(' 				=> depth += 1,
 			')'					=> depth -= 1,
 			'{' | '[' if depth == 0	=> {
-				if let Some((span, _)) = read_delim_group(&chars, i) {
+				if let Some((span, _)) = crate::lang::parse::read_group(&chars, i) {
 					return Some((c, span));
 				}
 				return None;
@@ -2268,34 +2211,6 @@ fn resolve_len(v: &str, body_size: Sp) -> Option<Sp> {
 	length_pt(v).map(Sp::from_pt)
 }
 
-/// Splits a parameter or dict text on top-level commas (outside any `(...)`/`[...]`/`{...}`/`"..."`).
-fn split_top_commas_str(s: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut cur		= String::new();
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
-}
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MATCHING                                                                   │
@@ -3079,6 +2994,17 @@ mod tests {
 		let mut tfns = TemplateFns::new();
 		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
 		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
+	}
+
+	/// A content binding's body is read as Typst reads a content block.
+	#[test]
+	fn a_content_binding_body_is_read_as_typst_reads_a_content_block() {
+		// An escaped `]`, one in raw text and one in a comment close nothing; a `"` in markup is a character.
+		let src = "#let note = [Say \\] and `]` and /* ] */ \"quoted] here.]\n#let after = [After.]\n";
+		let mut cfns = ContentFns::new();
+		collect_content_fns(src, &mut cfns);
+		assert_eq!(cfns.get("note").map(|f| f.body.as_str()), Some("Say \\] and `]` and /* ] */ \"quoted"));
+		assert_eq!(cfns.get("after").map(|f| f.body.as_str()), Some("After."));
 	}
 
 	/// A bare `#let name = <literal>` collects a scalar for a string, an integer and a length alike, keeping

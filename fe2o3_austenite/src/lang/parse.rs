@@ -39,6 +39,8 @@ use crate::ir::Span;
 use crate::table::Align;
 
 use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, ListItem, Spacing, TableSpec};
+use super::lex;
+use super::lex::Lexer;
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -363,11 +365,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// stands, its indentation and markup untouched.
 	let mut code:		Option<(Vec<String>, u32)>	= None;
 
-	// A multi-line Typst code statement or standalone template call being skipped: the net bracket depth
-	// still open across the lines consumed so far, and whether a string literal is currently open. `None`
-	// when not skipping. While it is `Some`, every line is consumed and nothing is set until the delimiters
-	// balance.
-	let mut skip:		Option<(SkipState, Span, String)>	= None;	// with its opening line and its name
+	// A multi-line Typst code statement or standalone template call being skipped: the lexer's state across
+	// the lines consumed so far. `None` when not skipping. While it is `Some`, every line is consumed and
+	// nothing is set until the construct ends.
+	let mut skip:		Option<(Lexer, Span, String)>	= None;	// with its opening line and its name
 
 	// A multi-line construct whose whole text is gathered so it can be parsed rather than skipped: a
 	// `#figure(...)`, a bare `#table(...)`, or a `#let name = (...)` data array feeding a table. `None`
@@ -379,9 +380,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// Populated as the arrays are read, so a later figure resolves its cells against them.
 	let mut arrays:		HashMap<String, Vec<Vec<Inline>>>	= HashMap::new();
 
-	// How deeply `/* ... */` block comments are open across the line break. A `//` line comment never
-	// straddles a line, so it needs no carried state.
-	let mut comment	= CommentState { depth: 0 };
+	// What each byte of the source is, read once over the whole source as Typst's lexer reads it: a `/*`
+	// in a link or raw text opens no comment, and one in a quoted phrase does, since a quote in markup is a
+	// character; raw text runs across lines until a run of backticks as long as its opener.
+	let toks	= lex::byte_toks(src);
 
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
@@ -402,7 +404,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// points into the source.
 		let stripped;
 		let line = if code.is_none() && skip.is_none() {
-			stripped = strip_comments(line, &mut comment);
+			stripped = strip_comments(line, toks.get(start as usize..end as usize).unwrap_or(&[]));
 			stripped.as_str()
 		} else {
 			line
@@ -415,8 +417,8 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// balance. Nothing between the opener and its close is set. This takes precedence over every other
 		// rule, since the span is code, not markup.
 		if let Some((state, at, name)) = skip.as_mut() {
-			scan_brackets(line, state);
-			if !state.has_open_bracket() {
+			state.feed_line(line);
+			if !state.is_open() {
 				skips.record(name, *at);
 				skip = None;
 			}
@@ -429,8 +431,8 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		if let Some(cap) = capture.as_mut() {
 			cap.buf.push_str(line);
 			cap.buf.push('\n');
-			scan_brackets(line, &mut cap.state);
-			if !cap.state.has_open_bracket() {
+			cap.state.feed_line(line);
+			if !cap.state.is_open() {
 				let done = capture.take();
 				if let Some(cap) = done {
 					res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));
@@ -448,6 +450,18 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			} else {
 				buf.push(line.to_string());
 			}
+			continue;
+		}
+		// A line that opens inside raw text an earlier line began -- a single backtick's span, or a block
+		// opened mid-line -- is that text's, not a construct or a marker: it joins the paragraph the raw
+		// text stands in, whose inline read sets it as code.
+		if start > 0 && toks.get(start as usize - 1) == Some(&lex::Tok::Raw) {
+			flush_list(&mut items, &mut stack);
+			if lines.is_empty() {
+				para_start = start;
+			}
+			lines.push(line.to_string());
+			para_end = end;
 			continue;
 		}
 		if is_fence(trimmed) {
@@ -501,13 +515,13 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
-			let mut state	= SkipState::new();
-			scan_brackets(line, &mut state);
+			let mut state	= Lexer::markup();
+			state.feed_line(line);
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
 			let cap = Capture { kind, buf, state, start };
-			if !cap.state.has_open_bracket() {
+			if !cap.state.is_open() {
 				res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
@@ -1396,282 +1410,10 @@ fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	Some(k)
 }
 
-/// One open delimiter context on the scanner's stack. Which frame is on top decides whether the next
-/// bracket is structural: a `(` inside a `[...]` content block is author prose, not nesting, and a `(`
-/// or `$` inside a `"..."` string or a `$...$` maths span never counts at all. This is what lets a caption
-/// whose prose carries an unbalanced `(` still close at its `]`, where a flat depth counter stuck open to
-/// end of source and swallowed the figure and everything after it.
-#[derive(Clone, Copy, PartialEq)]
-enum Frame {
-	Code,		// a `(...)`/`{...}`/`#name(...)` group, or the top level: brackets nest, `,`/`:` part
-	Content,	// a `[...]` content block: only `[` `]` nest; author `(` `)` `{` `}` are literal prose
-	Str,		// a `"..."` string literal: every character is literal until the closing quote
-	Math,		// a `$...$` maths span: every character is literal until the closing `$`
-	Comment,	// a `/* ... */` block comment, one frame per level of nesting: every character, brackets included, is literal until its own `*/`
-	Raw,		// a `` `...` `` code span: every character, `//`/`/*` included, is literal until the closing backtick
-	RawBlock(usize),	// a raw block opened by a run of three or more backticks: literal across lines until a run as long
-}
-
-/// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
-/// old flat `depth`: the span is closed when the stack is empty (was `depth <= 0`), and a multi-line code
-/// skip is still open while it is not. `escaped` records that the previous character was a `\` inside a
-/// string, maths span or content block, so a `\"`, `\$` or `\]` is passed over rather than closing its
-/// frame. Both persist across the lines of a span, since a frame may straddle the line break.
-pub(crate) struct SkipState {
-	frames:		Vec<Frame>,
-	escaped:	bool,
-	in_quote:	bool,	// an odd number of literal `"` seen since the start of the current line, in Content mode
-	markup:		bool,	// the level beneath every frame is a file's markup, not code
-}
-
-/// One step of a block comment's scan at `i`, as Typst's lexer counts one: a `/*` opens a comment nested one
-/// deeper, a `*/` closes the innermost, and any other character is the comment's text. Returns the characters
-/// consumed and the depth after them; the comment ends when the depth falls to zero. Every scanner that
-/// passes a block comment over steps through it here, so none closes a nested comment at its first `*/`.
-pub(crate) fn comment_step(chars: &[char], i: usize, depth: u32) -> (usize, u32) {
-	match (chars[i], chars.get(i + 1)) {
-		('*', Some('/'))	=> (2, depth.saturating_sub(1)),
-		('/', Some('*'))	=> (2, depth.saturating_add(1)),
-		_					=> (1, depth),
-	}
-}
-
-/// The length of the block comment opening at `i` (its `/*`), the comments nested in it included, or of the
-/// rest of `chars` when it never closes.
-pub(crate) fn block_comment_len(chars: &[char], i: usize) -> usize {
-	let mut j		= i.saturating_add(2);
-	let mut depth	= 1u32;
-	while depth > 0 && j < chars.len() {
-		let (n, d) = comment_step(chars, j, depth);
-		j		+= n;
-		depth	= d;
-	}
-	j.min(chars.len()) - i
-}
-
-/// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
-/// Mirrors the `://` exception in [`strip_comments`]: a `/` immediately after a `:` never starts a
-/// comment, in code or in content prose alike.
-fn is_line_comment(chars: &[char], i: usize) -> bool {
-	chars.get(i + 1) == Some(&'/') && !(i > 0 && chars[i - 1] == ':')
-}
-
-/// How many characters a `//` line comment opened at `i` consumes. `chars` may be a whole multi-line
-/// capture buffer -- [`read_group`], [`split_top_args`] and [`named_arg`] all run on one -- so the comment
-/// is bounded to the next `'\n'`, not to the end of the slice; a `//` on one line must never eat the lines
-/// that follow it.
-fn line_comment_len(chars: &[char], i: usize) -> usize {
-	match chars[i..].iter().position(|&c| c == '\n') {
-		Some(off)	=> off,
-		None		=> chars.len() - i,
-	}
-}
-
-/// The length of the run of backticks starting at `i`.
-fn backtick_run(chars: &[char], i: usize) -> usize {
-	chars[i..].iter().take_while(|&&c| c == '`').count()
-}
-
-impl SkipState {
-	pub(crate) fn new() -> Self {
-		SkipState { frames: Vec::new(), escaped: false, in_quote: false, markup: false }
-	}
-
-	/// A scan of a whole file, whose outermost level is markup, as the reader reads it: a paren, a brace or
-	/// a quote in prose is a character, a `#name(`/`#name[` opens a group, and a stray `]` closes nothing.
-	pub(crate) fn markup() -> Self {
-		SkipState { frames: Vec::new(), escaped: false, in_quote: false, markup: true }
-	}
-
-	/// Is a block comment or a raw block open? Everything inside one is text, so a line starting there is
-	/// no declaration, whatever it reads like.
-	pub(crate) fn in_literal(&self) -> bool {
-		self.frames.iter().any(|f| matches!(f, Frame::Comment | Frame::RawBlock(_)))
-	}
-
-	/// Is the innermost frame a comment or raw text, whose characters are text rather than markup or code?
-	fn in_text(&self) -> bool {
-		matches!(self.frames.last(), Some(Frame::Comment) | Some(Frame::Raw) | Some(Frame::RawBlock(_)))
-	}
-
-	/// Folds the step at `i` as [`Self::step`] does, and says whether the characters it consumed are text a
-	/// comment or raw text holds, delimiters included. A `//` line comment is the one step that consumes
-	/// such text while opening no frame: its whole run is taken at once.
-	fn step_literal(&mut self, chars: &[char], i: usize) -> (usize, bool) {
-		let was		= self.in_text();
-		let n		= self.step(chars, i);
-		let literal	= was || self.in_text() || (chars[i] == '/' && n >= 2);
-		(n, literal)
-	}
-
-	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
-	/// where a comma or colon parts only when nothing at all is open and a group closes when the stack empties.
-	fn is_open(&self) -> bool {
-		!self.frames.is_empty()
-	}
-
-	/// Is a structural bracket -- a `(`/`{`/`[` group -- still unclosed? This is the multi-line skip and
-	/// capture test, matching the old flat `depth > 0`: a dangling `"` or `$` left open at the end of a line
-	/// does not keep a construct open, since in prose a stray quote (an author's `"no bound"` split across
-	/// two lines after an inline `#raw("...")`) or a lone `$` is a character, not the start of a code span.
-	pub(crate) fn has_open_bracket(&self) -> bool {
-		self.frames.iter().any(|f| matches!(f, Frame::Code | Frame::Content))
-	}
-
-	/// How many structural `(`/`{`/`[` frames are nested right now -- the depth [`has_open_bracket`] only
-	/// asks a yes/no of. A guard tracking its own single opening bracket uses this to tell its own matching
-	/// closer (depth falls to 1) from an inner content block's closer (depth still above 1) on the same
-	/// `]` text.
-	pub(crate) fn open_brackets(&self) -> usize {
-		self.frames.iter().filter(|f| matches!(f, Frame::Code | Frame::Content)).count()
-	}
-
-	/// Folds the character (or, in content mode, the `#ident` run) at `i` into the stack, returning how
-	/// many characters were consumed from `chars` -- always at least one, more for a `#name(`/`#name[`/`#x`
-	/// run whose opener decides the frame it enters. All four scanners share this one transition so a
-	/// bracket is counted at exactly one place, whatever their outer loops do with the characters.
-	fn step(&mut self, chars: &[char], i: usize) -> usize {
-		let c = chars[i];
-		match self.frames.last().copied() {
-			Some(Frame::Str) => {
-				if self.escaped			{ self.escaped = false; }
-				else if c == '\\'		{ self.escaped = true; }
-				else if c == '"'		{ self.frames.pop(); }
-				1
-			},
-			Some(Frame::Math) => {
-				if self.escaped			{ self.escaped = false; }
-				else if c == '\\'		{ self.escaped = true; }
-				else if c == '$'		{ self.frames.pop(); }
-				1
-			},
-			// A `/* ... */` block comment: every character, including a stray `}`/`]`/`)` an author's note
-			// mentions, is literal until the comment's own closer -- the twin of Str/Math above, so a
-			// `#context` guard's brace balance is never corrupted by a comment inside its body. A `/*` in it
-			// opens a comment nested one deeper, as Typst nests them, so the first `*/` closes that one alone.
-			Some(Frame::Comment) => {
-				let (n, depth) = comment_step(chars, i, 1);
-				match depth {
-					0	=> { self.frames.pop(); },
-					1	=> {},
-					_	=> self.frames.push(Frame::Comment),
-				}
-				n
-			},
-			// A `` `...` `` code span: literal until the closing backtick, the twin of Comment above, so a
-			// `//`/`/*` a prose note quotes as a raw code token (`` the `//` operator ``) is never mistaken
-			// for a comment opener. Mirrors [`strip_comments`]' `in_raw`, which does not persist an
-			// unterminated span past its own line, so an unclosed backtick is dropped at the newline rather
-			// than swallowing the lines that follow.
-			Some(Frame::Raw) => {
-				match c {
-					'`'		=> { self.frames.pop(); 1 },
-					'\n'	=> { self.frames.pop(); 1 },
-					_		=> 1,
-				}
-			},
-			// A raw block, as Typst lexes one: literal, line breaks included, until a run of backticks as long
-			// as the one that opened it. A `#set` shown inside a ```` ```typst ```` example is its text.
-			Some(Frame::RawBlock(n)) => {
-				let run = backtick_run(chars, i);
-				if run >= n {
-					self.frames.pop();
-					n
-				} else {
-					run.max(1)
-				}
-			},
-			Some(Frame::Content)	=> self.content_step(chars, i, false),
-			// The outermost level of a file read as markup: a content block's rules, except that a stray `]`
-			// has no block to close.
-			None if self.markup		=> self.content_step(chars, i, true),
-			// A code frame, or the top level (an empty stack): brackets nest as the flat counter had them,
-			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span. A `"`
-			// opens a real `Str` frame here, which already keeps a `//`/`/*` inside it literal, so no
-			// separate quote count is needed the way Content mode's prose-only quote does.
-			_ => {
-				match c {
-					'"'									=> { self.frames.push(Frame::Str); 1 },
-					'`'									=> self.open_raw(chars, i),
-					'(' | '{'							=> { self.frames.push(Frame::Code); 1 },
-					'['									=> { self.frames.push(Frame::Content); 1 },
-					'$'									=> { self.frames.push(Frame::Math); 1 },
-					')' | '}'							=> { self.frames.pop(); 1 },
-					'/' if is_line_comment(chars, i)		=> line_comment_len(chars, i),
-					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
-					_									=> 1,
-				}
-			},
-		}
-	}
-
-	/// One character of content: the inside of a `[...]` block, or, with `base` set, a file's own markup,
-	/// where a `]` with no block open is a character.
-	fn content_step(&mut self, chars: &[char], i: usize, base: bool) -> usize {
-		// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over before any
-		// of the structural cases below can act on it.
-		if self.escaped {
-			self.escaped = false;
-			return 1;
-		}
-		match chars[i] {
-			'\\'			=> { self.escaped = true; 1 },
-			'['				=> { self.frames.push(Frame::Content); 1 },
-			']' if base		=> 1,
-			']'				=> { self.frames.pop(); 1 },
-			'$'				=> { self.frames.push(Frame::Math); 1 },
-			'#'				=> self.content_hash(chars, i),
-			'`'				=> self.open_raw(chars, i),
-			// A literal `"` in prose is not a string (content mode never opens `Frame::Str`), but
-			// `strip_comments` still treats a quoted phrase as opaque to `//`/`/*`, so a bare count mirrors
-			// that here without disturbing the bracket balance a real quote would otherwise leave alone.
-			// Line-scoped, as `strip_comments` is called once per line.
-			'"'				=> { self.in_quote = !self.in_quote; 1 },
-			'\n'			=> { self.in_quote = false; 1 },
-			// A line comment runs to the next `\n` in `chars` (which may hold a whole multi-line capture
-			// buffer, not just this one line) -- never past it, and never at all inside a quoted phrase or a
-			// raw span. The `://` exception mirrors `strip_comments`, so a bare URL's slashes stay literal
-			// prose. A block comment opens a `Comment` frame that can straddle the line break, same as
-			// Str/Math above.
-			'/' if is_line_comment(chars, i) && !self.in_quote		=> line_comment_len(chars, i),
-			'/' if chars.get(i + 1) == Some(&'*') && !self.in_quote	=> { self.frames.push(Frame::Comment); 2 },
-			// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole point of
-			// tracking the frame, so a caption's unbalanced paren does not stick.
-			_				=> 1,
-		}
-	}
-
-	/// Opens raw text at a backtick, as Typst's lexer does: one backtick an inline span, two an empty one,
-	/// three or more a raw block that runs until the same count closes it.
-	fn open_raw(&mut self, chars: &[char], i: usize) -> usize {
-		match backtick_run(chars, i) {
-			1	=> { self.frames.push(Frame::Raw); 1 },
-			2	=> 2,
-			n	=> { self.frames.push(Frame::RawBlock(n)); n },
-		}
-	}
-
-	/// Handles a `#` met in content mode: a `#name` identifier follows, and its first non-identifier
-	/// character decides the frame -- `(` opens the call's code arguments, `[` a content block, anything
-	/// else (or end of input) is a bare `#name` field access with no group. Returns the count consumed:
-	/// the `#`, the identifier, and, for a call or content opener, that opener too.
-	fn content_hash(&mut self, chars: &[char], i: usize) -> usize {
-		let mut j = i + 1;
-		while j < chars.len() && is_call_ident(chars[j]) {
-			j += 1;
-		}
-		match chars.get(j) {
-			Some('(')	=> { self.frames.push(Frame::Code); j + 1 - i },
-			Some('[')	=> { self.frames.push(Frame::Content); j + 1 - i },
-			_			=> j - i,	// a bare `#name` (or a lone `#`): open no frame
-		}
-	}
-}
-
 /// What to do with a line-leading Typst code statement or standalone template call.
 enum CodeSkip {
 	Line,				// the call closes on this line; skip the one line, as before
-	Multi(SkipState),	// the delimiters are still open; begin a multi-line skip carrying the depth
+	Multi(Lexer),		// the construct is still open; begin a multi-line skip carrying the lexer
 }
 
 /// If this already-left-trimmed line begins a Typst code statement Austenite skips for now, decides how
@@ -1688,9 +1430,9 @@ fn code_skip(trimmed: &str) -> Option<CodeSkip> {
 	if !keyword && !opens_standalone_call(trimmed) {
 		return None;
 	}
-	let mut state = SkipState::new();
-	scan_brackets(trimmed, &mut state);
-	if state.has_open_bracket() {
+	let mut state = Lexer::markup();
+	state.feed_line(trimmed);
+	if state.is_open() {
 		return Some(CodeSkip::Multi(state));
 	}
 	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
@@ -1842,56 +1584,6 @@ fn is_inline_call(name: &str) -> bool {
 		| "index" | "index-main" | "cite" | "link"
 		| "emph" | "strong" | "super" | "sub"
 		| "claim-label" | "claim-refs")
-}
-
-/// Folds one line's delimiters into the running [`SkipState`]. A bracket inside a `"..."` string, a `$...$`
-/// maths span or a `[...]` content block is not counted as structural nesting; the frame stack decides.
-/// The state carries into the next line, so a frame that straddles the break is tracked correctly.
-pub(crate) fn scan_brackets(line: &str, state: &mut SkipState) {
-	let chars: Vec<char> = line.chars().collect();
-	let mut i = 0;
-	while i < chars.len() {
-		i += state.step(&chars, i);
-	}
-}
-
-/// Which characters of `src` a comment or raw text holds, read as the reader reads a file: every character
-/// of a `//` or `/* */` comment and of a `` ` `` raw span or raw block, delimiters included. One entry per
-/// character of `src`.
-pub(crate) fn literal_chars(src: &str) -> Vec<bool> {
-	let chars: Vec<char>	= src.chars().collect();
-	let mut mask			= vec![false; chars.len()];
-	let mut state			= SkipState::markup();
-	let mut i				= 0usize;
-	while i < chars.len() {
-		let (n, literal)	= state.step_literal(&chars, i);
-		let end				= i.saturating_add(n.max(1)).min(chars.len());
-		if literal {
-			for m in &mut mask[i..end] {
-				*m = true;
-			}
-		}
-		i = end;
-	}
-	mask
-}
-
-/// `src` with every character a comment or raw text holds ([`literal_chars`]) blanked to spaces and every
-/// line break kept, so each byte offset and line of the result is the source's own. A scan that finds a
-/// declaration, an `#include` or a field in this text finds none a comment holds or a raw block shows.
-pub(crate) fn live_text(src: &str) -> String {
-	let mask	= literal_chars(src);
-	let mut out	= String::with_capacity(src.len());
-	for (c, literal) in src.chars().zip(mask) {
-		if literal && c != '\n' && c != '\r' {
-			for _ in 0..c.len_utf8() {
-				out.push(' ');
-			}
-		} else {
-			out.push(c);
-		}
-	}
-	out
 }
 
 /// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
@@ -2335,24 +2027,23 @@ fn resolve_term(key: &str, func: &str, span: Span, skips: &mut Refusals) -> Stri
 	}
 }
 
-/// Reads a bracket or paren group whose opener sits at `i`, returning its inner content and the index
-/// just past the matching closer. The [`SkipState`] frame stack decides what nests: strings, maths spans
-/// and content blocks are respected, so a bracket inside a quoted argument, a `$...$` span or the prose of
-/// a `[...]` caption does not close the group early -- a `(` an author left unbalanced in caption prose is
-/// literal, and the group still closes at its own delimiter. `None` when the group never closes, so a
-/// malformed call is left as ordinary text.
+/// Reads a bracket, paren or brace group whose opener sits at `i`, returning its inner content and the
+/// index just past the matching closer. The markup lexer ([`Lexer`]) decides what nests: strings, maths
+/// spans, content blocks, comments and raw text are respected, so a bracket inside a quoted argument, a
+/// `$...$` span or the prose of a `[...]` caption does not close the group early -- a `(` an author left
+/// unbalanced in caption prose is literal, and the group still closes at its own delimiter. `None` when
+/// the group never closes, so a malformed call is left as ordinary text.
 pub(crate) fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
-	let open = *chars.get(i)?;
-	if open != '[' && open != '(' {
+	if !matches!(chars.get(i), Some('[') | Some('(') | Some('{')) {
 		return None;
 	}
-	let mut state	= SkipState::new();
+	let mut state	= Lexer::code();
 	let mut inner	= String::new();
 	// The opener pushes its frame (`[` a content block, `(` a code group) but is not part of the inner
 	// content, so it is stepped over here and never appended.
-	let mut j = i + state.step(chars, i);
+	let mut j = i + state.step(chars, i).0;
 	while j < chars.len() {
-		let consumed = state.step(chars, j);
+		let consumed = state.step(chars, j).0;
 		if !state.is_open() {
 			// This character closed the outer group -- the matching closer -- so the group ends just past
 			// it, and the closer is dropped from the inner as the outer opener was.
@@ -2389,83 +2080,13 @@ fn cap_first(s: &str) -> String {
 	}
 }
 
-/// How deeply `/* ... */` block comments are nested across the line break: zero when none is open.
-struct CommentState {
-	depth:	u32,
-}
-
-/// Removes Typst comments from one line: a `//` to the line's end, and any `/* ... */` span, nested ones
-/// included, which may have opened on an earlier line ([`CommentState::depth`] carries that across). A `//`
-/// or `/*` inside a `"..."` string or a `` `code` `` span is not a comment and is kept, and a `//` immediately
-/// after `:` is kept so a bare URL survives. Quotes and backticks are treated as span delimiters here,
-/// which is what the reader's markup needs; a real Typst code line with string literals is skipped whole
-/// by the caller, so stripping it never reaches the output.
-fn strip_comments(line: &str, st: &mut CommentState) -> String {
-	let chars:	Vec<char>	= line.chars().collect();
-	let mut out				= String::new();
-	let mut in_str			= false;
-	let mut in_raw			= false;
-	let mut prev			= '\0';
-	let mut i				= 0usize;
-	while i < chars.len() {
-		let c = chars[i];
-		if st.depth > 0 {
-			let (n, depth) = comment_step(&chars, i, st.depth);
-			st.depth = depth;
-			i += n;
-			if depth == 0 {
-				prev = '\0';
-			}
-			continue;
-		}
-		if in_str {
-			out.push(c);
-			if c == '"' { in_str = false; }
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if in_raw {
-			out.push(c);
-			if c == '`' { in_raw = false; }
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '"' {
-			in_str = true;
-			out.push(c);
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '`' {
-			in_raw = true;
-			out.push(c);
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '/' && chars.get(i + 1) == Some(&'/') {
-			if prev == ':' {
-				out.push(c);	// a `://` is part of a URL, not a comment
-				prev = c;
-				i += 1;
-				continue;
-			}
-			break;	// a line comment: drop the rest of the line
-		}
-		if c == '/' && chars.get(i + 1) == Some(&'*') {
-			st.depth = 1;
-			i += 2;
-			prev = '\0';
-			continue;
-		}
-		out.push(c);
-		prev = c;
-		i += 1;
-	}
-	out
+/// A line with the characters a comment holds removed, `toks` being what the line's own bytes are as the
+/// lexer read the whole source ([`lex::byte_toks`]).
+fn strip_comments(line: &str, toks: &[lex::Tok]) -> String {
+	line.char_indices()
+		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment))
+		.map(|(_, c)| c)
+		.collect()
 }
 
 // -- Multi-line figure, table and data-array capture ----------------------------------------------
@@ -2475,7 +2096,7 @@ fn strip_comments(line: &str, st: &mut CommentState) -> String {
 struct Capture {
 	kind:	CaptureKind,
 	buf:	String,
-	state:	SkipState,
+	state:	Lexer,
 	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
 }
 
@@ -2550,9 +2171,9 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// is NOT own-line, so it falls through to the existing visible refusal, which keeps that trailing prose;
 	// inline mid-prose support is a later unit.
 	if let Some(kind) = builtin_opener(trimmed) {
-		let mut state = SkipState::new();
-		scan_brackets(trimmed, &mut state);
-		if state.has_open_bracket() || trimmed.trim_end().ends_with(')') {
+		let mut state = Lexer::markup();
+		state.feed_line(trimmed);
+		if state.is_open() || trimmed.trim_end().ends_with(')') {
 			return Some(CaptureKind::Builtin(kind));
 		}
 	}
@@ -4440,7 +4061,7 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 	let chars:	Vec<char>	= inner.chars().collect();
 	let mut args:	Vec<String>	= Vec::new();
 	let mut cur					= String::new();
-	let mut state				= SkipState::new();
+	let mut state				= Lexer::code();
 	let mut i					= 0;
 	while i < chars.len() {
 		// A comma parts the arguments only at the top level; inside any frame -- a nested group, a string,
@@ -4450,7 +4071,7 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 			i += 1;
 			continue;
 		}
-		let consumed = state.step(&chars, i);
+		let consumed = state.step(&chars, i).0;
 		for k in i..i + consumed {
 			cur.push(chars[k]);
 		}
@@ -4467,7 +4088,7 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 /// or a spread is not mistaken for a named argument.
 pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 	let chars:	Vec<char>	= arg.chars().collect();
-	let mut state			= SkipState::new();
+	let mut state			= Lexer::code();
 	let mut i				= 0;
 	while i < chars.len() {
 		// A colon names the argument only at the top level; inside any frame it is part of the value (an
@@ -4481,7 +4102,7 @@ pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 			}
 			return None;
 		}
-		i += state.step(&chars, i);
+		i += state.step(&chars, i).0;
 	}
 	None
 }
@@ -6091,11 +5712,11 @@ bound\".\n";
 	/// A block raw closes only on a run of backticks as long as its opener, as Typst lexes one.
 	#[test]
 	fn a_raw_block_closes_on_its_own_length() {
-		let mut state = SkipState::markup();
-		scan_brackets("````\n```\n#set text(size: 30pt)\n```\n", &mut state);
-		assert!(state.in_literal(), "a shorter run inside a four-backtick block is its text");
-		scan_brackets("````\n", &mut state);
-		assert!(!state.in_literal(), "the matching run closes it");
+		let mut state = Lexer::markup();
+		state.feed("````\n```\n#set text(size: 30pt)\n```\n");
+		assert!(state.is_open(), "a shorter run inside a four-backtick block is its text");
+		state.feed("````\n");
+		assert!(!state.is_open(), "the matching run closes it");
 	}
 
 	/// A `#set document` is applied from a file's own top level alone: one re-read from a container's body
@@ -6160,16 +5781,24 @@ bound\".\n";
 	/// comment holding another closes the inner one alone.
 	#[test]
 	fn block_comments_nest_in_every_scanner() {
-		let chars: Vec<char> = "/* a /* b */ c */ d".chars().collect();
-		assert_eq!(block_comment_len(&chars, 0), 17, "the outer `*/` closes the comment");
-		let open: Vec<char> = "/* a /* b */ c".chars().collect();
-		assert_eq!(block_comment_len(&open, 0), open.len(), "an unclosed comment runs to the end");
-		// The reader's line scan and the bracket scan agree: the outer comment holds the lines between.
-		let mut st = CommentState { depth: 0 };
-		assert_eq!(strip_comments("x /* a /* b */ c", &mut st), "x ");
-		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &mut st), " y");
-		assert_eq!(st.depth, 0);
-		assert_eq!(live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
+		// The reader's line scan and the bracket scan read one lexer: the outer comment holds the lines between.
+		let src		= "x /* a /* b */ c\n#set text(size: 30pt) */ y\n";
+		let toks	= lex::byte_toks(src);
+		assert_eq!(strip_comments("x /* a /* b */ c", &toks[..16]), "x ");
+		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &toks[17..43]), " y");
+		assert_eq!(lex::live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
+	}
+
+	/// A line that opens inside raw text an earlier line began is that text's: a `#set` in it is shown as
+	/// code, as Typst shows it, not read as a declaration nor dropped.
+	#[test]
+	fn a_line_inside_raw_text_is_its_text() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("Text `one\n#set document(title: \"Raw\")\nstill raw` after.\n"));
+		assert!(skips.is_empty(), "nothing is refused: {:?}", skips.sites());
+		let (runs, _) = res!(one_paragraph(&items));
+		assert!(runs.iter().any(|r| matches!(r, Inline::Code(t) if t.contains("#set document(title: \"Raw\")"))),
+			"the line is set as the raw text it stands in: {:?}", runs);
+		Ok(())
 	}
 
 	/// The live text blanks what a comment holds and what raw text shows, delimiters and all, and keeps
@@ -6177,7 +5806,7 @@ bound\".\n";
 	#[test]
 	fn live_text_blanks_comments_and_raw_text_and_keeps_offsets() {
 		let src = "A /* x\ny */ b // c\n```typst\n#include \"x.typ\"\n```\n`#set` d \u{e9}\n#include \"real.typ\"\n";
-		let live = live_text(src);
+		let live = lex::live_text(src);
 		assert_eq!(live.len(), src.len(), "byte offsets are kept");
 		assert_eq!(live.lines().count(), src.lines().count(), "lines are kept");
 		let blank = |n: usize| " ".repeat(n);
@@ -6190,8 +5819,8 @@ bound\".\n";
 			fmt!("{}d \u{e9}", blank(7)),
 			"#include \"real.typ\"".to_string(),
 		]);
-		// A URL's slashes are no comment, and a quoted `//` in prose stays prose, as the reader reads them.
-		assert_eq!(live_text("See https://x.io here.\n"), "See https://x.io here.\n");
+		// A link's slashes open no comment.
+		assert_eq!(lex::live_text("See https://x.io here.\n"), "See https://x.io here.\n");
 	}
 
 	/// A `#show` rule or a `#set` in a body that applies none of its own declarations is refused where the

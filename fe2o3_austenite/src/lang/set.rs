@@ -416,7 +416,7 @@ pub fn declstyle_refusal(buf: &str) -> Option<String> {
 /// without its enclosing parentheses, and the span of the line it opens on. `None` when the source has no
 /// such application at its top level.
 pub(crate) fn show_doc_with(src: &str) -> Option<(String, Span)> {
-	for (start, raw) in top_level_lines(src) {
+	for (start, raw) in crate::lang::lex::top_level_lines(src) {
 		let indent	= raw.len() - raw.trim_start().len();
 		let trimmed	= raw.trim_start();
 		if !trimmed.starts_with("#show:") {
@@ -443,33 +443,8 @@ pub fn heading_font_site(src: &str) -> Option<(String, Span)> {
 		named_string(&args, "heading-font").filter(|f| !f.is_empty()).map(|f| (f, span)))
 }
 
-/// The lines of `src` that stand at its top level, each with the byte offset it starts at, as the reader
-/// meets them: a line opening inside a bracketed body, a block comment or a raw block is none of them. A
-/// `#set` in a `#styled-box[...]`/`#columns[...]` body is that body's own declaration, lowered onto its
-/// scope when the body is re-parsed, and one inside a comment or a ```` ```typst ```` example is text, so
-/// a declaration scan that read either would apply what the document never applies.
-///
-/// The balance is folded through the reader's own scanner over the file's markup, so a paren, a brace or
-/// a quotation mark in prose is a character and leaves the lines after it at the top level.
-pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
-	let mut out		= Vec::new();
-	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
-	let mut state	= crate::lang::parse::SkipState::markup();
-	for raw in src.split_inclusive('\n') {
-		let line_start	= offset;
-		offset			= offset.saturating_add(raw.len());
-		// Whether the line starts nested, before its own delimiters are folded in.
-		let nested = state.has_open_bracket() || state.in_literal();
-		crate::lang::parse::scan_brackets(raw, &mut state);
-		if !nested {
-			out.push((line_start, raw));
-		}
-	}
-	out
-}
-
 /// Every top-level `#set <target>(...)` in `src`, as `(target, args)` pairs with the argument text
-/// stripped of its enclosing parentheses: a line of [`top_level_lines`] whose trimmed text opens with
+/// stripped of its enclosing parentheses: a line of [`crate::lang::lex::top_level_lines`] whose trimmed text opens with
 /// `#set `. A malformed set (no balanced parentheses) is skipped.
 ///
 /// The `(`'s position is found by tracking the running byte offset of each line rather than by searching
@@ -479,7 +454,7 @@ pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
 /// several following lines.
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
 	let mut out = Vec::new();
-	for (line_start, raw) in top_level_lines(src) {
+	for (line_start, raw) in crate::lang::lex::top_level_lines(src) {
 		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
 		let trimmed	= raw.trim_start();
 		let after	= match trimmed.strip_prefix("#set ") {

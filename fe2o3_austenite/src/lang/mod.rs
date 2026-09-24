@@ -12,6 +12,7 @@
 
 pub mod ast;
 pub mod codefig;
+pub(crate) mod lex;
 pub mod lower;
 pub mod mathparse;
 pub mod parse;

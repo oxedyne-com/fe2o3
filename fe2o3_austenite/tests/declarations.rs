@@ -228,3 +228,58 @@ fn a_commented_logo_field_asks_for_no_logo() -> Outcome<()> {
 		"no logo is missing: {:?}", report.diagnostics);
 	Ok(())
 }
+
+/// A `[` in prose is text, as Typst reads one: in a paragraph, a heading or a chapter, it hides none of the
+/// declarations, includes, guards or part pages after it, and nothing is refused for it.
+#[test]
+fn a_bracket_in_prose_hides_nothing_after_it() -> Outcome<()> {
+	let _turn = turn();
+	let root = "#let media = \"ebook\"\n\n= Intervals [0, 1)\n\nThe interval [0, 1) is BRACKETWORDS.\n\n\
+		#set document(title: \"After Bracket\")\n\n#include \"ch1.typ\"\n\n#if media == \"ebook\" [\n  #include \"ebook.typ\"\n\
+		] else [\n  #include \"print.typ\"\n]\n\n#part-page[Part Two]\n\n#include \"ch2.typ\"\n";
+	let files = [
+		("/proj/root.typ",	root),
+		("/proj/ch1.typ",	"= Chapter One\n\nThe set [a, b) is open.\n\n#include \"sub.typ\"\n"),
+		("/proj/sub.typ",	"SUBWORDS are set.\n"),
+		("/proj/ebook.typ",	"EBOOKWORDS are set.\n"),
+		("/proj/print.typ",	"PRINTWORDS are not.\n"),
+		("/proj/ch2.typ",	"= Chapter Two\n\nCHAPTWOWORDS are set.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	for want in ["BRACKETWORDS", "SUBWORDS", "EBOOKWORDS", "Part Two", "CHAPTWOWORDS"] {
+		assert!(text.contains(want), "{} is set: {}", want, text);
+	}
+	assert!(!text.contains("PRINTWORDS") && !text.contains("#include"), "{}", text);
+	assert_eq!(rendered.doc_info.title.as_deref(), Some("After Bracket"));
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #let (fixed-point)"]);
+	Ok(())
+}
+
+/// A comment is where Typst's lexer opens one: a link is one token, so the `/*` and `//` in it open none and
+/// the declaration, the include and the prose after it are read; a quotation mark in prose is a character,
+/// so a `/*` in a quoted phrase opens a comment that holds the declaration after it.
+#[test]
+fn a_comment_opens_where_typst_opens_one() -> Outcome<()> {
+	let _turn = turn();
+	let root = "See https://example.com/x/*y ZQX and https://a.io//b too.\n\n\
+		#set document(title: \"After Url\")\n\n#include \"ch1.typ\"\n\nLASTWORDS set.\n";
+	let files = [
+		("/proj/root.typ",	root),
+		("/proj/ch1.typ",	"= Chapter\n\nCHAPTERWORDS are set.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("ZQX") && text.contains("CHAPTERWORDS") && text.contains("LASTWORDS"), "{}", text);
+	assert_eq!(rendered.doc_info.title.as_deref(), Some("After Url"));
+	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+	let src = "He said \"use /* here\" today.\n\n#set document(title: \"After Quote\")\n\nHIDDENWORDS */ TAILWORDS.\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("TAILWORDS") && !text.contains("HIDDENWORDS") && !text.contains("today"), "{}", text);
+	assert_eq!(rendered.doc_info.title, None, "the commented title is not written");
+	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
