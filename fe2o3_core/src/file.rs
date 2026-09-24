@@ -148,16 +148,31 @@ pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
 
 /// Writes `data` to `path` atomically. No POSIX mode bits exist to restrict
 /// here, so this platform gets the write-then-rename without the 0600
-/// guarantee the unix build makes.
+/// guarantee the unix build makes, but the fsync-before-rename still applies:
+/// without it, a crash could still leave the rename recorded while the data
+/// it pointed at never reached the disk it was written on.
 #[cfg(not(unix))]
 pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
     let tmp = res!(secret_tmp_path(path));
-    if let Err(e) = fs::write(&tmp, data) {
+    let mut f = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e,
+            "Could not create the temporary secret file {:?}.", tmp;
+            File, IO, Create)),
+    };
+    if let Err(e) = f.write_all(data) {
         let _ = fs::remove_file(&tmp);
         return Err(err!(e,
             "Could not write the temporary secret file {:?}.", tmp;
             File, IO, Write));
     }
+    if let Err(e) = f.sync_all() {
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not fsync the temporary secret file {:?}.", tmp;
+            File, IO, Write));
+    }
+    drop(f);
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err!(e,
