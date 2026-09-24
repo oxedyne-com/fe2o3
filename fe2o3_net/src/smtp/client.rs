@@ -623,27 +623,14 @@ async fn transact(
 /// read off the wire in [`transact`], so this reads the tag rather than parse a status code out of a
 /// message.
 ///
-/// The whole chain is walked, not only the outermost frame. `res!` wraps a cause in an
-/// `Error::Upstream` carrying **no tags of its own**, and `Error::tags` reports one frame's tags
-/// rather than the chain's -- so every `res!` between the 5xx and the caller hid the tag. Reading
-/// only the outer frame, as this did until 2026-08-17, made the predicate answer `false` to every
-/// permanent failure there has ever been: `submit` and `try_one` each pass `transact`'s error
-/// through one `res!`. Nothing was suppressed, and `fe2o3_steel`'s subscriber list kept mailing
-/// addresses their servers had refused outright.
+/// The tag is read from the whole chain, as [`Error::tags`] gathers it. `res!` wraps a cause in an
+/// `Error::Upstream` carrying **no tags of its own**, so reading only the outer frame, as this did
+/// until 2026-08-17, made the predicate answer `false` to every permanent failure there has ever
+/// been: `submit` and `try_one` each pass `transact`'s error through one `res!`. Nothing was
+/// suppressed, and `fe2o3_steel`'s subscriber list kept mailing addresses their servers had refused
+/// outright.
 pub fn is_permanent(e: &Error<ErrTag>) -> bool {
-    if e.tags().contains(&ErrTag::Permanent) {
-        return true;
-    }
-    let mut cause = std::error::Error::source(e);
-    while let Some(c) = cause {
-        if let Some(inner) = c.downcast_ref::<Error<ErrTag>>() {
-            if inner.tags().contains(&ErrTag::Permanent) {
-                return true;
-            }
-        }
-        cause = c.source();
-    }
-    false
+    e.tags().contains(&ErrTag::Permanent)
 }
 
 /// Prove to the provider that the sender holds the account.

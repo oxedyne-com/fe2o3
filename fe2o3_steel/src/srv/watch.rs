@@ -102,14 +102,15 @@ use std::collections::{
 };
 use oxedyne_fe2o3_net::http::{
     client::{
-        http_request,
-        https_request,
+        http_request_limited,
+        https_request_limited,
     },
     header::{
         HttpHeadline,
         HttpMethod,
     },
     loc::Url,
+    msg::ReadLimits,
 };
 
 use std::{
@@ -151,6 +152,12 @@ impl From<Health> for PeerHealth {
         }
     }
 }
+
+// The most of an answer a probe reads. A real health body is under a few KiB even with every
+// stamp and resident, and each one read is kept in the dashboard's ring for an hour, so a peer
+// that sends more is refused rather than held (D-06 audit D1).
+pub const PROBE_BODY_MAX:   usize = 64 * 1024;
+pub const PROBE_HEADER_MAX: usize = 16 * 1024;
 
 /// What one probe came back with.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -422,86 +429,110 @@ impl Watcher {
         }
     }
 
-    /// Ask one peer whether it is well, returning what came back and how long the probe took.
-    ///
-    /// Any answer that is not a `2xx` is a failure, including a `503`: a Steel that is up and
-    /// sealed is answering, and it is still not serving the databases behind it. It is a
-    /// [`Probe::Refused`] rather than [`Probe::Silent`] all the same, because an answer proves
-    /// the path to the peer. The body is present only when the peer carries a `token` (so the
-    /// gate opens) and the answer parsed; its absence never fails the liveness check, so a peer
-    /// that answers `200` without a body is still up. The duration is measured here, not
-    /// self-reported by the peer.
     async fn probe(&self, peer: &WatchPeer) -> (Probe, std::time::Duration) {
-        let url = &peer.url;
-        let started = Instant::now();
-        let loc = match Url::parse(url) {
-            Ok(l) => l,
-            // Refused at construction, so this cannot happen -- and if it ever does, a peer
-            // that cannot be addressed is a peer that is not answering.
-            Err(e) => {
-                warn!("The watch URL {} stopped parsing: {}", url, e);
-                return (Probe::Silent, started.elapsed());
-            },
-        };
-        let host = loc.host.clone();
-        let port = loc.port;
-        let path = loc.target.clone();
         let timeout = Duration::from_secs(self.cfg.timeout_secs.max(2));
+        probe(peer, timeout, self.tls.clone()).await
+    }
+}
 
-        // The token, when the operator gave one, opens the peer's health gate. Without it the
-        // peer answers a 404 for the health path, so the probe reads liveness only.
-        let mut headers: Vec<(&str, &str)> = vec![
-            ("Connection", "close"),
-            ("User-Agent", "steel-watch"),
-        ];
-        if let Some(tok) = &peer.token {
-            headers.push(("x-steel-health-token", tok.as_str()));
-        }
-        // The scheme decides, and `new` has already refused a plain URL that nobody opted in
-        // to -- so by the time a probe runs, `http` here means the operator wrote it down.
-        let reply = if loc.scheme.is_tls() {
-            let call = https_request(
-                &host, port, HttpMethod::GET, &path, &headers, &[], self.tls.clone(),
-            );
-            tokio::time::timeout(timeout, call).await
-        } else {
-            let call = http_request(&host, port, HttpMethod::GET, &path, &headers, &[]);
-            tokio::time::timeout(timeout, call).await
-        };
-        let elapsed = started.elapsed();
-        match reply {
-            Ok(Ok(reply)) => {
-                let code = match &reply.header.headline {
-                    HttpHeadline::Response { status } => *status as u16,
-                    // A response with a request headline is not an answer this
-                    // can read, and an unreadable answer is not a healthy peer.
-                    _ => 0,
-                };
-                if (200..300).contains(&code) {
-                    let body = match String::from_utf8(reply.body.clone()) {
-                        Ok(s) => match HealthBody::parse(&s) {
-                            Ok(b) => Some(b),
-                            // A 200 that does not parse as a health body is a peer that is up but
-                            // served something else (no token, a plain page): still alive.
-                            Err(_) => None,
-                        },
+/// Ask one peer whether it is well, returning what came back and how long the probe took.
+///
+/// Any answer that is not a `2xx` is a failure, including a `503`: a Steel that is up and
+/// sealed is answering, and it is still not serving the databases behind it. It is a
+/// [`Probe::Refused`] rather than [`Probe::Silent`] all the same, because an answer proves
+/// the path to the peer. The body is present only when the peer carries a `token` (so the
+/// gate opens) and the answer parsed; its absence never fails the liveness check, so a peer
+/// that answers `200` without a body is still up. The duration is measured here, not
+/// self-reported by the peer.
+async fn probe(
+    peer:       &WatchPeer,
+    timeout:    Duration,
+    tls:        Arc<ClientConfig>,
+)
+    -> (Probe, std::time::Duration)
+{
+    let url = &peer.url;
+    let started = Instant::now();
+    let loc = match Url::parse(url) {
+        Ok(l) => l,
+        // Refused at construction, so this cannot happen -- and if it ever does, a peer
+        // that cannot be addressed is a peer that is not answering.
+        Err(e) => {
+            warn!("The watch URL {} stopped parsing: {}", url, e);
+            return (Probe::Silent, started.elapsed());
+        },
+    };
+    let host = loc.host.clone();
+    let port = loc.port;
+    let path = loc.target.clone();
+
+    // The token, when the operator gave one, opens the peer's health gate. Without it the
+    // peer answers a 404 for the health path, so the probe reads liveness only.
+    let mut headers: Vec<(&str, &str)> = vec![
+        ("Connection", "close"),
+        ("User-Agent", "steel-watch"),
+    ];
+    if let Some(tok) = &peer.token {
+        headers.push(("x-steel-health-token", tok.as_str()));
+    }
+    let limits = ReadLimits {
+        max_header_bytes:       Some(PROBE_HEADER_MAX),
+        max_body_bytes:         Some(PROBE_BODY_MAX),
+        header_read_timeout:    None,
+    };
+    // The scheme decides, and `new` has already refused a plain URL that nobody opted in
+    // to -- so by the time a probe runs, `http` here means the operator wrote it down.
+    let reply = if loc.scheme.is_tls() {
+        let call = https_request_limited(
+            &host, port, HttpMethod::GET, &path, &headers, &[], tls, Some(&limits),
+        );
+        tokio::time::timeout(timeout, call).await
+    } else {
+        let call = http_request_limited(
+            &host, port, HttpMethod::GET, &path, &headers, &[], Some(&limits),
+        );
+        tokio::time::timeout(timeout, call).await
+    };
+    let elapsed = started.elapsed();
+    match reply {
+        Ok(Ok(reply)) => {
+            let code = match &reply.header.headline {
+                HttpHeadline::Response { status } => *status as u16,
+                // A response with a request headline is not an answer this
+                // can read, and an unreadable answer is not a healthy peer.
+                _ => 0,
+            };
+            if (200..300).contains(&code) {
+                let body = match String::from_utf8(reply.body.clone()) {
+                    Ok(s) => match HealthBody::parse(&s) {
+                        Ok(b) => Some(b),
+                        // A 200 that does not parse as a health body is a peer that is up but
+                        // served something else (no token, a plain page): still alive.
                         Err(_) => None,
-                    };
-                    (Probe::Up(body), elapsed)
-                } else {
-                    debug!("Watch: {} answered {}.", url, code);
-                    (Probe::Refused(code), elapsed)
-                }
-            },
-            Ok(Err(e)) => {
-                debug!("Watch: {} did not answer: {}", url, e);
-                (Probe::Silent, elapsed)
-            },
-            Err(_) => {
-                debug!("Watch: {} did not answer within {}s.", url, timeout.as_secs());
-                (Probe::Silent, elapsed)
-            },
-        }
+                    },
+                    Err(_) => None,
+                };
+                (Probe::Up(body), elapsed)
+            } else {
+                debug!("Watch: {} answered {}.", url, code);
+                (Probe::Refused(code), elapsed)
+            }
+        },
+        // An answer, so the path works, but not one this will hold: a failure like any refusal,
+        // and said at warn, since the outage it leads to would otherwise read as silence.
+        Ok(Err(e)) if e.tags().contains(&ErrTag::TooBig) => {
+            warn!("Watch: {} answered with more than a probe reads ({} bytes of body, {} of \
+                header), so the answer is refused: {}", url, PROBE_BODY_MAX, PROBE_HEADER_MAX, e);
+            (Probe::Refused(0), elapsed)
+        },
+        Ok(Err(e)) => {
+            debug!("Watch: {} did not answer: {}", url, e);
+            (Probe::Silent, elapsed)
+        },
+        Err(_) => {
+            debug!("Watch: {} did not answer within {}s.", url, timeout.as_secs());
+            (Probe::Silent, elapsed)
+        },
     }
 }
 
@@ -565,10 +596,111 @@ fn judge_round(
         };
         let (ev, sample) = assess(
             threshold, whoami, peer, st, ok, body, took, repeat, now, t_secs);
-        events.extend(ev);
+        events.extend(ev.into_iter().map(|e| (i, e)));
         samples.push((i, sample));
     }
-    (events, samples)
+    (by_host(cfg, whoami, state, events, now), samples)
+}
+
+/// Fold a round's liveness events into one per host (D-06 audit A1).
+///
+/// A machine behind several entries -- its Steel and a forge copy, say -- dies as one, so it is
+/// told as one: a single `DOWN` or `is back` naming the entries, rather than a text for each.
+/// When any entry of a host is told `DOWN`, every entry of that host already down is named in
+/// the same message and its reminder restarted with it, so the host reminds on one cadence, the
+/// shortest of its entries', not once per entry. A host told about one entry alone reads
+/// exactly as before, and every other event passes through untouched.
+fn by_host(
+    cfg:        &WatchConfig,
+    whoami:     &str,
+    state:      &mut [PeerState],
+    events:     Vec<(usize, AlertEvent)>,
+    now:        Instant,
+)
+    -> Vec<AlertEvent>
+{
+    let host_of = |i: usize| cfg.peers.get(i).map(|p| p.host.clone()).unwrap_or_default();
+    let mut out = Vec::with_capacity(events.len());
+    let mut told_down: BTreeSet<String> = BTreeSet::new(); // hosts given their one message
+    let mut told_back: BTreeSet<String> = BTreeSet::new();
+    for (i, ev) in &events {
+        let host = host_of(*i);
+        match ev {
+            AlertEvent::PeerDown { .. } => {
+                if !told_down.insert(host.clone()) {
+                    continue;
+                }
+                let failures = events.iter()
+                    .filter(|(j, _)| host_of(*j) == host)
+                    .filter_map(|(_, e)| match e {
+                        AlertEvent::PeerDown { failures, .. } => Some(*failures),
+                        _ => None,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                // Every entry on the host that is down now, whether or not its own reminder
+                // fell due this round.
+                let mut names = Vec::new();
+                let mut urls = Vec::new();
+                let mut down_secs = 0;
+                for (j, p) in cfg.peers.iter().enumerate() {
+                    if p.host != host {
+                        continue;
+                    }
+                    if let Some(st) = state.get_mut(j) {
+                        if st.health == Health::Down {
+                            st.told_at = Some(now);
+                            let secs = st.failing_at
+                                .map(|t| now.duration_since(t).as_secs()).unwrap_or(0);
+                            down_secs = down_secs.max(secs);
+                            names.push(p.name.clone());
+                            urls.push(p.url.clone());
+                        }
+                    }
+                }
+                if names.len() < 2 {
+                    out.push(ev.clone());
+                } else {
+                    out.push(AlertEvent::PeerDown {
+                        peer:       fmt!("{} ({})", host, names.join(", ")),
+                        url:        urls.join(", "),
+                        failures,
+                        down_secs,
+                        noticed_by: whoami.to_string(),
+                    });
+                }
+            },
+            AlertEvent::PeerRecovered { .. } => {
+                if !told_back.insert(host.clone()) {
+                    continue;
+                }
+                let mut names = Vec::new();
+                let mut urls = Vec::new();
+                let mut away = 0;
+                for (j, e) in &events {
+                    if let AlertEvent::PeerRecovered { peer, url, away_secs, .. } = e {
+                        if host_of(*j) == host {
+                            names.push(peer.clone());
+                            urls.push(url.clone());
+                            away = away.max(*away_secs);
+                        }
+                    }
+                }
+                if names.len() < 2 {
+                    out.push(ev.clone());
+                } else {
+                    out.push(AlertEvent::PeerRecovered {
+                        peer:       fmt!("{} ({})", host, names.join(", ")),
+                        url:        urls.join(", "),
+                        away_secs:  away,
+                        noticed_by: whoami.to_string(),
+                    });
+                }
+            },
+            _ => out.push(ev.clone()),
+        }
+    }
+    out
 }
 
 /// One probe result in; the alerts it raises and the sample the dashboard keeps out.
@@ -1297,7 +1429,7 @@ mod tests {
     }
 
     /// Two entries on one machine are one host: when it dies both fall silent together, and
-    /// that is its death, not the watcher's link (D-06 audit W1).
+    /// that is its death, not the watcher's link (D-06 audit W1), told once (A1).
     #[test]
     fn two_entries_on_one_host_are_judged_as_one_host() {
         let mut cfg = watch_of(&["jarrah", "forge"], 2);
@@ -1312,8 +1444,65 @@ mod tests {
                 t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
             raised.extend(ev);
         }
-        assert_eq!(kinds(&raised), vec!["down", "down"]);
+        assert_eq!(kinds(&raised), vec!["down"]);
+        assert!(state.iter().all(|st| st.health == Health::Down));
         assert!(!link_down);
+    }
+
+    /// One host's death is one text, and so is each reminder and the recovery, however many
+    /// entries sit on it and whatever their own cadences (D-06 audit A1). An entry on the same
+    /// host that fails alone is still told alone, under its own name.
+    #[test]
+    fn a_hosts_death_is_told_once_however_many_entries_it_has() {
+        let mut cfg = watch_of(&["jarrah", "forge", "birch"], 2);
+        cfg.peers[1].host = fmt!("jarrah");
+        cfg.peers[1].repeat_secs = Some(3_600);
+        let mut state = states_for(&cfg);
+        let mut link_down = false;
+        let t0 = Instant::now();
+        let jarrah_dead = || round_of(vec![Probe::Silent, Probe::Silent, Probe::Up(None)]);
+
+        // Two hours of jarrah dead, one round a minute.
+        let mut texts = 0;
+        for i in 0..120u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down, jarrah_dead(),
+                t0 + Duration::from_secs(60 * i), 1_000 + 60 * i);
+            assert!(ev.len() <= 1, "round {} sent {} texts for one host", i, ev.len());
+            for e in &ev {
+                match e {
+                    AlertEvent::PeerDown { peer, url, .. } => {
+                        assert_eq!(peer, "jarrah (jarrah, forge)");
+                        assert!(url.contains("jarrah.example") && url.contains("forge.example"));
+                        texts += 1;
+                    },
+                    other => panic!("round {}: expected jarrah down, got {:?}", i, kinds(&[other.clone()])),
+                }
+            }
+        }
+        // Told at the second round, then reminded every 15 minutes: jarrah's cadence, the
+        // shortest, restarts forge's each time rather than adding its own.
+        assert_eq!(texts, 1 + (119 - 1) / 15);
+
+        let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+            round_of(vec![Probe::Up(None), Probe::Up(None), Probe::Up(None)]),
+            t0 + Duration::from_secs(7_200), 8_200);
+        match ev.as_slice() {
+            [AlertEvent::PeerRecovered { peer, .. }] => assert_eq!(peer, "jarrah (jarrah, forge)"),
+            other => panic!("expected one recovery for the host, got {:?}", kinds(other)),
+        }
+
+        // The forge copy alone: the host is up, so the entry is told under its own name.
+        let mut raised = Vec::new();
+        for i in 0..2u64 {
+            let (ev, _) = judge_round(&cfg, "karri", &mut state, &mut link_down,
+                round_of(vec![Probe::Up(None), Probe::Silent, Probe::Up(None)]),
+                t0 + Duration::from_secs(7_260 + 60 * i), 8_260 + 60 * i);
+            raised.extend(ev);
+        }
+        match raised.as_slice() {
+            [AlertEvent::PeerDown { peer, .. }] => assert_eq!(peer, "forge"),
+            other => panic!("expected forge down alone, got {:?}", kinds(other)),
+        }
     }
 
     /// The rule still holds over the hosts left: with jarrah down, karri and birch silent
@@ -1340,6 +1529,113 @@ mod tests {
         }
         assert_eq!(state[1].health, Health::Up { failures: 0 });
         assert_eq!(state[2].health, Health::Up { failures: 0 });
+    }
+
+    /// Serve one canned reply to the first connection on a loopback port, returning the port.
+    async fn serve_once(reply: Vec<u8>) -> u16 {
+        use tokio::io::{
+            AsyncReadExt,
+            AsyncWriteExt,
+        };
+        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+            Ok(l) => l,
+            Err(e) => panic!("no loopback listener: {}", e),
+        };
+        let port = match listener.local_addr() {
+            Ok(a) => a.port(),
+            Err(e) => panic!("no local address: {}", e),
+        };
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let _ = sock.write_all(&reply).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        port
+    }
+
+    /// A `200` carrying a well-formed health body of `fields` fields.
+    fn health_reply(fields: usize) -> Vec<u8> {
+        let mut b = HealthBody::new();
+        for i in 0..fields {
+            b.set(&fmt!("k{}", i), i as i64);
+        }
+        let body = b.to_json();
+        let mut out = fmt!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+            Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        out.extend_from_slice(body.as_bytes());
+        out
+    }
+
+    /// The same `200`, sent chunked and so declaring no length, as a proxy streaming the page
+    /// answers.
+    fn chunked_health_reply(fields: usize) -> Vec<u8> {
+        let mut b = HealthBody::new();
+        for i in 0..fields {
+            b.set(&fmt!("k{}", i), i as i64);
+        }
+        let body = b.to_json();
+        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+            Transfer-Encoding: chunked\r\n\r\n".to_vec();
+        for piece in body.as_bytes().chunks(4096) {
+            out.extend_from_slice(fmt!("{:x}\r\n", piece.len()).as_bytes());
+            out.extend_from_slice(piece);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
+    /// A probe reads a health body of ordinary size and refuses one far larger, since each body
+    /// read is kept in the dashboard's ring for an hour (D-06 audit D1).
+    #[tokio::test]
+    async fn a_probe_reads_a_health_body_but_not_one_of_any_size() {
+        let tls = match oxedyne_fe2o3_net::tls::default_client_config() {
+            Ok(c) => Arc::new(c),
+            Err(e) => panic!("no TLS client config: {}", e),
+        };
+        let small = health_reply(20);
+        let large = health_reply(20_000);
+        assert!(small.len() < PROBE_BODY_MAX && large.len() > 2 * PROBE_BODY_MAX);
+
+        let port = serve_once(small).await;
+        let mut peer = plain_peer("small", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls.clone()).await {
+            (Probe::Up(Some(b)), _) => assert_eq!(b.fields.len(), 20),
+            _ => panic!("a health body of ordinary size was not read"),
+        }
+
+        let port = serve_once(large).await;
+        let mut peer = plain_peer("large", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls.clone()).await {
+            (Probe::Up(Some(b)), _) => panic!("a body of {} fields, over {} bytes, was read \
+                whole and would be kept", b.fields.len(), PROBE_BODY_MAX),
+            // An answer, so not silence: it must not count towards the watcher's own link.
+            (Probe::Refused(0), _) => (),
+            (other, _) => panic!("an oversized answer read as {:?}, not a refusal", other),
+        }
+
+        // Chunked, the body declares no length, so it is cut off part way through decoding, and
+        // the overflow reaches the probe from beneath a wrapping frame (re-check B-H1).
+        let port = serve_once(chunked_health_reply(20)).await;
+        let mut peer = plain_peer("chunked", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls.clone()).await {
+            (Probe::Up(Some(b)), _) => assert_eq!(b.fields.len(), 20),
+            (other, _) => panic!("a chunked health body of ordinary size read as {:?}", other),
+        }
+
+        let port = serve_once(chunked_health_reply(20_000)).await;
+        let mut peer = plain_peer("chunked", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls).await {
+            (Probe::Refused(0), _) => (),
+            (other, _) => panic!("an oversized chunked answer read as {:?}, not a refusal", other),
+        }
     }
 
     /// Distress is told by mail alone, so a host with no mail recipient names the peers whose

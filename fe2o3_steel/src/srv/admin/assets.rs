@@ -224,7 +224,7 @@ pub const FLEET_JS: &str = r#"
             case 'pct':   return v + '%';
             case 'load':  return (v / 100).toFixed(2);
             case 'ms':    return v + ' ms';
-            case 'guard': return v >= 1 ? 'ok' : 'failed';
+            case 'guard': return v === 0 ? 'ok' : 'failed';
             case 'mail':  return v === 0 ? 'all bound' : v + ' not bound';
             case 'secs':  return span(v);
             case 'kib':   return kib(v);
@@ -248,10 +248,6 @@ pub const FLEET_JS: &str = r#"
         return '';
     }
     function hint(cell) {
-        if (cell.unit === 'guard') {
-            return 'The address guard’s own self-test. Failed is red whatever the '
-                + 'thresholds say: the rest of this pane is then decoration.';
-        }
         if (none(cell.d)) return cell.k + ': no threshold for this peer, so no colour.';
         return cell.k + ': distress at ' + cell.d
             + (none(cell.c) ? ', no separate clear' : ', clears at ' + cell.c) + '.';

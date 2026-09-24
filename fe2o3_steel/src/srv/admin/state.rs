@@ -172,7 +172,7 @@ pub struct AdminState {
     // When the process began serving, so the health body can report uptime.
     pub started:        Instant,
     // Whether the address guard reported armed by its in-process self-test at
-    // start-up, surfaced as `guard_selftest` in the health body so a box proves
+    // start-up, surfaced as `guard_failed` in the health body so a box proves
     // its own admission control is live without an external synthetic probe.
     pub guard_selftest: bool,
     // Rolling one-minute counts of `429`s emitted and connections dropped at

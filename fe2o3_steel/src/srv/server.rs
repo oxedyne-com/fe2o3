@@ -798,6 +798,8 @@ pub fn load_dkim_signers(
             cfg.dkim_selector.clone()
         };
         let bytes = if path.exists() {
+            // Tighten a key that predates `save_secret` before reading it.
+            res!(core_file::restrict_secret(&path));
             match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => return Err(err!(e,
@@ -808,7 +810,11 @@ pub fn load_dkim_signers(
             info!("DKIM: no key at {:?}, generating a fresh ed25519 pair.", path);
             let s = res!(DkimSigner::generate(domain.clone(), selector.clone()));
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                // Key directory: 0700, not the default create mode, and the
+                // error propagates rather than being swallowed -- a failure
+                // here means the save below fails too, but at a less specific
+                // error site.
+                res!(core_file::create_secret_dir(parent));
             }
             // Key material: 0600 whatever the umask, not the default create mode.
             if let Err(e) = core_file::save_secret(&path, s.pkcs8_bytes()) {

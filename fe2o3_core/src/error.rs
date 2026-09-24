@@ -230,19 +230,35 @@ pub enum Error<T: GenTag> {
 
 impl<T: GenTag> Error<T> where Error<T>: std::error::Error {
 
+    /// Every tag the error carries, its own and those of each error it wraps, outermost first. A
+    /// `res!` frame adds no tags of its own, so reading the outer frame alone loses the tags the fault
+    /// was raised with.
     pub fn tags(&self) -> Vec<T> {
+        let mut out = Vec::new();
+        self.gather_tags(&mut out);
+        out
+    }
+
+    fn gather_tags(&self, out: &mut Vec<T>) {
         match self {
             Error::Local(ErrMsg { tags: t, ..}) |
-            Error::Other(ErrMsg { tags: t, ..}) => t.to_vec(),
-            Error::Upstream(_, ErrMsg { tags: t, ..}) => t.to_vec(),
-            Error::Collection(boxerrs) => {
-                let mut t = Vec::new();
-                for e in boxerrs {
-                    for tag in (*e).tags() {
-                        t.push(tag.clone())
+            Error::Other(ErrMsg { tags: t, ..}) => out.extend(t.iter().cloned()),
+            Error::Upstream(arc_e, ErrMsg { tags: t, ..}) => {
+                out.extend(t.iter().cloned());
+                // A foreign cause may itself wrap one of ours, so the walk goes on through it.
+                let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(arc_e.as_ref());
+                while let Some(c) = cause {
+                    if let Some(e) = c.downcast_ref::<Error<T>>() {
+                        e.gather_tags(out);
+                        break;
                     }
+                    cause = c.source();
                 }
-                t
+            },
+            Error::Collection(boxerrs) => {
+                for e in boxerrs {
+                    e.gather_tags(out);
+                }
             },
         }
     }
@@ -785,6 +801,51 @@ mod tests {
             Ok(_) => (),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_tags_are_gathered_through_every_wrapping_frame() -> Outcome<()> {
+        fn inner() -> Outcome<()> {
+            Err(err!("The store is at its cap."; Excessive, LimitReached))
+        }
+        fn middle() -> Outcome<()> {
+            res!(inner());	// A frame with no tags of its own.
+            Ok(())
+        }
+        fn outer() -> Outcome<()> {
+            res!(middle(), IO);
+            Ok(())
+        }
+        let e = match outer() {
+            Ok(()) => return Err(err!("The error was supposed to propagate."; Bug)),
+            Err(e) => e,
+        };
+        let tags = e.tags();
+        assert_eq!(tags, vec![ErrTag::IO, ErrTag::Excessive, ErrTag::LimitReached], "outermost first");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tags_pass_through_a_foreign_error_that_wraps_one_of_ours() -> Outcome<()> {
+        // Somebody else's error type, whose source is one of ours.
+        #[derive(Debug)]
+        struct Foreign(Error<ErrTag>);
+        impl fmt::Display for Foreign {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "{}", self.0.plain())
+            }
+        }
+        impl std::error::Error for Foreign {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+        let fault = err!("A chunk took the body past its limit."; Input, TooBig);
+        let e = err!(Foreign(fault), "The answer could not be read."; IO);
+        let e = Error::Upstream(Arc::new(e), ErrMsg { tags: &[], msg: errmsg!() });
+        assert_eq!(e.tags(), vec![ErrTag::IO, ErrTag::Input, ErrTag::TooBig],
+            "the walk goes on through the foreign frame to the error it wraps");
         Ok(())
     }
 }

@@ -61,7 +61,7 @@ pub const F_LOAD1:          &str = "load1";        // 1-minute load average x100
 pub const F_CONNS:          &str = "conns";
 pub const F_R429_1M:        &str = "r429_1m";
 pub const F_DROPPED_1M:     &str = "dropped_1m";
-pub const F_GUARD_SELFTEST: &str = "guard_selftest";
+pub const F_GUARD_FAILED:   &str = "guard_failed";   // 1 when the guard's self-test failed
 pub const F_UPTIME_S:       &str = "uptime_s";
 pub const F_SEALED:         &str = "sealed";
 
@@ -91,7 +91,7 @@ pub const BUILTIN_FIELDS: [&str; 14] = [
     F_CONNS,
     F_R429_1M,
     F_DROPPED_1M,
-    F_GUARD_SELFTEST,
+    F_GUARD_FAILED,
     F_UPTIME_S,
     F_SEALED,
     F_DISK_PCT,
@@ -324,7 +324,9 @@ impl HealthBody {
         b.set(F_CONNS,          conns as i64);
         b.set(F_R429_1M,        r429_1m as i64);
         b.set(F_DROPPED_1M,     dropped_1m as i64);
-        b.set(F_GUARD_SELFTEST, if guard_selftest { 1 } else { 0 });
+        // Carried as a failure, as `mail_down` and `sealed_dbs` are, so an ordinary
+        // `distress` threshold of 1 alarms it (D-06 audit D2).
+        b.set(F_GUARD_FAILED,   if guard_selftest { 0 } else { 1 });
         b.set(F_UPTIME_S,       uptime_s as i64);
         b.set(F_SEALED,         if sealed { 1 } else { 0 });
         b
