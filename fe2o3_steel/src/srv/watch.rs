@@ -1569,6 +1569,25 @@ mod tests {
         out
     }
 
+    /// The same `200`, sent chunked and so declaring no length, as a proxy streaming the page
+    /// answers.
+    fn chunked_health_reply(fields: usize) -> Vec<u8> {
+        let mut b = HealthBody::new();
+        for i in 0..fields {
+            b.set(&fmt!("k{}", i), i as i64);
+        }
+        let body = b.to_json();
+        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+            Transfer-Encoding: chunked\r\n\r\n".to_vec();
+        for piece in body.as_bytes().chunks(4096) {
+            out.extend_from_slice(fmt!("{:x}\r\n", piece.len()).as_bytes());
+            out.extend_from_slice(piece);
+            out.extend_from_slice(b"\r\n");
+        }
+        out.extend_from_slice(b"0\r\n\r\n");
+        out
+    }
+
     /// A probe reads a health body of ordinary size and refuses one far larger, since each body
     /// read is kept in the dashboard's ring for an hour (D-06 audit D1).
     #[tokio::test]
@@ -1592,12 +1611,30 @@ mod tests {
         let port = serve_once(large).await;
         let mut peer = plain_peer("large", &fmt!("http://127.0.0.1:{}/_steel/health", port));
         peer.plain_ok = true;
-        match probe(&peer, Duration::from_secs(5), tls).await {
+        match probe(&peer, Duration::from_secs(5), tls.clone()).await {
             (Probe::Up(Some(b)), _) => panic!("a body of {} fields, over {} bytes, was read \
                 whole and would be kept", b.fields.len(), PROBE_BODY_MAX),
             // An answer, so not silence: it must not count towards the watcher's own link.
             (Probe::Refused(0), _) => (),
             (other, _) => panic!("an oversized answer read as {:?}, not a refusal", other),
+        }
+
+        // Chunked, the body declares no length, so it is cut off part way through decoding, and
+        // the overflow reaches the probe from beneath a wrapping frame (re-check B-H1).
+        let port = serve_once(chunked_health_reply(20)).await;
+        let mut peer = plain_peer("chunked", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls.clone()).await {
+            (Probe::Up(Some(b)), _) => assert_eq!(b.fields.len(), 20),
+            (other, _) => panic!("a chunked health body of ordinary size read as {:?}", other),
+        }
+
+        let port = serve_once(chunked_health_reply(20_000)).await;
+        let mut peer = plain_peer("chunked", &fmt!("http://127.0.0.1:{}/_steel/health", port));
+        peer.plain_ok = true;
+        match probe(&peer, Duration::from_secs(5), tls).await {
+            (Probe::Refused(0), _) => (),
+            (other, _) => panic!("an oversized chunked answer read as {:?}, not a refusal", other),
         }
     }
 
