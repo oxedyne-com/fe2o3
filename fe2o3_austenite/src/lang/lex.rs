@@ -1079,6 +1079,118 @@ pub(crate) fn top_comma(src: &str) -> usize {
 	src.len()
 }
 
+/// One argument of a call's list, or one entry of an array or a dictionary, as Typst's parser reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Arg {
+	pub(crate) key:		Option<String>,	// a named argument's name; `None` when positional
+	pub(crate) value:	String,			// the value's text, its comments dropped, trimmed
+	pub(crate) at:		usize,			// the byte of its first token in the list
+}
+
+/// How much of an argument's head has been read, to tell a name before its `:` from a value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Head {
+	Start,									// nothing yet but spaces and comments
+	Name { name: String, spaced: bool },	// a name, and whether a space has followed it
+	Value,									// anything else: a positional value, or the value after a `:`
+}
+
+/// The arguments of the list `inner`, the text inside a call's parentheses (or an array's or a
+/// dictionary's), read as code the way Typst's parser reads them. An argument ends at a comma only at the
+/// list's own level. A comment, at any depth, is trivia: it adds one space to the value in code and nothing
+/// in markup, where Typst sets nothing for it, so a field commented out is no field. Strings, raw text and
+/// groups are copied as written and close where the lexer closes them. An argument is named only when it
+/// opens with a name followed, past any spaces or comments, by a `:` at the list's own level; a spread, a
+/// content block and every other value are positional. An empty argument, as a trailing comma leaves, is
+/// not listed.
+pub(crate) fn args(inner: &str) -> Vec<Arg> {
+	let chars: Vec<(usize, char)>	= inner.char_indices().collect();
+	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
+	let mut out: Vec<Arg>	= Vec::new();
+	let mut lx				= Lexer::code();
+	let mut head			= Head::Start;
+	let mut key				= None;
+	let mut value			= String::new();
+	let mut at				= None;
+	let mut i				= 0usize;
+	loop {
+		let top = !lx.is_open();
+		if i >= only.len() || (top && only[i] == ',') {
+			let v = value.trim();
+			if key.is_some() || !v.is_empty() {
+				out.push(Arg { key: key.take(), value: v.to_string(), at: at.unwrap_or(0) });
+			}
+			if i >= only.len() {
+				break;
+			}
+			head	= Head::Start;
+			key		= None;
+			value.clear();
+			at		= None;
+			i += 1;
+			continue;
+		}
+		// A comment opens where the frame read before it is not already a comment; one opened in markup
+		// leaves nothing, one in code or maths a space, so the tokens either side of it stay apart.
+		let fresh	= !matches!(lx.frames.last(), Some(Frame::Comment(_)));
+		let markup	= matches!(lx.frames.last(), Some(Frame::Markup(_)));
+		let (n, tok) = lx.step(&only, i);
+		let piece = &only[i..i + n];
+		i += n;
+		if tok == Tok::Comment {
+			if fresh && !markup {
+				value.push(' ');
+			}
+			continue;
+		}
+		let blank = piece.iter().all(|c| c.is_whitespace());
+		if at.is_none() && !blank {
+			at = Some(chars[i - n].0);
+		}
+		if top && tok == Tok::Code && n == 1 {
+			let c = piece[0];
+			let next = match std::mem::replace(&mut head, Head::Value) {
+				Head::Start if blank						=> Head::Start,
+				Head::Start if is_id_start(c)				=> Head::Name { name: c.to_string(), spaced: false },
+				Head::Name { name, .. } if blank			=> Head::Name { name, spaced: true },
+				Head::Name { mut name, spaced: false } if is_id_continue(c) => {
+					name.push(c);
+					Head::Name { name, spaced: false }
+				},
+				Head::Name { name, .. } if c == ':'			=> {
+					// The name is the key, and the value starts after its colon.
+					key = Some(name);
+					value.clear();
+					continue;
+				},
+				Head::Start | Head::Name { .. } | Head::Value	=> Head::Value,
+			};
+			head = next;
+		} else if !blank {
+			head = Head::Value;
+		}
+		value.extend(piece.iter());
+	}
+	out
+}
+
+/// The value of the argument named `key` in `list`, the last one when it is named twice.
+pub(crate) fn named<'a>(list: &'a [Arg], key: &str) -> Option<&'a str> {
+	list.iter().rev().find(|a| a.key.as_deref() == Some(key)).map(|a| a.value.as_str())
+}
+
+/// A name `list` gives twice, which Typst refuses as a duplicate argument.
+pub(crate) fn duplicate_key(list: &[Arg]) -> Option<&str> {
+	for (k, a) in list.iter().enumerate() {
+		if let Some(name) = a.key.as_deref() {
+			if list[..k].iter().any(|b| b.key.as_deref() == Some(name)) {
+				return Some(name);
+			}
+		}
+	}
+	None
+}
+
 /// Each group a `(` opens at the top level of `src` read as code, by the byte of its `(` and the byte just
 /// past its `)`. A group that never closes is not listed.
 pub(crate) fn top_parens(src: &str) -> Vec<(usize, usize)> {
@@ -1482,6 +1594,75 @@ mod tests {
 		assert_eq!(top_comma(" [x, y) z], c"), " [x, y) z]".len());
 		assert_eq!(top_comma(" none)\n#let x = \"b\", c"), " none".len());
 		assert_eq!(top_comma(" /* , */ 1"), " /* , */ 1".len());
+	}
+
+	/// Each argument of `inner` as its key and value.
+	fn pairs(inner: &str) -> Vec<(Option<String>, String)> {
+		args(inner).into_iter().map(|a| (a.key, a.value)).collect()
+	}
+
+	fn keys(inner: &str) -> Vec<String> {
+		args(inner).into_iter().filter_map(|a| a.key).collect()
+	}
+
+	#[test]
+	fn an_argument_list_reads_comments_as_trivia() {
+		assert_eq!(pairs("title: \"T\" /* c */"), vec![(Some("title".to_string()), "\"T\"".to_string())]);
+		// In code a comment parts the tokens beside it; in a content block it leaves nothing, as Typst sets
+		// nothing for it.
+		assert_eq!(pairs("a: 1/* c */+ 2, [x/* c */y // d\n]"), vec![
+			(Some("a".to_string()), "1 + 2".to_string()), (None, "[xy \n]".to_string()),
+		]);
+		// A comment between a name and its colon leaves the name a key.
+		assert_eq!(keys("title /* c */ : \"T\""), vec!["title"]);
+		assert_eq!(args("a: 1,\n  b: 2")[1].at, "a: 1,\n  ".len());
+	}
+
+	#[test]
+	fn a_commented_out_named_argument_is_no_argument() {
+		let list = args("\n  // author: \"Old\",\n  title: \"T\",\n");
+		assert_eq!(list.len(), 1);
+		assert_eq!(list[0].key.as_deref(), Some("title"));
+		assert_eq!(named(&list, "author"), None);
+	}
+
+	#[test]
+	fn a_comment_between_arguments_parts_nothing() {
+		assert_eq!(keys("a: 1, /* b: 2, */ c: 3"), vec!["a", "c"]);
+		assert_eq!(keys("title: \"T\" // , author: \"X\"\n"), vec!["title"]);
+		assert_eq!(pairs("(\"a\", /* \"b\", */ \"c\")")[0].1, "(\"a\",   \"c\")");
+		assert_eq!(pairs("\"a\", /* \"b\", */ \"c\""), vec![(None, "\"a\"".to_string()), (None, "\"c\"".to_string())]);
+	}
+
+	#[test]
+	fn a_key_inside_a_string_or_group_is_no_key() {
+		let list = args("title: \"T, author: Q\" /* , author: \"X\" */, keywords: (\"k\",)");
+		assert_eq!(keys("title: \"T, author: Q\" /* , author: \"X\" */, keywords: (\"k\",)"), vec!["title", "keywords"]);
+		assert_eq!(named(&list, "title"), Some("\"T, author: Q\""));
+		assert_eq!(named(&list, "keywords"), Some("(\"k\",)"));
+		assert_eq!(keys("header: [page: 1]"), vec!["header"]);
+		assert_eq!(named(&args("header: [page: 1]"), "page"), None);
+		// A string keeps its comment markers, and raw text its commas.
+		assert_eq!(pairs("author: \"A /* not */ B\""), vec![(Some("author".to_string()), "\"A /* not */ B\"".to_string())]);
+		assert_eq!(keys("title: [T `raw, author: \"X\"` z]"), vec!["title"]);
+		// A spread, a positional value and a name without its colon are positional.
+		assert_eq!(pairs("..xs, 2pt, body"), vec![
+			(None, "..xs".to_string()), (None, "2pt".to_string()), (None, "body".to_string()),
+		]);
+		assert_eq!(keys("a b: 1, (c: 1)"), Vec::<String>::new());
+	}
+
+	#[test]
+	fn a_name_given_twice_is_a_duplicate() {
+		let list = args("title: \"A\", title: \"B\"");
+		assert_eq!(duplicate_key(&list), Some("title"));
+		assert_eq!(named(&list, "title"), Some("\"B\""));
+		assert_eq!(duplicate_key(&args("title: \"A\" /* , title: \"B\" */")), None);
+		// A name is read whole, so a longer one holding it is another name.
+		let list = args("heading-font: \"A\", first-line-indent: 1em");
+		assert_eq!(named(&list, "font"), None);
+		assert_eq!(named(&list, "indent"), None);
+		assert_eq!(named(&list, "first-line-indent"), Some("1em"));
 	}
 
 	#[test]
