@@ -157,8 +157,7 @@ impl WsClient {
             if !res!(self.frame_begun(deadline).await) {
                 return Ok(None);
             }
-            // `ok!` keeps a refusal's `TooBig` tag outermost, where `Error::tags` finds it.
-            let msg = match ok!(self.next_frame(deadline).await) {
+            let msg = match res!(self.next_frame(deadline).await) {
                 Assembled::Pending          => continue,
                 Assembled::Message(msg)     => return Ok(Some(msg)),
                 Assembled::Control(msg)     => msg,
