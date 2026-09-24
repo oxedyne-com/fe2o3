@@ -148,16 +148,31 @@ pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
 
 /// Writes `data` to `path` atomically. No POSIX mode bits exist to restrict
 /// here, so this platform gets the write-then-rename without the 0600
-/// guarantee the unix build makes.
+/// guarantee the unix build makes, but the fsync-before-rename still applies:
+/// without it, a crash could still leave the rename recorded while the data
+/// it pointed at never reached the disk it was written on.
 #[cfg(not(unix))]
 pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
     let tmp = res!(secret_tmp_path(path));
-    if let Err(e) = fs::write(&tmp, data) {
+    let mut f = match File::create(&tmp) {
+        Ok(f) => f,
+        Err(e) => return Err(err!(e,
+            "Could not create the temporary secret file {:?}.", tmp;
+            File, IO, Create)),
+    };
+    if let Err(e) = f.write_all(data) {
         let _ = fs::remove_file(&tmp);
         return Err(err!(e,
             "Could not write the temporary secret file {:?}.", tmp;
             File, IO, Write));
     }
+    if let Err(e) = f.sync_all() {
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not fsync the temporary secret file {:?}.", tmp;
+            File, IO, Write));
+    }
+    drop(f);
     if let Err(e) = fs::rename(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(err!(e,
@@ -219,13 +234,16 @@ pub fn create_secret_dir(path: &Path) -> Outcome<()> {
 /// too -- a 0440 key ends at 0400, never gaining the write bit it did not
 /// have.
 ///
-/// A failed narrowing warns and returns `Ok(())` rather than erroring: the
+/// Returns the mode the file was narrowed from, so a caller that silences the
+/// log can still tell its user, and `None` when nothing changed.
+///
+/// A failed narrowing warns and returns `Ok(None)` rather than erroring: the
 /// file was already readable at whatever mode it held, so refusing to start
 /// over a `chmod` this process cannot make -- EPERM on a key it can read but
 /// does not own, EROFS on a read-only mount -- would trade a narrower mode
 /// for no service at all.
 #[cfg(unix)]
-pub fn restrict_secret(path: &Path) -> Outcome<()> {
+pub fn restrict_secret(path: &Path) -> Outcome<Option<u32>> {
     use std::os::unix::fs::PermissionsExt;
 
     let meta = match fs::metadata(path) {
@@ -236,22 +254,22 @@ pub fn restrict_secret(path: &Path) -> Outcome<()> {
     };
     let mode = meta.permissions().mode() & 0o777;
     if mode & !0o600 == 0 {
-        return Ok(());
+        return Ok(None);
     }
     let narrowed = mode & 0o600; // keep only the owner rw bits already present, never add one
     warn!("Narrowing key file {:?} from mode {:04o} to {:04o}.", path, mode, narrowed);
     if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(narrowed)) {
         warn!("Could not narrow {:?} from mode {:04o} to {:04o}: {}. Leaving the key at its \
             current, already-readable mode rather than refusing to start.", path, mode, narrowed, e);
-        return Ok(());
+        return Ok(None);
     }
-    Ok(())
+    Ok(Some(mode))
 }
 
 /// A no-op off unix: there are no POSIX mode bits to narrow.
 #[cfg(not(unix))]
-pub fn restrict_secret(_path: &Path) -> Outcome<()> {
-    Ok(())
+pub fn restrict_secret(_path: &Path) -> Outcome<Option<u32>> {
+    Ok(None)
 }
 
 /// Fsyncs the directory holding `path`, after the rename that lands a secret
@@ -511,6 +529,48 @@ mod tests {
                 Test, Mismatch));
         }
         Ok(())
+    }
+
+    /// The caller is told the mode a file was narrowed from, and `None` when
+    /// there was nothing to narrow, so an app that silences the log can still
+    /// say so itself.
+    #[test]
+    fn test_restrict_secret_reports_the_mode_it_narrowed_from() -> Outcome<()> {
+        let path = scratch_path("restrict_reports");
+        if let Err(e) = fs::write(&path, b"key material") {
+            return Err(err!(e, "Could not pre-seed {:?}.", path; Test, File, IO, Write));
+        }
+        // Mode before, what restrict_secret must report, mode after.
+        let cases = [
+            (0o644, Some(0o644),    0o600),
+            (0o600, None,           0o600),
+            (0o440, Some(0o440),    0o400),
+            (0o400, None,           0o400),
+        ];
+        let mut outcome = Ok(());
+        for (before, said, after) in cases {
+            if let Err(e) = fs::set_permissions(&path, fs::Permissions::from_mode(before)) {
+                outcome = Err(err!(e, "Could not set {:04o} on {:?}.", before, path; Test, File, IO));
+                break;
+            }
+            let got = match restrict_secret(&path) {
+                Ok(g) => g,
+                Err(e) => { outcome = Err(e); break; },
+            };
+            let mode = match mode_of(&path) {
+                Ok(m) => m,
+                Err(e) => { outcome = Err(e); break; },
+            };
+            if got != said || mode != after {
+                outcome = Err(err!(
+                    "{:?} at {:04o}: restrict_secret reported {:?} and left {:04o}, \
+                    expected {:?} and {:04o}.", path, before, got, mode, said, after;
+                    Test, Mismatch));
+                break;
+            }
+        }
+        let _ = fs::remove_file(&path);
+        outcome
     }
 
     /// A mode already at or narrower than 0600 is left exactly as it is.
