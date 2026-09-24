@@ -182,7 +182,7 @@ pub(crate) fn save_secret_aged(
 ///
 /// Only directories this call actually creates get 0700; one that already
 /// exists is left at whatever mode it holds, since narrowing that is
-/// `restrict_secret`'s job. A plain `create_dir_all` off unix, where there
+/// `restrict_secret_dir`'s job. A plain `create_dir_all` off unix, where there
 /// is no mode to set.
 #[cfg(unix)]
 pub fn create_secret_dir(path: &Path) -> Outcome<()> {
@@ -260,6 +260,51 @@ pub fn restrict_secret(path: &Path) -> Outcome<Option<u32>> {
 /// A no-op off unix: there are no POSIX mode bits to narrow.
 #[cfg(not(unix))]
 pub fn restrict_secret(_path: &Path) -> Outcome<Option<u32>> {
+    Ok(None)
+}
+
+/// Narrows an existing directory of key material to its owner's bits alone,
+/// for one made before `create_secret_dir` was used, or by some other route. A
+/// group-writable one lets a group member rename a file of their own over a
+/// 0600 key inside it, so narrowing the keys alone is not enough.
+///
+/// The same contract as `restrict_secret`, with the owner's search bit kept:
+/// only bits are removed, never added, so 0500 stays 0500. Returns the mode it
+/// narrowed from, `None` when nothing changed, and warns and returns `Ok(None)`
+/// for a `chmod` it cannot make. `restrict_secret` itself would not do here,
+/// since its 0600 mask takes the search bit and with it the way in.
+#[cfg(unix)]
+pub fn restrict_secret_dir(path: &Path) -> Outcome<Option<u32>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => return Err(err!(e,
+            "Could not stat the key directory {:?} to check whether its mode needs narrowing.", path;
+            File, IO, Read)),
+    };
+    if !meta.is_dir() {
+        return Err(err!(
+            "{:?} is not a directory, so it cannot be narrowed as a key directory.", path;
+            Invalid, Input, File));
+    }
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & !0o700 == 0 {
+        return Ok(None);
+    }
+    let narrowed = mode & 0o700; // keep only the owner bits already present, never add one
+    warn!("Narrowing key directory {:?} from mode {:04o} to {:04o}.", path, mode, narrowed);
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(narrowed)) {
+        warn!("Could not narrow the key directory {:?} from mode {:04o} to {:04o}: {}. Leaving \
+            it at its current mode rather than refusing to start.", path, mode, narrowed, e);
+        return Ok(None);
+    }
+    Ok(Some(mode))
+}
+
+/// A no-op off unix: there are no POSIX mode bits to narrow.
+#[cfg(not(unix))]
+pub fn restrict_secret_dir(_path: &Path) -> Outcome<Option<u32>> {
     Ok(None)
 }
 
@@ -775,6 +820,61 @@ mod tests {
                 Test, Mismatch));
         }
         Ok(())
+    }
+
+    /// A key directory is narrowed to its owner's bits, search bit included,
+    /// and never widened; a file is refused rather than given a directory's
+    /// mask.
+    #[test]
+    fn test_restrict_secret_dir_narrows_to_the_owner() -> Outcome<()> {
+        let dir = scratch_path("restrict_dir");
+        res!(fs::create_dir(&dir));
+        // Mode before, what restrict_secret_dir must report, mode after.
+        let cases = [
+            (0o775, Some(0o775),    0o700),
+            (0o700, None,           0o700),
+            (0o500, None,           0o500),
+            (0o750, Some(0o750),    0o700),
+        ];
+        let mut outcome = Ok(());
+        for (before, said, after) in cases {
+            if let Err(e) = fs::set_permissions(&dir, fs::Permissions::from_mode(before)) {
+                outcome = Err(err!(e, "Could not set {:04o} on {:?}.", before, dir; Test, File, IO));
+                break;
+            }
+            let got = match restrict_secret_dir(&dir) {
+                Ok(g) => g,
+                Err(e) => { outcome = Err(e); break; },
+            };
+            let mode = match mode_of(&dir) {
+                Ok(m) => m,
+                Err(e) => { outcome = Err(e); break; },
+            };
+            if got != said || mode != after {
+                outcome = Err(err!(
+                    "{:?} at {:04o}: restrict_secret_dir reported {:?} and left {:04o}, \
+                    expected {:?} and {:04o}.", dir, before, got, mode, said, after;
+                    Test, Mismatch));
+                break;
+            }
+        }
+        if outcome.is_ok() {
+            let file = dir.join("key");
+            outcome = match fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+                .and_then(|()| fs::write(&file, b"key"))
+            {
+                Ok(()) => match restrict_secret_dir(&file) {
+                    Ok(got) => Err(err!(
+                        "restrict_secret_dir took the file {:?} for a directory: {:?}.", file, got;
+                        Test, Mismatch)),
+                    Err(_) => Ok(()),
+                },
+                Err(e) => Err(err!(e, "Could not seed {:?}.", file; Test, File, IO)),
+            };
+        }
+        let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+        let _ = fs::remove_dir_all(&dir);
+        outcome
     }
 
     // The race tests: two writers of one key path, and a reader that must only
