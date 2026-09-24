@@ -384,6 +384,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// in a link or raw text opens no comment, and one in a quoted phrase does, since a quote in markup is a
 	// character; raw text runs across lines until a run of backticks as long as its opener.
 	let toks	= lex::byte_toks(src);
+	// Which bytes each conditional and loop in the markup leaves to be read, and the sites of those refused
+	// whole, recorded as the loop reaches the line each opens on.
+	let (keep, flow_sites)	= flow_mask(src, binds.guards);
+	let mut flow_sites		= flow_sites.into_iter().peekable();
 
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
@@ -404,11 +408,15 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// points into the source.
 		let stripped;
 		let line = if code.is_none() && skip.is_none() {
-			stripped = strip_comments(line, toks.get(start as usize..end as usize).unwrap_or(&[]));
+			let range	= start as usize..end as usize;
+			stripped	= strip_comments(line, toks.get(range.clone()).unwrap_or(&[]), keep.get(range).unwrap_or(&[]));
 			stripped.as_str()
 		} else {
 			line
 		};
+		while let Some((_, r)) = flow_sites.next_if(|(at, _)| *at < offset as usize) {
+			skips.sites.push(r);
+		}
 
 		let trimmed = line.trim_start();
 
@@ -450,6 +458,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			} else {
 				buf.push(line.to_string());
 			}
+			continue;
+		}
+		// A line a conditional or a loop took, holding nothing of it the reader keeps -- its opener, its `else`,
+		// its closer, a line of a branch not taken -- is the statement's: it neither sets anything nor parts
+		// the paragraph around it, as the statement parts none in Typst.
+		if trimmed.is_empty() && keep.get(start as usize..offset as usize).is_some_and(|k| k.contains(&false)) {
 			continue;
 		}
 		// A line that opens inside raw text an earlier line began -- a single backtick's span, or a block
@@ -650,6 +664,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// unterminated code fence still yields the block it had gathered.
 	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 	flush_list(&mut items, &mut stack);
+	skips.sites.extend(flow_sites.map(|(_, r)| r));
 	// A construct still open at the end of the source never closed, so everything after its opener was taken
 	// into it, where Typst refuses the file: a raw block, a gathered call or a skipped statement is refused
 	// where it opens, and nothing it took in is set.
@@ -2080,13 +2095,125 @@ fn cap_first(s: &str) -> String {
 	}
 }
 
-/// A line with the characters a comment holds removed, `toks` being what the line's own bytes are as the
-/// lexer read the whole source ([`lex::byte_toks`]).
-fn strip_comments(line: &str, toks: &[lex::Tok]) -> String {
+/// A line with the characters a comment holds removed, and those a conditional or a loop takes without
+/// keeping them: `toks` is what the line's own bytes are as the lexer read the whole source
+/// ([`lex::byte_toks`]), and `keep` whether [`flow_mask`] keeps each.
+fn strip_comments(line: &str, toks: &[lex::Tok], keep: &[bool]) -> String {
 	line.char_indices()
-		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment))
+		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment) && keep.get(at) != Some(&false))
 		.map(|(_, c)| c)
 		.collect()
+}
+
+/// How the reader reads one conditional or loop in its markup.
+enum FlowRead {
+	Keep(usize, usize),		// the taken branch's inside, by its bytes, set where it stands
+	Drop,					// no branch is taken, so nothing of it is set
+	Refuse(String),			// refused whole at its line, with what the refusal says
+}
+
+/// Which bytes of `src` the reader keeps once each conditional and loop standing in its markup is read, and
+/// the sites refused on the way, each with the byte it opens at. A conditional whose condition resolves in
+/// the file's [`GuardScope`](crate::lang::rules::GuardScope), the scope the include walk resolves its guards
+/// in, keeps the taken branch's content where it stands, so a guard in a callout or mid-paragraph sets what Typst sets, and
+/// drops the rest of the statement, its other branches, `else` and brackets included. Any other conditional,
+/// and every loop, is dropped whole and refused at its line: never set as prose.
+fn flow_mask(src: &str, guards: &crate::lang::rules::GuardScope) -> (Vec<bool>, Vec<(usize, Refusal)>) {
+	let mut keep	= vec![true; src.len()];
+	let mut sites	= Vec::new();
+	mask_flows(src, 0, src.len(), guards, &mut keep, &mut sites);
+	sites.sort_by_key(|(at, _)| *at);
+	(keep, sites)
+}
+
+/// Reads the flows of `src[from..to]`, a run of markup, into `keep` and `sites`. A kept branch is markup
+/// read at the same level, so the flows standing in it are read in turn.
+fn mask_flows(
+	src:	&str,
+	from:	usize,
+	to:		usize,
+	guards:	&crate::lang::rules::GuardScope,
+	keep:	&mut [bool],
+	sites:	&mut Vec<(usize, Refusal)>,
+)
+{
+	let text = &src[from..to];
+	for f in lex::flows(text) {
+		let (start, end) = (from + f.start, from + f.end);
+		for k in &mut keep[start..end] {
+			*k = false;
+		}
+		match read_flow(text, &f, guards) {
+			FlowRead::Keep(a, b)	=> {
+				for k in &mut keep[from + a..from + b] {
+					*k = true;
+				}
+				mask_flows(src, from + a, from + b, guards, keep, sites);
+			},
+			FlowRead::Drop			=> {},
+			FlowRead::Refuse(note)	=> {
+				let name = match f.kw {
+					lex::Kw::For	=> "#for",
+					lex::Kw::While	=> "#while",
+					_				=> "#if",
+				};
+				let line_end = src[start..].find('\n').map_or(src.len(), |k| start + k);
+				sites.push((start, Refusal {
+					name:	name.to_string(),
+					span:	Span::new(start as u32, line_end as u32),
+					class:	RefusalClass::Unsupported,
+					file:	String::new(),
+					note:	Some(note),
+				}));
+			},
+		}
+	}
+}
+
+/// Decides how one flow of `text` is read. A conditional takes its first arm whose condition holds, or its
+/// `else`; a taken branch is kept only when it is a content block with no statement at its own level, since
+/// a `#set`, `#show`, `#let` or `#import` there governs the branch alone, which the reader does not scope,
+/// and an `#include` there is not followed.
+fn read_flow(text: &str, f: &lex::Flow, guards: &crate::lang::rules::GuardScope) -> FlowRead {
+	if !f.whole {
+		return FlowRead::Refuse("does not close as one statement, so nothing of it is set".to_string());
+	}
+	if f.kw != lex::Kw::If {
+		return FlowRead::Refuse("is a loop the reader does not run, so its body is not set".to_string());
+	}
+	for arm in &f.arms {
+		let taken = match arm.cond {
+			None			=> true,
+			Some((a, b))	=> match guards.eval(&text[a..b]) {
+				Some(t)	=> t,
+				None	=> return FlowRead::Refuse(
+					"has a condition the reader does not evaluate, so no branch of it is set".to_string()),
+			},
+		};
+		if !taken {
+			continue;
+		}
+		if !arm.content {
+			return FlowRead::Refuse(
+				"takes a code block the reader does not run, so no branch of it is set".to_string());
+		}
+		let (a, b) = (arm.body.0 + 1, arm.body.1.saturating_sub(1).max(arm.body.0 + 1));
+		if let Some(kw) = statement_in(&text[a..b]) {
+			return FlowRead::Refuse(fmt!(
+				"takes a branch holding {}, which the reader does not read there, so no branch of it is set", kw));
+		}
+		return FlowRead::Keep(a, b);
+	}
+	FlowRead::Drop
+}
+
+/// The first `#set`, `#show`, `#let`, `#import` or `#include` opening a line at the top level of `markup`.
+fn statement_in(markup: &str) -> Option<&'static str> {
+	lex::top_level_lines(markup).iter().find_map(|(_, line)| {
+		let t = line.trim_start();
+		["#set", "#show", "#let", "#import", "#include"].into_iter().find(|kw| t.strip_prefix(kw)
+			.is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')))
+	})
 }
 
 // -- Multi-line figure, table and data-array capture ----------------------------------------------
@@ -5784,9 +5911,35 @@ bound\".\n";
 		// The reader's line scan and the bracket scan read one lexer: the outer comment holds the lines between.
 		let src		= "x /* a /* b */ c\n#set text(size: 30pt) */ y\n";
 		let toks	= lex::byte_toks(src);
-		assert_eq!(strip_comments("x /* a /* b */ c", &toks[..16]), "x ");
-		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &toks[17..43]), " y");
+		assert_eq!(strip_comments("x /* a /* b */ c", &toks[..16], &[]), "x ");
+		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &toks[17..43], &[]), " y");
 		assert_eq!(lex::live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
+	}
+
+	/// A conditional mid-paragraph keeps its taken branch in the paragraph, as Typst joins the branch's
+	/// content to the words around it; its opener, `else` and closer lines part nothing. A nested
+	/// conditional in the taken branch is read the same way, and one refused is refused at its own line.
+	#[test]
+	fn a_taken_branch_joins_the_paragraph_it_stands_in() -> Outcome<()> {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let guards = crate::lang::rules::GuardScope::default().in_file("#let media = \"ebook\"\n");
+		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards);
+		let src = "Text before.\n#if media == \"ebook\" [\nEbook words\n#if media == \"print\" [\nPrint\n] then.\n\
+			] else [\nPrint words.\n]\n\nTail.\n\n#for x in (1, 2) [\nLoop.\n]\n";
+		let (items, skips) = res!(document_with_templates(src, binds));
+		let texts: Vec<String> = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(runs.iter().map(|r| match r {
+				Inline::Text(t) => t.clone(),
+				_ => String::new(),
+			}).collect()),
+			_ => None,
+		}).collect();
+		assert_eq!(texts, ["Text before. Ebook words then.", "Tail."]);
+		let sites: Vec<(usize, &str)> = skips.sites().iter()
+			.map(|r| (crate::lang::line_col_of(src, r.span.start).0, r.name.as_str())).collect();
+		assert_eq!(sites, [(13, "#for")]);
+		Ok(())
 	}
 
 	/// A line that opens inside raw text an earlier line began is that text's: a `#set` in it is shown as

@@ -41,6 +41,11 @@ fn compile_of(main: &str, files: &[(&str, &str)]) -> Outcome<(Rendered, Report)>
 	for (p, b) in files {
 		map.insert(PathBuf::from(p), b.as_bytes().to_vec());
 	}
+	compile_map(main, map)
+}
+
+/// As [`compile_of`], for a source map already built.
+fn compile_map(main: &str, map: HashMap<PathBuf, Vec<u8>>) -> Outcome<(Rendered, Report)> {
 	res!(vfs::install(map));
 	let main	= PathBuf::from(main);
 	let fonts	= Arc::new(res!(fonts::libertinus()));
@@ -281,5 +286,128 @@ fn a_comment_opens_where_typst_opens_one() -> Outcome<()> {
 	assert!(text.contains("TAILWORDS") && !text.contains("HIDDENWORDS") && !text.contains("today"), "{}", text);
 	assert_eq!(rendered.doc_info.title, None, "the commented title is not written");
 	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A conditional the reader meets sets its taken branch where it stands and nothing else of it -- no branch
+/// it does not take, no `else`, no bracket and no site -- as Typst sets it: in a lone file mid-paragraph,
+/// line-leading, mid-sentence on one line and in a callout, and in a callout of a book root.
+#[test]
+fn a_guard_the_reader_meets_sets_its_taken_branch_alone() -> Outcome<()> {
+	let _turn = turn();
+	let guard = "#if media == \"print\" [\nPRINTWORDS\n] else if media == \"ebook\" [\nEBOOKWORDS set.\n] else [\n\
+		OTHERWORDS\n]";
+	let lone = fmt!("#let media = \"ebook\"\n\nText before.\n{g}\n\n{g}\n\n\
+		Words #if media == \"ebook\" [INLINEWORDS] else [PRINTWORDS] after.\n\n#styled-box[\nBoxed.\n{g}\n]\n\n\
+		TAILWORDS.\n", g = guard);
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", &lone)]));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert_eq!(text.matches("EBOOKWORDS").count(), 3, "{}", text);
+	for want in ["Text before.", "Words", "INLINEWORDS", "after.", "Boxed.", "TAILWORDS"] {
+		assert!(text.contains(want), "{} is set: {}", want, text);
+	}
+	for leak in ["PRINTWORDS", "OTHERWORDS", "#if", "else", "[", "]"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #let (fixed-point)"]);
+
+	let root = fmt!("#let media = \"ebook\"\n\n= Root\n\n#styled-box[\nBoxed.\n{g}\n]\n\n#include \"ch1.typ\"\n", g = guard);
+	let files = [
+		("/proj/root.typ",	root.as_str()),
+		("/proj/ch1.typ",	"= Chapter One\n\nCHAPTERWORDS are set.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/root.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	assert!(text.contains("Boxed.") && text.contains("EBOOKWORDS") && text.contains("CHAPTERWORDS"), "{}", text);
+	for leak in ["PRINTWORDS", "OTHERWORDS", "#if", "else", "]"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert_eq!(names, ["skipped #let (fixed-point)"]);
+	Ok(())
+}
+
+/// A loop, and a conditional the reader does not evaluate -- one on a name nothing binds, one taking a code
+/// block, one whose taken branch holds an `#include` -- are refused whole, each at its own line: nothing of
+/// them is set, neither branch, no `else` and no bracket, and the prose around them is.
+#[test]
+fn a_loop_or_an_unread_conditional_is_refused_whole_at_its_line() -> Outcome<()> {
+	let _turn = turn();
+	let src = "#let media = \"ebook\"\n\n= Top\n\n#for i in range(2) [\nFORWORDS\n]\n\n\
+		Words #while false [WHILEWORDS] after.\n\n#if unbound == \"x\" [\nIFWORDS\n] else [\nELSEWORDS\n]\n\n\
+		#if media == \"ebook\" {\n[CODEWORDS]\n}\n\n#styled-box[\nBoxed.\n#if media == \"ebook\" [\n\
+		#include \"ch1.typ\"\n]\n]\n\nTAILWORDS.\n";
+	let files = [
+		("/proj/main.typ",	src),
+		("/proj/ch1.typ",	"CHAPTERWORDS.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	for want in ["Top", "Words", "after.", "Boxed.", "TAILWORDS"] {
+		assert!(text.contains(want), "{} is set: {}", want, text);
+	}
+	for leak in ["FORWORDS", "WHILEWORDS", "IFWORDS", "ELSEWORDS", "CODEWORDS", "CHAPTERWORDS", "#", "else", "]", "}"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let line_of = |needle: &str| src.lines().position(|l| l.contains(needle)).map_or(0, |i| i + 1);
+	let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+	let want: Vec<(usize, &str)> = vec![
+		(1,							"skipped #let (fixed-point)"),
+		(line_of("#for"),			"#for is a loop the reader does not run, so its body is not set"),
+		(line_of("#while"),			"#while is a loop the reader does not run, so its body is not set"),
+		(line_of("#if unbound"),	"#if has a condition the reader does not evaluate, so no branch of it is set"),
+		(line_of("{"),				"#if takes a code block the reader does not run, so no branch of it is set"),
+	];
+	assert_eq!(&sites[..want.len()], &want[..], "{:?}", sites);
+	// The callout's body is read apart, so its site's line is counted from the body (gate note, F1).
+	assert_eq!(sites.len(), want.len() + 1, "{:?}", sites);
+	assert_eq!(sites[want.len()].1,
+		"#if takes a branch holding #include, which the reader does not read there, so no branch of it is set");
+	Ok(())
+}
+
+/// A conditional in a chapter resolves in the one scope the include walk resolves its guards in: the book's
+/// `config.typ`, then the chapter's own bindings. A guard on the config's `media` in a chapter's callout and
+/// one mid-paragraph set their taken branch alone, as the chapter's include guard does, with no site; a name
+/// only another chapter binds is not in scope, so the guard testing it is refused at its line.
+#[test]
+fn a_chapter_guard_resolves_in_the_book_config_as_the_include_walk_does() -> Outcome<()> {
+	let _turn = turn();
+	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts");
+	for f in ["LibertinusSerif-Regular.otf", "LibertinusSerif-Bold.otf", "LibertinusSerif-Italic.otf",
+		"LibertinusSerif-BoldItalic.otf", "LibertinusMono-Regular.otf"]
+	{
+		map.insert(PathBuf::from(fmt!("/b/assets/fonts/libertinus/{}", f)), res!(std::fs::read(fonts.join(f))));
+	}
+	let root	= "#show: book.with(\n  title: [A Book],\n)\n\n#include \"ch1.typ\"\n#include \"ch2.typ\"\n";
+	let config	= "#let format = \"a5\"\n#let media = \"ebook\"\n";
+	let ch1		= "#import \"config.typ\": media\n#let side = \"a\"\n\n= One\n\n#styled-box[\nBoxed.\n\
+		#if media == \"ebook\" [\nEBOOKWORDS set.\n] else [\nPRINTWORDS\n]\n]\n\n\
+		Words #if media == \"print\" [PRINTWORDS] else [INLINEWORDS] after.\n\n\
+		#if media == \"ebook\" [\n  #include \"sub.typ\"\n]\n\n#if side == \"a\" [SIDEWORDS]\n\n\
+		#if media == \"print\" [\nPRINTWORDS\n] else if media == \"ebook\" [\nCHAINWORDS\n] else [\nOTHERWORDS\n]\n";
+	let ch2		= "= Two\n\nTWOWORDS #if side == \"a\" [LEAKWORDS] here.\n";
+	for (p, b) in [("/b/book/main.typ", root), ("/b/book/config.typ", config), ("/b/book/ch1.typ", ch1),
+		("/b/book/ch2.typ", ch2), ("/b/book/sub.typ", "SUBWORDS set.\n")]
+	{
+		map.insert(PathBuf::from(p), b.as_bytes().to_vec());
+	}
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", map));
+	let text = runs(&rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ");
+	for want in ["Boxed.", "EBOOKWORDS", "Words", "INLINEWORDS", "after.", "SUBWORDS", "SIDEWORDS", "CHAINWORDS", "TWOWORDS",
+		"here."]
+	{
+		assert!(text.contains(want), "{} is set: {}", want, text);
+	}
+	for leak in ["PRINTWORDS", "OTHERWORDS", "LEAKWORDS", "#if", "else", "]"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let ifs: Vec<(&str, usize, &str)> = report.diagnostics.iter()
+		.filter(|d| d.message.contains("#if"))
+		.map(|d| (d.file.as_str(), d.line, d.message.as_str()))
+		.collect();
+	assert_eq!(ifs, [("/b/book/ch2.typ", 3, "#if has a condition the reader does not evaluate, so no branch of it is set")]);
 	Ok(())
 }

@@ -1389,6 +1389,122 @@ impl ScalarValue {
 /// collected; a source with none reads exactly as before.
 pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
 
+/// Evaluates a conditional's condition to whether its branch is taken, or `None` when the form is beyond
+/// the two read here or its name binds no value, so the caller refuses the conditional rather than guess.
+/// The two forms are `<name> == "<text>"`, taken when the string `scalar` resolves the name to is the
+/// text, and a bare `<name>`, taken when the boolean `flag` resolves it to is true. The include walk and
+/// the reader both evaluate a condition here, each resolving a name from the bindings it holds.
+pub(crate) fn eval_condition(
+	cond:	&str,
+	scalar:	impl Fn(&str) -> Option<String>,
+	flag:	impl Fn(&str) -> Option<bool>,
+)
+	-> Option<bool>
+{
+	let cond = cond.trim();
+	if let Some(eq) = cond.find("==") {
+		let name = cond[..eq].trim();
+		if !is_plain_name(name) {
+			return None;
+		}
+		let Some(lit) = string_literal(cond[eq + 2..].trim()) else { return None; };
+		return scalar(name).map(|val| val == lit);
+	}
+	if is_plain_name(cond) {
+		return flag(cond);
+	}
+	None
+}
+
+/// Is `s` a single name, with no operator or call around it?
+fn is_plain_name(s: &str) -> bool {
+	let mut cs = s.chars();
+	match cs.next() {
+		Some(c) if c.is_alphabetic() || c == '_'	=> {},
+		_											=> return false,
+	}
+	cs.all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// The text inside a `"..."` string literal filling the whole of `s`: `None` when `s` is not one, or holds
+/// a quote or an escape it would take evaluating to read.
+fn string_literal(s: &str) -> Option<&str> {
+	s.strip_prefix('"')
+		.and_then(|t| t.strip_suffix('"'))
+		.filter(|inner| !inner.contains('"') && !inner.contains('\\'))
+}
+
+/// A value a conditional's condition can test.
+#[derive(Clone, Debug, PartialEq)]
+enum GuardValue {
+	Str(String),
+	Bool(bool),
+}
+
+/// The one scope a conditional's names resolve in, for the include walk and the reader alike: the book's
+/// `config.typ` first, then the file the conditional stands in. Each is read once, for the bindings at its
+/// top level to a literal: `#let <name> = "<text>"`, `= true` or `= false`. A name bound only by an
+/// `#import` of another file, bound to anything else, or bound twice to different values resolves to
+/// nothing there, so a conditional testing it is refused rather than guessed.
+#[derive(Clone, Debug, Default)]
+pub struct GuardScope {
+	config:	std::collections::HashMap<String, GuardValue>,
+	file:	std::collections::HashMap<String, GuardValue>,
+}
+
+impl GuardScope {
+	/// The scope of a book whose `config.typ` is `config`, empty for a tree with none, before any file.
+	pub fn of_config(config: &str) -> Self {
+		Self { config: guard_names(config), file: std::collections::HashMap::new() }
+	}
+
+	/// This scope for a conditional standing in the file whose source is `src`.
+	pub fn in_file(&self, src: &str) -> Self {
+		Self { config: self.config.clone(), file: guard_names(src) }
+	}
+
+	/// Which branch `cond` takes in this scope, as [`eval_condition`] reads it.
+	pub fn eval(&self, cond: &str) -> Option<bool> {
+		let get = |name: &str| self.config.get(name).or_else(|| self.file.get(name));
+		eval_condition(cond,
+			|name| match get(name) {
+				Some(GuardValue::Str(s))	=> Some(s.clone()),
+				_							=> None,
+			},
+			|name| match get(name) {
+				Some(GuardValue::Bool(b))	=> Some(*b),
+				_							=> None,
+			})
+	}
+}
+
+/// The literal bindings at the top level of `src` a conditional can test, by name.
+fn guard_names(src: &str) -> std::collections::HashMap<String, GuardValue> {
+	// Each name with its value, or `None` once it is bound to something else or to a second value.
+	let mut seen: std::collections::HashMap<String, Option<GuardValue>> = std::collections::HashMap::new();
+	for (_, line) in crate::lang::lex::top_level_lines(src) {
+		let text = crate::lang::lex::uncommented(line);
+		let Some(rest)			= text.trim().strip_prefix("#let ") else { continue; };
+		let Some((name, value))	= rest.split_once('=') else { continue; };
+		let name = name.trim();
+		if !is_plain_name(name) {
+			continue;	// a function's signature, or a destructuring
+		}
+		let value = value.trim().trim_end_matches(';').trim_end();
+		let value = match value {
+			"true"	=> Some(GuardValue::Bool(true)),
+			"false"	=> Some(GuardValue::Bool(false)),
+			_		=> string_literal(value).map(|s| GuardValue::Str(s.to_string())),
+		};
+		match seen.get(name) {
+			None							=> { seen.insert(name.to_string(), value); },
+			Some(prev) if *prev != value	=> { seen.insert(name.to_string(), None); },
+			Some(_)							=> {},
+		}
+	}
+	seen.into_iter().filter_map(|(name, value)| value.map(|v| (name, v))).collect()
+}
+
 /// The `#let` bindings a parse resolves a call against: the furniture functions ([`TemplateFns`], expanded
 /// into a padded box) and the content bindings ([`ContentFns`], spliced as markup). Threaded as one through
 /// the reader so a caller passes both together and a nested body carries the same scope. Borrowed, so it is
@@ -1406,6 +1522,7 @@ pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
 	pub cfns:	&'a ContentFns,
 	pub sfns:	&'a ScalarFns,
+	pub guards:	&'a GuardScope,	// what a conditional's condition resolves against, in the file being read
 	pub active:	&'b [String],
 	pub body:	bool,
 	pub scoped:	bool,	// the body re-read lowers its own top-level `#set` and `doc.with` onto its scope
@@ -1415,13 +1532,13 @@ impl<'a> Bindings<'a, 'static> {
 	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
 	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[], body: false, scoped: false }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), guards: empty_guard_scope(), active: &[], body: false, scoped: false }
 	}
 
 	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
 	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
 	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
-		Self { tfns, cfns, sfns, active: &[], body: false, scoped: false }
+		Self { tfns, cfns, sfns, guards: empty_guard_scope(), active: &[], body: false, scoped: false }
 	}
 }
 
@@ -1438,7 +1555,7 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active, body: true, scoped: false }
+		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, guards: self.guards, active, body: true, scoped: false }
 	}
 
 	/// The same bindings for re-reading a float's or a furniture call's body, which applies none of its own
@@ -1452,6 +1569,11 @@ impl<'a, 'b> Bindings<'a, 'b> {
 	pub fn in_scoped_body(self) -> Self {
 		Bindings { body: true, scoped: true, ..self }
 	}
+
+	/// The same bindings reading the file whose conditionals resolve in `guards`.
+	pub fn with_guards<'c>(self, guards: &'c GuardScope) -> Bindings<'c, 'b> where 'a: 'c {
+		Bindings { guards, ..self }
+	}
 }
 
 /// The empty [`ScalarFns`] map [`Bindings::new`] borrows when a caller has no scalar scope to hand -- a
@@ -1459,6 +1581,12 @@ impl<'a, 'b> Bindings<'a, 'b> {
 fn empty_scalar_fns() -> &'static ScalarFns {
 	static EMPTY: std::sync::OnceLock<ScalarFns> = std::sync::OnceLock::new();
 	EMPTY.get_or_init(ScalarFns::new)
+}
+
+/// The empty [`GuardScope`] [`Bindings::new`] borrows until a caller names the file being read.
+fn empty_guard_scope() -> &'static GuardScope {
+	static EMPTY: std::sync::OnceLock<GuardScope> = std::sync::OnceLock::new();
+	EMPTY.get_or_init(GuardScope::default)
 }
 
 /// Collects every `#let name(params) = block/box(...)` furniture definition in `src` into `tfns`, lowering
@@ -2994,6 +3122,23 @@ mod tests {
 		let mut tfns = TemplateFns::new();
 		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
 		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
+	}
+
+	/// A conditional's names resolve in the book config first, then in the file it stands in; a name bound to
+	/// an expression, twice to different values, inside a body or in a comment resolves to nothing.
+	#[test]
+	fn a_guard_scope_resolves_the_config_then_the_file() {
+		let scope = GuardScope::of_config("#let media = \"ebook\" // \"print\"\n#let draft = true\n")
+			.in_file("#let media = \"print\"\n#let side = \"a\"\n#let twice = \"a\"\n#let twice = \"b\"\n\
+				#let expr = sys.inputs.at(\"x\", default: \"a\")\n#box[\n#let inner = \"a\"\n]\n\
+				/* #let hidden = \"a\" */\n#let esc = \"a\\\"\"\n");
+		assert_eq!(scope.eval("media == \"ebook\""), Some(true));
+		assert_eq!(scope.eval("draft"), Some(true));
+		assert_eq!(scope.eval("side == \"a\""), Some(true));
+		assert_eq!(scope.eval("side == \"b\""), Some(false));
+		for name in ["twice", "expr", "inner", "hidden", "esc", "unbound"] {
+			assert_eq!(scope.eval(&fmt!("{} == \"a\"", name)), None, "{}", name);
+		}
 	}
 
 	/// A content binding's body is read as Typst reads a content block.

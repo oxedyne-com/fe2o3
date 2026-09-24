@@ -264,6 +264,14 @@ impl Lexer {
 		}
 	}
 
+	/// Where the expression embedded at the scan's own level stands, while one is open.
+	fn phase(&self) -> Option<Embed> {
+		match self.frames.get(1) {
+			Some(Frame::Embed(e))	=> Some(*e),
+			_						=> None,
+		}
+	}
+
 	fn markup_mut(&mut self) -> Option<&mut Markup> {
 		match self.frames.last_mut() {
 			Some(Frame::Markup(m))	=> Some(m),
@@ -916,6 +924,100 @@ pub(crate) fn top_parens(src: &str) -> Vec<(usize, usize)> {
 	out
 }
 
+/// A conditional or a loop embedded in markup -- an `#if` with its `else` arms, a `#for` or a `#while` --
+/// with its extent and each arm's condition and body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Flow {
+	pub(crate) kw:		Kw,			// `If`, `For` or `While`
+	pub(crate) start:	usize,		// the byte of its `#`
+	pub(crate) end:		usize,		// the byte just past its last body, or the end of what it took
+	pub(crate) arms:	Vec<Arm>,
+	pub(crate) whole:	bool,		// every arm closed, and no call or field follows the last
+}
+
+/// One arm of a [`Flow`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Arm {
+	pub(crate) cond:	Option<(usize, usize)>,	// the condition's bytes, or a loop's head's; `None` for `else`
+	pub(crate) body:	(usize, usize),			// the body's bytes, its delimiters included
+	pub(crate) content:	bool,					// a `[...]` content block, not a `{...}` code block
+}
+
+/// Every conditional and loop standing in `src`'s own markup, in order. One in another's body, or in any
+/// other group, is that group's, and is not listed.
+pub(crate) fn flows(src: &str) -> Vec<Flow> {
+	let chars: Vec<(usize, char)>	= src.char_indices().collect();
+	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
+	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
+	let mut out: Vec<Flow>		= Vec::new();
+	let mut lx					= Lexer::markup();
+	let mut cur: Option<Flow>	= None;
+	let mut hash: Option<usize>	= None;	// the byte of a `#` just read at the scan's own level
+	let mut head				= 0usize;	// where the open arm's condition starts
+	// The body being read: its condition, its first byte and whether it is a content block.
+	let mut open: Option<(Option<(usize, usize)>, usize, bool)> = None;
+	let mut i = 0usize;
+	while i < only.len() {
+		let before		= lx.phase();
+		let deep		= lx.frames.len();
+		let (n, tok)	= lx.step(&only, i);
+		let after		= lx.phase();
+		let next		= i + n;
+		// A `#` read at the scan's own level opens a new expression there.
+		let fresh		= tok == Tok::Hash && after == Some(Embed::Start) && lx.frames.len() == 2;
+		match cur.as_mut() {
+			None => {
+				// A flow opens where an expression embedded at the scan's own level reads a loop's or a
+				// conditional's keyword first.
+				if let (Some(h), Some(Embed::Start), Some(Embed::Head { kw, .. })) = (hash, before, after) {
+					cur		= Some(Flow { kw, start: h, end: byte(next), arms: Vec::new(), whole: true });
+					head	= byte(next);
+				}
+			},
+			Some(f) => {
+				match (before, after) {
+					(Some(Embed::Head { .. }), Some(Embed::Tail { .. }))	=>
+						open = Some((Some((head, byte(i))), byte(i), only[i] == '[')),
+					(Some(Embed::Else), Some(Embed::Tail { .. }))			=>
+						open = Some((None, byte(i), only[i] == '[')),
+					(Some(Embed::Else), Some(Embed::Head { .. }))			=> head = byte(next),
+					(Some(Embed::Tail { .. }), Some(Embed::Post))			=> f.whole = false,
+					_														=> {},
+				}
+				// A body closes on the step that brings the scan back to the expression's own level.
+				if deep > 2 && lx.frames.len() == 2 && matches!(after, Some(Embed::Tail { .. })) {
+					if let Some((cond, from, content)) = open.take() {
+						f.arms.push(Arm { cond, body: (from, byte(next)), content });
+						f.end = byte(next);
+					}
+				}
+				// The expression has ended, before the character this step read at the scan's own level. One
+				// that is not whole takes everything up to there.
+				if after.is_none() || fresh {
+					if !f.whole || f.arms.is_empty() || open.is_some() {
+						f.whole	= false;
+						f.end	= byte(i).max(f.end);
+					}
+					out.push(f.clone());
+					cur		= None;
+					open	= None;
+				}
+			},
+		}
+		hash = if fresh { Some(byte(i)) } else { None };
+		i = next;
+	}
+	if let Some(mut f) = cur {
+		// The source ends inside it: whole only when its last body has closed and nothing follows it.
+		if !f.whole || f.arms.is_empty() || open.is_some() {
+			f.whole	= false;
+			f.end	= src.len();
+		}
+		out.push(f);
+	}
+	out
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1032,6 +1134,59 @@ mod tests {
 		// On the next line, `else [` is prose, and its `[` a prose bracket.
 		let src = "#if a [X]\nelse [Y\nAfter\n";
 		assert_eq!(tops(src), vec!["#if a [X]", "else [Y", "After"]);
+	}
+
+	/// The byte ranges of `src`'s flows, as `(kw, whole, text, arms)` with each arm as its condition and body
+	/// text.
+	fn flows_of(src: &str) -> Vec<(Kw, bool, &str, Vec<(Option<&str>, &str, bool)>)> {
+		flows(src).into_iter().map(|f| {
+			let arms = f.arms.iter()
+				.map(|a| (a.cond.map(|(x, y)| src[x..y].trim()), &src[a.body.0..a.body.1], a.content))
+				.collect();
+			(f.kw, f.whole, &src[f.start..f.end], arms)
+		}).collect()
+	}
+
+	#[test]
+	fn a_conditional_is_read_whole_with_its_arms() {
+		let src = "Text #if a == \"x\" [A] else [B] more.\n";
+		assert_eq!(flows_of(src), vec![(Kw::If, true, "#if a == \"x\" [A] else [B]",
+			vec![(Some("a == \"x\""), "[A]", true), (None, "[B]", true)])]);
+		let src = "#if a [\nA\n] else if b [\nB\n] else {\n[C]\n}\nAfter\n";
+		assert_eq!(flows_of(src), vec![(Kw::If, true, "#if a [\nA\n] else if b [\nB\n] else {\n[C]\n}",
+			vec![(Some("a"), "[\nA\n]", true), (Some("b"), "[\nB\n]", true), (None, "{\n[C]\n}", false)])]);
+		// On the next line, `else` is prose, and the conditional ends with its first body.
+		let src = "#if a [A]\nelse [B]\n";
+		assert_eq!(flows_of(src), vec![(Kw::If, true, "#if a [A]", vec![(Some("a"), "[A]", true)])]);
+	}
+
+	#[test]
+	fn a_loop_is_read_whole() {
+		let src = "#for x in xs [\nX #x\n]\n#while n < 3 { n += 1 }\n";
+		assert_eq!(flows_of(src), vec![
+			(Kw::For, true, "#for x in xs [\nX #x\n]", vec![(Some("x in xs"), "[\nX #x\n]", true)]),
+			(Kw::While, true, "#while n < 3 { n += 1 }", vec![(Some("n < 3"), "{ n += 1 }", false)]),
+		]);
+	}
+
+	#[test]
+	fn only_a_flow_at_the_scans_own_level_is_listed() {
+		// One in another's body, in a content block, in maths or after `context` is not the scan's own.
+		let src = "#if a [\n#if b [x]\n]\n#box[#if c [y]]\n$#if d [z]$\n#context if e [w]\n";
+		assert_eq!(flows_of(src).len(), 1);
+		assert_eq!(flows_of(src)[0].2, "#if a [\n#if b [x]\n]");
+		// Two flows back to back are two.
+		assert_eq!(flows_of("#if a [x]#if b [y]\n").len(), 2);
+	}
+
+	#[test]
+	fn a_flow_that_does_not_close_as_one_statement_is_not_whole() {
+		// A call on its value, a head with no body, and a body that never closes.
+		assert_eq!(flows_of("#if a [x](y) tail\n")[0].2, "#if a [x](y)");
+		assert!(!flows_of("#if a [x](y) tail\n")[0].1);
+		assert!(!flows_of("#if a\n[x]\n")[0].1);
+		assert_eq!(flows_of("#if a [x\ny\n")[0].2, "#if a [x\ny\n");
+		assert!(!flows_of("#if a [x\ny\n")[0].1);
 	}
 
 	#[test]

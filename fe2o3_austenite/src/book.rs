@@ -1769,24 +1769,19 @@ fn walk_template_imports(
 const MAX_INCLUDE_DEPTH: u32 = 64;
 
 /// One open `#if` include guard on the assembler's stack while it walks a file's lines. `live` records
-/// that this guard actually decides emission: its parent branch was being kept, and its condition was one
-/// the evaluator could resolve. A guard nested inside a dropped branch, or one whose form was refused, is
-/// not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else` tracks which of
-/// the two branches the walk is currently inside.
+/// that this guard actually decides emission: its parent branch was being kept. A guard nested inside a
+/// dropped branch is not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else`
+/// tracks which of the two branches the walk is currently inside.
 ///
 /// `state` is the guard's own bracket balance, seeded from its opener line so it starts at depth one: a
 /// lone `]` deeper inside the branch (a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer) is then told
 /// apart from the guard's own matching closer by depth alone, rather than by line text -- the marker-based
 /// extent this replaces treated any bare `]` line as the guard's end, following both branches once one
-/// closed early and leaking the markers and the truncated tail as prose. `refused` marks a guard pushed
-/// only to keep this bracket balance for an unsupported form already reported at its opener, so the
-/// balance reaching zero on an ordinary body line (its own closer, not the guard's `]`/`else` shape) is not
-/// reported a second time.
+/// closed early and leaking the markers and the truncated tail as prose.
 struct GuardFrame {
 	live:		bool,
 	then_taken:	bool,
 	in_else:	bool,
-	refused:	bool,
 	state:		lang::lex::Lexer,
 }
 
@@ -1808,68 +1803,21 @@ fn guard_open(marker: &str) -> Option<&str> {
 	Some(cond.trim())
 }
 
+/// Is the conditional opening `rest`, a line standing at a file's top level or directly in a guard's branch,
+/// one the include walk reads line by line: it closes as one statement, with a content block for its
+/// branch and at most a plain `else` one?
+fn walked_guard(rest: &str) -> bool {
+	let lead = rest.len() - rest.trim_start().len();
+	lang::lex::flows(rest).first().is_some_and(|f| f.start == lead && f.whole && f.kw == lang::lex::Kw::If
+		&& f.arms.iter().all(|a| a.content)
+		&& (f.arms.len() == 1 || (f.arms.len() == 2 && f.arms[1].cond.is_none())))
+}
+
 /// Is this whitespace-trimmed line the `] else [` divider between an include guard's two branches,
 /// however its own internal spacing is written (`]else[`, `] else [`)?
 fn is_guard_else(marker: &str) -> bool {
 	let squeezed: String = marker.chars().filter(|c| !c.is_whitespace()).collect();
 	squeezed == "]else["
-}
-
-/// Evaluates an include-guard condition to which branch to keep -- `Some(true)` for the then-branch,
-/// `Some(false)` for the else-branch -- or `None` when the form is beyond the two the assembler reads or
-/// its variable resolves to no value, so the caller refuses it rather than guessing.
-///
-/// The two forms are `<var> == "<literal>"` (kept when the resolved scalar equals the literal) and a bare
-/// `<var>` (kept when the resolved boolean is true). The variable is resolved from the book's `config.typ`
-/// first, then from the guard's own file -- so a book's `#import "config.typ": media` and a lone file's
-/// own `#let` both answer.
-fn eval_guard(cond: &str, config: &str, file_src: &str) -> Option<bool> {
-	let cond = cond.trim();
-	if let Some(eq) = cond.find("==") {
-		let var = cond[..eq].trim();
-		let rhs = cond[eq + 2..].trim();
-		if !is_simple_ident(var) {
-			return None;
-		}
-		let Some(lit) = string_literal(rhs) else { return None; };
-		let Some(val) = guard_scalar(config, file_src, var) else { return None; };
-		return Some(val == lit);
-	}
-	if is_simple_ident(cond) {
-		return guard_bool(config, file_src, cond);
-	}
-	None
-}
-
-/// Is `s` a single plain identifier -- a config-variable name, no operator or call around it?
-fn is_simple_ident(s: &str) -> bool {
-	let mut cs = s.chars();
-	match cs.next() {
-		Some(c) if c.is_alphabetic() || c == '_'	=> {},
-		_											=> return false,
-	}
-	cs.all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-/// The text inside a `"..."` string literal filling the whole of `s`, or `None` when `s` is not one.
-fn string_literal(s: &str) -> Option<&str> {
-	let Some(stripped)	= s.strip_prefix('"') else { return None; };
-	let Some(inner)		= stripped.strip_suffix('"') else { return None; };
-	// A stray interior quote would mean this is not one flat literal; the guard then refuses.
-	if inner.contains('"') {
-		return None;
-	}
-	Some(inner)
-}
-
-/// The scalar an include-guard variable resolves to: the book config's binding, else the guard file's own.
-fn guard_scalar(config: &str, file_src: &str, name: &str) -> Option<String> {
-	read_let_string(config, name).or_else(|| read_let_string(file_src, name))
-}
-
-/// The boolean an include-guard variable resolves to: the book config's binding, else the guard file's own.
-fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
-	read_let_bool(config, name).or_else(|| read_let_bool(file_src, name))
 }
 
 /// Follows a root's `#include "..."` lines in order, reading each chapter and setting it through the
@@ -1887,15 +1835,17 @@ fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
 /// every level's own includes, each resolved against *that file's own directory*, exactly as Typst
 /// resolves one, rather than always against the book root's.
 ///
-/// `config` is the book's `config.typ` source (empty for the documentation idiom, which has none), so a
-/// `#if <var> == "..."` include guard in a chapter can be resolved against the same scalars the config
-/// binds -- `media` above all -- and only the taken branch's includes followed. See [`assemble_into`].
+/// `config` is the book's `config.typ` source (empty for the documentation idiom, which has none). Every
+/// conditional, an include guard the walk reads or one the reader meets in a body, resolves its names in one
+/// [`GuardScope`](lang::rules::GuardScope): the config's bindings, `media` above all, then those of the file
+/// it stands in. See [`assemble_into`].
 pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::rules::Bindings, config: &str)
 	-> Outcome<(Vec<Block>, Gathered)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
 	let mut got = Gathered::default();
-	res!(assemble_into(root_src, root_dir, root_path, binds, config, 0, &mut blocks, &mut got));
+	let guards = lang::rules::GuardScope::of_config(config);
+	res!(assemble_into(root_src, root_dir, root_path, binds, &guards, 0, &mut blocks, &mut got));
 	Ok((blocks, got))
 }
 
@@ -1920,13 +1870,16 @@ fn assemble_into(
 	dir:	&Path,
 	path:	&Path,
 	binds:	lang::rules::Bindings,
-	config:	&str,
+	config:	&lang::rules::GuardScope,	// the book config's names, before any file's
 	depth:	u32,
 	blocks:	&mut Vec<Block>,
 	got:	&mut Gathered,
 )
 	-> Outcome<()>
 {
+	// This file's guards and the conditionals the reader meets in it resolve in the one scope.
+	let names	= config.in_file(src);
+	let binds	= binds.with_guards(&names);
 	let mut buf = Chunk::default();	// this file's own inline markup gathered since the last boundary
 	// This file's own inline markup (its opening section, any tail after its last include) is tagged with
 	// its own path, exactly as an included chapter's blocks are tagged with theirs -- see `Refusal`'s doc
@@ -1986,69 +1939,42 @@ fn assemble_into(
 			}
 			continue;
 		}
-		// A guard opener `#if <cond> [`: evaluate the condition against the config (and this file's own
-		// `#let` bindings) and open a guard, seeding its bracket state from this opener line so it starts
-		// at depth one. A guard opened inside a dropped branch, or one whose form or variable the evaluator
-		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
-		// never silently followed nor leaked.
-		if let Some(cond) = guard_open(marker).filter(|_| structural) {
+		// A guard opener `#if <cond> [` of the shape the walk reads line by line, whose condition resolves in
+		// this file's guard scope: open a guard, seeding its bracket state from this opener line so it starts
+		// at depth one, and follow the taken branch's includes. One opened inside a dropped branch keeps
+		// neither branch. Every other conditional -- one this scope does not resolve, a one-line or
+		// brace-bodied one, an `else if` chain -- is the reader's: gathered with the markup around it, it is
+		// set or refused whole at its line there, in the same scope, exactly as one in a body is.
+		let parent_active = guards.iter().all(|g| g.emits());
+		let opened = guard_open(marker).filter(|_| structural).and_then(|cond| match parent_active {
+			true	=> walked_guard(&src[start as usize..]).then(|| names.eval(cond)).flatten().map(|t| (true, t)),
+			false	=> Some((false, false)),
+		});
+		if let Some((live, then_taken)) = opened {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			let parent_active = guards.iter().all(|g| g.emits());
-			let (live, then_taken) = if !parent_active {
-				(false, false)
-			} else {
-				match eval_guard(cond, config, src) {
-					Some(taken)	=> (true, taken),
-					None		=> {
-						got.skips.record_in(&label, &fmt!("#if {} (unsupported include-guard form)", cond), span);
-						(false, false)
-					},
-				}
-			};
 			let mut state = lang::lex::Lexer::markup();
 			state.feed_line(marker);
-			guards.push(GuardFrame { live, then_taken, in_else: false, refused: false, state });
-			continue;
-		}
-		// Any other `#if ...` line is a guard form the assembler does not evaluate (a one-line
-		// `#if c [..] else [..]`, or a brace-bodied `#if cond {`): refuse and drop it rather than let its
-		// raw source leak. A balanced one-liner refuses just this line, as before; a brace body still open
-		// at the line's end pushes a refused guard so the generic per-line scan below consumes the whole
-		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
-		// space is left to the reader's own code-skip path.
-		if structural && marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
-			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			got.skips.record_in(&label, &fmt!("#if (unsupported include-guard form): {:?}", marker), span);
-			let mut state = lang::lex::Lexer::markup();
-			state.feed_line(marker);
-			if state.is_open() {
-				guards.push(GuardFrame { live: false, then_taken: false, in_else: false, refused: true, state });
-			}
+			guards.push(GuardFrame { live, then_taken, in_else: false, state });
 			continue;
 		}
 		// Any other line while a guard is open: fold its own brackets into the innermost guard's state,
 		// whether or not the branch it stands in emits -- a dropped branch's own `#block[...]`/`{...}` still
 		// balances the stack, so a later real closer is not mistaken for one of these (or vice versa). If
-		// the state closes to zero here, rather than through one of the recognised `]`/`else`/`#if` shapes
-		// above, the guard's own bracket has just ended on an ordinary body line: a refused guard already
-		// reported its opener, so this is its expected close and stays silent; any other guard closing this
-		// way is a shape the guard did not predict, so it is reported rather than left to leak whatever
-		// follows as prose. Either way the line itself is the guard's own structural end, not content, so
-		// it is consumed here rather than falling through to the buffer below.
+		// the state closes to zero here, rather than through one of the recognised `]`/`else` shapes above,
+		// the guard's own bracket has just ended on an ordinary body line, a shape the guard did not predict:
+		// it is reported rather than left to leak whatever follows as prose, and the line, the guard's own
+		// structural end, is consumed here rather than falling through to the buffer below.
 		if let Some(top) = guards.last_mut() {
 			top.state.feed_line(line);
 			if !top.state.is_open() {
-				let refused = top.refused;
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				guards.pop();
-				if !refused {
-					got.skips.record_in(&label, &fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
-				}
+				got.skips.record_in(&label, &fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
 				continue;
 			}
 		}
-		// Inside a dropped or refused branch: the content is the untaken alternative, dropped silently
-		// (the guard already carries the report). Markers above are still tracked so the stack balances.
+		// Inside a dropped branch: the content is the untaken alternative, dropped silently. Markers above
+		// are still tracked so the stack balances.
 		if !guards.iter().all(|g| g.emits()) {
 			continue;
 		}
@@ -2116,13 +2042,10 @@ fn assemble_into(
 		}
 	}
 	// A guard still open at end of file never met its own closer: reported so a truncated branch is never
-	// silently accepted as complete. A refused guard already reported its opener, so only a guard that was
-	// genuinely live and open is reported here, to avoid a duplicate on the one already-reported form.
+	// silently accepted as complete.
 	let eof = crate::ir::Span::new(byte, byte);
-	for g in &guards {
-		if !g.refused {
-			got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
-		}
+	for _ in &guards {
+		got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
 	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
 	// include) closes with, if any.
@@ -2300,21 +2223,6 @@ fn read_let_string(src: &str, name: &str) -> Option<String> {
 	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	first_quoted(rest)
-}
-
-/// The boolean a `#let <name> = true` / `= false` binds, if the source sets one as a plain literal. A
-/// binding to anything else (a string, an expression) is not a boolean an include guard can test, so it
-/// yields `None` and the guard refuses rather than inventing a truth value.
-fn read_let_bool(src: &str, name: &str) -> Option<bool> {
-	let needle		= fmt!("#let {} =", name);
-	let Some(at)	= find_live(src, &needle) else { return None; };
-	let rest	= src[at + needle.len()..].trim_start();
-	let tok: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-	match tok.as_str() {
-		"true"	=> Some(true),
-		"false"	=> Some(false),
-		_		=> None,
-	}
 }
 
 /// The body of the `if`/`else if` arm a `#let <name> = if format == "<fmt>" {...}` chain selects for
