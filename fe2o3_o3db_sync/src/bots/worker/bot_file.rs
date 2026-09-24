@@ -13,7 +13,9 @@ use crate::{
             FileNum,
         },
         state::FileStateMap,
+        stored::RecordDigest,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -229,14 +231,14 @@ impl<
     {
         match msg {
             // WRITE
-            OzoneMsg::ScheduleOld(floc, from_id) => {
+            OzoneMsg::ScheduleOld(floc, rid, from_id) => {
                 // [17] Schedule the old file location for deletion.
                 if !self.gc_active(
                     floc.file_number(),
                     &msg,
                     processing_buffer,
                 ) { 
-                    let result = self.schedule_deletion(floc, from_id);
+                    let result = self.schedule_deletion(floc, rid, from_id);
                     self.result(&result);
                 }
             }
@@ -281,7 +283,7 @@ impl<
                         Data, IO, Channel));
                 }
             }
-            OzoneMsg::ReadFileRequest(fnum, mloc, resp_r2) => {
+            OzoneMsg::ReadFileRequest(fnum, kbyts, mloc, resp_r2) => {
                 if !self.gc_active(
                     *fnum,
                     &msg,
@@ -293,9 +295,25 @@ impl<
                         Ok(fstat) => {
                             let mut mloc2 = mloc.clone();
                             let mut postgc = false;
-                            if let Some(new_start) = fstat.map_and_remove(&mloc2.file_location().keyval()) {
-                                mloc2.new_start_position(new_start);
-                                postgc = true;
+                            // Only a file a collection has just moved records in has move entries,
+                            // so the record is named only then.  A read looks up its move and
+                            // leaves the entry: it is kept for the record's supersession, which
+                            // finding it gone flagged whatever now sits at the old offset as old.
+                            if !fstat.no_pending_moves() {
+                                match RecordDigest::new(kbyts, mloc.meta()) {
+                                    Ok(rid) => {
+                                        let dloc = mloc2.file_location().keyval();
+                                        if let Some(new_start) = fstat.moved_to(&dloc, &rid) {
+                                            mloc2.new_start_position(new_start);
+                                            postgc = true;
+                                        }
+                                    },
+                                    // The reader confirms the record it reads, so an unmapped
+                                    // location costs it a retry, never a wrong answer.
+                                    Err(e) => error!(sync_log::stream(), err!(e,
+                                        "Naming the record a read of file {} asks for.", fnum;
+                                        Data, Encode)),
+                                }
                             }
                             // Increment the reader count whether or not the location was remapped.
                             // The count is the pin that keeps a file from being collected while a
@@ -482,6 +500,7 @@ impl<
     fn schedule_deletion(
         &mut self,
         floc:   &FileLocation,
+        rid:    &RecordDigest,
         from:   &OzoneBotId,
     )
         -> Outcome<()>
@@ -496,9 +515,10 @@ impl<
                 Bug, Missing, Data)),
             Ok(fstat) => {
                 // Perform mapping to new start position, resulting from scheduling messages which
-                // have backed up during previous garbage collection.
+                // have backed up during previous garbage collection.  Only this record's move is
+                // taken: another's at the same offset is waiting for its own supersession.
                 let mut floc2 = floc.clone();
-                if let Some(new_start) = fstat.map_and_remove(&floc2.keyval()) {
+                if let Some(new_start) = fstat.map_and_remove(&floc2.keyval(), rid) {
                     floc2.start = new_start;
                 }
 
@@ -522,13 +542,14 @@ impl<
     ///
     /// Two changes that can make a file eligible deliberately do not call this.  The last read
     /// finishing would start a collection in the middle of a burst of reads of the file, a chunked
-    /// value's, and a read queued behind the collection can be replayed at its old offset with
-    /// nothing to remap it, since the collection re-anchored its cache entry and dropped the move;
-    /// with records of one size that offset holds another valid record, and the reader, which
-    /// checks the checksum but not the key, returns it.  Starting collections there failed the
-    /// first read of a same-key churn's value after a restart in 5 to 8 runs of 12, a read a moment
-    /// later being right.  Switching collection on would hand every file a start-up load had found
-    /// garbage in to the collectors at once, and a read of a file waiting its turn waits with it.
+    /// value's, and a read queued behind the collection is replayed at its old offset with
+    /// nothing to remap it, since the collection re-anchored its cache entry and dropped the move.
+    /// With records of one size that offset holds another valid record, which the reader returned
+    /// until it confirmed key and stamp (2026-09-23): starting collections there failed the first
+    /// read of a same-key churn's value after a restart in 5 to 8 runs of 12.  The reader now
+    /// retries such a read, but the trigger stays withdrawn until that is measured.  Switching
+    /// collection on would hand every file a start-up load had found garbage in to the collectors
+    /// at once, and a read of a file waiting its turn waits with it.
     fn maybe_collect(&mut self, fnum: FileNum) -> Outcome<()> {
         let self_id = self.ozid().clone();
         if self.gc_on {
@@ -635,7 +656,7 @@ impl<
         &mut self,
         floc_new:       &FileLocation,
         ilen:           usize,
-        floc_old_opt:   Option<&FileLocation>,
+        floc_old_opt:   Option<&(FileLocation, RecordDigest)>,
         from:           &OzoneBotId,
     )
         -> Outcome<()>
@@ -650,7 +671,7 @@ impl<
 
         // [16] Advise the appropriate fbot to schedule the old data for deletion in its file state
         // data map.
-        if let Some(floc_old) = floc_old_opt {
+        if let Some((floc_old, rid)) = floc_old_opt {
             let bots = res!(self.fbots());
             let (bot, b) = bots.choose_bot(&ChooseBot::ByFile(floc_old.file_number()));
             if *b == self.wind().b() {
@@ -661,17 +682,20 @@ impl<
                 // and a file with a move entry is never collected again.  With two file bots to a
                 // zone, half of all supersessions come this way; the online sweep lost 50 to 65
                 // of its 224 to it (2026-09-23).
-                let msg = OzoneMsg::ScheduleOld(*floc_old, from.clone());
+                let msg = OzoneMsg::ScheduleOld(*floc_old, *rid, from.clone());
                 if !self.gc_active(floc_old.file_number(), &msg, false) {
                     res!(self.schedule_deletion(
                         floc_old,
+                        rid,
                         from,
                     ));
                 }
             } else {
                 // Or another fbot.
+                hooks::forward_delay();
                 res!(bot.send(OzoneMsg::ScheduleOld(
                     *floc_old,
+                    *rid,
                     from.clone(),
                 )));
             }

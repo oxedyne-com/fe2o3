@@ -20,6 +20,7 @@ use crate::{
             FileState,
         },
         stored::{
+            RecordDigest,
             StoredIndex,
             StoredKey,
             StoredValue,
@@ -375,6 +376,7 @@ impl<
                             sindex.ref_stored_file_location().buf.len(),
                             meta,
                             Responder::none(Some(self.ozid())),
+                            None,
                         )
                     ));
                 },
@@ -611,6 +613,7 @@ impl<
                             ibuf.len(),
                             meta,
                             Responder::none(Some(self.ozid())),
+                            None,
                         )
                     ));
 
@@ -785,8 +788,23 @@ impl<
                                     IO, File, Read)),
                                 Ok(()) => (),
                             }
+                            // The move is kept against the record it carries, named by the key
+                            // and stamp at the head of its bytes.
+                            let rid = match res!(StoredKey::<UIDL, UID>::load(
+                                &mut &buf[..],
+                                self.api().schemes().checksummer().clone(),
+                            )) {
+                                Some((skey, _, _)) => res!(RecordDigest::new(
+                                    skey.key().as_bytes(),
+                                    skey.meta(),
+                                )),
+                                None => return Err(err!(
+                                    "{}: No key at position {} in file {}, where the file state \
+                                    has a current record.", self.ozid(), dloc.start, fnum;
+                                    Bug, Missing, Data)),
+                            };
                             res!(data_writer.write_all(&mut buf));
-                            fstat.update_moved(&dloc, new_start);
+                            fstat.update_moved(&dloc, new_start, rid);
                             new_start += dloc.len;
                         },
                         Some(DataState::Old) => {
@@ -1008,7 +1026,7 @@ impl<
 
             loop {
                 // 3. Load the key Daticle bytes and while we're at it, compare the checksum.
-                let (key, klen, kpos, _meta, mut index_entry, chash) =
+                let (key, klen, kpos, meta, mut index_entry, chash) =
                     match StoredKey::load(
                         &mut reader,
                         self.api().schemes().checksummer().clone(),
@@ -1079,6 +1097,7 @@ impl<
                         buffers[**bpind].push((
                             key.into_bytes(),
                             sfloc.ref_file_location().clone(),
+                            meta,
                         ));
 
                         // 8. Append to the index file and update the effect of the file size increase
@@ -1142,16 +1161,12 @@ impl<
                     "While collecting gc cache update response.";
                     IO, Channel, Read)),
                 Ok(OzoneMsg::GcCacheUpdateResponse(old_flocs)) => {
-                    for old_floc in old_flocs {
-                        // A cache update was performed, meaning the value in this file is still
-                        // the current value (i.e. the value was not updated during the garbage
-                        // collection transcription process).  During transcription, the data
-                        // location was mapped from old to new in via a FileState.smap DataState
-                        // entry, e.g.  DataState::Cur(Some(new_start)).  We no longer need this
-                        // mapping, because the cache now points to the new position.  So we update
-                        // the FileState to reflect the new position, and remove the old DataState
-                        // which provided the mapping.  There is no change in the data file size.
-                        fstat.map_and_remove(&old_floc.keyval());
+                    for (old_floc, rid) in old_flocs {
+                        // The cache re-anchored this record, so it is still current and nothing
+                        // will ask for it at its old start again but a read already on its way,
+                        // which the reader confirms and retries.  Its move entry is spent, and
+                        // taken by record: the entry at that offset may be another's.
+                        fstat.map_and_remove(&old_floc.keyval(), &rid);
                     }
                 },
                 Ok(msg) => return Err(err!(

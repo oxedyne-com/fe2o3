@@ -28,6 +28,7 @@ use crate::{
             FileLocation,
             FileNum,
         },
+        stored::StoredKey,
     },
 };
 
@@ -289,20 +290,18 @@ impl<
     {
         let cind = key.index();
 
-        // A `postgc` location is an offset into the one generation of the file that the collector
-        // had just rewritten when the fbot consumed its move map for this record.  A supersession
-        // burst can trip the collection trigger on the same file again before this read reaches
-        // it, and the reader count that pins a file against collection was not yet held while the
-        // request sat in the fbot's gc buffer, so by the time the offset is read the file may have
-        // been collected a second time and the offset now belongs to a superseded, unlinked inode.
-        // Dropping the cached handle reopens the live file but cannot mend a stale offset; only a
-        // fresh location can.  So a `postgc` read whose check fails is retried from the cbot, which
-        // the collection re-anchored to the current generation (`cache_data_file`).  The retry is
-        // bounded: a file the burst keeps collecting must not spin here for ever, and because each
-        // attempt now holds the reader-count pin (see the `ReadFileRequest` arm in bot_file.rs) the
-        // attempts converge as soon as the file settles.  A `postgc == false` failure is a genuine
-        // fault -- its offset was never remapped -- so it is surfaced at once, never retried.
-        for attempt in 0..constant::MAX_POSTGC_READ_ATTEMPTS {
+        // A location names a record by an offset into one generation of its file, and a collection
+        // makes a new generation.  A read that waited behind a collection, or was handed an offset
+        // the collection has just moved, can reach an offset that now holds another record, and
+        // with records of one size that record passes its own checksums: the read returned another
+        // key's value, or an older version of its own, about once in three collections
+        // (2026-09-23).  So a record is returned only if it is the one the cache named, its key
+        // and stamp matching, and anything else -- a failed checksum included -- is retried with a
+        // fresh location from the cbot, which a collection re-anchors before it renames the file.
+        // The retry is bounded, so that a file a supersession burst keeps collecting cannot spin
+        // a reader for ever; each attempt holds the reader-count pin (see the `ReadFileRequest`
+        // arm in bot_file.rs), so the attempts converge as soon as the file settles.
+        for attempt in 0..constant::MAX_READ_ATTEMPTS {
 
             // <2> Send read request to cbot.
             let resp_r2 = Responder::new(Some(self.ozid()));
@@ -365,7 +364,7 @@ impl<
             if postgc {
                 self.drop_cached_file(fnum, &FileType::Data);
             }
-            let result = self.read_checked(floc);
+            let result = self.read_checked(floc, &key, &meta);
 
             // <8> Advise the fbot that reading has finished so it can decrement the reader count it
             // took when it handed back the location.  The count has to come down whether the read
@@ -379,10 +378,12 @@ impl<
             res!(bot.send(OzoneMsg::ReadFinished(fnum)));
 
             match result {
-                Ok(mut val) => {
-                    val.truncate(vlen - res!(self.api().schms.checksummer().len()));
+                Ok(rec) => {
+                    // The value, without its checksum, follows the key.
+                    let klen = try_into!(usize, floc.klen);
+                    let end = klen + vlen - res!(self.api().schms.checksummer().len());
                     // All values are wrapped inside a Dat::BU64.
-                    let (dat, _) = res!(Dat::from_bytes(&val));
+                    let (dat, _) = res!(Dat::from_bytes(&rec[klen..end]));
                     return Ok(OzoneMsg::Value(Value::new(
                         Some((dat, meta)),
                         cind,
@@ -390,27 +391,30 @@ impl<
                     )));
                 },
                 Err(e) => {
-                    // A checksum failure on a store that is byte-perfect on disk means the offset
-                    // just read and the handle it was read through disagree on which generation of
-                    // the file they belong to: a `postgc` offset into an inode a later collection
-                    // has already replaced, or a current offset read through a handle still open on
-                    // the pre-rename inode.  The final attempt must never risk returning bytes from
-                    // the wrong generation, so it fails loud.
-                    if attempt + 1 == constant::MAX_POSTGC_READ_ATTEMPTS {
-                        return Err(err!(e,
-                            "{}: While reading {:?} file {} (postgc {}, attempt {} of {}).",
-                            self.ozid(), FileType::Data, fnum, postgc,
-                            attempt + 1, constant::MAX_POSTGC_READ_ATTEMPTS;
-                            IO, File, Read));
+                    // The record read is not the one named: its offset and the handle it was read
+                    // through disagree on which generation of the file they belong to, or the
+                    // offset was taken before a collection moved the record.  The final attempt
+                    // never returns bytes it could not confirm, so it fails loud.
+                    if attempt + 1 == constant::MAX_READ_ATTEMPTS {
+                        let what = fmt!("{}: While reading {:?} file {} (postgc {}, attempt {} of \
+                            {}).", self.ozid(), FileType::Data, fnum, postgc,
+                            attempt + 1, constant::MAX_READ_ATTEMPTS);
+                        // Tagged with its cause where that is a record other than the one named,
+                        // since `Error::tags` reports only the outermost error's tags.
+                        return Err(if e.tags().contains(&ErrTag::Mismatch) {
+                            err!(e, "{}", what; Data, Mismatch)
+                        } else {
+                            err!(e, "{}", what; IO, File, Read)
+                        });
                     }
-                    // Drop the handle whose generation disagreed and loop.  The next attempt fetches
-                    // a fresh location from the cbot, which the collection re-anchored to the
-                    // current generation before it renamed the file (`cache_data_file`'s cbot cache
-                    // update completes inside the call at collect_file step 6, before the rename at
-                    // step 7), then reads THAT offset against the reopened live inode.  The offset
-                    // that just failed is discarded, never re-read through a reopened inode: that
-                    // pairing -- an un-remapped offset on the new inode -- is the one that could read
-                    // a different record with a valid checksum, and it never happens here.
+                    trace!(sync_log::stream(), "{}: Retrying a read of {:?} file {} at {} \
+                        (postgc {}, attempt {}): {}", self.ozid(), FileType::Data, fnum,
+                        floc.start, postgc, attempt + 1, e);
+                    // Drop the handle and loop.  The next attempt fetches a fresh location from
+                    // the cbot, which the collection re-anchored to the current generation before
+                    // it renamed the file (`cache_data_file`'s cbot cache update completes inside
+                    // the call at collect_file step 6, before the rename at step 7), then reads
+                    // THAT offset against the reopened live inode.
                     self.drop_cached_file(fnum, &FileType::Data);
                 },
             }
@@ -423,18 +427,31 @@ impl<
             Bug, IO, Read))
     }
 
-    /// Reads the record at the given location and checks it against its stored checksum.  Split
-    /// out of `read` only so that the caller can report the read finished to the fbot on the way
-    /// out, whichever way this goes.
+    /// Reads the record at the given location, key and value in one read, and returns it only if
+    /// it is the record the cache named: it carries the key asked for with the stamp the cache has
+    /// for it, and its value's checksum holds.  A key alone would pass an older version of the
+    /// same key.  Split out of `read` only so that the caller can report the read finished to the
+    /// fbot on the way out, whichever way this goes.
     fn read_checked(
         &mut self,
-        floc: FileLocation,
+        floc:   FileLocation,
+        key:    &Key,
+        meta:   &Meta<UIDL, UID>,
     )
         -> Outcome<Vec<u8>>
     {
-        let val = res!(self.read_from_file(floc));
-        res!(self.api().schemes().checksummer().clone().verify(&val));
-        Ok(val)
+        let rec = res!(self.read_from_file(floc));
+        let klen = try_into!(usize, floc.klen);
+        let csummer = self.api().schemes().checksummer().clone();
+        let csum_len = res!(csummer.len());
+        if !res!(StoredKey::<UIDL, UID>::holds(&rec[..klen], key.as_bytes(), meta, csum_len)) {
+            return Err(err!(
+                "{}: The record at {} in data file {} is not the one its cache bot named, {:?} \
+                stamped {:?}.", self.ozid(), floc.start, floc.file_number(), key, meta.time;
+                Data, Mismatch));
+        }
+        res!(csummer.verify(&rec[klen..]));
+        Ok(rec)
     }
 
     fn read_from_file(
@@ -449,35 +466,35 @@ impl<
             self.ozid(), floc.file_number(),
         );
 
-        match file_write.seek(SeekFrom::Start(floc.val().start)) {
+        match file_write.seek(SeekFrom::Start(floc.keyval().start)) {
             Err(e) => return Err(err!(e,
                 "{}: attempt to move to position {} in data file {}.",
-                self.ozid(), floc.val().start, floc.file_number();
+                self.ozid(), floc.keyval().start, floc.file_number();
                 IO, File, Seek)),
             Ok(actual_pos) => {
-                if actual_pos != floc.val().start {
+                if actual_pos != floc.keyval().start {
                     return Err(err!(
                         "{}: attempt to move to position {} in data file {} \
                         but only moved to {}.",
-                        self.ozid(), floc.val().start, floc.file_number(), actual_pos;
+                        self.ozid(), floc.keyval().start, floc.file_number(), actual_pos;
                         IO, File, Seek));
                 }
-                let mut v = vec![0; floc.val().len as usize];
+                let mut v = vec![0; floc.keyval().len as usize];
                 let file_clone = res!((*file_write).try_clone());
                 let mut reader = BufReader::new(file_clone);
                 match reader.read(&mut v) {
                     Err(e) => {
                         return Err(err!(e,
                             "{}: attempt to read {} bytes from position {} in data file {}.",
-                            self.ozid(), floc.val().len, floc.val().start, floc.file_number();
+                            self.ozid(), floc.keyval().len, floc.keyval().start, floc.file_number();
                             IO, File, Read));
                     },
                     Ok(actually_read) => {
-                        if actually_read != floc.val().len as usize {
+                        if actually_read != floc.keyval().len as usize {
                             return Err(err!(
                                 "{:?}: attempt to read {} bytes from position {} \
                                 in data file {}, but only read {} bytes.",
-                                self.ozid(), floc.val().len, floc.val().start, floc.file_number(),
+                                self.ozid(), floc.keyval().len, floc.keyval().start, floc.file_number(),
                                 actually_read;
                                 IO, File, Read));
                         }

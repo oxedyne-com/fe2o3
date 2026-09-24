@@ -14,7 +14,11 @@ use crate::{
         },
         core::Key,
     },
-    file::floc::FileLocation,
+    file::{
+        floc::FileLocation,
+        stored::RecordDigest,
+    },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -148,9 +152,16 @@ impl<
                         // WRITE
                         OzoneMsg::GcCacheUpdateRequest(buf, resp_g1) => {
                             let mut old_flocs = Vec::new();
-                            for (key, floc) in buf {
-                                if let Some(old_floc) = self.cache_mut().update_if_same_fnum(&key, &floc) {
-                                    old_flocs.push(old_floc);
+                            for (key, floc, meta) in buf {
+                                if let Some(old_floc) = self.cache_mut().reanchor(&key, &floc, &meta) {
+                                    match RecordDigest::new(&key, &meta) {
+                                        Ok(rid) => old_flocs.push((old_floc, rid)),
+                                        // Its move entry stays, and keeps the file from being
+                                        // collected again; the location itself is right.
+                                        Err(e) => self.error(err!(e,
+                                            "{}: Naming a record a collection re-anchored.", self.ozid();
+                                            Data, Encode)),
+                                    }
                                 }
                             }
                             if let Err(e) = resp_g1.send(
@@ -161,8 +172,8 @@ impl<
                                     IO, Channel));
                             }
                         },
-                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1) => {
-                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1);
+                        OzoneMsg::Insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed) => {
+                            let result = self.insert(key, val, cind, floc, ilen, meta, resp_w1, unconfirmed);
                             self.result(&result);
                         },
                         // READ
@@ -211,7 +222,7 @@ impl<
                         //    self.respond(Ok(OzoneMsg::UserKeys(kuserdat)), &resp);
                         //},
                         OzoneMsg::ReadCache(key, resp_r2) => {
-                            let result = self.read(&key, resp_r2);
+                            let result = self.read(key, resp_r2);
                             self.result(&result);
                         },
                         _ => return self.listen_more(msg),
@@ -284,9 +295,11 @@ impl<
         ilen:       usize,
         meta:       Meta<UIDL, UID>,
         resp_w1:    Responder<UIDL, UID, ENC, KH>,
+        unconfirmed: Option<Error<ErrTag>>,
     )
         -> Outcome<()>
     {
+        hooks::insert_delay();
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
         let floc_old_opt = match self.cache.insert(
@@ -301,7 +314,7 @@ impl<
                 // as an expired durability deadline, which says the write is on its way.
                 let e = err!(e,
                     "{}: A written record could not be entered in the cache.", self.ozid();
-                    Data, Write);
+                    Data, Write, Unconfirmed);
                 self.respond(Err(e.clone()), &resp_w1);
                 return Err(e);
             },
@@ -309,10 +322,13 @@ impl<
 
         let key_present = floc_old_opt.is_some();
         
-        // [13] Inform the caller of successful file write and cache insertion.
-        match cind {
-            Some(cind) => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
-            None => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
+        // [13] Inform the caller of successful file write and cache insertion, or of the barrier
+        // that failed after the write: told here, the caller can read its write back once it
+        // hears, as it can a confirmed one.
+        match (unconfirmed, cind) {
+            (Some(e), _)        => self.respond(Err(e), &resp_w1),
+            (None, Some(cind))  => self.respond(Ok(OzoneMsg::KeyChunkExists(key_present, cind)), &resp_w1),
+            (None, None)        => self.respond(Ok(OzoneMsg::KeyExists(key_present)), &resp_w1),
         }
         self.respond(Ok(OzoneMsg::Finish), &resp_w1);
 
@@ -333,7 +349,7 @@ impl<
 
     pub fn read(
         &mut self,
-        key:        &Key,
+        key:        Key,
         resp_r2:    Responder<UIDL, UID, ENC, KH>,
     )
         -> Outcome<()>
@@ -348,10 +364,13 @@ impl<
                         let fnum = mloc.file_number();
                         let bots = res!(self.fbots());
                         let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
+                        // The key goes with the location, so that a move entry at the same
+                        // offset is taken only if it is this record's.
                         res!(bot.send(
                             OzoneMsg::ReadFileRequest(
                                 fnum,
-                                mloc.clone(),
+                                key.into_bytes(),
+                                mloc,
                                 resp_r2,
                         )));
                     },

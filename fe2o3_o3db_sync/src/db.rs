@@ -399,10 +399,12 @@ impl<
             // the same files (2026-09-23).  Their stopping is start-up work, held to the control
             // deadline like the rest of it.
             if sentinel.was_interrupted() {
-                // A supervisor that panicked stops nothing, so there is nothing to wait for.
+                // A panic while bringing the database up is caught and stops the bots like any
+                // failed start, so this is a panic in stopping them, and nothing is left that
+                // would stop the rest.
                 return Err(err!(e,
-                    "{}: The database did not start, and its supervisor panicked, leaving the \
-                    bots it had brought up running.", self.ozid();
+                    "{}: The database did not start, and its supervisor panicked while stopping \
+                    the bots it had brought up, some of which may still be running.", self.ozid();
                     Init, Thread, Panic));
             }
             if let Some(wg) = wg {

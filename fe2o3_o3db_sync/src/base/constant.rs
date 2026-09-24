@@ -85,10 +85,11 @@ pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins
 pub const MAX_CACHED_FILES:             usize = 200;
 
-// A read handed a post-collection (`postgc`) location may find that location already superseded by
-// a second collection of the same file, and retries with a freshly fetched location.  This bounds
-// those retries so a file a supersession burst keeps collecting cannot spin a reader for ever.
-pub const MAX_POSTGC_READ_ATTEMPTS:     usize = 8;
+// A read whose record is not the one its cache bot named -- a location a collection has moved, or
+// one read through the handle of the file's previous generation -- retries with a freshly fetched
+// location.  This bounds those retries, for every read, so a file a supersession burst keeps
+// collecting cannot spin a reader for ever.
+pub const MAX_READ_ATTEMPTS:            usize = 8;
 
 // Resource management.
 pub const CACHE_JETTISON_FRAC_OF_LIM:   f64 = 0.20;
@@ -98,7 +99,8 @@ pub const BOT_ERR_COUNT_WARNING:        usize = 10;
 pub const STACK_SIZE:                   usize = 2 * 1024 * 1024;
 
 // Shutdown.
-// Wait for all bots to idle after shutting off server.
+// How long a close waits for the bots to finish in order before the supervisor answers it; any
+// still running are finished afterwards, in the same order (`Supervisor::shutdown`).
 pub const SHUTDOWN_MAX_WAIT:            Duration = Duration::from_secs(3);
 
 // Intervals.

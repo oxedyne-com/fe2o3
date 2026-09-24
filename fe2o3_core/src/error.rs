@@ -168,6 +168,7 @@ pub enum ErrTag {
     Wire,
     Write,
     Unauthorised,
+    Unconfirmed, // An effect that may well have happened, whose confirmation did not come: not a failure.
     Underflow,
     Unexpected,
     Unimplemented,

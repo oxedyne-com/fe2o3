@@ -15,6 +15,9 @@ use std::{
 static BARRIER_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each barrier
 static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels are handed over
 static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each garbage collection
+static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
+static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
+static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
 static SYNCER_STOPS:     AtomicBool = AtomicBool::new(false); // syncers stop after their next batch
@@ -37,6 +40,25 @@ pub fn set_publish_delay(d: Duration) {
 /// disk would take, so that writes can be made to land while a file is being collected.
 pub fn set_collect_delay(d: Duration) {
     COLLECT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a file bot this long before it forwards a supersession to the file bot of the superseded
+/// record's file, as a file bot behind a long queue would, so that the supersession can reach a
+/// file after a collection of it has finished.
+pub fn set_forward_delay(d: Duration) {
+    FORWARD_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds every cache bot insert this long, as a cache bot behind a long queue would, so that a
+/// shutdown's time can run out with written records still queued at it.
+pub fn set_insert_delay(d: Duration) {
+    INSERT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Makes the supervisor panic once it has brought the bots up, before the database is ready, as a
+/// fault in its start-up would.
+pub fn set_supervisor_panic(on: bool) {
+    SUP_PANICS.store(on, Ordering::Relaxed);
 }
 
 /// Makes every durability barrier fail without syncing, as a disk that has started returning
@@ -77,6 +99,20 @@ pub(crate) fn publish_delay() {
 
 pub(crate) fn collect_delay() {
     pause(&COLLECT_DELAY_MS);
+}
+
+pub(crate) fn forward_delay() {
+    pause(&FORWARD_DELAY_MS);
+}
+
+pub(crate) fn insert_delay() {
+    pause(&INSERT_DELAY_MS);
+}
+
+pub(crate) fn supervisor_panic() {
+    if SUP_PANICS.load(Ordering::Relaxed) {
+        panic!("The supervisor panicked starting up (test::hooks::set_supervisor_panic).");
+    }
 }
 
 /// Is this syncer to stop now?  Counted when it is.
