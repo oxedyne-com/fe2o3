@@ -84,7 +84,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("data"),
             help:   Some(fmt!("Data retrieved from database.")),
-            vals:   vec![(Kind::Unknown, fmt!("Retrieved data"))],
+            vals:   vec![(Kind::Unknown, fmt!("Retrieved data")).into()],
             cat:    fmt!("Database IO"),
             ..Default::default()
         });
@@ -95,7 +95,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("info"),
             help:   Some(fmt!("For your information.")),
-            vals:   vec![(Kind::Str, fmt!("Information message"))],
+            vals:   vec![(Kind::Str, fmt!("Information message")).into()],
             cat:    fmt!("General IO"),
             ..Default::default()
         });
@@ -106,7 +106,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("error"),
             help:   Some(fmt!("Error.")),
-            vals:   vec![(Kind::Str, fmt!("Error message"))],
+            vals:   vec![(Kind::Str, fmt!("Error message")).into()],
             cat:    fmt!("General IO"),
             ..Default::default()
         });
@@ -117,7 +117,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("echo"),
             help:   Some(fmt!("Echo the incoming message.")),
-            vals:   vec![(Kind::Str, fmt!("Text to echo"))],
+            vals:   vec![(Kind::Str, fmt!("Text to echo")).into()],
             cat:    fmt!("General IO"),
             ..Default::default()
         });
@@ -135,8 +135,8 @@ impl WebSocketSyntax {
             name:   fmt!("insert"),
             help:   Some(fmt!("Insert a key-value pair into the database.")),
             vals:   vec![
-                (Kind::Unknown, fmt!("Key")),
-                (Kind::Unknown, fmt!("Value")),
+                (Kind::Unknown, fmt!("Key")).into(),
+                (Kind::Unknown, fmt!("Value")).into(),
             ],
             cat:    fmt!("Database IO"),
             ..Default::default()
@@ -150,7 +150,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("get_data"),
             help:   Some(fmt!("Get database value for given key daticle.")),
-            vals:   vec![(Kind::Unknown, fmt!("Key"))],
+            vals:   vec![(Kind::Unknown, fmt!("Key")).into()],
             cat:    fmt!("Database IO"),
             ..Default::default()
         });
@@ -171,7 +171,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("sess_get"),
             help:   Some(fmt!("Read a value from the caller's session-scoped storage.")),
-            vals:   vec![(Kind::Str, fmt!("Key (string)"))],
+            vals:   vec![(Kind::Str, fmt!("Key (string)")).into()],
             cat:    fmt!("Session IO"),
             ..Default::default()
         });
@@ -186,8 +186,8 @@ impl WebSocketSyntax {
             name:   fmt!("sess_put"),
             help:   Some(fmt!("Write a (key, value) pair into session-scoped storage.")),
             vals:   vec![
-                (Kind::Str, fmt!("Key")),
-                (Kind::Unknown, fmt!("Value")),
+                (Kind::Str, fmt!("Key")).into(),
+                (Kind::Unknown, fmt!("Value")).into(),
             ],
             cat:    fmt!("Session IO"),
             ..Default::default()
@@ -209,7 +209,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("user_get"),
             help:   Some(fmt!("Read a value from the authenticated user's storage.")),
-            vals:   vec![(Kind::Str, fmt!("Key (string)"))],
+            vals:   vec![(Kind::Str, fmt!("Key (string)")).into()],
             cat:    fmt!("User IO"),
             ..Default::default()
         });
@@ -225,8 +225,8 @@ impl WebSocketSyntax {
             name:   fmt!("user_put"),
             help:   Some(fmt!("Write a (key, value) pair into user-scoped storage.")),
             vals:   vec![
-                (Kind::Str, fmt!("Key")),
-                (Kind::Unknown, fmt!("Value")),
+                (Kind::Str, fmt!("Key")).into(),
+                (Kind::Unknown, fmt!("Value")).into(),
             ],
             cat:    fmt!("User IO"),
             ..Default::default()
@@ -247,8 +247,8 @@ impl WebSocketSyntax {
             name:   fmt!("register"),
             help:   Some(fmt!("Create a new user record keyed by username.")),
             vals:   vec![
-                (Kind::Str, fmt!("Username")),
-                (Kind::Str, fmt!("Passphrase")),
+                (Kind::Str, fmt!("Username")).into(),
+                (Kind::Str, fmt!("Passphrase")).into(),
             ],
             cat:    fmt!("Auth"),
             ..Default::default()
@@ -265,8 +265,8 @@ impl WebSocketSyntax {
             name:   fmt!("login"),
             help:   Some(fmt!("Verify credentials and bind the current session to the user.")),
             vals:   vec![
-                (Kind::Str, fmt!("Username")),
-                (Kind::Str, fmt!("Passphrase")),
+                (Kind::Str, fmt!("Username")).into(),
+                (Kind::Str, fmt!("Passphrase")).into(),
             ],
             cat:    fmt!("Auth"),
             ..Default::default()
@@ -340,7 +340,7 @@ impl WebSocketSyntax {
         let cmd = Cmd::from(CmdConfig {
             name:   fmt!("term_close"),
             help:   Some(fmt!("Kill a terminal session by name.")),
-            vals:   vec![(Kind::Str, fmt!("Session name"))],
+            vals:   vec![(Kind::Str, fmt!("Session name")).into()],
             cat:    fmt!("Terminal"),
             ..Default::default()
         });
@@ -355,8 +355,8 @@ impl WebSocketSyntax {
             name:   fmt!("term_set_name"),
             help:   Some(fmt!("Rename a terminal session.")),
             vals:   vec![
-                (Kind::Str, fmt!("Old session name")),
-                (Kind::Str, fmt!("New session name")),
+                (Kind::Str, fmt!("Old session name")).into(),
+                (Kind::Str, fmt!("New session name")).into(),
             ],
             cat:    fmt!("Terminal"),
             ..Default::default()
@@ -374,8 +374,8 @@ impl WebSocketSyntax {
             name:   fmt!("change_pass"),
             help:   Some(fmt!("Change the authenticated user's passphrase.")),
             vals:   vec![
-                (Kind::Str, fmt!("Old passphrase")),
-                (Kind::Str, fmt!("New passphrase")),
+                (Kind::Str, fmt!("Old passphrase")).into(),
+                (Kind::Str, fmt!("New passphrase")).into(),
             ],
             cat:    fmt!("Auth"),
             ..Default::default()
