@@ -462,6 +462,42 @@ fn a_rest_and_repeated_values_cross_the_wire() -> Outcome<()> {
     Ok(())
 }
 
+/// A chat protocol shaped like Daimond's: commands of fixed values, several to a message.
+fn chat_syntax() -> Outcome<SyntaxRef> {
+    let mut s = res!(Syntax::new("chat").with_default_help_cmd());
+    for (name, n) in [("chat", 1), ("session_switch", 1), ("session_list", 0), ("fs_write", 2)] {
+        s = res!(s.add_cmd(Cmd::from(CmdConfig {
+            name:   fmt!("{}", name),
+            vals:   (0..n).map(|_| (Kind::Str, fmt!("text")).into()).collect(),
+            ..Default::default()
+        })));
+    }
+    Ok(SyntaxRef::new(s))
+}
+
+#[test]
+fn a_command_name_on_the_wire_fills_a_value_still_owed() -> Outcome<()> {
+    let syntax = res!(chat_syntax());
+    // Owed a value, a command's name is that value, quoted or not, as before fe2o3 11cc494.
+    for (line, name, vals) in [
+        ("chat help",               "chat",     vec![dat!("help")]),
+        ("chat \"help\"",           "chat",     vec![dat!("help")]),
+        ("chat chat",               "chat",     vec![dat!("chat")]),
+        ("fs_write a.txt help",     "fs_write", vec![dat!("a.txt"), dat!("help")]),
+        ("fs_write session_list x", "fs_write", vec![dat!("session_list"), dat!("x")]),
+    ] {
+        let m = res!(Msg::new(syntax.clone()).from_str(line, None));
+        req!(m.cmds.len(), 1, "{}", line);
+        req!(res!(cmd(&m, name)).vals.clone(), vals, "{}", line);
+    }
+    // Once the values are given, a command's name still starts the next command.
+    let m = res!(Msg::new(syntax.clone()).from_str("session_switch abc session_list", None));
+    req!(m.cmds.len(), 2);
+    req!(res!(cmd(&m, "session_switch")).vals.clone(), vec![dat!("abc")]);
+    req!(res!(cmd(&m, "session_list")).vals.is_empty(), true);
+    Ok(())
+}
+
 /// A command shaped like `ore mark`: a name and a message, both verbatim, and one option.
 fn say() -> Outcome<SyntaxRef> {
     let mut s = Syntax::from(SyntaxConfig {

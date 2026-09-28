@@ -1094,8 +1094,11 @@ impl Msg {
                         // An option's value that is still owed takes a word that merely looks
                         // like an option, such as '--reason -x', and "--" and a help flag too.
                         let owed = for_arg && !slots.satisfied();
+                        // On the wire or at a prompt a command's name fills a value still
+                        // owed, as `chat help` always has; it starts the next command only
+                        // once the values are given.
                         let marker = found_arg.is_some()
-                            || is_cmd_word
+                            || (is_cmd_word && (argv || slots.satisfied()))
                             || is_rest_mark
                             || ((dashy || dash_dash) && !owed);
                         if !marker {
