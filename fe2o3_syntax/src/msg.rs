@@ -63,6 +63,7 @@ pub struct MsgEndState {
     pub vals:   Vec<Kind>,
     pub arg:    Option<String>,
     pub cmd:    Option<String>,
+    pub help:   bool,           // a command line stopped at -h or --help
 }
 
 /// A `Syntax` specifies message structure for validation, while `Msg` is used for transmission
@@ -721,13 +722,40 @@ impl Msg {
         self.rx_words(seq, similarity_threshold, Source::Argv)
     }
 
-    /// Does the word look like an option rather than a value?  A negative number does not.
-    fn looks_like_option(word: &str) -> bool {
-        let mut chars = word.chars();
-        match (chars.next(), chars.next()) {
-            (Some('-'), Some(c)) => !(c.is_ascii_digit() || c == '.'),
-            _ => false,
+    /// Does the word have the shape of an option?  A dash and a letter, as in `-v` or `-abc`, or
+    /// two dashes and a name, as in `--dry-run` or `--dry-run=x`.  A negative number does not, nor
+    /// `-`, `--`, or a word holding a space or a stop, such as `- fix typo` or `-x.txt`: a word
+    /// that could only be a value is read as one.
+    pub fn looks_like_option(word: &str) -> bool {
+        let name = |s: &str| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => chars.all(|c| c.is_ascii_alphanumeric()
+                    || c == '-' || c == '_'),
+                _ => false,
+            }
+        };
+        if let Some(long) = word.strip_prefix("--") {
+            return match long.split_once('=') {
+                Some((head, _)) => name(head),
+                None            => name(long),
+            };
         }
+        match word.strip_prefix('-') {
+            Some(short) => {
+                let mut chars = short.chars();
+                match chars.next() {
+                    Some(c) if c.is_ascii_alphabetic() => chars.all(|c| c.is_ascii_alphanumeric()),
+                    _ => false,
+                }
+            },
+            None => false,
+        }
+    }
+
+    /// Is the word one of the two that ask for help?
+    pub fn is_help_flag(word: &str) -> bool {
+        word == "-h" || word == "--help"
     }
 
     /// The argument a word names, and whether it is a message argument rather than one of the
@@ -776,6 +804,19 @@ impl Msg {
                 None => fmt!("a command"),
             },
             _ => fmt!("the message"),
+        }
+    }
+
+    /// The refusal of a word a command has no value left for.
+    fn excess(cmd: &Cmd, word: &str, pos: usize) -> Error<ErrTag> {
+        match &cmd.config().excess {
+            Some(sentence) => err!(
+                "{} (found '{}' at position {}).", sentence, word, pos;
+            Input, Excessive),
+            None => err!(
+                "The word '{}' at position {} is more than the command '{}' takes.",
+                word, pos, cmd.config().name;
+            Input, Excessive),
         }
     }
 
@@ -961,6 +1002,7 @@ impl Msg {
         };
         let mut rargs: Vec<&str> = syntax.config().rargs.iter().map(|s| s.as_str()).collect();
         let mut in_rest = false;
+        let mut opts_done = false; // past a "--" that ends the options
 
         for (i, word) in seq.into_iter().enumerate() {
             let pos = i + 1;
@@ -979,6 +1021,32 @@ impl Msg {
                 continue;
             }
 
+            // An option still taking values, whose next word the VAL block decides.
+            let opt_open = matches!(collecting, Collecting::MessageArg | Collecting::CommandArg)
+                && arg_slots.current().is_some();
+
+            if argv && !opt_open {
+                if let Some(cmd) = active_cmd {
+                    let owner = fmt!("the command '{}'", cmd.config().name);
+                    match cmd_slots.current() {
+                        // After a "--" that ends the options, and once a repeating verbatim
+                        // value is being filled, every word is a value as it stands.
+                        Some(val) if opts_done
+                            || (val.verbatim && val.arity.repeats() && cmd_slots.begun()) =>
+                        {
+                            let d = res!(Self::decode_word(&word, val, src, pos, &owner));
+                            collecting = Collecting::Command;
+                            active_arg = None;
+                            res!(Self::push_val(&mut msgrx, &collecting, active_cmd, None, d));
+                            cmd_slots.accept();
+                            continue;
+                        },
+                        None if opts_done => return Err(Self::excess(cmd, &word, pos)),
+                        _ => (),
+                    }
+                }
+            }
+
             let word_key = Key::Str(word.clone());
             let is_rest_mark = word == "--"
                 && active_cmd.map_or(false, |c| c.config().rest.is_some());
@@ -986,7 +1054,13 @@ impl Msg {
             // With one command per message, a command's name after the command is a value.
             let is_cmd_word = syntax.cmds.contains_key(&word_key)
                 && !(one_cmd && active_cmd.is_some());
-            let dashy = argv && found_arg.is_none() && Self::looks_like_option(&word);
+            let is_help = argv && found_arg.is_none() && Self::is_help_flag(&word);
+            let dash_dash = argv && word == "--";
+            // A verbatim value takes a word shaped like an option that is not one of the
+            // command's own, a help flag or a "--".
+            let as_typed = argv && active_cmd.is_some() && !opt_open && !is_help && !dash_dash
+                && cmd_slots.current().map_or(false, |v| v.verbatim);
+            let dashy = argv && found_arg.is_none() && Self::looks_like_option(&word) && !as_typed;
 
             // VAL block
             if collecting != Collecting::None {
@@ -999,11 +1073,12 @@ impl Msg {
                 match slots.current() {
                     Some(val) => {
                         // An option's value that is still owed takes a word that merely looks
-                        // like an option, such as '--reason -x'.
+                        // like an option, such as '--reason -x', and "--" and a help flag too.
+                        let owed = for_arg && !slots.satisfied();
                         let marker = found_arg.is_some()
                             || is_cmd_word
                             || is_rest_mark
-                            || (dashy && !(for_arg && !slots.satisfied()));
+                            || ((dashy || dash_dash) && !owed);
                         if !marker {
                             let owner = Self::owner_desc(&collecting, active_cmd, active_arg);
                             let d = res!(Self::decode_word(&word, val, src, pos, &owner));
@@ -1011,7 +1086,9 @@ impl Msg {
                             slots.accept();
                             continue;
                         }
-                        if slots.satisfied() || (one_cmd && collecting == Collecting::Command) {
+                        if slots.satisfied() || (one_cmd && collecting == Collecting::Command)
+                            || is_help || dash_dash
+                        {
                             // The values may stop here, or, with one command per message, be
                             // given after the options. The word is read below.
                             if for_arg {
@@ -1039,6 +1116,17 @@ impl Msg {
                         active_arg = None;
                     },
                 }
+            }
+
+            if is_help {
+                // Asked where an option could stand, so the page is the answer, whatever the
+                // rest of the line holds.
+                msgrx.end = MsgEndState {
+                    cmd:    active_cmd.map(|c| c.config().name.clone()),
+                    help:   true,
+                    ..Default::default()
+                };
+                return Ok(msgrx);
             }
 
             if is_rest_mark {
@@ -1083,18 +1171,18 @@ impl Msg {
                 continue;
             }
 
-            if argv && word == "--" {
-                return Err(match active_cmd {
-                    Some(cmd) => err!(
-                        "The '--' at position {} ends the options, but the command '{}' \
-                        takes nothing after it.",
-                        pos, cmd.config().name;
-                    Input, Invalid),
-                    None => err!(
+            if dash_dash {
+                // The end of the options: every word after it is one of the command's values.
+                if active_cmd.is_none() {
+                    return Err(err!(
                         "The '--' at position {} ends the options, but no command has been \
                         named.", pos;
-                    Input, Invalid),
-                });
+                    Input, Invalid));
+                }
+                opts_done = true;
+                collecting = Collecting::Command;
+                active_arg = None;
+                continue;
             }
 
             if dashy {
@@ -1137,16 +1225,7 @@ impl Msg {
                         cmd_slots.accept();
                         continue;
                     }
-                    return Err(match &cmd.config().excess {
-                        Some(sentence) => err!(
-                            "{} (found '{}' at position {}).", sentence, word, pos;
-                        Input, Excessive),
-                        None => err!(
-                            "The word '{}' at position {} is more than the command '{}' \
-                            takes.",
-                            word, pos, cmd.config().name;
-                        Input, Excessive),
-                    });
+                    return Err(Self::excess(cmd, &word, pos));
                 }
             }
 
@@ -1211,6 +1290,7 @@ impl Msg {
             },
             arg:    active_arg.map(|a| a.canonical_name()),
             cmd:    active_cmd.map(|c| c.config().name.clone()),
+            help:   false,
         };
         msgrx.enc = Encoding::UTF8;
 

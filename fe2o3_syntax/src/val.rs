@@ -47,6 +47,7 @@ pub struct Val {
     pub help:       String,
     pub arity:      Arity,
     pub missing:    Option<String>, // the caller's own sentence when it is absent
+    pub verbatim:   bool,           // a command line word is taken as typed
 }
 
 impl From<(Kind, String)> for Val {
@@ -96,6 +97,17 @@ impl Val {
 
     pub fn missing<S: Into<String>>(mut self, s: S) -> Self {
         self.missing = Some(s.into());
+        self
+    }
+
+    /// Takes command line words as they were typed, for a value such as a message or a name
+    /// that may say anything.  A word shaped like an option that is not one of the command's own
+    /// is this value's rather than refused, though `-h`, `--help` and `--` keep their meaning.
+    /// A repeating value goes further: once the command's values have begun and it is the one
+    /// being filled, every word left on the line is its, those three included, so options must
+    /// come before it.
+    pub fn verbatim(mut self) -> Self {
+        self.verbatim = true;
         self
     }
 
@@ -184,6 +196,9 @@ impl<'a> Slots<'a> {
     }
 
     pub fn current(&self) -> Option<&'a Val> { self.vals.get(self.idx) }
+
+    /// Has any value taken a word yet?
+    pub fn begun(&self) -> bool { self.idx > 0 || self.count > 0 }
 
     /// Records that the current value took a word.
     pub fn accept(&mut self) {

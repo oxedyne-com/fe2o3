@@ -141,6 +141,14 @@ impl Syntax {
         res!(Val::check_shape(&c.config().vals, &owner));
         if let Some(rest) = &c.config().rest {
             res!(Val::check_shape(std::slice::from_ref(rest), &owner));
+            if let Some(last) = c.config().vals.last() {
+                if last.verbatim && last.arity.repeats() {
+                    return Err(err!(
+                        "The {} ends on the verbatim value '{}', which takes every word \
+                        left, so no word could reach its '--' rest.", owner, last.label();
+                    Input, Invalid));
+                }
+            }
         }
         c.id = self.next_cmd_id;
         self.next_cmd_id = res!(Syntax::inc_counter(

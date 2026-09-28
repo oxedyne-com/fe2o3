@@ -26,9 +26,11 @@ pub const SIMILARITY_THRESHOLD: f64 = 0.4;
 /// Reads a process's arguments, `std::env::args_os()` or the like, program name first.
 ///
 /// With no words, or `help`, `-h` or `--help` first, the answer is the command table.
-/// `help <command>` or `help <topic>` is that page, `help --all` is everything, and a
-/// command followed anywhere before `--` by `-h` or `--help` is the command's page.
-/// `--version` or `-V` alone is the version.  Otherwise the words are a message.
+/// `help <command>` or `help <topic>` is that page, and `help --all` is everything.  A
+/// command followed by `-h` or `--help` where an option could stand is the command's page;
+/// as an option's value, after a `--`, or among the words of a verbatim value, either is a
+/// word like any other.  `--version` or `-V` alone is the version.  Otherwise the words are a
+/// message.
 pub fn parse<I, S>(syntax: &SyntaxRef, args: I) -> Outcome<Parsed>
     where
         I: IntoIterator<Item=S>,
@@ -60,7 +62,6 @@ pub fn words<I, S>(args: I) -> Outcome<Vec<String>>
 
 /// As `parse`, for words already taken from the command line.
 pub fn read(syntax: &SyntaxRef, words: Vec<String>) -> Outcome<Parsed> {
-    let is_help_flag = |w: &str| w == "--help" || w == "-h";
     let first = match words.first() {
         Some(w) => w.as_str(),
         None => return Ok(Parsed::Help(Page::Summary)),
@@ -68,7 +69,7 @@ pub fn read(syntax: &SyntaxRef, words: Vec<String>) -> Outcome<Parsed> {
     if words.len() == 1 && (first == "--version" || first == "-V") {
         return Ok(Parsed::Version);
     }
-    if is_help_flag(first) && words.len() == 1 {
+    if Msg::is_help_flag(first) && words.len() == 1 {
         return Ok(Parsed::Help(Page::Summary));
     }
     if first == "help" && syntax.get_cmd("help").is_none() {
@@ -86,30 +87,15 @@ pub fn read(syntax: &SyntaxRef, words: Vec<String>) -> Outcome<Parsed> {
             },
         };
     }
-    // A command's page, when the help flag comes before any "--".
-    let before_rest = words.iter().take_while(|w| w.as_str() != "--");
-    let mut asked = false;
-    for w in before_rest {
-        if is_help_flag(w) {
-            asked = true;
-            break;
-        }
-    }
-    if asked {
-        return match syntax.get_cmd(first) {
-            Some(_) => Ok(Parsed::Help(Page::Command(first.to_string()))),
-            None => if is_help_flag(first) {
-                Ok(Parsed::Help(Page::Summary))
-            } else {
-                // Named wrongly, so the parser's refusal, with its suggestion, is the answer.
-                let msg = Msg::new(syntax.clone());
-                let _ = res!(msg.rx_argv(vec![first.to_string()], Some(SIMILARITY_THRESHOLD)));
-                Ok(Parsed::Help(Page::Summary))
-            },
-        };
-    }
+    // The parser says where a help flag stands, since only it knows whether the word is a value.
     let msg = Msg::new(syntax.clone());
     let msg = res!(msg.rx_argv(words, Some(SIMILARITY_THRESHOLD)));
+    if msg.end.help {
+        return Ok(Parsed::Help(match &msg.end.cmd {
+            Some(name)  => Page::Command(name.clone()),
+            None        => Page::Summary,
+        }));
+    }
     Ok(Parsed::Run(msg))
 }
 

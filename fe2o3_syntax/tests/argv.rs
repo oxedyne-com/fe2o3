@@ -229,8 +229,12 @@ fn unknown_options_and_commands_are_refused_with_a_suggestion() -> Outcome<()> {
     let e = res!(refusal("mark n --force"));
     let ok = e.contains("'--force'") && e.contains("'mark'");
     req!(ok, true, "{}", e);
-    let e = res!(refusal("sync x --"));
-    req!(e.contains("'--' at position 3"), true, "{}", e);
+    // After a '--' that ends the options there is still only one repository to name.
+    let e = res!(refusal("sync x -- y"));
+    let ok = e.contains("'y' at position 4") && e.contains("more than the command 'sync'");
+    req!(ok, true, "{}", e);
+    let e = res!(refusal("-- sync"));
+    req!(e.contains("no command has been named"), true, "{}", e);
     // G11: the suggestion is a question, not a question with a full stop after it.
     let e = res!(refusal("mrak n"));
     req!(e.contains("Did you mean 'mark'? The word 'mrak' at position 1"), true, "{}", e);
@@ -350,6 +354,15 @@ fn syntax_shapes_a_parser_cannot_read_are_refused() -> Outcome<()> {
     });
     let refused = s.clone().add_cmd(c).is_err();
     req!(refused, true);
+    // A verbatim value that repeats takes every word left, so a rest after it is unreachable.
+    let c = Cmd::from(CmdConfig {
+        name:   fmt!("c"),
+        vals:   vec![Val::text("a").many().verbatim()],
+        rest:   Some(Val::text("b").many()),
+        ..Default::default()
+    });
+    let refused = s.clone().add_cmd(c).is_err();
+    req!(refused, true);
     // Two options answering to one name used to shadow each other silently.
     let c = Cmd::from(CmdConfig { name: fmt!("c"), ..Default::default() });
     let c = res!(c.add_arg(Arg::from(ArgConfig {
@@ -433,5 +446,151 @@ fn a_rest_and_repeated_values_cross_the_wire() -> Outcome<()> {
             req!(got.args.clone(), sent.args.clone(), "{}", line);
         }
     }
+    Ok(())
+}
+
+/// A command shaped like `ore mark`: a name and a message, both verbatim, and one option.
+fn say() -> Outcome<SyntaxRef> {
+    let mut s = Syntax::from(SyntaxConfig {
+        name:       fmt!("tool"),
+        one_cmd:    true,
+        ..Default::default()
+    });
+    let mut c = Cmd::from(CmdConfig {
+        name:   fmt!("say"),
+        vals:   vec![
+            Val::text("name").missing("say needs a name.").verbatim(),
+            Val::text("words").many().verbatim(),
+        ],
+        ..Default::default()
+    });
+    c = res!(c.add_arg(Arg::from(ArgConfig {
+        name: fmt!("loud"), hyph2: Some(fmt!("loud")), ..Default::default() })));
+    s = res!(s.add_cmd(c));
+    let mut c = Cmd::from(CmdConfig {
+        name:   fmt!("get"),
+        vals:   vec![Val::text("what")],
+        ..Default::default()
+    });
+    c = res!(c.add_arg(Arg::from(ArgConfig {
+        name: fmt!("why"), hyph2: Some(fmt!("why")), vals: vec![Val::text("text")],
+        ..Default::default() })));
+    s = res!(s.add_cmd(c));
+    Ok(SyntaxRef::new(s))
+}
+
+fn parse_say(v: &[&str]) -> Outcome<Parsed> {
+    let syntax = res!(say());
+    argv::read(&syntax, strs(v))
+}
+
+fn said(v: &[&str]) -> Outcome<(Vec<String>, bool)> {
+    match res!(parse_say(v)) {
+        Parsed::Run(msg) => {
+            let c = res!(msg.cmds.values().next().ok_or_else(|| err!("no command"; Missing)));
+            let vals = res!(c.str_vals()).iter().map(|v| fmt!("{}", v)).collect();
+            Ok((vals, c.has_arg("--loud")))
+        },
+        other => Err(err!("{:?} gave {:?}, not a message.", v, other; Unexpected)),
+    }
+}
+
+fn is_page(v: &[&str], name: &str) -> Outcome<()> {
+    match res!(parse_say(v)) {
+        Parsed::Help(page) => { req!(page, Page::Command(fmt!("{}", name)), "{:?}", v); Ok(()) },
+        other => Err(err!("{:?} gave {:?}, not the page of '{}'.", v, other, name; Unexpected)),
+    }
+}
+
+// A message is what was typed, so a word of it is never read as an option or as help.
+#[test]
+fn a_verbatim_value_takes_words_as_they_were_typed() -> Outcome<()> {
+    // Once the words have begun, every word is one of them.
+    req!(res!(said(&["say", "n", "-h", "--loud", "--", "--help", "x"])),
+        (strs(&["n", "-h", "--loud", "--", "--help", "x"]), false));
+    // Options come first.
+    req!(res!(said(&["say", "--loud", "n", "w"])), (strs(&["n", "w"]), true));
+    // A name may begin with a dash, as a commit's subject can.
+    req!(res!(said(&["say", "-WIP", "w"])), (strs(&["-WIP", "w"]), false));
+    req!(res!(said(&["say", "- fix typo", "w"])), (strs(&["- fix typo", "w"]), false));
+    // Which is the price: a misspelt option there is a name, since nothing can tell them apart.
+    req!(res!(said(&["say", "--lod", "w"])), (strs(&["--lod", "w"]), false));
+    // Before the values begin, a help flag still asks for the page, and '--' still ends the
+    // options, after which even a help flag is a name.
+    res!(is_page(&["say", "-h"], "say"));
+    res!(is_page(&["say", "--help", "w"], "say"));
+    res!(is_page(&["say", "--loud", "-h"], "say"));
+    req!(res!(said(&["say", "--", "-h", "w"])), (strs(&["-h", "w"]), false));
+    req!(res!(said(&["say", "--", "--loud"])), (strs(&["--loud"]), false));
+    match parse_say(&["say", "--"]) {
+        Ok(p) => return Err(err!("'say --' gave {:?}.", p; Unexpected)),
+        Err(e) => req!(e.plain().contains("say needs a name."), true, "{}", e.plain()),
+    }
+    // A command's own option is never a name.
+    match parse_say(&["say", "--loud"]) {
+        Ok(p) => return Err(err!("'say --loud' gave {:?}.", p; Unexpected)),
+        Err(e) => req!(e.plain().contains("say needs a name."), true, "{}", e.plain()),
+    }
+    Ok(())
+}
+
+// A help flag is help only where an option could stand.
+#[test]
+fn a_help_flag_is_help_only_where_an_option_could_stand() -> Outcome<()> {
+    res!(is_page(&["get", "--help"], "get"));
+    res!(is_page(&["get", "x", "-h"], "get"));
+    res!(is_page(&["get", "--why", "w", "--help"], "get"));
+    // An option owed a value takes it.
+    match res!(parse_say(&["get", "x", "--why", "-h"])) {
+        Parsed::Run(msg) => req!(res!(res!(cmd(&msg, "get")).str_arg_vals("--why")), vec!["-h"]),
+        other => return Err(err!("'get x --why -h' gave {:?}.", other; Unexpected)),
+    }
+    // After '--' it is a value.
+    match res!(parse_say(&["get", "--", "--help"])) {
+        Parsed::Run(msg) => req!(res!(res!(cmd(&msg, "get")).str_vals()), vec!["--help"]),
+        other => return Err(err!("'get -- --help' gave {:?}.", other; Unexpected)),
+    }
+    // Words before it are still read, and a refusal among them is the answer.
+    match parse_say(&["get", "--bogus", "-h"]) {
+        Ok(p) => return Err(err!("'get --bogus -h' gave {:?}.", p; Unexpected)),
+        Err(e) => req!(e.plain().contains("'--bogus'"), true, "{}", e.plain()),
+    }
+    Ok(())
+}
+
+// Only a word with the shape of an option is read as one; any other word is a value.
+#[test]
+fn only_option_shaped_words_are_options() -> Outcome<()> {
+    for w in ["-v", "-abc", "-h", "--dry-run", "--x_y", "--dry-run=1", "--oresyn-max=x y"] {
+        req!(Msg::looks_like_option(w), true, "{}", w);
+    }
+    for w in ["-", "--", "---", "-5", "-.5", "- fix typo", "-x.txt", "--no verify", "--=x", "-é"] {
+        req!(Msg::looks_like_option(w), false, "{}", w);
+    }
+    let msg = res!(run("forget -x.txt"));
+    req!(res!(res!(cmd(&msg, "forget")).str_vals()), vec!["-x.txt"]);
+    let syntax = res!(ore());
+    let msg = res!(Msg::new(syntax).rx_argv(strs(&["sync", "- a"]), None));
+    req!(res!(res!(cmd(&msg, "sync")).str_vals()), vec!["- a"]);
+    Ok(())
+}
+
+// '--' ends the options: every word after it is one of the command's values, until a
+// command with a rest of its own gives the words after it to that instead.
+#[test]
+fn a_double_dash_ends_the_options() -> Outcome<()> {
+    let msg = res!(run("forget --dry-run -- --reason b"));
+    let forget = res!(cmd(&msg, "forget"));
+    req!(res!(forget.str_vals()), vec!["--reason", "b"]);
+    req!(forget.has_arg("--dry-run"), true);
+    req!(forget.has_arg("--reason"), false);
+    let msg = res!(run("sync -- --pull-only"));
+    let sync = res!(cmd(&msg, "sync"));
+    req!(res!(sync.str_vals()), vec!["--pull-only"]);
+    req!(sync.has_arg("--pull-only"), false);
+    let msg = res!(run("back m -- --dry-run"));
+    let back = res!(cmd(&msg, "back"));
+    req!(res!(back.str_vals()), vec!["m"]);
+    req!(back.get_rest().cloned(), Some(vec![dat!("--dry-run")]));
     Ok(())
 }
