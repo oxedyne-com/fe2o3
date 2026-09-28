@@ -237,8 +237,21 @@ fn unknown_options_and_commands_are_refused_with_a_suggestion() -> Outcome<()> {
     req!(e.contains("no command has been named"), true, "{}", e);
     // G11: the suggestion is a question, not a question with a full stop after it.
     let e = res!(refusal("mrak n"));
-    req!(e.contains("Did you mean 'mark'? The word 'mrak' at position 1"), true, "{}", e);
+    req!(e.contains("Did you mean 'mark'? 'mrak' at position 1 is not a command."), true, "{}", e);
     req!(e.contains("?."), false, "{}", e);
+    Ok(())
+}
+
+// An unknown verb points at help, generically, not with the old "is not an argument,
+// and neither is it a command of" jargon.
+#[test]
+fn unknown_verb_names_the_help_command() -> Outcome<()> {
+    let e = res!(refusal("frobnicate"));
+    req!(e.contains("'frobnicate' at position 1 is not a command."), true, "{}", e);
+    req!(e.contains("Type 'ore help' for the list."), true, "{}", e);
+    // The suggestion form points at help too.
+    let e = res!(refusal("mrak n"));
+    req!(e.contains("Type 'ore help' for the list."), true, "{}", e);
     Ok(())
 }
 

@@ -619,6 +619,7 @@ impl Msg {
         word:                   &Key,
         pos:                    usize,
         similarity_threshold:   Option<f64>,
+        argv:                   bool,
     )
         -> Outcome<&Cmd>
     {
@@ -626,22 +627,40 @@ impl Msg {
             // We found it in the syntax, it's a command.
             return Ok(&cmd);
         }
+        let sname = &self.syntax().config().name;
         if let (Some(threshold), Key::Str(word)) = (similarity_threshold, word) {
             let names = self.syntax().cmds_in_order().into_iter()
                 .map(|c| c.config().name.clone()).collect::<Vec<_>>();
             if let Some(suggestion) = Self::closest(word, &names, threshold) {
-                return Err(err!(
-                    "Did you mean '{}'? The word '{}' at position {} is not an argument, \
-                    and neither is it a command of '{}'.",
-                    suggestion, word, pos, self.syntax().config().name;
-                Input, Invalid, Suggestion));
+                return Err(if argv {
+                    // Argv is a person at a prompt, not a message parser; point them at
+                    // help rather than reciting what a word is not.
+                    err!(
+                        "Did you mean '{}'? '{}' at position {} is not a command. Type \
+                        '{} help' for the list.",
+                        suggestion, word, pos, sname;
+                    Input, Invalid, Suggestion)
+                } else {
+                    err!(
+                        "Did you mean '{}'? The word '{}' at position {} is not an \
+                        argument, and neither is it a command of '{}'.",
+                        suggestion, word, pos, sname;
+                    Input, Invalid, Suggestion)
+                });
             }
         }
-        Err(err!(
-            "The word '{}' at position {} is not an argument, and neither is it a \
-            command of '{}'.",
-            word, pos, self.syntax().config().name;
-        Input, Invalid))
+        Err(if argv {
+            err!(
+                "'{}' at position {} is not a command. Type '{} help' for the list.",
+                word, pos, sname;
+            Input, Invalid)
+        } else {
+            err!(
+                "The word '{}' at position {} is not an argument, and neither is it a \
+                command of '{}'.",
+                word, pos, sname;
+            Input, Invalid)
+        })
     }
 
     /// The candidate nearest to the word by edit distance, if it is similar enough.
@@ -1230,7 +1249,7 @@ impl Msg {
             }
 
             // CMD block
-            let cmd = res!(self.is_word_a_cmd(&word_key, pos, similarity_threshold));
+            let cmd = res!(self.is_word_a_cmd(&word_key, pos, similarity_threshold, argv));
             msgrx.cmds.insert(
                 cmd.config().name.clone(),
                 res!(MsgCmd::new(self.syntaxref(), cmd.config().name.clone())),
