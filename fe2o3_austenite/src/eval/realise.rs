@@ -399,7 +399,9 @@ impl State<'_> {
 					return Ok(true);
 				}
 			}
-			if kind == ElemKind::Text {
+			// A maths character is a symbol and a number is text; rules run on each element alone here,
+			// not over a textual run.
+			if kind == ElemKind::Text || kind == ElemKind::Symbol {
 				if let Some(Value::Str(t)) = content.get(FieldId(0)) {
 					let t = t.clone();
 					if let Some(m) = res!(find_regex_match_in_str(&t, styles)) {
@@ -416,6 +418,19 @@ impl State<'_> {
 			if let Some(id) = ElemKind::Equation.field_id("body") {
 				let eq = Content::new(ElemKind::Equation, vec![(id, Value::Content(content.clone()))], content.span());
 				res!(self.visit(&eq, styles));
+				return Ok(true);
+			}
+		}
+		// A symbol outside maths is text, as Typst makes it before any show rule or grouping runs. A
+		// shorthand (`--`, `...`, `~`, `-?`), an escape and a symbol value all arrive here, so they join
+		// the paragraph and the textual run they stand in, and text and regex rules reach them.
+		if kind == ElemKind::Symbol {
+			if let Some(Value::Str(t)) = content.get(FieldId(0)) {
+				let mut text = Content::text(t).with_span(content.span());
+				if let Some(label) = content.label() {
+					text = text.labelled(label.clone());
+				}
+				res!(self.visit(&text, styles));
 				return Ok(true);
 			}
 		}
@@ -846,8 +861,8 @@ impl State<'_> {
 				continue;
 			}
 			let text = match (p.content.kind(), p.content.get(FieldId(0))) {
-				(Some(ElemKind::Text), Some(Value::Str(t)))	=> Some(t.clone()),
-				_											=> None,
+				(Some(ElemKind::Text | ElemKind::Symbol), Some(Value::Str(t)))	=> Some(t.clone()),
+				_																=> None,
 			};
 			let len = text.as_ref().map(|t| t.len()).unwrap_or(1);
 			let (es, ee) = (cursor, cursor + len);
