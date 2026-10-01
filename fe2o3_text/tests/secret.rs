@@ -715,6 +715,15 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		// A padded last line ends a run, so what follows it is a run of its own.
 		let more = fmt!("{}{}\n{}\n", body, noise(&mut 7u64, 64), noise(&mut 9u64, 64));
 		req!(secret::scan(more.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }], "after");
+		// A finding the run puts on a line above one the line walk already found is put in order:
+		// a P-256 key takes no padding, so an AWS key id on the next line is part of its run.
+		let p256 = wrapped(&res!(der(DER[4].1, DER[4].2)), 64, "\n");
+		let aws = fmt!("{}{}\n", "AKIA", "IOSFODNN7EXAMPLE");
+		let text = fmt!("{}{}", p256, aws);
+		req!(secret::scan(text.as_bytes()), vec![
+			Find { line: lines_in(&p256), kind: Kind::KeyBody },
+			Find { line: lines_in(&p256) + 1, kind: Kind::Aws },
+		], "in the order the lines hold them");
 		// So two bodies in a file, each ending in padding, are two findings.
 		let dkim = wrapped(&res!(der(DKIM.0, DKIM.1)), 64, "\n");
 		let both = fmt!("{}{}", dkim, body);
