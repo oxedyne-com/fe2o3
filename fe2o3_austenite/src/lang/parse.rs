@@ -384,6 +384,9 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// in a link or raw text opens no comment, and one in a quoted phrase does, since a quote in markup is a
 	// character; raw text runs across lines until a run of backticks as long as its opener.
 	let toks	= lex::byte_toks(src);
+	// Where each line stands -- the file's own level, a bare content block, a list item, strong or emphasis,
+	// or in code -- so a rule or an include the reader meets is held to the place it is read at.
+	let placed	= lex::placed_lines(src);
 	// Which bytes each conditional and loop in the markup leaves to be read, and the sites of those refused
 	// whole, recorded as the loop reaches the line each opens on.
 	let (keep, flow_sites)	= flow_mask(src, binds.guards);
@@ -509,7 +512,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			}
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
-			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
+			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Bare) && !lines.is_empty()))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
 			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
@@ -534,7 +537,8 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
-			let cap = Capture { kind, buf, state, start };
+			let place = lex::place_in(&placed, start as usize).unwrap_or(lex::Place::Content);
+			let cap = Capture { kind, buf, state, start, place };
 			if !cap.state.is_open() {
 				res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));	// the whole construct closed on one line
 			} else {
@@ -571,9 +575,11 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// when it never does, so the one site says which.
 			// An `#include` at a file's top level is followed by the assembler, so one met here stands in a
 			// body, where Typst sets the file; this reader does not follow it, and refuses it where it stands.
+			let place	= lex::place_in(&placed, start as usize).unwrap_or(lex::Place::Content);
 			let name	= match construct_name(trimmed) {
-				n if n == "#include" && binds.body	=> "#include (inside a body, where it is not followed)".to_string(),
-				n									=> n,
+				n if n == "#include" && (binds.body || place != lex::Place::Top)
+					=> "#include (inside a body, where it is not followed)".to_string(),
+				n	=> n,
 			};
 			let at		= Span::new(start, end);
 			match decision {
@@ -652,6 +658,11 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					flush_list(&mut items, &mut stack);
 					if lines.is_empty() {
 						para_start = start;
+					} else if trimmed.starts_with("#[") && !math_block_open {
+						// A bare content block opening inside a paragraph joins it in Typst. This reader sets it as
+						// the text it is written as, brackets and all, and says so.
+						skips.record_stand_in("#[", Span::new(start, end), RefusalClass::Unsupported,
+							"stands inside a paragraph, so it is set as text, brackets and all");
 					}
 					lines.push(line.to_string());
 					para_end = end;
@@ -2225,6 +2236,7 @@ struct Capture {
 	buf:	String,
 	state:	Lexer,
 	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
+	place:	lex::Place,	// where that line stands in the source being read
 }
 
 /// The backstop cap on content-binding expansion depth, for a pathological *non-cyclic* chain of distinct
@@ -2242,6 +2254,7 @@ enum CaptureKind {
 	Let(String),	// a `#let name = (...)` data array bound to this name
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
+	Bare,			// a line-leading `#[ ... ]`: a content block Typst joins into the markup around it, its own `#set`s scoped to it
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
 	ContentCall(String),	// a `#name`, `#name(args)` or `#name[ ... ]` reference to a bound content binding, expanded into re-read markup spliced in
@@ -2323,6 +2336,11 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// skipped -- otherwise the bracket span reads as an unbalanced standalone call and its text is dropped.
 	if trimmed.starts_with("#styled-box[") {
 		return Some(CaptureKind::StyledBox);
+	}
+	// A bare content block `#[ ... ]` is no call: Typst sets its content where it stands, joined into the
+	// markup around it, and a `#set` in it governs the block alone. Gathered whole and read as a scoped body.
+	if trimmed.starts_with("#[") {
+		return Some(CaptureKind::Bare);
 	}
 	// A documentation section opens with a line-leading `#section-banner("logo")` -- a full-width grey bar
 	// carrying the section's logo -- captured here so the bar is drawn rather than the call dropped. Tried
@@ -2662,18 +2680,65 @@ fn dispatch_capture(
 			// refusal (H2), so it is visible rather than a silent no-op; a `#set` that fully lowers, and a
 			// `#show: doc.with(...)`, record nothing.
 			//
-			// A `#set document` is applied from a file's own top level alone, where the assembler folds it into
-			// the Info dictionary. Inside a container Typst refuses one, and inside an expanded binding it
-			// would reach no dictionary here, so in any body it is refused rather than passed over. A `#show`
-			// rule is collected from a file's top level alone, and a `#set` or `doc.with` only from a file's or
-			// a scoped body's (a `#styled-box`'s, a `#columns`'), so one in any other body is refused too.
+			// The assembler lowers a file's rules from its own level alone, so a rule that stands anywhere else
+			// -- in a list item, strong or emphasis, which end it, or in code -- is refused where it stands.
+			// A `#set document` is the Info fold's: applied where the file's own lines hold it (its level, or a
+			// bare content block), and refused at its site there when a container holds it, so the reader
+			// records none of those. Inside a container body it would reach no dictionary here, and in an
+			// expanded binding likewise, so in any body it is refused rather than passed over. A `#show` rule
+			// is collected from a file's top level alone, and a `#set` or `doc.with` only from a file's or
+			// a scoped body's (a `#styled-box`'s, a `#columns'`, a `#[ ... ]`'s), so one in any other body is
+			// refused too.
 			let first	= cap.buf.lines().next().unwrap_or("").trim_start();
 			let rule	= crate::lang::rules::is_rule_line(first);
 			let at		= Span::new(cap.start, cap.start);
-			if binds.body && (crate::lang::set::sets_document(&cap.buf) || rule || !binds.scoped) {
+			let doc		= crate::lang::set::sets_document(&cap.buf);
+			let fold	= doc && (!binds.body || binds.joined) && cap.place != lex::Place::Content;
+			if fold {
+				// The fold of the file's own lines applies it, or refuses it at its site.
+			} else if binds.body && (doc || rule || !binds.scoped) {
+				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
+			} else if cap.place == lex::Place::Contained {
+				skips.record(&fmt!("{} (inside a list item, strong or emphasis, where it ends with it and is not applied)",
+					decl_name(first)), at);
+			} else if cap.place != lex::Place::Top {
 				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
 			} else if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
 				skips.record(&name, at);
+			}
+		},
+		CaptureKind::Bare => {
+			// A bare content block. Its content is set where it stands, as part of the markup around it, so
+			// it is read through the document parser again and spliced in flat. Its own top-level `#set`
+			// declarations scope to it, as a `#columns` body's do: a marker pair brackets the spliced items. A
+			// `#set document` in it is the Info fold's, which reads the same lines in the file.
+			let at = Span::new(cap.start, cap.start);
+			match bare_block(&cap.buf) {
+				Some((body_at, body, tail)) => {
+					// A block in code -- in a conditional's branch, say -- is joined into nothing the file's own
+					// lines hold, so a `#set document` in it is refused here rather than left to the fold.
+					let mut inside	= binds.in_bare_body();
+					inside.joined	= inside.joined && cap.place != lex::Place::Content;
+					let (mut inner, mut sub) = res!(parse_items(&body, inside));
+					// The block's lines are the file's own, so its sites are placed in them.
+					sub.shift(cap.start.saturating_add(body_at as u32));
+					skips.merge(sub);
+					let patch = crate::lang::set::lower_declarations(&body);
+					if patch == crate::theme::ThemePatch::default() {
+						items.append(&mut inner);
+					} else {
+						items.push(Item::Scoped { patch, items: inner, span: at });
+					}
+					// What stands after the block's closing bracket is read on as the file's own.
+					if !tail.trim().is_empty() {
+						let tail_at = cap.start.saturating_add(cap.buf.len().saturating_sub(tail.len()) as u32);
+						let (mut more, mut sub) = res!(parse_items(&tail, binds));
+						sub.shift(tail_at);
+						skips.merge(sub);
+						items.append(&mut more);
+					}
+				},
+				None => skips.record("#[", at),
 			}
 		},
 		CaptureKind::Context => {
@@ -3383,6 +3448,17 @@ fn columns_body(buf: &str) -> Option<String> {
 		return None;
 	}
 	read_group(&chars, j).map(|(body, _)| body)
+}
+
+/// A captured `#[ ... ]` content block as `(the byte its body starts at in `buf`, the body, the text after the
+/// block's closing bracket)`. `None` for a block that does not close.
+fn bare_block(buf: &str) -> Option<(usize, String, String)> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let Some(at) = find_lit(&chars, "#[") else { return None; };
+	let open = at + 1;
+	let Some((body, after)) = read_group(&chars, open) else { return None; };
+	let body_at: usize = chars[..open + 1].iter().map(|c| c.len_utf8()).sum();
+	Some((body_at, body, chars[after..].iter().collect()))
 }
 
 /// Reads a captured `#place(...)[ ... ]` as a float: its side from the alignment argument (`top`, `bottom`

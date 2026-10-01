@@ -411,3 +411,132 @@ fn a_chapter_guard_resolves_in_the_book_config_as_the_include_walk_does() -> Out
 	assert_eq!(ifs, [("/b/book/ch2.typ", 3, "#if has a condition the reader does not evaluate, so no branch of it is set")]);
 	Ok(())
 }
+
+/// Every text run set, joined by spaces.
+fn words(rendered: &Rendered) -> String {
+	runs(rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ")
+}
+
+/// The size of the first text run holding `needle`.
+fn size_of(rendered: &Rendered, needle: &str) -> Outcome<f32> {
+	match runs(rendered).into_iter().find(|(t, _)| t.contains(needle)) {
+		Some((_, size))	=> Ok(size),
+		None			=> Err(err!("no run holds {:?}: {:?}", needle, runs(rendered); Test, Missing)),
+	}
+}
+
+/// A `#!` line opening the file is a comment to its line's end, as Typst's lexer reads it: the `/*` in it
+/// opens no comment, so the heading and the `#include` after it stand, and the shebang is not set as prose.
+#[test]
+fn a_shebang_line_is_trivia_and_the_include_after_it_is_followed() -> Outcome<()> {
+	let _turn = turn();
+	let root = "#!/usr/bin/env typst /*\n= Root\n\n#include \"ch1.typ\"\n";
+	let files = [
+		("/proj/main.typ",	root),
+		("/proj/ch1.typ",	"= Chapter One\n\nINCLUDEDWORDS are set.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(text.contains("Root") && text.contains("INCLUDEDWORDS"), "the heading and the chapter are set: {}", text);
+	assert!(!text.contains("#!") && !text.contains("usr/bin"), "the shebang is not prose: {}", text);
+	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A rule in a list item, strong or emphasis ends with it, as Typst's does: it is not lowered for the whole
+/// document and not passed over, but refused where it stands, so the text after the item keeps its size and
+/// the heading its own.
+#[test]
+fn a_rule_in_an_item_strong_or_emphasis_ends_with_it() -> Outcome<()> {
+	let _turn = turn();
+	let cases = [
+		("item",	"= Root\n\n- item\n  #set text(size: 20pt)\n\n= Next\n\nTAILWORDS.\n",					4),
+		("strong",	"= Root\n\n*bold\n#set text(size: 20pt)\nstill*\n\n= Next\n\nTAILWORDS.\n",				4),
+		("emph",	"= Root\n\n_emph\n#set text(size: 20pt)\nstill_\n\n= Next\n\nTAILWORDS.\n",				4),
+		("show",	"= Root\n\n- item\n  #show heading: set text(size: 40pt)\n\n= Next\n\nTAILWORDS.\n",	4),
+	];
+	for (name, src, line) in cases {
+		let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+		assert!(res!(size_of(&rendered, "TAILWORDS")) < 15.0, "{}: the tail keeps its size: {:?}", name, runs(&rendered));
+		assert!(res!(size_of(&rendered, "Next")) < 30.0, "{}: the heading keeps its size: {:?}", name, runs(&rendered));
+		let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+		assert_eq!(sites.len(), 1, "{}: one site: {:?}", name, sites);
+		assert_eq!(sites[0].0, line, "{}: at the rule: {:?}", name, sites);
+		assert!(sites[0].1.contains("inside a list item, strong or emphasis"), "{}: {:?}", name, sites);
+	}
+	Ok(())
+}
+
+/// An `#include` in a list item or in emphasis is that body's, not a chapter: gathered with it and refused
+/// where it stands, so the file makes no book, sets no contents page and follows nothing.
+#[test]
+fn an_include_in_an_item_or_emphasis_is_not_a_chapter() -> Outcome<()> {
+	let _turn = turn();
+	let cases = [
+		("item",	"= Root\n\n- item\n  #include \"ch1.typ\"\n\nBody.\n",		4),
+		("emph",	"= Root\n\n_emph\n#include \"ch1.typ\"\nstill_\n\nTail.\n",	4),
+	];
+	for (name, src, line) in cases {
+		let files = [
+			("/proj/main.typ",	src),
+			("/proj/ch1.typ",	"= Chapter One\n\nCHAPTERWORDS are set.\n"),
+		];
+		let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+		let text = words(&rendered);
+		assert!(!text.contains("CHAPTERWORDS") && !text.contains("Chapter One"), "{}: not followed: {}", name, text);
+		assert_eq!(rendered.out.pages.len(), 1, "{}: no contents page, no new page: {}", name, text);
+		let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+		assert_eq!(sites, [(line, "skipped #include (inside a body, where it is not followed) (unsupported)")], "{}", name);
+	}
+	Ok(())
+}
+
+/// A line in a guard's branch is read as the file's own only with no list item, heading, strong or emphasis
+/// open around it there: an `#include` indented in an item in the branch is the item's, refused where it
+/// stands, while the file's own include still makes the book.
+#[test]
+fn an_include_in_an_item_in_a_guard_branch_is_not_a_chapter() -> Outcome<()> {
+	let _turn = turn();
+	let root = "#let media = \"ebook\"\n\n= Root\n\n#include \"ch0.typ\"\n\n#if media == \"ebook\" [\n- item\n  \
+		#include \"ch1.typ\"\n]\n\nTail.\n";
+	let files = [
+		("/proj/main.typ",	root),
+		("/proj/ch0.typ",	"= Chapter Zero\n\nZEROWORDS are set.\n"),
+		("/proj/ch1.typ",	"= Chapter One\n\nONEWORDS are not.\n"),
+	];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(text.contains("ZEROWORDS") && text.contains("Tail."), "the file's own include is followed: {}", text);
+	assert!(!text.contains("ONEWORDS"), "the item's is not: {}", text);
+	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
+	assert!(names.contains(&"skipped #include (inside a body, where it is not followed) (unsupported)"), "{:?}", names);
+	Ok(())
+}
+
+/// A bare content block `#[ ... ]` is set where it stands, joined into the markup around it: its brackets are
+/// not prose, and a `#set` in it governs the block alone, as Typst's does.
+#[test]
+fn a_bare_content_block_is_set_where_it_stands_and_scopes_its_rule() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Root\n\n#[\n#set text(size: 20pt)\nBIGWORDS in block.\n]\n\nThen tail words.\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	let text = words(&rendered);
+	assert!(!text.contains("#[") && !text.contains(']'), "the block's brackets are not prose: {}", text);
+	assert!(res!(size_of(&rendered, "BIGWORDS")) > 18.0, "the rule governs the block: {:?}", runs(&rendered));
+	assert!(res!(size_of(&rendered, "tail")) < 15.0, "and ends with it: {:?}", runs(&rendered));
+	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A bare content block that opens inside a paragraph joins it in Typst; this reader sets it as the text it is
+/// written as, brackets and all, and reports it at its line rather than leaving the brackets unexplained.
+#[test]
+fn a_bare_content_block_inside_a_paragraph_is_reported() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Root\n\nPara words\n#[\nin para\n]\nmore words\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	assert!(words(&rendered).contains("in para"), "{}", words(&rendered));
+	let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+	assert_eq!(sites, [(4, "#[ stands inside a paragraph, so it is set as text, brackets and all")]);
+	Ok(())
+}

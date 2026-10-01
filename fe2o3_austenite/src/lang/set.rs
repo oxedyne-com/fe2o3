@@ -21,6 +21,9 @@
 
 use crate::ir::Sp;
 use crate::ir::Span;
+use crate::lang::lex::Place;
+use crate::lang::RefusalClass;
+use crate::lang::Refusals;
 use crate::theme::{
 	Theme,
 	ThemeHeadingLevelPatch,
@@ -56,20 +59,28 @@ pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
 	theme.apply(&lower_declarations_seeded(src, theme.text.body_size.to_pt()));
 }
 
-/// The PDF Info fields a source's own top-level `#set document(...)` names. A later `#set` overrides an
-/// earlier one field by field, as in Typst.
-pub fn document_info(src: &str) -> crate::doc::DocInfo {
+/// The PDF Info fields a source's own `#set document(...)` rules name: each at its top level or in a bare
+/// content block `#[ ... ]`, where Typst applies it. A later `#set` overrides an earlier one field by field,
+/// as in Typst. One in a container is refused at its site in `skips`, charged to `file`.
+pub fn document_info(src: &str, file: &str, skips: &mut Refusals) -> crate::doc::DocInfo {
 	let mut info = crate::doc::DocInfo::default();
-	fold_document_info(src, &mut info);
+	fold_document_info(src, &mut info, file, 0, skips);
 	info
 }
 
-/// Applies each top-level `#set document(...)` of `src` to `info` in source order, field by field, so a
+/// Applies each `#set document(...)` of `src` that Typst applies to `info` in source order, field by field, so a
 /// caller walking a document's files in document order -- a root, then each file it includes where the
-/// include stands -- builds the dictionary Typst builds.
-pub fn fold_document_info(src: &str, info: &mut crate::doc::DocInfo) {
-	for (target, args) in top_level_sets(src) {
-		if target != "document" {
+/// include stands -- builds the dictionary Typst builds. A rule at the top level or in a bare content block
+/// applies; one in a list item, a heading, strong or emphasis, which Typst refuses ("document set rules are
+/// not allowed inside of containers"), applies nothing and is recorded in `skips` at its `#`, `at` bytes into
+/// `file`, since `src` may be a part of it. A rule in any other body is the reader's to refuse where it reads
+/// that body.
+pub fn fold_document_info(src: &str, info: &mut crate::doc::DocInfo, file: &str, at: u32, skips: &mut Refusals) {
+	for (place, hash, args) in document_sets(src) {
+		if place == Place::Contained {
+			let site = Span::new(at.saturating_add(hash as u32), at.saturating_add(hash as u32));
+			skips.record_stand_in_in(file, "#set document", site, RefusalClass::Unsupported,
+				"(document set rules are not allowed inside of containers, so none of its fields is applied)");
 			continue;
 		}
 		let fields: [(&str, &mut Option<String>); 4] = [
@@ -453,29 +464,46 @@ pub fn heading_font_site(src: &str) -> Option<(String, Span)> {
 /// balanced scan starts at this line's own `(` and reads its own arguments, even when they run on across
 /// several following lines.
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
+	crate::lang::lex::top_level_lines(src).into_iter()
+		.filter_map(|(line_start, raw)| set_on_line(src, line_start, raw))
+		.collect()
+}
+
+/// The `#set <target>(...)` the line `raw` of `src`, which starts at byte `line_start`, opens, as
+/// `(target, args)`. `None` for a line that opens none, and for a malformed one (no balanced parentheses).
+fn set_on_line(src: &str, line_start: usize, raw: &str) -> Option<(String, String)> {
+	let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
+	let trimmed	= raw.trim_start();
+	let Some(after) = trimmed.strip_prefix("#set ") else {
+		return None;
+	};
+	let rest_ws	= after.len() - after.trim_start().len();	// whitespace between `#set ` and the target
+	let rest	= after.trim_start();
+	let Some(open) = rest.find('(') else {
+		return None;
+	};
+	let target = rest[..open].trim().to_string();
+	if target.is_empty() {
+		return None;
+	}
+	// The byte offset of this line's own `(`, so the balanced scan reads this set's arguments -- which
+	// may run past the line's end -- rather than an earlier identical prefix's.
+	let abs = line_start + indent + "#set ".len() + rest_ws + open;
+	balanced_parens(&src[abs..]).map(|args| (target, args))
+}
+
+/// Every `#set document(...)` that opens a line of `src` in markup, as the line's place, the byte of its `#` and
+/// its argument text, in source order. A line inside code, a string, a comment or an expression opens none.
+fn document_sets(src: &str) -> Vec<(Place, usize, String)> {
 	let mut out = Vec::new();
-	for (line_start, raw) in crate::lang::lex::top_level_lines(src) {
-		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
-		let trimmed	= raw.trim_start();
-		let after	= match trimmed.strip_prefix("#set ") {
-			Some(a)	=> a,
-			None	=> continue,
-		};
-		let rest_ws	= after.len() - after.trim_start().len();	// whitespace between `#set ` and the target
-		let rest	= after.trim_start();
-		let open	= match rest.find('(') {
-			Some(i)	=> i,
-			None	=> continue,
-		};
-		let target = rest[..open].trim().to_string();
-		if target.is_empty() {
+	for (line_start, raw, place) in crate::lang::lex::placed_lines(src) {
+		if place == Place::Content {
 			continue;
 		}
-		// The byte offset of this line's own `(`, so the balanced scan reads this set's arguments -- which
-		// may run past the line's end -- rather than an earlier identical prefix's.
-		let abs = line_start + indent + "#set ".len() + rest_ws + open;
-		if let Some(args) = balanced_parens(&src[abs..]) {
-			out.push((target, args));
+		if let Some((target, args)) = set_on_line(src, line_start, raw) {
+			if target == "document" {
+				out.push((place, line_start + (raw.len() - raw.trim_start().len()), args));
+			}
 		}
 	}
 	out
@@ -752,6 +780,11 @@ fn named_length_mm_or_pt(args: &str, key: &str) -> Option<Sp> {
 mod tests {
 	use super::*;
 
+	/// The Info fields `src` names, the sites its container rules are refused at left to the caller's tests.
+	fn info_of(src: &str) -> crate::doc::DocInfo {
+		document_info(src, "t.typ", &mut Refusals::default())
+	}
+
 	/// `#show: doc.with(heading-font: "...")` lowers the heading face into levels 1 and 2 (the doc
 	/// template's per-level rule), leaving deeper levels and the rest of the theme at their defaults, so a
 	/// document that names only a heading font changes only those two levels' face.
@@ -975,18 +1008,64 @@ mod tests {
 	fn document_info_reads_each_field_as_typst_writes_it() {
 		let src = "#set document(\n\ttitle: [A *bold* Title],\n\tauthor: (\"Ann Author\", \"Bob\"),\n\t\
 			description: \"A \\\"quoted\\\" line\",\n\tkeywords: (\"one\", \"two\",),\n)\n= Body\n";
-		let info = document_info(src);
+		let info = info_of(src);
 		assert_eq!(info.title.as_deref(), Some("A bold Title"), "content reads as its plain text");
 		assert_eq!(info.author.as_deref(), Some("Ann Author, Bob"));
 		assert_eq!(info.subject.as_deref(), Some("A \"quoted\" line"), "escapes resolve");
 		assert_eq!(info.keywords.as_deref(), Some("one, two"));
 
-		assert_eq!(document_info("#set document(author: \"Solo\")\n").author.as_deref(), Some("Solo"));
-		assert_eq!(document_info("= Body\n#set text(size: 12pt)\n"), crate::doc::DocInfo::default());
+		assert_eq!(info_of("#set document(author: \"Solo\")\n").author.as_deref(), Some("Solo"));
+		assert_eq!(info_of("= Body\n#set text(size: 12pt)\n"), crate::doc::DocInfo::default());
 
 		// A later `#set` overrides field by field, and `none` clears.
-		let two = document_info("#set document(title: \"One\", author: \"A\")\n#set document(title: none)\n");
+		let two = info_of("#set document(title: \"One\", author: \"A\")\n#set document(title: none)\n");
 		assert_eq!((two.title, two.author.as_deref()), (None, Some("A")));
+	}
+
+	/// A `#set document` at the top level or in a bare content block applies; one in a list item, strong or
+	/// emphasis, or after an unclosed `*` or `_`, applies nothing and is refused at its `#`.
+	#[test]
+	fn set_document_in_a_container_is_refused_and_in_a_bare_block_applies() {
+		let mut skips = Refusals::default();
+		let src = "= R\n\n#[\n#set document(title: \"Block\")\n]\n";
+		assert_eq!(document_info(src, "t.typ", &mut skips).title.as_deref(), Some("Block"));
+		assert!(skips.is_empty());
+		let cases = [
+			"*b [\n#set document(title: \"T\")\nb*\n",
+			"_e\n#set document(title: \"T\")\ne_\n",
+			"- i\n  #set document(title: \"T\")\n",
+			"2 * 3\n#set document(title: \"T\")\n",
+			"\u{65E5}\u{672C}_\u{8A9E}\n#set document(title: \"T\")\n",
+			"- i #[\n#set document(title: \"T\")\n]\n",
+		];
+		for src in cases {
+			let mut skips = Refusals::default();
+			let info = document_info(src, "t.typ", &mut skips);
+			assert_eq!(info, crate::doc::DocInfo::default(), "{:?}", src);
+			assert_eq!(skips.sites().len(), 1, "{:?}", src);
+			let site = &skips.sites()[0];
+			assert_eq!((site.name.as_str(), site.class, site.file.as_str()), ("#set document", RefusalClass::Unsupported, "t.typ"));
+			assert_eq!(&src[site.span.start as usize..][..4], "#set", "{:?}", src);
+		}
+		// A file's part sits `at` bytes into it, and its site is placed there.
+		let mut skips = Refusals::default();
+		fold_document_info("- i\n  #set document(title: \"T\")\n", &mut crate::doc::DocInfo::default(), "f.typ", 100, &mut skips);
+		assert_eq!(skips.sites()[0].span.start, 100 + 6);
+	}
+
+	/// A rule in a list item, strong or emphasis ends with it, so none is lowered for the document.
+	#[test]
+	fn a_rule_in_an_item_strong_or_emphasis_is_not_lowered_for_the_document() {
+		let top = lower_declarations("#set heading(numbering: \"1.\")\n= Next\n");
+		assert_eq!(top.heading.numbering_all, Some(Some("1.".to_string())));
+		for src in [
+			"- item\n  #set heading(numbering: \"1.\")\n= Next\n",
+			"*bold\n#set heading(numbering: \"1.\")\nstill*\n\n= Next\n",
+			"_emph\n#set heading(numbering: \"1.\")\nstill_\n\n= Next\n",
+			"- item\n  #show: doc.with(heading-font: \"Old\")\n",
+		] {
+			assert_eq!(lower_declarations(src), ThemePatch::default(), "{:?}", src);
+		}
 	}
 
 	/// A field counts as applied only when its value was read, so one the reader cannot evaluate is refused
@@ -1009,7 +1088,7 @@ mod tests {
 		let src = "```typst\n#set document(title: \"Example Title\")\n#set text(size: 30pt)\n```\n\
 			/*\n#set document(title: \"Commented Out\")\n#set text(size: 31pt)\n*/\n\
 			#set text(size: 12pt)\n= Body\n";
-		assert_eq!(document_info(src), crate::doc::DocInfo::default());
+		assert_eq!(info_of(src), crate::doc::DocInfo::default());
 		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(12.0)));
 		// A comment opened after a declaration holds the lines after it, not the one it opens on.
 		let src = "#set text(size: 12pt) /* the old size:\n#set text(size: 30pt)\n*/\n";

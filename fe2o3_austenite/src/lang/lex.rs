@@ -6,7 +6,7 @@
 //! scope (a heading, a list item, strong or emphasis keeps a count of its own). A `"` is a character in
 //! markup and a string only in code or maths. An automatic link is one token, so the `//` or `/*` in it
 //! opens no comment. Block comments nest. Raw text opens with one backtick or three or more and closes
-//! on a run as long, across lines.
+//! on a run as long, across lines. A `#!` opening the file is a comment to its line's end.
 
 /// What a character is, as Typst reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,15 @@ pub(crate) enum Tok {
 	Hash,		// the `#` that embeds an expression
 	Open,		// a delimiter code opens: `(`, `{`, a content block's `[`, an equation's `$`
 	Close,		// the delimiter that closes one
+}
+
+/// Where a line stands, decided at its first token, as Typst's parser and realiser read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+	Top,		// the file's own markup, with no list item, heading, strong or emphasis open
+	Block,		// a bare content block `#[`, or a run of them, opened where no scope was: joined into the file's markup
+	Contained,	// in a list item, a heading, strong or emphasis of that markup: a container, which Typst sets apart
+	Content,	// in content code opened: a call's argument, a reference's supplement, a conditional's or loop's body, a value
 }
 
 /// The keyword that heads a loop or a conditional, while its body is still to come.
@@ -70,14 +79,26 @@ struct Scope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Markup {
 	block:	bool,		// a content block, closed by its own `]`
+	bare:	bool,		// a `#[` content block, not a call's argument
 	scopes:	Vec<Scope>,	// outermost first, the `Body` scope at the bottom
 	start:	bool,		// no token yet since the markup opened or since a line break: a marker may open here
 	head:	bool,		// no token yet since a line break: the next one ends the items it does not indent past
 }
 
 impl Markup {
-	fn new(block: bool) -> Self {
-		Markup { block, scopes: vec![Scope { kind: Kind::Body, nest: 0 }], start: true, head: false }
+	fn new(block: bool, bare: bool) -> Self {
+		Markup { block, bare, scopes: vec![Scope { kind: Kind::Body, nest: 0 }], start: true, head: false }
+	}
+
+	/// Is no scope open but the markup's own, once a line's first token at `col` has ended the items it does
+	/// not indent past? `None` for a line whose first token ends no item.
+	fn bare_at(&self, col: Option<usize>) -> bool {
+		let open = match col.filter(|_| self.head) {
+			Some(c)	=> self.scopes.iter().position(|s| matches!(s.kind, Kind::Item(at) if at >= c))
+				.unwrap_or(self.scopes.len()),
+			None	=> self.scopes.len(),
+		};
+		open <= 1
 	}
 
 	/// Ends the innermost scope of `kind`-like shape and every scope opened inside it.
@@ -113,7 +134,7 @@ pub(crate) struct Lexer {
 impl Lexer {
 	/// A scan of a file's markup, as Typst reads a `.typ` file.
 	pub(crate) fn markup() -> Self {
-		Self::with(Frame::Markup(Markup::new(false)))
+		Self::with(Frame::Markup(Markup::new(false, false)))
 	}
 
 	/// A scan of code, as the inside of a call's argument list reads.
@@ -144,6 +165,78 @@ impl Lexer {
 			Some(Frame::Markup(_))	=> Some(self.depth()),
 			_						=> None,
 		}
+	}
+
+	/// Where `line`, the next line to be fed, stands, or `None` when it opens outside markup: in a string, a
+	/// comment, raw text, an equation, a code group or an unfinished expression. The spaces that open a line
+	/// change no scope, so the place is decided at its first token, which ends the items it does not indent
+	/// past.
+	pub(crate) fn place_of(&self, line: &str) -> Option<Place> {
+		if !matches!(self.frames.last(), Some(Frame::Markup(_))) {
+			return None;
+		}
+		let last		= self.frames.len() - 1;
+		let col			= self.lead_col(line);
+		let mut place	= Place::Top;
+		for (k, f) in self.frames.iter().enumerate() {
+			match f {
+				// The outermost scope decides: an item, heading, strong or emphasis around a bare block holds it.
+				Frame::Markup(m) if k == 0 || m.bare => {
+					if !m.bare_at(if k == last { col } else { None }) {
+						return Some(Place::Contained);
+					}
+					if k > 0 {
+						place = Place::Block;
+					}
+				},
+				Frame::Embed(_) if matches!(self.frames.get(k + 1), Some(Frame::Markup(m)) if m.bare) => {},
+				_ => return Some(Place::Content),
+			}
+		}
+		Some(place)
+	}
+
+	/// Is `line`, the next line to be fed, standing directly in the innermost markup, whatever opened it,
+	/// with no list item, heading, strong or emphasis of that markup open around it?
+	pub(crate) fn bare_line(&self, line: &str) -> bool {
+		match self.frames.last() {
+			Some(Frame::Markup(m))	=> m.bare_at(self.lead_col(line)),
+			_						=> false,
+		}
+	}
+
+	/// The column of `line`'s first token, past its spaces and any block comment that closes on it, or `None`
+	/// when it holds no token (spaces, a comment or its break alone), which ends no item.
+	fn lead_col(&self, line: &str) -> Option<usize> {
+		let chars: Vec<char> = line.chars().collect();
+		let mut i = 0usize;
+		while let Some(&c) = chars.get(i) {
+			match (c, chars.get(i + 1)) {
+				(' ' | '\t', _)		=> i += 1,
+				('/', Some('/'))	=> return None,
+				('/', Some('*'))	=> {
+					// A block comment nests; one that does not close on this line holds the rest of it.
+					let mut depth = 0u32;
+					loop {
+						match (chars.get(i), chars.get(i + 1)) {
+							(Some('/'), Some('*'))	=> { depth = depth.saturating_add(1); i += 2; },
+							(Some('*'), Some('/'))	=> {
+								depth = depth.saturating_sub(1);
+								i += 2;
+								if depth == 0 {
+									break;
+								}
+							},
+							(Some(_), _)			=> i += 1,
+							(None, _)				=> return None,
+						}
+					}
+				},
+				_ if is_newline(c)	=> return None,
+				_					=> return Some(self.col.saturating_add(i)),
+			}
+		}
+		None
 	}
 
 	/// Steps through `text`.
@@ -300,6 +393,10 @@ impl Lexer {
 	fn markup_step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
 		let c		= chars[i];
 		let next	= chars.get(i + 1).copied();
+		// A shebang: a `#!` opening the file is a comment to its line's end, as Typst's lexer reads it.
+		if c == '#' && next == Some('!') && self.prev.is_none() && self.frames.len() == 1 {
+			return (line_comment_len(chars, i), Tok::Comment);
+		}
 		// Comments first: they are trivia, and a line's first token is what follows them.
 		if c == '/' && (next == Some('/') || next == Some('*')) {
 			if let Some(r) = self.trivia(chars, i, false) {
@@ -441,7 +538,7 @@ impl Lexer {
 			j -= 1;
 		}
 		if chars.get(j) == Some(&'[') {
-			self.frames.push(Frame::Markup(Markup::new(true)));
+			self.frames.push(Frame::Markup(Markup::new(true, false)));
 			j += 1;
 		}
 		(j - i, Tok::Ref)
@@ -477,7 +574,7 @@ impl Lexer {
 			'"'		=> { self.frames.push(Frame::Str(false)); (1, Tok::Str) },
 			'('		=> { self.frames.push(Frame::Code(')')); (1, Tok::Open) },
 			'{'		=> { self.frames.push(Frame::Code('}')); (1, Tok::Open) },
-			'['		=> { self.frames.push(Frame::Markup(Markup::new(true))); (1, Tok::Open) },
+			'['		=> { self.frames.push(Frame::Markup(Markup::new(true, false))); (1, Tok::Open) },
 			'$'		=> { self.frames.push(Frame::Math); (1, Tok::Open) },
 			'<' if chars.get(i + 1).copied().is_some_and(is_id_continue)	=> (label_len(chars, i), Tok::Label),
 			_		=> (1, Tok::Code),
@@ -523,7 +620,15 @@ impl Lexer {
 					self.set(Embed::Post);
 					return Some((label_len(chars, i), Tok::Label));
 				}
-				if matches!(c, '(' | '{' | '[' | '"' | '$') {
+				// A `[` straight after the `#` opens a bare content block, which Typst joins into the markup around
+				// it; one after `context` is the expression's content.
+				if c == '[' {
+					self.set(Embed::Post);
+					let bare = self.prev == Some('#');
+					self.frames.push(Frame::Markup(Markup::new(true, bare)));
+					return Some((1, Tok::Open));
+				}
+				if matches!(c, '(' | '{' | '"' | '$') {
 					self.set(Embed::Post);
 					return Some(self.code_char(chars, i));
 				}
@@ -847,20 +952,31 @@ pub(crate) fn live_text(src: &str) -> String {
 	out
 }
 
-/// The lines of `src` that stand at its own level, each with the byte it starts at: a line opening inside
-/// a group, a content block, a string, an equation, a comment or raw text is none of them.
-pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
+/// Each line of `src` that opens in markup, with the byte it starts at and where it stands.
+pub(crate) fn placed_lines(src: &str) -> Vec<(usize, &str, Place)> {
 	let mut out		= Vec::new();
 	let mut offset	= 0usize;
 	let mut lx		= Lexer::markup();
 	for raw in src.split_inclusive('\n') {
-		if !lx.is_open() {
-			out.push((offset, raw));
+		if let Some(place) = lx.place_of(raw) {
+			out.push((offset, raw, place));
 		}
 		lx.feed(raw);
 		offset = offset.saturating_add(raw.len());
 	}
 	out
+}
+
+/// Where the line starting at byte `at` stands, among `lines` from [`placed_lines`].
+pub(crate) fn place_in(lines: &[(usize, &str, Place)], at: usize) -> Option<Place> {
+	lines.binary_search_by_key(&at, |&(start, _, _)| start).ok().map(|k| lines[k].2)
+}
+
+/// The lines of `src` that stand at its own level, each with the byte it starts at: a line opening inside
+/// a group, a content block, a string, an equation, a comment or raw text is none of them, and nor is a
+/// line inside a list item, a heading, strong or emphasis.
+pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
+	placed_lines(src).into_iter().filter(|&(_, _, p)| p == Place::Top).map(|(at, line, _)| (at, line)).collect()
 }
 
 /// The byte just past the group opening at byte `at` of `src` -- a `(`, `[` or `{` read as code opens one
@@ -1021,6 +1137,7 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use oxedyne_fe2o3_core::prelude::*;
 
 	/// The top-level lines of `src`, by their trimmed text.
 	fn tops(src: &str) -> Vec<String> {
@@ -1106,7 +1223,8 @@ mod tests {
 
 	#[test]
 	fn an_escape_takes_the_character_after_it() {
-		assert_eq!(tops("\\[ \\/* x\n#include \"a.typ\"\n"), vec!["\\[ \\/* x", "#include \"a.typ\""]);
+		// The `*` after the escaped slash opens a strong the `x*` closes, so the line after it stands at the top.
+		assert_eq!(tops("\\[ \\/* x*\n#include \"a.typ\"\n"), vec!["\\[ \\/* x*", "#include \"a.typ\""]);
 		assert_eq!(tops("#box[a \\] b\n]\nc\n"), vec!["#box[a \\] b", "c"]);
 	}
 
@@ -1125,6 +1243,88 @@ mod tests {
 		// A statement's group runs across lines; the statement ends at the line after it closes.
 		let src = "#let x = (\n  a: 1,\n)\n#include \"e.typ\"\n";
 		assert_eq!(tops(src), vec!["#let x = (", "#include \"e.typ\""]);
+	}
+
+	#[test]
+	fn a_shebang_is_a_comment_to_its_line_end() {
+		let src = "#!/usr/bin/env typst /*\n= Root\n#include \"ch1.typ\"\n";
+		assert_eq!(tops(src), vec!["#!/usr/bin/env typst /*", "= Root", "#include \"ch1.typ\""]);
+		let first = src.find('\n').unwrap_or(src.len());
+		assert!(tokens(src).iter().filter(|&&(at, _, _)| at < first).all(|&(_, _, t)| t == Tok::Comment));
+		assert_eq!(live_text(src), fmt_spaces(first, &src[first..]));
+	}
+
+	#[test]
+	fn a_shebang_only_opens_the_file() {
+		// Past the file's first character, `#!` is an embedded expression Typst refuses, and the `/*` after it
+		// opens a comment.
+		let src = "x\n#!y /*\n= Root\n";
+		assert_eq!(tops(src), vec!["x", "#!y /*"]);
+		assert_eq!(tokens(src)[2].2, Tok::Hash);
+	}
+
+	#[test]
+	fn a_line_in_open_strong_or_emphasis_is_not_top_level() {
+		for m in ["*", "_"] {
+			let src = fmt!("{m}bold [\n#set document(title: \"T\")\nstill bold{m}\nAfter\n");
+			assert_eq!(tops(&src), vec![fmt!("{m}bold ["), "After".to_string()], "{}", m);
+		}
+	}
+
+	#[test]
+	fn an_unclosed_star_holds_to_the_paragraph_break() {
+		let src = "2 * 3 = 6\n#set document(title: \"S\")\n\n#set text(size: 9pt)\n";
+		assert_eq!(tops(src), vec!["2 * 3 = 6", "#set text(size: 9pt)"]);
+	}
+
+	#[test]
+	fn an_underscore_between_cjk_letters_opens_emphasis() {
+		assert_eq!(tops("漢_字\n#set document(title: \"C\")\n"), vec!["漢_字"]);
+		// Between Latin letters it is within a word, and opens nothing.
+		assert_eq!(tops("a_b\n#set document(title: \"C\")\n"), vec!["a_b", "#set document(title: \"C\")"]);
+	}
+
+	#[test]
+	fn an_indented_line_stays_in_its_item() {
+		let src = "- item\n  #set heading(numbering: \"1.\")\n= Next\n";
+		assert_eq!(tops(src), vec!["- item", "= Next"]);
+	}
+
+	#[test]
+	fn a_line_that_does_not_indent_ends_the_item() {
+		let src = "- item\n#set document(title: \"T\")\n";
+		assert_eq!(tops(src), vec!["- item", "#set document(title: \"T\")"]);
+	}
+
+	#[test]
+	fn a_comment_ahead_of_the_first_token_does_not_hide_where_it_stands() {
+		// The `#` stands at column 4, which does not indent past an item at column 6: the comment ahead of it
+		// is trivia, and the token is what ends the item.
+		let src = "      - item\n/**/#set document(title: \"T\")\n";
+		assert_eq!(tops(src), vec!["- item", "/**/#set document(title: \"T\")"]);
+		// A comment alone on a line holds no token, so it ends no item and stands in it.
+		assert_eq!(tops("- item\n// c\n  #set text(size: 9pt)\n"), vec!["- item"]);
+		assert_eq!(tops("- item\n/* c\n  d */ #set text(size: 9pt)\n"), vec!["- item"]);
+	}
+
+	/// Each placed line of `src` by its trimmed text.
+	fn places(src: &str) -> Vec<(String, Place)> {
+		placed_lines(src).into_iter().map(|(_, l, p)| (l.trim().to_string(), p)).collect()
+	}
+
+	#[test]
+	fn placed_lines_tells_a_bare_block_from_a_call() {
+		let src = "#[\n#set document(title: \"B\")\n]\n#box[\n#set document(title: \"X\")\n]\n";
+		let got = places(src);
+		assert_eq!(got[1], ("#set document(title: \"B\")".to_string(), Place::Block));
+		assert_eq!(got[4], ("#set document(title: \"X\")".to_string(), Place::Content));
+		// A bare block in a bare block is joined too; one opened in a list item is held by the item.
+		assert_eq!(places("#[\n#[\nX\n]\n]\n")[2], ("X".to_string(), Place::Block));
+		assert_eq!(places("- a #[\nX\n]\n")[1], ("X".to_string(), Place::Contained));
+		// Content a conditional, `context` or a reference opens is not joined as written.
+		for src in ["#if a [\nX\n]\n", "#context [\nX\n]\n", "#context[\nX\n]\n", "@r[\nX\n]\n", "#f(a, [\nX\n])\n"] {
+			assert_eq!(places(src)[1], ("X".to_string(), Place::Content), "{:?}", src);
+		}
 	}
 
 	#[test]

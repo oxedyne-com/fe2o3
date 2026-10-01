@@ -197,8 +197,8 @@ pub fn default_rule_set(theme: &Theme) -> Vec<Rule> {
 pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) -> Vec<Rule> {
 	let mut rules	= Vec::new();
 	// The rules a file declares stand at its top level, as the reader meets them: one inside a bracketed
-	// body is that body's own and is refused where the body is read, and one a comment holds or a raw block
-	// shows is text. A trailing comment is blanked too, so it never reads as part of the transform.
+	// body, a list item, strong or emphasis is that body's own and is refused where it is read, and one a
+	// comment holds or a raw block shows is text. A trailing comment is blanked too, so it never reads as part of the transform.
 	let live = crate::lang::lex::live_text(src);
 	for (line_start, line) in crate::lang::lex::top_level_lines(src) {
 		let raw			= &live[line_start..line_start.saturating_add(line.len())];
@@ -1516,7 +1516,9 @@ fn guard_names(src: &str) -> std::collections::HashMap<String, GuardValue> {
 /// shadow stack overflows. Its length also caps a pathological non-cyclic chain (see the reader's own cap).
 ///
 /// `body` is set while a body is re-read -- a container's, a float's or an expanded binding's -- rather than
-/// a file's own top level, where alone a `#set document` is applied.
+/// a file's own top level, where alone a `#set document` is applied. `joined` marks the body of a bare content
+/// block `#[ ... ]` standing in the file's own markup, which Typst joins into it: its `#set document` is the
+/// file's, applied (or refused as a container's) where the file's own lines hold it, not refused here.
 #[derive(Clone, Copy)]
 pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
@@ -1526,19 +1528,20 @@ pub struct Bindings<'a, 'b> {
 	pub active:	&'b [String],
 	pub body:	bool,
 	pub scoped:	bool,	// the body re-read lowers its own top-level `#set` and `doc.with` onto its scope
+	pub joined:	bool,	// the body re-read is a bare content block joined into the file's own markup
 }
 
 impl<'a> Bindings<'a, 'static> {
 	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
 	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, sfns: empty_scalar_fns(), guards: empty_guard_scope(), active: &[], body: false, scoped: false }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), guards: empty_guard_scope(), active: &[], body: false, scoped: false, joined: false }
 	}
 
 	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
 	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
 	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
-		Self { tfns, cfns, sfns, guards: empty_guard_scope(), active: &[], body: false, scoped: false }
+		Self { tfns, cfns, sfns, guards: empty_guard_scope(), active: &[], body: false, scoped: false, joined: false }
 	}
 }
 
@@ -1555,19 +1558,26 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, guards: self.guards, active, body: true, scoped: false }
+		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, guards: self.guards, active, body: true, scoped: false, joined: false }
 	}
 
 	/// The same bindings for re-reading a float's or a furniture call's body, which applies none of its own
 	/// declarations.
 	pub fn in_body(self) -> Self {
-		Bindings { body: true, scoped: false, ..self }
+		Bindings { body: true, scoped: false, joined: false, ..self }
 	}
 
 	/// The same bindings for re-reading a body whose own top-level `#set` and `doc.with` declarations are
 	/// lowered onto its scope: a `#styled-box`'s or a `#columns`'.
 	pub fn in_scoped_body(self) -> Self {
-		Bindings { body: true, scoped: true, ..self }
+		Bindings { body: true, scoped: true, joined: false, ..self }
+	}
+
+	/// The same bindings for re-reading a bare content block `#[ ... ]`, whose own top-level `#set` and
+	/// `doc.with` declarations are lowered onto its scope as a `#columns`' are. The block is joined into the
+	/// file's own markup only where the markup around it is the file's own, or a joined block's.
+	pub fn in_bare_body(self) -> Self {
+		Bindings { body: true, scoped: true, joined: !self.body || self.joined, ..self }
 	}
 
 	/// The same bindings reading the file whose conditionals resolve in `guards`.

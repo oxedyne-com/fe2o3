@@ -90,7 +90,7 @@ pub struct BookSpec {
 	// The constructs the reader skipped across every chapter, merged into one tally, so the binary reports
 	// a book or doc compile's skipped constructs on the same terse line a lone file already prints.
 	pub skips:		lang::Refusals,
-	pub doc_info:	DocInfo,	// the Info dictionary every file's own top-level `#set document` builds, in document order
+	pub doc_info:	DocInfo,	// the Info dictionary every file's own `#set document` builds, at its top level or in a bare content block, in document order
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
@@ -116,9 +116,12 @@ fn top_live_lines(src: &str) -> Vec<String> {
 		while guards.last().map_or(false, |&g| depth < g) {
 			guards.pop();
 		}
-		// A line opening in markup, at the file's own level or directly in a guard's branch.
-		let level = state.markup_level();
-		if level == Some(0) || (level.is_some() && level == guards.last().copied()) {
+		// A line opening in markup, at the file's own level with no list item, heading, strong or emphasis
+		// open around it, or directly in a guard's branch with none open around it there.
+		let level	= state.markup_level();
+		let top		= state.place_of(raw) == Some(lang::lex::Place::Top);
+		let branch	= level.is_some() && level == guards.last().copied() && state.bare_line(raw);
+		if top || branch {
 			if guard_open(raw_live.trim()).is_some() {
 				guards.push(depth + 1);
 			}
@@ -1850,8 +1853,9 @@ pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::
 }
 
 /// What the include walk gathers beside the blocks, in document order: every site not set as written, and
-/// the Info dictionary each file's own top-level `#set document` builds where the file stands -- a root's
-/// rules before an `#include`, then the included file's, then the root's after it -- as Typst applies them.
+/// the Info dictionary each file's own `#set document` builds where the file stands -- a root's rules before an
+/// `#include`, then the included file's, then the root's after it -- as Typst applies them. A rule applies at
+/// a file's top level or in a bare content block; one in a container is refused at its site.
 #[derive(Default)]
 pub struct Gathered {
 	pub skips:		lang::Refusals,
@@ -1915,8 +1919,10 @@ fn assemble_into(
 		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
 		// inside its branch -- see [`GuardFrame`].
 		let guard_depth = guards.last().map(|g| g.state.depth());
-		let structural	= match guard_depth {
-			Some(d)	=> d == 1,
+		// A line in a guard's branch is read only with no list item, heading, strong or emphasis open around it
+		// there, as at the file's own level: one inside such a scope is that scope's, gathered with it.
+		let structural	= match guards.last() {
+			Some(g)	=> g.state.depth() == 1 && g.state.bare_line(line),
 			None	=> top.contains(&(start as usize)),
 		};
 
@@ -2075,8 +2081,9 @@ impl Chunk {
 }
 
 /// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips
-/// (tagged with `file`, the path of the file the buffer was gathered from), folds its top-level `#set
-/// document` rules into the Info dictionary where they stand, then clears the buffer. A buffer holding
+/// (tagged with `file`, the path of the file the buffer was gathered from), folds its `#set document` rules
+/// into the Info dictionary where they stand, refusing at its site one a container holds, then clears the
+/// buffer. A buffer holding
 /// only code and whitespace yields no blocks -- a book root's template call reduces to nothing, so the
 /// book path is unchanged.
 fn flush_inline(
@@ -2092,7 +2099,7 @@ fn flush_inline(
 		let (b, s) = res!(lang::to_blocks_in(&buf.text, binds, file, buf.at));
 		blocks.extend(b);
 		got.skips.merge(s);
-		lang::set::fold_document_info(&buf.text, &mut got.doc_info);
+		lang::set::fold_document_info(&buf.text, &mut got.doc_info, file, buf.at, &mut got.skips);
 	}
 	buf.text.clear();
 	Ok(())

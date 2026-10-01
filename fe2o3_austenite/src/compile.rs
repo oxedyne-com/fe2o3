@@ -69,7 +69,7 @@ pub struct Assembled {
 	pub faces:		FaceResolver,
 	pub front:		Option<FrontMatter>,
 	pub bib:		Option<Bibliography>,
-	pub doc_info:	DocInfo,	// the Info dictionary, from each file's own top-level `#set document(...)`
+	pub doc_info:	DocInfo,	// the Info dictionary, from each file's own `#set document(...)` at its top level or in a bare content block
 	pub refusals:	lang::Refusals,	// every site not set as written, each already carrying its file
 }
 
@@ -160,6 +160,8 @@ where
 	let binds	= scope.bindings().with_guards(&guards);
 	let (mut blocks, parsed)	= res!(lang::to_blocks_in(&src, binds, &main_file, 0));
 	refusals.merge(parsed);
+	// The Info dictionary the file's own `#set document` rules build, a rule in a container refused at its site.
+	let doc_info = lang::set::document_info(&src, &main_file, &mut refusals);
 	// Fill a `#print-glossary()` the lone chapter carries, as a whole-doc compile does after assembly.
 	book::resolve_glossary(&mut blocks, false);
 	// Resolve citations against a `refs.bib` found beside or above the chapter, so a lone-file compile sets
@@ -198,7 +200,7 @@ where
 		faces,
 		front:	None,
 		bib,
-		doc_info:	crate::lang::set::document_info(&src),
+		doc_info,
 		refusals,
 	};
 	Ok(assembled)
