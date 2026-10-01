@@ -1304,3 +1304,21 @@ fn a_bare_content_block_resolves_its_conditionals_where_it_stands() -> Outcome<(
 	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 4, 1, unbound("nothing"))]);
 	Ok(())
 }
+
+/// A `$` whose maths never closes is a character and the markup after it is read as usual, by the guard scope
+/// as by every other scan: the callout it stands in closes at its own bracket, so a `#let` in the callout is its
+/// own and a conditional after it, on that name, is refused as one on a name nothing binds. Read with the
+/// `$` as maths, the bracket would close nothing and the name would reach past the callout.
+#[test]
+fn a_dollar_that_never_closes_leaves_a_callout_its_bracket_for_the_guard_scope() -> Outcome<()> {
+	let _turn = turn();
+	let src = "= Root\n\n#styled-box[\nCosts 5$ only.\n#let on = true\n#if on [INBOX] else [NOTSHOWN]\n]\n\n#if on [AFTERBOX]\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	let text = words(&rendered);
+	assert!(has(&text, "INBOX") && !text.contains("NOTSHOWN") && !text.contains("AFTERBOX"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 9, 1, unbound("on"))]);
+	let lone: Vec<(usize, usize)> = report.diagnostics.iter()
+		.filter(|d| d.message.contains("inline maths")).map(|d| (d.line, d.col)).collect();
+	assert_eq!(lone, [(4, 8)], "{:?}", report.diagnostics);
+	Ok(())
+}

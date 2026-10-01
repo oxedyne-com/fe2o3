@@ -1393,7 +1393,7 @@ pub(crate) fn bindings(src: &str) -> Vec<Binding> {
 	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
 	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
 	let mut out: Vec<Binding>	= Vec::new();
-	let mut lx					= Lexer::markup();
+	let mut lx					= Lexer::markup_over(src);
 	// The statements each open block holds, awaiting its closer; the text's own level at the bottom.
 	let mut held: Vec<Vec<usize>>			= vec![Vec::new()];
 	let mut cur: Option<(String, usize, usize)>	= None;	// the statement being read, its expression's frame and its `#`
