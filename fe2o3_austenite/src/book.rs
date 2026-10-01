@@ -1773,11 +1773,16 @@ const MAX_INCLUDE_DEPTH: u32 = 64;
 /// apart from the guard's own matching closer by depth alone, rather than by line text -- the marker-based
 /// extent this replaces treated any bare `]` line as the guard's end, following both branches once one
 /// closed early and leaking the markers and the truncated tail as prose.
+///
+/// A taken branch is a content block, so its `#set` rules govern it, from the rule down, and the files it
+/// includes, as Typst scopes them. `marks` holds each such rule's place in the blocks and its text, and
+/// [`close_branch`] wraps the blocks from there to the branch's end in a scope carrying what it lowers to.
 struct GuardFrame {
 	live:		bool,
 	then_taken:	bool,
 	in_else:	bool,
 	state:		lang::lex::Lexer,
+	marks:		Vec<(usize, String)>,	// each `#set` of the branch taken: the block it governs from, and its text
 }
 
 impl GuardFrame {
@@ -1786,6 +1791,19 @@ impl GuardFrame {
 	/// and the else-branch when it did not.
 	fn emits(&self) -> bool {
 		self.live && (self.then_taken != self.in_else)
+	}
+}
+
+/// Closes a guard's taken branch: the blocks standing from each `#set` the branch made to its end are
+/// wrapped in a scope carrying what that rule lowers to, the last rule's scope innermost. A rule that lowers
+/// to nothing wraps nothing, and is refused where the reader reads it.
+fn close_branch(marks: Vec<(usize, String)>, blocks: &mut Vec<Block>) {
+	for (from, text) in marks.into_iter().rev() {
+		let patch = lang::set::lower_declarations(&text);
+		if patch != ThemePatch::default() && from <= blocks.len() {
+			let tail = blocks.split_off(from);
+			blocks.push(Block::Scoped { patch, blocks: tail });
+		}
 	}
 }
 
@@ -1925,7 +1943,9 @@ fn assemble_into(
 		// to ordinary content. A lone `]` with no guard open at all is likewise ordinary content.
 		if marker == "]" && guard_depth == Some(1) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			guards.pop();
+			if let Some(frame) = guards.pop() {
+				close_branch(frame.marks, blocks);
+			}
 			continue;
 		}
 		// A guard divider `] else [`, at the guard's own depth: switch the innermost guard to its else
@@ -1935,6 +1955,7 @@ fn assemble_into(
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			if let Some(top) = guards.last_mut() {
 				top.in_else = true;
+				close_branch(std::mem::take(&mut top.marks), blocks);
 			}
 			continue;
 		}
@@ -1957,7 +1978,7 @@ fn assemble_into(
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			let mut state = lang::lex::Lexer::markup().with_lone(lone.clone());
 			state.feed_line_at(marker, start as usize + (line.len() - t.len()));
-			guards.push(GuardFrame { live, then_taken, in_else: false, state });
+			guards.push(GuardFrame { live, then_taken, in_else: false, state, marks: Vec::new() });
 			continue;
 		}
 		// Any other line while a guard is open: fold its own brackets into the innermost guard's state,
@@ -1971,7 +1992,9 @@ fn assemble_into(
 			top.state.feed_line_at(line, start as usize);
 			if !top.state.is_open() {
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
-				guards.pop();
+				if let Some(frame) = guards.pop() {
+					close_branch(frame.marks, blocks);
+				}
 				got.skips.record_in(&label, &fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
 				continue;
 			}
@@ -1984,6 +2007,26 @@ fn assemble_into(
 				got.skips.record_lone_dollar_in(&label, crate::ir::Span::new(at as u32, at as u32 + 1));
 			}
 			continue;
+		}
+		// A `#set` standing in the taken branch governs the branch from there to its end, and the files it
+		// includes: the blocks from here are scoped at the branch's close. A `#show` rule, which the rule
+		// engine applies from the root's top level alone, is refused where it stands.
+		if structural && !guards.is_empty() {
+			if lang::parse::is_lowerable_set(t) || lang::parse::is_show_doc_with(t) {
+				res!(flush_inline(&mut buf, blocks, got, &label, binds));
+				if let Some(top) = guards.last_mut() {
+					if top.marks.last().map_or(true, |m| m.0 != blocks.len()) {
+						top.marks.push((blocks.len(), String::new()));
+					}
+				}
+			} else if lang::rules::is_rule_line(t) {
+				got.skips.record_in(&label, &fmt!("{} (inside an include guard's branch, where it is not applied)",
+					lang::parse::decl_name(t)), span);
+			}
+		}
+		if let Some(mark) = guards.last_mut().and_then(|g| g.marks.last_mut()) {
+			mark.1.push_str(line);
+			mark.1.push('\n');
 		}
 		if let Some(rest) = t.strip_prefix("#include").filter(|_| structural) {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
@@ -2050,12 +2093,13 @@ fn assemble_into(
 	// A guard still open at end of file never met its own closer: reported so a truncated branch is never
 	// silently accepted as complete.
 	let eof = crate::ir::Span::new(byte, byte);
-	for _ in &guards {
-		got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
-	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
 	// include) closes with, if any.
 	res!(flush_inline(&mut buf, blocks, got, &label, binds));
+	while let Some(frame) = guards.pop() {
+		got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
+		close_branch(frame.marks, blocks);
+	}
 	Ok(())
 }
 

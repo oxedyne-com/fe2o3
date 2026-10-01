@@ -643,7 +643,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			let title = substitute_scalars(&title, binds.sfns);
 			items.push(Item::Heading {
 				level:	level as u8,
-				runs:	parse_inlines_in(&title, head_span, &mut skips),
+				runs:	parse_inlines_in(&title, head_span, &mut skips, binds),
 				label,
 				span:	head_span,
 			});
@@ -665,7 +665,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					// while the same reference in a paragraph beside it expanded, an inconsistency a reader sees.
 					let item_span	= Span::new(start, end);
 					let text		= substitute_content_calls(&text, binds, &mut skips, item_span);
-					let runs		= parse_inlines_in(&text, item_span, &mut skips);
+					let runs		= parse_inlines_in(&text, item_span, &mut skips, binds);
 					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 				},
 				None => {
@@ -883,7 +883,7 @@ fn flush_para(
 	// maths, or any other captured construct (a table, a figure, a `#context` block) -- those are gathered
 	// and dispatched on a wholly separate path and never reach here.
 	let body = substitute_scalars(&body, binds.sfns);
-	let runs = parse_inlines_in(&body, span, skips);
+	let runs = parse_inlines_in(&body, span, skips, binds);
 	items.push(Item::Paragraph { runs, label, span });
 	lines.clear();
 }
@@ -900,21 +900,36 @@ fn normalise_ws(s: &str) -> String {
 /// `fe2o3_net`, `5 * 3` and a lone `_` are ordinary text. A backslash sets the next character literally,
 /// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
 /// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
+///
+/// Reads the markup as it stands, the conditionals and loops in it already read: a caller holding text that
+/// came out of [`parse_inlines_in`], a table cell or a caption cut from a capture [`read_statements`] has
+/// passed over, or a test. A refusal it meets is not surfaced.
 pub(crate) fn parse_inlines(text: &str) -> Vec<Inline> {
 	let mut skips = Refusals::default();
-	// A table cell, a caption or a flattened array cell has no item-level span of its own to attribute a
-	// refusal to (see `Refusal`'s own doc comment on why the item, not the character, is the finest
-	// boundary kept); this thin wrapper already threw the summary away before this unit, so a zero span
-	// changes nothing a caller could observe.
-	parse_inlines_in(text, Span::new(0, 0), &mut skips)
+	scan_inlines(text, Span::new(0, 0), &mut skips)
+}
+
+/// Reads one run of inline markup that nothing has read yet: its conditionals and loops, at any depth, are
+/// read first ([`read_statements`]) in the bindings in force where the item at `span` stands, so a cell, a
+/// caption, a footnote or an emphasis holds what Typst sets there and never the source of an `#if`. Every
+/// inline body below it is cut from the text read here, so each is read once, with the one scope.
+pub(crate) fn parse_inlines_in(
+	text:	&str,
+	span:	Span,
+	skips:	&mut Refusals,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
+)
+	-> Vec<Inline>
+{
+	let text = read_statements(text, span, skips, binds);
+	scan_inlines(&text, span, skips)
 }
 
 /// The inline scanner proper, recording every unhandled inline call into `skips`, at `span` (the whole
 /// containing item -- a paragraph, a heading, a list item -- rather than the call's own narrower
 /// position; see `Refusal`'s doc comment), so a `#func[...]` the reader cannot set is reported rather
-/// than leaked into the running text. [`parse_inlines`] is the thin wrapper for callers -- table cells,
-/// captions, flattening -- that do not surface the summary.
-fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline> {
+/// than leaked into the running text. Its text has had its conditionals and loops read.
+fn scan_inlines(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let n					= chars.len();
 	let mut runs:	Vec<Inline>	= Vec::new();
@@ -1058,7 +1073,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 							}
 							// The display markup becomes its own runs, so the index page sets an emphasised entry
 							// italic and a display/sort split shows the display -- parsed exactly as the body's is.
-							let display = parse_inlines_in(&k.display, span, skips);
+							let display = scan_inlines(&k.display, span, skips);
 							runs.push(Inline::Index { term: k.term, sub: k.sub, display, main: k.main });
 						}
 					};
@@ -1072,7 +1087,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 						},
 						Call::Visible { display, index } => {
 							push_index(&mut runs, &mut plain, index, skips);
-							let sub = parse_inlines_in(&display, span, skips);
+							let sub = scan_inlines(&display, span, skips);
 							// A plain display folds back into the running text, keeping the fast single-run
 							// path; a display carrying markup becomes its own runs.
 							if let [Inline::Text(t)] = sub.as_slice() {
@@ -1245,7 +1260,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 /// display text rather than leaking its raw source. A glossary term keeps its own first-use bold-italic
 /// (which subsumes the surrounding emphasis), so only the plain stretches carry the emphasis face.
 fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str, span: Span, skips: &mut Refusals) {
-	let sub = parse_inlines_in(inner, span, skips);
+	let sub = scan_inlines(inner, span, skips);
 	if let [Inline::Text(t)] = sub.as_slice() {
 		runs.push(if strong { Inline::Strong(t.clone()) } else { Inline::Emph(t.clone()) });
 		return;
@@ -1345,7 +1360,7 @@ fn link_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> Opti
 	// A following `[...]` group is the link text; without one, the destination stands as the text.
 	if chars.get(after_dest) == Some(&'[') {
 		let Some((body, next)) = read_group(chars, after_dest) else { return None; };
-		return Some((parse_inlines_in(&body, span, skips), next));
+		return Some((scan_inlines(&body, span, skips), next));
 	}
 	let text = link_dest_text(&dest);
 	Some((vec![Inline::Text(text)], after_dest))
@@ -1386,14 +1401,14 @@ fn unknown_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals)
 		// A `#name[body]`: the bracketed content is the call's displayable body.
 		Some('[') => {
 			let Some((body, next)) = read_group(chars, j) else { return None; };
-			Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)))
+			Some((Some(scan_inlines(&body, span, skips)), next, fmt!("#{}", name)))
 		},
 		// A `#name(args)` and any following `[body]`: read the arguments away, then fold a body if one trails.
 		Some('(') => {
 			let Some((_, after_args)) = read_group(chars, j) else { return None; };
 			if chars.get(after_args) == Some(&'[') {
 				let Some((body, next)) = read_group(chars, after_args) else { return None; };
-				return Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)));
+				return Some((Some(scan_inlines(&body, span, skips)), next, fmt!("#{}", name)));
 			}
 			Some((None, after_args, fmt!("#{}", name)))
 		},
@@ -1430,7 +1445,7 @@ fn construct_name(trimmed: &str) -> String {
 
 /// A declarative styling construct's name as a report gives it: `#set <target>`, `#show <selector>` or
 /// `#show:`, read from its opening line.
-fn decl_name(first: &str) -> String {
+pub(crate) fn decl_name(first: &str) -> String {
 	if let Some(name) = crate::lang::rules::rule_name(first) {
 		return name;
 	}
@@ -1654,7 +1669,7 @@ fn footnote_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 		return None;
 	}
 	let Some((inner, next)) = read_group(chars, open) else { return None; };
-	Some((parse_inlines_in(&inner, span, skips), next))
+	Some((scan_inlines(&inner, span, skips), next))
 }
 
 /// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
@@ -2138,55 +2153,166 @@ enum FlowRead {
 /// other branches, `else` and brackets included. Any other conditional, and every loop, is dropped whole
 /// and refused at its line: never set as prose.
 fn flow_mask(src: &str, guards: &crate::lang::rules::GuardScope, at: usize) -> (Vec<bool>, Vec<(usize, Refusal)>) {
-	let mut keep	= vec![true; src.len()];
-	let mut sites	= Vec::new();
-	mask_flows(src, 0, src.len(), (guards, at), &mut keep, &mut sites);
-	sites.sort_by_key(|(at, _)| *at);
+	let (keep, sites, _) = flow_mask_in(src, guards, at, lex::Level::Own);
 	(keep, sites)
 }
 
+/// As [`flow_mask`], reading the flows `level` names, and with the bytes a quote is to be set before: the
+/// branch an equation keeps is text, set in quotes there.
+fn flow_mask_in(src: &str, guards: &crate::lang::rules::GuardScope, at: usize, level: lex::Level)
+	-> (Vec<bool>, Vec<(usize, Refusal)>, Vec<usize>)
+{
+	let mut keep	= vec![true; src.len()];
+	let mut sites	= Vec::new();
+	let mut quotes	= Vec::new();
+	mask_flows(src, 0, src.len(), (guards, at), level, &mut keep, &mut sites, &mut quotes);
+	sites.sort_by_key(|(at, _)| *at);
+	(keep, sites, quotes)
+}
+
 /// Reads the flows of `src[from..to]`, a run of markup, into `keep` and `sites`. A kept branch is markup
-/// read at the same level, so the flows standing in it are read in turn.
+/// read at the same level, so the flows standing in it are read in turn. One standing in an equation keeps
+/// its branch as quoted text when the branch is plain words, and is refused when it holds markup.
 fn mask_flows(
 	src:	&str,
 	from:	usize,
 	to:		usize,
 	guards:	(&crate::lang::rules::GuardScope, usize),	// and the byte of its text `src` starts at
+	level:	lex::Level,
 	keep:	&mut [bool],
 	sites:	&mut Vec<(usize, Refusal)>,
+	quotes:	&mut Vec<usize>,
 )
 {
 	let text = &src[from..to];
-	for f in lex::flows(text) {
+	for f in lex::flows_in(text, level) {
 		let (start, end) = (from + f.start, from + f.end);
 		for k in &mut keep[start..end] {
 			*k = false;
 		}
+		let name = match f.kw {
+			lex::Kw::For	=> "#for",
+			lex::Kw::While	=> "#while",
+			_				=> "#if",
+		};
+		let refuse = |note: String| {
+			let line_end = src[start..].find('\n').map_or(src.len(), |k| start + k);
+			(start, Refusal {
+				name:	name.to_string(),
+				span:	Span::new(start as u32, line_end as u32),
+				class:	RefusalClass::Unsupported,
+				file:	String::new(),
+				note:	Some(note),
+			})
+		};
 		match read_flow(text, &f, (guards.0, guards.1 + from)) {
 			FlowRead::Keep(a, b)	=> {
+				// In an equation the branch is text, not maths, so plain words alone are read: a quoted
+				// string is what the maths reader sets upright.
+				if f.math {
+					let branch = &text[a..b];
+					if branch.chars().any(|c| "#$*_@`\\\"<>[]{}^~".contains(c)) {
+						sites.push(refuse(
+							"takes a branch of markup the reader does not set in an equation, so no branch of it is set"
+								.to_string()));
+					} else if !branch.trim().is_empty() {
+						for k in &mut keep[from + a..from + b] {
+							*k = true;
+						}
+						quotes.push(from + a);
+						quotes.push(from + b);
+					}
+					continue;
+				}
 				for k in &mut keep[from + a..from + b] {
 					*k = true;
 				}
-				mask_flows(src, from + a, from + b, guards, keep, sites);
+				mask_flows(src, from + a, from + b, guards, level, keep, sites, quotes);
 			},
 			FlowRead::Drop			=> {},
-			FlowRead::Refuse(note)	=> {
-				let name = match f.kw {
-					lex::Kw::For	=> "#for",
-					lex::Kw::While	=> "#while",
-					_				=> "#if",
-				};
-				let line_end = src[start..].find('\n').map_or(src.len(), |k| start + k);
-				sites.push((start, Refusal {
-					name:	name.to_string(),
-					span:	Span::new(start as u32, line_end as u32),
-					class:	RefusalClass::Unsupported,
-					file:	String::new(),
-					note:	Some(note),
-				}));
-			},
+			FlowRead::Refuse(note)	=> sites.push(refuse(note)),
 		}
 	}
+}
+
+/// Reads the conditionals and loops of one run of inline markup, at any depth, in the bindings in force where
+/// the item at `span` stands, and returns the text with what each leaves: the taken branch's inside where it
+/// stood, and nothing of the rest. A conditional the reader cannot evaluate, and every loop, is dropped whole
+/// and recorded at the item, which is as fine as an inline text's site goes (see [`Refusal`]).
+///
+/// The text's own `#let`s bind where they stand and to the end of the block they stand in, over the names in
+/// force where the item starts: the one scope Typst reads a content block in. A conditional in a cell, a
+/// caption or a note thus resolves where it is written, not where the paragraph holding it starts.
+fn read_statements(
+	text:	&str,
+	span:	Span,
+	skips:	&mut Refusals,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
+)
+	-> String
+{
+	if !holds_flow(text) {
+		return text.to_string();	// the common case: nothing to read
+	}
+	let scope = binds.guards.body(binds.guard_at + span.start as usize, text);
+	statements_in(text, span, skips, &scope)
+}
+
+/// Might `text` hold a conditional or a loop? A cheap test ahead of the lexer, which decides.
+fn holds_flow(text: &str) -> bool {
+	text.contains("#if") || text.contains("#for") || text.contains("#while")
+}
+
+/// A captured construct, its conditionals and loops read once as the capture is dispatched, where it stands:
+/// a table's cells, a figure's caption, a data array's cells and a furniture call's arguments are read
+/// apart from the text round them, and no body re-read follows them. A capture whose body is re-read as
+/// items (a callout, a column body, an expanded binding) is read there, in the body's own scope.
+fn read_capture(mut cap: Capture, skips: &mut Refusals, binds: crate::lang::rules::Bindings<'_, '_>) -> Capture {
+	let span = Span::new(cap.start, cap.start);
+	match &cap.kind {
+		CaptureKind::Figure | CaptureKind::Table | CaptureKind::Image | CaptureKind::TemplateCall(_) => {
+			cap.buf = read_statements(&cap.buf, span, skips, binds);
+		},
+		// A `#let` statement's own text is code, so its value alone is read as markup.
+		CaptureKind::Let(_) => if let Some(eq) = cap.buf.find('=') {
+			let (head, value) = cap.buf.split_at(eq + 1);
+			cap.buf = fmt!("{}{}", head, read_statements(value, span, skips, binds));
+		},
+		_ => {},
+	}
+	cap
+}
+
+/// As [`read_statements`], with the scope the text reads in already built.
+fn statements_in(text: &str, span: Span, skips: &mut Refusals, scope: &crate::lang::rules::GuardScope) -> String {
+	let (mut keep, sites, quotes) = flow_mask_in(text, scope, 0, lex::Level::Deep);
+	for (_, mut site) in sites {
+		site.span = span;
+		skips.sites.push(site);
+	}
+	// A `#let` binds a name and sets nothing, so its text is not set, and is reported as at a line's start.
+	for b in lex::bindings(text).iter().filter(|b| b.text.starts_with("#let")) {
+		if !keep[b.start] {
+			continue;	// in a branch not taken
+		}
+		for k in &mut keep[b.start..b.at.min(text.len())] {
+			*k = false;
+		}
+		skips.record("#let", span);
+	}
+	let mut out = String::with_capacity(text.len());
+	for (at, c) in text.char_indices() {
+		for _ in quotes.iter().filter(|&&q| q == at) {
+			out.push('"');
+		}
+		if keep[at] {
+			out.push(c);
+		}
+	}
+	for _ in quotes.iter().filter(|&&q| q == text.len()) {
+		out.push('"');
+	}
+	out
 }
 
 /// Decides how one flow of `text` is read. A conditional takes its first arm whose condition holds, or its
@@ -2199,6 +2325,10 @@ fn read_flow(text: &str, f: &lex::Flow, guards: (&crate::lang::rules::GuardScope
 	}
 	if f.kw != lex::Kw::If {
 		return FlowRead::Refuse("is a loop the reader does not run, so its body is not set".to_string());
+	}
+	if f.coded {
+		return FlowRead::Refuse(
+			"stands in code whose own bindings the reader does not read, so no branch of it is set".to_string());
 	}
 	for arm in &f.arms {
 		let taken = match arm.cond {
@@ -2501,7 +2631,7 @@ fn template_call_parts(buf: &str, name: &str) -> Option<(String, String)> {
 /// Is this line a `#show: <ident>.with(` whole-document template application -- the form whose named
 /// arguments lower onto the theme? Distinguished from an introspective `#show ...: it => { ... }`,
 /// which carries no `.with(` and is left to be refused.
-fn is_show_doc_with(trimmed: &str) -> bool {
+pub(crate) fn is_show_doc_with(trimmed: &str) -> bool {
 	let rest = match trimmed.strip_prefix("#show:") {
 		Some(r)	=> r.trim_start(),
 		None	=> return false,
@@ -2519,7 +2649,7 @@ fn is_show_doc_with(trimmed: &str) -> bool {
 /// for? The target list is [`crate::lang::set::LOWERABLE_SET_TARGETS`], the single source of truth the
 /// lowering itself matches on, so the reader and the lowering never drift apart. A `#set` on any other
 /// target returns `false` and is left to [`code_skip`] to refuse, since the reader has no field for it.
-fn is_lowerable_set(trimmed: &str) -> bool {
+pub(crate) fn is_lowerable_set(trimmed: &str) -> bool {
 	let rest = match trimmed.strip_prefix("#set ") {
 		Some(r)	=> r.trim_start(),
 		None	=> return false,
@@ -2562,6 +2692,7 @@ fn dispatch_capture(
 )
 	-> Outcome<()>
 {
+	let cap = read_capture(cap, skips, binds);
 	match cap.kind {
 		CaptureKind::Let(name) => {
 			arrays.insert(name, parse_let_array(&cap.buf));
@@ -2851,7 +2982,8 @@ fn dispatch_capture(
 					Span::new(cap.start, cap.start));
 				return Ok(());
 			}
-			let args		= content_call_args(&cap.buf, &name);
+			let raw			= content_call_raw(&cap.buf, &name);
+			let args: Vec<String> = raw.iter().map(|a| content_arg_value(a)).collect();
 			let expanded	= expand_content_body(cf, &args);
 			// A styled-box content binding (`#let stamp(s) = box(fill: ..)[*v: #s*]`): the inner text is set,
 			// but the box's own styling this reader cannot draw is recorded as a visible skip here, so the
@@ -2861,7 +2993,7 @@ fn dispatch_capture(
 			}
 			let mut nested: Vec<String> = binds.active.to_vec();
 			nested.push(name.clone());
-			let scope = content_scope(cf, &args, binds, cap.start as usize, &expanded);
+			let scope = content_scope(cf, &raw, binds, cap.start as usize, &expanded);
 			let (mut inner, sub) = res!(parse_items(&expanded, binds.with_active(&nested).with_guards(&scope, 0)));
 			skips.merge(sub);
 			items.append(&mut inner);
@@ -3024,11 +3156,12 @@ fn settle_container_body(items: &mut Vec<Item>, skips: &mut Refusals) {
 	*items = kept;
 }
 
-/// The positional arguments of a captured content-binding reference, each evaluated to its substitution
-/// text: a `"quoted string"` yields its contents, a `[bracketed content]` its inner markup, and any other
-/// value (a number, an identifier) its trimmed source. A bare `#name` reference, or a `#name[ ... ]` whose
-/// single argument is the bracket body, is handled too. An empty list when the reference takes none.
-fn content_call_args(buf: &str, name: &str) -> Vec<String> {
+/// The positional arguments of a captured content-binding reference as written, trimmed; [`content_arg_value`]
+/// evaluates each to its substitution text: a `"quoted string"` yields its contents, a `[bracketed content]`
+/// its inner markup, and any other value (a number, an identifier) its trimmed source. A bare `#name`
+/// reference, or a `#name[ ... ]` whose single argument is the bracket body, is handled too. An empty list
+/// when the reference takes none.
+fn content_call_raw(buf: &str, name: &str) -> Vec<String> {
 	let chars:	Vec<char>	= buf.chars().collect();
 	let at = match find_lit(&chars, &fmt!("#{}", name)) {
 		Some(a)	=> a,
@@ -3038,15 +3171,13 @@ fn content_call_args(buf: &str, name: &str) -> Vec<String> {
 	match chars.get(j) {
 		Some('(') => {
 			match read_group(&chars, j) {
-				Some((inner, _))	=> split_top_args(&inner).into_iter()
-										.map(|a| content_arg_value(a.trim()))
-										.collect(),
+				Some((inner, _))	=> split_top_args(&inner).into_iter().map(|a| a.trim().to_string()).collect(),
 				None				=> Vec::new(),
 			}
 		},
 		// A `#name[ ... ]` call: the bracket body is the single positional argument.
 		Some('[') => match read_group(&chars, j) {
-			Some((inner, _))	=> vec![inner],
+			Some((inner, _))	=> vec![fmt!("[{}]", inner)],
 			None				=> Vec::new(),
 		},
 		_ => Vec::new(),	// a bare `#name` reference
@@ -3068,22 +3199,28 @@ fn content_arg_value(arg: &str) -> String {
 }
 
 /// The scope an expanded content binding's conditionals resolve in: the names in force where its body is
-/// written, where Typst evaluates it, over the body's own bindings. Arguments substituted into the body are
-/// the call's, evaluated where the call stands (`at` in the text `binds` reads), so where the two places
-/// differ on a name the name is unread rather than taken from either.
+/// written, where Typst evaluates it, over the body's own bindings. `raw` is the call's arguments as written,
+/// evaluated where the call stands (`at` in the text `binds` reads), so where the two places differ on a
+/// name the name is unread rather than taken from either; each parameter holds its argument when that is a
+/// string or boolean literal.
 fn content_scope(
 	cf:			&crate::lang::rules::ContentFn,
-	args:		&[String],
+	raw:		&[String],
 	binds:		crate::lang::rules::Bindings<'_, '_>,
 	at:			usize,
 	expanded:	&str,
 )
 	-> crate::lang::rules::GuardScope
 {
-	let base = match args.is_empty() {
+	let mut base = match raw.is_empty() {
 		true	=> cf.scope.clone(),
 		false	=> cf.scope.agree(&binds.guards.base_at(binds.guard_at + at)),
 	};
+	// A parameter holds the literal its argument is written as, a string or a boolean; given any other
+	// expression, or none, it is a value the reader does not know.
+	for (param, arg) in cf.params.iter().zip(raw) {
+		base = base.bound_to(param, arg);
+	}
 	crate::lang::rules::GuardScope::within(base, expanded, 0)
 }
 
@@ -3285,25 +3422,24 @@ pub(crate) fn substitute_content_calls(
 						// or a lone `[body]` -- reading its positional arguments the same way [`content_call_args`]
 						// reads a captured own-line call's, so both paths substitute identically.
 						let mut k		= j;
-						let mut args:	Vec<String>	= Vec::new();
+						let mut raw:	Vec<String>	= Vec::new();
 						if chars.get(k) == Some(&'(') {
 							if let Some((inner, after)) = read_group(&chars, k) {
-								args = split_top_args(&inner).into_iter()
-									.map(|a| content_arg_value(a.trim()))
-									.collect();
+								raw = split_top_args(&inner).into_iter().map(|a| a.trim().to_string()).collect();
 								k = after;
 							}
 						}
 						if chars.get(k) == Some(&'[') {
 							if let Some((inner, after)) = read_group(&chars, k) {
 								// A `#name[ ... ]` call with no paren group: the bracket body is the single
-								// positional argument, mirroring [`content_call_args`]'s own bracket arm.
-								if args.is_empty() {
-									args = vec![inner];
+								// positional argument, mirroring [`content_call_raw`]'s own bracket arm.
+								if raw.is_empty() {
+									raw = vec![fmt!("[{}]", inner)];
 								}
 								k = after;
 							}
 						}
+						let args: Vec<String> = raw.iter().map(|a| content_arg_value(a)).collect();
 						// A self- or mutually-referential binding is refused the instant its name recurs, so a
 						// cycle unwinds at its own length; the depth cap is the backstop for a pathological chain
 						// of distinct bindings. Either way the call is consumed (the surrounding prose is kept)
@@ -3321,6 +3457,15 @@ pub(crate) fn substitute_content_calls(
 							continue;
 						}
 						let expanded		= expand_content_body(cf, &args);
+						// Its conditionals and loops are read in the scope in force where the binding was
+						// written, where Typst evaluates it, before the text is spliced into the prose round it.
+						let expanded		= match holds_flow(&expanded) {
+							true	=> {
+								let scope = content_scope(cf, &raw, binds, span.start as usize, &expanded);
+								statements_in(&expanded, span, skips, &scope)
+							},
+							false	=> expanded,
+						};
 						// A styled-box content binding used inline (`see #stamp("v2") for details`): the inner text
 						// is spliced into the surrounding prose, and the box's own styling this reader cannot draw
 						// is recorded as a visible skip -- the styling is never silently lost, the text never dropped.
@@ -5369,7 +5514,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			"g did not translate the key to its value: {:?}", runs);
 		// An unknown key: the key text stands and the miss is recorded on the skip tally.
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("A #t[nonesuch] term.", Span::new(0, 0), &mut skips);
+		let runs = scan_inlines("A #t[nonesuch] term.", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
 			"unknown term-dict key did not fall back to its text: {:?}", runs);
 		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
@@ -5504,7 +5649,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	#[test]
 	fn unknown_inline_call_is_recorded_not_leaked() {
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
+		let runs = scan_inlines("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#overline") || t.contains("#v("))),
 			"raw unknown call leaked: {:?}", runs);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
@@ -6070,6 +6215,30 @@ bound\".\n";
 		assert_eq!(strip_comments("x /* a /* b */ c", &toks[..16], &[]), "x ");
 		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &toks[17..43], &[]), " y");
 		assert_eq!(lex::live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
+	}
+
+	/// A conditional standing in a code block, whose own `let` the reader does not read, would resolve against
+	/// the wrong binding if it were evaluated, so it is refused at its item with its reason: neither branch is
+	/// set, where `a` is true outside the block and false inside it.
+	#[test]
+	fn a_conditional_in_a_code_block_is_refused_not_evaluated() -> Outcome<()> {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let src = "#let a = true\n\nP #{ let a = false; [#if a [XBRANCH] else [YBRANCH]] } q.\n";
+		let guards = crate::lang::rules::GuardScope::of_file(src, None, 0);
+		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards, 0);
+		let (items, skips) = res!(document_with_templates(src, binds));
+		let text: String = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(runs.iter().map(|r| match r {
+				Inline::Text(t) => t.clone(),
+				_ => String::new(),
+			}).collect::<String>()),
+			_ => None,
+		}).collect();
+		assert!(!text.contains("XBRANCH") && !text.contains("YBRANCH"), "{}", text);
+		let notes: Vec<&str> = skips.sites().iter().filter(|r| r.name == "#if").filter_map(|r| r.note.as_deref()).collect();
+		assert_eq!(notes, ["stands in code whose own bindings the reader does not read, so no branch of it is set"]);
+		Ok(())
 	}
 
 	/// A conditional mid-paragraph keeps its taken branch in the paragraph, as Typst joins the branch's

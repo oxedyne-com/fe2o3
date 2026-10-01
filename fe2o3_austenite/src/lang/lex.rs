@@ -382,9 +382,10 @@ impl Lexer {
 		}
 	}
 
-	/// Where the expression embedded at the scan's own level stands, while one is open.
-	fn phase(&self) -> Option<Embed> {
-		match self.frames.get(1) {
+	/// Where the expression whose frame is the `k`th stands, while it is open: the first, for the one
+	/// embedded at the scan's own level.
+	fn phase_at(&self, k: usize) -> Option<Embed> {
+		match self.frames.get(k) {
 			Some(Frame::Embed(e))	=> Some(*e),
 			_						=> None,
 		}
@@ -1237,6 +1238,15 @@ pub(crate) struct Flow {
 	pub(crate) end:		usize,		// the byte just past its last body, or the end of what it took
 	pub(crate) arms:	Vec<Arm>,
 	pub(crate) whole:	bool,		// every arm closed, and no call or field follows the last
+	pub(crate) coded:	bool,		// it stands in code, a code block or a function's body, whose names this scan cannot see
+	pub(crate) math:	bool,		// it stands in an equation
+}
+
+/// Which of a text's conditionals and loops [`flows_in`] lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Level {
+	Own,	// those standing in the text's own markup
+	Deep,	// those too in any content block or equation inside it: a cell's, a caption's, a note's, a call's argument
 }
 
 /// One arm of a [`Flow`].
@@ -1250,31 +1260,68 @@ pub(crate) struct Arm {
 /// Every conditional and loop standing in `src`'s own markup, in order. One in another's body, or in any
 /// other group, is that group's, and is not listed.
 pub(crate) fn flows(src: &str) -> Vec<Flow> {
+	flows_in(src, Level::Own)
+}
+
+/// The conditionals and loops of `src` that `level` names, in order, each the outermost of its kind: one in
+/// another's head or body is that statement's. At [`Level::Deep`] a flow in a content block or an equation is
+/// listed wherever it stands, a call's argument list included, with its `coded` set where it stands in code
+/// whose own bindings (a code block's `let`, a function's parameters) this scan does not read. A flow inside
+/// a `#let`, `#set` or `#show` statement is that statement's, read when it is, and not listed.
+pub(crate) fn flows_in(src: &str, level: Level) -> Vec<Flow> {
 	let chars: Vec<(usize, char)>	= src.char_indices().collect();
 	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
 	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
 	let mut out: Vec<Flow>		= Vec::new();
 	let mut lx					= Lexer::markup_over(src);
 	let mut cur: Option<Flow>	= None;
-	let mut hash: Option<usize>	= None;	// the byte of a `#` just read at the scan's own level
+	let mut hash: Option<usize>	= None;	// the byte of a `#` just read where a flow may stand
+	let mut at					= 1usize;	// the index of the frame of the expression a `#` opened there
+	let mut coded				= false;	// whether that `#` stood in code
+	let mut math				= false;	// whether it stood in an equation
+	let mut arrows: Vec<usize>	= Vec::new();	// the depth of each open group a `=>` was read in
 	let mut head				= 0usize;	// where the open arm's condition starts
 	// The body being read: its condition, its first byte and whether it is a content block.
 	let mut open: Option<(Option<(usize, usize)>, usize, bool)> = None;
 	let mut i = 0usize;
 	while i < only.len() {
-		let before		= lx.phase();
+		let before		= lx.phase_at(at);
 		let deep		= lx.frames.len();
 		let (n, tok)	= lx.step(&only, i);
-		let after		= lx.phase();
+		let after		= lx.phase_at(at);
 		let next		= i + n;
-		// A `#` read at the scan's own level opens a new expression there.
-		let fresh		= tok == Tok::Hash && after == Some(Embed::Start) && lx.frames.len() == 2;
+		if tok == Tok::Code && only[i] == '>' && i > 0 && only[i - 1] == '=' && matches!(lx.frames.last(), Some(Frame::Code(_))) {
+			arrows.push(lx.frames.len());
+		}
+		arrows.retain(|&d| d <= lx.frames.len());
+		// A `#` opens an expression: where a new flow may stand, or at the open flow's own level, ending it.
+		let opened = tok == Tok::Hash && matches!(lx.frames.last(), Some(Frame::Embed(Embed::Start)));
+		// Where a `#` here may open a flow: `Some((in code, in an equation))`.
+		let host = |lx: &Lexer| -> Option<(bool, bool)> {
+			let k = lx.frames.len().checked_sub(2)?;
+			match level {
+				Level::Own	=> (lx.frames.len() == 2).then_some((false, false)),
+				Level::Deep	=> {
+					let stmt = lx.frames[..k + 1].iter().any(|f| matches!(f, Frame::Embed(Embed::Stmt)));
+					let code = lx.frames[..k].iter().any(|f| *f == Frame::Code('}')) || !arrows.is_empty();
+					match lx.frames[k] {
+						Frame::Markup(_) if !stmt	=> Some((code, false)),
+						Frame::Math(_) if !stmt		=> Some((code, true)),
+						_							=> None,
+					}
+				},
+			}
+		};
+		let fresh = opened && match cur {
+			Some(_)	=> lx.frames.len() == at + 1,
+			None	=> host(&lx).is_some(),
+		};
 		match cur.as_mut() {
 			None => {
-				// A flow opens where an expression embedded at the scan's own level reads a loop's or a
+				// A flow opens where an expression embedded at a flow's level reads a loop's or a
 				// conditional's keyword first.
 				if let (Some(h), Some(Embed::Start), Some(Embed::Head { kw, .. })) = (hash, before, after) {
-					cur		= Some(Flow { kw, start: h, end: byte(next), arms: Vec::new(), whole: true });
+					cur		= Some(Flow { kw, start: h, end: byte(next), arms: Vec::new(), whole: true, coded, math });
 					head	= byte(next);
 				}
 			},
@@ -1289,13 +1336,13 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 					_														=> {},
 				}
 				// A body closes on the step that brings the scan back to the expression's own level.
-				if deep > 2 && lx.frames.len() == 2 && matches!(after, Some(Embed::Tail { .. })) {
+				if deep > at + 1 && lx.frames.len() == at + 1 && matches!(after, Some(Embed::Tail { .. })) {
 					if let Some((cond, from, content)) = open.take() {
 						f.arms.push(Arm { cond, body: (from, byte(next)), content });
 						f.end = byte(next);
 					}
 				}
-				// The expression has ended, before the character this step read at the scan's own level. One
+				// The expression has ended, before the character this step read at its own level. One
 				// that is not whole takes everything up to there.
 				if after.is_none() || fresh {
 					if !f.whole || f.arms.is_empty() || open.is_some() {
@@ -1308,7 +1355,12 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 				}
 			},
 		}
-		hash = if fresh { Some(byte(i)) } else { None };
+		hash = None;
+		if fresh {
+			hash	= Some(byte(i));
+			at		= lx.frames.len() - 1;
+			(coded, math) = host(&lx).unwrap_or((false, false));
+		}
 		i = next;
 	}
 	if let Some(mut f) = cur {
@@ -1325,6 +1377,7 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 /// A `#let` or `#import` embedded in markup, and the stretch of the text its names are bound over.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Binding {
+	pub(crate) start:	usize,			// the byte of its `#`
 	pub(crate) text:	String,			// the statement from its `#`, its comments dropped
 	pub(crate) at:		usize,			// the byte just past it, where its names come into force
 	pub(crate) until:	Option<usize>,	// the byte of the closer of the block it stands in; `None` at the text's own level
@@ -1343,7 +1396,7 @@ pub(crate) fn bindings(src: &str) -> Vec<Binding> {
 	let mut lx					= Lexer::markup();
 	// The statements each open block holds, awaiting its closer; the text's own level at the bottom.
 	let mut held: Vec<Vec<usize>>			= vec![Vec::new()];
-	let mut cur: Option<(String, usize)>	= None;	// the statement being read, and its expression's frame
+	let mut cur: Option<(String, usize, usize)>	= None;	// the statement being read, its expression's frame and its `#`
 	let mut hash: Option<usize>				= None;	// the frame of an expression a `#` has just opened
 	let mut i = 0usize;
 	while i < only.len() {
@@ -1356,9 +1409,9 @@ pub(crate) fn bindings(src: &str) -> Vec<Binding> {
 			(Some(e), None) if stmt(&lx, e) && (at_word(word, 0, "let") || at_word(word, 0, "import")) => {
 				let mut text = String::from("#");
 				text.extend(word);
-				cur = Some((text, e));
+				cur = Some((text, e, byte(i).saturating_sub(1)));
 			},
-			(_, Some((text, e))) => {
+			(_, Some((text, e, start))) => {
 				if stmt(&lx, *e) {
 					if tok != Tok::Comment {
 						text.extend(word);
@@ -1367,7 +1420,7 @@ pub(crate) fn bindings(src: &str) -> Vec<Binding> {
 					// The statement ended on this step: on the `;` it took, or before the character the level
 					// beneath it read.
 					let at = if tok == Tok::Code && only[i] == ';' { byte(next) } else { byte(i) };
-					out.push(Binding { text: std::mem::take(text), at, until: None });
+					out.push(Binding { start: *start, text: std::mem::take(text), at, until: None });
 					if let Some(level) = held.last_mut() {
 						level.push(out.len() - 1);
 					}
@@ -1392,8 +1445,8 @@ pub(crate) fn bindings(src: &str) -> Vec<Binding> {
 		}
 		i = next;
 	}
-	if let Some((text, _)) = cur {
-		out.push(Binding { text, at: src.len(), until: None });
+	if let Some((text, _, start)) = cur {
+		out.push(Binding { start, text, at: src.len(), until: None });
 		if let Some(level) = held.last_mut() {
 			level.push(out.len() - 1);
 		}
@@ -1849,5 +1902,57 @@ mod tests {
 		let src = "(a, \"b)\", [c (d], /* ) */ e) tail";
 		assert_eq!(group_end(src, 0).map(|e| &src[e..]), Some(" tail"));
 		assert_eq!(group_end("(a", 0), None);
+	}
+
+	/// The texts of the flows `level` lists in `src`, with whether each stands in code and in an equation.
+	fn deep(src: &str, level: Level) -> Vec<(String, bool, bool)> {
+		flows_in(src, level).into_iter().map(|f| (src[f.start..f.end].to_string(), f.coded, f.math)).collect()
+	}
+
+	#[test]
+	fn a_flow_in_a_content_block_is_listed_at_the_deep_level_only() {
+		let src = "#table(columns: 2, [c1], [#if a [X] else [Y]])\nNote#footnote[F #if b [Z]].\n#if c [W]\n";
+		assert_eq!(deep(src, Level::Own), vec![("#if c [W]".to_string(), false, false)]);
+		assert_eq!(deep(src, Level::Deep), vec![
+			("#if a [X] else [Y]".to_string(), false, false),
+			("#if b [Z]".to_string(), false, false),
+			("#if c [W]".to_string(), false, false),
+		]);
+	}
+
+	#[test]
+	fn a_flow_in_an_equation_is_listed_in_one_flagged_math() {
+		let src = "P $x #if a [MX] else [MY]$ q $y$ #if b [Z]\n";
+		assert_eq!(deep(src, Level::Own), vec![("#if b [Z]".to_string(), false, false)]);
+		assert_eq!(deep(src, Level::Deep), vec![
+			("#if a [MX] else [MY]".to_string(), false, true),
+			("#if b [Z]".to_string(), false, false),
+		]);
+	}
+
+	#[test]
+	fn a_flow_in_code_is_flagged_and_one_in_a_statement_is_not_listed() {
+		let src = "#{ let a = 1; [#if a [X]] }\n#f(r => [#if r [Y]])\n#let blk = [#if a [Z]]\n#set text(fill: if a [W])\n";
+		assert_eq!(deep(src, Level::Deep), vec![
+			("#if a [X]".to_string(), true, false),
+			("#if r [Y]".to_string(), true, false),
+		]);
+	}
+
+	#[test]
+	fn a_flow_inside_a_flow_is_that_flows_and_a_loop_is_listed_whole() {
+		let src = "#table([#for x in (1, 2) [#if x [A]]])\n";
+		let got = flows_in(src, Level::Deep);
+		assert_eq!(got.len(), 1);
+		assert_eq!(got[0].kw, Kw::For);
+		assert_eq!(&src[got[0].start..got[0].end], "#for x in (1, 2) [#if x [A]]");
+	}
+
+	#[test]
+	fn a_let_in_a_text_is_listed_with_the_byte_of_its_hash() {
+		let src = "A [#let a = 1\nB]";
+		let b = bindings(src);
+		assert_eq!(b.len(), 1);
+		assert_eq!(&src[b[0].start..b[0].at], "#let a = 1");
 	}
 }

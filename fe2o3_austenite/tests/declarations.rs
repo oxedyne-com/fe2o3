@@ -1004,3 +1004,279 @@ fn a_bare_content_block_inside_a_paragraph_is_reported() -> Outcome<()> {
 	assert_eq!(sites, [(4, "#[ stands inside a paragraph, so it is set as text, brackets and all")]);
 	Ok(())
 }
+
+// Conditionals and loops in every inline context, and a walked guard branch's rules (round 5, root 4a). Each
+// fixture is one the Typst 0.15.1 oracle was run on (`austenite-r5-r4a-probe/cases`).
+
+/// What a compile reported for a loop or a conditional, as `(line, message)`.
+fn flow_sites(report: &Report) -> Vec<(usize, String)> {
+	report.diagnostics.iter()
+		.filter(|d| d.message.starts_with("#if") || d.message.starts_with("#for") || d.message.starts_with("#while"))
+		.map(|d| (d.line, d.message.clone()))
+		.collect()
+}
+
+/// A conditional in a table cell, a caption, a footnote, an emphasis and a strong call, mid-cell and alone,
+/// sets its taken branch where it stands and nothing of the statement, as Typst sets it: none of an `#if`, an
+/// untaken branch or a bracket reaches a run, and no site is reported.
+#[test]
+fn a_conditional_in_a_cell_a_caption_a_note_or_an_emphasis_is_read() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let a = true
+
+Intro.
+
+#table(columns: 2, [c1], [#if a [CELLA] else [CELLNA]])
+
+#table(columns: 2, [d1], [x #if a [CELLB] else [CELLNB] y])
+
+#figure(rect[r], caption: [Cap #if a [CAPA] else [CAPNA]])
+
+Note#footnote[Foot #if a [FOOTA] else [FOOTNA]].
+
+#emph[Emph #if a [EMA] else [EMNA]]
+
+Para #strong[Bold #if a [BA] else [BNA]] end.
+
+#table(columns: 1, [#if true [TRUECELL]])
+"##)]));
+	let text = words(&rendered);
+	for want in ["CELLA", "x CELLB y", "Cap CAPA", "FOOTA", "Emph EMA", "Bold BA end.", "TRUECELL"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	for leak in ["NA", "#if", "else", "[", "]"] {
+		assert!(!text.replace("FOOTNOTE", "").contains(leak), "{} is not set: {}", leak, text);
+	}
+	assert!(flow_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A loop in a cell, a caption or a note is refused whole at its line, as is a conditional whose condition the
+/// reader does not evaluate: its source is set nowhere and the cells round it are. A literal condition is
+/// evaluated.
+#[test]
+fn a_loop_in_a_body_is_refused_at_its_site() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"Intro.
+
+#table(columns: 2, [c1], [#for x in (1, 2) [CELL#x]])
+
+#figure(rect[r], caption: [Cap #for x in (1,) [CAPL#x]])
+
+Note#footnote[Foot #while false [W]].
+
+#table(columns: 1, [#if true [TRUECELL]])
+
+#table(columns: 1, [#if false [FALSECELL] else [ELSECELL]])
+"##)]));
+	let text = words(&rendered);
+	for want in ["Intro.", "c1", "Cap", "Foot", "TRUECELL", "ELSECELL"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	for leak in ["#for", "#while", "CELL1CELL2", "CAPL", "FALSECELL", "[", "]", "(1,2)"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let loop_ = |k: &str| fmt!("{} is a loop the reader does not run, so its body is not set", k);
+	assert_eq!(flow_sites(&report), [(3, loop_("#for")), (5, loop_("#for")), (7, loop_("#while"))]);
+	Ok(())
+}
+
+/// A cell's own `#let` binds from its line to the cell's end, a name bound above the table is the table's,
+/// and a rebinding after it reaches no earlier cell: each conditional resolves where it stands. The `#let`
+/// is a binding, which sets nothing.
+#[test]
+fn a_cell_resolves_its_conditional_where_it_stands() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let a = true
+
+#table(columns: 2, [c1], [#let a = false
+#if a [CELLA] else [CELLNA]])
+
+#table(columns: 2, [d1], [#if a [OUTA] else [OUTNA]])
+
+Note and #emph[#if a [EA] else [ENA]].
+
+#let a = false
+
+#table(columns: 1, [#if a [LATA] else [LATNA]])
+"##)]));
+	let text = words(&rendered);
+	for want in ["c1 CELLNA", "d1 OUTA", "EA", "LATNA"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	for leak in ["#let", "CELLA", "OUTNA", "ENA", "LATA"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	assert!(flow_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A content binding's conditionals are read where the binding is written, used inline in prose as on a line
+/// of its own, and a function binding's parameter holds the literal it is given: `DEF` though the name is
+/// rebound before the use, and `YESBR`, `NOBR` for the two arguments.
+#[test]
+fn an_expanded_binding_resolves_where_it_was_defined() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let a = true
+#let blk = [#if a [DEF] else [USE]]
+#let a = false
+
+Inline #blk and again.
+
+#blk
+
+#let note(x) = [Note #if x == "yes" [YESBR] else [NOBR] end]
+
+Using #note("yes") and #note("no") inline.
+
+#note("yes")
+
+#let c = [Bound #if a [BOUNDA] else [BOUNDNA] end]
+
+P #c.
+"##)]));
+	let text = words(&rendered);
+	for want in ["Inline DEF and again.", "Using Note YESBR end and Note NOBR end inline.", "P Bound BOUNDNA end."] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	assert_eq!(text.matches("DEF").count(), 2, "{}", text);
+	assert_eq!(text.matches("YESBR").count(), 2, "{}", text);
+	for leak in ["USE", "#if", "else", "BOUNDA", "[", "]"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	assert!(flow_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A conditional in a data array's cell, which a table spreads, is read where the array is written.
+#[test]
+fn a_conditional_in_a_data_array_cell_is_read() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let a = true
+#let data = ([h1], [#if a [ARRA] else [ARRNA]], [h3], [x #if a [ARRB] y])
+
+#table(columns: 2, ..data.flatten())
+"##)]));
+	let text = words(&rendered);
+	assert!(has(&text, "h1 ARRA h3 x ARRB y"), "{}", text);
+	assert!(!text.contains("ARRNA") && !text.contains("#if"), "{}", text);
+	assert!(flow_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A conditional in an equation sets its taken branch, plain words, as upright text after the maths before it,
+/// as Typst does; one whose branch is markup, and a loop, are refused at the item, never set as source.
+#[test]
+fn a_conditional_in_maths_sets_its_plain_branch_as_text() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let a = true
+
+P6 $x #if a [MX] else [MY]$ q.
+
+P7 $x #if a [M7 *z*] else [N7]$ q.
+
+P8 $x #for k in (1,) [K]$ q.
+
+P9 $ y #if a [DISP] else [NDISP] $
+"##)]));
+	let text = words(&rendered);
+	for want in ["P6", "MX", "q.", "DISP"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	for leak in ["MY", "#if", "#for", "M7", "NDISP", "N7"] {
+		assert!(!text.contains(leak), "{} is not set: {}", leak, text);
+	}
+	let sites = flow_sites(&report);
+	assert_eq!(sites.len(), 2, "{:?}", sites);
+	assert_eq!(sites[0], (5, "#if takes a branch of markup the reader does not set in an equation, so no branch of it is set".to_string()));
+	assert_eq!(sites[1], (7, "#for is a loop the reader does not run, so its body is not set".to_string()));
+	Ok(())
+}
+
+/// The book whose root `main.typ` holds an include guard whose taken branch is `branch`, the chapter `ch.typ`
+/// and a config setting `media` to `"ebook"`.
+fn walked(root: &str) -> Outcome<(Rendered, Report)> {
+	let files = [("main.typ", root), ("config.typ", "#let format = \"a5\"\n#let media = \"ebook\"\n"),
+		("ch.typ", "= Chap\n\nCHAPTEXT.\n")];
+	compile_map("/b/book/main.typ", res!(book_map(&files)))
+}
+
+/// The number the contents list sets before the heading `title`: the run ahead of the first run that is the
+/// title alone.
+fn numbered(rendered: &Rendered, title: &str) -> Option<String> {
+	let all: Vec<String> = runs(rendered).into_iter().map(|(t, _)| t).collect();
+	let at = all.iter().position(|t| t == title)?;
+	at.checked_sub(1).map(|k| all[k].clone())
+}
+
+/// A `#set` in a walked guard's taken branch governs the branch from there, and the file it includes: the
+/// chapter and a heading after the rule are numbered by its pattern, one before the rule and one after the
+/// branch by the file's own. Typst: `II. Before` under the file's pattern, `3. Chap` and `4. Inner` under the
+/// branch's, `e. Deep` under the rule after them, and `VI. After` under the file's again.
+#[test]
+fn a_walked_branchs_set_scopes_the_branch_and_its_includes() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(walked(r##"#import "config.typ": *
+#set heading(numbering: "I.")
+= Book
+
+#if media == "ebook" [
+= Before
+
+#set heading(numbering: "1.")
+Walked text.
+#include "ch.typ"
+= Inner
+
+INNERTEXT.
+#set heading(numbering: "a.")
+= Deep
+]
+
+= After
+
+AFTERTEXT.
+"##));
+	let want = [("Book", "I."), ("Before", "II."), ("Chap", "3."), ("Inner", "4."), ("Deep", "e."), ("After", "VI.")];
+	for (title, number) in want {
+		assert_eq!(numbered(&rendered, title).as_deref(), Some(number), "{}", title);
+	}
+	assert!(flow_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A walked branch's `#show` rule, which the rule engine applies from the root's top level alone, is refused at
+/// its line, with the include still followed: nothing of it is dropped without a site.
+#[test]
+fn a_walked_branchs_show_rule_is_refused_at_its_line() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(walked(r##"#import "config.typ": *
+= Book
+
+#if media == "ebook" [
+#show heading: set text(fill: red)
+Walked text.
+#include "ch.typ"
+]
+
+= After
+"##));
+	let text = words(&rendered);
+	for want in ["Walked text.", "CHAPTEXT.", "After"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+	assert!(sites.contains(&(5, "skipped #show heading (inside an include guard's branch, where it is not applied) (fixed-point)")),
+		"{:?}", sites);
+	Ok(())
+}
+
+/// A `#set` at a file's own top level numbers every heading after it, an included chapter's among them.
+#[test]
+fn a_top_level_set_numbers_every_heading() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, _) = res!(walked("#import \"config.typ\": *\n#set heading(numbering: \"1.\")\n= Book\n\n#include \"ch.typ\"\n"));
+	assert_eq!(numbered(&rendered, "Book").as_deref(), Some("1."));
+	assert_eq!(numbered(&rendered, "Chap").as_deref(), Some("2."));
+	Ok(())
+}

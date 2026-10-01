@@ -1334,13 +1334,19 @@ impl ScalarValue {
 /// collected; a source with none reads exactly as before.
 pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
 
-/// Evaluates a conditional's condition, resolving each name it tests through `lookup`. Two forms are read:
-/// `<name> == "<text>"`, taken when the name holds that string, and a bare `<name>`, taken when it holds
-/// `true`. A name nothing binds is [`Cond::Unknown`], where Typst stops; any other form, and a name bound to
-/// a value of another kind or to one this reader does not know, is [`Cond::Opaque`], so the caller refuses
+/// Evaluates a conditional's condition, resolving each name it tests through `lookup`. Three forms are read:
+/// `<name> == "<text>"`, taken when the name holds that string, a bare `<name>`, taken when it holds
+/// `true`, and the literal `true` or `false`. A name nothing binds is [`Cond::Unknown`], where Typst stops;
+/// any other form, and a name bound to a value of another kind or to one this reader does not know, is [`Cond::Opaque`], so the caller refuses
 /// the conditional rather than guess.
 pub(crate) fn eval_condition(cond: &str, lookup: impl Fn(&str) -> Lookup) -> Cond {
 	let cond = cond.trim();
+	// A boolean literal is its own value.
+	match cond {
+		"true"	=> return Cond::Taken(true),
+		"false"	=> return Cond::Taken(false),
+		_		=> {},
+	}
 	let (name, lit) = match cond.find("==") {
 		Some(eq) => match string_literal(cond[eq + 2..].trim()) {
 			Some(lit)	=> (cond[..eq].trim(), Some(lit)),
@@ -1458,6 +1464,18 @@ impl GuardBase {
 		for name in names {
 			self.names.insert(name.clone(), Bound::Opaque);
 		}
+		self
+	}
+
+	/// Binds `name` to what the argument `arg`, as written in a call, is: a string or a boolean literal is
+	/// read, and any other expression is a value this reader does not know.
+	pub fn bound_to(mut self, name: &str, arg: &str) -> Self {
+		let val = match arg.trim() {
+			"true"	=> Bound::Lit(GuardValue::Bool(true)),
+			"false"	=> Bound::Lit(GuardValue::Bool(false)),
+			v		=> string_literal(v).map_or(Bound::Opaque, |s| Bound::Lit(GuardValue::Str(s.to_string()))),
+		};
+		self.names.insert(name.to_string(), val);
 		self
 	}
 }
@@ -2732,6 +2750,15 @@ mod tests {
 
 	fn heading(level: u8) -> Block {
 		Block::Heading { level, segments: vec![Segment::text("H")], label: None }
+	}
+
+	// A boolean literal is its own value: Typst takes the branch of `#if true` and of `#if false [..] else`.
+	#[test]
+	fn a_boolean_literal_is_its_own_value() {
+		let none = |_: &str| Lookup::Unbound;
+		assert_eq!(eval_condition("true", none), Cond::Taken(true));
+		assert_eq!(eval_condition(" false ", none), Cond::Taken(false));
+		assert_eq!(eval_condition("trues", none), Cond::Unknown("trues".to_string()));
 	}
 
 	/// A `heading.where(level: 1)` selector parses to the heading kind with a single level predicate, and

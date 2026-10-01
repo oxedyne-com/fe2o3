@@ -208,18 +208,30 @@ impl Parser {
 		}
 
 		// A quoted string is an upright roman run. Typst keeps a space between such a run and a following
-		// word (`"if" x`), where it drops one between bare symbols, so a space that separates the run from
-		// a following letter or digit is preserved as a thin space.
+		// word (`"if" x`), or a word before it (`x "if"`), where it drops one between bare symbols, so a
+		// space that separates the run from a letter or digit is preserved as a thin space.
 		if c == '"' {
+			// The same space, after a word that stands before the run (`x "if"`), is kept.
+			let lead = self.chars[..self.i].iter().rev().skip_while(|c| c.is_whitespace()).next()
+				.is_some_and(|p| p.is_alphanumeric())
+				&& self.i > 0 && self.chars[self.i - 1].is_whitespace();
 			self.i += 1;
 			let s = self.take_while(|c| c != '"');
 			self.eat('"');
 			let spaced = self.peek() == Some(' ')
 				&& matches!(self.peek_nonws(), Some(n) if n.is_alphanumeric());
-			if spaced {
-				return Ok(Atom::row(vec![Atom::text(s), Atom::space(220)]));
+			let mut row = Vec::new();
+			if lead {
+				row.push(Atom::space(220));
 			}
-			return Ok(Atom::text(s));
+			row.push(Atom::text(s));
+			if spaced {
+				row.push(Atom::space(220));
+			}
+			return Ok(match row.len() {
+				1		=> row.pop().unwrap_or_else(|| Atom::row(Vec::new())),
+				_		=> Atom::row(row),
+			});
 		}
 
 		// A parenthesised group grows a fence around its row.
@@ -1094,5 +1106,18 @@ mod tests {
 				"display lost its argument: {:?}", a),
 			other => panic!("display -> {:?}", other),
 		}
+	}
+
+	// A space between a word and a quoted run is kept, as Typst keeps it; with none written, none is set.
+	#[test]
+	fn a_space_before_a_quoted_run_after_a_word_is_kept() {
+		let spaced = |src: &str| match parse(src) {
+			Ok(Atom::Row(items))	=> items.iter().any(|a| matches!(a, Atom::Row(r) if r.iter().any(|b| matches!(b, Atom::Space(_))))
+				|| matches!(a, Atom::Space(_))),
+			other					=> panic!("{} -> {:?}", src, other),
+		};
+		assert!(spaced("x \"MX\""), "a space after a word is kept");
+		assert!(!spaced("x\"MX\""), "no space written, none set");
+		assert!(!spaced("+ \"MX\""), "a space after an operator is dropped");
 	}
 }
