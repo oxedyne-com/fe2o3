@@ -116,6 +116,7 @@ fn parent() -> Outcome<()> {
     // The index has been made the data file's own, whichever file the kill left new.
     let want_ind = probe.ind[(size(&d1) / len) as usize];
     let rebuilt = size(&i1);
+    let temps = temporaries(&zone_dir(&root, &cfg));
 
     // Churn so that file 1 is collected again with whatever state the start built.
     for round in 4..7u8 {
@@ -137,6 +138,7 @@ fn parent() -> Outcome<()> {
     assert_eq!(rebuilt, want_ind,
         "the index is {} bytes beside a data file of {}, where records of {} bytes need {}",
         rebuilt, d_torn, len, want_ind);
+    assert!(temps.is_empty(), "the start left {:?} of the killed collection behind", temps);
     assert_eq!(churned, 0, "{} keys read wrong after file 1 was collected again", churned);
     assert_eq!(second, 0, "{} keys read wrong after the second reopening", second);
     let _ = std::fs::remove_dir_all(dir);

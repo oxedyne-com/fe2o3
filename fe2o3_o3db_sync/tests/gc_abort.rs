@@ -32,19 +32,6 @@ use std::{
     time::Duration,
 };
 
-/// Is any temporary file of a collection in the directory?
-fn temporaries(dir: &Path) -> Vec<String> {
-    let mut found = Vec::new();
-    if let Ok(list) = std::fs::read_dir(dir) {
-        for entry in list.flatten() {
-            if ZoneDir::is_gc_temp_file(&entry.path()) {
-                found.push(entry.file_name().to_string_lossy().to_string());
-            }
-        }
-    }
-    found
-}
-
 #[test]
 fn main() -> Outcome<()> {
     log_set_level!("error");

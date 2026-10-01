@@ -178,3 +178,16 @@ pub fn wait_until<F: FnMut() -> bool>(limit: Duration, mut f: F) -> bool {
     }
     f()
 }
+
+/// The temporary files of a collection that are in the directory.
+pub fn temporaries(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Ok(list) = fs::read_dir(dir) {
+        for entry in list.flatten() {
+            if ZoneDir::is_gc_temp_file(&entry.path()) {
+                found.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    found
+}
