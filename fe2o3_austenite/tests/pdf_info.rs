@@ -407,3 +407,31 @@ fn set_document_in_a_conditional_branch_below_its_level_is_refused() -> Outcome<
 	}
 	Ok(())
 }
+
+/// A `#set document` that names a field the Info fold cannot take is refused at its line, naming it, wherever
+/// the fold applies the rest of the rule: at a file's top level and in a bare content block. One in a container
+/// is refused there alone, once, for the container.
+#[test]
+fn set_document_that_leaves_a_field_unapplied_names_it() -> Outcome<()> {
+	let cases = [
+		("top",		"= Root\n\n#set document(title: \"T\", date: auto)\n\nBody.\n",						3, true),
+		("block",	"= Root\n\n#[\n#set document(title: \"T\", date: auto)\nIn block.\n]\n\nBody.\n",	4, true),
+		("item",	"= Root\n\n- item\n  #set document(title: \"T\", date: auto)\n\nBody.\n",			4, false),
+	];
+	for (name, src, line, applied) in cases {
+		let (pdf, sites) = res!(compile_with_sites(&[("/doc/main.typ", src)]));
+		let path = scratch(&fmt!("pdf_info_unapplied_{}.pdf", name));
+		res!(std::fs::write(&path, &pdf));
+		let titled = res!(info_of(&path)).get("Title").map(|s| s.as_str()) == Some("T");
+		assert_eq!(titled, applied, "{}: the title is applied only where the fold applies the rule", name);
+		let held: Vec<&(usize, usize, String)> = sites.iter().filter(|(_, _, m)| m.contains("#set document")).collect();
+		assert_eq!(held.len(), 1, "{}: one site for the rule: {:?}", name, sites);
+		assert_eq!(held[0].0, line, "{}: {:?}", name, held[0]);
+		if applied {
+			assert!(!held[0].2.contains("not allowed inside of containers"), "{}: refused for what it left: {:?}", name, held[0]);
+		} else {
+			assert!(held[0].2.contains("not allowed inside of containers"), "{}: {:?}", name, held[0]);
+		}
+	}
+	Ok(())
+}

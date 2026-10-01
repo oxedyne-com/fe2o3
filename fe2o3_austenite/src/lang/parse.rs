@@ -2724,7 +2724,13 @@ fn dispatch_capture(
 			let doc		= crate::lang::set::sets_document(&cap.buf);
 			let fold	= doc && (!binds.body || binds.joined) && cap.place != lex::Place::Content;
 			if fold {
-				// The fold of the file's own lines applies it, or refuses it at its site.
+				// The fold of the file's own lines applies it, or refuses it at its site in a container. What an
+				// applied rule names and the fold cannot take is refused here, at the rule's line.
+				if cap.place != lex::Place::Contained {
+					if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
+						skips.record(&name, at);
+					}
+				}
 			} else if binds.body && (doc || rule || !binds.scoped) {
 				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
 			} else if cap.place == lex::Place::Contained {
