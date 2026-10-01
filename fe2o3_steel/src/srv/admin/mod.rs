@@ -24,7 +24,8 @@
 //!   browsing only.
 //! - [`SCOPE_DASHBOARD_ADMIN`] -- full dashboard access; required to
 //!   mutate the address guard's whitelist and blacklist, which is the
-//!   only mutation the dashboard performs.
+//!   only mutation the dashboard performs, and to see the Fleet view,
+//!   which shows what every watched peer reports about itself.
 //! - [`SCOPE_ADMIN`] -- the existing CLI scope; required *in addition*
 //!   to one of the dashboard scopes to see the admin-management UI.
 //!
@@ -40,6 +41,8 @@
 //!   counters that feed the live dashboard views.
 //! - [`ozone_view`] -- read-only ozone browsing, prefix scans, key
 //!   detail lookup.
+//! - [`fleet_view`] -- the Fleet page: this host and every peer its
+//!   watcher reads, judged against the alarm's own thresholds.
 //! - [`assets`] -- embedded HTML, CSS, JavaScript and image assets
 //!   served as the dashboard front end.
 //! - [`handler`] -- HTTP dispatcher that maps `/admin/*` request paths
@@ -51,6 +54,7 @@
 pub mod assets;
 pub mod audit;
 pub mod auth;
+pub mod fleet_view;
 pub mod guard;
 pub mod handler;
 pub mod host_sampler;

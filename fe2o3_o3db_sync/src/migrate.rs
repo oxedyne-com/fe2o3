@@ -41,10 +41,7 @@
 
 use crate::{
     prelude::*,
-    comm::{
-        msg::OzoneMsg,
-        response::Wait,
-    },
+    comm::response::Wait,
 };
 
 use oxedyne_fe2o3_jdat::{
@@ -293,9 +290,9 @@ pub fn verify_migration<
 ///
 /// A store dispatches `n` write parts -- one `Complete` record, or one bunch key
 /// plus one record per chunk -- and reports `n` first as an `OzoneMsg::Chunks`,
-/// then one acknowledgement per part.  Waiting for all `n` acknowledgements,
-/// rather than on ordering between writers, is what makes the copy safe to
-/// verify immediately.
+/// then answers each part twice, written and then durable.  Waiting for all `n`
+/// final answers, rather than on ordering between writers, is what makes the
+/// copy safe to verify immediately.
 fn store_and_wait<
     const UIDL: usize,
     UID:    NumIdDat<UIDL> + 'static,
@@ -313,13 +310,7 @@ fn store_and_wait<
     -> Outcome<()>
 {
     let resp = res!(api.store_using_schemes(k, v, user, schms2));
-    let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) => n,
-        other => return Err(err!(
-            "Expected an OzoneMsg::Chunks acknowledging the write, got {:?}.", other;
-            Channel, Unexpected)),
-    };
-    res!(resp.recv_number(n, constant::USER_REQUEST_WAIT));
+    res!(resp.recv_store_ack());
     Ok(())
 }
 

@@ -160,14 +160,9 @@ impl Default for OzoneConfig {
             // the GC rename, which bound loss to the live file's tail under any
             // policy. Operators wanting a stronger floor set `sync_on_write` (an
             // fsync per write) or `sync_every_n_writes`; `sync_interval_ms = 0`
-            // restores the old never-fsync append behaviour.
-            //
-            // Known limitation (no background tick in this wave):
-            // `maybe_sync_files` evaluates the interval on each write, so if
-            // writes stop, the final sub-interval of writes is not fsynced until
-            // the next write arrives. The seal barrier still makes every sealed
-            // file durable; only the live file's most recent unsynced tail is
-            // exposed across a write pause.
+            // restores the old never-fsync append behaviour.  Each writer's
+            // syncer thread keeps the interval whether or not another write
+            // arrives, so the writes that end a burst are made durable too.
             sync_on_write:                  false,
             sync_every_n_writes:            0,
             sync_interval_ms:               200,

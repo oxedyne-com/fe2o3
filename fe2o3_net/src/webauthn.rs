@@ -17,7 +17,7 @@
 //! the ASN.1 sibling of the fixed-form verifier a browser's own WebCrypto key
 //! uses. ES256 is the near-universal default of Apple, Google and Windows
 //! authenticators; EdDSA (COSE `-8`) is modelled too for the rare Ed25519
-//! passkey, over `ring`'s Ed25519 verifier.
+//! passkey, over `fe2o3_crypto`'s strict Ed25519 verifier.
 //!
 //! A second downstream caller (a device-key admin surface, an operator console)
 //! reuses this verbatim, which is why it lives here rather than in one app.
@@ -34,15 +34,11 @@ use oxedyne_fe2o3_jdat::{
     string::dec::DecoderConfig,
 };
 
-use ring::{
-    digest::{
-        Context,
-        SHA256,
-    },
-    signature::{
-        UnparsedPublicKey,
-        ED25519,
-    },
+use oxedyne_fe2o3_crypto::sign::verify_ed25519;
+
+use ring::digest::{
+    Context,
+    SHA256,
 };
 
 
@@ -190,9 +186,9 @@ pub fn verify_assertion(
 
     let ok = match alg {
         CoseAlg::Es256 => verify_p256_sha256_asn1(stored_key, &signed, signature),
-        CoseAlg::EdDsa => {
-            UnparsedPublicKey::new(&ED25519, stored_key).verify(&signed, signature).is_ok()
-        }
+        // Hematite's one Ed25519 verifier, which refuses a small-order key that
+        // `ring`'s would take as signing anything.
+        CoseAlg::EdDsa => matches!(verify_ed25519(stored_key, &signed, signature), Ok(true)),
     };
     if !ok {
         return Err(err!(
@@ -282,6 +278,48 @@ mod tests {
             let sig = res!(self.sign(&signed));
             Ok((ad, cdj, sig))
         }
+    }
+
+    /// An EdDSA assertion signed by a real Ed25519 key verifies, and one "signed"
+    /// for the identity as a key, with R the identity and S zero, is refused.
+    /// That pair satisfies the cofactorless equation over any message, and
+    /// `ring`'s Ed25519 verifier, which this path used before, takes it, as the
+    /// second assertion shows.
+    #[test]
+    fn test_verify_assertion_eddsa_refuses_a_small_order_key() -> Outcome<()> {
+        use oxedyne_fe2o3_crypto::sign::SignatureScheme;
+        use oxedyne_fe2o3_iop_crypto::{
+            keys::KeyManager,
+            sign::Signer,
+        };
+
+        let challenge = b"eddsa-challenge";
+        let ad = make_auth_data(RP_ID, FLAG_UP | FLAG_UV, 3);
+        let cdj = client_data("webauthn.get", challenge, ORIGIN);
+        let mut signed = ad.clone();
+        signed.extend_from_slice(&sha256(&cdj));
+
+        let key = SignatureScheme::new_ed25519();
+        let public = match res!(key.get_public_key()) {
+            Some(pk) => pk.to_vec(),
+            None => return Err(err!("A new Ed25519 key has no public half."; Test, Missing)),
+        };
+        let sig = res!(key.sign(&signed));
+        let v = res!(verify_assertion(
+            CoseAlg::EdDsa, &public, challenge, ORIGIN, RP_ID, &ad, &cdj, &sig));
+        assert_eq!(v.counter, 3);
+
+        let mut identity = [0u8; 32];
+        identity[0] = 0x01;
+        let mut forged = [0u8; 64];
+        forged[0] = 0x01;
+        assert!(ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &identity)
+            .verify(&signed, &forged).is_ok(),
+            "ring's verifier takes the forgery, which is why this path no longer uses it");
+        assert!(verify_assertion(
+            CoseAlg::EdDsa, &identity, challenge, ORIGIN, RP_ID, &ad, &cdj, &forged).is_err(),
+            "the identity key's forgery must be refused");
+        Ok(())
     }
 
     /// A well-formed ES256 assertion verifies, and its counter and flags come back.

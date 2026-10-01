@@ -5,13 +5,13 @@ use crate::{
         SyntaxPrefs,
     },
     key::Key,
+    val::Val,
 };
 
 use oxedyne_fe2o3_core::{
     prelude::*,
     map::Recursive,
 };
-use oxedyne_fe2o3_jdat::kind::Kind;
 
 use std::{
     collections::BTreeMap,
@@ -30,12 +30,16 @@ pub struct Cmd {
 #[derive(Clone, Default)]
 pub struct CmdConfig {
     pub name:   String,
-    pub vals:   Vec<(Kind, String)>,    // Expected value kindicles, with help text.
+    pub vals:   Vec<Val>,               // Expected values.
+    pub rest:   Option<Val>,            // Words after "--", taken as they stand.
     pub rargs:  Vec<String>,            // Which arguments are required?
+    pub excess: Option<String>,         // The command's own sentence for a word too many.
     // CLI
-    pub help:   Option<String>,         // Command help text.
+    pub help:   Option<String>,         // One line, for the command table.
+    pub detail: Option<String>,         // Prose for the command's own page.
+    pub see:    Vec<String>,            // Commands or topics named under SEE ALSO.
     pub prefs:  SyntaxPrefs,
-    pub cat:    String,                 // Command category.
+    pub cat:    String,                 // Command category, a help heading.
 }
 
 impl fmt::Debug for Cmd {
@@ -84,9 +88,37 @@ impl Cmd {
         Ok(self)
     }
     
-    pub fn expected_vals(mut self, vals: Vec<(Kind, String)>) -> Self {
-        self.cfg.vals = vals;
+    pub fn expected_vals<V: Into<Val>>(mut self, vals: Vec<V>) -> Self {
+        self.cfg.vals = vals.into_iter().map(|v| v.into()).collect();
         self
+    }
+
+    pub fn rest(mut self, val: Val) -> Self {
+        self.cfg.rest = Some(val);
+        self
+    }
+
+    pub fn detail<S: Into<String>>(mut self, s: S) -> Self {
+        self.cfg.detail = Some(s.into());
+        self
+    }
+
+    pub fn cat<S: Into<String>>(mut self, s: S) -> Self {
+        self.cfg.cat = s.into();
+        self
+    }
+
+    pub fn excess<S: Into<String>>(mut self, s: S) -> Self {
+        self.cfg.excess = Some(s.into());
+        self
+    }
+
+    /// The command's arguments in the order they were added.
+    pub fn args_in_order(&self) -> Vec<&Arg> {
+        self.args.iter().filter_map(|(k, v)| match (k, v) {
+            (Key::Id(_), Recursive::Val(arg)) => Some(arg),
+            _ => None,
+        }).collect()
     }
 
     pub fn help<S: Into<String>>(mut self, s: S) -> Self {
@@ -94,18 +126,11 @@ impl Cmd {
         self
     }
 
-    /// Collects all hyph1 (short form switch) strings from the command's arguments.
+    /// Collects the short form switch strings of those arguments that have one.
     pub fn collect_short_arg_names(&self) -> Vec<String> {
-        self.args
-            .iter()
-            .filter_map(|(_, arg_rec)| {
-                // Get the actual Arg from the Recursive enum.
-                if let Recursive::Val(arg) = arg_rec {
-                    Some(arg.config().hyph1.clone())
-                } else {
-                    None
-                }
-            })
+        self.args_in_order()
+            .into_iter()
+            .filter_map(|arg| arg.config().hyph1.clone())
             .collect()
     }
 }

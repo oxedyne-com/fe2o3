@@ -42,6 +42,15 @@ impl OzoneConfig {
                 CONTROL_REQUEST_TIMEOUT, USER_REQUEST_TIMEOUT;
             Invalid, Input));
         }
+        if DURABILITY_TIMEOUT <= USER_REQUEST_TIMEOUT || DURABILITY_TIMEOUT > CONTROL_REQUEST_TIMEOUT {
+            return Err(err!(
+                "The durability timeout, {:?}, must exceed the user request timeout, {:?}, and \
+                not exceed the control operation timeout, {:?}.  It waits on the disk, which \
+                answers more slowly than any bot, and it is a request's deadline, which a \
+                start-up control operation outlasts.",
+                DURABILITY_TIMEOUT, USER_REQUEST_TIMEOUT, CONTROL_REQUEST_TIMEOUT;
+            Invalid, Input));
+        }
         Ok(())
     }
 }
@@ -76,10 +85,11 @@ pub const OLD_DATA_PERCENT_GC_TRIGGER:  f64 = 30.0;
 pub const FILE_CACHE_EXPIRY_SECS:       u64 = 15*60; // 15 mins
 pub const MAX_CACHED_FILES:             usize = 200;
 
-// A read handed a post-collection (`postgc`) location may find that location already superseded by
-// a second collection of the same file, and retries with a freshly fetched location.  This bounds
-// those retries so a file a supersession burst keeps collecting cannot spin a reader for ever.
-pub const MAX_POSTGC_READ_ATTEMPTS:     usize = 8;
+// A read whose record is not the one its cache bot named -- a location a collection has moved, or
+// one read through the handle of the file's previous generation -- retries with a freshly fetched
+// location.  This bounds those retries, for every read, so a file a supersession burst keeps
+// collecting cannot spin a reader for ever.
+pub const MAX_READ_ATTEMPTS:            usize = 8;
 
 // Resource management.
 pub const CACHE_JETTISON_FRAC_OF_LIM:   f64 = 0.20;
@@ -89,7 +99,8 @@ pub const BOT_ERR_COUNT_WARNING:        usize = 10;
 pub const STACK_SIZE:                   usize = 2 * 1024 * 1024;
 
 // Shutdown.
-// Wait for all bots to idle after shutting off server.
+// How long a close waits for the bots to finish in order before the supervisor answers it; any
+// still running are finished afterwards, in the same order (`Supervisor::shutdown`).
 pub const SHUTDOWN_MAX_WAIT:            Duration = Duration::from_secs(3);
 
 // Intervals.
@@ -115,6 +126,14 @@ pub const BOT_REQUEST_WAIT:                     Wait = Wait {
     max_wait:       BOT_REQUEST_TIMEOUT,
     check_interval: CHECK_INTERVAL,
 };
+// A write is answered twice.  `OzoneMsg::Written` says its record is appended, which is the
+// writer's own work and is held to USER_REQUEST_TIMEOUT like any request.  The final answer says
+// the record is durable under the store's sync policy and readable, and that waits on the disk:
+// an fsync queued behind everything else a busy machine is writing took over eleven seconds when
+// measured (2026-09-23), and a six-second deadline then reported as failed a write that went on
+// to land.  So this deadline marks a disk that has stopped rather than one that is busy, and what
+// its expiry reports is a write not confirmed durable, never a write that failed.
+pub const DURABILITY_TIMEOUT:                   Duration = Duration::from_secs(120);
 // A control operation -- activating garbage collection, rolling every writer onto a fresh live
 // file -- is issued once, by whoever owns the database, and usually while it is still starting.
 // Its message queues behind whatever the zone bots are already doing, and the initial survey of

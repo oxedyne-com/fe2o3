@@ -26,7 +26,8 @@
 //!         RestSchemesInput::default(),
 //!         Uid::default(),
 //!     ));
-//!     res!(db.start());
+//!     // Returns once every zone has surveyed its files and loaded its caches.
+//!     res!(db.start("my_db"));
 //!     
 //!     // Store a value
 //!     let resp = res!(db.api().store(
@@ -35,12 +36,10 @@
 //!         user_id,
 //!     ));
 //!     
-//!     // Handle potential errors during storage
-//!     match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-//!         OzoneMsg::Error(e) => return Err(err!(e, "Failed to store value"; IO, Data, Write)),
-//!         OzoneMsg::Ok => Ok(()),
-//!         msg => Err(err!("Unexpected response: {:?}", msg; Channel, Unexpected)),
-//!     }
+//!     // Each record is answered written, within the user request deadline, and then durable,
+//!     // within the durability deadline.  A writer's error arrives as the error it was.
+//!     let (_existed, _records) = res!(resp.recv_store_ack());
+//!     Ok(())
 //! }
 //! ```
 //! 

@@ -291,7 +291,7 @@ impl AppShellContext {
                         self.wallet.enc_secs_mut().insert(name.clone(), dat!(map));
                     }
                     let wallet_path = Path::new("./").join(app_const::WALLET_NAME);
-                    res!(self.wallet.save(
+                    res!(self.wallet.save_secret(
                         &wallet_path, "  ", Some(EncoderConfig::<(), ()>::default()),
                     ));
                 } else if res!(msg_cmd.has_only_arg("recover")) {

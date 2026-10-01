@@ -91,6 +91,7 @@ fn blob() -> Dat {
 
 pub fn test_chunked_value(_filter: &'static str) -> Outcome<()> {
 
+    res!(std::fs::create_dir_all("./test_db_chunked_value"));
     let db_root = res!(Path::new("./test_db_chunked_value").canonicalize());
 
     let mut enckey = [0u8; 32];

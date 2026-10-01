@@ -41,6 +41,7 @@ use oxedyne_fe2o3_syntax::{
         Msg,
         MsgCmd,
     },
+    val::Val,
 };
 
 
@@ -191,7 +192,7 @@ impl AppWebSocketHandler {
         match syntax.get_cmd(&*msgcmd.name) {
             Some(cmd) => {
                 let cmdcfg = cmd.config();
-                if msgcmd.vals.len() != cmdcfg.vals.len() {
+                if !Val::count_fits(&cmdcfg.vals, msgcmd.vals.len()) {
                     return Err(err!(
                         "The syntax '{}' command '{}' expects {} value(s), found {}.",
                         syntax.config().name,
@@ -200,15 +201,19 @@ impl AppWebSocketHandler {
                         msgcmd.vals.len();
                         Input, Network, Mismatch));
                 }
-                for (i, (kind, _)) in cmdcfg.vals.iter().enumerate() {
-                    if *kind != Kind::Unknown && *kind != msgcmd.vals[i].kind() {
+                for (i, got) in msgcmd.vals.iter().enumerate() {
+                    let kind = match Val::slot(&cmdcfg.vals, i) {
+                        Some(val) => &val.kind,
+                        None => continue,
+                    };
+                    if *kind != Kind::Unknown && *kind != got.kind() {
                         return Err(err!(
                             "The syntax '{}' command '{}' expects value {} to be a '{:?}, found {:?}.",
                             syntax.config().name,
                             msgcmd.name,
                             i,
                             kind,
-                            msgcmd.vals[i].kind();
+                            got.kind();
                             Input, Network, Mismatch));
                     }
                 }

@@ -2343,62 +2343,12 @@ impl Dat {
                                     // Decode as a number when the kind is specified.
                                     res!(kind.clone().decode_number(ns))
                                 } else {
-                                    if ns.is_zero() {
-                                        Dat::U8(0)
-                                    } else {
-                                        if ns.has_point() || ns.has_exp() {
-                                            Dat::Adec(res!(ns.as_bigdecimal()))
-                                        } else {
-                                            // Interpret the number as the smallest possible
-                                            // native integer, otherwise use an Aint.
-                                            match u128::from_str_radix(ns.abs_integer_str(), ns.radix()) {
-                                                Ok(nu128) => {
-                                                    // n is a member of the set -u128::MAX..u128::MAX
-                                                    // i.e. n E -u128::MAX..u128::MAX
-                                                    if ns.is_negative() {
-                                                        if nu128 > (i128::MAX as u128 + 1) {
-                                                            // n E -u128::MAX..i128::MIN, can only be
-                                                            // represented by a BigInt.
-                                                            match ns.as_bigint() {
-                                                                Ok(n) => Dat::Aint(n),
-                                                                Err(e) => return Err(err!(e,
-                                                                    "While interpreting '{}' with outer kind {:?}.",
-                                                                    slurp, kind;
-                                                                String, Input, Decode)),
-                                                            }
-                                                        } else {
-                                                            // n E i128::MIN..0
-                                                            // But the cast (nu128 as i128) works
-                                                            // differently when nu128 =
-                                                            // |i128::MIN|.  In this case, Rust
-                                                            // recognises that nu128 could not have
-                                                            // been positive, and automatically
-                                                            // negates the result.  For all other
-                                                            // values, the cast is positive and we
-                                                            // need to negate manually.
-                                                            let n = if nu128 == i128::MAX as u128 + 1 {
-                                                                nu128 as i128
-                                                            } else {
-                                                                -(nu128 as i128)
-                                                            };
-                                                            res!(DatInt::from(n).min_size().to_dat())
-                                                        }
-                                                    } else {
-                                                        // n E 0..u128::MAX
-                                                        res!(DatInt::from(nu128).min_size().to_dat())
-                                                    }
-                                                }
-                                                Err(_e) => {
-                                                    match ns.as_bigint() {
-                                                        Ok(n) => Dat::Aint(n),
-                                                        Err(e) => return Err(err!(e,
-                                                            "While interpreting '{}' with outer kind {:?}.",
-                                                            slurp, kind;
-                                                        String, Input, Decode)),
-                                                    }
-                                                }
-                                            }
-                                        }
+                                    match Self::from_untyped_number(&ns) {
+                                        Ok(d) => d,
+                                        Err(e) => return Err(err!(e,
+                                            "While interpreting '{}' with outer kind {:?}.",
+                                            slurp, kind;
+                                        String, Input, Decode)),
                                     }
                                 }
                             }
@@ -2418,6 +2368,40 @@ impl Dat {
 
         slurp.reset();
         Ok(d)
+    }
+
+    /// The daticle a number read without a kind becomes: zero as a `U8`, a fraction or an
+    /// exponent as an `Adec`, any other integer as the smallest native integer that holds it, and
+    /// one beyond 128 bits as an `Aint`. The JDAT text decoder and the strict JSON reader both
+    /// read numbers through this, so the same digits give the same daticle either way.
+    pub(crate) fn from_untyped_number(ns: &NumberString) -> Outcome<Self> {
+        if ns.is_zero() {
+            return Ok(Dat::U8(0));
+        }
+        if ns.has_point() || ns.has_exp() {
+            return Ok(Dat::Adec(res!(ns.as_bigdecimal())));
+        }
+        match u128::from_str_radix(ns.abs_integer_str(), ns.radix()) {
+            Ok(nu128) => if ns.is_negative() {
+                if nu128 > (i128::MAX as u128 + 1) {
+                    // Below i128::MIN, so only a BigInt holds it.
+                    Ok(Dat::Aint(res!(ns.as_bigint())))
+                } else {
+                    // The cast of |i128::MIN| wraps to i128::MIN, which is the value wanted;
+                    // every other magnitude is negated by hand.
+                    let n = if nu128 == i128::MAX as u128 + 1 {
+                        nu128 as i128
+                    } else {
+                        -(nu128 as i128)
+                    };
+                    DatInt::from(n).min_size().to_dat()
+                }
+            } else {
+                DatInt::from(nu128).min_size().to_dat()
+            },
+            // Beyond u128.
+            Err(_) => Ok(Dat::Aint(res!(ns.as_bigint()))),
+        }
     }
 
     #[inline(never)]

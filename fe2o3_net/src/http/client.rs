@@ -143,6 +143,11 @@ where
             complete HTTP response.",
             peer;
             IO, Network, Wire, Read, Missing)),
+        // Kept distinct, so a caller that set `limits` can tell an answer larger than it
+        // allows from one that broke off, without reading the text.
+        Err(e) if e.tags().contains(&ErrTag::TooBig) => Err(err!(e,
+            "The HTTP response from {} is larger than this caller reads.", peer;
+            IO, Network, Wire, Read, TooBig)),
         Err(e) => Err(err!(e,
             "Failed to read or parse the HTTP response from {}.", peer;
             IO, Network, Wire, Read)),
@@ -169,6 +174,23 @@ pub async fn http_request(
 )
     -> Outcome<HttpMessage>
 {
+    http_request_limited(host, port, method, path, headers, body, None).await
+}
+
+/// [`http_request`] with the response bounded by `limits`, for a caller that
+/// does not trust the peer to answer in proportion: a health probe, say, whose
+/// every reply is kept.
+pub async fn http_request_limited(
+    host:           &str,
+    port:           u16,
+    method:         HttpMethod,
+    path:           &str,
+    headers:        &[(&str, &str)],
+    body:           &[u8],
+    limits:         Option<&ReadLimits>,
+)
+    -> Outcome<HttpMessage>
+{
     let request_bytes = format_request(method, host, path, headers, body);
     let peer = fmt!("{}:{}", host, port);
 
@@ -179,7 +201,7 @@ pub async fn http_request(
             IO, Network, Init)),
     };
 
-    exchange(&mut stream, &request_bytes, &peer, None).await
+    exchange(&mut stream, &request_bytes, &peer, limits).await
 }
 
 /// Dials an address the caller has already vetted, rather than a host name this
@@ -242,6 +264,23 @@ pub async fn https_request(
 )
     -> Outcome<HttpMessage>
 {
+    https_request_limited(host, port, method, path, headers, body, tls_config, None).await
+}
+
+/// [`https_request`] with the response bounded by `limits`, as
+/// [`http_request_limited`] is.
+pub async fn https_request_limited(
+    host:           &str,
+    port:           u16,
+    method:         HttpMethod,
+    path:           &str,
+    headers:        &[(&str, &str)],
+    body:           &[u8],
+    tls_config:     Arc<ClientConfig>,
+    limits:         Option<&ReadLimits>,
+)
+    -> Outcome<HttpMessage>
+{
     // Format the request bytes up front so any failure from this point on is
     // a real network or TLS fault, not a local formatting bug.
     let request_bytes = format_request(method, host, path, headers, body);
@@ -256,7 +295,7 @@ pub async fn https_request(
     };
 
     let mut stream = res!(tls_wrap(tcp, host, &peer, tls_config).await);
-    exchange(&mut stream, &request_bytes, &peer, None).await
+    exchange(&mut stream, &request_bytes, &peer, limits).await
 }
 
 /// The TLS sibling of [`http_request_at`], and vetted for the same reason: the

@@ -3,7 +3,8 @@
 //! Each zone runs pools of cache bots ([`bot_cache`]), file bots
 //! ([`bot_file`]), reader bots ([`bot_reader`]), writer bots ([`bot_writer`]),
 //! scan bots ([`bot_scan`]) and init/garbage-collection bots
-//! ([`bot_initgc`]). [`bot`] defines the shared worker behaviour and
+//! ([`bot_initgc`]); each writer makes its records durable through a
+//! [`syncer`] of its own. [`bot`] defines the shared worker behaviour and
 //! [`WorkerType`](bot::WorkerType), and [`worker_deps`] bundles their
 //! start-up dependencies.
 
@@ -14,4 +15,5 @@ pub mod bot_initgc;
 pub mod bot_reader;
 pub mod bot_scan;
 pub mod bot_writer;
+pub mod syncer;
 pub mod worker_deps;

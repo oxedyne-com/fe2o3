@@ -619,14 +619,9 @@ fn store_wait(
 )
     -> Outcome<()>
 {
-    use oxedyne_fe2o3_o3db_sync::comm::msg::OzoneMsg;
     let resp = res!(api.store(k, v, user));
-    let n = match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
-        OzoneMsg::Chunks(n) => n,
-        other => return Err(err!(
-            "Expected OzoneMsg::Chunks, got {:?}.", other; Test, Channel, Unexpected)),
-    };
-    res!(resp.recv_number(n, constant::USER_REQUEST_WAIT));
+    // The count, then each record written and durable: a writer's error is this test's failure.
+    res!(resp.recv_store_ack());
     Ok(())
 }
 
@@ -641,6 +636,6 @@ fn delete_wait(
     let resp = api.responder();
     res!(api.delete_using_responder(&k, user, None, resp.clone()));
     // The delete writes a single tombstone record; wait for its acknowledgement.
-    res!(resp.recv_number(1, constant::USER_REQUEST_WAIT));
+    res!(resp.recv_delete_ack());
     Ok(())
 }

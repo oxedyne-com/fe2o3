@@ -22,6 +22,10 @@ rand_core = { version = "0.6.3", features = ["std"] }
 oxedyne_fe2o3_hash 				= { path = "../fe2o3_hash" }
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 
+# The independent RFC 8259 reader `Dat::decode_json_strict` is held to in tests/json_strict.rs.
+# Tests only; the crate itself reads JSON with its own code.
+serde_json = "1"
+
 num-bigint = "0.3"
 syn = "1.0"
 quote = "1.0"

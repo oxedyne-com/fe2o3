@@ -40,12 +40,20 @@ use crate::srv::{
     admin::{
         guard::SteelAddressGuard,
         host_sampler::HostSampler,
-        signed_login::NonceTracker,
         traffic::TrafficRecorder,
     },
     alert::Alerter,
     cfg::AdminKey,
-    health::RollingCounter,
+    fleet::Fleet,
+    health::{
+        F_DISK_PCT,
+        F_MAIL_DOWN,
+        F_SEALED_DBS,
+        HealthBody,
+        HealthStamp,
+        RollingCounter,
+    },
+    mail::ListenerTally,
 };
 
 use oxedyne_fe2o3_core::{
@@ -56,6 +64,7 @@ use oxedyne_fe2o3_crypto::{
     enc::EncryptionScheme,
     keystore::Wallet,
 };
+use oxedyne_fe2o3_net::guard::nonce::NonceTracker;
 
 use std::{
     path::PathBuf,
@@ -71,6 +80,7 @@ use std::{
     time::{
         Duration,
         Instant,
+        SystemTime,
     },
 };
 
@@ -162,7 +172,7 @@ pub struct AdminState {
     // When the process began serving, so the health body can report uptime.
     pub started:        Instant,
     // Whether the address guard reported armed by its in-process self-test at
-    // start-up, surfaced as `guard_selftest` in the health body so a box proves
+    // start-up, surfaced as `guard_failed` in the health body so a box proves
     // its own admission control is live without an external synthetic probe.
     pub guard_selftest: bool,
     // Rolling one-minute counts of `429`s emitted and connections dropped at
@@ -170,6 +180,15 @@ pub struct AdminState {
     // 429 site increment these; the health route reads them.
     pub r429:           Arc<RollingCounter>,
     pub dropped:        Arc<RollingCounter>,
+    // Mail listeners asked for against those bound, surfaced as `mail_down`. The
+    // mail spawner in `Server::start` counts into it.
+    pub mail:           Arc<ListenerTally>,
+    // What this host's watcher saw of each peer, drawn by `/admin/fleet`. The
+    // watcher writes the same `Arc`; an empty fleet on a host that watches nobody.
+    pub fleet:          Arc<Fleet>,
+    // Job stamps whose ages the health body reports, vetted at start-up by
+    // `ServerConfig::get_health_stamps`; empty on a host that names none.
+    pub health_stamps:  Arc<Vec<HealthStamp>>,
 }
 
 impl AdminState {
@@ -205,10 +224,12 @@ impl AdminState {
         Rand::fill_u8(&mut session_key);
         let session_enc = res!(
             EncryptionScheme::new_aes_256_gcm_with_key(&session_key));
-        // The replay-window matches the signed-login freshness
-        // window -- an envelope older than the window would fail
-        // the verify_fresh check anyway, so there is no point
-        // tracking nonces past that horizon.
+        // The replay window is the signed-login freshness window. The
+        // tracker holds each nonce until that window after the later
+        // of the envelope's stamp and its first showing: an envelope
+        // stamped ahead of the clock stays fresh until its stamp plus
+        // the window, so a window from the first showing alone would
+        // let it replay.
         let tracker = NonceTracker::new(Duration::from_secs(
             crate::srv::admin::signed_login::SIGNED_LOGIN_FRESHNESS_SECS,
         ));
@@ -237,7 +258,57 @@ impl AdminState {
             guard_selftest,
             r429:               RollingCounter::new_shared(),
             dropped:            RollingCounter::new_shared(),
+            mail:               ListenerTally::new_shared(),
+            fleet:              Fleet::new_shared(String::new(), None),
+            health_stamps:      Arc::new(Vec::new()),
         })
+    }
+
+    /// Hands the dashboard the rings the watcher writes, and this host's name for
+    /// the page's own row. A state built without one has an empty fleet, as a host
+    /// that watches nobody does.
+    pub fn with_fleet(mut self, fleet: Arc<Fleet>) -> Self {
+        self.fleet = fleet;
+        self
+    }
+
+    pub fn with_health_stamps(mut self, stamps: Vec<HealthStamp>) -> Self {
+        self.health_stamps = Arc::new(stamps);
+        self
+    }
+
+    /// This host's health body: what the health route serves, and what the Fleet
+    /// page draws in this host's own row.
+    ///
+    /// `assemble` makes the original fields; the ones the Fleet view added are
+    /// set here, from state this struct holds. Each is absent rather than zero
+    /// when it was never read, so no watcher mistakes a missing figure for a
+    /// good one. The stamp ages are the exception by design: each is read at
+    /// this call, and a stamp that cannot be read reports as never written.
+    pub fn health_body(&self) -> HealthBody {
+        let host = self.host_sampler.health_metrics().ok().flatten();
+        let mut b = HealthBody::assemble(
+            host,
+            self.addr_guard.live_conns(),
+            self.r429.last(60),
+            self.dropped.last(60),
+            self.guard_selftest,
+            self.started.elapsed().as_secs(),
+            self.is_sealed(),
+        );
+        let sealed_dbs = if self.seal_withholds_data() { self.db_count } else { 0 };
+        b.set(F_SEALED_DBS, sealed_dbs as i64);
+        if let Some(pct) = self.host_sampler.disk_pct().ok().flatten() {
+            b.set(F_DISK_PCT, pct);
+        }
+        if let Some(n) = self.mail.down() {
+            b.set(F_MAIL_DOWN, n as i64);
+        }
+        for r in self.host_sampler.residents().unwrap_or_default() {
+            b.set_resident(&r);
+        }
+        b.set_stamps(&self.health_stamps, SystemTime::now());
+        b
     }
 
     /// True while no master key is known, so the databases are shut and
@@ -333,5 +404,49 @@ impl AdminState {
             }
             notified.await;
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::srv::health::BUILTIN_FIELDS;
+
+    /// Every field the served body carries of its own accord is on the reserved list, so a stamp
+    /// can take none of them, and the stamps the state was handed ride beside them, a stamp that
+    /// is not there reading as never written.
+    #[test]
+    fn the_served_body_is_the_builtin_list_and_the_stamps() -> Outcome<()> {
+        let state = res!(AdminState::new(
+            Arc::new(RwLock::new(Wallet::default())),
+            PathBuf::from("./wallet.jdat"),
+            Some([0u8; 32].to_vec()),
+            1,
+            None,
+            TrafficRecorder::new_shared(0),
+            HostSampler::new_shared(),
+            res!(crate::srv::admin::guard::new_shared()),
+            res!(crate::srv::admin::guard::new_shared()),
+            Vec::new(),
+            None,
+        ));
+        let plain = state.health_body();
+        for k in plain.fields.keys() {
+            assert!(BUILTIN_FIELDS.contains(&k.as_str()),
+                "the served body carries '{}', which BUILTIN_FIELDS does not reserve", k);
+        }
+
+        let state = state.with_health_stamps(vec![HealthStamp {
+            field:  fmt!("forge_state_age_s"),
+            path:   PathBuf::from("/nonexistent/fe2o3_steel/stamp/state.ok"),
+        }]);
+        let body = state.health_body();
+        assert!(body.get("forge_state_age_s").unwrap_or(0) > 1_000_000_000,
+            "a missing stamp must read as never written, a very large age");
+        assert_eq!(body.fields.len(), plain.fields.len() + 1,
+            "the stamp rides beside the built-in fields and displaces none");
+        Ok(())
     }
 }

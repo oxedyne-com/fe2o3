@@ -416,8 +416,9 @@ fn old_random_key_value_still_reads(
         return Err(err!(
             "The legacy value was not chunked ({} chunk(s)).", nchunks; Test, Invalid, Configuration));
     }
-    // Drain the write acknowledgements so the value is settled before it is read.
-    let _ = resp.recv_number(nchunks, constant::USER_REQUEST_WAIT);
+    // Drain the write acknowledgements so the value is settled before it is read: the count,
+    // then every record written and durable.
+    res!(resp.recv_store_ack());
     thread::sleep(Duration::from_secs(1));
 
     // It must read back correctly even though its set_id is not the key-derived one.

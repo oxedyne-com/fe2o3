@@ -243,10 +243,8 @@ impl<
     // Write API, for general public use.
     
     /// Insert key-value `Dat`icles using the given data scheme overrides.  A `Responder` channel
-    /// is returned.  If the value is not chunked, this will carry a single `OzoneMsg::KeyExists`
-    /// message indicating whether or not the key was already present.  When chunked, one
-    /// `OzoneMsg::KeyChunkExists` will be sent for each chunk.  Receipt of all expected messages
-    /// indicates operation completion.
+    /// is returned, carrying the answers `store_dat_using_responder` describes; wait on them with
+    /// `Responder::recv_store_ack`.
     ///
     /// # Arguments
     /// * `k` - key `Dat`cle.
@@ -421,11 +419,13 @@ impl<
     /// * `resp` - a `Responder` channel.
     ///
     /// Returns the number of chunks.  The first message in the `Responder` will be an
-    /// `OzoneMsg::Chunks` containing the number of chunks.  If there was no chunking this will be
-    /// followed by an `OzoneMsg::KeyExists` message indicating whether the key was present.  In
-    /// the case of chunking, an `OzoneMsg::KeyChunkExists` message will follow for the bunch key
-    /// (with index 0) and each chunk, in undefined order.  These messages indicate successful
-    /// completion of each operation.
+    /// `OzoneMsg::Chunks` containing the number of chunks.  Each record written is then answered
+    /// twice: `OzoneMsg::Written` once it is appended, and a final answer once it is durable under
+    /// the sync policy and readable.  Without chunking the final answer is an `OzoneMsg::KeyExists`
+    /// saying whether the key was present; with chunking it is an `OzoneMsg::KeyChunkExists` for
+    /// the bunch key (with index 0) and for each chunk.  The answers to different records arrive
+    /// in no particular order.  A writer that fails sends `OzoneMsg::Error` instead.
+    /// `Responder::recv_store_ack` waits on all of it, each stage to its own deadline.
     ///
     /// # Local errors
     /// * The key must be transformable into an Ozone key.

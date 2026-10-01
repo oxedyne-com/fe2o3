@@ -207,7 +207,9 @@ fn sweep_reclaims_orphans(
             return Err(err!("The random-ticket value was not chunked ({} chunk(s)).", nchunks;
                 Test, Invalid, Configuration));
         }
-        let _ = resp.recv_number(nchunks, constant::USER_REQUEST_WAIT);
+        // The count, then every record written and durable.  Counting answers instead took the
+        // count for one of them, and ignored an error.
+        res!(resp.recv_store_ack());
         // Overwrite with a tiny unchunked value: supersedes the bunch key, orphans every chunk.
         res!(db.insert(key.clone(), value_of((k as u8).wrapping_add(1), TINY_BYTES), user, schms2));
     }

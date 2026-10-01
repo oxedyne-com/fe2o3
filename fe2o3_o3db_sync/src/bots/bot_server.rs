@@ -71,9 +71,15 @@ impl<
             Ok(msg) => match msg {
                 OzoneMsg::Get { key, schms2, resp } => {
                     match self.api().get_wait(&key, schms2.as_ref()) {
-                        Err(e) => self.error(err!(e,
-                            "{}: While trying to get value for key {:?}", self.ozid(), key;
-                            Data, Read)),
+                        Err(e) => {
+                            // The caller is waiting on this answer, and a failure only logged
+                            // reached it as a timeout that named no cause.
+                            let e = err!(e,
+                                "{}: While trying to get value for key {:?}", self.ozid(), key;
+                                Data, Read);
+                            self.error(e.clone());
+                            self.respond(Err(e), &resp);
+                        },
                         Ok(result) => match resp.send(OzoneMsg::GetResult(result)) {
                             Err(e) => self.err_cannot_send(err!(e,
                                 "{}: While sending an OzoneMsg::GetResult back via a responder.",
@@ -85,6 +91,7 @@ impl<
                 },
                 OzoneMsg::Put { key, val, user, schms2, resp } => {
                     debug!(sync_log::stream(), "Store key: {:?}",key);
+                    let caller = resp.clone();
                     match self.api().store_dat_using_responder(
                         key,
                         val,
@@ -92,9 +99,14 @@ impl<
                         schms2.as_ref(),
                         resp,
                     ) {
-                        Err(e) => self.error(err!(e,
-                            "{}: While trying to put value.", self.ozid();
-                            Data, Write)),
+                        Err(e) => {
+                            // As for a get: the caller hears the cause, not a timeout.
+                            let e = err!(e,
+                                "{}: While trying to put value.", self.ozid();
+                                Data, Write);
+                            self.error(e.clone());
+                            self.respond(Err(e), &caller);
+                        },
                         Ok(_nchunks) => (),
                     }
                 },

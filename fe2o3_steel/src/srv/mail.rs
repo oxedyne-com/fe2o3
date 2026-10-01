@@ -26,10 +26,52 @@ use oxedyne_fe2o3_net::{
 
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicU32,
+            Ordering,
+        },
+    },
 };
 
 use tokio::net::TcpListener;
+
+
+/// How many mail listeners bound, against how many the configuration asked for,
+/// surfaced in the health body as `mail_down`.
+///
+/// Counted up front from the configuration, before anything that can fail, so a
+/// set-up that dies before it binds anything still shows every listener as down
+/// rather than showing no mail server at all.
+#[derive(Debug, Default)]
+pub struct ListenerTally {
+    wanted: AtomicU32,
+    bound:  AtomicU32,
+}
+
+impl ListenerTally {
+    pub fn new_shared() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub fn want(&self) {
+        self.wanted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn bound(&self) {
+        self.bound.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Listeners asked for and not bound, or `None` when none were asked for.
+    pub fn down(&self) -> Option<u32> {
+        let wanted = self.wanted.load(Ordering::Relaxed);
+        if wanted == 0 {
+            return None;
+        }
+        Some(wanted.saturating_sub(self.bound.load(Ordering::Relaxed)))
+    }
+}
 
 
 /// Runs the accept loop forever. An error on an individual accept is logged and
@@ -37,6 +79,7 @@ use tokio::net::TcpListener;
 pub async fn run_smtp_listener(
     addr:   SocketAddr,
     server: SmtpServer<AppMailHandler, PasswdFileUserStore>,
+    tally:  Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
@@ -46,6 +89,9 @@ pub async fn run_smtp_listener(
             "Binding SMTP listener on {}.", addr;
             IO, Network, Init)),
     };
+    if let Some(t) = &tally {
+        t.bound();
+    }
     info!("SMTP {:?} listening on {} (mode={:?})",
         server.mode, addr, server.mode);
     loop {
@@ -77,6 +123,7 @@ pub async fn run_imap_listener(
         oxedyne_fe2o3_mail::maildir::MaildirStore,
         PasswdFileUserStore,
     >,
+    tally:          Option<Arc<ListenerTally>>,
 )
     -> Outcome<()>
 {
@@ -86,6 +133,9 @@ pub async fn run_imap_listener(
             "Binding IMAP listener on {}.", addr;
             IO, Network, Init)),
     };
+    if let Some(t) = &tally {
+        t.bound();
+    }
     info!("IMAP listening on {}", addr);
     loop {
         let (stream, peer) = match listener.accept().await {
@@ -153,4 +203,24 @@ pub fn build_smtp_servers(
         mode:           SmtpMode::Submission,
     };
     (receive, submission)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn listener_tally_reports_only_what_was_asked_for() {
+        let t = ListenerTally::default();
+        assert_eq!(t.down(), None, "a host with no mail server reports no mail field");
+        t.want();
+        t.want();
+        t.want();
+        t.bound();
+        t.bound();
+        assert_eq!(t.down(), Some(1), "three asked for, two bound");
+        t.bound();
+        assert_eq!(t.down(), Some(0));
+    }
 }

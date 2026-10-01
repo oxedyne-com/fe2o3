@@ -468,17 +468,13 @@ pub async fn read_frame<R: AsyncRead + Unpin>(
     }
 
     // Bound the frame, and then the message a data frame would join, before anything is allocated
-    // to hold either. The peer's number is not believed until it has been agreed to.
-    //
-    // `TooBig` is repeated on the wrapper deliberately: `Error::tags` reads the outermost frame of
-    // an error and not the chain beneath it, so a tag that is only on the inner error is a tag no
-    // caller will find, and answering with a 1009 close depends on finding it.
-    res!(limits.check_frame(declared),
-        IO, Network, Invalid, Input, Wire, TooBig);
+    // to hold either. The peer's number is not believed until it has been agreed to. The bound's own
+    // error carries `TooBig`, and `Error::tags` reads every frame of the chain, so the 1009 close finds
+    // it through any frame added on the way out.
+    res!(limits.check_frame(declared));
     let payload_length = declared as usize; // Narrowing is safe: `check_frame` bounded it.
     if !is_control {
-        res!(limits.check_msg(buffered.saturating_add(payload_length)),
-            IO, Network, Invalid, Input, Wire, TooBig);
+        res!(limits.check_msg(buffered.saturating_add(payload_length)));
     }
 
     let mut masking_key = [0u8; 4];
@@ -626,9 +622,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(
 {
     let mut opcode = None;
     loop {
-        // `ok!` rather than `res!`, so that the `TooBig` tag stays on the outermost error, where
-        // `WebSocket::read` looks for it.
-        let frame = match ok!(read_frame(stream, chunk_size, limits, buffer.len()).await) {
+        let frame = match res!(read_frame(stream, chunk_size, limits, buffer.len()).await) {
             Some(frame) => frame,
             None        => return Ok(None),
         };
@@ -1160,8 +1154,6 @@ impl<
                             break;
                         }
                         Err(e) => {
-                            // Asked before the wrap, because wrapping puts the outer frame's tags
-                            // in front of the ones underneath and `Error::tags` reads no deeper.
                             let too_big = e.tags().contains(&ErrTag::TooBig);
                             let e = err!(e,
                                 "{}: Error reading websocket message:", id;
@@ -1486,8 +1478,9 @@ mod tests {
         let mut buffer = Vec::new();
         let result = read_message(&mut src, &mut buffer, 256, limits).await;
         match result {
-            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
-                "an over-limit frame must be tagged TooBig, so that a 1009 close can answer it; \
+            // Tagged once: `Error::tags` reads the whole chain, so no frame on the way out repeats it.
+            Err(e) => assert_eq!(e.tags().iter().filter(|t| **t == ErrTag::TooBig).count(), 1,
+                "an over-limit frame must be tagged TooBig, once, so that a 1009 close can answer it; \
                 got tags {:?}", e.tags()),
             Ok(other) => return Err(err!(
                 "Expected a frame of 1025 bytes to be refused against a 1024 byte limit, got \
@@ -1557,8 +1550,8 @@ mod tests {
         let mut src = &byts[..];
         let mut buffer = Vec::new();
         match read_message(&mut src, &mut buffer, 256, limits).await {
-            Err(e) => assert!(e.tags().contains(&ErrTag::TooBig),
-                "an over-limit message must be tagged TooBig; got tags {:?}", e.tags()),
+            Err(e) => assert_eq!(e.tags().iter().filter(|t| **t == ErrTag::TooBig).count(), 1,
+                "an over-limit message must be tagged TooBig, once; got tags {:?}", e.tags()),
             Ok(other) => return Err(err!(
                 "Expected four 1,000 byte frames to breach a 2,048 byte message limit, got {:?}.",
                 other; Test, Mismatch)),

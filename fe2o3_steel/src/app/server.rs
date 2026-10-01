@@ -120,6 +120,17 @@ impl AppShellContext {
             server_cfg.health_token = res!(crate::srv::cfg::ApiRoute::resolve_file_refs(
                 &server_cfg.health_token, root_path.as_ref()));
         }
+        // A stamp with an unusable name or a relative path is a refusal to start, not a
+        // warning: served past, it would be a field that is quietly never in the body, and an
+        // absent field trips no watcher's threshold, so the job it watches could stop unheard.
+        let health_stamps = res!(server_cfg.get_health_stamps());
+        if !health_stamps.is_empty() {
+            info!("The health body reports the age of {} stamp(s): {}.",
+                health_stamps.len(),
+                health_stamps.iter()
+                    .map(|s| fmt!("{} <- {:?}", s.field, s.path))
+                    .collect::<Vec<_>>().join(", "));
+        }
 
         info!("Reading dev config...");
         let dev_cfg = res!(DevConfig::from_datmap(self.app_cfg.dev_cfg.clone()));
@@ -407,7 +418,14 @@ impl AppShellContext {
         // recorder so dashboard reads and request-pipeline writes
         // see one consistent view.
         let traffic = TrafficRecorder::new_shared(0);
-        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared();
+        // The sampler also reads what the health body needs beyond its snapshot --
+        // the `health_residents` processes on a slower cadence of its own, and how
+        // full the app root's filesystem is -- so a request formats figures rather
+        // than walking `/proc`. Resident names were checked at validation.
+        let host_sampler = crate::srv::admin::host_sampler::HostSampler::new_shared_for_health(
+            res!(server_cfg.get_health_residents()),
+            Some(PathBuf::from(&root_path)),
+        );
         let addr_guard = res!(crate::srv::admin::guard::new_shared_with(
             server_cfg.get_addr_guard_settings(),
         ));
@@ -533,7 +551,11 @@ impl AppShellContext {
         // an outbound TLS client for the same practical reason. Both absences
         // are said out loud rather than logged at debug, since the operator who
         // configured a watch believes they are covered.
-        match res!(server_cfg.get_watch()) {
+        //
+        // What the watcher sees goes into the shared fleet rings too, which the
+        // dashboard's Fleet page draws. A host that watches nobody still gets an
+        // empty fleet, since the page always has this host's own row to show.
+        let fleet = match res!(server_cfg.get_watch()) {
             Some(mut wcfg) => {
                 // Resolve each peer's health-token `{file:...}` at load, the same
                 // reason the server's own token is resolved: the secret must be
@@ -547,6 +569,8 @@ impl AppShellContext {
                         }
                     }
                 }
+                let fleet = crate::srv::fleet::Fleet::new_shared(
+                    alert_host.clone(), Some(&wcfg));
                 match (&alerter, &tls_client) {
                 (Some(a), Some(tls)) => {
                     let w = res!(crate::srv::watch::Watcher::new(
@@ -554,6 +578,7 @@ impl AppShellContext {
                         Arc::new(a.clone()),
                         tls.clone(),
                         alert_host.to_string(),
+                        fleet.clone(),
                     ));
                     // `rt.spawn`, NOT `tokio::spawn`. This function is sync: the
                     // runtime is built at the top and is not current until
@@ -573,49 +598,13 @@ impl AppShellContext {
                     outbound TLS client, so it cannot probe anything. The watcher \
                     was not started."),
                 }
+                fleet
             },
-            None => {},
-        }
-
-        // The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built
-        // from the same mail configuration the mail server and the alerter use, and shared by every
-        // vhost. `None` where no mail is configured -- newsletter signup then answers "not set up"
-        // rather than recording a pending subscriber it could never confirm. A build failure warns and
-        // disables the newsletter rather than taking the server down: the websites do not depend on it.
-        let mail_sender = match res!(server_cfg.get_mail_any()) {
-            // Built whenever there is a sending identity -- a hostname to greet with and at least one
-            // DKIM key -- independent of whether the mail *server* (the listeners) is enabled. This is
-            // what lets a site send its newsletter without becoming an MX.
-            Some(mail_cfg) if !mail_cfg.hostname.is_empty()
-                && (!mail_cfg.dkim_key_file.is_empty() || !mail_cfg.dkim_rsa_key_file.is_empty()) => {
-                let dkim = res!(
-                    crate::srv::server::load_dkim_signers(&mail_cfg, &root_path));
-                let domain = if mail_cfg.dkim_domain.is_empty() {
-                    mail_cfg.hostname.clone()
-                } else {
-                    mail_cfg.dkim_domain.clone()
-                };
-                let default_from = fmt!("news@{}", domain);
-                match crate::srv::publish::send::MailSender::new(
-                    mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
-                {
-                    Ok(s) => {
-                        info!("Newsletter sender ready (default from {}, {} DKIM key(s)).",
-                            default_from, dkim.len());
-                        Some(Arc::new(s))
-                    }
-                    Err(e) => {
-                        warn!("Building the newsletter sender failed ({}); newsletter \
-                            signup will report itself unavailable.", e);
-                        None
-                    }
-                }
-            }
-            _ => {
-                info!("No mail configured, so the newsletter is unavailable; signup says so.");
-                None
-            }
+            None => crate::srv::fleet::Fleet::new_shared(alert_host.clone(), None),
         };
+
+        // Any failure here disables the newsletter with a warning; see `newsletter_sender`.
+        let mail_sender = newsletter_sender(res!(server_cfg.get_mail_any()), &root_path);
 
         let admin_state = res!(AdminState::new(
             self.wallet.clone(),
@@ -629,7 +618,7 @@ impl AppShellContext {
             auth_guard.clone(),
             admin_keys_cfg,
             head_injection_url_cfg,
-        ));
+        )).with_fleet(fleet).with_health_stamps(health_stamps);
         let admin_state = Arc::new(admin_state);
         info!("Admin dashboard runtime initialised \
             (traffic ring capacity {}; host sampler capacity {}).",
@@ -1044,5 +1033,127 @@ async fn open_dbs_on_unseal(
             "The database opener task failed to join.";
             Thread, Panic),
             "Opening the per-vhost databases after unseal."),
+    }
+}
+
+
+
+/// The site's own newsletter sender: the DKIM identities and an outbound SMTP client, built from
+/// the `mail` block whether or not the mail server is enabled, and shared by every vhost.
+///
+/// `None` where there is no sending identity -- a hostname to greet with and at least one DKIM
+/// key -- or where one cannot be built. Newsletter signup then answers "not set up" rather than
+/// recording a pending subscriber it could never confirm. A failure warns and disables the
+/// newsletter rather than refusing to start, because the websites do not depend on it: on
+/// 2026-09-21 a disabled `mail` block naming an RSA key that was never generated stopped birch,
+/// a forge proxy that sends no mail, from starting. The keys are still loaded when mail is
+/// disabled, since that is what lets a site send its newsletter signed without becoming an MX.
+fn newsletter_sender(
+    mail:   Option<crate::srv::cfg::MailConfig>,
+    root:   &oxedyne_fe2o3_core::path::NormPathBuf,
+)
+    -> Option<Arc<crate::srv::publish::send::MailSender>>
+{
+    let mail_cfg = match mail {
+        Some(m) if !m.hostname.is_empty()
+            && (!m.dkim_key_file.is_empty() || !m.dkim_rsa_key_file.is_empty()) => m,
+        _ => {
+            info!("No mail configured, so the newsletter is unavailable; signup says so.");
+            return None;
+        },
+    };
+    let dkim = match crate::srv::server::load_dkim_signers(&mail_cfg, root) {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("The newsletter is disabled, and signup will say so: its DKIM key(s) could \
+                not be loaded ({}). The websites are unaffected.", e);
+            return None;
+        },
+    };
+    let domain = if mail_cfg.dkim_domain.is_empty() {
+        mail_cfg.hostname.clone()
+    } else {
+        mail_cfg.dkim_domain.clone()
+    };
+    let default_from = fmt!("news@{}", domain);
+    match crate::srv::publish::send::MailSender::new(
+        mail_cfg.hostname.clone(), dkim.clone(), default_from.clone())
+    {
+        Ok(s) => {
+            info!("Newsletter sender ready (default from {}, {} DKIM key(s)).",
+                default_from, dkim.len());
+            Some(Arc::new(s))
+        },
+        Err(e) => {
+            warn!("Building the newsletter sender failed ({}); newsletter \
+                signup will report itself unavailable.", e);
+            None
+        },
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::srv::cfg::MailConfig;
+    use oxedyne_fe2o3_core::path::NormalPath;
+
+    /// A fresh scratch directory, removed by the caller.
+    fn scratch(tag: &str) -> Outcome<std::path::PathBuf> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(fmt!(
+            "fe2o3_steel_newsletter_{}_{}_{}", tag, std::process::id(), nanos));
+        res!(std::fs::create_dir_all(&dir), IO, File);
+        Ok(dir)
+    }
+
+    /// THE BIRCH START-UP FAILURE: a disabled `mail` block naming an RSA key that was never
+    /// generated disables the newsletter and lets the server start, where it used to refuse.
+    #[test]
+    fn a_missing_newsletter_key_disables_the_newsletter_and_does_not_stop_start_up() -> Outcome<()> {
+        let dir = res!(scratch("missing"));
+        let root = Path::new(&dir).normalise().absolute();
+        let mut cfg = MailConfig::default();
+        cfg.enabled = false;
+        cfg.hostname = fmt!("birch.example.test");
+        cfg.dkim_rsa_key_file = fmt!("mail/dkim_rsa.key");
+        assert!(newsletter_sender(Some(cfg), &root).is_none(),
+            "a key that is not there cannot sign, so there is no newsletter sender");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// Mail disabled is not signing disabled: a site with a key sends its newsletter signed,
+    /// which is why the key is not skipped wholesale when `enabled` is false.
+    #[test]
+    fn a_send_only_newsletter_is_still_signed_when_mail_is_disabled() -> Outcome<()> {
+        let dir = res!(scratch("signed"));
+        let root = Path::new(&dir).normalise().absolute();
+        let mut cfg = MailConfig::default();
+        cfg.enabled = false;
+        cfg.hostname = fmt!("site.example.test");
+        cfg.dkim_key_file = fmt!("mail/dkim.key");
+        let sender = match newsletter_sender(Some(cfg), &root) {
+            Some(s) => s,
+            None => return Err(err!("A send-only site lost its newsletter sender."; Test)),
+        };
+        let shown = fmt!("{:?}", sender);
+        assert!(shown.contains("news@site.example.test") && shown.contains("dkim: 1"),
+            "the sender must sign with its one key: {}", shown);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn no_mail_block_means_no_newsletter() {
+        let root = Path::new("/nonexistent").normalise().absolute();
+        assert!(newsletter_sender(None, &root).is_none());
+        let mut bare = MailConfig::default();
+        bare.hostname = fmt!("site.example.test");
+        assert!(newsletter_sender(Some(bare), &root).is_none(), "no key, no sending identity");
     }
 }

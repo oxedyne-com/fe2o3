@@ -124,11 +124,22 @@ pub struct MailUser {
     pub local:          String, // left of `@`, as authenticated
     pub domain:         String, // right of `@`
     pub delivery_key:   String, // mailbox root: a path or opaque key, set by the UserStore
+    // Addresses besides its own that the account may send as: the identities a mail client
+    // sends through this one login. Empty for most accounts.
+    pub send_as:        Vec<String>,
 }
 
 impl MailUser {
     pub fn address(&self) -> String {
         fmt!("{}@{}", self.local, self.domain)
+    }
+
+    /// May this account send mail as `address`? Its own address and those listed in
+    /// `send_as`, compared without regard to case.
+    pub fn may_send_as(&self, address: &str) -> bool {
+        let a = address.trim().to_lowercase();
+        a == self.address().to_lowercase()
+            || self.send_as.iter().any(|s| s.trim().to_lowercase() == a)
     }
 }
 

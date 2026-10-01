@@ -338,7 +338,7 @@ impl ImapClient {
 
         let stream = match cfg.security {
             Security::ImplicitTls =>
-                res!(tls::upgrade(plain, &cfg.host, tls_cfg.clone()).await),
+                res!(tls::upgrade(plain, &cfg.host, tls_cfg.clone(), cfg.timeout).await),
             Security::StartTls | Security::Plain =>
                 ClientStream::Plain(plain),
         };
@@ -407,7 +407,7 @@ impl ImapClient {
                 "STARTTLS issued on an already-protected connection.";
                 Invalid, Bug)),
         };
-        let upgraded = res!(tls::upgrade(plain, &self.host, tls_cfg).await);
+        let upgraded = res!(tls::upgrade(plain, &self.host, tls_cfg, self.timeout).await);
         self.stream = Some(BufReader::new(upgraded));
 
         // Capabilities before and after TLS are allowed to differ, and the

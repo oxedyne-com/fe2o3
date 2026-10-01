@@ -11,8 +11,13 @@
 //! Blacklist / Whitelist) with a caller-supplied data payload, likewise lifted out of
 //! `fe2o3_shield` so any protocol can classify users, not only addresses.
 //!
+//! `nonce::NonceTracker` refuses a nonce shown twice inside a window, for a
+//! signed command whose signer chose the nonce; it came from `fe2o3_steel`'s
+//! signed admin login.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod addr;
+pub mod nonce;
 pub mod user;

@@ -8,7 +8,7 @@
 //! caches have to follow that.
 //!
 //! The location cache does follow it: `cache_data_file` sends each carried record's new location
-//! to its cbot, which re-anchors the entry (`Cache::update_if_same_fnum`), and any location still
+//! to its cbot, which re-anchors the entry (`Cache::reanchor`), and any location still
 //! in flight is mapped through the file state's ephemeral old -> new move map.
 //!
 //! The reader's file cache does not.  `ReaderBot::get_file` keeps an open `File` per file number

@@ -13,7 +13,9 @@ use crate::{
             FileNum,
         },
         state::FileStateMap,
+        stored::RecordDigest,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::channels::Recv;
@@ -229,14 +231,14 @@ impl<
     {
         match msg {
             // WRITE
-            OzoneMsg::ScheduleOld(floc, from_id) => {
+            OzoneMsg::ScheduleOld(floc, rid, from_id) => {
                 // [17] Schedule the old file location for deletion.
                 if !self.gc_active(
                     floc.file_number(),
                     &msg,
                     processing_buffer,
                 ) { 
-                    let result = self.schedule_deletion(floc, from_id);
+                    let result = self.schedule_deletion(floc, rid, from_id);
                     self.result(&result);
                 }
             }
@@ -281,7 +283,7 @@ impl<
                         Data, IO, Channel));
                 }
             }
-            OzoneMsg::ReadFileRequest(fnum, mloc, resp_r2) => {
+            OzoneMsg::ReadFileRequest(fnum, kbyts, mloc, resp_r2) => {
                 if !self.gc_active(
                     *fnum,
                     &msg,
@@ -293,9 +295,25 @@ impl<
                         Ok(fstat) => {
                             let mut mloc2 = mloc.clone();
                             let mut postgc = false;
-                            if let Some(new_start) = fstat.map_and_remove(&mloc2.file_location().keyval()) {
-                                mloc2.new_start_position(new_start);
-                                postgc = true;
+                            // Only a file a collection has just moved records in has move entries,
+                            // so the record is named only then.  A read looks up its move and
+                            // leaves the entry: it is kept for the record's supersession, which
+                            // finding it gone flagged whatever now sits at the old offset as old.
+                            if !fstat.no_pending_moves() {
+                                match RecordDigest::new(kbyts, mloc.meta()) {
+                                    Ok(rid) => {
+                                        let dloc = mloc2.file_location().keyval();
+                                        if let Some(new_start) = fstat.moved_to(&dloc, &rid) {
+                                            mloc2.new_start_position(new_start);
+                                            postgc = true;
+                                        }
+                                    },
+                                    // The reader confirms the record it reads, so an unmapped
+                                    // location costs it a retry, never a wrong answer.
+                                    Err(e) => error!(sync_log::stream(), err!(e,
+                                        "Naming the record a read of file {} asks for.", fnum;
+                                        Data, Encode)),
+                                }
                             }
                             // Increment the reader count whether or not the location was remapped.
                             // The count is the pin that keeps a file from being collected while a
@@ -332,7 +350,8 @@ impl<
                     &msg,
                     processing_buffer,
                 ) { 
-                    // <9> Decrement the reader count now that a read has completed.
+                    // <9> Decrement the reader count now that a read has completed.  The last read
+                    // finishing does not look at the file for collection (see `maybe_collect`).
                     let result = match self.states_mut().get_state_mut(*fnum) {
                         Ok(fstat) => {
                             let result = fstat.dec_readers();
@@ -374,14 +393,19 @@ impl<
                 new_ind_size,
                 resp,
             } => {
-                let result = self.close_old_live_file_state(
+                // The writer rolling over waits on this, and would otherwise wait out its deadline
+                // on a failure only logged here.
+                let caller = resp.clone();
+                if let Err(e) = self.close_old_live_file_state(
                     fnum_old,
                     fnum_new,
                     new_dat_size,
                     new_ind_size,
                     resp,
-                );
-                self.result(&result);
+                ) {
+                    self.error(e.clone());
+                    self.respond(Err(e), &caller);
+                }
             },
             OzoneMsg::OpenNewLiveFileState {
                 fnum_new,
@@ -476,6 +500,7 @@ impl<
     fn schedule_deletion(
         &mut self,
         floc:   &FileLocation,
+        rid:    &RecordDigest,
         from:   &OzoneBotId,
     )
         -> Outcome<()>
@@ -490,9 +515,10 @@ impl<
                 Bug, Missing, Data)),
             Ok(fstat) => {
                 // Perform mapping to new start position, resulting from scheduling messages which
-                // have backed up during previous garbage collection.
+                // have backed up during previous garbage collection.  Only this record's move is
+                // taken: another's at the same offset is waiting for its own supersession.
                 let mut floc2 = floc.clone();
-                if let Some(new_start) = fstat.map_and_remove(&floc2.keyval()) {
+                if let Some(new_start) = fstat.map_and_remove(&floc2.keyval(), rid) {
                     floc2.start = new_start;
                 }
 
@@ -503,11 +529,32 @@ impl<
             },
         }
 
+        // [17.2] Check whether garbage collection should be triggered for the file.
+        self.maybe_collect(floc.file_number())
+    }
+
+    /// Starts a collection of the file if it is eligible now.  A file deferred on any input to
+    /// eligibility is looked at again only when something calls this: a supersession, a seal, a
+    /// record landing in a sealed file.  Until 2026-09-23 only a supersession did, and a file that
+    /// crossed the trigger while it was live, or before its last writes had drained, kept its
+    /// garbage until a later supersession happened to land in it: for a file whose remaining
+    /// records are never superseded, for ever.
+    ///
+    /// Two changes that can make a file eligible deliberately do not call this.  The last read
+    /// finishing would start a collection in the middle of a burst of reads of the file, a chunked
+    /// value's, and a read queued behind the collection is replayed at its old offset with
+    /// nothing to remap it, since the collection re-anchored its cache entry and dropped the move.
+    /// With records of one size that offset holds another valid record, which the reader returned
+    /// until it confirmed key and stamp (2026-09-23): starting collections there failed the first
+    /// read of a same-key churn's value after a restart in 5 to 8 runs of 12.  The reader now
+    /// retries such a read, but the trigger stays withdrawn until that is measured.  Switching
+    /// collection on would hand every file a start-up load had found garbage in to the collectors
+    /// at once, and a read of a file waiting its turn waits with it.
+    fn maybe_collect(&mut self, fnum: FileNum) -> Outcome<()> {
+        let self_id = self.ozid().clone();
         if self.gc_on {
-            let fnum = floc.file_number();
             let mut gc_activated = false;
-            // [17.2] Check whether garbage collection should be triggered for the file.
-            match self.states().get_state(floc.file_number()) {
+            match self.states().get_state(fnum) {
                 Ok(fstat) => {
                     let oldvals = fstat.get_old_sum() as f64;
                     let datfilemax = self.cfg().data_file_max_bytes as f64;
@@ -534,7 +581,8 @@ impl<
                     // path (old bytes accrue a small record at a time, long after the file has
                     // sealed and drained) but routine for a chunked value, whose single overwrite
                     // both rolls a file mid-burst and supersedes a whole value's worth of records
-                    // at once.  A later supersession re-evaluates, so deferral only delays.
+                    // at once.  The record whose landing completes the drain brings the file
+                    // back here (`update_data`), so deferral only delays.
                     let drained = if eligible {
                         let mut dat_path = self.zdir().dir.clone();
                         dat_path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
@@ -590,26 +638,25 @@ impl<
                     }
                 },
                 Err(e) => return Err(err!(e,
-                    "{:?}: Request from {:?} to schedule old {:?}.", self_id, from, floc;
+                    "{:?}: Evaluating file {} for collection, which has no state.", self_id, fnum;
                     Bug, Missing, Data)),
             }
             // [#] Moved out to here due to borrow checker.
             if gc_activated {
-                match self.states_mut().get_state_mut(floc.file_number()) {
+                match self.states_mut().get_state_mut(fnum) {
                     Ok(fstat) => fstat.set_gc(true),
                     _ => (), // unreachable
                 }
             }
         }
         Ok(())
-
     }
 
     fn update_data(
         &mut self,
         floc_new:       &FileLocation,
         ilen:           usize,
-        floc_old_opt:   Option<&FileLocation>,
+        floc_old_opt:   Option<&(FileLocation, RecordDigest)>,
         from:           &OzoneBotId,
     )
         -> Outcome<()>
@@ -624,25 +671,39 @@ impl<
 
         // [16] Advise the appropriate fbot to schedule the old data for deletion in its file state
         // data map.
-        if let Some(floc_old) = floc_old_opt {
+        if let Some((floc_old, rid)) = floc_old_opt {
             let bots = res!(self.fbots());
             let (bot, b) = bots.choose_bot(&ChooseBot::ByFile(floc_old.file_number()));
             if *b == self.wind().b() {
-                // This could be itself...
-                res!(self.schedule_deletion(
-                    floc_old,
-                    from,
-                ));
+                // This could be itself, and then the supersession passes the same guard as a
+                // `ScheduleOld` message.  Applied directly to a file being collected, it went
+                // into the state that the collection's result then replaced: the record was
+                // carried into the rewritten file as current, its move entry was never cleared,
+                // and a file with a move entry is never collected again.  With two file bots to a
+                // zone, half of all supersessions come this way; the online sweep lost 50 to 65
+                // of its 224 to it (2026-09-23).
+                let msg = OzoneMsg::ScheduleOld(*floc_old, *rid, from.clone());
+                if !self.gc_active(floc_old.file_number(), &msg, false) {
+                    res!(self.schedule_deletion(
+                        floc_old,
+                        rid,
+                        from,
+                    ));
+                }
             } else {
                 // Or another fbot.
+                hooks::forward_delay();
                 res!(bot.send(OzoneMsg::ScheduleOld(
                     *floc_old,
+                    *rid,
                     from.clone(),
                 )));
             }
         }
 
-        Ok(())
+        // A sealed file's last records land after its seal, and until they do it has not
+        // drained and cannot be collected.
+        self.maybe_collect(floc_new.file_number())
     }
     
     fn close_old_live_file_state(
@@ -684,6 +745,13 @@ impl<
                 new_ind_size,
                 resp,
             }));
+        }
+
+        // Supersessions that reached the file while it was live could not start a collection.
+        // The writer has its answer, so a failure here is only logged.
+        if fnum_old > 0 {
+            let result = self.maybe_collect(fnum_old);
+            self.result(&result);
         }
 
         Ok(())

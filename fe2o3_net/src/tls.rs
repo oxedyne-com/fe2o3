@@ -241,11 +241,14 @@ impl AsyncWrite for ClientStream {
     }
 }
 
-/// The peer certificate is validated against `cfg` for the name `host`.
+/// The peer certificate is validated against `cfg` for the name `host`, and the handshake must
+/// finish within `deadline`. A peer that takes the connection and never answers the hello would
+/// otherwise hold the caller for as long as the socket lived.
 pub async fn upgrade(
-    plain:  TcpStream,
-    host:   &str,
-    cfg:    Arc<ClientConfig>,
+    plain:      TcpStream,
+    host:       &str,
+    cfg:        Arc<ClientConfig>,
+    deadline:   Duration,
 )
     -> Outcome<ClientStream>
 {
@@ -256,11 +259,14 @@ pub async fn upgrade(
             Invalid, Input)),
     };
     let connector = TlsConnector::from(cfg);
-    match connector.connect(name, plain).await {
-        Ok(s)  => Ok(ClientStream::Tls(Box::new(s))),
-        Err(e) => Err(err!(e,
+    match tokio::time::timeout(deadline, connector.connect(name, plain)).await {
+        Ok(Ok(s))  => Ok(ClientStream::Tls(Box::new(s))),
+        Ok(Err(e)) => Err(err!(e,
             "TLS handshake to {}.", host;
             IO, Network, Init)),
+        Err(_)     => Err(err!(
+            "The TLS handshake to {} did not finish within {:?}.", host, deadline;
+            IO, Network, Init, Timeout)),
     }
 }
 

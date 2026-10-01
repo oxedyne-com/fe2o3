@@ -148,16 +148,9 @@ impl<
         {
             return Some(not_found());
         }
-        let host = admin.host_sampler.health_metrics().ok().flatten();
-        let body = crate::srv::health::HealthBody::assemble(
-            host,
-            admin.addr_guard.live_conns(),
-            admin.r429.last(60),
-            admin.dropped.last(60),
-            admin.guard_selftest,
-            admin.started.elapsed().as_secs(),
-            admin.is_sealed(),
-        );
+        // Assembled per request, stamp ages included: each stamp is read now rather than
+        // sampled, so a job whose timer has died shows an age that keeps growing.
+        let body = admin.health_body();
         Some(HttpMessage::new_response(HttpStatus::OK)
             .with_field(
                 HeaderName::ContentType,

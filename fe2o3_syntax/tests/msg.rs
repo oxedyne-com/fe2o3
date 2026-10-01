@@ -35,19 +35,19 @@ use oxedyne_fe2o3_jdat::{
 fn make_test_syntax_00() -> Outcome<SyntaxRef> {
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("Arg_c1a1"),
-        hyph1:  fmt!("c"),
+        hyph1:  Some(fmt!("c")),
         hyph2:  Some(fmt!("c1a1")),
         reqd:   true,
         vals:   vec![
-            (Kind::Str, fmt!("A string value for Arg_c1a1.")),
-            (Kind::I16, fmt!("A number for c1a1.")),
+            (Kind::Str, fmt!("A string value for Arg_c1a1.")).into(),
+            (Kind::I16, fmt!("A number for c1a1.")).into(),
         ],
         help:   Some(fmt!("Some help text")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("Arg_c1a2"),
-        hyph1:  fmt!("d"),
+        hyph1:  Some(fmt!("d")),
         hyph2:  Some(fmt!("c1a2")),
         reqd:   false,
         help:   Some(fmt!("Some help text")),
@@ -55,7 +55,7 @@ fn make_test_syntax_00() -> Outcome<SyntaxRef> {
     });
     let a3 = Arg::from(ArgConfig {
         name:   fmt!("Arg_c1a3"),
-        hyph1:  fmt!("e"),
+        hyph1:  Some(fmt!("e")),
         hyph2:  Some(fmt!("c1a3")),
         reqd:   false,
         help:   Some(fmt!("Some help text")),
@@ -73,18 +73,18 @@ fn make_test_syntax_00() -> Outcome<SyntaxRef> {
 
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("Arg_a"),
-        hyph1:  fmt!("a"),
+        hyph1:  Some(fmt!("a")),
         hyph2:  Some(fmt!("a0")),
         reqd:   true,
         vals:   vec![
-            (Kind::Str, fmt!("A string value for Arg_a.")),
+            (Kind::Str, fmt!("A string value for Arg_a.")).into(),
         ],
         help:   Some(fmt!("Some help text")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("Arg_b"),
-        hyph1:  fmt!("b"),
+        hyph1:  Some(fmt!("b")),
         hyph2:  Some(fmt!("b0")),
         reqd:   false,
         help:   Some(fmt!("Some help text")),
@@ -108,38 +108,38 @@ fn make_test_syntax_00() -> Outcome<SyntaxRef> {
 fn make_test_syntax_01() -> Outcome<SyntaxRef> {
     let a1 = Arg::from(ArgConfig {
         name:   fmt!("Arga"),
-        hyph1:  fmt!("a"),
+        hyph1:  Some(fmt!("a")),
         hyph2:  Some(fmt!("arga")),
         vals:   vec![
-            (Kind::Str, fmt!("A string value for Arga.")),
-            (Kind::I16, fmt!("A number value for Arga.")),
+            (Kind::Str, fmt!("A string value for Arga.")).into(),
+            (Kind::I16, fmt!("A number value for Arga.")).into(),
         ],
         help:   Some(fmt!("Activate the a argument")),
         ..Default::default()
     });
     let a2 = Arg::from(ArgConfig {
         name:   fmt!("Argb"),
-        hyph1:  fmt!("b"),
+        hyph1:  Some(fmt!("b")),
         hyph2:  Some(fmt!("argb")),
         help:   Some(fmt!("Activate the b argument")),
         ..Default::default()
     });
     let a3 = Arg::from(ArgConfig {
         name:   fmt!("Argc"),
-        hyph1:  fmt!("c"),
+        hyph1:  Some(fmt!("c")),
         hyph2:  Some(fmt!("argc")),
         vals:   vec![
-            (Kind::Str, fmt!("A string value for Argc.")),
+            (Kind::Str, fmt!("A string value for Argc.")).into(),
         ],
         help:   Some(fmt!("Activate the c argument")),
         ..Default::default()
     });
     let a4 = Arg::from(ArgConfig {
         name:   fmt!("Argd"),
-        hyph1:  fmt!("d"),
+        hyph1:  Some(fmt!("d")),
         hyph2:  Some(fmt!("argd")),
         vals:   vec![
-            (Kind::I32, fmt!("A number value for Argd.")),
+            (Kind::I32, fmt!("A number value for Argd.")).into(),
         ],
         help:   Some(fmt!("Activate the d argument")),
         ..Default::default()
@@ -149,7 +149,7 @@ fn make_test_syntax_01() -> Outcome<SyntaxRef> {
         name:   fmt!("cmd1"),
         help:   Some(fmt!("Do the first thing")),
         vals:   vec![
-            (Kind::U8, fmt!("A number value for cmd1.")),
+            (Kind::U8, fmt!("A number value for cmd1.")).into(),
         ],
         ..Default::default()
     });
@@ -286,18 +286,18 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         });
         let a1 = Arg::from(ArgConfig {
             name:   fmt!("Arg_a"),
-            hyph1:  fmt!("a"),
+            hyph1:  Some(fmt!("a")),
             hyph2:  Some(fmt!("a0")),
             reqd:   false,
             vals:   vec![
-                (Kind::Str, fmt!("A string value for Arg_a.")),
+                (Kind::Str, fmt!("A string value for Arg_a.")).into(),
             ],
             help:   Some(fmt!("Some help text")),
             ..Default::default()
         });
         let a2 = Arg::from(ArgConfig {
             name:   fmt!("Arg_b"),
-            hyph1:  fmt!("b"),
+            hyph1:  Some(fmt!("b")),
             hyph2:  Some(fmt!("b0")),
             reqd:   false,
             help:   Some(fmt!("Some help text")),
@@ -375,19 +375,19 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for TestSyntax.")),
-                (Kind::U8, fmt!("A number value for TestSyntax.")),
+                (Kind::Str, fmt!("A string value for TestSyntax.")).into(),
+                (Kind::U8, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("Arg_a"),
-            hyph1:  fmt!("a"),
+            hyph1:  Some(fmt!("a")),
             hyph2:  Some(fmt!("a0")),
             reqd:   false,
             vals:   vec![
-                (Kind::Str, fmt!("A string value for Arg_a.")),
-                (Kind::I8, fmt!("A number value for Arg_a.")),
+                (Kind::Str, fmt!("A string value for Arg_a.")).into(),
+                (Kind::I8, fmt!("A number value for Arg_a.")).into(),
             ],
             ..Default::default()
         });
@@ -459,27 +459,27 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for TestSyntax.")),
-                (Kind::U8, fmt!("A number value for TestSyntax.")),
+                (Kind::Str, fmt!("A string value for TestSyntax.")).into(),
+                (Kind::U8, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("Arg_a"),
-            hyph1:  fmt!("a"),
+            hyph1:  Some(fmt!("a")),
             hyph2:  Some(fmt!("a0")),
             reqd:   false,
             vals:   vec![
-                (Kind::Str, fmt!("A string value for Arg_a.")),
-                (Kind::I8, fmt!("A number value for Arg_a.")),
+                (Kind::Str, fmt!("A string value for Arg_a.")).into(),
+                (Kind::I8, fmt!("A number value for Arg_a.")).into(),
             ],
             ..Default::default()
         });
         let c = Cmd::from(CmdConfig {
             name:   fmt!("cmd"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd.")),
-                (Kind::I16, fmt!("A number value for cmd.")),
+                (Kind::Str, fmt!("A string value for cmd.")).into(),
+                (Kind::I16, fmt!("A number value for cmd.")).into(),
             ],
             ..Default::default()
         });
@@ -559,19 +559,19 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for TestSyntax.")),
-                (Kind::I128, fmt!("A number value for TestSyntax.")),
+                (Kind::Str, fmt!("A string value for TestSyntax.")).into(),
+                (Kind::I128, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("Arg_a"),
-            hyph1:  fmt!("a"),
+            hyph1:  Some(fmt!("a")),
             hyph2:  Some(fmt!("a0")),
             reqd:   false,
             vals:   vec![
-                (Kind::Str, fmt!("A string value for Arg_a.")),
-                (Kind::I32, fmt!("A number value for Arg_a.")),
+                (Kind::Str, fmt!("A string value for Arg_a.")).into(),
+                (Kind::I32, fmt!("A number value for Arg_a.")).into(),
             ],
             ..Default::default()
         });
@@ -580,19 +580,19 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd.")),
-                (Kind::I16, fmt!("A number value for cmd.")),
+                (Kind::Str, fmt!("A string value for cmd.")).into(),
+                (Kind::I16, fmt!("A number value for cmd.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("Arg_b"),
-            hyph1:  fmt!("b"),
+            hyph1:  Some(fmt!("b")),
             hyph2:  Some(fmt!("b0")),
             reqd:   false,
             vals:   vec![
-                (Kind::Str, fmt!("A string value for Arg_b.")),
-                (Kind::U8, fmt!("A number value for Arg_b.")),
+                (Kind::Str, fmt!("A string value for Arg_b.")).into(),
+                (Kind::U8, fmt!("A number value for Arg_b.")).into(),
             ],
             ..Default::default()
         });
@@ -678,14 +678,14 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::U8, fmt!("A number value for TestSyntax.")),
+                (Kind::U8, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let c = Cmd::from(CmdConfig {
             name:   fmt!("cmd1"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd1.")),
+                (Kind::Str, fmt!("A string value for cmd1.")).into(),
             ],
             ..Default::default()
         });
@@ -694,22 +694,22 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd2"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd2.")),
-                (Kind::I8, fmt!("A number value for cmd2.")),
+                (Kind::Str, fmt!("A string value for cmd2.")).into(),
+                (Kind::I8, fmt!("A number value for cmd2.")).into(),
             ],
             ..Default::default()
         });
         let a1 = Arg::from(ArgConfig {
             name:   fmt!("arg1"),
-            hyph1:  fmt!("a1"),
+            hyph1:  Some(fmt!("a1")),
             ..Default::default()
         });
         let a2 = Arg::from(ArgConfig {
             name:   fmt!("arg2"),
-            hyph1:  fmt!("a2"),
+            hyph1:  Some(fmt!("a2")),
             hyph2:  Some(fmt!("arg2")),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for arg2.")),
+                (Kind::Str, fmt!("A string value for arg2.")).into(),
             ],
             ..Default::default()
         });
@@ -763,7 +763,7 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let c = Cmd::from(CmdConfig {
             name:   fmt!("cd"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cd.")),
+                (Kind::Str, fmt!("A string value for cd.")).into(),
             ],
             help:   Some(fmt!("Change directory")),
             ..Default::default()
@@ -790,16 +790,16 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         });
         let a1 = Arg::from(ArgConfig {
             name:   fmt!("sort"),
-            hyph1:  fmt!("s"),
+            hyph1:  Some(fmt!("s")),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for sort.")),
+                (Kind::Str, fmt!("A string value for sort.")).into(),
             ],
             help:   Some(fmt!("Sort by 'size', 'type' or 'name'")),
             ..Default::default()
         });
         let a2 = Arg::from(ArgConfig {
             name:   fmt!("reverse"),
-            hyph1:  fmt!("r"),
+            hyph1:  Some(fmt!("r")),
             help:   Some(fmt!("Reverse any sort")),
             ..Default::default()
         });
@@ -839,13 +839,13 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::I16, fmt!("A number value for TestSyntax.")),
+                (Kind::I16, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("arg00"),
-            hyph1:  fmt!("a00"),
+            hyph1:  Some(fmt!("a00")),
             ..Default::default()
         }).required(true);
         p = res!(p.add_arg(a));
@@ -853,13 +853,13 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd1"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd1.")),
+                (Kind::Str, fmt!("A string value for cmd1.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("arg10"),
-            hyph1:  fmt!("a10"),
+            hyph1:  Some(fmt!("a10")),
             ..Default::default()
         });
         c = res!(c.add_arg(a));
@@ -868,22 +868,22 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd2"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd2.")),
-                (Kind::I32, fmt!("A number value for cmd2.")),
+                (Kind::Str, fmt!("A string value for cmd2.")).into(),
+                (Kind::I32, fmt!("A number value for cmd2.")).into(),
             ],
             ..Default::default()
         });
         let a1 = Arg::from(ArgConfig {
             name:   fmt!("arg20"),
-            hyph1:  fmt!("a20"),
+            hyph1:  Some(fmt!("a20")),
             ..Default::default()
         });
         let a2 = Arg::from(ArgConfig {
             name:   fmt!("arg21"),
-            hyph1:  fmt!("a21"),
+            hyph1:  Some(fmt!("a21")),
             hyph2:  Some(fmt!("arg21")),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for arg21.")),
+                (Kind::Str, fmt!("A string value for arg21.")).into(),
             ],
             ..Default::default()
         });
@@ -956,13 +956,13 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut p = Syntax::from(SyntaxConfig {
             name:   fmt!("TestSyntax"),
             vals:   vec![
-                (Kind::I16, fmt!("A number value for TestSyntax.")),
+                (Kind::I16, fmt!("A number value for TestSyntax.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("arg00"),
-            hyph1:  fmt!("a00"),
+            hyph1:  Some(fmt!("a00")),
             ..Default::default()
         });
         p = res!(p.add_arg(a));
@@ -970,13 +970,13 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd1"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd1.")),
+                (Kind::Str, fmt!("A string value for cmd1.")).into(),
             ],
             ..Default::default()
         });
         let a = Arg::from(ArgConfig {
             name:   fmt!("arg10"),
-            hyph1:  fmt!("a10"),
+            hyph1:  Some(fmt!("a10")),
             ..Default::default()
         });
         c = res!(c.add_arg(a));
@@ -985,22 +985,22 @@ pub fn test_msg(filter: &'static str) -> Outcome<()> {
         let mut c = Cmd::from(CmdConfig {
             name:   fmt!("cmd2"),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for cmd2.")),
-                (Kind::I32, fmt!("A number value for cmd2.")),
+                (Kind::Str, fmt!("A string value for cmd2.")).into(),
+                (Kind::I32, fmt!("A number value for cmd2.")).into(),
             ],
             ..Default::default()
         });
         let a1 = Arg::from(ArgConfig {
             name:   fmt!("arg20"),
-            hyph1:  fmt!("a20"),
+            hyph1:  Some(fmt!("a20")),
             ..Default::default()
         }).required(true);
         let a2 = Arg::from(ArgConfig {
             name:   fmt!("arg21"),
-            hyph1:  fmt!("a21"),
+            hyph1:  Some(fmt!("a21")),
             hyph2:  Some(fmt!("arg21")),
             vals:   vec![
-                (Kind::Str, fmt!("A string value for arg21.")),
+                (Kind::Str, fmt!("A string value for arg21.")).into(),
             ],
             ..Default::default()
         });

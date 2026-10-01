@@ -74,13 +74,15 @@ fn run() -> Outcome<()> {
         Some(crc32.clone()),
     );
 
-    let cfg = res!(setup::default_cfg());
+    let mut cfg = res!(setup::default_cfg());
+    // Every zone in this test's own directory, not the shared container the default names.
+    cfg.zone_overrides = Default::default();
 
     let db = res!(setup::start_db(
         db_root.clone(),
         Some(cfg),
         schms_input,
-        Some(fmt!("./test_db_idle_cpu_zone_container")),
+        None,
         false,
         true,
     ));

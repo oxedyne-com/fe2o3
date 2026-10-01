@@ -9,6 +9,7 @@ pub mod health;
 pub mod constant;
 pub mod context;
 pub mod dev;
+pub mod fleet;
 pub mod http;
 pub mod https;
 pub mod id;

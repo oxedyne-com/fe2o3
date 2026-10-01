@@ -6,6 +6,10 @@ use crate::{
         SyntaxRef,
     },
     key::Key,
+    val::{
+        Slots,
+        Val,
+    },
 };
 
 use oxedyne_fe2o3_core::{
@@ -34,8 +38,15 @@ use std::{
         BTreeSet,
     },
     fmt,
-    slice::Iter,
 };
+
+/// Where the words of a text message came from, which decides how a string value is read.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Source {
+    #[default]
+    Line,   // a REPL line or a wire message: every value is decoded as a daticle
+    Argv,   // a process's arguments, already split and unquoted by a shell
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Collecting {
@@ -52,6 +63,7 @@ pub struct MsgEndState {
     pub vals:   Vec<Kind>,
     pub arg:    Option<String>,
     pub cmd:    Option<String>,
+    pub help:   bool,           // a command line stopped at -h or --help
 }
 
 /// A `Syntax` specifies message structure for validation, while `Msg` is used for transmission
@@ -134,6 +146,18 @@ impl ToBytes for Msg {
                                 buf = res!(Dat::U16(arg.id).to_bytes(buf));
                                 buf.push(Dat::LIST_CODE);
                                 buf = res!(Dat::vec_to_bytes(&v, buf));
+                            }
+                        }
+                        // Only a command declaring a rest carries one, so the bytes of every
+                        // other command are as they were.
+                        if cmd.config().rest.is_some() {
+                            match &msgcmd.rest {
+                                Some(words) => {
+                                    buf = res!(Dat::Bool(true).to_bytes(buf));
+                                    buf.push(Dat::LIST_CODE);
+                                    buf = res!(Dat::vec_to_bytes(words, buf));
+                                },
+                                None => buf = res!(Dat::Bool(false).to_bytes(buf)),
                             }
                         }
                     }
@@ -278,7 +302,7 @@ impl Msg {
         ->  Outcome<Self>
     {
         let arg_opt = arg_opt.map(|s| s.into());
-        let exp_vals: Vec<(Kind, String)> = match &arg_opt {
+        let exp_vals: Vec<Val> = match &arg_opt {
             Some(arg_name) => {
                 let arg = res!(self.get_syntax_arg(arg_name.clone()));
                 arg.config().vals.clone()
@@ -305,20 +329,21 @@ impl Msg {
             None => &mut self.vals,
         };
 
-        if v.len() >= exp_vals.len() {
-            return Err(err!(
+        let next = match Val::slot(&exp_vals, v.len()) {
+            Some(next) => next,
+            None => return Err(err!(
                 "Message already has all {} of its expected values.", v.len();
-            Invalid, Input, Exists));
-        }
+            Invalid, Input, Exists)),
+        };
 
         match val_opt {
             Some(val) => {
-                if val.kind() == exp_vals[v.len()].0 {
+                if val.kind() == next.kind {
                     v.push(val);
                 } else {
                     return Err(err!(
                         "Message already has {} values, and the next one must be a {:?}, \
-                        not a {:?}.", v.len(), exp_vals[v.len()], val.kind();
+                        not a {:?}.", v.len(), next.kind, val.kind();
                     Invalid, Input));
                 }
             },
@@ -592,55 +617,76 @@ impl Msg {
     fn is_word_a_cmd(
         &self,
         word:                   &Key,
+        pos:                    usize,
         similarity_threshold:   Option<f64>,
+        argv:                   bool,
     )
         -> Outcome<&Cmd>
     {
         if let Some(cmd) = self.syntax().cmds.get_recursive(word) {
             // We found it in the syntax, it's a command.
             return Ok(&cmd);
+        }
+        let sname = &self.syntax().config().name;
+        if let (Some(threshold), Key::Str(word)) = (similarity_threshold, word) {
+            let names = self.syntax().cmds_in_order().into_iter()
+                .map(|c| c.config().name.clone()).collect::<Vec<_>>();
+            if let Some(suggestion) = Self::closest(word, &names, threshold) {
+                return Err(if argv {
+                    // Argv is a person at a prompt, not a message parser; point them at
+                    // help rather than reciting what a word is not.
+                    err!(
+                        "Did you mean '{}'? '{}' at position {} is not a command. Type \
+                        '{} help' for the list.",
+                        suggestion, word, pos, sname;
+                    Input, Invalid, Suggestion)
+                } else {
+                    err!(
+                        "Did you mean '{}'? The word '{}' at position {} is not an \
+                        argument, and neither is it a command of '{}'.",
+                        suggestion, word, pos, sname;
+                    Input, Invalid, Suggestion)
+                });
+            }
+        }
+        Err(if argv {
+            err!(
+                "'{}' at position {} is not a command. Type '{} help' for the list.",
+                word, pos, sname;
+            Input, Invalid)
         } else {
-            if let Some(similarity_threshold) = similarity_threshold {
-                if let Key::Str(word) = word {
-                    let mut min_dist = word.chars().count();
-                    let mut closest = None;
-                    // Loop through other commands to find those that are similar to the given
-                    // word, using the specified threshold.
-                    for cmd_key in self.syntax().cmds.keys() {
-                        if let Key::Str(cmd) = cmd_key {
-                            let dist = levenshtein::levenshtein(word, cmd);
-                            if dist < min_dist {
-                                min_dist = dist;
-                                let similarity_ratio: f64 =
-                                    1.0
-                                    - (
-                                        dist as f64
-                                        / std::cmp::max(
-                                            word.chars().count(),
-                                            cmd.chars().count(),
-                                        ) as f64
-                                    );
-                                if similarity_ratio > similarity_threshold { 
-                                    closest = Some(cmd);
-                                }
-                            }
-                        }
-                    }
-                    if let Some(suggestion) = closest {
-                        return Err(err!(
-                            "Did you mean '{}'?. The word '{}' is not an argument, but \
-                            neither was it recognised as a command in the '{}' syntax.",
-                            suggestion, word, self.syntax().config().name;
-                        Input, Invalid, Suggestion))
-                    }
+            err!(
+                "The word '{}' at position {} is not an argument, and neither is it a \
+                command of '{}'.",
+                word, pos, sname;
+            Input, Invalid)
+        })
+    }
+
+    /// The candidate nearest to the word by edit distance, if it is similar enough.
+    pub fn closest(
+        word:       &str,
+        candidates: &[String],
+        threshold:  f64,
+    )
+        -> Option<String>
+    {
+        let mut min_dist = word.chars().count();
+        let mut closest = None;
+        for cand in candidates {
+            let dist = levenshtein::levenshtein(word, cand);
+            if dist < min_dist {
+                min_dist = dist;
+                let ratio: f64 = 1.0 - (
+                    dist as f64
+                    / std::cmp::max(word.chars().count(), cand.chars().count()) as f64
+                );
+                if ratio > threshold {
+                    closest = Some(cand.clone());
                 }
             }
         }
-        Err(err!(
-            "The word '{:?}' is not an argument, but neither was it \
-            recognised as a command in the '{}' syntax.",
-            word, self.syntax().config().name;
-        Input, Invalid))
+        closest
     }
 
     /// If the given argument is on the given list of required arguments, the argument is removed
@@ -679,366 +725,606 @@ impl Msg {
     )
         -> Outcome<Self>
     {
-        let iter = seq.into_iter();
-        // Read-only syntax args and cmds using many-to-one arg treemaps
+        self.rx_words(seq, similarity_threshold, Source::Line)
+    }
+
+    /// Reads the words of a process's command line, which a shell has already split and
+    /// unquoted.  A string value is taken as it stands, and a value that is required but absent
+    /// is an error rather than an outstanding value.
+    pub fn rx_argv<I: IntoIterator<Item=String>>(
+        &self,
+        seq:                    I,
+        similarity_threshold:   Option<f64>,
+    )
+        -> Outcome<Self>
+    {
+        self.rx_words(seq, similarity_threshold, Source::Argv)
+    }
+
+    /// Does the word have the shape of an option?  A dash and a letter, as in `-v` or `-abc`, or
+    /// two dashes and a name, as in `--dry-run` or `--dry-run=x`.  A negative number does not, nor
+    /// `-`, `--`, or a word holding a space or a stop, such as `- fix typo` or `-x.txt`: a word
+    /// that could only be a value is read as one.
+    pub fn looks_like_option(word: &str) -> bool {
+        let name = |s: &str| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(c) if c.is_ascii_alphabetic() => chars.all(|c| c.is_ascii_alphanumeric()
+                    || c == '-' || c == '_'),
+                _ => false,
+            }
+        };
+        if let Some(long) = word.strip_prefix("--") {
+            return match long.split_once('=') {
+                Some((head, _)) => name(head),
+                None            => name(long),
+            };
+        }
+        match word.strip_prefix('-') {
+            Some(short) => {
+                let mut chars = short.chars();
+                match chars.next() {
+                    Some(c) if c.is_ascii_alphabetic() => chars.all(|c| c.is_ascii_alphanumeric()),
+                    _ => false,
+                }
+            },
+            None => false,
+        }
+    }
+
+    /// Is the word one of the two that ask for help?
+    pub fn is_help_flag(word: &str) -> bool {
+        word == "-h" || word == "--help"
+    }
+
+    /// The argument a word names, and whether it is a message argument rather than one of the
+    /// active command's.  On a command line only a hyphenated name counts, so a value that
+    /// happens to spell an argument's internal name stays a value.
+    fn find_arg<'a>(
+        syntax:     &'a Syntax,
+        word:       &str,
+        active_cmd: Option<&'a Cmd>,
+        src:        Source,
+    )
+        -> Option<(&'a Arg, bool)>
+    {
+        if src == Source::Argv && !word.starts_with('-') {
+            return None;
+        }
+        let key = Key::Str(word.to_string());
+        match active_cmd {
+            Some(cmd) => match cmd.args.get_recursive(&key) {
+                Some(arg) => Some((arg, false)),
+                None => if src == Source::Argv {
+                    // A message option may follow the command on a command line.
+                    syntax.args.get_recursive(&key).map(|arg| (arg, true))
+                } else {
+                    None
+                },
+            },
+            None => syntax.args.get_recursive(&key).map(|arg| (arg, true)),
+        }
+    }
+
+    fn owner_desc(
+        coll:       &Collecting,
+        active_cmd: Option<&Cmd>,
+        active_arg: Option<&Arg>,
+    )
+        -> String
+    {
+        match coll {
+            Collecting::MessageArg | Collecting::CommandArg => match active_arg {
+                Some(arg) => fmt!("the option '{}'", arg.long_name()),
+                None => fmt!("an option"),
+            },
+            Collecting::Command => match active_cmd {
+                Some(cmd) => fmt!("the command '{}'", cmd.config().name),
+                None => fmt!("a command"),
+            },
+            _ => fmt!("the message"),
+        }
+    }
+
+    /// The refusal of a word a command has no value left for.
+    fn excess(cmd: &Cmd, word: &str, pos: usize) -> Error<ErrTag> {
+        match &cmd.config().excess {
+            Some(sentence) => err!(
+                "{} (found '{}' at position {}).", sentence, word, pos;
+            Input, Excessive),
+            None => err!(
+                "The word '{}' at position {} is more than the command '{}' takes.",
+                word, pos, cmd.config().name;
+            Input, Excessive),
+        }
+    }
+
+    fn push_val(
+        msgrx:      &mut Msg,
+        coll:       &Collecting,
+        active_cmd: Option<&Cmd>,
+        active_arg: Option<&Arg>,
+        d:          Dat,
+    )
+        -> Outcome<()>
+    {
+        match coll {
+            Collecting::Message => msgrx.vals.push(d),
+            Collecting::MessageArg => if let Some(arg) = active_arg {
+                msgrx.args.entry(arg.canonical_name()).or_insert(Vec::new()).push(d);
+            },
+            Collecting::Command => if let Some(cmd) = active_cmd {
+                let ckey = cmd.config().name.clone();
+                let entry = msgrx.cmds.entry(ckey.clone())
+                    .or_insert(res!(MsgCmd::new(msgrx.syntax.clone(), ckey)));
+                entry.vals.push(d);
+            },
+            Collecting::CommandArg => if let Some(cmd) = active_cmd {
+                let ckey = cmd.config().name.clone();
+                let entry = msgrx.cmds.entry(ckey.clone())
+                    .or_insert(res!(MsgCmd::new(msgrx.syntax.clone(), ckey)));
+                if let Some(arg) = active_arg {
+                    entry.args.entry(arg.canonical_name()).or_insert(Vec::new()).push(d);
+                }
+            },
+            Collecting::None => return Err(err!(
+                "A value was read while nothing was collecting values.";
+            Bug, Unexpected)),
+        }
+        Ok(())
+    }
+
+    /// Reads a word as a value of the expected kind.  From a command line a string is the word
+    /// itself: decoding it would turn `42` into a number and `(x)` into a tuple, and leave
+    /// `don't` with an unbalanced quote.
+    pub fn decode_word(
+        word:   &str,
+        val:    &Val,
+        src:    Source,
+        pos:    usize,
+        owner:  &str,
+    )
+        -> Outcome<Dat>
+    {
+        let kind = &val.kind;
+        if src == Source::Argv && *kind == Kind::Str {
+            return Ok(Dat::Str(word.to_string()));
+        }
+        let mut d = match Dat::decode_string(word) {
+            Ok(d) => d,
+            Err(e) => return Err(err!(e,
+                "The word '{}' at position {}, <{}> for {}, could not be read.",
+                word, pos, val.label(), owner;
+            Input, Invalid, Decode)),
+        };
+        // Coercion may be necessary for positive values of signed kinds.
+        match kind {
+            Kind::I8 => if let Dat::U8(v) = d {
+                d = Dat::I8(try_into!(i8, v));
+            },
+            Kind::I16 => match d {
+                Dat::I8(v)  => d = Dat::I16(try_into!(i16, v)),
+                Dat::U8(v)  => d = Dat::I16(try_into!(i16, v)),
+                Dat::U16(v) => d = Dat::I16(try_into!(i16, v)),
+                _ => (),
+            },
+            Kind::I32 => match d {
+                Dat::I8(v)  => d = Dat::I32(try_into!(i32, v)),
+                Dat::I16(v) => d = Dat::I32(try_into!(i32, v)),
+                Dat::U8(v)  => d = Dat::I32(try_into!(i32, v)),
+                Dat::U16(v) => d = Dat::I32(try_into!(i32, v)),
+                Dat::U32(v) => d = Dat::I32(try_into!(i32, v)),
+                _ => (),
+            },
+            Kind::I64 => match d {
+                Dat::I8(v)  => d = Dat::I64(try_into!(i64, v)),
+                Dat::I16(v) => d = Dat::I64(try_into!(i64, v)),
+                Dat::I32(v) => d = Dat::I64(try_into!(i64, v)),
+                Dat::U8(v)  => d = Dat::I64(try_into!(i64, v)),
+                Dat::U16(v) => d = Dat::I64(try_into!(i64, v)),
+                Dat::U32(v) => d = Dat::I64(try_into!(i64, v)),
+                Dat::U64(v) => d = Dat::I64(try_into!(i64, v)),
+                _ => (),
+            },
+            Kind::I128 => match d {
+                Dat::I8(v)  => d = Dat::I128(try_into!(i128, v)),
+                Dat::I16(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::I32(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::I64(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::U8(v)  => d = Dat::I128(try_into!(i128, v)),
+                Dat::U16(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::U32(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::U64(v) => d = Dat::I128(try_into!(i128, v)),
+                Dat::U128(v) => d = Dat::I128(try_into!(i128, v)),
+                _ => (),
+            },
+            Kind::U16 => match d {
+                Dat::U8(v) => d = Dat::U16(try_into!(u16, v)),
+                _ => (),
+            },
+            Kind::U32 => match d {
+                Dat::U8(v)  => d = Dat::U32(try_into!(u32, v)),
+                Dat::U16(v) => d = Dat::U32(try_into!(u32, v)),
+                _ => (),
+            },
+            Kind::U64 => match d {
+                Dat::U8(v)  => d = Dat::U64(try_into!(u64, v)),
+                Dat::U16(v) => d = Dat::U64(try_into!(u64, v)),
+                Dat::U32(v) => d = Dat::U64(try_into!(u64, v)),
+                _ => (),
+            },
+            Kind::U128 => match d {
+                Dat::U8(v)  => d = Dat::U128(try_into!(u128, v)),
+                Dat::U16(v) => d = Dat::U128(try_into!(u128, v)),
+                Dat::U32(v) => d = Dat::U128(try_into!(u128, v)),
+                Dat::U64(v) => d = Dat::U128(try_into!(u128, v)),
+                _ => (),
+            },
+            Kind::F64 => match d {
+                Dat::U8(v)  => d = Dat::F64(Float64(v as f64)),
+                Dat::U16(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::U32(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::U64(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::I8(v)  => d = Dat::F64(Float64(v as f64)),
+                Dat::I16(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::I32(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::I64(v) => d = Dat::F64(Float64(v as f64)),
+                Dat::F32(v) => d = Dat::F64(Float64(v.0 as f64)),
+                Dat::Adec(v) => {
+                    // Convert BigDecimal to f64.
+                    match v.to_f64() {
+                        Some(f) => d = Dat::F64(Float64(f)),
+                        None => return Err(err!(
+                            "Cannot convert BigDecimal '{}' to f64: value out of range", v;
+                            Input, Invalid, Conversion)),
+                    }
+                },
+                _ => (),
+            },
+            _ => (),
+        }
+        if *kind == d.kind() || *kind == Kind::Unknown {
+            return Ok(d);
+        }
+        match res!(Self::coerce_to_expected_kind(kind, &d)) {
+            Some(converted) => Ok(converted),
+            None => Err(err!(
+                "The word '{}' at position {}, <{}> for {}, must be a {} but reads as a {}.",
+                word, pos, val.label(), owner, kind, d.kind();
+            Input, Invalid)),
+        }
+    }
+
+    /// Interprets a sequence of words as a message of the syntax.
+    pub fn rx_words<I: IntoIterator<Item=String>>(
+        &self,
+        seq:                    I,
+        similarity_threshold:   Option<f64>,
+        src:                    Source,
+    )
+        -> Outcome<Self>
+    {
+        let syntax = self.syntax();
+        let sname = syntax.config().name.clone();
+        let argv = src == Source::Argv;
+        let one_cmd = syntax.config().one_cmd;
+        let mut msgrx = Msg::new(self.syntaxref());
         let mut active_cmd: Option<&Cmd> = None;
         let mut active_arg: Option<&Arg> = None;
-        let mut val_kind_iter: Option<Iter<'_, (Kind, String)>> = None;
-        // Read and write struct into which args and cmd data are one-to-one treemapped
-        let mut msgrx = Msg::new(self.syntaxref());
-        let mut rargs: Vec<&str> = Vec::new();
-        for arg_name in &self.syntax().config().rargs {
-            rargs.push(arg_name);   
-        }
-        let mut msg = String::new();
-        let mut first = true;
-        let mut collecting_vals = Collecting::None;
-        if self.syntax().config().vals.len() > 0 {
-            collecting_vals = Collecting::Message;   
-            val_kind_iter = Some(self.syntax().config().vals.iter()); 
-        }
+        let mut msg_slots = Slots::new(&syntax.config().vals);
+        let mut cmd_slots = Slots::new(&[]);
+        let mut arg_slots = Slots::new(&[]);
+        let mut collecting = if syntax.config().vals.is_empty() {
+            Collecting::None
+        } else {
+            Collecting::Message
+        };
+        let mut rargs: Vec<&str> = syntax.config().rargs.iter().map(|s| s.as_str()).collect();
+        let mut in_rest = false;
+        let mut opts_done = false; // past a "--" that ends the options
 
-        for word in iter {
-            if first {
-                msg.push_str(&word);
-                first = false;
-            } else {
-                msg.push(' ');
-                msg.push_str(&word);
-            }
-            let word_key = Key::Str(word.clone());
-            if collecting_vals != Collecting::None {
-                // VAL block
-                if let Some(vkiter) = val_kind_iter.as_mut() {
-                    //match res!(val_kind_iter.as_mut().ok_or_else(|| err!(
-                    //    "val_kind_iter should not be None here.",
-                    //), Bug, Unexpected))).next() {
-                    match vkiter.next() {
-                        Some((kind, _)) => {
-                            // We're expecting another value.
-                            if active_cmd.is_none() {
-                                // Is the word a recognised message arg?
-                                if self.syntax().args.contains_key(&word_key) {
-                                    return Err(err!(
-                                        "The syntax '{}' expects a value of kind '{:?}' but \
-                                        found a message argument '{}'.",
-                                        self.syntax().config().name, kind, word;
-                                    Input, Missing));
-                                }
-                                // Is the word a recognised command?
-                                if self.syntax().cmds.contains_key(&word_key) {
-                                    return Err(err!(
-                                        "The syntax '{}' expects a value of kind '{:?}' but \
-                                        found a command '{}'.",
-                                        self.syntax().config().name, kind, word;
-                                    Input, Missing));
-                                }
-                            } else {
-                                // Is the word a recognised command arg?
-                                if let Some(cmd) = active_cmd.as_ref() {
-                                    if cmd.args.contains_key(&word_key) {
-                                        return Err(err!(
-                                            "The syntax '{}' expects a value of kind '{:?}' but \
-                                            found a command argument '{}'.",
-                                            self.syntax().config().name, kind, word;
-                                        Input, Missing));
-                                    }
-                                }
-                            }
-                            let mut d = res!(Dat::decode_string(&word));
-                            // Coercion may be necessary for positive values of signed kinds.
-                            match kind {
-                                Kind::I8 => if let Dat::U8(v) = d {
-                                    d = Dat::I8(try_into!(i8, v));
-                                },
-                                Kind::I16 => match d {
-                                    Dat::I8(v)  => d = Dat::I16(try_into!(i16, v)),
-                                    Dat::U8(v)  => d = Dat::I16(try_into!(i16, v)),
-                                    Dat::U16(v) => d = Dat::I16(try_into!(i16, v)),
-                                    _ => (),
-                                },
-                                Kind::I32 => match d {
-                                    Dat::I8(v)  => d = Dat::I32(try_into!(i32, v)),
-                                    Dat::I16(v) => d = Dat::I32(try_into!(i32, v)),
-                                    Dat::U8(v)  => d = Dat::I32(try_into!(i32, v)),
-                                    Dat::U16(v) => d = Dat::I32(try_into!(i32, v)),
-                                    Dat::U32(v) => d = Dat::I32(try_into!(i32, v)),
-                                    _ => (),
-                                },
-                                Kind::I64 => match d {
-                                    Dat::I8(v)  => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::I16(v) => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::I32(v) => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::U8(v)  => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::U16(v) => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::U32(v) => d = Dat::I64(try_into!(i64, v)),
-                                    Dat::U64(v) => d = Dat::I64(try_into!(i64, v)),
-                                    _ => (),
-                                },
-                                Kind::I128 => match d {
-                                    Dat::I8(v)  => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::I16(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::I32(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::I64(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::U8(v)  => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::U16(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::U32(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::U64(v) => d = Dat::I128(try_into!(i128, v)),
-                                    Dat::U128(v) => d = Dat::I128(try_into!(i128, v)),
-                                    _ => (),
-                                },
-                                Kind::U16 => match d {
-                                    Dat::U8(v) => d = Dat::U16(try_into!(u16, v)),
-                                    _ => (),
-                                },
-                                Kind::U32 => match d {
-                                    Dat::U8(v)  => d = Dat::U32(try_into!(u32, v)),
-                                    Dat::U16(v) => d = Dat::U32(try_into!(u32, v)),
-                                    _ => (),
-                                },
-                                Kind::U64 => match d {
-                                    Dat::U8(v)  => d = Dat::U64(try_into!(u64, v)),
-                                    Dat::U16(v) => d = Dat::U64(try_into!(u64, v)),
-                                    Dat::U32(v) => d = Dat::U64(try_into!(u64, v)),
-                                    _ => (),
-                                },
-                                Kind::U128 => match d {
-                                    Dat::U8(v)  => d = Dat::U128(try_into!(u128, v)),
-                                    Dat::U16(v) => d = Dat::U128(try_into!(u128, v)),
-                                    Dat::U32(v) => d = Dat::U128(try_into!(u128, v)),
-                                    Dat::U64(v) => d = Dat::U128(try_into!(u128, v)),
-                                    _ => (),
-                                },
-                                Kind::F64 => match d {
-                                    Dat::U8(v)  => d = Dat::F64(Float64(v as f64)),
-                                    Dat::U16(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::U32(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::U64(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::I8(v)  => d = Dat::F64(Float64(v as f64)),
-                                    Dat::I16(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::I32(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::I64(v) => d = Dat::F64(Float64(v as f64)),
-                                    Dat::F32(v) => d = Dat::F64(Float64(v.0 as f64)),
-                                    Dat::Adec(v) => {
-                                        // Convert BigDecimal to f64.
-                                        match v.to_f64() {
-                                            Some(f) => d = Dat::F64(Float64(f)),
-                                            None => return Err(err!(
-                                                "Cannot convert BigDecimal '{}' to f64: value out of range", v;
-                                                Input, Invalid, Conversion)),
-                                        }
-                                    },
-                                    _ => (),
-                                },
-                                _ => (),
-                            }
+        for (i, word) in seq.into_iter().enumerate() {
+            let pos = i + 1;
 
-                            if *kind == d.kind() || *kind == Kind::Unknown {
-                                // The value kind matches what we expected, it's a valid value.
-                                match collecting_vals {
-                                    Collecting::Message => {
-                                        msgrx.vals.push(d);
-                                    },
-                                    Collecting::MessageArg => {
-                                        if let Some(arg) = active_arg.as_ref() {
-                                            let akey = arg.canonical_name();
-                                            // Key message arg to the hyph1 forms e.g. "-arg".
-                                            let entry = msgrx.args.entry(akey).or_insert(Vec::new());
-                                            entry.push(d);
-                                        }
-                                    },
-                                    Collecting::Command => {
-                                        if let Some(cmd) = active_cmd.as_ref() {
-                                            let ckey = cmd.config().name.clone();
-                                            let entry = msgrx.cmds.entry(ckey.clone())
-                                                .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
-                                            entry.vals.push(d);
-                                        }
-                                    },
-                                    Collecting::CommandArg => {
-                                        if let Some(cmd) = active_cmd.as_ref() {
-                                            let ckey = cmd.config().name.clone();
-                                            let entry1 = msgrx.cmds.entry(ckey.clone())
-                                                .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
-                                            if let Some(arg) = active_arg.as_ref() {
-                                                let akey = arg.canonical_name();
-                                                // Key command arg to the hyph1 forms e.g. "-arg".
-                                                let entry2 = entry1.args.entry(akey).or_insert(Vec::new());
-                                                entry2.push(d);
-                                            }
-                                        }
-                                    },
-                                    _ => {},
-                                }
-                                continue;
-                            } else {
-
-                                let converted = res!(Self::coerce_to_expected_kind(kind, &d));
-
-                                match converted {
-                                    Some(converted_dat) => {
-                                        match collecting_vals {
-                                            Collecting::Message => {
-                                                msgrx.vals.push(converted_dat);
-                                            }
-                                            Collecting::MessageArg => {
-                                                if let Some(arg) = active_arg.as_ref() {
-                                                    let akey = arg.canonical_name();
-                                                    let entry = msgrx.args.entry(akey).or_insert(Vec::new());
-                                                    entry.push(converted_dat);
-                                                }
-                                            }
-                                            Collecting::Command => {
-                                                if let Some(cmd) = active_cmd.as_ref() {
-                                                    let ckey = cmd.config().name.clone();
-                                                    let entry = msgrx.cmds.entry(ckey.clone())
-                                                        .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
-                                                    entry.vals.push(converted_dat);
-                                                }
-                                            }
-                                            Collecting::CommandArg => {
-                                                if let Some(cmd) = active_cmd.as_ref() {
-                                                    let ckey = cmd.config().name.clone();
-                                                    let entry1 = msgrx.cmds.entry(ckey.clone())
-                                                        .or_insert(res!(MsgCmd::new(self.syntaxref(), ckey)));
-                                                    if let Some(arg) = active_arg.as_ref() {
-                                                        let akey = arg.canonical_name();
-                                                        let entry2 = entry1.args.entry(akey).or_insert(Vec::new());
-                                                        entry2.push(converted_dat);
-                                                    }
-                                                }
-                                            }
-                                            _ => {
-                                                return Err(err!(
-                                                    "Unexpected collecting state during type conversion";
-                                                Bug, Unexpected));
-                                            }
-                                        }
-                                        continue;
-                                    }
-                                    None => {
-                                        return Err(err!(
-                                            "The syntax '{}' expects a value of kind '{:?}' \
-                                            but the kind for received value '{}' is '{:?}'.",
-                                            self.syntax().config().name, kind, word, d.kind();
-                                        Input, Invalid));
-                                    }
-                                }
-                            }
-                        },
-                        None => {
-                            // Expected values exhausted.
-                            collecting_vals = Collecting::None;
-                            val_kind_iter = None;
-                            if active_arg.is_some() {
-                                active_arg = None;   
-                            }
-                        },
+            // Everything after "--" is the command's rest, whatever it looks like.
+            if in_rest {
+                if let Some(cmd) = active_cmd {
+                    if let Some(rest) = &cmd.config().rest {
+                        let d = res!(Self::decode_word(
+                            &word, rest, src, pos, &fmt!("the command '{}'", cmd.config().name)));
+                        if let Some(msgcmd) = msgrx.cmds.get_mut(&cmd.config().name) {
+                            msgcmd.rest.get_or_insert_with(Vec::new).push(d);
+                        }
                     }
-                } else {
-                    return Err(err!(
-                        "val_kind_iter should not be None here.";
-                    Bug, Unexpected));
+                }
+                continue;
+            }
+
+            // An option still taking values, whose next word the VAL block decides.
+            let opt_open = matches!(collecting, Collecting::MessageArg | Collecting::CommandArg)
+                && arg_slots.current().is_some();
+
+            if argv && !opt_open {
+                if let Some(cmd) = active_cmd {
+                    let owner = fmt!("the command '{}'", cmd.config().name);
+                    match cmd_slots.current() {
+                        // After a "--" that ends the options, and once a repeating verbatim
+                        // value is being filled, every word is a value as it stands.
+                        Some(val) if opts_done
+                            || (val.verbatim && val.arity.repeats() && cmd_slots.begun()) =>
+                        {
+                            let d = res!(Self::decode_word(&word, val, src, pos, &owner));
+                            collecting = Collecting::Command;
+                            active_arg = None;
+                            res!(Self::push_val(&mut msgrx, &collecting, active_cmd, None, d));
+                            cmd_slots.accept();
+                            continue;
+                        },
+                        None if opts_done => return Err(Self::excess(cmd, &word, pos)),
+                        _ => (),
+                    }
                 }
             }
-            if active_arg.is_none() {
-                // CMD ARG block
-                match active_cmd {
-                    Some(cmd) => {
-                        // It may be a command argument.
-                        if let Some(arg) = cmd.args.get_recursive(&word_key) {
-                            // We found it in the syntax, it's a command argument.
-                            if let Some(cmdrx) = msgrx.get_cmd_mut(&cmd.config().name) {
-                                if cmdrx.has_arg(&arg.canonical_name()) {
-                                    return Err(err!(
-                                        "The argument '{}' for command '{}' in the \
-                                        syntax '{}' has already been detected.",
-                                        word, cmd.config().name, self.syntax().config().name;
-                                    Input, Invalid));
-                                } else {
-                                    cmdrx.args.insert(arg.canonical_name(), Vec::new());    
-                                }
+
+            let word_key = Key::Str(word.clone());
+            let is_rest_mark = word == "--"
+                && active_cmd.map_or(false, |c| c.config().rest.is_some());
+            let found_arg = Self::find_arg(syntax, &word, active_cmd, src);
+            // With one command per message, a command's name after the command is a value.
+            let is_cmd_word = syntax.cmds.contains_key(&word_key)
+                && !(one_cmd && active_cmd.is_some());
+            let is_help = argv && found_arg.is_none() && Self::is_help_flag(&word);
+            let dash_dash = argv && word == "--";
+            // A verbatim value takes a word shaped like an option that is not one of the
+            // command's own, a help flag or a "--".
+            let as_typed = argv && active_cmd.is_some() && !opt_open && !is_help && !dash_dash
+                && cmd_slots.current().map_or(false, |v| v.verbatim);
+            let dashy = argv && found_arg.is_none() && Self::looks_like_option(&word) && !as_typed;
+
+            // VAL block
+            if collecting != Collecting::None {
+                let for_arg = matches!(collecting, Collecting::MessageArg | Collecting::CommandArg);
+                let slots = match collecting {
+                    Collecting::Message => &mut msg_slots,
+                    Collecting::Command => &mut cmd_slots,
+                    _                   => &mut arg_slots,
+                };
+                match slots.current() {
+                    Some(val) => {
+                        // An option's value that is still owed takes a word that merely looks
+                        // like an option, such as '--reason -x', and "--" and a help flag too.
+                        let owed = for_arg && !slots.satisfied();
+                        // On the wire or at a prompt a command's name fills a value still
+                        // owed, as `chat help` always has; it starts the next command only
+                        // once the values are given.
+                        let marker = found_arg.is_some()
+                            || (is_cmd_word && (argv || slots.satisfied()))
+                            || is_rest_mark
+                            || ((dashy || dash_dash) && !owed);
+                        if !marker {
+                            let owner = Self::owner_desc(&collecting, active_cmd, active_arg);
+                            let d = res!(Self::decode_word(&word, val, src, pos, &owner));
+                            res!(Self::push_val(&mut msgrx, &collecting, active_cmd, active_arg, d));
+                            slots.accept();
+                            continue;
+                        }
+                        if slots.satisfied() || (one_cmd && collecting == Collecting::Command)
+                            || is_help || dash_dash
+                        {
+                            // The values may stop here, or, with one command per message, be
+                            // given after the options. The word is read below.
+                            if for_arg {
+                                active_arg = None;
                             }
-                            Self::revise_reqd_arg_list(&arg.canonical_name(), &mut rargs);
-                            active_arg = Some(&arg);
-                            collecting_vals = Collecting::CommandArg;
-                            val_kind_iter = Some(arg.config().vals.iter());
+                            collecting = Collecting::None;
+                        } else {
+                            let owner = Self::owner_desc(&collecting, active_cmd, active_arg);
+                            let wanted = slots.wanting().unwrap_or(val);
+                            return Err(match &wanted.missing {
+                                Some(sentence) => err!(
+                                    "{} (found '{}' at position {}).", sentence, word, pos;
+                                Input, Missing),
+                                None => err!(
+                                    "The syntax '{}' expects <{}> for {} at position {}, but \
+                                    found '{}'.",
+                                    sname, wanted.label(), owner, pos, word;
+                                Input, Missing),
+                            });
                         }
                     },
                     None => {
-                        // MSG ARG block
-                        if let Some(arg) = self.syntax().args.get_recursive(&word_key) {
-                            // We found it in the syntax, it's a message argument.
-                            if msgrx.args.contains_key(&arg.canonical_name()) {
-                                return Err(err!(
-                                    "The message argument '{}' in the syntax \
-                                    '{}' has already been detected.",
-                                    word, self.syntax().config().name;
-                                Input, Invalid));
-                            } else {
-                                msgrx.args.insert(arg.canonical_name(), Vec::new());    
-                            }
-                            Self::revise_reqd_arg_list(&arg.canonical_name(), &mut rargs);
-                            active_arg = Some(&arg);
-                            collecting_vals = Collecting::MessageArg;
-                            val_kind_iter = Some(arg.config().vals.iter());
-                        }
+                        // Expected values exhausted.
+                        collecting = Collecting::None;
+                        active_arg = None;
                     },
                 }
+            }
 
-                if active_arg.is_none() {
-                    // CMD block
-                    let cmd = res!(self.is_word_a_cmd(&word_key, similarity_threshold));
-                    // Yep, checks out, we found it in the syntax, the word is a command.
-                    msgrx.cmds.insert(
-                        cmd.config().name.clone(),
-                        res!(MsgCmd::new(
-                            self.syntaxref(),
-                            cmd.config().name.clone(),
-                        )),
-                    );
-                    active_cmd = Some(cmd);
-                    collecting_vals = Collecting::Command;
-                    val_kind_iter = Some(cmd.config().vals.iter());
-                    res!(self.check_required_txt_args(
-                        rargs,
-                        &None,
-                    ));
-                    // Reset rargs for specified command.
-                    rargs = Vec::new();
-                    if let Some(cmd) = active_cmd {
-                        for arg_name in &cmd.config().rargs {
-                            rargs.push(&arg_name);   
+            if is_help {
+                // Asked where an option could stand, so the page is the answer, whatever the
+                // rest of the line holds.
+                msgrx.end = MsgEndState {
+                    cmd:    active_cmd.map(|c| c.config().name.clone()),
+                    help:   true,
+                    ..Default::default()
+                };
+                return Ok(msgrx);
+            }
+
+            if is_rest_mark {
+                in_rest = true;
+                if let Some(cmd) = active_cmd {
+                    if let Some(msgcmd) = msgrx.cmds.get_mut(&cmd.config().name) {
+                        msgcmd.rest = Some(Vec::new());
+                    }
+                }
+                continue;
+            }
+
+            // ARG block
+            if let Some((arg, is_msg_arg)) = found_arg {
+                let canon = arg.canonical_name();
+                if is_msg_arg {
+                    if msgrx.args.contains_key(&canon) {
+                        return Err(err!(
+                            "The message argument '{}' at position {} in the syntax '{}' \
+                            has already been given.",
+                            word, pos, sname;
+                        Input, Invalid));
+                    }
+                    msgrx.args.insert(canon.clone(), Vec::new());
+                    collecting = Collecting::MessageArg;
+                } else if let Some(cmd) = active_cmd {
+                    if let Some(cmdrx) = msgrx.get_cmd_mut(&cmd.config().name) {
+                        if cmdrx.has_arg(&canon) {
+                            return Err(err!(
+                                "The argument '{}' at position {} for command '{}' in the \
+                                syntax '{}' has already been given.",
+                                word, pos, cmd.config().name, sname;
+                            Input, Invalid));
+                        }
+                        cmdrx.args.insert(canon.clone(), Vec::new());
+                    }
+                    collecting = Collecting::CommandArg;
+                }
+                Self::revise_reqd_arg_list(&canon, &mut rargs);
+                active_arg = Some(arg);
+                arg_slots = Slots::new(&arg.config().vals);
+                continue;
+            }
+
+            if dash_dash {
+                // The end of the options: every word after it is one of the command's values.
+                if active_cmd.is_none() {
+                    return Err(err!(
+                        "The '--' at position {} ends the options, but no command has been \
+                        named.", pos;
+                    Input, Invalid));
+                }
+                opts_done = true;
+                collecting = Collecting::Command;
+                active_arg = None;
+                continue;
+            }
+
+            if dashy {
+                let mut names = Vec::new();
+                if let Some(cmd) = active_cmd {
+                    for arg in cmd.args_in_order() {
+                        names.append(&mut arg.hyphenated_names());
+                    }
+                }
+                for arg in syntax.args_in_order() {
+                    names.append(&mut arg.hyphenated_names());
+                }
+                let whose = match active_cmd {
+                    Some(cmd) => fmt!("the command '{}'", cmd.config().name),
+                    None => fmt!("'{}'", sname),
+                };
+                return Err(match similarity_threshold
+                    .and_then(|t| Self::closest(&word, &names, t))
+                {
+                    Some(suggestion) => err!(
+                        "Did you mean '{}'? The option '{}' at position {} is not one \
+                        that {} takes.",
+                        suggestion, word, pos, whose;
+                    Input, Invalid, Suggestion),
+                    None => err!(
+                        "The option '{}' at position {} is not one that {} takes.",
+                        word, pos, whose;
+                    Input, Invalid),
+                });
+            }
+
+            if one_cmd {
+                if let Some(cmd) = active_cmd {
+                    // Values may come after options, so a bare word fills the next one.
+                    if let Some(val) = cmd_slots.current() {
+                        let owner = fmt!("the command '{}'", cmd.config().name);
+                        let d = res!(Self::decode_word(&word, val, src, pos, &owner));
+                        collecting = Collecting::Command;
+                        res!(Self::push_val(&mut msgrx, &collecting, active_cmd, None, d));
+                        cmd_slots.accept();
+                        continue;
+                    }
+                    return Err(Self::excess(cmd, &word, pos));
+                }
+            }
+
+            // CMD block
+            let cmd = res!(self.is_word_a_cmd(&word_key, pos, similarity_threshold, argv));
+            msgrx.cmds.insert(
+                cmd.config().name.clone(),
+                res!(MsgCmd::new(self.syntaxref(), cmd.config().name.clone())),
+            );
+            active_cmd = Some(cmd);
+            active_arg = None;
+            collecting = Collecting::Command;
+            cmd_slots = Slots::new(&cmd.config().vals);
+            res!(self.check_required_txt_args(rargs, &None));
+            // Reset rargs for the command.
+            rargs = cmd.config().rargs.iter().map(|s| s.as_str()).collect();
+        }
+
+        if argv {
+            // From a command line nothing more is coming, so what is owed is missing.
+            let mut owed: Vec<(&Val, String)> = Vec::new();
+            if let Some(arg) = active_arg {
+                if let Some(val) = arg_slots.wanting() {
+                    owed.push((val, fmt!("the option '{}'", arg.long_name())));
+                }
+            }
+            if let Some(val) = msg_slots.wanting() {
+                owed.push((val, fmt!("'{}'", sname)));
+            }
+            if let Some(cmd) = active_cmd {
+                if let Some(val) = cmd_slots.wanting() {
+                    owed.push((val, fmt!("the command '{}'", cmd.config().name)));
+                }
+                if let (Some(rest), Some(msgcmd)) =
+                    (&cmd.config().rest, msgrx.cmds.get(&cmd.config().name))
+                {
+                    if let Some(words) = &msgcmd.rest {
+                        if words.is_empty() && !rest.arity.may_be_empty() {
+                            owed.push((rest, fmt!("the command '{}' after '--'", cmd.config().name)));
                         }
                     }
                 }
             }
+            if let Some((val, owner)) = owed.first() {
+                return Err(match &val.missing {
+                    Some(sentence) => err!("{}", sentence; Input, Missing),
+                    None => err!("{} needs <{}>.", Self::capitalise(owner), val.label();
+                        Input, Missing),
+                });
+            }
         }
 
-        res!(self.check_required_txt_args(
-            rargs,
-            &active_cmd,
-        ));
+        res!(self.check_required_txt_args(rargs, &active_cmd));
 
         msgrx.end = MsgEndState {
-            vals:
-            if let Some(iter) = val_kind_iter {
-                iter.map(|(kind, _)| kind.clone()).collect::<Vec<Kind>>()
-            } else {
-                Vec::new()
+            vals:   match collecting {
+                Collecting::Message     => msg_slots.outstanding(),
+                Collecting::Command     => cmd_slots.outstanding(),
+                Collecting::MessageArg |
+                Collecting::CommandArg  => arg_slots.outstanding(),
+                Collecting::None        => Vec::new(),
             },
-            arg:    match active_arg {
-                Some(a) => Some(a.canonical_name()),
-                None => None,
-            },
-            cmd:    match active_cmd {
-                Some(c) => Some(c.config().name.clone()),
-                None => None,
-            },
+            arg:    active_arg.map(|a| a.canonical_name()),
+            cmd:    active_cmd.map(|c| c.config().name.clone()),
+            help:   false,
         };
         msgrx.enc = Encoding::UTF8;
 
         Ok(msgrx)
+    }
+
+    fn capitalise(s: &str) -> String {
+        let mut chars = s.chars();
+        match chars.next() {
+            Some(c) => c.to_uppercase().chain(chars).collect(),
+            None => String::new(),
+        }
     }
 
     // BINARY IO
@@ -1186,6 +1472,15 @@ impl Msg {
                         n += nb;
                         msgcmd.args = map;
                         last_arg = last_arg2;
+                        if cmd.config().rest.is_some() {
+                            let (dat, nb) = res!(Dat::from_bytes(&buf[n..]));
+                            n += nb;
+                            if let Dat::Bool(true) = dat {
+                                let (dat, nb) = res!(Dat::from_bytes(&buf[n..]));
+                                n += nb;
+                                msgcmd.rest = Some(try_extract_dat!(dat, List));
+                            }
+                        }
                         msgrx.cmds.insert(cmd.config().name.clone(), msgcmd);
                         if i == ncmd - 1 {
                             last_cmd = Some(cmd.config().name.clone());
@@ -1309,13 +1604,13 @@ impl Msg {
 
     fn check_expected_vals(
         &self,
-        expected_vals:  &Vec<(Kind, String)>,
+        expected_vals:  &Vec<Val>,
         actual_vals:    &Vec<Dat>,
         active_cmd:     &Option<&Cmd>,
     )
         -> Outcome<()>
     {
-        if expected_vals.len() != actual_vals.len() {
+        if !Val::count_fits(expected_vals, actual_vals.len()) {
             return Err(err!(
                 "The syntax '{}' expects {} {} value(s), found {}.",
                 self.syntax().config().name,
@@ -1324,17 +1619,19 @@ impl Msg {
                 actual_vals.len();
             Input, Missing));
         }
-        for i in 0..expected_vals.len() {
-            if expected_vals[i].0 != actual_vals[i].kind() {
-                return Err(err!(
-                    "The syntax '{}' expects {} value {} to be a '{:?}', \
-                    {:?} was found.",
-                    self.syntax().config().name,
-                    Self::msg_or_cmd_string(active_cmd),
-                    actual_vals[i],
-                    expected_vals[i].0,
-                    actual_vals[i].kind();
-                Input, Missing));
+        for (i, actual) in actual_vals.iter().enumerate() {
+            if let Some(expected) = Val::slot(expected_vals, i) {
+                if expected.kind != Kind::Unknown && expected.kind != actual.kind() {
+                    return Err(err!(
+                        "The syntax '{}' expects {} value {} to be a '{:?}', \
+                        {:?} was found.",
+                        self.syntax().config().name,
+                        Self::msg_or_cmd_string(active_cmd),
+                        actual,
+                        expected.kind,
+                        actual.kind();
+                    Input, Missing));
+                }
             }
         }
         Ok(())
@@ -1906,6 +2203,7 @@ pub struct MsgCmd {
     pub name:   String, // Command name.
     pub vals:   Vec<Dat>,
     pub args:   BTreeMap<String, Vec<Dat>>, // one-to-one
+    pub rest:   Option<Vec<Dat>>,           // after "--", when it was given
 }
 
 impl fmt::Display for MsgCmd {
@@ -1918,6 +2216,12 @@ impl fmt::Display for MsgCmd {
             // Written as a reader would type it, not as the command files it.
             ok!(write!(f, " {}", self.arg_short_name(k)));
             for val in argvals {
+                ok!(write!(f, " {:?}", val));
+            }
+        }
+        if let Some(words) = &self.rest {
+            ok!(write!(f, " --"));
+            for val in words {
                 ok!(write!(f, " {:?}", val));
             }
         }
@@ -1947,6 +2251,7 @@ impl MsgCmd {
             name,
             vals:   Vec::new(),
             args:   BTreeMap::new(),
+            rest:   None,
         })
     }
 
@@ -2052,7 +2357,7 @@ impl MsgCmd {
         ->  Outcome<Self>
     {
         let arg_opt = arg_opt.map(|s| s.into());
-        let (exp_vals, arg_name): (Vec<(Kind, String)>, String) = match &arg_opt {
+        let (exp_vals, arg_name): (Vec<Val>, String) = match &arg_opt {
             Some(arg_name) => {
                 let arg = res!(self.get_syntax_arg(arg_name.clone()));
                 (arg.config().vals.clone(), fmt!("argument '{}' ", arg_name))
@@ -2079,22 +2384,23 @@ impl MsgCmd {
             None => &mut self.vals,
         };
 
-        if v.len() >= exp_vals.len() {
-            return Err(err!(
+        let next = match Val::slot(&exp_vals, v.len()) {
+            Some(next) => next,
+            None => return Err(err!(
                 "Command '{}' {}already has all {} of its \
                 expected values.", self.name, arg_name, v.len();
-            Invalid, Input, Exists));
-        }
+            Invalid, Input, Exists)),
+        };
 
         match val_opt {
             Some(val) => {
-                if exp_vals[v.len()].0 == Kind::Unknown || val.kind() == exp_vals[v.len()].0 {
+                if next.kind == Kind::Unknown || val.kind() == next.kind {
                     v.push(val);
                 } else {
                     return Err(err!(
                         "Command '{}' {}already has {} values, and \
                         the next one must be a {:?}, not a {:?}.",
-                        self.name, arg_name, v.len(), exp_vals[v.len()], val.kind();
+                        self.name, arg_name, v.len(), next.kind, val.kind();
                     Invalid, Input));
                 }
             },
@@ -2147,6 +2453,36 @@ impl MsgCmd {
 
     pub fn has_arg<S: Into<String>>(&self, a: S) -> bool {
         self.args.contains_key(&self.arg_key(a))
+    }
+
+    /// The words given after "--", or `None` when there was no "--".
+    pub fn get_rest(&self) -> Option<&Vec<Dat>> { self.rest.as_ref() }
+
+    /// The command's values, each of which must be a string, as a command line gives them.
+    pub fn str_vals(&self) -> Outcome<Vec<&str>> {
+        Self::strs(&self.vals, &fmt!("command '{}'", self.name))
+    }
+
+    /// The values of one of the command's arguments, each of which must be a string.
+    pub fn str_arg_vals<S: Into<String>>(&self, a: S) -> Outcome<Vec<&str>> {
+        let a = a.into();
+        match self.args.get(&self.arg_key(a.clone())) {
+            Some(vals) => Self::strs(vals, &fmt!("command '{}' argument '{}'", self.name, a)),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn strs<'a>(vals: &'a [Dat], owner: &str) -> Outcome<Vec<&'a str>> {
+        let mut out = Vec::with_capacity(vals.len());
+        for (i, val) in vals.iter().enumerate() {
+            match val {
+                Dat::Str(s) => out.push(s.as_str()),
+                other => return Err(err!(
+                    "Value {} of the {} is a {:?}, not a string.", i + 1, owner, other.kind();
+                Input, Mismatch)),
+            }
+        }
+        Ok(out)
     }
 
     pub fn has_args(&self) -> bool {

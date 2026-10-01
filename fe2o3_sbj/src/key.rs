@@ -11,7 +11,10 @@
 
 use crate::text;
 
-use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_core::{
+	prelude::*,
+	file as core_file,
+};
 use oxedyne_fe2o3_crypto::sign::SignatureScheme;
 use oxedyne_fe2o3_iop_crypto::{
 	keys::KeyManager,
@@ -204,31 +207,9 @@ pub fn save(
 			}
 		}
 	}
-	match fs::write(path, &src) {
-		Ok(()) => (),
-		Err(e) => return Err(err!(e,
-			"Could not write the key file {}.", path.display();
-		IO, File)),
-	}
-	res!(restrict(path));
-	Ok(())
-}
-
-/// Restricts a key file to its owner. A secret key readable by the machine is not a secret key.
-#[cfg(unix)]
-fn restrict(path: &Path) -> Outcome<()> {
-	use std::os::unix::fs::PermissionsExt;
-	match fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-		Ok(()) => Ok(()),
-		Err(e) => Err(err!(e,
-			"Could not restrict the key file {} to its owner.", path.display();
-		IO, File)),
-	}
-}
-
-/// Restricts a key file to its owner, where the platform offers no way to say so.
-#[cfg(not(unix))]
-fn restrict(_path: &Path) -> Outcome<()> {
+	// Written atomically at 0600 whatever the umask: a secret key readable
+	// by the machine, even briefly, is not a secret key.
+	res!(core_file::save_secret(path, src.as_bytes()));
 	Ok(())
 }
 

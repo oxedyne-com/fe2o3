@@ -57,6 +57,7 @@ const AFTER: [&str; 3] = ["after:1", "after:2", "after:3"];
 
 pub fn test_delete_replay(_filter: &'static str) -> Outcome<()> {
 
+    res!(std::fs::create_dir_all("./test_db_delete_replay"));
     let db_root = res!(Path::new("./test_db_delete_replay").canonicalize());
 
     let mut enckey = [0u8; 32];

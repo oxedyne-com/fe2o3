@@ -1,6 +1,7 @@
 use crate::{
     prelude::*,
     base::{
+        cfg::ZoneConfig,
         constant,
         index::ZoneInd,
     },
@@ -144,8 +145,10 @@ impl<
                     match self.broadcast(OzoneMsg::Channels(self.chans().clone(), resp2.clone())) {
                         Err(e) => self.error(e),
                         Ok(zwbots) => {
+                            // Channels are handed out at start-up, to bots that may only just
+                            // have been scheduled, so this is held to the control deadline.
                             for _ in 0..zwbots.total_bot_count() {
-                                match resp2.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
+                                match resp2.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT) {
                                     Err(e) => self.error(e),
                                     Ok(OzoneMsg::ChannelsReceived(_)) => (),
                                     m => self.error(err!(
@@ -177,35 +180,16 @@ impl<
                 OzoneMsg::GetZoneDir(resp) => {
                     self.respond(Ok(OzoneMsg::ZoneDir(*self.zind(), self.zdir().clone())), &resp);
                 },
-                OzoneMsg::ZoneInit(zdir, zcfg) => {
-                    // Zone configuration.
-                    self.zone_state_mut().caches = vec![Resource::default(); zcfg.ncbots];
-                    self.zone_state_mut().files = vec![Resource::default(); zcfg.nfbots];
-                    let msg = OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim);
-                    match self.fwd_msg_to_pool(&WorkerType::Cache, msg) {
-                        Err(e) => self.error(e),
-                        Ok(_) => (),
+                OzoneMsg::ZoneInit(zdir, zcfg, resp) => {
+                    // The database is not ready until every zone says this, and a zone that
+                    // failed says why, because the caller of `O3db::start` is waiting on it.
+                    let result = self.init_zone(zdir, zcfg);
+                    match &result {
+                        Err(e) => self.error(e.clone()),
+                        Ok(()) => info!(sync_log::stream(), "{}: Zone {} init complete",
+                            self.ozid(), self.zind),
                     }
-                    // Survey zone files.
-                    self.zdir = zdir.clone();
-                    match self.broadcast(OzoneMsg::ZoneDir(*self.zind(), zdir)) {
-                        Err(e) => self.error(e),
-                        Ok(_) => (),
-                    }
-                    match self.survey_files() {
-                        Ok(shards) => {
-                            //let n_w = self.cfg().num_wbots_per_zone;
-                            //let result = self.init_writer_live_files(n_w);
-                            //self.result(&result);
-
-                            if zcfg.init_load_caches {
-                                let result = self.init_caches(shards);
-                                self.result(&result);
-                            }
-                        },
-                        Err(e) => self.result(&Err(e)),
-                    }
-                    info!(sync_log::stream(), "{}: Zone {} init complete", self.ozid(), self.zind);
+                    self.respond(result.map(|()| OzoneMsg::Ok), &resp);
                 },
                 // WORK
                 OzoneMsg::CacheSize(b, size, ancillary_size) => {
@@ -270,27 +254,38 @@ impl<
                     // are then not contiguous, which nothing depends on: a zone's files
                     // are found by reading the directory.
                     let mut fnum = self.fnum;
-                    let mut claimed = false;
+                    let mut claim = None;
                     // Bounded so that a directory in a state nobody expected stops the
                     // bot rather than spinning it.
                     for _ in 0..constant::LIVE_FILE_CLAIM_LIMIT {
                         fnum += 1;
                         match self.zdir().claim(fnum) {
-                            Ok(true) => { claimed = true; break; },
+                            Ok(true) => { claim = Some(Ok(fnum)); break; },
                             Ok(false) => (),
-                            Err(e) => { self.error(e); break; },
+                            Err(e) => { claim = Some(Err(e)); break; },
                         }
                     }
-                    if claimed {
-                        self.fnum = fnum;
-                        self.respond(Ok(OzoneMsg::UseLiveFile(self.fnum)), &resp);
-                    } else {
-                        self.error(err!(
+                    let result = match claim {
+                        Some(Ok(fnum)) => {
+                            self.fnum = fnum;
+                            Ok(OzoneMsg::UseLiveFile(fnum))
+                        },
+                        Some(Err(e)) => Err(err!(e,
+                            "{}: No live file could be claimed in zone {:?}.",
+                            self.ozid(), self.zdir();
+                        IO, File, Create)),
+                        None => Err(err!(
                             "{}: No live file number could be claimed in zone {:?} within {} \
                             attempts from {}; every number tried was already taken.",
                             self.ozid(), self.zdir(), constant::LIVE_FILE_CLAIM_LIMIT, self.fnum;
-                        IO, File, Create, Excessive));
+                        IO, File, Create, Excessive)),
+                    };
+                    // The writer asking is waiting on this, and so is the caller whose write
+                    // needed the new file, so a failure is answered rather than only logged.
+                    if let Err(e) = &result {
+                        self.error(e.clone());
                     }
+                    self.respond(result, &resp);
                 },
                 OzoneMsg::ShardFileSize(b, size) => {
                     if b+1 > self.zone_state().files.len() {
@@ -517,6 +512,26 @@ impl<
 //    }
 
 
+    /// Configures the zone, surveys its files, gives each writer a live file and loads the caches.
+    fn init_zone(
+        &mut self,
+        zdir:   ZoneDir,
+        zcfg:   ZoneConfig,
+    )
+        -> Outcome<()>
+    {
+        self.zone_state_mut().caches = vec![Resource::default(); zcfg.ncbots];
+        self.zone_state_mut().files = vec![Resource::default(); zcfg.nfbots];
+        res!(self.fwd_msg_to_pool(&WorkerType::Cache, OzoneMsg::SetCacheSizeLimit(zcfg.cache_size_lim)));
+        self.zdir = zdir.clone();
+        res!(self.broadcast(OzoneMsg::ZoneDir(*self.zind(), zdir)));
+        let shards = res!(self.survey_files());
+        if zcfg.init_load_caches {
+            res!(self.init_caches(shards));
+        }
+        Ok(())
+    }
+
     /// Survey the existing data and index files and send the file state maps to the zone file bots.
     pub fn survey_files(&mut self) -> Outcome<Vec<FileStateMap>> {
     
@@ -639,8 +654,7 @@ impl<
         self.fnum = max_data_fnum;
 
         // Initialise WriterBot live files.
-        let result = self.init_writer_live_files(&incomplete_files);
-        self.result(&result);
+        res!(self.init_writer_live_files(&incomplete_files));
 
         // 9. Set the directory size for the zone.
         self.size = dir_size;
@@ -679,7 +693,8 @@ impl<
             res!(wbot.send(OzoneMsg::NewLiveFile(Some(fnum), resp.clone())));
         }
 
-        let (_, msgs) = res!(resp.recv_number(n_w, constant::BOT_REQUEST_WAIT));
+        // Start-up work, held to the control deadline: see constant::CONTROL_REQUEST_TIMEOUT.
+        let (_, msgs) = res!(resp.recv_number(n_w, constant::CONTROL_REQUEST_WAIT));
         for msg in msgs {
             match msg {
                 OzoneMsg::Error(e) => return Err(err!(e,
@@ -822,9 +837,11 @@ impl<
             }
         }
 
-        // 4. Wait for and collect all request responses.
+        // 4. Wait for and collect all request responses.  Loading one large file under a busy
+        //    disk can take longer than a bot request is allowed, and this is start-up work that
+        //    nothing is waiting to be served behind, so it is held to the control deadline.
         for _ in 0..bot_requests {
-            match resp.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
+            match resp.recv_timeout(constant::CONTROL_REQUEST_TIMEOUT) {
                 Err(e) => return Err(err!(e,
                     "While collecting cache initialisation request responses.";
                     IO, Channel, Read)),

@@ -1,9 +1,12 @@
 use crate::{
     prelude::*,
-    file::floc::{
-        DataLocation,
-        FileLocation,
-        FileNum,
+    file::{
+        floc::{
+            DataLocation,
+            FileLocation,
+            FileNum,
+        },
+        stored::RecordDigest,
     },
 };
 
@@ -38,6 +41,13 @@ impl std::fmt::Display for DataState {
     }
 }
 
+/// Where a collection carried a record, and which record it was.
+#[derive(Clone, Copy, Debug)]
+pub struct Move {
+    to:     u64,
+    rid:    RecordDigest,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct FileState {
     present:    Present,
@@ -47,7 +57,7 @@ pub struct FileState {
     oldsum:     u64,
     oldcnt:     usize,
     dmap:       BTreeMap<u64, DataState>, // Map of key-value pair starting positions in data file.
-    mmap:       BTreeMap<u64, u64>, // Ephemeral map of the movement of starting positions due to gc.
+    mmap:       BTreeMap<u64, Move>, // Ephemeral map of the movement of starting positions due to gc.
     pending_old: BTreeMap<u64, u64>, // Supersessions that arrived before the record's insert; start -> registered length.
     gc_active:  bool,
     readers:    usize,
@@ -295,12 +305,14 @@ impl FileState {
         Ok(len)
     }
 
+    /// Records that a collection carried the record `rid` names from `dloc` to `new_start`.
     pub fn update_moved(
         &mut self,
         dloc:       &DataLocation,
         new_start:  u64,
+        rid:        RecordDigest,
     ) {
-        self.mmap.insert(dloc.start, new_start);
+        self.mmap.insert(dloc.start, Move { to: new_start, rid });
         self.dmap.remove(&dloc.start);
     }
 
@@ -408,29 +420,42 @@ impl FileState {
         Ok(dat_len)
     }
 
-    /// The move map maps old -> new.  If there is no old, nothing is done and `None` is returned.
-    /// Otherwise this method removes old and returns `Some(new)`.
-    pub fn delete_move_entry(
-        &mut self,
-        dloc: &DataLocation,
+    /// Where the record `rid` names, last seen at `dloc` before a collection, now starts, if the
+    /// collection moved it and a supersession has still to find it there.  A move entry is
+    /// matched by the record as well as the offset: with records of one size, a new offset can
+    /// equal an old one whose move is still pending, and matched by offset alone a read of the
+    /// record now at that offset was handed the other record (2026-09-23).  A read only looks:
+    /// the entry stays for the supersession it is kept for.
+    pub fn moved_to(
+        &self,
+        dloc:   &DataLocation,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {
-        self.mmap.remove(&dloc.start)
+        match self.mmap.get(&dloc.start) {
+            Some(mv) if mv.rid == *rid => Some(mv.to),
+            _ => None,
+        }
     }
 
+    /// As `moved_to`, and the entry is then spent: its record is current at its new start until
+    /// the caller says otherwise.  For a supersession, and for the collector re-anchoring a record
+    /// in its cache.  An entry of another record at the same offset is left alone.
     pub fn map_and_remove(
         &mut self,
-        dloc: &DataLocation,
+        dloc:   &DataLocation,
+        rid:    &RecordDigest,
     )
         -> Option<u64>
     {
-        if let Some(new_start) = self.mmap.remove(&dloc.start) {
-            self.dmap.insert(new_start, DataState::Cur);
-            Some(new_start)
-        } else {
-            None
-        }
+        let to = match self.moved_to(dloc, rid) {
+            Some(to) => to,
+            None => return None,
+        };
+        self.mmap.remove(&dloc.start);
+        self.dmap.insert(to, DataState::Cur);
+        Some(to)
     }
 }
 
