@@ -362,8 +362,19 @@ impl<
                         ),
                     };
                     self.result(&result);
+                    let pinned = result.is_ok();
                     // <6> Send file location back to rbot, representing permission to perform a read.
-                    self.respond(Ok(msg2), resp_r2);
+                    // A reader that gave up waiting while the request sat in a collection's buffer,
+                    // or behind a slow cache bot, will never read this or send `ReadFinished` for
+                    // it, and the file would keep its reader for the life of the process, neither
+                    // collected nor deleted.  So the pin goes back here.
+                    if !self.try_respond(Ok(msg2), resp_r2) && pinned {
+                        let result = match self.states_mut().get_state_mut(*fnum) {
+                            Ok(fstat) => fstat.dec_readers(),
+                            Err(_) => Ok(()),
+                        };
+                        self.result(&result);
+                    }
                 }
             }
             OzoneMsg::ReadFinished(fnum) => {

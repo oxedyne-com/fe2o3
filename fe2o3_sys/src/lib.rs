@@ -6,6 +6,9 @@
 //! relevant pseudo-file under `/proc` on Linux; support for
 //! BSD and macOS will slot in via the same [`Sampler`] trait.
 //!
+//! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
+//! `nix`; without it the crate has no third-party dependency at all.
+//!
 //! Intended consumers include admin dashboards, long-running
 //! service processes that want to record their own resource
 //! use, and test harnesses that need to confirm a workload's
@@ -20,6 +23,8 @@
 
 pub mod cpu;
 pub mod disk;
+#[cfg(all(target_os = "linux", feature = "inotify"))]
+pub mod inotify;
 pub mod load;
 pub mod mem;
 pub mod net;

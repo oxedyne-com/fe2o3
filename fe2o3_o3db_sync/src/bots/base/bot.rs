@@ -96,8 +96,20 @@ pub trait OzoneBot<
         result: Outcome<OzoneMsg<UIDL, UID, ENC, KH>>,
         resp:   &Responder<UIDL, UID, ENC, KH>,
     ) {
+        let _ = self.try_respond(result, resp);
+    }
+
+    /// As `respond`, and says whether the reply went to a requester still waiting for it, which is
+    /// the question a bot that has given the requester something to give back must ask.
+    fn try_respond(
+        &self,
+        result: Outcome<OzoneMsg<UIDL, UID, ENC, KH>>,
+        resp:   &Responder<UIDL, UID, ENC, KH>,
+    )
+        -> bool
+    {
         match resp.channel() {
-            None => return,
+            None => return false,
             Some(simplex) => {
                 let msg = match result {
                     Err(e) => OzoneMsg::Error(e),
@@ -107,8 +119,12 @@ pub trait OzoneBot<
                     "While trying to return a msg {:?} via a responder for ticket {}",
                     msg, resp.ticket(),
                 );
-                if let Err(e) = simplex.send(msg) {
-                    self.err_cannot_send(err!(e, "{}", err_msg; Channel, Write));
+                match simplex.send_if_open(msg) {
+                    Ok(sent) => sent,
+                    Err(e) => {
+                        self.err_cannot_send(err!(e, "{}", err_msg; Channel, Write));
+                        false
+                    },
                 }
             },
         }

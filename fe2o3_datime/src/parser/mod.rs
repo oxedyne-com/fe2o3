@@ -16,6 +16,7 @@ use crate::{
 	constant::{DayOfWeek, MonthOfYear, OrdinalEnglish},
 };
 
+pub mod moment;
 pub mod relative;
 
 use oxedyne_fe2o3_core::prelude::*;
