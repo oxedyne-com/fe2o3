@@ -608,6 +608,13 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let one = fmt!("{} # {}\n", base64::encode(&key), secret::MARKER);
 		req!(secret::scan(one.as_bytes()), vec![Find { line: 1, kind: Kind::KeyBody }],
 			"marker beside a token");
+		// Armour and a whole body on one line are the armour's to speak for, so a marker on the
+		// line excuses the lot and without one there is a single finding.
+		let flat = fmt!("{}{} {}\n", head.trim_end(), base64::encode(&key), tail.trim_end());
+		req!(secret::scan(flat.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }],
+			"armour and body on one line");
+		let flat = fmt!("{} # {}\n", flat.trim_end(), secret::MARKER);
+		req!(secret::scan(flat.as_bytes()), Vec::<Find>::new(), "and a marker on it");
 		Ok(())
 	}));
 
@@ -708,6 +715,24 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		// A padded last line ends a run, so what follows it is a run of its own.
 		let more = fmt!("{}{}\n{}\n", body, noise(&mut 7u64, 64), noise(&mut 9u64, 64));
 		req!(secret::scan(more.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }], "after");
+		// So two bodies in a file, each ending in padding, are two findings.
+		let dkim = wrapped(&res!(der(DKIM.0, DKIM.1)), 64, "\n");
+		let both = fmt!("{}{}", dkim, body);
+		req!(secret::scan(both.as_bytes()), vec![
+			Find { line: lines_in(&dkim), kind: Kind::KeyBody },
+			Find { line: lines_in(&dkim) + n, kind: Kind::KeyBody },
+		], "two bodies");
+		// A key's last byte on the last character of a line is on that line, and on the first
+		// character of the next when the line is one character short: sixteen to a line puts
+		// the last of forty-eight bytes at the end of the fourth, and seventy puts the last of
+		// fifty-three at the start of the second.
+		let mut run = res!(der(DER[0].1, DER[0].2));
+		run.extend_from_slice(&[0x5A; 30]);
+		req!(secret::scan(wrapped(&run, 16, "\n").as_bytes()),
+			vec![Find { line: 4, kind: Kind::KeyBody }], "at the end of a line");
+		let odd = res!(der("3033020100300506032B657004220420", 53));
+		req!(secret::scan(wrapped(&odd, 70, "\n").as_bytes()),
+			vec![Find { line: 2, kind: Kind::KeyBody }], "at the start of a line");
 		Ok(())
 	}));
 
