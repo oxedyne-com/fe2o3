@@ -3,10 +3,11 @@
 //! The kernel is the oracle for the two things it can attest on any machine: the first
 //! field of `/proc/uptime` is `CLOCK_BOOTTIME`, and a process stopped by a real `SIGSTOP`
 //! (whose state the kernel reports in `/proc/<pid>/status`) is not a suspend, since both
-//! clocks run through it. A suspend itself cannot be produced here, and this machine has
-//! never had one (its boot and monotonic clocks agree to the microsecond), so what a
+//! clocks run through it. A suspend itself cannot be produced from a test, so what a
 //! suspend leaves is given to `Asleep` as readings, 3 s apart, and the arithmetic is
-//! checked on those.
+//! checked on those. On a machine that has never been suspended the boot and monotonic
+//! clocks agree, so these tests cannot tell which of the two `since_boot` asks the kernel
+//! for.
 
 #![cfg(all(target_os = "linux", feature = "clock"))]
 

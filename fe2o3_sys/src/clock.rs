@@ -23,9 +23,7 @@ use nix::time::{
     ClockId,
 };
 
-/// The shortest absence [`Asleep::new`] reports. The two clocks are read a moment apart, so
-/// a smaller difference may be that moment and not a sleep.
-pub const LEAST: Duration = Duration::from_secs(2);
+pub const LEAST: Duration = Duration::from_secs(2);  // the shortest absence Asleep::new reports
 
 /// Time since the kernel booted, counting any time the machine spent suspended.
 ///
@@ -51,7 +49,8 @@ pub fn since_boot() -> Outcome<Duration> {
 /// and the monotonic clock as `mono`, when that is at least `least`.
 ///
 /// The whole of the arithmetic, apart from reading the clocks, so a test can give it the
-/// readings a suspend would leave.
+/// readings a suspend would leave. A `least` above nothing is wanted because the two clocks
+/// are read a moment apart, and a smaller difference may be that moment and not a sleep.
 pub fn slept(boot: Duration, mono: Duration, least: Duration) -> Option<Duration> {
     let gap = boot.saturating_sub(mono);
     if !gap.is_zero() && gap >= least {
