@@ -1132,16 +1132,10 @@ pub fn collect_palette(src: &str, palette: &mut Palette) {
 			}
 			if chars.get(j) == Some(&'(') {
 				if let Some((inner, next)) = crate::lang::parse::read_group(&chars, j) {
-					for entry in crate::lang::parse::split_top_args(&inner) {
-						if let Some((name_part, val_part)) = entry.split_once(':') {
-							// The name is the last line of the key part, so a `//` comment line preceding the
-							// entry is dropped; the value is taken up to any trailing `//` line comment.
-							let name = name_part.rsplit('\n').next().unwrap_or(name_part).trim();
-							let val = val_part.split("//").next().unwrap_or(val_part).trim();
-							if !name.is_empty() && name.chars().all(is_ident_char) {
-								if let Some(rgba) = parse_colour(val) {
-									palette.insert(name.to_string(), rgba);
-								}
+					for entry in lex::args(&inner) {
+						if let Some(name) = entry.key.as_deref().filter(|n| n.chars().all(is_ident_char)) {
+							if let Some(rgba) = parse_colour(&entry.value) {
+								palette.insert(name.to_string(), rgba);
 							}
 						}
 					}
@@ -3250,6 +3244,30 @@ mod tests {
 		assert!(parse_colour_pal("colours.yellow.lighten(92%)", &palette).is_some());
 		// Without the palette, the reference cannot resolve.
 		assert_eq!(parse_colour_pal("colours.yellow", &Palette::new()), None);
+	}
+
+	/// A parameter list is read as Typst reads it, comments as trivia: a comment beside a parameter, with a
+	/// comma or a colon in it, leaves the parameter its own, and a keyword parameter is told from a body.
+	#[test]
+	fn a_comment_in_a_parameter_list_is_no_part_of_a_parameter() {
+		let mut cfns = ContentFns::new();
+		collect_content_fns("#let note(a /* c, d */, // e: f\n b) = [N #a #b]\n", &mut cfns);
+		assert_eq!(cfns.get("note").map(|f| f.params.clone()), Some(vec!["a".to_string(), "b".to_string()]));
+		assert_eq!(body_param_name("title: none, /* x: y */ body"), Some("body".to_string()));
+		assert_eq!(param_names("/* c */ a, b // d\n, title: none"), vec!["a", "b", "title"]);
+	}
+
+	/// A palette is read as Typst reads its dictionary, comments as trivia: an entry written in a comment is no
+	/// entry, a comma in a comment parts nothing, and the entry after a comment is still read.
+	#[test]
+	fn a_palette_entry_in_a_comment_is_no_entry() {
+		let src = "#let colours = (\n  // red: rgb(\"#ff0000\"),\n  yellow: rgb(\"#f0f600\"), // trailing, blue: rgb(\"#0000ff\")\n  /* green: rgb(\"#00ff00\"), */ purple: rgb(\"#4c1a57\"),\n)\n";
+		let mut palette = Palette::new();
+		collect_palette(src, &mut palette);
+		let mut names: Vec<&str> = palette.keys().map(|k| k.as_str()).collect();
+		names.sort();
+		assert_eq!(names, vec!["purple", "yellow"], "only the written entries are read");
+		assert_eq!(palette.get("purple"), Some(&Rgba::opaque(0x4c, 0x1a, 0x57)));
 	}
 
 	/// `#let colours` must match exactly -- a differently named dict such as `#let colours_x` is a

@@ -2868,11 +2868,11 @@ fn dispatch_capture(
 				// (`pagebreak(to: "odd")`) selects a parity target the reader does not model, so it is refused
 				// visibly rather than set as a plain break that quietly ignores the argument.
 				BuiltinKind::PageBreak => {
-					let inner = call_inner(&cap.buf, "pagebreak").unwrap_or_default();
-					if inner.contains("to:") {
+					let list = lex::args(&call_inner(&cap.buf, "pagebreak").unwrap_or_default());
+					if lex::named(&list, "to").is_some() {
 						skips.record("#pagebreak", span);
 					} else {
-						items.push(Item::PageBreak { weak: pagebreak_is_weak(&inner), span });
+						items.push(Item::PageBreak { weak: pagebreak_is_weak(&list), span });
 					}
 				},
 				// `#lorem(<n>)`: n words of the standard placeholder, set as one plain paragraph. A malformed
@@ -2895,15 +2895,16 @@ fn dispatch_capture(
 				// `#colbreak()` or `#colbreak(weak: true)`: a forced column break, which on a page of one column
 				// breaks the page, as Typst makes it.
 				BuiltinKind::ColBreak => {
-					let inner = call_inner(&cap.buf, "colbreak").unwrap_or_default();
-					items.push(Item::ColBreak { weak: pagebreak_is_weak(&inner), span });
+					let list = lex::args(&call_inner(&cap.buf, "colbreak").unwrap_or_default());
+					items.push(Item::ColBreak { weak: pagebreak_is_weak(&list), span });
 				},
 				BuiltinKind::Vspace => {
-					let inner = call_inner(&cap.buf, "v").unwrap_or_default();
-					match parse_length(first_arg(&inner).trim()) {
-						Some(Length::Abs(pt)) if !inner.contains("weak:")	=>
+					let list = lex::args(&call_inner(&cap.buf, "v").unwrap_or_default());
+					let first = list.iter().find(|a| a.key.is_none()).map(|a| a.value.as_str()).unwrap_or_default();
+					match parse_length(first) {
+						Some(Length::Abs(pt)) if lex::named(&list, "weak").is_none()	=>
 							items.push(Item::Space { height: crate::ir::Sp::from_pt(pt), span }),
-						_													=> skips.record("#v", span),
+						_																=> skips.record("#v", span),
 					}
 				},
 			}
@@ -2949,19 +2950,16 @@ fn lorem_arg(buf: &str) -> Option<usize> {
 
 /// Does a `#pagebreak(...)` argument list ask for a WEAK break? Only an explicit `weak: true` does; a
 /// `weak: false` and an absent argument are both the STRONG default (Typst 0.15.1), which always ejects.
-/// The value is read as the token immediately after `weak:`, so `weak: true`, `weak:true` and
-/// `weak: false` all resolve correctly.
-fn pagebreak_is_weak(inner: &str) -> bool {
-	match inner.find("weak:") {
-		Some(at)	=> inner[at + "weak:".len()..].trim_start().starts_with("true"),
-		None		=> false,
-	}
+/// The argument is the list's own, as [`lex::args`] reads it, so one named in a comment or a string asks for
+/// nothing.
+fn pagebreak_is_weak(list: &[lex::Arg]) -> bool {
+	lex::named(list, "weak") == Some("true")
 }
 
-/// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
-/// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
+/// The first positional argument of a call's inner argument text, as [`lex::args`] reads it, so
+/// `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
 fn first_arg(inner: &str) -> String {
-	split_top_args(inner).into_iter().next().unwrap_or_default()
+	lex::args(inner).into_iter().find(|a| a.key.is_none()).map(|a| a.value).unwrap_or_default()
 }
 
 /// Settles a container's body -- a callout's or a float's -- for a unit laid out whole, where the reader
@@ -4242,7 +4240,9 @@ pub(crate) fn first_string(text: &str) -> Option<String> {
 }
 
 /// Splits the inner text of a call by its top-level commas, respecting `()[]{}` nesting and `"..."`
-/// strings, so a comma inside a nested group or a string does not part an argument.
+/// strings, so a comma inside a nested group or a string does not part an argument. A comment is trivia, as
+/// [`lex::args`] reads it: it leaves a space in code and nothing in markup, so a comma, a name or a value in
+/// one is no part of an argument.
 pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 	let chars:	Vec<char>	= inner.chars().collect();
 	let mut args:	Vec<String>	= Vec::new();
@@ -4257,9 +4257,11 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 			i += 1;
 			continue;
 		}
-		let consumed = state.step(&chars, i).0;
-		for k in i..i + consumed {
-			cur.push(chars[k]);
+		let (consumed, _, kept) = state.arg_step(&chars, i);
+		match kept {
+			lex::Kept::Text		=> cur.extend(&chars[i..i + consumed]),
+			lex::Kept::Space	=> cur.push(' '),
+			lex::Kept::Nothing	=> {},
 		}
 		i += consumed;
 	}
@@ -4732,6 +4734,71 @@ mod tests {
 		let (items2, skips2) = res!(document_with_refusals("#v(24pt, weak: true)\n"));
 		assert!(!items2.iter().any(|it| matches!(it, Item::Space { .. })), "a weak #v is not set: {:?}", items2);
 		assert!(skips2.report().map_or(false, |r| r.contains("#v")), "a weak #v is refused: {:?}", skips2.report());
+		Ok(())
+	}
+
+	/// A comment inside a call's parentheses is trivia, as Typst reads it, so a keyword written in one asks for
+	/// nothing: `#pagebreak(/* to: "odd" */)` is a plain break (Typst 0.15.1 sets two pages, where a real `to:`
+	/// makes three), `#pagebreak(/* weak: true */)` and `#colbreak(/* weak: true */)` are strong (two in a row
+	/// set three pages, not two) and `#v(12pt /* , weak: true */)` is a fixed space. The keyword beside a comment
+	/// still counts, and one named in a string is no keyword. A comment is blanked as a call is gathered, so a
+	/// substring scan saw none of these; the test pins what the lexer-read arguments set.
+	#[test]
+	fn a_keyword_in_a_comment_asks_for_nothing() -> Outcome<()> {
+		let weak_of = |it: &Item| match it {
+			Item::PageBreak { weak, .. } | Item::ColBreak { weak, .. }	=> Some(*weak),
+			_															=> None,
+		};
+		for (src, weak) in [
+			("#pagebreak(/* to: \"odd\" */)\n", false),
+			("#pagebreak(/* weak: true */)\n", false),
+			("#pagebreak(weak: false)\n", false),
+			("#pagebreak(weak: true /* , to: \"odd\" */)\n", true),
+			("#pagebreak(// weak: false\n weak: true)\n", true),
+			("#colbreak(/* weak: true */)\n", false),
+			("#colbreak(weak: true // , weak: false\n)\n", true),
+		] {
+			let (items, skips) = res!(document_with_refusals(src));
+			assert!(skips.report().is_none(), "{:?} refuses nothing: {:?}", src, skips.report());
+			let got: Vec<bool> = items.iter().filter_map(weak_of).collect();
+			assert_eq!(got, vec![weak], "{:?}: {:?}", src, items);
+		}
+		let (items, skips) = res!(document_with_refusals("#pagebreak(// to: \"odd\"\n to: \"odd\")\n"));
+		assert!(!items.iter().any(|it| matches!(it, Item::PageBreak { .. })), "a real `to:` is refused: {:?}", items);
+		assert!(skips.report().map_or(false, |r| r.contains("#pagebreak")), "{:?}", skips.report());
+
+		let (items, skips) = res!(document_with_refusals("#v(12pt /* , weak: true */)\n"));
+		assert!(skips.report().is_none(), "a commented `weak:` refuses nothing: {:?}", skips.report());
+		assert!(items.iter().any(|it| matches!(it, Item::Space { .. })), "the fixed space is set: {:?}", items);
+		let (items, skips) = res!(document_with_refusals("#v(/* weak: true, */ 12pt, weak: true)\n"));
+		assert!(!items.iter().any(|it| matches!(it, Item::Space { .. })), "a real `weak:` is refused: {:?}", items);
+		assert!(skips.report().map_or(false, |r| r.contains("#v")), "{:?}", skips.report());
+		Ok(())
+	}
+
+	/// Every splitter of an argument list reads a comment as trivia: a comma in one parts nothing, a name in
+	/// one is no name, and a comment alone after the last comma is no argument -- where the text of a comment
+	/// once joined the argument beside it, so a comment line before `columns:` took the name from the key.
+	#[test]
+	fn a_comment_in_an_argument_list_is_trivia_to_every_splitter() -> Outcome<()> {
+		let trimmed = |inner: &str| -> Vec<String> { split_top_args(inner).iter().map(|a| a.trim().to_string()).collect() };
+		assert_eq!(trimmed("a /* x, y */, b // c, d\n, [p // q\n r], c // end\n"),
+			vec!["a", "b", "[p \n r]", "c"]);
+		assert_eq!(trimmed("a, b, // end\n"), vec!["a", "b"]);
+		assert_eq!(first_arg("/* a, */ 12pt, weak: true"), "12pt");
+		assert_eq!(first_arg("weak: true, 12pt"), "12pt");
+
+		// A comment line before `columns:` leaves the name its own, and a commented cell is no cell.
+		let table = |inner: &str| -> Outcome<(usize, usize)> {
+			let spec = res!(parse_table_spec(inner, &HashMap::new(), None)
+				.ok_or_else(|| err!("a table of cells: {:?}", inner; Test, Bug)));
+			Ok((spec.ncols, spec.cells.len()))
+		};
+		assert_eq!(res!(table("\n  // two columns\n  columns: 2,\n  [a], [b], /* [x], */ [c], [d] // end\n")), (2, 4));
+
+		// A claim's codes are read as they are written, a comment between them none: a `<label>` is one token to
+		// the lexer, so the splitter that kept a `<...>` together by hand is no longer needed.
+		assert_eq!(claim_codes("<B1> /* B9, */, \"B2\", // B8\n B3,<B4>"), vec!["B1", "B2", "B3", "B4"]);
 		Ok(())
 	}
 

@@ -1086,6 +1086,30 @@ pub(crate) struct Arg {
 	pub(crate) value:	String,			// the value's text, its comments dropped, trimmed
 }
 
+/// What a step over an argument list's text leaves of what it read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Kept {
+	Text,		// the characters as written
+	Space,		// a comment in code or maths: one space, so the tokens either side of it stay apart
+	Nothing,	// a comment in markup, where Typst sets nothing for it, or the rest of one already begun
+}
+
+impl Lexer {
+	/// One [`Lexer::step`] over an argument list's text, and what the step leaves of it. A comment is trivia,
+	/// so a reader that keeps the text of an argument keeps none of a comment's.
+	pub(crate) fn arg_step(&mut self, chars: &[char], i: usize) -> (usize, Tok, Kept) {
+		let fresh	= !matches!(self.frames.last(), Some(Frame::Comment(_)));
+		let markup	= matches!(self.frames.last(), Some(Frame::Markup(_)));
+		let (n, tok) = self.step(chars, i);
+		let kept = match tok {
+			Tok::Comment if fresh && !markup	=> Kept::Space,
+			Tok::Comment						=> Kept::Nothing,
+			_									=> Kept::Text,
+		};
+		(n, tok, kept)
+	}
+}
+
 /// How much of an argument's head has been read, to tell a name before its `:` from a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Head {
@@ -1126,18 +1150,13 @@ pub(crate) fn args(inner: &str) -> Vec<Arg> {
 			i += 1;
 			continue;
 		}
-		// A comment opens where the frame read before it is not already a comment; one opened in markup
-		// leaves nothing, one in code or maths a space, so the tokens either side of it stay apart.
-		let fresh	= !matches!(lx.frames.last(), Some(Frame::Comment(_)));
-		let markup	= matches!(lx.frames.last(), Some(Frame::Markup(_)));
-		let (n, tok) = lx.step(&only, i);
+		let (n, tok, kept) = lx.arg_step(&only, i);
 		let piece = &only[i..i + n];
 		i += n;
-		if tok == Tok::Comment {
-			if fresh && !markup {
-				value.push(' ');
-			}
-			continue;
+		match kept {
+			Kept::Space		=> { value.push(' '); continue; },
+			Kept::Nothing	=> continue,
+			Kept::Text		=> {},
 		}
 		let blank = piece.iter().all(|c| c.is_whitespace());
 		if top && tok == Tok::Code && n == 1 {
@@ -1642,6 +1661,35 @@ mod tests {
 			(None, "..xs".to_string()), (None, "2pt".to_string()), (None, "body".to_string()),
 		]);
 		assert_eq!(keys("a b: 1, (c: 1)"), Vec::<String>::new());
+	}
+
+	/// The text a step-by-step reader of `src` keeps, as [`split`](crate::lang::parse::split_top_args) does.
+	fn kept(src: &str) -> String {
+		let chars: Vec<char>	= src.chars().collect();
+		let mut lx				= Lexer::code();
+		let mut out				= String::new();
+		let mut i				= 0usize;
+		while i < chars.len() {
+			let (n, _, k) = lx.arg_step(&chars, i);
+			match k {
+				Kept::Text		=> out.extend(&chars[i..i + n]),
+				Kept::Space		=> out.push(' '),
+				Kept::Nothing	=> {},
+			}
+			i += n;
+		}
+		out
+	}
+
+	#[test]
+	fn a_step_over_an_argument_list_keeps_no_comment_text() {
+		// One space for a comment in code, however it nests, and none in a content block, as in Typst.
+		assert_eq!(kept("a /* x, y */, b"), "a  , b");
+		assert_eq!(kept("a/* b /* c */ d */e"), "a e");
+		assert_eq!(kept("a // c, d\n, b"), "a  \n, b");
+		assert_eq!(kept("[p // q\n r /* s */]"), "[p \n r ]");
+		// A string and raw text keep their comment markers.
+		assert_eq!(kept("\"/* x */\", `// y`"), "\"/* x */\", `// y`");
 	}
 
 	#[test]

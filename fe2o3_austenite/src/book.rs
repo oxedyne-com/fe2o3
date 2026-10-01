@@ -2359,6 +2359,14 @@ fn first_len_after(src: &str, key: &str) -> Option<f64> {
 mod tests {
 	use super::*;
 
+	/// The copyright tuple is read as Typst reads it, comments as trivia: a comma or a bracket in one parts
+	/// nothing, and a comment alone before a part is no part of it.
+	#[test]
+	fn the_copyright_tuple_reads_comments_as_trivia() {
+		let meta = "copyright: (\"2024\", /* x, y */ [Holder], // n, m\n \"Notice\")";
+		assert_eq!(copyright_line(meta), Some("Copyright © 2024 Holder. Notice".to_string()));
+	}
+
 	// A miniature two-format config with the shape the real books use: a `format` switch and a chain of
 	// `if format == "..." {...}` arms per setting.
 	const CFG: &str = r#"
