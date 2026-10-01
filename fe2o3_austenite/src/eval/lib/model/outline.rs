@@ -7,6 +7,7 @@
 // same question without an extra element kind. An entry's page number is `counter(page)` at the element,
 // which is U8's to answer.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -175,13 +176,13 @@ fn outlinable(e: &Content) -> Option<(bool, i64)> {
 fn entry_element(engine: &mut Engine, entry: &Content, span: Span) -> Outcome<Content> {
 	match entry.field("element") {
 		Some(Value::Content(c))	=> Ok(c.clone()),
-		_						=> Err(engine.error(span, "missing argument: element")),
+		_						=> Err(engine.error(DiagnosticKind::Type, span, "missing argument: element")),
 	}
 }
 
 fn cannot(engine: &mut Engine, e: &Content, span: Span) -> Error<ErrTag> {
 	let name = e.kind().map(|k| k.name()).unwrap_or("sequence");
-	engine.error(span, fmt!("cannot outline {}", name))
+	engine.error(DiagnosticKind::Type, span, fmt!("cannot outline {}", name))
 }
 
 /// The entry's prefix: the element's number in its numbering, with a figure's supplement; `none` for
@@ -213,7 +214,7 @@ fn element_location(engine: &mut Engine, e: &Content, span: Span) -> Outcome<cra
 		Some(l)	=> Ok(l),
 		None if outlinable(e).is_some() => {
 			let name = e.kind().map(|k| k.name()).unwrap_or("element");
-			Err(engine.error_hint(span, fmt!("{} must have a location", name),
+			Err(engine.error_hint(DiagnosticKind::Type, span, fmt!("{} must have a location", name),
 				"try using a show rule to customize the outline.entry instead"))
 		}
 		None => Err(cannot(engine, e, span)),
@@ -311,7 +312,7 @@ fn indented(
 {
 	let parent = match common::style_or(styles, ElemKind::OutlineEntry, "parent", Value::None) {
 		Value::Content(p)	=> p,
-		_					=> return Err(engine.error(span, "must be called within the context of an outline")),
+		_					=> return Err(engine.error(DiagnosticKind::Type, span, "must be called within the context of an outline")),
 	};
 	let level = match entry.field("level") {
 		Some(Value::Int(l))	=> (*l).max(1),
@@ -343,7 +344,7 @@ fn indented(
 			args.push(span, Value::Int(level - 1));
 			let v = res!(engine.call_func(f, args));
 			if let Err(e) = expect(&v, &[K::Rel]) {
-				return Err(engine.error(span, e.message()));
+				return Err(engine.error(DiagnosticKind::Type, span, e.message()));
 			}
 			(rel_parts(styles, &v), prefix_inset)
 		}
@@ -471,7 +472,7 @@ pub fn call(f: ModelFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
 	let entry = match res!(args.eat::<Value>()) {
 		Some(Value::Content(c)) if c.is(ElemKind::OutlineEntry)	=> c,
-		_ => return Err(engine.error(span, "expected outline entry")),
+		_ => return Err(engine.error(DiagnosticKind::Type, span, "expected outline entry")),
 	};
 	if f == ModelFn::EntryBody {
 		res!(super::finish(engine, &mut args));
@@ -479,7 +480,7 @@ pub fn call(f: ModelFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	}
 	let styles = match &engine.context.styles {
 		Some(s)	=> s.clone(),
-		None	=> return Err(engine.error_hint(span, "can only be used when context is known",
+		None	=> return Err(engine.error_hint(DiagnosticKind::Type, span, "can only be used when context is known",
 			"try wrapping this in a `context` expression")),
 	};
 	let out = match f {
@@ -504,7 +505,7 @@ pub fn call(f: ModelFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let pre: Option<Content> = res!(args.eat::<Option<Content>>()).flatten();
 			let inner = match res!(args.eat::<Content>()) {
 				Some(c)	=> c,
-				None	=> return Err(engine.error(span, "missing argument: inner")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: inner")),
 			};
 			let gap = match res!(args.named::<Value>("gap")) {
 				Some(g)	=> g,

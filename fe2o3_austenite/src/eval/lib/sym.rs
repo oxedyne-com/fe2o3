@@ -6,6 +6,7 @@
 // Resolution follows codex: the applied modifiers must all be present in a variant, and among those the
 // variant with the fewest modifiers wins, the first in table order on a tie.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::lib::foundations::{
 	finish,
@@ -186,13 +187,13 @@ pub fn call(_f: SymFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			Value::Str(s) => vars.push((String::new(), (*s).clone())),
 			Value::Array(a) if a.len() == 2 => match (&a[0], &a[1]) {
 				(Value::Str(m), Value::Str(t)) => vars.push(((**m).clone(), (**t).clone())),
-				_ => return Err(engine.error(span, "variant must be a pair of strings")),
+				_ => return Err(engine.error(DiagnosticKind::Type, span, "variant must be a pair of strings")),
 			},
 			other => return Err(mismatch(engine, span, "string or array", &other)),
 		}
 	}
 	if vars.is_empty() {
-		return Err(engine.error(span, "expected at least one variant"));
+		return Err(engine.error(DiagnosticKind::Type, span, "expected at least one variant"));
 	}
 	for (i, (m, _)) in vars.iter().enumerate() {
 		if vars[..i].iter().any(|(n, _)| {
@@ -201,7 +202,7 @@ pub fn call(_f: SymFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			b.sort_unstable();
 			a == b
 		}) {
-			return Err(engine.error(span, if m.is_empty() {
+			return Err(engine.error(DiagnosticKind::Type, span, if m.is_empty() {
 				"duplicate default variant".to_string()
 			} else {
 				fmt!("duplicate variant: {}", repr_str(m))

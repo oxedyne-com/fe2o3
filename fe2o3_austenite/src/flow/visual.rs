@@ -13,6 +13,7 @@
 //
 // An infinite region extent is `Sp(i32::MAX)` (anything from 2^30 up reads as infinite).
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -453,7 +454,7 @@ pub fn layout_frame_with<F>(
 			f.hide();
 			f
 		},
-		other => return Err(engine.error(span, fmt!("{} is not a visual element flow can lay out", other.path()))),
+		other => return Err(engine.error(DiagnosticKind::Unsupported, span, fmt!("{} is not a visual element flow can lay out", other.path()))),
 	};
 
 	// The block keeps the size it was given on an expanded axis.
@@ -581,7 +582,7 @@ fn layout_line(g: &Get, pod: Pod, span: Span, engine: &mut Engine) -> Outcome<Fr
 	let w		= start.x.max(end.x).max(0.0);
 	let h		= start.y.max(end.y).max(0.0);
 	if !w.is_finite() || !h.is_finite() {
-		return Err(engine.error(span, "cannot create line with infinite length"));
+		return Err(engine.error(DiagnosticKind::Type, span, "cannot create line with infinite length"));
 	}
 	let mut frame	= Frame::new(w, h);
 	let mut c		= Curve::new();
@@ -601,7 +602,7 @@ fn layout_polygon(g: &Get, pod: Pod, span: Span, engine: &mut Engine) -> Outcome
 	let w = pts.iter().fold(0.0f64, |m, p| m.max(p.x));
 	let h = pts.iter().fold(0.0f64, |m, p| m.max(p.y));
 	if !w.is_finite() || !h.is_finite() {
-		return Err(engine.error(span, "cannot create polygon with infinite size"));
+		return Err(engine.error(DiagnosticKind::Type, span, "cannot create polygon with infinite size"));
 	}
 	let mut frame = Frame::new(w, h);
 	let first = match pts.first() {
@@ -814,7 +815,7 @@ fn layout_curve(g: &Get, pod: Pod, span: Span, engine: &mut Engine) -> Outcome<F
 		return Ok(frame);
 	}
 	if !size.x.is_finite() || !size.y.is_finite() {
-		return Err(engine.error(span, "cannot create curve with infinite size"));
+		return Err(engine.error(DiagnosticKind::Type, span, "cannot create curve with infinite size"));
 	}
 	let fill	= res!(fill(g));
 	let stroke	= res!(smart_stroke(res!(g.val("stroke")), fill.is_some(), g.fs));
@@ -1486,10 +1487,10 @@ fn layout_image(engine: &mut Engine, g: &Get, pod: Pod) -> Outcome<Frame> {
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_string());
 			match crate::vfs::read(&path) {
 				Ok(b)	=> (b, ext),
-				Err(e)	=> return Err(engine.error(span, fmt!("failed to load file ({})", e))),
+				Err(e)	=> return Err(engine.error(DiagnosticKind::MissingFile, span, fmt!("failed to load file ({})", e))),
 			}
 		},
-		_ => return Err(engine.error(span, "image source must be a path or bytes")),
+		_ => return Err(engine.error(DiagnosticKind::Type, span, "image source must be a path or bytes")),
 	};
 	let format = match res!(g.val("format")) {
 		Some(Value::Str(s))	=> img::format_named(&s),
@@ -1500,11 +1501,11 @@ fn layout_image(engine: &mut Engine, g: &Get, pod: Pod) -> Outcome<Frame> {
 	};
 	let format = match format {
 		Ok(f)	=> f,
-		Err(e)	=> return Err(engine.error(span, last_msg(&e))),
+		Err(e)	=> return Err(engine.error(DiagnosticKind::Type, span, last_msg(&e))),
 	};
 	let decoded = match img::decode(&data, format) {
 		Ok(d)	=> d,
-		Err(e)	=> return Err(engine.error(span, fmt!("failed to decode image ({})", last_msg(&e)))),
+		Err(e)	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("failed to decode image ({})", last_msg(&e)))),
 	};
 	let (nw, nh)	= decoded.size_pt();
 	let px_ratio	= nw / nh;
@@ -1777,7 +1778,7 @@ fn resolve_scale<F>(engine: &mut Engine, g: &Get, pod: Pod, body: &Content, body
 		}
 	};
 	match (res!(axis(x, size.x)), res!(axis(y, size.y))) {
-		(None, None)			=> Err(engine.error(span, "x and y cannot both be auto")),
+		(None, None)			=> Err(engine.error(DiagnosticKind::Type, span, "x and y cannot both be auto")),
 		(Some(a), Some(b))		=> Ok((a, b)),
 		(None, Some(v)) | (Some(v), None)	=> Ok((v, v)),
 	}
@@ -1793,7 +1794,7 @@ fn layout_repeat<F>(engine: &mut Engine, g: &Get, pod: Pod, body_fn: &mut F) -> 
 	let piece	= res!(body_fn(engine, &body, g.styles, Pod::new(pod.w, pod.h, false, false)));
 	let w_fill	= pod.w;
 	if !w_fill.is_finite() || !piece.height.is_finite() {
-		return Err(engine.error(span, "repeat with no size restrictions"));
+		return Err(engine.error(DiagnosticKind::Type, span, "repeat with no size restrictions"));
 	}
 	let mut frame = Frame::new(w_fill, piece.height);
 	if piece.baseline.is_some() {
@@ -1996,7 +1997,7 @@ fn op_transform(op: &DrawOp, t: &GTransform, span: Span, engine: &mut Engine) ->
 		},
 		DrawOp::Image { image, x, y, w, h } => {
 			if t.b != 0.0 || t.c != 0.0 || t.a < 0.0 || t.d < 0.0 {
-				return Err(engine.error(span,
+				return Err(engine.error(DiagnosticKind::Unsupported, span,
 					"a raster image cannot yet be rotated, skewed or mirrored: the drawing layer places \
 					rasters upright"));
 			}
@@ -2072,7 +2073,7 @@ fn bake_leaf(l: &Leaf, x: Sp, top: Sp, ops: &mut Vec<DrawOp>, engine: &mut Engin
 			}
 		},
 		LeafKind::Reserved(..) | LeafKind::Mark(_) => {
-			return Err(engine.error(span,
+			return Err(engine.error(DiagnosticKind::Unsupported, span,
 				"a reference or footnote mark cannot yet be transformed: the transform node is not wired in"));
 		},
 	}
@@ -2134,14 +2135,14 @@ fn paint_rgba(engine: &mut Engine, p: &Paint, span: Span) -> Outcome<Option<Rgba
 	match p {
 		Paint::Color(c) => Ok(Some(res!(c.to_rgba()))),
 		Paint::Gradient(g) => {
-			engine.warn(span, "gradients are drawn in one flat colour: the drawing layer has no shading");
+			engine.warn(DiagnosticKind::Unsupported, span, "gradients are drawn in one flat colour: the drawing layer has no shading");
 			match g.stops.get(g.stops.len() / 2) {
 				Some((c, _))	=> Ok(Some(res!(c.to_rgba()))),
 				None			=> Ok(None),
 			}
 		},
 		Paint::Tiling(_) => {
-			engine.warn(span, "tiling paint is not drawn: the drawing layer has no tiling");
+			engine.warn(DiagnosticKind::Unsupported, span, "tiling paint is not drawn: the drawing layer has no tiling");
 			Ok(None)
 		},
 	}

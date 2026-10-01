@@ -29,6 +29,7 @@ pub mod quote;
 pub mod raw;
 pub mod reference;
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -163,7 +164,7 @@ pub fn fold(kind: ElemKind, field: &str, inner: Value, outer: Value) -> Outcome<
 
 pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcome<Option<Content>> {
 	match kind {
-		ElemKind::ParLine		=> Err(engine.error(args.span, "cannot be constructed manually")),
+		ElemKind::ParLine		=> Err(engine.error(DiagnosticKind::Type, args.span, "cannot be constructed manually")),
 		ElemKind::Link			=> link::construct(engine, args).map(Some),
 		ElemKind::Bibliography	=> bibliography::construct(engine, args).map(Some),
 		ElemKind::Cite			=> reference::construct_cite(engine, args).map(Some),
@@ -192,7 +193,7 @@ pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) ->
 		} else if spec.positional && spec.required {
 			let a = match args.items.iter().position(|a| a.name.is_none()) {
 				Some(p)	=> args.items.remove(p),
-				None	=> return Err(engine.error(span, fmt!("missing argument: {}", spec.name))),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("missing argument: {}", spec.name))),
 			};
 			fields.push((id, res!(cast_arg(engine, kind, spec.name, a.value, a.span))));
 		} else if spec.positional {
@@ -203,7 +204,7 @@ pub fn construct_schema(engine: &mut Engine, kind: ElemKind, args: &mut Args) ->
 					let v = args.items[p].value.clone();
 					match cast(kind, spec.name, v) {
 						Err(CastErr::Type(_))	=> (),
-						Err(CastErr::Value(m))	=> return Err(engine.error(args.items[p].span, m)),
+						Err(CastErr::Value(m))	=> return Err(engine.error(DiagnosticKind::Type, args.items[p].span, m)),
 						Ok(v)					=> {
 							taken = Some(v);
 							args.items.remove(p);
@@ -239,14 +240,14 @@ fn cast_arg(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Spa
 	// Typst still takes an array as an enumeration or term list item, with a warning.
 	if matches!(v, Value::Array(_)) && name == "children" {
 		match kind {
-			ElemKind::Enum	=> engine.warn(span, "implicit conversion from array to `enum.item` is deprecated"),
-			ElemKind::Terms	=> engine.warn(span, "implicit conversion from array to `terms.item` is deprecated"),
+			ElemKind::Enum	=> engine.warn(DiagnosticKind::Internal, span, "implicit conversion from array to `enum.item` is deprecated"),
+			ElemKind::Terms	=> engine.warn(DiagnosticKind::Internal, span, "implicit conversion from array to `terms.item` is deprecated"),
 			_				=> (),
 		}
 	}
 	match cast(kind, name, v) {
 		Ok(v)	=> Ok(v),
-		Err(e)	=> Err(engine.error(span, e.message())),
+		Err(e)	=> Err(engine.error(DiagnosticKind::Type, span, e.message())),
 	}
 }
 
@@ -260,7 +261,7 @@ pub fn finish(engine: &mut Engine, args: &mut Args) -> Outcome<()> {
 				Some(n)	=> fmt!("unexpected argument: {}", n),
 				None	=> "unexpected argument".to_string(),
 			};
-			Err(engine.error(span, msg))
+			Err(engine.error(DiagnosticKind::Type, span, msg))
 		}
 	}
 }

@@ -2,6 +2,7 @@
 // a place, which only the evaluator holds, so `methods.rs` carries them out. Comparison, equality, addition and joining
 // are `ops.rs`'s, so `sorted`, `dedup`, `sum` and `join` agree with the operators by construction.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::Func;
 use crate::eval::lib::foundations::{
@@ -72,7 +73,7 @@ pub fn method(name: &str) -> Option<ArrayFn> {
 
 
 fn no_default(engine: &mut Engine, span: Span, i: i64, len: usize) -> Error<ErrTag> {
-	engine.error(span, fmt!(
+	engine.error(DiagnosticKind::Type, span, fmt!(
 		"array index out of bounds (index: {}, len: {}) and no default value was specified", i, len))
 }
 
@@ -102,7 +103,7 @@ fn test(engine: &mut Engine, span: Span, f: &Func, v: Value) -> Outcome<bool> {
 // An operator's error, as a diagnostic at the call.
 fn op_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
 	let w = words(&e);
-	engine.error(span, w)
+	engine.error(DiagnosticKind::Type, span, w)
 }
 
 pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
@@ -130,7 +131,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			match (v, default) {
 				(Some(v), _)	=> v.clone(),
 				(None, Some(d))	=> d,
-				(None, None)	=> return Err(engine.error(span, "array is empty")),
+				(None, None)	=> return Err(engine.error(DiagnosticKind::Type, span, "array is empty")),
 			}
 		}
 		ArrayFn::At => {
@@ -176,7 +177,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			for (i, v) in arr.iter().enumerate() {
 				let k = match start.checked_add(i as i64) {
 					Some(k)	=> k,
-					None	=> return Err(engine.error(span, "array index is too large")),
+					None	=> return Err(engine.error(DiagnosticKind::Type, span, "array index is too large")),
 				};
 				out.push(Value::array(vec![Value::Int(k), v.clone()]));
 			}
@@ -192,7 +193,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					Value::Array(a) => {
 						if exact && a.len() != arr.len() {
 							let which = if one { "second array" } else { "array" };
-							return Err(engine.error(span, fmt!(
+							return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 								"{} has different length ({}) from first array ({})", which, a.len(), arr.len())));
 						}
 						lists.push(a);
@@ -235,7 +236,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let mut acc = match (it.next(), default) {
 				(Some(v), _)	=> v.clone(),
 				(None, Some(d))	=> d,
-				(None, None)	=> return Err(engine.error(span, fmt!(
+				(None, None)	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"cannot calculate {} of empty array with no default",
 					if f == ArrayFn::Sum { "sum" } else { "product" }))),
 			};
@@ -323,7 +324,7 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				false
 			};
 			if n <= 0 {
-				return Err(engine.error(span, "number must be positive"));
+				return Err(engine.error(DiagnosticKind::Type, span, "number must be positive"));
 			}
 			let n = n as usize;
 			let out: Vec<Value> = if f == ArrayFn::Chunks {
@@ -370,15 +371,15 @@ pub fn call(f: ArrayFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			for v in arr.iter() {
 				let pair = match v {
 					Value::Array(p) => p,
-					other => return Err(engine.error(span, fmt!(
+					other => return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"expected (str, any) pairs, found {}", other.ty().name()))),
 				};
 				if pair.len() != 2 {
-					return Err(engine.error(span, fmt!("expected pairs of length 2, found length {}", pair.len())));
+					return Err(engine.error(DiagnosticKind::Type, span, fmt!("expected pairs of length 2, found length {}", pair.len())));
 				}
 				match &pair[0] {
 					Value::Str(k)	=> d.insert(k, pair[1].clone()),
-					other			=> return Err(engine.error(span, fmt!(
+					other			=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"expected key of type str, found {}",
 						crate::eval::lib::foundations::type_desc(other.ty())))),
 				}
@@ -448,7 +449,7 @@ fn flatten(arr: &[Value], out: &mut Vec<Value>) {
 
 fn sorted(engine: &mut Engine, span: Span, arr: &[Value], key: Option<Func>, by: Option<Func>) -> Outcome<Value> {
 	if key.is_some() && by.is_some() {
-		return Err(engine.error(span, "`key` and `by` are mutually exclusive"));
+		return Err(engine.error(DiagnosticKind::Type, span, "`key` and `by` are mutually exclusive"));
 	}
 	// Pair each element with its sort key, so a key function runs once per element.
 	let mut items: Vec<(Value, Value)> = Vec::with_capacity(arr.len());
@@ -471,7 +472,7 @@ fn sorted(engine: &mut Engine, span: Span, arr: &[Value], key: Option<Func>, by:
 		None => res!(merge_sort(items, &mut |a: &(Value, Value), b: &(Value, Value)| {
 			match ops::compare(&a.0, &b.0) {
 				Ok(o)	=> Ok(o),
-				Err(e)	=> Err(engine.error_hint(span, words(&e),
+				Err(e)	=> Err(engine.error_hint(DiagnosticKind::Type, span, words(&e),
 					"consider choosing a `key` or defining the comparison with `by`")),
 			}
 		})),
@@ -482,7 +483,7 @@ fn sorted(engine: &mut Engine, span: Span, arr: &[Value], key: Option<Func>, by:
 fn by_call(engine: &mut Engine, span: Span, f: &Func, a: &Value, b: &Value) -> Outcome<bool> {
 	match res!(apply(engine, span, f, vec![a.clone(), b.clone()])) {
 		Value::Bool(x)	=> Ok(x),
-		other			=> Err(engine.error(span, fmt!(
+		other			=> Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"expected boolean from `by` function, got {}",
 			crate::eval::lib::foundations::type_desc(other.ty())))),
 	}

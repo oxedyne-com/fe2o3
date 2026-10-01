@@ -2,6 +2,7 @@
 // target; in a paged document `set document(..)` carries the metadata (title, author, ...) that the PDF
 // writer and `title()` read from the style chain.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -74,6 +75,6 @@ pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 }
 
 pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcome<Option<Content>> {
-	Err(engine.error_hint(elem.span(), "constructing a document is only supported in the bundle target",
+	Err(engine.error_hint(DiagnosticKind::Type, elem.span(), "constructing a document is only supported in the bundle target",
 		"or use a `set document(..)` rule to configure metadata"))
 }

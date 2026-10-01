@@ -10,6 +10,7 @@
 //! `EVAL_ORACLE_SKIP=1` skips explicitly; a missing `typst` binary otherwise fails, so absence never
 //! reads as green.
 
+use oxedyne_fe2o3_austenite::diag::DiagnosticKind;
 use oxedyne_fe2o3_austenite::eval::content::{
 	Content,
 	ElemKind,
@@ -879,5 +880,43 @@ fn warnings_match_the_typst_oracle() -> Outcome<()> {
 	// The corpus must hold warnings to compare, or agreement means nothing.
 	assert!(warned >= 5, "only {} warnings in the corpus", warned);
 	assert!(failures.is_empty(), "{} of {} warning cases differ:\n{}", failures.len(), docs.len(), failures.join("\n"));
+	Ok(())
+}
+
+// Every diagnostic carries the kind of what it reports, set where it is raised, so a caller switches on
+// the kind and never on the wording. Each row is code, the kind of its first diagnostic, and whether that
+// diagnostic is an error.
+#[test]
+fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
+	use DiagnosticKind as K;
+	let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("eval_core_kinds");
+	res!(std::fs::create_dir_all(&dir).map_err(|e| err!("Cannot create {}: {}", dir.display(), e; IO, File, Write)));
+	// A missing file is not a row yet: every `MissingFile` site sits behind `import::resolve_path`, still
+	// the U10a stub, which raises `Unsupported`. U10a adds the row, `read("/absent.txt")`, with the resolver.
+	// 0xff is not UTF-8 in any position, and inline bytes reach the decoder without a path.
+	let cases: [(&str, K, bool); 11] = [
+		("missing",							K::UnknownVariable,	true),
+		("(1 +",							K::Syntax,			true),
+		("break",							K::Syntax,			true),
+		("1 + \"a\"",						K::Type,			true),
+		("int(\"x\")",					K::Type,			true),
+		("{ let f() = f(); f() }",			K::Limit,			true),
+		("plugin(\"x.wasm\")",			K::Unsupported,		true),
+		("json(bytes((255, 254, 65)))",	K::Encoding,		true),
+		("{ let f() = { [a]; return 1 }; f() }",	K::Internal,	false),
+		("import heading as heading",		K::Internal,		false),
+		("import list: item as item",		K::Internal,		false),
+	];
+	let mut failures = Vec::new();
+	for (code, kind, error) in cases {
+		let mut engine = Engine::new(World::new(dir.clone()));
+		let _ = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::detached());
+		match engine.diags.iter().find(|d| d.is_error() == error) {
+			Some(d) if d.kind == kind	=> (),
+			Some(d)						=> failures.push(fmt!("{}: kind {} ({}), wanted {}", code, d.kind, d.message, kind)),
+			None						=> failures.push(fmt!("{}: no {} raised", code, if error { "error" } else { "warning" })),
+		}
+	}
+	assert!(failures.is_empty(), "{} case(s) carry the wrong kind:\n{}", failures.len(), failures.join("\n"));
 	Ok(())
 }

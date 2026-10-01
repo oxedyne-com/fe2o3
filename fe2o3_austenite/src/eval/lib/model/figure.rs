@@ -3,6 +3,7 @@
 // force) and what counts it (`counter(figure.where(kind: ..))`), and hands all three to the caption,
 // with the figure's location, so the caption can number itself.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -171,7 +172,7 @@ pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) 
 		Value::Auto => {
 			let name = kind_elem.and_then(local_key).map(|key| common::text(common::local(styles, key)));
 			if !numbering.is_none() && name.is_none() {
-				return Err(engine.error(span, "please specify the figure's supplement"));
+				return Err(engine.error(DiagnosticKind::Type, span, "please specify the figure's supplement"));
 			}
 			Some(name.unwrap_or_else(Content::empty))
 		}
@@ -276,7 +277,7 @@ fn show_figure(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	match res!(common::get(elem, styles, "placement")) {
 		Value::None => {
 			if matches!(&scope, Value::Str(s) if s.as_str() == "parent") {
-				return Err(engine.error_hint(span,
+				return Err(engine.error_hint(DiagnosticKind::Type, span,
 					"parent-scoped placement is only available for floating figures",
 					"you can enable floating placement with `figure(placement: auto, ..)`"));
 			}

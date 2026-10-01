@@ -2,6 +2,7 @@
 // `pi`, `tau`, `e` and `inf` (Typst has no `calc.nan`; `float.nan` is the type's). `erf` is FreeBSD's
 // `s_erf.c`, the implementation Rust's `libm` ports, so results agree with Typst to the last bit.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::{
 	Func,
@@ -156,7 +157,7 @@ fn arg_float(engine: &mut Engine, args: &mut Args, what: &str) -> Outcome<f64> {
 }
 
 fn decimal_and_float(engine: &mut Engine, span: Span) -> Error<ErrTag> {
-	engine.error_hint(span, "cannot apply this operation to a decimal and a float",
+	engine.error_hint(DiagnosticKind::Type, span, "cannot apply this operation to a decimal and a float",
 		"if loss of precision is acceptable, explicitly cast the decimal to a float with `float(value)`")
 }
 
@@ -172,7 +173,7 @@ fn arg_int(engine: &mut Engine, args: &mut Args, what: &str) -> Outcome<i64> {
 fn arg_nat(engine: &mut Engine, args: &mut Args, what: &str) -> Outcome<u64> {
 	let i = res!(arg_int(engine, args, what));
 	if i < 0 {
-		return Err(engine.error(args.span, "number must be at least zero"));
+		return Err(engine.error(DiagnosticKind::Type, args.span, "number must be at least zero"));
 	}
 	Ok(i as u64)
 }
@@ -188,9 +189,9 @@ fn arg_angle(engine: &mut Engine, args: &mut Args) -> Outcome<f64> {
 	}
 }
 
-fn too_large(engine: &mut Engine, span: Span) -> Error<ErrTag> { engine.error(span, "the result is too large") }
+fn too_large(engine: &mut Engine, span: Span) -> Error<ErrTag> { engine.error(DiagnosticKind::Type, span, "the result is too large") }
 
-fn not_real(engine: &mut Engine, span: Span) -> Error<ErrTag> { engine.error(span, "the result is not a real number") }
+fn not_real(engine: &mut Engine, span: Span) -> Error<ErrTag> { engine.error(DiagnosticKind::Type, span, "the result is not a real number") }
 
 pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
@@ -232,7 +233,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		CalcFn::Sqrt => {
 			let x = res!(arg_float(engine, &mut args, "value"));
 			if x < 0.0 {
-				return Err(engine.error(span, "cannot take square root of negative number"));
+				return Err(engine.error(DiagnosticKind::Type, span, "cannot take square root of negative number"));
 			}
 			Value::Float(x.sqrt())
 		}
@@ -240,11 +241,11 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let r = res!(arg_float(engine, &mut args, "radicand"));
 			let n = res!(arg_int(engine, &mut args, "index"));
 			if n == 0 {
-				return Err(engine.error(span, "cannot take the 0th root of a number"));
+				return Err(engine.error(DiagnosticKind::Type, span, "cannot take the 0th root of a number"));
 			}
 			if r < 0.0 {
 				if n % 2 == 0 {
-					return Err(engine.error(span,
+					return Err(engine.error(DiagnosticKind::Type, span,
 						"negative numbers do not have a real nth root when n is even"));
 				}
 				Value::Float(-(-r).powf(1.0 / n as f64))
@@ -264,7 +265,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		CalcFn::Asin | CalcFn::Acos => {
 			let x = res!(arg_float(engine, &mut args, "value"));
 			if !(-1.0..=1.0).contains(&x) {
-				return Err(engine.error(span, "value must be between -1 and 1"));
+				return Err(engine.error(DiagnosticKind::Type, span, "value must be between -1 and 1"));
 			}
 			Value::Angle(Angle(if f == CalcFn::Asin { x.asin() } else { x.acos() }))
 		}
@@ -281,14 +282,14 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		CalcFn::Acosh => {
 			let x = res!(arg_float(engine, &mut args, "value"));
 			if x < 1.0 {
-				return Err(engine.error(span, "value must be greater than or equal to 1"));
+				return Err(engine.error(DiagnosticKind::Type, span, "value must be greater than or equal to 1"));
 			}
 			Value::Float(x.acosh())
 		}
 		CalcFn::Atanh => {
 			let x = res!(arg_float(engine, &mut args, "value"));
 			if x <= -1.0 || x >= 1.0 {
-				return Err(engine.error(span, "value must be between -1 and 1 (exclusive)"));
+				return Err(engine.error(DiagnosticKind::Type, span, "value must be between -1 and 1 (exclusive)"));
 			}
 			Value::Float(x.atanh())
 		}
@@ -299,10 +300,10 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Some(v)	=> res!(float_of(engine, span, v)),
 			};
 			if x <= 0.0 {
-				return Err(engine.error(span, "value must be strictly positive"));
+				return Err(engine.error(DiagnosticKind::Type, span, "value must be strictly positive"));
 			}
 			if !base.is_normal() {
-				return Err(engine.error(span, "base may not be zero, NaN, infinite, or subnormal"));
+				return Err(engine.error(DiagnosticKind::Type, span, "base may not be zero, NaN, infinite, or subnormal"));
 			}
 			let r = if base == std::f64::consts::E {
 				x.ln()
@@ -321,7 +322,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		CalcFn::Ln => {
 			let x = res!(arg_float(engine, &mut args, "value"));
 			if x <= 0.0 {
-				return Err(engine.error(span, "value must be strictly positive"));
+				return Err(engine.error(DiagnosticKind::Type, span, "value must be strictly positive"));
 			}
 			let r = x.ln();
 			if r.is_infinite() {
@@ -454,7 +455,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			match (v, lo, hi) {
 				(Num::Int(v), Num::Int(lo), Num::Int(hi)) => {
 					if hi < lo {
-						return Err(engine.error(span, "max must be greater than or equal to min"));
+						return Err(engine.error(DiagnosticKind::Type, span, "max must be greater than or equal to min"));
 					}
 					Value::Int(v.clamp(lo, hi))
 				}
@@ -463,7 +464,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					let pair = (lo.decimal(), hi.decimal());
 					if let (Some(l), Some(h)) = pair {
 						if h < l {
-							return Err(engine.error(span, "max must be greater than or equal to min"));
+							return Err(engine.error(DiagnosticKind::Type, span, "max must be greater than or equal to min"));
 						}
 					}
 					match (v.decimal(), pair.0, pair.1) {
@@ -474,7 +475,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				_ => {
 					let (v, lo, hi) = (v.float().unwrap_or(0.0), lo.float().unwrap_or(0.0), hi.float().unwrap_or(0.0));
 					if hi < lo {
-						return Err(engine.error(span, "max must be greater than or equal to min"));
+						return Err(engine.error(DiagnosticKind::Type, span, "max must be greater than or equal to min"));
 					}
 					Value::Float(v.clamp(lo, hi))
 				}
@@ -486,12 +487,12 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let mut it = vals.into_iter();
 			let mut ext = match it.next() {
 				Some(v)	=> v,
-				None	=> return Err(engine.error(span, "expected at least one value")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "expected at least one value")),
 			};
 			for v in it {
 				let ord = match ops::compare(&v, &ext) {
 					Ok(o)	=> o,
-					Err(e)	=> return Err(engine.error(span, words(&e))),
+					Err(e)	=> return Err(engine.error(DiagnosticKind::Type, span, words(&e))),
 				};
 				if ord == goal {
 					ext = v;
@@ -507,7 +508,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let a = res!(arg_num(engine, &mut args, "dividend"));
 			let b = res!(arg_num(engine, &mut args, "divisor"));
 			if b.is_zero() {
-				return Err(engine.error(span, "divisor must not be zero"));
+				return Err(engine.error(DiagnosticKind::Type, span, "divisor must not be zero"));
 			}
 			res!(division(engine, span, f, a, b))
 		}
@@ -522,7 +523,7 @@ pub fn call(f: CalcFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				xs.push(res!(float_of(engine, span, v)));
 			}
 			if p <= 0.0 {
-				return Err(engine.error(span, "p must be greater than zero"));
+				return Err(engine.error(DiagnosticKind::Type, span, "p must be greater than zero"));
 			}
 			if p.is_infinite() {
 				Value::Float(xs.iter().fold(0.0f64, |m, x| m.max(x.abs())))
@@ -547,13 +548,13 @@ fn float_to_int(engine: &mut Engine, span: Span, x: f64) -> Outcome<Value> {
 
 fn pow(engine: &mut Engine, span: Span, base: Num, exp: Num) -> Outcome<Value> {
 	if exp.is_zero() && base.is_zero() {
-		return Err(engine.error(span, "zero to the power of zero is undefined"));
+		return Err(engine.error(DiagnosticKind::Type, span, "zero to the power of zero is undefined"));
 	}
 	match exp {
 		Num::Int(i) if i32::try_from(i).is_err()
-			=> return Err(engine.error(span, "exponent is too large")),
+			=> return Err(engine.error(DiagnosticKind::Type, span, "exponent is too large")),
 		Num::Float(x) if !x.is_normal() && x != 0.0
-			=> return Err(engine.error(span, "exponent may not be infinite, subnormal, or NaN")),
+			=> return Err(engine.error(DiagnosticKind::Type, span, "exponent may not be infinite, subnormal, or NaN")),
 		_ => (),
 	}
 	if let (Num::Int(a), Num::Int(b)) = (base, exp) {
@@ -625,7 +626,7 @@ fn division(engine: &mut Engine, span: Span, f: CalcFn, a: Num, b: Num) -> Outco
 				},
 				(Some(r), _)			=> Ok(Value::Decimal(r)),
 				(None, CalcFn::Rem | CalcFn::RemEuclid)
-										=> Err(engine.error(span, "dividend too small compared to divisor")),
+										=> Err(engine.error(DiagnosticKind::Type, span, "dividend too small compared to divisor")),
 				(None, _)				=> Err(too_large(engine, span)),
 			}
 		}

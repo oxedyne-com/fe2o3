@@ -3,6 +3,7 @@
 // `foundations::field`'s. `to-absolute` resolves `em` against the contextual text size, the one method
 // here that needs context.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::ElemKind;
 use crate::eval::lib::foundations::{
@@ -138,7 +139,7 @@ fn is_horizontal(d: Direction) -> bool { matches!(d, Direction::Ltr | Direction:
 // The absolute pt of a length, refusing an unresolved em part with Typst's message.
 fn pt_of(engine: &mut Engine, span: Span, l: &Length, unit: &str) -> Outcome<f64> {
 	if l.em != 0.0 {
-		let e = engine.error_hint(span,
+		let e = engine.error_hint(DiagnosticKind::Type, span,
 			fmt!("cannot convert a length with non-zero em units (`{}`) to {}", repr_length(l), unit),
 			"use `length.to-absolute()` to resolve its em component (requires context)");
 		if let Some(d) = engine.diags.last_mut() {
@@ -153,7 +154,7 @@ fn pt_of(engine: &mut Engine, span: Span, l: &Length, unit: &str) -> Outcome<f64
 fn text_size(engine: &mut Engine, span: Span) -> Outcome<f64> {
 	let styles = match &engine.context.styles {
 		Some(s)	=> s.clone(),
-		None	=> return Err(engine.error_hint(span, "can only be used when context is known",
+		None	=> return Err(engine.error_hint(DiagnosticKind::Type, span, "can only be used when context is known",
 			"try wrapping this in a `context` expression")),
 	};
 	let size = match ElemKind::Text.field_id("size") {
@@ -181,7 +182,7 @@ pub fn call(f: GeomFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			(Some(HAlign::Right), None)		=> Direction::Rtl,
 			(None, Some(VAlign::Top))		=> Direction::Ttb,
 			(None, Some(VAlign::Bottom))	=> Direction::Btt,
-			_ => return Err(engine.error(span, "expected `left`, `right`, `top`, or `bottom`")),
+			_ => return Err(engine.error(DiagnosticKind::Type, span, "expected `left`, `right`, `top`, or `bottom`")),
 		};
 		return Ok(Value::Direction(if f == GeomFn::To { inv_dir(d) } else { d }));
 	}

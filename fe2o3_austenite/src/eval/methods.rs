@@ -4,6 +4,7 @@
 // mutating methods (`push`, `pop`, `insert`, `remove` on arrays and dictionaries) are carried out here on
 // the place itself, as Typst's own evaluator does, since a native function only ever sees a copy.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -230,14 +231,14 @@ pub fn call_method(
 	-> Outcome<Value>
 {
 	if is_mutating(name) && matches!(receiver, Value::Array(_) | Value::Dict(_)) {
-		return Err(engine.error(span, "cannot mutate a temporary value"));
+		return Err(engine.error(DiagnosticKind::Syntax, span, "cannot mutate a temporary value"));
 	}
 	match type_method(receiver.ty(), name).or_else(|| element_method(&receiver, name)) {
 		Some(f) => {
 			args.prepend(span, receiver);
 			engine.call_func(&Func::Native(f), args)
 		}
-		None => Err(engine.error(span, fmt!("type {} has no method `{}`", receiver.ty().long_name(), name))),
+		None => Err(engine.error(DiagnosticKind::Type, span, fmt!("type {} has no method `{}`", receiver.ty().long_name(), name))),
 	}
 }
 
@@ -268,7 +269,7 @@ pub fn call_method_mut(
 	};
 	match out {
 		Ok(v)	=> Ok(v),
-		Err(e)	=> Err(engine.error(span, e.plain())),
+		Err(e)	=> Err(engine.error(DiagnosticKind::Type, span, e.plain())),
 	}
 }
 

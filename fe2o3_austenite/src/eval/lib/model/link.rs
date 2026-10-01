@@ -4,6 +4,7 @@
 // is resolved to the labelled element's location here. Typst's alternative text for a link, for tagged
 // PDF, is not produced.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -81,20 +82,20 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	let span = args.span;
 	let a = match args.items.iter().position(|a| a.name.is_none()) {
 		Some(p)	=> args.items.remove(p),
-		None	=> return Err(engine.error(span, "missing argument: dest")),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: dest")),
 	};
 	let d = match dest(a.value) {
 		Ok(d)	=> d,
-		Err(e)	=> return Err(engine.error(a.span, e.message())),
+		Err(e)	=> return Err(engine.error(DiagnosticKind::Type, a.span, e.message())),
 	};
 	let next = args.items.iter().position(|a| a.name.is_none()).map(|p| args.items.remove(p));
 	let body = match (next, &d) {
 		(Some(b), _) => match expect(&b.value, &[K::Content]) {
 			Ok(())	=> to_content(b.value),
-			Err(e)	=> return Err(engine.error(b.span, e.message())),
+			Err(e)	=> return Err(engine.error(DiagnosticKind::Type, b.span, e.message())),
 		},
 		(None, Value::Str(url))	=> Value::Content(body_from_url(url).with_span(span)),
-		(None, _)				=> return Err(engine.error(span, "missing argument: body")),
+		(None, _)				=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: body")),
 	};
 	res!(super::finish(engine, args));
 	common::raw_elem(ElemKind::Link, span, vec![("dest", d), ("body", body)])
@@ -113,7 +114,7 @@ pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcom
 			let target = res!(lookup::label(engine, &l, span));
 			match target.location() {
 				Some(loc)	=> Value::Location(loc),
-				None		=> return Err(engine.error(span, "cannot link to an element without a location")),
+				None		=> return Err(engine.error(DiagnosticKind::Type, span, "cannot link to an element without a location")),
 			}
 		}
 		Some(v)	=> v.clone(),

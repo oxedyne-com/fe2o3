@@ -1,5 +1,6 @@
 // U5 owns this file: heading and title.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -195,7 +196,7 @@ fn show_heading(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Out
 	if !numbering.is_none() {
 		let loc = match elem.location() {
 			Some(l)	=> l,
-			None	=> return Err(engine.error(span, "heading must have a location to be numbered")),
+			None	=> return Err(engine.error(DiagnosticKind::Type, span, "heading must have a location to be numbered")),
 		};
 		let numbers = common::spanned(res!(lookup::display_counter(
 			engine, &lookup::elem_counter(ElemKind::Heading), loc, &numbering, span)), span);
@@ -242,7 +243,7 @@ fn show_title(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outco
 	let span = elem.span();
 	let body = match res!(common::get(elem, styles, "body")) {
 		Value::Auto => match res!(common::style(styles, ElemKind::Document, "title")) {
-			Value::None => return Err(engine.error_hint(span, "document title was not set",
+			Value::None => return Err(engine.error_hint(DiagnosticKind::Type, span, "document title was not set",
 				"set the title with `set document(title: [...])`")),
 			v => common::display(v),
 		},

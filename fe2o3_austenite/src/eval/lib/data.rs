@@ -7,6 +7,7 @@
 // of the 1.2 core schema, quoted and block scalars, anchors and aliases); tags and complex keys are
 // refused with a diagnostic.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::Content;
 use crate::eval::func::{
@@ -76,7 +77,7 @@ fn source(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<Vec<u8>>> {
 			let path = res!(resolve_path(engine, &p, span.file, span));
 			match vfs::read(&path) {
 				Ok(b)	=> Ok(Arc::new(b)),
-				Err(e)	=> Err(engine.error(span, if e.kind() == std::io::ErrorKind::NotFound {
+				Err(e)	=> Err(engine.error(DiagnosticKind::MissingFile, span, if e.kind() == std::io::ErrorKind::NotFound {
 					fmt!("file not found (searched at {})", path.display())
 				} else {
 					fmt!("failed to load file ({})", e)
@@ -91,7 +92,7 @@ fn source(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<Vec<u8>>> {
 fn utf8<'a>(engine: &mut Engine, span: Span, b: &'a [u8]) -> Outcome<&'a str> {
 	match std::str::from_utf8(b) {
 		Ok(s)	=> Ok(s.strip_prefix('\u{feff}').unwrap_or(s)),
-		Err(_)	=> Err(engine.error(span, "file is not valid utf-8")),
+		Err(_)	=> Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
 	}
 }
 
@@ -100,7 +101,7 @@ fn utf8<'a>(engine: &mut Engine, span: Span, b: &'a [u8]) -> Outcome<&'a str> {
 // characters read.
 fn parse_error(engine: &mut Engine, span: Span, fmt_name: &str, text: &str, at: usize, msg: &str) -> Error<ErrTag> {
 	let (line, col) = line_col(text, at);
-	engine.error(span, fmt!("failed to parse {} ({} at line {} column {} at {}:{})",
+	engine.error(DiagnosticKind::Type, span, fmt!("failed to parse {} ({} at line {} column {} at {}:{})",
 		fmt_name, msg, line, col, line, col.max(1)))
 }
 
@@ -129,7 +130,7 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				None | Some(Value::Str(_)) => {
 					if let Some(Value::Str(e)) = &enc {
 						if e.as_str() != "utf8" {
-							return Err(engine.error(span, "expected \"utf8\" or none"));
+							return Err(engine.error(DiagnosticKind::Type, span, "expected \"utf8\" or none"));
 						}
 					}
 					let s = res!(utf8(engine, span, &b));
@@ -148,8 +149,8 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 						let mut cs = s.chars();
 						match (cs.next(), cs.next()) {
 							(Some(c), None) if c.is_ascii()	=> c,
-							(Some(_), None)	=> return Err(engine.error(span, "delimiter must be an ASCII character")),
-							_				=> return Err(engine.error(span, "delimiter must be a single character")),
+							(Some(_), None)	=> return Err(engine.error(DiagnosticKind::Type, span, "delimiter must be an ASCII character")),
+							_				=> return Err(engine.error(DiagnosticKind::Type, span, "delimiter must be a single character")),
 						}
 					}
 					Some(other) => return Err(mismatch(engine, span, "string", &other)),
@@ -158,7 +159,7 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					None => false,
 					Some(Value::Type(t)) if t == crate::eval::value::Type::Array => false,
 					Some(Value::Type(t)) if t == crate::eval::value::Type::Dict => true,
-					Some(_) => return Err(engine.error(span, "expected `array` or `dictionary`")),
+					Some(_) => return Err(engine.error(DiagnosticKind::Type, span, "expected `array` or `dictionary`")),
 				};
 				(d, rows)
 			} else {
@@ -171,8 +172,8 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					let mut r = CborReader { b: &b, at: 0, depth: 0 };
 					match r.value() {
 						Ok(v) if r.at == b.len()	=> Ok(v),
-						Ok(_)						=> Err(engine.error(span, "failed to parse CBOR (trailing data)")),
-						Err(e)						=> Err(engine.error(span, fmt!("failed to parse CBOR ({})", words(&e)))),
+						Ok(_)						=> Err(engine.error(DiagnosticKind::Type, span, "failed to parse CBOR (trailing data)")),
+						Err(e)						=> Err(engine.error(DiagnosticKind::Type, span, fmt!("failed to parse CBOR ({})", words(&e)))),
 					}
 				}
 				_ => {
@@ -735,7 +736,7 @@ fn csv_value(engine: &mut Engine, span: Span, text: &str, delim: char, dict_rows
 			row.push(std::mem::take(&mut field));
 			quoted = false;
 			if let Err(m) = finish_row(&mut row, &mut rows, &mut expected, row_line) {
-				return Err(engine.error(span, fmt!("failed to parse CSV ({})", m)));
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!("failed to parse CSV ({})", m)));
 			}
 			line += 1;
 			row_line = line;
@@ -747,7 +748,7 @@ fn csv_value(engine: &mut Engine, span: Span, text: &str, delim: char, dict_rows
 	if any || !field.is_empty() || !row.is_empty() {
 		row.push(field);
 		if let Err(m) = finish_row(&mut row, &mut rows, &mut expected, row_line) {
-			return Err(engine.error(span, fmt!("failed to parse CSV ({})", m)));
+			return Err(engine.error(DiagnosticKind::Type, span, fmt!("failed to parse CSV ({})", m)));
 		}
 	}
 	if dict_rows {
@@ -775,7 +776,7 @@ fn xml_value(engine: &mut Engine, span: Span, text: &str) -> Outcome<Value> {
 	};
 	let doc = match Xml::parse(text) {
 		Ok(d)	=> d,
-		Err(e)	=> return Err(engine.error(span, fmt!("failed to parse XML ({})",
+		Err(e)	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("failed to parse XML ({})",
 			e.msgs().last().cloned().unwrap_or_default()))),
 	};
 	// Typst reads XML through roxmltree, whose tree this reproduces: adjacent text and CDATA merge

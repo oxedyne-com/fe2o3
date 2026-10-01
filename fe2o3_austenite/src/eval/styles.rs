@@ -8,7 +8,10 @@
 // `radius` folds as corners, `first-line-indent` as an `amount` dictionary and every other `Merge` field as
 // sides. A fold that meets values it cannot combine lets the inner value win, as `Replace` would.
 
-use crate::diag::Diagnostic;
+use crate::diag::{
+	Diagnostic,
+	DiagnosticKind,
+};
 use crate::eval::args::Args;
 use crate::eval::content::{
 	self,
@@ -776,12 +779,12 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 		if let Some(arg) = taken {
 			if !spec.ty.accepts(&arg.value) {
 				let msg = expected_message(spec.ty, &arg.value);
-				return Err(engine.error(arg.span, msg));
+				return Err(engine.error(DiagnosticKind::Type, arg.span, msg));
 			}
 			// Cast as construction casts, so `set` refuses at the rule what the element would refuse.
 			let value = match content::cast_field(kind, spec.name, arg.value) {
 				Ok(v)	=> v,
-				Err(e)	=> return Err(engine.error(arg.span, crate::diag::message_of(&e))),
+				Err(e)	=> return Err(engine.error(DiagnosticKind::Type, arg.span, crate::diag::message_of(&e))),
 			};
 			styles.push(Style::Property(Property::new(kind, id, value, arg.span)));
 		}
@@ -792,7 +795,7 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 			Some(n)	=> fmt!("unexpected argument: {}", n),
 			None	=> "unexpected argument".to_string(),
 		};
-		return Err(engine.error(span, msg));
+		return Err(engine.error(DiagnosticKind::Type, span, msg));
 	}
 	Ok(styles)
 }
@@ -850,8 +853,16 @@ pub fn apply_recipe(engine: &mut Engine, recipe: &Recipe, target: Content, chain
 }
 
 /// Records an error with several hints and returns it.
-pub(crate) fn error_hints(engine: &mut Engine, span: Span, message: &str, hints: &[&str]) -> Error<ErrTag> {
-	let mut d = Diagnostic::error(span, message);
+pub(crate) fn error_hints(
+	engine:		&mut Engine,
+	kind:		DiagnosticKind,
+	span:		Span,
+	message:	&str,
+	hints:		&[&str],
+)
+	-> Error<ErrTag>
+{
+	let mut d = Diagnostic::error(kind, span, message);
 	for h in hints {
 		d = d.with_hint(*h);
 	}

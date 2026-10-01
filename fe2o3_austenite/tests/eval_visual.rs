@@ -5,13 +5,19 @@
 //! The element is built here through `content::construct`, as the evaluator will build it from the call.
 //! A missing `typst` fails the suite unless `EVAL_ORACLE_SKIP=1` is set.
 
+use oxedyne_fe2o3_austenite::diag::DiagnosticKind;
 use oxedyne_fe2o3_austenite::eval::args::Args;
 use oxedyne_fe2o3_austenite::eval::content::{
 	construct,
 	Content,
 	ElemKind,
 };
+use oxedyne_fe2o3_austenite::eval::eval::{
+	eval_string,
+	EvalMode,
+};
 use oxedyne_fe2o3_austenite::eval::lib::visual;
+use oxedyne_fe2o3_austenite::eval::scope::Scope;
 use oxedyne_fe2o3_austenite::eval::styles::StyleChain;
 use oxedyne_fe2o3_austenite::eval::value::{
 	Alignment,
@@ -32,6 +38,7 @@ use oxedyne_fe2o3_austenite::eval::{
 	World,
 };
 use oxedyne_fe2o3_austenite::flow::visual::{
+	frame_to_node,
 	layout_frame_with,
 	Frame,
 	Item,
@@ -639,7 +646,6 @@ fn path_element_is_refused_as_in_typst() -> Outcome<()> {
 #[test]
 fn frames_lower_to_one_box_of_the_frame_size() -> Outcome<()> {
 	use oxedyne_fe2o3_austenite::flow::visual::{
-		frame_to_node,
 		layout_visual,
 		P2,
 	};
@@ -680,5 +686,32 @@ fn frames_lower_to_one_box_of_the_frame_size() -> Outcome<()> {
 		Node::VBox(b)	=> assert_eq!(b.dims, Dims::new(Sp::from_pt(20.0), Sp::from_pt(10.0), Sp::ZERO)),
 		other			=> panic!("expected a vertical box, got {:?}", other),
 	}
+	Ok(())
+}
+
+// The drawing layer carries flat colours only, so a gradient fill is drawn in one colour and a tiling not
+// at all. Each says so with a warning of kind `unsupported`, the kind a strict compile refuses: the
+// document was not set as written.
+#[test]
+fn a_paint_the_drawing_layer_cannot_draw_warns_as_unsupported() -> Outcome<()> {
+	let mut e = engine();
+	let region = Region { width: Sp(i32::MAX), height: Sp(i32::MAX), base: (Sp(i32::MAX), Sp(i32::MAX)), expand_x: false, expand_y: false };
+	let mut raised = 0;
+	for paint in ["gradient.linear(red, blue)", "tiling(size: (4pt, 4pt))[x]"] {
+		let fill = res!(eval_string(&mut e, paint, EvalMode::Code, Scope::new(), Span::detached()));
+		let rect = res!(el(&mut e, ElemKind::Rect, vec![], vec![("width", pt(20.0)), ("height", pt(10.0)), ("fill", fill)]));
+		let before = e.diags.len();
+		let frame = res!(layout_frame_with(&mut e, &rect, &StyleChain::root(), region, &mut body_fn));
+		// The paint is turned into ink only when the frame lowers to a node, so the warning is raised there.
+		res!(frame_to_node(&mut e, &frame, Span::detached()));
+		let warned: Vec<_> = e.diags[before..].iter().filter(|d| !d.is_error()).collect();
+		assert!(!warned.is_empty(), "{} fill drew without a warning", paint);
+		for d in &warned {
+			assert_eq!(d.kind, DiagnosticKind::Unsupported, "{}: {}", paint, d.message);
+			assert!(d.kind.refuses_strict(), "{}: a strict compile must refuse it", paint);
+		}
+		raised += warned.len();
+	}
+	assert!(raised >= 2, "only {} warning(s) for the two paints", raised);
 	Ok(())
 }

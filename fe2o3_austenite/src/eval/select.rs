@@ -2,6 +2,7 @@
 // `cast` for `selector(..)`, `query` and the combinators, and `cast_showable` for a `show` rule, which also
 // takes a symbol and refuses what only introspection can answer (a location, `before`, `after`).
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -112,7 +113,7 @@ impl Selector {
 /// A text selector; an empty one is refused.
 fn text_selector(engine: &mut Engine, span: Span, text: &str) -> Outcome<Selector> {
 	if text.is_empty() {
-		return Err(engine.error(span, "text selector is empty"));
+		return Err(engine.error(DiagnosticKind::Type, span, "text selector is empty"));
 	}
 	Ok(Selector::Text(text.to_string()))
 }
@@ -120,7 +121,7 @@ fn text_selector(engine: &mut Engine, span: Span, text: &str) -> Outcome<Selecto
 fn func_selector(engine: &mut Engine, span: Span, f: &Func) -> Outcome<Selector> {
 	match f.element() {
 		Some(k)	=> Ok(Selector::Elem(k, None)),
-		None	=> Err(engine.error(span, "only element functions can be used as selectors")),
+		None	=> Err(engine.error(DiagnosticKind::Type, span, "only element functions can be used as selectors")),
 	}
 }
 
@@ -133,7 +134,7 @@ pub fn cast(engine: &mut Engine, span: Span, v: Value) -> Outcome<Selector> {
 		Value::Str(s)		=> text_selector(engine, span, &s),
 		Value::Regex(r)		=> Ok(Selector::Regex(r)),
 		Value::Location(l)	=> Ok(Selector::Location(l)),
-		other				=> Err(engine.error(span, fmt!(
+		other				=> Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"expected string, function, label, regex, location, or selector, found {}", other.ty().long_name()))),
 	}
 }
@@ -147,11 +148,11 @@ pub fn cast_showable(engine: &mut Engine, span: Span, v: Value) -> Outcome<Selec
 		Value::Str(s)		=> res!(text_selector(engine, span, &s)),
 		Value::Symbol(s)	=> res!(text_selector(engine, span, &ops::symbol_text(&s))),
 		Value::Regex(r)		=> Selector::Regex(r),
-		other				=> return Err(engine.error(span, fmt!(
+		other				=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"expected symbol, string, label, function, regex, or selector, found {}", other.ty().long_name()))),
 	};
 	if !sel.is_showable() {
-		return Err(engine.error(span, "this selector cannot be used with show"));
+		return Err(engine.error(DiagnosticKind::Type, span, "this selector cannot be used with show"));
 	}
 	Ok(sel)
 }
@@ -192,7 +193,7 @@ fn take(engine: &mut Engine, args: &mut Args, what: &str) -> Outcome<(Span, Valu
 			let span = if a.span.is_detached() { args.span } else { a.span };
 			Ok((span, a.value))
 		}
-		None => Err(engine.error(args.span, fmt!("missing argument: {}", what))),
+		None => Err(engine.error(DiagnosticKind::Type, args.span, fmt!("missing argument: {}", what))),
 	}
 }
 
@@ -205,7 +206,7 @@ fn finish(engine: &mut Engine, args: Args) -> Outcome<()> {
 				Some(n)	=> fmt!("unexpected argument: {}", n),
 				None	=> "unexpected argument".to_string(),
 			};
-			Err(engine.error(span, msg))
+			Err(engine.error(DiagnosticKind::Type, span, msg))
 		}
 	}
 }
@@ -214,7 +215,7 @@ fn inclusive(engine: &mut Engine, args: &mut Args) -> Outcome<bool> {
 	match res!(args.named::<Value>("inclusive")) {
 		None				=> Ok(true),
 		Some(Value::Bool(b))	=> Ok(b),
-		Some(other)			=> Err(engine.error(args.span, fmt!("expected boolean, found {}", other.ty().long_name()))),
+		Some(other)			=> Err(engine.error(DiagnosticKind::Type, args.span, fmt!("expected boolean, found {}", other.ty().long_name()))),
 	}
 }
 
@@ -255,7 +256,7 @@ pub fn call(f: StyleFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			};
 			let kind = match kind {
 				Some(k)	=> k,
-				None	=> return Err(engine.error(span, "`where()` can only be called on element functions")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "`where()` can only be called on element functions")),
 			};
 			let mut fields = Vec::new();
 			let mut i = 0;
@@ -269,7 +270,7 @@ pub fn call(f: StyleFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					Some(id)	=> id,
 					None		=> {
 						let span = if a.span.is_detached() { args.span } else { a.span };
-						return Err(engine.error(span, fmt!(
+						return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 							"element `{}` does not have field `{}`", kind.name(), name)));
 					}
 				};

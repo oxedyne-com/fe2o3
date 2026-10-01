@@ -6,6 +6,7 @@
 // see what Typst shows (`rect(width: 1pt).width` is `0% + 1pt`, a sides dictionary is expanded). A value
 // that arrives through `set` is raw, so flow casts again on reading; every cast here is idempotent.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -263,9 +264,9 @@ pub fn call(f: VisualFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> 
 	match out {
 		Ok(v) => match args.finish() {
 			Ok(())	=> Ok(v),
-			Err(e)	=> Err(engine.error(span, err_text(&e))),
+			Err(e)	=> Err(engine.error(DiagnosticKind::Type, span, err_text(&e))),
 		},
-		Err(e) => Err(engine.error(span, err_text(&e))),
+		Err(e) => Err(engine.error(DiagnosticKind::Type, span, err_text(&e))),
 	}
 }
 
@@ -396,10 +397,10 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 	};
 	let fields = match built {
 		Ok(f)	=> f,
-		Err(e)	=> return Err(engine.error(span, err_text(&e))),
+		Err(e)	=> return Err(engine.error(DiagnosticKind::Type, span, err_text(&e))),
 	};
 	if let Err(e) = std::mem::take(args).finish() {
-		return Err(engine.error(span, err_text(&e)));
+		return Err(engine.error(DiagnosticKind::Type, span, err_text(&e)));
 	}
 	Ok(Some(Content::new(kind, fields, span)))
 }

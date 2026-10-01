@@ -2,6 +2,7 @@
 // here (one line in the table below) by agreement, never worked around. Each element's field schema,
 // custom constructor and native show live with the unit that lays it out, reached through `Family`.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::lib;
 use crate::eval::locate::Location;
@@ -667,7 +668,7 @@ pub fn build(engine: &mut Engine, kind: ElemKind, fields: Vec<(&str, Value)>, sp
 	for (name, v) in fields {
 		match kind.field_id(name) {
 			Some(id)	=> fv.push((id, v)),
-			None		=> return Err(engine.error(span, fmt!(
+			None		=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 				"element `{}` has no field `{}` in its schema", kind.path(), name))),
 		}
 	}
@@ -710,7 +711,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 		};
 		if let Some(v) = value {
 			if !spec.ty.accepts(&v) {
-				return Err(engine.error(span, fmt!(
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"{}: field `{}` does not accept {}", kind.path(), spec.name, v.ty().name())));
 			}
 			fields.push((id, res!(cast_field(kind, spec.name, v))));

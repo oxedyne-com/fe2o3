@@ -14,6 +14,7 @@
 // A boundary line between two row groups is drawn by both: each group's box carries its own top and bottom
 // rules, so a page break between them frames both pages, as Typst does. Coincident strokes draw twice.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -284,7 +285,7 @@ fn paint_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<Option<Paint>
 		Value::Color(c)				=> Ok(Some(Paint::Color(*c))),
 		Value::Gradient(g)			=> Ok(Some(Paint::Gradient(g.clone()))),
 		Value::Tiling(t)			=> Ok(Some(Paint::Tiling(t.clone()))),
-		other => Err(engine.error(span, fmt!("expected color, gradient, tiling, or none, found {}", other.ty().name()))),
+		other => Err(engine.error(DiagnosticKind::Type, span, fmt!("expected color, gradient, tiling, or none, found {}", other.ty().name()))),
 	}
 }
 
@@ -296,7 +297,7 @@ fn stroke_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<Stroke> {
 			=> Ok(Stroke { paint: res!(paint_of(engine, span, v)), ..Stroke::default() }),
 		Value::Stroke(s)	=> Ok((**s).clone()),
 		Value::Dict(d)		=> stroke_dict(engine, span, d),
-		other => Err(engine.error(span, fmt!(
+		other => Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"expected length, color, gradient, tiling, dictionary, or stroke, found {}", other.ty().name()))),
 	}
 }
@@ -310,7 +311,7 @@ fn stroke_dict(engine: &mut Engine, span: Span, d: &Dict) -> Outcome<Stroke> {
 			"thickness"		=> match v {
 				Value::Length(l)	=> s.thickness = Some(*l),
 				Value::Auto			=> (),
-				other => return Err(engine.error(span, fmt!("expected length, found {}", other.ty().name()))),
+				other => return Err(engine.error(DiagnosticKind::Type, span, fmt!("expected length, found {}", other.ty().name()))),
 			},
 			"cap"			=> s.cap = match v {
 				Value::Str(t) if t.as_str() == "butt"	=> Some(LineCap::Butt),
@@ -330,7 +331,7 @@ fn stroke_dict(engine: &mut Engine, span: Span, d: &Dict) -> Outcome<Stroke> {
 				Value::Int(i)	=> Some(*i as f64),
 				_				=> None,
 			},
-			other => return Err(engine.error(span, fmt!("unexpected key \"{}\", valid keys are \"paint\", \"thickness\", \"cap\", \"join\", \"dash\", and \"miter-limit\"", other))),
+			other => return Err(engine.error(DiagnosticKind::Type, span, fmt!("unexpected key \"{}\", valid keys are \"paint\", \"thickness\", \"cap\", \"join\", \"dash\", and \"miter-limit\"", other))),
 		}
 	}
 	Ok(s)
@@ -365,12 +366,12 @@ fn dash_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<Option<Dash>> 
 				match item {
 					Value::Length(l)						=> array.push(DashItem::Len(*l)),
 					Value::Str(s) if s.as_str() == "dot"	=> array.push(DashItem::Dot),
-					other => return Err(engine.error(span, fmt!("expected length or \"dot\", found {}", other.ty().name()))),
+					other => return Err(engine.error(DiagnosticKind::Type, span, fmt!("expected length or \"dot\", found {}", other.ty().name()))),
 				}
 			}
 			Ok(Some(Dash { array, phase: Length::zero() }))
 		}
-		other => Err(engine.error(span, fmt!("expected string, array, dictionary, or none, found {}", other.ty().name()))),
+		other => Err(engine.error(DiagnosticKind::Type, span, fmt!("expected string, array, dictionary, or none, found {}", other.ty().name()))),
 	}
 }
 
@@ -447,7 +448,7 @@ fn sides_inset(engine: &mut Engine, span: Span, v: &Value) -> Outcome<Sides<Opti
 			Value::Ratio(r)		=> Ok(Some(Relative { rel: *r, abs: Length::zero() })),
 			Value::Relative(r)	=> Ok(Some(*r)),
 			Value::None			=> Ok(Some(Relative::default())),
-			other => Err(engine.error(span, fmt!("expected relative length, found {}", other.ty().name()))),
+			other => Err(engine.error(DiagnosticKind::Type, span, fmt!("expected relative length, found {}", other.ty().name()))),
 		}
 	};
 	match v {
@@ -477,7 +478,7 @@ fn align_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<Alignment> {
 	match v {
 		Value::Auto | Value::None	=> Ok(Alignment::default()),
 		Value::Alignment(a)			=> Ok(*a),
-		other => Err(engine.error(span, fmt!("expected alignment or auto, found {}", other.ty().name()))),
+		other => Err(engine.error(DiagnosticKind::Type, span, fmt!("expected alignment or auto, found {}", other.ty().name()))),
 	}
 }
 
@@ -539,18 +540,18 @@ fn place_cell(
 	let rowspan	= int_of(&res!(schema::resolve(styles, &elem, fid::ROWSPAN))).unwrap_or(1).max(1) as usize;
 	for v in [fx, fy].into_iter().flatten() {
 		if v < 0 {
-			return Err(engine.error(span, "number must be at least zero"));
+			return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 		}
 	}
 	let index = match (fx, fy) {
 		(Some(x), Some(y)) => {
 			let (x, y) = (x as usize, y as usize);
 			if x >= c {
-				return Err(engine.error(span, fmt!("cell could not be placed at invalid column {}", x)));
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!("cell could not be placed at invalid column {}", x)));
 			}
 			let i = y * c + x;
 			if !is_free(occ, i) {
-				return Err(engine.error_hint(span,
+				return Err(engine.error_hint(DiagnosticKind::Type, span,
 					fmt!("attempted to place a second cell at column {}, row {}", x, y),
 					"try specifying your cells in a different order"));
 			}
@@ -559,7 +560,7 @@ fn place_cell(
 		(Some(x), None) => {
 			let x = x as usize;
 			if x >= c {
-				return Err(engine.error(span, fmt!("cell could not be placed at invalid column {}", x)));
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!("cell could not be placed at invalid column {}", x)));
 			}
 			// Within a header or footer the search starts at its first row.
 			let mut y = first;
@@ -572,7 +573,7 @@ fn place_cell(
 			let y = y as usize;
 			match (0..c).find(|x| is_free(occ, y * c + x)) {
 				Some(x)	=> y * c + x,
-				None	=> return Err(engine.error_hint(span,
+				None	=> return Err(engine.error_hint(DiagnosticKind::Type, span,
 					fmt!("cell could not be placed in row {} because it was full", y),
 					"try specifying your cells in a different order")),
 			}
@@ -587,7 +588,7 @@ fn place_cell(
 	};
 	let (x, y) = (index % c, index / c);
 	if colspan > c - x {
-		return Err(engine.error_hint(span,
+		return Err(engine.error_hint(DiagnosticKind::Type, span,
 			"cell's colspan would cause it to exceed the available column(s)",
 			"try placing the cell in another position or reducing its colspan"));
 	}
@@ -596,7 +597,7 @@ fn place_cell(
 		for dx in 0..colspan {
 			let j = (y + dy) * c + x + dx;
 			if let Some(Some(_)) = occ.get(j) {
-				return Err(engine.error_hint(span,
+				return Err(engine.error_hint(DiagnosticKind::Type, span,
 					fmt!("cell would span a previously placed cell at column {}, row {}", x + dx, y + dy),
 					"try specifying your cells in a different order or reducing the cell's rowspan or colspan"));
 			}
@@ -642,7 +643,7 @@ fn pending_line(
 	let span = elem.span();
 	let at = match res!(schema::resolve(styles, elem, fid::LINE_AT)) {
 		Value::Int(i) if i >= 0 => i as usize,
-		Value::Int(_) => return Err(engine.error(span, "number must be at least zero")),
+		Value::Int(_) => return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero")),
 		// After the latest automatically positioned cell: below its row, or right of it.
 		_ if vertical	=> if auto == 0 { 0 } else { (auto - 1) % c + 1 },
 		_				=> auto.div_ceil(c),
@@ -690,7 +691,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 				for v in a.iter() {
 					match Sizing::from_value(v) {
 						Some(s)	=> out.push(s),
-						None	=> return Err(engine.error(span, fmt!(
+						None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 							"expected auto, relative length, or fraction, found {}", v.ty().name()))),
 					}
 				}
@@ -780,7 +781,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	for s in &sections {
 		if let Part::Footer { .. } = s.part {
 			if s.end != n_rows {
-				return Err(engine.error(span, "footer must end at the last row"));
+				return Err(engine.error(DiagnosticKind::Type, span, "footer must end at the last row"));
 			}
 		}
 	}
@@ -935,7 +936,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 		let (limit, other) = if l.vertical { (c, n_rows) } else { (n_rows, c) };
 		if l.at > limit {
 			let what = if l.vertical { "vertical line at invalid column" } else { "horizontal line at invalid row" };
-			return Err(engine.error(l.span, fmt!("cannot place {} {}", what, l.at)));
+			return Err(engine.error(DiagnosticKind::Type, l.span, fmt!("cannot place {} {}", what, l.at)));
 		}
 		let end = l.end.unwrap_or(other).min(other);
 		if l.start >= end {
@@ -1431,14 +1432,14 @@ fn rgba(engine: &mut Engine, span: Span, p: &Paint) -> Outcome<Rgba> {
 		Paint::Color(c)		=> c.to_rgba(),
 		Paint::Gradient(g)	=> {
 			// `DrawOp` carries a flat colour only; the first stop stands in, and the loss is said.
-			engine.warn(span, "gradients in grid fills and strokes are drawn in their first colour");
+			engine.warn(DiagnosticKind::Unsupported, span, "gradients in grid fills and strokes are drawn in their first colour");
 			match g.stops.first() {
 				Some((c, _))	=> c.to_rgba(),
 				None			=> Ok(Rgba::BLACK),
 			}
 		}
 		Paint::Tiling(_)	=> {
-			engine.warn(span, "tilings in grid fills and strokes are not drawn yet");
+			engine.warn(DiagnosticKind::Unsupported, span, "tilings in grid fills and strokes are not drawn yet");
 			Ok(Rgba::TRANSPARENT)
 		}
 	}
@@ -1497,7 +1498,7 @@ fn group_box(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan, g: &Group) -
 	let mut ops = Vec::new();
 	for s in &g.lines {
 		if s.pen.dash.is_some() {
-			engine.warn(span, "dashed grid lines are drawn solid");
+			engine.warn(DiagnosticKind::Unsupported, span, "dashed grid lines are drawn solid");
 		}
 		let c = res!(rgba(engine, span, &s.pen.paint));
 		let mut s2 = s.clone();

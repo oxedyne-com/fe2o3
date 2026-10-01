@@ -10,6 +10,7 @@
 // the group element, an end after it). This file also answers for the `Realise` family: `tag`,
 // `sequence` and `styled`, the kinds of what realisation makes and of plain content.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	self,
@@ -121,14 +122,14 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 			let items = res!(args.expect::<Value>("children"));
 			let items = match items {
 				Value::Array(a)	=> a,
-				other			=> return Err(engine.error(span, fmt!(
+				other			=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"expected array, found {}", other.ty().long_name()))),
 			};
 			let mut children = Vec::with_capacity(items.len());
 			for v in items.iter() {
 				match v {
 					Value::Content(c)	=> children.push(c.clone()),
-					other				=> return Err(engine.error(span, fmt!(
+					other				=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"expected content, found {}", other.ty().long_name()))),
 				}
 			}
@@ -140,11 +141,11 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 			let child = res!(content::display(engine, child, span));
 			match styles {
 				Value::Styles(s)	=> child.styled(s),
-				other				=> return Err(engine.error(span, fmt!(
+				other				=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"expected styles, found {}", other.ty().long_name()))),
 			}
 		}
-		_ => return Err(engine.error(span, fmt!("`{}` is made by realisation, not called", kind.path()))),
+		_ => return Err(engine.error(DiagnosticKind::Type, span, fmt!("`{}` is made by realisation, not called", kind.path()))),
 	};
 	res!(std::mem::take(args).finish());
 	Ok(Some(built))
@@ -572,7 +573,7 @@ impl State<'_> {
 	fn visit_output(&mut self, target: &Content, output: &Content, map: &Styles, styles: &StyleChain) -> Outcome<()> {
 		self.depth += 1;
 		if self.depth > MAX_SHOW_RULE_DEPTH {
-			return Err(error_hints(self.engine, target.span(), "maximum show rule depth exceeded", &[
+			return Err(error_hints(self.engine, DiagnosticKind::Limit, target.span(), "maximum show rule depth exceeded", &[
 				"maybe a show rule matches its own output",
 				"maybe there are too deeply nested elements",
 			]));
@@ -648,10 +649,10 @@ impl State<'_> {
 			};
 			match p.elem {
 				ElemKind::Document if self.mode != RealiseMode::Document => {
-					return Err(self.engine.error(p.span, "document set rules are not allowed inside of containers"));
+					return Err(self.engine.error(DiagnosticKind::Type, p.span, "document set rules are not allowed inside of containers"));
 				}
 				ElemKind::Page if self.mode != RealiseMode::Document => {
-					return Err(self.engine.error(p.span, "page configuration is not allowed inside of containers"));
+					return Err(self.engine.error(DiagnosticKind::Type, p.span, "page configuration is not allowed inside of containers"));
 				}
 				ElemKind::Page => {
 					// Page styles break free of the show-rule cage.
@@ -712,7 +713,7 @@ impl State<'_> {
 			res!(self.finish_innermost_grouping());
 			i += 1;
 			if i > MAX_GROUPING_STEPS {
-				return Err(self.engine.error(content.span(), "maximum grouping depth exceeded"));
+				return Err(self.engine.error(DiagnosticKind::Limit, content.span(), "maximum grouping depth exceeded"));
 			}
 		}
 		if let Some(rule) = matching {
@@ -757,7 +758,7 @@ impl State<'_> {
 			res!(self.finish_innermost_grouping());
 			i += 1;
 			if i > MAX_GROUPING_STEPS {
-				return Err(self.engine.error(Span::detached(), "maximum grouping depth exceeded"));
+				return Err(self.engine.error(DiagnosticKind::Limit, Span::detached(), "maximum grouping depth exceeded"));
 			}
 		}
 		Ok(())
@@ -774,7 +775,7 @@ impl State<'_> {
 			res!(self.finish_innermost_grouping());
 			i += 1;
 			if i > MAX_GROUPING_STEPS {
-				return Err(self.engine.error(Span::detached(), "maximum grouping depth exceeded"));
+				return Err(self.engine.error(DiagnosticKind::Limit, Span::detached(), "maximum grouping depth exceeded"));
 			}
 		}
 		if inline || matches!(self.mode, RealiseMode::Inline | RealiseMode::Math) {

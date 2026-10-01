@@ -4,6 +4,7 @@
 // footnote's own location's variant one ([`entry_location`]), as Typst's `loc.variant(1)`, so page
 // layout records the entry's position under that location.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -128,16 +129,16 @@ fn declaration(engine: &mut Engine, note: &Content, depth: usize) -> Outcome<Loc
 			let l = l.clone();
 			let target = res!(lookup::label(engine, &l, span));
 			if !target.is(ElemKind::Footnote) {
-				return Err(engine.error(span, "referenced element should be a footnote"));
+				return Err(engine.error(DiagnosticKind::Type, span, "referenced element should be a footnote"));
 			}
 			if target.location() == note.location() || depth > 64 {
-				return Err(engine.error(span, "footnote cannot reference itself"));
+				return Err(engine.error(DiagnosticKind::Type, span, "footnote cannot reference itself"));
 			}
 			declaration(engine, &target, depth + 1)
 		}
 		_ => match note.location() {
 			Some(l)	=> Ok(l),
-			None	=> Err(engine.error(span, "footnote must have a location")),
+			None	=> Err(engine.error(DiagnosticKind::Type, span, "footnote must have a location")),
 		},
 	}
 }
@@ -155,11 +156,11 @@ pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		Some(ElemKind::FootnoteEntry) => {
 			let note = match elem.field("note") {
 				Some(Value::Content(c))	=> c.clone(),
-				_						=> return Err(engine.error(span, "missing argument: note")),
+				_						=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: note")),
 			};
 			let dest = match note.location() {
 				Some(l)	=> l,
-				None	=> return Err(engine.error_hint(span, "footnote entry must have a location",
+				None	=> return Err(engine.error_hint(DiagnosticKind::Type, span, "footnote entry must have a location",
 					"try using a query or a show rule to customize the footnote instead")),
 			};
 			let numbering = note.field("numbering").cloned().unwrap_or_else(|| Value::str("1"));

@@ -7,6 +7,7 @@
 // and the unbound methods (`str.len`), and `field(value, name)` answers `1pt.abs`, `(50% + 1pt).ratio`,
 // `(left + top).x`, `stroke.paint` and `version.major`. `method(ty, name)` is the one method table.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -237,7 +238,7 @@ fn method_types(f: FoundFn) -> &'static [Type] {
 
 /// "type integer has no method `is-nan`": a method reached through a name another type owns.
 pub fn no_method(engine: &mut Engine, span: Span, ty: Type, name: &str) -> Error<ErrTag> {
-	engine.error(span, fmt!("type {} has no method `{}`", ty.long_name(), name))
+	engine.error(DiagnosticKind::Type, span, fmt!("type {} has no method `{}`", ty.long_name(), name))
 }
 
 /// `ty.name`: a type's static members (`float.inf`, `str.from-unicode`, `color.hsl`, `datetime.today`),
@@ -368,13 +369,13 @@ pub fn receiver(args: &mut Args) -> Outcome<Value> {
 pub fn need(engine: &mut Engine, args: &mut Args, what: &str) -> Outcome<Value> {
 	match res!(args.eat::<Value>()) {
 		Some(v)	=> Ok(v),
-		None	=> Err(engine.error(args.span, fmt!("missing argument: {}", what))),
+		None	=> Err(engine.error(DiagnosticKind::Type, args.span, fmt!("missing argument: {}", what))),
 	}
 }
 
 /// "expected X, found Y", as a spanned diagnostic.
 pub fn mismatch(engine: &mut Engine, span: Span, expected: &str, found: &Value) -> Error<ErrTag> {
-	engine.error(span, fmt!("expected {}, found {}", expected, type_desc(found.ty())))
+	engine.error(DiagnosticKind::Type, span, fmt!("expected {}, found {}", expected, type_desc(found.ty())))
 }
 
 /// A type as Typst names it in "expected ..., found ..." messages.
@@ -391,7 +392,7 @@ pub fn finish(engine: &mut Engine, args: Args) -> Outcome<()> {
 				None	=> "unexpected argument".to_string(),
 			};
 			let s = if a.span.is_detached() { span } else { a.span };
-			Err(engine.error(s, msg))
+			Err(engine.error(DiagnosticKind::Type, s, msg))
 		}
 	}
 }
@@ -489,7 +490,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				}).collect();
 				msg.push_str(&parts.join(", "));
 			}
-			return Err(engine.error(span, msg));
+			return Err(engine.error(DiagnosticKind::Type, span, msg));
 		}
 		FoundFn::Eval => {
 			let text = res!(need(engine, &mut args, "source"));
@@ -500,7 +501,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					"code"		=> EvalMode::Code,
 					"markup"	=> EvalMode::Markup,
 					"math"		=> EvalMode::Math,
-					_			=> return Err(engine.error(span,
+					_			=> return Err(engine.error(DiagnosticKind::Type, span,
 						"expected \"markup\", \"math\", or \"code\"")),
 				},
 				Some(other) => return Err(mismatch(engine, span, "string", &other)),
@@ -531,13 +532,13 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			res!(finish(engine, args));
 			res!(to_str(engine, span, v, base))
 		}
-		FoundFn::Bool => return Err(engine.error(span, "type boolean does not have a constructor")),
+		FoundFn::Bool => return Err(engine.error(DiagnosticKind::Type, span, "type boolean does not have a constructor")),
 		FoundFn::Label => {
 			let v = res!(need(engine, &mut args, "name"));
 			res!(finish(engine, args));
 			let s = res!(str_of(engine, span, v));
 			if s.is_empty() {
-				return Err(engine.error(span, "label name must not be empty"));
+				return Err(engine.error(DiagnosticKind::Type, span, "label name must not be empty"));
 			}
 			Value::Label(Label::new(&s))
 		}
@@ -551,7 +552,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Err(e)	=> {
 					let m = e.msgs().last().cloned().unwrap_or_default();
 					let m = m.strip_prefix("regex: ").unwrap_or(&m).trim_end_matches('.').to_string();
-					return Err(engine.error(span, fmt!("regex parse error:\n    {}\nerror: {}", s, m)));
+					return Err(engine.error(DiagnosticKind::Type, span, fmt!("regex parse error:\n    {}\nerror: {}", s, m)));
 				}
 			}
 		}
@@ -575,7 +576,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					for x in a.iter() {
 						match x {
 							Value::Int(i) if (0..=255).contains(i) => out.push(*i as u8),
-							Value::Int(_) => return Err(engine.error(span, "number must be between 0 and 255")),
+							Value::Int(_) => return Err(engine.error(DiagnosticKind::Type, span, "number must be between 0 and 255")),
 							other => return Err(mismatch(engine, span, "integer", other)),
 						}
 					}
@@ -589,7 +590,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			a.span = span;
 			Value::Args(Arc::new(a))
 		}
-		FoundFn::Plugin => return Err(engine.error_hint(span,
+		FoundFn::Plugin => return Err(engine.error_hint(DiagnosticKind::Unsupported, span,
 			"wasm plugins are not supported by Austenite",
 			"a package that needs a plugin cannot be compiled here")),
 		FoundFn::Decimal => {
@@ -601,12 +602,12 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Value::Bool(b)		=> Value::Decimal(Decimal::from(b as i64)),
 				Value::Float(f)		=> match Decimal::from_f64(f) {
 					Some(d)	=> Value::Decimal(d),
-					None	=> return Err(engine.error(span, fmt!("float is not a valid decimal: {}",
+					None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("float is not a valid decimal: {}",
 						format_float(f, None, true, "")))),
 				},
 				Value::Str(s)		=> match Decimal::parse(&s.replace(MINUS, "-")) {
 					Some(d)	=> Value::Decimal(d),
-					None	=> return Err(engine.error(span, fmt!("invalid decimal: {}", s))),
+					None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("invalid decimal: {}", s))),
 				},
 				other => return Err(mismatch(engine, span, "decimal, integer, boolean, float, or string", &other)),
 			}
@@ -614,7 +615,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		FoundFn::Target => {
 			res!(finish(engine, args));
 			if engine.context.styles.is_none() && engine.context.location.is_none() {
-				return Err(engine.error_hint(span, "can only be used when context is known",
+				return Err(engine.error_hint(DiagnosticKind::Type, span, "can only be used when context is known",
 					"try wrapping this in a `context` expression"));
 			}
 			Value::str("paged")
@@ -631,7 +632,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let n = parts.len() as i64;
 			let idx = if i < 0 { n + i } else { i };
 			if idx < 0 {
-				return Err(engine.error(span, fmt!("component index out of bounds (index: {}, len: {})", i, n)));
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!("component index out of bounds (index: {}, len: {})", i, n)));
 			}
 			Value::Int(parts.get(idx as usize).copied().unwrap_or(0) as i64)
 		}
@@ -650,7 +651,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Some(k)	=> Value::Int(b[k] as i64),
 				None	=> match default {
 					Some(d)	=> d,
-					None	=> return Err(engine.error(span, fmt!(
+					None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"byte index out of bounds (index: {}, len: {}) and no default value was specified",
 						i, b.len()))),
 				},
@@ -689,11 +690,11 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let n = res!(int_of(engine, span, n));
 			res!(finish(engine, args));
 			if n < 0 {
-				return Err(engine.error(span, "number must be at least zero"));
+				return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 			}
 			match i.checked_shl(n as u32) {
 				Some(r) if n < 64	=> Value::Int(r),
-				_					=> return Err(engine.error(span, "the result is too large")),
+				_					=> return Err(engine.error(DiagnosticKind::Type, span, "the result is too large")),
 			}
 		}
 		FoundFn::IntBitRshift => {
@@ -703,7 +704,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let logical = res!(named_bool(engine, &mut args, "logical", false));
 			res!(finish(engine, args));
 			if n < 0 {
-				return Err(engine.error(span, "number must be at least zero"));
+				return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 			}
 			if logical {
 				if n >= 64 { Value::Int(0) } else { Value::Int(((i as u64) >> n) as i64) }
@@ -722,7 +723,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			};
 			res!(finish(engine, args));
 			if size < 0 {
-				return Err(engine.error(span, "number must be at least zero"));
+				return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 			}
 			let size = size as usize;
 			let le = i.to_le_bytes();
@@ -743,7 +744,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let signed = res!(named_bool(engine, &mut args, "signed", true));
 			res!(finish(engine, args));
 			if b.len() > 8 {
-				return Err(engine.error(span, "too many bytes to convert to a 64 bit number"));
+				return Err(engine.error(DiagnosticKind::Type, span, "too many bytes to convert to a 64 bit number"));
 			}
 			let mut le: Vec<u8> = b.to_vec();
 			if big {
@@ -782,7 +783,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let mut out = match size {
 				8	=> x.to_le_bytes().to_vec(),
 				4	=> (x as f32).to_le_bytes().to_vec(),
-				_	=> return Err(engine.error(span, "size must be either 4 or 8")),
+				_	=> return Err(engine.error(DiagnosticKind::Type, span, "size must be either 4 or 8")),
 			};
 			if big {
 				out.reverse();
@@ -812,7 +813,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					a.copy_from_slice(&le);
 					Value::Float(f32::from_le_bytes(a) as f64)
 				}
-				_ => return Err(engine.error(span, "bytes must have a length of 4 or 8")),
+				_ => return Err(engine.error(DiagnosticKind::Type, span, "bytes must have a length of 4 or 8")),
 			}
 		}
 	};
@@ -821,16 +822,16 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 
 fn assert_fail(engine: &mut Engine, span: Span, msg: Option<Value>, dflt: String) -> Error<ErrTag> {
 	match msg {
-		Some(Value::Str(s))	=> engine.error(span, fmt!("assertion failed: {}", s)),
-		_					=> engine.error(span, dflt),
+		Some(Value::Str(s))	=> engine.error(DiagnosticKind::Type, span, fmt!("assertion failed: {}", s)),
+		_					=> engine.error(DiagnosticKind::Type, span, dflt),
 	}
 }
 
 fn version_part(engine: &mut Engine, span: Span, v: Value, out: &mut Vec<u32>) -> Outcome<()> {
 	match v {
 		Value::Int(i) if i >= 0 && i <= u32::MAX as i64	=> out.push(i as u32),
-		Value::Int(i) if i < 0	=> return Err(engine.error(span, "number must be at least zero")),
-		Value::Int(_)			=> return Err(engine.error(span, "number too large")),
+		Value::Int(i) if i < 0	=> return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero")),
+		Value::Int(_)			=> return Err(engine.error(DiagnosticKind::Type, span, "number too large")),
 		Value::Array(a)			=> for x in a.iter() {
 			res!(version_part(engine, span, x.clone(), out));
 		},
@@ -846,7 +847,7 @@ fn endian(engine: &mut Engine, args: &mut Args) -> Outcome<bool> {
 		Some(Value::Str(s)) => match s.as_str() {
 			"big"		=> Ok(true),
 			"little"	=> Ok(false),
-			_			=> Err(engine.error(args.span, "expected \"big\" or \"little\"")),
+			_			=> Err(engine.error(DiagnosticKind::Type, args.span, "expected \"big\" or \"little\"")),
 		},
 		Some(other) => Err(mismatch(engine, args.span, "string", &other)),
 	}
@@ -896,7 +897,7 @@ pub fn locate_bound<B: Fn(usize) -> bool>(
 	let resolved = wrapped.filter(|v| *v >= 0 && *v as usize <= len).map(|v| v as usize);
 	if let Some(k) = resolved {
 		if !boundary(k) {
-			return Err(engine.error(span, fmt!("string index {} is not a character boundary", i)));
+			return Err(engine.error(DiagnosticKind::Type, span, fmt!("string index {} is not a character boundary", i)));
 		}
 	}
 	Ok(resolved)
@@ -930,11 +931,11 @@ pub fn slice_bounds<B: Fn(usize) -> bool>(
 	let end = end.or(count.map(|c| start.saturating_add(c))).unwrap_or(len as i64);
 	let s = match res!(locate_bound(engine, span, start, len, &boundary)) {
 		Some(k)	=> k,
-		None	=> return Err(engine.error(span, fmt!("{} index out of bounds (index: {}, len: {})", what, start, len))),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("{} index out of bounds (index: {}, len: {})", what, start, len))),
 	};
 	let e = match res!(locate_bound(engine, span, end, len, &boundary)) {
 		Some(k)	=> k.max(s),
-		None	=> return Err(engine.error(span, fmt!("{} index out of bounds (index: {}, len: {})", what, end, len))),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!("{} index out of bounds (index: {}, len: {})", what, end, len))),
 	};
 	Ok((s, e))
 }
@@ -953,7 +954,7 @@ fn range(engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	};
 	res!(finish(engine, args));
 	if step == 0 {
-		return Err(engine.error(span, "number must not be zero"));
+		return Err(engine.error(DiagnosticKind::Type, span, "number must not be zero"));
 	}
 	let mut out = Vec::new();
 	let mut x = start;
@@ -976,12 +977,12 @@ fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 		Value::Bool(b)	=> Ok(Value::Int(b as i64)),
 		Value::Decimal(d)	=> match d.to_i64() {
 			Some(i)	=> Ok(Value::Int(i)),
-			None	=> Err(engine.error(span, "number too large")),
+			None	=> Err(engine.error(DiagnosticKind::Type, span, "number too large")),
 		},
 		Value::Float(f)	=> {
 			let t = f.trunc();
 			if t.is_nan() || t < -9.223372036854776e18 || t >= 9.223372036854776e18 {
-				return Err(engine.error(span, "number too large"));
+				return Err(engine.error(DiagnosticKind::Type, span, "number too large"));
 			}
 			Ok(Value::Int(t as i64))
 		}
@@ -992,7 +993,7 @@ fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 				None	=> (false, t.strip_prefix('+').unwrap_or(&t)),
 			};
 			if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-				return Err(engine.error(span, "string contains invalid digits"));
+				return Err(engine.error(DiagnosticKind::Type, span, "string contains invalid digits"));
 			}
 			let mut acc: i64 = 0;
 			for b in digits.bytes() {
@@ -1002,7 +1003,7 @@ fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 					Some(n)	=> n,
 					None	=> {
 						let msg = if neg { "integer value is too small" } else { "integer value is too large" };
-						return Err(engine.error_hint(span, msg,
+						return Err(engine.error_hint(DiagnosticKind::Type, span, msg,
 							"value does not fit into a signed 64-bit integer"));
 					}
 				};
@@ -1024,7 +1025,7 @@ fn to_float(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 			let t = s.replace('\u{2212}', "-");
 			match parse_float(&t) {
 				Some(f)	=> Ok(Value::Float(f)),
-				None	=> Err(engine.error(span, fmt!("invalid float: {}", s))),
+				None	=> Err(engine.error(DiagnosticKind::Type, span, fmt!("invalid float: {}", s))),
 			}
 		}
 		other => Err(mismatch(engine, span, "integer, boolean, float, decimal, ratio, or string", &other)),
@@ -1053,12 +1054,12 @@ fn to_str(engine: &mut Engine, span: Span, v: Value, base: Option<Value>) -> Out
 		match v {
 			Value::Int(i) => {
 				if !(2..=36).contains(&b) {
-					return Err(engine.error(span, "base must be between 2 and 36"));
+					return Err(engine.error(DiagnosticKind::Type, span, "base must be between 2 and 36"));
 				}
 				return Ok(Value::str(format_int_with_base(i, b)));
 			}
 			_ => if b != 10 {
-				return Err(engine.error(span, "base is only supported for integers"));
+				return Err(engine.error(DiagnosticKind::Type, span, "base is only supported for integers"));
 			},
 		}
 	}
@@ -1073,7 +1074,7 @@ fn to_str(engine: &mut Engine, span: Span, v: Value, base: Option<Value>) -> Out
 		Value::Symbol(s)	=> sym::text(&s).to_string(),
 		Value::Bytes(b)		=> match String::from_utf8(b.to_vec()) {
 			Ok(s)	=> s,
-			Err(_)	=> return Err(engine.error(span, "bytes are not valid UTF-8")),
+			Err(_)	=> return Err(engine.error(DiagnosticKind::Type, span, "bytes are not valid UTF-8")),
 		},
 		other => return Err(mismatch(engine, span,
 			"integer, float, decimal, version, bytes, label, type, or string", &other)),

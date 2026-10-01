@@ -4,6 +4,7 @@
 // alphabets for Latin, kana and Hangul, greedy additive tables for Roman, Greek and Hebrew, positional
 // digit sets, circled forms, and Chinese with ten-thousand grouping.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::{
 	Func,
@@ -38,7 +39,7 @@ pub fn call(_f: NumberingFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 	for v in rest {
 		match v {
 			Value::Int(i) if i >= 0	=> nums.push(i as u64),
-			Value::Int(_)			=> return Err(engine.error(span, "number must be at least zero")),
+			Value::Int(_)			=> return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero")),
 			other					=> return Err(mismatch(engine, span, "integer", &other)),
 		}
 	}
@@ -66,12 +67,12 @@ pub fn apply_kth(engine: &mut Engine, numbering: &Value, k: usize, n: u64) -> Ou
 		Value::Str(s) => {
 			let pat = match Pattern::parse(s) {
 				Some(p)	=> p,
-				None	=> return Err(engine.error(span, "invalid numbering pattern")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "invalid numbering pattern")),
 			};
 			let kind = pat.kind_at(k);
 			if n == 0 {
 				if let Some(name) = kind.zeroless_name() {
-					engine.warn(span, fmt!("the numeral system `{}` cannot represent zero", name));
+					engine.warn(DiagnosticKind::Internal, span, fmt!("the numeral system `{}` cannot represent zero", name));
 				}
 			}
 			Ok(Value::str(pat.apply_kth(k, n)))
@@ -89,14 +90,14 @@ fn apply_with(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64], 
 		Value::Str(s) => {
 			let mut pat = match Pattern::parse(s) {
 				Some(p)	=> p,
-				None	=> return Err(engine.error(span, "invalid numbering pattern")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "invalid numbering pattern")),
 			};
 			pat.trimmed = trimmed;
 			for (i, n) in nums.iter().enumerate() {
 				if *n == 0 {
 					let kind = pat.kind_at(i);
 					if let Some(name) = kind.zeroless_name() {
-						engine.warn(span, fmt!("the numeral system `{}` cannot represent zero", name));
+						engine.warn(DiagnosticKind::Internal, span, fmt!("the numeral system `{}` cannot represent zero", name));
 					}
 				}
 			}

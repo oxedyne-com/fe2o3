@@ -5,6 +5,7 @@
 // is not a field but the fallback for both `column-gutter` and `row-gutter`, and a child that is not a
 // cell, header, footer or line is wrapped in the family's own cell -- so `it.children` reads as Typst's.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -225,14 +226,14 @@ fn track_sizings(engine: &mut Engine, span: Span, name: &str, v: Value) -> Outco
 		Value::Array(a) => {
 			for item in a.iter() {
 				if !one(item) {
-					return Err(engine.error(span, fmt!(
+					return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 						"expected auto, relative length, or fraction, found {}", item.ty().name())));
 				}
 			}
 			Ok(Value::Array(a))
 		}
 		v if one(&v)	=> Ok(Value::array(vec![v])),
-		other			=> Err(engine.error(span, fmt!(
+		other			=> Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"{}: expected integer, auto, relative length, fraction, or array of the latter three, found {}",
 			name, other.ty().name()))),
 	}
@@ -272,12 +273,12 @@ fn wrap_child(
 					ElemKind::TableCell	=> ("table", "grid"),
 					_					=> ("grid", "table"),
 				};
-				return Err(engine.error_hint(span,
+				return Err(engine.error_hint(DiagnosticKind::Type, span,
 					fmt!("cannot use `{}.{}` as a {} cell", other, k.name(), what),
 					fmt!("use `{}.{}` instead", what, k.name())));
 			}
 			if in_part && (k == header || k == footer) {
-				return Err(engine.error(span, fmt!("cannot place a {} within another header or footer", k.path())));
+				return Err(engine.error(DiagnosticKind::Type, span, fmt!("cannot place a {} within another header or footer", k.path())));
 			}
 			return Ok(Value::Content(content));
 		}
@@ -341,7 +342,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 				if let Some(v) = res!(args.named::<Value>("level")) {
 					match v {
 						Value::Int(n) if n >= 1	=> fields.push((fid::LEVEL, v)),
-						_ => return Err(engine.error(span, "number must be positive")),
+						_ => return Err(engine.error(DiagnosticKind::Type, span, "number must be positive")),
 					}
 				}
 			}
@@ -360,7 +361,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 			for name in ["colspan", "rowspan"] {
 				if let Some(Value::Int(n)) = args.items.iter().find(|a| a.name.as_deref() == Some(name)).map(|a| &a.value) {
 					if *n < 1 {
-						return Err(engine.error(span, "number must be positive"));
+						return Err(engine.error(DiagnosticKind::Type, span, "number must be positive"));
 					}
 				}
 			}
@@ -416,6 +417,6 @@ pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcom
 fn layout_field(engine: &mut Engine, span: Span, kind: ElemKind, name: &str) -> Outcome<FieldId> {
 	match kind.field_id(name) {
 		Some(id)	=> Ok(id),
-		None		=> Err(engine.error(span, fmt!("{} has no field `{}`, which a grid cell needs", kind.path(), name))),
+		None		=> Err(engine.error(DiagnosticKind::Type, span, fmt!("{} has no field `{}`, which a grid cell needs", kind.path(), name))),
 	}
 }

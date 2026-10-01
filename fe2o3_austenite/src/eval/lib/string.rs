@@ -3,6 +3,7 @@
 // `fe2o3_text::regex`'s iterators once over the whole text, so `^` and `\b` see the true context and a
 // long text is not searched afresh from every match.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::lib::foundations::{
 	finish,
@@ -95,7 +96,7 @@ struct Hit {
 }
 
 fn regex_error(engine: &mut Engine, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
-	engine.error(span, fmt!("regex search failed: {}", e.msgs().last().cloned().unwrap_or_default()))
+	engine.error(DiagnosticKind::Type, span, fmt!("regex search failed: {}", e.msgs().last().cloned().unwrap_or_default()))
 }
 
 fn hit(c: &oxedyne_fe2o3_text::regex::Captures) -> Hit {
@@ -156,11 +157,11 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		let i = res!(int_of(engine, span, v));
 		res!(finish(engine, args));
 		if i < 0 {
-			return Err(engine.error(span, "number must be at least zero"));
+			return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 		}
 		return match u32::try_from(i).ok().and_then(char::from_u32) {
 			Some(c)	=> Ok(Value::str(c.to_string())),
-			None	=> Err(engine.error(span, fmt!("{:#x} is not a valid codepoint", i))),
+			None	=> Err(engine.error(DiagnosticKind::Type, span, fmt!("{:#x} is not a valid codepoint", i))),
 		};
 	}
 	if let StrFn::ToUnicode = f {
@@ -169,7 +170,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		let mut cs = s.chars();
 		return match (cs.next(), cs.next()) {
 			(Some(c), None)	=> Ok(Value::Int(c as i64)),
-			_				=> Err(engine.error(span, "expected exactly one character")),
+			_				=> Err(engine.error(DiagnosticKind::Type, span, "expected exactly one character")),
 		};
 	}
 	let s = res!(text_recv(engine, &mut args));
@@ -182,7 +183,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			match (g, default) {
 				(Some(g), _)		=> Value::str(*g),
 				(None, Some(d))		=> d,
-				(None, None)		=> return Err(engine.error(span, "string is empty")),
+				(None, None)		=> return Err(engine.error(DiagnosticKind::Type, span, "string is empty")),
 			}
 		}
 		StrFn::At => {
@@ -194,7 +195,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			match (g, default) {
 				(Some(g), _)	=> Value::str(g),
 				(None, Some(d))	=> d,
-				(None, None)	=> return Err(engine.error(span, fmt!(
+				(None, None)	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"no default value was specified and string index out of bounds (index: {}, len: {})",
 					i, s.len()))),
 			}
@@ -259,7 +260,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Some(v)	=> {
 					let c = res!(int_of(engine, span, v));
 					if c < 0 {
-						return Err(engine.error(span, "number must be at least zero"));
+						return Err(engine.error(DiagnosticKind::Type, span, "number must be at least zero"));
 					}
 					c as usize
 				}
@@ -304,7 +305,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				None | Some(Value::None) => None,
 				Some(Value::Alignment(Alignment { x: Some(HAlign::Start), y: None })) => Some(true),
 				Some(Value::Alignment(Alignment { x: Some(HAlign::End), y: None })) => Some(false),
-				Some(_) => return Err(engine.error(span, "expected either `start` or `end`")),
+				Some(_) => return Err(engine.error(DiagnosticKind::Type, span, "expected either `start` or `end`")),
 			};
 			let repeat = match res!(args.named::<Value>("repeat")) {
 				None				=> true,
@@ -321,7 +322,7 @@ pub fn call(f: StrFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 					"nfd"	=> norm::Form::Nfd,
 					"nfkc"	=> norm::Form::Nfkc,
 					"nfkd"	=> norm::Form::Nfkd,
-					_		=> return Err(engine.error(span,
+					_		=> return Err(engine.error(DiagnosticKind::Type, span,
 						"expected \"nfc\", \"nfd\", \"nfkc\", or \"nfkd\"")),
 				},
 				Some(other) => return Err(mismatch(engine, span, "string", &other)),

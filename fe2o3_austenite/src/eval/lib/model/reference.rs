@@ -3,6 +3,7 @@
 // The number is displayed with the target's numbering; Typst trims a pattern's prefix and suffix there
 // (`"1."` references as `1`), which waits on a trimmed form of `numbering::apply` (U3).
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -129,7 +130,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 	let span = elem.span();
 	let target = match elem.field("target") {
 		Some(Value::Label(l))	=> l.clone(),
-		_						=> return Err(engine.error(span, "missing argument: target")),
+		_						=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: target")),
 	};
 	let form = res!(common::get(elem, styles, "form"));
 	if matches!(&form, Value::Str(s) if s.as_str() == "page") {
@@ -156,7 +157,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		engine.diags.truncate(before);
 		if let Ok(Some(e)) = found {
 			let name = e.kind().map(|k| k.name()).unwrap_or("content");
-			return Err(engine.error_hint(span,
+			return Err(engine.error_hint(DiagnosticKind::Type, span,
 				fmt!("label `<{}>` occurs both in the document and a bibliography", target.as_str()),
 				fmt!("change either the {}'s label or the bibliography key to resolve the ambiguity", name)));
 		}
@@ -165,7 +166,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 	let found = res!(lookup::label(engine, &target, span));
 	let kind = match found.kind() {
 		Some(k)	=> k,
-		None	=> return Err(engine.error(span, "cannot reference sequence")),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, "cannot reference sequence")),
 	};
 	if kind == ElemKind::Footnote {
 		// A reference to a footnote is the footnote's mark again, pointing at the same note.
@@ -183,14 +184,14 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 	let (counter, default_supplement) = match kind {
 		ElemKind::Heading | ElemKind::Figure	=> (res!(refable_counter(&found)), found.field("supplement").cloned()),
 		ElemKind::Equation						=> (lookup::elem_counter(ElemKind::Equation), found.field("supplement").cloned()),
-		ElemKind::Image | ElemKind::Table | ElemKind::Raw => return Err(engine.error(span, fmt!(
+		ElemKind::Image | ElemKind::Table | ElemKind::Raw => return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 			"cannot reference {} directly, try putting it into a figure", kind.name()))),
-		_ => return Err(engine.error(span, fmt!("cannot reference {}", kind.name()))),
+		_ => return Err(engine.error(DiagnosticKind::Type, span, fmt!("cannot reference {}", kind.name()))),
 	};
 	let numbering = match found.field("numbering") {
 		Some(Value::None) | None => {
 			let set = if kind == ElemKind::Equation { "math.equation" } else { kind.name() };
-			return Err(engine.error_hint(span,
+			return Err(engine.error_hint(DiagnosticKind::Type, span,
 				fmt!("cannot reference {} without numbering", kind.name()),
 				fmt!("you can enable {} numbering with `#set {}(numbering: \"1.\")`", kind.name(), set)));
 		}
@@ -218,7 +219,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 fn located(engine: &mut Engine, e: &Content, span: Span) -> Outcome<crate::eval::locate::Location> {
 	match e.location() {
 		Some(l)	=> Ok(l),
-		None	=> Err(engine.error(span, "cannot reference an element without a location")),
+		None	=> Err(engine.error(DiagnosticKind::Type, span, "cannot reference an element without a location")),
 	}
 }
 

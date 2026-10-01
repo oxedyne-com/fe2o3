@@ -53,7 +53,10 @@ pub mod select;
 pub mod styles;
 pub mod value;
 
-use crate::diag::Diagnostic;
+use crate::diag::{
+	Diagnostic,
+	DiagnosticKind,
+};
 use crate::eval::intro::{
 	Introspector,
 	ReadLog,
@@ -148,6 +151,15 @@ pub struct Engine {
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
 }
 
+/// The kind of an error a native function raised with `err!` and no diagnostic of its own: the kind its
+/// tags give, with an input fault, a bad argument or value, read as a type error.
+pub(crate) fn native_kind(e: &Error<ErrTag>) -> DiagnosticKind {
+	match DiagnosticKind::from_error_tags(e) {
+		DiagnosticKind::Internal if e.tags().contains(&ErrTag::Input)	=> DiagnosticKind::Type,
+		kind															=> kind,
+	}
+}
+
 impl Engine {
 	pub fn new(world: World) -> Self {
 		Self {
@@ -164,29 +176,40 @@ impl Engine {
 	}
 
 	/// Records an error diagnostic at `span` and returns the error to propagate.
-	pub fn error<S: Into<String>>(&mut self, span: Span, message: S) -> Error<ErrTag> {
+	pub fn error<S: Into<String>>(&mut self, kind: DiagnosticKind, span: Span, message: S) -> Error<ErrTag> {
 		let message = message.into();
 		let e = err!("{}", message; Input, Invalid);
-		self.diags.push(Diagnostic::error(span, message));
+		self.diags.push(Diagnostic::error(kind, span, message));
 		e
 	}
 
 	/// As [`error`](Self::error), with a hint line.
-	pub fn error_hint<S: Into<String>, H: Into<String>>(&mut self, span: Span, message: S, hint: H) -> Error<ErrTag> {
+	pub fn error_hint<S: Into<String>, H: Into<String>>(
+		&mut self,
+		kind:		DiagnosticKind,
+		span:		Span,
+		message:	S,
+		hint:		H,
+	)
+		-> Error<ErrTag>
+	{
 		let message = message.into();
 		let e = err!("{}", message; Input, Invalid);
-		self.diags.push(Diagnostic::error(span, message).with_hint(hint));
+		self.diags.push(Diagnostic::error(kind, span, message).with_hint(hint));
 		e
 	}
 
-	pub fn warn<S: Into<String>>(&mut self, span: Span, message: S) {
-		self.diags.push(Diagnostic::warning(span, message));
+	/// Records a warning of `kind`. A warning of a kind that [`refuses_strict`](DiagnosticKind::refuses_strict)
+	/// fails a strict compile, so one for a construct passed over or set otherwise than Typst sets it is
+	/// `Unsupported`.
+	pub fn warn<S: Into<String>>(&mut self, kind: DiagnosticKind, span: Span, message: S) {
+		self.diags.push(Diagnostic::warning(kind, span, message));
 	}
 
 	/// Enters a closure call; past [`MAX_CALL_DEPTH`] it is an error, not a stack overflow.
 	pub fn enter_call(&mut self, span: Span) -> Outcome<()> {
 		if self.depth >= MAX_CALL_DEPTH {
-			return Err(self.error(span, "maximum function call depth exceeded"));
+			return Err(self.error(DiagnosticKind::Limit, span, "maximum function call depth exceeded"));
 		}
 		self.depth += 1;
 		Ok(())
@@ -197,7 +220,7 @@ impl Engine {
 	/// Spends one loop iteration; an exhausted budget is a diagnostic, so a runaway loop terminates.
 	pub fn burn(&mut self, span: Span) -> Outcome<()> {
 		if self.fuel == 0 {
-			return Err(self.error(span, "loop seems to be infinite"));
+			return Err(self.error(DiagnosticKind::Limit, span, "loop seems to be infinite"));
 		}
 		self.fuel -= 1;
 		Ok(())

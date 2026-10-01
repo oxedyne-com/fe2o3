@@ -8,6 +8,7 @@
 // (`cmyk_srgb.bin`) with quadrilinear interpolation, within two eight-bit steps of Typst everywhere the
 // oracle was probed. RGB to CMYK is Typst's naive formula; luma to CMYK its fixed ink ratios.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::{
 	Func,
@@ -518,7 +519,7 @@ fn space_of(engine: &mut Engine, span: Span, v: &Value) -> Outcome<ColorSpace> {
 	};
 	match s {
 		Some(s)	=> Ok(s),
-		None	=> Err(engine.error(span,
+		None	=> Err(engine.error(DiagnosticKind::Type, span,
 			"expected `rgb`, `luma`, `cmyk`, `oklab`, `oklch`, `color.linear-rgb`, `color.hsl`, or `color.hsv`")),
 	}
 }
@@ -529,7 +530,7 @@ fn luma(engine: &mut Engine, span: Span, mut vals: Vec<Value>) -> Outcome<Color>
 	if let Some(i) = vals.iter().position(|v| matches!(v, Value::Color(_))) {
 		let c = vals.remove(i);
 		if !vals.is_empty() {
-			return Err(engine.error(span, "unexpected argument"));
+			return Err(engine.error(DiagnosticKind::Type, span, "unexpected argument"));
 		}
 		if let Value::Color(c) = c {
 			return Ok(to_space(&c, ColorSpace::Luma));
@@ -546,7 +547,7 @@ fn luma(engine: &mut Engine, span: Span, mut vals: Vec<Value>) -> Outcome<Color>
 		Some(v)	=> res!(ratio_only(engine, span, v)),
 	};
 	if it.next().is_some() {
-		return Err(engine.error(span, "unexpected argument"));
+		return Err(engine.error(DiagnosticKind::Type, span, "unexpected argument"));
 	}
 	Ok(Color { space: ColorSpace::Luma, c: [l, 0.0, 0.0, 0.0], alpha: a })
 }
@@ -557,7 +558,7 @@ fn luma(engine: &mut Engine, span: Span, mut vals: Vec<Value>) -> Outcome<Color>
 fn comp(engine: &mut Engine, span: Span, v: Value) -> Outcome<f32> {
 	match v {
 		Value::Int(i) if (0..=255).contains(&i)	=> Ok(i as f32 / 255.0),
-		Value::Int(_)	=> Err(engine.error(span, "number must be between 0 and 255")),
+		Value::Int(_)	=> Err(engine.error(DiagnosticKind::Type, span, "number must be between 0 and 255")),
 		Value::Ratio(r)	=> ratio_comp(engine, span, r),
 		other			=> Err(mismatch(engine, span, "integer or ratio", &other)),
 	}
@@ -567,7 +568,7 @@ fn ratio_comp(engine: &mut Engine, span: Span, r: Ratio) -> Outcome<f32> {
 	if (0.0..=1.0).contains(&r.0) {
 		Ok(r.0 as f32)
 	} else {
-		Err(engine.error(span, "ratio must be between 0% and 100%"))
+		Err(engine.error(DiagnosticKind::Type, span, "ratio must be between 0% and 100%"))
 	}
 }
 
@@ -612,7 +613,7 @@ fn ratio_arg(engine: &mut Engine, span: Span, v: Value) -> Outcome<f32> {
 fn parse_hex(engine: &mut Engine, span: Span, s: &str) -> Outcome<Color> {
 	let h = s.strip_prefix('#').unwrap_or(s);
 	if !h.bytes().all(|b| b.is_ascii_hexdigit()) {
-		return Err(engine.error(span, "color string contains non-hexadecimal letters"));
+		return Err(engine.error(DiagnosticKind::Type, span, "color string contains non-hexadecimal letters"));
 	}
 	let nib = |i: usize| u8::from_str_radix(&h[i..i + 1], 16).map(|x| x * 17).unwrap_or(0);
 	let byte = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0);
@@ -621,7 +622,7 @@ fn parse_hex(engine: &mut Engine, span: Span, s: &str) -> Outcome<Color> {
 		4	=> rgb8(nib(0), nib(1), nib(2), nib(3)),
 		6	=> rgb8(byte(0), byte(2), byte(4), 255),
 		8	=> rgb8(byte(0), byte(2), byte(4), byte(6)),
-		_	=> return Err(engine.error(span, "color string has wrong length")),
+		_	=> return Err(engine.error(DiagnosticKind::Type, span, "color string has wrong length")),
 	};
 	Ok(c)
 }
@@ -662,10 +663,10 @@ fn construct(f: ColorFn, engine: &mut Engine, args: &mut Args) -> Outcome<Color>
 		_				=> (3, &["red", "green", "blue", "alpha"]),
 	};
 	if vals.len() < need_n {
-		return Err(engine.error(span, fmt!("missing argument: {}", names[vals.len()])));
+		return Err(engine.error(DiagnosticKind::Type, span, fmt!("missing argument: {}", names[vals.len()])));
 	}
 	if vals.len() > names.len() {
-		return Err(engine.error(span, "unexpected argument"));
+		return Err(engine.error(DiagnosticKind::Type, span, "unexpected argument"));
 	}
 	let mut it = vals.into_iter();
 	let mut next = || it.next().unwrap_or(Value::None);
@@ -889,18 +890,18 @@ fn stops_of(engine: &mut Engine, span: Span, vals: Vec<Value>, conic: bool) -> O
 		}
 	}
 	if raw.len() < 2 {
-		return Err(engine.error_hint(span, "a gradient must have at least two stops",
+		return Err(engine.error_hint(DiagnosticKind::Type, span, "a gradient must have at least two stops",
 			"try filling the shape with a single color instead"));
 	}
 	if raw.iter().any(|(_, o)| o.is_some()) {
 		let mut last = f64::NEG_INFINITY;
 		for (_, o) in &raw {
 			match o {
-				None => return Err(engine.error_hint(span, "either all stops must have an offset or none of them can",
+				None => return Err(engine.error_hint(DiagnosticKind::Type, span, "either all stops must have an offset or none of them can",
 					"try adding an offset to all stops")),
 				Some(r) => {
 					if r.0 < last {
-						return Err(engine.error(span, "offsets must be in monotonic order"));
+						return Err(engine.error(DiagnosticKind::Type, span, "offsets must be in monotonic order"));
 					}
 					last = r.0;
 				}
@@ -909,14 +910,14 @@ fn stops_of(engine: &mut Engine, span: Span, vals: Vec<Value>, conic: bool) -> O
 		let out: Vec<(Color, Ratio)> = raw.into_iter().map(|(c, o)| (c, o.unwrap_or(Ratio(0.0)))).collect();
 		for (_, o) in &out {
 			if o.0 < 0.0 || o.0 > 1.0 {
-				return Err(engine.error(span, "offset must be between 0 and 1"));
+				return Err(engine.error(DiagnosticKind::Type, span, "offset must be between 0 and 1"));
 			}
 		}
 		if out.first().map(|s| (s.1).0 != 0.0).unwrap_or(false) {
-			return Err(engine.error_hint(span, "first stop must have an offset of 0", "try setting this stop to `0%`"));
+			return Err(engine.error_hint(DiagnosticKind::Type, span, "first stop must have an offset of 0", "try setting this stop to `0%`"));
 		}
 		if out.last().map(|s| (s.1).0 != 1.0).unwrap_or(false) {
-			return Err(engine.error_hint(span, "last stop must have an offset of 100%", "try setting this stop to `100%`"));
+			return Err(engine.error_hint(DiagnosticKind::Type, span, "last stop must have an offset of 100%", "try setting this stop to `100%`"));
 		}
 		return Ok(out);
 	}
@@ -930,7 +931,7 @@ fn relative_of(engine: &mut Engine, span: Span, v: Option<Value>) -> Outcome<Rel
 		Some(Value::Str(s)) => match s.as_str() {
 			"self"		=> Ok(RelativeTo::SelfBox),
 			"parent"	=> Ok(RelativeTo::Parent),
-			_			=> Err(engine.error(span, "expected \"self\" or \"parent\"")),
+			_			=> Err(engine.error(DiagnosticKind::Type, span, "expected \"self\" or \"parent\"")),
 		},
 		Some(other) => Err(mismatch(engine, span, "auto or string", &other)),
 	}
@@ -940,7 +941,7 @@ fn pair_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<(Ratio, Ratio)>
 	match v {
 		Value::Array(a) if a.len() == 2 => match (&a[0], &a[1]) {
 			(Value::Ratio(x), Value::Ratio(y))	=> Ok((*x, *y)),
-			_									=> Err(engine.error(span, "expected a pair of ratios")),
+			_									=> Err(engine.error(DiagnosticKind::Type, span, "expected a pair of ratios")),
 		},
 		other => Err(mismatch(engine, span, "array", &other)),
 	}
@@ -992,12 +993,12 @@ fn make_gradient(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 				Some(other)			=> return Err(mismatch(engine, span, "ratio", &other)),
 			};
 			if focal_radius.0 > radius.0 {
-				return Err(engine.error_hint(span, "the focal radius must be smaller than the end radius",
+				return Err(engine.error_hint(DiagnosticKind::Type, span, "the focal radius must be smaller than the end radius",
 					"try using a focal radius of `0%` instead"));
 			}
 			let d = (((focal_center.0).0 - (center.0).0).powi(2) + ((focal_center.1).0 - (center.1).0).powi(2)).sqrt();
 			if d + focal_radius.0 > radius.0 {
-				return Err(engine.error_hint(span, "the focal circle must be inside of the end circle",
+				return Err(engine.error_hint(DiagnosticKind::Type, span, "the focal circle must be inside of the end circle",
 					"try using a focal center of `auto` instead"));
 			}
 			GradientKind::Radial { center, radius, focal_center, focal_radius }
@@ -1206,10 +1207,10 @@ fn gradient_call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 				Some(other)			=> return Err(mismatch(engine, span, "ratio", &other)),
 			};
 			if n < 2 {
-				return Err(engine.error(span, "sharp gradients must have at least two stops"));
+				return Err(engine.error(DiagnosticKind::Type, span, "sharp gradients must have at least two stops"));
 			}
 			if !(0.0..=1.0).contains(&smooth) {
-				return Err(engine.error(span, "smoothness must be between 0 and 1"));
+				return Err(engine.error(DiagnosticKind::Type, span, "smoothness must be between 0 and 1"));
 			}
 			let n = n as usize;
 			let colors: Vec<Color> = (0..n).flat_map(|i| {
@@ -1243,7 +1244,7 @@ fn gradient_call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Val
 				Some(other)			=> return Err(mismatch(engine, span, "boolean", &other)),
 			};
 			if n <= 0 {
-				return Err(engine.error(span, "must repeat at least once"));
+				return Err(engine.error(DiagnosticKind::Type, span, "must repeat at least once"));
 			}
 			let n = n as usize;
 			let mut stops = Vec::new();
@@ -1323,7 +1324,7 @@ pub fn call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			}
 			return match mix(&cs, space) {
 				Ok(c)	=> Ok(Value::Color(c)),
-				Err(m)	=> Err(engine.error(span, m)),
+				Err(m)	=> Err(engine.error(DiagnosticKind::Type, span, m)),
 			};
 		}
 		ColorFn::GradientLinear | ColorFn::GradientRadial | ColorFn::GradientConic => {
@@ -1352,7 +1353,7 @@ pub fn call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let x = res!(ratio_arg(engine, span, x));
 			if c.space == ColorSpace::Luma {
 				let verb = if f == ColorFn::Saturate { "saturate" } else { "desaturate" };
-				return Err(engine.error_hint(span, fmt!("cannot {} grayscale color", verb),
+				return Err(engine.error_hint(DiagnosticKind::Type, span, fmt!("cannot {} grayscale color", verb),
 					"try converting your color to RGB first"));
 			}
 			Value::Color(saturate(&c, x, f == ColorFn::Desaturate))
@@ -1373,7 +1374,7 @@ pub fn call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			};
 			let hi = match hue_index(space) {
 				Some(h)	=> h,
-				None	=> return Err(engine.error(span, "this color space does not support hue rotation")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "this color space does not support hue rotation")),
 			};
 			let mut s = to_space(&c, space);
 			s.c[hi] = norm_hue(s.c[hi] + deg);
@@ -1393,7 +1394,7 @@ pub fn call(f: ColorFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let x = res!(need(engine, &mut args, "scale"));
 			let x = res!(ratio_arg(engine, span, x));
 			if c.space == ColorSpace::Cmyk {
-				return Err(engine.error(span, "CMYK does not have an alpha component"));
+				return Err(engine.error(DiagnosticKind::Type, span, "CMYK does not have an alpha component"));
 			}
 			let factor = if f == ColorFn::Transparentize { x } else { -x };
 			let mut out = c;

@@ -12,7 +12,10 @@
 // * A closure captures by value the free names it mentions, at definition. Over-capturing a name that
 //   a parameter later shadows is harmless, so the capture pass is a plain identifier scan.
 
-use crate::diag::Diagnostic;
+use crate::diag::{
+	Diagnostic,
+	DiagnosticKind,
+};
 use crate::eval::args::{
 	Arg,
 	Args,
@@ -32,6 +35,7 @@ use crate::eval::import;
 use crate::eval::lib;
 use crate::eval::lib::foundations;
 use crate::eval::methods;
+use crate::eval::native_kind;
 use crate::eval::ops;
 use crate::eval::scope::{
 	Binding,
@@ -167,7 +171,7 @@ fn report_syntax_errors(engine: &mut Engine, root: &SyntaxNode, at: Option<Span>
 			Some(s) if span.is_detached()	=> s,
 			_								=> *span,
 		};
-		let mut d = Diagnostic::error(span, e.message.clone());
+		let mut d = Diagnostic::error(DiagnosticKind::Syntax, span, e.message.clone());
 		for h in &e.hints {
 			d = d.with_hint(h.clone());
 		}
@@ -218,7 +222,7 @@ impl Engine {
 	pub fn adopt(&mut self, mark: usize, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
 		let recorded = self.diags.get(mark..).map(|ds| ds.iter().any(|d| d.is_error())).unwrap_or(false);
 		if !recorded {
-			self.diags.push(Diagnostic::error(span, e.plain()));
+			self.diags.push(Diagnostic::error(native_kind(&e), span, e.plain()));
 		}
 		e
 	}
@@ -580,25 +584,33 @@ impl<'a> Vm<'a> {
 		if span.is_detached() { self.fallback } else { span }
 	}
 
-	fn error<S: Into<String>>(&mut self, span: Span, msg: S) -> Error<ErrTag> {
+	fn error<S: Into<String>>(&mut self, kind: DiagnosticKind, span: Span, msg: S) -> Error<ErrTag> {
 		let span = self.fix(span);
-		self.engine.error(span, msg)
+		self.engine.error(kind, span, msg)
 	}
 
-	fn error_hint<S: Into<String>, H: Into<String>>(&mut self, span: Span, msg: S, hint: H) -> Error<ErrTag> {
+	fn error_hint<S: Into<String>, H: Into<String>>(
+		&mut self,
+		kind:	DiagnosticKind,
+		span:	Span,
+		msg:	S,
+		hint:	H,
+	)
+		-> Error<ErrTag>
+	{
 		let span = self.fix(span);
-		self.engine.error_hint(span, msg, hint)
+		self.engine.error_hint(kind, span, msg, hint)
 	}
 
-	fn warn<S: Into<String>>(&mut self, span: Span, msg: S) {
+	fn warn<S: Into<String>>(&mut self, kind: DiagnosticKind, span: Span, msg: S) {
 		let span = self.fix(span);
-		self.engine.warn(span, msg);
+		self.engine.warn(kind, span, msg);
 	}
 
 	// A library error (an operator, a cast) reported at the expression that caused it.
 	fn fail(&mut self, span: Span, e: Error<ErrTag>) -> Error<ErrTag> {
 		let msg = e.plain();
-		self.error(span, msg)
+		self.error(native_kind(&e), span, msg)
 	}
 
 	fn define(&mut self, name: &str, value: Value, span: Span) {
@@ -659,9 +671,9 @@ impl<'a> Vm<'a> {
 	fn forbid_flow(&mut self) -> Outcome<()> {
 		match self.flow.take() {
 			None						=> Ok(()),
-			Some(Flow::Break(s))		=> Err(self.error(s, "cannot break outside of loop")),
-			Some(Flow::Continue(s))		=> Err(self.error(s, "cannot continue outside of loop")),
-			Some(Flow::Return(s, _, _))	=> Err(self.error(s, "cannot return outside of function")),
+			Some(Flow::Break(s))		=> Err(self.error(DiagnosticKind::Syntax, s, "cannot break outside of loop")),
+			Some(Flow::Continue(s))		=> Err(self.error(DiagnosticKind::Syntax, s, "cannot continue outside of loop")),
+			Some(Flow::Return(s, _, _))	=> Err(self.error(DiagnosticKind::Syntax, s, "cannot return outside of function")),
 		}
 	}
 
@@ -676,7 +688,7 @@ impl<'a> Vm<'a> {
 	fn expect_bool(&mut self, node: &SyntaxNode) -> Outcome<bool> {
 		match res!(self.eval(node)) {
 			Value::Bool(b)	=> Ok(b),
-			other			=> Err(self.error(node.span(), fmt!("expected boolean, found {}", other.ty().long_name()))),
+			other			=> Err(self.error(DiagnosticKind::Type, node.span(), fmt!("expected boolean, found {}", other.ty().long_name()))),
 		}
 	}
 
@@ -731,11 +743,11 @@ impl<'a> Vm<'a> {
 		match seq.iter_mut().rev().find(|c| !ops::unlabellable(c)) {
 			Some(c) => {
 				if c.label().is_some() {
-					self.warn(c.span(), "content labelled multiple times");
+					self.warn(DiagnosticKind::Internal, c.span(), "content labelled multiple times");
 				}
 				*c = std::mem::take(c).labelled(label);
 			}
-			None => self.warn(span, fmt!("label `<{}>` is not attached to anything", label.as_str())),
+			None => self.warn(DiagnosticKind::Internal, span, fmt!("label `<{}>` is not attached to anything", label.as_str())),
 		}
 	}
 
@@ -855,7 +867,7 @@ impl<'a> Vm<'a> {
 			// Literals
 			K::Ident		=> match self.lookup(node.text()) {
 				Some(v)	=> Ok(v.clone()),
-				None	=> Err(self.error(span, fmt!("unknown variable: {}", node.text()))),
+				None	=> Err(self.error(DiagnosticKind::UnknownVariable, span, fmt!("unknown variable: {}", node.text()))),
 			},
 			K::None			=> Ok(Value::None),
 			K::Auto			=> Ok(Value::Auto),
@@ -863,7 +875,7 @@ impl<'a> Vm<'a> {
 			K::Int			=> self.eval_int(node),
 			K::Float		=> match node.text().parse::<f64>() {
 				Ok(f)	=> Ok(Value::Float(f)),
-				Err(_)	=> Err(self.error(span, fmt!("invalid floating point number: {}", node.text()))),
+				Err(_)	=> Err(self.error(DiagnosticKind::Syntax, span, fmt!("invalid floating point number: {}", node.text()))),
 			},
 			K::Numeric		=> self.eval_numeric(node),
 			K::Str			=> Ok(Value::str(unescape_str(node.text()))),
@@ -897,7 +909,7 @@ impl<'a> Vm<'a> {
 			K::FieldAccess	=> {
 				let target = match first_expr(node) {
 					Some(t)	=> t,
-					None	=> return Err(self.error(span, "field access without a target")),
+					None	=> return Err(self.error(DiagnosticKind::Syntax, span, "field access without a target")),
 				};
 				let tv = res!(self.eval(target));
 				let name = ident_text(node).unwrap_or("");
@@ -949,12 +961,12 @@ impl<'a> Vm<'a> {
 						res!(self.destructure(&p, value, Bind::Assign));
 						Ok(Value::None)
 					}
-					_ => Err(self.error(span, "incomplete destructuring assignment")),
+					_ => Err(self.error(DiagnosticKind::Syntax, span, "incomplete destructuring assignment")),
 				}
 			}
-			K::Error		=> Err(self.error(span, node.error_info()
+			K::Error		=> Err(self.error(DiagnosticKind::Syntax, span, node.error_info()
 				.map(|e| e.message.clone()).unwrap_or_else(|| "syntax error".to_string()))),
-			other			=> Err(self.error(span, fmt!("expected expression, found {}", other.name()))),
+			other			=> Err(self.error(DiagnosticKind::Syntax, span, fmt!("expected expression, found {}", other.name()))),
 		}
 	}
 
@@ -973,9 +985,9 @@ impl<'a> Vm<'a> {
 			Ok(i)	=> Ok(Value::Int(i)),
 			Err(_) if radix == 10 => match t.parse::<f64>() {
 				Ok(f)	=> Ok(Value::Float(f)),
-				Err(_)	=> Err(self.error(node.span(), fmt!("invalid integer: {}", t))),
+				Err(_)	=> Err(self.error(DiagnosticKind::Syntax, node.span(), fmt!("invalid integer: {}", t))),
 			},
-			Err(_)	=> Err(self.error(node.span(), "integer number is too large")),
+			Err(_)	=> Err(self.error(DiagnosticKind::Syntax, node.span(), "integer number is too large")),
 		}
 	}
 
@@ -987,7 +999,7 @@ impl<'a> Vm<'a> {
 		let (n, unit) = t.split_at(split);
 		let v = match n.parse::<f64>() {
 			Ok(v)	=> v,
-			Err(_)	=> return Err(self.error(node.span(), fmt!("invalid number: {}", t))),
+			Err(_)	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), fmt!("invalid number: {}", t))),
 		};
 		Ok(match unit {
 			"pt"	=> Value::Length(Length::pt(v)),
@@ -999,7 +1011,7 @@ impl<'a> Vm<'a> {
 			"rad"	=> Value::Angle(Angle(v)),
 			"fr"	=> Value::Fraction(Fraction(v)),
 			"%"		=> Value::Ratio(Ratio(v / 100.0)),
-			other	=> return Err(self.error(node.span(), fmt!("invalid unit: {}", other))),
+			other	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), fmt!("invalid unit: {}", other))),
 		})
 	}
 
@@ -1126,11 +1138,11 @@ impl<'a> Vm<'a> {
 			Some(v)	=> Ok(v),
 			None if name.chars().count() > 1 && name.chars().all(char::is_alphabetic) => {
 				let spaced: Vec<String> = name.chars().map(|c| c.to_string()).collect();
-				Err(self.error_hint(node.span(), fmt!("unknown variable: {}", name), fmt!(
+				Err(self.error_hint(DiagnosticKind::UnknownVariable, node.span(), fmt!("unknown variable: {}", name), fmt!(
 					"if you meant to display multiple letters as is, try adding spaces between each letter: `{}`",
 					spaced.join(" "))))
 			}
-			None	=> Err(self.error(node.span(), fmt!("unknown variable: {}", name))),
+			None	=> Err(self.error(DiagnosticKind::UnknownVariable, node.span(), fmt!("unknown variable: {}", name))),
 		}
 	}
 
@@ -1212,7 +1224,7 @@ impl<'a> Vm<'a> {
 			.filter(|c| is_expr(c.kind()) && c.kind() != SyntaxKind::Space).cloned().collect();
 		let (num, denom) = match (parts.first(), parts.last()) {
 			(Some(n), Some(d)) if parts.len() >= 2	=> (n.clone(), d.clone()),
-			_ => return Err(self.error(node.span(), "incomplete fraction")),
+			_ => return Err(self.error(DiagnosticKind::Syntax, node.span(), "incomplete fraction")),
 		};
 		let num = res!(self.eval_math_operand(&num));
 		let denom = res!(self.eval_math_operand(&denom));
@@ -1257,10 +1269,10 @@ impl<'a> Vm<'a> {
 					match res!(self.eval(&e)) {
 						Value::None			=> (),
 						Value::Array(a)		=> out.extend(a.iter().cloned()),
-						Value::Dict(_)		=> return Err(self.error_hint(c.span(),
+						Value::Dict(_)		=> return Err(self.error_hint(DiagnosticKind::Type, c.span(),
 							"cannot spread dictionary into array",
 							fmt!("add a colon to create a dictionary instead: `(: {},)`", c.full_text().trim()))),
-						other				=> return Err(self.error(c.span(),
+						other				=> return Err(self.error(DiagnosticKind::Type, c.span(),
 							fmt!("cannot spread {} into array", other.ty().long_name()))),
 					}
 				}
@@ -1292,7 +1304,7 @@ impl<'a> Vm<'a> {
 					};
 					let key = match res!(self.eval(&k)) {
 						Value::Str(s)	=> s,
-						other			=> return Err(self.error(k.span(),
+						other			=> return Err(self.error(DiagnosticKind::Type, k.span(),
 							fmt!("expected string, found {}", other.ty().long_name()))),
 					};
 					let v = res!(self.eval(&e));
@@ -1308,7 +1320,7 @@ impl<'a> Vm<'a> {
 						Value::Dict(x)	=> for (k, v) in x.iter() {
 							d.insert(k, v.clone());
 						},
-						other			=> return Err(self.error(c.span(),
+						other			=> return Err(self.error(DiagnosticKind::Type, c.span(),
 							fmt!("cannot spread {} into dictionary", other.ty().long_name()))),
 					}
 				}
@@ -1322,7 +1334,7 @@ impl<'a> Vm<'a> {
 		let op = node.children().iter().find(|c| !c.kind().is_trivia()).map(|c| c.kind());
 		let operand = match last_expr(node) {
 			Some(e)	=> e,
-			None	=> return Err(self.error(node.span(), "missing operand")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "missing operand")),
 		};
 		let v = res!(self.eval(operand));
 		let out = match op {
@@ -1341,7 +1353,7 @@ impl<'a> Vm<'a> {
 		let sig: Vec<&SyntaxNode> = node.significant().collect();
 		let (lhs, rhs) = match (sig.first(), sig.last()) {
 			(Some(l), Some(r)) if sig.len() >= 3	=> (*l, *r),
-			_ => return Err(self.error(node.span(), "incomplete binary expression")),
+			_ => return Err(self.error(DiagnosticKind::Syntax, node.span(), "incomplete binary expression")),
 		};
 		let op = match (sig.get(1).map(|n| n.kind()), sig.get(2).map(|n| n.kind())) {
 			(Some(K::Not), Some(K::In))	=> None,
@@ -1394,7 +1406,7 @@ impl<'a> Vm<'a> {
 			Some(K::GtEq)	=> ops::compare(&a, &b).map(|o| Value::Bool(o.is_ge())),
 			Some(K::In)		=> ops::contains(&a, &b).map(Value::Bool),
 			None			=> ops::contains(&a, &b).map(|c| Value::Bool(!c)),
-			Some(other)		=> return Err(self.error(span, fmt!("unknown operator {}", other.name()))),
+			Some(other)		=> return Err(self.error(DiagnosticKind::Syntax, span, fmt!("unknown operator {}", other.name()))),
 		};
 		match out {
 			Ok(v)	=> Ok(v),
@@ -1412,12 +1424,12 @@ impl<'a> Vm<'a> {
 					let e = e.clone();
 					self.place(&e)
 				}
-				None	=> Err(self.error(node.span(), "cannot mutate a temporary value")),
+				None	=> Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value")),
 			},
 			SyntaxKind::FieldAccess => {
 				let target = match first_expr(node) {
 					Some(t)	=> t.clone(),
-					None	=> return Err(self.error(node.span(), "cannot mutate a temporary value")),
+					None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value")),
 				};
 				let name = ident_text(node).unwrap_or("").to_string();
 				let (root, rs, mut steps) = res!(self.place(&target));
@@ -1431,11 +1443,11 @@ impl<'a> Vm<'a> {
 						let mut args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
 						let key = match args.items.iter().position(|a| a.name.is_none()) {
 							Some(i)	=> args.items.remove(i).value,
-							None	=> return Err(self.error(node.span(), "missing argument: index")),
+							None	=> return Err(self.error(DiagnosticKind::Type, node.span(), "missing argument: index")),
 						};
 						let target = match first_expr(&c) {
 							Some(t)	=> t.clone(),
-							None	=> return Err(self.error(node.span(), "cannot mutate a temporary value")),
+							None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value")),
 						};
 						let (root, rs, mut steps) = res!(self.place(&target));
 						steps.push(Step::At(key, node.span()));
@@ -1443,19 +1455,19 @@ impl<'a> Vm<'a> {
 					}
 				}
 				res!(self.eval(node));
-				Err(self.error(node.span(), "cannot mutate a temporary value"))
+				Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value"))
 			}
 			_ => {
 				res!(self.eval(node));
-				Err(self.error(node.span(), "cannot mutate a temporary value"))
+				Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value"))
 			}
 		}
 	}
 
 	fn place_error(&mut self, e: (Span, String, Option<String>)) -> Error<ErrTag> {
 		match e.2 {
-			Some(h)	=> self.error_hint(e.0, e.1, h),
-			None	=> self.error(e.0, e.1),
+			Some(h)	=> self.error_hint(DiagnosticKind::Type, e.0, e.1, h),
+			None	=> self.error(DiagnosticKind::Type, e.0, e.1),
 		}
 	}
 
@@ -1556,7 +1568,7 @@ impl<'a> Vm<'a> {
 			SyntaxKind::Destructuring	=> match v {
 				Value::Array(a)	=> self.destructure_array(pat, &a, mode),
 				Value::Dict(d)	=> self.destructure_dict(pat, &d, mode),
-				other			=> Err(self.error(pat.span(), fmt!("cannot destructure {}", other.ty().long_name()))),
+				other			=> Err(self.error(DiagnosticKind::Type, pat.span(), fmt!("cannot destructure {}", other.ty().long_name()))),
 			},
 			SyntaxKind::Ident if mode == Bind::Define => {
 				self.define(pat.text(), v, pat.span());
@@ -1567,7 +1579,7 @@ impl<'a> Vm<'a> {
 				let create = matches!(steps.last(), Some(Step::Key(..)));
 				self.write_place(&root, rs, &steps, v, create)
 			}
-			_ => Err(self.error(pat.span(), "cannot assign to this expression")),
+			_ => Err(self.error(DiagnosticKind::Syntax, pat.span(), "cannot assign to this expression")),
 		}
 	}
 
@@ -1588,7 +1600,7 @@ impl<'a> Vm<'a> {
 			(false, 1)	=> "a single element".to_string(),
 			(false, c)	=> fmt!("{} elements", c),
 		};
-		self.error_hint(pat.span(), fmt!("{} elements to destructure", quantifier), fmt!(
+		self.error_hint(DiagnosticKind::Type, pat.span(), fmt!("{} elements to destructure", quantifier), fmt!(
 			"the provided array has a length of {}, but the pattern expects {}", len, expected))
 	}
 
@@ -1612,7 +1624,7 @@ impl<'a> Vm<'a> {
 					i += size;
 				}
 				SyntaxKind::Named => {
-					return Err(self.error(item.span(), "cannot destructure named pattern from an array"));
+					return Err(self.error(DiagnosticKind::Type, item.span(), "cannot destructure named pattern from an array"));
 				}
 				_ => {
 					let v = match a.get(i) {
@@ -1640,7 +1652,7 @@ impl<'a> Vm<'a> {
 					let name = item.text();
 					let v = match d.get(name) {
 						Some(v)	=> v.clone(),
-						None	=> return Err(self.error(item.span(),
+						None	=> return Err(self.error(DiagnosticKind::Type, item.span(),
 							fmt!("dictionary does not contain key \"{}\"", name))),
 					};
 					res!(self.destructure(item, v, mode));
@@ -1653,7 +1665,7 @@ impl<'a> Vm<'a> {
 					};
 					let v = match d.get(key.text()) {
 						Some(v)	=> v.clone(),
-						None	=> return Err(self.error(key.span(),
+						None	=> return Err(self.error(DiagnosticKind::Type, key.span(),
 							fmt!("dictionary does not contain key \"{}\"", key.text()))),
 					};
 					let sub = item.children().iter().rev().find(|c| is_pattern(c.kind())).cloned();
@@ -1664,7 +1676,7 @@ impl<'a> Vm<'a> {
 				}
 				SyntaxKind::Spread	=> sink = Some(item.children().iter().rev()
 					.find(|c| is_pattern(c.kind())).cloned()),
-				_ => return Err(self.error(item.span(), "cannot destructure unnamed pattern from dictionary")),
+				_ => return Err(self.error(DiagnosticKind::Type, item.span(), "cannot destructure unnamed pattern from dictionary")),
 			}
 		}
 		if let Some(Some(target)) = sink {
@@ -1708,7 +1720,7 @@ impl<'a> Vm<'a> {
 			.skip(1).find(|c| is_code_expr(c.kind()))
 		{
 			Some(b)	=> b.clone(),
-			None	=> return Err(self.error(node.span(), "closure has no body")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "closure has no body")),
 		};
 		let captured = self.capture(node);
 		Ok(Value::Func(Func::Closure(Arc::new(Closure { name, params, body, captured, span: node.span() }))))
@@ -1726,7 +1738,7 @@ impl<'a> Vm<'a> {
 						Some(i)	=> args.items.remove(i).value,
 						None	=> {
 							let what = if pat.kind() == SyntaxKind::Ident { pat.text() } else { "pattern parameter" };
-							return Err(self.error(span, fmt!("missing argument: {}", what)));
+							return Err(self.error(DiagnosticKind::Type, span, fmt!("missing argument: {}", what)));
 						}
 					};
 					res!(self.destructure(pat, v, Bind::Define));
@@ -1763,9 +1775,9 @@ impl<'a> Vm<'a> {
 			None								=> Ok(()),
 			Some(Arg { name: Some(n), .. })		=> {
 				let msg = fmt!("unexpected argument: {}", n);
-				Err(self.error(span, msg))
+				Err(self.error(DiagnosticKind::Type, span, msg))
 			}
-			Some(_)								=> Err(self.error(span, "unexpected argument")),
+			Some(_)								=> Err(self.error(DiagnosticKind::Type, span, "unexpected argument")),
 		}
 	}
 
@@ -1775,8 +1787,8 @@ impl<'a> Vm<'a> {
 			None							=> Ok(out),
 			Some(Flow::Return(_, Some(v), _))	=> Ok(v),
 			Some(Flow::Return(_, None, _))		=> Ok(out),
-			Some(Flow::Break(s))			=> Err(self.error(s, "cannot break outside of loop")),
-			Some(Flow::Continue(s))			=> Err(self.error(s, "cannot continue outside of loop")),
+			Some(Flow::Break(s))			=> Err(self.error(DiagnosticKind::Syntax, s, "cannot break outside of loop")),
+			Some(Flow::Continue(s))			=> Err(self.error(DiagnosticKind::Syntax, s, "cannot continue outside of loop")),
 		}
 	}
 
@@ -1811,7 +1823,7 @@ impl<'a> Vm<'a> {
 							args.push_named(c.span(), k, x.clone());
 						},
 						Value::Args(a)	=> args.items.extend(a.items.iter().cloned()),
-						other			=> return Err(self.error(c.span(),
+						other			=> return Err(self.error(DiagnosticKind::Type, c.span(),
 							fmt!("cannot spread {}", other.ty().long_name()))),
 					}
 				}
@@ -1829,13 +1841,13 @@ impl<'a> Vm<'a> {
 		let span = node.span();
 		let callee = match first_expr(node) {
 			Some(c)	=> c.clone(),
-			None	=> return Err(self.error(span, "call without a callee")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, span, "call without a callee")),
 		};
 		let args_node = node.child(SyntaxKind::Args).cloned();
 		if callee.kind() == SyntaxKind::FieldAccess {
 			let target = match first_expr(&callee) {
 				Some(t)	=> t.clone(),
-				None	=> return Err(self.error(span, "field access without a target")),
+				None	=> return Err(self.error(DiagnosticKind::Syntax, span, "field access without a target")),
 			};
 			let field = ident_text(&callee).unwrap_or("").to_string();
 			if methods::is_mutating(&field) && matches!(target.kind(),
@@ -1855,7 +1867,7 @@ impl<'a> Vm<'a> {
 			let tv = res!(self.eval(&target));
 			let mut args = res!(self.eval_args(args_node.as_ref(), span));
 			if methods::is_mutating(&field) && matches!(tv, Value::Array(_) | Value::Dict(_)) {
-				return Err(self.error(span, "cannot mutate a temporary value"));
+				return Err(self.error(DiagnosticKind::Syntax, span, "cannot mutate a temporary value"));
 			}
 			if let Some(f) = methods::type_method(tv.ty(), &field) {
 				args.prepend(target.span(), tv);
@@ -1866,11 +1878,11 @@ impl<'a> Vm<'a> {
 					let fv = res!(self.field(tv, &field, callee.span()));
 					self.call_value(fv, args, &callee, args_node.as_ref(), span)
 				}
-				Value::Dict(ref d) if matches!(d.get(&field), Some(Value::Func(_))) => Err(self.error_hint(span,
+				Value::Dict(ref d) if matches!(d.get(&field), Some(Value::Func(_))) => Err(self.error_hint(DiagnosticKind::Type, span,
 					"cannot directly call dictionary keys as functions", fmt!(
 					"to call the stored function, wrap the field access in parentheses: `({})(..)`",
 					callee.full_text().trim()))),
-				other => Err(self.error(callee.span(),
+				other => Err(self.error(DiagnosticKind::Type, callee.span(),
 					fmt!("type {} has no method `{}`", other.ty().long_name(), field))),
 			};
 		}
@@ -1893,7 +1905,7 @@ impl<'a> Vm<'a> {
 			Value::Func(f)	=> self.engine.call_func(&f, args),
 			Value::Type(t)	=> match foundations::constructor(t) {
 				Some(f)	=> self.engine.call_func(&Func::Native(f), args),
-				None	=> Err(self.error(callee_node.span(), fmt!("type {} is not callable", t.name()))),
+				None	=> Err(self.error(DiagnosticKind::Type, callee_node.span(), fmt!("type {} is not callable", t.name()))),
 			},
 			other if in_math(callee_node) => {
 				// `$f(x)$` with a non-function `f`: the callee, then its arguments in parentheses.
@@ -1919,7 +1931,7 @@ impl<'a> Vm<'a> {
 				let lr = res!(self.elem(ElemKind::MathLr, vec![("body", Value::Content(body))], span));
 				Ok(Value::Content(Content::sequence(vec![head, lr])))
 			}
-			other => Err(self.error(callee_node.span(),
+			other => Err(self.error(DiagnosticKind::Type, callee_node.span(),
 				fmt!("expected function, found {}", other.ty().long_name()))),
 		}
 	}
@@ -1931,43 +1943,43 @@ impl<'a> Vm<'a> {
 		let found = match &v {
 			Value::Symbol(s)	=> match ops::symbol_modified(s, name) {
 				Some(m)	=> Some(Value::Symbol(m)),
-				None	=> return Err(self.error(span, "unknown symbol modifier")),
+				None	=> return Err(self.error(DiagnosticKind::Type, span, "unknown symbol modifier")),
 			},
 			Value::Version(_)	=> match foundations::field(&v, name) {
 				Some(x)	=> Some(x),
-				None	=> return Err(self.error(span, "unknown version component")),
+				None	=> return Err(self.error(DiagnosticKind::Type, span, "unknown version component")),
 			},
 			Value::Dict(d)		=> match d.get(name) {
 				Some(v)	=> Some(v.clone()),
-				None	=> return Err(self.error(span, fmt!("dictionary does not contain key \"{}\"", name))),
+				None	=> return Err(self.error(DiagnosticKind::Type, span, fmt!("dictionary does not contain key \"{}\"", name))),
 			},
 			Value::Content(c)	=> match methods::content_field(c, name) {
 				Some(v)	=> Some(v),
-				None	=> return Err(self.error(span, fmt!(
+				None	=> return Err(self.error(DiagnosticKind::Type, span, fmt!(
 					"{} does not have field \"{}\"", methods::content_name(c), name))),
 			},
 			Value::Type(t)		=> match foundations::type_scope(*t, name) {
 				Some(x)	=> Some(x),
-				None	=> return Err(self.error(span, fmt!("type {} does not contain field `{}`", t.long_name(), name))),
+				None	=> return Err(self.error(DiagnosticKind::Type, span, fmt!("type {} does not contain field `{}`", t.long_name(), name))),
 			},
 			Value::Func(f)		=> match func_field(f, name) {
 				Some(g)	=> Some(Value::Func(g)),
-				None	=> return Err(self.error(span, match f.name() {
+				None	=> return Err(self.error(DiagnosticKind::Type, span, match f.name() {
 					Some(n)	=> fmt!("function `{}` does not contain field `{}`", n, name),
 					None	=> fmt!("function does not contain field `{}`", name),
 				})),
 			},
 			Value::Module(m)	=> match m.scope.get(name) {
 				Some(v)	=> Some(v.clone()),
-				None	=> return Err(self.error(span, fmt!("module `{}` does not contain `{}`", m.name, name))),
+				None	=> return Err(self.error(DiagnosticKind::UnknownVariable, span, fmt!("module `{}` does not contain `{}`", m.name, name))),
 			},
 			Value::Length(_) | Value::Relative(_) | Value::Alignment(_) | Value::Stroke(_)
 								=> foundations::field(&v, name),
-			_ => return Err(self.error(span, fmt!("cannot access fields on type {}", ty.long_name()))),
+			_ => return Err(self.error(DiagnosticKind::Type, span, fmt!("cannot access fields on type {}", ty.long_name()))),
 		};
 		match found {
 			Some(v)	=> Ok(v),
-			None	=> Err(self.error(span, fmt!("{} does not contain field \"{}\"", ty.long_name(), name))),
+			None	=> Err(self.error(DiagnosticKind::Type, span, fmt!("{} does not contain field \"{}\"", ty.long_name(), name))),
 		}
 	}
 
@@ -1982,15 +1994,15 @@ impl<'a> Vm<'a> {
 		}
 		let target = match expr_after(node, SyntaxKind::Set) {
 			Some(t)	=> t.clone(),
-			None	=> return Err(self.error(node.span(), "set rule without a target")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "set rule without a target")),
 		};
 		let tv = res!(self.eval(&target));
 		let kind = match &tv {
 			Value::Func(f)	=> match f.element() {
 				Some(k)	=> k,
-				None	=> return Err(self.error(target.span(), "only element functions can be used in set rules")),
+				None	=> return Err(self.error(DiagnosticKind::Type, target.span(), "only element functions can be used in set rules")),
 			},
-			other	=> return Err(self.error(target.span(),
+			other	=> return Err(self.error(DiagnosticKind::Type, target.span(),
 				fmt!("expected function, found {}", other.ty().long_name()))),
 		};
 		let args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
@@ -2017,7 +2029,7 @@ impl<'a> Vm<'a> {
 			.skip(1).find(|c| is_code_expr(c.kind()))
 		{
 			Some(t)	=> t.clone(),
-			None	=> return Err(self.error(span, "show rule without a transformation")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, span, "show rule without a transformation")),
 		};
 		let transform = if transform_node.kind() == SyntaxKind::SetRule {
 			Transformation::Style(res!(self.eval_set(&transform_node)))
@@ -2028,7 +2040,7 @@ impl<'a> Vm<'a> {
 				Value::Styles(s)	=> Transformation::Style(s),
 				v @ (Value::None | Value::Str(_) | Value::Symbol(_))
 									=> Transformation::Content(res!(self.display(v, transform_node.span()))),
-				other				=> return Err(self.error(transform_node.span(),
+				other				=> return Err(self.error(DiagnosticKind::Type, transform_node.span(),
 					fmt!("expected content or function, found {}", other.ty().long_name()))),
 			}
 		};
@@ -2043,7 +2055,7 @@ impl<'a> Vm<'a> {
 	fn eval_context(&mut self, node: &SyntaxNode) -> Outcome<Value> {
 		let body = match last_expr(node) {
 			Some(b)	=> b.clone(),
-			None	=> return Err(self.error(node.span(), "context without a body")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "context without a body")),
 		};
 		let captured = self.capture(&body);
 		let closure = Closure { name: None, params: Vec::new(), body: body.clone(), captured, span: body.span() };
@@ -2057,7 +2069,7 @@ impl<'a> Vm<'a> {
 		let exprs = code_exprs(node);
 		let (cond, then) = match (exprs.first(), exprs.get(1)) {
 			(Some(c), Some(t))	=> ((*c).clone(), (*t).clone()),
-			_					=> return Err(self.error(node.span(), "incomplete conditional")),
+			_					=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "incomplete conditional")),
 		};
 		let otherwise = expr_after(node, SyntaxKind::Else).cloned();
 		let out = if res!(self.expect_bool(&cond)) {
@@ -2089,7 +2101,7 @@ impl<'a> Vm<'a> {
 			Value::Content(c)	=> c,
 			_					=> return,
 		};
-		let mut d = Diagnostic::warning(self.fix(span), "this return unconditionally discards the content before it")
+		let mut d = Diagnostic::warning(DiagnosticKind::Internal, self.fix(span), "this return unconditionally discards the content before it")
 			.with_hint("try omitting the `return` to automatically join all values");
 		if contains_update(tree, 0) {
 			d = d.with_hint("state/counter updates are content that must end up in the document to have an effect");
@@ -2101,17 +2113,17 @@ impl<'a> Vm<'a> {
 		let exprs = code_exprs(node);
 		let (cond, body) = match (exprs.first(), exprs.get(1)) {
 			(Some(c), Some(b))	=> ((*c).clone(), (*b).clone()),
-			_					=> return Err(self.error(node.span(), "incomplete while loop")),
+			_					=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "incomplete while loop")),
 		};
 		let outer = self.flow.take();
 		let mut output = Value::None;
 		let mut i = 0;
 		while res!(self.expect_bool(&cond)) {
 			if i == 0 && is_invariant(&cond) && !can_diverge(&body) {
-				return Err(self.error(cond.span(), "condition is always true"));
+				return Err(self.error(DiagnosticKind::Limit, cond.span(), "condition is always true"));
 			}
 			if i >= MAX_WHILE_ITERATIONS {
-				return Err(self.error(node.span(), "loop seems to be infinite"));
+				return Err(self.error(DiagnosticKind::Limit, node.span(), "loop seems to be infinite"));
 			}
 			res!(self.burn(node.span()));
 			let v = res!(self.eval(&body));
@@ -2147,15 +2159,15 @@ impl<'a> Vm<'a> {
 	fn eval_for(&mut self, node: &SyntaxNode) -> Outcome<Value> {
 		let pattern = match pattern_after(node, SyntaxKind::For) {
 			Some(p)	=> p.clone(),
-			None	=> return Err(self.error(node.span(), "for loop without a pattern")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "for loop without a pattern")),
 		};
 		let iterable = match expr_after(node, SyntaxKind::In) {
 			Some(e)	=> e.clone(),
-			None	=> return Err(self.error(node.span(), "for loop without an iterable")),
+			None	=> return Err(self.error(DiagnosticKind::Type, node.span(), "for loop without an iterable")),
 		};
 		let body = match last_expr(node) {
 			Some(b)	=> b.clone(),
-			None	=> return Err(self.error(node.span(), "for loop without a body")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "for loop without a body")),
 		};
 		let it = res!(self.eval(&iterable));
 		let destructuring = pattern.kind() == SyntaxKind::Destructuring;
@@ -2164,9 +2176,9 @@ impl<'a> Vm<'a> {
 			Value::Dict(d)	=> d.iter().map(|(k, v)| Value::array(vec![Value::str(k), v.clone()])).collect(),
 			Value::Str(s) if !destructuring	=> segment::graphemes(&s).into_iter().map(Value::str).collect(),
 			Value::Bytes(b) if !destructuring	=> b.iter().map(|x| Value::Int(*x as i64)).collect(),
-			v @ (Value::Str(_) | Value::Bytes(_))	=> return Err(self.error(pattern.span(),
+			v @ (Value::Str(_) | Value::Bytes(_))	=> return Err(self.error(DiagnosticKind::Type, pattern.span(),
 				fmt!("cannot destructure values of {}", v.ty().long_name()))),
-			other => return Err(self.error(iterable.span(), fmt!("cannot loop over {}", other.ty().long_name()))),
+			other => return Err(self.error(DiagnosticKind::Type, iterable.span(), fmt!("cannot loop over {}", other.ty().long_name()))),
 		};
 		let outer = self.flow.take();
 		let mut output = Value::None;
@@ -2221,7 +2233,7 @@ impl<'a> Vm<'a> {
 	fn eval_import(&mut self, node: &SyntaxNode) -> Outcome<Value> {
 		let src_node = match expr_after(node, SyntaxKind::Import) {
 			Some(s)	=> s.clone(),
-			None	=> return Err(self.error(node.span(), "import without a source")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "import without a source")),
 		};
 		let src_span = src_node.span();
 		let source = res!(self.eval(&src_node));
@@ -2236,9 +2248,9 @@ impl<'a> Vm<'a> {
 					}
 				}
 			}
-			Value::Func(Func::Closure(_)) => return Err(self.error(src_span, "cannot import from user-defined functions")),
+			Value::Func(Func::Closure(_)) => return Err(self.error(DiagnosticKind::Type, src_span, "cannot import from user-defined functions")),
 			v @ (Value::Module(_) | Value::Func(_) | Value::Type(_)) => v,
-			other => return Err(self.error(src_span, fmt!(
+			other => return Err(self.error(DiagnosticKind::Type, src_span, fmt!(
 				"expected path, module, function, or type, found {}", other.ty().long_name()))),
 		};
 		let new_name = node.children().iter().skip_while(|c| c.kind() != SyntaxKind::As)
@@ -2251,7 +2263,7 @@ impl<'a> Vm<'a> {
 		let new_name = if colon_seen_before_as { None } else { new_name };
 		if let Some(n) = &new_name {
 			if src_node.kind() == SyntaxKind::Ident && src_node.text() == n.text() {
-				self.engine.warn(self.fix(n.span()), "unnecessary import rename to same name");
+				self.engine.warn(DiagnosticKind::Internal, self.fix(n.span()), "unnecessary import rename to same name");
 			}
 			self.define(n.text(), source.clone(), n.span());
 		}
@@ -2267,12 +2279,12 @@ impl<'a> Vm<'a> {
 					match bare {
 						// `import calc` binds `calc` to itself.
 						Ok(_) if src_node.kind() == SyntaxKind::Ident	=> {
-							self.engine.warn(self.fix(src_span), "this import has no effect");
+							self.engine.warn(DiagnosticKind::Internal, self.fix(src_span), "this import has no effect");
 						}
 						Ok(b)	=> self.define(&b, source, src_span),
-						Err(BareImportError::Dynamic)	=> return Err(self.error_hint(src_span,
+						Err(BareImportError::Dynamic)	=> return Err(self.error_hint(DiagnosticKind::Syntax, src_span,
 							"dynamic import requires an explicit name", "you can name the import with `as`")),
-						Err(_)	=> return Err(self.error_hint(src_span,
+						Err(_)	=> return Err(self.error_hint(DiagnosticKind::Syntax, src_span,
 							"module name would not be a valid identifier", "you can rename the import with `as`")),
 					}
 				}
@@ -2320,7 +2332,7 @@ impl<'a> Vm<'a> {
 							match b {
 								Some(b)	=> {
 									if p.last().map(|l| l.text() == b.text()).unwrap_or(false) {
-										self.engine.warn(self.fix(b.span()), "unnecessary import rename to same name");
+										self.engine.warn(DiagnosticKind::Internal, self.fix(b.span()), "unnecessary import rename to same name");
 									}
 									(p, b)
 								}
@@ -2335,7 +2347,7 @@ impl<'a> Vm<'a> {
 						match next {
 							Some(v) => {
 								if i + 1 < path.len() && !matches!(v, Value::Module(_) | Value::Func(_) | Value::Type(_)) {
-									failed = Some(self.error(comp.span(), fmt!(
+									failed = Some(self.error(DiagnosticKind::Type, comp.span(), fmt!(
 										"expected module, function, or type, found {}", v.ty().long_name())));
 									ok = false;
 									break;
@@ -2343,7 +2355,7 @@ impl<'a> Vm<'a> {
 								cur = v;
 							}
 							None => {
-								failed = Some(self.error(comp.span(), "unresolved import"));
+								failed = Some(self.error(DiagnosticKind::UnknownVariable, comp.span(), "unresolved import"));
 								ok = false;
 								break;
 							}
@@ -2364,7 +2376,7 @@ impl<'a> Vm<'a> {
 	fn eval_include(&mut self, node: &SyntaxNode) -> Outcome<Value> {
 		let src_node = match expr_after(node, SyntaxKind::Include) {
 			Some(s)	=> s.clone(),
-			None	=> return Err(self.error(node.span(), "include without a source")),
+			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "include without a source")),
 		};
 		let span = self.fix(src_node.span());
 		match res!(self.eval(&src_node)) {
@@ -2376,7 +2388,7 @@ impl<'a> Vm<'a> {
 				}
 			}
 			Value::Module(m)	=> Ok(Value::Content(m.content.clone())),
-			other				=> Err(self.error(span, fmt!("expected path or module, found {}", other.ty().long_name()))),
+			other				=> Err(self.error(DiagnosticKind::Type, span, fmt!("expected path or module, found {}", other.ty().long_name()))),
 		}
 	}
 }

@@ -1,6 +1,7 @@
 // U3 owns this file. Methods on `dictionary`; `insert` and `remove` change a place, so `methods.rs`
 // carries them out. `dictionary(module)` turns a module's bindings into a dictionary.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::lib::array;
 use crate::eval::lib::foundations::{
@@ -73,7 +74,7 @@ pub fn call(f: DictFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			match (d.get(&k), default) {
 				(Some(v), _)	=> v.clone(),
 				(None, Some(x))	=> x,
-				(None, None)	=> return Err(engine.error(span, fmt!(
+				(None, None)	=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"dictionary does not contain key {} and no default value was specified", repr_str(&k)))),
 			}
 		}

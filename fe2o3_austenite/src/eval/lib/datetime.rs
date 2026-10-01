@@ -3,6 +3,7 @@
 // date arithmetic the operators need (`datetime_add`, `datetime_sub`, for `ops.rs`). `today` reads the host
 // clock; a document compiled across midnight may see two dates, which Typst shares.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::{
 	Func,
@@ -289,7 +290,7 @@ pub fn call(f: DatetimeFn, engine: &mut Engine, mut args: Args) -> Outcome<Value
 			};
 			let (y, m, d) = match now() {
 				Some(t)	=> t,
-				None	=> return Err(engine.error(span, "unable to get the current date")),
+				None	=> return Err(engine.error(DiagnosticKind::Type, span, "unable to get the current date")),
 			};
 			let (y, m, d) = if hours != 0 {
 				civil_from_days(days_from_civil(y, m, d) + hours.div_euclid(24))
@@ -314,7 +315,7 @@ pub fn call(f: DatetimeFn, engine: &mut Engine, mut args: Args) -> Outcome<Value
 			};
 			match display(&dt, &pat) {
 				Ok(s)	=> Value::str(s),
-				Err(m)	=> return Err(engine.error(span, m)),
+				Err(m)	=> return Err(engine.error(DiagnosticKind::Type, span, m)),
 			}
 		}
 		DatetimeFn::Year		=> res!(dt_recv(engine, &mut args)).year.map(|y| Value::Int(y as i64)).unwrap_or(Value::None),
@@ -344,7 +345,7 @@ pub fn call(f: DatetimeFn, engine: &mut Engine, mut args: Args) -> Outcome<Value
 				if let Some(n) = res!(opt_int(engine, span, v)) {
 					secs = match n.checked_mul(unit).and_then(|x| secs.checked_add(x)) {
 						Some(s)	=> s,
-						None	=> return Err(engine.error(span, "duration is too large")),
+						None	=> return Err(engine.error(DiagnosticKind::Type, span, "duration is too large")),
 					};
 				}
 			}
@@ -374,7 +375,7 @@ fn construct(engine: &mut Engine, span: Span, date: [Option<i64>; 3], time: [Opt
 		}
 	};
 	if date_n == 0 && time_n == 0 {
-		let e = engine.error_hint(span, "at least one of date or time must be fully specified",
+		let e = engine.error_hint(DiagnosticKind::Type, span, "at least one of date or time must be fully specified",
 			"add the `hour`, `minute`, and `second` arguments to get a valid time");
 		if let Some(d) = engine.diags.last_mut() {
 			d.hints.push("add the `year`, `month`, and `day` arguments to get a valid date".to_string());
@@ -383,19 +384,19 @@ fn construct(engine: &mut Engine, span: Span, date: [Option<i64>; 3], time: [Opt
 	}
 	if date_n > 0 && date_n < 3 {
 		let hint = fmt!("{} to get a valid date", missing(&date, &names[0]));
-		return Err(engine.error_hint(span, "date is incomplete", hint));
+		return Err(engine.error_hint(DiagnosticKind::Type, span, "date is incomplete", hint));
 	}
 	if time_n > 0 && time_n < 3 {
 		let hint = fmt!("{} to get a valid time", missing(&time, &names[1]));
-		return Err(engine.error_hint(span, "time is incomplete", hint));
+		return Err(engine.error_hint(DiagnosticKind::Type, span, "time is incomplete", hint));
 	}
 	let mut dt = Datetime::default();
 	if let [Some(y), Some(m), Some(d)] = date {
 		if !(1..=12).contains(&m) {
-			return Err(engine.error(span, "month is invalid"));
+			return Err(engine.error(DiagnosticKind::Type, span, "month is invalid"));
 		}
 		if !(-9999..=9999).contains(&y) || d < 1 || d > days_in_month(y, m as u32) as i64 {
-			return Err(engine.error(span, "date is invalid"));
+			return Err(engine.error(DiagnosticKind::Type, span, "date is invalid"));
 		}
 		dt.year = Some(y as i32);
 		dt.month = Some(m as u8);
@@ -403,7 +404,7 @@ fn construct(engine: &mut Engine, span: Span, date: [Option<i64>; 3], time: [Opt
 	}
 	if let [Some(h), Some(mi), Some(s)] = time {
 		if !(0..24).contains(&h) || !(0..60).contains(&mi) || !(0..60).contains(&s) {
-			return Err(engine.error(span, "time is invalid"));
+			return Err(engine.error(DiagnosticKind::Type, span, "time is invalid"));
 		}
 		dt.hour = Some(h as u8);
 		dt.minute = Some(mi as u8);

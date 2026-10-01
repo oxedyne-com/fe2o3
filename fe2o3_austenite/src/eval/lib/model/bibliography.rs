@@ -17,6 +17,7 @@ use crate::bib::{
 	RefRun,
 	RefStyle,
 };
+use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -173,22 +174,22 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 				let path = res!(crate::eval::import::resolve_path(engine, &p, span.file, span));
 				let text = match vfs::read_to_string(&path) {
 					Ok(t)	=> t,
-					Err(e)	=> return Err(engine.error(span, fmt!("failed to load file ({})", e))),
+					Err(e)	=> return Err(engine.error(DiagnosticKind::MissingFile, span, fmt!("failed to load file ({})", e))),
 				};
 				(text, p.to_string())
 			}
 			Value::Bytes(b) => match String::from_utf8((*b).clone()) {
 				Ok(t)	=> (t, String::new()),
-				Err(_)	=> return Err(engine.error(span, "file is not valid utf-8")),
+				Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
 			},
 			_ => continue,
 		};
 		let lower = name.to_ascii_lowercase();
 		if lower.ends_with(".yml") || lower.ends_with(".yaml") || (!lower.ends_with(".bib") && !text.contains('@')) {
-			return Err(engine.error(span, "Hayagriva YAML bibliographies are not supported yet; use a BibTeX (.bib) file"));
+			return Err(engine.error(DiagnosticKind::Unsupported, span, "Hayagriva YAML bibliographies are not supported yet; use a BibTeX (.bib) file"));
 		}
 		if !name.is_empty() && !lower.ends_with(".bib") {
-			return Err(engine.error(span, "unknown bibliography format (must be .yaml/.yml or .bib)"));
+			return Err(engine.error(DiagnosticKind::Type, span, "unknown bibliography format (must be .yaml/.yml or .bib)"));
 		}
 		texts.push(text);
 	}
@@ -207,7 +208,7 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 		}
 	}
 	if !dups.is_empty() {
-		return Err(engine.error(span, fmt!("duplicate bibliography keys: {}", dups.join(", "))));
+		return Err(engine.error(DiagnosticKind::Type, span, fmt!("duplicate bibliography keys: {}", dups.join(", "))));
 	}
 	let keys: Vec<Value> = seen.into_iter().map(Value::str).collect();
 	elem.set(res!(common::fid(ElemKind::Bibliography, "keys")), Value::array(keys));
@@ -250,7 +251,7 @@ struct Works {
 fn works(engine: &mut Engine, span: Span) -> Outcome<Works> {
 	let bib = match engine.intro.elems.iter().find(|e| e.is(ElemKind::Bibliography)) {
 		Some(b)	=> b.clone(),
-		None	=> return Err(engine.error(span, "the document does not contain a bibliography")),
+		None	=> return Err(engine.error(DiagnosticKind::Type, span, "the document does not contain a bibliography")),
 	};
 	let texts: Vec<String> = match bib.field("data") {
 		Some(Value::Array(a)) => a.iter().filter_map(|v| match v {
@@ -307,10 +308,10 @@ fn citation_parts(engine: &mut Engine, elem: &Content, styles: &StyleChain, work
 	let span = elem.span();
 	let key = match elem.field("key") {
 		Some(Value::Label(l))	=> l.as_str().to_string(),
-		_						=> return Err(engine.error(span, "missing argument: key")),
+		_						=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: key")),
 	};
 	if !works.lib.has(&key) {
-		return Err(engine.error(span, fmt!("key `{}` does not exist in the bibliography", key)));
+		return Err(engine.error(DiagnosticKind::Type, span, fmt!("key `{}` does not exist in the bibliography", key)));
 	}
 	let form = match res!(common::get(elem, styles, "form")) {
 		Value::Str(s)	=> CiteForm::by_name(&s),

@@ -8,6 +8,7 @@
 // the page counter need U8 and are refused with `Unimplemented`; general queries go to
 // `Introspector::query` as they stand.
 
+use crate::diag::DiagnosticKind;
 use crate::eval::content::{
 	Content,
 	ElemKind,
@@ -33,7 +34,7 @@ use oxedyne_fe2o3_core::prelude::*;
 pub fn label(engine: &mut Engine, label: &Label, span: Span) -> Outcome<Content> {
 	match res!(label_opt(engine, label, span)) {
 		Some(c)	=> Ok(c),
-		None	=> Err(engine.error(span, fmt!("label `<{}>` does not exist in the document", label.as_str()))),
+		None	=> Err(engine.error(DiagnosticKind::Type, span, fmt!("label `<{}>` does not exist in the document", label.as_str()))),
 	}
 }
 
@@ -46,7 +47,7 @@ pub fn label_opt(engine: &mut Engine, label: &Label, span: Span) -> Outcome<Opti
 	match found.len() {
 		0	=> Ok(None),
 		1	=> Ok(found.pop()),
-		_	=> Err(engine.error(span, fmt!("label `<{}>` occurs multiple times in the document",
+		_	=> Err(engine.error(DiagnosticKind::Type, span, fmt!("label `<{}>` occurs multiple times in the document",
 			label.as_str()))),
 	}
 }
