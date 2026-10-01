@@ -189,6 +189,13 @@ impl Refusals {
 		self.record_stand_in_in("", name, span, class, note);
 	}
 
+	/// Records a `$` whose maths never closes: Typst refuses the file there, and the reader reads it as the
+	/// character it is ([`lex::lone_dollars`]).
+	pub(crate) fn record_lone_dollar_in(&mut self, file: &str, span: Span) {
+		self.record_stand_in_in(file, "inline maths", span, RefusalClass::Unusable,
+			"never closes, so its `$` is set as text");
+	}
+
 	/// As [`Self::record_stand_in`], for a site already known to stand in `file`.
 	pub(crate) fn record_stand_in_in(&mut self, file: &str, name: &str, span: Span, class: RefusalClass, note: &str) {
 		self.sites.push(Refusal {
@@ -387,6 +394,13 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// Where each line stands -- the file's own level, a bare content block, a list item, strong or emphasis,
 	// or in code -- so a rule or an include the reader meets is held to the place it is read at.
 	let placed	= lex::placed_lines(src);
+	// Each `$` whose maths never closes, which the lexer read as a character: every line below writes it
+	// `\$`, so each reader after the lexer -- a gathered construct's own, a paragraph's maths, the inline
+	// reader -- reads it as a character too, and it is recorded, once, as the loop reaches its line.
+	let mut lone = src.bytes().enumerate()
+		.filter(|&(at, b)| b == b'$' && toks.get(at) == Some(&lex::Tok::Text))
+		.map(|(at, _)| at)
+		.peekable();
 	// Which bytes each conditional and loop in the markup leaves to be read, and the sites of those refused
 	// whole, recorded as the loop reaches the line each opens on.
 	let (keep, flow_sites)	= flow_mask(src, binds.guards);
@@ -408,17 +422,20 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// Strip Typst comments before classifying the line, but not while a fenced code block or a
 		// multi-line call skip is open: inside a fence a `//` is verbatim, and a skipped span is dropped
 		// whole regardless. The span above is computed from the raw line, so a diagnostic caret still
-		// points into the source.
-		let stripped;
-		let line = if code.is_none() && skip.is_none() {
-			let range	= start as usize..end as usize;
-			stripped	= strip_comments(line, toks.get(range.clone()).unwrap_or(&[]), keep.get(range).unwrap_or(&[]));
-			stripped.as_str()
+		// points into the source. Either way a `$` whose maths never closes is written `\$`.
+		let range		= start as usize..end as usize;
+		let line_toks	= toks.get(range.clone()).unwrap_or(&[]);
+		let stripped	= if code.is_none() && skip.is_none() {
+			strip_comments(line, line_toks, keep.get(range).unwrap_or(&[]))
 		} else {
-			line
+			lone_escaped(line.char_indices(), line_toks)
 		};
+		let line = stripped.as_str();
 		while let Some((_, r)) = flow_sites.next_if(|(at, _)| *at < offset as usize) {
 			skips.sites.push(r);
+		}
+		while let Some(at) = lone.next_if(|at| *at < offset as usize) {
+			skips.record_lone_dollar_in("", Span::new(at as u32, at as u32 + 1));
 		}
 
 		let trimmed = line.trim_start();
@@ -937,8 +954,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 						},
 					}
 				},
-				None => skips.record_stand_in("inline maths", span, RefusalClass::Unusable,
-					"never closes, so its `$` is set as text"),
+				None => skips.record_lone_dollar_in("", span),
 			}
 		}
 		// An inline code span, `raw` between backticks: its content is verbatim, no markup within.
@@ -2108,12 +2124,25 @@ fn cap_first(s: &str) -> String {
 
 /// A line with the characters a comment holds removed, and those a conditional or a loop takes without
 /// keeping them: `toks` is what the line's own bytes are as the lexer read the whole source
-/// ([`lex::byte_toks`]), and `keep` whether [`flow_mask`] keeps each.
+/// ([`lex::byte_toks`]), and `keep` whether [`flow_mask`] keeps each. A `$` whose maths never closes is
+/// written `\$` ([`lone_escaped`]).
 fn strip_comments(line: &str, toks: &[lex::Tok], keep: &[bool]) -> String {
-	line.char_indices()
-		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment) && keep.get(at) != Some(&false))
-		.map(|(_, c)| c)
-		.collect()
+	lone_escaped(line.char_indices()
+		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment) && keep.get(at) != Some(&false)), toks)
+}
+
+/// The characters `chars` of a line, each by its byte in the line, with a `$` the lexer read as a character
+/// (its maths never closes, [`lex::lone_dollars`]) written `\$`, so a reader that sees the line alone reads
+/// it as the lexer read it over the whole source.
+fn lone_escaped(chars: impl Iterator<Item = (usize, char)>, toks: &[lex::Tok]) -> String {
+	let mut out = String::new();
+	for (at, c) in chars {
+		if c == '$' && toks.get(at) == Some(&lex::Tok::Text) {
+			out.push('\\');
+		}
+		out.push(c);
+	}
+	out
 }
 
 /// How the reader reads one conditional or loop in its markup.
@@ -6101,8 +6130,8 @@ bound\".\n";
 		Ok(())
 	}
 
-	/// A `$` that never closes is set as text and recorded where its item stands, rather than passed as text
-	/// in silence; closed maths records nothing.
+	/// A `$` that never closes is set as text and recorded where it stands, rather than passed as text in
+	/// silence; closed maths records nothing.
 	#[test]
 	fn a_dollar_that_never_closes_is_recorded() -> Outcome<()> {
 		let (_, skips) = res!(document_with_refusals("Worth $5 today.\n"));
@@ -6111,6 +6140,81 @@ bound\".\n";
 			.collect();
 		assert_eq!(notes, [("inline maths", Some("never closes, so its `$` is set as text"))]);
 		let (_, skips) = res!(document_with_refusals("Then $x$ and $y$.\n"));
+		assert!(skips.is_empty(), "{:?}", skips.sites());
+		Ok(())
+	}
+
+	/// Each item of a parse by its kind and plain text, and each site by its name, note and first byte.
+	fn items_and_sites(src: &str) -> Outcome<(Vec<(&'static str, String)>, Vec<(String, Option<String>, u32)>)> {
+		let (items, skips) = res!(document_with_refusals(src));
+		let items = items.iter().map(|it| match it {
+			Item::Heading { runs, .. }		=> ("heading", plain(runs)),
+			Item::Paragraph { runs, .. }	=> ("para", plain(runs)),
+			_								=> ("other", String::new()),
+		}).collect();
+		let sites = skips.sites().iter().map(|r| (r.name.clone(), r.note.clone(), r.span.start)).collect();
+		Ok((items, sites))
+	}
+
+	/// A `$` whose maths never closes is set as the one character and recorded at itself; the markup after
+	/// it is read as usual, so a later heading is still a heading (`dl.typ`: typst 0.15.1 refuses the file
+	/// with "unclosed delimiter" at the `$`, and strict refuses it by the site).
+	#[test]
+	fn a_dollar_that_never_closes_leaves_later_headings() -> Outcome<()> {
+		let src = "Alpha $x + y and more.\n\nNext paragraph here.\n\n= Heading Later\n\nLast words.\n";
+		let (items, sites) = res!(items_and_sites(src));
+		assert_eq!(items, [
+			("para",	"Alpha $x + y and more.".to_string()),
+			("para",	"Next paragraph here.".to_string()),
+			("heading",	"Heading Later".to_string()),
+			("para",	"Last words.".to_string()),
+		]);
+		let note = Some("never closes, so its `$` is set as text".to_string());
+		assert_eq!(sites, [("inline maths".to_string(), note.clone(), 6)]);
+		// In a statement's or a gathered call's body, on its line or a later one, the construct still closes
+		// where it does over the whole file, and what follows it is read.
+		for (src, at) in [
+			("#let x = [5$ each]\n\n= Later\n",			11),
+			("#let x = [\n5$ each\n]\n\n= Later\n",		12),
+			("#styled-box[\nCosts 5$ each.\n]\n\n= Later\n",	20),
+		] {
+			let (items, sites) = res!(items_and_sites(src));
+			assert_eq!(items.last(), Some(&("heading", "Later".to_string())), "{:?}: {:?}", src, items);
+			assert!(sites.contains(&("inline maths".to_string(), note.clone(), at)), "{:?}: {:?}", src, sites);
+			assert_eq!(sites.iter().filter(|s| s.0 == "inline maths").count(), 1, "{:?}: {:?}", src, sites);
+			assert!(sites.iter().all(|s| s.1.as_deref() != Some("never closes, so nothing from it to the end of the \
+				file is set")), "{:?}: {:?}", src, sites);
+		}
+		Ok(())
+	}
+
+	/// A `$` whose maths never closes in a table cell, a caption or a footnote is recorded where it stands, once,
+	/// and the heading after it is a heading: typst 0.15.1 refuses each of these files at the `$`.
+	#[test]
+	fn a_dollar_that_never_closes_in_a_cell_a_caption_or_a_note_is_recorded() -> Outcome<()> {
+		for (src, at) in [
+			("#table(columns: 1, [a 5$ b])\n\n= Later\n",								23),
+			("#figure(table(columns: 1, [x]), caption: [Costs 5$ each])\n\n= Later\n",	49),
+			("Note#footnote[Pay 5$ now].\n\n= Later\n",									19),
+		] {
+			let (items, sites) = res!(items_and_sites(src));
+			assert_eq!(items.last(), Some(&("heading", "Later".to_string())), "{:?}: {:?}", src, items);
+			let maths: Vec<u32> = sites.iter().filter(|s| s.0 == "inline maths").map(|s| s.2).collect();
+			assert_eq!(maths, [at], "{:?}: {:?}", src, sites);
+		}
+		Ok(())
+	}
+
+	/// Maths that closes, and a file with no `$`, read as before: the guard against the pass over-reaching.
+	#[test]
+	fn a_closed_dollar_is_unchanged() -> Outcome<()> {
+		let (items, sites) = res!(items_and_sites("Alpha x + y and more.\n\nNext paragraph here.\n\n= Heading Later\n\nLast words.\n"));
+		assert_eq!(items.iter().filter(|i| i.0 == "heading").count(), 1);
+		assert!(sites.is_empty(), "{:?}", sites);
+		let (items, skips) = res!(document_with_refusals("Alpha $x + y$ and more.\n\n= Heading Later\n"));
+		assert!(matches!(items.first(), Some(Item::Paragraph { runs, .. })
+			if runs.iter().filter(|r| matches!(r, Inline::Math(_))).count() == 1), "{:?}", items);
+		assert!(matches!(items.last(), Some(Item::Heading { .. })), "{:?}", items);
 		assert!(skips.is_empty(), "{:?}", skips.sites());
 		Ok(())
 	}

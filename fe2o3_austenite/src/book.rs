@@ -109,7 +109,7 @@ pub fn is_book_root(src: &str) -> bool {
 fn top_live_lines(src: &str) -> Vec<String> {
 	let live		= lang::lex::live_text(src);
 	let mut out		= Vec::new();
-	let mut state	= lang::lex::Lexer::markup();
+	let mut state	= lang::lex::Lexer::markup_over(src);
 	let mut guards: Vec<usize> = Vec::new();	// the group depth each open guard's branch stands at
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let depth = state.depth();
@@ -1902,6 +1902,8 @@ fn assemble_into(
 	// callout holding an `#include` is read whole and the include is refused where it stands.
 	let live = lang::lex::live_text(src);
 	let top: HashSet<usize> = lang::lex::top_level_lines(src).into_iter().map(|(at, _)| at).collect();
+	// A guard's own lexer reads a `$` whose maths never closes as a character, as every scan of the file does.
+	let lone = lang::lex::lone_dollars(src);
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
@@ -1958,8 +1960,8 @@ fn assemble_into(
 		});
 		if let Some((live, then_taken)) = opened {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			let mut state = lang::lex::Lexer::markup();
-			state.feed_line(marker);
+			let mut state = lang::lex::Lexer::markup().with_lone(lone.clone());
+			state.feed_line_at(marker, start as usize + (line.len() - t.len()));
 			guards.push(GuardFrame { live, then_taken, in_else: false, state });
 			continue;
 		}
@@ -1971,7 +1973,7 @@ fn assemble_into(
 		// it is reported rather than left to leak whatever follows as prose, and the line, the guard's own
 		// structural end, is consumed here rather than falling through to the buffer below.
 		if let Some(top) = guards.last_mut() {
-			top.state.feed_line(line);
+			top.state.feed_line_at(line, start as usize);
 			if !top.state.is_open() {
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				guards.pop();
@@ -1980,8 +1982,12 @@ fn assemble_into(
 			}
 		}
 		// Inside a dropped branch: the content is the untaken alternative, dropped silently. Markers above
-		// are still tracked so the stack balances.
+		// are still tracked so the stack balances. A `$` whose maths never closes is an error Typst reports
+		// wherever it stands, so one here is still recorded.
 		if !guards.iter().all(|g| g.emits()) {
+			for &at in lone.iter().filter(|&&at| at >= start as usize && at < byte as usize) {
+				got.skips.record_lone_dollar_in(&label, crate::ir::Span::new(at as u32, at as u32 + 1));
+			}
 			continue;
 		}
 		if let Some(rest) = t.strip_prefix("#include").filter(|_| structural) {
@@ -2414,6 +2420,14 @@ mod tests {
 		assert!(!is_book_root("= Lone\n\n/*\n#include \"draft.typ\"\n*/\n// #include \"x.typ\"\n"));
 	}
 
+	/// An `#include` after a `$` whose maths never closes stands at the file's top level, as it does to Typst's
+	/// own lexer: the `$` is a character, so the root still reads as a book.
+	#[test]
+	fn a_dollar_that_never_closes_leaves_the_includes_after_it_a_book() {
+		assert!(is_book_root("Costs 5$ each.\n\n#include \"chap_01.typ\"\n"));
+		assert!(!is_book_root("Costs 5$ each.\n\n```typst\n#include \"chapter.typ\"\n```\n"));
+	}
+
 	/// A field is read where a reader meets it: not in a comment, not in a raw block, and not as the tail of
 	/// a longer field's name.
 	#[test]
@@ -2676,6 +2690,22 @@ mod tests {
 		// The reader's own `#let` skip is expected and unrelated; the guard itself must report nothing.
 		assert!(!got.skips.report().map(|r| r.contains("#if")).unwrap_or(false),
 			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", got.skips.report());
+		Ok(())
+	}
+
+	/// A `$` whose maths never closes, in a guard's branch, is a character to the guard's own lexer as to every
+	/// scan of the file: the branch closes where it does and what follows the guard is read. One in a branch
+	/// not taken is still recorded, since Typst refuses the file there.
+	#[test]
+	fn a_dollar_that_never_closes_in_a_guard_leaves_what_follows() -> Outcome<()> {
+		let dir		= std::path::Path::new("/nonexistent");
+		let root	= "#let media = \"print\"\n\n#if media == \"ebook\" [\nEbook costs 5$ only.\n] More.\n\n= After\n";
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("After") && !body.contains("Ebook costs"), "{}", body);
+		let at = root.find('$').map(|b| b as u32);
+		assert!(got.skips.sites().iter().any(|r| r.name == "inline maths" && Some(r.span.start) == at),
+			"{:?}", got.skips.sites());
 		Ok(())
 	}
 

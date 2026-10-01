@@ -6,12 +6,14 @@
 //! scope (a heading, a list item, strong or emphasis keeps a count of its own). A `"` is a character in
 //! markup and a string only in code or maths. An automatic link is one token, so the `//` or `/*` in it
 //! opens no comment. Block comments nest. Raw text opens with one backtick or three or more and closes
-//! on a run as long, across lines. A `#!` opening the file is a comment to its line's end.
+//! on a run as long, across lines. A `#!` opening the file is a comment to its line's end. A `$` whose
+//! maths never closes is read as a character, so the error stays at it and the markup after it is read as
+//! usual, where Typst's parser takes the rest of the source into the equation.
 
 /// What a character is, as Typst reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tok {
-	Text,		// markup text, a bracket in prose included
+	Text,		// markup text, a bracket in prose included, and a `$` whose maths never closes
 	Code,		// code: a name, a number, an operator, a space
 	Math,		// an equation's own text
 	Str,		// a string in code or maths, its quotes included
@@ -113,7 +115,7 @@ impl Markup {
 enum Frame {
 	Markup(Markup),
 	Code(char),		// a code group and its closer; `'\0'` for a code scan's outermost level
-	Math,
+	Math(usize),	// opened by the `$` at this source byte
 	Str(bool),		// whether the last character was a `\` still to take its escape
 	Comment(u32),	// nested this deep
 	Raw(usize),		// opened by this many backticks
@@ -129,6 +131,8 @@ pub(crate) struct Lexer {
 	col:	usize,			// characters since the last line break
 	blank:	u32,			// line breaks in the run of spaces now open, for a paragraph break
 	prev:	Option<char>,	// the character before the next one, for a `*` or `_` within a word
+	at:		usize,			// the source byte the next character stands at
+	lone:	Vec<usize>,		// sorted: the source bytes of each `$` whose maths never closes
 }
 
 impl Lexer {
@@ -142,8 +146,22 @@ impl Lexer {
 		Self::with(Frame::Code('\0'))
 	}
 
+	/// A scan of the whole of `src`'s markup, or of its lines fed in order from its first, that reads each
+	/// `$` whose maths never closes ([`lone_dollars`]) as a character.
+	pub(crate) fn markup_over(src: &str) -> Self {
+		Self::markup().with_lone(lone_dollars(src))
+	}
+
+	/// This scan, reading the `$` at each of the source bytes `lone` as a character. A caller that feeds
+	/// lines from anywhere but the source's start says where each stands with [`Lexer::feed_line_at`].
+	pub(crate) fn with_lone(mut self, mut lone: Vec<usize>) -> Self {
+		lone.sort_unstable();
+		self.lone = lone;
+		self
+	}
+
 	fn with(base: Frame) -> Self {
-		Lexer { frames: vec![base], col: 0, blank: 0, prev: None }
+		Lexer { frames: vec![base], col: 0, blank: 0, prev: None, at: 0, lone: Vec::new() }
 	}
 
 	/// Is anything open beyond the scan's own level: a group, a string, an equation, a comment, raw text,
@@ -255,6 +273,12 @@ impl Lexer {
 		self.feed("\n");
 	}
 
+	/// As [`Lexer::feed_line`], for a `line` whose first character stands at byte `at` of the source.
+	pub(crate) fn feed_line_at(&mut self, line: &str, at: usize) {
+		self.at = at;
+		self.feed_line(line);
+	}
+
 	/// Reads the token, or the part of a longer one, at `i`: how many characters it takes (at least one)
 	/// and what they are.
 	pub(crate) fn step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
@@ -278,7 +302,8 @@ impl Lexer {
 				}
 			}
 		}
-		self.prev = Some(chars[i + n - 1]);
+		self.prev	= Some(chars[i + n - 1]);
+		self.at		= self.at.saturating_add(chars[i..i + n].iter().map(|c| c.len_utf8()).sum::<usize>());
 		(n, tok)
 	}
 
@@ -324,7 +349,7 @@ impl Lexer {
 					return (run, Tok::Raw);
 				},
 				Some(Frame::Markup(_))	=> return self.markup_step(chars, i),
-				Some(Frame::Math)		=> return self.math_step(chars, i),
+				Some(Frame::Math(_))	=> return self.math_step(chars, i),
 				Some(Frame::Code(close)) => {
 					let close = *close;
 					return self.code_step(chars, i, close);
@@ -444,7 +469,7 @@ impl Lexer {
 			},
 			']'		=> self.markup_close(),
 			'#'		=> { self.frames.push(Frame::Embed(Embed::Start)); (1, Tok::Hash) },
-			'$'		=> { self.frames.push(Frame::Math); (1, Tok::Open) },
+			'$'		=> self.dollar(),
 			'*' if !self.in_word(chars, i)	=> { self.toggle(Kind::Strong); (1, Tok::Text) },
 			'_' if !self.in_word(chars, i)	=> { self.toggle(Kind::Emph); (1, Tok::Text) },
 			_		=> (1, Tok::Text),
@@ -544,6 +569,15 @@ impl Lexer {
 		(j - i, Tok::Ref)
 	}
 
+	/// A `$` in markup or code: it opens an equation, unless its maths never closes, when it is a character.
+	fn dollar(&mut self) -> (usize, Tok) {
+		if self.lone.binary_search(&self.at).is_ok() {
+			return (1, Tok::Text);
+		}
+		self.frames.push(Frame::Math(self.at));
+		(1, Tok::Open)
+	}
+
 	fn math_step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
 		if let Some(r) = self.trivia(chars, i, false) {
 			return r;
@@ -575,7 +609,7 @@ impl Lexer {
 			'('		=> { self.frames.push(Frame::Code(')')); (1, Tok::Open) },
 			'{'		=> { self.frames.push(Frame::Code('}')); (1, Tok::Open) },
 			'['		=> { self.frames.push(Frame::Markup(Markup::new(true, false))); (1, Tok::Open) },
-			'$'		=> { self.frames.push(Frame::Math); (1, Tok::Open) },
+			'$'		=> self.dollar(),
 			'<' if chars.get(i + 1).copied().is_some_and(is_id_continue)	=> (label_len(chars, i), Tok::Label),
 			_		=> (1, Tok::Code),
 		}
@@ -886,12 +920,42 @@ fn number_len(chars: &[char], i: usize) -> usize {
 	j.max(i + 1) - i
 }
 
+/// The source bytes of each `$` in `src` whose maths never closes, in order. Typst refuses the file there,
+/// with the rest of the source taken into the equation; the lexer reads each of these as a character
+/// instead, so the error stays at the `$` and the markup after it is read. A pass over the source that ends
+/// inside maths names the innermost equation's `$`, and the source is read again with it, until a pass ends
+/// outside maths: at most one pass for each `$`.
+pub(crate) fn lone_dollars(src: &str) -> Vec<usize> {
+	let mut lone = Vec::new();
+	if !src.contains('$') {
+		return lone;
+	}
+	let chars: Vec<char>	= src.chars().collect();
+	let passes				= chars.iter().filter(|&&c| c == '$').count() + 1;
+	for _ in 0..passes {
+		let mut lx	= Lexer::markup().with_lone(lone.clone());
+		let mut i	= 0usize;
+		while i < chars.len() {
+			i += lx.step(&chars, i).0;
+		}
+		let open = lx.frames.iter().rev().find_map(|f| match f {
+			Frame::Math(at)	=> Some(*at),
+			_				=> None,
+		});
+		match open {
+			Some(at)	=> lone.insert(lone.partition_point(|&p| p < at), at),
+			None		=> break,
+		}
+	}
+	lone
+}
+
 /// Each character of `src` read as a file's markup, with the byte it starts at.
 pub(crate) fn tokens(src: &str) -> Vec<(usize, char, Tok)> {
 	let chars: Vec<(usize, char)>	= src.char_indices().collect();
 	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
 	let mut out						= Vec::with_capacity(only.len());
-	let mut lx						= Lexer::markup();
+	let mut lx						= Lexer::markup_over(src);
 	let mut i						= 0usize;
 	while i < only.len() {
 		let (n, tok) = lx.step(&only, i);
@@ -956,7 +1020,7 @@ pub(crate) fn live_text(src: &str) -> String {
 pub(crate) fn placed_lines(src: &str) -> Vec<(usize, &str, Place)> {
 	let mut out		= Vec::new();
 	let mut offset	= 0usize;
-	let mut lx		= Lexer::markup();
+	let mut lx		= Lexer::markup_over(src);
 	for raw in src.split_inclusive('\n') {
 		if let Some(place) = lx.place_of(raw) {
 			out.push((offset, raw, place));
@@ -1066,7 +1130,7 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
 	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
 	let mut out: Vec<Flow>		= Vec::new();
-	let mut lx					= Lexer::markup();
+	let mut lx					= Lexer::markup_over(src);
 	let mut cur: Option<Flow>	= None;
 	let mut hash: Option<usize>	= None;	// the byte of a `#` just read at the scan's own level
 	let mut head				= 0usize;	// where the open arm's condition starts
@@ -1233,6 +1297,29 @@ mod tests {
 		let src = "#let x = \"a // b /* c\"\n$ \"d /* e\" $\nAfter\n";
 		assert_eq!(live_text(src), src);
 		assert_eq!(tops(src).len(), 3);
+	}
+
+	#[test]
+	fn lone_dollars_leaves_earlier_pairs() {
+		// Typst 0.15.1 refuses each of these files with "unclosed delimiter" at exactly the `$` named.
+		assert_eq!(lone_dollars("a $x$ b $ c"), [8]);
+		// A `]` is maths inside an equation, so the second `$` closes the first; the group never closes.
+		assert_eq!(lone_dollars("#emph[a $b] c $d$"), [16]);
+		// An equation opened in a group inside another: neither closes, the inner found first.
+		assert_eq!(lone_dollars("$ a #[ b $ c"), [0, 9]);
+		assert!(lone_dollars("a $x$ b $ y $\n").is_empty());
+		let toks: Vec<Tok> = tokens("a $x$ b $ c").into_iter().map(|(_, _, t)| t).collect();
+		assert_eq!(toks[2..5], [Tok::Open, Tok::Math, Tok::Close]);
+		assert_eq!(toks[8..], [Tok::Text; 3]);
+	}
+
+	#[test]
+	fn a_dollar_that_never_closes_hides_no_line() {
+		let src = "Alpha $x + y.\n\n= Heading Later\n#include \"a.typ\"\n#if a [B]\n";
+		assert_eq!(tops(src), vec!["Alpha $x + y.", "", "= Heading Later", "#include \"a.typ\"", "#if a [B]"]);
+		assert_eq!(flows_of(src).len(), 1);
+		// A backtick after it opens raw text, as after any character of prose, so the `/*` in it opens nothing.
+		assert_eq!(live_text("A $ `b /* c` d\n"), "A $".to_string() + &fmt_spaces(10, "d\n"));
 	}
 
 	#[test]
