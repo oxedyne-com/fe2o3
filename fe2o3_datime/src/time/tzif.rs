@@ -318,6 +318,37 @@ impl TZifData {
         Ok(&self.abbreviations[abbrev_start..abbrev_end])
     }
 
+    /// Data that is nothing but a POSIX TZ rule such as `AEST-10AEDT,M10.1.0,M4.1.0/3`,
+    /// the form libc reads `TZ` in when no zoneinfo file answers to it. With no
+    /// transitions the rule alone answers, as a footer does past the end of its table.
+    pub fn from_posix_rule(rule: &str) -> Outcome<Self> {
+        let zone = res!(PosixZone::parse(rule));
+        let mut abbreviations = format!("{}\0", zone.std_name);
+        let mut local_time_types = vec![
+            LocalTimeType { utc_offset: zone.std, is_dst: false, abbreviation_index: 0 },
+        ];
+        if let Some(dst) = &zone.dst {
+            local_time_types.push(LocalTimeType {
+                utc_offset:         dst.off,
+                is_dst:             true,
+                abbreviation_index: abbreviations.len(),
+            });
+            abbreviations.push_str(&dst.name);
+            abbreviations.push('\0');
+        }
+        Ok(Self {
+            version:                    3,
+            transition_times:           Vec::new(),
+            transition_types:           Vec::new(),
+            local_time_types,
+            abbreviations,
+            leap_seconds:               Vec::new(),
+            standard_wall_indicators:   Vec::new(),
+            ut_local_indicators:        Vec::new(),
+            posix_tz_string:            Some(rule.to_string()),
+        })
+    }
+
     /// The offset in force at a UTC instant. Before the first transition the
     /// first local time type applies (RFC 8536, section 3.2). At or after the
     /// last, the footer's POSIX rule does where the file has one: a "slim" file
@@ -422,12 +453,14 @@ where
 /// string such as `EST5EDT,M3.2.0,M11.1.0` or `<+1030>-10:30<+11>-11,M10.1.0,M4.1.0`.
 #[derive(Clone, Debug, PartialEq)]
 struct PosixZone {
-    std: i32, // seconds east of UTC
-    dst: Option<PosixDst>,
+    std:      i32, // seconds east of UTC
+    std_name: String,
+    dst:      Option<PosixDst>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 struct PosixDst {
+    name:    String,
     off:     i32, // seconds east of UTC
     start:   PosixDay,
     start_t: i32, // seconds after local midnight, which may be negative or exceed a day
@@ -446,12 +479,12 @@ impl PosixZone {
     fn parse(text: &str) -> Outcome<Self> {
         let b = text.as_bytes();
         let mut i = 0;
-        res!(Self::name(b, &mut i, text));
+        let std_name = res!(Self::name(b, &mut i, text));
         let std = -res!(Self::seconds(b, &mut i, text));
         if i == b.len() {
-            return Ok(Self { std, dst: None });
+            return Ok(Self { std, std_name, dst: None });
         }
-        res!(Self::name(b, &mut i, text));
+        let dst_name = res!(Self::name(b, &mut i, text));
         let off = if i < b.len() && b[i] != b',' {
             -res!(Self::seconds(b, &mut i, text))
         } else {
@@ -470,11 +503,12 @@ impl PosixZone {
                 "Unread text '{}' after the rule in the TZif footer '{}'.", &text[i..], text;
                 Invalid, Input));
         }
-        Ok(Self { std, dst: Some(PosixDst { off, start, start_t, end, end_t }) })
+        Ok(Self { std, std_name, dst: Some(PosixDst { name: dst_name, off, start, start_t, end, end_t }) })
     }
 
-    // A zone name, letters or angle-bracketed, three characters at least.
-    fn name(b: &[u8], i: &mut usize, text: &str) -> Outcome<()> {
+    // A zone name, letters or angle-bracketed, three characters at least, as the
+    // abbreviation it spells (the brackets are not part of it).
+    fn name(b: &[u8], i: &mut usize, text: &str) -> Outcome<String> {
         let from = *i;
         if *i < b.len() && b[*i] == b'<' {
             while *i < b.len() && b[*i] != b'>' {
@@ -500,7 +534,8 @@ impl PosixZone {
                     Invalid, Input));
             }
         }
-        Ok(())
+        let spelt = &text[from..*i];
+        Ok(spelt.trim_start_matches('<').trim_end_matches('>').to_string())
     }
 
     // [+-]h[h[h]][:mm[:ss]], in seconds, the sign kept as written.

@@ -55,15 +55,29 @@ fn offsets_agree(
 )
 	-> Outcome<usize>
 {
+	offsets_agree_tz(zone, Some(tz), tzdir, from, to, step)
+}
+
+// As `offsets_agree`, with TZ left unset for GNU date where `tz` is None.
+fn offsets_agree_tz(
+	zone:	&CalClockZone,
+	tz:		Option<&str>,
+	tzdir:	Option<&Path>,
+	from:	i64,
+	to:		i64,
+	step:	i64,
+)
+	-> Outcome<usize>
+{
 	let grid: Vec<i64> = (from..to).step_by(step as usize).collect();
 	let lines: Vec<String> = grid.iter().map(|t| fmt!("@{}", t)).collect();
-	let said = res!(date_batch(tz, tzdir, &lines, "+%z"));
+	let said = res!(date_batch_tz(tz, tzdir, &lines, "+%z"));
 	let mut prev: Option<(i64, i64)> = None;
 	let mut edges: Vec<(i64, i64, i64)> = Vec::new(); // first second under the new offset, old, new
 	for (i, t) in grid.iter().enumerate() {
 		let mine = res!(zone.offset_millis_at_time(t * 1000)) as i64 / 1000;
 		let theirs = z_secs(said[i].as_deref().unwrap_or("+0000"));
-		assert_eq!(mine, theirs, "{} at UTC second {}", tz, t);
+		assert_eq!(mine, theirs, "TZ={:?} at UTC second {}", tz, t);
 		if let Some((pt, po)) = prev {
 			if po != mine {
 				// Bisect to the first second under the new offset.
@@ -82,12 +96,12 @@ fn offsets_agree(
 		prev = Some((*t, mine));
 	}
 	let around: Vec<String> = edges.iter().flat_map(|(t, _, _)| [fmt!("@{}", t - 1), fmt!("@{}", t)]).collect();
-	let said = res!(date_batch(tz, tzdir, &around, "+%z"));
+	let said = res!(date_batch_tz(tz, tzdir, &around, "+%z"));
 	for (k, (t, old, new)) in edges.iter().enumerate() {
 		let before = z_secs(said[2 * k].as_deref().unwrap_or("+0000"));
 		let after = z_secs(said[2 * k + 1].as_deref().unwrap_or("+0000"));
-		assert_eq!(before, *old, "{} one second before the change at {}", tz, t);
-		assert_eq!(after, *new, "{} at the change at {}", tz, t);
+		assert_eq!(before, *old, "TZ={:?} one second before the change at {}", tz, t);
+		assert_eq!(after, *new, "TZ={:?} at the change at {}", tz, t);
 	}
 	Ok(edges.len())
 }
@@ -345,6 +359,119 @@ fn fixed_answers_across_the_transitions() -> Outcome<()> {
 	// Asia/Kathmandu is +05:45 all year.
 	if let Some(zone) = res!(zone_from(ZONEINFO, "Asia/Kathmandu")) {
 		assert_eq!(zone.local_to_utc(ms(1_782_907_200)), Single(ms(1_782_886_500)));
+	}
+	Ok(())
+}
+
+// Puts TZ back as it was, whether the test that changed it returns or panics.
+// This file's other tests never read TZ, and the oracle runs they start set it
+// for the child alone, so the one test that changes it needs no lock.
+struct TzRestored(Option<String>);
+
+impl Drop for TzRestored {
+	fn drop(&mut self) {
+		match &self.0 {
+			Some(tz)	=> std::env::set_var("TZ", tz),
+			None		=> std::env::remove_var("TZ"),
+		}
+	}
+}
+
+// What `here()` makes of each way of writing TZ, with the number of changes it
+// has in 2026. GNU date, which reads TZ as libc does, is asked at every instant.
+#[test]
+fn here_reads_tz_as_libc_does() -> Outcome<()> {
+	if skip_without_oracle() { return Ok(()); }
+	let _restored = TzRestored(std::env::var("TZ").ok());
+	let forms: [(Option<&str>, usize); 19] = [
+		(None,											0),	// this host's /etc/localtime
+		(Some(""),										0),	// UTC, not "unset"
+		(Some(":"),										0),
+		(Some("UTC"),									0),
+		(Some(":/etc/localtime"),						0),
+		(Some(":Australia/Perth"),						0),
+		(Some("Australia/Lord_Howe"),					2),
+		(Some("/usr/share/zoneinfo/America/New_York"),	2),	// a path to a TZif file
+		(Some("AEST-10AEDT,M10.1.0,M4.1.0/3"),			2),	// a rule string, southern
+		(Some(":AEST-10AEDT,M10.1.0,M4.1.0/3"),			2),
+		(Some("EST5EDT,M3.2.0,M11.1.0"),				2),	// and northern, if no file by that name
+		(Some("<+0530>-5:30"),							0),
+		(Some("<+05>-5"),								0),
+		(Some("EST5"),									0),
+		(Some("UTC+5"),									0),	// five hours west: POSIX's sign, not Java's
+		(Some("UTC-3"),									0),
+		(Some("GMT+5"),									0),
+		(Some("garbage/Nowhere"),						0),	// what nothing reads is UTC
+		(Some("Etc/GMT+5"),								0),
+	];
+	for (tz, changes) in forms {
+		match tz {
+			Some(tz)	=> std::env::set_var("TZ", tz),
+			None		=> std::env::remove_var("TZ"),
+		}
+		let zone = CalClockZone::here();
+		let got = res!(offsets_agree_tz(&zone, tz, None, Y2026, Y2027, 1200));
+		assert_eq!(got, changes, "TZ={:?} changes in 2026", tz);
+		if tz == Some("garbage/Nowhere") {
+			// The fallback is named in the zone, which is what a command prints of it.
+			assert_eq!(zone.id(), "garbage/Nowhere");
+		}
+	}
+	Ok(())
+}
+
+// A rule string as a zone in its own right: both hemispheres, a rule time other
+// than 02:00, a negative one, one past a day, the last week, half an hour of
+// daylight saving, a negative one, the day-of-year forms and a rule that never
+// changes. GNU date answers offsets and wall times; the abbreviations are the
+// rule's own names.
+#[test]
+fn a_posix_rule_makes_a_zone_that_matches_gnu_date() -> Outcome<()> {
+	if skip_without_oracle() { return Ok(()); }
+	let rules = [
+		"EST5EDT,M3.2.0,M11.1.0",
+		"CET-1CEST,M3.5.0,M10.5.0/3",
+		"<+1030>-10:30<+11>-11,M10.1.0,M4.1.0",
+		"AEST-10AEDT,M10.1.0,M4.1.0/3",
+		"NZST-12NZDT,M9.5.0,M4.1.0/3",
+		"<-0330>3:30<-0230>,M3.2.0,M11.1.0",
+		"IST-1GMT0,M10.5.0,M3.5.0/1",
+		"EST5EDT,M3.2.0/-1,M11.1.0/26",
+		"EST5EDT,J60,J300",
+		"EST5EDT,59,299",
+		"<+05>-5",
+		"UTC+5",
+	];
+	// A rule with no dates, such as `AEST-10AEDT`, is left out: POSIX leaves its dates to
+	// the implementation, and glibc takes them from the host's `posixrules` file.
+	for rule in rules {
+		let zone = res!(CalClockZone::from_posix_rule(rule));
+		assert_eq!(zone.id(), rule);
+		res!(offsets_agree(&zone, rule, None, Y2026, Y2027, 1800));
+		res!(offsets_agree(&zone, rule, None, Y2038, Y2043, 7200));
+		res!(locals_agree(&zone, rule, None, Y2026, Y2027, 1800));
+	}
+	let data = res!(TZifData::from_posix_rule("<+1030>-10:30<+11>-11,M10.1.0,M4.1.0"));
+	let names: Vec<&str> = data.local_time_types.iter()
+		.map(|t| data.get_abbreviation(t).unwrap_or("?"))
+		.collect();
+	assert_eq!(names, ["+1030", "+11"], "angle brackets are not part of a name");
+	let data = res!(TZifData::from_posix_rule("AEST-10AEDT,M10.1.0,M4.1.0/3"));
+	let seen: Vec<(&str, i32, bool)> = data.local_time_types.iter()
+		.map(|t| (data.get_abbreviation(t).unwrap_or("?"), t.utc_offset, t.is_dst))
+		.collect();
+	assert_eq!(seen, [("AEST", 36_000, false), ("AEDT", 39_600, true)]);
+	let zone = res!(CalClockZone::from_posix_rule("AEST-10AEDT,M10.1.0,M4.1.0/3"));
+	assert_eq!(zone.raw_offset_millis(), 36_000_000, "the standard offset, as Java's getRawOffset");
+	Ok(())
+}
+
+// What is not a rule is an error here, and `here()` keeps its fallback for it.
+#[test]
+fn text_that_is_not_a_rule_is_refused() -> Outcome<()> {
+	for text in ["", "garbage/Nowhere", "EST", "ES", "EST5EDT,M13.1.0,M11.1.0", "EST5EDT,M3.2.0", "+05:00"] {
+		assert!(CalClockZone::from_posix_rule(text).is_err(), "'{}' was read as a rule", text);
+		assert!(TZifData::from_posix_rule(text).is_err(), "'{}' was read as rule data", text);
 	}
 	Ok(())
 }
