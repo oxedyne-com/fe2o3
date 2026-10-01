@@ -50,6 +50,29 @@
 //! read, which is where the rule stood until this was written. The smallest artefact in that sweep
 //! was 101,960 bytes, three times the span.
 //!
+//! # Key material without its wrapper
+//!
+//! A credential is recognised by the part of it that makes it one, and some credentials put that
+//! part last. The body of a PEM key written into a file before its armour is, a password typed up to
+//! but not including its closing quote: a tool that records a file as it is saved will record such a
+//! file between the two saves, and the save that completes it is refused too late. Written on
+//! 2026-10-02 after qa1 found exactly that (D3) with `ore edit`, which saves without being asked.
+//!
+//! So the body is recognised without its armour. Every run of lines made of base64 and nothing else,
+//! and every long base64 token in a line that is not, is decoded with [`crate::base64`] and put to
+//! [`der_key`], the rule that already refuses a key written as raw DER, so that a certificate body
+//! is not refused and a key body is, armoured or not. An OpenSSH key is not DER; it opens with a
+//! fixed string, which is as exact a mark as an object identifier, and is found by that. Armour is
+//! still what is reported when it is there, and a marker is still what excuses a key written as
+//! text, on the line above the body as on the line above the armour. The finding names the line the
+//! key's last byte is on, because a caller that passes over a line already recorded must be asked
+//! about the line that completed the key.
+//!
+//! What stays a fragment is stated rather than found later. A body saved short of its last byte is
+//! not a key, as the first characters of a token are not a token. Base64 that is wrapped in
+//! anything, such as quotes at the start of a line, a comment marker on every line, or `\n` escapes
+//! in a JSON string, is read only where a long enough token stands whole in one line.
+//!
 //! # Why the shapes are matched by hand
 //!
 //! [`crate::regex`] would say these patterns in one line each, and is not used for two reasons: it
@@ -58,6 +81,9 @@
 //! [`interesting`] prefilter is what makes that pass cheap -- a byte that opens no shape is
 //! rejected on a handful of comparisons -- and [`leads_are_covered`] is the test that keeps the
 //! prefilter honest as shapes are added.
+
+use crate::base64;
+
 
 // Fewest bytes an assigned literal must hold before it is worth suspecting, how far into a file
 // the scan looks for a NUL before calling it a binary, and the marker that excuses a line, spelled
@@ -140,6 +166,33 @@ pub const DER_ALGOS: &[&[u8]] = &[
 // default. Read off one key per curve, the same day and the same way. P-256, P-384, P-521.
 const DER_SCALARS: &[u8] = &[0x20, 0x30, 0x42];
 
+// Fewest base64 characters that can hold a private key, which is DER_MIN bytes at six bits a
+// character, and most that are kept of a run to be decoded: DER_SPAN bytes' worth and a little over,
+// so that a run just past the span is told from one at it.
+const B64_MIN: usize = (DER_MIN * 4 + 2) / 3;
+const B64_KEEP: usize = (DER_SPAN * 4 + 2) / 3 + 8;
+
+// The front of an OpenSSH private key, which `ssh-keygen` writes by default and which is no DER: it
+// opens with this string and a NUL, and holds a private key whether or not a passphrase wraps it.
+const OPENSSH_MAGIC: &[u8] = b"openssh-key-v1\0";
+
+// The same fifteen bytes as base64 at the start of a line, which is where they stand in a body.
+const OPENSSH_B64: &[u8] = b"b3BlbnNzaC1rZXktdjEA";
+
+// Which bytes are in the base64 alphabet.
+const B64: [bool; 256] = b64_table();
+
+const fn b64_table() -> [bool; 256] {
+	let mut table = [false; 256];
+	let mut i = 0;
+	while i < 256 {
+		let b = i as u8;
+		table[i] = b.is_ascii_alphanumeric() || b == b'+' || b == b'/';
+		i += 1;
+	}
+	table
+}
+
 // Field names that say outright what the value beside them is.
 const FIELDS: &[&str] = &[
 	"api_key",
@@ -182,7 +235,7 @@ pub enum Kind {
 	Slack,		// xoxb-, xoxa-, xoxp-, xoxr-, xoxs-
 	Stripe,		// sk_live_, rk_live_
 	Google,		// AIza
-	PrivateKey,	// a PEM private key block
+	PrivateKey,	// a PEM private key block, or the body of one without its armour
 	DerKey,		// a private key written as DER, at any offset in a small file
 	Assigned,	// a named secret field holding a long literal
 }
@@ -332,7 +385,7 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 	// over: NULs at the front, no text anywhere, and nothing the line walk below can see. It is a
 	// property of the bytes rather than of a line, so it answers on its own and stops here,
 	// whatever else stands around the key.
-	if let Some(at) = der_key(data) {
+	if let Some((at, _)) = der_key(data) {
 		out.push(Find { line: line_at(data, at), kind: Kind::DerKey });
 		return out;
 	}
@@ -341,18 +394,47 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 		return out;
 	}
 	let mut kinds = Vec::new();
-	let mut prev: &[u8] = b"";
+	let mut run = Run::new();
+	let mut prev_ex = false;		// the line above carries the marker
+	let mut prev_armour = false;	// the line above opens a private key block
+	let mut behind = false;			// a run put a finding on a line above the ones since
 	for (i, line) in data.split(|b| *b == b'\n').enumerate() {
 		// The line above excuses this one, so that a marker can sit in a comment over the line it
 		// speaks for rather than trailing off the end of it.
-		if !excused(line) && !excused(prev) {
-			kinds.clear();
-			kinds_at(line, &mut kinds);
+		let marked = excused(line);
+		let ex = marked || prev_ex;
+		kinds.clear();
+		kinds_at(line, &mut kinds);
+		let armour = kinds.contains(&Kind::PrivateKey);
+		if !ex {
 			for kind in &kinds {
 				out.push(Find { line: i + 1, kind: *kind });
 			}
 		}
-		prev = line;
+		match b64_line(line) {
+			Some((chars, padded)) => {
+				if !run.on {
+					// A body under its armour is spoken for by the armour, found or excused.
+					run.start(ex || prev_armour);
+				}
+				run.push(i + 1, chars);
+				if padded {
+					behind |= run.end(&mut out);
+				}
+			},
+			None => {
+				behind |= run.end(&mut out);
+				if !ex && !armour {
+					tokens_at(line, i + 1, &mut out);
+				}
+			},
+		}
+		prev_ex = marked;
+		prev_armour = armour;
+	}
+	behind |= run.end(&mut out);
+	if behind {
+		out.sort_by_key(|f| f.line);
 	}
 	out
 }
@@ -429,7 +511,8 @@ pub fn skip_path(path: &[u8]) -> bool {
 	LOCKFILES.iter().any(|f| f.as_bytes() == last)
 }
 
-/// Where a private key, written as DER and left unarmoured, stands in these bytes, if one does.
+/// Where a private key, written as DER and left unarmoured, stands in these bytes, and how many
+/// bytes it takes, if one does.
 ///
 /// The front of the input is asked whatever its size, and every offset in it as well while it is
 /// no wider than [`DER_SPAN`]. Until 2026-08-23 only the front was asked, and `cat cert.der
@@ -440,9 +523,9 @@ pub fn skip_path(path: &[u8]) -> bool {
 /// There is no marker that excuses a finding here, and there cannot be: this reads the key's own
 /// structure and nothing around it, so there is nowhere to write one that it would look at. A test
 /// that needs a key should generate one, which is what this crate's own suite does.
-fn der_key(data: &[u8]) -> Option<usize> {
-	if der_key_at(data, 0) {
-		return Some(0);
+fn der_key(data: &[u8]) -> Option<(usize, usize)> {
+	if let Some(whole) = der_key_at(data, 0) {
+		return Some((0, whole));
 	}
 	if data.len() > DER_SPAN {
 		return None;
@@ -458,15 +541,17 @@ fn der_key(data: &[u8]) -> Option<usize> {
 			continue;
 		}
 		for hdr in 1..=3 {
-			if v >= 1 + hdr && der_key_at(data, v - 1 - hdr) {
-				return Some(v - 1 - hdr);
+			if v >= 1 + hdr {
+				if let Some(whole) = der_key_at(data, v - 1 - hdr) {
+					return Some((v - 1 - hdr, whole));
+				}
 			}
 		}
 	}
 	None
 }
 
-/// Does one stand at this offset?
+/// How many bytes the key takes, if one stands at this offset.
 ///
 /// The three questions are the encoding's own, and each of them has one answer. The outer
 /// `SEQUENCE` declares its own length and that is where the key ends: everything asked below is
@@ -475,19 +560,19 @@ fn der_key(data: &[u8]) -> Option<usize> {
 /// carries the public key too, which is the 83-byte shape `ring` writes and the shape the DKIM key
 /// was in. What follows the version is then an algorithm's object identifier from [`DER_ALGOS`],
 /// or the modulus of a PKCS#1 RSA key, or the private scalar of a SEC1 elliptic curve key.
-fn der_key_at(data: &[u8], at: usize) -> bool {
+fn der_key_at(data: &[u8], at: usize) -> Option<usize> {
 	if data.len() - at < DER_MIN || data[at] != 0x30 {
-		return false;
+		return None;
 	}
 	let (len, hdr) = match der_len(&data[at + 1..]) {
 		Some(v)	=> v,
-		None	=> return false,
+		None	=> return None,
 	};
 	let whole = 1 + hdr + len;
 	// The SEQUENCE has to be all there, and the ceiling is asked of the length it declares rather
 	// than of what is left of the file.
 	if whole > data.len() - at || whole > DER_MAX {
-		return false;
+		return None;
 	}
 	// Bounded by the declared length, so that a SEQUENCE too short to hold one of the shapes below
 	// cannot borrow the bytes standing after it to finish the match.
@@ -499,18 +584,22 @@ fn der_key_at(data: &[u8], at: usize) -> bool {
 		// as well as a PKCS#8 algorithm.
 		let after = &body[3..];
 		if DER_SCALARS.iter().any(|w| after.starts_with(&[0x04, *w])) {
-			return true;
+			return Some(whole);
 		}
 		after
 	} else {
-		return false;
+		return None;
 	};
 	if DER_ALGOS.iter().any(|a| after.starts_with(a)) {
-		return true;
+		return Some(whole);
 	}
 	// PKCS#1, which names no algorithm: what follows the version is the modulus, an INTEGER whose
 	// length is written long form because no key worth having has one under 128 bytes.
-	after.starts_with(&[0x02, 0x81]) || after.starts_with(&[0x02, 0x82])
+	if after.starts_with(&[0x02, 0x81]) || after.starts_with(&[0x02, 0x82]) {
+		Some(whole)
+	} else {
+		None
+	}
 }
 
 /// The line an offset falls on, counting line feeds, so that a key written into a text file is
@@ -532,6 +621,224 @@ fn der_len(from: &[u8]) -> Option<(usize, usize)> {
 		},
 		_						=> None,
 	}
+}
+
+/// A run of lines made of base64 and nothing else, gathered to be decoded as one body.
+///
+/// Held once and reused, because most files are full of one-word lines that are base64 by the
+/// alphabet and nothing more, and each of them would otherwise cost an allocation.
+struct Run {
+	on:		bool,
+	skip:	bool,					// excused, or under armour that speaks for it
+	chars:	Vec<u8>,				// the first B64_KEEP characters
+	total:	usize,					// every character, kept or not
+	ends:	Vec<(usize, usize)>,	// characters held, and the line, at the end of each kept line
+	last:	usize,					// the line the run has reached
+}
+
+impl Run {
+	fn new() -> Self {
+		Self { on: false, skip: false, chars: Vec::new(), total: 0, ends: Vec::new(), last: 0 }
+	}
+
+	fn start(&mut self, skip: bool) {
+		self.on = true;
+		self.skip = skip;
+		self.chars.clear();
+		self.ends.clear();
+		self.total = 0;
+	}
+
+	fn push(&mut self, line: usize, chars: &[u8]) {
+		self.last = line;
+		if self.skip {
+			return;
+		}
+		self.total += chars.len();
+		let room = B64_KEEP.saturating_sub(self.chars.len());
+		if room > 0 {
+			self.chars.extend_from_slice(&chars[..chars.len().min(room)]);
+			self.ends.push((self.chars.len(), line));
+		}
+	}
+
+	/// Closes the run, putting a finding into `out` if it was the body of a key. True if it did.
+	fn end(&mut self, out: &mut Vec<Find>) -> bool {
+		if !self.on {
+			return false;
+		}
+		self.on = false;
+		if self.skip {
+			return false;
+		}
+		let found = match body_key(&self.chars, self.total) {
+			Some(at)	=> Some(at),
+			None		=> self.later(),
+		};
+		match found {
+			Some(at) => {
+				out.push(Find { line: self.line_of(at), kind: Kind::PrivateKey });
+				true
+			},
+			None => false,
+		}
+	}
+
+	/// Tries each line after the first as the start of a body of its own.
+	///
+	/// A word or a label on a line of its own in front of a body puts every character after it
+	/// out of step with the run's start, and the run is then decoded as noise. A key's first
+	/// byte is a `SEQUENCE` tag, so its first character is fixed, and a line is only decoded
+	/// where it could open one.
+	fn later(&self) -> Option<usize> {
+		for j in 1..self.ends.len() {
+			let from = self.ends[j - 1].0;
+			if let Some(at) = front_key(&self.chars[from..]) {
+				return Some(if at == usize::MAX { at } else { from + at });
+			}
+		}
+		None
+	}
+
+	/// The line a character was on. Past the characters kept, which is where an OpenSSH key is
+	/// said to end, it is the last line the run reached.
+	fn line_of(&self, at: usize) -> usize {
+		for (held, line) in &self.ends {
+			if at < *held {
+				return *line;
+			}
+		}
+		self.last
+	}
+}
+
+/// The base64 a line is made of when it is made of nothing else, and whether padding ends it.
+///
+/// Blanks at either end are not part of it, so a body indented in a YAML block or ended with a
+/// carriage return is the same body.
+fn b64_line(line: &[u8]) -> Option<(&[u8], bool)> {
+	let mut end = line.len();
+	while end > 0 && matches!(line[end - 1], b' ' | b'\t' | b'\r') {
+		end -= 1;
+	}
+	let mut pad = 0;
+	while pad < 2 && end > 0 && line[end - 1] == b'=' {
+		end -= 1;
+		pad += 1;
+	}
+	let body = blank(&line[..end]);
+	if body.is_empty() || !body.iter().all(|b| B64[*b as usize]) {
+		return None;
+	}
+	Some((body, pad > 0))
+}
+
+/// Puts a finding at this line into `out` if a long base64 token in it decodes to a private key.
+///
+/// For a line that is not made of base64 alone, so a key on one line with other text beside it:
+/// `KEY=`, a quote, a tag. Where the text is glued to the token with no character between that
+/// base64 does not admit, the token starts out of step with the base64 it carries and is not read.
+fn tokens_at(line: &[u8], no: usize, out: &mut Vec<Find>) {
+	let mut at = 0;
+	while at < line.len() {
+		if !B64[line[at] as usize] {
+			at += 1;
+			continue;
+		}
+		let from = at;
+		while at < line.len() && B64[line[at] as usize] {
+			at += 1;
+		}
+		let token = &line[from..at];
+		if token.len() >= B64_MIN
+			&& body_key(&token[..token.len().min(B64_KEEP)], token.len()).is_some()
+		{
+			out.push(Find { line: no, kind: Kind::PrivateKey });
+			return;
+		}
+	}
+}
+
+/// Where a private key's body ends among these base64 characters, if the characters are one.
+///
+/// The characters decoded are put to the rule a raw DER key is, on the same terms: every offset
+/// while the bytes are no wider than [`DER_SPAN`], and only the front above that. `total` is the
+/// run's whole length where `chars` holds only the front of it. The answer is the index of the
+/// last character the key takes, or the largest `usize` for an OpenSSH key, which runs to the end
+/// of its body.
+fn body_key(chars: &[u8], total: usize) -> Option<usize> {
+	if total < B64_MIN {
+		return None;
+	}
+	let bytes = unbase64(chars);
+	if total * 3 / 4 > DER_SPAN {
+		return match der_key_at(&bytes, 0) {
+			Some(whole)	=> Some(last_char(whole)),
+			None		=> if bytes.starts_with(OPENSSH_MAGIC) { Some(usize::MAX) } else { None },
+		};
+	}
+	if let Some((at, whole)) = der_key(&bytes) {
+		return Some(last_char(at + whole));
+	}
+	if bytes.windows(OPENSSH_MAGIC.len()).any(|w| w == OPENSSH_MAGIC) {
+		return Some(usize::MAX);
+	}
+	None
+}
+
+/// Where a private key's body ends if one begins at the first of these base64 characters.
+///
+/// Asked of the front only, and cheaply, since it is asked of every line a run holds: a `SEQUENCE`
+/// opens with `M` and a second character from `A` to `I` whatever its length, and only then is
+/// the length read and that much decoded.
+fn front_key(chars: &[u8]) -> Option<usize> {
+	if chars.starts_with(OPENSSH_B64) {
+		return Some(usize::MAX);
+	}
+	if chars.len() < B64_MIN || chars[0] != b'M' || !(b'A'..=b'I').contains(&chars[1]) {
+		return None;
+	}
+	let head = unbase64(&chars[..8]);
+	let need = match head.get(1..).and_then(der_len) {
+		Some((len, hdr))	=> 1 + hdr + len,
+		None				=> return None,
+	};
+	if need > DER_MAX {
+		return None;
+	}
+	let upto = ((need * 4 + 2) / 3 + 4).min(chars.len());
+	der_key_at(&unbase64(&chars[..upto]), 0).map(last_char)
+}
+
+/// What base64 characters decode to, taking the last quantum as it stands.
+///
+/// Padded out with zero sextets to whole quanta and cut back to the bytes the characters carry, so
+/// that a body whose padding was left off, or whose last character a careless encoder left bits
+/// in, reads as the key it is rather than as nothing. The characters are all in the alphabet, which
+/// is what the strict decoder asks, so it has nothing to refuse.
+fn unbase64(chars: &[u8]) -> Vec<u8> {
+	let mut text = Vec::with_capacity(chars.len() + 3);
+	text.extend_from_slice(chars);
+	while text.len() % 4 != 0 {
+		text.push(b'A');
+	}
+	let text = match String::from_utf8(text) {
+		Ok(t)	=> t,
+		Err(_)	=> return Vec::new(),
+	};
+	match base64::decode(&text) {
+		Ok(mut bytes)	=> {
+			bytes.truncate(chars.len() * 3 / 4);
+			bytes
+		},
+		Err(_)	=> Vec::new(),
+	}
+}
+
+/// The index of the last base64 character that carries a bit of the byte before `end`.
+fn last_char(end: usize) -> usize {
+	let b = end - 1;
+	(b / 3) * 4 + b % 3 + 1
 }
 
 /// Does the line carry the marker that excuses it?
@@ -638,9 +945,13 @@ fn literal(after: &[u8]) -> bool {
 	if n < MIN_LITERAL {
 		return false;
 	}
-	// The run has to end where the quote does, or what stands there is not one literal.
+	// The run has to end where the quote does, or at the end of the line. A quote not yet typed is
+	// the state a password is saved in between the keystrokes, and a scanner that waits for the
+	// quote records it whole. Qa1's D3, 2026-09-23. What follows the run on the same line, when it
+	// is neither, says it is not one literal.
 	match rest.get(n) {
 		Some(b'"') | Some(b'\'')	=> (),
+		_ if rest[n..].iter().all(|b| matches!(b, b' ' | b'\t' | b'\r'))	=> (),
 		_							=> return false,
 	}
 	!placeholder(&rest[..n])
