@@ -162,5 +162,41 @@ pub fn test_quiet(filter: &'static str) -> Outcome<()> {
         Ok(())
     }));
 
+    // What a caller does on noticing the machine slept: it has no reading it can trust, and the
+    // time spent still is not time anybody watched.
+    res!(test_it(filter, &["A restart drops the reading and starts the window over 000", "all", "quiet"], || {
+        let quiet = Duration::from_secs(15);
+        let poll  = Duration::from_secs(5);
+        let mut q: Quiet<u64> = Quiet::new(quiet);
+        let t0 = Instant::now();
+        assert_eq!(q.poll(5, t0, poll), Stillness::Moved);
+        assert_eq!(q.poll(5, t0 + quiet, poll), Stillness::Still);
+        q.restart();
+        assert_eq!(q.reading(), None);
+        // The same reading is no longer still: it begins its window afresh, as a first poll does.
+        assert_eq!(q.poll(5, t0 + quiet + poll, poll), Stillness::Moved);
+        assert_eq!(q.reading(), Some(&5));
+        assert_eq!(q.poll(5, t0 + quiet + poll * 2, poll), Stillness::Settling(quiet - poll));
+        assert_eq!(q.poll(5, t0 + quiet + poll + quiet, poll), Stillness::Still);
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["A restart is not a gap and keeps the configuration 000", "all", "quiet"], || {
+        let mut q: Quiet<u64> = Quiet::with_gap_factor(Duration::from_secs(15), 10);
+        let poll = Duration::from_secs(1);
+        let t0 = Instant::now();
+        assert_eq!(q.poll(1, t0, poll), Stillness::Moved);
+        q.restart();
+        // An hour later, by the guard's own arithmetic a very long gap, but the restart took the
+        // memory of the last poll with it: this is a first poll, not a restart reported twice.
+        let t1 = t0 + Duration::from_secs(3_600);
+        assert_eq!(q.poll(1, t1, poll), Stillness::Moved);
+        // The window and the gap factor are those given at construction.
+        assert_eq!(q.poll(1, t1 + Duration::from_secs(9), poll), Stillness::Settling(Duration::from_secs(6)));
+        assert_eq!(q.poll(1, t1 + Duration::from_secs(15), poll), Stillness::Still);
+        assert_eq!(q.poll(1, t1 + Duration::from_secs(40), poll), Stillness::Restarted);
+        Ok(())
+    }));
+
     Ok(())
 }
