@@ -63,10 +63,12 @@
 //! [`der_key`], the rule that already refuses a key written as raw DER, so that a certificate body
 //! is not refused and a key body is, armoured or not. An OpenSSH key is not DER; it opens with a
 //! fixed string, which is as exact a mark as an object identifier, and is found by that. Armour is
-//! still what is reported when it is there, and a marker is still what excuses a key written as
-//! text, on the line above the body as on the line above the armour. The finding names the line the
-//! key's last byte is on, because a caller that passes over a line already recorded must be asked
-//! about the line that completed the key.
+//! still what is reported when it is there, and what a marker speaks to: a body under armour is
+//! passed over, found or excused as the armour is. A body with no armour is [`Kind::KeyBody`], and
+//! no marker excuses it, as none excuses a raw DER key, because the rule reads the key's own
+//! structure and there is nowhere to write one that it would look at. The finding names the line
+//! the key's last byte is on, because a caller that passes over a line already recorded must be
+//! asked about the line that completed the key.
 //!
 //! What stays a fragment is stated rather than found later. A body saved short of its last byte is
 //! not a key, as the first characters of a token are not a token. Base64 that is wrapped in
@@ -235,8 +237,9 @@ pub enum Kind {
 	Slack,		// xoxb-, xoxa-, xoxp-, xoxr-, xoxs-
 	Stripe,		// sk_live_, rk_live_
 	Google,		// AIza
-	PrivateKey,	// a PEM private key block, or the body of one without its armour
+	PrivateKey,	// a PEM private key block
 	DerKey,		// a private key written as DER, at any offset in a small file
+	KeyBody,	// the base64 body of a private key with no armour, which no marker excuses
 	Assigned,	// a named secret field holding a long literal
 }
 
@@ -256,6 +259,7 @@ impl Kind {
 			Self::Google		=> "Google API key",
 			Self::PrivateKey	=> "private key block",
 			Self::DerKey		=> "private key in DER form",
+			Self::KeyBody		=> "private key body without its armour",
 			Self::Assigned		=> "assigned secret literal",
 		}
 	}
@@ -415,7 +419,7 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 			Some((chars, padded)) => {
 				if !run.on {
 					// A body under its armour is spoken for by the armour, found or excused.
-					run.start(ex || prev_armour);
+					run.start(prev_armour);
 				}
 				run.push(i + 1, chars);
 				if padded {
@@ -424,7 +428,7 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 			},
 			None => {
 				behind |= run.end(&mut out);
-				if !ex && !armour {
+				if !armour {
 					tokens_at(line, i + 1, &mut out);
 				}
 			},
@@ -629,7 +633,7 @@ fn der_len(from: &[u8]) -> Option<(usize, usize)> {
 /// alphabet and nothing more, and each of them would otherwise cost an allocation.
 struct Run {
 	on:		bool,
-	skip:	bool,					// excused, or under armour that speaks for it
+	skip:	bool,					// under armour that speaks for it
 	chars:	Vec<u8>,				// the first B64_KEEP characters
 	total:	usize,					// every character, kept or not
 	ends:	Vec<(usize, usize)>,	// characters held, and the line, at the end of each kept line
@@ -677,7 +681,7 @@ impl Run {
 		};
 		match found {
 			Some(at) => {
-				out.push(Find { line: self.line_of(at), kind: Kind::PrivateKey });
+				out.push(Find { line: self.line_of(at), kind: Kind::KeyBody });
 				true
 			},
 			None => false,
@@ -753,7 +757,7 @@ fn tokens_at(line: &[u8], no: usize, out: &mut Vec<Find>) {
 		if token.len() >= B64_MIN
 			&& body_key(&token[..token.len().min(B64_KEEP)], token.len()).is_some()
 		{
-			out.push(Find { line: no, kind: Kind::PrivateKey });
+			out.push(Find { line: no, kind: Kind::KeyBody });
 			return;
 		}
 	}

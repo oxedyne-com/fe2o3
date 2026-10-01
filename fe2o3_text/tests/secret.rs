@@ -546,7 +546,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 			for width in WIDTHS {
 				for eol in ["\n", "\r\n"] {
 					let body = wrapped(&key, *width, eol);
-					let want = vec![Find { line: lines_in(&body), kind: Kind::PrivateKey }];
+					let want = vec![Find { line: lines_in(&body), kind: Kind::KeyBody }];
 					req!(secret::scan(body.as_bytes()), want, "for {:?}, {} wide", what, width);
 				}
 			}
@@ -561,16 +561,16 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 			indented.push_str(&fmt!("    {}\n", line));
 		}
 		indented.push_str("other: 1\n");
-		req!(secret::scan(indented.as_bytes()), vec![Find { line: 1 + n, kind: Kind::PrivateKey }],
+		req!(secret::scan(indented.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
 			"indented");
 		req!(secret::scan(body.trim_end().as_bytes()),
-			vec![Find { line: n, kind: Kind::PrivateKey }], "no newline at the end");
+			vec![Find { line: n, kind: Kind::KeyBody }], "no newline at the end");
 		// A word or a label alone on the line above is all alphabet, so it runs into the body and
 		// puts every character after it out of step. The body is found all the same, and the same
 		// word after it, or a certificate with a label above it, is nothing.
 		for label in ["notes", "id", "Key", "ssh", "x"] {
 			let text = fmt!("{}\n{}{}\n", label, body, label);
-			req!(secret::scan(text.as_bytes()), vec![Find { line: 1 + n, kind: Kind::PrivateKey }],
+			req!(secret::scan(text.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
 				"after {:?}", label);
 			let cert = fmt!("{}\n{}", label, wrapped(&res!(der(CERT.0, CERT.1)), 64, "\n"));
 			req!(secret::scan(cert.as_bytes()), Vec::<Find>::new(), "certificate after {:?}", label);
@@ -596,15 +596,18 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		// On the armour line itself.
 		let beside = fmt!("{}{}{}", head.trim_end(), fmt!(" # {}\n", secret::MARKER), body);
 		req!(secret::scan(beside.as_bytes()), Vec::<Find>::new(), "marker on the armour line");
-		// With no armour a marker on the line above excuses the body, and one line further does not.
+		// With no armour there is no line that says what the body is, and so no marker for it:
+		// the rule reads the key's own structure, as it does for a raw DER key. A marker above the
+		// body, on it, or below it excuses nothing.
 		let above = fmt!("# {}\n{}", secret::MARKER, body);
-		req!(secret::scan(above.as_bytes()), Vec::<Find>::new(), "marker above a bare body");
-		let far = fmt!("# {}\n\n{}", secret::MARKER, body);
-		req!(secret::scan(far.as_bytes()), vec![Find { line: 2 + n, kind: Kind::PrivateKey }],
-			"marker two lines above");
+		req!(secret::scan(above.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
+			"marker above a bare body");
 		let below = fmt!("{}# {}\n", body, secret::MARKER);
-		req!(secret::scan(below.as_bytes()), vec![Find { line: n, kind: Kind::PrivateKey }],
+		req!(secret::scan(below.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }],
 			"marker below");
+		let one = fmt!("{} # {}\n", base64::encode(&key), secret::MARKER);
+		req!(secret::scan(one.as_bytes()), vec![Find { line: 1, kind: Kind::KeyBody }],
+			"marker beside a token");
 		Ok(())
 	}));
 
@@ -624,7 +627,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 					fmt!("<key>{}</key>\n", one),
 				] {
 					req!(secret::scan(form.as_bytes()),
-						vec![Find { line: 1, kind: Kind::PrivateKey }], "for {:?}, {}", what, form.len());
+						vec![Find { line: 1, kind: Kind::KeyBody }], "for {:?}, {}", what, form.len());
 				}
 			}
 		}
@@ -633,7 +636,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut both = res!(der(CERT.0, CERT.1));
 		both.extend_from_slice(&res!(der(DER[0].1, DER[0].2)));
 		let line = fmt!("bundle = {}\n", base64::encode(&both));
-		req!(secret::scan(line.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }], "bundle");
+		req!(secret::scan(line.as_bytes()), vec![Find { line: 1, kind: Kind::KeyBody }], "bundle");
 		Ok(())
 	}));
 
@@ -693,7 +696,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let half = all[..n - 1].join("\n");
 		req!(secret::scan(half.as_bytes()), Vec::<Find>::new(), "the last line missing");
 		req!(secret::scan(all.join("\n").as_bytes()),
-			vec![Find { line: n, kind: Kind::PrivateKey }], "complete");
+			vec![Find { line: n, kind: Kind::KeyBody }], "complete");
 		// Bytes after the key in the same run do not move the finding off the line the key ends on:
 		// an ed25519 key and thirty more bytes at twenty characters a line, which put the key's last
 		// byte in the fourth of six.
@@ -701,10 +704,10 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		run.extend_from_slice(&[0x5A; 30]);
 		let text = wrapped(&run, 20, "\n");
 		req!(lines_in(&text), 6);
-		req!(secret::scan(text.as_bytes()), vec![Find { line: 4, kind: Kind::PrivateKey }], "mid run");
+		req!(secret::scan(text.as_bytes()), vec![Find { line: 4, kind: Kind::KeyBody }], "mid run");
 		// A padded last line ends a run, so what follows it is a run of its own.
 		let more = fmt!("{}{}\n{}\n", body, noise(&mut 7u64, 64), noise(&mut 9u64, 64));
-		req!(secret::scan(more.as_bytes()), vec![Find { line: n, kind: Kind::PrivateKey }], "after");
+		req!(secret::scan(more.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }], "after");
 		Ok(())
 	}));
 
@@ -719,7 +722,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		req!(inside.len(), secret::DER_SPAN);
 		let found = secret::scan(wrapped(&inside, 64, "\n").as_bytes());
 		req!(found.len(), 1, "at the span");
-		req!(found[0].kind, Kind::PrivateKey);
+		req!(found[0].kind, Kind::KeyBody);
 		let mut over = vec![0x5A; secret::DER_SPAN + 1 - key.len()];
 		over.extend_from_slice(&key);
 		req!(over.len(), secret::DER_SPAN + 1);
@@ -728,7 +731,7 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut wide = key.clone();
 		wide.resize(secret::DER_SPAN * 4, 0x5A);
 		let text = wrapped(&wide, 64, "\n");
-		req!(secret::scan(text.as_bytes()), vec![Find { line: 2, kind: Kind::PrivateKey }], "front");
+		req!(secret::scan(text.as_bytes()), vec![Find { line: 2, kind: Kind::KeyBody }], "front");
 		// A run far wider than a key is read once and not at every line.
 		let mut state = 0x2545F4914F6CDD1Du64;
 		let mut big = String::new();
@@ -748,13 +751,13 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut key = OPENSSH_HEAD.to_vec();
 		key.resize(400, 0x5A);
 		let body = wrapped(&key, 70, "\n");
-		req!(secret::scan(body.as_bytes()), vec![Find { line: lines_in(&body), kind: Kind::PrivateKey }]);
+		req!(secret::scan(body.as_bytes()), vec![Find { line: lines_in(&body), kind: Kind::KeyBody }]);
 		let (head, tail) = armour("OPENSSH ");
 		let pem = fmt!("{}{}{}", head, body, tail);
 		req!(secret::scan(pem.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }], "armoured");
 		let labelled = fmt!("id\n{}", body);
 		req!(secret::scan(labelled.as_bytes()),
-			vec![Find { line: 1 + lines_in(&body), kind: Kind::PrivateKey }], "labelled");
+			vec![Find { line: 1 + lines_in(&body), kind: Kind::KeyBody }], "labelled");
 		// Behind other bytes in a small run it is still found, and in a wide one it is not.
 		let mut behind = vec![0x41; 40];
 		behind.extend_from_slice(&key);
@@ -803,13 +806,13 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 				"armoured, {}", what);
 			let body = body_of(&pem);
 			req!(secret::scan(body.as_bytes()),
-				vec![Find { line: lines_in(&body), kind: Kind::PrivateKey }], "body, {}", what);
+				vec![Find { line: lines_in(&body), kind: Kind::KeyBody }], "body, {}", what);
 			let one = body.replace('\n', "");
 			req!(secret::scan(fmt!("{}\n", one).as_bytes()),
-				vec![Find { line: 1, kind: Kind::PrivateKey }], "one line, {}", what);
+				vec![Find { line: 1, kind: Kind::KeyBody }], "one line, {}", what);
 			let crlf = body.replace('\n', "\r\n");
 			req!(secret::scan(crlf.as_bytes()),
-				vec![Find { line: lines_in(&body), kind: Kind::PrivateKey }], "CRLF, {}", what);
+				vec![Find { line: lines_in(&body), kind: Kind::KeyBody }], "CRLF, {}", what);
 		}
 		test!("{} of {} keys were made and tried.", tried, makers.len());
 		// And what is not a key, made the same way: a certificate and the public halves.
