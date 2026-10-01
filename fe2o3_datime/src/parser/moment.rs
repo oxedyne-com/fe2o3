@@ -22,8 +22,9 @@ use oxedyne_fe2o3_core::prelude::*;
 const MICROS:	i64 = 1_000_000;	// per second
 const DAY:		i64 = 86_400;		// seconds
 
-/// The forms `read` accepts, each with its meaning, for a caller that has to
-/// tell a person what it could not read.
+/// The forms `read` accepts, each with its meaning, for a caller to give a
+/// person whose words it could not read. The refusal names the words and the
+/// reason and leaves this list to the caller, which knows how it is being read.
 pub const FORMS: [(&str, &str); 5] = [
 	("HH:MM[:SS]",						"a clock time today, or yesterday's if today's has not come yet"),
 	("<n>s|m|h|d|w, repeated: 1h30m",	"that long ago, a day being 24 hours"),
@@ -334,10 +335,7 @@ fn offset(word: &str) -> Outcome<Option<i64>> {
 // attached to the time or standing as a word of its own.
 fn stamp(words: &[&str], zone: &CalClockZone) -> Outcome<Moment> {
 	let said = words.join(" ");
-	let bad = || err!(
-		"'{}' is not a time that can be read. It is none of: {}.",
-		said, FORMS.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(", ");
-		Invalid, Input);
+	let bad = || err!("'{}' is not a time that can be read.", said; Invalid, Input);
 	let splits_at_t = |w: &str| w.len() > 11 && matches!(w.as_bytes()[10], b'T' | b't');
 	let (date, time, word_zone) = match words {
 		[a] if splits_at_t(a)				=> (&a[..10], &a[11..], None),

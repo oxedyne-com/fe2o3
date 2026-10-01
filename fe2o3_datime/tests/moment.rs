@@ -276,18 +276,23 @@ fn the_reader_is_strict() -> Outcome<()> {
 }
 
 #[test]
-fn a_refusal_lists_the_forms() -> Outcome<()> {
+fn a_refusal_names_the_words_and_the_reason() -> Outcome<()> {
 	let utc = CalClockZone::utc();
 	let text = refusal(moment::read("last friday", NOW, &utc));
-	assert!(text.contains("'last friday'"), "{}", text);
-	for (form, _) in FORMS {
-		assert!(text.contains(form), "the refusal lacks the form {}: {}", form, text);
-	}
+	assert!(text.contains("'last friday' is not a time that can be read"), "{}", text);
 	// A reading that has the shape of a time and a wrong number says which.
 	let text = refusal(moment::read("25:00", NOW, &utc));
 	assert!(text.contains("hour") && text.contains("25"), "{}", text);
+	let text = refusal(moment::read("12:61", NOW, &utc));
+	assert!(text.contains("minute") && text.contains("61"), "{}", text);
 	let text = refusal(moment::read("2026-02-30 10:00", NOW, &utc));
 	assert!(text.contains("2026-02-30"), "{}", text);
+	// And what it reads is listed for the caller, each form once and in the words
+	// a person types.
+	assert_eq!(FORMS.len(), 5);
+	for (form, meaning) in FORMS {
+		assert!(!form.is_empty() && !meaning.is_empty());
+	}
 	Ok(())
 }
 
