@@ -1798,7 +1798,7 @@ fn claim_call(chars: &[char], i: usize) -> Option<(String, Vec<String>, usize)> 
 /// anything else taken as written -- `claims.typ`'s own `str(c)` fallback for a bare argument.
 fn claim_codes(inner: &str) -> Vec<String> {
 	let mut out = Vec::new();
-	for arg in split_claim_args(inner) {
+	for arg in split_top_args(inner) {
 		let a = arg.trim();
 		if a.is_empty() {
 			continue;
@@ -1813,28 +1813,6 @@ fn claim_codes(inner: &str) -> Vec<String> {
 		if !code.is_empty() {
 			out.push(code);
 		}
-	}
-	out
-}
-
-/// Splits a claim argument list on its top-level commas, holding a `<...>`, `(...)` or `[...]` nesting and
-/// a `"..."` string together so a comma inside one does not split an argument.
-fn split_claim_args(inner: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut cur		= String::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	for c in inner.chars() {
-		match c {
-			'"'								=> { in_str = !in_str; cur.push(c); },
-			'<' | '(' | '[' if !in_str		=> { depth += 1; cur.push(c); },
-			'>' | ')' | ']' if !in_str		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0 && !in_str	=> out.push(std::mem::take(&mut cur)),
-			_								=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
 	}
 	out
 }
@@ -2705,9 +2683,9 @@ fn dispatch_capture(
 			// blindly refused; lowering its arguments onto the theme is the book assembler's job (see
 			// [`crate::lang::set`] and [`crate::book`]), which reads the same source with the theme in hand,
 			// so nothing is emitted into the item stream here. A `#set` that would lower to nothing -- one
-			// applying no argument, or naming an unrecognised or unconvertible one -- is recorded as a
-			// refusal (H2), so it is visible rather than a silent no-op; a `#set` that fully lowers, and a
-			// `#show: doc.with(...)`, record nothing.
+			// applying no argument, or naming an unrecognised or unconvertible one, or one twice -- is
+			// recorded as a refusal (H2) naming the fields it left unapplied, so it is visible rather than a
+			// silent no-op; a `#set` that fully lowers, and a `#show: doc.with(...)`, record nothing.
 			//
 			// The assembler lowers a file's rules from its own level alone, so a rule that stands anywhere else
 			// -- in a list item, strong or emphasis, which end it, or in code -- is refused where it stands.
@@ -2723,13 +2701,13 @@ fn dispatch_capture(
 			let at		= Span::new(cap.start, cap.start);
 			let doc		= crate::lang::set::sets_document(&cap.buf);
 			let fold	= doc && (!binds.body || binds.joined) && cap.place != lex::Place::Content;
+			// What the rule names and the lowering cannot take; a container refuses the rule whole instead.
+			let left	= if cap.place == lex::Place::Contained { None } else { crate::lang::set::declstyle_refusal(&cap.buf) };
 			if fold {
 				// The fold of the file's own lines applies it, or refuses it at its site in a container. What an
 				// applied rule names and the fold cannot take is refused here, at the rule's line.
-				if cap.place != lex::Place::Contained {
-					if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
-						skips.record(&name, at);
-					}
+				if let Some((name, why)) = left {
+					skips.record_stand_in(&name, at, RefusalClass::Unsupported, &why);
 				}
 			} else if binds.body && (doc || rule || !binds.scoped) {
 				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
@@ -2738,8 +2716,8 @@ fn dispatch_capture(
 					decl_name(first)), at);
 			} else if cap.place != lex::Place::Top {
 				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
-			} else if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
-				skips.record(&name, at);
+			} else if let Some((name, why)) = left {
+				skips.record_stand_in(&name, at, RefusalClass::Unsupported, &why);
 			}
 		},
 		CaptureKind::Bare => {
@@ -2983,7 +2961,7 @@ fn pagebreak_is_weak(inner: &str) -> bool {
 /// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
 /// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
 fn first_arg(inner: &str) -> String {
-	split_arg_commas(inner).into_iter().next().unwrap_or_default()
+	split_top_args(inner).into_iter().next().unwrap_or_default()
 }
 
 /// Settles a container's body -- a callout's or a float's -- for a unit laid out whole, where the reader
@@ -3054,7 +3032,7 @@ fn content_call_args(buf: &str, name: &str) -> Vec<String> {
 	match chars.get(j) {
 		Some('(') => {
 			match read_group(&chars, j) {
-				Some((inner, _))	=> split_arg_commas(&inner).into_iter()
+				Some((inner, _))	=> split_top_args(&inner).into_iter()
 										.map(|a| content_arg_value(a.trim()))
 										.collect(),
 				None				=> Vec::new(),
@@ -3081,36 +3059,6 @@ fn content_arg_value(arg: &str) -> String {
 		}
 	}
 	unwrap_arg(t)
-}
-
-/// Splits an argument list on its top-level commas, honouring `(`/`[`/`{` nesting and `"..."` strings so a
-/// comma inside a bracketed or quoted argument does not split it.
-fn split_arg_commas(s: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut cur		= String::new();
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
 }
 
 /// Substitutes a content binding's positional arguments into its body: each line-leading or inline `#param`
@@ -3314,7 +3262,7 @@ pub(crate) fn substitute_content_calls(
 						let mut args:	Vec<String>	= Vec::new();
 						if chars.get(k) == Some(&'(') {
 							if let Some((inner, after)) = read_group(&chars, k) {
-								args = split_arg_commas(&inner).into_iter()
+								args = split_top_args(&inner).into_iter()
 									.map(|a| content_arg_value(a.trim()))
 									.collect();
 								k = after;

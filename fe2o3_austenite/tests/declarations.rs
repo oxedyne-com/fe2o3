@@ -144,6 +144,33 @@ fn a_nested_comment_holds_its_declarations_and_includes() -> Outcome<()> {
 	Ok(())
 }
 
+/// A `#set document`'s site names the fields it left unapplied, read from the same arguments the Info
+/// dictionary is read from, comments as trivia: a field commented out asks for nothing, a field whose value
+/// the reader cannot evaluate is named rather than dropped, and a field named twice, which Typst refuses,
+/// applies nothing and says so.
+#[test]
+fn a_set_documents_site_names_the_fields_it_left_unapplied() -> Outcome<()> {
+	let _turn = turn();
+	let cases = [
+		("#set document(title: \"T\" /* c */, date: auto)\n", Some("T"),
+			vec!["#set document left unapplied: date"]),
+		("#set document(title: 1 + 1)\n", None, vec!["#set document left unapplied: title"]),
+		("#set document(title: \"A\", title: \"B\")\n", None,
+			vec!["#set document names title twice, so none of it is applied"]),
+		("#set document(\n  // author: \"Old\", date: auto,\n  title: \"T\",\n)\n", Some("T"), vec![]),
+	];
+	for (set, title, want) in cases {
+		let src = fmt!("{}= H\n\nBody.\n", set);
+		let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", &src)]));
+		let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
+		let want: Vec<(usize, &str)> = want.into_iter().map(|m| (1, m)).collect();
+		assert_eq!(sites, want, "{:?}", set);
+		assert_eq!(rendered.doc_info.title.as_deref(), title, "{:?}", set);
+		assert_eq!(report.strict_failure(Path::new("/proj/main.typ")).is_some(), !want.is_empty(), "{:?}", set);
+	}
+	Ok(())
+}
+
 /// An `#include` in a callout's body is the body's: the file is the lone file it is, with no contents page,
 /// the callout is read whole and set, its include refused where it stands, and nothing after it is refused
 /// as never closing -- where the include was once followed as the file's own, the callout cut at it, and its

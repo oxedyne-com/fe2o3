@@ -355,3 +355,19 @@ fn code_mode_form_in_expanded_body_is_refused_not_leaked() -> Outcome<()> {
 	res!(assert_no_hash_leak(&blocks));
 	Ok(())
 }
+
+/// A call to a content binding takes a raw span as one argument, a comma inside it no part of the list, as in
+/// Typst (`N x, y`): a splitter that did not know raw text cut ``#note(`x, y`)`` at the comma and handed the
+/// binding two broken halves.
+#[test]
+fn a_comma_in_raw_text_parts_no_binding_argument() -> Outcome<()> {
+	let (blocks, refused) = res!(assemble_full(&[
+		("/__vfs__/main.typ",
+			"#import \"tmpl.typ\": note\n\n#note(`x, y`)\n\nInline #note(`p, q`) end.\n"),
+		("/__vfs__/tmpl.typ", "#let note(a) = [N #a]\n"),
+	]));
+	assert!(!refused.iter().any(|n| n.starts_with("#note")), "no call is refused: {:?}", refused);
+	assert!(has_block_text(&blocks, "N x, y"), "the raw span is the one argument, got: {:?}", blocks);
+	assert!(has_block_text(&blocks, "Inline N p, q end."), "an inline call takes it the same way, got: {:?}", blocks);
+	Ok(())
+}

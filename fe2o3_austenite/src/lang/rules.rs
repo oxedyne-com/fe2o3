@@ -51,6 +51,7 @@ use crate::theme::{
 	ThemePatch,
 };
 
+use super::lex;
 use super::parse::Refusals;
 use super::set;
 
@@ -1033,37 +1034,12 @@ fn call_args(s: &str, name: &str) -> Option<String> {
 	call_group(rest)
 }
 
-/// The text inside a balanced `(...)` at the start of `s` (which must open with `(`), spanning nested
-/// brackets and strings. `None` when the parentheses never close.
+/// The text inside a balanced `(...)` at the start of `s` (which must open with `(`), closed where the
+/// lexer closes it, so a bracket in a string, a comment or raw text does not end it. `None` when the
+/// parentheses never close.
 fn call_group(s: &str) -> Option<String> {
-	let s = s.trim_start();
-	let bytes = s.as_bytes();
-	if bytes.first() != Some(&b'(') {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for (i, c) in s.char_indices() {
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'			=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_			=> {},
-		}
-	}
-	None
+	let chars: Vec<char> = s.trim_start().chars().collect();
+	read_paren_group(&chars, 0).map(|(inner, _)| inner)
 }
 
 /// The text inside the first balanced `[...]` content block of `s`, or `None` when there is none.
@@ -1087,37 +1063,11 @@ fn bracket_content(s: &str) -> Option<String> {
 	None
 }
 
-/// The raw value text a `key:` names inside an argument list, up to the next top-level comma. `None` when
-/// the key is absent.
+/// The value text a `key:` names inside an argument list, as the lexer reads the list ([`lex::args`]): a
+/// comment is trivia, a string or group closes where Typst closes it, and a key is a key only at the list's
+/// own level, whole. `None` when the key is absent.
 fn named_value(args: &str, key: &str) -> Option<String> {
-	let bytes	= args.as_bytes();
-	let mut from	= 0usize;
-	let start = loop {
-		let rel	= args[from..].find(key)?;
-		let at	= from + rel;
-		let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
-		let mut j = at + key.len();
-		while j < bytes.len() && bytes[j] == b' ' {
-			j += 1;
-		}
-		if before_ok && j < bytes.len() && bytes[j] == b':' {
-			break j + 1;
-		}
-		from = at + key.len();
-	};
-	// Read to the next comma outside any nested group.
-	let tail	= &args[start..];
-	let mut depth	= 0i32;
-	let mut end		= tail.len();
-	for (i, c) in tail.char_indices() {
-		match c {
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_			=> {},
-		}
-	}
-	Some(tail[..end].trim().to_string())
+	lex::named(&lex::args(args), key).map(|v| v.to_string())
 }
 
 /// A template's named colour palette (`#let colours = (yellow: rgb("#f0f600"), ...)`), by name. Empty
@@ -2022,13 +1972,11 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp, palette: &Palette)
 /// `None` when the body wraps its content in no figure. `auto`/`top` float to the top, `bottom` to the
 /// foot -- the same mapping the `#figure` reader uses.
 fn figure_placement_in(expr: &str) -> Option<FloatPlacement> {
-	let at		= expr.find("figure(")?;
-	let rest	= &expr[at + "figure(".len()..];
-	let key		= rest.find("placement:")?;
-	let after	= rest[key + "placement:".len()..].trim_start();
-	// The value runs to the next comma or the close of the call.
-	let end		= after.find(|c| c == ',' || c == ')').unwrap_or(after.len());
-	match after[..end].trim() {
+	let chars: Vec<char> = expr.chars().collect();
+	let at		= find_call(&chars, "figure")?;
+	let (inner, _) = read_paren_group(&chars, at + "figure".len())?;
+	// The call's own `placement`, whole, so one named in a comment or a string is none.
+	match lex::named(&lex::args(&inner), "placement")? {
 		"auto"		=> Some(FloatPlacement::Auto),
 		"top"		=> Some(FloatPlacement::Top),
 		"bottom"	=> Some(FloatPlacement::Bottom),
@@ -2219,38 +2167,20 @@ fn read_inset_pads(raw: &str, body_size: Sp) -> Option<InsetPads> {
 	}
 }
 
-/// The first top-level `{ ... }` or `[ ... ]` content group in a wrap's argument list, as its delimiter and
-/// inner text -- the block the body parameter sits in. `None` when the call carries no positional content.
+/// The first positional `{ ... }` or `[ ... ]` content group in a wrap's argument list, as its delimiter and
+/// inner text -- the block the body parameter sits in. `None` when the call carries no positional content,
+/// or its first one never closes.
 fn positional_content(args: &str) -> Option<(char, String)> {
-	let chars:	Vec<char>	= args.chars().collect();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= 0usize;
-	while i < chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
+	for arg in lex::args(args) {
+		if arg.key.is_some() {
 			continue;
 		}
-		match c {
-			'"'					=> in_str = true,
-			'(' 				=> depth += 1,
-			')'					=> depth -= 1,
-			'{' | '[' if depth == 0	=> {
-				if let Some((span, _)) = crate::lang::parse::read_group(&chars, i) {
-					return Some((c, span));
-				}
-				return None;
-			},
-			'{' | '['			=> depth += 1,
-			'}' | ']'			=> depth -= 1,
-			_					=> {},
-		}
-		i += 1;
+		let chars: Vec<char> = arg.value.chars().collect();
+		let open = match chars.first() {
+			Some(&c) if c == '{' || c == '['	=> c,
+			_									=> continue,
+		};
+		return crate::lang::parse::read_group(&chars, 0).map(|(inner, _)| (open, inner));
 	}
 	None
 }
@@ -2921,6 +2851,54 @@ mod tests {
 		assert_eq!(tf.inset_x, Some(Sp::from_pt(8.0)), "the dict's x becomes inset_x");
 		assert_eq!(tf.inset_top, Some(Sp::from_pt(6.0)), "the dict's y becomes inset_top");
 		assert_eq!(tf.inset_bot, Some(Sp::from_pt(12.0)), "a following bottom overrides y for the foot pad");
+	}
+
+	/// A template's arguments are read as Typst reads them, comments as trivia: an argument written in a
+	/// comment is none, so an `inset: 1em` the reader cannot resolve, commented out, refuses nothing, and the
+	/// argument beside the comment still counts. The same holds for a furniture definition's block and its
+	/// `figure(placement:)` wrapper.
+	#[test]
+	fn a_template_argument_in_a_comment_is_no_argument() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240), // inset: 1em\n radius: 10pt)") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("a commented `inset: 1em` refused nothing in Typst: {:?}", other),
+		};
+		let tf = t.frame.expect("a fill names a frame");
+		assert_eq!((tf.inset_x, tf.radius), (None, Some(Sp::from_pt(10.0))), "the radius beside the comment is read");
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240), /* radius: 50%, */ inset: 8pt)") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("a commented `radius: 50%` refused nothing in Typst: {:?}", other),
+		};
+		let tf = t.frame.expect("a fill names a frame");
+		assert_eq!((tf.inset_x, tf.radius), (Some(Sp::from_pt(8.0)), None));
+
+		let src = "\
+#let pr-note(body) = block(
+	inset: 1em,
+	// above: 5pt,
+	{
+		// set text(size: 3pt)
+		body
+	},
+)
+#let aside(body) = {
+	let inner = box(inset: 1em, [#body])
+	figure(/* placement: bottom, */ placement: auto, inner)
+}
+#let ghost(body) = block(inset: 1em, {
+	// body
+	1
+})
+";
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
+		let note = tfns.get("pr-note").expect("pr-note is collected");
+		assert_eq!(note.patch.callout.inset_top, Some(Sp::from_pt(10.0)), "a commented `above:` sets no pad");
+		assert_eq!(note.patch.text.body_size, None, "a commented `set text` sets no size");
+		let aside = tfns.get("aside").expect("aside is collected");
+		assert_eq!(aside.float, Some(FloatPlacement::Auto), "the call's own placement, not the comment's");
+		assert!(tfns.get("ghost").is_none(), "a body named only in a comment is never placed, so nothing is lowered");
 	}
 
 	/// A rule's `inset`/`radius` that this reader cannot resolve to points -- an `em` value, which has no

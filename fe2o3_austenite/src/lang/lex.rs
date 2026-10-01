@@ -1084,7 +1084,6 @@ pub(crate) fn top_comma(src: &str) -> usize {
 pub(crate) struct Arg {
 	pub(crate) key:		Option<String>,	// a named argument's name; `None` when positional
 	pub(crate) value:	String,			// the value's text, its comments dropped, trimmed
-	pub(crate) at:		usize,			// the byte of its first token in the list
 }
 
 /// How much of an argument's head has been read, to tell a name before its `:` from a value.
@@ -1104,21 +1103,19 @@ enum Head {
 /// content block and every other value are positional. An empty argument, as a trailing comma leaves, is
 /// not listed.
 pub(crate) fn args(inner: &str) -> Vec<Arg> {
-	let chars: Vec<(usize, char)>	= inner.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
+	let only: Vec<char>		= inner.chars().collect();
 	let mut out: Vec<Arg>	= Vec::new();
 	let mut lx				= Lexer::code();
 	let mut head			= Head::Start;
 	let mut key				= None;
 	let mut value			= String::new();
-	let mut at				= None;
 	let mut i				= 0usize;
 	loop {
 		let top = !lx.is_open();
 		if i >= only.len() || (top && only[i] == ',') {
 			let v = value.trim();
 			if key.is_some() || !v.is_empty() {
-				out.push(Arg { key: key.take(), value: v.to_string(), at: at.unwrap_or(0) });
+				out.push(Arg { key: key.take(), value: v.to_string() });
 			}
 			if i >= only.len() {
 				break;
@@ -1126,7 +1123,6 @@ pub(crate) fn args(inner: &str) -> Vec<Arg> {
 			head	= Head::Start;
 			key		= None;
 			value.clear();
-			at		= None;
 			i += 1;
 			continue;
 		}
@@ -1144,9 +1140,6 @@ pub(crate) fn args(inner: &str) -> Vec<Arg> {
 			continue;
 		}
 		let blank = piece.iter().all(|c| c.is_whitespace());
-		if at.is_none() && !blank {
-			at = Some(chars[i - n].0);
-		}
 		if top && tok == Tok::Code && n == 1 {
 			let c = piece[0];
 			let next = match std::mem::replace(&mut head, Head::Value) {
@@ -1615,7 +1608,6 @@ mod tests {
 		]);
 		// A comment between a name and its colon leaves the name a key.
 		assert_eq!(keys("title /* c */ : \"T\""), vec!["title"]);
-		assert_eq!(args("a: 1,\n  b: 2")[1].at, "a: 1,\n  ".len());
 	}
 
 	#[test]

@@ -168,6 +168,51 @@ fn the_info_dictionary_is_typsts_for_the_same_source() -> Outcome<()> {
 	Ok(())
 }
 
+/// A comment inside a `#set document`'s parentheses is trivia, as Typst reads it: a field commented out is
+/// no field, a comma in a comment parts no argument, and a `key:` in a comment, a string or raw text names
+/// none, while a string's or raw text's own comment markers stay text. Each case is pinned to Typst 0.15.1's
+/// reading of it, and held against the installed `typst` where there is one.
+#[test]
+fn comments_in_set_document_are_trivia() -> Outcome<()> {
+	let cases: [(&str, &str, [Option<&str>; 4]); 9] = [
+		("e2", "#set document(title: \"T\" /* c */)\n\n= Root\n\nBody.\n", [Some("T"), None, None, None]),
+		("d3", "#set document(author: \"A\", title: \"T\" /* , title: \"Wrong\" */)\n\n= Root\n\nBody.\n",
+			[Some("T"), Some("A"), None, None]),
+		("i", "#set document(title: \"T, author: Q\" /* , author: \"X\" */, keywords: (\"k\",))\nBody.\n",
+			[Some("T, author: Q"), None, None, Some("k")]),
+		("j", "#set document(title: \"T\" // , author: \"X\"\n)\nBody.\n", [Some("T"), None, None, None]),
+		("k", "#set document(title: \"T\", author: \"A /* not */ B\")\nBody.\n",
+			[Some("T"), Some("A /* not */ B"), None, None]),
+		("l", "#set document(title: [T `raw, author: \"X\"` z])\nBody.\n",
+			[Some("T raw, author: \"X\" z"), None, None, None]),
+		("w", "#set document(\n  title: \"T\", // the working title\n  author: \"A\",\n)\nBody.\n",
+			[Some("T"), Some("A"), None, None]),
+		("x", "#set document(title: \"T\", keywords: (\"a\", /* \"b\", */ \"c\"))\nBody.\n",
+			[Some("T"), None, None, Some("a, c")]),
+		("y", "#set document(\n  // author: \"Old\",\n  title: \"T\",\n)\nBody.\n", [Some("T"), None, None, None]),
+	];
+	for (name, src, want) in cases {
+		let pdf = scratch(&fmt!("pdf_info_trivia_{}.pdf", name));
+		res!(std::fs::write(&pdf, res!(compile_pdf(src))));
+		let ours = res!(info_of(&pdf));
+		for (key, value) in METADATA.iter().zip(want) {
+			assert_eq!(ours.get(*key).map(|s| s.as_str()), value, "{}: {} ({:?})", name, key, ours);
+		}
+		if let Some(theirs) = res!(typst_info(src, &fmt!("trivia_{}", name))) {
+			for key in METADATA {
+				assert_eq!(ours.get(key), theirs.get(key), "{}: {} (ours {:?}, typst {:?})", name, key, ours, theirs);
+			}
+		}
+	}
+
+	// A field named twice is refused by Typst, which writes no PDF; nothing of the rule is applied here.
+	let pdf = scratch("pdf_info_trivia_dup.pdf");
+	res!(std::fs::write(&pdf, res!(compile_pdf("#set document(title: \"A\", title: \"B\")\nBody.\n"))));
+	let ours = res!(info_of(&pdf));
+	assert!(METADATA.iter().all(|k| !ours.contains_key(*k)), "a refused rule sets no field: {:?}", ours);
+	Ok(())
+}
+
 /// A `#set document` shown in a raw block or written in a comment is text, so it writes no Info entry, as
 /// in Typst.
 #[test]
