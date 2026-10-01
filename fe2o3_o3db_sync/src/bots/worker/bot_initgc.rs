@@ -285,7 +285,7 @@ impl<
                             // The index file cannot be read, so it is of no use to a scan
                             // either.  Read the data file and write the index back from it.
                             warn!(sync_log::stream(),
-                                "{}: Index file {} could not be read, so it is rebuilt by \
+                                "{}: Index file {} could not be used, so it is rebuilt by \
                                 reading data file {}; until this completes, a scan of this \
                                 zone under-reports what it holds. Caused by {}.",
                                 self.ozid(), fnum, fnum, e);

@@ -52,28 +52,29 @@ fn main() -> Outcome<()> {
     let (d_old, i_old) = (size(&d1), size(&i1));
     assert_eq!(d_old, 5 * len, "file 1 does not hold the five records it was sized for");
 
-    // 1. The collection that fails.  Superseding two of file 1's records starts it.
+    // 1. The collection that fails.  Superseding two of file 1's records starts it, which then
+    //    waits a second and a half before it reads the file, and a third record is superseded
+    //    while it waits, so that the file bot holds that supersession in the collection's buffer.
+    hooks::set_collect_delay(Duration::from_millis(1_500));
     hooks::set_collect_failure(true);
-    for i in 0..2 {
+    for i in 0..3 {
         res!(db.insert(key(i), value(i, 2), Uid::default(), None));
         want[i] = 2;
     }
     assert!(wait_until(Duration::from_secs(30), || hooks::collections_failed() >= 1),
         "the collection of file 1 never started");
-    // The abandoned collection takes its temporaries with it, and tells the file bot.
-    assert!(wait_until(Duration::from_secs(10), || temporaries(&zone).is_empty()),
-        "an abandoned collection left {:?} behind", temporaries(&zone));
-    assert_eq!((size(&d1), size(&i1)), (d_old, i_old),
-        "file 1 is not the pair it was after a collection that replaced nothing");
 
-    // 2. The file is not held.  A third supersession finds file 1 eligible again, which it could
-    //    not if the file bot were still waiting on the collection that failed.
-    res!(db.insert(key(2), value(2, 2), Uid::default(), None));
-    want[2] = 2;
+    // 2. The file is not held.  When the collection is abandoned the file bot replays what it
+    //    held, and the third supersession finds the file eligible again, so a second collection
+    //    starts and fails.  A file bot still waiting on the first would never start another.
     assert!(wait_until(Duration::from_secs(30), || hooks::collections_failed() >= 2),
         "file 1 was never collected again after a collection of it failed");
+    // The abandoned collections take their temporaries with them.
     assert!(wait_until(Duration::from_secs(10), || temporaries(&zone).is_empty()),
         "an abandoned collection left {:?} behind", temporaries(&zone));
+    hooks::set_collect_delay(Duration::ZERO);
+    assert_eq!((size(&d1), size(&i1)), (d_old, i_old),
+        "file 1 is not the pair it was after collections that replaced nothing");
     let held = judge(&db, &want, "After two failed collections");
 
     // 3. A temporary left in the directory, as a crash or a failed removal would leave it, must
