@@ -2242,7 +2242,8 @@ fn mask_flows(
 ///
 /// The text's own `#let`s bind where they stand and to the end of the block they stand in, over the names in
 /// force where the item starts: the one scope Typst reads a content block in. A conditional in a cell, a
-/// caption or a note thus resolves where it is written, not where the paragraph holding it starts.
+/// caption or a note thus resolves where it is written, not where the paragraph holding it starts. A `#let`
+/// or an `#import` sets nothing, so it is dropped and recorded, whether or not a conditional stands beside it.
 fn read_statements(
 	text:	&str,
 	span:	Span,
@@ -2251,16 +2252,18 @@ fn read_statements(
 )
 	-> String
 {
-	if !holds_flow(text) {
+	if !holds_statement(text) {
 		return text.to_string();	// the common case: nothing to read
 	}
 	let scope = binds.guards.body(binds.guard_at + span.start as usize, text);
 	statements_in(text, span, skips, &scope)
 }
 
-/// Might `text` hold a conditional or a loop? A cheap test ahead of the lexer, which decides.
-fn holds_flow(text: &str) -> bool {
+/// Might `text` hold a statement [`statements_in`] reads: a conditional, a loop, or a `#let` or `#import`
+/// binding? A cheap test ahead of the lexer, which decides.
+fn holds_statement(text: &str) -> bool {
 	text.contains("#if") || text.contains("#for") || text.contains("#while")
+		|| text.contains("#let") || text.contains("#import")
 }
 
 /// A captured construct, its conditionals and loops read once as the capture is dispatched, where it stands:
@@ -2290,15 +2293,16 @@ fn statements_in(text: &str, span: Span, skips: &mut Refusals, scope: &crate::la
 		site.span = span;
 		skips.sites.push(site);
 	}
-	// A `#let` binds a name and sets nothing, so its text is not set, and is reported as at a line's start.
-	for b in lex::bindings(text).iter().filter(|b| b.text.starts_with("#let")) {
+	// A `#let` binds a name and an `#import` brings names in; neither sets anything, so its text is not
+	// set, and is reported as at a line's start.
+	for b in lex::bindings(text) {
 		if !keep[b.start] {
 			continue;	// in a branch not taken
 		}
 		for k in &mut keep[b.start..b.at.min(text.len())] {
 			*k = false;
 		}
-		skips.record("#let", span);
+		skips.record(if b.text.starts_with("#let") { "#let" } else { "#import" }, span);
 	}
 	let mut out = String::with_capacity(text.len());
 	for (at, c) in text.char_indices() {
@@ -3461,7 +3465,7 @@ pub(crate) fn substitute_content_calls(
 						let expanded		= expand_content_body(cf, &args);
 						// Its conditionals and loops are read in the scope in force where the binding was
 						// written, where Typst evaluates it, before the text is spliced into the prose round it.
-						let expanded		= match holds_flow(&expanded) {
+						let expanded		= match holds_statement(&expanded) {
 							true	=> {
 								let scope = content_scope(cf, &raw, binds, span.start as usize, &expanded);
 								statements_in(&expanded, span, skips, &scope)

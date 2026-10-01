@@ -1322,3 +1322,54 @@ fn a_dollar_that_never_closes_leaves_a_callout_its_bracket_for_the_guard_scope()
 	assert_eq!(lone, [(4, 8)], "{:?}", report.diagnostics);
 	Ok(())
 }
+
+/// A `#let` or an `#import` written mid-line in prose binds a name and sets nothing, whether or not the
+/// paragraph holds a conditional: no run holds its source and the paragraph is reported once for it, where
+/// Typst sets `Bold still here.` (oracle probes `s2_let_mid_para_no_if` and `s1_binding_body_own_let`). A
+/// binding body's own `#let` is read the same once the block pass has taken the conditional beside it, and a
+/// conditional that stays in the paragraph still resolves a name the line binds.
+#[test]
+fn a_binding_written_mid_line_in_prose_is_not_set() -> Outcome<()> {
+	let _turn = turn();
+	let one = |src: &str| -> Outcome<(String, Vec<String>)> {
+		let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src), ("/proj/x.typ", "#let q = 1\n")]));
+		let names = report.diagnostics.iter().map(|d| d.message.clone()).collect();
+		Ok((words(&rendered), names))
+	};
+	let one_site = ["skipped #let (fixed-point)".to_string()];
+
+	// Alone in a paragraph, and twice in one, in strong and in an item.
+	let (text, names) = res!(one("Bold #let a = true; still here.\n\nPlain paragraph.\n"));
+	assert!(has(&text, "Bold still here.Plain paragraph."), "{}", text);
+	assert!(!text.contains("#let") && !text.contains("true"), "{}", text);
+	assert_eq!(names, one_site);
+	let (text, names) = res!(one("A #let a = 1; b #let c = 2; d.\n"));
+	assert!(has(&text, "A b d."), "{}", text);
+	assert!(!text.contains("#let") && !text.contains('='), "{}", text);
+	assert_eq!(names, ["skipped #let (fixed-point)", "skipped #let (fixed-point)"]);
+	let (text, names) = res!(one("Some *bold #let a = true; inner* text.\n\n- item #let c = 3; tail\n"));
+	assert!(has(&text, "Some bold inner text.") && has(&text, "item tail"), "{}", text);
+	assert!(!text.contains("#let") && !text.contains("true"), "{}", text);
+	assert_eq!(names, ["skipped #let (fixed-point)", "skipped #let (fixed-point)"]);
+
+	// An import brings names in and sets nothing either.
+	let (text, names) = res!(one("Text #import \"x.typ\": q; more here.\n\nNext.\n"));
+	assert!(has(&text, "Text more here.Next."), "{}", text);
+	assert!(!text.contains("#import") && !text.contains("x.typ"), "{}", text);
+	assert_eq!(names, ["skipped #import (fixed-point)".to_string()]);
+
+	// With a conditional in the paragraph, which resolves the name the line binds.
+	let (text, names) = res!(one("Bold #let a = true; and #if a [YES] else [NO] here.\n"));
+	assert!(has(&text, "Bold and YES here."), "{}", text);
+	assert!(!text.contains("#let") && !text.contains("NO"), "{}", text);
+	assert_eq!(names, one_site);
+
+	// A binding body's own `#let`, whose conditional the block pass has taken: the block and the inline
+	// expansion set the same words.
+	let src = "#let n = [N: #let z = true; #if z [Z] else [NZ].]\n\n#n\n\nPara #n end.\n";
+	let (text, names) = res!(one(src));
+	assert!(has(&text, "N: Z.Para N: Z. end."), "{}", text);
+	assert!(!text.contains("#let") && !text.contains("true") && !text.contains("NZ"), "{}", text);
+	assert!(!names.is_empty() && names.iter().all(|n| *n == one_site[0]), "{:?}", names);
+	Ok(())
+}
