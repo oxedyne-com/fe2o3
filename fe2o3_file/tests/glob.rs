@@ -5,6 +5,7 @@ use oxedyne_fe2o3_file::glob::{
     Glob,
     IgnoreFile,
     EDITOR_DROPPINGS,
+    SYNC_DROPPINGS,
 };
 use oxedyne_fe2o3_text::secret;
 
@@ -210,6 +211,40 @@ pub fn test_glob(filter: &'static str) -> Outcome<()> {
         let f = IgnoreFile::parse(lines.join("\n").as_bytes());
         assert!(!f.excludes(b"ch3.typ~", false), "a repo rule re-included it");
         assert!(f.excludes(b"other.typ~", false), "everything else is still kept out");
+        Ok(())
+    }));
+
+    res!(test_it(filter, &["Sync droppings keep out transfer names, never a conflict copy 000", "all",
+        "glob", "sync"], ||
+    {
+        for line in SYNC_DROPPINGS {
+            res!(Glob::new(line.as_bytes()));
+        }
+        let f = IgnoreFile::parse(SYNC_DROPPINGS.join("\n").as_bytes());
+        // Both spellings of the file Syncthing writes before it renames it into place, at any depth.
+        for path in [
+            ".syncthing.ch3.typ.tmp", "~syncthing~ch3.typ.tmp",
+            "notes/.syncthing.ch3.typ.tmp", "notes/deep/~syncthing~ch3.typ.tmp",
+        ] {
+            assert!(f.excludes(path.as_bytes(), false), "{} is a transfer file", path);
+        }
+        for path in [
+            // A conflict copy is the other machine's content, and is always kept.
+            "ch3.sync-conflict-20261001-123456-ABCDEFG.typ",
+            ".ch3.sync-conflict-20261001-123456-ABCDEFG.typ.swp",
+            // Folder-root bookkeeping, not a transfer name.
+            ".stfolder", ".stversions", ".stignore",
+            // Near misses: the whole shape has to hold.
+            "ch3.typ", "syncthing.tmp", "my.syncthing.ch3.tmp", ".syncthing.ch3.typ", "~syncthing~ch3.typ",
+        ] {
+            assert!(!f.excludes(path.as_bytes(), false), "{} is not", path);
+        }
+        // A repository's rule re-includes one by name, as for any dropping.
+        let mut lines: Vec<&str> = SYNC_DROPPINGS.to_vec();
+        lines.push("!.syncthing.*.tmp");
+        let f = IgnoreFile::parse(lines.join("\n").as_bytes());
+        assert!(!f.excludes(b".syncthing.ch3.typ.tmp", false), "a repo rule re-included it");
+        assert!(f.excludes(b"~syncthing~ch3.typ.tmp", false), "the other spelling is still kept out");
         Ok(())
     }));
 

@@ -64,7 +64,7 @@ pub fn test_quiet(filter: &'static str) -> Outcome<()> {
     }));
 
     // The control for the bug `ore-quiet-mark`'s bash loop had: "last seen" was stamped on only
-    // some code paths, so ten of the loop's own regular polls could look like a suspend gap and
+    // some code paths, so ten of the loop's own regular polls could look like a stalled gap and
     // restart the window. `Quiet::poll` stamps it unconditionally, on every call.
     res!(test_it(filter, &["Ten regular polls never trip the gap guard 000", "all", "quiet"], || {
         let quiet = Duration::from_secs(15);
@@ -96,8 +96,8 @@ pub fn test_quiet(filter: &'static str) -> Outcome<()> {
             Stillness::Still => {},
             other => return Err(err!("A gap equal to the guard must not restart, got {:?}.", other; Test)),
         }
-        // Now a real suspend: the machine sleeps for a minute between two polls. Even though the
-        // reading never changed, waking is not an hour of stillness.
+        // Now a stall: the process is stopped for a minute between two polls. Even though the
+        // reading never changed, nothing was watching, and waking is not a minute of stillness.
         assert_eq!(
             q.poll(3, t0 + Duration::from_secs(15) + Duration::from_secs(61), poll),
             Stillness::Restarted,
@@ -106,6 +106,43 @@ pub fn test_quiet(filter: &'static str) -> Outcome<()> {
         match q.poll(3, t0 + Duration::from_secs(15) + Duration::from_secs(62), poll) {
             Stillness::Settling(_) => {},
             other => return Err(err!("Expected Settling just after a restart, got {:?}.", other; Test)),
+        }
+        Ok(())
+    }));
+
+    // A real stall, from outside: a child shell stops this whole process with SIGSTOP for 600 ms
+    // and starts it again, and the guard must see the gap on `Instant`'s own clock. A suspend is
+    // not this. `Instant` does not run while the machine sleeps, so nothing here can show one.
+    #[cfg(target_os = "linux")]
+    res!(test_it(filter, &["A real SIGSTOP between two polls restarts the window 000", "all", "quiet"], || {
+        let stall = Duration::from_millis(600);
+        let poll  = Duration::from_millis(20);
+        let mut q: Quiet<u64> = Quiet::new(Duration::from_secs(60)); // guard = 3 * 20ms = 60ms.
+        let mut prev = Instant::now();
+        assert_eq!(q.poll(4, prev, poll), Stillness::Moved);
+        let mut child = res!(std::process::Command::new("sh")
+            .args(["-c", "kill -STOP $PPID; sleep 0.6; kill -CONT $PPID"])
+            .spawn());
+        let began = Instant::now();
+        let mut seen = false;
+        while !seen && began.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(poll);
+            let now = Instant::now();
+            let got = q.poll(4, now, poll);
+            // A scheduling hiccup on a loaded machine can restart the window by itself. Only a
+            // restart after a gap as long as the stall is the stop being seen.
+            if got == Stillness::Restarted && now.duration_since(prev) >= stall - Duration::from_millis(100) {
+                seen = true;
+            }
+            prev = now;
+        }
+        let status = res!(child.wait());
+        assert!(status.success(), "the stopping child failed: {:?}", status);
+        assert!(seen, "the guard never saw a gap of the stall's length after a real SIGSTOP");
+        // And the window really did start again at the restart, not finish.
+        match q.poll(4, Instant::now(), poll) {
+            Stillness::Settling(_) => {},
+            other => return Err(err!("Expected Settling just after the stall, got {:?}.", other; Test)),
         }
         Ok(())
     }));

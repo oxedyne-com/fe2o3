@@ -34,8 +34,7 @@
 //!
 //! [`quiet`] answers a different question: given a reading of something changing -- taken by the
 //! caller, not this crate -- has it gone still? It is a pure state machine with no I/O, for a poll
-//! loop such as `ore edit`'s tree-capture trigger, or `fe2o3_austenite`'s rebuild-on-change watch,
-//! to debounce against.
+//! loop to debounce against.
 //!
 //! [Written with AI](https://need2know.ai/with-ai/code)\
 //! Anthropic Claude

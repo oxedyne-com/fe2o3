@@ -5,18 +5,21 @@
 //! comparable by equality -- and hands it to [`Quiet::poll`] along with the time of the poll.
 //! `Quiet` answers with a [`Stillness`]: still moving, settling, still, or restarted.
 //!
-//! This is `ore edit`'s trigger ("the tree has changed and has been still for `N` seconds")
-//! pulled out so that a second caller, `fe2o3_austenite::watch`'s poll-based rebuild, can gain the
-//! same debounce without reimplementing it.
-//!
 //! # The gap guard
 //!
-//! A poll loop is not always running: a laptop can suspend between one poll and the next. Waking
-//! up is not an hour of stillness, so a gap between two polls more than `gap_factor` times the
-//! caller's own expected poll interval restarts the quiet window, reporting [`Stillness::Restarted`]
-//! rather than [`Stillness::Still`] at once. The interval is supplied on each call rather than
-//! fixed at construction, since a caller may lengthen its own poll interval over a run (as `ore
-//! edit` does, to keep a large tree's survey under a fixed share of one core).
+//! A poll loop is not always running. A process that is stopped (SIGSTOP, a debugger) or swapped
+//! out between one poll and the next watched nothing during the gap, and waking is not the
+//! stillness of an unchanged reading. So a gap between two polls of more than `gap_factor` times
+//! the caller's expected poll interval restarts the quiet window, reporting
+//! [`Stillness::Restarted`] rather than [`Stillness::Still`] at once. The interval is supplied on
+//! each call rather than fixed at construction, since a caller may lengthen its own poll interval
+//! over a run, to keep a large tree's survey under a fixed share of one core.
+//!
+//! The guard does not see the machine suspend, on Linux. [`Instant`] reads `CLOCK_MONOTONIC`,
+//! which stops while the machine sleeps, so a suspended hour is neither a gap nor an hour of
+//! stillness: the time is not counted at all, and a reading that held across it goes on with its
+//! window where it left off. A caller that must take a fresh reading on resume has to notice the
+//! resume itself, by comparing `CLOCK_BOOTTIME`, which counts suspend, against `Instant`.
 //!
 //! [Written with AI](https://need2know.ai/with-ai/code)\
 //! Anthropic Claude
