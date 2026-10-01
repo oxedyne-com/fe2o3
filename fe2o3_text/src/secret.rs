@@ -635,14 +635,13 @@ struct Run {
 	on:		bool,
 	skip:	bool,					// under armour that speaks for it
 	chars:	Vec<u8>,				// the first B64_KEEP characters
-	total:	usize,					// every character, kept or not
 	ends:	Vec<(usize, usize)>,	// characters held, and the line, at the end of each kept line
 	last:	usize,					// the line the run has reached
 }
 
 impl Run {
 	fn new() -> Self {
-		Self { on: false, skip: false, chars: Vec::new(), total: 0, ends: Vec::new(), last: 0 }
+		Self { on: false, skip: false, chars: Vec::new(), ends: Vec::new(), last: 0 }
 	}
 
 	fn start(&mut self, skip: bool) {
@@ -650,7 +649,6 @@ impl Run {
 		self.skip = skip;
 		self.chars.clear();
 		self.ends.clear();
-		self.total = 0;
 	}
 
 	fn push(&mut self, line: usize, chars: &[u8]) {
@@ -658,7 +656,6 @@ impl Run {
 		if self.skip {
 			return;
 		}
-		self.total += chars.len();
 		let room = B64_KEEP.saturating_sub(self.chars.len());
 		if room > 0 {
 			self.chars.extend_from_slice(&chars[..chars.len().min(room)]);
@@ -675,7 +672,7 @@ impl Run {
 		if self.skip {
 			return false;
 		}
-		let found = match body_key(&self.chars, self.total) {
+		let found = match body_key(&self.chars) {
 			Some(at)	=> Some(at),
 			None		=> self.later(),
 		};
@@ -754,9 +751,7 @@ fn tokens_at(line: &[u8], no: usize, out: &mut Vec<Find>) {
 			at += 1;
 		}
 		let token = &line[from..at];
-		if token.len() >= B64_MIN
-			&& body_key(&token[..token.len().min(B64_KEEP)], token.len()).is_some()
-		{
+		if token.len() >= B64_MIN && body_key(&token[..token.len().min(B64_KEEP)]).is_some() {
 			out.push(Find { line: no, kind: Kind::KeyBody });
 			return;
 		}
@@ -766,28 +761,28 @@ fn tokens_at(line: &[u8], no: usize, out: &mut Vec<Find>) {
 /// Where a private key's body ends among these base64 characters, if the characters are one.
 ///
 /// The characters decoded are put to the rule a raw DER key is, on the same terms: every offset
-/// while the bytes are no wider than [`DER_SPAN`], and only the front above that. `total` is the
-/// run's whole length where `chars` holds only the front of it. The answer is the index of the
-/// last character the key takes, or the largest `usize` for an OpenSSH key, which runs to the end
-/// of its body.
-fn body_key(chars: &[u8], total: usize) -> Option<usize> {
-	if total < B64_MIN {
+/// while the bytes are no wider than [`DER_SPAN`], and only the front above that. `chars` is as
+/// much of the run as is kept, which decodes to more than [`DER_SPAN`] bytes exactly when the run
+/// is wider than that. The answer is the index of the last character the key takes, or the largest
+/// `usize` for an OpenSSH key, which runs to the end of its body.
+fn body_key(chars: &[u8]) -> Option<usize> {
+	if chars.len() < B64_MIN {
 		return None;
 	}
 	let bytes = unbase64(chars);
-	if total * 3 / 4 > DER_SPAN {
-		return match der_key_at(&bytes, 0) {
-			Some(whole)	=> Some(last_char(whole)),
-			None		=> if bytes.starts_with(OPENSSH_MAGIC) { Some(usize::MAX) } else { None },
-		};
-	}
 	if let Some((at, whole)) = der_key(&bytes) {
 		return Some(last_char(at + whole));
 	}
-	if bytes.windows(OPENSSH_MAGIC.len()).any(|w| w == OPENSSH_MAGIC) {
-		return Some(usize::MAX);
+	let magic = if bytes.len() > DER_SPAN {
+		bytes.starts_with(OPENSSH_MAGIC)
+	} else {
+		bytes.windows(OPENSSH_MAGIC.len()).any(|w| w == OPENSSH_MAGIC)
+	};
+	if magic {
+		Some(usize::MAX)
+	} else {
+		None
 	}
-	None
 }
 
 /// Where a private key's body ends if one begins at the first of these base64 characters.

@@ -796,9 +796,12 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut behind = vec![0x41; 40];
 		behind.extend_from_slice(&key);
 		req!(secret::scan(wrapped(&behind, 70, "\n").as_bytes()).len(), 1, "behind");
-		let mut far = vec![0x41; secret::DER_SPAN + 1];
+		let mut far = vec![0x41; 31_000];
 		far.extend_from_slice(&key);
+		far.resize(34_400, 0x41);
 		req!(secret::scan(wrapped(&far, 70, "\n").as_bytes()), Vec::<Find>::new(), "far");
+		far.truncate(31_000 + key.len());
+		req!(secret::scan(wrapped(&far, 70, "\n").as_bytes()).len(), 1, "as far, and no wider");
 		// The public half of the same pair opens with a length and a name instead.
 		let mut public = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
 		public.resize(51, 0x5A);
