@@ -1280,3 +1280,27 @@ fn a_top_level_set_numbers_every_heading() -> Outcome<()> {
 	assert_eq!(numbered(&rendered, "Chap").as_deref(), Some("2."));
 	Ok(())
 }
+
+/// A bare content block `#[ ... ]` is a scope of its own: a conditional in it, and one after its closing
+/// bracket on the same line, resolves in the bindings in force where it stands, a `#let` in the block shadows
+/// the file's inside it alone, and a name nothing binds is refused at its line as Typst stops there (`a1`,
+/// `a2` of the Typst 0.15.1 oracle run: "Root INBLOCK ELSEIN x TAILSET y TAILEMPH OUTSIDE", and "unknown variable").
+#[test]
+fn a_bare_content_block_resolves_its_conditionals_where_it_stands() -> Outcome<()> {
+	let _turn = turn();
+	let src = "#let on = true\n= Root\n\n#[\n#if on [INBLOCK]\n]\n\n#[\n#let on = false\n#if on [NOTSHOWN] else [ELSEIN]\n]\n\n#[ x ] #if on [TAILSET]\n\n#[ y ] #emph[#if on [TAILEMPH]]\n\n#if on [OUTSIDE]\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	let text = words(&rendered);
+	for want in ["INBLOCK", "ELSEIN", "x", "TAILSET", "TAILEMPH", "OUTSIDE"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	assert!(!text.contains("NOTSHOWN"), "{}", text);
+	assert_eq!(if_sites(&report), []);
+
+	let src = "= Root\n\n#[\n#if nothing [HIDDENBLOCK] else [ELSEBLOCK]\n]\n";
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
+	let text = words(&rendered);
+	assert!(!text.contains("HIDDENBLOCK") && !text.contains("ELSEBLOCK"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 4, 1, unbound("nothing"))]);
+	Ok(())
+}

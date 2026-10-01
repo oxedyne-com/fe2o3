@@ -2867,7 +2867,9 @@ fn dispatch_capture(
 				Some((body_at, body, tail)) => {
 					// A block in code -- in a conditional's branch, say -- is joined into nothing the file's own
 					// lines hold, so a `#set document` in it is refused here rather than left to the fold.
-					let mut inside	= binds.in_bare_body();
+					// Its conditionals resolve in the block's own scope, over the bindings in force where it opens.
+					let scope		= binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let mut inside	= binds.in_bare_body().with_guards(&scope, 0);
 					inside.joined	= inside.joined && cap.place != lex::Place::Content;
 					let (mut inner, mut sub) = res!(parse_items(&body, inside));
 					// The block's lines are the file's own, so its sites are placed in them.
@@ -2882,7 +2884,7 @@ fn dispatch_capture(
 					// What stands after the block's closing bracket is read on as the file's own.
 					if !tail.trim().is_empty() {
 						let tail_at = cap.start.saturating_add(cap.buf.len().saturating_sub(tail.len()) as u32);
-						let (mut more, mut sub) = res!(parse_items(&tail, binds));
+						let (mut more, mut sub) = res!(parse_items(&tail, binds.at(binds.guard_at + tail_at as usize)));
 						sub.shift(tail_at);
 						skips.merge(sub);
 						items.append(&mut more);
