@@ -125,6 +125,23 @@ impl<M: 'static + Debug + Send + Sync> Simplex<M> {
         Ok(())
     }
 
+    /// Sends the message unless the channel has been closed, and says whether it was sent.  A
+    /// `Simplex` and every clone of it hold the receiving end as well as the sending end, so
+    /// `send` cannot fail because the reader has gone: it queues the message for nobody.  A
+    /// reader that gives up closes the channel instead, and the open flag is held while a message
+    /// is sent, so once `close` has returned no message can arrive that the closer's last
+    /// `try_recv` has not seen.
+    pub fn send_if_open(&self, msg: M) -> Outcome<bool> {
+        let open = lock_read!(self.open,
+            "While trying to send only if the channel is open.",
+        );
+        if !*open {
+            return Ok(false);
+        }
+        res!(self.tx().send(msg));
+        Ok(true)
+    }
+
     /// Waits until a message is available.
     pub fn recv(&self) -> Outcome<M> {
         let msg = res!(self.rx().recv());

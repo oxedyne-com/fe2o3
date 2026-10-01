@@ -111,6 +111,28 @@ impl<
         }
     }
 
+    /// The requester stops waiting for the reply, so that a bot that has handed it something it
+    /// must give back, such as a file's reader pin, can find out and take it back.  Returns what
+    /// arrived too late to be read, which the requester must give back itself.
+    pub fn give_up(&self) -> Outcome<Vec<OzoneMsg<UIDL, UID, ENC, KH>>> {
+        let mut late = Vec::new();
+        if let Some(chan) = self.channel() {
+            // Once closed, nothing more can be sent, so what is queued now is all there will be.
+            res!(chan.close());
+            loop {
+                match chan.try_recv() {
+                    Recv::Empty => break,
+                    Recv::Result(Ok(msg)) => late.push(msg),
+                    Recv::Result(Err(e)) => return Err(err!(e,
+                        "While collecting the replies that reached a responder after its \
+                        requester gave up.";
+                        Channel, Read)),
+                }
+            }
+        }
+        Ok(late)
+    }
+
     /// A receiver waiting for a complete `Dat` wrapped byte vector.  Also returns whether
     /// garbage collection has just been performed on the read file, during which time it is
     /// possible the value may have been updated.  This method does not assemble a `Dat`
