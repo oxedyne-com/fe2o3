@@ -247,6 +247,28 @@ impl<
                 let result = self.update_data(floc_new, *ilen, floc_old_opt.as_ref(), from_id);
                 self.result(&result);
             }
+            OzoneMsg::GcAborted(fnum) => {
+                // The collection replaced nothing, so the state held here is still the file's,
+                // and what was buffered meanwhile applies to it as it stands.
+                match self.states_mut().get_state_mut(*fnum) {
+                    Ok(fstat) => {
+                        fstat.set_gc(false);
+                        self.gc_active(
+                            *fnum,
+                            &OzoneMsg::None,
+                            false,
+                        );
+                    },
+                    Err(e) => {
+                        self.error(err!(e,
+                            "{}: Cannot release file {} after an abandoned garbage collection \
+                            because it cannot be found in the file state map.",
+                            self.ozid(), fnum;
+                            Bug, Missing, Data));
+                        return false;
+                    },
+                }
+            }
             OzoneMsg::GcCompleted(fnum, new_fstat, size_dec) => {
                 match self.states_mut().get_state_mut(*fnum) {
                     Ok(fstat) => {

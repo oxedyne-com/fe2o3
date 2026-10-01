@@ -1,0 +1,124 @@
+//! A collection that fails before it has replaced anything must leave the file's pair as it was,
+//! must not leave the file held, and must leave nothing the next collection of the file would be
+//! hurt by (D-C, 2026-10-01).  Until then a failed collection returned an error that was only
+//! logged: the file bot went on holding every read and write of the file for a collection that was
+//! not coming, so the file could never be collected again, and a temporary file the collection had
+//! begun was left to be appended to by the next one.  `test::hooks::set_collect_failure` fails
+//! each collection once it has written its temporary files, and is process-wide, which is why this
+//! is a test binary of its own with a single test.
+
+mod gc_pair;
+
+use gc_pair::*;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_o3db_sync::{
+    file::{
+        core::FileType,
+        zdir::ZoneDir,
+    },
+    test::{
+        hooks,
+        setup::{
+            self,
+            Uid,
+        },
+    },
+};
+
+use std::{
+    path::Path,
+    time::Duration,
+};
+
+/// Is any temporary file of a collection in the directory?
+fn temporaries(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Ok(list) = std::fs::read_dir(dir) {
+        for entry in list.flatten() {
+            if ZoneDir::is_gc_temp_file(&entry.path()) {
+                found.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn main() -> Outcome<()> {
+    log_set_level!("error");
+    let dir = "./test_db_gc_abort";
+    let _ = std::fs::remove_dir_all(dir);
+    res!(std::fs::create_dir_all(dir));
+    let root = res!(Path::new(dir).canonicalize());
+
+    let probe = res!(probe("./test_db_gc_abort_probe"));
+    let len = probe.len;
+    let cfg = res!(config(5 * len + len / 2));
+    let zone = zone_dir(&root, &cfg);
+    let (d1, i1) = (file(&root, &cfg, FileType::Data, 1), file(&root, &cfg, FileType::Index, 1));
+
+    let db: TestDb = res!(setup::start_db(root.clone(), Some(cfg.clone()), schemes(), None, true, true));
+    let mut want = vec![1u8; NKEYS];
+    res!(fill(&db));
+    let (d_old, i_old) = (size(&d1), size(&i1));
+    assert_eq!(d_old, 5 * len, "file 1 does not hold the five records it was sized for");
+
+    // 1. The collection that fails.  Superseding two of file 1's records starts it.
+    hooks::set_collect_failure(true);
+    for i in 0..2 {
+        res!(db.insert(key(i), value(i, 2), Uid::default(), None));
+        want[i] = 2;
+    }
+    assert!(wait_until(Duration::from_secs(30), || hooks::collections_failed() >= 1),
+        "the collection of file 1 never started");
+    // The abandoned collection takes its temporaries with it, and tells the file bot.
+    assert!(wait_until(Duration::from_secs(10), || temporaries(&zone).is_empty()),
+        "an abandoned collection left {:?} behind", temporaries(&zone));
+    assert_eq!((size(&d1), size(&i1)), (d_old, i_old),
+        "file 1 is not the pair it was after a collection that replaced nothing");
+
+    // 2. The file is not held.  A third supersession finds file 1 eligible again, which it could
+    //    not if the file bot were still waiting on the collection that failed.
+    res!(db.insert(key(2), value(2, 2), Uid::default(), None));
+    want[2] = 2;
+    assert!(wait_until(Duration::from_secs(30), || hooks::collections_failed() >= 2),
+        "file 1 was never collected again after a collection of it failed");
+    assert!(wait_until(Duration::from_secs(10), || temporaries(&zone).is_empty()),
+        "an abandoned collection left {:?} behind", temporaries(&zone));
+    let held = judge(&db, &want, "After two failed collections");
+
+    // 3. A temporary left in the directory, as a crash or a failed removal would leave it, must
+    //    not become the head of the next collected file.
+    let mut stale = zone.clone();
+    stale.push(ZoneDir::relative_gc_temp_path(&FileType::Data, 1));
+    res!(std::fs::write(&stale, vec![0xabu8; 777]));
+    hooks::set_collect_failure(false);
+    res!(db.insert(key(3), value(3, 2), Uid::default(), None));
+    want[3] = 2;
+    // Keys 0 to 3 are superseded, so the collection carries key 4's record alone.
+    assert!(wait_until(Duration::from_secs(30), || size(&d1) != d_old),
+        "file 1 was not collected once collection could succeed");
+    assert!(wait_until(Duration::from_secs(10), || size(&i1) == probe.ind[1]),
+        "the index of file 1 was not rebuilt to one record");
+    let collected = size(&d1);
+    let after = judge(&db, &want, "After the collection that worked");
+    res!(db.close());
+
+    let index = res!(std::fs::read(&i1));
+    let db: TestDb = res!(setup::start_db(root.clone(), Some(cfg.clone()), schemes(), None, true, false));
+    let reopened = judge(&db, &want, "After reopening");
+    res!(db.close());
+    log_finish_wait!();
+    let unchanged = res!(std::fs::read(&i1)) == index;
+
+    assert_eq!(held, 0, "{} keys read wrong after the failed collections", held);
+    assert_eq!(collected, len,
+        "file 1 is {} bytes after its collection, where its one current record is {}", collected, len);
+    assert_eq!(after, 0, "{} keys read wrong after the collection that worked", after);
+    assert_eq!(reopened, 0, "{} keys read wrong after reopening", reopened);
+    assert!(unchanged, "the start rebuilt an index that agreed with its data file");
+    let _ = std::fs::remove_dir_all(dir);
+    Ok(())
+}
