@@ -1,6 +1,11 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use crate::{
+    calendar::CalendarDate,
+    time::CalClockZone,
+};
+
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::{
@@ -45,8 +50,16 @@ pub struct LeapSecond {
 #[derive(Clone, Debug, PartialEq)]
 pub enum LocalTimeResult<T> {
     Single(T),
-    Ambiguous(T, T), // the autumn fold: (standard, daylight)
+    Ambiguous(T, T), // the autumn fold: the earlier instant first, then the later
     None, // the spring gap, where the local time never occurs
+}
+
+/// What the zone's rules say about one instant: the offset, and whether it is
+/// a summer one.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ZoneOffset {
+    pub utc_offset: i32, // seconds east of UTC
+    pub is_dst: bool,
 }
 
 impl TZifParser {
@@ -305,83 +318,346 @@ impl TZifData {
         Ok(&self.abbreviations[abbrev_start..abbrev_end])
     }
 
-    pub fn utc_to_local(&self, utc_timestamp: i64) -> LocalTimeResult<(i64, &LocalTimeType)> {
-        // Find the applicable transition
-        let transition_index = self.transition_times
-            .binary_search(&utc_timestamp)
-            .unwrap_or_else(|insert_pos| {
-                if insert_pos == 0 { 0 } else { insert_pos - 1 }
-            });
-
-        if transition_index >= self.transition_types.len() {
-            return LocalTimeResult::None;
+    /// The offset in force at a UTC instant. Before the first transition the
+    /// first local time type applies (RFC 8536, section 3.2). At or after the
+    /// last, the footer's POSIX rule does where the file has one: a "slim" file
+    /// ends its table where the rules stop changing and leaves the years after
+    /// to that string, and a "fat" one only runs out of table in 2037.
+    pub fn offset_at(&self, utc: i64) -> Outcome<ZoneOffset> {
+        let n = self.transition_times.len().min(self.transition_types.len());
+        let after = self.transition_times[..n].partition_point(|&t| t <= utc);
+        if after == n {
+            if let Some(text) = self.posix_tz_string.as_deref().filter(|t| !t.is_empty()) {
+                return res!(PosixZone::parse(text)).offset_at(utc);
+            }
         }
-
-        let type_index = self.transition_types[transition_index] as usize;
-        
-        if type_index >= self.local_time_types.len() {
-            return LocalTimeResult::None;
+        let local_type = if after == 0 {
+            self.local_time_types.first()
+        } else {
+            self.local_time_types.get(self.transition_types[after - 1] as usize)
+        };
+        match local_type {
+            Some(t) => Ok(ZoneOffset { utc_offset: t.utc_offset, is_dst: t.is_dst }),
+            None => Err(err!(
+                "The TZif data has no local time type for UTC timestamp {}", utc;
+                Invalid, Input, Missing)),
         }
-
-        let local_time_type = &self.local_time_types[type_index];
-        let local_timestamp = utc_timestamp + local_time_type.utc_offset as i64;
-
-        LocalTimeResult::Single((local_timestamp, local_time_type))
     }
 
-    pub fn local_to_utc(&self, local_timestamp: i64) -> LocalTimeResult<(i64, &LocalTimeType)> {
-        // This is more complex due to DST transitions creating ambiguous or invalid times
-        let mut candidates = Vec::new();
-
-        // Check all possible timezone rules around this time
-        for (i, &_transition_time) in self.transition_times.iter().enumerate() {
-            if i >= self.transition_types.len() {
-                continue;
-            }
-
-            let type_index = self.transition_types[i] as usize;
-            if type_index >= self.local_time_types.len() {
-                continue;
-            }
-
-            let local_time_type = &self.local_time_types[type_index];
-            let candidate_utc = local_timestamp - local_time_type.utc_offset as i64;
-
-            // Check if this UTC time would produce the given local time
-            if let LocalTimeResult::Single((computed_local, _)) = self.utc_to_local(candidate_utc) {
-                if computed_local == local_timestamp {
-                    candidates.push((candidate_utc, local_time_type));
-                }
-            }
-
-            // Only check transitions around the target time (within 24 hours)
-            if (candidate_utc - local_timestamp).abs() > 86400 {
-                continue;
-            }
+    pub fn utc_to_local(&self, utc_timestamp: i64) -> LocalTimeResult<(i64, ZoneOffset)> {
+        match self.offset_at(utc_timestamp) {
+            Ok(z) => LocalTimeResult::Single((utc_timestamp + z.utc_offset as i64, z)),
+            Err(_) => LocalTimeResult::None,
         }
+    }
 
-        match candidates.len() {
-            0 => LocalTimeResult::None,
-            1 => LocalTimeResult::Single(candidates[0]),
-            2 => LocalTimeResult::Ambiguous(candidates[0], candidates[1]),
-            _ => {
-                // Multiple candidates - take the first valid one
-                LocalTimeResult::Single(candidates[0])
-            }
+    /// Every UTC instant at which the wall clock reads `local_timestamp` (local
+    /// seconds, as if UTC), earliest first: none in a spring gap, two across an
+    /// autumn fold.
+    pub fn local_to_utc(&self, local_timestamp: i64) -> LocalTimeResult<(i64, ZoneOffset)> {
+        let found = local_to_utc_by(local_timestamp, 86_400, |u| {
+            self.offset_at(u).map(|z| z.utc_offset as i64)
+        });
+        let with_offset = |u: i64| match self.offset_at(u) {
+            Ok(z) => Some((u, z)),
+            Err(_) => None,
+        };
+        match found.as_slice() {
+            [] => LocalTimeResult::None,
+            [a] => match with_offset(*a) {
+                Some(x) => LocalTimeResult::Single(x),
+                None => LocalTimeResult::None,
+            },
+            [a, b, ..] => match (with_offset(*a), with_offset(*b)) {
+                (Some(x), Some(y)) => LocalTimeResult::Ambiguous(x, y),
+                _ => LocalTimeResult::None,
+            },
         }
     }
 
     pub fn get_offset_at_utc(&self, utc_timestamp: i64) -> Outcome<i32> {
-        match self.utc_to_local(utc_timestamp) {
-            LocalTimeResult::Single((_, local_time_type)) => Ok(local_time_type.utc_offset),
-            _ => Err(err!("Could not determine offset for UTC timestamp {}", utc_timestamp; Invalid, Input)),
-        }
+        Ok(res!(self.offset_at(utc_timestamp)).utc_offset)
     }
 
     pub fn is_dst_at_utc(&self, utc_timestamp: i64) -> Outcome<bool> {
-        match self.utc_to_local(utc_timestamp) {
-            LocalTimeResult::Single((_, local_time_type)) => Ok(local_time_type.is_dst),
-            _ => Err(err!("Could not determine DST status for UTC timestamp {}", utc_timestamp; Invalid, Input)),
+        Ok(res!(self.offset_at(utc_timestamp)).is_dst)
+    }
+}
+
+/// The UTC instants whose wall clock reads `local`, earliest first, given how
+/// to find the offset at a UTC instant. All three quantities share one unit,
+/// and `day` is a day in it. A local time stands within 15 hours of the same
+/// number read as UTC, so the offsets sampled over two days either side are
+/// the only ones that can apply; each is kept when it is the offset actually
+/// in force at the instant it implies. Two survivors are the autumn fold and
+/// none is the spring gap.
+pub(crate) fn local_to_utc_by<F>(local: i64, day: i64, offset_at: F) -> Vec<i64>
+where
+    F: Fn(i64) -> Outcome<i64>,
+{
+    let mut tried: Vec<i64> = Vec::new();
+    let mut found: Vec<i64> = Vec::new();
+    for k in -2..=2 {
+        let off = match offset_at(local + k * day) {
+            Ok(off) => off,
+            Err(_) => continue,
+        };
+        if tried.contains(&off) {
+            continue;
+        }
+        tried.push(off);
+        let utc = local - off;
+        if let Ok(back) = offset_at(utc) {
+            if back == off {
+                found.push(utc);
+            }
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// The rule a TZif footer gives for the years beyond its table: a POSIX TZ
+/// string such as `EST5EDT,M3.2.0,M11.1.0` or `<+1030>-10:30<+11>-11,M10.1.0,M4.1.0`.
+#[derive(Clone, Debug, PartialEq)]
+struct PosixZone {
+    std: i32, // seconds east of UTC
+    dst: Option<PosixDst>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PosixDst {
+    off:     i32, // seconds east of UTC
+    start:   PosixDay,
+    start_t: i32, // seconds after local midnight, which may be negative or exceed a day
+    end:     PosixDay,
+    end_t:   i32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PosixDay {
+    Julian1(i64), // Jn: 1 to 365, February 29th never counted
+    Julian0(i64), // n: 0 to 365, February 29th counted
+    Month(u8, u8, u8), // Mm.w.d: month, week 1 to 5 (5 is the last), day 0 to 6 from Sunday
+}
+
+impl PosixZone {
+    fn parse(text: &str) -> Outcome<Self> {
+        let b = text.as_bytes();
+        let mut i = 0;
+        res!(Self::name(b, &mut i, text));
+        let std = -res!(Self::seconds(b, &mut i, text));
+        if i == b.len() {
+            return Ok(Self { std, dst: None });
+        }
+        res!(Self::name(b, &mut i, text));
+        let off = if i < b.len() && b[i] != b',' {
+            -res!(Self::seconds(b, &mut i, text))
+        } else {
+            std + 3600
+        };
+        let (start, start_t, end, end_t) = if i == b.len() {
+            // No rule given: the United States default, as the C library has it.
+            (PosixDay::Month(3, 2, 0), 7200, PosixDay::Month(11, 1, 0), 7200)
+        } else {
+            let (start, start_t) = res!(Self::rule(b, &mut i, text));
+            let (end, end_t) = res!(Self::rule(b, &mut i, text));
+            (start, start_t, end, end_t)
+        };
+        if i != b.len() {
+            return Err(err!(
+                "Unread text '{}' after the rule in the TZif footer '{}'.", &text[i..], text;
+                Invalid, Input));
+        }
+        Ok(Self { std, dst: Some(PosixDst { off, start, start_t, end, end_t }) })
+    }
+
+    // A zone name, letters or angle-bracketed, three characters at least.
+    fn name(b: &[u8], i: &mut usize, text: &str) -> Outcome<()> {
+        let from = *i;
+        if *i < b.len() && b[*i] == b'<' {
+            while *i < b.len() && b[*i] != b'>' {
+                *i += 1;
+            }
+            if *i >= b.len() {
+                return Err(err!(
+                    "A '<' in the TZif footer '{}' has no closing '>'.", text; Invalid, Input));
+            }
+            *i += 1;
+            if *i - from < 5 {
+                return Err(err!(
+                    "A zone name in the TZif footer '{}' is shorter than three characters.", text;
+                    Invalid, Input));
+            }
+        } else {
+            while *i < b.len() && b[*i].is_ascii_alphabetic() {
+                *i += 1;
+            }
+            if *i - from < 3 {
+                return Err(err!(
+                    "A zone name in the TZif footer '{}' is shorter than three characters.", text;
+                    Invalid, Input));
+            }
+        }
+        Ok(())
+    }
+
+    // [+-]h[h[h]][:mm[:ss]], in seconds, the sign kept as written.
+    fn seconds(b: &[u8], i: &mut usize, text: &str) -> Outcome<i32> {
+        let mut sign = 1;
+        if *i < b.len() && (b[*i] == b'+' || b[*i] == b'-') {
+            if b[*i] == b'-' {
+                sign = -1;
+            }
+            *i += 1;
+        }
+        let mut total = 0i32;
+        let mut scale = 3600;
+        loop {
+            let from = *i;
+            let mut n = 0i32;
+            while *i < b.len() && b[*i].is_ascii_digit() && *i - from < 3 {
+                n = n * 10 + (b[*i] - b'0') as i32;
+                *i += 1;
+            }
+            if *i == from {
+                return Err(err!(
+                    "Expected a number at byte {} of the TZif footer '{}'.", from, text;
+                    Invalid, Input));
+            }
+            total += n * scale;
+            if scale > 1 && *i < b.len() && b[*i] == b':' {
+                *i += 1;
+                scale /= 60;
+            } else {
+                break;
+            }
+        }
+        Ok(sign * total)
+    }
+
+    // ,date[/time]
+    fn rule(b: &[u8], i: &mut usize, text: &str) -> Outcome<(PosixDay, i32)> {
+        if *i >= b.len() || b[*i] != b',' {
+            return Err(err!(
+                "Expected ',' at byte {} of the TZif footer '{}'.", *i, text; Invalid, Input));
+        }
+        *i += 1;
+        let day = res!(Self::day(b, i, text));
+        let t = if *i < b.len() && b[*i] == b'/' {
+            *i += 1;
+            res!(Self::seconds(b, i, text))
+        } else {
+            7200
+        };
+        Ok((day, t))
+    }
+
+    fn day(b: &[u8], i: &mut usize, text: &str) -> Outcome<PosixDay> {
+        let number = |i: &mut usize| -> Outcome<i64> {
+            let from = *i;
+            let mut n = 0i64;
+            while *i < b.len() && b[*i].is_ascii_digit() && *i - from < 4 {
+                n = n * 10 + (b[*i] - b'0') as i64;
+                *i += 1;
+            }
+            if *i == from {
+                return Err(err!(
+                    "Expected a number at byte {} of the TZif footer '{}'.", from, text;
+                    Invalid, Input));
+            }
+            Ok(n)
+        };
+        if *i < b.len() && b[*i] == b'M' {
+            *i += 1;
+            let m = res!(number(i));
+            if *i >= b.len() || b[*i] != b'.' {
+                return Err(err!("Expected '.' in the TZif footer '{}'.", text; Invalid, Input));
+            }
+            *i += 1;
+            let w = res!(number(i));
+            if *i >= b.len() || b[*i] != b'.' {
+                return Err(err!("Expected '.' in the TZif footer '{}'.", text; Invalid, Input));
+            }
+            *i += 1;
+            let d = res!(number(i));
+            if !(1..=12).contains(&m) || !(1..=5).contains(&w) || !(0..=6).contains(&d) {
+                return Err(err!(
+                    "The month, week or day in the TZif footer '{}' is out of range.", text;
+                    Invalid, Input, Range));
+            }
+            Ok(PosixDay::Month(m as u8, w as u8, d as u8))
+        } else if *i < b.len() && b[*i] == b'J' {
+            *i += 1;
+            let n = res!(number(i));
+            if !(1..=365).contains(&n) {
+                return Err(err!(
+                    "The Julian day in the TZif footer '{}' is out of range.", text;
+                    Invalid, Input, Range));
+            }
+            Ok(PosixDay::Julian1(n))
+        } else {
+            let n = res!(number(i));
+            if !(0..=365).contains(&n) {
+                return Err(err!(
+                    "The day of the year in the TZif footer '{}' is out of range.", text;
+                    Invalid, Input, Range));
+            }
+            Ok(PosixDay::Julian0(n))
+        }
+    }
+
+    fn offset_at(&self, utc: i64) -> Outcome<ZoneOffset> {
+        let dst = match &self.dst {
+            Some(dst) => dst,
+            None => return Ok(ZoneOffset { utc_offset: self.std, is_dst: false }),
+        };
+        // The year by the standard-time calendar. Each change falls on a date
+        // of that year, read in the clock in force just before it.
+        let year = res!(CalendarDate::from_days_since_epoch(
+            (utc + self.std as i64).div_euclid(86_400),
+            CalClockZone::utc(),
+        )).year();
+        let start = res!(dst.start.day_of(year)) * 86_400 + dst.start_t as i64 - self.std as i64;
+        let end = res!(dst.end.day_of(year)) * 86_400 + dst.end_t as i64 - dst.off as i64;
+        // The southern hemisphere has its summer across the new year.
+        let summer = if start < end {
+            utc >= start && utc < end
+        } else {
+            utc >= start || utc < end
+        };
+        if summer {
+            Ok(ZoneOffset { utc_offset: dst.off, is_dst: true })
+        } else {
+            Ok(ZoneOffset { utc_offset: self.std, is_dst: false })
+        }
+    }
+}
+
+impl PosixDay {
+    // Days since the Unix epoch of the date this rule names in `year`.
+    fn day_of(&self, year: i32) -> Outcome<i64> {
+        let utc = CalClockZone::utc();
+        let jan1 = res!(res!(CalendarDate::new(year, 1, 1, utc.clone())).days_since_epoch());
+        match self {
+            Self::Julian1(n) => {
+                let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+                Ok(jan1 + n - 1 + if leap && *n >= 60 { 1 } else { 0 })
+            },
+            Self::Julian0(n) => Ok(jan1 + n),
+            Self::Month(m, w, d) => {
+                let first_date = res!(CalendarDate::new(year, *m, 1, utc));
+                let first = res!(first_date.days_since_epoch());
+                let dim = res!(first_date.days_in_month()) as i64;
+                // 1970-01-01 fell on a Thursday, which is day 4 counting from Sunday.
+                let dow = (first + 4).rem_euclid(7);
+                let mut day = first + (*d as i64 - dow).rem_euclid(7) + (*w as i64 - 1) * 7;
+                if day >= first + dim {
+                    day -= 7; // week 5 is the last, which may be the fourth
+                }
+                Ok(day)
+            },
         }
     }
 }
@@ -417,11 +693,15 @@ mod tests {
     fn test_tzif_header_parsing() {
         // Create minimal valid TZif header
         let mut data = Vec::new();
-        data.extend_from_slice(b"TZif");  // Magic
-        data.push(b'2');                 // Version 2
-        data.extend_from_slice(&[0u8; 15]); // Reserved
-        // Counts (all zero for minimal test)
-        data.extend_from_slice(&[0u8; 24]); // 6 * 4 bytes of counts
+        // A version 2 file is two headers, the second with its own data
+        // block, and the footer's lines; each header has no counts here.
+        for _ in 0..2 {
+            data.extend_from_slice(b"TZif");  // Magic
+            data.push(b'2');                 // Version 2
+            data.extend_from_slice(&[0u8; 15]); // Reserved
+            data.extend_from_slice(&[0u8; 24]); // 6 * 4 bytes of counts
+        }
+        data.extend_from_slice(b"\n\n"); // Empty footer
         
         let mut parser = TZifParser::new();
         assert!(parser.load_from_bytes(&data).is_ok());
