@@ -383,7 +383,7 @@ fn a_loop_or_an_unread_conditional_is_refused_whole_at_its_line() -> Outcome<()>
 		(1,							"skipped #let (fixed-point)"),
 		(line_of("#for"),			"#for is a loop the reader does not run, so its body is not set"),
 		(line_of("#while"),			"#while is a loop the reader does not run, so its body is not set"),
-		(line_of("#if unbound"),	"#if has a condition the reader does not evaluate, so no branch of it is set"),
+		(line_of("#if unbound"),	"#if names `unbound`, which nothing binds above it (Typst stops: unknown variable: unbound)"),
 		(line_of("{"),				"#if takes a code block the reader does not run, so no branch of it is set"),
 	];
 	assert_eq!(&sites[..want.len()], &want[..], "{:?}", sites);
@@ -394,10 +394,10 @@ fn a_loop_or_an_unread_conditional_is_refused_whole_at_its_line() -> Outcome<()>
 	Ok(())
 }
 
-/// A conditional in a chapter resolves in the one scope the include walk resolves its guards in: the book's
-/// `config.typ`, then the chapter's own bindings. A guard on the config's `media` in a chapter's callout and
-/// one mid-paragraph set their taken branch alone, as the chapter's include guard does, with no site; a name
-/// only another chapter binds is not in scope, so the guard testing it is refused at its line.
+/// A conditional in a chapter resolves in the bindings and imports in force where it stands, as the include
+/// walk resolves its guards. A guard on the config's `media`, which the chapter imports, in a chapter's callout
+/// and one mid-paragraph set their taken branch alone, as the chapter's include guard does, with no site; a
+/// name only another chapter binds is not in scope, so the guard testing it is refused at its line.
 #[test]
 fn a_chapter_guard_resolves_in_the_book_config_as_the_include_walk_does() -> Outcome<()> {
 	let _turn = turn();
@@ -435,12 +435,449 @@ fn a_chapter_guard_resolves_in_the_book_config_as_the_include_walk_does() -> Out
 		.filter(|d| d.message.contains("#if"))
 		.map(|d| (d.file.as_str(), d.line, d.message.as_str()))
 		.collect();
-	assert_eq!(ifs, [("/b/book/ch2.typ", 3, "#if has a condition the reader does not evaluate, so no branch of it is set")]);
+	assert_eq!(ifs, [("/b/book/ch2.typ", 3,
+		"#if names `side`, which nothing binds above it (Typst stops: unknown variable: side)")]);
+	Ok(())
+}
+
+// Guard scope, by position: a conditional resolves its names in the bindings and imports in force where it
+// stands, as Typst's scope does. Each fixture is one the Typst 0.15.1 oracle was run on.
+
+/// Every text run set on every page, with the spaces taken out, so a kerning split or a line break hides no word.
+fn words(rendered: &Rendered) -> String {
+	runs(rendered).into_iter().flat_map(|(t, _)| t.chars().filter(|c| !c.is_whitespace()).collect::<Vec<_>>()).collect()
+}
+
+/// Does the squashed `text` hold `want`, taken as `words` takes it?
+fn has(text: &str, want: &str) -> bool {
+	text.contains(&want.replace(' ', ""))
+}
+
+/// The source map of a book whose root is `/b/book/main.typ`: `files` beside it, and the Libertinus faces a book
+/// reads from its `assets` directory.
+fn book_map(files: &[(&str, &str)]) -> Outcome<HashMap<PathBuf, Vec<u8>>> {
+	let mut map: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	let fonts = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts");
+	for f in ["LibertinusSerif-Regular.otf", "LibertinusSerif-Bold.otf", "LibertinusSerif-Italic.otf",
+		"LibertinusSerif-BoldItalic.otf", "LibertinusMono-Regular.otf"]
+	{
+		map.insert(PathBuf::from(fmt!("/b/assets/fonts/libertinus/{}", f)), res!(std::fs::read(fonts.join(f))));
+	}
+	for (p, b) in files {
+		map.insert(PathBuf::from(fmt!("/b/book/{}", p)), b.as_bytes().to_vec());
+	}
+	Ok(map)
+}
+
+/// The conditionals a compile refused, as `(file, line, column, message)`.
+fn if_sites(report: &Report) -> Vec<(String, usize, usize, String)> {
+	report.diagnostics.iter()
+		.filter(|d| d.message.contains("#if"))
+		.map(|d| (d.file.clone(), d.line, d.col, d.message.clone()))
+		.collect()
+}
+
+/// What a refused conditional says of a name nothing binds above it.
+fn unbound(name: &str) -> String {
+	fmt!("#if names `{n}`, which nothing binds above it (Typst stops: unknown variable: {n})", n = name)
+}
+
+const UNREAD: &str = "#if has a condition the reader does not evaluate, so no branch of it is set";
+
+/// A conditional on a name bound only below it is refused at its line, as Typst stops there with "unknown
+/// variable": a rebinding further down does not reach back to earlier guards, whether the guard stands on a
+/// line of its own or mid-paragraph.
+#[test]
+fn a_conditional_on_a_name_bound_only_below_it_is_refused_at_its_line() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"Intro.
+
+#if draft [DRAFTON] else [DRAFTOFF]
+
+#let draft = true
+"##)]));
+	let text = words(&rendered);
+	assert!(has(&text, "Intro.") && !text.contains("DRAFT"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 3, 1, unbound("draft"))]);
+
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"Alpha #if draft [YES] else [NO] omega.
+
+#let draft = true
+"##)]));
+	let text = words(&rendered);
+	assert!(has(&text, "Alpha") && has(&text, "omega.") && !text.contains("YES") && !text.contains("NO"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 1, 7, unbound("draft"))]);
+	Ok(())
+}
+
+/// An include guard on a name bound only below it is not followed: its include is dropped with the guard, which
+/// is refused at its line, in a book that imports a config and in a root that has none.
+#[test]
+fn a_walked_guard_on_a_name_bound_only_below_it_is_not_followed() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#if full [
+#include "a.typ"
+]
+
+#let full = true
+"##), ("config.typ", r##"#let format = "a5"
+#let media = "ebook"
+"##), ("a.typ", r##"= Chap A
+
+TEXTA.
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	assert!(has(&text, "Book") && !text.contains("Chap A") && !text.contains("TEXTA"), "{}", text);
+	assert_eq!(if_sites(&report), [("/b/book/main.typ".to_string(), 4, 1, unbound("full"))]);
+
+	let files = [("/proj/main.typ", r##"#if draft [
+#include "inc.typ"
+]
+#let draft = true
+Tail.
+"##), ("/proj/inc.typ", r##"INCLUDED
+"##)];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(has(&text, "Tail.") && !text.contains("INCLUDED"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 1, 1, unbound("draft"))]);
+	Ok(())
+}
+
+/// A `#let` in a callout's body shadows the file's binding inside the callout and nowhere else: the guard in
+/// the body takes the body's value, and one below the callout takes the file's again.
+#[test]
+fn a_callouts_own_let_shadows_the_files_inside_the_callout_alone() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let styled-box(..args, body) = block(stroke: 0.5pt, inset: 4pt, body)
+#let media = "ebook"
+
+Intro.
+
+#styled-box[
+#let media = "print"
+#if media == "ebook" [BOXEBOOK] else [BOXPRINT]
+]
+
+Tail #if media == "ebook" [AFTEREB] else [AFTERPR] end.
+"##)]));
+	let text = words(&rendered);
+	for want in ["Intro.", "BOXPRINT", "AFTEREB"] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	assert!(!text.contains("BOXEBOOK") && !text.contains("AFTERPR"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A callout's own `#let` shadows the config a chapter imports, in a book: the guard in the callout takes the
+/// callout's value, not the config's.
+#[test]
+fn a_book_callouts_let_shadows_the_config_import() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#include "ch.typ"
+"##), ("config.typ", r##"#let format = "a5"
+#let media = "ebook"
+"##), ("ch.typ", r##"#import "config.typ": *
+#let styled-box(..args, body) = block(stroke: 0.5pt, inset: 4pt, body)
+
+= Chapter
+
+Lead.
+
+#styled-box[
+#let media = "print"
+Callout #if media == "ebook" [CALLEBOOK] else [CALLPRINT] end.
+]
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	assert!(has(&text, "Lead.") && has(&text, "CALLPRINT") && !text.contains("CALLEBOOK"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A walked include guard's branch is a content block: its own `#let` holds to the branch's closer, so a
+/// guard inside it, before or after the include it holds, takes the branch's value, and a guard after the
+/// branch takes the config's again.
+#[test]
+fn a_walked_branchs_let_scopes_its_guards_to_the_branch() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#if media == "ebook" [
+#let media = "print"
+Walked #if media == "ebook" [INNEREB] else [INNERPR] text.
+#include "ch.typ"
+]
+
+After #if media == "ebook" [AFTEREB] else [AFTERPR] text.
+"##), ("config.typ", r##"#let format = "a5"
+#let media = "ebook"
+"##), ("ch.typ", r##"= Chap
+
+CHAPTEXT.
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	for want in ["Walked INNERPR text.", "CHAPTEXT", "After AFTEREB text."] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	assert!(!text.contains("INNEREB") && !text.contains("AFTERPR"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A rebinding holds from its own line down and never reaches back: the guards above `#let media = "print"`
+/// still take the earlier value, so a chapter and a line each follow the branch Typst follows.
+#[test]
+fn a_rebinding_holds_from_its_own_line_down() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+#let media = "ebook"
+= Book
+
+#if media == "ebook" [
+#include "a.typ"
+]
+
+Mid1 #if media == "ebook" [RB1E] else [RB1P] q.
+
+#let media = "print"
+
+#if media == "print" [
+#include "b.typ"
+]
+
+Mid2 #if media == "ebook" [RB2E] else [RB2P] q.
+"##), ("config.typ", r##"#let format = "a5"
+"##), ("a.typ", r##"= Chap A
+
+TEXTA.
+"##), ("b.typ", r##"= Chap B
+
+TEXTB.
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	for want in ["Chap A", "TEXTA.", "Mid1 RB1E q.", "Chap B", "TEXTB.", "Mid2 RB2P q."] {
+		assert!(has(&text, want), "{} is set: {}", want, text);
+	}
+	assert!(!text.contains("RB1P") && !text.contains("RB2E"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A name the config binds twice holds the later value from there down, as Typst's import brings it in: the
+/// guard on it is evaluated, where a name bound to two values was once refused.
+#[test]
+fn a_name_bound_twice_in_the_config_takes_the_later() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#if draft [
+#include "a.typ"
+]
+"##), ("config.typ", r##"#let format = "a5"
+#let draft = false
+#let draft = true
+"##), ("a.typ", r##"= Chap A
+
+TEXTA.
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	assert!(has(&text, "Chap A") && has(&text, "TEXTA."), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A chapter's own `#let` after its `#import` of the config beats the config's binding, for the guard that
+/// takes whole lines and for the one mid-paragraph.
+#[test]
+fn a_chapters_let_after_its_import_wins() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#include "ch.typ"
+"##), ("config.typ", r##"#let format = "a5"
+#let media = "ebook"
+"##), ("ch.typ", r##"#import "config.typ": *
+#let media = "print"
+
+= Chapter
+
+Lead para.
+
+#if media == "ebook" [
+EBOOKBRANCH
+] else [
+PRINTBRANCH
+]
+
+Mid #if media == "ebook" [EBMID] else [PRMID] end.
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	assert!(has(&text, "PRINTBRANCH") && has(&text, "Mid PRMID end."), "{}", text);
+	assert!(!text.contains("EBOOKBRANCH") && !text.contains("EBMID"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A chapter that imports a name from a file other than the config gets that file's value, not the config's.
+#[test]
+fn an_import_of_another_file_binds_its_value() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("main.typ", r##"#import "config.typ": *
+= Book
+
+#include "ch.typ"
+"##), ("config.typ", r##"#let format = "a5"
+#let media = "ebook"
+"##), ("other.typ", r##"#let media = "print"
+"##), ("ch.typ", r##"#import "other.typ": media
+
+= Chapter
+
+Lead.
+
+#if media == "ebook" [
+OTHEREB
+] else [
+OTHERPR
+]
+"##)];
+	let (rendered, report) = res!(compile_map("/b/book/main.typ", res!(book_map(&files))));
+	let text = words(&rendered);
+	assert!(has(&text, "OTHERPR") && !text.contains("OTHEREB"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A lone file's guard on a name it imports from a config of its own evaluates: the import is read from the
+/// file's own directory, with no book behind it.
+#[test]
+fn a_lone_file_guard_on_an_imported_name_evaluates() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("/proj/main.typ", r##"#import "config.typ": *
+
+Intro.
+
+#if media == "ebook" [
+LONEEBOOK
+] else [
+LONEPRINT
+]
+
+Mid #if draft [LONEDRAFT] else [LONEFINAL] q.
+"##), ("/proj/config.typ", r##"#let media = "ebook"
+#let draft = true
+"##)];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(has(&text, "LONEEBOOK") && has(&text, "Mid LONEDRAFT q."), "{}", text);
+	assert!(!text.contains("LONEPRINT") && !text.contains("LONEFINAL"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// An `#import` lists the names it brings in, each under its own name or an alias, and a name the import does
+/// not list is not in scope: the guard testing it is refused as unbound.
+#[test]
+fn an_import_brings_in_the_names_it_lists_and_no_other() -> Outcome<()> {
+	let _turn = turn();
+	let files = [("/proj/main.typ", r##"#import "config.typ": media as m, media2
+
+#if m == "ebook" [ALIASEB] else [ALIASPR]
+
+#if media2 == "print" [LISTEDPR] else [LISTEDEB]
+"##), ("/proj/config.typ", r##"#let media = "ebook"
+#let media2 = "print"
+"##)];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(has(&text, "ALIASEB") && has(&text, "LISTEDPR"), "{}", text);
+	assert!(!text.contains("ALIASPR") && !text.contains("LISTEDEB"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+
+	let files = [("/proj/main.typ", r##"#import "config.typ": media2
+
+Before.
+
+#if media == "ebook" [UNLISTEDEB] else [UNLISTEDPR]
+"##), ("/proj/config.typ", r##"#let media = "ebook"
+#let media2 = "print"
+"##)];
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
+	let text = words(&rendered);
+	assert!(has(&text, "Before.") && !text.contains("UNLISTED"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 5, 1, unbound("media"))]);
+	Ok(())
+}
+
+/// A conditional after an `#import` the reader cannot open is refused as unread, not as unbound: the file may
+/// bring any name in, so the name is not known to be missing.
+#[test]
+fn an_import_the_reader_cannot_open_leaves_a_name_unread_not_unbound() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#import "missing.typ": *
+
+Before.
+
+#if media == "x" [UNREADA] else [UNREADB]
+"##)]));
+	let text = words(&rendered);
+	assert!(has(&text, "Before.") && !text.contains("UNREAD"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 5, 1, UNREAD.to_string())]);
+	Ok(())
+}
+
+/// A content binding's conditionals are read where the binding is written, as Typst evaluates its body there:
+/// a rebinding of the name after the definition does not change the branch a later use sets.
+#[test]
+fn a_content_binding_reads_its_guards_where_it_is_defined() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let m = "a"
+#let c = [#if m == "a" [DEF] else [CALL]]
+#let m = "b"
+
+P
+
+#c
+"##)]));
+	let text = words(&rendered);
+	assert!(has(&text, "DEF") && !text.contains("CALL"), "{}", text);
+	assert!(if_sites(&report).is_empty(), "{:?}", report.diagnostics);
+	Ok(())
+}
+
+/// A string tested bare is refused, as Typst refuses it ("expected boolean, found string"): neither branch is
+/// set, and the site is the conditional's.
+#[test]
+fn a_string_tested_bare_is_refused_as_typst_refuses_it() -> Outcome<()> {
+	let _turn = turn();
+	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", r##"#let m = "a"
+#if m [BARE] else [NOTBARE]
+"##)]));
+	let text = words(&rendered);
+	assert!(!text.contains("BARE"), "{}", text);
+	assert_eq!(if_sites(&report), [("/proj/main.typ".to_string(), 2, 1, UNREAD.to_string())]);
 	Ok(())
 }
 
 /// Every text run set, joined by spaces.
-fn words(rendered: &Rendered) -> String {
+fn spaced_words(rendered: &Rendered) -> String {
 	runs(rendered).into_iter().map(|(t, _)| t).collect::<Vec<_>>().join(" ")
 }
 
@@ -463,7 +900,7 @@ fn a_shebang_line_is_trivia_and_the_include_after_it_is_followed() -> Outcome<()
 		("/proj/ch1.typ",	"= Chapter One\n\nINCLUDEDWORDS are set.\n"),
 	];
 	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
-	let text = words(&rendered);
+	let text = spaced_words(&rendered);
 	assert!(text.contains("Root") && text.contains("INCLUDEDWORDS"), "the heading and the chapter are set: {}", text);
 	assert!(!text.contains("#!") && !text.contains("usr/bin"), "the shebang is not prose: {}", text);
 	assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
@@ -509,7 +946,7 @@ fn an_include_in_an_item_or_emphasis_is_not_a_chapter() -> Outcome<()> {
 			("/proj/ch1.typ",	"= Chapter One\n\nCHAPTERWORDS are set.\n"),
 		];
 		let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
-		let text = words(&rendered);
+		let text = spaced_words(&rendered);
 		assert!(!text.contains("CHAPTERWORDS") && !text.contains("Chapter One"), "{}: not followed: {}", name, text);
 		assert_eq!(rendered.out.pages.len(), 1, "{}: no contents page, no new page: {}", name, text);
 		let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
@@ -532,7 +969,7 @@ fn an_include_in_an_item_in_a_guard_branch_is_not_a_chapter() -> Outcome<()> {
 		("/proj/ch1.typ",	"= Chapter One\n\nONEWORDS are not.\n"),
 	];
 	let (rendered, report) = res!(compile_of("/proj/main.typ", &files));
-	let text = words(&rendered);
+	let text = spaced_words(&rendered);
 	assert!(text.contains("ZEROWORDS") && text.contains("Tail."), "the file's own include is followed: {}", text);
 	assert!(!text.contains("ONEWORDS"), "the item's is not: {}", text);
 	let names: Vec<&str> = report.diagnostics.iter().map(|d| d.message.as_str()).collect();
@@ -547,7 +984,7 @@ fn a_bare_content_block_is_set_where_it_stands_and_scopes_its_rule() -> Outcome<
 	let _turn = turn();
 	let src = "= Root\n\n#[\n#set text(size: 20pt)\nBIGWORDS in block.\n]\n\nThen tail words.\n";
 	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
-	let text = words(&rendered);
+	let text = spaced_words(&rendered);
 	assert!(!text.contains("#[") && !text.contains(']'), "the block's brackets are not prose: {}", text);
 	assert!(res!(size_of(&rendered, "BIGWORDS")) > 18.0, "the rule governs the block: {:?}", runs(&rendered));
 	assert!(res!(size_of(&rendered, "tail")) < 15.0, "and ends with it: {:?}", runs(&rendered));
@@ -562,7 +999,7 @@ fn a_bare_content_block_inside_a_paragraph_is_reported() -> Outcome<()> {
 	let _turn = turn();
 	let src = "= Root\n\nPara words\n#[\nin para\n]\nmore words\n";
 	let (rendered, report) = res!(compile_of("/proj/main.typ", &[("/proj/main.typ", src)]));
-	assert!(words(&rendered).contains("in para"), "{}", words(&rendered));
+	assert!(spaced_words(&rendered).contains("in para"), "{}", spaced_words(&rendered));
 	let sites: Vec<(usize, &str)> = report.diagnostics.iter().map(|d| (d.line, d.message.as_str())).collect();
 	assert_eq!(sites, [(4, "#[ stands inside a paragraph, so it is set as text, brackets and all")]);
 	Ok(())

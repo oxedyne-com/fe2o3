@@ -403,7 +403,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		.peekable();
 	// Which bytes each conditional and loop in the markup leaves to be read, and the sites of those refused
 	// whole, recorded as the loop reaches the line each opens on.
-	let (keep, flow_sites)	= flow_mask(src, binds.guards);
+	let (keep, flow_sites)	= flow_mask(src, binds.guards, binds.guard_at);
 	let mut flow_sites		= flow_sites.into_iter().peekable();
 
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
@@ -2131,15 +2131,16 @@ enum FlowRead {
 }
 
 /// Which bytes of `src` the reader keeps once each conditional and loop standing in its markup is read, and
-/// the sites refused on the way, each with the byte it opens at. A conditional whose condition resolves in
-/// the file's [`GuardScope`](crate::lang::rules::GuardScope), the scope the include walk resolves its guards
-/// in, keeps the taken branch's content where it stands, so a guard in a callout or mid-paragraph sets what Typst sets, and
-/// drops the rest of the statement, its other branches, `else` and brackets included. Any other conditional,
-/// and every loop, is dropped whole and refused at its line: never set as prose.
-fn flow_mask(src: &str, guards: &crate::lang::rules::GuardScope) -> (Vec<bool>, Vec<(usize, Refusal)>) {
+/// the sites refused on the way, each with the byte it opens at. `src` starts at byte `at` of the text
+/// `guards` was built from, so each condition resolves in the bindings in force where it stands, as the
+/// include walk resolves its guards. One that resolves keeps the taken branch's content where it stands, so
+/// a guard in a callout or mid-paragraph sets what Typst sets, and drops the rest of the statement, its
+/// other branches, `else` and brackets included. Any other conditional, and every loop, is dropped whole
+/// and refused at its line: never set as prose.
+fn flow_mask(src: &str, guards: &crate::lang::rules::GuardScope, at: usize) -> (Vec<bool>, Vec<(usize, Refusal)>) {
 	let mut keep	= vec![true; src.len()];
 	let mut sites	= Vec::new();
-	mask_flows(src, 0, src.len(), guards, &mut keep, &mut sites);
+	mask_flows(src, 0, src.len(), (guards, at), &mut keep, &mut sites);
 	sites.sort_by_key(|(at, _)| *at);
 	(keep, sites)
 }
@@ -2150,7 +2151,7 @@ fn mask_flows(
 	src:	&str,
 	from:	usize,
 	to:		usize,
-	guards:	&crate::lang::rules::GuardScope,
+	guards:	(&crate::lang::rules::GuardScope, usize),	// and the byte of its text `src` starts at
 	keep:	&mut [bool],
 	sites:	&mut Vec<(usize, Refusal)>,
 )
@@ -2161,7 +2162,7 @@ fn mask_flows(
 		for k in &mut keep[start..end] {
 			*k = false;
 		}
-		match read_flow(text, &f, guards) {
+		match read_flow(text, &f, (guards.0, guards.1 + from)) {
 			FlowRead::Keep(a, b)	=> {
 				for k in &mut keep[from + a..from + b] {
 					*k = true;
@@ -2192,7 +2193,7 @@ fn mask_flows(
 /// `else`; a taken branch is kept only when it is a content block with no statement at its own level, since
 /// a `#set`, `#show`, `#let` or `#import` there governs the branch alone, which the reader does not scope,
 /// and an `#include` there is not followed.
-fn read_flow(text: &str, f: &lex::Flow, guards: &crate::lang::rules::GuardScope) -> FlowRead {
+fn read_flow(text: &str, f: &lex::Flow, guards: (&crate::lang::rules::GuardScope, usize)) -> FlowRead {
 	if !f.whole {
 		return FlowRead::Refuse("does not close as one statement, so nothing of it is set".to_string());
 	}
@@ -2202,9 +2203,11 @@ fn read_flow(text: &str, f: &lex::Flow, guards: &crate::lang::rules::GuardScope)
 	for arm in &f.arms {
 		let taken = match arm.cond {
 			None			=> true,
-			Some((a, b))	=> match guards.eval(&text[a..b]) {
-				Some(t)	=> t,
-				None	=> return FlowRead::Refuse(
+			Some((a, b))	=> match guards.0.cond_at(guards.1 + a, &text[a..b]) {
+				crate::lang::rules::Cond::Taken(t)			=> t,
+				crate::lang::rules::Cond::Unknown(name)		=> return FlowRead::Refuse(fmt!(
+					"names `{}`, which nothing binds above it (Typst stops: unknown variable: {})", name, name)),
+				crate::lang::rules::Cond::Opaque			=> return FlowRead::Refuse(
 					"has a condition the reader does not evaluate, so no branch of it is set".to_string()),
 			},
 		};
@@ -2622,7 +2625,8 @@ fn dispatch_capture(
 			let span = Span::new(cap.start, cap.start);
 			match place_float_call(&cap.buf) {
 				Some((floating, clearance, body)) => {
-					let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_body().with_guards(&scope, 0)));
 					skips.merge(sub);
 					// A float is laid out as one unit, so a break inside it is refused, and a float inside it
 					// is set in place with its placement refused (see [`settle_container_body`]).
@@ -2644,7 +2648,8 @@ fn dispatch_capture(
 			// the same record.
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body()));
+				let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+				let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
 				skips.merge(sub);
 				// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
 				// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
@@ -2664,7 +2669,8 @@ fn dispatch_capture(
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
 			match styled_box_body(&cap.buf) {
 				Some(body) => {
-					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body()));
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
 					skips.merge(sub);
 					// The box is laid out as one keep unit, so a break in its body is refused, and a float in it
 					// is set in place with its placement refused (see [`settle_container_body`]).
@@ -2780,7 +2786,8 @@ fn dispatch_capture(
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
 					{
-						let (mut inner, sub) = res!(parse_items(&body, binds.in_body()));
+						let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+						let (mut inner, sub) = res!(parse_items(&body, binds.in_body().with_guards(&scope, 0)));
 						skips.merge(sub);
 						// The box is one keep unit, so a break in its body is refused, and a float in it is set
 						// in place with its placement refused.
@@ -2854,7 +2861,8 @@ fn dispatch_capture(
 			}
 			let mut nested: Vec<String> = binds.active.to_vec();
 			nested.push(name.clone());
-			let (mut inner, sub) = res!(parse_items(&expanded, binds.with_active(&nested)));
+			let scope = content_scope(cf, &args, binds, cap.start as usize, &expanded);
+			let (mut inner, sub) = res!(parse_items(&expanded, binds.with_active(&nested).with_guards(&scope, 0)));
 			skips.merge(sub);
 			items.append(&mut inner);
 		},
@@ -3057,6 +3065,26 @@ fn content_arg_value(arg: &str) -> String {
 		}
 	}
 	unwrap_arg(t)
+}
+
+/// The scope an expanded content binding's conditionals resolve in: the names in force where its body is
+/// written, where Typst evaluates it, over the body's own bindings. Arguments substituted into the body are
+/// the call's, evaluated where the call stands (`at` in the text `binds` reads), so where the two places
+/// differ on a name the name is unread rather than taken from either.
+fn content_scope(
+	cf:			&crate::lang::rules::ContentFn,
+	args:		&[String],
+	binds:		crate::lang::rules::Bindings<'_, '_>,
+	at:			usize,
+	expanded:	&str,
+)
+	-> crate::lang::rules::GuardScope
+{
+	let base = match args.is_empty() {
+		true	=> cf.scope.clone(),
+		false	=> cf.scope.agree(&binds.guards.base_at(binds.guard_at + at)),
+	};
+	crate::lang::rules::GuardScope::within(base, expanded, 0)
 }
 
 /// Substitutes a content binding's positional arguments into its body: each line-leading or inline `#param`
@@ -5362,6 +5390,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			params:		vec!["w".to_string()],
 			body:		"Learn about #t(w).".to_string(),
 			wrapper:	None,
+			scope:		crate::lang::rules::GuardBase::unknown(),
 		});
 		let tfns	= crate::lang::rules::TemplateFns::new();
 		let binds	= crate::lang::rules::Bindings::new(&tfns, &cfns);
@@ -5383,6 +5412,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			params:		vec!["w".to_string()],
 			body:		"The word w on its own is prose, not #t(w).".to_string(),
 			wrapper:	None,
+			scope:		crate::lang::rules::GuardBase::unknown(),
 		};
 		let expanded = expand_content_body(&cf, &["website".to_string()]);
 		assert_eq!(expanded, "The word w on its own is prose, not #t(\"website\").",
@@ -5982,7 +6012,7 @@ bound\".\n";
 		let (_, skips) = res!(document_with_refusals("#columns(2)[\n#set document(title: \"Cols\")\nText.\n]\n"));
 		assert!(named(&skips), "a container's is refused: {:?}", skips.sites());
 		let mut cfns = crate::lang::rules::ContentFns::new();
-		crate::lang::rules::collect_content_fns("#let intro = [\n#set document(title: \"Bound\")\nHello.\n]\n", &mut cfns);
+		crate::lang::rules::collect_content_fns("#let intro = [\n#set document(title: \"Bound\")\nHello.\n]\n", None, &mut cfns);
 		assert!(cfns.contains_key("intro"), "the binding is collected");
 		let tfns = crate::lang::rules::TemplateFns::new();
 		let (_, skips) = res!(document_with_templates("#intro\n", crate::lang::rules::Bindings::new(&tfns, &cfns)));
@@ -6049,10 +6079,10 @@ bound\".\n";
 	fn a_taken_branch_joins_the_paragraph_it_stands_in() -> Outcome<()> {
 		let tfns = crate::lang::rules::TemplateFns::new();
 		let cfns = crate::lang::rules::ContentFns::new();
-		let guards = crate::lang::rules::GuardScope::default().in_file("#let media = \"ebook\"\n");
-		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards);
-		let src = "Text before.\n#if media == \"ebook\" [\nEbook words\n#if media == \"print\" [\nPrint\n] then.\n\
+		let src = "#let media = \"ebook\"\nText before.\n#if media == \"ebook\" [\nEbook words\n#if media == \"print\" [\nPrint\n] then.\n\
 			] else [\nPrint words.\n]\n\nTail.\n\n#for x in (1, 2) [\nLoop.\n]\n";
+		let guards = crate::lang::rules::GuardScope::of_file(src, None, 0);
+		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards, 0);
 		let (items, skips) = res!(document_with_templates(src, binds));
 		let texts: Vec<String> = items.iter().filter_map(|it| match it {
 			Item::Paragraph { runs, .. } => Some(runs.iter().map(|r| match r {
@@ -6064,7 +6094,7 @@ bound\".\n";
 		assert_eq!(texts, ["Text before. Ebook words then.", "Tail."]);
 		let sites: Vec<(usize, &str)> = skips.sites().iter()
 			.map(|r| (crate::lang::line_col_of(src, r.span.start).0, r.name.as_str())).collect();
-		assert_eq!(sites, [(13, "#for")]);
+		assert_eq!(sites, [(1, "#let"), (14, "#for")]);
 		Ok(())
 	}
 

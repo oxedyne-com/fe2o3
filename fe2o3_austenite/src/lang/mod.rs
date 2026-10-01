@@ -50,6 +50,17 @@ pub fn line_col_of(src: &str, offset: u32) -> (usize, usize, &str) {
 	(line_no, col, &src[line_start..line_end])
 }
 
+/// The file a local `#import "<rel>"` written in `dir` names, and its source, as Typst resolves one:
+/// relative to the importing file's own directory. `None` for a package import (`@preview/...`), a file
+/// that cannot be read, or one `depth` imports down past the walk's cap, which stops a cycle.
+pub(crate) fn resolve_import(dir: &std::path::Path, rel: &str, depth: u32) -> Option<(std::path::PathBuf, String)> {
+	if depth > 4 || rel.starts_with('@') {
+		return None;
+	}
+	let path = dir.join(rel);
+	crate::vfs::read_to_string(&path).ok().map(|src| (path, src))
+}
+
 /// Reads one run of Typst inline markup -- prose with `*strong*`, `_emph_`, a maths span or a glossary
 /// term -- into the [`Segment`]s the block layer sets, without a surrounding block. The book layer uses
 /// it to turn a `term-defs` definition (Typst content, `[...]`) into the runs of a glossary table cell.

@@ -155,9 +155,9 @@ where
 	// re-read markup, rather than being dropped as an unknown construct. The import walk resolves an `#import`
 	// even with no `#include` present, which the lone path by definition has none of.
 	let scope	= book::collect_scope(&src, main_path.parent().unwrap_or_else(|| Path::new(".")), style.text.body_size);
-	// A lone file has no book config, so a conditional in it resolves in its own bindings alone.
-	let guards	= lang::rules::GuardScope::default().in_file(&src);
-	let binds	= scope.bindings().with_guards(&guards);
+	// A lone file's conditionals resolve in its own bindings and imports, where each stands.
+	let guards	= lang::rules::GuardScope::of_file(&src, main_path.parent(), 0);
+	let binds	= scope.bindings().with_guards(&guards, 0);
 	let (mut blocks, parsed)	= res!(lang::to_blocks_in(&src, binds, &main_file, 0));
 	refusals.merge(parsed);
 	// The Info dictionary the file's own `#set document` rules build, a rule in a container refused at its site.

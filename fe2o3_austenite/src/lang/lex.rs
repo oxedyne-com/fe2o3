@@ -1322,6 +1322,101 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 	out
 }
 
+/// A `#let` or `#import` embedded in markup, and the stretch of the text its names are bound over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Binding {
+	pub(crate) text:	String,			// the statement from its `#`, its comments dropped
+	pub(crate) at:		usize,			// the byte just past it, where its names come into force
+	pub(crate) until:	Option<usize>,	// the byte of the closer of the block it stands in; `None` at the text's own level
+}
+
+/// Every `#let` and `#import` embedded in `src`'s markup, at any depth, in source order. Typst binds a
+/// name in the innermost content block `[...]` or code block `{...}` the statement stands in, a
+/// conditional's branch included, from the statement's end to the block's closer; a heading, a list item,
+/// strong or emphasis opens no scope. A code block's own `let`, written with no `#`, is code rather than
+/// markup and is not listed.
+pub(crate) fn bindings(src: &str) -> Vec<Binding> {
+	let chars: Vec<(usize, char)>	= src.char_indices().collect();
+	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
+	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
+	let mut out: Vec<Binding>	= Vec::new();
+	let mut lx					= Lexer::markup();
+	// The statements each open block holds, awaiting its closer; the text's own level at the bottom.
+	let mut held: Vec<Vec<usize>>			= vec![Vec::new()];
+	let mut cur: Option<(String, usize)>	= None;	// the statement being read, and its expression's frame
+	let mut hash: Option<usize>				= None;	// the frame of an expression a `#` has just opened
+	let mut i = 0usize;
+	while i < only.len() {
+		let blocks		= open_blocks(&lx);
+		let (n, tok)	= lx.step(&only, i);
+		let next		= i + n;
+		let stmt		= |lx: &Lexer, e: usize| lx.frames.get(e) == Some(&Frame::Embed(Embed::Stmt));
+		let word		= &only[i..next];
+		match (hash.take(), cur.as_mut()) {
+			(Some(e), None) if stmt(&lx, e) && (at_word(word, 0, "let") || at_word(word, 0, "import")) => {
+				let mut text = String::from("#");
+				text.extend(word);
+				cur = Some((text, e));
+			},
+			(_, Some((text, e))) => {
+				if stmt(&lx, *e) {
+					if tok != Tok::Comment {
+						text.extend(word);
+					}
+				} else {
+					// The statement ended on this step: on the `;` it took, or before the character the level
+					// beneath it read.
+					let at = if tok == Tok::Code && only[i] == ';' { byte(next) } else { byte(i) };
+					out.push(Binding { text: std::mem::take(text), at, until: None });
+					if let Some(level) = held.last_mut() {
+						level.push(out.len() - 1);
+					}
+					cur = None;
+				}
+			},
+			_ => {},
+		}
+		if tok == Tok::Hash && matches!(lx.frames.last(), Some(Frame::Embed(Embed::Start))) {
+			hash = Some(lx.frames.len() - 1);
+		}
+		// A step closes one block, on its closer, or opens one.
+		let now = open_blocks(&lx);
+		if now < blocks && held.len() > 1 {
+			if let Some(level) = held.pop() {
+				for k in level {
+					out[k].until = Some(byte(i));
+				}
+			}
+		} else if now > blocks {
+			held.push(Vec::new());
+		}
+		i = next;
+	}
+	if let Some((text, _)) = cur {
+		out.push(Binding { text, at: src.len(), until: None });
+		if let Some(level) = held.last_mut() {
+			level.push(out.len() - 1);
+		}
+	}
+	// A block the text never closes holds its statements to the end.
+	for level in held.iter().skip(1) {
+		for &k in level {
+			out[k].until = Some(src.len());
+		}
+	}
+	out
+}
+
+/// How many blocks that scope a binding are open: content blocks, a reference's supplement among them, and
+/// code blocks.
+fn open_blocks(lx: &Lexer) -> usize {
+	lx.frames.iter().skip(1).filter(|f| match f {
+		Frame::Markup(m)	=> m.block,
+		Frame::Code(c)		=> *c == '}',
+		_					=> false,
+	}).count()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1598,6 +1693,43 @@ mod tests {
 		assert!(!flows_of("#if a\n[x]\n")[0].1);
 		assert_eq!(flows_of("#if a [x\ny\n")[0].2, "#if a [x\ny\n");
 		assert!(!flows_of("#if a [x\ny\n")[0].1);
+	}
+
+	/// The statements `bindings` finds, as `(text, the source before it comes into force, the closer's source
+	/// from where it stops)`.
+	fn binds_of(src: &str) -> Vec<(String, String, Option<String>)> {
+		bindings(src).into_iter()
+			.map(|b| (b.text.clone(), src[..b.at].to_string(), b.until.map(|u| src[u..].to_string())))
+			.collect()
+	}
+
+	#[test]
+	fn a_binding_is_listed_from_its_end_to_its_blocks_closer() {
+		// At the text's own level it holds to the end; a `;` ends it there, and is part of what it holds over.
+		let src = "#let a = \"x\"\nText\n#let b = true; more\n";
+		assert_eq!(binds_of(src), vec![
+			("#let a = \"x\"".to_string(), "#let a = \"x\"".to_string(), None),
+			("#let b = true".to_string(), "#let a = \"x\"\nText\n#let b = true;".to_string(), None),
+		]);
+		// In a callout's body, or a conditional's branch, it stops at the closer; text after the block is
+		// outside it, and a heading, strong or emphasis opens no scope of its own.
+		let src = "#box[\n#let a = 1\nIN\n]\n#if x [\n#let b = 2\n]\n= H #let c = 3;\nEND\n";
+		let got = binds_of(src);
+		assert_eq!(got.len(), 3);
+		assert_eq!(got[0], ("#let a = 1".to_string(), "#box[\n#let a = 1".to_string(), Some("]\n#if x [\n#let b = 2\n]\n= H #let c = 3;\nEND\n".to_string())));
+		assert_eq!(got[1].0, "#let b = 2");
+		assert_eq!(got[1].2.as_deref(), Some("]\n= H #let c = 3;\nEND\n"));
+		assert_eq!(got[2].0, "#let c = 3");
+		assert_eq!(got[2].2, None);
+	}
+
+	#[test]
+	fn a_binding_a_comment_a_raw_or_a_code_block_holds_is_not_listed_as_markup() {
+		// Comments inside a statement are dropped from its text; one standing alone, a raw span, and a `let`
+		// of a code block (no `#`) are not statements of the markup.
+		let src = "#let a = /* c */ \"x\" // t\n// #let b = 1\n`#let c = 1`\n#{ let d = 1 }\n#include \"f.typ\"\n#import \"g.typ\": *\n";
+		let got: Vec<String> = binds_of(src).into_iter().map(|(t, _, _)| t.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+		assert_eq!(got, ["#let a = \"x\"", "#import \"g.typ\": *"]);
 	}
 
 	#[test]
