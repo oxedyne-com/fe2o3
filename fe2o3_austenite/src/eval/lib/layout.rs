@@ -248,7 +248,15 @@ pub fn spread(kind: ElemKind, args: &mut Args) -> Outcome<()> {
 			}
 		},
 		ElemKind::Pad => {
-			let rest	= res!(args.named::<Value>("rest"));
+			let mut rest = res!(args.named::<Value>("rest"));
+			// `rest` is also the first positional, ahead of the body: `pad(1em)[..]`.
+			if rest.is_none() && args.items.iter().filter(|a| a.name.is_none()).count() > 1 {
+				if let Some(i) = args.items.iter().position(|a| a.name.is_none()) {
+					if matches!(args.items[i].value, Value::Length(_) | Value::Relative(_) | Value::Ratio(_)) {
+						rest = Some(args.items.remove(i).value);
+					}
+				}
+			}
 			let x		= res!(args.named::<Value>("x")).or_else(|| rest.clone());
 			let y		= res!(args.named::<Value>("y")).or(rest);
 			for (side, v) in [("left", &x), ("right", &x), ("top", &y), ("bottom", &y)] {

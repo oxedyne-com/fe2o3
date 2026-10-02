@@ -1861,8 +1861,16 @@ impl<'a> Vm<'a> {
 					"cannot directly call dictionary keys as functions", fmt!(
 					"to call the stored function, wrap the field access in parentheses: `({})(..)`",
 					callee.full_text().trim()))),
-				other => Err(self.error(DiagnosticKind::Type, callee.span(),
-					fmt!("type {} has no method `{}`", other.ty().long_name(), field))),
+				// A function in the type's own scope is called with the value as its first argument, as Typst
+				// calls it: `c.mix(red)` is `color.mix(c, red)`.
+				other => match foundations::type_scope(other.ty(), &field) {
+					Some(Value::Func(f))	=> {
+						args.prepend(target.span(), other);
+						self.engine.call_func(&f, args)
+					},
+					_						=> Err(self.error(DiagnosticKind::Type, callee.span(),
+						fmt!("type {} has no method `{}`", other.ty().long_name(), field))),
+				},
 			};
 		}
 		let cv = res!(self.eval(&callee));
