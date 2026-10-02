@@ -98,7 +98,9 @@ fn austenite_nth(name: &str, src: &str, nth: usize) -> Outcome<(Vec<BoxF>, (f64,
 		Ok(p)	=> p,
 		Err(err)	=> return Err(err!("realise {}: {} {:?}", name, err, e.diags; Invalid)),
 	};
-	if nth > 0 {
+	// A number reads the equation counter at its own location, which only the previous pass's introspector
+	// holds, so a numbered equation needs the second pass the fixpoint would make.
+	if nth > 0 || src.contains("numbering") {
 		// The second pass sees the first's equations, as the fixpoint's second pass does.
 		let elems: Vec<Content> = pairs.iter().filter(|p| p.content.is(ElemKind::Equation)).map(|p| p.content.clone()).collect();
 		let mut builder = Builder::new();
@@ -152,6 +154,10 @@ fn walk(node: &Node, x: f64, y: f64, out: &mut Vec<BoxF>) -> Outcome<()> {
 						res!(walk(c, cx, base - i.dims.height.to_pt(), out));
 						cx += i.dims.width.to_pt();
 					}
+					Node::Frame(f) => {
+						res!(walk(c, cx, base - f.dims.height.to_pt(), out));
+						cx += f.dims.width.to_pt();
+					}
 					_ => (),
 				}
 			}
@@ -169,11 +175,19 @@ fn walk(node: &Node, x: f64, y: f64, out: &mut Vec<BoxF>) -> Outcome<()> {
 						res!(walk(c, x, cy, out));
 						cy += i.dims.vextent().to_pt();
 					}
+					Node::Frame(f) => {
+						res!(walk(c, x, cy, out));
+						cy += f.dims.vextent().to_pt();
+					}
 					_ => (),
 				}
 			}
 		}
 		Node::Leaf(l) => res!(leaf(l, x, y + l.shift.to_pt(), out)),
+		// A number is laid as a block, which the block flow hands back as a frame of positioned children.
+		Node::Frame(f) => for (ox, oy, c) in &f.items {
+			res!(walk(c, x + ox.to_pt(), y + oy.to_pt(), out));
+		},
 		_ => (),
 	}
 	Ok(())

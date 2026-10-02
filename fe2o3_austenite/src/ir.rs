@@ -8,6 +8,7 @@
 //! Lengths are [`Sp`], scaled points, per the architecture's reproducibility rule. Floating point
 //! appears only at the output boundary, where a coordinate becomes a device length.
 
+use crate::eval::realise::Tag;
 use crate::font::ShapedText;
 use crate::ledger::{
 	AnchorId,
@@ -516,6 +517,11 @@ impl Transform {
 		Self { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
 	}
 
+	/// The image of the point `(x, y)`.
+	pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+		(self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+	}
+
 	/// `self` applied after `inner`.
 	pub fn then(&self, inner: &Transform) -> Transform {
 		Transform {
@@ -530,10 +536,9 @@ impl Transform {
 }
 
 /// Material drawn under a transform (`move`, `scale`, `rotate`, `skew`). `dims` is the layout footprint
-/// the flow reserves, which Typst keeps as the untransformed size unless `reflow` is set.
-///
-/// Not yet a [`Node`] variant: adding one forces the driver's exhaustive matches to change, so U6b wires
-/// it in with its `driver.rs` work. Declared here now so U6d builds against it.
+/// the flow reserves, which Typst keeps as the untransformed size unless `reflow` is set. `list` is a
+/// vertical list set from the footprint's top-left; `transform` maps that local frame (points, y down,
+/// origin at the top-left) onto the frame the node is placed in.
 #[derive(Clone, Debug)]
 pub struct TransformNode {
 	pub transform:	Transform,
@@ -541,13 +546,31 @@ pub struct TransformNode {
 	pub dims:		Dims,
 }
 
-/// Material clipped to its box, or to `path` when given (a rounded `block(clip: true, radius: ..)`).
-/// Wired into [`Node`] by U6b, as [`TransformNode`] is.
+/// Material clipped to its box, or to `path` when given (a rounded `block(clip: true, radius: ..)`). The
+/// list is a vertical list set from the box's top-left.
 #[derive(Clone, Debug)]
 pub struct ClipNode {
 	pub list:	Vec<Node>,
 	pub dims:	Dims,
 	pub path:	Option<Path>,	// in the box's own frame, points, y down
+}
+
+/// A box of absolutely positioned children: Typst's frame. Each child is set with its top-left at its
+/// offset from the frame's top-left, whatever came before it, so children may overlap. `dims` splits the
+/// frame's height at its baseline, as every box does.
+///
+/// `parent` names the [`Node::Mark`] (or the located element's start tag) the frame's contents belong to
+/// logically: a float's frame is drawn at the top or foot of a region but read, for introspection, where its
+/// `place` stood in the flow, as Typst's frame parents make it.
+#[derive(Clone, Debug)]
+pub struct FrameNode {
+	pub dims:	Dims,
+	pub items:	Vec<(Sp, Sp, Node)>,	// (x, y) of each child's top-left, then the child
+	pub parent:	Option<u64>,
+}
+
+impl FrameNode {
+	pub fn new(dims: Dims) -> Self { Self { dims, items: Vec::new(), parent: None } }
 }
 
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
@@ -571,6 +594,20 @@ pub enum Node {
 	// never ToDat-serialised -- it is a driver-time control node the lowerer weaves, not shipped IR -- so
 	// adding it changes no on-disc format. Transparent to breakability, like `Anchor`.
 	RepeatHead(Option<Box<BoxNode>>),
+	// A zero-size marker arming (Some) or disarming (None) a repeated footer: while armed, the rows that
+	// break across regions are closed in every region but the last by the boxed footer, set straight after
+	// them, and each region reserves its height (Typst's `table.footer` repeat). The final footer is the
+	// list's own, after the marker disarms. A driver-time control node like `RepeatHead`.
+	RepeatFoot(Option<Box<BoxNode>>),
+	Frame(FrameNode),			// absolutely positioned children, Typst's frame
+	Transform(TransformNode),	// material drawn under an affine map
+	Clip(ClipNode),				// material clipped to its box or a path
+	// Where a located element starts or ends (`eval::realise::Tag`): zero-size, it records the element's
+	// page and position in the ledger when placed, as Typst's frame tags do.
+	Tag(Tag),
+	// A zero-size marker of where out-of-flow material (a float) stands in the flow; a frame whose `parent`
+	// names it is ordered here for introspection.
+	Mark(u64),
 }
 
 impl Node {
@@ -594,8 +631,14 @@ impl Node {
 			// A repeated-header marker is a zero-size control node: it arms or disarms the driver's header
 			// repeat and occupies no vertical space where it stands.
 			Node::RepeatHead(_)	=> Sp::ZERO,
+			Node::RepeatFoot(_)	=> Sp::ZERO,
 			// A column-layout marker occupies nothing; the driver acts on it between pages.
 			Node::PageColumns(_)	=> Sp::ZERO,
+			Node::Frame(f)		=> f.dims.vextent(),
+			Node::Transform(t)	=> t.dims.vextent(),
+			Node::Clip(c)		=> c.dims.vextent(),
+			Node::Tag(_)		=> Sp::ZERO,
+			Node::Mark(_)		=> Sp::ZERO,
 		}
 	}
 

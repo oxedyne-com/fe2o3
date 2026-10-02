@@ -118,6 +118,16 @@ fn page_key(page: &Page, body: &[Placed]) -> u64 {
 			PlacedKind::Reserved	=> h.write_u8(1),
 			PlacedKind::Text(s)		=> { h.write_u8(2); s.hash_into(&mut h); },
 			PlacedKind::Graphic(g)	=> { h.write_u8(3); hash_graphic(g, &mut h); },
+			PlacedKind::Group(g)	=> {
+				h.write_u8(4);
+				for v in [g.transform.a, g.transform.b, g.transform.c, g.transform.d, g.transform.e, g.transform.f] {
+					h.write(&v.to_le_bytes());
+				}
+				if let Some(c) = &g.clip {
+					h.write_str(&write_path_data(c));
+				}
+			},
+			PlacedKind::GroupEnd	=> h.write_u8(5),
 		}
 	}
 	h.finish()
@@ -210,6 +220,15 @@ fn render_slice(
 			res!(draw_text(ink, p.x, p.y, p.dims.height, shaped));
 			continue;
 		}
+		// A group opens an SVG group under its matrix and clip; its end closes it.
+		if let PlacedKind::Group(g) = &p.kind {
+			res!(open_group(ink, p, g));
+			continue;
+		}
+		if let PlacedKind::GroupEnd = &p.kind {
+			ink.push_str("  </g>\n");
+			continue;
+		}
 		if let PlacedKind::Graphic(g) = &p.kind {
 			res!(draw_graphic(ink, p.x, p.y, g));
 			continue;
@@ -231,18 +250,62 @@ fn render_slice(
 			PlacedKind::Reserved	=> presentation(None, Some((grey, &pen))),
 			PlacedKind::Text(_)		=> continue,	// drawn above
 			PlacedKind::Graphic(_)	=> continue,	// drawn above
+			PlacedKind::Group(_) | PlacedKind::GroupEnd	=> continue,	// handled above
 		};
 		ink.push_str(&fmt!("  <path d=\"{}\" {}/>\n", d, attrs));
 	}
 
+	// Text under a transform is left out of the selectable layer, whose spans sit at untransformed baseline
+	// positions; it stays visible as ink.
+	let mut bent: Vec<bool> = Vec::new();
 	for p in placed {
-		if let PlacedKind::Text(shaped) = &p.kind {
-			if res!(run_text_layer(tspans, p.x, p.y, p.dims.height, shaped, *seen_text)) {
-				*seen_text = true;
-			}
+		match &p.kind {
+			PlacedKind::Group(g) => {
+				let outer = bent.last().copied().unwrap_or(false);
+				bent.push(outer || g.transform != crate::ir::Transform::identity());
+			},
+			PlacedKind::GroupEnd => {
+				bent.pop();
+			},
+			PlacedKind::Text(shaped) if !bent.last().copied().unwrap_or(false) => {
+				if res!(run_text_layer(tspans, p.x, p.y, p.dims.height, shaped, *seen_text)) {
+					*seen_text = true;
+				}
+			},
+			_ => (),
 		}
 	}
 	Ok(())
+}
+
+/// Opens a group: `<g>` under the group's page matrix, clipped when the group clips. The clip path is given
+/// in page coordinates before the matrix, which is the user space `clipPathUnits="userSpaceOnUse"` names
+/// for an element carrying a `transform`; its id is a hash of what it draws, so equal clips share a name.
+fn open_group(out: &mut String, p: &Placed, g: &crate::page::Group) -> Outcome<()> {
+	let m = g.page_transform(p.x, p.y);
+	let mut attrs = String::new();
+	if m != crate::ir::Transform::identity() {
+		attrs.push_str(&fmt!(" transform=\"matrix({} {} {} {} {} {})\"",
+			num(m.a), num(m.b), num(m.c), num(m.d), num(m.e), num(m.f)));
+	}
+	if let Some(clip) = &g.clip {
+		let t	= Transform::translate(p.x.to_pt() as f32, p.y.to_pt() as f32);
+		let d	= write_path_data(&res!(clip.transform(&t)));
+		let mut h = Fnv::new();
+		h.write_str(&d);
+		let id = fmt!("clip{:016x}", h.finish());
+		out.push_str(&fmt!("  <clipPath id=\"{}\"><path d=\"{}\"/></clipPath>\n", id, d));
+		attrs.push_str(&fmt!(" clip-path=\"url(#{})\"", id));
+	}
+	out.push_str(&fmt!("  <g{}>\n", attrs));
+	Ok(())
+}
+
+/// A matrix entry as SVG writes it: fixed to four decimals, trailing zeros trimmed.
+fn num(v: f64) -> String {
+	let s = fmt!("{:.4}", v);
+	let s = s.trim_end_matches('0').trim_end_matches('.');
+	if s == "-0" { "0".to_string() } else { s.to_string() }
 }
 
 /// Draws a placed graphic: each op's path translated from the graphic's own frame to where the graphic

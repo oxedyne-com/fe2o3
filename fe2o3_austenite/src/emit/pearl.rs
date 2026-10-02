@@ -375,9 +375,33 @@ impl PearlBuilder {
 	/// `frame.placed`, which is what lets the reader reproduce that arm's bytes.
 	pub fn add_page(&mut self, page: &Page) -> Outcome<()> {
 		let mut leaves: Vec<Dat> = Vec::new();
+		// The page maps of the groups open at each point. Pearl v1 has no group leaf, so material under a
+		// transform is baked into page-space paths as `fill` leaves; a group's clip is not carried.
+		let mut maps: Vec<Transform> = Vec::new();
 
 		for placed in &page.frame.placed {
 			match &placed.kind {
+				PlacedKind::Group(g) => {
+					let m = g.page_transform(placed.x, placed.y);
+					let m = Transform { a: m.a as f32, b: m.b as f32, c: m.c as f32, d: m.d as f32, e: m.e as f32, f: m.f as f32 };
+					let outer = maps.last().copied().unwrap_or(Transform::IDENTITY);
+					maps.push(m.then(&outer));	// this group's map first, then the enclosing ones
+					continue;
+				},
+				PlacedKind::GroupEnd => {
+					maps.pop();
+					continue;
+				},
+				_ => (),
+			}
+			if let Some(map) = maps.last().copied() {
+				if map != Transform::IDENTITY {
+					res!(bake_placed(placed, &map, &mut leaves));
+					continue;
+				}
+			}
+			match &placed.kind {
+				PlacedKind::Group(_) | PlacedKind::GroupEnd => (),
 				PlacedKind::Text(shaped) => {
 					let mut glyphs: Vec<Dat> = Vec::new();
 					for glyph in &shaped.run().glyphs {
@@ -1457,4 +1481,62 @@ mod tests {
 		assert!(svg.ends_with("</svg>\n"), "keystone page 0 is not a well-formed, closed SVG document");
 		Ok(())
 	}
+}
+
+/// Bakes one placed item under a group's page map into `fill` and `stroke` leaves in page space: text as its
+/// glyph outlines, a rule as its rectangle, a graphic op by op. A raster can be moved and scaled but not
+/// rotated or skewed, since Pearl v1 places images upright.
+fn bake_placed(placed: &crate::page::Placed, map: &Transform, leaves: &mut Vec<Dat>) -> Outcome<()> {
+	let x = placed.x.to_pt() as f32;
+	let y = placed.y.to_pt() as f32;
+	let zero = res!(crate::ir::Sp::ZERO.to_dat());
+	let fill = |path: Path, colour: Rgba, leaves: &mut Vec<Dat>| -> Outcome<()> {
+		leaves.push(listdat![
+			dat!("fill"),
+			zero.clone(),
+			zero.clone(),
+			dat!(write_path_data(&res!(path.transform(map)))),
+			rgba_to_dat(colour),
+		]);
+		Ok(())
+	};
+	match &placed.kind {
+		PlacedKind::Text(shaped) => {
+			let base_y = y + placed.dims.height.to_pt() as f32;
+			for glyph in &shaped.run().glyphs {
+				let o = res!(shaped.outline(glyph));
+				if o.is_empty() {
+					continue;
+				}
+				let t = Transform::scale(1.0, -1.0).then(&Transform::translate(x + glyph.x, base_y - glyph.y));
+				res!(fill(res!(o.transform(&t)), shaped.colour(), leaves));
+			}
+		},
+		PlacedKind::Rule => {
+			let w = placed.dims.width.to_pt() as f32;
+			let h = placed.dims.vextent().to_pt() as f32;
+			if w > 0.0 && h > 0.0 {
+				res!(fill(res!(Path::rect(Bounds::new(x, y, x + w, y + h))), Rgba::BLACK, leaves));
+			}
+		},
+		PlacedKind::Reserved => (),
+		PlacedKind::Graphic(g) => {
+			let at = Transform::translate(x, y);
+			for op in &g.ops {
+				match op {
+					DrawOp::Fill { path, colour } => res!(fill(res!(path.transform(&at)), *colour, leaves)),
+					DrawOp::Stroke { path, colour, width } => {
+						let pen = res!(Stroke::new(*width));
+						let outline = res!(res!(path.transform(&at)).stroke(&pen));
+						res!(fill(outline, *colour, leaves));
+					},
+					DrawOp::Image { .. } => return Err(err!(
+						"A raster under a transform cannot be written to Pearl v1, which places images \
+						upright and has no group leaf."; Unimplemented)),
+				}
+			}
+		},
+		PlacedKind::Group(_) | PlacedKind::GroupEnd => (),
+	}
+	Ok(())
 }

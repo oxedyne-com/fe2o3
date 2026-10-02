@@ -747,6 +747,7 @@ pub fn native_show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> 
 pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::cast_field(kind, name, v),
+		Family::Layout	=> lib::layout::cast_field(kind, name, v),
 		Family::Model	=> lib::model::cast_field(kind, name, v),
 		Family::Math	=> lib::math::cast_field(kind, name, v),
 		_				=> Ok(v),

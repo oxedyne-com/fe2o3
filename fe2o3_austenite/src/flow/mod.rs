@@ -14,6 +14,11 @@ pub mod par;
 pub mod text;
 pub mod visual;
 
+pub use page::{
+	PageBody,
+	Paginator,
+};
+
 use crate::eval::content::Content;
 use crate::eval::styles::StyleChain;
 use crate::eval::value::{
@@ -54,10 +59,11 @@ pub enum Parity {
 	Even,
 }
 
-/// A run of pages under one `set page(..)`: the driver breaks `nodes` into pages of `geom`, and
-/// decoration (U9) evaluates `header`/`footer`/`background`/`foreground` per page with `here()` there.
+/// What a run of pages under one `set page(..)` shares: the geometry, and the furniture decoration (U9)
+/// evaluates per page with `here()` there. Its pages' bodies come from the [`Paginator`] one at a time, so
+/// no run holds them.
 #[derive(Clone, Debug)]
-pub struct PageRun {
+pub struct RunSetup {
 	pub geom:		PageGeometry,
 	pub columns:	usize,
 	pub gutter:		Sp,
@@ -68,13 +74,11 @@ pub struct PageRun {
 	pub background:	Option<Content>,
 	pub foreground:	Option<Content>,
 	pub styles:		StyleChain,		// the chain furniture is evaluated under
-	pub to:			Option<Parity>,	// the parity the run's first page must have
-	pub nodes:		Vec<Node>,
 }
 
-/// The whole document, from its realised top level into page runs.
-pub fn layout_document(engine: &mut Engine, content: &Content, styles: &StyleChain) -> Outcome<Vec<PageRun>> {
-	page::layout_document(engine, content, styles)
+/// The document as pages, one at a time, from its content under `styles`.
+pub fn paginate(content: &Content, styles: &StyleChain) -> Paginator {
+	Paginator::new(content, styles)
 }
 
 /// Block-level content into a vertical list for a region.

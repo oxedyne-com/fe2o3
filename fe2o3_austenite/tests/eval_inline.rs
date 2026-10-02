@@ -353,16 +353,13 @@ fn read_fixture(text: &str) -> Outcome<Fixture> {
 	let mut width = None;
 	let mut base = ConfigBase { justify: false, linebreaks: None, first_line_indent: (0.0, false), hanging_indent: 0.0 };
 	let par_schema = ElemKind::Par.field_id("justify").is_some();
-	let page_schema = ElemKind::Page.field_id("width").is_some();
 	let mut kept = Vec::new();
 	for line in text.lines() {
 		if let Some(args) = line.strip_prefix("#set page(") {
 			if let Some(w) = args.split("width:").nth(1).and_then(|r| r.trim().split("pt").next()) {
 				width = w.trim().parse::<f64>().ok();
 			}
-			if page_schema {
-				kept.push(line);
-			}
+			// The width goes to the line setter directly; a page rule would be refused in an inline body.
 		} else if let Some(args) = line.strip_prefix("#set par(") {
 			base.justify = args.contains("justify: true");
 			if args.contains("\"simple\"") {

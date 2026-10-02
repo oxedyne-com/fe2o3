@@ -4,11 +4,11 @@
 
 use crate::eval::func::unimplemented;
 use crate::eval::Engine;
-use crate::flow::PageRun;
+use crate::flow::RunSetup;
 use crate::page::Page;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-pub fn decorate(_engine: &mut Engine, _pages: &mut [Page], _runs: &[PageRun]) -> Outcome<()> {
+pub fn decorate_page(_engine: &mut Engine, _page: &mut Page, _setup: &RunSetup) -> Outcome<()> {
 	Err(unimplemented("flow", "decorate"))
 }

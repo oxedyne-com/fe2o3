@@ -3080,6 +3080,7 @@ dependencies = [
  "oxedyne_fe2o3_geom",
  "oxedyne_fe2o3_graphics",
  "oxedyne_fe2o3_jdat",
+ "oxedyne_fe2o3_sys",
  "oxedyne_fe2o3_test",
  "oxedyne_fe2o3_text",
  "wasm-bindgen",

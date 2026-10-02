@@ -107,6 +107,14 @@ pub enum Draw {
 		colour:		Rgba,
 		text:		String,		// source scalar(s), for /ToUnicode; may be empty
 	},
+	// Opens a group: the draws up to the matching `Pop` are drawn under `matrix` (`[a b c d e f]`, mapping
+	// the group's coordinates onto the engine frame, top-left and y down) and clipped to `clip`, given in
+	// the group's coordinates, when present. Written as `q`, `cm` and `W n`, closed by `Q`.
+	Push {
+		matrix:	[f64; 6],
+		clip:	Option<Path>,
+	},
+	Pop,
 }
 
 impl Draw {
@@ -120,6 +128,7 @@ impl Draw {
 			Draw::Glyph { colour, .. }	=> *colour,
 			Draw::Text { colour, .. }	=> *colour,
 			Draw::Image { .. }			=> Rgba::new(0, 0, 0, 255),
+			Draw::Push { .. } | Draw::Pop	=> Rgba::new(0, 0, 0, 255),
 		}
 	}
 }
@@ -167,6 +176,17 @@ impl PdfPage {
 
 	pub fn fill(&mut self, path: Path, colour: Rgba) {
 		self.draws.push(Draw::Fill { path, colour });
+	}
+
+	/// Opens a group drawn under `matrix` and clipped to `clip`; see [`Draw::Push`]. Every `push` must be
+	/// matched by a [`pop`](Self::pop) on the same page.
+	pub fn push(&mut self, matrix: [f64; 6], clip: Option<Path>) {
+		self.draws.push(Draw::Push { matrix, clip });
+	}
+
+	/// Closes the innermost open group.
+	pub fn pop(&mut self) {
+		self.draws.push(Draw::Pop);
 	}
 
 	pub fn stroke(&mut self, path: Path, colour: Rgba, width: f64) {
@@ -702,6 +722,7 @@ impl<W: Write> PdfStream<W> {
 		let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
 		let mut used: Vec<(String, usize)> = Vec::new();
 		let mut ts = TextState::default();
+		let mut saved: Vec<Option<u8>> = Vec::new();	// the alpha in force at each open group, restored by `Q`
 
 		for d in &page.draws {
 			// A non-text draw ends any text object first, so it is well formed.
@@ -709,6 +730,20 @@ impl<W: Write> PdfStream<W> {
 				ts.close(&mut s);
 			}
 			match d {
+				Draw::Push { matrix, clip } => {
+					s.push_str("q\n");
+					saved.push(cur_alpha);
+					let [a, b, c, dd, e, f] = *matrix;
+					s.push_str(&fmt!("{} {} {} {} {} {} cm\n", numf(a), numf(b), numf(c), numf(dd), numf(e), numf(f)));
+					if let Some(path) = clip {
+						path_ops(&mut s, path);
+						s.push_str("W n\n");
+					}
+				},
+				Draw::Pop => {
+					s.push_str("Q\n");
+					cur_alpha = saved.pop().unwrap_or(cur_alpha);
+				},
 				Draw::Image { x, y, w, h, .. } => {
 					// The page CTM already flips y into the engine's top-left frame. An image's sample space
 					// paints the unit square with its top row at the square's top, so mapping it into the

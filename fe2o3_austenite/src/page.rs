@@ -10,12 +10,14 @@ use crate::ir::{
 	Dims,
 	Graphic,
 	Sp,
+	Transform,
 };
 
 use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_geom::rect::AbsSize;
+use oxedyne_fe2o3_graphics::path::Path;
 
 /// A page's physical geometry: its trim size and four margins. A book binds along one edge, so the
 /// inside (binding) and outside (fore-edge) margins differ, and the two alternate between recto and
@@ -30,17 +32,49 @@ pub struct PageGeometry {
 	pub outside:	Sp,	// the fore-edge margin, opposite the binding
 	pub top:	Sp,
 	pub bottom:	Sp,
+	pub swap:	Swap,	// which physical pages exchange `inside` and `outside` (Typst's two-sided margins)
+}
+
+/// Which pages of a two-sided layout exchange their left and right margins, by physical page number.
+/// Typst's `binding: left` swaps even pages (the first page is right as it stands); `binding: right`
+/// swaps odd ones. A one-sided layout swaps none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Swap {
+	#[default]
+	None,
+	Even,
+	Odd,
+}
+
+impl Swap {
+	/// Does the page with this one-based physical number exchange its side margins?
+	pub fn applies(self, number: u32) -> bool {
+		match self {
+			Swap::None	=> false,
+			Swap::Even	=> number % 2 == 0,
+			Swap::Odd	=> number % 2 == 1,
+		}
+	}
 }
 
 impl PageGeometry {
 	/// A uniform margin on all four sides -- the demos' geometry, and single-file `ingot`.
 	pub fn new(width: Sp, height: Sp, margin: Sp) -> Self {
-		Self { width, height, inside: margin, outside: margin, top: margin, bottom: margin }
+		Self { width, height, inside: margin, outside: margin, top: margin, bottom: margin, swap: Swap::None }
 	}
 
 	/// A book geometry with mirror margins: `inside` binds, `outside` is the fore-edge.
 	pub fn with_margins(width: Sp, height: Sp, inside: Sp, outside: Sp, top: Sp, bottom: Sp) -> Self {
-		Self { width, height, inside, outside, top, bottom }
+		Self { width, height, inside, outside, top, bottom, swap: Swap::None }
+	}
+
+	/// The geometry physical page `number` takes: the side margins exchanged when the layout is two-sided
+	/// and the binding puts this page's spine on the other side.
+	pub fn for_page(&self, number: u32) -> PageGeometry {
+		if !self.swap.applies(number) {
+			return *self;
+		}
+		PageGeometry { inside: self.outside, outside: self.inside, ..*self }
 	}
 
 	/// A4 portrait, 595.276 by 841.890 points, with a two-centimetre margin (56.9 points).
@@ -79,6 +113,7 @@ impl PageGeometry {
 			outside:	self.width - col_left - col_w,
 			top:		self.top,
 			bottom:		self.bottom,
+			swap:		self.swap,
 		}
 	}
 
@@ -105,6 +140,26 @@ pub enum PlacedKind {
 	Reserved,
 	Text(ShapedText),
 	Graphic(Arc<Graphic>),	// a figure's baked paths, drawn at this box's position
+	// Opens a group: every item up to the matching `GroupEnd` is drawn under the group's transform and
+	// clip. The items are placed at page positions as if untransformed; the transform acts about this
+	// item's position, and the clip path is in the frame whose origin that position is.
+	Group(Arc<Group>),
+	GroupEnd,
+}
+
+/// What a group does to the items it encloses.
+#[derive(Clone, Debug)]
+pub struct Group {
+	pub transform:	Transform,		// about the group's origin, points, y down
+	pub clip:		Option<Path>,	// relative to the group's origin, before the transform
+}
+
+impl Group {
+	/// The whole map a writer applies to page coordinates: the transform moved to act about `(x, y)`.
+	pub fn page_transform(&self, x: Sp, y: Sp) -> Transform {
+		let (ox, oy) = (x.to_pt(), y.to_pt());
+		Transform::translate(ox, oy).then(&self.transform.then(&Transform::translate(-ox, -oy)))
+	}
 }
 
 /// Which of a page's three vertical regions a placed item belongs to. A float insertion reflows one region

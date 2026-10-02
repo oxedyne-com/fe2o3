@@ -18,6 +18,10 @@
 //!   reservation -- which is the thing that broke the two-pass guarantee.
 
 use crate::{
+	eval::content::Content,
+	eval::realise::Tag,
+	eval::value::Paint,
+	flow::PageBody,
 	ir::{
 		BoxNode,
 		ColumnsNode,
@@ -32,14 +36,18 @@ use crate::{
 		Node,
 		PageColumns,
 		Sp,
+		StubMetrics,
+		Transform,
 	},
 	ledger::{
 		Anchor,
+		AnchorId,
 		Ledger,
 		Position,
 	},
 	page::{
 		Frame,
+		Group,
 		Page,
 		PageGeometry,
 		Placed,
@@ -47,6 +55,13 @@ use crate::{
 		Region,
 	},
 };
+
+use oxedyne_fe2o3_graphics::path::{
+	Bounds,
+	Path,
+};
+
+use std::sync::Arc;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -722,7 +737,19 @@ impl<'a, M: Metrics> Flow<'a, M> {
 				// Arm or disarm the repeated header. Transparent to breakability, like an anchor.
 				self.repeat = head.as_ref().map(|b| (**b).clone());
 			},
-			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
+			// The curated reader's tables repeat no footer; the evaluator's grids break in the flow, which
+			// honours the marker.
+			Node::RepeatFoot(_) => (),
+			Node::Mark(_) => (),
+			Node::Tag(t) => {
+				// A tag is transparent to breakability, like an anchor.
+				let x = self.col_geom().content_left();
+				let mut located = Nowhere;
+				let mut p = Placer::new(
+					self.page_no, Seat::Top, self.metrics, self.incoming, &mut self.frame, &mut self.ledger, &mut located);
+				p.tag(t, x, self.y);
+			},
+			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) | Node::Frame(_) | Node::Transform(_) | Node::Clip(_) => {
 				// At an atom start, weigh the whole atom -- every box up to the next legal breakpoint, with the
 				// footnotes they introduce reserved from the foot -- and break before it if it will not fit. A box
 				// in mid-atom is placed unconditionally: the atom was found to fit when it opened.
@@ -880,7 +907,8 @@ fn flow_columns<M: Metrics>(
 				let col_geom = geom.column_slice(col, n, cols.gutter);
 				ledger.record(Anchor::new(id.clone(), Position::new(*page_no, col_geom.content_left(), yy)));
 			},
-			node @ (Node::HBox(_) | Node::VBox(_) | Node::Leaf(_)) => {
+			node @ (Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) | Node::Frame(_) | Node::Transform(_)
+				| Node::Clip(_)) => {
 				if at_break {
 					let (atom_ext, atom_reserve) = atom_measure(list, idx, notes, foot);
 					let col_bottom = bottom - bands.bot_reserve - atom_reserve;
@@ -912,7 +940,13 @@ fn flow_columns<M: Metrics>(
 			},
 			// A repeated-header marker never carries vertical extent and never opens or closes an atom, so a
 			// columns block that happened to enclose one just passes it through untouched.
-			Node::RepeatHead(_) => (),
+			Node::RepeatHead(_) | Node::RepeatFoot(_) | Node::Mark(_) => (),
+			Node::Tag(t) => {
+				let col_geom = geom.column_slice(col, n, cols.gutter);
+				let mut located = Nowhere;
+				let mut p = Placer::new(*page_no, Seat::Top, metrics, incoming, frame, ledger, &mut located);
+				p.tag(t, col_geom.content_left(), yy);
+			},
 			// A float or a nested columns block inside a columns block is a construction error the parser never
 			// builds. It is refused loudly rather than silently dropped, keeping the project's loud-refusal
 			// stance: reaching here means the lowering built an impossible shape, which is a bug to surface.
@@ -1073,6 +1107,12 @@ fn place_float<M: Metrics>(
 			Node::Anchor(id) => {
 				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
 			},
+			Node::Frame(_) | Node::Transform(_) | Node::Clip(_) | Node::Tag(_) | Node::Mark(_) => {
+				let mut located = Nowhere;
+				let mut p = Placer::new(page_no, Seat::Top, metrics, incoming, frame, ledger, &mut located);
+				res!(p.node(child, geom.content_left(), yy));
+				yy += child.vextent();
+			},
 			Node::Penalty(_)	=> (),
 			// A float never nests inside another float; a nested one would be a construction error, so it is
 			// left unplaced rather than silently flattened.
@@ -1082,7 +1122,7 @@ fn place_float<M: Metrics>(
 			Node::Columns(_)	=> (),
 			// A repeated-header marker and a page-column marker are top-level control nodes; one in a float's
 			// body is a construction error the lowering never builds, so it is passed over rather than flattened.
-			Node::RepeatHead(_) | Node::PageColumns(_)	=> (),
+			Node::RepeatHead(_) | Node::RepeatFoot(_) | Node::PageColumns(_)	=> (),
 		}
 	}
 	ledger.leave_region(prev_region);
@@ -1233,6 +1273,11 @@ fn place_node<M: Metrics>(
 		Node::VBox(b)	=> place_vbox(b, y, page_no, geom, metrics, incoming, frame, ledger),
 		Node::HBox(b)	=> place_line(b, y, page_no, geom, metrics, incoming, frame, ledger),
 		Node::Leaf(l)	=> place_leaf(l, geom.content_left(), y, page_no, metrics, incoming, frame, ledger).map(|_| ()),
+		Node::Frame(_) | Node::Transform(_) | Node::Clip(_) => {
+			let mut located = Nowhere;
+			let mut p = Placer::new(page_no, Seat::Top, metrics, incoming, frame, ledger, &mut located);
+			p.node(node, geom.content_left(), y)
+		},
 		_				=> Ok(()),
 	}
 }
@@ -1268,13 +1313,14 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 					break;	// a non-forbidden penalty is a legal breakpoint
 				}
 			},
-			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) => {
+			Node::HBox(_) | Node::VBox(_) | Node::Leaf(_) | Node::Frame(_) | Node::Transform(_) | Node::Clip(_) => {
 				ext += nodes[j].vextent();
 				collect_marks(&nodes[j], &mut marks);
 				prev_box = true;
 			},
 			// Transparent to the atom: none opens or closes it, and a repeated-header marker carries no extent.
-			Node::Anchor(_) | Node::Float(_) | Node::Columns(_) | Node::RepeatHead(_) | Node::PageColumns(_) => (),
+			Node::Anchor(_) | Node::Tag(_) | Node::Mark(_) | Node::Float(_) | Node::Columns(_)
+				| Node::RepeatHead(_) | Node::RepeatFoot(_) | Node::PageColumns(_) => (),
 		}
 		j += 1;
 	}
@@ -1287,6 +1333,9 @@ fn atom_measure(nodes: &[Node], start: usize, notes: &[Footnote], foot: &FootSty
 fn collect_marks(node: &Node, out: &mut Vec<Footnote>) {
 	match node {
 		Node::HBox(b) | Node::VBox(b)	=> for child in &b.list { collect_marks(child, out); },
+		Node::Frame(f)					=> for (_, _, child) in &f.items { collect_marks(child, out); },
+		Node::Transform(t)				=> for child in &t.list { collect_marks(child, out); },
+		Node::Clip(c)					=> for child in &c.list { collect_marks(child, out); },
 		Node::Leaf(l)					=> if let LeafKind::Mark(f) = &l.kind { out.push(f.clone()); },
 		_								=> (),
 	}
@@ -1357,9 +1406,9 @@ fn lay_footnotes<M: Metrics>(
 	Ok(())
 }
 
-/// Lays one horizontal box -- a line -- left to right, placing each child and recording any anchor
-/// or forward reference it carries. Nested boxes are placed as their own rectangle in Phase 0;
-/// shaping their contents is Phase 1.
+/// Lays one horizontal box -- a line -- left to right from the content left, placing each child and
+/// recording any anchor or forward reference it carries. The curated reader's lines seat each leaf at the
+/// line top plus its shift ([`Seat::Top`]); a box nested in the line sits on the line's baseline.
 fn place_line<M: Metrics>(
 	line:		&BoxNode,
 	y:			Sp,
@@ -1372,40 +1421,9 @@ fn place_line<M: Metrics>(
 )
 	-> Outcome<()>
 {
-	let mut x = geom.content_left();
-	for child in &line.list {
-		match child {
-			Node::Leaf(l) => {
-				x = res!(place_leaf(l, x, y, page_no, metrics, incoming, frame, ledger));
-			},
-			Node::Glue(g) => {
-				x += g.natural;
-			},
-			Node::Anchor(id) => {
-				ledger.record(Anchor::new(id.clone(), Position::new(page_no, x, y)));
-			},
-			Node::Penalty(_) => {
-				// A line arrives here already broken: `linebreak::break_paragraph` runs the Knuth-Plass
-				// optimiser upstream and hands the driver finished HBox lines of words and justified
-				// glue. A penalty inside such a line would be a later intra-line refinement (a kept
-				// discretionary break), which Phase 1 does not yet place, so there is nothing to weigh.
-			},
-			Node::HBox(b) | Node::VBox(b) => {
-				frame.push(Placed::new(x, y, b.dims, PlacedKind::Rule));
-				x += b.dims.width;
-			},
-			// A float is a block-level node the driver handles before it ever reaches a line; one woven into a
-			// line would be a construction error, so it draws nothing rather than being flattened here.
-			Node::Float(_) => (),
-			// A columns block is a top-level node; one woven into a line would be a construction error, so it
-			// draws nothing rather than being flattened here.
-			Node::Columns(_) => (),
-			// A repeated-header or page-column marker is a top-level control node; nested here it is a
-			// construction error the lowering never builds, so it is passed over rather than flattened.
-			Node::RepeatHead(_) | Node::PageColumns(_) => (),
-		}
-	}
-	Ok(())
+	let mut located = Nowhere;
+	let mut p = Placer::new(page_no, Seat::Top, metrics, incoming, frame, ledger, &mut located);
+	p.hbox(line, geom.content_left(), y)
 }
 
 /// Sets a vertical keep box: its children stacked from the box top, each at the content left. Lines
@@ -1424,40 +1442,224 @@ fn place_vbox<M: Metrics>(
 )
 	-> Outcome<()>
 {
-	let mut yy = y_top;
-	for child in &vbox.list {
-		match child {
-			Node::HBox(b) => {
-				res!(place_line(b, yy, page_no, geom, metrics, incoming, frame, ledger));
-				yy += b.dims.vextent();
-			},
-			Node::VBox(b) => {
-				res!(place_vbox(b, yy, page_no, geom, metrics, incoming, frame, ledger));
-				yy += b.dims.vextent();
-			},
-			Node::Leaf(l) => {
-				res!(place_leaf(l, geom.content_left(), yy, page_no, metrics, incoming, frame, ledger));
-				yy += l.dims.vextent();
-			},
-			Node::Glue(g) => {
-				yy += g.natural;
-			},
-			Node::Anchor(id) => {
-				ledger.record(Anchor::new(id.clone(), Position::new(page_no, geom.content_left(), yy)));
-			},
-			Node::Penalty(_) => (),
-			// A float never nests inside a keep box; one that did would be a construction error, so it draws
-			// nothing rather than being flattened into the box.
-			Node::Float(_) => (),
-			// A columns block never nests inside a keep box; one that did would be a construction error, so it
-			// draws nothing rather than being flattened into the box.
-			Node::Columns(_) => (),
-			// A repeated-header or page-column marker is a top-level control node; nested here it is a
-			// construction error the lowering never builds, so it is passed over rather than flattened.
-			Node::RepeatHead(_) | Node::PageColumns(_) => (),
+	let mut located = Nowhere;
+	let mut p = Placer::new(page_no, Seat::Top, metrics, incoming, frame, ledger, &mut located);
+	p.vlist(&vbox.list, geom.content_left(), y_top)
+}
+
+/// How a leaf in a horizontal list is seated against the line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seat {
+	// The curated reader's lines: a leaf's top at the line top plus its shift, its baseline its own height
+	// below that. Its line breaker raises a first line's leaves by shift to meet a cap-height top edge.
+	Top,
+	// TeX's rule, which the evaluator's lines follow: every child sits on the line's baseline, `height`
+	// below the line top, its shift lowering it.
+	Baseline,
+}
+
+/// Where a page reports the located elements it holds, as it is placed: each element whose start tag the
+/// page reaches, with where it landed and the logical parent of the frame it sits in (a float's material, a
+/// footnote's entry, which are read where their parent stands); and where out-of-flow material logically
+/// stands. The introspector's builder implements it.
+pub trait Recorder {
+	fn record(&mut self, elem: &Content, pos: Position, parent: Option<u64>);
+
+	fn mark(&mut self, id: u64);
+}
+
+/// A recorder that keeps nothing, for the curated reader, which has no introspector.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Nowhere;
+
+impl Recorder for Nowhere {
+	fn record(&mut self, _elem: &Content, _pos: Position, _parent: Option<u64>) {}
+
+	fn mark(&mut self, _id: u64) {}
+}
+
+/// Places a node tree onto a page's frame: boxes by the box rules, frames by their children's offsets,
+/// transforms and clips as groups the writers draw under a matrix and a clip path, and anchors and tags
+/// into the ledger at the page position they reach -- through any transform they sit under, as Typst
+/// reports a transformed element's position.
+struct Placer<'a, M: Metrics, R: Recorder> {
+	page_no:	u32,
+	seat:		Seat,
+	metrics:	&'a M,
+	incoming:	&'a Ledger,
+	frame:		&'a mut Frame,
+	ledger:		&'a mut Ledger,
+	rec:		&'a mut R,
+	parents:	Vec<u64>,	// the logical parents of the frames being placed, innermost last
+	ts:			Transform,	// the map from placed coordinates to page coordinates, through open groups
+}
+
+impl<'a, M: Metrics, R: Recorder> Placer<'a, M, R> {
+	fn new(
+		page_no:	u32,
+		seat:		Seat,
+		metrics:	&'a M,
+		incoming:	&'a Ledger,
+		frame:		&'a mut Frame,
+		ledger:		&'a mut Ledger,
+		rec:		&'a mut R,
+	)
+		-> Self
+	{
+		Self { page_no, seat, metrics, incoming, frame, ledger, rec, parents: Vec::new(), ts: Transform::identity() }
+	}
+
+	/// The page position of a placed point, through the groups it sits in.
+	fn page_pos(&self, x: Sp, y: Sp) -> (Sp, Sp) {
+		if self.ts == Transform::identity() {
+			return (x, y);
+		}
+		let (px, py) = self.ts.apply(x.to_pt(), y.to_pt());
+		(Sp::from_pt(px), Sp::from_pt(py))
+	}
+
+	fn anchor(&mut self, id: &AnchorId, x: Sp, y: Sp) {
+		let (px, py) = self.page_pos(x, y);
+		self.ledger.record(Anchor::new(id.clone(), Position::new(self.page_no, px, py)));
+	}
+
+	/// A tag records where its element starts: the element's location anchor in the ledger, and the element
+	/// itself in document order for the introspector. An end tag marks nothing.
+	fn tag(&mut self, tag: &Tag, x: Sp, y: Sp) {
+		if let Tag::Start(elem) = tag {
+			let (px, py) = self.page_pos(x, y);
+			let pos = Position::new(self.page_no, px, py);
+			if let Some(loc) = elem.location() {
+				self.ledger.record(Anchor::new(loc.anchor(), pos));
+			}
+			// A footnote's entry is read after the footnote itself: the element's location is a parent id.
+			self.rec.record(elem, pos, self.parents.last().copied());
 		}
 	}
-	Ok(())
+
+	/// Where out-of-flow material logically stands.
+	fn mark(&mut self, id: u64) {
+		self.rec.mark(id);
+	}
+
+	/// Places `node` with its top-left at `(x, y)`.
+	fn node(&mut self, node: &Node, x: Sp, y: Sp) -> Outcome<()> {
+		match node {
+			Node::HBox(b)		=> self.hbox(b, x, y),
+			Node::VBox(b)		=> self.vlist(&b.list, x, y),
+			Node::Leaf(l)		=> place_leaf(l, x, y, self.page_no, self.metrics, self.incoming, self.frame, self.ledger)
+				.map(|_| ()),
+			Node::Frame(f) => {
+				if let Some(p) = f.parent {
+					self.parents.push(p);
+				}
+				let mut r = Ok(());
+				for (dx, dy, child) in &f.items {
+					r = self.node(child, x + *dx, y + *dy);
+					if r.is_err() {
+						break;
+					}
+				}
+				if f.parent.is_some() {
+					self.parents.pop();
+				}
+				r
+			},
+			Node::Transform(t)	=> self.group(Group { transform: t.transform, clip: None }, &t.list, t.dims, x, y),
+			Node::Clip(c) => {
+				let path = match &c.path {
+					Some(p)	=> p.clone(),
+					None	=> {
+						let w = c.dims.width.to_pt() as f32;
+						let h = c.dims.vextent().to_pt() as f32;
+						res!(Path::rect(Bounds::new(0.0, 0.0, w.max(0.0), h.max(0.0))))
+					},
+				};
+				self.group(Group { transform: Transform::identity(), clip: Some(path) }, &c.list, c.dims, x, y)
+			},
+			Node::Anchor(id)	=> { self.anchor(id, x, y); Ok(()) },
+			Node::Tag(t)		=> { self.tag(t, x, y); Ok(()) },
+			Node::Mark(id)		=> { self.mark(*id); Ok(()) },
+			// Spacing and breaks place nothing where they stand; the page-level control nodes act only in the
+			// breaker, which never hands them here.
+			Node::Glue(_) | Node::Penalty(_) | Node::Float(_) | Node::Columns(_) | Node::PageColumns(_)
+				| Node::RepeatHead(_) | Node::RepeatFoot(_) => Ok(()),
+		}
+	}
+
+	/// A group's material, a vertical list from the group's top-left, drawn under the group.
+	fn group(&mut self, group: Group, list: &[Node], dims: Dims, x: Sp, y: Sp) -> Outcome<()> {
+		let map = group.page_transform(x, y);
+		self.frame.push(Placed::new(x, y, dims, PlacedKind::Group(Arc::new(group))));
+		let outer = self.ts;
+		self.ts = outer.then(&map);
+		let r = self.vlist(list, x, y);
+		self.ts = outer;
+		self.frame.push(Placed::new(x, y, Dims::default(), PlacedKind::GroupEnd));
+		r
+	}
+
+	/// A vertical list from `(x, y)`: each box at the cursor, glue advancing it.
+	fn vlist(&mut self, list: &[Node], x: Sp, y: Sp) -> Outcome<()> {
+		let mut yy = y;
+		for child in list {
+			match child {
+				Node::Glue(g) => yy += g.natural,
+				other => {
+					res!(self.node(other, x, yy));
+					yy += other.vextent();
+				},
+			}
+		}
+		Ok(())
+	}
+
+	/// A horizontal list from `(x, y)`, its baseline `height` below the top.
+	fn hbox(&mut self, line: &BoxNode, x: Sp, y: Sp) -> Outcome<()> {
+		let base	= y + line.dims.height;
+		let mut xx	= x;
+		for child in &line.list {
+			match child {
+				Node::Leaf(l) => {
+					let top = match self.seat {
+						Seat::Top		=> y,
+						Seat::Baseline	=> base - l.dims.height,
+					};
+					xx = res!(place_leaf(l, xx, top, self.page_no, self.metrics, self.incoming, self.frame, self.ledger));
+				},
+				Node::Glue(g) => xx += g.natural,
+				Node::Anchor(id) => self.anchor(id, xx, y),
+				// An inline tag sits on the baseline, where Typst's line layout puts it.
+				Node::Tag(t) => self.tag(t, xx, base),
+				Node::Mark(id) => self.mark(*id),
+				// A line arrives here already broken: `linebreak::break_paragraph` runs the Knuth-Plass optimiser
+				// upstream and hands the driver finished lines of words and justified glue, so a penalty inside
+				// one marks nothing to weigh.
+				Node::Penalty(_) => (),
+				// A box in a line sits on its baseline, TeX's rule, and advances the pen by its width.
+				Node::HBox(b) | Node::VBox(b) => {
+					res!(self.node(child, xx, base - b.dims.height));
+					xx += b.dims.width;
+				},
+				Node::Frame(f) => {
+					res!(self.node(child, xx, base - f.dims.height));
+					xx += f.dims.width;
+				},
+				Node::Transform(t) => {
+					res!(self.node(child, xx, base - t.dims.height));
+					xx += t.dims.width;
+				},
+				Node::Clip(c) => {
+					res!(self.node(child, xx, base - c.dims.height));
+					xx += c.dims.width;
+				},
+				// Page-level control nodes are never woven into a line; one here is passed over.
+				Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) | Node::RepeatHead(_)
+					| Node::RepeatFoot(_) => (),
+			}
+		}
+		Ok(())
+	}
 }
 
 /// Places one leaf at `(x, y)` and returns the x the next child starts at. A rule is drawn as it
@@ -1582,4 +1784,62 @@ fn non_convergence(
 		"Composition did not converge after {} passes; the ledger is still moving. Moved anchors:{}. \
 		Reservations exceeded:{}.", pass, moved, over;
 		Data, Excessive, LimitReached)
+}
+
+// The evaluator's pages
+
+/// Places one page of the evaluator from its body, as the flow leaves it: its fill, the tags waiting for it at
+/// its top-left, its body frame inside the margins, and any tags that fall after the last page at its foot.
+/// Each page's geometry is its run's with the side margins exchanged on the pages a two-sided binding swaps;
+/// a width or height of zero is Typst's `auto`, the page taking its body's size plus its margins. Lines are
+/// seated by TeX's baseline rule ([`Seat::Baseline`]). The located elements the page holds go to `rec`, and
+/// the page is the caller's to hand on and drop: nothing here keeps it.
+pub fn place_page<R: Recorder>(body: PageBody, rec: &mut R) -> Outcome<Page> {
+	let metrics		= StubMetrics::new(Sp::ZERO, Sp::ZERO);	// evaluator lines hold no forward reservations
+	let incoming	= Ledger::new();
+	let mut ledger	= Ledger::new();					// the page's own, dropped with it
+	let PageBody { setup, number, body, tags, foot, .. } = body;
+	let node		= body.into_node();
+	let mut geom	= setup.geom.for_page(number);
+	let dims		= match &node {
+		Node::Frame(f)	=> f.dims,
+		_				=> Dims::default(),
+	};
+	if geom.width == Sp::ZERO {
+		geom.width = dims.width + geom.inside + geom.outside;
+	}
+	if geom.height == Sp::ZERO {
+		geom.height = dims.vextent() + geom.top + geom.bottom;
+	}
+	let mut frame = Frame::new();
+	let colour = match &setup.fill {
+		None					=> None,
+		Some(Paint::Color(c))	=> Some(res!(c.to_rgba())),
+		// The drawing layer has flat colours only; a gradient page fill takes its first stop.
+		Some(Paint::Gradient(g)) => match g.stops.first() {
+			Some((c, _))	=> Some(res!(c.to_rgba())),
+			None			=> None,
+		},
+		Some(Paint::Tiling(_)) => return Err(err!(
+			"A tiling page fill cannot be drawn: the drawing layer has no tiling paint."; Unimplemented)),
+	};
+	if let Some(colour) = colour {
+		let (w, h) = (geom.width.to_pt() as f32, geom.height.to_pt() as f32);
+		let path = res!(Path::rect(Bounds::new(0.0, 0.0, w, h)));
+		let g = crate::ir::Graphic::new(
+			vec![crate::ir::DrawOp::Fill { path, colour }], Dims::new(geom.width, geom.height, Sp::ZERO));
+		frame.push(Placed::new(Sp::ZERO, Sp::ZERO, g.dims, PlacedKind::Graphic(Arc::new(g))));
+	}
+	{
+		let mut p = Placer::new(number, Seat::Baseline, &metrics, &incoming, &mut frame, &mut ledger, rec);
+		for t in &tags {
+			p.tag(t, Sp::ZERO, Sp::ZERO);
+		}
+		res!(p.node(&node, geom.content_left(), geom.content_top()));
+		// Tags after the last page land at its foot.
+		for t in &foot {
+			p.tag(t, Sp::ZERO, geom.height);
+		}
+	}
+	Ok(Page::new(number, geom, frame))
 }
