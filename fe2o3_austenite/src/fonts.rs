@@ -445,8 +445,8 @@ fn load_variant(dir: &Path, name: &str, suffix: &str, slot: &mut Option<Variant>
 
 // The embedded faces are Typst 0.15.1's own files (`typst-assets`), byte for byte, so a document that
 // names no font is shaped from the same glyph tables the oracle shapes from.
-const SERIF:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
-const BOLD:				&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
+pub(crate) const SERIF:	&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
+pub(crate) const BOLD:	&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
 const ITALIC:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Italic.otf");
 const BOLD_ITALIC:		&[u8] = include_bytes!("../fonts/LibertinusSerif-BoldItalic.otf");
 const SEMIBOLD:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Semibold.otf");

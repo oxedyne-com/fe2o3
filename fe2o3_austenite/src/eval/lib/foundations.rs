@@ -1516,7 +1516,8 @@ pub fn repr_content(c: &Content) -> String {
 		}
 		Content::Styled(s) => fmt!("styled(child: {}, ..)", repr_content(&s.child)),
 		Content::Elem(e) => match e.kind {
-			ElemKind::Text => match c.field("text").or_else(|| c.get(crate::eval::content::FieldId(0))) {
+			// A symbol element reprs as plain content does, as its text in brackets.
+			ElemKind::Text | ElemKind::Symbol => match c.field("text").or_else(|| c.get(crate::eval::content::FieldId(0))) {
 				Some(Value::Str(t))	=> fmt!("[{}]", t),
 				_					=> "[]".to_string(),
 			},

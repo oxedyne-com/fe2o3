@@ -1,0 +1,2 @@
+// oracle: rejects
+$ arrow.nothing $

@@ -393,6 +393,7 @@ fn run(name: &str) -> Outcome<()> {
 #[test] fn data_agrees_with_typst()			-> Outcome<()> { run("data.txt") }
 #[test] fn geometry_agrees_with_typst()		-> Outcome<()> { run("geom.txt") }
 #[test] fn symbols_agree_with_typst()		-> Outcome<()> { run("sym.txt") }
+#[test] fn the_math_module_agrees_with_typst()	-> Outcome<()> { run("math.txt") }
 
 #[test] fn coverage_agrees_with_typst()		-> Outcome<()> { run("coverage.txt") }
 #[test] fn decimals_agree_with_typst()		-> Outcome<()> { run("decimal.txt") }

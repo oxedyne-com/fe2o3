@@ -748,6 +748,7 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::cast_field(kind, name, v),
 		Family::Model	=> lib::model::cast_field(kind, name, v),
+		Family::Math	=> lib::math::cast_field(kind, name, v),
 		_				=> Ok(v),
 	}
 }
@@ -755,7 +756,8 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 /// An element's built-in show-set styles, Typst's `ShowSet`: applied outside the user's own show-set
 /// rules when the element is prepared, so a heading's weight is visible to `show heading: it => ..`
 /// and a user rule still overrides it. The styles may depend on the element's own fields (a heading's
-/// level), so the element is passed. A family whose elements have them gains an arm here.
+/// level, an equation's block flag), so the element is passed. A family whose elements have them gains
+/// an arm here.
 pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
 	let kind = match elem.kind() {
 		Some(k)	=> k,
@@ -763,7 +765,8 @@ pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
 	};
 	match kind.family() {
 		Family::Model	=> lib::model::show_set(elem, styles),
-		Family::Text | Family::Layout | Family::Grid | Family::Visual | Family::Math
+		Family::Math	=> lib::math::show_set_of(elem, styles),
+		Family::Text | Family::Layout | Family::Grid | Family::Visual
 			| Family::Intro | Family::Realise	=> Ok(Styles::new()),
 	}
 }

@@ -181,7 +181,7 @@ fn kind_of(name: &str) -> Option<(SyntaxKind, &'static str)> {
 		"MathText"		=> (K::MathText, ""),
 		"MathIdent"		=> (K::MathIdent, ""),
 		"MathAttach"	=> (K::MathAttach, ""),
-		"MathPrimes"	=> (K::MathPrimes, ""),
+		"MathPrimes"	=> (K::MathPrimes, "'"),	// the parser lexes a run of primes as one leaf
 		"MathFrac"		=> (K::MathFrac, ""),
 		"MathDelimited"	=> (K::MathDelimited, ""),
 		"Dollar"		=> (K::Dollar, "$"),

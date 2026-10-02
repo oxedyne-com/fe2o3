@@ -266,7 +266,7 @@
 %%[U6a] ["q"]
 (ContentBlock LeftBracket (Markup (SmartQuote '"') (Text 'q') (SmartQuote '"')) RightBracket)
 %%[U7,symbol] $x^2_i'$
-(Equation Dollar (Math (MathAttach (MathText 'x') Hat (MathText '2') Underscore (MathAttach (MathText 'i') (MathPrimes Prime)))) Dollar)
+(Equation Dollar (Math (MathAttach (MathText 'x') Hat (MathText '2') Underscore (MathAttach (MathText 'i') MathPrimes))) Dollar)
 %%[U7,symbol] $ a/b $
 (Equation Dollar Space (Math (MathFrac (MathText 'a') Slash (MathText 'b'))) Space Dollar)
 %%[U7,symbol] $(a+b)/(c)$

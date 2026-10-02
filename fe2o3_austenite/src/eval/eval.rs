@@ -85,6 +85,8 @@ use std::collections::{
 };
 use std::sync::Arc;
 
+mod math_call;
+
 const MAX_WHILE_ITERATIONS: usize = 10_000;	// Typst's per-loop limit for `while`
 
 /// Which mode `eval(..)` parses its string in.
@@ -291,7 +293,7 @@ fn is_expr(k: SyntaxKind) -> bool {
 		| K::Strong | K::Emph | K::Raw | K::Link | K::Label | K::Ref | K::Heading | K::ListItem
 		| K::EnumItem | K::TermItem | K::Equation | K::Math | K::MathText | K::MathIdent
 		| K::MathShorthand | K::MathAlignPoint | K::MathDelimited | K::MathAttach | K::MathPrimes
-		| K::MathFrac | K::MathRoot | K::Ident | K::None | K::Auto | K::Bool | K::Int | K::Float
+		| K::MathFrac | K::MathRoot | K::MathCall | K::MathFieldAccess | K::Ident | K::None | K::Auto | K::Bool | K::Int | K::Float
 		| K::Numeric | K::Str | K::CodeBlock | K::ContentBlock | K::Parenthesized | K::Array | K::Dict
 		| K::Unary | K::Binary | K::FieldAccess | K::FuncCall | K::Closure | K::LetBinding | K::SetRule
 		| K::ShowRule | K::Contextual | K::Conditional | K::WhileLoop | K::ForLoop | K::ModuleImport
@@ -859,11 +861,14 @@ impl<'a> Vm<'a> {
 			K::MathDelimited	=> self.eval_math_delimited(node),
 			K::MathAttach	=> self.eval_math_attach(node),
 			K::MathPrimes	=> {
-				let n = node.children().iter().filter(|c| c.kind() == K::Prime).count().max(1);
+				// One leaf holds every prime of a run, so its length is the count.
+				let n = ast::MathPrimes::from_untyped(node).map(|p| p.count()).unwrap_or(1);
 				self.elem(ElemKind::MathPrimes, vec![("count", Value::Int(n as i64))], span).map(Value::Content)
 			}
 			K::MathFrac		=> self.eval_math_frac(node),
 			K::MathRoot		=> self.eval_math_root(node),
+			K::MathCall		=> self.eval_math_call(node),
+			K::MathFieldAccess	=> self.eval_math_field_access(node),
 			// Literals
 			K::Ident		=> match self.lookup(node.text()) {
 				Some(v)	=> Ok(v.clone()),
