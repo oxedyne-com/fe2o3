@@ -249,7 +249,29 @@ fn check_rejection(fx: &Fixture, typst: &str, limit: Duration, rep: &mut Fixture
 		}
 	};
 	rep.notes.extend(out.diags.iter().map(|d| fmt!("diagnostic: {}", d)));
-	compare_first_error(&want_msg, want_pos, out.first_error.as_ref())
+	let verdict = compare_first_error(&want_msg, want_pos, out.first_error.as_ref());
+	// An error raised inside an imported file or a package is placed in that file, so the file is compared
+	// too, where Typst names one.
+	match (split_first_error_file(typst), &out.first_file) {
+		(Some(w), Some(g)) if w != *g => {
+			let mut d = match verdict {
+				Verdict::Fail(d)	=> d,
+				_					=> Vec::new(),
+			};
+			d.push(fmt!("file: typst `{}`, austenite `{}`", w, g));
+			Verdict::Fail(d)
+		}
+		_ => verdict,
+	}
+}
+
+/// The file Typst's first error is placed in, as the CLI prints it.
+pub fn split_first_error_file(s: &str) -> Option<String> {
+	let (_, loc) = s.trim().split_once(" ┌─ ")?;
+	let mut parts = loc.trim().rsplitn(3, ':');
+	let _col = parts.next()?;
+	let _line = parts.next()?;
+	parts.next().map(|f| f.to_string())
 }
 
 /// Austenite's first error against Typst's: the same message and, where Typst gives one, the same

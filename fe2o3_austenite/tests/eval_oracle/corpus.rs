@@ -174,7 +174,10 @@ fn directives(text: &str) -> Option<([bool; 4], Expect)> {
 /// Why a fixture cannot be in the corpus, if it cannot: it must be synthetic, so it may not name a
 /// book or reach outside its area.
 pub fn provenance_fault(f: &Fixture) -> Option<String> {
-	for bad in ["usr/books", "/books/", "../"] {
+	// A `../` is not a fault in itself: Typst, run with the area as its root, and the evaluator's own
+	// resolver both refuse a path that leaves the root, so a fixture that climbs either stays inside or is
+	// rejected by both, and the import corpus tests that refusal.
+	for bad in ["usr/books", "/books/"] {
 		if f.text.contains(bad) {
 			return Some(fmt!("{} names `{}`: fixtures are synthetic and stay inside their area", f.id(), bad));
 		}

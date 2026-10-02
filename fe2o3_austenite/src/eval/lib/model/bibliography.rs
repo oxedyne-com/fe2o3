@@ -33,6 +33,7 @@ use crate::eval::lib::model::common::{
 	CastErr,
 	K,
 };
+use crate::eval::import;
 use crate::eval::lib::model::link;
 use crate::eval::lib::model::lookup;
 use crate::eval::select::Selector;
@@ -46,7 +47,6 @@ use crate::eval::value::{
 };
 use crate::eval::Engine;
 use crate::syntax::Span;
-use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -173,12 +173,12 @@ pub fn construct(engine: &mut Engine, args: &mut Args) -> Outcome<Content> {
 	for s in sources {
 		let (text, name) = match s {
 			Value::Str(p) => {
-				let path = res!(crate::eval::import::resolve_path(engine, &p, span.file, span));
-				let text = match vfs::read_to_string(&path) {
-					Ok(t)	=> t,
-					Err(e)	=> return Err(engine.error(DiagnosticKind::MissingFile, span, fmt!("failed to load file ({})", e))),
-				};
-				(text, p.to_string())
+				let path = res!(import::resolve_path(engine, &p, span.file, span));
+				let bytes = res!(import::read_file(engine, &path, span));
+				match String::from_utf8(bytes) {
+					Ok(t)	=> (t, p.to_string()),
+					Err(_)	=> return Err(engine.error(DiagnosticKind::Encoding, span, "file is not valid utf-8")),
+				}
 			}
 			Value::Bytes(b) => match String::from_utf8((*b).clone()) {
 				Ok(t)	=> (t, String::new()),

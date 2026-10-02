@@ -1,0 +1,11 @@
+[package]
+name = "demo"
+version = "0.1.0"
+entrypoint = "src/lib.typ"
+authors = ["A. Author <a@example.org>"]
+license = "MIT-0"
+description = "A synthetic package for the import tests."
+keywords = ["synthetic", "test"]
+
+[tool.checker]
+strict = true

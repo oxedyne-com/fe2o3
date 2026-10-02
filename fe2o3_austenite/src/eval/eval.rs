@@ -149,7 +149,8 @@ pub fn eval_string(
 	}
 	let lib = library();
 	let base = Scope { map: scope.map, parent: Some(lib.clone()) };
-	let mut vm = Vm::new(engine, &base, lib.clone(), FileId::DETACHED, false, span);
+	// The string's own nodes have no file; a path in it resolves from the file that called `eval`.
+	let mut vm = Vm::new(engine, &base, lib.clone(), span.file, false, span);
 	let out = match mode {
 		EvalMode::Markup	=> Value::Content(res!(vm.eval_markup(root.children()))),
 		EvalMode::Code		=> res!(vm.eval_code(root.children())),
@@ -364,42 +365,6 @@ fn is_invariant(n: &SyntaxNode) -> bool {
 
 fn can_diverge(n: &SyntaxNode) -> bool {
 	matches!(n.kind(), SyntaxKind::Break | SyntaxKind::Return) || n.children().iter().any(can_diverge)
-}
-
-fn unescape_str(lit: &str) -> String {
-	let inner = lit.strip_prefix('"').unwrap_or(lit);
-	let inner = inner.strip_suffix('"').unwrap_or(inner);
-	let mut out = String::with_capacity(inner.len());
-	let mut chars = inner.chars().peekable();
-	while let Some(c) = chars.next() {
-		if c != '\\' {
-			out.push(c);
-			continue;
-		}
-		match chars.next() {
-			Some('n')	=> out.push('\n'),
-			Some('r')	=> out.push('\r'),
-			Some('t')	=> out.push('\t'),
-			Some('u') if chars.peek() == Some(&'{') => {
-				chars.next();
-				let mut hex = String::new();
-				while let Some(&h) = chars.peek() {
-					chars.next();
-					if h == '}' {
-						break;
-					}
-					hex.push(h);
-				}
-				match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
-					Some(ch)	=> out.push(ch),
-					None		=> out.push_str(&fmt!("\\u{{{}}}", hex)),
-				}
-			}
-			Some(o)		=> out.push(o),
-			None		=> out.push('\\'),
-		}
-	}
-	out
 }
 
 fn unescape_markup(esc: &str) -> String {
@@ -883,7 +848,7 @@ impl<'a> Vm<'a> {
 				Err(_)	=> Err(self.error(DiagnosticKind::Syntax, span, fmt!("invalid floating point number: {}", node.text()))),
 			},
 			K::Numeric		=> self.eval_numeric(node),
-			K::Str			=> Ok(Value::str(unescape_str(node.text()))),
+			K::Str			=> Ok(Value::str(ast::unescape_str(node.text()))),
 			// Code
 			K::Code			=> self.eval_code(node.children()),
 			K::CodeBlock	=> match node.child(K::Code) {
@@ -1798,7 +1763,9 @@ impl<'a> Vm<'a> {
 	}
 
 	fn eval_args(&mut self, node: Option<&SyntaxNode>, span: Span) -> Outcome<Args> {
-		let mut args = Args::new(span);
+		// A call in a string given to `eval` has no span of its own; it takes the call site's, whose file
+		// a path in the call resolves against, as in Typst.
+		let mut args = Args::new(self.fix(span));
 		let node = match node {
 			Some(n)	=> n.clone(),
 			None	=> return Ok(args),
@@ -1812,7 +1779,7 @@ impl<'a> Vm<'a> {
 						Some(e)	=> (res!(self.eval(e)), e.span()),
 						None	=> (Value::None, c.span()),
 					};
-					args.push_named_at(c.span(), at, name, v);
+					args.push_named_at(self.fix(c.span()), self.fix(at), name, v);
 				}
 				SyntaxKind::Spread => {
 					let v = match last_expr(c) {
@@ -1822,10 +1789,10 @@ impl<'a> Vm<'a> {
 					match v {
 						Value::None		=> (),
 						Value::Array(a)	=> for x in a.iter() {
-							args.push(c.span(), x.clone());
+							args.push(self.fix(c.span()), x.clone());
 						},
 						Value::Dict(d)	=> for (k, x) in d.iter() {
-							args.push_named(c.span(), k, x.clone());
+							args.push_named(self.fix(c.span()), k, x.clone());
 						},
 						Value::Args(a)	=> args.items.extend(a.items.iter().cloned()),
 						other			=> return Err(self.error(DiagnosticKind::Type, c.span(),
@@ -1834,7 +1801,7 @@ impl<'a> Vm<'a> {
 				}
 				k if is_code_expr(k) => {
 					let v = res!(self.eval(c));
-					args.push(c.span(), v);
+					args.push(self.fix(c.span()), v);
 				}
 				_ => (),
 			}

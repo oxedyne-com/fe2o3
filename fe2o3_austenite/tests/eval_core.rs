@@ -891,10 +891,11 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 	use DiagnosticKind as K;
 	let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("eval_core_kinds");
 	res!(std::fs::create_dir_all(&dir).map_err(|e| err!("Cannot create {}: {}", dir.display(), e; IO, File, Write)));
-	// A missing file is not a row yet: every `MissingFile` site sits behind `import::resolve_path`, still
-	// the U10a stub, which raises `Unsupported`. U10a adds the row, `read("/absent.txt")`, with the resolver.
-	// 0xff is not UTF-8 in any position, and inline bytes reach the decoder without a path.
-	let cases: [(&str, K, bool); 11] = [
+	// A file at a path needs a file to resolve it from, so each case is evaluated from a source in `dir`, as
+	// the string handed to `eval` is in Typst. 0xff is not UTF-8 in any position.
+	res!(std::fs::write(dir.join("bad.txt"), [255u8, 254, 65]).map_err(|e| err!(
+		"Cannot write bad.txt in {}: {}", dir.display(), e; IO, File, Write)));
+	let cases: [(&str, K, bool); 13] = [
 		("missing",							K::UnknownVariable,	true),
 		("(1 +",							K::Syntax,			true),
 		("break",							K::Syntax,			true),
@@ -903,6 +904,8 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 		("{ let f() = f(); f() }",			K::Limit,			true),
 		("plugin(\"x.wasm\")",			K::Unsupported,		true),
 		("json(bytes((255, 254, 65)))",	K::Encoding,		true),
+		("read(\"/absent.txt\")",		K::MissingFile,		true),
+		("read(\"/bad.txt\")",			K::Encoding,		true),
 		("{ let f() = { [a]; return 1 }; f() }",	K::Internal,	false),
 		("import heading as heading",		K::Internal,		false),
 		("import list: item as item",		K::Internal,		false),
@@ -910,7 +913,8 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 	let mut failures = Vec::new();
 	for (code, kind, error) in cases {
 		let mut engine = Engine::new(World::new(dir.clone()));
-		let _ = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::detached());
+		let id = res!(engine.world.add_source(dir.join("case.typ"), String::new()));
+		let _ = eval_string(&mut engine, code, EvalMode::Code, Scope::new(), Span::new(id, 0, 0));
 		match engine.diags.iter().find(|d| d.is_error() == error) {
 			Some(d) if d.kind == kind	=> (),
 			Some(d)						=> failures.push(fmt!("{}: kind {} ({}), wanted {}", code, d.kind, d.message, kind)),

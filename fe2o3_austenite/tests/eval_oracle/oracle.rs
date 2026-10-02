@@ -110,6 +110,12 @@ impl Oracle {
 		};
 		c.args(args);
 		c.current_dir(cwd);
+		// An area that keeps packages of its own beside its fixtures lays them out as Typst's package
+		// path does, `packages/<namespace>/<name>/<version>`.
+		let own = cwd.join("packages");
+		if own.is_dir() {
+			c.env("TYPST_PACKAGE_PATH", &own);
+		}
 		c
 	}
 
@@ -181,6 +187,15 @@ impl Oracle {
 			Ok(text)	=> Ok(Ok(res!(json::parse(&text)))),
 			Err(e)		=> Ok(Err(e)),
 		}
+	}
+
+	/// The value of a code expression, `typst eval` in the fixture's context with the area as its root, so
+	/// an `import` or a `read` in the expression resolves there. Cached like every other product.
+	#[allow(dead_code)]	// the import corpus asks for values; the other test crates do not
+	pub fn value(&self, fx: &Fixture, expr: &str) -> Outcome<Said<J>> {
+		let mut h = Fnv::new();
+		h.feed(expr.as_bytes());
+		self.eval(fx, &fmt!("value-{:016x}", h.0), expr)
 	}
 
 	/// Does the fixture compile without error? `Ok(Err(message))` names the first error.
@@ -328,8 +343,22 @@ fn first_error(stderr: &str) -> String {
 	let mut lines = stderr.lines();
 	while let Some(l) = lines.next() {
 		if l.starts_with("error:") {
-			let loc = lines.next().map(|n| n.trim().to_string()).unwrap_or_default();
-			return fmt!("{} {}", l.trim(), loc);
+			// A message may run over several lines; the place follows it, on the line that opens `┌─`.
+			let mut message = l.trim().to_string();
+			let mut loc = String::new();
+			for n in lines.by_ref() {
+				let t = n.trim();
+				if t.starts_with('┌') {
+					loc = t.to_string();
+					break;
+				}
+				if t.starts_with('│') || t.starts_with('=') || t.is_empty() {
+					break;
+				}
+				message.push('\n');
+				message.push_str(t);
+			}
+			return fmt!("{} {}", message, loc);
 		}
 	}
 	stderr.trim().lines().take(3).collect::<Vec<_>>().join(" | ")

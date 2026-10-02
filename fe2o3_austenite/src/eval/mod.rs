@@ -235,7 +235,15 @@ impl Engine {
 	pub fn has_errors(&self) -> bool { self.diags.iter().any(|d| d.is_error()) }
 }
 
-/// Evaluates a loaded source into a module. The body is U2's [`eval::eval_module`].
+/// Evaluates a loaded source into a module. The body is U2's [`eval::eval_module`]. The source goes on
+/// the import route while it runs, so a file it imports that imports it back is a cycle, as in Typst.
 pub fn eval_source(engine: &mut Engine, id: FileId) -> Outcome<Module> {
-	eval::eval_module(engine, id)
+	let path = match engine.world.source(id) {
+		Some(s)	=> s.path.clone(),
+		None	=> return Err(err!("No source with id {} is loaded.", id.0; Missing, Input)),
+	};
+	engine.world.route.push(path);
+	let out = eval::eval_module(engine, id);
+	engine.world.route.pop();
+	out
 }

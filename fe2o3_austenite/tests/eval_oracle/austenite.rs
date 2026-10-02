@@ -31,6 +31,7 @@ use oxedyne_fe2o3_austenite::eval::fixpoint::{
 };
 use oxedyne_fe2o3_austenite::eval::intro::Introspector;
 use oxedyne_fe2o3_austenite::eval::lib::foundations;
+use oxedyne_fe2o3_austenite::eval::package;
 use oxedyne_fe2o3_austenite::eval::ops;
 use oxedyne_fe2o3_austenite::eval::realise::{
 	realise_structure,
@@ -94,6 +95,7 @@ pub struct AusOut {
 	pub layout:		Option<String>,	// the fixpoint failure, if any
 	pub diags:		Vec<String>,
 	pub first_error:	Option<(String, Option<(usize, usize)>)>,	// message, then line and column
+	pub first_file:		Option<String>,	// the file of the first error, relative to the root as Typst prints it
 	pub probes:		Option<std::result::Result<(Vec<J>, ProbeSource), String>>,
 	pub positions:	Option<std::result::Result<Vec<PosRow>, String>>,
 	pub skeleton:	Option<std::result::Result<Vec<Sk>, String>>,
@@ -150,8 +152,30 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
 	"a panic with no message".to_string()
 }
 
+/// Supplies the packages a fixture's area imports, as a host would: the area's own `packages` directory,
+/// then Typst's package cache, where the real packages the corpus imports are kept. Austenite never
+/// fetches a package, so one in neither place is an import error.
+pub fn supply_packages(root: &std::path::Path) {
+	let own = root.join("packages");
+	if own.is_dir() {
+		let _ = package::add_dir(own);
+	}
+	let cache = match std::env::var("TYPST_PACKAGE_CACHE_PATH") {
+		Ok(p) if !p.is_empty()	=> std::path::PathBuf::from(p),
+		_						=> match std::env::var("XDG_CACHE_HOME") {
+			Ok(p) if !p.is_empty()	=> std::path::PathBuf::from(p).join("typst").join("packages"),
+			_						=> std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+				.join(".cache").join("typst").join("packages"),
+		},
+	};
+	if cache.is_dir() {
+		let _ = package::add_dir(cache);
+	}
+}
+
 fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextual: bool) -> AusOut {
 	let mut out = AusOut::default();
+	supply_packages(root);
 	let mut world = World::new(root.to_path_buf());
 	let id = match world.load(path) {
 		Ok(id)	=> id,
@@ -167,6 +191,7 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 			out.eval = Some(plain(&e));
 			out.diags = render_diags(&engine);
 			out.first_error = first_error(&engine);
+			out.first_file = first_file(&engine);
 			return out;
 		}
 	};
@@ -198,6 +223,7 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 	}
 	out.diags = render_diags(&engine);
 	out.first_error = first_error(&engine);
+	out.first_file = first_file(&engine);
 	out
 }
 
@@ -212,6 +238,17 @@ fn first_error(engine: &Engine) -> Option<(String, Option<(usize, usize)>)> {
 			.find(|src| src.id == d.span.file && !d.span.is_detached())
 			.map(|src| src.line_col(d.span.start));
 		(d.message.clone(), pos)
+	})
+}
+
+// The first error's file as Typst prints it: relative to the project root, or `@ns/name:ver/path` inside a
+// package.
+fn first_file(engine: &Engine) -> Option<String> {
+	let d = engine.diags.iter().find(|d| d.is_error())?;
+	let src = engine.world.sources.iter().find(|s| s.id == d.span.file && !d.span.is_detached())?;
+	Some(match src.path.strip_prefix(&engine.world.root) {
+		Ok(rel)	=> rel.display().to_string(),
+		Err(_)	=> src.path.display().to_string(),
 	})
 }
 
@@ -585,6 +622,7 @@ pub fn eval_only(path: &std::path::Path, root: &std::path::Path, timeout: Durati
 		.spawn(move || {
 			let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 				let mut out = AusOut::default();
+				supply_packages(&root);
 				let mut world = World::new(root);
 				match world.load(&path) {
 					Ok(id)	=> {

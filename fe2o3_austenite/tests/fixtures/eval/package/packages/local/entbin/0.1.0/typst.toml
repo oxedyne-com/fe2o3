@@ -1,0 +1,4 @@
+[package]
+name = "entbin"
+version = "0.1.0"
+entrypoint = "lib.txt"

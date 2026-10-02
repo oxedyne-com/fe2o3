@@ -1485,10 +1485,7 @@ fn layout_image(engine: &mut Engine, g: &Get, pod: Pod) -> Outcome<Frame> {
 		Some(Value::Str(p)) => {
 			let path = res!(crate::eval::import::resolve_path(engine, &p, span.file, span));
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_string());
-			match crate::vfs::read(&path) {
-				Ok(b)	=> (b, ext),
-				Err(e)	=> return Err(engine.error(DiagnosticKind::MissingFile, span, fmt!("failed to load file ({})", e))),
-			}
+			(res!(crate::eval::import::read_file(engine, &path, span)), ext)
 		},
 		_ => return Err(engine.error(DiagnosticKind::Type, span, "image source must be a path or bytes")),
 	};

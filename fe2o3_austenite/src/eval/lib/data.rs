@@ -1,6 +1,6 @@
-// U3 owns this file. Data loading through `crate::vfs`, paths resolved with `import::resolve_path`, and the
-// readers and writers behind `read`, `json`, `csv`, `yaml`, `toml`, `xml` and `cbor` (with `.encode` for
-// JSON, YAML, TOML and CBOR). Every format is read here into Typst values directly: JSON keeps object
+// U3 owns this file. Data loading (paths resolved with `import::resolve_path`, files read with
+// `import::read_file`) and the readers and writers behind `read`, `json`, `csv`, `yaml`, `toml`, `xml` and
+// `cbor` (with `.encode` for JSON, YAML, TOML and CBOR). Every format is read here into Typst values directly: JSON keeps object
 // order and the integer/float distinction, TOML dates become `datetime`s, and a document a reader cannot
 // take is a diagnostic naming the line and column, never an empty value. XML goes through
 // `fe2o3_text::xml`. YAML is the block and flow subset real documents use (mappings, sequences, scalars
@@ -14,7 +14,10 @@ use crate::eval::func::{
 	Func,
 	NativeFunc,
 };
-use crate::eval::import::resolve_path;
+use crate::eval::import::{
+	read_file,
+	resolve_path,
+};
 use crate::eval::lib::foundations::{
 	finish,
 	mismatch,
@@ -30,7 +33,6 @@ use crate::eval::value::{
 };
 use crate::eval::Engine;
 use crate::syntax::Span;
-use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -75,14 +77,7 @@ fn source(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<Vec<u8>>> {
 	match v {
 		Value::Str(p) => {
 			let path = res!(resolve_path(engine, &p, span.file, span));
-			match vfs::read(&path) {
-				Ok(b)	=> Ok(Arc::new(b)),
-				Err(e)	=> Err(engine.error(DiagnosticKind::MissingFile, span, if e.kind() == std::io::ErrorKind::NotFound {
-					fmt!("file not found (searched at {})", path.display())
-				} else {
-					fmt!("failed to load file ({})", e)
-				})),
-			}
+			Ok(Arc::new(res!(read_file(engine, &path, span))))
 		}
 		Value::Bytes(b) => Ok(b),
 		other => Err(mismatch(engine, span, "string or bytes", &other)),
@@ -116,6 +111,8 @@ fn line_col(text: &str, at: usize) -> (usize, usize) {
 
 pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let span = args.span;
+	// Typst places a path that cannot be resolved or a file that cannot be read at the argument naming it.
+	let at = args.items.iter().find(|a| a.name.is_none()).map(|a| a.span).unwrap_or(span);
 	match f {
 		DataFn::Read => {
 			let p = res!(need(engine, &mut args, "path"));
@@ -125,7 +122,7 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				Value::Str(s)	=> s,
 				other			=> return Err(mismatch(engine, span, "string", &other)),
 			};
-			let b = res!(source(engine, span, Value::Str(path)));
+			let b = res!(source(engine, at, Value::Str(path)));
 			match enc {
 				None | Some(Value::Str(_)) => {
 					if let Some(Value::Str(e)) = &enc {
@@ -166,7 +163,7 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				(',', false)
 			};
 			res!(finish(engine, args));
-			let b = res!(source(engine, span, src));
+			let b = res!(source(engine, at, src));
 			match f {
 				DataFn::Cbor => {
 					let mut r = CborReader { b: &b, at: 0, depth: 0 };
@@ -1180,12 +1177,12 @@ fn toml_document(p: &mut Toml) -> Outcome<Value> {
 			p.skip_ws();
 			if aot {
 				if !p.s[p.at..].starts_with("]]") {
-					return p.err("expected `]]`");
+					return p.err("invalid table header\nexpected `.`, `]]`");
 				}
 				p.at += 2;
 			} else {
 				if p.b.get(p.at) != Some(&b']') {
-					return p.err("expected `]`");
+					return p.err("invalid table header\nexpected `.`, `]`");
 				}
 				p.at += 1;
 			}

@@ -698,12 +698,14 @@ fn build_image(engine: &mut Engine, args: &mut Args) -> Outcome<Fields> {
 	let kind	= ElemKind::Image;
 	let span	= args.span;
 	let mut f	= Vec::new();
+	let at		= args.items.iter().find(|a| a.name.is_none()).map(|a| a.span).unwrap_or(span);
 	let source	= res!(args.expect::<Value>("source"));
 	match &source {
-		// A path is resolved now, as Typst reads the file when the element is built, so a missing file
-		// is reported at the call.
+		// A path is resolved and the file checked now, as Typst reads it when the element is built, so a
+		// missing file is reported at the argument that names it.
 		Value::Str(p) => {
-			let _ = res!(crate::eval::import::resolve_path(engine, p, span.file, span));
+			let path = res!(crate::eval::import::resolve_path(engine, p, at.file, at));
+			res!(crate::eval::import::require_file(engine, &path, at));
 		},
 		Value::Bytes(_) => (),
 		other => return Err(err!("expected string or bytes, found {}", other.ty().long_name(); Input, Mismatch)),
