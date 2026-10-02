@@ -68,6 +68,8 @@ impl Selector {
 							Some(v)	=> Some(v),
 							None	=> Some(Value::Auto),
 						},
+						// Nothing sets it: the default a field has, as Typst compares it.
+						None				=> content::default_field(*kind, *id),
 						other				=> other,
 					};
 					match have {

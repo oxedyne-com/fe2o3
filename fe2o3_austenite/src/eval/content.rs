@@ -808,6 +808,23 @@ pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
 	}
 }
 
+/// The value a settable field has where nothing sets it: the family's computed default (a list's marker array,
+/// a caption's position, the text font and fill), else the schema's. `None` where the schema holds none and
+/// no family computes one.
+pub fn default_field(kind: ElemKind, field: FieldId) -> Option<Value> {
+	let name = match kind.field_spec(field) {
+		Some(spec)	=> spec.name,
+		None		=> return None,
+	};
+	match kind.family() {
+		Family::Model	=> lib::model::default_value(kind, name),
+		Family::Text	=> lib::text::default_value(kind, name),
+		Family::Layout	=> lib::layout::default_value(kind, name),
+		Family::Grid | Family::Visual | Family::Math | Family::Intro | Family::Realise
+			=> kind.field_spec(field).and_then(|s| s.default.to_value()),
+	}
+}
+
 /// The value an `auto` field has once the element is prepared, worked out from the element and its styles
 /// without preparing it: a heading's level, a figure's kind. `None` where synthesis leaves the field as it is.
 /// A selector reads a field through this, so a rule for `heading.where(level: 1)` matches the heading `=`

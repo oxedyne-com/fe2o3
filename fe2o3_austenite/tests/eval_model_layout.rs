@@ -26,8 +26,9 @@ use harness::Verdict;
 use oxedyne_fe2o3_core::prelude::*;
 
 const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs", "locate", "book"];
-const MIN_COMPARED:		usize	= 90;
-const MIN_REJECTED:		usize	= 3;
+const VALUE_AREAS:		&[&str]	= &["book"];	// areas whose level-1 values are held as well as the layout
+const MIN_COMPARED:		usize	= 92;
+const MIN_REJECTED:		usize	= 4;
 
 #[test]
 fn model_layout_matches_the_typst_oracle_at_level_4() -> Outcome<()> {
@@ -56,6 +57,13 @@ fn model_layout_matches_the_typst_oracle_at_level_4() -> Outcome<()> {
 					other				=> failures.push(fmt!("{}: the first error differs from Typst's ({:?})", rep.id, other)),
 				}
 				continue;
+			}
+			if VALUE_AREAS.contains(area) && fx.wants(1) {
+				match &rep.levels[0] {
+					Verdict::Pass		=> (),
+					Verdict::Fail(d)	=> failures.push(fmt!("{}: L1: {}", rep.id, d.iter().take(4).cloned().collect::<Vec<_>>().join(" | "))),
+					Verdict::NotApplicable(_) | Verdict::NotRequested	=> (),
+				}
 			}
 			match &rep.levels[3] {
 				Verdict::Pass		=> compared += 1,

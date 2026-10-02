@@ -35,6 +35,7 @@ use crate::eval::func::{
 	Param,
 };
 use crate::eval::import;
+use crate::eval::intro;
 use crate::eval::lib;
 use crate::eval::lib::foundations;
 use crate::eval::methods;
@@ -886,7 +887,10 @@ impl<'a> Vm<'a> {
 				};
 				let tv = res!(self.eval(target));
 				let name = ident_text(node).unwrap_or("");
-				self.field(tv, name, span)
+				// An error in the access is Typst's at the field's name, not at the whole expression.
+				let at = node.children().iter().rev().find(|c| c.kind() == SyntaxKind::Ident)
+					.map(|c| c.span()).unwrap_or(span);
+				self.field(tv, name, at)
 			}
 			K::FuncCall		=> self.eval_call(node),
 			K::Closure		=> self.eval_closure(node, None),
@@ -1939,10 +1943,13 @@ impl<'a> Vm<'a> {
 			},
 			Value::Func(f)		=> match func_field(f, name) {
 				Some(g)	=> Some(Value::Func(g)),
-				None	=> return Err(self.error(DiagnosticKind::Type, span, match f.name() {
-					Some(n)	=> fmt!("function `{}` does not contain field `{}`", n, name),
-					None	=> fmt!("function does not contain field `{}`", name),
-				})),
+				None	=> match res!(self.style_field(f, name, span)) {
+					Some(v)	=> Some(v),
+					None	=> return Err(self.error(DiagnosticKind::Type, span, match f.name() {
+						Some(n)	=> fmt!("function `{}` does not contain field `{}`", n, name),
+						None	=> fmt!("function does not contain field `{}`", name),
+					})),
+				},
 			},
 			Value::Module(m)	=> match m.scope.get(name) {
 				Some(v)	=> Some(v.clone()),
@@ -1955,6 +1962,28 @@ impl<'a> Vm<'a> {
 		match found {
 			Some(v)	=> Ok(v),
 			None	=> Err(self.error(DiagnosticKind::Type, span, fmt!("{} does not contain field \"{}\"", ty.long_name(), name))),
+		}
+	}
+
+	/// Typst's get rule: `text.size` in a `context` is the value the styles in force give the element's
+	/// settable field. `None` where `f` is not an element function with such a field; outside a context
+	/// the field is known but its value is not, and that is an error.
+	fn style_field(&mut self, f: &Func, name: &str, span: Span) -> Outcome<Option<Value>> {
+		let kind = match f {
+			Func::Element(k)	=> *k,
+			_					=> return Ok(None),
+		};
+		let id = match kind.field_id(name) {
+			Some(id)	=> id,
+			None		=> return Ok(None),
+		};
+		if !kind.field_spec(id).map(|spec| spec.settable).unwrap_or(false) {
+			return Ok(None);
+		}
+		let styles = res!(intro::context_styles(self.engine, span));
+		match res!(styles.get(kind, id)) {
+			Some(v)	=> Ok(Some(res!(lib::text::as_read(kind, name, v)))),
+			None	=> Ok(content::default_field(kind, id)),
 		}
 	}
 

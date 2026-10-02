@@ -39,6 +39,7 @@ use crate::eval::value::{
 	Color,
 	ColorSpace,
 	Dict,
+	Length,
 	Type,
 	Value,
 };
@@ -301,6 +302,42 @@ fn internal(content: Content, field: &str, value: Value) -> Outcome<Content> {
 	};
 	let span = content.span();
 	Ok(content.styled(Styles::from_style(Style::Property(Property::new(ElemKind::Text, id, value, span)))))
+}
+
+/// A text field's default where the schema holds none (`Computed`): the font is the one Typst names, in the
+/// lower case it keeps family names in, and the fill is black.
+pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
+	match (kind, name) {
+		(ElemKind::Text, "font")	=> Some(Value::str("libertinus serif")),
+		(ElemKind::Text, "fill")	=> Some(Value::Color(Color {
+			space:	ColorSpace::Luma,
+			c:		[0.0; 4],
+			alpha:	1.0,
+		})),
+		_							=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
+	}
+}
+
+/// A value as a read of its field gives it back, as Typst's `into_value` does: a list of font families in the lower
+/// case it keeps them in, the first-line indent with both its keys.
+pub fn as_read(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
+	Ok(match (kind, name, v) {
+		(ElemKind::Text, "font", Value::Array(a))	=> {
+			let names: Vec<Value> = a.iter().map(|x| match x {
+				Value::Str(s)	=> Value::str(s.to_lowercase()),
+				other			=> other.clone(),
+			}).collect();
+			Value::array(names)
+		},
+		// The indent is read as the dictionary it is written as, with both of its keys.
+		(ElemKind::Par, "first-line-indent", Value::Dict(d))	=> {
+			let mut full = Dict::new();
+			full.insert("amount", d.get("amount").cloned().unwrap_or_else(|| Value::Length(Length::pt(0.0))));
+			full.insert("all", d.get("all").cloned().unwrap_or(Value::Bool(false)));
+			Value::dict(full)
+		},
+		(_, _, other)								=> other,
+	})
 }
 
 /// A field of the element in hand, else the chain's, else the default.

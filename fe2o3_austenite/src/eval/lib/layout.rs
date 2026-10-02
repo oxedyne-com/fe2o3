@@ -644,3 +644,16 @@ const PAPERS: &[(&str, f64, f64)] = &[
 	("presentation-16-9",	297.0,	167.0625),
 	("presentation-4-3",	280.0,	210.0),
 ];
+
+/// A layout field's default where the schema holds none (`Computed`) and Typst gives a value a read can show: the
+/// page number's alignment, the spacing a block takes from its neighbours (`auto`, as the paragraph's own).
+pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
+	match (kind, name) {
+		(ElemKind::Page, "number-align")	=> Some(Value::Alignment(crate::eval::value::Alignment {
+			x:	Some(crate::eval::value::HAlign::Center),
+			y:	Some(crate::eval::value::VAlign::Bottom),
+		})),
+		(ElemKind::Block, "above") | (ElemKind::Block, "below")	=> Some(Value::Auto),
+		_	=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
+	}
+}
