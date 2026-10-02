@@ -124,7 +124,7 @@ impl GlyphFrag {
 				}
 			}
 			Action::WarnBothAxes => {
-				let d = crate::diag::Diagnostic::warning(DiagnosticKind::Internal, props.span, "glyph has both vertical and horizontal constructions")
+				let d = crate::diag::Diagnostic::warning(DiagnosticKind::Lint, props.span, "glyph has both vertical and horizontal constructions")
 					.with_hint("this is probably a font bug");
 				engine.diags.push(d);
 			}
@@ -309,7 +309,7 @@ impl GlyphFrag {
 					let max_overlap = font.em(part.end_connector.min(next.start_connector) as f64) * size;
 					if max_overlap < min_overlap && !warned {
 						warned = true;
-						let d = crate::diag::Diagnostic::warning(DiagnosticKind::Internal, self.span,
+						let d = crate::diag::Diagnostic::warning(DiagnosticKind::Lint, self.span,
 							"glyph has assembly parts with overlap less than minConnectorOverlap")
 							.with_hint("its rendering may appear broken - this is probably a font bug");
 						engine.diags.push(d);

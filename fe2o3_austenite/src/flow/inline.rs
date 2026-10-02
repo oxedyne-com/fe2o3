@@ -546,7 +546,7 @@ fn collect(
 				}
 			}
 			other => {
-				engine.warn(DiagnosticKind::Internal, pair.content.span(), fmt!(
+				engine.warn(DiagnosticKind::Lint, pair.content.span(), fmt!(
 					"{} may not occur inside of a paragraph and was ignored", other.name()));
 			}
 		}

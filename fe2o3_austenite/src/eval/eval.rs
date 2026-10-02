@@ -713,11 +713,11 @@ impl<'a> Vm<'a> {
 		match seq.iter_mut().rev().find(|c| !ops::unlabellable(c)) {
 			Some(c) => {
 				if c.label().is_some() {
-					self.warn(DiagnosticKind::Internal, c.span(), "content labelled multiple times");
+					self.warn(DiagnosticKind::Lint, c.span(), "content labelled multiple times");
 				}
 				*c = std::mem::take(c).labelled(label);
 			}
-			None => self.warn(DiagnosticKind::Internal, span, fmt!("label `<{}>` is not attached to anything", label.as_str())),
+			None => self.warn(DiagnosticKind::Lint, span, fmt!("label `<{}>` is not attached to anything", label.as_str())),
 		}
 	}
 
@@ -2076,7 +2076,7 @@ impl<'a> Vm<'a> {
 			Value::Content(c)	=> c,
 			_					=> return,
 		};
-		let mut d = Diagnostic::warning(DiagnosticKind::Internal, self.fix(span), "this return unconditionally discards the content before it")
+		let mut d = Diagnostic::warning(DiagnosticKind::Lint, self.fix(span), "this return unconditionally discards the content before it")
 			.with_hint("try omitting the `return` to automatically join all values");
 		if contains_update(tree, 0) {
 			d = d.with_hint("state/counter updates are content that must end up in the document to have an effect");
@@ -2238,7 +2238,7 @@ impl<'a> Vm<'a> {
 		let new_name = if colon_seen_before_as { None } else { new_name };
 		if let Some(n) = &new_name {
 			if src_node.kind() == SyntaxKind::Ident && src_node.text() == n.text() {
-				self.engine.warn(DiagnosticKind::Internal, self.fix(n.span()), "unnecessary import rename to same name");
+				self.engine.warn(DiagnosticKind::Lint, self.fix(n.span()), "unnecessary import rename to same name");
 			}
 			self.define(n.text(), source.clone(), n.span());
 		}
@@ -2254,7 +2254,7 @@ impl<'a> Vm<'a> {
 					match bare {
 						// `import calc` binds `calc` to itself.
 						Ok(_) if src_node.kind() == SyntaxKind::Ident	=> {
-							self.engine.warn(DiagnosticKind::Internal, self.fix(src_span), "this import has no effect");
+							self.engine.warn(DiagnosticKind::Lint, self.fix(src_span), "this import has no effect");
 						}
 						Ok(b)	=> self.define(&b, source, src_span),
 						Err(BareImportError::Dynamic)	=> return Err(self.error_hint(DiagnosticKind::Syntax, src_span,
@@ -2307,7 +2307,7 @@ impl<'a> Vm<'a> {
 							match b {
 								Some(b)	=> {
 									if p.last().map(|l| l.text() == b.text()).unwrap_or(false) {
-										self.engine.warn(DiagnosticKind::Internal, self.fix(b.span()), "unnecessary import rename to same name");
+										self.engine.warn(DiagnosticKind::Lint, self.fix(b.span()), "unnecessary import rename to same name");
 									}
 									(p, b)
 								}

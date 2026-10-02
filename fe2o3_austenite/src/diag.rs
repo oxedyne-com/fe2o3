@@ -39,6 +39,7 @@ pub enum DiagnosticKind {
 	Package,			// a package import the host has not supplied
 	Limit,				// a limit of the engine reached: layout that will not settle, a depth or a loop bound
 	Unsupported,		// a construct passed over or refused, or one set with a stand-in for what it asked for
+	Lint,				// a warning Typst itself raises about the source, which is set as written
 	Internal,			// no pages, no content, or an error raised with no more specific tag
 }
 
@@ -55,13 +56,15 @@ impl DiagnosticKind {
 			Self::Package			=> "package",
 			Self::Limit				=> "limit",
 			Self::Unsupported		=> "unsupported",
+			Self::Lint				=> "lint",
 			Self::Internal			=> "internal",
 		}
 	}
 
 	/// Does a warning of this kind refuse a strict compile? It does where the document was not set as
 	/// written: a construct passed over or set with a stand-in, or a file, its text, a package or a font
-	/// family missing.
+	/// family missing. A [`Lint`](Self::Lint) is Typst's own remark on a document it sets as written, so it
+	/// stands beside the PDF.
 	pub fn refuses_strict(&self) -> bool {
 		matches!(self, Self::Unsupported | Self::MissingFile | Self::Encoding | Self::Package | Self::MissingFont)
 	}
@@ -164,9 +167,9 @@ pub fn message_of(e: &Error<ErrTag>) -> String {
 mod tests {
 	use super::*;
 
-	// The ten words and the strict set, pinned against the Daimond gate's table (`compile.rs`, the
-	// `DiagnosticKind` block): a caller switches on a word, so neither moves without that table moving.
-	const GATE: [(DiagnosticKind, &str, bool); 10] = [
+	// The eleven words and the strict set, which the Daimond gate's table maps: a caller switches on a word,
+	// so neither moves without that table moving.
+	const GATE: [(DiagnosticKind, &str, bool); 11] = [
 		(DiagnosticKind::MissingFile,		"missing_file",		true),
 		(DiagnosticKind::Encoding,			"encoding",			true),
 		(DiagnosticKind::MissingFont,		"missing_font",		true),
@@ -176,6 +179,7 @@ mod tests {
 		(DiagnosticKind::Package,			"package",			true),
 		(DiagnosticKind::Limit,				"limit",			false),
 		(DiagnosticKind::Unsupported,		"unsupported",		true),
+		(DiagnosticKind::Lint,				"lint",				false),
 		(DiagnosticKind::Internal,			"internal",			false),
 	];
 
@@ -191,13 +195,14 @@ mod tests {
 			DiagnosticKind::Package			=> 6,
 			DiagnosticKind::Limit			=> 7,
 			DiagnosticKind::Unsupported		=> 8,
-			DiagnosticKind::Internal		=> 9,
+			DiagnosticKind::Lint			=> 9,
+			DiagnosticKind::Internal		=> 10,
 		}
 	}
 
 	#[test]
-	fn the_ten_kind_words_and_the_strict_set_match_the_gates_table() {
-		let mut seen = [false; 10];
+	fn the_eleven_kind_words_and_the_strict_set_match_the_gates_table() {
+		let mut seen = [false; 11];
 		for (kind, word, strict) in GATE {
 			seen[slot(kind)] = true;
 			assert_eq!(kind.as_str(), word, "the word of {:?}", kind);

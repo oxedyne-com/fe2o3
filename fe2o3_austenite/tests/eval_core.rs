@@ -895,7 +895,7 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 	// the string handed to `eval` is in Typst. 0xff is not UTF-8 in any position.
 	res!(std::fs::write(dir.join("bad.txt"), [255u8, 254, 65]).map_err(|e| err!(
 		"Cannot write bad.txt in {}: {}", dir.display(), e; IO, File, Write)));
-	let cases: [(&str, K, bool); 13] = [
+	let cases: [(&str, K, bool); 18] = [
 		("missing",							K::UnknownVariable,	true),
 		("(1 +",							K::Syntax,			true),
 		("break",							K::Syntax,			true),
@@ -906,9 +906,14 @@ fn diagnostics_carry_the_kind_of_what_they_report() -> Outcome<()> {
 		("json(bytes((255, 254, 65)))",	K::Encoding,		true),
 		("read(\"/absent.txt\")",		K::MissingFile,		true),
 		("read(\"/bad.txt\")",			K::Encoding,		true),
-		("{ let f() = { [a]; return 1 }; f() }",	K::Internal,	false),
-		("import heading as heading",		K::Internal,		false),
-		("import list: item as item",		K::Internal,		false),
+		("{ let f() = { [a]; return 1 }; f() }",	K::Lint,		false),
+		("import heading as heading",		K::Lint,		false),
+		("import list: item as item",		K::Lint,		false),
+		("[<x>]",							K::Lint,		false),
+		("[a <x> <y>]",					K::Lint,		false),
+		("numbering(\"a\", 0)",			K::Lint,		false),
+		("enum(([1], [a]))",				K::Lint,		false),
+		("terms(([a], [b]))",				K::Lint,		false),
 	];
 	let mut failures = Vec::new();
 	for (code, kind, error) in cases {

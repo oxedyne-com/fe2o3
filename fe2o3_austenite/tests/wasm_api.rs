@@ -416,7 +416,7 @@ fn strict_refuses_by_severity_and_kind() {
 		assert!(report(site(Severity::Warning, kind)).strict_failure(Path::new(MAIN)).is_some(), "{}", kind);
 	}
 	for kind in [DiagnosticKind::Limit, DiagnosticKind::Syntax, DiagnosticKind::Type,
-		DiagnosticKind::UnknownVariable, DiagnosticKind::Internal]
+		DiagnosticKind::UnknownVariable, DiagnosticKind::Lint, DiagnosticKind::Internal]
 	{
 		assert_eq!(report(site(Severity::Warning, kind)).strict_failure(Path::new(MAIN)), None, "{}", kind);
 		assert!(report(site(Severity::Error, kind)).strict_failure(Path::new(MAIN)).is_some(), "{}", kind);
@@ -436,10 +436,11 @@ fn the_kind_and_severity_words_are_the_wire_contract() {
 		DiagnosticKind::Package,
 		DiagnosticKind::Limit,
 		DiagnosticKind::Unsupported,
+		DiagnosticKind::Lint,
 		DiagnosticKind::Internal,
 	].iter().map(|k| k.as_str()).collect();
 	assert_eq!(words, ["missing_file", "encoding", "missing_font", "syntax", "type", "unknown_variable",
-		"package", "limit", "unsupported", "internal"]);
+		"package", "limit", "unsupported", "lint", "internal"]);
 	assert_eq!([Severity::Error.as_str(), Severity::Warning.as_str()], ["error", "warning"]);
 }
 

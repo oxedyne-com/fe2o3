@@ -111,6 +111,8 @@ fn a_warning_of_kind_unsupported_refuses_a_strict_compile_and_a_typst_warning_do
 		"#import \"t.typ\": doc as doc\nBody text.\n"));
 	assert!(report.diagnostics.iter().any(|d| d.message.contains("unnecessary import rename")),
 		"Typst's own warning is reported, found {:?}", report.diagnostics);
+	assert!(report.diagnostics.iter().filter(|d| d.message.contains("unnecessary import rename"))
+		.all(|d| d.kind == compile::DiagnosticKind::Lint && d.kind.as_str() == "lint"), "Typst's own warning is a lint");
 	assert!(report.diagnostics.iter().all(|d| !d.kind.refuses_strict()), "none of Typst's own warnings refuses strict");
 	assert!(report.strict_failure(&src).is_none(), "a Typst warning stands beside the PDF");
 	Ok(())

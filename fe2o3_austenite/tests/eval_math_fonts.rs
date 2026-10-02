@@ -131,8 +131,9 @@ $ x^2 + 1 / (y + 1) = sqrt(z) $
 	let found = res!(pdf_compare(&typ, &root.join("no_math_table"), Some(&fonts), true));
 	println!("typst {:?} / austenite {:?}", found.theirs, found.ours);
 	assert!(found.differences.is_empty(), "differs from typst: {}", found.differences.join("; "));
-	let warned = found.report.diagnostics.iter().any(|d| d.message.contains("not designed for math"));
-	assert!(warned, "no `current font is not designed for math` warning: {:?}", found.report.diagnostics);
+	let warned = found.report.diagnostics.iter().any(|d| d.message.contains("not designed for math")
+		&& d.kind == oxedyne_fe2o3_austenite::diag::DiagnosticKind::Lint);
+	assert!(warned, "no `current font is not designed for math` lint: {:?}", found.report.diagnostics);
 	Ok(())
 }
 

@@ -243,8 +243,8 @@ fn cast_arg(engine: &mut Engine, kind: ElemKind, name: &str, v: Value, span: Spa
 	// Typst still takes an array as an enumeration or term list item, with a warning.
 	if matches!(v, Value::Array(_)) && name == "children" {
 		match kind {
-			ElemKind::Enum	=> engine.warn(DiagnosticKind::Internal, span, "implicit conversion from array to `enum.item` is deprecated"),
-			ElemKind::Terms	=> engine.warn(DiagnosticKind::Internal, span, "implicit conversion from array to `terms.item` is deprecated"),
+			ElemKind::Enum	=> engine.warn(DiagnosticKind::Lint, span, "implicit conversion from array to `enum.item` is deprecated"),
+			ElemKind::Terms	=> engine.warn(DiagnosticKind::Lint, span, "implicit conversion from array to `terms.item` is deprecated"),
 			_				=> (),
 		}
 	}

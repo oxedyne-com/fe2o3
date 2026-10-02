@@ -72,7 +72,7 @@ pub fn apply_kth(engine: &mut Engine, numbering: &Value, k: usize, n: u64) -> Ou
 			let kind = pat.kind_at(k);
 			if n == 0 {
 				if let Some(name) = kind.zeroless_name() {
-					engine.warn(DiagnosticKind::Internal, span, fmt!("the numeral system `{}` cannot represent zero", name));
+					engine.warn(DiagnosticKind::Lint, span, fmt!("the numeral system `{}` cannot represent zero", name));
 				}
 			}
 			Ok(Value::str(pat.apply_kth(k, n)))
@@ -97,7 +97,7 @@ fn apply_with(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64], 
 				if *n == 0 {
 					let kind = pat.kind_at(i);
 					if let Some(name) = kind.zeroless_name() {
-						engine.warn(DiagnosticKind::Internal, span, fmt!("the numeral system `{}` cannot represent zero", name));
+						engine.warn(DiagnosticKind::Lint, span, fmt!("the numeral system `{}` cannot represent zero", name));
 					}
 				}
 			}

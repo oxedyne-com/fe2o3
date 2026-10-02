@@ -767,7 +767,7 @@ impl<'e> Resolver<'e> {
 				let drained: Vec<Raw> = self.items.drain(start..).collect();
 				let (sub, had_breaks) = process_table_cell(drained, &cell_styles);
 				if had_breaks {
-					let d = crate::diag::Diagnostic::warning(DiagnosticKind::Internal, cell.span(), fmt!("linebreaks are ignored in {}", what))
+					let d = crate::diag::Diagnostic::warning(DiagnosticKind::Lint, cell.span(), fmt!("linebreaks are ignored in {}", what))
 						.with_hint("use commas instead to separate each line");
 					self.engine.diags.push(d);
 				}
