@@ -11,8 +11,9 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRedactor, fingerprint, secretName } from '../redact.js';
+import { createRedactor, fingerprint, scrubText, secretName } from '../redact.js';
 import { check, finish, section } from './harness.mjs';
+import { TEMPLATES, expand } from './scrub_corpus.mjs';
 
 const DATA = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'tests', 'data');
 const lines = (f) => readFileSync(join(DATA, f), 'utf8').split('\n').filter((l) => l.length);
@@ -45,6 +46,31 @@ section('crosscheck: fingerprints against lens_fingerprint.tsv');
 		rows.some(([i]) => typeof i === 'string' && /[\u{10000}-\u{10ffff}]/u.test(i)));
 	check('a redactor walk fingerprints through the same function',
 		createRedactor().value({ apiKey: 'abcdefghi' }).apiKey === fingerprint('abcdefghi'));
+}
+
+section('crosscheck: the content scrubber against lens_scrub.tsv, the table Rust\'s Shapes is held to');
+{
+	// Template, scrubbed output and the id flag, from `gen_scrub_oracle.mjs`. The table holds the recipe
+	// of each input and never a credential; `scrub_corpus.mjs` says how to expand one.
+	const rows = lines('lens_scrub.tsv').map((l) => l.split('\t')).map(([t, o, id]) => [JSON.parse(t), JSON.parse(o), id === '1']);
+	const bad = rows.filter(([t, o, id]) => scrubText(expand(t), id) !== o);
+	check('every case scrubs to the table\'s output, character for character', bad.length === 0, bad.length + ' differ, first ' + JSON.stringify(bad[0] && bad[0][0]));
+	check('the table is the corpus, expanded and scrubbed now (regenerate it if redact.js moved)',
+		rows.length === TEMPLATES.length && rows.every(([t, , id], i) => t === TEMPLATES[i][0] && id === (TEMPLATES[i][1] === 1)), rows.length + ' rows');
+	const kinds = new Set();
+	for (const [, o] of rows) for (const m of o.matchAll(/\[redacted (\w+) #/g)) kinds.add(m[1]);
+	check('it exercises every shape, pair and the entropy catch',
+		['pem', 'gh', 'ghpat', 'stripe', 'whsec', 'sk', 'aws', 'gcp', 'slack', 'jwt', 'tune', 'bearer', 'urlarg', 'named', 'awssec', 'hi'].every((k) => kinds.has(k)), [...kinds].join());
+	const same = rows.filter(([t, o]) => o === expand(t)).length;
+	check('and it holds decoys that must come through untouched', same >= 15 && same < rows.length - 50, same + ' of ' + rows.length + ' unchanged');
+	check('a case that was already scrubbed stays as it is (the second pass is idempotent)',
+		rows.every(([, o, id]) => scrubText(o, id) === o));
+	check('the table holds no literal credential: no template has a long run of characters outside a token',
+		rows.every(([t]) => { const r = t.replace(/\{\{[^}]*\}\}/g, ''); return !/[A-Za-z0-9]{20,}/.test(r) && !/(?:sk_|rk_|pk_|sk-|ghp_|gho_|AKIA|ASIA|eyJ|xox.-|AIza|whsec_|tune-)[A-Za-z0-9]{8,}/.test(r); }));
+	// Pinned expansions, so a port of the expander can be checked before it is trusted with the table.
+	check('the expander gives the pinned vectors',
+		expand('{{8:1:hex}}') === '8388dbc2' && expand('{{12:7:alnum}}') === 'Dn8QmkIRy6vU' && expand('{{10:3:digit}}') === '0086285001'
+		&& expand('{{6:5:upper36}}') === 'PJMEIR' && expand('a{{dash5}}b') === 'a-----b');
 }
 
 finish('crosscheck');
