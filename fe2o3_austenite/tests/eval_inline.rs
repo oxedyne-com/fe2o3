@@ -725,7 +725,7 @@ fn layout_par_keeps_nothing_and_depends_only_on_its_inputs() -> Outcome<()> {
 }
 
 /// A located element inside a paragraph is met where it stands in the text: `layout_par` puts its start
-/// in the line as an anchor, before the text it covers and after the text before it.
+/// in the line as a tag, before the text it covers and after the text before it.
 #[test]
 fn a_located_element_is_tagged_where_it_stands_in_its_paragraph() -> Outcome<()> {
 	let (mut engine, pars) = res!(paragraphs("Alpha #strong[beta] gamma #emph[delta] epsilon\n"));
@@ -737,7 +737,9 @@ fn a_located_element_is_tagged_where_it_stands_in_its_paragraph() -> Outcome<()>
 		match n {
 			Node::HBox(b) | Node::VBox(b)	=> for c in &b.list { walk(c, out); },
 			Node::Leaf(l)					=> if let LeafKind::Text(t) = &l.kind { out.push(fmt!("text:{}", t.source())); },
-			Node::Anchor(_)					=> out.push("anchor".to_string()),
+			Node::Tag(t)					=> if matches!(t, oxedyne_fe2o3_austenite::eval::realise::Tag::Start(_)) {
+				out.push("anchor".to_string());
+			},
 			_								=> (),
 		}
 	}
@@ -746,15 +748,15 @@ fn a_located_element_is_tagged_where_it_stands_in_its_paragraph() -> Outcome<()>
 	}
 	let joined = flat.join("|");
 	let anchors = flat.iter().filter(|f| f.as_str() == "anchor").count();
-	assert_eq!(anchors, 2, "strong and emph each start an anchor: {}", joined);
+	assert_eq!(anchors, 2, "strong and emph each start a tag: {}", joined);
 	let at = |needle: &str| flat.iter().position(|f| f.contains(needle));
 	let (a1, a2) = {
 		let mut it = flat.iter().enumerate().filter(|(_, f)| f.as_str() == "anchor").map(|(i, _)| i);
 		(it.next().unwrap_or(usize::MAX), it.next().unwrap_or(usize::MAX))
 	};
-	assert!(at("Alpha").map_or(false, |i| i < a1), "the first anchor precedes `Alpha`: {}", joined);
-	assert!(at("beta").map_or(false, |i| i > a1 && i < a2), "`beta` stands between the anchors: {}", joined);
-	assert!(at("delta").map_or(false, |i| i > a2), "`delta` follows the second anchor: {}", joined);
+	assert!(at("Alpha").map_or(false, |i| i < a1), "the first tag precedes `Alpha`: {}", joined);
+	assert!(at("beta").map_or(false, |i| i > a1 && i < a2), "`beta` stands between the tags: {}", joined);
+	assert!(at("delta").map_or(false, |i| i > a2), "`delta` follows the second tag: {}", joined);
 	Ok(())
 }
 

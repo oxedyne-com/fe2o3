@@ -1273,11 +1273,9 @@ pub fn commit(engine: &mut Engine, p: &Prep, l: &Line, width: f64, full: f64) ->
 				nodes.push(frame_node(&f));
 				cursor += w;
 			}
-			// Until the IR carries a located element's tags, its start is recorded as its anchor.
-			Placed::Tag(RealiseTag::Start(content)) => if let Some(loc) = content.location() {
-				nodes.push(Node::Anchor(loc.anchor()));
-			},
-			Placed::Tag(RealiseTag::End(_)) => (),
+			// A located element's tags sit in the line where it stands, on its baseline: the driver records the
+			// element for the introspector and the ledger, and a footnote's marker is found by its start tag.
+			Placed::Tag(tag) => nodes.push(Node::Tag(tag)),
 		}
 	}
 	// Rounded up, so a region taken from the line's measured width still holds the line.
