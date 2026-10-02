@@ -11,7 +11,10 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_mail::{
     maildir::MaildirStore,
-    outbound::OutboundSpool,
+    outbound::{
+        OutboundSpool,
+        RetrySchedule,
+    },
     passwd::PasswdFileUserStore,
 };
 use oxedyne_fe2o3_net::{
@@ -201,8 +204,9 @@ impl SmtpHandler for AppMailHandler {
 }
 
 
-/// Polls the spool and pushes each message through the outbound SMTP client.
-/// Runs forever.
+/// Sweeps the spool every thirty seconds and pushes each message that is due through the outbound
+/// SMTP client. Runs forever. What becomes of a failure, whether it waits, is retried or ends
+/// in `failed/`, is [`OutboundSpool::sweep`]'s to say, so that it can be tested without a network.
 pub async fn run_outbound_worker(
     spool:      OutboundSpool,
     client:     OutboundClient,
@@ -210,35 +214,18 @@ pub async fn run_outbound_worker(
     -> Outcome<()>
 {
     use std::time::Duration;
+    let mut sched = RetrySchedule::default();
     loop {
-        // Drain the spool.
-        match spool.list() {
-            Ok(messages) => {
-                for msg in messages {
-                    info!("Outbound: delivering {} ({} rcpt)",
-                        msg.filename, msg.rcpt_to.len());
-                    let result = client.deliver(
-                        &msg.mail_from,
-                        &msg.rcpt_to,
-                        &msg.body,
-                    ).await;
-                    match result {
-                        Ok(qid) => {
-                            info!("Outbound: {} delivered (remote: {})",
-                                msg.filename, qid);
-                            if let Err(e) = spool.remove(&msg.filename) {
-                                warn!("Failed to remove spool file {}: {}",
-                                    msg.filename, e);
-                            }
-                        }
-                        Err(e) => {
-                            warn!("Outbound: {} failed: {}", msg.filename, e);
-                            // Leave on disk for next sweep.
-                        }
-                    }
-                }
-            }
-            Err(e) => warn!("Spool list error: {}", e),
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or_default();
+        let client = &client;
+        let sweep = spool.sweep(&mut sched, now, |msg| async move {
+            client.deliver(&msg.mail_from, &msg.rcpt_to, &msg.body).await
+        }).await;
+        if let Err(e) = sweep {
+            warn!("Spool sweep error: {}", e);
         }
         tokio::time::sleep(Duration::from_secs(30)).await;
     }

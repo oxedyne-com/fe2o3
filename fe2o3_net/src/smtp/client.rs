@@ -126,6 +126,27 @@ impl SubmissionConfig {
 }
 
 
+/// The error for a domain whose mail exchanges came to no address.
+///
+/// It is permanent when the resolver answered for every exchange and none had an address: the
+/// domain does not exist, has no A record, or publishes a null MX (RFC 7505), and asking again will
+/// not change that. It is transient when any lookup failed outright, since a timeout or a SERVFAIL
+/// says nothing about the domain. Both used to read as the latter, so mail to a dead domain was
+/// retried for ever.
+fn unroutable(mxs: &[dns_resolver::MxRecord], lookup_failed: bool) -> Error<ErrTag> {
+    if mxs.iter().all(|mx| mx.exchange.is_empty()) {
+        err!("The recipient domain publishes a null MX and accepts no mail (RFC 7505).";
+            IO, Network, Missing, Permanent)
+    } else if lookup_failed {
+        err!("No reachable MX hosts for any of the configured recipients.";
+            IO, Network, Missing)
+    } else {
+        // Only A records are resolved, so this means no IPv4 address.
+        err!("No mail exchange of the recipient domain has an address.";
+            IO, Network, Missing, Permanent)
+    }
+}
+
 /// One outbound delivery target after MX resolution, sorted into preference order by
 /// [`OutboundClient::deliver`].
 #[derive(Clone, Debug)]
@@ -210,7 +231,13 @@ impl OutboundClient {
         let mxs = res!(mxs);
 
         let mut targets: Vec<DeliveryTarget> = Vec::new();
+        // Whether any exchange failed to resolve at all, as against resolving to nothing.
+        let mut lookup_failed = false;
         for mx in &mxs {
+            // RFC 7505: a null MX is the domain saying it takes no mail. There is nothing to look up.
+            if mx.exchange.is_empty() {
+                continue;
+            }
             let exchange = mx.exchange.clone();
             let pref = mx.preference;
             let addrs_outcome = tokio::task::spawn_blocking(move || {
@@ -218,7 +245,10 @@ impl OutboundClient {
             }).await;
             let addrs = match addrs_outcome {
                 Ok(Ok(v)) => v,
-                _ => continue,
+                _ => {
+                    lookup_failed = true;
+                    continue;
+                }
             };
             for ip in addrs {
                 targets.push(DeliveryTarget {
@@ -228,6 +258,9 @@ impl OutboundClient {
                     preference: pref,
                 });
             }
+        }
+        if targets.is_empty() {
+            return Err(unroutable(&mxs, lookup_failed));
         }
         self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT).await
     }
@@ -1502,6 +1535,39 @@ mod tests {
         req!(true, c.deliver("a@example.com",
             &[fmt!("b@one.example"), fmt!("c@two.example")], b"x").await.is_err(),
             "delivery accepted two domains in one transaction");
+        Ok(())
+    }
+
+    // ── A domain with nowhere to deliver to ──
+
+    fn mx(exchange: &str) -> dns_resolver::MxRecord {
+        dns_resolver::MxRecord { preference: 10, exchange: exchange.to_string() }
+    }
+
+    /// RFC 7505. The two stale messages on karri were stuck behind this: the domain says it takes
+    /// no mail, and the sender read that as a reason to ask again in thirty seconds, for ever.
+    #[test]
+    fn test_a_null_mx_is_a_permanent_failure_00() -> Outcome<()> {
+        let e = unroutable(&[mx("")], false);
+        req!(true, is_permanent(&e), "a null MX was read as transient");
+        // Whether a lookup also failed makes no difference to a domain that said no.
+        req!(true, is_permanent(&unroutable(&[mx("")], true)), "a null MX was read as transient");
+        Ok(())
+    }
+
+    /// NXDOMAIN, or an exchange with no A record: the resolver answered and the answer was nothing.
+    #[test]
+    fn test_exchanges_that_resolve_to_nothing_are_permanent_00() -> Outcome<()> {
+        let e = unroutable(&[mx("mx1.gone.example"), mx("mx2.gone.example")], false);
+        req!(true, is_permanent(&e), "a domain whose exchanges have no address was read as transient");
+        Ok(())
+    }
+
+    /// A timeout or a SERVFAIL says nothing about the domain, so the message waits.
+    #[test]
+    fn test_a_failed_lookup_is_not_permanent_00() -> Outcome<()> {
+        let e = unroutable(&[mx("mx1.slow.example")], true);
+        req!(false, is_permanent(&e), "a failed DNS lookup was read as permanent");
         Ok(())
     }
 
