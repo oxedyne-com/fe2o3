@@ -293,6 +293,11 @@ impl Face {
 		self.program.as_ref()
 	}
 
+	/// The font file as given, for a reader of tables the face itself does not expose.
+	pub fn bytes(&self) -> &[u8] {
+		&self.bytes
+	}
+
 	/// The family, weight and slant the file declares.
 	pub fn info(&self) -> Outcome<FaceInfo> {
 		FaceInfo::read(&self.bytes)

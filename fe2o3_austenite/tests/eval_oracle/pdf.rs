@@ -43,9 +43,14 @@ pub struct Made {
 
 /// Compiles `src` (its directory the root) to a PDF through `compile::assemble_eval` with a `PdfSink`.
 pub fn austenite_pdf(src: &Path) -> Outcome<Made> {
+	austenite_pdf_with(src, FontStore::default())
+}
+
+/// As [`austenite_pdf`], with the faces `fonts` holds beside the embedded ones.
+pub fn austenite_pdf_with(src: &Path, fonts: FontStore) -> Outcome<Made> {
 	let mut sink = res!(PdfSink::new());
 	let root = src.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-	let done = res!(compile::assemble_eval(src, &root, FontStore::default(), &mut sink));
+	let done = res!(compile::assemble_eval(src, &root, fonts, &mut sink));
 	let pages = res!(done.laid.as_ref().map_err(|e| err!("{} did not lay out: {}", src.display(), e.plain(); Test))).pages;
 	let report = done.report();
 	let out = res!(sink.output().ok_or_else(|| err!("The fixpoint finished with no PDF."; Test)));
@@ -54,8 +59,14 @@ pub fn austenite_pdf(src: &Path) -> Outcome<Made> {
 
 /// Typst's PDF of `src`, under the same memory cap as every oracle run.
 pub fn typst_pdf(src: &Path, out: &Path) -> Outcome<()> {
+	typst_pdf_with(src, out, &[])
+}
+
+/// As [`typst_pdf`], with `extra` arguments to `typst compile` (a `--font-path`, say).
+pub fn typst_pdf_with(src: &Path, out: &Path, extra: &[&str]) -> Outcome<()> {
 	let status = Command::new("systemd-run")
 		.args(["--user", "--scope", "--quiet", "-p", "MemoryMax=3G", "--slice=claude-rc.slice", TYPST, "compile"])
+		.args(extra)
 		.arg(src).arg(out)
 		.status();
 	match status {
@@ -99,6 +110,13 @@ pub fn page_size(pdf: &Path) -> Outcome<(f64, f64)> {
 /// Where Austenite's lines differ from Typst's: a line's text, the bottom of its box and where its first
 /// word starts, each within [`TOL`].
 pub fn k3_differences(want: &[OPage], got: &[OPage]) -> Vec<String> {
+	k3_differences_by(want, got, false)
+}
+
+/// As [`k3_differences`]; with `spaceless`, a line's text is compared without its spaces, for a reader of
+/// maths whose word breaks fall on glyph gaps a hair apart (Typst writes a run as one `TJ`, Austenite a
+/// glyph at a time).
+pub fn k3_differences_by(want: &[OPage], got: &[OPage], spaceless: bool) -> Vec<String> {
 	let mut out = Vec::new();
 	if want.len() != got.len() {
 		out.push(fmt!("page count: typst {}, austenite {}", want.len(), got.len()));
@@ -108,7 +126,7 @@ pub fn k3_differences(want: &[OPage], got: &[OPage]) -> Vec<String> {
 			out.push(fmt!("page {}: typst has {} line(s), austenite {}", pi + 1, w.lines.len(), g.lines.len()));
 		}
 		for (wl, gl) in w.lines.iter().zip(g.lines.iter()) {
-			let squash = |l: &OLine| l.text.split_whitespace().collect::<Vec<_>>().join(" ");
+			let squash = |l: &OLine| l.text.split_whitespace().collect::<Vec<_>>().join(if spaceless { "" } else { " " });
 			if squash(wl) != squash(gl) {
 				out.push(fmt!("page {}: line text typst {:?}, austenite {:?}", pi + 1, squash(wl), squash(gl)));
 			}
@@ -123,18 +141,63 @@ pub fn k3_differences(want: &[OPage], got: &[OPage]) -> Vec<String> {
 	out
 }
 
+/// The fonts a PDF embeds, as `pdffonts` lists them, each name without its subset tag.
+pub fn font_names(pdf: &Path) -> Outcome<Vec<String>> {
+	let list = res!(tool("pdffonts", &[], pdf, &[]));
+	let mut out = Vec::new();
+	for line in list.lines().skip(2) {
+		if let Some(name) = line.split_whitespace().next() {
+			let bare = name.split_once('+').map(|(_, n)| n).unwrap_or(name);
+			if !out.iter().any(|o| o == bare) {
+				out.push(bare.to_string());
+			}
+		}
+	}
+	Ok(out)
+}
+
 /// Compiles `src` both ways into `dir` and returns the level-4b differences of Austenite's own PDF from Typst's.
 pub fn pdf_differences(src: &Path, dir: &Path) -> Outcome<Vec<String>> {
+	Ok(res!(pdf_compare(src, dir, None, false)).differences)
+}
+
+/// What one comparison of the two PDFs found: the level-4b differences and the fonts each file embeds.
+pub struct Compared {
+	pub differences:	Vec<String>,
+	pub ours:			Vec<String>,
+	pub theirs:			Vec<String>,
+	pub report:			compile::Report,
+}
+
+/// Compiles `src` both ways into `dir`, the faces under `fonts` supplied to each as a host supplies them
+/// (`--font-path`, with Typst's system fonts ignored so the two sides see the same faces). With `spaceless`
+/// the text is compared without its spaces ([`k3_differences_by`]).
+pub fn pdf_compare(src: &Path, dir: &Path, fonts: Option<&Path>, spaceless: bool) -> Outcome<Compared> {
 	res!(std::fs::create_dir_all(dir));
-	let made	= res!(austenite_pdf(src));
+	let mut store = FontStore::default();
+	let mut extra: Vec<String> = Vec::new();
+	if let Some(f) = fonts {
+		store.add_dir(f.to_path_buf());
+		extra.push("--ignore-system-fonts".to_string());
+		extra.push("--font-path".to_string());
+		extra.push(f.display().to_string());
+	}
+	let made	= res!(austenite_pdf_with(src, store));
 	let ours	= dir.join("austenite.pdf");
 	let theirs	= dir.join("typst.pdf");
 	res!(std::fs::write(&ours, &made.bytes));
-	res!(typst_pdf(src, &theirs));
-	let mut out = k3_differences(&res!(lines_of(&theirs)), &res!(lines_of(&ours)));
+	let args: Vec<&str> = extra.iter().map(|a| a.as_str()).collect();
+	res!(typst_pdf_with(src, &theirs, &args));
+	let mut out = k3_differences_by(&res!(lines_of(&theirs)), &res!(lines_of(&ours)), spaceless);
 	let (a, t) = (res!(text_of(&ours)), res!(text_of(&theirs)));
-	if a != t {
+	let bare = |s: &String| if spaceless { s.split_whitespace().collect::<Vec<_>>().join("") } else { s.clone() };
+	if bare(&a) != bare(&t) {
 		out.push(fmt!("pdftotext differs: typst {:?}, austenite {:?}", t, a));
 	}
-	Ok(out)
+	Ok(Compared {
+		differences:	out,
+		ours:			res!(font_names(&ours)),
+		theirs:			res!(font_names(&theirs)),
+		report:			made.report,
+	})
 }

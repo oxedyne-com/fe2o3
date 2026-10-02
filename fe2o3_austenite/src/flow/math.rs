@@ -120,7 +120,8 @@ fn efield(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Val
 // script percentages.
 fn prepare(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<(StyleChain, Arc<MathFont>)> {
 	let st = styles.clone();
-	let font = res!(resolve_font(&res!(props::families(&st)), res!(props::fallback(&st)), res!(props::weight(&st))));
+	let book = res!(engine.fonts.book());
+	let font = res!(resolve_font(&book, &res!(props::families(&st)), res!(props::fallback(&st)), res!(props::face_variant(&st))));
 	if !font.has_math {
 		let d = crate::diag::Diagnostic::warning(DiagnosticKind::Internal, elem.span(), "current font is not designed for math")
 			.with_hint("rendering may be poor");

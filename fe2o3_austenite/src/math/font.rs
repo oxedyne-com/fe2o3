@@ -5,11 +5,16 @@
 //! queries maths layout asks (advances, ink boxes, italics corrections, accent attachments, cut-in
 //! kerning, constructions). Ems throughout; a caller multiplies by the font size in points.
 //!
-//! Faces are found by family name among the faces this crate embeds -- New Computer Modern Math, Typst's
-//! default for equations. A family the store cannot supply falls through to the next in the list and, as
-//! in Typst, to the maths fallback list.
+//! Faces are found by family name in the compilation's font book -- the faces this crate embeds, New
+//! Computer Modern Math among them (Typst's default for equations), and every face the host supplies. A
+//! family the book cannot supply falls through to the next in the list and, as in Typst, to the maths
+//! fallback list.
 
-use crate::fonts;
+use crate::fonts::{
+	BookFace,
+	FaceVariant,
+	FontBook,
+};
 use crate::mathtable::{
 	Construction,
 	FontTables,
@@ -29,7 +34,6 @@ use oxedyne_fe2o3_graphics::transform::Transform;
 use std::collections::HashMap;
 use std::sync::{
 	Arc,
-	OnceLock,
 	RwLock,
 };
 
@@ -146,15 +150,15 @@ impl std::fmt::Debug for MathFont {
 }
 
 impl MathFont {
-	pub fn from_bytes(bytes: Vec<u8>) -> Outcome<Self> {
-		let tables	= res!(FontTables::parse(&bytes));
-		let font	= Arc::new(res!(Font::new(bytes)));
-		let info	= res!(font.info());
+	/// The maths view of a book face, sharing its font so text and equations in one family are one font to
+	/// a PDF.
+	pub fn from_face(face: &BookFace) -> Outcome<Self> {
+		let tables	= res!(FontTables::parse(res!(face.face()).bytes()));
 		let mut mf = Self {
-			font,
+			font:		face.font.clone(),
 			tables,
-			family:		info.family,
-			weight:		info.weight,
+			family:		face.family.clone(),
+			weight:		face.variant.weight,
 			consts:		Constants::default(),
 			has_math:	false,
 			boxes:		RwLock::new(HashMap::new()),
@@ -395,64 +399,39 @@ pub const FALLBACKS: &[&str] = &[
 	"segoe ui emoji",
 ];
 
-/// The faces maths can be set in, parsed once.
-fn library() -> Outcome<&'static Vec<Arc<MathFont>>> {
-	static LIB: OnceLock<Vec<Arc<MathFont>>> = OnceLock::new();
-	if let Some(l) = LIB.get() {
-		return Ok(l);
-	}
-	// New Computer Modern Math first, since it is the default face; the Libertinus Serif faces carry no
-	// MATH table, so maths set in them takes the fallback constants and a warning, as Typst's does.
-	let mut lib = Vec::new();
-	for bytes in [fonts::MATH, fonts::SERIF, fonts::BOLD] {
-		lib.push(Arc::new(res!(MathFont::from_bytes(bytes.to_vec()))));
-	}
-	let _ = LIB.set(lib);
-	match LIB.get() {
-		Some(l)	=> Ok(l),
-		None	=> Err(err!("The maths font library could not be initialised."; Bug)),
+/// The face maths sets in by default when no family a document names is in the book.
+const DEFAULT: &str = "new computer modern math";
+
+/// The face of `family` nearest `variant` in the book, if the book has the family.
+pub fn select(book: &FontBook, family: &str, variant: FaceVariant) -> Outcome<Option<Arc<MathFont>>> {
+	match book.select(&family.to_lowercase(), variant) {
+		Some(id)	=> Ok(Some(res!(book.math_font(id)))),
+		None		=> Ok(None),
 	}
 }
 
-/// The face of `family` nearest `weight`, if the library has the family.
-pub fn select(family: &str, weight: u16) -> Outcome<Option<Arc<MathFont>>> {
-	let lib = res!(library());
-	let mut best: Option<&Arc<MathFont>> = None;
-	for f in lib {
-		if !fonts::same_family(&f.family, family) {
-			continue;
-		}
-		let d = (f.weight as i32 - weight as i32).abs();
-		if best.map(|b| d < (b.weight as i32 - weight as i32).abs()).unwrap_or(true) {
-			best = Some(f);
-		}
-	}
-	Ok(best.cloned())
-}
-
-/// The face maths is set in: the first family of the list the library has, else the default maths
-/// face.
-pub fn resolve(families: &[String], fallback: bool, weight: u16) -> Outcome<Arc<MathFont>> {
+/// The face maths is set in: the first family of the list the book has, else the default maths face.
+pub fn resolve(book: &FontBook, families: &[String], fallback: bool, variant: FaceVariant) -> Outcome<Arc<MathFont>> {
 	for fam in families {
-		if let Some(f) = res!(select(fam, weight)) {
+		if let Some(f) = res!(select(book, fam, variant)) {
 			return Ok(f);
 		}
 	}
 	if fallback {
 		for fam in FALLBACKS {
-			if let Some(f) = res!(select(fam, weight)) {
+			if let Some(f) = res!(select(book, fam, variant)) {
 				return Ok(f);
 			}
 		}
 	}
-	match res!(library()).first() {
-		Some(f)	=> Ok(f.clone()),
+	match res!(select(book, DEFAULT, variant)) {
+		Some(f)	=> Ok(f),
 		None	=> Err(err!("no font could be found"; Missing)),
 	}
 }
 
 /// The faces to try, in order, for a character the first face lacks.
-pub fn chain(families: &[String], fallback: bool, weight: u16) -> Outcome<Vec<Arc<MathFont>>> {
+pub fn chain(book: &FontBook, families: &[String], fallback: bool, variant: FaceVariant) -> Outcome<Vec<Arc<MathFont>>> {
 	let mut out: Vec<Arc<MathFont>> = Vec::new();
 	let push = |f: Arc<MathFont>, out: &mut Vec<Arc<MathFont>>| {
 		if !out.iter().any(|g| Arc::ptr_eq(g, &f)) {
@@ -460,19 +439,19 @@ pub fn chain(families: &[String], fallback: bool, weight: u16) -> Outcome<Vec<Ar
 		}
 	};
 	for fam in families {
-		if let Some(f) = res!(select(fam, weight)) {
+		if let Some(f) = res!(select(book, fam, variant)) {
 			push(f, &mut out);
 		}
 	}
 	if fallback {
 		for fam in FALLBACKS {
-			if let Some(f) = res!(select(fam, weight)) {
+			if let Some(f) = res!(select(book, fam, variant)) {
 				push(f, &mut out);
 			}
 		}
 	}
 	if out.is_empty() {
-		out.push(res!(resolve(families, fallback, weight)));
+		out.push(res!(resolve(book, families, fallback, variant)));
 	}
 	Ok(out)
 }

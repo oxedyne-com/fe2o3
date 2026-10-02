@@ -45,10 +45,7 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::shape::Glyph;
-use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
-	transform::Transform,
-};
+use oxedyne_fe2o3_graphics::colour::Rgba;
 
 use std::sync::Arc;
 

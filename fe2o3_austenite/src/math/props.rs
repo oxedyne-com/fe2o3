@@ -24,6 +24,7 @@ use crate::eval::value::{
 	Paint,
 	Value,
 };
+use crate::fonts::FaceVariant;
 use crate::math::style::{
 	MathSize,
 	MathVariant,
@@ -200,22 +201,9 @@ pub fn fallback(styles: &StyleChain) -> Outcome<bool> {
 	Ok(!matches!(res!(get(styles, ElemKind::Text, "fallback")), Some(Value::Bool(false))))
 }
 
-pub fn weight(styles: &StyleChain) -> Outcome<u16> {
-	Ok(match res!(get(styles, ElemKind::Text, "weight")) {
-		Some(Value::Int(i))	=> i.clamp(100, 900) as u16,
-		Some(Value::Str(s))	=> match s.as_str() {
-			"thin"			=> 100,
-			"extralight"	=> 200,
-			"light"			=> 300,
-			"medium"		=> 500,
-			"semibold"		=> 600,
-			"bold"			=> 700,
-			"extrabold"		=> 800,
-			"black"			=> 900,
-			_				=> 400,
-		},
-		_					=> 400,
-	})
+/// The font variant the styles ask of a face: style, weight and stretch, as Typst's `variant(styles)`.
+pub fn face_variant(styles: &StyleChain) -> Outcome<FaceVariant> {
+	crate::flow::text::variant(styles)
 }
 
 /// `text.baseline`: a shift of the glyphs, positive downward.

@@ -13,6 +13,7 @@
 //! 2026-09-23: the maths face moved from Latin Modern Math to New Computer Modern Math, Typst's default,
 //! when Daimond dropped the typst.ts vendor copy that had been its only source.
 
+use crate::math::font::MathFont;
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -480,8 +481,8 @@ fn load_variant(dir: &Path, name: &str, suffix: &str, slot: &mut Option<Variant>
 
 // The embedded faces are Typst 0.15.1's own files (`typst-assets`), byte for byte, so a document that
 // names no font is shaped from the same glyph tables the oracle shapes from.
-pub(crate) const SERIF:	&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
-pub(crate) const BOLD:	&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
+const SERIF:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Regular.otf");
+const BOLD:				&[u8] = include_bytes!("../fonts/LibertinusSerif-Bold.otf");
 const ITALIC:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Italic.otf");
 const BOLD_ITALIC:		&[u8] = include_bytes!("../fonts/LibertinusSerif-BoldItalic.otf");
 const SEMIBOLD:			&[u8] = include_bytes!("../fonts/LibertinusSerif-Semibold.otf");
@@ -847,6 +848,7 @@ pub struct FontBook {
 	faces:		Vec<BookFace>,
 	families:	HashMap<String, Vec<usize>>,	// lower-cased family to face ids, in insertion order
 	shapes:		Mutex<ShapeCache>,				// shaped runs, which every holder of the book shares
+	maths:		Mutex<HashMap<usize, Arc<MathFont>>>,	// a face's maths view, built when maths first asks
 }
 
 impl std::fmt::Debug for FontBook {
@@ -911,6 +913,21 @@ impl FontBook {
 	}
 
 	pub fn face(&self, id: usize) -> Option<&BookFace> { self.faces.get(id) }
+
+	/// Face `fid` as maths sets it: its MATH table, the constants and the glyph queries layout asks. Built
+	/// on first use and shared, so a face maths never reaches costs nothing.
+	pub fn math_font(&self, fid: usize) -> Outcome<Arc<MathFont>> {
+		{
+			let cache = lock_mutex!(self.maths);
+			if let Some(m) = cache.get(&fid) {
+				return Ok(m.clone());
+			}
+		}
+		let bf = res!(self.faces.get(fid).ok_or_else(|| err!("Face {} is not in the font book.", fid; Bug)));
+		let built = Arc::new(res!(MathFont::from_face(bf)));
+		let mut cache = lock_mutex!(self.maths);
+		Ok(cache.entry(fid).or_insert(built).clone())
+	}
 
 	/// The glyphs of `text` shaped in face `fid`, in font units, from the cache when the same call has been
 	/// made before. The shaper runs outside the lock, so a slow shaping never holds up another.

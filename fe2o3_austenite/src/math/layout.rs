@@ -113,7 +113,8 @@ impl<'e> Ctx<'e> {
 		for it in item.as_slice() {
 			let st = it.styles().cloned().unwrap_or_else(|| outer.clone());
 			if !st.ptr_eq(&outer) && res!(props::families(&st)) != outer_families {
-				let f = res!(resolve_font(&res!(props::families(&st)), res!(props::fallback(&st)), res!(props::weight(&st))));
+				let book = res!(self.engine.fonts.book());
+				let f = res!(resolve_font(&book, &res!(props::families(&st)), res!(props::fallback(&st)), res!(props::face_variant(&st))));
 				let scaled = props::chain_with(&st, vec![props::set_script_scale(
 					f.consts.script_percent_scale_down, f.consts.script_script_percent_scale_down)]);
 				self.fonts.push(f);
@@ -248,7 +249,8 @@ impl<'e> Ctx<'e> {
 
 	fn text(&mut self, text: &str, styles: &StyleChain, p: &Props) -> Outcome<()> {
 		// A run of text in maths sets as a line of its own, its box the ink's bounds.
-		let fonts = res!(crate::math::font::chain(&res!(props::families(styles)), res!(props::fallback(styles)), res!(props::weight(styles))));
+		let book = res!(self.engine.fonts.book());
+		let fonts = res!(crate::math::font::chain(&book, &res!(props::families(styles)), res!(props::fallback(styles)), res!(props::face_variant(styles))));
 		let mut feats: Vec<Feature> = res!(props::features(styles)).into_iter().filter(|f| &f.tag != b"ssty").collect();
 		if props::dtls(styles) {
 			feats.push(Feature { tag: *b"dtls", value: 1 });
@@ -291,7 +293,7 @@ impl<'e> Ctx<'e> {
 	fn number(&mut self, text: &str, styles: &StyleChain, p: &Props) -> Outcome<()> {
 		let mut frags = Vec::new();
 		for c in text.chars() {
-			if let Some(g) = res!(GlyphFrag::synthetic(styles, c, p.span)) {
+			if let Some(g) = res!(GlyphFrag::synthetic(self.engine, styles, c, p.span)) {
 				frags.push(Frag::Glyph(g));
 			}
 		}
@@ -302,7 +304,7 @@ impl<'e> Ctx<'e> {
 	}
 
 	fn primes(&mut self, count: usize, styles: &StyleChain, p: &Props) -> Outcome<()> {
-		let prime = match res!(GlyphFrag::synthetic(styles, '\u{2032}', p.span)) {
+		let prime = match res!(GlyphFrag::synthetic(self.engine, styles, '\u{2032}', p.span)) {
 			Some(g)	=> Frag::Glyph(g).into_frame(),
 			None	=> return Ok(()),
 		};
@@ -911,7 +913,7 @@ impl<'e> Ctx<'e> {
 			None => (Vec::new(), Vec::new(), default_pen.clone()),
 		};
 		let den = props::chain_with(styles, props::for_denominator(styles));
-		let (pa, pd) = match res!(GlyphFrag::synthetic(&den, '(', Span::detached())) {
+		let (pa, pd) = match res!(GlyphFrag::synthetic(self.engine, &den, '(', Span::detached())) {
 			Some(g)	=> (g.ascent(), g.descent()),
 			None	=> (0.0, 0.0),
 		};

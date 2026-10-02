@@ -62,11 +62,11 @@ pub struct GlyphFrag {
 
 impl GlyphFrag {
 	/// A glyph for one character in the maths font chain the styles name.
-	pub fn synthetic(styles: &StyleChain, c: char, span: Span) -> Outcome<Option<Self>> {
+	pub fn synthetic(engine: &mut Engine, styles: &StyleChain, c: char, span: Span) -> Outcome<Option<Self>> {
 		let class = default_math_class(c).unwrap_or(MathClass::Normal);
 		let mut s = String::new();
 		s.push(c);
-		let g = res!(Self::base(styles, &res!(props::features(styles)), &s, class, props::size(styles)));
+		let g = res!(Self::base(engine, styles, &res!(props::features(styles)), &s, class, props::size(styles)));
 		Ok(g.map(|mut g| { g.span = span; g }))
 	}
 
@@ -82,7 +82,7 @@ impl GlyphFrag {
 	)
 		-> Outcome<Option<Self>>
 	{
-		let mut glyph = match res!(Self::base(styles, &features, text, class, props.size)) {
+		let mut glyph = match res!(Self::base(engine, styles, &features, text, class, props.size)) {
 			Some(g)	=> g,
 			None	=> return Ok(None),
 		};
@@ -105,7 +105,7 @@ impl GlyphFrag {
 				if ssty > 0 {
 					f.push(Feature { tag: *b"ssty", value: ssty });
 				}
-				if let Some(mut g) = res!(Self::base(styles, &f, text, class, props.size)) {
+				if let Some(mut g) = res!(Self::base(engine, styles, &f, text, class, props.size)) {
 					g.span = props.span;
 					let a = res!(decide(&g, stretch));
 					if !matches!(a, Action::Fallback) {
@@ -133,8 +133,9 @@ impl GlyphFrag {
 		Ok(Some(glyph))
 	}
 
-	fn base(styles: &StyleChain, features: &[Feature], text: &str, class: MathClass, math_size: MathSize) -> Outcome<Option<Self>> {
-		let fonts = res!(chain(&res!(props::families(styles)), res!(props::fallback(styles)), res!(props::weight(styles))));
+	fn base(engine: &mut Engine, styles: &StyleChain, features: &[Feature], text: &str, class: MathClass, math_size: MathSize) -> Outcome<Option<Self>> {
+		let book = res!(engine.fonts.book());
+		let fonts = res!(chain(&book, &res!(props::families(styles)), res!(props::fallback(styles)), res!(props::face_variant(styles))));
 		let mut chosen: Option<(Arc<MathFont>, Vec<ShapedGlyph>)> = None;
 		for f in &fonts {
 			let glyphs = res!(f.shape(text, features));
