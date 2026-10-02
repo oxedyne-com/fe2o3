@@ -377,6 +377,10 @@ pub struct Evaluated {
 /// each pass's pages to `sink`. `root` is what a leading `/` resolves against, and `fonts` the host's
 /// font store. Only a main file that cannot be read is an `Err`; a failure after that is in
 /// [`Evaluated::laid`] beside the diagnostics it recorded.
+///
+/// Both paths are made canonical first, as `typst compile` does, so that a source named relative to the
+/// working directory and a root named absolutely (or the reverse) agree on whether the source lies within
+/// the root. Left as given, every file the source reached for would be refused as outside the root.
 pub fn assemble_eval<S: PageSink>(
 	main_path:	&Path,
 	root:		&Path,
@@ -385,8 +389,10 @@ pub fn assemble_eval<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
-	let mut world = World::new(root.to_path_buf());
-	let id = res!(world.load(main_path));
+	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+	let main_path	= canon(main_path);
+	let mut world = World::new(canon(root));
+	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
 	let laid = match eval::eval_source(&mut engine, id) {
