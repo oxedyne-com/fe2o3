@@ -106,7 +106,7 @@ pub enum Type {
 }
 
 impl Type {
-	/// Every type, Typst's registry of them, in the order they are declared.
+	// Every type, Typst's registry of them, in the order they are declared.
 	pub const ALL: [Type; 37] = [
 		Type::None, Type::Auto, Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Length, Type::Angle,
 		Type::Ratio, Type::Relative, Type::Fraction, Type::Color, Type::Gradient, Type::Tiling, Type::Stroke,
