@@ -2405,6 +2405,25 @@ impl<'a> Vm<'a> {
 	}
 }
 
+/// Is every segment of a dotted path a name the standard library binds: the first in its global scope, each
+/// later one in the scope of what the one before names (`calc.pow`, `table.cell`, `str.len`)? The names
+/// asked of it are a document's own, so it answers and never says more.
+pub fn std_path_bound(path: &[&str]) -> bool {
+	let lib = library();
+	let mut it = path.iter();
+	let mut v = match it.next().and_then(|n| lib.get(n)) {
+		Some(v)	=> v.clone(),
+		None	=> return false,
+	};
+	for name in it {
+		v = match scope_member(&v, name) {
+			Some(next)	=> next,
+			None		=> return false,
+		};
+	}
+	true
+}
+
 // A name `import`ed from a module, function or type.
 fn scope_member(v: &Value, name: &str) -> Option<Value> {
 	match v {

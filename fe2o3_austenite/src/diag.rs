@@ -2,9 +2,13 @@
 //! failure is recorded here with its span *and* returned as an `Err`, so an `Outcome` carries control flow
 //! while the diagnostic list carries the position; `Engine::error` does both in one call.
 
+use crate::eval::eval::std_path_bound;
+use crate::eval::value::Type;
 use crate::syntax::{
 	Source,
 	Span,
+	SyntaxKind,
+	SyntaxNode,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -184,6 +188,109 @@ pub fn summary_lines(diags: &[Diagnostic]) -> Vec<String> {
 	counts.into_iter()
 		.map(|((sev, kind, construct), n)| fmt!("diag-summary {} {} {} {}", sev.name(), kind, construct, n))
 		.collect()
+}
+
+/// The lines of the `--diag-summary` report that name each error, one per error diagnostic, as
+/// `diag-error <kind> callee:<name> expected:<type> found:<type> file:<class>`. Every token is drawn from a
+/// closed vocabulary, so the line says what failed in Typst's own terms and nothing of the document:
+///
+/// * `callee` is the call the error's span lies in, or failing that the name at the span, written as a
+///   dotted path (`calc.pow`), when every segment is a name the standard library binds and the path is
+///   lower-case letters, digits, `-` and `.`; otherwise `-`. A document's own function or variable is `-`.
+/// * `expected` and `found` are the two types of a message that reads `expected <type>, found <type>` with
+///   each a type in the registry ([`Type`]); otherwise both are `-`. A message that offers several types
+///   is `-`.
+/// * `file` is `main` for the compiled source (the first loaded), `sibling` for another file in its
+///   directory, and `other` for anything else, a detached span included.
+///
+/// No message, name, path, position, field or source text of the document is carried.
+pub fn error_lines(diags: &[Diagnostic], sources: &[Source]) -> Vec<String> {
+	diags.iter()
+		.filter(|d| d.is_error())
+		.map(|d| {
+			let (expected, found) = type_pair(&d.message).unwrap_or(("-", "-"));
+			fmt!("diag-error {} callee:{} expected:{} found:{} file:{}",
+				d.kind.as_str(), callee_of(d.span, sources), expected, found, file_class(d.span, sources))
+		})
+		.collect()
+}
+
+// The two registry types of `expected <type>, found <type>`, as their names, or `None` when the message is any
+// other shape or either side is not exactly one registry type.
+fn type_pair(message: &str) -> Option<(&'static str, &'static str)> {
+	message.strip_prefix("expected ")
+		.and_then(|m| m.split_once(", found "))
+		.and_then(|(e, f)| Type::from_name(e).zip(Type::from_name(f)))
+		.map(|(e, f)| (e.name(), f.name()))
+}
+
+// Where an error lies relative to the compiled source, which is the first one loaded.
+fn file_class(span: Span, sources: &[Source]) -> &'static str {
+	let at = match sources.iter().find(|s| s.id == span.file && !span.is_detached()) {
+		Some(s)	=> s,
+		None	=> return "other",
+	};
+	let main = match sources.first() {
+		Some(m)	=> m,
+		None	=> return "other",
+	};
+	if at.id == main.id {
+		"main"
+	} else if at.path.parent() == main.path.parent() {
+		"sibling"
+	} else {
+		"other"
+	}
+}
+
+// The standard-library name of the call an error's span lies in, else of the name at the span, else `-`.
+fn callee_of(span: Span, sources: &[Source]) -> String {
+	let src = match sources.iter().find(|s| s.id == span.file && !span.is_detached()) {
+		Some(s)	=> s,
+		None	=> return "-".to_string(),
+	};
+	// The nodes from the root down to the smallest one holding the span.
+	let mut node = &src.root;
+	let mut chain: Vec<&SyntaxNode> = vec![node];
+	while let Some(c) = node.children().iter().find(|c| {
+		let at = c.span();
+		!at.is_detached() && at.start <= span.start && span.end <= at.end
+	}) {
+		chain.push(c);
+		node = c;
+	}
+	let name = match chain.iter().rev().find(|n| matches!(n.kind(), SyntaxKind::FuncCall | SyntaxKind::MathCall)) {
+		Some(call)	=> call.significant().next().and_then(path_of),
+		None		=> chain.last().copied().and_then(path_of),
+	};
+	let name = match name {
+		Some(n)	=> n,
+		None	=> return "-".to_string(),
+	};
+	let segs: Vec<&str> = name.iter().map(|s| s.as_str()).collect();
+	let word = segs.join(".");
+	let plain = word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.');
+	if plain && !word.is_empty() && std_path_bound(&segs) { word } else { "-".to_string() }
+}
+
+// A name written as an identifier or a chain of field accesses on one, as its segments.
+fn path_of(node: &SyntaxNode) -> Option<Vec<String>> {
+	match node.kind() {
+		SyntaxKind::Ident | SyntaxKind::MathIdent => Some(vec![node.text().to_string()]),
+		SyntaxKind::FieldAccess | SyntaxKind::MathFieldAccess => {
+			let target	= node.significant().next().and_then(path_of);
+			let field	= node.significant().last()
+				.filter(|f| matches!(f.kind(), SyntaxKind::Ident | SyntaxKind::MathIdent));
+			match (target, field) {
+				(Some(mut path), Some(f))	=> {
+					path.push(f.text().to_string());
+					Some(path)
+				},
+				_							=> None,
+			}
+		},
+		_ => None,
+	}
 }
 
 /// An error's own message, the last one pushed, without the chain of places it passed through: the

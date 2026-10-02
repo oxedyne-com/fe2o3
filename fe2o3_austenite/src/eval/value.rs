@@ -106,6 +106,21 @@ pub enum Type {
 }
 
 impl Type {
+	/// Every type, Typst's registry of them, in the order they are declared.
+	pub const ALL: [Type; 37] = [
+		Type::None, Type::Auto, Type::Bool, Type::Int, Type::Float, Type::Decimal, Type::Length, Type::Angle,
+		Type::Ratio, Type::Relative, Type::Fraction, Type::Color, Type::Gradient, Type::Tiling, Type::Stroke,
+		Type::Alignment, Type::Direction, Type::Symbol, Type::Str, Type::Bytes, Type::Label, Type::Datetime,
+		Type::Duration, Type::Version, Type::Regex, Type::Content, Type::Array, Type::Dict, Type::Func,
+		Type::Args, Type::Module, Type::Type, Type::Styles, Type::Selector, Type::Counter, Type::State,
+		Type::Location,
+	];
+
+	/// The type a name stands for, in either spelling: `int` or `integer`, `relative` or `relative length`.
+	pub fn from_name(name: &str) -> Option<Type> {
+		Self::ALL.iter().copied().find(|t| t.name() == name || t.long_name() == name)
+	}
+
 	/// The name `repr(type(x))` prints.
 	pub fn name(self) -> &'static str {
 		match self {
@@ -752,5 +767,37 @@ impl<T: IntoValue> IntoValue for Option<T> {
 			Some(v)	=> v.into_value(),
 			None	=> Value::None,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	// An exhaustive match, so a type added to the enum fails here until `Type::ALL` holds it.
+	fn slot(t: Type) -> usize {
+		match t {
+			Type::None => 0, Type::Auto => 1, Type::Bool => 2, Type::Int => 3, Type::Float => 4,
+			Type::Decimal => 5, Type::Length => 6, Type::Angle => 7, Type::Ratio => 8, Type::Relative => 9,
+			Type::Fraction => 10, Type::Color => 11, Type::Gradient => 12, Type::Tiling => 13, Type::Stroke => 14,
+			Type::Alignment => 15, Type::Direction => 16, Type::Symbol => 17, Type::Str => 18, Type::Bytes => 19,
+			Type::Label => 20, Type::Datetime => 21, Type::Duration => 22, Type::Version => 23, Type::Regex => 24,
+			Type::Content => 25, Type::Array => 26, Type::Dict => 27, Type::Func => 28, Type::Args => 29,
+			Type::Module => 30, Type::Type => 31, Type::Styles => 32, Type::Selector => 33, Type::Counter => 34,
+			Type::State => 35, Type::Location => 36,
+		}
+	}
+
+	#[test]
+	fn every_type_is_in_the_registry_once_and_found_by_either_name() {
+		for (i, t) in Type::ALL.iter().enumerate() {
+			assert_eq!(slot(*t), i, "{:?} sits at its declared place in Type::ALL", t);
+			assert_eq!(Type::from_name(t.name()), Some(*t), "{:?} by its repr name", t);
+			assert_eq!(Type::from_name(t.long_name()), Some(*t), "{:?} by its message name", t);
+		}
+		assert_eq!(Type::from_name("integer"), Some(Type::Int));
+		assert_eq!(Type::from_name("relative length"), Some(Type::Relative));
+		assert_eq!(Type::from_name("nonesuch"), None);
+		assert_eq!(Type::from_name(""), None);
 	}
 }

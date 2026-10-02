@@ -491,7 +491,8 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 /// `typst compile` takes them. The terse `skipped:` line is built from the diagnostics of kind
 /// `unsupported`; under `--strict` a refusal of the strict rule fails the compile as Daimond's does.
 /// `--diag-summary` adds one stderr line for each severity, kind and construct, counts only
-/// ([`diag::summary_lines`]), on a compile that succeeds and on one that fails.
+/// ([`diag::summary_lines`]), and one for each error that names its call and types in Typst's own terms
+/// ([`diag::error_lines`]), on a compile that succeeds and on one that fails.
 fn compile_eval(
 	source:		&str,
 	out_dir:	&str,
@@ -525,6 +526,9 @@ fn compile_eval(
 	// Before the error a failed compile returns, so a run that stops still names what it passed over.
 	if diag_summary {
 		for line in diag::summary_lines(&done.engine.diags) {
+			eprintln!("{}", line);
+		}
+		for line in diag::error_lines(&done.engine.diags, &done.engine.world.sources) {
 			eprintln!("{}", line);
 		}
 	}
