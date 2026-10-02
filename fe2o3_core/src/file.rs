@@ -92,40 +92,145 @@ pub fn touch(path: &Path) -> Outcome<File> {
     ))
 }
 
-// Secret temporary files
-pub const SECRET_TMP_SWEEP_AGE: Duration    = Duration::from_secs(10 * 60); // a live writer's tmp is far younger
-const SECRET_TMP_TRIES:         u64         = 16;                           // fresh names tried before giving up
-static SECRET_TMP_SEQ:          AtomicU64   = AtomicU64::new(0);            // per process, so per thread too
+// Atomic replacement
+pub const TMP_SWEEP_AGE:    Duration    = Duration::from_secs(10 * 60); // a live writer's tmp is far younger
+const TMP_TRIES:            u64         = 16;                           // fresh names tried before giving up
+static TMP_SEQ:             AtomicU64   = AtomicU64::new(0);            // per process, so per thread too
 
-/// Writes `data` to `path` as key material: atomically, and on unix at mode
-/// 0600 whatever the caller's umask, so the bytes are never briefly readable by
-/// anyone else and a crash never leaves a loose or partial file where the
-/// secret should be.
+/// The permission bits a file saved by [`save_atomic`] ends with.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SaveMode {
+    Owner,  // 0600 from creation, whatever the umask and whatever the replaced file held
+    Keep,   // the replaced file's bits, else those `fs::write` would have made, umask and all
+}
+
+/// Replaces `path` with `data` whole, where `fs::write` truncates the file and
+/// then writes it. A reader, or a crash, finds the old bytes or the new ones and
+/// never an empty or partial file: between `fs::write`'s truncate and its last
+/// byte a SIGKILL leaves the file empty for good, and a small state file that
+/// every later command parses is then refused for ever.
 ///
 /// The write lands on a sibling `<name>.<pid>.<n>.tmp`, where `n` counts saves
 /// across the whole process, so no other writer -- another process, or another
-/// thread of this one -- ever uses the same name. It is made with `create_new`,
-/// at mode 0600 on unix (never `create` then `chmod`, which leaves a window at
-/// the process's default mode), fsynced, then renamed over `path`. The rename
-/// replaces whatever `path` held -- including its mode -- so a pre-existing,
-/// more permissive file also ends at 0600. On unix the directory is fsynced
+/// thread of this one -- ever uses the same name. It is made with `create_new`
+/// (never `create` then `chmod`, which leaves a window at the process's default
+/// mode), fsynced, then renamed over `path`; on unix the directory is fsynced
 /// too, so the rename cannot survive a crash while the directory entry pointing
-/// at it does not. The tmp is removed on every error path, so a failed save
-/// never leaves the whole secret under a name nothing else will read.
+/// at it does not. The tmp is removed on every error path. Two writers of one
+/// `path` each rename a whole file of their own, so the last rename wins whole.
 ///
-/// Two writers of one `path` each rename a whole file of their own, so the last
-/// rename wins whole, and no reader ever finds a torn key there.
+/// `mode` says which permission bits the new file has: see [`SaveMode`]. What
+/// the rename replaces is the name and not the inode, so a symlink at `path` is
+/// replaced rather than followed, a hard link to the old file is left holding
+/// the old bytes, and ownership is the caller's. The caller needs write access to
+/// the directory and not to the file, so a read-only file is replaced too.
 ///
-/// Once its own rename has landed, a save sweeps, best-effort, what crashed
-/// writers left beside `path`: the legacy `<name>.tmp`, which no writer uses any
-/// more, and any `<name>.<digits>.<digits>.tmp` older than
-/// [`SECRET_TMP_SWEEP_AGE`]. A failed sweep never fails the save. A writer that
+/// Once its own rename has landed, a save sweeps, best-effort, any
+/// `<name>.<digits>.<digits>.tmp` older than [`TMP_SWEEP_AGE`] that crashed
+/// writers left beside `path`. A failed sweep never fails the save. A writer that
 /// stalls past that age between create and rename, or whose tmp a writer on
 /// older code removes, finds its tmp gone at the rename: it returns an error
 /// tagged `Missing` and leaves `path` as this call found it. `Ok` means this
 /// call renamed over `path` a file it created and wrote itself.
+pub fn save_atomic(
+    path:   &Path,
+    data:   &[u8],
+    mode:   SaveMode,
+)
+    -> Outcome<()>
+{
+    replace_file(path, data, mode, TMP_SWEEP_AGE, false)
+}
+
+/// The one body of [`save_atomic`] and [`save_secret`]. `sweep_legacy` also
+/// removes `<name>.tmp`, a name only the secret saves ever wrote and which an
+/// ordinary neighbour could be using, and `sweep_age` lets a test put the sweep
+/// onto a live writer's file.
+fn replace_file(
+    path:           &Path,
+    data:           &[u8],
+    mode:           SaveMode,
+    sweep_age:      Duration,
+    sweep_legacy:   bool,
+)
+    -> Outcome<()>
+{
+    let name = res!(file_name_of(path));
+    #[cfg(unix)]
+    let old = match mode {
+        SaveMode::Keep  => mode_bits_of(path),
+        SaveMode::Owner => None,
+    };
+    let (tmp, mut f) = res!(create_tmp(path, &name, mode));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        // Before a byte is written, so nothing is ever there at a wider mode
+        // than the file it replaces.
+        if let Some(bits) = old {
+            if let Err(e) = f.set_permissions(fs::Permissions::from_mode(bits)) {
+                let _ = fs::remove_file(&tmp);
+                return Err(err!(e,
+                    "Could not give the temporary file {:?} the mode {:04o} of {:?}.",
+                    tmp, bits, path;
+                    File, IO, Write));
+            }
+        }
+    }
+    if let Err(e) = f.write_all(data) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not write the temporary file {:?}.", tmp;
+            File, IO, Write));
+    }
+    if let Err(e) = f.sync_all() {
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not fsync the temporary file {:?}.", tmp;
+            File, IO, Write));
+    }
+    // Closed before the rename, which off unix cannot move a file still open.
+    drop(f);
+    if let Err(e) = fs::rename(&tmp, path) {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            // No other writer makes this name, so it is gone because another
+            // writer's sweep took it, and the rename moved nothing.
+            return Err(err!(e,
+                "The temporary file {:?} is gone, most likely removed by another \
+                writer's cleanup, so {:?} was not changed by this call.", tmp, path;
+                File, IO, Missing));
+        }
+        let _ = fs::remove_file(&tmp);
+        return Err(err!(e,
+            "Could not rename {:?} over {:?}.", tmp, path;
+            File, IO, Write));
+    }
+    #[cfg(unix)]
+    res!(sync_parent_dir(path));
+    sweep_tmps(path, &name, sweep_age, sweep_legacy);
+    Ok(())
+}
+
+/// The permission bits `path` holds now, if it is there to be asked.
+#[cfg(unix)]
+fn mode_bits_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o777)
+}
+
+// Secrets
+
+/// Writes `data` to `path` as key material: atomically, as [`save_atomic`] does,
+/// and on unix at mode 0600 whatever the caller's umask, so the bytes are never
+/// briefly readable by anyone else and a crash never leaves a loose or partial
+/// file where the secret should be. A pre-existing, more permissive file also
+/// ends at 0600, since the rename replaces its mode along with its contents.
+///
+/// Once its own rename has landed, a save also sweeps the legacy `<name>.tmp`,
+/// which no writer uses any more.
 pub fn save_secret(path: &Path, data: &[u8]) -> Outcome<()> {
-    save_secret_aged(path, data, SECRET_TMP_SWEEP_AGE)
+    save_secret_aged(path, data, TMP_SWEEP_AGE)
 }
 
 /// [`save_secret`], sweeping temporary files at least `sweep_age` old, so a
@@ -137,40 +242,7 @@ pub(crate) fn save_secret_aged(
 )
     -> Outcome<()>
 {
-    let name = res!(secret_file_name(path));
-    let (tmp, mut f) = res!(create_secret_tmp(path, &name));
-    if let Err(e) = f.write_all(data) {
-        let _ = fs::remove_file(&tmp);
-        return Err(err!(e,
-            "Could not write the temporary secret file {:?}.", tmp;
-            File, IO, Write));
-    }
-    if let Err(e) = f.sync_all() {
-        let _ = fs::remove_file(&tmp);
-        return Err(err!(e,
-            "Could not fsync the temporary secret file {:?}.", tmp;
-            File, IO, Write));
-    }
-    // Closed before the rename, which off unix cannot move a file still open.
-    drop(f);
-    if let Err(e) = fs::rename(&tmp, path) {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            // No other writer makes this name, so it is gone because another
-            // writer's sweep took it, and the rename moved nothing.
-            return Err(err!(e,
-                "The temporary secret file {:?} is gone, most likely removed by another \
-                writer's cleanup, so {:?} was not changed by this call.", tmp, path;
-                File, IO, Missing));
-        }
-        let _ = fs::remove_file(&tmp);
-        return Err(err!(e,
-            "Could not rename {:?} to secret file {:?}.", tmp, path;
-            File, IO, Write));
-    }
-    #[cfg(unix)]
-    res!(sync_secret_parent_dir(path));
-    sweep_secret_tmps(path, &name, sweep_age);
-    Ok(())
+    replace_file(path, data, SaveMode::Owner, sweep_age, true)
 }
 
 /// Creates `path` and any missing parents, as `create_dir_all` does, but at
@@ -308,13 +380,13 @@ pub fn restrict_secret_dir(_path: &Path) -> Outcome<Option<u32>> {
     Ok(None)
 }
 
-/// Fsyncs the directory holding `path`, after the rename that lands a secret
+/// Fsyncs the directory holding `path`, after the rename that lands a file
 /// there. Without this, the rename itself can survive a crash while the
 /// directory entry pointing at it does not, which can bring back a file --
 /// or the previous contents of one -- that was already reported saved.
 #[cfg(unix)]
-fn sync_secret_parent_dir(path: &Path) -> Outcome<()> {
-    let dir = secret_parent_dir(path);
+fn sync_parent_dir(path: &Path) -> Outcome<()> {
+    let dir = parent_dir(path);
     let d = match File::open(dir) {
         Ok(d) => d,
         Err(e) => return Err(err!(e,
@@ -329,34 +401,40 @@ fn sync_secret_parent_dir(path: &Path) -> Outcome<()> {
     Ok(())
 }
 
-fn secret_parent_dir(path: &Path) -> &Path {
+fn parent_dir(path: &Path) -> &Path {
     match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d,
         _ => Path::new("."),
     }
 }
 
-fn secret_file_name(path: &Path) -> Outcome<OsString> {
+fn file_name_of(path: &Path) -> Outcome<OsString> {
     match path.file_name() {
         Some(n) => Ok(n.to_os_string()),
         None => Err(err!(
-            "Path {:?} has no file-name component; cannot save secret material.", path;
+            "Path {:?} has no file-name component; cannot save a file there.", path;
             Invalid, Input, Path)),
     }
 }
 
 /// Creates this writer's own temporary sibling of `path`. It is always a new
-/// file, never an existing one, so on unix the 0600 asked for is the mode it
-/// gets.
-fn create_secret_tmp(path: &Path, name: &OsStr) -> Outcome<(PathBuf, File)> {
+/// file, never an existing one, so on unix the 0600 asked for by
+/// [`SaveMode::Owner`] is the mode it gets.
+fn create_tmp(
+    path:   &Path,
+    name:   &OsStr,
+    mode:   SaveMode,
+)
+    -> Outcome<(PathBuf, File)>
+{
     let pid = std::process::id();
-    for _ in 0..SECRET_TMP_TRIES {
-        let n = SECRET_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let tmp = path.with_file_name(secret_tmp_name(name, pid, n));
+    for _ in 0..TMP_TRIES {
+        let n = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let tmp = path.with_file_name(tmp_name(name, pid, n));
         let mut opts = OpenOptions::new();
         opts.write(true).create_new(true);
         #[cfg(unix)]
-        {
+        if mode == SaveMode::Owner {
             use std::os::unix::fs::OpenOptionsExt;
             opts.mode(0o600);
         }
@@ -366,19 +444,19 @@ fn create_secret_tmp(path: &Path, name: &OsStr) -> Outcome<(PathBuf, File)> {
             // namesake on another host sharing this directory, holds the name.
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(err!(e,
-                "Could not create the temporary secret file {:?}.", tmp;
+                "Could not create the temporary file {:?}.", tmp;
                 File, IO, Create)),
         }
     }
     Err(err!(
-        "All {} fresh temporary names tried for the secret file {:?} were already taken.",
-        SECRET_TMP_TRIES, path;
+        "All {} fresh temporary names tried for the file {:?} were already taken.",
+        TMP_TRIES, path;
         File, IO, Create, Exists))
 }
 
-/// The temporary name writer `n` of process `pid` gives secret file `name`:
+/// The temporary name writer `n` of process `pid` gives file `name`:
 /// `<name>.<pid>.<n>.tmp`.
-fn secret_tmp_name(name: &OsStr, pid: u32, n: u64) -> OsString {
+fn tmp_name(name: &OsStr, pid: u32, n: u64) -> OsString {
     // Built as an `OsString`, not via `to_string_lossy`, so a non-UTF-8 file
     // name is not mangled into one that could collide with another file's.
     let mut tmp = name.to_os_string();
@@ -386,16 +464,16 @@ fn secret_tmp_name(name: &OsStr, pid: u32, n: u64) -> OsString {
     tmp
 }
 
-/// The one temporary name every writer used before names were made unique.
-fn legacy_secret_tmp_name(name: &OsStr) -> OsString {
+/// The one temporary name every secret writer used before names were made unique.
+fn legacy_tmp_name(name: &OsStr) -> OsString {
     let mut tmp = name.to_os_string();
     tmp.push(".tmp");
     tmp
 }
 
 /// Is `entry` strictly `<name>.<digits>.<digits>.tmp`, a writer's temporary
-/// file for secret file `name`?
-fn is_secret_tmp_of(entry: &OsStr, name: &OsStr) -> bool {
+/// file for file `name`?
+fn is_tmp_of(entry: &OsStr, name: &OsStr) -> bool {
     let digits = |p: &[u8]| !p.is_empty() && p.iter().all(u8::is_ascii_digit);
     let mid = entry.as_encoded_bytes()
         .strip_prefix(name.as_encoded_bytes())
@@ -413,12 +491,13 @@ fn is_secret_tmp_of(entry: &OsStr, name: &OsStr) -> bool {
     }
 }
 
-/// Removes, best-effort, what crashed writers of secret file `name` left beside
-/// `path`: the legacy `<name>.tmp`, and each `<name>.<pid>.<n>.tmp` at least
-/// `sweep_age` old. A live writer's file is younger than any sensible bound,
-/// so it is left alone. Nothing here can fail a save that has already landed.
-fn sweep_secret_tmps(path: &Path, name: &OsStr, sweep_age: Duration) {
-    let dir = secret_parent_dir(path);
+/// Removes, best-effort, what crashed writers of file `name` left beside `path`:
+/// each `<name>.<pid>.<n>.tmp` at least `sweep_age` old, and when `legacy` the
+/// `<name>.tmp` of the old secret saves. A live writer's file is younger than
+/// any sensible bound, so it is left alone. Nothing here can fail a save that has
+/// already landed.
+fn sweep_tmps(path: &Path, name: &OsStr, sweep_age: Duration, legacy: bool) {
+    let dir = parent_dir(path);
     let entries = match fs::read_dir(dir) {
         Ok(it) => it,
         Err(e) => {
@@ -427,12 +506,12 @@ fn sweep_secret_tmps(path: &Path, name: &OsStr, sweep_age: Duration) {
             return;
         },
     };
-    let legacy = legacy_secret_tmp_name(name);
+    let legacy_name = legacy_tmp_name(name);
     for entry in entries.flatten() {
         let entry_name = entry.file_name();
-        let stale = if entry_name == legacy {
+        let stale = if legacy && entry_name == legacy_name {
             true
-        } else if is_secret_tmp_of(&entry_name, name) {
+        } else if is_tmp_of(&entry_name, name) {
             match entry.metadata().and_then(|m| m.modified()) {
                 // An mtime ahead of the clock reads as fresh, never as stale.
                 Ok(t) => match SystemTime::now().duration_since(t) {
@@ -450,7 +529,7 @@ fn sweep_secret_tmps(path: &Path, name: &OsStr, sweep_age: Duration) {
                 // Another writer's sweep got there first.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                 Err(e) => {
-                    warn!("Could not remove the leftover temporary secret file {:?}: {}.",
+                    warn!("Could not remove the leftover temporary file {:?}: {}.",
                         entry.path(), e);
                 },
             }
@@ -631,7 +710,7 @@ mod tests {
     #[test]
     fn test_save_secret_ignores_a_stale_permissive_tmp_file() -> Outcome<()> {
         let path = scratch_path("stale_tmp");
-        let tmp = path.with_file_name(legacy_secret_tmp_name(&res!(secret_file_name(&path))));
+        let tmp = path.with_file_name(legacy_tmp_name(&res!(file_name_of(&path))));
         if let Err(e) = fs::write(&tmp, b"leftover from a killed run") {
             return Err(err!(e, "Could not pre-seed {:?}.", tmp; Test, File, IO, Write));
         }
@@ -681,7 +760,7 @@ mod tests {
     fn sweeps_only_stale_leftovers(dir: &Path) -> Outcome<()> {
         let key = dir.join("key");
         let old = res!(SystemTime::now()
-            .checked_sub(SECRET_TMP_SWEEP_AGE + Duration::from_secs(60))
+            .checked_sub(TMP_SWEEP_AGE + Duration::from_secs(60))
             .ok_or_else(|| err!("The clock is too early to backdate a file."; Test, Invalid)));
         // Name, backdated past the bound, swept.
         let cases = [
@@ -988,15 +1067,20 @@ mod tests {
     /// Saves one payload of `byte` to `key`, `RACE_SAVES` times or until
     /// `RACE_CAP` has passed, sweeping every tmp it finds when `aged`.
     fn race_writer(key: &Path, byte: u8, aged: bool) -> Tally {
+        match aged {
+            true    => race_writer_by(key, byte, |k, d| save_secret_aged(k, d, Duration::ZERO)),
+            false   => race_writer_by(key, byte, save_secret),
+        }
+    }
+
+    /// [`race_writer`] saving by `save`.
+    fn race_writer_by(key: &Path, byte: u8, save: fn(&Path, &[u8]) -> Outcome<()>) -> Tally {
         let payload = vec![byte; RACE_LEN];
         let mut tally = Tally::default();
         let start = Instant::now();
         let mut n = 0;
         while n < RACE_SAVES && start.elapsed() < RACE_CAP {
-            tally.count(match aged {
-                true    => save_secret_aged(key, &payload, Duration::ZERO),
-                false   => save_secret(key, &payload),
-            });
+            tally.count(save(key, &payload));
             n += 1;
         }
         tally
@@ -1207,12 +1291,12 @@ mod tests {
     fn test_save_secret_two_threads_never_tear_the_key() -> Outcome<()> {
         let dir = scratch_path("race_threads");
         res!(fs::create_dir(&dir));
-        let outcome = race_threads(&dir);
+        let outcome = race_threads(&dir, save_secret);
         let _ = fs::remove_dir_all(&dir);
         outcome
     }
 
-    fn race_threads(dir: &Path) -> Outcome<()> {
+    fn race_threads(dir: &Path, save: fn(&Path, &[u8]) -> Outcome<()>) -> Outcome<()> {
         let key = dir.join("key");
         let go = Arc::new(Barrier::new(3));
         let mut writers = Vec::new();
@@ -1220,7 +1304,7 @@ mod tests {
             let (key, go) = (key.clone(), go.clone());
             writers.push(thread::spawn(move || {
                 go.wait();
-                race_writer(&key, byte, false)
+                race_writer_by(&key, byte, save)
             }));
         }
         go.wait();
@@ -1276,5 +1360,307 @@ mod tests {
                 Test, Missing));
         }
         Ok(())
+    }
+
+    // The atomic replacement of ordinary files, with a real kill as the oracle.
+
+    /// `Keep` leaves a replaced file at the permission bits it held, which
+    /// `fs::write` also does and a rename over it would otherwise not.
+    #[test]
+    fn test_save_atomic_keep_holds_the_mode_of_the_file_it_replaces() -> Outcome<()> {
+        for bits in [0o600u32, 0o640, 0o664, 0o444, 0o755] {
+            let path = scratch_path("keep_mode");
+            res!(fs::write(&path, b"old"));
+            res!(fs::set_permissions(&path, fs::Permissions::from_mode(bits)));
+            let saved = save_atomic(&path, b"new bytes", SaveMode::Keep);
+            let mode = mode_of(&path);
+            let contents = fs::read(&path);
+            let _ = fs::remove_file(&path);
+            res!(saved);
+            let mode = res!(mode);
+            let contents = res!(contents);
+            if mode != bits || contents != b"new bytes" {
+                return Err(err!(
+                    "A file at {:04o} held {:?} at {:04o} after a Keep save, not the new \
+                    bytes at the same mode.", bits, contents, mode;
+                    Test, Mismatch));
+            }
+        }
+        Ok(())
+    }
+
+    /// A first save by `Keep` makes the file `fs::write` would have made, so
+    /// the bits are whatever the process's umask leaves, and the oracle is
+    /// `fs::write` itself.
+    #[test]
+    fn test_save_atomic_keep_makes_a_new_file_as_fs_write_does() -> Outcome<()> {
+        let theirs = scratch_path("keep_new_theirs");
+        let ours = scratch_path("keep_new_ours");
+        res!(fs::write(&theirs, b"x"));
+        let saved = save_atomic(&ours, b"x", SaveMode::Keep);
+        let (want, got) = (mode_of(&theirs), mode_of(&ours));
+        let _ = fs::remove_file(&theirs);
+        let _ = fs::remove_file(&ours);
+        res!(saved);
+        let (want, got) = (res!(want), res!(got));
+        if want != got {
+            return Err(err!(
+                "fs::write made a file at {:04o} and a Keep save made one at {:04o}.", want, got;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// `Owner` ends at 0600 whatever it replaces, the way `save_secret` does.
+    #[test]
+    fn test_save_atomic_owner_ends_at_0600_over_a_wider_file() -> Outcome<()> {
+        let path = scratch_path("owner_mode");
+        res!(fs::write(&path, b"old"));
+        res!(fs::set_permissions(&path, fs::Permissions::from_mode(0o664)));
+        let saved = save_atomic(&path, b"new bytes", SaveMode::Owner);
+        let mode = mode_of(&path);
+        let _ = fs::remove_file(&path);
+        res!(saved);
+        let mode = res!(mode);
+        if mode != 0o600 {
+            return Err(err!("An Owner save left {:04o}, not 0600.", mode; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// The sweep after a save takes this file's stale temporaries and nothing
+    /// else, and in particular not `<name>.tmp`, which an ordinary neighbour may
+    /// be using and only the old secret saves ever wrote.
+    #[test]
+    fn test_save_atomic_sweeps_only_its_own_stale_tmps() -> Outcome<()> {
+        let dir = scratch_path("atomic_sweep");
+        res!(fs::create_dir(&dir));
+        let outcome = sweeps_its_own(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn sweeps_its_own(dir: &Path) -> Outcome<()> {
+        let file = dir.join("data");
+        let old = res!(SystemTime::now()
+            .checked_sub(TMP_SWEEP_AGE + Duration::from_secs(60))
+            .ok_or_else(|| err!("The clock is too early to backdate a file."; Test, Invalid)));
+        // Name, backdated past the bound, swept.
+        let cases = [
+            ("data.tmp",        true,   false),
+            ("data.1.2.tmp",    true,   true),
+            ("data.3.4.tmp",    false,  false),
+            ("other.1.2.tmp",   true,   false),
+        ];
+        for (name, aged, _) in cases {
+            let p = dir.join(name);
+            res!(fs::write(&p, b"leftover"));
+            if aged {
+                let f = res!(OpenOptions::new().write(true).open(&p));
+                res!(f.set_modified(old));
+            }
+        }
+        res!(save_atomic(&file, b"new bytes", SaveMode::Keep));
+        for (name, aged, swept) in cases {
+            if dir.join(name).exists() == swept {
+                return Err(err!(
+                    "After a save, {:?} (backdated past the bound: {}) was {}.",
+                    name, aged, if swept { "left, but should have been swept" }
+                        else { "swept, but should have been left" };
+                    Test, Mismatch));
+            }
+        }
+        if res!(fs::read(&file)) != b"new bytes" {
+            return Err(err!("{:?} did not hold the new bytes after the save.", file; Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// A save leaves no temporary behind, and a symlink at the path is replaced
+    /// by a file and not written through, so what it pointed at is untouched.
+    #[test]
+    fn test_save_atomic_replaces_a_symlink_and_leaves_its_target_alone() -> Outcome<()> {
+        let dir = scratch_path("atomic_link");
+        res!(fs::create_dir(&dir));
+        let outcome = replaces_a_link(&dir);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn replaces_a_link(dir: &Path) -> Outcome<()> {
+        let target = dir.join("target");
+        let link = dir.join("link");
+        res!(fs::write(&target, b"the target"));
+        res!(std::os::unix::fs::symlink(&target, &link));
+        res!(save_atomic(&link, b"new bytes", SaveMode::Keep));
+        let is_link = res!(fs::symlink_metadata(&link)).file_type().is_symlink();
+        if is_link || res!(fs::read(&link)) != b"new bytes" || res!(fs::read(&target)) != b"the target" {
+            return Err(err!(
+                "After a save over a symlink, the path was still a link ({}) or held the wrong \
+                bytes, or its target was written through.", is_link; Test, Mismatch));
+        }
+        let mut names: Vec<String> = Vec::new();
+        for entry in res!(fs::read_dir(dir)) {
+            names.push(res!(entry).file_name().to_string_lossy().into_owned());
+        }
+        names.sort();
+        if names != ["link", "target"] {
+            return Err(err!("A save left {:?} in the directory, not just the two files.", names;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
+
+    /// Two threads saving one path with `Keep` never leave it torn.
+    #[test]
+    fn test_save_atomic_two_threads_never_tear_the_file() -> Outcome<()> {
+        let dir = scratch_path("atomic_threads");
+        res!(fs::create_dir(&dir));
+        let outcome = race_threads(&dir, keep);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn keep(path: &Path, data: &[u8]) -> Outcome<()> {
+        save_atomic(path, data, SaveMode::Keep)
+    }
+
+    // The kill tests: a writer child saves a 1 MiB payload over and over and the
+    // parent SIGKILLs it at a random moment, which is what the kernel does to a
+    // command that is killed. The control is `fs::write`, which truncates and
+    // then writes.
+    const KILL_ROLE_ENV:    &str    = "FE2O3_CORE_TEST_KILL_ROLE";   // set only in a writer child
+    const KILLS:            u64     = 100;                           // kills of the atomic writer
+    const KILLS_CAP:        u64     = 400;                           // kills of the control before giving up
+
+    /// The body of a killed writer: save, announce the first save, and go on
+    /// saving, until it is killed or has waited for the kill too long.
+    fn kill_child(role: &str) -> Outcome<()> {
+        let dir = PathBuf::from(res!(std::env::var(RACE_DIR_ENV)));
+        let key = dir.join("key");
+        let begun = Instant::now();
+        let mut n = 0u64;
+        while begun.elapsed() < RACE_HUNG {
+            let payload = vec![if n % 2 == 0 { 0xA5u8 } else { 0x5A }; RACE_LEN];
+            match role {
+                "atomic"    => res!(keep(&key, &payload)),
+                "plain"     => res!(fs::write(&key, &payload)),
+                _           => return Err(err!("Unknown kill writer role {:?}.", role; Test, Invalid)),
+            }
+            if n == 0 {
+                res!(fs::write(dir.join("ready"), b""));
+            }
+            n += 1;
+        }
+        Err(err!("Writer {:?} was never killed.", role; Test, Timeout))
+    }
+
+    /// Spawns a writer child, kills it `after` into its saving and says what the
+    /// key held then: `None` for one payload, whole, else what it held.
+    fn kill_once(exe: &Path, test: &str, role: &str, after: Duration) -> Outcome<Option<String>> {
+        let dir = scratch_path("kill");
+        res!(fs::create_dir(&dir));
+        let outcome = kill_once_in(exe, &dir, test, role, after);
+        let _ = fs::remove_dir_all(&dir);
+        outcome
+    }
+
+    fn kill_once_in(
+        exe:    &Path,
+        dir:    &Path,
+        test:   &str,
+        role:   &str,
+        after:  Duration,
+    )
+        -> Outcome<Option<String>>
+    {
+        let kid = match Command::new(exe)
+            .arg("--exact")
+            .arg(test)
+            .env(KILL_ROLE_ENV, role)
+            .env(RACE_DIR_ENV, dir)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(k) => k,
+            Err(e) => return Err(err!(e,
+                "Could not spawn the writer child of {:?} --exact {}.", exe, test; Test, IO)),
+        };
+        let mut writers = Writers(vec![kid]);
+        let begun = Instant::now();
+        while !dir.join("ready").exists() {
+            if let Some(status) = res!(writers.0[0].try_wait()) {
+                return Err(err!("The writer child of {} exited {:?} before its first save.",
+                    test, status; Test, Mismatch));
+            }
+            if begun.elapsed() > RACE_HUNG {
+                return Err(err!("The writer child of {} never made its first save.", test;
+                    Test, Timeout));
+            }
+            thread::sleep(Duration::from_micros(200));
+        }
+        thread::sleep(after);
+        // SIGKILL on unix, so the child gets no chance to finish a thing.
+        res!(writers.0[0].kill());
+        res!(writers.0[0].wait());
+        let reads = Reads::new();
+        match fs::read(dir.join("key")) {
+            Ok(bytes) if bytes == reads.a || bytes == reads.b => Ok(None),
+            Ok(bytes)   => Ok(Some(torn(&bytes))),
+            Err(e)      => Ok(Some(fmt!("the key could not be read: {}", e))),
+        }
+    }
+
+    /// A random wait of up to 40 ms, from the clock and a counter, so the kills
+    /// fall all through the saves, several to a wait, and not at one moment of one.
+    fn kill_after(i: u64) -> Duration {
+        let t = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos() as u64);
+        let mut x = t ^ i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        x ^= x >> 33;
+        x = x.wrapping_mul(0xFF51_AFD7_ED558_CCD);
+        x ^= x >> 33;
+        Duration::from_micros(x % 40_000)
+    }
+
+    /// A SIGKILL at any moment of a `Keep` save leaves the file one whole
+    /// payload, never empty and never a prefix of one.
+    #[test]
+    fn test_save_atomic_a_killed_writer_never_leaves_the_file_empty_or_torn() -> Outcome<()> {
+        const TEST: &str =
+            "file::tests::test_save_atomic_a_killed_writer_never_leaves_the_file_empty_or_torn";
+        if let Ok(role) = std::env::var(KILL_ROLE_ENV) {
+            return kill_child(&role);
+        }
+        let exe = res!(std::env::current_exe());
+        for i in 0..KILLS {
+            if let Some(what) = res!(kill_once(&exe, TEST, "atomic", kill_after(i))) {
+                return Err(err!(
+                    "Kill {} of {}: a SIGKILL left the file as {}, not one payload, whole.",
+                    i + 1, KILLS, what; Test, Mismatch));
+            }
+        }
+        Ok(())
+    }
+
+    /// The same kill, on `fs::write`, does leave a file empty or short, so the
+    /// test above can see the fault it says is gone.
+    #[test]
+    fn test_a_plain_write_killed_the_same_way_leaves_the_file_torn() -> Outcome<()> {
+        const TEST: &str = "file::tests::test_a_plain_write_killed_the_same_way_leaves_the_file_torn";
+        if let Ok(role) = std::env::var(KILL_ROLE_ENV) {
+            return kill_child(&role);
+        }
+        let exe = res!(std::env::current_exe());
+        for i in 0..KILLS_CAP {
+            if res!(kill_once(&exe, TEST, "plain", kill_after(i))).is_some() {
+                return Ok(());
+            }
+        }
+        Err(err!(
+            "{} kills of a plain write left no torn file, so the kill tests cannot tell \
+            a torn file from a whole one.", KILLS_CAP; Test, Missing))
     }
 }
