@@ -540,7 +540,8 @@ impl Lexer {
 	}
 
 	/// The scopes still open where a line with no token stands, which ends none: those that held the last token
-	/// before it. A heading ended with its line, and strong or emphasis that closed is closed.
+	/// before it. A heading ended with its line, and strong or emphasis that closed before it is closed; one
+	/// that has not ended runs on through the trailing space the parser gives it.
 	fn open_chain(&self, p: usize) -> Vec<usize> {
 		let Some(mut li) = self.leaf_at(p) else { return Vec::new(); };
 		// The last token ending before the line.
@@ -562,7 +563,7 @@ impl Lexer {
 			let m = self.nodes[a];
 			let keep = match m.kind {
 				SyntaxKind::Heading		=> false,
-				SyntaxKind::Strong | SyntaxKind::Emph	=> m.end > p || self.unclosed(a),
+				SyntaxKind::Strong | SyntaxKind::Emph	=> m.end > p,
 				SyntaxKind::Markup | SyntaxKind::ListItem | SyntaxKind::EnumItem | SyntaxKind::TermItem	=> true,
 				_	=> m.end > p,
 			};
@@ -575,12 +576,6 @@ impl Lexer {
 			a = m.parent;
 		}
 		out
-	}
-
-	/// Did the delimiter that opens the node `a` find no closer?
-	fn unclosed(&self, a: usize) -> bool {
-		let c = self.nodes[a].child;
-		c != NONE && self.nodes[c].kind == SyntaxKind::Error
 	}
 
 	/// The chain a line at byte `p` is placed by, and whether it opens in markup at all: the strict ancestors of
@@ -607,16 +602,10 @@ impl Lexer {
 	/// list item, heading, strong or emphasis of that markup open around it?
 	pub(crate) fn bare_line_at(&self, p: usize) -> bool {
 		let Some(chain) = self.line_chain(p) else { return false; };
-		// A content block's own closer stands in its markup, which it ends.
-		if self.first_token(p).and_then(|t| self.leaf_at(t)).is_some_and(|li| {
-			let n = self.nodes[self.leaves[li].node];
-			n.kind == SyntaxKind::RightBracket && n.parent != NONE && self.nodes[n.parent].kind == SyntaxKind::ContentBlock
-		}) {
-			return true;
-		}
 		match chain.first() {
 			None		=> true,
-			// A line in a content block whose markup has not begun stands in it, bare.
+			// A line in a content block whose markup has not begun, or that opens with the block's own closer,
+			// stands in the block, bare.
 			Some(&a) if self.nodes[a].kind == SyntaxKind::ContentBlock	=> true,
 			Some(&a)	=> {
 				self.nodes[a].kind == SyntaxKind::Markup
@@ -1880,6 +1869,11 @@ mod tests {
 		assert_eq!(group_end(src, 1), Some(src.len() - 1));
 		assert_eq!(group_end(src, src.find('(').unwrap_or(0)), None);
 		assert_eq!(byte_toks(src)[src.len() - 1], Tok::Text);
+		// The block ended what was open inside it, so the line after it is not in a group.
+		let src = "#{ import \"x\": (a, b }\nnext\n";
+		let lx = Lexer::markup(src);
+		let next = src.find("next").unwrap_or(0);
+		assert_eq!((lx.depth_at(next), lx.open_at(next)), (0, 0));
 	}
 
 	#[test]
@@ -1894,8 +1888,9 @@ mod tests {
 
 	#[test]
 	fn what_the_parser_left_over_in_code_is_read_again() {
-		// A duplicate argument is one error node holding the text of its tokens: its string stays a string.
-		let src = "#f(a: 1, a: \"b // c\")\n#set x()\n";
+		// typst: `expected named or keyed pair`, and nothing about what follows. The expression it refuses
+		// is one error node holding the text of its tokens, whose string stays a string.
+		let src = "#let d = (a: 1, \"x\" + \"y // z\")\n#set x()\n";
 		let toks = byte_toks(src);
 		let slashes = src.find("//").unwrap_or(0);
 		assert_eq!(toks[slashes], Tok::Str);
@@ -1974,6 +1969,10 @@ mod tests {
 		assert_eq!(group_end_chars(&chars, chars.len() - 9), None);
 		assert_eq!(group_end("(a, b", 0), None);
 		assert_eq!(top_comma(&fmt!("{} , more", &src[..end.unwrap_or(0)])), end.unwrap_or(0) + 1);
+		// An index in chars is not an index in bytes.
+		let src = "(é, \"ü ) €\", [ñ])x";
+		let chars: Vec<char> = src.chars().collect();
+		assert_eq!((group_end_chars(&chars, 0), group_end(src, 0)), (Some(17), Some(22)));
 	}
 
 	#[test]

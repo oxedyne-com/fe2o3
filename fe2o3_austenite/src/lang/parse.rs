@@ -190,7 +190,7 @@ impl Refusals {
 	}
 
 	/// Records a `$` whose maths never closes: Typst refuses the file there, and the reader reads it as the
-	/// character it is ([`lex::lone_dollars`]).
+	/// character it is ([`lex::Lexer::lone`]).
 	pub(crate) fn record_lone_dollar_in(&mut self, file: &str, span: Span) {
 		self.record_stand_in_in(file, "inline maths", span, RefusalClass::Unusable,
 			"never closes, so its `$` is set as text");
@@ -2108,7 +2108,7 @@ fn strip_comments(line: &str, toks: &[lex::Tok], keep: &[bool]) -> String {
 }
 
 /// The characters `chars` of a line, each by its byte in the line, with a `$` the lexer read as a character
-/// (its maths never closes, [`lex::lone_dollars`]) written `\$`, so a reader that sees the line alone reads
+/// (its maths never closes, [`lex::Lexer::lone`]) written `\$`, so a reader that sees the line alone reads
 /// it as the lexer read it over the whole source.
 fn lone_escaped(chars: impl Iterator<Item = (usize, char)>, toks: &[lex::Tok]) -> String {
 	let mut out = String::new();
