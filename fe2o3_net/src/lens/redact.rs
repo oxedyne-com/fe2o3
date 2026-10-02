@@ -1,0 +1,491 @@
+//! The redactor of Daimond's feed, over a `Dat`.
+//!
+//! `secret_name` is `SECRET_RE` and `fingerprint` is `fingerprint` from `www/js/debugshare.js`
+//! (the lines marked `SECRET_RE`, `SECRET_RE_LOOSE` and `function fingerprint` there), and a
+//! test holds each to the JavaScript over a table that JavaScript generated. `Redact` is its
+//! `redact` walk: a deep copy in which every field whose name looks secret has its value
+//! replaced by a fingerprint, so the operator still sees which fields were present and how they
+//! relate, and only the value is gone. Two hooks are added for a caller's own knowledge: a
+//! deny-list of names and paths, and a test over strings.
+//!
+//! Free text is the caller's string test, and `Shapes` is a stock one for the shapes a credential
+//! wears. It stands on `fe2o3_text::secret`, the scanner behind the commit hook, and not on the
+//! `SCRUB_SHAPES` of `debugshare.js`. The two overlap without being equal: the JavaScript also
+//! takes JWTs, `whsec_` and test-mode Stripe keys, `tune-` relay keys, the other AWS prefixes and
+//! shorter GitHub runs, and it has an entropy catch, none of which is ported. A caller that needs
+//! one of those passes its own test.
+
+use super::row::Row;
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_text::secret;
+
+
+// The walk's bound, as in `redact`. A `Dat` cannot hold a cycle, so this is a depth bound alone.
+const MAX_DEPTH: usize = 40;
+const DEEP:      &str = "[redacted:cycle-or-deep]";
+const OBJECT:    &str = "[redacted:object]";
+const ABSENT:    &str = "[redacted:absent]";
+
+// SECRET_RE's words, in its order.
+const WORDS: [&str; 17] = [
+    "apikey", "api_key", "key", "token", "secret", "passphrase", "password", "salt", "wrapped",
+    "wrappedpriv", "sealed", "seal", "privatekey", "priv", "mnemonic", "seed", "masterkey",
+];
+
+fn sep(b: u8) -> bool {
+    matches!(b, b'_' | b'.' | b'-')
+}
+
+// JavaScript's `\w`, which is ASCII alone.
+fn word(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Does the name look like a secret's? This is Daimond's `SECRET_RE`,
+///
+/// `/(?:^|[_.-])(?:apikey|api_key|key|token|secret|passphrase|password|salt|wrapped|wrappedpriv|
+/// sealed|seal|privatekey|priv|mnemonic|seed|masterkey)(?:$|[_.-]|enc\b)/i`,
+///
+/// tested anywhere in the name. A word counts only at the start of the name or after a `_`, `.`
+/// or `-`, so a camel-joined `pushToken` slides past it; `secret_name_loose` catches those.
+///
+/// This is a hand matcher and not a `fe2o3_text::regex::Regex` on purpose. JavaScript's `\b` and
+/// `/i` are ASCII-only, while the crate's engine follows the `regex` crate, whose `\b` and case
+/// folding are Unicode, so the two would disagree on a name such as `keyenc` followed by `é`. A
+/// test holds the matcher to the JavaScript over generated names, `é` included, and to the engine
+/// over the ASCII ones.
+pub fn secret_name(name: &str) -> bool {
+    let b = name.as_bytes();
+    let mut starts = vec![0usize];
+    for (i, &c) in b.iter().enumerate() {
+        if sep(c) {
+            starts.push(i + 1);
+        }
+    }
+    for s in starts {
+        for w in WORDS {
+            let n = w.len();
+            if b.len() < s + n || !b[s..s + n].eq_ignore_ascii_case(w.as_bytes()) {
+                continue;
+            }
+            let e = s + n;
+            // `$`, a separator, or `enc` ending at a word boundary.
+            let tail = e == b.len()
+                || sep(b[e])
+                || (b.len() >= e + 3
+                    && b[e..e + 3].eq_ignore_ascii_case(b"enc")
+                    && (b.len() == e + 3 || !word(b[e + 3])));
+            if tail {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `secret_name`, or Daimond's `SECRET_RE_LOOSE`, `/token|secret|passphrase|password|key$/i`.
+///
+/// The loose pattern has no boundary, so it also takes a real, non-secret field such as
+/// `tokenStats`. Daimond uses it only on its free-form `config`, and so should a caller that
+/// knows its names are camel-joined.
+pub fn secret_name_loose(name: &str) -> bool {
+    if secret_name(name) {
+        return true;
+    }
+    let l = name.to_ascii_lowercase();
+    l.contains("token") || l.contains("secret") || l.contains("passphrase") || l.contains("password")
+        || l.ends_with("key")
+}
+
+/// A short, non-reversible rendering of a secret for a person's eye: its first `head`
+/// characters, a stable hash and its length. With `head` of 6 this is Daimond's `fingerprint`
+/// exactly, which hashes and counts UTF-16 code units as JavaScript does.
+///
+/// The hash is djb2, not a cryptographic hash. It only has to tell two secrets apart and match
+/// two sightings of one. The head is itself a disclosure of up to `head` characters, and `0`
+/// withholds it.
+pub fn fingerprint(v: &str, head: usize) -> String {
+    if v.is_empty() {
+        return "[redacted:empty]".to_string();
+    }
+    let u: Vec<u16> = v.encode_utf16().collect();
+    let mut h: u32 = 5381;
+    for &c in &u {
+        h = (h << 5).wrapping_add(h).wrapping_add(c as u32);
+    }
+    let hd = String::from_utf16_lossy(&u[..head.min(u.len())]);
+    fmt!("[redacted {}…#{:x}/{}]", hd, h, u.len())
+}
+
+// Is this a marker the redactor itself wrote? A second pass leaves it alone, since a
+// fingerprint of a fingerprint tells the reader nothing and hides the first.
+fn marker(s: &str) -> bool {
+    s.starts_with("[redacted") && s.ends_with(']')
+}
+
+/// A caller's test over strings: does this one hold a secret?
+///
+/// Any closure over `&str` is one. A string that passes is replaced whole by its fingerprint,
+/// so the test should look *inside* a string (Oxegen's asks whether eight words of the EFF list
+/// stand in a row) and not only at all of it.
+pub trait StrTest: Send + Sync {
+    fn hit(&self, s: &str) -> bool;
+}
+
+/// The test that never fires, for a redactor that has no string test of its own.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoTest;
+
+impl StrTest for NoTest {
+    fn hit(&self, _s: &str) -> bool { false }
+}
+
+impl<F: Fn(&str) -> bool + Send + Sync> StrTest for F {
+    fn hit(&self, s: &str) -> bool { self(s) }
+}
+
+/// The stock string test: a string that holds a credential in any shape the commit hook refuses
+/// is covered whole. Daimond's `SCRUB_SHAPES` are a different list; see the module note.
+///
+/// It is `fe2o3_text::secret::holds`, which honours no `allowlist secret` marker and skips no
+/// text for a NUL, since a feed's text is the very thing in doubt. Pair it with `Redact::with_head(0)`
+/// where the first characters of a credential must not show in its fingerprint.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Shapes;
+
+impl StrTest for Shapes {
+    fn hit(&self, s: &str) -> bool { secret::holds(s) }
+}
+
+/// A place a caller knows holds a secret, whatever it is called.
+#[derive(Clone, Debug)]
+pub enum Deny {
+    Name(String),           // a field of this exact name, at any depth
+    Path(Vec<String>),      // the fields along this path from the root, where `*` is any one name
+}
+
+/// Walks a `Dat` and covers what looks secret.
+///
+/// A value is covered when its field's name is a secret's (`secret_name`, or the loose pattern if
+/// asked), when its name or its path is in the deny-list, or, for a string, when the caller's
+/// test fires. A covered scalar becomes its fingerprint, a covered object or list becomes
+/// `[redacted:object]` without being walked, and an empty value becomes `[redacted:absent]`.
+/// Lists are transparent to a deny path, so `["sess", "nonce"]` reaches the members of a list of
+/// sessions. Map keys that are strings meet the caller's test as well.
+pub struct Redact<T: StrTest = NoTest> {
+    deny:   Vec<Deny>,
+    test:   T,
+    head:   usize,
+    loose:  bool,
+}
+
+impl Redact<NoTest> {
+
+    pub fn new() -> Self {
+        Self {
+            deny:   Vec::new(),
+            test:   NoTest,
+            head:   Self::DEFAULT_HEAD,
+            loose:  false,
+        }
+    }
+}
+
+impl Default for Redact<NoTest> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T: StrTest> Redact<T> {
+
+    pub const DEFAULT_HEAD: usize = 6;
+
+    pub fn deny(mut self, d: Deny) -> Self {
+        self.deny.push(d);
+        self
+    }
+
+    pub fn deny_name(self, name: &str) -> Self {
+        self.deny(Deny::Name(name.to_string()))
+    }
+
+    pub fn deny_path(self, path: &[&str]) -> Self {
+        self.deny(Deny::Path(path.iter().map(|s| s.to_string()).collect()))
+    }
+
+    /// Takes `secret_name_loose` for the names, which catches `pushToken` and `refreshSecret`.
+    pub fn loose(mut self) -> Self {
+        self.loose = true;
+        self
+    }
+
+    /// How many leading characters a fingerprint shows. Daimond shows 6.
+    pub fn with_head(mut self, head: usize) -> Self {
+        self.head = head;
+        self
+    }
+
+    pub fn with_test<U: StrTest>(self, test: U) -> Redact<U> {
+        Redact {
+            deny:   self.deny,
+            test,
+            head:   self.head,
+            loose:  self.loose,
+        }
+    }
+
+    /// A deep copy with the secrets covered.
+    pub fn dat(&self, d: &Dat) -> Dat {
+        self.walk(d).0
+    }
+
+    /// `dat`, and whether anything was covered. A caller that finds nothing changed can keep the
+    /// text it parsed the `Dat` from, byte for byte.
+    pub fn walk(&self, d: &Dat) -> (Dat, bool) {
+        let mut path = Vec::new();
+        self.value(d, &mut path, 0)
+    }
+
+    /// A copy of the row with its payload covered. The payload's field names are the root's.
+    pub fn row(&self, row: &Row) -> Row {
+        let mut out = row.clone();
+        let mut path = Vec::new();
+        for (k, v) in out.body.iter_mut() {
+            path.push(k.clone());
+            let (nv, _) = self.member(k, v, &mut path, 1);
+            path.pop();
+            *v = nv;
+        }
+        out
+    }
+
+    /// The fingerprint of a free string if the caller's test fires on it.
+    pub fn text(&self, s: &str) -> Option<String> {
+        if self.test.hit(s) {
+            Some(fingerprint(s, self.head))
+        } else {
+            None
+        }
+    }
+
+    fn secret(&self, name: &str) -> bool {
+        if self.loose { secret_name_loose(name) } else { secret_name(name) }
+    }
+
+    fn denied(&self, path: &[String]) -> bool {
+        self.deny.iter().any(|d| match d {
+            Deny::Name(n) => path.last().map_or(false, |l| l == n),
+            Deny::Path(p) => p.len() == path.len()
+                && p.iter().zip(path.iter()).all(|(a, b)| a == "*" || a == b),
+        })
+    }
+
+    // One field of a map: covered by name or place, or walked.
+    fn member(&self, name: &str, v: &Dat, path: &mut Vec<String>, depth: usize) -> (Dat, bool) {
+        if self.secret(name) || self.denied(path) {
+            return self.cover(v);
+        }
+        self.value(v, path, depth)
+    }
+
+    // A value covered by its field: a scalar's fingerprint, or a note of what it was.
+    fn cover(&self, v: &Dat) -> (Dat, bool) {
+        let s = match v {
+            Dat::Empty              => return (Dat::Str(ABSENT.to_string()), true),
+            Dat::Opt(o)             => match &**o {
+                Some(x) => return self.cover(x),
+                None    => return (Dat::Str(ABSENT.to_string()), true),
+            },
+            Dat::Box(b)             => return self.cover(b),
+            Dat::Str(s)             => s.clone(),
+            Dat::Bool(b)            => fmt!("{}", b),
+            Dat::U8(n)              => fmt!("{}", n),
+            Dat::U16(n)             => fmt!("{}", n),
+            Dat::U32(n)             => fmt!("{}", n),
+            Dat::U64(n)             => fmt!("{}", n),
+            Dat::U128(n)            => fmt!("{}", n),
+            Dat::I8(n)              => fmt!("{}", n),
+            Dat::I16(n)             => fmt!("{}", n),
+            Dat::I32(n)             => fmt!("{}", n),
+            Dat::I64(n)             => fmt!("{}", n),
+            Dat::I128(n)            => fmt!("{}", n),
+            Dat::F32(n)             => fmt!("{}", n),
+            Dat::F64(n)             => fmt!("{}", n),
+            Dat::C64(n)             => fmt!("{}", n),
+            // A list, a map, bytes: noted as present, never shown, as `[redacted:object]` is.
+            _                       => return (Dat::Str(OBJECT.to_string()), true),
+        };
+        if marker(&s) {
+            return (Dat::Str(s), false);
+        }
+        (Dat::Str(fingerprint(&s, self.head)), true)
+    }
+
+    fn key(&self, k: &Dat) -> (Dat, bool) {
+        match k {
+            Dat::Str(s) if self.test.hit(s) && !marker(s) => (Dat::Str(fingerprint(s, self.head)), true),
+            _ => (k.clone(), false),
+        }
+    }
+
+    fn value(&self, v: &Dat, path: &mut Vec<String>, depth: usize) -> (Dat, bool) {
+        let deep = depth > MAX_DEPTH;
+        match v {
+            Dat::Str(s) => {
+                if !marker(s) && self.test.hit(s) {
+                    return (Dat::Str(fingerprint(s, self.head)), true);
+                }
+            },
+            Dat::Map(m) => {
+                if deep {
+                    return (Dat::Str(DEEP.to_string()), true);
+                }
+                let mut out = DaticleMap::new();
+                let mut changed = false;
+                for (k, val) in m {
+                    let name = key_text(k);
+                    let (mut nk, kc) = self.key(k);
+                    while out.contains_key(&nk) {
+                        nk = Dat::Str(fmt!("{}~", key_text(&nk)));
+                    }
+                    path.push(name.clone());
+                    let (nv, vc) = self.member(&name, val, path, depth + 1);
+                    path.pop();
+                    changed |= kc | vc;
+                    out.insert(nk, nv);
+                }
+                return (Dat::Map(out), changed);
+            },
+            Dat::OrdMap(m) => {
+                if deep {
+                    return (Dat::Str(DEEP.to_string()), true);
+                }
+                let mut out = OrdDaticleMap::new();
+                let mut changed = false;
+                for (mk, val) in m {
+                    let name = key_text(mk.dat());
+                    let (nk, kc) = self.key(mk.dat());
+                    path.push(name.clone());
+                    let (nv, vc) = self.member(&name, val, path, depth + 1);
+                    path.pop();
+                    changed |= kc | vc;
+                    out.insert(MapKey::new(mk.ord(), nk), nv);
+                }
+                return (Dat::OrdMap(out), changed);
+            },
+            Dat::List(l) => {
+                if deep {
+                    return (Dat::Str(DEEP.to_string()), true);
+                }
+                let mut out = Vec::with_capacity(l.len());
+                let mut changed = false;
+                for x in l {
+                    let (nx, c) = self.value(x, path, depth + 1);
+                    changed |= c;
+                    out.push(nx);
+                }
+                return (Dat::List(out), changed);
+            },
+            Dat::Box(b) => {
+                let (nb, c) = self.value(b, path, depth);
+                return (Dat::Box(Box::new(nb)), c);
+            },
+            Dat::Opt(o) => {
+                if let Some(x) = &**o {
+                    let (nx, c) = self.value(x, path, depth);
+                    return (Dat::Opt(Box::new(Some(nx))), c);
+                }
+            },
+            Dat::Usr(id, Some(b)) => {
+                let (nb, c) = self.value(b, path, depth);
+                return (Dat::Usr(id.clone(), Some(Box::new(nb))), c);
+            },
+            _ => {},
+        }
+        // A tuple is a list that has a length of its own.
+        macro_rules! tuples {
+            ($($t:ident),*) => {
+                match v {
+                    $(
+                        Dat::$t(a) => {
+                            if deep {
+                                return (Dat::Str(DEEP.to_string()), true);
+                            }
+                            let mut b = a.clone();
+                            let mut changed = false;
+                            for x in b.iter_mut() {
+                                let (nx, c) = self.value(x, path, depth + 1);
+                                *x = nx;
+                                changed |= c;
+                            }
+                            return (Dat::$t(b), changed);
+                        },
+                    )*
+                    _ => {},
+                }
+            };
+        }
+        tuples!(Tup2, Tup3, Tup4, Tup5, Tup6, Tup7, Tup8, Tup9, Tup10);
+        (v.clone(), false)
+    }
+}
+
+fn key_text(k: &Dat) -> String {
+    match k {
+        Dat::Str(s) => s.clone(),
+        other       => fmt!("{}", other),
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn enc_needs_a_word_boundary_after_it() {
+        // `enc\b`: the end of the name or a non-word character, and not `_`, a digit or a letter.
+        assert!(secret_name("keyenc"));
+        assert!(secret_name("keyENC"));
+        assert!(secret_name("key.enc"));
+        assert!(!secret_name("keyenc_x"));
+        assert!(!secret_name("keyenc1"));
+        assert!(!secret_name("keyencx"));
+        assert!(secret_name("keyenc é"));
+    }
+
+    #[test]
+    fn a_word_counts_only_at_the_start_or_after_a_separator() {
+        assert!(secret_name("key"));
+        assert!(secret_name("x_key"));
+        assert!(secret_name("x.token-y"));
+        assert!(!secret_name("xkey"));
+        assert!(!secret_name("monkey"));
+        assert!(!secret_name("keys"));
+        assert!(!secret_name(""));
+        assert!(secret_name_loose("monkey"), "key$ is boundary-free");
+        assert!(!secret_name_loose("keyboard"));
+    }
+
+    #[test]
+    fn a_marker_is_recognised_so_it_is_not_covered_twice() {
+        assert!(marker(&fingerprint("abcdefgh", 6)));
+        assert!(marker(OBJECT) && marker(ABSENT) && marker(DEEP));
+        assert!(!marker("[redacted"));
+        assert!(!marker("not [redacted x]"));
+    }
+
+    #[test]
+    fn the_stock_test_is_the_commit_hooks_and_ignores_its_excuses() {
+        // A credential's shape, in two pieces so that this file passes the hook it tests.
+        let k = fmt!("{}{}", "sk-ant", "-api03-AbCdEfGhIjKlMnOpQrStUvWx");
+        assert!(Shapes.hit(&k));
+        assert!(Shapes.hit(&fmt!("{} # allowlist secret", k)));
+        assert!(!Shapes.hit("sk-ant-short"));
+        // Covered whole, with none of its characters left standing in the fingerprint.
+        let red = Redact::new().with_head(0).with_test(Shapes);
+        let out = red.text(&fmt!("deployed with {}", k)).unwrap_or_default();
+        assert!(out.starts_with("[redacted") && !out.contains("sk-ant"));
+    }
+}

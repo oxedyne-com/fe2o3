@@ -17,9 +17,13 @@
 //! signed command whose signer chose the nonce; it came from `fe2o3_steel`'s
 //! signed admin login.
 //!
+//! `floor::KeyFloor` is a minimum interval between two accepted calls under one string key, the
+//! rate rule of Daimond's diagnostic trace endpoint.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 pub mod addr;
+pub mod floor;
 pub mod nonce;
 pub mod user;

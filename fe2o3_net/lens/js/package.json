@@ -1,0 +1,6 @@
+{
+	"name": "fe2o3-net-lens-js",
+	"private": true,
+	"type": "module",
+	"description": "The browser writer and node reader of fe2o3_net::lens. No dependencies, no build step."
+}

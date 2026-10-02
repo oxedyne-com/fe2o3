@@ -1,0 +1,130 @@
+"{{dash5}}BEGIN RSA PRIVATE KEY{{dash5}}\n{{64:100:b64std}}\n{{64:101:b64std}}\n{{dash5}}END RSA PRIVATE KEY{{dash5}}"	"[redacted pem #44e88e3/191]"	0
+"log: {{dash5}}BEGIN PRIVATE KEY{{dash5}}\n{{40:102:b64std}}… (clipped)"	"log: [redacted pem #730d611b/79]"	0
+"{{dash5}}BEGIN CERTIFICATE{{dash5}}\n{{40:103:b64std}}\n{{dash5}}END CERTIFICATE{{dash5}}"	"-----BEGIN CERTIFICATE-----\n0liFII/jnjX8hTXWr+oMGYAixStpOfkWUwJj6q/j\n-----END CERTIFICATE-----"	0
+"token ghp_{{16:104:alnum}} end"	"token [redacted gh #23436471/20] end"	0
+"token gho_{{36:105:alnum}} end"	"token [redacted gh #f0078c5d/40] end"	0
+"token ghu_{{20:106:alnum}} end"	"token [redacted gh #76813b5c/24] end"	0
+"token ghs_{{40:107:alnum}} end"	"token [redacted gh #b5e409ef/44] end"	0
+"token ghr_{{16:108:alnum}} end"	"token [redacted gh #dc725837/20] end"	0
+"token ghp_{{15:109:alnum}} end"	"token ghp_x3eF59q8CU7xkDI end"	0
+"github_pat_{{20:110:alnum}}"	"[redacted ghpat #d7240da4/31]"	0
+"github_pat_{{22:111:alnum}}"	"[redacted ghpat #d8ad6104/33]"	0
+"github_pat_{{40:112:alnum}}"	"[redacted ghpat #cebcd13f/51]"	0
+"github_pat_{{19:113:alnum}}"	"github_pat_890quTdWMwXnQCnYGtu"	0
+"key=sk_test_{{10:114:alnum}}&x=1"	"key=[redacted stripe #73e721b1/18]&x=1"	0
+"key=sk_live_{{24:115:alnum}}&x=1"	"key=[redacted stripe #9d9c862/32]&x=1"	0
+"key=rk_live_{{24:116:alnum}}&x=1"	"key=[redacted stripe #77555df1/32]&x=1"	0
+"key=rk_test_{{10:117:alnum}}&x=1"	"key=[redacted stripe #f30c00c/18]&x=1"	0
+"key=pk_test_{{24:118:alnum}}&x=1"	"key=[redacted hi #de609239/32]&x=1"	0
+"key=sk_test_{{9:119:alnum}}&x=1"	"key=sk_test_sj3hdymXc&x=1"	0
+"hook whsec_{{16:120:alnum}}"	"hook [redacted whsec #ee888828/22]"	0
+"hook whsec_{{32:121:alnum}}"	"hook [redacted whsec #683e73e6/38]"	0
+"hook whsec_{{15:122:alnum}}"	"hook whsec_kX39ziMZDSjBEwd"	0
+"sk-{{16:123:b64}}"	"[redacted sk #7dba5f5b/19]"	0
+"sk-{{48:124:b64}}"	"[redacted sk #af9134a5/51]"	0
+"sk-or-v1-{{48:125:hex}}"	"[redacted sk #14fa9e77/57]"	0
+"sk-ant-api03-{{80:126:b64}}"	"[redacted sk #df884ad6/93]"	0
+"sk-{{15:127:b64}}"	"sk-GWDjL0gYUuY3W9i"	0
+"task-{{40:128:alnum}}"	"[redacted hi #e067fb24/45]"	0
+"id AKIA{{16:129:upper36}} used"	"id [redacted aws #a582aaaf/20] used"	0
+"id ASIA{{12:130:upper36}} used"	"id [redacted aws #b32cb7df/16] used"	0
+"id ABIA{{20:131:upper36}} used"	"id [redacted aws #4ea658cb/24] used"	0
+"id ACCA{{16:132:upper36}} used"	"id [redacted aws #27aa6dfd/20] used"	0
+"id AGPA{{16:133:upper36}} used"	"id [redacted aws #4baa30ec/20] used"	0
+"id AIDA{{16:134:upper36}} used"	"id [redacted aws #c4a26c99/20] used"	0
+"id AIPA{{16:135:upper36}} used"	"id [redacted aws #d5e7a248/20] used"	0
+"id ANPA{{16:136:upper36}} used"	"id [redacted aws #9e0dc8b7/20] used"	0
+"id ANVA{{16:137:upper36}} used"	"id [redacted aws #114cfcd9/20] used"	0
+"id AROA{{16:138:upper36}} used"	"id [redacted aws #bc3488e8/20] used"	0
+"id APKA{{16:139:upper36}} used"	"id [redacted aws #fb8578aa/20] used"	0
+"id AKIA{{11:140:upper36}} used"	"id AKIAISL7T9YTL4M used"	0
+"id AKIB{{16:141:upper36}} used"	"id AKIB3N5J4P9YARE8ON8C used"	0
+"AIza{{35:142:b64}}"	"[redacted gcp #1d596242/39]"	0
+"AIza{{39:143:b64}}"	"[redacted gcp #5226e55b/43]"	0
+"AIza{{29:144:b64}}"	"[redacted hi #890eb9b6/33]"	0
+"xoxb-{{12:145:alnum}}-{{12:146:alnum}}"	"[redacted slack #bc6600b2/30]"	0
+"xoxb-{{10:147:alnum}}-{{10:148:alnum}}"	"[redacted slack #b3d3b18a/26]"	0
+"xoxb-{{9:149:alnum}}-{{12:150:alnum}}"	"[redacted slack #885f1732/27]"	0
+"xoxp-{{12:151:alnum}}-{{12:152:alnum}}-{{24:153:alnum}}"	"[redacted slack #40de9d71/55]"	0
+"Bearer eyJ{{6:154:b64}}.{{6:155:b64}}.{{4:156:b64}} ok"	"Bearer [redacted jwt #b1ec54af/21] ok"	0
+"Bearer eyJ{{20:157:b64}}.{{40:158:b64}}.{{43:159:b64}} ok"	"Bearer [redacted jwt #f3b5ad85/108] ok"	0
+"Bearer eyJ{{36:160:b64}}.{{120:161:b64}}.{{43:162:b64}} ok"	"Bearer [redacted jwt #ebf104fb/204] ok"	0
+"Bearer eyJ{{5:163:b64}}.{{6:164:b64}}.{{4:165:b64}} ok"	"Bearer [redacted bearer #e3a24fd5/20] ok"	0
+"Bearer eyJ{{6:166:b64}}.{{5:167:b64}}.{{4:168:b64}} ok"	"Bearer [redacted bearer #12d3c811/20] ok"	0
+"Bearer eyJ{{6:169:b64}}.{{6:170:b64}}.{{3:171:b64}} ok"	"Bearer [redacted bearer #17cb0260/20] ok"	0
+"relay tune-{{32:172:hex}} up"	"relay [redacted tune #9e1bf9b6/37] up"	0
+"relay tune-{{31:173:hex}} up"	"relay [redacted hi #3b857758/36] up"	0
+"relay tune-{{40:174:hex}} up"	"relay [redacted tune #d6e21d49/37]d3016c84 up"	0
+"Authorization: Bearer {{20:175:b64}}"	"Authorization: Bearer [redacted bearer #d7038e88/20]"	0
+"Authorization: Basic {{20:176:b64}}"	"Authorization: Basic [redacted bearer #a37b501a/20]"	0
+"Authorization: Token {{20:177:b64}}"	"Authorization: Token [redacted bearer #d26d75bf/20]"	0
+"Authorization: Bearer {{7:178:b64}}"	"Authorization: Bearer 0fQ5ZTx"	0
+"Authorization: Bearer {{8:179:b64}}"	"Authorization: Bearer [redacted bearer #6f7dc2f1/8]"	0
+"https://x.example/cb?a=1&token={{12:180:alnum}}&z=2"	"https://x.example/cb?a=1&token=[redacted urlarg #42bfcf53/12]&z=2"	0
+"https://x.example/cb?a=1&access_token={{12:181:alnum}}&z=2"	"https://x.example/cb?a=1&access_token=[redacted urlarg #49b759c3/12]&z=2"	0
+"https://x.example/cb?a=1&refresh_token={{12:182:alnum}}&z=2"	"https://x.example/cb?a=1&refresh_token=[redacted urlarg #b15bce2a/12]&z=2"	0
+"https://x.example/cb?a=1&id_token={{12:183:alnum}}&z=2"	"https://x.example/cb?a=1&id_token=[redacted urlarg #4a03766a/12]&z=2"	0
+"https://x.example/cb?a=1&api_key={{12:184:alnum}}&z=2"	"https://x.example/cb?a=1&api_key=[redacted urlarg #f6d44ee0/12]&z=2"	0
+"https://x.example/cb?a=1&api-key={{12:185:alnum}}&z=2"	"https://x.example/cb?a=1&api-key=[redacted urlarg #4635c4f/12]&z=2"	0
+"https://x.example/cb?a=1&apikey={{12:186:alnum}}&z=2"	"https://x.example/cb?a=1&apikey=[redacted urlarg #86ee6f40/12]&z=2"	0
+"https://x.example/cb?a=1&key={{12:187:alnum}}&z=2"	"https://x.example/cb?a=1&key=[redacted urlarg #8f6c860e/12]&z=2"	0
+"https://x.example/cb?a=1&auth={{12:188:alnum}}&z=2"	"https://x.example/cb?a=1&auth=[redacted urlarg #c78acd13/12]&z=2"	0
+"https://x.example/cb?a=1&secret={{12:189:alnum}}&z=2"	"https://x.example/cb?a=1&secret=[redacted urlarg #7717a3d4/12]&z=2"	0
+"https://x.example/cb?a=1&password={{12:190:alnum}}&z=2"	"https://x.example/cb?a=1&password=[redacted urlarg #7f913ab9/12]&z=2"	0
+"https://x.example/cb?a=1&passwd={{12:191:alnum}}&z=2"	"https://x.example/cb?a=1&passwd=[redacted urlarg #b4b8e89f/12]&z=2"	0
+"https://x.example/cb?a=1&sig={{12:192:alnum}}&z=2"	"https://x.example/cb?a=1&sig=[redacted urlarg #53cc5e12/12]&z=2"	0
+"https://x.example/cb?a=1&signature={{12:193:alnum}}&z=2"	"https://x.example/cb?a=1&signature=[redacted urlarg #9e6b4e65/12]&z=2"	0
+"https://x.example/cb#access_token={{30:194:b64}}#end"	"https://x.example/cb#access_token=[redacted urlarg #75b6a34a/30]#end"	0
+"https://x.example/cb?key={{4:195:alnum}}"	"https://x.example/cb?key=[redacted urlarg #7c79e9c1/4]"	0
+"https://x.example/cb?key={{3:196:alnum}}"	"https://x.example/cb?key=LK4"	0
+"https://x.example/cb?Token={{12:197:alnum}}"	"https://x.example/cb?Token=[redacted urlarg #c572ca6c/12]"	0
+"config token: {{16:198:alnum}} done"	"config token: [redacted named #d94059fe/16] done"	0
+"config secret: {{16:199:alnum}} done"	"config secret: [redacted named #dd67ae88/16] done"	0
+"config apikey: {{16:200:alnum}} done"	"config apikey: [redacted named #c2301e2/16] done"	0
+"config api_key: {{16:201:alnum}} done"	"config api_key: [redacted named #429f9a48/16] done"	0
+"config api-key: {{16:202:alnum}} done"	"config api-key: [redacted named #6d1972b8/16] done"	0
+"config auth_token: {{16:203:alnum}} done"	"config auth_token: [redacted named #a24921b5/16] done"	0
+"config access-token: {{16:204:alnum}} done"	"config access-token: [redacted named #458f912b/16] done"	0
+"config passphrase: {{16:205:alnum}} done"	"config passphrase: [redacted named #338daec6/16] done"	0
+"config password: {{16:206:alnum}} done"	"config password: [redacted named #e5ec2fa8/16] done"	0
+"config master_key: {{16:207:alnum}} done"	"config master_key: [redacted named #3ee461b7/16] done"	0
+"config private-key: {{16:208:alnum}} done"	"config private-key: [redacted named #a0abb82a/16] done"	0
+"config mnemonic: {{16:209:alnum}} done"	"config mnemonic: [redacted named #b5f05e47/16] done"	0
+"config seed_phrase: {{16:210:alnum}} done"	"config seed_phrase: [redacted named #16b41c5d/16] done"	0
+"config salt: {{16:211:alnum}} done"	"config salt: [redacted named #8237707d/16] done"	0
+"config sealed: {{16:212:alnum}} done"	"config sealed: [redacted named #f9d49c68/16] done"	0
+"config wrapped: {{16:213:alnum}} done"	"config wrapped: [redacted named #532e2b9b/16] done"	0
+"password=\"{{10:214:alnum}}\""	"password=\"[redacted named #11b4a514/10]\""	0
+"secret = '{{12:215:alnum}}'"	"secret = '[redacted named #37589dd7/12]'"	0
+"token={{7:216:alnum}}"	"token=AgrpeSO"	0
+"AKIA{{16:217:upper36}} and its secret {{40:218:b64std}} here"	"[redacted aws #c4bd1fd5/20] and its secret SGxVIH+jKxKpicVfAlIEedklU0Au6kL0BdA/QznW here"	0
+"aws_secret_access_key = {{40:219:b64std}}"	"aws_secret_access_key = [redacted awssec #ace6d46e/40]"	0
+"AWS_SECRET_ACCESS_KEY: \"{{40:220:b64std}}\""	"AWS_SECRET_ACCESS_KEY: \"[redacted awssec #ffa14fef/40]\""	0
+"aws_secret_access_key = {{39:221:b64std}}"	"aws_secret_access_key = [redacted hi #a7283011/39]"	0
+"blob {{32:222:b64}} end"	"blob [redacted hi #ab8252cb/32] end"	0
+"blob {{33:223:b64}} end"	"blob [redacted hi #860f0008/33] end"	0
+"blob {{48:224:b64}} end"	"blob [redacted hi #9f60d94b/48] end"	0
+"blob {{64:225:b64}} end"	"blob [redacted hi #f3d91ac9/64] end"	0
+"blob {{128:226:b64}} end"	"blob [redacted hi #213e5dae/128] end"	0
+"{{31:227:b64}}"	"w5VohYk_7Fav-s6jUd0THPxhjXg1pm-"	0
+"sha {{32:228:hex}} ok"	"sha 909b343480a23d59c5cc4d68f531f19d ok"	0
+"sha {{40:229:hex}} ok"	"sha 28df61294ca47f0f4d452bbfb47c6c412381317b ok"	0
+"sha {{64:230:hex}} ok"	"sha bf139d0d17a7c1b5b5defa0572a8d6f503f0f136a75e80247b15860a6834b1bc ok"	0
+"{{8:231:hex}}-{{4:232:hex}}-{{4:233:hex}}-{{4:234:hex}}-{{12:235:hex}}"	"3657caf2-ce9b-55df-ed13-64577ca60ea3"	0
+"call_{{24:236:hex}}_{{12:237:hex}}"	"call_fb9ba89bc9a6abe785f300ee_83dec58094a8"	0
+"{{40:238:digit}}"	"7658557438255783011643494265580876358121"	0
+"worker_pool_seat_000412_alpha_beta_gamma_delta"	"worker_pool_seat_000412_alpha_beta_gamma_delta"	0
+"build-6911be85c0f7-seq-312-stamp-20261002T120000Z-gamma"	"[redacted hi #3b145d5d/55]"	0
+"{{40:239:b64}}"	"ZSFWCuV5SLaN4B_pv9Y9o7ty2EK_8oDLW7HGKPsF"	1
+"id sk-{{20:240:b64}}"	"id [redacted sk #10602236/23]"	1
+"id eyJ{{8:241:b64}}.{{8:242:b64}}.{{8:243:b64}}"	"id [redacted jwt #bf062772/29]"	1
+"first sk_test_{{24:244:alnum}} then eyJ{{10:245:b64}}.{{10:246:b64}}.{{10:247:b64}} then AKIA{{16:248:upper36}}"	"first [redacted stripe #697b7dd2/32] then [redacted jwt #39b9d0b1/35] then [redacted aws #397b08ad/20]"	0
+"sk-{{20:249:b64}} sk-{{20:250:b64}} sk-{{20:251:b64}}"	"[redacted sk #e6109846/23] [redacted sk #39d156c6/23] [redacted sk #4e7887b6/23]"	0
+"clé sk_test_{{12:252:alnum}} 日本語 😀 ghp_{{20:253:alnum}}"	"clé [redacted stripe #34a83752/20] 日本語 😀 [redacted gh #430b2941/24]"	0
+"line one\nBearer {{20:254:b64}}\nline three {{40:255:b64}}\n"	"line one\nBearer [redacted bearer #9a2aaeb5/20]\nline three [redacted hi #1ac2eddb/40]\n"	0
+"[redacted stripe #1f2e3d4c/32] already scrubbed"	"[redacted stripe #1f2e3d4c/32] already scrubbed"	0
+"[redacted hi #deadbeef/40] and ?token=[redacted urlarg #12ab34cd/12]"	"[redacted hi #deadbeef/40] and ?token=[redacted urlarg #12ab34cd/12]"	0
+""	""	0
+"short"	"short"	0
+"       "	"       "	0
+"plain prose with no credential at all, only words and a number 12345 and a path /usr/local/bin"	"plain prose with no credential at all, only words and a number 12345 and a path /usr/local/bin"	0
