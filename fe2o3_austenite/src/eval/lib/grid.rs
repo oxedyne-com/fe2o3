@@ -188,6 +188,16 @@ pub fn computed_default(kind: ElemKind, field: FieldId) -> Option<Value> {
 	}
 }
 
+/// A field as a read shows it where nothing sets it: [`computed_default`], with a line's stroke as Typst holds it,
+/// a stroke whose paint and thickness are both `auto` (it reads as `1pt + black`), where layout draws
+/// [`default_line_stroke`].
+pub fn read_default(kind: ElemKind, field: FieldId) -> Option<Value> {
+	match computed_default(kind, field) {
+		Some(Value::Stroke(_))	=> Some(Value::Stroke(Arc::new(Stroke::default()))),
+		other					=> other,
+	}
+}
+
 /// A field in force for an element in hand: its own value, a `set` rule's, or the default, computed
 /// defaults included.
 pub fn resolve(styles: &StyleChain, elem: &Content, field: FieldId) -> Outcome<Value> {

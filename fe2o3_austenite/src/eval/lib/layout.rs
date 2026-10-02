@@ -654,7 +654,8 @@ const PAPERS: &[(&str, f64, f64)] = &[
 ];
 
 /// A layout field's default where the schema holds none (`Computed`) and Typst gives a value a read can show: the
-/// page number's alignment, the spacing a block takes from its neighbours (`auto`, as the paragraph's own).
+/// page number's alignment, the spacing a block takes from its neighbours (`auto`, as the paragraph's own), the
+/// alignment `align` and `place` take, and the direction a stack runs.
 pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 	match (kind, name) {
 		(ElemKind::Page, "number-align")	=> Some(Value::Alignment(crate::eval::value::Alignment {
@@ -662,6 +663,15 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 			y:	Some(crate::eval::value::VAlign::Bottom),
 		})),
 		(ElemKind::Block, "above") | (ElemKind::Block, "below")	=> Some(Value::Auto),
+		(ElemKind::Align, "alignment")	=> Some(Value::Alignment(crate::eval::value::Alignment {
+			x:	Some(crate::eval::value::HAlign::Start),
+			y:	Some(crate::eval::value::VAlign::Top),
+		})),
+		(ElemKind::Place, "alignment")	=> Some(Value::Alignment(crate::eval::value::Alignment {
+			x:	Some(crate::eval::value::HAlign::Start),
+			y:	None,
+		})),
+		(ElemKind::Stack, "dir")		=> Some(Value::Direction(crate::eval::value::Direction::Ttb)),
 		_	=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
 	}
 }

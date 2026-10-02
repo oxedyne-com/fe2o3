@@ -255,6 +255,27 @@ fn elem(kind: ElemKind, fields: Vec<(&str, Value)>, span: Span) -> Outcome<Conte
 	Ok(Content::new(kind, fv, span))
 }
 
+/// A math field's default where the schema holds none (`Computed`) and Typst gives a value a read can show: where an
+/// equation's number sits, the brackets of a matrix, vector or case split and how a matrix or vector aligns, and
+/// how far and in what stroke a cancel line is drawn.
+pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
+	use crate::eval::value::{Alignment, HAlign, Length, Ratio, Relative, Stroke, VAlign};
+	let pair = |a: &str, b: &str| Some(Value::array(vec![Value::str(a), Value::str(b)]));
+	match (kind, name) {
+		(ElemKind::Equation, "number-align")
+			=> Some(Value::Alignment(Alignment { x: Some(HAlign::End), y: Some(VAlign::Horizon) })),
+		(ElemKind::MathMat, "delim") | (ElemKind::MathVec, "delim")	=> pair("(", ")"),
+		(ElemKind::MathCases, "delim")								=> pair("{", "}"),
+		(ElemKind::MathMat, "align") | (ElemKind::MathVec, "align")
+			=> Some(Value::Alignment(Alignment { x: Some(HAlign::Center), y: None })),
+		(ElemKind::MathCancel, "length")
+			=> Some(Value::Relative(Relative { rel: Ratio(1.0), abs: Length::em(0.3) })),
+		(ElemKind::MathCancel, "stroke")
+			=> Some(Value::Stroke(Arc::new(Stroke { thickness: Some(Length::em(0.05)), ..Stroke::default() }))),
+		_	=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
+	}
+}
+
 /// Casts a field value as Typst's maths element fields do, for constructors and `set` rules alike.
 pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 	// A field that holds content keeps content: a string, symbol or number is shown as it would be

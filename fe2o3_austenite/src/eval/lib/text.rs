@@ -305,7 +305,8 @@ fn internal(content: Content, field: &str, value: Value) -> Outcome<Content> {
 }
 
 /// A text field's default where the schema holds none (`Computed`): the font is the one Typst names, in the
-/// lower case it keeps family names in, and the fill is black.
+/// lower case it keeps family names in, the fill is black, the costs are all 100%, and no feature or variation
+/// is set. A highlight's fill is Typst's yellow.
 pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 	match (kind, name) {
 		(ElemKind::Text, "font")	=> Some(Value::str("libertinus serif")),
@@ -313,6 +314,21 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 			space:	ColorSpace::Luma,
 			c:		[0.0; 4],
 			alpha:	1.0,
+		})),
+		// Every cost at its neutral 100%, in the order Typst lists them.
+		(ElemKind::Text, "costs")	=> {
+			let mut d = Dict::new();
+			for k in ["hyphenation", "runt", "widow", "orphan"] {
+				d.insert(k, Value::Ratio(crate::eval::value::Ratio(1.0)));
+			}
+			Some(Value::dict(d))
+		},
+		(ElemKind::Text, "features") | (ElemKind::Text, "variations")	=> Some(Value::dict(Dict::new())),
+		// The highlight's own yellow, `#fffd11a1`.
+		(ElemKind::Highlight, "fill")	=> Some(Value::Color(Color {
+			space:	ColorSpace::Rgb,
+			c:		[255.0 / 255.0, 253.0 / 255.0, 17.0 / 255.0, 0.0],
+			alpha:	161.0 / 255.0,
 		})),
 		_							=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
 	}

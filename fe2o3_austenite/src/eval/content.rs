@@ -820,7 +820,11 @@ pub fn default_field(kind: ElemKind, field: FieldId) -> Option<Value> {
 		Family::Model	=> lib::model::default_value(kind, name),
 		Family::Text	=> lib::text::default_value(kind, name),
 		Family::Layout	=> lib::layout::default_value(kind, name),
-		Family::Grid | Family::Visual | Family::Math | Family::Intro | Family::Realise
+		Family::Grid	=> kind.field_spec(field).and_then(|s| s.default.to_value())
+			.or_else(|| lib::grid::read_default(kind, field)),
+		Family::Visual	=> lib::visual::default_value(kind, name),
+		Family::Math	=> lib::math::default_value(kind, name),
+		Family::Intro | Family::Realise
 			=> kind.field_spec(field).and_then(|s| s.default.to_value()),
 	}
 }

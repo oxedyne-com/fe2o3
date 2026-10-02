@@ -152,6 +152,25 @@ const MOVE: &[FieldSpec] = &[
 	FieldSpec::required("body",	FieldType::Content),
 ];
 
+/// A visual field's default where the schema holds none (`Computed`) and Typst gives a value a read can show: the
+/// turn of a rotation or skew (none), the point they and a scale turn about (the centre), a line's start and
+/// angle, and its stroke as Typst holds a default one, with paint and thickness both `auto`.
+pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
+	use crate::eval::value::{Alignment, Angle, HAlign, Length, Ratio, Relative, Stroke, VAlign};
+	match (kind, name) {
+		(ElemKind::Rotate, "angle") | (ElemKind::Skew, "ax") | (ElemKind::Skew, "ay") | (ElemKind::Line, "angle")
+			=> Some(Value::Angle(Angle(0.0))),
+		(ElemKind::Rotate, "origin") | (ElemKind::Scale, "origin") | (ElemKind::Skew, "origin")
+			=> Some(Value::Alignment(Alignment { x: Some(HAlign::Center), y: Some(VAlign::Horizon) })),
+		(ElemKind::Line, "start")	=> {
+			let origin = Value::Relative(Relative { rel: Ratio(0.0), abs: Length::pt(0.0) });
+			Some(Value::array(vec![origin.clone(), origin]))
+		},
+		(ElemKind::Line, "stroke")	=> Some(Value::Stroke(std::sync::Arc::new(Stroke::default()))),
+		_	=> kind.field_id(name).and_then(|id| kind.field_spec(id)).and_then(|s| s.default.to_value()),
+	}
+}
+
 const ROTATE: &[FieldSpec] = &[
 	FieldSpec::named("angle",	ANY,	FieldDefault::Computed).positional(),
 	FieldSpec::named("origin",	ANY,	FieldDefault::Computed).fold(Fold::Custom),
