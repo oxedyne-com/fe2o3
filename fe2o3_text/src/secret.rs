@@ -58,6 +58,16 @@
 //! [`interesting`] prefilter is what makes that pass cheap -- a byte that opens no shape is
 //! rejected on a handful of comparisons -- and [`leads_are_covered`] is the test that keeps the
 //! prefilter honest as shapes are added.
+//!
+//! # Text bound for a feed
+//!
+//! [`scan`] is for files a person wrote, and takes the person's word in two ways. A feed's text
+//! has an author who may be anyone, so [`holds`] takes neither, and [`scrub`] is the other table:
+//! Daimond's content scrubber, which replaces each credential in a string with a marker and holds
+//! shapes this module's hook has no reason to refuse, among them JWTs, test-mode Stripe keys and
+//! the secret standing beside a name.
+
+pub mod scrub;
 
 // Fewest bytes an assigned literal must hold before it is worth suspecting, how far into a file
 // the scan looks for a NUL before calling it a binary, and the marker that excuses a line, spelled

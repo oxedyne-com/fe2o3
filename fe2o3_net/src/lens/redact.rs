@@ -9,17 +9,20 @@
 //! deny-list of names and paths, and a test over strings.
 //!
 //! Free text is the caller's string test, and `Shapes` is a stock one for the shapes a credential
-//! wears. It stands on `fe2o3_text::secret`, the scanner behind the commit hook, and not on the
-//! `SCRUB_SHAPES` of `debugshare.js`. The two overlap without being equal: the JavaScript also
-//! takes JWTs, `whsec_` and test-mode Stripe keys, `tune-` relay keys, the other AWS prefixes and
-//! shorter GitHub runs, and it has an entropy catch, none of which is ported. A caller that needs
-//! one of those passes its own test.
+//! wears. It is the union of two things in `fe2o3_text::secret`: the scanner behind the commit
+//! hook, and a port of the content scrubber of `debugshare.js` (its `SCRUB_SHAPES`, its pairs and
+//! its entropy catch), so a feed is at least as well guarded here as it is in Daimond's browser.
+//! A caller adds what only it knows, as Oxegen adds its eight-word passphrase, by passing its own
+//! test.
 
 use super::row::Row;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_text::secret;
+use oxedyne_fe2o3_text::secret::{
+    self,
+    scrub,
+};
 
 
 // The walk's bound, as in `redact`. A `Dat` cannot hold a cycle, so this is a depth bound alone.
@@ -132,6 +135,11 @@ fn marker(s: &str) -> bool {
 /// stand in a row) and not only at all of it.
 pub trait StrTest: Send + Sync {
     fn hit(&self, s: &str) -> bool;
+
+    /// The same question of a string found under a correlation-id field (see
+    /// [`Redact::id_key`]). A test may excuse an id from its heuristics here and keep its shapes;
+    /// by default an id is held to the same test as any other string.
+    fn hit_id(&self, s: &str) -> bool { self.hit(s) }
 }
 
 /// The test that never fires, for a redactor that has no string test of its own.
@@ -146,17 +154,34 @@ impl<F: Fn(&str) -> bool + Send + Sync> StrTest for F {
     fn hit(&self, s: &str) -> bool { self(s) }
 }
 
-/// The stock string test: a string that holds a credential in any shape the commit hook refuses
-/// is covered whole. Daimond's `SCRUB_SHAPES` are a different list; see the module note.
+/// The stock string test: a string that holds a credential is covered whole.
 ///
-/// It is `fe2o3_text::secret::holds`, which honours no `allowlist secret` marker and skips no
-/// text for a NUL, since a feed's text is the very thing in doubt. Pair it with `Redact::with_head(0)`
-/// where the first characters of a credential must not show in its fingerprint.
+/// A credential here is anything `fe2o3_text::secret::holds` finds, which honours no `allowlist
+/// secret` marker and skips no text for a NUL since a feed's text is the very thing in doubt, or
+/// anything Daimond's content scrubber would mark: every shape in its `SCRUB_SHAPES`, a secret's
+/// name standing against a value (`token=...`, an `Authorization` header, a URL's `?key=`), and
+/// a long unbroken run of high entropy. That last is a heuristic, so a string found under a
+/// correlation-id field is excused from it alone ([`StrTest::hit_id`]); a shape still hits there.
+///
+/// `hit` says whether, and `scrub` is the in-place form Daimond writes, which cuts only the
+/// credential out of a string and keeps the words round it. A [`Redact`] covers a hit whole, which
+/// is the stronger of the two. Pair it with `Redact::with_head(0)` where the first characters of a
+/// credential must not show in its fingerprint.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Shapes;
 
+impl Shapes {
+
+    /// The string with each credential replaced by `[redacted <shape> #<hash>/<length>]`, exactly
+    /// as the JavaScript scrubber writes it. `is_id` suppresses the entropy catch alone.
+    pub fn scrub(&self, s: &str, is_id: bool) -> String {
+        scrub::text(s, is_id)
+    }
+}
+
 impl StrTest for Shapes {
-    fn hit(&self, s: &str) -> bool { secret::holds(s) }
+    fn hit(&self, s: &str) -> bool { secret::holds(s) || scrub::hit(s, false) }
+    fn hit_id(&self, s: &str) -> bool { secret::holds(s) || scrub::hit(s, true) }
 }
 
 /// A place a caller knows holds a secret, whatever it is called.
@@ -173,12 +198,14 @@ pub enum Deny {
 /// test fires. A covered scalar becomes its fingerprint, a covered object or list becomes
 /// `[redacted:object]` without being walked, and an empty value becomes `[redacted:absent]`.
 /// Lists are transparent to a deny path, so `["sess", "nonce"]` reaches the members of a list of
-/// sessions. Map keys that are strings meet the caller's test as well.
+/// sessions. Map keys that are strings meet the caller's test as well, and a string under a
+/// correlation-id field meets its `hit_id` instead (see [`Redact::id_key`]).
 pub struct Redact<T: StrTest = NoTest> {
     deny:   Vec<Deny>,
     test:   T,
     head:   usize,
     loose:  bool,
+    ids:    Vec<String>,    // fields whose strings are correlation ids
 }
 
 impl Redact<NoTest> {
@@ -189,6 +216,7 @@ impl Redact<NoTest> {
             test:   NoTest,
             head:   Self::DEFAULT_HEAD,
             loose:  false,
+            ids:    scrub::ID_KEYS.iter().map(|k| k.to_string()).collect(),
         }
     }
 }
@@ -226,12 +254,23 @@ impl<T: StrTest> Redact<T> {
         self
     }
 
+    /// Names a field whose strings are correlation ids, which a reader joins rows by: a string
+    /// under it, or under it through any lists, meets the test's `hit_id` and not its `hit`.
+    /// Daimond's own list (`id`, `callId`, `turn`, `device`, `d`, `b`, `n` and the rest of
+    /// `SCRUB_ID_KEYS`) is there from the start; an application adds the ids it stamps, such as a
+    /// session or a connection.
+    pub fn id_key(mut self, name: &str) -> Self {
+        self.ids.push(name.to_string());
+        self
+    }
+
     pub fn with_test<U: StrTest>(self, test: U) -> Redact<U> {
         Redact {
             deny:   self.deny,
             test,
             head:   self.head,
             loose:  self.loose,
+            ids:    self.ids,
         }
     }
 
@@ -244,7 +283,7 @@ impl<T: StrTest> Redact<T> {
     /// text it parsed the `Dat` from, byte for byte.
     pub fn walk(&self, d: &Dat) -> (Dat, bool) {
         let mut path = Vec::new();
-        self.value(d, &mut path, 0)
+        self.value(d, &mut path, 0, false)
     }
 
     /// A copy of the row with its payload covered. The payload's field names are the root's.
@@ -286,7 +325,13 @@ impl<T: StrTest> Redact<T> {
         if self.secret(name) || self.denied(path) {
             return self.cover(v);
         }
-        self.value(v, path, depth)
+        let id = self.ids.iter().any(|k| k == name);
+        self.value(v, path, depth, id)
+    }
+
+    // The caller's test, in the form that suits a correlation id or any other string.
+    fn hit(&self, s: &str, id: bool) -> bool {
+        if id { self.test.hit_id(s) } else { self.test.hit(s) }
     }
 
     // A value covered by its field: a scalar's fingerprint, or a note of what it was.
@@ -329,11 +374,11 @@ impl<T: StrTest> Redact<T> {
         }
     }
 
-    fn value(&self, v: &Dat, path: &mut Vec<String>, depth: usize) -> (Dat, bool) {
+    fn value(&self, v: &Dat, path: &mut Vec<String>, depth: usize, id: bool) -> (Dat, bool) {
         let deep = depth > MAX_DEPTH;
         match v {
             Dat::Str(s) => {
-                if !marker(s) && self.test.hit(s) {
+                if !marker(s) && self.hit(s, id) {
                     return (Dat::Str(fingerprint(s, self.head)), true);
                 }
             },
@@ -381,25 +426,25 @@ impl<T: StrTest> Redact<T> {
                 let mut out = Vec::with_capacity(l.len());
                 let mut changed = false;
                 for x in l {
-                    let (nx, c) = self.value(x, path, depth + 1);
+                    let (nx, c) = self.value(x, path, depth + 1, id);
                     changed |= c;
                     out.push(nx);
                 }
                 return (Dat::List(out), changed);
             },
             Dat::Box(b) => {
-                let (nb, c) = self.value(b, path, depth);
+                let (nb, c) = self.value(b, path, depth, id);
                 return (Dat::Box(Box::new(nb)), c);
             },
             Dat::Opt(o) => {
                 if let Some(x) = &**o {
-                    let (nx, c) = self.value(x, path, depth);
+                    let (nx, c) = self.value(x, path, depth, id);
                     return (Dat::Opt(Box::new(Some(nx))), c);
                 }
             },
-            Dat::Usr(id, Some(b)) => {
-                let (nb, c) = self.value(b, path, depth);
-                return (Dat::Usr(id.clone(), Some(Box::new(nb))), c);
+            Dat::Usr(uid, Some(b)) => {
+                let (nb, c) = self.value(b, path, depth, id);
+                return (Dat::Usr(uid.clone(), Some(Box::new(nb))), c);
             },
             _ => {},
         }
@@ -415,7 +460,7 @@ impl<T: StrTest> Redact<T> {
                             let mut b = a.clone();
                             let mut changed = false;
                             for x in b.iter_mut() {
-                                let (nx, c) = self.value(x, path, depth + 1);
+                                let (nx, c) = self.value(x, path, depth + 1, id);
                                 *x = nx;
                                 changed |= c;
                             }
