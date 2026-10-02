@@ -136,6 +136,12 @@ impl Diagnostic {
 
 	pub fn is_error(&self) -> bool { self.severity == Severity::Error }
 
+	/// The message up to its first colon: the name of what was passed over, before the particulars of
+	/// where it was met.
+	pub fn head(&self) -> &str {
+		self.message.split(':').next().unwrap_or("").trim()
+	}
+
 	/// `path:line:col: severity: message`, then one `hint:` line each, against the sources the span
 	/// indexes. A detached span or an unknown file renders without a position.
 	pub fn render(&self, sources: &[Source]) -> String {
@@ -152,6 +158,32 @@ impl Diagnostic {
 		}
 		s
 	}
+}
+
+/// The lines of the `--diag-summary` report, one for each severity, kind and construct, as
+/// `diag-summary <severity> <kind> <construct> <count>`, errors before warnings and each group in the
+/// order of its kind's word and construct. The construct is given only for kind `unsupported`, as the
+/// diagnostic's [`head`](Diagnostic::head) with each space written `_`; every other kind has `-`. No
+/// message, path or position is carried, so the report names what was passed over and never the document
+/// it was passed over in.
+pub fn summary_lines(diags: &[Diagnostic]) -> Vec<String> {
+	let mut counts: std::collections::BTreeMap<(Severity, &'static str, String), usize> =
+		std::collections::BTreeMap::new();
+	for d in diags {
+		let construct = match d.kind {
+			DiagnosticKind::Unsupported	=> {
+				let head: String = d.head().chars()
+					.map(|c| if c.is_whitespace() { '_' } else { c })
+					.collect();
+				if head.is_empty() { "-".to_string() } else { head }
+			},
+			_							=> "-".to_string(),
+		};
+		*counts.entry((d.severity, d.kind.as_str(), construct)).or_insert(0) += 1;
+	}
+	counts.into_iter()
+		.map(|((sev, kind, construct), n)| fmt!("diag-summary {} {} {} {}", sev.name(), kind, construct, n))
+		.collect()
 }
 
 /// An error's own message, the last one pushed, without the chain of places it passed through: the

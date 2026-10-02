@@ -435,7 +435,7 @@ impl Evaluated {
 				None	=> (String::new(), 0, 0),
 			};
 			if d.kind == DiagnosticKind::Unsupported && !d.is_error() {
-				let head = d.message.split(':').next().unwrap_or("").trim().to_string();
+				let head = d.head().to_string();
 				match skipped.iter_mut().find(|(h, _)| *h == head) {
 					Some((_, n))	=> *n += 1,
 					None			=> skipped.push((head, 1)),

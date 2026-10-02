@@ -16,6 +16,7 @@
 
 use oxedyne_fe2o3_austenite::{
 	compile,
+	diag,
 	emit::{
 		self,
 		svg,
@@ -489,12 +490,15 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 /// `/` resolves against (default the source's directory) and each `--font-path` a directory of fonts, as
 /// `typst compile` takes them. The terse `skipped:` line is built from the diagnostics of kind
 /// `unsupported`; under `--strict` a refusal of the strict rule fails the compile as Daimond's does.
+/// `--diag-summary` adds one stderr line for each severity, kind and construct, counts only
+/// ([`diag::summary_lines`]), on a compile that succeeds and on one that fails.
 fn compile_eval(
 	source:		&str,
 	out_dir:	&str,
 	root:		Option<&str>,
 	font_paths:	&[String],
 	strict:		bool,
+	diag_summary:	bool,
 )
 	-> Outcome<()>
 {
@@ -517,6 +521,12 @@ fn compile_eval(
 	let report = done.report();
 	if let Some(skip) = &report.skipped {
 		eprintln!("[austenite] {}", skip);
+	}
+	// Before the error a failed compile returns, so a run that stops still names what it passed over.
+	if diag_summary {
+		for line in diag::summary_lines(&done.engine.diags) {
+			eprintln!("{}", line);
+		}
 	}
 	let laid = match &done.laid {
 		Ok(l)	=> l,
@@ -555,6 +565,7 @@ fn main() -> Outcome<()> {
 	let mut explain		= false;
 	let mut eval		= false;
 	let mut strict		= false;
+	let mut diag_summary	= false;
 	let mut root:		Option<String>	= None;
 	let mut font_paths:	Vec<String>		= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
@@ -567,6 +578,7 @@ fn main() -> Outcome<()> {
 			"--explain"			=> explain = true,
 			"--eval"			=> eval = true,
 			"--strict"			=> strict = true,
+			"--diag-summary"	=> diag_summary = true,
 			"--root"			=> root = Some(match args.next() {
 				Some(p)	=> p,
 				None	=> return Err(err!("--root needs a directory argument."; Input, Invalid, Missing)),
@@ -588,7 +600,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
@@ -596,8 +608,11 @@ fn main() -> Outcome<()> {
 		None	=> "austenite-out".to_string(),
 	};
 
+	if diag_summary && !eval {
+		return Err(err!("--diag-summary needs --eval."; Input, Invalid));
+	}
 	if eval {
-		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict);
+		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict, diag_summary);
 	}
 
 	if watching {
