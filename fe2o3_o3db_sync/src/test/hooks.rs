@@ -15,6 +15,7 @@ use std::{
 static BARRIER_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each barrier
 static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels are handed over
 static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each garbage collection
+static COMMIT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // between a collection's two renames
 static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
@@ -23,6 +24,8 @@ static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the s
 static SYNCER_STOPS:     AtomicBool = AtomicBool::new(false); // syncers stop after their next batch
 static SYNCERS_STOPPED:  AtomicU64  = AtomicU64::new(0);      // stopped by the switch above
 static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs cannot be handed over
+static COLLECT_FAILS:    AtomicBool = AtomicBool::new(false); // every collection fails before it commits
+static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -40,6 +43,13 @@ pub fn set_publish_delay(d: Duration) {
 /// disk would take, so that writes can be made to land while a file is being collected.
 pub fn set_collect_delay(d: Duration) {
     COLLECT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds every garbage collection this long between putting its new data file in place and putting
+/// its new index file in place, as a process stopped there would be, so that a test can kill it
+/// with the data file of one generation beside the index file of the one before.
+pub fn set_commit_delay(d: Duration) {
+    COMMIT_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Holds a file bot this long before it forwards a supersession to the file bot of the superseded
@@ -89,6 +99,18 @@ pub fn set_pair_hand_failure(on: bool) {
     PAIR_HAND_FAILS.store(on, Ordering::Relaxed);
 }
 
+/// Makes every garbage collection fail once it has written its temporary files, before it has
+/// replaced anything, as a disk that filled during the transcription would, and counts each
+/// collection it fails.
+pub fn set_collect_failure(on: bool) {
+    COLLECT_FAILS.store(on, Ordering::Relaxed);
+}
+
+/// How many collections `set_collect_failure` has failed so far.
+pub fn collections_failed() -> u64 {
+    COLLECTS_FAILED.load(Ordering::Relaxed)
+}
+
 pub(crate) fn barrier_delay() {
     pause(&BARRIER_DELAY_MS);
 }
@@ -99,6 +121,10 @@ pub(crate) fn publish_delay() {
 
 pub(crate) fn collect_delay() {
     pause(&COLLECT_DELAY_MS);
+}
+
+pub(crate) fn commit_delay() {
+    pause(&COMMIT_DELAY_MS);
 }
 
 pub(crate) fn forward_delay() {
@@ -126,6 +152,15 @@ pub(crate) fn syncer_stops() -> bool {
 
 pub(crate) fn pair_hand_fails() -> bool {
     PAIR_HAND_FAILS.load(Ordering::Relaxed)
+}
+
+/// Is this collection to fail now?  Counted when it is.
+pub(crate) fn collect_fails() -> bool {
+    let fails = COLLECT_FAILS.load(Ordering::Relaxed);
+    if fails {
+        COLLECTS_FAILED.fetch_add(1, Ordering::Relaxed);
+    }
+    fails
 }
 
 /// Is the disk to fail this sync?  Counted when it is.

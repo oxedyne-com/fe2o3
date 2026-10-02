@@ -11,6 +11,7 @@
 //! [`render_document`] rather than the per-page `render_page` the [`super::Emitter`] enum uses for
 //! SVG.
 
+use crate::doc::DocInfo;
 use crate::font::ShapedText;
 use crate::ir::{
 	DrawOp,
@@ -34,12 +35,27 @@ use oxedyne_fe2o3_graphics::{
 	},
 	pdf::{
 		OutlineItem,
+		PdfInfo,
 		PdfPage,
 		PdfStream,
 		PdfWriter,
 	},
 	transform::Transform,
 };
+
+const ENGINE_NAME: &str = "Austenite";	// `/Creator` and `/Producer`: a name, never a version or a build
+
+/// The Info dictionary a document's metadata lowers to, `/Creator` and `/Producer` always naming the engine.
+fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
+	PdfInfo {
+		title:		doc_info.title.clone(),
+		author:		doc_info.author.clone(),
+		subject:	doc_info.subject.clone(),
+		keywords:	doc_info.keywords.clone(),
+		creator:	Some(ENGINE_NAME.to_string()),
+		producer:	Some(ENGINE_NAME.to_string()),
+	}
+}
 
 /// Renders a whole document -- every page -- as one PDF file, held in a buffer. A convenience for a
 /// short run; a whole book streams to a file with [`stream_document`] instead, which never holds more
@@ -64,16 +80,17 @@ pub fn open_document<W: Write>(out: W, total: usize) -> Outcome<PdfStream<W>> {
 }
 
 /// As [`open_document`], but the file also carries a document outline (the viewer's bookmark side
-/// panel), built by the caller from the heading table and the front-matter anchors. An empty outline
-/// yields a file byte-identical to [`open_document`]'s.
+/// panel), built by the caller from the heading table and the front-matter anchors, and the Info
+/// dictionary of `doc_info`.
 pub fn open_document_with_outline<W: Write>(
 	out:		W,
 	total:		usize,
 	outline:	Vec<OutlineItem>,
+	doc_info:	&DocInfo,
 )
 	-> Outcome<PdfStream<W>>
 {
-	PdfStream::new_with_outline(out, total, true, outline)
+	PdfStream::new_with_outline_and_info(out, total, true, outline, Some(pdf_info(doc_info)))
 }
 
 /// Renders one page's frame to the open PDF stream. The page's outlines live only for this call: the
@@ -229,7 +246,7 @@ fn draw_text(
 			let gid = match u16::try_from(glyph.id) {
 				Ok(g)	=> g,
 				Err(_)	=> return Err(err!(
-					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range)),
+					"Glyph id {} exceeds the 16 bits a font program can index.", glyph.id; Invalid, Range, LimitReached)),
 			};
 			out.text(prog, gid, x, y, shaped.size(), shaped.colour(), text);
 			continue;

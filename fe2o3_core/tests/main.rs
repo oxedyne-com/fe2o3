@@ -1,3 +1,4 @@
+mod channels;
 mod path;
 mod string;
 
@@ -23,6 +24,7 @@ fn main() -> Outcome<()> {
 fn run_tests() -> Outcome<()> {
 
     let filter = "all";
+    res!(channels::test_channels(filter));
     res!(path::test_path(filter));
     //res!(string::test_string(filter));
 

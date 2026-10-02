@@ -39,6 +39,8 @@ use crate::ir::Span;
 use crate::table::Align;
 
 use super::ast::{AlignSpec, ClosureAlign, FigureBody, Inline, Item, ListItem, Spacing, TableSpec};
+use super::lex;
+use super::lex::Lexer;
 use super::mathparse;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -72,8 +74,9 @@ pub(crate) fn term_value(key: &str) -> Option<String> {
 	}
 }
 
-/// Why a construct was refused rather than set: the axis a per-site diagnostic reports alongside its
-/// name and location, so a reader can tell a categorical limit from a todo.
+/// Why a site was not set as written: the axis a per-site diagnostic reports alongside its name and
+/// location. The first three name a construct the reader passed over; the rest a site that was set with
+/// something standing in for what it asked for, the page built all the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusalClass {
 	// Typst's own general evaluation primitives -- `#import`, `#let`, `#set`, `#show` -- which run an
@@ -90,6 +93,14 @@ pub enum RefusalClass {
 	// Anything else skipped: a specific call or wrapper (`#columns`, an unknown standalone or inline
 	// `#func`, an unknown term-dictionary key) that names no fundamental barrier -- just not yet read.
 	Unsupported,
+	// A file the construct names that the project does not hold, set with a stand-in or left out.
+	MissingFile,
+	// A text file that is there but is not valid UTF-8, its content left out.
+	Encoding,
+	// Something the construct asked for that is there but could not be used -- an image that will not
+	// decode, a figure that will not build, a label or citation key that resolves to nothing -- set with a
+	// stand-in in its place.
+	Unusable,
 }
 
 impl RefusalClass {
@@ -118,36 +129,44 @@ impl RefusalClass {
 			RefusalClass::FixedPoint		=> "fixed-point",
 			RefusalClass::Introspective	=> "introspective",
 			RefusalClass::Unsupported		=> "unsupported",
+			RefusalClass::MissingFile		=> "missing-file",
+			RefusalClass::Unusable			=> "unusable",
+			RefusalClass::Encoding			=> "encoding",
 		}
+	}
+
+	/// Was the construct passed over, rather than set with a stand-in?
+	pub fn passed_over(&self) -> bool {
+		matches!(self, RefusalClass::FixedPoint | RefusalClass::Introspective | RefusalClass::Unsupported)
 	}
 }
 
-/// One site the reader passed over rather than set: the source name it was written with (carrying its
-/// leading `#`, so it reads back as source), the byte span it was found at, and why it was refused.
-/// The span is the whole containing line for a code statement or standalone call, or the whole
-/// containing item (a paragraph, a heading) for an inline call found within one -- Austenite's inline
-/// scanner does not keep the fine per-character offset once a paragraph's lines have been joined and its
-/// whitespace collapsed, so the enclosing item is the finest boundary available without a deeper rework
-/// of the reader than this diagnostic upgrade is for.
+/// One site not set as written: the source name it was written with (carrying its leading `#`, so it
+/// reads back as source), the byte span it was found at, and why. The span is the whole containing line
+/// for a code statement or standalone call, or the whole containing item (a paragraph, a heading) for an
+/// inline call found within one -- Austenite's inline scanner does not keep the fine per-character offset
+/// once a paragraph's lines have been joined and its whitespace collapsed, so the enclosing item is the
+/// finest boundary available without a deeper rework of the reader than this diagnostic upgrade is for.
 #[derive(Clone, Debug)]
 pub struct Refusal {
 	pub name:	String,
 	pub span:	Span,
 	pub class:	RefusalClass,
-	// The source file this site was read from, for `--explain`'s "file:line:col". Empty immediately
-	// after parsing, since a lone parse of a source string carries no filename of its own; the book
-	// assembler ([`crate::book::assemble`]) tags each chapter's (and the root's own) refusals with the
-	// real path once assembly is back in a context that has one -- see [`Refusals::tag_file`].
+	// The source file this site was read from, for `--explain`'s "file:line:col". Empty immediately after
+	// a parse, since a parse of a source string carries no filename of its own; its caller tags the table
+	// with the real path at once (see [`Refusals::tag_file`]), and every other collector records its sites
+	// with their file ([`Refusals::record_in`]).
 	pub file:	String,
+	pub note:	Option<String>,	// for a site set with a stand-in, what went wrong and what stands in its place
 }
 
-/// Every site the reader refused across one parse (or, once [`Refusals::merge`] has folded chapters
-/// together, across a whole book). Kept as a flat list of [`Refusal`]s rather than the old name-keyed
-/// tally, so a caller can still print the terse one-line [`Refusals::report`] but can also walk every
+/// Every site not set as written across one parse (or, once [`Refusals::merge`] has folded chapters
+/// together, across a whole compile). Kept as a flat list of [`Refusal`]s rather than the old name-keyed
+/// tally, so a caller can still print the terse one-line [`Refusals::skip_line`] but can also walk every
 /// site for `--explain`'s per-site listing. Empty when the reader set everything it met.
 #[derive(Clone, Debug, Default)]
 pub struct Refusals {
-	sites: Vec<Refusal>,
+	sites:	Vec<Refusal>,
 }
 
 impl Refusals {
@@ -155,7 +174,37 @@ impl Refusals {
 	/// the span it was found at, classifying it from the name.
 	pub(crate) fn record(&mut self, name: &str, span: Span) {
 		let class = RefusalClass::classify(name);
-		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new() });
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: String::new(), note: None });
+	}
+
+	/// Records a refused construct already known to stand in `file`, for a collector recording into a table
+	/// that holds other files' sites, so the site never waits for a later tagging to say where it is.
+	pub(crate) fn record_in(&mut self, file: &str, name: &str, span: Span) {
+		let class = RefusalClass::classify(name);
+		self.sites.push(Refusal { name: name.to_string(), span, class, file: file.to_string(), note: None });
+	}
+
+	/// Records a site set with a stand-in: `class` says why, `note` what went wrong and what stands in.
+	pub(crate) fn record_stand_in(&mut self, name: &str, span: Span, class: RefusalClass, note: &str) {
+		self.record_stand_in_in("", name, span, class, note);
+	}
+
+	/// Records a `$` whose maths never closes: Typst refuses the file there, and the reader reads it as the
+	/// character it is ([`lex::lone_dollars`]).
+	pub(crate) fn record_lone_dollar_in(&mut self, file: &str, span: Span) {
+		self.record_stand_in_in(file, "inline maths", span, RefusalClass::Unusable,
+			"never closes, so its `$` is set as text");
+	}
+
+	/// As [`Self::record_stand_in`], for a site already known to stand in `file`.
+	pub(crate) fn record_stand_in_in(&mut self, file: &str, name: &str, span: Span, class: RefusalClass, note: &str) {
+		self.sites.push(Refusal {
+			name:	name.to_string(),
+			span,
+			class,
+			file:	file.to_string(),
+			note:	Some(note.to_string()),
+		});
 	}
 
 	/// Builds a table directly from a caller's own sites, for a test (or another future caller outside
@@ -166,11 +215,8 @@ impl Refusals {
 
 	pub fn is_empty(&self) -> bool { self.sites.is_empty() }
 
-	/// Sets every site's `file` that is not already set, so a caller assembling several chapters can tag
-	/// each chapter's refusals with its own path right after parsing it, before folding them into the
-	/// book's running total with [`merge`](Self::merge) -- at which point every site already carries the
-	/// file it came from, and a second tagging (the root's own trailing markup, read after every
-	/// include) touches only the sites still unset.
+	/// Sets every site's `file` that is not already set, so a caller parsing a file's source tags the
+	/// parse's table with the file's path at once, before it joins any other file's.
 	pub fn tag_file(&mut self, file: &str) {
 		for r in &mut self.sites {
 			if r.file.is_empty() {
@@ -179,25 +225,31 @@ impl Refusals {
 		}
 	}
 
-	/// Every refused site, in the order the reader met them.
+	/// Moves every site on by `by` bytes, placing a parse of a fragment in the file it was cut from.
+	pub(crate) fn shift(&mut self, by: u32) {
+		for r in &mut self.sites {
+			r.span = Span::new(r.span.start.saturating_add(by), r.span.end.saturating_add(by));
+		}
+	}
+
+	/// Every site not set as written, in the order they were met.
 	pub fn sites(&self) -> &[Refusal] { &self.sites }
 
-	/// The number of distinct construct names refused.
+	/// The number of distinct construct names passed over.
 	pub fn kinds(&self) -> usize { self.entries().len() }
 
-	/// The total count of refused sites across every name.
+	/// The total count of sites across every name.
 	pub fn total(&self) -> usize { self.sites.len() }
 
-	/// Each refused construct name with its count, ordered by descending count then name, so the report
-	/// leads with the construct that cost the most.
+	/// Each construct name passed over, with its count, ordered by descending count then name, so the
+	/// report leads with the construct that cost the most.
 	pub fn entries(&self) -> Vec<(String, usize)> {
-		let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-		for r in &self.sites {
-			*counts.entry(r.name.as_str()).or_insert(0) += 1;
-		}
-		let mut v: Vec<(String, usize)> = counts.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
-		v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-		v
+		tally(self.sites.iter().filter(|r| r.class.passed_over()))
+	}
+
+	/// Each site set with a stand-in, by name, with its count, ordered as [`Self::entries`] orders them.
+	pub fn stand_ins(&self) -> Vec<(String, usize)> {
+		tally(self.sites.iter().filter(|r| !r.class.passed_over()))
 	}
 
 	/// Folds another parse's refusals into this one, so a caller assembling several chapters reports one
@@ -207,21 +259,61 @@ impl Refusals {
 		self.sites.extend(other.sites);
 	}
 
-	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- or `None` when
-	/// nothing was skipped, so a caller prints the line only when it has something to say. Unchanged in
-	/// wording from before this unit: `--explain` is the new, detailed report, this terse one stays the
-	/// default.
-	pub fn report(&self) -> Option<String> {
-		if self.sites.is_empty() {
+	/// The terse line of the constructs passed over -- `skipped: #show ×2, #columns ×1` -- ordered as
+	/// [`Refusals::entries`] orders them, or `None` when none was. A site set with a stand-in was not
+	/// skipped, so it is not on the line.
+	pub fn skip_line(&self) -> Option<String> {
+		let entries = self.entries();
+		if entries.is_empty() {
 			return None;
 		}
-		let parts: Vec<String> = self.entries().into_iter()
+		Some(fmt!("skipped: {}", counted(&entries)))
+	}
+
+	/// The line of every site not set as written: the [`skip line`](Self::skip_line), then the sites set
+	/// with a stand-in -- `skipped: #columns ×1; substituted: image "gone.png" ×1` -- or `None` for none.
+	pub fn summary(&self) -> Option<String> {
+		let mut parts: Vec<String> = Vec::new();
+		if let Some(line) = self.skip_line() {
+			parts.push(line);
+		}
+		let stand_ins = self.stand_ins();
+		if !stand_ins.is_empty() {
+			parts.push(fmt!("substituted: {}", counted(&stand_ins)));
+		}
+		if parts.is_empty() { None } else { Some(parts.join("; ")) }
+	}
+
+	/// A one-line report -- "skipped 3 unsupported constructs: #show (2), #columns (1)" -- of the constructs
+	/// passed over, or `None` when none was, so a caller prints the line only when it has something to say.
+	pub fn report(&self) -> Option<String> {
+		let entries = self.entries();
+		if entries.is_empty() {
+			return None;
+		}
+		let parts: Vec<String> = entries.into_iter()
 			.map(|(n, c)| fmt!("{} ({})", n, c))
 			.collect();
-		let n = self.total();
+		let n: usize = self.sites.iter().filter(|r| r.class.passed_over()).count();
 		Some(fmt!("skipped {} unsupported construct{}: {}",
 			n, if n == 1 { "" } else { "s" }, parts.join(", ")))
 	}
+}
+
+/// Each name among `sites` with its count, by descending count then name.
+fn tally<'a, I: Iterator<Item = &'a Refusal>>(sites: I) -> Vec<(String, usize)> {
+	let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+	for r in sites {
+		*counts.entry(r.name.as_str()).or_insert(0) += 1;
+	}
+	let mut v: Vec<(String, usize)> = counts.into_iter().map(|(k, c)| (k.to_string(), c)).collect();
+	v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+	v
+}
+
+/// `name ×count` pairs joined with commas.
+fn counted(entries: &[(String, usize)]) -> String {
+	entries.iter().map(|(n, c)| fmt!("{} ×{}", n, c)).collect::<Vec<_>>().join(", ")
 }
 
 /// Parses a whole Ingot source string into its surface items. The only error is an empty heading --
@@ -241,62 +333,6 @@ pub fn document_with_refusals(src: &str) -> Outcome<(Vec<Item>, Refusals)> {
 	document_with_templates(src, crate::lang::rules::Bindings::new(&tfns, &cfns))
 }
 
-/// Records a refusal for every claim reference (`#claim-refs`/`#claim-label`) that sits in a context the
-/// layout does not gather into the reverse claim index. A top-level body run -- a paragraph, a list entry, a
-/// callout body -- and a table cell both feed the index (see `doc::build_pieces`, reached for a cell through
-/// `doc::build_grid`); a claim code in a heading title, a figure or table caption, or a footnote body is
-/// dropped by the layout, so it would otherwise vanish from the index (and, for a `#claim-label`, from the
-/// margin) with no trace. Making that a refusal keeps the silent-loss class this project guards against out
-/// of the reverse index. Gathering from a heading or caption needs anchor support there and is a later
-/// increment; until then the code is reported, not dropped.
-fn flag_unindexed_claim_refs(items: &[Item], skips: &mut Refusals) {
-	for item in items {
-		match item {
-			// A body run and a list entry are gathered; only a claim reference nested inside a footnote of one
-			// escapes the index, so the top-level runs are scanned as indexed and their footnotes are not.
-			Item::Paragraph { runs, span, .. }	=> scan_claim_refs(runs, true, *span, "a paragraph", skips),
-			Item::List { items: entries, .. }	=> for e in entries { flag_list_item_claim_refs(e, skips); },
-			// A callout body is gathered like the main flow; recurse so a claim reference in it is indexed and
-			// only its non-body sub-contexts (a caption, a footnote) are flagged.
-			Item::Box { items: inner, .. }		=> flag_unindexed_claim_refs(inner, skips),
-			Item::Scoped { items: inner, .. }	=> flag_unindexed_claim_refs(inner, skips),
-			// A heading title and a caption are still not gathered, so a claim reference in either is refused.
-			// A table cell now runs through the body's own segment pipeline (`doc::build_grid` ->
-			// `doc::build_pieces`), which weaves the cell's `#claim-refs`/`#claim-label` anchor into the reverse
-			// claim index exactly as a body run does, so it is no longer refused.
-			Item::Heading { runs, span, .. }	=> scan_claim_refs(runs, false, *span, "a heading title", skips),
-			Item::Figure { caption, span, .. } => {
-				if let Some(cap) = caption {
-					scan_claim_refs(cap, false, *span, "a figure caption", skips);
-				}
-			},
-			_ => {},
-		}
-	}
-}
-
-/// [`flag_unindexed_claim_refs`] for one list entry: its own runs are gathered (indexed), and its nested
-/// child items are walked as their own contexts.
-fn flag_list_item_claim_refs(entry: &ListItem, skips: &mut Refusals) {
-	scan_claim_refs(&entry.runs, true, Span::new(0, 0), "a list entry", skips);
-	flag_unindexed_claim_refs(&entry.children, skips);
-}
-
-/// Scans an inline run for claim references and records a refusal for each that will not reach the reverse
-/// index. `indexed` is true for a top-level body run (a paragraph, list entry or callout body), where a
-/// claim reference IS gathered and so is left alone; a footnote body is never gathered, so its own runs are
-/// always scanned as unindexed regardless of where the footnote sits.
-fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, skips: &mut Refusals) {
-	for run in runs {
-		match run {
-			Inline::MarginNote { codes, .. } if !indexed && !codes.is_empty() =>
-				skips.record(&fmt!("claim reference in {} is not indexed", context), span),
-			Inline::Footnote(inner) => scan_claim_refs(inner, false, span, "a footnote body", skips),
-			_ => {},
-		}
-	}
-}
-
 /// As [`document_with_refusals`], with the `#let` bindings (`binds`) in scope: a call to a furniture
 /// function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` -- expands into a padded box, and a
 /// reference to a content binding -- `#greet("world")`, a bare `#intro` -- expands into its re-read markup,
@@ -304,16 +340,12 @@ fn scan_claim_refs(runs: &[Inline], indexed: bool, span: Span, context: &str, sk
 /// so a call nested inside another's body expands too. With empty maps this is exactly
 /// [`document_with_refusals`].
 ///
-/// After the surface tree is built, [`flag_unindexed_claim_refs`] records a refusal for any claim reference
-/// that landed in a context the layout does not gather into the reverse claim index. This runs once, on the
-/// whole assembled tree -- the recursive re-parse of a `#columns`/`#styled-box` body reaches for
-/// [`parse_items`] directly, so a nested claim reference is flagged once here rather than again per level.
+/// A claim reference in a context the reverse claim index does not gather -- a heading title, a caption, a
+/// footnote body -- is answered where it is set ([`crate::doc::asks_of`]), not judged here.
 pub fn document_with_templates(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	-> Outcome<(Vec<Item>, Refusals)>
 {
-	let (items, mut skips) = res!(parse_items(src, binds));
-	flag_unindexed_claim_refs(&items, &mut skips);
-	Ok((items, skips))
+	parse_items(src, binds)
 }
 
 /// The surface-tree parse proper, without the [`flag_unindexed_claim_refs`] post-pass -- so a recursively
@@ -328,7 +360,6 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	let mut para_start:	u32			= 0;			// byte offset of the paragraph's first line
 	let mut para_end:	u32			= 0;			// byte offset just past its last line's content
 	let mut offset:		u32			= 0;			// running byte offset of the current line's start
-	let mut line_no					= 0usize;		// 1-based, for a diagnostic
 
 	// The stack of open list levels, innermost last. Each level records the leading-space indent of its
 	// markers, so a deeper marker opens a sub-list under the current item and a shallower one closes back
@@ -341,11 +372,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// stands, its indentation and markup untouched.
 	let mut code:		Option<(Vec<String>, u32)>	= None;
 
-	// A multi-line Typst code statement or standalone template call being skipped: the net bracket depth
-	// still open across the lines consumed so far, and whether a string literal is currently open. `None`
-	// when not skipping. While it is `Some`, every line is consumed and nothing is set until the delimiters
-	// balance.
-	let mut skip:		Option<SkipState>	= None;
+	// A multi-line Typst code statement or standalone template call being skipped: the lexer's state across
+	// the lines consumed so far. `None` when not skipping. While it is `Some`, every line is consumed and
+	// nothing is set until the construct ends.
+	let mut skip:		Option<(Lexer, Span, String)>	= None;	// with its opening line and its name
 
 	// A multi-line construct whose whole text is gathered so it can be parsed rather than skipped: a
 	// `#figure(...)`, a bare `#table(...)`, or a `#let name = (...)` data array feeding a table. `None`
@@ -357,14 +387,28 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// Populated as the arrays are read, so a later figure resolves its cells against them.
 	let mut arrays:		HashMap<String, Vec<Vec<Inline>>>	= HashMap::new();
 
-	// Whether a `/* ... */` block comment is open across the line break. A `//` line comment never
-	// straddles a line, so it needs no carried state.
-	let mut comment	= CommentState { in_block: false };
+	// What each byte of the source is, read once over the whole source as Typst's lexer reads it: a `/*`
+	// in a link or raw text opens no comment, and one in a quoted phrase does, since a quote in markup is a
+	// character; raw text runs across lines until a run of backticks as long as its opener.
+	let toks	= lex::byte_toks(src);
+	// Where each line stands -- the file's own level, a bare content block, a list item, strong or emphasis,
+	// or in code -- so a rule or an include the reader meets is held to the place it is read at.
+	let placed	= lex::placed_lines(src);
+	// Each `$` whose maths never closes, which the lexer read as a character: every line below writes it
+	// `\$`, so each reader after the lexer -- a gathered construct's own, a paragraph's maths, the inline
+	// reader -- reads it as a character too, and it is recorded, once, as the loop reaches its line.
+	let mut lone = src.bytes().enumerate()
+		.filter(|&(at, b)| b == b'$' && toks.get(at) == Some(&lex::Tok::Text))
+		.map(|(at, _)| at)
+		.peekable();
+	// Which bytes each conditional and loop in the markup leaves to be read, and the sites of those refused
+	// whole, recorded as the loop reaches the line each opens on.
+	let (keep, flow_sites)	= flow_mask(src, binds.guards, binds.guard_at);
+	let mut flow_sites		= flow_sites.into_iter().peekable();
 
 	// `split_inclusive` keeps the trailing newline on each piece, so the running offset stays a true
 	// byte position into the source rather than drifting by the count of stripped terminators.
 	for raw in src.split_inclusive('\n') {
-		line_no += 1;
 		let start = offset;
 		offset = offset.saturating_add(raw.len() as u32);
 
@@ -378,14 +422,21 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// Strip Typst comments before classifying the line, but not while a fenced code block or a
 		// multi-line call skip is open: inside a fence a `//` is verbatim, and a skipped span is dropped
 		// whole regardless. The span above is computed from the raw line, so a diagnostic caret still
-		// points into the source.
-		let stripped;
-		let line = if code.is_none() && skip.is_none() {
-			stripped = strip_comments(line, &mut comment);
-			stripped.as_str()
+		// points into the source. Either way a `$` whose maths never closes is written `\$`.
+		let range		= start as usize..end as usize;
+		let line_toks	= toks.get(range.clone()).unwrap_or(&[]);
+		let stripped	= if code.is_none() && skip.is_none() {
+			strip_comments(line, line_toks, keep.get(range).unwrap_or(&[]))
 		} else {
-			line
+			lone_escaped(line.char_indices(), line_toks)
 		};
+		let line = stripped.as_str();
+		while let Some((_, r)) = flow_sites.next_if(|(at, _)| *at < offset as usize) {
+			skips.sites.push(r);
+		}
+		while let Some(at) = lone.next_if(|at| *at < offset as usize) {
+			skips.record_lone_dollar_in("", Span::new(at as u32, at as u32 + 1));
+		}
 
 		let trimmed = line.trim_start();
 
@@ -393,9 +444,10 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		// bracket nesting across `()`, `[]` and `{}` and respecting string literals, until the delimiters
 		// balance. Nothing between the opener and its close is set. This takes precedence over every other
 		// rule, since the span is code, not markup.
-		if let Some(state) = skip.as_mut() {
-			scan_brackets(line, state);
-			if !state.has_open_bracket() {
+		if let Some((state, at, name)) = skip.as_mut() {
+			state.feed_line(line);
+			if !state.is_open() {
+				skips.record(name, *at);
 				skip = None;
 			}
 			continue;
@@ -407,11 +459,11 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		if let Some(cap) = capture.as_mut() {
 			cap.buf.push_str(line);
 			cap.buf.push('\n');
-			scan_brackets(line, &mut cap.state);
-			if !cap.state.has_open_bracket() {
+			cap.state.feed_line(line);
+			if !cap.state.is_open() {
 				let done = capture.take();
 				if let Some(cap) = done {
-					dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
+					res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));
 				}
 			}
 			continue;
@@ -426,6 +478,24 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			} else {
 				buf.push(line.to_string());
 			}
+			continue;
+		}
+		// A line a conditional or a loop took, holding nothing of it the reader keeps -- its opener, its `else`,
+		// its closer, a line of a branch not taken -- is the statement's: it neither sets anything nor parts
+		// the paragraph around it, as the statement parts none in Typst.
+		if trimmed.is_empty() && keep.get(start as usize..offset as usize).is_some_and(|k| k.contains(&false)) {
+			continue;
+		}
+		// A line that opens inside raw text an earlier line began -- a single backtick's span, or a block
+		// opened mid-line -- is that text's, not a construct or a marker: it joins the paragraph the raw
+		// text stands in, whose inline read sets it as code.
+		if start > 0 && toks.get(start as usize - 1) == Some(&lex::Tok::Raw) {
+			flush_list(&mut items, &mut stack);
+			if lines.is_empty() {
+				para_start = start;
+			}
+			lines.push(line.to_string());
+			para_end = end;
 			continue;
 		}
 		if is_fence(trimmed) {
@@ -459,7 +529,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			}
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 		} else if let Some(kind) = capture_opener(trimmed, binds)
-			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_)) && !lines.is_empty()))
+			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Bare) && !lines.is_empty()))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
 			// splicing a block, matching Typst's inline value flow: only a reference with no paragraph open
@@ -479,14 +549,15 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
-			let mut state	= SkipState::new();
-			scan_brackets(line, &mut state);
+			let mut state	= Lexer::markup();
+			state.feed_line(line);
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
-			let cap = Capture { kind, buf, state, start };
-			if !cap.state.has_open_bracket() {
-				dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);	// the whole construct closed on one line
+			let place = lex::place_in(&placed, start as usize).unwrap_or(lex::Place::Content);
+			let cap = Capture { kind, buf, state, start, place };
+			if !cap.state.is_open() {
+				res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
 			}
@@ -517,9 +588,20 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// The recorded span is the opening line alone, even for a construct whose delimiters run on
 			// for several more: that is where a reader wants `--explain`'s caret to land, and the true
 			// closing offset is not known until the multi-line skip above closes, several iterations on.
-			skips.record(&construct_name(trimmed), Span::new(start, end));
-			if let CodeSkip::Multi(state) = decision {
-				skip = Some(state);
+			// A statement that closes on a later line is recorded when it closes, or at the end of the source
+			// when it never does, so the one site says which.
+			// An `#include` at a file's top level is followed by the assembler, so one met here stands in a
+			// body, where Typst sets the file; this reader does not follow it, and refuses it where it stands.
+			let place	= lex::place_in(&placed, start as usize).unwrap_or(lex::Place::Content);
+			let name	= match construct_name(trimmed) {
+				n if n == "#include" && (binds.body || place != lex::Place::Top)
+					=> "#include (inside a body, where it is not followed)".to_string(),
+				n	=> n,
+			};
+			let at		= Span::new(start, end);
+			match decision {
+				CodeSkip::Line			=> skips.record(&name, at),
+				CodeSkip::Multi(state)	=> skip = Some((state, at, name)),
 			}
 		} else if lines.is_empty() && is_code_reference(trimmed) && !names_scalar_alone(trimmed, binds.sfns) {
 			// A line-leading code-mode reference the reader cannot run -- a bare `#name` bound to nothing, a
@@ -543,15 +625,13 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			flush_list(&mut items, &mut stack);
 			let level = trimmed.chars().take_while(|&c| c == '=').count();
 			let raw = trimmed[level..].trim();	// '=' is ASCII, so a byte slice at the count is safe
-			if raw.is_empty() {
-				return Err(err!(
-					"Empty heading on line {}: a `=` marker must be followed by a title.", line_no;
-					Input, Invalid, Missing));
-			}
+			// Typst sets a heading with no title as an empty heading; this reader sets none, so the marker is
+			// refused where it stands, in a body as at the top level, and the rest of the file still sets.
 			let (title, label) = split_label(raw);
 			if title.is_empty() {
-				return Err(err!(
-					"Heading on line {} has a label but no title.", line_no; Input, Invalid, Missing));
+				let why = if label.is_some() { "with a label but no title" } else { "with no title" };
+				skips.record(&fmt!("= (a heading {})", why), Span::new(start, end));
+				continue;
 			}
 			// The title carries inline markup like any run, so a glossary term, an index call, emphasis or a
 			// maths span in a heading sets its display text rather than leaking its raw source into the head
@@ -563,7 +643,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			let title = substitute_scalars(&title, binds.sfns);
 			items.push(Item::Heading {
 				level:	level as u8,
-				runs:	parse_inlines_in(&title, head_span, &mut skips),
+				runs:	parse_inlines_in(&title, head_span, &mut skips, binds),
 				label,
 				span:	head_span,
 			});
@@ -585,7 +665,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					// while the same reference in a paragraph beside it expanded, an inconsistency a reader sees.
 					let item_span	= Span::new(start, end);
 					let text		= substitute_content_calls(&text, binds, &mut skips, item_span);
-					let runs		= parse_inlines_in(&text, item_span, &mut skips);
+					let runs		= parse_inlines_in(&text, item_span, &mut skips, binds);
 					list_marker(&mut items, &mut stack, indent, ord, runs, start, end);
 				},
 				None => {
@@ -595,6 +675,11 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 					flush_list(&mut items, &mut stack);
 					if lines.is_empty() {
 						para_start = start;
+					} else if trimmed.starts_with("#[") && !math_block_open {
+						// A bare content block opening inside a paragraph joins it in Typst. This reader sets it as
+						// the text it is written as, brackets and all, and says so.
+						skips.record_stand_in("#[", Span::new(start, end), RefusalClass::Unsupported,
+							"stands inside a paragraph, so it is set as text, brackets and all");
 					}
 					lines.push(line.to_string());
 					para_end = end;
@@ -607,13 +692,20 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// unterminated code fence still yields the block it had gathered.
 	flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 	flush_list(&mut items, &mut stack);
-	if let Some((buf, cstart)) = code {
-		items.push(Item::Code { lines: buf, span: Span::new(cstart, offset) });
+	skips.sites.extend(flow_sites.map(|(_, r)| r));
+	// A construct still open at the end of the source never closed, so everything after its opener was taken
+	// into it, where Typst refuses the file: a raw block, a gathered call or a skipped statement is refused
+	// where it opens, and nothing it took in is set.
+	let never = "never closes, so nothing from it to the end of the file is set";
+	if let Some((_, cstart)) = code {
+		skips.record_stand_in("``` (a raw block)", Span::new(cstart, cstart), RefusalClass::Unsupported, never);
 	}
-	// A construct left open at end of source is dispatched with what it gathered, so a missing closer
-	// still yields its best-effort figure or table rather than swallowing the tail silently.
 	if let Some(cap) = capture {
-		dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds);
+		let first = cap.buf.lines().next().unwrap_or("").trim_start();
+		skips.record_stand_in(&construct_name(first), Span::new(cap.start, cap.start), RefusalClass::Unsupported, never);
+	}
+	if let Some((_, at, name)) = skip {
+		skips.record_stand_in(&name, at, RefusalClass::Unsupported, never);
 	}
 	Ok((items, skips))
 }
@@ -707,7 +799,7 @@ fn list_marker(
 				top.loose = true;
 			}
 			top.saw_blank = false;
-			top.items.push(ListItem { runs, children: Vec::new() });
+			top.items.push(ListItem { runs, children: Vec::new(), span: Span::new(start, end) });
 			top.end = end;
 		},
 		Some(top) if top.indent == indent => {
@@ -716,12 +808,12 @@ fn list_marker(
 				fold(items, stack, frame);
 			}
 			stack.push(ListFrame {
-				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end });
+				indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new(), span: Span::new(start, end) }], loose: false, saw_blank: false, start, end });
 		},
 		// Deeper than the current level (a sub-list), or the first marker of a list: open a new level. A
 		// deeper level becomes a child of the current item when it folds.
 		_ => stack.push(ListFrame {
-			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new() }], loose: false, saw_blank: false, start, end }),
+			indent, ordered: ord, items: vec![ListItem { runs, children: Vec::new(), span: Span::new(start, end) }], loose: false, saw_blank: false, start, end }),
 	}
 }
 
@@ -791,7 +883,7 @@ fn flush_para(
 	// maths, or any other captured construct (a table, a figure, a `#context` block) -- those are gathered
 	// and dispatched on a wholly separate path and never reach here.
 	let body = substitute_scalars(&body, binds.sfns);
-	let runs = parse_inlines_in(&body, span, skips);
+	let runs = parse_inlines_in(&body, span, skips, binds);
 	items.push(Item::Paragraph { runs, label, span });
 	lines.clear();
 }
@@ -808,21 +900,36 @@ fn normalise_ws(s: &str) -> String {
 /// `fe2o3_net`, `5 * 3` and a lone `_` are ordinary text. A backslash sets the next character literally,
 /// so `\$`, `\#`, `\_` and `\@` appear as themselves. An unpaired delimiter, or an `@` with no label
 /// after it, is ordinary text. Nesting is a later increment: the first valid closer ends a run.
+///
+/// Reads the markup as it stands, the conditionals and loops in it already read: a caller holding text that
+/// came out of [`parse_inlines_in`], a table cell or a caption cut from a capture [`read_statements`] has
+/// passed over, or a test. A refusal it meets is not surfaced.
 pub(crate) fn parse_inlines(text: &str) -> Vec<Inline> {
 	let mut skips = Refusals::default();
-	// A table cell, a caption or a flattened array cell has no item-level span of its own to attribute a
-	// refusal to (see `Refusal`'s own doc comment on why the item, not the character, is the finest
-	// boundary kept); this thin wrapper already threw the summary away before this unit, so a zero span
-	// changes nothing a caller could observe.
-	parse_inlines_in(text, Span::new(0, 0), &mut skips)
+	scan_inlines(text, Span::new(0, 0), &mut skips)
+}
+
+/// Reads one run of inline markup that nothing has read yet: its conditionals and loops, at any depth, are
+/// read first ([`read_statements`]) in the bindings in force where the item at `span` stands, so a cell, a
+/// caption, a footnote or an emphasis holds what Typst sets there and never the source of an `#if`. Every
+/// inline body below it is cut from the text read here, so each is read once, with the one scope.
+pub(crate) fn parse_inlines_in(
+	text:	&str,
+	span:	Span,
+	skips:	&mut Refusals,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
+)
+	-> Vec<Inline>
+{
+	let text = read_statements(text, span, skips, binds);
+	scan_inlines(&text, span, skips)
 }
 
 /// The inline scanner proper, recording every unhandled inline call into `skips`, at `span` (the whole
 /// containing item -- a paragraph, a heading, a list item -- rather than the call's own narrower
 /// position; see `Refusal`'s doc comment), so a `#func[...]` the reader cannot set is reported rather
-/// than leaked into the running text. [`parse_inlines`] is the thin wrapper for callers -- table cells,
-/// captions, flattening -- that do not surface the summary.
-fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline> {
+/// than leaked into the running text. Its text has had its conditionals and loops read.
+fn scan_inlines(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline> {
 	let chars:	Vec<char>	= text.chars().collect();
 	let n					= chars.len();
 	let mut runs:	Vec<Inline>	= Vec::new();
@@ -837,18 +944,32 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 			continue;
 		}
 		// An inline maths span between dollars. A `\$` was already turned into a literal above, so a `$`
-		// reaching here opens maths. If it parses, it is a maths run; if not, the literal `$...$` is kept.
+		// reaching here opens maths. If it parses, it is a maths run; if not, or if it never closes, the
+		// literal `$...$` is kept, a stand-in recorded where the item stands.
 		if c == '$' {
-			if let Some(close) = (i + 1..n).find(|&j| chars[j] == '$') {
-				let inner: String = chars[i + 1..close].iter().collect();
-				if let Ok(atom) = mathparse::parse(&inner) {
-					if !plain.is_empty() {
-						runs.push(Inline::Text(std::mem::take(&mut plain)));
+			match (i + 1..n).find(|&j| chars[j] == '$') {
+				Some(close) => {
+					let inner: String = chars[i + 1..close].iter().collect();
+					match mathparse::parse(&inner) {
+						Ok(atom) => {
+							if !plain.is_empty() {
+								runs.push(Inline::Text(std::mem::take(&mut plain)));
+							}
+							runs.push(Inline::Math(atom));
+							i = close + 1;
+							continue;
+						},
+						Err(_) => {
+							// The span is set whole as its source, so its closing `$` opens nothing.
+							skips.record_stand_in("inline maths", span, RefusalClass::Unusable,
+								"is not read by this reader's maths, so its source is set as text");
+							plain.extend(chars[i..=close].iter());
+							i = close + 1;
+							continue;
+						},
 					}
-					runs.push(Inline::Math(atom));
-					i = close + 1;
-					continue;
-				}
+				},
+				None => skips.record_lone_dollar_in("", span),
 			}
 		}
 		// An inline code span, `raw` between backticks: its content is verbatim, no markup within.
@@ -952,7 +1073,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 							}
 							// The display markup becomes its own runs, so the index page sets an emphasised entry
 							// italic and a display/sort split shows the display -- parsed exactly as the body's is.
-							let display = parse_inlines_in(&k.display, span, skips);
+							let display = scan_inlines(&k.display, span, skips);
 							runs.push(Inline::Index { term: k.term, sub: k.sub, display, main: k.main });
 						}
 					};
@@ -966,7 +1087,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 						},
 						Call::Visible { display, index } => {
 							push_index(&mut runs, &mut plain, index, skips);
-							let sub = parse_inlines_in(&display, span, skips);
+							let sub = scan_inlines(&display, span, skips);
 							// A plain display folds back into the running text, keeping the fast single-run
 							// path; a display carrying markup becomes its own runs.
 							if let [Inline::Text(t)] = sub.as_slice() {
@@ -1139,7 +1260,7 @@ fn parse_inlines_in(text: &str, span: Span, skips: &mut Refusals) -> Vec<Inline>
 /// display text rather than leaking its raw source. A glossary term keeps its own first-use bold-italic
 /// (which subsumes the surrounding emphasis), so only the plain stretches carry the emphasis face.
 fn push_emphasis(runs: &mut Vec<Inline>, strong: bool, inner: &str, span: Span, skips: &mut Refusals) {
-	let sub = parse_inlines_in(inner, span, skips);
+	let sub = scan_inlines(inner, span, skips);
 	if let [Inline::Text(t)] = sub.as_slice() {
 		runs.push(if strong { Inline::Strong(t.clone()) } else { Inline::Emph(t.clone()) });
 		return;
@@ -1239,7 +1360,7 @@ fn link_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> Opti
 	// A following `[...]` group is the link text; without one, the destination stands as the text.
 	if chars.get(after_dest) == Some(&'[') {
 		let Some((body, next)) = read_group(chars, after_dest) else { return None; };
-		return Some((parse_inlines_in(&body, span, skips), next));
+		return Some((scan_inlines(&body, span, skips), next));
 	}
 	let text = link_dest_text(&dest);
 	Some((vec![Inline::Text(text)], after_dest))
@@ -1280,14 +1401,14 @@ fn unknown_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals)
 		// A `#name[body]`: the bracketed content is the call's displayable body.
 		Some('[') => {
 			let Some((body, next)) = read_group(chars, j) else { return None; };
-			Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)))
+			Some((Some(scan_inlines(&body, span, skips)), next, fmt!("#{}", name)))
 		},
 		// A `#name(args)` and any following `[body]`: read the arguments away, then fold a body if one trails.
 		Some('(') => {
 			let Some((_, after_args)) = read_group(chars, j) else { return None; };
 			if chars.get(after_args) == Some(&'[') {
 				let Some((body, next)) = read_group(chars, after_args) else { return None; };
-				return Some((Some(parse_inlines_in(&body, span, skips)), next, fmt!("#{}", name)));
+				return Some((Some(scan_inlines(&body, span, skips)), next, fmt!("#{}", name)));
 			}
 			Some((None, after_args, fmt!("#{}", name)))
 		},
@@ -1322,6 +1443,18 @@ fn construct_name(trimmed: &str) -> String {
 	trimmed.split_whitespace().next().unwrap_or(trimmed).to_string()
 }
 
+/// A declarative styling construct's name as a report gives it: `#set <target>`, `#show <selector>` or
+/// `#show:`, read from its opening line.
+pub(crate) fn decl_name(first: &str) -> String {
+	if let Some(name) = crate::lang::rules::rule_name(first) {
+		return name;
+	}
+	match first.find('(') {
+		Some(p) if first.starts_with("#set ")	=> first[..p].split_whitespace().collect::<Vec<_>>().join(" "),
+		_										=> construct_name(first),
+	}
+}
+
 /// If the literal `s` sits at `i` in `chars`, the index just past it; otherwise `None`.
 fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	let mut k = i;
@@ -1334,188 +1467,10 @@ fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 	Some(k)
 }
 
-/// One open delimiter context on the scanner's stack. Which frame is on top decides whether the next
-/// bracket is structural: a `(` inside a `[...]` content block is author prose, not nesting, and a `(`
-/// or `$` inside a `"..."` string or a `$...$` maths span never counts at all. This is what lets a caption
-/// whose prose carries an unbalanced `(` still close at its `]`, where a flat depth counter stuck open to
-/// end of source and swallowed the figure and everything after it.
-#[derive(Clone, Copy, PartialEq)]
-enum Frame {
-	Code,		// a `(...)`/`{...}`/`#name(...)` group, or the top level: brackets nest, `,`/`:` part
-	Content,	// a `[...]` content block: only `[` `]` nest; author `(` `)` `{` `}` are literal prose
-	Str,		// a `"..."` string literal: every character is literal until the closing quote
-	Math,		// a `$...$` maths span: every character is literal until the closing `$`
-	Comment,	// a `/* ... */` block comment: every character, brackets included, is literal until `*/`
-	Raw,		// a `` `...` `` code span: every character, `//`/`/*` included, is literal until the closing backtick
-}
-
-/// The running delimiter balance while a bracketed span is scanned. The stack of [`Frame`]s replaces the
-/// old flat `depth`: the span is closed when the stack is empty (was `depth <= 0`), and a multi-line code
-/// skip is still open while it is not. `escaped` records that the previous character was a `\` inside a
-/// string, maths span or content block, so a `\"`, `\$` or `\]` is passed over rather than closing its
-/// frame. Both persist across the lines of a span, since a frame may straddle the line break.
-pub(crate) struct SkipState {
-	frames:		Vec<Frame>,
-	escaped:	bool,
-	in_quote:	bool,	// an odd number of literal `"` seen since the start of the current line, in Content mode
-}
-
-/// Does a `//` at `i` open a line comment, or is it a URL's double slash (`https://...`) and so literal?
-/// Mirrors the `://` exception in [`strip_comments`]: a `/` immediately after a `:` never starts a
-/// comment, in code or in content prose alike.
-fn is_line_comment(chars: &[char], i: usize) -> bool {
-	chars.get(i + 1) == Some(&'/') && !(i > 0 && chars[i - 1] == ':')
-}
-
-/// How many characters a `//` line comment opened at `i` consumes. `chars` may be a whole multi-line
-/// capture buffer -- [`read_group`], [`split_top_args`] and [`named_arg`] all run on one -- so the comment
-/// is bounded to the next `'\n'`, not to the end of the slice; a `//` on one line must never eat the lines
-/// that follow it.
-fn line_comment_len(chars: &[char], i: usize) -> usize {
-	match chars[i..].iter().position(|&c| c == '\n') {
-		Some(off)	=> off,
-		None		=> chars.len() - i,
-	}
-}
-
-impl SkipState {
-	pub(crate) fn new() -> Self {
-		SkipState { frames: Vec::new(), escaped: false, in_quote: false }
-	}
-
-	/// Is any frame still open? The top-level test for [`read_group`], [`split_top_args`] and [`named_arg`],
-	/// where a comma or colon parts only when nothing at all is open and a group closes when the stack empties.
-	fn is_open(&self) -> bool {
-		!self.frames.is_empty()
-	}
-
-	/// Is a structural bracket -- a `(`/`{`/`[` group -- still unclosed? This is the multi-line skip and
-	/// capture test, matching the old flat `depth > 0`: a dangling `"` or `$` left open at the end of a line
-	/// does not keep a construct open, since in prose a stray quote (an author's `"no bound"` split across
-	/// two lines after an inline `#raw("...")`) or a lone `$` is a character, not the start of a code span.
-	pub(crate) fn has_open_bracket(&self) -> bool {
-		self.frames.iter().any(|f| matches!(f, Frame::Code | Frame::Content))
-	}
-
-	/// How many structural `(`/`{`/`[` frames are nested right now -- the depth [`has_open_bracket`] only
-	/// asks a yes/no of. A guard tracking its own single opening bracket uses this to tell its own matching
-	/// closer (depth falls to 1) from an inner content block's closer (depth still above 1) on the same
-	/// `]` text.
-	pub(crate) fn open_brackets(&self) -> usize {
-		self.frames.iter().filter(|f| matches!(f, Frame::Code | Frame::Content)).count()
-	}
-
-	/// Folds the character (or, in content mode, the `#ident` run) at `i` into the stack, returning how
-	/// many characters were consumed from `chars` -- always at least one, more for a `#name(`/`#name[`/`#x`
-	/// run whose opener decides the frame it enters. All four scanners share this one transition so a
-	/// bracket is counted at exactly one place, whatever their outer loops do with the characters.
-	fn step(&mut self, chars: &[char], i: usize) -> usize {
-		let c = chars[i];
-		match self.frames.last().copied() {
-			Some(Frame::Str) => {
-				if self.escaped			{ self.escaped = false; }
-				else if c == '\\'		{ self.escaped = true; }
-				else if c == '"'		{ self.frames.pop(); }
-				1
-			},
-			Some(Frame::Math) => {
-				if self.escaped			{ self.escaped = false; }
-				else if c == '\\'		{ self.escaped = true; }
-				else if c == '$'		{ self.frames.pop(); }
-				1
-			},
-			// A `/* ... */` block comment: every character, including a stray `}`/`]`/`)` an author's note
-			// mentions, is literal until the comment's own closer -- the twin of Str/Math above, so a
-			// `#context` guard's brace balance is never corrupted by a comment inside its body.
-			Some(Frame::Comment) => {
-				if c == '*' && chars.get(i + 1) == Some(&'/')	{ self.frames.pop(); 2 }
-				else											{ 1 }
-			},
-			// A `` `...` `` code span: literal until the closing backtick, the twin of Comment above, so a
-			// `//`/`/*` a prose note quotes as a raw code token (`` the `//` operator ``) is never mistaken
-			// for a comment opener. Mirrors [`strip_comments`]' `in_raw`, which does not persist an
-			// unterminated span past its own line, so an unclosed backtick is dropped at the newline rather
-			// than swallowing the lines that follow.
-			Some(Frame::Raw) => {
-				match c {
-					'`'		=> { self.frames.pop(); 1 },
-					'\n'	=> { self.frames.pop(); 1 },
-					_		=> 1,
-				}
-			},
-			Some(Frame::Content) => {
-				// A `\`-escaped `\$ \[ \] \#` is literal content, so the escaped character is passed over
-				// before any of the structural cases below can act on it.
-				if self.escaped {
-					self.escaped = false;
-					return 1;
-				}
-				match c {
-					'\\'	=> { self.escaped = true; 1 },
-					'['		=> { self.frames.push(Frame::Content); 1 },
-					']'		=> { self.frames.pop(); 1 },
-					'$'		=> { self.frames.push(Frame::Math); 1 },
-					'#'		=> self.content_hash(chars, i),
-					'`'		=> { self.frames.push(Frame::Raw); 1 },
-					// A literal `"` in prose is not a string (content mode never opens `Frame::Str`), but
-					// `strip_comments` still treats a quoted phrase as opaque to `//`/`/*`, so a bare count
-					// mirrors that here without disturbing the bracket balance a real quote would otherwise
-					// leave alone. Line-scoped, as `strip_comments` is called once per line.
-					'"'		=> { self.in_quote = !self.in_quote; 1 },
-					'\n'	=> { self.in_quote = false; 1 },
-					// A line comment runs to the next `\n` in `chars` (which may hold a whole multi-line
-					// capture buffer, not just this one line) -- never past it, and never at all inside a
-					// quoted phrase or a raw span. The `://` exception mirrors `strip_comments`, so a bare
-					// URL's slashes stay literal prose. A block comment opens a `Comment` frame that can
-					// straddle the line break, same as Str/Math above.
-					'/' if is_line_comment(chars, i) && !self.in_quote		=> line_comment_len(chars, i),
-					'/' if chars.get(i + 1) == Some(&'*') && !self.in_quote	=> { self.frames.push(Frame::Comment); 2 },
-					// A `(` `)` `{` `}` in content mode is author prose, never nesting: this is the whole
-					// point of tracking the frame, so a caption's unbalanced paren does not stick.
-					_		=> 1,
-				}
-			},
-			// A code frame, or the top level (an empty stack): brackets nest as the flat counter had them,
-			// the closer kind is not checked, and a `[` opens a content child, a `$` a maths span. A `"`
-			// opens a real `Str` frame here, which already keeps a `//`/`/*` inside it literal, so no
-			// separate quote count is needed the way Content mode's prose-only quote does.
-			_ => {
-				match c {
-					'"'									=> { self.frames.push(Frame::Str); 1 },
-					'`'									=> { self.frames.push(Frame::Raw); 1 },
-					'(' | '{'							=> { self.frames.push(Frame::Code); 1 },
-					'['									=> { self.frames.push(Frame::Content); 1 },
-					'$'									=> { self.frames.push(Frame::Math); 1 },
-					')' | '}'							=> { self.frames.pop(); 1 },
-					'/' if is_line_comment(chars, i)		=> line_comment_len(chars, i),
-					'/' if chars.get(i + 1) == Some(&'*')	=> { self.frames.push(Frame::Comment); 2 },
-					_									=> 1,
-				}
-			},
-		}
-	}
-
-	/// Handles a `#` met in content mode: a `#name` identifier follows, and its first non-identifier
-	/// character decides the frame -- `(` opens the call's code arguments, `[` a content block, anything
-	/// else (or end of input) is a bare `#name` field access with no group. Returns the count consumed:
-	/// the `#`, the identifier, and, for a call or content opener, that opener too.
-	fn content_hash(&mut self, chars: &[char], i: usize) -> usize {
-		let mut j = i + 1;
-		while j < chars.len() && is_call_ident(chars[j]) {
-			j += 1;
-		}
-		match chars.get(j) {
-			Some('(')	=> { self.frames.push(Frame::Code); j + 1 - i },
-			Some('[')	=> { self.frames.push(Frame::Content); j + 1 - i },
-			_			=> j - i,	// a bare `#name` (or a lone `#`): open no frame
-		}
-	}
-}
-
 /// What to do with a line-leading Typst code statement or standalone template call.
 enum CodeSkip {
 	Line,				// the call closes on this line; skip the one line, as before
-	Multi(SkipState),	// the delimiters are still open; begin a multi-line skip carrying the depth
+	Multi(Lexer),		// the construct is still open; begin a multi-line skip carrying the lexer
 }
 
 /// If this already-left-trimmed line begins a Typst code statement Austenite skips for now, decides how
@@ -1532,9 +1487,9 @@ fn code_skip(trimmed: &str) -> Option<CodeSkip> {
 	if !keyword && !opens_standalone_call(trimmed) {
 		return None;
 	}
-	let mut state = SkipState::new();
-	scan_brackets(trimmed, &mut state);
-	if state.has_open_bracket() {
+	let mut state = Lexer::markup();
+	state.feed_line(trimmed);
+	if state.is_open() {
 		return Some(CodeSkip::Multi(state));
 	}
 	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
@@ -1688,17 +1643,6 @@ fn is_inline_call(name: &str) -> bool {
 		| "claim-label" | "claim-refs")
 }
 
-/// Folds one line's delimiters into the running [`SkipState`]. A bracket inside a `"..."` string, a `$...$`
-/// maths span or a `[...]` content block is not counted as structural nesting; the frame stack decides.
-/// The state carries into the next line, so a frame that straddles the break is tracked correctly.
-pub(crate) fn scan_brackets(line: &str, state: &mut SkipState) {
-	let chars: Vec<char> = line.chars().collect();
-	let mut i = 0;
-	while i < chars.len() {
-		i += state.step(&chars, i);
-	}
-}
-
 /// Splits a trailing `<label>` off a heading title: a `<name>` with no inner whitespace at the very end
 /// labels the heading and is removed from its text. A title that merely contains angle brackets, or a
 /// `< >` with a space inside, keeps them as ordinary characters.
@@ -1725,7 +1669,7 @@ fn footnote_call(chars: &[char], i: usize, span: Span, skips: &mut Refusals) -> 
 		return None;
 	}
 	let Some((inner, next)) = read_group(chars, open) else { return None; };
-	Some((parse_inlines_in(&inner, span, skips), next))
+	Some((scan_inlines(&inner, span, skips), next))
 }
 
 /// Reads an inline `#emph[...]` at `i` (a `#`), returning its inner markup unreduced -- it is the call
@@ -1869,7 +1813,7 @@ fn claim_call(chars: &[char], i: usize) -> Option<(String, Vec<String>, usize)> 
 /// anything else taken as written -- `claims.typ`'s own `str(c)` fallback for a bare argument.
 fn claim_codes(inner: &str) -> Vec<String> {
 	let mut out = Vec::new();
-	for arg in split_claim_args(inner) {
+	for arg in split_top_args(inner) {
 		let a = arg.trim();
 		if a.is_empty() {
 			continue;
@@ -1884,28 +1828,6 @@ fn claim_codes(inner: &str) -> Vec<String> {
 		if !code.is_empty() {
 			out.push(code);
 		}
-	}
-	out
-}
-
-/// Splits a claim argument list on its top-level commas, holding a `<...>`, `(...)` or `[...]` nesting and
-/// a `"..."` string together so a comma inside one does not split an argument.
-fn split_claim_args(inner: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut cur		= String::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	for c in inner.chars() {
-		match c {
-			'"'								=> { in_str = !in_str; cur.push(c); },
-			'<' | '(' | '[' if !in_str		=> { depth += 1; cur.push(c); },
-			'>' | ')' | ']' if !in_str		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0 && !in_str	=> out.push(std::mem::take(&mut cur)),
-			_								=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
 	}
 	out
 }
@@ -2140,24 +2062,23 @@ fn resolve_term(key: &str, func: &str, span: Span, skips: &mut Refusals) -> Stri
 	}
 }
 
-/// Reads a bracket or paren group whose opener sits at `i`, returning its inner content and the index
-/// just past the matching closer. The [`SkipState`] frame stack decides what nests: strings, maths spans
-/// and content blocks are respected, so a bracket inside a quoted argument, a `$...$` span or the prose of
-/// a `[...]` caption does not close the group early -- a `(` an author left unbalanced in caption prose is
-/// literal, and the group still closes at its own delimiter. `None` when the group never closes, so a
-/// malformed call is left as ordinary text.
+/// Reads a bracket, paren or brace group whose opener sits at `i`, returning its inner content and the
+/// index just past the matching closer. The markup lexer ([`Lexer`]) decides what nests: strings, maths
+/// spans, content blocks, comments and raw text are respected, so a bracket inside a quoted argument, a
+/// `$...$` span or the prose of a `[...]` caption does not close the group early -- a `(` an author left
+/// unbalanced in caption prose is literal, and the group still closes at its own delimiter. `None` when
+/// the group never closes, so a malformed call is left as ordinary text.
 pub(crate) fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
-	let open = *chars.get(i)?;
-	if open != '[' && open != '(' {
+	if !matches!(chars.get(i), Some('[') | Some('(') | Some('{')) {
 		return None;
 	}
-	let mut state	= SkipState::new();
+	let mut state	= Lexer::code();
 	let mut inner	= String::new();
 	// The opener pushes its frame (`[` a content block, `(` a code group) but is not part of the inner
 	// content, so it is stepped over here and never appended.
-	let mut j = i + state.step(chars, i);
+	let mut j = i + state.step(chars, i).0;
 	while j < chars.len() {
-		let consumed = state.step(chars, j);
+		let consumed = state.step(chars, j).0;
 		if !state.is_open() {
 			// This character closed the outer group -- the matching closer -- so the group ends just past
 			// it, and the closer is dropped from the inner as the outer opener was.
@@ -2194,84 +2115,260 @@ fn cap_first(s: &str) -> String {
 	}
 }
 
-/// Whether a `/* ... */` block comment is open across the line break.
-struct CommentState {
-	in_block:	bool,
+/// A line with the characters a comment holds removed, and those a conditional or a loop takes without
+/// keeping them: `toks` is what the line's own bytes are as the lexer read the whole source
+/// ([`lex::byte_toks`]), and `keep` whether [`flow_mask`] keeps each. A `$` whose maths never closes is
+/// written `\$` ([`lone_escaped`]).
+fn strip_comments(line: &str, toks: &[lex::Tok], keep: &[bool]) -> String {
+	lone_escaped(line.char_indices()
+		.filter(|&(at, _)| toks.get(at) != Some(&lex::Tok::Comment) && keep.get(at) != Some(&false)), toks)
 }
 
-/// Removes Typst comments from one line: a `//` to the line's end, and any `/* ... */` span, which may
-/// have opened on an earlier line ([`CommentState::in_block`] carries that across). A `//` or `/*`
-/// inside a `"..."` string or a `` `code` `` span is not a comment and is kept, and a `//` immediately
-/// after `:` is kept so a bare URL survives. Quotes and backticks are treated as span delimiters here,
-/// which is what the reader's markup needs; a real Typst code line with string literals is skipped whole
-/// by the caller, so stripping it never reaches the output.
-fn strip_comments(line: &str, st: &mut CommentState) -> String {
-	let chars:	Vec<char>	= line.chars().collect();
-	let mut out				= String::new();
-	let mut in_str			= false;
-	let mut in_raw			= false;
-	let mut prev			= '\0';
-	let mut i				= 0usize;
-	while i < chars.len() {
-		let c = chars[i];
-		if st.in_block {
-			if c == '*' && chars.get(i + 1) == Some(&'/') {
-				st.in_block = false;
-				i += 2;
-				prev = '\0';
-				continue;
-			}
-			i += 1;
-			continue;
-		}
-		if in_str {
-			out.push(c);
-			if c == '"' { in_str = false; }
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if in_raw {
-			out.push(c);
-			if c == '`' { in_raw = false; }
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '"' {
-			in_str = true;
-			out.push(c);
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '`' {
-			in_raw = true;
-			out.push(c);
-			prev = c;
-			i += 1;
-			continue;
-		}
-		if c == '/' && chars.get(i + 1) == Some(&'/') {
-			if prev == ':' {
-				out.push(c);	// a `://` is part of a URL, not a comment
-				prev = c;
-				i += 1;
-				continue;
-			}
-			break;	// a line comment: drop the rest of the line
-		}
-		if c == '/' && chars.get(i + 1) == Some(&'*') {
-			st.in_block = true;
-			i += 2;
-			prev = '\0';
-			continue;
+/// The characters `chars` of a line, each by its byte in the line, with a `$` the lexer read as a character
+/// (its maths never closes, [`lex::lone_dollars`]) written `\$`, so a reader that sees the line alone reads
+/// it as the lexer read it over the whole source.
+fn lone_escaped(chars: impl Iterator<Item = (usize, char)>, toks: &[lex::Tok]) -> String {
+	let mut out = String::new();
+	for (at, c) in chars {
+		if c == '$' && toks.get(at) == Some(&lex::Tok::Text) {
+			out.push('\\');
 		}
 		out.push(c);
-		prev = c;
-		i += 1;
 	}
 	out
+}
+
+/// How the reader reads one conditional or loop in its markup.
+enum FlowRead {
+	Keep(usize, usize),		// the taken branch's inside, by its bytes, set where it stands
+	Drop,					// no branch is taken, so nothing of it is set
+	Refuse(String),			// refused whole at its line, with what the refusal says
+}
+
+/// Which bytes of `src` the reader keeps once each conditional and loop standing in its markup is read, and
+/// the sites refused on the way, each with the byte it opens at. `src` starts at byte `at` of the text
+/// `guards` was built from, so each condition resolves in the bindings in force where it stands, as the
+/// include walk resolves its guards. One that resolves keeps the taken branch's content where it stands, so
+/// a guard in a callout or mid-paragraph sets what Typst sets, and drops the rest of the statement, its
+/// other branches, `else` and brackets included. Any other conditional, and every loop, is dropped whole
+/// and refused at its line: never set as prose.
+fn flow_mask(src: &str, guards: &crate::lang::rules::GuardScope, at: usize) -> (Vec<bool>, Vec<(usize, Refusal)>) {
+	let (keep, sites, _) = flow_mask_in(src, guards, at, lex::Level::Own);
+	(keep, sites)
+}
+
+/// As [`flow_mask`], reading the flows `level` names, and with the bytes a quote is to be set before: the
+/// branch an equation keeps is text, set in quotes there.
+fn flow_mask_in(src: &str, guards: &crate::lang::rules::GuardScope, at: usize, level: lex::Level)
+	-> (Vec<bool>, Vec<(usize, Refusal)>, Vec<usize>)
+{
+	let mut keep	= vec![true; src.len()];
+	let mut sites	= Vec::new();
+	let mut quotes	= Vec::new();
+	mask_flows(src, 0, src.len(), (guards, at), level, &mut keep, &mut sites, &mut quotes);
+	sites.sort_by_key(|(at, _)| *at);
+	(keep, sites, quotes)
+}
+
+/// Reads the flows of `src[from..to]`, a run of markup, into `keep` and `sites`. A kept branch is markup
+/// read at the same level, so the flows standing in it are read in turn. One standing in an equation keeps
+/// its branch as quoted text when the branch is plain words, and is refused when it holds markup.
+fn mask_flows(
+	src:	&str,
+	from:	usize,
+	to:		usize,
+	guards:	(&crate::lang::rules::GuardScope, usize),	// and the byte of its text `src` starts at
+	level:	lex::Level,
+	keep:	&mut [bool],
+	sites:	&mut Vec<(usize, Refusal)>,
+	quotes:	&mut Vec<usize>,
+)
+{
+	let text = &src[from..to];
+	for f in lex::flows_in(text, level) {
+		let (start, end) = (from + f.start, from + f.end);
+		for k in &mut keep[start..end] {
+			*k = false;
+		}
+		let name = match f.kw {
+			lex::Kw::For	=> "#for",
+			lex::Kw::While	=> "#while",
+			_				=> "#if",
+		};
+		let refuse = |note: String| {
+			let line_end = src[start..].find('\n').map_or(src.len(), |k| start + k);
+			(start, Refusal {
+				name:	name.to_string(),
+				span:	Span::new(start as u32, line_end as u32),
+				class:	RefusalClass::Unsupported,
+				file:	String::new(),
+				note:	Some(note),
+			})
+		};
+		match read_flow(text, &f, (guards.0, guards.1 + from)) {
+			FlowRead::Keep(a, b)	=> {
+				// In an equation the branch is text, not maths, so plain words alone are read: a quoted
+				// string is what the maths reader sets upright.
+				if f.math {
+					let branch = &text[a..b];
+					if branch.chars().any(|c| "#$*_@`\\\"<>[]{}^~".contains(c)) {
+						sites.push(refuse(
+							"takes a branch of markup the reader does not set in an equation, so no branch of it is set"
+								.to_string()));
+					} else if !branch.trim().is_empty() {
+						for k in &mut keep[from + a..from + b] {
+							*k = true;
+						}
+						quotes.push(from + a);
+						quotes.push(from + b);
+					}
+					continue;
+				}
+				for k in &mut keep[from + a..from + b] {
+					*k = true;
+				}
+				mask_flows(src, from + a, from + b, guards, level, keep, sites, quotes);
+			},
+			FlowRead::Drop			=> {},
+			FlowRead::Refuse(note)	=> sites.push(refuse(note)),
+		}
+	}
+}
+
+/// Reads the conditionals and loops of one run of inline markup, at any depth, in the bindings in force where
+/// the item at `span` stands, and returns the text with what each leaves: the taken branch's inside where it
+/// stood, and nothing of the rest. A conditional the reader cannot evaluate, and every loop, is dropped whole
+/// and recorded at the item, which is as fine as an inline text's site goes (see [`Refusal`]).
+///
+/// The text's own `#let`s bind where they stand and to the end of the block they stand in, over the names in
+/// force where the item starts: the one scope Typst reads a content block in. A conditional in a cell, a
+/// caption or a note thus resolves where it is written, not where the paragraph holding it starts. A `#let`
+/// or an `#import` sets nothing, so it is dropped and recorded, whether or not a conditional stands beside it.
+fn read_statements(
+	text:	&str,
+	span:	Span,
+	skips:	&mut Refusals,
+	binds:	crate::lang::rules::Bindings<'_, '_>,
+)
+	-> String
+{
+	if !holds_statement(text) {
+		return text.to_string();	// the common case: nothing to read
+	}
+	let scope = binds.guards.body(binds.guard_at + span.start as usize, text);
+	statements_in(text, span, skips, &scope)
+}
+
+/// Might `text` hold a statement [`statements_in`] reads: a conditional, a loop, or a `#let` or `#import`
+/// binding? A cheap test ahead of the lexer, which decides.
+fn holds_statement(text: &str) -> bool {
+	text.contains("#if") || text.contains("#for") || text.contains("#while")
+		|| text.contains("#let") || text.contains("#import")
+}
+
+/// A captured construct, its conditionals and loops read once as the capture is dispatched, where it stands:
+/// a table's cells, a figure's caption, a data array's cells and a furniture call's arguments are read
+/// apart from the text round them, and no body re-read follows them. A capture whose body is re-read as
+/// items (a callout, a column body, an expanded binding) is read there, in the body's own scope.
+fn read_capture(mut cap: Capture, skips: &mut Refusals, binds: crate::lang::rules::Bindings<'_, '_>) -> Capture {
+	let span = Span::new(cap.start, cap.start);
+	match &cap.kind {
+		CaptureKind::Figure | CaptureKind::Table | CaptureKind::Image | CaptureKind::TemplateCall(_) => {
+			cap.buf = read_statements(&cap.buf, span, skips, binds);
+		},
+		// A `#let` statement's own text is code, so its value alone is read as markup.
+		CaptureKind::Let(_) => if let Some(eq) = cap.buf.find('=') {
+			let (head, value) = cap.buf.split_at(eq + 1);
+			cap.buf = fmt!("{}{}", head, read_statements(value, span, skips, binds));
+		},
+		_ => {},
+	}
+	cap
+}
+
+/// As [`read_statements`], with the scope the text reads in already built.
+fn statements_in(text: &str, span: Span, skips: &mut Refusals, scope: &crate::lang::rules::GuardScope) -> String {
+	let (mut keep, sites, quotes) = flow_mask_in(text, scope, 0, lex::Level::Deep);
+	for (_, mut site) in sites {
+		site.span = span;
+		skips.sites.push(site);
+	}
+	// A `#let` binds a name and an `#import` brings names in; neither sets anything, so its text is not
+	// set, and is reported as at a line's start.
+	for b in lex::bindings(text) {
+		if !keep[b.start] {
+			continue;	// in a branch not taken
+		}
+		for k in &mut keep[b.start..b.at.min(text.len())] {
+			*k = false;
+		}
+		skips.record(if b.text.starts_with("#let") { "#let" } else { "#import" }, span);
+	}
+	let mut out = String::with_capacity(text.len());
+	for (at, c) in text.char_indices() {
+		for _ in quotes.iter().filter(|&&q| q == at) {
+			out.push('"');
+		}
+		if keep[at] {
+			out.push(c);
+		}
+	}
+	for _ in quotes.iter().filter(|&&q| q == text.len()) {
+		out.push('"');
+	}
+	out
+}
+
+/// Decides how one flow of `text` is read. A conditional takes its first arm whose condition holds, or its
+/// `else`; a taken branch is kept only when it is a content block with no statement at its own level, since
+/// a `#set`, `#show`, `#let` or `#import` there governs the branch alone, which the reader does not scope,
+/// and an `#include` there is not followed.
+fn read_flow(text: &str, f: &lex::Flow, guards: (&crate::lang::rules::GuardScope, usize)) -> FlowRead {
+	if !f.whole {
+		return FlowRead::Refuse("does not close as one statement, so nothing of it is set".to_string());
+	}
+	if f.kw != lex::Kw::If {
+		return FlowRead::Refuse("is a loop the reader does not run, so its body is not set".to_string());
+	}
+	if f.coded {
+		return FlowRead::Refuse(
+			"stands in code whose own bindings the reader does not read, so no branch of it is set".to_string());
+	}
+	for arm in &f.arms {
+		let taken = match arm.cond {
+			None			=> true,
+			Some((a, b))	=> match guards.0.cond_at(guards.1 + a, &text[a..b]) {
+				crate::lang::rules::Cond::Taken(t)			=> t,
+				crate::lang::rules::Cond::Unknown(name)		=> return FlowRead::Refuse(fmt!(
+					"names `{}`, which nothing binds above it (Typst stops: unknown variable: {})", name, name)),
+				crate::lang::rules::Cond::Opaque			=> return FlowRead::Refuse(
+					"has a condition the reader does not evaluate, so no branch of it is set".to_string()),
+			},
+		};
+		if !taken {
+			continue;
+		}
+		if !arm.content {
+			return FlowRead::Refuse(
+				"takes a code block the reader does not run, so no branch of it is set".to_string());
+		}
+		let (a, b) = (arm.body.0 + 1, arm.body.1.saturating_sub(1).max(arm.body.0 + 1));
+		if let Some(kw) = statement_in(&text[a..b]) {
+			return FlowRead::Refuse(fmt!(
+				"takes a branch holding {}, which the reader does not read there, so no branch of it is set", kw));
+		}
+		return FlowRead::Keep(a, b);
+	}
+	FlowRead::Drop
+}
+
+/// The first `#set`, `#show`, `#let`, `#import` or `#include` opening a line at the top level of `markup`.
+fn statement_in(markup: &str) -> Option<&'static str> {
+	lex::top_level_lines(markup).iter().find_map(|(_, line)| {
+		let t = line.trim_start();
+		["#set", "#show", "#let", "#import", "#include"].into_iter().find(|kw| t.strip_prefix(kw)
+			.is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-' || c == '_')))
+	})
 }
 
 // -- Multi-line figure, table and data-array capture ----------------------------------------------
@@ -2281,8 +2378,9 @@ fn strip_comments(line: &str, st: &mut CommentState) -> String {
 struct Capture {
 	kind:	CaptureKind,
 	buf:	String,
-	state:	SkipState,
+	state:	Lexer,
 	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
+	place:	lex::Place,	// where that line stands in the source being read
 }
 
 /// The backstop cap on content-binding expansion depth, for a pathological *non-cyclic* chain of distinct
@@ -2300,6 +2398,7 @@ enum CaptureKind {
 	Let(String),	// a `#let name = (...)` data array bound to this name
 	Columns,		// a `#columns(n)[ ... ]` wrapper: its body is set single-column
 	StyledBox,		// a `#styled-box[ ... ]` callout: its body is set inside a filled, padded box
+	Bare,			// a line-leading `#[ ... ]`: a content block Typst joins into the markup around it, its own `#set`s scoped to it
 	DeclStyle,		// a `#show: <t>.with(...)` application or a lowerable `#set <target>(...)`; lowered onto the theme, not refused
 	TemplateCall(String),	// a `#name(args)?[ ... ]` call to a bound `#let` furniture function, expanded into a box
 	ContentCall(String),	// a `#name`, `#name(args)` or `#name[ ... ]` reference to a bound content binding, expanded into re-read markup spliced in
@@ -2356,9 +2455,9 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// is NOT own-line, so it falls through to the existing visible refusal, which keeps that trailing prose;
 	// inline mid-prose support is a later unit.
 	if let Some(kind) = builtin_opener(trimmed) {
-		let mut state = SkipState::new();
-		scan_brackets(trimmed, &mut state);
-		if state.has_open_bracket() || trimmed.trim_end().ends_with(')') {
+		let mut state = Lexer::markup();
+		state.feed_line(trimmed);
+		if state.is_open() || trimmed.trim_end().ends_with(')') {
 			return Some(CaptureKind::Builtin(kind));
 		}
 	}
@@ -2381,6 +2480,11 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// skipped -- otherwise the bracket span reads as an unbalanced standalone call and its text is dropped.
 	if trimmed.starts_with("#styled-box[") {
 		return Some(CaptureKind::StyledBox);
+	}
+	// A bare content block `#[ ... ]` is no call: Typst sets its content where it stands, joined into the
+	// markup around it, and a `#set` in it governs the block alone. Gathered whole and read as a scoped body.
+	if trimmed.starts_with("#[") {
+		return Some(CaptureKind::Bare);
 	}
 	// A documentation section opens with a line-leading `#section-banner("logo")` -- a full-width grey bar
 	// carrying the section's logo -- captured here so the bar is drawn rather than the call dropped. Tried
@@ -2531,7 +2635,7 @@ fn template_call_parts(buf: &str, name: &str) -> Option<(String, String)> {
 /// Is this line a `#show: <ident>.with(` whole-document template application -- the form whose named
 /// arguments lower onto the theme? Distinguished from an introspective `#show ...: it => { ... }`,
 /// which carries no `.with(` and is left to be refused.
-fn is_show_doc_with(trimmed: &str) -> bool {
+pub(crate) fn is_show_doc_with(trimmed: &str) -> bool {
 	let rest = match trimmed.strip_prefix("#show:") {
 		Some(r)	=> r.trim_start(),
 		None	=> return false,
@@ -2549,7 +2653,7 @@ fn is_show_doc_with(trimmed: &str) -> bool {
 /// for? The target list is [`crate::lang::set::LOWERABLE_SET_TARGETS`], the single source of truth the
 /// lowering itself matches on, so the reader and the lowering never drift apart. A `#set` on any other
 /// target returns `false` and is left to [`code_skip`] to refuse, since the reader has no field for it.
-fn is_lowerable_set(trimmed: &str) -> bool {
+pub(crate) fn is_lowerable_set(trimmed: &str) -> bool {
 	let rest = match trimmed.strip_prefix("#set ") {
 		Some(r)	=> r.trim_start(),
 		None	=> return false,
@@ -2579,8 +2683,10 @@ fn let_array_name(trimmed: &str) -> Option<String> {
 }
 
 /// Dispatches a completed capture: a data array is evaluated and stored under its name; a table or a
-/// figure is parsed into an [`Item`]. A construct that does not parse -- an unresolved spread, an empty
-/// table -- yields no item rather than an error, so a stray call never fails the whole document.
+/// figure is parsed into an [`Item`]. A construct that does not read -- an unresolved spread, an empty
+/// table, a container with no body -- yields no item and is refused where it stands, so a stray call never
+/// fails the whole document and is never dropped in silence. A container's body is read as the file is, and
+/// what fails there fails the file.
 fn dispatch_capture(
 	cap:	Capture,
 	items:	&mut Vec<Item>,
@@ -2588,35 +2694,62 @@ fn dispatch_capture(
 	skips:	&mut Refusals,
 	binds:	crate::lang::rules::Bindings<'_, '_>,
 )
+	-> Outcome<()>
 {
+	let cap = read_capture(cap, skips, binds);
 	match cap.kind {
 		CaptureKind::Let(name) => {
 			arrays.insert(name, parse_let_array(&cap.buf));
 		},
+		// A construct the reader cannot read -- a table whose arguments do not parse, a malformed figure call,
+		// an image or banner naming no path -- sets nothing, so each is refused where it stands rather than
+		// dropped without a trace.
 		CaptureKind::Table => {
-			if let Some(inner) = call_inner(&cap.buf, "table") {
-				if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(&cap.buf)) {
-					items.push(Item::Table { spec, span: Span::new(0, 0) });
-				}
+			match call_inner(&cap.buf, "table").and_then(|inner| parse_table_spec(&inner, arrays, outer_text_size(&cap.buf))) {
+				Some(spec)	=> items.push(Item::Table { spec, span: Span::new(cap.start, cap.start) }),
+				None		=> skips.record("#table", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::Figure => {
-			if let Some(item) = parse_figure(&cap.buf, arrays) {
-				items.push(item);
+			let at = Span::new(cap.start, cap.start);
+			match parse_figure(&cap.buf, arrays, at) {
+				Some((item, without)) => {
+					// A figure drawn by code is drawn with what the reader could place; each thing it is drawn
+					// without is refused where the figure stands. A figure whose body is none this reader draws
+					// is set as a placeholder, and recorded at once.
+					match &item {
+						Item::Figure { body: FigureBody::Code(cf), .. } => {
+							for w in &without {
+								skips.record_stand_in(&fmt!("#figure ({})", cf.kind_name()), at,
+									RefusalClass::Unsupported, &fmt!("is drawn without {}", w));
+							}
+						},
+						Item::Figure { body: FigureBody::Image { path, .. }, .. } if path.is_empty() => {
+							skips.record_stand_in("#figure", at, RefusalClass::Unusable,
+								"has no image, table or diagram this reader draws, so a placeholder is set");
+						},
+						_ => {},
+					}
+					items.push(item);
+				},
+				None => skips.record("#figure", at),
 			}
 		},
 		CaptureKind::Image => {
 			// A line-leading image call: its path and sizing are read the same way a figure's image body is,
-			// then set as a plain centred image with no figure number. A call naming no path draws nothing.
+			// then set as a plain centred image with no figure number.
 			let (path, width, height, scale) = image_call(&cap.buf);
-			if !path.is_empty() {
-				items.push(Item::Image { path, width, height, scale, span: Span::new(0, 0) });
+			if path.is_empty() {
+				skips.record("#image", Span::new(cap.start, cap.start));
+			} else {
+				items.push(Item::Image { path, width, height, scale, span: Span::new(cap.start, cap.start) });
 			}
 		},
 		CaptureKind::SectionBanner => {
-			// The first positional argument is the logo path; a call naming none draws nothing.
-			if let Some(path) = call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
-				items.push(Item::SectionBanner { path, span: Span::new(0, 0) });
+			// The first positional argument is the logo path.
+			match call_inner(&cap.buf, "section-banner").as_deref().and_then(first_string) {
+				Some(path)	=> items.push(Item::SectionBanner { path, span: Span::new(cap.start, cap.start) }),
+				None		=> skips.record("#section-banner", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::Place => {
@@ -2627,13 +2760,13 @@ fn dispatch_capture(
 			let span = Span::new(cap.start, cap.start);
 			match place_float_call(&cap.buf) {
 				Some((floating, clearance, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
-						skips.merge(sub);
-						// A float is laid out as one unit, so a page or column break inside it cannot be
-						// honoured; it is refused visibly rather than dropped.
-						refuse_nested_page_breaks(&mut inner, skips);
-						items.push(Item::Place { items: inner, floating, clearance, span });
-					}
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_body().with_guards(&scope, 0)));
+					skips.merge(sub);
+					// A float is laid out as one unit, so a break inside it is refused, and a float inside it
+					// is set in place with its placement refused (see [`settle_container_body`]).
+					settle_container_body(&mut inner, skips);
+					items.push(Item::Place { items: inner, floating, clearance, span });
 				},
 				None => skips.record("#place", span),
 			}
@@ -2646,19 +2779,21 @@ fn dispatch_capture(
 			// The span is the wrapper's own opening line; a refusal recorded inside the re-parsed body
 			// carries a span relative to that body text alone, not the enclosing document -- a known,
 			// accepted imprecision for a wrapper nested this way (see `Refusal`'s own doc comment).
+			// A wrapper with no trailing `[ ... ]` body the reader finds is passed over whole, body and all, on
+			// the same record.
 			skips.record("#columns", Span::new(cap.start, cap.start));
 			if let Some(body) = columns_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
-					skips.merge(sub);
-					// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
-					// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
-					// brackets them. An empty patch -- a body that declares no styling -- adds no markers.
-					let patch = crate::lang::set::lower_declarations(&body);
-					if patch == crate::theme::ThemePatch::default() {
-						items.append(&mut inner);
-					} else {
-						items.push(Item::Scoped { patch, items: inner });
-					}
+				let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+				let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
+				skips.merge(sub);
+				// The columns body's own top-level `#set` declarations scope to the spliced subtree, the
+				// way an included chapter's do (H1): its items splice in flat, so a scope marker pair
+				// brackets them. An empty patch -- a body that declares no styling -- adds no markers.
+				let patch = crate::lang::set::lower_declarations(&body);
+				if patch == crate::theme::ThemePatch::default() {
+					items.append(&mut inner);
+				} else {
+					items.push(Item::Scoped { patch, items: inner, span: Span::new(cap.start, cap.start) });
 				}
 			}
 		},
@@ -2667,18 +2802,20 @@ fn dispatch_capture(
 			// parser again and wrapped in a single [`Item::Box`] the lowering sets in a filled, padded box --
 			// unlike `#columns`, whose body splices in flat. The construct is set, not skipped, so it is not
 			// recorded itself; a refusal within the body (an unknown inline call) still folds in.
-			if let Some(body) = styled_box_body(&cap.buf) {
-				if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+			match styled_box_body(&cap.buf) {
+				Some(body) => {
+					let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let (mut inner, sub) = res!(parse_items(&body, binds.in_scoped_body().with_guards(&scope, 0)));
 					skips.merge(sub);
-					// A `#pagebreak()` nested in a callout body cannot be honoured -- the box is laid out as one
-					// keep unit -- so it is refused visibly rather than dropped silently at render (see
-					// [`refuse_nested_page_breaks`]).
-					refuse_nested_page_breaks(&mut inner, skips);
+					// The box is laid out as one keep unit, so a break in its body is refused, and a float in it
+					// is set in place with its placement refused (see [`settle_container_body`]).
+					settle_container_body(&mut inner, skips);
 					// The box body's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to the box, applied to the box's subtree at render (H3) rather than the document.
 					let patch = crate::lang::set::lower_declarations(&body);
-					items.push(Item::Box { items: inner, patch, placement: None, span: Span::new(0, 0) });
-				}
+					items.push(Item::Box { items: inner, patch, placement: None, span: Span::new(cap.start, cap.start) });
+				},
+				None => skips.record("#styled-box", Span::new(cap.start, cap.start)),
 			}
 		},
 		CaptureKind::DeclStyle => {
@@ -2687,11 +2824,77 @@ fn dispatch_capture(
 			// blindly refused; lowering its arguments onto the theme is the book assembler's job (see
 			// [`crate::lang::set`] and [`crate::book`]), which reads the same source with the theme in hand,
 			// so nothing is emitted into the item stream here. A `#set` that would lower to nothing -- one
-			// applying no argument, or naming an unrecognised or unconvertible one -- is recorded as a
-			// refusal (H2), so it is visible rather than a silent no-op; a `#set` that fully lowers, and a
-			// `#show: doc.with(...)`, record nothing.
-			if let Some(name) = crate::lang::set::declstyle_refusal(&cap.buf) {
-				skips.record(&name, Span::new(cap.start, cap.start));
+			// applying no argument, or naming an unrecognised or unconvertible one, or one twice -- is
+			// recorded as a refusal (H2) naming the fields it left unapplied, so it is visible rather than a
+			// silent no-op; a `#set` that fully lowers, and a `#show: doc.with(...)`, record nothing.
+			//
+			// The assembler lowers a file's rules from its own level alone, so a rule that stands anywhere else
+			// -- in a list item, strong or emphasis, which end it, or in code -- is refused where it stands.
+			// A `#set document` is the Info fold's: applied where the file's own lines hold it (its level, or a
+			// bare content block), and refused at its site there when a container holds it, so the reader
+			// records none of those. Inside a container body it would reach no dictionary here, and in an
+			// expanded binding likewise, so in any body it is refused rather than passed over. A `#show` rule
+			// is collected from a file's top level alone, and a `#set` or `doc.with` only from a file's or
+			// a scoped body's (a `#styled-box`'s, a `#columns'`, a `#[ ... ]`'s), so one in any other body is
+			// refused too.
+			let first	= cap.buf.lines().next().unwrap_or("").trim_start();
+			let rule	= crate::lang::rules::is_rule_line(first);
+			let at		= Span::new(cap.start, cap.start);
+			let doc		= crate::lang::set::sets_document(&cap.buf);
+			let fold	= doc && (!binds.body || binds.joined) && cap.place != lex::Place::Content;
+			// What the rule names and the lowering cannot take; a container refuses the rule whole instead.
+			let left	= if cap.place == lex::Place::Contained { None } else { crate::lang::set::declstyle_refusal(&cap.buf) };
+			if fold {
+				// The fold of the file's own lines applies it, or refuses it at its site in a container. What an
+				// applied rule names and the fold cannot take is refused here, at the rule's line.
+				if let Some((name, why)) = left {
+					skips.record_stand_in(&name, at, RefusalClass::Unsupported, &why);
+				}
+			} else if binds.body && (doc || rule || !binds.scoped) {
+				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
+			} else if cap.place == lex::Place::Contained {
+				skips.record(&fmt!("{} (inside a list item, strong or emphasis, where it ends with it and is not applied)",
+					decl_name(first)), at);
+			} else if cap.place != lex::Place::Top {
+				skips.record(&fmt!("{} (inside a body, where it is not applied)", decl_name(first)), at);
+			} else if let Some((name, why)) = left {
+				skips.record_stand_in(&name, at, RefusalClass::Unsupported, &why);
+			}
+		},
+		CaptureKind::Bare => {
+			// A bare content block. Its content is set where it stands, as part of the markup around it, so
+			// it is read through the document parser again and spliced in flat. Its own top-level `#set`
+			// declarations scope to it, as a `#columns` body's do: a marker pair brackets the spliced items. A
+			// `#set document` in it is the Info fold's, which reads the same lines in the file.
+			let at = Span::new(cap.start, cap.start);
+			match bare_block(&cap.buf) {
+				Some((body_at, body, tail)) => {
+					// A block in code -- in a conditional's branch, say -- is joined into nothing the file's own
+					// lines hold, so a `#set document` in it is refused here rather than left to the fold.
+					// Its conditionals resolve in the block's own scope, over the bindings in force where it opens.
+					let scope		= binds.guards.body(binds.guard_at + cap.start as usize, &body);
+					let mut inside	= binds.in_bare_body().with_guards(&scope, 0);
+					inside.joined	= inside.joined && cap.place != lex::Place::Content;
+					let (mut inner, mut sub) = res!(parse_items(&body, inside));
+					// The block's lines are the file's own, so its sites are placed in them.
+					sub.shift(cap.start.saturating_add(body_at as u32));
+					skips.merge(sub);
+					let patch = crate::lang::set::lower_declarations(&body);
+					if patch == crate::theme::ThemePatch::default() {
+						items.append(&mut inner);
+					} else {
+						items.push(Item::Scoped { patch, items: inner, span: at });
+					}
+					// What stands after the block's closing bracket is read on as the file's own.
+					if !tail.trim().is_empty() {
+						let tail_at = cap.start.saturating_add(cap.buf.len().saturating_sub(tail.len()) as u32);
+						let (mut more, mut sub) = res!(parse_items(&tail, binds.at(binds.guard_at + tail_at as usize)));
+						sub.shift(tail_at);
+						skips.merge(sub);
+						items.append(&mut more);
+					}
+				},
+				None => skips.record("#[", at),
 			}
 		},
 		CaptureKind::Context => {
@@ -2715,15 +2918,17 @@ fn dispatch_capture(
 			// is set, not skipped, so it is not tallied; a refusal inside the body still folds in.
 			let tf = match binds.tfns.get(&name) {
 				Some(tf)	=> tf,
-				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+				None		=> return Err(err!("The furniture call #{} was gathered with no binding for it.", name; Bug, Missing)),
 			};
 			match template_call_parts(&cap.buf, &name) {
 				Some((args, body)) => {
-					if let Ok((mut inner, sub)) = parse_items(&body, binds) {
+					{
+						let scope = binds.guards.body(binds.guard_at + cap.start as usize, &body);
+						let (mut inner, sub) = res!(parse_items(&body, binds.in_body().with_guards(&scope, 0)));
 						skips.merge(sub);
-						// A `#pagebreak()` nested in a furniture callout body cannot be honoured -- the box is one
-						// keep unit -- so it is refused visibly rather than dropped silently at render.
-						refuse_nested_page_breaks(&mut inner, skips);
+						// The box is one keep unit, so a break in its body is refused, and a float in it is set
+						// in place with its placement refused.
+						settle_container_body(&mut inner, skips);
 						// A `title:` keyword argument, its content set as a leading bold paragraph. It is set at
 						// the title size the definition named (`text(size: 0.85em)`) by nesting it in a scope, so a
 						// title larger or smaller than the body reads at its own size.
@@ -2739,7 +2944,7 @@ fn dispatch_capture(
 									Some(sz)	=> {
 										let mut patch = crate::theme::ThemePatch::default();
 										patch.text.body_size = Some(sz);
-										Item::Scoped { patch, items: vec![para] }
+										Item::Scoped { patch, items: vec![para], span: Span::new(cap.start, cap.start) }
 									},
 									None		=> para,
 								};
@@ -2764,7 +2969,7 @@ fn dispatch_capture(
 			// is set, not skipped, so it is not tallied; a refusal inside the expanded body still folds in.
 			let cf = match binds.cfns.get(&name) {
 				Some(cf)	=> cf,
-				None		=> return,	// the opener only fires for a bound name, so this cannot happen
+				None		=> return Err(err!("The content binding #{} was gathered with no binding for it.", name; Bug, Missing)),
 			};
 			// A self- or mutually-referential binding (`#let a = [#a]`, `#let a = [#b]`/`#let b = [#a]`, or a
 			// function form `#let f(n) = [x #f(n)]`) would re-expand without bound. The name stack catches it
@@ -2775,15 +2980,16 @@ fn dispatch_capture(
 				skips.record(
 					&fmt!("#{} (cycle: content binding refers back to itself)", name),
 					Span::new(cap.start, cap.start));
-				return;
+				return Ok(());
 			}
 			if binds.depth() >= MAX_EXPANSION_DEPTH {
 				skips.record(
 					&fmt!("#{} (cycle: expansion depth exceeds {})", name, MAX_EXPANSION_DEPTH),
 					Span::new(cap.start, cap.start));
-				return;
+				return Ok(());
 			}
-			let args		= content_call_args(&cap.buf, &name);
+			let raw			= content_call_raw(&cap.buf, &name);
+			let args: Vec<String> = raw.iter().map(|a| content_arg_value(a)).collect();
 			let expanded	= expand_content_body(cf, &args);
 			// A styled-box content binding (`#let stamp(s) = box(fill: ..)[*v: #s*]`): the inner text is set,
 			// but the box's own styling this reader cannot draw is recorded as a visible skip here, so the
@@ -2793,10 +2999,10 @@ fn dispatch_capture(
 			}
 			let mut nested: Vec<String> = binds.active.to_vec();
 			nested.push(name.clone());
-			if let Ok((mut inner, sub)) = parse_items(&expanded, binds.with_active(&nested)) {
-				skips.merge(sub);
-				items.append(&mut inner);
-			}
+			let scope = content_scope(cf, &raw, binds, cap.start as usize, &expanded);
+			let (mut inner, sub) = res!(parse_items(&expanded, binds.with_active(&nested).with_guards(&scope, 0)));
+			skips.merge(sub);
+			items.append(&mut inner);
 		},
 		CaptureKind::Builtin(kind) => {
 			let span = Span::new(cap.start, cap.start);
@@ -2808,11 +3014,11 @@ fn dispatch_capture(
 				// (`pagebreak(to: "odd")`) selects a parity target the reader does not model, so it is refused
 				// visibly rather than set as a plain break that quietly ignores the argument.
 				BuiltinKind::PageBreak => {
-					let inner = call_inner(&cap.buf, "pagebreak").unwrap_or_default();
-					if inner.contains("to:") {
+					let list = lex::args(&call_inner(&cap.buf, "pagebreak").unwrap_or_default());
+					if lex::named(&list, "to").is_some() {
 						skips.record("#pagebreak", span);
 					} else {
-						items.push(Item::PageBreak { weak: pagebreak_is_weak(&inner), span });
+						items.push(Item::PageBreak { weak: pagebreak_is_weak(&list), span });
 					}
 				},
 				// `#lorem(<n>)`: n words of the standard placeholder, set as one plain paragraph. A malformed
@@ -2835,20 +3041,22 @@ fn dispatch_capture(
 				// `#colbreak()` or `#colbreak(weak: true)`: a forced column break, which on a page of one column
 				// breaks the page, as Typst makes it.
 				BuiltinKind::ColBreak => {
-					let inner = call_inner(&cap.buf, "colbreak").unwrap_or_default();
-					items.push(Item::ColBreak { weak: pagebreak_is_weak(&inner), span });
+					let list = lex::args(&call_inner(&cap.buf, "colbreak").unwrap_or_default());
+					items.push(Item::ColBreak { weak: pagebreak_is_weak(&list), span });
 				},
 				BuiltinKind::Vspace => {
-					let inner = call_inner(&cap.buf, "v").unwrap_or_default();
-					match parse_length(first_arg(&inner).trim()) {
-						Some(Length::Abs(pt)) if !inner.contains("weak:")	=>
+					let list = lex::args(&call_inner(&cap.buf, "v").unwrap_or_default());
+					let first = list.iter().find(|a| a.key.is_none()).map(|a| a.value.as_str()).unwrap_or_default();
+					match parse_length(first) {
+						Some(Length::Abs(pt)) if lex::named(&list, "weak").is_none()	=>
 							items.push(Item::Space { height: crate::ir::Sp::from_pt(pt), span }),
-						_													=> skips.record("#v", span),
+						_																=> skips.record("#v", span),
 					}
 				},
 			}
 		},
 	}
+	Ok(())
 }
 
 /// The standard lorem-ipsum passage Typst's `#lorem` draws from, the opening of Cicero's *De Finibus* as
@@ -2888,47 +3096,78 @@ fn lorem_arg(buf: &str) -> Option<usize> {
 
 /// Does a `#pagebreak(...)` argument list ask for a WEAK break? Only an explicit `weak: true` does; a
 /// `weak: false` and an absent argument are both the STRONG default (Typst 0.15.1), which always ejects.
-/// The value is read as the token immediately after `weak:`, so `weak: true`, `weak:true` and
-/// `weak: false` all resolve correctly.
-fn pagebreak_is_weak(inner: &str) -> bool {
-	match inner.find("weak:") {
-		Some(at)	=> inner[at + "weak:".len()..].trim_start().starts_with("true"),
-		None		=> false,
-	}
+/// The argument is the list's own, as [`lex::args`] reads it, so one named in a comment or a string asks for
+/// nothing.
+fn pagebreak_is_weak(list: &[lex::Arg]) -> bool {
+	lex::named(list, "weak") == Some("true")
 }
 
-/// The first positional argument of a call's inner argument text: the run up to the first top-level comma,
-/// so `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
+/// The first positional argument of a call's inner argument text, as [`lex::args`] reads it, so
+/// `#v(12pt, weak: true)` yields `12pt` and `#lorem(60)` yields `60`.
 fn first_arg(inner: &str) -> String {
-	split_arg_commas(inner).into_iter().next().unwrap_or_default()
+	lex::args(inner).into_iter().find(|a| a.key.is_none()).map(|a| a.value).unwrap_or_default()
 }
 
-/// Records a visible refusal for, and removes, every `#pagebreak()` nested in a callout box's body. A
-/// forced page eject has no meaning inside a box the layout keeps whole -- the box-body renderer has no
-/// page to turn -- so it is refused rather than silently dropped at render. Recurses through a nested scope
-/// or a nested box, so a break buried in either is caught too. The document top level and a `#columns` body
-/// (which splices into the main flow, not a box) are untouched: a break there is honoured.
-fn refuse_nested_page_breaks(items: &mut Vec<Item>, skips: &mut Refusals) {
+/// Settles a container's body -- a callout's or a float's -- for a unit laid out whole, where the reader
+/// builds the container. A `#pagebreak()` or a `#colbreak()` has no page or column to turn there, so it is
+/// refused and removed. A float has no band of its own there: a floating figure or table, a floating callout
+/// and a floating `#place` each have their placement refused, and are set where they stand -- a `#place`'s
+/// body spliced into the container's flow -- so a float in a container is neither lost nor fatal. A scope
+/// changing the page's columns has no page to change there, so the change is refused in the same way. Recurses
+/// through a nested scope and a nested box, so one buried in either is caught too. The document top level and
+/// a `#columns` body (which splices into the main flow, not a container) are untouched: a break or a float
+/// there is honoured.
+fn settle_container_body(items: &mut Vec<Item>, skips: &mut Refusals) {
+	let in_place = "inside a container is refused, so";
 	let mut kept = Vec::with_capacity(items.len());
 	for mut item in items.drain(..) {
 		match &mut item {
 			Item::PageBreak { span, .. }	=> { skips.record("#pagebreak", *span); continue; },
 			Item::ColBreak { span, .. }		=> { skips.record("#colbreak", *span); continue; },
-			Item::Box { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			Item::Place { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			Item::Scoped { items: inner, .. }	=> refuse_nested_page_breaks(inner, skips),
-			_								=> {},
+			Item::Place { items: inner, span, .. }	=> {
+				skips.record_stand_in("#place float", *span, RefusalClass::Unsupported,
+					&fmt!("{} its body is set where it stands", in_place));
+				settle_container_body(inner, skips);
+				kept.append(inner);
+				continue;
+			},
+			Item::Figure { placement, span, .. }	=> if placement.take().is_some() {
+				skips.record_stand_in("#figure placement", *span, RefusalClass::Unsupported,
+					&fmt!("{} the figure is set where it stands", in_place));
+			},
+			Item::Box { items: inner, placement, span, .. }	=> {
+				if placement.take().is_some() {
+					skips.record_stand_in("callout float", *span, RefusalClass::Unsupported,
+						&fmt!("{} the callout is set where it stands", in_place));
+				}
+				settle_container_body(inner, skips);
+			},
+			// A scope changing the page's columns has no page to change in a unit laid out whole, so the change
+			// is refused and the scope's blocks are set in the container's one column.
+			Item::Scoped { patch, items: inner, span }	=> {
+				let cols	= patch.page.columns.take().is_some();
+				let gutter	= patch.page.column_gutter.take().is_some();
+				if cols || gutter {
+					skips.record_stand_in("column change", *span, RefusalClass::Unsupported,
+						&fmt!("{} its body is set in the container's one column", in_place));
+				}
+				settle_container_body(inner, skips);
+			},
+			Item::Heading { .. } | Item::Paragraph { .. } | Item::List { .. } | Item::Code { .. } | Item::Table { .. }
+			| Item::Image { .. } | Item::SectionBanner { .. } | Item::Rule { .. } | Item::Space { .. }
+			| Item::PrintGlossary { .. } | Item::ClaimIndex { .. }	=> {},
 		}
 		kept.push(item);
 	}
 	*items = kept;
 }
 
-/// The positional arguments of a captured content-binding reference, each evaluated to its substitution
-/// text: a `"quoted string"` yields its contents, a `[bracketed content]` its inner markup, and any other
-/// value (a number, an identifier) its trimmed source. A bare `#name` reference, or a `#name[ ... ]` whose
-/// single argument is the bracket body, is handled too. An empty list when the reference takes none.
-fn content_call_args(buf: &str, name: &str) -> Vec<String> {
+/// The positional arguments of a captured content-binding reference as written, trimmed; [`content_arg_value`]
+/// evaluates each to its substitution text: a `"quoted string"` yields its contents, a `[bracketed content]`
+/// its inner markup, and any other value (a number, an identifier) its trimmed source. A bare `#name`
+/// reference, or a `#name[ ... ]` whose single argument is the bracket body, is handled too. An empty list
+/// when the reference takes none.
+fn content_call_raw(buf: &str, name: &str) -> Vec<String> {
 	let chars:	Vec<char>	= buf.chars().collect();
 	let at = match find_lit(&chars, &fmt!("#{}", name)) {
 		Some(a)	=> a,
@@ -2938,15 +3177,13 @@ fn content_call_args(buf: &str, name: &str) -> Vec<String> {
 	match chars.get(j) {
 		Some('(') => {
 			match read_group(&chars, j) {
-				Some((inner, _))	=> split_arg_commas(&inner).into_iter()
-										.map(|a| content_arg_value(a.trim()))
-										.collect(),
+				Some((inner, _))	=> split_top_args(&inner).into_iter().map(|a| a.trim().to_string()).collect(),
 				None				=> Vec::new(),
 			}
 		},
 		// A `#name[ ... ]` call: the bracket body is the single positional argument.
 		Some('[') => match read_group(&chars, j) {
-			Some((inner, _))	=> vec![inner],
+			Some((inner, _))	=> vec![fmt!("[{}]", inner)],
 			None				=> Vec::new(),
 		},
 		_ => Vec::new(),	// a bare `#name` reference
@@ -2967,34 +3204,30 @@ fn content_arg_value(arg: &str) -> String {
 	unwrap_arg(t)
 }
 
-/// Splits an argument list on its top-level commas, honouring `(`/`[`/`{` nesting and `"..."` strings so a
-/// comma inside a bracketed or quoted argument does not split it.
-fn split_arg_commas(s: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut cur		= String::new();
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
+/// The scope an expanded content binding's conditionals resolve in: the names in force where its body is
+/// written, where Typst evaluates it, over the body's own bindings. `raw` is the call's arguments as written,
+/// evaluated where the call stands (`at` in the text `binds` reads), so where the two places differ on a
+/// name the name is unread rather than taken from either; each parameter holds its argument when that is a
+/// string or boolean literal.
+fn content_scope(
+	cf:			&crate::lang::rules::ContentFn,
+	raw:		&[String],
+	binds:		crate::lang::rules::Bindings<'_, '_>,
+	at:			usize,
+	expanded:	&str,
+)
+	-> crate::lang::rules::GuardScope
+{
+	let mut base = match raw.is_empty() {
+		true	=> cf.scope.clone(),
+		false	=> cf.scope.agree(&binds.guards.base_at(binds.guard_at + at)),
+	};
+	// A parameter holds the literal its argument is written as, a string or a boolean; given any other
+	// expression, or none, it is a value the reader does not know.
+	for (param, arg) in cf.params.iter().zip(raw) {
+		base = base.bound_to(param, arg);
 	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
+	crate::lang::rules::GuardScope::within(base, expanded, 0)
 }
 
 /// Substitutes a content binding's positional arguments into its body: each line-leading or inline `#param`
@@ -3195,25 +3428,24 @@ pub(crate) fn substitute_content_calls(
 						// or a lone `[body]` -- reading its positional arguments the same way [`content_call_args`]
 						// reads a captured own-line call's, so both paths substitute identically.
 						let mut k		= j;
-						let mut args:	Vec<String>	= Vec::new();
+						let mut raw:	Vec<String>	= Vec::new();
 						if chars.get(k) == Some(&'(') {
 							if let Some((inner, after)) = read_group(&chars, k) {
-								args = split_arg_commas(&inner).into_iter()
-									.map(|a| content_arg_value(a.trim()))
-									.collect();
+								raw = split_top_args(&inner).into_iter().map(|a| a.trim().to_string()).collect();
 								k = after;
 							}
 						}
 						if chars.get(k) == Some(&'[') {
 							if let Some((inner, after)) = read_group(&chars, k) {
 								// A `#name[ ... ]` call with no paren group: the bracket body is the single
-								// positional argument, mirroring [`content_call_args`]'s own bracket arm.
-								if args.is_empty() {
-									args = vec![inner];
+								// positional argument, mirroring [`content_call_raw`]'s own bracket arm.
+								if raw.is_empty() {
+									raw = vec![fmt!("[{}]", inner)];
 								}
 								k = after;
 							}
 						}
+						let args: Vec<String> = raw.iter().map(|a| content_arg_value(a)).collect();
 						// A self- or mutually-referential binding is refused the instant its name recurs, so a
 						// cycle unwinds at its own length; the depth cap is the backstop for a pathological chain
 						// of distinct bindings. Either way the call is consumed (the surrounding prose is kept)
@@ -3231,6 +3463,15 @@ pub(crate) fn substitute_content_calls(
 							continue;
 						}
 						let expanded		= expand_content_body(cf, &args);
+						// Its conditionals and loops are read in the scope in force where the binding was
+						// written, where Typst evaluates it, before the text is spliced into the prose round it.
+						let expanded		= match holds_statement(&expanded) {
+							true	=> {
+								let scope = content_scope(cf, &raw, binds, span.start as usize, &expanded);
+								statements_in(&expanded, span, skips, &scope)
+							},
+							false	=> expanded,
+						};
 						// A styled-box content binding used inline (`see #stamp("v2") for details`): the inner text
 						// is spliced into the surrounding prose, and the box's own styling this reader cannot draw
 						// is recorded as a visible skip -- the styling is never silently lost, the text never dropped.
@@ -3367,6 +3608,17 @@ fn columns_body(buf: &str) -> Option<String> {
 		return None;
 	}
 	read_group(&chars, j).map(|(body, _)| body)
+}
+
+/// A captured `#[ ... ]` content block as `(the byte its body starts at in `buf`, the body, the text after the
+/// block's closing bracket)`. `None` for a block that does not close.
+fn bare_block(buf: &str) -> Option<(usize, String, String)> {
+	let chars:	Vec<char>	= buf.chars().collect();
+	let Some(at) = find_lit(&chars, "#[") else { return None; };
+	let open = at + 1;
+	let Some((body, after)) = read_group(&chars, open) else { return None; };
+	let body_at: usize = chars[..open + 1].iter().map(|c| c.len_utf8()).sum();
+	Some((body_at, body, chars[after..].iter().collect()))
 }
 
 /// Reads a captured `#place(...)[ ... ]` as a float: its side from the alignment argument (`top`, `bottom`
@@ -3942,7 +4194,7 @@ fn outer_text_size(text: &str) -> Option<f64> {
 /// Parses a `#figure(...)` call (its buffer, a trailing `<label>` and all) into an [`Item::Figure`]. The
 /// positional argument is the body -- a wrapped `#table(...)` set in full, or an image call stood in for
 /// by a placeholder; `caption:` sets the caption, `supplement:`/`kind:` the "Figure" or "Table" label.
-fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option<Item> {
+fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>, span: Span) -> Option<(Item, Vec<String>)> {
 	let (body_src, label)	= strip_trailing_label(buf);
 	let inner				= call_inner(&body_src, "figure")?;
 
@@ -3973,15 +4225,15 @@ fn parse_figure(buf: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> Option
 		}
 	}
 
-	let body_text	= positional.unwrap_or_default();
-	let body		= figure_body(&body_text, arrays);
+	let body_text			= positional.unwrap_or_default();
+	let (body, without)		= figure_body(&body_text, arrays);
 	let supplement	= supplement.unwrap_or_else(|| match kind.as_deref() {
 		Some("table")	=> "Table".to_string(),
 		_				=> "Figure".to_string(),
 	});
 	// A scope matters only to a float: Typst accepts `scope: "parent"` on a floating figure alone.
 	let placement = placement.map(|side| Floating { side, scope });
-	Some(Item::Figure { body, caption, supplement, label, placement, span: Span::new(0, 0) })
+	Some((Item::Figure { body, caption, supplement, label, placement, span }, without))
 }
 
 /// Reads a float's `scope:` value: `"parent"` spans every column of the page, anything else -- `"column"`,
@@ -4007,19 +4259,20 @@ fn parse_placement(val: &str) -> Option<FloatPlacement> {
 
 /// Decides a figure's body from its positional text: a wrapped `#table(...)` if one is present and
 /// parses, otherwise an image carrying the path and any declared sizing (empty path when none is found).
-fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> FigureBody {
+/// Beside it, what a figure drawn by code is drawn without ([`super::codefig::parse_code_figure`]).
+fn figure_body(text: &str, arrays: &HashMap<String, Vec<Vec<Inline>>>) -> (FigureBody, Vec<String>) {
 	if let Some(inner) = call_inner(text, "table") {
 		if let Some(spec) = parse_table_spec(&inner, arrays, outer_text_size(text)) {
-			return FigureBody::Table(spec);
+			return (FigureBody::Table(spec), Vec::new());
 		}
 	}
 	// A CeTZ/Fletcher diagram, bar chart or line plot drawn inline is read into a builder that draws it
 	// for real; only when the body is none of these does it fall through to the image/placeholder path.
-	if let Some(cf) = super::codefig::parse_code_figure(text) {
-		return FigureBody::Code(cf);
+	if let Some((cf, without)) = super::codefig::parse_code_figure(text) {
+		return (FigureBody::Code(cf), without);
 	}
 	let (path, width, height, scale) = image_call(text);
-	FigureBody::Image { path, width, height, scale }
+	(FigureBody::Image { path, width, height, scale }, Vec::new())
 }
 
 /// The path and sizing of a `padded-image("...")` or `image("...")` call in `text`. The custom wrapper is
@@ -4166,12 +4419,14 @@ pub(crate) fn first_string(text: &str) -> Option<String> {
 }
 
 /// Splits the inner text of a call by its top-level commas, respecting `()[]{}` nesting and `"..."`
-/// strings, so a comma inside a nested group or a string does not part an argument.
+/// strings, so a comma inside a nested group or a string does not part an argument. A comment is trivia, as
+/// [`lex::args`] reads it: it leaves a space in code and nothing in markup, so a comma, a name or a value in
+/// one is no part of an argument.
 pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 	let chars:	Vec<char>	= inner.chars().collect();
 	let mut args:	Vec<String>	= Vec::new();
 	let mut cur					= String::new();
-	let mut state				= SkipState::new();
+	let mut state				= Lexer::code();
 	let mut i					= 0;
 	while i < chars.len() {
 		// A comma parts the arguments only at the top level; inside any frame -- a nested group, a string,
@@ -4181,9 +4436,11 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 			i += 1;
 			continue;
 		}
-		let consumed = state.step(&chars, i);
-		for k in i..i + consumed {
-			cur.push(chars[k]);
+		let (consumed, _, kept) = state.arg_step(&chars, i);
+		match kept {
+			lex::Kept::Text		=> cur.extend(&chars[i..i + consumed]),
+			lex::Kept::Space	=> cur.push(' '),
+			lex::Kept::Nothing	=> {},
 		}
 		i += consumed;
 	}
@@ -4198,7 +4455,7 @@ pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
 /// or a spread is not mistaken for a named argument.
 pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 	let chars:	Vec<char>	= arg.chars().collect();
-	let mut state			= SkipState::new();
+	let mut state			= Lexer::code();
 	let mut i				= 0;
 	while i < chars.len() {
 		// A colon names the argument only at the top level; inside any frame it is part of the value (an
@@ -4212,7 +4469,7 @@ pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
 			}
 			return None;
 		}
-		i += state.step(&chars, i);
+		i += state.step(&chars, i).0;
 	}
 	None
 }
@@ -4659,6 +4916,71 @@ mod tests {
 		Ok(())
 	}
 
+	/// A comment inside a call's parentheses is trivia, as Typst reads it, so a keyword written in one asks for
+	/// nothing: `#pagebreak(/* to: "odd" */)` is a plain break (Typst 0.15.1 sets two pages, where a real `to:`
+	/// makes three), `#pagebreak(/* weak: true */)` and `#colbreak(/* weak: true */)` are strong (two in a row
+	/// set three pages, not two) and `#v(12pt /* , weak: true */)` is a fixed space. The keyword beside a comment
+	/// still counts, and one named in a string is no keyword. A comment is blanked as a call is gathered, so a
+	/// substring scan saw none of these; the test pins what the lexer-read arguments set.
+	#[test]
+	fn a_keyword_in_a_comment_asks_for_nothing() -> Outcome<()> {
+		let weak_of = |it: &Item| match it {
+			Item::PageBreak { weak, .. } | Item::ColBreak { weak, .. }	=> Some(*weak),
+			_															=> None,
+		};
+		for (src, weak) in [
+			("#pagebreak(/* to: \"odd\" */)\n", false),
+			("#pagebreak(/* weak: true */)\n", false),
+			("#pagebreak(weak: false)\n", false),
+			("#pagebreak(weak: true /* , to: \"odd\" */)\n", true),
+			("#pagebreak(// weak: false\n weak: true)\n", true),
+			("#colbreak(/* weak: true */)\n", false),
+			("#colbreak(weak: true // , weak: false\n)\n", true),
+		] {
+			let (items, skips) = res!(document_with_refusals(src));
+			assert!(skips.report().is_none(), "{:?} refuses nothing: {:?}", src, skips.report());
+			let got: Vec<bool> = items.iter().filter_map(weak_of).collect();
+			assert_eq!(got, vec![weak], "{:?}: {:?}", src, items);
+		}
+		let (items, skips) = res!(document_with_refusals("#pagebreak(// to: \"odd\"\n to: \"odd\")\n"));
+		assert!(!items.iter().any(|it| matches!(it, Item::PageBreak { .. })), "a real `to:` is refused: {:?}", items);
+		assert!(skips.report().map_or(false, |r| r.contains("#pagebreak")), "{:?}", skips.report());
+
+		let (items, skips) = res!(document_with_refusals("#v(12pt /* , weak: true */)\n"));
+		assert!(skips.report().is_none(), "a commented `weak:` refuses nothing: {:?}", skips.report());
+		assert!(items.iter().any(|it| matches!(it, Item::Space { .. })), "the fixed space is set: {:?}", items);
+		let (items, skips) = res!(document_with_refusals("#v(/* weak: true, */ 12pt, weak: true)\n"));
+		assert!(!items.iter().any(|it| matches!(it, Item::Space { .. })), "a real `weak:` is refused: {:?}", items);
+		assert!(skips.report().map_or(false, |r| r.contains("#v")), "{:?}", skips.report());
+		Ok(())
+	}
+
+	/// Every splitter of an argument list reads a comment as trivia: a comma in one parts nothing, a name in
+	/// one is no name, and a comment alone after the last comma is no argument -- where the text of a comment
+	/// once joined the argument beside it, so a comment line before `columns:` took the name from the key.
+	#[test]
+	fn a_comment_in_an_argument_list_is_trivia_to_every_splitter() -> Outcome<()> {
+		let trimmed = |inner: &str| -> Vec<String> { split_top_args(inner).iter().map(|a| a.trim().to_string()).collect() };
+		assert_eq!(trimmed("a /* x, y */, b // c, d\n, [p // q\n r], c // end\n"),
+			vec!["a", "b", "[p \n r]", "c"]);
+		assert_eq!(trimmed("a, b, // end\n"), vec!["a", "b"]);
+		assert_eq!(first_arg("/* a, */ 12pt, weak: true"), "12pt");
+		assert_eq!(first_arg("weak: true, 12pt"), "12pt");
+
+		// A comment line before `columns:` leaves the name its own, and a commented cell is no cell.
+		let table = |inner: &str| -> Outcome<(usize, usize)> {
+			let spec = res!(parse_table_spec(inner, &HashMap::new(), None)
+				.ok_or_else(|| err!("a table of cells: {:?}", inner; Test, Bug)));
+			Ok((spec.ncols, spec.cells.len()))
+		};
+		assert_eq!(res!(table("\n  // two columns\n  columns: 2,\n  [a], [b], /* [x], */ [c], [d] // end\n")), (2, 4));
+
+		// A claim's codes are read as they are written, a comment between them none: a `<label>` is one token to
+		// the lexer, so the splitter that kept a `<...>` together by hand is no longer needed.
+		assert_eq!(claim_codes("<B1> /* B9, */, \"B2\", // B8\n B3,<B4>"), vec!["B1", "B2", "B3", "B4"]);
+		Ok(())
+	}
+
 	/// `_compress-codes`: a run of three or more consecutive same-prefix codes collapses to an en-dash
 	/// range, a pair stays expanded, two or fewer codes join unchanged, and an unparseable run passes through.
 	#[test]
@@ -4679,20 +5001,6 @@ mod tests {
 		assert!(is_inline_call("claim-label"));
 		assert!(is_inline_call("claim-refs"));
 		assert!(code_skip("#claim-label(<CD18>). Equilibrium appropriation follows.").is_none());
-	}
-
-	/// A claim reference in a context the layout does not gather into the reverse claim index -- here a
-	/// heading title -- is recorded as a refusal rather than dropped silently, while the same reference in a
-	/// body paragraph (which IS gathered) draws no refusal. Guards the silent-loss path the audit flagged.
-	#[test]
-	fn claim_ref_in_a_non_body_context_is_refused_not_dropped() {
-		let (_items, skips) = document_with_refusals("= Heading #claim-refs(<Z9>) here\n\nBody text follows.\n").expect("parse");
-		assert!(skips.sites().iter().any(|s| s.name.contains("claim reference") && s.name.contains("heading")),
-			"a claim reference in a heading title must be a refusal: {:?}", skips.sites());
-		// A claim reference in a body paragraph is gathered into the index, so it is NOT refused.
-		let (_i2, skips2) = document_with_refusals("Body carrying a reference#claim-refs(<Z9>) here.\n").expect("parse");
-		assert!(!skips2.sites().iter().any(|s| s.name.contains("claim reference")),
-			"a body claim reference is indexed, not refused: {:?}", skips2.sites());
 	}
 
 	/// A line-leading `#padded-image(...)` (a section opener's logo) is set as an [`Item::Image`] carrying
@@ -4848,7 +5156,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 		let (items, _skips) = res!(document_with_refusals(
 			"#columns(2)[\n#set text(size: 20pt)\n\nScoped body.\n]\n"));
 		let (patch, inner) = res!(items.iter().find_map(|it| match it {
-			Item::Scoped { patch, items }	=> Some((patch.clone(), items)),
+			Item::Scoped { patch, items, .. }	=> Some((patch.clone(), items)),
 			_								=> None,
 		}).ok_or_else(|| err!("no Item::Scoped was produced for a columns body with a #set"; Test, Bug)));
 		assert_eq!(patch.text.body_size, Some(crate::ir::Sp::from_pt(20.0)),
@@ -5212,7 +5520,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			"g did not translate the key to its value: {:?}", runs);
 		// An unknown key: the key text stands and the miss is recorded on the skip tally.
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("A #t[nonesuch] term.", Span::new(0, 0), &mut skips);
+		let runs = scan_inlines("A #t[nonesuch] term.", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("nonesuch"))),
 			"unknown term-dict key did not fall back to its text: {:?}", runs);
 		assert_eq!(skips.total(), 1, "an unknown term-dict key was not recorded");
@@ -5233,6 +5541,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			params:		vec!["w".to_string()],
 			body:		"Learn about #t(w).".to_string(),
 			wrapper:	None,
+			scope:		crate::lang::rules::GuardBase::unknown(),
 		});
 		let tfns	= crate::lang::rules::TemplateFns::new();
 		let binds	= crate::lang::rules::Bindings::new(&tfns, &cfns);
@@ -5254,6 +5563,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 			params:		vec!["w".to_string()],
 			body:		"The word w on its own is prose, not #t(w).".to_string(),
 			wrapper:	None,
+			scope:		crate::lang::rules::GuardBase::unknown(),
 		};
 		let expanded = expand_content_body(&cf, &["website".to_string()]);
 		assert_eq!(expanded, "The word w on its own is prose, not #t(\"website\").",
@@ -5345,7 +5655,7 @@ fill: colours.yellow.lighten(50%), radius: 4pt, stroke: (left: 2pt + colours.yel
 	#[test]
 	fn unknown_inline_call_is_recorded_not_leaked() {
 		let mut skips = Refusals::default();
-		let runs = parse_inlines_in("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
+		let runs = scan_inlines("a #overline[Nato] treaty and a #v(2pt) gap", Span::new(0, 0), &mut skips);
 		assert!(runs.iter().all(|r| !matches!(r, Inline::Text(t) if t.contains("#overline") || t.contains("#v("))),
 			"raw unknown call leaked: {:?}", runs);
 		assert!(runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("Nato"))),
@@ -5811,6 +6121,327 @@ bound\".\n";
 		assert_eq!(inner, "first line // trailing\nsecond line",
 			"the buffer content around the line comment was misread: {:?}", inner);
 		assert_eq!(next, s.len(), "the group did not close at its own bracket");
+		Ok(())
+	}
+
+	/// A raw block inside a callout body is text to the scanner, as it is to Typst: a `]` shown in a
+	/// ```` ``` ```` example closes nothing, so the callout ends at its own bracket and the prose after it
+	/// stays outside.
+	#[test]
+	fn a_raw_block_in_a_body_closes_nothing() -> Outcome<()> {
+		let src = "#styled-box[\n```\nlet s = `x ]`\n]\n```\n]\n\nAfter the box.\n";
+		let (items, _) = res!(document_with_refusals(src));
+		let inner = res!(items.iter().find_map(|it| match it {
+			Item::Box { items, .. }	=> Some(items.clone()),
+			_						=> None,
+		}).ok_or_else(|| err!("no Item::Box was produced"; Test, Bug)));
+		assert!(inner.iter().any(|it| matches!(it, Item::Code { lines, .. } if lines.len() == 2)),
+			"the shown code stays whole inside the box: {:?}", inner);
+		assert!(matches!(items.last(), Some(Item::Paragraph { runs, .. })
+			if runs.iter().any(|r| matches!(r, Inline::Text(t) if t.contains("After the box.")))),
+			"the prose after the box is outside it: {:?}", items);
+		Ok(())
+	}
+
+	/// A block raw closes only on a run of backticks as long as its opener, as Typst lexes one.
+	#[test]
+	fn a_raw_block_closes_on_its_own_length() {
+		let mut state = Lexer::markup();
+		state.feed("````\n```\n#set text(size: 30pt)\n```\n");
+		assert!(state.is_open(), "a shorter run inside a four-backtick block is its text");
+		state.feed("````\n");
+		assert!(!state.is_open(), "the matching run closes it");
+	}
+
+	/// A `#set document` is applied from a file's own top level alone: one re-read from a container's body
+	/// or from an expanded binding is refused, while one at the top level refuses nothing.
+	#[test]
+	fn a_set_document_in_a_body_is_refused() -> Outcome<()> {
+		let named = |skips: &Refusals| skips.sites().iter().any(|s| s.name.starts_with("#set document"));
+		let (_, skips) = res!(document_with_refusals("#set document(title: \"Top\")\n\nText.\n"));
+		assert!(!named(&skips), "a top-level one is applied: {:?}", skips.sites());
+		let (_, skips) = res!(document_with_refusals("#columns(2)[\n#set document(title: \"Cols\")\nText.\n]\n"));
+		assert!(named(&skips), "a container's is refused: {:?}", skips.sites());
+		let mut cfns = crate::lang::rules::ContentFns::new();
+		crate::lang::rules::collect_content_fns("#let intro = [\n#set document(title: \"Bound\")\nHello.\n]\n", None, &mut cfns);
+		assert!(cfns.contains_key("intro"), "the binding is collected");
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let (_, skips) = res!(document_with_templates("#intro\n", crate::lang::rules::Bindings::new(&tfns, &cfns)));
+		assert!(named(&skips), "an expanded binding's is refused: {:?}", skips.sites());
+		Ok(())
+	}
+
+	/// Every construct that asks for something only setting it can give -- a figure's image, a plain image, a
+	/// banner's logo, a drawn figure, and every `@label`, `#cite`, footnote and maths span in a paragraph, a
+	/// heading, a caption or a table cell -- carries the site of its item in its file, and the reader refuses
+	/// at once a construct it cannot read, which sets nothing.
+	#[test]
+	fn every_construct_that_asks_carries_its_site() -> Outcome<()> {
+		use crate::doc::{Asked, ImageRole};
+		let src = "= Title @head\n\n#figure(image(\"a.png\"), caption: [See @cap.])\n\n#image(\"b.png\")\n\n\
+			#section-banner(\"c.svg\")\n\nA #cite(<k1>, <k2>) and @para#footnote[$x$].\n\n\
+			#figure(diagram(node((0, 0), [A]), edge(), node((0, 1), [B])), caption: [Flow.])\n";
+		let (items, skips)	= res!(document_with_refusals(src));
+		let blocks			= crate::lang::lower::blocks_in(&items, &crate::lang::lower::SiteBase::new("/p/a.typ", 100));
+		let mut asks		= Vec::new();
+		crate::doc::asks_of(&blocks, &mut asks);
+		let at = |needle: &str| src.find(needle).map_or(0, |p| p as u32 + 100);
+		let got: Vec<(&str, u32, &Asked)> = asks.iter().map(|(site, what)| (&*site.file, site.span.start, what)).collect();
+		assert_eq!(got, [
+			("/p/a.typ", at("= Title"), &Asked::Ref("head".to_string())),
+			("/p/a.typ", at("#figure(image"), &Asked::Image { path: "a.png".to_string(), role: ImageRole::Figure }),
+			("/p/a.typ", at("#figure(image"), &Asked::Ref("cap".to_string())),
+			("/p/a.typ", at("#image(\"b"), &Asked::Image { path: "b.png".to_string(), role: ImageRole::Figure }),
+			("/p/a.typ", at("#section-banner"), &Asked::Image { path: "c.svg".to_string(), role: ImageRole::BannerLogo }),
+			("/p/a.typ", at("A #cite"), &Asked::Cite(vec!["k1".to_string(), "k2".to_string()])),
+			("/p/a.typ", at("A #cite"), &Asked::Ref("para".to_string())),
+			("/p/a.typ", at("A #cite"), &Asked::Footnote),
+			("/p/a.typ", at("A #cite"), &Asked::Math),
+			("/p/a.typ", at("#figure(diagram"), &Asked::Figure { kind: "diagram" }),
+		]);
+		assert!(skips.is_empty(), "asking refuses nothing: {:?}", skips.sites());
+
+		let refused = |src: &str| -> Outcome<Vec<String>> {
+			let (_, skips) = res!(document_with_refusals(src));
+			Ok(skips.sites().iter().map(|r| r.name.clone()).collect())
+		};
+		assert_eq!(res!(refused("#image()\n")), ["#image"]);
+		assert_eq!(res!(refused("#section-banner()\n")), ["#section-banner"]);
+		assert_eq!(res!(refused("#figure(rect(width: 1cm), caption: [A box.])\n")), ["#figure"]);
+		Ok(())
+	}
+
+	/// A block comment nests, as Typst nests one, in every scanner that passes one over: the first `*/` in a
+	/// comment holding another closes the inner one alone.
+	#[test]
+	fn block_comments_nest_in_every_scanner() {
+		// The reader's line scan and the bracket scan read one lexer: the outer comment holds the lines between.
+		let src		= "x /* a /* b */ c\n#set text(size: 30pt) */ y\n";
+		let toks	= lex::byte_toks(src);
+		assert_eq!(strip_comments("x /* a /* b */ c", &toks[..16], &[]), "x ");
+		assert_eq!(strip_comments("#set text(size: 30pt) */ y", &toks[17..43], &[]), " y");
+		assert_eq!(lex::live_text("/* a /* b */ (c */ d"), fmt!("{}d", " ".repeat(19)));
+	}
+
+	/// A conditional standing in a code block, whose own `let` the reader does not read, would resolve against
+	/// the wrong binding if it were evaluated, so it is refused at its item with its reason: neither branch is
+	/// set, where `a` is true outside the block and false inside it.
+	#[test]
+	fn a_conditional_in_a_code_block_is_refused_not_evaluated() -> Outcome<()> {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let src = "#let a = true\n\nP #{ let a = false; [#if a [XBRANCH] else [YBRANCH]] } q.\n";
+		let guards = crate::lang::rules::GuardScope::of_file(src, None, 0);
+		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards, 0);
+		let (items, skips) = res!(document_with_templates(src, binds));
+		let text: String = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(runs.iter().map(|r| match r {
+				Inline::Text(t) => t.clone(),
+				_ => String::new(),
+			}).collect::<String>()),
+			_ => None,
+		}).collect();
+		assert!(!text.contains("XBRANCH") && !text.contains("YBRANCH"), "{}", text);
+		let notes: Vec<&str> = skips.sites().iter().filter(|r| r.name == "#if").filter_map(|r| r.note.as_deref()).collect();
+		assert_eq!(notes, ["stands in code whose own bindings the reader does not read, so no branch of it is set"]);
+		Ok(())
+	}
+
+	/// A conditional mid-paragraph keeps its taken branch in the paragraph, as Typst joins the branch's
+	/// content to the words around it; its opener, `else` and closer lines part nothing. A nested
+	/// conditional in the taken branch is read the same way, and one refused is refused at its own line.
+	#[test]
+	fn a_taken_branch_joins_the_paragraph_it_stands_in() -> Outcome<()> {
+		let tfns = crate::lang::rules::TemplateFns::new();
+		let cfns = crate::lang::rules::ContentFns::new();
+		let src = "#let media = \"ebook\"\nText before.\n#if media == \"ebook\" [\nEbook words\n#if media == \"print\" [\nPrint\n] then.\n\
+			] else [\nPrint words.\n]\n\nTail.\n\n#for x in (1, 2) [\nLoop.\n]\n";
+		let guards = crate::lang::rules::GuardScope::of_file(src, None, 0);
+		let binds = crate::lang::rules::Bindings::new(&tfns, &cfns).with_guards(&guards, 0);
+		let (items, skips) = res!(document_with_templates(src, binds));
+		let texts: Vec<String> = items.iter().filter_map(|it| match it {
+			Item::Paragraph { runs, .. } => Some(runs.iter().map(|r| match r {
+				Inline::Text(t) => t.clone(),
+				_ => String::new(),
+			}).collect()),
+			_ => None,
+		}).collect();
+		assert_eq!(texts, ["Text before. Ebook words then.", "Tail."]);
+		let sites: Vec<(usize, &str)> = skips.sites().iter()
+			.map(|r| (crate::lang::line_col_of(src, r.span.start).0, r.name.as_str())).collect();
+		assert_eq!(sites, [(1, "#let"), (14, "#for")]);
+		Ok(())
+	}
+
+	/// A line that opens inside raw text an earlier line began is that text's: a `#set` in it is shown as
+	/// code, as Typst shows it, not read as a declaration nor dropped.
+	#[test]
+	fn a_line_inside_raw_text_is_its_text() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("Text `one\n#set document(title: \"Raw\")\nstill raw` after.\n"));
+		assert!(skips.is_empty(), "nothing is refused: {:?}", skips.sites());
+		let (runs, _) = res!(one_paragraph(&items));
+		assert!(runs.iter().any(|r| matches!(r, Inline::Code(t) if t.contains("#set document(title: \"Raw\")"))),
+			"the line is set as the raw text it stands in: {:?}", runs);
+		Ok(())
+	}
+
+	/// The live text blanks what a comment holds and what raw text shows, delimiters and all, and keeps
+	/// every other character, every line break and every byte offset where the source has them.
+	#[test]
+	fn live_text_blanks_comments_and_raw_text_and_keeps_offsets() {
+		let src = "A /* x\ny */ b // c\n```typst\n#include \"x.typ\"\n```\n`#set` d \u{e9}\n#include \"real.typ\"\n";
+		let live = lex::live_text(src);
+		assert_eq!(live.len(), src.len(), "byte offsets are kept");
+		assert_eq!(live.lines().count(), src.lines().count(), "lines are kept");
+		let blank = |n: usize| " ".repeat(n);
+		assert_eq!(live.lines().map(|l| l.to_string()).collect::<Vec<_>>(), [
+			fmt!("A{}", blank(5)),
+			fmt!("{}b{}", blank(5), blank(5)),
+			blank(8),
+			blank(16),
+			blank(3),
+			fmt!("{}d \u{e9}", blank(7)),
+			"#include \"real.typ\"".to_string(),
+		]);
+		// A link's slashes open no comment.
+		assert_eq!(lex::live_text("See https://x.io here.\n"), "See https://x.io here.\n");
+	}
+
+	/// A `#show` rule or a `#set` in a body that applies none of its own declarations is refused where the
+	/// body is read, while a `#styled-box` body lowers its own `#set` and refuses only its `#show`.
+	#[test]
+	fn a_declaration_a_body_does_not_apply_is_refused() -> Outcome<()> {
+		let src = "#styled-box[\n#show heading: set text(size: 30pt)\n#set text(size: 9pt)\n= Boxed\n]\n\n\
+			#place(top, float: true)[\n#set text(size: 9pt)\nFloat.\n]\n";
+		let (_, skips) = res!(document_with_refusals(src));
+		let names: Vec<&str> = skips.sites().iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, [
+			"#show heading (inside a body, where it is not applied)",
+			"#set text (inside a body, where it is not applied)",
+		]);
+		Ok(())
+	}
+
+	/// A container's body is read as the file is: a heading with no title in a callout is refused where it
+	/// stands and the callout is still set with the rest of its body, and at the top level the file goes on
+	/// to set after one. Before, the body's failed read dropped the whole callout in silence.
+	#[test]
+	fn a_body_that_does_not_read_is_refused_where_it_stands() -> Outcome<()> {
+		let (items, skips) = res!(document_with_refusals("#styled-box[\n=\n\nIn the box.\n]\n\n= <lbl>\n\nAfter.\n"));
+		assert!(matches!(items.first(), Some(Item::Box { items: inner, .. }) if inner.len() == 1), "{:?}", items);
+		assert!(matches!(items.last(), Some(Item::Paragraph { .. })), "{:?}", items);
+		let names: Vec<&str> = skips.sites().iter().map(|r| r.name.as_str()).collect();
+		assert_eq!(names, ["= (a heading with no title)", "= (a heading with a label but no title)"]);
+		Ok(())
+	}
+
+	/// A construct that never closes took everything after it in, where Typst refuses the file: each is
+	/// refused where it opens, and nothing it took in is set.
+	#[test]
+	fn a_construct_that_never_closes_is_refused_where_it_opens() -> Outcome<()> {
+		for (src, name) in [
+			("Before.\n\n#styled-box[\nInside.\n\nAfter.\n",	"#styled-box"),
+			("Before.\n\n#let x = (\n  1,\n\nAfter.\n",		"#let"),
+			("Before.\n\n#pagebreak(\n\nAfter.\n",			"#pagebreak"),
+			("Before.\n\n```\ncode\n\nAfter.\n",			"``` (a raw block)"),
+			("Before.\n\n#foo(\n\nAfter.\n",				"#foo"),
+		] {
+			let (items, skips) = res!(document_with_refusals(src));
+			assert_eq!(items.len(), 1, "{:?}: only the paragraph before it is set: {:?}", src, items);
+			let sites: Vec<(&str, Option<&str>)> = skips.sites().iter()
+				.map(|r| (r.name.as_str(), r.note.as_deref()))
+				.collect();
+			assert_eq!(sites, [(name, Some("never closes, so nothing from it to the end of the file is set"))], "{:?}", src);
+		}
+		Ok(())
+	}
+
+	/// A `$` that never closes is set as text and recorded where it stands, rather than passed as text in
+	/// silence; closed maths records nothing.
+	#[test]
+	fn a_dollar_that_never_closes_is_recorded() -> Outcome<()> {
+		let (_, skips) = res!(document_with_refusals("Worth $5 today.\n"));
+		let notes: Vec<(&str, Option<&str>)> = skips.sites().iter()
+			.map(|r| (r.name.as_str(), r.note.as_deref()))
+			.collect();
+		assert_eq!(notes, [("inline maths", Some("never closes, so its `$` is set as text"))]);
+		let (_, skips) = res!(document_with_refusals("Then $x$ and $y$.\n"));
+		assert!(skips.is_empty(), "{:?}", skips.sites());
+		Ok(())
+	}
+
+	/// Each item of a parse by its kind and plain text, and each site by its name, note and first byte.
+	fn items_and_sites(src: &str) -> Outcome<(Vec<(&'static str, String)>, Vec<(String, Option<String>, u32)>)> {
+		let (items, skips) = res!(document_with_refusals(src));
+		let items = items.iter().map(|it| match it {
+			Item::Heading { runs, .. }		=> ("heading", plain(runs)),
+			Item::Paragraph { runs, .. }	=> ("para", plain(runs)),
+			_								=> ("other", String::new()),
+		}).collect();
+		let sites = skips.sites().iter().map(|r| (r.name.clone(), r.note.clone(), r.span.start)).collect();
+		Ok((items, sites))
+	}
+
+	/// A `$` whose maths never closes is set as the one character and recorded at itself; the markup after
+	/// it is read as usual, so a later heading is still a heading (`dl.typ`: typst 0.15.1 refuses the file
+	/// with "unclosed delimiter" at the `$`, and strict refuses it by the site).
+	#[test]
+	fn a_dollar_that_never_closes_leaves_later_headings() -> Outcome<()> {
+		let src = "Alpha $x + y and more.\n\nNext paragraph here.\n\n= Heading Later\n\nLast words.\n";
+		let (items, sites) = res!(items_and_sites(src));
+		assert_eq!(items, [
+			("para",	"Alpha $x + y and more.".to_string()),
+			("para",	"Next paragraph here.".to_string()),
+			("heading",	"Heading Later".to_string()),
+			("para",	"Last words.".to_string()),
+		]);
+		let note = Some("never closes, so its `$` is set as text".to_string());
+		assert_eq!(sites, [("inline maths".to_string(), note.clone(), 6)]);
+		// In a statement's or a gathered call's body, on its line or a later one, the construct still closes
+		// where it does over the whole file, and what follows it is read.
+		for (src, at) in [
+			("#let x = [5$ each]\n\n= Later\n",			11),
+			("#let x = [\n5$ each\n]\n\n= Later\n",		12),
+			("#styled-box[\nCosts 5$ each.\n]\n\n= Later\n",	20),
+		] {
+			let (items, sites) = res!(items_and_sites(src));
+			assert_eq!(items.last(), Some(&("heading", "Later".to_string())), "{:?}: {:?}", src, items);
+			assert!(sites.contains(&("inline maths".to_string(), note.clone(), at)), "{:?}: {:?}", src, sites);
+			assert_eq!(sites.iter().filter(|s| s.0 == "inline maths").count(), 1, "{:?}: {:?}", src, sites);
+			assert!(sites.iter().all(|s| s.1.as_deref() != Some("never closes, so nothing from it to the end of the \
+				file is set")), "{:?}: {:?}", src, sites);
+		}
+		Ok(())
+	}
+
+	/// A `$` whose maths never closes in a table cell, a caption or a footnote is recorded where it stands, once,
+	/// and the heading after it is a heading: typst 0.15.1 refuses each of these files at the `$`.
+	#[test]
+	fn a_dollar_that_never_closes_in_a_cell_a_caption_or_a_note_is_recorded() -> Outcome<()> {
+		for (src, at) in [
+			("#table(columns: 1, [a 5$ b])\n\n= Later\n",								23),
+			("#figure(table(columns: 1, [x]), caption: [Costs 5$ each])\n\n= Later\n",	49),
+			("Note#footnote[Pay 5$ now].\n\n= Later\n",									19),
+		] {
+			let (items, sites) = res!(items_and_sites(src));
+			assert_eq!(items.last(), Some(&("heading", "Later".to_string())), "{:?}: {:?}", src, items);
+			let maths: Vec<u32> = sites.iter().filter(|s| s.0 == "inline maths").map(|s| s.2).collect();
+			assert_eq!(maths, [at], "{:?}: {:?}", src, sites);
+		}
+		Ok(())
+	}
+
+	/// Maths that closes, and a file with no `$`, read as before: the guard against the pass over-reaching.
+	#[test]
+	fn a_closed_dollar_is_unchanged() -> Outcome<()> {
+		let (items, sites) = res!(items_and_sites("Alpha x + y and more.\n\nNext paragraph here.\n\n= Heading Later\n\nLast words.\n"));
+		assert_eq!(items.iter().filter(|i| i.0 == "heading").count(), 1);
+		assert!(sites.is_empty(), "{:?}", sites);
+		let (items, skips) = res!(document_with_refusals("Alpha $x + y$ and more.\n\n= Heading Later\n"));
+		assert!(matches!(items.first(), Some(Item::Paragraph { runs, .. })
+			if runs.iter().filter(|r| matches!(r, Inline::Math(_))).count() == 1), "{:?}", items);
+		assert!(matches!(items.last(), Some(Item::Heading { .. })), "{:?}", items);
+		assert!(skips.is_empty(), "{:?}", skips.sites());
 		Ok(())
 	}
 }

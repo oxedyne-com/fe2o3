@@ -20,6 +20,11 @@
 //! fields those write are populated here only where a `#show: doc.with(...)` names them directly.
 
 use crate::ir::Sp;
+use crate::ir::Span;
+use crate::lang::lex;
+use crate::lang::lex::Place;
+use crate::lang::RefusalClass;
+use crate::lang::Refusals;
 use crate::theme::{
 	Theme,
 	ThemeHeadingLevelPatch,
@@ -41,6 +46,7 @@ pub const LOWERABLE_SET_TARGETS: &[&str] = &[
 	"enum",
 	"math.equation",
 	"columns",
+	"document",	// metadata, read by `document_info`; lowers to no theme field
 ];
 
 /// Lowers a source's own top-level declarations onto `theme`: its `#show: <template>.with(...)`
@@ -52,6 +58,54 @@ pub fn lower_root_declarations(src: &str, theme: &mut Theme) {
 	// The theme's own body size seeds the `em` base: a root that sets no `text(size:)` of its own resolves a
 	// `#set par(spacing: <em>)` against the size the theme already carries, not the raw house default.
 	theme.apply(&lower_declarations_seeded(src, theme.text.body_size.to_pt()));
+}
+
+/// The PDF Info fields a source's own `#set document(...)` rules name: each at its top level or in a bare
+/// content block `#[ ... ]`, where Typst applies it. A later `#set` overrides an earlier one field by field,
+/// as in Typst. One in a container is refused at its site in `skips`, charged to `file`.
+pub fn document_info(src: &str, file: &str, skips: &mut Refusals) -> crate::doc::DocInfo {
+	let mut info = crate::doc::DocInfo::default();
+	fold_document_info(src, &mut info, file, 0, skips);
+	info
+}
+
+/// Applies each `#set document(...)` of `src` that Typst applies to `info` in source order, field by field, so a
+/// caller walking a document's files in document order -- a root, then each file it includes where the
+/// include stands -- builds the dictionary Typst builds. A rule at the top level or in a bare content block
+/// applies; one in a list item, a heading, strong or emphasis, which Typst refuses ("document set rules are
+/// not allowed inside of containers"), applies nothing and is recorded in `skips` at its `#`, `at` bytes into
+/// `file`, since `src` may be a part of it. A rule in any other body is the reader's to refuse where it reads
+/// that body.
+pub fn fold_document_info(src: &str, info: &mut crate::doc::DocInfo, file: &str, at: u32, skips: &mut Refusals) {
+	for (place, hash, args) in document_sets(src) {
+		if place == Place::Contained {
+			let site = Span::new(at.saturating_add(hash as u32), at.saturating_add(hash as u32));
+			skips.record_stand_in_in(file, "#set document", site, RefusalClass::Unsupported,
+				"(document set rules are not allowed inside of containers, so none of its fields is applied)");
+			continue;
+		}
+		let list = lex::args(&args);
+		// Typst refuses a field named twice and applies nothing of the rule; the reader's site says why.
+		if lex::duplicate_key(&list).is_some() {
+			continue;
+		}
+		let fields: [(&str, &mut Option<String>); 4] = [
+			("title",		&mut info.title),
+			("author",		&mut info.author),
+			("description",	&mut info.subject),
+			("keywords",	&mut info.keywords),
+		];
+		for (key, slot) in fields {
+			if let Some(value) = document_field(&list, key) {
+				*slot = value;
+			}
+		}
+	}
+}
+
+/// Is this captured construct a `#set document(...)`?
+pub fn sets_document(buf: &str) -> bool {
+	top_level_sets(buf).first().map_or(false, |(target, _)| target == "document")
 }
 
 /// The [`ThemePatch`] a source's own top-level declarations lower to, without applying it: a `#show:
@@ -75,17 +129,20 @@ pub fn lower_declarations(src: &str) -> ThemePatch {
 fn lower_declarations_seeded(src: &str, scope_body_pt: f64) -> ThemePatch {
 	let mut patch = ThemePatch::default();
 	if let Some(args) = show_doc_with_args(src) {
-		lower_doc_with_into(&args, &mut patch);
+		lower_doc_with_into(&lex::args(&args), &mut patch);
 	}
-	let sets = top_level_sets(src);
-	// The layout-time `em` base: the last `text(size:)` the batch sets, else the size already in force.
+	let sets: Vec<(String, Vec<lex::Arg>)> = top_level_sets(src).into_iter()
+		.map(|(target, args)| (target, lex::args(&args)))
+		.collect();
+	// The layout-time `em` base: the last `text(size:)` the batch applies, else the size already in force.
 	let em_base_pt = sets.iter().rev()
-		.find_map(|(target, args)| if target == "text" { named_length_pt(args, "size") } else { None })
+		.filter(|(target, list)| target == "text" && lex::duplicate_key(list).is_none())
+		.find_map(|(_, list)| named_length_pt(list, "size"))
 		.unwrap_or(scope_body_pt);
-	for (target, args) in &sets {
+	for (target, list) in &sets {
 		// A target the theme has no field for writes nothing; the reader keeps such a `#set` a refusal, so
 		// nothing is silently dropped here.
-		lower_set_into(target, args, &mut patch, em_base_pt);
+		lower_set_into(target, list, &mut patch, em_base_pt);
 	}
 	patch
 }
@@ -96,12 +153,12 @@ fn lower_declarations_seeded(src: &str, scope_body_pt: f64) -> ThemePatch {
 /// An argument this does not recognise is left alone rather than guessed at.
 pub fn lower_doc_with(args: &str) -> ThemePatch {
 	let mut patch = ThemePatch::default();
-	lower_doc_with_into(args, &mut patch);
+	lower_doc_with_into(&lex::args(args), &mut patch);
 	patch
 }
 
-fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
-	if let Some(font) = named_string(args, "heading-font") {
+fn lower_doc_with_into(list: &[lex::Arg], patch: &mut ThemePatch) {
+	if let Some(font) = named_string(list, "heading-font") {
 		if !font.is_empty() {
 			// The doc template applies the heading font to levels 1 and 2 only, the body family below (its
 			// per-level show rule: `font: if it.level <= 2 { heading-font } else { "Libertinus Serif" }`).
@@ -122,7 +179,7 @@ fn lower_doc_with_into(args: &str, patch: &mut ThemePatch) {
 /// patch, so applying it leaves the theme's own value.
 pub fn lower_set(target: &str, args: &str) -> ThemePatch {
 	let mut patch = ThemePatch::default();
-	lower_set_into(target, args, &mut patch, DEFAULT_BODY_PT);
+	lower_set_into(target, &lex::args(args), &mut patch, DEFAULT_BODY_PT);
 	patch
 }
 
@@ -132,7 +189,7 @@ const DEFAULT_BODY_PT: f64 = 11.0;
 
 /// `em_base_pt` is the text size in force, in points, that a font-relative (`em`) length resolves
 /// against; a caller with no size context passes [`DEFAULT_BODY_PT`].
-fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: f64) -> Vec<&'static str> {
+fn lower_set_into(target: &str, list: &[lex::Arg], patch: &mut ThemePatch, em_base_pt: f64) -> Vec<&'static str> {
 	// The argument keys this set applied AND the renderer consumes -- the invariant is that every lowered
 	// field is either read by the renderer or refused with a diagnostic, never written-and-ignored. A key
 	// that lowers into a field nothing reads yet (an equation `numbering`, a `page` dimension) is deliberately NOT pushed here, so the refusal check ([`set_refusal_reason`]) sees it as
@@ -140,22 +197,27 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 	// source but absent for any other reason (unrecognised for the target, an `em` length, a bare `none`)
 	// is likewise not pushed.
 	let mut used: Vec<&'static str> = Vec::new();
+	// Typst refuses a rule that names a field twice and applies none of it, so nothing is lowered here and
+	// the refusal check names the field.
+	if lex::duplicate_key(list).is_some() {
+		return used;
+	}
 	match target {
 		"text" => {
-			if let Some(pt) = named_length_pt(args, "size") {
+			if let Some(pt) = named_length_pt(list, "size") {
 				patch.text.body_size = Some(Sp::from_pt(pt));
 				used.push("size");
 			}
 			// The body family list: `font: "Name"` or the fallback array `font: ("A", "B")`. Resolved against
 			// the document's fonts at assembly, where a family no font declares is a hard error (Typst's
 			// missing-family precheck), so nothing named here ever falls back silently.
-			if let Some(expr) = named_value(args, "font") {
-				if let Some(families) = font_families(&expr) {
+			if let Some(expr) = lex::named(list, "font") {
+				if let Some(families) = font_families(expr) {
 					patch.text.faces.body = Some(families);
 					used.push("font");
 				}
 			}
-			if let Some(b) = named_bool(args, "hyphenate") {
+			if let Some(b) = named_bool(list, "hyphenate") {
 				patch.text.hyphenate = Some(b);
 				used.push("hyphenate");
 			}
@@ -165,8 +227,8 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 			// and is left unmarked, so a `#set text(fill: colours.x)` is refused rather than set wrongly.
 			// This lowers a body `#set text(fill:)` only; a heading-selector fill stays refused on the rule
 			// engine's own path.
-			if let Some(expr) = named_value(args, "fill") {
-				if let Some(rgba) = crate::lang::rules::parse_colour(&expr) {
+			if let Some(expr) = lex::named(list, "fill") {
+				if let Some(rgba) = crate::lang::rules::parse_colour(expr) {
 					patch.text.fill = Some(rgba);
 					used.push("fill");
 				}
@@ -184,19 +246,19 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 			// the book path's `build_style` does. Lowering an `em` (or even a `pt`) leading straight into the
 			// baseline field would set the line grid wrongly, so that conversion is left to a dedicated leading
 			// pass -- see this crate's parity notes. A `pt` leading keeps the pre-existing behaviour.
-			if let Some(pt) = named_length_pt(args, "leading") {
+			if let Some(pt) = named_length_pt(list, "leading") {
 				patch.text.leading = Some(Sp::from_pt(pt));
 				used.push("leading");
 			}
-			if let Some(pt) = named_length_pt_em(args, "spacing", em_base_pt) {
+			if let Some(pt) = named_length_pt_em(list, "spacing", em_base_pt) {
 				patch.par.skip = Some(Sp::from_pt(pt));
 				used.push("spacing");
 			}
-			if let Some(pt) = named_length_pt_em(args, "first-line-indent", em_base_pt) {
+			if let Some(pt) = named_length_pt_em(list, "first-line-indent", em_base_pt) {
 				patch.par.indent = Some(Sp::from_pt(pt));
 				used.push("first-line-indent");
 			}
-			if let Some(b) = named_bool(args, "justify") {
+			if let Some(b) = named_bool(list, "justify") {
 				patch.text.justify = Some(b);
 				used.push("justify");
 			}
@@ -204,32 +266,32 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 		"heading" => {
 			// `numbering` applies across the levels, the way Typst's own `set heading(numbering: ...)` does:
 			// one group-level leaf the patch folds onto every level, whatever their count.
-			if let Some(pattern) = named_string(args, "numbering") {
+			if let Some(pattern) = named_string(list, "numbering") {
 				let pat = if pattern.is_empty() { None } else { Some(pattern) };
 				patch.heading.numbering_all = Some(pat);
 				used.push("numbering");
 			}
 		},
 		"list" => {
-			if let Some(pt) = named_length_pt(args, "spacing") {
+			if let Some(pt) = named_length_pt(list, "spacing") {
 				patch.list.item_skip = Some(Some(Sp::from_pt(pt)));
 				used.push("spacing");
 			}
-			if let Some(pt) = named_length_pt(args, "indent") {
+			if let Some(pt) = named_length_pt(list, "indent") {
 				patch.list.marker_gap = Some(Sp::from_pt(pt));
 				used.push("indent");
 			}
 		},
 		"enum" => {
-			if let Some(pt) = named_length_pt(args, "spacing") {
+			if let Some(pt) = named_length_pt(list, "spacing") {
 				patch.enumeration.item_skip = Some(Some(Sp::from_pt(pt)));
 				used.push("spacing");
 			}
-			if let Some(pt) = named_length_pt(args, "indent") {
+			if let Some(pt) = named_length_pt(list, "indent") {
 				patch.enumeration.marker_gap = Some(Sp::from_pt(pt));
 				used.push("indent");
 			}
-			if let Some(pattern) = named_string(args, "numbering") {
+			if let Some(pattern) = named_string(list, "numbering") {
 				patch.enumeration.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
 				used.push("numbering");
 			}
@@ -237,7 +299,7 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 		"math.equation" => {
 			// The equation renderer numbers displays "(N)" unconditionally and reads no pattern yet, so a
 			// `numbering` lowers into the theme but is left unmarked -- refused, not silently ignored.
-			if let Some(pattern) = named_string(args, "numbering") {
+			if let Some(pattern) = named_string(list, "numbering") {
 				patch.equation.numbering = Some(if pattern.is_empty() { None } else { Some(pattern) });
 			}
 		},
@@ -245,15 +307,15 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 			// Page geometry lowers onto the body part's reserved override, but no unit consumes it yet (the
 			// driver still supplies the document geometry), so `width`/`height` are left unmarked and a lone
 			// `#set page(...)` is refused as not-yet-supported rather than silently doing nothing.
-			if let Some(pt) = named_length_mm_or_pt(args, "width") {
+			if let Some(pt) = named_length_mm_or_pt(list, "width") {
 				patch.page.body.default.width = Some(Some(pt));
 			}
-			if let Some(pt) = named_length_mm_or_pt(args, "height") {
+			if let Some(pt) = named_length_mm_or_pt(list, "height") {
 				patch.page.body.default.height = Some(Some(pt));
 			}
 			// The column count the body flows in, read by the author and the driver: a whole number of at
 			// least one.
-			if let Some(expr) = named_value(args, "columns") {
+			if let Some(expr) = lex::named(list, "columns") {
 				if let Ok(n) = expr.trim().parse::<usize>() {
 					if n >= 1 {
 						patch.page.columns = Some(n);
@@ -264,11 +326,24 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 		},
 		"columns" => {
 			// The space between two columns: a percentage of the content width, or an absolute length.
-			if let Some(expr) = named_value(args, "gutter") {
-				if let Some(len) = crate::lang::parse::parse_length(&expr) {
+			if let Some(expr) = lex::named(list, "gutter") {
+				if let Some(len) = crate::lang::parse::parse_length(expr) {
 					patch.page.column_gutter = Some(len);
 					used.push("gutter");
 				}
+			}
+		},
+		"document" => {
+			// Metadata, not styling: a field counts as applied only when `document_info` can read its
+			// value, so one it cannot is refused rather than dropped from the Info dictionary. No date is
+			// ever written, which is what `date: none` asks for.
+			for key in ["title", "author", "description", "keywords"] {
+				if document_field(list, key).is_some() {
+					used.push(key);
+				}
+			}
+			if lex::named(list, "date") == Some("none") {
+				used.push("date");
 			}
 		},
 		_ => {},
@@ -280,108 +355,91 @@ fn lower_set_into(target: &str, args: &str, patch: &mut ThemePatch, em_base_pt: 
 // │ REFUSING A #set THAT LOWERED TO NOTHING (H2)                               │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The top-level argument keys `args` names, in source order: an identifier at depth zero immediately
-/// before a `:`. A key nested inside a `(...)`, `[...]` or `"..."` is not top-level, so `header: [x: y]`
-/// names only `header`. Used to tell which of a `#set`'s arguments the lowering left unapplied.
-fn arg_keys(args: &str) -> Vec<String> {
-	let chars:	Vec<char>			= args.chars().collect();
-	let mut keys					= Vec::new();
-	let mut depth					= 0i32;
-	let mut in_str					= false;
-	let mut esc						= false;
-	// The start of the current top-level token, or `None` once its `:` has been passed, so only the first
-	// `:` of a `key: value` names a key and a `:` inside the value is ignored.
-	let mut token_start:	Option<usize>	= Some(0);
-	let mut i						= 0usize;
-	while i < chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'					=> in_str = true,
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> token_start = Some(i + 1),
-			':' if depth == 0	=> {
-				if let Some(start) = token_start.take() {
-					let key: String = chars[start..i].iter().collect();
-					let key = key.trim().to_string();
-					if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.') {
-						keys.push(key);
-					}
-				}
-			},
-			_					=> {},
-		}
-		i += 1;
-	}
-	keys
-}
-
-/// Why a lowerable `#set <target>(...)` should be refused rather than pass silently: it applied none of
-/// its arguments, or named one the lowering does not recognise or could not convert (an `em` length with
-/// no context, a `#set text(lang: ...)`, a `heading(numbering: none)`). `None` when every argument the
-/// source named was applied. Only a lowerable target is judged here; a `#set` on any other target is
-/// refused by the reader's own skip path.
+/// Why a lowerable `#set <target>(...)` should be refused rather than pass silently, as the words that
+/// follow the rule's name in its site: it applied none of its arguments, named one twice (which Typst
+/// refuses, applying none of the rule), gave one positionally, or named one the lowering does not
+/// recognise or could not convert (an `em` length with no context, a `#set text(lang: ...)`, a
+/// `heading(numbering: none)`). The keys present and the keys applied are read from the same arguments,
+/// with comments as trivia, so a field commented out is no field. `None` when every argument the source
+/// named was applied. Only a lowerable target is judged here; a `#set` on any other target is refused by the
+/// reader's own skip path.
 fn set_refusal_reason(target: &str, args: &str) -> Option<String> {
 	if !LOWERABLE_SET_TARGETS.iter().any(|t| *t == target) {
 		return None;
 	}
-	let present			= arg_keys(args);
-	let mut patch		= ThemePatch::default();
-	let used			= lower_set_into(target, args, &mut patch, DEFAULT_BODY_PT);
-	if present.is_empty() {
-		return Some(fmt!("#set {} applied no argument", target));
+	let list = lex::args(args);
+	if list.is_empty() {
+		return Some("applied no argument".to_string());
 	}
-	let leftover: Vec<String> = present.into_iter()
-		.filter(|k| !used.iter().any(|u| *u == k.as_str()))
+	if let Some(key) = lex::duplicate_key(&list) {
+		return Some(fmt!("names {} twice, so none of it is applied", key));
+	}
+	let mut patch	= ThemePatch::default();
+	let used		= lower_set_into(target, &list, &mut patch, DEFAULT_BODY_PT);
+	let mut leftover: Vec<&str> = list.iter()
+		.filter_map(|a| a.key.as_deref())
+		.filter(|k| !used.iter().any(|u| u == k))
 		.collect();
+	if list.iter().any(|a| a.key.is_none()) {
+		leftover.push("a positional argument");
+	}
 	if leftover.is_empty() {
 		None
 	} else {
-		Some(fmt!("#set {} left unapplied: {}", target, leftover.join(", ")))
+		Some(fmt!("left unapplied: {}", leftover.join(", ")))
 	}
 }
 
 /// If a captured declarative-styling construct is a `#set` on a theme element that lowered to nothing --
 /// applying no argument, or hitting an unrecognised or unconvertible one -- the construct name to record
-/// as a refusal, so a `#set` that silently did nothing becomes a visible refusal (H2). `None` for a `#set`
-/// that fully lowered, and for a `#show: <t>.with(...)` (whose non-theme arguments are the book's front
-/// matter, not a no-op). The reader calls this as it dispatches a captured `DeclStyle` construct.
-pub fn declstyle_refusal(buf: &str) -> Option<String> {
-	let (target, args) = top_level_sets(buf).into_iter().next()?;
-	set_refusal_reason(&target, &args).map(|_| fmt!("#set {}", target))
+/// as a refusal and why, so a `#set` that silently did nothing becomes a visible refusal (H2). `None` for
+/// a `#set` that fully lowered, and for a `#show: <t>.with(...)` (whose non-theme arguments are the book's
+/// front matter, not a no-op). The reader calls this as it dispatches a captured `DeclStyle` construct.
+pub fn declstyle_refusal(buf: &str) -> Option<(String, String)> {
+	let (target, args) = match top_level_sets(buf).into_iter().next() {
+		Some(set)	=> set,
+		None		=> return None,
+	};
+	set_refusal_reason(&target, &args).map(|why| (fmt!("#set {}", target), why))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ EXTRACTING A CONSTRUCT'S ARGUMENTS FROM SOURCE                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The balanced argument text of the first `#show: <ident>.with(...)` application in `src`, without its
-/// enclosing parentheses. `None` when the source has no such application.
-fn show_doc_with_args(src: &str) -> Option<String> {
-	let mut from = 0usize;
-	while let Some(rel) = src[from..].find("#show:") {
-		let at		= from + rel;
-		let rest	= &src[at..];
-		// The application is `#show: <ident>.with(` -- find the `.with(` that follows, on the same line.
-		let line_end	= rest.find('\n').map(|n| at + n).unwrap_or(src.len());
-		if let Some(wrel) = src[at..line_end].find(".with(") {
-			let open = at + wrel + ".with".len();	// the '(' of the argument list
-			return balanced_parens(&src[open..]);
+/// The balanced argument text of the first top-level `#show: <ident>.with(...)` application in `src`,
+/// without its enclosing parentheses, and the span of the line it opens on. `None` when the source has no
+/// such application at its top level.
+pub(crate) fn show_doc_with(src: &str) -> Option<(String, Span)> {
+	for (start, raw) in crate::lang::lex::top_level_lines(src) {
+		let indent	= raw.len() - raw.trim_start().len();
+		let trimmed	= raw.trim_start();
+		if !trimmed.starts_with("#show:") {
+			continue;
 		}
-		from = line_end.max(at + 1);
+		// The application is `#show: <ident>.with(` -- the `.with(` follows on the same line.
+		if let Some(wrel) = trimmed.trim_end().find(".with(") {
+			let open = start + indent + wrel + ".with".len();	// the '(' of the argument list
+			let end = start + raw.trim_end().len();
+			return balanced_parens(&src[open..]).map(|args| (args, Span::new(start as u32, end as u32)));
+		}
 	}
 	None
 }
 
+fn show_doc_with_args(src: &str) -> Option<String> {
+	show_doc_with(src).map(|(args, _)| args)
+}
+
+/// The heading face a source's own `#show: <template>.with(heading-font: ...)` names, with the span of the
+/// line the application opens on, so a note about that face is charged to the declaration that named it.
+pub fn heading_font_site(src: &str) -> Option<(String, Span)> {
+	show_doc_with(src).and_then(|(args, span)|
+		named_string(&lex::args(&args), "heading-font").filter(|f| !f.is_empty()).map(|f| (f, span)))
+}
+
 /// Every top-level `#set <target>(...)` in `src`, as `(target, args)` pairs with the argument text
-/// stripped of its enclosing parentheses. "Top-level" is by line: a line whose trimmed text opens with
+/// stripped of its enclosing parentheses: a line of [`crate::lang::lex::top_level_lines`] whose trimmed text opens with
 /// `#set `. A malformed set (no balanced parentheses) is skipped.
 ///
 /// The `(`'s position is found by tracking the running byte offset of each line rather than by searching
@@ -390,46 +448,46 @@ fn show_doc_with_args(src: &str) -> Option<String> {
 /// balanced scan starts at this line's own `(` and reads its own arguments, even when they run on across
 /// several following lines.
 fn top_level_sets(src: &str) -> Vec<(String, String)> {
-	let mut out		= Vec::new();
-	let mut offset	= 0usize;	// running byte offset of the current line's start within `src`
-	// The running bracket balance across lines, folded through the reader's own content-aware scanner. A
-	// `#set` on a line that opens inside a `#styled-box[...]`/`#columns[...]` body -- a bracket still open at
-	// the line's start -- is that body's own declaration, lowered onto its scope when the body is re-parsed;
-	// capturing it here too would apply it to the enclosing scope as well. Only a `#set` at true top level
-	// (no open bracket) lowers to this source's scope.
-	let mut state	= crate::lang::parse::SkipState::new();
-	for raw in src.split_inclusive('\n') {
-		let line_start	= offset;
-		offset			= offset.saturating_add(raw.len());
+	crate::lang::lex::top_level_lines(src).into_iter()
+		.filter_map(|(line_start, raw)| set_on_line(src, line_start, raw))
+		.collect()
+}
 
-		// The depth in force at this line's start, before its own delimiters are folded in.
-		let nested = state.has_open_bracket();
-		crate::lang::parse::scan_brackets(raw, &mut state);
-		if nested {
+/// The `#set <target>(...)` the line `raw` of `src`, which starts at byte `line_start`, opens, as
+/// `(target, args)`. `None` for a line that opens none, and for a malformed one (no balanced parentheses).
+fn set_on_line(src: &str, line_start: usize, raw: &str) -> Option<(String, String)> {
+	let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
+	let trimmed	= raw.trim_start();
+	let Some(after) = trimmed.strip_prefix("#set ") else {
+		return None;
+	};
+	let rest_ws	= after.len() - after.trim_start().len();	// whitespace between `#set ` and the target
+	let rest	= after.trim_start();
+	let Some(open) = rest.find('(') else {
+		return None;
+	};
+	let target = rest[..open].trim().to_string();
+	if target.is_empty() {
+		return None;
+	}
+	// The byte offset of this line's own `(`, so the balanced scan reads this set's arguments -- which
+	// may run past the line's end -- rather than an earlier identical prefix's.
+	let abs = line_start + indent + "#set ".len() + rest_ws + open;
+	balanced_parens(&src[abs..]).map(|args| (target, args))
+}
+
+/// Every `#set document(...)` that opens a line of `src` in markup, as the line's place, the byte of its `#` and
+/// its argument text, in source order. A line inside code, a string, a comment or an expression opens none.
+fn document_sets(src: &str) -> Vec<(Place, usize, String)> {
+	let mut out = Vec::new();
+	for (line_start, raw, place) in crate::lang::lex::placed_lines(src) {
+		if place == Place::Content {
 			continue;
 		}
-
-		let indent	= raw.len() - raw.trim_start().len();	// leading-whitespace bytes
-		let trimmed	= raw.trim_start();
-		let after	= match trimmed.strip_prefix("#set ") {
-			Some(a)	=> a,
-			None	=> continue,
-		};
-		let rest_ws	= after.len() - after.trim_start().len();	// whitespace between `#set ` and the target
-		let rest	= after.trim_start();
-		let open	= match rest.find('(') {
-			Some(i)	=> i,
-			None	=> continue,
-		};
-		let target = rest[..open].trim().to_string();
-		if target.is_empty() {
-			continue;
-		}
-		// The byte offset of this line's own `(`, so the balanced scan reads this set's arguments -- which
-		// may run past the line's end -- rather than an earlier identical prefix's.
-		let abs = line_start + indent + "#set ".len() + rest_ws + open;
-		if let Some(args) = balanced_parens(&src[abs..]) {
-			out.push((target, args));
+		if let Some((target, args)) = set_on_line(src, line_start, raw) {
+			if target == "document" {
+				out.push((place, line_start + (raw.len() - raw.trim_start().len()), args));
+			}
 		}
 	}
 	out
@@ -452,134 +510,136 @@ fn balanced_parens(s: &str) -> Option<String> {
 // │ READING ONE NAMED ARGUMENT                                                 │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The byte offset just past a `key:` binding in `args`, matched only where `key` is preceded by a
-/// non-identifier character (or the start), so `font:` is not found inside `heading-font:`. `None` when
-/// the key is not present.
-fn key_value_start(args: &str, key: &str) -> Option<usize> {
-	let bytes	= args.as_bytes();
-	let mut from	= 0usize;
-	while let Some(rel) = args[from..].find(key) {
-		let at	= from + rel;
-		let before_ok = at == 0 || {
-			let p = bytes[at - 1];
-			!(p.is_ascii_alphanumeric() || p == b'-' || p == b'_')
-		};
-		// After the key: optional spaces, then a colon.
-		let mut j = at + key.len();
-		while j < bytes.len() && bytes[j] == b' ' {
-			j += 1;
-		}
-		if before_ok && j < bytes.len() && bytes[j] == b':' {
-			return Some(j + 1);
-		}
-		from = at + key.len();
+/// The inner text of `raw` when it is one group, opened by `open` and closed at its very end, as the
+/// lexer reads it; `None` for anything else, such as `[a] + [b]`.
+fn whole_group(raw: &str, open: char) -> Option<&str> {
+	if !raw.starts_with(open) || lex::group_end(raw, 0) != Some(raw.len()) {
+		return None;
 	}
-	None
+	let close = raw.len() - raw.chars().next_back().map_or(0, |c| c.len_utf8());
+	Some(&raw[open.len_utf8()..close])
 }
 
-/// The string a `key: "..."` or `key: [...]` names, without its quotes or brackets, trimmed. `None`
-/// when the key is absent or its value is neither a string nor a content block.
-fn named_string(args: &str, key: &str) -> Option<String> {
-	let start	= key_value_start(args, key)?;
-	let rest	= args[start..].trim_start();
-	if let Some(inner) = rest.strip_prefix('"') {
-		let end = inner.find('"')?;
-		return Some(inner[..end].to_string());
+/// The string a `key: "..."` or `key: [...]` names: the string's value, its escapes resolved, or the
+/// content block's markup, trimmed. `None` when the key is absent or its value is neither.
+fn named_string(list: &[lex::Arg], key: &str) -> Option<String> {
+	let v = match lex::named(list, key) {
+		Some(v)	=> v,
+		None	=> return None,
+	};
+	if let Some(s) = string_value(v) {
+		return Some(s);
 	}
-	if rest.starts_with('[') {
-		let mut depth = 0i32;
-		for (i, c) in rest.char_indices() {
-			match c {
-				'['	=> depth += 1,
-				']'	=> {
-					depth -= 1;
-					if depth == 0 {
-						return Some(rest[1..i].trim().to_string());
-					}
-				},
-				_	=> {},
-			}
-		}
-	}
-	None
+	whole_group(v, '[').map(|inner| inner.trim().to_string())
 }
 
 /// The family list a `font:` value names: a lone string, or an array of strings (Typst's fallback list,
 /// tried in order). `None` for anything else -- a variable, a dictionary form, an empty name -- so the
 /// argument stays unapplied and the `#set` is refused rather than set wrongly.
 fn font_families(expr: &str) -> Option<Vec<String>> {
-	let e = expr.trim();
-	let inner = match e.strip_prefix('(').and_then(|r| r.strip_suffix(')')) {
-		Some(i)	=> i,
-		None	=> e,
+	let items: Vec<lex::Arg> = match whole_group(expr, '(') {
+		Some(inner)	=> lex::args(inner),
+		None		=> vec![lex::Arg { key: None, value: expr.to_string() }],
 	};
 	let mut out: Vec<String> = Vec::new();
-	for part in inner.split(',') {
-		let p = part.trim();
-		if p.is_empty() {
-			continue;	// the trailing comma of a one-element array, `("A",)`
-		}
-		let Some(name) = p.strip_prefix('"').and_then(|r| r.strip_suffix('"')) else { return None; };
-		if name.trim().is_empty() || name.contains('"') {
+	for item in items {
+		if item.key.is_some() {
 			return None;
 		}
-		out.push(name.trim().to_string());
+		match string_value(&item.value) {
+			Some(name) if !name.trim().is_empty()	=> out.push(name.trim().to_string()),
+			_										=> return None,
+		}
 	}
 	if out.is_empty() { None } else { Some(out) }
 }
 
-/// The raw value expression a `key:` names, read to the next top-level comma -- one not nested inside a
-/// `(...)`, `[...]`, `{...}` or `"..."` -- and trimmed. Unlike [`named_string`] it keeps the value's own
-/// delimiters, so a call like `rgb("#ff0000")`, an argument list `rgb(0, 0, 0)` or a modifier chain
-/// `red.darken(20%)` arrives whole for a colour reader. `None` when the key is absent or the value empty.
-fn named_value(args: &str, key: &str) -> Option<String> {
-	let start				= key_value_start(args, key)?;
-	let chars: Vec<char>	= args[start..].chars().collect();
-	let mut depth			= 0i32;
-	let mut in_str			= false;
-	let mut esc				= false;
-	let mut end				= chars.len();
-	for (i, c) in chars.iter().enumerate() {
-		if in_str {
-			if esc				{ esc = false; }
-			else if *c == '\\'	{ esc = true; }
-			else if *c == '"'	{ in_str = false; }
-			continue;
+/// A `#set document(...)` field as its Info entry: `Some(None)` for `none`, else a string, a content
+/// block's plain text, or an array of strings joined with ", " as Typst joins an author or keyword list.
+/// `None` when the key is absent or its value is one the reader cannot evaluate.
+fn document_field(list: &[lex::Arg], key: &str) -> Option<Option<String>> {
+	let raw = match lex::named(list, key) {
+		Some(r)	=> r,
+		None	=> return None,
+	};
+	if raw == "none" {
+		return Some(None);
+	}
+	if let Some(s) = string_value(raw) {
+		return Some(Some(s));
+	}
+	if let Some(markup) = whole_group(raw, '[') {
+		let plain = crate::doc::flatten_segments(&crate::lang::inline_segments(markup.trim()));
+		return Some(Some(plain));
+	}
+	if let Some(inner) = whole_group(raw, '(') {
+		let mut items: Vec<String> = Vec::new();
+		for item in lex::args(inner) {
+			if item.key.is_some() {
+				return None;	// a dictionary, not a list of names
+			}
+			match string_value(&item.value) {
+				Some(s)	=> items.push(s),
+				None	=> return None,
+			}
 		}
+		return Some(if items.is_empty() { None } else { Some(items.join(", ")) });
+	}
+	None
+}
+
+/// The value of a `"..."` string literal filling the whole of `expr`, its escapes resolved, or `None`
+/// when `expr` is not one.
+fn string_value(expr: &str) -> Option<String> {
+	let inner = match expr.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
+		Some(i)	=> i,
+		None	=> return None,
+	};
+	let mut out		= String::with_capacity(inner.len());
+	let mut chars	= inner.chars();
+	while let Some(c) = chars.next() {
 		match c {
-			'"'					=> in_str = true,
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_					=> {},
+			'"'		=> return None,	// an unescaped quote ends the literal early, so this is not one
+			'\\'	=> match chars.next() {
+				Some('\\')	=> out.push('\\'),
+				Some('"')	=> out.push('"'),
+				Some('n')	=> out.push('\n'),
+				Some('r')	=> out.push('\r'),
+				Some('t')	=> out.push('\t'),
+				Some('u')	=> {
+					let hex: String = chars.by_ref().skip_while(|c| *c == '{').take_while(|c| *c != '}').collect();
+					match u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32) {
+						Some(ch)	=> out.push(ch),
+						None		=> return None,
+					}
+				},
+				_			=> return None,
+			},
+			other	=> out.push(other),
 		}
 	}
-	let v: String = chars[..end].iter().collect();
-	let v = v.trim().to_string();
-	if v.is_empty() { None } else { Some(v) }
+	Some(out)
 }
 
 /// The boolean a `key: true`/`key: false` names. `None` when absent or not a boolean literal.
-fn named_bool(args: &str, key: &str) -> Option<bool> {
-	let start	= key_value_start(args, key)?;
-	let rest	= args[start..].trim_start();
-	if rest.starts_with("true") {
-		Some(true)
-	} else if rest.starts_with("false") {
-		Some(false)
-	} else {
-		None
+fn named_bool(list: &[lex::Arg], key: &str) -> Option<bool> {
+	match lex::named(list, key) {
+		Some("true")	=> Some(true),
+		Some("false")	=> Some(false),
+		_				=> None,
 	}
 }
 
-/// The leading real number of a `key:`'s value, and the unit token immediately after it (`pt`, `mm`,
-/// `em`, or empty). `None` when the key is absent or its value does not begin with a number.
-fn named_number_unit(args: &str, key: &str) -> Option<(f64, String)> {
-	let start	= key_value_start(args, key)?;
-	let rest	= args[start..].trim_start();
-	let mut end	= 0usize;
-	let mut seen_dot = false;
-	for (i, c) in rest.char_indices() {
+/// A `key:`'s value read whole as a number and the unit written directly after it (`pt`, `mm`, `em`, or
+/// empty). `None` when the key is absent or its value is anything else, such as `50%` or `12pt * 2`.
+fn named_number_unit(list: &[lex::Arg], key: &str) -> Option<(f64, String)> {
+	let v = match lex::named(list, key) {
+		Some(v)	=> v,
+		None	=> return None,
+	};
+	let mut end			= 0usize;
+	let mut seen_dot	= false;
+	for (i, c) in v.char_indices() {
 		if c.is_ascii_digit() || (c == '-' && i == 0) {
 			end = i + c.len_utf8();
 		} else if c == '.' && !seen_dot {
@@ -589,22 +649,23 @@ fn named_number_unit(args: &str, key: &str) -> Option<(f64, String)> {
 			break;
 		}
 	}
-	if end == 0 {
+	let unit = &v[end..];
+	if end == 0 || !unit.chars().all(|c| c.is_ascii_alphabetic()) {
 		return None;
 	}
-	let num: f64 = rest[..end].parse().ok()?;
-	let unit: String = rest[end..].chars().take_while(|c| c.is_ascii_alphabetic()).collect();
-	Some((num, unit))
+	match v[..end].parse::<f64>() {
+		Ok(num)	=> Some((num, unit.to_string())),
+		Err(_)	=> None,
+	}
 }
 
 /// The point value of a `key:`'s length, accepting a bare number or one suffixed `pt`. An `em` or `mm`
 /// value returns `None` so the field is left unchanged rather than set wrongly; where a field is legally
 /// written in ems (a paragraph metric), the caller uses [`named_length_pt_em`] with the body size instead.
-fn named_length_pt(args: &str, key: &str) -> Option<f64> {
-	let (num, unit) = named_number_unit(args, key)?;
-	match unit.as_str() {
-		"" | "pt"	=> Some(num),
-		_			=> None,
+fn named_length_pt(list: &[lex::Arg], key: &str) -> Option<f64> {
+	match named_number_unit(list, key) {
+		Some((num, unit)) if unit.is_empty() || unit == "pt"	=> Some(num),
+		_														=> None,
 	}
 }
 
@@ -612,12 +673,11 @@ fn named_length_pt(args: &str, key: &str) -> Option<f64> {
 /// against `em_base_pt` (the text size in force). `mm` is still `None` here -- a paragraph metric is never
 /// set in millimetres, and leaving it unconverted keeps such a `#set` a visible refusal rather than a
 /// wrong write. Used where a metric may legitimately be written in ems, unlike [`named_length_pt`].
-fn named_length_pt_em(args: &str, key: &str, em_base_pt: f64) -> Option<f64> {
-	let (num, unit) = named_number_unit(args, key)?;
-	match unit.as_str() {
-		"" | "pt"	=> Some(num),
-		"em"		=> Some(num * em_base_pt),
-		_			=> None,
+fn named_length_pt_em(list: &[lex::Arg], key: &str, em_base_pt: f64) -> Option<f64> {
+	match named_number_unit(list, key) {
+		Some((num, unit)) if unit.is_empty() || unit == "pt"	=> Some(num),
+		Some((num, unit)) if unit == "em"						=> Some(num * em_base_pt),
+		_														=> None,
 	}
 }
 
@@ -625,18 +685,22 @@ const MM_PER_PT: f64 = 72.0 / 25.4;	// points in one millimetre
 
 /// The scaled-point length of a `key:`'s value, accepting `pt` or `mm` (a page dimension is usually set
 /// in millimetres). An `em` value is left to a later unit that knows the body size.
-fn named_length_mm_or_pt(args: &str, key: &str) -> Option<Sp> {
-	let (num, unit) = named_number_unit(args, key)?;
-	match unit.as_str() {
-		"pt"		=> Some(Sp::from_pt(num)),
-		"mm"		=> Some(Sp::from_pt(num * MM_PER_PT)),
-		_			=> None,
+fn named_length_mm_or_pt(list: &[lex::Arg], key: &str) -> Option<Sp> {
+	match named_number_unit(list, key) {
+		Some((num, unit)) if unit == "pt"	=> Some(Sp::from_pt(num)),
+		Some((num, unit)) if unit == "mm"	=> Some(Sp::from_pt(num * MM_PER_PT)),
+		_									=> None,
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The Info fields `src` names, the sites its container rules are refused at left to the caller's tests.
+	fn info_of(src: &str) -> crate::doc::DocInfo {
+		document_info(src, "t.typ", &mut Refusals::default())
+	}
 
 	/// `#show: doc.with(heading-font: "...")` lowers the heading face into levels 1 and 2 (the doc
 	/// template's per-level rule), leaving deeper levels and the rest of the theme at their defaults, so a
@@ -801,8 +865,8 @@ mod tests {
 	/// `heading-font:`.
 	#[test]
 	fn key_reader_respects_word_boundaries() {
-		assert_eq!(named_string("heading-font: \"A\"", "font"), None);
-		assert_eq!(named_string("heading-font: \"A\", font: \"B\"", "font"), Some("B".to_string()));
+		assert_eq!(named_string(&lex::args("heading-font: \"A\""), "font"), None);
+		assert_eq!(named_string(&lex::args("heading-font: \"A\", font: \"B\""), "font"), Some("B".to_string()));
 	}
 
 	/// Balanced-paren extraction spans newlines and ignores a parenthesis inside a string.
@@ -812,13 +876,24 @@ mod tests {
 		assert_eq!(balanced_parens(s), Some("\n  a: 1,\n  b: \"a)b\",\n  c: (1, 2),\n".to_string()));
 	}
 
-	/// The top-level argument keys are read at depth zero, so a nested `key:` inside a `[...]` value is not
-	/// mistaken for one of the set's own arguments.
+	/// The keys a `#set` names and the keys it applied are read from the same arguments, comments as
+	/// trivia: a key nested in a value, written in a comment or found in a string is none of the set's own,
+	/// and a field named twice, or given positionally, is refused as Typst refuses it.
 	#[test]
-	fn arg_keys_reads_top_level_keys_only() {
-		assert_eq!(arg_keys("size: 12pt, font: \"A\""), vec!["size".to_string(), "font".to_string()]);
-		assert_eq!(arg_keys("header: [page: 1]"), vec!["header".to_string()]);
-		assert_eq!(arg_keys(""), Vec::<String>::new());
+	fn a_sets_keys_are_its_own_top_level_arguments() {
+		assert_eq!(set_refusal_reason("document", "title: \"T\" /* c */, date: auto"),
+			Some("left unapplied: date".to_string()));
+		assert_eq!(set_refusal_reason("document", "\n  // author: \"Old\",\n  title: \"T\",\n"), None);
+		assert_eq!(set_refusal_reason("document", "title: \"T, date: auto\""), None);
+		assert_eq!(set_refusal_reason("document", "title: 1 + 1"), Some("left unapplied: title".to_string()));
+		assert_eq!(set_refusal_reason("document", "title: \"A\", title: \"B\""),
+			Some("names title twice, so none of it is applied".to_string()));
+		assert_eq!(set_refusal_reason("text", "\"x\""), Some("left unapplied: a positional argument".to_string()));
+		assert_eq!(set_refusal_reason("text", ""), Some("applied no argument".to_string()));
+		assert_eq!(set_refusal_reason("text", "size: 12pt, /* font: \"A\", */"), None);
+		// A field named twice applies nothing of the rule.
+		assert_eq!(lower_set("text", "size: 9pt, size: 10pt"), ThemePatch::default());
+		assert_eq!(info_of("#set document(title: \"A\", title: \"B\")\n"), crate::doc::DocInfo::default());
 	}
 
 	/// H2: a lowerable `#set` whose named arguments the renderer does not consume -- an unknown key, an
@@ -853,7 +928,118 @@ mod tests {
 		// declstyle_refusal drives it off a captured construct buffer, naming the set, and never flags a
 		// `#show: doc.with(...)`, whose non-theme arguments are front matter rather than a no-op.
 		assert_eq!(declstyle_refusal("#set text(size: 12pt)\n"), None);
-		assert_eq!(declstyle_refusal("#set text(lang: \"de\")\n"), Some("#set text".to_string()));
+		assert_eq!(declstyle_refusal("#set text(lang: \"de\")\n"),
+			Some(("#set text".to_string(), "left unapplied: lang".to_string())));
 		assert_eq!(declstyle_refusal("#show: doc.with(title: [X])\n"), None);
+	}
+
+	#[test]
+	fn document_info_reads_each_field_as_typst_writes_it() {
+		let src = "#set document(\n\ttitle: [A *bold* Title],\n\tauthor: (\"Ann Author\", \"Bob\"),\n\t\
+			description: \"A \\\"quoted\\\" line\",\n\tkeywords: (\"one\", \"two\",),\n)\n= Body\n";
+		let info = info_of(src);
+		assert_eq!(info.title.as_deref(), Some("A bold Title"), "content reads as its plain text");
+		assert_eq!(info.author.as_deref(), Some("Ann Author, Bob"));
+		assert_eq!(info.subject.as_deref(), Some("A \"quoted\" line"), "escapes resolve");
+		assert_eq!(info.keywords.as_deref(), Some("one, two"));
+
+		assert_eq!(info_of("#set document(author: \"Solo\")\n").author.as_deref(), Some("Solo"));
+		assert_eq!(info_of("= Body\n#set text(size: 12pt)\n"), crate::doc::DocInfo::default());
+
+		// A later `#set` overrides field by field, and `none` clears.
+		let two = info_of("#set document(title: \"One\", author: \"A\")\n#set document(title: none)\n");
+		assert_eq!((two.title, two.author.as_deref()), (None, Some("A")));
+	}
+
+	/// A `#set document` at the top level or in a bare content block applies; one in a list item, strong or
+	/// emphasis, or after an unclosed `*` or `_`, applies nothing and is refused at its `#`.
+	#[test]
+	fn set_document_in_a_container_is_refused_and_in_a_bare_block_applies() {
+		let mut skips = Refusals::default();
+		let src = "= R\n\n#[\n#set document(title: \"Block\")\n]\n";
+		assert_eq!(document_info(src, "t.typ", &mut skips).title.as_deref(), Some("Block"));
+		assert!(skips.is_empty());
+		let cases = [
+			"*b [\n#set document(title: \"T\")\nb*\n",
+			"_e\n#set document(title: \"T\")\ne_\n",
+			"- i\n  #set document(title: \"T\")\n",
+			"2 * 3\n#set document(title: \"T\")\n",
+			"\u{65E5}\u{672C}_\u{8A9E}\n#set document(title: \"T\")\n",
+			"- i #[\n#set document(title: \"T\")\n]\n",
+		];
+		for src in cases {
+			let mut skips = Refusals::default();
+			let info = document_info(src, "t.typ", &mut skips);
+			assert_eq!(info, crate::doc::DocInfo::default(), "{:?}", src);
+			assert_eq!(skips.sites().len(), 1, "{:?}", src);
+			let site = &skips.sites()[0];
+			assert_eq!((site.name.as_str(), site.class, site.file.as_str()), ("#set document", RefusalClass::Unsupported, "t.typ"));
+			assert_eq!(&src[site.span.start as usize..][..4], "#set", "{:?}", src);
+		}
+		// A file's part sits `at` bytes into it, and its site is placed there.
+		let mut skips = Refusals::default();
+		fold_document_info("- i\n  #set document(title: \"T\")\n", &mut crate::doc::DocInfo::default(), "f.typ", 100, &mut skips);
+		assert_eq!(skips.sites()[0].span.start, 100 + 6);
+	}
+
+	/// A rule in a list item, strong or emphasis ends with it, so none is lowered for the document.
+	#[test]
+	fn a_rule_in_an_item_strong_or_emphasis_is_not_lowered_for_the_document() {
+		let top = lower_declarations("#set heading(numbering: \"1.\")\n= Next\n");
+		assert_eq!(top.heading.numbering_all, Some(Some("1.".to_string())));
+		for src in [
+			"- item\n  #set heading(numbering: \"1.\")\n= Next\n",
+			"*bold\n#set heading(numbering: \"1.\")\nstill*\n\n= Next\n",
+			"_emph\n#set heading(numbering: \"1.\")\nstill_\n\n= Next\n",
+			"- item\n  #show: doc.with(heading-font: \"Old\")\n",
+		] {
+			assert_eq!(lower_declarations(src), ThemePatch::default(), "{:?}", src);
+		}
+	}
+
+	/// A field counts as applied only when its value was read, so one the reader cannot evaluate is refused
+	/// rather than silently missing from the Info dictionary.
+	#[test]
+	fn set_document_refuses_what_it_cannot_read() {
+		assert_eq!(set_refusal_reason("document", "title: \"X\", author: (\"Y\", \"Z\")"), None);
+		assert_eq!(set_refusal_reason("document", "title: \"X\", date: none"), None);
+		assert!(set_refusal_reason("document", "title: my-title").is_some(), "a variable");
+		assert!(set_refusal_reason("document", "keywords: (\"a\", b)").is_some(), "a non-string item");
+		assert!(set_refusal_reason("document", "date: auto").is_some(), "a date is never written");
+		assert!(set_refusal_reason("document", "title: \"X\", lang: \"de\"").is_some());
+		assert_eq!(declstyle_refusal("#set document(title: \"X\")\n"), None);
+	}
+
+	/// A `#set` shown in a raw block or written in a comment is text, not a rule: neither the theme nor the
+	/// Info dictionary reads one, while a declaration after them still applies.
+	#[test]
+	fn raw_blocks_and_comments_hold_no_declarations() {
+		let src = "```typst\n#set document(title: \"Example Title\")\n#set text(size: 30pt)\n```\n\
+			/*\n#set document(title: \"Commented Out\")\n#set text(size: 31pt)\n*/\n\
+			#set text(size: 12pt)\n= Body\n";
+		assert_eq!(info_of(src), crate::doc::DocInfo::default());
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(12.0)));
+		// A comment opened after a declaration holds the lines after it, not the one it opens on.
+		let src = "#set text(size: 12pt) /* the old size:\n#set text(size: 30pt)\n*/\n";
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(12.0)));
+	}
+
+	/// A file's top level is markup: a paren, brace or quotation mark in its prose is a character, so a
+	/// `#set` on a later line still applies.
+	#[test]
+	fn prose_punctuation_leaves_a_later_set_at_the_top_level() {
+		let src = "A ruler (and {more, 12\" long\n\n#set text(size: 13pt)\n";
+		assert_eq!(lower_declarations(src).text.body_size, Some(Sp::from_pt(13.0)));
+	}
+
+	/// The template application is read from the top level alone, so one commented out or shown in a raw
+	/// block names no heading face.
+	#[test]
+	fn a_shown_or_commented_template_application_is_not_applied() {
+		let src = "// #show: doc.with(heading-font: \"Old\")\n```\n#show: doc.with(heading-font: \"Shown\")\n```\n\
+			#show: doc.with(heading-font: \"Real\")\n";
+		let mut theme = Theme::default();
+		lower_root_declarations(src, &mut theme);
+		assert_eq!(theme.heading.levels[0].face, Some("Real".to_string()));
 	}
 }

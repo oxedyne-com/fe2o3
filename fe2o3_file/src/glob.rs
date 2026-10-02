@@ -386,3 +386,26 @@ impl IgnoreFile {
         line
     }
 }
+
+
+// Names a terminal editor writes beside the file it is working on.  A caller lays the list beneath
+// a repository's own rules, as `oxedyne_fe2o3_text::secret::SECRET_PATHS` is laid: parse these
+// lines first, so that the repository's own `!*~` or `!.#*` still re-includes one by name.
+pub const EDITOR_DROPPINGS: &[&str] = &[
+	"*.swp",		// vim swap file
+	"*.swo",		// vim swap file, second crash
+	"*.swx",		// vim swap file, third crash
+	"4913",			// vim's probe, written to see that a directory takes a new file
+	"\\#*#",		// emacs autosave; escaped, as a leading # starts a comment
+	".#*",			// emacs lock, a link to a target that is never there
+	"*~",			// the backup convention several editors share
+	"*.kate-swp",	// kate swap file
+];
+
+// Names Syncthing writes while it is part way through bringing a file in.  Laid beneath the
+// repository's own rules like `EDITOR_DROPPINGS`.  `*.sync-conflict-*` is deliberately absent: a
+// conflict copy is the other machine's content, and keeping it out would lose it.
+pub const SYNC_DROPPINGS: &[&str] = &[
+	".syncthing.*.tmp",	// the transfer file, renamed over its target when complete
+	"~syncthing~*.tmp",	// the same, as Syncthing spells it on Windows
+];

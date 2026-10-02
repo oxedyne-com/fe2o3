@@ -51,6 +51,7 @@ use crate::theme::{
 	ThemePatch,
 };
 
+use super::lex;
 use super::parse::Refusals;
 use super::set;
 
@@ -196,10 +197,13 @@ pub fn default_rule_set(theme: &Theme) -> Vec<Rule> {
 /// appending them after the default set keeps every [`RuleId`] distinct.
 pub fn collect_from_source(src: &str, base_id: RuleId, refusals: &mut Refusals) -> Vec<Rule> {
 	let mut rules	= Vec::new();
-	let mut offset	= 0usize;	// running byte offset of the current line's start
-	for raw in src.split_inclusive('\n') {
-		let line_start	= offset;
-		offset			= offset.saturating_add(raw.len());
+	// The rules a file declares stand at its top level, as the reader meets them: one inside a bracketed
+	// body, a list item, strong or emphasis is that body's own and is refused where it is read, and one a
+	// comment holds or a raw block shows is text. A trailing comment is blanked too, so it never reads as part of the transform.
+	let live = crate::lang::lex::live_text(src);
+	for (line_start, line) in crate::lang::lex::top_level_lines(src) {
+		let raw			= &live[line_start..line_start.saturating_add(line.len())];
+		let offset		= line_start.saturating_add(raw.len());
 		let trimmed		= raw.trim_start();
 		// A per-element show rule opens `#show <selector>:` -- a selector between `#show ` and the colon.
 		// `#show:` (no selector) is the whole-document application, not ours.
@@ -246,6 +250,14 @@ pub fn is_rule_line(trimmed: &str) -> bool {
 		Some((sel_text, _))	=> parse_selector(sel_text.trim()).is_some(),
 		None				=> false,
 	}
+}
+
+/// The `#show <selector>` a rule line opens with, as a report names it, or `None` when the line declares no
+/// rule [`is_rule_line`] recognises.
+pub(crate) fn rule_name(trimmed: &str) -> Option<String> {
+	trimmed.strip_prefix("#show ")
+		.and_then(|after| split_at_top_level_colon(after))
+		.and_then(|(sel, _)| parse_selector(sel.trim()).map(|_| fmt!("#show {}", sel.trim())))
 }
 
 /// The `(selector, transform)` split of a `#show <selector>: <transform>` body at the first colon that is
@@ -559,7 +571,7 @@ fn short(body: &str) -> String {
 /// Lowers a `#show <selector>: <body>` whose body is not a bare `set` to a [`Transform::Template`], or
 /// refuses it. The recognised shapes are the corpus's shared template forms: a `block.with(fill:, inset:,
 /// radius:)` (or `block(fill: ...)[#it]`) wash around the element -- a callout frame; a `block(...)[ #set
-/// text(...) #it.body ]` whose inner `#set` overlays the element (the hole patch); and `v(<len>)` / `line(...)`
+/// text(...) #it ]` whose inner `#set` overlays the element (the hole patch); and `v(<len>)` / `line(...)`
 /// statements set as siblings before or after the element (`pre` / `post`). An inline wrap (`underline`) and a
 /// text rewrite (`regex`) have no block lowering and are refused; a page-reading body is already refused
 /// upstream. Under a heading selector a `v(<len>)` folds into the matched level's `space_above` / `space_below`
@@ -591,14 +603,17 @@ fn lower_template(selector: &Selector, body: &str) -> Transform {
 			match make_spacer(selector, kind, s, seen_hole, heading, &mut hole) {
 				Ok(None)		=> {},	// folded into the level's spacing (a heading v)
 				Ok(Some(b))		=> if seen_hole { post.push(b); } else { pre.push(b); },
-				Err(e)			=> return Transform::Refused(fmt!("{}", e)),
+				Err(e)			=> return Transform::Refused(e.plain()),
 			}
 		} else if is_element_stmt(s) {
 			if seen_hole {
 				return Transform::Refused(fmt!("a template names the element `it` more than once: {}", short(body)));
 			}
+			// The reason reaches a diagnostic's message, the skip line and a strict hint, so it is the
+			// error's words alone: `Display` colours itself for a terminal and names the source file of
+			// every frame.
 			if let Err(e) = read_element(s, &mut hole, &mut frame) {
-				return Transform::Refused(fmt!("{}", e));
+				return Transform::Refused(e.plain());
 			}
 			seen_hole = true;
 		} else {
@@ -818,8 +833,13 @@ fn stroke_grey(v: &str) -> Option<u8> {
 fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<TemplateFrame>) -> Outcome<()> {
 	let is_wrap = s.starts_with("block") || s.starts_with("box");
 	if !is_wrap {
-		// A bare `it` / `it.body` -- the element passes through untouched.
-		return Ok(());
+		// Only the element itself passes through untouched. Anything else that names it -- `it.body`, which
+		// drops a heading's number, or content set beside the element -- changes what the page shows, and
+		// this reader runs none of it, so it is refused rather than passed through as though it were `it`.
+		if is_bare_it(s) {
+			return Ok(());
+		}
+		return Err(err!("a template statement this reader does not run: {}", short(s); Invalid, Input));
 	}
 	// The wrap's argument list -- `block.with(<args>)` or `block(<args>)[...]`.
 	let head = s.strip_prefix("block").or_else(|| s.strip_prefix("box")).unwrap_or(s);
@@ -853,10 +873,54 @@ fn read_element(s: &str, hole: &mut ThemePatch, frame: &mut Option<TemplateFrame
 		if !mentions_word(&content, "it") {
 			return Err(err!("a template wrap's content does not place the element `it`: {}", short(s); Invalid, Input));
 		}
+		// The overlay and the element are all this reader sets of a wrap's content; anything more -- words
+		// beside the element, `it.body` for `it` -- would be dropped, so it is refused instead.
+		if !only_sets_and_it(&content) {
+			return Err(err!("a template wrap sets content this reader does not run: {}", short(&content); Invalid, Input));
+		}
 	} else if !has_partial {
 		return Err(err!("a template wrap places no element `it`: {}", short(s); Invalid, Input));
 	}
 	Ok(())
+}
+
+/// Is this statement the element and nothing more: `it`, `#it` or `[#it]`?
+fn is_bare_it(s: &str) -> bool {
+	let t = s.trim().trim_start_matches('#').trim();
+	let t = match t.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
+		Some(inner)	=> inner.trim().trim_start_matches('#').trim(),
+		None		=> t,
+	};
+	t == "it"
+}
+
+/// Is a wrap's `[...]` content only `#set` rules and the element `#it`, with nothing else set?
+fn only_sets_and_it(content: &str) -> bool {
+	let chars: Vec<char> = content.chars().collect();
+	let at = |i: usize, lit: &str| lit.chars().enumerate().all(|(k, c)| chars.get(i + k) == Some(&c));
+	let mut placed = false;
+	let mut i = 0usize;
+	while i < chars.len() {
+		if chars[i].is_whitespace() || chars[i] == ';' {
+			i += 1;
+		} else if at(i, "#set ") {
+			// Past the rule's target and its balanced argument list.
+			let open = match chars[i..].iter().position(|&c| c == '(') {
+				Some(o)	=> i + o,
+				None	=> return false,
+			};
+			match crate::lang::parse::read_group(&chars, open) {
+				Some((_, next))	=> i = next,
+				None			=> return false,
+			}
+		} else if at(i, "#it") && chars.get(i + 3).map_or(true, |c| !(c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')) {
+			placed = true;
+			i += 3;
+		} else {
+			return false;
+		}
+	}
+	placed
 }
 
 /// Reads a `block.with(inset: ...)` argument into `tf`: a scalar length (`inset: 8pt`) pads every side
@@ -970,37 +1034,12 @@ fn call_args(s: &str, name: &str) -> Option<String> {
 	call_group(rest)
 }
 
-/// The text inside a balanced `(...)` at the start of `s` (which must open with `(`), spanning nested
-/// brackets and strings. `None` when the parentheses never close.
+/// The text inside a balanced `(...)` at the start of `s` (which must open with `(`), closed where the
+/// lexer closes it, so a bracket in a string, a comment or raw text does not end it. `None` when the
+/// parentheses never close.
 fn call_group(s: &str) -> Option<String> {
-	let s = s.trim_start();
-	let bytes = s.as_bytes();
-	if bytes.first() != Some(&b'(') {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for (i, c) in s.char_indices() {
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'			=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_			=> {},
-		}
-	}
-	None
+	let chars: Vec<char> = s.trim_start().chars().collect();
+	read_paren_group(&chars, 0).map(|(inner, _)| inner)
 }
 
 /// The text inside the first balanced `[...]` content block of `s`, or `None` when there is none.
@@ -1024,37 +1063,11 @@ fn bracket_content(s: &str) -> Option<String> {
 	None
 }
 
-/// The raw value text a `key:` names inside an argument list, up to the next top-level comma. `None` when
-/// the key is absent.
+/// The value text a `key:` names inside an argument list, as the lexer reads the list ([`lex::args`]): a
+/// comment is trivia, a string or group closes where Typst closes it, and a key is a key only at the list's
+/// own level, whole. `None` when the key is absent.
 fn named_value(args: &str, key: &str) -> Option<String> {
-	let bytes	= args.as_bytes();
-	let mut from	= 0usize;
-	let start = loop {
-		let rel	= args[from..].find(key)?;
-		let at	= from + rel;
-		let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
-		let mut j = at + key.len();
-		while j < bytes.len() && bytes[j] == b' ' {
-			j += 1;
-		}
-		if before_ok && j < bytes.len() && bytes[j] == b':' {
-			break j + 1;
-		}
-		from = at + key.len();
-	};
-	// Read to the next comma outside any nested group.
-	let tail	= &args[start..];
-	let mut depth	= 0i32;
-	let mut end		= tail.len();
-	for (i, c) in tail.char_indices() {
-		match c {
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_			=> {},
-		}
-	}
-	Some(tail[..end].trim().to_string())
+	lex::named(&lex::args(args), key).map(|v| v.to_string())
 }
 
 /// A template's named colour palette (`#let colours = (yellow: rgb("#f0f600"), ...)`), by name. Empty
@@ -1104,11 +1117,12 @@ pub(crate) fn parse_colour_pal(expr: &str, palette: &Palette) -> Option<Rgba> {
 /// resolve is passed over; a source with no such binding adds nothing.
 pub fn collect_palette(src: &str, palette: &mut Palette) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// The literal must name `colours` exactly, not merely start with it -- `#let colours_x = (...)`
 		// is a different binding and must not be read as the palette.
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let colours")
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let colours")
 			&& !chars.get(i + "#let colours".chars().count()).is_some_and(|&c| is_ident_char(c))
 		{
 			// The dict opens at the first `(` after the `=`.
@@ -1117,17 +1131,11 @@ pub fn collect_palette(src: &str, palette: &mut Palette) {
 				j += 1;
 			}
 			if chars.get(j) == Some(&'(') {
-				if let Some((inner, next)) = read_delim_group(&chars, j) {
-					for entry in split_top_commas_str(&inner) {
-						if let Some((name_part, val_part)) = entry.split_once(':') {
-							// The name is the last line of the key part, so a `//` comment line preceding the
-							// entry is dropped; the value is taken up to any trailing `//` line comment.
-							let name = name_part.rsplit('\n').next().unwrap_or(name_part).trim();
-							let val = val_part.split("//").next().unwrap_or(val_part).trim();
-							if !name.is_empty() && name.chars().all(is_ident_char) {
-								if let Some(rgba) = parse_colour(val) {
-									palette.insert(name.to_string(), rgba);
-								}
+				if let Some((inner, next)) = crate::lang::parse::read_group(&chars, j) {
+					for entry in lex::args(&inner) {
+						if let Some(name) = entry.key.as_deref().filter(|n| n.chars().all(is_ident_char)) {
+							if let Some(rgba) = parse_colour(&entry.value) {
+								palette.insert(name.to_string(), rgba);
 							}
 						}
 					}
@@ -1293,6 +1301,7 @@ pub struct ContentFn {
 	pub params:		Vec<String>,		// the positional parameter names, empty for a value binding
 	pub body:		String,				// the bracketed markup, its `[` `]` delimiters stripped
 	pub wrapper:	Option<String>,		// a `box`/`rect`/`block` styling wrap the body was lifted out of
+	pub scope:		GuardBase,			// the names in force where the body is written, its parameters unread
 }
 
 /// The content bindings in scope for a source, by name. Empty until a document's definitions are collected;
@@ -1325,6 +1334,373 @@ impl ScalarValue {
 /// collected; a source with none reads exactly as before.
 pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
 
+/// Evaluates a conditional's condition, resolving each name it tests through `lookup`. Three forms are read:
+/// `<name> == "<text>"`, taken when the name holds that string, a bare `<name>`, taken when it holds
+/// `true`, and the literal `true` or `false`. A name nothing binds is [`Cond::Unknown`], where Typst stops;
+/// any other form, and a name bound to a value of another kind or to one this reader does not know, is [`Cond::Opaque`], so the caller refuses
+/// the conditional rather than guess.
+pub(crate) fn eval_condition(cond: &str, lookup: impl Fn(&str) -> Lookup) -> Cond {
+	let cond = cond.trim();
+	// A boolean literal is its own value.
+	match cond {
+		"true"	=> return Cond::Taken(true),
+		"false"	=> return Cond::Taken(false),
+		_		=> {},
+	}
+	let (name, lit) = match cond.find("==") {
+		Some(eq) => match string_literal(cond[eq + 2..].trim()) {
+			Some(lit)	=> (cond[..eq].trim(), Some(lit)),
+			None		=> return Cond::Opaque,
+		},
+		None => (cond, None),
+	};
+	if !is_plain_name(name) || is_keyword(name) {
+		return Cond::Opaque;
+	}
+	match (lookup(name), lit) {
+		(Lookup::Str(v), Some(lit))	=> Cond::Taken(v == lit),
+		(Lookup::Bool(b), None)		=> Cond::Taken(b),
+		(Lookup::Unbound, _)		=> Cond::Unknown(name.to_string()),
+		// A string tested bare (Typst stops: expected boolean), a boolean compared, or a value unread.
+		_							=> Cond::Opaque,
+	}
+}
+
+/// Is `s` a single name, with no operator or call around it?
+fn is_plain_name(s: &str) -> bool {
+	let mut cs = s.chars();
+	match cs.next() {
+		Some(c) if c.is_alphabetic() || c == '_'	=> {},
+		_											=> return false,
+	}
+	cs.all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Is `s` a word Typst reserves, which names no variable?
+fn is_keyword(s: &str) -> bool {
+	matches!(s, "none" | "auto" | "true" | "false" | "not" | "and" | "or" | "let" | "set" | "show" | "context"
+		| "if" | "else" | "for" | "in" | "while" | "break" | "continue" | "return" | "import" | "include" | "as")
+}
+
+/// The text inside a `"..."` string literal filling the whole of `s`: `None` when `s` is not one, or holds
+/// a quote or an escape it would take evaluating to read.
+fn string_literal(s: &str) -> Option<&str> {
+	s.strip_prefix('"')
+		.and_then(|t| t.strip_suffix('"'))
+		.filter(|inner| !inner.contains('"') && !inner.contains('\\'))
+}
+
+/// A value a conditional's condition can test.
+#[derive(Clone, Debug, PartialEq)]
+enum GuardValue {
+	Str(String),
+	Bool(bool),
+}
+
+/// What a `#let` or an `#import` binds a name to, as a conditional reads it.
+#[derive(Clone, Debug, PartialEq)]
+enum Bound {
+	Lit(GuardValue),	// a string, `true` or `false` literal
+	Opaque,				// bound, to anything else
+}
+
+/// What a name holds where a conditional stands.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Lookup {
+	Str(String),
+	Bool(bool),
+	Other,		// bound, to a value this reader does not know
+	Unbound,	// bound nowhere above it, so Typst stops there
+}
+
+/// Which way a conditional's condition goes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Cond {
+	Taken(bool),
+	Opaque,				// a form, or a value, this reader does not evaluate
+	Unknown(String),	// it tests a name bound nowhere above it
+}
+
+/// One binding a conditional's name can resolve to: a `#let`, or one name an `#import` brings in.
+#[derive(Clone, Debug)]
+struct GuardBind {
+	at:		usize,			// the byte just past the statement that makes it
+	until:	usize,			// the closer of the block it stands in; `usize::MAX` at the text's own level
+	name:	Option<String>,	// `None` for an import this reader cannot read, which may bind any name
+	val:	Bound,
+}
+
+/// The names in force where a text starts, and the directory its own `#import`s resolve from. A content
+/// binding keeps the one in force where its body is written, which is where Typst evaluates it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GuardBase {
+	names:	std::collections::HashMap<String, Bound>,
+	open:	bool,								// a name not in `names` may still be bound: an import went unread
+	dir:	Option<std::path::PathBuf>,
+}
+
+impl GuardBase {
+	/// Where nothing is known: every name may be bound, to anything.
+	pub fn unknown() -> Self {
+		Self { names: std::collections::HashMap::new(), open: true, dir: None }
+	}
+
+	/// Each name as both `self` and `other` hold it, or unread where they differ: for text drawn from two
+	/// places, a binding's body and the arguments its call site substitutes into it.
+	pub fn agree(&self, other: &GuardBase) -> GuardBase {
+		let mut names = std::collections::HashMap::new();
+		for (name, val) in &self.names {
+			let same = other.names.get(name) == Some(val);
+			names.insert(name.clone(), if same { val.clone() } else { Bound::Opaque });
+		}
+		for name in other.names.keys() {
+			names.entry(name.clone()).or_insert(Bound::Opaque);
+		}
+		GuardBase { names, open: self.open || other.open, dir: self.dir.clone() }
+	}
+
+	/// Binds each of `names` to a value this reader does not know: a function's parameters in its body.
+	pub fn shadowed(mut self, names: &[String]) -> Self {
+		for name in names {
+			self.names.insert(name.clone(), Bound::Opaque);
+		}
+		self
+	}
+
+	/// Binds `name` to what the argument `arg`, as written in a call, is: a string or a boolean literal is
+	/// read, and any other expression is a value this reader does not know.
+	pub fn bound_to(mut self, name: &str, arg: &str) -> Self {
+		let val = match arg.trim() {
+			"true"	=> Bound::Lit(GuardValue::Bool(true)),
+			"false"	=> Bound::Lit(GuardValue::Bool(false)),
+			v		=> string_literal(v).map_or(Bound::Opaque, |s| Bound::Lit(GuardValue::Str(s.to_string()))),
+		};
+		self.names.insert(name.to_string(), val);
+		self
+	}
+}
+
+/// The scope a conditional's names resolve in, as Typst's does: lexical, by position. It holds every
+/// `#let` and `#import` of one text in source order, each in force from the end of its statement to the
+/// closer of the block it stands in -- a callout's body, a conditional's branch -- or to the end of the text,
+/// over the names in force where the text starts. A name resolves to its latest binding in force at the
+/// conditional, so a rebinding holds from its own line down, and a body's own `#let` shadows the enclosing
+/// file's within the body alone. A book's `config.typ` applies only where a file imports it. A literal
+/// `"..."`, `true` or `false` is read; any other value, and any name an import this reader cannot read may
+/// bring in, is known only to be bound.
+#[derive(Clone, Debug)]
+pub struct GuardScope {
+	binds:	Vec<GuardBind>,
+	base:	GuardBase,
+	depth:	u32,	// imports below the file compiled, capped as the import walk caps them
+}
+
+impl GuardScope {
+	/// A scope knowing no binding, for text read with no file behind it: every conditional is unread.
+	pub fn unknown() -> Self {
+		Self { binds: Vec::new(), base: GuardBase::unknown(), depth: 0 }
+	}
+
+	/// The scope of the file whose source is `src`, read from `dir`, `depth` imports below the file
+	/// compiled. With no `dir`, no import is read.
+	pub fn of_file(src: &str, dir: Option<&std::path::Path>, depth: u32) -> Self {
+		let base = GuardBase { names: std::collections::HashMap::new(), open: false, dir: dir.map(|d| d.to_path_buf()) };
+		Self::within(base, src, depth)
+	}
+
+	/// The scope of `text`, a body read apart from the file it is written in, whose start has `base` in force.
+	pub fn within(base: GuardBase, text: &str, depth: u32) -> Self {
+		Self { binds: guard_binds(text, base.dir.as_deref(), depth), base, depth }
+	}
+
+	/// The scope of `text`, a body standing at byte `pos` of this scope's text and read apart from it.
+	pub fn body(&self, pos: usize, text: &str) -> Self {
+		Self::within(self.base_at(pos), text, self.depth)
+	}
+
+	/// The names in force at byte `pos`.
+	pub fn base_at(&self, pos: usize) -> GuardBase {
+		self.fold(self.base.clone(), |b| b.at <= pos && pos < b.until)
+	}
+
+	/// The names the text binds at its own level, as it stands at its end: what an `#import` of it brings in.
+	fn exports(&self) -> GuardBase {
+		let base = GuardBase { names: std::collections::HashMap::new(), open: false, dir: None };
+		self.fold(base, |b| b.until == usize::MAX)
+	}
+
+	fn fold(&self, mut base: GuardBase, keep: impl Fn(&GuardBind) -> bool) -> GuardBase {
+		for b in self.binds.iter().filter(|b| keep(b)) {
+			match &b.name {
+				Some(name)	=> { base.names.insert(name.clone(), b.val.clone()); },
+				// Every name bound before it may now hold what the unread import brings.
+				None		=> { base.names.clear(); base.open = true; },
+			}
+		}
+		base
+	}
+
+	/// What `name` holds at byte `pos`.
+	pub(crate) fn at(&self, pos: usize, name: &str) -> Lookup {
+		let latest = self.binds.iter().rev()
+			.find(|b| b.at <= pos && pos < b.until && b.name.as_deref().map_or(true, |n| n == name));
+		let val = match latest {
+			Some(GuardBind { name: None, .. })	=> return Lookup::Other,
+			Some(b)								=> Some(&b.val),
+			None								=> self.base.names.get(name),
+		};
+		match val {
+			Some(Bound::Lit(GuardValue::Str(s)))	=> Lookup::Str(s.clone()),
+			Some(Bound::Lit(GuardValue::Bool(b)))	=> Lookup::Bool(*b),
+			Some(Bound::Opaque)						=> Lookup::Other,
+			None if self.base.open					=> Lookup::Other,
+			None									=> Lookup::Unbound,
+		}
+	}
+
+	/// Which way `cond`, standing at byte `pos`, goes.
+	pub(crate) fn cond_at(&self, pos: usize, cond: &str) -> Cond {
+		eval_condition(cond, |name| self.at(pos, name))
+	}
+}
+
+/// Every binding `src` makes a conditional can test, in source order: each `#let` of a name, and each name
+/// an `#import` brings in, read from `dir` while `depth` is within the import walk's cap.
+fn guard_binds(src: &str, dir: Option<&std::path::Path>, depth: u32) -> Vec<GuardBind> {
+	let mut out = Vec::new();
+	for b in crate::lang::lex::bindings(src) {
+		let until = b.until.unwrap_or(usize::MAX);
+		let mut push = |name: Option<&str>, val: Bound| {
+			out.push(GuardBind { at: b.at, until, name: name.map(str::to_string), val });
+		};
+		if let Some(rest) = b.text.strip_prefix("#let") {
+			let_binds(rest, &mut push);
+		} else if let Some(rest) = b.text.strip_prefix("#import") {
+			import_binds(rest, dir, depth, &mut push);
+		}
+	}
+	out
+}
+
+/// The names a `#let` binds, from what follows its keyword: a name to a literal or to anything else, a
+/// function's name, or each name a destructuring pattern binds.
+fn let_binds(rest: &str, push: &mut impl FnMut(Option<&str>, Bound)) {
+	let rest = rest.trim();
+	if let Some(pat) = rest.strip_prefix('(') {
+		// A destructuring: each name it binds, a key before a `:` and a lone `_` aside.
+		let pat	= pat.split('=').next().unwrap_or("");
+		let cs: Vec<(usize, char)> = pat.char_indices().collect();
+		let mut j = 0usize;
+		while j < cs.len() {
+			let (k, c) = cs[j];
+			if !(c.is_alphabetic() || c == '_') {
+				j += 1;
+				continue;
+			}
+			let mut e = j;
+			while e < cs.len() && (cs[e].1.is_alphanumeric() || cs[e].1 == '-' || cs[e].1 == '_') {
+				e += 1;
+			}
+			let end		= cs.get(e).map_or(pat.len(), |&(b, _)| b);
+			let name	= &pat[k..end];
+			if name != "_" && !pat[end..].trim_start().starts_with(':') {
+				push(Some(name), Bound::Opaque);
+			}
+			j = e;
+		}
+		return;
+	}
+	let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).unwrap_or(rest.len());
+	let name = &rest[..end];
+	if !is_plain_name(name) {
+		return;
+	}
+	let tail = &rest[end..];
+	let val = match tail.trim_start().strip_prefix('=').filter(|_| !tail.starts_with('(')) {
+		Some(value) => match value.trim().trim_end_matches(';').trim_end() {
+			"true"	=> Bound::Lit(GuardValue::Bool(true)),
+			"false"	=> Bound::Lit(GuardValue::Bool(false)),
+			v		=> string_literal(v).map_or(Bound::Opaque, |s| Bound::Lit(GuardValue::Str(s.to_string()))),
+		},
+		// A function, or a name bound to `none`.
+		None => Bound::Opaque,
+	};
+	push(Some(name), val);
+}
+
+/// The names an `#import` brings in, from what follows its keyword: a module's own name, the names it
+/// lists, or with `*` every name the imported file binds at its own level, as that file stands at its end.
+/// An import of a file this reader cannot read -- a package, a missing file, past the depth cap, or any
+/// from text with no file behind it -- brings its listed names in unread, and with `*` may bind any name.
+fn import_binds(rest: &str, dir: Option<&std::path::Path>, depth: u32, push: &mut impl FnMut(Option<&str>, Bound)) {
+	let rest = rest.trim();
+	let (path, tail) = match rest.strip_prefix('"') {
+		Some(r) => match r.find('"') {
+			Some(q)	=> (Some(&r[..q]), &r[q + 1..]),
+			None	=> return,
+		},
+		None => {
+			let end = rest.find(|c: char| c.is_whitespace() || c == ':').unwrap_or(rest.len());
+			(None, &rest[end..])
+		},
+	};
+	let mut tail = tail.trim_start();
+	let mut alias = None;
+	if let Some(r) = tail.strip_prefix("as").filter(|r| r.starts_with(char::is_whitespace)) {
+		let r	= r.trim_start();
+		let end	= r.find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_')).unwrap_or(r.len());
+		alias	= Some(&r[..end]);
+		tail	= r[end..].trim_start();
+	}
+	if let Some(a) = alias {
+		push(Some(a), Bound::Opaque);
+	}
+	let exports = || path
+		.zip(dir)
+		.and_then(|(rel, dir)| crate::lang::resolve_import(dir, rel, depth))
+		.map(|(p, src)| GuardScope::of_file(&src, p.parent(), depth + 1).exports());
+	let items = tail.strip_prefix(':').map(|r| r.trim().trim_end_matches(';').trim());
+	match items {
+		// A module import binds the module's own name: a file's stem, or a package's name.
+		None => if alias.is_none() {
+			let stem = path.map(|p| {
+				let file = p.rsplit('/').next().unwrap_or(p);
+				let file = file.split(':').next().unwrap_or(file);
+				file.strip_suffix(".typ").unwrap_or(file)
+			});
+			if let Some(stem) = stem.filter(|s| is_plain_name(s)) {
+				push(Some(stem), Bound::Opaque);
+			}
+		},
+		Some("*") => match exports() {
+			Some(ex) => {
+				if ex.open {
+					push(None, Bound::Opaque);
+				}
+				for (name, val) in &ex.names {
+					push(Some(name), val.clone());
+				}
+			},
+			None => push(None, Bound::Opaque),
+		},
+		Some(list) => {
+			let ex = exports();
+			let list = list.strip_prefix('(').and_then(|l| l.strip_suffix(')')).unwrap_or(list);
+			for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+				let (orig, bound) = match item.split_once(" as ") {
+					Some((o, b))	=> (o.trim(), b.trim()),
+					None			=> (item, item.rsplit('.').next().unwrap_or(item)),
+				};
+				let orig = orig.rsplit('.').next().unwrap_or(orig);
+				let val = ex.as_ref().and_then(|ex| ex.names.get(orig)).cloned().unwrap_or(Bound::Opaque);
+				if is_plain_name(bound) {
+					push(Some(bound), val);
+				}
+			}
+		},
+	}
+}
+
 /// The `#let` bindings a parse resolves a call against: the furniture functions ([`TemplateFns`], expanded
 /// into a padded box) and the content bindings ([`ContentFns`], spliced as markup). Threaded as one through
 /// the reader so a caller passes both together and a nested body carries the same scope. Borrowed, so it is
@@ -1334,25 +1710,35 @@ pub type ScalarFns = std::collections::HashMap<String, ScalarValue>;
 /// name already on it is a cycle (`#let a = [#a]`, or the mutual `#let a = [#b]`/`#let b = [#a]`) and is
 /// refused at once -- so a cycle recurses only to its own length, never until the native stack or the wasm
 /// shadow stack overflows. Its length also caps a pathological non-cyclic chain (see the reader's own cap).
+///
+/// `body` is set while a body is re-read -- a container's, a float's or an expanded binding's -- rather than
+/// a file's own top level, where alone a `#set document` is applied. `joined` marks the body of a bare content
+/// block `#[ ... ]` standing in the file's own markup, which Typst joins into it: its `#set document` is the
+/// file's, applied (or refused as a container's) where the file's own lines hold it, not refused here.
 #[derive(Clone, Copy)]
 pub struct Bindings<'a, 'b> {
 	pub tfns:	&'a TemplateFns,
 	pub cfns:	&'a ContentFns,
 	pub sfns:	&'a ScalarFns,
-	pub active:	&'b [String],
+	pub guards:		&'a GuardScope,	// what a conditional's condition resolves against, in the text being read
+	pub guard_at:	usize,			// the byte of `guards`' text the text being read starts at
+	pub active:		&'b [String],
+	pub body:	bool,
+	pub scoped:	bool,	// the body re-read lowers its own top-level `#set` and `doc.with` onto its scope
+	pub joined:	bool,	// the body re-read is a bare content block joined into the file's own markup
 }
 
 impl<'a> Bindings<'a, 'static> {
 	/// No scalar scope to hand: borrows the empty [`ScalarFns`] map, so a caller with only furniture and
 	/// content bindings in scope reads exactly as before.
 	pub fn new(tfns: &'a TemplateFns, cfns: &'a ContentFns) -> Self {
-		Self { tfns, cfns, sfns: empty_scalar_fns(), active: &[] }
+		Self { tfns, cfns, sfns: empty_scalar_fns(), guards: empty_guard_scope(), guard_at: 0, active: &[], body: false, scoped: false, joined: false }
 	}
 
 	/// As [`Self::new`], with the scalar `#let` value bindings a full `#let` scope also carries -- see
 	/// [`crate::book::Scope::bindings`], which is how a book or lone-file compile builds one.
 	pub fn with_scalars(tfns: &'a TemplateFns, cfns: &'a ContentFns, sfns: &'a ScalarFns) -> Self {
-		Self { tfns, cfns, sfns, active: &[] }
+		Self { tfns, cfns, sfns, guards: empty_guard_scope(), guard_at: 0, active: &[], body: false, scoped: false, joined: false }
 	}
 }
 
@@ -1369,7 +1755,47 @@ impl<'a, 'b> Bindings<'a, 'b> {
 
 	/// The same bindings with `active` as the stack of names in expansion, for re-reading an expanded body.
 	pub fn with_active<'c>(self, active: &'c [String]) -> Bindings<'a, 'c> {
-		Bindings { tfns: self.tfns, cfns: self.cfns, sfns: self.sfns, active }
+		Bindings {
+			tfns:		self.tfns,
+			cfns:		self.cfns,
+			sfns:		self.sfns,
+			guards:		self.guards,
+			guard_at:	self.guard_at,
+			active,
+			body:		true,
+			scoped:		false,
+			joined:		false,
+		}
+	}
+
+	/// The same bindings for re-reading a float's or a furniture call's body, which applies none of its own
+	/// declarations.
+	pub fn in_body(self) -> Self {
+		Bindings { body: true, scoped: false, joined: false, ..self }
+	}
+
+	/// The same bindings for re-reading a body whose own top-level `#set` and `doc.with` declarations are
+	/// lowered onto its scope: a `#styled-box`'s or a `#columns`'.
+	pub fn in_scoped_body(self) -> Self {
+		Bindings { body: true, scoped: true, joined: false, ..self }
+	}
+
+	/// The same bindings for re-reading a bare content block `#[ ... ]`, whose own top-level `#set` and
+	/// `doc.with` declarations are lowered onto its scope as a `#columns`' are. The block is joined into the
+	/// file's own markup only where the markup around it is the file's own, or a joined block's.
+	pub fn in_bare_body(self) -> Self {
+		Bindings { body: true, scoped: true, joined: !self.body || self.joined, ..self }
+	}
+
+	/// The same bindings reading text whose conditionals resolve in `guards`, starting at byte `at` of the
+	/// text `guards` was built from.
+	pub fn with_guards<'c>(self, guards: &'c GuardScope, at: usize) -> Bindings<'c, 'b> where 'a: 'c {
+		Bindings { guards, guard_at: at, ..self }
+	}
+
+	/// The same bindings reading the text starting at byte `at` of the one `guards` was built from.
+	pub fn at(self, at: usize) -> Self {
+		Bindings { guard_at: at, ..self }
 	}
 }
 
@@ -1380,6 +1806,13 @@ fn empty_scalar_fns() -> &'static ScalarFns {
 	EMPTY.get_or_init(ScalarFns::new)
 }
 
+/// The [`GuardScope`] [`Bindings::new`] borrows until a caller names the file being read: it knows no
+/// binding, so a conditional read with it is refused rather than called unbound.
+fn empty_guard_scope() -> &'static GuardScope {
+	static EMPTY: std::sync::OnceLock<GuardScope> = std::sync::OnceLock::new();
+	EMPTY.get_or_init(GuardScope::unknown)
+}
+
 /// Collects every `#let name(params) = block/box(...)` furniture definition in `src` into `tfns`, lowering
 /// each against `body_size` so its `em` lengths resolve to absolutes. A definition whose body this reader
 /// cannot lower (not a `block`/`box` wrap, or naming a length it cannot resolve) is passed over silently --
@@ -1388,12 +1821,13 @@ fn empty_scalar_fns() -> &'static ScalarFns {
 /// same value, so the map is definition-order-independent.
 pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &mut TemplateFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
 		// A definition opens at a line-leading `#let <ident>(` -- a function `#let`, whose name is followed by
 		// a parameter list. (`#let name = (...)` -- a value binding -- has no `(` right after the name and is
-		// left to the data-array reader.)
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+		// left to the data-array reader.) One a comment holds or a raw block shows is text, not a definition.
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
 			if let Some((name, params, expr, next)) = read_let_fn(&chars, i) {
 				// A name the reader already handles as a built-in construct (`styled-box`, `padded-image`,
 				// `part-page`, ...) is NOT overridden by a collected definition, so the built-in path stays
@@ -1426,14 +1860,21 @@ pub fn collect_template_fns(src: &str, body_size: Sp, palette: &Palette, tfns: &
 /// sits INSIDE the call's parens and the [`collect_template_fns`] reader draws as a styled block): a
 /// furniture definition carries no `[ ... ]` group TRAILING the wrap's closing `)`, so the two shapes do
 /// not collide, and where a name were somehow read by both, the furniture map wins at every call site.
-pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
+pub fn collect_content_fns(src: &str, dir: Option<&std::path::Path>, cfns: &mut ContentFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let bytes:	Vec<usize>	= src.char_indices().map(|(b, _)| b).collect();
+	let lit		= crate::lang::lex::literal_chars(src);
+	let mut names: Option<GuardScope> = None;	// the file's guard scope, built at its first binding
 	let mut i	= 0usize;
 	while i < chars.len() {
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
-			if let Some((name, params, body, wrapper, next)) = read_let_content(&chars, i) {
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
+			if let Some((name, params, body, wrapper, next, body_at)) = read_let_content(&chars, i) {
 				if !is_reserved_construct(&name) {
-					cfns.insert(name, ContentFn { params, body, wrapper });
+					// Typst evaluates the body where it is written, so its conditionals read the names in force
+					// there, with the parameters' values unknown.
+					let names = names.get_or_insert_with(|| GuardScope::of_file(src, dir, 0));
+					let scope = names.base_at(bytes.get(body_at).copied().unwrap_or(src.len())).shadowed(&params);
+					cfns.insert(name, ContentFn { params, body, wrapper, scope });
 				}
 				i = next;
 				continue;
@@ -1446,7 +1887,7 @@ pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 /// Reads a `#let name = [ ... ]` or `#let name(params) = [ ... ]` content binding beginning at `at` (the
 /// `#`), returning the name, its positional parameter names (empty for a value binding), the bracketed body
 /// with its delimiters stripped, the styling wrapper the body was lifted out of (`Some("box")` and kin, or
-/// `None` for a plain bracket body), and the index just past it. `None` when the line is not a
+/// `None` for a plain bracket body), the index just past it, and the index its body starts at. `None` when the line is not a
 /// content-binding `#let`: a data array `= (...)` and a scalar fail the body check below, so this reader
 /// leaves them to the array and scalar readers.
 ///
@@ -1455,7 +1896,7 @@ pub fn collect_content_fns(src: &str, cfns: &mut ContentFns) {
 /// styled by a box. The trailing group tells this shape apart from a furniture definition, whose content
 /// block sits inside the wrap's parens; a furniture `= block(...)` with no trailing `[ ... ]` fails the
 /// check here and is left to [`collect_template_fns`].
-fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, Option<String>, usize)> {
+fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, String, Option<String>, usize, usize)> {
 	let mut j = at + "#let ".chars().count();
 	let name_start = j;
 	while j < chars.len() && is_ident_char(chars[j]) {
@@ -1470,7 +1911,7 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	let mut params = Vec::new();
 	if chars.get(j) == Some(&'(') {
 		let (plist, after) = read_paren_group(chars, j)?;
-		params = split_top_commas_str(&plist).into_iter().filter_map(|p| {
+		params = crate::lang::parse::split_top_args(&plist).into_iter().filter_map(|p| {
 			let p = p.trim();
 			if !p.is_empty() && p.chars().all(is_ident_char) { Some(p.to_string()) } else { None }
 		}).collect();
@@ -1489,8 +1930,8 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 	}
 	// A bare bracket body `[ ... ]` -- the plain content binding.
 	if chars.get(j) == Some(&'[') {
-		let (body, next) = read_delim_group(chars, j)?;
-		return Some((name, params, body, None, next));
+		let Some((body, next)) = crate::lang::parse::read_group(chars, j) else { return None; };
+		return Some((name, params, body, None, next, j + 1));
 	}
 	// A styling wrap `box(...)[ ... ]` / `rect(...)[ ... ]` / `block(...)[ ... ]`: a content function whose
 	// text is set inside a styled box. The inner `[ ... ]` content is the binding's body; the wrapper name is
@@ -1505,10 +1946,10 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 			if chars.get(after_name) != Some(&'(') {
 				continue;
 			}
-			if let Some((_, after_args)) = read_delim_group(chars, after_name) {
+			if let Some((_, after_args)) = crate::lang::parse::read_group(chars, after_name) {
 				if chars.get(after_args) == Some(&'[') {
-					let (body, next) = read_delim_group(chars, after_args)?;
-					return Some((name, params, body, Some(wrap.to_string()), next));
+					let Some((body, next)) = crate::lang::parse::read_group(chars, after_args) else { return None; };
+					return Some((name, params, body, Some(wrap.to_string()), next, after_args + 1));
 				}
 			}
 		}
@@ -1525,9 +1966,10 @@ fn read_let_content(chars: &[char], at: usize) -> Option<(String, Vec<String>, S
 /// same value, so the map is definition-order-independent.
 pub fn collect_scalar_fns(src: &str, sfns: &mut ScalarFns) {
 	let chars:	Vec<char>	= src.chars().collect();
+	let lit		= crate::lang::lex::literal_chars(src);
 	let mut i	= 0usize;
 	while i < chars.len() {
-		if at_line_start(&chars, i) && starts_with_at(&chars, i, "#let ") {
+		if at_line_start(&chars, i) && !lit[i] && starts_with_at(&chars, i, "#let ") {
 			if let Some((name, value, next)) = read_let_scalar(&chars, i) {
 				if !is_reserved_construct(&name) {
 					sfns.insert(name, value);
@@ -1681,41 +2123,9 @@ fn read_paren_group(chars: &[char], open: usize) -> Option<(String, usize)> {
 	if chars.get(open) != Some(&'(') {
 		return None;
 	}
-	read_delim_group(chars, open)
+	crate::lang::parse::read_group(chars, open)
 }
 
-/// Reads the balanced group whose opener (`(`, `[` or `{`) sits at `open`, returning the inner text
-/// (without the delimiters) and the index just past its close. Nesting and string literals are honoured.
-fn read_delim_group(chars: &[char], open: usize) -> Option<(String, usize)> {
-	if !matches!(chars.get(open), Some('(') | Some('[') | Some('{')) {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for i in open..chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'				=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					let inner: String = chars[open + 1..i].iter().collect();
-					return Some((inner, i + 1));
-				}
-			},
-			_				=> {},
-		}
-	}
-	None
-}
 
 /// Reads the balanced group beginning at `from` -- a `name( ... )` call, a `( ... )`, a `[ ... ]` or a
 /// `{ ... }` -- returning the whole group's text (delimiters included) and the index just past its close.
@@ -1727,35 +2137,9 @@ fn read_balanced_from(chars: &[char], from: usize) -> Option<(String, usize)> {
 	while open < chars.len() && (is_ident_char(chars[open]) || chars[open] == '.') {
 		open += 1;
 	}
-	let opener = *chars.get(open)?;
-	if !matches!(opener, '(' | '[' | '{') {
-		return None;
-	}
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	for i in open..chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'				=> in_str = true,
-			'(' | '[' | '{'	=> depth += 1,
-			')' | ']' | '}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					let span: String = chars[from..=i].iter().collect();
-					return Some((span, i + 1));
-				}
-			},
-			_				=> {},
-		}
-	}
-	None
+	// The group read as Typst's lexer reads it, so a delimiter in a string, a content block's prose, a
+	// comment or raw text does not close it.
+	crate::lang::parse::read_group(chars, open).map(|(_, next)| (chars[from..next].iter().collect(), next))
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -1858,13 +2242,11 @@ fn lower_template_fn(params: &str, expr: &str, body_size: Sp, palette: &Palette)
 /// `None` when the body wraps its content in no figure. `auto`/`top` float to the top, `bottom` to the
 /// foot -- the same mapping the `#figure` reader uses.
 fn figure_placement_in(expr: &str) -> Option<FloatPlacement> {
-	let at		= expr.find("figure(")?;
-	let rest	= &expr[at + "figure(".len()..];
-	let key		= rest.find("placement:")?;
-	let after	= rest[key + "placement:".len()..].trim_start();
-	// The value runs to the next comma or the close of the call.
-	let end		= after.find(|c| c == ',' || c == ')').unwrap_or(after.len());
-	match after[..end].trim() {
+	let chars: Vec<char> = expr.chars().collect();
+	let at		= find_call(&chars, "figure")?;
+	let (inner, _) = read_paren_group(&chars, at + "figure".len())?;
+	// The call's own `placement`, whole, so one named in a comment or a string is none.
+	match lex::named(&lex::args(&inner), "placement")? {
 		"auto"		=> Some(FloatPlacement::Auto),
 		"top"		=> Some(FloatPlacement::Top),
 		"bottom"	=> Some(FloatPlacement::Bottom),
@@ -1921,7 +2303,7 @@ fn body_wrapper_size(content: &str, body_param: &str, body_size: Sp) -> Option<S
 			k += 1;
 		}
 		let places_body = chars.get(k) == Some(&'[')
-			&& read_delim_group(&chars, k)
+			&& crate::lang::parse::read_group(&chars, k)
 				.map(|(inner, _)| mentions_word(&inner, body_param))
 				.unwrap_or(false);
 		if places_body {
@@ -1942,7 +2324,7 @@ fn body_wrapper_size(content: &str, body_param: &str, body_size: Sp) -> Option<S
 /// the call supplies. A named parameter (`title: none`, `float: true`) is a keyword the call may set, not
 /// the content hole. `None` when the list names no positional parameter.
 fn body_param_name(params: &str) -> Option<String> {
-	split_top_commas_str(params).into_iter().rev().find_map(|p| {
+	crate::lang::parse::split_top_args(params).into_iter().rev().find_map(|p| {
 		let p = p.trim();
 		if p.is_empty() || p.contains(':') {
 			None
@@ -1956,7 +2338,7 @@ fn body_param_name(params: &str) -> Option<String> {
 
 /// Every parameter's name (the identifier before any `:` default), for detecting a `title:` keyword.
 fn param_names(params: &str) -> Vec<String> {
-	split_top_commas_str(params).into_iter().filter_map(|p| {
+	crate::lang::parse::split_top_args(params).into_iter().filter_map(|p| {
 		let name = p.split(':').next().unwrap_or("").trim();
 		if !name.is_empty() && name.chars().all(is_ident_char) {
 			Some(name.to_string())
@@ -2055,38 +2437,20 @@ fn read_inset_pads(raw: &str, body_size: Sp) -> Option<InsetPads> {
 	}
 }
 
-/// The first top-level `{ ... }` or `[ ... ]` content group in a wrap's argument list, as its delimiter and
-/// inner text -- the block the body parameter sits in. `None` when the call carries no positional content.
+/// The first positional `{ ... }` or `[ ... ]` content group in a wrap's argument list, as its delimiter and
+/// inner text -- the block the body parameter sits in. `None` when the call carries no positional content,
+/// or its first one never closes.
 fn positional_content(args: &str) -> Option<(char, String)> {
-	let chars:	Vec<char>	= args.chars().collect();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= 0usize;
-	while i < chars.len() {
-		let c = chars[i];
-		if in_str {
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
+	for arg in lex::args(args) {
+		if arg.key.is_some() {
 			continue;
 		}
-		match c {
-			'"'					=> in_str = true,
-			'(' 				=> depth += 1,
-			')'					=> depth -= 1,
-			'{' | '[' if depth == 0	=> {
-				if let Some((span, _)) = read_delim_group(&chars, i) {
-					return Some((c, span));
-				}
-				return None;
-			},
-			'{' | '['			=> depth += 1,
-			'}' | ']'			=> depth -= 1,
-			_					=> {},
-		}
-		i += 1;
+		let chars: Vec<char> = arg.value.chars().collect();
+		let open = match chars.first() {
+			Some(&c) if c == '{' || c == '['	=> c,
+			_									=> continue,
+		};
+		return crate::lang::parse::read_group(&chars, 0).map(|(inner, _)| (open, inner));
 	}
 	None
 }
@@ -2185,34 +2549,6 @@ fn resolve_len(v: &str, body_size: Sp) -> Option<Sp> {
 	length_pt(v).map(Sp::from_pt)
 }
 
-/// Splits a parameter or dict text on top-level commas (outside any `(...)`/`[...]`/`{...}`/`"..."`).
-fn split_top_commas_str(s: &str) -> Vec<String> {
-	let mut out		= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut cur		= String::new();
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc				{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
-}
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ MATCHING                                                                   │
@@ -2370,12 +2706,41 @@ fn resolve_avail(block: Block, avail: Sp) -> Block {
 
 /// The default rule set followed by a source's own rules, ready to apply. The default set uses `theme`
 /// (the document theme in force) to re-assert each heading level's own size; the source's rules are
-/// appended after, so an authored rule overrides the default for the elements it matches.
-pub fn rule_set_for(theme: &Theme, src: &str, refusals: &mut Refusals) -> Vec<Rule> {
-	let mut rules = default_rule_set(theme);
-	let own = collect_from_source(src, rules.len(), refusals);
+/// appended after, so an authored rule overrides the default for the elements it matches. A refused rule
+/// is recorded against `file`, the path `src` was read from.
+pub fn rule_set_for(theme: &Theme, src: &str, file: &str, refusals: &mut Refusals) -> Vec<Rule> {
+	let mut rules	= default_rule_set(theme);
+	let mut own_sites	= Refusals::default();
+	let own			= collect_from_source(src, rules.len(), &mut own_sites);
+	own_sites.tag_file(file);
+	refusals.merge(own_sites);
 	rules.extend(own);
 	rules
+}
+
+/// Each heading face a rule names, with the rule's own span: a `#show heading: set text(font: ...)` wraps
+/// its headings in that face, so a note about the face belongs at the rule.
+pub fn heading_face_sites(rules: &[Rule]) -> Vec<(String, Span)> {
+	let mut out: Vec<(String, Span)> = Vec::new();
+	for rule in rules {
+		let patch = match &rule.transform {
+			Transform::SetFields(p)	=> p,
+			_						=> continue,
+		};
+		let mut names: Vec<&String> = Vec::new();
+		if let Some(Some(n)) = &patch.heading.face_all {
+			names.push(n);
+		}
+		for level in &patch.heading.levels {
+			if let Some(Some(n)) = &level.face {
+				names.push(n);
+			}
+		}
+		for n in names {
+			out.push((n.clone(), rule.span));
+		}
+	}
+	out
 }
 
 #[cfg(test)]
@@ -2385,6 +2750,15 @@ mod tests {
 
 	fn heading(level: u8) -> Block {
 		Block::Heading { level, segments: vec![Segment::text("H")], label: None }
+	}
+
+	// A boolean literal is its own value: Typst takes the branch of `#if true` and of `#if false [..] else`.
+	#[test]
+	fn a_boolean_literal_is_its_own_value() {
+		let none = |_: &str| Lookup::Unbound;
+		assert_eq!(eval_condition("true", none), Cond::Taken(true));
+		assert_eq!(eval_condition(" false ", none), Cond::Taken(false));
+		assert_eq!(eval_condition("trues", none), Cond::Unknown("trues".to_string()));
 	}
 
 	/// A `heading.where(level: 1)` selector parses to the heading kind with a single level predicate, and
@@ -2452,6 +2826,20 @@ mod tests {
 		assert!(matches!(rules[0].transform, Transform::SetFields(_)));
 	}
 
+	/// A rule is collected from a file's top level alone: one a raw block shows, one a comment holds and one
+	/// inside a body is none of the file's, and the file's own rule after them all is.
+	#[test]
+	fn a_rule_is_collected_from_the_top_level_alone() {
+		let src = "```typst\n#show heading: set text(size: 30pt)\n```\n/*\n#show heading: set text(size: 31pt)\n*/\n\
+			#styled-box[\n#show heading: set text(size: 32pt)\n]\n#show heading: set text(size: 33pt) // a note\n";
+		let mut refusals = Refusals::default();
+		let rules = collect_from_source(src, 0, &mut refusals);
+		assert_eq!(rules.len(), 1, "{:?}", rules.iter().map(|r| r.source.clone()).collect::<Vec<_>>());
+		assert!(refusals.is_empty(), "{:?}", refusals.sites());
+		let line = src.find("#show heading: set text(size: 33pt)").unwrap_or(0) as u32;
+		assert_eq!(rules[0].span.start, line, "the rule is placed at its own line");
+	}
+
 	/// A page-reading rule is collected as a refusal, not applied, and its reason recorded.
 	#[test]
 	fn page_reading_rule_is_refused() {
@@ -2499,10 +2887,10 @@ mod tests {
 		// heading's keep box -- so a body line set right beside the resized heading is measured too.
 		let render = |base: &Theme, rules_src: &str| -> Outcome<Vec<(i32, Option<i32>)>> {
 			let mut refusals	= Refusals::default();
-			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
-			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			let (doc, _, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			let mut out = Vec::new();
 			for n in &doc.nodes {
 				if let Node::VBox(b) = n {
@@ -2561,7 +2949,7 @@ mod tests {
 			"#show heading.where(level: 1): set heading(numbering: \"A\")\n", 0, &mut refusals);
 		let mut blocks = vec![heading(1), heading(2)];
 		apply_rules(&mut blocks, &rules, geom.content_width());
-		let (_, heads) = res!(crate::doc::author(
+		let (_, heads, _) = res!(crate::doc::author(
 			fonts, geom, &style, &crate::fonts::FaceResolver::default(), &blocks, None, None));
 		assert_eq!(heads[0].number, "A", "the level-1 rule renumbers only the level-1 heading");
 		assert_eq!(heads[1].number, "1.1", "the level-2 heading, outside the rule, keeps the default number");
@@ -2597,10 +2985,10 @@ mod tests {
 		// the following paragraph's first line, pulled into the keep box.
 		let keep_hboxes = |base: &Theme, rules_src: &str| -> Outcome<Vec<i32>> {
 			let mut refusals	= Refusals::default();
-			let rules			= rule_set_for(base, rules_src, &mut refusals);
+			let rules			= rule_set_for(base, rules_src, "rules.typ", &mut refusals);
 			let mut bs			= blocks();
 			apply_rules(&mut bs, &rules, geom.content_width());
-			let (doc, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
+			let (doc, _, _)		= res!(author(fonts.clone(), geom, base, &faces, &bs, None, None));
 			for n in &doc.nodes {
 				if let Node::VBox(b) = n {
 					return Ok(b.list.iter().filter_map(|c| match c {
@@ -2742,6 +3130,54 @@ mod tests {
 		assert_eq!(tf.inset_x, Some(Sp::from_pt(8.0)), "the dict's x becomes inset_x");
 		assert_eq!(tf.inset_top, Some(Sp::from_pt(6.0)), "the dict's y becomes inset_top");
 		assert_eq!(tf.inset_bot, Some(Sp::from_pt(12.0)), "a following bottom overrides y for the foot pad");
+	}
+
+	/// A template's arguments are read as Typst reads them, comments as trivia: an argument written in a
+	/// comment is none, so an `inset: 1em` the reader cannot resolve, commented out, refuses nothing, and the
+	/// argument beside the comment still counts. The same holds for a furniture definition's block and its
+	/// `figure(placement:)` wrapper.
+	#[test]
+	fn a_template_argument_in_a_comment_is_no_argument() {
+		let sel	= raw_selector();
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240), // inset: 1em\n radius: 10pt)") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("a commented `inset: 1em` refused nothing in Typst: {:?}", other),
+		};
+		let tf = t.frame.expect("a fill names a frame");
+		assert_eq!((tf.inset_x, tf.radius), (None, Some(Sp::from_pt(10.0))), "the radius beside the comment is read");
+		let t	= match lower_transform(&sel, "it => block.with(fill: luma(240), /* radius: 50%, */ inset: 8pt)") {
+			Transform::Template(t)	=> t,
+			other					=> panic!("a commented `radius: 50%` refused nothing in Typst: {:?}", other),
+		};
+		let tf = t.frame.expect("a fill names a frame");
+		assert_eq!((tf.inset_x, tf.radius), (Some(Sp::from_pt(8.0)), None));
+
+		let src = "\
+#let pr-note(body) = block(
+	inset: 1em,
+	// above: 5pt,
+	{
+		// set text(size: 3pt)
+		body
+	},
+)
+#let aside(body) = {
+	let inner = box(inset: 1em, [#body])
+	figure(/* placement: bottom, */ placement: auto, inner)
+}
+#let ghost(body) = block(inset: 1em, {
+	// body
+	1
+})
+";
+		let mut tfns = TemplateFns::new();
+		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
+		let note = tfns.get("pr-note").expect("pr-note is collected");
+		assert_eq!(note.patch.callout.inset_top, Some(Sp::from_pt(10.0)), "a commented `above:` sets no pad");
+		assert_eq!(note.patch.text.body_size, None, "a commented `set text` sets no size");
+		let aside = tfns.get("aside").expect("aside is collected");
+		assert_eq!(aside.float, Some(FloatPlacement::Auto), "the call's own placement, not the comment's");
+		assert!(tfns.get("ghost").is_none(), "a body named only in a comment is never placed, so nothing is lowered");
 	}
 
 	/// A rule's `inset`/`radius` that this reader cannot resolve to points -- an `em` value, which has no
@@ -2922,7 +3358,7 @@ mod tests {
 #let pr-note(body) = block(inset: (left: 1.2em), { set text(size: 0.9em); body })
 ";
 		let mut cfns = ContentFns::new();
-		collect_content_fns(src, &mut cfns);
+		collect_content_fns(src, None, &mut cfns);
 
 		let stamp = cfns.get("stamp").expect("a box-wrapped content fn collects as a content binding");
 		assert_eq!(stamp.params, vec!["s".to_string()]);
@@ -2953,6 +3389,42 @@ mod tests {
 		let mut tfns = TemplateFns::new();
 		collect_template_fns(src, Sp::from_pt(10.0), &Palette::new(), &mut tfns);
 		assert!(tfns.get("bogus").is_none(), "a body that never places `body` is not a furniture wrap");
+	}
+
+	/// A conditional's names resolve in the bindings in force where it stands, the latest first: a rebinding
+	/// holds from its own line down, a body's own `#let` holds to the body's closer, and a name bound only in
+	/// a comment or below the conditional is bound nowhere above it. A name bound to an expression, or to a
+	/// string it would take evaluating to read, is bound but unread.
+	#[test]
+	fn a_guard_scope_resolves_the_binding_in_force_where_it_stands() {
+		let src = "#let media = \"ebook\" // \"print\"\n#let draft = true\n#let twice = \"a\"\nMID\n#let twice = \"b\"\n\
+			#let expr = sys.inputs.at(\"x\", default: \"a\")\n#box[\n#let inner = \"a\"\nIN\n]\n\
+			/* #let hidden = \"a\" */\n#let esc = \"a\\\"\"\nEND\n#let late = \"a\"\n";
+		let scope		= GuardScope::of_file(src, None, 0);
+		let at			= |mark: &str| src.find(mark).unwrap_or(0);
+		let (mid, inside, end) = (at("MID"), at("IN\n"), at("END"));
+		assert_eq!(scope.cond_at(end, "media == \"ebook\""), Cond::Taken(true));
+		assert_eq!(scope.cond_at(end, "draft"), Cond::Taken(true));
+		assert_eq!(scope.cond_at(mid, "twice == \"a\""), Cond::Taken(true));
+		assert_eq!(scope.cond_at(end, "twice == \"a\""), Cond::Taken(false));
+		assert_eq!(scope.cond_at(inside, "inner == \"a\""), Cond::Taken(true));
+		for name in ["expr", "esc"] {
+			assert_eq!(scope.cond_at(end, &fmt!("{} == \"a\"", name)), Cond::Opaque, "{}", name);
+		}
+		for name in ["inner", "hidden", "late", "unbound"] {
+			assert_eq!(scope.cond_at(end, &fmt!("{} == \"a\"", name)), Cond::Unknown(name.to_string()), "{}", name);
+		}
+	}
+
+	/// A content binding's body is read as Typst reads a content block.
+	#[test]
+	fn a_content_binding_body_is_read_as_typst_reads_a_content_block() {
+		// An escaped `]`, one in raw text and one in a comment close nothing; a `"` in markup is a character.
+		let src = "#let note = [Say \\] and `]` and /* ] */ \"quoted] here.]\n#let after = [After.]\n";
+		let mut cfns = ContentFns::new();
+		collect_content_fns(src, None, &mut cfns);
+		assert_eq!(cfns.get("note").map(|f| f.body.as_str()), Some("Say \\] and `]` and /* ] */ \"quoted"));
+		assert_eq!(cfns.get("after").map(|f| f.body.as_str()), Some("After."));
 	}
 
 	/// A bare `#let name = <literal>` collects a scalar for a string, an integer and a length alike, keeping
@@ -3067,6 +3539,30 @@ mod tests {
 		assert_eq!(parse_colour_pal("colours.yellow", &Palette::new()), None);
 	}
 
+	/// A parameter list is read as Typst reads it, comments as trivia: a comment beside a parameter, with a
+	/// comma or a colon in it, leaves the parameter its own, and a keyword parameter is told from a body.
+	#[test]
+	fn a_comment_in_a_parameter_list_is_no_part_of_a_parameter() {
+		let mut cfns = ContentFns::new();
+		collect_content_fns("#let note(a /* c, d */, // e: f\n b) = [N #a #b]\n", None, &mut cfns);
+		assert_eq!(cfns.get("note").map(|f| f.params.clone()), Some(vec!["a".to_string(), "b".to_string()]));
+		assert_eq!(body_param_name("title: none, /* x: y */ body"), Some("body".to_string()));
+		assert_eq!(param_names("/* c */ a, b // d\n, title: none"), vec!["a", "b", "title"]);
+	}
+
+	/// A palette is read as Typst reads its dictionary, comments as trivia: an entry written in a comment is no
+	/// entry, a comma in a comment parts nothing, and the entry after a comment is still read.
+	#[test]
+	fn a_palette_entry_in_a_comment_is_no_entry() {
+		let src = "#let colours = (\n  // red: rgb(\"#ff0000\"),\n  yellow: rgb(\"#f0f600\"), // trailing, blue: rgb(\"#0000ff\")\n  /* green: rgb(\"#00ff00\"), */ purple: rgb(\"#4c1a57\"),\n)\n";
+		let mut palette = Palette::new();
+		collect_palette(src, &mut palette);
+		let mut names: Vec<&str> = palette.keys().map(|k| k.as_str()).collect();
+		names.sort();
+		assert_eq!(names, vec!["purple", "yellow"], "only the written entries are read");
+		assert_eq!(palette.get("purple"), Some(&Rgba::opaque(0x4c, 0x1a, 0x57)));
+	}
+
 	/// `#let colours` must match exactly -- a differently named dict such as `#let colours_x` is a
 	/// separate binding, not the palette, and must not be prefix-matched into it.
 	#[test]
@@ -3075,5 +3571,39 @@ mod tests {
 		let mut palette = Palette::new();
 		collect_palette(src, &mut palette);
 		assert!(palette.get("yellow").is_none(), "colours_x must not be read as the colours palette");
+	}
+
+	/// A template passes the element through untouched only when it names the element alone; one that sets
+	/// its body, or anything beside it, is refused rather than passed through as though it were `it`, and a
+	/// wrap's content may hold `#set` rules and `#it`, nothing more.
+	#[test]
+	fn a_template_passes_the_element_through_only_when_it_names_it_alone() {
+		let h1 = Selector { kind: ElementKind::Heading, predicates: vec![FieldPredicate::Level(1)] };
+		assert!(matches!(lower_transform(&h1, "it => it"), Transform::Template(_)));
+		assert!(matches!(lower_transform(&h1, "it => [#it]"), Transform::Template(_)));
+		for body in ["it => it.body", "it => [#it.body #here().page()]", "it => emph(it)",
+			"it => block(fill: luma(240))[#it.body]", "it => block(fill: luma(240))[Note: #it]"]
+		{
+			assert!(matches!(lower_transform(&h1, body), Transform::Refused(_)), "{} must be refused", body);
+		}
+		assert!(matches!(lower_transform(&h1, "it => block(fill: luma(240))[#set text(size: 9pt)\n#it]"),
+			Transform::Template(_)));
+	}
+
+	/// A refused template's reason is the error's words alone, as a browser shows them: no terminal colour
+	/// code and no source location of the engine's own, whichever statement it was refused at.
+	#[test]
+	fn a_refused_template_gives_its_reason_as_plain_words() {
+		let src = "#show heading: it => [#it.body #here().page()]\n\
+			#show heading.where(level: 2): it => block(fill: rgb(\"#zz\"))[#it]\n\
+			#show figure: it => block(fill: luma(240))[Note: #it]\n";
+		let mut refusals = Refusals::default();
+		let rules = collect_from_source(src, 0, &mut refusals);
+		assert_eq!(rules.len(), 3);
+		assert_eq!(refusals.sites().len(), 3, "each rule is refused: {:?}", refusals.sites());
+		for r in refusals.sites() {
+			assert!(!r.name.contains('\u{1b}') && !r.name.contains(".rs:"), "not plain: {:?}", r.name);
+			assert!(r.name.contains("a template"), "the reason is kept: {:?}", r.name);
+		}
 	}
 }

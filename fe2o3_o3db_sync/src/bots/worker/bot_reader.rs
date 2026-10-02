@@ -311,9 +311,22 @@ impl<
 
             // <6> We receive either the value or the file location from the cbot or fbot.
             let (floc, meta, postgc) = match resp_r2.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
-                Err(e) => return Err(err!(e,
-                    "While waiting on value or location from cbot or fbot.";
-                    IO, Channel, Read)),
+                Err(e) => {
+                    // The fbot takes a reader pin when it grants a location, and only a reader
+                    // that finishes returns it.  Having given up, tell the fbot not to grant one,
+                    // and return the pin of a grant that came in after the deadline.
+                    for late in res!(resp_r2.give_up()) {
+                        if let OzoneMsg::ReadResult(ReadResult::Location(mloc, _)) = late {
+                            let fnum = mloc.file_location().file_number();
+                            let bots = res!(self.fbots());
+                            let (bot, _) = bots.choose_bot(&ChooseBot::ByFile(fnum));
+                            res!(bot.send(OzoneMsg::ReadFinished(fnum)));
+                        }
+                    }
+                    return Err(err!(e,
+                        "While waiting on value or location from cbot or fbot.";
+                        IO, Channel, Read));
+                },
                 Ok(OzoneMsg::ReadResult(readres)) => {
                     match readres {
                         // <10> Return result to caller via resp_r1.

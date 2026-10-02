@@ -49,7 +49,7 @@ struct Run {
 /// text run in the document, in page-then-baseline order.
 fn runs() -> Outcome<Vec<Run>> {
 	let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("samples").join("hierarchy.typ");
-	let (assembled, _refusals, _skip) = res!(compile::assemble(
+	let assembled = res!(compile::assemble(
 		&path,
 		|| Ok(Arc::new(res!(fonts::libertinus()))),
 	));

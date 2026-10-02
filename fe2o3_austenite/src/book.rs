@@ -25,6 +25,7 @@ use crate::bib::{
 };
 use crate::doc::{
 	Block,
+	DocInfo,
 	FrontMatter,
 	HeadingStyle,
 	Segment,
@@ -36,6 +37,7 @@ use crate::theme::{
 use crate::fonts;
 use crate::fonts::FaceResolver;
 use crate::ir::Sp;
+use crate::ir::Span;
 use crate::lang::parse::flatten_markup;
 use crate::lang;
 use crate::page::PageGeometry;
@@ -88,12 +90,46 @@ pub struct BookSpec {
 	// The constructs the reader skipped across every chapter, merged into one tally, so the binary reports
 	// a book or doc compile's skipped constructs on the same terse line a lone file already prints.
 	pub skips:		lang::Refusals,
+	pub doc_info:	DocInfo,	// the Info dictionary every file's own `#set document` builds, at its top level or in a bare content block, in document order
 }
 
 /// Does this source read as a book root -- a Typst file that assembles chapters through `#include`?
 /// A single manuscript has none, so the binary can tell a book from a lone file by the source itself.
 pub fn is_book_root(src: &str) -> bool {
-	src.lines().any(|l| l.trim_start().starts_with("#include"))
+	// An `#include` a comment holds or a raw block shows is text, and one in a body is the body's: only one at
+	// the file's top level makes a book.
+	top_live_lines(src).iter().any(|l| l.trim_start().starts_with("#include"))
+}
+
+/// The lines of `src` the include walk reads for its structure, with what a comment holds and what raw text
+/// shows blanked: a line at the file's top level, or directly in the branch of an `#if` include guard opened
+/// on such a line, as [`assemble_into`] reads them. These are the lines an `#import` or an `#include` is read
+/// from, so one a comment holds, a raw block shows or any other bracketed body holds is never followed as the
+/// file's own.
+fn top_live_lines(src: &str) -> Vec<String> {
+	let live		= lang::lex::live_text(src);
+	let mut out		= Vec::new();
+	let mut state	= lang::lex::Lexer::markup_over(src);
+	let mut guards: Vec<usize> = Vec::new();	// the group depth each open guard's branch stands at
+	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
+		let depth = state.depth();
+		while guards.last().map_or(false, |&g| depth < g) {
+			guards.pop();
+		}
+		// A line opening in markup, at the file's own level with no list item, heading, strong or emphasis
+		// open around it, or directly in a guard's branch with none open around it there.
+		let level	= state.markup_level();
+		let top		= state.place_of(raw) == Some(lang::lex::Place::Top);
+		let branch	= level.is_some() && level == guards.last().copied() && state.bare_line(raw);
+		if top || branch {
+			if guard_open(raw_live.trim()).is_some() {
+				guards.push(depth + 1);
+			}
+			out.push(raw_live.to_string());
+		}
+		state.feed(raw);
+	}
+	out
 }
 
 /// The heading display-face names a theme carries, for the resolver to load: the role-default heading
@@ -189,20 +225,62 @@ fn collect_named_families(blocks: &[Block], bodies: &mut Vec<Vec<String>>, headi
 	}
 }
 
+/// Where each heading face a document names was named: a `#show: doc.with(heading-font: ...)` in the root
+/// or in a file it includes, or a `#show heading: set text(font: ...)` rule. A note about a face is charged
+/// to the first declaration naming it. A face no declaration names -- an idiom's own preference -- is charged
+/// to the root's template application, which is what brings the idiom, or to the root's top without one.
+pub struct FaceSites {
+	named:		Vec<(String, String, Span)>,	// the face, the file and span of its declaration
+	fallback:	(String, Span),
+}
+
+impl FaceSites {
+	/// The declarations of the root at `root_file` -- its template application and its `rules` -- and then
+	/// `included`, each included file's own.
+	pub fn new(root_file: &str, root_src: &str, rules: &[lang::rules::Rule], included: Vec<(String, String, Span)>) -> Self {
+		let mut named: Vec<(String, String, Span)> = Vec::new();
+		if let Some((face, span)) = lang::set::heading_font_site(root_src) {
+			named.push((face, root_file.to_string(), span));
+		}
+		for (face, span) in lang::rules::heading_face_sites(rules) {
+			named.push((face, root_file.to_string(), span));
+		}
+		named.extend(included);
+		let template = lang::set::show_doc_with(root_src).map_or(Span::new(0, 0), |(_, span)| span);
+		Self { named, fallback: (root_file.to_string(), template) }
+	}
+
+	/// The file and span of the declaration that named `face`.
+	fn site_of(&self, face: &str) -> (&str, Span) {
+		match self.named.iter().find(|(n, _, _)| n == face) {
+			Some((_, file, span))	=> (file.as_str(), *span),
+			None					=> (self.fallback.0.as_str(), self.fallback.1),
+		}
+	}
+}
+
 /// Records a note for each heading level that names a face and asks for a weight or slant the book ships
-/// no file for -- so a bold or italic heading falling back to Regular is visible rather than silent. Checks
-/// the root theme's own levels, then descends every scoped or box subtree, folding its patch onto the theme
-/// in force at that point (mirroring the merge [`Theme::apply`] performs) so a rule- or chapter-scoped face
-/// is checked with the same weight/italic the renderer would set, not only the root's own. A level whose
-/// face has no file at all is not noted here: that is the ordinary role fall-back, not a missing variant.
-pub fn note_missing_face_variants(theme: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
-	note_missing_variants_for_levels(theme, faces, skips);
-	note_missing_face_variants_in(theme, blocks, faces, skips);
+/// no file for -- so a bold or italic heading falling back to Regular is visible rather than silent -- at
+/// the declaration that named the face ([`FaceSites`]). Checks the root theme's own levels, then descends
+/// every scoped or box subtree, folding its patch onto the theme in force at that point (mirroring the
+/// merge [`Theme::apply`] performs) so a rule- or chapter-scoped face is checked with the same weight/italic
+/// the renderer would set, not only the root's own. A level whose face has no file at all is not noted
+/// here: that is the ordinary role fall-back, not a missing variant.
+pub fn note_missing_face_variants(
+	theme:	&Theme,
+	blocks:	&[Block],
+	faces:	&FaceResolver,
+	sites:	&FaceSites,
+	skips:	&mut lang::Refusals,
+)
+{
+	note_missing_variants_for_levels(theme, faces, sites, skips);
+	note_missing_face_variants_in(theme, blocks, faces, sites, skips);
 }
 
 /// The per-level check [`note_missing_face_variants`] runs at the root and, folded onto a scope's merged
 /// theme, at every scoped or box subtree.
-fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: &mut lang::Refusals) {
+fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, sites: &FaceSites, skips: &mut lang::Refusals) {
 	for (i, l) in theme.heading.levels.iter().enumerate() {
 		let name = match l.face.as_deref().or(theme.heading.face.as_deref()) {
 			Some(n)	=> n,
@@ -220,9 +298,9 @@ fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: 
 				(false, true)	=> "italic",
 				(false, false)	=> "regular",
 			};
-			skips.record(
-				&fmt!("heading face {:?} level {}: no {} file, set in Regular", name, i + 1, slant),
-				crate::ir::Span::new(0, 0));
+			let (file, span) = sites.site_of(name);
+			skips.record_stand_in_in(file, &fmt!("heading face {:?} level {}", name, i + 1), span,
+				lang::RefusalClass::Unusable, &fmt!("has no {} file, so it is set in Regular", slant));
 		}
 	}
 }
@@ -230,22 +308,29 @@ fn note_missing_variants_for_levels(theme: &Theme, faces: &FaceResolver, skips: 
 /// Descends every [`Block::Scoped`]/[`Block::Box`] subtree, folding its patch onto `parent` (the theme in
 /// force at that point) before checking the merged levels and recursing, so a nested scope's own patch
 /// folds onto its immediate parent's, not the document root's.
-fn note_missing_face_variants_in(parent: &Theme, blocks: &[Block], faces: &FaceResolver, skips: &mut lang::Refusals) {
+fn note_missing_face_variants_in(
+	parent:	&Theme,
+	blocks:	&[Block],
+	faces:	&FaceResolver,
+	sites:	&FaceSites,
+	skips:	&mut lang::Refusals,
+)
+{
 	for b in blocks {
 		match b {
 			Block::Scoped { patch, blocks }	=> {
 				let mut scoped = parent.clone();
 				scoped.apply(patch);
-				note_missing_variants_for_levels(&scoped, faces, skips);
-				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+				note_missing_variants_for_levels(&scoped, faces, sites, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, sites, skips);
 			},
 			Block::Box { patch, blocks, .. }	=> {
 				let mut scoped = parent.clone();
 				scoped.apply(patch);
-				note_missing_variants_for_levels(&scoped, faces, skips);
-				note_missing_face_variants_in(&scoped, blocks, faces, skips);
+				note_missing_variants_for_levels(&scoped, faces, sites, skips);
+				note_missing_face_variants_in(&scoped, blocks, faces, sites, skips);
 			},
-			Block::Place { blocks, .. }			=> note_missing_face_variants_in(parent, blocks, faces, skips),
+			Block::Place { blocks, .. }			=> note_missing_face_variants_in(parent, blocks, faces, sites, skips),
 			_							=> {},
 		}
 	}
@@ -273,10 +358,8 @@ pub fn lone_font_dir(root_dir: &Path) -> PathBuf {
 }
 
 /// Where an injected project font must sit for the lone-file [`face_resolver`] to discover it: the
-/// resolver's [`lone_font_dir`] joined with the font file's own basename, so `Radley-Regular.otf` injected
-/// under any path is found as the `Radley` face's Regular variant. `None` when `given` has no file name.
-/// The resolver keys a face on its `<Family>-<Variant>.{ttf,otf}` basename and the family name a document
-/// declares (a heading face), so the injected file's basename must follow that convention to be usable.
+/// resolver's [`lone_font_dir`] joined with the font file's own basename. `None` when `given` has no file
+/// name.
 pub fn project_font_path(main_path: &Path, given: &Path) -> Option<PathBuf> {
 	let root_dir = main_path.parent().unwrap_or(main_path);
 	given.file_name().map(|name| lone_font_dir(root_dir).join(name))
@@ -302,32 +385,113 @@ pub fn load(root_path: &Path) -> Outcome<BookSpec> {
 	};
 	let root_src = match vfs::read_to_string(root_path) {
 		Ok(s)	=> s,
+		Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(e,
+			"The book root {:?} is not valid UTF-8 text.", root_path; File, Decode, UTF8)),
 		Err(e)	=> return Err(err!(e, "Could not read the book root {:?}.", root_path; File, Read)),
 	};
 
 	// Install the book's `term-dict` and `term-defs` from a `terms.typ` beside or above the root: the
 	// dictionary so the glossary family resolves each key to its value as the chapters are read, and the
 	// definitions so a `#print-glossary()` can be filled once the document's used terms are known.
-	res!(install_term_dict(&root_dir));
-	res!(install_term_defs(&root_dir));
+	let mut skips = lang::Refusals::default();
+	res!(install_terms(&root_dir, &mut skips));
 
 	// A `config.typ` beside the root marks the book (`format`-switch) idiom; without it, the root sets its
 	// page through the shared `template.typ` and the `doc.with` call, which is the documentation idiom.
 	let config_path = root_dir.join("config.typ");
 	if !vfs::exists(&config_path) {
-		return load_doc(root_path, &root_dir, &root_src);
+		return load_doc(root_path, &root_dir, &root_src, skips);
 	}
-	load_book(root_path, &root_dir, &root_src)
+	load_book(root_path, &root_dir, &root_src, skips)
+}
+
+/// Reads a file an idiom looks for but does not require -- a `terms.typ`, a `template.typ`, a `refs.bib`
+/// found beside a chapter. `None` when it is not there, as the idiom allows; `None` with a site recorded
+/// when it is there but will not read, so what it held is never dropped without a trace. `stand_in` says
+/// what the document is set with instead.
+fn read_found(path: &Path, stand_in: &str, skips: &mut lang::Refusals) -> Option<String> {
+	if !vfs::exists(path) {
+		return None;
+	}
+	match vfs::read_to_string(path) {
+		Ok(s)	=> Some(s),
+		Err(e)	=> {
+			let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().to_string());
+			let file = path.display().to_string();
+			if vfs::is_not_utf8(&e) {
+				skips.record_stand_in_in(&file, &name, Span::new(0, 0), lang::RefusalClass::Encoding,
+					&fmt!("is not valid UTF-8 text, so {}", stand_in));
+			} else {
+				skips.record_stand_in_in(&file, &name, Span::new(0, 0), lang::RefusalClass::Unusable,
+					&fmt!("will not read ({}), so {}", e, stand_in));
+			}
+			None
+		},
+	}
+}
+
+/// The span of the first `name:` field in `src`, where [`string_field`] reads it, to charge a site to the
+/// field that named what could not be had.
+fn field_span(src: &str, name: &str) -> Span {
+	let at = find_live(src, &fmt!("{}:", name)).unwrap_or(0) as u32;
+	Span::new(at, at)
+}
+
+/// The byte offset of the first `needle` in `src` a reader would meet: not in a comment or raw text, and,
+/// for a needle that opens with a name, such as a `title:` field, not the tail of a longer name, so
+/// `title:` is never found inside `subtitle:`. Every field, setting and binding the front matter, the
+/// config and the template are read by is found this way, and its value then read from `src` itself.
+fn find_live(src: &str, needle: &str) -> Option<usize> {
+	let live	= lang::lex::live_text(src);
+	let named	= needle.chars().next().map_or(false, is_name_char);
+	let mut from	= 0usize;
+	while let Some(rel) = live[from..].find(needle) {
+		let at = from + rel;
+		if !named || live[..at].chars().next_back().map_or(true, |c| !is_name_char(c)) {
+			return Some(at);
+		}
+		from = at + needle.len();
+	}
+	None
+}
+
+/// Can `c` stand in a Typst name, a field's or a binding's?
+fn is_name_char(c: char) -> bool {
+	c.is_alphanumeric() || c == '-' || c == '_'
+}
+
+/// Places each image the front matter draws at the field that names it: a book's cover in its config's
+/// `cover-image-path`, and the logos in the root's template application, so a stand-in set in an image's
+/// place is charged there.
+fn place_front_images(
+	fm:			&mut FrontMatter,
+	root_file:	&str,
+	root_src:	&str,
+	config:		Option<(&str, &str)>,	// the config's path and source, for a book
+)
+{
+	let root	= Arc::<str>::from(root_file);
+	let at		= |name: &str| crate::ir::Site::new(&root, field_span(root_src, name));
+	if let Some((config_file, config_src)) = config {
+		let c	= find_live(config_src, "cover-image-path").unwrap_or(0) as u32;
+		fm.sites.cover = crate::ir::Site::new(&Arc::from(config_file), Span::new(c, c));
+	}
+	fm.sites.logo			= at("title-logo-path");
+	fm.sites.top_logo		= at("title-top-logo-path");
+	fm.sites.bottom_logo	= at("title-bottom-logo-path");
+	fm.sites.footer_logo	= at("footer-left-logo-path");
 }
 
 /// The book (`format`-switch) path: reads the `config.typ` beside the root, loads the shared Libertinus
 /// faces by path from the project assets tree, and follows the root's includes into one block stream.
-fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
+fn load_book(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::Refusals) -> Outcome<BookSpec> {
 	// The config sits beside the root; the assets tree is one level up (the project root), holding the
 	// Libertinus directory both books share.
 	let config_path	= root_dir.join("config.typ");
 	let config_src	= match vfs::read_to_string(&config_path) {
 		Ok(s)	=> s,
+		Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(e,
+			"The book config {:?} is not valid UTF-8 text.", config_path; File, Decode, UTF8)),
 		Err(e)	=> return Err(err!(e, "Could not read the book config {:?}.", config_path; File, Read)),
 	};
 	let project_dir = match root_dir.parent() {
@@ -355,40 +519,46 @@ fn load_book(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookS
 	// tallied as a skipped construct.
 	let scope = collect_scope(root_src, root_dir, style.text.body_size);
 	let binds = scope.bindings();
-	// The book config's `media` (and any other guard scalar) reaches the assembler here, so a chapter's
-	// `#if media == "..."` include guard follows only its taken branch.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, &config_src));
+	// The book config's `media` (and any other guard scalar) reaches a conditional through the `#import` of
+	// the config its file makes, so a chapter's `#if media == "..."` include guard follows only its taken branch.
+	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds));
+	let Gathered { skips: walked, doc_info, faces: chapter_faces } = got;
+	skips.merge(walked);
+	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree here, BEFORE the face resolver is built: a rule
 	// that names a heading face wraps its matched elements in a scope carrying that face, and the resolver's
 	// face union descends into those scopes -- so a rule-named face must already be on the tree when the
 	// union is taken. The default rules re-assert the theme's own heading sizes (byte-neutral); the root's
 	// own `#show <selector>: <transform>` rules are appended, refused where a transform reads the page or
 	// patches a field the renderer does not read.
-	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	let rules = lang::rules::rule_set_for(&style, root_src, &root_file, &mut skips);
 	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver is built from every heading face the document can name -- the root theme's, and every
 	// name a scoped or box subtree's patch introduces -- so a face a chapter or a rule names still loads,
 	// not only the root's own. A note is recorded where a heading asks for a weight or slant the book ships
-	// no file for.
+	// no file for, at the declaration that named the face.
 	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
 	let (bodies, headings) = named_families(&style, &blocks);
 	res!(faces.require(&assets_fonts, &bodies, &headings));
-	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
+	let sites = FaceSites::new(&root_file, root_src, &rules, chapter_faces);
+	note_missing_face_variants(&style, &blocks, &faces, &sites, &mut skips);
 	// A book root may also place a `#print-glossary()`; fill it in place once its chapters are assembled.
 	resolve_glossary(&mut blocks, false);
 	let title		= content_field(root_src, "title").unwrap_or_default();
-	let front		= read_front_matter(root_src, &config_src, &title);
+	let mut front	= read_front_matter(root_src, &config_src, &title);
+	let config_file	= config_path.display().to_string();
+	place_front_images(&mut front, &root_file, root_src, Some((&config_file, &config_src)));
 
 	// The bibliography the root names, if any: parse it, mark every key the body cited, and append the
 	// Chicago reference list as back matter. The marked bibliography then resolves each in-text `#cite`.
-	let bib = res!(load_bibliography(root_src, &project_dir, &mut blocks));
+	let bib = res!(load_bibliography(root_src, &root_file, &project_dir, &mut blocks, &mut skips));
 
 	// The glossary and index back matter the root's `meta-data.glossary`/`meta-data.index` flags ask for,
 	// after the bibliography and gated on the body actually carrying the content -- a book that sets a flag
 	// but uses no glossary or index term emits neither section, matching the template's own gate.
 	append_flag_back_matter(root_src, &mut blocks);
 
-	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib, skips, doc_info })
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -427,8 +597,12 @@ fn ai_declaration_mark(slug: &str) -> Option<(String, String)> {
 /// from those two sources; the body font is the embedded Libertinus, which is the doc body and heading
 /// family both (a doc heading is Libertinus bold, so no separate display face is loaded); and the
 /// includes are followed exactly as for a book. A field the tree omits keeps a readable default.
-fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSpec> {
-	let (geom, raw, opener)	= res!(read_doc_config(root_dir, root_src));
+fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str, mut skips: lang::Refusals) -> Outcome<BookSpec> {
+	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm and the
+	// template's own defaults, and one that will not read is reported.
+	let template = read_found(&root_dir.join("template.typ"), "the page and type defaults stand in for it", &mut skips)
+		.unwrap_or_default();
+	let (geom, raw, opener)	= res!(read_doc_config(&template, root_src));
 	let mut style	= build_style(&raw);
 	// The doc root's own `#show: doc.with(...)` application (and any lowerable top-level `#set`) lowers
 	// onto the theme; its per-format type scale is read from the config by `read_doc_config` above.
@@ -462,24 +636,27 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 	};
 	let scope = collect_scope(root_src, root_dir, style.text.body_size);
 	let binds = scope.bindings();
-	// The documentation idiom carries no `config.typ`, so the guard evaluator sees an empty config and
-	// falls back to each file's own `#let` bindings; a doc tree writing no include guard is unaffected.
-	let (mut blocks, mut skips)	= res!(assemble(root_src, root_dir, root_path, binds, ""));
+	let (mut blocks, got)	= res!(assemble(root_src, root_dir, root_path, binds));
+	let Gathered { skips: walked, doc_info, faces: chapter_faces } = got;
+	skips.merge(walked);
+	let root_file = root_path.display().to_string();
 	// The styling rule engine runs over the assembled tree before the resolver is built, so a rule-named
 	// face is in the union the resolver loads (see `load_book` for the same seam and why it sits here).
-	let rules = lang::rules::rule_set_for(&style, root_src, &mut skips);
+	let rules = lang::rules::rule_set_for(&style, root_src, &root_file, &mut skips);
 	lang::rules::apply_rules(&mut blocks, &rules, geom.content_width());
 	// The resolver loads every heading face the document can name -- the root theme's and every scoped or
 	// box subtree's -- so a face a chapter names still loads; a heading asking for a weight/slant with no
-	// file is noted rather than silently set in Regular.
+	// file is noted rather than silently set in Regular, at the declaration that named the face.
 	let mut faces = FaceResolver::load(&assets_fonts, &all_face_names(&style, &blocks));
 	let (bodies, headings) = named_families(&style, &blocks);
 	res!(faces.require(&assets_fonts, &bodies, &headings));
-	note_missing_face_variants(&style, &blocks, &faces, &mut skips);
+	let sites = FaceSites::new(&root_file, root_src, &rules, chapter_faces);
+	note_missing_face_variants(&style, &blocks, &faces, &sites, &mut skips);
 	// Fill each `#print-glossary()` placeholder with the Term/Definition table now the whole document's
 	// blocks are assembled and its used glossary terms known, before the word count and layout walk them.
 	resolve_glossary(&mut blocks, false);
-	let mut front	= read_doc_front_matter(root_dir, root_src, &raw, &title);
+	let mut front	= read_doc_front_matter(&template, root_src, &raw, &title);
+	place_front_images(&mut front, &root_file, root_src, None);
 
 	// The reading time the meta page appends to its notes cell: the whole-document word count over the
 	// template's 230 words/min, rounded up, matching its `calc.ceil(words.final() / avg_reading_speed)`.
@@ -488,7 +665,7 @@ fn load_doc(root_path: &Path, root_dir: &Path, root_src: &str) -> Outcome<BookSp
 
 	// A doc tree names its bibliography, glossary and index through raw Typst calls the reader skips, not
 	// the book's `meta-data.bibliography` field, so no reference back matter is assembled here.
-	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips })
+	Ok(BookSpec { geom, style, fonts, blocks, title, faces, front, bib: None, skips, doc_info })
 }
 
 /// Which level-1 opener idiom a doc template uses, read from its `show heading` block. A grid template
@@ -505,15 +682,13 @@ enum DocOpener {
 /// fixes uniform margins with a slightly deeper foot (`margins.a4 + 0.25cm`), matching its `set page`.
 /// Everything the tree does not state -- leading, paragraph spacing, heading sizes -- takes the Typst
 /// default the template inherits, so an unfamiliar doc root still assembles onto a readable A4 page.
-fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
-	// The template is symlinked in beside the root; a tree without it falls back to A4 at 2.5 cm.
-	let template = vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
+fn read_doc_config(template: &str, root_src: &str) -> Outcome<(PageGeometry, RawStyle, DocOpener)> {
 
-	let paper_name	= first_quoted_after(&template, "paper:").unwrap_or_else(|| "a4".to_string());
+	let paper_name	= first_quoted_after(template, "paper:").unwrap_or_else(|| "a4".to_string());
 	let (pw_mm, ph_mm)	= paper_dims_mm(&paper_name);
 
 	// The uniform margin: the `a4:` entry of the template's `#let margins = (...)` dictionary, a length.
-	let margin_pt	= let_dict_field(&template, "margins", "a4")
+	let margin_pt	= let_dict_field(template, "margins", "a4")
 		.and_then(|v| parse_len_pt(&v))
 		.unwrap_or(2.5 * 10.0 * MM_PER_PT);	// 2.5 cm default
 	let foot_extra	= 0.25 * 10.0 * MM_PER_PT;	// the template's `bottom: margins.a4 + 0.25cm`
@@ -529,7 +704,7 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 
 	// The body size the doc.with call sets, else the template's own `text-size: 11pt` default.
 	let body_pt	= first_len_after(root_src, "text-size:")
-		.or_else(|| first_len_after(&template, "text-size:"))
+		.or_else(|| first_len_after(template, "text-size:"))
 		.unwrap_or(11.0);
 
 	// The doc template inherits Typst's default leading (0.65 em) but its OWN paragraph spacing: the
@@ -549,7 +724,7 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 	// `show heading: it =>`, not the bare words: the banner template carries a `//` comment naming
 	// `show heading`/`set heading`, and matching that comment (with a `rows:` tuple anywhere after it) would
 	// misread the banner as a grid.
-	let head_tail	= template.find("show heading: it =>").map(|at| &template[at..]);
+	let head_tail	= find_live(template, "show heading: it =>").map(|at| &template[at..]);
 	let grid_rows	= head_tail.and_then(|t| tuple_after(t, "rows:")).filter(|r| r.len() >= 4);
 	let (opener, chap_grid, h1_pt, h2_pt, h3_pt, h4_pt) = match grid_rows {
 		Some(rows)	=> {
@@ -579,7 +754,7 @@ fn read_doc_config(root_dir: &Path, root_src: &str) -> Outcome<(PageGeometry, Ra
 /// colour, the two sidebar logos with their declared widths, the small-caps flag, and the footer logo --
 /// read from the `#show: doc.with(...)` call and the shared `template.typ`. A doc tree carries no imprint
 /// (no ISBN, publisher or copyright tuple), so only a title page and the contents are composed from this.
-fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title: &str) -> FrontMatter {
+fn read_doc_front_matter(template: &str, root_src: &str, raw: &RawStyle, title: &str) -> FrontMatter {
 	let subtitle	= content_field(root_src, "subtitle");
 	let meta		= meta_block(root_src).unwrap_or_default();
 	let author		= string_field(&meta, "authors").unwrap_or_default();
@@ -587,9 +762,8 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The AI scheme address the mark links to, `<scheme>/<slug>/<medium>`, read from the shared template's
 	// `ai-scheme-url` and `ai-medium` lets (the template's `link(ai-scheme-url + "/" + slug + "/" +
 	// ai-medium, ..)`). A tree without the template falls back to the scheme's permanent home and doc medium.
-	let template		= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
-	let ai_scheme_url	= first_quoted_after(&template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
-	let ai_medium		= first_quoted_after(&template, "ai-medium").unwrap_or_else(|| "doc".to_string());
+	let ai_scheme_url	= first_quoted_after(template, "ai-scheme-url").unwrap_or_else(|| "https://need2know.ai".to_string());
+	let ai_medium		= first_quoted_after(template, "ai-medium").unwrap_or_else(|| "doc".to_string());
 
 	// The revision rows the template's meta/colophon page draws: each row's version, date, notes, and the
 	// AI declaration whose slug picks the mark image, its caption (a `declaration-words` field rescopes the
@@ -627,8 +801,7 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 	// The sidebar width is `margins.title_page` in the shared template (a percentage of the page); the fill
 	// is the `title-colour` the call names, resolved to a grey level. A doc tree always draws the sidebar,
 	// so `sidebar_grey` is set here (marking the two-column idiom) even when the call omits its colour.
-	let template	= vfs::read_to_string(&root_dir.join("template.typ")).unwrap_or_default();
-	let sidebar_frac	= let_dict_field(&template, "margins", "title_page")
+	let sidebar_frac	= let_dict_field(template, "margins", "title_page")
 		.and_then(|v| parse_percent(&v))
 		.unwrap_or(0.45);
 	let colour_name	= string_field(root_src, "title-colour").unwrap_or_default();
@@ -673,6 +846,7 @@ fn read_doc_front_matter(root_dir: &Path, root_src: &str, raw: &RawStyle, title:
 		meta_rows,
 		reading_min:	None,	// set by `load_doc`, which has the body blocks to count
 		acknowledgement,
+		sites:			crate::doc::FrontSites::default(),	// placed by `load_doc` against the root's fields
 	}
 }
 
@@ -700,7 +874,15 @@ fn parse_percent(s: &str) -> Option<f64> {
 /// and appends the Bibliography back matter (a heading and the sorted, cited-only reference list) to the
 /// block stream. Returns the marked bibliography for the in-text citation formatter, or `None` when the
 /// book names no bibliography or the file cannot be read.
-fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+fn load_bibliography(
+	root_src:		&str,
+	root_file:		&str,
+	project_dir:	&Path,
+	blocks:			&mut Vec<Block>,
+	skips:			&mut lang::Refusals,
+)
+	-> Outcome<Option<Bibliography>>
+{
 	let meta = match meta_block(root_src) {
 		Some(m)	=> m,
 		None	=> return Ok(None),
@@ -715,7 +897,23 @@ fn load_bibliography(root_src: &str, project_dir: &Path, blocks: &mut Vec<Block>
 	let bib_path	= project_dir.join(rel);
 	let src = match vfs::read_to_string(&bib_path) {
 		Ok(s)	=> s,
-		Err(_)	=> return Ok(None),	// a named bibliography that will not read is a reported gap, not a failure
+		Err(e)	=> {
+			// Named but not had: the book is set without its reference list, and each citation as its keys,
+			// and the field that named the file is where that is charged.
+			let name	= fmt!("bibliography {:?}", path_str);
+			let span	= field_span(root_src, "bibliography");
+			if vfs::is_not_utf8(&e) {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::Encoding,
+					"is not valid UTF-8 text, so no reference list is set");
+			} else if vfs::exists(&bib_path) {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::Unusable,
+					&fmt!("will not read ({}), so no reference list is set", e));
+			} else {
+				skips.record_stand_in_in(root_file, &name, span, lang::RefusalClass::MissingFile,
+					"is not in the project, so no reference list is set");
+			}
+			return Ok(None);
+		},
 	};
 	let bib = res!(Bibliography::parse(&src));
 	Ok(Some(append_bibliography(bib, blocks)))
@@ -785,48 +983,24 @@ fn has_defined_glossary_terms(blocks: &[Block]) -> bool {
 	!ordered.is_empty()
 }
 
-/// Does the body carry at least one index marker anywhere -- in a heading, paragraph, list item, table cell
-/// or callout, or a footnote's own runs? The gate that keeps the index section from being set for a book
-/// that asks for one but marks no term.
+/// Does the body carry at least one index marker anywhere -- in a heading, a paragraph, a list item, a table
+/// cell, a caption, a callout or a footnote's own runs? The gate that keeps the index section from being set
+/// for a book that asks for one but marks no term, read from the one walk that lists what the document asks
+/// for, so a marker in any place a setter sets it counts.
 fn has_index_occurrences(blocks: &[Block]) -> bool {
-	blocks.iter().any(block_has_index)
-}
-
-/// Whether one block, or anything nested in it, carries an index marker segment.
-fn block_has_index(block: &Block) -> bool {
-	match block {
-		Block::Heading { segments, .. }		=> segments_have_index(segments),
-		Block::RichParagraph { segments }	=> segments_have_index(segments),
-		Block::List { items, .. }			=> items.iter().any(|it|
-			segments_have_index(&it.segments) || it.children.iter().any(block_has_index)),
-		Block::Table(t)						=> table_has_index(t),
-		Block::TableFigure { table, .. }	=> table_has_index(table),
-		Block::Box { blocks, .. }			=> blocks.iter().any(block_has_index),
-		Block::Scoped { blocks, .. }		=> blocks.iter().any(block_has_index),
-		Block::Place { blocks, .. }			=> blocks.iter().any(block_has_index),
-		_									=> false,
-	}
-}
-
-/// Whether a run of segments carries an index marker, descending into a footnote's own runs.
-fn segments_have_index(segments: &[Segment]) -> bool {
-	segments.iter().any(|seg| match seg {
-		Segment::Index { .. }		=> true,
-		Segment::Footnote { note }	=> segments_have_index(note),
-		_						=> false,
-	})
-}
-
-/// Whether any cell of a table carries an index marker.
-fn table_has_index(table: &Table) -> bool {
-	table.rows.iter().any(|row| row.cells.iter().any(|cell| segments_have_index(&cell.content)))
+	let mut asks = Vec::new();
+	crate::doc::asks_of(blocks, &mut asks);
+	asks.iter().any(|(_, what)| matches!(what, crate::doc::Asked::Index(_)))
 }
 
 /// Locates a `refs.bib` beside a lone chapter or in an ancestor directory, parses it, marks the keys the
 /// chapter cited, appends the reference list as back matter, and returns the marked bibliography so the
 /// block layer resolves each in-text `#cite` to Chicago author-year -- as a whole-book compile does.
-/// `None` when no `refs.bib` is found or it will not read, in which case the raw cite key stands as before.
-pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome<Option<Bibliography>> {
+/// `None` when no `refs.bib` is found, or when one is found that will not read, which is recorded in
+/// `skips`; each citation then stands as its key, and is reported where it is written.
+pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>, skips: &mut lang::Refusals)
+	-> Outcome<Option<Bibliography>>
+{
 	let start = match source.parent() {
 		Some(d)	=> d,
 		None	=> return Ok(None),
@@ -835,9 +1009,9 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 		Some(p)	=> p,
 		None	=> return Ok(None),
 	};
-	let src = match vfs::read_to_string(&bib_path) {
-		Ok(s)	=> s,
-		Err(_)	=> return Ok(None),	// a bibliography found but unreadable is a reported gap, not a failure
+	let src = match read_found(&bib_path, "no reference list is set", skips) {
+		Some(s)	=> s,
+		None	=> return Ok(None),
 	};
 	let bib = res!(Bibliography::parse(&src));
 	Ok(Some(append_bibliography(bib, blocks)))
@@ -847,31 +1021,25 @@ pub fn load_lone_bibliography(source: &Path, blocks: &mut Vec<Block>) -> Outcome
 // │ TERM DICTIONARY                                                            │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Reads the book's `term-dict` from a `terms.typ` beside or above `start_dir` and installs it, so the
-/// term-dictionary glossary family (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`) resolves each key to
-/// its value while the chapters are read. An absent or `term-dict`-less `terms.typ` installs an empty
-/// map, under which every key falls back to its own text.
-pub fn install_term_dict(start_dir: &Path) -> Outcome<()> {
-	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
-		None	=> String::new(),
+/// Reads the book's `terms.typ` beside or above `start_dir` and installs its `term-dict` and `term-defs`:
+/// the dictionary so the term-dictionary glossary family (`t`, `tcap`, `graw`, `g`, `gi`, `gcap`, `gcapi`)
+/// resolves each key to its value while the chapters are read, and the definitions so
+/// [`resolve_glossary`] can give each glossary term used in the document its definition row. An absent
+/// `terms.typ`, or one naming neither, installs empty maps, under which every key falls back to its own
+/// text and the glossary sets its header alone -- the same early return the template's style makes for an
+/// undefined key. One that is there but will not read is recorded in `skips` and installs the same.
+pub fn install_terms(start_dir: &Path, skips: &mut lang::Refusals) -> Outcome<()> {
+	let (src, file) = match find_up(start_dir, "terms.typ") {
+		Some(p)	=> (read_found(&p, "its terms are set as their keys", skips).unwrap_or_default(), p.display().to_string()),
+		None	=> (String::new(), String::new()),
 	};
 	res!(crate::lang::parse::set_term_dict(parse_term_dict(&src)));
-	Ok(())
-}
-
-/// Reads the book's `term-defs` from a `terms.typ` beside or above `start_dir` and installs it, so
-/// [`resolve_glossary`] can give each glossary term used in the document its definition row. An absent or
-/// `term-defs`-less `terms.typ` installs an empty map, under which every term contributes no row and the
-/// glossary sets its header alone -- the same early return the template's style makes for an undefined key.
-pub fn install_term_defs(start_dir: &Path) -> Outcome<()> {
-	let src = match find_up(start_dir, "terms.typ") {
-		Some(p)	=> vfs::read_to_string(&p).unwrap_or_default(),
-		None	=> String::new(),
-	};
+	// A definition's reference or citation is set in the glossary's table, and answered for at the file
+	// that defines it.
+	let site = crate::ir::Site::new(&Arc::from(file.as_str()), Span::default());
 	let mut defs: HashMap<String, Vec<Segment>> = HashMap::new();
 	for (key, content) in parse_term_defs(&src) {
-		defs.insert(key, lang::inline_segments(&content));
+		defs.insert(key, lang::inline_segments_in(&content, &site));
 	}
 	let mut guard = lock_write!(TERM_DEFS, "While recording the term definitions");
 	*guard = Some(defs);
@@ -901,7 +1069,10 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 		Some(a)	=> a,
 		None	=> return out,
 	};
-	let chars: Vec<char> = src[at..].chars().collect();
+	// The comments a term file carries between entries -- `// ...` banners, notes with a `)` or a quote in
+	// them -- are blanked as the lexer reads them, so none is read as part of the literal.
+	let text = lang::lex::uncommented(src);
+	let chars: Vec<char> = text[at..].chars().collect();
 	let n = chars.len();
 
 	// Advance to the opening parenthesis of the dictionary literal, then step past it.
@@ -915,30 +1086,9 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 	i += 1;
 
 	loop {
-		// Skip the whitespace, commas and comments between entries; stop at the closing parenthesis or the
-		// source end. Comments must be skipped whole: `terms.typ` carries `// ...` banners and notes between
-		// term groups, and a `)` inside one (a parenthetical aside) would otherwise read as the literal's
-		// closing parenthesis and truncate the parse -- which dropped half of Lucronics' 346 definitions.
-		loop {
-			while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
-				i += 1;
-			}
-			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '/' {
-				i += 2;
-				while i < n && chars[i] != '\n' {
-					i += 1;
-				}
-				continue;
-			}
-			if i + 1 < n && chars[i] == '/' && chars[i + 1] == '*' {
-				i += 2;
-				while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
-					i += 1;
-				}
-				i = (i + 2).min(n);
-				continue;
-			}
-			break;
+		// Skip the whitespace and commas between entries; stop at the closing parenthesis or the source end.
+		while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
+			i += 1;
 		}
 		if i >= n || chars[i] == ')' {
 			break;
@@ -962,8 +1112,11 @@ fn parse_term_defs(src: &str) -> Vec<(String, String)> {
 		}
 		// The value: a `[...]` content group is the definition; anything else is skipped to the next entry.
 		if i < n && chars[i] == '[' {
-			let (content, next) = read_content(&chars, i);
-			out.push((key, content));
+			// Read as Typst reads a content block: a quote in it is a character, and a `[` in its prose is
+			// balanced by a `]` there. One that never closes takes the rest of the literal.
+			let (content, next) = lang::parse::read_group(&chars, i)
+				.unwrap_or_else(|| (chars[i + 1..].iter().collect(), n));
+			out.push((key, content.trim().to_string()));
 			i = next;
 		} else {
 			// Not a content group: advance to the next top-level comma so the reader resynchronises.
@@ -1003,46 +1156,6 @@ fn read_string(chars: &[char], i: usize) -> (String, usize) {
 		j += 1;
 	}
 	(s, j)
-}
-
-/// Reads a `[...]` content group whose opening bracket sits at `i`, returning its inner source and the
-/// index just past the closing bracket. Brackets nested in the content (a `#emph[...]` inside a
-/// definition) are balanced, and a quoted string inside the content is skipped whole so a `]` within it
-/// does not close the group early.
-fn read_content(chars: &[char], i: usize) -> (String, usize) {
-	let mut depth	= 0i32;
-	let mut j		= i;
-	let mut inner	= String::new();
-	while j < chars.len() {
-		match chars[j] {
-			'['	=> {
-				depth += 1;
-				if depth > 1 {
-					inner.push('[');	// a nested opener is part of the content
-				}
-			},
-			']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					j += 1;
-					break;
-				}
-				inner.push(']');
-			},
-			'"'	=> {
-				// Copy the whole quoted string verbatim so a bracket inside it is not read as structure.
-				let (s, next) = read_string(chars, j);
-				inner.push('"');
-				inner.push_str(&s);
-				inner.push('"');
-				j = next;
-				continue;
-			},
-			c	=> inner.push(c),
-		}
-		j += 1;
-	}
-	(inner.trim().to_string(), j)
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1142,9 +1255,10 @@ fn replace_first_glossary(blocks: &mut [Block], table: Block) -> Result<(), Bloc
 }
 
 /// Walks one block's rich runs, recording each glossary term key on its first appearance -- in document
-/// order, deduplicated -- when the key carries a `term-defs` definition. Headings, paragraphs, list items
-/// and table cells all carry glossary terms, and a term inside a footnote counts as a use, so each is
-/// walked. A term with no definition is passed over, so the ordered set holds only rows the glossary sets.
+/// order, deduplicated -- when the key carries a `term-defs` definition. Headings, paragraphs, list items,
+/// table cells and captions all carry glossary terms, and a term inside a footnote counts as a use, so each
+/// is walked; the walk names every block, as [`crate::doc::asks_of`] does, so none is passed by a wildcard.
+/// A term with no definition is passed over, so the ordered set holds only rows the glossary sets.
 fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &mut Vec<String>) {
 	match block {
 		Block::Heading { segments, .. }			=> collect_from_segments(segments, seen, ordered),
@@ -1154,11 +1268,33 @@ fn collect_glossary_terms(block: &Block, seen: &mut HashSet<String>, ordered: &m
 			for child in &it.children { collect_glossary_terms(child, seen, ordered); }
 		},
 		Block::Table(t)							=> collect_from_table(t, seen, ordered),
-		Block::TableFigure { table, .. }		=> collect_from_table(table, seen, ordered),
+		// A figure's body comes before its caption, as Typst sets them.
+		Block::TableFigure { table, caption, .. } => {
+			collect_from_table(table, seen, ordered);
+			if let Some(c) = caption { collect_from_segments(c, seen, ordered); }
+		},
+		Block::ImageFigure { caption, .. }
+		| Block::CodeFigure { caption, .. }		=> if let Some(c) = caption { collect_from_segments(c, seen, ordered); },
 		Block::Box { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		Block::Scoped { blocks, .. }			=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
 		Block::Place { blocks, .. }				=> for b in blocks { collect_glossary_terms(b, seen, ordered); },
-		_										=> {},
+		// These carry no glossary run: plain words, verbatim code, a display equation, a figure the engine
+		// draws, the back matter it composes, images, spacing and breaks, and placeholders.
+		Block::Paragraph { .. }
+		| Block::Code { .. }
+		| Block::Equation { .. }
+		| Block::Figure { .. }
+		| Block::BackMatterHeading { .. }
+		| Block::Reference { .. }
+		| Block::Rule { .. }
+		| Block::Image { .. }
+		| Block::SectionBanner { .. }
+		| Block::Glossary
+		| Block::Index
+		| Block::ClaimIndex
+		| Block::Space(_)
+		| Block::PageBreak { .. }
+		| Block::ColBreak { .. }				=> {},
 	}
 }
 
@@ -1172,7 +1308,7 @@ fn collect_from_segments(segments: &[Segment], seen: &mut HashSet<String>, order
 					ordered.push(term.clone());
 				}
 			},
-			Segment::Footnote { note }		=> collect_from_segments(note, seen, ordered),
+			Segment::Footnote { note, .. }	=> collect_from_segments(note, seen, ordered),
 			_								=> {},
 		}
 	}
@@ -1201,7 +1337,10 @@ fn parse_term_dict(src: &str) -> HashMap<String, String> {
 		Some(a)	=> a,
 		None	=> return map,
 	};
-	let chars: Vec<char> = src[at..].chars().collect();
+	// A comment inside the literal is blanked as the lexer reads it, so a quoted word or a `)` in one
+	// neither shifts the pairs nor ends the literal.
+	let text = lang::lex::uncommented(src);
+	let chars: Vec<char> = text[at..].chars().collect();
 
 	// Advance to the opening parenthesis of the dictionary literal.
 	let mut i = 0;
@@ -1256,8 +1395,9 @@ fn parse_term_dict(src: &str) -> HashMap<String, String> {
 /// non-whitespace character after it is `=`. Skips a mention of the name in a comment or another context
 /// (say `// name: ...`), returning the first true assignment, or `None` when there is none.
 fn assignment_offset(src: &str, name: &str) -> Option<usize> {
-	let mut from = 0;
-	while let Some(rel) = src[from..].find(name) {
+	let live		= lang::lex::live_text(src);
+	let mut from	= 0;
+	while let Some(rel) = live[from..].find(name) {
 		let at		= from + rel;
 		let after	= at + name.len();
 		let rest	= src[after..].trim_start();
@@ -1292,43 +1432,15 @@ fn find_up(start: &Path, name: &str) -> Option<PathBuf> {
 
 /// Gathers the citation keys the body's blocks carry, in document order, so each can be marked cited.
 fn collect_cite_keys(blocks: &[Block]) -> Vec<Vec<String>> {
-	let mut out = Vec::new();
-	for block in blocks {
-		match block {
-			Block::RichParagraph { segments }	=> collect_cite_segments(segments, &mut out),
-			Block::List { items, .. }			=> for item in items {
-				collect_cite_segments(&item.segments, &mut out);
-				out.extend(collect_cite_keys(&item.children));
-			},
-			Block::Box { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
-			Block::Scoped { blocks, .. }		=> out.extend(collect_cite_keys(blocks)),
-			Block::Place { blocks, .. }			=> out.extend(collect_cite_keys(blocks)),
-			// A table cell is set through the body's own segment pipeline, so a `#cite` in a cell renders and
-			// must be marked cited too, or its work would render but its reference vanish from the list.
-			Block::Table(t)						=> collect_cite_from_table(t, &mut out),
-			Block::TableFigure { table, .. }	=> collect_cite_from_table(table, &mut out),
-			_									=> {},
-		}
-	}
-	out
-}
-
-/// Pushes the keys of every citation in any cell of a table onto `out`.
-fn collect_cite_from_table(table: &Table, out: &mut Vec<Vec<String>>) {
-	for row in &table.rows {
-		for cell in &row.cells {
-			collect_cite_segments(&cell.content, out);
-		}
-	}
-}
-
-/// Pushes the keys of every citation segment in `segments` onto `out`.
-fn collect_cite_segments(segments: &[Segment], out: &mut Vec<Vec<String>>) {
-	for seg in segments {
-		if let Segment::Cite(keys) = seg {
-			out.push(keys.clone());
-		}
-	}
+	// Every citation the document sets, wherever it is written -- a paragraph, a list, a cell, a caption, a
+	// heading or a footnote -- read from the one walk that lists what the document asks for, so a work cited
+	// only in a caption or a note is listed too.
+	let mut asks = Vec::new();
+	crate::doc::asks_of(blocks, &mut asks);
+	asks.into_iter().filter_map(|(_, what)| match what {
+		crate::doc::Asked::Cite(keys)	=> Some(keys),
+		_								=> None,
+	}).collect()
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1404,128 +1516,45 @@ fn read_front_matter(root_src: &str, config_src: &str, title: &str) -> FrontMatt
 		meta_rows:			Vec::new(),
 		reading_min:		None,
 		acknowledgement:	None,
+		sites:				crate::doc::FrontSites::default(),	// placed by `load_book` against the root's fields
 	}
 }
 
-/// The inner text of the root's `meta-data: ( ... )` argument, balanced across nested groups and
-/// strings, or `None` when the root sets no `meta-data`.
+/// The inner text of the root's `meta-data: ( ... )` argument, read as code, or `None` when the root sets
+/// no `meta-data`.
 fn meta_block(src: &str) -> Option<String> {
-	let at		= src.find("meta-data:")?;
-	let rest	= &src[at + "meta-data:".len()..];
-	let open	= rest.find('(')?;
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= open;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> depth += 1,
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(rest[open + 1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let Some(at)	= find_live(src, "meta-data:") else { return None; };
+	let rest		= &src[at + "meta-data:".len()..];
+	rest.find('(').and_then(|open| group_inner(&rest[open..]))
 }
 
-/// Splits a `meta-data` block into its revision rows: the text inside each top-level parenthesised tuple,
-/// in source order. Nested parentheses and strings are respected, so a row whose value carries a comma or
-/// a bracket is not split early. A block with no nested tuple (a bare single row) yields no rows.
+/// Splits a `meta-data` block into its revision rows: the text inside each parenthesised tuple the block
+/// lists, in source order, read as code, so a row whose value carries a comma, a bracket or a comment is
+/// not split early, and a tuple a comment holds is none. A block with no nested tuple (a bare single row)
+/// yields no rows.
 fn meta_rows(block: &str) -> Vec<String> {
-	let bytes	= block.as_bytes();
-	let mut rows:	Vec<String>	= Vec::new();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut start	= 0usize;
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> {
-				if depth == 0 { start = i + 1; }
-				depth += 1;
-			},
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					rows.push(block[start..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	rows
+	lang::lex::top_parens(block).into_iter().map(|(a, b)| block[a + 1..b - 1].to_string()).collect()
 }
 
 /// The string a `name: "..."` field binds: the first `"..."` in the field's value, which runs to the
 /// next top-level comma (a comma inside the string does not end it). `None` when the value holds no
 /// string literal -- a `name: none` reads as absent -- so a later field's value is never read by mistake.
 fn string_field(src: &str, name: &str) -> Option<String> {
-	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
-	let rest	= &src[at + needle.len()..];
-	// Bound the value at the next depth-zero comma, respecting strings, so the search stays in this field.
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut end		= rest.len();
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'					=> in_str = true,
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_					=> {},
-		}
-		i += 1;
-	}
-	first_quoted(&rest[..end])
+	let needle		= fmt!("{}:", name);
+	let Some(at)	= find_live(src, &needle) else { return None; };
+	let rest		= &src[at + needle.len()..];
+	// The value runs to the next comma at its own level, read as code, so the search stays in this field.
+	first_quoted(&rest[..lang::lex::top_comma(rest)])
 }
 
 /// The `Copyright © YEAR HOLDER. NOTICE` line the template composes from the `copyright: (year, [holder],
 /// notice)` tuple, or `None` when the book sets no copyright tuple.
 fn copyright_line(meta: &str) -> Option<String> {
-	let at		= meta.find("copyright:")?;
-	let rest	= &meta[at + "copyright:".len()..];
-	let open	= rest.find('(')?;
+	let Some(at)	= find_live(meta, "copyright:") else { return None; };
+	let rest		= &meta[at + "copyright:".len()..];
 	// The tuple's three parts: a year string, a `[holder]` content, and a notice string.
-	let inner	= balanced_parens(&rest[open..])?;
-	let parts	= split_top(&inner);
+	let Some(inner)	= rest.find('(').and_then(|open| group_inner(&rest[open..])) else { return None; };
+	let parts		= lang::parse::split_top_args(&inner);
 	if parts.is_empty() {
 		return None;
 	}
@@ -1535,65 +1564,11 @@ fn copyright_line(meta: &str) -> Option<String> {
 	Some(fmt!("Copyright © {} {}. {}", year.trim(), holder.trim(), notice.trim()))
 }
 
-/// The contents of a `(...)` at the start of `s`, balanced across nesting and strings.
-fn balanced_parens(s: &str) -> Option<String> {
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut in_str	= false;
-	let mut esc		= false;
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		let c = bytes[i] as char;
-		if in_str {
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			i += 1;
-			continue;
-		}
-		match c {
-			'"'	=> in_str = true,
-			'('	=> depth += 1,
-			')'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
-}
-
-/// Splits `s` at its top-level commas, respecting nesting and strings.
-fn split_top(s: &str) -> Vec<String> {
-	let mut out:	Vec<String>	= Vec::new();
-	let mut cur					= String::new();
-	let mut depth				= 0i32;
-	let mut in_str				= false;
-	let mut esc					= false;
-	for c in s.chars() {
-		if in_str {
-			cur.push(c);
-			if esc			{ esc = false; }
-			else if c == '\\'	{ esc = true; }
-			else if c == '"'	{ in_str = false; }
-			continue;
-		}
-		match c {
-			'"'					=> { in_str = true; cur.push(c); },
-			'(' | '[' | '{'		=> { depth += 1; cur.push(c); },
-			')' | ']' | '}'		=> { depth -= 1; cur.push(c); },
-			',' if depth == 0	=> out.push(std::mem::take(&mut cur)),
-			_					=> cur.push(c),
-		}
-	}
-	if !cur.trim().is_empty() {
-		out.push(cur);
-	}
-	out
+/// The inside of the group `s` opens with, a `(`, `[` or `{` read as code: its strings, content blocks,
+/// comments and raw text are what Typst reads them as, so a delimiter in one does not close it. `None`
+/// when it never closes.
+fn group_inner(s: &str) -> Option<String> {
+	lang::lex::group_end(s, 0).map(|end| s[1..end - 1].to_string())
 }
 
 /// Reads a tuple part as a plain string: a `"..."` literal unquoted, or a `[...]` content flattened.
@@ -1611,7 +1586,7 @@ fn unquote_or_content(part: &str) -> String {
 /// Whether a `name: true` boolean field is set true.
 fn bool_field(src: &str, name: &str) -> bool {
 	let needle	= fmt!("{}:", name);
-	match src.find(&needle) {
+	match find_live(src, &needle) {
 		Some(at)	=> {
 			let rest	= &src[at + needle.len()..];
 			let end		= rest.find(',').unwrap_or(rest.len());
@@ -1626,7 +1601,7 @@ fn bool_field(src: &str, name: &str) -> bool {
 /// default for the `auto` case.
 fn tri_bool(src: &str, name: &str) -> Option<bool> {
 	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	let end		= rest.find(',').unwrap_or(rest.len());
 	let val		= rest[..end].trim();
@@ -1666,30 +1641,13 @@ fn clean_content(s: &str) -> String {
 }
 
 /// The text of a `name: [ ... ]` content field in the root's template call -- the book title, say --
-/// with the surrounding brackets dropped and inner whitespace trimmed. Bracket-balanced, so a nested
-/// group does not close it early.
+/// with the surrounding brackets dropped and inner whitespace trimmed. Read as Typst reads a content block,
+/// so a nested group, an escaped bracket or one in raw text or a comment does not close it early.
 fn content_field(src: &str, name: &str) -> Option<String> {
-	let needle	= fmt!("{}:", name);
-	let at		= src.find(&needle)?;
-	let rest	= &src[at + needle.len()..];
-	let open	= rest.find('[')?;
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= open;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'['	=> depth += 1,
-			b']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(rest[open + 1..i].trim().to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let needle		= fmt!("{}:", name);
+	let Some(at)	= find_live(src, &needle) else { return None; };
+	let rest		= &src[at + needle.len()..];
+	rest.find('[').and_then(|open| group_inner(&rest[open..])).map(|inner| inner.trim().to_string())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -1733,7 +1691,9 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	// The template chain the main source imports: builds the palette and collects furniture, content and
 	// scalar bindings (the `#aside-box` furniture, the `#greet` content binding, a `#let title = "..."`
 	// scalar, the palette they resolve against).
-	for line in main_src.lines() {
+	// An `#import` or `#include` a comment holds, a raw block shows or a body holds is not followed.
+	let main_top = top_live_lines(main_src);
+	for line in &main_top {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(rel) = first_quoted(rest) {
@@ -1744,15 +1704,16 @@ pub fn collect_scope(main_src: &str, main_dir: &Path, body_size: Sp) -> Scope {
 	// The main source's own definitions, and each included chapter's (pr-note), with the palette now in hand.
 	lang::rules::collect_palette(main_src, &mut palette);
 	lang::rules::collect_template_fns(main_src, body_size, &palette, &mut tfns);
-	lang::rules::collect_content_fns(main_src, &mut cfns);
+	lang::rules::collect_content_fns(main_src, Some(main_dir), &mut cfns);
 	lang::rules::collect_scalar_fns(main_src, &mut sfns);
-	for line in main_src.lines() {
+	for line in &main_top {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#include") {
 			if let Some(rel) = first_quoted(rest) {
-				if let Ok(src) = vfs::read_to_string(&main_dir.join(&rel)) {
+				let path = main_dir.join(&rel);
+				if let Ok(src) = vfs::read_to_string(&path) {
 					lang::rules::collect_template_fns(&src, body_size, &palette, &mut tfns);
-					lang::rules::collect_content_fns(&src, &mut cfns);
+					lang::rules::collect_content_fns(&src, path.parent(), &mut cfns);
 					lang::rules::collect_scalar_fns(&src, &mut sfns);
 				}
 			}
@@ -1776,17 +1737,10 @@ fn walk_template_imports(
 	depth:		u32,
 )
 {
-	if depth > 4 || rel.starts_with('@') {
-		return;
-	}
-	let path = dir.join(rel);
-	let src = match vfs::read_to_string(&path) {
-		Ok(s)	=> s,
-		Err(_)	=> return,
-	};
+	let Some((path, src)) = lang::resolve_import(dir, rel, depth) else { return; };
 	let next_dir = path.parent().unwrap_or(dir);
 	// Imports first, so a palette, furniture or binding this file depends on is collected before its own.
-	for line in src.lines() {
+	for line in &top_live_lines(&src) {
 		let t = line.trim_start();
 		if let Some(rest) = t.strip_prefix("#import") {
 			if let Some(inner_rel) = first_quoted(rest) {
@@ -1796,7 +1750,7 @@ fn walk_template_imports(
 	}
 	lang::rules::collect_palette(&src, palette);
 	lang::rules::collect_template_fns(&src, body_size, palette, tfns);
-	lang::rules::collect_content_fns(&src, cfns);
+	lang::rules::collect_content_fns(&src, Some(next_dir), cfns);
 	lang::rules::collect_scalar_fns(&src, sfns);
 }
 
@@ -1810,25 +1764,25 @@ fn walk_template_imports(
 const MAX_INCLUDE_DEPTH: u32 = 64;
 
 /// One open `#if` include guard on the assembler's stack while it walks a file's lines. `live` records
-/// that this guard actually decides emission: its parent branch was being kept, and its condition was one
-/// the evaluator could resolve. A guard nested inside a dropped branch, or one whose form was refused, is
-/// not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else` tracks which of
-/// the two branches the walk is currently inside.
+/// that this guard actually decides emission: its parent branch was being kept. A guard nested inside a
+/// dropped branch is not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else`
+/// tracks which of the two branches the walk is currently inside.
 ///
 /// `state` is the guard's own bracket balance, seeded from its opener line so it starts at depth one: a
 /// lone `]` deeper inside the branch (a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer) is then told
 /// apart from the guard's own matching closer by depth alone, rather than by line text -- the marker-based
 /// extent this replaces treated any bare `]` line as the guard's end, following both branches once one
-/// closed early and leaking the markers and the truncated tail as prose. `refused` marks a guard pushed
-/// only to keep this bracket balance for an unsupported form already reported at its opener, so the
-/// balance reaching zero on an ordinary body line (its own closer, not the guard's `]`/`else` shape) is not
-/// reported a second time.
+/// closed early and leaking the markers and the truncated tail as prose.
+///
+/// A taken branch is a content block, so its `#set` rules govern it, from the rule down, and the files it
+/// includes, as Typst scopes them. `marks` holds each such rule's place in the blocks and its text, and
+/// [`close_branch`] wraps the blocks from there to the branch's end in a scope carrying what it lowers to.
 struct GuardFrame {
 	live:		bool,
 	then_taken:	bool,
 	in_else:	bool,
-	refused:	bool,
-	state:		lang::parse::SkipState,
+	state:		lang::lex::Lexer,
+	marks:		Vec<(usize, String)>,	// each `#set` of the branch taken: the block it governs from, and its text
 }
 
 impl GuardFrame {
@@ -1837,6 +1791,19 @@ impl GuardFrame {
 	/// and the else-branch when it did not.
 	fn emits(&self) -> bool {
 		self.live && (self.then_taken != self.in_else)
+	}
+}
+
+/// Closes a guard's taken branch: the blocks standing from each `#set` the branch made to its end are
+/// wrapped in a scope carrying what that rule lowers to, the last rule's scope innermost. A rule that lowers
+/// to nothing wraps nothing, and is refused where the reader reads it.
+fn close_branch(marks: Vec<(usize, String)>, blocks: &mut Vec<Block>) {
+	for (from, text) in marks.into_iter().rev() {
+		let patch = lang::set::lower_declarations(&text);
+		if patch != ThemePatch::default() && from <= blocks.len() {
+			let tail = blocks.split_off(from);
+			blocks.push(Block::Scoped { patch, blocks: tail });
+		}
 	}
 }
 
@@ -1849,68 +1816,21 @@ fn guard_open(marker: &str) -> Option<&str> {
 	Some(cond.trim())
 }
 
+/// Is the conditional opening `rest`, a line standing at a file's top level or directly in a guard's branch,
+/// one the include walk reads line by line: it closes as one statement, with a content block for its
+/// branch and at most a plain `else` one?
+fn walked_guard(rest: &str) -> bool {
+	let lead = rest.len() - rest.trim_start().len();
+	lang::lex::flows(rest).first().is_some_and(|f| f.start == lead && f.whole && f.kw == lang::lex::Kw::If
+		&& f.arms.iter().all(|a| a.content)
+		&& (f.arms.len() == 1 || (f.arms.len() == 2 && f.arms[1].cond.is_none())))
+}
+
 /// Is this whitespace-trimmed line the `] else [` divider between an include guard's two branches,
 /// however its own internal spacing is written (`]else[`, `] else [`)?
 fn is_guard_else(marker: &str) -> bool {
 	let squeezed: String = marker.chars().filter(|c| !c.is_whitespace()).collect();
 	squeezed == "]else["
-}
-
-/// Evaluates an include-guard condition to which branch to keep -- `Some(true)` for the then-branch,
-/// `Some(false)` for the else-branch -- or `None` when the form is beyond the two the assembler reads or
-/// its variable resolves to no value, so the caller refuses it rather than guessing.
-///
-/// The two forms are `<var> == "<literal>"` (kept when the resolved scalar equals the literal) and a bare
-/// `<var>` (kept when the resolved boolean is true). The variable is resolved from the book's `config.typ`
-/// first, then from the guard's own file -- so a book's `#import "config.typ": media` and a lone file's
-/// own `#let` both answer.
-fn eval_guard(cond: &str, config: &str, file_src: &str) -> Option<bool> {
-	let cond = cond.trim();
-	if let Some(eq) = cond.find("==") {
-		let var = cond[..eq].trim();
-		let rhs = cond[eq + 2..].trim();
-		if !is_simple_ident(var) {
-			return None;
-		}
-		let Some(lit) = string_literal(rhs) else { return None; };
-		let Some(val) = guard_scalar(config, file_src, var) else { return None; };
-		return Some(val == lit);
-	}
-	if is_simple_ident(cond) {
-		return guard_bool(config, file_src, cond);
-	}
-	None
-}
-
-/// Is `s` a single plain identifier -- a config-variable name, no operator or call around it?
-fn is_simple_ident(s: &str) -> bool {
-	let mut cs = s.chars();
-	match cs.next() {
-		Some(c) if c.is_alphabetic() || c == '_'	=> {},
-		_											=> return false,
-	}
-	cs.all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-}
-
-/// The text inside a `"..."` string literal filling the whole of `s`, or `None` when `s` is not one.
-fn string_literal(s: &str) -> Option<&str> {
-	let Some(stripped)	= s.strip_prefix('"') else { return None; };
-	let Some(inner)		= stripped.strip_suffix('"') else { return None; };
-	// A stray interior quote would mean this is not one flat literal; the guard then refuses.
-	if inner.contains('"') {
-		return None;
-	}
-	Some(inner)
-}
-
-/// The scalar an include-guard variable resolves to: the book config's binding, else the guard file's own.
-fn guard_scalar(config: &str, file_src: &str, name: &str) -> Option<String> {
-	read_let_string(config, name).or_else(|| read_let_string(file_src, name))
-}
-
-/// The boolean an include-guard variable resolves to: the book config's binding, else the guard file's own.
-fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
-	read_let_bool(config, name).or_else(|| read_let_bool(file_src, name))
 }
 
 /// Follows a root's `#include "..."` lines in order, reading each chapter and setting it through the
@@ -1928,16 +1848,28 @@ fn guard_bool(config: &str, file_src: &str, name: &str) -> Option<bool> {
 /// every level's own includes, each resolved against *that file's own directory*, exactly as Typst
 /// resolves one, rather than always against the book root's.
 ///
-/// `config` is the book's `config.typ` source (empty for the documentation idiom, which has none), so a
-/// `#if <var> == "..."` include guard in a chapter can be resolved against the same scalars the config
-/// binds -- `media` above all -- and only the taken branch's includes followed. See [`assemble_into`].
-pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::rules::Bindings, config: &str)
-	-> Outcome<(Vec<Block>, lang::Refusals)>
+/// Every conditional, an include guard the walk reads or one the reader meets in a body, resolves its names
+/// in the file's [`GuardScope`](lang::rules::GuardScope): the bindings and imports in force where it stands,
+/// as Typst's scope has them. The book's `config.typ`, `media` above all, applies where a file imports it.
+/// See [`assemble_into`].
+pub fn assemble(root_src: &str, root_dir: &Path, root_path: &Path, binds: lang::rules::Bindings)
+	-> Outcome<(Vec<Block>, Gathered)>
 {
 	let mut blocks: Vec<Block> = Vec::new();
-	let mut skips = lang::Refusals::default();
-	res!(assemble_into(root_src, root_dir, root_path, binds, config, 0, &mut blocks, &mut skips));
-	Ok((blocks, skips))
+	let mut got = Gathered::default();
+	res!(assemble_into(root_src, root_dir, root_path, binds, 0, &mut blocks, &mut got));
+	Ok((blocks, got))
+}
+
+/// What the include walk gathers beside the blocks, in document order: every site not set as written, and
+/// the Info dictionary each file's own `#set document` builds where the file stands -- a root's rules before an
+/// `#include`, then the included file's, then the root's after it -- as Typst applies them. A rule applies at
+/// a file's top level or in a bare content block; one in a container is refused at its site.
+#[derive(Default)]
+pub struct Gathered {
+	pub skips:		lang::Refusals,
+	pub doc_info:	DocInfo,
+	pub faces:		Vec<(String, String, Span)>,	// each included file's heading face, with where it was named
 }
 
 /// The recursive body of [`assemble`]. `dir` is the directory `src` was itself read from -- the book
@@ -1951,14 +1883,17 @@ fn assemble_into(
 	dir:	&Path,
 	path:	&Path,
 	binds:	lang::rules::Bindings,
-	config:	&str,
 	depth:	u32,
 	blocks:	&mut Vec<Block>,
-	skips:	&mut lang::Refusals,
+	got:	&mut Gathered,
 )
 	-> Outcome<()>
 {
-	let mut buf = String::new();	// this file's own inline markup gathered since the last boundary
+	// This file's guards and the conditionals the reader meets in it resolve in its one lexical scope, by
+	// where each stands in it.
+	let names	= lang::rules::GuardScope::of_file(src, Some(dir), 0);
+	let binds	= binds.with_guards(&names, 0);
+	let mut buf = Chunk::default();	// this file's own inline markup gathered since the last boundary
 	// This file's own inline markup (its opening section, any tail after its last include) is tagged with
 	// its own path, exactly as an included chapter's blocks are tagged with theirs -- see `Refusal`'s doc
 	// comment on why the span alone does not already say which file it came from.
@@ -1968,12 +1903,22 @@ fn assemble_into(
 	// otherwise they are dropped (reported once at the guard, never leaked as prose). See [`GuardFrame`].
 	let mut guards: Vec<GuardFrame> = Vec::new();
 	let mut byte: u32 = 0;	// running byte offset, so a refusal's span points at its own line (G4)
-	for raw in src.split_inclusive('\n') {
+	// Each line is read for its structure -- a guard, an `#include`, a part page -- as the reader meets it:
+	// one a comment holds or a raw block shows is text, and is none of them. The live text keeps every
+	// offset and line of the file, and the file's own line is what is gathered for the reader.
+	// A guard, an `#include` or a part page is read only where it stands at the file's top level, or directly
+	// in an open guard's branch: one in a bracketed body is the body's, gathered for the reader with it, so a
+	// callout holding an `#include` is read whole and the include is refused where it stands.
+	let live = lang::lex::live_text(src);
+	let top: HashSet<usize> = lang::lex::top_level_lines(src).into_iter().map(|(at, _)| at).collect();
+	// A guard's own lexer reads a `$` whose maths never closes as a character, as every scan of the file does.
+	let lone = lang::lex::lone_dollars(src);
+	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
 		// Strip the line terminator without treating it as a real character, exactly as the reader's own
 		// line loop does (`lang::parse::to_blocks`), so the span below covers the line, not its newline.
-		let mut line = raw;
+		let mut line = raw_live;
 		if let Some(s) = line.strip_suffix('\n') { line = s; }
 		if let Some(s) = line.strip_suffix('\r') { line = s; }
 		let end	= start.saturating_add(line.len() as u32);
@@ -1984,138 +1929,157 @@ fn assemble_into(
 		// The innermost open guard's own bracket depth (`None` with no guard open at all). Seeded from the
 		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
 		// inside its branch -- see [`GuardFrame`].
-		let guard_depth = guards.last().map(|g| g.state.open_brackets());
+		let guard_depth = guards.last().map(|g| g.state.depth());
+		// A line in a guard's branch is read only with no list item, heading, strong or emphasis open around it
+		// there, as at the file's own level: one inside such a scope is that scope's, gathered with it.
+		let structural	= match guards.last() {
+			Some(g)	=> g.state.depth() == 1 && g.state.bare_line(line),
+			None	=> top.contains(&(start as usize)),
+		};
 
 		// A guard closer `]` on its own line, exactly at the guard's own depth: close the innermost open
 		// guard. A `]` deeper than that -- a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer inside the
 		// branch -- is not the guard's own and falls through below, to the generic per-line scan and then
 		// to ordinary content. A lone `]` with no guard open at all is likewise ordinary content.
 		if marker == "]" && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
-			guards.pop();
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
+			if let Some(frame) = guards.pop() {
+				close_branch(frame.marks, blocks);
+			}
 			continue;
 		}
 		// A guard divider `] else [`, at the guard's own depth: switch the innermost guard to its else
 		// branch. Its `]` closes the content bracket and its `[` reopens it, so the depth is unchanged and
 		// the state is left as it stands.
 		if is_guard_else(marker) && guard_depth == Some(1) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			if let Some(top) = guards.last_mut() {
 				top.in_else = true;
+				close_branch(std::mem::take(&mut top.marks), blocks);
 			}
 			continue;
 		}
-		// A guard opener `#if <cond> [`: evaluate the condition against the config (and this file's own
-		// `#let` bindings) and open a guard, seeding its bracket state from this opener line so it starts
-		// at depth one. A guard opened inside a dropped branch, or one whose form or variable the evaluator
-		// cannot resolve, keeps neither branch -- the latter is reported, so an unsupported guard form is
-		// never silently followed nor leaked.
-		if let Some(cond) = guard_open(marker) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
-			let parent_active = guards.iter().all(|g| g.emits());
-			let (live, then_taken) = if !parent_active {
-				(false, false)
-			} else {
-				match eval_guard(cond, config, src) {
-					Some(taken)	=> (true, taken),
-					None		=> {
-						skips.record(&fmt!("#if {} (unsupported include-guard form)", cond), span);
-						skips.tag_file(&label);
-						(false, false)
-					},
-				}
-			};
-			let mut state = lang::parse::SkipState::new();
-			lang::parse::scan_brackets(marker, &mut state);
-			guards.push(GuardFrame { live, then_taken, in_else: false, refused: false, state });
-			continue;
-		}
-		// Any other `#if ...` line is a guard form the assembler does not evaluate (a one-line
-		// `#if c [..] else [..]`, or a brace-bodied `#if cond {`): refuse and drop it rather than let its
-		// raw source leak. A balanced one-liner refuses just this line, as before; a brace body still open
-		// at the line's end pushes a refused guard so the generic per-line scan below consumes the whole
-		// block -- its body, `} else {` and closing `}` -- instead of leaking it as prose. `#if(` with no
-		// space is left to the reader's own code-skip path.
-		if marker.starts_with("#if ") && guards.iter().all(|g| g.emits()) {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
-			skips.record(&fmt!("#if (unsupported include-guard form): {:?}", marker), span);
-			skips.tag_file(&label);
-			let mut state = lang::parse::SkipState::new();
-			lang::parse::scan_brackets(marker, &mut state);
-			if state.has_open_bracket() {
-				guards.push(GuardFrame { live: false, then_taken: false, in_else: false, refused: true, state });
-			}
+		// A guard opener `#if <cond> [` of the shape the walk reads line by line, whose condition resolves in
+		// this file's guard scope: open a guard, seeding its bracket state from this opener line so it starts
+		// at depth one, and follow the taken branch's includes. One opened inside a dropped branch keeps
+		// neither branch. Every other conditional -- one this scope does not resolve, a one-line or
+		// brace-bodied one, an `else if` chain -- is the reader's: gathered with the markup around it, it is
+		// set or refused whole at its line there, in the same scope, exactly as one in a body is.
+		let parent_active = guards.iter().all(|g| g.emits());
+		let hash = start as usize + (line.len() - t.len());	// the guard's `#`, where its names resolve
+		let opened = guard_open(marker).filter(|_| structural).and_then(|cond| match parent_active {
+			true	=> walked_guard(&src[start as usize..]).then(|| names.cond_at(hash, cond)).and_then(|c| match c {
+				lang::rules::Cond::Taken(t)	=> Some((true, t)),
+				_							=> None,
+			}),
+			false	=> Some((false, false)),
+		});
+		if let Some((live, then_taken)) = opened {
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
+			let mut state = lang::lex::Lexer::markup().with_lone(lone.clone());
+			state.feed_line_at(marker, start as usize + (line.len() - t.len()));
+			guards.push(GuardFrame { live, then_taken, in_else: false, state, marks: Vec::new() });
 			continue;
 		}
 		// Any other line while a guard is open: fold its own brackets into the innermost guard's state,
 		// whether or not the branch it stands in emits -- a dropped branch's own `#block[...]`/`{...}` still
 		// balances the stack, so a later real closer is not mistaken for one of these (or vice versa). If
-		// the state closes to zero here, rather than through one of the recognised `]`/`else`/`#if` shapes
-		// above, the guard's own bracket has just ended on an ordinary body line: a refused guard already
-		// reported its opener, so this is its expected close and stays silent; any other guard closing this
-		// way is a shape the guard did not predict, so it is reported rather than left to leak whatever
-		// follows as prose. Either way the line itself is the guard's own structural end, not content, so
-		// it is consumed here rather than falling through to the buffer below.
+		// the state closes to zero here, rather than through one of the recognised `]`/`else` shapes above,
+		// the guard's own bracket has just ended on an ordinary body line, a shape the guard did not predict:
+		// it is reported rather than left to leak whatever follows as prose, and the line, the guard's own
+		// structural end, is consumed here rather than falling through to the buffer below.
 		if let Some(top) = guards.last_mut() {
-			lang::parse::scan_brackets(line, &mut top.state);
-			if !top.state.has_open_bracket() {
-				let refused = top.refused;
-				res!(flush_inline(&mut buf, blocks, skips, &label, binds));
-				guards.pop();
-				if !refused {
-					skips.record(&fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
-					skips.tag_file(&label);
+			top.state.feed_line_at(line, start as usize);
+			if !top.state.is_open() {
+				res!(flush_inline(&mut buf, blocks, got, &label, binds));
+				if let Some(frame) = guards.pop() {
+					close_branch(frame.marks, blocks);
 				}
+				got.skips.record_in(&label, &fmt!("#if guard closed on an unrecognised line: {:?}", marker), span);
 				continue;
 			}
 		}
-		// Inside a dropped or refused branch: the content is the untaken alternative, dropped silently
-		// (the guard already carries the report). Markers above are still tracked so the stack balances.
+		// Inside a dropped branch: the content is the untaken alternative, dropped silently. Markers above
+		// are still tracked so the stack balances. A `$` whose maths never closes is an error Typst reports
+		// wherever it stands, so one here is still recorded.
 		if !guards.iter().all(|g| g.emits()) {
+			for &at in lone.iter().filter(|&&at| at >= start as usize && at < byte as usize) {
+				got.skips.record_lone_dollar_in(&label, crate::ir::Span::new(at as u32, at as u32 + 1));
+			}
 			continue;
 		}
-		if let Some(rest) = t.strip_prefix("#include") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+		// A `#set` standing in the taken branch governs the branch from there to its end, and the files it
+		// includes: the blocks from here are scoped at the branch's close. A `#show` rule, which the rule
+		// engine applies from the root's top level alone, is refused where it stands.
+		if structural && !guards.is_empty() {
+			if lang::parse::is_lowerable_set(t) || lang::parse::is_show_doc_with(t) {
+				res!(flush_inline(&mut buf, blocks, got, &label, binds));
+				if let Some(top) = guards.last_mut() {
+					if top.marks.last().map_or(true, |m| m.0 != blocks.len()) {
+						top.marks.push((blocks.len(), String::new()));
+					}
+				}
+			} else if lang::rules::is_rule_line(t) {
+				got.skips.record_in(&label, &fmt!("{} (inside an include guard's branch, where it is not applied)",
+					lang::parse::decl_name(t)), span);
+			}
+		}
+		if let Some(mark) = guards.last_mut().and_then(|g| g.marks.last_mut()) {
+			mark.1.push_str(line);
+			mark.1.push('\n');
+		}
+		if let Some(rest) = t.strip_prefix("#include").filter(|_| structural) {
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			match first_quoted(rest) {
 				Some(rel) if depth >= MAX_INCLUDE_DEPTH => {
-					skips.record(&fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
+					got.skips.record_in(&label, &fmt!("#include {:?} (cycle: depth exceeds {})", rel, MAX_INCLUDE_DEPTH),
 						span);
-					skips.tag_file(&label);
 				},
 				Some(rel) => {
 					let inc_path = dir.join(&rel);
 					let inc_src = match vfs::read_to_string(&inc_path) {
 						Ok(s)	=> s,
-						Err(e)	=> return Err(err!(e,
-							"Could not read the included chapter {:?}.", inc_path; File, Read)),
+						Err(e)	=> {
+							// Charged to the path literal, as Typst charges it, while this file's text is in
+							// hand. A chapter that is there but not UTF-8 text is told from one that is not.
+							let lead	= line.len() - t.len() + "#include".len();
+							let quote	= rest.find('"').map_or(lead, |q| lead + q);
+							let (l, c, _)	= lang::line_col_of(src, start.saturating_add(quote as u32));
+							if vfs::is_not_utf8(&e) {
+								return Err(err!(crate::compile::Cited::new(&label, l, c, e),
+									"The included chapter {:?} is not valid UTF-8 text.", inc_path; File, Decode, UTF8));
+							}
+							return Err(err!(crate::compile::Cited::new(&label, l, c, e),
+								"Could not read the included chapter {:?}.", inc_path; File, Read));
+						},
 					};
 					let inc_dir = inc_path.parent().unwrap_or(dir);
 					let mut chap_blocks: Vec<Block> = Vec::new();
-					let mut chap_skips = lang::Refusals::default();
-					res!(assemble_into(&inc_src, inc_dir, &inc_path, binds, config, depth + 1,
-						&mut chap_blocks, &mut chap_skips));
+					res!(assemble_into(&inc_src, inc_dir, &inc_path, binds, depth + 1, &mut chap_blocks, got));
 					// The chapter's own top-level `#set`/`#show: doc.with(...)` declarations lower to a patch
 					// scoped to this chapter's subtree (H1): the reader captures them but holds no theme to lower
 					// them onto, so it is done here, where the chapter boundary is known. A chapter that declares
 					// no styling -- every corpus chapter today -- lowers to an empty patch and nests nothing,
 					// splicing its blocks in flat and keeping the block stream and the render byte-identical.
 					let chap_patch = lang::set::lower_declarations(&inc_src);
+					// A heading face the chapter's own template application names is charged there by a note.
+					if let Some((face, at)) = lang::set::heading_font_site(&inc_src) {
+						got.faces.push((face, inc_path.display().to_string(), at));
+					}
 					if chap_patch == ThemePatch::default() {
 						blocks.extend(chap_blocks);
 					} else {
 						blocks.push(Block::Scoped { patch: chap_patch, blocks: chap_blocks });
 					}
-					skips.merge(chap_skips);
 				},
 				None => {
 					// A malformed `#include` with no quoted path: reported, not left to fall through as a
 					// literal line of body text.
-					skips.record("#include", span);
-					skips.tag_file(&label);
+					got.skips.record_in(&label, "#include", span);
 				},
 			}
-		} else if t.starts_with("#part-page") {
-			res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+		} else if structural && t.starts_with("#part-page") {
+			res!(flush_inline(&mut buf, blocks, got, &label, binds));
 			// A part divider: its title is the last bracket group on the line. A part is a level-0 heading
 			// -- unnumbered and centred on its own page, outside the chapter numbering -- so a chapter keeps
 			// its number across a part boundary and a part never appears in a running head.
@@ -2123,47 +2087,67 @@ fn assemble_into(
 				blocks.push(Block::heading(0, title));
 			}
 		} else {
-			buf.push_str(line);
-			buf.push('\n');
+			buf.push(raw, start);
 		}
 	}
 	// A guard still open at end of file never met its own closer: reported so a truncated branch is never
-	// silently accepted as complete. A refused guard already reported its opener, so only a guard that was
-	// genuinely live and open is reported here, to avoid a duplicate on the one already-reported form.
+	// silently accepted as complete.
 	let eof = crate::ir::Span::new(byte, byte);
-	for g in &guards {
-		if !g.refused {
-			skips.record("#if guard never closed (end of file)", eof);
-			skips.tag_file(&label);
-		}
-	}
 	// The tail after the last include: back-matter markup a doc root (or the last chapter of a nested
 	// include) closes with, if any.
-	res!(flush_inline(&mut buf, blocks, skips, &label, binds));
+	res!(flush_inline(&mut buf, blocks, got, &label, binds));
+	while let Some(frame) = guards.pop() {
+		got.skips.record_in(&label, "#if guard never closed (end of file)", eof);
+		close_branch(frame.marks, blocks);
+	}
 	Ok(())
 }
 
+/// A file's own inline markup gathered since the last boundary, and the byte offset in the file it
+/// starts at, so a site its parse records is placed in the file's own lines.
+#[derive(Default)]
+struct Chunk {
+	text:	String,
+	at:		u32,
+}
+
+impl Chunk {
+	/// Adds a line as the file holds it, terminator and all, so the chunk's offsets stay the file's.
+	fn push(&mut self, raw: &str, start: u32) {
+		if self.text.is_empty() {
+			self.at = start;
+		}
+		self.text.push_str(raw);
+		if !raw.ends_with('\n') {
+			self.text.push('\n');
+		}
+	}
+}
+
 /// Reads the accumulated inline markup through the reader, appending its blocks and merging its skips
-/// (tagged with `file`, the root's own path -- this buffer is always the root's inline text, never a
-/// chapter's, which is tagged separately where it is read), then clears the buffer. A buffer holding
+/// (tagged with `file`, the path of the file the buffer was gathered from), folds its `#set document` rules
+/// into the Info dictionary where they stand, refusing at its site one a container holds, then clears the
+/// buffer. A buffer holding
 /// only code and whitespace yields no blocks -- a book root's template call reduces to nothing, so the
 /// book path is unchanged.
 fn flush_inline(
-	buf:	&mut String,
+	buf:	&mut Chunk,
 	blocks:	&mut Vec<Block>,
-	skips:	&mut lang::Refusals,
+	got:	&mut Gathered,
 	file:	&str,
 	binds:	lang::rules::Bindings,
 )
 	-> Outcome<()>
 {
-	if !buf.trim().is_empty() {
-		let (b, mut s) = res!(lang::to_blocks_with_templates(buf, binds));
-		s.tag_file(file);
+	if !buf.text.trim().is_empty() {
+		// The chunk's conditionals resolve where they stand in the file, a walked branch's `#let` above them
+		// included.
+		let (b, s) = res!(lang::to_blocks_in(&buf.text, binds.at(buf.at as usize), file, buf.at));
 		blocks.extend(b);
-		skips.merge(s);
+		got.skips.merge(s);
+		lang::set::fold_document_info(&buf.text, &mut got.doc_info, file, buf.at, &mut got.skips);
 	}
-	buf.clear();
+	buf.text.clear();
 	Ok(())
 }
 
@@ -2175,27 +2159,13 @@ fn first_quoted(s: &str) -> Option<String> {
 	Some(rest[..close].to_string())
 }
 
-/// The contents of the first `[...]` group in a line, balanced so a nested bracket does not close it
-/// early. Used to lift a `#part-page[Title]` divider's title.
+/// The contents of the first `[...]` group in a line, read as Typst reads a content block, so a bracket
+/// in its prose balanced within it does not close it early. Used to lift a `#part-page[Title]` divider's
+/// title.
 fn bracket_body(s: &str) -> Option<String> {
-	let open	= s.find('[')?;
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= open;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'['	=> depth += 1,
-			b']'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[open + 1..i].trim().to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	s.find('[')
+		.and_then(|open| lang::lex::group_end(s, open).map(|end| (open, end)))
+		.map(|(open, end)| s[open + 1..end - 1].trim().to_string())
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -2303,70 +2273,32 @@ fn build_style(raw: &RawStyle) -> Theme {
 /// The string a `#let <name> = "..."` binds, if the config sets one as a plain literal.
 fn read_let_string(src: &str, name: &str) -> Option<String> {
 	let needle	= fmt!("#let {} =", name);
-	let at		= src.find(&needle)?;
+	let at		= find_live(src, &needle)?;
 	let rest	= &src[at + needle.len()..];
 	first_quoted(rest)
-}
-
-/// The boolean a `#let <name> = true` / `= false` binds, if the source sets one as a plain literal. A
-/// binding to anything else (a string, an expression) is not a boolean an include guard can test, so it
-/// yields `None` and the guard refuses rather than inventing a truth value.
-fn read_let_bool(src: &str, name: &str) -> Option<bool> {
-	let needle		= fmt!("#let {} =", name);
-	let Some(at)	= src.find(&needle) else { return None; };
-	let rest	= src[at + needle.len()..].trim_start();
-	let tok: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-	match tok.as_str() {
-		"true"	=> Some(true),
-		"false"	=> Some(false),
-		_		=> None,
-	}
 }
 
 /// The body of the `if`/`else if` arm a `#let <name> = if format == "<fmt>" {...}` chain selects for
 /// `fmt`. Bounds the search to the one `#let` so a later binding's arms are not read by mistake, finds
 /// the arm whose condition tests this format, and returns its balanced `{...}` body.
 fn arm(src: &str, name: &str, fmt: &str) -> Option<String> {
-	let needle	= fmt!("#let {} =", name);
-	let start	= src.find(&needle)?;
-	let tail	= &src[start + needle.len()..];
+	let needle		= fmt!("#let {} =", name);
+	let Some(start)	= find_live(src, &needle) else { return None; };
+	let tail		= &src[start + needle.len()..];
 	// The binding ends at the next top-level `#let`, or the end of the file.
-	let end		= tail.find("\n#let ").unwrap_or(tail.len());
-	let block	= &tail[..end];
+	let end			= find_live(tail, "\n#let ").unwrap_or(tail.len());
+	let block		= &tail[..end];
 
-	let cond	= fmt!("== \"{}\"", fmt);
-	let at		= block.find(&cond)?;
-	let after	= &block[at..];
-	let brace	= after.find('{')?;
-	balanced_braces(&after[brace..])
-}
-
-/// The contents of a `{...}` at the start of `s`, matched by brace depth so a nested record does not
-/// close it early.
-fn balanced_braces(s: &str) -> Option<String> {
-	let bytes	= s.as_bytes();
-	let mut depth	= 0i32;
-	let mut i	= 0usize;
-	while i < bytes.len() {
-		match bytes[i] {
-			b'{'	=> depth += 1,
-			b'}'	=> {
-				depth -= 1;
-				if depth == 0 {
-					return Some(s[1..i].to_string());
-				}
-			},
-			_	=> {},
-		}
-		i += 1;
-	}
-	None
+	let cond		= fmt!("== \"{}\"", fmt);
+	let Some(at)	= find_live(block, &cond) else { return None; };
+	let after		= &block[at..];
+	after.find('{').and_then(|brace| group_inner(&after[brace..]))
 }
 
 /// The first number after `key` in `s` -- the digits and one decimal point that follow the key. The
 /// unit (`mm`, `pt`, `em`) is known from the key, so it is read off and dropped.
 fn num_after(s: &str, key: &str) -> Option<f64> {
-	let at	= s.find(key)?;
+	let at	= find_live(s, key)?;
 	first_num(&s[at + key.len()..])
 }
 
@@ -2392,7 +2324,7 @@ fn first_num(s: &str) -> Option<f64> {
 /// The numbers of the first `( ... )` tuple after `key` -- `sub-headings: (15pt, 12.5pt, ...)` reads as
 /// `[15.0, 12.5, ...]`.
 fn tuple_after(s: &str, key: &str) -> Option<Vec<f64>> {
-	let at		= s.find(key)?;
+	let at		= find_live(s, key)?;
 	let after	= &s[at + key.len()..];
 	let open	= after.find('(')?;
 	let close	= after[open..].find(')')?;
@@ -2421,7 +2353,7 @@ fn paper_dims_mm(name: &str) -> (f64, f64) {
 /// The first `"..."` string after `key` anywhere in `src` -- `paper: "a4"` reads as `a4`. Used to read a
 /// bare `name: "value"` setting that is not bounded by the field machinery the book path needs.
 fn first_quoted_after(src: &str, key: &str) -> Option<String> {
-	let at = src.find(key)?;
+	let at = find_live(src, key)?;
 	first_quoted(&src[at + key.len()..])
 }
 
@@ -2429,29 +2361,15 @@ fn first_quoted_after(src: &str, key: &str) -> Option<String> {
 /// the template's `#let margins = (a4: 2.5cm, ...)`, say. The dictionary is matched by paren depth from
 /// the `#let`, and the field's value runs to the next depth-zero comma, so a nested group does not end it.
 fn let_dict_field(src: &str, dict: &str, field: &str) -> Option<String> {
-	let needle	= fmt!("#let {} =", dict);
-	let start	= src.find(&needle)?;
-	let tail	= &src[start + needle.len()..];
-	let open	= tail.find('(')?;
-	let body	= balanced_parens(&tail[open..])?;
-	// Within the dictionary body, find `field:` and take its value up to the next top-level comma.
-	let key		= fmt!("{}:", field);
-	let at		= body.find(&key)?;
-	let rest	= &body[at + key.len()..];
-	let bytes	= rest.as_bytes();
-	let mut depth	= 0i32;
-	let mut end		= rest.len();
-	let mut i		= 0usize;
-	while i < bytes.len() {
-		match bytes[i] as char {
-			'(' | '[' | '{'		=> depth += 1,
-			')' | ']' | '}'		=> depth -= 1,
-			',' if depth == 0	=> { end = i; break; },
-			_					=> {},
-		}
-		i += 1;
-	}
-	Some(rest[..end].trim().to_string())
+	let needle		= fmt!("#let {} =", dict);
+	let Some(start)	= find_live(src, &needle) else { return None; };
+	let tail		= &src[start + needle.len()..];
+	let Some(body)	= tail.find('(').and_then(|open| group_inner(&tail[open..])) else { return None; };
+	// Within the dictionary body, find `field:` and take its value up to the next comma at its own level.
+	let key			= fmt!("{}:", field);
+	let Some(at)	= find_live(&body, &key) else { return None; };
+	let rest		= &body[at + key.len()..];
+	Some(rest[..lang::lex::top_comma(rest)].trim().to_string())
 }
 
 /// A Typst length token as points: the leading number scaled by its unit (`cm`, `mm`, `in`, `pt`). A
@@ -2473,13 +2391,21 @@ fn parse_len_pt(s: &str) -> Option<f64> {
 
 /// The first length after `key` in `src`, in points -- `text-size: 11pt` reads as `11.0`.
 fn first_len_after(src: &str, key: &str) -> Option<f64> {
-	let at = src.find(key)?;
+	let at = find_live(src, key)?;
 	parse_len_pt(&src[at + key.len()..])
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The copyright tuple is read as Typst reads it, comments as trivia: a comma or a bracket in one parts
+	/// nothing, and a comment alone before a part is no part of it.
+	#[test]
+	fn the_copyright_tuple_reads_comments_as_trivia() {
+		let meta = "copyright: (\"2024\", /* x, y */ [Holder], // n, m\n \"Notice\")";
+		assert_eq!(copyright_line(meta), Some("Copyright © 2024 Holder. Notice".to_string()));
+	}
 
 	// A miniature two-format config with the shape the real books use: a `format` switch and a chain of
 	// `if format == "..." {...}` arms per setting.
@@ -2537,6 +2463,45 @@ mod tests {
 	fn test_a_root_with_includes_reads_as_a_book_02() {
 		assert!(is_book_root("#show: doc.with()\n#include \"chap_01.typ\"\n"));
 		assert!(!is_book_root("= A lone heading\n\nSome prose.\n"));
+		// An `#include` a comment holds or a raw block shows is text, and makes no book.
+		assert!(!is_book_root("= Lone\n\n```typst\n#include \"chapter.typ\"\n```\n"));
+		assert!(!is_book_root("= Lone\n\n/*\n#include \"draft.typ\"\n*/\n// #include \"x.typ\"\n"));
+	}
+
+	/// An `#include` after a `$` whose maths never closes stands at the file's top level, as it does to Typst's
+	/// own lexer: the `$` is a character, so the root still reads as a book.
+	#[test]
+	fn a_dollar_that_never_closes_leaves_the_includes_after_it_a_book() {
+		assert!(is_book_root("Costs 5$ each.\n\n#include \"chap_01.typ\"\n"));
+		assert!(!is_book_root("Costs 5$ each.\n\n```typst\n#include \"chapter.typ\"\n```\n"));
+	}
+
+	/// A field is read where a reader meets it: not in a comment, not in a raw block, and not as the tail of
+	/// a longer field's name.
+	#[test]
+	fn a_field_is_read_where_the_reader_meets_it() {
+		let src = "#show: doc.with(\n  subtitle: [Sub],\n  // title-top-logo-path: \"old.png\",\n  \
+			/* title: [Commented] */\n  title: [Real],\n  title-top-logo-path: \"new.png\",\n)\n";
+		assert_eq!(content_field(src, "title").as_deref(), Some("Real"));
+		assert_eq!(content_field(src, "subtitle").as_deref(), Some("Sub"));
+		assert_eq!(string_field(src, "title-top-logo-path").as_deref(), Some("new.png"));
+		assert_eq!(string_field("// cover: \"x.png\"\n", "cover"), None);
+	}
+
+	/// A front-matter field's group is read as Typst reads it: a `]` escaped, in raw text or in a comment does
+	/// not end a content field, a tuple a comment holds is no revision row and one with a comment before it
+	/// is, and a string field's value ends at the group it stands in, so a later string is never its value.
+	#[test]
+	fn a_front_matter_group_is_read_as_typst_reads_it() {
+		let src = "#show: doc.with(\n  title: [A \\] B `x]y` C /* ] */ D],\n  title-colour: none)\n#let c = \"red\"\n";
+		assert_eq!(content_field(src, "title").as_deref(), Some("A \\] B `x]y` C /* ] */ D"));
+		assert_eq!(string_field(src, "title-colour"), None);
+		let block = "\n  // ( version: \"0.9\"\n  ( version: \"2.0\", notes: \"Fix (a) and [b.\" ),\n  \
+			/* ( version: \"1.5\" ) */\n  ( version: \"1.0\", notes: [A ) in prose.] ),\n";
+		let rows = meta_rows(block);
+		let versions: Vec<Option<String>> = rows.iter().map(|r| string_field(r, "version")).collect();
+		assert_eq!(versions, [Some("2.0".to_string()), Some("1.0".to_string())], "{:?}", rows);
+		assert_eq!(string_field(&rows[0], "notes").as_deref(), Some("Fix (a) and [b."));
 	}
 
 	#[test]
@@ -2592,7 +2557,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.title, "Austenite");
 		assert_eq!(fm.subtitle.as_deref(), Some("Design Document"));
 		assert_eq!(fm.author, "J. D. Hoogland");
@@ -2628,7 +2593,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.meta_rows.len(), 1, "one revision row");
 		let mr = &fm.meta_rows[0];
 		assert_eq!(mr.date.as_deref(), Some("12026-08-08"));
@@ -2655,7 +2620,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Hematite");
+		let fm = read_doc_front_matter("", root, &raw, "Hematite");
 		assert_eq!(fm.meta_rows.len(), 2, "both revision rows are read");
 		assert_eq!(fm.meta_rows[0].version.as_deref(), Some("2.0.0"));
 		// A `declaration-words` rescopes the caption without changing the mark image.
@@ -2689,7 +2654,7 @@ mod tests {
 			chap_num_pt: 54.0, chap_grid: [72.0, 8.0, 36.0, 20.0],
 			h1_pt: 14.0, h2_pt: 12.0, h3_pt: 13.0, h4_pt: 12.0,
 		};
-		let fm = read_doc_front_matter(std::path::Path::new("/nonexistent"), root, &raw, "Austenite");
+		let fm = read_doc_front_matter("", root, &raw, "Austenite");
 		assert_eq!(fm.sidebar_grey, Some(240), "lightgrey resolves to luma 240");
 		assert!(fm.title_smallcaps, "the title sets in small caps");
 		assert_eq!(fm.top_logo.as_deref(), Some("assets/svg/austenite_logo_text_right.svg"));
@@ -2706,7 +2671,7 @@ mod tests {
 		// Austenite design's `= Purpose`). With no include present, only that inline markup is read; its
 		// heading and paragraph must both survive, and the template call above them must be skipped, not set.
 		let root = "#import \"template.typ\": *\n#show: doc.with(title: [X])\n\n= Purpose\n\nAustenite is an engine.\n";
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		assert!(
 			blocks.iter().any(|b| matches!(b, Block::Heading { level: 1, .. })),
 			"the root's inline level-1 heading is read into the flow");
@@ -2718,16 +2683,15 @@ mod tests {
 
 	/// A `#if media == "..." [ ... ] else [ ... ]` include guard is evaluated, not both-branches-followed:
 	/// only the taken branch's content survives, and the `#if`/`] else [`/`]` marker lines never leak as
-	/// prose. The scalar resolves from the book config first (so a real `#import "config.typ": media`
-	/// answers), then from the guard's own file; an unsupported guard form is refused and reported, never
-	/// guessed or leaked. This is the DEFECT B regression gate at the unit level, beside the oracle fixture.
+	/// prose. The scalar resolves in the binding in force where the guard stands; an unsupported guard form
+	/// is refused and reported, never guessed or leaked. This is the DEFECT B regression gate at the unit level, beside the oracle fixture.
 	#[test]
 	fn if_media_guard_follows_only_the_taken_branch_08() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "#let media = \"ebook\"\n\nIntro paragraph.\n\n#if media == \"ebook\" [\nEbook only paragraph.\n] else [\nPrint only paragraph.\n]\n\nTail paragraph.\n";
 
 		// File-local `#let media = "ebook"`, no config: the then-branch is taken.
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Intro paragraph") && body.contains("Tail paragraph"),
 			"prose around the guard must survive: {}", body);
@@ -2736,20 +2700,21 @@ mod tests {
 		assert!(!body.contains("] else [") && !body.contains("#if "),
 			"no guard marker line may leak as prose: {}", body);
 
-		// The book config binds `media = "print"` and takes precedence over the file's own `#let`: the
-		// else-branch is taken instead, proving the config-first resolution the real books rely on.
-		let (blocks, _skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), "#let media = \"print\"\n"));
+		// A later `#let media = "print"` holds from its own line down, so the same guard below it takes the
+		// else-branch, while the one above keeps the ebook branch.
+		let twice = fmt!("{}#let media = \"print\"\n\n#if media == \"ebook\" [\nEbook again.\n] else [\nPrint again.\n]\n", root);
+		let (blocks, _skips) = res!(assemble(&twice, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		let body = fmt!("{:?}", blocks);
-		assert!(body.contains("Print only paragraph"), "config `media` selects the else-branch: {}", body);
-		assert!(!body.contains("Ebook only paragraph"), "the ebook branch is dropped under the config: {}", body);
+		assert!(body.contains("Ebook only paragraph") && body.contains("Print again"), "each guard reads its own binding: {}", body);
+		assert!(!body.contains("Print only paragraph") && !body.contains("Ebook again"), "{}", body);
 
 		// An unsupported guard form is refused and reported, not followed nor leaked.
 		let odd = "#if media > 3 [\nSomething.\n]\n";
-		let (blocks, skips) = res!(assemble(odd, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(odd, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		let body = fmt!("{:?}", blocks);
 		assert!(!body.contains("Something"), "a refused guard follows neither branch: {}", body);
-		assert!(skips.report().map(|r| r.contains("#if")).unwrap_or(false),
-			"a refused guard form must be reported: {:?}", skips.report());
+		assert!(got.skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a refused guard form must be reported: {:?}", got.skips.report());
 		Ok(())
 	}
 
@@ -2761,7 +2726,7 @@ mod tests {
 	fn if_guard_bracket_extent_survives_an_inner_content_closer() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "#let media = \"ebook\"\n\n#if media == \"ebook\" [\nEbook lead-in with an aside: #emph[\nspanning more than one line\n]\nand the branch continues here.\n] else [\nPrint branch text.\n]\n\nTail paragraph.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Ebook lead-in") && body.contains("spanning more than one line")
 			&& body.contains("and the branch continues here"),
@@ -2771,8 +2736,24 @@ mod tests {
 		assert!(!body.contains("] else [") && !body.contains("#if "),
 			"no guard marker line may leak as prose: {}", body);
 		// The reader's own `#let` skip is expected and unrelated; the guard itself must report nothing.
-		assert!(!skips.report().map(|r| r.contains("#if")).unwrap_or(false),
-			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", skips.report());
+		assert!(!got.skips.report().map(|r| r.contains("#if")).unwrap_or(false),
+			"a correctly bracket-tracked guard reports no #if refusal of its own: {:?}", got.skips.report());
+		Ok(())
+	}
+
+	/// A `$` whose maths never closes, in a guard's branch, is a character to the guard's own lexer as to every
+	/// scan of the file: the branch closes where it does and what follows the guard is read. One in a branch
+	/// not taken is still recorded, since Typst refuses the file there.
+	#[test]
+	fn a_dollar_that_never_closes_in_a_guard_leaves_what_follows() -> Outcome<()> {
+		let dir		= std::path::Path::new("/nonexistent");
+		let root	= "#let media = \"print\"\n\n#if media == \"ebook\" [\nEbook costs 5$ only.\n] More.\n\n= After\n";
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
+		let body = fmt!("{:?}", blocks);
+		assert!(body.contains("After") && !body.contains("Ebook costs"), "{}", body);
+		let at = root.find('$').map(|b| b as u32);
+		assert!(got.skips.sites().iter().any(|r| r.name == "inline maths" && Some(r.span.start) == at),
+			"{:?}", got.skips.sites());
 		Ok(())
 	}
 
@@ -2784,20 +2765,20 @@ mod tests {
 	fn if_brace_bodied_form_is_refused_as_one_block_not_leaked() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
 		let root = "Intro.\n\n#if media == \"ebook\" {\n  let x = 1\n} else {\n  let x = 2\n}\n\nTail.\n";
-		let (blocks, skips) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, got) = res!(assemble(root, dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		let body = fmt!("{:?}", blocks);
 		assert!(body.contains("Intro") && body.contains("Tail"), "prose around the guard must survive: {}", body);
 		assert!(!body.contains("let x") && !body.contains("} else {"),
 			"the brace-bodied guard's body and its else divider must not leak as prose: {}", body);
-		assert_eq!(skips.total(), 1,
-			"exactly one refusal for the whole brace-bodied guard, not one per leaked line: {:?}", skips.sites());
+		assert_eq!(got.skips.total(), 1,
+			"exactly one refusal for the whole brace-bodied guard, not one per leaked line: {:?}", got.skips.sites());
 		Ok(())
 	}
 
 	#[test]
 	fn test_a_part_page_divider_lifts_to_a_heading_03() -> Outcome<()> {
 		let dir = std::path::Path::new("/nonexistent");
-		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, _skips) = res!(assemble("#part-page(label: \"Part\")[The Pattern]\n", dir, &dir.join("root.typ"), lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 		assert_eq!(blocks.len(), 1, "one divider, one heading");
 		match &blocks[0] {
 			Block::Heading { level, segments, .. } => {
@@ -2832,6 +2813,27 @@ mod tests {
 		assert_eq!(map.len(), 3, "unexpected entries: {:?}", map);
 	}
 
+	/// A block comment between definitions nests as Typst nests one: a `)` after the inner comment's `*/`
+	/// is still comment text, so it does not end the literal, and the definition after the comment is read.
+	#[test]
+	fn term_defs_reader_skips_a_nested_comment() {
+		let src = "#let term-defs = (\n  \"a\": [Alpha.],\n  /* outer /* inner */ still a comment ) */\n  \"b\": [Beta.],\n)\n";
+		let defs = parse_term_defs(src);
+		assert_eq!(defs, vec![("a".to_string(), "Alpha.".to_string()), ("b".to_string(), "Beta.".to_string())]);
+	}
+
+	/// A comment inside the `term-dict` literal is passed over as Typst's lexer passes one over: a quoted word
+	/// or a `)` in it neither shifts the key and value pairs nor ends the literal.
+	#[test]
+	fn term_dict_reader_skips_a_comment_inside_the_literal() {
+		let src = "#let term-dict = (\n  \"a\": \"Alpha\", // the \"first\" (of two)\n  /* a \"quoted\" ) note */\n  \
+			\"b\": \"Beta\",\n)\n";
+		let map = parse_term_dict(src);
+		assert_eq!(map.get("a").map(String::as_str), Some("Alpha"));
+		assert_eq!(map.get("b").map(String::as_str), Some("Beta"));
+		assert_eq!(map.len(), 2, "unexpected entries: {:?}", map);
+	}
+
 	/// A lone chapter finds a `refs.bib` in an ancestor directory, marks the key it cited, and returns a
 	/// bibliography that resolves that key to an author-year citation rather than the raw key.
 	#[test]
@@ -2847,8 +2849,8 @@ mod tests {
 		let chapter = sub.join("chap.typ");
 		res!(std::fs::write(&chapter, "cited here"));
 
-		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite(vec!["smith2020".to_string()])] }];
-		let bib = res!(load_lone_bibliography(&chapter, &mut blocks));
+		let mut blocks = vec![Block::RichParagraph { segments: vec![Segment::Cite { keys: vec!["smith2020".to_string()], site: crate::ir::Site::none() }] }];
+		let bib = res!(load_lone_bibliography(&chapter, &mut blocks, &mut lang::Refusals::default()));
 
 		// Clean up before asserting, so a failed assertion still leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
@@ -2877,7 +2879,7 @@ mod tests {
 		let root_src	= "#include \"chap_a.typ\"\n#include \"chap_b.typ\"\n";
 		let root_path	= base.join("root.typ");
 
-		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new()), ""));
+		let (blocks, _skips) = res!(assemble(root_src, &base, &root_path, lang::rules::Bindings::new(&lang::rules::TemplateFns::new(), &lang::rules::ContentFns::new())));
 
 		// Clean up before asserting, so a failed assertion leaves no scratch behind.
 		let _ = std::fs::remove_dir_all(&base);
@@ -2924,7 +2926,8 @@ mod tests {
 
 	/// `#print-glossary()` collects the document's glossary terms in first-appearance order, deduplicated
 	/// by key, dropping a term with no definition, and fills the placeholder with a Term/Definition table
-	/// whose Term column is the term-dictionary value where the key has one and the key itself otherwise.
+	/// whose Term column is the term-dictionary value where the key has one and the key itself otherwise. A
+	/// term used only in a figure's caption is a use like any other.
 	#[test]
 	fn test_resolve_glossary_orders_dedupes_and_skips_undefined_11() -> Outcome<()> {
 		// The term-dictionary gives the `g`-family its display value; `meet` has none, so its Term column is
@@ -2937,6 +2940,7 @@ mod tests {
 			let mut m: HashMap<String, Vec<Segment>> = HashMap::new();
 			m.insert("org".to_string(),  vec![Segment::text("The Foundation.")]);
 			m.insert("meet".to_string(), vec![Segment::text("To oxedize.")]);
+			m.insert("cap".to_string(),  vec![Segment::text("Said only in a caption.")]);
 			*guard = Some(m);
 		}
 		let mut blocks = vec![
@@ -2945,6 +2949,8 @@ mod tests {
 				Segment::text(" then "),
 				Segment::glossary("org", "Oxegence Foundation"),
 			]),
+			Block::image_figure(String::new(), None, None, None, Some(vec![Segment::glossary("cap", "cap")]),
+				"Figure".to_string(), None, None, crate::ir::Site::default()),
 			Block::rich(vec![
 				Segment::glossary("meet", "oxedize"),		// a second use adds no row
 				Segment::glossary("surplus", "surplus"),	// no definition, so no row
@@ -2953,13 +2959,13 @@ mod tests {
 		];
 		resolve_glossary(&mut blocks, false);
 
-		let table = match &blocks[2] {
+		let table = match &blocks[3] {
 			Block::Table(t)	=> t,
 			other			=> return Err(err!("expected a glossary table, found {:?}", other; Test, Bug)),
 		};
 		assert!(table.header, "the glossary sets a header row");
 		assert_eq!(table.weights, vec![1.0, 3.0], "columns are 1fr / 3fr");
-		assert_eq!(table.rows.len(), 3, "header plus the two defined terms");
+		assert_eq!(table.rows.len(), 4, "header plus the three defined terms");
 
 		// The Term column of a body row, flattened to its text.
 		let term_of = |r: usize| -> String {
@@ -2970,6 +2976,7 @@ mod tests {
 		};
 		assert_eq!(term_of(1), "meet", "first appearance, a key with no dict value shows the key itself");
 		assert_eq!(term_of(2), "Oxegence Foundation", "second appearance, a key with a dict value shows it");
+		assert_eq!(term_of(3), "cap", "a term said only in a caption has its row, in its place");
 		Ok(())
 	}
 
@@ -3077,10 +3084,50 @@ mod tests {
 			},
 		];
 		let mut skips = lang::Refusals::default();
-		note_missing_face_variants(&theme, &blocks, &faces, &mut skips);
+		note_missing_face_variants(&theme, &blocks, &faces, &FaceSites::new("root.typ", "", &[], Vec::new()), &mut skips);
 		assert_eq!(skips.total(), 1, "the scoped bold heading in a Regular-only face must be noted exactly once");
-		assert!(skips.sites()[0].name.contains("TestFace") && skips.sites()[0].name.contains("bold"),
-			"the note must name the face and the missing slant, found {:?}", skips.sites()[0].name);
+		assert!(skips.sites()[0].name.contains("TestFace")
+			&& skips.sites()[0].note.as_deref().map_or(false, |n| n.contains("bold")),
+			"the note must name the face and the missing slant, found {:?}", skips.sites()[0]);
+		Ok(())
+	}
+
+	/// A note about a heading face is charged to the declaration that named the face -- the template
+	/// application's line, a rule's, or an included file's own -- and a face no declaration names falls to the
+	/// root's template application, which brings the idiom that prefers it.
+	#[test]
+	fn a_face_note_is_charged_to_the_declaration_that_named_the_face() -> Outcome<()> {
+		let root = "= Title\n#show: doc.with(heading-font: \"TestFace\")\n#show heading.where(level: 2): set text(font: \"RuleFace\")\n";
+		let mut refusals = lang::Refusals::default();
+		let rules = lang::rules::rule_set_for(&Theme::default(), root, "/r/main.typ", &mut refusals);
+		let sites = FaceSites::new("/r/main.typ", root, &rules,
+			vec![("ChapFace".to_string(), "/r/ch.typ".to_string(), Span::new(5, 9))]);
+		let line = |span: Span| lang::line_col_of(root, span.start).0;
+		let (file, span) = sites.site_of("TestFace");
+		assert_eq!((file, line(span)), ("/r/main.typ", 2), "the template application names it");
+		let (file, span) = sites.site_of("RuleFace");
+		assert_eq!((file, line(span)), ("/r/main.typ", 3), "the rule names it");
+		assert_eq!(sites.site_of("ChapFace"), ("/r/ch.typ", Span::new(5, 9)), "the included file names it");
+		let (file, span) = sites.site_of("Radley");
+		assert_eq!((file, line(span)), ("/r/main.typ", 2), "an idiom's own face falls to the template line");
+
+		// The note itself lands there, in its file, for a bold heading in a face shipped Regular only.
+		let base = std::env::temp_dir().join(fmt!("austenite-facesite-{}",
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+				.map(|d| d.as_nanos()).unwrap_or(0)));
+		res!(std::fs::create_dir_all(&base));
+		let src_font = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join("LibertinusSerif-Regular.otf");
+		res!(std::fs::copy(&src_font, base.join("TestFace-Regular.otf")));
+		let faces = FaceResolver::load(&base, &["TestFace".to_string()]);
+		let _ = std::fs::remove_dir_all(&base);
+		let mut theme = Theme::default();
+		lang::set::lower_root_declarations(root, &mut theme);
+		theme.heading.levels[0].weight = Some(700);
+		let mut skips = lang::Refusals::default();
+		note_missing_face_variants(&theme, &[], &faces, &sites, &mut skips);
+		assert_eq!(skips.total(), 1, "{:?}", skips.sites());
+		let site = &skips.sites()[0];
+		assert_eq!((site.file.as_str(), line(site.span)), ("/r/main.typ", 2), "{:?}", site);
 		Ok(())
 	}
 
@@ -3102,7 +3149,7 @@ mod tests {
 		// A document whose only citation is inside a table cell.
 		let cell = Cell::rich(vec![
 			Segment::text("Author "),
-			Segment::cite(vec!["scott1976moral".to_string()]),
+			Segment::cite(vec!["scott1976moral".to_string()], crate::ir::Site::none()),
 		], Align::Left);
 		let mut blocks = vec![Block::Table(Table::new(false, vec![Row::new(vec![cell])]))];
 

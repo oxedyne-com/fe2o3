@@ -368,6 +368,19 @@ pub fn layout(
 )
 	-> Outcome<Node>
 {
+	Ok(Node::HBox(res!(layout_box(fonts, style, expr, display))))
+}
+
+/// [`layout`]'s box itself, for a caller that weaves its leaves into a line: there is no other shape a
+/// maths layout could take, so the caller has none to fall back from.
+pub fn layout_box(
+	fonts:		Arc<FontSet>,
+	style: &Theme,
+	expr:		&Atom,
+	display:	bool,
+)
+	-> Outcome<BoxNode>
+{
 	let m = res!(build(style, expr, Level::Text, display));
 
 	// The baseline's distance from the box top. A display box stands on its own, so its top is its
@@ -380,7 +393,7 @@ pub fn layout(
 	};
 
 	let (nodes, dims) = emit(m, base);
-	Ok(Node::HBox(BoxNode::new(nodes, dims)))
+	Ok(BoxNode::new(nodes, dims))
 }
 
 /// The body face's ascent at a size: how far the line top sits above the baseline, the reference an

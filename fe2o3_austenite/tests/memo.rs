@@ -16,13 +16,16 @@ use oxedyne_fe2o3_austenite::compile::{
 };
 use oxedyne_fe2o3_austenite::doc::{
 	Block,
+	DocInfo,
 	Segment,
 };
 use oxedyne_fe2o3_austenite::emit::svg;
+use oxedyne_fe2o3_austenite::ir::Site;
 use oxedyne_fe2o3_austenite::fonts::{
 	self,
 	FaceResolver,
 };
+use oxedyne_fe2o3_austenite::lang::Refusals;
 use oxedyne_fe2o3_austenite::memo::Memo;
 use oxedyne_fe2o3_austenite::page::PageGeometry;
 use oxedyne_fe2o3_austenite::theme::Theme;
@@ -83,11 +86,13 @@ fn compile_pages(blocks: Vec<Block>, bib: Option<Bibliography>, memo: Option<&mu
 		blocks,
 		fonts,
 		geom,
-		style:	Theme::default(),
-		title:	String::new(),
-		faces:	FaceResolver::default(),
-		front:	None,
+		style:		Theme::default(),
+		title:		String::new(),
+		faces:		FaceResolver::default(),
+		front:		None,
 		bib,
+		doc_info:	DocInfo::default(),
+		refusals:	Refusals::default(),
 	};
 	let mut memo	= memo;
 	let rendered	= res!(author_and_run_memo(assembled, memo.as_deref_mut()));
@@ -321,13 +326,13 @@ fn rich_paragraph_one(drop_first_use: bool) -> Block {
 		segments.push(Segment::text(" as "));
 	}
 	segments.push(Segment::text("the technique that caches "));
-	segments.push(Segment::cite(vec!["scott1976".to_string()]));
+	segments.push(Segment::cite(vec!["scott1976".to_string()], Site::none()));
 	segments.push(Segment::text("'s peasant economy against a repeated anchor, recording it "));
-	segments.push(Segment::index("Ledger anchor", None, false, vec![Segment::text("Ledger anchor")]));
+	segments.push(Segment::index("Ledger anchor", None, false, vec![Segment::text("Ledger anchor")], Site::none()));
 	segments.push(Segment::text(" once per pass"));
-	segments.push(Segment::footnote(vec![Segment::text("A pass converges when no anchor moves twice.")]));
+	segments.push(Segment::footnote(vec![Segment::text("A pass converges when no anchor moves twice.")], Site::none()));
 	segments.push(Segment::text(", and marks it "));
-	segments.push(Segment::margin_note("R1", vec!["R1".to_string()]));
+	segments.push(Segment::margin_note("R1", vec!["R1".to_string()], Site::none()));
 	segments.push(Segment::text("in the outside margin."));
 	Block::rich(segments)
 }
@@ -342,13 +347,13 @@ fn rich_paragraph_two() -> Block {
 		Segment::text("The account returns to "),
 		Segment::glossary("memoisation", "memoisation"),
 		Segment::text(" once more, this time citing "),
-		Segment::cite(vec!["zuboff2019a".to_string(), "zuboff2019b".to_string()]),
+		Segment::cite(vec!["zuboff2019a".to_string(), "zuboff2019b".to_string()], Site::none()),
 		Segment::text(" on the surveillance ledger, indexing "),
-		Segment::index("Surveillance ledger", None, false, vec![Segment::text("Surveillance ledger")]),
+		Segment::index("Surveillance ledger", None, false, vec![Segment::text("Surveillance ledger")], Site::none()),
 		Segment::text(" and noting"),
-		Segment::footnote(vec![Segment::text("Both works share the one 2019 imprint year.")]),
+		Segment::footnote(vec![Segment::text("Both works share the one 2019 imprint year.")], Site::none()),
 		Segment::text(" the citation in "),
-		Segment::margin_note("R2", vec!["R2".to_string()]),
+		Segment::margin_note("R2", vec!["R2".to_string()], Site::none()),
 		Segment::text("the margin."),
 	])
 }

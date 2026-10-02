@@ -12,6 +12,7 @@ use crate::{
         core::FileAccess,
         floc::{
             DataLocation,
+            FileLocation,
             FileNum,
             StoredFileLocation,
         },
@@ -46,8 +47,24 @@ use std::{
         Read,
         Write,
     },
+    path::PathBuf,
     sync::Arc,
 };
+
+/// The locations a collection carried records to, for one cache bot to re-anchor.
+type CacheBatch<const UIDL: usize, UID> = Vec<(Vec<u8>, FileLocation, Meta<UIDL, UID>)>;
+
+/// A transcribed file, ready to be put in place of the one it was made from.
+struct Collected<
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL>,
+>{
+    fstat:      FileState,
+    batches:    Vec<CacheBatch<UIDL, UID>>,     // one for each cache bot
+    shrink:     usize,                          // bytes lost from the data and index files
+    old_size:   usize,                          // data file length before
+    new_size:   usize,                          // data file length after
+}
 
 /// `InitGarbageBot`s have two functions:
 /// 1. Initialisation where they are asked to read files and fill the caches.
@@ -268,7 +285,7 @@ impl<
                             // The index file cannot be read, so it is of no use to a scan
                             // either.  Read the data file and write the index back from it.
                             warn!(sync_log::stream(),
-                                "{}: Index file {} could not be read, so it is rebuilt by \
+                                "{}: Index file {} could not be used, so it is rebuilt by \
                                 reading data file {}; until this completes, a scan of this \
                                 zone under-reports what it holds. Caused by {}.",
                                 self.ozid(), fnum, fnum, e);
@@ -298,7 +315,9 @@ impl<
     }
 
     /// Use the index file to update the cache with data file value locations, which should be
-    /// quicker than scanning the data file itself.
+    /// quicker than scanning the data file itself.  The index is read whole and checked against its
+    /// data file before a single entry reaches a cache, and an index that fails a check is
+    /// refused whole, for the caller to rebuild from the data file.
     #[allow(unused_assignments, unused_variables)]
     fn init_cache_index_file(
         &mut self,
@@ -313,6 +332,13 @@ impl<
         let mut count = 0;
         let mut dat_size2: u64 = 0;
         let typ = FileType::Index;
+        // The entries are held back until the checks at the end have passed.  Sent as they were
+        // read, the entries of an index that was not this data file's own (the index of the other
+        // generation of a collected file, after an interruption between a collection's renames)
+        // reached the cache first, and the cache refused the data file's own as no newer.  It was
+        // left naming offsets of a file that was not the one beside it, and served another
+        // record's bytes from every offset that happened to hold one (D-C, 2026-09-24).
+        let mut found = Vec::new();
 
         loop {
             // 1. Load the key Daticle bytes and while we're at it, compare the checksum.
@@ -350,40 +376,38 @@ impl<
                 Ok((Some(sindex), n)) => {
                     count += 1;
                     pos += n;
+                    // 3. The records of a data file are appended one after another, so each
+                    //    entry must start where the one before it ended.
+                    let start = sindex.ref_file_location().start;
+                    if start != dat_size2 {
+                        return Err(err!(
+                            "{}: The index file {} has an entry at data position {} where the \
+                            entries before it end at {}, so it does not describe the data file \
+                            beside it.", self.ozid(), fnum, start, dat_size2;
+                            Mismatch, Data));
+                    }
                     dat_size2 += sindex.keyval_len();
-                    // 3. Insert the key and location into the bot cache, informing an fbot about
-                    //    new data and old data that can be scheduled for garbage collection.  The
-                    //    bot we advise actually performs any garbage collection, so instead of
-                    //    choosing randomly, we allocate each bot to an exclusive fraction of files
-                    //    based on their number.
+                    // 4. Keep the key and location for the bot cache.
                     let cind = key.index();
                     let kbyts = key.into_bytes();
                     let chash = res!(<alias::ChooseHash>::try_from(
                         &chash[..constant::CACHE_HASH_BYTES]));
-                    let cbwind = ChooseCache::<PR>::choose_cbot_select(
-                        alias::ChooseHashUint::from_be_bytes(chash),
-                        self.cfg().num_zones,
-                        self.cfg().num_cbots_per_zone,
-                    );
-                    let cbots = res!(self.cbots());
-                    let bot = res!(cbots.get_bot(**cbwind.bpind()));
-                    res!(bot.send(
-                        OzoneMsg::Insert(
-                            kbyts,
-                            None,
-                            cind,
-                            sindex.ref_file_location().clone(),
-                            sindex.ref_stored_file_location().buf.len(),
-                            meta,
-                            Responder::none(Some(self.ozid())),
-                            None,
-                        )
+                    found.push((
+                        kbyts,
+                        cind,
+                        sindex.ref_file_location().clone(),
+                        sindex.ref_stored_file_location().buf.len(),
+                        meta,
+                        chash,
                     ));
                 },
             }
         }
 
-        // 8. Do size check.
+        // 5. Do size check.  The index must have been read to the byte, and the records it names
+        //    must add up to the data file's length, which is what tells an index from the
+        //    other generation of a collected file.  A collection only ever shortens a file, so
+        //    the index of either generation is the wrong length for the data of the other.
         if pos != ind_size {
             return Err(err!(
                 "{}: After initial caching of data file {} using the index file, the \
@@ -397,6 +421,32 @@ impl<
                 file data count came to {} bytes, but the originally surveyed file \
                 size was {}.", self.ozid(), fnum, dat_size2, dat_size1;
                 Mismatch, Data));
+        }
+
+        // 6. Insert the keys and locations into the bot cache, informing an fbot about new data
+        //    and old data that can be scheduled for garbage collection.  The bot we advise
+        //    actually performs any garbage collection, so instead of choosing randomly, we
+        //    allocate each bot to an exclusive fraction of files based on their number.
+        for (kbyts, cind, floc, ilen, meta, chash) in found {
+            let cbwind = ChooseCache::<PR>::choose_cbot_select(
+                alias::ChooseHashUint::from_be_bytes(chash),
+                self.cfg().num_zones,
+                self.cfg().num_cbots_per_zone,
+            );
+            let cbots = res!(self.cbots());
+            let bot = res!(cbots.get_bot(**cbwind.bpind()));
+            res!(bot.send(
+                OzoneMsg::Insert(
+                    kbyts,
+                    None,
+                    cind,
+                    floc,
+                    ilen,
+                    meta,
+                    Responder::none(Some(self.ozid())),
+                    None,
+                )
+            ));
         }
 
         Ok(())
@@ -724,20 +774,192 @@ impl<
     ///                     |                        |                       |
     ///
     ///```
-    /// Returns whether the file state can be eliminated because the data file has been completely
-    /// deleted, or the new data file size.
+    ///
+    /// A collection commits in one place.  Everything before it, the transcription and the rebuilt
+    /// index in their temporary files, leaves the file as it was, and a failure there abandons the
+    /// collection with the old pair in place.  The commit is the new data file replacing the old,
+    /// which is the file's record of truth.  The index is derived from it, so it goes second, and
+    /// an interruption between the two leaves at worst an index that the next start refuses and
+    /// rebuilds from the data.  The cache is asked to re-anchor only after that, because the
+    /// request cannot be recalled: a cache bot behind a long queue applies it whenever it gets
+    /// there, and from then the cache names offsets of the new file.  A failure after the commit
+    /// therefore rolls forward and never back.
     fn collect_garbage(
         &mut self,
         fnum:       FileNum,
-        mut fstat:  FileState,
+        fstat:      FileState,
         fbot_index: usize,
     )
         -> Outcome<()>
     {
-        // [19] Perform transcription from data_reader to data_writer.
-
         hooks::collect_delay();
         trace!(sync_log::stream(), "{}: Performing garbage collection on file {}...", self.ozid(), fnum);
+
+        // 1. Transcribe the file and rebuild its index, into temporary files.  Nothing is
+        //    replaced, so a failure here leaves the file's pair as it was.
+        let mut done = match self.transcribe(fnum, fstat) {
+            Ok(done) => done,
+            Err(e) => return self.abandon_collection(fnum, fbot_index, e),
+        };
+        if hooks::collect_fails() {
+            return self.abandon_collection(fnum, fbot_index, err!(
+                "{}: Garbage collection of file {} failed on the test::hooks::set_collect_failure \
+                switch.", self.ozid(), fnum;
+                IO, File, Write));
+        }
+
+        // 2. Commit: the transcribed data file replaces the old one, and the directory entry is
+        //    made durable before the index is touched, so that no crash leaves the index of the
+        //    new generation beside the data of the old.
+        let (data_path, tmp_data_path, ind_path, tmp_ind_path) = self.collection_paths(fnum);
+        if let Err(e) = fs::rename(&tmp_data_path, &data_path) {
+            return self.abandon_collection(fnum, fbot_index, err!(e,
+                "{}: While replacing data file {} with its collected copy {:?}.",
+                self.ozid(), fnum, tmp_data_path;
+                IO, File, Write));
+        }
+
+        // From here the file is collected, and whatever goes wrong is carried past rather than
+        // undone.
+        let mut late = None;
+        self.keep(&mut late, Self::sync_dir(&self.zdir().dir));
+        hooks::commit_delay();
+
+        // 3. Replace the index with the one rebuilt from the new data file.
+        match fs::rename(&tmp_ind_path, &ind_path) {
+            Err(e) => self.keep(&mut late, Err(err!(e,
+                "{}: While replacing index file {} with its rebuilt copy {:?}, after its data \
+                file was replaced; the next start rebuilds the index from the data file.",
+                self.ozid(), fnum, tmp_ind_path;
+                IO, File, Write))),
+            Ok(()) => self.keep(&mut late, Self::sync_dir(&self.zdir().dir)),
+        }
+
+        // Both renames put a new inode behind an unchanged path and unlinked the old one, but
+        // an rbot that read this file earlier still holds the old inode open in its file cache
+        // for `constant::FILE_CACHE_EXPIRY_SECS`, and nothing about a rename reaches that cache.
+        // It would go on seeking to the NEW offsets in the OLD inode, which are not record
+        // boundaries there, so every read of a carried record would fail its checksum until the
+        // entry expired a quarter of an hour later. Hence this notice, and hence its position:
+        // after both renames, because an rbot told beforehand would simply reopen the path and
+        // cache the old inode again. Telling an rbot that has no entry, or one opened since the
+        // rename, costs it a reopen and nothing else.
+        let told = self.notify_file_replaced(fnum, &[FileType::Data, FileType::Index]);
+        self.keep(&mut late, told);
+
+        // 4. Ask the caches to re-anchor the records carried.  An answer that does not come
+        //    leaves the move entries for the fbot to translate reads by, and the file is not
+        //    collected again until the next start.
+        let updated = self.update_caches(fnum, &mut done);
+        self.keep(&mut late, updated);
+
+        // 5. Reset FileState, and send it back to the fbot.
+        done.fstat.reset_old_accounting();
+        let completed = OzoneMsg::GcCompleted(fnum, done.fstat, done.shrink);
+        let told = self.tell_fbot(fnum, fbot_index, completed);
+        self.keep(&mut late, told);
+        match late {
+            Some(e) => Err(err!(e,
+                "{}: The collection of file {} replaced the file, but did not finish cleanly.",
+                self.ozid(), fnum;
+                Data)),
+            None => {
+                debug!(sync_log::stream(), "{}: Reduced file {} size by {:.1}% from {} to {} bytes.",
+                    self.ozid(),
+                    fnum,
+                    100.0 * ((done.old_size - done.new_size) as f32) / (done.old_size as f32),
+                    done.old_size,
+                    done.new_size,
+                );
+                Ok(())
+            },
+        }
+    }
+
+    /// Where a file number's data and index files live, and where a collection of them works.
+    fn collection_paths(&self, fnum: FileNum) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
+        let dir = &self.zdir().dir;
+        (
+            dir.join(ZoneDir::relative_file_path(&FileType::Data, fnum)),
+            dir.join(ZoneDir::relative_gc_temp_path(&FileType::Data, fnum)),
+            dir.join(ZoneDir::relative_file_path(&FileType::Index, fnum)),
+            dir.join(ZoneDir::relative_gc_temp_path(&FileType::Index, fnum)),
+        )
+    }
+
+    /// Remembers the first thing to go wrong in a collection that has replaced its data file, and
+    /// logs the rest, so that the collection still runs to its end.
+    fn keep(&self, late: &mut Option<Error<ErrTag>>, result: Outcome<()>) {
+        if let Err(e) = result {
+            if late.is_none() {
+                *late = Some(e);
+            } else {
+                self.error(e);
+            }
+        }
+    }
+
+    fn tell_fbot(
+        &self,
+        fnum:       FileNum,
+        fbot_index: usize,
+        msg:        OzoneMsg<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<()>
+    {
+        let bots = res!(self.fbots());
+        let bot = res!(bots.get_bot(fbot_index));
+        if let Err(e) = bot.send(msg) {
+            return Err(err!(e,
+                "{}: Cannot send the outcome of the collection of file {} to fbot {}.",
+                self.ozid(), fnum, fbot_index;
+                Channel, Write));
+        }
+        Ok(())
+    }
+
+    /// Gives up a collection that has replaced nothing.  The temporary files go, because ozone
+    /// opens files for writing in append mode and the next collection of the file would otherwise
+    /// write after what this one left, and the file bot is told, so that it stops holding every
+    /// read and write of the file for a collection that is not coming.
+    fn abandon_collection(
+        &mut self,
+        fnum:       FileNum,
+        fbot_index: usize,
+        cause:      Error<ErrTag>,
+    )
+        -> Outcome<()>
+    {
+        let (_, tmp_data_path, _, tmp_ind_path) = self.collection_paths(fnum);
+        for path in [tmp_data_path, tmp_ind_path] {
+            if path.is_file() {
+                if let Err(e) = fs::remove_file(&path) {
+                    self.error(err!(e,
+                        "{}: Cannot remove {:?}, left by an abandoned collection of file {}.",
+                        self.ozid(), path, fnum;
+                        IO, File, Write));
+                }
+            }
+        }
+        let told = self.tell_fbot(fnum, fbot_index, OzoneMsg::GcAborted(fnum));
+        if let Err(e) = told {
+            self.error(e);
+        }
+        Err(err!(cause,
+            "{}: The collection of file {} was abandoned, and its data and index files are as \
+            they were.", self.ozid(), fnum;
+            Data))
+    }
+
+    /// Writes the data file's collected copy and its index, each to a temporary file, and works
+    /// out what the caches are to be told.  Replaces nothing.
+    fn transcribe(
+        &mut self,
+        fnum:       FileNum,
+        mut fstat:  FileState,
+    )
+        -> Outcome<Collected<UIDL, UID>>
+    {
         let typ = FileType::Data;
         // 1. Open the data file for reading.
         let (data_path, file) = res!(self.zdir().open_ozone_file(
@@ -750,8 +972,12 @@ impl<
         let mut data_reader = BufReader::new(file);
 
         // 2. Create new, temporary data file for writing.
-        let mut tmp_data_path = self.zdir().dir.clone();
-        tmp_data_path.push(ZoneDir::relative_gc_temp_path(&typ, fnum));
+        let (_, tmp_data_path, _, _) = self.collection_paths(fnum);
+        // One left by a collection that gave up, or by a crash, would be appended to, so that the
+        // new data file began with that earlier transcription.
+        if tmp_data_path.is_file() {
+            res!(fs::remove_file(&tmp_data_path));
+        }
         let mut new_start: u64 = 0;
         let old_sum = try_into!(usize, fstat.get_old_sum());
         
@@ -821,7 +1047,7 @@ impl<
 
             // Durability barrier before the rename below: force the transcribed
             // temporary data file to stable storage. Dropping the BufWriter
-            // flushes the buffer into the page cache, but the rename at step 7
+            // flushes the buffer into the page cache, but the rename in the commit
             // is a directory operation that can reach disk before the file's
             // contents do. A power loss in that window would leave the rename
             // durable and the file torn -- a renamed, torn file replacing a
@@ -880,7 +1106,8 @@ impl<
             Ok(f) => f,
         };
         let new_data_reader = BufReader::new(file);
-        fstat = res!(self.cache_data_file(
+        let batches;
+        (fstat, batches) = res!(self.index_collected(
             new_data_reader,
             fnum,
             fstat,
@@ -896,55 +1123,15 @@ impl<
         }
         dat_ind_file_size_decrease += old_ind_size - fstat.get_index_file_size();
 
-        // 7. Replace the old data file with the new temporary file.
-        res!(fs::rename(tmp_data_path, data_path));
-
-        // Persist the directory entries changed by the renames above (this data
-        // file here, and the index file inside `cache_data_file`). A rename is a
-        // directory metadata operation; fsyncing the file contents does not
-        // persist the rename itself, so without this a power loss could leave
-        // the directory pointing at a file that is not yet on disk. Both files
-        // live directly in the zone directory, so one fsync of it covers both.
-        res!(Self::sync_dir(&self.zdir().dir));
-
-        // Both renames put a new inode behind an unchanged path and unlinked the old one, but
-        // an rbot that read this file earlier still holds the old inode open in its file cache
-        // for `constant::FILE_CACHE_EXPIRY_SECS`, and nothing about a rename reaches that cache.
-        // It would go on seeking to the NEW offsets in the OLD inode, which are not record
-        // boundaries there, so every read of a carried record would fail its checksum until the
-        // entry expired a quarter of an hour later. Hence this notice, and hence its position:
-        // after both renames, because an rbot told beforehand would simply reopen the path and
-        // cache the old inode again. Telling an rbot that has no entry, or one opened since the
-        // rename, costs it a reopen and nothing else.
-        res!(self.notify_file_replaced(fnum, &[FileType::Data, FileType::Index]));
-
-        // 8. Reset FileState.
-        fstat.reset_old_accounting();
-
-        // [22] Send updated file state back to the fbot.
-        let bots = res!(self.fbots());
-        let bot = res!(bots.get_bot(fbot_index));
-        if let Err(e) = bot.send(
-            OzoneMsg::GcCompleted(
-                fnum,
-                fstat,
-                dat_ind_file_size_decrease,
-            )
-        ) {
-            return Err(err!(e,
-                "{}: Cannot send updated file state for file number {} to fbot {}",
-                self.ozid(), fnum, fbot_index;
-                Channel, Write));
-        }
-        debug!(sync_log::stream(), "{}: Reduced file {} size by {:.1}% from {} to {} bytes.",
-            self.ozid(),
-            fnum,
-            100.0 * ((old_size - new_size) as f32) / (old_size as f32),
+        Ok(Collected {
+            fstat,
+            batches,
+            shrink:     dat_ind_file_size_decrease,
             old_size,
             new_size,
-        );
-        Ok(())
+        })
     }
+
 
     /// Tells every rbot to drop its cached handle on the given files, because a collection has
     /// just renamed new ones over them.  Every pool in every zone is told: a file number is only
@@ -979,25 +1166,25 @@ impl<
     /// data and work its way sequentially through files, but here we want to allow values to be
     /// added to live files while we collect the garbage and therefore must update the cache and
     /// file state depending on live file changes.
-    pub fn cache_data_file(
+    ///
+    /// Only the temporary index is written, and the cache updates are gathered, one batch to a
+    /// cache bot, for `update_caches` to send once the collection has been committed.
+    fn index_collected(
         &mut self,
         mut reader: BufReader<File>,
         fnum:       FileNum,
         mut fstat:  FileState,
     )
-        -> Outcome<FileState>
+        -> Outcome<(FileState, Vec<CacheBatch<UIDL, UID>>)>
     {
         let typ = FileType::Data;
-        // 1. Name the index file and the temporary the rebuild is written to.  The rebuild
-        //    goes to the temporary and is renamed over the index at the end, so a reader
-        //    walking index files alongside this collection sees either the whole old index
-        //    or the whole new one, never a gap.  Writing in place would leave the file
-        //    absent, then partial, for the length of the rebuild, and a scan arriving in
-        //    that window would drop every key whose current value lives in this file.
-        let mut ind_path = self.zdir().dir.clone();
-        ind_path.push(ZoneDir::relative_file_path(&FileType::Index, fnum));
-        let mut tmp_ind_path = self.zdir().dir.clone();
-        tmp_ind_path.push(ZoneDir::relative_gc_temp_path(&FileType::Index, fnum));
+        // 1. Name the temporary the rebuild is written to.  The rebuild goes to the temporary and
+        //    is renamed over the index once the data file has been replaced, so a reader walking
+        //    index files alongside this collection sees either the whole old index or the whole
+        //    new one, never a gap.  Writing in place would leave the file absent, then partial,
+        //    for the length of the rebuild, and a scan arriving in that window would drop every
+        //    key whose current value lives in this file.
+        let (_, _, _, tmp_ind_path) = self.collection_paths(fnum);
         // An abandoned rebuild would otherwise be appended to, because ozone opens files
         // for writing in append mode.
         if tmp_ind_path.is_file() {
@@ -1009,11 +1196,10 @@ impl<
         let mut count = 0;
 
         // Prepare to buffer request to update caches.
-        let resp_g1 = Responder::new(Some(self.ozid()));
         let nc = self.cfg().num_cbots_per_zone();
-        let mut buffers = Vec::new();
+        let mut batches = Vec::new();
         for _ in 0..nc {
-            buffers.push(Vec::new());
+            batches.push(Vec::new());
         }
 
         {
@@ -1094,7 +1280,7 @@ impl<
                             self.cfg().num_cbots_per_zone,
                         );
                         let bpind = cbwind.bpind();
-                        buffers[**bpind].push((
+                        batches[**bpind].push((
                             key.into_bytes(),
                             sfloc.ref_file_location().clone(),
                             meta,
@@ -1105,7 +1291,7 @@ impl<
                         //let ibuf = StoredIndex::as_bytes(&mut floc); // update floc encoded length
                         let ibuf = sfloc.buf;
                         index_entry.extend_from_slice(&ibuf);
-                        res!(writer.write(&index_entry));
+                        res!(writer.write_all(&index_entry));
                         res!(fstat.inc_index_file_size(index_entry.len()));
                     },
                 }
@@ -1129,14 +1315,27 @@ impl<
             }
         } // close out that writer
 
-        // Put the rebuilt index in place in one step.
-        res!(fs::rename(&tmp_ind_path, &ind_path));
+        Ok((fstat, batches))
+    }
 
+    /// Sends each cache bot the locations its keys now have, and waits for the answers, spending
+    /// the move entry of each record a cache bot re-anchored.  Called only once the collection has
+    /// been committed, since a cache bot that has not yet read the request will apply it whatever
+    /// the sender does next.
+    fn update_caches(
+        &mut self,
+        fnum:   FileNum,
+        done:   &mut Collected<UIDL, UID>,
+    )
+        -> Outcome<()>
+    {
+        let resp_g1 = Responder::new(Some(self.ozid()));
+        let nc = self.cfg().num_cbots_per_zone();
         // Send cache update request batches to each cbot.
         let bots = res!(self.cbots());
         for i in (0..nc).rev() {
             let bot = res!(bots.get_bot(i));
-            if let Some(buf) = buffers.pop() { // Transfer ownership to OzoneMsg.
+            if let Some(buf) = done.batches.pop() { // Transfer ownership to OzoneMsg.
                 if let Err(e) = bot.send(
                     OzoneMsg::GcCacheUpdateRequest(
                         buf,
@@ -1158,7 +1357,9 @@ impl<
         for _ in 0..nc {
             match resp_g1.recv_timeout(constant::BOT_REQUEST_TIMEOUT) {
                 Err(e) => return Err(err!(e,
-                    "While collecting gc cache update response.";
+                    "{}: No answer to the cache update for file {} from a cbot.  The move \
+                    entries of its records stay, to translate reads by, and the file is not \
+                    collected again until the next start.", self.ozid(), fnum;
                     IO, Channel, Read)),
                 Ok(OzoneMsg::GcCacheUpdateResponse(old_flocs)) => {
                     for (old_floc, rid) in old_flocs {
@@ -1166,7 +1367,7 @@ impl<
                         // will ask for it at its old start again but a read already on its way,
                         // which the reader confirms and retries.  Its move entry is spent, and
                         // taken by record: the entry at that offset may be another's.
-                        fstat.map_and_remove(&old_floc.keyval(), &rid);
+                        done.fstat.map_and_remove(&old_floc.keyval(), &rid);
                     }
                 },
                 Ok(msg) => return Err(err!(
@@ -1174,7 +1375,7 @@ impl<
                     Channel, Unknown)),
             }
         }
-        Ok(fstat)
+        Ok(())
     }
 
     /// Is there a complete, checksum-valid key/value record beginning at any

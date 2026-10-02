@@ -11,9 +11,11 @@
 //! Every method resolves; none rejects or throws. A failure returns `{ error: "<file>:<line>:<col>:
 //! <message>", diagnostics, skipped }` -- `0:0` where the cause could not be traced to a source line --
 //! never a bare access-denied line and never a JavaScript exception, so a caller composes its diagnostics
-//! from a value it always receives. A project carrying `strict: true` turns a result that passed over a
-//! construct, produced no pages or set no content into such a failure, so a partial PDF never reads as
-//! success.
+//! from a value it always receives. A project carrying `strict: true` turns a result that was not set as
+//! written -- a construct passed over, a stand-in set for something asked for (an image or a logo that will
+//! not load, a figure that will not build, a label or a citation that resolves to nothing), a file or font
+//! family missing -- or that produced no pages or set no content into such a failure, so a partial PDF never
+//! reads as success.
 //!
 //! One capability is deliberately out of this lane and documented as a gap rather than stubbed: a recompile
 //! is from scratch -- the instance is shaped to hold an incremental block cache, but this lane does not
@@ -91,11 +93,12 @@ impl DaimondTypst {
 	}
 
 	/// Compiles a project to a single PDF: `{ pdf: Uint8Array, pages, diagnostics: [{ file, line, col,
-	/// message }], skipped: string | null }` on success, `{ error, diagnostics, skipped }` otherwise.
-	/// `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes], ...], fonts: [[path,
-	/// bytes], ...], strict?: bool }`; every entry is injected into the source map and nothing outside it
-	/// is read. `diagnostics` lists every construct the reader passed over; under `strict` any such site,
-	/// zero pages or a source setting no content is returned as `{ error }` instead of a PDF.
+	/// message, severity, kind, hint }], skipped: string | null }` on success, `{ error, diagnostics,
+	/// skipped }` otherwise. `project` is `{ main, sources: [[path, text], ...], assets: [[path, bytes],
+	/// ...], fonts: [[path, bytes], ...], strict?: bool }`; every entry is injected into the source map and
+	/// nothing outside it is read. `diagnostics` lists every site not set as written, and `skipped` the
+	/// constructs passed over among them; under `strict` a warning of a refusing kind, zero pages or a source
+	/// setting no content is returned as `{ error }` instead of a PDF.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
 		match self.run(project, Mode::Pdf) {
@@ -127,9 +130,9 @@ impl DaimondTypst {
 	/// than a blank preview against a cache that no longer holds anything. The memory-frugal successor to
 	/// [`Self::compile_project_vector`] -- see [`crate::delta`] for the shape and the residency contract.
 	/// Ids are opaque decimal strings, since a JavaScript number cannot hold every 64-bit hash exactly.
-	/// The return also carries `pages`, `diagnostics: [{ file, line, col, message }]` and `skipped` (the
-	/// terse summary line, or `null`) exactly as [`Self::compile_project`] does, and honours `strict` the
-	/// same way. On a strict refusal the version does not step, so the consumer's cache stays valid.
+	/// The return also carries `pages`, `diagnostics` and `skipped` exactly as [`Self::compile_project`]
+	/// does, and honours `strict` the same way. On a strict refusal the version does not step, so the
+	/// consumer's cache stays valid.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.run_delta(project) {
@@ -139,25 +142,27 @@ impl DaimondTypst {
 	}
 
 	/// The font families a compile of `project` can set by name, as a sorted `string[]`: the embedded
-	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family of each
-	/// `project.fonts` entry named `<Family>-<Variant>.{ttf,otf}` that the engine's face resolver loads.
-	/// `project` is optional; with none, or with no fonts, only the embedded families are listed. For a
-	/// missing-font pre-check before a compile.
+	/// families (`Libertinus Serif`, `Libertinus Mono`, `New Computer Modern Math`) and the family each face
+	/// of each `project.fonts` file declares, one per face of a collection. The list is read by the scan the
+	/// compile resolves `font:` against, so a file the engine does not load -- one without a `.ttf`, `.otf`,
+	/// `.ttc` or `.otc` name -- is not listed. `project` is optional; with none, or with no fonts, only the
+	/// embedded families are listed. For a missing-font pre-check before a compile, matching names as the
+	/// engine does, ignoring case and white space.
 	#[wasm_bindgen(js_name = fontFamilies)]
 	pub fn font_families(&self, project: &JsValue) -> JsValue {
 		let main_path	= PathBuf::from(main_of(project));
 		let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-		let injected	= read_font_pairs(project, &main_path, &mut files);
+		read_font_pairs(project, &main_path, &mut files);
 		let families	= if files.is_empty() {
-			compile::font_families(&main_path, &[])
+			compile::font_families(&main_path)
 		} else {
 			match vfs::install(files) {
 				Ok(())	=> {
-					let f = compile::font_families(&main_path, &injected);
+					let f = compile::font_families(&main_path);
 					let _ = vfs::clear();
 					f
 				},
-				Err(_)	=> compile::font_families(&main_path, &[]),
+				Err(_)	=> compile::font_families(&main_path),
 			}
 		};
 		let arr = js_sys::Array::new();
@@ -316,19 +321,16 @@ impl DaimondTypst {
 		F: FnOnce(&mut Self, &Path) -> Outcome<Ran<T>>,
 	{
 		let main_path	= PathBuf::from(main);
-		let sources		= match install_project(project, &main_path) {
-			Ok(s)	=> s,
-			Err(e)	=> {
-				let _ = vfs::clear();
-				return Err(Failure { head: compile::locate_error(&e, &main_path, &[]), report: None });
-			},
-		};
+		if let Err(e) = install_project(project, &main_path) {
+			let _ = vfs::clear();
+			return Err(Failure { head: Diagnostic::from_error(&e, &main_path), report: None });
+		}
 		let outcome	= catch_compile(|| body(self, &main_path), main);
 		let result	= match outcome {
 			Ok(Ran::Done(t, report))		=> Ok((t, report)),
 			Ok(Ran::Refused(head, report))	=> Err(Failure { head, report: Some(report) }),
 			Err(e)							=> Err(Failure {
-				head:	compile::locate_error(&e, &main_path, &sources),
+				head:	Diagnostic::from_error(&e, &main_path),
 				report:	None,
 			}),
 		};
@@ -384,14 +386,14 @@ impl DaimondTypst {
 			Some(f)	=> f.clone(),
 			None	=> return Err(err!("The embedded font set could not be built."; Init, Missing)),
 		};
-		let (assembled, refusals, skip)	= res!(compile::assemble(main_path, || Ok(fonts.clone())));
-		let empty = assembled.blocks.is_empty();
+		let assembled	= res!(compile::assemble(main_path, || Ok(fonts.clone())));
+		let empty		= assembled.blocks.is_empty();
 		let rendered = if use_memo {
 			res!(compile::author_and_run_memo(assembled, Some(&mut self.memo)))
 		} else {
 			res!(compile::author_and_run(assembled))
 		};
-		let report = Report::new(rendered.out.pages.len(), &refusals, skip, empty);
+		let report = Report::new(rendered.out.pages.len(), &rendered.refusals, empty);
 
 		// Keep the resolved ledger and heading table for a later section-rail query.
 		self.last_ledger	= Some(rendered.out.ledger.clone());
@@ -407,7 +409,7 @@ impl DaimondTypst {
 				return Ok(Ran::Refused(head, report));
 			}
 		}
-		let compile::Rendered { mut out, heads, geom: _ } = rendered;
+		let compile::Rendered { mut out, heads, geom: _, doc_info, refusals: _ } = rendered;
 		let product = match mode {
 			Mode::Svg => {
 				let mut pages: Vec<String> = Vec::with_capacity(out.pages.len());
@@ -416,28 +418,26 @@ impl DaimondTypst {
 				}
 				Product::Svg(pages)
 			},
-			Mode::Pdf => Product::Pdf(res!(compile::emit_pdf(&mut out, &heads))),
+			Mode::Pdf => Product::Pdf(res!(compile::emit_pdf(&mut out, &heads, &doc_info))),
 		};
 		Ok(Ran::Done(product, report))
 	}
 }
 
 /// Installs every source, asset and font of `project` into the source map, the main path naming the root
-/// among them, and returns the installed paths for placing a later error.
-fn install_project(project: &JsValue, main_path: &Path) -> Outcome<Vec<PathBuf>> {
+/// among them.
+fn install_project(project: &JsValue, main_path: &Path) -> Outcome<()> {
 	let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
 	read_text_pairs(project, "sources", &mut files);
 	read_byte_pairs(project, "assets", &mut files);
 	// A font is installed at the path the consumer named AND at the location the lone-file face resolver
 	// reads, so a face the document names resolves whatever path the consumer chose (see `read_font_pairs`).
-	let _ = read_font_pairs(project, main_path, &mut files);
+	read_font_pairs(project, main_path, &mut files);
 	if !files.contains_key(main_path) {
-		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing));
+		return Err(err!("The project has no source for its main file {:?}.", main_path; Input, Missing, File));
 	}
-	let mut paths: Vec<PathBuf> = files.keys().cloned().collect();
-	paths.sort();
 	res!(vfs::install(files));
-	Ok(paths)
+	Ok(())
 }
 
 /// The project's main path, `/main.typ` when it names none.
@@ -448,7 +448,15 @@ fn main_of(project: &JsValue) -> String {
 /// A failure the engine itself caused, with no source position to give.
 fn internal(msg: &str) -> Failure {
 	Failure {
-		head:	Diagnostic { file: String::new(), line: 0, col: 0, message: fmt!("internal: {}", msg) },
+		head:	Diagnostic {
+			file:		String::new(),
+			line:		0,
+			col:		0,
+			message:	fmt!("internal: {}", msg),
+			severity:	compile::Severity::Error,
+			kind:		compile::DiagnosticKind::Internal,
+			hint:		None,
+		},
 		report:	None,
 	}
 }
@@ -506,15 +514,11 @@ fn read_byte_pairs(project: &JsValue, key: &str, out: &mut HashMap<PathBuf, Vec<
 /// consumer named AND -- so the lone-file face resolver discovers it whatever path was chosen -- at the
 /// resolver's own `<root>/assets/fonts/<basename>` location (see [`book::project_font_path`]). Without the
 /// second placement an injected font is present in the map but invisible to the resolver, which reads only
-/// its own directory: a face the document names would silently fall back to the reading role. The consumer
-/// still names a usable face by its `<Family>-<Variant>.{ttf,otf}` basename and declares that family as a
-/// heading face; this makes such a font resolve regardless of the path it was injected under. Returns the
-/// paths as the consumer gave them.
-fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) -> Vec<PathBuf> {
-	let mut given_paths = Vec::new();
+/// its own directory.
+fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBuf, Vec<u8>>) {
 	let arr = match array_field(project, "fonts") {
 		Some(a)	=> a,
-		None	=> return given_paths,
+		None	=> return,
 	};
 	for entry in arr.iter() {
 		if let Ok(pair) = entry.dyn_into::<js_sys::Array>() {
@@ -526,13 +530,11 @@ fn read_font_pairs(project: &JsValue, main_path: &Path, out: &mut HashMap<PathBu
 							out.insert(routed, bytes.clone());
 						}
 					}
-					given_paths.push(given.clone());
 					out.insert(given, bytes);
 				}
 			}
 		}
 	}
-	given_paths
 }
 
 /// The bytes of a `Uint8Array` or an `ArrayBuffer`, or `None` for anything else.
@@ -588,8 +590,8 @@ fn set(obj: &js_sys::Object, key: &str, val: &JsValue) {
 	let _ = js_sys::Reflect::set(obj, &JsValue::from_str(key), val);
 }
 
-/// Sets `pages`, `diagnostics: [{ file, line, col, message }]` and `skipped` (string or `null`) from a
-/// report, the fields every compile result carries.
+/// Sets `pages`, `diagnostics: [{ file, line, col, message, severity, kind, hint }]` and `skipped`
+/// (string or `null`) from a report, the fields every compile result carries.
 fn set_report(obj: &js_sys::Object, rep: &Report) {
 	set(obj, "pages", &JsValue::from_f64(rep.pages as f64));
 	set(obj, "diagnostics", &diagnostics_array(&rep.diagnostics));
@@ -608,6 +610,13 @@ fn diagnostics_array(diags: &[Diagnostic]) -> js_sys::Array {
 		set(&entry, "line",		&JsValue::from_f64(d.line as f64));
 		set(&entry, "col",		&JsValue::from_f64(d.col as f64));
 		set(&entry, "message",	&JsValue::from_str(&d.message));
+		set(&entry, "severity",	&JsValue::from_str(d.severity.as_str()));
+		set(&entry, "kind",		&JsValue::from_str(d.kind.as_str()));
+		let hint = match &d.hint {
+			Some(h)	=> JsValue::from_str(h),
+			None	=> JsValue::NULL,
+		};
+		set(&entry, "hint", &hint);
 		arr.push(&entry);
 	}
 	arr

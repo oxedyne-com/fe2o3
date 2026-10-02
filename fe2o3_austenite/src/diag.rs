@@ -66,12 +66,28 @@ impl DiagnosticKind {
 		matches!(self, Self::Unsupported | Self::MissingFile | Self::Encoding | Self::Package | Self::MissingFont)
 	}
 
+	/// The kind of a curated-path refusal, by the class it was refused under. Every class but a missing or
+	/// unreadable file is a construct passed over or set with a stand-in.
+	pub(crate) fn from_refusal_class(class: crate::lang::RefusalClass) -> Self {
+		use crate::lang::RefusalClass;
+		match class {
+			RefusalClass::FixedPoint		=> Self::Unsupported,
+			RefusalClass::Introspective		=> Self::Unsupported,
+			RefusalClass::Unsupported		=> Self::Unsupported,
+			RefusalClass::MissingFile		=> Self::MissingFile,
+			RefusalClass::Unusable			=> Self::Unsupported,
+			RefusalClass::Encoding			=> Self::Encoding,
+		}
+	}
+
 	/// A hard error's kind, from the tags it was raised with anywhere in its chain. A file that is there
 	/// but not UTF-8 text is told from one that cannot be read at all, since the remedy differs. An error
 	/// raised as unimplemented is a construct passed over.
 	pub fn from_error_tags(e: &Error<ErrTag>) -> Self {
 		let tags = e.tags();
-		if tags.contains(&ErrTag::UTF8) {
+		if tags.contains(&ErrTag::Font) {
+			Self::MissingFont
+		} else if tags.contains(&ErrTag::UTF8) {
 			Self::Encoding
 		} else if tags.contains(&ErrTag::File) {
 			Self::MissingFile

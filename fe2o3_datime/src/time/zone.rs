@@ -2,7 +2,7 @@
 //! Anthropic Claude
 
 use crate::{
-    time::tzif::{TZifData, TZifParser, LocalTimeResult},
+    time::tzif::{TZifData, TZifParser, LocalTimeResult, local_to_utc_by},
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -337,7 +337,7 @@ impl CalClockZone {
 	pub fn offset_millis_at_time(&self, utc_millis: i64) -> Outcome<i32> {
 		// Use TZif data if available for accurate calculations
 		if let Some(ref tzif_data) = self.tzif_data {
-			let utc_seconds = utc_millis / 1000;
+			let utc_seconds = utc_millis.div_euclid(1000);
 			return tzif_data.get_offset_at_utc(utc_seconds).map(|offset| offset * 1000);
 		}
 
@@ -349,7 +349,7 @@ impl CalClockZone {
 				let base_offset_millis = base_offset * 1000;
 				
 				// Check if we're in daylight saving time
-				let dst_offset_result = res!(self.dst_offset_at_time(utc_millis, dst_rules));
+				let dst_offset_result = res!(self.dst_offset_at_time(utc_millis, *base_offset, dst_rules));
 				if let Some(dst_offset) = dst_offset_result {
 					Ok(base_offset_millis + dst_offset * 1000)
 				} else {
@@ -382,65 +382,41 @@ impl CalClockZone {
 	pub fn in_daylight_time(&self, utc_millis: i64) -> Outcome<bool> {
 		// Use TZif data if available for accurate DST detection
 		if let Some(ref tzif_data) = self.tzif_data {
-			let utc_seconds = utc_millis / 1000;
+			let utc_seconds = utc_millis.div_euclid(1000);
 			return tzif_data.is_dst_at_utc(utc_seconds);
 		}
 
 		// Fall back to embedded timezone rules
 		match &self.zone_data {
 			TimezoneData::Utc | TimezoneData::Fixed(_) => Ok(false),
-			TimezoneData::RuleBased { dst_rules, .. } => {
-				let dst_result = res!(self.dst_offset_at_time(utc_millis, dst_rules));
+			TimezoneData::RuleBased { base_offset, dst_rules } => {
+				let dst_result = res!(self.dst_offset_at_time(utc_millis, *base_offset, dst_rules));
 				Ok(dst_result.is_some())
 			},
 			TimezoneData::Local => Ok(false), // Fallback
 		}
 	}
 	
-	/// Ambiguous covers the autumn fold, where the local time is reached twice
-	/// and both are returned; None the spring gap, where it is never reached.
 	pub fn utc_to_local(&self, utc_millis: i64) -> LocalTimeResult<i64> {
-		if let Some(ref tzif_data) = self.tzif_data {
-			let utc_seconds = utc_millis / 1000;
-			match tzif_data.utc_to_local(utc_seconds) {
-				LocalTimeResult::Single((local_seconds, _)) => {
-					LocalTimeResult::Single(local_seconds * 1000)
-				},
-				LocalTimeResult::Ambiguous((local1, _), (local2, _)) => {
-					LocalTimeResult::Ambiguous(local1 * 1000, local2 * 1000)
-				},
-				LocalTimeResult::None => LocalTimeResult::None,
-			}
-		} else {
-			// Fall back to simple offset calculation
-			match self.offset_millis_at_time(utc_millis) {
-				Ok(offset) => LocalTimeResult::Single(utc_millis + offset as i64),
-				Err(_) => LocalTimeResult::None,
-			}
+		match self.offset_millis_at_time(utc_millis) {
+			Ok(offset) => LocalTimeResult::Single(utc_millis + offset as i64),
+			Err(_) => LocalTimeResult::None,
 		}
 	}
 
-	/// The inverse of utc_to_local, and ambiguous or absent over the same two
-	/// transitions.
+	/// The UTC instants at which the wall clock reads `local_millis`, as if that
+	/// were UTC. Ambiguous covers the autumn fold, where the clock reads it twice
+	/// and both are returned, the earlier instant first; None the spring gap,
+	/// where it never reads it. Every kind of zone answers the same way, from the
+	/// offsets it reports.
 	pub fn local_to_utc(&self, local_millis: i64) -> LocalTimeResult<i64> {
-		if let Some(ref tzif_data) = self.tzif_data {
-			let local_seconds = local_millis / 1000;
-			match tzif_data.local_to_utc(local_seconds) {
-				LocalTimeResult::Single((utc_seconds, _)) => {
-					LocalTimeResult::Single(utc_seconds * 1000)
-				},
-				LocalTimeResult::Ambiguous((utc1, _), (utc2, _)) => {
-					LocalTimeResult::Ambiguous(utc1 * 1000, utc2 * 1000)
-				},
-				LocalTimeResult::None => LocalTimeResult::None,
-			}
-		} else {
-			// Fall back to simple offset calculation
-			// This is less accurate for DST transitions but provides basic functionality
-			match self.offset_millis_at_time(local_millis) {
-				Ok(offset) => LocalTimeResult::Single(local_millis - offset as i64),
-				Err(_) => LocalTimeResult::None,
-			}
+		let found = local_to_utc_by(local_millis, 86_400_000, |u| {
+			self.offset_millis_at_time(u).map(|off| off as i64)
+		});
+		match found.as_slice() {
+			[] => LocalTimeResult::None,
+			[a] => LocalTimeResult::Single(*a),
+			[a, b, ..] => LocalTimeResult::Ambiguous(*a, *b),
 		}
 	}
 
@@ -565,7 +541,11 @@ impl CalClockZone {
 		}
 	}
 
-	fn from_zoneinfo_name(name: &str) -> Outcome<Self> {
+	/// A zone read from the host's zoneinfo tree, whose rules are exact for every
+	/// year the file or its footer covers. Unlike `new`, which falls back on an
+	/// approximate table and then on UTC, it is an error where the host has no
+	/// file by that name.
+	pub fn from_zoneinfo_name(name: &str) -> Outcome<Self> {
 		// The name may have come from the environment; keep it inside the
 		// tree.
 		if name.starts_with('/') || name.contains("..") {
@@ -605,7 +585,9 @@ impl CalClockZone {
 		}
 	}
 	
-	fn dst_offset_at_time(&self, utc_millis: i64, dst_rules: &[DstRule]) -> Outcome<Option<i32>> {
+	// The transitions are given as the wall clock reads just before them: the
+	// standard clock going into summer time, the summer clock coming out.
+	fn dst_offset_at_time(&self, utc_millis: i64, base_offset: i32, dst_rules: &[DstRule]) -> Outcome<Option<i32>> {
 		// Convert UTC milliseconds to a date for rule evaluation
 		let utc_date = res!(self.millis_to_date(utc_millis));
 		
@@ -617,11 +599,18 @@ impl CalClockZone {
 			});
 		
 		if let Some(rule) = applicable_rule {
-			let dst_start = res!(self.calculate_transition_time(&rule.dst_start, utc_date.year));
-			let dst_end = res!(self.calculate_transition_time(&rule.dst_end, utc_date.year));
+			let start_wall = res!(self.calculate_transition_time(&rule.dst_start, utc_date.year));
+			let end_wall = res!(self.calculate_transition_time(&rule.dst_end, utc_date.year));
+			let dst_start = start_wall - base_offset as i64 * 1000;
+			let dst_end = end_wall - (base_offset as i64 + rule.dst_offset as i64) * 1000;
 			
-			// Check if current time is within DST period
-			if utc_millis >= dst_start && utc_millis < dst_end {
+			// The southern hemisphere has its summer across the new year.
+			let summer = if dst_start < dst_end {
+				utc_millis >= dst_start && utc_millis < dst_end
+			} else {
+				utc_millis >= dst_start || utc_millis < dst_end
+			};
+			if summer {
 				Ok(Some(rule.dst_offset))
 			} else {
 				Ok(None)
@@ -689,7 +678,7 @@ impl CalClockZone {
 				
 				// Work backwards from the last day of month
 				while day >= 1 {
-					let day_of_week = self.day_of_week(year, month, day);
+					let day_of_week = res!(self.day_of_week(year, month, day));
 					if day_of_week == *weekday {
 						return Ok(day);
 					}
@@ -704,7 +693,7 @@ impl CalClockZone {
 				let mut current_day = *day;
 				
 				while current_day <= days_in_month {
-					let day_of_week = self.day_of_week(year, month, current_day);
+					let day_of_week = res!(self.day_of_week(year, month, current_day));
 					if day_of_week == *weekday {
 						return Ok(current_day);
 					}
@@ -746,18 +735,10 @@ impl CalClockZone {
 	}
 	
 	/// 0 = Sunday.
-	fn day_of_week(&self, year: i32, month: u8, day: u8) -> u8 {
-		// Use Zeller's congruence algorithm
-		let (q, m, k, j) = if month < 3 {
-			(day as i32, month as i32 + 12, (year - 1) % 100, (year - 1) / 100)
-		} else {
-			(day as i32, month as i32, year % 100, year / 100)
-		};
-		
-		let h = (q + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - 2 * j) % 7;
-		
-		// Convert to our format (0=Sunday)
-		((h + 5) % 7) as u8
+	fn day_of_week(&self, year: i32, month: u8, day: u8) -> Outcome<u8> {
+		// 1970-01-01 was a Thursday, which is day 4 counting from Sunday.
+		let days = res!(self.days_since_epoch(year, month, day));
+		Ok((days + 4).rem_euclid(7) as u8)
 	}
 	
 	fn system_offset_at_time(&self, _utc_millis: i64) -> Outcome<i32> {

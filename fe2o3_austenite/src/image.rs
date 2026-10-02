@@ -53,6 +53,15 @@ fn base_dir() -> Outcome<Option<PathBuf>> {
 	Ok(guard.clone())
 }
 
+/// Does `src` name an image that no candidate root holds? `false` when no document root is recorded, so a
+/// bare parse, outside any compile, checks nothing.
+pub fn is_missing(src: &str) -> bool {
+	match base_dir() {
+		Ok(Some(_))	=> matches!(resolve(src), Ok(None)),
+		_			=> false,
+	}
+}
+
 /// Resolves a Typst image path to a file on disk, or `None` when none of the candidate roots holds it.
 ///
 /// A leading `/` makes the path root-relative in Typst, not filesystem-absolute, so it is stripped and

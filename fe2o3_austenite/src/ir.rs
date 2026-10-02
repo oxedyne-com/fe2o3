@@ -86,7 +86,7 @@ impl FromDat for Sp {
 
 /// A span of the source a box came from, in byte offsets, so a diagnostic can quote it. The
 /// architecture makes this universal; Phase 0 carries it but does not yet render carets.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Span {
 	pub start:	u32,
 	pub end:	u32,
@@ -94,6 +94,31 @@ pub struct Span {
 
 impl Span {
 	pub fn new(start: u32, end: u32) -> Self { Self { start, end } }
+}
+
+/// Where a construct was written: the file it stands in and the byte span of the item that holds it. Its
+/// `Debug` names no position. The authoring memo keys a block by its derived `Debug`, and where a block was
+/// written does not change what it sets, so a block moved by an edit elsewhere is still served from the
+/// memo, and takes the sites of the block it is served for ([`crate::doc::Answered`]).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Site {
+	pub file:	Arc<str>,
+	pub span:	Span,
+}
+
+impl Site {
+	pub fn new(file: &Arc<str>, span: Span) -> Self { Self { file: file.clone(), span } }
+
+	/// A site in no file, for a construct built by the engine rather than read from a source.
+	pub fn none() -> Self { Self { file: Arc::from(""), span: Span::default() } }
+}
+
+impl Default for Site {
+	fn default() -> Self { Self::none() }
+}
+
+impl std::fmt::Debug for Site {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("Site") }
 }
 
 /// The three measurements a box occupies, split at the baseline as TeX splits them: `height` reaches

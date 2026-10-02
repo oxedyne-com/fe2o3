@@ -74,7 +74,7 @@ fn compile(src: &str, fonts: &[(String, Vec<u8>)]) -> Outcome<(Vec<Run>, Vec<Str
 	res!(vfs::install(files));
 	let set		= Arc::new(res!(fonts::libertinus()));
 	let result	= compile::assemble(&main, || Ok(set.clone()))
-		.and_then(|(a, _, _)| compile::author_and_run(a));
+		.and_then(compile::author_and_run);
 	let _ = vfs::clear();
 	let rendered = res!(result);
 
@@ -144,6 +144,27 @@ fn a_missing_family_is_a_hard_error() -> Outcome<()> {
 				assert!(msg.contains("Noto Sans"), "the error must name the families on offer: {}", msg);
 			},
 		}
+	}
+	Ok(())
+}
+
+/// A family written in a comment inside `#set text(...)` is no family, as Typst reads it: the rule's other
+/// arguments apply and nothing asks for the family, so the compile stands. One named after a block comment
+/// is really named, and is refused as any missing family is.
+#[test]
+fn a_font_named_in_a_comment_is_no_font() -> Outcome<()> {
+	let src = "#set text(size: 14pt // , font: \"NoSuchFace\"\n)\nBody words.\n";
+	let (runs, svgs) = match compile(src, &noto()) {
+		Ok(r)	=> r,
+		Err(e)	=> return Err(err!("a family in a comment was asked for: {}", e; Test, Mismatch)),
+	};
+	assert_eq!(svgs.len(), 1, "Typst sets one page");
+	assert_eq!(res!(run_of(&runs, "Body")).family, "Libertinus Serif");
+
+	match compile("#set text(/* size: 9pt, */ font: \"NoSuchFace\")\nBody words.\n", &noto()) {
+		Ok((runs, _))	=> return Err(err!(
+			"a family named after a comment was not asked for; runs were {:?}.", runs; Test, Mismatch)),
+		Err(e)			=> assert!(fmt!("{}", e).contains("NoSuchFace"), "the error names the family: {}", e),
 	}
 	Ok(())
 }

@@ -4,15 +4,21 @@
 //! [`doc::Block`](crate::doc::Block) the two-pass driver already knows how to set. A heading lowers to
 //! a heading; a paragraph of plain prose to a plain [`Block::Paragraph`], and a paragraph carrying any
 //! emphasis to a [`Block::RichParagraph`] of [`Segment`]s -- keeping the fast single-role break path
-//! for the common case. The source spans are dropped here, since the block layer does not yet carry
-//! them. As the surface language grows, this is where a richer item collapses to what the engine sets.
+//! for the common case. A construct that asks for something only setting it can give -- an image, a drawn
+//! figure, a footnote, a maths span, a reference, a citation, a margin note, an index marker -- carries the
+//! site of the item it stands in, so its setter answers for it there (see [`crate::doc::asks_of`]). As the
+//! surface language grows, this is where a richer item collapses to what the engine sets.
 
 use crate::doc::{
 	Block,
 	ListEntry,
 	Segment,
 };
-use crate::ir::Sp;
+use crate::ir::{
+	Site,
+	Sp,
+	Span,
+};
 use crate::table::{
 	Align,
 	Cell,
@@ -29,59 +35,95 @@ use super::ast::{
 	TableSpec,
 };
 
-/// Lowers a surface item list to the block list the driver authors from.
+use std::sync::Arc;
+
+/// The file a parse was read from and the byte offset its text starts at in that file, so an item's span
+/// becomes the site it stands at in the file.
+#[derive(Clone)]
+pub struct SiteBase {
+	pub file:	Arc<str>,
+	pub at:		u32,
+}
+
+impl SiteBase {
+	pub fn new(file: &str, at: u32) -> Self {
+		Self { file: Arc::from(file), at }
+	}
+
+	/// The base of a parse read from no file.
+	pub fn none() -> Self {
+		Self::new("", 0)
+	}
+
+	/// The site of the item at `span` in the parsed text.
+	fn site(&self, span: Span) -> Site {
+		Site::new(&self.file, Span::new(span.start.saturating_add(self.at), span.end.saturating_add(self.at)))
+	}
+}
+
+/// Lowers a surface item list to the block list the driver authors from, read from no file.
 pub fn blocks(items: &[Item]) -> Vec<Block> {
+	blocks_in(items, &SiteBase::none())
+}
+
+/// Lowers a surface item list to the block list the driver authors from, each construct that asks for
+/// something carrying the site of its item in the file `base` names.
+pub fn blocks_in(items: &[Item], base: &SiteBase) -> Vec<Block> {
 	let mut out = Vec::with_capacity(items.len());
 	for item in items {
 		match item {
-			Item::Heading { level, runs, label, .. }	=> out.push(
-				Block::heading_rich(*level, lower_runs(runs), label.clone())),
-			Item::Paragraph { runs, label, .. }	=> out.push(lower_paragraph(runs, label.clone())),
-			Item::List { ordered, items, loose, .. }	=> out.push(lower_list(*ordered, items, *loose)),
+			Item::Heading { level, runs, label, span }	=> out.push(
+				Block::heading_rich(*level, lower_runs_in(runs, &base.site(*span)), label.clone())),
+			Item::Paragraph { runs, label, span }	=> out.push(lower_paragraph(runs, label.clone(), &base.site(*span))),
+			Item::List { ordered, items, loose, .. }	=> out.push(lower_list(*ordered, items, *loose, base)),
 			Item::Code { lines, .. }			=> out.push(Block::code(lines.clone())),
-			Item::Table { spec, .. }			=> out.push(Block::table(build_table(spec))),
+			Item::Table { spec, span }			=> out.push(Block::table(build_table(spec, &base.site(*span)))),
 			Item::Rule { width, thickness, grey, .. }	=> out.push(Block::rule(*width, *thickness, *grey)),
 			Item::PageBreak { weak, .. }		=> out.push(Block::page_break(*weak)),
 			Item::ColBreak { weak, .. }			=> out.push(Block::ColBreak { weak: *weak }),
 			Item::Place { items, floating, clearance, .. }	=> out.push(Block::Place {
-				blocks:		blocks(items),
+				blocks:		blocks_in(items, base),
 				floating:	*floating,
 				clearance:	*clearance,
 			}),
 			Item::Space { height, .. }			=> out.push(Block::space(*height)),
-			Item::Figure { body, caption, supplement, label, placement, .. }	=> {
-				let caption = caption.as_ref().map(|runs| lower_runs(runs));
+			Item::Figure { body, caption, supplement, label, placement, span }	=> {
+				let site	= base.site(*span);
+				let caption	= caption.as_ref().map(|runs| lower_runs_in(runs, &site));
 				out.push(match body {
 					FigureBody::Table(spec)	=> Block::table_figure(
-						build_table(spec), caption, supplement.clone(), label.clone(), *placement),
+						build_table(spec, &site), caption, supplement.clone(), label.clone(), *placement),
 					FigureBody::Image { path, width, height, scale }	=> Block::image_figure(
 						path.clone(), *width, *height, *scale,
-						caption, supplement.clone(), label.clone(), *placement),
+						caption, supplement.clone(), label.clone(), *placement, site),
 					FigureBody::Code(figure)	=> Block::code_figure(
-						figure.clone(), caption, supplement.clone(), label.clone(), *placement),
+						figure.clone(), caption, supplement.clone(), label.clone(), *placement, site),
 				});
 			},
-			Item::Image { path, width, height, scale, .. }	=> out.push(
-				Block::image(path.clone(), *width, *height, *scale)),
-			Item::SectionBanner { path, .. }	=> out.push(Block::section_banner(path.clone())),
+			Item::Image { path, width, height, scale, span }	=> out.push(
+				Block::image(path.clone(), *width, *height, *scale, base.site(*span))),
+			Item::SectionBanner { path, span }	=> out.push(Block::section_banner(path.clone(), base.site(*span))),
 			Item::PrintGlossary { .. }			=> out.push(Block::Glossary),
 			Item::ClaimIndex { .. }				=> out.push(Block::ClaimIndex),
 			Item::Box { items, patch, placement, .. }	=> out.push(match placement {
-				Some(p)	=> Block::box_callout_float(blocks(items), patch.clone(), *p),
-				None	=> Block::box_callout(blocks(items), patch.clone()),
+				Some(p)	=> Block::box_callout_float(blocks_in(items, base), patch.clone(), *p),
+				None	=> Block::box_callout(blocks_in(items, base), patch.clone()),
 			}),
-			Item::Scoped { patch, items }		=> out.push(Block::Scoped { patch: patch.clone(), blocks: blocks(items) }),
+			Item::Scoped { patch, items, .. }	=> out.push(Block::Scoped { patch: patch.clone(), blocks: blocks_in(items, base) }),
 		}
 	}
 	out
 }
 
-/// Lowers a surface list, nesting and all, to a [`Block::List`]: each entry carries its own lowered runs
-/// and its sub-lists, themselves lowered to nested [`Block::List`]s by [`blocks`]. The parent list keeps
-/// its ordering regardless of what a child carries.
-fn lower_list(ordered: bool, items: &[ListItem], loose: bool) -> Block {
+/// Lowers a surface list, nesting and all, to a [`Block::List`]: each entry carries its own lowered runs,
+/// at its own item's site, and its sub-lists, themselves lowered to nested [`Block::List`]s whose items stand
+/// at theirs. The parent list keeps its ordering regardless of what a child carries.
+fn lower_list(ordered: bool, items: &[ListItem], loose: bool, base: &SiteBase) -> Block {
 	let entries = items.iter()
-		.map(|it| ListEntry { segments: lower_runs(&it.runs), children: blocks(&it.children) })
+		.map(|it| ListEntry {
+			segments:	lower_runs_in(&it.runs, &base.site(it.span)),
+			children:	blocks_in(&it.children, base),
+		})
 		.collect();
 	Block::list(ordered, entries, loose)
 }
@@ -90,13 +132,13 @@ fn lower_list(ordered: bool, items: &[ListItem], loose: bool) -> Block {
 /// carrying its inline runs lowered to segments and its alignment from the [`AlignSpec`]. A header row's
 /// cells set centred under the fixed forms; a closure is evaluated per cell, so a `(col, row) => ...`
 /// spec sets each cell exactly as its own row/column logic dictates.
-fn build_table(spec: &TableSpec) -> Table {
+fn build_table(spec: &TableSpec, site: &Site) -> Table {
 	let ncols = spec.ncols.max(1);
 	let mut rows:	Vec<Row>	= Vec::new();
 	for (r, chunk) in spec.cells.chunks(ncols).enumerate() {
 		let mut cells = Vec::with_capacity(ncols);
 		for (c, runs) in chunk.iter().enumerate() {
-			let content = lower_runs(runs);
+			let content = lower_runs_in(runs, site);
 			cells.push(Cell::rich(content, cell_align(&spec.align, spec.header, r, c)));
 		}
 		rows.push(Row::new(cells));
@@ -139,21 +181,27 @@ fn cell_align(spec: &AlignSpec, header: bool, r: usize, c: usize) -> Align {
 /// (a single-role Knuth-Plass break); the moment it carries an emphasis run it becomes a rich paragraph
 /// of segments, which the driver breaks with a face per run. A `label` is the paragraph's trailing
 /// `<name>`, carried onto a display equation so an `@`-reference can resolve to it.
-fn lower_paragraph(runs: &[Inline], label: Option<String>) -> Block {
+fn lower_paragraph(runs: &[Inline], label: Option<String>, site: &Site) -> Block {
 	match runs {
 		[Inline::Text(text)]	=> Block::paragraph(text.clone()),
 		// A paragraph that is nothing but one maths span is a display equation on its own line. The
 		// template sets `math.equation(numbering: "(1)")`, so every display equation takes the next
 		// number; inline maths, a run among others, never does.
 		[Inline::Math(atom)]	=> Block::equation(atom.clone(), true, label),
-		_						=> Block::rich(lower_runs(runs)),
+		_						=> Block::rich(lower_runs_in(runs, site)),
 	}
 }
 
-/// Lowers a run of inlines to segments, then groups adjacent citations, so a `#cite ... #cite`
-/// sequence parted by nothing but whitespace sets as one parenthesis.
+/// Lowers a run of inlines read from no file to segments, as [`lower_runs_in`] does.
 pub(crate) fn lower_runs(runs: &[Inline]) -> Vec<Segment> {
-	group_adjacent_cites(runs.iter().map(lower_inline).collect())
+	lower_runs_in(runs, &Site::none())
+}
+
+/// Lowers a run of inlines to segments, each that asks for something carrying `site`, the site of the item
+/// the run stands in, then groups adjacent citations, so a `#cite ... #cite` sequence parted by nothing but
+/// whitespace sets as one parenthesis.
+pub(crate) fn lower_runs_in(runs: &[Inline], site: &Site) -> Vec<Segment> {
+	group_adjacent_cites(runs.iter().map(|r| lower_inline(r, site)).collect())
 }
 
 /// Groups adjacent citations into one, as Typst does: two or more `#cite` calls separated by nothing
@@ -162,14 +210,14 @@ pub(crate) fn lower_runs(runs: &[Inline]) -> Vec<Segment> {
 /// citations is dropped, matching the oracle.
 fn group_adjacent_cites(segments: Vec<Segment>) -> Vec<Segment> {
 	// Grouping can only change a run holding two or more citations.
-	if segments.iter().filter(|s| matches!(s, Segment::Cite(_))).count() < 2 {
+	if segments.iter().filter(|s| matches!(s, Segment::Cite { .. })).count() < 2 {
 		return segments;
 	}
 	let n = segments.len();
 	let mut out: Vec<Segment> = Vec::with_capacity(n);
 	let mut i = 0usize;
 	while i < n {
-		if let Segment::Cite(keys) = &segments[i] {
+		if let Segment::Cite { keys, site } = &segments[i] {
 			let mut group = keys.clone();
 			let mut j = i + 1;
 			// Absorb each following citation reachable across whitespace-only text alone.
@@ -179,14 +227,14 @@ fn group_adjacent_cites(segments: Vec<Segment>) -> Vec<Segment> {
 					k += 1;
 				}
 				match segments.get(k) {
-					Some(Segment::Cite(more))	=> {
+					Some(Segment::Cite { keys: more, .. })	=> {
 						group.extend(more.iter().cloned());
 						j = k + 1;
 					},
-					_							=> break,
+					_										=> break,
 				}
 			}
-			out.push(Segment::Cite(group));
+			out.push(Segment::Cite { keys: group, site: site.clone() });
 			i = j;
 		} else {
 			out.push(segments[i].clone());
@@ -201,7 +249,7 @@ fn is_whitespace_text(seg: &Segment) -> bool {
 	matches!(seg, Segment::Text(t) if t.chars().all(char::is_whitespace))
 }
 
-fn lower_inline(run: &Inline) -> Segment {
+fn lower_inline(run: &Inline, site: &Site) -> Segment {
 	match run {
 		Inline::Text(text)		=> Segment::text(text.clone()),
 		Inline::Strong(text)	=> Segment::strong(text.clone()),
@@ -210,16 +258,16 @@ fn lower_inline(run: &Inline) -> Segment {
 		Inline::Super(text)		=> Segment::superscript(text.clone()),
 		Inline::SmallCaps(text)	=> Segment::SmallCaps(text.clone()),
 		Inline::Sub(text)		=> Segment::subscript(text.clone()),
-		Inline::PageRef(label)	=> Segment::page_ref(label.clone()),
+		Inline::PageRef(label)	=> Segment::page_ref(label.clone(), site.clone()),
 		Inline::Code(text)		=> Segment::code(text.clone()),
-		Inline::Math(atom)		=> Segment::math(atom.clone()),
+		Inline::Math(atom)		=> Segment::math(atom.clone(), site.clone()),
 		Inline::Glossary { term, display }
 								=> Segment::glossary(term.clone(), display.clone()),
 		Inline::Index { term, sub, display, main }
-								=> Segment::index(term.clone(), sub.clone(), *main, lower_runs(display)),
-		Inline::Footnote(note)	=> Segment::footnote(lower_runs(note)),
-		Inline::Cite(keys)		=> Segment::cite(keys.clone()),
-		Inline::MarginNote { display, codes }	=> Segment::margin_note(display.clone(), codes.clone()),
+								=> Segment::index(term.clone(), sub.clone(), *main, lower_runs_in(display, site), site.clone()),
+		Inline::Footnote(note)	=> Segment::footnote(lower_runs_in(note, site), site.clone()),
+		Inline::Cite(keys)		=> Segment::cite(keys.clone(), site.clone()),
+		Inline::MarginNote { display, codes }	=> Segment::margin_note(display.clone(), codes.clone(), site.clone()),
 	}
 }
 
@@ -244,7 +292,7 @@ mod tests {
 		assert_eq!(segs.len(), 3, "got: {:?}", segs);
 		assert!(matches!(&segs[0], Segment::Text(t) if t == "A "));
 		match &segs[1] {
-			Segment::Cite(keys)	=> assert_eq!(keys, &vec!["a".to_string(), "b".to_string()]),
+			Segment::Cite { keys, .. }	=> assert_eq!(keys, &vec!["a".to_string(), "b".to_string()]),
 			other				=> panic!("expected one grouped cite, got {:?}", other),
 		}
 		assert!(matches!(&segs[2], Segment::Text(t) if t == " end."));
@@ -263,7 +311,7 @@ mod tests {
 		let segs = lower_runs(&runs);
 		assert_eq!(segs.len(), 1, "got: {:?}", segs);
 		match &segs[0] {
-			Segment::Cite(keys)	=> assert_eq!(
+			Segment::Cite { keys, .. }	=> assert_eq!(
 				keys, &vec!["a".to_string(), "b".to_string(), "c".to_string()]),
 			other				=> panic!("expected one grouped cite, got {:?}", other),
 		}
@@ -279,11 +327,11 @@ mod tests {
 		];
 		let segs = lower_runs(&runs);
 		let cites: Vec<&Segment> = segs.iter()
-			.filter(|s| matches!(s, Segment::Cite(_)))
+			.filter(|s| matches!(s, Segment::Cite { .. }))
 			.collect();
 		assert_eq!(cites.len(), 2, "expected two separate cites, got: {:?}", segs);
-		assert!(matches!(&cites[0], Segment::Cite(k) if k == &vec!["a".to_string()]));
-		assert!(matches!(&cites[1], Segment::Cite(k) if k == &vec!["b".to_string()]));
+		assert!(matches!(&cites[0], Segment::Cite { keys: k, .. } if k == &vec!["a".to_string()]));
+		assert!(matches!(&cites[1], Segment::Cite { keys: k, .. } if k == &vec!["b".to_string()]));
 		// The intervening prose survives.
 		assert!(segs.iter().any(|s| matches!(s, Segment::Text(t) if t == " and then ")));
 	}
@@ -298,7 +346,7 @@ mod tests {
 		];
 		let segs = lower_runs(&runs);
 		assert_eq!(segs.len(), 3);
-		assert!(matches!(&segs[1], Segment::Cite(k) if k == &vec!["a".to_string()]));
+		assert!(matches!(&segs[1], Segment::Cite { keys: k, .. } if k == &vec!["a".to_string()]));
 		// The trailing space after a lone cite is preserved.
 		assert!(matches!(&segs[2], Segment::Text(t) if t == " end."));
 	}
@@ -309,6 +357,6 @@ mod tests {
 		let runs = vec![Inline::Cite(vec!["a".to_string(), "b".to_string()])];
 		let segs = lower_runs(&runs);
 		assert_eq!(segs.len(), 1);
-		assert!(matches!(&segs[0], Segment::Cite(k) if k == &vec!["a".to_string(), "b".to_string()]));
+		assert!(matches!(&segs[0], Segment::Cite { keys: k, .. } if k == &vec!["a".to_string(), "b".to_string()]));
 	}
 }

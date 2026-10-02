@@ -3560,6 +3560,7 @@ dependencies = [
 name = "oxedyne_fe2o3_sys"
 version = "0.5.0"
 dependencies = [
+ "nix",
  "oxedyne_fe2o3_core",
 ]
 

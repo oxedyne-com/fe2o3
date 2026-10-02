@@ -13,8 +13,9 @@
 //! meets PDF's bottom-left, y-up one.
 //!
 //! The bytes are deterministic: no dates are written, the `/ID` is derived from the file's own
-//! content rather than the clock, and no producer string leaks a version or a build. The same page
-//! list yields the same bytes on every run, which is what a content-addressed pipeline needs.
+//! content rather than the clock, and the Info dictionary ([`PdfInfo`]) holds only what the caller
+//! gives it. The same page list and the same Info yield the same bytes on every run, which is what a
+//! content-addressed pipeline needs.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -316,9 +317,28 @@ fn build_outline_links(items: &[OutlineItem]) -> (Vec<OutlineLinks>, Vec<usize>)
 	(links, roots)
 }
 
-/// A PDF text string for a title: a parenthesised literal with `(`, `)` and `\` escaped when the text
-/// is printable ASCII, else a UTF-16BE hex string with a byte-order mark so any Unicode renders. Both
-/// forms are deterministic, which the content-addressed file needs.
+/// The PDF Info dictionary, the properties a viewer's document panel shows. A field left `None` writes
+/// no entry; a set one is encoded as an outline title is ([`pdf_text_string`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PdfInfo {
+	pub title:		Option<String>,
+	pub author:		Option<String>,
+	pub subject:	Option<String>,
+	pub keywords:	Option<String>,
+	pub creator:	Option<String>,
+	pub producer:	Option<String>,
+}
+
+impl PdfInfo {
+	fn is_empty(&self) -> bool {
+		self.title.is_none() && self.author.is_none() && self.subject.is_none()
+			&& self.keywords.is_none() && self.creator.is_none() && self.producer.is_none()
+	}
+}
+
+/// A PDF text string for a title or an Info dictionary value: a parenthesised literal with `(`, `)` and
+/// `\` escaped when the text is printable ASCII, else a UTF-16BE hex string with a byte-order mark so any
+/// Unicode renders. Both forms are deterministic, which the content-addressed file needs.
 fn pdf_text_string(s: &str) -> String {
 	if s.bytes().all(|b| (0x20..0x7f).contains(&b)) {
 		let mut out = String::from("(");
@@ -348,6 +368,7 @@ pub struct PdfWriter {
 	pages:		Vec<PdfPage>,
 	compress:	bool,
 	outline:	Vec<OutlineItem>,
+	info:		Option<PdfInfo>,
 }
 
 impl PdfWriter {
@@ -360,6 +381,13 @@ impl PdfWriter {
 	/// uncompressed stream is trivially deterministic and easy to read while the writer is young.
 	pub fn with_compression(mut self, on: bool) -> Self {
 		self.compress = on;
+		self
+	}
+
+	/// Sets the Info dictionary the trailer's `/Info` names. A writer given none, or one with every field
+	/// unset, writes no `/Info` at all.
+	pub fn with_info(mut self, info: PdfInfo) -> Self {
+		self.info = Some(info);
 		self
 	}
 
@@ -379,8 +407,8 @@ impl PdfWriter {
 	/// returns it. The bytes are exactly those [`PdfStream`] writes page by page, so a caller that
 	/// cannot hold the whole document keeps the identical file by streaming to a file handle instead.
 	pub fn to_bytes(&self) -> Outcome<Vec<u8>> {
-		let mut stream = res!(PdfStream::new_with_outline(
-			Vec::new(), self.pages.len(), self.compress, self.outline.clone()));
+		let mut stream = res!(PdfStream::new_with_outline_and_info(
+			Vec::new(), self.pages.len(), self.compress, self.outline.clone(), self.info.clone()));
 		for page in &self.pages {
 			res!(stream.page(page));
 		}
@@ -416,6 +444,7 @@ pub struct PdfStream<W: Write> {
 	hash_b:		u64,			// running FNV-1a of the body, second half
 	outline:	Vec<OutlineItem>,	// document outline entries, empty for none
 	outline_root:	usize,		// object number of the /Outlines dict, zero when there is no outline
+	info:		Option<PdfInfo>,	// the Info dictionary the trailer's /Info points at, unset for none
 	glyph_slots:	HashMap<u64, (usize, u8)>,	// outline content key -> (font index, code)
 	fonts:		Vec<Type3Font>,	// one Type-3 font per 256 distinct glyphs, in assignment order
 	cid_slots:	HashMap<u64, usize>,	// font program key -> index into `cid_fonts`
@@ -532,6 +561,22 @@ impl<W: Write> PdfStream<W> {
 	/// panel). Each entry's page must be one of the `n` promised, since its destination names that page
 	/// object. An empty outline yields a file byte-identical to [`new`]'s.
 	pub fn new_with_outline(out: W, n: usize, compress: bool, outline: Vec<OutlineItem>) -> Outcome<Self> {
+		Self::new_with_outline_and_info(out, n, compress, outline, None)
+	}
+
+	/// As [`new_with_outline`](Self::new_with_outline), and the file also carries `info` as its Info
+	/// dictionary, written as the last object and named by the trailer's `/Info`. `None` writes the file
+	/// [`new_with_outline`](Self::new_with_outline) writes.
+	pub fn new_with_outline_and_info(
+		out:		W,
+		n:			usize,
+		compress:	bool,
+		outline:	Vec<OutlineItem>,
+		info:		Option<PdfInfo>,
+	)
+		-> Outcome<Self>
+	{
+		let info = info.filter(|i| !i.is_empty());
 		for it in &outline {
 			if it.page >= n {
 				return Err(err!(
@@ -561,6 +606,7 @@ impl<W: Write> PdfStream<W> {
 			hash_b:		FNV_BASIS_B,
 			outline,
 			outline_root,
+			info,
 			glyph_slots:	HashMap::new(),
 			fonts:		Vec::new(),
 			cid_slots:	HashMap::new(),
@@ -1233,9 +1279,23 @@ impl<W: Write> PdfStream<W> {
 			res!(self.write_cid_fonts());
 		}
 
-		// The fixed page/content block is `2 + 2n` objects; the outline, every image and soft mask, and the
-		// Type-3 fonts took further numbers past it, so the highest object written is one below the next free
-		// number. A document with no outline, image or text leaves `next_extra` at `2 + 2n + 1`, the original.
+		// The Info dictionary is the last object, named by the trailer alone. An empty one was dropped at
+		// construction.
+		let info_obj = match self.info.take() {
+			Some(info)	=> {
+				let obj = self.next_extra;
+				self.next_extra += 1;
+				self.set_extra_offset(obj);
+				res!(self.write_info(obj, &info));
+				Some(obj)
+			},
+			None	=> None,
+		};
+
+		// The fixed page/content block is `2 + 2n` objects; the outline, every image and soft mask, the
+		// Type-3 fonts and the Info dictionary took further numbers past it, so the highest object written
+		// is one below the next free number. A document with none of them leaves `next_extra` at
+		// `2 + 2n + 1`.
 		let obj_count = self.next_extra - 1;
 
 		// The identifier is derived from the body already written, never from the clock. The two halves
@@ -1252,12 +1312,34 @@ impl<W: Write> PdfStream<W> {
 		for k in 1..=obj_count {
 			tail.push_str(&fmt!("{:010} 00000 n\r\n", self.offsets[k]));
 		}
+		let info_entry = match info_obj {
+			Some(o)	=> fmt!(" /Info {} 0 R", o),
+			None	=> String::new(),
+		};
 		tail.push_str(&fmt!(
-			"trailer\n<< /Size {} /Root 1 0 R /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
-			obj_count + 1, id, id, xref_off));
+			"trailer\n<< /Size {} /Root 1 0 R{} /ID [<{}> <{}>] >>\nstartxref\n{}\n%%EOF\n",
+			obj_count + 1, info_entry, id, id, xref_off));
 		res!(self.out.write_all(tail.as_bytes()));
 		res!(self.out.flush());
 		Ok(self.out)
+	}
+
+	/// Writes the Info dictionary object, one entry per field set, in a fixed order.
+	fn write_info(&mut self, obj: usize, info: &PdfInfo) -> Outcome<()> {
+		let mut dict = fmt!("{} 0 obj\n<<", obj);
+		let field = |key: &str, val: &Option<String>, dict: &mut String| {
+			if let Some(v) = val {
+				dict.push_str(&fmt!(" /{} {}", key, pdf_text_string(v)));
+			}
+		};
+		field("Title",		&info.title,	&mut dict);
+		field("Author",		&info.author,	&mut dict);
+		field("Subject",	&info.subject,	&mut dict);
+		field("Keywords",	&info.keywords,	&mut dict);
+		field("Creator",	&info.creator,	&mut dict);
+		field("Producer",	&info.producer,	&mut dict);
+		dict.push_str(" >>\nendobj\n");
+		self.body(dict.as_bytes())
 	}
 
 	/// Writes a run of body bytes: out to the sink, on to the running offset, and folded into both
@@ -1906,6 +1988,77 @@ mod tests {
 			assert!(bytes[off..].starts_with(want.as_bytes()),
 				"object {} offset {} does not open with '{}'", obj, off, want);
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_no_info_leaves_the_trailer_untouched_16() -> Outcome<()> {
+		// A writer nobody called `with_info` on writes no `/Info` at all -- byte for byte as before the
+		// dictionary existed.
+		let mut w = PdfWriter::new();
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(!text.contains("/Info"), "no /Info in the trailer, found: {}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_info_dictionary_carries_only_the_set_fields_17() -> Outcome<()> {
+		let info = PdfInfo {
+			title:		Some("A Title".to_string()),
+			author:		Some("An Author".to_string()),
+			subject:	None,
+			keywords:	None,
+			creator:	Some("Austenite".to_string()),
+			producer:	Some("Austenite".to_string()),
+		};
+		let mut w = PdfWriter::new().with_info(info);
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("/Info"), "the trailer names an /Info object, found: {}", text);
+		assert!(text.contains("/Title (A Title)"), "the title, found: {}", text);
+		assert!(text.contains("/Author (An Author)"), "the author, found: {}", text);
+		assert!(text.contains("/Creator (Austenite)"), "the creator, found: {}", text);
+		assert!(text.contains("/Producer (Austenite)"), "the producer, found: {}", text);
+		assert!(!text.contains("/Subject"), "no /Subject entry for an unset field");
+		assert!(!text.contains("/Keywords"), "no /Keywords entry for an unset field");
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_non_ascii_info_field_encodes_as_utf16_18() -> Outcome<()> {
+		// The Info dictionary shares the outline title's own encoder, so a non-Latin subject goes UTF-16BE.
+		let info = PdfInfo {
+			subject: Some("Ünïcödé".to_string()),
+			..Default::default()
+		};
+		let mut w = PdfWriter::new().with_info(info);
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.contains("/Subject <FEFF"), "a UTF-16BE hex string with its BOM, found: {}", text);
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_all_unset_info_writes_no_dictionary_19() -> Outcome<()> {
+		// A `PdfInfo` naming nothing is the same as never calling `with_info` -- no empty `<< >>` object
+		// for the trailer to point at for no reason.
+		let mut w = PdfWriter::new().with_info(PdfInfo::default());
+		let mut page = PdfPage::new(50.0, 50.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+		w.add_page(page);
+		let bytes = res!(w.to_bytes());
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(!text.contains("/Info"), "no /Info in the trailer, found: {}", text);
 		Ok(())
 	}
 }
