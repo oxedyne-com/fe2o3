@@ -2373,6 +2373,12 @@ mod tests {
 		assert!(said.contains("part way through record 1"), "message was {:?}", said);
 		// The records behind it are what says it is not one.
 		assert!(whole_records_inside(&damaged[second..], Fold, [0u8; 0]));
+		// And they must reach the end: whole records with bytes after them are no
+		// run, which is what keeps a record whose body holds a record from being
+		// taken for damage.
+		let mut ragged = damaged.clone();
+		ragged.extend_from_slice(&[0x07, 0x07, 0x07, 0x07, 0x07]);
+		assert!(!whole_records_inside(&ragged[second..], Fold, [0u8; 0]));
 		// And a record damaged in the last place is a cut as far as anyone can tell.
 		let (_, _, _, last) = res!(up_to(&bytes, entries.len() - 1));
 		let (_, old) = res!(varint_decode(&bytes[last + 1..]));
