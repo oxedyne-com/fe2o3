@@ -37,8 +37,8 @@ use oxedyne_fe2o3_austenite::eval::eval::{
 	EvalMode,
 };
 use oxedyne_fe2o3_austenite::eval::intro::{
+	Builder,
 	CounterKey,
-	Introspector,
 };
 use oxedyne_fe2o3_austenite::eval::lib::foundations::repr;
 use oxedyne_fe2o3_austenite::eval::lib::model::local::local_name;
@@ -57,11 +57,12 @@ use oxedyne_fe2o3_austenite::eval::{
 	Engine,
 	World,
 };
+use oxedyne_fe2o3_austenite::ir::Sp;
+use oxedyne_fe2o3_austenite::ledger::Position;
 use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-use std::collections::HashMap;
 use std::path::{
 	Path,
 	PathBuf,
@@ -419,13 +420,12 @@ fn walk_value(engine: &mut Engine, v: &Value, chain: &StyleChain, sink: &mut Vec
 fn realised(engine: &mut Engine, content: &Content) -> Outcome<Vec<Content>> {
 	let mut first = Vec::new();
 	res!(walk(engine, content, &StyleChain::root(), &mut first));
-	let mut index = HashMap::new();
+	let mut builder = Builder::new();
 	for (i, e) in first.iter().enumerate() {
-		if let Some(l) = e.location() {
-			index.insert(l, i);
-		}
+		builder.record(e, Position::new(1, Sp::ZERO, Sp(i as i32)), None);
 	}
-	engine.intro = Arc::new(Introspector { elems: first, index, ..Introspector::default() });
+	builder.page(1, &Value::None);
+	engine.intro = Arc::new(builder.finish());
 	engine.locator.reset();
 	let mut second = Vec::new();
 	res!(walk(engine, content, &StyleChain::root(), &mut second));

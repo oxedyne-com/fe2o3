@@ -34,6 +34,8 @@ use crate::eval::lib::model::common::{
 	K,
 };
 use crate::eval::lib::model::link;
+use crate::eval::lib::model::lookup;
+use crate::eval::select::Selector;
 use crate::eval::styles::{
 	StyleChain,
 	Styles,
@@ -249,8 +251,9 @@ struct Works {
 }
 
 fn works(engine: &mut Engine, span: Span) -> Outcome<Works> {
-	let bib = match engine.intro.elems.iter().find(|e| e.is(ElemKind::Bibliography)) {
-		Some(b)	=> b.clone(),
+	let bibs = res!(lookup::query(engine, &Selector::Elem(ElemKind::Bibliography, None), span));
+	let bib = match bibs.into_iter().next() {
+		Some(b)	=> b,
 		None	=> return Err(engine.error(DiagnosticKind::Type, span, "the document does not contain a bibliography")),
 	};
 	let texts: Vec<String> = match bib.field("data") {
@@ -266,7 +269,8 @@ fn works(engine: &mut Engine, span: Span) -> Outcome<Works> {
 		_					=> CiteStyle::Ieee,
 	};
 	let mut cited: Vec<String> = Vec::new();
-	for e in engine.intro.elems.iter() {
+	let citing = Selector::Or(vec![Selector::Elem(ElemKind::Cite, None), Selector::Elem(ElemKind::Ref, None)]);
+	for e in res!(lookup::query(engine, &citing, span)).iter() {
 		let key = match e.kind() {
 			Some(ElemKind::Cite)	=> e.field("key"),
 			Some(ElemKind::Ref)		=> e.field("target"),

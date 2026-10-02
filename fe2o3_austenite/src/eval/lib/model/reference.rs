@@ -236,4 +236,4 @@ fn refable_counter(e: &Content) -> Outcome<Counter> {
 }
 
 /// Is `l` a bibliography key rather than a document label? For the quote attribution and citations.
-pub fn is_bib_key(engine: &Engine, l: &Label) -> bool { lookup::bib_has(engine, l) }
+pub fn is_bib_key(engine: &mut Engine, l: &Label) -> bool { lookup::bib_has(engine, l) }

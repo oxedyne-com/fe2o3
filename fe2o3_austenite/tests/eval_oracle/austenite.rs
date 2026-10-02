@@ -27,7 +27,9 @@ use oxedyne_fe2o3_austenite::eval::content::{
 use oxedyne_fe2o3_austenite::eval::fixpoint::{
 	self,
 	Laid,
+	PageSink,
 };
+use oxedyne_fe2o3_austenite::eval::intro::Introspector;
 use oxedyne_fe2o3_austenite::eval::lib::foundations;
 use oxedyne_fe2o3_austenite::eval::ops;
 use oxedyne_fe2o3_austenite::eval::realise::{
@@ -46,7 +48,10 @@ use oxedyne_fe2o3_austenite::eval::{
 	Engine,
 	World,
 };
-use oxedyne_fe2o3_austenite::page::PlacedKind;
+use oxedyne_fe2o3_austenite::page::{
+	Page,
+	PlacedKind,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -54,6 +59,27 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 pub const PROBE: &str = "probe";
+
+/// Keeps the final pass's pages for level 4, which reads them. The harness may hold a document's pages;
+/// the pipeline's own sinks never do.
+#[derive(Debug, Default)]
+pub struct Keep {
+	pub pages:	Vec<Page>,
+}
+
+impl PageSink for Keep {
+	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
+		self.pages.push(page);
+		Ok(())
+	}
+
+	fn discard_pass(&mut self) -> Outcome<()> {
+		self.pages.clear();
+		Ok(())
+	}
+
+	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> { Ok(()) }
+}
 
 /// Where level-1 values were read from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,7 +170,8 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 			return out;
 		}
 	};
-	let laid = match fixpoint::run(&mut engine, &module) {
+	let mut kept = Keep::default();
+	let laid = match fixpoint::run(&mut engine, &module, &mut kept) {
 		Ok(l)	=> Some(l),
 		Err(e)	=> {
 			out.layout = Some(plain(&e));
@@ -165,7 +192,7 @@ fn compute(path: &std::path::Path, root: &std::path::Path, want: Want, contextua
 	}
 	if want.levels[3] {
 		out.pages = Some(match &laid {
-			Some(l)	=> Ok(pages(l)),
+			Some(_)	=> Ok(pages(&kept.pages)),
 			None	=> Err("no layout: the fixpoint did not run".to_string()),
 		});
 	}
@@ -319,7 +346,7 @@ fn content_json(c: &Content) -> J {
 
 pub fn positions(laid: &Laid) -> std::result::Result<Vec<PosRow>, String> {
 	let mut rows = Vec::new();
-	for e in &laid.intro.elems {
+	for e in laid.intro.elems() {
 		let kind = match e.kind() {
 			Some(k)	=> k,
 			None	=> continue,
@@ -532,8 +559,8 @@ fn element(
 
 // Level 4
 
-pub fn pages(laid: &Laid) -> Vec<APage> {
-	laid.pages.iter().map(|p| APage {
+pub fn pages(pages: &[Page]) -> Vec<APage> {
+	pages.iter().map(|p| APage {
 		width:	p.geom.width.to_pt(),
 		height:	p.geom.height.to_pt(),
 		runs:	p.frame.placed.iter().filter_map(|pl| match &pl.kind {

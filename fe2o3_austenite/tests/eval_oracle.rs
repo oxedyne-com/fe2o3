@@ -50,7 +50,7 @@ use oxedyne_fe2o3_austenite::eval::content::{
 	ElemKind,
 };
 use oxedyne_fe2o3_austenite::eval::fixpoint::Laid;
-use oxedyne_fe2o3_austenite::eval::intro::Introspector;
+use oxedyne_fe2o3_austenite::eval::intro::Builder;
 use oxedyne_fe2o3_austenite::eval::locate::Location;
 use oxedyne_fe2o3_austenite::eval::value::{
 	Dict,
@@ -60,10 +60,7 @@ use oxedyne_fe2o3_austenite::eval::value::{
 use oxedyne_fe2o3_austenite::font::ShapedText;
 use oxedyne_fe2o3_austenite::fonts;
 use oxedyne_fe2o3_austenite::ir::Sp;
-use oxedyne_fe2o3_austenite::ledger::{
-	Ledger,
-	Position,
-};
+use oxedyne_fe2o3_austenite::ledger::Position;
 use oxedyne_fe2o3_austenite::page::{
 	Frame,
 	Page,
@@ -360,7 +357,9 @@ fn position_reader_reads_known_positions() -> Outcome<()> {
 // A laid-out document built by hand in Austenite's own page and introspector types, placed where
 // `harness/baselines.typ` and `harness/positions.typ` put things, so Austenite's side of levels 2 and
 // 4 is read through the same code the conformance run uses and checked against the oracle.
-fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)], shift: f64) -> Outcome<Laid> {
+fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)], shift: f64)
+	-> Outcome<(Laid, Vec<Page>)>
+{
 	let fonts = Arc::new(res!(fonts::libertinus()));
 	let mut frame = Frame::new();
 	for (text, base) in lines {
@@ -370,11 +369,11 @@ fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)],
 		let y = Sp::from_pt(base + shift) - dims.height;
 		frame.push(Placed::new(Sp::from_pt(10.0), y, dims, PlacedKind::Text(st)));
 	}
-	let mut intro = Introspector::default();
+	let mut builder = Builder::new();
 	for (i, (kind, probe, page, x, y)) in located.iter().enumerate() {
 		let loc = Location(0x1000 + i as u64);
 		let label = if *probe { Some(Label::new("probe")) } else { None };
-		intro.elems.push(Content::Elem(Arc::new(Elem {
+		let elem = Content::Elem(Arc::new(Elem {
 			kind:		*kind,
 			fields:		Vec::new(),
 			label,
@@ -382,20 +381,17 @@ fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)],
 			span:		Span::detached(),
 			guards:		Vec::new(),
 			prepared:	true,
-		})));
-		intro.index.insert(loc, i);
-		intro.positions.insert(loc, Position::new(*page, Sp::from_pt(*x), Sp::from_pt(*y + shift)));
+		}));
+		builder.record(&elem, Position::new(*page, Sp::from_pt(*x), Sp::from_pt(*y + shift)), None);
 	}
-	intro.pages = 1;
+	builder.page(1, &Value::None);
 	let geom = PageGeometry::new(Sp::from_pt(200.0), Sp::from_pt(220.0), Sp::ZERO);
-	Ok(Laid {
-		pages:		vec![Page::new(1, geom, frame)],
-		runs:		Vec::new(),
-		ledger:		Ledger::default(),
-		intro:		Arc::new(intro),
+	Ok((Laid {
+		intro:		Arc::new(builder.finish()),
+		pages:		1,
 		passes:		1,
 		converged:	true,
-	})
+	}, vec![Page::new(1, geom, frame)]))
 }
 
 #[test]
@@ -418,9 +414,9 @@ fn austenite_side_readers_agree_with_the_oracle_on_hand_built_layout() -> Outcom
 		(ElemKind::Metadata, true, 1, 20.0, want_pos[1].y),
 		(ElemKind::Heading, false, 2, 20.0, 20.0),
 	];
-	let laid = res!(hand_laid(&lines, &located, 0.0));
+	let (laid, laid_pages) = res!(hand_laid(&lines, &located, 0.0));
 	let mut d = Vec::new();
-	layout::compare(&want_pages, &austenite::pages(&laid), &mut d);
+	layout::compare(&want_pages, &austenite::pages(&laid_pages), &mut d);
 	assert!(d.is_empty(), "hand-built layout differs from typst: {:?}", d);
 	let pos = match austenite::positions(&laid) {
 		Ok(p)	=> p,
@@ -430,9 +426,9 @@ fn austenite_side_readers_agree_with_the_oracle_on_hand_built_layout() -> Outcom
 	assert!(d.is_empty(), "hand-built positions differ from typst: {:?}", d);
 
 	// Moved by 1.5pt, both go red.
-	let moved = res!(hand_laid(&lines, &located, 1.5));
+	let (moved, moved_pages) = res!(hand_laid(&lines, &located, 1.5));
 	let mut d = Vec::new();
-	layout::compare(&want_pages, &austenite::pages(&moved), &mut d);
+	layout::compare(&want_pages, &austenite::pages(&moved_pages), &mut d);
 	assert!(!d.is_empty(), "a 1.5pt shift of every baseline must fail level 4");
 	let pos = match austenite::positions(&moved) {
 		Ok(p)	=> p,
@@ -441,7 +437,7 @@ fn austenite_side_readers_agree_with_the_oracle_on_hand_built_layout() -> Outcom
 	assert!(!harness::compare_positions(&want_pos, &pos).is_empty(), "a 1.5pt shift must fail level 2");
 	// An unlabelled metadata element is not a probe, so the rows no longer line up.
 	let unlabelled = [located[0], (ElemKind::Metadata, false, 1, 20.0, want_pos[1].y), located[2]];
-	let pos = match austenite::positions(&res!(hand_laid(&lines, &unlabelled, 0.0))) {
+	let pos = match austenite::positions(&res!(hand_laid(&lines, &unlabelled, 0.0)).0) {
 		Ok(p)	=> p,
 		Err(e)	=> return Err(err!("positions: {}", e; Invalid)),
 	};

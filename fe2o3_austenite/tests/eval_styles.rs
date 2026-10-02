@@ -661,7 +661,10 @@ fn a_guarded_element_skips_its_recipe_and_locatable_elements_get_tags() {
 	}
 	let mut e = engine();
 	let pairs = realise(&mut e, &guarded, &chain, RealiseMode::Inline).unwrap_or_else(|x| panic!("{:?}", x));
-	assert_eq!(pairs.iter().filter(|p| p.content.is(ElemKind::Metadata)).count(), 1);
+	// The recipe is skipped, so the element's own show runs: a metadata element shows as nothing, its
+	// start tag carrying it.
+	assert_eq!(plain(&pairs), "");
+	assert_eq!(pairs.iter().filter(|p| matches!(&p.tag, Some(Tag::Start(c)) if c.is(ElemKind::Metadata))).count(), 1);
 	// Plain text is neither locatable nor labelled: no location, no tags.
 	let mut e = engine();
 	let pairs = realise(&mut e, &t("a"), &StyleChain::root(), RealiseMode::Inline).unwrap_or_else(|x| panic!("{:?}", x));
@@ -677,9 +680,15 @@ fn page_styles_in_the_document_break_pages_around_them() {
 	]);
 	let mut e = engine();
 	let pairs = realise(&mut e, &body, &StyleChain::root(), RealiseMode::Document).unwrap_or_else(|x| panic!("{:?}", x));
-	let kinds: Vec<Option<ElemKind>> = pairs.iter().filter(|p| p.tag.is_none()).map(|p| p.content.kind()).collect();
-	assert_eq!(kinds, vec![Some(ElemKind::Metadata), Some(ElemKind::Pagebreak), Some(ElemKind::Metadata),
-		Some(ElemKind::Pagebreak)]);
+	// A metadata element shows as nothing, leaving its two tags; the break before the styled one is the
+	// weak break its page style makes, and the break after is the boundary.
+	let seq: Vec<String> = pairs.iter().map(|p| match (&p.tag, p.content.kind()) {
+		(Some(Tag::Start(c)), _)	=> format!("start {}", c.kind().map(|k| k.name()).unwrap_or("?")),
+		(Some(Tag::End(_)), _)		=> "end".to_string(),
+		(None, Some(k))				=> k.name().to_string(),
+		(None, None)				=> "?".to_string(),
+	}).collect();
+	assert_eq!(seq, ["start metadata", "end", "pagebreak", "start metadata", "end", "pagebreak"]);
 	// The page property rides on the second metadata and the leading break, not the trailing one.
 	let breaks: Vec<&Pair> = pairs.iter().filter(|p| p.content.is(ElemKind::Pagebreak)).collect();
 	assert_eq!(breaks[0].styles.values(ElemKind::Page, FieldId(0)).len(), 1);

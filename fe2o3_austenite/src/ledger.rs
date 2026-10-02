@@ -527,6 +527,24 @@ mod tests {
 	}
 
 	#[test]
+	fn location_anchors_survive_the_jdat_round_trip() {
+		// An evaluator location rides in the ledger as tag 7; the Pearl file ships this encoding, and
+		// `fe2o3_pearlite` decodes it through this same `Ledger::from_dat`.
+		let mut ledger = Ledger::new();
+		ledger.record(Anchor::new(
+			AnchorId::new(AnchorKind::Location, "00000000deadbeef"),
+			Position::new(2, Sp::from_pt(10.0), Sp::from_pt(20.0))));
+		ledger.total_pages = 2;
+		let back = match ledger.to_dat().and_then(Ledger::from_dat) {
+			Ok(l)	=> l,
+			Err(e)	=> panic!("{}", e.plain()),
+		};
+		let id = AnchorId::new(AnchorKind::Location, "00000000deadbeef");
+		assert_eq!(back.get(&id).map(|a| a.pos), Some(Position::new(2, Sp::from_pt(10.0), Sp::from_pt(20.0))));
+		assert!(AnchorKind::from_tag(8).is_err(), "an unknown kind tag is refused, not defaulted");
+	}
+
+	#[test]
 	fn record_sets_back_matter_start_on_the_citation_marker() {
 		let mut ledger = Ledger::new();
 		ledger.record(Anchor::new(

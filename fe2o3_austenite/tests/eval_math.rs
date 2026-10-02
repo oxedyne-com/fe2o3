@@ -14,7 +14,7 @@ use oxedyne_fe2o3_austenite::eval::content::{
 	ElemKind,
 };
 use oxedyne_fe2o3_austenite::eval::eval_source as eval_module;
-use oxedyne_fe2o3_austenite::eval::intro::Introspector;
+use oxedyne_fe2o3_austenite::eval::intro::Builder;
 use oxedyne_fe2o3_austenite::eval::realise::{
 	realise,
 	RealiseMode,
@@ -32,11 +32,11 @@ use oxedyne_fe2o3_austenite::ir::{
 	Node,
 	Sp,
 };
+use oxedyne_fe2o3_austenite::ledger::Position;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::transform::Transform;
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
@@ -101,13 +101,11 @@ fn austenite_nth(name: &str, src: &str, nth: usize) -> Outcome<(Vec<BoxF>, (f64,
 	if nth > 0 {
 		// The second pass sees the first's equations, as the fixpoint's second pass does.
 		let elems: Vec<Content> = pairs.iter().filter(|p| p.content.is(ElemKind::Equation)).map(|p| p.content.clone()).collect();
-		let mut index = HashMap::new();
+		let mut builder = Builder::new();
 		for (i, c) in elems.iter().enumerate() {
-			if let Some(l) = c.location() {
-				index.insert(l, i);
-			}
+			builder.record(c, Position::new(1, Sp::ZERO, Sp(i as i32)), None);
 		}
-		e.intro = Arc::new(Introspector { elems, index, ..Introspector::default() });
+		e.intro = Arc::new(builder.finish());
 		e.locator.reset();
 		pairs = match realise(&mut e, &module.content, &StyleChain::root(), mode) {
 			Ok(p)	=> p,
