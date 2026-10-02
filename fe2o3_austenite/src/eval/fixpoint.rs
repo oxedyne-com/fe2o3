@@ -109,6 +109,7 @@ impl PageSource for flow::Paginator {
 			None						=> Ok(None),
 			Some((mut page, setup))	=> {
 				res!(flow::decorate::decorate_page(engine, &mut page, &setup));
+				builder.document(res!(intro::document_info(&setup.styles)));
 				Ok(Some((page, setup.numbering.clone())))
 			},
 		}

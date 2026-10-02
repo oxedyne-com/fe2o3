@@ -449,6 +449,8 @@ pub struct PdfStream<W: Write> {
 	fonts:		Vec<Type3Font>,	// one Type-3 font per 256 distinct glyphs, in assignment order
 	cid_slots:	HashMap<u64, usize>,	// font program key -> index into `cid_fonts`
 	cid_fonts:	Vec<CidFont>,	// one embedded font per program, in order of first use
+	deferred:	bool,			// opened by `open`: the page tree, outline and Info are written by `close`
+	page_objs:	Vec<usize>,		// a deferred stream's page object numbers, in page order
 }
 
 /// One embedded font: the program, the glyphs shown from it with the text each stands for, and the
@@ -611,6 +613,8 @@ impl<W: Write> PdfStream<W> {
 			fonts:		Vec::new(),
 			cid_slots:	HashMap::new(),
 			cid_fonts:	Vec::new(),
+			deferred:	false,
+			page_objs:	Vec::new(),
 		};
 
 		res!(s.body(b"%PDF-1.7\n"));
@@ -645,6 +649,41 @@ impl<W: Write> PdfStream<W> {
 		Ok(s)
 	}
 
+	/// Opens a stream for a document whose page count, outline and Info dictionary are known only at the
+	/// end: the pages are written as they come, each on the next free object numbers, and
+	/// [`close`](Self::close) then writes the catalogue and the page tree naming them, the outline, the
+	/// subset fonts, the Info dictionary and the cross-reference table. Objects 1 and 2 are reserved for the
+	/// catalogue and the page tree, so a reader that follows the trailer finds them wherever they sit.
+	/// A stream opened here is ended by `close`; `finish` refuses it.
+	pub fn open(out: W, compress: bool) -> Outcome<Self> {
+		let mut s = Self {
+			out,
+			compress,
+			n:			usize::MAX,
+			offsets:	vec![0; 3],
+			pos:		0,
+			added:		0,
+			next_extra:	3,
+			hash_a:		FNV_BASIS_A,
+			hash_b:		FNV_BASIS_B,
+			outline:	Vec::new(),
+			outline_root:	0,
+			info:		None,
+			glyph_slots:	HashMap::new(),
+			fonts:		Vec::new(),
+			cid_slots:	HashMap::new(),
+			cid_fonts:	Vec::new(),
+			deferred:	true,
+			page_objs:	Vec::new(),
+		};
+		res!(s.body(b"%PDF-1.7\n"));
+		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
+		Ok(s)
+	}
+
+	/// How many pages have been written.
+	pub fn pages(&self) -> usize { self.added }
+
 	/// Writes the next page -- its page object and its content stream -- then advances. The page must
 	/// be the next of the `n` promised at construction; an extra page is a mismatch the file could not
 	/// name, so it is refused rather than written past the page tree.
@@ -660,8 +699,14 @@ impl<W: Write> PdfStream<W> {
 				name it.", self.n; Input, Invalid, Excessive));
 		}
 		let i			= self.added;
-		let page_obj	= 3 + 2 * i;
-		let content_obj	= 4 + 2 * i;
+		let (page_obj, content_obj) = if self.deferred {
+			let p = self.next_extra;
+			self.next_extra += 2;
+			self.page_objs.push(p);
+			(p, p + 1)
+		} else {
+			(3 + 2 * i, 4 + 2 * i)
+		};
 
 		// Assign object numbers for every image on the page -- one for the image itself, and one more for
 		// its soft mask when it carries translucency -- so the page's resource dictionary can name them
@@ -706,7 +751,7 @@ impl<W: Write> PdfStream<W> {
 			raw
 		};
 
-		self.offsets[page_obj] = self.pos;
+		self.set_extra_offset(page_obj);
 		let annots = match annots_obj {
 			Some(a)	=> fmt!(" /Annots {} 0 R", a),
 			None	=> String::new(),
@@ -718,7 +763,7 @@ impl<W: Write> PdfStream<W> {
 			resources(page, &img_objs, &page_fonts), content_obj, annots);
 		res!(self.body(head.as_bytes()));
 
-		self.offsets[content_obj] = self.pos;
+		self.set_extra_offset(content_obj);
 		let filter = if self.compress { " /Filter /FlateDecode" } else { "" };
 		let open = fmt!(
 			"{} 0 obj\n<< /Length {}{} >>\nstream\n", content_obj, bytes.len(), filter);
@@ -1225,7 +1270,7 @@ impl<W: Write> PdfStream<W> {
 				Some(p)	=> item_base + p,
 				None	=> root,
 			};
-			let page_obj = 3 + 2 * item.page;
+			let page_obj = if self.deferred { self.page_objs[item.page] } else { 3 + 2 * item.page };
 
 			let mut dict = fmt!("{} 0 obj\n<< /Title {} /Parent {} 0 R",
 				obj, pdf_text_string(&item.title), parent);
@@ -1256,10 +1301,63 @@ impl<W: Write> PdfStream<W> {
 		self.offsets[obj] = self.pos;
 	}
 
+	/// Closes a stream opened by [`open`](Self::open): the catalogue and the page tree naming every page
+	/// written, the document outline and the Info dictionary, the fonts and the cross-reference table. Each
+	/// outline entry's page must be one written.
+	pub fn close(mut self, outline: Vec<OutlineItem>, info: Option<PdfInfo>) -> Outcome<W> {
+		if !self.deferred {
+			return Err(err!(
+				"close ends a stream opened by open; a stream opened for a fixed page count is ended by finish.";
+				Invalid, Input));
+		}
+		let n = self.added;
+		for it in &outline {
+			if it.page >= n {
+				return Err(err!(
+					"An outline entry points at page {} (zero-based), but the document has only {} \
+					page(s); its destination could not be named.", it.page, n; Input, Invalid, Range));
+			}
+		}
+		self.info = info.filter(|i| !i.is_empty());
+		if !outline.is_empty() {
+			self.outline_root	= self.next_extra;
+			self.next_extra		+= 1 + outline.len();
+			self.outline		= outline;
+		}
+		self.set_extra_offset(1);
+		let cat = if self.outline_root > 0 {
+			fmt!("1 0 obj\n<< /Type /Catalog /Pages 2 0 R /Outlines {} 0 R /PageMode /UseOutlines >>\nendobj\n",
+				self.outline_root)
+		} else {
+			"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string()
+		};
+		res!(self.body(cat.as_bytes()));
+		self.set_extra_offset(2);
+		let mut kids = String::new();
+		for (i, p) in self.page_objs.iter().enumerate() {
+			if i > 0 {
+				kids.push(' ');
+			}
+			kids.push_str(&fmt!("{} 0 R", p));
+		}
+		let tree = fmt!("2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n", kids, n);
+		res!(self.body(tree.as_bytes()));
+		self.end()
+	}
+
 	/// Closes the file: writes the cross-reference table and the trailer, flushes, and returns the sink.
 	/// The `/ID` is the body hash folded as the body was written, so the file matches
 	/// [`PdfWriter::to_bytes`] to the byte.
-	pub fn finish(mut self) -> Outcome<W> {
+	pub fn finish(self) -> Outcome<W> {
+		if self.deferred {
+			return Err(err!(
+				"A stream opened by open has no page tree until close writes it; end it with close, not finish.";
+				Invalid, Input));
+		}
+		self.end()
+	}
+
+	fn end(mut self) -> Outcome<W> {
 		// The outline objects -- the `/Outlines` dict and one object per entry -- are written after the
 		// pages, on the numbers reserved for them at construction. A document with no outline writes none.
 		if !self.outline.is_empty() {
@@ -1588,6 +1686,68 @@ mod tests {
 		assert!(s.contains("0 0 m"), "the move, found: {}", s);
 		assert!(s.contains(" c\n"), "a cubic operator, found: {}", s);
 		assert!(s.contains("10 10 c"), "the cubic ends where the quadratic did, found: {}", s);
+		Ok(())
+	}
+
+	// Every cross-reference entry of `bytes` names the offset of its own "N 0 obj", and the trailer's /Root
+	// is object 1: the check a reader's repair pass would otherwise hide.
+	fn xref_is_exact(bytes: &[u8]) -> Outcome<usize> {
+		let text	= String::from_utf8_lossy(bytes).to_string();
+		let at		= res!(text.rfind("\nxref\n").ok_or_else(|| err!("no xref"; Missing))) + 1;
+		let mut lines = text[at..].lines();
+		lines.next();
+		let head	= res!(lines.next().ok_or_else(|| err!("no xref head"; Missing)));
+		let count: usize = res!(head.split(' ').nth(1).unwrap_or("0").parse::<usize>());
+		lines.next();	// the free entry
+		for k in 1..count {
+			let entry	= res!(lines.next().ok_or_else(|| err!("short xref"; Missing)));
+			let off: usize = res!(entry[..10].parse::<usize>());
+			let want	= fmt!("{} 0 obj", k);
+			assert!(bytes[off..].starts_with(want.as_bytes()), "object {} is not at its offset {}", k, off);
+		}
+		assert!(text[at..].contains("/Root 1 0 R"), "the trailer names object 1 as the catalogue");
+		Ok(count - 1)
+	}
+
+	#[test]
+	fn test_a_deferred_stream_writes_its_page_tree_and_outline_at_close_02() -> Outcome<()> {
+		let mut s = res!(PdfStream::open(Vec::new(), false));
+		for _ in 0..3 {
+			let mut page = PdfPage::new(100.0, 200.0);
+			page.fill(res!(Path::rect(Bounds::new(10.0, 10.0, 90.0, 90.0))), Rgba::BLACK);
+			res!(s.page(&page));
+		}
+		assert_eq!(s.pages(), 3);
+		let info = PdfInfo { title: Some("T".to_string()), creator: Some("Austenite".to_string()), ..PdfInfo::default() };
+		let outline = vec![
+			OutlineItem { title: "One".to_string(), page: 0, level: 0 },
+			OutlineItem { title: "Two".to_string(), page: 2, level: 1 },
+		];
+		let bytes = res!(s.close(outline, Some(info)));
+		let text = String::from_utf8_lossy(&bytes);
+		assert!(text.starts_with("%PDF-1.7"), "the header");
+		assert!(text.contains("/Type /Pages /Kids [3 0 R 5 0 R 7 0 R] /Count 3"), "the tree names the 3 pages, found: {}", text);
+		assert!(text.contains("/Outlines"), "the catalogue names the outline");
+		assert!(text.contains("/Dest [7 0 R /Fit]"), "the second entry jumps to the third page object");
+		assert!(text.contains("/Title (T)"), "the Info dictionary is written");
+		let first_page	= res!(text.find("3 0 obj").ok_or_else(|| err!("no page"; Missing)));
+		let catalogue	= res!(text.find("/Type /Catalog").ok_or_else(|| err!("no catalogue"; Missing)));
+		assert!(catalogue > first_page, "the catalogue follows the pages it was written for");
+		let objects = res!(xref_is_exact(&bytes));
+		assert!(objects >= 10, "the pages, tree, catalogue, outline and Info are all in the xref, found {}", objects);
+		Ok(())
+	}
+
+	#[test]
+	fn test_the_two_ends_of_a_stream_refuse_the_other_mode_03() -> Outcome<()> {
+		let fixed = res!(PdfStream::new(Vec::new(), 0, false));
+		assert!(fixed.close(Vec::new(), None).is_err(), "close refuses a stream with a fixed page count");
+		let open = res!(PdfStream::open(Vec::new(), false));
+		assert!(open.finish().is_err(), "finish refuses a stream whose page tree is still to write");
+		let mut open = res!(PdfStream::open(Vec::new(), false));
+		res!(open.page(&PdfPage::new(10.0, 10.0)));
+		let bad = vec![OutlineItem { title: "x".to_string(), page: 1, level: 0 }];
+		assert!(open.close(bad, None).is_err(), "an outline entry past the last page is refused");
 		Ok(())
 	}
 

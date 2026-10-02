@@ -7,6 +7,7 @@
 pub mod svg;
 pub mod pdf;
 pub mod pearl;
+pub mod sinks;
 
 use crate::page::Page;
 

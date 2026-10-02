@@ -18,6 +18,7 @@
 // stream past, and [`Builder::finish`] orders them once, at the end of the pass.
 
 use crate::diag::DiagnosticKind;
+use crate::doc::DocInfo;
 use crate::eval::args::Args;
 use crate::eval::content::{
 	Content,
@@ -80,9 +81,15 @@ pub struct Introspector {
 	labels:		HashMap<Label, Vec<u32>>,		// records by label, ascending
 	pages:		u32,
 	numberings:	Vec<(u32, Value)>,				// `page.numbering` runs: first page, value
+	info:		DocInfo,						// the document's metadata as the last page's styles set it
 }
 
 impl Introspector {
+	/// The document's title, authors, description and keywords, as the styles in force on its last page
+	/// set them: a `set document` anywhere at the top level, or inside a template the document is shown
+	/// through. The PDF's Info dictionary is written from it.
+	pub fn info(&self) -> &DocInfo { &self.info }
+
 	pub fn len(&self) -> usize { self.records.len() }
 
 	pub fn is_empty(&self) -> bool { self.records.is_empty() }
@@ -274,6 +281,7 @@ pub struct Builder {
 	pages:		u32,
 	numberings:	Vec<(u32, Value)>,
 	last_hash:	Option<u64>,				// the hash of the latest numbering run's value
+	info:		DocInfo,
 }
 
 impl Builder {
@@ -297,6 +305,12 @@ impl Builder {
 		self.items.push((None, Item::Mark(id)));
 	}
 
+	/// Takes the document metadata in force on the page just placed. Each page's chain already holds every
+	/// `set document` before it, so the last page's is the document's.
+	pub fn document(&mut self, info: DocInfo) {
+		self.info = info;
+	}
+
 	/// Counts page `number` and its numbering. Runs of equal numberings are held once; a page given
 	/// twice counts once.
 	pub fn page(&mut self, number: u32, numbering: &Value) {
@@ -315,7 +329,7 @@ impl Builder {
 
 	/// Orders the records into document order and builds the introspector's indices.
 	pub fn finish(self) -> Introspector {
-		let Builder { items, pages, mut numberings, .. } = self;
+		let Builder { items, pages, mut numberings, info, .. } = self;
 		// A parent id that nothing marks leaves its children where they were placed, as U6b's `Order` did.
 		let mut anchored: HashSet<u64> = HashSet::new();
 		for (_, item) in &items {
@@ -374,7 +388,7 @@ impl Builder {
 		for v in labels.values_mut() {
 			v.shrink_to_fit();
 		}
-		Introspector { records, index, kinds, labels, pages, numberings }
+		Introspector { records, index, kinds, labels, pages, numberings, info }
 	}
 }
 
@@ -762,6 +776,38 @@ fn format_selector(sel: &Selector, what: &str) -> String {
 // Recorded introspection: what library code calls, so that every answer reaches the fixpoint.
 
 /// Every element the selector matches, in document order, from the previous pass.
+/// The document metadata a style chain carries: `set document(title:, author:, description:, keywords:)`,
+/// Typst's own defaults where unset. Content is read as its plain text, an array of strings joined with
+/// ", " for the one Info entry.
+pub fn document_info(styles: &StyleChain) -> Outcome<DocInfo> {
+	let plain = |v: Value| -> Option<String> {
+		match v {
+			Value::None			=> None,
+			Value::Content(c)	=> Some(c.plain_text()),
+			Value::Str(s)		=> Some(s.to_string()),
+			_					=> None,
+		}
+	};
+	let joined = |v: Value| -> Option<String> {
+		match v {
+			Value::Array(a)	=> {
+				let parts: Vec<String> = a.iter().filter_map(|x| match x {
+					Value::Str(s)	=> Some(s.to_string()),
+					_				=> None,
+				}).collect();
+				if parts.is_empty() { None } else { Some(parts.join(", ")) }
+			}
+			_	=> None,
+		}
+	};
+	Ok(DocInfo {
+		title:		plain(res!(model::common::style(styles, ElemKind::Document, "title"))),
+		author:		joined(res!(model::common::style(styles, ElemKind::Document, "author"))),
+		subject:	plain(res!(model::common::style(styles, ElemKind::Document, "description"))),
+		keywords:	joined(res!(model::common::style(styles, ElemKind::Document, "keywords"))),
+	})
+}
+
 pub fn query(engine: &mut Engine, selector: &Selector) -> Outcome<Vec<Content>> {
 	res!(ask(engine, Question::Query(selector.clone())));
 	let intro = engine.intro.clone();

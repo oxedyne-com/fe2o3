@@ -46,7 +46,7 @@ use oxedyne_fe2o3_graphics::{
 const ENGINE_NAME: &str = "Austenite";	// `/Creator` and `/Producer`: a name, never a version or a build
 
 /// The Info dictionary a document's metadata lowers to, `/Creator` and `/Producer` always naming the engine.
-fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
+pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
 	PdfInfo {
 		title:		doc_info.title.clone(),
 		author:		doc_info.author.clone(),

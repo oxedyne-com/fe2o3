@@ -29,6 +29,18 @@ use crate::driver::{
 	CompileOutput,
 	Config,
 };
+use crate::eval::{
+	self,
+	package,
+	Engine,
+	World,
+};
+use crate::eval::fixpoint::{
+	self,
+	Laid,
+	PageSink,
+};
+use crate::flow::text::FontStore;
 use crate::font::FontMetrics;
 use crate::fonts;
 use crate::fonts::FaceResolver;
@@ -347,6 +359,112 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 	}
 	res!(pdf.finish());
 	Ok(buf)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE EVALUATOR PATH                                                         │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What compiling through the evaluator leaves: the engine, which holds the diagnostics and the sources,
+/// and how the fixpoint ended. The pages went to the sink.
+#[derive(Debug)]
+pub struct Evaluated {
+	pub engine:	Engine,
+	pub laid:	Outcome<Laid>,
+}
+
+/// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
+/// each pass's pages to `sink`. `root` is what a leading `/` resolves against, and `fonts` the host's
+/// font store. Only a main file that cannot be read is an `Err`; a failure after that is in
+/// [`Evaluated::laid`] beside the diagnostics it recorded.
+pub fn assemble_eval<S: PageSink>(
+	main_path:	&Path,
+	root:		&Path,
+	fonts:		FontStore,
+	sink:		&mut S,
+)
+	-> Outcome<Evaluated>
+{
+	let mut world = World::new(root.to_path_buf());
+	let id = res!(world.load(main_path));
+	let mut engine = Engine::new(world);
+	engine.fonts = fonts;
+	let laid = match eval::eval_source(&mut engine, id) {
+		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
+		Err(e)		=> Err(e),
+	};
+	Ok(Evaluated { engine, laid })
+}
+
+/// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory
+/// named by `TYPST_PACKAGE_CACHE_PATH`, else `typst/packages` beneath `XDG_CACHE_HOME` or `~/.cache`. A host
+/// supplies packages and Austenite fetches none, so a package in no supplied directory is an import error.
+pub fn supply_typst_package_cache() {
+	let cache = match std::env::var("TYPST_PACKAGE_CACHE_PATH") {
+		Ok(p) if !p.is_empty()	=> PathBuf::from(p),
+		_						=> match std::env::var("XDG_CACHE_HOME") {
+			Ok(p) if !p.is_empty()	=> PathBuf::from(p).join("typst").join("packages"),
+			_						=> PathBuf::from(std::env::var("HOME").unwrap_or_default())
+				.join(".cache").join("typst").join("packages"),
+		},
+	};
+	if cache.is_dir() {
+		let _ = package::add_dir(cache);
+	}
+}
+
+impl Evaluated {
+	/// The compile's report: its diagnostics at the positions a caller shows, the terse line of the
+	/// constructs passed over (every diagnostic of kind `unsupported`, by its message and how often), and
+	/// the page count. Strict mode reads it as the curated path's report is read, so one function,
+	/// [`DiagnosticKind::refuses_strict`], decides on both paths.
+	pub fn report(&self) -> Report {
+		let pages = match &self.laid {
+			Ok(l)	=> l.pages as usize,
+			Err(_)	=> 0,
+		};
+		let mut diagnostics = Vec::with_capacity(self.engine.diags.len());
+		let mut skipped: Vec<(String, usize)> = Vec::new();
+		for d in &self.engine.diags {
+			let src = self.engine.world.sources.iter().find(|s| s.id == d.span.file && !d.span.is_detached());
+			let (file, line, col) = match src {
+				Some(s)	=> {
+					let (l, c) = s.line_col(d.span.start);
+					(s.path.display().to_string(), l, c)
+				},
+				None	=> (String::new(), 0, 0),
+			};
+			if d.kind == DiagnosticKind::Unsupported && !d.is_error() {
+				let head = d.message.split(':').next().unwrap_or("").trim().to_string();
+				match skipped.iter_mut().find(|(h, _)| *h == head) {
+					Some((_, n))	=> *n += 1,
+					None			=> skipped.push((head, 1)),
+				}
+			}
+			diagnostics.push(Diagnostic {
+				file,
+				line,
+				col,
+				message:	d.message.clone(),
+				severity:	if d.is_error() { Severity::Error } else { Severity::Warning },
+				kind:		d.kind,
+				hint:		d.hints.first().cloned(),
+			});
+		}
+		let line = if skipped.is_empty() {
+			None
+		} else {
+			let parts: Vec<String> = skipped.iter().map(|(h, n)| fmt!("{} \u{d7}{}", h, n)).collect();
+			Some(parts.join(", "))
+		};
+		Report {
+			pages,
+			diagnostics,
+			skipped:	line.as_ref().map(|l| fmt!("skipped: {}", l)),
+			summary:	line,
+			empty:		false,
+		}
+	}
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐

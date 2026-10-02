@@ -1,12 +1,12 @@
 //! Rasterises a Pearl page to a pixmap, driving `fe2o3_graphics`'s anti-aliased [`Pixmap`] straight from
 //! the one leaf walk `pearl.rs` exposes as [`PearlDoc::render_page_to`]. A [`PixmapSink`] is a
-//! [`PageSink`](oxedyne_fe2o3_austenite::emit::pearl::PageSink): the SVG writer and this rasteriser share
+//! [`PageDevice`](oxedyne_fe2o3_austenite::emit::pearl::PageDevice): the SVG writer and this rasteriser share
 //! that single walk, so a page reaches pixels without ever round-tripping through an SVG string. The one
 //! new thing this module adds over the SVG arm is scaling by a caller-chosen DPI rather than a fixed
 //! pixel width, and skipping the invisible selectable-text layer (see [`PixmapSink::text_layer`]).
 
 use oxedyne_fe2o3_austenite::emit::pearl::{
-	PageSink,
+	PageDevice,
 	PearlDoc,
 	TselRun,
 };
@@ -33,7 +33,7 @@ pub struct RasterPage {
 	pub height_px:	usize,
 }
 
-/// A [`PageSink`] that draws a page's placed ink onto an anti-aliased [`Pixmap`] at a chosen DPI. Every
+/// A [`PageDevice`] that draws a page's placed ink onto an anti-aliased [`Pixmap`] at a chosen DPI. Every
 /// path arrives in the page's point frame; the sink applies the DPI scale as its device transform. The
 /// selectable-text layer is invisible ink, so it is dropped rather than drawn.
 pub struct PixmapSink {
@@ -66,14 +66,14 @@ impl PixmapSink {
 		Transform::scale(s, s)
 	}
 
-	/// The open pixmap, or an error naming the sink method that ran before [`PageSink::begin`].
+	/// The open pixmap, or an error naming the sink method that ran before [`PageDevice::begin`].
 	fn canvas(&mut self, who: &str) -> Outcome<&mut Pixmap> {
 		Ok(res!(self.pixmap.as_mut().ok_or_else(|| err!(
 			"pixmap sink {} was called before begin opened a page.", who; Bug, Missing))))
 	}
 }
 
-impl PageSink for PixmapSink {
+impl PageDevice for PixmapSink {
 	fn begin(&mut self, w: usize, h: usize) -> Outcome<()> {
 		let s = self.scale();
 		// The media box scaled by the DPI, ceiled and floored at one, exactly as the media-box viewport

@@ -485,13 +485,78 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 	println!("{}", line);
 }
 
+/// Compiles through the evaluator (`--eval`) and writes `OUT_DIR/document.pdf`. `--root` is what a leading
+/// `/` resolves against (default the source's directory) and each `--font-path` a directory of fonts, as
+/// `typst compile` takes them. The terse `skipped:` line is built from the diagnostics of kind
+/// `unsupported`; under `--strict` a refusal of the strict rule fails the compile as Daimond's does.
+fn compile_eval(
+	source:		&str,
+	out_dir:	&str,
+	root:		Option<&str>,
+	font_paths:	&[String],
+	strict:		bool,
+)
+	-> Outcome<()>
+{
+	use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
+	use oxedyne_fe2o3_austenite::flow::text::FontStore;
+
+	let t		= std::time::Instant::now();
+	let main	= PathBuf::from(source);
+	let root	= match root {
+		Some(r)	=> PathBuf::from(r),
+		None	=> main.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
+	};
+	let mut fonts = FontStore::default();
+	for dir in font_paths {
+		fonts.add_dir(PathBuf::from(dir));
+	}
+	compile::supply_typst_package_cache();
+	let mut sink = res!(PdfSink::new());
+	let done = res!(compile::assemble_eval(&main, &root, fonts, &mut sink));
+	let report = done.report();
+	if let Some(skip) = &report.skipped {
+		eprintln!("[austenite] {}", skip);
+	}
+	let laid = match &done.laid {
+		Ok(l)	=> l,
+		Err(e)	=> {
+			for d in &done.engine.diags {
+				eprintln!("{}", d.render(&done.engine.world.sources));
+			}
+			return Err(err!("{}", e.plain(); Input, Invalid));
+		},
+	};
+	if strict {
+		if let Some(refusal) = report.strict_failure(&main) {
+			return Err(err!("{}", refusal.message; Input, Invalid));
+		}
+	}
+	let out = match sink.output() {
+		Some(o)	=> o,
+		None	=> return Err(err!("The fixpoint ended without a finished PDF."; Bug)),
+	};
+	res!(std::fs::create_dir_all(out_dir));
+	let path = PathBuf::from(out_dir).join("document.pdf");
+	let mut file = BufWriter::new(res!(File::create(&path)));
+	res!(out.write_to(&mut file));
+	println!(
+		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}/",
+		source, laid.pages, laid.passes, out.len(), t.elapsed().as_secs_f64(), out_dir);
+	Ok(())
+}
+
 fn main() -> Outcome<()> {
-	// Flags may precede or follow the paths; only `--watch` (`-w`), `--pearl`, `--ledger-out <path>` and
-	// `--explain` are recognised, everything else is a positional argument in order: the source root,
-	// then the optional output directory.
+	// Flags may precede or follow the paths; `--watch` (`-w`), `--pearl`, `--ledger-out <path>`, `--explain`,
+	// and the evaluator's `--eval`, `--strict`, `--root <dir>` and `--font-path <dir>` are recognised,
+	// everything else is a positional argument in order: the source root, then the optional output directory.
 	let mut watching	= false;
 	let mut pearl		= false;
 	let mut explain		= false;
+	let mut eval		= false;
+	let mut strict		= false;
+	let mut root:		Option<String>	= None;
+	let mut font_paths:	Vec<String>		= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
 	let mut pos:	Vec<String>	= Vec::new();
 	let mut args = std::env::args().skip(1);
@@ -500,6 +565,16 @@ fn main() -> Outcome<()> {
 			"--watch" | "-w"	=> watching = true,
 			"--pearl"			=> pearl = true,
 			"--explain"			=> explain = true,
+			"--eval"			=> eval = true,
+			"--strict"			=> strict = true,
+			"--root"			=> root = Some(match args.next() {
+				Some(p)	=> p,
+				None	=> return Err(err!("--root needs a directory argument."; Input, Invalid, Missing)),
+			}),
+			"--font-path"		=> font_paths.push(match args.next() {
+				Some(p)	=> p,
+				None	=> return Err(err!("--font-path needs a directory argument."; Input, Invalid, Missing)),
+			}),
 			"--ledger-out"		=> {
 				ledger_out = Some(match args.next() {
 					Some(p)	=> p,
@@ -513,13 +588,17 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
 		Some(s)	=> s.clone(),
 		None	=> "austenite-out".to_string(),
 	};
+
+	if eval {
+		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict);
+	}
 
 	if watching {
 		// Poll interval: brisk enough to feel live, cheap enough to leave the cores to the compile.
