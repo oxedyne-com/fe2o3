@@ -4,8 +4,8 @@
 //! Until the document layouter can place pages, fixtures run through [`Flat`], a layouter that realises
 //! the document level by level and places every element on the page its page breaks give it, streaming
 //! each page to the sink as it ends, which is all a query, a counter or a state can see. A line
-//! `// intro: needs <parts>` names the units a fixture waits on (`layout`, `numbering`, `heading`,
-//! `figure`, `array`, `par`, `selector`), each probed at run time, so a fixture is checked the moment its
+//! `// intro: needs <parts>` names the units a fixture waits on (`layout`, `furniture`, `boxheight`,
+//! `numbering`, `heading`, `figure`, `array`, `par`, `selector`), each probed at run time, so a fixture is checked the moment its
 //! parts exist and is reported, not silently passed, until then. A fixture marked `oracle: rejects` must
 //! fail with Typst's first error, message and line:column.
 //!
@@ -292,6 +292,31 @@ fn realises(src: &str) -> bool {
 	}
 }
 
+/// Runs a document of `src` through the fixpoint and returns what its `<probe>`s hold, or `None` when it
+/// does not lay out.
+fn laid_probes(src: &str) -> Option<Vec<J>> {
+	let root = PathBuf::from("/");
+	let mut world = World::new(root.clone());
+	let id = world.add_source(root.join("__probe_laid.typ"), src.to_string()).ok()?;
+	let mut engine = Engine::new(world);
+	let m = eval_source(&mut engine, id).ok()?;
+	let laid = fixpoint::run(&mut engine, &m, &mut Counting::default()).ok()?;
+	probes(&laid.intro).ok()
+}
+
+/// Does a page with numbering lay out? The page's footer is its number, which `flow::decorate` supplies.
+fn has_furniture() -> bool {
+	laid_probes("#set page(numbering: \"1\")\n#context [#metadata(1) <probe>]").is_some()
+}
+
+/// Does an inline `box(height:)` take its height, as `measure` reports it?
+fn has_box_height() -> bool {
+	match laid_probes("#context [#metadata(measure(box(width: 3pt, height: 4pt))) <probe>]") {
+		Some(v)	=> v.iter().any(|j| j.render().contains("4pt")),
+		None	=> false,
+	}
+}
+
 fn has_elem(kind: ElemKind) -> bool {
 	if kind.fields().is_empty() || kind.field_id("numbering").is_none() {
 		return false;
@@ -309,6 +334,8 @@ fn missing(fx: &Fixture, layout: bool, numbering: bool) -> Vec<&'static str> {
 	let mut out = Vec::new();
 	for (word, have, name) in [
 		("layout", layout, "layout (U6a/U6b)"),
+		("furniture", has_furniture(), "page furniture (U9 `flow::decorate`)"),
+		("boxheight", has_box_height(), "inline `box(height:)` (U6b-S2)"),
 		("numbering", numbering, "numbering (U3)"),
 		("heading", has_elem(ElemKind::Heading), "heading (U5)"),
 		("figure", has_elem(ElemKind::Figure), "figure (U5)"),

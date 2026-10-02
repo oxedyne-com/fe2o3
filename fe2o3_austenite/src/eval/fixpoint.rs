@@ -16,7 +16,6 @@ use crate::diag::{
 	DiagnosticKind,
 };
 use crate::eval::content::Content;
-use crate::eval::func::unimplemented;
 use crate::eval::intro::{
 	self,
 	Builder,
@@ -32,6 +31,7 @@ use crate::eval::{
 	Context,
 	Engine,
 };
+use crate::flow;
 use crate::page::Page;
 use crate::syntax::Span;
 
@@ -89,18 +89,29 @@ pub struct Pages;
 impl Layouter for Pages {
 	fn lay<S: PageSink>(
 		&mut self,
-		_engine:	&mut Engine,
-		_content:	&Content,
-		_styles:	&StyleChain,
-		_builder:	&mut Builder,
-		_sink:		&mut S,
+		engine:		&mut Engine,
+		content:	&Content,
+		styles:		&StyleChain,
+		builder:	&mut Builder,
+		sink:		&mut S,
 	)
 		-> Outcome<u32>
 	{
-		// U6b's `flow::paginate` is not on this branch yet. When it is, this is
-		// `place(engine, &mut flow::paginate(content, styles), builder, sink)`, the paginator implementing
-		// `PageSource` over `next_page`, `driver::place_page` and `flow::decorate::decorate_page`.
-		Err(unimplemented("flow", "paginate"))
+		place(engine, &mut flow::paginate(content, styles), builder, sink)
+	}
+}
+
+// The paginator is the document's page source: the next page's body is placed on its page, which records
+// the page's located elements in the builder, and then decorated.
+impl PageSource for flow::Paginator {
+	fn next_page(&mut self, engine: &mut Engine, builder: &mut Builder) -> Outcome<Option<(Page, Value)>> {
+		match res!(self.next_placed(engine, builder)) {
+			None						=> Ok(None),
+			Some((mut page, setup))	=> {
+				res!(flow::decorate::decorate_page(engine, &mut page, &setup));
+				Ok(Some((page, setup.numbering.clone())))
+			},
+		}
 	}
 }
 

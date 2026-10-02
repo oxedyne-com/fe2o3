@@ -227,7 +227,7 @@ fn realise_with(
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?
 pub fn is_inline(content: &Content) -> bool {
-	Rule::Par.trigger(content)
+	Rule::Par.trigger(content, false)
 }
 
 // Grouping rules
@@ -251,8 +251,10 @@ impl Rule {
 		}
 	}
 
-	/// Does the element open (or continue) such a group?
-	fn trigger(self, c: &Content) -> bool {
+	/// Does the element open (or continue) such a group? When the model stands unexpanded (`keep`), strong
+	/// text, emphasis and a link are phrasing content, as Typst's HTML export groups them, so they stay
+	/// in their paragraph instead of ending it.
+	fn trigger(self, c: &Content, keep: bool) -> bool {
 		let k = match c.kind() {
 			Some(k)	=> k,
 			None	=> return false,
@@ -262,6 +264,7 @@ impl Rule {
 			Rule::Par		=> match k {
 				ElemKind::Text | ElemKind::H | ElemKind::Linebreak | ElemKind::SmartQuote
 					| ElemKind::Box	=> true,
+				ElemKind::Strong | ElemKind::Emph | ElemKind::Link	=> keep,
 				// An inline equation; a block one is `block: true`.
 				ElemKind::Equation	=> !matches!(c.field("block"), Some(Value::Bool(true))),
 				_					=> false,
@@ -724,14 +727,14 @@ impl State<'_> {
 	// Grouping
 
 	fn visit_grouping_rules(&mut self, content: &Content, styles: &StyleChain) -> Outcome<bool> {
-		let matching = self.rules().iter().copied().find(|r| r.trigger(content));
+		let matching = self.rules().iter().copied().find(|r| r.trigger(content, self.keep_model));
 		let mut i = 0;
 		while let Some(active) = self.groupings.last().copied() {
 			// A rule of higher priority nests a new group inside the active one.
 			if matching.map(|r| r.priority() > active.rule.priority()).unwrap_or(false) {
 				break;
 			}
-			if active.rule.trigger(content) || active.rule.inner(content) {
+			if active.rule.trigger(content, self.keep_model) || active.rule.inner(content) {
 				self.sink.push(Pair::new(content.clone(), styles.clone()));
 				return Ok(true);
 			}
@@ -809,7 +812,7 @@ impl State<'_> {
 			None	=> return Ok(()),
 		};
 		// Trailing members that did not trigger the group are not part of it.
-		let end = match self.sink[g.start..].iter().rposition(|p| !p.is_tag() && g.rule.trigger(&p.content)) {
+		let end = match self.sink[g.start..].iter().rposition(|p| !p.is_tag() && g.rule.trigger(&p.content, self.keep_model)) {
 			Some(i)	=> g.start + i + 1,
 			None	=> g.start,
 		};

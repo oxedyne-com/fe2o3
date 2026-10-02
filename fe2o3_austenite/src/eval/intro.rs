@@ -25,6 +25,7 @@ use crate::eval::content::{
 	FieldId,
 };
 use crate::eval::func::Func;
+use crate::driver::Recorder;
 use crate::eval::lib;
 use crate::eval::lib::model;
 use crate::eval::locate::Location;
@@ -374,6 +375,17 @@ impl Builder {
 			v.shrink_to_fit();
 		}
 		Introspector { records, index, kinds, labels, pages, numberings }
+	}
+}
+
+// The pages place their located elements straight into the builder.
+impl Recorder for Builder {
+	fn record(&mut self, elem: &Content, pos: Position, parent: Option<u64>) {
+		Builder::record(self, elem, pos, parent)
+	}
+
+	fn mark(&mut self, id: u64) {
+		Builder::mark(self, id)
 	}
 }
 
