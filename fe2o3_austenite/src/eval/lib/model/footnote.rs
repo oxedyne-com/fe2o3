@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/footnote.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: footnote and footnote.entry. The footnote's show is its superscript number, linked
 // to the entry; page layout collects each page's footnotes, builds their entries with [`entry`] and sets
 // them below the separator, the entry's show linking its number back. The entry's location is the

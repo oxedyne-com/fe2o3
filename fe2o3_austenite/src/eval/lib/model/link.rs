@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/link.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: link. The show leaves the body in place under the internal style `link.current`,
 // the resolved destination -- a URL string, a location, or a position dictionary -- which inline flow
 // reads to make the body's text a link area, as Typst's `LinkElem::current` is read. A label destination

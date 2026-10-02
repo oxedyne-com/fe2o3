@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/reference.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: ref and cite. A reference to a label that a bibliography holds is a citation; any
 // other is realised as the target's supplement and number, linked to it, as Typst's `RefElem::realize`.
 // The number is displayed with the target's numbering; Typst trims a pattern's prefix and suffix there

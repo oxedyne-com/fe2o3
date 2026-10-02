@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/{bibliography,cite}.rs`, version 0.15.1).
+// Modified for Austenite: the elements' fields, defaults and default shows, ported to Hematite's types over `bib.rs`.
 // U5 owns this file: bibliography and the realisation of citations, over `crate::bib`.
 //
 // Sources are read when the element is constructed and kept on it (Typst keeps the parsed library the

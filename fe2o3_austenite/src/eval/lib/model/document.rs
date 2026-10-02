@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/document.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: document. In Typst 0.15 a document element is only constructed in the bundle
 // target; in a paged document `set document(..)` carries the metadata (title, author, ...) that the PDF
 // writer and `title()` read from the style chain.

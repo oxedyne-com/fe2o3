@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (the `codex` 0.3.0 crate (Apache-2.0), `src/modules/{sym,emoji}.txt`, as typst-library `symbols` loads them, version 0.15.1).
+// Modified for Austenite: tabulated for Austenite by running typst 0.15.1.
 // Generated from the typst 0.15.1 oracle by the U3 lane's table generator: `dictionary(sym)` and
 // `dictionary(emoji)` walked, each symbol's variants read from its `repr`. Do not edit by hand; regenerate.
 

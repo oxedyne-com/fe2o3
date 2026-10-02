@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/par.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: par, par.line and parbreak, primitives the flow sets. `par.line`'s fields are
 // style-only (Typst's ghost fields), set by `set par.line(..)` and read by flow for line numbering.
 

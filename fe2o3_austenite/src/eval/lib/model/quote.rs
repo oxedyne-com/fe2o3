@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/quote.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: quote. An inline quote is wrapped in the language's quotation marks, alternating
 // double and single with nesting (`quote.depth`, a style-only field); a block quote is padded, with its
 // attribution set below it after an em dash. The quotation marks by language and region are Typst

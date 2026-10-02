@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/mod.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 //! Contract (U0, 2026-09-23; U5 owns this directory): the model family. Each element's schema and
 //! native show live in the submodule named for it, and this file only dispatches by `ElemKind`. A native
 //! show reproduces Typst's own default (heading sizes, list indents, figure supplement), never Austenite's

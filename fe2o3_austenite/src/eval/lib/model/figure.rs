@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/figure.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: figure and figure.caption. Synthesis settles what a figure is (its kind from the
 // first image, table or raw text in its body), what it is called (the kind's word in the language in
 // force) and what counts it (`counter(figure.where(kind: ..))`), and hands all three to the caption,

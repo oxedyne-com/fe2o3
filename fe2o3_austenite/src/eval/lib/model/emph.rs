@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/{emph,strong}.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: strong and emph. Neither picks a font: `strong` adds its `delta` to the weight in
 // force and `emph` toggles italics, through `text`'s internal `delta` and `emph` style fields, so nested
 // emphasis cancels as Typst's does.

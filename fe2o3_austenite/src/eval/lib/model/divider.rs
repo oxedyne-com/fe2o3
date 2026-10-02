@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/divider.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // The model family (U5's directory): divider. Typst's thematic break shows as a bare `line`; its full
 // width, its 0.05em stroke and the 2em of block space around it are the element's built-in show-set styles,
 // so `show divider: set line(..)` restyles it as in Typst.

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-syntax `package.rs` and typst-eval `import.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, vfs and error handling.
 // U10 owns this file. A package is supplied by the host and never fetched: in Daimond its origin serves
 // the package corpus, mirrored ahead of use, and the engine reads what the host hands it. An archive's
 // SHA-256 is the host's to check, since the engine receives files and never the archive; what the engine

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `text/lang.rs` and `translations/*.txt`, version 0.15.1).
+// Modified for Austenite: the translation tables are Typst's own files, unchanged; the lookup is ported to Hematite's types.
 // U5 owns this file: the words Typst puts in a document for the reader's language -- the default
 // supplements (`Figure`, `Section`), titles (`Contents`, `Bibliography`) and link descriptions.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `model/outline.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: outline and outline.entry, with the entry's scoped functions (`indented`, `prefix`,
 // `inner`, `body`, `page`) a show rule on entries calls.
 //

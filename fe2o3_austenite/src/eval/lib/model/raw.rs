@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `text/raw.rs`, version 0.15.1).
+// Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: raw text and its lines. Lines are synthesised as Typst does -- tabs expanded to the
 // tab size, split at every newline Typst recognises -- but each line's body is its plain text: syntax
 // highlighting (Typst's syntect themes, and its own highlighter for `typ`/`typc`/`typm`) is not done,
