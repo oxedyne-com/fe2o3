@@ -3,8 +3,8 @@
 // Modified for Austenite: the element's fields, defaults and default show, ported to Hematite's types, IR and error handling.
 // U5 owns this file: ref and cite. A reference to a label that a bibliography holds is a citation; any
 // other is realised as the target's supplement and number, linked to it, as Typst's `RefElem::realize`.
-// The number is displayed with the target's numbering; Typst trims a pattern's prefix and suffix there
-// (`"1."` references as `1`), which waits on a trimmed form of `numbering::apply` (U3).
+// The number is displayed with the target's numbering, trimmed of a pattern's first prefix and its suffix as
+// Typst trims it (`"1."` references as `1`, `"(1)"` as `1`).
 
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
@@ -15,7 +15,10 @@ use crate::eval::content::{
 	FieldSpec,
 	FieldType,
 };
-use crate::eval::intro::Counter;
+use crate::eval::intro::{
+	self,
+	Counter,
+};
 use crate::eval::lib::model::common::{
 	self,
 	choice,
@@ -141,7 +144,13 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		let found = res!(lookup::label(engine, &target, span));
 		let loc = res!(located(engine, &found, span));
 		let page = crate::eval::intro::Counter { key: crate::eval::intro::CounterKey::Page };
-		let numbers = res!(lookup::display_counter(engine, &page, loc, &Value::str("1"), span));
+		let numbering = match res!(intro::page_numbering(engine, loc)) {
+			Value::None	=> return Err(engine.error_hint(DiagnosticKind::Type, span,
+				"cannot reference without page numbering",
+				"you can enable page numbering with `#set page(numbering: \"1\")`")),
+			n			=> n,
+		};
+		let numbers = res!(lookup::display_counter_trimmed(engine, &page, loc, &numbering, span));
 		let supplement = match res!(common::get(elem, styles, "supplement")) {
 			Value::Auto	=> common::text(common::local(styles, "page")),
 			other		=> res!(heading::resolve_supplement(engine, &other, styles, "page", &found))
@@ -206,7 +215,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		_						=> Content::empty(),
 	};
 	let loc = res!(located(engine, &found, span));
-	let numbers = res!(lookup::display_counter(engine, &counter, loc, &numbering, span));
+	let numbers = res!(lookup::display_counter_trimmed(engine, &counter, loc, &numbering, span));
 	let supplement = match res!(common::get(elem, styles, "supplement")) {
 		Value::Auto	=> default_supplement,
 		other		=> res!(heading::resolve_supplement(engine, &other, styles, "heading", &found))

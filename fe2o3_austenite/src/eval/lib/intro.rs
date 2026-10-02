@@ -303,7 +303,7 @@ fn counter_method(engine: &mut Engine, span: Span, f: IntroFn, c: &Counter, args
 				}
 			};
 			let styles = engine.context.styles.clone();
-			res!(introspect::counter_display(engine, c, numbering, both, loc, styles.as_ref()))
+			res!(introspect::counter_display(engine, c, numbering, both, false, loc, styles.as_ref()))
 		}
 		IntroFn::CounterStep	=> {
 			let level = match res!(args.named::<Value>("level")) {

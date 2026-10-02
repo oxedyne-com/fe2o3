@@ -1159,12 +1159,14 @@ fn matching_numbering(
 
 /// `counter.display()`: the counter at `loc` (both numbers with `both`) formatted with `numbering`, or
 /// with the numbering the counted element or the page has, falling back to `"1.1"`. The numbering runs
-/// in a context at `loc`.
+/// in a context at `loc`. A `trimmed` pattern drops its first prefix and its suffix, as a reference to
+/// the element shows its number.
 pub fn counter_display(
 	engine:		&mut Engine,
 	counter:	&Counter,
 	numbering:	Option<Value>,
 	both:		bool,
+	trimmed:	bool,
 	loc:		Location,
 	styles:		Option<&StyleChain>,
 )
@@ -1183,7 +1185,11 @@ pub fn counter_display(
 		location:	Some(loc),
 		styles:		styles.cloned(),
 	});
-	let out = lib::numbering::apply(engine, &numbering, &state);
+	let out = if trimmed {
+		lib::numbering::apply_trimmed(engine, &numbering, &state)
+	} else {
+		lib::numbering::apply(engine, &numbering, &state)
+	};
 	engine.context = saved;
 	out
 }
@@ -1196,11 +1202,12 @@ pub fn display_at(
 	counter:	&Counter,
 	loc:		Location,
 	numbering:	&Value,
+	trimmed:	bool,
 	styles:		Option<&StyleChain>,
 )
 	-> Outcome<Value>
 {
-	counter_display(engine, counter, Some(numbering.clone()), false, loc, styles)
+	counter_display(engine, counter, Some(numbering.clone()), false, trimmed, loc, styles)
 }
 
 // States

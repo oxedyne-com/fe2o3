@@ -62,7 +62,34 @@ pub fn display_counter(
 )
 	-> Outcome<Content>
 {
-	let v = match intro::display_at(engine, counter, loc, numbering, None) {
+	display(engine, counter, loc, numbering, false, span)
+}
+
+/// As [`display_counter`], with a pattern's first prefix and its suffix dropped: the number a reference
+/// shows, `1` for a heading numbered `"1."`. A numbering function is called as it is.
+pub fn display_counter_trimmed(
+	engine:		&mut Engine,
+	counter:	&Counter,
+	loc:		Location,
+	numbering:	&Value,
+	span:		Span,
+)
+	-> Outcome<Content>
+{
+	display(engine, counter, loc, numbering, true, span)
+}
+
+fn display(
+	engine:		&mut Engine,
+	counter:	&Counter,
+	loc:		Location,
+	numbering:	&Value,
+	trimmed:	bool,
+	span:		Span,
+)
+	-> Outcome<Content>
+{
+	let v = match intro::display_at(engine, counter, loc, numbering, trimmed, None) {
 		Ok(v)	=> v,
 		Err(e)	=> return Err(engine.adopt(engine.diags.len(), span, e)),
 	};

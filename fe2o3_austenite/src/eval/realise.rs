@@ -502,16 +502,24 @@ impl State<'_> {
 			tags = res!(self.prepare(&mut output, &mut map, styles));
 		}
 		let chained = styles.chain(&map);
+		// A show rule's error does not end the compile here: the element shows as nothing and the error
+		// stands for the final pass to report (Typst's `Engine::delay`).
+		let mark = self.engine.diags.len();
 		let result = match step {
 			Step::Recipe(recipe, index) => {
 				if let Content::Elem(e) = &mut output {
 					Arc::make_mut(e).guards.push(index);
 				}
-				res!(apply_recipe(self.engine, &recipe, output.clone(), &chained))
+				let shown = apply_recipe(self.engine, &recipe, output.clone(), &chained);
+				self.engine.delay(mark, target.span(), shown)
 			}
-			Step::Builtin => match res!(self.builtin_show(&output, &chained)) {
-				Some(c) => spanned(c, output.span()),
-				None => {
+			Step::Builtin => match self.builtin_show(&output, &chained) {
+				Ok(Some(c)) => spanned(c, output.span()),
+				Err(e) => {
+					let shown = self.engine.delay(mark, target.span(), Err::<Content, _>(e));
+					spanned(shown, output.span())
+				},
+				Ok(None) => {
 					// A primitive: flow lays it out itself.
 					if let Some((start, _)) = &tags {
 						self.push_tag(start.clone(), styles);
@@ -592,7 +600,9 @@ impl State<'_> {
 		match step {
 			Some((recipe, _)) => {
 				let chained = styles.chain(&map);
-				let result = res!(apply_recipe(self.engine, &recipe, output.clone(), &chained));
+				let mark = self.engine.diags.len();
+				let shown = apply_recipe(self.engine, &recipe, output.clone(), &chained);
+				let result = self.engine.delay(mark, target.span(), shown);
 				res!(self.visit_output(target, &result, &map, styles));
 			}
 			// No recipe: the located sequence itself, which the next visit walks into at this level,

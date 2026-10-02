@@ -671,6 +671,55 @@ fn measure_takes_none_of_the_documents_ordinals() -> Outcome<()> {
 	Ok(())
 }
 
+/// Runs `src` through the fixpoint with [`Flat`] and returns how it ended with the diagnostics it left.
+fn flat_run(src: &str) -> Outcome<(std::result::Result<Laid, String>, Vec<(bool, String, Span)>)> {
+	let root = PathBuf::from("/");
+	let mut world = World::new(root.clone());
+	let id = res!(world.add_source(root.join("__delay.typ"), src.to_string()));
+	let mut engine = Engine::new(world);
+	let module = res!(eval_source(&mut engine, id));
+	let laid = fixpoint::run_with(&mut engine, &module, &mut Flat, &mut Counting::default()).map_err(|e| e.plain());
+	let diags = engine.diags.iter().map(|d| (d.is_error(), d.message.clone(), d.span)).collect();
+	Ok((laid, diags))
+}
+
+/// A show rule's error is delayed (Typst's `Engine::delay`): a reference above its target fails in the first
+/// pass, which has not seen the label, shows as nothing, and the second pass settles it. No error survives.
+#[test]
+fn a_reference_above_its_target_does_not_fail_the_first_pass() -> Outcome<()> {
+	let (laid, diags) = res!(flat_run("#set heading(numbering: \"1.\")\nSee @h and @h again.\n= Heading <h>\n"));
+	let laid = res!(laid.map_err(|e| err!("the compile failed: {}", e; Test)));
+	assert!(laid.passes >= 2, "the reference settled in {} pass(es)", laid.passes);
+	assert!(laid.converged);
+	let errors: Vec<_> = diags.iter().filter(|d| d.0).collect();
+	assert!(errors.is_empty(), "errors survived the final pass: {:?}", errors);
+	Ok(())
+}
+
+/// A label no element carries stays an error through every pass, and the final one reports it with Typst's
+/// message, once for each place that refers to it.
+#[test]
+fn a_label_no_element_carries_fails_the_final_pass() -> Outcome<()> {
+	let (laid, diags) = res!(flat_run("See @nowhere and @nowhere.\n"));
+	assert!(laid.is_err(), "a reference to a label that does not exist compiled");
+	let errors: Vec<_> = diags.iter().filter(|d| d.0).collect();
+	assert_eq!(errors.len(), 2, "one error for each reference: {:?}", errors);
+	assert!(errors.iter().all(|d| d.1 == "label `<nowhere>` does not exist in the document"), "{:?}", errors);
+	assert_ne!(errors[0].2, errors[1].2, "the two references are at different places");
+	Ok(())
+}
+
+/// An error met again at one span with one message is reported once (Typst's `deduplicate`): a loop's body
+/// refers to the missing label at one span however many times it runs.
+#[test]
+fn a_delayed_error_met_again_at_one_span_is_reported_once() -> Outcome<()> {
+	let (laid, diags) = res!(flat_run("#for i in range(3) [@nowhere ]\n"));
+	assert!(laid.is_err());
+	let errors: Vec<_> = diags.iter().filter(|d| d.0).collect();
+	assert_eq!(errors.len(), 1, "{:?}", errors);
+	Ok(())
+}
+
 /// Typst's `CounterState::step`, on the cases `counter_str.typ` checks against the oracle end to end,
 /// spelt out so a regression names the rule rather than a fixture.
 #[test]

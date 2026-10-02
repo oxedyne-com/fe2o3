@@ -212,6 +212,21 @@ impl Engine {
 		}
 	}
 
+	/// Typst's `Engine::delay`: the failure of a show rule is recorded and the element it was showing shows as
+	/// nothing, so the compile goes on. The error stays among the diagnostics, and fails the compile only if it is
+	/// still there after the final pass: an earlier pass may fail for want of a label or a counter that a later
+	/// one has, and the fixpoint drops each pass's diagnostics before the next. `mark` is the length of
+	/// `diags` before the show ran, so an error raised without a diagnostic of its own is given one at `span`.
+	pub fn delay<T: Default>(&mut self, mark: usize, span: Span, result: Outcome<T>) -> T {
+		match result {
+			Ok(v)	=> v,
+			Err(e)	=> {
+				self.adopt(mark, span, e);
+				T::default()
+			},
+		}
+	}
+
 	/// Enters a closure call; past [`MAX_CALL_DEPTH`] it is an error, not a stack overflow.
 	pub fn enter_call(&mut self, span: Span) -> Outcome<()> {
 		if self.depth >= MAX_CALL_DEPTH {

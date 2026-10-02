@@ -7,6 +7,11 @@
 // diagnostics of the previous pass are dropped, so a `context` error a first pass makes for want of a
 // later label is gone once the label is known. Only the final pass's errors fail the run.
 //
+// What fails a pass outright and what waits are Typst's own division. A show rule's error (a reference
+// to a label the first pass has not seen above all) is delayed by `Engine::delay`: the element shows as
+// nothing, the pass completes, and the error counts only if the final pass still holds it. An error from
+// anywhere else, layout above all, ends the compile in the pass it occurs in.
+//
 // Streaming (addendum 2026-09-23): a pass holds one page at a time. Nothing here keeps a page, a frame or
 // a run; what outlives a page is its records in the [`Builder`], and what outlives a pass is the
 // [`Introspector`] built from them and the sink's own output.
@@ -179,6 +184,7 @@ pub fn run_with<L: Layouter, S: PageSink>(
 			res!(warn_unsettled(engine, &intro));
 		}
 		engine.intro = intro.clone();
+		dedupe_errors(&mut engine.diags, mark);
 		if let Some(d) = engine.diags[mark..].iter().find(|d| d.is_error()) {
 			let e = err!("{}", d.message; Input, Invalid);
 			res!(sink.discard_pass());
@@ -187,6 +193,19 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		res!(sink.finish(engine, &intro));
 		return Ok(Laid { intro, pages, passes, converged });
 	}
+}
+
+/// Typst's `deduplicate`: an error met again at one span with one message is reported once. A body laid out
+/// again, measured and then placed, shows its failed element each time.
+fn dedupe_errors(diags: &mut Vec<Diagnostic>, mark: usize) {
+	let mut kept: Vec<Diagnostic> = Vec::with_capacity(diags.len() - mark);
+	for d in diags.drain(mark..) {
+		if d.is_error() && kept.iter().any(|k| k.is_error() && k.span == d.span && k.message == d.message) {
+			continue;
+		}
+		kept.push(d);
+	}
+	diags.extend(kept);
 }
 
 /// Typst's non-convergence report: a summary, then one warning for each counter, state, query or
