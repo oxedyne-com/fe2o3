@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-eval, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U2 owns this file: the tree-walking evaluator. Its public surface is `eval_module`, `eval_string` and
 // `Engine::call_func`; the walker's own state (a VM with the scope chain and flow control) is private.
 //

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `layout/*`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U6b owns this file. Schemas for the layout family (box, block, align, pad, stack, h, v, place, columns,
 // colbreak, pagebreak, page), with Typst 0.15's defaults. `align` shows as its body under the alignment
 // style and `page(..)[body]` constructs a page-bounded sequence, as Typst's do; every other element is a

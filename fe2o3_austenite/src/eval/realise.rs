@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-realize, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U4 owns this file: content plus styles in, an ordered element stream out, with show rules applied,
 // locations assigned and inline runs grouped. Flow calls it again for each container's body, so one call
 // realises one level, not the whole tree.

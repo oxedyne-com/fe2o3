@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions Copyright (c) The Typst Project Developers, from typst-syntax 0.15.1's `src/parser.rs`; see
+// fe2o3_austenite/licences/typst-LICENSE.txt for the full Apache-2.0 text.
+// Modified for Austenite.
 //! Ported from typst-syntax 0.15.1 (`src/parser.rs`, Apache-2.0, (c) the Typst authors): the same
 //! recursive descent over the three modes, the same newline modes, backtracking memo and depth limit,
 //! so the tree has typst-syntax's kinds, child order and error nodes. The tree is built with detached

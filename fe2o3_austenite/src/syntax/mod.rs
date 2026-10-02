@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-syntax `span.rs`, `file.rs` and `source.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 //! Contract (U0, 2026-09-23): the concrete syntax tree is lossless -- concatenating every leaf's text
 //! reproduces the source byte for byte -- and its kinds and child order follow typst-syntax 0.14/0.15,
 //! so typst-syntax's own `ast.rs` is the reference for which child an accessor reads. A parse error is an

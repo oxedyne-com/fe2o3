@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-layout `shapes.rs`, `transforms.rs`, `image.rs` and `repeat.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U6d owns this file: images, shapes, curves and transforms into one atomic box each, over `image.rs`,
 // `fe2o3_graphics` paths and `ir::TransformNode`/`ir::ClipNode`.
 //

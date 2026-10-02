@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `visualize/*`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U6d owns this file. Schemas for images, shapes, curves and transforms, and the `stroke`, `tiling` and
 // `polygon.regular` constructors. Every visual element but `hide` is a primitive flow lays out itself
 // (`flow::visual`), so `show` is `None` for them; `hide` shows as its body under the `hidden` style.

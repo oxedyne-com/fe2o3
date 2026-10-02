@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions Copyright (c) The Typst Project Developers, from typst-syntax 0.15.1's `src/ast.rs`; see
+// fe2o3_austenite/licences/typst-LICENSE.txt for the full Apache-2.0 text.
+// Modified for Austenite.
 //! Ported from typst-syntax 0.15.1 (`src/ast.rs`, Apache-2.0, (c) the Typst authors): typed, zero-cost
 //! views over [`SyntaxNode`], with the same names and accessors, so the evaluator reads the tree as
 //! typst-eval does. A view never panics on a malformed tree: where the child it wants is missing it

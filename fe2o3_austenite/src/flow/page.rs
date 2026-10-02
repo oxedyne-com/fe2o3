@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-layout `pages/*`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U6b owns this file: the document's top level as pages, one page at a time, honouring `pagebreak(weak:,
 // to:)`. The driver's `place_page` takes each page's body as it comes.
 //

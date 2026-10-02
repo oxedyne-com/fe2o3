@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+// Portions Copyright (c) The Typst Project Developers, from typst-syntax 0.15.1's `src/lexer.rs`; see
+// fe2o3_austenite/licences/typst-LICENSE.txt for the full Apache-2.0 text.
+// Modified for Austenite.
 //! Ported from typst-syntax 0.15.1 (`src/lexer.rs`, Apache-2.0, (c) the Typst authors), token for token:
 //! the same modes, the same kinds, the same error messages and hints, so a document lexes as Typst
 //! lexes it. The Unicode predicates it needs (XID identifiers, the CJK scripts, the maths delimiter

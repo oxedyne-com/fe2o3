@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-library `introspection/*` and `foundations/{styles,content}.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U8 owns this file: the introspector, counter and state keys, and the read log the fixpoint compares.
 // A counter or state is a fold of its update elements in document order; nothing here observes layout
 // except through the positions the pages recorded.

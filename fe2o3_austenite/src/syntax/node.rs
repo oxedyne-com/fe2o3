@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-syntax `node.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U1 owns this file. The public methods below are the contract U2 codes against; keep their names and
 // meanings, add freely.
 

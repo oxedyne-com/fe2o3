@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-layout `flow/*`, `pad.rs` and `stack.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U6b owns this file: block-level flow -- block, pad, align, stack, v with fr, place (float and parent
 // scope), columns and colbreak -- dispatching inline runs to `par` and atoms to `grid`, `visual`, `math`.
 //

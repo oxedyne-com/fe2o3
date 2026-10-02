@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-syntax `kind.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U1 owns this file. The variant list mirrors typst-syntax 0.14's `SyntaxKind`; add a kind rather than
 // overloading one, since U2 dispatches on it.
 

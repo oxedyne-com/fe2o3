@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-eval `import.rs`, typst-syntax `path.rs` and typst-library `foundations/path.rs` and `diag.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 // U10 owns this file: paths, `import` and `include`, and reading the files they name. Every path is
 // resolved within a root, the project's or a package's, as Typst 0.15.1 resolves it: relative to the
 // directory of the file it is written in, or with a leading `/` to that file's root, and never out of the
