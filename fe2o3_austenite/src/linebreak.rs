@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// Original work copyright (c) the Typst project authors (typst-layout `inline/linebreak.rs`, version 0.15.1).
+// Modified for Austenite: ported to Hematite's types, IR and error handling.
 //! Total-fit line breaking, after Knuth and Plass (*Breaking Paragraphs into Lines*, 1981).
 //!
 //! A paragraph is turned into the box-glue-penalty stream the [`ir`](crate::ir) already models: a
@@ -769,4 +772,633 @@ fn set_lines(
 		}
 	}
 	Ok(out)
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE EVALUATOR'S LINE BREAKER                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// Everything above serves the curated reader and goes with it at cut-over. What follows is the
+// evaluator's breaker, a port of Typst 0.15.1's `typst-layout/src/inline/linebreak.rs` (Apache-2.0,
+// (c) the Typst project authors), so that a paragraph breaks where the oracle breaks it:
+//
+// - Break opportunities are UAX #14's, a mandatory one after a hard line-break class, links broken by
+//   Typst's own rule, and hyphenation points inside alphabetic words (Liang's patterns, through
+//   `fe2o3_text::hyphen`, the port of the `hypher` automata Typst uses).
+// - `linebreaks: "simple"` is first fit. `"optimized"` is Knuth-Plass over Typst's cost, not TeX's
+//   demerits: a line's cost is (1 + badness + penalty)^2, badness 100|r|^3 (none for a ragged last line
+//   that need not shrink), a runt cost of 100 for a lone word before a mandatory break, a hyphenation
+//   cost of 135 scaled by `text.costs` and by 15% per character short of five either side of the break,
+//   and the hyphenation cost again for two dashes in a row. The ratio stretches past a line's own
+//   stretchability onto its justifiable glyphs, measured in half ems.
+// - A first pass over cumulative width estimates finds a likely layout whose exact cost bounds the
+//   exact pass, which then skips every predecessor that cannot beat it.
+
+use crate::flow::inline::{
+	line,
+	Dash,
+	Item as InlineItem,
+	Line,
+	Linebreaks,
+	Prep,
+};
+use crate::fonts::is_default_ignorable;
+
+use oxedyne_fe2o3_text::hyphen;
+use oxedyne_fe2o3_text::unicode::lookup::Partitioned;
+use oxedyne_fe2o3_text::unicode::prop::LineBreakClass;
+use oxedyne_fe2o3_text::unicode::segment::word_boundaries;
+
+type Cost = f64;
+
+// Typst's costs: higher than Knuth-Plass's 50 for a hyphen, which hyphenates too eagerly without glue.
+const DEFAULT_HYPH_COST:	Cost	= 135.0;
+const DEFAULT_RUNT_COST:	Cost	= 100.0;
+const MIN_RATIO:			f64		= -1.0;
+const MIN_APPROX_RATIO:		f64		= -0.5;
+const BOUND_EPS:			f64		= 1e-3;
+const ABS_EPS:				f64		= 1e-4 / 127.0;	// Typst's length epsilon, in points
+
+/// A place a line may end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Breakpoint {
+	Normal,				// an ordinary opportunity, after a space say
+	Mandatory,			// after a line feed, or at the end of the text
+	Hyphen(u8, u8),		// inside a word, with the characters of the word before and after
+}
+
+/// Where a line's text stops counting for layout and for shaping: trailing spaces are shaped (to be
+/// copied) but take no width, and a line feed is neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Trim {
+	pub layout:		usize,
+	pub shaping:	usize,
+}
+
+impl Breakpoint {
+	pub fn trim(self, start: usize, line: &str) -> Trim {
+		match self {
+			Breakpoint::Normal => {
+				let trimmed = line.trim_end_matches(|c: char| c.is_whitespace() || is_default_ignorable(c));
+				Trim { layout: start + trimmed.len(), shaping: start + line.len() }
+			}
+			Breakpoint::Mandatory => {
+				let trimmed = line.trim_end_matches(|c: char| is_hard_break(c));
+				let t = start + trimmed.len();
+				Trim { layout: t, shaping: t }
+			}
+			Breakpoint::Hyphen(..) => {
+				let t = start + line.len();
+				Trim { layout: t, shaping: t }
+			}
+		}
+	}
+
+	pub fn is_hyphen(self) -> bool { matches!(self, Breakpoint::Hyphen(..)) }
+}
+
+/// Is the character of a mandatory line-break class (BK, CR, LF, NL)?
+fn is_hard_break(c: char) -> bool {
+	matches!(LineBreakClass::of(c), LineBreakClass::BK | LineBreakClass::CR | LineBreakClass::LF | LineBreakClass::NL)
+}
+
+/// Breaks a prepared paragraph into lines `width` points wide.
+pub fn linebreak(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+	match p.config.linebreaks {
+		Linebreaks::Simple		=> linebreak_simple(p, width),
+		Linebreaks::Optimized	=> linebreak_optimized(p, width),
+	}
+}
+
+fn fits(width: f64, other: f64) -> bool {
+	width + ABS_EPS >= other
+}
+
+/// First fit: each line as long as fits.
+fn linebreak_simple(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+	let mut lines: Vec<Line> = Vec::with_capacity(16);
+	let mut start = 0;
+	let mut last: Option<(Line, usize)> = None;
+	for (end, bp) in breakpoints(p) {
+		let mut attempt = res!(line(p, start, end, bp, lines.last()));
+		if !fits(width, attempt.width) {
+			if let Some((last_attempt, last_end)) = last.take() {
+				lines.push(last_attempt);
+				start = last_end;
+				attempt = res!(line(p, start, end, bp, lines.last()));
+			}
+		}
+		if bp == Breakpoint::Mandatory || !fits(width, attempt.width) {
+			lines.push(attempt);
+			start = end;
+			last = None;
+		} else {
+			last = Some((attempt, end));
+		}
+	}
+	if let Some((l, _)) = last {
+		lines.push(l);
+	}
+	Ok(lines)
+}
+
+/// Knuth-Plass over Typst's cost, bounded by the exact cost of an estimated layout.
+fn linebreak_optimized(p: &Prep, width: f64) -> Outcome<Vec<Line>> {
+	let metrics = CostMetrics::compute(p);
+	let bound = res!(linebreak_optimized_approximate(p, width, &metrics));
+	linebreak_optimized_bounded(p, width, &metrics, bound)
+}
+
+struct Entry {
+	pred:	usize,
+	total:	Cost,
+	line:	Line,
+	end:	usize,
+}
+
+fn linebreak_optimized_bounded(p: &Prep, width: f64, metrics: &CostMetrics, upper_bound: Cost) -> Outcome<Vec<Line>> {
+	let mut table: Vec<Entry> = vec![Entry { pred: 0, total: 0.0, line: Line::empty(), end: 0 }];
+	let mut active = 0;
+	let mut prev_end = 0;
+	for (end, bp) in breakpoints(p) {
+		let mut best: Option<Entry> = None;
+		let mut line_lower_bound: Option<Cost> = None;
+		for pred_index in active..table.len() {
+			let (start, pred_total) = (table[pred_index].end, table[pred_index].total);
+			let unbreakable = prev_end == start;
+			if line_lower_bound.map_or(false, |lower| pred_total + lower > upper_bound + BOUND_EPS) {
+				continue;
+			}
+			let attempt = res!(line(p, start, end, bp, Some(&table[pred_index].line)));
+			let (line_ratio, line_cost) = ratio_and_cost(p, metrics, width, &table[pred_index].line, &attempt, bp, unbreakable);
+			if line_ratio < metrics.min_ratio && active == pred_index {
+				active += 1;
+			}
+			let total = pred_total + line_cost;
+			if line_ratio > 0.0 && line_lower_bound.is_none() && !attempt.has_negative_width_items() {
+				line_lower_bound = Some(line_cost);
+			}
+			if total > upper_bound + BOUND_EPS {
+				continue;
+			}
+			if best.as_ref().map_or(true, |b| b.total >= total) {
+				best = Some(Entry { pred: pred_index, total, line: attempt, end });
+			}
+		}
+		if bp == Breakpoint::Mandatory {
+			active = table.len();
+		}
+		if let Some(b) = best {
+			table.push(b);
+		}
+		prev_end = end;
+	}
+
+	// A bound that proves faulty is dropped, as Typst's release build does.
+	let last = table.len() - 1;
+	if table[last].end != p.text.len() {
+		if upper_bound.is_infinite() {
+			return Err(err!("The optimised line breaker found no layout for a paragraph of {} bytes.", p.text.len(); Bug));
+		}
+		return linebreak_optimized_bounded(p, width, metrics, Cost::INFINITY);
+	}
+	let mut lines = Vec::with_capacity(16);
+	let mut idx = last;
+	while idx != 0 {
+		table.truncate(idx + 1);
+		let entry = match table.pop() {
+			Some(e)	=> e,
+			None	=> break,
+		};
+		idx = entry.pred;
+		lines.push(entry.line);
+	}
+	lines.reverse();
+	Ok(lines)
+}
+
+struct ApproxEntry {
+	pred:			usize,
+	total:			Cost,
+	end:			usize,
+	unbreakable:	bool,
+	bp:				Breakpoint,
+}
+
+/// Knuth-Plass over cumulative estimates, then the exact cost of the layout it finds: a sound upper
+/// bound for the exact pass, or infinity when that layout overflows.
+fn linebreak_optimized_approximate(p: &Prep, width: f64, metrics: &CostMetrics) -> Outcome<Cost> {
+	let est = Estimates::compute(p);
+	let mut table: Vec<ApproxEntry> = vec![ApproxEntry {
+		pred: 0, total: 0.0, end: 0, unbreakable: false, bp: Breakpoint::Mandatory,
+	}];
+	let mut active = 0;
+	let mut prev_end = 0;
+	for (end, bp) in breakpoints(p) {
+		let mut best: Option<ApproxEntry> = None;
+		for pred_index in active..table.len() {
+			let pred = &table[pred_index];
+			let start = pred.end;
+			let unbreakable = prev_end == start;
+			let justify = p.config.justify && bp != Breakpoint::Mandatory;
+			let consecutive_dash = pred.bp.is_hyphen() && bp.is_hyphen();
+			let trimmed_end = start + p.text.get(start..end).map_or(0, |t| t.trim_end().len());
+			let line_ratio = raw_ratio(
+				p,
+				width,
+				est.widths.estimate(start, trimmed_end) + if bp.is_hyphen() { metrics.approx_hyphen_width } else { 0.0 },
+				est.stretchability.estimate(start, trimmed_end),
+				est.shrinkability.estimate(start, trimmed_end),
+				est.justifiables.estimate(start, trimmed_end),
+			);
+			let line_cost = raw_cost(metrics, bp, line_ratio, justify, unbreakable, consecutive_dash, true);
+			if line_ratio < metrics.min_ratio && active == pred_index {
+				active += 1;
+			}
+			let total = pred.total + line_cost;
+			if best.as_ref().map_or(true, |b| b.total >= total) {
+				best = Some(ApproxEntry { pred: pred_index, total, end, unbreakable, bp });
+			}
+		}
+		if bp == Breakpoint::Mandatory {
+			active = table.len();
+		}
+		if let Some(b) = best {
+			table.push(b);
+		}
+		prev_end = end;
+	}
+
+	let mut indices = Vec::with_capacity(16);
+	let mut idx = table.len() - 1;
+	while idx != 0 {
+		indices.push(idx);
+		idx = table[idx].pred;
+	}
+	let mut pred = Line::empty();
+	let mut start = 0;
+	let mut exact = 0.0;
+	for idx in indices.into_iter().rev() {
+		let (end, bp, unbreakable) = (table[idx].end, table[idx].bp, table[idx].unbreakable);
+		let attempt = res!(line(p, start, end, bp, Some(&pred)));
+		let (ratio, cost) = ratio_and_cost(p, metrics, width, &pred, &attempt, bp, unbreakable);
+		if ratio < metrics.min_ratio {
+			return Ok(Cost::INFINITY);
+		}
+		pred = attempt;
+		start = end;
+		exact += cost;
+	}
+	Ok(exact)
+}
+
+fn ratio_and_cost(
+	p:				&Prep,
+	metrics:		&CostMetrics,
+	available:		f64,
+	pred:			&Line,
+	attempt:		&Line,
+	bp:				Breakpoint,
+	unbreakable:	bool,
+)
+	-> (f64, Cost)
+{
+	let ratio = raw_ratio(p, available, attempt.width, attempt.stretchability(), attempt.shrinkability(), attempt.justifiables());
+	let consecutive = pred.dash.is_some() && attempt.dash.is_some();
+	let cost = raw_cost(metrics, bp, ratio, attempt.justify, unbreakable, consecutive, false);
+	(ratio, cost)
+}
+
+/// How far a line must stretch (positive) or shrink (negative) to fill `available`, in multiples of its
+/// adjustability; past full stretch, the extra is spread over its justifiable glyphs in half ems. Below
+/// `MIN_RATIO` is overfull.
+fn raw_ratio(p: &Prep, available: f64, width: f64, stretch: f64, shrink: f64, justifiables: usize) -> f64 {
+	let mut delta = available - width;
+	if delta == 0.0 || delta.abs() < ABS_EPS {
+		delta = 0.0;
+	}
+	let adjustability = if delta >= 0.0 { stretch } else { shrink };
+	// A line holding no text sums its stretch over nothing, which Rust gives as -0.0, and `f64::max`
+	// may hand that sign back. Dividing by -0.0 turns an underfull line into an overfull one, which
+	// drops the line's start from the active set, so every break after it is chosen from the second
+	// breakpoint on. Typst's `Abs::max` is `Ord::max`, which on a tie returns the zero given.
+	let mut ratio = delta / if adjustability > 0.0 { adjustability } else { 0.0 };
+	if ratio.is_nan() {
+		ratio = 0.0;
+	}
+	if ratio > 1.0 {
+		let extra = (delta - adjustability) / justifiables.max(1) as f64;
+		ratio = 1.0 + extra / (p.config.font_size / 2.0);
+	}
+	ratio.clamp(MIN_RATIO - 1.0, 10.0)
+}
+
+/// Typst's cost of a line: (1 + badness + penalty)^2.
+fn raw_cost(
+	metrics:			&CostMetrics,
+	bp:					Breakpoint,
+	ratio:				f64,
+	justify:			bool,
+	unbreakable:		bool,
+	consecutive_dash:	bool,
+	approx:				bool,
+)
+	-> Cost
+{
+	let badness = if ratio < metrics.min(approx) {
+		1_000_000.0
+	} else if bp != Breakpoint::Mandatory || justify || ratio < 0.0 {
+		100.0 * scalar(ratio.abs()).powi(3)
+	} else {
+		0.0
+	};
+	let mut penalty = 0.0;
+	if unbreakable && bp == Breakpoint::Mandatory {
+		penalty += metrics.runt_cost;
+	}
+	if let Breakpoint::Hyphen(l, r) = bp {
+		const LIMIT: u8 = 5;
+		let steps = LIMIT.saturating_sub(l) + LIMIT.saturating_sub(r);
+		let extra = 0.15 * steps as f64;
+		penalty += (1.0 + extra) * metrics.hyph_cost;
+	}
+	if consecutive_dash {
+		penalty += metrics.hyph_cost;
+	}
+	scalar(1.0 + badness + penalty).powi(2)
+}
+
+/// A float with NaN read as zero, as Typst's `Scalar` reads it.
+fn scalar(v: f64) -> f64 {
+	if v.is_nan() { 0.0 } else { v }
+}
+
+/// The break opportunities of the paragraph's text, in order, each with its kind.
+pub fn breakpoints(p: &Prep) -> Vec<(usize, Breakpoint)> {
+	let text = p.text.as_str();
+	let mut out = Vec::new();
+	if text.is_empty() {
+		out.push((0, Breakpoint::Mandatory));
+		return out;
+	}
+	let hyphenate = p.config.hyphenate != Some(false);
+	let points: Vec<usize> = oxedyne_fe2o3_text::unicode::linebreak::line_breaks(text)
+		.into_iter().map(|o| o.offset).collect();
+	let mut last = 0usize;
+	let mut k = 0usize;
+	loop {
+		// Links break by Typst's own rule rather than UAX #14's.
+		let (head, tail) = text.split_at(last);
+		if head.ends_with("://") || tail.starts_with("www.") {
+			let (link, _) = crate::syntax::lexer::link_prefix(tail);
+			let base = last;
+			linebreak_link(link, |i| out.push((base + i, Breakpoint::Normal)));
+			last += link.len();
+			while k < points.len() && points[k] < last {
+				k += 1;
+			}
+		}
+		let point = match points.get(k) {
+			Some(pt)	=> *pt,
+			None		=> break,
+		};
+		k += 1;
+		let c = match text.get(..point).and_then(|t| t.chars().next_back()) {
+			Some(c)	=> c,
+			None	=> continue,
+		};
+		let bp = if point == text.len() {
+			Breakpoint::Mandatory
+		} else if is_hard_break(c) {
+			Breakpoint::Mandatory
+		} else if LineBreakClass::of(c) == LineBreakClass::CM
+			&& text.get(point..).map_or(false, |t| t.starts_with('\u{FFFC}'))
+			&& last + c.len_utf8() == point
+		{
+			continue;
+		} else {
+			Breakpoint::Normal
+		};
+		if hyphenate && last < point {
+			if let Some(span) = text.get(last..point) {
+				let bounds = word_boundaries(span);
+				for w in bounds.windows(2) {
+					let seg = &span[w[0]..w[1]];
+					if !seg.is_empty() && seg.chars().all(char::is_alphabetic) {
+						hyphenations(p, last + w[0], seg, &mut out);
+					}
+				}
+			}
+		}
+		out.push((point, bp));
+		last = point;
+	}
+	out
+}
+
+/// The hyphenation points inside `word`, which starts at byte `offset`.
+fn hyphenations(p: &Prep, offset: usize, word: &str, out: &mut Vec<(usize, Breakpoint)>) {
+	let lang = match lang_at(p, offset) {
+		Some(l)	=> l,
+		None	=> return,
+	};
+	let count = word.chars().count();
+	for at in hyphen::hyphenate(word, lang) {
+		let pos = offset + at;
+		if !hyphenate_at(p, pos) {
+			continue;
+		}
+		// Not after a glue, a word joiner or a zero-width joiner.
+		if let Some(prev) = word.get(..at).and_then(|t| t.chars().next_back()) {
+			if matches!(LineBreakClass::of(prev), LineBreakClass::GL | LineBreakClass::WJ | LineBreakClass::ZWJ) {
+				continue;
+			}
+		}
+		let chars = word.get(..at).map_or(0, |t| t.chars().count());
+		let l = chars.min(255) as u8;
+		let r = (count - chars).min(255) as u8;
+		out.push((pos, Breakpoint::Hyphen(l, r)));
+	}
+}
+
+/// Is hyphenation on at `offset`: the paragraph's uniform setting, else that of the text there, which is
+/// `justify` when `auto`.
+fn hyphenate_at(p: &Prep, offset: usize) -> bool {
+	match p.config.hyphenate {
+		Some(h)	=> h,
+		None	=> match &p.get(offset).1 {
+			InlineItem::Text(t)	=> t.props.hyphenate.unwrap_or(p.config.justify),
+			_				=> false,
+		},
+	}
+}
+
+/// The patterns for the language at `offset`: the paragraph's uniform language, else the text's there,
+/// when it is a two-letter code patterns exist for.
+fn lang_at(p: &Prep, offset: usize) -> Option<hyphen::Lang> {
+	let lang = match &p.config.lang {
+		Some(l)	=> l.clone(),
+		None	=> match &p.get(offset).1 {
+			InlineItem::Text(t)	=> t.props.lang.clone(),
+			_				=> return None,
+		},
+	};
+	if lang.len() != 2 {
+		return None;
+	}
+	hyphen::Lang::from_iso(&lang)
+}
+
+/// Break opportunities inside a URL: between two non-alphanumerics, and at a change between letters and
+/// digits, never after an opening bracket; a very long piece breaks anywhere.
+fn linebreak_link<F: FnMut(usize)>(link: &str, mut f: F) {
+	#[derive(PartialEq)]
+	enum Class {
+		Alphabetic,
+		Digit,
+		Open,
+		Other,
+	}
+	fn class_of(c: char) -> Class {
+		if c.is_alphabetic() {
+			Class::Alphabetic
+		} else if c.is_numeric() {
+			Class::Digit
+		} else if matches!(c, '(' | '[') {
+			Class::Open
+		} else {
+			Class::Other
+		}
+	}
+	let mut offset = 0;
+	let mut prev = Class::Other;
+	for (end, c) in link.char_indices() {
+		let class = class_of(c);
+		if end > 0
+			&& prev != Class::Open
+			&& if class == Class::Other { prev == Class::Other } else { class != prev }
+		{
+			let piece = &link[offset..end];
+			if piece.len() < 16 {
+				offset = end;
+				f(offset);
+			} else {
+				for ch in piece.chars() {
+					offset += ch.len_utf8();
+					f(offset);
+				}
+			}
+		}
+		prev = class;
+	}
+}
+
+struct CostMetrics {
+	min_ratio:				f64,
+	min_approx_ratio:		f64,
+	approx_hyphen_width:	f64,
+	hyph_cost:				Cost,
+	runt_cost:				Cost,
+}
+
+impl CostMetrics {
+	fn compute(p: &Prep) -> Self {
+		Self {
+			min_ratio:				if p.config.justify { MIN_RATIO } else { 0.0 },
+			min_approx_ratio:		if p.config.justify { MIN_APPROX_RATIO } else { 0.0 },
+			approx_hyphen_width:	0.33 * p.config.font_size,
+			hyph_cost:				DEFAULT_HYPH_COST * p.config.costs.hyphenation,
+			runt_cost:				DEFAULT_RUNT_COST * p.config.costs.runt,
+		}
+	}
+
+	fn min(&self, approx: bool) -> f64 {
+		if approx { self.min_approx_ratio } else { self.min_ratio }
+	}
+}
+
+/// Cumulative per-byte sums of the width, stretch, shrink and justifiable count, for estimates.
+struct Estimates {
+	widths:			Cumulative<f64>,
+	stretchability:	Cumulative<f64>,
+	shrinkability:	Cumulative<f64>,
+	justifiables:	Cumulative<usize>,
+}
+
+impl Estimates {
+	fn compute(p: &Prep) -> Self {
+		let cap = p.text.len();
+		let mut widths = Cumulative::with_capacity(cap);
+		let mut stretchability = Cumulative::with_capacity(cap);
+		let mut shrinkability = Cumulative::with_capacity(cap);
+		let mut justifiables = Cumulative::with_capacity(cap);
+		for (range, item) in &p.items {
+			match item {
+				InlineItem::Text(t) => for g in t.kept() {
+					let n = g.range.1 - g.range.0;
+					widths.push(n, g.x_advance * g.size);
+					stretchability.push(n, (g.stretch.0 + g.stretch.1) * g.size);
+					shrinkability.push(n, (g.shrink.0 + g.shrink.1) * g.size);
+					justifiables.push(n, g.justifiable as usize);
+				},
+				other => widths.push(range.1 - range.0, other.natural_width()),
+			}
+			widths.adjust(range.1);
+			stretchability.adjust(range.1);
+			shrinkability.adjust(range.1);
+			justifiables.adjust(range.1);
+		}
+		Self { widths, stretchability, shrinkability, justifiables }
+	}
+}
+
+struct Cumulative<T> {
+	total:	T,
+	summed:	Vec<T>,
+}
+
+impl<T> Cumulative<T>
+	where T: Default + Copy + std::ops::Add<Output = T> + std::ops::Sub<Output = T>
+{
+	fn with_capacity(cap: usize) -> Self {
+		let total = T::default();
+		let mut summed = Vec::with_capacity(cap);
+		summed.push(total);
+		Self { total, summed }
+	}
+
+	fn adjust(&mut self, len: usize) {
+		self.summed.resize(len, self.total);
+	}
+
+	fn push(&mut self, byte_len: usize, metric: T) {
+		self.total = self.total + metric;
+		for _ in 0..byte_len {
+			self.summed.push(self.total);
+		}
+	}
+
+	fn estimate(&self, start: usize, end: usize) -> T {
+		self.get(end) - self.get(start)
+	}
+
+	fn get(&self, index: usize) -> T {
+		match index.checked_sub(1) {
+			None	=> T::default(),
+			Some(i)	=> self.summed.get(i).copied().unwrap_or(self.total),
+		}
+	}
+}
+
+/// Does a line ending in this text end with a dash, and which?
+pub fn dash_of(bp: Breakpoint, full: &str) -> Option<Dash> {
+	if bp.is_hyphen() || full.ends_with('\u{00AD}') {
+		Some(Dash::Soft)
+	} else if full.ends_with('-') {
+		Some(Dash::Hard)
+	} else if full.ends_with(['\u{2013}', '\u{2014}']) {
+		Some(Dash::Other)
+	} else {
+		None
+	}
 }

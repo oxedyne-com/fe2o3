@@ -44,7 +44,7 @@ oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_graphics 			= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_font 				= { path = "../fe2o3_font" }
-oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_text 				= { path = "../fe2o3_text", features = ["hyphenation"] }
 
 # The wasm-bindgen compile surface's dependencies, confined to the wasm target exactly as `fe2o3_core`
 # confines its own, so Cargo feature unification never pulls them onto a native build.  They are present

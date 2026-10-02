@@ -9,6 +9,7 @@ use crate::shape::{
 	Feature,
 	Glyph,
 	Run,
+	ShapeSpec,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -16,6 +17,7 @@ use oxedyne_fe2o3_graphics::prelude::*;
 use oxedyne_fe2o3_graphics::pdf_font::FontProgram;
 
 use harfrust::{
+	BufferFlags,
 	Feature as ShapeFeature,
 	FontRef as ShapeFont,
 	ShapeOptions,
@@ -33,6 +35,7 @@ use skrifa::{
 		OutlinePen,
 	},
 	attribute::Style,
+	raw::TableProvider,
 	string::StringId,
 	FontRef as OutlineFont,
 	GlyphId,
@@ -71,6 +74,51 @@ impl Metrics {
 	pub fn line_height(&self) -> f32 {
 		self.ascent + self.descent + self.leading
 	}
+}
+
+/// The metrics a typesetter reads from a face beyond its ascent and descent, in font units, taken as
+/// Typst takes them: the typographic ascender and descender of the `OS/2` table where the face has one
+/// (whatever its `USE_TYPO_METRICS` bit says), else the `hhea` pair; the cap and x heights only where the
+/// table records a positive value; the decoration lines from `OS/2` and `post`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutMetrics {
+	pub units_per_em:	f32,
+	pub ascender:		f32,
+	pub descender:		f32,					// negative below the baseline, as the font records it
+	pub cap_height:		Option<f32>,
+	pub x_height:		Option<f32>,
+	pub strikeout:		Option<(f32, f32)>,		// position above the baseline, thickness
+	pub underline:		Option<(f32, f32)>,		// position (negative below), thickness
+	pub subscript:		Option<ScriptMetrics>,
+	pub superscript:	Option<ScriptMetrics>,
+}
+
+/// A face's own advice for synthesising a sub- or superscript, in font units (`OS/2`'s `ySubscript*` and
+/// `ySuperscript*` fields). The offsets are as the table records them: positive `y_offset` is upwards for a
+/// superscript and downwards for a subscript.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScriptMetrics {
+	pub x_size:		f32,
+	pub y_size:		f32,
+	pub x_offset:	f32,
+	pub y_offset:	f32,
+}
+
+/// How a face describes itself for selection by family and variant: its names, its weight, width and
+/// slant classes, and the flags a fallback search compares on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FaceClass {
+	pub family:		Option<String>,	// name ID 1, the legacy family
+	pub full_name:	Option<String>,	// name ID 4
+	pub postscript:	Option<String>,	// name ID 6
+	pub weight:		u16,			// OS/2 usWeightClass, 400 when absent
+	pub width:		u16,			// OS/2 usWidthClass, 1 to 9, 5 when absent
+	pub italic:		bool,			// fsSelection bit 0
+	pub oblique:	bool,			// fsSelection bit 9
+	pub monospace:	bool,			// post isFixedPitch
+	pub serif:		bool,			// the PANOSE family is Latin text with a serif style
+	pub variable:	bool,			// the face carries an fvar table
+	pub math:		bool,			// the face carries a MATH table
 }
 
 /// What a font file says about itself: the family it belongs to and where in that family it sits. This
@@ -212,6 +260,94 @@ impl Face {
 		})
 	}
 
+	/// The face's units per em, what every measurement in the file is in terms of.
+	pub fn units_per_em(&self) -> f32 {
+		self.upem
+	}
+
+	/// The layout metrics in font units; see [`LayoutMetrics`].
+	pub fn layout_metrics(&self) -> Outcome<LayoutMetrics> {
+		let of = res!(self.outline_font());
+		let os2 = of.os2().ok();
+		let hhea = of.hhea().ok();
+		let post = of.post().ok();
+		let (ascender, descender) = match (&os2, &hhea) {
+			(Some(t), _)		=> (t.s_typo_ascender() as f32, t.s_typo_descender() as f32),
+			(None, Some(h))		=> (h.ascender().to_i16() as f32, h.descender().to_i16() as f32),
+			(None, None)		=> (self.upem * 0.8, -self.upem * 0.2),
+		};
+		let positive = |v: Option<i16>| v.filter(|h| *h > 0).map(|h| h as f32);
+		Ok(LayoutMetrics {
+			units_per_em:	self.upem,
+			ascender,
+			descender,
+			cap_height:		os2.as_ref().and_then(|t| positive(t.s_cap_height())),
+			x_height:		os2.as_ref().and_then(|t| positive(t.sx_height())),
+			strikeout:		os2.as_ref().map(|t| (t.y_strikeout_position() as f32, t.y_strikeout_size() as f32)),
+			underline:		post.as_ref().map(|t| (
+				t.underline_position().to_i16() as f32,
+				t.underline_thickness().to_i16() as f32,
+			)),
+			subscript:		os2.as_ref().map(|t| ScriptMetrics {
+				x_size:		t.y_subscript_x_size() as f32,
+				y_size:		t.y_subscript_y_size() as f32,
+				x_offset:	t.y_subscript_x_offset() as f32,
+				y_offset:	t.y_subscript_y_offset() as f32,
+			}),
+			superscript:	os2.as_ref().map(|t| ScriptMetrics {
+				x_size:		t.y_superscript_x_size() as f32,
+				y_size:		t.y_superscript_y_size() as f32,
+				x_offset:	t.y_superscript_x_offset() as f32,
+				y_offset:	t.y_superscript_y_offset() as f32,
+			}),
+		})
+	}
+
+	/// The names, classes and flags the face is selected by; see [`FaceClass`].
+	pub fn class(&self) -> Outcome<FaceClass> {
+		let of = res!(self.outline_font());
+		let name = |id: StringId| of.localized_strings(id).english_or_first()
+			.map(|s| s.to_string())
+			.filter(|s| !s.trim().is_empty());
+		let os2 = of.os2().ok();
+		let sel = os2.as_ref().map(|t| t.fs_selection().bits()).unwrap_or(0);
+		// PANOSE is ten bytes at offset 32 of OS/2: family kind 2 is Latin text, and a serif style from 2
+		// to 10 is one of the serifed forms (11 and up are the sans styles).
+		let serif = of.table_data(harfrust::Tag::new(b"OS/2"))
+			.and_then(|d| d.as_bytes().get(32..34).map(|p| p[0] == 2 && (2..=10).contains(&p[1])))
+			.unwrap_or(false);
+		Ok(FaceClass {
+			family:		name(StringId::FAMILY_NAME),
+			full_name:	name(StringId::FULL_NAME),
+			postscript:	name(StringId::POSTSCRIPT_NAME),
+			weight:		os2.as_ref().map(|t| t.us_weight_class()).unwrap_or(400),
+			width:		os2.as_ref().map(|t| t.us_width_class()).filter(|w| (1..=9).contains(w)).unwrap_or(5),
+			italic:		sel & 0x0001 != 0,
+			oblique:	sel & 0x0200 != 0,
+			monospace:	of.post().map(|t| t.is_fixed_pitch() != 0).unwrap_or(false),
+			serif,
+			variable:	of.table_data(harfrust::Tag::new(b"fvar")).is_some(),
+			math:		of.table_data(harfrust::Tag::new(b"MATH")).is_some(),
+		})
+	}
+
+	/// Every character the face maps, in no set order.
+	pub fn coverage(&self) -> impl Iterator<Item = u32> + '_ {
+		self.covers.iter().copied()
+	}
+
+	/// The glyph the face maps a character to, if it maps it.
+	pub fn glyph_index(&self, ch: char) -> Option<u32> {
+		let of = self.outline_font().ok()?;
+		of.charmap().map(ch).map(|g| g.to_u32())
+	}
+
+	/// A glyph's advance width in font units, from `hmtx`.
+	pub fn advance_units(&self, id: u32) -> Option<f32> {
+		let of = self.outline_font().ok()?;
+		of.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(GlyphId::new(id))
+	}
+
 	/// Shapes a string this face can draw the whole of: the glyphs it becomes, and where each sits.
 	/// `face` is which face in the chain this is, carried on every glyph so painting knows whose
 	/// outline to ask for; `at` is the string's byte offset in the one it was cut from, added to each
@@ -232,6 +368,23 @@ impl Face {
 	)
 		-> Outcome<Run>
 	{
+		self.shape_spec(text, size, dir, face, at, &ShapeSpec { features, ..ShapeSpec::default() })
+	}
+
+	/// As [`Face::shape`], told the features, language and script to shape with, and whether to drop
+	/// default-ignorable characters; see [`ShapeSpec`]. A language or script the shaper does not know is
+	/// left to be guessed, as an unset one is.
+	pub fn shape_spec(
+		&self,
+		text:	&str,
+		size:	f32,
+		dir:	Dir,
+		face:	u8,
+		at:		usize,
+		spec:	&ShapeSpec,
+	)
+		-> Outcome<Run>
+	{
 		if text.is_empty() {
 			return Ok(Run {
 				glyphs:		Vec::new(),
@@ -244,13 +397,26 @@ impl Face {
 
 		let mut buf = UnicodeBuffer::new();
 		buf.push_str(text);
+		if let Some(lang) = spec.language {
+			if let Ok(l) = lang.parse::<harfrust::Language>() {
+				buf.set_language(l);
+			}
+		}
+		if let Some(tag) = spec.script {
+			if let Some(sc) = harfrust::Script::from_iso15924_tag(harfrust::Tag::new(&tag)) {
+				buf.set_script(sc);
+			}
+		}
 		buf.set_direction(match dir {
 			Dir::Ltr	=> harfrust::Direction::LeftToRight,
 			Dir::Rtl	=> harfrust::Direction::RightToLeft,
 		});
 		buf.guess_segment_properties();
+		if spec.remove_ignorables {
+			buf.set_flags(BufferFlags::REMOVE_DEFAULT_IGNORABLES);
+		}
 
-		let feats: Vec<ShapeFeature> = features.iter()
+		let feats: Vec<ShapeFeature> = spec.features.iter()
 			.map(|f| ShapeFeature::new(harfrust::Tag::new(&f.tag), f.value, ..))
 			.collect();
 		let out = shaper.shape(buf, ShapeOptions::new().features(&feats));

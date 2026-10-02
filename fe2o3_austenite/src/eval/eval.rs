@@ -1803,11 +1803,11 @@ impl<'a> Vm<'a> {
 				SyntaxKind::Named => {
 					let name = c.children().iter().find(|x| x.kind() == SyntaxKind::Ident)
 						.map(|x| x.text().to_string()).unwrap_or_default();
-					let v = match last_expr(c) {
-						Some(e)	=> res!(self.eval(e)),
-						None	=> Value::None,
+					let (v, at) = match last_expr(c) {
+						Some(e)	=> (res!(self.eval(e)), e.span()),
+						None	=> (Value::None, c.span()),
 					};
-					args.push_named(c.span(), name, v);
+					args.push_named_at(c.span(), at, name, v);
 				}
 				SyntaxKind::Spread => {
 					let v = match last_expr(c) {

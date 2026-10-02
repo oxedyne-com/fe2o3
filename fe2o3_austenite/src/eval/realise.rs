@@ -696,15 +696,22 @@ impl State<'_> {
 		Ok(())
 	}
 
-	/// Ends every group that the styled elements interrupt, with everything opened inside it.
+	/// Ends every group that the styled elements interrupt, innermost first, as long as one is. Finishing
+	/// a textual run opens the paragraph it belongs to, which no style on a text interrupts, so the
+	/// paragraph stays open across a styled run inside it.
 	fn finish_interrupted(&mut self, local: &Styles) -> Outcome<()> {
 		let mut last = None;
 		for elem in local.iter().filter_map(|s| s.element()) {
 			if last == Some(elem) {
 				continue;
 			}
-			if let Some(i) = self.groupings.iter().position(|g| g.rule.interrupted_by(elem)) {
-				res!(self.finish_groupings_to(i));
+			let mut i = 0;
+			while self.groupings.iter().any(|g| g.rule.interrupted_by(elem)) {
+				res!(self.finish_innermost_grouping());
+				i += 1;
+				if i > MAX_GROUPING_STEPS {
+					return Err(self.engine.error(DiagnosticKind::Limit, Span::detached(), "maximum grouping depth exceeded"));
+				}
 			}
 			last = Some(elem);
 		}
@@ -764,19 +771,6 @@ impl State<'_> {
 		}
 		self.may_attach = content.is(ElemKind::Par);
 		Ok(false)
-	}
-
-	/// Finishes groups until `keep` remain; a finished group may open others, so the steps are counted.
-	fn finish_groupings_to(&mut self, keep: usize) -> Outcome<()> {
-		let mut i = 0;
-		while self.groupings.len() > keep {
-			res!(self.finish_innermost_grouping());
-			i += 1;
-			if i > MAX_GROUPING_STEPS {
-				return Err(self.engine.error(DiagnosticKind::Limit, Span::detached(), "maximum grouping depth exceeded"));
-			}
-		}
-		Ok(())
 	}
 
 	fn finish(&mut self) -> Outcome<()> {

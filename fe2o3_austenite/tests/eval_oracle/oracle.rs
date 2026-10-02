@@ -308,6 +308,7 @@ impl Oracle {
 			let svg = d.join(fmt!("typst-{}.svg", i + 1));
 			let text = res!(std::fs::read_to_string(&svg).map_err(|e| err!("Cannot read {}: {}", svg.display(), e; IO, File, Read)));
 			layout::attach_baselines(p, &layout::glyph_origins(&text));
+			layout::attach_starts(p, &layout::run_starts(&text));
 		}
 		Ok(Ok(pages))
 	}

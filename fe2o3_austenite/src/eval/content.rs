@@ -630,6 +630,7 @@ impl Content {
 pub fn fold_custom(kind: ElemKind, field: &str, inner: Value, outer: Value) -> Outcome<Value> {
 	match kind.family() {
 		Family::Visual	=> lib::visual::fold(kind, field, inner, outer),
+		Family::Text	=> lib::text::fold(kind, field, inner, outer),
 		Family::Model	=> lib::model::fold(kind, field, inner, outer),
 		_				=> Err(err!(
 			"`{}.{}` is declared `Fold::Custom`, but its family has no fold in `content::fold_custom`",

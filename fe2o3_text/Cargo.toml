@@ -20,6 +20,10 @@ oxedyne_fe2o3_core 				= { path = "../fe2o3_core" }
 oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_stds 				= { path = "../fe2o3_stds" }
 
+[features]
+# Liang hyphenation for 35 languages (the `hyphen` module); its pattern automata add about 1.1 MiB.
+hyphenation = []
+
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
 

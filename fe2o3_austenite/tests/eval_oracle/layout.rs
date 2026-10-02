@@ -9,6 +9,10 @@
 //
 // Austenite's side is its placed text runs, read straight from the laid-out pages: a run's top-left
 // is `(x, y)` and its baseline `y + height`.
+//
+// A line is held to its text, its baseline and the x where it starts. The start is where a first-line
+// or hanging indent, a margin and an alignment all show, none of which moves a break or a baseline, so
+// a line set sideways passes the first two checks and fails the third.
 
 use crate::harness::markup::{
 	tokens,
@@ -18,12 +22,15 @@ use crate::harness::markup::{
 use oxedyne_fe2o3_core::prelude::*;
 
 pub const BASELINE_TOL: f64 = 1.0;	// points, the design's level-4 tolerance
+pub const START_TOL: f64 = 0.05;	// points, where a line starts: its indent or its alignment offset
+pub const SPACE_REACH: f64 = 40.0;	// points, the most a space opening a line can be wide
 
 #[derive(Clone, Debug)]
 pub struct OLine {
 	pub text:		String,
-	pub x0:			f64,
+	pub x0:			f64,	// where the first word starts
 	pub x1:			f64,
+	pub start:		f64,	// where the first glyph drawn starts, a leading space included: its text run's start
 	pub y0:			f64,
 	pub y1:			f64,
 	pub base:		f64,
@@ -57,24 +64,53 @@ fn num(attrs: &[(String, String)], key: &str) -> f64 {
 }
 
 /// The pages and lines of `pdftotext -bbox-layout` output, baselines not yet attached.
+///
+/// A line's horizontal extent is its words', not its own `xMin` and `xMax`: pdftotext (poppler 26.01)
+/// gives a line the left edge of its second word, so a line's start read from the line is wrong. And
+/// a loosely justified line comes back from it as several, cut at its widest gaps, so the pieces of one
+/// block that stand on one baseline are one line again.
 pub fn read_bbox(xml: &str) -> Vec<OPage> {
 	let mut pages: Vec<OPage> = Vec::new();
+	let mut block_from = 0usize;	// where the current block's lines begin on the page
 	let mut line: Option<OLine> = None;
+	let mut words_seen = false;
 	let mut in_word = false;
 	for t in tokens(xml) {
 		match t {
 			Tok::Open { name, attrs, .. } => match name.as_str() {
-				"page"	=> pages.push(OPage { width: num(&attrs, "width"), height: num(&attrs, "height"), lines: Vec::new() }),
-				"line"	=> line = Some(OLine {
-					text:		String::new(),
-					x0:			num(&attrs, "xmin"),
-					x1:			num(&attrs, "xmax"),
-					y0:			num(&attrs, "ymin"),
-					y1:			num(&attrs, "ymax"),
-					base:		0.0,
-					measured:	false,
-				}),
-				"word"	=> in_word = true,
+				"page"	=> {
+					block_from = 0;
+					pages.push(OPage { width: num(&attrs, "width"), height: num(&attrs, "height"), lines: Vec::new() });
+				}
+				"block"	=> block_from = pages.last().map_or(0, |p| p.lines.len()),
+				"line"	=> {
+					words_seen = false;
+					line = Some(OLine {
+						text:		String::new(),
+						x0:			num(&attrs, "xmin"),
+						x1:			num(&attrs, "xmax"),
+						start:		num(&attrs, "xmin"),
+						y0:			num(&attrs, "ymin"),
+						y1:			num(&attrs, "ymax"),
+						base:		0.0,
+						measured:	false,
+					});
+				}
+				"word"	=> {
+					in_word = true;
+					if let Some(l) = line.as_mut() {
+						let (w0, w1) = (num(&attrs, "xmin"), num(&attrs, "xmax"));
+						if words_seen {
+							l.x0 = l.x0.min(w0);
+							l.x1 = l.x1.max(w1);
+						} else {
+							l.x0 = w0;
+							l.x1 = w1;
+							words_seen = true;
+						}
+						l.start = l.x0;
+					}
+				}
 				_		=> (),
 			},
 			Tok::Close(name) => match name.as_str() {
@@ -87,7 +123,16 @@ pub fn read_bbox(xml: &str) -> Vec<OPage> {
 				"line"	=> if let Some(mut l) = line.take() {
 					l.text = l.text.trim().to_string();
 					if let Some(p) = pages.last_mut() {
-						p.lines.push(l);
+						let same = |o: &OLine| (o.y0 - l.y0).abs() < 0.5 && (o.y1 - l.y1).abs() < 0.5;
+						match p.lines.iter_mut().skip(block_from).find(|o| same(o)) {
+							Some(o) => {
+								o.text = fmt!("{} {}", o.text, l.text);
+								o.x0 = o.x0.min(l.x0);
+								o.x1 = o.x1.max(l.x1);
+								o.start = o.x0;
+							}
+							None => p.lines.push(l),
+						}
 					}
 				},
 				_		=> (),
@@ -168,14 +213,17 @@ fn parse_transform(s: &str) -> M {
 	m
 }
 
-/// The page-space origin of every glyph a Typst SVG page draws.
-pub fn glyph_origins(svg: &str) -> Vec<(f64, f64)> {
-	let mut stack: Vec<(M, bool)> = vec![(M::ID, false)];	// (transform, inside defs)
-	let mut out = Vec::new();
+/// The page-space origin of every glyph a Typst SVG page draws, and the origin of each text run: the
+/// group that holds its glyphs, which Typst draws at the run's start, a space it leaves out included.
+fn walk_glyphs(svg: &str) -> (Vec<(f64, f64)>, Vec<(f64, f64)>) {
+	// Per open element: its transform, whether it is inside defs, and its origin while no glyph has been
+	// drawn in it.
+	let mut stack: Vec<(M, bool, Option<(f64, f64)>)> = vec![(M::ID, false, None)];
+	let (mut out, mut starts) = (Vec::new(), Vec::new());
 	for t in tokens(svg) {
 		match t {
 			Tok::Open { name, attrs, closed } => {
-				let (top, in_defs) = stack.last().copied().unwrap_or((M::ID, false));
+				let (top, in_defs, _) = stack.last().copied().unwrap_or((M::ID, false, None));
 				let own = Tok::attr(&attrs, "transform").map(parse_transform).unwrap_or(M::ID);
 				let cur = top.then(own);
 				let defs = in_defs || name == "defs" || name == "symbol";
@@ -183,10 +231,15 @@ pub fn glyph_origins(svg: &str) -> Vec<(f64, f64)> {
 					let href = Tok::attr(&attrs, "xlink:href").or_else(|| Tok::attr(&attrs, "href")).unwrap_or("");
 					if href.starts_with("#g") {
 						out.push(cur.apply(num(&attrs, "x"), num(&attrs, "y")));
+						if let Some(last) = stack.last_mut() {
+							if let Some(origin) = last.2.take() {
+								starts.push(origin);
+							}
+						}
 					}
 				}
 				if !closed {
-					stack.push((cur, defs));
+					stack.push((cur, defs, if name == "g" { Some(cur.apply(0.0, 0.0)) } else { None }));
 				}
 			}
 			Tok::Close(_) => {
@@ -197,7 +250,17 @@ pub fn glyph_origins(svg: &str) -> Vec<(f64, f64)> {
 			Tok::Text(_) => (),
 		}
 	}
-	out
+	(out, starts)
+}
+
+/// The page-space origin of every glyph a Typst SVG page draws.
+pub fn glyph_origins(svg: &str) -> Vec<(f64, f64)> {
+	walk_glyphs(svg).0
+}
+
+/// The page-space origin of every text run a Typst SVG page draws.
+pub fn run_starts(svg: &str) -> Vec<(f64, f64)> {
+	walk_glyphs(svg).1
 }
 
 /// Gives each line the baseline its glyphs sit on; a line with no glyph origin inside its box keeps
@@ -231,12 +294,30 @@ pub fn attach_baselines(page: &mut OPage, origins: &[(f64, f64)]) {
 	}
 }
 
+/// Gives each line the start of the text run its first word is drawn in: the nearest run start on the
+/// line's baseline at or before the word, within a space's reach. That run opens with a space when
+/// Typst's line begins after an inline box or a space (pdftotext's words leave the space out), where
+/// Austenite's run opens as well; a line whose run is not found starts where its first word does.
+/// Call after [`attach_baselines`].
+pub fn attach_starts(page: &mut OPage, starts: &[(f64, f64)]) {
+	for l in &mut page.lines {
+		let found = starts.iter()
+			.filter(|(x, y)| (*y - l.base).abs() < 0.02 && *x <= l.x0 + 0.02 && *x >= l.x0 - SPACE_REACH)
+			.map(|(x, _)| *x)
+			.fold(f64::NEG_INFINITY, f64::max);
+		if found.is_finite() {
+			l.start = found;
+		}
+	}
+}
+
 fn squash(s: &str) -> String {
 	s.chars().filter(|c| !c.is_whitespace() && *c != '\u{ad}').collect()
 }
 
 /// Level-4 differences: page count exact, page size within half a point, every Typst line matched by
-/// Austenite text on the same page with the same characters and a baseline within [`BASELINE_TOL`].
+/// Austenite text on the same page with the same characters, a baseline within [`BASELINE_TOL`] and a
+/// start within [`START_TOL`] of where Typst's line starts.
 pub fn compare(want: &[OPage], got: &[APage], out: &mut Vec<String>) {
 	if want.len() != got.len() {
 		out.push(fmt!("page count: typst {}, austenite {}", want.len(), got.len()));
@@ -292,6 +373,13 @@ pub fn compare(want: &[OPage], got: &[APage], out: &mut Vec<String>) {
 			let main = mine.iter().max_by_key(|r| r.text.chars().count()).map(|r| r.base).unwrap_or(l.base);
 			if (main - l.base).abs() > BASELINE_TOL {
 				out.push(fmt!("page {}: line {:?}: baseline typst {:.2}, austenite {:.2}", pno, l.text, l.base, main));
+			}
+			// Where the line starts: its first run's left edge, to the left edge of Typst's first run.
+			if let Some(first) = mine.first() {
+				if (first.x0 - l.start).abs() > START_TOL {
+					out.push(fmt!("page {}: line {:?}: starts at x {:.2} in typst, {:.2} in austenite ({:+.2})",
+						pno, l.text, l.start, first.x0, first.x0 - l.start));
+				}
 			}
 		}
 		for (ri, r) in g.runs.iter().enumerate() {

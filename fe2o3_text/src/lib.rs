@@ -35,6 +35,8 @@ pub mod core;
 pub mod glob;
 pub mod highlight;
 pub mod html;
+#[cfg(feature = "hyphenation")]
+pub mod hyphen;
 pub mod lines;
 pub mod doc;
 pub mod pattern;

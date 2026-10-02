@@ -202,8 +202,14 @@ impl Engine {
 	/// Records a warning of `kind`. A warning of a kind that [`refuses_strict`](DiagnosticKind::refuses_strict)
 	/// fails a strict compile, so one for a construct passed over or set otherwise than Typst sets it is
 	/// `Unsupported`.
+	///
+	/// A warning identical to one already recorded is dropped, as Typst's sink drops it, so a set rule met
+	/// again, or a paragraph laid out in every pass, warns once.
 	pub fn warn<S: Into<String>>(&mut self, kind: DiagnosticKind, span: Span, message: S) {
-		self.diags.push(Diagnostic::warning(kind, span, message));
+		let d = Diagnostic::warning(kind, span, message);
+		if !self.diags.contains(&d) {
+			self.diags.push(d);
+		}
 	}
 
 	/// Enters a closure call; past [`MAX_CALL_DEPTH`] it is an error, not a stack overflow.

@@ -11,9 +11,10 @@ use oxedyne_fe2o3_core::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct Arg {
-	pub span:	Span,
-	pub name:	Option<String>,
-	pub value:	Value,
+	pub span:		Span,	// the whole argument, `name: value`
+	pub value_span:	Span,	// the value's own expression, where Typst reports a fault of the value
+	pub name:		Option<String>,
+	pub value:		Value,
 }
 
 /// Call arguments in source order. Taking an argument removes it; `finish` then rejects leftovers.
@@ -27,16 +28,21 @@ impl Args {
 	pub fn new(span: Span) -> Self { Self { span, items: Vec::new() } }
 
 	pub fn push(&mut self, span: Span, value: Value) {
-		self.items.push(Arg { span, name: None, value });
+		self.items.push(Arg { span, value_span: span, name: None, value });
 	}
 
 	pub fn push_named<S: Into<String>>(&mut self, span: Span, name: S, value: Value) {
-		self.items.push(Arg { span, name: Some(name.into()), value });
+		self.items.push(Arg { span, value_span: span, name: Some(name.into()), value });
+	}
+
+	/// As [`push_named`](Self::push_named), told where the value's own expression stands.
+	pub fn push_named_at<S: Into<String>>(&mut self, span: Span, value_span: Span, name: S, value: Value) {
+		self.items.push(Arg { span, value_span, name: Some(name.into()), value });
 	}
 
 	/// Puts a value in front of the positional arguments: a method's receiver, or `.with`'s bound ones.
 	pub fn prepend(&mut self, span: Span, value: Value) {
-		self.items.insert(0, Arg { span, name: None, value });
+		self.items.insert(0, Arg { span, value_span: span, name: None, value });
 	}
 
 	/// The next positional argument cast to `T`, or `None` when there is none.

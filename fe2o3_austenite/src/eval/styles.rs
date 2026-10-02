@@ -759,23 +759,22 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 			continue;
 		}
 		let id = FieldId(i as u8);
-		let taken = if spec.positional {
-			match args.items.iter().position(|a| a.name.is_none() && spec.ty.accepts(&a.value)) {
-				Some(p)	=> Some(args.items.remove(p)),
-				None	=> None,
+		// The last argument of the field's name, else for a positional field the first unnamed one its
+		// type accepts: Typst's `named_or_find`.
+		let mut taken = None;
+		let mut j = 0;
+		while j < args.items.len() {
+			if args.items[j].name.as_deref() == Some(spec.name) {
+				taken = Some(args.items.remove(j));
+			} else {
+				j += 1;
 			}
-		} else {
-			let mut found = None;
-			let mut j = 0;
-			while j < args.items.len() {
-				if args.items[j].name.as_deref() == Some(spec.name) {
-					found = Some(args.items.remove(j));
-				} else {
-					j += 1;
-				}
+		}
+		if taken.is_none() && spec.positional {
+			if let Some(p) = args.items.iter().position(|a| a.name.is_none() && spec.ty.accepts(&a.value)) {
+				taken = Some(args.items.remove(p));
 			}
-			found
-		};
+		}
 		if let Some(arg) = taken {
 			if !spec.ty.accepts(&arg.value) {
 				let msg = expected_message(spec.ty, &arg.value);
@@ -786,6 +785,9 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 				Ok(v)	=> v,
 				Err(e)	=> return Err(engine.error(DiagnosticKind::Type, arg.span, crate::diag::message_of(&e))),
 			};
+			if kind == ElemKind::Text && spec.name == "font" {
+				res!(crate::eval::lib::text::check_font_list(engine, &value, arg.value_span));
+			}
 			styles.push(Style::Property(Property::new(kind, id, value, arg.span)));
 		}
 	}
