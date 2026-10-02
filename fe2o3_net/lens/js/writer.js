@@ -87,7 +87,7 @@ export function looksSecret(msg) {
 
 /// Creates a writer. `cfg`:
 ///
-///   host      `{ storage, setTimeout, clearTimeout, console, now, document }`, each defaulting to
+///   host      `{ storage, setTimeout, clearTimeout, console, now, document, Error }`, each defaulting to
 ///             the global of that name where one exists. `storage` is `getItem`/`setItem`.
 ///   keys      `{ outbox, seq, postAt }`, the storage key names.
 ///   device    `() -> string`, the device id (clipped to 12 characters in the envelope).
@@ -367,7 +367,8 @@ export function createWriter(cfg) {
 	// being ADMITTED, so the cost is bounded by `consolePerMin`. Empty where there is no usable stack.
 	function stackSrc() {
 		let st = '';
-		try { st = (new Error()).stack || ''; } catch (e) { return ''; }
+		// The host's own `Error` is read at call time, so a host with no usable stack can say so.
+		try { const E = host.Error || Error; st = (new E()).stack || ''; } catch (e) { return ''; }
 		const lines = String(st).split('\n');
 		for (let i = 0; i < lines.length && i < 12; i++) {
 			if (skip.some(function (s) { return lines[i].indexOf(s) !== -1; })) continue;

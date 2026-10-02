@@ -88,6 +88,26 @@ await part(async () => {
 	h.halt(); h2.halt();
 });
 
+section('writer: events -- the content scrubber meets every row at the egress seam, BEFORE the cut');
+await part(async () => {
+	const KEY = 'sk-' + 'Zq9Xw8Vu7Ts6Rq5Po4Nm3Lk2Jh1';
+	const h = makeHost({ respond: () => 500, fastTimers: true });
+	const w = makeWriter(h);
+	w.event('tool', { out: 'call used ' + KEY + ' today' });
+	check('a key shape inside a free-text field is replaced by a marker naming its shape',
+		w.outbox()[0].data.indexOf(KEY) === -1 && /\[redacted sk #[0-9a-f]+\/\d+\]/.test(w.outbox()[0].data));
+	w.event('tool', { msg: 'a'.repeat(300) + ' ' + KEY + ' ' + 'b'.repeat(200) });
+	check('a key that the 360-byte cut would have split leaves no prefix of itself behind',
+		w.outbox()[1].data.indexOf('sk-Zq9') === -1 && new TextEncoder().encode(w.outbox()[1].data).length <= 360);
+	w.captureConsole(h.console);
+	h.console.warn('x'.repeat(190) + ' ' + KEY + ' ' + 'tail '.repeat(40));
+	w.flushConsole(true);
+	check('nor does a console line clipped at 200 characters, because the clip scrubs first',
+		w.outbox().filter((r) => r.tag === 'ev console').every((r) => r.data.indexOf('sk-Zq9') === -1));
+	check('and a key in an object key is taken too', (w.event('t', { ['k ' + KEY]: 1 }), w.outbox().pop().data.indexOf(KEY) === -1));
+	h.halt();
+});
+
 section('writer: events -- RULE 1, exactly once and in order across an outage');
 await part(async () => {
 	const h = makeHost({ fastTimers: true, respond: (i) => (i < 6 ? 503 : 200) });
