@@ -8,13 +8,18 @@
 //! relate, and only the value is gone. Two hooks are added for a caller's own knowledge: a
 //! deny-list of names and paths, and a test over strings.
 //!
-//! What it does not do is search free text for the shapes a credential wears (the
-//! `SCRUB_SHAPES` of `debugshare.js`). That is the caller's string test.
+//! Free text is the caller's string test, and `Shapes` is a stock one for the shapes a credential
+//! wears. It stands on `fe2o3_text::secret`, the scanner behind the commit hook, and not on the
+//! `SCRUB_SHAPES` of `debugshare.js`. The two overlap without being equal: the JavaScript also
+//! takes JWTs, `whsec_` and test-mode Stripe keys, `tune-` relay keys, the other AWS prefixes and
+//! shorter GitHub runs, and it has an entropy catch, none of which is ported. A caller that needs
+//! one of those passes its own test.
 
 use super::row::Row;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_text::secret;
 
 
 // The walk's bound, as in `redact`. A `Dat` cannot hold a cycle, so this is a depth bound alone.
@@ -45,6 +50,12 @@ fn word(b: u8) -> bool {
 ///
 /// tested anywhere in the name. A word counts only at the start of the name or after a `_`, `.`
 /// or `-`, so a camel-joined `pushToken` slides past it; `secret_name_loose` catches those.
+///
+/// This is a hand matcher and not a `fe2o3_text::regex::Regex` on purpose. JavaScript's `\b` and
+/// `/i` are ASCII-only, while the crate's engine follows the `regex` crate, whose `\b` and case
+/// folding are Unicode, so the two would disagree on a name such as `keyenc` followed by `é`. A
+/// test holds the matcher to the JavaScript over generated names, `é` included, and to the engine
+/// over the ASCII ones.
 pub fn secret_name(name: &str) -> bool {
     let b = name.as_bytes();
     let mut starts = vec![0usize];
@@ -133,6 +144,19 @@ impl StrTest for NoTest {
 
 impl<F: Fn(&str) -> bool + Send + Sync> StrTest for F {
     fn hit(&self, s: &str) -> bool { self(s) }
+}
+
+/// The stock string test: a string that holds a credential in any shape the commit hook refuses
+/// is covered whole. Daimond's `SCRUB_SHAPES` are a different list; see the module note.
+///
+/// It is `fe2o3_text::secret::holds`, which honours no `allowlist secret` marker and skips no
+/// text for a NUL, since a feed's text is the very thing in doubt. Pair it with `Redact::with_head(0)`
+/// where the first characters of a credential must not show in its fingerprint.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Shapes;
+
+impl StrTest for Shapes {
+    fn hit(&self, s: &str) -> bool { secret::holds(s) }
 }
 
 /// A place a caller knows holds a secret, whatever it is called.
@@ -450,5 +474,18 @@ mod tests {
         assert!(marker(OBJECT) && marker(ABSENT) && marker(DEEP));
         assert!(!marker("[redacted"));
         assert!(!marker("not [redacted x]"));
+    }
+
+    #[test]
+    fn the_stock_test_is_the_commit_hooks_and_ignores_its_excuses() {
+        // A credential's shape, in two pieces so that this file passes the hook it tests.
+        let k = fmt!("{}{}", "sk-ant", "-api03-AbCdEfGhIjKlMnOpQrStUvWx");
+        assert!(Shapes.hit(&k));
+        assert!(Shapes.hit(&fmt!("{} # allowlist secret", k)));
+        assert!(!Shapes.hit("sk-ant-short"));
+        // Covered whole, with none of its characters left standing in the fingerprint.
+        let red = Redact::new().with_head(0).with_test(Shapes);
+        let out = red.text(&fmt!("deployed with {}", k)).unwrap_or_default();
+        assert!(out.starts_with("[redacted") && !out.contains("sk-ant"));
     }
 }

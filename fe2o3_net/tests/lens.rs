@@ -27,8 +27,14 @@ use oxedyne_fe2o3_net::{
         Redact,
         Refusal,
         Row,
+        Shapes,
         Sink,
+        StrTest,
     },
+};
+use oxedyne_fe2o3_text::{
+    regex::Regex,
+    secret,
 };
 
 use std::{
@@ -963,4 +969,429 @@ fn a_planted_secret_is_absent_from_every_byte_written() -> Outcome<()> {
         assert!(has(raw.as_bytes(), p), "the control line should hold {:?}: {}", p, raw);
     }
     Ok(())
+}
+
+
+// The stock string test ==================================================================
+
+// One credential of each shape `fe2o3_text::secret` knows, in two pieces joined at run time, so
+// that the scanners that read this file find nothing in it to refuse.
+const SHAPED: &[(&str, &str)] = &[
+    ("fw",          "_3ZjKq81mAbCdEfGhIjKlMnOpQrSt"),
+    ("sk-ant",      "-api03-AbCdEfGhIjKlMnOpQrStUvWx"),
+    ("sk-proj",     "-AbCdEfGhIjKlMnOpQrStUvWxYz01"),
+    ("sk-or",       "-v1-0123456789abcdef0123456789abcdef"),
+    ("sk-",         "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+    ("AKIA",        "IOSFODNN7EXAMPLE"),
+    ("ghp",         "_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+    ("github_pat",  "_11ABCDEFG0AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"),
+    ("xoxb",        "-1234567890-abcdefghij"),
+    ("sk_live",     "_AbCdEfGhIjKlMnOpQrStUv"),
+    ("AIza",        "SyA0123456789abcdefghijklmnopqrstuv"),
+    ("-----BEGIN ", "OPENSSH PRIVATE KEY-----"),
+];
+
+fn cred(i: usize) -> String {
+    fmt!("{}{}", SHAPED[i].0, SHAPED[i].1)
+}
+
+#[test]
+fn shapes_cover_each_credential_shape_whole_and_leave_prose_alone() -> Outcome<()> {
+    // Head 0, so that no character of a credential stands in its own fingerprint.
+    let red = Redact::new().with_head(0).with_test(Shapes);
+    for i in 0..SHAPED.len() {
+        let c = cred(i);
+        let doc = omap(vec![
+            ("alone", st(&c)),
+            ("note",  st(&fmt!("deployed with {} this morning", c))),
+            ("list",  Dat::List(vec![st("fine"), st(&fmt!("k={}\n", c))])),
+            ("deep",  omap(vec![("x", omap(vec![("y", st(&fmt!("a\nb {} c\nd", c)))]))])),
+        ]);
+        let out = red.dat(&doc);
+        let json = res!(compact(&out));
+        assert!(!json.contains(&c), "{:?} survived the redactor: {}", SHAPED[i].0, json);
+        for p in ["alone", "note", "deep.x.y"] {
+            assert!(text_at(&out, p).starts_with("[redacted"), "{} for {:?}: {:?}", p, SHAPED[i].0, text_at(&out, p));
+        }
+        assert!(json.contains("fine"), "the innocent list member stays: {}", json);
+    }
+    // An assigned literal under a secret-looking name is a shape too.
+    let lit = fmt!("password = \"{}{}\"", "9f3Bq7", "ZmR4tYuIoPkLjHgFdS");
+    assert!(Shapes.hit(&lit));
+    for ok in [
+        "the quick brown fox", "sk-nope", "skip-tracing and key lore", "AKIA", "fw_short",
+        "an api_key = \"\" field", "password: \"your-key-here\"", "", "ghp_tooshort",
+    ] {
+        assert!(!Shapes.hit(ok), "{:?} is not a credential", ok);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_marker_and_a_nul_do_not_excuse_a_credential_in_a_feed() -> Outcome<()> {
+    let k = cred(0);
+    // `scan` is a file reader and takes the author's word; the control shows it does.
+    let excused = [
+        fmt!("{} # {}", k, secret::MARKER),
+        fmt!("{}\n{}", secret::MARKER, k),
+        fmt!("\0{}", k),
+    ];
+    for t in &excused {
+        assert!(secret::scan(t.as_bytes()).is_empty(), "scan should excuse {:?}", t);
+        assert!(secret::holds(t), "holds must not excuse {:?}", t);
+        assert!(Shapes.hit(t), "Shapes must not excuse {:?}", t);
+    }
+    // And the same through both doors of a sink: nothing of the key reaches a byte.
+    let s = Scratch::new("holds");
+    let sink = Sink::new(s.dir(), Gates::default())
+        .with_redact(Redact::new().with_head(0).with_test(Shapes));
+    let row = Row::new("peer", 1, "b", T0, "console")
+        .with("line", st(&excused[0]))
+        .with("other", st(&excused[2]));
+    assert_eq!(res!(sink.write(&["sid"], "peer", &[row], T0)), 1);
+    let ev = fmt!("{{\"v\":1,\"d\":\"x\",\"n\":1,\"b\":\"b\",\"t\":1,\"line\":\"{}\"}}", excused[0]);
+    let b = body("devX", &[(1, "ev console", &ev), (2, "diag", &excused[1])]);
+    assert_eq!(stored(res!(sink.post(&["sid2"], &b, T0 + 5_000))), 2);
+    let bytes = res!(all_bytes(&s.dir()));
+    assert!(!has(&bytes, &k), "the key reached the disk");
+    assert!(has(&bytes, "[redacted"), "markers are expected");
+    Ok(())
+}
+
+#[test]
+fn secret_name_agrees_with_the_regex_engine_on_every_ascii_name() -> Outcome<()> {
+    // The hand matcher stands for the JavaScript, whose `\b` and `/i` are ASCII-only. On ASCII
+    // names the crate's own engine, which follows the `regex` crate, must say the same.
+    let re = res!(Regex::new(
+        r"(?i)(?:^|[_.-])(?:apikey|api_key|key|token|secret|passphrase|password|salt|wrapped|wrappedpriv|sealed|seal|privatekey|priv|mnemonic|seed|masterkey)(?:$|[_.-]|enc\b)"));
+    let table = res!(fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/lens_secret_re.tsv")));
+    let mut n = 0;
+    for line in table.lines() {
+        let name = line.split('\t').next().unwrap_or("");
+        if !name.is_ascii() {
+            continue;
+        }
+        assert_eq!(secret_name(name), res!(re.is_match(name)), "on {:?}", name);
+        n += 1;
+    }
+    assert!(n > 2_500, "only {} ASCII names were compared", n);
+    Ok(())
+}
+
+
+// The tap on a websocket's messages ======================================================
+
+#[cfg(feature = "async")]
+mod tap {
+    use super::*;
+
+    use oxedyne_fe2o3_iop_db::api::NoDatabase;
+    use oxedyne_fe2o3_net::{
+        lens::{
+            Dir,
+            Frame,
+            Tap,
+        },
+        ws::{
+            encode_message,
+            handler::WebSocketEchoHandler,
+            read_message,
+            tap::{
+                encode_message_tapped,
+                read_message_tapped,
+                FrameTap,
+                NoTap,
+            },
+            WebSocket,
+            WebSocketLimits,
+            WebSocketMessage,
+        },
+    };
+
+    use std::sync::Arc;
+
+    use tokio::io::{
+        duplex,
+        AsyncWriteExt,
+    };
+
+    const CHUNK: usize = 1_024;
+
+    /// What a connection knows about itself, which is what a filter gets to see.
+    struct Conn {
+        sid:    String,
+        dev:    String,
+    }
+
+    fn conn(sid: &str) -> Conn {
+        Conn { sid: sid.to_string(), dev: "peer".to_string() }
+    }
+
+    /// The safe filter: every frame, reduced to its kind and its size.
+    fn shape_only(_dir: Dir, c: &Conn, msg: &WebSocketMessage) -> Option<Frame> {
+        Some(Frame::new(&[&c.sid], &c.dev).shape(msg))
+    }
+
+    fn num_at(d: &Dat, path: &str) -> Option<u64> {
+        match at(d, path)? {
+            Dat::U8(n)  => Some(*n as u64),
+            Dat::U16(n) => Some(*n as u64),
+            Dat::U32(n) => Some(*n as u64),
+            Dat::U64(n) => Some(*n),
+            Dat::I8(n)  => u64::try_from(*n).ok(),
+            Dat::I16(n) => u64::try_from(*n).ok(),
+            Dat::I32(n) => u64::try_from(*n).ok(),
+            Dat::I64(n) => u64::try_from(*n).ok(),
+            _           => None,
+        }
+    }
+
+    /// The events a key holds, each the JSON a row carried in its `data`.
+    fn events<T: StrTest>(sink: &Sink<T>, key: &[&str]) -> Outcome<Vec<Dat>> {
+        let mut out = Vec::new();
+        for l in res!(lines(&sink.path(key))) {
+            out.push(res!(Dat::decode_json_strict(&text_at(&l, "data"), &DecodeLimits::default())));
+        }
+        Ok(out)
+    }
+
+    fn text(s: &str) -> WebSocketMessage { WebSocketMessage::Text(s.to_string()) }
+
+    /// Frames a message as a client would, masked.
+    fn from_client(m: &WebSocketMessage) -> Outcome<Vec<u8>> {
+        encode_message(m, true, CHUNK, CHUNK)
+    }
+
+    /// One tapped read.
+    async fn read_one<X: FrameTap>(bytes: &[u8], tap: &X, ctx: &X::Ctx) -> Outcome<Option<WebSocketMessage>> {
+        let mut stream = bytes;
+        let mut buf = Vec::new();
+        read_message_tapped(&mut stream, &mut buf, CHUNK, WebSocketLimits::default(), tap, ctx).await
+    }
+
+    #[tokio::test]
+    async fn frames_in_both_directions_reach_the_sink_as_kind_and_size_only() -> Outcome<()> {
+        let s = Scratch::new("tap-both");
+        let sink = Arc::new(Sink::new(s.dir(), Gates::default()));
+        let tap = Tap::new(sink.clone(), "b9", shape_only);
+        let c = conn("sess-1");
+
+        // In: a text frame, then a binary one, then a ping.
+        let secret_text = "do-not-keep-this-chat-line";
+        let got = res!(read_one(&res!(from_client(&text(secret_text))), &tap, &c).await);
+        assert!(matches!(got, Some(WebSocketMessage::Text(ref t)) if t == secret_text));
+        let got = res!(read_one(&res!(from_client(&WebSocketMessage::Binary(vec![7u8; 300]))), &tap, &c).await);
+        assert!(matches!(got, Some(WebSocketMessage::Binary(ref b)) if b.len() == 300));
+        res!(read_one(&res!(from_client(&WebSocketMessage::Ping(vec![1, 2, 3]))), &tap, &c).await);
+
+        // Out: a text reply and a close, framed unmasked as a server does.
+        let out = res!(encode_message_tapped(&text("pong!"), false, CHUNK, CHUNK, &tap, &c));
+        assert_eq!(out, res!(encode_message(&text("pong!"), false, CHUNK, CHUNK)));
+        res!(encode_message_tapped(&WebSocketMessage::Close(None, Some("bye".to_string())), false, CHUNK, CHUNK, &tap, &c));
+
+        let ev = res!(events(&sink, &["sess-1"]));
+        assert_eq!(ev.len(), 5, "{:?}", ev);
+        let want = [
+            ("frame.in", "text",   secret_text.len() as u64),
+            ("frame.in", "binary", 300),
+            ("frame.in", "ping",   3),
+            ("frame.out", "text",  5),
+            ("frame.out", "close", 3),
+        ];
+        for (i, (kind, op, bytes)) in want.iter().enumerate() {
+            let e = &ev[i];
+            assert_eq!(num_at(e, "n"), Some(i as u64 + 1), "n counts from 1, as Daimond's does: {:?}", e);
+            assert_eq!(text_at(e, "d"), "peer");
+            assert_eq!(text_at(e, "b"), "b9");
+            assert_eq!(text_at(e, "op"), *op, "{:?}", e);
+            assert_eq!(num_at(e, "bytes"), Some(*bytes), "{:?}", e);
+            // The tag carries the direction.
+            let tag = text_at(&res!(lines(&sink.path(&["sess-1"])))[i], "tag");
+            assert_eq!(tag, fmt!("ev {}", kind));
+        }
+        // The default arm never carried content.
+        let bytes = res!(all_bytes(&s.dir()));
+        assert!(!has(&bytes, secret_text), "a frame's text reached the file");
+        assert_eq!(tap.lost(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn the_filters_reduction_is_what_lands_and_a_forgetful_filter_meets_the_redactor() -> Outcome<()> {
+        let s = Scratch::new("tap-reduce");
+        let sink = Arc::new(Sink::new(s.dir(), Gates::default())
+            .with_redact(Redact::new().with_head(0)));
+        // Oxegen's case: an enrol bundle carries a biometric, and only its shape may be kept.
+        let filter = |dir: Dir, c: &Conn, msg: &WebSocketMessage| -> Option<Frame> {
+            let t = match msg {
+                WebSocketMessage::Text(t)   => t,
+                _                           => return Some(Frame::new(&[&c.sid], &c.dev).shape(msg)),
+            };
+            let d = match Dat::decode_json_strict(t, &DecodeLimits::default()) {
+                Ok(d)   => d,
+                Err(_)  => return None,
+            };
+            let kind = text_at(&d, "kind");
+            if kind == "EnrolBundle" {
+                return Some(Frame::new(&[&c.sid], &c.dev)
+                    .with("kind", st(&kind))
+                    .with("bundle", st(&text_at(&d, "bundle")))
+                    .with("item", st(&text_at(&d, "item")))
+                    .with("bytes", Dat::U64(t.len() as u64))
+                    .with("dir", st(if dir == Dir::In { "in" } else { "out" })));
+            }
+            if kind == "Forgetful" {
+                // A filter that keeps a field it should not: the sink's redactor still covers it.
+                return Some(Frame::new(&[&c.sid], &c.dev).with("token", st(&text_at(&d, "token"))));
+            }
+            None
+        };
+        let tap = Tap::new(sink.clone(), "b9", filter);
+        let c = conn("sess-2");
+        let raw = "RAW-FACE-TEMPLATE-0123456789";
+        let enrol = fmt!("{{\"kind\":\"EnrolBundle\",\"bundle\":\"b-7\",\"item\":\"face-3\",\"blob\":\"{}\"}}", raw);
+        res!(read_one(&res!(from_client(&text(&enrol))), &tap, &c).await);
+        res!(encode_message_tapped(&text(&enrol), false, CHUNK, CHUNK, &tap, &c));
+        let leaky = "PLANT-token-from-a-filter";
+        let forgot = fmt!("{{\"kind\":\"Forgetful\",\"token\":\"{}\"}}", leaky);
+        res!(read_one(&res!(from_client(&text(&forgot))), &tap, &c).await);
+
+        let ev = res!(events(&sink, &["sess-2"]));
+        assert_eq!(ev.len(), 3, "{:?}", ev);
+        for (i, dir) in ["in", "out"].iter().enumerate() {
+            assert_eq!(text_at(&ev[i], "kind"), "EnrolBundle");
+            assert_eq!(text_at(&ev[i], "bundle"), "b-7");
+            assert_eq!(text_at(&ev[i], "item"), "face-3");
+            assert_eq!(num_at(&ev[i], "bytes"), Some(enrol.len() as u64));
+            assert_eq!(text_at(&ev[i], "dir"), *dir);
+        }
+        assert!(text_at(&ev[2], "token").starts_with("[redacted"), "{:?}", ev[2]);
+        let bytes = res!(all_bytes(&s.dir()));
+        assert!(!has(&bytes, raw), "the raw payload reached a file");
+        assert!(!has(&bytes, leaky), "a forgetful filter leaked past the sink's redactor");
+        assert!(has(&bytes, "face-3"), "the reduction is there");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn none_drops_a_frame_and_leaves_no_gap_in_the_sequence() -> Outcome<()> {
+        let s = Scratch::new("tap-none");
+        let sink = Arc::new(Sink::new(s.dir(), Gates::default()));
+        // Keeps the text frames only.
+        let tap = Tap::new(sink.clone(), "b", |_d: Dir, c: &Conn, m: &WebSocketMessage| match m {
+            WebSocketMessage::Text(_)   => Some(Frame::new(&[&c.sid], &c.dev).shape(m)),
+            _                           => None,
+        });
+        let c = conn("sess-3");
+        for m in [text("a"), WebSocketMessage::Binary(vec![0]), text("bb"), WebSocketMessage::Ping(vec![]), text("ccc")] {
+            res!(read_one(&res!(from_client(&m)), &tap, &c).await);
+        }
+        let ev = res!(events(&sink, &["sess-3"]));
+        let ns: Vec<Option<u64>> = ev.iter().map(|e| num_at(e, "n")).collect();
+        assert_eq!(ns, vec![Some(1), Some(2), Some(3)], "{:?}", ev);
+        let sizes: Vec<Option<u64>> = ev.iter().map(|e| num_at(e, "bytes")).collect();
+        assert_eq!(sizes, vec![Some(1), Some(2), Some(3)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_cannot_write_counts_the_loss_and_the_frame_still_flows() -> Outcome<()> {
+        let s = Scratch::new("tap-lost");
+        res!(fs::create_dir_all(&s.0));
+        // A regular file where the directory must go.
+        let blocker = s.0.join("blocker");
+        res!(fs::write(&blocker, b"x"));
+        let sink = Arc::new(Sink::new(blocker.join("lens"), Gates::default()));
+        let tap = Tap::new(sink.clone(), "b", shape_only);
+        let c = conn("sess-4");
+        for want in ["one", "two", "three"] {
+            let got = res!(read_one(&res!(from_client(&text(want))), &tap, &c).await);
+            assert!(matches!(got, Some(WebSocketMessage::Text(ref t)) if t == want), "the frame must flow: {:?}", got);
+        }
+        let out = res!(encode_message_tapped(&text("x"), false, CHUNK, CHUNK, &tap, &c));
+        assert!(!out.is_empty());
+        assert_eq!(tap.lost(), 4, "each write that failed is counted");
+        Ok(())
+    }
+
+    type Echo<'a, S, X> = WebSocket<'a, 8, u64, (), (), NoDatabase<8, u64, (), ()>, S, WebSocketEchoHandler, X>;
+
+    #[tokio::test]
+    async fn a_websocket_taps_its_own_read_and_send() -> Outcome<()> {
+        let s = Scratch::new("tap-ws");
+        let sink = Arc::new(Sink::new(s.dir(), Gates::default()));
+        let tap = Tap::new(sink.clone(), "b", shape_only);
+        let (mut server_end, mut client_end) = duplex(8_192);
+        let mut ws = Echo::new_server(&mut server_end, WebSocketEchoHandler, CHUNK, CHUNK)
+            .with_tap(&tap, conn("sess-5"));
+        res!(client_end.write_all(&res!(from_client(&text("hello")))).await);
+        let got = res!(ws.read().await);
+        assert!(matches!(got, Some(WebSocketMessage::Text(ref t)) if t == "hello"));
+        res!(ws.send(&text("hello back")).await);
+        // The peer hears the same bytes the tap saw framed.
+        let mut buf = Vec::new();
+        let heard = res!(read_message(&mut client_end, &mut buf, CHUNK, WebSocketLimits::default()).await);
+        assert!(matches!(heard, Some(WebSocketMessage::Text(ref t)) if t == "hello back"));
+        let ev = res!(events(&sink, &["sess-5"]));
+        assert_eq!(ev.len(), 2, "{:?}", ev);
+        assert_eq!((text_at(&ev[0], "op"), num_at(&ev[0], "bytes")), ("text".to_string(), Some(5)));
+        assert_eq!((text_at(&ev[1], "op"), num_at(&ev[1], "bytes")), ("text".to_string(), Some(10)));
+        let tags: Vec<String> = res!(lines(&sink.path(&["sess-5"]))).iter().map(|l| text_at(l, "tag")).collect();
+        assert_eq!(tags, vec!["ev frame.in".to_string(), "ev frame.out".to_string()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_websocket_with_no_tap_compiles_unchanged_and_behaves() -> Outcome<()> {
+        let (mut server_end, mut client_end) = duplex(8_192);
+        // The eight-argument spelling, as `fe2o3_steel` writes it, still names a complete type.
+        let mut ws: WebSocket<'_, 8, u64, (), (), NoDatabase<8, u64, (), ()>, _, WebSocketEchoHandler> =
+            WebSocket::new_server(&mut server_end, WebSocketEchoHandler, CHUNK, CHUNK);
+        res!(client_end.write_all(&res!(from_client(&text("plain")))).await);
+        let got = res!(ws.read().await);
+        assert!(matches!(got, Some(WebSocketMessage::Text(ref t)) if t == "plain"));
+        res!(ws.send(&text("plain back")).await);
+        let mut buf = Vec::new();
+        let heard = res!(read_message(&mut client_end, &mut buf, CHUNK, WebSocketLimits::default()).await);
+        assert!(matches!(heard, Some(WebSocketMessage::Text(ref t)) if t == "plain back"));
+        Ok(())
+    }
+
+    // Zero cost with no tap is shown by type, not by counting allocations: a counting global
+    // allocator needs `unsafe`, which this tree forbids. `NoTap` and its context occupy no bytes,
+    // its hooks are empty and inlined, and the tapped free functions give what the untapped ones
+    // give, byte for byte.
+    #[tokio::test]
+    async fn no_tap_costs_nothing_and_changes_nothing() -> Outcome<()> {
+        assert_eq!(std::mem::size_of::<NoTap>(), 0);
+        assert_eq!(std::mem::size_of::<<NoTap as FrameTap>::Ctx>(), 0);
+        for m in [text("same"), WebSocketMessage::Binary(vec![9u8; 2_000]), WebSocketMessage::Ping(vec![1])] {
+            // Unmasked, so the framing is deterministic.
+            let plain = res!(encode_message(&m, false, 512, 512));
+            let tapped = res!(encode_message_tapped(&m, false, 512, 512, &NoTap, &()));
+            assert_eq!(plain, tapped);
+            let mut a: &[u8] = &plain;
+            let mut b: &[u8] = &plain;
+            let (mut ba, mut bb) = (Vec::new(), Vec::new());
+            let x = res!(read_message(&mut a, &mut ba, 512, WebSocketLimits::default()).await);
+            let y = res!(read_message_tapped(&mut b, &mut bb, 512, WebSocketLimits::default(), &NoTap, &()).await);
+            assert_eq!(fmt!("{:?}", x), fmt!("{:?}", y));
+            assert_eq!(a.len(), b.len(), "both consumed the same bytes");
+        }
+        // The same holds for a tap behind a reference or an `Arc`.
+        let s = Scratch::new("tap-arc");
+        let sink = Arc::new(Sink::new(s.dir(), Gates::default()));
+        let tap = Arc::new(Tap::new(sink.clone(), "b", shape_only));
+        let c = conn("sess-6");
+        res!(read_one(&res!(from_client(&text("via arc"))), &tap, &c).await);
+        assert_eq!(res!(events(&sink, &["sess-6"])).len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn a_direction_names_its_kind() {
+        assert_eq!(Dir::In.kind(), "frame.in");
+        assert_eq!(Dir::Out.kind(), "frame.out");
+    }
 }

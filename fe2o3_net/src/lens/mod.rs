@@ -11,10 +11,15 @@
 //! The envelope and the gates must stay equal to Daimond's, so that Daimond's gateway can move
 //! onto this module without its clients or its reader noticing. `Gates::daimond` holds Daimond's
 //! numbers; `Gates::default` holds the retention the test site wants instead.
+//!
+//! With the `async` feature, `tap::Tap` is a tap on a websocket's messages (`crate::ws::tap`)
+//! that files what a caller's filter keeps as rows of a `Sink`.
 
 pub mod redact;
 pub mod row;
 pub mod sink;
+#[cfg(feature = "async")]
+pub mod tap;
 
 pub use redact::{
     fingerprint,
@@ -23,6 +28,7 @@ pub use redact::{
     Deny,
     NoTest,
     Redact,
+    Shapes,
     StrTest,
 };
 pub use row::{
@@ -39,4 +45,10 @@ pub use sink::{
     Posted,
     Refusal,
     Sink,
+};
+#[cfg(feature = "async")]
+pub use tap::{
+    Dir,
+    Frame,
+    Tap,
 };
