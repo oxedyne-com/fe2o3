@@ -5,9 +5,9 @@
 //! nested frames, laid-out external content and location tags, at points from the frame's top-left, y
 //! down -- and its lowering to one IR horizontal box.
 //!
-//! The box sets everything on its baseline: glyph runs become text leaves raised or lowered by their
-//! shift, the ink a run of variant glyphs or a rule needs becomes one graphic leaf, and external content
-//! keeps its own nodes. Leaves are zero-width and seated by fixed glue, so overlapping parts (a script
+//! The box sets everything on its baseline: glyph runs become text leaves, whatever their glyphs, raised
+//! or lowered by their shift, the ink a rule needs becomes one graphic leaf, and external content keeps
+//! its own nodes. Leaves are zero-width and seated by fixed glue, so overlapping parts (a script
 //! over a base, a rule over a radicand) need no nested boxes.
 
 use crate::diag::DiagnosticKind;
@@ -44,7 +44,7 @@ use crate::math::font::{
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_font::shape::Dir;
+use oxedyne_fe2o3_font::shape::Glyph;
 use oxedyne_fe2o3_graphics::{
 	colour::Rgba,
 	transform::Transform,
@@ -169,7 +169,9 @@ pub fn to_node(engine: &mut Engine, frame: &MFrame, span: Span) -> Outcome<Node>
 		let dims = Dims::new(Sp::ZERO, Sp::from_pt(base), Sp::from_pt(frame.h - base));
 		list.push(Node::Leaf(Leaf::graphic(Graphic::new(ink, dims))));
 	}
-	prims.sort_by(|a, b| px(a).partial_cmp(&px(b)).unwrap_or(std::cmp::Ordering::Equal));
+	// The glyphs stay in the frame's own order, which is Typst's: a row after its row, a base before its
+	// scripts, a numerator before its denominator, so the file's text reads as the equation does. The glue
+	// that seats each leaf therefore goes back as well as forward.
 	let mut cursor = 0.0;
 	for p in prims {
 		let x = px(&p);
@@ -222,12 +224,7 @@ fn flatten(
 		let x = ox + p.x;
 		let y = oy + p.y;
 		match item {
-			FItem::Glyphs(run) => {
-				match res!(as_text(run)) {
-					Some(shaped)	=> prims.push(Prim::Text { x, y, shaped }),
-					None			=> res!(glyph_ink(run, x, y, ink)),
-				}
-			}
+			FItem::Glyphs(run) => prims.push(Prim::Text { x, y, shaped: res!(glyph_text(run)) }),
 			FItem::Line { to, pen } => {
 				let mut c = Curve::new();
 				c.move_(P2::new(0.0, 0.0));
@@ -266,59 +263,37 @@ fn stroke_ink(engine: &mut Engine, c: &Curve, pen: &Pen, x: f64, y: f64, ink: &m
 	Ok(())
 }
 
-// A run shaped as the font shapes its text, when that reproduces the run's glyphs exactly: then it is
-// set as text, keeping what it says. A variant, an assembly or a feature-selected form is drawn as ink.
-fn as_text(run: &GlyphRun) -> Outcome<Option<ShapedText>> {
-	if run.text.is_empty() || run.glyphs.iter().any(|g| g.y_advance != 0.0 || g.y_offset != 0.0) {
-		return Ok(None);
-	}
-	let colour = match &run.fill {
-		Paint::Color(c) if is_black(c)	=> Rgba::BLACK,
-		Paint::Color(c)					=> match c.to_rgba() {
-			Ok(r)	=> r,
-			Err(_)	=> return Ok(None),
-		},
-		_								=> return Ok(None),
-	};
-	let shaped = match ShapedText::new_with_font(run.font.font.clone(), Dir::Ltr, Sp::from_pt(run.size), &run.text) {
-		Ok(s)	=> s,
-		Err(_)	=> return Ok(None),
-	};
-	let glyphs = &shaped.run().glyphs;
-	if glyphs.len() != run.glyphs.len() {
-		return Ok(None);
-	}
-	let mut pen = 0.0f64;
-	for (a, b) in glyphs.iter().zip(run.glyphs.iter()) {
-		let bx = (pen + b.x_offset) * run.size;
-		if a.id as u16 != b.id || (a.x as f64 - bx).abs() > 0.01 || a.face != 0 {
-			return Ok(None);
-		}
-		pen += b.x_advance;
-	}
-	Ok(Some(shaped.with_colour(colour)))
-}
-
-fn glyph_ink(run: &GlyphRun, x: f64, y: f64, ink: &mut Vec<DrawOp>) -> Outcome<()> {
+// A glyph run as a text run of its own glyphs, whatever they are. A variant, an assembly part and a
+// feature-selected form are glyphs of the font like any other: set as the font's glyph ids at their
+// offsets they draw as the font draws them and keep the text they stand for, so the page's text and a
+// PDF's /ToUnicode carry a script's digit, a stretched delimiter and an accent as characters, as Typst's
+// do. A glyph for each character stands for that character; otherwise the run's first glyph stands for
+// its whole text.
+fn glyph_text(run: &GlyphRun) -> Outcome<ShapedText> {
 	let colour = match &run.fill {
 		Paint::Color(c) if is_black(c)	=> Rgba::BLACK,
 		Paint::Color(c)					=> res!(c.to_rgba()),
 		_								=> Rgba::BLACK,
 	};
-	let mut gx = 0.0f64;
-	let mut gy = 0.0f64;
-	for g in &run.glyphs {
-		let ox = x + (gx + g.x_offset) * run.size;
-		let oy = y - (gy + g.y_offset) * run.size;
-		let path = res!(run.font.font.outline(0, g.id as u32, run.size as f32));
-		if !path.is_empty() {
-			let t = Transform::scale(1.0, -1.0).then(&Transform::translate(ox as f32, oy as f32));
-			ink.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
-		}
-		gx += g.x_advance;
-		gy += g.y_advance;
+	let starts: Vec<usize> = run.text.char_indices().map(|(i, _)| i).collect();
+	let each = starts.len() == run.glyphs.len();
+	let (mut px, mut py) = (0.0f64, 0.0f64);
+	let mut glyphs = Vec::with_capacity(run.glyphs.len());
+	for (i, g) in run.glyphs.iter().enumerate() {
+		glyphs.push(Glyph {
+			id:		g.id as u32,
+			face:	0,
+			x:		((px + g.x_offset) * run.size) as f32,
+			y:		((py + g.y_offset) * run.size) as f32,	// up from the baseline
+			adv:	(g.x_advance * run.size) as f32,
+			cluster: if each { starts[i] } else { 0 },
+		});
+		px += g.x_advance;
+		py += g.y_advance;
 	}
-	Ok(())
+	let vm = res!(run.font.font.metrics(run.size as f32));
+	let dims = Dims::new(Sp::from_pt(px * run.size), Sp::from_pt(vm.ascent as f64), Sp::from_pt(vm.descent as f64));
+	Ok(ShapedText::from_glyphs(run.font.font.clone(), run.size as f32, glyphs, run.text.clone(), colour, dims))
 }
 
 fn is_black(c: &crate::eval::value::Color) -> bool {

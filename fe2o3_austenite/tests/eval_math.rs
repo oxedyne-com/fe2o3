@@ -675,7 +675,17 @@ fn debug_dump() {
 				_ => println!("{:w$}leaf", "", w = d),
 			},
 			Node::Glue(g) => println!("{:w$}glue {:?}", "", g.natural.to_pt(), w = d),
-			_ => (),
+			Node::Frame(f) => {
+				println!("{:w$}frame {:?}", "", f.dims, w = d);
+				for (x, y, c) in &f.items {
+					println!("{:w$}at ({:.2}, {:.2})", "", x.to_pt(), y.to_pt(), w = d + 2);
+					show(c, d + 4);
+				}
+			}
+			Node::Transform(t) => { println!("{:w$}transform {:?}", "", t.dims, w = d); for c in &t.list { show(c, d + 2); } }
+			Node::Clip(c) => { println!("{:w$}clip {:?}", "", c.dims, w = d); for k in &c.list { show(k, d + 2); } }
+			Node::Tag(_) | Node::Anchor(_) | Node::Mark(_) => println!("{:w$}tag", "", w = d),
+			_ => println!("{:w$}other", "", w = d),
 		}
 	}
 	show(&node, 0);
