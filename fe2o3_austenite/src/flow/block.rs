@@ -27,7 +27,6 @@ use crate::eval::locate::Location;
 use crate::eval::realise::{
 	self,
 	Pair,
-	RealiseMode,
 	Tag,
 };
 use crate::eval::styles::StyleChain;
@@ -123,24 +122,9 @@ pub fn layout_frame(engine: &mut Engine, content: &Content, styles: &StyleChain,
 /// Lays content out into as many of `regions` as it needs, Typst's `layout_fragment`: realised one level,
 /// then flowed as blocks, or as the lines of one paragraph when the content is inline only.
 pub fn layout_fragment(engine: &mut Engine, content: &Content, styles: &StyleChain, regions: Regions) -> Outcome<Vec<Frame>> {
-	let pairs	= res!(realise::realise(engine, content, styles, RealiseMode::Flow));
-	let mode	= if is_inline_fragment(&pairs) { FlowMode::Inline } else { FlowMode::Block };
+	let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
+	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
 	layout_flow_pairs(engine, pairs, styles, regions, 1, Rel::zero(), mode, content.span())
-}
-
-/// Is a fragment's realisation one paragraph's worth of inline elements, left without a `par`?
-fn is_inline_fragment(pairs: &[Pair]) -> bool {
-	let mut any = false;
-	for p in pairs {
-		if p.is_tag() {
-			continue;
-		}
-		if !realise::is_inline(&p.content) {
-			return false;
-		}
-		any = true;
-	}
-	any
 }
 
 /// What a flow may hold: a page's root flow also hosts footnotes.
@@ -2776,8 +2760,8 @@ fn flow_cursor(
 )
 	-> Outcome<FlowCursor>
 {
-	let pairs	= res!(realise::realise(engine, content, styles, RealiseMode::Flow));
-	let mode	= if is_inline_fragment(&pairs) { FlowMode::Inline } else { FlowMode::Block };
+	let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
+	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
 	FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
 }
 
@@ -3047,8 +3031,8 @@ fn columns_parts(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Ou
 /// `columns(n)`: the body flowed through `n` column regions per region, as a page's columns are.
 fn layout_columns(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let (count, gutter, body) = res!(columns_parts(engine, elem, styles));
-	let pairs = res!(realise::realise(engine, &body, styles, RealiseMode::Flow));
-	let mode = if is_inline_fragment(&pairs) { FlowMode::Inline } else { FlowMode::Block };
+	let (pairs, inline) = res!(realise::realise_fragment(engine, &body, styles));
+	let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
 	layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
 }
 

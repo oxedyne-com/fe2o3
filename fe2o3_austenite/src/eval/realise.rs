@@ -182,7 +182,20 @@ pub fn realise(
 )
 	-> Outcome<Vec<Pair>>
 {
-	realise_with(engine, content, styles, mode, false)
+	Ok(res!(realise_with(engine, content, styles, mode, false)).0)
+}
+
+/// Realises a body in `Flow` mode and says whether it is one paragraph's worth of inline elements left without
+/// a `par`: Typst's `FragmentKind::Inline`. Text with spaces between its runs (`A: B`) is such a body, so the
+/// caller cannot re-derive the verdict from the pairs alone.
+pub fn realise_fragment(
+	engine:		&mut Engine,
+	content:	&Content,
+	styles:		&StyleChain,
+)
+	-> Outcome<(Vec<Pair>, bool)>
+{
+	realise_with(engine, content, styles, RealiseMode::Flow, false)
 }
 
 /// Realises as `realise` does, but leaves model elements (headings, paragraphs, lists, strong and
@@ -197,7 +210,7 @@ pub fn realise_structure(
 )
 	-> Outcome<Vec<Pair>>
 {
-	realise_with(engine, content, styles, mode, true)
+	Ok(res!(realise_with(engine, content, styles, mode, true)).0)
 }
 
 fn realise_with(
@@ -207,7 +220,7 @@ fn realise_with(
 	mode:		RealiseMode,
 	keep_model:	bool,
 )
-	-> Outcome<Vec<Pair>>
+	-> Outcome<(Vec<Pair>, bool)>
 {
 	let mut s = State {
 		engine,
@@ -218,11 +231,12 @@ fn realise_with(
 		outside:		mode == RealiseMode::Document,
 		may_attach:		false,
 		saw_parbreak:	false,
+		fully_inline:	false,
 		depth:			0,
 	};
 	res!(s.visit(content, styles));
 	res!(s.finish());
-	Ok(s.sink)
+	Ok((s.sink, s.fully_inline))
 }
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?
@@ -337,6 +351,7 @@ struct State<'e> {
 	outside:		bool,	// at the document's top level, not inside a container or show-rule output
 	may_attach:		bool,	// the last block was a paragraph, so `v(attach: true)` survives
 	saw_parbreak:	bool,
+	fully_inline:	bool,	// the whole body is one paragraph's worth of inline elements (`Flow` mode)
 	depth:			usize,	// nested show-rule outputs
 }
 
@@ -785,6 +800,7 @@ impl State<'_> {
 		while !self.groupings.is_empty() {
 			if self.is_fully_inline() {
 				inline = true;
+				self.fully_inline = true;
 				break;
 			}
 			res!(self.finish_innermost_grouping());
