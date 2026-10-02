@@ -59,7 +59,16 @@ pub enum Parity {
 	Even,
 }
 
-/// What a run of pages under one `set page(..)` shares: the geometry, and the furniture decoration (U9)
+/// How a page's `header` or `footer` is set. `auto` leaves the slot to the page numbering; `none` clears it,
+/// the numbering with it.
+#[derive(Clone, Debug)]
+pub enum Slot {
+	Auto,
+	Off,
+	On(Content),
+}
+
+/// What a run of pages under one `set page(..)` shares: the geometry, and the furniture [`decorate`]
 /// evaluates per page with `here()` there. Its pages' bodies come from the [`Paginator`] one at a time, so
 /// no run holds them.
 #[derive(Clone, Debug)]
@@ -69,8 +78,8 @@ pub struct RunSetup {
 	pub gutter:		Sp,
 	pub fill:		Option<Paint>,
 	pub numbering:	Value,			// `page.numbering`, none by default
-	pub header:		Option<Content>,
-	pub footer:		Option<Content>,
+	pub header:		Slot,
+	pub footer:		Slot,
 	pub background:	Option<Content>,
 	pub foreground:	Option<Content>,
 	pub styles:		StyleChain,		// the chain furniture is evaluated under

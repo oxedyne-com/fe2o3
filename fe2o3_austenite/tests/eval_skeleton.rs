@@ -16,10 +16,13 @@
 #[path = "eval_oracle/mod.rs"]
 mod harness;
 
-use harness::layout::{
-	read_bbox,
-	OLine,
-	OPage,
+use harness::pdf::{
+	self,
+	k3_differences,
+	lines_of,
+	page_size,
+	text_of,
+	typst_pdf,
 };
 
 use oxedyne_fe2o3_austenite::compile;
@@ -32,107 +35,20 @@ use std::path::{
 	Path,
 	PathBuf,
 };
-use std::process::Command;
-
-const TYPST:	&str = "/home/jason/bin/typst";
-const TOL:		f64 = 1.0;	// points: K3's tolerance
 
 fn skeleton() -> PathBuf {
 	Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/skeleton/skeleton.typ")
 }
 
-fn work_dir() -> Outcome<PathBuf> {
-	let home = res!(std::env::var("HOME"));
-	let dir = Path::new(&home).join(".cache").join("austenite-qc").join("eval-skeleton");
-	res!(std::fs::create_dir_all(&dir));
-	Ok(dir)
-}
-
-/// Austenite's PDF of the skeleton, and the compile's report.
-fn austenite_pdf(src: &Path) -> Outcome<(Vec<u8>, compile::Report)> {
-	let mut sink = res!(PdfSink::new());
-	let root = src.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-	let done = res!(compile::assemble_eval(src, &root, FontStore::default(), &mut sink));
-	let laid = res!(done.laid.as_ref().map_err(|e| err!("The skeleton did not lay out: {}", e.plain(); Test)));
-	assert_eq!(laid.pages, 1, "the skeleton is one page");
-	let report = done.report();
-	let out = res!(sink.output().ok_or_else(|| err!("The fixpoint finished with no PDF."; Test)));
-	Ok((out.to_vec(), report))
-}
-
-fn typst_pdf(src: &Path, out: &Path) -> Outcome<()> {
-	let status = Command::new("systemd-run")
-		.args(["--user", "--scope", "--quiet", "-p", "MemoryMax=3G", "--slice=claude-rc.slice", TYPST, "compile"])
-		.arg(src).arg(out)
-		.status();
-	match status {
-		Ok(s) if s.success()	=> Ok(()),
-		other					=> Err(err!("typst did not compile the skeleton: {:?}", other; Test)),
-	}
-}
-
-fn tool(name: &str, args: &[&str], file: &Path, tail: &[&str]) -> Outcome<String> {
-	let out = Command::new(name).args(args).arg(file).args(tail).output();
-	match out {
-		Ok(o) if o.status.success()	=> Ok(String::from_utf8_lossy(&o.stdout).to_string()),
-		other						=> Err(err!("{} failed on {}: {:?}", name, file.display(), other.map(|o| o.status); Test)),
-	}
-}
-
-fn text_of(pdf: &Path) -> Outcome<String> {
-	let t = res!(tool("pdftotext", &["-layout"], pdf, &["-"]));
-	Ok(t.split_whitespace().collect::<Vec<_>>().join(" "))
-}
-
-fn lines_of(pdf: &Path) -> Outcome<Vec<OPage>> {
-	let xml = res!(tool("pdftotext", &["-bbox-layout"], pdf, &["-"]));
-	Ok(read_bbox(&xml))
-}
-
-/// The page size `pdfinfo` reads from a PDF, in points: Typst packs its page objects into compressed streams,
-/// so its MediaBox is not in the bytes.
-fn page_size(pdf: &Path) -> Outcome<(f64, f64)> {
-	let info = res!(tool("pdfinfo", &[], pdf, &[]));
-	let line = res!(info.lines().find(|l| l.starts_with("Page size:")).ok_or_else(|| err!("pdfinfo gave no page size"; Test)));
-	let nums: Vec<f64> = line.split_whitespace().filter_map(|n| n.parse::<f64>().ok()).collect();
-	if nums.len() < 2 {
-		return Err(err!("pdfinfo's page size line has no two numbers: {}", line; Test));
-	}
-	Ok((nums[0], nums[1]))
-}
-
-/// Where Austenite's lines differ from Typst's: a line's text, the bottom of its box and where its first
-/// word starts, each within [`TOL`].
-fn k3_differences(want: &[OPage], got: &[OPage]) -> Vec<String> {
-	let mut out = Vec::new();
-	if want.len() != got.len() {
-		out.push(fmt!("page count: typst {}, austenite {}", want.len(), got.len()));
-	}
-	for (pi, (w, g)) in want.iter().zip(got.iter()).enumerate() {
-		if w.lines.len() != g.lines.len() {
-			out.push(fmt!("page {}: typst has {} line(s), austenite {}", pi + 1, w.lines.len(), g.lines.len()));
-		}
-		for (wl, gl) in w.lines.iter().zip(g.lines.iter()) {
-			let squash = |l: &OLine| l.text.split_whitespace().collect::<Vec<_>>().join(" ");
-			if squash(wl) != squash(gl) {
-				out.push(fmt!("page {}: line text typst {:?}, austenite {:?}", pi + 1, squash(wl), squash(gl)));
-			}
-			if (wl.y1 - gl.y1).abs() > TOL {
-				out.push(fmt!("page {}: {:?}: box bottom typst {:.2}, austenite {:.2}", pi + 1, squash(wl), wl.y1, gl.y1));
-			}
-			if (wl.x0 - gl.x0).abs() > TOL {
-				out.push(fmt!("page {}: {:?}: starts at x typst {:.2}, austenite {:.2}", pi + 1, squash(wl), wl.x0, gl.x0));
-			}
-		}
-	}
-	out
-}
+fn work_dir() -> Outcome<PathBuf> { pdf::work_dir("eval-skeleton") }
 
 #[test]
 fn the_skeleton_is_a_pdf_of_one_a4_page_with_typsts_text_and_lines_and_no_diagnostic() -> Outcome<()> {
 	let src		= skeleton();
 	let dir		= res!(work_dir());
-	let (bytes, report) = res!(austenite_pdf(&src));
+	let made	= res!(pdf::austenite_pdf(&src));
+	assert_eq!(made.pages, 1, "the skeleton is one page");
+	let (bytes, report) = (made.bytes, made.report);
 	let ours	= dir.join("austenite.pdf");
 	let theirs	= dir.join("typst.pdf");
 	res!(std::fs::write(&ours, &bytes));

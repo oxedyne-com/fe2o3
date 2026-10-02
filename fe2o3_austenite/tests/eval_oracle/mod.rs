@@ -26,6 +26,7 @@ pub mod json;
 pub mod layout;
 pub mod markup;
 pub mod oracle;
+pub mod pdf;
 pub mod structure;
 
 use austenite::{

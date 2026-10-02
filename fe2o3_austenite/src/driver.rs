@@ -21,6 +21,7 @@ use crate::{
 	eval::content::Content,
 	eval::realise::Tag,
 	eval::value::Paint,
+	flow::decorate::Marginals,
 	flow::PageBody,
 	ir::{
 		BoxNode,
@@ -1822,12 +1823,12 @@ fn non_convergence(
 // The evaluator's pages
 
 /// Places one page of the evaluator from its body, as the flow leaves it: its fill, the tags waiting for it at
-/// its top-left, its body frame inside the margins, and any tags that fall after the last page at its foot.
-/// Each page's geometry is its run's with the side margins exchanged on the pages a two-sided binding swaps;
+/// its top-left, its furniture and body frame inside the margins in Typst's frame order (background, header,
+/// body, footer, foreground), and any tags that fall after the last page at its foot. Each page's geometry is its run's with the side margins exchanged on the pages a two-sided binding swaps;
 /// a width or height of zero is Typst's `auto`, the page taking its body's size plus its margins. Lines are
 /// seated by TeX's baseline rule ([`Seat::Baseline`]). The located elements the page holds go to `rec`, and
 /// the page is the caller's to hand on and drop: nothing here keeps it.
-pub fn place_page<R: Recorder>(body: PageBody, rec: &mut R) -> Outcome<Page> {
+pub fn place_page<R: Recorder>(body: PageBody, marginals: Marginals, rec: &mut R) -> Outcome<Page> {
 	let metrics		= StubMetrics::new(Sp::ZERO, Sp::ZERO);	// evaluator lines hold no forward reservations
 	let incoming	= Ledger::new();
 	let mut ledger	= Ledger::new();					// the page's own, dropped with it
@@ -1868,7 +1869,20 @@ pub fn place_page<R: Recorder>(body: PageBody, rec: &mut R) -> Outcome<Page> {
 		for t in &tags {
 			p.tag(t, Sp::ZERO, Sp::ZERO);
 		}
+		let Marginals { background, header, footer, foreground, foot_h } = marginals;
+		if let Some(f) = background {
+			res!(p.node(&f.into_node(), Sp::ZERO, Sp::ZERO));
+		}
+		if let Some(f) = header {
+			res!(p.node(&f.into_node(), geom.content_left(), Sp::ZERO));
+		}
 		res!(p.node(&node, geom.content_left(), geom.content_top()));
+		if let Some(f) = footer {
+			res!(p.node(&f.into_node(), geom.content_left(), geom.height - Sp::from_pt(foot_h)));
+		}
+		if let Some(f) = foreground {
+			res!(p.node(&f.into_node(), Sp::ZERO, Sp::ZERO));
+		}
 		// Tags after the last page land at its foot.
 		for t in &foot {
 			p.tag(t, Sp::ZERO, geom.height);

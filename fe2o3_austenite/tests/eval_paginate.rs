@@ -23,10 +23,7 @@ use harness::layout::{
 };
 use harness::oracle::Oracle;
 
-use oxedyne_fe2o3_austenite::driver::{
-	self,
-	Nowhere,
-};
+use oxedyne_fe2o3_austenite::driver::Nowhere;
 use oxedyne_fe2o3_austenite::eval::styles::StyleChain;
 use oxedyne_fe2o3_austenite::eval::{
 	eval_source,
@@ -97,14 +94,10 @@ fn austenite(fx: &Fixture) -> std::result::Result<Vec<APage>, String> {
 	let mut paginator = flow::paginate(&module.content, &StyleChain::root());
 	let mut pages = Vec::new();
 	loop {
-		let body = match paginator.next_page(&mut engine) {
-			Ok(Some(b))	=> b,
-			Ok(None)	=> break,
-			Err(e)		=> return Err(fmt!("flow: {}", last(&e))),
-		};
-		let page = match driver::place_page(body, &mut Nowhere) {
-			Ok(p)	=> p,
-			Err(e)	=> return Err(fmt!("driver: {}", last(&e))),
+		let page = match paginator.next_placed(&mut engine, &mut Nowhere) {
+			Ok(Some((p, _)))	=> p,
+			Ok(None)			=> break,
+			Err(e)				=> return Err(fmt!("flow: {}", last(&e))),
 		};
 		pages.push(APage {
 			width:	page.geom.width.to_pt(),

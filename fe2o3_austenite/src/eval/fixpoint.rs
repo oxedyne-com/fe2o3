@@ -75,8 +75,8 @@ pub trait Layouter {
 		-> Outcome<u32>;
 }
 
-/// A pass's pages, one at a time: the document's are U6b's `flow::Paginator`, each body placed by
-/// `driver::place_page`, which records the page's located elements in the builder, then decorated.
+/// A pass's pages, one at a time: the document's are U6b's `flow::Paginator`, each body placed with its
+/// furniture by `driver::place_page`, which records the page's located elements in the builder.
 pub trait PageSource {
 	/// The next page, placed and decorated, with its `page.numbering`; `None` after the last page.
 	fn next_page(&mut self, engine: &mut Engine, builder: &mut Builder) -> Outcome<Option<(Page, Value)>>;
@@ -101,14 +101,13 @@ impl Layouter for Pages {
 	}
 }
 
-// The paginator is the document's page source: the next page's body is placed on its page, which records
-// the page's located elements in the builder, and then decorated.
+// The paginator is the document's page source: the next page's furniture is laid out and its body placed on
+// its page, which records the page's located elements in the builder.
 impl PageSource for flow::Paginator {
 	fn next_page(&mut self, engine: &mut Engine, builder: &mut Builder) -> Outcome<Option<(Page, Value)>> {
 		match res!(self.next_placed(engine, builder)) {
 			None						=> Ok(None),
-			Some((mut page, setup))	=> {
-				res!(flow::decorate::decorate_page(engine, &mut page, &setup));
+			Some((page, setup))	=> {
 				builder.document(res!(intro::document_info(&setup.styles)));
 				Ok(Some((page, setup.numbering.clone())))
 			},

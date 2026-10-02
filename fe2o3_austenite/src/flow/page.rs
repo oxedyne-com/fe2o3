@@ -56,8 +56,10 @@ use crate::flow::block::{
 	Rel,
 };
 use crate::flow::{
+	decorate,
 	Parity,
 	RunSetup,
+	Slot,
 };
 use crate::ir::Sp;
 use crate::page::{
@@ -358,10 +360,11 @@ impl Paginator {
 		}
 		if let Some(setup) = self.blank.take() {
 			self.count += 1;
+			let body = blank_area(&setup);
 			let mut page = PageBody {
 				setup,
 				number:		self.count,
-				body:		Frame::new(0.0, 0.0),
+				body,
 				tags:		std::mem::take(&mut self.waiting),
 				foot:		Vec::new(),
 				run_start:	true,
@@ -395,9 +398,8 @@ impl Paginator {
 		Ok(Some(page))
 	}
 
-	/// The next page placed: its body put on its page by [`driver::place_page`], the located elements it holds
-	/// going to `rec`, with the setup of its run for decoration. This is the whole of the pipeline's
-	/// `PageSource::next_page` bar the decoration, which U9 supplies.
+	/// The next page placed: its furniture laid out ([`decorate::decorate_page`]) and its body put on its page
+	/// by [`driver::place_page`], the located elements they hold going to `rec`, with the setup of its run.
 	pub fn next_placed<R: Recorder>(&mut self, engine: &mut Engine, rec: &mut R)
 		-> Outcome<Option<(Page, Arc<RunSetup>)>>
 	{
@@ -405,7 +407,8 @@ impl Paginator {
 			None		=> Ok(None),
 			Some(body)	=> {
 				let setup = body.setup.clone();
-				Ok(Some((res!(driver::place_page(body, rec)), setup)))
+				let marginals = res!(decorate::decorate_page(engine, &setup, (body.body.w, body.body.h)));
+				Ok(Some((res!(driver::place_page(body, marginals, rec)), setup)))
 			},
 		}
 	}
@@ -458,6 +461,18 @@ impl Paginator {
 			engine, feed, &styles, &regions, setup.columns, setup.gutter, FlowMode::Root, self.span));
 		self.active = Some(Active { setup: Arc::new(setup.run(styles)), cursor, regions, first: true });
 		Ok(())
+	}
+}
+
+/// A parity blank page's body, the size of its run's area as Typst's flow makes it, so the furniture of a
+/// blank page spans the page; nothing where the page fits its content.
+fn blank_area(setup: &RunSetup) -> Frame {
+	let g = &setup.geom;
+	match (g.width == Sp::ZERO, g.height == Sp::ZERO) {
+		(false, false)	=> Frame::new(g.content_width().to_pt(), g.content_height().to_pt()),
+		(false, true)	=> Frame::new(g.content_width().to_pt(), 0.0),
+		(true, false)	=> Frame::new(0.0, g.content_height().to_pt()),
+		(true, true)	=> Frame::new(0.0, 0.0),
 	}
 }
 
@@ -517,8 +532,8 @@ struct PageSetup {
 	gutter_pt:	f64,
 	fill:		Option<Paint>,
 	numbering:	Value,
-	header:		Option<Content>,
-	footer:		Option<Content>,
+	header:		Slot,
+	footer:		Slot,
 	background:	Option<Content>,
 	foreground:	Option<Content>,
 }
@@ -550,6 +565,11 @@ impl PageSetup {
 			}
 		};
 		let (left, top, right, bottom) = (side(0, w), side(1, h), side(2, w), side(3, h));
+		// A bleed extends the page past its trim, which the writers do not draw.
+		let bleed = margin_parts(res!(page_field(styles, "bleed")));
+		if bleed.iter().flatten().any(|v| rel(styles, v).map(|r| !r.is_zero()).unwrap_or(false)) {
+			engine.warn(DiagnosticKind::Unsupported, span, "page bleed is not drawn");
+		}
 		let dir = match ElemKind::Text.field_id("dir") {
 			Some(id)	=> res!(styles.get(ElemKind::Text, id)),
 			None		=> None,
@@ -587,6 +607,14 @@ impl PageSetup {
 				Some(v)											=> Ok(Some(res!(v.cast::<Content>()))),
 			}
 		};
+		// A header or footer left `auto` is the page numbering's, and `none` clears it.
+		let slot = |name: &str| -> Outcome<Slot> {
+			match res!(page_field(styles, name)) {
+				None | Some(Value::Auto)	=> Ok(Slot::Auto),
+				Some(Value::None)			=> Ok(Slot::Off),
+				Some(v)						=> Ok(Slot::On(res!(v.cast::<Content>()))),
+			}
+		};
 		Ok(PageSetup {
 			geom,
 			area,
@@ -595,8 +623,8 @@ impl PageSetup {
 			gutter_pt:	gutter.relative_to(area.0),
 			fill,
 			numbering:	res!(page_field(styles, "numbering")).unwrap_or(Value::None),
-			header:		res!(content("header")),
-			footer:		res!(content("footer")),
+			header:		res!(slot("header")),
+			footer:		res!(slot("footer")),
 			background:	res!(content("background")),
 			foreground:	res!(content("foreground")),
 		})
@@ -619,7 +647,7 @@ impl PageSetup {
 }
 
 /// A `page` field as the chain has it.
-fn page_field(styles: &StyleChain, name: &str) -> Outcome<Option<Value>> {
+pub(crate) fn page_field(styles: &StyleChain, name: &str) -> Outcome<Option<Value>> {
 	match ElemKind::Page.field_id(name) {
 		Some(id)	=> styles.get(ElemKind::Page, id),
 		None		=> Ok(None),
@@ -673,7 +701,7 @@ fn length_or_inf(styles: &StyleChain, v: &Value) -> f64 {
 	}
 }
 
-fn rel(styles: &StyleChain, v: &Value) -> Option<Rel> {
+pub(crate) fn rel(styles: &StyleChain, v: &Value) -> Option<Rel> {
 	match v {
 		Value::Length(l)	=> Some(Rel::pt(styles.resolve_length(*l))),
 		Value::Ratio(r)		=> Some(Rel { ratio: r.0, abs: 0.0 }),

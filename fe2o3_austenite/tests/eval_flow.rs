@@ -3,17 +3,14 @@
 //! Each fixture in `tests/fixtures/eval/{flow,float,fr}` labels the elements it probes `<probe>`. Typst
 //! reports each probe's page and position through `typst eval --in`, and its page count and page sizes
 //! through an SVG compile; Austenite evaluates the fixture, lays its pages out through
-//! `flow::paginate` and `driver::place_page` a page at a time, and reads the same from the located elements
+//! `flow::paginate` and `Paginator::next_placed` a page at a time, and reads the same from the located elements
 //! the pages report and the pages. Positions must agree within 0.5pt, page counts exactly, page sizes within 0.5pt.
 //!
 //! A fixture whose first lines say `// needs: <unit>` depends on a unit not yet merged. While Austenite
 //! cannot evaluate it, it is reported as pending; the moment it evaluates, it is held to the oracle like
 //! any other. The suite fails unless at least `MIN_COMPARED` fixtures were compared in full.
 
-use oxedyne_fe2o3_austenite::driver::{
-	self,
-	Recorder,
-};
+use oxedyne_fe2o3_austenite::driver::Recorder;
 use oxedyne_fe2o3_austenite::eval::content::Content;
 use oxedyne_fe2o3_austenite::eval::styles::StyleChain;
 use oxedyne_fe2o3_austenite::eval::{
@@ -184,14 +181,10 @@ fn austenite(path: &Path) -> std::result::Result<Laid, String> {
 	let mut order = Order::default();
 	let mut pages = Vec::new();
 	loop {
-		let body = match paginator.next_page(&mut engine) {
-			Ok(Some(b))	=> b,
-			Ok(None)	=> break,
-			Err(e)		=> return Err(fmt!("flow: {}", last(&e))),
-		};
-		let page = match driver::place_page(body, &mut order) {
-			Ok(p)	=> p,
-			Err(e)	=> return Err(fmt!("driver: {}", last(&e))),
+		let page = match paginator.next_placed(&mut engine, &mut order) {
+			Ok(Some((p, _)))	=> p,
+			Ok(None)			=> break,
+			Err(e)				=> return Err(fmt!("flow: {}", last(&e))),
 		};
 		pages.push((page.geom.width.to_pt(), page.geom.height.to_pt()));
 	}
