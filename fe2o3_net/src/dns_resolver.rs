@@ -73,6 +73,11 @@ pub fn lookup_mx(domain: &str) -> Outcome<Vec<MxRecord>> {
 }
 
 /// Every IPv4 answer, in the order the server sent them.
+///
+/// An empty list is a name that exists but has no A record, which is also what an IPv6-only host
+/// looks like. A name that does not exist (RCODE 3, NXDOMAIN) is an error tagged `Permanent`, so a
+/// caller can tell the two apart: asking again will not make the second one appear, but may well
+/// change the first.
 pub fn lookup_a(host: &str) -> Outcome<Vec<Ipv4Addr>> {
     let resolver = system_resolver();
     let response = res!(query(host, QTYPE_A, resolver));
@@ -89,6 +94,8 @@ const QTYPE_MX: u16 = 15;
 const QCLASS_IN: u16 = 1;
 
 const FLAG_RD: u16 = 0x0100; // Recursion desired.
+
+const RCODE_NXDOMAIN: u8 = 3;
 
 const RTYPE_A:      u16 = 1;
 const RTYPE_NS:     u16 = 2;
@@ -154,7 +161,7 @@ fn encode_qname(name: &str, out: &mut Vec<u8>) {
 }
 
 fn parse_mx_response(buf: &[u8]) -> Outcome<Vec<MxRecord>> {
-    let (_id, ancount, mut pos) = res!(parse_response_header(buf));
+    let (_id, _rcode, ancount, mut pos) = res!(parse_response_header(buf));
     let mut out = Vec::new();
     for _ in 0..ancount {
         let (rtype, rdlength, rdata_pos, next) = res!(parse_rr(buf, pos));
@@ -180,7 +187,12 @@ fn parse_mx_response(buf: &[u8]) -> Outcome<Vec<MxRecord>> {
 }
 
 fn parse_a_response(buf: &[u8]) -> Outcome<Vec<Ipv4Addr>> {
-    let (_id, ancount, mut pos) = res!(parse_response_header(buf));
+    let (_id, rcode, ancount, mut pos) = res!(parse_response_header(buf));
+    if rcode == RCODE_NXDOMAIN {
+        return Err(err!(
+            "The name does not exist (DNS RCODE 3, NXDOMAIN).";
+            IO, Network, Missing, Permanent));
+    }
     let mut out = Vec::new();
     for _ in 0..ancount {
         let (rtype, rdlength, rdata_pos, next) = res!(parse_rr(buf, pos));
@@ -207,9 +219,9 @@ fn parse_a_response(buf: &[u8]) -> Outcome<Vec<Ipv4Addr>> {
     Ok(out)
 }
 
-/// `(transaction_id, ancount, position_of_first_answer)`, having read the
-/// 12-byte header and the question section.
-fn parse_response_header(buf: &[u8]) -> Outcome<(u16, u16, usize)> {
+/// `(transaction_id, rcode, ancount, position_of_first_answer)`, having read the
+/// 12-byte header and the question section. Only RCODEs 0 and 3 are accepted.
+fn parse_response_header(buf: &[u8]) -> Outcome<(u16, u8, u16, usize)> {
     if buf.len() < 12 {
         return Err(err!(
             "DNS response too short ({} bytes).", buf.len();
@@ -231,7 +243,7 @@ fn parse_response_header(buf: &[u8]) -> Outcome<(u16, u16, usize)> {
         let (_qname, consumed) = res!(read_name(buf, pos));
         pos = consumed + 4; // skip QTYPE + QCLASS
     }
-    Ok((id, ancount, pos))
+    Ok((id, rcode, ancount, pos))
 }
 
 /// One resource record header at `pos`, as
@@ -322,4 +334,72 @@ fn read_name(buf: &[u8], start: usize) -> Outcome<(String, usize)> {
         pos = label_end;
     }
     Ok((name, after.unwrap_or(pos)))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A response to an A query for `gone.example`, as a resolver would send it. Each answer is
+    /// `(rtype, rdata)`, named by a pointer back to the question.
+    fn response(rcode: u8, answers: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut b: Vec<u8> = Vec::new();
+        b.extend_from_slice(&0x1234u16.to_be_bytes());
+        b.extend_from_slice(&(0x8180u16 | rcode as u16).to_be_bytes());
+        b.extend_from_slice(&1u16.to_be_bytes());
+        b.extend_from_slice(&(answers.len() as u16).to_be_bytes());
+        b.extend_from_slice(&[0, 0, 0, 0]);
+        encode_qname("gone.example", &mut b);
+        b.extend_from_slice(&QTYPE_A_TEST.to_be_bytes());
+        b.extend_from_slice(&QCLASS_IN.to_be_bytes());
+        for (rtype, rdata) in answers {
+            b.extend_from_slice(&[0xc0, 0x0c]);
+            b.extend_from_slice(&rtype.to_be_bytes());
+            b.extend_from_slice(&QCLASS_IN.to_be_bytes());
+            b.extend_from_slice(&60u32.to_be_bytes());
+            b.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            b.extend_from_slice(rdata);
+        }
+        b
+    }
+
+    const QTYPE_A_TEST:     u16 = 1;
+    const RTYPE_AAAA_TEST:  u16 = 28;
+
+    /// The name does not exist. Asking again will not make it.
+    #[test]
+    fn test_nxdomain_is_a_permanent_error_for_an_a_lookup_00() -> Outcome<()> {
+        match parse_a_response(&response(3, &[])) {
+            Ok(v) => Err(err!("NXDOMAIN read as an answer: {:?}.", v; Test, Mismatch)),
+            Err(e) => {
+                req!(true, e.tags().contains(&ErrTag::Permanent), "NXDOMAIN was not tagged permanent");
+                Ok(())
+            }
+        }
+    }
+
+    /// The name exists and has no A record. Not an error, and not a verdict on the host.
+    #[test]
+    fn test_noerror_without_an_a_record_is_an_empty_answer_00() -> Outcome<()> {
+        let v = res!(parse_a_response(&response(0, &[])));
+        req!(true, v.is_empty(), "NOERROR with no answer was not empty");
+        Ok(())
+    }
+
+    /// An IPv6-only host: AAAA answered, no A. It is an existing name with no IPv4 address.
+    #[test]
+    fn test_an_aaaa_only_answer_is_an_empty_a_answer_00() -> Outcome<()> {
+        let aaaa = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let v = res!(parse_a_response(&response(0, &[(RTYPE_AAAA_TEST, &aaaa)])));
+        req!(true, v.is_empty(), "an AAAA answer was read as an A address");
+        Ok(())
+    }
+
+    #[test]
+    fn test_an_a_answer_is_returned_00() -> Outcome<()> {
+        let v = res!(parse_a_response(&response(0, &[(1, &[192, 0, 2, 7])])));
+        req!(vec![Ipv4Addr::new(192, 0, 2, 7)], v, "the A address was not returned");
+        Ok(())
+    }
 }
