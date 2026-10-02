@@ -286,7 +286,15 @@ pub fn resolve_public(host: &str) -> Outcome<Vec<IpAddr>> {
         return Ok(vec![ip]);
     }
 
-    let answers = res!(crate::dns_resolver::lookup_a(host));
+    let answers = match crate::dns_resolver::lookup_a(host) {
+        Ok(a) => a,
+        // NXDOMAIN is an error from the resolver now, but to this caller it is still a host that does
+        // not resolve.
+        Err(e) if e.tags().contains(&ErrTag::Permanent) => return Err(err!(e,
+            "The host '{}' does not resolve.", host;
+            Invalid, Input, NotFound)),
+        Err(e) => return Err(e),
+    };
     if answers.is_empty() {
         return Err(err!(
             "The host '{}' does not resolve.", host;
