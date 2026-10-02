@@ -13,6 +13,10 @@
 pub mod ast;
 pub mod codefig;
 pub(crate) mod lex;
+#[cfg(test)]
+pub(crate) mod lex_diff;
+#[cfg(test)]
+pub(crate) mod lex_old;
 pub mod lower;
 pub mod mathparse;
 pub mod parse;

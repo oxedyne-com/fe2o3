@@ -107,27 +107,28 @@ pub fn is_book_root(src: &str) -> bool {
 /// from, so one a comment holds, a raw block shows or any other bracketed body holds is never followed as the
 /// file's own.
 fn top_live_lines(src: &str) -> Vec<String> {
-	let live		= lang::lex::live_text(src);
+	let lx			= lang::lex::Lexer::markup(src);
+	let live		= lx.live_text();
 	let mut out		= Vec::new();
-	let mut state	= lang::lex::Lexer::markup_over(src);
+	let mut at		= 0usize;	// the byte the line starts at
 	let mut guards: Vec<usize> = Vec::new();	// the group depth each open guard's branch stands at
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
-		let depth = state.depth();
+		let depth = lx.depth_at(at);
 		while guards.last().map_or(false, |&g| depth < g) {
 			guards.pop();
 		}
 		// A line opening in markup, at the file's own level with no list item, heading, strong or emphasis
 		// open around it, or directly in a guard's branch with none open around it there.
-		let level	= state.markup_level();
-		let top		= state.place_of(raw) == Some(lang::lex::Place::Top);
-		let branch	= level.is_some() && level == guards.last().copied() && state.bare_line(raw);
+		let level	= lx.markup_level_at(at);
+		let top		= lx.place_at(at) == Some(lang::lex::Place::Top);
+		let branch	= level.is_some() && level == guards.last().copied() && lx.bare_line_at(at);
 		if top || branch {
 			if guard_open(raw_live.trim()).is_some() {
 				guards.push(depth + 1);
 			}
 			out.push(raw_live.to_string());
 		}
-		state.feed(raw);
+		at = at.saturating_add(raw.len());
 	}
 	out
 }
@@ -1768,11 +1769,12 @@ const MAX_INCLUDE_DEPTH: u32 = 64;
 /// dropped branch is not `live` and keeps neither branch. `then_taken` is the resolved condition; `in_else`
 /// tracks which of the two branches the walk is currently inside.
 ///
-/// `state` is the guard's own bracket balance, seeded from its opener line so it starts at depth one: a
-/// lone `]` deeper inside the branch (a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer) is then told
-/// apart from the guard's own matching closer by depth alone, rather than by line text -- the marker-based
-/// extent this replaces treated any bare `]` line as the guard's end, following both branches once one
-/// closed early and leaking the markers and the truncated tail as prose.
+/// `depth` and `open` are what the file has open before the guard's opener line, so that a line's depth
+/// below them is the guard's own bracket balance, one once its opener line is past: a lone `]` deeper inside
+/// the branch (a `#block[...]`/`#align(..)[...]`/`#quote[...]` closer) is then told apart from the guard's
+/// own matching closer by depth alone, rather than by line text -- the marker-based extent this replaces
+/// treated any bare `]` line as the guard's end, following both branches once one closed early and leaking
+/// the markers and the truncated tail as prose.
 ///
 /// A taken branch is a content block, so its `#set` rules govern it, from the rule down, and the files it
 /// includes, as Typst scopes them. `marks` holds each such rule's place in the blocks and its text, and
@@ -1781,7 +1783,8 @@ struct GuardFrame {
 	live:		bool,
 	then_taken:	bool,
 	in_else:	bool,
-	state:		lang::lex::Lexer,
+	depth:		usize,	// the groups the file has open before the guard's opener line
+	open:		usize,	// and everything it has open there
 	marks:		Vec<(usize, String)>,	// each `#set` of the branch taken: the block it governs from, and its text
 }
 
@@ -1909,10 +1912,12 @@ fn assemble_into(
 	// A guard, an `#include` or a part page is read only where it stands at the file's top level, or directly
 	// in an open guard's branch: one in a bracketed body is the body's, gathered for the reader with it, so a
 	// callout holding an `#include` is read whole and the include is refused where it stands.
-	let live = lang::lex::live_text(src);
-	let top: HashSet<usize> = lang::lex::top_level_lines(src).into_iter().map(|(at, _)| at).collect();
-	// A guard's own lexer reads a `$` whose maths never closes as a character, as every scan of the file does.
-	let lone = lang::lex::lone_dollars(src);
+	let lx	= lang::lex::Lexer::markup(src);
+	let live = lx.live_text();
+	let top: HashSet<usize> = lx.lines(src).into_iter()
+		.filter(|&(_, _, place)| place == lang::lex::Place::Top).map(|(at, _, _)| at).collect();
+	// A `$` whose maths never closes is read as a character, as every scan of the file does.
+	let lone = lx.lone().to_vec();
 	for (raw, raw_live) in src.split_inclusive('\n').zip(live.split_inclusive('\n')) {
 		let start = byte;
 		byte = byte.saturating_add(raw.len() as u32);
@@ -1929,11 +1934,11 @@ fn assemble_into(
 		// The innermost open guard's own bracket depth (`None` with no guard open at all). Seeded from the
 		// opener line at one, this is what tells the guard's own matching closer apart from a `]` deeper
 		// inside its branch -- see [`GuardFrame`].
-		let guard_depth = guards.last().map(|g| g.state.depth());
+		let guard_depth = guards.last().map(|g| lx.depth_at(start as usize).saturating_sub(g.depth));
 		// A line in a guard's branch is read only with no list item, heading, strong or emphasis open around it
 		// there, as at the file's own level: one inside such a scope is that scope's, gathered with it.
 		let structural	= match guards.last() {
-			Some(g)	=> g.state.depth() == 1 && g.state.bare_line(line),
+			Some(g)	=> lx.depth_at(start as usize).saturating_sub(g.depth) == 1 && lx.bare_line_at(start as usize),
 			None	=> top.contains(&(start as usize)),
 		};
 
@@ -1976,9 +1981,8 @@ fn assemble_into(
 		});
 		if let Some((live, then_taken)) = opened {
 			res!(flush_inline(&mut buf, blocks, got, &label, binds));
-			let mut state = lang::lex::Lexer::markup().with_lone(lone.clone());
-			state.feed_line_at(marker, start as usize + (line.len() - t.len()));
-			guards.push(GuardFrame { live, then_taken, in_else: false, state, marks: Vec::new() });
+			let (depth, open) = (lx.depth_at(start as usize), lx.open_at(start as usize));
+			guards.push(GuardFrame { live, then_taken, in_else: false, depth, open, marks: Vec::new() });
 			continue;
 		}
 		// Any other line while a guard is open: fold its own brackets into the innermost guard's state,
@@ -1989,8 +1993,7 @@ fn assemble_into(
 		// it is reported rather than left to leak whatever follows as prose, and the line, the guard's own
 		// structural end, is consumed here rather than falling through to the buffer below.
 		if let Some(top) = guards.last_mut() {
-			top.state.feed_line_at(line, start as usize);
-			if !top.state.is_open() {
+			if lx.open_at(byte as usize) <= top.open {
 				res!(flush_inline(&mut buf, blocks, got, &label, binds));
 				if let Some(frame) = guards.pop() {
 					close_branch(frame.marks, blocks);

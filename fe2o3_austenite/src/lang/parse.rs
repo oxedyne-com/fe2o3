@@ -375,7 +375,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// A multi-line Typst code statement or standalone template call being skipped: the lexer's state across
 	// the lines consumed so far. `None` when not skipping. While it is `Some`, every line is consumed and
 	// nothing is set until the construct ends.
-	let mut skip:		Option<(Lexer, Span, String)>	= None;	// with its opening line and its name
+	let mut skip:		Option<(usize, Span, String)>	= None;	// what was open before it opened, with its opening line and its name
 
 	// A multi-line construct whose whole text is gathered so it can be parsed rather than skipped: a
 	// `#figure(...)`, a bare `#table(...)`, or a `#let name = (...)` data array feeding a table. `None`
@@ -390,10 +390,11 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 	// What each byte of the source is, read once over the whole source as Typst's lexer reads it: a `/*`
 	// in a link or raw text opens no comment, and one in a quoted phrase does, since a quote in markup is a
 	// character; raw text runs across lines until a run of backticks as long as its opener.
-	let toks	= lex::byte_toks(src);
+	let scan	= Lexer::markup(src);
+	let toks	= scan.byte_toks();
 	// Where each line stands -- the file's own level, a bare content block, a list item, strong or emphasis,
 	// or in code -- so a rule or an include the reader meets is held to the place it is read at.
-	let placed	= lex::placed_lines(src);
+	let placed	= scan.lines(src);
 	// Each `$` whose maths never closes, which the lexer read as a character: every line below writes it
 	// `\$`, so each reader after the lexer -- a gathered construct's own, a paragraph's maths, the inline
 	// reader -- reads it as a character too, and it is recorded, once, as the loop reaches its line.
@@ -439,14 +440,15 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		}
 
 		let trimmed = line.trim_start();
+		// Whether what opens on this line is still open at its end, as the file reads it.
+		let open_here = scan.open_at(offset as usize) > scan.open_at(start as usize);
 
 		// A multi-line code statement or standalone call is being skipped: keep consuming lines, tracking
 		// bracket nesting across `()`, `[]` and `{}` and respecting string literals, until the delimiters
 		// balance. Nothing between the opener and its close is set. This takes precedence over every other
 		// rule, since the span is code, not markup.
-		if let Some((state, at, name)) = skip.as_mut() {
-			state.feed_line(line);
-			if !state.is_open() {
+		if let Some((base, at, name)) = skip.as_ref() {
+			if scan.open_at(offset as usize) <= *base {
 				skips.record(name, *at);
 				skip = None;
 			}
@@ -459,8 +461,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 		if let Some(cap) = capture.as_mut() {
 			cap.buf.push_str(line);
 			cap.buf.push('\n');
-			cap.state.feed_line(line);
-			if !cap.state.is_open() {
+			if scan.open_at(offset as usize) <= cap.base {
 				let done = capture.take();
 				if let Some(cap) = done {
 					res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));
@@ -528,7 +529,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 				top.saw_blank = true;
 			}
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
-		} else if let Some(kind) = capture_opener(trimmed, binds)
+		} else if let Some(kind) = capture_opener(trimmed, binds, open_here)
 			.filter(|k| !(matches!(k, CaptureKind::ContentCall(_) | CaptureKind::Bare) && !lines.is_empty()))
 		{
 			// A standalone content-binding reference mid-paragraph joins the paragraph inline rather than
@@ -549,14 +550,12 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			// at the top of the loop until the delimiters balance, and parsed by [`dispatch_capture`].
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
-			let mut state	= Lexer::markup();
-			state.feed_line(line);
 			let mut buf		= String::new();
 			buf.push_str(line);
 			buf.push('\n');
 			let place = lex::place_in(&placed, start as usize).unwrap_or(lex::Place::Content);
-			let cap = Capture { kind, buf, state, start, place };
-			if !cap.state.is_open() {
+			let cap = Capture { kind, buf, base: scan.open_at(start as usize), start, place };
+			if !open_here {
 				res!(dispatch_capture(cap, &mut items, &mut arrays, &mut skips, binds));	// the whole construct closed on one line
 			} else {
 				capture = Some(cap);
@@ -577,7 +576,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			flush_para(&mut items, &mut lines, para_start, para_end, &mut skips, binds);
 			flush_list(&mut items, &mut stack);
 			items.push(Item::PrintGlossary { span: Span::new(start, end) });
-		} else if let Some(decision) = code_skip(trimmed) {
+		} else if let Some(decision) = code_skip_with(trimmed, open_here) {
 			// A Typst code statement (`#import`, `#let`, `#set`, `#show`) or a line-leading standalone call
 			// to a template function Austenite does not yet run: it closes any open block and is skipped.
 			// The styling and computation layer is a later increment; the prose around it still sets. When
@@ -601,7 +600,7 @@ fn parse_items(src: &str, binds: crate::lang::rules::Bindings<'_, '_>)
 			let at		= Span::new(start, end);
 			match decision {
 				CodeSkip::Line			=> skips.record(&name, at),
-				CodeSkip::Multi(state)	=> skip = Some((state, at, name)),
+				CodeSkip::Multi			=> skip = Some((scan.open_at(start as usize), at, name)),
 			}
 		} else if lines.is_empty() && is_code_reference(trimmed) && !names_scalar_alone(trimmed, binds.sfns) {
 			// A line-leading code-mode reference the reader cannot run -- a bare `#name` bound to nothing, a
@@ -1470,7 +1469,7 @@ fn at_lit(chars: &[char], i: usize, s: &str) -> Option<usize> {
 /// What to do with a line-leading Typst code statement or standalone template call.
 enum CodeSkip {
 	Line,				// the call closes on this line; skip the one line, as before
-	Multi(Lexer),		// the construct is still open; begin a multi-line skip carrying the lexer
+	Multi,				// the construct is still open; begin a multi-line skip
 }
 
 /// If this already-left-trimmed line begins a Typst code statement Austenite skips for now, decides how
@@ -1482,15 +1481,19 @@ enum CodeSkip {
 /// (`#name(` or `#name[`) is skipped only as a whole -- either it closes on the line, or it opens a
 /// multi-line span. A balanced `#name[...]` with prose trailing it (`#index-main[x]More prose...`) is
 /// left to set, since its content is a marker within a real paragraph, not a standalone call.
+#[cfg(test)]
 fn code_skip(trimmed: &str) -> Option<CodeSkip> {
+	code_skip_with(trimmed, lex::open_after(trimmed))
+}
+
+/// As [`code_skip`], for a line `open` says the file leaves a construct open at the end of.
+fn code_skip_with(trimmed: &str, open: bool) -> Option<CodeSkip> {
 	let keyword	= code_keyword(trimmed);
 	if !keyword && !opens_standalone_call(trimmed) {
 		return None;
 	}
-	let mut state = Lexer::markup();
-	state.feed_line(trimmed);
-	if state.is_open() {
-		return Some(CodeSkip::Multi(state));
+	if open {
+		return Some(CodeSkip::Multi);
 	}
 	// The delimiters balance on this line. A block statement is skipped whatever trails it; a standalone
 	// call is skipped only when it truly ends with its own closer, so a marker inside a paragraph sets.
@@ -2069,29 +2072,9 @@ fn resolve_term(key: &str, func: &str, span: Span, skips: &mut Refusals) -> Stri
 /// unbalanced in caption prose is literal, and the group still closes at its own delimiter. `None` when
 /// the group never closes, so a malformed call is left as ordinary text.
 pub(crate) fn read_group(chars: &[char], i: usize) -> Option<(String, usize)> {
-	if !matches!(chars.get(i), Some('[') | Some('(') | Some('{')) {
-		return None;
-	}
-	let mut state	= Lexer::code();
-	let mut inner	= String::new();
-	// The opener pushes its frame (`[` a content block, `(` a code group) but is not part of the inner
-	// content, so it is stepped over here and never appended.
-	let mut j = i + state.step(chars, i).0;
-	while j < chars.len() {
-		let consumed = state.step(chars, j).0;
-		if !state.is_open() {
-			// This character closed the outer group -- the matching closer -- so the group ends just past
-			// it, and the closer is dropped from the inner as the outer opener was.
-			return Some((inner, j + consumed));
-		}
-		// Every other character is inner content, verbatim: a nested opener or closer, a string with its
-		// quotes, a maths span, or a `#name(` run in content mode.
-		for k in j..j + consumed {
-			inner.push(chars[k]);
-		}
-		j += consumed;
-	}
-	None
+	// The opener and the closer are not part of the inner content.
+	let end = lex::group_end_chars(chars, i)?;
+	Some((chars[i + 1..end - 1].iter().collect(), end))
 }
 
 /// Strips a `"..."` wrapper from a paren-string argument, so `#gs("surplus")` reads the same term as
@@ -2378,7 +2361,7 @@ fn statement_in(markup: &str) -> Option<&'static str> {
 struct Capture {
 	kind:	CaptureKind,
 	buf:	String,
-	state:	Lexer,
+	base:	usize,	// what was open before the construct opened
 	start:	u32,	// byte offset of the construct's opening line, for a `#columns` refusal's span
 	place:	lex::Place,	// where that line stands in the source being read
 }
@@ -2421,7 +2404,7 @@ enum BuiltinKind {
 /// Detects the opener of a multi-line construct the reader parses rather than skips: a `#figure(`, a
 /// bare `#table(`, or a `#let name = (` data array. `None` for any other line, which the caller then
 /// offers to [`code_skip`].
-fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) -> Option<CaptureKind> {
+fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>, open: bool) -> Option<CaptureKind> {
 	// A call to a bound `#let` furniture function -- `#pr-note[ ... ]`, `#aside-box(title: [..])[ ... ]` --
 	// is expanded rather than skipped. Recognised before the generic openers so a furniture name never
 	// collides with one of them (none of the corpus names does), and only when the map holds it, so an
@@ -2455,9 +2438,7 @@ fn capture_opener(trimmed: &str, binds: crate::lang::rules::Bindings<'_, '_>) ->
 	// is NOT own-line, so it falls through to the existing visible refusal, which keeps that trailing prose;
 	// inline mid-prose support is a later unit.
 	if let Some(kind) = builtin_opener(trimmed) {
-		let mut state = Lexer::markup();
-		state.feed_line(trimmed);
-		if state.is_open() || trimmed.trim_end().ends_with(')') {
+		if open || trimmed.trim_end().ends_with(')') {
 			return Some(CaptureKind::Builtin(kind));
 		}
 	}
@@ -4423,53 +4404,19 @@ pub(crate) fn first_string(text: &str) -> Option<String> {
 /// [`lex::args`] reads it: it leaves a space in code and nothing in markup, so a comma, a name or a value in
 /// one is no part of an argument.
 pub(crate) fn split_top_args(inner: &str) -> Vec<String> {
-	let chars:	Vec<char>	= inner.chars().collect();
-	let mut args:	Vec<String>	= Vec::new();
-	let mut cur					= String::new();
-	let mut state				= Lexer::code();
-	let mut i					= 0;
-	while i < chars.len() {
-		// A comma parts the arguments only at the top level; inside any frame -- a nested group, a string,
-		// a maths span or a content block -- it is literal and joins the current argument.
-		if !state.is_open() && chars[i] == ',' {
-			args.push(std::mem::take(&mut cur));
-			i += 1;
-			continue;
-		}
-		let (consumed, _, kept) = state.arg_step(&chars, i);
-		match kept {
-			lex::Kept::Text		=> cur.extend(&chars[i..i + consumed]),
-			lex::Kept::Space	=> cur.push(' '),
-			lex::Kept::Nothing	=> {},
-		}
-		i += consumed;
-	}
-	if !cur.trim().is_empty() {
-		args.push(cur);
-	}
-	args
+	lex::split_args(inner)
 }
 
 /// Splits a `key: value` argument at its top-level colon, returning the key and the trimmed value, or
 /// `None` when there is no top-level colon or the key is not a bare identifier -- so a positional cell
-/// or a spread is not mistaken for a named argument.
+/// or a spread is not mistaken for a named argument. A colon names the argument only at the top level;
+/// inside any group it is part of the value (an alignment `align: (col, row) => ...`, a ratio in a
+/// caption, a dictionary key in code).
 pub(crate) fn named_arg(arg: &str) -> Option<(String, String)> {
-	let chars:	Vec<char>	= arg.chars().collect();
-	let mut state			= Lexer::code();
-	let mut i				= 0;
-	while i < chars.len() {
-		// A colon names the argument only at the top level; inside any frame it is part of the value (an
-		// alignment `align: (col, row) => ...`, a ratio in a caption, a dictionary key in code).
-		if !state.is_open() && chars[i] == ':' {
-			let key: String = chars[..i].iter().collect();
-			let key = key.trim().to_string();
-			if !key.is_empty() && key.chars().all(is_call_ident) {
-				let val: String = chars[i + 1..].iter().collect();
-				return Some((key, val.trim().to_string()));
-			}
-			return None;
-		}
-		i += state.step(&chars, i).0;
+	let at	= lex::top_colon(arg)?;
+	let key	= arg[..at].trim();
+	if !key.is_empty() && key.chars().all(is_call_ident) {
+		return Some((key.to_string(), arg[at + 1..].trim().to_string()));
 	}
 	None
 }
@@ -6146,11 +6093,9 @@ bound\".\n";
 	/// A block raw closes only on a run of backticks as long as its opener, as Typst lexes one.
 	#[test]
 	fn a_raw_block_closes_on_its_own_length() {
-		let mut state = Lexer::markup();
-		state.feed("````\n```\n#set text(size: 30pt)\n```\n");
-		assert!(state.is_open(), "a shorter run inside a four-backtick block is its text");
-		state.feed("````\n");
-		assert!(!state.is_open(), "the matching run closes it");
+		let open = "````\n```\n#set text(size: 30pt)\n```\n";
+		assert!(lex::open_after(open), "a shorter run inside a four-backtick block is its text");
+		assert!(!lex::open_after(&fmt!("{}````\n", open)), "the matching run closes it");
 	}
 
 	/// A `#set document` is applied from a file's own top level alone: one re-read from a container's body
