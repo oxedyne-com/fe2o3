@@ -1,0 +1,10 @@
+// oracle: levels 2 4
+#set page(width: 220pt, height: 260pt, margin: 20pt)
+#set page(numbering: "i", number-align: bottom + center, fill: rgb("#fafaf0"), background: place(top + right, rect(width: 10pt, height: 10pt, fill: red)), foreground: none, binding: left, margin: (inside: 30pt, outside: 20pt, top: 25pt, bottom: 25pt))
+#lorem(60)
+#pagebreak(to: "odd")
+#set page(numbering: "1", columns: 2)
+#counter(page).update(1)
+#lorem(120)
+#colbreak()
+#lorem(10)

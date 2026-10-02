@@ -155,18 +155,24 @@ pub fn local_key(k: ElemKind) -> Option<&'static str> {
 	}
 }
 
-pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
-	let span = elem.span();
-	let numbering = res!(common::get(elem, styles, "numbering"));
-	let body = common::body(elem, "body");
-	let kind = match res!(common::get(elem, styles, "kind")) {
+/// The figure's kind: the one given, else the first figurable element of the body (an image when it has none).
+pub fn resolved_kind(elem: &Content, styles: &StyleChain) -> Outcome<Value> {
+	Ok(match res!(common::get(elem, styles, "kind")) {
 		Value::Auto => {
+			let body = common::body(elem, "body");
 			let found = common::find_first(&body, |c| c.kind().map(figurable).unwrap_or(false));
 			let k = found.and_then(|c| c.kind()).unwrap_or(ElemKind::Image);
 			Value::Func(Func::Element(k))
 		}
 		other => other,
-	};
+	})
+}
+
+pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
+	let span = elem.span();
+	let numbering = res!(common::get(elem, styles, "numbering"));
+	let body = common::body(elem, "body");
+	let kind = res!(resolved_kind(elem, styles));
 	let kind_elem = match &kind {
 		Value::Func(f)	=> f.element(),
 		_				=> None,

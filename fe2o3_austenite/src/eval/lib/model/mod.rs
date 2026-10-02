@@ -298,6 +298,23 @@ pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) 
 	}
 }
 
+/// [`content::derived_field`] for a model element: a heading's `level`, a figure's `kind`.
+pub fn derived_field(elem: &Content, field: FieldId, styles: &StyleChain) -> Outcome<Option<Value>> {
+	let kind = match elem.kind() {
+		Some(k)	=> k,
+		None	=> return Ok(None),
+	};
+	let name = match kind.field_spec(field) {
+		Some(spec)	=> spec.name,
+		None		=> return Ok(None),
+	};
+	match (kind, name) {
+		(ElemKind::Heading, "level")	=> Ok(Some(Value::Int(res!(heading::level(elem, styles))))),
+		(ElemKind::Figure, "kind")		=> Ok(Some(res!(figure::resolved_kind(elem, styles)))),
+		_								=> Ok(None),
+	}
+}
+
 /// Typst's `ShowSet`: the styles an element's own default applies to it and its show-rule output,
 /// visible inside a user's `show` rule for it (a heading's size and weight).
 pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {

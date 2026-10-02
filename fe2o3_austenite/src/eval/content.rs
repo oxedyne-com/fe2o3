@@ -808,6 +808,22 @@ pub fn show_set(elem: &Content, styles: &StyleChain) -> Outcome<Styles> {
 	}
 }
 
+/// The value an `auto` field has once the element is prepared, worked out from the element and its styles
+/// without preparing it: a heading's level, a figure's kind. `None` where synthesis leaves the field as it is.
+/// A selector reads a field through this, so a rule for `heading.where(level: 1)` matches the heading `=`
+/// makes, whose level is its depth plus the offset in force, before realisation has synthesised it.
+pub fn derived_field(elem: &Content, field: FieldId, styles: &StyleChain) -> Outcome<Option<Value>> {
+	let family = match elem.kind() {
+		Some(k)	=> k.family(),
+		None	=> return Ok(None),
+	};
+	match family {
+		Family::Model	=> lib::model::derived_field(elem, field, styles),
+		Family::Text | Family::Layout | Family::Grid | Family::Visual | Family::Math
+			| Family::Intro | Family::Realise	=> Ok(None),
+	}
+}
+
 /// Fills an element's synthesised fields once its styles are known, Typst's `Synthesize`: a heading's
 /// resolved numbering, a figure's kind and supplement. A family with such fields gains an arm here.
 pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {

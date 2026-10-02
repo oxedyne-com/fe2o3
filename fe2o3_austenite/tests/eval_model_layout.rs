@@ -3,7 +3,8 @@
 //! a footnote's number, a reference's target and what a block, a list item or a cell holds when it is laid out
 //! again are the converged ones).
 //!
-//! The fixtures live in the areas below, one theme to an area. Each must pass level 4 in full: a fixture that
+//! The fixtures live in the areas below, one theme to an area (`book` holds the idioms a book's template and
+//! front matter use: show rules selected by field, running heads, counters, outlines, quotes, notes). Each must pass level 4 in full: a fixture that
 //! is not yet right is not kept here, it is an `unsupported` warning in the sweep (`eval_model_sweep`) until it
 //! is. A fixture marked `oracle: rejects` must fail with Typst's first error, message and position. The suite
 //! fails when fewer than `MIN_COMPARED` fixtures were compared or `MIN_REJECTED` rejected, so a harness that
@@ -24,8 +25,8 @@ use harness::Verdict;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs", "locate"];
-const MIN_COMPARED:		usize	= 55;
+const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs", "locate", "book"];
+const MIN_COMPARED:		usize	= 90;
 const MIN_REJECTED:		usize	= 3;
 
 #[test]

@@ -5,6 +5,7 @@
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::content::{
+	self,
 	Content,
 	ElemKind,
 	FieldId,
@@ -44,7 +45,7 @@ pub enum Selector {
 
 impl Selector {
 	/// Does the element match? A `where` field is compared with the element's own value, else the
-	/// chain's (or the schema default without a chain), as Typst does. Text and regex selectors match
+	/// chain's (or the schema default without a chain), else the value synthesis gives an `auto` one, as Typst does. Text and regex selectors match
 	/// text runs, which `realise.rs` handles, and `before`/`after` only filter a query; here none of
 	/// them matches an element.
 	pub fn matches(&self, elem: &Content, styles: Option<&StyleChain>) -> Outcome<bool> {
@@ -60,7 +61,16 @@ impl Selector {
 				let root = StyleChain::root();
 				let chain = styles.unwrap_or(&root);
 				for (id, want) in fields {
-					match res!(chain.resolve(elem, *id)) {
+					// A field that only synthesis fills in reads as it will once the element is prepared,
+					// so a rule written for it matches the element before realisation has met it.
+					let have = match res!(chain.resolve(elem, *id)) {
+						Some(Value::Auto)	=> match res!(content::derived_field(elem, *id, chain)) {
+							Some(v)	=> Some(v),
+							None	=> Some(Value::Auto),
+						},
+						other				=> other,
+					};
+					match have {
 						Some(have) if ops::equal(&have, want)	=> (),
 						_										=> return Ok(false),
 					}
