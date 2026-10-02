@@ -27,7 +27,7 @@ use oxedyne_fe2o3_core::prelude::*;
 
 const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs", "locate", "book"];
 const VALUE_AREAS:		&[&str]	= &["book"];	// areas whose level-1 values are held as well as the layout
-const MIN_COMPARED:		usize	= 95;
+const MIN_COMPARED:		usize	= 97;
 const MIN_REJECTED:		usize	= 4;
 
 #[test]

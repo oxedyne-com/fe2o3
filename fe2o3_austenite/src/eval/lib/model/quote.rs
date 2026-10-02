@@ -153,9 +153,11 @@ pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 				("weak", Value::Bool(true)),
 			]));
 			let attr = res!(attribution_content(&attribution, span));
+			// The block carries the alignment as a style, as Typst's `BlockElem::aligned` does, so its lines
+			// are set against the end whatever width the block takes.
 			let end = Value::Alignment(Alignment { x: Some(HAlign::End), y: None });
-			let aligned = res!(common::build(engine, ElemKind::Align, span, vec![end, Value::Content(attr)], Vec::new()));
-			let attr_block = res!(common::block(engine, aligned, span, Vec::new()));
+			let attr_block = res!(common::block(engine, attr, span, Vec::new()));
+			let attr_block = res!(common::set(attr_block, ElemKind::Align, "alignment", end));
 			realised = common::seq(vec![realised, gap, attr_block]);
 		}
 		realised = res!(common::build(engine, ElemKind::Pad, span, vec![Value::Content(realised)], Vec::new()));
