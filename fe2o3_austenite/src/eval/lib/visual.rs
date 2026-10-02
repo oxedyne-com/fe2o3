@@ -761,6 +761,8 @@ pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcom
 				field:	id,
 				value:	Value::Bool(true),
 				span:	elem.span(),
+				liftable: false,
+				outside: false,
 			}));
 			let _ = engine;
 			Ok(Some(body.styled(styles)))

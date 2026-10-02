@@ -713,6 +713,14 @@ impl State<'_> {
 				_ => (),
 			}
 		}
+		// Outside a container or show rule's output, the styles may be lifted to the page level.
+		let marked;
+		let local = if self.outside {
+			marked = local.outside();
+			&marked
+		} else {
+			local
+		};
 		if pagebreak {
 			// The leading break takes the styles up to and including the last page property only.
 			let last = local.as_slice().iter().rposition(|s| matches!(s, Style::Property(p) if p.elem == ElemKind::Page));
