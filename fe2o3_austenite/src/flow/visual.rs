@@ -10,9 +10,8 @@
 // lowered to IR: ink becomes one `Graphic` leaf, a laid-out body stays as nodes, and the two are overlaid
 // in a vertical box whose layers back up over one another with negative glue.
 //
-// Two interim lowerings stand until U6b makes `TransformNode` and `ClipNode` `Node` variants
-// (`wrap_transform`, `wrap_clip` are the only places that change): transformed content is baked to ink
-// (text to glyph outlines), and a clip is dropped (a raster's cover crop is done on its pixels instead).
+// A transformed or clipped frame lowers to a `Node::Transform` or `Node::Clip` holding its material, which the
+// driver places as a group; a raster's cover crop is still done on its pixels.
 //
 // An infinite region extent is `Sp(i32::MAX)` (anything from 2^30 up reads as infinite).
 
@@ -1340,6 +1339,82 @@ fn segmented_rect(size: P2, radius: &[Relative; 4], fs: f64, fill: Option<Paint>
 	res
 }
 
+/// The per-side strokes of a container's `stroke` field: a side with none, or a field that is `none` or `auto`, is
+/// unstroked.
+pub fn side_strokes(stroke: Option<Value>, fs: f64) -> Outcome<[Option<FixedStroke>; 4]> {
+	let mut out: [Option<FixedStroke>; 4] = [None, None, None, None];
+	match stroke {
+		None | Some(Value::None) | Some(Value::Auto)	=> (),
+		Some(v) => {
+			let v = res!(vis::cast_stroke_sides(v));
+			let parts = vis::sides_of(&v);
+			for k in 0..4 {
+				if let Some(Value::Stroke(s)) = &parts[k] {
+					out[k] = Some(fix_stroke(s, fs));
+				}
+			}
+		},
+	}
+	Ok(out)
+}
+
+/// Typst's `clip_rect`: the path a clipping container cuts its contents to, in the container's own frame. It
+/// is the container's rectangle grown by its `outset`, with the corners rounded by `radius`, and drawn at the
+/// inner edge of the stroke, so a stroke is never clipped away and nothing shows outside it. `outset` is
+/// `[left, top, right, bottom]` in points.
+pub fn clip_path(
+	w:			f64,
+	h:			f64,
+	fs:			f64,
+	radius:		Option<Value>,
+	stroke:		Option<Value>,
+	outset:		[f64; 4],
+)
+	-> Outcome<Path>
+{
+	let strokes	= res!(side_strokes(stroke, fs));
+	let mut rel = [Relative::default(); 4];
+	if let Some(v) = radius {
+		let v = res!(vis::cast_corners_rel(v));
+		for (k, c) in vis::corners_of(&v).iter().enumerate() {
+			if let Some(x) = c {
+				rel[k] = res!(vis::cast_rel(x.clone()));
+			}
+		}
+	}
+	let size		= P2::new(w + outset[0] + outset[2], h + outset[1] + outset[3]);
+	let widths		= strokes.clone().map(|s| s.map(|s| s.thickness / 2.0));
+	let base		= size.x.abs().min(size.y.abs()) / 2.0;
+	let corner_max	= [
+		base + opt_min(widths[0], widths[1]).unwrap_or(0.0),
+		base + opt_min(widths[1], widths[2]).unwrap_or(0.0),
+		base + opt_min(widths[2], widths[3]).unwrap_or(0.0),
+		base + opt_min(widths[3], widths[0]).unwrap_or(0.0),
+	];
+	let mut rad = [0.0f64; 4];
+	for k in 0..4 {
+		rad[k] = rel_to(rel[k], corner_max[k] * 2.0, fs).min(corner_max[k]);
+	}
+	let corners	= corners_control_points(size, &rad, &strokes, &widths);
+	let mut curve = Curve::new();
+	let first = &corners[Corner::TopLeft.idx()];
+	if first.arc_inner() {
+		curve.arc_move(first.start_inner(), first.center_inner(), first.end_inner());
+	} else {
+		curve.move_(first.center_inner());
+	}
+	for corner in [Corner::TopRight, Corner::BottomRight, Corner::BottomLeft] {
+		let c = &corners[corner.idx()];
+		if c.arc_inner() {
+			curve.arc_line(c.start_inner(), c.center_inner(), c.end_inner());
+		} else {
+			curve.line(c.center_inner());
+		}
+	}
+	curve.close();
+	curve.to_path(P2::new(-outset[0], -outset[1]))
+}
+
 fn curve_segment(start: Corner, end: Corner, corners: &[ControlPoints; 4], curve: &mut Curve) {
 	let c = &corners[start.idx()];
 	if start == end || !c.arc() {
@@ -1959,32 +2034,14 @@ fn collect_layers(engine: &mut Engine, frame: &Frame, at: P2, layers: &mut Vec<L
 	Ok(())
 }
 
-/// Transformed material as a node. Until U6b makes `TransformNode` a `Node` variant, the material is baked
-/// to ink under the transform: text becomes glyph outlines, rules and graphics are carried over, and a
-/// raster keeps its axis alignment (a rotated or skewed raster is refused).
-pub fn wrap_transform(engine: &mut Engine, t: TransformNode, span: Span) -> Outcome<Node> {
-	let mut ops = Vec::new();
-	let mut y = Sp::ZERO;
-	for n in &t.list {
-		res!(bake_node(n, Sp::ZERO, y, &mut ops, engine, span));
-		y += n.vextent();
-	}
-	let gt = GTransform {
-		a: t.transform.a as f32, b: t.transform.b as f32, c: t.transform.c as f32,
-		d: t.transform.d as f32, e: t.transform.e as f32, f: t.transform.f as f32,
-	};
-	let mut out = Vec::with_capacity(ops.len());
-	for op in &ops {
-		out.push(res!(op_transform(op, &gt, span, engine)));
-	}
-	Ok(Node::Leaf(Leaf::graphic(Graphic::new(out, t.dims))))
+/// Transformed material as a node: the transform node itself, which the driver places as a group.
+pub fn wrap_transform(_engine: &mut Engine, t: TransformNode, _span: Span) -> Outcome<Node> {
+	Ok(Node::Transform(t))
 }
 
-/// Clipped material as a node. Until U6b makes `ClipNode` a `Node` variant the clip is not applied; the
-/// one clip visual elements make, a covering image's, crops a raster's pixels instead and so never
-/// reaches here, leaving only a covering SVG drawn unclipped.
+/// Clipped material as a node: the clip node itself, which the driver places as a clipping group.
 pub fn wrap_clip(c: ClipNode) -> Outcome<Node> {
-	Ok(Node::VBox(BoxNode::new(c.list, c.dims)))
+	Ok(Node::Clip(c))
 }
 
 fn op_transform(op: &DrawOp, t: &GTransform, span: Span, engine: &mut Engine) -> Outcome<DrawOp> {
@@ -2006,78 +2063,6 @@ fn op_transform(op: &DrawOp, t: &GTransform, span: Span, engine: &mut Engine) ->
 			DrawOp::Image { image: image.clone(), x: p0.x, y: p0.y, w: p1.x - p0.x, h: p1.y - p0.y }
 		},
 	})
-}
-
-// Bakes a node's ink at (x, y), its top-left, reading the box vocabulary as TeX does: a vertical list
-// stacks from the top, a horizontal list sets its children on a shared baseline `height` below its top.
-fn bake_node(node: &Node, x: Sp, y: Sp, ops: &mut Vec<DrawOp>, engine: &mut Engine, span: Span) -> Outcome<()> {
-	match node {
-		Node::VBox(b) => {
-			let mut yy = y;
-			for c in &b.list {
-				res!(bake_node(c, x, yy, ops, engine, span));
-				yy += c.vextent();
-			}
-		},
-		Node::HBox(b) => {
-			let base	= y + b.dims.height;
-			let mut xx	= x;
-			for c in &b.list {
-				match c {
-					Node::Glue(g) => xx += g.natural,
-					Node::Leaf(l) => {
-						res!(bake_leaf(l, xx, base - l.dims.height + l.shift, ops, engine, span));
-						xx += l.dims.width;
-					},
-					Node::HBox(inner) | Node::VBox(inner) => {
-						res!(bake_node(c, xx, base - inner.dims.height, ops, engine, span));
-						xx += inner.dims.width;
-					},
-					_ => (),
-				}
-			}
-		},
-		Node::Leaf(l) => res!(bake_leaf(l, x, y + l.shift, ops, engine, span)),
-		_ => (),
-	}
-	Ok(())
-}
-
-fn bake_leaf(l: &Leaf, x: Sp, top: Sp, ops: &mut Vec<DrawOp>, engine: &mut Engine, span: Span) -> Outcome<()> {
-	let fx = x.to_pt() as f32;
-	let fy = top.to_pt() as f32;
-	match &l.kind {
-		LeafKind::Rule => {
-			let w = l.dims.width.to_pt() as f32;
-			let h = l.dims.vextent().to_pt() as f32;
-			if w > 0.0 && h > 0.0 {
-				let path = res!(Path::rect(oxedyne_fe2o3_graphics::path::Bounds::new(fx, fy, fx + w, fy + h)));
-				ops.push(DrawOp::Fill { path, colour: Rgba::BLACK });
-			}
-		},
-		LeafKind::Text(shaped) => {
-			let base = fy + l.dims.height.to_pt() as f32;
-			for glyph in &shaped.run().glyphs {
-				let o = res!(shaped.outline(glyph));
-				if o.is_empty() {
-					continue;
-				}
-				let t = GTransform::scale(1.0, -1.0).then(&GTransform::translate(fx + glyph.x, base - glyph.y));
-				ops.push(DrawOp::Fill { path: res!(o.transform(&t)), colour: shaped.colour() });
-			}
-		},
-		LeafKind::Graphic(g) => {
-			let t = GTransform::translate(fx, fy);
-			for op in &g.ops {
-				ops.push(res!(op_transform(op, &t, span, engine)));
-			}
-		},
-		LeafKind::Reserved(..) | LeafKind::Mark(_) => {
-			return Err(engine.error(DiagnosticKind::Unsupported, span,
-				"a reference or footnote mark cannot yet be transformed: the transform node is not wired in"));
-		},
-	}
-	Ok(())
 }
 
 /// A shape's fill and stroke as draw ops at `at`. A stroke is outlined and filled, so caps, joins, dashes

@@ -61,11 +61,7 @@ use crate::ir::{
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_graphics::path::{
-	Path,
-	PathBuilder,
-	Pt,
-};
+use oxedyne_fe2o3_graphics::path::Path;
 
 use std::cell::RefCell;
 use std::collections::{
@@ -2519,8 +2515,53 @@ fn share(fr: f64, total: f64, remaining: f64) -> f64 {
 
 /// An unbreakable block, Typst's `layout_single_block`: sized, inset, filled, stroked and clipped.
 fn layout_single(engine: &mut Engine, spec: &BlockSpec, region: &Regions) -> Outcome<Frame> {
+	let width = res!(spec.sizing("width"));
+	layout_single_sized(engine, spec, region, width)
+}
+
+/// An inline `box` as one frame, Typst's `layout_box`: sized, inset, clipped, filled and stroked as an
+/// unbreakable block is, then its baseline moved. `share` is the width a fractional `width` takes. The
+/// region is the line's: relative sizes resolve against its base.
+pub fn layout_box(engine: &mut Engine, elem: &Content, styles: &StyleChain, region: Region, share: Option<f64>)
+	-> Outcome<Frame>
+{
+	let body = match res!(field(elem, styles, "body")) {
+		Some(Value::Content(c))	=> Body::Content(c),
+		_						=> Body::Empty,
+	};
+	let spec = BlockSpec { elem: elem.clone(), styles: styles.clone(), body, explicit: true };
+	let width = match share {
+		Some(w)	=> Sizing::Rel(Rel::pt(w)),
+		None	=> res!(spec.sizing("width")),
+	};
+	let mut frame = res!(layout_single_sized(engine, &spec, &Regions::from_region(region), width));
+	// The baseline moves after the size and inset are final, so a relative shift reads the final height.
+	let (at, shift) = match res!(field(elem, styles, "baseline")) {
+		Some(Value::Dict(d))	=> (d.get("at").cloned(), d.get("shift").cloned()),
+		Some(v @ Value::Alignment(_))	=> (Some(v), None),
+		Some(Value::Auto) | Some(Value::None) | None	=> (None, None),
+		Some(v)					=> (None, Some(v)),
+	};
+	if let Some(Value::Alignment(a)) = at {
+		let pos = match a.y {
+			Some(VAlign::Top)		=> 0.0,
+			Some(VAlign::Horizon)	=> frame.h / 2.0,
+			Some(VAlign::Bottom)	=> frame.h,
+			None					=> frame.baseline(),
+		};
+		frame.baseline = Some(pos);
+	}
+	if let Some(v) = shift {
+		let by = rel_of(styles, &v).map(|r| r.relative_to(frame.h)).unwrap_or(0.0);
+		if by != 0.0 {
+			frame.baseline = Some(frame.baseline() - by);
+		}
+	}
+	Ok(frame)
+}
+
+fn layout_single_sized(engine: &mut Engine, spec: &BlockSpec, region: &Regions, width: Sizing) -> Outcome<Frame> {
 	let styles	= &spec.styles;
-	let width	= res!(spec.sizing("width"));
 	let height	= res!(spec.sizing("height"));
 	let inset	= sides_rel(styles, res!(spec.field("inset")));
 	let pod		= unbreakable_pod(width, height, &inset, region.w, region.h);
@@ -2857,10 +2898,15 @@ fn decorate(engine: &mut Engine, spec: &BlockSpec, frame: &mut Frame, paint: boo
 	let outset	= res!(spec.field("outset"));
 	if bool_of(res!(spec.field("clip")), false) {
 		let out	= sides_rel(styles, outset.clone());
-		let w	= frame.w + out[0].relative_to(frame.w) + out[2].relative_to(frame.w);
-		let h	= frame.h + out[1].relative_to(frame.h) + out[3].relative_to(frame.h);
-		let radii = corner_radii(styles, radius.clone(), w, h);
-		frame.clip(res!(rounded_rect(w, h, radii)));
+		let outs = [
+			out[0].relative_to(frame.w),
+			out[1].relative_to(frame.h),
+			out[2].relative_to(frame.w),
+			out[3].relative_to(frame.h),
+		];
+		let path = res!(crate::flow::visual::clip_path(frame.w, frame.h, styles.font_size(),
+			radius.clone(), stroke.clone(), outs));
+		frame.clip(path);
 	}
 	if !paint || (fill.is_none() && stroke.is_none()) || res!(vis::is_hidden(styles)) {
 		return Ok(());
@@ -2885,56 +2931,6 @@ fn decorate(engine: &mut Engine, spec: &BlockSpec, frame: &mut Frame, paint: boo
 	Ok(())
 }
 
-/// The corner radii, top-left then clockwise, each capped at half the shorter side.
-fn corner_radii(styles: &StyleChain, v: Option<Value>, w: f64, h: f64) -> [f64; 4] {
-	let max = w.min(h) / 2.0;
-	let parts: [Option<Value>; 4] = match v {
-		None | Some(Value::None) | Some(Value::Auto) => [None, None, None, None],
-		Some(Value::Dict(d)) => {
-			let get		= |k: &str| d.get(k).cloned();
-			let rest	= get("rest");
-			let top		= get("top").or_else(|| rest.clone());
-			let bottom	= get("bottom").or_else(|| rest.clone());
-			let left	= get("left").or_else(|| rest.clone());
-			let right	= get("right").or_else(|| rest.clone());
-			[
-				get("top-left").or_else(|| top.clone()).or_else(|| left.clone()),
-				get("top-right").or_else(|| top.clone()).or_else(|| right.clone()),
-				get("bottom-right").or_else(|| bottom.clone()).or_else(|| right.clone()),
-				get("bottom-left").or_else(|| bottom.clone()).or_else(|| left.clone()),
-			]
-		},
-		Some(other) => [Some(other.clone()), Some(other.clone()), Some(other.clone()), Some(other)],
-	};
-	parts.map(|p| p.and_then(|v| rel_of(styles, &v)).map(|r| r.relative_to(max * 2.0).min(max).max(0.0)).unwrap_or(0.0))
-}
-
-/// A rectangle from the origin with rounded corners, top-left then clockwise.
-fn rounded_rect(w: f64, h: f64, r: [f64; 4]) -> Outcome<Path> {
-	const K: f64 = 0.552_284_749_830_793_4;	// a quarter circle's cubic control distance, per unit radius
-	let p = |x: f64, y: f64| Pt::new(x as f32, y as f32);
-	let mut b = PathBuilder::new();
-	b.move_to(p(r[0], 0.0));
-	b.line_to(p(w - r[1], 0.0));
-	if r[1] > 0.0 {
-		b.cubic_to(p(w - r[1] + K * r[1], 0.0), p(w, r[1] - K * r[1]), p(w, r[1]));
-	}
-	b.line_to(p(w, h - r[2]));
-	if r[2] > 0.0 {
-		b.cubic_to(p(w, h - r[2] + K * r[2]), p(w - r[2] + K * r[2], h), p(w - r[2], h));
-	}
-	b.line_to(p(r[3], h));
-	if r[3] > 0.0 {
-		b.cubic_to(p(r[3] - K * r[3], h), p(0.0, h - r[3] + K * r[3]), p(0.0, h - r[3]));
-	}
-	b.line_to(p(0.0, r[0]));
-	if r[0] > 0.0 {
-		b.cubic_to(p(0.0, r[0] - K * r[0]), p(r[0] - K * r[0], 0.0), p(r[0], 0.0));
-	}
-	b.close();
-	b.finish()
-}
-
 // Layout routines
 
 /// An element Typst shows through a single-region layout routine.
@@ -2949,8 +2945,15 @@ fn layout_single_layouter(
 {
 	match elem.kind() {
 		Some(k) if k.family() == Family::Visual => {
-			let node = res!(crate::flow::visual::layout_visual(engine, elem, styles, sized.region()));
-			Ok(Frame::from_node(node))
+			// A shape or an image with no body of its own has no baseline, as in Typst: its baseline is its
+			// bottom, wherever a later height puts that.
+			let laid = res!(crate::flow::visual::layout_frame(engine, elem, styles, sized.region()));
+			let node = res!(crate::flow::visual::frame_to_node(engine, &laid, elem.span()));
+			let mut frame = Frame::from_node(node);
+			if laid.baseline.is_none() {
+				frame.baseline = None;
+			}
+			Ok(frame)
 		},
 		_ => {
 			let mut frames = res!(layout_multi_layouter(engine, elem, styles, pod));

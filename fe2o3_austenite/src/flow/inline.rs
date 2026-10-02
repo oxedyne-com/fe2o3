@@ -589,12 +589,9 @@ fn layout_inline_box(
 	Ok(frame)
 }
 
-/// Lays out an inline `box`: its body in the box's width (its natural width when `auto`, the share of a
-/// fractional width when `share` is given), shifted by `baseline`. Inline content is set here with this
-/// file's own inline layout; block content through the block flow.
-///
-/// Interim: a box's `height`, `inset`, `outset`, `fill`, `stroke`, `radius` and `clip` are U6b's to
-/// honour, through a `layout_box` of theirs that replaces this one call site.
+/// Lays out an inline `box` as the block flow does an unbreakable block, Typst's `layout_box`: its body in the
+/// box's width (its natural width when `auto`, the share of a fractional width when `share` is given), its
+/// height, `inset`, `outset`, `fill`, `stroke`, `radius` and `clip` applied, its baseline shifted by `baseline`.
 pub fn layout_box(
 	engine:		&mut Engine,
 	elem:		&Content,
@@ -604,66 +601,9 @@ pub fn layout_box(
 )
 	-> Outcome<Frame>
 {
-	let get = |name: &str| -> Outcome<Option<Value>> {
-		match elem.kind().and_then(|k| k.field_id(name)) {
-			Some(id)	=> styles.resolve(elem, id),
-			None		=> Ok(None),
-		}
-	};
-	let size = styles.font_size();
-	let base_w = region.base.0.to_pt();
-	let width = match share {
-		Some(w)	=> Some(w),
-		None	=> match res!(get("width")) {
-			Some(Value::Length(l))		=> Some(l.resolve(size)),
-			Some(Value::Ratio(r))		=> Some(r.0 * base_w),
-			Some(Value::Relative(r))	=> Some(r.rel.0 * base_w + r.abs.resolve(size)),
-			_							=> None,
-		},
-	};
-	let body = match res!(get("body")) {
-		Some(Value::Content(c))	=> c,
-		_						=> Content::empty(),
-	};
-	let pod = Region {
-		width:		Sp::from_pt(width.unwrap_or(region.width.to_pt())),
-		height:		region.height,
-		base:		region.base,
-		expand_x:	width.is_some(),
-		expand_y:	false,
-	};
-	let pairs = res!(crate::eval::realise::realise(engine, &body, styles, crate::eval::realise::RealiseMode::Flow));
-	let inline = pairs.iter().all(|p| p.is_tag() || crate::eval::realise::is_inline(&p.content)
-		|| p.content.is(ElemKind::Space));
-	let mut frame = if pairs.iter().all(|p| p.is_tag()) {
-		Frame::empty(width.unwrap_or(0.0))
-	} else if inline {
-		let lines = res!(crate::flow::par::layout_lines(engine, &pairs, styles, pod, width.is_some()));
-		res!(crate::flow::par::stack_frame(styles, lines))
-	} else {
-		let nodes = res!(crate::flow::layout_block(engine, &body, styles, pod));
-		let mut h = Sp::ZERO;
-		let mut w = Sp::ZERO;
-		for n in &nodes {
-			h += n.vextent();
-			if let Node::HBox(b) | Node::VBox(b) = n {
-				if b.dims.width > w { w = b.dims.width; }
-			}
-		}
-		let wpt = width.unwrap_or(w.to_pt());
-		Frame::new(nodes, wpt, h.to_pt(), h.to_pt())
-	};
-	if let Some(w) = width {
-		frame.width = w;
-	}
-	let shift = match res!(get("baseline")) {
-		Some(Value::Length(l))		=> l.resolve(size),
-		Some(Value::Ratio(r))		=> r.0 * frame.height,
-		Some(Value::Relative(r))	=> r.rel.0 * frame.height + r.abs.resolve(size),
-		_							=> 0.0,
-	};
-	frame.baseline -= shift;
-	Ok(frame)
+	let f = res!(crate::flow::block::layout_box(engine, elem, styles, region, share));
+	let (w, h, base) = (f.w, f.h, f.baseline());
+	Ok(Frame::new(vec![f.into_node()], w, base, h))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
