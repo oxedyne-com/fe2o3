@@ -8,6 +8,7 @@ pub mod block;
 pub mod decorate;
 pub mod grid;
 pub mod inline;
+pub mod lists;
 pub mod math;
 pub mod page;
 pub mod par;

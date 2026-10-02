@@ -40,6 +40,13 @@ impl Sp {
 		Sp((pt * Sp::UNIT as f64).round() as i32)
 	}
 
+	/// Converts a length in points to scaled points, rounding up. A width measured in one pass and given
+	/// back as a region in the next must still hold what it measured, which rounding to the nearest unit
+	/// does not promise: half a unit less is enough to break the last word of an exactly fitted line.
+	pub fn from_pt_up(pt: f64) -> Self {
+		Sp((pt * Sp::UNIT as f64 - 1e-6).ceil() as i32)
+	}
+
 	/// The length in points, for the output boundary only.
 	pub fn to_pt(self) -> f64 {
 		self.0 as f64 / Sp::UNIT as f64

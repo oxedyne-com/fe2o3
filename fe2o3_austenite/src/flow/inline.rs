@@ -1340,7 +1340,8 @@ pub fn commit(engine: &mut Engine, p: &Prep, l: &Line, width: f64, full: f64) ->
 			Placed::Tag(RealiseTag::End(_)) => (),
 		}
 	}
-	let dims = Dims::new(Sp::from_pt(width), Sp::from_pt(top), Sp::from_pt(bottom));
+	// Rounded up, so a region taken from the line's measured width still holds the line.
+	let dims = Dims::new(Sp::from_pt_up(width), Sp::from_pt(top), Sp::from_pt(bottom));
 	Ok(LineBox { node: Node::HBox(BoxNode::new(nodes, dims)), width, top, bottom, text: line_text(l) })
 }
 

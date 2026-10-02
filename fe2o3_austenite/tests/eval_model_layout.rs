@@ -21,8 +21,8 @@ use harness::Verdict;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-const AREAS:			&[&str]	= &["bodies"];
-const MIN_COMPARED:		usize	= 3;
+const AREAS:			&[&str]	= &["bodies", "lists"];
+const MIN_COMPARED:		usize	= 20;
 
 #[test]
 fn model_layout_matches_the_typst_oracle_at_level_4() -> Outcome<()> {

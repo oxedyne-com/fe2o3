@@ -798,7 +798,7 @@ fn find_footnotes(frame: &Frame, y0: f64, out: &mut Vec<(f64, Content)>) {
 
 /// A field's value in force for an element: its own (folded onto the chain's for a folding field), else
 /// the chain's, else the schema default.
-fn field(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Value>> {
+pub(super) fn field(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Value>> {
 	let kind = match elem.kind() {
 		Some(k)	=> k,
 		None	=> return Ok(None),
@@ -810,7 +810,7 @@ fn field(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Valu
 }
 
 /// A field of another element kind, as the chain has it.
-fn chain_field(styles: &StyleChain, kind: ElemKind, name: &str) -> Outcome<Option<Value>> {
+pub(super) fn chain_field(styles: &StyleChain, kind: ElemKind, name: &str) -> Outcome<Option<Value>> {
 	match kind.field_id(name) {
 		Some(id)	=> styles.get(kind, id),
 		None		=> Ok(None),
@@ -818,10 +818,10 @@ fn chain_field(styles: &StyleChain, kind: ElemKind, name: &str) -> Outcome<Optio
 }
 
 /// A length in points, its em part at the font size in force.
-fn abs_of(styles: &StyleChain, l: Length) -> f64 { styles.resolve_length(l) }
+pub(super) fn abs_of(styles: &StyleChain, l: Length) -> f64 { styles.resolve_length(l) }
 
 /// A relative length from any value Typst accepts as one.
-fn rel_of(styles: &StyleChain, v: &Value) -> Option<Rel> {
+pub(super) fn rel_of(styles: &StyleChain, v: &Value) -> Option<Rel> {
 	match v {
 		Value::Length(l)	=> Some(Rel::pt(abs_of(styles, *l))),
 		Value::Ratio(r)		=> Some(Rel { ratio: r.0, abs: 0.0 }),
@@ -857,7 +857,7 @@ fn bool_of(v: Option<Value>, default: bool) -> bool {
 }
 
 /// Is the text direction in force right to left?
-fn rtl(styles: &StyleChain) -> Outcome<bool> {
+pub(super) fn rtl(styles: &StyleChain) -> Outcome<bool> {
 	Ok(matches!(res!(chain_field(styles, ElemKind::Text, "dir")), Some(Value::Direction(Direction::Rtl))))
 }
 
@@ -1228,7 +1228,7 @@ fn collect_pair(
 			"pagebreaks are not allowed inside of containers", "try using a `#colbreak()` instead")),
 		// Shown by Typst as breakable blocks with a layout routine of their own.
 		ElemKind::Pad | ElemKind::Stack | ElemKind::Columns | ElemKind::Grid | ElemKind::Table
-			| ElemKind::Layout | ElemKind::Equation => {
+			| ElemKind::Layout | ElemKind::Equation | ElemKind::List | ElemKind::Enum => {
 			let spec = BlockSpec { elem: c.clone(), styles: styles.clone(), body: Body::Layouter, explicit: false };
 			res!(collect_block(spec, alone, Some(true), out));
 			*par = ParSituation::Other;
@@ -2970,6 +2970,7 @@ fn layout_multi_layouter(engine: &mut Engine, elem: &Content, styles: &StyleChai
 		ElemKind::Stack		=> layout_stack(engine, elem, styles, regions),
 		ElemKind::Columns	=> layout_columns(engine, elem, styles, regions),
 		ElemKind::Layout	=> layout_layout(engine, elem, styles, regions),
+		ElemKind::List | ElemKind::Enum	=> crate::flow::lists::layout(engine, elem, styles, regions),
 		ElemKind::Grid | ElemKind::Table => {
 			let nodes = res!(crate::flow::grid::layout_grid(engine, elem, styles, regions.region()));
 			Ok(split_list(nodes, regions))
@@ -3253,13 +3254,13 @@ fn layout_stack(engine: &mut Engine, elem: &Content, styles: &StyleChain, region
 	Ok(s.finished)
 }
 
-enum StackItem {
+pub(super) enum StackItem {
 	Abs(f64),
 	Fr(f64),
 	Frame(Frame, Align2),
 }
 
-struct Stacker {
+pub(super) struct Stacker {
 	vertical:	bool,
 	positive:	bool,
 	regions:	Regions,
@@ -3274,7 +3275,7 @@ struct Stacker {
 }
 
 impl Stacker {
-	fn new(dir: Direction, mut regions: Regions, span: Span) -> Self {
+	pub(super) fn new(dir: Direction, mut regions: Regions, span: Span) -> Self {
 		let vertical = matches!(dir, Direction::Ttb | Direction::Btt);
 		let expand = (regions.expand_x, regions.expand_y);
 		// Children do not expand along the stacking axis.
@@ -3299,7 +3300,7 @@ impl Stacker {
 		}
 	}
 
-	fn spacing(&mut self, sp: Spacing, _styles: &StyleChain) {
+	pub(super) fn spacing(&mut self, sp: Spacing, _styles: &StyleChain) {
 		match sp {
 			Spacing::Rel(r) => {
 				let base = if self.vertical { self.regions.base().1 } else { self.regions.base().0 };
@@ -3340,6 +3341,24 @@ impl Stacker {
 			_ => res!(alignment(styles)),
 		};
 		let frames = res!(layout_fragment(engine, block, styles, self.regions.clone()));
+		self.fragment(engine, align, frames)
+	}
+
+	/// A child with a layout routine of its own, Typst's `StackLayoutChild::CustomLayouter`: the routine is
+	/// given the regions left and returns the child's frames, which take the alignment in force.
+	pub(super) fn custom<F>(&mut self, engine: &mut Engine, styles: &StyleChain, lay: F) -> Outcome<()>
+		where F: FnOnce(&mut Engine, &Regions) -> Outcome<Vec<Frame>>
+	{
+		if self.regions.is_full() {
+			res!(self.finish_region(engine));
+		}
+		let align = res!(alignment(styles));
+		let frames = res!(lay(engine, &self.regions));
+		self.fragment(engine, align, frames)
+	}
+
+	/// Takes laid out frames, a block's or a custom routine's, into the regions.
+	fn fragment(&mut self, engine: &mut Engine, align: Align2, frames: Vec<Frame>) -> Outcome<()> {
 		let n = frames.len();
 		for (i, frame) in frames.into_iter().enumerate() {
 			let (main, cross) = if self.vertical { (frame.h, frame.w) } else { (frame.w, frame.h) };
@@ -3406,5 +3425,11 @@ impl Stacker {
 		self.fr			= 0.0;
 		self.finished.push(output);
 		Ok(())
+	}
+
+	/// Closes the last region and hands over every region's frame.
+	pub(super) fn finish(mut self, engine: &mut Engine) -> Outcome<Vec<Frame>> {
+		res!(self.finish_region(engine));
+		Ok(self.finished)
 	}
 }

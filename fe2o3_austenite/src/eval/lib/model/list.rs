@@ -36,7 +36,7 @@ use crate::eval::lib::numbering;
 use crate::eval::styles::StyleChain;
 use crate::eval::value::{
 	Alignment,
-	Fraction,
+	Dict,
 	HAlign,
 	Type,
 	Value,
@@ -50,7 +50,7 @@ const ANY:		FieldType = FieldType::Any;
 const BOOL:		FieldType = FieldType::Of(Type::Bool);
 const LENGTH:	FieldType = FieldType::Of(Type::Length);
 
-static LIST: [FieldSpec; 8] = [
+static LIST: [FieldSpec; 9] = [
 	FieldSpec::named("tight",			BOOL,	FieldDefault::Bool(true)),
 	FieldSpec::named("marker",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("indent",			LENGTH,	FieldDefault::Pt(0.0)),
@@ -59,13 +59,14 @@ static LIST: [FieldSpec; 8] = [
 	FieldSpec::named("marker-align",	ANY,	FieldDefault::Computed),
 	FieldSpec::named("children",		ANY,	FieldDefault::EmptyArray).variadic().unsettable(),
 	FieldSpec::named("depth",			ANY,	FieldDefault::Int(0)).internal(),
+	FieldSpec::named("laid",			ANY,	FieldDefault::None).internal(),
 ];
 
 static LIST_ITEM: [FieldSpec; 1] = [
 	FieldSpec::required("body",			ANY),
 ];
 
-static ENUM: [FieldSpec; 11] = [
+static ENUM: [FieldSpec; 12] = [
 	FieldSpec::named("tight",			BOOL,	FieldDefault::Bool(true)),
 	FieldSpec::named("numbering",		ANY,	FieldDefault::Str("1.")),
 	FieldSpec::named("start",			ANY,	FieldDefault::Auto),
@@ -77,6 +78,7 @@ static ENUM: [FieldSpec; 11] = [
 	FieldSpec::named("number-align",	ANY,	FieldDefault::Computed),
 	FieldSpec::named("children",		ANY,	FieldDefault::EmptyArray).variadic().unsettable(),
 	FieldSpec::named("parents",			ANY,	FieldDefault::EmptyArray).internal(),
+	FieldSpec::named("laid",			ANY,	FieldDefault::None).internal(),
 ];
 
 static ENUM_ITEM: [FieldSpec; 2] = [
@@ -244,14 +246,13 @@ pub fn in_list(styles: &StyleChain) -> bool {
 
 pub fn show(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<Option<Content>> {
 	match elem.kind() {
+		// Shown already: flow lays it out with the routine of `flow::lists`.
+		Some(ElemKind::List | ElemKind::Enum) if elem.field("laid").is_some()	=> Ok(None),
 		Some(ElemKind::List)		=> show_list(engine, elem, styles).map(Some),
 		Some(ElemKind::Enum)		=> show_enum(engine, elem, styles).map(Some),
 		Some(ElemKind::Terms)		=> show_terms(engine, elem, styles).map(Some),
-		Some(ElemKind::TermItem)	=> Ok(Some(common::seq(vec![
-			common::body(elem, "term"),
-			common::body(elem, "description"),
-		]))),
-		_							=> Ok(Some(common::body(elem, "body"))),
+		// An item has no show of its own: realisation groups it into its list first.
+		_							=> Ok(None),
 	}
 }
 
@@ -287,31 +288,31 @@ fn attach_tight(engine: &mut Engine, spacing: Value, realised: Content, span: Sp
 	Ok(common::seq(vec![v, realised]))
 }
 
-/// Items as the four-column grid: indent, marker, body indent, body.
-fn item_grid(
-	engine:		&mut Engine,
+/// The list as its layout routine takes it (`flow::lists`): the element itself, marked laid by a `laid`
+/// field that holds each item's marker and body, the gutter between items and whether the marker aligns to
+/// the body's first baseline. The element then reaches flow as a block with a layout routine of its own, as
+/// Typst's `BlockElem::multi_layouter` makes it.
+fn laid(
 	elem:		&Content,
-	styles:		&StyleChain,
 	rows:		Vec<(Content, Content)>,
 	gutter:		Value,
+	baseline:	bool,
 )
 	-> Outcome<Content>
 {
-	let span = elem.span();
-	let indent = res!(common::get(elem, styles, "indent"));
-	let body_indent = res!(common::get(elem, styles, "body-indent"));
-	let columns = Value::array(vec![indent, Value::Auto, body_indent, Value::Fraction(Fraction(1.0))]);
-	let mut cells = Vec::with_capacity(rows.len() * 4);
-	for (marker, body) in rows {
-		cells.push(Value::Content(Content::empty()));
-		cells.push(Value::Content(marker));
-		cells.push(Value::Content(Content::empty()));
-		cells.push(Value::Content(body));
-	}
-	common::build(engine, ElemKind::Grid, span, cells, vec![
-		("columns",		columns),
-		("row-gutter",	gutter),
-	])
+	let kind = match elem.kind() {
+		Some(k)	=> k,
+		None	=> return Err(err!("a list was asked of content that is not an element"; Bug)),
+	};
+	let id = res!(common::fid(kind, "laid"));
+	let items = rows.into_iter().map(|(m, b)| Value::array(vec![Value::Content(m), Value::Content(b)])).collect();
+	let mut d = Dict::new();
+	d.insert("items", Value::array(items));
+	d.insert("gutter", gutter);
+	d.insert("baseline", Value::Bool(baseline));
+	let mut out = elem.clone();
+	out.set(id, Value::dict(d));
+	Ok(out)
 }
 
 fn show_list(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<Content> {
@@ -323,6 +324,7 @@ fn show_list(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 		_				=> 0,
 	};
 	let align = res!(common::get(elem, styles, "marker-align"));
+	let baseline = matches!(&align, Value::Alignment(a) if a.y.is_none());
 	let marker = match res!(common::get(elem, styles, "marker")) {
 		Value::Array(a) => match a.get(depth as usize % a.len().max(1)) {
 			Some(m)	=> common::display(m.clone()),
@@ -351,7 +353,7 @@ fn show_list(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 		let body = res!(common::set(body, ElemKind::List, "depth", Value::Int(depth + 1)));
 		rows.push((marker.clone(), body));
 	}
-	let realised = res!(item_grid(engine, elem, styles, rows, gutter.clone()));
+	let realised = res!(laid(elem, rows, gutter.clone(), baseline));
 	if tight {
 		return attach_tight(engine, gutter, realised, span);
 	}
@@ -366,6 +368,7 @@ fn show_enum(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 	let reversed = matches!(res!(common::get(elem, styles, "reversed")), Value::Bool(true));
 	let full = matches!(res!(common::get(elem, styles, "full")), Value::Bool(true));
 	let align = res!(common::get(elem, styles, "number-align"));
+	let baseline = matches!(&align, Value::Alignment(a) if a.y.is_none());
 	let items = children(elem);
 	let mut number: u64 = match res!(common::get(elem, styles, "start")) {
 		Value::Int(n)	=> n.max(0) as u64,
@@ -389,7 +392,8 @@ fn show_enum(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 			let v = res!(numbering::apply(engine, &numbering, &all));
 			res!(common::shown(engine, v, item.span()))
 		} else {
-			let v = res!(numbering::apply(engine, &numbering, &[number]));
+			// A pattern gives the piece for the item's depth; a function gets the number alone.
+			let v = res!(numbering::apply_kth(engine, &numbering, parents.len(), number));
 			res!(common::shown(engine, v, item.span()))
 		};
 		let resolved = res!(common::set(resolved, ElemKind::Text, "overhang", Value::Bool(false)));
@@ -405,7 +409,7 @@ fn show_enum(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcom
 		rows.push((resolved, body));
 		number = if reversed { number.saturating_sub(1) } else { number.saturating_add(1) };
 	}
-	let realised = res!(item_grid(engine, elem, styles, rows, gutter.clone()));
+	let realised = res!(laid(elem, rows, gutter.clone(), baseline));
 	if tight {
 		return attach_tight(engine, gutter, realised, span);
 	}
