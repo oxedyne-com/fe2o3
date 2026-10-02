@@ -22,6 +22,7 @@ pub mod layout;
 pub mod math;
 pub mod model;
 pub mod numbering;
+pub mod pdf;
 pub mod string;
 pub mod sym;
 pub mod text;
@@ -58,6 +59,7 @@ pub fn library() -> Scope {
 	model::define(&mut s);
 	math::define(&mut s);
 	intro::define(&mut s);
+	pdf::define(&mut s);
 	// `std` is the library as a module, so a name a document redefines stays reachable as `std.text`.
 	let std = s.clone();
 	s.define("std", Value::Module(std::sync::Arc::new(crate::eval::value::Module::new("std", std))));

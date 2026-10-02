@@ -259,3 +259,12 @@ fn the_error_lines_are_built_from_the_registry_and_the_standard_scope_alone() {
 		assert_eq!(l, vec!["diag-error type callee:- expected:- found:- file:other"], "the message {:?}", m);
 	}
 }
+
+#[test]
+fn a_pdf_attachment_is_passed_over_by_name_and_an_artifact_is_not() {
+	// Austenite embeds no file, so the attachment is named as passed over; an artifact only tags a PDF.
+	let r = run("pdf", "#pdf.attach(\"a.txt\", bytes(\"hi\"))\n#pdf.artifact(kind: \"header\")[x]\n", &["--eval", "--diag-summary"]);
+	assert!(r.ok, "the compile succeeds:\n{}", r.stderr);
+	assert_eq!(r.lines, vec!["diag-summary warning unsupported pdf_attachments_are_not_embedded 1"],
+		"the summary of:\n{}", r.stderr);
+}

@@ -17,6 +17,7 @@ use crate::eval::lib::{
 	math::MathFn,
 	model::ModelFn,
 	numbering::NumberingFn,
+	pdf::PdfFn,
 	string::StrFn,
 	sym::SymFn,
 	text::TextFn,
@@ -109,6 +110,7 @@ pub enum NativeFunc {
 	Model(ModelFn),				// lib/model/mod.rs, U5
 	Math(MathFn),				// lib/math.rs, U7
 	Intro(IntroFn),				// lib/intro.rs, U8
+	Pdf(PdfFn),					// lib/pdf.rs
 }
 
 impl NativeFunc {
@@ -133,6 +135,7 @@ impl NativeFunc {
 			NativeFunc::Model(f)		=> f.name(),
 			NativeFunc::Math(f)			=> f.name(),
 			NativeFunc::Intro(f)		=> f.name(),
+			NativeFunc::Pdf(f)			=> f.name(),
 		}
 	}
 
@@ -158,6 +161,7 @@ impl NativeFunc {
 			NativeFunc::Model(f)		=> lib::model::call(f, engine, args),
 			NativeFunc::Math(f)			=> lib::math::call(f, engine, args),
 			NativeFunc::Intro(f)		=> lib::intro::call(f, engine, args),
+			NativeFunc::Pdf(f)			=> lib::pdf::call(f, engine, args),
 		}
 	}
 }
