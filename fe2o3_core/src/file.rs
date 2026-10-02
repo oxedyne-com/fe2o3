@@ -1555,8 +1555,9 @@ mod tests {
         Err(err!("Writer {:?} was never killed.", role; Test, Timeout))
     }
 
-    /// Spawns a writer child, kills it `after` into its saving and says what the
-    /// key held then: `None` for one payload, whole, else what it held.
+    /// Spawns a writer child, kills it `after` into its saving, or sooner if the key
+    /// is seen torn, and says what the key held then: `None` for one payload, whole,
+    /// else what it held.
     fn kill_once(exe: &Path, test: &str, role: &str, after: Duration) -> Outcome<Option<String>> {
         let dir = scratch_path("kill");
         res!(fs::create_dir(&dir));
@@ -1600,7 +1601,17 @@ mod tests {
             }
             thread::sleep(Duration::from_micros(200));
         }
-        thread::sleep(after);
+        // Killed as soon as the key is seen to be anything but a whole payload, which a
+        // truncate and a write would show it to be for most of a save, and otherwise
+        // when `after` has passed, which is the only way to land in a save that is whole.
+        let key = dir.join("key");
+        let waited = Instant::now();
+        while waited.elapsed() < after {
+            match fs::metadata(&key) {
+                Ok(m) if m.len() as usize == RACE_LEN   => (),
+                _                                       => break,
+            }
+        }
         // SIGKILL on unix, so the child gets no chance to finish a thing.
         res!(writers.0[0].kill());
         res!(writers.0[0].wait());
