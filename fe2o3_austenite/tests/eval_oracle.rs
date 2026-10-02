@@ -381,6 +381,7 @@ fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)],
 			span:		Span::detached(),
 			guards:		Vec::new(),
 			prepared:	true,
+			place:		None,
 		}));
 		builder.record(&elem, Position::new(*page, Sp::from_pt(*x), Sp::from_pt(*y + shift)), None);
 	}

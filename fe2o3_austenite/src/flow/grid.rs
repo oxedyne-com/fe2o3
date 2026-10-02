@@ -24,6 +24,7 @@ use crate::eval::lib::grid::{
 	self as schema,
 	fid,
 };
+use crate::eval::locate::Locator;
 use crate::eval::styles::StyleChain;
 use crate::eval::value::{
 	Alignment,
@@ -97,11 +98,11 @@ pub struct FlowCells;
 
 impl CellLayout for FlowCells {
 	fn measure(&mut self, engine: &mut Engine, cell: &Content, styles: &StyleChain, region: Region) -> Outcome<Dims> {
-		crate::flow::measure(engine, cell, styles, region)
+		engine.within(cell.place(), |engine| crate::flow::measure(engine, cell, styles, region))
 	}
 
 	fn layout(&mut self, engine: &mut Engine, cell: &Content, styles: &StyleChain, region: Region) -> Outcome<Vec<Node>> {
-		crate::flow::layout_block(engine, cell, styles, region)
+		engine.within(cell.place(), |engine| crate::flow::layout_block(engine, cell, styles, region))
 	}
 }
 
@@ -829,9 +830,15 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 		_				=> Sides::splat(None),
 	};
 	let mut cells = Vec::with_capacity(placed.len());
+	// Each cell is realised at a place of its own under the grid's, so that the measurements and the layout of
+	// a cell, and a layout of the grid again, locate what is in it alike.
+	let mut places = elem.place().map(Locator::new);
 	for p in placed {
 		let cspan	= p.elem.span();
 		let mut el	= p.elem;
+		if let (Some(l), Some(k)) = (places.as_mut(), el.kind()) {
+			el.set_place(l.next(k, cspan));
+		}
 		let fill = match res!(schema::resolve(styles, &el, fid::CELL_FILL)) {
 			Value::Auto	=> {
 				let v = res!(celled(engine, &g_fill, p.x, p.y, cspan));

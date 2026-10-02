@@ -5,7 +5,10 @@
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::lib;
-use crate::eval::locate::Location;
+use crate::eval::locate::{
+	Location,
+	Place,
+};
 use crate::eval::styles::{
 	RecipeIndex,
 	StyleChain,
@@ -69,6 +72,22 @@ macro_rules! elem_kinds {
 			}
 		}
 	};
+}
+
+impl ElemKind {
+	/// Does the element lay a body of its own out, which may be laid out again and must realise to the same
+	/// locations each time? Such an element is given a [`Place`] when it is realised. The text and maths
+	/// kinds are inline atoms; the model kinds other than the paragraph and the bullet and numbered lists are shown as elements
+	/// that have a place themselves, and `layout` is the one introspection element that lays out a body.
+	pub fn has_place(self) -> bool {
+		match self.family() {
+			Family::Layout | Family::Grid | Family::Visual	=> true,
+			Family::Model									=> matches!(self,
+				ElemKind::Par | ElemKind::List | ElemKind::Enum),
+			Family::Intro									=> self == ElemKind::Layout,
+			Family::Text | Family::Math | Family::Realise	=> false,
+		}
+	}
 }
 
 elem_kinds! {
@@ -397,6 +416,7 @@ pub struct Elem {
 	pub span:		Span,
 	pub guards:		Vec<RecipeIndex>,
 	pub prepared:	bool,	// synthesised fields filled and location assigned
+	pub place:		Option<Place>,	// where the body it lays out is realised, given when it is first met
 }
 
 /// Content in order. A labelled sequence is located and guarded as an element is, so show rules on
@@ -441,7 +461,7 @@ impl Content {
 
 	pub fn new(kind: ElemKind, fields: Vec<(FieldId, Value)>, span: Span) -> Self {
 		Content::Elem(Arc::new(Elem {
-			kind, fields, label: None, location: None, span, guards: Vec::new(), prepared: false,
+			kind, fields, label: None, location: None, span, guards: Vec::new(), prepared: false, place: None,
 		}))
 	}
 
@@ -545,6 +565,14 @@ impl Content {
 		}
 	}
 
+	/// Where the element's body is realised, once the element has been met.
+	pub fn place(&self) -> Option<Place> {
+		match self {
+			Content::Elem(e)	=> e.place,
+			_					=> None,
+		}
+	}
+
 	/// The kind `content.func()` reports: the element's, or `sequence` and `styled` for plain content.
 	pub fn func_kind(&self) -> ElemKind {
 		match self {
@@ -585,6 +613,14 @@ impl Content {
 				Some(slot)	=> slot.1 = value,
 				None		=> e.fields.push((id, value)),
 			}
+		}
+	}
+
+	/// Gives an element the place its body is realised at (copy on write); a no-op on a sequence or styled
+	/// content. A layouter that resolves its children itself, as a grid does its cells, gives each one.
+	pub fn set_place(&mut self, place: Place) {
+		if let Content::Elem(e) = self {
+			Arc::make_mut(e).place = Some(place);
 		}
 	}
 

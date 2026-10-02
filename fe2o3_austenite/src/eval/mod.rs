@@ -64,6 +64,7 @@ use crate::eval::intro::{
 use crate::eval::locate::{
 	Location,
 	Locator,
+	Place,
 };
 use crate::eval::styles::StyleChain;
 use crate::eval::value::Module;
@@ -237,6 +238,22 @@ impl Engine {
 	}
 
 	pub fn exit_call(&mut self) { self.depth = self.depth.saturating_sub(1); }
+
+	/// Runs `f` with realisations counted afresh at `place`, Typst's `Locator::relayout`: content laid out
+	/// again at the place it was laid out at is realised to the same locations, whatever was realised in
+	/// between. `None` leaves the realisation where it stands. The locator in force comes back when `f` ends,
+	/// by whichever route.
+	pub fn within<R, F: FnOnce(&mut Engine) -> R>(&mut self, place: Option<Place>, f: F) -> R {
+		match place {
+			None		=> f(self),
+			Some(p)		=> {
+				let outer = std::mem::replace(&mut self.locator, Locator::new(p));
+				let out = f(self);
+				self.locator = outer;
+				out
+			},
+		}
+	}
 
 	/// Spends one loop iteration; an exhausted budget is a diagnostic, so a runaway loop terminates.
 	pub fn burn(&mut self, span: Span) -> Outcome<()> {

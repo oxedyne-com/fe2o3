@@ -23,7 +23,11 @@ use crate::eval::content::{
 	Family,
 };
 use crate::eval::lib::visual as vis;
-use crate::eval::locate::Location;
+use crate::eval::locate::{
+	Location,
+	Locator,
+	Place,
+};
 use crate::eval::realise::{
 	self,
 	Pair,
@@ -107,8 +111,16 @@ pub fn measure(
 
 /// Lays content out into the first of `regions` alone, Typst's `layout_frame`.
 pub fn layout_frame(engine: &mut Engine, content: &Content, styles: &StyleChain, regions: Regions) -> Outcome<Frame> {
+	layout_frame_in(engine, None, content, styles, regions)
+}
+
+/// As [`layout_frame`], for the body of the element that holds `place`: the content is realised at that place
+/// whenever it is laid out, so a measurement and every later attempt locate what is in it alike.
+pub fn layout_frame_in(engine: &mut Engine, place: Option<Place>, content: &Content, styles: &StyleChain, regions: Regions)
+	-> Outcome<Frame>
+{
 	let one = Regions::one(regions.w, regions.h, regions.expand_x, regions.expand_y);
-	let mut frames = res!(layout_fragment(engine, content, styles, one));
+	let mut frames = res!(layout_fragment_in(engine, place, content, styles, one));
 	Ok(match frames.is_empty() {
 		true	=> Frame::new(0.0, 0.0),
 		false	=> frames.swap_remove(0),
@@ -118,9 +130,24 @@ pub fn layout_frame(engine: &mut Engine, content: &Content, styles: &StyleChain,
 /// Lays content out into as many of `regions` as it needs, Typst's `layout_fragment`: realised one level,
 /// then flowed as blocks, or as the lines of one paragraph when the content is inline only.
 pub fn layout_fragment(engine: &mut Engine, content: &Content, styles: &StyleChain, regions: Regions) -> Outcome<Vec<Frame>> {
-	let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
-	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
-	layout_flow_pairs(engine, pairs, styles, regions, 1, Rel::zero(), mode, content.span())
+	layout_fragment_in(engine, None, content, styles, regions)
+}
+
+/// As [`layout_fragment`], for the body of the element that holds `place`.
+pub fn layout_fragment_in(
+	engine:		&mut Engine,
+	place:		Option<Place>,
+	content:	&Content,
+	styles:		&StyleChain,
+	regions:	Regions,
+)
+	-> Outcome<Vec<Frame>>
+{
+	engine.within(place, |engine| {
+		let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
+		let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
+		layout_flow_pairs(engine, pairs, styles, regions, 1, Rel::zero(), mode, content.span())
+	})
 }
 
 /// What a flow may hold: a page's root flow also hosts footnotes.
@@ -766,7 +793,7 @@ fn node_tags(node: &Node, y: f64, out: &mut Vec<(f64, Tag)>) {
 }
 
 /// The footnotes whose start tags a frame holds, with their offsets down from its top.
-fn find_footnotes(frame: &Frame, y0: f64, out: &mut Vec<(f64, Content)>) {
+pub fn find_footnotes(frame: &Frame, y0: f64, out: &mut Vec<(f64, Content)>) {
 	for (_, y, item) in &frame.items {
 		let y = y0 + y;
 		match item {
@@ -1155,7 +1182,7 @@ impl PlacedChild {
 			Some(v)	=> res!(v.cast::<Content>()),
 			None	=> Content::empty(),
 		};
-		let mut frame = res!(layout_frame(engine, &body, &styles, region));
+		let mut frame = res!(layout_frame_in(engine, self.elem.place(), &body, &styles, region));
 		if res!(vis::is_hidden(&self.styles)) {
 			frame.hide();
 		}
@@ -1969,7 +1996,10 @@ impl<'a> Composer<'a> {
 				"footnote.entry has no `note` field in its schema, so a footnote's entry cannot be built."; Unimplemented)),
 		};
 		let entry = Content::new(ElemKind::FootnoteEntry, vec![(id, Value::Content(elem.clone()))], elem.span());
-		let mut frames = res!(layout_fragment(self.engine, &entry, &self.config.shared, pod));
+		// The entry is laid out at a place made from the note's location, as Typst's `Locator::synthesize`, so it
+		// is the same entry each time the note is composed.
+		let place = elem.location().map(Place::synthesise);
+		let mut frames = res!(layout_fragment_in(self.engine, place, &entry, &self.config.shared, pod));
 		// The entry is read after its footnote for introspection.
 		if let Some(loc) = elem.location() {
 			for f in &mut frames {
@@ -2567,7 +2597,7 @@ fn layout_single_sized(engine: &mut Engine, spec: &BlockSpec, region: &Regions, 
 	let pod		= unbreakable_pod(width, height, &inset, region.w, region.h);
 	let mut frame = match &spec.body {
 		Body::Empty			=> Frame::new(0.0, 0.0),
-		Body::Content(c)	=> res!(layout_frame(engine, c, styles, pod.clone())),
+		Body::Content(c)	=> res!(layout_frame_in(engine, spec.elem.place(), c, styles, pod.clone())),
 		Body::Layouter		=> {
 			let mut p = pod.clone();
 			p.expand_x = (pod.expand_x || region.expand_x) && pod.w.is_finite();
@@ -2743,11 +2773,12 @@ impl MultiChild {
 				Ok(Nested::Frames(v, pod.clone()))
 			},
 			Body::Content(c) => {
+				let place = spec.elem.place();
 				if pod.expand_x {
-					let cursor = res!(flow_cursor(engine, c, styles, pod, 1, Rel::zero(), c.span()));
+					let cursor = res!(flow_cursor(engine, place, c, styles, pod, 1, Rel::zero(), c.span()));
 					return Ok(Nested::Flow(Box::new(cursor), None));
 				}
-				let mut frags = res!(layout_fragment(engine, c, styles, pod.clone()));
+				let mut frags = res!(layout_fragment_in(engine, place, c, styles, pod.clone()));
 				// An auto-width body that came out at different widths in different regions is relaid out at the
 				// widest, so every fragment of the block is as wide as the others.
 				if frags.windows(2).any(|w| (w[0].w - w[1].w).abs() >= EPS) {
@@ -2755,7 +2786,7 @@ impl MultiChild {
 					let mut p = pod.clone();
 					p.w = max;
 					p.expand_x = true;
-					frags = res!(layout_fragment(engine, c, styles, p));
+					frags = res!(layout_fragment_in(engine, place, c, styles, p));
 				}
 				Ok(Nested::Frames(frags.into(), pod.clone()))
 			},
@@ -2766,17 +2797,17 @@ impl MultiChild {
 					Some(ElemKind::Pad) => {
 						let (padding, body) = res!(pad_parts(elem, styles));
 						let cursor = res!(flow_cursor(
-							engine, &body, styles, &pad_regions(&inner, &padding), 1, Rel::zero(), elem.span()));
+							engine, elem.place(), &body, styles, &pad_regions(&inner, &padding), 1, Rel::zero(), elem.span()));
 						Ok(Nested::Flow(Box::new(cursor), Some(padding)))
 					},
 					Some(ElemKind::Columns) => {
 						let (count, gutter, body) = res!(columns_parts(engine, elem, styles));
-						let cursor = res!(flow_cursor(engine, &body, styles, &inner, count, gutter, elem.span()));
+						let cursor = res!(flow_cursor(engine, elem.place(), &body, styles, &inner, count, gutter, elem.span()));
 						Ok(Nested::Flow(Box::new(cursor), None))
 					},
 					Some(ElemKind::Layout) => {
 						let content = res!(layout_content(engine, elem, styles, inner.base()));
-						let cursor = res!(flow_cursor(engine, &content, styles, &inner, 1, Rel::zero(), content.span()));
+						let cursor = res!(flow_cursor(engine, elem.place(), &content, styles, &inner, 1, Rel::zero(), content.span()));
 						Ok(Nested::Flow(Box::new(cursor), None))
 					},
 					_ => {
@@ -2789,9 +2820,12 @@ impl MultiChild {
 	}
 }
 
-/// A flow over the realised body of a container, to be filled region by region.
+/// A flow over the realised body of a container, to be filled region by region. The body is realised at
+/// `place`, the container's.
+#[allow(clippy::too_many_arguments)]
 fn flow_cursor(
 	engine:		&mut Engine,
+	place:		Option<Place>,
 	content:	&Content,
 	styles:		&StyleChain,
 	regions:	&Regions,
@@ -2801,7 +2835,7 @@ fn flow_cursor(
 )
 	-> Outcome<FlowCursor>
 {
-	let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
+	let (pairs, inline) = res!(engine.within(place, |engine| realise::realise_fragment(engine, content, styles)));
 	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
 	FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
 }
@@ -3010,7 +3044,7 @@ fn pad_parts(elem: &Content, styles: &StyleChain) -> Outcome<([Rel; 4], Content)
 /// `pad`: the body laid out in regions shrunk by the padding, each frame grown back by it.
 fn layout_pad(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let (padding, body) = res!(pad_parts(elem, styles));
-	let mut frames = res!(layout_fragment(engine, &body, styles, pad_regions(regions, &padding)));
+	let mut frames = res!(layout_fragment_in(engine, elem.place(), &body, styles, pad_regions(regions, &padding)));
 	for f in &mut frames {
 		grow(f, &padding);
 	}
@@ -3035,7 +3069,7 @@ fn columns_parts(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Ou
 /// `columns(n)`: the body flowed through `n` column regions per region, as a page's columns are.
 fn layout_columns(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let (count, gutter, body) = res!(columns_parts(engine, elem, styles));
-	let (pairs, inline) = res!(realise::realise_fragment(engine, &body, styles));
+	let (pairs, inline) = res!(engine.within(elem.place(), |engine| realise::realise_fragment(engine, &body, styles)));
 	let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
 	layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
 }
@@ -3064,7 +3098,7 @@ fn layout_content(engine: &mut Engine, elem: &Content, styles: &StyleChain, base
 /// `layout(size => ..)`: the function's result flowed through the regions.
 fn layout_layout(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let content = res!(layout_content(engine, elem, styles, regions.base()));
-	layout_fragment(engine, &content, styles, regions.clone())
+	layout_fragment_in(engine, elem.place(), &content, styles, regions.clone())
 }
 
 /// A vertical node list (a grid's rows) broken across the regions: each region takes the boxes that fit,
@@ -3223,6 +3257,9 @@ fn layout_stack(engine: &mut Engine, elem: &Content, styles: &StyleChain, region
 	};
 	let mut s = Stacker::new(dir, regions.clone(), elem.span());
 	let mut deferred: Option<Spacing> = None;
+	// Each child is realised at a place of its own under the stack's, so it is located alike whenever the
+	// stack is laid out again.
+	let mut places = elem.place().map(Locator::new);
 	for child in children {
 		let content = match child {
 			Value::Content(c)	=> c,
@@ -3250,7 +3287,8 @@ fn layout_stack(engine: &mut Engine, elem: &Content, styles: &StyleChain, region
 		if let Some(sp) = deferred {
 			s.spacing(sp, styles);
 		}
-		res!(s.block(engine, &content, styles));
+		let place = places.as_mut().map(|l| l.next(content.kind().unwrap_or(ElemKind::Sequence), content.span()));
+		res!(s.block(engine, place, &content, styles));
 		deferred = spacing;
 	}
 	res!(s.finish_region(engine));
@@ -3323,7 +3361,7 @@ impl Stacker {
 		}
 	}
 
-	fn block(&mut self, engine: &mut Engine, block: &Content, styles: &StyleChain) -> Outcome<()> {
+	fn block(&mut self, engine: &mut Engine, place: Option<Place>, block: &Content, styles: &StyleChain) -> Outcome<()> {
 		if self.regions.is_full() {
 			res!(self.finish_region(engine));
 		}
@@ -3343,7 +3381,7 @@ impl Stacker {
 			},
 			_ => res!(alignment(styles)),
 		};
-		let frames = res!(layout_fragment(engine, block, styles, self.regions.clone()));
+		let frames = res!(layout_fragment_in(engine, place, block, styles, self.regions.clone()));
 		self.fragment(engine, align, frames)
 	}
 

@@ -413,6 +413,10 @@ pub fn layout_frame_with<F>(
 	};
 	let g = Get { elem, styles, kind, fs: font_size(styles) };
 	let span = elem.span();
+	// The body is laid out, however many times, at the element's place.
+	let place = elem.place();
+	let mut at_place = |engine: &mut Engine, b: &Content, s: &StyleChain, pod: Pod| engine.within(place, |e| body(e, b, s, pod));
+	let body = &mut at_place;
 
 	// Every visual element is shown by Typst as a block whose single child is the element's layouter; the
 	// block's `width` and `height` (shapes and images have them) decide the pod.

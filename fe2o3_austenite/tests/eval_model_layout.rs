@@ -1,6 +1,7 @@
 //! Model elements and block bodies laid out against the `typst` 0.15.1 oracle at level 4 (U6b-S2): every
 //! line's text, baseline and start, through the whole pipeline (the fixpoint, so an outline's page numbers,
-//! a footnote's number and a reference's target are the converged ones).
+//! a footnote's number, a reference's target and what a block, a list item or a cell holds when it is laid out
+//! again are the converged ones).
 //!
 //! The fixtures live in the areas below, one theme to an area. Each must pass level 4 in full: a fixture that
 //! is not yet right is not kept here, it is an `unsupported` warning in the sweep (`eval_model_sweep`) until it
@@ -23,8 +24,8 @@ use harness::Verdict;
 
 use oxedyne_fe2o3_core::prelude::*;
 
-const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs"];
-const MIN_COMPARED:		usize	= 37;
+const AREAS:			&[&str]	= &["bodies", "lists", "notes", "refs", "locate"];
+const MIN_COMPARED:		usize	= 55;
 const MIN_REJECTED:		usize	= 3;
 
 #[test]

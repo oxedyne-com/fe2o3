@@ -504,6 +504,7 @@ fn located(v: i64, label: &str, loc: u64) -> Content {
 		span:		Span::detached(),
 		guards:		Vec::new(),
 		prepared:	true,
+		place:		None,
 	}))
 }
 
@@ -717,6 +718,73 @@ fn a_delayed_error_met_again_at_one_span_is_reported_once() -> Outcome<()> {
 	assert!(laid.is_err());
 	let errors: Vec<_> = diags.iter().filter(|d| d.0).collect();
 	assert_eq!(errors.len(), 1, "{:?}", errors);
+	Ok(())
+}
+
+/// What a body realises to when it is laid out again at its place (Typst's `Locator::relayout`): the footnote
+/// in it is located as it was the first time, whatever was realised in between, and a second element of the
+/// same kind and span at the same level has a place, and so a footnote, of its own.
+#[test]
+fn a_body_realised_again_at_its_place_is_located_alike() -> Outcome<()> {
+	let root = PathBuf::from("/");
+	let mut world = World::new(root.clone());
+	let src = "#block[A note#footnote[One.]]\n\n#for i in range(2) [#block[A note#footnote[Two.]]]\n";
+	let id = res!(world.add_source(root.join("__place.typ"), src.to_string()));
+	let mut engine = Engine::new(world);
+	let module = res!(eval_source(&mut engine, id));
+	let styles = StyleChain::root();
+	let pairs = res!(realise(&mut engine, &module.content, &styles, RealiseMode::Document));
+	let blocks: Vec<Content> = pairs.iter().filter(|p| p.content.is(ElemKind::Block)).map(|p| p.content.clone()).collect();
+	assert_eq!(blocks.len(), 3, "three blocks realise");
+	let places: Vec<_> = blocks.iter().map(|b| b.place()).collect();
+	assert!(places.iter().all(|p| p.is_some()), "a block is given a place when it is realised");
+	assert_ne!(places[1], places[2], "two blocks from one source span have places of their own");
+
+	// The footnote's location in the realised body of a block, at the block's place or nowhere in particular.
+	let note_in = |engine: &mut Engine, b: &Content, at: Option<oxedyne_fe2o3_austenite::eval::locate::Place>| -> Outcome<Location> {
+		let body = match b.field("body") {
+			Some(Value::Content(c))	=> c.clone(),
+			_						=> return Err(err!("a block without a body"; Test)),
+		};
+		let pairs = res!(engine.within(at, |e| realise(e, &body, &styles, RealiseMode::Flow)));
+		for p in &pairs {
+			if let Some(Tag::Start(c)) = &p.tag {
+				if c.is(ElemKind::Footnote) {
+					return c.location().ok_or_else(|| err!("a footnote without a location"; Test));
+				}
+			}
+		}
+		let par = pairs.iter().find(|p| p.content.is(ElemKind::Par));
+		match par {
+			Some(p)	=> {
+				let inner = match p.content.field("body") {
+					Some(Value::Content(c))	=> c.clone(),
+					_						=> return Err(err!("a paragraph without a body"; Test)),
+				};
+				let kids = res!(engine.within(p.content.place(), |e| realise(e, &inner, &p.styles, RealiseMode::Inline)));
+				for k in &kids {
+					if let Some(Tag::Start(c)) = &k.tag {
+						if c.is(ElemKind::Footnote) {
+							return c.location().ok_or_else(|| err!("a footnote without a location"; Test));
+						}
+					}
+				}
+				Err(err!("no footnote in the paragraph"; Test))
+			},
+			None	=> Err(err!("no footnote and no paragraph in the block"; Test)),
+		}
+	};
+	let first = res!(note_in(&mut engine, &blocks[0], places[0]));
+	// Something else realised in between takes ordinals of the document's own locator.
+	let _ = res!(note_in(&mut engine, &blocks[1], places[1]));
+	let again = res!(note_in(&mut engine, &blocks[0], places[0]));
+	assert_eq!(first, again, "the same block realised again at its place located its footnote anew");
+	let other = res!(note_in(&mut engine, &blocks[1], places[1]));
+	assert_ne!(first, other, "two blocks share a footnote location");
+	// Without the place, the second realisation takes the next ordinal: the fault the place cures.
+	let loose_a = res!(note_in(&mut engine, &blocks[0], None));
+	let loose_b = res!(note_in(&mut engine, &blocks[0], None));
+	assert_ne!(loose_a, loose_b, "ordinals did not count in the document's locator");
 	Ok(())
 }
 

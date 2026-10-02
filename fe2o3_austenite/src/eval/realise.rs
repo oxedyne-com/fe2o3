@@ -644,6 +644,11 @@ impl State<'_> {
 		if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
 			e.location = Some(self.engine.locator.locate(e.kind, e.span));
 		}
+		// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
+		// made and gave a place already (a grid's cell) keeps that.
+		if e.place.is_none() && e.kind.has_place() {
+			e.place = Some(self.engine.locator.next(e.kind, e.span));
+		}
 		map.apply_outer(&builtin);
 		let chain = styles.chain(map);
 		for (i, spec) in e.kind.fields().iter().enumerate() {

@@ -10,7 +10,14 @@
 // horizon or bottom. The model's show (`eval::lib::model::list`) resolves the markers, numbers and bodies and
 // hands them over in the element's `laid` field.
 
-use crate::eval::content::Content;
+use crate::eval::content::{
+	Content,
+	ElemKind,
+};
+use crate::eval::locate::{
+	Locator,
+	Place,
+};
 use crate::eval::styles::StyleChain;
 use crate::eval::value::{
 	Direction,
@@ -20,8 +27,8 @@ use crate::eval::Engine;
 use crate::flow::block::{
 	abs_of,
 	field,
-	layout_fragment,
-	layout_frame,
+	layout_fragment_in,
+	layout_frame_in,
 	rel_of,
 	rtl,
 	Frame,
@@ -34,10 +41,13 @@ use crate::flow::block::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-/// A marker and the body it leads.
+/// A marker and the body it leads, each realised at a place of its own under the list's, so that the several
+/// times an item is measured and laid out locate what is in it alike.
 struct Entry {
-	marker:	Content,
-	body:	Content,
+	marker:			Content,
+	body:			Content,
+	marker_place:	Option<Place>,
+	body_place:		Option<Place>,
 }
 
 /// What every item of one list shares.
@@ -58,11 +68,14 @@ pub fn layout(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions:
 			elem.kind().map(|k| k.path()).unwrap_or("list"); Bug)),
 	};
 	let mut items = Vec::new();
+	let mut places = elem.place().map(Locator::new);
 	if let Some(Value::Array(rows)) = laid.get("items") {
 		for row in rows.iter() {
 			if let Value::Array(pair) = row {
 				if let (Some(Value::Content(m)), Some(Value::Content(b))) = (pair.get(0), pair.get(1)) {
-					items.push(Entry { marker: m.clone(), body: b.clone() });
+					let body_place = places.as_mut().map(|l| l.next(ElemKind::ListItem, b.span()));
+					let marker_place = places.as_mut().map(|l| l.next(ElemKind::Align, m.span()));
+					items.push(Entry { marker: m.clone(), body: b.clone(), marker_place, body_place });
 				}
 			}
 		}
@@ -114,7 +127,8 @@ fn measure_markers(
 	let avail = regions.w - lister.indent - lister.body_indent;
 	let mut width = 0.0f64;
 	for item in items {
-		let frame = res!(layout_frame(engine, &item.marker, styles, Regions::one(avail, f64::INFINITY, false, false)));
+		let frame = res!(layout_frame_in(engine, item.marker_place, &item.marker, styles,
+			Regions::one(avail, f64::INFINITY, false, false)));
 		width = width.max(frame.w);
 	}
 	Ok(width.min(avail))
@@ -135,7 +149,8 @@ fn measure_bodies(
 	let avail = regions.w - lister.indent - lister.body_indent;
 	let mut width = 0.0f64;
 	for item in items {
-		let frame = res!(layout_frame(engine, &item.body, styles, Regions::one(avail, f64::INFINITY, false, false)));
+		let frame = res!(layout_frame_in(engine, item.body_place, &item.body, styles,
+			Regions::one(avail, f64::INFINITY, false, false)));
 		width = width.max(frame.w);
 	}
 	Ok(width.min(avail - lister.marker_width))
@@ -171,9 +186,9 @@ fn layout_item(
 		},
 		None	=> body_regions.w -= total,
 	}
-	let mut marker = res!(layout_frame(engine, &item.marker, styles,
+	let mut marker = res!(layout_frame_in(engine, item.marker_place, &item.marker, styles,
 		Regions::one(lister.marker_width, regions.base().1, true, false)));
-	let mut body = res!(layout_fragment(engine, &item.body, styles, body_regions.clone()));
+	let mut body = res!(layout_fragment_in(engine, item.body_place, &item.body, styles, body_regions.clone()));
 	// The first frame that is not only tags.
 	let mut first = if skip_first(&body) { 1 } else { 0 };
 	let (mut body_y, mut marker_y) = (0.0, 0.0);
@@ -189,7 +204,7 @@ fn layout_item(
 		} else {
 			let mut shorter = body_regions.clone();
 			shorter.h += diff;
-			body = res!(layout_fragment(engine, &item.body, styles, shorter));
+			body = res!(layout_fragment_in(engine, item.body_place, &item.body, styles, shorter));
 			if skip_first(&body) {
 				first = 1;
 			}
@@ -202,7 +217,8 @@ fn layout_item(
 			Some(f)	=> f.h.max(marker.h),
 			None	=> marker.h,
 		};
-		marker = res!(layout_frame(engine, &item.marker, styles, Regions::one(lister.marker_width, height, true, true)));
+		marker = res!(layout_frame_in(engine, item.marker_place, &item.marker, styles,
+			Regions::one(lister.marker_width, height, true, true)));
 	}
 	// The marker joins the first frame that is not only tags, and the whole body is indented after it.
 	let mut frames = Vec::with_capacity(body.len());
