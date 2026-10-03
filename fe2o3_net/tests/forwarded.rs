@@ -102,7 +102,7 @@ async fn test_upgrade_head_strips_a_forgery_00() -> Outcome<()> {
     let head = build_upgrade_request_head(
         "/ws", "127.0.0.1", &request, &peer, &ForwardedPolicy::none());
 
-    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("203.0.113.7:51000")],
+    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("203.0.113.7")],
         "head was:\n{}", head);
     assert_eq!(values_of(&head, "x-forwarded-proto"), vec![fmt!("https")],
         "head was:\n{}", head);
@@ -142,7 +142,7 @@ async fn test_this_hop_names_itself_when_the_caller_said_nothing_00() -> Outcome
     let head = build_upgrade_request_head(
         "/ws", "127.0.0.1", &request, &peer, &ForwardedPolicy::none());
 
-    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("198.51.100.200:51004")]);
+    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("198.51.100.200")]);
     assert_eq!(values_of(&head, "x-forwarded-proto"), vec![fmt!("https")]);
     assert_eq!(values_of(&head, "x-forwarded-host"), vec![fmt!("app.example")]);
     assert_eq!(values_of(&head, "forwarded"),
@@ -171,7 +171,7 @@ async fn test_http_proxy_head_strips_and_appends_00() -> Outcome<()> {
     let head = build_proxy_request_head(
         "POST", "/thing", "127.0.0.1", &request, &peer, &ForwardedPolicy::none(), 2);
 
-    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("203.0.113.7:52000")],
+    assert_eq!(values_of(&head, "x-forwarded-for"), vec![fmt!("203.0.113.7")],
         "head was:\n{}", head);
     assert_eq!(values_of(&head, "x-forwarded-proto"), vec![fmt!("https")],
         "head was:\n{}", head);
@@ -198,7 +198,7 @@ async fn test_http_proxy_head_strips_and_appends_00() -> Outcome<()> {
     let head = build_proxy_request_head(
         "POST", "/thing", "127.0.0.1", &request, &peer, &policy, 2);
     assert_eq!(values_of(&head, "x-forwarded-for"),
-        vec![fmt!("9.9.9.9"), fmt!("203.0.113.7:52000")], "head was:\n{}", head);
+        vec![fmt!("9.9.9.9"), fmt!("203.0.113.7")], "head was:\n{}", head);
     assert_eq!(values_of(&head, "x-forwarded-proto"), vec![fmt!("http"), fmt!("https")],
         "head was:\n{}", head);
     Ok(())
@@ -245,11 +245,11 @@ async fn test_this_hops_value_is_last_under_either_policy_00() -> Outcome<()> {
     let seen = res!(parse_request(&head).await);
     let last = res!(seen.header.fields.get_last(&xff()).ok_or_else(|| err!(
         "This hop always appends its own X-Forwarded-For."; Test, Missing)));
-    assert_eq!(fmt!("{}", last), "203.0.113.7:51000",
+    assert_eq!(fmt!("{}", last), "203.0.113.7",
         "untrusted: the last value must be this hop's; head was:\n{}", head);
     let first = res!(seen.header.fields.get_one(&xff()).ok_or_else(|| err!(
         "This hop always appends its own X-Forwarded-For."; Test, Missing)));
-    assert_eq!(fmt!("{}", first), "203.0.113.7:51000",
+    assert_eq!(fmt!("{}", first), "203.0.113.7",
         "untrusted: there is only one value, so first and last agree; head was:\n{}", head);
 
     // Trusted: the caller's chain survives, and this hop's value still comes last.
@@ -258,11 +258,11 @@ async fn test_this_hops_value_is_last_under_either_policy_00() -> Outcome<()> {
     let seen = res!(parse_request(&head).await);
     let last = res!(seen.header.fields.get_last(&xff()).ok_or_else(|| err!(
         "This hop always appends its own X-Forwarded-For."; Test, Missing)));
-    assert_eq!(fmt!("{}", last), "203.0.113.7:51000",
+    assert_eq!(fmt!("{}", last), "203.0.113.7",
         "trusted: the last value must still be this hop's; head was:\n{}", head);
     let first = res!(seen.header.fields.get_one(&xff()).ok_or_else(|| err!(
         "The caller's chain was preserved."; Test, Missing)));
-    assert_ne!(fmt!("{}", first), "203.0.113.7:51000",
+    assert_ne!(fmt!("{}", first), "203.0.113.7",
         "trusted: the first value is the caller's, which is the trap get_last avoids; head was:\n{}",
         head);
     Ok(())
