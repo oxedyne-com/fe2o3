@@ -266,6 +266,13 @@ fn a_strict_skeleton_is_one_page_with_no_diagnostic_and_an_import_rename_stays_a
 	assert!(bytes.starts_with(b"%PDF-"));
 	assert_eq!(res!(pdf_pages(&bytes, &dir, "skeleton")), 1, "the report's count is the PDF's");
 
+	// The evaluator's own walking skeleton, a show rule and all, passes strict as one page.
+	let fixture = res!(std::fs::read_to_string(
+		Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval/skeleton/skeleton.typ")));
+	let made = res!(must_pdf(inst.compile_pdf(&strict(&[("/main.typ", &fixture)]))));
+	assert!(made.report.diagnostics.is_empty() && made.report.pages == 1, "{:?}", made.report.diagnostics);
+	assert_eq!(res!(pdf_pages(&pdf_of(&made), &dir, "fixture")), 1);
+
 	// Typst's own warning stands beside the PDF; strict does not refuse it.
 	let made = res!(must_pdf(inst.compile_pdf(&strict(&[
 		("/main.typ", "#import \"t.typ\": doc as doc\nBody text.\n"),
@@ -558,7 +565,8 @@ fn the_vector_door_gives_one_svg_per_page_and_refuses_as_the_pdf_door_does() -> 
 	assert_eq!(svg.report.pages, 3);
 	assert_eq!(res!(pdf_pages(&pdf_of(&pdf), &dir, "vector")), 3, "the PDF door's count");
 	for (i, s) in svg.product.iter().enumerate() {
-		assert!(s.starts_with("<svg") || s.contains("<svg"), "page {} is an SVG document", i + 1);
+		assert!(s.contains("<svg"), "page {} is an SVG document", i + 1);
+		assert!(s.contains("class=\"tsel\""), "page {} carries its selectable text layer", i + 1);
 	}
 	let refused = match inst.compile_svg(&strict(&[("/main.typ", "")])) {
 		Ok(_)	=> return Err(err!("The vector door compiled a main that sets no content."; Test)),

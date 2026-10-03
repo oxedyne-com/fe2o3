@@ -114,7 +114,8 @@ check('queryProject null for a selector that does not evaluate', (aus.compilePro
 
 // The other doors.
 const svg = aus.compileProjectVector(project(SKELETON));
-check('vector', Array.isArray(svg.svg) && svg.svg.length === 1 && svg.svg[0].includes('<svg') && svg.pages === 1);
+check('vector', Array.isArray(svg.svg) && svg.svg.length === 1 && svg.svg[0].includes('<svg')
+	&& svg.svg[0].includes('class="tsel"') && svg.pages === 1);
 const delta = aus.compileProjectDelta(project('= Delta\nbody\n', { known: [] }));
 check('delta', Array.isArray(delta.order) && delta.order.length === 1 && delta.reset === true
 	&& delta.changed.length === 1 && delta.version >= 1 && Array.isArray(delta.needs), JSON.stringify(Object.keys(delta)));
