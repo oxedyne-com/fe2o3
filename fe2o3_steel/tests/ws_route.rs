@@ -278,7 +278,7 @@ async fn test_ws_route_relays_handshake_and_bytes_00() -> Outcome<()> {
     };
     assert_eq!(seen.path, "/ws");
     assert_eq!(seen.ws_key.as_deref(), Some(key.as_str()));
-    assert_eq!(seen.forwarded.as_deref(), Some("203.0.113.9:51000"));
+    assert_eq!(seen.forwarded.as_deref(), Some("203.0.113.9"));
     assert_eq!(seen.host.as_deref(), Some("127.0.0.1"),
         "the Host header belongs to this hop, not to the browser's original");
 

@@ -447,6 +447,62 @@ mod tests {
         Ok(())
     }
 
+    /// Every `X-Forwarded-For` line in a request head this hop wrote, in order.
+    fn xff_values(head: &str) -> Vec<String> {
+        head.split("\r\n")
+            .filter_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.trim().eq_ignore_ascii_case("x-forwarded-for"))
+            .map(|(_, value)| value.trim().to_string())
+            .collect()
+    }
+
+    /// The value this hop writes into `X-Forwarded-For` is an address, and nothing but one.
+    ///
+    /// It used to be the whole `SocketAddr` -- `203.0.113.7:51000` -- which no reader that parses
+    /// the field as an `IpAddr` can take. The oxegen test peer was such a reader: it failed to
+    /// parse the value, fell back to the loopback hop, and so counted every tester behind Steel as
+    /// one address (seen 2026-10-04, five wrong codes from karri locked argonaut out). The
+    /// integration tests had hand-written a bare address, so none of them met the real header.
+    ///
+    /// Both builders are checked, over a v4 peer, a v6 peer and a v4-mapped v6 peer (which a
+    /// dual-stack listener reports for a v4 client, and which is written as the v4 address it is),
+    /// untrusted and trusted. Under a trusted peer the caller's chain is kept, so the check is on
+    /// the last line, which is the hop's.
+    #[test]
+    fn test_x_forwarded_for_is_a_bare_address_00() -> Outcome<()> {
+        let cases = [
+            ("203.0.113.7:51000",            "203.0.113.7"),
+            ("[2001:db8::7]:51000",          "2001:db8::7"),
+            ("[::ffff:203.0.113.7]:51000",   "203.0.113.7"),
+        ];
+        let caller = HttpMessage {
+            header: res!(HttpHeader::parse(
+                fmt!("GET /ws HTTP/1.1\r\nHost: app.example\r\nX-Forwarded-For: 9.9.9.9\r\n"),
+                Some(true))),
+            ..Default::default()
+        };
+        for (peer, want) in cases {
+            let peer = res!(peer.parse::<SocketAddr>(), Test);
+            let want = res!(want.parse::<IpAddr>(), Test);
+            let trusting = res!(ForwardedPolicy::new(&[fmt!("0.0.0.0/0"), fmt!("::/0")]));
+            for policy in [ForwardedPolicy::none(), trusting] {
+                for head in [
+                    build_upgrade_request_head("/ws", "127.0.0.1", &caller, &peer, &policy),
+                    build_proxy_request_head("GET", "/ws", "127.0.0.1", &caller, &peer, &policy, 0),
+                ] {
+                    let values = xff_values(&head);
+                    let last = res!(values.last().ok_or_else(|| err!(
+                        "The hop wrote no X-Forwarded-For:\n{}", head; Test, Missing)));
+                    let got = res!(last.parse::<IpAddr>().map_err(|e| err!(e,
+                        "X-Forwarded-For '{}' is not an address, so a reader that parses it \
+                        falls back to the loopback hop:\n{}", last, head; Test, Invalid, Decode)));
+                    assert_eq!(got, want, "the address written is not the peer's:\n{}", head);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// A caller's `multipart/form-data` reaches the upstream still naming its top
     /// level.
     ///
