@@ -361,7 +361,7 @@ impl<T: StrTest> Sink<T> {
         }
         // The body's device is a label. It names no file and keys no rate.
         let device = get(&req, "device").and_then(|d| d.get_string()).unwrap_or_default();
-        let device = clip(&scrub(&device), self.gates.max_tag);
+        let device = self.label(&device);
 
         if !res!(self.floor.admit(&key.join("/"), now_ms)) {
             return Ok(Posted::Refused(Refusal::TooFast));
@@ -384,7 +384,7 @@ impl<T: StrTest> Sink<T> {
     /// A row's JSON is fitted to `max_data` by dropping or trimming its largest string, which
     /// keeps it valid JSON, as `Row::fit` explains.
     pub fn write(&self, key: &[&str], device: &str, rows: &[Row], now_ms: u64) -> Outcome<usize> {
-        let device = clip(&scrub(device), self.gates.max_tag);
+        let device = self.label(device);
         let mut text = String::new();
         for row in rows {
             let covered = self.redact.row(row);
@@ -394,6 +394,16 @@ impl<T: StrTest> Sink<T> {
         }
         res!(self.append(key, &text, now_ms));
         Ok(rows.len())
+    }
+
+    // A device label as it is written beside each line: scrubbed, clipped, and covered like any
+    // other string a client sends, since a label is as free to carry a secret as a row is.
+    fn label(&self, device: &str) -> String {
+        let device = clip(&scrub(device), self.gates.max_tag);
+        match self.redact.text(&device) {
+            Some(covered)   => covered,
+            None            => device,
+        }
     }
 
     // One posted row, as it will be written: scrubbed, covered, then clipped.
