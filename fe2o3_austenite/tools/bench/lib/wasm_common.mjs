@@ -57,24 +57,43 @@ export async function loadAustenite(vendorDir) {
 /// the bundled font set, exactly as `getCompiler()` does in `www/js/typst.js`:
 /// a dummy access model (sources are injected, nothing is read from disk) and
 /// the same five bundled fonts.
-export async function loadTypstTs(vendorDir) {
+///
+/// A project's own fonts and binary assets, as `gather.mjs` returns them, are
+/// added the way Daimond adds them: the fonts after the bundled ones, each by
+/// `add_raw_font`; the assets into the shadow filesystem by `map_shadow`, after
+/// every `reset_shadow`. A compile that carries its own `assets` uses those
+/// instead.
+///
+/// # Arguments
+/// * `project` - `{ fonts: [[name, Uint8Array]], assets: [[shadowPath, Uint8Array]] }`.
+export async function loadTypstTs(vendorDir, project = {}) {
 	const glue = pathToFileURL(path.join(vendorDir, 'typst_ts_web_compiler.mjs')).href;
 	const wasmPath = path.join(vendorDir, 'typst_ts_web_compiler_bg.wasm');
 	const mod = await import(glue);
-	await mod.default(fs.readFileSync(wasmPath));
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
 	const builder = new mod.TypstCompilerBuilder();
 	builder.set_dummy_access_model();
 	for (const name of FONTS) {
 		const buf = fs.readFileSync(path.join(vendorDir, 'fonts', name));
 		await builder.add_raw_font(buf);
 	}
+	for (const [, buf] of project.fonts ?? []) {
+		await builder.add_raw_font(buf);
+	}
 	const compiler = await builder.build();
+	const ownAssets = project.assets ?? [];
 	let lastMain = null;
 	function ensureSources(project) {
 		compiler.reset_shadow();
 		for (const [p, text] of project.sources) {
 			if (compiler.add_source(p, text) === false) {
 				throw new Error(`typst.ts refused source ${p}`);
+			}
+		}
+		for (const [p, bytes] of project.assets ?? ownAssets) {
+			if (compiler.map_shadow(p, bytes) === false) {
+				throw new Error(`typst.ts refused asset ${p}`);
 			}
 		}
 		lastMain = project.main;
