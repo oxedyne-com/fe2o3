@@ -1620,3 +1620,26 @@ mod tap {
         assert_eq!(Dir::Out.kind(), "frame.out");
     }
 }
+
+/// A device label is a string a client sends like any other: one that holds a credential is covered
+/// before it is written beside each line, by the post and by a caller's own write.
+#[test]
+fn a_device_label_that_holds_a_credential_is_covered() -> Outcome<()> {
+    let s = Scratch::new("devsecret");
+    let sink = Sink::new(s.dir(), Gates::default()).with_redact(Redact::new().with_head(0).with_test(Shapes));
+    // Assembled here and not written down, so the source holds no credential for a hook to find.
+    let key = fmt!("{}{}{}", "sk_", "live_", "Qm9xZ3RwYWJjZGVmZ2hpamtsbW5v");
+    assert_eq!(stored(res!(sink.post(&["k"], &body(&key, &[(1, "a", "x")]), T0))), 1);
+    let rows = vec![Row::new("src", 1, "b", T0, "note")];
+    res!(sink.write(&["w"], &key, &rows, T0 + 5_000));
+    for name in ["k", "w"] {
+        let text = res!(fs::read_to_string(sink.path(&[name])), IO, File, Read);
+        assert!(!text.contains(&key), "the label is covered in {}: {}", name, text);
+        assert!(text.contains("[redacted"), "and says it was covered in {}: {}", name, text);
+    }
+    // An ordinary label is left alone.
+    assert_eq!(stored(res!(sink.post(&["plain"], &body("devABC", &[(1, "a", "x")]), T0))), 1);
+    let text = res!(fs::read_to_string(sink.path(&["plain"])), IO, File, Read);
+    assert!(text.contains("\"device\":\"devABC\""), "{}", text);
+    Ok(())
+}
