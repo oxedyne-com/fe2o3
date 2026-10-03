@@ -12,7 +12,7 @@
 // native ones. After the case lines come `interop <name> ok` lines for the surface the cases do not reach: the
 // PDF copy-out, the other doors, the package calls, `needs`, `queryProject` and `engineInfo`.
 //
-//   node tools/bench/door_smoke.mjs --pkg DIR [--expect FILE] [--git SHA]
+//   node tools/bench/door_smoke.mjs --pkg DIR [--expect FILE] [--git SHA] [--delta]
 //
 // Run it under a memory cap, as every heavy job on this host is:
 //   systemd-run --user --scope --quiet -p MemoryMax=3G --slice=claude-rc.slice node tools/bench/door_smoke.mjs --pkg DIR
@@ -21,6 +21,10 @@
 //   --pkg DIR      the wasm-pack output directory (required)
 //   --expect FILE  fail unless the case lines equal the lines in FILE
 //   --git SHA      fail unless `engineInfo().git` is exactly SHA (a build from a committed tree)
+//   --delta        also drive the live view's changed-only delta, `compileProjectDelta`, over six pages: the
+//                  `order` is as long as `pages`, every changed SVG holds the `.tsel` text layer, an unchanged
+//                  second call sends no SVG, a one-letter edit sends one page, a refusal leaves `version`
+//                  where it was, and a page that differs only in its face has another id
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -157,6 +161,72 @@ if (file !== null) {
 	const expected = readFileSync(file, 'utf8').split('\n').filter((l) => l.length > 0);
 	check('case lines equal the native lines', JSON.stringify(expected) === JSON.stringify(lines),
 		`expected ${JSON.stringify(expected)}`);
+}
+
+// The live view's delta (G10, the engine's side).
+if (process.argv.includes('--delta')) {
+	const NAMES = ['alpha', 'bravo', 'charlie', 'delta', 'echo', 'foxtrot'];
+	const six = (edit) => '#set page(width: 220pt, height: 100pt, margin: 12pt)\n' + NAMES.map((n, k) =>
+		(k > 0 ? '#pagebreak()\n' : '') + `Page ${n} holds the ${edit === k ? 'quarts' : 'quartz'} of paragraph ${k} alone.\n`).join('');
+	const hasTsel = (svg) => svg.includes('.tsel { fill: transparent; }') && svg.includes('<text class="tsel">');
+	const key = (r) => JSON.stringify(r.order);
+	// The characters of the selectable layer, spaces dropped.
+	const layerText = (svg) => [...svg.matchAll(/<tspan[^>]*>([^<]*)<\/tspan>/g)].map((m) => m[1]).join('').replace(/\s+/g, '');
+
+	const first = aus.compileProjectDelta(project(six(null), { known: [] }));
+	first.order = first.order || [];
+	first.changed = first.changed || [];
+	check('delta order length equals pages', Array.isArray(first.order) && first.pages === 6
+		&& first.order.length === first.pages && first.reset === true && first.version >= 1,
+		JSON.stringify({ pages: first.pages, order: first.order && first.order.length, error: first.error }));
+	check('delta ids are opaque decimal strings', first.order.every((id) => typeof id === 'string' && /^[0-9]+$/.test(id)));
+	check('delta every changed svg holds the .tsel layer', first.changed.length === new Set(first.order).size
+		&& first.changed.every((c) => first.order.includes(c.id) && hasTsel(c.svg)),
+		`${first.changed.length} changed`);
+
+	const second = aus.compileProjectDelta(project(six(null), { known: first.order }));
+	second.order = second.order || [];
+	second.changed = second.changed || [];
+	check('delta an unchanged second call sends no svg', second.changed.length === 0 && second.reset === false
+		&& key(second) === key(first) && second.version === first.version + 1,
+		JSON.stringify({ changed: second.changed.length, reset: second.reset, version: second.version }));
+
+	const edited = aus.compileProjectDelta(project(six(2), { known: first.order }));
+	edited.order = edited.order || [];
+	edited.changed = edited.changed || [];
+	check('delta a one-letter edit sends the one page', edited.order.length === 6 && edited.changed.length === 1
+		&& edited.changed[0].id === edited.order[2] && edited.order[2] !== first.order[2]
+		&& edited.order.every((id, i) => i === 2 || id === first.order[i])
+		&& hasTsel(edited.changed[0].svg) && layerText(edited.changed[0].svg).includes('quarts'),
+		JSON.stringify({ changed: edited.changed.length }));
+
+	const refusals = [
+		['a missing font', '#set text(font: "Nope Sans")\nx\n', 'missing_font'],
+		['a body that sets nothing', '#context none\n', 'internal'],
+		['an unknown name', '#nonesuch()\n', 'unknown_variable'],
+	];
+	for (const [what, text, kind] of refusals) {
+		const r = aus.compileProjectDelta(project(text, { known: first.order }));
+		check(`delta ${what} is refused`, typeof r.error === 'string' && ((r.diagnostics || [])[0] || {}).kind === kind
+			&& r.version === undefined && Array.isArray(r.needs), String(r.error));
+	}
+	const blank = aus.compileProjectDelta(project('#context []\n', { known: [] }));
+	const at = (blank.diagnostics || [])[0] || {};
+	check('delta a context that gives nothing is refused at 1:1', blank.error !== undefined && at.file === '/main.typ'
+		&& at.line === 1 && at.col === 1, JSON.stringify(blank.diagnostics && blank.diagnostics[0]));
+	const after = aus.compileProjectDelta(project(six(null), { known: first.order }));
+	check('delta the refusals left the version where it was', after.version === edited.version + 1,
+		`${after.version} after ${edited.version}`);
+
+	const raw = (wrap) => `#set page(width: 220pt, height: 60pt, margin: 8pt)\n${wrap('raw("hello world")')}\n`;
+	const regular = aus.compileProjectDelta(project(raw((r) => '#' + r), { known: [] }));
+	regular.order = regular.order || [];
+	regular.changed = regular.changed || [];
+	const bold = aus.compileProjectDelta(project(raw((r) => `#strong(${r})`), { known: regular.order }));
+	bold.order = bold.order || [];
+	bold.changed = bold.changed || [];
+	check('delta a page that differs only in its face has another id', bold.order[0] !== regular.order[0]
+		&& bold.changed.length === 1 && bold.changed[0].svg !== regular.changed[0].svg);
 }
 
 if (failures.length > 0) {
