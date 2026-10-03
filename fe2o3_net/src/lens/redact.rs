@@ -24,6 +24,8 @@ use oxedyne_fe2o3_text::secret::{
     scrub,
 };
 
+use std::collections::HashSet;
+
 
 // The walk's bound, as in `redact`. A `Dat` cannot hold a cycle, so this is a depth bound alone.
 const MAX_DEPTH: usize = 40;
@@ -184,6 +186,130 @@ impl StrTest for Shapes {
     fn hit_id(&self, s: &str) -> bool { secret::holds(s) || scrub::hit(s, true) }
 }
 
+/// A test that fires when either of two does, so an app can add its own to the stock shapes:
+/// `Or(Shapes, Phrase::new(words, 8))`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Or<A, B>(pub A, pub B);
+
+impl<A: StrTest, B: StrTest> StrTest for Or<A, B> {
+    fn hit(&self, s: &str) -> bool { self.0.hit(s) || self.1.hit(s) }
+    fn hit_id(&self, s: &str) -> bool { self.0.hit_id(s) || self.1.hit_id(s) }
+}
+
+/// A run of words from a caller's list: `n` of them in a row are a secret.
+///
+/// An app whose passphrases are drawn from a list of words (Oxegen's are eight words of the EFF
+/// large list) cannot name the secret by shape, since nothing about a word is secret, but a string
+/// in which `n` of the list's words stand together is a passphrase or near enough to one that no
+/// row may keep it. Words are the runs of ASCII letters in the text, whatever separates them
+/// (a space, a hyphen, a comma, a line break, a digit, a letter outside ASCII) and whatever the
+/// case; any run of letters that is not on the list breaks the run. The list is the caller's, so a
+/// second app passes its own and the test is the same.
+///
+/// A list entry may hold hyphens (the EFF list has `drop-down`, `felt-tip`, `t-shirt` and
+/// `yo-yo`). Where the text spells such an entry, hyphens and all, it counts as the one word it is,
+/// and the longest entry wins. Splitting on every non-letter cannot see those four entries, and
+/// breaks a passphrase that holds one into runs shorter than eight.
+///
+/// This is the Rust half of `createRunGuard` in `redact.js`, and `tests/data/lens_phrase.tsv` holds
+/// the two to the same answers.
+#[derive(Clone, Debug)]
+pub struct Phrase {
+    words:  HashSet<String>,    // lower case
+    n:      usize,              // words in a row that make a secret
+    parts:  usize,              // the most hyphen-joined parts any entry has
+}
+
+impl Phrase {
+
+    /// A test over `words`, any case, firing on `n` in a row (at least one).
+    pub fn new<'a, I: IntoIterator<Item = &'a str>>(words: I, n: usize) -> Self {
+        let words: HashSet<String> = words.into_iter()
+            .map(|w| w.trim().to_ascii_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let parts = words.iter().map(|w| w.matches('-').count() + 1).max().unwrap_or(1);
+        Self { words, n: n.max(1), parts }
+    }
+
+    // The runs of ASCII letters in `b`, as byte ranges.
+    fn tokens(b: &[u8]) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut at = None;
+        for (i, c) in b.iter().enumerate() {
+            match (c.is_ascii_alphabetic(), at) {
+                (true, None)        => at = Some(i),
+                (false, Some(from)) => {
+                    out.push((from, i));
+                    at = None;
+                },
+                _ => {},
+            }
+        }
+        if let Some(from) = at {
+            out.push((from, b.len()));
+        }
+        out
+    }
+
+    // How many tokens the word starting at token `i` takes up: the longest hyphen-joined entry of
+    // the list that the text spells, else the token alone if it is a word, else none.
+    fn word_at(&self, s: &str, t: &[(usize, usize)], i: usize) -> usize {
+        let mut chain = 1;
+        while chain < self.parts && i + chain < t.len() && &s[t[i + chain - 1].1..t[i + chain].0] == "-" {
+            chain += 1;
+        }
+        for k in (2..=chain).rev() {
+            if self.words.contains(&s[t[i].0..t[i + k - 1].1].to_ascii_lowercase()) {
+                return k;
+            }
+        }
+        if self.words.contains(&s[t[i].0..t[i].1].to_ascii_lowercase()) { 1 } else { 0 }
+    }
+
+    /// The byte ranges of `s` that hold `n` words or more in a row, each running from the first
+    /// word's first letter to the last word's last, with whatever stood between the words.
+    pub fn spans(&self, s: &str) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        if s.len() < self.n.saturating_mul(2).saturating_sub(1) {
+            return out;
+        }
+        let t = Self::tokens(s.as_bytes());
+        let (mut from, mut to, mut run) = (0usize, 0usize, 0usize);
+        let mut i = 0;
+        while i < t.len() {
+            let took = self.word_at(s, &t, i);
+            if took == 0 {
+                if run >= self.n {
+                    out.push((from, to));
+                }
+                run = 0;
+                i += 1;
+                continue;
+            }
+            if run == 0 {
+                from = t[i].0;
+            }
+            to = t[i + took - 1].1;
+            run += 1;
+            i += took;
+        }
+        if run >= self.n {
+            out.push((from, to));
+        }
+        out
+    }
+
+    /// Does `s` hold `n` words of the list in a row?
+    pub fn has(&self, s: &str) -> bool {
+        !self.spans(s).is_empty()
+    }
+}
+
+impl StrTest for Phrase {
+    fn hit(&self, s: &str) -> bool { self.has(s) }
+}
+
 /// A place a caller knows holds a secret, whatever it is called.
 #[derive(Clone, Debug)]
 pub enum Deny {
@@ -297,6 +423,14 @@ impl<T: StrTest> Redact<T> {
             *v = nv;
         }
         out
+    }
+
+    /// The caller's string test.
+    pub fn test(&self) -> &T { &self.test }
+
+    /// The fingerprint this redactor writes over a string it covers, with its own head.
+    pub fn mark(&self, s: &str) -> String {
+        fingerprint(s, self.head)
     }
 
     /// The fingerprint of a free string if the caller's test fires on it.
@@ -511,6 +645,30 @@ mod tests {
         assert!(!secret_name(""));
         assert!(secret_name_loose("monkey"), "key$ is boundary-free");
         assert!(!secret_name_loose("keyboard"));
+    }
+
+    #[test]
+    fn a_phrase_is_n_list_words_in_a_row_whatever_stands_between() {
+        let p = Phrase::new(["red", "green", "blue"], 3);
+        assert!(p.hit("Red, GREEN; blue"));
+        assert!(p.hit("red1green2blue"));
+        assert!(!p.hit("red green"));
+        assert!(!p.hit("red green purple blue"), "a stranger breaks the run");
+        assert_eq!(p.spans("x red green blue y red"), vec![(2, 16)]);
+    }
+
+    #[test]
+    fn a_hyphenated_entry_is_one_word_where_the_text_spells_it() {
+        let p = Phrase::new(["red", "t-shirt", "blue"], 3);
+        assert!(p.hit("red t-shirt blue"), "the entry is one word");
+        assert!(!p.hit("red t shirt blue"), "and spelled otherwise it is not");
+        assert!(!p.hit("red t-shirts blue"));
+    }
+
+    #[test]
+    fn either_of_two_tests_is_a_test() {
+        let t = Or(|s: &str| s.contains("one"), Phrase::new(["a", "b"], 2));
+        assert!(t.hit("one") && t.hit("a b") && !t.hit("a c b"));
     }
 
     #[test]

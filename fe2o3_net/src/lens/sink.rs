@@ -27,6 +27,10 @@
 //! directory with `rsync`, which is free to rewrite timestamps.
 
 use super::{
+    chunk::{
+        self,
+        Verdict,
+    },
     redact::{
         fingerprint,
         NoTest,
@@ -366,12 +370,29 @@ impl<T: StrTest> Sink<T> {
         if !res!(self.floor.admit(&key.join("/"), now_ms)) {
             return Ok(Posted::Refused(Refusal::TooFast));
         }
-        let mut text = String::new();
+        let mut posted = Vec::with_capacity(rows.len());
         for r in rows {
             let ts   = get(r, "ts").and_then(|d| d.get_i64()).unwrap_or(0);
             let tag  = get(r, "tag").and_then(|d| d.get_string()).unwrap_or_default();
             let data = get(r, "data").and_then(|d| d.get_string()).unwrap_or_default();
-            text.push_str(&self.entry(ts, &tag, &data).line(&device, now_ms));
+            posted.push((ts, tag, data));
+        }
+        // The chunk rows of a bundle are judged by the text they encode, together (see `chunk`).
+        let seen: Vec<(String, String)> = posted.iter()
+            .map(|(_, tag, data)| (
+                clip(&scrub(tag), self.gates.max_tag),
+                clip(&scrub(data), self.gates.max_data),
+            ))
+            .collect();
+        let verdicts = chunk::judge(self.redact.test(), &seen);
+        let mut text = String::new();
+        for (((ts, tag, data), (stag, sdata)), verdict) in posted.iter().zip(seen).zip(verdicts) {
+            let entry = match verdict {
+                Verdict::Row    => self.entry(*ts, tag, data),
+                Verdict::Clean  => Entry { ts: *ts, tag: stag, data: sdata },
+                Verdict::Hit    => Entry { ts: *ts, tag: stag, data: self.redact.mark(&sdata) },
+            };
+            text.push_str(&entry.line(&device, now_ms));
         }
         res!(self.append(key, &text, now_ms));
         Ok(Posted::Stored(rows.len()))

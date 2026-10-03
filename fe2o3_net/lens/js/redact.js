@@ -287,6 +287,105 @@ export {
 	scrubText,
 };
 
+// ── The word-run test ────────────────────────────────────────────────
+
+/// A test over a caller's word list: `n` of its words in a row (eight unless told) are a secret.
+///
+/// An app whose passphrases are drawn from a list of words (Oxegen's are eight words of the EFF large
+/// list) cannot name the secret by shape, since nothing about a word is secret, but a string in which
+/// `n` of the list's words stand together is a passphrase or near enough to one that no row may keep
+/// it. A word is a run of ASCII letters, whatever separates it from the next (a space, a hyphen, a
+/// comma, a line break, a digit, a letter outside ASCII) and in any case; a run of letters that is not
+/// on the list breaks the run. A list entry may hold hyphens (the EFF list has `drop-down`, `felt-tip`,
+/// `t-shirt` and `yo-yo`): where the text spells such an entry, hyphens and all, it is the one word it
+/// is, and the longest entry wins. Splitting on every non-letter cannot see those four, and breaks a
+/// passphrase that holds one into runs shorter than eight.
+///
+/// `words` is an iterable of words, or a function that answers one (or null while the list is not
+/// there yet, when the guard finds nothing). Returns `{ spans, has, mask, deep }`:
+///
+///   spans(s)         the `[start, end)` of each stretch of `n` words or more, from the first word's
+///                    first letter to the last word's last, with what stood between the words;
+///   has(s)           is there one;
+///   mask(s, mark)    `s` with each such stretch replaced by `mark(stretch)`, which must show nothing of it;
+///   deep(v, mark)    a deep copy of any JSON-shaped value with every string, and every key, masked.
+///
+/// The Rust half is `fe2o3_net::lens::Phrase`; `tests/data/lens_phrase.tsv` holds the two to the same
+/// answers.
+export function createRunGuard(words, n) {
+	var RUN = n == null ? 8 : Math.max(1, n | 0);
+	var set = null, parts = 1;
+
+	function list() {
+		if (set) return set;
+		var w = null;
+		try { w = typeof words === 'function' ? words() : words; } catch (e) { w = null; }
+		// An array has a length, a Set does not: either may serve, and a list of nothing is no list.
+		if (w && (w.length === undefined || w.length > 0)) {
+			var s = new Set();
+			w.forEach(function (x) {
+				x = String(x).trim().toLowerCase();
+				if (x) { s.add(x); parts = Math.max(parts, x.split('-').length); }
+			});
+			set = s;
+		}
+		return set;
+	}
+
+	// How many tokens the word starting at token `i` takes up: the longest hyphen-joined entry the text
+	// spells, else the token alone if it is a word, else none.
+	function wordAt(s, t, i) {
+		var chain = 1, k;
+		while (chain < parts && i + chain < t.length && s.slice(t[i + chain - 1][1], t[i + chain][0]) === '-') chain++;
+		for (k = chain; k >= 2; k--) {
+			if (set.has(s.slice(t[i][0], t[i + k - 1][1]).toLowerCase())) return k;
+		}
+		return set.has(s.slice(t[i][0], t[i][1]).toLowerCase()) ? 1 : 0;
+	}
+
+	function spans(s) {
+		if (!list() || typeof s !== 'string' || s.length < RUN * 2 - 1) return [];
+		var t = [], re = /[A-Za-z]+/g, m;
+		while ((m = re.exec(s)) !== null) t.push([m.index, m.index + m[0].length]);
+		var out = [], from = 0, to = 0, run = 0, i = 0, took;
+		while (i < t.length) {
+			took = wordAt(s, t, i);
+			if (!took) {
+				if (run >= RUN) out.push([from, to]);
+				run = 0; i += 1;
+				continue;
+			}
+			if (!run) from = t[i][0];
+			to = t[i + took - 1][1];
+			run += 1; i += took;
+		}
+		if (run >= RUN) out.push([from, to]);
+		return out;
+	}
+
+	function has(s) { return spans(s).length > 0; }
+
+	function mask(s, mark) {
+		var sp = spans(s);
+		if (!sp.length) return s;
+		var out = '', at = 0;
+		sp.forEach(function (x) { out += s.slice(at, x[0]) + mark(s.slice(x[0], x[1])); at = x[1]; });
+		return out + s.slice(at);
+	}
+
+	function deep(v, mark, d) {
+		d = d || 0;
+		if (typeof v === 'string') return mask(v, mark);
+		if (v == null || typeof v !== 'object' || d > 40) return v;
+		if (Array.isArray(v)) return v.map(function (x) { return deep(x, mark, d + 1); });
+		var o = {};
+		Object.keys(v).forEach(function (k) { o[mask(k, mark)] = deep(v[k], mark, d + 1); });
+		return o;
+	}
+
+	return { spans: spans, has: has, mask: mask, deep: deep };
+}
+
 // ── The redactor: names, the caller's hooks, and the walk ────────────
 
 var MAX_DEPTH = 40;
