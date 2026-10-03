@@ -171,6 +171,17 @@ impl Pair {
 	pub fn is_tag(&self) -> bool { self.tag.is_some() }
 }
 
+/// Does a realised document set any content? Spaces, paragraph breaks, page breaks and column breaks do not,
+/// and a tag only marks a place; any other element does, though it draws nothing, as a vertical space or an
+/// empty box does. A `context` that gives nothing, a `set` rule and a `let` leave no element, and the furniture
+/// a `set page` names is laid out beside the body and is no part of it.
+pub fn sets_content(pairs: &[Pair]) -> bool {
+	pairs.iter().any(|p| !p.is_tag() && !matches!(
+		p.content.kind(),
+		Some(ElemKind::Space | ElemKind::Parbreak | ElemKind::Pagebreak | ElemKind::Colbreak),
+	))
+}
+
 /// Realises `content` under `styles`. In `Flow` mode a body that is inline only -- no paragraph break,
 /// no block-level element -- comes back ungrouped, as Typst's fragment realisation leaves it: flow sets
 /// it as one paragraph without a `par` element, so `show par` rules do not reach it.
@@ -1215,5 +1226,27 @@ pub fn label_of(pair: &Pair) -> Option<&Label> {
 	match &pair.tag {
 		Some(Tag::Start(c))	=> c.label(),
 		_					=> pair.content.label(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn pair(kind: ElemKind) -> Pair {
+		Pair::new(Content::new(kind, Vec::new(), Span::detached()), StyleChain::root())
+	}
+
+	/// Nothing, spaces, breaks and tags set nothing; any other element is content, drawn or not.
+	#[test]
+	fn a_realised_body_sets_content_unless_it_holds_only_spaces_breaks_and_tags() {
+		assert!(!sets_content(&[]));
+		assert!(!sets_content(&[
+			pair(ElemKind::Space), pair(ElemKind::Parbreak), pair(ElemKind::Pagebreak), pair(ElemKind::Colbreak),
+		]));
+		let tag = Pair::tag(Tag::End(Location(1)), StyleChain::root());
+		assert!(!sets_content(&[tag.clone(), pair(ElemKind::Space)]));
+		assert!(sets_content(&[tag, pair(ElemKind::Space), pair(ElemKind::Linebreak)]));
+		assert!(sets_content(&[pair(ElemKind::Parbreak), pair(ElemKind::Metadata)]));
 	}
 }

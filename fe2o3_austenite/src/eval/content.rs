@@ -633,16 +633,6 @@ impl Content {
 		}
 	}
 
-	/// Does the content set nothing at all: only spaces and paragraph breaks, under whatever styles? A
-	/// `context` is not blank, though it may realise to nothing: that is not known until it is laid out.
-	pub fn is_blank(&self) -> bool {
-		match self {
-			Content::Sequence(seq)	=> seq.children.iter().all(|c| c.is_blank()),
-			Content::Styled(st)		=> st.child.is_blank(),
-			Content::Elem(e)		=> matches!(e.kind, ElemKind::Space | ElemKind::Parbreak),
-		}
-	}
-
 	/// The text a reader would see, ignoring styles, as Typst's `plain-text` does for text, spaces and
 	/// breaks. Other elements contribute their `body` or `text` field when they have one.
 	pub fn plain_text(&self) -> String {
@@ -871,31 +861,5 @@ pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) 
 		Family::Model	=> lib::model::synthesise(engine, elem, styles),
 		Family::Text | Family::Layout | Family::Grid | Family::Visual | Family::Math
 			| Family::Intro | Family::Realise	=> Ok(()),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	fn seq(children: Vec<Content>) -> Content {
-		Content::Sequence(Arc::new(Sequence::new(children)))
-	}
-
-	fn elem(kind: ElemKind) -> Content {
-		Content::new(kind, Vec::new(), Span::detached())
-	}
-
-	/// Nothing, spaces and paragraph breaks set nothing, however nested; any other element, text included,
-	/// is content.
-	#[test]
-	fn content_is_blank_only_when_it_is_spaces_and_paragraph_breaks() {
-		assert!(Content::empty().is_blank());
-		assert!(seq(vec![elem(ElemKind::Space), elem(ElemKind::Parbreak)]).is_blank());
-		assert!(seq(vec![seq(vec![elem(ElemKind::Space)]), Content::empty()]).is_blank());
-		assert!(!Content::text("x").is_blank());
-		assert!(!seq(vec![elem(ElemKind::Space), Content::text("x")]).is_blank());
-		assert!(!seq(vec![seq(vec![elem(ElemKind::Parbreak), elem(ElemKind::Linebreak)])]).is_blank());
-		assert!(!elem(ElemKind::Context).is_blank());
 	}
 }

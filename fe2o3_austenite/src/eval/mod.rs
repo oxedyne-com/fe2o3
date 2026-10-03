@@ -155,6 +155,7 @@ pub struct Engine {
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
+	pub body:		Option<bool>,		// whether the pass's realised body set content; none until it is realised
 }
 
 /// The kind of an error a native function raised with `err!` and no diagnostic of its own: the kind its
@@ -178,6 +179,7 @@ impl Engine {
 			context:	Context::default(),
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),
+			body:		None,
 		}
 	}
 

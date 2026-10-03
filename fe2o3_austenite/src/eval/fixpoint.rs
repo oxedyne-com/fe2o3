@@ -164,6 +164,7 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		engine.reads = ReadLog::default();
 		engine.context = Context::default();
 		engine.fuel = fuel;
+		engine.body = None;
 		let mut builder = Builder::new();
 		let laid = layouter.lay(engine, &module.content, &styles, &mut builder, sink);
 		let pages = match laid {

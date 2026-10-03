@@ -119,6 +119,9 @@ impl Source {
 	fn ready(&mut self, engine: &mut Engine) -> Outcome<&mut VecDeque<Pair>> {
 		if let Source::Lazy(content, styles) = self {
 			let pairs = res!(realise::realise(engine, content, styles, RealiseMode::Document));
+			// What the body realises to, with its contexts resolved and its show rules applied, decides
+			// whether it sets content, never the content as it was evaluated.
+			engine.body = Some(realise::sets_content(&pairs));
 			*self = Source::Pairs(pairs.into());
 		}
 		match self {

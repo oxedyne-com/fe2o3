@@ -371,7 +371,7 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 pub struct Evaluated {
 	pub engine:	Engine,
 	pub laid:	Outcome<Laid>,
-	pub blank:	bool,			// the main module's content sets nothing ([`Content::is_blank`])
+	pub blank:	bool,			// the final pass realised a body that sets no content ([`Engine::body`])
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -396,16 +396,14 @@ pub fn assemble_eval<S: PageSink>(
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
-	let mut blank = false;
 	let laid = match eval::eval_source(&mut engine, id) {
-		Ok(module)	=> {
-			// Typst lays a main that sets nothing out as one blank page without a word, so a strict caller
-			// is told from the evaluated content, never from the page count.
-			blank = module.content.is_blank();
-			fixpoint::run(&mut engine, &module, sink)
-		},
+		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
 		Err(e)		=> Err(e),
 	};
+	// Typst lays a main that sets nothing out as one blank page without a word, so a strict caller is told
+	// from what the body realised to in the pass that stood, never from the page count nor from the content
+	// as it was evaluated: a `context` that gives nothing is an element until it is resolved.
+	let blank = engine.body == Some(false);
 	Ok(Evaluated { engine, laid, blank })
 }
 

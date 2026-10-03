@@ -219,6 +219,102 @@ fn g9_a_main_that_sets_no_content_is_refused_at_main_one_one_as_internal_though_
 	Ok(())
 }
 
+/// Typst's own run of `text` as one project: whether it compiled clean, and its pages.
+fn typst_clean_pages(dir: &Path, name: &str, text: &str) -> Outcome<(bool, usize)> {
+	let case	= dir.join(name);
+	let main	= res!(write_project(&case, &[("main.typ", text)]));
+	let pdf		= main.with_extension("pdf");
+	let (ok, _, stderr) = res!(typst(&["compile", "--diagnostic-format", "short",
+		&main.display().to_string(), &pdf.display().to_string()]));
+	let pages = if ok { res!(pdf_pages(&res!(std::fs::read(&pdf)), &case, "typst")) } else { 0 };
+	Ok((ok && stderr.trim().is_empty(), pages))
+}
+
+// A main sets content when its body, once its contexts are resolved and its show rules applied, holds an
+// element other than a space, a paragraph break, a page break or a column break. What it realises to is
+// judged, never what it evaluated to: a `context` that gives nothing is an element until it is resolved, and
+// the furniture of a `set page` is laid out beside the body and is no part of it.
+const BLANK: [(&str, &str); 14] = [
+	("context-none",		"#context none\n"),
+	("context-empty",		"#context []\n"),
+	("context-of-context",	"#context context none\n"),
+	("context-space",		"#context [ ]\n"),
+	("header-only",			"#set page(header: [x])\n"),
+	("footer-and-folio",	"#set page(footer: [y], numbering: \"1\")\n"),
+	("background-and-fill",	"#set page(background: [bg], fill: red)\n"),
+	("pagebreak",			"#pagebreak()\n"),
+	("metadata",			"#metadata(1) <m>\n"),
+	("show-all",			"#show: it => it\n"),
+	("styled-nothing",		"#align(center)[]\n"),
+	("gone-by-the-last-pass", "#context if query(<a>).len() == 0 [first pass only]\n#metadata(1) <a>\n"),
+	("set-and-let",			"#set text(size: 11pt)\n#let x = 1\n"),
+	("spaces",				"  \n\n  "),
+];
+
+const CONTENT: [(&str, &str); 9] = [
+	("vertical-space",		"#v(1cm)\n"),
+	("horizontal-space",	"#h(1cm)\n"),
+	("filled-box",			"#box(fill: red, width: 1cm, height: 1cm)\n"),
+	("empty-box",			"#box()\n"),
+	("context-space",		"#context v(1cm)\n"),
+	("context-text",		"#context [hello]\n"),
+	("furniture-and-body",	"#set page(header: [x])\nBody.\n"),
+	("styled-text",			"#text(red)[x]\n"),
+	("there-by-the-last-pass", "#context if query(<a>).len() > 0 [there]\n#metadata(1) <a>\n"),
+];
+
+#[test]
+fn a_main_whose_body_realises_to_nothing_is_refused_on_every_door_though_typst_raises_nothing() -> Outcome<()> {
+	let dir = res!(work_dir("blank-body"));
+	let mut inst = Instance::new();
+	for (name, text) in BLANK {
+		// Typst lays each out as one blank page, or more for a page break, and says nothing.
+		let (clean, pages) = res!(typst_clean_pages(&dir, name, text));
+		assert!(clean && pages >= 1, "typst compiles {} clean", name);
+		let p = strict(&[("/main.typ", text)]);
+		let pdf		= res!(must_fail(inst.compile_pdf(&p)));
+		let svg		= match inst.compile_svg(&p) {
+			Ok(_)	=> return Err(err!("The vector door compiled {}, which sets no content.", name; Test)),
+			Err(f)	=> f,
+		};
+		for (door, f) in [("pdf", &pdf), ("svg", &svg)] {
+			assert_eq!(site(f), "/main.typ:1:1", "{} on the {} door: {:?}", name, door, f.head);
+			assert_eq!(f.head.kind, DiagnosticKind::Internal, "{} on the {} door: {:?}", name, door, f.head);
+			assert!(f.head.message.contains("sets no content"), "{} on the {} door: {}", name, door, f.head.message);
+		}
+		// Not strict, the page is made.
+		let made = res!(must_pdf(inst.compile_pdf(&project(&[("/main.typ", text)]))));
+		assert!(made.report.pages >= 1, "{}", name);
+	}
+	Ok(())
+}
+
+#[test]
+fn a_main_with_any_element_in_its_body_passes_strict_though_it_sets_an_empty_looking_page() -> Outcome<()> {
+	let dir = res!(work_dir("content-body"));
+	let mut inst = Instance::new();
+	for (name, text) in CONTENT {
+		let (clean, pages) = res!(typst_clean_pages(&dir, name, text));
+		assert!(clean && pages == 1, "typst compiles {} clean to one page", name);
+		let p = strict(&[("/main.typ", text)]);
+		let pdf = res!(must_pdf(inst.compile_pdf(&p)));
+		assert_eq!(pdf.report.pages, 1, "{}", name);
+		match inst.compile_svg(&p) {
+			Ok(m)	=> assert_eq!(m.product.len(), 1, "{}", name),
+			Err(f)	=> return Err(err!("The vector door refused {}: {}", name, f.head; Test)),
+		}
+	}
+	// What the body is in the pass that stood decides it: the late content is there, as typst's page says.
+	let late = CONTENT[CONTENT.len() - 1].1;
+	let case = dir.join("late-text");
+	let main = res!(write_project(&case, &[("main.typ", late)]));
+	let pdf = main.with_extension("pdf");
+	let (ok, _, stderr) = res!(typst(&["compile", &main.display().to_string(), &pdf.display().to_string()]));
+	assert!(ok, "{}", stderr);
+	assert_eq!(res!(pdf::text_of(&pdf)), "there");
+	Ok(())
+}
+
 #[test]
 fn a_main_that_is_not_utf8_is_an_encoding_error_at_the_main() -> Outcome<()> {
 	let mut inst = Instance::new();
@@ -288,7 +384,8 @@ fn a_strict_skeleton_is_one_page_with_no_diagnostic_and_an_import_rename_stays_a
 #[test]
 fn a_document_that_does_not_settle_in_five_passes_stands_beside_the_pdf_under_strict() -> Outcome<()> {
 	// A state that feeds itself never settles; Typst stops after five passes with a warning.
-	let text = "#let s = state(\"s\", 0)\n\
+	let text = "Words.\n\
+		#let s = state(\"s\", 0)\n\
 		#context s.update(s.final() + 1)\n\
 		#context [#metadata(s.final()) <probe>]\n";
 	let dir		= res!(work_dir("unsettled"));
