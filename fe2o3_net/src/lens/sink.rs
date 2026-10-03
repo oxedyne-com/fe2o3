@@ -384,13 +384,14 @@ impl<T: StrTest> Sink<T> {
                 clip(&scrub(data), self.gates.max_data),
             ))
             .collect();
-        let verdicts = chunk::judge(self.redact.test(), &seen);
+        let verdicts = chunk::judge(&self.redact, self.gates.max_data, &seen);
         let mut text = String::new();
         for (((ts, tag, data), (stag, sdata)), verdict) in posted.iter().zip(seen).zip(verdicts) {
             let entry = match verdict {
-                Verdict::Row    => self.entry(*ts, tag, data),
-                Verdict::Clean  => Entry { ts: *ts, tag: stag, data: sdata },
-                Verdict::Hit    => Entry { ts: *ts, tag: stag, data: self.redact.mark(&sdata) },
+                Verdict::Row        => self.entry(*ts, tag, data),
+                Verdict::Clean      => Entry { ts: *ts, tag: stag, data: sdata },
+                Verdict::Hit        => Entry { ts: *ts, tag: stag, data: self.redact.mark(&sdata) },
+                Verdict::Cover(d)   => Entry { ts: *ts, tag: stag, data: d },
             };
             text.push_str(&entry.line(&device, now_ms));
         }

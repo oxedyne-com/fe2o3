@@ -126,7 +126,7 @@ pub fn fingerprint(v: &str, head: usize) -> String {
 
 // Is this a marker the redactor itself wrote? A second pass leaves it alone, since a
 // fingerprint of a fingerprint tells the reader nothing and hides the first.
-fn marker(s: &str) -> bool {
+pub(super) fn marker(s: &str) -> bool {
     s.starts_with("[redacted") && s.ends_with(']')
 }
 
@@ -142,6 +142,17 @@ pub trait StrTest: Send + Sync {
     /// [`Redact::id_key`]). A test may excuse an id from its heuristics here and keep its shapes;
     /// by default an id is held to the same test as any other string.
     fn hit_id(&self, s: &str) -> bool { self.hit(s) }
+
+    /// The byte ranges of `s`, the strings of a structure joined in order with a line break
+    /// between each, that this test calls secret for standing together. A word run is one: a
+    /// passphrase kept a word to a field is a run only once the fields are read as one text, and
+    /// the keys between the words would break it were the text the structure's own. A test of
+    /// shapes judges each string alone, as `hit` does, and answers `Vec::new()`.
+    ///
+    /// There is no default, so that a test that holds a word run cannot leave this out and have
+    /// a bundle's words go unseen without anything saying so. A test that wraps a `Phrase` hands
+    /// its `spans` on.
+    fn joined_spans(&self, s: &str) -> Vec<(usize, usize)>;
 }
 
 /// The test that never fires, for a redactor that has no string test of its own.
@@ -150,10 +161,12 @@ pub struct NoTest;
 
 impl StrTest for NoTest {
     fn hit(&self, _s: &str) -> bool { false }
+    fn joined_spans(&self, _s: &str) -> Vec<(usize, usize)> { Vec::new() }
 }
 
 impl<F: Fn(&str) -> bool + Send + Sync> StrTest for F {
     fn hit(&self, s: &str) -> bool { self(s) }
+    fn joined_spans(&self, _s: &str) -> Vec<(usize, usize)> { Vec::new() }
 }
 
 /// The stock string test: a string that holds a credential is covered whole.
@@ -184,6 +197,7 @@ impl Shapes {
 impl StrTest for Shapes {
     fn hit(&self, s: &str) -> bool { secret::holds(s) || scrub::hit(s, false) }
     fn hit_id(&self, s: &str) -> bool { secret::holds(s) || scrub::hit(s, true) }
+    fn joined_spans(&self, _s: &str) -> Vec<(usize, usize)> { Vec::new() }
 }
 
 /// A test that fires when either of two does, so an app can add its own to the stock shapes:
@@ -194,6 +208,11 @@ pub struct Or<A, B>(pub A, pub B);
 impl<A: StrTest, B: StrTest> StrTest for Or<A, B> {
     fn hit(&self, s: &str) -> bool { self.0.hit(s) || self.1.hit(s) }
     fn hit_id(&self, s: &str) -> bool { self.0.hit_id(s) || self.1.hit_id(s) }
+    fn joined_spans(&self, s: &str) -> Vec<(usize, usize)> {
+        let mut out = self.0.joined_spans(s);
+        out.extend(self.1.joined_spans(s));
+        out
+    }
 }
 
 /// A run of words from a caller's list: `n` of them in a row are a secret.
@@ -312,6 +331,7 @@ impl Phrase {
 
 impl StrTest for Phrase {
     fn hit(&self, s: &str) -> bool { self.has(s) }
+    fn joined_spans(&self, s: &str) -> Vec<(usize, usize)> { self.spans(s) }
 }
 
 /// A place a caller knows holds a secret, whatever it is called.
