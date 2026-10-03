@@ -28,6 +28,8 @@ pub mod markup;
 pub mod oracle;
 pub mod pdf;
 pub mod structure;
+#[path = "../support/typst_command.rs"]
+pub mod typst_command;
 
 use austenite::{
 	ProbeSource,

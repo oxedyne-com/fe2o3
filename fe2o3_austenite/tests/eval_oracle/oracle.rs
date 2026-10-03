@@ -24,6 +24,7 @@ use crate::harness::structure::{
 	self,
 	Sk,
 };
+use crate::harness::typst_command::typst_command;
 use crate::harness::PosRow;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -38,7 +39,7 @@ pub const PINNED: &str = "typst 0.15.";
 
 // Part of every cache key: which faces Typst was given, so that a product made with the account's own fonts is
 // never read as made without them.
-const FACES: &str = "fonts=system";
+pub const FACES: &str = "fonts=system";
 
 pub const PROBES_EXPR: &str = "query(<probe>).map(it => it.value)";
 pub const POSITIONS_EXPR: &str = "query(selector(heading).or(figure, math.equation, footnote, <probe>))\
@@ -101,23 +102,9 @@ impl Oracle {
 	}
 
 	fn command(&self, args: &[String], cwd: &Path) -> Command {
-		let mut c = match &self.cap {
-			Some(cap) => {
-				let mut c = Command::new("systemd-run");
-				c.args(["--user", "--scope", "--quiet", "-p"]);
-				c.arg(fmt!("MemoryMax={}", cap));
-				c.arg("--slice=claude-rc.slice");
-				c.arg(&self.bin);
-				c
-			}
-			None => Command::new(&self.bin),
-		};
+		let mut c = typst_command(&self.bin, self.cap.as_deref(), &self.work);
 		c.args(args);
 		c.current_dir(cwd);
-		// Typst looks for the account's own fonts under `$XDG_DATA_HOME/fonts`; a face installed there (a
-		// second Libertinus Serif of another version, say) outranks Typst's own and would move a glyph on one
-		// side only. The oracle sees the faces the system and Typst carry, whoever runs the test.
-		c.env("XDG_DATA_HOME", self.work.join("no-user-fonts"));
 		// An area that keeps packages of its own beside its fixtures lays them out as Typst's package
 		// path does, `packages/<namespace>/<name>/<version>`.
 		let own = cwd.join("packages");

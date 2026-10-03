@@ -79,6 +79,7 @@ use oxedyne_fe2o3_font::face::Role;
 use oxedyne_fe2o3_font::shape::Dir;
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::Arc;
 
 /// The oracle, or `None` after saying loudly that it was skipped on request.
@@ -88,6 +89,47 @@ fn oracle() -> Outcome<Option<Oracle>> {
 		println!("[eval-oracle] SKIPPED: EVAL_ORACLE_SKIP=1 and no typst 0.15.x -- nothing was compared");
 	}
 	Ok(o)
+}
+
+// An account whose own font folder holds a face Typst does not carry: Libertinus Mono, copied beside a fake
+// home. Typst finds it unless the run hides the account's fonts, and every run of the harness must.
+#[test]
+fn typst_runs_hide_the_accounts_own_fonts_and_go_red_when_they_do_not() -> Outcome<()> {
+	let o = match res!(oracle()) {
+		Some(o)	=> o,
+		None	=> return Ok(()),
+	};
+	let home = o.work.join("account-home");
+	let fonts = home.join(".local/share/fonts");
+	res!(std::fs::create_dir_all(&fonts));
+	let face = "LibertinusMono-Regular.otf";
+	res!(std::fs::copy(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts").join(face), fonts.join(face)));
+	let typ = o.work.join("account-home.typ");
+	res!(std::fs::write(&typ, "#set text(font: \"Libertinus Mono\")\nMono\n"));
+	let listed = |mut c: Command| -> Outcome<String> {
+		let out = res!(c.arg("fonts").env("HOME", &home).output());
+		Ok(String::from_utf8_lossy(&out.stdout).to_string())
+	};
+	let embedded = |mut c: Command, name: &str| -> Outcome<Vec<String>> {
+		let pdf = home.join(name);
+		let status = res!(c.env("HOME", &home).status());
+		assert!(status.success(), "typst did not compile {}", typ.display());
+		harness::pdf::font_names(&pdf)
+	};
+	// The premise: with nothing hidden, the face is there to be found.
+	let mut open = Command::new(&o.bin);
+	open.env_remove("XDG_DATA_HOME");
+	assert!(res!(listed(open)).lines().any(|l| l == "Libertinus Mono"), "the fake home's face was not found by an open run");
+	assert!(!res!(listed(harness::typst_command::typst_command(&o.bin, None, &o.work))).lines().any(|l| l == "Libertinus Mono"),
+		"the oracle's own run saw the account's face");
+	// The PDF builder the comparators use.
+	let mut open = Command::new(harness::pdf::TYPST);
+	open.env_remove("XDG_DATA_HOME").arg("compile").arg(&typ).arg(home.join("open.pdf"));
+	assert!(res!(embedded(open, "open.pdf")).iter().any(|n| n.starts_with("LibertinusMono")), "an open run did not embed the face");
+	let hidden = res!(harness::pdf::typst_pdf_command(&typ, &home.join("hidden.pdf"), &[]));
+	assert!(!res!(embedded(hidden, "hidden.pdf")).iter().any(|n| n.starts_with("LibertinusMono")),
+		"the PDF builder's run embedded the account's face");
+	Ok(())
 }
 
 fn harness_fixture(name: &str) -> Outcome<corpus::Fixture> {
