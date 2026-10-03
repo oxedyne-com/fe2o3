@@ -79,11 +79,13 @@ impl DaimondTypst {
 
 	/// The live-view path Daimond consumes: compiles a project to a changed-only page delta, returning
 	/// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs }`
-	/// on success or `{ error }` otherwise. The project carries `known: string[]`, the ids the consumer
-	/// still holds in its own SVG cache; only the pages whose id is not among them carry their SVG in
-	/// `changed`. A consumer that has cleared its cache sends `known: []` and gets a full resend
-	/// (`reset: true`). See [`crate::delta`] for the shape. Ids are opaque decimal strings, since a
-	/// JavaScript number cannot hold every 64-bit hash exactly.
+	/// on success or `{ error, diagnostics, skipped, needs }` otherwise, `strict` as for
+	/// [`Self::compile_project`]. The project carries `known: string[]`, the ids the consumer still holds
+	/// in its own SVG cache; only the pages whose id is not among them carry their SVG in `changed`. A
+	/// consumer that has cleared its cache sends `known: []` and gets a full resend (`reset: true`). The
+	/// `version` is this instance's tick, stepped by each delta and left where it was by a refusal. See
+	/// [`crate::delta`] for the shape. Ids are opaque decimal strings, since a JavaScript number cannot
+	/// hold every 64-bit hash exactly.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.inst.compile_delta(&project_of(project)) {

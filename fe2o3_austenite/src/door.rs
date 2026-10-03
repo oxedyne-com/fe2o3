@@ -1,15 +1,12 @@
 //! The door: every compile the wasm surface offers, as plain Rust, so that a native test drives exactly what
 //! the browser calls. [`crate::wasm`] holds only the translation between JavaScript values and these types.
 //!
-//! The evaluator serves each door but the delta. A project's files are sealed into the source map as the
-//! browser has them, so nothing the project does not hold resolves from the real filesystem, whatever the
-//! host. The source map, the image base directory and the package store are process globals, so a call
-//! takes one turn at a time. Columns on this surface count UTF-16 code units, as JavaScript counts them, and
-//! start at 1.
-//!
-//! The delta still runs the curated reader, which leaves this module with the live view's own change.
+//! The evaluator serves every door, the live view's changed-only delta included. A project's files are sealed
+//! into the source map as the browser has them, so nothing the project does not hold resolves from the real
+//! filesystem, whatever the host. The source map, the image base directory and the package store are process
+//! globals, so a call takes one turn at a time. Columns on this surface count UTF-16 code units, as JavaScript
+//! counts them, and start at 1.
 
-use crate::book;
 use crate::compile::{
 	self,
 	Cols,
@@ -21,6 +18,7 @@ use crate::delta;
 use crate::diag::DiagnosticKind;
 use crate::emit::sinks::{
 	Chunks,
+	DeltaSink,
 	PdfSink,
 	VectorSink,
 };
@@ -43,16 +41,11 @@ use crate::eval::scope::Scope;
 use crate::eval::select;
 use crate::eval::value::Value;
 use crate::flow::text::FontStore;
-use crate::fonts::{
-	self,
-	FontBook,
-};
-use crate::memo::Memo;
+use crate::fonts::FontBook;
 use crate::syntax::Span;
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_font::set::FontSet;
 
 use std::collections::HashMap;
 use std::path::{
@@ -171,13 +164,11 @@ pub struct Row {
 }
 
 /// A long-lived compiler: the embedded faces parsed once, the last good compile's introspector for queries,
-/// and the delta's own state.
+/// and the delta's version tick.
 pub struct Instance {
 	base:		Option<Arc<FontBook>>,		// none only if the embedded bytes would not parse
 	intro:		Option<Arc<Introspector>>,
-	reading:	Option<Arc<FontSet>>,		// the curated reader's set, built when the delta first runs
-	version:	u32,
-	memo:		Memo,
+	version:	u32,						// the delta's tick
 }
 
 impl Default for Instance {
@@ -191,9 +182,7 @@ impl Instance {
 		Self {
 			base:		FontBook::embedded().ok().map(Arc::new),
 			intro:		None,
-			reading:	None,
 			version:	0,
-			memo:		Memo::new(),
 		}
 	}
 
@@ -354,55 +343,16 @@ impl Instance {
 		Some(rows)
 	}
 
-	/// The changed-only page delta, through the curated reader: the live view's own path until it moves to
-	/// the evaluator. `known` is the page ids the consumer holds.
+	/// The changed-only page delta through the evaluator, the live view's path. `known` is the page ids the
+	/// consumer holds; the version is this instance's tick, stepped by a compile that produced a delta and
+	/// left where it was by one that did not, a strict refusal included, so a consumer that dispatches
+	/// compiles without awaiting each can discard a stale return by its version.
 	pub fn compile_delta(&mut self, p: &Project) -> Result<Made<delta::PageDelta>, Failure> {
-		let _turn	= turn();
-		let main	= p.main_path();
-		if let Err(e) = install_curated(p, &main) {
-			let _ = vfs::clear();
-			return Err(Failure::of(&e, &main));
+		let made = self.run(p, DeltaSink::new(&p.known, self.version), |s| s.into_delta());
+		if let Ok(m) = &made {
+			self.version = m.product.version;
 		}
-		let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.delta_inner(p, &main)));
-		let _ = vfs::clear();
-		match caught {
-			Ok(Ok(Ok((d, report))))	=> Ok(Made { product: d, report, needs: Vec::new() }),
-			Ok(Ok(Err((head, report))))	=> Err(Failure::refused(head, &report, Vec::new())),
-			Ok(Err(e))				=> Err(Failure::of(&e, &main)),
-			Err(_)					=> Err(Failure::internal(&main,
-				"the compiler panicked while assembling the document, so none was produced")),
-		}
-	}
-
-	fn delta_inner(&mut self, p: &Project, main: &Path)
-		-> Outcome<Result<(delta::PageDelta, Report), (Diagnostic, Report)>>
-	{
-		// The consumer owns the SVG cache, so it, not this instance, is the authority on which page ids are
-		// already held. A cleared cache sends `known: []` and gets a full resend rather than a blank preview.
-		let fonts = match &self.reading {
-			Some(f)	=> f.clone(),
-			None	=> {
-				let f = Arc::new(res!(fonts::libertinus()));
-				self.reading = Some(f.clone());
-				f
-			},
-		};
-		let assembled	= res!(compile::assemble(main, || Ok(fonts.clone())));
-		let empty		= assembled.blocks.is_empty();
-		let rendered	= res!(compile::author_and_run_memo(assembled, Some(&mut self.memo)));
-		let report		= Report::new(rendered.out.pages.len(), &rendered.refusals, empty);
-		// Close the memo generation, dropping block entries untouched for two compiles.
-		self.memo.sweep();
-		if p.strict {
-			if let Some(head) = report.strict_failure(main) {
-				return Ok(Err((head, report)));
-			}
-		}
-		let d = res!(delta::compute(&rendered.out.pages, &p.known, self.version));
-		// A strictly monotonic tick, so a consumer that dispatches compiles without awaiting each can discard
-		// a stale return by its version. A strict refusal does not step it.
-		self.version = d.version;
-		Ok(Ok((d, report)))
+		made
 	}
 }
 
@@ -440,29 +390,4 @@ fn install(p: &Project, main: &Path) -> Outcome<()> {
 		return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing, File));
 	}
 	vfs::install_sealed(files)
-}
-
-/// As [`install`] for the curated reader, which also routes each font to where its resolver reads from, and
-/// which falls through to the real filesystem for what the project does not hold.
-fn install_curated(p: &Project, main: &Path) -> Outcome<()> {
-	let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
-	for (path, text) in &p.sources {
-		files.insert(PathBuf::from(path), text.clone().into_bytes());
-	}
-	for (path, bytes) in &p.assets {
-		files.insert(PathBuf::from(path), bytes.clone());
-	}
-	for (path, bytes) in &p.fonts {
-		let given = PathBuf::from(path);
-		if let Some(routed) = book::project_font_path(main, &given) {
-			if routed != given {
-				files.insert(routed, bytes.clone());
-			}
-		}
-		files.insert(given, bytes.clone());
-	}
-	if !files.contains_key(main) {
-		return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing, File));
-	}
-	vfs::install(files)
 }

@@ -21,6 +21,7 @@ use harness::pdf::{
 };
 
 use oxedyne_fe2o3_austenite::compile::DiagnosticKind;
+use oxedyne_fe2o3_austenite::delta::PageDelta;
 use oxedyne_fe2o3_austenite::door::{
 	self,
 	Failure,
@@ -277,7 +278,8 @@ fn a_main_whose_body_realises_to_nothing_is_refused_on_every_door_though_typst_r
 			Ok(_)	=> return Err(err!("The vector door compiled {}, which sets no content.", name; Test)),
 			Err(f)	=> f,
 		};
-		for (door, f) in [("pdf", &pdf), ("svg", &svg)] {
+		let delta	= res!(delta_fail(&mut inst, &p));
+		for (door, f) in [("pdf", &pdf), ("svg", &svg), ("delta", &delta)] {
 			assert_eq!(site(f), "/main.typ:1:1", "{} on the {} door: {:?}", name, door, f.head);
 			assert_eq!(f.head.kind, DiagnosticKind::Internal, "{} on the {} door: {:?}", name, door, f.head);
 			assert!(f.head.message.contains("sets no content"), "{} on the {} door: {}", name, door, f.head.message);
@@ -303,6 +305,8 @@ fn a_main_with_any_element_in_its_body_passes_strict_though_it_sets_an_empty_loo
 			Ok(m)	=> assert_eq!(m.product.len(), 1, "{}", name),
 			Err(f)	=> return Err(err!("The vector door refused {}: {}", name, f.head; Test)),
 		}
+		let delta = res!(delta_made(&mut inst, &p));
+		assert_eq!(delta.product.order.len(), 1, "{}", name);
 	}
 	// What the body is in the pass that stood decides it: the late content is there, as typst's page says.
 	let late = CONTENT[CONTENT.len() - 1].1;
@@ -682,44 +686,223 @@ fn engine_info_names_the_typst_version_the_evaluator_follows() -> Outcome<()> {
 	Ok(())
 }
 
-#[test]
-fn the_delta_door_keeps_the_curated_readers_changed_only_contract_until_it_moves() -> Outcome<()> {
-	let words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma";
-	let mut text = String::new();
-	for i in 0..70 {
-		text.push_str(&fmt!("Paragraph {} {} {} {}.\n\n", i, words, words, words));
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE DELTA DOOR                                                             │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+const NAMES: [&str; 6] = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"];
+
+/// Six pages of one short paragraph each; `edit` sets one letter of the word in that page's paragraph.
+fn six_pages(edit: Option<usize>) -> String {
+	let mut t = String::from("#set page(width: 220pt, height: 100pt, margin: 12pt)\n");
+	for (k, name) in NAMES.iter().enumerate() {
+		if k > 0 {
+			t.push_str("#pagebreak()\n");
+		}
+		let word = if edit == Some(k) { "quarts" } else { "quartz" };
+		t.push_str(&fmt!("Page {} holds the {} of paragraph {} alone.\n", name, word, k));
 	}
-	let mut inst = Instance::new();
-	let mut p = project(&[("/main.typ", &text)]);
-	let first = match inst.compile_delta(&p) {
-		Ok(m)	=> m,
-		Err(f)	=> return Err(err!("The delta door refused: {}", f.head; Test)),
+	t
+}
+
+fn delta_made(inst: &mut Instance, p: &Project) -> Outcome<Made<PageDelta>> {
+	match inst.compile_delta(p) {
+		Ok(m)	=> Ok(m),
+		Err(f)	=> Err(err!("The delta door refused: {} {:?}", f.head, f.head.kind; Test)),
+	}
+}
+
+fn delta_fail(inst: &mut Instance, p: &Project) -> Outcome<Failure> {
+	match inst.compile_delta(p) {
+		Ok(_)	=> Err(err!("The delta door produced a delta where it should have refused."; Test)),
+		Err(f)	=> Ok(f),
+	}
+}
+
+/// The text a page's SVG offers for selection, with its whitespace removed: the characters of its `.tsel` layer.
+fn text_layer(svg: &str) -> String {
+	let mut out = String::new();
+	let mut rest = match svg.find("<text class=\"tsel\">") {
+		Some(i)	=> &svg[i..],
+		None	=> return out,
 	};
+	while let Some(at) = rest.find("<tspan") {
+		let span	= &rest[at..];
+		let open	= match span.find('>') { Some(i) => i + 1, None => break };
+		let close	= match span.find("</tspan>") { Some(i) => i, None => break };
+		out.push_str(&span[open..close]);
+		rest = &span[close + "</tspan>".len()..];
+	}
+	out.split_whitespace().collect()
+}
+
+/// Typst's PDF of `text` and each page's text, whitespace removed: the external fact the delta is held to.
+fn typst_page_texts(dir: &Path, name: &str, text: &str) -> Outcome<Vec<String>> {
+	let case	= dir.join(name);
+	let main	= res!(write_project(&case, &[("main.typ", text)]));
+	let pdf		= main.with_extension("pdf");
+	let (ok, _, stderr) = res!(typst(&["compile", &main.display().to_string(), &pdf.display().to_string()]));
+	assert!(ok, "typst compiles {}: {}", name, stderr);
+	let pages = res!(pdf_pages(&res!(std::fs::read(&pdf)), &case, "pages"));
+	let mut out = Vec::with_capacity(pages);
+	for n in 1..=pages {
+		let page = n.to_string();
+		let t = res!(tool("pdftotext", &["-f", &page, "-l", &page], &pdf, &["-"]));
+		out.push(t.split_whitespace().collect::<String>());
+	}
+	Ok(out)
+}
+
+#[test]
+fn the_delta_door_sends_every_page_once_then_nothing_while_the_consumer_holds_them() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &six_pages(None))]);
+	let first = res!(delta_made(&mut inst, &p));
 	let d = &first.product;
 	assert!(d.reset && d.version == 1, "a first compile is a reset at version 1");
-	assert!(d.order.len() >= 2 && first.report.pages == d.order.len(), "pages {} order {}", first.report.pages, d.order.len());
-	assert!(!d.changed.is_empty() && d.changed.iter().all(|(_, svg)| svg.contains("<svg")));
-	// The consumer holds every page, so the same document sends none.
+	assert_eq!(first.report.pages, 6);
+	assert_eq!(d.order.len(), first.report.pages, "order names every page");
+	assert_eq!(d.changed.len(), 6, "a reset carries every page");
+	let ids: BTreeSet<u64> = d.order.iter().copied().collect();
+	assert_eq!(ids.len(), 6, "six different pages, six different ids");
+	for (id, svg) in &d.changed {
+		assert!(ids.contains(id) && svg.contains("<svg") && svg.contains("class=\"tsel\""), "{}", id);
+	}
+	// The consumer holds every page, so the same document sends none, and the version moves on.
 	p.known = d.order.clone();
-	let second = match inst.compile_delta(&p) {
-		Ok(m)	=> m,
-		Err(f)	=> return Err(err!("The delta door refused: {}", f.head; Test)),
-	};
+	let second = res!(delta_made(&mut inst, &p));
 	assert!(!second.product.reset && second.product.changed.is_empty() && second.product.version == 2);
 	assert_eq!(second.product.order, first.product.order);
-	// A refusal (the reader fails a family no font declares outright) does not step the version.
-	let mut bad = strict(&[("/main.typ", "#set text(font: \"Nope Sans\")\nx\n")]);
-	bad.known = p.known.clone();
-	let refused = match inst.compile_delta(&bad) {
-		Ok(_)	=> return Err(err!("The delta door compiled what strict refuses."; Test)),
-		Err(f)	=> f,
-	};
-	assert_eq!(refused.head.kind, DiagnosticKind::MissingFont, "{:?}", refused.head);
-	let third = match inst.compile_delta(&p) {
+	// A cleared cache is a reset: a resend over a blank.
+	p.known = Vec::new();
+	let third = res!(delta_made(&mut inst, &p));
+	assert!(third.product.reset && third.product.changed.len() == 6 && third.product.version == 3);
+	Ok(())
+}
+
+#[test]
+fn a_one_letter_edit_sends_exactly_the_pages_whose_text_typst_says_changed() -> Outcome<()> {
+	let dir = res!(work_dir("delta-edit"));
+	let was = res!(typst_page_texts(&dir, "was", &six_pages(None)));
+	assert_eq!(was.len(), 6);
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &six_pages(None))]);
+	let first = res!(delta_made(&mut inst, &p));
+	for (n, k) in [0usize, 2, 5].iter().enumerate() {
+		let text = six_pages(Some(*k));
+		let now = res!(typst_page_texts(&dir, &fmt!("now{}", n), &text));
+		let differ: Vec<usize> = (0..6).filter(|i| was[*i] != now[*i]).collect();
+		assert_eq!(differ, vec![*k], "typst changes the text of page {} alone", k + 1);
+
+		p.known = first.product.order.clone();
+		p.sources = vec![("/main.typ".to_string(), text)];
+		let after = res!(delta_made(&mut inst, &p));
+		let d = &after.product;
+		assert!(!d.reset, "the consumer holds pages");
+		assert_eq!(d.order.len(), 6);
+		let want: BTreeSet<u64> = differ.iter().map(|i| d.order[*i]).collect();
+		let got: BTreeSet<u64> = d.changed.iter().map(|(id, _)| *id).collect();
+		assert_eq!(got, want, "changed holds the pages typst's text says changed (edit in page {})", k + 1);
+		for i in 0..6 {
+			if differ.contains(&i) {
+				assert_ne!(d.order[i], first.product.order[i], "page {} has a new id", i + 1);
+			} else {
+				assert_eq!(d.order[i], first.product.order[i], "page {} keeps its id", i + 1);
+			}
+		}
+		// What is sent is the edited page, not an old copy of it.
+		match d.changed.first() {
+			Some((_, svg))	=> assert!(text_layer(svg).contains("quarts"), "the page sent carries the edit"),
+			None			=> return Err(err!("The edit sent no page."; Test)),
+		}
+	}
+	Ok(())
+}
+
+#[test]
+fn a_page_of_a_discarded_pass_never_reaches_the_delta() -> Outcome<()> {
+	// The final page count is read before it is known, so the document takes a second pass and the pages of
+	// the first are discarded: page three reads its total, and says another thing the first time.
+	let text = "#set page(width: 220pt, height: 60pt, margin: 8pt)\nOne.\n#pagebreak()\nTwo.\n#pagebreak()\n\
+		Three of #context counter(page).final().first().\n";
+	let dir = res!(work_dir("delta-passes"));
+	let theirs = res!(typst_page_texts(&dir, "typst", text));
+	assert_eq!(theirs, vec!["One.", "Two.", "Threeof3."], "typst's pages");
+	let mut inst = Instance::new();
+	let p = strict(&[("/main.typ", text)]);
+	let made = res!(delta_made(&mut inst, &p));
+	let d = &made.product;
+	assert_eq!(made.report.pages, 3);
+	assert_eq!(d.order.len(), 3, "the order is the pages of the pass that stood");
+	let ids: BTreeSet<u64> = d.order.iter().copied().collect();
+	assert_eq!(d.changed.len(), ids.len(), "each id once");
+	let vector = match inst.compile_svg(&p) {
 		Ok(m)	=> m,
-		Err(f)	=> return Err(err!("The delta door refused: {}", f.head; Test)),
+		Err(f)	=> return Err(err!("The vector door refused: {}", f.head; Test)),
 	};
-	assert_eq!(third.product.version, 3, "the refusal left the version where it was");
+	for (i, id) in d.order.iter().enumerate() {
+		let sent = d.changed.iter().find(|(c, _)| c == id).map(|(_, svg)| svg);
+		match sent {
+			Some(svg)	=> {
+				assert_eq!(svg, &vector.product[i], "page {} is the page the final pass drew", i + 1);
+				assert_eq!(text_layer(svg), theirs[i], "and carries the text typst's page does");
+			},
+			None		=> return Err(err!("Page {} of the order was not sent on a reset.", i + 1; Test)),
+		}
+	}
+	Ok(())
+}
+
+#[test]
+fn a_refusal_leaves_the_delta_version_where_it_was() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", &six_pages(None))]);
+	let one = res!(delta_made(&mut inst, &p));
+	p.known = one.product.order.clone();
+	assert_eq!(one.product.version, 1);
+	assert_eq!(res!(delta_made(&mut inst, &p)).product.version, 2);
+	let mut bad = Vec::new();
+	// A strict refusal of a warning, one of a body that sets nothing, and a hard error.
+	bad.push(strict(&[("/main.typ", "#set text(font: \"Nope Sans\")\nx\n")]));
+	bad.push(strict(&[("/main.typ", "#context none\n")]));
+	bad.push(strict(&[("/main.typ", "#nonesuch()\n")]));
+	let kinds = [DiagnosticKind::MissingFont, DiagnosticKind::Internal, DiagnosticKind::UnknownVariable];
+	for (b, kind) in bad.iter_mut().zip(kinds) {
+		b.known = p.known.clone();
+		let f = res!(delta_fail(&mut inst, b));
+		assert_eq!(f.head.kind, kind, "{:?}", f.head);
+	}
+	assert_eq!(res!(delta_made(&mut inst, &p)).product.version, 3, "the three refusals left the version where it was");
+	// Not strict, the same missing font is a delta, and it steps the tick.
+	let mut soft = project(&[("/main.typ", "#set text(font: \"Nope Sans\")\nx\n")]);
+	soft.known = Vec::new();
+	let made = res!(delta_made(&mut inst, &soft));
+	assert_eq!(made.product.version, 4);
+	assert!(made.report.diagnostics.iter().any(|d| d.kind == DiagnosticKind::MissingFont), "{:?}", made.report.diagnostics);
+	Ok(())
+}
+
+#[test]
+fn the_delta_result_carries_pages_diagnostics_skipped_and_needs_as_the_other_doors_do() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let gradient = "#rect(width: 2cm, height: 1cm, fill: gradient.linear(red, blue))\nBody.\n";
+	// Not strict, a construct passed over stands beside the delta, and the line names it.
+	let made = res!(delta_made(&mut inst, &project(&[("/main.typ", gradient)])));
+	assert_eq!(made.report.pages, 1);
+	assert!(made.report.skipped.as_deref().unwrap_or("").contains("gradients"), "{:?}", made.report.skipped);
+	assert!(made.report.diagnostics.iter().any(|d| d.kind == DiagnosticKind::Unsupported), "{:?}", made.report.diagnostics);
+	assert!(made.needs.is_empty());
+	// Strict, the same document is refused as the PDF door refuses it, its sites and skip line with it.
+	let f = res!(delta_fail(&mut inst, &strict(&[("/main.typ", gradient)])));
+	let g = res!(must_fail(inst.compile_pdf(&strict(&[("/main.typ", gradient)]))));
+	assert_eq!(f.head, g.head);
+	assert_eq!(f.rest, g.rest);
+	assert_eq!(f.skipped, g.skipped);
+	assert_eq!(f.pages, Some(1));
+	// An unsupplied package is named in `needs`.
+	let f = res!(delta_fail(&mut inst, &project(&[("/main.typ", "#import \"@preview/zzz-absent:9.9.9\": x\n")])));
+	assert_eq!(f.head.kind, DiagnosticKind::Package, "{:?}", f.head);
+	assert_eq!(f.needs, vec!["@preview/zzz-absent:9.9.9".to_string()]);
 	Ok(())
 }
 

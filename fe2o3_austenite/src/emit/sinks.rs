@@ -5,9 +5,14 @@
 //! that has not settled is discarded and begun again, so nothing may reach a file before the last), and at
 //! `finish` writes the page tree, the outline from the final introspector, the Info dictionary from the
 //! document's metadata, the subset fonts with their `/ToUnicode` maps and the cross-reference table.
-//! [`VectorSink`] renders each page to an SVG document of its own, for the live view. [`CountSink`] counts
-//! and drops, for the heap probe and for tests.
+//! [`VectorSink`] renders each page to an SVG document of its own. [`DeltaSink`] is the live view's: it keeps
+//! each page's content id and the SVG of only those pages the consumer does not hold. [`CountSink`] counts and
+//! drops, for the heap probe and for tests.
 
+use crate::delta::{
+	Builder,
+	PageDelta,
+};
 use crate::emit::svg;
 use crate::eval::content::ElemKind;
 use crate::eval::fixpoint::PageSink;
@@ -185,6 +190,45 @@ impl PageSink for VectorSink {
 
 	fn discard_pass(&mut self) -> Outcome<()> {
 		self.pages.clear();
+		self.finished = false;
+		Ok(())
+	}
+
+	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
+		self.finished = true;
+		Ok(())
+	}
+}
+
+/// Takes each page of the pass as the live view's changed-only delta ([`crate::delta`]): the page's content
+/// id, and its SVG when the consumer does not hold that id. The page is dropped as soon as it is taken, so the
+/// sink holds ids and the SVG of the changed pages alone. A pass that has not settled is discarded whole, and
+/// the delta restarts with it, so no page of a discarded pass reaches `changed`.
+#[derive(Debug)]
+pub struct DeltaSink {
+	build:		Builder,
+	finished:	bool,
+}
+
+impl DeltaSink {
+	/// A sink against the consumer's `known` ids, stepping `prior_version`.
+	pub fn new(known: &[u64], prior_version: u32) -> Self {
+		Self { build: Builder::new(known, prior_version), finished: false }
+	}
+
+	/// The delta, once the fixpoint has run `finish`.
+	pub fn into_delta(self) -> Option<PageDelta> {
+		if self.finished { Some(self.build.finish()) } else { None }
+	}
+}
+
+impl PageSink for DeltaSink {
+	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
+		self.build.page(&page)
+	}
+
+	fn discard_pass(&mut self) -> Outcome<()> {
+		self.build.restart();
 		self.finished = false;
 		Ok(())
 	}
