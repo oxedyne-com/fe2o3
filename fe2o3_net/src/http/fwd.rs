@@ -21,6 +21,12 @@
 //! immediate peer is a configured trusted proxy, in which case the caller's chain is preserved and
 //! the hop's value appended to it, which is what makes a CDN work. See [`ForwardedPolicy`].
 //!
+//! The address written in `X-Forwarded-For` is the client's address alone -- `203.0.113.7`, or
+//! `2001:db8::7` for v6, bare and unbracketed -- never `ip:port`. A reader keyed on the client
+//! parses the field as an `IpAddr`, and a value with a port fails that parse. A v4 client seen
+//! through a dual-stack listener as `::ffff:203.0.113.7` is written as the v4 address it is.
+//! `Forwarded` is the field that carries a port, as an RFC 7239 node identifier.
+//!
 //! The invariant every reader may rely on: **this hop's own value is last, under either policy.**
 //! With an untrusted peer there is exactly one value and it is the hop's; with a trusted peer the
 //! caller's chain is kept and the hop's is appended after it. "Read the last value" is therefore a
@@ -269,8 +275,11 @@ pub fn write_forwarded_headers(
         }
     }
 
-    // This hop's own account of the request, appended after anything preserved above.
-    req.push_str(&fmt!("X-Forwarded-For: {}\r\n", peer));
+    // This hop's own account of the request, appended after anything preserved above.  The
+    // `X-Forwarded-For` value is the client's address alone, the de facto form every reader
+    // parses as an `IpAddr`.  Written with the port it is `ip:port`, which none of them can
+    // parse, and a reader keyed on the address then falls back to the hop it can see.
+    req.push_str(&fmt!("X-Forwarded-For: {}\r\n", peer.ip().to_canonical()));
     req.push_str("X-Forwarded-Proto: https\r\n");
     let host = match caller_host {
         Some(ref value) if is_safe_host(value) => Some(value.clone()),
