@@ -40,6 +40,7 @@ export {
 	SECRET_RE_LOOSE,
 	byteLen,
 	createRedactor,
+	createRunGuard,
 	createScrubber,
 	fingerprint,
 	scrubDeep,

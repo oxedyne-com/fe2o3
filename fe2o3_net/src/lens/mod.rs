@@ -14,19 +14,32 @@
 //!
 //! With the `async` feature, `tap::Tap` is a tap on a websocket's messages (`crate::ws::tap`)
 //! that files what a caller's filter keeps as rows of a `Sink`.
+//!
+//! Two pieces serve an app's own secrets. `redact::Phrase` is the test for a passphrase drawn from
+//! a list of words (`n` of them in a row), and `Or` joins it to the stock `Shapes`. `chunk` is how a
+//! `Sink` reads a bundle sent as base64 in `ds snapshot|telemetry <id> i/N` rows: it judges the
+//! text they encode, so the bundle is kept whole when it is innocent and covered whole when it is not.
 
+pub mod chunk;
 pub mod redact;
 pub mod row;
 pub mod sink;
 #[cfg(feature = "async")]
 pub mod tap;
 
+pub use chunk::{
+    judge,
+    ChunkTag,
+    Verdict,
+};
 pub use redact::{
     fingerprint,
     secret_name,
     secret_name_loose,
     Deny,
     NoTest,
+    Or,
+    Phrase,
     Redact,
     Shapes,
     StrTest,

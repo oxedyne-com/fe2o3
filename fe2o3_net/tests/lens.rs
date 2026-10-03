@@ -14,15 +14,20 @@ use oxedyne_fe2o3_jdat::{
 use oxedyne_fe2o3_net::{
     guard::floor::KeyFloor,
     lens::{
+        chunk,
         compact,
         fingerprint,
         is_stamp,
+        judge,
         sanitise,
         secret_name,
         secret_name_loose,
         stamp,
+        ChunkTag,
         Deny,
         Gates,
+        Or,
+        Phrase,
         Posted,
         Redact,
         Refusal,
@@ -30,9 +35,11 @@ use oxedyne_fe2o3_net::{
         Shapes,
         Sink,
         StrTest,
+        Verdict,
     },
 };
 use oxedyne_fe2o3_text::{
+    base64,
     regex::Regex,
     secret,
 };
@@ -1642,4 +1649,400 @@ fn a_device_label_that_holds_a_credential_is_covered() -> Outcome<()> {
     let text = res!(fs::read_to_string(sink.path(&["plain"])), IO, File, Read);
     assert!(text.contains("\"device\":\"devABC\""), "{}", text);
     Ok(())
+}
+
+
+// The word-run test ======================================================================
+
+struct PhraseCase {
+    text:   String,
+    n:      usize,
+    hit:    bool,
+    spans:  Vec<String>,
+}
+
+fn json_text(col: &str) -> Outcome<String> {
+    Ok(text_of(&res!(Dat::decode_json_strict(col, &DecodeLimits::default()))))
+}
+
+/// `tests/data/lens_phrase.tsv`: the list, then each case as input, n, hit and the spans found. The
+/// JavaScript's `createRunGuard` is held to the same file (`lens/js/test/phrase.test.mjs`).
+fn phrase_table() -> Outcome<(Vec<String>, Vec<PhraseCase>)> {
+    let table = res!(fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/lens_phrase.tsv")));
+    let mut list = Vec::new();
+    let mut cases = Vec::new();
+    for line in table.lines() {
+        if let Some(rest) = line.strip_prefix("#list\t") {
+            list = rest.split(' ').map(|w| w.to_string()).collect();
+            continue;
+        }
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols.len(), 4, "bad case line {:?}", line);
+        let spans = match res!(Dat::decode_json_strict(cols[3], &DecodeLimits::default())) {
+            Dat::List(l)    => l.iter().map(text_of).collect(),
+            other           => panic!("spans are a list, not {:?}", other),
+        };
+        cases.push(PhraseCase {
+            text:   res!(json_text(cols[0])),
+            n:      res!(cols[1].parse::<usize>()),
+            hit:    cols[2] == "1",
+            spans,
+        });
+    }
+    Ok((list, cases))
+}
+
+#[test]
+fn a_word_run_agrees_with_the_shared_case_file() -> Outcome<()> {
+    let (list, cases) = res!(phrase_table());
+    assert_eq!(cases.len(), 36, "the table has changed size");
+    assert!(list.iter().any(|w| w.contains('-')), "the list holds hyphenated entries");
+    let (mut hits, mut misses) = (0, 0);
+    for c in &cases {
+        let p = Phrase::new(list.iter().map(|w| w.as_str()), c.n);
+        let got: Vec<String> = p.spans(&c.text).iter().map(|&(a, b)| c.text[a..b].to_string()).collect();
+        assert_eq!(got, c.spans, "spans of {:?} at n={}", c.text, c.n);
+        assert_eq!(p.has(&c.text), c.hit, "has {:?} at n={}", c.text, c.n);
+        assert_eq!(p.hit(&c.text), c.hit);
+        assert_eq!(p.hit_id(&c.text), c.hit, "an id is held to the same test");
+        if c.hit { hits += 1 } else { misses += 1 }
+    }
+    assert!(hits >= 20 && misses >= 10, "a table that is nearly one answer proves little: {} hits, {} misses", hits, misses);
+    Ok(())
+}
+
+// What the peer's test did before this one: a word is a run of letters, and nothing else joins them.
+fn split_only(list: &[String], n: usize, s: &str) -> bool {
+    let mut run = 0;
+    for tok in s.split(|c: char| !c.is_ascii_alphabetic()) {
+        if tok.is_empty() {
+            continue;
+        }
+        if list.iter().any(|w| w == &tok.to_ascii_lowercase()) {
+            run += 1;
+            if run >= n {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+#[test]
+fn splitting_on_every_non_letter_misses_a_passphrase_with_a_hyphenated_word() -> Outcome<()> {
+    // The control for the case file: the split-only test agrees with it everywhere except where a
+    // hyphenated list entry is spelled, which is the hole the entry rule closes.
+    let (list, cases) = res!(phrase_table());
+    let mut missed = Vec::new();
+    for c in &cases {
+        if split_only(&list, c.n, &c.text) != c.hit {
+            missed.push(c.text.clone());
+        }
+    }
+    assert!(missed.len() >= 5, "the hyphenated entries are in the table: {:?}", missed);
+    for m in &missed {
+        assert!(["drop-down", "t-shirt", "yo-yo", "felt-tip", "Drop-Down", "T-SHIRT"].iter().any(|e| m.contains(e)),
+            "the only disagreement is a hyphenated entry: {:?}", m);
+    }
+    Ok(())
+}
+
+#[test]
+fn one_test_can_stand_for_two() {
+    let w = Phrase::new(["alpha", "beta"], 2);
+    let either = Or(Shapes, w);
+    assert!(either.hit("alpha beta"));
+    assert!(either.hit(&fmt!("{}{}", "sk-ant", "-api03-AbCdEfGhIjKlMnOpQrStUvWx")));
+    assert!(!either.hit("alpha gamma beta"));
+    assert!(either.hit_id(&fmt!("{}{}", "sk-ant", "-api03-AbCdEfGhIjKlMnOpQrStUvWx")), "an id is still held to a shape");
+}
+
+
+// Chunk rows =============================================================================
+
+// The eight words that the tests below plant, and the stock string test with them added.
+fn chunk_test() -> Or<Shapes, Phrase> {
+    Or(Shapes, Phrase::new(PHRASE.split(' '), 8))
+}
+
+fn chunk_sink(s: &Scratch) -> Sink<Or<Shapes, Phrase>> {
+    Sink::new(s.dir(), Gates { min_interval_ms: 0, ..Gates::default() })
+        .with_redact(Redact::new().with_head(0).with_test(chunk_test()))
+}
+
+// A snapshot as the page makes it: scrubbed JSON, plain prose in its free fields. The filler is
+// there to make a few chunks of it.
+fn snapshot_json(note: &str) -> String {
+    fmt!(
+        "{{\"ts\":1790000000000,\"iso\":\"2026-10-03T08:00:00.000Z\",\"sid\":\"k3j9x0a1qz\",\"device\":\"p4m8w2zr\",\
+\"build\":\"387d393\",\"why\":\"screen\",\"vis\":\"visible\",\"w\":390,\"screen\":\"oxegen_home\",\
+\"app\":{{\"phase\":\"home\",\"busy\":false,\"lang\":\"en\"}},\"member\":{{\"known\":true,\"fp\":\"[redacted …#1f3a9c/44]\"}},\
+\"wallet\":{{\"coins\":3,\"epoch\":19}},\"net\":{{\"state\":\"live\",\"wire\":\"ws\",\"may_count\":true}},\
+\"ls\":{{\"keys\":9}},\"idb\":{{\"dbs\":1}},\"lens\":{{\"depth\":4,\"health\":\"ok\",\"fault\":false}},\
+\"note\":\"{}\",\"more\":\"the page sat on the home screen while the member read the notice and the net stayed live\"}}",
+        note)
+}
+
+fn rows_of(kind: &str, id: &str, enc: &str, size: usize, wrap: bool) -> Vec<(i64, String, String)> {
+    let parts: Vec<String> = enc.as_bytes().chunks(size).map(|c| String::from_utf8_lossy(c).into_owned()).collect();
+    let n = parts.len();
+    parts.into_iter().enumerate().map(|(i, p)| {
+        let data = if wrap {
+            // Words of sixteen, as MIME wraps base64.
+            p.as_bytes().chunks(16).map(|w| String::from_utf8_lossy(w).into_owned()).collect::<Vec<String>>().join(" ")
+        } else {
+            p
+        };
+        (T0 as i64 + i as i64, fmt!("ds {} {} {}/{}", kind, id, i + 1, n), data)
+    }).collect()
+}
+
+fn post_rows(sink: &Sink<Or<Shapes, Phrase>>, key: &str, rows: &[(i64, String, String)], at: u64) -> Outcome<usize> {
+    let borrowed: Vec<(i64, &str, &str)> = rows.iter().map(|(t, g, d)| (*t, g.as_str(), d.as_str())).collect();
+    Ok(stored(res!(sink.post(&[key], &body("dev", &borrowed), at))))
+}
+
+// The (tag, data) of each line a key has stored, in order.
+fn kept(sink: &Sink<Or<Shapes, Phrase>>, key: &str) -> Outcome<Vec<(String, String)>> {
+    let mut out = Vec::new();
+    for l in res!(lines(&sink.path(&[key]))) {
+        out.push((text_at(&l, "tag"), text_at(&l, "data")));
+    }
+    Ok(out)
+}
+
+fn marked(data: &str) -> bool { data.starts_with("[redacted") }
+
+#[test]
+fn a_base64_snapshot_chunk_is_kept_intact() -> Outcome<()> {
+    let json = snapshot_json("a quiet moment");
+    assert!(!chunk_test().hit(&json), "the plain text is innocent, which is what the test is about");
+    let url = base64::encode_url(json.as_bytes());
+    let std = base64::encode(json.as_bytes());
+    let s = Scratch::new("chunk-intact");
+    let sink = chunk_sink(&s);
+    // The page's form, Daimond's, and the first Oxegen pages' (words of sixteen).
+    let forms = [
+        ("url",     rows_of("snapshot", "s1-1", &url, 288, false)),
+        ("std",     rows_of("telemetry", "t1", &std, 360, false)),
+        ("words",   rows_of("snapshot", "s1-2", &url, 288, true)),
+    ];
+    for (k, (key, rows)) in forms.iter().enumerate() {
+        assert!(rows.len() >= 3, "{}: a few chunks", key);
+        assert_eq!(res!(post_rows(&sink, key, rows, T0 + 10_000 * k as u64)), rows.len());
+        let got = res!(kept(&sink, key));
+        assert_eq!(got.len(), rows.len());
+        for ((tag, data), (_, want_tag, want)) in got.iter().zip(rows.iter()) {
+            assert_eq!(tag, want_tag);
+            assert_eq!(data, want, "{}: a chunk of a clean bundle is stored as it came", key);
+        }
+        // And what was kept reads back to the bundle.
+        let whole: String = got.iter().map(|(_, d)| d.replace(' ', "")).collect();
+        let back = if *key == "std" { res!(base64::decode(&whole)) } else { res!(base64::decode_url(&whole)) };
+        assert_eq!(String::from_utf8_lossy(&back), json, "{}", key);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_chunk_whose_decoded_text_holds_eight_words_is_covered() -> Outcome<()> {
+    let json = snapshot_json(&fmt!("the member typed {} by mistake", PHRASE));
+    let url = base64::encode_url(json.as_bytes());
+    let s = Scratch::new("chunk-phrase");
+    let sink = chunk_sink(&s);
+    let rows = rows_of("snapshot", "s2-1", &url, 288, false);
+    assert!(rows.len() >= 3);
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), rows.len());
+    let got = res!(kept(&sink, "k"));
+    assert_eq!(got.len(), rows.len());
+    // The bundle is one: a hit anywhere covers every chunk of it, so a reader finds it broken.
+    for (i, (tag, data)) in got.iter().enumerate() {
+        assert_eq!(tag, &rows[i].1);
+        assert!(marked(data), "chunk {} is covered: {}", i + 1, data);
+        assert!(!data.contains(&rows[i].2[..16]), "and holds none of the chunk");
+    }
+    let bytes = res!(all_bytes(&s.dir()));
+    assert!(!has(&bytes, "abandon") && !has(&bytes, &url[..40]));
+    Ok(())
+}
+
+#[test]
+fn a_chunk_whose_decoded_text_holds_a_key_is_covered() -> Outcome<()> {
+    let key = cred(1);
+    let json = snapshot_json(&fmt!("config says {}", key));
+    let s = Scratch::new("chunk-key");
+    let sink = chunk_sink(&s);
+    for (k, (_, (kind, enc, size))) in [
+        ("url", ("snapshot", base64::encode_url(json.as_bytes()), 288)),
+        ("std", ("telemetry", base64::encode(json.as_bytes()), 360)),
+    ].into_iter().enumerate() {
+        let rows = rows_of(kind, "s3", &enc, size, false);
+        assert_eq!(res!(post_rows(&sink, &fmt!("k{}", k), &rows, T0 + 10_000 * k as u64)), rows.len());
+        for (tag, data) in res!(kept(&sink, &fmt!("k{}", k))) {
+            assert!(marked(&data), "{}: {}", tag, data);
+        }
+    }
+    let bytes = res!(all_bytes(&s.dir()));
+    assert!(!has(&bytes, &key) && !has(&bytes, &key[..12]));
+    Ok(())
+}
+
+#[test]
+fn a_secret_that_straddles_a_cut_is_seen_and_every_chunk_is_covered() -> Outcome<()> {
+    // The eight words stand across the page's cut at 288 characters (216 bytes), five in the first
+    // chunk and three in the second.
+    let json = fmt!("{{\"p\":\"{}typed {} in the box\",\"rest\":{}}}",
+        "plain words ".repeat(15), PHRASE, snapshot_json("x"));
+    let a = json.find(PHRASE).unwrap_or(0);
+    assert!(a < 216 && 216 < a + PHRASE.len(), "the cut falls inside the words: {}", a);
+    let url = base64::encode_url(json.as_bytes());
+    let rows = rows_of("snapshot", "s4", &url, 288, false);
+    assert!(rows.len() >= 2);
+    // Alone, no chunk holds the eight words: the cut has halved them.
+    let test = chunk_test();
+    for (_, tag, data) in &rows {
+        let one = vec![(tag.clone(), data.clone())];
+        assert_eq!(judge(&test, &one), vec![Verdict::Clean], "{} alone is innocent", tag);
+    }
+    let s = Scratch::new("chunk-straddle");
+    let sink = chunk_sink(&s);
+    assert_eq!(res!(post_rows(&sink, "fwd", &rows, T0)), rows.len());
+    for (tag, data) in res!(kept(&sink, "fwd")) {
+        assert!(marked(&data), "{}: {}", tag, data);
+    }
+    // The order of the rows in the post makes no difference.
+    let mut rev = rows.clone();
+    rev.reverse();
+    assert_eq!(res!(post_rows(&sink, "rev", &rev, T0 + 10_000)), rev.len());
+    for (tag, data) in res!(kept(&sink, "rev")) {
+        assert!(marked(&data), "{}: {}", tag, data);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_payload_that_is_not_the_base64_of_text_is_no_chunk_at_all() -> Outcome<()> {
+    let s = Scratch::new("chunk-fake");
+    let sink = chunk_sink(&s);
+    // Bytes that are not text: an image, say, sent under a snapshot's tag.
+    let bin: Vec<u8> = (0..300u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8 | 0x80).collect();
+    let image = base64::encode_url(&bin);
+    assert!(chunk::text(&image).is_none(), "the bytes are not text");
+    let key = cred(1);
+    let rows: Vec<(i64, String, String)> = vec![
+        (1, "ds snapshot f1 1/4".to_string(), PHRASE.to_string()),
+        (2, "ds snapshot f1 2/4".to_string(), key.clone()),
+        (3, "ds snapshot f1 3/4".to_string(), image[..288].to_string()),
+        (4, "ds snapshot f1 4/4".to_string(), fmt!("{}", PHRASE.to_uppercase())),
+    ];
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), 4);
+    for (tag, data) in res!(kept(&sink, "k")) {
+        assert!(marked(&data), "{} is guarded as any row is: {}", tag, data);
+    }
+    let bytes = res!(all_bytes(&s.dir()));
+    assert!(!has(&bytes, "abandon") && !has(&bytes, "ABANDON") && !has(&bytes, &key) && !has(&bytes, &image[..40]));
+    Ok(())
+}
+
+#[test]
+fn only_an_exact_chunk_tag_is_a_chunk() -> Outcome<()> {
+    let ok = ChunkTag::parse("ds snapshot s1-7 2/5");
+    assert_eq!(ok, Some(ChunkTag { kind: "snapshot".to_string(), id: "s1-7".to_string(), i: 2, n: 5 }));
+    assert_eq!(ChunkTag::parse("ds telemetry t9 1/1").map(|t| (t.kind, t.i, t.n)), Some(("telemetry".to_string(), 1, 1)));
+    let bad = [
+        "ds snapshot s 0/3", "ds snapshot s 4/3", "ds snapshots s 1/3", "ds snapshot s 1/3 extra", "DS snapshot s 1/3",
+        "ds  snapshot s 1/3", "ds snapshot  s 1/3", "ds snapshot s 1/", "ds snapshot s /3", "ds snapshot s a/3",
+        "ds snapshot s +1/3", "ds snapshot s 1/3 ", " ds snapshot s 1/3", "ds snapshot s", "ds snapshot 1/3", "ds s 1/3",
+        "ev snapshot s 1/3", "ds snapshot s 1/3/4", "ds snapshot s 1/99999999999", "", "ds",
+    ];
+    for t in bad {
+        assert_eq!(ChunkTag::parse(t), None, "{:?} is not a chunk's tag", t);
+    }
+    // Their payloads get no exemption: the same real base64 is covered under each of them.
+    let enc = base64::encode_url(snapshot_json("x").as_bytes());
+    let s = Scratch::new("chunk-tags");
+    let sink = chunk_sink(&s);
+    let rows: Vec<(i64, String, String)> = bad.iter().enumerate()
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(i, t)| (i as i64 + 1, t.to_string(), enc[..288].to_string()))
+        .collect();
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), rows.len());
+    for (tag, data) in res!(kept(&sink, "k")) {
+        assert!(marked(&data), "{:?} is no chunk, and is guarded as a row: {}", tag, data);
+    }
+    // While the exact tag is let through.
+    let good = vec![(1i64, "ds snapshot s 2/5".to_string(), enc[..288].to_string())];
+    assert_eq!(res!(post_rows(&sink, "good", &good, T0 + 10_000)), 1);
+    assert_eq!(res!(kept(&sink, "good")), vec![("ds snapshot s 2/5".to_string(), enc[..288].to_string())]);
+    Ok(())
+}
+
+#[test]
+fn a_row_that_is_not_a_chunk_is_guarded_exactly_as_before() -> Outcome<()> {
+    let enc = base64::encode_url(snapshot_json("x").as_bytes());
+    let s = Scratch::new("chunk-plain");
+    let sink = chunk_sink(&s);
+    let rows = vec![
+        (1i64, "diag".to_string(), enc[..288].to_string()),
+        (2, "ds-snapshot s 1/3".to_string(), enc[..288].to_string()),
+        (3, "diag".to_string(), "an ordinary line of log text".to_string()),
+    ];
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), 3);
+    let got = res!(kept(&sink, "k"));
+    assert!(marked(&got[0].1) && marked(&got[1].1), "long random-looking runs are covered: {:?}", got);
+    assert_eq!(got[2].1, "an ordinary line of log text");
+    Ok(())
+}
+
+#[test]
+fn a_cut_off_a_quantum_still_reads_as_a_run_and_fails_closed_alone() -> Outcome<()> {
+    let json = snapshot_json("a quiet moment");
+    let url = base64::encode_url(json.as_bytes());
+    let rows = rows_of("snapshot", "s5", &url, 290, false);
+    assert!(rows.len() >= 3);
+    // 290 characters is not a whole number of quanta, so no chunk but the first decodes alone.
+    assert!(chunk::text(&rows[1].2).is_none(), "the second chunk starts inside a quantum");
+    let s = Scratch::new("chunk-cut");
+    let sink = chunk_sink(&s);
+    // Together they are the bundle, and the bundle is innocent.
+    assert_eq!(res!(post_rows(&sink, "run", &rows, T0)), rows.len());
+    for (i, (tag, data)) in res!(kept(&sink, "run")).iter().enumerate() {
+        assert_eq!(data, &rows[i].2, "{}", tag);
+    }
+    // One of them posted alone is not provably text, so it meets the whole guard and is covered.
+    assert_eq!(res!(post_rows(&sink, "alone", &rows[1..2], T0 + 10_000)), 1);
+    assert!(marked(&res!(kept(&sink, "alone"))[0].1));
+    Ok(())
+}
+
+#[test]
+fn the_text_of_a_payload_allows_a_partial_character_at_each_end_and_nothing_else() {
+    let s = "h\u{e9}llo w\u{f6}rld \u{2603} snowman and a longer tail to be cut at the end \u{2603}";
+    let b = s.as_bytes();
+    // Starting inside the first \u{e9}: one stray continuation byte.
+    let lead = &b[2..];
+    assert!(std::str::from_utf8(lead).is_err());
+    assert!(chunk::text(&base64::encode_url(lead)).is_some(), "a cut inside a character at the start");
+    // Ending inside the last \u{2603}: an unfinished character.
+    let tail = &b[..b.len() - 1];
+    assert!(std::str::from_utf8(tail).is_err());
+    assert!(chunk::text(&base64::encode_url(tail)).is_some(), "a cut inside a character at the end");
+    assert!(chunk::text(&base64::encode_url(b)).is_some());
+    // Bytes that are not text anywhere else are not text.
+    let mut bad = b.to_vec();
+    bad[10] = 0xff;
+    assert!(chunk::text(&base64::encode_url(&bad)).is_none());
+    // Padded, unpadded, white space; the two alphabets mixed are neither.
+    assert_eq!(chunk::text(&base64::encode(b"foobar!")).as_deref(), Some("foobar!"));
+    assert_eq!(chunk::text(&base64::encode_url(b"foobar!")).as_deref(), Some("foobar!"));
+    assert_eq!(chunk::text("Zm9v YmFy\nIQ").as_deref(), Some("foobar!"));
+    assert_eq!(chunk::text(""), Some(String::new()));
+    assert!(chunk::text("ab+/cd-_").is_none(), "both alphabets at once");
+    assert!(chunk::text("Zm9vYmFy!").is_none(), "a stray character");
+    assert!(chunk::text("Zm9vY").is_none(), "a lone character over a quantum");
+    // Plain words with their spaces taken out decode to bytes that are not text.
+    assert!(chunk::text(PHRASE).is_none());
 }
