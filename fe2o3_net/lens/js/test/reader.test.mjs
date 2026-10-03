@@ -331,6 +331,40 @@ await part(() => {
 	check('and its free text scrubbed by content', !JSON.stringify(body).includes(awsId()), JSON.stringify(body.note));
 });
 
+// A snapshot arrives as chunks of any of the forms the pages have sent: Daimond's padded base64, the
+// Oxegen page's unpadded base64url cut on a quantum, the first Oxegen pages' words of sixteen, and
+// (what the peer's guard writes over a chunk it covers) a marker. The reader assembles the first
+// three to one body and finds the fourth broken, which is how a covered snapshot reads.
+await part(() => {
+	const home = fresh();
+	const R = createReader({ home, now: () => NOW });
+	const snap = { ts: 7000, iso: 'y', chats: [1, 2], note: 'the page sat on the home screen while the member read the notice. '.repeat(14) };
+	const json = JSON.stringify(snap);
+	const std = Buffer.from(json, 'utf8').toString('base64');
+	const url = Buffer.from(json, 'utf8').toString('base64url');
+	const cut = (enc, size) => { const o = []; for (let i = 0; i < enc.length; i += size) o.push(enc.slice(i, i + size)); return o; };
+	const words = (c) => c.match(/.{1,16}/g).join(' ');
+	const B = NOW - 100_000;
+	const sets = {
+		D1: cut(std, 360),								// Daimond: padded, 360 characters
+		P1: cut(url, 288),								// the page: unpadded base64url, 288 characters
+		W1: cut(url, 288).map(words),					// the first pages: words of sixteen
+	};
+	check('the snapshot is several chunks in every form', Object.values(sets).every((c) => c.length >= 3), JSON.stringify(Object.values(sets).map((c) => c.length)));
+	let out = '';
+	Object.keys(sets).forEach((id, k) => sets[id].forEach((c, i) => { out += L(B + k * 10, 'devA', i + 1, 'ds snapshot ' + id + ' ' + (i + 1) + '/' + sets[id].length, c); }));
+	const bad = cut(url, 288).map(() => '[redacted …#1a2b3c4d/288]');
+	bad.forEach((c, i) => { out += L(B + 50, 'devA', i + 1, 'ds snapshot X1 ' + (i + 1) + '/' + bad.length, c); });
+	put(home, 'mirror/k.ndjson', out);
+	const st = R.pull();
+	const idx = readNdjson(R.snapIndexFile('devA'));
+	const ok = idx.filter((r) => r.complete === true && !r.broken);
+	check('three forms of one snapshot all assemble, one body each', ok.length === 3 && st.snapshots === 3, JSON.stringify(st));
+	const bodies = ok.map((r) => fs.readFileSync(path.join(R.dirs.snaps, r.body), 'utf8'));
+	check('and the three bodies are the same snapshot', bodies.every((b) => b === bodies[0]) && JSON.parse(bodies[0]).ts === 7000 && JSON.parse(bodies[0]).chats.length === 2);
+	check('a set whose chunks the peer covered is filed broken, not dropped and not thrown', idx.some((r) => r.id === 'X1' && r.broken) && st.broken === 1, JSON.stringify(idx.filter((r) => r.id === 'X1')));
+});
+
 await part(() => {
 	const home = fresh();
 	let now = NOW;

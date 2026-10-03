@@ -209,7 +209,8 @@ impl<A: StrTest, B: StrTest> StrTest for Or<A, B> {
 /// A list entry may hold hyphens (the EFF list has `drop-down`, `felt-tip`, `t-shirt` and
 /// `yo-yo`). Where the text spells such an entry, hyphens and all, it counts as the one word it is,
 /// and the longest entry wins. Splitting on every non-letter cannot see those four entries, and
-/// breaks a passphrase that holds one into runs shorter than eight.
+/// breaks a passphrase that holds one into runs shorter than eight. An entry whose every part is
+/// a list word counts for its parts, since a dashed passphrase joins its words with the same hyphen.
 ///
 /// This is the Rust half of `createRunGuard` in `redact.js`, and `tests/data/lens_phrase.tsv` holds
 /// the two to the same answers.
@@ -252,19 +253,22 @@ impl Phrase {
         out
     }
 
-    // How many tokens the word starting at token `i` takes up: the longest hyphen-joined entry of
-    // the list that the text spells, else the token alone if it is a word, else none.
-    fn word_at(&self, s: &str, t: &[(usize, usize)], i: usize) -> usize {
+    // The word starting at token `i`, as (tokens it takes up, words it counts for); (0, 0) if none.
+    // The longest hyphen-joined entry of the list that the text spells wins. It counts for one
+    // word, or for as many as it has parts where each part is itself a word, since hyphens also
+    // join the words of a dashed passphrase and the safer count is the larger.
+    fn word_at(&self, s: &str, t: &[(usize, usize)], i: usize) -> (usize, usize) {
         let mut chain = 1;
         while chain < self.parts && i + chain < t.len() && &s[t[i + chain - 1].1..t[i + chain].0] == "-" {
             chain += 1;
         }
         for k in (2..=chain).rev() {
             if self.words.contains(&s[t[i].0..t[i + k - 1].1].to_ascii_lowercase()) {
-                return k;
+                let each = (i..i + k).all(|j| self.words.contains(&s[t[j].0..t[j].1].to_ascii_lowercase()));
+                return (k, if each { k } else { 1 });
             }
         }
-        if self.words.contains(&s[t[i].0..t[i].1].to_ascii_lowercase()) { 1 } else { 0 }
+        if self.words.contains(&s[t[i].0..t[i].1].to_ascii_lowercase()) { (1, 1) } else { (0, 0) }
     }
 
     /// The byte ranges of `s` that hold `n` words or more in a row, each running from the first
@@ -278,7 +282,7 @@ impl Phrase {
         let (mut from, mut to, mut run) = (0usize, 0usize, 0usize);
         let mut i = 0;
         while i < t.len() {
-            let took = self.word_at(s, &t, i);
+            let (took, count) = self.word_at(s, &t, i);
             if took == 0 {
                 if run >= self.n {
                     out.push((from, to));
@@ -291,7 +295,7 @@ impl Phrase {
                 from = t[i].0;
             }
             to = t[i + took - 1].1;
-            run += 1;
+            run += count;
             i += took;
         }
         if run >= self.n {

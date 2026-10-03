@@ -21,7 +21,7 @@ const cases = table.slice(1).map((l) => l.split('\t')).map(([t, n, hit, spans]) 
 
 section('phrase: the shared case file, ' + cases.length + ' cases');
 {
-	check('the table has the 36 cases Rust is tested on, and a list with hyphenated entries', cases.length === 36 && list.some((w) => w.includes('-')), cases.length + ' cases');
+	check('the table has the 40 cases Rust is tested on, and a list with hyphenated entries', cases.length === 40 && list.some((w) => w.includes('-')), cases.length + ' cases');
 	let bad = 0, first = '', hits = 0, misses = 0;
 	for (const c of cases) {
 		const g = createRunGuard(list, c.n);
