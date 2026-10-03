@@ -800,6 +800,7 @@ pub fn stretch_of_ratio(ratio: f64) -> u16 {
 
 /// One face the book holds: what it is called, where it sits in its family, what it looks like, and the
 /// handle shaping and drawing use.
+#[derive(Clone)]
 pub struct BookFace {
 	pub family:		String,			// as declared, style words trimmed; Typst's `FontInfo::family`
 	pub key:		String,			// the family lower-cased, as a document names it
@@ -872,8 +873,42 @@ impl FontBook {
 		Ok(book)
 	}
 
-	/// Adds a font file's face. A file no parser can read is refused with the reason.
+	/// A book of its own that holds the faces this one holds now. Adding to the fork leaves this book as it
+	/// was, so a book of the embedded faces, parsed once, serves every project, each forking it to add its own.
+	/// The shaped-run cache starts empty; a maths view already built is shared.
+	pub fn fork(&self) -> Self {
+		let maths = match self.maths.lock() {
+			Ok(m)	=> m.clone(),
+			Err(_)	=> HashMap::new(),
+		};
+		Self {
+			faces:		self.faces.clone(),
+			families:	self.families.clone(),
+			shapes:		Mutex::new(ShapeCache::default()),
+			maths:		Mutex::new(maths),
+		}
+	}
+
+	/// Adds a font file's face, and every face of a collection: a `.ttc` or `.otc` is cut into a font file
+	/// for each face it holds, as the curated resolver cuts one. Returns the id of the first face added. A
+	/// file no parser can read is refused with the reason.
 	pub fn add(&mut self, bytes: Vec<u8>) -> Outcome<usize> {
+		if !is_collection(&bytes) {
+			return self.add_face(bytes);
+		}
+		let mut first = None;
+		for info in res!(FaceInfo::read_all(&bytes)) {
+			let face = res!(collection_face(&bytes, info.index as usize));
+			let id = res!(self.add_face(face));
+			first.get_or_insert(id);
+		}
+		match first {
+			Some(id)	=> Ok(id),
+			None		=> Err(err!("The font collection holds no face."; Invalid, Input, Missing)),
+		}
+	}
+
+	fn add_face(&mut self, bytes: Vec<u8>) -> Outcome<usize> {
 		let font = res!(Font::new(bytes));
 		let face = res!(font.face(0));
 		let class = res!(face.class());
