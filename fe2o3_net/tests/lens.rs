@@ -1020,7 +1020,7 @@ fn shapes_cover_each_credential_shape_whole_and_leave_prose_alone() -> Outcome<(
     assert!(Shapes.hit(&lit));
     for ok in [
         "the quick brown fox", "sk-nope", "skip-tracing and key lore", "AKIA", "fw_short",
-        "an api_key = \"\" field", "password: \"your-key-here\"", "", "ghp_tooshort",
+        "an api_key = \"\" field", "key = \"your-key-here\"", "", "ghp_tooshort",
     ] {
         assert!(!Shapes.hit(ok), "{:?} is not a credential", ok);
     }
@@ -1076,6 +1076,231 @@ fn secret_name_agrees_with_the_regex_engine_on_every_ascii_name() -> Outcome<()>
         n += 1;
     }
     assert!(n > 2_500, "only {} ASCII names were compared", n);
+    Ok(())
+}
+
+
+// The content scrubber ===================================================================
+
+// `tests/data/lens_scrub.tsv` holds each input of the JavaScript scrubber as a recipe and never as a
+// credential, so that nothing paste-able is in the repository. `{{n:seed:alphabet}}` is n
+// characters: the state starts at `seed * 2654435761` mod 2^32, each character steps it by
+// `h * 1103515245 + 12345` in u32 wrapping arithmetic and takes `alphabet[(h >> 16) mod len]`.
+// `{{dash5}}` is five hyphens.
+
+fn alphabet(name: &str) -> &'static str {
+    match name {
+        "alnum"     => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+        "hex"       => "0123456789abcdef",
+        "b64"       => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+        "b64std"    => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/+",
+        "upper36"   => "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        "digit"     => "0123456789",
+        other       => panic!("no alphabet {:?}", other),
+    }
+}
+
+/// `n` characters of one alphabet, from one seed.
+fn run(n: usize, seed: u32, alpha: &str) -> String {
+    let a: Vec<char> = alphabet(alpha).chars().collect();
+    let mut h = (seed as u64 * 2_654_435_761u64) as u32;
+    let mut s = String::new();
+    for _ in 0..n {
+        h = h.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        s.push(a[((h >> 16) as usize) % a.len()]);
+    }
+    s
+}
+
+/// A template of the table, with its recipes expanded.
+fn expand(t: &str) -> Outcome<String> {
+    let mut out = String::new();
+    let mut rest = t;
+    while let Some(i) = rest.find("{{") {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i + 2..];
+        let j = res!(tail.find("}}").ok_or_else(|| err!("An unclosed recipe in {:?}.", t; Invalid, Input)));
+        let body = &tail[..j];
+        if body == "dash5" {
+            out.push_str("-----");
+        } else {
+            let p: Vec<&str> = body.split(':').collect();
+            if p.len() != 3 {
+                return Err(err!("The recipe {:?} is not n:seed:alphabet.", body; Invalid, Input));
+            }
+            out.push_str(&run(res!(p[0].parse::<usize>()), res!(p[1].parse::<u32>()), p[2]));
+        }
+        rest = &tail[j + 2..];
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+struct Case {
+    template:   String,
+    input:      String,     // the template, expanded
+    want:       String,     // what the JavaScript made of it
+    id:         bool,       // scrubbed as a correlation id, so with no entropy catch
+}
+
+fn scrub_cases() -> Outcome<Vec<Case>> {
+    let table = res!(fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/lens_scrub.tsv")));
+    let mut cases = Vec::new();
+    for line in table.lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        assert_eq!(cols.len(), 3, "bad oracle line {:?}", line);
+        let template = text_of(&res!(Dat::decode_json_strict(cols[0], &DecodeLimits::default())));
+        let want = text_of(&res!(Dat::decode_json_strict(cols[1], &DecodeLimits::default())));
+        let input = res!(expand(&template));
+        cases.push(Case { template, input, want, id: cols[2] == "1" });
+    }
+    Ok(cases)
+}
+
+#[test]
+fn the_expander_gives_the_pinned_vectors() -> Outcome<()> {
+    // The port is held to the JavaScript's before it is trusted with the table.
+    for (t, want) in [
+        ("{{8:1:hex}}",     "8388dbc2"),
+        ("{{12:7:alnum}}",  "Dn8QmkIRy6vU"),
+        ("{{10:3:digit}}",  "0086285001"),
+        ("{{6:5:upper36}}", "PJMEIR"),
+        ("a{{dash5}}b",     "a-----b"),
+    ] {
+        assert_eq!(res!(expand(t)), want, "{}", t);
+    }
+    Ok(())
+}
+
+#[test]
+fn shapes_scrub_the_javascripts_table_to_the_same_text() -> Outcome<()> {
+    let cases = res!(scrub_cases());
+    assert_eq!(cases.len(), 130, "the table has changed size");
+    let mut changed = 0;
+    for c in &cases {
+        let got = Shapes.scrub(&c.input, c.id);
+        assert_eq!(got, c.want, "recipe {:?}", c.template);
+        // A second pass finds nothing in the markers of the first.
+        assert_eq!(Shapes.scrub(&got, c.id), got, "not idempotent, recipe {:?}", c.template);
+        if got != c.input {
+            changed += 1;
+        }
+    }
+    let unchanged = cases.len() - changed;
+    assert!(changed >= 100 && unchanged >= 20,
+        "a table that is nearly one answer proves little: {} changed, {} not", changed, unchanged);
+    // Every shape, every pair and the entropy catch is exercised.
+    for kind in [
+        "pem", "gh", "ghpat", "stripe", "whsec", "sk", "aws", "gcp", "slack", "jwt", "tune",
+        "bearer", "urlarg", "named", "awssec", "hi",
+    ] {
+        let tag = fmt!("[redacted {} #", kind);
+        assert!(cases.iter().any(|c| c.want.contains(&tag)), "no case yields {:?}", kind);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_hit_is_a_string_the_scrubber_would_change() -> Outcome<()> {
+    for c in res!(scrub_cases()) {
+        let changed = c.want != c.input;
+        let hit = if c.id { Shapes.hit_id(&c.input) } else { Shapes.hit(&c.input) };
+        assert_eq!(hit, changed, "recipe {:?}", c.template);
+        // What the scrubber wrote is not a hit, so a row the client already scrubbed passes the
+        // redactor with its own bytes.
+        let again = if c.id { Shapes.hit_id(&c.want) } else { Shapes.hit(&c.want) };
+        assert!(!again, "the output of recipe {:?} is itself a hit", c.template);
+        let red = Redact::new().with_test(Shapes);
+        let (out, covered) = red.walk(&omap(vec![(if c.id { "callId" } else { "msg" }, st(&c.want))]));
+        assert!(!covered, "recipe {:?} was covered a second time: {:?}", c.template, out);
+    }
+    Ok(())
+}
+
+#[test]
+fn the_shapes_the_commit_hook_does_not_know_are_caught_and_its_scan_is_unchanged() -> Outcome<()> {
+    // Each is Daimond's and not the hook's, built from recipes so that no literal is in this file.
+    let jwt = fmt!("eyJ{}.{}.{}", run(8, 301, "b64"), run(12, 302, "b64"), run(6, 303, "b64"));
+    let cases = [
+        ("a JWT",                   jwt),
+        ("a webhook secret",        fmt!("whsec_{}", run(20, 304, "alnum"))),
+        ("a test-mode Stripe key",  fmt!("sk_test_{}", run(14, 305, "alnum"))),
+        ("a test-mode restricted",  fmt!("rk_test_{}", run(14, 306, "alnum"))),
+        ("a relay key",             fmt!("tune-{}", run(32, 307, "hex"))),
+        ("a temporary AWS id",      fmt!("ASIA{}", run(14, 308, "upper36"))),
+        ("a role AWS id",           fmt!("AROA{}", run(14, 309, "upper36"))),
+        ("a short GitHub run",      fmt!("ghp_{}", run(16, 310, "alnum"))),
+        ("a new Slack token",       fmt!("xoxe-{}", run(14, 311, "alnum"))),
+        ("a short Google key",      fmt!("AIza{}", run(32, 312, "b64"))),
+        ("an `sk-` key of 16",      fmt!("sk-{}", run(16, 313, "b64"))),
+        ("a bearer header",         fmt!("Authorization: Bearer {}", run(20, 314, "b64"))),
+        ("a URL's token",           fmt!("https://h.example/cb?token={}&z=1", run(12, 315, "alnum"))),
+        ("a named secret",          fmt!("config password: {}", run(12, 316, "alnum"))),
+        ("an unnamed blob",         fmt!("blob {} end", run(40, 317, "b64"))),
+    ];
+    for (what, text) in &cases {
+        assert!(secret::scan(text.as_bytes()).is_empty(), "the hook would now refuse {}: {:?}", what, text);
+        assert!(!secret::holds(text), "holds, which is the hook's shapes, now sees {}", what);
+        assert!(Shapes.hit(text), "Shapes misses {}: {:?}", what, text);
+        assert_ne!(Shapes.scrub(text, false), *text, "scrub misses {}", what);
+        let out = Redact::new().with_head(0).with_test(Shapes).dat(&omap(vec![("msg", st(text))]));
+        assert!(text_at(&out, "msg").starts_with("[redacted"), "{}: {:?}", what, text_at(&out, "msg"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_placeholder_under_a_secret_name_is_scrubbed_as_daimond_scrubs_it() -> Outcome<()> {
+    // The hook excuses a placeholder, being noisy over source; Daimond's scrubber does not, being
+    // over a feed, and `Shapes` is no weaker than it.
+    let t = "password: \"your-key-here\"";
+    assert!(secret::scan(t.as_bytes()).is_empty() && !secret::holds(t));
+    assert!(Shapes.hit(t));
+    assert!(Shapes.scrub(t, false).starts_with("password: \"[redacted named #"));
+    Ok(())
+}
+
+#[test]
+fn a_correlation_id_is_excused_from_the_entropy_catch_and_nothing_else() -> Outcome<()> {
+    let blob = run(40, 401, "b64");
+    let key = fmt!("sk-{}", run(20, 402, "b64"));
+    let doc = omap(vec![
+        ("callId",  st(&blob)),
+        ("note",    st(&blob)),
+        ("id",      st(&key)),
+        ("sid",     st(&blob)),
+        ("inner",   omap(vec![("turn", st(&blob)), ("x", st(&blob))])),
+    ]);
+    let red = Redact::new().with_test(Shapes);
+    let out = red.dat(&doc);
+    assert_eq!(text_at(&out, "callId"), blob, "Daimond's own id fields keep their values");
+    assert!(text_at(&out, "note").starts_with("[redacted"), "any other field is held to the catch");
+    assert!(text_at(&out, "id").starts_with("[redacted"), "an id holding a key is still a key");
+    assert!(text_at(&out, "sid").starts_with("[redacted"), "sid is the application's to name");
+    assert_eq!(text_at(&out, "inner.turn"), blob, "at any depth");
+    assert!(text_at(&out, "inner.x").starts_with("[redacted"), "an id does not excuse its neighbour");
+    // The application names its own, and a list under an id field is ids as well.
+    let red = Redact::new().with_test(Shapes).id_key("sid");
+    let out = red.dat(&omap(vec![
+        ("sid",     st(&blob)),
+        ("turn",    Dat::List(vec![st(&blob), st(&blob)])),
+        ("other",   Dat::List(vec![st(&blob)])),
+    ]));
+    assert_eq!(text_at(&out, "sid"), blob);
+    let j = res!(compact(&out));
+    assert_eq!(j.matches(&blob).count(), 3, "two list members under turn, and sid: {}", j);
+    assert!(j.contains("[redacted"), "the list under another name is still covered: {}", j);
+    // A row meets the same rule through its payload's field names.
+    let row = Row::new("peer", 1, "b", T0, "console").with("callId", st(&blob)).with("msg", st(&blob));
+    let out = red.row(&row);
+    let get = |n: &str| out.body.iter().find(|(k, _)| k == n).map(|(_, v)| text_of(v)).unwrap_or_default();
+    assert_eq!(get("callId"), blob);
+    assert!(get("msg").starts_with("[redacted"), "{:?}", get("msg"));
+    // And a caller's own test is not excused for an id: the default is the same answer.
+    let own = Redact::new().with_test(|s: &str| s.contains("zzz"));
+    let out = own.dat(&omap(vec![("callId", st("a zzz b"))]));
+    assert!(text_at(&out, "callId").starts_with("[redacted"));
     Ok(())
 }
 
