@@ -35,6 +35,7 @@ pub mod delta;
 pub mod diag;
 pub mod diagram;
 pub mod doc;
+pub mod door;
 pub mod driver;
 pub mod emit;
 pub mod eval;
