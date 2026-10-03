@@ -371,6 +371,7 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 pub struct Evaluated {
 	pub engine:	Engine,
 	pub laid:	Outcome<Laid>,
+	pub blank:	bool,			// the main module's content sets nothing ([`Content::is_blank`])
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -395,11 +396,17 @@ pub fn assemble_eval<S: PageSink>(
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
+	let mut blank = false;
 	let laid = match eval::eval_source(&mut engine, id) {
-		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
+		Ok(module)	=> {
+			// Typst lays a main that sets nothing out as one blank page without a word, so a strict caller
+			// is told from the evaluated content, never from the page count.
+			blank = module.content.is_blank();
+			fixpoint::run(&mut engine, &module, sink)
+		},
 		Err(e)		=> Err(e),
 	};
-	Ok(Evaluated { engine, laid })
+	Ok(Evaluated { engine, laid, blank })
 }
 
 /// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory
@@ -420,31 +427,40 @@ pub fn supply_typst_package_cache() {
 }
 
 impl Evaluated {
-	/// The compile's report: its diagnostics at the positions a caller shows, the terse line of the
-	/// constructs passed over (every diagnostic of kind `unsupported`, by its message and how often), and
-	/// the page count. Strict mode reads it as the curated path's report is read, so one function,
-	/// [`DiagnosticKind::refuses_strict`], decides on both paths.
+	/// The compile's report with columns in characters, as Typst counts them: the form the command line
+	/// shows.
 	pub fn report(&self) -> Report {
+		self.report_in(Cols::Chars)
+	}
+
+	/// The compile's report: its diagnostics at the positions a caller shows, columns counted in `cols`, the
+	/// terse line of the constructs passed over (every diagnostic of kind `unsupported`, by its message and how
+	/// often), the line of every site a strict compile refuses (those, and each other refusing kind by its
+	/// word), the page count, and whether the main sets no content. Strict mode reads it as the curated path's
+	/// report is read, so one function, [`DiagnosticKind::refuses_strict`], decides on both paths.
+	pub fn report_in(&self, cols: Cols) -> Report {
 		let pages = match &self.laid {
 			Ok(l)	=> l.pages as usize,
 			Err(_)	=> 0,
 		};
 		let mut diagnostics = Vec::with_capacity(self.engine.diags.len());
 		let mut skipped: Vec<(String, usize)> = Vec::new();
+		let mut refused: Vec<(String, usize)> = Vec::new();
 		for d in &self.engine.diags {
 			let src = self.engine.world.sources.iter().find(|s| s.id == d.span.file && !d.span.is_detached());
 			let (file, line, col) = match src {
 				Some(s)	=> {
-					let (l, c) = s.line_col(d.span.start);
+					let (l, c) = s.line_col_in(d.span.start, cols);
 					(s.path.display().to_string(), l, c)
 				},
 				None	=> (String::new(), 0, 0),
 			};
-			if d.kind == DiagnosticKind::Unsupported && !d.is_error() {
-				let head = d.head().to_string();
-				match skipped.iter_mut().find(|(h, _)| *h == head) {
-					Some((_, n))	=> *n += 1,
-					None			=> skipped.push((head, 1)),
+			if !d.is_error() {
+				if d.kind == DiagnosticKind::Unsupported {
+					tally(&mut skipped, d.head());
+				}
+				if d.kind.refuses_strict() {
+					tally(&mut refused, if d.kind == DiagnosticKind::Unsupported { d.head() } else { d.kind.as_str() });
 				}
 			}
 			diagnostics.push(Diagnostic {
@@ -457,20 +473,45 @@ impl Evaluated {
 				hint:		d.hints.first().cloned(),
 			});
 		}
-		let line = if skipped.is_empty() {
-			None
-		} else {
-			let parts: Vec<String> = skipped.iter().map(|(h, n)| fmt!("{} \u{d7}{}", h, n)).collect();
-			Some(parts.join(", "))
-		};
 		Report {
 			pages,
 			diagnostics,
-			skipped:	line.as_ref().map(|l| fmt!("skipped: {}", l)),
-			summary:	line,
-			empty:		false,
+			skipped:	tally_line(&skipped).map(|l| fmt!("skipped: {}", l)),
+			summary:	tally_line(&refused),
+			empty:		self.blank,
 		}
 	}
+
+	/// The packages the compile asked for that nobody supplied, each once, in the order they were asked for,
+	/// read from the diagnostics that carry them and never from a message.
+	pub fn needs(&self) -> Vec<String> {
+		let mut out: Vec<String> = Vec::new();
+		for d in &self.engine.diags {
+			if let Some(n) = &d.need {
+				if !out.contains(n) {
+					out.push(n.clone());
+				}
+			}
+		}
+		out
+	}
+}
+
+// Counts one more of `key` in a list kept in order of first appearance.
+fn tally(list: &mut Vec<(String, usize)>, key: &str) {
+	match list.iter_mut().find(|(k, _)| k == key) {
+		Some((_, n))	=> *n += 1,
+		None			=> list.push((key.to_string(), 1)),
+	}
+}
+
+// The list as one line, `key ×n, key ×n`, or none when it is empty.
+fn tally_line(list: &[(String, usize)]) -> Option<String> {
+	if list.is_empty() {
+		return None;
+	}
+	let parts: Vec<String> = list.iter().map(|(k, n)| fmt!("{} \u{d7}{}", k, n)).collect();
+	Some(parts.join(", "))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -479,6 +520,7 @@ impl Evaluated {
 
 // One vocabulary: the evaluator's diagnostics and the curated path's carry the same kinds.
 pub use crate::diag::DiagnosticKind;
+pub use crate::syntax::Cols;
 
 /// How a diagnostic bears on the compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
