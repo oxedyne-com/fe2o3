@@ -906,6 +906,41 @@ fn the_delta_result_carries_pages_diagnostics_skipped_and_needs_as_the_other_doo
 	Ok(())
 }
 
+#[test]
+fn a_page_that_differs_only_in_its_face_has_another_id() -> Outcome<()> {
+	// Monospaced faces share their advances and, in a family, their glyph ids: the same word in the regular, the
+	// bold and the oblique face is placed alike, and the page is a different one. Typst says so too.
+	let dir = res!(work_dir("delta-faces"));
+	let regular = "#set page(width: 220pt, height: 60pt, margin: 8pt)\n#raw(\"hello world\")\n";
+	let bold	= "#set page(width: 220pt, height: 60pt, margin: 8pt)\n#strong(raw(\"hello world\"))\n";
+	let oblique	= "#set page(width: 220pt, height: 60pt, margin: 8pt)\n#emph(raw(\"hello world\"))\n";
+	let mut fonts: Vec<String> = Vec::new();
+	for (name, text) in [("regular", regular), ("bold", bold), ("oblique", oblique)] {
+		let case	= dir.join(name);
+		let main	= res!(write_project(&case, &[("main.typ", text)]));
+		let pdf		= main.with_extension("pdf");
+		let (ok, _, stderr) = res!(typst(&["compile", &main.display().to_string(), &pdf.display().to_string()]));
+		assert!(ok, "{}", stderr);
+		fonts.push(res!(tool("pdffonts", &[], &pdf, &[])));
+	}
+	assert!(fonts[0].contains("DejaVuSansMono") && !fonts[0].contains("Bold") && !fonts[0].contains("Oblique"), "{}", fonts[0]);
+	assert!(fonts[1].contains("DejaVuSansMono-Bold"), "typst sets the bold face: {}", fonts[1]);
+	assert!(fonts[2].contains("Oblique"), "typst sets the oblique face: {}", fonts[2]);
+
+	let mut inst = Instance::new();
+	let mut p = strict(&[("/main.typ", regular)]);
+	let was = res!(delta_made(&mut inst, &p));
+	p.known = was.product.order.clone();
+	for (name, text) in [("bold", bold), ("oblique", oblique)] {
+		p.sources = vec![("/main.typ".to_string(), text.to_string())];
+		let now = res!(delta_made(&mut inst, &p));
+		assert_ne!(now.product.order, was.product.order, "the {} page is not the regular one", name);
+		assert_eq!(now.product.changed.len(), 1, "and is sent: {}", name);
+		assert_ne!(now.product.changed[0].1, was.product.changed[0].1, "and is drawn otherwise: {}", name);
+	}
+	Ok(())
+}
+
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ queryProject                                                               │
 // └───────────────────────────────────────────────────────────────────────────┘

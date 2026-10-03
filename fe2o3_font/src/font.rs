@@ -86,6 +86,15 @@ impl Font {
 		}
 	}
 
+	/// The fingerprint of the face at a place in the chain, as a glyph's `face` names it; zero for a place
+	/// the chain does not hold.
+	pub fn fingerprint(&self, i: u8) -> u64 {
+		match self.faces.get(i as usize) {
+			Some(face)	=> face.fingerprint(),
+			None		=> 0,
+		}
+	}
+
 	/// The family, weight and slant of the face at the head of the chain -- the one the reader reads.
 	pub fn info(&self) -> Outcome<crate::face::FaceInfo> {
 		res!(self.first()).info()
