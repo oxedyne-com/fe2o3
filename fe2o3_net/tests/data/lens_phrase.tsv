@@ -1,4 +1,4 @@
-#list	abacus abdomen abdominal ability able abstract absurd acid down shirt drop-down t-shirt yo-yo felt-tip
+#list	abacus abdomen abdominal ability able abstract absurd acid down shirt drop-down t-shirt yo-yo felt-tip ice cream ice-cream
 "abacus abdomen abdominal ability able abstract absurd acid"	8	1	["abacus abdomen abdominal ability able abstract absurd acid"]
 "ABACUS ABDOMEN ABDOMINAL ABILITY ABLE ABSTRACT ABSURD ACID"	8	1	["ABACUS ABDOMEN ABDOMINAL ABILITY ABLE ABSTRACT ABSURD ACID"]
 "AbAcUs aBdOmEn abdominal ABILITY able Abstract absurd acid"	8	1	["AbAcUs aBdOmEn abdominal ABILITY able Abstract absurd acid"]
@@ -33,5 +33,9 @@
 "acid down shirt"	3	1	["acid down shirt"]
 "acid down"	3	0	[]
 "acid down zzzz shirt acid down"	3	1	["shirt acid down"]
+"ice-cream"	2	1	["ice-cream"]
+"x ice-cream y"	3	0	[]
+"acid ice-cream"	3	1	["acid ice-cream"]
+"acid ice cream"	3	1	["acid ice cream"]
 "abacus abdomen"	2	1	["abacus abdomen"]
 "abacus abdomen abdominal"	2	1	["abacus abdomen abdominal"]

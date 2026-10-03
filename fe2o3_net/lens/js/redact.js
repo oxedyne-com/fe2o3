@@ -299,7 +299,8 @@ export {
 /// on the list breaks the run. A list entry may hold hyphens (the EFF list has `drop-down`, `felt-tip`,
 /// `t-shirt` and `yo-yo`): where the text spells such an entry, hyphens and all, it is the one word it
 /// is, and the longest entry wins. Splitting on every non-letter cannot see those four, and breaks a
-/// passphrase that holds one into runs shorter than eight.
+/// passphrase that holds one into runs shorter than eight. An entry whose every part is a list word
+/// counts for its parts, since a dashed passphrase joins its words with the same hyphen.
 ///
 /// `words` is an iterable of words, or a function that answers one (or null while the list is not
 /// there yet, when the guard finds nothing). Returns `{ spans, has, mask, deep }`:
@@ -332,24 +333,31 @@ export function createRunGuard(words, n) {
 		return set;
 	}
 
-	// How many tokens the word starting at token `i` takes up: the longest hyphen-joined entry the text
-	// spells, else the token alone if it is a word, else none.
+	// The word starting at token `i`, as [tokens it takes up, words it counts for], or [0, 0]. The longest
+	// hyphen-joined entry the text spells wins; it counts for one word, or for as many as it has parts
+	// where each part is itself a word, since hyphens also join the words of a dashed passphrase and the
+	// safer count is the larger.
 	function wordAt(s, t, i) {
-		var chain = 1, k;
+		var chain = 1, k, j, each;
 		while (chain < parts && i + chain < t.length && s.slice(t[i + chain - 1][1], t[i + chain][0]) === '-') chain++;
 		for (k = chain; k >= 2; k--) {
-			if (set.has(s.slice(t[i][0], t[i + k - 1][1]).toLowerCase())) return k;
+			if (set.has(s.slice(t[i][0], t[i + k - 1][1]).toLowerCase())) {
+				each = true;
+				for (j = i; j < i + k; j++) if (!set.has(s.slice(t[j][0], t[j][1]).toLowerCase())) { each = false; break; }
+				return [k, each ? k : 1];
+			}
 		}
-		return set.has(s.slice(t[i][0], t[i][1]).toLowerCase()) ? 1 : 0;
+		return set.has(s.slice(t[i][0], t[i][1]).toLowerCase()) ? [1, 1] : [0, 0];
 	}
 
 	function spans(s) {
 		if (!list() || typeof s !== 'string' || s.length < RUN * 2 - 1) return [];
 		var t = [], re = /[A-Za-z]+/g, m;
 		while ((m = re.exec(s)) !== null) t.push([m.index, m.index + m[0].length]);
-		var out = [], from = 0, to = 0, run = 0, i = 0, took;
+		var out = [], from = 0, to = 0, run = 0, i = 0, w, took;
 		while (i < t.length) {
-			took = wordAt(s, t, i);
+			w = wordAt(s, t, i);
+			took = w[0];
 			if (!took) {
 				if (run >= RUN) out.push([from, to]);
 				run = 0; i += 1;
@@ -357,7 +365,7 @@ export function createRunGuard(words, n) {
 			}
 			if (!run) from = t[i][0];
 			to = t[i + took - 1][1];
-			run += 1; i += took;
+			run += w[1]; i += took;
 		}
 		if (run >= RUN) out.push([from, to]);
 		return out;

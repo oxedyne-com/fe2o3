@@ -1696,7 +1696,7 @@ fn phrase_table() -> Outcome<(Vec<String>, Vec<PhraseCase>)> {
 #[test]
 fn a_word_run_agrees_with_the_shared_case_file() -> Outcome<()> {
     let (list, cases) = res!(phrase_table());
-    assert_eq!(cases.len(), 36, "the table has changed size");
+    assert_eq!(cases.len(), 40, "the table has changed size");
     assert!(list.iter().any(|w| w.contains('-')), "the list holds hyphenated entries");
     let (mut hits, mut misses) = (0, 0);
     for c in &cases {
