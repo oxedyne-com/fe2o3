@@ -29,7 +29,7 @@ const INK:			u8		= 200;		// a pixel darker than this is ink
 const DIFF:			i32		= 100;		// grey levels two pixels must differ by to count
 const SLACK_PX:		i64		= 2;		// the ink box may move this many pixels
 const FRACTION:		f64		= 0.04;		// of Typst's ink pixels that may differ
-const MIN_COMPARED:	usize	= 4;
+const MIN_COMPARED:	usize	= 7;
 
 /// A grey picture, a row at a time.
 struct Grey {

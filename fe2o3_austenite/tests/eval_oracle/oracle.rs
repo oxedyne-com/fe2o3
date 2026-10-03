@@ -36,6 +36,10 @@ use std::process::Command;
 
 pub const PINNED: &str = "typst 0.15.";
 
+// Part of every cache key: which faces Typst was given, so that a product made with the account's own fonts is
+// never read as made without them.
+const FACES: &str = "fonts=system";
+
 pub const PROBES_EXPR: &str = "query(<probe>).map(it => it.value)";
 pub const POSITIONS_EXPR: &str = "query(selector(heading).or(figure, math.equation, footnote, <probe>))\
 	.map(it => (func: repr(it.func()), pos: it.location().position()))";
@@ -110,6 +114,10 @@ impl Oracle {
 		};
 		c.args(args);
 		c.current_dir(cwd);
+		// Typst looks for the account's own fonts under `$XDG_DATA_HOME/fonts`; a face installed there (a
+		// second Libertinus Serif of another version, say) outranks Typst's own and would move a glyph on one
+		// side only. The oracle sees the faces the system and Typst carry, whoever runs the test.
+		c.env("XDG_DATA_HOME", self.work.join("no-user-fonts"));
 		// An area that keeps packages of its own beside its fixtures lays them out as Typst's package
 		// path does, `packages/<namespace>/<name>/<version>`.
 		let own = cwd.join("packages");
@@ -139,6 +147,7 @@ impl Oracle {
 		let files = res!(area_bytes(&fx.root));
 		let mut h = Fnv::new();
 		h.feed(self.version.as_bytes());
+		h.feed(FACES.as_bytes());
 		h.feed(fx.name.as_bytes());
 		for (rel, bytes) in &files {
 			h.feed(rel.as_bytes());

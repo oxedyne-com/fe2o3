@@ -49,6 +49,7 @@ use crate::eval::{
 	Context,
 	Engine,
 };
+use crate::flow::grid::RowSplit;
 use crate::flow::inline::ParSituation;
 use crate::flow::page::Level;
 use crate::flow::Region;
@@ -3009,8 +3010,9 @@ fn layout_multi_layouter(engine: &mut Engine, elem: &Content, styles: &StyleChai
 		ElemKind::Layout	=> layout_layout(engine, elem, styles, regions),
 		ElemKind::List | ElemKind::Enum	=> crate::flow::lists::layout(engine, elem, styles, regions),
 		ElemKind::Grid | ElemKind::Table => {
-			let nodes = res!(crate::flow::grid::layout_grid(engine, elem, styles, regions.region()));
-			Ok(split_list(nodes, regions))
+			let rows = res!(crate::flow::grid::layout_rows(engine, elem, styles, regions.region()));
+			let (nodes, breaks) = (&rows.nodes, &rows.breaks);
+			split_list(nodes.clone(), regions, breaks, |gi, r, head, skip| rows.split(engine, styles, gi, r, head, skip))
 		},
 		ElemKind::Equation => {
 			let node = res!(crate::flow::math::layout_equation(engine, elem, styles, regions.region()));
@@ -3106,18 +3108,22 @@ fn layout_layout(engine: &mut Engine, elem: &Content, styles: &StyleChain, regio
 /// repeated header armed in the list is set again at the top of every region the rows spill onto, and a
 /// repeated footer armed in it closes every region but the last, straight after the rows, its height kept
 /// free in each.
-fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
+fn split_list<F>(nodes: Vec<Node>, regions: &Regions, breaks: &[Option<usize>], mut split: F) -> Outcome<Vec<Frame>>
+	where F: FnMut(usize, &Regions, f64, bool) -> Outcome<RowSplit>
+{
 	let mut s = Splitter {
 		regions:	regions.clone(),
 		frames:		Vec::new(),
 		cur:		Frame::new(0.0, 0.0),
 		y:			0.0,
 		boxes:		false,
+		base:		0.0,
 		head:		None,
 		foot:		None,
 	};
 	let mut at_break	= true;		// a break is allowed before the next box
 	let mut prev_box	= false;
+	let mut pending: Option<(usize, Vec<BoxNode>)> = None;	// the parts of a breakable row ahead
 	let mut i = 0;
 	while i < nodes.len() {
 		match &nodes[i] {
@@ -3146,12 +3152,33 @@ fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
 			Node::Anchor(_) | Node::Tag(_) | Node::Mark(_) => s.cur.push(0.0, s.y, Item::Node(nodes[i].clone())),
 			Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) => (),
 			node => {
-				if at_break && s.boxes && s.regions.may_progress() {
+				if at_break {
 					let atom = atom_height(&nodes, i);
 					let foot = s.foot.as_ref().map(|f| f.dims.vextent().to_pt()).unwrap_or(0.0);
-					if !fits(s.regions.h - s.y - foot, atom) {
-						s.next_region();
+					let room = s.regions.h - s.y - foot;
+					if !fits(room, atom) {
+						// A row that breaks is set into the regions it needs, after what is welded above it; one
+						// that does not goes whole to the next region, which a first row does too when the
+						// region has not its full height.
+						pending = res!(break_row(&nodes, breaks, i, &s, room, s.may_progress(), &mut split));
+						if pending.is_none() && s.may_progress() {
+							s.next_region();
+							let room = s.regions.h - s.y;
+							if !fits(room, atom) {
+								pending = res!(break_row(&nodes, breaks, i, &s, room, false, &mut split));
+							}
+						}
 					}
+				}
+				match pending.take() {
+					Some((j, parts)) if j == i => {
+						s.place_parts(parts);
+						at_break = false;
+						prev_box = true;
+						i += 1;
+						continue;
+					},
+					other => pending = other,
 				}
 				s.place(node.clone());
 				at_break = false;
@@ -3161,7 +3188,59 @@ fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
 		i += 1;
 	}
 	s.finish();
-	s.frames
+	Ok(s.frames)
+}
+
+/// The breakable row that ends the atom starting at `start` (a row alone, or one welded below a header), broken
+/// to fit `room` when it can be: the node holding its first part's box and the parts, if it breaks.
+fn break_row<F>(
+	nodes:		&[Node],
+	breaks:		&[Option<usize>],
+	start:		usize,
+	s:			&Splitter,
+	room:		f64,
+	skip:		bool,
+	split:		&mut F,
+)
+	-> Outcome<Option<(usize, Vec<BoxNode>)>>
+	where F: FnMut(usize, &Regions, f64, bool) -> Outcome<RowSplit>
+{
+	let (mut h, mut head, mut prev_box) = (0.0, s.head.as_ref().map(|b| b.dims.vextent().to_pt()), false);
+	let mut row = None;
+	for (k, n) in nodes.iter().enumerate().skip(start) {
+		match n {
+			Node::Glue(g) => {
+				if prev_box {
+					break;
+				}
+				h += g.natural.to_pt();
+			},
+			Node::Penalty(p) => {
+				if !p.is_forbidden() {
+					break;
+				}
+				prev_box = false;
+			},
+			Node::RepeatHead(b) => head = b.as_ref().map(|b| b.dims.vextent().to_pt()),
+			Node::Anchor(_) | Node::Tag(_) | Node::Mark(_) | Node::RepeatFoot(_) | Node::Float(_)
+				| Node::Columns(_) | Node::PageColumns(_) => (),
+			other => {
+				row = breaks.get(k).copied().flatten().map(|gi| (k, gi, h));
+				h += other.vextent().to_pt();
+				prev_box = true;
+			},
+		}
+	}
+	let (k, gi, lead) = match row {
+		Some(r)	=> r,
+		None	=> return Ok(None),
+	};
+	let mut r = s.regions.clone();
+	r.h = room - lead;
+	Ok(match res!(split(gi, &r, head.unwrap_or(0.0), skip)) {
+		RowSplit::Parts(parts)	=> Some((k, parts)),
+		RowSplit::Skip | RowSplit::Whole => None,
+	})
 }
 
 struct Splitter {
@@ -3170,6 +3249,7 @@ struct Splitter {
 	cur:		Frame,
 	y:			f64,
 	boxes:		bool,			// the region holds a box
+	base:		f64,			// the height a region starts at: what its repeated header takes
 	head:		Option<BoxNode>,
 	foot:		Option<BoxNode>,
 }
@@ -3185,6 +3265,20 @@ impl Splitter {
 		self.cur.push(0.0, self.y, Item::Node(node));
 		self.y += h;
 		self.boxes = true;
+	}
+
+	/// Would the next region give more room? Typst's `may_progress` on the room left, which what has been placed
+	/// beyond the repeated header has shortened.
+	fn may_progress(&self) -> bool { self.y > self.base + EPS || self.regions.may_progress() }
+
+	/// A row broken across regions: its first part here, each other in a region of its own.
+	fn place_parts(&mut self, parts: Vec<BoxNode>) {
+		for (k, part) in parts.into_iter().enumerate() {
+			if k > 0 {
+				self.next_region();
+			}
+			self.place(Node::VBox(part));
+		}
 	}
 
 	fn finish(&mut self) {
@@ -3209,6 +3303,7 @@ impl Splitter {
 		if let Some(head) = self.head.clone() {
 			self.place(Node::VBox(head));
 		}
+		self.base	= self.y;
 	}
 }
 
