@@ -18,7 +18,9 @@
 //! Two pieces serve an app's own secrets. `redact::Phrase` is the test for a passphrase drawn from
 //! a list of words (`n` of them in a row), and `Or` joins it to the stock `Shapes`. `chunk` is how a
 //! `Sink` reads a bundle sent as base64 in `ds snapshot|telemetry <id> i/N` rows: it judges the
-//! text they encode, so the bundle is kept whole when it is innocent and covered whole when it is not.
+//! text they encode, so the bundle is kept whole when it is innocent and covered whole when it is
+//! not. A bundle that is JSON meets the sink's whole `Redact`, names and word runs across its
+//! strings included, and is covered where the secret stands and sent on in the rows it came in.
 
 pub mod chunk;
 pub mod redact;

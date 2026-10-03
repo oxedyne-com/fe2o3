@@ -1902,10 +1902,10 @@ fn a_secret_that_straddles_a_cut_is_seen_and_every_chunk_is_covered() -> Outcome
     let rows = rows_of("snapshot", "s4", &url, 288, false);
     assert!(rows.len() >= 2);
     // Alone, no chunk holds the eight words: the cut has halved them.
-    let test = chunk_test();
+    let red = Redact::new().with_head(0).with_test(chunk_test());
     for (_, tag, data) in &rows {
         let one = vec![(tag.clone(), data.clone())];
-        assert_eq!(judge(&test, &one), vec![Verdict::Clean], "{} alone is innocent", tag);
+        assert_eq!(judge(&red, 400, &one), vec![Verdict::Clean], "{} alone is innocent", tag);
     }
     let s = Scratch::new("chunk-straddle");
     let sink = chunk_sink(&s);
@@ -2045,4 +2045,188 @@ fn the_text_of_a_payload_allows_a_partial_character_at_each_end_and_nothing_else
     assert!(chunk::text("Zm9vY").is_none(), "a lone character over a quantum");
     // Plain words with their spaces taken out decode to bytes that are not text.
     assert!(chunk::text(PHRASE).is_none());
+}
+
+
+// A bundle that parses as JSON meets the whole redactor (F5, 2026-10-04) ================
+
+// A snapshot with one more member in it, which is raw JSON.
+fn snapshot_with(member: &str) -> String {
+    let base = snapshot_json("x");
+    fmt!("{},{}}}", &base[..base.len() - 1], member)
+}
+
+// The eight words of PHRASE spread over a structure's strings in four shapes. The raw text of the
+// first two is one run, and the letter-only keys and the keys `t` of the last two break it.
+fn spread(shape: usize) -> String {
+    let w: Vec<&str> = PHRASE.split(' ').collect();
+    let join = |v: Vec<String>| v.join(",");
+    match shape {
+        0 => fmt!("[{}]", join(w.iter().map(|x| fmt!("\"{}\"", x)).collect())),
+        1 => fmt!("{{{}}}", join(w.iter().enumerate().map(|(i, x)| fmt!("\"{}\":\"{}\"", i, x)).collect())),
+        2 => fmt!("{{{}}}", join(w.iter().enumerate().map(|(i, x)| fmt!("\"{}\":\"{}\"", (b'a' + i as u8) as char, x)).collect())),
+        _ => fmt!("[{}]", join(w.iter().map(|x| fmt!("{{\"t\":\"{}\"}}", x)).collect())),
+    }
+}
+
+// What a key has stored as a reader reads it: the data of each row joined, decoded as it was sent.
+fn reread(got: &[(String, String)], std: bool) -> Outcome<String> {
+    let whole: String = got.iter().map(|(_, d)| d.replace(' ', "")).collect();
+    let bytes = if std { res!(base64::decode(&whole)) } else { res!(base64::decode_url(&whole)) };
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn parsed(text: &str) -> Outcome<Dat> {
+    Ok(res!(Dat::decode_json_strict(text, &DecodeLimits::default())))
+}
+
+#[test]
+fn words_spread_over_a_bundles_strings_are_covered_whatever_stands_between_them() -> Outcome<()> {
+    let names = ["list", "digits", "letters", "objects"];
+    let s = Scratch::new("chunk-spread");
+    let sink = chunk_sink(&s);
+    for (k, name) in names.iter().enumerate() {
+        let json = snapshot_with(&fmt!("\"spread\":{}", spread(k)));
+        let rows = rows_of("snapshot", &fmt!("sp-{}", name), &base64::encode_url(json.as_bytes()), 288, false);
+        assert!(rows.len() >= 3, "{}: a few chunks", name);
+        assert_eq!(res!(post_rows(&sink, name, &rows, T0 + 10_000 * k as u64)), rows.len());
+        let got = res!(kept(&sink, name));
+        assert_eq!(got.len(), rows.len(), "{}: a row for a row", name);
+        for ((tag, _), (_, want, _)) in got.iter().zip(rows.iter()) {
+            assert_eq!(tag, want, "{}: the tags stand", name);
+        }
+        let whole = got.iter().all(|(_, d)| marked(d));
+        assert_eq!(whole, k < 2, "{}: the raw text met the run in the first two shapes alone", name);
+        if whole {
+            assert!(!has(&res!(all_bytes(&s.dir())), &rows[0].2[..40]), "{}: no chunk is stored as it came", name);
+            continue;
+        }
+        // The raw text never met the run, so the bundle is covered in place, and is still a bundle.
+        let text = res!(reread(&got, false));
+        for w in PHRASE.split(' ') {
+            assert!(!text.contains(w), "{}: the word {:?} is stored", name, w);
+        }
+        let back = res!(parsed(&text));
+        assert_eq!(text_at(&back, "screen"), "oxegen_home", "{}: the rest of it is kept", name);
+        assert_eq!(text_at(&back, "app.phase"), "home", "{}", name);
+        let leaves = fmt!("{:?}", at(&back, "spread"));
+        assert!(leaves.contains("[redacted"), "{}: the strings of the run are fingerprints: {}", name, leaves);
+    }
+    Ok(())
+}
+
+#[test]
+fn seven_words_spread_over_a_bundle_are_a_bundle_as_it_came() -> Outcome<()> {
+    let seven: Vec<String> = PHRASE.split(' ').take(7).map(|x| fmt!("{{\"t\":\"{}\"}}", x)).collect();
+    let json = snapshot_with(&fmt!("\"spread\":[{}]", seven.join(",")));
+    let rows = rows_of("snapshot", "sv", &base64::encode_url(json.as_bytes()), 288, false);
+    let s = Scratch::new("chunk-seven");
+    let sink = chunk_sink(&s);
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), rows.len());
+    for ((_, data), (_, _, want)) in res!(kept(&sink, "k")).iter().zip(rows.iter()) {
+        assert_eq!(data, want, "an innocent bundle is stored as it came");
+    }
+    Ok(())
+}
+
+#[test]
+fn a_secret_named_field_inside_a_bundle_is_covered_in_place() -> Outcome<()> {
+    let json = snapshot_with("\"passphrase\":\"hunter2\",\"auth\":{\"seed\":\"s33d\",\"user\":\"ann\"}");
+    assert!(!chunk_test().hit(&json), "the string test alone finds nothing here, which is the point");
+    let s = Scratch::new("chunk-named");
+    let sink = chunk_sink(&s);
+    let forms = [
+        ("url",     "snapshot",     base64::encode_url(json.as_bytes()),    288, false, false),
+        ("std",     "telemetry",    base64::encode(json.as_bytes()),        360, false, true),
+        ("words",   "snapshot",     base64::encode_url(json.as_bytes()),    288, true,  false),
+    ];
+    for (k, (key, kind, enc, size, wrap, std)) in forms.iter().enumerate() {
+        let rows = rows_of(kind, &fmt!("nm-{}", key), enc, *size, *wrap);
+        assert!(rows.len() >= 3, "{}: a few chunks", key);
+        assert_eq!(res!(post_rows(&sink, key, &rows, T0 + 10_000 * k as u64)), rows.len());
+        let got = res!(kept(&sink, key));
+        assert_eq!(got.len(), rows.len(), "{}: a row for a row", key);
+        for ((tag, data), (_, want, _)) in got.iter().zip(rows.iter()) {
+            assert_eq!(tag, want, "{}", key);
+            assert!(data.len() <= Gates::default().max_data, "{}: a row within the gate", key);
+        }
+        // It reads back, in the alphabet it was sent in, as the bundle with two values covered.
+        let back = res!(parsed(&res!(reread(&got, *std))));
+        assert_eq!(text_at(&back, "passphrase"), fingerprint("hunter2", 0), "{}", key);
+        assert_eq!(text_at(&back, "auth.seed"), fingerprint("s33d", 0), "{}", key);
+        assert_eq!(text_at(&back, "auth.user"), "ann", "{}: only the secrets go", key);
+        assert_eq!(text_at(&back, "screen"), "oxegen_home", "{}", key);
+    }
+    let bytes = res!(all_bytes(&s.dir()));
+    assert!(!has(&bytes, "hunter2") && !has(&bytes, "s33d"));
+    Ok(())
+}
+
+#[test]
+fn a_bundle_too_big_to_hold_its_covering_is_covered_whole() -> Outcome<()> {
+    // Each short value becomes a longer fingerprint, so the covered text outgrows the rows it came in.
+    let members: Vec<String> = (0..60).map(|i| fmt!("\"a_key_{}\":\"{}\"", i, i % 10)).collect();
+    let json = snapshot_with(&members.join(","));
+    let rows = rows_of("snapshot", "big", &base64::encode_url(json.as_bytes()), 288, false);
+    let s = Scratch::new("chunk-big");
+    let sink = chunk_sink(&s);
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), rows.len());
+    let got = res!(kept(&sink, "k"));
+    assert_eq!(got.len(), rows.len());
+    for (tag, data) in &got {
+        assert!(marked(data), "{} is covered whole, since the covering does not fit: {}", tag, data);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_run_that_is_not_the_whole_bundle_is_covered_whole_if_it_needs_covering() -> Outcome<()> {
+    // One chunk of a set that claims two: whatever the other holds, this one cannot be re-cut.
+    let json = "{\"passphrase\":\"hunter2\"}";
+    let s = Scratch::new("chunk-half");
+    let sink = chunk_sink(&s);
+    let rows = vec![(1i64, "ds snapshot h1 1/2".to_string(), base64::encode_url(json.as_bytes()))];
+    assert_eq!(res!(post_rows(&sink, "half", &rows, T0)), 1);
+    assert!(marked(&res!(kept(&sink, "half"))[0].1));
+    // The same text as the whole of a set of one is covered in place.
+    let one = vec![(1i64, "ds snapshot h2 1/1".to_string(), base64::encode_url(json.as_bytes()))];
+    assert_eq!(res!(post_rows(&sink, "whole", &one, T0 + 10_000)), 1);
+    let got = res!(kept(&sink, "whole"));
+    assert!(!marked(&got[0].1));
+    let back = res!(parsed(&res!(reread(&got, false))));
+    assert_eq!(text_at(&back, "passphrase"), fingerprint("hunter2", 0));
+    Ok(())
+}
+
+#[test]
+fn a_test_says_which_of_a_structures_strings_it_reads_only_together() {
+    let text = "red\ngreen\nblue";
+    let p = Phrase::new(["red", "green", "blue"], 3);
+    assert_eq!(p.joined_spans(text), vec![(0, text.len())], "a word run is read across the strings");
+    assert!(Shapes.joined_spans(text).is_empty(), "a shape is read in one string");
+    assert!((|s: &str| s.contains("red")).joined_spans(text).is_empty(), "so is a closure's test");
+    assert_eq!(Or(Shapes, p).joined_spans(text), vec![(0, text.len())], "and `Or` asks both");
+}
+
+#[test]
+fn a_covering_that_shrinks_a_bundle_still_gives_a_row_for_a_row() -> Outcome<()> {
+    // A long value that no shape finds, under a name that is a secret's, becomes a short fingerprint.
+    let long = "w ".repeat(400);
+    let json = snapshot_with(&fmt!("\"passphrase\":\"{}\"", long));
+    assert!(!chunk_test().hit(&json));
+    let rows = rows_of("snapshot", "sh", &base64::encode_url(json.as_bytes()), 288, false);
+    let s = Scratch::new("chunk-shrink");
+    let sink = chunk_sink(&s);
+    assert_eq!(res!(post_rows(&sink, "k", &rows, T0)), rows.len());
+    let got = res!(kept(&sink, "k"));
+    assert_eq!(got.len(), rows.len(), "a row for a row, whatever it holds");
+    for ((tag, _), (_, want, _)) in got.iter().zip(rows.iter()) {
+        assert_eq!(tag, want);
+    }
+    let (before, after): (usize, usize) = (rows.iter().map(|r| r.2.len()).sum(), got.iter().map(|r| r.1.len()).sum());
+    assert!(after + 400 < before, "the bundle is shorter for the covering: {} then {}", before, after);
+    let back = res!(parsed(&res!(reread(&got, false))));
+    assert_eq!(text_at(&back, "passphrase"), fingerprint(&long, 0));
+    assert_eq!(text_at(&back, "screen"), "oxegen_home");
+    Ok(())
 }
