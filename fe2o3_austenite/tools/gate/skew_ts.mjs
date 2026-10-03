@@ -3,10 +3,13 @@
 // nothing else: typst.ts's diagnostics quote the source, so they are never printed.
 //
 //     node skew_ts.mjs --root <dir> --main <file> --vendor <dir> --out <pdf> [--font-dir <dir>]... [--exclude <dir>]...
+//                      [--packages <dir>]
 //
-// Prints: `typstts: gathered sources <n> assets <n> fonts <n> packages <n>`, then `typstts: compile ok` or
-// `typstts: compile failed`, or `typstts: error <code>` with a code from {bad-args, no-root, no-main,
-// too-large, failed}.
+// Prints: `typstts: gathered sources <n> assets <n> fonts <n> packages <n> missing <n>`; one
+// `typstts: package preview <name> <version> <supplied|missing>` for each spec in the registry namespace
+// `preview` (a public name; specs of any other namespace are only counted); then `typstts: compile ok` or
+// `typstts: compile failed`; or `typstts: error <code>` with a code from {bad-args, no-root, no-main,
+// no-packages, bad-package, too-large, failed}.
 
 import fs from 'node:fs';
 import { gather, FONT_DIRS } from '../bench/lib/gather.mjs';
@@ -20,6 +23,7 @@ function args(argv) {
 		if (v === undefined) return null;
 		if (k === '--font-dir') a.fontDirs.push(v);
 		else if (k === '--exclude') a.exclude.push(v);
+		else if (k === '--packages') a.packages = v;
 		else if (k === '--root') a.root = v;
 		else if (k === '--main') a.main = v;
 		else if (k === '--vendor') a.vendor = v;
@@ -39,8 +43,11 @@ if (!a) {
 
 let code = 'failed';
 try {
-	const g = gather(a.root, a.main, { fontDirs: a.fontDirs, exclude: a.exclude });
-	console.log(`typstts: gathered sources ${g.stats.sources} assets ${g.stats.assets} fonts ${g.stats.fonts} packages ${g.stats.packages}`);
+	const g = gather(a.root, a.main, { fontDirs: a.fontDirs, exclude: a.exclude, packages: a.packages ?? null });
+	console.log(`typstts: gathered sources ${g.stats.sources} assets ${g.stats.assets} fonts ${g.stats.fonts} packages ${g.stats.packages} missing ${g.stats.missing}`);
+	for (const { spec, found } of g.specs) {
+		if (spec.ns === 'preview') console.log(`typstts: package preview ${spec.name} ${spec.version} ${found ? 'supplied' : 'missing'}`);
+	}
 	code = 'compile';
 	const ts = await loadTypstTs(a.vendor, g);
 	const r = ts.compilePdf({ main: g.main, sources: g.sources, assets: g.assets });

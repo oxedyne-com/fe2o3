@@ -10,28 +10,26 @@
 // Left out, as Daimond leaves them out: a `.pdf` (typst.ts cannot place one, and a project directory
 // usually holds the last build), and any name that begins with a dot (`.git`, `.stversions`, ...).
 //
+// Given `--packages <dir>`, it also follows the project's `#import "@ns/name:x.y.z"` into that directory
+// and returns the packages it finds, with their dependencies (see `packages.mjs` for the two layouts the
+// directory may have and for how Daimond supplies them). Specs not found are counted, never fatal.
+//
 // Run directly, it prints counts and nothing else, so it is safe to point at a project whose text
 // must not appear in a log:
 //
-//     node gather.mjs <root> <main> [--font-dir <dir>]... [--exclude <dir>]...
+//     node gather.mjs <root> <main> [--font-dir <dir>]... [--exclude <dir>]... [--packages <dir>]
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { closure, refuse } from './packages.mjs';
 
 export const TEXT_EXTS = ['typ', 'bib', 'csv', 'json', 'yaml', 'yml', 'toml', 'xml', 'txt'];
 export const FONT_EXTS = ['ttf', 'otf', 'ttc', 'otc'];
 export const SKIP_EXTS = ['pdf'];
 export const FONT_DIRS = ['assets/fonts', 'fonts']; // Daimond's, relative to the root
 export const MAX_BYTES = 512 * 1024 * 1024; // refused above this, never cut short
-const PACKAGE_IMPORT = /import\s+"@[a-z0-9_-]+\//;
-
-// A refusal carries a closed `code`, so a caller that must not print the message can print the code.
-function refuse(code, message) {
-	const e = new Error(message);
-	e.code = code;
-	return e;
-}
 
 // The stat of a path, or null for a link that points nowhere.
 const statOf = (p) => {
@@ -61,7 +59,8 @@ function shadow(root, p) {
 /// * `fontDirs` - Directories searched for fonts, relative to `root` or absolute; those that do not
 ///   exist are skipped. Defaults to Daimond's `assets/fonts` and `fonts`.
 /// * `exclude` - Directories under `root` left out of the walk, relative to `root` or absolute.
-export function gather(root, main, { fontDirs = FONT_DIRS, exclude = [], maxBytes = MAX_BYTES } = {}) {
+/// * `packages` - A directory of packages to resolve the project's package imports against, or null.
+export function gather(root, main, { fontDirs = FONT_DIRS, exclude = [], maxBytes = MAX_BYTES, packages: pkgDir = null } = {}) {
 	let rootAbs;
 	try {
 		rootAbs = fs.realpathSync(path.resolve(root));
@@ -74,6 +73,7 @@ export function gather(root, main, { fontDirs = FONT_DIRS, exclude = [], maxByte
 	if (!mainShadow || ext(mainAbs) !== 'typ' || !fs.existsSync(mainAbs)) {
 		throw refuse('no-main', 'the main file is not a .typ file under the root');
 	}
+	if (pkgDir !== null && !fs.existsSync(pkgDir)) throw refuse('no-packages', 'the package directory does not exist');
 	const abs = (d) => path.resolve(rootAbs, d);
 	const fontRoots = fontDirs.map(abs).filter((d) => fs.existsSync(d) && fs.statSync(d).isDirectory());
 	const skip = exclude.map(abs);
@@ -147,9 +147,9 @@ export function gather(root, main, { fontDirs = FONT_DIRS, exclude = [], maxByte
 	};
 	walk(rootAbs);
 
-	// Sources that import a package. Daimond vendors a few and re-points the imports at them; this gather
-	// does not, so a project that names one will not compile in typst.ts, and this count says why.
-	const packages = sources.filter(([, t]) => PACKAGE_IMPORT.test(t)).length;
+	// The packages the sources import, and theirs in turn. A spec the directory does not hold is counted as
+	// missing; with no directory every spec is.
+	const pk = closure(sources, pkgDir);
 
 	return {
 		root: rootAbs,
@@ -157,22 +157,35 @@ export function gather(root, main, { fontDirs = FONT_DIRS, exclude = [], maxByte
 		sources,
 		assets,
 		fonts,
-		stats: { sources: sources.length, assets: assets.length, fonts: fonts.length, packages, bytes },
+		packages: pk.found,
+		specs: pk.specs,
+		stats: {
+			sources:	sources.length,
+			assets:		assets.length,
+			fonts:		fonts.length,
+			packages:	pk.specs.length,
+			missing:	pk.missing.length,
+			bytes,
+		},
 	};
 }
 
 // ── Command line ─────────────────────────────────────────────────────────────
 
-// Parses `<root> <main> [--font-dir d]... [--exclude d]...`; null on any other shape.
+// Parses `<root> <main> [--font-dir d]... [--exclude d]... [--packages d]`; null on any other shape.
 export function parseArgs(argv) {
 	const pos = [];
 	const fontDirs = [];
 	const exclude = [];
+	let packages = null;
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (a === '--font-dir' || a === '--exclude') {
 			if (i + 1 >= argv.length) return null;
 			(a === '--font-dir' ? fontDirs : exclude).push(argv[++i]);
+		} else if (a === '--packages') {
+			if (i + 1 >= argv.length) return null;
+			packages = argv[++i];
 		} else if (a.startsWith('--')) {
 			return null;
 		} else {
@@ -180,7 +193,7 @@ export function parseArgs(argv) {
 		}
 	}
 	if (pos.length !== 2) return null;
-	return { root: pos[0], main: pos[1], fontDirs: fontDirs.length ? fontDirs : FONT_DIRS, exclude };
+	return { root: pos[0], main: pos[1], fontDirs: fontDirs.length ? fontDirs : FONT_DIRS, exclude, packages };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -190,9 +203,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		process.exit(2);
 	}
 	try {
-		const g = gather(a.root, a.main, { fontDirs: a.fontDirs, exclude: a.exclude });
+		const g = gather(a.root, a.main, { fontDirs: a.fontDirs, exclude: a.exclude, packages: a.packages });
 		const s = g.stats;
-		console.log(`gather: sources ${s.sources} assets ${s.assets} fonts ${s.fonts} packages ${s.packages} bytes ${s.bytes}`);
+		console.log(`gather: sources ${s.sources} assets ${s.assets} fonts ${s.fonts} packages ${s.packages} missing ${s.missing} bytes ${s.bytes}`);
 	} catch (e) {
 		// Only the closed code: a message could name a file of the project.
 		console.log(`gather: error ${e && e.code ? e.code : 'failed'}`);

@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { prepare, repoint } from './packages.mjs';
+
 const DIAG_FULL = 3; // typst.ts diagnostics_format: full (matches www/js/typst.js)
 
 const FONTS = [
@@ -64,8 +66,16 @@ export async function loadAustenite(vendorDir) {
 /// every `reset_shadow`. A compile that carries its own `assets` uses those
 /// instead.
 ///
+/// Packages are supplied as Daimond's typst.ts leg supplies them (`packages.mjs`):
+/// each package is laid out under `/_pkg` with its `.typ` files re-pointed and a
+/// one-line module that carries the binding, its sources go in with the project's
+/// and its other files with the assets, and every package import in a project
+/// source is re-pointed at that module. There is no registry behind typst.ts, so
+/// an import of a package that was not supplied fails the compile.
+///
 /// # Arguments
-/// * `project` - `{ fonts: [[name, Uint8Array]], assets: [[shadowPath, Uint8Array]] }`.
+/// * `project` - `{ fonts: [[name, Uint8Array]], assets: [[shadowPath, Uint8Array]],
+///   packages: [{ spec, pack }] }`; a compile that carries its own `packages` uses those instead.
 export async function loadTypstTs(vendorDir, project = {}) {
 	const glue = pathToFileURL(path.join(vendorDir, 'typst_ts_web_compiler.mjs')).href;
 	const wasmPath = path.join(vendorDir, 'typst_ts_web_compiler_bg.wasm');
@@ -83,15 +93,30 @@ export async function loadTypstTs(vendorDir, project = {}) {
 	}
 	const compiler = await builder.build();
 	const ownAssets = project.assets ?? [];
+	const laidOut = (packages) => {
+		const sources = [];
+		const assets = [];
+		for (const { spec, pack } of packages) {
+			const ready = prepare(spec, pack);
+			sources.push(...ready.sources);
+			assets.push(...ready.assets);
+		}
+		return { sources, assets };
+	};
+	const ownPackages = laidOut(project.packages ?? []);
 	let lastMain = null;
 	function ensureSources(project) {
 		compiler.reset_shadow();
-		for (const [p, text] of project.sources) {
+		const pkg = project.packages ? laidOut(project.packages) : ownPackages;
+		// The project's sources, then the packages', as Daimond's gather orders them; a package import in a
+		// project's own source is re-pointed at the last moment, as it does.
+		const sources = project.sources.map(([p, text]) => [p, p.endsWith('.typ') && text.includes('@') ? repoint(text) : text]);
+		for (const [p, text] of [...sources, ...pkg.sources]) {
 			if (compiler.add_source(p, text) === false) {
 				throw new Error(`typst.ts refused source ${p}`);
 			}
 		}
-		for (const [p, bytes] of project.assets ?? ownAssets) {
+		for (const [p, bytes] of [...(project.assets ?? ownAssets), ...pkg.assets]) {
 			if (compiler.map_shadow(p, bytes) === false) {
 				throw new Error(`typst.ts refused asset ${p}`);
 			}

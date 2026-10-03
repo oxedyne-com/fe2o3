@@ -76,19 +76,70 @@ mkproj "$S/skewed" 'Compiler minor #sys.version.at(1).'
 mkdir -p "$S/broken"
 printf 'Text #ZZLEAKMARKERZZ more.\n' > "$S/broken/main.typ"
 
+# Synthetic packages. `tpk` is Typst's own layout, which typst 0.15.1 reads through TYPST_PACKAGE_PATH; `pk`
+# is what the typst.ts side is given: one package as a directory and two as Daimond's packs. zzpkg imports
+# zzdep, by a registry import and by a package-root path, so the closure and both re-pointings are used.
+pkgfile() { # pkgfile <relative path> <text>
+	mkdir -p "$(dirname "$S/tpk/$1")"
+	printf '%s\n' "$2" > "$S/tpk/$1"
+}
+pkgfile preview/zzpkg/0.1.0/typst.toml $'[package]\nname = "zzpkg"\nversion = "0.1.0"\nentrypoint = "lib.typ"'
+pkgfile preview/zzpkg/0.1.0/lib.typ $'#import "@preview/zzdep:0.3.0": dep\n#import "/helper.typ": help\n#let zz(x) = [zz(#x) #dep() #help()]'
+pkgfile preview/zzpkg/0.1.0/helper.typ '#let help() = [helper]'
+pkgfile preview/zzdep/0.3.0/typst.toml $'[package]\nname = "zzdep"\nversion = "0.3.0"\nentrypoint = "lib.typ"'
+pkgfile preview/zzdep/0.3.0/lib.typ '#let dep() = [dependency]'
+pkgfile preview/zzpack/0.2.0/typst.toml $'[package]\nname = "zzpack"\nversion = "0.2.0"\nentrypoint = "src/lib.typ"'
+pkgfile preview/zzpack/0.2.0/src/lib.typ '#let pk() = [packed]'
+pkgfile preview/zzpack/0.2.0/LICENSE 'Synthetic.'
+mkdir -p "$S/pk/preview/zzpkg" "$S/pk/preview/zzdep" "$S/pk/preview/zzpack"
+cp -r "$S/tpk/preview/zzpkg/0.1.0" "$S/pk/preview/zzpkg/0.1.0"
+mkpack() { # mkpack <ns> <name> <version> <out dir>: Daimond's refresh.sh format, from the tpk directory
+	python3 - "$S/tpk/$1/$2/$3" "$1" "$2" "$3" "$4/$1/$2/$3.pack" <<'PY'
+import os, re, sys
+src, ns, name, ver, out = sys.argv[1:]
+files = []
+for dp, _, fs in os.walk(src):
+	for f in fs:
+		rel = os.path.relpath(os.path.join(dp, f), src)
+		if f.endswith('.typ') or f == 'typst.toml' or f == 'LICENSE' or f.startswith('LICENSE.'):
+			files.append(rel)
+files.sort()
+entry = re.search(r'^\s*entrypoint\s*=\s*"(.*)"', open(os.path.join(src, 'typst.toml')).read(), re.M).group(1)
+head = 'DAIMOND TYPST PACK 1\nnamespace %s\nname %s\nversion %s\nentrypoint %s\n' % (ns, name, ver, entry)
+body = b''
+for f in files:
+	data = open(os.path.join(src, f), 'rb').read()
+	head += 'file %d %s\n' % (len(data), f)
+	body += data
+os.makedirs(os.path.dirname(out), exist_ok=True)
+open(out, 'wb').write(head.encode() + b'\n' + body)
+PY
+}
+mkpack preview zzdep 0.3.0 "$S/pk"
+mkpack preview zzpack 0.2.0 "$S/pk"
+mkproj "$S/pkgproj"
+cat >> "$S/pkgproj/main.typ" <<'TYP'
+#pagebreak()
+#import "@preview/zzpkg:0.1.0": zz
+#import "@preview/zzpack:0.2.0": pk
+#zz([a]) #pk()
+Quoted, not imported: `#import "@preview/zzghost:1.0.0"` and the string below.
+#let s = "@preview/zzghost2:1.0.0"
+TYP
+
 # ── 1. gather ───────────────────────────────────────────────────────────────
 g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/proj" main.typ --exclude skip 2>&1)"
-echo "$g" | grep -q '^gather: sources 4 assets 1 fonts 1 packages 0 bytes [0-9]*$' \
+echo "$g" | grep -q '^gather: sources 4 assets 1 fonts 1 packages 0 missing 0 bytes [0-9]*$' \
 	&& ok "gather: 3 .typ + csv as sources, the image as an asset, the font as a font, --exclude honoured" \
 	|| fail "gather counts: $g"
 g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/proj" main.typ 2>&1)"
-echo "$g" | grep -q '^gather: sources 5 assets 1 fonts 1 packages 0 bytes [0-9]*$' \
+echo "$g" | grep -q '^gather: sources 5 assets 1 fonts 1 packages 0 missing 0 bytes [0-9]*$' \
 	&& ok "gather: without --exclude the skipped file is gathered" || fail "gather without exclude: $g"
 mkdir -p "$S/pkg"
 printf '#import "@preview/zzz:0.0.1": f\n' > "$S/pkg/main.typ"
 g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkg" main.typ 2>&1)"
-echo "$g" | grep -q '^gather: sources 1 assets 0 fonts 0 packages 1 bytes [0-9]*$' \
-	&& ok "gather: a source that imports a package is counted, because it will not compile in typst.ts" \
+echo "$g" | grep -q '^gather: sources 1 assets 0 fonts 0 packages 1 missing 1 bytes [0-9]*$' \
+	&& ok "gather: a package import with no package directory is a spec found and missing" \
 	|| fail "gather packages: $g"
 # Links: a directory reached by two names is gathered under both, a link back up the tree is not followed
 # for ever, and a link that points nowhere is passed over.
@@ -99,9 +150,25 @@ ln -s a "$S/links/b"
 ln -s . "$S/links/up"
 ln -s nowhere "$S/links/dead"
 g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/links" main.typ 2>&1)"
-echo "$g" | grep -q '^gather: sources 3 assets 0 fonts 0 packages 0 bytes [0-9]*$' \
+echo "$g" | grep -q '^gather: sources 3 assets 0 fonts 0 packages 0 missing 0 bytes [0-9]*$' \
 	&& ok "gather: a directory under two names counts under both; a link back up and a dangling link do no harm" \
 	|| fail "gather links: $g"
+g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkgproj" main.typ --exclude skip --packages "$S/pk" 2>&1)"
+echo "$g" | grep -q '^gather: sources 4 assets 1 fonts 1 packages 3 missing 0 bytes [0-9]*$' \
+	&& ok "gather: the closure finds 3 packages (a directory, two packs, one a dependency); a quoted import and a string are not imports" \
+	|| fail "gather package closure: $g"
+g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkgproj" main.typ --exclude skip 2>&1)"
+echo "$g" | grep -q '^gather: sources 4 assets 1 fonts 1 packages 2 missing 2 bytes [0-9]*$' \
+	&& ok "gather: with no package directory the 2 imported specs are missing" || fail "gather no packages: $g"
+cp -r "$S/pk" "$S/pk_nodep" && rm -rf "${S:?}/pk_nodep/preview/zzdep"
+g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkgproj" main.typ --exclude skip --packages "$S/pk_nodep" 2>&1)"
+echo "$g" | grep -q '^gather: sources 4 assets 1 fonts 1 packages 3 missing 1 bytes [0-9]*$' \
+	&& ok "gather: a dependency that the directory lacks is missing, the rest supplied" || fail "gather missing dependency: $g"
+cp -r "$S/pk" "$S/pk_bad" && head -c 100 "$S/pk/preview/zzpack/0.2.0.pack" > "$S/pk_bad/preview/zzpack/0.2.0.pack"
+g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkgproj" main.typ --exclude skip --packages "$S/pk_bad" 2>&1)"
+expect "gather: a truncated pack is refused with a closed code" "$g" "gather: error bad-package"
+g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/pkgproj" main.typ --packages "$S/nowhere" 2>&1)"
+expect "gather: a package directory that does not exist is refused" "$g" "gather: error no-packages"
 g="$(gate_cap node "$CRATE/tools/bench/lib/gather.mjs" "$S/proj" nothing.typ 2>&1)"
 expect "gather: a missing main is refused with a closed code" "$g" "gather: error no-main"
 
@@ -170,7 +237,7 @@ r="$("$HERE/skew.sh" "$S/proj" main.typ assets/fonts "$V" 2>&1)"
 echo "$r" | sed 's/^/    /'
 n="$(printf '%s\n' "$r" | grep -vc '^skew: ')"
 [ "$n" -eq 0 ] && ok "skew: every line is a skew: line" || fail "skew: $n stray line(s)"
-expect "skew: the gather saw 4 sources, an asset and a font" "$r" "skew: typstts gathered sources 4 assets 1 fonts 1 packages 0"
+expect "skew: the gather saw 4 sources, an asset and a font" "$r" "skew: typstts gathered sources 4 assets 1 fonts 1 packages 0 missing 0"
 expect "skew: typst.ts compiled" "$r" "skew: typstts compile ok"
 expect "skew: row a typst exit 0" "$r" "skew: row a typst exit 0"
 expect "skew: row b typst exit 0" "$r" "skew: row b typst exit 0"
@@ -183,6 +250,53 @@ echo "$r" | sed 's/^/    /'
 expect "skew: the page that prints the compiler version goes red in row a" "$r" "skew: row a differ 1 pages 4"
 expect "skew: and in row b" "$r" "skew: row b differ 1 pages 4"
 expect "skew: and the verdict is differs" "$r" "skew: row b verdict differs"
+
+# Packages: supplied to typst.ts from `pk`, and resolved by typst 0.15.1 from its own layout of the same.
+r="$(TYPST_PACKAGE_PATH="$S/tpk" SKEW_PACKAGES="$S/pk" "$HERE/skew.sh" "$S/pkgproj" main.typ assets/fonts "$V" 2>&1)"
+echo "$r" | sed 's/^/    /'
+n="$(printf '%s\n' "$r" | grep -vc '^skew: ')"
+[ "$n" -eq 0 ] && ok "skew: every line is a skew: line, packages included" || fail "skew: $n stray line(s)"
+expect "skew: 3 packages found, none missing" "$r" "skew: typstts gathered sources 4 assets 1 fonts 1 packages 3 missing 0"
+expect "skew: the directory package is named" "$r" "skew: typstts package preview zzpkg 0.1.0 supplied"
+expect "skew: a pack is named" "$r" "skew: typstts package preview zzpack 0.2.0 supplied"
+expect "skew: and so is the dependency found by the closure" "$r" "skew: typstts package preview zzdep 0.3.0 supplied"
+expect "skew: typst.ts compiled the project that imports them" "$r" "skew: typstts compile ok"
+expect "skew: 4 pages on both, row b" "$r" "skew: row b pages typstts 4 typst 4"
+expect "skew: and the pages agree, row b" "$r" "skew: row b verdict same"
+r="$(TYPST_PACKAGE_PATH="$S/tpk" SKEW_PACKAGES="$S/pk_nodep" "$HERE/skew.sh" "$S/pkgproj" main.typ assets/fonts "$V" 2>&1)"
+expect "skew: a package that is not supplied is named missing" "$r" "skew: typstts package preview zzdep 0.3.0 missing"
+expect "skew: and typst.ts fails" "$r" "skew: typstts compile failed"
+expect "skew: and the row is incomparable, not different" "$r" "skew: row b verdict incomparable"
+
+# Daimond's own vendored packs, where this host has them and Typst's cache holds the same versions: a
+# synthetic project that draws with each of them compiles in typst.ts, so the port reads the real format.
+PACKS="$V/../../assets/typst/packs"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/typst/packages/preview"
+if [ -d "$PACKS" ] && [ -d "$CACHE/cetz/0.3.4" ] && [ -d "$CACHE/fletcher/0.5.7" ] && [ -d "$CACHE/cetz-plot/0.1.1" ] && [ -d "$CACHE/oxifmt/0.2.1" ]; then
+	mkdir -p "$S/real"
+	cat > "$S/real/main.typ" <<'TYP'
+#set page(width: 220pt, height: 160pt, margin: 10pt)
+#import "@preview/cetz:0.3.4": canvas, draw
+#import "@preview/fletcher:0.5.7": diagram, node, edge
+#import "@preview/cetz-plot:0.1.1": plot
+#import "@preview/oxifmt:0.2.1": strfmt
+= Real packs
+#canvas({
+  import draw: *
+  circle((0, 0), radius: 1)
+})
+#pagebreak()
+#diagram(node((0,0), [A]), edge("->"), node((1,0), [B]))
+#pagebreak()
+#strfmt("{} and {}", 1, 2)
+TYP
+	r="$(SKEW_PACKAGES="$PACKS" "$HERE/skew.sh" "$S/real" main.typ assets/fonts "$V" 2>&1)"
+	expect "real packs: cetz, fletcher, cetz-plot, oxifmt and cetz 0.3.2 by closure, none missing" "$r" "skew: typstts gathered sources 1 assets 0 fonts 0 packages 5 missing 0"
+	expect "real packs: typst.ts compiled the project" "$r" "skew: typstts compile ok"
+	expect "real packs: and agrees with typst 0.15.1 on every page, row a" "$r" "skew: row a verdict same"
+else
+	echo "selftest: skip real packs (Daimond's packs or Typst's cache of the same versions are absent)"
+fi
 
 # The supplied font and the image reached typst.ts: the PDF says so, which text alone would not.
 gate_cap node "$HERE/skew_ts.mjs" --root "$S/proj" --main main.typ --vendor "$V" --out "$S/ts.pdf" \

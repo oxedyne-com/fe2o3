@@ -12,7 +12,9 @@
 #
 # Environment: SKEW_TYPST (the typst binary, default /home/jason/bin/typst), SKEW_OUT (the scratch parent,
 # default ~/.cache/austenite-o4-probe/out), SKEW_EXCLUDE (directories under <root> the typst.ts gather
-# leaves out, space separated).
+# leaves out, space separated), SKEW_PACKAGES (a directory of packages for the typst.ts side only, as
+# `tools/bench/lib/packages.mjs` describes: `<ns>/<name>/<version>/` or Daimond's `<version>.pack`, for
+# instance `www/assets/typst/packs`). Typst 0.15.1 keeps resolving packages from its own cache.
 #
 # Two rows, each typst.ts against a different 0.15.1 run:
 #   a  as each engine runs in its own setting: typst.ts with the vendor fonts and <fontdir>; 0.15.1 with
@@ -25,9 +27,10 @@
 # through an awk filter that keeps counts or a closed vocabulary; and the whole of stdout passes a final
 # whitelist, so the only lines that can appear are:
 #
-#   skew: typstts gathered sources <n> assets <n> fonts <n> packages <n>
+#   skew: typstts gathered sources <n> assets <n> fonts <n> packages <n> missing <n>
+#   skew: typstts package preview <name> <version> <supplied|missing>   (the public registry only)
 #   skew: typstts compile <ok|failed>
-#   skew: typstts error <bad-args|no-root|no-main|too-large|failed>
+#   skew: typstts error <bad-args|no-root|no-main|no-packages|bad-package|too-large|failed>
 #   skew: row <a|b> typst exit <n>
 #   skew: row <a|b> typst diagnostics error <n> warning <n>
 #   skew: row <a|b> pages typstts <n|none> typst <n|none>
@@ -66,13 +69,17 @@ main() {
 	for d in ${SKEW_EXCLUDE:-}; do
 		ex+=(--exclude "$d")
 	done
+	if [ -n "${SKEW_PACKAGES:-}" ]; then
+		ex+=(--packages "$SKEW_PACKAGES")
+	fi
 
 	# typst.ts, in node.
 	gate_cap node "$HERE/skew_ts.mjs" --root "$ROOT" --main "$M" --vendor "$V" --out "$W/ts.pdf" \
 		--font-dir "$F" "${ex[@]}" 2>&1 | awk '
-		/^typstts: gathered sources [0-9]+ assets [0-9]+ fonts [0-9]+ packages [0-9]+$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
+		/^typstts: gathered sources [0-9]+ assets [0-9]+ fonts [0-9]+ packages [0-9]+ missing [0-9]+$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
+		/^typstts: package preview [A-Za-z0-9_-]+ [0-9]+\.[0-9]+\.[0-9]+ (supplied|missing)$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
 		/^typstts: compile (ok|failed)$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
-		/^typstts: error (bad-args|no-root|no-main|too-large|failed)$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
+		/^typstts: error (bad-args|no-root|no-main|no-packages|bad-package|too-large|failed)$/ { sub(/^typstts: /, "typstts "); print "skew: " $0; next }
 		{ n++ }
 		END { if (n) printf "skew: suppressed %d\n", n }'
 
@@ -127,9 +134,10 @@ row_cmp() {
 
 # The final whitelist, over everything main and its children wrote to either stream.
 main "$@" 2>&1 | awk '
-	/^skew: typstts gathered sources [0-9]+ assets [0-9]+ fonts [0-9]+ packages [0-9]+$/ { print; next }
+	/^skew: typstts gathered sources [0-9]+ assets [0-9]+ fonts [0-9]+ packages [0-9]+ missing [0-9]+$/ { print; next }
+	/^skew: typstts package preview [A-Za-z0-9_-]+ [0-9]+\.[0-9]+\.[0-9]+ (supplied|missing)$/ { print; next }
 	/^skew: typstts compile (ok|failed)$/ { print; next }
-	/^skew: typstts error (bad-args|no-root|no-main|too-large|failed)$/ { print; next }
+	/^skew: typstts error (bad-args|no-root|no-main|no-packages|bad-package|too-large|failed)$/ { print; next }
 	/^skew: row [ab] typst exit [0-9]+$/ { print; next }
 	/^skew: row [ab] typst diagnostics error [0-9]+ warning [0-9]+$/ { print; next }
 	/^skew: row [ab] pages typstts (none|[0-9]+) typst (none|[0-9]+)$/ { print; next }
