@@ -35,10 +35,15 @@ export async function loadAustenite(vendorDir) {
 	const glue = pathToFileURL(path.join(vendorDir, 'oxedyne_fe2o3_austenite.js')).href;
 	const wasmPath = path.join(vendorDir, 'oxedyne_fe2o3_austenite_bg.wasm');
 	const mod = await import(glue);
-	await mod.default(fs.readFileSync(wasmPath));
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
 	const instance = new mod.DaimondTypst();
 	return {
 		engine: 'austenite',
+		// The wasm instance itself, for a caller that needs a door the wrapper below does not carry
+		// (`supplyPackage`, `queryProject`, ...), and `DaimondTypst`, to make another.
+		instance,
+		DaimondTypst: mod.DaimondTypst,
 		compilePdf(project) {
 			return instance.compileProject(project);
 		},

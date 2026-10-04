@@ -11,14 +11,20 @@ gate_cap() {
 	systemd-run --user --scope --quiet -p "MemoryMax=${GATE_CAP}" --slice=claude-rc.slice "$@"
 }
 
-# gate_typst <typst> <args...>. GATE_SCRATCH names a directory that exists; its child `no-user-fonts` must not.
+# gate_hidden <command> <args...>: a command under the cap with the account's own fonts hidden, as above.
+# GATE_SCRATCH names a directory that exists; its child `no-user-fonts` must not.
+gate_hidden() {
+	local none="${GATE_SCRATCH:?gate_hidden: no scratch}/no-user-fonts"
+	if [ -e "$none" ]; then
+		echo "gate_hidden: the font isolation directory exists" >&2
+		return 97
+	fi
+	XDG_DATA_HOME="$none" gate_cap "$@"
+}
+
+# gate_typst <typst> <args...>.
 gate_typst() {
 	local bin="${1:?gate_typst: no typst}"
 	shift
-	local none="${GATE_SCRATCH:?gate_typst: no scratch}/no-user-fonts"
-	if [ -e "$none" ]; then
-		echo "gate_typst: the font isolation directory exists" >&2
-		return 97
-	fi
-	XDG_DATA_HOME="$none" gate_cap "$bin" "$@"
+	gate_hidden "$bin" "$@"
 }
