@@ -119,6 +119,7 @@ pub async fn test_server(filter: &'static str) -> Outcome<()> {
                 tiles:                  None,
                 access_log:             true,
                 permissions_policy:     None,
+                admin_dashboard:        true,
             };
 
             let web_handler: AppWebHandler<HashMap<String, OsPath>> = AppWebHandler::new(

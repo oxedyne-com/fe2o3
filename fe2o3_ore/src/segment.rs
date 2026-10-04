@@ -1202,6 +1202,50 @@ fn framed<'a, H: Hasher, const S: usize>(
 	Ok(Some(Framed { kind, body, used: digest_end, digest }))
 }
 
+/// Does a run of whole records, each holding its digest, begin inside `tail` and
+/// end at its last byte?
+///
+/// What a reader calls a record cut off is bytes that frame as the beginning of
+/// a record and then stop, and a record whose length was damaged frames the same
+/// way: it declares a body longer than anything left, so every record after it
+/// is read as that body. A caller that means to set such a tail aside asks this
+/// first. A tail that holds a run is a damaged length with whole records behind
+/// it, not a write that was cut off, and setting it aside would drop records
+/// that formed whole. The first byte of `tail` is the record the reader could
+/// not finish, so a run is looked for only after it.
+///
+/// A run must reach the end, which is what a damaged length in the middle of a
+/// segment leaves and a cut-off write does not, short of a record whose body is
+/// itself a segment cut exactly on one of its own boundaries. That is refused
+/// where it should have been mended, which costs a hand repair and no record.
+pub fn whole_records_inside<H: Hasher, const S: usize>(
+	tail:	&[u8],
+	hasher:	H,
+	salt:	[u8; S],
+)
+	-> bool
+{
+	for from in 1..tail.len() {
+		if !matches!(tail[from], KIND_BARE | KIND_SEALED | KIND_VEILED | KIND_PACKED) {
+			continue;
+		}
+		let mut at = from;
+		loop {
+			match framed(&hasher, salt, &tail[at..], 0, Integrity::Checked) {
+				Ok(Some(f)) => {
+					at += f.used;
+					if at == tail.len() {
+						return true;
+					}
+				},
+				// A frame that is short, malformed or damaged ends this run.
+				_ => break,
+			}
+		}
+	}
+	false
+}
+
 /// Compresses a run's plain framing.
 fn deflate(plain: &[u8])
 	-> Outcome<Vec<u8>>
@@ -2280,6 +2324,69 @@ mod tests {
 		// The whole segment reads every record.
 		let (_, got) = res!(decode(&bytes, Fold, [0u8; 0]));
 		assert_eq!(got.len(), entries.len());
+		Ok(())
+	}
+
+	/// A tail that is the front of one record holds no run of whole ones, wherever
+	/// the cut fell, so setting it aside drops nothing that formed whole.
+	#[test]
+	fn a_cut_off_record_holds_no_run_of_whole_ones() -> Outcome<()> {
+		let entries = res!(bare());
+		let bytes = res!(encode(&Head::new(Some(ReplicaId::new(2))), &entries, Fold, [0u8; 0]));
+		let mut tried = 0usize;
+		for k in 0..entries.len() {
+			let (_, _, _, from) = res!(up_to(&bytes, k));
+			let (_, _, _, to) = res!(up_to(&bytes, k + 1));
+			for cut in from + 1..to {
+				assert!(!whole_records_inside(&bytes[from..cut], Fold, [0u8; 0]),
+					"record {} cut at {} of {} was taken for a run of whole records",
+					k, cut, to);
+				tried += 1;
+			}
+		}
+		assert!(tried > 500, "the loop must have tried the cuts it claims to: {}", tried);
+		Ok(())
+	}
+
+	/// A length damaged in the middle of a segment reads as a record cut off, and
+	/// is told apart from one by the whole records standing behind it.
+	#[test]
+	fn a_damaged_length_hides_whole_records_that_a_cut_does_not() -> Outcome<()> {
+		let entries = res!(bare());
+		let bytes = res!(encode(&Head::new(Some(ReplicaId::new(2))), &entries, Fold, [0u8; 0]));
+		let (_, _, _, second) = res!(up_to(&bytes, 1));
+		let (_, old) = res!(varint_decode(&bytes[second + 1..]));
+		let mut damaged = bytes[..second + 1].to_vec();
+		varint_encode(1u64 << 40, &mut damaged);
+		damaged.extend_from_slice(&bytes[second + 1 + old..]);
+		// The reader cannot tell it from a cut.
+		let mut reader: Reader<Fold, 0> = Reader::new(Fold, [0u8; 0]);
+		reader.feed(&damaged);
+		assert!(res!(reader.next_entry()).is_some(), "the first record is whole");
+		assert!(res!(reader.next_entry()).is_none(), "the second asks for more bytes");
+		assert_eq!(damaged.len() - reader.remaining().len(), second);
+		reader.end();
+		let said = match reader.next_entry() {
+			Ok(_)	=> return Err(err!("A damaged length was read as a record."; Test, Mismatch)),
+			Err(e)	=> fmt!("{}", e),
+		};
+		assert!(said.contains("part way through record 1"), "message was {:?}", said);
+		// The records behind it are what says it is not one.
+		assert!(whole_records_inside(&damaged[second..], Fold, [0u8; 0]));
+		// And they must reach the end: whole records with bytes after them are no
+		// run, which is what keeps a record whose body holds a record from being
+		// taken for damage.
+		let mut ragged = damaged.clone();
+		ragged.extend_from_slice(&[0x07, 0x07, 0x07, 0x07, 0x07]);
+		assert!(!whole_records_inside(&ragged[second..], Fold, [0u8; 0]));
+		// And a record damaged in the last place is a cut as far as anyone can tell.
+		let (_, _, _, last) = res!(up_to(&bytes, entries.len() - 1));
+		let (_, old) = res!(varint_decode(&bytes[last + 1..]));
+		let mut final_one = bytes[..last + 1].to_vec();
+		varint_encode(1u64 << 40, &mut final_one);
+		final_one.extend_from_slice(&bytes[last + 1 + old..]);
+		assert!(!whole_records_inside(&final_one[last..], Fold, [0u8; 0]),
+			"nothing stands behind the last record, so there is no run to find");
 		Ok(())
 	}
 

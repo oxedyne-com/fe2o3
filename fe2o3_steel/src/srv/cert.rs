@@ -187,41 +187,73 @@ pub struct AcmeRenewer {
     cache:      AcmeDiskCache,
     resolver:   Arc<SteelCertResolver>,
     dns_names:  Vec<String>,
+    poll:       Duration,   // between checks while the cached cert is fresh
+    retry:      Duration,   // between attempts while it is due, or a check failed
 }
 
 impl AcmeRenewer {
 
-    pub async fn run_forever(mut self) -> Outcome<()> {
-        // Initial issuance on startup if the cache is empty or its cert is
-        // older than the renewal threshold.
-        if res!(self.needs_renewal()) {
-            info!("ACME: initial issuance for {:?}", self.dns_names);
-            res!(self.issue_and_install().await);
-        } else {
-            info!("ACME: cached certificate for {:?} is still fresh.", self.dns_names);
+    pub fn new(
+        client:     AcmeClient,
+        cache:      AcmeDiskCache,
+        resolver:   Arc<SteelCertResolver>,
+        dns_names:  Vec<String>,
+    )
+        -> Self
+    {
+        Self {
+            client,
+            cache,
+            resolver,
+            dns_names,
+            poll:   RENEWAL_POLL_INTERVAL,
+            retry:  RENEWAL_RETRY_INTERVAL,
         }
+    }
 
-        // Renewal loop. 24-hour tick granularity is plenty -- LE issues
-        // 90-day certs, we renew at 60 days, and a one-day latency on
-        // detecting the rollover is fine.
+    pub async fn run_forever(mut self) -> Outcome<()> {
+        // Never returns. A failed issuance, at start or on a renewal, is logged and
+        // tried again after `retry` for as long as the cached certificate is due: a
+        // CA or network fault at the wrong moment must not leave the process running
+        // with its certificate expiring unattended.
+        let mut first = true;
         loop {
-            tokio::time::sleep(RENEWAL_POLL_INTERVAL).await;
-            match self.needs_renewal() {
+            let wait = match self.needs_renewal() {
                 Ok(true) => {
-                    info!("ACME: cached cert is due for renewal, issuing now.");
-                    if let Err(e) = self.issue_and_install().await {
-                        error!(err!(e,
-                            "ACME: renewal attempt failed; will retry in \
-                            24 hours.";
-                            Init, Network));
+                    if first {
+                        info!("ACME: initial issuance for {:?}", self.dns_names);
+                    } else {
+                        info!("ACME: cached cert is due for renewal, issuing now.");
+                    }
+                    match self.issue_and_install().await {
+                        Ok(()) => self.poll,
+                        Err(e) => {
+                            error!(err!(e,
+                                "ACME: issuance for {:?} failed; will retry in {} s \
+                                while the certificate is due.",
+                                self.dns_names, self.retry.as_secs();
+                                Init, Network));
+                            self.retry
+                        },
                     }
                 },
-                Ok(false) => (),
-                Err(e) => error!(err!(e,
-                    "ACME: failed to check cached cert age; will retry in \
-                    24 hours.";
-                    IO, File)),
-            }
+                Ok(false) => {
+                    if first {
+                        info!("ACME: cached certificate for {:?} is still fresh.",
+                            self.dns_names);
+                    }
+                    self.poll
+                },
+                Err(e) => {
+                    error!(err!(e,
+                        "ACME: failed to check cached cert age; will retry in \
+                        {} s.", self.retry.as_secs();
+                        IO, File));
+                    self.retry
+                },
+            };
+            first = false;
+            tokio::time::sleep(wait).await;
         }
     }
 
@@ -286,6 +318,10 @@ impl AcmeRenewer {
 // └───────────────────────────────────────────────────────────────────────────┘
 
 const RENEWAL_POLL_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+// Hourly stays well inside Let's Encrypt's limit of five failed validations
+// per name per hour.
+const RENEWAL_RETRY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 const RENEWAL_LEAD_SECS: i64 = 30 * 24 * 60 * 60;
 
@@ -521,12 +557,7 @@ impl Certificate {
         server_config.alpn_protocols.push(b"http/1.1".to_vec());
         server_config.alpn_protocols.push(b"acme-tls/1".to_vec());
 
-        let renewer = AcmeRenewer {
-            client,
-            cache,
-            resolver,
-            dns_names: all_hostnames,
-        };
+        let renewer = AcmeRenewer::new(client, cache, resolver, all_hostnames);
 
         Ok(LoadedTls {
             server_config,
@@ -668,4 +699,91 @@ fn der_to_certified_key(
     let signing_key = res!(rustls::crypto::ring::sign::any_supported_type(&key_der)
         .map_err(|e| err!("{:?}", e; Init, Invalid)));
     Ok(CertifiedKey::new(vec![cert], signing_key))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::sync::atomic::{
+        AtomicUsize,
+        Ordering,
+    };
+
+    // A fresh scratch directory for the ACME cache, removed by the caller.
+    fn scratch(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(fmt!(
+            "fe2o3_steel_cert_{}_{}_{}", tag, std::process::id(), nanos))
+    }
+
+    /// **Defect regression.** A failed issuance at start used to end the renewer
+    /// task for good (`res!` returned from `run_forever` before the loop), so a
+    /// restart that met a CA or network fault left the certificate to expire
+    /// with nothing trying again until the next restart. The renewer must log the
+    /// failure, stay alive, and try again after its retry interval.
+    ///
+    /// The "CA" is a loopback listener that counts connections and drops them, so
+    /// every issuance attempt fails at once and is visible as one connection.
+    #[test]
+    fn test_failed_first_issuance_is_retried() -> Outcome<()> {
+        let runtime = res!(tokio::runtime::Runtime::new(), Init);
+        let dir = scratch("retry");
+        let outcome = runtime.block_on(async {
+            let listener = res!(tokio::net::TcpListener::bind("127.0.0.1:0").await);
+            let port = res!(listener.local_addr()).port();
+            let hits = Arc::new(AtomicUsize::new(0));
+            let counter = hits.clone();
+            tokio::spawn(async move {
+                loop {
+                    match listener.accept().await {
+                        Ok((conn, _)) => {
+                            counter.fetch_add(1, Ordering::SeqCst);
+                            drop(conn);
+                        },
+                        Err(_) => return,
+                    }
+                }
+            });
+            let client = AcmeClient::new(
+                fmt!("https://127.0.0.1:{}/directory", port),
+                "test@example.invalid",
+                res!(letsencrypt_client_config()),
+                res!(JwsSigner::new_es256()),
+            );
+            let cache = res!(AcmeDiskCache::new(&dir));
+            let mut renewer = AcmeRenewer::new(
+                client,
+                cache,
+                Arc::new(SteelCertResolver::new()),
+                vec![fmt!("example.invalid")],
+            );
+            renewer.retry = Duration::from_millis(40);
+            let task = tokio::spawn(renewer.run_forever());
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            let alive = !task.is_finished();
+            task.abort();
+            Ok((alive, hits.load(Ordering::SeqCst)))
+        });
+        let _ = fs::remove_dir_all(&dir);
+        let (alive, attempts) = res!(outcome);
+        if !alive {
+            return Err(err!(
+                "The renewer task ended after a failed first issuance; it \
+                must stay alive and retry.";
+                Test, Mismatch));
+        }
+        if attempts < 3 {
+            return Err(err!(
+                "Only {} issuance attempt(s) reached the CA in 1.5 s with a \
+                40 ms retry interval; the renewer must keep retrying while the \
+                certificate is due.", attempts;
+                Test, Mismatch));
+        }
+        Ok(())
+    }
 }

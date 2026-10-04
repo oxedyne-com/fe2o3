@@ -23,6 +23,16 @@ use oxedyne_fe2o3_core::{
 	test::test_it,
 };
 
+use std::{
+	fs,
+	io::ErrorKind,
+	path::{
+		Path,
+		PathBuf,
+	},
+	process::Command,
+};
+
 
 // One credential of each shape, as an opening and the rest of it.
 const SHAPED: &[(&str, &str, Kind)] = &[
@@ -85,6 +95,115 @@ fn der(head: &str, len: usize) -> Outcome<Vec<u8>> {
 	}
 	out.truncate(len);
 	Ok(out)
+}
+
+
+// What a body of base64 is wrapped to by the tools that write one: `openssl` at 64, `ssh-keygen` at
+// 70, and MIME at 76.
+const WIDTHS: &[usize] = &[64, 70, 76];
+
+// The front of an OpenSSH private key, as `ssh-keygen` writes it: the magic, a NUL, and then the
+// cipher, kdf and key counts of an unprotected ed25519 key. The rest is filler.
+const OPENSSH_HEAD: &[u8] = b"openssh-key-v1\0\0\0\0\x04none\0\0\0\x04none\0\0\0\0\0\0\0\x01";
+
+/// The bytes as a body of lines, encoded by the `base64` crate and not by the module under test, so
+/// that what the scanner is handed is an independent reading of the bytes.
+fn wrapped(bytes: &[u8], width: usize, eol: &str) -> String {
+	let text = base64::encode(bytes);
+	let mut out = String::new();
+	for line in text.as_bytes().chunks(width) {
+		out.push_str(&String::from_utf8_lossy(line));
+		out.push_str(eol);
+	}
+	out
+}
+
+/// The armour lines of a private key, with the words that a scanner looks for put together here so
+/// that this file does not hold them.
+fn armour(algo: &str) -> (String, String) {
+	(
+		fmt!("-----BEGIN {}{}-----\n", algo, "PRIVATE KEY"),
+		fmt!("-----END {}{}-----\n", algo, "PRIVATE KEY"),
+	)
+}
+
+/// What a PEM file holds between its armour lines.
+fn body_of(pem: &str) -> String {
+	let mut out = String::new();
+	for line in pem.lines() {
+		if !line.starts_with("-----") {
+			out.push_str(line);
+			out.push('\n');
+		}
+	}
+	out
+}
+
+/// How many lines the text has.
+fn lines_in(text: &str) -> usize {
+	text.lines().count()
+}
+
+/// A scratch directory under `TMPDIR` that removes itself, so that a key generated for a test does
+/// not outlive it.
+struct Dir(PathBuf);
+
+impl Dir {
+	fn new(name: &str) -> Outcome<Self> {
+		let path = std::env::temp_dir().join(fmt!("{}_{}", name, std::process::id()));
+		res!(fs::create_dir_all(&path));
+		Ok(Self(path))
+	}
+
+	fn path(&self) -> &Path { &self.0 }
+
+	fn read(&self, name: &str) -> Outcome<String> {
+		Ok(res!(fs::read_to_string(self.0.join(name))))
+	}
+}
+
+impl Drop for Dir {
+	fn drop(&mut self) {
+		let _ = fs::remove_dir_all(&self.0);
+	}
+}
+
+/// Runs a program in the directory. False where the program is not installed, so that a test
+/// reports itself skipped rather than failing for want of a tool.
+fn run(dir: &Dir, program: &str, args: &[&str]) -> Outcome<bool> {
+	match Command::new(program).args(args).current_dir(dir.path()).output() {
+		Ok(out) if out.status.success()	=> Ok(true),
+		Ok(out)							=> Err(err!(
+			"{} {:?} exited with {}: {}", program, args, out.status,
+			String::from_utf8_lossy(&out.stderr); Test, IO)),
+		Err(e) if e.kind() == ErrorKind::NotFound	=> {
+			test!("{} is not installed, so what it makes is not tried.", program);
+			Ok(false)
+		},
+		Err(e) => Err(err!("{} could not be run: {}", program, e; Test, IO)),
+	}
+}
+
+/// A deterministic stream of 64 bit words, so that a test of random input is the same test every
+/// time.
+fn xorshift(state: &mut u64) -> u64 {
+	let mut x = *state;
+	x ^= x << 13;
+	x ^= x >> 7;
+	x ^= x << 17;
+	*state = x;
+	x
+}
+
+/// A line of `n` characters from the base64 alphabet, at random.
+fn noise(state: &mut u64, n: usize) -> String {
+	const ALPHABET: &[u8] =
+		b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	let mut out = String::with_capacity(n);
+	for _ in 0..n {
+		out.push(ALPHABET[(xorshift(state) % 64) as usize] as char);
+	}
+	out
 }
 
 
@@ -182,6 +301,37 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut data = fmt!("\0\u{1}\u{2}").into_bytes();
 		data.extend_from_slice(fmt!("key = \"{}{}\"\n", SHAPED[0].0, SHAPED[0].1).as_bytes());
 		req!(secret::scan(&data), Vec::<Find>::new());
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["holds sees every shape where it stands", "all", "secret", "holds"], || {
+		for (lead, rest, _kind) in SHAPED {
+			let c = fmt!("{}{}", lead, rest);
+			req!(secret::holds(&c), true, "alone, for {:?}", lead);
+			req!(secret::holds(&fmt!("note: {} (rotated)\nnext line", c)), true,
+				"in prose, for {:?}", lead);
+			req!(secret::holds(&fmt!("one\ntwo\n{}", c)), true, "on a later line, for {:?}", lead);
+		}
+		let assigned = fmt!("api_key = \"{}{}\"", LITERAL.0, LITERAL.1);
+		req!(secret::holds(&assigned), true);
+		for plain in ["", "ordinary text", "sk-nope", "api_key = \"\"", "key = \"your-key-here\""] {
+			req!(secret::holds(plain), false, "for {:?}", plain);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["holds is not excused by a marker or a NUL", "all", "secret", "holds"],
+		||
+	{
+		// The control: `scan` takes each of these excuses, because a person put the file there.
+		let c = fmt!("{}{}", SHAPED[0].0, SHAPED[0].1);
+		let trailing = fmt!("{} # {}", c, secret::MARKER);
+		let above = fmt!("{}\n{}", secret::MARKER, c);
+		let binary = fmt!("\0{}", c);
+		for text in [&trailing, &above, &binary] {
+			req!(secret::scan(text.as_bytes()), Vec::<Find>::new(), "scan, for {:?}", text);
+			req!(secret::holds(text), true, "holds, for {:?}", text);
+		}
 		Ok(())
 	}));
 
@@ -411,6 +561,394 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		let mut elf = fmt!("\u{7f}ELF").into_bytes();
 		elf.resize(200, 0);
 		req!(secret::scan(&elf), Vec::<Find>::new(), "ELF");
+		Ok(())
+	}));
+
+
+	res!(test_it(filter, &["A private key body without its armour is caught", "all", "secret",
+		"body"], ||
+	{
+		// What qa1 found on 2026-09-23 (D3): the body of a key, written into a file before the
+		// armour is, was recorded by the tick that saw it. Each fixture here is a key of a real
+		// form, its structure real and its body filler, encoded by the `base64` crate and wrapped
+		// as each tool wraps. The finding stands on the line the key's last byte is on.
+		for (what, head, len) in DER {
+			let key = res!(der(head, *len));
+			for width in WIDTHS {
+				for eol in ["\n", "\r\n"] {
+					let body = wrapped(&key, *width, eol);
+					let want = vec![Find { line: lines_in(&body), kind: Kind::KeyBody }];
+					req!(secret::scan(body.as_bytes()), want, "for {:?}, {} wide", what, width);
+				}
+			}
+		}
+		// Indented, as it stands in a YAML block, and after a line of prose, and with no newline at
+		// the end of the file.
+		let key = res!(der(DER[3].1, DER[3].2));
+		let body = wrapped(&key, 64, "\n");
+		let n = lines_in(&body);
+		let mut indented = fmt!("private_key: |\n");
+		for line in body.lines() {
+			indented.push_str(&fmt!("    {}\n", line));
+		}
+		indented.push_str("other: 1\n");
+		req!(secret::scan(indented.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
+			"indented");
+		req!(secret::scan(body.trim_end().as_bytes()),
+			vec![Find { line: n, kind: Kind::KeyBody }], "no newline at the end");
+		// A word or a label alone on the line above is all alphabet, so it runs into the body and
+		// puts every character after it out of step. The body is found all the same, and the same
+		// word after it, or a certificate with a label above it, is nothing.
+		for label in ["notes", "id", "Key", "ssh", "x"] {
+			let text = fmt!("{}\n{}{}\n", label, body, label);
+			req!(secret::scan(text.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
+				"after {:?}", label);
+			let cert = fmt!("{}\n{}", label, wrapped(&res!(der(CERT.0, CERT.1)), 64, "\n"));
+			req!(secret::scan(cert.as_bytes()), Vec::<Find>::new(), "certificate after {:?}", label);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["Armour is the finding and its body is not a second one", "all", "secret",
+		"body", "marker"], ||
+	{
+		let key = res!(der(DER[3].1, DER[3].2));
+		let body = wrapped(&key, 64, "\n");
+		let n = lines_in(&body);
+		let (head, tail) = armour("");
+		let pem = fmt!("{}{}{}", head, body, tail);
+		req!(secret::scan(pem.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }],
+			"armoured");
+		// A marker above the armour excused the whole of it before bodies were read, and does now.
+		let marked = fmt!("// {}\n{}", secret::MARKER, pem);
+		req!(secret::scan(marked.as_bytes()), Vec::<Find>::new(), "marker above the armour");
+		let open = fmt!("// {}\n{}{}", secret::MARKER, head, body);
+		req!(secret::scan(open.as_bytes()), Vec::<Find>::new(), "marker above, no end line");
+		// On the armour line itself.
+		let beside = fmt!("{}{}{}", head.trim_end(), fmt!(" # {}\n", secret::MARKER), body);
+		req!(secret::scan(beside.as_bytes()), Vec::<Find>::new(), "marker on the armour line");
+		// With no armour there is no line that says what the body is, and so no marker for it:
+		// the rule reads the key's own structure, as it does for a raw DER key. A marker above the
+		// body, on it, or below it excuses nothing.
+		let above = fmt!("# {}\n{}", secret::MARKER, body);
+		req!(secret::scan(above.as_bytes()), vec![Find { line: 1 + n, kind: Kind::KeyBody }],
+			"marker above a bare body");
+		let below = fmt!("{}# {}\n", body, secret::MARKER);
+		req!(secret::scan(below.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }],
+			"marker below");
+		let one = fmt!("{} # {}\n", base64::encode(&key), secret::MARKER);
+		req!(secret::scan(one.as_bytes()), vec![Find { line: 1, kind: Kind::KeyBody }],
+			"marker beside a token");
+		// Armour and a whole body on one line are the armour's to speak for, so a marker on the
+		// line excuses the lot and without one there is a single finding.
+		let flat = fmt!("{}{} {}\n", head.trim_end(), base64::encode(&key), tail.trim_end());
+		req!(secret::scan(flat.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }],
+			"armour and body on one line");
+		let flat = fmt!("{} # {}\n", flat.trim_end(), secret::MARKER);
+		req!(secret::scan(flat.as_bytes()), Vec::<Find>::new(), "and a marker on it");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A private key body on one line is caught", "all", "secret", "body",
+		"token"], ||
+	{
+		for (what, head, len) in DER {
+			let key = res!(der(head, *len));
+			let padded = base64::encode(&key);
+			let bare = padded.trim_end_matches('=').to_string();
+			for one in [&padded, &bare] {
+				for form in [
+					fmt!("{}\n", one),
+					fmt!("KEY={}\n", one),
+					fmt!("\"private_key\": \"{}\",\n", one),
+					fmt!("key: {} # the signing key\n", one),
+					fmt!("<key>{}</key>\n", one),
+				] {
+					req!(secret::scan(form.as_bytes()),
+						vec![Find { line: 1, kind: Kind::KeyBody }], "for {:?}, {}", what, form.len());
+				}
+			}
+		}
+		// A certificate and a key written as one file and encoded as one token: the key is not at
+		// the front, and is found where it is.
+		let mut both = res!(der(CERT.0, CERT.1));
+		both.extend_from_slice(&res!(der(DER[0].1, DER[0].2)));
+		let line = fmt!("bundle = {}\n", base64::encode(&both));
+		req!(secret::scan(line.as_bytes()), vec![Find { line: 1, kind: Kind::KeyBody }], "bundle");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["What is not key material is not caught in base64", "all", "secret", "body",
+		"clean"], ||
+	{
+		// A certificate and a public key, which name the same algorithms and hold nothing worth
+		// refusing.
+		let cert = res!(der(CERT.0, CERT.1));
+		for width in WIDTHS {
+			req!(secret::scan(wrapped(&cert, *width, "\n").as_bytes()), Vec::<Find>::new(),
+				"certificate, {} wide", width);
+		}
+		let public = res!(der("302A300506032B6570032100", 44));
+		req!(secret::scan(wrapped(&public, 64, "\n").as_bytes()), Vec::<Find>::new(), "public key");
+		// The structural head of a key with an algorithm nobody has.
+		let other = res!(der("302E020100300506032B657104220420", 48));
+		req!(secret::scan(wrapped(&other, 64, "\n").as_bytes()), Vec::<Find>::new(), "unknown");
+		// A thousand lines of random base64, as runs of ten at two widths, then as one run, then
+		// one to a line among prose: none decodes to a key.
+		let mut state = 0x9E3779B97F4A7C15u64;
+		for width in [64usize, 76] {
+			let mut text = String::new();
+			for _ in 0..100 {
+				for _ in 0..10 {
+					text.push_str(&noise(&mut state, width));
+					text.push('\n');
+				}
+				text.push('\n');
+			}
+			req!(secret::scan(text.as_bytes()), Vec::<Find>::new(), "runs of ten, {} wide", width);
+		}
+		let mut run = String::new();
+		let mut tokens = String::new();
+		for i in 0..1000 {
+			run.push_str(&noise(&mut state, 64));
+			run.push('\n');
+			tokens.push_str(&fmt!("let k{} = \"{}\";\n", i, noise(&mut state, 43 + i % 200)));
+		}
+		req!(secret::scan(run.as_bytes()), Vec::<Find>::new(), "one run of a thousand");
+		req!(secret::scan(tokens.as_bytes()), Vec::<Find>::new(), "a token to a line");
+		// Words one to a line are all alphabet and run on into one another, and decode to nothing.
+		let words = "alpha\nbravo\ncharlie\ndelta\necho\nfoxtrot\ngolf\nhotel\nindia\njuliet\n".repeat(50);
+		req!(secret::scan(words.as_bytes()), Vec::<Find>::new(), "words");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["The finding stands on the line the key ends on", "all", "secret", "body"],
+		||
+	{
+		// A key short of its last byte is not a key, so a body saved half way through is a
+		// fragment, as a token's first characters are, and the save that completes it is refused.
+		let key = res!(der(DER[3].1, DER[3].2));
+		let body = wrapped(&key, 64, "\n");
+		let n = lines_in(&body);
+		let all: Vec<&str> = body.lines().collect();
+		let half = all[..n - 1].join("\n");
+		req!(secret::scan(half.as_bytes()), Vec::<Find>::new(), "the last line missing");
+		req!(secret::scan(all.join("\n").as_bytes()),
+			vec![Find { line: n, kind: Kind::KeyBody }], "complete");
+		// Bytes after the key in the same run do not move the finding off the line the key ends on:
+		// an ed25519 key and thirty more bytes at twenty characters a line, which put the key's last
+		// byte in the fourth of six.
+		let mut run = res!(der(DER[0].1, DER[0].2));
+		run.extend_from_slice(&[0x5A; 30]);
+		let text = wrapped(&run, 20, "\n");
+		req!(lines_in(&text), 6);
+		req!(secret::scan(text.as_bytes()), vec![Find { line: 4, kind: Kind::KeyBody }], "mid run");
+		// A padded last line ends a run, so what follows it is a run of its own.
+		let more = fmt!("{}{}\n{}\n", body, noise(&mut 7u64, 64), noise(&mut 9u64, 64));
+		req!(secret::scan(more.as_bytes()), vec![Find { line: n, kind: Kind::KeyBody }], "after");
+		// A finding the run puts on a line above one the line walk already found is put in order:
+		// a P-256 key takes no padding, so an AWS key id on the next line is part of its run.
+		let p256 = wrapped(&res!(der(DER[4].1, DER[4].2)), 64, "\n");
+		let aws = fmt!("{}{}\n", "AKIA", "IOSFODNN7EXAMPLE");
+		let text = fmt!("{}{}", p256, aws);
+		req!(secret::scan(text.as_bytes()), vec![
+			Find { line: lines_in(&p256), kind: Kind::KeyBody },
+			Find { line: lines_in(&p256) + 1, kind: Kind::Aws },
+		], "in the order the lines hold them");
+		// So two bodies in a file, each ending in padding, are two findings.
+		let dkim = wrapped(&res!(der(DKIM.0, DKIM.1)), 64, "\n");
+		let both = fmt!("{}{}", dkim, body);
+		req!(secret::scan(both.as_bytes()), vec![
+			Find { line: lines_in(&dkim), kind: Kind::KeyBody },
+			Find { line: lines_in(&dkim) + n, kind: Kind::KeyBody },
+		], "two bodies");
+		// A key's last byte on the last character of a line is on that line, and on the first
+		// character of the next when the line is one character short: sixteen to a line puts
+		// the last of forty-eight bytes at the end of the fourth, and seventy puts the last of
+		// fifty-three at the start of the second.
+		let mut run = res!(der(DER[0].1, DER[0].2));
+		run.extend_from_slice(&[0x5A; 30]);
+		req!(secret::scan(wrapped(&run, 16, "\n").as_bytes()),
+			vec![Find { line: 4, kind: Kind::KeyBody }], "at the end of a line");
+		let odd = res!(der("3033020100300506032B657004220420", 53));
+		req!(secret::scan(wrapped(&odd, 70, "\n").as_bytes()),
+			vec![Find { line: 2, kind: Kind::KeyBody }], "at the start of a line");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A run too wide to be read at every offset is read at its front", "all",
+		"secret", "body", "der"], ||
+	{
+		// The span DER keys are held to, put to base64: a key behind a span of other bytes is where
+		// a compiled artefact carries one, and it is not looked for there.
+		let key = res!(der(DKIM.0, DKIM.1));
+		let mut inside = vec![0x5A; secret::DER_SPAN - key.len()];
+		inside.extend_from_slice(&key);
+		req!(inside.len(), secret::DER_SPAN);
+		let found = secret::scan(wrapped(&inside, 64, "\n").as_bytes());
+		req!(found.len(), 1, "at the span");
+		req!(found[0].kind, Kind::KeyBody);
+		let mut over = vec![0x5A; secret::DER_SPAN + 1 - key.len()];
+		over.extend_from_slice(&key);
+		req!(over.len(), secret::DER_SPAN + 1);
+		req!(secret::scan(wrapped(&over, 64, "\n").as_bytes()), Vec::<Find>::new(), "past the span");
+		// The front is read whatever the run's size.
+		let mut wide = key.clone();
+		wide.resize(secret::DER_SPAN * 4, 0x5A);
+		let text = wrapped(&wide, 64, "\n");
+		req!(secret::scan(text.as_bytes()), vec![Find { line: 2, kind: Kind::KeyBody }], "front");
+		// A run far wider than a key is read once and not at every line.
+		let mut state = 0x2545F4914F6CDD1Du64;
+		let mut big = String::new();
+		for _ in 0..20_000 {
+			big.push_str(&noise(&mut state, 64));
+			big.push('\n');
+		}
+		req!(secret::scan(big.as_bytes()), Vec::<Find>::new(), "twenty thousand lines");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["An OpenSSH private key body is known by its magic", "all", "secret", "body",
+		"openssh"], ||
+	{
+		// ssh-keygen's own format is no DER: it opens with a fixed string, which is as exact a
+		// mark as an object identifier and holds a private key whether or not a passphrase wraps it.
+		let mut key = OPENSSH_HEAD.to_vec();
+		key.resize(400, 0x5A);
+		let body = wrapped(&key, 70, "\n");
+		req!(secret::scan(body.as_bytes()), vec![Find { line: lines_in(&body), kind: Kind::KeyBody }]);
+		let (head, tail) = armour("OPENSSH ");
+		let pem = fmt!("{}{}{}", head, body, tail);
+		req!(secret::scan(pem.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }], "armoured");
+		let labelled = fmt!("id\n{}", body);
+		req!(secret::scan(labelled.as_bytes()),
+			vec![Find { line: 1 + lines_in(&body), kind: Kind::KeyBody }], "labelled");
+		// Behind other bytes in a small run it is still found, and in a wide one it is not.
+		let mut behind = vec![0x41; 40];
+		behind.extend_from_slice(&key);
+		req!(secret::scan(wrapped(&behind, 70, "\n").as_bytes()).len(), 1, "behind");
+		let mut far = vec![0x41; 31_000];
+		far.extend_from_slice(&key);
+		far.resize(34_400, 0x41);
+		req!(secret::scan(wrapped(&far, 70, "\n").as_bytes()), Vec::<Find>::new(), "far");
+		far.truncate(31_000 + key.len());
+		req!(secret::scan(wrapped(&far, 70, "\n").as_bytes()).len(), 1, "as far, and no wider");
+		// The public half of the same pair opens with a length and a name instead.
+		let mut public = b"\0\0\0\x0bssh-ed25519\0\0\0\x20".to_vec();
+		public.resize(51, 0x5A);
+		let line = fmt!("ssh-ed25519 {} me@host\n", base64::encode(&public));
+		req!(secret::scan(line.as_bytes()), Vec::<Find>::new(), "public key");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A key made by openssl or ssh-keygen is caught without its armour", "all",
+		"secret", "body", "real"], ||
+	{
+		// The oracle is the tools themselves: each key is generated here, in TMPDIR, read, scanned
+		// and removed with the directory. Nothing of one is printed or kept.
+		let dir = res!(Dir::new("fe2o3_text_secret"));
+		let makers: &[(&str, &str, &[&str], &str)] = &[
+			("RSA-2048, PKCS#8",	"openssl",		&["genpkey", "-algorithm", "RSA", "-pkeyopt",
+				"rsa_keygen_bits:2048", "-out", "rsa.pem"],								"rsa.pem"),
+			("P-256, PKCS#8",		"openssl",		&["genpkey", "-algorithm", "EC", "-pkeyopt",
+				"ec_paramgen_curve:P-256", "-out", "ec.pem"],							"ec.pem"),
+			("P-256, SEC1",			"openssl",		&["ecparam", "-name", "prime256v1", "-genkey",
+				"-noout", "-out", "sec1.pem"],											"sec1.pem"),
+			("ed25519, PKCS#8",		"openssl",		&["genpkey", "-algorithm", "ED25519", "-out",
+				"ed.pem"],																"ed.pem"),
+			("ed25519, OpenSSH",	"ssh-keygen",	&["-q", "-t", "ed25519", "-N", "", "-f",
+				"ssh_ed"],																"ssh_ed"),
+			("RSA-2048, OpenSSH",	"ssh-keygen",	&["-q", "-t", "rsa", "-b", "2048", "-N", "", "-f",
+				"ssh_rsa"],																"ssh_rsa"),
+			("RSA-2048, PKCS#1",	"ssh-keygen",	&["-q", "-t", "rsa", "-b", "2048", "-m", "PEM",
+				"-N", "", "-f", "ssh_pem"],												"ssh_pem"),
+		];
+		let mut tried = 0;
+		for (what, program, args, file) in makers {
+			if !res!(run(&dir, program, args)) {
+				continue;
+			}
+			tried += 1;
+			let pem = res!(dir.read(file));
+			req!(secret::scan(pem.as_bytes()), vec![Find { line: 1, kind: Kind::PrivateKey }],
+				"armoured, {}", what);
+			let body = body_of(&pem);
+			req!(secret::scan(body.as_bytes()),
+				vec![Find { line: lines_in(&body), kind: Kind::KeyBody }], "body, {}", what);
+			let one = body.replace('\n', "");
+			req!(secret::scan(fmt!("{}\n", one).as_bytes()),
+				vec![Find { line: 1, kind: Kind::KeyBody }], "one line, {}", what);
+			let crlf = body.replace('\n', "\r\n");
+			req!(secret::scan(crlf.as_bytes()),
+				vec![Find { line: lines_in(&body), kind: Kind::KeyBody }], "CRLF, {}", what);
+		}
+		test!("{} of {} keys were made and tried.", tried, makers.len());
+		// And what is not a key, made the same way: a certificate and the public halves.
+		if res!(run(&dir, "openssl", &["req", "-x509", "-newkey", "ec", "-pkeyopt",
+			"ec_paramgen_curve:P-256", "-nodes", "-keyout", "throwaway.pem", "-out", "cert.pem",
+			"-subj", "/CN=fixture", "-days", "1"]))
+		{
+			let cert = body_of(&res!(dir.read("cert.pem")));
+			req!(secret::scan(cert.as_bytes()), Vec::<Find>::new(), "certificate");
+			req!(secret::scan(fmt!("{}\n", cert.replace('\n', "")).as_bytes()), Vec::<Find>::new(),
+				"certificate on one line");
+		}
+		if res!(run(&dir, "openssl", &["pkey", "-in", "rsa.pem", "-pubout", "-out", "rsa_pub.pem"])) {
+			let public = body_of(&res!(dir.read("rsa_pub.pem")));
+			req!(secret::scan(public.as_bytes()), Vec::<Find>::new(), "RSA public key");
+		}
+		// The public half ssh-keygen wrote beside the private one is a single line.
+		if dir.path().join("ssh_ed.pub").exists() {
+			let public = res!(dir.read("ssh_ed.pub"));
+			req!(secret::scan(public.as_bytes()), Vec::<Find>::new(), "OpenSSH public key");
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A literal still open at the end of its line is caught", "all", "secret",
+		"assigned", "open"], ||
+	{
+		// The other half of D3: a field, its separator, an opening quote and the characters typed
+		// so far, with the closing quote not yet there. The end of the line closes the literal.
+		let value = fmt!("{}{}", LITERAL.0, LITERAL.1);
+		for quote in ['"', '\''] {
+			for tail in ["", " ", "\t ", "\r"] {
+				for field in ["password", "api_key", "SECRET"] {
+					for sep in [" = ", ": ", "="] {
+						let line = fmt!("{}{}{}{}{}\n", field, sep, quote, value, tail);
+						req!(secret::scan(line.as_bytes()),
+							vec![Find { line: 1, kind: Kind::Assigned }], "for {:?}", line.len());
+					}
+				}
+			}
+		}
+		let end = fmt!("password = \"{}", value);
+		req!(secret::scan(end.as_bytes()), vec![Find { line: 1, kind: Kind::Assigned }], "at the end");
+		// What follows the run says it is not the end of a literal.
+		for after in [" and more", ",", ";", ")", "/x"] {
+			let line = fmt!("password = \"{}{}\n", value, after);
+			req!(secret::scan(line.as_bytes()), Vec::<Find>::new(), "followed by {:?}", after);
+		}
+		// A placeholder is as excused open as it is closed, and a short run is as short.
+		for open in ["api_key = \"your-key-goes-here-please", "api_key = 'xxxxxxxxxxxxxxxxxxxxxxxx",
+			"password: \"9f3Bq7ZmR4tYuIoPkLj"]
+		{
+			req!(secret::scan(open.as_bytes()), Vec::<Find>::new(), "for {:?}", open);
+		}
+		let marked = fmt!("password = \"{} // {}\n", value, secret::MARKER);
+		req!(secret::scan(marked.as_bytes()), Vec::<Find>::new(), "marked");
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["A token prefix shorter than its shape stays a fragment", "all", "secret",
+		"shape"], ||
+	{
+		// By design: a shape has a minimum, and what is typed short of it is a few characters that
+		// every run of letters resembles. The save that completes it is the one refused.
+		let full = fmt!("let key = \"{}{}\";\n", "sk_live", "_AbCdEfGhIjKlMnOpQrSt");
+		req!(secret::scan(full.as_bytes()), vec![Find { line: 1, kind: Kind::Stripe }]);
+		let part = fmt!("let key = \"{}{}\n", "sk_live", "_AbCdEfGhIjKlMnOpQrS");
+		req!(secret::scan(part.as_bytes()), Vec::<Find>::new(), "one short");
 		Ok(())
 	}));
 

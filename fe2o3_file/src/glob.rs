@@ -71,6 +71,7 @@ enum Comp {
 pub struct Glob {
     negated:    bool,       // the pattern began with `!`
     dir_only:   bool,       // the pattern ended with `/`, so directories only
+    files_only: bool,       // set by the caller, never by the pattern: not a directory
     // A leading Comp::Globstar stands in for an unanchored pattern's freedom to
     // match at any depth.
     comps:      Vec<Comp>,
@@ -121,7 +122,15 @@ impl Glob {
                 comps.push(Comp::One(Self::tokens(part)));
             }
         }
-        Ok(Self { negated, dir_only, comps })
+        Ok(Self { negated, dir_only, files_only: false, comps })
+    }
+
+    /// Narrows the pattern to what is not a directory, which no ignore-file syntax
+    /// can say. A directory is never matched, whatever it is called, and a pattern
+    /// that also ended in `/` matches nothing at all.
+    pub fn files_only(mut self) -> Self {
+        self.files_only = true;
+        self
     }
 
     pub fn is_negated(&self) -> bool {
@@ -132,14 +141,18 @@ impl Glob {
         self.dir_only
     }
 
+    pub fn is_files_only(&self) -> bool {
+        self.files_only
+    }
+
     /// Reports whether a path matches, where `is_dir` says what the path names.
     ///
     /// The path is relative, `/`-joined, with no leading or trailing slash. A
-    /// directory-only pattern refuses anything that is not a directory; it does
-    /// not by itself speak for the files beneath, which is the business of
-    /// [`IgnoreFile::excludes`].
+    /// directory-only pattern refuses anything that is not a directory, and a
+    /// files-only one refuses a directory; neither by itself speaks for the files
+    /// beneath, which is the business of [`IgnoreFile::excludes`].
     pub fn matches(&self, path: &[u8], is_dir: bool) -> bool {
-        if self.dir_only && !is_dir {
+        if (self.dir_only && !is_dir) || (self.files_only && is_dir) {
             return false;
         }
         if path.is_empty() {
@@ -308,6 +321,20 @@ impl IgnoreFile {
     /// compiled from is passed over, as git passes over a pattern it cannot
     /// read.
     pub fn parse(bytes: &[u8]) -> Self {
+        Self::parse_as(bytes, false)
+    }
+
+    /// As [`IgnoreFile::parse`], but every rule speaks for files alone: a
+    /// directory is never matched, however it is named. The built-in lists of
+    /// names an editor or Syncthing writes ([`EDITOR_DROPPINGS`] and
+    /// [`SYNC_DROPPINGS`]) are read this way, because neither writes a
+    /// directory by one of them, and one holding somebody's work under such a
+    /// name must not be kept out whole.
+    pub fn parse_files_only(bytes: &[u8]) -> Self {
+        Self::parse_as(bytes, true)
+    }
+
+    fn parse_as(bytes: &[u8], files_only: bool) -> Self {
         let mut rules = Vec::new();
         for raw in bytes.split(|b| *b == b'\n') {
             let mut line = raw;
@@ -322,7 +349,7 @@ impl IgnoreFile {
                 continue;
             }
             if let Ok(glob) = Glob::new(line) {
-                rules.push(glob);
+                rules.push(if files_only { glob.files_only() } else { glob });
             }
         }
         Self { rules }
@@ -390,7 +417,8 @@ impl IgnoreFile {
 
 // Names a terminal editor writes beside the file it is working on.  A caller lays the list beneath
 // a repository's own rules, as `oxedyne_fe2o3_text::secret::SECRET_PATHS` is laid: parse these
-// lines first, so that the repository's own `!*~` or `!.#*` still re-includes one by name.
+// lines first, so that the repository's own `!*~` or `!.#*` still re-includes one by name.  They
+// name files, so compile them with `IgnoreFile::parse_files_only`: `drafts~/` is somebody's folder.
 pub const EDITOR_DROPPINGS: &[&str] = &[
 	"*.swp",		// vim swap file
 	"*.swo",		// vim swap file, second crash
@@ -403,7 +431,7 @@ pub const EDITOR_DROPPINGS: &[&str] = &[
 ];
 
 // Names Syncthing writes while it is part way through bringing a file in.  Laid beneath the
-// repository's own rules like `EDITOR_DROPPINGS`.  `*.sync-conflict-*` is deliberately absent: a
+// repository's own rules like `EDITOR_DROPPINGS`, and compiled files-only like it.  `*.sync-conflict-*` is deliberately absent: a
 // conflict copy is the other machine's content, and keeping it out would lose it.
 pub const SYNC_DROPPINGS: &[&str] = &[
 	".syncthing.*.tmp",	// the transfer file, renamed over its target when complete

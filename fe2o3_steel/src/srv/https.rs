@@ -48,11 +48,11 @@ use oxedyne_fe2o3_net::{
         header::{
             HttpHeadline,
             HttpMethod,
+            HttpVersion,
         },
         msg::{
             HttpMessageReader,
             HttpMessage,
-            ReadLimits,
         },
         status::HttpStatus,
     },
@@ -64,10 +64,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    time::{
-        Duration,
-        Instant,
-    },
+    time::Instant,
 };
 
 use tokio::{
@@ -190,25 +187,7 @@ impl<
         // reader enforces the configured header / body bounds and the
         // slowloris read deadline. A zero value in the config means
         // "disabled" and maps to `None` in `ReadLimits`.
-        let limits = ReadLimits {
-            max_header_bytes: if self.cfg.http_max_header_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_header_bytes as usize)
-            },
-            max_body_bytes: if self.cfg.http_max_body_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_body_bytes as usize)
-            },
-            header_read_timeout: if self.cfg.http_header_read_timeout_ms == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(
-                    self.cfg.http_header_read_timeout_ms,
-                ))
-            },
-        };
+        let limits = self.cfg.read_limits();
 
         let mut reader: HttpMessageReader<
             '_,
@@ -394,7 +373,7 @@ impl<
                             {
                                 let proxy_path = loc.path.as_string().to_string();
                                 if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                    .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                    .filter(|r| r.matches(&proxy_path))
                                     .max_by_key(|r| r.path_prefix.len())
                                 {
                                     alog!(logged, log_level,
@@ -525,6 +504,9 @@ impl<
 
                     let mut response = None;
                     let close_requested = request.get_connection_close();
+                    // Only an HTTP/1.0 request that asked to keep the connection reaches
+                    // here with `close_requested` false.
+                    let request_is_1_0 = request.header.version == HttpVersion::Http1_0;
                     if close_requested {
                         let mut msg = HttpMessage::new_response(HttpStatus::OK);
                         msg.set_connection_close(true);
@@ -574,16 +556,25 @@ impl<
 
                     match request.header.headline.clone() {
                         HttpHeadline::Request { method, loc } => {
-                            // Redirect rules fire before the file router.
-                            let request_uri = loc.path.as_string().to_string();
+                            // Redirect rules fire before the file router. A rule matches on the
+                            // path alone, but `{uri}` in its target is the path and the query as
+                            // they arrived, so a www -> apex redirect keeps `?ref=x`.
+                            let request_path = loc.path.as_string().to_string();
                             if let Some(rule) = Self::match_redirect(
                                 &vhost.redirects,
-                                &request_uri,
+                                &request_path,
                             ) {
+                                let request_uri = match loc.query.is_empty() {
+                                    true    => request_path.clone(),
+                                    false   => fmt!("{}?{}", request_path, loc.query),
+                                };
                                 let target = rule.resolve_target(&request_uri);
+                                // The log line names the path, not the query, as the rest of the
+                                // request log does.
                                 alog!(logged, log_level,
                                     "{}: redirect {} {} -> {} ({})",
-                                    id, rule.status, request_uri, target,
+                                    id, rule.status, request_path,
+                                    rule.resolve_target(&request_path),
                                     match rule.match_kind {
                                         RedirectMatch::Exact    => "exact",
                                         RedirectMatch::Prefix   => "prefix",
@@ -612,7 +603,7 @@ impl<
                                 if !vhost.proxy_routes.is_empty() {
                                     let proxy_path = loc.path.as_string().to_string();
                                     if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                        .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                        .filter(|r| r.matches(&proxy_path))
                                         .max_by_key(|r| r.path_prefix.len())
                                     {
                                         alog!(logged, log_level,
@@ -933,6 +924,16 @@ impl<
                                 }
                             }
 
+                            // Say what happens to the connection. A request that asked
+                            // to close, or an HTTP/1.0 one that did not ask to stay, is
+                            // told it will end; an HTTP/1.0 one that asked to stay is told
+                            // it may (RFC 9112 9.3), since it assumes nothing otherwise.
+                            if close_requested {
+                                msg.set_connection_close(true);
+                            } else if request_is_1_0 {
+                                msg.set_connection_close(false);
+                            }
+
                             // The length the response actually carries, which for a
                             // body sent from a file is the window rather than the
                             // empty buffer beside it.
@@ -969,6 +970,12 @@ impl<
                             warn!("{}: traffic recorder rejected entry: {}",
                                 id, e);
                         }
+                    }
+
+                    // The reply is out. A connection that was asked to close ends here,
+                    // by the server, rather than waiting for the client to drop it.
+                    if close_requested {
+                        break;
                     }
                 }
                 Some(Err(e)) => {

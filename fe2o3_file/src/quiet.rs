@@ -19,7 +19,8 @@
 //! which stops while the machine sleeps, so a suspended hour is neither a gap nor an hour of
 //! stillness: the time is not counted at all, and a reading that held across it goes on with its
 //! window where it left off. A caller that must take a fresh reading on resume has to notice the
-//! resume itself, by comparing `CLOCK_BOOTTIME`, which counts suspend, against `Instant`.
+//! resume itself, by comparing `CLOCK_BOOTTIME`, which counts suspend, against `Instant` (the
+//! `Asleep` check in `fe2o3_sys::clock` does), and then call [`Quiet::restart`].
 //!
 //! [Written with AI](https://need2know.ai/with-ai/code)\
 //! Anthropic Claude
@@ -108,5 +109,14 @@ impl<T: PartialEq> Quiet<T> {
 	/// The reading last fed to [`Quiet::poll`], if any.
 	pub fn reading(&self) -> Option<&T> {
 		self.reading.as_ref()
+	}
+
+	/// Forgets the reading and the window, so the next poll is a first poll: [`Stillness::Moved`],
+	/// with the quiet window beginning there. For a caller that knows what the guard cannot, such
+	/// as the machine having slept.
+	pub fn restart(&mut self) {
+		self.reading	= None;
+		self.changed_at	= None;
+		self.last_poll	= None;
 	}
 }

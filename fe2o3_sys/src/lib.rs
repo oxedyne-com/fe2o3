@@ -7,7 +7,8 @@
 //! BSD and macOS will slot in via the same [`Sampler`] trait.
 //!
 //! The optional `inotify` feature adds a watcher for directory trees on Linux, built on
-//! `nix`; without it the crate has no third-party dependency at all.
+//! `nix`, and the optional `clock` feature the boot clock and a check for the machine
+//! having slept; without them the crate has no third-party dependency at all.
 //!
 //! Intended consumers include admin dashboards, long-running
 //! service processes that want to record their own resource
@@ -21,6 +22,8 @@
 //! ```
 #![forbid(unsafe_code)]
 
+#[cfg(all(target_os = "linux", feature = "clock"))]
+pub mod clock;
 pub mod cpu;
 pub mod disk;
 #[cfg(all(target_os = "linux", feature = "inotify"))]

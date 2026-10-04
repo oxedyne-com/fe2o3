@@ -14,6 +14,9 @@ oxedyne_fe2o3_core              = { path = "../fe2o3_core" }
 # inotify: a safe Linux watcher for directory trees, built on nix. Off by default
 # so that every other user of this crate stays free of third-party dependencies.
 inotify = ["dep:nix"]
+# clock: the boot clock and a check for the machine having slept, which `Instant` cannot
+# see. Off by default for the same reason.
+clock = ["dep:nix", "nix/time"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }

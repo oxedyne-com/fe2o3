@@ -481,21 +481,28 @@ impl CalClockZone {
 	}
 	
 	fn detect_system_timezone() -> Outcome<Self> {
-		// TZ first, as POSIX says: an optional leading colon, then either a
-		// zone name or a path to a TZif file.
+		// TZ first, as POSIX says: an optional leading colon, then a path to a
+		// TZif file, a zone name, or a rule string. Set to nothing it is UTC,
+		// as libc reads it, and is not the same as unset.
 		if let Ok(tz) = std::env::var("TZ") {
-			if !tz.is_empty() {
-				let name = tz.strip_prefix(':').unwrap_or(&tz);
-				if name.starts_with('/') {
-					if let Ok(zone) = Self::from_tzif_file(name, Path::new(name)) {
-						return Ok(zone);
-					}
-				}
-				if let Ok(zone) = Self::from_zoneinfo_name(name) {
+			let name = tz.strip_prefix(':').unwrap_or(&tz);
+			if name.is_empty() {
+				return Ok(Self::utc());
+			}
+			if name.starts_with('/') {
+				if let Ok(zone) = Self::from_tzif_file(name, Path::new(name)) {
 					return Ok(zone);
 				}
-				return Self::new(name);
 			}
+			if let Ok(zone) = Self::from_zoneinfo_name(name) {
+				return Ok(zone);
+			}
+			// What no file answers to is a rule string such as `EST5EDT,M3.2.0,M11.1.0`,
+			// which libc applies; `new` would read its name as a zone and give UTC.
+			if let Ok(zone) = Self::from_posix_rule(name) {
+				return Ok(zone);
+			}
+			return Self::new(name);
 		}
 
 		// /etc/localtime: on every modern Linux and macOS a symlink into the
@@ -539,6 +546,15 @@ impl CalClockZone {
 				"The TZif file {:?} parsed to no timezone data.", path;
 			System, Missing, Data)),
 		}
+	}
+
+	/// A zone from a POSIX TZ rule string such as `AEST-10AEDT,M10.1.0,M4.1.0/3` or
+	/// `<+05>-5`, which is how libc reads `TZ` where it names no zoneinfo file. An
+	/// error where the text is not a rule. The sign is POSIX's, so `UTC+5` is five
+	/// hours west of Greenwich.
+	pub fn from_posix_rule(rule: &str) -> Outcome<Self> {
+		let data = res!(TZifData::from_posix_rule(rule));
+		Self::from_tzif_data(rule, data)
 	}
 
 	/// A zone read from the host's zoneinfo tree, whose rules are exact for every

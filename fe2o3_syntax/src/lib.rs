@@ -164,6 +164,7 @@
 pub mod apps;
 pub mod arg;
 pub mod argv;
+pub mod cli;
 pub mod cmd;
 pub mod core;
 pub mod help;

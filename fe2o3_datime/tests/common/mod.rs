@@ -72,6 +72,19 @@ pub fn date_batch(
 )
 	-> Outcome<Vec<Option<String>>>
 {
+	date_batch_tz(Some(tz), tzdir, lines, format)
+}
+
+/// As `date_batch`, but `TZ` is left out of the environment where `tz` is None,
+/// which is not the same as setting it to nothing.
+pub fn date_batch_tz(
+	tz:		Option<&str>,
+	tzdir:	Option<&Path>,
+	lines:	&[String],
+	format:	&str,
+)
+	-> Outcome<Vec<Option<String>>>
+{
 	let gnu = res!(gnu_date().ok_or_else(|| err!("No GNU date."; System, Missing)));
 	// Tests run in parallel, so each call has a file of its own.
 	static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -83,7 +96,11 @@ pub fn date_batch(
 		}
 	}
 	let mut cmd = Command::new(gnu);
-	cmd.env("TZ", tz).env_remove("TZDIR");
+	cmd.env_remove("TZDIR");
+	match tz {
+		Some(tz)	=> cmd.env("TZ", tz),
+		None		=> cmd.env_remove("TZ"),
+	};
 	if let Some(dir) = tzdir {
 		cmd.env("TZDIR", dir);
 	}
@@ -109,7 +126,7 @@ pub fn date_batch(
 			match said.next() {
 				Some(s)	=> answers.push(Some(s.to_string())),
 				None	=> return Err(err!(
-					"GNU date gave no answer for '{}' under TZ={} TZDIR={:?}: {}",
+					"GNU date gave no answer for '{}' under TZ={:?} TZDIR={:?}: {}",
 					line, tz, tzdir, String::from_utf8_lossy(&out.stderr).lines().next().unwrap_or("");
 					Invalid, Mismatch)),
 			}
