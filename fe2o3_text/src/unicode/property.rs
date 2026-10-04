@@ -26,6 +26,7 @@ use crate::unicode::{
 	},
 	tables::cat::{
 		BIN_ALPHABETIC,
+		BIN_DEFAULT_IGNORABLE_CODE_POINT,
 		BIN_JOIN_CONTROL,
 		BIN_LONG,
 		BIN_NAMES,
@@ -88,9 +89,10 @@ pub struct Binary(u8);
 
 impl Binary {
 
-	pub const ALPHABETIC:	Self = Self(BIN_ALPHABETIC);
-	pub const JOIN_CONTROL:	Self = Self(BIN_JOIN_CONTROL);
-	pub const WHITE_SPACE:	Self = Self(BIN_WHITE_SPACE);
+	pub const ALPHABETIC:			Self = Self(BIN_ALPHABETIC);
+	pub const DEFAULT_IGNORABLE:	Self = Self(BIN_DEFAULT_IGNORABLE_CODE_POINT);
+	pub const JOIN_CONTROL:			Self = Self(BIN_JOIN_CONTROL);
+	pub const WHITE_SPACE:			Self = Self(BIN_WHITE_SPACE);
 
 	/// Every binary property the tables carry.
 	pub fn all() -> impl Iterator<Item = Self> {
@@ -270,6 +272,32 @@ pub fn is_digit(c: char) -> bool {
 		return c.is_ascii_digit();
 	}
 	GeneralCategory::of(c) == GeneralCategory::Nd
+}
+
+/// Is `c` a character that a person reading the text cannot see but a program reads?
+///
+/// That is a control, format, private-use or unassigned character (General_Category Cc, Cf,
+/// Co or Cn), a line or paragraph separator (Zl, Zp), or a Default_Ignorable_Code_Point. The
+/// last takes in what the categories leave: the variation selectors, the combining grapheme
+/// joiner, the Hangul fillers and the whole tag block U+E0000 to U+E007F, which can spell an
+/// ASCII sentence that a model reads and an editor does not draw. Tab and the line ends are
+/// controls, so a caller that allows them has to set them aside first. Text is checked as
+/// written: a compatibility form such as a fullwidth letter is visible, and `norm::nfkc` is
+/// what folds it.
+pub fn is_invisible(c: char) -> bool {
+	if c.is_ascii() {
+		return c.is_ascii_control();
+	}
+	if Binary::DEFAULT_IGNORABLE.contains(c) {
+		return true;
+	}
+	matches!(GeneralCategory::of(c),
+		GeneralCategory::Cc
+		| GeneralCategory::Cf
+		| GeneralCategory::Co
+		| GeneralCategory::Cn
+		| GeneralCategory::Zl
+		| GeneralCategory::Zp)
 }
 
 /// UAX44-LM3 without the `is` prefix rule: ASCII lower case, no spaces, underscores or hyphens,
