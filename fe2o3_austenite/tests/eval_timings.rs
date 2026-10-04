@@ -114,6 +114,14 @@ fn faults(record: &J) -> Vec<String> {
 	if (sum - total).abs() * 10 > total {
 		out.push(format!("the phases sum to {} ns against a total of {} ns", sum, total));
 	}
+	// The shaped-run cache was used, and holds no more than its budget.
+	let (hits, misses) = (num(record, &["shape", "hits"]), num(record, &["shape", "misses"]));
+	if hits + misses < 1 || misses < 1 {
+		out.push(format!("the shaped-run cache shows {} hits and {} misses", hits, misses));
+	}
+	if num(record, &["shape", "bytes"]) > num(record, &["shape", "budget"]) {
+		out.push("the shaped-run cache holds more than its budget".to_string());
+	}
 	out
 }
 

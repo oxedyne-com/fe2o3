@@ -569,6 +569,11 @@ fn compile_eval(
 	res!(file.flush());
 	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), timings_out) {
 		tm.leave();
+		if let Ok(book) = done.engine.fonts.book() {
+			if let Ok(stats) = book.shape_stats() {
+				tm.set_shape(stats);
+			}
+		}
 		res!(std::fs::write(dest, tm.json(t.elapsed().as_nanos() as u64)));
 	}
 	println!(

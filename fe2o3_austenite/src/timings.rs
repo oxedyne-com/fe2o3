@@ -8,8 +8,13 @@
 //! and with one, a clock read at each end of a phase and no allocation per page (a bucket is added once
 //! per fixpoint pass).
 //!
+//! The record also carries the shaped-run cache's counters, which say whether the time in flow was spent
+//! shaping again what had been shaped.
+//!
 //! It reads `std::time::Instant`, which the wasm32-unknown-unknown target does not provide, so only a
 //! native run switches it on.
+
+use crate::fonts::ShapeStats;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -83,6 +88,7 @@ pub struct Timings {
 	passes:	Vec<Bucket>,	// one for each fixpoint pass
 	idle:	u64,			// ns spent outside every phase
 	clock:	u64,			// ns one clock read costs, measured when the recorder starts
+	shape:	Option<ShapeStats>,	// the shaped-run cache at the end of the run, once the caller has read it
 }
 
 impl Timings {
@@ -93,7 +99,7 @@ impl Timings {
 		stack.push(Phase::Load);
 		let mut run = Bucket::default();
 		run.n[Phase::Load.index()] = 1;
-		Self { last: Instant::now(), stack, run, passes: Vec::with_capacity(Phase::PASS.len()), idle: 0, clock }
+		Self { last: Instant::now(), stack, run, passes: Vec::with_capacity(Phase::PASS.len()), idle: 0, clock, shape: None }
 	}
 
 	fn clock_cost() -> u64 {
@@ -153,12 +159,24 @@ impl Timings {
 
 	pub fn passes(&self) -> usize { self.passes.len() }
 
+	/// Keeps the shaped-run cache's counters for the record.
+	pub fn set_shape(&mut self, stats: ShapeStats) { self.shape = Some(stats); }
+
+	fn shape_json(&self) -> String {
+		match &self.shape {
+			Some(s)	=> fmt!(
+				"{{\"entries\":{},\"bytes\":{},\"budget\":{},\"hits\":{},\"misses\":{},\"evictions\":{}}}",
+				s.entries, s.bytes, s.budget, s.hits, s.misses, s.evictions),
+			None	=> "null".to_string(),
+		}
+	}
+
 	/// The recorded times as one JSON object, in nanoseconds, with `total` the run's own wall time as the
 	/// caller read it.
 	pub fn json(&self, total: u64) -> String {
 		let passes: Vec<String> = self.passes.iter().map(|b| b.json(&Phase::PASS)).collect();
 		fmt!(
-			"{{\"unit\":\"ns\",\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}]}}\n",
-			total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","))
+			"{{\"unit\":\"ns\",\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}],\"shape\":{}}}\n",
+			total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","), self.shape_json())
 	}
 }
