@@ -1920,6 +1920,17 @@ impl<'a> Vm<'a> {
 	)
 		-> Outcome<Value>
 	{
+		// A symbol is callable where it is an accent or an opening delimiter, `sym.acute($x$)` and
+		// `math.floor($x$)`; any other reads as text in maths and is not callable in code.
+		let callee = match callee {
+			Value::Symbol(ref s) => match lib::math::symbol_func(&ops::symbol_text(s)) {
+				Some(f)	=> Value::Func(f),
+				None if in_math(callee_node)	=> callee,
+				None	=> return Err(self.error(DiagnosticKind::Type, callee_node.span(),
+					fmt!("symbol {} is not callable", ops::symbol_text(s)))),
+			},
+			other	=> other,
+		};
 		match callee {
 			Value::Func(f)	=> self.engine.call_func(&f, args),
 			Value::Type(t)	=> match foundations::constructor(t) {

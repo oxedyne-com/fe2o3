@@ -749,7 +749,9 @@ fn math_scope(sym: Option<&Scope>) -> Outcome<Scope> {
 	lib::define_elements(&mut s, "math");
 	s.define("text", Value::Func(Func::Element(ElemKind::Text)));
 	for f in MathFn::ALL {
-		if matches!(f, MathFn::AccentOf | MathFn::LrOf) {
+		// Typst's `floor` and `ceil` are symbols (`floor.l`, `floor.r`), called as functions through
+		// `symbol_func`, so the `sym` symbols stand and these two are not bound as functions.
+		if matches!(f, MathFn::AccentOf | MathFn::LrOf | MathFn::Floor | MathFn::Ceil) {
 			continue;
 		}
 		s.define(f.name(), Value::Func(Func::Native(NativeFunc::Math(*f))));

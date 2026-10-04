@@ -122,6 +122,70 @@ fn refuses_alike(dir: &Path, name: &str, src: &str) -> Outcome<Failure> {
 	Ok(f)
 }
 
+// Maths: `floor` and `ceil` are symbols
+
+// The sources are the shapes a document writes: the delimiter as a variant of the symbol, called, set
+// beside its partner, and the symbol alone.
+const FLOORS: [(&str, &str); 6] = [
+	("variant-called",		"$ T = floor.l(2^256 dot n slash N) $\n"),
+	("both-sides",			"$ floor.l a floor.r + ceil.l b ceil.r $\n"),
+	("right-called",		"$ floor.r(x) + ceil.r(y) $\n"),
+	("alone",				"$floor$ and $ceil$ and $floor.l$ and $ceil.r$\n"),
+	("mixed-with-calls",	"$ floor(x) + floor.l(y) + ceil(z) + ceil.l(w) + round(v) $\n"),
+	("in-code",				"#math.floor.l($x$) #math.ceil.l($y$) #sym.floor.r #sym.ceil.l\n"),
+];
+
+#[test]
+fn floor_and_ceil_are_symbols_with_left_and_right_variants_in_maths_as_typst_has_them() -> Outcome<()> {
+	let dir = res!(work_dir("floor"));
+	for (name, src) in FLOORS {
+		res!(builds_alike(&dir, name, src));
+	}
+	// A symbol, not a function: its type and its variants are what `typst` reports.
+	let ty = res!(builds_alike(&dir, "type-of", "#type(math.floor) #type(math.ceil) #repr(math.floor) #repr(math.ceil.r)\n"));
+	assert!(ty.starts_with("symbolsymbol"), "typst's own answer: {}", ty);
+	Ok(())
+}
+
+#[test]
+fn a_function_of_maths_that_has_no_variants_still_refuses_one() -> Outcome<()> {
+	let dir = res!(work_dir("variants"));
+	// `round` and `abs` are functions in Typst, so the field is not found there.
+	for (name, src) in [
+		("round-l",	"$round.l$\n"),
+		("abs-l",	"$abs.l$\n"),
+		("modifier", "$floor.l.double$\n"),
+	] {
+		let f = res!(refuses_alike(&dir, name, src));
+		assert!(!f.head.message.is_empty(), "{}", name);
+	}
+	Ok(())
+}
+
+// Code: a symbol is callable where it is an accent or an opening delimiter
+
+#[test]
+fn a_symbol_is_called_in_code_where_it_is_an_accent_or_an_opening_delimiter() -> Outcome<()> {
+	let dir = res!(work_dir("call"));
+	for (name, src) in [
+		("floor",		"#sym.floor($x$) #sym.floor.l($y$) #math.ceil($z$)\n"),
+		("paren",		"#sym.paren.l($x$) #sym.bracket.l($y$)\n"),
+		("accent",		"#sym.acute($x$) #sym.arrow.r($y$)\n"),
+		("bound",		"#let f = sym.floor\n#f($x$)\n"),
+	] {
+		res!(builds_alike(&dir, name, src));
+	}
+	for (name, src) in [
+		("letter",		"#sym.alpha($x$)\n"),
+		("closing",		"#sym.floor.r($x$)\n"),
+		("plain",		"#sym.plus($x$)\n"),
+	] {
+		let f = res!(refuses_alike(&dir, name, src));
+		assert!(f.head.message.ends_with("is not callable"), "{}: {}", name, f.head.message);
+	}
+	Ok(())
+}
+
 // Loops: Typst bounds one `while`, not the document
 
 // Eleven million empty iterations and a body that ends at once: more than the ten million the evaluator

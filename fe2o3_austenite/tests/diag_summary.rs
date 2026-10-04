@@ -189,9 +189,10 @@ fn a_standard_call_with_a_type_pair_is_named_with_both_types() {
 fn a_dotted_standard_path_is_named_and_a_message_offering_several_types_has_no_pair() {
 	assert_eq!(named("dotted", "#calc.abs(\"a\")\n", &[]),
 		vec!["diag-error type callee:calc.abs expected:- found:- file:main"]);
-	// A standard name outside the probe's lower-case alphabet (`sym.Alpha`) is `-`, as is any other.
+	// A standard name outside the probe's lower-case alphabet (`sym.Alpha`) is `-`, as is any other. Typst
+	// refuses the call of a letter with "symbol Α is not callable", which offers no pair of types.
 	assert_eq!(named("upper", "#sym.Alpha(1)\n", &[]),
-		vec!["diag-error type callee:- expected:function found:symbol file:main"]);
+		vec!["diag-error type callee:- expected:- found:- file:main"]);
 }
 
 #[test]
