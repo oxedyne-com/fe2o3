@@ -290,6 +290,14 @@ impl Rule {
 		}
 	}
 
+	/// May a group of this rule open inside the active group of `outer`? A textual run opens in a paragraph
+	/// group. Opened inside a list, enum, terms or cite group, which cannot hold text, it would stay in that
+	/// group and be dropped when the next item joined it and the group was built, so there the text ends the
+	/// group instead.
+	fn nests_in(self, outer: Rule) -> bool {
+		!(self == Rule::Textual && matches!(outer, Rule::Cites | Rule::List | Rule::Enum | Rule::Terms))
+	}
+
 	/// May the element sit inside such a group without opening one?
 	fn inner(self, c: &Content) -> bool {
 		match self {
@@ -769,7 +777,7 @@ impl State<'_> {
 		let mut i = 0;
 		while let Some(active) = self.groupings.last().copied() {
 			// A rule of higher priority nests a new group inside the active one.
-			if matching.map(|r| r.priority() > active.rule.priority()).unwrap_or(false) {
+			if matching.map(|r| r.priority() > active.rule.priority() && r.nests_in(active.rule)).unwrap_or(false) {
 				break;
 			}
 			if active.rule.trigger(content, self.keep_model) || active.rule.inner(content) {
