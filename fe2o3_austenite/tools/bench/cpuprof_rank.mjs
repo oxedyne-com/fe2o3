@@ -12,11 +12,13 @@
 //   - self time attributed to the nearest `oxedyne_fe2o3_austenite` frame on the stack: which of
 //     Austenite's modules asked for the work, whoever executed it (alloc, hashbrown, memcpy);
 //   - inclusive time of named functions (`--incl=a,b`, substrings of the demangled name): the share of the
-//     samples that had one of them on the stack, counted once per sample whatever the recursion.
+//     samples that had one of them on the stack, counted once per sample whatever the recursion;
+//   - the callers of named functions (`--callers=a,b`): the self time of a function whose name contains the
+//     substring, split by the nearest frame above it that is not itself a match.
 //
 // A sample's duration is the delta to the next sample, as the DevTools profile view takes it.
 //
-// Usage: cpuprof_rank.mjs FILE.cpuprofile [--top=30] [--incl=name,name,...] [--json]
+// Usage: cpuprof_rank.mjs FILE.cpuprofile [--top=30] [--incl=name,name,...] [--callers=name,...] [--json]
 import fs from 'node:fs';
 
 const AUSTENITE = 'oxedyne_fe2o3_austenite';
@@ -33,10 +35,10 @@ function unescapeIdent(id) {
 	return s.replace(/\.\./g, '::');
 }
 
-// `_ZN<len><ident>...E` to a path; the trailing `h<16 hex>` hash segment is dropped. Anything that is not
-// a legacy symbol comes back as it was.
+// `_ZN<len><ident>...E` to a path; the trailing `h<16 hex>` hash segment is dropped. A name wasm-bindgen
+// has already demangled loses its `::h<16 hex>` suffix. Anything else comes back as it was.
 export function demangle(name) {
-	if (!name.startsWith('_ZN')) return name;
+	if (!name.startsWith('_ZN')) return name.replace(/::h[0-9a-f]{16}$/, '');
 	let i = 3;
 	const parts = [];
 	while (i < name.length && name[i] !== 'E') {
@@ -73,7 +75,7 @@ function classify(cf) {
 	const raw = cf.functionName || '';
 	const url = cf.url || '';
 	if (raw.startsWith('(')) return { name: raw, crate: raw, module: raw, area: raw, kind: 'runtime' };
-	const wasm = url.startsWith('wasm://') || /^wasm-function\[/.test(raw) || raw.startsWith('_ZN');
+	const wasm = url.startsWith('wasm://') || /^wasm-function\[/.test(raw) || raw.startsWith('_ZN') || /::h[0-9a-f]{16}$/.test(raw);
 	if (!wasm) {
 		const where = url ? url.split('/').pop() : '';
 		const name = `${raw || '(anonymous)'}${where ? ` [${where}]` : ''}`;
@@ -112,6 +114,7 @@ function table(map, total, top) {
 export function rank(profile, opts = {}) {
 	const top = opts.top ?? 30;
 	const incl = opts.incl ?? [];
+	const callers = opts.callers ?? [];
 	const nodes = new Map();
 	for (const n of profile.nodes) nodes.set(n.id, n);
 	const parent = new Map();
@@ -130,6 +133,7 @@ export function rank(profile, opts = {}) {
 	const byAskedBy = new Map();	// nearest austenite module on the stack
 	const byKind = new Map();
 	const inclMs = new Map(incl.map((s) => [s, 0]));
+	const callerMs = new Map(callers.map((s) => [s, new Map()]));
 	let total = 0;
 	let idle = 0;
 	for (let i = 0; i < samples.length; i++) {
@@ -161,6 +165,12 @@ export function rank(profile, opts = {}) {
 			}
 		}
 		add(byAskedBy, asked === null ? '(no austenite frame)' : `austenite::${asked}`, ms);
+		for (const s of callers) {
+			if (!inf.name.includes(s)) continue;
+			let at = parent.get(id);
+			while (at !== undefined && info.get(at) && info.get(at).name.includes(s)) at = parent.get(at);
+			add(callerMs.get(s), at === undefined || !info.get(at) ? '(root)' : info.get(at).name, ms);
+		}
 	}
 	return {
 		total_ms:	total,
@@ -174,6 +184,7 @@ export function rank(profile, opts = {}) {
 		asked_by:	table(byAskedBy, total, 40),
 		by_kind:	table(byKind, total, 10),
 		inclusive:	[...inclMs.entries()].map(([name, ms]) => ({ name, ms, pct: total > 0 ? (100 * ms) / total : 0 })),
+		callers:	[...callerMs.entries()].map(([name, m]) => ({ name, rows: table(m, total, 8) })),
 	};
 }
 
@@ -200,21 +211,26 @@ export function render(r) {
 		out.push('\nInclusive time of named functions');
 		out.push(fmtRows(r.inclusive));
 	}
+	for (const c of r.callers) {
+		out.push(`\nCallers of self time in ${c.name}`);
+		out.push(fmtRows(c.rows));
+	}
 	return out.join('\n') + '\n';
 }
 
 function main() {
-	const args = { top: 30, incl: [], json: false };
+	const args = { top: 30, incl: [], callers: [], json: false };
 	let file = null;
 	for (const a of process.argv.slice(2)) {
 		let m;
 		if ((m = a.match(/^--top=(\d+)$/))) args.top = Number(m[1]);
 		else if ((m = a.match(/^--incl=(.*)$/))) args.incl = m[1].split(',').filter(Boolean);
+		else if ((m = a.match(/^--callers=(.*)$/))) args.callers = m[1].split(',').filter(Boolean);
 		else if (a === '--json') args.json = true;
 		else if (!a.startsWith('--')) file = a;
 	}
 	if (!file) {
-		process.stderr.write('usage: cpuprof_rank.mjs FILE.cpuprofile [--top=30] [--incl=name,name] [--json]\n');
+		process.stderr.write('usage: cpuprof_rank.mjs FILE.cpuprofile [--top=30] [--incl=name,name] [--callers=name,...] [--json]\n');
 		process.exit(2);
 	}
 	const r = rank(JSON.parse(fs.readFileSync(file, 'utf8')), args);

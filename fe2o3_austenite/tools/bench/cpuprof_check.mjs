@@ -23,6 +23,8 @@ check('plain path', demangle(sym('oxedyne_fe2o3_austenite', 'flow', 'par', 'layo
 check('trait impl', demangle(`_ZN67_$LT$alloc..vec..Vec$LT$T$C$A$GT$$u20$as$u20$core..clone..Clone$GT$5clone17${H}E`),
 	'<alloc::vec::Vec<T,A> as core::clone::Clone>::clone');
 check('not a symbol', demangle('compileProject'), 'compileProject');
+check('already demangled', demangle(`oxedyne_fe2o3_austenite::flow::par::layout_with::${H}`),
+	'oxedyne_fe2o3_austenite::flow::par::layout_with');
 
 const frame = (id, functionName, children = [], url = 'wasm://wasm/x') => ({ id, callFrame: { functionName, url }, children });
 const A = (m, f) => sym('oxedyne_fe2o3_austenite', m, f);
@@ -43,11 +45,13 @@ const profile = {
 	samples:	[3, 5, 5, 6, 3],
 	timeDeltas:	[0, 10000, 20000, 30000, 40000],
 };
-const r = rank(profile, { top: 5, incl: ['flow::par', 'eval::eval'] });
+const r = rank(profile, { top: 5, incl: ['flow::par', 'eval::eval'], callers: ['core::ptr::copy'] });
 check('busy', r.total_ms, 100);
 const by = (rows) => Object.fromEntries(rows.map((x) => [x.name, x.ms]).sort((a, b) => a[0].localeCompare(b[0])));
 check('self by crate', by(r.by_crate), { alloc: 10, core: 50, oxedyne_fe2o3_austenite: 40 });
 check('asked by', by(r.asked_by), { 'austenite::eval::eval': 40, 'austenite::flow::par': 60 });
 check('inclusive counts once', by(r.inclusive), { 'eval::eval': 40, 'flow::par': 60 });
+// Node 5 (core::ptr::copy, 50 ms) is called by node 4 (flow::par), whose own name does not match.
+check('callers', by(r.callers[0].rows), { 'oxedyne_fe2o3_austenite::flow::par': 50 });
 console.log(`cpuprof_check: ${checks} checks, ${failed} failed`);
 process.exit(failed ? 1 : 0);
