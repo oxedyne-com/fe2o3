@@ -155,6 +155,47 @@ if (want !== null) {
 	check('engineInfo git', info.git === want && !info.git.endsWith('-dirty'), `${info.git} is not ${want}`);
 }
 
+// A nest of containers past the layout depth is a `limit` error, never a trap: a trap ends the module for the page's
+// life, since the wasm has one linear memory and a call that traps leaves the instance borrowed. After the refusal the
+// same instance and a new one compile on. The nests just under the depth Typst sets must still be set, which the
+// stack has to hold.
+const looped = (kind, n) => `#let x = [a]\n#for i in range(${n}) { x = ${kind}(x) }\n#x\n`;
+const nested = (open, close, n) => `${open.repeat(n)}x${close.repeat(n)}\n`;
+const listed = (n) => Array.from({ length: n }, (_, i) => `${'  '.repeat(i)}- item\n`).join('');
+function attempt(text) {
+	try {
+		return { r: aus.compileProject(project(text)) };
+	} catch (e) {
+		return { threw: `${e.constructor.name}: ${String(e.message).slice(0, 80)}` };
+	}
+}
+for (const [kind, text] of [
+	['box', looped('box', 2000)], ['block', looped('block', 2000)], ['stack', looped('stack', 2000)],
+	['table', looped('table', 2000)], ['list', listed(100)],
+]) {
+	const { r, threw } = attempt(text);
+	const d = r && r.diagnostics && r.diagnostics[0];
+	check(`depth ${kind} nested deep is a limit error`,
+		!threw && typeof r.error === 'string' && d && d.kind === 'limit' && /^maximum (layout|show rule) depth exceeded$/.test(d.message),
+		threw || String(r && r.error));
+	const next = attempt(SKELETON);
+	check(`depth the same instance compiles after ${kind}`, !next.threw && !!next.r.pdf, next.threw || String(next.r.error));
+}
+check('depth a new instance compiles after the nests', (() => {
+	try {
+		return !!new mod.DaimondTypst().compileProject(project(SKELETON)).pdf;
+	} catch (e) {
+		return false;
+	}
+})());
+for (const [kind, text] of [
+	['box', nested('#box[', ']', 70)], ['block', nested('#block[', ']', 35)], ['stack', nested('#stack[', ']', 32)],
+	['list', listed(31)],
+]) {
+	const { r, threw } = attempt(text);
+	check(`depth ${kind} just under Typst's depth is set`, !threw && !!r.pdf, threw || String(r && r.error));
+}
+
 // The case lines against the native ones.
 const file = opt('--expect', null);
 if (file !== null) {
