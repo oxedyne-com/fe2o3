@@ -6,6 +6,9 @@
 //! relevant pseudo-file under `/proc` on Linux; support for
 //! BSD and macOS will slot in via the same [`Sampler`] trait.
 //!
+//! The optional `signal` feature signals to a process group, on Linux, built on `nix`;
+//! without it the crate has no third-party dependency at all.
+//!
 //! Intended consumers include admin dashboards, long-running
 //! service processes that want to record their own resource
 //! use, and test harnesses that need to confirm a workload's
@@ -25,6 +28,8 @@ pub mod mem;
 pub mod net;
 pub mod parse;
 pub mod proc_self;
+#[cfg(all(target_os = "linux", feature = "signal"))]
+pub mod signal;
 pub mod snapshot;
 pub mod uptime;
 
