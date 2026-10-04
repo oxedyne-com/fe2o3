@@ -19,7 +19,7 @@
 #
 # What runs, in order, every run under the cap and with the account's own fonts hidden:
 #   typst compile; `austenite --eval --strict --diag-summary` twice; `door_pdf.mjs` twice, the first
-#   compiling twice on one instance; then G1, G2, G3, G4, G5, G7 and G8 for the CLI's PDF and for the door's
+#   compiling twice on one instance; then G1, G2, G3, G4, G5, G7, G8 and G9 for the CLI's PDF and for the door's
 #   against Typst's (the door's only when it is not the CLI's byte for byte), and G12 over the five Austenite
 #   PDFs.
 #
@@ -43,14 +43,14 @@
 #   gate: door pages <n|none>
 #   gate: <cli|door> checks skipped
 #   gate: door same-as-cli          the door's PDF equals the CLI's byte for byte, so it has the CLI's verdicts
-#   gate: <cli|door> g1 .. g8       every line of `g_checks.py` for that check, as its docstring lists them
+#   gate: <cli|door> g1 .. g9       every line of `g_checks.py` for that check, as its docstring lists them
 #   gate: g12 ...                   the lines of `g_checks.py g12`
-#   gate: table <cli|door> <g1|g2|g3|g4|g5|g7|g8> <green|red|measured>
+#   gate: table <cli|door> <g1|g2|g3|g4|g5|g7|g8|g9> <green|red|measured>
 #   gate: table g12 <green|red>
 #   gate: verdict <green|red>      green when every required check is green and both compiles succeeded
 #   gate: suppressed <n>           lines a program printed that the whitelist dropped
 #
-# G3 and G7 are measured and are `measured` in the table; the others are required. The exit status is 0 on
+# G3, G7 and G9 are measured and are `measured` in the table; the others are required. The exit status is 0 on
 # `verdict green`, 1 on `verdict red`, 2 on an `error`.
 set -u
 
@@ -169,12 +169,12 @@ main() {
 		# The door's PDF, byte for byte the CLI's, has the CLI's verdicts: the checks are not run twice.
 		if [ "$row" = door ] && cmp -s "$W/cli1/document.pdf" "$pdf"; then
 			echo "gate: door same-as-cli"
-			for g in g1 g2 g3 g4 g5 g7 g8; do
+			for g in g1 g2 g3 g4 g5 g7 g8 g9; do
 				V["door $g"]="${V["cli $g"]:-}"
 			done
 			continue
 		fi
-		for g in g1 g2 g3 g4 g5 g7 g8; do
+		for g in g1 g2 g3 g4 g5 g7 g8 g9; do
 			run_g "$row" "$g" "$W/typst.pdf" "$pdf"
 		done
 	done
@@ -189,9 +189,9 @@ main() {
 	[ "$ce" -eq 0 ] || red=1
 	[ "$de" -eq 0 ] || red=1
 	for row in cli door; do
-		for g in g1 g2 g3 g4 g5 g7 g8; do
+		for g in g1 g2 g3 g4 g5 g7 g8 g9; do
 			case "$g" in
-				g3|g7)	echo "gate: table $row $g measured" ;;
+				g3|g7|g9)	echo "gate: table $row $g measured" ;;
 				*)
 					v="${V["$row $g"]:-}"
 					if [ "$v" = same ]; then
@@ -218,7 +218,7 @@ main() {
 main "$@" 2>&1 | awk '
 	function ok(re) { return $0 ~ ("^gate: " re "$") }
 	BEGIN {
-		N = "[0-9]+"; D = "[0-9]+\\.[0-9][0-9][0-9][0-9]"; S = "[0-9]\\.[0-9][0-9][0-9]"
+		N = "[0-9]+"; D2 = "-?[0-9]+\\.[0-9][0-9]"; D = "[0-9]+\\.[0-9][0-9][0-9][0-9]"; S = "[0-9]\\.[0-9][0-9][0-9]"
 		R = "(none|[0-9]+(-[0-9]+)?(,[0-9]+(-[0-9]+)?)*)"
 		K = "[a-z_]+"
 		row = "(cli|door) "
@@ -254,7 +254,12 @@ main "$@" 2>&1 | awk '
 		g[30] = "g8 empty " N " pages " R
 		g[31] = "g8 verdict (same|differs)"
 		g[32] = "g[1234578] error (unreadable|usage|scratch)"
-		ng = 32
+		g[33] = "g9 pages differ " N " pages " R
+		g[34] = "g9 page " N " (lines|blocks|words|sizes|images|links) a " N " b " N
+		g[35] = "g9 page " N " (left|right|top|bottom|pitch|height) a " D2 " b " D2
+		g[36] = "g9 line " N " " N " y a " D2 " b " D2 " x a " D2 " b " D2 " w a " D2 " b " D2
+		g[37] = "g9 error (unreadable|usage)"
+		ng = 37
 		h[1] = "g12 (cli-twice|door-one-instance|door-two-instances|cli-door) (equal|differs|absent)"
 		h[2] = "g12 size cli (none|" N ") door (none|" N ")"
 		h[3] = "g12 verdict (same|differs)"
@@ -273,7 +278,7 @@ main "$@" 2>&1 | awk '
 		if (ok("(cli|door) checks skipped") || ok("door same-as-cli")) { print; next }
 		for (i = 1; i <= ng; i++) if (ok(row g[i])) { print; next }
 		for (i = 1; i <= nh; i++) if (ok(h[i])) { print; next }
-		if (ok("table (cli|door) (g1|g2|g3|g4|g5|g7|g8) (green|red|measured)") || ok("table g12 (green|red)")) { print; next }
+		if (ok("table (cli|door) (g1|g2|g3|g4|g5|g7|g8|g9) (green|red|measured)") || ok("table g12 (green|red)")) { print; next }
 		if (ok("verdict (green|red)")) { print; next }
 		if (ok("suppressed " N)) { print; next }
 		n++

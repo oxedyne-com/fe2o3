@@ -202,6 +202,40 @@ expect "g8: a page with no text where a has some is named" "$r" "g8 empty 1 page
 plant "g8 tolerance" 'if dev > 0.01:' 'if dev > 0.5:' "g8 out-of-tolerance 1 pages 2" g8 "$S/c_a.pdf" "$S/c_b.pdf"
 plant "g8 empty ignored" 'if a > 0 and b == 0:' 'if False:' "g8 empty 1 pages 2" g8 "$S/c_a.pdf" "$S/c_blank.pdf"
 
+# ── 1f2. G9 ─────────────────────────────────────────────────────────────────
+python3 - "$S/mark.png" <<'PY'
+import sys
+from PIL import Image
+Image.new('RGB', (8, 8), (200, 40, 40)).save(sys.argv[1])
+PY
+TXT="#range(40).map(i => \"word\" + str(i)).join(\" \")"
+mkpdf y_a $'#set page(height: 200pt)\n'"$TXT"$'\n\n'"$TXT"
+mkpdf y_same $'#set page(height: 200pt)\n'"$TXT"$'\n\n'"$TXT"
+mkpdf y_lead $'#set page(height: 200pt)\n#set par(leading: 1.2em)\n'"$TXT"$'\n\n'"$TXT"
+mkpdf y_cols $'#set page(height: 200pt, columns: 2)\n'"$TXT"$'\n\n'"$TXT"
+mkpdf y_img $'#set page(height: 200pt)\n#image("mark.png", width: 20pt)\n'"$TXT"$'\n\n'"$TXT"
+mkpdf y_link $'#set page(height: 200pt)\n#link("https://example.org")[link] '"$TXT"$'\n\n'"$TXT"
+r="$(python3 "$G" g9 "$S/y_a.pdf" "$S/y_same.pdf")"
+expect "g9: the same layout differs on no page" "$r" "g9 pages differ 0 pages none"
+r="$(python3 "$G" g9 "$S/y_a.pdf" "$S/y_lead.pdf")"
+echo "$r" | grep -q '^g9 pages differ [1-9]' && ok "g9: a looser leading differs" || fail "g9: a looser leading read as no difference"
+pitch="$(printf '%s\n' "$r" | awk '$1 == "g9" && $2 == "page" && $3 == 1 && $4 == "pitch" { print ($8 > $6) ? "wider" : "not" }')"
+[ "$pitch" = wider ] && ok "g9: and its line pitch is the larger one" || fail "g9: the pitch line of the looser leading is '$pitch'"
+want_pitch="$(printf '%s\n' "$r" | grep '^g9 page 1 pitch ')"
+want_line="$(printf '%s\n' "$r" | grep '^g9 line 1 2 ' | head -1)"
+[ -n "$want_line" ] && ok "g9: and the second line of page 1 has moved" || fail "g9: no line moved on the looser leading"
+r="$(python3 "$G" g9 "$S/y_a.pdf" "$S/y_cols.pdf")"
+narrow="$(printf '%s\n' "$r" | awk '$1 == "g9" && $2 == "line" && $3 == 1 && $4 == 1 { print ($19 < $17 / 1.5) ? "narrower" : "not" }')"
+[ "$narrow" = narrower ] && ok "g9: a first line set in a column is narrower than set across the page" || fail "g9: the first line's width reads '$narrow'"
+r="$(python3 "$G" g9 "$S/y_a.pdf" "$S/y_img.pdf")"
+expect "g9: an image that only b places is counted" "$r" "g9 page 1 images a 0 b 1"
+r="$(python3 "$G" g9 "$S/y_a.pdf" "$S/y_link.pdf")"
+expect "g9: a link that only b carries is counted" "$r" "g9 page 1 links a 0 b 1"
+plant "g9 pitch ignored" "if abs(a['pitch'] - b['pitch']) > 0.1:" 'if False:' "$want_pitch" g9 "$S/y_a.pdf" "$S/y_lead.pdf"
+plant "g9 lines not compared" 'if max(abs(u[1] - v[1]), abs(u[0] - v[0]), abs((u[2] - u[0]) - (v[2] - v[0]))) > 0.5:' 'if False:' "$want_line" g9 "$S/y_a.pdf" "$S/y_lead.pdf"
+plant "g9 images and links not counted" "for m in COUNTS + ('images', 'links'):" 'for m in COUNTS:' "g9 page 1 images a 0 b 1" g9 "$S/y_a.pdf" "$S/y_img.pdf"
+plant "g9 links not counted" "ann is None else sum(1 for x in ann if str(x.get('/Subtype')) == '/Link')" "ann is None else 0" "g9 page 1 links a 0 b 1" g9 "$S/y_a.pdf" "$S/y_link.pdf"
+
 # ── 1g. G12 ─────────────────────────────────────────────────────────────────
 touch_byte() { # touch_byte <in> <out>: the same size, one byte changed
 	python3 - "$1" "$2" <<'PY'
@@ -286,7 +320,7 @@ CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/typst/packages/preview"
 if [ -f "$PACKS/preview/cetz/0.3.4.pack" ] && [ -d "$CACHE/cetz/0.3.4" ]; then
 	# A cetz canvas that draws paths, through Daimond's own pack and the door, against Typst's own result. The
 	# paths are drawn by a `for ((kind, ..rest)) in` pattern in the package, which the evaluator once did not bind.
-	mkproj "$S/pj_cetz" "$HEAD"$'\n#import "@preview/oxifmt:0.2.1": strfmt\n#import "@preview/cetz:0.3.4": canvas, draw\n#strfmt("{} and {}", 1, 2)\n#canvas({\n  import draw: *\n  line((0, 0), (2, 1))\n  circle((1, 1), radius: 0.5)\n})'
+	mkproj "$S/pj_cetz" "$HEAD"$'\n#set page(height: 200pt)\n#import "@preview/oxifmt:0.2.1": strfmt\n#import "@preview/cetz:0.3.4": canvas, draw\n#strfmt("{} and {}", 1, 2)\n#canvas({\n  import draw: *\n  line((0, 0), (2, 1))\n  circle((1, 1), radius: 0.5)\n})'
 	r="$(door pj_cetz "$S/d_cetz.pdf" --packages "$PACKS")"
 	expect "door: a cetz canvas that draws a line and a circle, from Daimond's pack, is ok" "$r" "door ok pages 1 kinds none needs 0"
 	gate_typst "$TYPST" compile --root "$S/pj_cetz" "$S/pj_cetz/main.typ" "$S/t_cetz.pdf" > /dev/null 2>&1
@@ -356,7 +390,7 @@ for row in cli door; do
 	for g in g1 g2 g4 g5 g8; do
 		expect "gate: $row $g is green on a project that agrees" "$r" "gate: table $row $g green"
 	done
-	for g in g3 g7; do
+	for g in g3 g7 g9; do
 		expect "gate: $row $g is measured" "$r" "gate: table $row $g measured"
 	done
 done

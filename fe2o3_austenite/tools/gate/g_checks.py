@@ -13,8 +13,11 @@
     g_checks.py g8  <a.pdf> <b.pdf>              the character count of each page, within 1%
     g_checks.py g12 <cli1> <cli2> <door1> <door2> <door3>
                                                  two CLI PDFs, two from one door instance, one from another
+    g_checks.py g9  <a.pdf> <b.pdf>              where the text sits on each page: lines, blocks, words, extents,
+                                                 line pitch, word height, images and links, then line by line
 
-`a` is the oracle's PDF (Typst's) and `b` the PDF under test. In `compare` and `pages` a page is its `pdftotext
+`a` is the oracle's PDF (Typst's) and `b` the PDF under test. G9 is measured, with no verdict: it carries no word of
+a page, only where the words sit, from `pdftotext -bbox-layout`. In `compare` and `pages` a page is its `pdftotext
 -raw` text, normalised to NFKC and split on whitespace, with the tokens that are only punctuation dropped. Page i
 of one PDF is compared with page i of the other by the 12-hex hash of its first token, the 12-hex hash of its
 last, and the difflib ratio over its token lists. Text is read from a pipe and never written to disk, and
@@ -63,6 +66,14 @@ Every check ends in a `verdict` line and exits 0 for `same`, 1 for `differs`; on
     g8 max-deviation <d.dddd>             (|b - a| / a, with 1.0000 where a is 0 and b is not)
     g8 empty <n> pages <ranges|none>      (b has no text where a has some)
     g8 verdict <same|differs>
+
+    g9 pages differ <n> pages <ranges|none>          (a count or an extent below differs)
+    g9 page <i> <lines|blocks|words|sizes|images|links> a <n> b <n>        (counts; sizes is the distinct word heights)
+    g9 page <i> <left|right|top|bottom|pitch|height> a <d.dd> b <d.dd>     (pt; pitch is the median gap between lines
+                                                 of a block, height the median word height; 0.5 pt, pitch 0.1 pt)
+    g9 line <i> <j> y a <d.dd> b <d.dd> x a <d.dd> b <d.dd> w a <d.dd> b <d.dd>
+                                                 (line j of page i where its top, left or width differs by 0.5 pt;
+                                                 the first 40 such lines of each of the first 3 differing pages)
 
     g12 cli-twice <equal|differs|absent>
     g12 door-one-instance <equal|differs|absent>
@@ -483,6 +494,110 @@ def cmd_g12(cli1, cli2, door1, door2, door3):
 	return 0 if same else 1
 
 
+# ── G9 ──────────────────────────────────────────────────────────────────────
+
+TAG_PAGE	= re.compile(rb'<page\b')
+TAG_BLOCK	= re.compile(rb'<block\b[^>]*>')
+TAG_LINE	= re.compile(rb'<line\b[^>]*>')
+TAG_WORD	= re.compile(rb'<word\b[^>]*>')
+ATTR		= re.compile(rb'(xMin|yMin|xMax|yMax)="([-0-9.]+)"')
+
+
+def boxes(tag):
+	"""(xMin, yMin, xMax, yMax) of one tag, from its own attributes."""
+	a = {k: float(v) for k, v in ATTR.findall(tag)}
+	return a[b'xMin'], a[b'yMin'], a[b'xMax'], a[b'yMax']
+
+
+def layout_pages(pdf):
+	"""Per page, a dict of counts and extents and the list of its lines, from `pdftotext -bbox-layout`."""
+	r = subprocess.run(['pdftotext', '-bbox-layout', pdf, '-'], capture_output=True)
+	if r.returncode != 0:
+		raise OSError('pdftotext')
+	pages = []
+	for chunk in TAG_PAGE.split(r.stdout)[1:]:
+		blocks = TAG_BLOCK.split(chunk)
+		lines = [boxes(t) for t in TAG_LINE.findall(chunk)]
+		heights = [b[3] - b[1] for b in (boxes(t) for t in TAG_WORD.findall(chunk))]
+		# The pitch: the median gap from one line to the next in reading order, leaving out the gaps of
+		# more than two and a half word heights, which are spaces between paragraphs and blocks.
+		hm = statistics.median(heights) if heights else 0.0
+		gaps = [b[1] - a[1] for a, b in zip(lines, lines[1:]) if 0 < b[1] - a[1] <= 2.5 * hm]
+		pages.append({
+			'lines':	len(lines),
+			'blocks':	len(blocks) - 1,
+			'words':	len(heights),
+			'sizes':	len({round(h * 2) for h in heights}),
+			'left':		min((b[0] for b in lines), default=0.0),
+			'right':	max((b[2] for b in lines), default=0.0),
+			'top':		min((b[1] for b in lines), default=0.0),
+			'bottom':	max((b[3] for b in lines), default=0.0),
+			'pitch':	statistics.median(gaps) if gaps else 0.0,
+			'height':	statistics.median(heights) if heights else 0.0,
+			'rows':		lines,
+		})
+	return pages
+
+
+def counts_per_page(pdf, n):
+	"""(images, links) on each of the `n` pages."""
+	r = subprocess.run(['pdfimages', '-list', pdf], capture_output=True)
+	imgs = [0] * n
+	if r.returncode == 0:
+		for line in r.stdout.decode('utf-8', 'replace').splitlines()[2:]:
+			t = line.split()
+			if t and t[0].isdigit() and 1 <= int(t[0]) <= n:
+				imgs[int(t[0]) - 1] += 1
+	links = []
+	with pdf_open(pdf) as doc:
+		for page in doc.pages:
+			ann = page.obj.get('/Annots')
+			links.append(0 if ann is None else sum(1 for x in ann if str(x.get('/Subtype')) == '/Link'))
+	return imgs, links
+
+
+COUNTS	= ('lines', 'blocks', 'words', 'sizes')
+EXTENTS	= ('left', 'right', 'top', 'bottom', 'height')
+
+
+def cmd_g9(a_pdf, b_pdf):
+	pa = layout_pages(a_pdf)
+	pb = layout_pages(b_pdf)
+	ia, la = counts_per_page(a_pdf, len(pa))
+	ib, lb = counts_per_page(b_pdf, len(pb))
+	n = min(len(pa), len(pb))
+	rows = []		# (page, [(metric, a, b)]) for each page that differs
+	for i in range(n):
+		a, b = pa[i], pb[i]
+		a['images'], a['links'], b['images'], b['links'] = ia[i], la[i], ib[i], lb[i]
+		d = []
+		for m in COUNTS + ('images', 'links'):
+			if a[m] != b[m]:
+				d.append((m, a[m], b[m], '%d'))
+		for m in EXTENTS:
+			if abs(a[m] - b[m]) > 0.5:
+				d.append((m, a[m], b[m], '%.2f'))
+		if abs(a['pitch'] - b['pitch']) > 0.1:
+			d.append(('pitch', a['pitch'], b['pitch'], '%.2f'))
+		if d:
+			rows.append((i, d))
+	idx = [i + 1 for i, _ in rows]
+	print('g9 pages differ %d pages %s' % (len(idx), ranges(idx)))
+	for i, d in rows[:12]:
+		for m, x, y, f in d:
+			print(('g9 page %d %s a ' + f + ' b ' + f) % (i + 1, m, x, y))
+	for i, _ in rows[:3]:
+		shown = 0
+		for j, (u, v) in enumerate(zip(pa[i]['rows'], pb[i]['rows'])):
+			if max(abs(u[1] - v[1]), abs(u[0] - v[0]), abs((u[2] - u[0]) - (v[2] - v[0]))) > 0.5:
+				print('g9 line %d %d y a %.2f b %.2f x a %.2f b %.2f w a %.2f b %.2f'
+					% (i + 1, j + 1, u[1], v[1], u[0], v[0], u[2] - u[0], v[2] - v[0]))
+				shown += 1
+				if shown >= 40:
+					break
+	return 0
+
+
 CHECKS = {
 	'compare':	(2, cmd_compare, 'g3'),
 	'g3':		(2, cmd_compare, 'g3'),
@@ -494,6 +609,7 @@ CHECKS = {
 	'g7':		(2, cmd_g7, 'g7'),
 	'g8':		(2, cmd_g8, 'g8'),
 	'g12':		(5, cmd_g12, 'g12'),
+	'g9':		(2, cmd_g9, 'g9'),
 }
 
 
