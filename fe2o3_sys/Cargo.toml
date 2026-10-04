@@ -17,6 +17,9 @@ inotify = ["dep:nix"]
 # clock: the boot clock and a check for the machine having slept, which `Instant` cannot
 # see. Off by default for the same reason.
 clock = ["dep:nix", "nix/time"]
+# signal: signals to the caller's own process group and to one process, safe over nix. Off by
+# default for the same reason.
+signal = ["dep:nix", "nix/signal", "nix/process"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nix = { version = "0.31", default-features = false, features = ["inotify", "poll"], optional = true }
