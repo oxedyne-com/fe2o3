@@ -394,7 +394,7 @@ impl<
                             {
                                 let proxy_path = loc.path.as_string().to_string();
                                 if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                    .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                    .filter(|r| r.matches(&proxy_path))
                                     .max_by_key(|r| r.path_prefix.len())
                                 {
                                     alog!(logged, log_level,
@@ -574,16 +574,25 @@ impl<
 
                     match request.header.headline.clone() {
                         HttpHeadline::Request { method, loc } => {
-                            // Redirect rules fire before the file router.
-                            let request_uri = loc.path.as_string().to_string();
+                            // Redirect rules fire before the file router. A rule matches on the
+                            // path alone, but `{uri}` in its target is the path and the query as
+                            // they arrived, so a www -> apex redirect keeps `?ref=x`.
+                            let request_path = loc.path.as_string().to_string();
                             if let Some(rule) = Self::match_redirect(
                                 &vhost.redirects,
-                                &request_uri,
+                                &request_path,
                             ) {
+                                let request_uri = match loc.query.is_empty() {
+                                    true    => request_path.clone(),
+                                    false   => fmt!("{}?{}", request_path, loc.query),
+                                };
                                 let target = rule.resolve_target(&request_uri);
+                                // The log line names the path, not the query, as the rest of the
+                                // request log does.
                                 alog!(logged, log_level,
                                     "{}: redirect {} {} -> {} ({})",
-                                    id, rule.status, request_uri, target,
+                                    id, rule.status, request_path,
+                                    rule.resolve_target(&request_path),
                                     match rule.match_kind {
                                         RedirectMatch::Exact    => "exact",
                                         RedirectMatch::Prefix   => "prefix",
@@ -612,7 +621,7 @@ impl<
                                 if !vhost.proxy_routes.is_empty() {
                                     let proxy_path = loc.path.as_string().to_string();
                                     if let Some(proxy_route) = vhost.proxy_routes.iter()
-                                        .filter(|r| proxy_path.starts_with(&r.path_prefix))
+                                        .filter(|r| r.matches(&proxy_path))
                                         .max_by_key(|r| r.path_prefix.len())
                                     {
                                         alog!(logged, log_level,
