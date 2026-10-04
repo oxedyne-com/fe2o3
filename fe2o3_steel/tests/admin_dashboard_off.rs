@@ -80,6 +80,37 @@ fn a_vhost_with_the_dashboard_off_has_no_admin() -> Outcome<()> {
     })
 }
 
+/// The static router reads `//admin/page.html`, `/./admin/page.html` and `/x/../admin/page.html`
+/// as `admin/page.html`, so the 404 for the prefix has to be decided on the path as the router
+/// reads it. Tested on the raw text it let each of these through to the file under the prefix.
+#[test]
+fn a_vhost_with_the_dashboard_off_has_no_admin_under_any_spelling_of_the_path() -> Outcome<()> {
+    let web = res!(Scratch::new("admin_off_spelling"));
+    res!(web.put("index.html", "<p>home</p>"));
+    res!(web.put("admin/page.html", "<p>a file under the prefix</p>"));
+    let mut off = Site::new(OFF, &web.0);
+    off.admin_dashboard = false;
+    let rig = res!(Rig::new(vec![off]));
+    let runtime = res!(vhost_rig::runtime());
+    runtime.block_on(async {
+        for path in ["//admin/page.html", "///admin/page.html", "/./admin/page.html",
+            "/x/../admin/page.html", "/admin/../admin/page.html", "//admin", "//admin/",
+            "/./admin", "/x/../admin/login", "//admin/login"]
+        {
+            let r = res!(rig.fetch(OFF, "GET", path, &[], "").await);
+            assert_eq!(r.status(), 404, "GET {} must be a 404: {:?}", path, r);
+            assert!(!r.body.contains("a file under the prefix"), "GET {} leaked the file: {:?}",
+                path, r);
+        }
+        for path in ["//admin/login", "/./admin/login", "/x/../admin/login"] {
+            let r = res!(rig.fetch(OFF, "POST", path,
+                &["Content-Type: application/x-www-form-urlencoded"], "passphrase=x").await);
+            assert_eq!(r.status(), 404, "POST {} must be a 404: {:?}", path, r);
+        }
+        Ok(())
+    })
+}
+
 fn vhost(extra: &str) -> Outcome<VhostConfig> {
     let text = fmt!("{{\"hostnames\": [\"ontheism.org\"] {}}}", extra);
     match res!(Dat::decode_string(text)) {

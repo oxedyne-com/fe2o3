@@ -82,9 +82,11 @@ use oxedyne_fe2o3_net::{
 
 use std::{
     collections::BTreeMap,
+    ffi::OsStr,
     fmt::Debug,
     net::SocketAddr,
     path::{
+        Component,
         Path,
         PathBuf,
     },
@@ -326,9 +328,7 @@ impl<
             // A vhost that has switched the dashboard off does not own `/admin`, and does not
             // hand the prefix to anything else either: the whole subtree is a 404, so neither
             // a login page nor a file of that name in its web root is reachable there.
-            if !admin_dashboard
-                && (request_path == "/admin" || request_path.starts_with("/admin/"))
-            {
+            if !admin_dashboard && is_admin_path(&request_path) {
                 return Ok(Some(cache::generated(HttpMessage::respond_with_text(
                     HttpStatus::NotFound,
                     "Not found.",
@@ -1015,9 +1015,7 @@ impl<
 
         async move {
             // As for a `GET`: with the dashboard off, `/admin` is a 404 whatever the method.
-            if !admin_dashboard
-                && (request_path == "/admin" || request_path.starts_with("/admin/"))
-            {
+            if !admin_dashboard && is_admin_path(&request_path) {
                 return Ok(Some(HttpMessage::respond_with_text(
                     HttpStatus::NotFound,
                     "Not found.",
@@ -1331,6 +1329,15 @@ impl<
             Ok(Some(resp))
         }
     }
+}
+
+/// Is the request path `/admin`, or under it, as the static router reads it? The router
+/// normalises the path (`//admin/x`, `/./admin/x` and `/x/../admin/x` are all `admin/x` to it),
+/// so a test of the raw text would let a spelling it does not recognise through to a file named
+/// `admin/...` in the web root.
+fn is_admin_path(path: &str) -> bool {
+    let rel = Path::new(path.strip_prefix('/').unwrap_or(path)).normalise().remove_relative();
+    rel.components().next() == Some(Component::Normal(OsStr::new("admin")))
 }
 
 /// What bounds one call to an `api_routes` or webhook upstream, from the server config: the
