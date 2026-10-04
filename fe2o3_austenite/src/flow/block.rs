@@ -2761,15 +2761,15 @@ impl MultiChild {
 	}
 
 	/// The regions a layout routine lays its body out in: the block's own, expanded as its parent's are. A
-	/// grid or table takes none of the parent's expansion: its frame is as wide as its columns whatever the
-	/// region, so that `align` has room to place it. A fractional column still fills the region, through the
-	/// width of the plan.
+	/// grid or table takes none of the parent's expansion: its frame is as wide as its columns and as tall
+	/// as its rows whatever the region, so that `align` has room to place it, alone on a page or not. A
+	/// fractional column or row still fills the region, through the size of the plan.
 	fn inner(&self, pod: &Regions, regions: &Regions) -> Regions {
 		let mut p = pod.clone();
 		if matches!(self.spec.body, Body::Layouter) {
 			let from = !is_grid(&self.spec.elem);
 			p.expand_x = (pod.expand_x || (from && regions.expand_x)) && pod.w.is_finite();
-			p.expand_y = (pod.expand_y || regions.expand_y) && pod.h.is_finite();
+			p.expand_y = (pod.expand_y || (from && regions.expand_y)) && pod.h.is_finite();
 		}
 		p
 	}
@@ -3140,6 +3140,7 @@ fn split_list<F>(nodes: Vec<Node>, regions: &Regions, breaks: &[Option<usize>], 
 		cur:		Frame::new(0.0, 0.0),
 		y:			0.0,
 		boxes:		false,
+		tail:		0.0,
 		base:		0.0,
 		head:		None,
 		foot:		None,
@@ -3153,6 +3154,7 @@ fn split_list<F>(nodes: Vec<Node>, regions: &Regions, breaks: &[Option<usize>], 
 			Node::Glue(g) => {
 				if s.boxes {
 					s.y += g.natural.to_pt();
+					s.tail += g.natural.to_pt();
 				}
 				if prev_box {
 					at_break = true;
@@ -3272,6 +3274,7 @@ struct Splitter {
 	cur:		Frame,
 	y:			f64,
 	boxes:		bool,			// the region holds a box
+	tail:		f64,			// the gutters since the last box, left out of a region that ends there
 	base:		f64,			// the height a region starts at: what its repeated header takes
 	head:		Option<BoxNode>,
 	foot:		Option<BoxNode>,
@@ -3288,6 +3291,7 @@ impl Splitter {
 		self.cur.push(0.0, self.y, Item::Node(node));
 		self.y += h;
 		self.boxes = true;
+		self.tail = 0.0;
 	}
 
 	/// Would the next region give more room? Typst's `may_progress` on the room left, which what has been placed
@@ -3306,7 +3310,7 @@ impl Splitter {
 
 	fn finish(&mut self) {
 		let mut done = std::mem::replace(&mut self.cur, Frame::new(0.0, 0.0));
-		done.h = if self.regions.expand_y { self.regions.h } else { self.y };
+		done.h = if self.regions.expand_y { self.regions.h } else { self.y - self.tail };
 		// A grid is as wide as its columns, and no wider than the region where they overflow it: Typst places
 		// an overflowing grid at the region's start, whatever the alignment.
 		done.w = if self.regions.expand_x { self.regions.w } else { done.w.min(self.regions.w) };
@@ -3322,6 +3326,7 @@ impl Splitter {
 		self.finish();
 		self.regions.next();
 		self.y		= 0.0;
+		self.tail	= 0.0;
 		self.boxes	= false;
 		if let Some(head) = self.head.clone() {
 			self.place(Node::VBox(head));
