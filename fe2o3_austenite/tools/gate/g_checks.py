@@ -73,7 +73,8 @@ Every check ends in a `verdict` line and exits 0 for `same`, 1 for `differs`; on
                                                  of a block, height the median word height; 0.5 pt, pitch 0.1 pt)
     g9 line <i> <j> y a <d.dd> b <d.dd> x a <d.dd> b <d.dd> w a <d.dd> b <d.dd>
                                                  (line j of page i where its top, left or width differs by 0.5 pt;
-                                                 the first 40 such lines of each of the first 3 differing pages)
+                                                 the first 14 such lines of each of the first 5 pages that differ in
+                                                 more than their links)
 
     g12 cli-twice <equal|differs|absent>
     g12 door-one-instance <equal|differs|absent>
@@ -586,14 +587,16 @@ def cmd_g9(a_pdf, b_pdf):
 	for i, d in rows[:12]:
 		for m, x, y, f in d:
 			print(('g9 page %d %s a ' + f + ' b ' + f) % (i + 1, m, x, y))
-	for i, _ in rows[:3]:
+	# The pages whose line places are listed: those that differ in more than their links, then the rest.
+	more = [i for i, d in rows if any(m != 'links' for m, *_ in d)]
+	for i in (more or [i for i, _ in rows])[:5]:
 		shown = 0
 		for j, (u, v) in enumerate(zip(pa[i]['rows'], pb[i]['rows'])):
 			if max(abs(u[1] - v[1]), abs(u[0] - v[0]), abs((u[2] - u[0]) - (v[2] - v[0]))) > 0.5:
 				print('g9 line %d %d y a %.2f b %.2f x a %.2f b %.2f w a %.2f b %.2f'
 					% (i + 1, j + 1, u[1], v[1], u[0], v[0], u[2] - u[0], v[2] - v[0]))
 				shown += 1
-				if shown >= 40:
+				if shown >= 14:
 					break
 	return 0
 
