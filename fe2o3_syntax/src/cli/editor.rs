@@ -156,20 +156,45 @@ pub fn apply_wait_flag(command: &str) -> String {
 	trimmed.to_string()
 }
 
-/// Editor names the probe already knows how to run from a terminal. A caller refusing a
-/// terminal editor with no tty (§B2 of the CLI plan) checks its resolved command against this
-/// before opening anything.
-pub const KNOWN_TERMINAL_EDITORS: &[&str] = &["editor", "nano", "nvim", "vim", "vi"];
+// Terminal editors
+// The program's name, and the flag its command must carry where the program has a window form as
+// well (empty where it has none). A caller refusing a terminal editor with no tty (§B2 of the CLI
+// plan), or telling one that has handed its file on from one that holds the terminal, checks its
+// resolved command against this before opening anything.
+pub const TERMINAL_EDITORS: &[(&str, &str)] = &[
+	("editor",		""),
+	("nano",		""),
+	("nvim",		""),
+	("vim",			""),
+	("vi",			""),
+	("emacs",		"-nw"),
+	("emacs",		"--no-window-system"),
+	("emacsclient",	"-t"),
+	("emacsclient",	"-nw"),
+	("emacsclient",	"--tty"),
+	("micro",		""),
+	("hx",			""),
+	("helix",		""),
+	("kak",			""),
+	("joe",			""),
+	("ne",			""),
+	("pico",		""),
+	("view",		""),
+	("ed",			""),
+];
 
-/// Does `command`'s first word name one of [`KNOWN_TERMINAL_EDITORS`]?
+/// Does `command` run one of the [`TERMINAL_EDITORS`]?
+///
+/// The first word is matched by its file name, and where the program has a window form as well
+/// (`emacs`), only a command that carries the table's flag counts.
 pub fn is_known_terminal_editor(command: &str) -> bool {
-	match command.trim().split_whitespace().next() {
-		Some(word) => {
-			let base = Path::new(word).file_name().and_then(OsStr::to_str).unwrap_or(word);
-			KNOWN_TERMINAL_EDITORS.contains(&base)
-		},
-		None => false,
-	}
+	let mut words = command.split_whitespace();
+	let first = match words.next() {
+		Some(word)	=> Path::new(word).file_name().and_then(OsStr::to_str).unwrap_or(word),
+		None		=> return false,
+	};
+	let rest: Vec<&str> = words.collect();
+	TERMINAL_EDITORS.iter().any(|(name, flag)| *name == first && (flag.is_empty() || rest.contains(flag)))
 }
 
 /// The platform's fallback probe order, first found on PATH wins. `tty` picks the terminal vs.
@@ -455,6 +480,25 @@ mod tests {
 		req!(is_known_terminal_editor("/usr/bin/vim"), true);
 		req!(is_known_terminal_editor("vi"), true);
 		req!(is_known_terminal_editor("code --wait"), false);
+		Ok(())
+	}
+
+	#[test]
+	fn a_terminal_editor_with_a_window_form_is_known_by_its_flag_14() -> Outcome<()> {
+		// The plain ones, by name and by path: every name the two lists held before they were merged.
+		for c in [
+			"editor", "nano", "nvim", "vim", "vi", "micro", "hx", "helix", "kak", "joe", "ne", "pico", "view", "ed",
+			"nano file.txt", "/usr/bin/nvim -u NONE", "/usr/bin/micro x",
+		] {
+			req!(is_known_terminal_editor(c), true, "{}", c);
+		}
+		// One with a window form is a terminal editor only where its command asks for the terminal.
+		for c in ["emacs -nw", "emacs --no-window-system f", "emacsclient -t", "emacsclient --tty f", "/usr/bin/emacs a -nw"] {
+			req!(is_known_terminal_editor(c), true, "{}", c);
+		}
+		for c in ["emacs", "emacs file.txt", "emacs --nwfoo", "emacsclient", "emacsclient -c", "emacsclient -tab", "emacs-nw", "", "  ", "code --wait", "gvim", "vimdiff"] {
+			req!(is_known_terminal_editor(c), false, "{}", c);
+		}
 		Ok(())
 	}
 
