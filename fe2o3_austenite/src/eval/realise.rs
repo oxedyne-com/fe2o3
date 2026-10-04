@@ -182,7 +182,7 @@ pub fn realise(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, false)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, false, false)).0)
 }
 
 /// Realises a body in `Flow` mode and says whether it is one paragraph's worth of inline elements left without
@@ -195,7 +195,7 @@ pub fn realise_fragment(
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
-	realise_with(engine, content, styles, RealiseMode::Flow, false)
+	realise_with(engine, content, styles, RealiseMode::Flow, false, true)
 }
 
 /// Realises as `realise` does, but leaves model elements (headings, paragraphs, lists, strong and
@@ -210,7 +210,7 @@ pub fn realise_structure(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, true)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, true, false)).0)
 }
 
 fn realise_with(
@@ -219,6 +219,7 @@ fn realise_with(
 	styles:		&StyleChain,
 	mode:		RealiseMode,
 	keep_model:	bool,
+	fragment:	bool,
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
@@ -232,11 +233,39 @@ fn realise_with(
 		may_attach:		false,
 		saw_parbreak:	false,
 		fully_inline:	false,
+		pars:			0,
 		depth:			0,
 	};
 	res!(s.visit(content, styles));
 	res!(s.finish());
-	Ok((s.sink, s.fully_inline))
+	let State { engine, sink, fully_inline, pars, .. } = s;
+	if !fragment || fully_inline || pars != 1 {
+		return Ok((sink, fully_inline));
+	}
+	// A fragment whose one paragraph was closed by styles around it (`set par(..)`, `set align(..)`) is still a
+	// paragraph's worth of inline content, with no `par` of its own: Typst sets it as such, with no first-line indent.
+	let members: Vec<usize> = (0..sink.len()).filter(|i| !sink[*i].is_tag()).collect();
+	let at = match members.as_slice() {
+		[i] if sink[*i].content.is(ElemKind::Par)	=> *i,
+		_											=> return Ok((sink, false)),
+	};
+	let body = match sink[at].content.kind().and_then(|k| k.field_id("body")).and_then(|id| sink[at].content.get(id)) {
+		Some(Value::Content(c))	=> c.clone(),
+		_						=> return Ok((sink, false)),
+	};
+	let (inner, _) = res!(realise_with(engine, &body, &sink[at].styles, RealiseMode::Inline, keep_model, false));
+	let mut inner = Some(inner);
+	let mut out = Vec::new();
+	for (i, pair) in sink.into_iter().enumerate() {
+		match inner.take() {
+			Some(run) if i == at	=> out.extend(run),
+			other					=> {
+				inner = other;
+				out.push(pair);
+			}
+		}
+	}
+	Ok((out, true))
 }
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?
@@ -360,6 +389,7 @@ struct State<'e> {
 	may_attach:		bool,	// the last block was a paragraph, so `v(attach: true)` survives
 	saw_parbreak:	bool,
 	fully_inline:	bool,	// the whole body is one paragraph's worth of inline elements (`Flow` mode)
+	pars:			usize,	// paragraphs the grouping has made
 	depth:			usize,	// nested show-rule outputs
 }
 
@@ -950,6 +980,7 @@ impl State<'_> {
 		let span = select_span(&elems);
 		let (body, trunk) = repack(&elems);
 		let id = res!(field(ElemKind::Par, "body"));
+		self.pars += 1;
 		let par = Content::new(ElemKind::Par, vec![(id, Value::Content(body))], span);
 		self.visit(&par, &trunk)
 	}
