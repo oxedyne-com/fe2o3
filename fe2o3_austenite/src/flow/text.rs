@@ -74,12 +74,20 @@ use std::sync::Arc;
 pub struct FontStore {
 	pub families:	Vec<String>,			// family names known, for diagnostics
 	book:			Option<Arc<FontBook>>,
+	base:			Option<Arc<FontBook>>,	// the embedded faces, parsed once by the host, else parsed here
 	dirs:			Vec<PathBuf>,
 	files:			Vec<Arc<Vec<u8>>>,
 	shape_budget:	Option<usize>,			// bytes the shaped-run cache may hold, else the default
 }
 
 impl FontStore {
+	/// A store over a book of the embedded faces the host parsed once. A compile that adds no font of its own
+	/// shares that book; one that does forks it and adds to the fork, so the base never changes and no
+	/// project's fonts reach another's.
+	pub fn with_base(base: Arc<FontBook>) -> Self {
+		Self { base: Some(base), ..Self::default() }
+	}
+
 	/// Adds every font file beneath `dir` in the vfs, after the embedded faces.
 	pub fn add_dir(&mut self, dir: PathBuf) {
 		self.dirs.push(dir);
@@ -106,7 +114,18 @@ impl FontStore {
 		if let Some(b) = &self.book {
 			return Ok(b.clone());
 		}
-		let mut book = res!(FontBook::embedded());
+		let mut book = match &self.base {
+			Some(base) if self.dirs.is_empty() && self.files.is_empty()	=> {
+				self.families = base.family_names();
+				if let Some(bytes) = self.shape_budget {
+					res!(base.set_shape_budget(bytes));
+				}
+				self.book = Some(base.clone());
+				return Ok(base.clone());
+			},
+			Some(base)	=> base.fork(),
+			None		=> res!(FontBook::embedded()),
+		};
 		for dir in &self.dirs {
 			book.add_dir(dir);
 		}

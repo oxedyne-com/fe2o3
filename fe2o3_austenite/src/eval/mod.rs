@@ -121,8 +121,13 @@ impl World {
 		if let Some(s) = self.sources.iter().find(|s| s.path == path) {
 			return Ok(s.id);
 		}
-		let text = res!(vfs::read_to_string(path).map_err(|e| err!(
-			"Could not read source {}: {}", path.display(), e; IO, File, Read)));
+		let text = match vfs::read_to_string(path) {
+			Ok(t)	=> t,
+			// A file that is there but is not text is told from one that cannot be read, since the remedy differs.
+			Err(e) if vfs::is_not_utf8(&e)	=> return Err(err!(
+				"The source {} is not valid UTF-8 text.", path.display(); IO, File, Decode, UTF8)),
+			Err(e)	=> return Err(err!("Could not read source {}: {}", path.display(), e; IO, File, Read)),
+		};
 		self.add_source(path.to_path_buf(), text)
 	}
 

@@ -5,8 +5,10 @@
 //! that has not settled is discarded and begun again, so nothing may reach a file before the last), and at
 //! `finish` writes the page tree, the outline from the final introspector, the Info dictionary from the
 //! document's metadata, the subset fonts with their `/ToUnicode` maps and the cross-reference table.
-//! [`CountSink`] counts and drops, for the heap probe and for tests.
+//! [`VectorSink`] renders each page to an SVG document of its own, for the live view. [`CountSink`] counts
+//! and drops, for the heap probe and for tests.
 
+use crate::emit::svg;
 use crate::eval::content::ElemKind;
 use crate::eval::fixpoint::PageSink;
 use crate::eval::intro::Introspector;
@@ -158,6 +160,39 @@ pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 		items.push(OutlineItem { title, page, level });
 	}
 	Ok(items)
+}
+
+/// Renders each page of the pass to an SVG document, in order. A pass that has not settled is discarded
+/// whole, so the pages held are those of the pass that did.
+#[derive(Debug, Default)]
+pub struct VectorSink {
+	pages:		Vec<String>,
+	finished:	bool,
+}
+
+impl VectorSink {
+	/// The pages, once the fixpoint has run `finish`.
+	pub fn into_pages(self) -> Option<Vec<String>> {
+		if self.finished { Some(self.pages) } else { None }
+	}
+}
+
+impl PageSink for VectorSink {
+	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
+		self.pages.push(res!(svg::render_page(&page)));
+		Ok(())
+	}
+
+	fn discard_pass(&mut self) -> Outcome<()> {
+		self.pages.clear();
+		self.finished = false;
+		Ok(())
+	}
+
+	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
+		self.finished = true;
+		Ok(())
+	}
 }
 
 /// Counts pages and drops them.

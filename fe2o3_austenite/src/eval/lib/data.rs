@@ -271,6 +271,52 @@ fn to_data(v: &Value) -> Data {
 	}
 }
 
+/// `v` as compact JSON text, for the values Typst writes as plain JSON: none, a boolean, an integer, a float, a
+/// string or symbol, and an array or dictionary of those. Any other value, content, a length, a colour, bytes,
+/// a function, is `None`: it has more than one way to be written, and a caller reading JSON must get Typst's or
+/// nothing.
+pub fn plain_json(v: &Value) -> Option<String> {
+	let data = match plain_data(v) {
+		Some(d)	=> d,
+		None	=> return None,
+	};
+	let mut out = String::new();
+	json_write(&data, false, 0, &mut out);
+	Some(out)
+}
+
+fn plain_data(v: &Value) -> Option<Data> {
+	match v {
+		Value::None			=> Some(Data::Null),
+		Value::Bool(b)		=> Some(Data::Bool(*b)),
+		Value::Int(i)		=> Some(Data::Int(*i)),
+		Value::Float(f)		=> Some(Data::Float(*f)),
+		Value::Str(s)		=> Some(Data::Str((**s).clone())),
+		Value::Symbol(s)	=> Some(Data::Str(crate::eval::lib::sym::text(s).to_string())),
+		Value::Array(a)		=> {
+			let mut out = Vec::with_capacity(a.len());
+			for x in a.iter() {
+				match plain_data(x) {
+					Some(d)	=> out.push(d),
+					None	=> return None,
+				}
+			}
+			Some(Data::Seq(out))
+		},
+		Value::Dict(d)		=> {
+			let mut out = Vec::with_capacity(d.len());
+			for (k, x) in d.iter() {
+				match plain_data(x) {
+					Some(dx)	=> out.push((k.to_string(), dx)),
+					None		=> return None,
+				}
+			}
+			Some(Data::Map(out))
+		},
+		_					=> None,
+	}
+}
+
 // Content serialises as its fields under `func`, as Typst's does.
 fn content_data(c: &Content) -> Data {
 	match c {
