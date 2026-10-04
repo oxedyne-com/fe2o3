@@ -276,6 +276,8 @@ enum Bind {
 enum Step {
 	Key(String, Span),
 	At(Value, Span),
+	First(Span),	// `.first()`, an accessor as `.at()` is
+	Last(Span),
 }
 
 type Frame = HashMap<String, Binding>;
@@ -500,6 +502,20 @@ fn slot<'b>(
 						fmt!("fields on {} are not yet mutable", ty.long_name()),
 						Some(fmt!("try creating a new {} with the updated field value instead", ty.long_name())))),
 					_ => return Err((*sp, fmt!("{} does not have accessible fields", ty.long_name()), None)),
+				}
+			}
+			Step::First(sp) | Step::Last(sp) => {
+				let ty = cur.ty();
+				match cur {
+					Value::Array(a) => {
+						let a = Arc::make_mut(a);
+						let end = if matches!(step, Step::First(_)) { a.first_mut() } else { a.last_mut() };
+						cur = match end {
+							Some(v)	=> v,
+							None	=> return Err((*sp, "array is empty".to_string(), None)),
+						};
+					}
+					_ => return Err((*sp, fmt!("cannot mutate a temporary value of type {}", ty.long_name()), None)),
 				}
 			}
 			Step::At(key, sp) => {
@@ -1416,6 +1432,21 @@ impl<'a> Vm<'a> {
 			SyntaxKind::FuncCall => {
 				let callee = first_expr(node).cloned();
 				if let Some(c) = callee {
+					// `first` and `last` are accessors beside `at`: `ctx.groups.last().push(n)` changes the array in place.
+					let edge = if c.kind() == SyntaxKind::FieldAccess { ident_text(&c) } else { None };
+					if matches!(edge, Some("first") | Some("last")) {
+						let args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
+						if !args.items.is_empty() {
+							return Err(self.error(DiagnosticKind::Type, node.span(), "unexpected argument"));
+						}
+						let target = match first_expr(&c) {
+							Some(t)	=> t.clone(),
+							None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value")),
+						};
+						let (root, rs, mut steps) = res!(self.place(&target));
+						steps.push(if edge == Some("first") { Step::First(node.span()) } else { Step::Last(node.span()) });
+						return Ok((root, rs, steps));
+					}
 					if c.kind() == SyntaxKind::FieldAccess && ident_text(&c) == Some("at") {
 						let mut args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
 						let key = match args.items.iter().position(|a| a.name.is_none()) {
