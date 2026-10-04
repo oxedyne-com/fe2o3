@@ -100,6 +100,12 @@ use tokio::{
 use tokio_rustls::rustls::ClientConfig;
 
 
+// What the router made of a request path.
+enum Routed {
+    File(PathBuf),
+    Slash(String),  // a directory named without its slash, and where the slash form lives
+}
+
 #[derive(Clone, Debug)]
 pub struct AppWebHandler<
     M: MapMut<String, OsPath> + Clone + Debug + Send + Sync,
@@ -183,7 +189,7 @@ impl<
         loc:    &HttpLocator,
         id:     &String, 
     )
-        -> Outcome<PathBuf>
+        -> Outcome<Routed>
     {
         let route = loc.path.as_string();
 
@@ -195,7 +201,7 @@ impl<
                     for filename in &self.default_index_files {
                         let candidate = path.clone().join(filename);
                         if candidate.exists() {
-                            return Ok(candidate);
+                            return Ok(Routed::File(candidate));
                         }
                     }
                     return Err(err!(
@@ -203,7 +209,7 @@ impl<
                         Tried: {:?}", id, path, self.default_index_files;
                         File, NotFound)); 
                 }
-                OsPath::File(path) => return Ok(path.clone()),
+                OsPath::File(path) => return Ok(Routed::File(path.clone())),
             }
             None => {
                 // Fallback: try to serve directly from public directory.
@@ -221,19 +227,42 @@ impl<
                         Invalid, Path, Security));
                 }
                 
-                let full_path = self.public_dir.clone().join(path);
+                let full_path = self.public_dir.clone().join(&path);
                 
                 // If it's a directory, try index files.
                 if full_path.is_dir() {
                     for filename in &self.default_index_files {
                         let candidate = full_path.join(filename);
                         if candidate.exists() {
-                            return Ok(candidate);
+                            // A page served for `/invitation` has two addresses, and the page
+                            // draws its stylesheet and fonts relative to the one it was not
+                            // given: `reader.css` asked for beside `/invitation` is `/reader.css`.
+                            // So the directory named without its slash is moved to the one with
+                            // it, as every static server does. Built from the normalised path,
+                            // never the raw one, so `//host/..` cannot become a link that leaves
+                            // the site, and kept to plain characters so nothing in it can split
+                            // a header.
+                            if !route.ends_with('/') {
+                                let rel = path.clone().remove_relative();
+                                let rel = rel.to_string_lossy();
+                                let mut to = match rel.is_empty() {
+                                    true    => fmt!("/"),
+                                    false   => fmt!("/{}/", rel),
+                                };
+                                if !loc.query.is_empty() {
+                                    to.push('?');
+                                    to.push_str(&loc.query);
+                                }
+                                if !to.chars().any(|c| c.is_control()) {
+                                    return Ok(Routed::Slash(to));
+                                }
+                            }
+                            return Ok(Routed::File(candidate));
                         }
                     }
                 }
                 
-                return Ok(full_path);
+                return Ok(Routed::File(full_path));
             }
         }
     }
@@ -694,7 +723,15 @@ impl<
             }
 
             let abs_path = match self.router(&loc, &id).await {
-                Ok(path) => path, // The path may not exist, but at least we have one.
+                Ok(Routed::File(path)) => path, // The path may not exist, but at least we have one.
+                Ok(Routed::Slash(to)) => {
+                    debug!("{}: {} is a directory; 301 to {}.", id, request_path, to);
+                    return Ok(Some(HttpMessage::new_response(HttpStatus::MovedPermanently)
+                        .with_field(
+                            HeaderName::Location,
+                            HeaderFieldValue::Generic(to),
+                        )));
+                }
                 Err(e) => {
                     // Tap out early if the route is definitely not known.
                     error!(e);
