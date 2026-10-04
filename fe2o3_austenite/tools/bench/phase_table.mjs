@@ -52,6 +52,11 @@ for (const [doc, runs] of byDoc) {
 	const layout = median(ok.map((r) => r.timings.pass.reduce((a, b) => a + b.realise.ns + b.flow.ns + b.place.ns + b.decorate.ns, 0)));
 	out.push(`load+eval ${ms(eval_)} ms (${((100 * eval_) / total).toFixed(1)}%); realise+flow+place+decorate ${ms(layout)} ms (${((100 * layout) / total).toFixed(1)}%)`);
 	out.push(`cpu user ${median(ok.map((r) => r.user_s)).toFixed(2)} s, sys ${median(ok.map((r) => r.sys_s)).toFixed(2)} s, wall ${median(ok.map((r) => r.wall_s)).toFixed(2)} s, peak rss ${(median(ok.map((r) => r.rss_kb)) / 1024).toFixed(0)} MB, total spread ${ms(Math.min(...ok.map((r) => r.timings.total)))} to ${ms(Math.max(...ok.map((r) => r.timings.total)))} ms`);
+	const sh = ok.find((r) => r.timings.shape);
+	if (sh) {
+		const c = sh.timings.shape;
+		out.push(`shaped-run cache: ${c.entries} entries, ${(c.bytes / 1048576).toFixed(2)} of ${(c.budget / 1048576).toFixed(0)} MiB, ${c.hits} hits, ${c.misses} misses (${((100 * c.hits) / Math.max(1, c.hits + c.misses)).toFixed(1)}% hit), ${c.evictions} evictions`);
+	}
 	const maxPasses = Math.max(...passes);
 	if (maxPasses > 1) {
 		out.push('\nper pass (ms):');
