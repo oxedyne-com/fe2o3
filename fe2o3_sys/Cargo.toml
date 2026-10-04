@@ -9,3 +9,12 @@ repository = "https://github.com/oxedyne-io/fe2o3"
 
 [dependencies]
 oxedyne_fe2o3_core              = { path = "../fe2o3_core" }
+
+[features]
+# signal: signals to the caller's own process group, to a group it started and to one process,
+# safe over nix. Off by default so that every other user of this crate stays free of third-party
+# dependencies.
+signal = ["dep:nix", "nix/signal", "nix/process"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { version = "0.31", default-features = false, optional = true }
