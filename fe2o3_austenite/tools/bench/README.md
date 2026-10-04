@@ -146,6 +146,10 @@ baseline.
 | `cost_runs.sh` | cold and unchanged wasm compiles, one `wasm_bench.mjs` process per run, the engines interleaved, each under both slot locks |
 | `bench_verdict.mjs` | `typing`: per-session p50/p95, medians, T = max(1.25 x typst.ts, typst.ts + 16 ms), the verdict; `cost`: medians and the ratio against the 1.5 limit |
 | `percentile_check.mjs` | node check that nearest-rank over 1..50 gives p50 = 25 and p95 = 48, and the threshold arithmetic; red when `lib/stats.mjs` indexes with a floor |
+| `phase_runs.sh` | the native phase table's runs (S1a): `austenite --eval --timings` on each document, one process a run, each under both slot locks, cpu and io PSI at each end, a flagged run run once more |
+| `phase_table.mjs` | medians of every phase over `phase_runs.sh`'s runs, the load and eval against the layout phases, the fixpoint pass count, and each pass's phases |
+| `cpuprof_runs.mjs` / `cpuprof_sessions.sh` | one CPU-profiled wasm run (node's inspector profiler around the measured calls only): `cold` and `warm` `compileProject`, ten one-letter `edits` and an `unchanged` recompile through `compileProjectDelta` carrying `known`; the shell driver holds both slot locks and reads PSI at each end |
+| `cpuprof_rank.mjs` | ranks a `.cpuprofile` taken on a `wasm-pack build --profiling` package: top functions by self time, totals by crate, module and the nearest Austenite frame on the stack, inclusive time of named functions (`--incl=`) |
 | `lib/stats.mjs` | nearest-rank percentile, median, the typing threshold |
 | `lib/quiet_host.sh` | `with_quiet_host`: runs a command holding both Austenite build-slot locks (append-open, never replaced) |
 | `lib/host.sh` | bash: `/proc/loadavg` + PSI reading, the capped-and-timed single-run helper |
