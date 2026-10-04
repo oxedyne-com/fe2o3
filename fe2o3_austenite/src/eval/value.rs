@@ -6,6 +6,10 @@ use crate::eval::args::Args;
 use crate::eval::content::Content;
 use crate::eval::func::Func;
 use crate::eval::lib::decimal::Decimal;
+use crate::eval::lib::foundations::{
+	as_func,
+	func_refusal,
+};
 use crate::eval::intro::{
 	Counter,
 	State,
@@ -688,9 +692,9 @@ impl FromValue for Alignment {
 
 impl FromValue for Func {
 	fn from_value(v: Value) -> Outcome<Self> {
-		match v {
-			Value::Func(f)	=> Ok(f),
-			other			=> Err(mismatch("function", &other)),
+		match as_func(&v) {
+			Some(f)	=> Ok(f),
+			None	=> Err(err!("{}", func_refusal(&v); Input, Mismatch)),
 		}
 	}
 }

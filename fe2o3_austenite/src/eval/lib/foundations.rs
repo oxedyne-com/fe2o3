@@ -33,6 +33,7 @@ use crate::eval::lib::{
 	datetime,
 	dict,
 	geom,
+	math,
 	string,
 	sym,
 };
@@ -181,12 +182,23 @@ pub fn constructor(ty: Type) -> Option<NativeFunc> {
 	}
 }
 
-/// A value that can be called: a function, or a type with a constructor (`(1, 2).map(str)`).
+/// A value that can be called: a function, a type with a constructor (`(1, 2).map(str)`), or a symbol that
+/// is an accent or an opening delimiter (`map(math.floor)`), the cast Typst makes wherever it expects a
+/// function.
 pub fn as_func(v: &Value) -> Option<Func> {
 	match v {
-		Value::Func(f)	=> Some(f.clone()),
-		Value::Type(t)	=> constructor(*t).map(Func::Native),
-		_				=> None,
+		Value::Func(f)		=> Some(f.clone()),
+		Value::Type(t)		=> constructor(*t).map(Func::Native),
+		Value::Symbol(s)	=> math::symbol_func(sym::text(s)),
+		_					=> None,
+	}
+}
+
+/// Why `v` is not a function: Typst names a symbol that cannot be called, and the type of anything else.
+pub fn func_refusal(v: &Value) -> String {
+	match v {
+		Value::Symbol(s)	=> fmt!("symbol {} is not callable", sym::text(s)),
+		other				=> fmt!("expected function, found {}", type_desc(other.ty())),
 	}
 }
 

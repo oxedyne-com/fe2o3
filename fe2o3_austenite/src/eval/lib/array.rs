@@ -6,7 +6,9 @@ use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
 use crate::eval::func::Func;
 use crate::eval::lib::foundations::{
+	as_func,
 	finish,
+	func_refusal,
 	int_of,
 	locate_index,
 	mismatch,
@@ -78,9 +80,9 @@ fn no_default(engine: &mut Engine, span: Span, i: i64, len: usize) -> Error<ErrT
 }
 
 pub fn func_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Func> {
-	match crate::eval::lib::foundations::as_func(&v) {
+	match as_func(&v) {
 		Some(f)	=> Ok(f),
-		None	=> Err(mismatch(engine, span, "function", &v)),
+		None	=> Err(engine.error(DiagnosticKind::Type, span, func_refusal(&v))),
 	}
 }
 

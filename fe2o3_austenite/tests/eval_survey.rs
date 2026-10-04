@@ -200,6 +200,52 @@ fn a_symbol_is_called_in_code_where_it_is_an_accent_or_an_opening_delimiter() ->
 	Ok(())
 }
 
+// Functions: a callable symbol is a function wherever a function is expected
+
+// A symbol that is an accent or an opening delimiter casts to the function it calls as, so a document hands
+// `math.floor` or `sym.paren.l` to `map` as it hands any function.
+const SYMBOL_FUNCS: [(&str, &str); 8] = [
+	("floor-mapped",	"#([a], [b]).map(math.floor).join()\n"),
+	("ceil-mapped",		"#([a], [b]).map(math.ceil).join()\n"),
+	("variant-mapped",	"#([a], [b]).map(math.floor.l).join() #([a], [b]).map(sym.ceil.l).join()\n"),
+	("delimiter-mapped", "#([a], [b]).map(sym.paren.l).join() #([a], [b]).map(sym.bracket.l).join()\n"),
+	("accent-mapped",	"#([a], [b]).map(sym.hat).join()\n"),
+	("key-of-dedup",	"#([a], [b], [a]).dedup(key: sym.paren.l).len()\n"),
+	("in-maths",		"$#([a], [b]).map(math.ceil).join()$ $#([a], [b]).map(sym.paren.l).join()$\n"),
+	("bound-first",		"#let g = math.floor\n#([a], [b]).map(g).join()\n"),
+];
+
+#[test]
+fn a_callable_symbol_is_a_function_where_a_function_is_expected_as_typst_casts_it() -> Outcome<()> {
+	let dir = res!(work_dir("symbol-funcs"));
+	for (name, src) in SYMBOL_FUNCS {
+		res!(builds_alike(&dir, name, src));
+	}
+	Ok(())
+}
+
+#[test]
+fn a_symbol_that_is_not_callable_is_refused_as_a_function_with_typsts_message() -> Outcome<()> {
+	let dir = res!(work_dir("symbol-not-callable"));
+	// Typst reports each at the argument, which the door has no span for, so it names the call.
+	for (name, src) in [
+		("map",			"#(1, 2).map(sym.alpha)\n"),
+		("filter",		"#(1, 2).filter(sym.alpha)\n"),
+		("any",			"#(1, 2).any(sym.alpha)\n"),
+		("fold",		"#(1, 2).fold(0, sym.alpha)\n"),
+		("reduce",		"#(1, 2).reduce(sym.alpha)\n"),
+		("sorted-key",	"#(1, 2).sorted(key: sym.alpha)\n"),
+		("dedup-key",	"#(1, 2).dedup(key: sym.alpha)\n"),
+		("closing",		"#(1, 2).map(sym.floor.r)\n"),
+		("plain",		"#(1, 2).map(sym.plus)\n"),
+	] {
+		let f = res!(refuses_message_alike(&dir, name, src));
+		assert!(f.head.message.starts_with("symbol "), "{}: {}", name, f.head.message);
+		assert!(f.head.message.ends_with(" is not callable"), "{}: {}", name, f.head.message);
+	}
+	Ok(())
+}
+
 // Loops: Typst bounds one `while`, not the document
 
 // Eleven million empty iterations and a body that ends at once: more than the ten million the evaluator
