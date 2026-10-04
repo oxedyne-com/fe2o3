@@ -3,7 +3,7 @@
 // and handing the page to the sink, stopping when every recorded read answers the same against the
 // introspector the pass built. A fifth pass still moving is a warning and its output stands, as in Typst.
 //
-// Each pass starts clean: the locator, the read log, the context and the loop fuel are reset, and the
+// Each pass starts clean: the locator, the read log, the context are reset, and the
 // diagnostics of the previous pass are dropped, so a `context` error a first pass makes for want of a
 // later label is gone once the label is known. Only the final pass's errors fail the run.
 //
@@ -155,7 +155,6 @@ pub fn run_with<L: Layouter, S: PageSink>(
 	-> Outcome<Laid>
 {
 	let mark = engine.diags.len();
-	let fuel = engine.fuel;
 	let styles = StyleChain::root();
 	let mut passes = 0;
 	loop {
@@ -164,7 +163,6 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		engine.locator.reset();
 		engine.reads = ReadLog::default();
 		engine.context = Context::default();
-		engine.fuel = fuel;
 		engine.body = None;
 		if let Some(t) = engine.timings.as_mut() {
 			t.begin_pass();

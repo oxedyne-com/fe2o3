@@ -92,7 +92,6 @@ use std::sync::Arc;
 
 pub const MAX_CALL_DEPTH:	usize	= 80;			// Typst's own limit
 pub const MAX_LAYOUT_DEPTH:	usize	= 72;			// ditto, for nested layout
-pub const LOOP_FUEL:		u64		= 10_000_000;	// iterations across all loops before a diagnostic
 
 /// The sources of one compilation and the modules evaluated from them. Loading a path is here;
 /// resolving an import spec to a path, caching and cycle detection are `import.rs` (U10).
@@ -168,7 +167,6 @@ pub struct Engine {
 	pub diags:		Vec<Diagnostic>,
 	pub depth:		usize,				// current closure call depth
 	pub route:		usize,				// layout layers and show rules entered, Typst's route; the document is the first
-	pub fuel:		u64,				// loop iterations remaining
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
@@ -194,7 +192,6 @@ impl Engine {
 			diags:		Vec::new(),
 			depth:		0,
 			route:		1,
-			fuel:		LOOP_FUEL,
 			context:	Context::default(),
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),
@@ -316,15 +313,6 @@ impl Engine {
 				out
 			},
 		}
-	}
-
-	/// Spends one loop iteration; an exhausted budget is a diagnostic, so a runaway loop terminates.
-	pub fn burn(&mut self, span: Span) -> Outcome<()> {
-		if self.fuel == 0 {
-			return Err(self.error(DiagnosticKind::Limit, span, "loop seems to be infinite"));
-		}
-		self.fuel -= 1;
-		Ok(())
 	}
 
 	pub fn has_errors(&self) -> bool { self.diags.iter().any(|d| d.is_error()) }

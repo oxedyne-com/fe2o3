@@ -959,7 +959,6 @@ fn range(engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 	let mut out = Vec::new();
 	let mut x = start;
 	while (step > 0 && x < end) || (step < 0 && x > end) {
-		res!(engine.burn(span));
 		out.push(Value::Int(x));
 		x = match x.checked_add(step) {
 			Some(n)	=> n,
