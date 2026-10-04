@@ -555,6 +555,13 @@ impl<
                                     deadline; dropping.", src_addr);
                                 if let Some(dc) = &dropped_conn { dc.incr(); }
                             }
+                            // Scanners, old clients and clients that hang up end
+                            // a handshake all day on a public port. Below ERROR,
+                            // so they do not bury the faults that are ours.
+                            Handshake::PeerFailed(e) => {
+                                debug!("TLS handshake from {} ended by the \
+                                    peer: {}", src_addr, e);
+                            }
                             Handshake::Failed(e) => {
                                 error!(err!(e,
                                     "TLS handshake aborted.";

@@ -157,6 +157,10 @@ pub async fn run_imap_listener(
                     warn!("IMAP TLS handshake from {} timed out.", peer);
                     return;
                 }
+                Handshake::PeerFailed(e) => {
+                    debug!("IMAP TLS handshake from {} ended by the peer: {}", peer, e);
+                    return;
+                }
                 Handshake::Failed(e) => {
                     warn!("IMAP TLS handshake from {} failed: {}", peer, e);
                     return;

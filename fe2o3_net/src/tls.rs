@@ -39,6 +39,7 @@ use tokio::{
 };
 use tokio_rustls::{
     rustls::{
+        AlertDescription,
         ClientConfig,
         pki_types::{
             CertificateDer,
@@ -55,16 +56,77 @@ use tokio_rustls::{
 // │ BOUNDED SERVER-SIDE TLS ACCEPTOR                                          │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The result of a bounded handshake, distinguishing the two ways it can fail.
+/// The result of a bounded handshake, distinguishing the ways it can fail.
 ///
 /// A `TimedOut` is an admission event -- the permit wait or the handshake ran
 /// past the deadline -- and a caller that keeps admission counters records it as
-/// a drop. A `Failed` is an ordinary broken handshake (a client that hung up, a
-/// malformed record) and is logged, not counted against admission.
+/// a drop. A `PeerFailed` is a handshake that the peer ended or could not make
+/// work: a client that hung up, spoke nonsense, or offered no protocol version,
+/// cipher suite or application protocol this server serves. Every scanner and
+/// old client on a public port produces one, so a caller should log it below
+/// `ERROR`. A `Failed` is everything else, which may be the server's own fault
+/// -- no certificate to serve, a peer rejecting the certificate it was shown --
+/// and is the one to log loudly. A cause that cannot be told is a `Failed`, so
+/// reading it as the peer's fault never hides a fault of ours.
 pub enum Handshake<IO> {
     Ok(tokio_rustls::server::TlsStream<IO>),
     TimedOut,
+    PeerFailed(Error<ErrTag>),
     Failed(Error<ErrTag>),
+}
+
+/// Did the peer, and not this server, end the handshake?
+///
+/// An `io::Error` that wraps a rustls error is judged by that error; any other
+/// is judged by its kind, a transport that went away. The rustls match is an
+/// allowlist of the peer's own faults, so a variant added to that non-exhaustive
+/// enum is treated as ours until someone says otherwise.
+fn peer_ended(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    use tokio_rustls::rustls::Error as Tls;
+    match e.get_ref().and_then(|inner| inner.downcast_ref::<Tls>()) {
+        Some(Tls::PeerIncompatible(_))
+        | Some(Tls::PeerMisbehaved(_))
+        | Some(Tls::InvalidMessage(_))
+        | Some(Tls::InappropriateMessage { .. })
+        | Some(Tls::InappropriateHandshakeMessage { .. })
+        | Some(Tls::PeerSentOversizedRecord)
+        | Some(Tls::NoApplicationProtocol)
+        | Some(Tls::UnsupportedNameType)
+        | Some(Tls::DecryptError)           => true,
+        // An alert is the peer's word, and a rejected certificate is the one it
+        // can say about us: an expired or mismatched certificate reaches the
+        // server only this way, so it is never read as a scanner's doing.
+        Some(Tls::AlertReceived(a))         => !rejects_certificate(a),
+        Some(_)                             => false,
+        None => matches!(e.kind(),
+            ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof),
+    }
+}
+
+/// Does an alert from the peer say that it will not accept our certificate?
+fn rejects_certificate(a: &AlertDescription) -> bool {
+    matches!(a,
+        AlertDescription::BadCertificate
+        | AlertDescription::UnsupportedCertificate
+        | AlertDescription::CertificateRevoked
+        | AlertDescription::CertificateExpired
+        | AlertDescription::CertificateUnknown
+        | AlertDescription::UnknownCA
+        | AlertDescription::BadCertificateStatusResponse
+        | AlertDescription::BadCertificateHashValue)
+}
+
+/// Sorts a failed handshake by whose fault it was.
+fn failed<IO>(e: std::io::Error) -> Handshake<IO> {
+    if peer_ended(&e) {
+        Handshake::PeerFailed(err!(e, "TLS handshake failed."; IO, Network, Init))
+    } else {
+        Handshake::Failed(err!(e, "TLS handshake failed."; IO, Network, Init))
+    }
 }
 
 /// A `TlsAcceptor` with a shared cap on how many handshakes run at once and a
@@ -149,14 +211,12 @@ impl BoundedTlsAcceptor {
         match self.deadline {
             Some(d) => match tokio::time::timeout(d, self.acceptor.accept(stream)).await {
                 Ok(Ok(tls)) => Handshake::Ok(tls),
-                Ok(Err(e))  => Handshake::Failed(err!(e,
-                    "TLS handshake failed."; IO, Network, Init)),
+                Ok(Err(e))  => failed(e),
                 Err(_)      => Handshake::TimedOut,
             },
             None => match self.acceptor.accept(stream).await {
                 Ok(tls) => Handshake::Ok(tls),
-                Err(e)  => Handshake::Failed(err!(e,
-                    "TLS handshake failed."; IO, Network, Init)),
+                Err(e)  => failed(e),
             },
         }
     }
