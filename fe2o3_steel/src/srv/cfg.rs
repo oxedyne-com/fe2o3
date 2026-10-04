@@ -34,6 +34,7 @@ use oxedyne_fe2o3_net::{
             SameSite,
         },
         fwd::ForwardedPolicy,
+        msg::ReadLimits,
     },
 };
 
@@ -2610,6 +2611,12 @@ pub struct ServerConfig {
     // error. Zero disables the deadline.
     #[optional]
     pub http_header_read_timeout_ms:    u64,
+    // Wall-clock budget, in milliseconds, for one call to an `api_routes` or webhook upstream, from
+    // connecting to the last byte of its reply. A call that overruns it is answered `504 Gateway
+    // Timeout`. The size limits above bound the reply's headers and body (`502 Bad Gateway` over
+    // them). Zero disables the deadline.
+    #[optional]
+    pub upstream_timeout_ms:            u64,
     // When true, Steel injects a baseline set of security response headers into every HTTPS
     // response: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
     // `Permissions-Policy`.
@@ -2822,6 +2829,7 @@ impl Default for ServerConfig {
             http_max_header_bytes:          16 * 1024,            // 16 KiB
             http_max_body_bytes:            8 * 1024 * 1024,      // 8 MiB
             http_header_read_timeout_ms:    15_000,               // 15 s
+            upstream_timeout_ms:            30_000,               // 30 s
             security_headers_enabled:       true,
             content_security_policy:        String::new(),
             addr_guard:                     DaticleMap::new(),
@@ -3139,6 +3147,32 @@ impl ServerConfig {
             key: SESSION_ID_KEY_LABEL.to_string(),
             val: sid,
             attrs: Some(session_cookie_attrs),
+        }
+    }
+
+    /// The bounds the HTTP reader enforces on a message it reads, from the three `http_*` limits.
+    /// Zero in the config means no limit.
+    pub fn read_limits(&self) -> ReadLimits {
+        ReadLimits {
+            max_header_bytes: match self.http_max_header_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            max_body_bytes: match self.http_max_body_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            header_read_timeout: match self.http_header_read_timeout_ms {
+                0 => None,
+                ms => Some(Duration::from_millis(ms)),
+            },
+        }
+    }
+
+    pub fn upstream_timeout(&self) -> Option<Duration> {
+        match self.upstream_timeout_ms {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
         }
     }
 

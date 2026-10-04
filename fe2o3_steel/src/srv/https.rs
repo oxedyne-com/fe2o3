@@ -53,7 +53,6 @@ use oxedyne_fe2o3_net::{
         msg::{
             HttpMessageReader,
             HttpMessage,
-            ReadLimits,
         },
         status::HttpStatus,
     },
@@ -65,10 +64,7 @@ use std::{
     net::SocketAddr,
     pin::Pin,
     sync::Arc,
-    time::{
-        Duration,
-        Instant,
-    },
+    time::Instant,
 };
 
 use tokio::{
@@ -191,25 +187,7 @@ impl<
         // reader enforces the configured header / body bounds and the
         // slowloris read deadline. A zero value in the config means
         // "disabled" and maps to `None` in `ReadLimits`.
-        let limits = ReadLimits {
-            max_header_bytes: if self.cfg.http_max_header_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_header_bytes as usize)
-            },
-            max_body_bytes: if self.cfg.http_max_body_bytes == 0 {
-                None
-            } else {
-                Some(self.cfg.http_max_body_bytes as usize)
-            },
-            header_read_timeout: if self.cfg.http_header_read_timeout_ms == 0 {
-                None
-            } else {
-                Some(Duration::from_millis(
-                    self.cfg.http_header_read_timeout_ms,
-                ))
-            },
-        };
+        let limits = self.cfg.read_limits();
 
         let mut reader: HttpMessageReader<
             '_,

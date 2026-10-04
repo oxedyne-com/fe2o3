@@ -23,6 +23,7 @@ use oxedyne_fe2o3_steel::{
         cfg::{
             ApiRoute,
             ServerConfig,
+            WebhookRoute,
         },
         context::{
             Protocol,
@@ -159,6 +160,7 @@ pub struct Site {
     pub host:               String,
     pub public_dir:         PathBuf,
     pub api_routes:         Vec<ApiRoute>,
+    pub webhook_routes:     Vec<WebhookRoute>,
     pub admin_dashboard:    bool,
 }
 
@@ -168,6 +170,7 @@ impl Site {
             host:               host.to_string(),
             public_dir:         public_dir.to_path_buf(),
             api_routes:         Vec::new(),
+            webhook_routes:     Vec::new(),
             admin_dashboard:    true,
         }
     }
@@ -204,6 +207,11 @@ pub struct Rig {
 
 impl Rig {
     pub fn new(sites: Vec<Site>) -> Outcome<Self> {
+        Self::with_config(sites, ServerConfig::default())
+    }
+
+    /// As `new`, with a server config of the caller's choosing (small limits, short deadlines).
+    pub fn with_config(sites: Vec<Site>, cfg: ServerConfig) -> Outcome<Self> {
         oxedyne_fe2o3_net::tls::ensure_crypto_provider();
         let names: Vec<String> = sites.iter().map(|s| s.host.clone()).collect();
         let cert = res!(rcgen::generate_simple_self_signed(names), Init);
@@ -234,7 +242,6 @@ impl Rig {
         ));
         let admin = Arc::new(admin);
 
-        let cfg = ServerConfig::default();
         let mut vhosts = HashMap::new();
         let mut first = String::new();
         for site in sites {
@@ -248,7 +255,7 @@ impl Rig {
                 vec![fmt!("index.html")],
                 false,
                 site.api_routes.clone(),
-                Vec::new(),
+                site.webhook_routes.clone(),
                 Arc::new(WebhookRegistry::new()),
                 Arc::new(ApiHandlerRegistry::new()),
                 None,

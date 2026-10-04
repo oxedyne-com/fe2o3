@@ -55,8 +55,8 @@ use oxedyne_fe2o3_net::{
     file::RequestPath,
     http::{
         client::{
-            http_request,
-            https_request,
+            http_request_limited,
+            https_request_limited,
         },
         encoding,
         fields::{
@@ -70,6 +70,7 @@ use oxedyne_fe2o3_net::{
         msg::{
             FileWindow,
             HttpMessage,
+            ReadLimits,
         },
         range::{
             self,
@@ -87,10 +88,12 @@ use std::{
         Path,
         PathBuf,
     },
+    future::Future,
     sync::{
         Arc,
         RwLock,
     },
+    time::Duration,
 };
 
 use tokio::{
@@ -305,6 +308,7 @@ impl<
         let api_routes = self.api_routes.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let upstream = UpstreamBounds::of(&self.cfg);
         let admin_state = self.admin_state.clone();
         let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
@@ -716,6 +720,7 @@ impl<
                         &[],
                         &req_headers,
                         &tls_client,
+                        &upstream,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -1001,6 +1006,7 @@ impl<
         let webhook_registry = self.webhook_registry.clone();
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
+        let upstream = UpstreamBounds::of(&self.cfg);
         let admin_state = self.admin_state.clone();
         let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
@@ -1268,6 +1274,7 @@ impl<
                         &body,
                         &req_headers,
                         &tls_client,
+                        &upstream,
                         &id,
                     ).await);
                     return Ok(Some(resp));
@@ -1318,10 +1325,79 @@ impl<
                 &body,
                 &req_headers,
                 &tls_client,
+                &upstream,
                 &id,
             ).await);
             Ok(Some(resp))
         }
+    }
+}
+
+/// What bounds one call to an `api_routes` or webhook upstream, from the server config: the
+/// reader's size limits on the reply, and a deadline on the whole call. Without them an upstream
+/// that states no length and never closes holds the visitor's request open and is buffered
+/// without limit.
+#[derive(Clone, Debug)]
+struct UpstreamBounds {
+    limits:     ReadLimits,
+    timeout:    Option<Duration>,
+}
+
+impl UpstreamBounds {
+
+    fn of(cfg: &ServerConfig) -> Self {
+        Self {
+            limits:     cfg.read_limits(),
+            timeout:    cfg.upstream_timeout(),
+        }
+    }
+
+    /// `Err` means the deadline passed before the call finished.
+    async fn run<F: Future<Output = Outcome<HttpMessage>>>(
+        &self,
+        call: F,
+    )
+        -> Result<Outcome<HttpMessage>, tokio::time::error::Elapsed>
+    {
+        match self.timeout {
+            Some(limit) => tokio::time::timeout(limit, call).await,
+            None        => Ok(call.await),
+        }
+    }
+}
+
+/// The visitor's answer to a call to an upstream: its reply if it gave one, `502` if it could not
+/// be reached, sent something that is not HTTP or overran the size limits, `504` if it overran the
+/// deadline. Returned as an error instead, the failure left the handler, and the connection
+/// closed on a visitor who was told nothing.
+fn upstream_answer(
+    id:     &str,
+    what:   &str,
+    host:   &str,
+    port:   u16,
+    bounds: &UpstreamBounds,
+    reply:  Result<Outcome<HttpMessage>, tokio::time::error::Elapsed>,
+)
+    -> HttpMessage
+{
+    match reply {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            warn!("{}: {} could not be served by its upstream {}:{}: {}",
+                id, what, host, port, e);
+            HttpMessage::respond_with_text(
+                HttpStatus::BadGateway,
+                "Bad Gateway: upstream proxy error.",
+            )
+        },
+        Err(_) => {
+            warn!("{}: {} got no complete reply from its upstream {}:{} within {:?}.",
+                id, what, host, port, bounds.timeout);
+            HttpMessage::respond_with_text(
+                HttpStatus::GatewayTimeout,
+                "Gateway Timeout: the upstream did not answer in time.",
+            )
+        },
     }
 }
 
@@ -1332,6 +1408,7 @@ async fn forward_api_proxy(
     body:           &[u8],
     req_headers:    &HeaderFields,
     tls_client:     &Option<Arc<ClientConfig>>,
+    bounds:         &UpstreamBounds,
     id:             &str,
 )
     -> Outcome<HttpMessage>
@@ -1409,47 +1486,40 @@ async fn forward_api_proxy(
         if route.upstream_tls { "https://" } else { "http://" },
         upstream_host, upstream_port, upstream_path, hdrs.len());
 
-    let reply = if route.upstream_tls {
-        let tls_cfg = match tls_client {
-            Some(cfg) => cfg.clone(),
-            None => return Err(err!(
-                "{}: API route '{}' configured with https:// upstream but \
-                no TLS client is available.", id, route.path;
-                Init, Missing)),
-        };
-        https_request(
-            upstream_host,
-            upstream_port,
-            method,
-            upstream_path,
-            &hdrs,
-            body,
-            tls_cfg,
-        ).await
-    } else {
-        http_request(
-            upstream_host,
-            upstream_port,
-            method,
-            upstream_path,
-            &hdrs,
-            body,
-        ).await
-    };
-    match reply {
-        Ok(msg) => Ok(msg),
-        // An upstream that is down, or that answers with something that is not HTTP, is the
-        // visitor's 502 and the operator's log line. Returned as an error it was neither: it left
-        // the handler, and the connection closed on a visitor who was told nothing.
-        Err(e) => {
-            warn!("{}: API route '{}' could not be served by its upstream {}:{}: {}",
-                id, route.path, upstream_host, upstream_port, e);
-            Ok(HttpMessage::respond_with_text(
-                HttpStatus::BadGateway,
-                "Bad Gateway: upstream proxy error.",
-            ))
+    let call = async {
+        if route.upstream_tls {
+            let tls_cfg = match tls_client {
+                Some(cfg) => cfg.clone(),
+                None => return Err(err!(
+                    "{}: API route '{}' configured with https:// upstream but \
+                    no TLS client is available.", id, route.path;
+                    Init, Missing)),
+            };
+            https_request_limited(
+                upstream_host,
+                upstream_port,
+                method,
+                upstream_path,
+                &hdrs,
+                body,
+                tls_cfg,
+                Some(&bounds.limits),
+            ).await
+        } else {
+            http_request_limited(
+                upstream_host,
+                upstream_port,
+                method,
+                upstream_path,
+                &hdrs,
+                body,
+                Some(&bounds.limits),
+            ).await
         }
-    }
+    };
+    let reply = bounds.run(call).await;
+    Ok(upstream_answer(
+        id, &fmt!("API route '{}'", route.path), upstream_host, upstream_port, bounds, reply))
 }
 
 async fn forward_webhook(
@@ -1457,6 +1527,7 @@ async fn forward_webhook(
     body:           &[u8],
     req_headers:    &HeaderFields,
     tls_client:     &Option<Arc<ClientConfig>>,
+    bounds:         &UpstreamBounds,
     id:             &str,
 )
     -> Outcome<HttpMessage>
@@ -1519,31 +1590,38 @@ async fn forward_webhook(
         upstream_host, upstream_port, upstream_path,
         body.len(), hdr_refs.len());
 
-    if route.upstream_tls {
-        let tls_cfg = match tls_client {
-            Some(cfg) => cfg.clone(),
-            None => return Err(err!(
-                "{}: webhook route '{}' configured with https:// upstream \
-                but no TLS client is available.", id, route.path;
-                Init, Missing)),
-        };
-        https_request(
-            upstream_host,
-            upstream_port,
-            HttpMethod::POST,
-            upstream_path,
-            &hdr_refs,
-            body,
-            tls_cfg,
-        ).await
-    } else {
-        http_request(
-            upstream_host,
-            upstream_port,
-            HttpMethod::POST,
-            upstream_path,
-            &hdr_refs,
-            body,
-        ).await
-    }
+    let call = async {
+        if route.upstream_tls {
+            let tls_cfg = match tls_client {
+                Some(cfg) => cfg.clone(),
+                None => return Err(err!(
+                    "{}: webhook route '{}' configured with https:// upstream \
+                    but no TLS client is available.", id, route.path;
+                    Init, Missing)),
+            };
+            https_request_limited(
+                upstream_host,
+                upstream_port,
+                HttpMethod::POST,
+                upstream_path,
+                &hdr_refs,
+                body,
+                tls_cfg,
+                Some(&bounds.limits),
+            ).await
+        } else {
+            http_request_limited(
+                upstream_host,
+                upstream_port,
+                HttpMethod::POST,
+                upstream_path,
+                &hdr_refs,
+                body,
+                Some(&bounds.limits),
+            ).await
+        }
+    };
+    let reply = bounds.run(call).await;
+    Ok(upstream_answer(
+        id, &fmt!("webhook route '{}'", route.path), upstream_host, upstream_port, bounds, reply))
 }
