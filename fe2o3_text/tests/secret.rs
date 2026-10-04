@@ -304,6 +304,37 @@ pub fn test_secret(filter: &'static str) -> Outcome<()> {
 		Ok(())
 	}));
 
+	res!(test_it(filter, &["holds sees every shape where it stands", "all", "secret", "holds"], || {
+		for (lead, rest, _kind) in SHAPED {
+			let c = fmt!("{}{}", lead, rest);
+			req!(secret::holds(&c), true, "alone, for {:?}", lead);
+			req!(secret::holds(&fmt!("note: {} (rotated)\nnext line", c)), true,
+				"in prose, for {:?}", lead);
+			req!(secret::holds(&fmt!("one\ntwo\n{}", c)), true, "on a later line, for {:?}", lead);
+		}
+		let assigned = fmt!("api_key = \"{}{}\"", LITERAL.0, LITERAL.1);
+		req!(secret::holds(&assigned), true);
+		for plain in ["", "ordinary text", "sk-nope", "api_key = \"\"", "key = \"your-key-here\""] {
+			req!(secret::holds(plain), false, "for {:?}", plain);
+		}
+		Ok(())
+	}));
+
+	res!(test_it(filter, &["holds is not excused by a marker or a NUL", "all", "secret", "holds"],
+		||
+	{
+		// The control: `scan` takes each of these excuses, because a person put the file there.
+		let c = fmt!("{}{}", SHAPED[0].0, SHAPED[0].1);
+		let trailing = fmt!("{} # {}", c, secret::MARKER);
+		let above = fmt!("{}\n{}", secret::MARKER, c);
+		let binary = fmt!("\0{}", c);
+		for text in [&trailing, &above, &binary] {
+			req!(secret::scan(text.as_bytes()), Vec::<Find>::new(), "scan, for {:?}", text);
+			req!(secret::holds(text), true, "holds, for {:?}", text);
+		}
+		Ok(())
+	}));
+
 	res!(test_it(filter, &["Lockfiles and vendored trees are not scanned", "all", "secret",
 		"path"], ||
 	{

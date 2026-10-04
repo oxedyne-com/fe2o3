@@ -28,11 +28,24 @@ impl Dat {
     /// and a `\u` escape that leaves half a surrogate pair, since neither has one meaning.
     /// `limits` bounds the length of the text and the depth of nesting, the root at depth 1.
     pub fn decode_json_strict(s: &str, limits: &DecodeLimits) -> Outcome<Self> {
+        Self::decode_json_members(s, limits, false)
+    }
+
+    /// `decode_json_strict`, with each object read as a `Dat::OrdMap` that keeps its members in the
+    /// order they were written. A plain `Dat::Map` sorts them by name, which is no matter to a
+    /// reader that looks a member up and is all of it to one that reads the document through, as a
+    /// scan for a run of words across its strings does.
+    pub fn decode_json_strict_ordered(s: &str, limits: &DecodeLimits) -> Outcome<Self> {
+        Self::decode_json_members(s, limits, true)
+    }
+
+    fn decode_json_members(s: &str, limits: &DecodeLimits, ordered: bool) -> Outcome<Self> {
         res!(limits.check_len(s.len()));
         let mut r = Reader {
-            src:    s.as_bytes(),
-            pos:    0,
-            limits: *limits,
+            src:        s.as_bytes(),
+            pos:        0,
+            limits:     *limits,
+            ordered,
         };
         r.skip_ws();
         let value = res!(r.value(1));
@@ -48,9 +61,10 @@ impl Dat {
 }
 
 struct Reader<'a> {
-    src:    &'a [u8],
-    pos:    usize,
-    limits: DecodeLimits,
+    src:        &'a [u8],
+    pos:        usize,
+    limits:     DecodeLimits,
+    ordered:    bool,   // are objects read with their members in the order written
 }
 
 impl<'a> Reader<'a> {
@@ -101,10 +115,11 @@ impl<'a> Reader<'a> {
         let open = self.pos;
         self.pos += 1;
         let mut map = DaticleMap::new();
+        let mut order = Vec::new();     // the names in the order written, kept if the caller asked
         self.skip_ws();
         if self.peek() == Some(b'}') {
             self.pos += 1;
-            return Ok(Dat::Map(map));
+            return Ok(self.members(map, order));
         }
         loop {
             self.skip_ws();
@@ -132,13 +147,16 @@ impl<'a> Reader<'a> {
                     byte {}.", open, key, at;
                 Invalid, Input, Duplicate));
             }
+            if self.ordered {
+                order.push(key.clone());
+            }
             map.insert(key, value);
             self.skip_ws();
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b'}') => {
                     self.pos += 1;
-                    return Ok(Dat::Map(map));
+                    return Ok(self.members(map, order));
                 },
                 _ => return Err(err!(
                     "A member of the JSON object opened at byte {} is followed by ',' or '}}', \
@@ -146,6 +164,20 @@ impl<'a> Reader<'a> {
                 Invalid, Input, Decode)),
             }
         }
+    }
+
+    // The members of an object, as a plain map or as one that remembers the order they came in.
+    fn members(&self, mut map: DaticleMap, order: Vec<Dat>) -> Dat {
+        if !self.ordered {
+            return Dat::Map(map);
+        }
+        let mut out = OrdDaticleMap::new();
+        for (i, key) in order.into_iter().enumerate() {
+            if let Some(value) = map.remove(&key) {
+                out.insert(MapKey::new(i as u64, key), value);
+            }
+        }
+        Dat::OrdMap(out)
     }
 
     fn array(&mut self, depth: usize) -> Outcome<Dat> {

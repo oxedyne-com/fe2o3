@@ -115,6 +115,7 @@ pub mod http;
 pub mod id;
 #[cfg(feature = "async")]
 pub mod imap;
+pub mod lens;
 #[cfg(feature = "async")]
 pub mod llm;
 pub mod mail;

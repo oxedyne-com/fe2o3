@@ -11,6 +11,10 @@ use crate::{
     ws::{
         handler::WebSocketHandler,
         status::WebSocketStatusCode,
+        tap::{
+            FrameTap,
+            NoTap,
+        },
     },
 };
 
@@ -642,6 +646,11 @@ pub async fn read_message<R: AsyncRead + Unpin>(
     }
 }
 
+/// One end of a websocket.
+///
+/// `TAP` is the seam of [`crate::ws::tap`]: it watches every message read or sent. It defaults to
+/// [`NoTap`], which costs nothing, so a socket that names its first eight parameters, as every
+/// caller did before the ninth existed, is unchanged. `with_tap` installs one.
 pub struct WebSocket<
     'a,
     const UIDL: usize,
@@ -651,6 +660,7 @@ pub struct WebSocket<
     DB:     Database<UIDL, UID, ENC, KH>,
     S:      AsyncRead + AsyncWrite + Unpin,
     WSH:    WebSocketHandler,
+    TAP:    FrameTap = NoTap,
 > {
     stream:         Pin<&'a mut S>,
     is_server:      bool,
@@ -660,12 +670,16 @@ pub struct WebSocket<
     chunk_size:     usize,
     chunk_thresh:   usize,
     limits:         WebSocketLimits,
+    tap:            TAP,
+    tctx:           TAP::Ctx,
     phantom1:       PhantomData<UID>,
     phantom2:       PhantomData<ENC>,
     phantom3:       PhantomData<KH>,
     phantom4:       PhantomData<DB>,
 }
 
+// The constructors and the tap's installer live here, on the untapped type, so that
+// `WebSocket::new_server(..)` with its parameters left to inference can only mean `NoTap`.
 impl<
     'a,
     const UIDL: usize,
@@ -676,7 +690,7 @@ impl<
     S:      AsyncRead + AsyncWrite + Unpin,
     WSH:    WebSocketHandler,
 >
-    WebSocket<'a, UIDL, UID, ENC, KH, DB, S, WSH>
+    WebSocket<'a, UIDL, UID, ENC, KH, DB, S, WSH, NoTap>
 {
     pub fn new_client(
         stream:         &'a mut S,
@@ -695,6 +709,8 @@ impl<
             chunk_size,
             chunk_thresh,
             limits:         WebSocketLimits::default(),
+            tap:            NoTap,
+            tctx:           (),
             phantom1:       PhantomData,
             phantom2:       PhantomData,
             phantom3:       PhantomData,
@@ -719,6 +735,8 @@ impl<
             chunk_size,
             chunk_thresh,
             limits:         WebSocketLimits::default(),
+            tap:            NoTap,
+            tctx:           (),
             phantom1:       PhantomData,
             phantom2:       PhantomData,
             phantom3:       PhantomData,
@@ -726,6 +744,47 @@ impl<
         }
     }
 
+    /// Installs a tap that is shown every message this socket reads or sends, with `ctx` as what
+    /// it knows of the connection. A tap can be installed once; it changes the socket's type.
+    pub fn with_tap<X: FrameTap>(
+        self,
+        tap:    X,
+        ctx:    X::Ctx,
+    )
+        -> WebSocket<'a, UIDL, UID, ENC, KH, DB, S, WSH, X>
+    {
+        WebSocket {
+            stream:         self.stream,
+            is_server:      self.is_server,
+            buffer:         self.buffer,
+            latency:        self.latency,
+            handler:        self.handler,
+            chunk_size:     self.chunk_size,
+            chunk_thresh:   self.chunk_thresh,
+            limits:         self.limits,
+            tap,
+            tctx:           ctx,
+            phantom1:       PhantomData,
+            phantom2:       PhantomData,
+            phantom3:       PhantomData,
+            phantom4:       PhantomData,
+        }
+    }
+}
+
+impl<
+    'a,
+    const UIDL: usize,
+    UID:    NumIdDat<UIDL> + 'static,
+    ENC:    Encrypter + 'static,
+    KH:     Hasher + 'static,
+    DB:     Database<UIDL, UID, ENC, KH> + 'static,
+    S:      AsyncRead + AsyncWrite + Unpin,
+    WSH:    WebSocketHandler,
+    TAP:    FrameTap,
+>
+    WebSocket<'a, UIDL, UID, ENC, KH, DB, S, WSH, TAP>
+{
     pub fn is_server(&self) -> bool { self.is_server }
     pub fn is_client(&self) -> bool { !self.is_server }
 
@@ -832,6 +891,9 @@ impl<
             limits,
         ).await;
         self.buffer = buffer;
+        if let Ok(Some(msg)) = &result {
+            self.tap.inbound(&self.tctx, msg);
+        }
         if let Err(e) = &result {
             if e.tags().contains(&ErrTag::TooBig) {
                 // Whatever was gathered of the refused message is dropped here rather than left to
@@ -867,6 +929,7 @@ impl<
             self.chunk_size,
             self.chunk_thresh,
         ));
+        self.tap.outbound(&self.tctx, message);
         let result = self.stream.write_all(&byts).await;
         res!(result);
         let result = self.stream.flush().await;

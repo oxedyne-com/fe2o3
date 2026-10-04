@@ -192,3 +192,67 @@ fn test_a_fuzzed_corpus_agrees_with_an_independent_reader() -> Outcome<()> {
     req!(read > 1_000 && refused > 1_000, true, "{} read and {} refused", read, refused);
     Ok(())
 }
+
+fn ordered(s: &str) -> Outcome<Dat> {
+    Dat::decode_json_strict_ordered(s, &DecodeLimits::text())
+}
+
+fn owned(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+/// The names of a map's members, first written first.
+fn written(d: &Dat) -> Vec<String> {
+    let mut at: Vec<(u64, String)> = match d {
+        Dat::OrdMap(m) => m.iter().map(|(k, _)| (k.ord(), match k.dat() {
+            Dat::Str(s) => s.clone(),
+            other       => fmt!("{:?}", other),
+        })).collect(),
+        other => panic!("an object is read as an ordered map, not {:?}", other),
+    };
+    at.sort();
+    at.into_iter().map(|(_, k)| k).collect()
+}
+
+/// The same document with each ordered map made a plain one, so the two readers can be compared.
+fn plain(d: &Dat) -> Dat {
+    match d {
+        Dat::OrdMap(m)  => Dat::Map(m.iter().map(|(k, v)| (k.dat().clone(), plain(v))).collect()),
+        Dat::List(l)    => Dat::List(l.iter().map(plain).collect()),
+        other           => other.clone(),
+    }
+}
+
+/// An object keeps the order its members were written in, at every depth, where `decode_json_strict`
+/// sorts them by name. Nothing else about the reading differs: the same documents are read and
+/// refused, to the same value.
+#[test]
+fn test_the_ordered_reader_keeps_members_in_the_order_written() -> Outcome<()> {
+    let d = res!(ordered("{\"b\":1,\"a\":{\"z\":true,\"y\":[{\"q\":null,\"p\":\"x\"},{\"n\":0,\"m\":0}]},\"c\":\"s\",\"B\":2}"));
+    req!(written(&d), owned(&["b", "a", "c", "B"]), "the root");
+    let a = res!(d.map_get(&Dat::Str("a".to_string()))).cloned().unwrap_or(Dat::Empty);
+    req!(written(&a), owned(&["z", "y"]), "a member");
+    let y = res!(a.map_get(&Dat::Str("y".to_string()))).cloned().unwrap_or(Dat::Empty);
+    match &y {
+        Dat::List(l) => {
+            req!(written(&l[0]), owned(&["q", "p"]), "a member of a list");
+            req!(written(&l[1]), owned(&["n", "m"]), "another");
+        },
+        other => panic!("an array is a list, not {:?}", other),
+    }
+    // The plain reader sorts, which is why an ordered one is wanted.
+    match res!(strict("{\"b\":1,\"a\":2}")) {
+        Dat::Map(m) => req!(m.keys().next().cloned(), Some(Dat::Str("a".to_string())), "the plain reader sorts by name"),
+        other       => panic!("{:?}", other),
+    }
+    for doc in [
+        "{}", "[]", "[{}]", "{\"a\":{}}", "null", "true", "\"s\"", "12", "-1.5e3", "[1,\"a\",null,{\"k\":[{}]}]",
+        "{\"v\":\"present/1\",\"ts\":1800000000,\"proof\":{\"alg\":\"linkring/1\",\"body\":\"AAEC\"},\"prev\":null}",
+    ] {
+        req!(plain(&res!(ordered(doc))), res!(strict(doc)), "{:?} against the plain reader", doc);
+    }
+    for doc in ["{\"a\":1,\"a\":2}", "{\"a\":1,\"b\":{\"a\":1,\"a\":1}}", "{a:1}", "{\"a\":1,}", "[1,]", "", "{\"a\":1} x"] {
+        assert!(ordered(doc).is_err(), "{:?} is not accepted by the ordered reader", doc);
+    }
+    Ok(())
+}

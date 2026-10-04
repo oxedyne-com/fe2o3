@@ -83,6 +83,16 @@
 //! [`interesting`] prefilter is what makes that pass cheap -- a byte that opens no shape is
 //! rejected on a handful of comparisons -- and [`leads_are_covered`] is the test that keeps the
 //! prefilter honest as shapes are added.
+//!
+//! # Text bound for a feed
+//!
+//! [`scan`] is for files a person wrote, and takes the person's word in two ways. A feed's text
+//! has an author who may be anyone, so [`holds`] takes neither, and [`scrub`] is the other table:
+//! Daimond's content scrubber, which replaces each credential in a string with a marker and holds
+//! shapes this module's hook has no reason to refuse, among them JWTs, test-mode Stripe keys and
+//! the secret standing beside a name.
+
+pub mod scrub;
 
 use crate::base64;
 
@@ -441,6 +451,25 @@ pub fn scan(data: &[u8]) -> Vec<Find> {
 		out.sort_by_key(|f| f.line);
 	}
 	out
+}
+
+/// Does this text hold a credential, in any shape [`scan`] knows, with no excuse honoured?
+///
+/// [`scan`] reads a file that a person put there, so it takes the person's word: a marker excuses a
+/// line, and a NUL near the front calls the bytes a binary and passes them. Neither can be
+/// taken from text bound for a log or a feed, whose author may be anyone and whose content is the
+/// very thing in question. Here a marker is more text, and a shape standing beside one is still a
+/// shape. A DER key is not looked for, because its bytes are not text.
+pub fn holds(text: &str) -> bool {
+	let mut kinds = Vec::new();
+	for line in text.as_bytes().split(|b| *b == b'\n') {
+		kinds.clear();
+		kinds_at(line, &mut kinds);
+		if !kinds.is_empty() {
+			return true;
+		}
+	}
+	false
 }
 
 /// Paths that are a secret by name, as ignore rules in git's glob syntax, one per line.
