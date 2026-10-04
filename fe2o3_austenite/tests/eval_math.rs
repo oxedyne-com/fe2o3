@@ -59,7 +59,7 @@ fn typst_available() -> bool {
 	Command::new("typst").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-const PRELUDE: &str = "#set page(width: auto, height: auto, margin: 0pt)\n#show math.equation: set text(weight: 400)\n";
+const PRELUDE: &str = "#set page(width: auto, height: auto, margin: 0pt)\n";
 
 // A construct another unit has still to implement stops a layout with an `Unimplemented` error: the
 // fixture waits for it, and `EVAL_ORACLE_STRICT=math` turns the wait into a failure.
