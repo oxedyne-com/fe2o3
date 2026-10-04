@@ -48,6 +48,7 @@ use oxedyne_fe2o3_net::{
         header::{
             HttpHeadline,
             HttpMethod,
+            HttpVersion,
         },
         msg::{
             HttpMessageReader,
@@ -525,6 +526,9 @@ impl<
 
                     let mut response = None;
                     let close_requested = request.get_connection_close();
+                    // Only an HTTP/1.0 request that asked to keep the connection reaches
+                    // here with `close_requested` false.
+                    let request_is_1_0 = request.header.version == HttpVersion::Http1_0;
                     if close_requested {
                         let mut msg = HttpMessage::new_response(HttpStatus::OK);
                         msg.set_connection_close(true);
@@ -942,6 +946,16 @@ impl<
                                 }
                             }
 
+                            // Say what happens to the connection. A request that asked
+                            // to close, or an HTTP/1.0 one that did not ask to stay, is
+                            // told it will end; an HTTP/1.0 one that asked to stay is told
+                            // it may (RFC 9112 9.3), since it assumes nothing otherwise.
+                            if close_requested {
+                                msg.set_connection_close(true);
+                            } else if request_is_1_0 {
+                                msg.set_connection_close(false);
+                            }
+
                             // The length the response actually carries, which for a
                             // body sent from a file is the window rather than the
                             // empty buffer beside it.
@@ -978,6 +992,12 @@ impl<
                             warn!("{}: traffic recorder rejected entry: {}",
                                 id, e);
                         }
+                    }
+
+                    // The reply is out. A connection that was asked to close ends here,
+                    // by the server, rather than waiting for the client to drop it.
+                    if close_requested {
+                        break;
                     }
                 }
                 Some(Err(e)) => {

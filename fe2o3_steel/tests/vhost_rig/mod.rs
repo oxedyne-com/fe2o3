@@ -388,6 +388,95 @@ impl Rig {
     }
 }
 
+/// One request, written exactly as given, with what the server did to the connection afterwards.
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    pub reply:  Reply,
+    pub closed: bool,   // the server ended the connection within the patience given
+}
+
+impl Rig {
+
+    /// A request as raw text, with nothing added (no `Connection` field, no `Content-Length`), over
+    /// a fresh TLS connection to the named vhost. After one whole response is read, the connection
+    /// is watched for `patience`: `closed` says whether the server ended it in that time.
+    pub async fn exchange(
+        &self,
+        host:       &str,
+        raw:        &str,
+        patience:   std::time::Duration,
+    )
+        -> Outcome<Exchange>
+    {
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await, Network, Init);
+        let addr = res!(listener.local_addr(), Network, Init);
+        let ctx = self.context.clone();
+        let acceptor = TlsAcceptor::from(self.server_tls.clone());
+        let host_owned = host.to_string();
+        let server = tokio::spawn(async move {
+            let (tcp, peer) = match listener.accept().await {
+                Ok(c) => c,
+                Err(e) => return Err(err!(e, "Accept failed."; Network)),
+            };
+            let stream = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => return Err(err!(e, "TLS accept failed."; Network)),
+            };
+            ctx.handle_https(stream, Some(host_owned), peer).await
+        });
+        let tcp = res!(TcpStream::connect(addr).await, Network, Init);
+        let name = res!(ServerName::try_from(host.to_string()), Invalid);
+        let mut stream = res!(TlsConnector::from(self.client_tls.clone()).connect(name, tcp).await,
+            Network);
+        res!(stream.write_all(raw.as_bytes()).await, Network, Write);
+        res!(stream.flush().await, Network, Write);
+        let mut reply = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let mut closed = false;
+        loop {
+            if let Some(i) = reply.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&reply[..i]).to_lowercase();
+                let want = head.lines()
+                    .filter_map(|l| l.strip_prefix("content-length:"))
+                    .filter_map(|v| v.trim().parse::<usize>().ok())
+                    .next()
+                    .unwrap_or(0);
+                if reply.len() >= i + 4 + want {
+                    break;
+                }
+            }
+            match stream.read(&mut chunk).await {
+                Ok(0) | Err(_) => {
+                    closed = true;
+                    break;
+                },
+                Ok(n) => reply.extend_from_slice(&chunk[..n]),
+            }
+        }
+        if !closed {
+            closed = match tokio::time::timeout(patience, stream.read(&mut chunk)).await {
+                Ok(Ok(0)) | Ok(Err(_)) => true,
+                Ok(Ok(_))               => false,
+                Err(_)                  => false,
+            };
+        }
+        drop(stream);
+        let _ = server.await;
+        let split = match reply.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(i) => i,
+            None => return Err(err!("{:?} on {} answered with no complete head: {:?}.",
+                raw, host, String::from_utf8_lossy(&reply); Test)),
+        };
+        Ok(Exchange {
+            reply: Reply {
+                head: String::from_utf8_lossy(&reply[..split]).to_string(),
+                body: String::from_utf8_lossy(&reply[split + 4..]).to_string(),
+            },
+            closed,
+        })
+    }
+}
+
 /// The runtime these tests drive `async` code with from a plain `#[test]`.
 pub fn runtime() -> Outcome<tokio::runtime::Runtime> {
     Ok(res!(tokio::runtime::Runtime::new(), Init))

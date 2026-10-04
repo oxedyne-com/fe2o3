@@ -719,15 +719,19 @@ impl HttpMessage {
         }
     }
 
+    /// Does the message ask for its connection to end after the reply? RFC 9112 section 9.3:
+    /// `Connection: close` asks for it in any version, and a message in HTTP/1.0 asks for it
+    /// unless it carries `Connection: keep-alive`, since only HTTP/1.1 assumes persistence.
     pub fn get_connection_close(&self) -> bool {
         if let Some(hfv) = self.header.get_a_field_value(&HeaderName::Connection) {
             if let HeaderFieldValue::Connection(Some(ct), _) = hfv {
-                if let ConnectionType::Close = ct {
-                    return true;
-                }
+                return match ct {
+                    ConnectionType::Close       => true,
+                    ConnectionType::KeepAlive   => false,
+                };
             }
         }
-        false
+        self.header.version == HttpVersion::Http1_0
     }
 
     pub fn set_connection_close(&mut self, close: bool) -> bool {
@@ -1123,6 +1127,30 @@ mod body_tests {
 
     fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
         Ok(String::from_utf8_lossy(&res!(on_the_wire_bytes(msg))).to_string())
+    }
+
+    /// RFC 9112 section 9.3: HTTP/1.1 is persistent unless it says `close`; HTTP/1.0 is not
+    /// persistent unless it says `keep-alive`. Steel acted on a request's close request only
+    /// where the field said so outright, so an HTTP/1.0 request without a `Connection` field was
+    /// held open as if it were HTTP/1.1.
+    #[test]
+    fn test_a_message_asks_to_close_by_its_version_and_connection_field() -> Outcome<()> {
+        let cases = [
+            ("GET / HTTP/1.1\r\nHost: a\r\n\r\n",                              false),
+            ("GET / HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n",        true),
+            ("GET / HTTP/1.1\r\nHost: a\r\nConnection: Keep-Alive\r\n\r\n",   false),
+            ("GET / HTTP/1.0\r\n\r\n",                                         true),
+            ("GET / HTTP/1.0\r\nHost: a\r\nConnection: close\r\n\r\n",        true),
+            ("GET / HTTP/1.0\r\nHost: a\r\nConnection: Keep-Alive\r\n\r\n",   false),
+        ];
+        for (wire, closes) in cases {
+            let msg = match res!(read_reply(wire, Some(true))) {
+                Some(m) => m,
+                None => return Err(err!("{:?} was read as no request at all.", wire; Test, Missing)),
+            };
+            assert_eq!(msg.get_connection_close(), closes, "{:?}", wire);
+        }
+        Ok(())
     }
 
     /// A reply from an HTTP/1.0 upstream is passed on with a `Content-Length` this module adds,
