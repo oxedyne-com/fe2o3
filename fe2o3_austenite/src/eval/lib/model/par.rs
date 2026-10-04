@@ -14,6 +14,7 @@ use crate::eval::content::{
 use crate::eval::lib::model::common::{
 	choice,
 	expect,
+	expect_cast,
 	pt,
 	to_content,
 	CastErr,
@@ -100,7 +101,7 @@ pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 		(ElemKind::Par, "linebreaks")			=> choice(&v, &["simple", "optimized"], true, false).map(|_| v),
 		(ElemKind::Par, "first-line-indent")	=> first_line_indent(v),
 		(ElemKind::Par, "body")					=> expect(&v, &[K::Content]).map(|_| to_content(v)),
-		(ElemKind::ParLine, "numbering")		=> expect(&v, &[K::Str, K::Func, K::None]).map(|_| v),
+		(ElemKind::ParLine, "numbering")		=> expect_cast(v, &[K::Str, K::Func, K::None]),
 		(ElemKind::ParLine, "number-align")		=> expect(&v, &[K::Alignment, K::Auto]).map(|_| v),
 		(ElemKind::ParLine, "number-margin")	=> expect(&v, &[K::Alignment]).map(|_| v),
 		(ElemKind::ParLine, "number-clearance")	=> expect(&v, &[K::Length, K::Auto]).map(|_| v),

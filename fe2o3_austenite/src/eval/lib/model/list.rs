@@ -27,6 +27,7 @@ use crate::eval::content::{
 use crate::eval::lib::model::common::{
 	self,
 	expect,
+	expect_cast,
 	natural,
 	to_content,
 	CastErr,
@@ -149,7 +150,7 @@ pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 		(ElemKind::List, "marker")		=> marker(v),
 		(ElemKind::List, "marker-align") | (ElemKind::Enum, "number-align")
 			=> expect(&v, &[K::Alignment]).map(|_| v),
-		(ElemKind::Enum, "numbering")	=> expect(&v, &[K::Str, K::Func]).map(|_| v),
+		(ElemKind::Enum, "numbering")	=> expect_cast(v, &[K::Str, K::Func]),
 		(ElemKind::Enum, "start") | (ElemKind::EnumItem, "number") => match v {
 			Value::Auto	=> Ok(v),
 			Value::Int(_)	=> natural(&v, true).map(|_| v),

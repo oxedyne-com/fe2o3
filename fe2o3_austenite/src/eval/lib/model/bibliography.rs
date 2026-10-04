@@ -32,6 +32,7 @@ use crate::eval::content::{
 use crate::eval::lib::model::common::{
 	self,
 	expect,
+	expect_cast,
 	to_content,
 	CastErr,
 	K,
@@ -83,7 +84,7 @@ pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 				}
 				Ok(v)
 			}
-			_ => expect(&v, &[K::Path, K::Str, K::Bytes, K::Array]).map(|_| v),
+			_ => expect_cast(v, &[K::Path, K::Str, K::Bytes, K::Array]),
 		},
 		"title"		=> match v {
 			Value::Auto | Value::None	=> Ok(v),
@@ -95,7 +96,7 @@ pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 			other			=> Err(CastErr::Type(common::mismatch("string", other))),
 		},
 		"target"	=> expect(&v, &[K::Label, K::Func, K::Location, K::Selector, K::Auto]).map(|_| v),
-		"group"		=> expect(&v, &[K::Str, K::None, K::Auto]).map(|_| v),
+		"group"		=> expect_cast(v, &[K::Str, K::None, K::Auto]),
 		_			=> Ok(v),
 	}
 }

@@ -122,6 +122,19 @@ fn refuses_alike(dir: &Path, name: &str, src: &str) -> Outcome<Failure> {
 	Ok(f)
 }
 
+/// As [`refuses_alike`] for the message alone: Typst reports a method's wrong argument at the argument, which
+/// the door has no span for, so it names the call.
+fn refuses_message_alike(dir: &Path, name: &str, src: &str) -> Outcome<Failure> {
+	let (message, _, _) = res!(typst_error(dir, name, src));
+	let mut inst = Instance::new();
+	let f = match inst.compile_pdf(&Project::single(src)) {
+		Ok(_)	=> return Err(err!("The door builds {}, which typst refuses with: {}", name, message; Test)),
+		Err(f)	=> f,
+	};
+	assert_eq!(f.head.message, message, "{}: the message", name);
+	Ok(f)
+}
+
 // Maths: `floor` and `ceil` are symbols
 
 // The sources are the shapes a document writes: the delimiter as a variant of the symbol, called, set
@@ -207,5 +220,88 @@ fn a_while_loop_still_ends_at_ten_thousand_iterations_where_typst_ends_it() -> O
 	assert_eq!(text, "10000");
 	let f = res!(refuses_alike(&dir, "over", "#{ let n = 0; while n < 10001 { n += 1 }; [#n] }\n"));
 	assert_eq!(f.head.message, "loop seems to be infinite");
+	Ok(())
+}
+
+// Strings: a symbol is cast to the string it stands for wherever Typst expects a string
+
+// A computed key of a dictionary is cast to a string, so a symbol is the key its text spells, the
+// variant its modifiers pick: the shape of a table of arrows that maps each to a mark's name.
+const KEYS: [(&str, &str); 4] = [
+	("arrows",		"#let d = ((sym.arrow.r): \"x\", (sym.arrow.l): \"y\", (sym.arrow.r.l): \"z\", (sym.arrow.double.long.r): \"w\")\n#repr(d) #d.keys()\n"),
+	("later-wins",	"#let d = ((sym.alpha): 1, (sym.zws): 2, (math.floor): 3, (\"a\".first()): 4, (\"a\" + \"b\"): 5, (sym.arrow): 6, (sym.arrow.r): 7)\n#repr(d)\n"),
+	("looked-up",	"#let d = ((sym.arrow.r): 1)\n#d.at(\"→\") #d.at(sym.arrow.r) #d.at(sym.arrow.l, default: 5)\n"),
+	("a-string",	"#let d = ((\"a\" + \"b\"): 1, (str(1)): 2)\n#repr(d)\n"),
+];
+
+#[test]
+fn a_symbol_is_a_dictionary_key_as_the_text_it_stands_for_and_any_other_non_string_is_refused() -> Outcome<()> {
+	let dir = res!(work_dir("keys"));
+	for (name, src) in KEYS {
+		res!(builds_alike(&dir, name, src));
+	}
+	// The key's own expression is where Typst reports a value that is not a string.
+	for (name, src, found) in [
+		("integer",	"#let d = ((1): 1)\n",			"integer"),
+		("none",	"#let d = ((none): 1)\n",		"none"),
+		("float",	"#let d = ((1.5): 1)\n",		"float"),
+		("content",	"#let d = (([a]): 1)\n",		"content"),
+		("label",	"#let d = ((<lbl>): 1)\n",		"label"),
+	] {
+		let f = res!(refuses_alike(&dir, name, src));
+		assert_eq!(f.head.message, fmt!("expected string, found {}", found), "{}", name);
+	}
+	Ok(())
+}
+
+// Each is a place Typst's parameter is a string, so a symbol is accepted and read as its text.
+const CASTS: [(&str, &str); 14] = [
+	("dict-at",			"#let d = (\"α\": 1, \"→\": 2)\n#d.at(sym.alpha) #d.at(sym.arrow.r) #d.at(sym.beta, default: 7)\n"),
+	("dict-insert",		"#let d = (a: 1)\n#{ d.insert(sym.alpha, 2) } #d.remove(sym.alpha) #d.remove(sym.beta, default: 3)\n#repr(d)\n"),
+	("dict-assign",		"#let d = (\"α\": 1)\n#{ d.at(sym.alpha) = 9 }\n#{ d.at(sym.alpha) += 1 }\n#repr(d)\n"),
+	("dict-nested",		"#let d = (a: (:))\n#{ d.a.insert(sym.alpha, 1) }\n#repr(d)\n"),
+	("str-patterns",	"#\"xαy\".contains(sym.alpha) #\"xαy\".starts-with(sym.alpha) #\"xα\".ends-with(sym.alpha) #\"xαy\".find(sym.alpha) #\"xαy\".position(sym.alpha) #\"xαy\".match(sym.alpha).text #\"xαyα\".matches(sym.alpha).len() #\"xαy\".split(sym.alpha) #\"αxα\".trim(sym.alpha)\n"),
+	("str-replace",		"#\"xαy\".replace(sym.alpha, sym.beta) #\"xαy\".replace(\"x\", sym.beta) #\"a→b\".replace(regex(\"→\"), m => sym.beta)\n"),
+	("constructors",	"#regex(sym.alpha) #bytes(sym.alpha).len() #str.to-unicode(sym.alpha) #repr(label(sym.alpha))\n"),
+	("keys",			"#let c = counter(sym.alpha)\n#context c.get()\n#let s = state(sym.alpha, 5)\n#context s.get()\n#numbering(sym.alpha, 1)\n"),
+	("case",			"#upper(sym.alpha) #lower(sym.Alpha)\n"),
+	("eval",			"#eval(sym.alpha, mode: \"markup\")\n"),
+	("fields",			"#raw(sym.alpha) #raw(sym.alpha, lang: sym.beta)\n"),
+	("font",			"#text(font: sym.alpha)[x]\n"),
+	("args-at",			"#let f(..a) = a\n#f(α: 1).at(sym.alpha) #f(α: 1).at(sym.beta, default: 0)\n"),
+	("content-at",		"#[a].has(sym.alpha) #[a].at(sym.alpha, default: 1)\n"),
+];
+
+#[test]
+fn a_symbol_is_read_as_its_text_wherever_typst_expects_a_string() -> Outcome<()> {
+	let dir = res!(work_dir("casts"));
+	for (name, src) in CASTS {
+		res!(builds_alike(&dir, name, src));
+	}
+	Ok(())
+}
+
+#[test]
+fn a_value_that_is_neither_a_string_nor_a_symbol_is_refused_where_a_string_is_expected_as_typst_does() -> Outcome<()> {
+	let dir = res!(work_dir("string-refusals"));
+	for (name, src) in [
+		("at-label",		"#let d = (a: 1)\n#d.at(<lbl>)\n"),
+		("at-none",			"#let d = (a: 1)\n#d.at(none)\n"),
+		("at-float",		"#let d = (a: 1)\n#d.at(1.5)\n"),
+		("remove-integer",	"#let d = (a: 1)\n#{ d.remove(1) }\n"),
+		("insert-integer",	"#let d = (a: 1)\n#{ d.insert(1, 2) }\n"),
+	] {
+		let f = res!(refuses_message_alike(&dir, name, src));
+		assert!(f.head.message.starts_with("expected string, found "), "{}: {}", name, f.head.message);
+	}
+	for (name, src) in [
+		("assign-integer",	"#let d = (a: 1)\n#{ d.at(2) = 3 }\n"),
+		// A symbol is a key; an absent one is refused at the assignment as any absent key is.
+		("assign-absent",	"#let d = (a: 1)\n#{ d.at(sym.alpha) = 3 }\n"),
+		("assert-message",	"#assert(false, message: sym.alpha)\n"),
+	] {
+		let f = res!(refuses_alike(&dir, name, src));
+		assert!(!f.head.message.is_empty(), "{}", name);
+	}
 	Ok(())
 }

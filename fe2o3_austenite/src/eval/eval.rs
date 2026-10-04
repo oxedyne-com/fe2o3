@@ -275,7 +275,7 @@ enum Bind {
 
 enum Step {
 	Key(String, Span),
-	At(Value, Span),
+	At(Value, Span, Span),	// the key, where it stands and where the access does
 	First(Span),	// `.first()`, an accessor as `.at()` is
 	Last(Span),
 }
@@ -518,7 +518,7 @@ fn slot<'b>(
 					_ => return Err((*sp, fmt!("cannot mutate a temporary value of type {}", ty.long_name()), None)),
 				}
 			}
-			Step::At(key, sp) => {
+			Step::At(key, key_sp, sp) => {
 				let ty = cur.ty();
 				match (cur, key) {
 					(Value::Array(a), Value::Int(i)) => {
@@ -533,18 +533,21 @@ fn slot<'b>(
 							None	=> return Err((*sp, "array index out of bounds".to_string(), None)),
 						};
 					}
-					(Value::Dict(d), Value::Str(k)) => {
+					(Value::Dict(d), key) => {
+						let k = match key.str_cast() {
+							Some(k)	=> k,
+							None	=> return Err((*key_sp,
+								fmt!("expected string, found {}", key.ty().long_name()), None)),
+						};
 						let d = Arc::make_mut(d);
-						cur = match d.get_mut(k) {
+						cur = match d.get_mut(&k) {
 							Some(v)	=> v,
 							None	=> return Err((*sp, fmt!("dictionary does not contain key \"{}\"", k),
 								Some("use `insert` to add or update values".to_string()))),
 						};
 					}
-					(Value::Array(_), other) => return Err((*sp,
+					(Value::Array(_), other) => return Err((*key_sp,
 						fmt!("expected integer, found {}", other.ty().long_name()), None)),
-					(Value::Dict(_), other) => return Err((*sp,
-						fmt!("expected string, found {}", other.ty().long_name()), None)),
 					_ => return Err((*sp, fmt!("cannot mutate a temporary value of type {}", ty.long_name()), None)),
 				}
 			}
@@ -1295,10 +1298,11 @@ impl<'a> Vm<'a> {
 						(Some(k), Some(e))	=> (k.clone(), e.clone()),
 						_					=> continue,
 					};
-					let key = match res!(self.eval(&k)) {
-						Value::Str(s)	=> s,
-						other			=> return Err(self.error(DiagnosticKind::Type, k.span(),
-							fmt!("expected string, found {}", other.ty().long_name()))),
+					let kv = res!(self.eval(&k));
+					let key = match kv.str_cast() {
+						Some(s)	=> s,
+						None	=> return Err(self.error(DiagnosticKind::Type, k.span(),
+							fmt!("expected string, found {}", kv.ty().long_name()))),
 					};
 					let v = res!(self.eval(&e));
 					d.insert(&key, v);
@@ -1449,8 +1453,11 @@ impl<'a> Vm<'a> {
 					}
 					if c.kind() == SyntaxKind::FieldAccess && ident_text(&c) == Some("at") {
 						let mut args = res!(self.eval_args(node.child(SyntaxKind::Args), node.span()));
-						let key = match args.items.iter().position(|a| a.name.is_none()) {
-							Some(i)	=> args.items.remove(i).value,
+						let (key, key_sp) = match args.items.iter().position(|a| a.name.is_none()) {
+							Some(i)	=> {
+								let a = args.items.remove(i);
+								(a.value, a.value_span)
+							}
 							None	=> return Err(self.error(DiagnosticKind::Type, node.span(), "missing argument: index")),
 						};
 						let target = match first_expr(&c) {
@@ -1458,7 +1465,7 @@ impl<'a> Vm<'a> {
 							None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "cannot mutate a temporary value")),
 						};
 						let (root, rs, mut steps) = res!(self.place(&target));
-						steps.push(Step::At(key, node.span()));
+						steps.push(Step::At(key, key_sp, node.span()));
 						return Ok((root, rs, steps));
 					}
 				}

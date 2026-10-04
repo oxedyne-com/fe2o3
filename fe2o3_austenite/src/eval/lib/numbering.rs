@@ -63,6 +63,7 @@ pub fn apply_trimmed(engine: &mut Engine, numbering: &Value, nums: &[u64]) -> Ou
 /// numbering function is called with the number alone.
 pub fn apply_kth(engine: &mut Engine, numbering: &Value, k: usize, n: u64) -> Outcome<Value> {
 	let span = Span::detached();
+	let numbering = &numbering.clone().symbol_as_str();
 	match numbering {
 		Value::Str(s) => {
 			let pat = match Pattern::parse(s) {
@@ -86,6 +87,7 @@ fn apply_at(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64]) ->
 }
 
 fn apply_with(engine: &mut Engine, span: Span, numbering: &Value, nums: &[u64], trimmed: bool) -> Outcome<Value> {
+	let numbering = &numbering.clone().symbol_as_str();
 	match numbering {
 		Value::Str(s) => {
 			let mut pat = match Pattern::parse(s) {

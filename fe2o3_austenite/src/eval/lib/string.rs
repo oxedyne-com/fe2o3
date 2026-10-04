@@ -81,8 +81,10 @@ enum Pattern {
 }
 
 fn pattern(engine: &mut Engine, span: Span, v: Value) -> Outcome<Pattern> {
+	if let Some(s) = v.str_cast() {
+		return Ok(Pattern::Str(s));
+	}
 	match v {
-		Value::Str(s)	=> Ok(Pattern::Str(s)),
 		Value::Regex(r)	=> Ok(Pattern::Regex(r)),
 		other			=> Err(mismatch(engine, span, "string or regular expression", &other)),
 	}
@@ -343,16 +345,19 @@ fn replace(engine: &mut Engine, span: Span, s: &str, p: &Pattern, with: Value, c
 		let (a, b) = (h.a, h.b);
 		out.push_str(&s[last..a]);
 		match &with {
-			Value::Str(r)	=> out.push_str(r),
+			Value::Str(_) | Value::Symbol(_)	=> match with.str_cast() {
+				Some(r)	=> out.push_str(&r),
+				None	=> return Err(mismatch(engine, span, "string or function", &with)),
+			},
 			Value::Func(_) | Value::Type(_)	=> {
 				let f = res!(crate::eval::lib::array::func_of(engine, span, with.clone()));
 				let f = &f;
 				let mut fa = Args::new(span);
 				fa.push(span, match_dict(s, h));
 				let r = res!(engine.call_func(f, fa));
-				match r {
-					Value::Str(r)	=> out.push_str(&r),
-					other			=> return Err(mismatch(engine, span, "string", &other)),
+				match r.str_cast() {
+					Some(r)	=> out.push_str(&r),
+					None	=> return Err(mismatch(engine, span, "string", &r)),
 				}
 			}
 			other => return Err(mismatch(engine, span, "string or function", other)),

@@ -17,6 +17,7 @@ use crate::eval::lib::model::common::{
 	self,
 	choice,
 	expect,
+	expect_cast,
 	to_content,
 	CastErr,
 	K,
@@ -52,7 +53,7 @@ pub fn fields(kind: ElemKind) -> &'static [FieldSpec] {
 
 pub fn cast(_kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match name {
-		"path"		=> expect(&v, &[K::Str]).map(|_| v),
+		"path"		=> expect_cast(v, &[K::Str]),
 		"format"	=> choice(&v, &["pdf", "png", "svg", "html"], true, false).map(|_| v),
 		"title" | "description" => match v {
 			Value::None	=> Ok(v),

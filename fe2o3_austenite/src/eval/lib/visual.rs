@@ -721,7 +721,7 @@ fn build_image(engine: &mut Engine, args: &mut Args) -> Outcome<Fields> {
 	let span	= args.span;
 	let mut f	= Vec::new();
 	let at		= args.items.iter().find(|a| a.name.is_none()).map(|a| a.span).unwrap_or(span);
-	let source	= res!(args.expect::<Value>("source"));
+	let source	= res!(args.expect::<Value>("source")).symbol_as_str();
 	match &source {
 		// A path is resolved and the file checked now, as Typst reads it when the element is built, so a
 		// missing file is reported at the argument that names it.

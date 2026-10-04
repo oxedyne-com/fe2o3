@@ -225,6 +225,28 @@ impl Value {
 
 	pub fn dict(d: Dict) -> Self { Value::Dict(Arc::new(d)) }
 
+	/// The string a value casts to where Typst expects a `str`: a string itself, or the text of a symbol with
+	/// its modifiers applied (`sym.arrow.r` is "→"). No other type casts.
+	pub fn str_cast(&self) -> Option<Arc<String>> {
+		match self {
+			Value::Str(s)		=> Some(s.clone()),
+			Value::Symbol(s)	=> Some(Arc::new(crate::eval::lib::sym::text(s).to_string())),
+			_					=> None,
+		}
+	}
+
+	/// A symbol as the string it casts to, any other value unchanged: for a `match` where a string is one of
+	/// several types a parameter takes, as in `bytes`.
+	pub fn symbol_as_str(self) -> Value {
+		match self {
+			Value::Symbol(_)	=> match self.str_cast() {
+				Some(s)	=> Value::Str(s),
+				None	=> self,
+			},
+			other				=> other,
+		}
+	}
+
 	pub fn is_none(&self) -> bool { matches!(self, Value::None) }
 
 	pub fn is_auto(&self) -> bool { matches!(self, Value::Auto) }
@@ -601,18 +623,18 @@ impl FromValue for f64 {
 
 impl FromValue for String {
 	fn from_value(v: Value) -> Outcome<Self> {
-		match v {
-			Value::Str(s)	=> Ok((*s).clone()),
-			other			=> Err(mismatch("string", &other)),
+		match v.str_cast() {
+			Some(s)	=> Ok((*s).clone()),
+			None	=> Err(mismatch("string", &v)),
 		}
 	}
 }
 
 impl FromValue for Arc<String> {
 	fn from_value(v: Value) -> Outcome<Self> {
-		match v {
-			Value::Str(s)	=> Ok(s),
-			other			=> Err(mismatch("string", &other)),
+		match v.str_cast() {
+			Some(s)	=> Ok(s),
+			None	=> Err(mismatch("string", &v)),
 		}
 	}
 }

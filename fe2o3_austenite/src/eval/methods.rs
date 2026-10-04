@@ -131,7 +131,7 @@ pub fn call(f: CoreFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			Value::dict(d)
 		}
 		(CoreFn::ArgsAt, Value::Args(a)) => {
-			let key = res!(args.expect::<Value>("key"));
+			let key = res!(args.expect::<Value>("key")).symbol_as_str();
 			let default = res!(args.named::<Value>("default"));
 			let found = match &key {
 				Value::Int(i) => {

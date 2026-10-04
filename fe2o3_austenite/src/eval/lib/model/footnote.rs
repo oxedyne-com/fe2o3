@@ -18,6 +18,7 @@ use crate::eval::content::{
 use crate::eval::lib::model::common::{
 	self,
 	expect,
+	expect_cast,
 	to_content,
 	CastErr,
 	K,
@@ -87,7 +88,7 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 
 pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match (kind, name) {
-		(ElemKind::Footnote, "numbering")	=> expect(&v, &[K::Str, K::Func]).map(|_| v),
+		(ElemKind::Footnote, "numbering")	=> expect_cast(v, &[K::Str, K::Func]),
 		(ElemKind::Footnote, "body") => match v {
 			Value::Label(_)	=> Ok(v),
 			other			=> expect(&other, &[K::Content, K::Label]).map(|_| to_content(other)),

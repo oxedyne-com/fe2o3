@@ -367,6 +367,17 @@ pub fn expect(v: &Value, ks: &[K]) -> Result<(), CastErr> {
 	Err(CastErr::Type(mismatch(&list(&names), v)))
 }
 
+/// As [`expect`], handing the value back as the field keeps it: a symbol where a string or a path is
+/// accepted is stored as the string it casts to, as Typst's `Str` cast makes it.
+pub fn expect_cast(v: Value, ks: &[K]) -> Result<Value, CastErr> {
+	let v = if ks.iter().any(|k| matches!(k, K::Str | K::Path)) && !ks.iter().any(|k| k.accepts(&v)) {
+		v.symbol_as_str()
+	} else {
+		v
+	};
+	expect(&v, ks).map(|_| v)
+}
+
 /// "A, B, or C", as Typst lists what a cast accepts.
 pub fn list(names: &[&str]) -> String {
 	match names.len() {

@@ -74,7 +74,7 @@ pub fn func_scope(f: DataFn, name: &str) -> Option<Value> {
 
 // The bytes a data function reads: a path through the vfs, or bytes given inline.
 fn source(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<Vec<u8>>> {
-	match v {
+	match v.symbol_as_str() {
 		Value::Str(p) => {
 			let path = res!(resolve_path(engine, &p, span.file, span));
 			Ok(Arc::new(res!(read_file(engine, &path, span))))
@@ -118,7 +118,7 @@ pub fn call(f: DataFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let p = res!(need(engine, &mut args, "path"));
 			let enc = res!(args.named::<Value>("encoding"));
 			res!(finish(engine, args));
-			let path = match p {
+			let path = match p.symbol_as_str() {
 				Value::Str(s)	=> s,
 				other			=> return Err(mismatch(engine, span, "string", &other)),
 			};

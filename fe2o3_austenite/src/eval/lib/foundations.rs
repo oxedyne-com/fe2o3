@@ -423,9 +423,9 @@ pub fn named_bool(engine: &mut Engine, args: &mut Args, name: &str, default: boo
 }
 
 pub fn str_of(engine: &mut Engine, span: Span, v: Value) -> Outcome<Arc<String>> {
-	match v {
-		Value::Str(s)	=> Ok(s),
-		other			=> Err(mismatch(engine, span, "string", &other)),
+	match v.str_cast() {
+		Some(s)	=> Ok(s),
+		None	=> Err(mismatch(engine, span, "string", &v)),
 	}
 }
 
@@ -568,7 +568,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		FoundFn::Bytes => {
 			let v = res!(need(engine, &mut args, "value"));
 			res!(finish(engine, args));
-			match v {
+			match v.symbol_as_str() {
 				Value::Str(s)	=> Value::Bytes(Arc::new(s.as_bytes().to_vec())),
 				Value::Bytes(b)	=> Value::Bytes(b),
 				Value::Array(a)	=> {
@@ -596,7 +596,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		FoundFn::Decimal => {
 			let v = res!(need(engine, &mut args, "value"));
 			res!(finish(engine, args));
-			match v {
+			match v.symbol_as_str() {
 				Value::Decimal(d)	=> Value::Decimal(d),
 				Value::Int(i)		=> Value::Decimal(Decimal::from(i)),
 				Value::Bool(b)		=> Value::Decimal(Decimal::from(b as i64)),
@@ -821,7 +821,7 @@ pub fn call(f: FoundFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 }
 
 fn assert_fail(engine: &mut Engine, span: Span, msg: Option<Value>, dflt: String) -> Error<ErrTag> {
-	match msg {
+	match msg.map(Value::symbol_as_str) {
 		Some(Value::Str(s))	=> engine.error(DiagnosticKind::Type, span, fmt!("assertion failed: {}", s)),
 		_					=> engine.error(DiagnosticKind::Type, span, dflt),
 	}
@@ -971,7 +971,7 @@ fn range(engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 // Conversions
 
 fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
-	match v {
+	match v.symbol_as_str() {
 		Value::Int(i)	=> Ok(Value::Int(i)),
 		Value::Bool(b)	=> Ok(Value::Int(b as i64)),
 		Value::Decimal(d)	=> match d.to_i64() {
@@ -1014,7 +1014,7 @@ fn to_int(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
 }
 
 fn to_float(engine: &mut Engine, span: Span, v: Value) -> Outcome<Value> {
-	match v {
+	match v.symbol_as_str() {
 		Value::Float(f)	=> Ok(Value::Float(f)),
 		Value::Int(i)	=> Ok(Value::Float(i as f64)),
 		Value::Bool(b)	=> Ok(Value::Float(if b { 1.0 } else { 0.0 })),

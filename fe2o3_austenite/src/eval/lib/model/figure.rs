@@ -24,6 +24,7 @@ use crate::eval::lib::model::common::{
 	alignment_of,
 	choice,
 	expect,
+	expect_cast,
 	to_content,
 	CastErr,
 	K,
@@ -93,7 +94,7 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match (kind, name) {
 		(ElemKind::Figure, "body")			=> expect(&v, &[K::Content]).map(|_| to_content(v)),
-		(ElemKind::Figure, "alt")			=> expect(&v, &[K::Str, K::None]).map(|_| v),
+		(ElemKind::Figure, "alt")			=> expect_cast(v, &[K::Str, K::None]),
 		(ElemKind::Figure, "placement")		=> match v {
 			Value::None | Value::Auto	=> Ok(v),
 			other						=> alignment_of(&other, &["top", "horizon", "bottom"]).map(|_| other),
@@ -112,7 +113,7 @@ pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 			other	=> Err(CastErr::Type(common::mismatch("function, string, or auto", other))),
 		},
 		(ElemKind::Figure, "supplement")	=> heading::supplement(v),
-		(ElemKind::Figure, "numbering")		=> expect(&v, &[K::Str, K::Func, K::None]).map(|_| v),
+		(ElemKind::Figure, "numbering")		=> expect_cast(v, &[K::Str, K::Func, K::None]),
 		(ElemKind::Figure, "gap")			=> expect(&v, &[K::Length]).map(|_| v),
 		(ElemKind::Figure, "outlined")		=> expect(&v, &[K::Bool]).map(|_| v),
 		(ElemKind::FigureCaption, "position")	=> alignment_of(&v, &["top", "bottom"]).map(|_| v),

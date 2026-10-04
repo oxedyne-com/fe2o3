@@ -152,9 +152,11 @@ pub fn call(f: IntroFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 		}
 		IntroFn::State		=> {
 			let key = match res!(take(engine, &mut args, "key")) {
-				(_, Value::Str(s))	=> s.to_string(),
-				(at, other)			=> return Err(engine.error(DiagnosticKind::Type, at, fmt!(
-					"expected string, found {}", other.ty().long_name()))),
+				(at, v) => match v.str_cast() {
+					Some(s)	=> s.to_string(),
+					None	=> return Err(engine.error(DiagnosticKind::Type, at, fmt!(
+						"expected string, found {}", v.ty().long_name()))),
+				},
 			};
 			let init = res!(args.eat::<Value>()).unwrap_or(Value::None);
 			Value::State(Arc::new(State { key, init }))
@@ -230,7 +232,7 @@ fn finish(engine: &mut Engine, args: Args) -> Outcome<()> {
 /// Typst's `CounterKey` cast: a string, a label, a location, an element function (`page` is the page
 /// counter) or a selector, the last two over locatable elements only.
 fn counter_key(engine: &mut Engine, span: Span, v: Value) -> Outcome<CounterKey> {
-	match v {
+	match v.symbol_as_str() {
 		Value::Str(s)		=> Ok(CounterKey::Str(s.to_string())),
 		Value::Label(l)		=> Ok(CounterKey::Selector(Selector::Label(l))),
 		Value::Location(l)	=> Ok(CounterKey::Selector(Selector::Location(l))),
@@ -281,7 +283,7 @@ fn counter_method(engine: &mut Engine, span: Span, f: IntroFn, c: &Counter, args
 			introspect::state_value(&res!(introspect::counter_final(engine, c)))
 		}
 		IntroFn::CounterDisplay	=> {
-			let numbering = match res!(args.eat::<Value>()) {
+			let numbering = match res!(args.eat::<Value>()).map(Value::symbol_as_str) {
 				None | Some(Value::Auto)	=> None,
 				Some(v @ Value::Str(_)) | Some(v @ Value::Func(_))	=> Some(v),
 				Some(other)					=> return Err(engine.error(DiagnosticKind::Type, span, fmt!(

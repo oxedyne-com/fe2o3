@@ -310,6 +310,24 @@ impl FieldType {
 				Type::Content | Type::Str | Type::Symbol | Type::Int | Type::Float | Type::None),
 		}
 	}
+
+	/// Does the field take the value once Typst's casts are made? A symbol is taken where a string is.
+	pub fn castable(self, v: &Value) -> bool {
+		self.accepts(v) || (matches!(v, Value::Symbol(_)) && self.takes_str())
+	}
+
+	/// The value as the field keeps it: a symbol a string field takes is stored as the string it casts to.
+	pub fn cast(self, v: Value) -> Value {
+		if !self.accepts(&v) && self.castable(&v) { v.symbol_as_str() } else { v }
+	}
+
+	fn takes_str(self) -> bool {
+		match self {
+			FieldType::Of(t)		=> t == Type::Str,
+			FieldType::OneOf(ts)	=> ts.contains(&Type::Str),
+			FieldType::Any | FieldType::Content	=> false,
+		}
+	}
 }
 
 /// A default a `static` schema can hold. `Computed` means the owning unit resolves it in code (Typst's
@@ -747,15 +765,16 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 		} else if spec.positional && spec.required {
 			Some(res!(args.expect::<Value>(spec.name)))
 		} else if spec.positional {
-			res!(args.find::<Value>(|v| spec.ty.accepts(v)))
+			res!(args.find::<Value>(|v| spec.ty.castable(v)))
 		} else {
 			res!(args.named::<Value>(spec.name))
 		};
 		if let Some(v) = value {
-			if !spec.ty.accepts(&v) {
+			if !spec.ty.castable(&v) {
 				return Err(engine.error(DiagnosticKind::Type, span, fmt!(
 					"{}: field `{}` does not accept {}", kind.path(), spec.name, v.ty().name())));
 			}
+			let v = spec.ty.cast(v);
 			fields.push((id, res!(cast_field(kind, spec.name, v))));
 		}
 	}

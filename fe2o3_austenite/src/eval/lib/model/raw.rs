@@ -18,6 +18,7 @@ use crate::eval::lib::model::common::{
 	self,
 	alignment_of,
 	expect,
+	expect_cast,
 	natural,
 	to_content,
 	CastErr,
@@ -75,12 +76,12 @@ pub fn default_value(kind: ElemKind, name: &str) -> Option<Value> {
 
 pub fn cast(kind: ElemKind, name: &str, v: Value) -> Result<Value, CastErr> {
 	match (kind, name) {
-		(ElemKind::Raw, "text") | (ElemKind::RawLine, "text")	=> expect(&v, &[K::Str]).map(|_| v),
+		(ElemKind::Raw, "text") | (ElemKind::RawLine, "text")	=> expect_cast(v, &[K::Str]),
 		(ElemKind::Raw, "block")		=> expect(&v, &[K::Bool]).map(|_| v),
-		(ElemKind::Raw, "lang")			=> expect(&v, &[K::Str, K::None]).map(|_| v),
+		(ElemKind::Raw, "lang")			=> expect_cast(v, &[K::Str, K::None]),
 		(ElemKind::Raw, "align")		=> alignment_of(&v, &["start", "left", "center", "right", "end"]).map(|_| v),
-		(ElemKind::Raw, "syntaxes")		=> expect(&v, &[K::Path, K::Str, K::Bytes, K::Array]).map(|_| v),
-		(ElemKind::Raw, "theme")		=> expect(&v, &[K::Path, K::Str, K::Bytes, K::None, K::Auto]).map(|_| v),
+		(ElemKind::Raw, "syntaxes")		=> expect_cast(v, &[K::Path, K::Str, K::Bytes, K::Array]),
+		(ElemKind::Raw, "theme")		=> expect_cast(v, &[K::Path, K::Str, K::Bytes, K::None, K::Auto]),
 		(ElemKind::Raw, "tab-size")		=> natural(&v, true).map(|_| v),
 		(ElemKind::RawLine, "number") | (ElemKind::RawLine, "count")	=> expect(&v, &[K::Int]).map(|_| v),
 		(ElemKind::RawLine, "body")		=> expect(&v, &[K::Content]).map(|_| to_content(v)),

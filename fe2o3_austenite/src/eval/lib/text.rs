@@ -188,7 +188,7 @@ pub fn call(f: TextFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 				None	=> return Err(engine.error(DiagnosticKind::Type, span, "missing argument: text")),
 			};
 			res!(finish(engine, args));
-			match v {
+			match v.symbol_as_str() {
 				Value::Str(s) => Ok(Value::str(if upper { s.to_uppercase() } else { s.to_lowercase() })),
 				Value::Content(c) => {
 					let case = if upper { "upper" } else { "lower" };

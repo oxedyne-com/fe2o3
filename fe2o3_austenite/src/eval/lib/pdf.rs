@@ -79,7 +79,7 @@ pub fn call(f: PdfFn, engine: &mut Engine, mut args: Args) -> Outcome<Value> {
 			let at = args.items.iter().find(|a| a.name.is_none()).map(|a| a.span).unwrap_or(span);
 			let (at_rel, at_mime, at_desc) = (
 				value_span(&args, "relationship"), value_span(&args, "mime-type"), value_span(&args, "description"));
-			let path = match res!(need(engine, &mut args, "path")) {
+			let path = match res!(need(engine, &mut args, "path")).symbol_as_str() {
 				Value::Str(s)	=> s,
 				other			=> return Err(mismatch(engine, span, "string", &other)),
 			};

@@ -848,15 +848,16 @@ pub fn set_rule(engine: &mut Engine, kind: ElemKind, mut args: Args) -> Outcome<
 			}
 		}
 		if taken.is_none() && spec.positional {
-			if let Some(p) = args.items.iter().position(|a| a.name.is_none() && spec.ty.accepts(&a.value)) {
+			if let Some(p) = args.items.iter().position(|a| a.name.is_none() && spec.ty.castable(&a.value)) {
 				taken = Some(args.items.remove(p));
 			}
 		}
-		if let Some(arg) = taken {
-			if !spec.ty.accepts(&arg.value) {
+		if let Some(mut arg) = taken {
+			if !spec.ty.castable(&arg.value) {
 				let msg = expected_message(spec.ty, &arg.value);
 				return Err(engine.error(DiagnosticKind::Type, arg.span, msg));
 			}
+			arg.value = spec.ty.cast(arg.value);
 			// Cast as construction casts, so `set` refuses at the rule what the element would refuse.
 			let value = match content::cast_field(kind, spec.name, arg.value) {
 				Ok(v)	=> v,
