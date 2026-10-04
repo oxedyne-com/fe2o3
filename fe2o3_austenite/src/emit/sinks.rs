@@ -12,6 +12,7 @@ use crate::emit::svg;
 use crate::eval::content::ElemKind;
 use crate::eval::fixpoint::PageSink;
 use crate::eval::intro::Introspector;
+use crate::eval::lib::model::lookup;
 use crate::eval::select::Selector;
 use crate::eval::value::Value;
 use crate::eval::Engine;
@@ -120,21 +121,22 @@ impl PageSink for PdfSink {
 		Ok(())
 	}
 
-	fn finish(&mut self, _engine: &mut Engine, intro: &Introspector) -> Outcome<()> {
+	fn finish(&mut self, engine: &mut Engine, intro: &Introspector) -> Outcome<()> {
 		let stream = match self.stream.take() {
 			Some(s)	=> s,
 			None	=> return Err(err!("The PDF sink finished twice."; Bug)),
 		};
-		let outline	= res!(outline(intro));
+		let outline	= res!(outline(engine, intro));
 		let info	= crate::emit::pdf::pdf_info(intro.info());
 		self.out	= Some(res!(stream.close(outline, Some(info))));
 		Ok(())
 	}
 }
 
-/// The document outline, from the final introspector: each outlined heading in document order, titled
-/// with its plain text, at its level and the page its start tag landed on.
-pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
+/// The document outline, from the final introspector: each outlined heading in document order, at its level
+/// and the page its start tag landed on. A numbered heading is titled as Typst titles it, its number as the
+/// heading shows it, a space and the plain text of its body; any other with its body alone.
+pub fn outline(engine: &mut Engine, intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 	let mut items = Vec::new();
 	for h in res!(intro.query(&Selector::Elem(ElemKind::Heading, None))) {
 		let outlined = !matches!(h.field("outlined"), Some(Value::Bool(false)));
@@ -149,13 +151,23 @@ pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 			Some(Value::Int(l)) if *l >= 1	=> (*l - 1) as u8,
 			_								=> 0,
 		};
-		let title = match h.field("body") {
+		let body = match h.field("body") {
 			Some(Value::Content(c))	=> c.plain_text(),
 			_						=> String::new(),
 		};
 		let page = match h.location().and_then(|l| intro.page(l)) {
 			Some(p) if p >= 1	=> (p - 1) as usize,
 			_					=> continue,
+		};
+		let title = match (h.field("numbering"), h.location()) {
+			(None | Some(Value::None) | Some(Value::Auto), _)	=> body,
+			(Some(numbering), Some(loc))	=> {
+				let numbering = numbering.clone();
+				let numbers = res!(lookup::display_counter(
+					engine, &lookup::elem_counter(ElemKind::Heading), loc, &numbering, h.span()));
+				fmt!("{} {}", numbers.plain_text(), body)
+			},
+			(Some(_), None)	=> body,
 		};
 		items.push(OutlineItem { title, page, level });
 	}
