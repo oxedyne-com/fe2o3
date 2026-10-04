@@ -2625,6 +2625,11 @@ fn layout_single_sized(engine: &mut Engine, spec: &BlockSpec, region: &Regions, 
 	Ok(frame)
 }
 
+/// Is the element a grid or a table? Typst sizes one to its columns and rows, never to the region it is in.
+fn is_grid(elem: &Content) -> bool {
+	matches!(elem.kind(), Some(ElemKind::Grid | ElemKind::Table))
+}
+
 /// A fragment's body laid out, before it is sized, inset or painted.
 struct Laid {
 	frame:	Frame,
@@ -2755,11 +2760,15 @@ impl MultiChild {
 		Ok(false)
 	}
 
-	/// The regions a layout routine lays its body out in: the block's own, expanded as its parent's are.
+	/// The regions a layout routine lays its body out in: the block's own, expanded as its parent's are. A
+	/// grid or table takes none of the parent's expansion: its frame is as wide as its columns whatever the
+	/// region, so that `align` has room to place it. A fractional column still fills the region, through the
+	/// width of the plan.
 	fn inner(&self, pod: &Regions, regions: &Regions) -> Regions {
 		let mut p = pod.clone();
 		if matches!(self.spec.body, Body::Layouter) {
-			p.expand_x = (pod.expand_x || regions.expand_x) && pod.w.is_finite();
+			let from = !is_grid(&self.spec.elem);
+			p.expand_x = (pod.expand_x || (from && regions.expand_x)) && pod.w.is_finite();
 			p.expand_y = (pod.expand_y || regions.expand_y) && pod.h.is_finite();
 		}
 		p
@@ -3298,9 +3307,9 @@ impl Splitter {
 	fn finish(&mut self) {
 		let mut done = std::mem::replace(&mut self.cur, Frame::new(0.0, 0.0));
 		done.h = if self.regions.expand_y { self.regions.h } else { self.y };
-		if self.regions.expand_x {
-			done.w = self.regions.w;
-		}
+		// A grid is as wide as its columns, and no wider than the region where they overflow it: Typst places
+		// an overflowing grid at the region's start, whatever the alignment.
+		done.w = if self.regions.expand_x { self.regions.w } else { done.w.min(self.regions.w) };
 		self.frames.push(done);
 	}
 
