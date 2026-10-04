@@ -44,6 +44,7 @@ use crate::eval::value::{
 };
 use crate::eval::Engine;
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -233,21 +234,23 @@ fn realise_with(
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
-	let mut s = State {
-		engine,
-		mode,
-		keep_model,
-		sink:			Vec::new(),
-		groupings:		Vec::new(),
-		outside:		mode == RealiseMode::Document,
-		may_attach:		false,
-		saw_parbreak:	false,
-		fully_inline:	false,
-		depth:			0,
-	};
-	res!(s.visit(content, styles));
-	res!(s.finish());
-	Ok((s.sink, s.fully_inline))
+	engine.timed(Phase::Realise, |engine| {
+		let mut s = State {
+			engine,
+			mode,
+			keep_model,
+			sink:			Vec::new(),
+			groupings:		Vec::new(),
+			outside:		mode == RealiseMode::Document,
+			may_attach:		false,
+			saw_parbreak:	false,
+			fully_inline:	false,
+			depth:			0,
+		};
+		res!(s.visit(content, styles));
+		res!(s.finish());
+		Ok((s.sink, s.fully_inline))
+	})
 }
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?

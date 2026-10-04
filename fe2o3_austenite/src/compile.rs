@@ -52,6 +52,10 @@ use crate::ledger::{
 use crate::lang;
 use crate::page::PageGeometry;
 use crate::theme::Theme;
+use crate::timings::{
+	Phase,
+	Timings,
+};
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -390,13 +394,32 @@ pub fn assemble_eval<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
+	assemble_eval_timed(main_path, root, fonts, sink, None)
+}
+
+/// As [`assemble_eval`], recording the phases' wall time in `timings` when there is a recorder, which is
+/// started by [`Timings::start`] with `Load` open and left in the engine for the caller to read. The
+/// output is the same bytes with the recorder or without it.
+pub fn assemble_eval_timed<S: PageSink>(
+	main_path:	&Path,
+	root:		&Path,
+	fonts:		FontStore,
+	sink:		&mut S,
+	timings:	Option<Timings>,
+)
+	-> Outcome<Evaluated>
+{
 	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 	let main_path	= canon(main_path);
 	let mut world = World::new(canon(root));
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
-	let laid = match eval::eval_source(&mut engine, id) {
+	engine.timings = timings;
+	if let Some(t) = engine.timings.as_mut() {
+		t.leave();	// the load
+	}
+	let laid = match engine.timed(Phase::Eval, |engine| eval::eval_source(engine, id)) {
 		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
 		Err(e)		=> Err(e),
 	};

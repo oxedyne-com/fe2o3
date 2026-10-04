@@ -68,6 +68,7 @@ use crate::page::{
 	Swap,
 };
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -406,12 +407,14 @@ impl Paginator {
 	pub fn next_placed<R: Recorder>(&mut self, engine: &mut Engine, rec: &mut R)
 		-> Outcome<Option<(Page, Arc<RunSetup>)>>
 	{
-		match res!(self.next_page(engine)) {
+		match res!(engine.timed(Phase::Flow, |engine| self.next_page(engine))) {
 			None		=> Ok(None),
 			Some(body)	=> {
 				let setup = body.setup.clone();
-				let marginals = res!(decorate::decorate_page(engine, &setup, (body.body.w, body.body.h)));
-				Ok(Some((res!(driver::place_page(body, marginals, rec)), setup)))
+				let marginals = res!(engine.timed(Phase::Decorate, |engine|
+					decorate::decorate_page(engine, &setup, (body.body.w, body.body.h))));
+				let page = res!(engine.timed(Phase::Place, |_| driver::place_page(body, marginals, rec)));
+				Ok(Some((page, setup)))
 			},
 		}
 	}

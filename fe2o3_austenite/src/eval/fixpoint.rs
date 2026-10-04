@@ -39,6 +39,7 @@ use crate::eval::{
 use crate::flow;
 use crate::page::Page;
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -134,7 +135,7 @@ pub fn place<P: PageSource, S: PageSink>(
 	while let Some((page, numbering)) = res!(source.next_page(engine, builder)) {
 		n += 1;
 		builder.page(page.number, &numbering);
-		res!(sink.page(engine, page));
+		res!(engine.timed(Phase::Sink, |engine| sink.page(engine, page)));
 	}
 	Ok(n)
 }
@@ -165,19 +166,25 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		engine.context = Context::default();
 		engine.fuel = fuel;
 		engine.body = None;
+		if let Some(t) = engine.timings.as_mut() {
+			t.begin_pass();
+		}
 		let mut builder = Builder::new();
 		let laid = layouter.lay(engine, &module.content, &styles, &mut builder, sink);
 		let pages = match laid {
 			Ok(n)	=> n,
 			Err(e)	=> {
-				res!(sink.discard_pass());
+				res!(engine.timed(Phase::Sink, |_| sink.discard_pass()));
 				return Err(e);
 			}
 		};
-		let intro = Arc::new(builder.finish());
-		let converged = res!(engine.reads.holds(&intro));
+		let (intro, converged) = res!(engine.timed(Phase::Settle, |engine| -> Outcome<_> {
+			let intro = Arc::new(builder.finish());
+			let converged = res!(engine.reads.holds(&intro));
+			Ok((intro, converged))
+		}));
 		if !converged && passes < MAX_PASSES {
-			res!(sink.discard_pass());
+			res!(engine.timed(Phase::Sink, |_| sink.discard_pass()));
 			engine.intro = intro;
 			continue;
 		}
@@ -188,10 +195,10 @@ pub fn run_with<L: Layouter, S: PageSink>(
 		dedupe_errors(&mut engine.diags, mark);
 		if let Some(d) = engine.diags[mark..].iter().find(|d| d.is_error()) {
 			let e = err!("{}", d.message; Input, Invalid);
-			res!(sink.discard_pass());
+			res!(engine.timed(Phase::Sink, |_| sink.discard_pass()));
 			return Err(e);
 		}
-		res!(sink.finish(engine, &intro));
+		res!(engine.timed(Phase::Finish, |engine| sink.finish(engine, &intro)));
 		return Ok(Laid { intro, pages, passes, converged });
 	}
 }

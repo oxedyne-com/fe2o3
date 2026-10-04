@@ -56,6 +56,7 @@ pub mod plot;
 pub mod syntax;
 pub mod table;
 pub mod theme;
+pub mod timings;
 pub mod vfs;
 pub mod watch;
 

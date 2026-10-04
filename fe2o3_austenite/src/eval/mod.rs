@@ -74,6 +74,10 @@ use crate::syntax::{
 	Source,
 	Span,
 };
+use crate::timings::{
+	Phase,
+	Timings,
+};
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -156,6 +160,7 @@ pub struct Engine {
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
 	pub body:		Option<bool>,		// whether the pass's realised body set content; none until it is realised
+	pub timings:	Option<Timings>,	// the per-phase clock of `--timings`; none costs a test of the option
 }
 
 /// The kind of an error a native function raised with `err!` and no diagnostic of its own: the kind its
@@ -180,7 +185,20 @@ impl Engine {
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),
 			body:		None,
+			timings:	None,
 		}
+	}
+
+	/// Runs `f` as phase `p` of the timing record. With no recorder it is a call of `f`.
+	pub fn timed<R, F: FnOnce(&mut Engine) -> R>(&mut self, p: Phase, f: F) -> R {
+		if let Some(t) = self.timings.as_mut() {
+			t.enter(p);
+		}
+		let out = f(self);
+		if let Some(t) = self.timings.as_mut() {
+			t.leave();
+		}
+		out
 	}
 
 	/// Records an error diagnostic at `span` and returns the error to propagate.
