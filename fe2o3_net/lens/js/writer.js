@@ -34,6 +34,7 @@ import {
 	clipChars,
 	createRedactor,
 	createScrubber,
+	soundText,
 } from './redact.js';
 
 export {
@@ -159,14 +160,16 @@ export function createWriter(cfg) {
 	// A string clipped to `n` characters. THE SCRUB HAPPENS BEFORE THE CUT: a cut destroys the very
 	// shape the scrubber matches on, so a key beginning at character 190 of a line would otherwise
 	// reach the egress seam as a prefix too short for any rule to know and every reader still can.
-	// ANSI colouring (fe2o3's `err!` wraps a wasm-side error in it) is stripped as noise.
+	// ANSI colouring (fe2o3's `err!` wraps a wasm-side error in it) is stripped as noise. A lone half of a
+	// surrogate pair in the text (a message cut by the caller, a truncated read) becomes U+FFFD before the
+	// cut, since JSON would write it as an escape that the peer's strict reader refuses.
 	function clip(s, n) {
 		const v = scrub.text(String(s == null ? '' : s))
 			.replace(/\u001b\[[0-9;]*m/g, '')
 			.replace(/\[[0-9]{1,2}(;[0-9]{1,2})*m/g, '')
 			.replace(/\s+/g, ' ')
 			.trim();
-		return clipChars(v, n);
+		return clipChars(soundText(v), n);
 	}
 
 	function device() { try { return String((cfg.device && cfg.device()) || ''); } catch (e) { return ''; } }
@@ -205,9 +208,10 @@ export function createWriter(cfg) {
 			});
 			if (!bigK) break;
 			// Characters, not bytes: a multi-byte string loses at least `over` bytes this way, never
-			// fewer, so the loop always converges.
+			// fewer, so the loop always converges. `clipChars` gives up one more unit where the cut
+			// falls inside a pair, which only removes more, and leaves no half to be written as an escape.
 			const keep = o[bigK].length - over - 1;
-			if (keep > 0) o[bigK] = o[bigK].slice(0, keep);
+			if (keep > 0) o[bigK] = clipChars(o[bigK], keep);
 			else delete o[bigK];
 		}
 		s = str(o);

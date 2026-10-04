@@ -54,4 +54,28 @@ await part(async () => {
 	h.halt();
 });
 
+section('writer: the egress trim cuts at a character, and a lone half is mended on the way in');
+await part(async () => {
+	// QA #4 of the Opus bundle: `fit` trimmed the largest string by unit, so a trim that fell inside an emoji
+	// left half of it, and the peer's strict reader covered the whole row. Eight lengths, as the report ran them.
+	const bad = [];
+	for (let pad = 0; pad < 8; pad++) {
+		const h = makeHost({ fastTimers: true, respond: () => 500 });
+		const w = makeWriter(h);
+		w.noteError('x'.repeat(pad) + E.repeat(98), '');
+		const row = w.outbox()[0];
+		if (!row || /\\ud[89a-f][0-9a-f]{2}/i.test(row.data) || lone(JSON.parse(row.data).msg || '')) bad.push(pad);
+		h.halt();
+	}
+	check('no row the trim cuts holds half of a pair, at any of eight lengths', bad.length === 0, 'rows with half a pair, by pad: ' + bad.join(','));
+
+	// A lone half in the message as it arrives is mended by the writer's own clip, to U+FFFD, and not passed on.
+	const h = makeHost({ fastTimers: true, respond: () => 500 });
+	const w = makeWriter(h);
+	w.noteError('broke here \uD83D and \uDE00 there', '');
+	const data = w.outbox()[0].data;
+	check('a lone half in a message reaches the row as U+FFFD, never as an escape', !/\\ud[89a-f][0-9a-f]{2}/i.test(data) && JSON.parse(data).msg === 'broke here \uFFFD and \uFFFD there', data.slice(-60));
+	h.halt();
+});
+
 finish('clip');
