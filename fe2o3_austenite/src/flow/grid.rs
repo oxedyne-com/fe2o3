@@ -1411,6 +1411,10 @@ fn size_columns<L: CellLayout>(
 			if last_auto != Some(x) {
 				continue;
 			}
+			// A cell that spans a fractional column asks nothing of the auto columns: the fraction takes what it needs.
+			if grid.cols[x0..x1].iter().any(|c| matches!(c, Sizing::Fr(_))) {
+				continue;
+			}
 			// A cell spanning only relative rows knows its height; otherwise the region's is the guess.
 			let mut height	= Sp::ZERO;
 			let mut fixed	= true;
