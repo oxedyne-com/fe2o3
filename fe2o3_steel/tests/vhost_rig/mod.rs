@@ -304,6 +304,21 @@ impl Rig {
     )
         -> Outcome<Reply>
     {
+        self.fetch_as(host, "HTTP/1.1", method, path, fields, body).await
+    }
+
+    /// As [`Rig::fetch`], naming the HTTP version the request line carries.
+    pub async fn fetch_as(
+        &self,
+        host:       &str,
+        version:    &str,
+        method:     &str,
+        path:       &str,
+        fields:     &[&str],
+        body:       &str,
+    )
+        -> Outcome<Reply>
+    {
         let listener = res!(TcpListener::bind("127.0.0.1:0").await, Network, Init);
         let addr = res!(listener.local_addr(), Network, Init);
         let ctx = self.context.clone();
@@ -324,7 +339,7 @@ impl Rig {
         let name = res!(ServerName::try_from(host.to_string()), Invalid);
         let mut stream = res!(TlsConnector::from(self.client_tls.clone()).connect(name, tcp).await,
             Network);
-        let mut request = fmt!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, path, host);
+        let mut request = fmt!("{} {} {}\r\nHost: {}\r\n", method, path, version, host);
         for f in fields {
             request.push_str(f);
             request.push_str("\r\n");
@@ -341,11 +356,15 @@ impl Rig {
         loop {
             if let Some(i) = reply.windows(4).position(|w| w == b"\r\n\r\n") {
                 let head = String::from_utf8_lossy(&reply[..i]).to_lowercase();
-                let want = head.lines()
-                    .filter_map(|l| l.strip_prefix("content-length:"))
-                    .filter_map(|v| v.trim().parse::<usize>().ok())
-                    .next()
-                    .unwrap_or(0);
+                // A HEAD answer states the length of a body it does not send.
+                let want = match method == "HEAD" {
+                    true    => 0,
+                    false   => head.lines()
+                        .filter_map(|l| l.strip_prefix("content-length:"))
+                        .filter_map(|v| v.trim().parse::<usize>().ok())
+                        .next()
+                        .unwrap_or(0),
+                };
                 if reply.len() >= i + 4 + want {
                     break;
                 }

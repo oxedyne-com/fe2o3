@@ -408,10 +408,52 @@ impl HttpMessage {
         const BODY_CHUNK_SIZE: usize,
         R: AsyncRead + Unpin,
     >(
+        stream:     Pin<&mut R>,
+        remnant:    &Vec<u8>,
+        is_request: Option<bool>,
+        limits:     Option<&ReadLimits>,
+    )
+        -> Outcome<(Option<Self>, Vec<u8>)>
+    {
+        Self::read_framed::<HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, R>(
+            stream, remnant, is_request, limits, false).await
+    }
+
+    /// Reads the reply to a request this side made. Unlike [`HttpMessage::read`], a reply that
+    /// states no `Content-Length` and is not chunked has its body read to the end of the
+    /// connection (RFC 9112 6.3), which is how an HTTP/1.0 server ends what it cannot measure;
+    /// `read` takes such a message to have none, which is right for a request. A reply to a `HEAD`
+    /// (`to_head`), and a `1xx`, `204` or `304`, have no body whatever the framing says.
+    #[cfg(feature = "async")]
+    pub async fn read_reply<
+        'a,
+        const HEADER_CHUNK_SIZE: usize,
+        const BODY_CHUNK_SIZE: usize,
+        R: AsyncRead + Unpin,
+    >(
+        stream:     Pin<&mut R>,
+        remnant:    &Vec<u8>,
+        to_head:    bool,
+        limits:     Option<&ReadLimits>,
+    )
+        -> Outcome<(Option<Self>, Vec<u8>)>
+    {
+        Self::read_framed::<HEADER_CHUNK_SIZE, BODY_CHUNK_SIZE, R>(
+            stream, remnant, Some(false), limits, !to_head).await
+    }
+
+    #[cfg(feature = "async")]
+    async fn read_framed<
+        'a,
+        const HEADER_CHUNK_SIZE: usize,
+        const BODY_CHUNK_SIZE: usize,
+        R: AsyncRead + Unpin,
+    >(
         mut stream: Pin<&mut R>,
         remnant:    &Vec<u8>,
         is_request: Option<bool>,
         limits:     Option<&ReadLimits>,
+        until_close: bool,
     )
         -> Outcome<(Option<Self>, Vec<u8>)>
     {
@@ -535,6 +577,14 @@ impl HttpMessage {
 
                     msg.body = body[..content_length].to_vec();
                     Ok((Some(msg), remnant))
+                } else if until_close
+                    && msg.header.fields.get_one(&HeaderName::ContentLength).is_none()
+                    && !msg.is_bodiless_status()
+                {
+                    // Decided here, not by the caller, because by now a chunked body has had its
+                    // `Transfer-Encoding` removed and would look like one with no framing at all.
+                    msg.body = res!(read_to_close(stream.as_mut(), remnant, limits).await);
+                    Ok((Some(msg), Vec::new()))
                 } else {
                     Ok((Some(msg), remnant))
                 }
@@ -553,6 +603,13 @@ impl HttpMessage {
     )
         -> Outcome<()>
     {
+        // A message read from an HTTP/1.0 peer and passed on is written here with this
+        // module's framing, a `Content-Length` below, which is HTTP/1.1's. Saying `HTTP/1.0`
+        // over it would tell a client the connection ends with the body, and Steel keeps it
+        // open for the next request.
+        if self.header.version == HttpVersion::Http1_0 {
+            self.header.version = HttpVersion::Http1_1;
+        }
         // `HeaderFields::insert` refuses a `Content-Length` while a
         // `Transfer-Encoding` stands, so a message that really is chunked keeps
         // its own framing and does not acquire a second, contradictory one.
@@ -782,6 +839,41 @@ impl HttpMessage {
             _ => Err(err!(
                 "The server's 101 response has no Sec-WebSocket-Accept key.";
             IO, Network, Wire, Invalid, Input, Missing)),
+        }
+    }
+}
+
+
+/// Reads the rest of a body that ends where the connection does, from the bytes already in hand.
+/// A TLS peer that closes without a close notify is read as closing, as the header reader treats
+/// it: for a body with no length there is nothing else to tell the end by.
+#[cfg(feature = "async")]
+async fn read_to_close<R: AsyncRead + Unpin>(
+    mut stream: Pin<&mut R>,
+    mut body:   Vec<u8>,
+    limits:     Option<&ReadLimits>,
+)
+    -> Outcome<Vec<u8>>
+{
+    let max = limits.and_then(|l| l.max_body_bytes);
+    let mut chunk = [0u8; constant::HTTP_DEFAULT_BODY_CHUNK_SIZE];
+    loop {
+        if let Some(max) = max {
+            if body.len() > max {
+                return Err(err!(
+                    "An HTTP body that states no length and ends with the connection overflowed \
+                    the configured limit of {} bytes.", max;
+                    IO, Network, Input, TooBig));
+            }
+        }
+        match stream.as_mut().read(&mut chunk).await {
+            Ok(0) => return Ok(body),
+            Ok(n) => body.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == tokio::io::ErrorKind::UnexpectedEof => {
+                warn!("UnexpectedEof treated as connection closure.");
+                return Ok(body);
+            }
+            Err(e) => return Err(e.into()),
         }
     }
 }
@@ -1031,6 +1123,24 @@ mod body_tests {
 
     fn on_the_wire(msg: HttpMessage) -> Outcome<String> {
         Ok(String::from_utf8_lossy(&res!(on_the_wire_bytes(msg))).to_string())
+    }
+
+    /// A reply from an HTTP/1.0 upstream is passed on with a `Content-Length` this module adds,
+    /// which is HTTP/1.1's framing, so it must not go out still saying `HTTP/1.0`: that tells the
+    /// client the connection ends with the body, and Steel holds it open for the next request.
+    #[test]
+    fn test_a_reply_read_as_http_1_0_is_written_as_http_1_1() -> Outcome<()> {
+        let msg = match res!(read_reply(
+            "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nhi", Some(false))) {
+            Some(m) => m,
+            None => return Err(err!("An HTTP/1.0 reply was read as no reply at all."; Test, Missing)),
+        };
+        assert_eq!(msg.header.version, HttpVersion::Http1_0);
+        let wire = res!(on_the_wire(msg));
+        assert!(wire.starts_with("HTTP/1.1 200 "), "{}", wire);
+        assert!(wire.contains("content-length: 2\r\n"), "{}", wire);
+        assert!(wire.ends_with("hi"), "{}", wire);
+        Ok(())
     }
 
     /// A `HEAD` answer is the headers the matching `GET` would have sent, and nothing after them
