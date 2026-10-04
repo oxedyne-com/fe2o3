@@ -444,8 +444,10 @@ fn show_terms(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outco
 		if !tight {
 			parts.push(Content::marker(ElemKind::Parbreak, Span::detached()));
 		}
+		// The item is the stack's own child, not a `block` of it: a block shrinks its inline lines to the longest,
+		// where the stack hands them its full width, as Typst's `StackChild::Block` of the bare sequence does.
 		let item = common::spanned(common::seq(parts), child.span());
-		stack_children.push(Value::Content(res!(common::block(engine, item, child.span(), Vec::new()))));
+		stack_children.push(Value::Content(item));
 	}
 	let stack = res!(common::build(engine, ElemKind::Stack, span, stack_children, vec![("spacing", gutter.clone())]));
 	let side = if common::is_rtl(styles) { "right" } else { "left" };

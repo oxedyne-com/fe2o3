@@ -473,5 +473,28 @@ else
 	fail "plant: gate.sh's trap has moved"
 fi
 
+# ── 4. layout against Typst, line by line (G9) ──────────────────────────────
+# Projects that Austenite once set differently from Typst, each held to G9 with the link counts left out (Austenite
+# writes no link annotation for a footnote's marks). A page that differs in a count, an extent, a pitch or a line's
+# place is red. The faults are in the engine, so each project was shown red against the engine before its fix:
+# a terms item shrunk to its longest line (a justified first line left short), a footnote entry given the first-line
+# indent of every paragraph, a paragraph lost between two lists.
+layout_same() { # layout_same <label> <project>: G9 finds no difference but in the links
+	local label="$1" p="$2"
+	r="$(gate "$p")"
+	expect "layout: $label compiles with Typst and with the CLI" "$r" "gate: cli exit 0"
+	local diff
+	diff="$(printf '%s\n' "$r" | grep -E '^gate: cli g9 (page [0-9]+ (lines|blocks|words|sizes|images|left|right|top|bottom|pitch|height) |line )' || true)"
+	if [ -z "$diff" ]; then ok "layout: $label has no line, extent or count that G9 reads differently"; else fail "layout: $label differs from Typst: $diff"; fi
+	expect "layout: $label has the same pages" "$r" "gate: cli g8 verdict same"
+}
+LAYOUT_HEAD=$'#set page(width: 612pt, height: 300pt, margin: 20pt)\n#set text(size: 10pt)'
+mkproj "$S/pj_terms" "$LAYOUT_HEAD"$'\n#set par(justify: true, leading: 0.55em, spacing: 1.2em)\n#terms(terms.item[Term 1][#lorem(25)], terms.item[T][#lorem(25)])\n#terms(tight: false, indent: 1em, hanging-indent: 3em, terms.item[Term 1][#lorem(25)])'
+layout_same "a justified terms list" pj_terms
+mkproj "$S/pj_notes" "$LAYOUT_HEAD"$'\n#set par(first-line-indent: (amount: 1.5em, all: true), justify: true)\nFirst.#footnote[#lorem(30)] #lorem(20)\n\nSecond.#footnote[#lorem(12)] #lorem(15)'
+layout_same "footnotes under an every-paragraph first-line indent" pj_notes
+mkproj "$S/pj_lists" "$LAYOUT_HEAD"$'\n- one\n- two\n\nBetween the lists.\n\n- three\n\n+ four\nText with no blank line.\n+ five'
+layout_same "a paragraph between lists" pj_lists
+
 echo "selftest: $bad failure(s)"
 [ "$bad" -eq 0 ]

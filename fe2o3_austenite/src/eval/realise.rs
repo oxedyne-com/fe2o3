@@ -194,7 +194,7 @@ pub fn realise(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, false)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, false, false)).0)
 }
 
 /// Realises a body in `Flow` mode and says whether it is one paragraph's worth of inline elements left without
@@ -207,7 +207,7 @@ pub fn realise_fragment(
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
-	realise_with(engine, content, styles, RealiseMode::Flow, false)
+	realise_with(engine, content, styles, RealiseMode::Flow, false, true)
 }
 
 /// Realises as `realise` does, but leaves model elements (headings, paragraphs, lists, strong and
@@ -222,7 +222,7 @@ pub fn realise_structure(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, true)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, true, false)).0)
 }
 
 fn realise_with(
@@ -231,6 +231,7 @@ fn realise_with(
 	styles:		&StyleChain,
 	mode:		RealiseMode,
 	keep_model:	bool,
+	fragment:	bool,
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
@@ -245,11 +246,39 @@ fn realise_with(
 			may_attach:		false,
 			saw_parbreak:	false,
 			fully_inline:	false,
+			pars:			0,
 			depth:			0,
 		};
 		res!(s.visit(content, styles));
 		res!(s.finish());
-		Ok((s.sink, s.fully_inline))
+		let State { engine, sink, fully_inline, pars, .. } = s;
+		if !fragment || fully_inline || pars != 1 {
+			return Ok((sink, fully_inline));
+		}
+		// A fragment whose one paragraph was closed by styles around it (`set par(..)`, `set align(..)`) is still a
+		// paragraph's worth of inline content, with no `par` of its own: Typst sets it as such, with no first-line indent.
+		let members: Vec<usize> = (0..sink.len()).filter(|i| !sink[*i].is_tag()).collect();
+		let at = match members.as_slice() {
+			[i] if sink[*i].content.is(ElemKind::Par)	=> *i,
+			_											=> return Ok((sink, false)),
+		};
+		let body = match sink[at].content.kind().and_then(|k| k.field_id("body")).and_then(|id| sink[at].content.get(id)) {
+			Some(Value::Content(c))	=> c.clone(),
+			_						=> return Ok((sink, false)),
+		};
+		let (inner, _) = res!(realise_with(engine, &body, &sink[at].styles, RealiseMode::Inline, keep_model, false));
+		let mut inner = Some(inner);
+		let mut out = Vec::new();
+		for (i, pair) in sink.into_iter().enumerate() {
+			match inner.take() {
+				Some(run) if i == at	=> out.extend(run),
+				other					=> {
+					inner = other;
+					out.push(pair);
+				}
+			}
+		}
+		Ok((out, true))
 	})
 }
 
@@ -302,6 +331,14 @@ impl Rule {
 			Rule::Enum	=> k == ElemKind::EnumItem,
 			Rule::Terms	=> k == ElemKind::TermItem,
 		}
+	}
+
+	/// May a group of this rule open inside the active group of `outer`? A textual run opens in a paragraph
+	/// group. Opened inside a list, enum, terms or cite group, which cannot hold text, it would stay in that
+	/// group and be dropped when the next item joined it and the group was built, so there the text ends the
+	/// group instead.
+	fn nests_in(self, outer: Rule) -> bool {
+		!(self == Rule::Textual && matches!(outer, Rule::Cites | Rule::List | Rule::Enum | Rule::Terms))
 	}
 
 	/// May the element sit inside such a group without opening one?
@@ -366,6 +403,7 @@ struct State<'e> {
 	may_attach:		bool,	// the last block was a paragraph, so `v(attach: true)` survives
 	saw_parbreak:	bool,
 	fully_inline:	bool,	// the whole body is one paragraph's worth of inline elements (`Flow` mode)
+	pars:			usize,	// paragraphs the grouping has made
 	depth:			usize,	// nested show-rule outputs
 }
 
@@ -783,7 +821,7 @@ impl State<'_> {
 		let mut i = 0;
 		while let Some(active) = self.groupings.last().copied() {
 			// A rule of higher priority nests a new group inside the active one.
-			if matching.map(|r| r.priority() > active.rule.priority()).unwrap_or(false) {
+			if matching.map(|r| r.priority() > active.rule.priority() && r.nests_in(active.rule)).unwrap_or(false) {
 				break;
 			}
 			if active.rule.trigger(content, self.keep_model) || active.rule.inner(content) {
@@ -956,6 +994,7 @@ impl State<'_> {
 		let span = select_span(&elems);
 		let (body, trunk) = repack(&elems);
 		let id = res!(field(ElemKind::Par, "body"));
+		self.pars += 1;
 		let par = Content::new(ElemKind::Par, vec![(id, Value::Content(body))], span);
 		self.visit(&par, &trunk)
 	}
