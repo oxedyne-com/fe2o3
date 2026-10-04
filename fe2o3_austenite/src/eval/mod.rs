@@ -167,6 +167,7 @@ pub struct Engine {
 	pub diags:		Vec<Diagnostic>,
 	pub depth:		usize,				// current closure call depth
 	pub route:		usize,				// layout layers and show rules entered, Typst's route; the document is the first
+	pub fuel:		Option<u64>,		// loop iterations remaining; none is unbounded, as Typst is
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
@@ -192,6 +193,7 @@ impl Engine {
 			diags:		Vec::new(),
 			depth:		0,
 			route:		1,
+			fuel:		None,
 			context:	Context::default(),
 			reads:		ReadLog::default(),
 			fonts:		FontStore::default(),
@@ -312,6 +314,19 @@ impl Engine {
 				self.locator = outer;
 				out
 			},
+		}
+	}
+
+	/// Spends one loop iteration when the host set a budget, and ends the compile with a diagnostic when it
+	/// is spent, so a runaway loop terminates. Without a budget a loop runs as long as it runs.
+	pub fn burn(&mut self, span: Span) -> Outcome<()> {
+		match self.fuel {
+			Some(0)	=> Err(self.error(DiagnosticKind::Limit, span, "loop seems to be infinite")),
+			Some(n)	=> {
+				self.fuel = Some(n - 1);
+				Ok(())
+			},
+			None	=> Ok(()),
 		}
 	}
 

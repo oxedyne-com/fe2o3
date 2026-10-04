@@ -125,6 +125,35 @@ impl DaimondTypst {
 		obj.into()
 	}
 
+	/// Sets the loop iterations a compile may spend for each layout pass, the host's bound on a compile it
+	/// cannot stop: a whole number, or `null` for no bound, by which the host declares it can stop a
+	/// compile itself. A new instance holds 10,000,000. Returns `{ loopBudget }`, the budget now in force,
+	/// a number or `null`, or `{ error }` and no change for any other value. A project is document data
+	/// and cannot set it.
+	#[wasm_bindgen(js_name = setLoopBudget)]
+	pub fn set_loop_budget(&mut self, budget: &JsValue) -> JsValue {
+		let obj = js_sys::Object::new();
+		let parsed = if budget.is_null() {
+			Some(None)
+		} else {
+			match budget.as_f64() {
+				Some(n) if n >= 0.0 && n.fract() == 0.0 && n <= 9_007_199_254_740_991.0	=> Some(Some(n as u64)),
+				_																		=> None,
+			}
+		};
+		match parsed {
+			Some(b)	=> {
+				self.inst.set_loop_budget(b);
+				set(&obj, "loopBudget", &match b {
+					Some(n)	=> JsValue::from_f64(n as f64),
+					None	=> JsValue::NULL,
+				});
+			},
+			None	=> set(&obj, "error", &JsValue::from_str("the loop budget is a whole number of iterations, or null")),
+		}
+		obj.into()
+	}
+
 	/// Compiles a single source string to PDF, wrapping it as the project's `/main.typ`.
 	#[wasm_bindgen]
 	pub fn compile(&mut self, source: &str) -> JsValue {
@@ -228,6 +257,7 @@ impl Default for DaimondTypst {
 
 /// Reads a project object into the door's own type; a field that is absent or of the wrong shape is empty.
 fn project_of(v: &JsValue) -> Project {
+	// Only the fields a project has are read: its loop budget is the host's, set on the instance.
 	let mut p = Project {
 		main:		string_field(v, "main").unwrap_or_default(),
 		strict:		bool_field(v, "strict"),

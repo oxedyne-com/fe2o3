@@ -16,11 +16,15 @@ use harness::pdf::{
 	TYPST,
 };
 
-use oxedyne_fe2o3_austenite::compile::supply_typst_package_cache;
+use oxedyne_fe2o3_austenite::compile::{
+	supply_typst_package_cache,
+	DiagnosticKind,
+};
 use oxedyne_fe2o3_austenite::door::{
 	Failure,
 	Instance,
 	Project,
+	LOOP_BUDGET,
 };
 use oxedyne_fe2o3_austenite::eval::content::{
 	ElemKind,
@@ -71,11 +75,15 @@ fn write_main(dir: &Path, name: &str, src: &str) -> Outcome<PathBuf> {
 /// Compiles `src` under Typst and through the door, not strict, and asserts they agree on the pages and the
 /// text. Returns the text.
 fn builds_alike(dir: &Path, name: &str, src: &str) -> Outcome<String> {
+	builds_alike_with(dir, name, src, Instance::new())
+}
+
+/// As [`builds_alike`], through the door instance given, whose host options the caller has set.
+fn builds_alike_with(dir: &Path, name: &str, src: &str, mut inst: Instance) -> Outcome<String> {
 	let main = res!(write_main(dir, name, src));
 	let want = main.with_extension("pdf");
 	let (ok, stderr) = res!(typst(&main, &want));
 	assert!(ok, "typst refuses {}: {}", name, stderr);
-	let mut inst = Instance::new();
 	let made = match inst.compile_pdf(&Project::single(src)) {
 		Ok(m)	=> m,
 		Err(f)	=> return Err(err!("The door refused {}, which typst builds: {} {:?}", name, f.head, f.head.kind; Test)),
@@ -349,11 +357,93 @@ fn every_field_the_schema_types_as_a_keyword_is_held_to_typst_above() -> Outcome
 // once allowed across a whole compile, as the plot of a technical document spends them.
 const MANY: &str = "#{ for i in range(3200) { for j in range(3400) { } }; [done] }\n";
 
+// A host that can stop a compile itself declares so by setting no budget.
 #[test]
 fn a_document_may_run_more_loop_iterations_than_ten_million_as_typst_lets_it() -> Outcome<()> {
 	let dir = res!(work_dir("fuel"));
-	let text = res!(builds_alike(&dir, "many", MANY));
+	let mut inst = Instance::new();
+	inst.set_loop_budget(None);
+	let text = res!(builds_alike_with(&dir, "many", MANY, inst));
 	assert_eq!(text, "done");
+	Ok(())
+}
+
+// A host cannot stop a compile that has begun (Daimond's runs on the page's own thread), so the door bounds
+// the loops of one unless the host says it can stop it. The command line has no bound, as Typst has none.
+#[test]
+fn the_door_refuses_a_document_that_spends_more_loop_iterations_than_its_default_budget() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let f = match inst.compile_pdf(&Project::single(MANY)) {
+		Ok(_)	=> return Err(err!("The door builds eleven million loop iterations, past its default budget"; Test)),
+		Err(f)	=> f,
+	};
+	assert_eq!(f.head.kind, DiagnosticKind::Limit);
+	assert_eq!(f.head.message, "loop seems to be infinite");
+	Ok(())
+}
+
+#[test]
+fn a_host_sets_the_loop_budget_to_a_number_or_to_none_and_a_small_one_refuses_earlier() -> Outcome<()> {
+	assert_eq!(LOOP_BUDGET, 10_000_000);
+	assert_eq!(Instance::new().loop_budget(), Some(LOOP_BUDGET));
+	let dir = res!(work_dir("budget-host"));
+	// Five thousand iterations of an empty loop, and the range it walks, spend ten thousand of the budget.
+	let few = "#{ for i in range(5000) { }; [done] }\n";
+	let mut small = Instance::new();
+	small.set_loop_budget(Some(1_000));
+	assert_eq!(small.loop_budget(), Some(1_000));
+	let f = match small.compile_pdf(&Project::single(few)) {
+		Ok(_)	=> return Err(err!("A budget of a thousand builds a document of five thousand iterations"; Test)),
+		Err(f)	=> f,
+	};
+	assert_eq!(f.head.kind, DiagnosticKind::Limit);
+	assert_eq!(f.head.message, "loop seems to be infinite");
+	// The default allows it, as does a budget the host raises or removes.
+	for (name, budget) in [("default", Some(LOOP_BUDGET)), ("raised", Some(100_000_000)), ("none", None)] {
+		let mut inst = Instance::new();
+		inst.set_loop_budget(budget);
+		assert_eq!(inst.loop_budget(), budget);
+		assert_eq!(res!(builds_alike_with(&dir, name, few, inst)), "done");
+	}
+	// The host's budget is read again by the next compile of an instance that has refused one.
+	small.set_loop_budget(None);
+	assert!(small.compile_pdf(&Project::single(few)).is_ok());
+	Ok(())
+}
+
+#[test]
+fn a_project_is_document_data_and_carries_no_loop_budget() -> Outcome<()> {
+	// Every field of a project, named: one added for a budget stops this compiling, so the choice to let a
+	// project that arrives by sync set its own bound is made here, deliberately, or not at all.
+	let Project { main, sources, assets, fonts, strict, known } = Project::single("#[a]\n");
+	assert!(main.is_empty() && assets.is_empty() && fonts.is_empty() && known.is_empty() && !strict);
+	assert_eq!(sources.len(), 1);
+	// A source that spells a budget is only source: the door's bound is the same with it.
+	let mut inst = Instance::new();
+	let src = "// loopBudget: null\n#let loop-budget = none\n#{ for i in range(3200) { for j in range(3400) { } }; [done] }\n";
+	let f = match inst.compile_pdf(&Project::single(src)) {
+		Ok(_)	=> return Err(err!("A project that spells a budget lifted the door's bound"; Test)),
+		Err(f)	=> f,
+	};
+	assert_eq!(f.head.kind, DiagnosticKind::Limit);
+	assert_eq!(inst.loop_budget(), Some(LOOP_BUDGET));
+	Ok(())
+}
+
+#[test]
+fn the_command_line_has_no_loop_budget_and_builds_the_document_the_door_refuses() -> Outcome<()> {
+	let dir = res!(work_dir("budget-cli"));
+	res!(write_main(&dir, "many", MANY));
+	let out_dir = dir.join("many").join("out");
+	let out = res!(Command::new(env!("CARGO_BIN_EXE_austenite"))
+		.current_dir(dir.join("many"))
+		.args(["--eval", "--root", ".", "main.typ"])
+		.arg(&out_dir)
+		.output());
+	assert!(out.status.success(), "the command line builds it: {}", String::from_utf8_lossy(&out.stderr));
+	let pdf = out_dir.join("document.pdf");
+	assert!(pdf.is_file(), "{} is written", pdf.display());
+	assert_eq!(res!(glyphs_of(&pdf)), "done");
 	Ok(())
 }
 

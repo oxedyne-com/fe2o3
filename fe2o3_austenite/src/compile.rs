@@ -396,18 +396,20 @@ pub fn assemble_eval<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
-	assemble_eval_timed(main_path, root, fonts, sink, None)
+	assemble_eval_timed(main_path, root, fonts, sink, None, None)
 }
 
 /// As [`assemble_eval`], recording the phases' wall time in `timings` when there is a recorder, which is
 /// started by [`Timings::start`] with `Load` open and left in the engine for the caller to read. The
-/// output is the same bytes with the recorder or without it.
+/// output is the same bytes with the recorder or without it. `fuel` is the host's budget of loop
+/// iterations for each layout pass, `None` for no bound, as Typst has none.
 pub fn assemble_eval_timed<S: PageSink>(
 	main_path:	&Path,
 	root:		&Path,
 	fonts:		FontStore,
 	sink:		&mut S,
 	timings:	Option<Timings>,
+	fuel:		Option<u64>,
 )
 	-> Outcome<Evaluated>
 {
@@ -417,6 +419,7 @@ pub fn assemble_eval_timed<S: PageSink>(
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
+	engine.fuel = fuel;
 	engine.timings = timings;
 	if let Some(t) = engine.timings.as_mut() {
 		t.leave();	// the load

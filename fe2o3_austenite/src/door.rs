@@ -72,6 +72,11 @@ fn turn() -> MutexGuard<'static, ()> {
 /// The path a project's main file takes when it names none.
 pub const MAIN: &str = "/main.typ";
 
+/// The loop iterations a compile may spend, per layout pass, before the door refuses it. The host's own
+/// thread cannot stop a compile that has begun, so the door bounds the loops of one unless the host says
+/// otherwise with [`Instance::set_loop_budget`]. The command line has no such bound, as Typst has none.
+pub const LOOP_BUDGET: u64 = 10_000_000;
+
 /// What a call is given: the project's files by path in its own shadow file system, as Daimond sends them.
 #[derive(Clone, Debug, Default)]
 pub struct Project {
@@ -172,6 +177,7 @@ pub struct Instance {
 	base:		Option<Arc<FontBook>>,		// none only if the embedded bytes would not parse
 	intro:		Option<Arc<Introspector>>,
 	version:	u32,						// the delta's tick
+	budget:		Option<u64>,				// the loop budget of a compile, none for no bound
 }
 
 impl Default for Instance {
@@ -186,8 +192,19 @@ impl Instance {
 			base:		FontBook::embedded().ok().map(Arc::new),
 			intro:		None,
 			version:	0,
+			budget:		Some(LOOP_BUDGET),
 		}
 	}
+
+	/// Sets the loop iterations a compile may spend, per layout pass: a number, or `None` for no bound, by
+	/// which the host declares it can stop a compile itself. It is the host's option, held here and never
+	/// read from a project, which is document data and may arrive by sync.
+	pub fn set_loop_budget(&mut self, budget: Option<u64>) {
+		self.budget = budget;
+	}
+
+	/// The loop budget in force: [`LOOP_BUDGET`] until the host sets another.
+	pub fn loop_budget(&self) -> Option<u64> { self.budget }
 
 	/// Compiles to PDF through the evaluator. The chunks are the file; a host copies them out one by one.
 	pub fn compile_pdf(&mut self, p: &Project) -> Result<Made<Chunks>, Failure> {
@@ -209,6 +226,7 @@ impl Instance {
 		F: FnOnce(S) -> Option<T>,
 	{
 		let _turn	= turn();
+		let budget	= self.budget;
 		let main	= p.main_path();
 		// A failed compile answers no query, so the kept introspector goes before the compile begins.
 		self.intro	= None;
@@ -225,7 +243,7 @@ impl Instance {
 			fonts.add_bytes(bytes.clone());
 		}
 		let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			compile::assemble_eval(&main, Path::new("/"), fonts, &mut sink)
+			compile::assemble_eval_timed(&main, Path::new("/"), fonts, &mut sink, None, budget)
 		}));
 		let _ = vfs::clear();
 		let done = match caught {

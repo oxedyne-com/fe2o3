@@ -2187,6 +2187,7 @@ impl<'a> Vm<'a> {
 			if i >= MAX_WHILE_ITERATIONS {
 				return Err(self.error(DiagnosticKind::Limit, node.span(), "loop seems to be infinite"));
 			}
+			res!(self.burn(node.span()));
 			let v = res!(self.eval(&body));
 			output = match ops::join(output, v) {
 				Ok(v)	=> v,
@@ -2210,6 +2211,11 @@ impl<'a> Vm<'a> {
 			self.flow = outer;
 		}
 		Ok(output)
+	}
+
+	fn burn(&mut self, span: Span) -> Outcome<()> {
+		let span = self.fix(span);
+		self.engine.burn(span)
 	}
 
 	fn eval_for(&mut self, node: &SyntaxNode) -> Outcome<Value> {
@@ -2241,6 +2247,10 @@ impl<'a> Vm<'a> {
 		self.frames.push(Frame::new());
 		let mut result = Ok(());
 		for v in items {
+			if let Err(e) = self.burn(node.span()) {
+				result = Err(e);
+				break;
+			}
 			if let Err(e) = self.destructure(&pattern, v, Bind::Define) {
 				result = Err(e);
 				break;

@@ -550,7 +550,7 @@ fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<E
 	}
 	compile::supply_typst_package_cache();
 	let mut sink = res!(PdfSink::new());
-	let mut done = res!(compile::assemble_eval_timed(&main, &root, fonts, &mut sink, timings));
+	let mut done = res!(compile::assemble_eval_timed(&main, &root, fonts, &mut sink, timings, None));
 	*read = done.files_read();
 	let report = done.report();
 	let mut skip = None;
