@@ -5,6 +5,8 @@ pub mod core;
 #[cfg(feature = "async")]
 pub mod handler;
 pub mod status;
+#[cfg(feature = "async")]
+pub mod tap;
 
 #[cfg(feature = "async")]
 pub use self::core::{
@@ -21,3 +23,10 @@ pub use self::core::{
 };
 #[cfg(feature = "async")]
 pub use self::client::WsClient;
+#[cfg(feature = "async")]
+pub use self::tap::{
+    encode_message_tapped,
+    read_message_tapped,
+    FrameTap,
+    NoTap,
+};
