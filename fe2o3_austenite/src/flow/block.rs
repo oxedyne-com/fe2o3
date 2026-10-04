@@ -144,11 +144,11 @@ pub fn layout_fragment_in(
 )
 	-> Outcome<Vec<Frame>>
 {
-	engine.within(place, |engine| {
+	engine.within(place, |engine| engine.descend_fragment(content.span(), |engine| {
 		let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
 		let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
 		layout_flow_pairs(engine, pairs, styles, regions, 1, Rel::zero(), mode, content.span())
-	})
+	}))
 }
 
 /// What a flow may hold: a page's root flow also hosts footnotes.
@@ -1081,7 +1081,7 @@ impl SingleChild {
 				return Ok(f.clone());
 			}
 		}
-		let frame = res!(layout_single(engine, &self.spec, &region));
+		let frame = res!(engine.descend(|engine| layout_single(engine, &self.spec, &region)));
 		*self.cell.borrow_mut() = Some((key, frame.clone()));
 		Ok(frame)
 	}
@@ -1312,7 +1312,7 @@ fn collect_par(
 	-> Outcome<()>
 {
 	let region	= Regions::one(cfg.width, cfg.height, cfg.expand, false).region();
-	let nodes	= res!(crate::flow::par::layout_par(engine, par, styles, region, situation));
+	let nodes	= res!(engine.descend(|engine| crate::flow::par::layout_par(engine, par, styles, region, situation)));
 	let spacing	= res!(par_spacing(par, styles));
 	out.push(Child::Rel(spacing, 4));
 	res!(collect_lines(nodes, styles, out));
@@ -2675,8 +2675,13 @@ impl MultiChild {
 		Ok(Fragment { frame, next, skip })
 	}
 
-	/// One fragment's body, as the continuation `from` (or the start) lays it out in `regions`.
+	/// One fragment's body, as the continuation `from` (or the start) lays it out in `regions`, a layer of its
+	/// own as Typst's `layout_multi_block` is.
 	fn lay(self: &Rc<Self>, engine: &mut Engine, from: Option<&Rc<Spill>>, regions: &Regions) -> Outcome<Laid> {
+		engine.descend(|engine| self.lay_in(engine, from, regions))
+	}
+
+	fn lay_in(self: &Rc<Self>, engine: &mut Engine, from: Option<&Rc<Spill>>, regions: &Regions) -> Outcome<Laid> {
 		let spec	= &self.spec;
 		let styles	= &spec.styles;
 		let width	= res!(spec.sizing("width"));
@@ -2704,11 +2709,16 @@ impl MultiChild {
 					Some(pad)	=> pad_regions(&inner, pad),
 					None		=> inner,
 				};
-				let mut f = res!(cursor.region(engine, &pod_k));
+				// The body's flow is the fragment layer Typst's `layout_fragment` is.
+				let (mut f, done) = res!(engine.descend(|engine| -> Outcome<(Frame, bool)> {
+					let f = res!(cursor.region(engine, &pod_k));
+					let done = res!(cursor.is_done(engine));
+					Ok((f, done))
+				}));
 				if let Some(pad) = padding {
 					grow(&mut f, pad);
 				}
-				let done = res!(cursor.is_done(engine)) && (!pod_k.expand_y || pod_k.backlog.is_empty());
+				let done = done && (!pod_k.expand_y || pod_k.backlog.is_empty());
 				(f, done, Some(pod.h))
 			},
 			Nested::Frames(q, pod0) => {
@@ -2836,9 +2846,11 @@ fn flow_cursor(
 )
 	-> Outcome<FlowCursor>
 {
-	let (pairs, inline) = res!(engine.within(place, |engine| realise::realise_fragment(engine, content, styles)));
-	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
-	FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
+	engine.descend_fragment(span, |engine| {
+		let (pairs, inline) = res!(engine.within(place, |engine| realise::realise_fragment(engine, content, styles)));
+		let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
+		FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
+	})
 }
 
 /// The regions shrunk by a padding that each side resolves against the region itself: Typst's `pad`.
@@ -3071,9 +3083,11 @@ fn columns_parts(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Ou
 /// `columns(n)`: the body flowed through `n` column regions per region, as a page's columns are.
 fn layout_columns(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let (count, gutter, body) = res!(columns_parts(engine, elem, styles));
-	let (pairs, inline) = res!(engine.within(elem.place(), |engine| realise::realise_fragment(engine, &body, styles)));
-	let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
-	layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
+	engine.descend_fragment(elem.span(), |engine| {
+		let (pairs, inline) = res!(engine.within(elem.place(), |engine| realise::realise_fragment(engine, &body, styles)));
+		let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
+		layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
+	})
 }
 
 /// `layout(size => ..)`: the function called under context with the base size of the regions, its result

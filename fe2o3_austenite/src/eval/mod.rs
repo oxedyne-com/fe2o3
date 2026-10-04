@@ -90,6 +90,7 @@ use std::path::{
 use std::sync::Arc;
 
 pub const MAX_CALL_DEPTH:	usize	= 80;			// Typst's own limit
+pub const MAX_LAYOUT_DEPTH:	usize	= 72;			// ditto, for nested layout
 pub const LOOP_FUEL:		u64		= 10_000_000;	// iterations across all loops before a diagnostic
 
 /// The sources of one compilation and the modules evaluated from them. Loading a path is here;
@@ -155,6 +156,7 @@ pub struct Engine {
 	pub locator:	Locator,			// hands out stable element locations during realisation
 	pub diags:		Vec<Diagnostic>,
 	pub depth:		usize,				// current closure call depth
+	pub route:		usize,				// layout layers and show rules entered, Typst's route; the document is the first
 	pub fuel:		u64,				// loop iterations remaining
 	pub context:	Context,
 	pub reads:		ReadLog,			// introspection reads recorded for the fixpoint (U8)
@@ -180,6 +182,7 @@ impl Engine {
 			locator:	Locator::default(),
 			diags:		Vec::new(),
 			depth:		0,
+			route:		1,
 			fuel:		LOOP_FUEL,
 			context:	Context::default(),
 			reads:		ReadLog::default(),
@@ -263,6 +266,30 @@ impl Engine {
 	}
 
 	pub fn exit_call(&mut self) { self.depth = self.depth.saturating_sub(1); }
+
+	/// Runs `f` one layer deeper in the nesting Typst's route counts: a layout call Typst memoises (a
+	/// paragraph, a block, a fragment) or a show rule's output being visited. The layer is left however `f`
+	/// ends.
+	pub fn descend<R, F: FnOnce(&mut Engine) -> R>(&mut self, f: F) -> R {
+		self.route += 1;
+		let out = f(self);
+		self.route -= 1;
+		out
+	}
+
+	/// As [`descend`](Self::descend), for the layer that lays a fragment out. Past [`MAX_LAYOUT_DEPTH`] it is an
+	/// error at `span`, not a stack overflow: the recursion of nested containers ends here, as Typst's does.
+	pub fn descend_fragment<R, F: FnOnce(&mut Engine) -> Outcome<R>>(&mut self, span: Span, f: F) -> Outcome<R> {
+		if self.route >= MAX_LAYOUT_DEPTH {
+			return Err(self.error_hint(
+				DiagnosticKind::Limit,
+				span,
+				"maximum layout depth exceeded",
+				"try to reduce the amount of nesting in your layout",
+			));
+		}
+		self.descend(f)
+	}
 
 	/// Runs `f` with realisations counted afresh at `place`, Typst's `Locator::relayout`: content laid out
 	/// again at the place it was laid out at is realised to the same locations, whatever was realised in

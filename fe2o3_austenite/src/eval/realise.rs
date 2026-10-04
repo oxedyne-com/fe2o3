@@ -53,6 +53,20 @@ use std::sync::Arc;
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
 
+/// The show rules Typst applies to an element on its way to a layout routine, which its show-rule depth counts
+/// where the element is realised: one for a shape, a stack, a pad, a transform or a `layout`, two for a list, an
+/// enumeration, a grid or a figure, where the nested list or grid begins a layer more.
+fn shows_of(kind: Option<ElemKind>) -> usize {
+	match kind {
+		Some(ElemKind::List | ElemKind::Enum | ElemKind::Grid | ElemKind::Figure)
+			=> 2,
+		Some(ElemKind::Pad | ElemKind::Stack | ElemKind::Rect | ElemKind::Square | ElemKind::Circle | ElemKind::Ellipse
+			| ElemKind::Move | ElemKind::Scale | ElemKind::Rotate | ElemKind::Layout)
+			=> 1,
+		_	=> 0,
+	}
+}
+
 /// What the caller will do with the stream, which decides grouping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RealiseMode {
@@ -247,7 +261,6 @@ fn realise_with(
 			saw_parbreak:	false,
 			fully_inline:	false,
 			pars:			0,
-			depth:			0,
 		};
 		res!(s.visit(content, styles));
 		res!(s.finish());
@@ -404,7 +417,6 @@ struct State<'e> {
 	saw_parbreak:	bool,
 	fully_inline:	bool,	// the whole body is one paragraph's worth of inline elements (`Flow` mode)
 	pars:			usize,	// paragraphs the grouping has made
-	depth:			usize,	// nested show-rule outputs
 }
 
 impl State<'_> {
@@ -572,7 +584,12 @@ impl State<'_> {
 					spanned(shown, output.span())
 				},
 				Ok(None) => {
-					// A primitive: flow lays it out itself.
+					// A primitive: flow lays it out itself. Typst shows it as a block with a layout routine,
+					// which counts toward the show-rule depth where it is realised.
+					let shows = shows_of(output.kind());
+					if shows > 0 {
+						res!(self.check_depth(output.span(), shows));
+					}
 					if let Some((start, _)) = &tags {
 						self.push_tag(start.clone(), styles);
 					}
@@ -669,19 +686,27 @@ impl State<'_> {
 
 	/// Visits a show rule's output under the collected show-set styles, one level deeper.
 	fn visit_output(&mut self, target: &Content, output: &Content, map: &Styles, styles: &StyleChain) -> Outcome<()> {
-		self.depth += 1;
-		if self.depth > MAX_SHOW_RULE_DEPTH {
-			return Err(error_hints(self.engine, DiagnosticKind::Limit, target.span(), "maximum show rule depth exceeded", &[
-				"maybe a show rule matches its own output",
-				"maybe there are too deeply nested elements",
-			]));
-		}
+		res!(self.check_depth(target.span(), 1));
+		self.engine.route += 1;
 		let prev_outside = self.outside;
 		self.outside &= target.is(ElemKind::Context);
 		let r = self.visit_styled(output, map, styles, false);
 		self.outside = prev_outside;
-		self.depth -= 1;
+		self.engine.route -= 1;
 		r
+	}
+
+	/// Typst's show-rule depth limit. The layers and show rules already entered, and `shows` more, must not pass
+	/// it: an element that Typst shows as a layout routine counts the shows it takes, though its body is laid out
+	/// later and no output is visited here.
+	fn check_depth(&mut self, span: Span, shows: usize) -> Outcome<()> {
+		if self.engine.route + shows > MAX_SHOW_RULE_DEPTH {
+			return Err(error_hints(self.engine, DiagnosticKind::Limit, span, "maximum show rule depth exceeded", &[
+				"maybe a show rule matches its own output",
+				"maybe there are too deeply nested elements",
+			]));
+		}
+		Ok(())
 	}
 
 	/// Gives the element its location (when locatable or labelled) and copies the style chain's values

@@ -1170,3 +1170,96 @@ fn heading_rows_keep_title_a_plain_string_and_page_a_one_based_number_across_pag
 	assert!(rows.iter().all(|r| r.page.map_or(false, |p| p >= 1)), "no page is 0 or missing");
 	Ok(())
 }
+
+/// Runs `body` on a thread whose stack holds the deepest nest the door allows. A debug build's frames are many
+/// times a release build's, and a test thread has two mebibytes.
+fn deep<F: FnOnce() -> Outcome<()> + Send + 'static>(body: F) -> Outcome<()> {
+	let t = res!(std::thread::Builder::new().stack_size(128 << 20).spawn(body));
+	match t.join() {
+		Ok(r)	=> r,
+		Err(_)	=> Err(err!("The nest test panicked on its own stack."; Test)),
+	}
+}
+
+// A nest of containers: `kind` n deep around one word, or a list n deep.
+fn nest(kind: &str, n: usize) -> String {
+	let (open, close) = match kind {
+		"box"		=> ("#box[", "]"),
+		"block"		=> ("#block[", "]"),
+		"stack"		=> ("#stack[", "]"),
+		_			=> return (0..n).map(|i| fmt!("{}- item\n", "  ".repeat(i))).collect(),
+	};
+	fmt!("{}x{}\n", open.repeat(n), close.repeat(n))
+}
+
+// As [`nest`], built by a loop at evaluation, so the parser's own depth limit does not end it first.
+fn looped(kind: &str, n: usize) -> String {
+	match kind {
+		"list"	=> nest(kind, n),
+		_		=> fmt!("#let x = [a]\n#for i in range({}) {{ x = {}(x) }}\n#x\n", n, kind),
+	}
+}
+
+/// Typst's first error message and its short-format site for `text`, or `None` where typst compiles it.
+fn typst_refusal(dir: &Path, name: &str, text: &str) -> Outcome<Option<(String, usize, usize)>> {
+	let case	= dir.join(name);
+	let main	= res!(write_project(&case, &[("main.typ", text)]));
+	let pdf		= main.with_extension("pdf");
+	let (ok, _, stderr) = res!(typst(&["compile", "--diagnostic-format", "short",
+		&main.display().to_string(), &pdf.display().to_string()]));
+	if ok {
+		return Ok(None);
+	}
+	let (line, col) = res!(typst_site(&main, "error"));
+	let message = stderr.lines()
+		.find_map(|l| l.split_once(": error: ").map(|(_, m)| m.trim().to_string()))
+		.unwrap_or_default();
+	Ok(Some((message, line, col)))
+}
+
+// Typst refuses a container nested past its depth, `maximum layout depth exceeded` for boxes and blocks,
+// `maximum show rule depth exceeded` for a stack and a list, and each kind costs its own number of levels. The
+// door sets the nest typst sets one level under and refuses the one a level over, at typst's site, as a `limit`.
+#[test]
+fn a_nest_of_containers_is_set_one_level_under_typsts_depth_and_refused_one_level_over() -> Outcome<()> {
+	deep(|| {
+	let dir = res!(work_dir("depth-kinds"));
+	let mut inst = Instance::new();
+	for (kind, under) in [("box", 70usize), ("block", 35), ("stack", 32), ("list", 31)] {
+		let set = nest(kind, under);
+		assert!(res!(typst_refusal(&dir, &fmt!("{}-under", kind), &set)).is_none(), "typst must set {} {} deep", kind, under);
+		res!(must_pdf(inst.compile_pdf(&strict(&[("/main.typ", set.as_str())]))));
+		let over = nest(kind, under + 1);
+		let (message, line, col) = match res!(typst_refusal(&dir, &fmt!("{}-over", kind), &over)) {
+			Some(r)	=> r,
+			None	=> return Err(err!("Typst must refuse {} {} deep.", kind, under + 1; Test)),
+		};
+		let f = res!(must_fail(inst.compile_pdf(&strict(&[("/main.typ", over.as_str())]))));
+		assert_eq!(f.head.message, message, "{} {} deep: the message", kind, under + 1);
+		assert_eq!(f.head.kind, DiagnosticKind::Limit, "{} {} deep: the kind", kind, under + 1);
+		assert_eq!((f.head.line, f.head.col), (line, door_col(&over, line, col)), "{} {} deep: the site", kind, under + 1);
+	}
+	Ok(())
+	})
+}
+
+// Without the guard these nests overflow the stack: a trap in the browser, which ends the module for the page's
+// life, and an abort here. With it each is a `limit` error, and the instance and a new one compile on.
+#[test]
+fn a_nest_two_thousand_deep_is_a_limit_error_and_the_next_compile_succeeds_on_the_same_instance_and_a_new_one() -> Outcome<()> {
+	deep(|| {
+	let mut inst = Instance::new();
+	for kind in ["box", "block", "stack", "table", "list"] {
+		let n = if kind == "list" { 100 } else { 2_000 };
+		let text = looped(kind, n);
+		let f = match inst.compile_pdf(&strict(&[("/main.typ", text.as_str())])) {
+			Ok(_)	=> return Err(err!("The door compiled {} {} deep; it must refuse it as a limit.", kind, n; Test)),
+			Err(f)	=> f,
+		};
+		assert_eq!(f.head.kind, DiagnosticKind::Limit, "{} {} deep: {}", kind, n, f.head);
+		res!(must_pdf(inst.compile_pdf(&strict(&[("/main.typ", SKELETON)]))));
+		res!(must_pdf(Instance::new().compile_pdf(&strict(&[("/main.typ", SKELETON)]))));
+	}
+	Ok(())
+	})
+}
