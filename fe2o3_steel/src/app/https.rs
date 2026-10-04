@@ -121,6 +121,7 @@ pub struct AppWebHandler<
     pub publish:                Option<Arc<PublishConfig>>,
     pub mail:                   Option<Arc<MailSender>>,
     pub site_admins:            Arc<Vec<String>>,
+    pub admin_dashboard:        bool,   // `false` answers 404 for `/admin` and everything under it
 }
 
 impl<
@@ -163,7 +164,14 @@ impl<
             publish,
             mail,
             site_admins,
+            admin_dashboard:    true,
         }
+    }
+
+    pub fn with_admin_dashboard(mut self, on: bool) -> Self {
+        // `new` leaves the dashboard on, as every config written before the setting says.
+        self.admin_dashboard = on;
+        self
     }
 
     pub fn err_id() -> String {
@@ -269,6 +277,7 @@ impl<
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
+        let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
         let site_admins = self.site_admins.clone();
         // A `HEAD` reached this branch because it asks what the `GET` would
@@ -281,6 +290,17 @@ impl<
         );
 
         async move {
+            // A vhost that has switched the dashboard off does not own `/admin`, and does not
+            // hand the prefix to anything else either: the whole subtree is a 404, so neither
+            // a login page nor a file of that name in its web root is reachable there.
+            if !admin_dashboard
+                && (request_path == "/admin" || request_path.starts_with("/admin/"))
+            {
+                return Ok(Some(cache::generated(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                ))));
+            }
             // The dashboard owns the entire `/admin` and `/admin/*`
             // subtree on every vhost it is configured for. Dispatch
             // before any API/webhook/static route lookups so app
@@ -945,11 +965,21 @@ impl<
         let api_handler_registry = self.api_handler_registry.clone();
         let tls_client = self.tls_client.clone();
         let admin_state = self.admin_state.clone();
+        let admin_dashboard = self.admin_dashboard;
         let publish = self.publish.clone();
         let mail = self.mail.clone();
         let site_admins = self.site_admins.clone();
 
         async move {
+            // As for a `GET`: with the dashboard off, `/admin` is a 404 whatever the method.
+            if !admin_dashboard
+                && (request_path == "/admin" || request_path.starts_with("/admin/"))
+            {
+                return Ok(Some(HttpMessage::respond_with_text(
+                    HttpStatus::NotFound,
+                    "Not found.",
+                )));
+            }
             // The newsletter sign-up: a public POST under the published prefix,
             // answered before the console and the API routes. It touches the
             // subscriber store and the DKIM mail sender, not the posts, and

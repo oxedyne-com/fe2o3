@@ -1078,6 +1078,13 @@ pub struct VhostConfig {
     // writes no connection line, request line or traffic record, which a vhost serving tiles
     // must set, since its requests say where each viewer looked. Defaults to `true`.
     pub access_log:             bool,
+    // Whether this vhost serves the operator dashboard at `/admin` and everything under it.
+    // `false` answers 404 there, so a public site with nothing to administer shows no login page
+    // and its web root can never be read through that prefix. The dashboard is one surface for
+    // the whole process, so this only decides which names it is reachable by: the loopback
+    // listener (`admin_local_port`) names no vhost and is untouched. Defaults to `true`, which is
+    // what every config written before the field existed says.
+    pub admin_dashboard:        bool,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -1125,6 +1132,7 @@ impl Default for VhostConfig {
             site_admins:            Vec::new(),
             tiles:                  None,
             access_log:             true,
+            admin_dashboard:        true,
         }
     }
 }
@@ -1480,6 +1488,13 @@ impl VhostConfig {
                 "VhostConfig: 'access_log' must be a boolean.";
                 Invalid, Input, Mismatch)),
         };
+        let admin_dashboard = match m.get(&dat!("admin_dashboard")) {
+            Some(Dat::Bool(b)) => *b,
+            None => true,
+            _ => return Err(err!(
+                "VhostConfig: 'admin_dashboard' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
         // A tile request names where its viewer looked, so a vhost serving tiles may not keep
         // even the connection lines that would pair a viewer's address with the time.
         if tiles.is_some() && access_log {
@@ -1509,6 +1524,7 @@ impl VhostConfig {
             site_admins,
             tiles,
             access_log,
+            admin_dashboard,
         })
     }
 
