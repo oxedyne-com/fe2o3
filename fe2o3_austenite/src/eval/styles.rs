@@ -818,6 +818,7 @@ fn list_types(ts: &[&str]) -> String {
 /// The message for a value a field does not accept.
 pub fn expected_message(ty: FieldType, found: &Value) -> String {
 	let expected = match ty {
+		FieldType::Keyword(_, choices)	=> return fmt!("expected {}, found {}", choices, found.ty().long_name()),
 		FieldType::Any			=> "any value".to_string(),
 		FieldType::Of(t)		=> t.long_name().to_string(),
 		FieldType::OneOf(ts)	=> list_types(&ts.iter().map(|t| t.long_name()).collect::<Vec<_>>()),

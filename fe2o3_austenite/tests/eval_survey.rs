@@ -22,6 +22,10 @@ use oxedyne_fe2o3_austenite::door::{
 	Instance,
 	Project,
 };
+use oxedyne_fe2o3_austenite::eval::content::{
+	ElemKind,
+	FieldType,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -243,6 +247,99 @@ fn a_symbol_that_is_not_callable_is_refused_as_a_function_with_typsts_message() 
 		assert!(f.head.message.starts_with("symbol "), "{}: {}", name, f.head.message);
 		assert!(f.head.message.ends_with(" is not callable"), "{}: {}", name, f.head.message);
 	}
+	Ok(())
+}
+
+// Keywords: a parameter that takes a closed set of strings takes a string alone
+
+// Each is a parameter Typst types as a keyword: `@` is the value given. A symbol is never cast to the
+// string it stands for here, as it is where a parameter is a `str`, so Typst refuses it by naming what it
+// found, as it names any other type; a string outside the set is named without what was found.
+const KEYWORDS: [(&str, &str); 28] = [
+	("text-style",			"#text(style: @)[x]\n"),
+	("text-weight",			"#text(weight: @)[x]\n"),
+	("text-top-edge",		"#text(top-edge: @)[x]\n"),
+	("text-bottom-edge",	"#text(bottom-edge: @)[x]\n"),
+	("text-number-type",	"#text(number-type: @)[x]\n"),
+	("text-number-width",	"#text(number-width: @)[x]\n"),
+	("set-text-weight",		"#set text(weight: @)\nx\n"),
+	("set-text-style",		"#set text(style: @)\nx\n"),
+	("highlight-top-edge",	"#highlight(top-edge: @)[x]\n"),
+	("highlight-bottom-edge", "#highlight(bottom-edge: @)[x]\n"),
+	("frac-style",			"#math.frac([a], [b], style: @)\n"),
+	("math-class",			"#math.class(@, [x])\n"),
+	("place-scope",			"#place(scope: @)[x]\n"),
+	("figure-scope",		"#figure([a], scope: @)\n"),
+	("page-paper",			"#set page(paper: @)\n"),
+	("pagebreak-to",		"#pagebreak(to: @)\n"),
+	("curve-close-mode",	"#curve(curve.move((0pt, 0pt)), curve.close(mode: @))\n"),
+	("curve-fill-rule",		"#curve(fill-rule: @, curve.line((1pt, 1pt)))\n"),
+	("polygon-fill-rule",	"#polygon(fill-rule: @, (0pt, 0pt), (1pt, 1pt), (0pt, 2pt))\n"),
+	("stroke-cap",			"#line(stroke: (cap: @))\n"),
+	("stroke-join",			"#line(stroke: (join: @))\n"),
+	("gradient-relative",	"#gradient.linear(red, blue, relative: @)\n"),
+	("par-linebreaks",		"#set par(linebreaks: @)\n"),
+	("par-line-scope",		"#set par.line(numbering-scope: @)\n"),
+	("ref-form",			"#ref(<a>, form: @)\n"),
+	("image-format",		"#image(\"x.svg\", format: @)\n"),
+	("image-fit",			"#image(\"x.svg\", fit: @)\n"),
+	("image-scaling",		"#image(\"x.svg\", scaling: @)\n"),
+];
+
+#[test]
+fn a_keyword_parameter_refuses_a_symbol_and_any_other_type_with_typsts_message() -> Outcome<()> {
+	// One SVG, `x.svg`, for the `image` cases: written beside Typst's copy and supplied as the project's own.
+	const SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"4\" height=\"4\"><rect width=\"4\" height=\"4\"/></svg>";
+	let dir = res!(work_dir("keywords"));
+	let mut bad: Vec<String> = Vec::new();
+	let mut cases = 0;
+	for (name, template) in KEYWORDS {
+		for (given, found) in [("sym.alpha", "symbol"), ("true", "boolean")] {
+			cases += 1;
+			let case = fmt!("{}-{}", name, found);
+			let src = template.replace('@', given);
+			let main = res!(write_main(&dir, &case, &src));
+			res!(std::fs::write(main.with_file_name("x.svg"), SVG));
+			let (want, _, _) = res!(typst_error(&dir, &case, &src));
+			let mut project = Project::single(&src);
+			project.assets.push(("/x.svg".to_string(), SVG.as_bytes().to_vec()));
+			let mut inst = Instance::new();
+			let got = match inst.compile_pdf(&project) {
+				Ok(_)	=> "it builds".to_string(),
+				Err(f)	=> f.head.message,
+			};
+			if got != want || !want.ends_with(&fmt!(", found {}", found)) {
+				bad.push(fmt!("{}: typst says `{}`, the door `{}`", case, want, got));
+			}
+		}
+	}
+	assert!(bad.is_empty(), "{} of {} keyword cases differ:\n{}", bad.len(), cases, bad.join("\n"));
+	Ok(())
+}
+
+// The fields the schema types as keywords, each one in `KEYWORDS` above: a field typed so and left out
+// is not held to Typst, and one listed here that is no longer a keyword is a stale line.
+const KEYWORD_FIELDS: [&str; 11] = [
+	"text.style", "text.weight", "text.top-edge", "text.bottom-edge", "text.number-type", "text.number-width",
+	"highlight.top-edge", "highlight.bottom-edge", "math.frac.style", "math.class.class", "place.scope",
+];
+
+#[test]
+fn every_field_the_schema_types_as_a_keyword_is_held_to_typst_above() -> Outcome<()> {
+	let mut have: Vec<String> = Vec::new();
+	for kind in ElemKind::ALL {
+		for spec in kind.fields() {
+			if matches!(spec.ty, FieldType::Keyword(..)) {
+				have.push(fmt!("{}.{}", kind.path(), spec.name));
+			}
+		}
+	}
+	have.sort();
+	have.dedup();
+	let mut want: Vec<String> = KEYWORD_FIELDS.iter().map(|s| s.to_string()).collect();
+	want.sort();
+	want.dedup();
+	assert_eq!(have, want, "the schema's keyword fields and the test's list differ");
 	Ok(())
 }
 

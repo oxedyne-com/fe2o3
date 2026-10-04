@@ -928,12 +928,10 @@ fn stops_of(engine: &mut Engine, span: Span, vals: Vec<Value>, conic: bool) -> O
 fn relative_of(engine: &mut Engine, span: Span, v: Option<Value>) -> Outcome<RelativeTo> {
 	match v {
 		None | Some(Value::Auto)	=> Ok(RelativeTo::Auto),
-		Some(Value::Str(s)) => match s.as_str() {
-			"self"		=> Ok(RelativeTo::SelfBox),
-			"parent"	=> Ok(RelativeTo::Parent),
-			_			=> Err(engine.error(DiagnosticKind::Type, span, "expected \"self\" or \"parent\"")),
-		},
-		Some(other) => Err(mismatch(engine, span, "auto or string", &other)),
+		Some(Value::Str(s)) if s.as_str() == "self"		=> Ok(RelativeTo::SelfBox),
+		Some(Value::Str(s)) if s.as_str() == "parent"	=> Ok(RelativeTo::Parent),
+		Some(other) => Err(engine.error(DiagnosticKind::Type, span,
+			crate::eval::lib::foundations::keyword_message(crate::eval::lib::visual::RELATIVE_TO, &other))),
 	}
 }
 

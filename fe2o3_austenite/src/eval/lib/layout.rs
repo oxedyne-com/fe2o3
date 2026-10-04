@@ -22,6 +22,10 @@ use crate::eval::content::{
 	FieldType,
 	Fold,
 };
+use crate::eval::lib::foundations::{
+	keyword,
+	keyword_message,
+};
 use crate::eval::lib::visual as vis;
 use crate::eval::scope::Scope;
 use crate::eval::styles::{
@@ -122,9 +126,13 @@ const V: &[FieldSpec] = &[
 	FieldSpec::named("attach",		BOOL,	FieldDefault::Bool(false)).unsettable(),
 ];
 
+// Keyword choices
+const PLACE_SCOPE:	&str = "\"column\" or \"parent\"";
+const BREAK_TO:		&str = "\"even\", \"odd\", or none";
+
 const PLACE: &[FieldSpec] = &[
 	FieldSpec::named("alignment",	FieldType::OneOf(&[Type::Alignment, Type::Auto]),	FieldDefault::Computed).positional(),
-	FieldSpec::named("scope",		FieldType::Of(Type::Str),	FieldDefault::Str("column")),
+	FieldSpec::named("scope",		FieldType::Keyword(&[], PLACE_SCOPE),	FieldDefault::Str("column")),
 	FieldSpec::named("float",		BOOL,	FieldDefault::Bool(false)),
 	FieldSpec::named("clearance",	ANY,	FieldDefault::Em(1.5)),
 	FieldSpec::named("dx",			ANY,	FieldDefault::Pt(0.0)),
@@ -152,7 +160,7 @@ const PAGEBREAK: &[FieldSpec] = &[
 // `paper` spreads into `width` and `height` (see the file header), so it precedes them: within one `set`,
 // an explicit width or height is the nearer of the two.
 const PAGE: &[FieldSpec] = &[
-	FieldSpec::named("paper",			FieldType::Of(Type::Str),	FieldDefault::Str("a4")),
+	FieldSpec::named("paper",			ANY,	FieldDefault::Str("a4")),	// a keyword: `cast_field` checks it
 	FieldSpec::named("width",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("height",			ANY,	FieldDefault::Computed),
 	FieldSpec::named("flipped",			BOOL,	FieldDefault::Bool(false)),
@@ -347,13 +355,7 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 			other		=> spacing(other),
 		},
 		(K::H | K::V, "amount")								=> spacing(v),
-		(K::Place, "scope") => {
-			let s = res!(v.cast::<String>());
-			match s.as_str() {
-				"column" | "parent"	=> Ok(Value::str(s)),
-				_					=> Err(err!("expected \"column\" or \"parent\""; Input, Invalid)),
-			}
-		},
+		(K::Place, "scope")									=> Ok(Value::Str(res!(keyword(&v, &["column", "parent"], PLACE_SCOPE)))),
 		(K::Place, "clearance")								=> Ok(Value::Length(res!(vis::cast_length(v)))),
 		(K::Place, "dx") | (K::Place, "dy")					=> Ok(Value::Relative(res!(vis::cast_rel(v)))),
 		(K::Columns, "count") | (K::Page, "columns") => {
@@ -366,28 +368,19 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 		(K::Columns, "gutter")								=> Ok(Value::Relative(res!(vis::cast_rel(v)))),
 		(K::Pagebreak, "to") => match v {
 			Value::None => Ok(v),
-			other => {
-				let s = res!(other.cast::<String>());
-				match s.as_str() {
-					"even" | "odd"	=> Ok(Value::str(s)),
-					_				=> Err(err!("expected \"even\", \"odd\", or none"; Input, Invalid)),
-				}
-			},
+			other	=> Ok(Value::Str(res!(keyword(&other, &["even", "odd"], BREAK_TO)))),
 		},
-		(K::Page, "paper") => {
-			let s = res!(v.cast::<String>());
-			match paper(&s) {
-				Some(_)	=> Ok(Value::str(s)),
-				None	=> {
-					// Typst names every paper it knows, in its table's order.
-					let names: Vec<String> = PAPERS.iter().map(|(n, _, _)| fmt!("\"{}\"", n)).collect();
-					let (last, rest) = match names.split_last() {
-						Some(x)	=> x,
-						None	=> return Err(err!("unknown paper size"; Input, Invalid)),
-					};
-					Err(err!("expected {}, or {}", rest.join(", "), last; Input, Invalid))
-				},
-			}
+		(K::Page, "paper") => match &v {
+			Value::Str(s) if paper(s).is_some()	=> Ok(v),
+			_ => {
+				// Typst names every paper it knows, in its table's order.
+				let names: Vec<String> = PAPERS.iter().map(|(n, _, _)| fmt!("\"{}\"", n)).collect();
+				let (last, rest) = match names.split_last() {
+					Some(x)	=> x,
+					None	=> return Err(err!("unknown paper size"; Input, Invalid)),
+				};
+				Err(err!("{}", keyword_message(&fmt!("{}, or {}", rest.join(", "), last), &v); Input, Invalid))
+			},
 		},
 		(K::Page, "width") | (K::Page, "height") => match v {
 			Value::Auto	=> Ok(v),

@@ -298,6 +298,7 @@ pub enum FieldType {
 	Of(Type),
 	OneOf(&'static [Type]),
 	Content,	// content, str, symbol or number, displayed
+	Keyword(&'static [Type], &'static str),	// a closed set of strings and Typst's words for it; no symbol cast
 }
 
 impl FieldType {
@@ -308,6 +309,7 @@ impl FieldType {
 			FieldType::OneOf(ts)	=> ts.contains(&v.ty()),
 			FieldType::Content		=> matches!(v.ty(),
 				Type::Content | Type::Str | Type::Symbol | Type::Int | Type::Float | Type::None),
+			FieldType::Keyword(ts, _)	=> matches!(v, Value::Str(_)) || ts.contains(&v.ty()),
 		}
 	}
 
@@ -325,7 +327,7 @@ impl FieldType {
 		match self {
 			FieldType::Of(t)		=> t == Type::Str,
 			FieldType::OneOf(ts)	=> ts.contains(&Type::Str),
-			FieldType::Any | FieldType::Content	=> false,
+			FieldType::Any | FieldType::Content | FieldType::Keyword(..)	=> false,
 		}
 	}
 }
@@ -771,8 +773,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 		};
 		if let Some(v) = value {
 			if !spec.ty.castable(&v) {
-				return Err(engine.error(DiagnosticKind::Type, span, fmt!(
-					"{}: field `{}` does not accept {}", kind.path(), spec.name, v.ty().name())));
+				return Err(engine.error(DiagnosticKind::Type, span, crate::eval::styles::expected_message(spec.ty, &v)));
 			}
 			let v = spec.ty.cast(v);
 			fields.push((id, res!(cast_field(kind, spec.name, v))));

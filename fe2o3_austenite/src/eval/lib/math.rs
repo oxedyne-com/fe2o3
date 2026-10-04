@@ -21,6 +21,7 @@ use crate::eval::func::{
 	NativeFunc,
 };
 use crate::eval::lib;
+use crate::eval::lib::foundations::keyword_message;
 use crate::eval::scope::Scope;
 use crate::eval::content::display;
 use crate::eval::styles::{
@@ -129,10 +130,14 @@ const PRIMES: &[FieldSpec] = &[
 	FieldSpec::required("count", FieldType::Of(Type::Int)),
 ];
 
+// Keyword choices
+const FRAC_STYLE:	&str = "\"vertical\", \"skewed\", or \"horizontal\"";
+const CLASS_NAME:	&str = "\"normal\", \"punctuation\", \"opening\", \"closing\", \"fence\", \"large\", \"relation\", \"unary\", \"binary\", or \"vary\"";
+
 const FRAC: &[FieldSpec] = &[
 	FieldSpec::required("num", FieldType::Content),
 	FieldSpec::required("denom", FieldType::Content),
-	FieldSpec::named("style", FieldType::Of(Type::Str), FieldDefault::Str("vertical")),
+	FieldSpec::named("style", FieldType::Keyword(&[], FRAC_STYLE), FieldDefault::Str("vertical")),
 	FieldSpec::named("num-deparenthesized", FieldType::Of(Type::Bool), FieldDefault::Bool(false)).synthesised(),
 	FieldSpec::named("denom-deparenthesized", FieldType::Of(Type::Bool), FieldDefault::Bool(false)).synthesised(),
 ];
@@ -188,7 +193,7 @@ const OP: &[FieldSpec] = &[
 ];
 
 const CLASS: &[FieldSpec] = &[
-	FieldSpec::required("class", FieldType::Of(Type::Str)),
+	FieldSpec::required("class", FieldType::Keyword(&[], CLASS_NAME)),
 	FieldSpec::required("body", FieldType::Content),
 ];
 
@@ -295,8 +300,7 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 		},
 		(ElemKind::MathClass, "class") => match &v {
 			Value::Str(s) if MathClass::from_name(s).is_some()	=> Ok(v),
-			_ => Err(err!("expected \"normal\", \"punctuation\", \"opening\", \"closing\", \"fence\", \"large\", \
-				\"relation\", \"unary\", \"binary\", or \"vary\""; Input, Invalid)),
+			_ => Err(err!("{}", keyword_message(CLASS_NAME, &v); Input, Invalid)),
 		},
 		(ElemKind::MathMat, "augment") => Ok(augment_value(v)),
 		// The accent is kept as its combining form, as Typst's cast leaves it.
@@ -309,7 +313,7 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 		},
 		(ElemKind::MathFrac, "style") => match &v {
 			Value::Str(s) if matches!(s.as_str(), "vertical" | "skewed" | "horizontal")	=> Ok(v),
-			_ => Err(err!("expected \"vertical\", \"skewed\", or \"horizontal\""; Input, Invalid)),
+			_ => Err(err!("{}", keyword_message(FRAC_STYLE, &v); Input, Invalid)),
 		},
 		_ => Ok(v),
 	}
@@ -533,9 +537,7 @@ pub fn construct(engine: &mut Engine, kind: ElemKind, args: &mut Args) -> Outcom
 		ElemKind::MathClass => {
 			if let Some(Value::Str(s)) = args.items.iter().find(|a| a.name.is_none()).map(|a| a.value.clone()) {
 				if MathClass::from_name(&s).is_none() {
-					return Err(engine.error(DiagnosticKind::Type, span, fmt!(
-						"expected \"normal\", \"punctuation\", \"opening\", \"closing\", \"fence\", \"large\", \
-						\"relation\", \"unary\", \"binary\", or \"vary\"")));
+					return Err(engine.error(DiagnosticKind::Type, span, keyword_message(CLASS_NAME, &Value::Str(s))));
 				}
 			}
 			Ok(None)

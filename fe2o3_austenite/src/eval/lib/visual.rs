@@ -24,6 +24,7 @@ use crate::eval::func::{
 	Func,
 	NativeFunc,
 };
+use crate::eval::lib::foundations::keyword;
 use crate::eval::scope::Scope;
 use crate::eval::styles::{
 	Property,
@@ -437,6 +438,16 @@ fn take_named(fields: &mut Fields, kind: ElemKind, args: &mut Args, name: &str) 
 	Ok(())
 }
 
+// Keyword choices
+const CLOSE_MODE:		&str = "\"smooth\" or \"straight\"";
+const IMAGE_FORMAT:		&str = "\"png\", \"jpg\", \"gif\", \"webp\", dictionary, \"svg\", \"pdf\", or auto";
+const IMAGE_FIT:		&str = "\"cover\", \"contain\", or \"stretch\"";
+const IMAGE_SCALING:	&str = "\"smooth\", \"pixelated\", or auto";
+const FILL_RULE:		&str = "\"non-zero\" or \"even-odd\"";
+const CAP:				&str = "\"butt\", \"round\", \"square\", or auto";
+const JOIN:				&str = "\"miter\", \"round\", \"bevel\", or auto";
+pub const RELATIVE_TO:	&str = "\"self\", \"parent\", or auto";
+
 /// Casts a value into a visual element's field as Typst casts it. The constructors and `set` rules
 /// both cast through here, so a value `set` accepts is one construction accepts.
 pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
@@ -462,45 +473,20 @@ pub fn cast_field(kind: ElemKind, name: &str, v: Value) -> Outcome<Value> {
 		(_, "reflow") | (_, "relative") | (_, "justify")
 											=> Ok(Value::Bool(res!(v.cast::<bool>()))),
 		(K::Repeat, "gap")					=> Ok(Value::Length(res!(cast_length(v)))),
-		(K::CurveClose, "mode") => {
-			let s = res!(v.cast::<String>());
-			match s.as_str() {
-				"smooth" | "straight"	=> Ok(Value::str(s)),
-				_						=> Err(err!("expected \"smooth\" or \"straight\""; Input, Invalid)),
-			}
-		}
+		(K::CurveClose, "mode")				=> Ok(Value::Str(res!(keyword(&v, &["smooth", "straight"], CLOSE_MODE)))),
 		(K::Image, "format") => match v {
-			Value::Auto => Ok(v),
-			other => {
-				let s = res!(other.cast::<String>());
-				match s.as_str() {
-					"png" | "jpg" | "gif" | "webp" | "svg" | "pdf"	=> Ok(Value::str(s)),
-					_ => Err(err!("expected \"png\", \"jpg\", \"gif\", \"webp\", \"svg\", \"pdf\", \
-						dictionary, or auto"; Input, Invalid)),
-				}
-			},
+			Value::Auto	=> Ok(v),
+			other		=> Ok(Value::Str(res!(keyword(&other, &["png", "jpg", "gif", "webp", "svg", "pdf"], IMAGE_FORMAT)))),
 		},
 		(K::Image, "alt") => match v {
 			Value::None	=> Ok(v),
 			other		=> Ok(Value::str(res!(other.cast::<String>()))),
 		},
 		(K::Image, "page")					=> Ok(Value::Int(res!(v.cast::<i64>()))),
-		(K::Image, "fit") => {
-			let s = res!(v.cast::<String>());
-			match s.as_str() {
-				"cover" | "contain" | "stretch"	=> Ok(Value::str(s)),
-				_ => Err(err!("expected \"cover\", \"contain\", or \"stretch\""; Input, Invalid)),
-			}
-		}
+		(K::Image, "fit")					=> Ok(Value::Str(res!(keyword(&v, &["cover", "contain", "stretch"], IMAGE_FIT)))),
 		(K::Image, "scaling") => match v {
-			Value::Auto => Ok(v),
-			other => {
-				let s = res!(other.cast::<String>());
-				match s.as_str() {
-					"smooth" | "pixelated"	=> Ok(Value::str(s)),
-					_ => Err(err!("expected \"smooth\", \"pixelated\", or auto"; Input, Invalid)),
-				}
-			},
+			Value::Auto	=> Ok(v),
+			other		=> Ok(Value::Str(res!(keyword(&other, &["smooth", "pixelated"], IMAGE_SCALING)))),
 		},
 		_									=> Ok(v),
 	}
@@ -1002,30 +988,22 @@ pub fn fill_of(v: &Value) -> Outcome<Option<Paint>> {
 }
 
 fn cast_fill_rule(v: Value) -> Outcome<Value> {
-	let s = res!(v.cast::<String>());
-	match s.as_str() {
-		"non-zero" | "even-odd"	=> Ok(Value::str(s)),
-		_ => Err(err!("expected \"non-zero\" or \"even-odd\""; Input, Invalid)),
-	}
+	Ok(Value::Str(res!(keyword(&v, &["non-zero", "even-odd"], FILL_RULE))))
 }
 
 fn cast_cap(v: Value) -> Outcome<LineCap> {
-	let s = res!(v.cast::<String>());
-	match s.as_str() {
-		"butt"		=> Ok(LineCap::Butt),
-		"round"		=> Ok(LineCap::Round),
-		"square"	=> Ok(LineCap::Square),
-		_ => Err(err!("expected \"butt\", \"round\", or \"square\""; Input, Invalid)),
+	match res!(keyword(&v, &["butt", "round", "square"], CAP)).as_str() {
+		"butt"	=> Ok(LineCap::Butt),
+		"round"	=> Ok(LineCap::Round),
+		_		=> Ok(LineCap::Square),
 	}
 }
 
 fn cast_join(v: Value) -> Outcome<LineJoin> {
-	let s = res!(v.cast::<String>());
-	match s.as_str() {
+	match res!(keyword(&v, &["miter", "round", "bevel"], JOIN)).as_str() {
 		"miter"	=> Ok(LineJoin::Miter),
 		"round"	=> Ok(LineJoin::Round),
-		"bevel"	=> Ok(LineJoin::Bevel),
-		_ => Err(err!("expected \"miter\", \"round\", or \"bevel\""; Input, Invalid)),
+		_		=> Ok(LineJoin::Bevel),
 	}
 }
 
@@ -1333,11 +1311,9 @@ pub fn cast_corners_rel(v: Value) -> Outcome<Value> {
 }
 
 fn cast_relative_to(v: Value) -> Outcome<RelativeTo> {
-	let s = res!(v.cast::<String>());
-	match s.as_str() {
-		"self"		=> Ok(RelativeTo::SelfBox),
-		"parent"	=> Ok(RelativeTo::Parent),
-		_			=> Err(err!("expected \"self\", \"parent\", or auto"; Input, Invalid)),
+	match res!(keyword(&v, &["self", "parent"], RELATIVE_TO)).as_str() {
+		"self"	=> Ok(RelativeTo::SelfBox),
+		_		=> Ok(RelativeTo::Parent),
 	}
 }
 

@@ -388,8 +388,8 @@ pub fn list(names: &[&str]) -> String {
 	}
 }
 
-/// One of a closed set of strings, optionally `auto` or `none`: Typst's message names the strings quoted
-/// and does not say what was found.
+/// One of a closed set of strings, optionally `auto` or `none`: Typst's message names the strings quoted,
+/// and says what was found for a value that is not a string.
 pub fn choice(v: &Value, options: &[&str], auto: bool, none: bool) -> Result<(), CastErr> {
 	match v {
 		Value::Str(s) if options.contains(&s.as_str())	=> return Ok(()),
@@ -405,7 +405,7 @@ pub fn choice(v: &Value, options: &[&str], auto: bool, none: bool) -> Result<(),
 		names.push("auto".to_string());
 	}
 	let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-	let msg = fmt!("expected {}", list(&refs));
+	let msg = crate::eval::lib::foundations::keyword_message(&list(&refs), v);
 	// A string outside the set is a value error; any other type a type error.
 	match v {
 		Value::Str(_)	=> Err(CastErr::Value(msg)),

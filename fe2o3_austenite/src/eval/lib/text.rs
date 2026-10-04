@@ -59,6 +59,14 @@ native_fns! {
 	}
 }
 
+// Keyword choices
+const STYLE:		&str = "\"normal\", \"italic\", or \"oblique\"";
+const WEIGHT:		&str = "integer, \"thin\", \"extralight\", \"light\", \"regular\", \"medium\", \"semibold\", \"bold\", \"extrabold\", or \"black\"";
+const TOP_EDGE:		&str = "\"ascender\", \"cap-height\", \"x-height\", \"baseline\", \"bounds\", or length";
+const BOTTOM_EDGE:	&str = "\"baseline\", \"descender\", \"bounds\", or length";
+const NUMBER_TYPE:	&str = "\"lining\", \"old-style\", or auto";
+const NUMBER_WIDTH:	&str = "\"proportional\", \"tabular\", or auto";
+
 const PAINT:	FieldType = FieldType::OneOf(&[Type::Color, Type::Gradient, Type::Tiling]);
 const REL:		FieldType = FieldType::OneOf(&[Type::Relative, Type::Length, Type::Ratio]);
 
@@ -66,8 +74,8 @@ const TEXT: &[FieldSpec] = &[
 	FieldSpec::required("text", FieldType::Of(Type::Str)).unsettable(),
 	FieldSpec::named("font", FieldType::OneOf(&[Type::Str, Type::Array, Type::Dict]), FieldDefault::Computed),
 	FieldSpec::named("fallback", FieldType::Of(Type::Bool), FieldDefault::Bool(true)),
-	FieldSpec::named("style", FieldType::Of(Type::Str), FieldDefault::Str("normal")),
-	FieldSpec::named("weight", FieldType::OneOf(&[Type::Int, Type::Str]), FieldDefault::Int(400)),
+	FieldSpec::named("style", FieldType::Keyword(&[], STYLE), FieldDefault::Str("normal")),
+	FieldSpec::named("weight", FieldType::Keyword(&[Type::Int], WEIGHT), FieldDefault::Int(400)),
 	FieldSpec::named("stretch", FieldType::Of(Type::Ratio), FieldDefault::Ratio(1.0)),
 	FieldSpec::named("size", FieldType::Of(Type::Length), FieldDefault::Pt(11.0)).fold(Fold::Add).positional(),
 	FieldSpec::named("fill", PAINT, FieldDefault::Computed).positional(),
@@ -77,8 +85,8 @@ const TEXT: &[FieldSpec] = &[
 	FieldSpec::named("cjk-latin-spacing", FieldType::OneOf(&[Type::Auto, Type::None]), FieldDefault::Auto),
 	FieldSpec::named("baseline", FieldType::Of(Type::Length), FieldDefault::Pt(0.0)),
 	FieldSpec::named("overhang", FieldType::Of(Type::Bool), FieldDefault::Bool(true)),
-	FieldSpec::named("top-edge", FieldType::OneOf(&[Type::Str, Type::Length]), FieldDefault::Str("cap-height")),
-	FieldSpec::named("bottom-edge", FieldType::OneOf(&[Type::Str, Type::Length]), FieldDefault::Str("baseline")),
+	FieldSpec::named("top-edge", FieldType::Keyword(&[Type::Length], TOP_EDGE), FieldDefault::Str("cap-height")),
+	FieldSpec::named("bottom-edge", FieldType::Keyword(&[Type::Length], BOTTOM_EDGE), FieldDefault::Str("baseline")),
 	FieldSpec::named("lang", FieldType::Of(Type::Str), FieldDefault::Str("en")),
 	FieldSpec::named("region", FieldType::OneOf(&[Type::Str, Type::None]), FieldDefault::None),
 	FieldSpec::named("script", FieldType::OneOf(&[Type::Str, Type::Auto]), FieldDefault::Auto),
@@ -91,8 +99,8 @@ const TEXT: &[FieldSpec] = &[
 	FieldSpec::named("ligatures", FieldType::Of(Type::Bool), FieldDefault::Bool(true)),
 	FieldSpec::named("discretionary-ligatures", FieldType::Of(Type::Bool), FieldDefault::Bool(false)),
 	FieldSpec::named("historical-ligatures", FieldType::Of(Type::Bool), FieldDefault::Bool(false)),
-	FieldSpec::named("number-type", FieldType::OneOf(&[Type::Str, Type::Auto]), FieldDefault::Auto),
-	FieldSpec::named("number-width", FieldType::OneOf(&[Type::Str, Type::Auto]), FieldDefault::Auto),
+	FieldSpec::named("number-type", FieldType::Keyword(&[Type::Auto], NUMBER_TYPE), FieldDefault::Auto),
+	FieldSpec::named("number-width", FieldType::Keyword(&[Type::Auto], NUMBER_WIDTH), FieldDefault::Auto),
 	FieldSpec::named("slashed-zero", FieldType::Of(Type::Bool), FieldDefault::Bool(false)),
 	FieldSpec::named("fractions", FieldType::Of(Type::Bool), FieldDefault::Bool(false)),
 	FieldSpec::named("features", FieldType::OneOf(&[Type::Array, Type::Dict]), FieldDefault::Computed).fold(Fold::Custom),
@@ -147,8 +155,8 @@ const STRIKE: &[FieldSpec] = &[
 const HIGHLIGHT: &[FieldSpec] = &[
 	FieldSpec::named("fill", FieldType::OneOf(&[Type::None, Type::Color, Type::Gradient, Type::Tiling]), FieldDefault::Computed),
 	FieldSpec::named("stroke", FieldType::Any, FieldDefault::None).fold(Fold::Sides),
-	FieldSpec::named("top-edge", FieldType::OneOf(&[Type::Str, Type::Length]), FieldDefault::Str("ascender")),
-	FieldSpec::named("bottom-edge", FieldType::OneOf(&[Type::Str, Type::Length]), FieldDefault::Str("descender")),
+	FieldSpec::named("top-edge", FieldType::Keyword(&[Type::Length], TOP_EDGE), FieldDefault::Str("ascender")),
+	FieldSpec::named("bottom-edge", FieldType::Keyword(&[Type::Length], BOTTOM_EDGE), FieldDefault::Str("descender")),
 	FieldSpec::named("extent", FieldType::Of(Type::Length), FieldDefault::Pt(0.0)),
 	FieldSpec::named("radius", FieldType::Any, FieldDefault::Pt(0.0)).fold(Fold::Corners),
 	FieldSpec::required("body", FieldType::Content),

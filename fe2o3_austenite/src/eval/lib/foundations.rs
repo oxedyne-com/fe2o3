@@ -390,6 +390,25 @@ pub fn mismatch(engine: &mut Engine, span: Span, expected: &str, found: &Value) 
 	engine.error(DiagnosticKind::Type, span, fmt!("expected {}, found {}", expected, type_desc(found.ty())))
 }
 
+/// Typst's refusal of a keyword parameter, a string from a closed set: `choices` is its wording of the
+/// alternatives (`"cover", "contain", or "stretch"`). A string outside the set is named without what was
+/// found, and any other type, a symbol among them, with it.
+pub fn keyword_message(choices: &str, v: &Value) -> String {
+	match v {
+		Value::Str(_)	=> fmt!("expected {}", choices),
+		other			=> fmt!("expected {}, found {}", choices, type_desc(other.ty())),
+	}
+}
+
+/// The keyword `v` is, one of `words`. A symbol is not cast to the string it stands for, as it is where a
+/// parameter is a `str`: no keyword of Typst's is a symbol's text, and Typst refuses one by its type.
+pub fn keyword(v: &Value, words: &[&str], choices: &str) -> Outcome<Arc<String>> {
+	match v {
+		Value::Str(s) if words.contains(&s.as_str())	=> Ok(s.clone()),
+		other	=> Err(err!("{}", keyword_message(choices, other); Input, Invalid)),
+	}
+}
+
 /// A type as Typst names it in "expected ..., found ..." messages.
 pub fn type_desc(ty: Type) -> &'static str { ty.long_name() }
 
