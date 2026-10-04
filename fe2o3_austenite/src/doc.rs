@@ -5964,9 +5964,11 @@ fn inset_nodes(nodes: &mut [Node], by: Sp) {
 				b.dims = Dims::new(b.dims.width + by, b.dims.height, b.dims.depth);
 			},
 			// Nothing else is drawn across the line: glue and a penalty take no width, an anchor records the
-			// callout's own left, and a float, a columns block or a column change never reach a callout.
+			// callout's own left, and a float, a columns block or a column change never reach a callout. A
+			// frame, a transform, a clip, a tag and a mark are the evaluator's, which sets no callout.
 			Node::Leaf(_) | Node::Glue(_) | Node::Penalty(_) | Node::Anchor(_) | Node::Float(_)
-			| Node::Columns(_) | Node::PageColumns(_) | Node::RepeatHead(_) => {},
+			| Node::Columns(_) | Node::PageColumns(_) | Node::RepeatHead(_) | Node::RepeatFoot(_)
+			| Node::Frame(_) | Node::Transform(_) | Node::Clip(_) | Node::Tag(_) | Node::Mark(_) => {},
 		}
 	}
 }

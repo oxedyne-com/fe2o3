@@ -1,14 +1,20 @@
-//! The one markup lexer every source scanner reads through. It follows `typst-syntax` 0.15.1: its
-//! `Lexer` for the tokens, and the mode stack its `Parser` keeps, since whether a `[` opens content or is
-//! prose, and where an embedded expression hands back to markup, is decided there rather than in the
-//! lexer. A `[` opens content only where code opened it (`#name[`, `#[`, a call's trailing argument, a
-//! reference's supplement); in prose it is text, balanced against a later `]` within its own markup
-//! scope (a heading, a list item, strong or emphasis keeps a count of its own). A `"` is a character in
-//! markup and a string only in code or maths. An automatic link is one token, so the `//` or `/*` in it
-//! opens no comment. Block comments nest. Raw text opens with one backtick or three or more and closes
-//! on a run as long, across lines. A `#!` opening the file is a comment to its line's end. A `$` whose
-//! maths never closes is read as a character, so the error stays at it and the markup after it is read as
-//! usual, where Typst's parser takes the rest of the source into the equation.
+//! The one markup lexer every source scanner reads through, as a view over the concrete syntax tree of
+//! [`crate::syntax`]: the port of `typst-syntax` 0.15.1's lexer and parser. A text is parsed once, and every
+//! answer -- what a character is, where a line stands, what a group holds, where a conditional ends -- is read
+//! from that tree, so the scanners keep no second reading of what is a comment, a body or the top level.
+//! A `[` opens content only where code opened it (`#name[`, `#[`, a call's trailing argument, a reference's
+//! supplement); in prose it is text, balanced against a later `]` within its own markup scope. A `"` is a
+//! character in markup and a string only in code or maths. An automatic link is one token, so the `//` or
+//! `/*` in it opens no comment. Block comments nest. Raw text opens with one backtick or three or more and
+//! closes on a run as long, across lines. A `#!` opening the file is a comment to its line's end. A `$`
+//! whose maths never closes is read as a character, so the error stays at it and the markup after it is read
+//! as usual, where Typst's parser takes the rest of the source into the equation: the text is parsed again
+//! with each such `$` set aside, until none is left.
+
+use crate::syntax::FileId;
+use crate::syntax::SyntaxKind;
+use crate::syntax::SyntaxNode;
+use crate::syntax::parser;
 
 /// What a character is, as Typst reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,742 +43,348 @@ pub(crate) enum Place {
 	Content,	// in content code opened: a call's argument, a reference's supplement, a conditional's or loop's body, a value
 }
 
-/// The keyword that heads a loop or a conditional, while its body is still to come.
+/// The keyword that heads a loop or a conditional.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kw {
 	If,
 	While,
 	For,
-	Done,	// an `else` branch's: nothing may follow it but a call or a field
 }
 
-/// Where an embedded expression stands: after its `#`, the parser reads one atomic expression (a name,
-/// a literal or a group, then any call or field written directly after it), or one statement, which runs
-/// to its line's end.
+/// How the text of a node is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Embed {
-	Start,								// the expression follows directly
-	Post,								// after an operand: `(`, `[` or `.name` may follow directly
-	Stmt,								// `let`, `set`, `show`, `import`, `include`, `return`: to the line's end, a `;` or a closer
-	Context,							// after `context`: spaces, then the expression
-	Head { kw: Kw, seen: bool, adj: bool },	// a head before its body; an operand seen, and one directly before
-	Tail { kw: Kw, spaced: bool },		// after a body: `else` may follow on the line
-	Else,								// after `else`: `if`, or the last body
+enum Mode {
+	Markup,
+	Code,
+	Math,
 }
 
-/// What opened a markup scope, and so what ends it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-	Body,			// the markup's own: ends with its content block, or never
-	Heading,		// ends at its line's end, or at a label
-	Item(usize),	// a list, enum or term item, its marker at this column: ends at a line that does not indent past it
-	Strong,			// ends at the next `*`, or at a paragraph break
-	Emph,			// ends at the next `_`, or at a paragraph break
+const NONE: usize = usize::MAX;	// no node
+
+/// One node of the tree, flattened: the leaves and the nodes above them, in source order.
+#[derive(Clone, Copy, Debug)]
+struct Node {
+	kind:	SyntaxKind,
+	start:	usize,
+	end:	usize,
+	parent:	usize,		// `NONE` for the root
+	child:	usize,		// the first child; `NONE` for a leaf
+	next:	usize,		// the next sibling
+	prev:	usize,		// the previous sibling
+	mode:	Mode,		// of a leaf, how it is read; of an inner node, how its children are
+	bare:	bool,		// a content block opened directly after a `#`
+	leaf:	usize,		// the leaf's place in `leaves`; `NONE` for an inner node
 }
 
-/// One markup scope, with the count of its prose `[` not yet balanced by a `]`. The parser keeps one count
-/// per scope, so a heading's unbalanced `[` is forgotten at its line's end.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Scope {
-	kind:	Kind,
-	nest:	u32,
+/// A leaf's class, and what is open before it.
+#[derive(Clone, Copy, Debug)]
+struct Leaf {
+	node:	usize,
+	tok:	Tok,
+	groups:	u32,		// groups code opened and not yet closed, before this leaf
+	eqs:	u32,		// equations open before it
+	shut:	bool,		// false for a string, raw text or block comment the text ends inside
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Markup {
-	block:	bool,		// a content block, closed by its own `]`
-	bare:	bool,		// a `#[` content block, not a call's argument
-	scopes:	Vec<Scope>,	// outermost first, the `Body` scope at the bottom
-	start:	bool,		// no token yet since the markup opened or since a line break: a marker may open here
-	head:	bool,		// no token yet since a line break: the next one ends the items it does not indent past
-}
-
-impl Markup {
-	fn new(block: bool, bare: bool) -> Self {
-		Markup { block, bare, scopes: vec![Scope { kind: Kind::Body, nest: 0 }], start: true, head: false }
-	}
-
-	/// Is no scope open but the markup's own, once a line's first token at `col` has ended the items it does
-	/// not indent past? `None` for a line whose first token ends no item.
-	fn bare_at(&self, col: Option<usize>) -> bool {
-		let open = match col.filter(|_| self.head) {
-			Some(c)	=> self.scopes.iter().position(|s| matches!(s.kind, Kind::Item(at) if at >= c))
-				.unwrap_or(self.scopes.len()),
-			None	=> self.scopes.len(),
-		};
-		open <= 1
-	}
-
-	/// Ends the innermost scope of `kind`-like shape and every scope opened inside it.
-	fn end_from(&mut self, pick: impl Fn(Kind) -> bool) {
-		if let Some(k) = self.scopes.iter().position(|s| s.kind != Kind::Body && pick(s.kind)) {
-			self.scopes.truncate(k);
-		}
-	}
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Frame {
-	Markup(Markup),
-	Code(char),		// a code group and its closer; `'\0'` for a code scan's outermost level
-	Math(usize),	// opened by the `$` at this source byte
-	Str(bool),		// whether the last character was a `\` still to take its escape
-	Comment(u32),	// nested this deep
-	Raw(usize),		// opened by this many backticks
-	Embed(Embed),
-}
-
-/// The lexer's state between steps, so a scan fed line by line reads a construct that runs across lines
-/// exactly as it reads the whole text. A caller that feeds lines feeds each line break too
-/// ([`Lexer::feed_line`]): an embedded statement ends at one, and an `else` on the next line is prose.
+/// A text read once. A file's markup is read with [`Lexer::markup`], a line or fragment as Typst reads it
+/// with [`Lexer::markup_exact`], and the inside of a call's argument list with [`Lexer::code`].
 #[derive(Clone, Debug)]
 pub(crate) struct Lexer {
-	frames:	Vec<Frame>,
-	col:	usize,			// characters since the last line break
-	blank:	u32,			// line breaks in the run of spaces now open, for a paragraph break
-	prev:	Option<char>,	// the character before the next one, for a `*` or `_` within a word
-	at:		usize,			// the source byte the next character stands at
-	lone:	Vec<usize>,		// sorted: the source bytes of each `$` whose maths never closes
+	text:		String,
+	nodes:		Vec<Node>,
+	leaves:		Vec<Leaf>,
+	lone:		Vec<usize>,		// sorted: the source bytes of each `$` whose maths never closes
+	groups:		u32,			// open at the end of the text
+	eqs:		u32,
 }
 
-impl Lexer {
-	/// A scan of a file's markup, as Typst reads a `.typ` file.
-	pub(crate) fn markup() -> Self {
-		Self::with(Frame::Markup(Markup::new(false, false)))
-	}
+/// The tree under construction.
+struct Build {
+	nodes:		Vec<Node>,
+	leaves:		Vec<Leaf>,
+	pos:		usize,
+	open:		Vec<usize>,						// the group nodes whose brackets are open, outermost first
+	eqs:		u32,
+	last:		Option<(SyntaxKind, usize)>,	// the last leaf made: its kind and where it ended
+	dollars:	Vec<usize>,						// the byte of each `$` the parser found unclosed
+	deep:		u32,							// error text being read again
+}
 
-	/// A scan of code, as the inside of a call's argument list reads.
-	pub(crate) fn code() -> Self {
-		Self::with(Frame::Code('\0'))
-	}
+// Where the kinds of the syntax tree take a text apart.
 
-	/// A scan of the whole of `src`'s markup, or of its lines fed in order from its first, that reads each
-	/// `$` whose maths never closes ([`lone_dollars`]) as a character.
-	pub(crate) fn markup_over(src: &str) -> Self {
-		Self::markup().with_lone(lone_dollars(src))
-	}
+/// Is `kind` one whose brackets code opens and closes as groups?
+fn is_group(kind: SyntaxKind) -> bool {
+	matches!(kind,
+		SyntaxKind::CodeBlock | SyntaxKind::ContentBlock | SyntaxKind::Args | SyntaxKind::Parenthesized
+		| SyntaxKind::Array | SyntaxKind::Dict | SyntaxKind::Params | SyntaxKind::Destructuring)
+}
 
-	/// This scan, reading the `$` at each of the source bytes `lone` as a character. A caller that feeds
-	/// lines from anywhere but the source's start says where each stands with [`Lexer::feed_line_at`].
-	pub(crate) fn with_lone(mut self, mut lone: Vec<usize>) -> Self {
-		lone.sort_unstable();
-		self.lone = lone;
-		self
-	}
+/// Does `kind` open a markup scope of its own in the markup around it: an item, a heading, strong or emphasis?
+fn is_scope(kind: SyntaxKind) -> bool {
+	matches!(kind,
+		SyntaxKind::Strong | SyntaxKind::Emph | SyntaxKind::Heading | SyntaxKind::ListItem
+		| SyntaxKind::EnumItem | SyntaxKind::TermItem)
+}
 
-	fn with(base: Frame) -> Self {
-		Lexer { frames: vec![base], col: 0, blank: 0, prev: None, at: 0, lone: Vec::new() }
-	}
+/// Is `kind` a statement an `#` embeds, which runs to its line's end?
+fn is_stmt(kind: SyntaxKind) -> bool {
+	matches!(kind,
+		SyntaxKind::LetBinding | SyntaxKind::SetRule | SyntaxKind::ShowRule | SyntaxKind::ModuleImport
+		| SyntaxKind::ModuleInclude | SyntaxKind::FuncReturn)
+}
 
-	/// Is anything open beyond the scan's own level: a group, a string, an equation, a comment, raw text,
-	/// or an embedded expression not yet ended?
-	pub(crate) fn is_open(&self) -> bool {
-		self.frames.len() > 1
+/// How the children of a node of `kind` are read, `mode` being how the node itself is.
+fn child_mode(kind: SyntaxKind, mode: Mode) -> Mode {
+	match kind {
+		SyntaxKind::Markup | SyntaxKind::Heading | SyntaxKind::Strong | SyntaxKind::Emph
+		| SyntaxKind::ListItem | SyntaxKind::EnumItem | SyntaxKind::TermItem | SyntaxKind::Ref
+		| SyntaxKind::Raw
+			=> Mode::Markup,
+		SyntaxKind::Math | SyntaxKind::Equation | SyntaxKind::MathDelimited | SyntaxKind::MathCall
+		| SyntaxKind::MathArgs | SyntaxKind::MathAttach | SyntaxKind::MathFrac | SyntaxKind::MathRoot
+			=> Mode::Math,
+		SyntaxKind::Code | SyntaxKind::CodeBlock | SyntaxKind::ContentBlock | SyntaxKind::Parenthesized
+		| SyntaxKind::Array | SyntaxKind::Dict | SyntaxKind::Keyed | SyntaxKind::Unary | SyntaxKind::Binary
+		| SyntaxKind::FieldAccess | SyntaxKind::FuncCall | SyntaxKind::Args | SyntaxKind::Closure
+		| SyntaxKind::Params | SyntaxKind::LetBinding | SyntaxKind::SetRule | SyntaxKind::ShowRule
+		| SyntaxKind::Contextual | SyntaxKind::Conditional | SyntaxKind::WhileLoop | SyntaxKind::ForLoop
+		| SyntaxKind::ModuleImport | SyntaxKind::ImportItems | SyntaxKind::ImportItemPath
+		| SyntaxKind::RenamedImportItem | SyntaxKind::ModuleInclude | SyntaxKind::LoopBreak
+		| SyntaxKind::LoopContinue | SyntaxKind::FuncReturn | SyntaxKind::Destructuring
+		| SyntaxKind::DestructAssignment
+			=> Mode::Code,
+		_	=> mode,
 	}
+}
 
-	/// How many groups code opened are open: `(`, `{`, a content block. Prose brackets, strings,
-	/// equations, comments and raw text are not counted.
-	pub(crate) fn depth(&self) -> usize {
-		self.frames.iter().skip(1).filter(|f| matches!(f, Frame::Code(_) | Frame::Markup(_))).count()
+/// Does a block comment's text close, its nesting balanced?
+fn comment_closed(text: &str) -> bool {
+	let b = text.as_bytes();
+	let (mut i, mut depth) = (0usize, 0u32);
+	while i + 1 < b.len() {
+		match (b[i], b[i + 1]) {
+			(b'/', b'*')	=> { depth = depth.saturating_add(1); i += 2; },
+			(b'*', b'/')	=> { depth = depth.saturating_sub(1); i += 2; },
+			_				=> i += 1,
+		}
 	}
+	depth == 0
+}
 
-	/// The number of groups open when the scan stands in markup -- the file's own, or a content block's --
-	/// and `None` when it stands in code, a string, an equation, a comment, raw text or an expression.
-	pub(crate) fn markup_level(&self) -> Option<usize> {
-		match self.frames.last() {
-			Some(Frame::Markup(_))	=> Some(self.depth()),
-			_						=> None,
+impl Build {
+	fn new() -> Self {
+		Build {
+			nodes:		Vec::new(),
+			leaves:		Vec::new(),
+			pos:		0,
+			open:		Vec::new(),
+			eqs:		0,
+			last:		None,
+			dollars:	Vec::new(),
+			deep:		0,
 		}
 	}
 
-	/// Where `line`, the next line to be fed, stands, or `None` when it opens outside markup: in a string, a
-	/// comment, raw text, an equation, a code group or an unfinished expression. The spaces that open a line
-	/// change no scope, so the place is decided at its first token, which ends the items it does not indent
-	/// past.
-	pub(crate) fn place_of(&self, line: &str) -> Option<Place> {
-		if !matches!(self.frames.last(), Some(Frame::Markup(_))) {
-			return None;
-		}
-		let last		= self.frames.len() - 1;
-		let col			= self.lead_col(line);
-		let mut place	= Place::Top;
-		for (k, f) in self.frames.iter().enumerate() {
-			match f {
-				// The outermost scope decides: an item, heading, strong or emphasis around a bare block holds it.
-				Frame::Markup(m) if k == 0 || m.bare => {
-					if !m.bare_at(if k == last { col } else { None }) {
-						return Some(Place::Contained);
-					}
-					if k > 0 {
-						place = Place::Block;
-					}
-				},
-				Frame::Embed(_) if matches!(self.frames.get(k + 1), Some(Frame::Markup(m)) if m.bare) => {},
-				_ => return Some(Place::Content),
-			}
-		}
-		Some(place)
+	/// An inner node, opening at the current byte; its end is set when its children are done.
+	fn inner(&mut self, kind: SyntaxKind, parent: usize, mode: Mode) -> usize {
+		let bare = kind == SyntaxKind::ContentBlock && self.last == Some((SyntaxKind::Hash, self.pos));
+		self.nodes.push(Node { kind, start: self.pos, end: self.pos, parent, child: NONE, next: NONE, prev: NONE, mode, bare, leaf: NONE });
+		self.nodes.len() - 1
 	}
 
-	/// Is `line`, the next line to be fed, standing directly in the innermost markup, whatever opened it,
-	/// with no list item, heading, strong or emphasis of that markup open around it?
-	pub(crate) fn bare_line(&self, line: &str) -> bool {
-		match self.frames.last() {
-			Some(Frame::Markup(m))	=> m.bare_at(self.lead_col(line)),
-			_						=> false,
-		}
+	/// A leaf of `len` bytes, read as `tok`.
+	fn leaf(&mut self, kind: SyntaxKind, len: usize, tok: Tok, parent: usize, mode: Mode, shut: bool) -> usize {
+		let idx = self.nodes.len();
+		self.nodes.push(Node {
+			kind, start: self.pos, end: self.pos + len, parent, child: NONE, next: NONE, prev: NONE, mode,
+			bare: false, leaf: self.leaves.len(),
+		});
+		self.leaves.push(Leaf { node: idx, tok, groups: self.open.len() as u32, eqs: self.eqs, shut });
+		self.pos += len;
+		self.last = Some((kind, self.pos));
+		idx
 	}
 
-	/// The column of `line`'s first token, past its spaces and any block comment that closes on it, or `None`
-	/// when it holds no token (spaces, a comment or its break alone), which ends no item.
-	fn lead_col(&self, line: &str) -> Option<usize> {
-		let chars: Vec<char> = line.chars().collect();
-		let mut i = 0usize;
-		while let Some(&c) = chars.get(i) {
-			match (c, chars.get(i + 1)) {
-				(' ' | '\t', _)		=> i += 1,
-				('/', Some('/'))	=> return None,
-				('/', Some('*'))	=> {
-					// A block comment nests; one that does not close on this line holds the rest of it.
-					let mut depth = 0u32;
-					loop {
-						match (chars.get(i), chars.get(i + 1)) {
-							(Some('/'), Some('*'))	=> { depth = depth.saturating_add(1); i += 2; },
-							(Some('*'), Some('/'))	=> {
-								depth = depth.saturating_sub(1);
-								i += 2;
-								if depth == 0 {
-									break;
-								}
-							},
-							(Some(_), _)			=> i += 1,
-							(None, _)				=> return None,
-						}
-					}
-				},
-				_ if is_newline(c)	=> return None,
-				_					=> return Some(self.col.saturating_add(i)),
-			}
-		}
-		None
-	}
-
-	/// Steps through `text`.
-	pub(crate) fn feed(&mut self, text: &str) {
-		let chars: Vec<char> = text.chars().collect();
-		let mut i = 0;
-		while i < chars.len() {
-			i += self.step(&chars, i).0;
-		}
-	}
-
-	/// Steps through `line` and then a line break, for a caller that holds its lines without their
-	/// terminators.
-	pub(crate) fn feed_line(&mut self, line: &str) {
-		self.feed(line);
-		self.feed("\n");
-	}
-
-	/// As [`Lexer::feed_line`], for a `line` whose first character stands at byte `at` of the source.
-	pub(crate) fn feed_line_at(&mut self, line: &str, at: usize) {
-		self.at = at;
-		self.feed_line(line);
-	}
-
-	/// Reads the token, or the part of a longer one, at `i`: how many characters it takes (at least one)
-	/// and what they are.
-	pub(crate) fn step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		let (n, tok) = self.dispatch(chars, i);
-		let n = n.max(1).min(chars.len() - i);
-		// A paragraph break is a run of spaces holding two line breaks; any token, a comment included,
-		// ends the run.
-		let space = matches!(tok, Tok::Text | Tok::Code | Tok::Math);
-		for k in i..i + n {
-			let c = chars[k];
-			if c == '\n' && k > 0 && chars[k - 1] == '\r' {
-				continue;	// the second half of a `\r\n`, counted once
-			}
-			if is_newline(c) {
-				self.col	= 0;
-				self.blank	= if space { self.blank.saturating_add(1) } else { 0 };
+	/// Reads the children `kids` of the node `parent`, of `pkind`, whose children are read as `mode`.
+	fn kids(&mut self, kids: &[SyntaxNode], parent: usize, pkind: SyntaxKind, mode: Mode) {
+		let mut last	= NONE;
+		let mut k1: Option<SyntaxKind>	= None;	// the kind of the sibling before
+		let mut k2: Option<SyntaxKind>	= None;	// and the one before that
+		let mut first	= true;
+		for c in kids {
+			let kind = c.kind();
+			let idx = if c.is_inner() {
+				let cmode	= child_mode(kind, mode);
+				let idx		= self.inner(kind, parent, cmode);
+				self.kids(c.children(), idx, kind, cmode);
+				self.nodes[idx].end = self.pos;
+				idx
+			} else if c.len() == 0 {
+				continue;	// a zero-width error: nothing of the text
+			} else if kind == SyntaxKind::Error {
+				self.error(c, parent, mode, k1)
 			} else {
-				self.col = self.col.saturating_add(1);
-				if !(space && (c == ' ' || c == '\t')) {
-					self.blank = 0;
-				}
-			}
-		}
-		self.prev	= Some(chars[i + n - 1]);
-		self.at		= self.at.saturating_add(chars[i..i + n].iter().map(|c| c.len_utf8()).sum::<usize>());
-		(n, tok)
-	}
-
-	fn dispatch(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		loop {
-			let c		= chars[i];
-			let next	= chars.get(i + 1).copied();
-			let embed = match self.frames.last_mut() {
-				Some(Frame::Str(esc)) => {
-					if *esc {
-						*esc = false;
-						return (1, Tok::Str);
-					}
-					match c {
-						'\\'	=> { *esc = true; return (1, Tok::Str); },
-						'"'		=> { self.pop(); return (1, Tok::Str); },
-						_		=> return (1, Tok::Str),
-					}
-				},
-				Some(Frame::Comment(depth)) => {
-					match (c, next) {
-						('*', Some('/')) => {
-							*depth = depth.saturating_sub(1);
-							if *depth == 0 {
-								self.pop();
-							}
-							return (2, Tok::Comment);
-						},
-						('/', Some('*'))	=> { *depth = depth.saturating_add(1); return (2, Tok::Comment); },
-						_					=> return (1, Tok::Comment),
-					}
-				},
-				Some(Frame::Raw(n)) => {
-					let n = *n;
-					if c != '`' {
-						return (1, Tok::Raw);
-					}
-					let run = backtick_run(chars, i);
-					if run >= n {
-						self.pop();
-						return (n, Tok::Raw);
-					}
-					return (run, Tok::Raw);
-				},
-				Some(Frame::Markup(_))	=> return self.markup_step(chars, i),
-				Some(Frame::Math(_))	=> return self.math_step(chars, i),
-				Some(Frame::Code(close)) => {
-					let close = *close;
-					return self.code_step(chars, i, close);
-				},
-				Some(Frame::Embed(e))	=> *e,
-				None					=> return (1, Tok::Text),
+				self.token(c, parent, pkind, mode, first, k1, k2)
 			};
-			match self.embed_step(chars, i, embed) {
-				Some(r)	=> return r,
-				// The expression ends before this character, which the level beneath reads.
-				None	=> self.pop(),
+			if last == NONE {
+				self.nodes[parent].child = idx;
+			} else {
+				self.nodes[last].next	= idx;
+				self.nodes[idx].prev	= last;
 			}
+			last	= idx;
+			k2		= k1;
+			k1		= Some(kind);
+			first	= false;
 		}
 	}
 
-	/// Closes the innermost frame, never the scan's own level. A group closing straight back into a
-	/// loop's or conditional's head leaves an operand just before the next character.
-	fn pop(&mut self) {
-		if self.frames.len() > 1 {
-			self.frames.pop();
-		}
-		if let Some(Frame::Embed(Embed::Head { adj, .. })) = self.frames.last_mut() {
-			*adj = true;
-		}
-	}
-
-	fn set(&mut self, e: Embed) {
-		if let Some(Frame::Embed(cur)) = self.frames.last_mut() {
-			*cur = e;
-		}
-	}
-
-	/// Where the expression whose frame is the `k`th stands, while it is open: the first, for the one
-	/// embedded at the scan's own level.
-	fn phase_at(&self, k: usize) -> Option<Embed> {
-		match self.frames.get(k) {
-			Some(Frame::Embed(e))	=> Some(*e),
-			_						=> None,
-		}
-	}
-
-	fn markup_mut(&mut self) -> Option<&mut Markup> {
-		match self.frames.last_mut() {
-			Some(Frame::Markup(m))	=> Some(m),
-			_						=> None,
-		}
-	}
-
-	/// A comment, a stray `*/` or raw text, which Typst's lexer reads before any mode's own rules.
-	fn trivia(&mut self, chars: &[char], i: usize, raw: bool) -> Option<(usize, Tok)> {
-		match (chars[i], chars.get(i + 1)) {
-			('/', Some('/'))	=> Some((line_comment_len(chars, i), Tok::Comment)),
-			('/', Some('*'))	=> { self.frames.push(Frame::Comment(1)); Some((2, Tok::Comment)) },
-			('*', Some('/'))	=> Some((2, Tok::Text)),	// a stray closer: an error token, not an opener
-			('`', _) if raw		=> Some(self.open_raw(chars, i)),
-			_					=> None,
-		}
-	}
-
-	fn open_raw(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		match backtick_run(chars, i) {
-			2	=> (2, Tok::Raw),	// empty raw text
-			n	=> { self.frames.push(Frame::Raw(n)); (n, Tok::Raw) },
-		}
-	}
-
-	fn markup_step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		let c		= chars[i];
-		let next	= chars.get(i + 1).copied();
-		// A shebang: a `#!` opening the file is a comment to its line's end, as Typst's lexer reads it.
-		if c == '#' && next == Some('!') && self.prev.is_none() && self.frames.len() == 1 {
-			return (line_comment_len(chars, i), Tok::Comment);
-		}
-		// Comments first: they are trivia, and a line's first token is what follows them.
-		if c == '/' && (next == Some('/') || next == Some('*')) {
-			if let Some(r) = self.trivia(chars, i, false) {
-				return r;
-			}
-		}
-		if is_newline(c) {
-			let parbreak = self.blank >= 1;
-			if let Some(m) = self.markup_mut() {
-				m.start	= true;
-				m.head	= true;
-				m.end_from(|k| k == Kind::Heading);
-				if parbreak {
-					m.end_from(|k| matches!(k, Kind::Strong | Kind::Emph));
+	/// A leaf that is no error.
+	fn token(
+		&mut self,
+		c:		&SyntaxNode,
+		parent:	usize,
+		pkind:	SyntaxKind,
+		mode:	Mode,
+		first:	bool,
+		k1:		Option<SyntaxKind>,
+		k2:		Option<SyntaxKind>,
+	)
+		-> usize
+	{
+		let kind	= c.kind();
+		let len		= c.len();
+		let gp		= self.nodes[parent].parent;
+		let gkind	= if gp == NONE { None } else { Some(self.nodes[gp].kind) };
+		let group	= is_group(pkind);
+		// The atom an `#` embeds, which follows it directly.
+		let after_hash	= k1 == Some(SyntaxKind::Hash) && !matches!(kind, SyntaxKind::Space | SyntaxKind::Parbreak);
+		let (mut opens, mut closes, mut eq, mut shut) = (false, false, 0i8, true);
+		let tok = match kind {
+			SyntaxKind::Shebang | SyntaxKind::LineComment	=> Tok::Comment,
+			SyntaxKind::BlockComment	=> { shut = comment_closed(c.text()); Tok::Comment },
+			SyntaxKind::Hash			=> Tok::Hash,
+			SyntaxKind::Str				=> Tok::Str,
+			SyntaxKind::Escape | SyntaxKind::Linebreak	=> Tok::Escape,
+			SyntaxKind::Link			=> Tok::Link,
+			SyntaxKind::Label			=> Tok::Label,
+			SyntaxKind::RefMarker		=> Tok::Ref,
+			SyntaxKind::Dollar if pkind == SyntaxKind::Equation	=> {
+				if first {
+					eq = 1;
+					Tok::Open
+				} else {
+					eq = -1;
+					Tok::Close
 				}
-			}
-			return (if c == '\r' && next == Some('\n') { 2 } else { 1 }, Tok::Text);
-		}
-		if c == ' ' || c == '\t' {
-			return (1, Tok::Text);
-		}
-		self.markup_token(chars, i);
-		if let Some(r) = self.trivia(chars, i, true) {
-			return r;
-		}
-		match c {
-			'\\'	=> (escape_len(chars, i), Tok::Escape),
-			'h' if at_lit(chars, i, "http://") || at_lit(chars, i, "https://")
-					=> (link_len(chars, i), Tok::Link),
-			'<' if next.is_some_and(is_id_continue)	=> {
-				// A label ends the heading it closes, when the heading is the innermost scope.
-				if let Some(m) = self.markup_mut() {
-					if m.scopes.last().map(|s| s.kind) == Some(Kind::Heading) {
-						m.scopes.pop();
-					}
+			},
+			SyntaxKind::LeftParen | SyntaxKind::LeftBrace | SyntaxKind::LeftBracket if group	=> {
+				opens = true;
+				// A reference's supplement is a content block, its opening bracket part of the reference.
+				if kind == SyntaxKind::LeftBracket && pkind == SyntaxKind::ContentBlock && gkind == Some(SyntaxKind::Ref) {
+					Tok::Ref
+				} else {
+					Tok::Open
 				}
-				(label_len(chars, i), Tok::Label)
 			},
-			'@' if next.is_some_and(is_label_char)	=> self.reference(chars, i),
-			'['		=> {
-				if let Some(s) = self.markup_mut().and_then(|m| m.scopes.last_mut()) {
-					s.nest = s.nest.saturating_add(1);
-				}
-				(1, Tok::Text)
+			SyntaxKind::RightParen | SyntaxKind::RightBrace | SyntaxKind::RightBracket if group	=> {
+				closes = true;
+				Tok::Close
 			},
-			']'		=> self.markup_close(),
-			'#'		=> { self.frames.push(Frame::Embed(Embed::Start)); (1, Tok::Hash) },
-			'$'		=> self.dollar(),
-			'*' if !self.in_word(chars, i)	=> { self.toggle(Kind::Strong); (1, Tok::Text) },
-			'_' if !self.in_word(chars, i)	=> { self.toggle(Kind::Emph); (1, Tok::Text) },
-			_		=> (1, Tok::Text),
-		}
-	}
-
-	/// A token in markup: the first on its line ends the items it does not indent past, and one where a
-	/// marker may stand opens a heading or an item.
-	fn markup_token(&mut self, chars: &[char], i: usize) {
-		let col = self.col;
-		let Some(m) = self.markup_mut() else { return; };
-		if m.head {
-			m.head = false;
-			m.end_from(|k| matches!(k, Kind::Item(at) if at >= col));
-		}
-		if !m.start {
-			return;
-		}
-		m.start = false;
-		let c = chars[i];
-		let kind = match c {
-			'=' => {
-				let run = chars[i..].iter().take_while(|&&x| x == '=').count();
-				space_or_end(chars, i + run).then_some(Kind::Heading)
+			_ if pkind == SyntaxKind::Raw	=> Tok::Raw,
+			_ if after_hash					=> Tok::Code,
+			_	=> match mode {
+				Mode::Code		=> Tok::Code,
+				Mode::Markup	=> if kind == SyntaxKind::Semicolon { Tok::Code } else { Tok::Text },
+				// A `;` straight after an embedded expression ends it, as it ends no maths argument.
+				Mode::Math		=> if kind == SyntaxKind::Semicolon && k2 == Some(SyntaxKind::Hash) { Tok::Code } else { Tok::Math },
 			},
-			'-' | '+' | '/' if space_or_end(chars, i + 1) => Some(Kind::Item(col)),
-			'0'..='9' => {
-				let run = chars[i..].iter().take_while(|x| x.is_ascii_digit()).count();
-				(chars.get(i + run) == Some(&'.') && space_or_end(chars, i + run + 1)).then_some(Kind::Item(col))
-			},
-			_ => None,
 		};
-		if let Some(kind) = kind {
-			m.scopes.push(Scope { kind, nest: 0 });
-			// An item's own markup opens at its start, so a marker may follow the item's.
-			m.start = matches!(kind, Kind::Item(_));
+		let at = self.leaf(kind, len, tok, parent, mode, shut);
+		self.shift(opens, closes, eq, parent);
+		at
+	}
+
+	/// Moves the counts of what is open past a leaf that opens or closes a group or an equation.
+	fn shift(&mut self, opens: bool, closes: bool, eq: i8, parent: usize) {
+		if opens {
+			self.open.push(parent);
 		}
-	}
-
-	/// Is the `*` or `_` at `i` inside a word, where it is text?
-	fn in_word(&self, chars: &[char], i: usize) -> bool {
-		let prev = if i > 0 { chars.get(i - 1).copied() } else { self.prev };
-		wordy(prev) && wordy(chars.get(i + 1).copied())
-	}
-
-	/// Opens a strong or emphasis scope, or closes the innermost one of that kind.
-	fn toggle(&mut self, kind: Kind) {
-		let Some(m) = self.markup_mut() else { return; };
-		if m.scopes.last().map(|s| s.kind) == Some(kind) {
-			m.scopes.pop();
-		} else {
-			m.scopes.push(Scope { kind, nest: 0 });
-		}
-	}
-
-	/// A `]` in markup: text balancing the innermost scope's own `[`; else the end of every scope with none
-	/// open, and then of the content block, or, at a file's own level, a stray bracket Typst refuses.
-	fn markup_close(&mut self) -> (usize, Tok) {
-		let block = match self.markup_mut() {
-			Some(m) => {
-				while let Some(s) = m.scopes.last_mut() {
-					if s.nest > 0 {
-						s.nest -= 1;
-						return (1, Tok::Text);
-					}
-					if m.scopes.len() == 1 {
-						break;
-					}
-					m.scopes.pop();
+		// A closer ends its own group and any inside it that never closed, as the parser leaves them.
+		if closes && self.open.contains(&parent) {
+			while let Some(g) = self.open.pop() {
+				if g == parent {
+					break;
 				}
-				m.block
-			},
-			None => false,
+			}
+		}
+		if eq > 0 {
+			self.eqs = self.eqs.saturating_add(1);
+		} else if eq < 0 {
+			self.eqs = self.eqs.saturating_sub(1);
+		}
+	}
+
+	/// A leaf the parser could not read. Most are one token, by what the message says it is; one that is
+	/// the leftover of a construct is read again as code, so the strings and comments in it are still such.
+	fn error(&mut self, c: &SyntaxNode, parent: usize, mode: Mode, k1: Option<SyntaxKind>) -> usize {
+		let text	= c.text();
+		let msg		= c.error_info().map(|e| e.message.as_str()).unwrap_or("");
+		let len		= c.len();
+		let (mut opens, mut eq, mut shut) = (false, 0i8, true);
+		let tok = if msg.starts_with("unclosed delimiter") {
+			match text {
+				"$"					=> {
+					eq = 1;
+					self.dollars.push(self.pos);
+					Some(Tok::Open)
+				},
+				"(" | "{" | "["		=> { opens = true; Some(Tok::Open) },
+				_					=> None,
+			}
+		} else if msg.starts_with("unclosed raw text") {
+			shut = false;
+			Some(Tok::Raw)
+		} else if msg.starts_with("unclosed string") {
+			shut = false;
+			Some(Tok::Str)
+		} else if msg.starts_with("unexpected end of block comment") {
+			Some(Tok::Text)
+		} else if msg.starts_with("unclosed label") {
+			Some(Tok::Label)
+		} else if msg.contains("Unicode") {
+			Some(Tok::Escape)
+		} else if msg.starts_with("automatic links") {
+			Some(Tok::Link)
+		} else {
+			None
 		};
-		if block {
-			self.pop();
-			(1, Tok::Close)
-		} else {
-			(1, Tok::Text)
+		if let Some(tok) = tok {
+			let at = self.leaf(SyntaxKind::Error, len, tok, parent, mode, shut);
+			self.shift(opens, false, eq, parent);
+			return at;
 		}
-	}
-
-	/// A reference, `@name` without a trailing `.` or `:`, and the supplement's content block when a `[`
-	/// follows directly.
-	fn reference(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		let mut j = i + 1;
-		while j < chars.len() && is_label_char(chars[j]) {
-			j += 1;
+		// What the parser left over in code may hold a string, a comment, a group: read it again as code.
+		if mode == Mode::Code && text.chars().nth(1).is_some() && self.deep < 3 {
+			let root = parser::parse_code(text, FileId::DETACHED);
+			let same = matches!(root.children(), [only] if only.kind() == SyntaxKind::Error && only.text() == text);
+			if !same {
+				let idx = self.inner(SyntaxKind::Error, parent, Mode::Code);
+				self.deep += 1;
+				self.kids(root.children(), idx, SyntaxKind::Code, Mode::Code);
+				self.deep -= 1;
+				self.nodes[idx].end = self.pos;
+				return idx;
+			}
 		}
-		while j > i + 1 && matches!(chars[j - 1], '.' | ':') {
-			j -= 1;
-		}
-		if chars.get(j) == Some(&'[') {
-			self.frames.push(Frame::Markup(Markup::new(true, false)));
-			j += 1;
-		}
-		(j - i, Tok::Ref)
-	}
-
-	/// A `$` in markup or code: it opens an equation, unless its maths never closes, when it is a character.
-	fn dollar(&mut self) -> (usize, Tok) {
-		if self.lone.binary_search(&self.at).is_ok() {
-			return (1, Tok::Text);
-		}
-		self.frames.push(Frame::Math(self.at));
-		(1, Tok::Open)
-	}
-
-	fn math_step(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		if let Some(r) = self.trivia(chars, i, false) {
-			return r;
-		}
-		match chars[i] {
-			'\\'	=> (escape_len(chars, i), Tok::Escape),
-			'"'		=> { self.frames.push(Frame::Str(false)); (1, Tok::Str) },
-			'$'		=> { self.pop(); (1, Tok::Close) },
-			'#'		=> { self.frames.push(Frame::Embed(Embed::Start)); (1, Tok::Hash) },
-			_		=> (1, Tok::Math),
-		}
-	}
-
-	fn code_step(&mut self, chars: &[char], i: usize, close: char) -> (usize, Tok) {
-		match chars[i] {
-			')' | '}' if close != '\0'	=> { self.pop(); (1, Tok::Close) },
-			_							=> self.code_char(chars, i),
-		}
-	}
-
-	/// A character of code that closes nothing: trivia, a string, a group, an equation or a label opens
-	/// here; anything else is code.
-	fn code_char(&mut self, chars: &[char], i: usize) -> (usize, Tok) {
-		if let Some(r) = self.trivia(chars, i, true) {
-			return r;
-		}
-		match chars[i] {
-			'"'		=> { self.frames.push(Frame::Str(false)); (1, Tok::Str) },
-			'('		=> { self.frames.push(Frame::Code(')')); (1, Tok::Open) },
-			'{'		=> { self.frames.push(Frame::Code('}')); (1, Tok::Open) },
-			'['		=> { self.frames.push(Frame::Markup(Markup::new(true, false))); (1, Tok::Open) },
-			'$'		=> self.dollar(),
-			'<' if chars.get(i + 1).copied().is_some_and(is_id_continue)	=> (label_len(chars, i), Tok::Label),
-			_		=> (1, Tok::Code),
-		}
-	}
-
-	/// One step of an embedded expression, or `None` where it has ended and the level beneath reads the
-	/// character. The phases follow `embedded_code_expr`: newline mode `Stop`, so a line break ends it
-	/// outside a group; an operand takes a call or a field only written directly after it.
-	fn embed_step(&mut self, chars: &[char], i: usize, e: Embed) -> Option<(usize, Tok)> {
-		let c		= chars[i];
-		let next	= chars.get(i + 1).copied();
-		let comment	= c == '/' && (next == Some('/') || next == Some('*'));
-		match e {
-			Embed::Start => {
-				// A space or a comment after the `#` leaves it standing alone, which Typst refuses.
-				if c.is_whitespace() || comment {
-					return None;
-				}
-				if c == '`' {
-					self.set(Embed::Post);
-					return Some(self.open_raw(chars, i));
-				}
-				if is_id_start(c) {
-					let j = ident_end(chars, i);
-					let word: String = chars[i..j].iter().collect();
-					self.set(match word.as_str() {
-						"let" | "set" | "show" | "import" | "include" | "return"	=> Embed::Stmt,
-						"context"	=> Embed::Context,
-						"if"		=> Embed::Head { kw: Kw::If, seen: false, adj: false },
-						"while"		=> Embed::Head { kw: Kw::While, seen: false, adj: false },
-						"for"		=> Embed::Head { kw: Kw::For, seen: false, adj: false },
-						_			=> Embed::Post,
-					});
-					return Some((j - i, Tok::Code));
-				}
-				let digit = c.is_ascii_digit() || (c == '.' && next.is_some_and(|d| d.is_ascii_digit()));
-				if digit {
-					self.set(Embed::Post);
-					return Some((number_len(chars, i), Tok::Code));
-				}
-				if c == '<' && next.is_some_and(is_id_continue) {
-					self.set(Embed::Post);
-					return Some((label_len(chars, i), Tok::Label));
-				}
-				// A `[` straight after the `#` opens a bare content block, which Typst joins into the markup around
-				// it; one after `context` is the expression's content.
-				if c == '[' {
-					self.set(Embed::Post);
-					let bare = self.prev == Some('#');
-					self.frames.push(Frame::Markup(Markup::new(true, bare)));
-					return Some((1, Tok::Open));
-				}
-				if matches!(c, '(' | '{' | '"' | '$') {
-					self.set(Embed::Post);
-					return Some(self.code_char(chars, i));
-				}
-				None
-			},
-			Embed::Post => {
-				match c {
-					'(' | '['							=> Some(self.code_char(chars, i)),
-					'.' if next.is_some_and(is_id_start)	=> Some((ident_end(chars, i + 1) - i, Tok::Code)),
-					';'									=> { self.pop(); Some((1, Tok::Code)) },
-					_									=> None,
-				}
-			},
-			Embed::Stmt => {
-				if is_newline(c) || matches!(c, ']' | ')' | '}') {
-					return None;
-				}
-				if c == ';' {
-					self.pop();
-					return Some((1, Tok::Code));
-				}
-				Some(self.code_char(chars, i))
-			},
-			Embed::Context => {
-				if is_newline(c) {
-					return None;
-				}
-				if c.is_whitespace() {
-					return Some((1, Tok::Code));
-				}
-				if comment {
-					return self.trivia(chars, i, false);
-				}
-				self.set(Embed::Start);
-				self.embed_step(chars, i, Embed::Start)
-			},
-			Embed::Head { kw, seen, adj } => {
-				if is_newline(c) || matches!(c, ';' | ']' | ')' | '}') {
-					return None;
-				}
-				if comment {
-					self.set(Embed::Head { kw, seen, adj: false });
-					return self.trivia(chars, i, false);
-				}
-				if c.is_whitespace() {
-					self.set(Embed::Head { kw, seen, adj: false });
-					return Some((1, Tok::Code));
-				}
-				// The body: a block after the head's operand, a `[` only where it is not the operand's call.
-				if (c == '[' && seen && !adj) || (c == '{' && seen) {
-					self.set(Embed::Tail { kw, spaced: false });
-					return Some(self.code_char(chars, i));
-				}
-				if is_id_continue(c) {
-					let j = ident_end(chars, i);
-					self.set(Embed::Head { kw, seen: true, adj: true });
-					return Some((j - i, Tok::Code));
-				}
-				let opens = matches!(c, '(' | '{' | '[' | '"' | '$' | '`');
-				self.set(Embed::Head { kw, seen: seen || opens, adj: false });
-				Some(self.code_char(chars, i))
-			},
-			Embed::Tail { kw, spaced } => {
-				if is_newline(c) {
-					return None;
-				}
-				// A call or a field on the whole expression, written directly after its body.
-				if !spaced && (matches!(c, '(' | '[') || (c == '.' && next.is_some_and(is_id_start))) {
-					self.set(Embed::Post);
-					return self.embed_step(chars, i, Embed::Post);
-				}
-				if kw != Kw::If {
-					return None;
-				}
-				if c.is_whitespace() {
-					self.set(Embed::Tail { kw, spaced: true });
-					return Some((1, Tok::Code));
-				}
-				if comment {
-					self.set(Embed::Tail { kw, spaced: true });
-					return self.trivia(chars, i, false);
-				}
-				if at_word(chars, i, "else") {
-					self.set(Embed::Else);
-					return Some((4, Tok::Code));
-				}
-				None
-			},
-			Embed::Else => {
-				if is_newline(c) {
-					return None;
-				}
-				if c.is_whitespace() {
-					return Some((1, Tok::Code));
-				}
-				if comment {
-					return self.trivia(chars, i, false);
-				}
-				if at_word(chars, i, "if") {
-					self.set(Embed::Head { kw: Kw::If, seen: false, adj: false });
-					return Some((2, Tok::Code));
-				}
-				if matches!(c, '[' | '{') {
-					self.set(Embed::Tail { kw: Kw::Done, spaced: false });
-					return Some(self.code_char(chars, i));
-				}
-				None
-			},
-		}
+		let tok = match mode {
+			// What follows an `#` and is no expression is still code.
+			_ if k1 == Some(SyntaxKind::Hash)	=> Tok::Code,
+			Mode::Markup	=> Tok::Text,
+			Mode::Code		=> Tok::Code,
+			Mode::Math		=> Tok::Math,
+		};
+		self.leaf(SyntaxKind::Error, len, tok, parent, mode, true)
 	}
 }
 
@@ -791,181 +403,336 @@ pub(crate) fn is_id_continue(c: char) -> bool {
 	c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-fn is_label_char(c: char) -> bool {
-	is_id_continue(c) || c == ':' || c == '.'
-}
-
-/// Does the character count as part of a word for a `*` or `_` beside it? Letters of the CJK scripts
-/// do not, since those scripts put no space between words.
-fn wordy(c: Option<char>) -> bool {
-	match c {
-		Some(c) => c.is_alphanumeric() && !matches!(c as u32,
-			0x1100..=0x11FF | 0x3040..=0x30FF | 0x3130..=0x318F | 0x31F0..=0x31FF | 0x3400..=0x4DBF
-			| 0x4E00..=0x9FFF | 0xAC00..=0xD7AF | 0xF900..=0xFAFF | 0x20000..=0x2FA1F),
-		None	=> false,
+impl Lexer {
+	/// A file's markup, as Typst reads a `.typ` file, each `$` whose maths never closes read as a character.
+	pub(crate) fn markup(src: &str) -> Self {
+		Self::read(src, false, true)
 	}
-}
 
-/// Is the character at `i` a space, the end, or a comment's opener, so a marker before it stands alone?
-fn space_or_end(chars: &[char], i: usize) -> bool {
-	match chars.get(i) {
-		None		=> true,
-		Some(&c)	=> c.is_whitespace() || (c == '/' && matches!(chars.get(i + 1), Some('/') | Some('*'))),
+	/// A line or fragment of markup exactly as Typst reads it, an unclosed `$` opening an equation that
+	/// takes the rest.
+	#[cfg(test)]
+	pub(crate) fn markup_exact(src: &str) -> Self {
+		Self::read(src, false, false)
 	}
-}
 
-/// If the literal `s` sits at `i` in `chars`.
-fn at_lit(chars: &[char], i: usize, s: &str) -> bool {
-	let mut k = i;
-	for ch in s.chars() {
-		if chars.get(k) != Some(&ch) {
-			return false;
+	/// Code, as the inside of a call's argument list or a value reads.
+	pub(crate) fn code(src: &str) -> Self {
+		Self::read(src, true, false)
+	}
+
+	fn read(src: &str, code: bool, recover: bool) -> Self {
+		let mut lone: Vec<usize> = Vec::new();
+		let passes = if recover { src.matches('$').count() + 1 } else { 1 };
+		let mut done = None;
+		for _ in 0..passes {
+			let b = Self::pass(src, code, &lone);
+			// The innermost equation that never closes is the last, as each one that does not takes the rest.
+			match (recover, b.dollars.last()) {
+				(true, Some(&at))	=> lone.insert(lone.partition_point(|&p| p < at), at),
+				_					=> { done = Some(b); break; },
+			}
 		}
-		k += 1;
-	}
-	true
-}
-
-/// Is the keyword `w` at `i`, a whole name?
-fn at_word(chars: &[char], i: usize, w: &str) -> bool {
-	at_lit(chars, i, w) && !chars.get(i + w.chars().count()).copied().is_some_and(is_id_continue)
-}
-
-fn ident_end(chars: &[char], i: usize) -> usize {
-	let mut j = i + 1;
-	while j < chars.len() && is_id_continue(chars[j]) {
-		j += 1;
-	}
-	j
-}
-
-fn backtick_run(chars: &[char], i: usize) -> usize {
-	chars[i..].iter().take_while(|&&c| c == '`').count()
-}
-
-/// A `//` comment runs to its line's end, the break itself not taken.
-fn line_comment_len(chars: &[char], i: usize) -> usize {
-	chars[i..].iter().position(|&c| is_newline(c)).unwrap_or(chars.len() - i)
-}
-
-/// A backslash escapes the character after it, or reads `\u{...}`; before a space or the end it is a line
-/// break alone.
-fn escape_len(chars: &[char], i: usize) -> usize {
-	if at_lit(chars, i + 1, "u{") {
-		let mut j = i + 3;
-		while j < chars.len() && chars[j].is_ascii_alphanumeric() {
-			j += 1;
-		}
-		if chars.get(j) == Some(&'}') {
-			j += 1;
-		}
-		return j - i;
-	}
-	match chars.get(i + 1) {
-		Some(c) if !c.is_whitespace()	=> 2,
-		_								=> 1,
-	}
-}
-
-/// An automatic link: `http://` or `https://`, then the characters a link may hold, brackets balanced, and
-/// not the punctuation that likely ends the sentence around it.
-fn link_len(chars: &[char], i: usize) -> usize {
-	let head = if at_lit(chars, i, "https://") { 8 } else { 7 };
-	let mut j = i + head;
-	let mut open: Vec<char> = Vec::new();
-	while j < chars.len() {
-		let c = chars[j];
-		let ok = match c {
-			'0'..='9' | 'a'..='z' | 'A'..='Z' | '!' | '#' | '$' | '%' | '&' | '*' | '+' | ',' | '-' | '.' | '/'
-			| ':' | ';' | '=' | '?' | '@' | '_' | '~' | '\''	=> true,
-			'[' | '('	=> { open.push(c); true },
-			']'			=> open.pop() == Some('['),
-			')'			=> open.pop() == Some('('),
-			_			=> false,
+		let b = match done {
+			Some(b)	=> b,
+			None	=> Self::pass(src, code, &lone),
 		};
-		if !ok {
-			break;
+		Lexer { text: src.to_string(), nodes: b.nodes, leaves: b.leaves, lone, groups: b.open.len() as u32, eqs: b.eqs }
+	}
+
+	/// One reading, with each `$` of `lone` set aside as a comma, which no mode reads as more than text.
+	fn pass(src: &str, code: bool, lone: &[usize]) -> Build {
+		let mut bytes = src.as_bytes().to_vec();
+		for &at in lone {
+			bytes[at] = b',';
 		}
-		j += 1;
+		let text = String::from_utf8(bytes).unwrap_or_else(|_| src.to_string());
+		let (root, mode) = if code {
+			(parser::parse_code(&text, FileId::DETACHED), Mode::Code)
+		} else {
+			(parser::parse(&text, FileId::DETACHED), Mode::Markup)
+		};
+		let mut b = Build::new();
+		let idx = b.inner(root.kind(), NONE, mode);
+		b.kids(root.children(), idx, root.kind(), mode);
+		b.nodes[idx].end = b.pos;
+		b
 	}
-	while j > i + head && matches!(chars[j - 1], '!' | ',' | '.' | ':' | ';' | '?' | '\'') {
-		j -= 1;
-	}
-	j - i
-}
 
-/// A label `<name>`, or as much of one as there is.
-fn label_len(chars: &[char], i: usize) -> usize {
-	let mut j = i + 1;
-	while j < chars.len() && is_label_char(chars[j]) {
-		j += 1;
+	/// The source bytes of each `$` whose maths never closes, in order. Typst refuses the file there, with the
+	/// rest of the source taken into the equation; the scan reads each of these as a character instead, so the
+	/// error stays at the `$` and the markup after it is read.
+	pub(crate) fn lone(&self) -> &[usize] {
+		&self.lone
 	}
-	if chars.get(j) == Some(&'>') {
-		j += 1;
-	}
-	j - i
-}
 
-/// A number, as code reads one: digits, a fraction, an exponent and a unit or `%`.
-fn number_len(chars: &[char], i: usize) -> usize {
-	let mut j = i;
-	while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '%') {
-		j += 1;
+	/// The leaf holding byte `p`, or the last one starting before it.
+	fn leaf_at(&self, p: usize) -> Option<usize> {
+		self.leaves.partition_point(|l| self.nodes[l.node].start <= p).checked_sub(1)
 	}
-	if chars.get(j) == Some(&'.') && chars.get(j + 1).is_some_and(|d| d.is_ascii_digit()) {
-		j += 1;
-		while j < chars.len() && (chars[j].is_ascii_alphanumeric() || chars[j] == '%') {
-			j += 1;
+
+	/// What stands around byte `p`: the leaf it falls inside, when it is no leaf's first byte, and the nodes
+	/// that began before it and end after it, innermost first.
+	fn around(&self, p: usize) -> (Option<usize>, Vec<usize>) {
+		let Some(li) = self.leaf_at(p) else { return (None, Vec::new()); };
+		let n = self.nodes[self.leaves[li].node];
+		if p >= n.end {
+			return (None, Vec::new());
+		}
+		let inside	= if n.start < p { Some(li) } else { None };
+		let mut out	= Vec::new();
+		let mut a	= n.parent;
+		while a != NONE {
+			let m = self.nodes[a];
+			if m.start < p && m.end > p {
+				out.push(a);
+			}
+			a = m.parent;
+		}
+		(inside, out)
+	}
+
+	/// Does the text stand in markup at the position `chain` and `inside` describe: neither in a string, a
+	/// comment, raw text, a code group, an equation, nor anywhere but the file's own markup or a content block?
+	fn in_markup(&self, inside: Option<usize>, chain: &[usize]) -> bool {
+		if let Some(li) = inside {
+			if matches!(self.leaves[li].tok, Tok::Str | Tok::Comment | Tok::Raw) {
+				return false;
+			}
+		}
+		let own = chain.iter().map(|&a| self.nodes[a].kind).find(|&k| k != SyntaxKind::Markup && !is_scope(k));
+		own.map_or(true, |k| k == SyntaxKind::ContentBlock)
+	}
+
+	/// The scopes and frames of `chain`, outermost first, as a line standing in them is placed.
+	fn place_of(&self, chain: &[usize]) -> Place {
+		let mut place = Place::Top;
+		for &a in chain.iter().rev() {
+			let n = &self.nodes[a];
+			match n.kind {
+				SyntaxKind::Markup	=> {},
+				k if is_scope(k)	=> return Place::Contained,
+				SyntaxKind::ContentBlock if n.bare	=> place = Place::Block,
+				_	=> return Place::Content,
+			}
+		}
+		place
+	}
+
+	/// The first leaf of the line at byte `p` that is a token: past its spaces and any block comment that
+	/// closes on it. `None` when the line holds none (spaces, a comment or its break alone).
+	fn first_token(&self, p: usize) -> Option<usize> {
+		let line_end = self.text[p..].find(is_newline).map_or(self.text.len(), |k| p + k);
+		let mut li = self.leaf_at(p)?;
+		loop {
+			let n = self.nodes[self.leaves.get(li)?.node];
+			if n.start >= line_end {
+				return None;
+			}
+			match n.kind {
+				SyntaxKind::Space | SyntaxKind::Parbreak	=> {},
+				SyntaxKind::LineComment | SyntaxKind::Shebang	=> return None,
+				SyntaxKind::BlockComment	=> if n.end > line_end { return None; },
+				_	=> return Some(n.start.max(p)),
+			}
+			li += 1;
 		}
 	}
-	j.max(i + 1) - i
+
+	/// The scopes still open where a line with no token stands, which ends none: those that held the last token
+	/// before it. A heading ended with its line, and strong or emphasis that closed before it is closed; one
+	/// that has not ended runs on through the trailing space the parser gives it.
+	fn open_chain(&self, p: usize) -> Vec<usize> {
+		let Some(mut li) = self.leaf_at(p) else { return Vec::new(); };
+		// The last token ending before the line.
+		loop {
+			let n = self.nodes[self.leaves[li].node];
+			let blank = matches!(n.kind, SyntaxKind::Space | SyntaxKind::Parbreak | SyntaxKind::LineComment
+				| SyntaxKind::BlockComment | SyntaxKind::Shebang);
+			if n.end <= p && !blank {
+				break;
+			}
+			match li.checked_sub(1) {
+				Some(k)	=> li = k,
+				None	=> return Vec::new(),
+			}
+		}
+		let mut out	= Vec::new();
+		let mut a	= self.nodes[self.leaves[li].node].parent;
+		while a != NONE {
+			let m = self.nodes[a];
+			let keep = match m.kind {
+				SyntaxKind::Heading		=> false,
+				SyntaxKind::Strong | SyntaxKind::Emph	=> m.end > p,
+				SyntaxKind::Markup | SyntaxKind::ListItem | SyntaxKind::EnumItem | SyntaxKind::TermItem	=> true,
+				_	=> m.end > p,
+			};
+			if keep {
+				out.push(a);
+			} else if out.last().is_some_and(|&l| self.nodes[l].kind == SyntaxKind::Markup && self.nodes[l].parent == a) {
+				// The markup a scope that has ended held goes with it.
+				out.pop();
+			}
+			a = m.parent;
+		}
+		out
+	}
+
+	/// The chain a line at byte `p` is placed by, and whether it opens in markup at all: the strict ancestors of
+	/// its first token, or, for a line with none, the scopes left open before it.
+	fn line_chain(&self, p: usize) -> Option<Vec<usize>> {
+		let (inside, here) = self.around(p);
+		if !self.in_markup(inside, &here) {
+			return None;
+		}
+		Some(match self.first_token(p) {
+			Some(t)	=> self.around(t).1,
+			None	=> self.open_chain(p),
+		})
+	}
+
+	/// Where the line starting at byte `p` stands, or `None` when it opens outside markup: in a string, a
+	/// comment, raw text, an equation, a code group or an unfinished expression. The spaces that open a line
+	/// change no scope, so the place is decided at its first token, which ends the items it does not indent past.
+	pub(crate) fn place_at(&self, p: usize) -> Option<Place> {
+		self.line_chain(p).map(|chain| self.place_of(&chain))
+	}
+
+	/// Is the line starting at byte `p` standing directly in the innermost markup, whatever opened it, with no
+	/// list item, heading, strong or emphasis of that markup open around it?
+	pub(crate) fn bare_line_at(&self, p: usize) -> bool {
+		let Some(chain) = self.line_chain(p) else { return false; };
+		match chain.first() {
+			None		=> true,
+			// A line in a content block whose markup has not begun, or that opens with the block's own closer,
+			// stands in the block, bare.
+			Some(&a) if self.nodes[a].kind == SyntaxKind::ContentBlock	=> true,
+			Some(&a)	=> {
+				self.nodes[a].kind == SyntaxKind::Markup
+					&& chain.get(1).map_or(true, |&b| self.nodes[b].kind == SyntaxKind::ContentBlock)
+			},
+		}
+	}
+
+	/// How many groups code opened are open at byte `p`: `(`, `{`, a content block. Prose brackets, strings,
+	/// equations, comments and raw text are not counted.
+	pub(crate) fn depth_at(&self, p: usize) -> usize {
+		match self.leaf_at(p) {
+			Some(li) if p < self.nodes[self.leaves[li].node].end	=> self.leaves[li].groups as usize,
+			_	=> self.groups as usize,
+		}
+	}
+
+	/// The number of groups open at byte `p` when the text stands there in markup -- the file's own, or a
+	/// content block's -- and `None` when it stands in code, a string, an equation, a comment or raw text.
+	pub(crate) fn markup_level_at(&self, p: usize) -> Option<usize> {
+		let (inside, chain) = self.around(p);
+		self.in_markup(inside, &chain).then(|| self.depth_at(p))
+	}
+
+	/// How many frames are open at byte `p`: groups, equations, and the string, comment or raw text it falls
+	/// inside.
+	pub(crate) fn open_at(&self, p: usize) -> usize {
+		let end = |this: &Self| -> usize {
+			let shut = this.leaves.last().map_or(true, |l| l.shut);
+			this.groups as usize + this.eqs as usize + usize::from(!shut)
+		};
+		let Some(li) = self.leaf_at(p) else { return end(self); };
+		let l = self.leaves[li];
+		let n = self.nodes[l.node];
+		if p >= n.end {
+			return end(self);
+		}
+		let mut open = l.groups as usize + l.eqs as usize;
+		let in_raw	= l.tok == Tok::Raw
+			&& (n.start < p || (self.nodes[n.parent].kind == SyntaxKind::Raw && self.nodes[n.parent].start < p));
+		if (n.start < p && matches!(l.tok, Tok::Str | Tok::Comment)) || in_raw {
+			open += 1;
+		}
+		open
+	}
+
+	/// Is anything open at the end of the text?
+	#[cfg(test)]
+	pub(crate) fn is_open(&self) -> bool {
+		self.open_at(self.text.len()) > 0
+	}
+
+	/// What each byte of the text is: every byte of a character takes the character's.
+	pub(crate) fn byte_toks(&self) -> Vec<Tok> {
+		let mut out = vec![Tok::Text; self.text.len()];
+		for l in &self.leaves {
+			let n = &self.nodes[l.node];
+			for t in &mut out[n.start..n.end] {
+				*t = l.tok;
+			}
+		}
+		for &at in &self.lone {
+			out[at] = Tok::Text;
+		}
+		out
+	}
+
+	/// Each character of the text, with the byte it starts at.
+	pub(crate) fn tokens(&self) -> Vec<(usize, char, Tok)> {
+		let toks = self.byte_toks();
+		self.text.char_indices().map(|(at, c)| (at, c, toks[at])).collect()
+	}
+
+	/// The text of a leaf.
+	fn leaf_text(&self, li: usize) -> &str {
+		let n = &self.nodes[self.leaves[li].node];
+		&self.text[n.start..n.end]
+	}
+
+	/// The text with every character `blank` names turned into a space and every line break kept, so each byte
+	/// offset and line of the result is the text's own.
+	fn blanked(&self, blank: impl Fn(Tok) -> bool) -> String {
+		let mut out = String::with_capacity(self.text.len());
+		for (_, c, tok) in self.tokens() {
+			if blank(tok) && c != '\n' && c != '\r' {
+				for _ in 0..c.len_utf8() {
+					out.push(' ');
+				}
+			} else {
+				out.push(c);
+			}
+		}
+		out
+	}
+
+	/// The text with every character a comment or raw text holds blanked to spaces and every line break kept,
+	/// so each byte offset and line of the result is the text's own.
+	pub(crate) fn live_text(&self) -> String {
+		self.blanked(|t| matches!(t, Tok::Comment | Tok::Raw))
+	}
+
+	/// Each line of `src`, the text read, that opens in markup, with the byte it starts at and where it stands.
+	pub(crate) fn lines<'a>(&self, src: &'a str) -> Vec<(usize, &'a str, Place)> {
+		let mut out		= Vec::new();
+		let mut offset	= 0usize;
+		for raw in src.split_inclusive('\n') {
+			if let Some(place) = self.place_at(offset) {
+				out.push((offset, raw, place));
+			}
+			offset = offset.saturating_add(raw.len());
+		}
+		out
+	}
 }
 
-/// The source bytes of each `$` in `src` whose maths never closes, in order. Typst refuses the file there,
-/// with the rest of the source taken into the equation; the lexer reads each of these as a character
-/// instead, so the error stays at the `$` and the markup after it is read. A pass over the source that ends
-/// inside maths names the innermost equation's `$`, and the source is read again with it, until a pass ends
-/// outside maths: at most one pass for each `$`.
+/// The source bytes of each `$` in `src` whose maths never closes, in order.
+#[cfg(test)]
 pub(crate) fn lone_dollars(src: &str) -> Vec<usize> {
-	let mut lone = Vec::new();
 	if !src.contains('$') {
-		return lone;
+		return Vec::new();
 	}
-	let chars: Vec<char>	= src.chars().collect();
-	let passes				= chars.iter().filter(|&&c| c == '$').count() + 1;
-	for _ in 0..passes {
-		let mut lx	= Lexer::markup().with_lone(lone.clone());
-		let mut i	= 0usize;
-		while i < chars.len() {
-			i += lx.step(&chars, i).0;
-		}
-		let open = lx.frames.iter().rev().find_map(|f| match f {
-			Frame::Math(at)	=> Some(*at),
-			_				=> None,
-		});
-		match open {
-			Some(at)	=> lone.insert(lone.partition_point(|&p| p < at), at),
-			None		=> break,
-		}
-	}
-	lone
+	Lexer::markup(src).lone
 }
 
 /// Each character of `src` read as a file's markup, with the byte it starts at.
 pub(crate) fn tokens(src: &str) -> Vec<(usize, char, Tok)> {
-	let chars: Vec<(usize, char)>	= src.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
-	let mut out						= Vec::with_capacity(only.len());
-	let mut lx						= Lexer::markup_over(src);
-	let mut i						= 0usize;
-	while i < only.len() {
-		let (n, tok) = lx.step(&only, i);
-		for k in i..i + n {
-			out.push((chars[k].0, chars[k].1, tok));
-		}
-		i += n;
-	}
-	out
+	Lexer::markup(src).tokens()
 }
 
 /// Which characters of `src` a comment or raw text holds, delimiters included, one entry per character.
@@ -974,62 +741,27 @@ pub(crate) fn literal_chars(src: &str) -> Vec<bool> {
 }
 
 /// What each byte of `src` is, read as a file's markup: every byte of a character takes the character's.
+#[cfg(test)]
 pub(crate) fn byte_toks(src: &str) -> Vec<Tok> {
-	let mut out = vec![Tok::Text; src.len()];
-	for (at, c, tok) in tokens(src) {
-		for t in &mut out[at..at + c.len_utf8()] {
-			*t = tok;
-		}
-	}
-	out
+	Lexer::markup(src).byte_toks()
 }
 
 /// `src` with every character a comment holds blanked to spaces and every line break kept, so each byte
 /// offset and line of the result is the source's own.
 pub(crate) fn uncommented(src: &str) -> String {
-	let mut out = String::with_capacity(src.len());
-	for (_, c, tok) in tokens(src) {
-		if tok == Tok::Comment && c != '\n' && c != '\r' {
-			for _ in 0..c.len_utf8() {
-				out.push(' ');
-			}
-		} else {
-			out.push(c);
-		}
-	}
-	out
+	Lexer::markup(src).blanked(|t| t == Tok::Comment)
 }
 
 /// `src` with every character a comment or raw text holds blanked to spaces and every line break kept, so
 /// each byte offset and line of the result is the source's own. A scan that finds a declaration, an
 /// `#include` or a field in this text finds none a comment holds or a raw block shows.
 pub(crate) fn live_text(src: &str) -> String {
-	let mut out = String::with_capacity(src.len());
-	for (_, c, tok) in tokens(src) {
-		if matches!(tok, Tok::Comment | Tok::Raw) && c != '\n' && c != '\r' {
-			for _ in 0..c.len_utf8() {
-				out.push(' ');
-			}
-		} else {
-			out.push(c);
-		}
-	}
-	out
+	Lexer::markup(src).live_text()
 }
 
 /// Each line of `src` that opens in markup, with the byte it starts at and where it stands.
 pub(crate) fn placed_lines(src: &str) -> Vec<(usize, &str, Place)> {
-	let mut out		= Vec::new();
-	let mut offset	= 0usize;
-	let mut lx		= Lexer::markup_over(src);
-	for raw in src.split_inclusive('\n') {
-		if let Some(place) = lx.place_of(raw) {
-			out.push((offset, raw, place));
-		}
-		lx.feed(raw);
-		offset = offset.saturating_add(raw.len());
-	}
-	out
+	Lexer::markup(src).lines(src)
 }
 
 /// Where the line starting at byte `at` stands, among `lines` from [`placed_lines`].
@@ -1044,40 +776,136 @@ pub(crate) fn top_level_lines(src: &str) -> Vec<(usize, &str)> {
 	placed_lines(src).into_iter().filter(|&(_, _, p)| p == Place::Top).map(|(at, line, _)| (at, line)).collect()
 }
 
+/// Is anything left open at the end of `text`, read as Typst reads a fragment of markup: a group, a string,
+/// an equation, a comment or raw text?
+#[cfg(test)]
+pub(crate) fn open_after(text: &str) -> bool {
+	Lexer::markup_exact(text).is_open()
+}
+
+// Code fragments. A group's end, a value's end and the like are asked of text that goes on past the answer,
+// so the text is read in growing prefixes: a prefix that holds the answer holds it as the whole would.
+
+/// `text` cut at the first char boundary at or after `n` bytes.
+fn prefix(text: &str, n: usize) -> &str {
+	let mut end = n.min(text.len());
+	while !text.is_char_boundary(end) {
+		end += 1;
+	}
+	&text[..end]
+}
+
+/// The first answer `ask` finds, reading `text` as code in prefixes of growing size; the whole, last, is
+/// asked with `full` set.
+fn in_prefixes<T>(text: &str, ask: impl Fn(&Lexer, bool) -> Option<T>) -> Option<T> {
+	let mut n = 512usize;
+	loop {
+		let head	= prefix(text, n);
+		let full	= head.len() >= text.len();
+		if let Some(r) = ask(&Lexer::code(head), full) {
+			return Some(r);
+		}
+		if full {
+			return None;
+		}
+		n = n.saturating_mul(4);
+	}
+}
+
+impl Lexer {
+	/// The byte just past the group the text opens with, a `(`, `[` or `{`; `None` when it never closes.
+	fn group_close(&self) -> Option<usize> {
+		let first = self.leaves.first()?;
+		if first.tok != Tok::Open || self.nodes[first.node].start != 0 {
+			return None;
+		}
+		let group = self.nodes[first.node].parent;
+		(1..self.leaves.len()).find(|&li| self.closes_group(li) && self.nodes[self.leaves[li].node].parent == group)
+			.map(|li| self.nodes[self.leaves[li].node].end)
+	}
+
+	/// Is the leaf `li` the `)`, `]` or `}` that closes a group?
+	fn closes_group(&self, li: usize) -> bool {
+		self.leaves[li].tok == Tok::Close
+			&& matches!(self.nodes[self.leaves[li].node].kind, SyntaxKind::RightParen | SyntaxKind::RightBrace | SyntaxKind::RightBracket)
+	}
+
+	/// The byte of the first leaf that is a comma or a closer standing at the text's own level: in no group,
+	/// equation, string, comment or raw text.
+	fn comma(&self) -> Option<usize> {
+		(0..self.leaves.len()).find(|&li| {
+			let l = self.leaves[li];
+			l.groups == 0 && l.eqs == 0 && l.tok == Tok::Code && matches!(self.leaf_text(li), "," | ")" | "]" | "}")
+		}).map(|li| self.nodes[self.leaves[li].node].start)
+	}
+}
+
 /// The byte just past the group opening at byte `at` of `src` -- a `(`, `[` or `{` read as code opens one
 /// -- or `None` when it never closes.
 pub(crate) fn group_end(src: &str, at: usize) -> Option<usize> {
-	let rest: Vec<(usize, char)>	= src[at..].char_indices().collect();
-	let only: Vec<char>				= rest.iter().map(|&(_, c)| c).collect();
-	if !matches!(only.first(), Some('(') | Some('[') | Some('{')) {
+	if !matches!(src[at..].chars().next(), Some('(') | Some('[') | Some('{')) {
 		return None;
 	}
-	let mut lx	= Lexer::code();
-	let mut i	= 0usize;
-	while i < only.len() {
-		i += lx.step(&only, i).0;
-		if !lx.is_open() {
-			return Some(at + rest.get(i).map_or(src.len() - at, |&(b, _)| b));
-		}
+	in_prefixes(&src[at..], |lx, _| lx.group_close()).map(|end| at + end)
+}
+
+/// As [`group_end`] over a slice of chars, at the char `at` and in chars: the index just past the closer.
+pub(crate) fn group_end_chars(chars: &[char], at: usize) -> Option<usize> {
+	if !matches!(chars.get(at), Some('(') | Some('[') | Some('{')) {
+		return None;
 	}
-	None
+	let mut n = 128usize;
+	loop {
+		let upto	= (at + n).min(chars.len());
+		let head: String = chars[at..upto].iter().collect();
+		if let Some(end) = Lexer::code(&head).group_close() {
+			return Some(at + head[..end].chars().count());
+		}
+		if upto >= chars.len() {
+			return None;
+		}
+		n = n.saturating_mul(4);
+	}
 }
 
 /// Where a field's value in an argument list or a dictionary ends, for `src` read as code from the value's
 /// start: the byte of the first comma at its own level, or of the closer of the group it stands in, or the
 /// length of `src` when there is neither.
 pub(crate) fn top_comma(src: &str) -> usize {
-	let chars: Vec<(usize, char)>	= src.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
-	let mut lx	= Lexer::code();
-	let mut i	= 0usize;
-	while i < only.len() {
-		if matches!(only[i], ',' | ')' | ']' | '}') && !lx.is_open() {
-			return chars[i].0;
+	in_prefixes(src, |lx, full| lx.comma().or_else(|| full.then_some(src.len()))).unwrap_or(src.len())
+}
+
+/// The byte of the first colon at the own level of `src` read as code, or `None` when there is none.
+pub(crate) fn top_colon(src: &str) -> Option<usize> {
+	let lx = Lexer::code(src);
+	(0..lx.leaves.len()).find(|&li| {
+		let l = lx.leaves[li];
+		l.groups == 0 && l.eqs == 0 && l.tok == Tok::Code && lx.leaf_text(li) == ":"
+	}).map(|li| lx.nodes[lx.leaves[li].node].start)
+}
+
+/// Each group a `(` opens at the top level of `src` read as code, by the byte of its `(` and the byte just
+/// past its `)`. A group that never closes is not listed.
+pub(crate) fn top_parens(src: &str) -> Vec<(usize, usize)> {
+	let lx		= Lexer::code(src);
+	let mut out	= Vec::new();
+	let mut open: Option<usize>	= None;
+	let mut group: Option<usize> = None;	// the group node the open `(` belongs to
+	for li in 0..lx.leaves.len() {
+		let l = lx.leaves[li];
+		let n = lx.nodes[l.node];
+		if l.groups == 0 && l.eqs == 0 && l.tok == Tok::Open && lx.leaf_text(li) == "(" {
+			open	= Some(n.start);
+			group	= Some(n.parent);
 		}
-		i += lx.step(&only, i).0;
+		if lx.closes_group(li) && Some(n.parent) == group {
+			if let Some(o) = open.take() {
+				out.push((o, n.end));
+			}
+			group = None;
+		}
 	}
-	src.len()
+	out
 }
 
 /// One argument of a call's list, or one entry of an array or a dictionary, as Typst's parser reads it.
@@ -1087,27 +915,29 @@ pub(crate) struct Arg {
 	pub(crate) value:	String,			// the value's text, its comments dropped, trimmed
 }
 
-/// What a step over an argument list's text leaves of what it read.
+/// What a leaf of an argument list's text leaves of what it read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kept {
 	Text,		// the characters as written
 	Space,		// a comment in code or maths: one space, so the tokens either side of it stay apart
-	Nothing,	// a comment in markup, where Typst sets nothing for it, or the rest of one already begun
+	Nothing,	// a comment in markup, where Typst sets nothing for it
 }
 
 impl Lexer {
-	/// One [`Lexer::step`] over an argument list's text, and what the step leaves of it. A comment is trivia,
-	/// so a reader that keeps the text of an argument keeps none of a comment's.
-	pub(crate) fn arg_step(&mut self, chars: &[char], i: usize) -> (usize, Tok, Kept) {
-		let fresh	= !matches!(self.frames.last(), Some(Frame::Comment(_)));
-		let markup	= matches!(self.frames.last(), Some(Frame::Markup(_)));
-		let (n, tok) = self.step(chars, i);
-		let kept = match tok {
-			Tok::Comment if fresh && !markup	=> Kept::Space,
-			Tok::Comment						=> Kept::Nothing,
-			_									=> Kept::Text,
-		};
-		(n, tok, kept)
+	/// What the leaf `li` leaves of an argument list: a comment is trivia, so a reader that keeps the text of
+	/// an argument keeps none of a comment's.
+	fn kept(&self, li: usize) -> Kept {
+		match self.leaves[li].tok {
+			Tok::Comment if self.nodes[self.leaves[li].node].mode == Mode::Markup	=> Kept::Nothing,
+			Tok::Comment	=> Kept::Space,
+			_				=> Kept::Text,
+		}
+	}
+
+	/// Is the leaf `li` a comma at the list's own level?
+	fn parts(&self, li: usize) -> bool {
+		let l = self.leaves[li];
+		l.groups == 0 && l.eqs == 0 && l.tok == Tok::Code && self.leaf_text(li) == ","
 	}
 }
 
@@ -1128,49 +958,45 @@ enum Head {
 /// content block and every other value are positional. An empty argument, as a trailing comma leaves, is
 /// not listed.
 pub(crate) fn args(inner: &str) -> Vec<Arg> {
-	let only: Vec<char>		= inner.chars().collect();
+	let lx					= Lexer::code(inner);
 	let mut out: Vec<Arg>	= Vec::new();
-	let mut lx				= Lexer::code();
 	let mut head			= Head::Start;
 	let mut key				= None;
 	let mut value			= String::new();
-	let mut i				= 0usize;
-	loop {
-		let top = !lx.is_open();
-		if i >= only.len() || (top && only[i] == ',') {
-			let v = value.trim();
-			if key.is_some() || !v.is_empty() {
-				out.push(Arg { key: key.take(), value: v.to_string() });
-			}
-			if i >= only.len() {
-				break;
-			}
+	let flush = |key: &mut Option<String>, value: &mut String, out: &mut Vec<Arg>| {
+		let v = value.trim();
+		if key.is_some() || !v.is_empty() {
+			out.push(Arg { key: key.take(), value: v.to_string() });
+		}
+	};
+	for li in 0..lx.leaves.len() {
+		if lx.parts(li) {
+			flush(&mut key, &mut value, &mut out);
 			head	= Head::Start;
 			key		= None;
 			value.clear();
-			i += 1;
 			continue;
 		}
-		let (n, tok, kept) = lx.arg_step(&only, i);
-		let piece = &only[i..i + n];
-		i += n;
-		match kept {
+		match lx.kept(li) {
 			Kept::Space		=> { value.push(' '); continue; },
 			Kept::Nothing	=> continue,
 			Kept::Text		=> {},
 		}
-		let blank = piece.iter().all(|c| c.is_whitespace());
-		if top && tok == Tok::Code && n == 1 {
-			let c = piece[0];
+		let l		= lx.leaves[li];
+		let piece	= lx.leaf_text(li);
+		let top		= l.groups == 0 && l.eqs == 0;
+		let blank	= piece.chars().all(|c| c.is_whitespace());
+		if top && l.tok == Tok::Code {
+			let word = piece.chars().next().is_some_and(is_id_start) && piece.chars().all(is_id_continue);
 			let next = match std::mem::replace(&mut head, Head::Value) {
-				Head::Start if blank						=> Head::Start,
-				Head::Start if is_id_start(c)				=> Head::Name { name: c.to_string(), spaced: false },
-				Head::Name { name, .. } if blank			=> Head::Name { name, spaced: true },
-				Head::Name { mut name, spaced: false } if is_id_continue(c) => {
-					name.push(c);
+				Head::Start if blank					=> Head::Start,
+				Head::Start if word						=> Head::Name { name: piece.to_string(), spaced: false },
+				Head::Name { name, .. } if blank		=> Head::Name { name, spaced: true },
+				Head::Name { mut name, spaced: false } if piece.chars().all(is_id_continue) => {
+					name.push_str(piece);
 					Head::Name { name, spaced: false }
 				},
-				Head::Name { name, .. } if c == ':'			=> {
+				Head::Name { name, .. } if piece == ":"	=> {
 					// The name is the key, and the value starts after its colon.
 					key = Some(name);
 					value.clear();
@@ -1182,7 +1008,31 @@ pub(crate) fn args(inner: &str) -> Vec<Arg> {
 		} else if !blank {
 			head = Head::Value;
 		}
-		value.extend(piece.iter());
+		value.push_str(piece);
+	}
+	flush(&mut key, &mut value, &mut out);
+	out
+}
+
+/// The arguments of the list `inner` as the text each keeps, comments as [`args`] reads them, split at the
+/// commas of the list's own level. A last argument of nothing but space is not listed.
+pub(crate) fn split_args(inner: &str) -> Vec<String> {
+	let lx					= Lexer::code(inner);
+	let mut out: Vec<String>	= Vec::new();
+	let mut cur				= String::new();
+	for li in 0..lx.leaves.len() {
+		if lx.parts(li) {
+			out.push(std::mem::take(&mut cur));
+			continue;
+		}
+		match lx.kept(li) {
+			Kept::Text		=> cur.push_str(lx.leaf_text(li)),
+			Kept::Space		=> cur.push(' '),
+			Kept::Nothing	=> {},
+		}
+	}
+	if !cur.trim().is_empty() {
+		out.push(cur);
 	}
 	out
 }
@@ -1202,31 +1052,6 @@ pub(crate) fn duplicate_key(list: &[Arg]) -> Option<&str> {
 		}
 	}
 	None
-}
-
-/// Each group a `(` opens at the top level of `src` read as code, by the byte of its `(` and the byte just
-/// past its `)`. A group that never closes is not listed.
-pub(crate) fn top_parens(src: &str) -> Vec<(usize, usize)> {
-	let chars: Vec<(usize, char)>	= src.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
-	let byte		= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
-	let mut out		= Vec::new();
-	let mut lx		= Lexer::code();
-	let mut open	= None;	// the character a top-level `(` opens at
-	let mut i		= 0usize;
-	while i < only.len() {
-		let top = !lx.is_open();
-		let (n, tok) = lx.step(&only, i);
-		if top && tok == Tok::Open && only[i] == '(' {
-			open = Some(i);
-		}
-		if let Some(o) = open.filter(|_| !lx.is_open()) {
-			out.push((byte(o), byte(i + n)));
-			open = None;
-		}
-		i += n;
-	}
-	out
 }
 
 /// A conditional or a loop embedded in markup -- an `#if` with its `else` arms, a `#for` or a `#while` --
@@ -1269,109 +1094,7 @@ pub(crate) fn flows(src: &str) -> Vec<Flow> {
 /// whose own bindings (a code block's `let`, a function's parameters) this scan does not read. A flow inside
 /// a `#let`, `#set` or `#show` statement is that statement's, read when it is, and not listed.
 pub(crate) fn flows_in(src: &str, level: Level) -> Vec<Flow> {
-	let chars: Vec<(usize, char)>	= src.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
-	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
-	let mut out: Vec<Flow>		= Vec::new();
-	let mut lx					= Lexer::markup_over(src);
-	let mut cur: Option<Flow>	= None;
-	let mut hash: Option<usize>	= None;	// the byte of a `#` just read where a flow may stand
-	let mut at					= 1usize;	// the index of the frame of the expression a `#` opened there
-	let mut coded				= false;	// whether that `#` stood in code
-	let mut math				= false;	// whether it stood in an equation
-	let mut arrows: Vec<usize>	= Vec::new();	// the depth of each open group a `=>` was read in
-	let mut head				= 0usize;	// where the open arm's condition starts
-	// The body being read: its condition, its first byte and whether it is a content block.
-	let mut open: Option<(Option<(usize, usize)>, usize, bool)> = None;
-	let mut i = 0usize;
-	while i < only.len() {
-		let before		= lx.phase_at(at);
-		let deep		= lx.frames.len();
-		let (n, tok)	= lx.step(&only, i);
-		let after		= lx.phase_at(at);
-		let next		= i + n;
-		if tok == Tok::Code && only[i] == '>' && i > 0 && only[i - 1] == '=' && matches!(lx.frames.last(), Some(Frame::Code(_))) {
-			arrows.push(lx.frames.len());
-		}
-		arrows.retain(|&d| d <= lx.frames.len());
-		// A `#` opens an expression: where a new flow may stand, or at the open flow's own level, ending it.
-		let opened = tok == Tok::Hash && matches!(lx.frames.last(), Some(Frame::Embed(Embed::Start)));
-		// Where a `#` here may open a flow: `Some((in code, in an equation))`.
-		let host = |lx: &Lexer| -> Option<(bool, bool)> {
-			let k = lx.frames.len().checked_sub(2)?;
-			match level {
-				Level::Own	=> (lx.frames.len() == 2).then_some((false, false)),
-				Level::Deep	=> {
-					let stmt = lx.frames[..k + 1].iter().any(|f| matches!(f, Frame::Embed(Embed::Stmt)));
-					let code = lx.frames[..k].iter().any(|f| *f == Frame::Code('}')) || !arrows.is_empty();
-					match lx.frames[k] {
-						Frame::Markup(_) if !stmt	=> Some((code, false)),
-						Frame::Math(_) if !stmt		=> Some((code, true)),
-						_							=> None,
-					}
-				},
-			}
-		};
-		let fresh = opened && match cur {
-			Some(_)	=> lx.frames.len() == at + 1,
-			None	=> host(&lx).is_some(),
-		};
-		match cur.as_mut() {
-			None => {
-				// A flow opens where an expression embedded at a flow's level reads a loop's or a
-				// conditional's keyword first.
-				if let (Some(h), Some(Embed::Start), Some(Embed::Head { kw, .. })) = (hash, before, after) {
-					cur		= Some(Flow { kw, start: h, end: byte(next), arms: Vec::new(), whole: true, coded, math });
-					head	= byte(next);
-				}
-			},
-			Some(f) => {
-				match (before, after) {
-					(Some(Embed::Head { .. }), Some(Embed::Tail { .. }))	=>
-						open = Some((Some((head, byte(i))), byte(i), only[i] == '[')),
-					(Some(Embed::Else), Some(Embed::Tail { .. }))			=>
-						open = Some((None, byte(i), only[i] == '[')),
-					(Some(Embed::Else), Some(Embed::Head { .. }))			=> head = byte(next),
-					(Some(Embed::Tail { .. }), Some(Embed::Post))			=> f.whole = false,
-					_														=> {},
-				}
-				// A body closes on the step that brings the scan back to the expression's own level.
-				if deep > at + 1 && lx.frames.len() == at + 1 && matches!(after, Some(Embed::Tail { .. })) {
-					if let Some((cond, from, content)) = open.take() {
-						f.arms.push(Arm { cond, body: (from, byte(next)), content });
-						f.end = byte(next);
-					}
-				}
-				// The expression has ended, before the character this step read at its own level. One
-				// that is not whole takes everything up to there.
-				if after.is_none() || fresh {
-					if !f.whole || f.arms.is_empty() || open.is_some() {
-						f.whole	= false;
-						f.end	= byte(i).max(f.end);
-					}
-					out.push(f.clone());
-					cur		= None;
-					open	= None;
-				}
-			},
-		}
-		hash = None;
-		if fresh {
-			hash	= Some(byte(i));
-			at		= lx.frames.len() - 1;
-			(coded, math) = host(&lx).unwrap_or((false, false));
-		}
-		i = next;
-	}
-	if let Some(mut f) = cur {
-		// The source ends inside it: whole only when its last body has closed and nothing follows it.
-		if !f.whole || f.arms.is_empty() || open.is_some() {
-			f.whole	= false;
-			f.end	= src.len();
-		}
-		out.push(f);
-	}
-	out
+	Lexer::markup(src).flows(level)
 }
 
 /// A `#let` or `#import` embedded in markup, and the stretch of the text its names are bound over.
@@ -1389,85 +1112,217 @@ pub(crate) struct Binding {
 /// strong or emphasis opens no scope. A code block's own `let`, written with no `#`, is code rather than
 /// markup and is not listed.
 pub(crate) fn bindings(src: &str) -> Vec<Binding> {
-	let chars: Vec<(usize, char)>	= src.char_indices().collect();
-	let only: Vec<char>				= chars.iter().map(|&(_, c)| c).collect();
-	let byte	= |i: usize| chars.get(i).map_or(src.len(), |&(b, _)| b);
-	let mut out: Vec<Binding>	= Vec::new();
-	let mut lx					= Lexer::markup_over(src);
-	// The statements each open block holds, awaiting its closer; the text's own level at the bottom.
-	let mut held: Vec<Vec<usize>>			= vec![Vec::new()];
-	let mut cur: Option<(String, usize, usize)>	= None;	// the statement being read, its expression's frame and its `#`
-	let mut hash: Option<usize>				= None;	// the frame of an expression a `#` has just opened
-	let mut i = 0usize;
-	while i < only.len() {
-		let blocks		= open_blocks(&lx);
-		let (n, tok)	= lx.step(&only, i);
-		let next		= i + n;
-		let stmt		= |lx: &Lexer, e: usize| lx.frames.get(e) == Some(&Frame::Embed(Embed::Stmt));
-		let word		= &only[i..next];
-		match (hash.take(), cur.as_mut()) {
-			(Some(e), None) if stmt(&lx, e) && (at_word(word, 0, "let") || at_word(word, 0, "import")) => {
-				let mut text = String::from("#");
-				text.extend(word);
-				cur = Some((text, e, byte(i).saturating_sub(1)));
-			},
-			(_, Some((text, e, start))) => {
-				if stmt(&lx, *e) {
-					if tok != Tok::Comment {
-						text.extend(word);
-					}
-				} else {
-					// The statement ended on this step: on the `;` it took, or before the character the level
-					// beneath it read.
-					let at = if tok == Tok::Code && only[i] == ';' { byte(next) } else { byte(i) };
-					out.push(Binding { start: *start, text: std::mem::take(text), at, until: None });
-					if let Some(level) = held.last_mut() {
-						level.push(out.len() - 1);
-					}
-					cur = None;
-				}
-			},
-			_ => {},
-		}
-		if tok == Tok::Hash && matches!(lx.frames.last(), Some(Frame::Embed(Embed::Start))) {
-			hash = Some(lx.frames.len() - 1);
-		}
-		// A step closes one block, on its closer, or opens one.
-		let now = open_blocks(&lx);
-		if now < blocks && held.len() > 1 {
-			if let Some(level) = held.pop() {
-				for k in level {
-					out[k].until = Some(byte(i));
-				}
-			}
-		} else if now > blocks {
-			held.push(Vec::new());
-		}
-		i = next;
-	}
-	if let Some((text, _, start)) = cur {
-		out.push(Binding { start, text, at: src.len(), until: None });
-		if let Some(level) = held.last_mut() {
-			level.push(out.len() - 1);
-		}
-	}
-	// A block the text never closes holds its statements to the end.
-	for level in held.iter().skip(1) {
-		for &k in level {
-			out[k].until = Some(src.len());
-		}
-	}
-	out
+	Lexer::markup(src).bindings()
 }
 
-/// How many blocks that scope a binding are open: content blocks, a reference's supplement among them, and
-/// code blocks.
-fn open_blocks(lx: &Lexer) -> usize {
-	lx.frames.iter().skip(1).filter(|f| match f {
-		Frame::Markup(m)	=> m.block,
-		Frame::Code(c)		=> *c == '}',
-		_					=> false,
-	}).count()
+impl Lexer {
+	fn kind(&self, a: usize) -> SyntaxKind {
+		self.nodes[a].kind
+	}
+
+	/// The expression an `#` at the leaf node `h` embeds, if one follows it directly.
+	fn embedded(&self, h: usize) -> Option<usize> {
+		let n = &self.nodes[h];
+		(n.kind == SyntaxKind::Hash && n.next != NONE && self.nodes[n.next].start == n.end).then_some(n.next)
+	}
+
+	/// The nodes beneath `a`, in order.
+	fn kids(&self, a: usize) -> Vec<usize> {
+		let mut out	= Vec::new();
+		let mut c	= self.nodes[a].child;
+		while c != NONE {
+			out.push(c);
+			c = self.nodes[c].next;
+		}
+		out
+	}
+
+	/// The conditionals and loops `level` names.
+	fn flows(&self, level: Level) -> Vec<Flow> {
+		let mut out = Vec::new();
+		self.find_flows(0, level, true, false, false, &mut out);
+		out
+	}
+
+	/// Walks the children of `a`: `own` while only markup and its scopes lie between the root and `a`, `stmt` inside
+	/// an embedded statement, `coded` inside a code block or a closure.
+	fn find_flows(&self, a: usize, level: Level, own: bool, stmt: bool, coded: bool, out: &mut Vec<Flow>) {
+		let mode		= self.nodes[a].mode;
+		let mut skip	= NONE;	// the expression a flow took, which holds no other
+		for c in self.kids(a) {
+			if c == skip {
+				continue;
+			}
+			let k = self.kind(c);
+			if let Some(e) = self.embedded(c) {
+				let listed = match level {
+					Level::Own	=> own,
+					Level::Deep	=> !stmt && matches!(mode, Mode::Markup | Mode::Math),
+				};
+				if listed {
+					if let Some(flow) = self.flow(c, e, coded, mode == Mode::Math) {
+						out.push(flow);
+						skip = e;
+						continue;
+					}
+				}
+			}
+			if self.nodes[c].child == NONE {
+				continue;
+			}
+			// An embedded statement is the statement's, whatever stands inside it.
+			let embedded_stmt = is_stmt(k) && self.nodes[c].prev != NONE && self.kind(self.nodes[c].prev) == SyntaxKind::Hash;
+			let keeps = k == SyntaxKind::Markup || is_scope(k);
+			self.find_flows(
+				c, level, own && keeps, stmt || embedded_stmt,
+				coded || matches!(k, SyntaxKind::CodeBlock | SyntaxKind::Closure), out,
+			);
+		}
+	}
+
+	/// The flow the `#` at `h` opens over the expression `e`, if `e` is a conditional or a loop, or a call or a
+	/// field taken from one.
+	fn flow(&self, h: usize, e: usize, coded: bool, math: bool) -> Option<Flow> {
+		let mut x		= e;
+		let mut whole	= true;
+		while matches!(self.kind(x), SyntaxKind::FuncCall | SyntaxKind::FieldAccess) {
+			x = self.nodes[x].child;
+			whole = false;
+			if x == NONE {
+				return None;
+			}
+		}
+		let kw = match self.kind(x) {
+			SyntaxKind::Conditional	=> Kw::If,
+			SyntaxKind::WhileLoop	=> Kw::While,
+			SyntaxKind::ForLoop		=> Kw::For,
+			_						=> return None,
+		};
+		let mut arms	= Vec::new();
+		let complete	= self.arms(x, &mut arms);
+		let whole		= whole && complete && !arms.is_empty();
+		let last		= arms.last().map_or(0, |a| a.body.1);
+		Some(Flow {
+			kw,
+			start:	self.nodes[h].start,
+			end:	if whole { last } else { self.nodes[e].end.max(last) },
+			arms,
+			whole,
+			coded,
+			math,
+		})
+	}
+
+	/// Pushes the arms of the conditional or loop `x`: false when one is missing its body or leaves it open.
+	fn arms(&self, x: usize, out: &mut Vec<Arm>) -> bool {
+		let kids	= self.kids(x);
+		let Some(&kw) = kids.first() else { return false; };
+		let from	= self.nodes[kw].end;
+		let block	= |a: usize| matches!(self.kind(a), SyntaxKind::ContentBlock | SyntaxKind::CodeBlock);
+		let at_else	= kids.iter().position(|&a| self.kind(a) == SyntaxKind::Else);
+		let head	= &kids[1..at_else.unwrap_or(kids.len())];
+		let Some(&body) = head.iter().rev().find(|&&a| block(a)) else { return false; };
+		if !self.closed(body) {
+			return false;
+		}
+		out.push(Arm {
+			cond:		Some((from, self.nodes[body].start)),
+			body:		(self.nodes[body].start, self.nodes[body].end),
+			content:	self.kind(body) == SyntaxKind::ContentBlock,
+		});
+		let Some(e) = at_else else { return true; };
+		let tail = kids[e + 1..].iter().copied().find(|&a| !matches!(self.kind(a), SyntaxKind::Space | SyntaxKind::LineComment | SyntaxKind::BlockComment));
+		match tail {
+			Some(a) if self.kind(a) == SyntaxKind::Conditional	=> self.arms(a, out),
+			Some(a) if block(a) && self.closed(a)				=> {
+				out.push(Arm {
+					cond:		None,
+					body:		(self.nodes[a].start, self.nodes[a].end),
+					content:	self.kind(a) == SyntaxKind::ContentBlock,
+				});
+				true
+			},
+			_	=> false,
+		}
+	}
+
+	/// Does the block `a` end with its closer?
+	fn closed(&self, a: usize) -> bool {
+		let mut c = self.nodes[a].child;
+		let mut last = NONE;
+		while c != NONE {
+			last = c;
+			c = self.nodes[c].next;
+		}
+		last != NONE && matches!(self.kind(last), SyntaxKind::RightBracket | SyntaxKind::RightBrace)
+	}
+
+	/// The statements `bindings` lists.
+	fn bindings(&self) -> Vec<Binding> {
+		let mut out = Vec::new();
+		self.find_bindings(0, &mut out);
+		out
+	}
+
+	fn find_bindings(&self, a: usize, out: &mut Vec<Binding>) {
+		let mut skip = NONE;	// the statement a binding took, which holds no other
+		for c in self.kids(a) {
+			if c == skip {
+				continue;
+			}
+			if let Some(e) = self.embedded(c) {
+				if matches!(self.kind(e), SyntaxKind::LetBinding | SyntaxKind::ModuleImport) {
+					out.push(self.binding(c, e));
+					skip = e;
+					continue;
+				}
+			}
+			if self.nodes[c].child != NONE {
+				self.find_bindings(c, out);
+			}
+		}
+	}
+
+	/// The binding the `#` at `h` makes of the statement `e`.
+	fn binding(&self, h: usize, e: usize) -> Binding {
+		let mut text = String::from("#");
+		self.push_text(e, &mut text);
+		// A `;` ends the statement, and is part of what it holds over, though not of its text.
+		let mut at	= self.nodes[e].end;
+		let mut n	= self.nodes[e].next;
+		while n != NONE && matches!(self.kind(n), SyntaxKind::Space | SyntaxKind::LineComment | SyntaxKind::BlockComment) {
+			n = self.nodes[n].next;
+		}
+		if n != NONE && self.kind(n) == SyntaxKind::Semicolon {
+			at = self.nodes[n].end;
+		}
+		// The innermost block it stands in holds it to its closer.
+		let mut until	= None;
+		let mut p		= self.nodes[h].parent;
+		while p != NONE {
+			if matches!(self.kind(p), SyntaxKind::ContentBlock | SyntaxKind::CodeBlock) {
+				let close = self.kids(p).last().copied().filter(|&k| matches!(self.kind(k), SyntaxKind::RightBracket | SyntaxKind::RightBrace));
+				until = Some(close.map_or(self.text.len(), |k| self.nodes[k].start));
+				break;
+			}
+			p = self.nodes[p].parent;
+		}
+		Binding { start: self.nodes[h].start, text, at, until }
+	}
+
+	/// Appends the text beneath `a`, its comments dropped.
+	fn push_text(&self, a: usize, out: &mut String) {
+		let n = &self.nodes[a];
+		if n.leaf != NONE {
+			if self.leaves[n.leaf].tok != Tok::Comment {
+				out.push_str(&self.text[n.start..n.end]);
+			}
+			return;
+		}
+		for c in self.kids(a) {
+			self.push_text(c, out);
+		}
+	}
 }
 
 #[cfg(test)]
@@ -1524,8 +1379,11 @@ mod tests {
 
 	#[test]
 	fn a_link_drops_the_punctuation_that_ends_its_sentence() {
-		let chars: Vec<char> = "https://x.io/a(b). /* c */".chars().collect();
-		assert_eq!(link_len(&chars, 0), "https://x.io/a(b)".len());
+		let src = "https://x.io/a(b). /* c */";
+		let link = "https://x.io/a(b)".len();
+		let toks = byte_toks(src);
+		assert!(toks[..link].iter().all(|&t| t == Tok::Link));
+		assert_eq!(toks[link], Tok::Text);
 		let src = "https://x.io. /* c */ d\n";
 		assert_eq!(live_text(src), "https://x.io.         d\n");
 	}
@@ -1848,20 +1706,16 @@ mod tests {
 		assert_eq!(keys("a b: 1, (c: 1)"), Vec::<String>::new());
 	}
 
-	/// The text a step-by-step reader of `src` keeps, as [`split`](crate::lang::parse::split_top_args) does.
+	/// The text a reader of `src` as an argument list keeps, as [`split_args`] does.
 	fn kept(src: &str) -> String {
-		let chars: Vec<char>	= src.chars().collect();
-		let mut lx				= Lexer::code();
-		let mut out				= String::new();
-		let mut i				= 0usize;
-		while i < chars.len() {
-			let (n, _, k) = lx.arg_step(&chars, i);
-			match k {
-				Kept::Text		=> out.extend(&chars[i..i + n]),
+		let lx = Lexer::code(src);
+		let mut out = String::new();
+		for li in 0..lx.leaves.len() {
+			match lx.kept(li) {
+				Kept::Text		=> out.push_str(lx.leaf_text(li)),
 				Kept::Space		=> out.push(' '),
 				Kept::Nothing	=> {},
 			}
-			i += n;
 		}
 		out
 	}
@@ -1954,5 +1808,178 @@ mod tests {
 		let b = bindings(src);
 		assert_eq!(b.len(), 1);
 		assert_eq!(&src[b[0].start..b[0].at], "#let a = 1");
+	}
+
+	// What the syntax tree settles that the state machine it replaces read otherwise. Each source below was
+	// compiled by typst 0.15.1 as a probe, and the diagnostics it gave are named where they decide the reading.
+
+	#[test]
+	fn a_space_after_a_statement_is_markup_beside_it() {
+		// The spaces before a trailing comment are the markup's, outside the statement; typst compiles this
+		// without a diagnostic.
+		let src = "#let a = 230   // note\n#let b = 1; // c\n";
+		let toks = byte_toks(src);
+		let first = src.find("   //").unwrap_or(0);
+		assert!(toks[first..first + 3].iter().all(|&t| t == Tok::Text));
+		assert_eq!(toks[first + 3], Tok::Comment);
+		let second = src.find("; //").map_or(0, |k| k + 1);
+		assert_eq!(toks[second - 1], Tok::Code);
+		assert_eq!(toks[second], Tok::Text);
+		// The statement's own text ends before them, and what it binds holds from its end.
+		let b = bindings(src);
+		assert_eq!(b[0].text, "#let a = 230");
+		assert_eq!(&src[..b[0].at], "#let a = 230");
+		assert_eq!(&src[..b[1].at], "#let a = 230   // note\n#let b = 1;");
+	}
+
+	#[test]
+	fn a_statement_ends_where_typst_ends_it() {
+		// typst: `expected semicolon or line break` after the `1` and nothing about `*b*`, so what follows is
+		// markup, a strong span included.
+		let src = "#let x = 1 a *b*\n";
+		let toks = byte_toks(src);
+		let a = src.find(" a").unwrap_or(0);
+		assert!(toks[a..a + 2].iter().all(|&t| t == Tok::Text));
+		assert_eq!(bindings(src)[0].text, "#let x = 1");
+		// typst: `expected colon` after `heading`, then the same.
+		let src = "#show heading it => it\n";
+		let toks = byte_toks(src);
+		let it = src.find(" it").unwrap_or(0);
+		assert!(toks[it..src.len() - 1].iter().all(|&t| t == Tok::Text));
+	}
+
+	#[test]
+	fn an_unclosed_paren_ends_at_a_terminator() {
+		// typst: `unclosed delimiter` at the `(`, `unexpected closing bracket` at the `]`, and the duplicate
+		// argument of the call after it, so the `]` and what follows are markup.
+		let src = "#let x = (1, 2\n\n*unclosed strong\n\ntext ] more\n\n#f(a: 1, a: 2)\n";
+		let toks = byte_toks(src);
+		let bracket = src.find(" ] more").unwrap_or(0);
+		assert!(toks[bracket..bracket + 7].iter().all(|&t| t == Tok::Text));
+		let call = src.find("#f(").unwrap_or(0);
+		assert_eq!((toks[call], toks[call + 1], toks[call + 2]), (Tok::Hash, Tok::Code, Tok::Open));
+		// The group never closed, and so is still counted open.
+		assert_eq!(Lexer::markup(src).depth_at(call), 1);
+	}
+
+	#[test]
+	fn an_unclosed_paren_ends_with_the_code_block_round_it() {
+		// typst: `unclosed delimiter` at the `(` alone, so the `}` closes the block.
+		let src = "#{ import \"x\": (a, b }\n";
+		assert_eq!(group_end(src, 1), Some(src.len() - 1));
+		assert_eq!(group_end(src, src.find('(').unwrap_or(0)), None);
+		assert_eq!(byte_toks(src)[src.len() - 1], Tok::Text);
+		// The block ended what was open inside it, so the line after it is not in a group.
+		let src = "#{ import \"x\": (a, b }\nnext\n";
+		let lx = Lexer::markup(src);
+		let next = src.find("next").unwrap_or(0);
+		assert_eq!((lx.depth_at(next), lx.open_at(next)), (0, 0));
+	}
+
+	#[test]
+	fn an_error_token_after_a_hash_is_code() {
+		// typst: `invalid number suffix`, `expected a hexadecimal number` and `unexpected minus`, each reported
+		// at the `#` and each part of the embedded expression.
+		for (src, upto) in [("#12p\n", 4), ("#0x\n", 3), ("#-1\n", 2)] {
+			assert!(byte_toks(src)[1..upto].iter().all(|&t| t == Tok::Code), "{:?}", src);
+		}
+		assert_eq!(byte_toks("#-1\n")[2], Tok::Text);
+	}
+
+	#[test]
+	fn what_the_parser_left_over_in_code_is_read_again() {
+		// typst: `expected named or keyed pair`, and nothing about what follows. The expression it refuses
+		// is one error node holding the text of its tokens, whose string stays a string.
+		let src = "#let d = (a: 1, \"x\" + \"y // z\")\n#set x()\n";
+		let toks = byte_toks(src);
+		let slashes = src.find("//").unwrap_or(0);
+		assert_eq!(toks[slashes], Tok::Str);
+		assert_eq!(tops(src).len(), 2);
+	}
+
+	#[test]
+	fn a_line_with_no_token_stands_where_the_last_token_left_it() {
+		// The blank line is inside the strong span, which a paragraph break has not yet ended; the line after it
+		// is not.
+		let src = "2 * 3\n#set x()\n\n#set y()\n";
+		let lx = Lexer::markup(src);
+		let blank = src.find("\n\n").map_or(0, |k| k + 1);
+		assert_eq!(lx.place_at(blank), Some(Place::Contained));
+		assert_eq!(lx.place_at(blank + 1), Some(Place::Top));
+		// A heading ended with its line, and an item has not ended until a token says so.
+		let src = "= H\n\ntext\n";
+		assert_eq!(Lexer::markup(src).place_at(4), Some(Place::Top));
+		assert!(Lexer::markup(src).bare_line_at(4));
+		let src = "- item\n\n  more\n";
+		assert_eq!(Lexer::markup(src).place_at(7), Some(Place::Contained));
+	}
+
+	#[test]
+	fn a_block_closer_and_a_blank_line_in_an_empty_block_are_bare() {
+		let src = "#box[\n\n]\n";
+		let lx = Lexer::markup(src);
+		assert!(lx.bare_line_at(6), "a blank line in a block that holds nothing yet");
+		assert!(lx.bare_line_at(7), "the closer stands in the block's markup");
+		assert_eq!(lx.place_at(7), Some(Place::Content));
+		// With a list item open in the block, the closer at its own margin ends it.
+		let src = "#box[\n- a\n]\n";
+		assert!(Lexer::markup(src).bare_line_at(10));
+		assert!(!Lexer::markup(src).bare_line_at(6) || Lexer::markup(src).place_at(6) == Some(Place::Content));
+		// A line in strong inside the block is not bare.
+		let src = "#box[\n*a\nb*\n]\n";
+		assert!(!Lexer::markup(src).bare_line_at(8));
+	}
+
+	#[test]
+	fn what_is_open_at_a_line_start_counts_groups_equations_and_literals() {
+		let src = "#let x = (\n  a,\n)\nb\n";
+		let lx = Lexer::markup(src);
+		assert_eq!((lx.open_at(0), lx.open_at(11), lx.open_at(src.len() - 2)), (0, 1, 0));
+		assert_eq!(lx.depth_at(11), 1);
+		assert_eq!(lx.markup_level_at(11), None, "inside a code group");
+		assert_eq!(lx.markup_level_at(src.len() - 2), Some(0));
+		for (src, line) in [("$ a\n b $\n", 4), ("#\"a\nb\"\n", 4), ("`a\nb`\n", 3), ("/* a\nb */\n", 5)] {
+			let lx = Lexer::markup(src);
+			assert_eq!(lx.open_at(line), 1, "{:?}", src);
+			assert_eq!(lx.open_at(src.len()), 0, "{:?}", src);
+			assert_eq!(lx.place_at(line), None, "{:?}", src);
+		}
+		// What is open at the end of a text that stops inside a construct.
+		for src in ["#f(a,\n", "$ x\n", "#[a\n", "`raw\n", "/* c\n", "#\"s\n"] {
+			assert!(open_after(src), "{:?}", src);
+		}
+		for src in ["#f(a)\n", "$ x $\n", "#[a]\n", "`raw`\n", "/* c */\n", "#\"s\"\n"] {
+			assert!(!open_after(src), "{:?}", src);
+		}
+	}
+
+	#[test]
+	fn a_group_is_found_in_the_prefix_that_holds_it() {
+		// A group far longer than the first prefix, nested and holding strings, comments and brackets that
+		// close nothing, ends where the whole text says.
+		let mut inner = String::new();
+		for k in 0..400 {
+			inner.push_str(&fmt!("s{}: \"a ] b ) c\", item{}: [text ) with \\] {} /* ) */ (n{})], ", k, k, k, k));
+		}
+		let src = fmt!("({}) tail ( not part", inner);
+		let end = src.find(") tail").map(|k| k + 1);
+		assert_eq!(group_end(&src, 0), end);
+		let chars: Vec<char> = src.chars().collect();
+		assert_eq!(group_end_chars(&chars, 0), end);
+		assert_eq!(group_end_chars(&chars, chars.len() - 9), None);
+		assert_eq!(group_end("(a, b", 0), None);
+		assert_eq!(top_comma(&fmt!("{} , more", &src[..end.unwrap_or(0)])), end.unwrap_or(0) + 1);
+		// An index in chars is not an index in bytes.
+		let src = "(é, \"ü ) €\", [ñ])x";
+		let chars: Vec<char> = src.chars().collect();
+		assert_eq!((group_end_chars(&chars, 0), group_end(src, 0)), (Some(17), Some(22)));
+	}
+
+	#[test]
+	fn the_first_colon_at_the_own_level_names_an_argument() {
+		assert_eq!(top_colon("key: value"), Some(3));
+		assert_eq!(top_colon("(a: 1) b: 2"), Some(8));
+		assert_eq!(top_colon("[a: 1], \"b: 2\", $c: 3$"), None);
+		assert_eq!(split_args("a, [b, c], \"d, e\" /* , */, f"), vec!["a", " [b, c]", " \"d, e\"  ", " f"]);
 	}
 }

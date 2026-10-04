@@ -375,9 +375,33 @@ impl PearlBuilder {
 	/// `frame.placed`, which is what lets the reader reproduce that arm's bytes.
 	pub fn add_page(&mut self, page: &Page) -> Outcome<()> {
 		let mut leaves: Vec<Dat> = Vec::new();
+		// The page maps of the groups open at each point. Pearl v1 has no group leaf, so material under a
+		// transform is baked into page-space paths as `fill` leaves; a group's clip is not carried.
+		let mut maps: Vec<Transform> = Vec::new();
 
 		for placed in &page.frame.placed {
 			match &placed.kind {
+				PlacedKind::Group(g) => {
+					let m = g.page_transform(placed.x, placed.y);
+					let m = Transform { a: m.a as f32, b: m.b as f32, c: m.c as f32, d: m.d as f32, e: m.e as f32, f: m.f as f32 };
+					let outer = maps.last().copied().unwrap_or(Transform::IDENTITY);
+					maps.push(m.then(&outer));	// this group's map first, then the enclosing ones
+					continue;
+				},
+				PlacedKind::GroupEnd => {
+					maps.pop();
+					continue;
+				},
+				_ => (),
+			}
+			if let Some(map) = maps.last().copied() {
+				if map != Transform::IDENTITY {
+					res!(bake_placed(placed, &map, &mut leaves));
+					continue;
+				}
+			}
+			match &placed.kind {
+				PlacedKind::Group(_) | PlacedKind::GroupEnd => (),
 				PlacedKind::Text(shaped) => {
 					let mut glyphs: Vec<Dat> = Vec::new();
 					for glyph in &shaped.run().glyphs {
@@ -608,7 +632,7 @@ pub struct TselSpan {
 }
 
 /// A text run's contribution to the selectable-text layer: the run's baseline origin and size, and the
-/// spans placed against it. A visual [`PageSink`] ignores these; the SVG sink turns them into the page's
+/// spans placed against it. A visual [`PageDevice`] ignores these; the SVG sink turns them into the page's
 /// one `.tsel` `<text>` element. Kept as structured data rather than pre-built markup so no sink but the
 /// SVG one ever handles a tspan.
 pub struct TselRun {
@@ -618,12 +642,13 @@ pub struct TselRun {
 	pub spans:	Vec<TselSpan>,
 }
 
-/// A destination for a page's placed ink. The one leaf walk in [`PearlDoc::render_page_to`] drives a
+/// A device a page's placed ink is drawn on (distinct from the fixpoint's `eval::fixpoint::PageSink`, which
+/// takes whole pages). The one leaf walk in [`PearlDoc::render_page_to`] drives a
 /// sink rather than building SVG inline, so the SVG writer and a direct rasteriser (`fe2o3_pearlite`'s
 /// pixmap sink) share that single walk instead of the rasteriser re-parsing the SVG. Every path arrives
 /// already placed in the page's point frame -- origin top-left, y down, one unit one point -- so a sink
 /// applies only its own device transform (a DPI scale, say) on top.
-pub trait PageSink {
+pub trait PageDevice {
 	/// Opens a page `w` by `h` points; a sink sizes its canvas and lays the white ground here.
 	fn begin(&mut self, w: usize, h: usize) -> Outcome<()>;
 	/// Fills the placed `path` with `colour`.
@@ -638,7 +663,7 @@ pub trait PageSink {
 	fn end(&mut self) -> Outcome<()>;
 }
 
-/// The [`PageSink`] that reconstructs the SVG arm's own page markup, byte for byte. Every method writes
+/// The [`PageDevice`] that reconstructs the SVG arm's own page markup, byte for byte. Every method writes
 /// through the very `write_path_data`, `presentation` and `.tsel` shapes the SVG arm uses, so a rendered
 /// page is that arm's output exactly.
 pub struct SvgSink {
@@ -661,7 +686,7 @@ impl Default for SvgSink {
 	}
 }
 
-impl PageSink for SvgSink {
+impl PageDevice for SvgSink {
 	fn begin(&mut self, w: usize, h: usize) -> Outcome<()> {
 		self.out.push_str(&fmt!(
 			"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
@@ -834,8 +859,8 @@ impl PearlDoc {
 
 	/// The one leaf walk for a page: loads the page's block and stores, then drives every placed leaf
 	/// through `sink`. The SVG writer and a direct rasteriser share this walk, so a page never needs
-	/// re-parsing from SVG to reach pixels. See [`PageSink`].
-	pub fn render_page_to<S: PageSink>(&self, idx: usize, sink: &mut S) -> Outcome<()> {
+	/// re-parsing from SVG to reach pixels. See [`PageDevice`].
+	pub fn render_page_to<S: PageDevice>(&self, idx: usize, sink: &mut S) -> Outcome<()> {
 		let index	= res!(self.top.map_get_list(&dat!("index")));
 		let entry	= res!(index.get(idx).ok_or_else(|| err!(
 			"Page index {} is past the {} pages the document holds.", idx, index.len(); Input, Range)));
@@ -1457,4 +1482,62 @@ mod tests {
 		assert!(svg.ends_with("</svg>\n"), "keystone page 0 is not a well-formed, closed SVG document");
 		Ok(())
 	}
+}
+
+/// Bakes one placed item under a group's page map into `fill` and `stroke` leaves in page space: text as its
+/// glyph outlines, a rule as its rectangle, a graphic op by op. A raster can be moved and scaled but not
+/// rotated or skewed, since Pearl v1 places images upright.
+fn bake_placed(placed: &crate::page::Placed, map: &Transform, leaves: &mut Vec<Dat>) -> Outcome<()> {
+	let x = placed.x.to_pt() as f32;
+	let y = placed.y.to_pt() as f32;
+	let zero = res!(crate::ir::Sp::ZERO.to_dat());
+	let fill = |path: Path, colour: Rgba, leaves: &mut Vec<Dat>| -> Outcome<()> {
+		leaves.push(listdat![
+			dat!("fill"),
+			zero.clone(),
+			zero.clone(),
+			dat!(write_path_data(&res!(path.transform(map)))),
+			rgba_to_dat(colour),
+		]);
+		Ok(())
+	};
+	match &placed.kind {
+		PlacedKind::Text(shaped) => {
+			let base_y = y + placed.dims.height.to_pt() as f32;
+			for glyph in &shaped.run().glyphs {
+				let o = res!(shaped.outline(glyph));
+				if o.is_empty() {
+					continue;
+				}
+				let t = Transform::scale(1.0, -1.0).then(&Transform::translate(x + glyph.x, base_y - glyph.y));
+				res!(fill(res!(o.transform(&t)), shaped.colour(), leaves));
+			}
+		},
+		PlacedKind::Rule => {
+			let w = placed.dims.width.to_pt() as f32;
+			let h = placed.dims.vextent().to_pt() as f32;
+			if w > 0.0 && h > 0.0 {
+				res!(fill(res!(Path::rect(Bounds::new(x, y, x + w, y + h))), Rgba::BLACK, leaves));
+			}
+		},
+		PlacedKind::Reserved => (),
+		PlacedKind::Graphic(g) => {
+			let at = Transform::translate(x, y);
+			for op in &g.ops {
+				match op {
+					DrawOp::Fill { path, colour } => res!(fill(res!(path.transform(&at)), *colour, leaves)),
+					DrawOp::Stroke { path, colour, width } => {
+						let pen = res!(Stroke::new(*width));
+						let outline = res!(res!(path.transform(&at)).stroke(&pen));
+						res!(fill(outline, *colour, leaves));
+					},
+					DrawOp::Image { .. } => return Err(err!(
+						"A raster under a transform cannot be written to Pearl v1, which places images \
+						upright and has no group leaf."; Unimplemented)),
+				}
+			}
+		},
+		PlacedKind::Group(_) | PlacedKind::GroupEnd => (),
+	}
+	Ok(())
 }

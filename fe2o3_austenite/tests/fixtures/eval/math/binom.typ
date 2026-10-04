@@ -1,0 +1,1 @@
+$ #math.binom($n$, $k$) $

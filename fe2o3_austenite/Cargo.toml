@@ -3,7 +3,7 @@ name = "oxedyne_fe2o3_austenite"
 version = "0.5.0"
 authors = ["h00gs <hello@oxedyne.io>"]
 edition = "2021"
-license = "BSD-2-Clause/Apache-2.0"
+license = "Apache-2.0 AND BSD-2-Clause"
 description = "Austenite: a streaming, two-pass typesetting engine. Phase 0 spine."
 repository = "https://github.com/oxedyne-io/fe2o3"
 autobins = false
@@ -44,7 +44,7 @@ oxedyne_fe2o3_jdat 				= { path = "../fe2o3_jdat" }
 oxedyne_fe2o3_geom 				= { path = "../fe2o3_geom" }
 oxedyne_fe2o3_graphics 			= { path = "../fe2o3_graphics" }
 oxedyne_fe2o3_font 				= { path = "../fe2o3_font" }
-oxedyne_fe2o3_text 				= { path = "../fe2o3_text" }
+oxedyne_fe2o3_text 				= { path = "../fe2o3_text", features = ["hyphenation"] }
 
 # The wasm-bindgen compile surface's dependencies, confined to the wasm target exactly as `fe2o3_core`
 # confines its own, so Cargo feature unification never pulls them onto a native build.  They are present
@@ -60,3 +60,4 @@ wasm = []
 
 [dev-dependencies]
 oxedyne_fe2o3_test 				= { path = "../fe2o3_test" }
+oxedyne_fe2o3_sys 				= { path = "../fe2o3_sys" }

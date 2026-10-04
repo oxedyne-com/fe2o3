@@ -30,6 +30,7 @@ pub enum AnchorKind {
 	Citation,	// a bibliographic reference
 	Equation,	// a numbered display equation
 	MarginNote,	// a marginal claim-code annotation, drawn post-convergence in the outside margin
+	Location,	// an evaluator element's location (`eval::locate::Location`), keyed by its hex hash
 }
 
 impl AnchorKind {
@@ -42,6 +43,7 @@ impl AnchorKind {
 			AnchorKind::Citation	=> 4,
 			AnchorKind::Equation	=> 5,
 			AnchorKind::MarginNote	=> 6,
+			AnchorKind::Location	=> 7,
 		}
 	}
 
@@ -54,8 +56,9 @@ impl AnchorKind {
 			4 => Ok(AnchorKind::Citation),
 			5 => Ok(AnchorKind::Equation),
 			6 => Ok(AnchorKind::MarginNote),
+			7 => Ok(AnchorKind::Location),
 			_ => Err(err!(
-				"Anchor kind tag {} is not one of the seven known kinds.", tag; Input, Invalid)),
+				"Anchor kind tag {} is not one of the eight known kinds.", tag; Input, Invalid)),
 		}
 	}
 
@@ -70,6 +73,7 @@ impl AnchorKind {
 			AnchorKind::Citation	=> "citation",
 			AnchorKind::Equation	=> "equation",
 			AnchorKind::MarginNote	=> "margin_note",
+			AnchorKind::Location	=> "location",
 		}
 	}
 }
@@ -520,6 +524,24 @@ mod tests {
 			AnchorId::new(AnchorKind::Heading, "02-server"),
 			Position::new(9, Sp::ZERO, Sp::ZERO)));
 		assert_eq!(ledger.body_start_page, 4, "a later heading leaves the body start where it was");
+	}
+
+	#[test]
+	fn location_anchors_survive_the_jdat_round_trip() {
+		// An evaluator location rides in the ledger as tag 7; the Pearl file ships this encoding, and
+		// `fe2o3_pearlite` decodes it through this same `Ledger::from_dat`.
+		let mut ledger = Ledger::new();
+		ledger.record(Anchor::new(
+			AnchorId::new(AnchorKind::Location, "00000000deadbeef"),
+			Position::new(2, Sp::from_pt(10.0), Sp::from_pt(20.0))));
+		ledger.total_pages = 2;
+		let back = match ledger.to_dat().and_then(Ledger::from_dat) {
+			Ok(l)	=> l,
+			Err(e)	=> panic!("{}", e.plain()),
+		};
+		let id = AnchorId::new(AnchorKind::Location, "00000000deadbeef");
+		assert_eq!(back.get(&id).map(|a| a.pos), Some(Position::new(2, Sp::from_pt(10.0), Sp::from_pt(20.0))));
+		assert!(AnchorKind::from_tag(8).is_err(), "an unknown kind tag is refused, not defaulted");
 	}
 
 	#[test]

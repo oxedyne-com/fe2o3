@@ -8,6 +8,7 @@
 //! Lengths are [`Sp`], scaled points, per the architecture's reproducibility rule. Floating point
 //! appears only at the output boundary, where a coordinate becomes a device length.
 
+use crate::eval::realise::Tag;
 use crate::font::ShapedText;
 use crate::ledger::{
 	AnchorId,
@@ -37,6 +38,13 @@ impl Sp {
 	/// boundary conversion; once inside the engine a length never leaves the integer domain.
 	pub fn from_pt(pt: f64) -> Self {
 		Sp((pt * Sp::UNIT as f64).round() as i32)
+	}
+
+	/// Converts a length in points to scaled points, rounding up. A width measured in one pass and given
+	/// back as a region in the next must still hold what it measured, which rounding to the nearest unit
+	/// does not promise: half a unit less is enough to break the last word of an exactly fitted line.
+	pub fn from_pt_up(pt: f64) -> Self {
+		Sp((pt * Sp::UNIT as f64 - 1e-6).ceil() as i32)
 	}
 
 	/// The length in points, for the output boundary only.
@@ -518,6 +526,85 @@ impl ColumnsNode {
 	}
 }
 
+/// A 2D affine map `(x, y) -> (a x + c y + e, b x + d y + f)`, in points, y down, as PDF's `cm`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform {
+	pub a:	f64,
+	pub b:	f64,
+	pub c:	f64,
+	pub d:	f64,
+	pub e:	f64,
+	pub f:	f64,
+}
+
+impl Transform {
+	pub fn identity() -> Self { Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 } }
+
+	pub fn translate(x: f64, y: f64) -> Self { Self { e: x, f: y, ..Self::identity() } }
+
+	pub fn scale(sx: f64, sy: f64) -> Self { Self { a: sx, d: sy, ..Self::identity() } }
+
+	pub fn rotate(radians: f64) -> Self {
+		let (s, c) = radians.sin_cos();
+		Self { a: c, b: s, c: -s, d: c, e: 0.0, f: 0.0 }
+	}
+
+	/// The image of the point `(x, y)`.
+	pub fn apply(&self, x: f64, y: f64) -> (f64, f64) {
+		(self.a * x + self.c * y + self.e, self.b * x + self.d * y + self.f)
+	}
+
+	/// `self` applied after `inner`.
+	pub fn then(&self, inner: &Transform) -> Transform {
+		Transform {
+			a:	self.a * inner.a + self.c * inner.b,
+			b:	self.b * inner.a + self.d * inner.b,
+			c:	self.a * inner.c + self.c * inner.d,
+			d:	self.b * inner.c + self.d * inner.d,
+			e:	self.a * inner.e + self.c * inner.f + self.e,
+			f:	self.b * inner.e + self.d * inner.f + self.f,
+		}
+	}
+}
+
+/// Material drawn under a transform (`move`, `scale`, `rotate`, `skew`). `dims` is the layout footprint
+/// the flow reserves, which Typst keeps as the untransformed size unless `reflow` is set. `list` is a
+/// vertical list set from the footprint's top-left; `transform` maps that local frame (points, y down,
+/// origin at the top-left) onto the frame the node is placed in.
+#[derive(Clone, Debug)]
+pub struct TransformNode {
+	pub transform:	Transform,
+	pub list:		Vec<Node>,
+	pub dims:		Dims,
+}
+
+/// Material clipped to its box, or to `path` when given (a rounded `block(clip: true, radius: ..)`). The
+/// list is a vertical list set from the box's top-left.
+#[derive(Clone, Debug)]
+pub struct ClipNode {
+	pub list:	Vec<Node>,
+	pub dims:	Dims,
+	pub path:	Option<Path>,	// in the box's own frame, points, y down
+}
+
+/// A box of absolutely positioned children: Typst's frame. Each child is set with its top-left at its
+/// offset from the frame's top-left, whatever came before it, so children may overlap. `dims` splits the
+/// frame's height at its baseline, as every box does.
+///
+/// `parent` names the [`Node::Mark`] (or the located element's start tag) the frame's contents belong to
+/// logically: a float's frame is drawn at the top or foot of a region but read, for introspection, where its
+/// `place` stood in the flow, as Typst's frame parents make it.
+#[derive(Clone, Debug)]
+pub struct FrameNode {
+	pub dims:	Dims,
+	pub items:	Vec<(Sp, Sp, Node)>,	// (x, y) of each child's top-left, then the child
+	pub parent:	Option<u64>,
+}
+
+impl FrameNode {
+	pub fn new(dims: Dims) -> Self { Self { dims, items: Vec::new(), parent: None } }
+}
+
 /// One item of a box-glue-penalty list: the closed vocabulary the whole engine is built on.
 #[derive(Clone, Debug)]
 pub enum Node {
@@ -539,6 +626,20 @@ pub enum Node {
 	// never ToDat-serialised -- it is a driver-time control node the lowerer weaves, not shipped IR -- so
 	// adding it changes no on-disc format. Transparent to breakability, like `Anchor`.
 	RepeatHead(Option<Box<BoxNode>>),
+	// A zero-size marker arming (Some) or disarming (None) a repeated footer: while armed, the rows that
+	// break across regions are closed in every region but the last by the boxed footer, set straight after
+	// them, and each region reserves its height (Typst's `table.footer` repeat). The final footer is the
+	// list's own, after the marker disarms. A driver-time control node like `RepeatHead`.
+	RepeatFoot(Option<Box<BoxNode>>),
+	Frame(FrameNode),			// absolutely positioned children, Typst's frame
+	Transform(TransformNode),	// material drawn under an affine map
+	Clip(ClipNode),				// material clipped to its box or a path
+	// Where a located element starts or ends (`eval::realise::Tag`): zero-size, it records the element's
+	// page and position in the ledger when placed, as Typst's frame tags do.
+	Tag(Tag),
+	// A zero-size marker of where out-of-flow material (a float) stands in the flow; a frame whose `parent`
+	// names it is ordered here for introspection.
+	Mark(u64),
 }
 
 impl Node {
@@ -562,8 +663,14 @@ impl Node {
 			// A repeated-header marker is a zero-size control node: it arms or disarms the driver's header
 			// repeat and occupies no vertical space where it stands.
 			Node::RepeatHead(_)	=> Sp::ZERO,
+			Node::RepeatFoot(_)	=> Sp::ZERO,
 			// A column-layout marker occupies nothing; the driver acts on it between pages.
 			Node::PageColumns(_)	=> Sp::ZERO,
+			Node::Frame(f)		=> f.dims.vextent(),
+			Node::Transform(t)	=> t.dims.vextent(),
+			Node::Clip(c)		=> c.dims.vextent(),
+			Node::Tag(_)		=> Sp::ZERO,
+			Node::Mark(_)		=> Sp::ZERO,
 		}
 	}
 

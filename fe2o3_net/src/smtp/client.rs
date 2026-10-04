@@ -34,6 +34,7 @@ use oxedyne_fe2o3_core::prelude::*;
 use std::{
     net::{
         IpAddr,
+        Ipv4Addr,
         SocketAddr,
     },
     sync::Arc,
@@ -126,6 +127,59 @@ impl SubmissionConfig {
 }
 
 
+/// The addresses to try for a domain, from the A records of its mail exchanges, looked up with
+/// `lookup`.
+///
+/// Failing to find one is permanent only where the DNS said so for good: the domain publishes a null
+/// MX (RFC 7505), or every exchange is a name that does not exist (NXDOMAIN). An exchange that exists
+/// but has no A record may be an IPv6-only host, which this client cannot reach and a later one might,
+/// and a lookup that failed outright says nothing about the host, so both leave the failure transient.
+/// Mail to a dead domain used to be retried for ever because none of this was told apart.
+fn route<L>(mxs: &[dns_resolver::MxRecord], lookup: L) -> Outcome<Vec<DeliveryTarget>>
+    where
+        L: Fn(&str) -> Outcome<Vec<Ipv4Addr>>,
+{
+    if mxs.iter().all(|mx| mx.exchange.is_empty()) {
+        return Err(err!(
+            "The recipient domain publishes a null MX and accepts no mail (RFC 7505).";
+            IO, Network, Missing, Permanent));
+    }
+    let mut targets: Vec<DeliveryTarget> = Vec::new();
+    // Whether some exchange is not shown to be gone.
+    let mut open = false;
+    for mx in mxs {
+        if mx.exchange.is_empty() {
+            continue;
+        }
+        match lookup(&mx.exchange) {
+            Ok(addrs) if addrs.is_empty()   => open = true,
+            Ok(addrs)                       => {
+                for ip in addrs {
+                    targets.push(DeliveryTarget {
+                        host:       mx.exchange.clone(),
+                        addr:       IpAddr::V4(ip),
+                        port:       25,
+                        preference: mx.preference,
+                    });
+                }
+            }
+            Err(e) if is_permanent(&e)      => (),
+            Err(_)                          => open = true,
+        }
+    }
+    if !targets.is_empty() {
+        Ok(targets)
+    } else if open {
+        Err(err!(
+            "No reachable MX hosts for any of the configured recipients.";
+            IO, Network, Missing))
+    } else {
+        Err(err!(
+            "No mail exchange of the recipient domain exists (NXDOMAIN).";
+            IO, Network, Missing, Permanent))
+    }
+}
+
 /// One outbound delivery target after MX resolution, sorted into preference order by
 /// [`OutboundClient::deliver`].
 #[derive(Clone, Debug)]
@@ -209,26 +263,12 @@ impl OutboundClient {
         );
         let mxs = res!(mxs);
 
-        let mut targets: Vec<DeliveryTarget> = Vec::new();
-        for mx in &mxs {
-            let exchange = mx.exchange.clone();
-            let pref = mx.preference;
-            let addrs_outcome = tokio::task::spawn_blocking(move || {
-                dns_resolver::lookup_a(&exchange)
-            }).await;
-            let addrs = match addrs_outcome {
-                Ok(Ok(v)) => v,
-                _ => continue,
-            };
-            for ip in addrs {
-                targets.push(DeliveryTarget {
-                    host:       mx.exchange.clone(),
-                    addr:       IpAddr::V4(ip),
-                    port:       25,
-                    preference: pref,
-                });
-            }
-        }
+        let targets = res!(
+            tokio::task::spawn_blocking(move || route(&mxs, dns_resolver::lookup_a)).await
+                .map_err(|e| err!("Exchange lookup task join failure: {}.", e;
+                    IO, Network, Init))
+        );
+        let targets = res!(targets);
         self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT).await
     }
 
@@ -1502,6 +1542,96 @@ mod tests {
         req!(true, c.deliver("a@example.com",
             &[fmt!("b@one.example"), fmt!("c@two.example")], b"x").await.is_err(),
             "delivery accepted two domains in one transaction");
+        Ok(())
+    }
+
+    // ── A domain with nowhere to deliver to ──
+
+    fn mx(exchange: &str) -> dns_resolver::MxRecord {
+        dns_resolver::MxRecord { preference: 10, exchange: exchange.to_string() }
+    }
+
+    /// What the resolver says of a name that does not exist.
+    fn nxdomain() -> Outcome<Vec<Ipv4Addr>> {
+        Err(err!("The name does not exist (DNS RCODE 3, NXDOMAIN)."; IO, Network, Missing, Permanent))
+    }
+
+    /// RFC 7505. The two stale messages on karri were stuck behind this: the domain says it takes
+    /// no mail, and the sender read that as a reason to ask again in thirty seconds, for ever. No
+    /// exchange is looked up, because there is none.
+    #[test]
+    fn test_a_null_mx_is_a_permanent_failure_00() -> Outcome<()> {
+        match route(&[mx("")], |_| Err(err!("a null MX was looked up."; IO, Network))) {
+            Ok(t) => Err(err!("A null MX gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(true, is_permanent(&e), "a null MX was read as transient");
+                Ok(())
+            }
+        }
+    }
+
+    /// NXDOMAIN for every exchange: the name is not there, so the domain has nowhere to deliver.
+    #[test]
+    fn test_exchanges_that_do_not_exist_are_permanent_00() -> Outcome<()> {
+        match route(&[mx("mx1.gone.example"), mx("mx2.gone.example")], |_| nxdomain()) {
+            Ok(t) => Err(err!("Absent exchanges gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(true, is_permanent(&e), "exchanges that do not exist were read as transient");
+                Ok(())
+            }
+        }
+    }
+
+    /// NOERROR with no A record, which is also what an IPv6-only exchange looks like. The name is
+    /// there, so nothing says it never will be deliverable: the message waits, it is not bounced.
+    #[test]
+    fn test_an_exchange_with_no_a_record_is_transient_00() -> Outcome<()> {
+        match route(&[mx("mx1.v6only.example")], |_| Ok(Vec::new())) {
+            Ok(t) => Err(err!("An exchange with no A record gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "an exchange with no A record was read as permanent");
+                Ok(())
+            }
+        }
+    }
+
+    /// A timeout or a SERVFAIL says nothing about the domain, so the message waits.
+    #[test]
+    fn test_a_failed_lookup_is_not_permanent_00() -> Outcome<()> {
+        match route(&[mx("mx1.slow.example")], |_| Err(err!("Timed out."; IO, Network, Timeout))) {
+            Ok(t) => Err(err!("A failed lookup gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "a failed DNS lookup was read as permanent");
+                Ok(())
+            }
+        }
+    }
+
+    /// One exchange gone and another that exists but has no A: the second is not shown to be gone.
+    #[test]
+    fn test_one_absent_exchange_does_not_condemn_the_others_00() -> Outcome<()> {
+        let looked = |host: &str| if host.starts_with("gone") { nxdomain() } else { Ok(Vec::new()) };
+        match route(&[mx("gone.example"), mx("mx2.v6only.example")], looked) {
+            Ok(t) => Err(err!("Gave targets: {:?}.", t; Test, Mismatch)),
+            Err(e) => {
+                req!(false, is_permanent(&e), "an exchange with no A record was condemned with its sibling");
+                Ok(())
+            }
+        }
+    }
+
+    /// An exchange that resolves is a target even when its sibling does not exist.
+    #[test]
+    fn test_a_resolving_exchange_is_a_target_00() -> Outcome<()> {
+        let looked = |host: &str| if host.starts_with("gone") {
+            nxdomain()
+        } else {
+            Ok(vec![Ipv4Addr::new(192, 0, 2, 25)])
+        };
+        let t = res!(route(&[mx("gone.example"), mx("mx2.up.example")], looked));
+        req!(1, t.len(), "the resolving exchange was not the one target");
+        req!(true, t[0].addr == IpAddr::V4(Ipv4Addr::new(192, 0, 2, 25)), "wrong address");
+        req!(25, t[0].port, "mail goes to port 25");
         Ok(())
     }
 

@@ -374,6 +374,15 @@ impl Regex {
         Matches { it: Walk::new(self, hay) }
     }
 
+    /// The leftmost match from the start, then the leftmost match from one character after that
+    /// match's start, and so on: every match a search from some position finds first, overlaps
+    /// included. `ends_with` for a pattern is whether one of these ends at the end of `hay`.
+    pub fn overlapping_iter<'r, 'h>(&'r self, hay: &'h str) -> Matches<'r, 'h> {
+        let mut it = Walk::new(self, hay);
+        it.overlap = true;
+        Matches { it }
+    }
+
     pub fn captures_iter<'r, 'h>(&'r self, hay: &'h str) -> CaptureMatches<'r, 'h> {
         CaptureMatches { it: Walk::new(self, hay) }
     }
@@ -751,12 +760,13 @@ struct Walk<'r, 'h> {
     at:     usize,          // character index the next search starts from
     last:   Option<usize>,  // where the previous match ended
     done:   bool,
+    overlap: bool,          // restart one character after each match's start, not at its end
 }
 
 impl<'r, 'h> Walk<'r, 'h> {
 
     fn new(re: &'r Regex, text: &'h str) -> Self {
-        Self { re, hay: Hay::new(text), vis: None, at: 0, last: None, done: false }
+        Self { re, hay: Hay::new(text), vis: None, at: 0, last: None, done: false, overlap: false }
     }
 
     /// The next match, by the rule of the `regex` crate: an empty match where the previous one
@@ -780,7 +790,7 @@ impl<'r, 'h> Walk<'r, 'h> {
             Err(e)  => { self.done = true; return Some(Err(e)); }
         };
         if let Some((s, e)) = found.as_ref().and_then(|x| x.first().copied().flatten()) {
-            if s == e && Some(e) == self.last {
+            if !self.overlap && s == e && Some(e) == self.last {
                 if self.at + 1 > self.hay.chars.len() {
                     self.done = true;
                     return None;
@@ -796,6 +806,10 @@ impl<'r, 'h> Walk<'r, 'h> {
             None    => { self.done = true; return None; }
         };
         match slots.first().copied().flatten() {
+            Some((s, _)) if self.overlap => {
+                self.at = s + 1;
+                Some(Ok(slots))
+            }
             Some((_, e)) => {
                 self.at = e;
                 self.last = Some(e);

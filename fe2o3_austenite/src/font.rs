@@ -67,13 +67,29 @@ impl Metrics for FontMetrics {
 enum Source {
 	Set { fonts: Arc<FontSet>, role: Role },
 	Solo { font: Arc<Font> },
+	// Several fonts, each of one face, a glyph's `face` indexing the list: a run the evaluator shaped
+	// with Typst's per-family fallback, where each stretch may come from a different family.
+	Faces { head: Arc<Font>, fonts: Arc<Vec<Arc<Font>>> },
 }
 
 impl Source {
+	/// The font heading the source: the chain a set's role or a solo font is, or the first of a list.
 	fn font(&self) -> &Font {
 		match self {
 			Source::Set { fonts, role }	=> fonts.get(*role),
 			Source::Solo { font }		=> font,
+			Source::Faces { head, .. }	=> head,
+		}
+	}
+
+	/// The font that drew `glyph` and the face within it.
+	fn glyph_font(&self, glyph: &Glyph) -> (&Font, u8) {
+		match self {
+			Source::Faces { fonts, .. }	=> match fonts.get(glyph.face as usize) {
+				Some(f)	=> (f, 0),
+				None	=> (self.font(), glyph.face),
+			},
+			_						=> (self.font(), glyph.face),
 		}
 	}
 }
@@ -145,6 +161,57 @@ impl ShapedText {
 		Self::from_source(Source::Solo { font }, dir, size.to_pt() as f32, text)
 	}
 
+	/// A run the caller has already shaped and positioned: glyphs of the one `font` (each glyph's `face`
+	/// indexing its chain), drawn at `size` points in `colour`, with the dimensions the caller measured.
+	/// The evaluator's inline layout builds its line runs this way, having justified them itself.
+	pub fn from_glyphs(
+		font:	Arc<Font>,
+		size:	f32,
+		glyphs:	Vec<Glyph>,
+		text:	String,
+		colour:	Rgba,
+		dims:	Dims,
+	)
+		-> Self
+	{
+		let advance = glyphs.iter().map(|g| g.adv).sum();
+		Self {
+			src:	Source::Solo { font },
+			size,
+			run:	Run { glyphs, advance, size },
+			dims,
+			text,
+			colour,
+		}
+	}
+
+	/// As [`ShapedText::from_glyphs`], the glyphs drawn from several fonts, each glyph's `face` indexing
+	/// `fonts` (each a chain of one face).
+	pub fn from_faces(
+		fonts:	Vec<Arc<Font>>,
+		size:	f32,
+		glyphs:	Vec<Glyph>,
+		text:	String,
+		colour:	Rgba,
+		dims:	Dims,
+	)
+		-> Outcome<Self>
+	{
+		let head = match fonts.first() {
+			Some(f)	=> f.clone(),
+			None	=> return Err(err!("A run drawn from several fonts was given none."; Input, Missing)),
+		};
+		let advance = glyphs.iter().map(|g| g.adv).sum();
+		Ok(Self {
+			src:	Source::Faces { head, fonts: Arc::new(fonts) },
+			size,
+			run:	Run { glyphs, advance, size },
+			dims,
+			text,
+			colour,
+		})
+	}
+
 	fn from_source(src: Source, dir: Dir, size: f32, text: &str) -> Outcome<Self> {
 		Self::from_source_with(src, dir, size, text, &[])
 	}
@@ -172,6 +239,9 @@ impl ShapedText {
 	pub fn colour(&self) -> Rgba { self.colour }
 
 	pub fn dims(&self) -> Dims { self.dims }
+
+	/// The font the run draws from, for telling whether two runs hold one face or a copy each.
+	pub fn font(&self) -> &Font { self.src.font() }
 	pub fn run(&self) -> &Run { &self.run }
 
 	/// The shaped source string, whose byte offsets a glyph's [`cluster`](Glyph::cluster) indexes.
@@ -208,20 +278,23 @@ impl ShapedText {
 
 	/// One glyph's outline, in the font frame (origin at the glyph, y up); empty for a space.
 	pub fn outline(&self, glyph: &Glyph) -> Outcome<Path> {
-		self.src.font().outline(glyph.face, glyph.id, self.size)
+		let (font, face) = self.src.glyph_font(glyph);
+		font.outline(face, glyph.id, self.size)
 	}
 
 	/// The embeddable program of the face that shaped `glyph`, or `None` when that face must be drawn as
 	/// outlines instead.
 	pub fn program(&self, glyph: &Glyph) -> Outcome<Option<Arc<oxedyne_fe2o3_graphics::pdf_font::FontProgram>>> {
-		Ok(res!(self.src.font().face(glyph.face)).program().cloned())
+		let (font, face) = self.src.glyph_font(glyph);
+		Ok(res!(font.face(face)).program().cloned())
 	}
 
 	/// One glyph's outline at a canonical thousand units per em, in the font frame (origin at the glyph, y
 	/// up); empty for a space. The PDF writer stores this once and shows it at any point size, so the same
 	/// glyph in body and in a heading shares a single stored outline.
 	pub fn outline_canonical(&self, glyph: &Glyph) -> Outcome<Path> {
-		self.src.font().outline(glyph.face, glyph.id, 1000.0)
+		let (font, face) = self.src.glyph_font(glyph);
+		font.outline(face, glyph.id, 1000.0)
 	}
 
 	/// The source text each glyph stands for, one entry per glyph in [`run`](Self::run)'s order: from

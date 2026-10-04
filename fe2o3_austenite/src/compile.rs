@@ -29,6 +29,18 @@ use crate::driver::{
 	CompileOutput,
 	Config,
 };
+use crate::eval::{
+	self,
+	package,
+	Engine,
+	World,
+};
+use crate::eval::fixpoint::{
+	self,
+	Laid,
+	PageSink,
+};
+use crate::flow::text::FontStore;
 use crate::font::FontMetrics;
 use crate::fonts;
 use crate::fonts::FaceResolver;
@@ -350,83 +362,123 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE EVALUATOR PATH                                                         │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What compiling through the evaluator leaves: the engine, which holds the diagnostics and the sources,
+/// and how the fixpoint ended. The pages went to the sink.
+#[derive(Debug)]
+pub struct Evaluated {
+	pub engine:	Engine,
+	pub laid:	Outcome<Laid>,
+}
+
+/// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
+/// each pass's pages to `sink`. `root` is what a leading `/` resolves against, and `fonts` the host's
+/// font store. Only a main file that cannot be read is an `Err`; a failure after that is in
+/// [`Evaluated::laid`] beside the diagnostics it recorded.
+///
+/// Both paths are made canonical first, as `typst compile` does, so that a source named relative to the
+/// working directory and a root named absolutely (or the reverse) agree on whether the source lies within
+/// the root. Left as given, every file the source reached for would be refused as outside the root.
+pub fn assemble_eval<S: PageSink>(
+	main_path:	&Path,
+	root:		&Path,
+	fonts:		FontStore,
+	sink:		&mut S,
+)
+	-> Outcome<Evaluated>
+{
+	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+	let main_path	= canon(main_path);
+	let mut world = World::new(canon(root));
+	let id = res!(world.load(&main_path));
+	let mut engine = Engine::new(world);
+	engine.fonts = fonts;
+	let laid = match eval::eval_source(&mut engine, id) {
+		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
+		Err(e)		=> Err(e),
+	};
+	Ok(Evaluated { engine, laid })
+}
+
+/// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory
+/// named by `TYPST_PACKAGE_CACHE_PATH`, else `typst/packages` beneath `XDG_CACHE_HOME` or `~/.cache`. A host
+/// supplies packages and Austenite fetches none, so a package in no supplied directory is an import error.
+pub fn supply_typst_package_cache() {
+	let cache = match std::env::var("TYPST_PACKAGE_CACHE_PATH") {
+		Ok(p) if !p.is_empty()	=> PathBuf::from(p),
+		_						=> match std::env::var("XDG_CACHE_HOME") {
+			Ok(p) if !p.is_empty()	=> PathBuf::from(p).join("typst").join("packages"),
+			_						=> PathBuf::from(std::env::var("HOME").unwrap_or_default())
+				.join(".cache").join("typst").join("packages"),
+		},
+	};
+	if cache.is_dir() {
+		let _ = package::add_dir(cache);
+	}
+}
+
+impl Evaluated {
+	/// The compile's report: its diagnostics at the positions a caller shows, the terse line of the
+	/// constructs passed over (every diagnostic of kind `unsupported`, by its message and how often), and
+	/// the page count. Strict mode reads it as the curated path's report is read, so one function,
+	/// [`DiagnosticKind::refuses_strict`], decides on both paths.
+	pub fn report(&self) -> Report {
+		let pages = match &self.laid {
+			Ok(l)	=> l.pages as usize,
+			Err(_)	=> 0,
+		};
+		let mut diagnostics = Vec::with_capacity(self.engine.diags.len());
+		let mut skipped: Vec<(String, usize)> = Vec::new();
+		for d in &self.engine.diags {
+			let src = self.engine.world.sources.iter().find(|s| s.id == d.span.file && !d.span.is_detached());
+			let (file, line, col) = match src {
+				Some(s)	=> {
+					let (l, c) = s.line_col(d.span.start);
+					(s.path.display().to_string(), l, c)
+				},
+				None	=> (String::new(), 0, 0),
+			};
+			if d.kind == DiagnosticKind::Unsupported && !d.is_error() {
+				let head = d.head().to_string();
+				match skipped.iter_mut().find(|(h, _)| *h == head) {
+					Some((_, n))	=> *n += 1,
+					None			=> skipped.push((head, 1)),
+				}
+			}
+			diagnostics.push(Diagnostic {
+				file,
+				line,
+				col,
+				message:	d.message.clone(),
+				severity:	if d.is_error() { Severity::Error } else { Severity::Warning },
+				kind:		d.kind,
+				hint:		d.hints.first().cloned(),
+			});
+		}
+		let line = if skipped.is_empty() {
+			None
+		} else {
+			let parts: Vec<String> = skipped.iter().map(|(h, n)| fmt!("{} \u{d7}{}", h, n)).collect();
+			Some(parts.join(", "))
+		};
+		Report {
+			pages,
+			diagnostics,
+			skipped:	line.as_ref().map(|l| fmt!("skipped: {}", l)),
+			summary:	line,
+			empty:		false,
+		}
+	}
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ DIAGNOSTICS AND STRICT MODE                                                │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// Why a diagnostic was raised, fixed where its refusal or error is raised and never read back from the
-/// message's wording, which drifts. [`DiagnosticKind::as_str`] is the word a caller switches on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiagnosticKind {
-	MissingFile,		// a source, chapter, image or other file could not be found or read
-	Encoding,			// a source or other text file that is there but is not valid UTF-8 text
-	MissingFont,		// a named family that no supplied or embedded font declares
-	Syntax,				// source that does not parse
-	Type,				// a value of the wrong type
-	UnknownVariable,	// a name with no binding in scope
-	Package,			// a package import the host has not supplied
-	Limit,				// a limit of the engine reached: layout that will not settle, a depth or a loop bound
-	Unsupported,		// a construct passed over or refused, or one set with a stand-in for what it asked for
-	Internal,			// no pages, no content, or an error raised with no more specific tag
-}
-
-impl DiagnosticKind {
-	/// The word the kind is carried as. A caller switches on it, so it never changes.
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			Self::MissingFile		=> "missing_file",
-			Self::Encoding			=> "encoding",
-			Self::MissingFont		=> "missing_font",
-			Self::Syntax			=> "syntax",
-			Self::Type				=> "type",
-			Self::UnknownVariable	=> "unknown_variable",
-			Self::Package			=> "package",
-			Self::Limit				=> "limit",
-			Self::Unsupported		=> "unsupported",
-			Self::Internal			=> "internal",
-		}
-	}
-
-	/// Does a warning of this kind refuse a strict compile? It does where the document was not set as
-	/// written: a construct passed over or set with a stand-in, or a file, its text, a package or a font
-	/// family missing.
-	pub fn refuses_strict(&self) -> bool {
-		matches!(self, Self::Unsupported | Self::MissingFile | Self::Encoding | Self::Package | Self::MissingFont)
-	}
-
-	fn from_refusal_class(class: lang::RefusalClass) -> Self {
-		match class {
-			lang::RefusalClass::FixedPoint		=> Self::Unsupported,
-			lang::RefusalClass::Introspective	=> Self::Unsupported,
-			lang::RefusalClass::Unsupported		=> Self::Unsupported,
-			lang::RefusalClass::MissingFile		=> Self::MissingFile,
-			lang::RefusalClass::Unusable		=> Self::Unsupported,
-			lang::RefusalClass::Encoding		=> Self::Encoding,
-		}
-	}
-
-	/// A hard error's kind, from the tags it was raised with anywhere in its chain. A file that is there
-	/// but not UTF-8 text is told from one that cannot be read at all, since the remedy differs.
-	fn from_error_tags(e: &Error<ErrTag>) -> Self {
-		let tags = e.tags();
-		if tags.contains(&ErrTag::Font) {
-			Self::MissingFont
-		} else if tags.contains(&ErrTag::UTF8) {
-			Self::Encoding
-		} else if tags.contains(&ErrTag::File) {
-			Self::MissingFile
-		} else if tags.contains(&ErrTag::LimitReached) {
-			Self::Limit
-		} else {
-			Self::Internal
-		}
-	}
-}
-
-impl fmt::Display for DiagnosticKind {
-	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-		write!(f, "{}", self.as_str())
-	}
-}
+// One vocabulary: the evaluator's diagnostics and the curated path's carry the same kinds.
+pub use crate::diag::DiagnosticKind;
 
 /// How a diagnostic bears on the compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

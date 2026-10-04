@@ -20,6 +20,19 @@
 //! delimiter taller than the largest pre-drawn variant is not yet assembled from repeating pieces; big
 //! operators, matrices and a maths parser are later work. See the crate's phase notes.
 
+// The evaluator's maths engine, a port of Typst 0.15's maths IR and layout; the `Atom` layout below
+// serves the curated reader until it is retired.
+pub mod class;
+pub mod font;
+pub mod fragment;
+pub mod frame;
+pub mod item;
+pub mod layout;
+pub mod process;
+pub mod props;
+pub mod resolve;
+pub mod style;
+
 use crate::theme::Theme;
 use crate::font::ShapedText;
 use crate::ir::{

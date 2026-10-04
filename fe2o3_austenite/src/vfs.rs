@@ -6,12 +6,21 @@
 //! map before the same assembler runs. Every library file read routes through this module, so the
 //! assembler is written once and reads either source without a `#cfg` at each call.
 //!
+//! A path under a package's root, `@preview/cetz:0.3.4/src/lib.typ`, is served by the package layer
+//! ([`crate::eval::package`]) from what the host supplied, in memory or on disc, and never from the source
+//! map or the project's filesystem, so a package's files and a project's cannot shadow one another.
+//!
 //! The contract that keeps a native build byte-for-byte what it was: with no map installed -- the native
 //! default -- a read is exactly the `std::fs` call it replaced, and every predicate (`exists`, `is_file`,
 //! `canonicalize`) falls through to the real filesystem unchanged. A map is installed only by the wasm
 //! surface ([`crate::wasm`]), and only there does a read resolve from injected bytes. The global mirrors
 //! the crate's other assembly-time singletons -- the image base directory and the term dictionary --
 //! since the reader sets one file at a time and threads no source map of its own.
+
+use crate::eval::package::{
+	self,
+	PackageSpec,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -62,6 +71,9 @@ pub fn is_installed() -> bool {
 /// Reads a file's bytes: from the installed source map where one holds the path, else from the real
 /// filesystem. With no map installed this is exactly [`std::fs::read`], so a native compile is unchanged.
 pub fn read(path: &Path) -> io::Result<Vec<u8>> {
+	if let Some(r) = package::read(path) {
+		return r;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
 			Some(map) => match map.get(&normalise(path)) {
@@ -94,6 +106,9 @@ pub fn is_not_utf8(e: &io::Error) -> bool {
 /// Writes a file's bytes: into the installed source map where one is present (so a later read in the same
 /// compile sees it), else to the real filesystem. With no map installed this is exactly [`std::fs::write`].
 pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
+	if PackageSpec::of_path(path).is_some() {
+		return Err(io::Error::new(io::ErrorKind::PermissionDenied, fmt!("{:?} is in a package, which is read-only.", path)));
+	}
 	if is_installed() {
 		let mut guard = match SOURCES.write() {
 			Ok(g)	=> g,
@@ -111,6 +126,9 @@ pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
 /// Does a path resolve to a file? A map lookup where one is installed, falling through to the real
 /// filesystem; exactly [`Path::exists`] on the native default path.
 pub fn exists(path: &Path) -> bool {
+	if let (Some(file), Some(dir)) = (package::is_file(path), package::is_dir(path)) {
+		return file || dir;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
 			Some(map)	=> map.contains_key(&normalise(path)) || native_exists(path),
@@ -123,6 +141,9 @@ pub fn exists(path: &Path) -> bool {
 /// Is a path a readable file? For the injected map a key is a file, so this matches [`exists`] there;
 /// exactly [`Path::is_file`] on the native default path.
 pub fn is_file(path: &Path) -> bool {
+	if let Some(file) = package::is_file(path) {
+		return file;
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
 			Some(map)	=> map.contains_key(&normalise(path)) || native_is_file(path),
@@ -132,10 +153,31 @@ pub fn is_file(path: &Path) -> bool {
 	}
 }
 
+/// Is a path a directory? A package path asks the package it lies in; under an installed map a directory is
+/// any proper prefix of a key, or a real directory; exactly [`Path::is_dir`] on the native default path.
+pub fn is_dir(path: &Path) -> bool {
+	if let Some(dir) = package::is_dir(path) {
+		return dir;
+	}
+	match SOURCES.read() {
+		Ok(guard) => match guard.as_ref() {
+			Some(map) => {
+				let root = normalise(path);
+				map.keys().any(|k| k.starts_with(&root) && k != &root) || native_is_dir(path)
+			},
+			None => native_is_dir(path),
+		},
+		Err(_) => native_is_dir(path),
+	}
+}
+
 /// Every file beneath `dir`, at any depth, in a stable (sorted) order: the injected map's keys under that
 /// directory where a map is installed, together with whatever the real filesystem holds there. A directory
 /// that does not exist lists nothing, so a caller scanning an optional directory needs no existence check.
 pub fn list_files(dir: &Path) -> Vec<PathBuf> {
+	if let Some(files) = package::list(dir) {
+		return files;
+	}
 	let root = normalise(dir);
 	let mut out: Vec<PathBuf> = Vec::new();
 	if let Ok(guard) = SOURCES.read() {
@@ -157,6 +199,9 @@ pub fn list_files(dir: &Path) -> Vec<PathBuf> {
 /// so the path is normalised lexically (`.` and `..` folded); exactly [`std::fs::canonicalize`] on the
 /// native default path.
 pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+	if PackageSpec::of_path(path).is_some() {
+		return Ok(normalise(path));
+	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
 			Some(_)	=> Ok(normalise(path)),
@@ -229,6 +274,16 @@ fn native_is_file(path: &Path) -> bool {
 
 #[cfg(target_arch = "wasm32")]
 fn native_is_file(_path: &Path) -> bool {
+	false
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_is_dir(path: &Path) -> bool {
+	path.is_dir()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn native_is_dir(_path: &Path) -> bool {
 	false
 }
 

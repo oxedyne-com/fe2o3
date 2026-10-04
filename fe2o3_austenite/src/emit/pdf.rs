@@ -46,7 +46,7 @@ use oxedyne_fe2o3_graphics::{
 const ENGINE_NAME: &str = "Austenite";	// `/Creator` and `/Producer`: a name, never a version or a build
 
 /// The Info dictionary a document's metadata lowers to, `/Creator` and `/Producer` always naming the engine.
-fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
+pub fn pdf_info(doc_info: &DocInfo) -> PdfInfo {
 	PdfInfo {
 		title:		doc_info.title.clone(),
 		author:		doc_info.author.clone(),
@@ -133,6 +133,23 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 			res!(draw_graphic(&mut out, placed.x, placed.y, g));
 			continue;
 		}
+		// A group is drawn under its page matrix and clip, as a saved graphics state.
+		if let PlacedKind::Group(g) = &placed.kind {
+			let m = g.page_transform(placed.x, placed.y);
+			let clip = match &g.clip {
+				Some(c) => {
+					let t = Transform::translate(placed.x.to_pt() as f32, placed.y.to_pt() as f32);
+					Some(res!(c.transform(&t)))
+				},
+				None => None,
+			};
+			out.push([m.a, m.b, m.c, m.d, m.e, m.f], clip);
+			continue;
+		}
+		if let PlacedKind::GroupEnd = &placed.kind {
+			out.pop();
+			continue;
+		}
 
 		let x0 = placed.x.to_pt() as f32;
 		let y0 = placed.y.to_pt() as f32;
@@ -149,6 +166,7 @@ pub fn render_page(page: &Page) -> Outcome<PdfPage> {
 			PlacedKind::Reserved	=> out.stroke(path, grey, 0.5),
 			PlacedKind::Text(_)		=> continue,	// drawn above
 			PlacedKind::Graphic(_)	=> continue,	// drawn above
+			PlacedKind::Group(_) | PlacedKind::GroupEnd	=> continue,	// drawn above
 		}
 	}
 

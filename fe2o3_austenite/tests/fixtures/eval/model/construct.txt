@@ -1,0 +1,147 @@
+;; U5: each line is Typst code evaluated by `typst eval` and by Austenite in code mode; the value (as
+;; JSON) or the first error message must agree. Lines starting with ;; are comments. `%%[U3]` marks a case
+;; that needs U3's library; `%%[CSL]` one that needs a CSL processor, which Austenite does not have.
+heading[A]
+heading(level: 2)[A]
+heading(depth: 3, offset: 1, numbering: "1.a", outlined: false, bookmarked: true, hanging-indent: 1em)[B]
+heading(supplement: [Chapter])[C]
+heading(supplement: none)[C]
+%%[U3] heading(sym.arrow)
+heading(none)
+heading("text")
+heading(level: "a")[x]
+heading(level: 0)[x]
+heading(numbering: 5)[x]
+heading(supplement: 5)[x]
+heading()
+heading(depth: 0)[x]
+heading(offset: -1)[x]
+heading(hanging-indent: 5)[x]
+heading(5)
+heading(1.5)
+heading(outlined: 1)[x]
+heading(bookmarked: 1)[x]
+heading[a][b]
+title[My Title]
+title()
+title(5)
+par[text]
+par(leading: 1em, spacing: 2em, justify: true, linebreaks: "simple", hanging-indent: 3pt)[p]
+par(first-line-indent: 1em)[p]
+par(first-line-indent: (amount: 1em, all: true))[p]
+par(linebreaks: "x")[a]
+par(first-line-indent: (a: 1pt))[a]
+par(justify: 1)[a]
+par.line()
+parbreak()
+strong[a]
+strong(delta: 100)[a]
+strong(delta: "a")[x]
+strong(5)
+emph[a]
+emph()
+raw("code")
+raw("fn main() {}", lang: "rust", block: true)
+%%[U3] raw("x", align: center, tab-size: 4)
+raw(5)
+%%[U3] raw("x", align: top)
+raw("x", tab-size: -1)
+raw.line(1, 1, "a", [a])
+list[a][b]
+list([a], "b")
+list(tight: false, indent: 1em, body-indent: 1em, spacing: 2pt, marker: [-])[a]
+list(marker: ([a], [b]))[x]
+%%[U3] list(marker-align: left)[x]
+list(marker: ())
+list(tight: 1)
+list(5)
+list(indent: 1)
+list(marker-align: 5)
+list(marker: 5)
+list(spacing: 5)
+list.item[a]
+enum[a][b]
+enum(numbering: "a)", start: 3, full: true, reversed: true)[x]
+enum(enum.item(5)[x], [y])
+enum.item(2)[x]
+enum(start: -1)
+enum.item(-1)[x]
+enum(numbering: 3)
+enum.item("x")[a]
+enum(full: 1)
+terms(terms.item[a][b])
+terms(terms.item[a][b], separator: [: ], hanging-indent: 1em)
+terms.item[a]
+terms([a])
+terms.item(1,2)
+terms(separator: 5)
+link("https://typst.app")
+link("mailto:a@b.c")
+link("tel:123")
+link("https://x.org")[X]
+link(<lbl>)[L]
+link((page: 1, x: 0pt, y: 0pt))[P]
+link(5)
+link("")
+link(<a>)
+link("x", 5)
+ref(<a>)
+ref(<a>, supplement: [Fig.], form: "page")
+ref(5)
+ref(<a>, form: "x")
+ref(<a>, supplement: 5)
+cite(<a>)
+cite(<a>, supplement: [p. 5], form: "prose")
+cite(<a>, form: none)
+cite("x")
+cite(<a>, form: "x")
+cite(<a>, style: "foo")
+%%[CSL] cite(<a>, style: "apa")
+cite(<a>, style: "institute-of-electrical-and-electronics-engineers")
+bibliography(5, style: "chicago-author-date")
+footnote[note]
+footnote(<a>)
+footnote("s")
+footnote(numbering: "*")[x]
+footnote(5pt)
+footnote(numbering: 5)[x]
+footnote.entry[x]
+footnote.entry(footnote[x], gap: 1em, clearance: 2em, indent: 0pt)
+figure[x]
+%%[U3] figure(rect(), caption: [Cap], placement: top, scope: "parent", gap: 1em, kind: table, supplement: [Tab], numbering: "I", outlined: false, alt: "Alt")
+%%[U3] figure([x], caption: figure.caption(position: top, separator: [ -- ])[C])
+figure([x], kind: "diagram", supplement: [Diagram])
+figure(5)
+figure(kind: 5)[x]
+%%[U3] figure(placement: left)[x]
+figure(scope: "x")[x]
+figure(caption: 5)[x]
+%%[U3] figure.caption(position: left)[x]
+figure([a], supplement: 5)
+figure([x], gap: 1)
+figure(alt: 5)[x]
+figure(numbering: 5)[x]
+figure(outlined: 1)[x]
+figure.caption(separator: 5)[x]
+figure.caption(5)
+outline()
+outline(title: [TOC], target: figure, depth: 2, indent: 2em)
+outline(target: <x>)
+outline(indent: n => n * 1em)
+outline(target: 5)
+outline(depth: 0)
+outline(indent: "x")
+outline(title: 5)
+outline.entry(1, [x])
+outline.entry(0, [x])
+outline.entry(1, [x], fill: none)
+outline.entry(1,[x], fill: 5)
+quote[Q]
+quote(block: true, quotes: false, attribution: [Me])[Q]
+quote(attribution: <src>)[Q]
+quote(attribution: 5)[x]
+quote(quotes: 1)[x]
+quote(block: 1)[x]
+quote(5)
+bibliography(5)
+document()

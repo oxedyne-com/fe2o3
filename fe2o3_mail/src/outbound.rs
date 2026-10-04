@@ -14,9 +14,17 @@
 //! <RFC 5322 message bytes>
 //! ```
 //!
-//! Filenames are `<unix>.<usec>.<pid>.<rand>.eml`. There is no retry
-//! schedule beyond "the worker tries again on the next sweep" -- that
-//! is enough for an MVP whose volume is a handful of messages a day.
+//! Filenames are `<unix>.<usec>.<pid>.<rand>.eml`, so a message's age is
+//! readable from its name and survives a restart.
+//!
+//! A sweep ([`OutboundSpool::sweep`]) settles every message one of three
+//! ways: delivered and removed; failed for good and set aside in `failed/`
+//! (a failure tagged [`ErrTag::Permanent`], such as a 5xx reply, or a
+//! message older than [`GIVE_UP_SECS`]); or failed for now and tried again
+//! after a growing wait. Until 2026-10-02 every failure was "tried again on
+//! the next sweep", thirty seconds later and for ever: two stale messages, a
+//! 550 and a null MX, were retried about 63,000 times each over twenty-five
+//! days before anyone looked.
 
 use oxedyne_fe2o3_core::{
     prelude::*,
@@ -24,7 +32,9 @@ use oxedyne_fe2o3_core::{
 };
 
 use std::{
+    collections::{HashMap, HashSet},
     fs::{self, File},
+    future::Future,
     io::{Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -43,6 +53,36 @@ pub struct SpooledMessage {
     pub rcpt_to:    Vec<String>,
     /// Raw RFC 5322 message bytes.
     pub body:       Vec<u8>,
+    pub queued:     u64,    // when it was queued, in unix seconds
+}
+
+// RFC 5321 §4.5.4.1 asks a sender to persist for four or five days before giving up.
+pub const GIVE_UP_SECS: u64 = 5 * 86_400;
+const RETRY_FIRST_SECS: u64 = 60;
+const RETRY_MAX_SECS:   u64 = 4 * 3_600;
+
+/// The wait, in seconds, before the next attempt once `tries` attempts have failed: a minute,
+/// doubling, to a ceiling of four hours.
+pub fn retry_after(tries: u32) -> u64 {
+    let shift = tries.saturating_sub(1).min(16);
+    (RETRY_FIRST_SECS << shift).min(RETRY_MAX_SECS)
+}
+
+/// What a delivery worker remembers between sweeps: how often each queued message has failed, and
+/// when it may next be tried. It lives in memory, so a restart forgets it. That costs one early
+/// retry and no more, because a message's age comes from its name and the give-up time still holds.
+#[derive(Debug, Default)]
+pub struct RetrySchedule {
+    next: HashMap<String, (u32, u64)>,  // filename -> (failed attempts, unix second the next is due)
+}
+
+/// What one sweep did to the messages it found.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub struct Sweep {
+    pub delivered:  usize,  // accepted by the far end and removed
+    pub failed:     usize,  // set aside in `failed/`, never to be tried again
+    pub deferred:   usize,  // tried and failed, to be tried again after a wait
+    pub waiting:    usize,  // not yet due, so not tried
 }
 
 /// Filesystem-backed outbound spool.
@@ -124,17 +164,105 @@ impl OutboundSpool {
             if !path.is_file() { continue; }
             let name = entry.file_name().to_string_lossy().into_owned();
             if !name.ends_with(".eml") { continue; }
+            let queued = queued_at(&name, &path);
             match Self::read_one(&path) {
                 Ok((from, rcpt, body)) => out.push(SpooledMessage {
                     filename:   name,
                     mail_from:  from,
                     rcpt_to:    rcpt,
                     body,
+                    queued,
                 }),
                 Err(e) => warn!("Skipping spool file {:?}: {}", path, e),
             }
         }
         Ok(out)
+    }
+
+    /// One pass over the queue. `deliver` is the transport, given each message that is due.
+    ///
+    /// A failure tagged [`ErrTag::Permanent`] ends the message: it is logged once and set aside in
+    /// `failed/`. RFC 5321 §4.2.1 makes a 5xx reply final, and nothing a later sweep does will
+    /// change a refusal. Any other failure is retried after [`retry_after`], and abandoned once the
+    /// message is [`GIVE_UP_SECS`] old. `now` is the current unix second, passed in so a test need
+    /// not wait out a retry.
+    pub async fn sweep<F, Fut>(
+        &self,
+        sched:      &mut RetrySchedule,
+        now:        u64,
+        deliver:    F,
+    )
+        -> Outcome<Sweep>
+        where
+            F:      Fn(SpooledMessage) -> Fut,
+            Fut:    Future<Output = Outcome<String>>,
+    {
+        let msgs = res!(self.list());
+        let live: HashSet<&String> = msgs.iter().map(|m| &m.filename).collect();
+        sched.next.retain(|name, _| live.contains(name));
+        let mut out = Sweep::default();
+        for msg in &msgs {
+            let (tries, due) = sched.next.get(&msg.filename).copied().unwrap_or((0, 0));
+            if now < due {
+                out.waiting += 1;
+                continue;
+            }
+            info!("Outbound: delivering {} ({} rcpt)", msg.filename, msg.rcpt_to.len());
+            match deliver(msg.clone()).await {
+                Ok(qid) => {
+                    info!("Outbound: {} delivered (remote: {})", msg.filename, qid);
+                    sched.next.remove(&msg.filename);
+                    if let Err(e) = self.remove(&msg.filename) {
+                        warn!("Failed to remove spool file {}: {}", msg.filename, e);
+                    }
+                    out.delivered += 1;
+                }
+                Err(e) => {
+                    let tries = tries + 1;
+                    // The tag is read directly, because this crate does not depend on fe2o3_net
+                    // where `is_permanent` lives.
+                    let over_age = now.saturating_sub(msg.queued) >= GIVE_UP_SECS;
+                    if e.tags().contains(&ErrTag::Permanent) || over_age {
+                        match self.fail(&msg.filename) {
+                            Ok(_) => {
+                                warn!("Outbound: {} failed for good after {} attempt(s), set aside \
+                                    in failed/: {}", msg.filename, tries, e);
+                                sched.next.remove(&msg.filename);
+                                out.failed += 1;
+                                continue;
+                            }
+                            // Leave it queued, but on the backoff below rather than every sweep.
+                            Err(e2) => warn!("Outbound: could not set {} aside: {}",
+                                msg.filename, e2),
+                        }
+                    }
+                    let wait = retry_after(tries);
+                    warn!("Outbound: {} failed (attempt {}), next try in {} s: {}",
+                        msg.filename, tries, wait, e);
+                    sched.next.insert(msg.filename.clone(), (tries, now + wait));
+                    out.deferred += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Takes a message out of the queue for good, keeping it in `failed/` under the spool root
+    /// for the operator. The sweep reads only the root, so a file there is never tried again.
+    pub fn fail(&self, filename: &str) -> Outcome<PathBuf> {
+        let dir = self.root.join("failed");
+        if let Err(e) = fs::create_dir_all(&dir) {
+            return Err(err!(e,
+                "Creating failed-mail dir {:?}.", dir;
+                IO, File, Write));
+        }
+        let to = dir.join(filename);
+        if let Err(e) = fs::rename(self.root.join(filename), &to) {
+            return Err(err!(e,
+                "Moving spool file {} to {:?}.", filename, to;
+                IO, File, Write));
+        }
+        Ok(to)
     }
 
     /// Remove a successfully-delivered message from the spool.
@@ -180,6 +308,20 @@ impl OutboundSpool {
         }
         Ok((from, rcpt, body))
     }
+}
+
+/// When a spooled file was queued, in unix seconds: the stamp that opens its name, or failing
+/// that its modification time, or failing that now.
+fn queued_at(name: &str, path: &Path) -> u64 {
+    if let Some(Ok(secs)) = name.split('.').next().map(|s| s.parse::<u64>()) {
+        return secs;
+    }
+    let mtime = fs::metadata(path).and_then(|m| m.modified()).ok();
+    mtime
+        .unwrap_or_else(SystemTime::now)
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
 }
 
 fn find_double_lf(bytes: &[u8]) -> Option<usize> {

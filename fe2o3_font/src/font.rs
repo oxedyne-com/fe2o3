@@ -12,6 +12,7 @@ use crate::shape::{
 	Feature,
 	Glyph,
 	Run,
+	ShapeSpec,
 };
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -202,6 +203,12 @@ impl Font {
 			advance: pen,
 			size,
 		})
+	}
+
+	/// As [`Font::shape_with`], in a named script (an ISO 15924 tag such as `Zmth` for mathematics),
+	/// by the head face alone: a maths run is one grapheme, and its script's forms are the head face's.
+	pub fn shape_in(&self, text: &str, size: f32, dir: Dir, features: &[Feature], script: [u8; 4]) -> Outcome<Run> {
+		res!(self.first()).shape_spec(text, size, dir, 0, 0, &ShapeSpec { features, script: Some(script), ..ShapeSpec::default() })
 	}
 
 	/// The outline of one glyph, drawn by the face that shaped it.

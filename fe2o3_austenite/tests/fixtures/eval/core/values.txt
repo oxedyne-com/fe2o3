@@ -1,0 +1,299 @@
+;; U2 value cases. Each case is `%% <Typst code>` followed by the syntax tree the U1 parser yields for it,
+;; as an s-expression: `(Kind child ...)` an inner node, `(Kind 'text')` a leaf with that text, a bare
+;; capitalised word a punctuation or keyword leaf, a bare lower-case word an identifier, digits a number,
+;; `"..."` a string literal. The expected value is whatever `typst eval` prints for the code. `%%[dep]`
+;; (or `%%[a,b]`) marks a case that also needs another unit (U3's library, U5/U6a/U7/U8 element schemas,
+;; the `symbol` element); it is enforced as soon as that dependency is present and reported as pending
+;; until then.
+%% 1 + 2 * 3
+(Binary 1 Plus (Binary 2 Star 3))
+%% 7 / 2
+(Binary 7 Slash 2)
+%% 6 / 2
+(Binary 6 Slash 2)
+%% 0xff + 0b101 + 0o17
+(Binary (Binary 0xff Plus 0b101) Plus 0o17)
+%% 1.5e3
+1.5e3
+%% 5 - 2.5
+(Binary 5 Minus 2.5)
+%% 2.5mm
+2.5mm
+%% 1in
+1in
+%% 45deg
+45deg
+%% 1pt + 1em + 10%
+(Binary (Binary 1pt Plus 1em) Plus 10%)
+%% 50% + 50%
+(Binary 50% Plus 50%)
+%% 10% * 2pt
+(Binary 10% Star 2pt)
+%% 5pt * 2
+(Binary 5pt Star 2)
+%% 2pt / 1pt
+(Binary 2pt Slash 1pt)
+%% 1fr / 2fr
+(Binary 1fr Slash 2fr)
+%% 2 * 1fr
+(Binary 2 Star 1fr)
+%% 90deg / 45deg
+(Binary 90deg Slash 45deg)
+%% "a" * 3
+(Binary "a" Star 3)
+%% 3 * (1, 2)
+(Binary 3 Star (Array LeftParen 1 Comma 2 RightParen))
+%% (1, 2) + (3,)
+(Binary (Array LeftParen 1 Comma 2 RightParen) Plus (Array LeftParen 3 Comma RightParen))
+%% (a: 1) + (b: 2)
+(Binary (Dict LeftParen (Named a Colon 1) RightParen) Plus (Dict LeftParen (Named b Colon 2) RightParen))
+%% (a: 1, b: 2) == (b: 2, a: 1)
+(Binary (Dict LeftParen (Named a Colon 1) Comma (Named b Colon 2) RightParen) EqEq (Dict LeftParen (Named b Colon 2) Comma (Named a Colon 1) RightParen))
+%% (:)
+(Dict LeftParen Colon RightParen)
+%% ("k": 1, ..(j: 2), ..none)
+(Dict LeftParen (Keyed "k" Colon 1) Comma (Spread Dots (Dict LeftParen (Named j Colon 2) RightParen)) Comma (Spread Dots none) RightParen)
+%% (..(1, 2), 3, ..none)
+(Array LeftParen (Spread Dots (Array LeftParen 1 Comma 2 RightParen)) Comma 3 Comma (Spread Dots none) RightParen)
+%% 1.0 == 1
+(Binary 1.0 EqEq 1)
+%% 1 != 2
+(Binary 1 ExclEq 2)
+%% (1, 2) < (1, 3)
+(Binary (Array LeftParen 1 Comma 2 RightParen) Lt (Array LeftParen 1 Comma 3 RightParen))
+%% "b" >= "a"
+(Binary "b" GtEq "a")
+%% "a" in "abc"
+(Binary "a" In "abc")
+%% 2 in (1, 2)
+(Binary 2 In (Array LeftParen 1 Comma 2 RightParen))
+%% "a" in (a: 1)
+(Binary "a" In (Dict LeftParen (Named a Colon 1) RightParen))
+%% 3 not in (1, 2)
+(Binary 3 Not In (Array LeftParen 1 Comma 2 RightParen))
+%% none + 1
+(Binary none Plus 1)
+%% false and 1
+(Binary false And 1)
+%% true or x
+(Binary true Or x)
+%% not false
+(Unary Not false)
+%% -(3)
+(Unary Minus (Parenthesized LeftParen 3 RightParen))
+%% 1pt == 1pt + 0%
+(Binary 1pt EqEq (Binary 1pt Plus 0%))
+%% (10% + 1pt) == (1pt + 10%)
+(Binary (Parenthesized LeftParen (Binary 10% Plus 1pt) RightParen) EqEq (Parenthesized LeftParen (Binary 1pt Plus 10%) RightParen))
+%% (1pt + 2em).em
+(FieldAccess (Parenthesized LeftParen (Binary 1pt Plus 2em) RightParen) Dot em)
+%% (10% + 2pt).ratio
+(FieldAccess (Parenthesized LeftParen (Binary 10% Plus 2pt) RightParen) Dot ratio)
+%% (x: (y: 7)).x.y
+(FieldAccess (FieldAccess (Dict LeftParen (Named x Colon (Dict LeftParen (Named y Colon 7) RightParen)) RightParen) Dot x) Dot y)
+%% {let x = 2; x *= 3; x /= 4; x}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 2) Semicolon (Binary x StarEq 3) Semicolon (Binary x SlashEq 4) Semicolon x) RightBrace)
+%% {let s = "a"; s += "b"; s}
+(CodeBlock LeftBrace (Code (LetBinding Let s Eq "a") Semicolon (Binary s PlusEq "b") Semicolon s) RightBrace)
+%% {let x = 5; x -= 7; x}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 5) Semicolon (Binary x HyphEq 7) Semicolon x) RightBrace)
+%% {let x; x}
+(CodeBlock LeftBrace (Code (LetBinding Let x) Semicolon x) RightBrace)
+%% {let (a, ..b) = (1, 2, 3); b}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma (Spread Dots b) RightParen) Eq (Array LeftParen 1 Comma 2 Comma 3 RightParen)) Semicolon b) RightBrace)
+%% {let (..b, c) = (1, 2, 3); (b, c)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen (Spread Dots b) Comma c RightParen) Eq (Array LeftParen 1 Comma 2 Comma 3 RightParen)) Semicolon (Array LeftParen b Comma c RightParen)) RightBrace)
+%% {let (a, b: c) = (a: 1, b: 2); (a, c)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma (Named b Colon c) RightParen) Eq (Dict LeftParen (Named a Colon 1) Comma (Named b Colon 2) RightParen)) Semicolon (Array LeftParen a Comma c RightParen)) RightBrace)
+%% {let (a, ..r) = (a: 1, b: 2); r}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma (Spread Dots r) RightParen) Eq (Dict LeftParen (Named a Colon 1) Comma (Named b Colon 2) RightParen)) Semicolon r) RightBrace)
+%% {let ((a, b), c) = ((1, 2), 3); b}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen (Destructuring LeftParen a Comma b RightParen) Comma c RightParen) Eq (Array LeftParen (Array LeftParen 1 Comma 2 RightParen) Comma 3 RightParen)) Semicolon b) RightBrace)
+%% {let (a, _, c) = (1, 2, 3); c}
+(CodeBlock LeftBrace (Code (LetBinding Let (Destructuring LeftParen a Comma Underscore Comma c RightParen) Eq (Array LeftParen 1 Comma 2 Comma 3 RightParen)) Semicolon c) RightBrace)
+%% {let a = 1; let b = 2; (a, b) = (b, a); (a, b)}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq 1) Semicolon (LetBinding Let b Eq 2) Semicolon (DestructAssignment (Destructuring LeftParen a Comma b RightParen) Eq (Array LeftParen b Comma a RightParen)) Semicolon (Array LeftParen a Comma b RightParen)) RightBrace)
+%% {let d = (x: (y: 1)); d.x.y = 5; d}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named x Colon (Dict LeftParen (Named y Colon 1) RightParen)) RightParen)) Semicolon (Binary (FieldAccess (FieldAccess d Dot x) Dot y) Eq 5) Semicolon d) RightBrace)
+%% {let d = (a: 1); d.b = 2; d}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (Binary (FieldAccess d Dot b) Eq 2) Semicolon d) RightBrace)
+%% {let a = (1, 2); a.at(-1) = 9; a}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon (Binary (FuncCall (FieldAccess a Dot at) (Args LeftParen (Unary Minus 1) RightParen)) Eq 9) Semicolon a) RightBrace)
+%% {let a = ((1, 2),); a.at(0).push(3); a}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen (Array LeftParen 1 Comma 2 RightParen) Comma RightParen)) Semicolon (FuncCall (FieldAccess (FuncCall (FieldAccess a Dot at) (Args LeftParen 0 RightParen)) Dot push) (Args LeftParen 3 RightParen)) Semicolon a) RightBrace)
+%% {let a = (1, 2); a.insert(2, 0); a}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 RightParen)) Semicolon (FuncCall (FieldAccess a Dot insert) (Args LeftParen 2 Comma 0 RightParen)) Semicolon a) RightBrace)
+%% {let a = (1, 2, 3); (a.pop(), a.remove(0), a)}
+(CodeBlock LeftBrace (Code (LetBinding Let a Eq (Array LeftParen 1 Comma 2 Comma 3 RightParen)) Semicolon (Array LeftParen (FuncCall (FieldAccess a Dot pop) (Args LeftParen RightParen)) Comma (FuncCall (FieldAccess a Dot remove) (Args LeftParen 0 RightParen)) Comma a RightParen)) RightBrace)
+%% {let d = (a: 1); d.insert("b", 2); (d.remove("a"), d)}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (FuncCall (FieldAccess d Dot insert) (Args LeftParen "b" Comma 2 RightParen)) Semicolon (Array LeftParen (FuncCall (FieldAccess d Dot remove) (Args LeftParen "a" RightParen)) Comma d RightParen)) RightBrace)
+%% {let d = (a: 1); d.remove("b", default: 5)}
+(CodeBlock LeftBrace (Code (LetBinding Let d Eq (Dict LeftParen (Named a Colon 1) RightParen)) Semicolon (FuncCall (FieldAccess d Dot remove) (Args LeftParen "b" Comma (Named default Colon 5) RightParen))) RightBrace)
+%% {let f(x, y: 2, ..r) = (x, y, r); f(1, 3, y: 5, z: 6)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x Comma (Named y Colon 2) Comma (Spread Dots r) RightParen) Eq (Array LeftParen x Comma y Comma r RightParen))) Semicolon (FuncCall f (Args LeftParen 1 Comma 3 Comma (Named y Colon 5) Comma (Named z Colon 6) RightParen))) RightBrace)
+%% {let f(..r, x) = (x, r); f(1, 2, 3)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) Comma x RightParen) Eq (Array LeftParen x Comma r RightParen))) Semicolon (FuncCall f (Args LeftParen 1 Comma 2 Comma 3 RightParen))) RightBrace)
+%% {let f(x, ..r, y: 1) = r; f(1, y: 2, 3, z: 4)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x Comma (Spread Dots r) Comma (Named y Colon 1) RightParen) Eq r)) Semicolon (FuncCall f (Args LeftParen 1 Comma (Named y Colon 2) Comma 3 Comma (Named z Colon 4) RightParen))) RightBrace)
+%% {let f((a, b), c) = a + b + c; f((1, 2), 3)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Destructuring LeftParen a Comma b RightParen) Comma c RightParen) Eq (Binary (Binary a Plus b) Plus c))) Semicolon (FuncCall f (Args LeftParen (Array LeftParen 1 Comma 2 RightParen) Comma 3 RightParen))) RightBrace)
+%% {let f(..r) = r; f(..(1, 2), ..(a: 3)).named()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) RightParen) Eq r)) Semicolon (FuncCall (FieldAccess (FuncCall f (Args LeftParen (Spread Dots (Array LeftParen 1 Comma 2 RightParen)) Comma (Spread Dots (Dict LeftParen (Named a Colon 3) RightParen)) RightParen)) Dot named) (Args LeftParen RightParen))) RightBrace)
+%% {let f(..r) = r; (f(1, a: 2, 3).at(1), f(1, a: 2, 3).at("a"), f(1).at(4, default: 0))}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) RightParen) Eq r)) Semicolon (Array LeftParen (FuncCall (FieldAccess (FuncCall f (Args LeftParen 1 Comma (Named a Colon 2) Comma 3 RightParen)) Dot at) (Args LeftParen 1 RightParen)) Comma (FuncCall (FieldAccess (FuncCall f (Args LeftParen 1 Comma (Named a Colon 2) Comma 3 RightParen)) Dot at) (Args LeftParen "a" RightParen)) Comma (FuncCall (FieldAccess (FuncCall f (Args LeftParen 1 RightParen)) Dot at) (Args LeftParen 4 Comma (Named default Colon 0) RightParen)) RightParen)) RightBrace)
+%% {let f(..r) = r; f(1, a: 2, 3).pos()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen (Spread Dots r) RightParen) Eq r)) Semicolon (FuncCall (FieldAccess (FuncCall f (Args LeftParen 1 Comma (Named a Colon 2) Comma 3 RightParen)) Dot pos) (Args LeftParen RightParen))) RightBrace)
+%% {let f(n) = if n <= 1 { 1 } else { n * f(n - 1) }; f(5)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen n RightParen) Eq (Conditional If (Binary n LtEq 1) (CodeBlock LeftBrace (Code 1) RightBrace) Else (CodeBlock LeftBrace (Code (Binary n Star (FuncCall f (Args LeftParen (Binary n Minus 1) RightParen)))) RightBrace)))) Semicolon (FuncCall f (Args LeftParen 5 RightParen))) RightBrace)
+%% {let x = 1; let g() = x; x = 2; g()}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1) Semicolon (LetBinding Let (Closure g (Params LeftParen RightParen) Eq x)) Semicolon (Binary x Eq 2) Semicolon (FuncCall g (Args LeftParen RightParen))) RightBrace)
+%% {let f = (a, b) => a + b; f.with(1)(2)}
+(CodeBlock LeftBrace (Code (LetBinding Let f Eq (Closure (Params LeftParen a Comma b RightParen) Arrow (Binary a Plus b))) Semicolon (FuncCall (FuncCall (FieldAccess f Dot with) (Args LeftParen 1 RightParen)) (Args LeftParen 2 RightParen))) RightBrace)
+%% {let add(a, b: 10) = a + b; (add.with(b: 1).with(2))()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure add (Params LeftParen a Comma (Named b Colon 10) RightParen) Eq (Binary a Plus b))) Semicolon (FuncCall (Parenthesized LeftParen (FuncCall (FieldAccess (FuncCall (FieldAccess add Dot with) (Args LeftParen (Named b Colon 1) RightParen)) Dot with) (Args LeftParen 2 RightParen)) RightParen) (Args LeftParen RightParen))) RightBrace)
+%% {let k = 3; let f = x => x * k; f(2)}
+(CodeBlock LeftBrace (Code (LetBinding Let k Eq 3) Semicolon (LetBinding Let f Eq (Closure (Params x) Arrow (Binary x Star k))) Semicolon (FuncCall f (Args LeftParen 2 RightParen))) RightBrace)
+%% {let f() = { [a]; return [c]; [b] }; f()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen RightParen) Eq (CodeBlock LeftBrace (Code (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket) Semicolon (FuncReturn Return (ContentBlock LeftBracket (Markup (Text 'c')) RightBracket)) Semicolon (ContentBlock LeftBracket (Markup (Text 'b')) RightBracket)) RightBrace))) Semicolon (FuncCall f (Args LeftParen RightParen))) RightBrace)
+%% {let f() = { [a]; return; [b] }; f()}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen RightParen) Eq (CodeBlock LeftBrace (Code (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket) Semicolon (FuncReturn Return) Semicolon (ContentBlock LeftBracket (Markup (Text 'b')) RightBracket)) RightBrace))) Semicolon (FuncCall f (Args LeftParen RightParen))) RightBrace)
+%% {let f(x) = f; f(1)}
+(CodeBlock LeftBrace (Code (LetBinding Let (Closure f (Params LeftParen x RightParen) Eq f)) Semicolon (FuncCall f (Args LeftParen 1 RightParen))) RightBrace)
+%% {for (k, v) in (a: 1, b: 2) { (k, v) }}
+(CodeBlock LeftBrace (Code (ForLoop For (Destructuring LeftParen k Comma v RightParen) In (Dict LeftParen (Named a Colon 1) Comma (Named b Colon 2) RightParen) (CodeBlock LeftBrace (Code (Array LeftParen k Comma v RightParen)) RightBrace))) RightBrace)
+%% {for c in "ab" { (c,) }}
+(CodeBlock LeftBrace (Code (ForLoop For c In "ab" (CodeBlock LeftBrace (Code (Array LeftParen c Comma RightParen)) RightBrace))) RightBrace)
+%% {for c in "e\u{301}x" { (c,) }}
+(CodeBlock LeftBrace (Code (ForLoop For c In "e\u{301}x" (CodeBlock LeftBrace (Code (Array LeftParen c Comma RightParen)) RightBrace))) RightBrace)
+%% {let s = 0; for i in (0, 1, 2, 3, 4) { if i == 3 { break }; s += i }; s}
+(CodeBlock LeftBrace (Code (LetBinding Let s Eq 0) Semicolon (ForLoop For i In (Array LeftParen 0 Comma 1 Comma 2 Comma 3 Comma 4 RightParen) (CodeBlock LeftBrace (Code (Conditional If (Binary i EqEq 3) (CodeBlock LeftBrace (Code (LoopBreak Break)) RightBrace)) Semicolon (Binary s PlusEq i)) RightBrace)) Semicolon s) RightBrace)
+%% {let s = 0; for i in (1, 2, 3) { if i == 2 { continue }; s += i }; s}
+(CodeBlock LeftBrace (Code (LetBinding Let s Eq 0) Semicolon (ForLoop For i In (Array LeftParen 1 Comma 2 Comma 3 RightParen) (CodeBlock LeftBrace (Code (Conditional If (Binary i EqEq 2) (CodeBlock LeftBrace (Code (LoopContinue Continue)) RightBrace)) Semicolon (Binary s PlusEq i)) RightBrace)) Semicolon s) RightBrace)
+%% {let i = 0; while i < 3 { i += 1 }; i}
+(CodeBlock LeftBrace (Code (LetBinding Let i Eq 0) Semicolon (WhileLoop While (Binary i Lt 3) (CodeBlock LeftBrace (Code (Binary i PlusEq 1)) RightBrace)) Semicolon i) RightBrace)
+%% {let i = 0; while true { i += 1; if i > 4 { break } }; i}
+(CodeBlock LeftBrace (Code (LetBinding Let i Eq 0) Semicolon (WhileLoop While true (CodeBlock LeftBrace (Code (Binary i PlusEq 1) Semicolon (Conditional If (Binary i Gt 4) (CodeBlock LeftBrace (Code (LoopBreak Break)) RightBrace))) RightBrace)) Semicolon i) RightBrace)
+%% {if false { 1 }}
+(CodeBlock LeftBrace (Code (Conditional If false (CodeBlock LeftBrace (Code 1) RightBrace))) RightBrace)
+%% {if false { 1 } else if true { 2 } else { 3 }}
+(CodeBlock LeftBrace (Code (Conditional If false (CodeBlock LeftBrace (Code 1) RightBrace) Else (Conditional If true (CodeBlock LeftBrace (Code 2) RightBrace) Else (CodeBlock LeftBrace (Code 3) RightBrace)))) RightBrace)
+%% {none; 2; none}
+(CodeBlock LeftBrace (Code none Semicolon 2 Semicolon none) RightBrace)
+%% {"a"; "b"}
+(CodeBlock LeftBrace (Code "a" Semicolon "b") RightBrace)
+%% {(1,); (2,)}
+(CodeBlock LeftBrace (Code (Array LeftParen 1 Comma RightParen) Semicolon (Array LeftParen 2 Comma RightParen)) RightBrace)
+%% {let x = 1}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1)) RightBrace)
+%% {let x = 1; {let x = 2}; x}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1) Semicolon (CodeBlock LeftBrace (Code (LetBinding Let x Eq 2)) RightBrace) Semicolon x) RightBrace)
+%% {let x = 1; {x = 2}; x}
+(CodeBlock LeftBrace (Code (LetBinding Let x Eq 1) Semicolon (CodeBlock LeftBrace (Code (Binary x Eq 2)) RightBrace) Semicolon x) RightBrace)
+%% "tab\there \"q\" \u{41}"
+"tab\there \"q\" \u{41}"
+%% [a <l>]
+(ContentBlock LeftBracket (Markup (Text 'a') Space (Label '<l>')) RightBracket)
+%% [a #{} b]
+(ContentBlock LeftBracket (Markup (Text 'a') Space Hash (CodeBlock LeftBrace (Code) RightBrace) Space (Text 'b')) RightBracket)
+%%[U3] [x #1.5 #"s" #none]
+(ContentBlock LeftBracket (Markup (Text 'x') Space Hash 1.5 Space Hash "s" Space Hash none) RightBracket)
+%% [a \ b]
+(ContentBlock LeftBracket (Markup (Text 'a') Space (Linebreak '\') Space (Text 'b')) RightBracket)
+%%[symbol] [a -- b \#]
+(ContentBlock LeftBracket (Markup (Text 'a') Space (Shorthand '--') Space (Text 'b') Space (Escape '\#')) RightBracket)
+%% "a" + [b]
+(Binary "a" Plus (ContentBlock LeftBracket (Markup (Text 'b')) RightBracket))
+%% [a] + [b] + [c]
+(Binary (Binary (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket) Plus (ContentBlock LeftBracket (Markup (Text 'b')) RightBracket)) Plus (ContentBlock LeftBracket (Markup (Text 'c')) RightBracket))
+%% [a] * 2
+(Binary (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket) Star 2)
+%% {show: it => [X]; [a]}
+(CodeBlock LeftBrace (Code (ShowRule Show Colon (Closure (Params it) Arrow (ContentBlock LeftBracket (Markup (Text 'X')) RightBracket))) Semicolon (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket)) RightBrace)
+%% [#show: it => [X #it]; a b]
+(ContentBlock LeftBracket (Markup Hash (ShowRule Show Colon (Closure (Params it) Arrow (ContentBlock LeftBracket (Markup (Text 'X') Space Hash it) RightBracket))) Semicolon Space (Text 'a b')) RightBracket)
+%% [#show: [gone]; a]
+(ContentBlock LeftBracket (Markup Hash (ShowRule Show Colon (ContentBlock LeftBracket (Markup (Text 'gone')) RightBracket)) Semicolon Space (Text 'a')) RightBracket)
+%% [a #let x = [b]; #x]
+(ContentBlock LeftBracket (Markup (Text 'a') Space Hash (LetBinding Let x Eq (ContentBlock LeftBracket (Markup (Text 'b')) RightBracket)) Semicolon Space Hash x) RightBracket)
+%%[U3] [#for x in (1, 2) [#x ]]
+(ContentBlock LeftBracket (Markup Hash (ForLoop For x In (Array LeftParen 1 Comma 2 RightParen) (ContentBlock LeftBracket (Markup Hash x Space) RightBracket))) RightBracket)
+%%[U3] [a <l>].children.first().label
+(FieldAccess (FuncCall (FieldAccess (FieldAccess (ContentBlock LeftBracket (Markup (Text 'a') Space (Label '<l>')) RightBracket) Dot children) Dot first) (Args LeftParen RightParen)) Dot label)
+%%[U3] [a <l>].children.at(0).fields()
+(FuncCall (FieldAccess (FuncCall (FieldAccess (FieldAccess (ContentBlock LeftBracket (Markup (Text 'a') Space (Label '<l>')) RightBracket) Dot children) Dot at) (Args LeftParen 0 RightParen)) Dot fields) (Args LeftParen RightParen))
+%% [a b].has("children")
+(FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'a b')) RightBracket) Dot has) (Args LeftParen "children" RightParen))
+%% [x].at("nope", default: 3)
+(FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot at) (Args LeftParen "nope" Comma (Named default Colon 3) RightParen))
+%% [x].text
+(FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot text)
+%% [x].location()
+(FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot location) (Args LeftParen RightParen))
+%% [x].func() == text
+(Binary (FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'x')) RightBracket) Dot func) (Args LeftParen RightParen)) EqEq text)
+%% text("hi")
+(FuncCall text (Args LeftParen "hi" RightParen))
+%% heading == heading
+(Binary heading EqEq heading)
+%% [a  b].has("children")
+(FuncCall (FieldAccess (ContentBlock LeftBracket (Markup (Text 'a') Space (Text 'b')) RightBracket) Dot has) (Args LeftParen "children" RightParen))
+%%[U5] [= Hi]
+(ContentBlock LeftBracket (Markup (Heading (HeadingMarker '=') Space (Markup (Text 'Hi')))) RightBracket)
+%%[U5] [*a* _b_]
+(ContentBlock LeftBracket (Markup (Strong Star (Markup (Text 'a')) Star) Space (Emph Underscore (Markup (Text 'b')) Underscore)) RightBracket)
+%%[U5] [*a* <l>]
+(ContentBlock LeftBracket (Markup (Strong Star (Markup (Text 'a')) Star) Space (Label '<l>')) RightBracket)
+%%[U5] [- a]
+(ContentBlock LeftBracket (Markup (ListItem ListMarker Space (Markup (Text 'a')))) RightBracket)
+%%[U5] [+ b]
+(ContentBlock LeftBracket (Markup (EnumItem (EnumMarker '+') Space (Markup (Text 'b')))) RightBracket)
+%%[U5] [5. c]
+(ContentBlock LeftBracket (Markup (EnumItem (EnumMarker '5.') Space (Markup (Text 'c')))) RightBracket)
+%%[U5] [/ T: d]
+(ContentBlock LeftBracket (Markup (TermItem TermMarker Space (Markup (Text 'T')) Colon Space (Markup (Text 'd')))) RightBracket)
+%%[U5] [`x`]
+(ContentBlock LeftBracket (Markup (Raw (RawDelim '`') (Text 'x') (RawDelim '`'))) RightBracket)
+%%[U5] [```rust y```]
+(ContentBlock LeftBracket (Markup (Raw (RawDelim '```') (RawLang 'rust') (RawTrimmed ' ') (Text 'y') (RawDelim '```'))) RightBracket)
+%%[U5] [@r]
+(ContentBlock LeftBracket (Markup (Ref (RefMarker '@r'))) RightBracket)
+%%[U5] [@r[see]]
+(ContentBlock LeftBracket (Markup (Ref (RefMarker '@r') (ContentBlock LeftBracket (Markup (Text 'see')) RightBracket))) RightBracket)
+%%[U5] [https://x.org]
+(ContentBlock LeftBracket (Markup (Link 'https://x.org')) RightBracket)
+%%[U3,U5] [#(1pt)]
+(ContentBlock LeftBracket (Markup Hash (Parenthesized LeftParen 1pt RightParen)) RightBracket)
+%%[U6a] ["q"]
+(ContentBlock LeftBracket (Markup (SmartQuote '"') (Text 'q') (SmartQuote '"')) RightBracket)
+%%[U7,symbol] $x^2_i'$
+(Equation Dollar (Math (MathAttach (MathText 'x') Hat (MathText '2') Underscore (MathAttach (MathText 'i') MathPrimes))) Dollar)
+%%[U7,symbol] $ a/b $
+(Equation Dollar Space (Math (MathFrac (MathText 'a') Slash (MathText 'b'))) Space Dollar)
+%%[U7,symbol] $(a+b)/(c)$
+(Equation Dollar (Math (MathFrac (MathDelimited (MathText '(') (Math (MathText 'a') (MathText '+') (MathText 'b')) (MathText ')')) Slash (MathDelimited (MathText '(') (Math (MathText 'c')) (MathText ')')))) Dollar)
+%%[U7,symbol] $x^(a+b)$
+(Equation Dollar (Math (MathAttach (MathText 'x') Hat (MathDelimited (MathText '(') (Math (MathText 'a') (MathText '+') (MathText 'b')) (MathText ')')))) Dollar)
+%%[U8] context 1
+(Contextual Context 1)
+%%[U5] [== Sub]
+(ContentBlock LeftBracket (Markup (Heading (HeadingMarker '==') Space (Markup (Text 'Sub')))) RightBracket)
+%%[U7] $ 2/3 $
+(Equation Dollar Space (Math (MathFrac (MathText '2') Slash (MathText '3'))) Space Dollar)
+%%[U7] $2^(34)_5$
+(Equation Dollar (Math (MathAttach (MathText '2') Hat (MathDelimited (MathText '(') (Math (MathText '34')) (MathText ')')) Underscore (MathText '5'))) Dollar)
+%% {import list: item; item == list.item}
+(CodeBlock LeftBrace (Code (ModuleImport Import list Colon (ImportItems (ImportItemPath item))) Semicolon (Binary item EqEq (FieldAccess list Dot item))) RightBrace)
+%% {import table: cell as c, header; (c == table.cell, header == table.header)}
+(CodeBlock LeftBrace (Code (ModuleImport Import table Colon (ImportItems (RenamedImportItem (ImportItemPath cell) As c) Comma (ImportItemPath header))) Semicolon (Array LeftParen (Binary c EqEq (FieldAccess table Dot cell)) Comma (Binary header EqEq (FieldAccess table Dot header)) RightParen)) RightBrace)
+%% {import list as l; l == list}
+(CodeBlock LeftBrace (Code (ModuleImport Import list As l) Semicolon (Binary l EqEq list)) RightBrace)
+%% {show heading: it => it; [a]}
+(CodeBlock LeftBrace (Code (ShowRule Show heading Colon (Closure (Params it) Arrow it)) Semicolon (ContentBlock LeftBracket (Markup (Text 'a')) RightBracket)) RightBrace)
+%% [#show <l>: none; a]
+(ContentBlock LeftBracket (Markup Hash (ShowRule Show (Label '<l>') Colon none) Semicolon Space (Text 'a')) RightBracket)
+%% [#show "x": [y]; a]
+(ContentBlock LeftBracket (Markup Hash (ShowRule Show "x" Colon (ContentBlock LeftBracket (Markup (Text 'y')) RightBracket)) Semicolon Space (Text 'a')) RightBracket)
+;; Plain content reports `sequence` and `styled` as its function (no hand tree: parser only).
+%% [#[a b] <l>].func() == [#[c d] <e>].func()
+%%[U6a] {set text(red); [a]}.func() == [#[a b] <l>].func()
+%%[U6a] {set text(red); [a]}.func() == {set text(blue); [b]}.func()

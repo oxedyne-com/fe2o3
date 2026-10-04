@@ -38,6 +38,22 @@ impl Feature {
 
 	/// Small capitals from lower case: what Typst's `smallcaps` asks the font for.
 	pub const SMALL_CAPS: Self = Self::on(b"smcp");
+
+	/// The feature at a given setting; 0 switches off a feature a shaper applies by default.
+	pub const fn set(tag: &[u8; 4], value: u32) -> Self {
+		Self { tag: *tag, value }
+	}
+}
+
+/// Everything a shaping call may be told beyond the string, the size and the direction. The default is
+/// what [`Face::shape_with`](crate::face::Face::shape_with) has always done: no features, the language
+/// and script guessed from the text, and default-ignorable characters shaped as the font has them.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShapeSpec<'a> {
+	pub features:			&'a [Feature],
+	pub language:			Option<&'a str>,	// BCP 47, as `en` or `de-CH`; selects `locl` forms
+	pub script:				Option<[u8; 4]>,	// ISO 15924, as `Latn`; else guessed from the text
+	pub remove_ignorables:	bool,				// drop default ignorables (a soft hyphen, a joiner) from the run
 }
 
 /// One glyph, placed in pixels relative to the run's start and baseline, y up as the font has it.
