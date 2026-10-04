@@ -83,6 +83,7 @@ use crate::vfs;
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::path::{
 	Path,
 	PathBuf,
@@ -101,6 +102,7 @@ pub struct World {
 	pub sources:	Vec<Source>,					// indexed by `FileId.0`
 	pub modules:	HashMap<PathBuf, Arc<Module>>,	// evaluated once, by canonical path
 	pub route:		Vec<PathBuf>,					// modules being evaluated, outermost first, for cycles
+	pub files:		BTreeSet<PathBuf>,				// every vfs path the compile asked for, found or not
 }
 
 impl World {
@@ -121,8 +123,17 @@ impl World {
 		Ok(id)
 	}
 
+	/// Records that the compile asked the vfs for `path`. A path that is not there is recorded too: the
+	/// file whose appearance would change the result is as much a dependency as one that was read.
+	pub fn note(&mut self, path: &Path) {
+		if !self.files.contains(path) {
+			self.files.insert(path.to_path_buf());
+		}
+	}
+
 	/// Reads a path through the vfs (native disc or the wasm source map) and parses it.
 	pub fn load(&mut self, path: &Path) -> Outcome<FileId> {
+		self.note(path);
 		if let Some(s) = self.sources.iter().find(|s| s.path == path) {
 			return Ok(s.id);
 		}

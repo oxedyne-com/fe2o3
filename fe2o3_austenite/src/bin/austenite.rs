@@ -486,6 +486,27 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 	println!("{}", line);
 }
 
+/// What `--eval` was asked to compile and how: the source and the output directory, `--root`, each
+/// `--font-path`, `--strict`, `--diag-summary` and `--timings FILE`.
+struct EvalJob {
+	source:		String,
+	out_dir:	String,
+	root:		Option<String>,
+	font_paths:	Vec<String>,
+	strict:		bool,
+	diag_summary:	bool,
+	timings_out:	Option<String>,
+}
+
+/// What a compile through the evaluator reports of itself once its PDF is written.
+struct EvalStats {
+	pages:	u32,
+	passes:	u32,
+	bytes:	usize,
+	skip:	Option<String>,	// the terse `skipped:` line, when the watch holds it back to fold into its status line
+	secs:	f64,
+}
+
 /// Compiles through the evaluator (`--eval`) and writes `OUT_DIR/document.pdf`. `--root` is what a leading
 /// `/` resolves against (default the source's directory) and each `--font-path` a directory of fonts, as
 /// `typst compile` takes them. The terse `skipped:` line is built from the diagnostics of kind
@@ -495,17 +516,13 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 /// ([`diag::error_lines`]), on a compile that succeeds and on one that fails. `--timings FILE` writes each
 /// phase's wall time, for the load, the evaluation, every fixpoint pass and the finish, as JSON to `FILE`
 /// after a compile that succeeds; the PDF is the same bytes either way.
-fn compile_eval(
-	source:		&str,
-	out_dir:	&str,
-	root:		Option<&str>,
-	font_paths:	&[String],
-	strict:		bool,
-	diag_summary:	bool,
-	timings_out:	Option<&str>,
-)
-	-> Outcome<()>
-{
+///
+/// `read` is filled with the files the evaluation asked for as soon as it has run, so it is there for a
+/// compile that fails, and holds at least the source when even that could not be read. The PDF is written
+/// whole beside its place and renamed onto it, after every check, so a compile that fails leaves the last
+/// good one as it was and a reader never meets half of one. `fold` holds the `skipped:` line back in the
+/// result for the caller to print, rather than writing it to the standard error.
+fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<EvalStats> {
 	use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
 	use oxedyne_fe2o3_austenite::flow::text::FontStore;
 	use oxedyne_fe2o3_austenite::timings::{
@@ -515,25 +532,37 @@ fn compile_eval(
 	use std::io::Write;
 
 	let t		= std::time::Instant::now();
-	let timings	= timings_out.map(|_| Timings::start());
-	let main	= PathBuf::from(source);
-	let root	= match root {
+	let timings	= job.timings_out.as_ref().map(|_| Timings::start());
+	let main	= PathBuf::from(&job.source);
+	read.push(main.clone());
+	// The source's own directory, which for a bare file name is the working directory and not the empty
+	// path `parent` gives, which no canonical path lies beneath.
+	let root	= match &job.root {
 		Some(r)	=> PathBuf::from(r),
-		None	=> main.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| PathBuf::from(".")),
+		None	=> match main.parent() {
+			Some(p) if !p.as_os_str().is_empty()	=> p.to_path_buf(),
+			_										=> PathBuf::from("."),
+		},
 	};
 	let mut fonts = FontStore::default();
-	for dir in font_paths {
+	for dir in &job.font_paths {
 		fonts.add_dir(PathBuf::from(dir));
 	}
 	compile::supply_typst_package_cache();
 	let mut sink = res!(PdfSink::new());
 	let mut done = res!(compile::assemble_eval_timed(&main, &root, fonts, &mut sink, timings));
+	*read = done.files_read();
 	let report = done.report();
-	if let Some(skip) = &report.skipped {
-		eprintln!("[austenite] {}", skip);
+	let mut skip = None;
+	if let Some(line) = &report.skipped {
+		if fold {
+			skip = Some(line.clone());
+		} else {
+			eprintln!("[austenite] {}", line);
+		}
 	}
 	// Before the error a failed compile returns, so a run that stops still names what it passed over.
-	if diag_summary {
+	if job.diag_summary {
 		for line in diag::summary_lines(&done.engine.diags) {
 			eprintln!("{}", line);
 		}
@@ -550,7 +579,7 @@ fn compile_eval(
 			return Err(err!("{}", e.plain(); Input, Invalid));
 		},
 	};
-	if strict {
+	if job.strict {
 		if let Some(refusal) = report.strict_failure(&main) {
 			return Err(err!("{}", refusal.message; Input, Invalid));
 		}
@@ -562,12 +591,15 @@ fn compile_eval(
 	if let Some(t) = done.engine.timings.as_mut() {
 		t.enter(Phase::Write);
 	}
-	res!(std::fs::create_dir_all(out_dir));
-	let path = PathBuf::from(out_dir).join("document.pdf");
-	let mut file = BufWriter::new(res!(File::create(&path)));
+	res!(std::fs::create_dir_all(&job.out_dir));
+	let path	= PathBuf::from(&job.out_dir).join("document.pdf");
+	let beside	= PathBuf::from(&job.out_dir).join("document.pdf.part");
+	let mut file = BufWriter::new(res!(File::create(&beside)));
 	res!(out.write_to(&mut file));
 	res!(file.flush());
-	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), timings_out) {
+	drop(file);
+	res!(std::fs::rename(&beside, &path));
+	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), job.timings_out.as_ref()) {
 		tm.leave();
 		if let Ok(book) = done.engine.fonts.book() {
 			if let Ok(stats) = book.shape_stats() {
@@ -576,10 +608,51 @@ fn compile_eval(
 		}
 		res!(std::fs::write(dest, tm.json(t.elapsed().as_nanos() as u64)));
 	}
+	Ok(EvalStats {
+		pages:	laid.pages,
+		passes:	laid.passes,
+		bytes:	out.len(),
+		skip,
+		secs:	t.elapsed().as_secs_f64(),
+	})
+}
+
+/// The line `--eval` prints when its compile is done.
+fn print_eval_done(job: &EvalJob, stats: &EvalStats) {
 	println!(
 		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}/",
-		source, laid.pages, laid.passes, out.len(), t.elapsed().as_secs_f64(), out_dir);
-	Ok(())
+		job.source, stats.pages, stats.passes, stats.bytes, stats.secs, job.out_dir);
+}
+
+/// `--eval --watch`: compiles through the evaluator, then again whenever a file the last compile read
+/// changes ([`watch::run_read`]). The watched set is the evaluator's own record of what it asked for, so an
+/// import, an include, an image, a data file, a package file or a font under `--font-path` each rebuilds, and
+/// a file the document does not use never does. Each rebuild prints one status line, the page count and the
+/// wall, with the `skipped:` line folded on; one that fails prints why and leaves the last good
+/// `document.pdf` in place.
+fn watch_eval(job: EvalJob) -> Outcome<()> {
+	// Brisk enough to feel live, cheap enough to leave the cores to the compile.
+	let interval = Duration::from_millis(400);
+	println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", job.source, job.out_dir);
+	watch::run_read(
+		move || {
+			let mut read = Vec::new();
+			match compile_eval(&job, true, &mut read) {
+				Ok(stats)	=> {
+					let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s -> {}/",
+						job.source, stats.pages, stats.secs, job.out_dir);
+					if let Some(skip) = &stats.skip {
+						line.push_str("; ");
+						line.push_str(skip);
+					}
+					println!("{}", line);
+					(Ok(()), read)
+				},
+				Err(e)		=> (Err(e), read),
+			}
+		},
+		interval,
+	)
 }
 
 fn main() -> Outcome<()> {
@@ -646,7 +719,14 @@ fn main() -> Outcome<()> {
 		return Err(err!("--timings needs --eval."; Input, Invalid));
 	}
 	if eval {
-		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict, diag_summary, timings.as_deref());
+		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings };
+		if watching {
+			return watch_eval(job);
+		}
+		let mut read = Vec::new();
+		let stats = res!(compile_eval(&job, false, &mut read));
+		print_eval_done(&job, &stats);
+		return Ok(());
 	}
 
 	if watching {

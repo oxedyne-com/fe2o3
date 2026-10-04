@@ -55,3 +55,18 @@ fn a_root_and_a_source_that_climb_with_dotdot_agree_where_the_source_is() {
 	let (ok, err) = compile(&dir.join("sub"), "..", "../main.typ");
 	assert!(ok, "the source reached through `..` compiles under the root reached through `..`:\n{}", err);
 }
+
+#[test]
+fn a_bare_source_name_with_no_root_takes_the_working_directory_as_its_root() {
+	let dir = project("bare_default");
+	let out_dir = dir.join("out");
+	let out = Command::new(env!("CARGO_BIN_EXE_austenite"))
+		.current_dir(&dir)
+		.args(["--eval", "--diag-summary", "main.typ"])
+		.arg(&out_dir)
+		.output()
+		.expect("the built austenite binary");
+	let err = String::from_utf8_lossy(&out.stderr).to_string();
+	assert!(out.status.success() && out_dir.join("document.pdf").is_file(),
+		"`main.typ` alone compiles, its root the directory it is in:\n{}", err);
+}

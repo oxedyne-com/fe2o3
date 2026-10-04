@@ -51,6 +51,7 @@ use std::collections::{
 };
 use std::sync::Mutex;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -856,6 +857,7 @@ pub struct FontBook {
 	families:	HashMap<String, Vec<usize>>,	// lower-cased family to face ids, in insertion order
 	shapes:		Mutex<ShapeCache>,				// shaped runs, which every holder of the book shares
 	maths:		Mutex<HashMap<usize, Arc<MathFont>>>,	// a face's maths view, built when maths first asks
+	scanned:	Vec<PathBuf>,					// each directory and font file [`FontBook::add_dir`] met
 }
 
 impl std::fmt::Debug for FontBook {
@@ -892,6 +894,7 @@ impl FontBook {
 			families:	self.families.clone(),
 			shapes:		Mutex::new(ShapeCache::default()),
 			maths:		Mutex::new(maths),
+			scanned:	self.scanned.clone(),
 		}
 	}
 
@@ -942,16 +945,29 @@ impl FontBook {
 	pub fn add_dir(&mut self, dir: &Path) {
 		let mut paths = vfs::list_files(dir);
 		paths.sort();
+		self.scanned.push(dir.to_path_buf());
 		for path in paths {
 			let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
 			if !matches!(ext.as_deref(), Some("ttf") | Some("otf") | Some("ttc") | Some("otc")) {
 				continue;
 			}
+			// A file that will not parse is kept here: mending it must be seen. So is its directory, where a
+			// font added beneath the one given shows as a change of the directory it lands in.
+			if let Some(parent) = path.parent() {
+				if !self.scanned.iter().any(|d| d == parent) {
+					self.scanned.push(parent.to_path_buf());
+				}
+			}
+			self.scanned.push(path.clone());
 			if let Ok(bytes) = vfs::read(&path) {
 				let _ = self.add(bytes);
 			}
 		}
 	}
+
+	/// The directories [`FontBook::add_dir`] scanned and every font file it found beneath them, parsed or
+	/// not, which a watch polls so that a font added, mended or removed is seen.
+	pub fn scanned(&self) -> &[PathBuf] { &self.scanned }
 
 	pub fn face(&self, id: usize) -> Option<&BookFace> { self.faces.get(id) }
 

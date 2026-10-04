@@ -94,6 +94,16 @@ impl FontStore {
 		self.book = None;
 	}
 
+	/// The font directories added, and every font file found in them once the book is built: what a watch
+	/// polls so that a font added, mended or removed is seen.
+	pub fn scanned(&self) -> Vec<PathBuf> {
+		let mut out = self.dirs.clone();
+		if let Some(book) = &self.book {
+			out.extend(book.scanned().iter().cloned());
+		}
+		out
+	}
+
 	/// Adds one font file's bytes, after the embedded faces and any directory.
 	pub fn add_bytes(&mut self, bytes: Vec<u8>) {
 		self.files.push(Arc::new(bytes));

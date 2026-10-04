@@ -192,6 +192,7 @@ pub fn read_file(engine: &mut Engine, path: &Path, span: Span) -> Outcome<Vec<u8
 /// Checks that the file at a vfs path can be read, without reading it: what Typst's `image(path)` does at
 /// the call, where it loads the file. The error is the one `read_file` gives.
 pub fn require_file(engine: &mut Engine, path: &Path, span: Span) -> Outcome<()> {
+	engine.world.note(path);
 	if vfs::is_file(path) {
 		return Ok(());
 	}
@@ -202,6 +203,7 @@ pub fn require_file(engine: &mut Engine, path: &Path, span: Span) -> Outcome<()>
 // As `read_file`, with the kind a failure carries: a manifest that cannot be read is the package's fault,
 // not a document's missing file.
 fn read_file_as(engine: &mut Engine, kind: DiagnosticKind, path: &Path, span: Span) -> Outcome<Vec<u8>> {
+	engine.world.note(path);
 	if vfs::is_dir(path) {
 		return Err(fail(engine, kind, span, "failed to load file (is a directory)".to_string(), Vec::new()));
 	}

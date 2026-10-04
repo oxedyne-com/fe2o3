@@ -66,6 +66,7 @@ use oxedyne_fe2o3_font::{
 };
 use oxedyne_fe2o3_graphics::pdf::OutlineItem;
 
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::io;
@@ -449,6 +450,22 @@ pub fn supply_typst_package_cache() {
 }
 
 impl Evaluated {
+	/// The files on disc that the compile depends on, sorted, for a watch to poll: every path the evaluation
+	/// asked the vfs for (the main, each import and include, each image and data file, a package's files),
+	/// found or not, and the font directories and the font files found in them. The record is the
+	/// evaluator's own, kept as it reads, so nothing is parsed again to find a dependency, and a compile
+	/// that failed gives what it had asked for by then. A package supplied in memory has no file behind it.
+	pub fn files_read(&self) -> Vec<PathBuf> {
+		let mut set: BTreeSet<PathBuf> = BTreeSet::new();
+		for path in &self.engine.world.files {
+			if let Some(real) = package::on_disc(path) {
+				set.insert(real);
+			}
+		}
+		set.extend(self.engine.fonts.scanned());
+		set.into_iter().collect()
+	}
+
 	/// The compile's report with columns in characters, as Typst counts them: the form the command line
 	/// shows.
 	pub fn report(&self) -> Report {

@@ -629,6 +629,19 @@ pub fn list(path: &Path) -> Option<Vec<PathBuf>> {
 	Some(out)
 }
 
+/// The file on disc that a vfs path names: a path under a package kept on disc, by its real path, and any
+/// other path as it is. A package supplied in memory has no file behind it, nor has one nobody supplied, so
+/// those give `None`.
+pub fn on_disc(path: &Path) -> Option<PathBuf> {
+	match PackageSpec::of_path(path) {
+		None				=> Some(path.to_path_buf()),
+		Some((spec, rel))	=> match find(&spec) {
+			Some(Found::Dir(dir))	=> Some(dir.join(rel)),
+			_						=> None,
+		},
+	}
+}
+
 /// How a diagnostic names the file at a vfs path: a file in a package kept on disc by its real path, as
 /// Typst names it; any other file by its vfs path.
 pub fn display(path: &Path) -> String {
