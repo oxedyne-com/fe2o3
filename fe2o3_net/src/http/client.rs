@@ -20,9 +20,10 @@
 //!   compiles in its own pinned Let's Encrypt root anchors rather than
 //!   pulling a generic trust store.
 //! - Responses are read with `HttpMessage::read` using the existing default
-//!   chunk sizes from `fe2o3_net::constant`. Chunked transfer encoding is
-//!   not supported: ACME API responses always carry a `Content-Length`
-//!   header, and that is the only production caller for now.
+//!   chunk sizes from `fe2o3_net::constant`. A body is framed by its
+//!   `Content-Length`, by chunked transfer encoding, or, when a response says
+//!   neither, by the end of the connection, which is how an HTTP/1.0 server such
+//!   as Python's `http.server` ends a reply that has no length to state.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -104,6 +105,7 @@ pub fn format_request(
 /// TLS-wrapped, and so is shared by all four entry points below.
 async fn exchange<S>(
     stream:         &mut S,
+    method:         HttpMethod,
     request_bytes:  &[u8],
     peer:           &str,
     limits:         Option<&ReadLimits>,
@@ -125,14 +127,14 @@ where
             IO, Network, Wire, Write)),
     }
 
-    let result = HttpMessage::read::<
+    let result = HttpMessage::read_reply::<
         { constant::HTTP_DEFAULT_HEADER_CHUNK_SIZE },
         { constant::HTTP_DEFAULT_BODY_CHUNK_SIZE },
         _,
     >(
         Pin::new(stream),
         &Vec::new(),
-        Some(false),
+        method == HttpMethod::HEAD,
         limits,
     ).await;
 
@@ -201,7 +203,7 @@ pub async fn http_request_limited(
             IO, Network, Init)),
     };
 
-    exchange(&mut stream, &request_bytes, &peer, limits).await
+    exchange(&mut stream, method, &request_bytes, &peer, limits).await
 }
 
 /// Dials an address the caller has already vetted, rather than a host name this
@@ -238,7 +240,7 @@ pub async fn http_request_at(
             IO, Network, Init)),
     };
 
-    exchange(&mut stream, &request_bytes, &peer, limits).await
+    exchange(&mut stream, method, &request_bytes, &peer, limits).await
 }
 
 
@@ -295,7 +297,7 @@ pub async fn https_request_limited(
     };
 
     let mut stream = res!(tls_wrap(tcp, host, &peer, tls_config).await);
-    exchange(&mut stream, &request_bytes, &peer, limits).await
+    exchange(&mut stream, method, &request_bytes, &peer, limits).await
 }
 
 /// The TLS sibling of [`http_request_at`], and vetted for the same reason: the
@@ -326,7 +328,7 @@ pub async fn https_request_at(
     };
 
     let mut stream = res!(tls_wrap(tcp, host, &peer, tls_config).await);
-    exchange(&mut stream, &request_bytes, &peer, limits).await
+    exchange(&mut stream, method, &request_bytes, &peer, limits).await
 }
 
 /// rustls needs the host name as a validated `ServerName`, so that it can send
@@ -534,5 +536,149 @@ mod tests {
                 Test, Missing));
         }
         Ok(())
+    }
+
+    // ── Replies from an HTTP/1.0 server ──────────────────────────────────────────────────────
+
+    /// A one-shot loopback server: reads the request head, writes `reply` in pieces, then holds
+    /// the connection open for `hold` before closing it. Returns its port.
+    async fn serve_once(
+        reply:  Vec<u8>,
+        hold:   std::time::Duration,
+    )
+        -> Outcome<u16>
+    {
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+        let listener = res!(TcpListener::bind("127.0.0.1:0").await);
+        let port = res!(listener.local_addr()).port();
+        tokio::spawn(async move {
+            let (mut tcp, _) = match listener.accept().await {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 2048];
+            let _ = tcp.read(&mut buf).await;
+            for piece in reply.chunks(1_300) {
+                let _ = tcp.write_all(piece).await;
+                let _ = tcp.flush().await;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            tokio::time::sleep(hold).await;
+            let _ = tcp.shutdown().await;
+        });
+        Ok(port)
+    }
+
+    fn run<F: std::future::Future<Output = Outcome<()>>>(f: F) -> Outcome<()> {
+        let rt = res!(tokio::runtime::Runtime::new());
+        rt.block_on(f)
+    }
+
+    /// Python's `http.server` answers `HTTP/1.0`. The reply was refused as an unrecognised
+    /// version, so a caller proxying to such a server got an error where the page should be.
+    #[test]
+    fn test_an_http_1_0_reply_with_a_length_is_read() -> Outcome<()> {
+        run(async {
+            let port = res!(serve_once(
+                b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\nhello".to_vec(),
+                std::time::Duration::ZERO,
+            ).await);
+            let msg = res!(http_request("127.0.0.1", port, HttpMethod::GET, "/", &[], &[]).await);
+            assert_eq!(msg.header.version, crate::http::header::HttpVersion::Http1_0);
+            assert_eq!(msg.body, b"hello");
+            Ok(())
+        })
+    }
+
+    /// With no length and no chunking an HTTP/1.0 body ends where the connection does (RFC 9112
+    /// 6.3). It is longer than one read and arrives in several writes, so it can only be whole if
+    /// the client reads to the close.
+    #[test]
+    fn test_a_body_that_ends_with_the_connection_is_read_whole() -> Outcome<()> {
+        run(async {
+            let body: Vec<u8> = (0..12_345u32).map(|i| b'a' + (i % 26) as u8).collect();
+            let mut reply = b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n".to_vec();
+            reply.extend_from_slice(&body);
+            let port = res!(serve_once(reply, std::time::Duration::ZERO).await);
+            let msg = res!(http_request("127.0.0.1", port, HttpMethod::GET, "/", &[], &[]).await);
+            assert_eq!(msg.body.len(), body.len());
+            assert_eq!(msg.body, body);
+            Ok(())
+        })
+    }
+
+    /// A reply to `HEAD`, and a `204` or `304`, has no body whatever the framing says, so the
+    /// client must not wait for a connection the server is holding open.
+    #[test]
+    fn test_a_reply_that_has_no_body_is_not_waited_for() -> Outcome<()> {
+        run(async {
+            let hold = std::time::Duration::from_secs(4);
+            let cases: [(HttpMethod, &[u8]); 3] = [
+                (HttpMethod::HEAD, b"HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n\r\n"),
+                (HttpMethod::GET,  b"HTTP/1.0 204 No Content\r\n\r\n"),
+                (HttpMethod::GET,  b"HTTP/1.1 304 Not Modified\r\n\r\n"),
+            ];
+            for (method, reply) in cases {
+                let port = res!(serve_once(reply.to_vec(), hold).await);
+                let started = std::time::Instant::now();
+                let msg = res!(http_request("127.0.0.1", port, method, "/", &[], &[]).await);
+                assert!(msg.body.is_empty());
+                assert!(started.elapsed() < std::time::Duration::from_secs(2),
+                    "{:?} {:?} waited {:?} for a body that cannot exist",
+                    method, String::from_utf8_lossy(reply), started.elapsed());
+            }
+            Ok(())
+        })
+    }
+
+    /// A caller's bound on the body holds for one with no length to check it against.
+    #[test]
+    fn test_a_body_that_ends_with_the_connection_obeys_the_limit() -> Outcome<()> {
+        run(async {
+            let mut reply = b"HTTP/1.0 200 OK\r\n\r\n".to_vec();
+            reply.extend_from_slice(&[b'x'; 20_000]);
+            let port = res!(serve_once(reply, std::time::Duration::ZERO).await);
+            let limits = ReadLimits { max_body_bytes: Some(1_000), ..ReadLimits::default() };
+            let e = match http_request_limited("127.0.0.1", port, HttpMethod::GET, "/", &[], &[],
+                Some(&limits)).await
+            {
+                Ok(m) => return Err(err!("A {} byte body passed a limit of 1000.", m.body.len();
+                    Test, Mismatch)),
+                Err(e) => e,
+            };
+            assert!(e.tags().contains(&ErrTag::TooBig), "{}", e);
+            Ok(())
+        })
+    }
+
+    /// A body framed by a chunked encoding or by a `Content-Length` ends where the framing says,
+    /// not where the connection does. A chunked reply reaches the framing check with its
+    /// `Transfer-Encoding` already taken off, so a check made afterwards sees no framing at all and
+    /// reads to the close, which both waits out a server holding the connection open and throws
+    /// the decoded body away.
+    #[test]
+    fn test_a_framed_reply_is_not_read_to_the_close() -> Outcome<()> {
+        run(async {
+            let hold = std::time::Duration::from_secs(4);
+            let cases: [(&[u8], &[u8]); 3] = [
+                (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                    b"hello world"),
+                (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n", b""),
+                (b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", b""),
+            ];
+            for (reply, want) in cases {
+                let port = res!(serve_once(reply.to_vec(), hold).await);
+                let started = std::time::Instant::now();
+                let msg = res!(http_request("127.0.0.1", port, HttpMethod::GET, "/", &[], &[]).await);
+                assert_eq!(msg.body, want, "{:?}", String::from_utf8_lossy(reply));
+                assert!(started.elapsed() < std::time::Duration::from_secs(2),
+                    "{:?} waited {:?} for a close its framing had made unnecessary",
+                    String::from_utf8_lossy(reply), started.elapsed());
+            }
+            Ok(())
+        })
     }
 }

@@ -1,8 +1,16 @@
 #!/usr/bin/env bash
-# Runs wasm_bench.mjs for both wasm engines on each doc, interleaved (Austenite
-# then typst.ts per doc, round for round -- there is only one round per doc here
-# since wasm_bench.mjs itself runs the warm-ups and measured runs in one long-
-# lived process), each capped and timed exactly as the native runs are.
+# Runs wasm_bench.mjs for both wasm engines, in every mode in $WASM_MODES, on
+# each doc -- Austenite then typst.ts per (doc, mode), round for round (there
+# is only one round per invocation here, since wasm_bench.mjs itself runs the
+# warm-ups and measured runs in one process), each capped and timed exactly
+# as the native runs are.
+#
+# Modes (see wasm_bench.mjs's header for what each measures), named as check
+# G11 names them: `cold` (a fresh instance per measured run), `unchanged` (one
+# instance, the same source again: a memoising engine's cache hit) and `edit`
+# (one instance, one more letter typed near the middle before each run). All
+# three run by default so a report always carries the labelled comparison
+# (review item 18); set WASM_MODES to narrow it.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,6 +22,7 @@ TYPST_VENDOR="${TYPST_VENDOR:?set TYPST_VENDOR to the daimond typst.ts vendor di
 WARMUPS="${WARMUPS:-1}"
 RUNS="${RUNS:-3}"
 FMT="${FMT:-pdf}"
+WASM_MODES="${WASM_MODES:-cold unchanged edit}"
 OUT_DIR="${OUT_DIR:?set OUT_DIR}"
 DOCS=("$@")
 
@@ -27,7 +36,7 @@ JSONL="$OUT_DIR/wasm_runs.jsonl"
 : > "$JSONL"
 
 run_engine() {
-	local doc="$1" engine="$2" vendor="$3"
+	local doc="$1" engine="$2" vendor="$3" mode="$4" runs="${5:-$RUNS}"
 	local docname; docname="$(basename "$doc" .typ)"
 	local stdout_f time_f
 	stdout_f="$(mktemp)"; time_f="$(mktemp)"
@@ -40,7 +49,7 @@ run_engine() {
 	systemd-run --user --scope --quiet -p MemoryMax=3G --slice=claude-rc.slice -- \
 		/usr/bin/time -v -o "$time_f" -- \
 		node "$HERE/wasm_bench.mjs" "--engine=$engine" "--vendor=$vendor" "--doc=$doc" \
-			"--warmups=$WARMUPS" "--runs=$RUNS" "--fmt=$FMT" \
+			"--mode=$mode" "--warmups=$WARMUPS" "--runs=$runs" "--fmt=$FMT" \
 		> "$stdout_f" 2> /dev/null
 	local exit_code=$?
 	t1=$(date +%s.%N)
@@ -61,15 +70,17 @@ run_engine() {
 		flagged=true
 	fi
 
+	# Engine tag carries the mode, so an unchanged recompile and a cold compile
+	# are never folded into the same group by aggregate.py.
 	jq -nc \
-		--arg doc "$docname" --arg engine "$engine" --argjson rss_kb "${rss_kb:-0}" \
+		--arg doc "$docname" --arg engine "wasm-${engine}-${mode}" --argjson rss_kb "${rss_kb:-0}" \
 		--argjson exit_code "$exit_code" \
 		--argjson load_before "$load_before" --argjson load_after "$load_after" \
 		--argjson psi_cpu_before "$psi_cpu_before" --argjson psi_cpu_after "$psi_cpu_after" \
 		--argjson psi_mem_before "$psi_mem_before" --argjson psi_mem_after "$psi_mem_after" \
 		--argjson flagged_under_load "$flagged" --arg ts "$(date -u +%FT%TZ)" \
 		--argjson inner "$inner" \
-		'$inner * {ts:$ts, doc:$doc, engine:("wasm-"+$engine), rss_kb:$rss_kb, exit_code:$exit_code,
+		'$inner * {ts:$ts, doc:$doc, engine:$engine, rss_kb:$rss_kb, exit_code:$exit_code,
 		  load_before:$load_before, load_after:$load_after,
 		  psi_cpu_before:$psi_cpu_before, psi_cpu_after:$psi_cpu_after,
 		  psi_mem_before:$psi_mem_before, psi_mem_after:$psi_mem_after,
@@ -80,9 +91,20 @@ run_engine() {
 }
 
 for doc in "${DOCS[@]}"; do
-	run_engine "$doc" austenite "$AUST_VENDOR"
-	run_engine "$doc" typstts "$TYPST_VENDOR"
-	echo "[wasm_bench] $(basename "$doc" .typ): austenite + typstts done" >&2
+	for mode in $WASM_MODES; do
+		if [[ "$mode" == cold ]]; then
+			# A cold compile is one per process, so nothing -- not even the engine's compiled code --
+			# is warm; the processes alternate between the engines run for run.
+			for ((r = 0; r < RUNS; r++)); do
+				run_engine "$doc" austenite "$AUST_VENDOR" cold 1
+				run_engine "$doc" typstts "$TYPST_VENDOR" cold 1
+			done
+		else
+			run_engine "$doc" austenite "$AUST_VENDOR" "$mode"
+			run_engine "$doc" typstts "$TYPST_VENDOR" "$mode"
+		fi
+		echo "[wasm_bench] $(basename "$doc" .typ) [$mode]: austenite + typstts done" >&2
+	done
 done
 
 echo "$JSONL"

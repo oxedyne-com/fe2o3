@@ -34,6 +34,7 @@ use oxedyne_fe2o3_net::{
             SameSite,
         },
         fwd::ForwardedPolicy,
+        msg::ReadLimits,
     },
 };
 
@@ -596,9 +597,21 @@ impl WebhookRoute {
 /// Proxy routes are checked after redirect rules but before static file
 /// serving and API routes.  When multiple proxy routes match, the longest
 /// prefix wins.
+///
+/// A route with `exact` set claims the one path it names instead of a
+/// subtree, so a form endpoint such as `/subscribe` can be handed to its
+/// own process without also handing it `/subscribe.py` or `/subscribers.txt`.
+/// Unlike an [`ApiRoute`], which also names one path, a proxy route tells the
+/// upstream who the client is (`X-Forwarded-For`, see `fe2o3_net::http::fwd`),
+/// accepts any method and streams the reply with its status untouched.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProxyRoute {
     pub path_prefix:    String,                     // `/` matches everything, `/api/` a subtree
+    // When true, `path_prefix` names the one path the route serves, and a request for anything
+    // else -- `/subscribe.py`, `/subscribe/`, `/subscribers.txt` beside an exact `/subscribe` --
+    // is left to the rest of the dispatch chain. Defaults to false, the prefix match every
+    // config written before the field existed says.
+    pub exact:          bool,
     pub upstream_host:  String,                     // e.g. `127.0.0.1`, `localhost`
     pub upstream_port:  u16,
     pub upstream_tls:   bool,                       // default false; loopback rarely needs it
@@ -633,6 +646,14 @@ impl ProxyRoute {
                 path_prefix;
                 Invalid, Input, Missing)),
         };
+        let exact = match m.get(&dat!("exact")) {
+            Some(Dat::Bool(b)) => *b,
+            None => false,
+            _ => return Err(err!(
+                "ProxyRoute '{}': 'exact' must be a boolean when present.",
+                path_prefix;
+                Invalid, Input, Mismatch)),
+        };
         let upstream_tls = match m.get(&dat!("upstream_tls")) {
             Some(Dat::Bool(b)) => *b,
             None => false,
@@ -651,6 +672,7 @@ impl ProxyRoute {
         };
         Ok(Self {
             path_prefix,
+            exact,
             upstream_host,
             upstream_port,
             upstream_tls,
@@ -658,8 +680,12 @@ impl ProxyRoute {
         })
     }
 
+    /// Does this route claim the request path?
     pub fn matches(&self, request_path: &str) -> bool {
-        request_path.starts_with(&self.path_prefix)
+        match self.exact {
+            true    => request_path == self.path_prefix,
+            false   => request_path.starts_with(&self.path_prefix),
+        }
     }
 
     pub fn upstream_path_for(&self, request_path: &str) -> String {
@@ -1053,6 +1079,13 @@ pub struct VhostConfig {
     // writes no connection line, request line or traffic record, which a vhost serving tiles
     // must set, since its requests say where each viewer looked. Defaults to `true`.
     pub access_log:             bool,
+    // Whether this vhost serves the operator dashboard at `/admin` and everything under it.
+    // `false` answers 404 there, so a public site with nothing to administer shows no login page
+    // and its web root can never be read through that prefix. The dashboard is one surface for
+    // the whole process, so this only decides which names it is reachable by: the loopback
+    // listener (`admin_local_port`) names no vhost and is untouched. Defaults to `true`, which is
+    // what every config written before the field existed says.
+    pub admin_dashboard:        bool,
 }
 
 /// A single entry in a vhost's [`VhostConfig::admin_keys`] list.
@@ -1100,6 +1133,7 @@ impl Default for VhostConfig {
             site_admins:            Vec::new(),
             tiles:                  None,
             access_log:             true,
+            admin_dashboard:        true,
         }
     }
 }
@@ -1455,6 +1489,13 @@ impl VhostConfig {
                 "VhostConfig: 'access_log' must be a boolean.";
                 Invalid, Input, Mismatch)),
         };
+        let admin_dashboard = match m.get(&dat!("admin_dashboard")) {
+            Some(Dat::Bool(b)) => *b,
+            None => true,
+            _ => return Err(err!(
+                "VhostConfig: 'admin_dashboard' must be a boolean.";
+                Invalid, Input, Mismatch)),
+        };
         // A tile request names where its viewer looked, so a vhost serving tiles may not keep
         // even the connection lines that would pair a viewer's address with the time.
         if tiles.is_some() && access_log {
@@ -1484,6 +1525,7 @@ impl VhostConfig {
             site_admins,
             tiles,
             access_log,
+            admin_dashboard,
         })
     }
 
@@ -2569,6 +2611,12 @@ pub struct ServerConfig {
     // error. Zero disables the deadline.
     #[optional]
     pub http_header_read_timeout_ms:    u64,
+    // Wall-clock budget, in milliseconds, for one call to an `api_routes` or webhook upstream, from
+    // connecting to the last byte of its reply. A call that overruns it is answered `504 Gateway
+    // Timeout`. The size limits above bound the reply's headers and body (`502 Bad Gateway` over
+    // them). Zero disables the deadline.
+    #[optional]
+    pub upstream_timeout_ms:            u64,
     // When true, Steel injects a baseline set of security response headers into every HTTPS
     // response: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`,
     // `Permissions-Policy`.
@@ -2781,6 +2829,7 @@ impl Default for ServerConfig {
             http_max_header_bytes:          16 * 1024,            // 16 KiB
             http_max_body_bytes:            8 * 1024 * 1024,      // 8 MiB
             http_header_read_timeout_ms:    15_000,               // 15 s
+            upstream_timeout_ms:            30_000,               // 30 s
             security_headers_enabled:       true,
             content_security_policy:        String::new(),
             addr_guard:                     DaticleMap::new(),
@@ -3098,6 +3147,32 @@ impl ServerConfig {
             key: SESSION_ID_KEY_LABEL.to_string(),
             val: sid,
             attrs: Some(session_cookie_attrs),
+        }
+    }
+
+    /// The bounds the HTTP reader enforces on a message it reads, from the three `http_*` limits.
+    /// Zero in the config means no limit.
+    pub fn read_limits(&self) -> ReadLimits {
+        ReadLimits {
+            max_header_bytes: match self.http_max_header_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            max_body_bytes: match self.http_max_body_bytes {
+                0 => None,
+                n => Some(n as usize),
+            },
+            header_read_timeout: match self.http_header_read_timeout_ms {
+                0 => None,
+                ms => Some(Duration::from_millis(ms)),
+            },
+        }
+    }
+
+    pub fn upstream_timeout(&self) -> Option<Duration> {
+        match self.upstream_timeout_ms {
+            0 => None,
+            ms => Some(Duration::from_millis(ms)),
         }
     }
 
@@ -3560,6 +3635,7 @@ mod tests {
     fn proxy_up(prefix: &str, host: &str, port: u16) -> ProxyRoute {
         ProxyRoute {
             path_prefix:    prefix.to_string(),
+            exact:          false,
             upstream_host:  host.to_string(),
             upstream_port:  port,
             upstream_tls:   false,
@@ -3599,6 +3675,40 @@ mod tests {
         v.proxy_routes = vec![proxy_up("/chat/", "evil.example.com", 8080)];
         assert!(v.validate_egress().is_err(),
             "a proxy_route to a host the operator did not name must be refused");
+    }
+
+    /// A prefix route claims a subtree, and an exact one only the path it names.
+    /// The difference is what keeps `/subscribe.py` and `/subscribers.txt` out
+    /// of the process behind an exact `/subscribe`.
+    #[test]
+    fn an_exact_proxy_route_claims_only_the_path_it_names() {
+        let prefix = proxy_up("/subscribe", "127.0.0.1", 9900);
+        let mut exact = proxy_up("/subscribe", "127.0.0.1", 9900);
+        exact.exact = true;
+        for path in ["/subscribe", "/subscribe.py", "/subscribers.txt", "/subscribe/x"] {
+            assert!(prefix.matches(path), "a prefix route must claim {}", path);
+        }
+        assert!(exact.matches("/subscribe"));
+        for path in ["/subscribe.py", "/subscribers.txt", "/subscribe/", "/subscribe/x", "/", ""] {
+            assert!(!exact.matches(path), "an exact route must not claim {:?}", path);
+        }
+    }
+
+    /// `exact` is optional, defaults to the prefix match, and must be a boolean.
+    #[test]
+    fn a_proxy_route_reads_exact_and_defaults_to_a_prefix() -> Outcome<()> {
+        let mut m = DaticleMap::new();
+        m.insert(dat!("path_prefix"),   dat!("/subscribe"));
+        m.insert(dat!("upstream_host"), dat!("127.0.0.1"));
+        m.insert(dat!("upstream_port"), Dat::U16(9900));
+        assert!(!res!(ProxyRoute::from_datmap(&m)).exact,
+            "a route written before `exact` existed must stay a prefix route");
+        m.insert(dat!("exact"), Dat::Bool(true));
+        assert!(res!(ProxyRoute::from_datmap(&m)).exact);
+        m.insert(dat!("exact"), dat!("yes"));
+        assert!(ProxyRoute::from_datmap(&m).is_err(),
+            "a non-boolean `exact` must be refused, not read as false");
+        Ok(())
     }
 
     /// A webhook route in forwarding mode POSTs the payload onward, which is

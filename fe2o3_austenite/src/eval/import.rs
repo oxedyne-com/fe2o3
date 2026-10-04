@@ -374,7 +374,12 @@ fn not_found(engine: &mut Engine, spec: &PackageSpec, span: Span) -> Error<ErrTa
 		hints.push(fmt!("the host supplied {} {}", if listed.len() == 1 { "version" } else { "versions" },
 			listed.join(", ")));
 	}
-	fail(engine, DiagnosticKind::Package, span, message, hints)
+	let mut d = Diagnostic::error(DiagnosticKind::Package, span, message.clone()).needing(spec.to_string());
+	for h in hints {
+		d = d.with_hint(h);
+	}
+	engine.diags.push(d);
+	err!("{}", message; Input, Invalid)
 }
 
 // A file as a diagnostic names it: relative to the project root, or by its package path.

@@ -24,6 +24,7 @@ use crate::harness::structure::{
 	self,
 	Sk,
 };
+use crate::harness::typst_command::typst_command;
 use crate::harness::PosRow;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -35,6 +36,10 @@ use std::path::{
 use std::process::Command;
 
 pub const PINNED: &str = "typst 0.15.";
+
+// Part of every cache key: which faces Typst was given, so that a product made with the account's own fonts is
+// never read as made without them.
+pub const FACES: &str = "fonts=system";
 
 pub const PROBES_EXPR: &str = "query(<probe>).map(it => it.value)";
 pub const POSITIONS_EXPR: &str = "query(selector(heading).or(figure, math.equation, footnote, <probe>))\
@@ -97,17 +102,7 @@ impl Oracle {
 	}
 
 	fn command(&self, args: &[String], cwd: &Path) -> Command {
-		let mut c = match &self.cap {
-			Some(cap) => {
-				let mut c = Command::new("systemd-run");
-				c.args(["--user", "--scope", "--quiet", "-p"]);
-				c.arg(fmt!("MemoryMax={}", cap));
-				c.arg("--slice=claude-rc.slice");
-				c.arg(&self.bin);
-				c
-			}
-			None => Command::new(&self.bin),
-		};
+		let mut c = typst_command(&self.bin, self.cap.as_deref(), &self.work);
 		c.args(args);
 		c.current_dir(cwd);
 		// An area that keeps packages of its own beside its fixtures lays them out as Typst's package
@@ -139,6 +134,7 @@ impl Oracle {
 		let files = res!(area_bytes(&fx.root));
 		let mut h = Fnv::new();
 		h.feed(self.version.as_bytes());
+		h.feed(FACES.as_bytes());
 		h.feed(fx.name.as_bytes());
 		for (rel, bytes) in &files {
 			h.feed(rel.as_bytes());

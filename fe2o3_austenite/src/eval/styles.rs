@@ -51,15 +51,17 @@ pub const DEFAULT_FONT_SIZE_PT: f64 = 11.0;	// Typst's `text.size` default
 
 #[derive(Clone, Debug)]
 pub struct Property {
-	pub elem:	ElemKind,
-	pub field:	FieldId,
-	pub value:	Value,
-	pub span:	Span,
+	pub elem:		ElemKind,
+	pub field:		FieldId,
+	pub value:		Value,
+	pub span:		Span,
+	pub liftable:	bool,	// set by a set rule: may be lifted to the page level
+	pub outside:	bool,	// applied outside any show rule or container
 }
 
 impl Property {
 	pub fn new(elem: ElemKind, field: FieldId, value: Value, span: Span) -> Self {
-		Self { elem, field, value, span }
+		Self { elem, field, value, span, liftable: false, outside: false }
 	}
 }
 
@@ -81,6 +83,7 @@ pub struct Recipe {
 	pub selector:	Option<Selector>,	// None: `show: f`, wrapping the rest of the scope
 	pub transform:	Transformation,
 	pub span:		Span,
+	pub outside:	bool,				// applied outside any show rule or container
 }
 
 impl Recipe {
@@ -127,6 +130,36 @@ impl Style {
 			Style::Revocation(_)	=> Span::detached(),
 		}
 	}
+
+	/// Was the style applied outside any show rule or container, so that it may reach the page level?
+	pub fn outside(&self) -> bool {
+		match self {
+			Style::Property(p)		=> p.outside,
+			Style::Recipe(r)		=> r.outside,
+			Style::Revocation(_)	=> false,
+		}
+	}
+
+	/// May the style be lifted to the page level? Only a set rule's properties and any recipe may.
+	pub fn liftable(&self) -> bool {
+		match self {
+			Style::Property(p)		=> p.liftable,
+			Style::Recipe(_)		=> true,
+			Style::Revocation(_)	=> false,
+		}
+	}
+
+	/// Is this the style `other` was copied from? Two styles from one rule share their element, field and
+	/// span; a value is not compared.
+	pub fn same(&self, other: &Style) -> bool {
+		match (self, other) {
+			(Style::Property(a), Style::Property(b))	=> a.elem == b.elem && a.field == b.field && a.span == b.span
+				&& a.outside == b.outside && a.liftable == b.liftable,
+			(Style::Recipe(a), Style::Recipe(b))		=> a.span == b.span && a.outside == b.outside,
+			(Style::Revocation(a), Style::Revocation(b))	=> a == b,
+			_											=> false,
+		}
+	}
 }
 
 /// A list of styles from one `set` or `show`, or several merged. Later entries are inner: they win.
@@ -163,6 +196,45 @@ impl Styles {
 		let mut v = (*outer.0).clone();
 		v.extend(self.0.iter().cloned());
 		self.0 = Arc::new(v);
+	}
+
+	/// The styles marked as applied outside any show rule or container.
+	pub fn outside(&self) -> Styles {
+		Styles::from_vec(self.iter().cloned().map(|mut s| {
+			match &mut s {
+				Style::Property(p)	=> p.outside = true,
+				Style::Recipe(r)	=> r.outside = true,
+				Style::Revocation(_)	=> (),
+			}
+			s
+		}).collect())
+	}
+
+	/// The styles marked as liftable to the page level, as a `set` rule's are.
+	pub fn liftable(&self) -> Styles {
+		Styles::from_vec(self.iter().cloned().map(|mut s| {
+			if let Style::Property(p) = &mut s {
+				p.liftable = true;
+			}
+			s
+		}).collect())
+	}
+
+	/// The styles of content at the root, outside what the author laid out: page furniture and footnote
+	/// entries. Typst's `Styles::root`: the styles every child shares (else those in force at the start),
+	/// of which only an outside style that was in force at the start or is liftable stays, so a set rule
+	/// at the top of the document reaches the furniture but a heading's own styling or a `text` call's
+	/// does not.
+	pub fn root<'a, I: IntoIterator<Item = &'a StyleChain>>(children: I, initial: &StyleChain) -> Styles {
+		let mut chains = children.into_iter().peekable();
+		let base = if chains.peek().is_some() { StyleChain::trunk(chains) } else { initial.clone() };
+		let base = base.flatten();
+		let init = initial.flatten();
+		let kept = init.iter().zip(base.iter()).take_while(|(a, b)| a.same(b)).count();
+		Styles::from_vec(base.into_iter().enumerate()
+			.filter(|(i, s)| s.outside() && (*i < kept || s.liftable()))
+			.map(|(_, s)| s.clone())
+			.collect())
 	}
 
 	/// Does any style set a property of `kind`?
@@ -214,6 +286,11 @@ impl StyleChain {
 			(Some(a), Some(b))	=> Arc::ptr_eq(a, b),
 			_					=> false,
 		}
+	}
+
+	/// Every style, outermost first: Typst's `to_map`.
+	pub fn flatten(&self) -> Vec<&Style> {
+		self.links().into_iter().rev().flat_map(|l| l.styles.0.iter()).collect()
 	}
 
 	/// Every style, innermost first.

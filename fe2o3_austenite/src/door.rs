@@ -1,0 +1,408 @@
+//! The door: every compile the wasm surface offers, as plain Rust, so that a native test drives exactly what
+//! the browser calls. [`crate::wasm`] holds only the translation between JavaScript values and these types.
+//!
+//! The evaluator serves every door, the live view's changed-only delta included. A project's files are sealed
+//! into the source map as the browser has them, so nothing the project does not hold resolves from the real
+//! filesystem, whatever the host. The source map, the image base directory and the package store are process
+//! globals, so a call takes one turn at a time. Columns on this surface count UTF-16 code units, as JavaScript
+//! counts them, and start at 1.
+
+use crate::compile::{
+	self,
+	Cols,
+	Diagnostic,
+	Report,
+	Severity,
+};
+use crate::delta::{
+	self,
+	Changed,
+};
+use crate::diag::DiagnosticKind;
+use crate::emit::sinks::{
+	Chunks,
+	DeltaSink,
+	PdfSink,
+	VectorSink,
+};
+use crate::eval::{
+	Engine,
+	World,
+};
+use crate::eval::eval::{
+	eval_string,
+	EvalMode,
+};
+use crate::eval::fixpoint::PageSink;
+use crate::eval::intro::Introspector;
+use crate::eval::lib::data;
+use crate::eval::package::{
+	self,
+	PackageSpec,
+};
+use crate::eval::scope::Scope;
+use crate::eval::select;
+use crate::eval::value::Value;
+use crate::flow::text::FontStore;
+use crate::fonts::FontBook;
+use crate::syntax::Span;
+use crate::vfs;
+
+use oxedyne_fe2o3_core::prelude::*;
+
+use std::collections::HashMap;
+use std::path::{
+	Path,
+	PathBuf,
+};
+use std::sync::{
+	Arc,
+	Mutex,
+	MutexGuard,
+};
+
+// One call at a time: the source map, the image base directory and the package store are process globals.
+static TURN: Mutex<()> = Mutex::new(());
+
+/// Takes this call's turn; a turn a panicked call poisoned is still a turn.
+fn turn() -> MutexGuard<'static, ()> {
+	TURN.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The path a project's main file takes when it names none.
+pub const MAIN: &str = "/main.typ";
+
+/// What a call is given: the project's files by path in its own shadow file system, as Daimond sends them.
+#[derive(Clone, Debug, Default)]
+pub struct Project {
+	pub main:		String,					// empty for `/main.typ`
+	pub sources:	Vec<(String, String)>,	// path, text
+	pub assets:		Vec<(String, Vec<u8>)>,
+	pub fonts:		Vec<(String, Vec<u8>)>,	// the name is not read: the face declares its own family
+	pub strict:		bool,
+	pub known:		Vec<u64>,				// the delta's page ids the consumer already holds
+}
+
+impl Project {
+	/// A one-file project, `/main.typ`, not strict.
+	pub fn single(source: &str) -> Self {
+		Self { sources: vec![(MAIN.to_string(), source.to_string())], ..Self::default() }
+	}
+
+	fn main_path(&self) -> PathBuf {
+		PathBuf::from(if self.main.is_empty() { MAIN } else { self.main.as_str() })
+	}
+}
+
+/// A compile that produced its artefact: the artefact, every site not set as written, and the packages the
+/// project asked for that nobody supplied.
+pub struct Made<T> {
+	pub product:	T,
+	pub report:		Report,
+	pub needs:		Vec<String>,
+}
+
+/// A compile that did not: the error's own site first, then the sites that follow it.
+#[derive(Debug)]
+pub struct Failure {
+	pub head:		Diagnostic,
+	pub rest:		Vec<Diagnostic>,
+	pub pages:		Option<usize>,	// set when the compile got as far as laying pages out
+	pub skipped:	Option<String>,
+	pub needs:		Vec<String>,
+}
+
+impl Failure {
+	/// An error with no report behind it, placed at the site it was raised with, else at `0:0` in `main`.
+	fn of(e: &Error<ErrTag>, main: &Path) -> Self {
+		Self {
+			head:		Diagnostic::from_error(e, main),
+			rest:		Vec::new(),
+			pages:		None,
+			skipped:	None,
+			needs:		Vec::new(),
+		}
+	}
+
+	/// A fault of the engine's own, at `0:0` in `main`.
+	fn internal(main: &Path, message: &str) -> Self {
+		Self {
+			head:		Diagnostic {
+				file:		main.display().to_string(),
+				line:		0,
+				col:		0,
+				message:	fmt!("internal: {}", message),
+				severity:	Severity::Error,
+				kind:		DiagnosticKind::Internal,
+				hint:		None,
+			},
+			rest:		Vec::new(),
+			pages:		None,
+			skipped:	None,
+			needs:		Vec::new(),
+		}
+	}
+
+	/// A strict refusal: its head restates the first site, then every site follows.
+	fn refused(head: Diagnostic, report: &Report, needs: Vec<String>) -> Self {
+		Self {
+			head,
+			rest:		report.diagnostics.clone(),
+			pages:		Some(report.pages),
+			skipped:	report.skipped.clone(),
+			needs,
+		}
+	}
+}
+
+/// One element a query found.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Row {
+	pub kind:	String,				// the element's function: `heading`, `figure`, `metadata`
+	pub label:	Option<String>,
+	pub page:	Option<u32>,		// 1-based, from the introspector
+	pub value:	Option<String>,		// JSON text of the field asked for, none where the element has none
+	pub title:	Option<String>,		// a heading's plain text
+	pub level:	Option<i64>,		// a heading's depth
+}
+
+/// A long-lived compiler: the embedded faces parsed once, the last good compile's introspector for queries,
+/// and the delta's version tick.
+pub struct Instance {
+	base:		Option<Arc<FontBook>>,		// none only if the embedded bytes would not parse
+	intro:		Option<Arc<Introspector>>,
+	version:	u32,						// the delta's tick
+}
+
+impl Default for Instance {
+	fn default() -> Self { Self::new() }
+}
+
+impl Instance {
+	/// Parses the embedded faces once. A face that will not parse is reported by the first compile, never
+	/// here, so a constructor cannot fail.
+	pub fn new() -> Self {
+		Self {
+			base:		FontBook::embedded().ok().map(Arc::new),
+			intro:		None,
+			version:	0,
+		}
+	}
+
+	/// Compiles to PDF through the evaluator. The chunks are the file; a host copies them out one by one.
+	pub fn compile_pdf(&mut self, p: &Project) -> Result<Made<Chunks>, Failure> {
+		let sink = match PdfSink::new() {
+			Ok(s)	=> s,
+			Err(e)	=> return Err(Failure::of(&e, &p.main_path())),
+		};
+		self.run(p, sink, |s| s.into_output())
+	}
+
+	/// Compiles to one SVG document per page through the evaluator.
+	pub fn compile_svg(&mut self, p: &Project) -> Result<Made<Vec<String>>, Failure> {
+		self.run(p, VectorSink::default(), |s| s.into_pages())
+	}
+
+	fn run<S, T, F>(&mut self, p: &Project, mut sink: S, take: F) -> Result<Made<T>, Failure>
+	where
+		S: PageSink,
+		F: FnOnce(S) -> Option<T>,
+	{
+		let _turn	= turn();
+		let main	= p.main_path();
+		// A failed compile answers no query, so the kept introspector goes before the compile begins.
+		self.intro	= None;
+		let base = match &self.base {
+			Some(b)	=> b.clone(),
+			None	=> return Err(Failure::internal(&main, "the embedded font set could not be built")),
+		};
+		if let Err(e) = install(p, &main) {
+			let _ = vfs::clear();
+			return Err(Failure::of(&e, &main));
+		}
+		let mut fonts = FontStore::with_base(base);
+		for (_, bytes) in &p.fonts {
+			fonts.add_bytes(bytes.clone());
+		}
+		let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			compile::assemble_eval(&main, Path::new("/"), fonts, &mut sink)
+		}));
+		let _ = vfs::clear();
+		let done = match caught {
+			Ok(Ok(d))	=> d,
+			Ok(Err(e))	=> return Err(Failure::of(&e, &main)),
+			Err(_)		=> return Err(Failure::internal(&main,
+				"the compiler panicked while compiling, so no document was produced")),
+		};
+		let needs	= done.needs();
+		let report	= done.report_in(Cols::Utf16);
+		let laid = match &done.laid {
+			Ok(l)	=> l,
+			Err(e)	=> {
+				// The first error is the one the fixpoint stopped on; the sites after it follow.
+				let mut rest = report.diagnostics.clone();
+				let head = match done.engine.diags.iter().position(|d| d.is_error()) {
+					Some(i)	=> rest.remove(i),
+					None	=> Diagnostic::from_error(e, &main),
+				};
+				return Err(Failure { head, rest, pages: None, skipped: report.skipped.clone(), needs });
+			},
+		};
+		if p.strict {
+			if let Some(head) = report.strict_failure(&main) {
+				return Err(Failure::refused(head, &report, needs));
+			}
+		}
+		self.intro = Some(laid.intro.clone());
+		match take(sink) {
+			Some(product)	=> Ok(Made { product, report, needs }),
+			None			=> Err(Failure::internal(&main, "the fixpoint ended with no output")),
+		}
+	}
+
+	/// The families a compile of `p` can set by name, sorted: the embedded faces and the family every face
+	/// of every project font declares. It is read from the font book a compile resolves `font:` against, so
+	/// a family is listed exactly when a compile finds it.
+	pub fn font_families(&self, p: Option<&Project>) -> Vec<String> {
+		let base = match &self.base {
+			Some(b)	=> b.clone(),
+			None	=> return Vec::new(),
+		};
+		let mut store = FontStore::with_base(base);
+		if let Some(p) = p {
+			for (_, bytes) in &p.fonts {
+				store.add_bytes(bytes.clone());
+			}
+		}
+		match store.book() {
+			Ok(book)	=> book.family_names(),
+			Err(_)		=> Vec::new(),
+		}
+	}
+
+	/// What `selector`, a Typst selector expression, finds in the last good compile, as `typst query` finds
+	/// it. `field` names the field each row's `value` carries, `value` where empty. It answers `None`, never
+	/// a wrong answer, when nothing has compiled, the selector does not evaluate, or a field cannot be
+	/// written as Typst writes it.
+	pub fn query(&self, selector: &str, field: &str) -> Option<Vec<Row>> {
+		let intro = match &self.intro {
+			Some(i)	=> i.clone(),
+			None	=> return None,
+		};
+		let _turn = turn();
+		// A fresh engine over the kept introspector evaluates the selector as `typst query` does.
+		let mut engine = Engine::new(World::new(PathBuf::from("/")));
+		engine.intro = intro.clone();
+		let span = Span::detached();
+		let found = match eval_string(&mut engine, selector, EvalMode::Code, Scope::default(), span) {
+			Ok(v)	=> v,
+			Err(_)	=> return None,
+		};
+		let sel = match select::cast(&mut engine, span, found) {
+			Ok(s)	=> s,
+			Err(_)	=> return None,
+		};
+		let hits = match intro.query(&sel) {
+			Ok(h)	=> h,
+			Err(_)	=> return None,
+		};
+		let want = if field.is_empty() { "value" } else { field };
+		let mut rows = Vec::with_capacity(hits.len());
+		for c in hits {
+			let kind = match c.kind() {
+				Some(k)	=> k.name().to_string(),
+				None	=> return None,
+			};
+			// A field that cannot be written as Typst writes it spoils the whole answer, not just its row.
+			let value = match c.field(want) {
+				Some(v)	=> match data::plain_json(v) {
+					Some(j)	=> Some(j),
+					None	=> return None,
+				},
+				None	=> None,
+			};
+			let (title, level) = if kind == "heading" {
+				let title = match c.field("body") {
+					Some(Value::Content(b))	=> b.plain_text(),
+					_						=> String::new(),
+				};
+				let level = match c.field("level") {
+					Some(Value::Int(l))	=> *l,
+					_					=> 1,
+				};
+				(Some(title), Some(level))
+			} else {
+				(None, None)
+			};
+			rows.push(Row {
+				kind,
+				label:	c.label().map(|l| l.as_str().to_string()),
+				page:	c.location().and_then(|l| intro.page(l)),
+				value,
+				title,
+				level,
+			});
+		}
+		Some(rows)
+	}
+
+	/// The changed-only page delta through the evaluator, the live view's path. `known` is the page ids the
+	/// consumer holds; the version is this instance's tick, stepped by a compile that produced a delta and
+	/// left where it was by one that did not, a strict refusal included, so a consumer that dispatches
+	/// compiles without awaiting each can discard a stale return by its version.
+	pub fn compile_delta(&mut self, p: &Project) -> Result<Made<delta::PageDelta>, Failure> {
+		self.compile_delta_into(p, Vec::new()).map(|m| Made {
+			product:	delta::PageDelta::of(m.product.0, m.product.1),
+			report:		m.report,
+			needs:		m.needs,
+		})
+	}
+
+	/// As [`compile_delta`](Self::compile_delta), each changed page's SVG handed to `out` the moment it is
+	/// drawn, so the compile holds none of them: the browser door pushes each into a JavaScript array.
+	pub fn compile_delta_into<C: Changed>(&mut self, p: &Project, out: C)
+		-> Result<Made<(delta::Head, C)>, Failure>
+	{
+		let made = self.run(p, DeltaSink::new(&p.known, self.version, out), |s| s.into_delta());
+		if let Ok(m) = &made {
+			self.version = m.product.0.version;
+		}
+		made
+	}
+}
+
+/// Hands a package's files to the engine, `spec` as `@namespace/name:version`; the count of files held.
+pub fn supply_package(spec: &str, files: Vec<(String, Vec<u8>)>) -> Outcome<usize> {
+	let _turn = turn();
+	let spec = res!(package::parse_spec(spec));
+	package::supply(&spec, files)
+}
+
+/// Every package supplied, as `@namespace/name:version`, in order.
+pub fn packages() -> Outcome<Vec<String>> {
+	let _turn = turn();
+	Ok(res!(package::supplied()).iter().map(|s| s.to_string()).collect())
+}
+
+/// Withdraws a supplied package; false when none was held under `spec`.
+pub fn withdraw_package(spec: &str) -> Outcome<bool> {
+	let _turn = turn();
+	let spec: PackageSpec = res!(package::parse_spec(spec));
+	package::withdraw(&spec)
+}
+
+/// Seals the project's sources and assets into the source map. A project that does not hold its main
+/// file is an error before any compile.
+fn install(p: &Project, main: &Path) -> Outcome<()> {
+	let mut files: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+	for (path, text) in &p.sources {
+		files.insert(PathBuf::from(path), text.clone().into_bytes());
+	}
+	for (path, bytes) in &p.assets {
+		files.insert(PathBuf::from(path), bytes.clone());
+	}
+	if !files.keys().any(|k| k == main) {
+		return Err(err!("The project has no source for its main file {:?}.", main; Input, Missing, File));
+	}
+	vfs::install_sealed(files)
+}

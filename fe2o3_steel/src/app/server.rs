@@ -713,7 +713,7 @@ impl AppShellContext {
                 publish.map(Arc::new),
                 mail_sender.clone(),
                 Arc::new(vh.site_admins.clone()),
-            );
+            ).with_admin_dashboard(vh.admin_dashboard);
 
             // One terminal manager per vhost, built only where the config asks
             // for it. It is shared two ways: attached to the WS syntax handler

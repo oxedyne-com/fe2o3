@@ -35,8 +35,9 @@ use tokio::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HttpVersion {
+    Http1_0,
     Http1_1,
     Http2_0,
     Http3_0,
@@ -45,6 +46,7 @@ pub enum HttpVersion {
 impl fmt::Display for HttpVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Http1_0 => write!(f, "HTTP/1.0"),
             Self::Http1_1 => write!(f, "HTTP/1.1"),
             Self::Http2_0 => write!(f, "HTTP/2"),
             Self::Http3_0 => write!(f, "HTTP/3"),
@@ -57,6 +59,7 @@ impl FromStr for HttpVersion {
 
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         Ok(match s {
+            "HTTP/1.0" => Self::Http1_0,
             "HTTP/1.1" => Self::Http1_1,
             "HTTP/2" => Self::Http2_0,
             "HTTP/3" => Self::Http3_0,
@@ -600,6 +603,24 @@ mod reader_tests {
             // Only the body bytes that shared the terminator's read are in hand.
             assert!(b"BODY".starts_with(&remnant[..]));
         }
+        Ok(())
+    }
+
+    /// `HTTP/1.0` is a version Steel meets in both directions: a loopback upstream such as Python's
+    /// `http.server` answers with it, and `ab` or `curl -0` ask with it.
+    #[test]
+    fn test_http_1_0_is_a_known_version() -> Outcome<()> {
+        let (head, version) = res!(HttpHeadline::parse_response("HTTP/1.0 200 OK"));
+        assert_eq!(version, HttpVersion::Http1_0);
+        assert!(matches!(head, HttpHeadline::Response { status: HttpStatus::OK }));
+        let (_, version) = res!(HttpHeadline::parse_request("GET /x?y=1 HTTP/1.0"));
+        assert_eq!(version, HttpVersion::Http1_0);
+        let (_, version) = res!(HttpHeadline::parse("HTTP/1.0 404 Not Found", None));
+        assert_eq!(version, HttpVersion::Http1_0);
+        assert_eq!(fmt!("{}", HttpVersion::Http1_0), "HTTP/1.0");
+        // Neighbours that are not versions are still refused.
+        assert!(HttpHeadline::parse_response("HTTP/1.2 200 OK").is_err());
+        assert!(HttpHeadline::parse_response("HTTP/0.9 200 OK").is_err());
         Ok(())
     }
 }

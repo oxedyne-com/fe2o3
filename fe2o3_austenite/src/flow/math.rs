@@ -121,7 +121,12 @@ fn efield(elem: &Content, styles: &StyleChain, name: &str) -> Outcome<Option<Val
 fn prepare(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome<(StyleChain, Arc<MathFont>)> {
 	let st = styles.clone();
 	let book = res!(engine.fonts.book());
-	let font = res!(resolve_font(&book, &res!(props::families(&st)), res!(props::fallback(&st)), res!(props::face_variant(&st))));
+	let found = resolve_font(&book, &res!(props::families(&st)), res!(props::fallback(&st)), res!(props::face_variant(&st)));
+	// No family of the list in the book, and no fallback to turn to, fails the equation.
+	let font = match found {
+		Ok(f)	=> f,
+		Err(_)	=> return Err(engine.error(DiagnosticKind::MissingFont, elem.span(), "no font could be found")),
+	};
 	if !font.has_math {
 		let d = crate::diag::Diagnostic::warning(DiagnosticKind::Lint, elem.span(), "current font is not designed for math")
 			.with_hint("rendering may be poor");

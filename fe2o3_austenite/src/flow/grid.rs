@@ -41,6 +41,12 @@ use crate::eval::value::{
 	Value,
 };
 use crate::eval::Engine;
+use crate::flow::block::{
+	layout_fragment_in,
+	Frame,
+	Item as BlockItem,
+	Regions,
+};
 use crate::flow::Region;
 use crate::ir::{
 	BoxNode,
@@ -80,6 +86,111 @@ pub fn layout_grid(
 	let grid = res!(resolve(engine, elem, styles));
 	let plan = res!(plan(engine, &grid, styles, region, &mut FlowCells));
 	lower(engine, &grid, &plan)
+}
+
+/// A grid or table as vertical material, with the rows that may break across regions marked, and what
+/// breaking one takes.
+pub struct Rows {
+	pub nodes:	Vec<Node>,
+	pub breaks:	Vec<Option<usize>>,	// for each node, its group when that is a breakable row
+	grid:		CellGrid,
+	plan:		GridPlan,
+}
+
+/// How a row that does not fit the room left is dealt with.
+pub enum RowSplit {
+	Whole,					// it does not break: it goes to the next region whole
+	Skip,					// its first part would be empty: it starts in the next region
+	Parts(Vec<BoxNode>),	// a part for each region it spans
+}
+
+/// As [`layout_grid`], keeping what is needed to break a row.
+pub fn layout_rows(engine: &mut Engine, elem: &Content, styles: &StyleChain, region: Region) -> Outcome<Rows> {
+	let grid = res!(resolve(engine, elem, styles));
+	let plan = res!(plan(engine, &grid, styles, region, &mut FlowCells));
+	let (nodes, breaks) = res!(lower_rows(engine, &grid, &plan));
+	// A group of rows that stays together (a rowspan's, a header's or a footer's) taller than the region is
+	// set whole and runs past it, where Typst breaks it.
+	let full = region.base.1;
+	if plan.groups.iter().any(|g| g.height > full && g.end > g.start + 1)
+	{
+		engine.warn(DiagnosticKind::Unsupported, grid.span,
+			"rows held together by a rowspan, a header or a footer that are taller than a page are not broken across pages");
+	}
+	Ok(Rows { nodes, breaks, grid, plan })
+}
+
+impl Rows {
+	/// Sets the cells of group `gi`, one automatically sized row, into `regions`, whose first has the room
+	/// left, Typst's breakable row: each cell is measured into the regions, every part but the last is
+	/// grown to fill its region less `head` (a repeated header), and the cells are set again into those
+	/// heights. When `skip` is set a row whose first part would be empty for a cell that has more to show
+	/// is left to start in the next region.
+	pub fn split(&self, engine: &mut Engine, styles: &StyleChain, gi: usize, regions: &Regions, head: f64, skip: bool)
+		-> Outcome<RowSplit>
+	{
+		let g = &self.plan.groups[gi];
+		// A frame with nothing in it but tags, or no height, holds no content.
+		let bare = |fr: &Frame| fr.h <= 0.01 || fr.items.iter().all(|(_, _, i)| matches!(i, BlockItem::Tag(_)));
+		let mut sizes: Vec<f64> = Vec::new();
+		for pc in &g.cells {
+			let cell = &self.grid.cells[pc.index];
+			let mut r = regions.clone();
+			r.w = pc.w.to_pt();
+			r.expand_x = true;
+			r.expand_y = false;
+			let frames = res!(layout_fragment_in(engine, cell.elem.place(), &cell.elem, styles, r));
+			if skip && frames.first().map(|f| bare(f)).unwrap_or(false) && frames.iter().skip(1).any(|f| !bare(f)) {
+				return Ok(RowSplit::Skip);
+			}
+			for (i, fr) in frames.iter().enumerate() {
+				match sizes.get_mut(i) {
+					Some(h)	=> *h = h.max(fr.h),
+					None	=> sizes.push(fr.h),
+				}
+			}
+		}
+		let n = sizes.len();
+		if n <= 1 {
+			return Ok(RowSplit::Whole);
+		}
+		let mut walk = regions.clone();
+		for i in 0..n - 1 {
+			if i > 0 {
+				walk.next();
+			}
+			let room = walk.h - if i > 0 { head } else { 0.0 };
+			sizes[i] = sizes[i].max(room);
+		}
+		let mut parts: Vec<Vec<CellPart>> = (0..n).map(|_| Vec::new()).collect();
+		for pc in &g.cells {
+			let cell = &self.grid.cells[pc.index];
+			let r = Regions {
+				w: pc.w.to_pt(), h: sizes[0], full: regions.full, backlog: sizes[1..].to_vec(), last: None,
+				expand_x: true, expand_y: true,
+			};
+			let frames = res!(layout_fragment_in(engine, cell.elem.place(), &cell.elem, styles, r));
+			for (k, part) in parts.iter_mut().enumerate() {
+				let h = Sp::from_pt(sizes[k]);
+				let nodes = match frames.get(k) {
+					Some(fr)	=> vec![Node::VBox(BoxNode::new(vec![fr.clone().into_node()], Dims::new(pc.w, h, Sp::ZERO)))],
+					None		=> Vec::new(),
+				};
+				part.push(CellPart { x: pc.x, w: pc.w, h, nodes });
+			}
+		}
+		let mut boxes = Vec::new();
+		for (k, cells) in parts.into_iter().enumerate() {
+			let h = Sp::from_pt(sizes[k]);
+			let ys = vec![Sp::ZERO; cells.len()];
+			boxes.push(res!(part_box(engine, &self.grid, &self.plan, g, cells, ys, h, k == 0, k + 1 == n)));
+		}
+		if !self.grid.hlines.is_empty() || !self.grid.vlines.is_empty() {
+			engine.warn(DiagnosticKind::Unsupported, self.grid.span,
+				"a row broken across pages is ruled at each break by the lines of its own edges; Typst's explicit lines at a break differ");
+		}
+		Ok(RowSplit::Parts(boxes))
+	}
 }
 
 // Cell layout seam
@@ -821,6 +932,10 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	let g_fill		= res!(schema::resolve(styles, elem, fid::FILL));
 	let g_align		= res!(schema::resolve(styles, elem, fid::ALIGN));
 	let g_inset		= res!(schema::resolve(styles, elem, fid::INSET));
+	let inset_default = match kind {
+		ElemKind::Table	=> Some(Relative { rel: Ratio(0.0), abs: Length::pt(5.0) }),
+		_				=> None,
+	};
 	let g_stroke	= res!(schema::resolve(styles, elem, fid::STROKE));
 	// A table's side left unspecified is a stroke with no part set: drawn as `1pt + black`, but in a fold
 	// at a shared edge it yields every part to the neighbour's specified stroke. So `stroke: (bottom:
@@ -857,11 +972,13 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 			let v = res!(celled(engine, &g_inset, p.x, p.y, cspan));
 			res!(sides_inset(engine, cspan, &v))
 		};
+		// A side of a table's inset that nothing specifies keeps the default 5 pt: `inset: (y: 8pt)` folds over it.
+		let side = |own: Option<Relative>, grid: Option<Relative>| own.or(grid).or(inset_default).unwrap_or_default();
 		let inset = Sides {
-			left:	own_i.left.or(grid_i.left).unwrap_or_default(),
-			top:	own_i.top.or(grid_i.top).unwrap_or_default(),
-			right:	own_i.right.or(grid_i.right).unwrap_or_default(),
-			bottom:	own_i.bottom.or(grid_i.bottom).unwrap_or_default(),
+			left:	side(own_i.left, grid_i.left),
+			top:	side(own_i.top, grid_i.top),
+			right:	side(own_i.right, grid_i.right),
+			bottom:	side(own_i.bottom, grid_i.bottom),
 		};
 		let own_s	= res!(sides_stroke(engine, cspan, &res!(schema::resolve(styles, &el, fid::CELL_STROKE))));
 		let grid_s	= {
@@ -1294,6 +1411,10 @@ fn size_columns<L: CellLayout>(
 			if last_auto != Some(x) {
 				continue;
 			}
+			// A cell that spans a fractional column asks nothing of the auto columns: the fraction takes what it needs.
+			if grid.cols[x0..x1].iter().any(|c| matches!(c, Sizing::Fr(_))) {
+				continue;
+			}
 			// A cell spanning only relative rows knows its height; otherwise the region's is the guess.
 			let mut height	= Sp::ZERO;
 			let mut fixed	= true;
@@ -1393,7 +1514,9 @@ fn size_rows<L: CellLayout>(
 			continue;
 		}
 		let w = sum(&cols[x0..x1]);
-		let r = Region { width: w, height: region.height, base: (w, region.base.1), expand_x: true, expand_y: false };
+		// The height is not the region's: a row's natural height is its content's, however little room is
+		// left, and the row is broken where it does not fit.
+		let r = Region { width: w, height: Sp(i32::MAX), base: (w, region.base.1), expand_x: true, expand_y: false };
 		let d = res!(cells.measure(engine, &cell.elem, styles, r));
 		natural.push(d.vextent());
 	}
@@ -1476,24 +1599,55 @@ fn overlay(ops: Vec<DrawOp>, w: Sp, h: Sp, list: &mut Vec<Node>) {
 	list.push(Node::Glue(Glue::fixed(-h)));
 }
 
+/// What a cell sets in one part of a row: where it stands across and the nodes it draws.
+struct CellPart {
+	x:		Sp,
+	w:		Sp,
+	h:		Sp,
+	nodes:	Vec<Node>,
+}
+
 /// One row group as an unbreakable box: its fills, then each cell's content at its place, then its lines.
 fn group_box(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan, g: &Group) -> Outcome<BoxNode> {
+	let cells = g.cells.iter().map(|pc| CellPart { x: pc.x, w: pc.w, h: pc.h, nodes: pc.nodes.clone() }).collect();
+	let ys = g.cells.iter().map(|pc| pc.y - g.top).collect();
+	part_box(engine, grid, plan, g, cells, ys, g.height, true, true)
+}
+
+/// A part of a row group as a box, `h` tall. A whole group is one part,
+/// first and last; a row broken across regions has one part for each, taking the fills of its cells and the
+/// row's lines, a vertical line running the part's height.
+#[allow(clippy::too_many_arguments)]
+fn part_box(
+	engine:	&mut Engine,
+	grid:	&CellGrid,
+	plan:	&GridPlan,
+	g:		&Group,
+	cells:	Vec<CellPart>,
+	ys:		Vec<Sp>,
+	h:		Sp,
+	first:	bool,
+	last:	bool,
+)
+	-> Outcome<BoxNode>
+{
 	let span	= grid.span;
 	let w		= plan.width;
+	let whole	= first && last;
 	let mut list = Vec::new();
 
 	let mut ops = Vec::new();
 	for r in &g.fills {
 		let c = res!(rgba(engine, span, &r.paint));
-		let y = r.y - g.top;
-		let path = res!(Path::rect(Bounds::new(f(r.x), f(y), f(r.x + r.w), f(y + r.h))));
+		let (y, rh) = if whole { (r.y - g.top, r.h) } else { (Sp::ZERO, h) };
+		let path = res!(Path::rect(Bounds::new(f(r.x), f(y), f(r.x + r.w), f(y + rh))));
 		ops.push(DrawOp::Fill { path, colour: c });
 	}
-	overlay(ops, w, g.height, &mut list);
+	overlay(ops, w, h, &mut list);
 
-	// Each cell stepped to its place: down, across, its box, then back up to the group's top.
-	for pc in &g.cells {
-		let y = pc.y - g.top;
+	// Each cell stepped to its place: down, across, its box, then back up to the part's top.
+	for (pc, y) in cells.iter().zip(ys.iter()) {
+		let y = *y;
 		list.push(Node::Glue(Glue::fixed(y)));
 		let cell = Node::VBox(BoxNode::new(pc.nodes.clone(), Dims::new(pc.w, pc.h, Sp::ZERO)));
 		list.push(Node::HBox(BoxNode::new(
@@ -1504,34 +1658,52 @@ fn group_box(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan, g: &Group) -
 
 	let mut ops = Vec::new();
 	for s in &g.lines {
+		let mut s2 = s.clone();
+		if whole {
+			if !s.vertical {
+				s2.at = s.at - g.top;
+			} else {
+				s2.from = s.from - g.top;
+				s2.to = s.to - g.top;
+			}
+		} else if s.vertical {
+			s2.from = if first { s.from - g.top } else { Sp::ZERO };
+			s2.to = if last { h + (s.to - g.top - g.height) } else { h };
+		} else if (s.at - g.top).0 * 2 < g.height.0 {
+			// A part carries the row's top line and its bottom line, each at its own edge, so a break between
+			// two parts is ruled on both pages.
+			s2.at = Sp::ZERO;
+		} else {
+			s2.at = h;
+		}
 		if s.pen.dash.is_some() {
 			engine.warn(DiagnosticKind::Unsupported, span, "dashed grid lines are drawn solid");
 		}
 		let c = res!(rgba(engine, span, &s.pen.paint));
-		let mut s2 = s.clone();
-		if !s.vertical {
-			s2.at = s.at - g.top;
-		} else {
-			s2.from = s.from - g.top;
-			s2.to = s.to - g.top;
-		}
 		ops.push(DrawOp::Stroke { path: res!(segment_path(&s2)), colour: c, width: f(s.pen.thickness) });
 	}
-	overlay(ops, w, g.height, &mut list);
-	list.push(Node::Glue(Glue::fixed(g.height)));
-	Ok(BoxNode::new(list, Dims::new(w, g.height, Sp::ZERO)))
+	overlay(ops, w, h, &mut list);
+	list.push(Node::Glue(Glue::fixed(h)));
+	Ok(BoxNode::new(list, Dims::new(w, h, Sp::ZERO)))
 }
 
 /// The plan as vertical material. Rows break between groups only; a header is welded to the row after it
 /// and armed to repeat, a subheader replacing any header of its level or deeper; the footer is welded to
 /// the row before it.
 pub fn lower(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan) -> Outcome<Vec<Node>> {
+	Ok(res!(lower_rows(engine, grid, plan)).0)
+}
+
+/// [`lower`], with for each node the group it is the box of when that group is a single body row that
+/// may break across regions: an automatically sized row, which Typst breaks where its cells do.
+pub fn lower_rows(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan) -> Outcome<(Vec<Node>, Vec<Option<usize>>)> {
 	let mut out: Vec<Node> = Vec::new();
+	let mut rows: Vec<Option<usize>> = Vec::new();
 	let mut active: Vec<(i64, BoxNode)> = Vec::new();
 	let mut armed	= false;
 	let mut weld	= false;
 	let mut prev_end: Option<usize> = None;
-	for g in &plan.groups {
+	for (gi, g) in plan.groups.iter().enumerate() {
 		let bx = res!(group_box(engine, grid, plan, g));
 		if let Some(pe) = prev_end {
 			if matches!(g.part, Part::Footer { .. }) || weld {
@@ -1542,6 +1714,9 @@ pub fn lower(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan) -> Outcome<V
 		}
 		weld = false;
 		out.push(Node::VBox(bx.clone()));
+		let breaks = g.part == Part::Body && g.end == g.start + 1 && grid.rows[g.start].is_auto();
+		rows.resize(out.len() - 1, None);
+		rows.push(if breaks { Some(gi) } else { None });
 		if let Part::Header { level, repeat } = g.part {
 			weld = true;
 			active.retain(|(l, _)| *l < level);
@@ -1563,5 +1738,6 @@ pub fn lower(engine: &mut Engine, grid: &CellGrid, plan: &GridPlan) -> Outcome<V
 	if armed {
 		out.push(Node::RepeatHead(None));
 	}
-	Ok(out)
+	rows.resize(out.len(), None);
+	Ok((out, rows))
 }

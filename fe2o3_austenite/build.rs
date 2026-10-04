@@ -1,8 +1,19 @@
 //! Captures the git commit the engine is built from, for `compile::engine_git_hash` and the wasm
 //! `engineInfo()`. No git, or no repository, yields `unknown` rather than failing the build.
+//!
+//! Sets the wasm module's stack. The layout depth guard ends a nest of containers where Typst does, at about
+//! seventy levels, and the stack has to hold the deepest nest the guard lets through with room to spare: an
+//! overflow is a trap, which ends the module for the page's life. It is set here, as a link argument of the
+//! `cdylib` for the `wasm32` target alone, so that every build of the wasm module has it, whichever directory
+//! it is started in and whatever `RUSTFLAGS` says.
 
 use std::path::Path;
 use std::process::Command;
+
+// The wasm stack, in bytes: 8 MiB. The deepest nest the guard lets through, seventy boxes, uses 535 KiB of it,
+// and the default stack is 1 MiB; the rest is margin for a nest of mixed containers and for a nest of equations,
+// which the guard does not count and which uses about 2.8 KiB a level.
+const WASM_STACK: usize = 8 << 20;
 
 fn main() {
 	let hash = match git(&["rev-parse", "--short=12", "HEAD"]) {
@@ -17,6 +28,10 @@ fn main() {
 		_ => "unknown".to_string(),
 	};
 	println!("cargo:rustc-env=AUSTENITE_GIT_HASH={}", hash);
+
+	if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") {
+		println!("cargo:rustc-link-arg-cdylib=-zstack-size={}", WASM_STACK);
+	}
 
 	// Naming any rerun trigger turns off Cargo's default of rerunning on every package file, so the
 	// crate's sources are named alongside the git state a commit or checkout moves.

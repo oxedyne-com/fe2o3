@@ -49,6 +49,7 @@ use crate::eval::{
 	Context,
 	Engine,
 };
+use crate::flow::grid::RowSplit;
 use crate::flow::inline::ParSituation;
 use crate::flow::page::Level;
 use crate::flow::Region;
@@ -143,11 +144,11 @@ pub fn layout_fragment_in(
 )
 	-> Outcome<Vec<Frame>>
 {
-	engine.within(place, |engine| {
+	engine.within(place, |engine| engine.descend_fragment(content.span(), |engine| {
 		let (pairs, inline) = res!(realise::realise_fragment(engine, content, styles));
 		let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
 		layout_flow_pairs(engine, pairs, styles, regions, 1, Rel::zero(), mode, content.span())
-	})
+	}))
 }
 
 /// What a flow may hold: a page's root flow also hosts footnotes.
@@ -1080,7 +1081,7 @@ impl SingleChild {
 				return Ok(f.clone());
 			}
 		}
-		let frame = res!(layout_single(engine, &self.spec, &region));
+		let frame = res!(engine.descend(|engine| layout_single(engine, &self.spec, &region)));
 		*self.cell.borrow_mut() = Some((key, frame.clone()));
 		Ok(frame)
 	}
@@ -1311,7 +1312,7 @@ fn collect_par(
 	-> Outcome<()>
 {
 	let region	= Regions::one(cfg.width, cfg.height, cfg.expand, false).region();
-	let nodes	= res!(crate::flow::par::layout_par(engine, par, styles, region, situation));
+	let nodes	= res!(engine.descend(|engine| crate::flow::par::layout_par(engine, par, styles, region, situation)));
 	let spacing	= res!(par_spacing(par, styles));
 	out.push(Child::Rel(spacing, 4));
 	res!(collect_lines(nodes, styles, out));
@@ -2624,6 +2625,11 @@ fn layout_single_sized(engine: &mut Engine, spec: &BlockSpec, region: &Regions, 
 	Ok(frame)
 }
 
+/// Is the element a grid or a table? Typst sizes one to its columns and rows, never to the region it is in.
+fn is_grid(elem: &Content) -> bool {
+	matches!(elem.kind(), Some(ElemKind::Grid | ElemKind::Table))
+}
+
 /// A fragment's body laid out, before it is sized, inset or painted.
 struct Laid {
 	frame:	Frame,
@@ -2674,8 +2680,13 @@ impl MultiChild {
 		Ok(Fragment { frame, next, skip })
 	}
 
-	/// One fragment's body, as the continuation `from` (or the start) lays it out in `regions`.
+	/// One fragment's body, as the continuation `from` (or the start) lays it out in `regions`, a layer of its
+	/// own as Typst's `layout_multi_block` is.
 	fn lay(self: &Rc<Self>, engine: &mut Engine, from: Option<&Rc<Spill>>, regions: &Regions) -> Outcome<Laid> {
+		engine.descend(|engine| self.lay_in(engine, from, regions))
+	}
+
+	fn lay_in(self: &Rc<Self>, engine: &mut Engine, from: Option<&Rc<Spill>>, regions: &Regions) -> Outcome<Laid> {
 		let spec	= &self.spec;
 		let styles	= &spec.styles;
 		let width	= res!(spec.sizing("width"));
@@ -2703,11 +2714,16 @@ impl MultiChild {
 					Some(pad)	=> pad_regions(&inner, pad),
 					None		=> inner,
 				};
-				let mut f = res!(cursor.region(engine, &pod_k));
+				// The body's flow is the fragment layer Typst's `layout_fragment` is.
+				let (mut f, done) = res!(engine.descend(|engine| -> Outcome<(Frame, bool)> {
+					let f = res!(cursor.region(engine, &pod_k));
+					let done = res!(cursor.is_done(engine));
+					Ok((f, done))
+				}));
 				if let Some(pad) = padding {
 					grow(&mut f, pad);
 				}
-				let done = res!(cursor.is_done(engine)) && (!pod_k.expand_y || pod_k.backlog.is_empty());
+				let done = done && (!pod_k.expand_y || pod_k.backlog.is_empty());
 				(f, done, Some(pod.h))
 			},
 			Nested::Frames(q, pod0) => {
@@ -2744,12 +2760,16 @@ impl MultiChild {
 		Ok(false)
 	}
 
-	/// The regions a layout routine lays its body out in: the block's own, expanded as its parent's are.
+	/// The regions a layout routine lays its body out in: the block's own, expanded as its parent's are. A
+	/// grid or table takes none of the parent's expansion: its frame is as wide as its columns and as tall
+	/// as its rows whatever the region, so that `align` has room to place it, alone on a page or not. A
+	/// fractional column or row still fills the region, through the size of the plan.
 	fn inner(&self, pod: &Regions, regions: &Regions) -> Regions {
 		let mut p = pod.clone();
 		if matches!(self.spec.body, Body::Layouter) {
-			p.expand_x = (pod.expand_x || regions.expand_x) && pod.w.is_finite();
-			p.expand_y = (pod.expand_y || regions.expand_y) && pod.h.is_finite();
+			let from = !is_grid(&self.spec.elem);
+			p.expand_x = (pod.expand_x || (from && regions.expand_x)) && pod.w.is_finite();
+			p.expand_y = (pod.expand_y || (from && regions.expand_y)) && pod.h.is_finite();
 		}
 		p
 	}
@@ -2835,9 +2855,11 @@ fn flow_cursor(
 )
 	-> Outcome<FlowCursor>
 {
-	let (pairs, inline) = res!(engine.within(place, |engine| realise::realise_fragment(engine, content, styles)));
-	let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
-	FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
+	engine.descend_fragment(span, |engine| {
+		let (pairs, inline) = res!(engine.within(place, |engine| realise::realise_fragment(engine, content, styles)));
+		let mode	= if inline { FlowMode::Inline } else { FlowMode::Block };
+		FlowCursor::new(engine, Feed::list(pairs), styles, regions, columns, gutter, mode, span)
+	})
 }
 
 /// The regions shrunk by a padding that each side resolves against the region itself: Typst's `pad`.
@@ -3009,8 +3031,9 @@ fn layout_multi_layouter(engine: &mut Engine, elem: &Content, styles: &StyleChai
 		ElemKind::Layout	=> layout_layout(engine, elem, styles, regions),
 		ElemKind::List | ElemKind::Enum	=> crate::flow::lists::layout(engine, elem, styles, regions),
 		ElemKind::Grid | ElemKind::Table => {
-			let nodes = res!(crate::flow::grid::layout_grid(engine, elem, styles, regions.region()));
-			Ok(split_list(nodes, regions))
+			let rows = res!(crate::flow::grid::layout_rows(engine, elem, styles, regions.region()));
+			let (nodes, breaks) = (&rows.nodes, &rows.breaks);
+			split_list(nodes.clone(), regions, breaks, |gi, r, head, skip| rows.split(engine, styles, gi, r, head, skip))
 		},
 		ElemKind::Equation => {
 			let node = res!(crate::flow::math::layout_equation(engine, elem, styles, regions.region()));
@@ -3069,9 +3092,11 @@ fn columns_parts(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Ou
 /// `columns(n)`: the body flowed through `n` column regions per region, as a page's columns are.
 fn layout_columns(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions: &Regions) -> Outcome<Vec<Frame>> {
 	let (count, gutter, body) = res!(columns_parts(engine, elem, styles));
-	let (pairs, inline) = res!(engine.within(elem.place(), |engine| realise::realise_fragment(engine, &body, styles)));
-	let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
-	layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
+	engine.descend_fragment(elem.span(), |engine| {
+		let (pairs, inline) = res!(engine.within(elem.place(), |engine| realise::realise_fragment(engine, &body, styles)));
+		let mode = if inline { FlowMode::Inline } else { FlowMode::Block };
+		layout_flow_pairs(engine, pairs, styles, regions.clone(), count, gutter, mode, elem.span())
+	})
 }
 
 /// `layout(size => ..)`: the function called under context with the base size of the regions, its result
@@ -3106,24 +3131,30 @@ fn layout_layout(engine: &mut Engine, elem: &Content, styles: &StyleChain, regio
 /// repeated header armed in the list is set again at the top of every region the rows spill onto, and a
 /// repeated footer armed in it closes every region but the last, straight after the rows, its height kept
 /// free in each.
-fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
+fn split_list<F>(nodes: Vec<Node>, regions: &Regions, breaks: &[Option<usize>], mut split: F) -> Outcome<Vec<Frame>>
+	where F: FnMut(usize, &Regions, f64, bool) -> Outcome<RowSplit>
+{
 	let mut s = Splitter {
 		regions:	regions.clone(),
 		frames:		Vec::new(),
 		cur:		Frame::new(0.0, 0.0),
 		y:			0.0,
 		boxes:		false,
+		tail:		0.0,
+		base:		0.0,
 		head:		None,
 		foot:		None,
 	};
 	let mut at_break	= true;		// a break is allowed before the next box
 	let mut prev_box	= false;
+	let mut pending: Option<(usize, Vec<BoxNode>)> = None;	// the parts of a breakable row ahead
 	let mut i = 0;
 	while i < nodes.len() {
 		match &nodes[i] {
 			Node::Glue(g) => {
 				if s.boxes {
 					s.y += g.natural.to_pt();
+					s.tail += g.natural.to_pt();
 				}
 				if prev_box {
 					at_break = true;
@@ -3146,12 +3177,33 @@ fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
 			Node::Anchor(_) | Node::Tag(_) | Node::Mark(_) => s.cur.push(0.0, s.y, Item::Node(nodes[i].clone())),
 			Node::Float(_) | Node::Columns(_) | Node::PageColumns(_) => (),
 			node => {
-				if at_break && s.boxes && s.regions.may_progress() {
+				if at_break {
 					let atom = atom_height(&nodes, i);
 					let foot = s.foot.as_ref().map(|f| f.dims.vextent().to_pt()).unwrap_or(0.0);
-					if !fits(s.regions.h - s.y - foot, atom) {
-						s.next_region();
+					let room = s.regions.h - s.y - foot;
+					if !fits(room, atom) {
+						// A row that breaks is set into the regions it needs, after what is welded above it; one
+						// that does not goes whole to the next region, which a first row does too when the
+						// region has not its full height.
+						pending = res!(break_row(&nodes, breaks, i, &s, room, s.may_progress(), &mut split));
+						if pending.is_none() && s.may_progress() {
+							s.next_region();
+							let room = s.regions.h - s.y;
+							if !fits(room, atom) {
+								pending = res!(break_row(&nodes, breaks, i, &s, room, false, &mut split));
+							}
+						}
 					}
+				}
+				match pending.take() {
+					Some((j, parts)) if j == i => {
+						s.place_parts(parts);
+						at_break = false;
+						prev_box = true;
+						i += 1;
+						continue;
+					},
+					other => pending = other,
 				}
 				s.place(node.clone());
 				at_break = false;
@@ -3161,7 +3213,59 @@ fn split_list(nodes: Vec<Node>, regions: &Regions) -> Vec<Frame> {
 		i += 1;
 	}
 	s.finish();
-	s.frames
+	Ok(s.frames)
+}
+
+/// The breakable row that ends the atom starting at `start` (a row alone, or one welded below a header), broken
+/// to fit `room` when it can be: the node holding its first part's box and the parts, if it breaks.
+fn break_row<F>(
+	nodes:		&[Node],
+	breaks:		&[Option<usize>],
+	start:		usize,
+	s:			&Splitter,
+	room:		f64,
+	skip:		bool,
+	split:		&mut F,
+)
+	-> Outcome<Option<(usize, Vec<BoxNode>)>>
+	where F: FnMut(usize, &Regions, f64, bool) -> Outcome<RowSplit>
+{
+	let (mut h, mut head, mut prev_box) = (0.0, s.head.as_ref().map(|b| b.dims.vextent().to_pt()), false);
+	let mut row = None;
+	for (k, n) in nodes.iter().enumerate().skip(start) {
+		match n {
+			Node::Glue(g) => {
+				if prev_box {
+					break;
+				}
+				h += g.natural.to_pt();
+			},
+			Node::Penalty(p) => {
+				if !p.is_forbidden() {
+					break;
+				}
+				prev_box = false;
+			},
+			Node::RepeatHead(b) => head = b.as_ref().map(|b| b.dims.vextent().to_pt()),
+			Node::Anchor(_) | Node::Tag(_) | Node::Mark(_) | Node::RepeatFoot(_) | Node::Float(_)
+				| Node::Columns(_) | Node::PageColumns(_) => (),
+			other => {
+				row = breaks.get(k).copied().flatten().map(|gi| (k, gi, h));
+				h += other.vextent().to_pt();
+				prev_box = true;
+			},
+		}
+	}
+	let (k, gi, lead) = match row {
+		Some(r)	=> r,
+		None	=> return Ok(None),
+	};
+	let mut r = s.regions.clone();
+	r.h = room - lead;
+	Ok(match res!(split(gi, &r, head.unwrap_or(0.0), skip)) {
+		RowSplit::Parts(parts)	=> Some((k, parts)),
+		RowSplit::Skip | RowSplit::Whole => None,
+	})
 }
 
 struct Splitter {
@@ -3170,6 +3274,8 @@ struct Splitter {
 	cur:		Frame,
 	y:			f64,
 	boxes:		bool,			// the region holds a box
+	tail:		f64,			// the gutters since the last box, left out of a region that ends there
+	base:		f64,			// the height a region starts at: what its repeated header takes
 	head:		Option<BoxNode>,
 	foot:		Option<BoxNode>,
 }
@@ -3185,14 +3291,29 @@ impl Splitter {
 		self.cur.push(0.0, self.y, Item::Node(node));
 		self.y += h;
 		self.boxes = true;
+		self.tail = 0.0;
+	}
+
+	/// Would the next region give more room? Typst's `may_progress` on the room left, which what has been placed
+	/// beyond the repeated header has shortened.
+	fn may_progress(&self) -> bool { self.y > self.base + EPS || self.regions.may_progress() }
+
+	/// A row broken across regions: its first part here, each other in a region of its own.
+	fn place_parts(&mut self, parts: Vec<BoxNode>) {
+		for (k, part) in parts.into_iter().enumerate() {
+			if k > 0 {
+				self.next_region();
+			}
+			self.place(Node::VBox(part));
+		}
 	}
 
 	fn finish(&mut self) {
 		let mut done = std::mem::replace(&mut self.cur, Frame::new(0.0, 0.0));
-		done.h = if self.regions.expand_y { self.regions.h } else { self.y };
-		if self.regions.expand_x {
-			done.w = self.regions.w;
-		}
+		done.h = if self.regions.expand_y { self.regions.h } else { self.y - self.tail };
+		// A grid is as wide as its columns, and no wider than the region where they overflow it: Typst places
+		// an overflowing grid at the region's start, whatever the alignment.
+		done.w = if self.regions.expand_x { self.regions.w } else { done.w.min(self.regions.w) };
 		self.frames.push(done);
 	}
 
@@ -3205,10 +3326,12 @@ impl Splitter {
 		self.finish();
 		self.regions.next();
 		self.y		= 0.0;
+		self.tail	= 0.0;
 		self.boxes	= false;
 		if let Some(head) = self.head.clone() {
 			self.place(Node::VBox(head));
 		}
+		self.base	= self.y;
 	}
 }
 

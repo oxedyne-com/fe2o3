@@ -5,11 +5,20 @@
 //! that has not settled is discarded and begun again, so nothing may reach a file before the last), and at
 //! `finish` writes the page tree, the outline from the final introspector, the Info dictionary from the
 //! document's metadata, the subset fonts with their `/ToUnicode` maps and the cross-reference table.
-//! [`CountSink`] counts and drops, for the heap probe and for tests.
+//! [`VectorSink`] renders each page to an SVG document of its own. [`DeltaSink`] is the live view's: it keeps
+//! each page's content id and the frame of only those pages the consumer does not hold, and draws them once the
+//! pass that stands is known. [`CountSink`] counts and drops, for the heap probe and for tests.
 
+use crate::delta::{
+	Builder,
+	Changed,
+	Head,
+};
+use crate::emit::svg;
 use crate::eval::content::ElemKind;
 use crate::eval::fixpoint::PageSink;
 use crate::eval::intro::Introspector;
+use crate::eval::lib::model::lookup;
 use crate::eval::select::Selector;
 use crate::eval::value::Value;
 use crate::eval::Engine;
@@ -118,21 +127,22 @@ impl PageSink for PdfSink {
 		Ok(())
 	}
 
-	fn finish(&mut self, _engine: &mut Engine, intro: &Introspector) -> Outcome<()> {
+	fn finish(&mut self, engine: &mut Engine, intro: &Introspector) -> Outcome<()> {
 		let stream = match self.stream.take() {
 			Some(s)	=> s,
 			None	=> return Err(err!("The PDF sink finished twice."; Bug)),
 		};
-		let outline	= res!(outline(intro));
+		let outline	= res!(outline(engine, intro));
 		let info	= crate::emit::pdf::pdf_info(intro.info());
 		self.out	= Some(res!(stream.close(outline, Some(info))));
 		Ok(())
 	}
 }
 
-/// The document outline, from the final introspector: each outlined heading in document order, titled
-/// with its plain text, at its level and the page its start tag landed on.
-pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
+/// The document outline, from the final introspector: each outlined heading in document order, at its level
+/// and the page its start tag landed on. A numbered heading is titled as Typst titles it, its number as the
+/// heading shows it, a space and the plain text of its body; any other with its body alone.
+pub fn outline(engine: &mut Engine, intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 	let mut items = Vec::new();
 	for h in res!(intro.query(&Selector::Elem(ElemKind::Heading, None))) {
 		let outlined = !matches!(h.field("outlined"), Some(Value::Bool(false)));
@@ -147,7 +157,7 @@ pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 			Some(Value::Int(l)) if *l >= 1	=> (*l - 1) as u8,
 			_								=> 0,
 		};
-		let title = match h.field("body") {
+		let body = match h.field("body") {
 			Some(Value::Content(c))	=> c.plain_text(),
 			_						=> String::new(),
 		};
@@ -155,9 +165,110 @@ pub fn outline(intro: &Introspector) -> Outcome<Vec<OutlineItem>> {
 			Some(p) if p >= 1	=> (p - 1) as usize,
 			_					=> continue,
 		};
+		let title = match (h.field("numbering"), h.location()) {
+			(None | Some(Value::None) | Some(Value::Auto), _)	=> body,
+			(Some(numbering), Some(loc))	=> {
+				let numbering = numbering.clone();
+				let numbers = res!(lookup::display_counter(
+					engine, &lookup::elem_counter(ElemKind::Heading), loc, &numbering, h.span()));
+				fmt!("{} {}", numbers.plain_text(), body)
+			},
+			(Some(_), None)	=> body,
+		};
 		items.push(OutlineItem { title, page, level });
 	}
 	Ok(items)
+}
+
+/// Renders each page of the pass to an SVG document, in order. A pass that has not settled is discarded
+/// whole, so the pages held are those of the pass that did.
+#[derive(Debug, Default)]
+pub struct VectorSink {
+	pages:		Vec<String>,
+	finished:	bool,
+}
+
+impl VectorSink {
+	/// The pages, once the fixpoint has run `finish`.
+	pub fn into_pages(self) -> Option<Vec<String>> {
+		if self.finished { Some(self.pages) } else { None }
+	}
+}
+
+impl PageSink for VectorSink {
+	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
+		self.pages.push(res!(svg::render_page(&page)));
+		Ok(())
+	}
+
+	fn discard_pass(&mut self) -> Outcome<()> {
+		self.pages.clear();
+		self.finished = false;
+		Ok(())
+	}
+
+	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
+		self.finished = true;
+		Ok(())
+	}
+}
+
+/// Takes each page of the pass as the live view's changed-only delta ([`crate::delta`]): the page's content
+/// id, and the page itself when the consumer does not hold that id. Nothing is drawn while a pass runs,
+/// because the fixpoint cannot say a pass has settled before its last page: a pass that has not is
+/// discarded whole and the builder restarts with it, so none of its pages is ever drawn. `finish`, which
+/// runs once, after the pass that stands, draws each page the consumer lacks and hands its SVG to `out`.
+#[derive(Debug)]
+pub struct DeltaSink<C: Changed> {
+	build:	Option<Builder>,	// none once the delta is finished
+	out:	C,
+	head:	Option<Head>,
+}
+
+impl<C: Changed> DeltaSink<C> {
+	/// A sink against the consumer's `known` ids, stepping `prior_version`, sending each changed page to `out`.
+	pub fn new(known: &[u64], prior_version: u32, out: C) -> Self {
+		Self { build: Some(Builder::new(known, prior_version)), out, head: None }
+	}
+
+	/// The delta's head and the consumer of its changed pages, once the fixpoint has run `finish`.
+	pub fn into_delta(self) -> Option<(Head, C)> {
+		match self.head {
+			Some(head)	=> Some((head, self.out)),
+			None		=> None,
+		}
+	}
+}
+
+impl<C: Changed> PageSink for DeltaSink<C> {
+	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
+		match self.build.as_mut() {
+			Some(b)	=> {
+				b.page(page);
+				Ok(())
+			},
+			None	=> Err(err!("The delta sink was handed a page after it finished."; Bug)),
+		}
+	}
+
+	fn discard_pass(&mut self) -> Outcome<()> {
+		match self.build.as_mut() {
+			Some(b)	=> {
+				b.restart();
+				Ok(())
+			},
+			None	=> Err(err!("The delta sink discarded a pass after it finished."; Bug)),
+		}
+	}
+
+	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
+		let build = match self.build.take() {
+			Some(b)	=> b,
+			None	=> return Err(err!("The delta sink finished twice."; Bug)),
+		};
+		self.head = Some(res!(build.finish(&mut self.out)));
+		Ok(())
+	}
 }
 
 /// Counts pages and drops them.

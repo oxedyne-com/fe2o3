@@ -236,6 +236,7 @@ fn collection_faces(bytes: &[u8]) -> Option<Vec<u32>> {
 /// parsers when needed; the shaper's tables, the costly part to build, are cached.
 pub struct Face {
 	bytes:		Arc<Vec<u8>>,	// the font file, shared with its embeddable program
+	print:		u64,			// a hash of the file, taken once: what makes two faces the same face
 	program:	Option<Arc<FontProgram>>,	// the file as a PDF embeds it; `None` when it cannot be
 	shaper:		ShaperData,		// the shaper's cached view, built once
 	upem:		f32,			// font units per em, what every measurement in the file is in terms of
@@ -245,6 +246,24 @@ pub struct Face {
 	// redrawing each outline every time was the whole cost of emit. The outline is a pure function of
 	// its key, so the cache changes nothing in the bytes drawn -- only how many times they are computed.
 	outlines:	RwLock<HashMap<(u32, u32), Path>>,
+}
+
+/// A 64-bit hash of a font file, a word at a time: an identity for the file, not a defence against a forger.
+fn fingerprint_of(bytes: &[u8]) -> u64 {
+	const K: u64 = 0x9e37_79b9_7f4a_7c15;
+	let mut h = (bytes.len() as u64) ^ K;
+	let mut words = bytes.chunks_exact(8);
+	for w in &mut words {
+		let mut a = [0u8; 8];
+		a.copy_from_slice(w);
+		h = (h ^ u64::from_le_bytes(a)).wrapping_mul(K);
+		h ^= h >> 29;
+	}
+	for b in words.remainder() {
+		h = (h ^ (*b as u64)).wrapping_mul(K);
+		h ^= h >> 29;
+	}
+	h
 }
 
 impl Face {
@@ -273,12 +292,14 @@ impl Face {
 		let covers: HashSet<u32> = of.charmap().mappings().map(|(c, _)| c).collect();
 		drop(of);
 		drop(sf);
+		let print = fingerprint_of(&bytes);
 		let bytes = Arc::new(bytes);
 		// A file the embedding reader cannot follow is still a face to shape and outline; it is drawn as
 		// outlines in a PDF rather than embedded, so the failure is not the caller's.
 		let program = FontProgram::parse(bytes.clone()).ok().flatten().map(Arc::new);
 		Ok(Self {
 			bytes,
+			print,
 			program,
 			shaper,
 			upem,
@@ -291,6 +312,13 @@ impl Face {
 	/// `CFF2` face, or one whose licence forbids it -- and must be drawn as outlines.
 	pub fn program(&self) -> Option<&Arc<FontProgram>> {
 		self.program.as_ref()
+	}
+
+	/// A hash of the font file, equal for equal files and, to within a 64-bit hash's chance, otherwise
+	/// different. The glyph ids of the faces of one family agree, and a monospaced family's advances
+	/// too, so a glyph id and a position do not tell one face's drawing from another's; this does.
+	pub fn fingerprint(&self) -> u64 {
+		self.print
 	}
 
 	/// The font file as given, for a reader of tables the face itself does not expose.
@@ -605,6 +633,24 @@ mod tests {
 
 	const NOTO_SANS:	&[u8] = include_bytes!("../fonts/NotoSans-Regular.ttf");
 	const DEJAVU_MONO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono.ttf");
+
+	/// Two files of one family, one the other's bold, differ in the fingerprint; the same bytes read twice
+	/// agree; and one byte changed in a file moves it.
+	#[test]
+	fn the_fingerprint_tells_one_file_from_another_and_a_file_from_itself() -> Outcome<()> {
+		let a = res!(Face::new(DEJAVU_MONO.to_vec()));
+		let b = res!(Face::new(DEJAVU_MONO.to_vec()));
+		let c = res!(Face::new(NOTO_SANS.to_vec()));
+		assert_eq!(a.fingerprint(), b.fingerprint(), "the same bytes, the same fingerprint");
+		assert_ne!(a.fingerprint(), c.fingerprint(), "two fonts, two fingerprints");
+		assert_ne!(fingerprint_of(&[1, 2, 3, 4, 5, 6, 7, 8, 9]), fingerprint_of(&[1, 2, 3, 4, 5, 6, 7, 8, 10]), "the tail counts");
+		assert_ne!(fingerprint_of(&[0; 8]), fingerprint_of(&[0; 9]), "so does the length");
+		let mut edited = DEJAVU_MONO.to_vec();
+		let mid = edited.len() / 2;
+		edited[mid] ^= 1;
+		assert_ne!(fingerprint_of(&edited), a.fingerprint(), "one byte of the file moves it");
+		Ok(())
+	}
 
 	#[test]
 	fn read_reads_the_family_weight_and_slant_from_the_name_table() -> Outcome<()> {

@@ -130,10 +130,9 @@ impl<
             dev_mode,
         ));
 
-        // If ACME is enabled, spawn the renewer task. It drives the
-        // initial issuance (if the cache is empty) and then loops with
-        // a 24-hour tick, re-issuing whenever the cached cert is older
-        // than the renewal threshold.
+        // If ACME is enabled, spawn the renewer task. It issues at start if
+        // the cache is empty or due, retries hourly while the cert is due
+        // (a failed issuance does not end it), and checks daily otherwise.
         if let Some(renewer) = loaded.acme_renewer {
             tokio::spawn(async move {
                 if let Err(e) = renewer.run_forever().await {
@@ -555,6 +554,13 @@ impl<
                                 debug!("TLS handshake from {} exceeded the \
                                     deadline; dropping.", src_addr);
                                 if let Some(dc) = &dropped_conn { dc.incr(); }
+                            }
+                            // Scanners, old clients and clients that hang up end
+                            // a handshake all day on a public port. Below ERROR,
+                            // so they do not bury the faults that are ours.
+                            Handshake::PeerFailed(e) => {
+                                debug!("TLS handshake from {} ended by the \
+                                    peer: {}", src_addr, e);
                             }
                             Handshake::Failed(e) => {
                                 error!(err!(e,

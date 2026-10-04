@@ -52,6 +52,10 @@ use crate::ledger::{
 use crate::lang;
 use crate::page::PageGeometry;
 use crate::theme::Theme;
+use crate::timings::{
+	Phase,
+	Timings,
+};
 use crate::vfs;
 
 use oxedyne_fe2o3_core::prelude::*;
@@ -371,6 +375,8 @@ pub fn emit_pdf(out: &mut CompileOutput, heads: &[Heading], doc_info: &DocInfo) 
 pub struct Evaluated {
 	pub engine:	Engine,
 	pub laid:	Outcome<Laid>,
+	pub blank:	bool,			// the final pass realised a body that sets no content ([`Engine::body`])
+	pub main:	PathBuf,		// the main file, where a diagnostic with no site of its own is reported
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -389,17 +395,40 @@ pub fn assemble_eval<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
+	assemble_eval_timed(main_path, root, fonts, sink, None)
+}
+
+/// As [`assemble_eval`], recording the phases' wall time in `timings` when there is a recorder, which is
+/// started by [`Timings::start`] with `Load` open and left in the engine for the caller to read. The
+/// output is the same bytes with the recorder or without it.
+pub fn assemble_eval_timed<S: PageSink>(
+	main_path:	&Path,
+	root:		&Path,
+	fonts:		FontStore,
+	sink:		&mut S,
+	timings:	Option<Timings>,
+)
+	-> Outcome<Evaluated>
+{
 	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 	let main_path	= canon(main_path);
 	let mut world = World::new(canon(root));
 	let id = res!(world.load(&main_path));
 	let mut engine = Engine::new(world);
 	engine.fonts = fonts;
-	let laid = match eval::eval_source(&mut engine, id) {
+	engine.timings = timings;
+	if let Some(t) = engine.timings.as_mut() {
+		t.leave();	// the load
+	}
+	let laid = match engine.timed(Phase::Eval, |engine| eval::eval_source(engine, id)) {
 		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
 		Err(e)		=> Err(e),
 	};
-	Ok(Evaluated { engine, laid })
+	// Typst lays a main that sets nothing out as one blank page without a word, so a strict caller is told
+	// from what the body realised to in the pass that stood, never from the page count nor from the content
+	// as it was evaluated: a `context` that gives nothing is an element until it is resolved.
+	let blank = engine.body == Some(false);
+	Ok(Evaluated { engine, laid, blank, main: main_path })
 }
 
 /// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory
@@ -420,31 +449,41 @@ pub fn supply_typst_package_cache() {
 }
 
 impl Evaluated {
-	/// The compile's report: its diagnostics at the positions a caller shows, the terse line of the
-	/// constructs passed over (every diagnostic of kind `unsupported`, by its message and how often), and
-	/// the page count. Strict mode reads it as the curated path's report is read, so one function,
-	/// [`DiagnosticKind::refuses_strict`], decides on both paths.
+	/// The compile's report with columns in characters, as Typst counts them: the form the command line
+	/// shows.
 	pub fn report(&self) -> Report {
+		self.report_in(Cols::Chars)
+	}
+
+	/// The compile's report: its diagnostics at the positions a caller shows, columns counted in `cols`, the
+	/// terse line of the constructs passed over (every diagnostic of kind `unsupported`, by its message and how
+	/// often), the line of every site a strict compile refuses (those, and each other refusing kind by its
+	/// word), the page count, and whether the main sets no content. Strict mode reads it as the curated path's
+	/// report is read, so one function, [`DiagnosticKind::refuses_strict`], decides on both paths.
+	pub fn report_in(&self, cols: Cols) -> Report {
 		let pages = match &self.laid {
 			Ok(l)	=> l.pages as usize,
 			Err(_)	=> 0,
 		};
 		let mut diagnostics = Vec::with_capacity(self.engine.diags.len());
 		let mut skipped: Vec<(String, usize)> = Vec::new();
+		let mut refused: Vec<(String, usize)> = Vec::new();
 		for d in &self.engine.diags {
 			let src = self.engine.world.sources.iter().find(|s| s.id == d.span.file && !d.span.is_detached());
 			let (file, line, col) = match src {
 				Some(s)	=> {
-					let (l, c) = s.line_col(d.span.start);
+					let (l, c) = s.line_col_in(d.span.start, cols);
 					(s.path.display().to_string(), l, c)
 				},
-				None	=> (String::new(), 0, 0),
+				// A diagnostic raised with no site is reported at 0:0 in the main, as an error is.
+				None	=> (self.main.display().to_string(), 0, 0),
 			};
-			if d.kind == DiagnosticKind::Unsupported && !d.is_error() {
-				let head = d.head().to_string();
-				match skipped.iter_mut().find(|(h, _)| *h == head) {
-					Some((_, n))	=> *n += 1,
-					None			=> skipped.push((head, 1)),
+			if !d.is_error() {
+				if d.kind == DiagnosticKind::Unsupported {
+					tally(&mut skipped, d.head());
+				}
+				if d.kind.refuses_strict() {
+					tally(&mut refused, if d.kind == DiagnosticKind::Unsupported { d.head() } else { d.kind.as_str() });
 				}
 			}
 			diagnostics.push(Diagnostic {
@@ -457,20 +496,45 @@ impl Evaluated {
 				hint:		d.hints.first().cloned(),
 			});
 		}
-		let line = if skipped.is_empty() {
-			None
-		} else {
-			let parts: Vec<String> = skipped.iter().map(|(h, n)| fmt!("{} \u{d7}{}", h, n)).collect();
-			Some(parts.join(", "))
-		};
 		Report {
 			pages,
 			diagnostics,
-			skipped:	line.as_ref().map(|l| fmt!("skipped: {}", l)),
-			summary:	line,
-			empty:		false,
+			skipped:	tally_line(&skipped).map(|l| fmt!("skipped: {}", l)),
+			summary:	tally_line(&refused),
+			empty:		self.blank,
 		}
 	}
+
+	/// The packages the compile asked for that nobody supplied, each once, in the order they were asked for,
+	/// read from the diagnostics that carry them and never from a message.
+	pub fn needs(&self) -> Vec<String> {
+		let mut out: Vec<String> = Vec::new();
+		for d in &self.engine.diags {
+			if let Some(n) = &d.need {
+				if !out.contains(n) {
+					out.push(n.clone());
+				}
+			}
+		}
+		out
+	}
+}
+
+// Counts one more of `key` in a list kept in order of first appearance.
+fn tally(list: &mut Vec<(String, usize)>, key: &str) {
+	match list.iter_mut().find(|(k, _)| k == key) {
+		Some((_, n))	=> *n += 1,
+		None			=> list.push((key.to_string(), 1)),
+	}
+}
+
+// The list as one line, `key ×n, key ×n`, or none when it is empty.
+fn tally_line(list: &[(String, usize)]) -> Option<String> {
+	if list.is_empty() {
+		return None;
+	}
+	let parts: Vec<String> = list.iter().map(|(k, n)| fmt!("{} \u{d7}{}", k, n)).collect();
+	Some(parts.join(", "))
 }
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -479,6 +543,7 @@ impl Evaluated {
 
 // One vocabulary: the evaluator's diagnostics and the curated path's carry the same kinds.
 pub use crate::diag::DiagnosticKind;
+pub use crate::syntax::Cols;
 
 /// How a diagnostic bears on the compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

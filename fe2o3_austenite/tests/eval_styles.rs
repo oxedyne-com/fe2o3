@@ -399,6 +399,7 @@ fn show_text(sel: &str, out: &str) -> Style {
 		selector:	Some(Selector::Text(sel.into())),
 		transform:	Transformation::Content(t(out)),
 		span:		Span::detached(),
+		outside:	false,
 	})
 }
 
@@ -408,6 +409,7 @@ fn show_regex(pat: &str, out: &str) -> Style {
 		selector:	Some(Selector::Regex(Arc::new(re))),
 		transform:	Transformation::Content(t(out)),
 		span:		Span::detached(),
+		outside:	false,
 	})
 }
 
@@ -466,7 +468,7 @@ fn a_style_change_stops_a_text_rule() {
 #[test]
 fn a_selectorless_show_replaces_the_rest_of_its_scope() {
 	let rest = Content::sequence(vec![t("b"), sp(), t("c")]);
-	let recipe = Style::Recipe(Recipe { selector: None, transform: Transformation::Content(t("X")), span: Span::detached() });
+	let recipe = Style::Recipe(Recipe { selector: None, transform: Transformation::Content(t("X")), span: Span::detached(), outside: false, });
 	check_html("show_none.typ", inline(vec![t("a"), sp(), rest.styled(Styles::from_style(recipe))], vec![]));
 }
 
@@ -512,6 +514,7 @@ fn realisation_errors_match_the_oracle() {
 		selector:	Some(Selector::Label(l.clone())),
 		transform:	Transformation::Content(meta()),
 		span:		Span::detached(),
+		outside:	false,
 	});
 	let (r, e) = realise_err(meta().styled(Styles::from_style(recipe)), RealiseMode::Document);
 	check_error("err_depth.typ", r, &e.diags);
@@ -605,7 +608,7 @@ fn selector_matching_matches_the_oracle() {
 // expected behaviour each asserts is noted from the oracle.
 
 fn recipe(sel: Selector, transform: Transformation) -> Styles {
-	Styles::from_style(Style::Recipe(Recipe { selector: Some(sel), transform, span: Span::detached() }))
+	Styles::from_style(Style::Recipe(Recipe { selector: Some(sel), transform, span: Span::detached(), outside: false, }))
 }
 
 fn set_prop(kind: ElemKind, field: u8, v: Value) -> Styles {

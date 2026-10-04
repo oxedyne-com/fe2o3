@@ -650,6 +650,11 @@ impl Content {
 					s.push_str(t);
 				},
 				ElemKind::Space | ElemKind::Linebreak	=> s.push(' '),
+				// A smart quote reads as the straight quote it was typed as.
+				ElemKind::SmartQuote	=> s.push(match self.field("double") {
+					Some(Value::Bool(false))	=> '\'',
+					_							=> '"',
+				}),
 				ElemKind::Parbreak						=> s.push_str("\n\n"),
 				_ => match self.field("body").or_else(|| self.field("text")) {
 					Some(Value::Content(c))	=> c.push_plain(s),

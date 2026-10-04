@@ -394,6 +394,26 @@ export function createRunGuard(words, n) {
 	return { spans: spans, has: has, mask: mask, deep: deep };
 }
 
+// ── Cutting a string ─────────────────────────────────────────────────
+
+// JSON.stringify writes half of a surrogate pair as a `\udXXX` escape, which the peer's strict reader
+// (`fe2o3_net::lens::chunk`) refuses, covering the whole bundle. So no row may hold half a pair: a
+// page cuts with `clipChars` and mends what reaches it broken with `soundText`.
+
+/// The first `n` UTF-16 units of `s`, or one fewer where the cut falls inside a pair. It cuts a string
+/// that is already sound without breaking it, and mends nothing: `soundText` first for one that may not be.
+export function clipChars(s, n) {
+	if (s.length <= n) return s;
+	var c = s.charCodeAt(n - 1);
+	return s.slice(0, c >= 0xD800 && c <= 0xDBFF ? n - 1 : n);
+}
+
+/// `s` with each half of a surrogate pair that has no other half replaced by U+FFFD, which is what a lone
+/// half is when it is read as text. A whole pair is left as it is.
+export function soundText(s) {
+	return s.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]|[\uD800-\uDFFF]/g, function (m) { return m.length === 2 ? m : '\uFFFD'; });
+}
+
 // ── The redactor: names, the caller's hooks, and the walk ────────────
 
 var MAX_DEPTH = 40;

@@ -14,10 +14,10 @@
 // far needs one for the parity. Tags that fall between pages wait for the next page's top-left corner,
 // or land at the foot of the last page.
 //
-// The run's page-wide styles (Typst's trunk of the run's styles) are taken over the first `TRUNK_WINDOW`
-// pairs of the run, so a run of any length opens with a bounded lookahead. Page styles cannot differ inside
-// a run, since realisation brackets a change with boundary breaks; only styles such as the text size can
-// differ, and a pair beyond the window that drops one of them from the trunk no longer moves it.
+// The run's page-wide styles (Typst's `Styles::root` of the run's pairs) are taken over the first
+// `TRUNK_WINDOW` pairs of the run, so a run of any length opens with a bounded lookahead. Page styles cannot
+// differ inside a run, since realisation brackets a change with boundary breaks; only styles such as the
+// text size can differ, and a pair beyond the window that drops one of them from the trunk no longer moves it.
 
 use crate::diag::DiagnosticKind;
 use crate::driver::{
@@ -39,6 +39,7 @@ use crate::eval::realise::{
 use crate::eval::styles::{
 	Style,
 	StyleChain,
+	Styles,
 };
 use crate::eval::value::{
 	Direction,
@@ -68,6 +69,7 @@ use crate::page::{
 	Swap,
 };
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -119,6 +121,9 @@ impl Source {
 	fn ready(&mut self, engine: &mut Engine) -> Outcome<&mut VecDeque<Pair>> {
 		if let Source::Lazy(content, styles) = self {
 			let pairs = res!(realise::realise(engine, content, styles, RealiseMode::Document));
+			// What the body realises to, with its contexts resolved and its show rules applied, decides
+			// whether it sets content, never the content as it was evaluated.
+			engine.body = Some(realise::sets_content(&pairs));
 			*self = Source::Pairs(pairs.into());
 		}
 		match self {
@@ -224,7 +229,7 @@ impl Level {
 		}
 	}
 
-	/// The page-wide styles of the run that has just opened: the trunk of the styles of its first pairs, else
+	/// The page-wide styles of the run that has just opened: the root styles of its first pairs, else
 	/// the initial ones.
 	fn run_styles(&mut self, engine: &mut Engine, initial: &StyleChain) -> Outcome<StyleChain> {
 		let q = res!(self.src.ready(engine));
@@ -237,7 +242,7 @@ impl Level {
 				chains.push(&p.styles);
 			}
 		}
-		Ok(if chains.is_empty() { initial.clone() } else { StyleChain::trunk(chains) })
+		Ok(root_styles(chains, initial))
 	}
 
 	/// The next pair of the open run. Tags that end the run before a break are sorted as Typst's
@@ -403,12 +408,14 @@ impl Paginator {
 	pub fn next_placed<R: Recorder>(&mut self, engine: &mut Engine, rec: &mut R)
 		-> Outcome<Option<(Page, Arc<RunSetup>)>>
 	{
-		match res!(self.next_page(engine)) {
+		match res!(engine.timed(Phase::Flow, |engine| self.next_page(engine))) {
 			None		=> Ok(None),
 			Some(body)	=> {
 				let setup = body.setup.clone();
-				let marginals = res!(decorate::decorate_page(engine, &setup, (body.body.w, body.body.h)));
-				Ok(Some((res!(driver::place_page(body, marginals, rec)), setup)))
+				let marginals = res!(engine.timed(Phase::Decorate, |engine|
+					decorate::decorate_page(engine, &setup, (body.body.w, body.body.h))));
+				let page = res!(engine.timed(Phase::Place, |_| driver::place_page(body, marginals, rec)));
+				Ok(Some((page, setup)))
 			},
 		}
 	}
@@ -479,8 +486,14 @@ fn blank_area(setup: &RunSetup) -> Frame {
 /// The page-wide styles of a run held as pairs: the trunk of its contentful pairs' styles, else the initial
 /// ones.
 fn styles_of(pairs: &[Pair], initial: &StyleChain) -> StyleChain {
-	let chains: Vec<&StyleChain> = pairs.iter().filter(|p| !p.is_tag()).map(|p| &p.styles).collect();
-	if chains.is_empty() { initial.clone() } else { StyleChain::trunk(chains) }
+	root_styles(pairs.iter().filter(|p| !p.is_tag()).map(|p| &p.styles), initial)
+}
+
+/// The styles page furniture and footnote entries take: Typst's `Styles::root` of the run's pairs, which
+/// keeps only the outside styles that were in force where the run began or that a set rule could lift, never
+/// those a show rule or a call such as `text(size: ..)[..]` put on its own content.
+fn root_styles<'a, I: IntoIterator<Item = &'a StyleChain>>(chains: I, initial: &StyleChain) -> StyleChain {
+	StyleChain::root().chain(&Styles::root(chains, initial))
 }
 
 /// Does a `pagebreak(to: parity)` after `count` pages need a blank page first? Typst adds one when the

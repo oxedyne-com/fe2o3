@@ -492,7 +492,9 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 /// `unsupported`; under `--strict` a refusal of the strict rule fails the compile as Daimond's does.
 /// `--diag-summary` adds one stderr line for each severity, kind and construct, counts only
 /// ([`diag::summary_lines`]), and one for each error that names its call and types in Typst's own terms
-/// ([`diag::error_lines`]), on a compile that succeeds and on one that fails.
+/// ([`diag::error_lines`]), on a compile that succeeds and on one that fails. `--timings FILE` writes each
+/// phase's wall time, for the load, the evaluation, every fixpoint pass and the finish, as JSON to `FILE`
+/// after a compile that succeeds; the PDF is the same bytes either way.
 fn compile_eval(
 	source:		&str,
 	out_dir:	&str,
@@ -500,13 +502,20 @@ fn compile_eval(
 	font_paths:	&[String],
 	strict:		bool,
 	diag_summary:	bool,
+	timings_out:	Option<&str>,
 )
 	-> Outcome<()>
 {
 	use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
 	use oxedyne_fe2o3_austenite::flow::text::FontStore;
+	use oxedyne_fe2o3_austenite::timings::{
+		Phase,
+		Timings,
+	};
+	use std::io::Write;
 
 	let t		= std::time::Instant::now();
+	let timings	= timings_out.map(|_| Timings::start());
 	let main	= PathBuf::from(source);
 	let root	= match root {
 		Some(r)	=> PathBuf::from(r),
@@ -518,7 +527,7 @@ fn compile_eval(
 	}
 	compile::supply_typst_package_cache();
 	let mut sink = res!(PdfSink::new());
-	let done = res!(compile::assemble_eval(&main, &root, fonts, &mut sink));
+	let mut done = res!(compile::assemble_eval_timed(&main, &root, fonts, &mut sink, timings));
 	let report = done.report();
 	if let Some(skip) = &report.skipped {
 		eprintln!("[austenite] {}", skip);
@@ -550,10 +559,23 @@ fn compile_eval(
 		Some(o)	=> o,
 		None	=> return Err(err!("The fixpoint ended without a finished PDF."; Bug)),
 	};
+	if let Some(t) = done.engine.timings.as_mut() {
+		t.enter(Phase::Write);
+	}
 	res!(std::fs::create_dir_all(out_dir));
 	let path = PathBuf::from(out_dir).join("document.pdf");
 	let mut file = BufWriter::new(res!(File::create(&path)));
 	res!(out.write_to(&mut file));
+	res!(file.flush());
+	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), timings_out) {
+		tm.leave();
+		if let Ok(book) = done.engine.fonts.book() {
+			if let Ok(stats) = book.shape_stats() {
+				tm.set_shape(stats);
+			}
+		}
+		res!(std::fs::write(dest, tm.json(t.elapsed().as_nanos() as u64)));
+	}
 	println!(
 		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}/",
 		source, laid.pages, laid.passes, out.len(), t.elapsed().as_secs_f64(), out_dir);
@@ -570,6 +592,7 @@ fn main() -> Outcome<()> {
 	let mut eval		= false;
 	let mut strict		= false;
 	let mut diag_summary	= false;
+	let mut timings:	Option<String>	= None;
 	let mut root:		Option<String>	= None;
 	let mut font_paths:	Vec<String>		= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
@@ -583,6 +606,10 @@ fn main() -> Outcome<()> {
 			"--eval"			=> eval = true,
 			"--strict"			=> strict = true,
 			"--diag-summary"	=> diag_summary = true,
+			"--timings"			=> timings = Some(match args.next() {
+				Some(p)	=> p,
+				None	=> return Err(err!("--timings needs a file argument."; Input, Invalid, Missing)),
+			}),
 			"--root"			=> root = Some(match args.next() {
 				Some(p)	=> p,
 				None	=> return Err(err!("--root needs a directory argument."; Input, Invalid, Missing)),
@@ -604,7 +631,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
@@ -615,8 +642,11 @@ fn main() -> Outcome<()> {
 	if diag_summary && !eval {
 		return Err(err!("--diag-summary needs --eval."; Input, Invalid));
 	}
+	if timings.is_some() && !eval {
+		return Err(err!("--timings needs --eval."; Input, Invalid));
+	}
 	if eval {
-		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict, diag_summary);
+		return compile_eval(&source, &out_dir, root.as_deref(), &font_paths, strict, diag_summary, timings.as_deref());
 	}
 
 	if watching {

@@ -2230,3 +2230,56 @@ fn a_covering_that_shrinks_a_bundle_still_gives_a_row_for_a_row() -> Outcome<()>
     assert_eq!(text_at(&back, "screen"), "oxegen_home");
     Ok(())
 }
+
+#[test]
+fn a_bundle_the_strict_reader_refuses_is_stored_covered_whole_and_never_as_sent() -> Outcome<()> {
+    let deep = fmt!("\"passphrase\":\"hunter2\",\"d\":{}{}", "[".repeat(65), "]".repeat(65));
+    let cases = [
+        ("twice",       snapshot_with("\"passphrase\":\"hunter2\",\"passphrase\":\"x\"")),
+        ("surrogate",   snapshot_with("\"passphrase\":\"hunter2\",\"t\":\"\\ud83d\"")),
+        ("deep",        snapshot_with(&deep)),
+    ];
+    let s = Scratch::new("chunk-refused");
+    let sink = chunk_sink(&s);
+    for (k, (name, json)) in cases.iter().enumerate() {
+        assert!(Dat::decode_json_strict(json, &DecodeLimits::default()).is_err(), "{}: the strict reader refuses it", name);
+        let rows = rows_of("snapshot", &fmt!("rf-{}", name), &base64::encode_url(json.as_bytes()), 288, false);
+        assert!(rows.len() >= 3, "{}: a few chunks", name);
+        assert_eq!(res!(post_rows(&sink, name, &rows, T0 + 10_000 * k as u64)), rows.len());
+        let got = res!(kept(&sink, name));
+        assert_eq!(got.len(), rows.len(), "{}: a row for a row", name);
+        for (tag, data) in &got {
+            assert!(marked(data), "{}: {} is covered whole: {}", name, tag, data);
+        }
+        assert!(!has(&res!(all_bytes(&s.dir())), &rows[0].2[..40]), "{}: no chunk is stored as it came", name);
+    }
+    Ok(())
+}
+
+#[test]
+fn words_that_are_names_or_that_stand_round_a_secret_field_are_covered_in_place() -> Outcome<()> {
+    let w: Vec<&str> = PHRASE.split(' ').collect();
+    let names = fmt!("{{{}}}", w.iter().map(|x| fmt!("\"{}\":true", x)).collect::<Vec<String>>().join(","));
+    // The eight words as the values of eight members, the fourth of them named for a secret: the walk
+    // covers that one, which used to leave two runs that never reached eight.
+    let round = fmt!("{{{}}}", w.iter().enumerate()
+        .map(|(i, x)| fmt!("\"{}\":\"{}\"", if i == 3 { "seed".to_string() } else { ((b'a' + i as u8) as char).to_string() }, x))
+        .collect::<Vec<String>>().join(","));
+    let s = Scratch::new("chunk-names");
+    let sink = chunk_sink(&s);
+    for (k, (name, member)) in [("names", names), ("round", round)].iter().enumerate() {
+        let json = snapshot_with(&fmt!("\"spread\":{}", member));
+        assert!(!chunk_test().hit(&json), "{}: the raw text never meets the run", name);
+        let rows = rows_of("snapshot", &fmt!("nr-{}", name), &base64::encode_url(json.as_bytes()), 288, false);
+        assert_eq!(res!(post_rows(&sink, name, &rows, T0 + 10_000 * k as u64)), rows.len());
+        let got = res!(kept(&sink, name));
+        assert_eq!(got.len(), rows.len(), "{}: a row for a row", name);
+        let text = res!(reread(&got, false));
+        for x in &w {
+            assert!(!text.contains(&fmt!("\"{}\"", x)), "{}: the word {:?} is stored: {}", name, x, text);
+        }
+        let back = res!(parsed(&text));
+        assert_eq!(text_at(&back, "screen"), "oxegen_home", "{}: the rest of it is kept", name);
+    }
+    Ok(())
+}

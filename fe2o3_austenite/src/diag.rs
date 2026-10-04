@@ -122,19 +122,27 @@ pub struct Diagnostic {
 	pub message:	String,
 	pub hints:		Vec<String>,
 	pub trace:		Vec<(Span, String)>,	// call sites outward, innermost first
+	pub need:		Option<String>,			// the package an import asked for that nobody supplied, as `@ns/name:version`
 }
 
 impl Diagnostic {
 	pub fn error<S: Into<String>>(kind: DiagnosticKind, span: Span, message: S) -> Self {
-		Self { severity: Severity::Error, kind, span, message: message.into(), hints: Vec::new(), trace: Vec::new() }
+		Self { severity: Severity::Error, kind, span, message: message.into(), hints: Vec::new(), trace: Vec::new(), need: None }
 	}
 
 	pub fn warning<S: Into<String>>(kind: DiagnosticKind, span: Span, message: S) -> Self {
-		Self { severity: Severity::Warning, kind, span, message: message.into(), hints: Vec::new(), trace: Vec::new() }
+		Self { severity: Severity::Warning, kind, span, message: message.into(), hints: Vec::new(), trace: Vec::new(), need: None }
 	}
 
 	pub fn with_hint<S: Into<String>>(mut self, hint: S) -> Self {
 		self.hints.push(hint.into());
+		self
+	}
+
+	/// Names the package an import asked for, so a host reads what to supply from the diagnostic, never from its
+	/// message.
+	pub fn needing<S: Into<String>>(mut self, spec: S) -> Self {
+		self.need = Some(spec.into());
 		self
 	}
 

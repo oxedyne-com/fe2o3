@@ -3,12 +3,12 @@
 one markdown summary.
 
 A run flagged `flagged_under_load` (the host's 1-minute load average was above
-`BENCH_LOAD_THRESHOLD`, default 2, before or after that run) is never folded
+`BENCH_LOAD_THRESHOLD`, default 20, before or after that run) is never folded
 into a median silently. By default the whole report refuses to print numbers
 when ANY run is flagged: `--force` overrides that and prints them anyway,
 loudly labelled as taken under load. This is the harness's own gate on the
-plan's rule: "A run whose load average is above 2 is flagged and repeated,
-never averaged in silently."
+rule that a run taken under load is flagged and repeated, never averaged in
+silently. Every group reports the load averages its runs were taken at.
 
 Usage: aggregate.py --in DIR [--in DIR ...] --out-json FILE --out-md FILE
                      [--force] [--pages N]
@@ -40,6 +40,16 @@ def median_min_max(values):
 	if not values:
 		return None
 	return {"median": st.median(values), "min": min(values), "max": max(values), "n": len(values)}
+
+
+def load_range(rows):
+	"""The 1-minute load averages a group's runs were taken at, as {min, max}, read before and after."""
+	vals = [r[k] for r in rows for k in ("load_before", "load_after") if isinstance(r.get(k), (int, float))]
+	return {"min": min(vals), "max": max(vals)} if vals else None
+
+
+def fmt_load(lr):
+	return f"{lr['min']:.0f}-{lr['max']:.0f}" if lr else "-"
 
 
 def summarise_wall(rows, key_fields, wall_field="wall_s"):
@@ -107,6 +117,7 @@ def main():
 		report["native"].setdefault(doc, {})[engine] = {
 			"wall_s": stat,
 			"rss_kb": rss_summary.get((doc, engine)),
+			"load": load_range([r for r in native if r.get("doc") == doc and r.get("engine") == engine]),
 		}
 	# Ratio austenite-native / typst-j16 median, per doc.
 	for doc, engines in report["native"].items():
@@ -121,11 +132,13 @@ def main():
 	# where `run_timed` writes one row per measured run.
 	wasm_by_key = defaultdict(list)
 	wasm_rss_rows = defaultdict(list)
+	wasm_rows = defaultdict(list)
 	for r in wasm:
 		if r.get("exit_code", 0) != 0 or not r.get("ok", True):
 			continue
 		key = (r.get("doc"), r.get("engine"))
 		wasm_by_key[key].extend(r.get("runs") or [])
+		wasm_rows[key].append(r)
 		if r.get("rss_kb") is not None:
 			wasm_rss_rows[key].append(r["rss_kb"])
 	for key, samples in wasm_by_key.items():
@@ -133,12 +146,21 @@ def main():
 		report["wasm_compile"].setdefault(doc, {})[engine] = {
 			"wall_s": median_min_max(samples),
 			"rss_kb": median_min_max(wasm_rss_rows.get(key, [])),
+			"load": load_range(wasm_rows[key]),
 		}
+	# Ratio per mode (e.g. "wasm-austenite-edit" / "wasm-typstts-edit"), never
+	# across modes -- an engine name carries its mode (cold, unchanged or edit;
+	# see wasm_bench.mjs), so pairing must respect it.
 	for doc, engines in report["wasm_compile"].items():
-		a = engines.get("wasm-austenite", {}).get("wall_s")
-		t = engines.get("wasm-typstts", {}).get("wall_s")
-		if a and t and t["median"]:
-			report["wasm_compile"][doc]["ratio_austenite_over_typstts"] = round(a["median"] / t["median"], 3)
+		modes = {
+			e[len("wasm-austenite-"):] for e in engines if e.startswith("wasm-austenite-")
+		}
+		for mode in sorted(modes):
+			a = engines.get(f"wasm-austenite-{mode}", {}).get("wall_s")
+			t = engines.get(f"wasm-typstts-{mode}", {}).get("wall_s")
+			if a and t and t["median"]:
+				report["wasm_compile"][doc][f"ratio_austenite_over_typstts_{mode}"] = \
+					round(a["median"] / t["median"], 3)
 
 	# Edit latency: p50_s/p95_s come pre-computed from edit_latency.mjs, one row per (doc, engine).
 	for r in edits:
@@ -148,7 +170,7 @@ def main():
 		report["edit_latency"].setdefault(doc, {})[engine] = {
 			"p50_s": r.get("p50_s"), "p95_s": r.get("p95_s"),
 			"edits": r.get("edits"), "rss_kb": r.get("rss_kb"),
-			"ok": r.get("ok"),
+			"ok": r.get("ok"), "load": load_range([r]),
 		}
 
 	Path(args.out_json).write_text(json.dumps(report, indent=2) + "\n")
@@ -164,8 +186,8 @@ def main():
 			"are NOT a valid baseline; re-run when the host is idle.\n"
 		)
 	md.append("\n## Native (typst -j16 / -j1 vs austenite)\n")
-	md.append("| Doc | Engine | wall median (s) | min | max | n | peak RSS median (kB) |")
-	md.append("|---|---|---|---|---|---|---|")
+	md.append("| Doc | Engine | wall median (s) | min | max | n | peak RSS median (kB) | load |")
+	md.append("|---|---|---|---|---|---|---|---|")
 	for doc, engines in sorted(report["native"].items()):
 		for engine, v in sorted(engines.items()):
 			if engine.startswith("ratio_"):
@@ -173,14 +195,14 @@ def main():
 			w = v["wall_s"]
 			rss = v.get("rss_kb") or {}
 			md.append(f"| {doc} | {engine} | {w['median']:.3f} | {w['min']:.3f} | {w['max']:.3f} | "
-				f"{w['n']} | {rss.get('median', '-')} |")
+				f"{w['n']} | {rss.get('median', '-')} | {fmt_load(v.get('load'))} |")
 		ratio = engines.get("ratio_austenite_over_typst_j16")
 		if ratio is not None:
-			md.append(f"| {doc} | **ratio austenite/typst-j16** | {ratio} | | | | |")
+			md.append(f"| {doc} | **ratio austenite/typst-j16** | {ratio} | | | | | |")
 
 	md.append("\n## Wasm compile (Austenite wasm vs typst.ts wasm, node)\n")
-	md.append("| Doc | Engine | wall median (s) | min | max | n | peak RSS median (kB) |")
-	md.append("|---|---|---|---|---|---|---|")
+	md.append("| Doc | Engine | wall median (s) | min | max | n | peak RSS median (kB) | load |")
+	md.append("|---|---|---|---|---|---|---|---|")
 	for doc, engines in sorted(report["wasm_compile"].items()):
 		for engine, v in sorted(engines.items()):
 			if engine.startswith("ratio_"):
@@ -188,21 +210,23 @@ def main():
 			w = v["wall_s"]
 			rss = v.get("rss_kb") or {}
 			md.append(f"| {doc} | {engine} | {w['median']:.3f} | {w['min']:.3f} | {w['max']:.3f} | "
-				f"{w['n']} | {rss.get('median', '-')} |")
-		ratio = engines.get("ratio_austenite_over_typstts")
-		if ratio is not None:
-			md.append(f"| {doc} | **ratio austenite/typst.ts** | {ratio} | | | | |")
+				f"{w['n']} | {rss.get('median', '-')} | {fmt_load(v.get('load'))} |")
+		for key, ratio in sorted(engines.items()):
+			if not key.startswith("ratio_austenite_over_typstts_"):
+				continue
+			mode = key[len("ratio_austenite_over_typstts_"):]
+			md.append(f"| {doc} | **ratio austenite/typst.ts ({mode})** | {ratio} | | | | | |")
 
 	md.append("\n## Edit latency (one-character edit to recompiled page)\n")
-	md.append("| Doc | Engine | p50 (s) | p95 (s) | edits | peak RSS (kB) | ok |")
-	md.append("|---|---|---|---|---|---|---|")
+	md.append("| Doc | Engine | p50 (s) | p95 (s) | edits | peak RSS (kB) | ok | load |")
+	md.append("|---|---|---|---|---|---|---|---|")
 	def fmt4(x):
 		return f"{x:.4f}" if isinstance(x, (int, float)) else "-"
 
 	for doc, engines in sorted(report["edit_latency"].items()):
 		for engine, v in sorted(engines.items()):
 			md.append(f"| {doc} | {engine} | {fmt4(v['p50_s'])} | {fmt4(v['p95_s'])} | "
-				f"{v['edits']} | {v.get('rss_kb', '-')} | {v['ok']} |")
+				f"{v['edits']} | {v.get('rss_kb', '-')} | {v['ok']} | {fmt_load(v.get('load'))} |")
 
 	Path(args.out_md).write_text("\n".join(md) + "\n")
 	print(f"wrote {args.out_json} and {args.out_md}", file=sys.stderr)

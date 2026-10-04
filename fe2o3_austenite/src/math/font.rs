@@ -399,9 +399,6 @@ pub const FALLBACKS: &[&str] = &[
 	"segoe ui emoji",
 ];
 
-/// The face maths sets in by default when no family a document names is in the book.
-const DEFAULT: &str = "new computer modern math";
-
 /// The face of `family` nearest `variant` in the book, if the book has the family.
 pub fn select(book: &FontBook, family: &str, variant: FaceVariant) -> Outcome<Option<Arc<MathFont>>> {
 	match book.select(&family.to_lowercase(), variant) {
@@ -410,7 +407,8 @@ pub fn select(book: &FontBook, family: &str, variant: FaceVariant) -> Outcome<Op
 	}
 }
 
-/// The face maths is set in: the first family of the list the book has, else the default maths face.
+/// The face maths is set in: the first family of the list the book has, then the fallback families when
+/// `fallback` is on, as Typst's `get_font`. A list that no face answers, with the fallback off, is an error.
 pub fn resolve(book: &FontBook, families: &[String], fallback: bool, variant: FaceVariant) -> Outcome<Arc<MathFont>> {
 	for fam in families {
 		if let Some(f) = res!(select(book, fam, variant)) {
@@ -424,10 +422,7 @@ pub fn resolve(book: &FontBook, families: &[String], fallback: bool, variant: Fa
 			}
 		}
 	}
-	match res!(select(book, DEFAULT, variant)) {
-		Some(f)	=> Ok(f),
-		None	=> Err(err!("no font could be found"; Missing)),
-	}
+	Err(err!("no font could be found"; Missing))
 }
 
 /// The faces to try, in order, for a character the first face lacks.

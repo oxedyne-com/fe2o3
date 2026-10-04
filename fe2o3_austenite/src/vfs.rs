@@ -12,10 +12,12 @@
 //!
 //! The contract that keeps a native build byte-for-byte what it was: with no map installed -- the native
 //! default -- a read is exactly the `std::fs` call it replaced, and every predicate (`exists`, `is_file`,
-//! `canonicalize`) falls through to the real filesystem unchanged. A map is installed only by the wasm
-//! surface ([`crate::wasm`]), and only there does a read resolve from injected bytes. The global mirrors
-//! the crate's other assembly-time singletons -- the image base directory and the term dictionary --
-//! since the reader sets one file at a time and threads no source map of its own.
+//! `canonicalize`) falls through to the real filesystem unchanged. A map is installed only by the compile
+//! surface ([`crate::door`], which the wasm surface wraps), and only there does a read resolve from
+//! injected bytes. The door seals its map ([`install_sealed`]), so nothing the project does not hold reads
+//! from the host. The global mirrors the crate's other assembly-time singletons -- the image base
+//! directory and the term dictionary -- since the reader sets one file at a time and threads no source map
+//! of its own.
 
 use crate::eval::package::{
 	self,
@@ -36,19 +38,37 @@ use std::sync::RwLock;
 // The injected source map. `None` on the native default path, where every read and predicate falls
 // through to `std::fs`; `Some` once the wasm surface installs a document's files, under which reads
 // resolve from the map and the real filesystem is never touched.
-static SOURCES: RwLock<Option<HashMap<PathBuf, Vec<u8>>>> = RwLock::new(None);
+static SOURCES: RwLock<Option<Sources>> = RwLock::new(None);
+
+// The map, and whether it is the whole world. A sealed map answers for every path: one it does not hold is
+// absent, whatever the real filesystem has there. An unsealed one falls through to it.
+struct Sources {
+	files:	HashMap<PathBuf, Vec<u8>>,
+	sealed:	bool,
+}
 
 /// Installs an injected source map, so every subsequent read resolves from `files` rather than the real
 /// filesystem. Keys are normalised on install and again on lookup, so a `dir.join("../x")` and a direct
 /// `x` resolve alike. The wasm compile surface calls this before it runs the assembler and clears it
 /// after, so one process can compile many documents in turn.
 pub fn install(files: HashMap<PathBuf, Vec<u8>>) -> Outcome<()> {
+	set_sources(files, false)
+}
+
+/// As [`install`], with the map sealed: a path it does not hold is absent, never read from the real
+/// filesystem. The native door installs this way, so a project sees only the files it was given, as it does
+/// in the browser, where there is no other filesystem to fall through to.
+pub fn install_sealed(files: HashMap<PathBuf, Vec<u8>>) -> Outcome<()> {
+	set_sources(files, true)
+}
+
+fn set_sources(files: HashMap<PathBuf, Vec<u8>>, sealed: bool) -> Outcome<()> {
 	let mut norm: HashMap<PathBuf, Vec<u8>> = HashMap::with_capacity(files.len());
 	for (k, v) in files {
 		norm.insert(normalise(&k), v);
 	}
 	let mut guard = lock_write!(SOURCES, "While installing the source map");
-	*guard = Some(norm);
+	*guard = Some(Sources { files: norm, sealed });
 	Ok(())
 }
 
@@ -76,9 +96,11 @@ pub fn read(path: &Path) -> io::Result<Vec<u8>> {
 	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map) => match map.get(&normalise(path)) {
-				Some(bytes)	=> Ok(bytes.clone()),
-				None		=> native_read(path),
+			Some(map) => match map.files.get(&normalise(path)) {
+				Some(bytes)			=> Ok(bytes.clone()),
+				None if map.sealed	=> Err(io::Error::new(
+					io::ErrorKind::NotFound, fmt!("{:?} is not in the project.", path))),
+				None				=> native_read(path),
 			},
 			None => native_read(path),
 		},
@@ -115,7 +137,7 @@ pub fn write(path: &Path, contents: &[u8]) -> io::Result<()> {
 			Err(_)	=> return Err(io::Error::new(io::ErrorKind::Other, "the source map lock is poisoned")),
 		};
 		if let Some(map) = guard.as_mut() {
-			map.insert(normalise(path), contents.to_vec());
+			map.files.insert(normalise(path), contents.to_vec());
 		}
 		Ok(())
 	} else {
@@ -131,7 +153,7 @@ pub fn exists(path: &Path) -> bool {
 	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map)	=> map.contains_key(&normalise(path)) || native_exists(path),
+			Some(map)	=> map.files.contains_key(&normalise(path)) || (!map.sealed && native_exists(path)),
 			None		=> native_exists(path),
 		},
 		Err(_) => native_exists(path),
@@ -146,7 +168,7 @@ pub fn is_file(path: &Path) -> bool {
 	}
 	match SOURCES.read() {
 		Ok(guard) => match guard.as_ref() {
-			Some(map)	=> map.contains_key(&normalise(path)) || native_is_file(path),
+			Some(map)	=> map.files.contains_key(&normalise(path)) || (!map.sealed && native_is_file(path)),
 			None		=> native_is_file(path),
 		},
 		Err(_) => native_is_file(path),
@@ -163,7 +185,7 @@ pub fn is_dir(path: &Path) -> bool {
 		Ok(guard) => match guard.as_ref() {
 			Some(map) => {
 				let root = normalise(path);
-				map.keys().any(|k| k.starts_with(&root) && k != &root) || native_is_dir(path)
+				map.files.keys().any(|k| k.starts_with(&root) && k != &root) || (!map.sealed && native_is_dir(path))
 			},
 			None => native_is_dir(path),
 		},
@@ -180,16 +202,20 @@ pub fn list_files(dir: &Path) -> Vec<PathBuf> {
 	}
 	let root = normalise(dir);
 	let mut out: Vec<PathBuf> = Vec::new();
+	let mut sealed = false;
 	if let Ok(guard) = SOURCES.read() {
 		if let Some(map) = guard.as_ref() {
-			for k in map.keys() {
+			sealed = map.sealed;
+			for k in map.files.keys() {
 				if k.starts_with(&root) && k != &root {
 					out.push(k.clone());
 				}
 			}
 		}
 	}
-	native_list(dir, &mut out, LIST_DEPTH);
+	if !sealed {
+		native_list(dir, &mut out, LIST_DEPTH);
+	}
 	out.sort();
 	out.dedup();
 	out

@@ -35,6 +35,7 @@ pub mod delta;
 pub mod diag;
 pub mod diagram;
 pub mod doc;
+pub mod door;
 pub mod driver;
 pub mod emit;
 pub mod eval;
@@ -55,6 +56,7 @@ pub mod plot;
 pub mod syntax;
 pub mod table;
 pub mod theme;
+pub mod timings;
 pub mod vfs;
 pub mod watch;
 

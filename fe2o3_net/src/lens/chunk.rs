@@ -29,6 +29,14 @@
 //! covered where it stands. The covered JSON is encoded again in the alphabet it came in, and cut
 //! into the rows it came in ([`Verdict::Cover`]). Where it will not fit them, or the rows are not
 //! the whole bundle, the whole is covered instead, which is the safe side of the same choice.
+//!
+//! Two things were added the same day (N2 of the Opus QA). A bundle that is the whole of its post
+//! and opens as an object or an array, but that the strict reader refuses (a member named twice,
+//! half a surrogate pair, nesting past the limit), cannot be walked, and is now covered whole where
+//! it had been stored as it came: another reader takes all three, so a reader's refusing them was
+//! no defence. And the runs of words are sought before the walk, across the values, across the names
+//! and across both, since the walk covers a field named for a secret in the middle of a run and
+//! leaves the two halves too short to be one.
 
 use super::{
     redact::{
@@ -39,6 +47,7 @@ use super::{
     row::compact,
 };
 
+use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
     bdat::limits::DecodeLimits,
     prelude::*,
@@ -212,7 +221,7 @@ fn of_text<T: StrTest>(red: &Redact<T>, cap: usize, text: &str, flat: &str, k: u
     if red.test().hit(text) {
         return vec![Verdict::Hit; k];
     }
-    let covered = match cover(red, text) {
+    let covered = match cover(red, text, entire) {
         Seen::Plain         => return vec![Verdict::Clean; k],
         Seen::Whole         => return vec![Verdict::Hit; k],
         Seen::Covered(c)    => c,
@@ -234,69 +243,110 @@ enum Seen {
     Whole,              // JSON that cannot be covered in part
 }
 
-// A text that parses as JSON, put through `red`: its names and strings by the walk, then the strings
-// joined in order for the runs that only stand together.
-fn cover<T: StrTest>(red: &Redact<T>, text: &str) -> Seen {
+// Which of a structure's strings a run of words is read across.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Reads {
+    Values,     // the string values: no member name stands between the words
+    Names,      // the member names: no value stands between the words
+    Both,       // the names and the values, in the order the document gives them
+}
+
+// A text that parses as JSON, put through `red`: the runs of words first, across its strings joined
+// in order, then its names and strings by the walk. The runs come first because the walk covers a
+// field named for a secret in the middle of a run, and the two halves left over are each too short
+// to be one. `entire` says the text is the whole of a bundle.
+fn cover<T: StrTest>(red: &Redact<T>, text: &str, entire: bool) -> Seen {
     let parsed = match Dat::decode_json_strict_ordered(text, &DecodeLimits::default()) {
         Ok(d)   => d,
-        // Not a whole bundle, or not a bundle: the string test has had it, and a reader will too.
-        Err(_)  => return Seen::Plain,
+        // A whole bundle that the strict reader refuses (a member named twice, half a surrogate pair,
+        // nesting past the limit) is one that a lenient reader takes, and it cannot be walked, so it
+        // is covered as a whole and never stored as it came. A text that does not open as a bundle is
+        // no bundle: the string test has had it.
+        Err(_)  => return if entire && opens(text) { Seen::Whole } else { Seen::Plain },
     };
-    let (mut d, mut changed) = red.walk(&parsed);
-    let mut leaves = leaves_of(&d);
-    let spans = red.test().joined_spans(&leaves.join("\n"));
-    if !spans.is_empty() {
+    let mut d = parsed;
+    let mut changed = false;
+    for reads in [Reads::Values, Reads::Names, Reads::Both] {
+        let strs = strings_of(&d, reads);
+        let spans = red.test().joined_spans(&strs.join("\n"));
+        if spans.is_empty() {
+            continue;
+        }
         // Each string that a run touches is covered, as a plain row's string would be.
         let mut at = 0;
-        let mut take = Vec::with_capacity(leaves.len());
-        for l in &leaves {
+        let mut take = Vec::with_capacity(strs.len());
+        for l in &strs {
             take.push(spans.iter().any(|&(a, b)| a < at + l.len() && b > at));
             at += l.len() + 1;
         }
         let mut i = 0;
-        d = map_leaves(&d, &mut |s| {
+        d = map_strings(&d, reads, &mut |s| {
             i += 1;
             if take[i - 1] && !marker(s) { Some(red.mark(s)) } else { None }
         });
         changed = true;
-        // Covering must leave nothing of the run, or it has not covered it.
-        leaves = leaves_of(&d);
-        if !red.test().joined_spans(&leaves.join("\n")).is_empty() {
+    }
+    // Covering must leave nothing of a run, or it has not covered it.
+    for reads in [Reads::Values, Reads::Names, Reads::Both] {
+        if !red.test().joined_spans(&strings_of(&d, reads).join("\n")).is_empty() {
             return Seen::Whole;
         }
     }
-    if !changed {
+    let (walked, c) = red.walk(&d);
+    if !changed && !c {
         return Seen::Plain;
     }
-    match compact(&d) {
+    match compact(&walked) {
         Ok(c)   => Seen::Covered(c),
         Err(_)  => Seen::Whole,
     }
 }
 
-fn leaves_of(d: &Dat) -> Vec<String> {
+// Does the text open as a JSON object or array, as a bundle does, whatever follows?
+fn opens(text: &str) -> bool {
+    text.trim_start_matches([' ', '\t', '\n', '\r']).starts_with(['{', '['])
+}
+
+fn strings_of(d: &Dat, reads: Reads) -> Vec<String> {
     let mut out = Vec::new();
-    map_leaves(d, &mut |s| {
+    map_strings(d, reads, &mut |s| {
         out.push(s.to_string());
         None
     });
     out
 }
 
-// A copy of `d` in which each string value, in the order written, is given to `f`, which may answer
-// a replacement. A key is no value. JSON makes only maps, lists and strings of the kinds that hold
-// others, so those are all that is walked.
-fn map_leaves<F: FnMut(&str) -> Option<String>>(d: &Dat, f: &mut F) -> Dat {
+// A copy of `d` in which each string that `reads` names, in the order written, is given to `f`, which
+// may answer a replacement. A member's name comes before its value. JSON makes only maps, lists and
+// strings of the kinds that hold others, so those are all that is walked.
+fn map_strings<F: FnMut(&str) -> Option<String>>(d: &Dat, reads: Reads, f: &mut F) -> Dat {
+    let name = |k: &Dat, f: &mut F| match k {
+        Dat::Str(s) if reads != Reads::Values   => Dat::Str(f(s).unwrap_or_else(|| s.clone())),
+        other                                   => other.clone(),
+    };
     match d {
-        Dat::Str(s)     => Dat::Str(f(s).unwrap_or_else(|| s.clone())),
-        Dat::List(l)    => Dat::List(l.iter().map(|x| map_leaves(x, f)).collect()),
-        Dat::Map(m)     => Dat::Map(m.iter().map(|(k, v)| (k.clone(), map_leaves(v, f))).collect()),
+        Dat::Str(s) if reads == Reads::Names    => Dat::Str(s.clone()),
+        Dat::Str(s)                             => Dat::Str(f(s).unwrap_or_else(|| s.clone())),
+        Dat::List(l)    => Dat::List(l.iter().map(|x| map_strings(x, reads, f)).collect()),
+        Dat::Map(m)     => {
+            let mut out = DaticleMap::new();
+            for (k, v) in m {
+                let mut nk = name(k, f);
+                // Two names covered the same way must stay two members.
+                while out.contains_key(&nk) {
+                    nk = Dat::Str(fmt!("{}~", match &nk { Dat::Str(s) => s.as_str(), _ => "" }));
+                }
+                out.insert(nk, map_strings(v, reads, f));
+            }
+            Dat::Map(out)
+        },
         Dat::OrdMap(m)  => {
             let mut at: Vec<(&MapKey, &Dat)> = m.iter().collect();
             at.sort_by_key(|(k, _)| k.ord());
             let mut out = OrdDaticleMap::new();
             for (k, v) in at {
-                out.insert(k.clone(), map_leaves(v, f));
+                let nk = name(k.dat(), f);
+                out.insert(MapKey::new(k.ord(), nk), map_strings(v, reads, f));
             }
             Dat::OrdMap(out)
         },
@@ -389,6 +439,65 @@ mod tests {
         assert!(matches!(verdicts("{\"seed\":\"x\"}")[..], [Verdict::Cover(_)]));
         assert_eq!(verdicts("{\"state\":\"live\"}"), vec![Verdict::Clean]);
         assert_eq!(verdicts("not json {"), vec![Verdict::Clean]);
+    }
+
+    #[test]
+    fn a_bundle_the_strict_reader_refuses_is_covered_whole() {
+        let enc = |t: &str| base64::encode_url(t.as_bytes());
+        let one = |t: &str| vec![("ds snapshot r 1/1".to_string(), enc(t))];
+        let red = Redact::new().with_head(0).with_test(Phrase::new(["ant", "bee", "cow"], 3));
+        let deep = ["{\"passphrase\":\"hunter2\",\"d\":", &"[".repeat(65), &"]".repeat(65), "}"].concat();
+        // Each of these is a bundle to a lenient reader, and to none that is strict: a name twice,
+        // half a surrogate pair (which a page makes by cutting a string inside an emoji), and nesting
+        // one level past the limit. Held as it came, the field named for a secret would be stored.
+        let refused = [
+            ("a name twice",            "{\"passphrase\":\"hunter2\",\"passphrase\":\"x\"}"),
+            ("half a surrogate pair",   "{\"passphrase\":\"hunter2\",\"t\":\"\\ud83d\"}"),
+            ("nesting past the limit",  deep.as_str()),
+            ("blanks before it",        " \n\t{\"passphrase\":\"hunter2\",\"passphrase\":\"x\"}"),
+            ("an array",                "[\"a\",{\"passphrase\":\"hunter2\",\"passphrase\":\"x\"}]"),
+        ];
+        for (what, t) in refused {
+            assert!(Dat::decode_json_strict_ordered(t, &DecodeLimits::default()).is_err(), "{}: refused", what);
+            assert_eq!(judge(&red, 400, &one(t)), vec![Verdict::Hit], "{}: covered whole", what);
+        }
+        // The same field in a bundle that is read is covered where it stands.
+        assert!(matches!(judge(&red, 400, &one("{\"passphrase\":\"hunter2\"}"))[..], [Verdict::Cover(_)]));
+        // What does not open as an object or an array is no bundle, and is left to the string test.
+        for t in ["not json {", "\"\\ud83d\""] {
+            assert_eq!(judge(&red, 400, &one(t)), vec![Verdict::Clean], "{}", t);
+        }
+        // A run of chunks that is not the whole bundle cannot be read as one, so it is not refused as one.
+        let half = vec![("ds snapshot r 1/2".to_string(), enc("{\"passphrase\":\"hunter2\",\"passphrase\":"))];
+        assert_eq!(judge(&red, 400, &half), vec![Verdict::Clean]);
+    }
+
+    #[test]
+    fn a_word_run_is_sought_before_the_walk_and_in_the_names_as_well() {
+        let enc = |t: &str| base64::encode_url(t.as_bytes());
+        let stored = |red: &Redact<Phrase>, t: &str| -> String {
+            match judge(red, 400, &[("ds snapshot w 1/1".to_string(), enc(t))]).pop() {
+                Some(Verdict::Cover(d))  => text(&d).unwrap_or_default(),
+                other                   => fmt!("{:?}", other),
+            }
+        };
+        let words = ["ant", "bee", "cow", "dog", "eel"];
+        let five = Redact::new().with_head(0).with_test(Phrase::new(words, 5));
+        let three = Redact::new().with_head(0).with_test(Phrase::new(words, 3));
+        let gone = |t: &str| words.iter().all(|w| !t.contains(&fmt!("\"{}\"", w)));
+        // A field named for a secret, inside the run: the walk covers its value, and the run is then
+        // two short ones that no longer reach five, so the other four were left standing.
+        let t = stored(&five, "{\"a\":\"ant\",\"b\":\"bee\",\"seed\":\"cow\",\"c\":\"dog\",\"d\":\"eel\"}");
+        assert!(gone(&t) && t.matches("[redacted").count() == 5, "all five are covered: {}", t);
+        // Words that are the names, with nothing between them that is a string.
+        let t = stored(&three, "{\"ant\":true,\"bee\":true,\"cow\":true}");
+        assert!(gone(&t) && t.matches("[redacted").count() == 3, "the three names are covered: {}", t);
+        // Names and values in turn, which neither alone makes a run of. The `true` between breaks the
+        // run in the text as it stands, and no string is in its way.
+        let t = stored(&five, "{\"ant\":\"bee\",\"cow\":true,\"dog\":\"eel\"}");
+        assert!(gone(&t) && t.matches("[redacted").count() == 5, "the five strings are covered: {}", t);
+        // Letters that are not on the list still break a run, as they do in a row's text.
+        assert_eq!(judge(&three, 400, &[("ds snapshot w 1/1".to_string(), enc("{\"ant\":\"bee\",\"x\":1,\"cow\":\"y\"}"))]), vec![Verdict::Clean]);
     }
 
     #[test]

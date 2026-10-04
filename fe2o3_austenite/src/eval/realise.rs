@@ -44,6 +44,7 @@ use crate::eval::value::{
 };
 use crate::eval::Engine;
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -51,6 +52,20 @@ use std::sync::Arc;
 
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
+
+/// The show rules Typst applies to an element on its way to a layout routine, which its show-rule depth counts
+/// where the element is realised: one for a shape, a stack, a pad, a transform or a `layout`, two for a list, an
+/// enumeration, a grid or a figure, where the nested list or grid begins a layer more.
+fn shows_of(kind: Option<ElemKind>) -> usize {
+	match kind {
+		Some(ElemKind::List | ElemKind::Enum | ElemKind::Grid | ElemKind::Figure)
+			=> 2,
+		Some(ElemKind::Pad | ElemKind::Stack | ElemKind::Rect | ElemKind::Square | ElemKind::Circle | ElemKind::Ellipse
+			| ElemKind::Move | ElemKind::Scale | ElemKind::Rotate | ElemKind::Layout)
+			=> 1,
+		_	=> 0,
+	}
+}
 
 /// What the caller will do with the stream, which decides grouping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -171,6 +186,17 @@ impl Pair {
 	pub fn is_tag(&self) -> bool { self.tag.is_some() }
 }
 
+/// Does a realised document set any content? Spaces, paragraph breaks, page breaks and column breaks do not,
+/// and a tag only marks a place; any other element does, though it draws nothing, as a vertical space or an
+/// empty box does. A `context` that gives nothing, a `set` rule and a `let` leave no element, and the furniture
+/// a `set page` names is laid out beside the body and is no part of it.
+pub fn sets_content(pairs: &[Pair]) -> bool {
+	pairs.iter().any(|p| !p.is_tag() && !matches!(
+		p.content.kind(),
+		Some(ElemKind::Space | ElemKind::Parbreak | ElemKind::Pagebreak | ElemKind::Colbreak),
+	))
+}
+
 /// Realises `content` under `styles`. In `Flow` mode a body that is inline only -- no paragraph break,
 /// no block-level element -- comes back ungrouped, as Typst's fragment realisation leaves it: flow sets
 /// it as one paragraph without a `par` element, so `show par` rules do not reach it.
@@ -182,7 +208,7 @@ pub fn realise(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, false)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, false, false)).0)
 }
 
 /// Realises a body in `Flow` mode and says whether it is one paragraph's worth of inline elements left without
@@ -195,7 +221,7 @@ pub fn realise_fragment(
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
-	realise_with(engine, content, styles, RealiseMode::Flow, false)
+	realise_with(engine, content, styles, RealiseMode::Flow, false, true)
 }
 
 /// Realises as `realise` does, but leaves model elements (headings, paragraphs, lists, strong and
@@ -210,7 +236,7 @@ pub fn realise_structure(
 )
 	-> Outcome<Vec<Pair>>
 {
-	Ok(res!(realise_with(engine, content, styles, mode, true)).0)
+	Ok(res!(realise_with(engine, content, styles, mode, true, false)).0)
 }
 
 fn realise_with(
@@ -219,24 +245,54 @@ fn realise_with(
 	styles:		&StyleChain,
 	mode:		RealiseMode,
 	keep_model:	bool,
+	fragment:	bool,
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
-	let mut s = State {
-		engine,
-		mode,
-		keep_model,
-		sink:			Vec::new(),
-		groupings:		Vec::new(),
-		outside:		mode == RealiseMode::Document,
-		may_attach:		false,
-		saw_parbreak:	false,
-		fully_inline:	false,
-		depth:			0,
-	};
-	res!(s.visit(content, styles));
-	res!(s.finish());
-	Ok((s.sink, s.fully_inline))
+	engine.timed(Phase::Realise, |engine| {
+		let mut s = State {
+			engine,
+			mode,
+			keep_model,
+			sink:			Vec::new(),
+			groupings:		Vec::new(),
+			outside:		mode == RealiseMode::Document,
+			may_attach:		false,
+			saw_parbreak:	false,
+			fully_inline:	false,
+			pars:			0,
+		};
+		res!(s.visit(content, styles));
+		res!(s.finish());
+		let State { engine, sink, fully_inline, pars, .. } = s;
+		if !fragment || fully_inline || pars != 1 {
+			return Ok((sink, fully_inline));
+		}
+		// A fragment whose one paragraph was closed by styles around it (`set par(..)`, `set align(..)`) is still a
+		// paragraph's worth of inline content, with no `par` of its own: Typst sets it as such, with no first-line indent.
+		let members: Vec<usize> = (0..sink.len()).filter(|i| !sink[*i].is_tag()).collect();
+		let at = match members.as_slice() {
+			[i] if sink[*i].content.is(ElemKind::Par)	=> *i,
+			_											=> return Ok((sink, false)),
+		};
+		let body = match sink[at].content.kind().and_then(|k| k.field_id("body")).and_then(|id| sink[at].content.get(id)) {
+			Some(Value::Content(c))	=> c.clone(),
+			_						=> return Ok((sink, false)),
+		};
+		let (inner, _) = res!(realise_with(engine, &body, &sink[at].styles, RealiseMode::Inline, keep_model, false));
+		let mut inner = Some(inner);
+		let mut out = Vec::new();
+		for (i, pair) in sink.into_iter().enumerate() {
+			match inner.take() {
+				Some(run) if i == at	=> out.extend(run),
+				other					=> {
+					inner = other;
+					out.push(pair);
+				}
+			}
+		}
+		Ok((out, true))
+	})
 }
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?
@@ -288,6 +344,14 @@ impl Rule {
 			Rule::Enum	=> k == ElemKind::EnumItem,
 			Rule::Terms	=> k == ElemKind::TermItem,
 		}
+	}
+
+	/// May a group of this rule open inside the active group of `outer`? A textual run opens in a paragraph
+	/// group. Opened inside a list, enum, terms or cite group, which cannot hold text, it would stay in that
+	/// group and be dropped when the next item joined it and the group was built, so there the text ends the
+	/// group instead.
+	fn nests_in(self, outer: Rule) -> bool {
+		!(self == Rule::Textual && matches!(outer, Rule::Cites | Rule::List | Rule::Enum | Rule::Terms))
 	}
 
 	/// May the element sit inside such a group without opening one?
@@ -352,7 +416,7 @@ struct State<'e> {
 	may_attach:		bool,	// the last block was a paragraph, so `v(attach: true)` survives
 	saw_parbreak:	bool,
 	fully_inline:	bool,	// the whole body is one paragraph's worth of inline elements (`Flow` mode)
-	depth:			usize,	// nested show-rule outputs
+	pars:			usize,	// paragraphs the grouping has made
 }
 
 impl State<'_> {
@@ -520,7 +584,12 @@ impl State<'_> {
 					spanned(shown, output.span())
 				},
 				Ok(None) => {
-					// A primitive: flow lays it out itself.
+					// A primitive: flow lays it out itself. Typst shows it as a block with a layout routine,
+					// which counts toward the show-rule depth where it is realised.
+					let shows = shows_of(output.kind());
+					if shows > 0 {
+						res!(self.check_depth(output.span(), shows));
+					}
 					if let Some((start, _)) = &tags {
 						self.push_tag(start.clone(), styles);
 					}
@@ -617,19 +686,27 @@ impl State<'_> {
 
 	/// Visits a show rule's output under the collected show-set styles, one level deeper.
 	fn visit_output(&mut self, target: &Content, output: &Content, map: &Styles, styles: &StyleChain) -> Outcome<()> {
-		self.depth += 1;
-		if self.depth > MAX_SHOW_RULE_DEPTH {
-			return Err(error_hints(self.engine, DiagnosticKind::Limit, target.span(), "maximum show rule depth exceeded", &[
-				"maybe a show rule matches its own output",
-				"maybe there are too deeply nested elements",
-			]));
-		}
+		res!(self.check_depth(target.span(), 1));
+		self.engine.route += 1;
 		let prev_outside = self.outside;
 		self.outside &= target.is(ElemKind::Context);
 		let r = self.visit_styled(output, map, styles, false);
 		self.outside = prev_outside;
-		self.depth -= 1;
+		self.engine.route -= 1;
 		r
+	}
+
+	/// Typst's show-rule depth limit. The layers and show rules already entered, and `shows` more, must not pass
+	/// it: an element that Typst shows as a layout routine counts the shows it takes, though its body is laid out
+	/// later and no output is visited here.
+	fn check_depth(&mut self, span: Span, shows: usize) -> Outcome<()> {
+		if self.engine.route + shows > MAX_SHOW_RULE_DEPTH {
+			return Err(error_hints(self.engine, DiagnosticKind::Limit, span, "maximum show rule depth exceeded", &[
+				"maybe a show rule matches its own output",
+				"maybe there are too deeply nested elements",
+			]));
+		}
+		Ok(())
 	}
 
 	/// Gives the element its location (when locatable or labelled) and copies the style chain's values
@@ -713,6 +790,14 @@ impl State<'_> {
 				_ => (),
 			}
 		}
+		// Outside a container or show rule's output, the styles may be lifted to the page level.
+		let marked;
+		let local = if self.outside {
+			marked = local.outside();
+			&marked
+		} else {
+			local
+		};
 		if pagebreak {
 			// The leading break takes the styles up to and including the last page property only.
 			let last = local.as_slice().iter().rposition(|s| matches!(s, Style::Property(p) if p.elem == ElemKind::Page));
@@ -761,7 +846,7 @@ impl State<'_> {
 		let mut i = 0;
 		while let Some(active) = self.groupings.last().copied() {
 			// A rule of higher priority nests a new group inside the active one.
-			if matching.map(|r| r.priority() > active.rule.priority()).unwrap_or(false) {
+			if matching.map(|r| r.priority() > active.rule.priority() && r.nests_in(active.rule)).unwrap_or(false) {
 				break;
 			}
 			if active.rule.trigger(content, self.keep_model) || active.rule.inner(content) {
@@ -934,6 +1019,7 @@ impl State<'_> {
 		let span = select_span(&elems);
 		let (body, trunk) = repack(&elems);
 		let id = res!(field(ElemKind::Par, "body"));
+		self.pars += 1;
 		let par = Content::new(ElemKind::Par, vec![(id, Value::Content(body))], span);
 		self.visit(&par, &trunk)
 	}
@@ -1215,5 +1301,27 @@ pub fn label_of(pair: &Pair) -> Option<&Label> {
 	match &pair.tag {
 		Some(Tag::Start(c))	=> c.label(),
 		_					=> pair.content.label(),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn pair(kind: ElemKind) -> Pair {
+		Pair::new(Content::new(kind, Vec::new(), Span::detached()), StyleChain::root())
+	}
+
+	/// Nothing, spaces, breaks and tags set nothing; any other element is content, drawn or not.
+	#[test]
+	fn a_realised_body_sets_content_unless_it_holds_only_spaces_breaks_and_tags() {
+		assert!(!sets_content(&[]));
+		assert!(!sets_content(&[
+			pair(ElemKind::Space), pair(ElemKind::Parbreak), pair(ElemKind::Pagebreak), pair(ElemKind::Colbreak),
+		]));
+		let tag = Pair::tag(Tag::End(Location(1)), StyleChain::root());
+		assert!(!sets_content(&[tag.clone(), pair(ElemKind::Space)]));
+		assert!(sets_content(&[tag, pair(ElemKind::Space), pair(ElemKind::Linebreak)]));
+		assert!(sets_content(&[pair(ElemKind::Parbreak), pair(ElemKind::Metadata)]));
 	}
 }

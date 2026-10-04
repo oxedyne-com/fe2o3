@@ -115,6 +115,7 @@ fn show_text(sel: &str, out: &str) -> Style {
 		selector:	Some(Selector::Text(sel.into())),
 		transform:	Transformation::Content(Content::text(out)),
 		span:		Span::detached(),
+		outside:	false,
 	})
 }
 

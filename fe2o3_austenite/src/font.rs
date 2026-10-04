@@ -257,8 +257,8 @@ impl ShapedText {
 	pub fn size(&self) -> f32 { self.size }
 
 	/// Folds this run's content into a page-emit key: its size, its fill, its source string and every
-	/// glyph's identity and placed position. This is what the page memo hashes to decide a body frame is
-	/// unchanged. The theme is not folded in as such -- it never needs to be, because it has already
+	/// glyph's identity (the face that draws it included) and placed position. This is what the page memo
+	/// hashes to decide a body frame is unchanged. The theme is not folded in as such -- it never needs to be, because it has already
 	/// decided these very glyph ids, their positions and the fill, so two runs that hash alike here draw
 	/// identically whatever theme produced them.
 	pub fn hash_into(&self, h: &mut crate::memo::Fnv) {
@@ -269,6 +269,10 @@ impl ShapedText {
 		for g in &self.run.glyphs {
 			h.write_u32(g.id);
 			h.write_u8(g.face);
+			// The face that draws a glyph is part of what is drawn. The faces of a family share glyph ids and,
+			// in a monospaced family, advances, so an id and a position cannot tell bold from regular.
+			let (font, face) = self.src.glyph_font(g);
+			h.write_u64(font.fingerprint(face));
 			h.write_f32(g.x);
 			h.write_f32(g.y);
 			h.write_f32(g.adv);

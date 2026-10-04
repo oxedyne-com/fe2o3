@@ -431,3 +431,71 @@ fn measure_delta_cold_versus_warm_recompile() -> Outcome<()> {
 		memo.block_hits, n - 1, d2.changed.len(), d2.order.len());
 	Ok(())
 }
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE BUILDER THE EVALUATOR'S SINK FEEDS                                      │
+// └───────────────────────────────────────────────────────────────────────────┘
+//
+// The evaluator hands the delta its pages one at a time, a pass at a time, and discards a pass that has not
+// settled. The [`delta::Builder`] is what takes them; `compute` is one run of it over a finished list. These
+// tests drive it page by page on synthetic pages, whose content is exactly their rule's width.
+
+/// The builder's delta, its changed pages collected.
+fn finished(build: delta::Builder) -> Outcome<delta::PageDelta> {
+	let mut changed = Vec::new();
+	let head = res!(build.finish(&mut changed));
+	Ok(delta::PageDelta::of(head, changed))
+}
+
+/// A page's id depends on its drawing and on nothing else: the same rule on pages of different numbers is one
+/// id, and a different rule on pages of one number is two.
+#[test]
+fn a_page_id_follows_the_drawing_and_not_the_page_number() -> Outcome<()> {
+	let geom	= PageGeometry::a4();
+	let first	= res!(delta::compute(&[rule_page(1, geom, 10)], &[], 0));
+	let again	= res!(delta::compute(&[rule_page(7, geom, 10)], &[], 0));
+	let other	= res!(delta::compute(&[rule_page(1, geom, 20)], &[], 0));
+	assert_eq!(first.order, again.order, "one drawing is one id, whatever number the page has");
+	assert_ne!(first.order, other.order, "another drawing is another id, whatever number the page has");
+	Ok(())
+}
+
+/// A pass that is discarded leaves nothing: after `restart`, a page the discarded pass rendered is rendered
+/// again for the pass that stands, and a page only the discarded pass held is gone from the order.
+#[test]
+fn a_restarted_builder_keeps_no_page_of_the_pass_it_discards() -> Outcome<()> {
+	let geom = PageGeometry::a4();
+	let mut build = delta::Builder::new(&[], 0);
+	for (n, tag) in [(1, 10), (2, 20), (3, 30)] {
+		build.page(rule_page(n, geom, tag));
+	}
+	build.restart();
+	for (n, tag) in [(1, 10), (2, 40)] {
+		build.page(rule_page(n, geom, tag));
+	}
+	let d = res!(finished(build));
+	let want = res!(delta::compute(&[rule_page(1, geom, 10), rule_page(2, geom, 40)], &[], 0));
+	assert_eq!(d.order, want.order, "the order is the pages of the pass that stood");
+	assert_eq!(d.changed.len(), 2, "both pages are sent, the first though the discarded pass held it");
+	assert_eq!(d.rendered, 2, "and only the two the pass that stood holds are drawn");
+	assert_eq!(d.changed, want.changed, "and what is sent is what a single pass sends");
+	assert!(d.reset && d.version == 1);
+	Ok(())
+}
+
+/// Two pages that draw alike share an id and send one SVG, and the order names the id twice.
+#[test]
+fn two_pages_that_draw_alike_send_one_svg_and_appear_twice_in_the_order() -> Outcome<()> {
+	let geom = PageGeometry::a4();
+	let mut build = delta::Builder::new(&[], 4);
+	for n in 1..=3 {
+		build.page(rule_page(n, geom, if n == 2 { 20 } else { 10 }));
+	}
+	let d = res!(finished(build));
+	assert_eq!(d.order.len(), 3);
+	assert_eq!(d.order[0], d.order[2]);
+	assert_ne!(d.order[0], d.order[1]);
+	assert_eq!(d.changed.len(), 2, "two drawings, two SVGs");
+	assert_eq!(d.version, 5, "the version steps the one given");
+	Ok(())
+}

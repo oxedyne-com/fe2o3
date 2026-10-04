@@ -7,11 +7,14 @@
 //! Libertinus is the maintained descendant of Linux Libertine -- the libre successor to Times, and the
 //! face of the Wikipedia wordmark. New Computer Modern Math is the Computer Modern a reader knows from
 //! mathematics. Both are Typst's own defaults, so a document naming neither sets as the oracle sets it,
-//! and both are carried under permissive licences beside the font files (`LibertinusSerif-OFL.txt`,
-//! `NewCMMath-GUST-LICENSE.txt`).
+//! and both are carried under permissive licences (`fonts/LibertinusSerif-OFL.txt`,
+//! `licences/NewCMMath-GUST-LICENSE.txt`).
 //!
 //! 2026-09-23: the maths face moved from Latin Modern Math to New Computer Modern Math, Typst's default,
 //! when Daimond dropped the typst.ts vendor copy that had been its only source.
+//!
+//! 2026-10-04: the maths face is New Computer Modern Math Book, the face Typst sets an equation in, where it had
+//! been Regular, so a PDF names the font Typst's names (`licences/README.md` records the source).
 
 use crate::math::font::MathFont;
 use crate::vfs;
@@ -494,9 +497,12 @@ const DEJAVU_MONO_BO:	&[u8] = include_bytes!("../fonts/DejaVuSansMono-BoldObliqu
 // The curated reader's mono role; the evaluator sets `raw` in DejaVu Sans Mono, as Typst does.
 const MONO:				&[u8] = include_bytes!("../fonts/LibertinusMono-Regular.otf");
 
-// The maths face: New Computer Modern Math, Typst's own default for `math.equation`, so an equation sets
-// in the face the oracle sets it in. Its OpenType MATH table drives the maths layout (see `crate::math`).
-pub(crate) const MATH:	&[u8] = include_bytes!("../fonts/NewCMMath-Regular.otf");
+// The maths face: New Computer Modern Math Book, the face Typst sets an equation in by default (its weight is
+// 450, which `exceptions` records), so an equation sets in the face the oracle sets it in and the PDF names
+// the same font. Its OpenType MATH table drives the maths layout (see `crate::math`). The Bold face is the one
+// Typst resolves a bold family request to; maths layout sets in the Book face alone.
+pub(crate) const MATH:	&[u8] = include_bytes!("../fonts/NewCMMath-Book.otf");
+const MATH_BOLD:		&[u8] = include_bytes!("../fonts/NewCMMath-Bold.otf");
 
 // Every embedded face, for the family library a document's `font:` is matched against.
 const EMBEDDED: [&[u8]; 6] = [SERIF, BOLD, ITALIC, BOLD_ITALIC, MONO, MATH];
@@ -800,6 +806,7 @@ pub fn stretch_of_ratio(ratio: f64) -> u16 {
 
 /// One face the book holds: what it is called, where it sits in its family, what it looks like, and the
 /// handle shaping and drawing use.
+#[derive(Clone)]
 pub struct BookFace {
 	pub family:		String,			// as declared, style words trimmed; Typst's `FontInfo::family`
 	pub key:		String,			// the family lower-cased, as a document names it
@@ -859,12 +866,12 @@ impl std::fmt::Debug for FontBook {
 
 impl FontBook {
 	/// The faces Typst embeds that Austenite carries: Libertinus Serif in six styles, New Computer Modern
-	/// Math and DejaVu Sans Mono in four.
+	/// Math in Book and Bold, and DejaVu Sans Mono in four.
 	pub fn embedded() -> Outcome<Self> {
 		let mut book = Self::default();
 		for bytes in [
 			SERIF, BOLD, ITALIC, BOLD_ITALIC, SEMIBOLD, SEMIBOLD_ITALIC,
-			MATH,
+			MATH, MATH_BOLD,
 			DEJAVU_MONO, DEJAVU_MONO_B, DEJAVU_MONO_O, DEJAVU_MONO_BO,
 		] {
 			res!(book.add(bytes.to_vec()));
@@ -872,8 +879,42 @@ impl FontBook {
 		Ok(book)
 	}
 
-	/// Adds a font file's face. A file no parser can read is refused with the reason.
+	/// A book of its own that holds the faces this one holds now. Adding to the fork leaves this book as it
+	/// was, so a book of the embedded faces, parsed once, serves every project, each forking it to add its own.
+	/// The shaped-run cache starts empty; a maths view already built is shared.
+	pub fn fork(&self) -> Self {
+		let maths = match self.maths.lock() {
+			Ok(m)	=> m.clone(),
+			Err(_)	=> HashMap::new(),
+		};
+		Self {
+			faces:		self.faces.clone(),
+			families:	self.families.clone(),
+			shapes:		Mutex::new(ShapeCache::default()),
+			maths:		Mutex::new(maths),
+		}
+	}
+
+	/// Adds a font file's face, and every face of a collection: a `.ttc` or `.otc` is cut into a font file
+	/// for each face it holds, as the curated resolver cuts one. Returns the id of the first face added. A
+	/// file no parser can read is refused with the reason.
 	pub fn add(&mut self, bytes: Vec<u8>) -> Outcome<usize> {
+		if !is_collection(&bytes) {
+			return self.add_face(bytes);
+		}
+		let mut first = None;
+		for info in res!(FaceInfo::read_all(&bytes)) {
+			let face = res!(collection_face(&bytes, info.index as usize));
+			let id = res!(self.add_face(face));
+			first.get_or_insert(id);
+		}
+		match first {
+			Some(id)	=> Ok(id),
+			None		=> Err(err!("The font collection holds no face."; Invalid, Input, Missing)),
+		}
+	}
+
+	fn add_face(&mut self, bytes: Vec<u8>) -> Outcome<usize> {
 		let font = res!(Font::new(bytes));
 		let face = res!(font.face(0));
 		let class = res!(face.class());

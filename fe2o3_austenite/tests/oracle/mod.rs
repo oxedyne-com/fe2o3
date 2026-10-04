@@ -24,6 +24,10 @@
 //! and printed rather than silently accepted -- see [`record_and_diff`] and [`BaselineOutcome`].
 
 pub mod trio;
+#[path = "../support/typst_command.rs"]
+mod typst_command;
+
+use typst_command::typst_command;
 
 use oxedyne_fe2o3_austenite::emit::pearl::PearlDoc;
 use oxedyne_fe2o3_core::prelude::*;
@@ -722,7 +726,7 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 	res!(std::fs::write(&dump_path, &dump_src));
 	let _cleanup = RemoveOnDrop(dump_path.clone());
 
-	let mut query = Command::new("typst");
+	let mut query = typst_command("typst", Some("3G"), work_dir);
 	query.arg("query").arg(&dump_path).arg("<oracle-dump>").arg("--field").arg("value").arg("--one");
 	if let Some(r) = root.typst_root { query.arg("--root").arg(r); }
 	let qout = match query.output() {
@@ -741,7 +745,7 @@ fn run_typst(root: &CorpusRoot, work_dir: &Path) -> Outcome<TypstOutput> {
 	// the same unchanged root text), not the dump copy, so the trailing invisible `#metadata` call (it
 	// draws no ink and opens no page of its own) cannot be blamed for a count that turns out to disagree.
 	let pdf_path = work_dir.join(fmt!("{}-typst.pdf", root.name));
-	let mut compile = Command::new("typst");
+	let mut compile = typst_command("typst", Some("3G"), work_dir);
 	compile.arg("compile").arg(&compile_root).arg(&pdf_path);
 	if let Some(r) = root.typst_root { compile.arg("--root").arg(r); }
 	let cout = match compile.output() {

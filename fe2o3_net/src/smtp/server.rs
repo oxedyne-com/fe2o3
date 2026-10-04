@@ -307,7 +307,7 @@ impl<H: SmtpHandler, U: UserStore> SmtpServer<H, U> {
                         Handshake::TimedOut => return Err(err!(
                             "STARTTLS handshake timed out for {:?}.", peer;
                             IO, Network, Init)),
-                        Handshake::Failed(e) => return Err(err!(e,
+                        Handshake::PeerFailed(e) | Handshake::Failed(e) => return Err(err!(e,
                             "STARTTLS handshake failed for {:?}.", peer;
                             IO, Network, Init)),
                     };
