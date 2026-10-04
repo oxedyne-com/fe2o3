@@ -170,7 +170,8 @@ fn assemble(page: &Page, ink: &str, tspans: &str) -> String {
 	let size	= page.geom.media_box();
 	let w		= size.x.as_usize();
 	let h		= size.y.as_usize();
-	let mut out = String::new();
+	// Sized once, so a page of a few megabytes is not grown by doubling and left holding the slack.
+	let mut out = String::with_capacity(ink.len() + tspans.len() + 512);
 	out.push_str(&fmt!(
 		"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">\n",
 		w, h, w, h));

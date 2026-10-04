@@ -14,7 +14,10 @@ use crate::compile::{
 	Report,
 	Severity,
 };
-use crate::delta;
+use crate::delta::{
+	self,
+	Changed,
+};
 use crate::diag::DiagnosticKind;
 use crate::emit::sinks::{
 	Chunks,
@@ -348,9 +351,21 @@ impl Instance {
 	/// left where it was by one that did not, a strict refusal included, so a consumer that dispatches
 	/// compiles without awaiting each can discard a stale return by its version.
 	pub fn compile_delta(&mut self, p: &Project) -> Result<Made<delta::PageDelta>, Failure> {
-		let made = self.run(p, DeltaSink::new(&p.known, self.version), |s| s.into_delta());
+		self.compile_delta_into(p, Vec::new()).map(|m| Made {
+			product:	delta::PageDelta::of(m.product.0, m.product.1),
+			report:		m.report,
+			needs:		m.needs,
+		})
+	}
+
+	/// As [`compile_delta`](Self::compile_delta), each changed page's SVG handed to `out` the moment it is
+	/// drawn, so the compile holds none of them: the browser door pushes each into a JavaScript array.
+	pub fn compile_delta_into<C: Changed>(&mut self, p: &Project, out: C)
+		-> Result<Made<(delta::Head, C)>, Failure>
+	{
+		let made = self.run(p, DeltaSink::new(&p.known, self.version, out), |s| s.into_delta());
 		if let Ok(m) = &made {
-			self.version = m.product.version;
+			self.version = m.product.0.version;
 		}
 		made
 	}

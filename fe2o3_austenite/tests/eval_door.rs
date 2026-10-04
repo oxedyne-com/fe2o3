@@ -21,7 +21,10 @@ use harness::pdf::{
 };
 
 use oxedyne_fe2o3_austenite::compile::DiagnosticKind;
-use oxedyne_fe2o3_austenite::delta::PageDelta;
+use oxedyne_fe2o3_austenite::delta::{
+	Changed,
+	PageDelta,
+};
 use oxedyne_fe2o3_austenite::door::{
 	self,
 	Failure,
@@ -850,6 +853,74 @@ fn a_page_of_a_discarded_pass_never_reaches_the_delta() -> Outcome<()> {
 			None		=> return Err(err!("Page {} of the order was not sent on a reset.", i + 1; Test)),
 		}
 	}
+	Ok(())
+}
+
+// A document that settles in two passes: page three reads the page total, which the first pass has not seen.
+const TWO_PASSES: &str = "#set page(width: 220pt, height: 60pt, margin: 8pt)\nOne.\n#pagebreak()\nTwo.\n#pagebreak()\n\
+	Three of #context counter(page).final().first().\n";
+const ONE_PASS: &str = "#set page(width: 220pt, height: 60pt, margin: 8pt)\nOne.\n#pagebreak()\nTwo.\n#pagebreak()\n\
+	Three of 3.\n";
+
+#[test]
+fn an_open_draws_the_pages_of_the_pass_that_stands_and_no_others() -> Outcome<()> {
+	// The first pass of TWO_PASSES is discarded, and its three pages are not drawn: the sink counts each SVG it
+	// draws, and the count is the pages sent, not the pages of both passes.
+	let mut inst = Instance::new();
+	let two = res!(delta_made(&mut inst, &strict(&[("/main.typ", TWO_PASSES)])));
+	assert_eq!(two.report.pages, 3);
+	assert_eq!(two.product.changed.len(), 3);
+	assert_eq!(two.product.rendered, 3, "three pages drawn, none of the discarded pass's");
+	// A document that settles in one pass draws the same.
+	let one = res!(delta_made(&mut inst, &strict(&[("/main.typ", ONE_PASS)])));
+	assert_eq!(one.product.rendered, 3);
+	// An edit to page one, the consumer holding the rest: one page is drawn, though the edited document also
+	// takes two passes and its first pass holds a page three that the consumer does not.
+	let mut p = strict(&[("/main.typ", TWO_PASSES)]);
+	p.known = two.product.order.clone();
+	let same = res!(delta_made(&mut inst, &p));
+	assert_eq!((same.product.changed.len(), same.product.rendered), (0, 0), "an unchanged recompile draws nothing");
+	let edited = TWO_PASSES.replacen("One.", "Uno.", 1);
+	let mut q = strict(&[("/main.typ", &edited)]);
+	q.known = two.product.order.clone();
+	let made = res!(delta_made(&mut inst, &q));
+	assert_eq!(made.product.order.len(), 3);
+	assert_eq!((made.product.changed.len(), made.product.rendered), (1, 1), "only the edited page is drawn");
+	Ok(())
+}
+
+/// A consumer of changed pages that keeps the ids in the order they arrive and the bytes it was handed.
+#[derive(Default)]
+struct Tape {
+	ids:	Vec<u64>,
+	bytes:	usize,
+}
+
+impl Changed for Tape {
+	fn take(&mut self, id: u64, svg: String) -> Outcome<()> {
+		assert!(svg.contains("class=\"tsel\""), "page {} carries its text layer", id);
+		self.ids.push(id);
+		self.bytes += svg.len();
+		Ok(())
+	}
+}
+
+#[test]
+fn each_changed_page_goes_to_the_consumer_in_reading_order_as_it_is_drawn() -> Outcome<()> {
+	let mut inst = Instance::new();
+	let p = strict(&[("/main.typ", &six_pages(None))]);
+	let whole = res!(delta_made(&mut inst, &p));
+	let sent = match inst.compile_delta_into(&p, Tape::default()) {
+		Ok(m)	=> m,
+		Err(f)	=> return Err(err!("The delta door refused: {}", f.head; Test)),
+	};
+	let (head, tape) = sent.product;
+	assert_eq!(head.order, whole.product.order, "the order is the same through either entry");
+	assert_eq!(tape.ids, head.order, "six different pages arrive in reading order");
+	assert_eq!(head.rendered as usize, tape.ids.len());
+	let held: usize = whole.product.changed.iter().map(|(_, svg)| svg.len()).sum();
+	assert_eq!(tape.bytes, held, "the bytes handed over are the bytes the whole delta holds");
+	assert_eq!(head.version, whole.product.version + 1, "each compile steps the tick, by either entry");
 	Ok(())
 }
 

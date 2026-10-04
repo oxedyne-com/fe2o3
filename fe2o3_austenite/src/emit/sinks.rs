@@ -6,12 +6,14 @@
 //! `finish` writes the page tree, the outline from the final introspector, the Info dictionary from the
 //! document's metadata, the subset fonts with their `/ToUnicode` maps and the cross-reference table.
 //! [`VectorSink`] renders each page to an SVG document of its own. [`DeltaSink`] is the live view's: it keeps
-//! each page's content id and the SVG of only those pages the consumer does not hold. [`CountSink`] counts and
+//! each page's content id and the frame of only those pages the consumer does not hold, and draws them once the
+//! pass that stands is known. [`CountSink`] counts and
 //! drops, for the heap probe and for tests.
 
 use crate::delta::{
 	Builder,
-	PageDelta,
+	Changed,
+	Head,
 };
 use crate::emit::svg;
 use crate::eval::content::ElemKind;
@@ -213,40 +215,59 @@ impl PageSink for VectorSink {
 }
 
 /// Takes each page of the pass as the live view's changed-only delta ([`crate::delta`]): the page's content
-/// id, and its SVG when the consumer does not hold that id. The page is dropped as soon as it is taken, so the
-/// sink holds ids and the SVG of the changed pages alone. A pass that has not settled is discarded whole, and
-/// the delta restarts with it, so no page of a discarded pass reaches `changed`.
+/// id, and the page itself when the consumer does not hold that id. Nothing is drawn while a pass runs,
+/// because the fixpoint cannot say a pass has settled before its last page: a pass that has not is
+/// discarded whole and the builder restarts with it, so none of its pages is ever drawn. `finish`, which
+/// runs once, after the pass that stands, draws each page the consumer lacks and hands its SVG to `out`.
 #[derive(Debug)]
-pub struct DeltaSink {
-	build:		Builder,
-	finished:	bool,
+pub struct DeltaSink<C: Changed> {
+	build:	Option<Builder>,	// none once the delta is finished
+	out:	C,
+	head:	Option<Head>,
 }
 
-impl DeltaSink {
-	/// A sink against the consumer's `known` ids, stepping `prior_version`.
-	pub fn new(known: &[u64], prior_version: u32) -> Self {
-		Self { build: Builder::new(known, prior_version), finished: false }
+impl<C: Changed> DeltaSink<C> {
+	/// A sink against the consumer's `known` ids, stepping `prior_version`, sending each changed page to `out`.
+	pub fn new(known: &[u64], prior_version: u32, out: C) -> Self {
+		Self { build: Some(Builder::new(known, prior_version)), out, head: None }
 	}
 
-	/// The delta, once the fixpoint has run `finish`.
-	pub fn into_delta(self) -> Option<PageDelta> {
-		if self.finished { Some(self.build.finish()) } else { None }
+	/// The delta's head and the consumer of its changed pages, once the fixpoint has run `finish`.
+	pub fn into_delta(self) -> Option<(Head, C)> {
+		match self.head {
+			Some(head)	=> Some((head, self.out)),
+			None		=> None,
+		}
 	}
 }
 
-impl PageSink for DeltaSink {
+impl<C: Changed> PageSink for DeltaSink<C> {
 	fn page(&mut self, _engine: &mut Engine, page: Page) -> Outcome<()> {
-		self.build.page(&page)
+		match self.build.as_mut() {
+			Some(b)	=> {
+				b.page(page);
+				Ok(())
+			},
+			None	=> Err(err!("The delta sink was handed a page after it finished."; Bug)),
+		}
 	}
 
 	fn discard_pass(&mut self) -> Outcome<()> {
-		self.build.restart();
-		self.finished = false;
-		Ok(())
+		match self.build.as_mut() {
+			Some(b)	=> {
+				b.restart();
+				Ok(())
+			},
+			None	=> Err(err!("The delta sink discarded a pass after it finished."; Bug)),
+		}
 	}
 
 	fn finish(&mut self, _engine: &mut Engine, _intro: &Introspector) -> Outcome<()> {
-		self.finished = true;
+		let build = match self.build.take() {
+			Some(b)	=> b,
+			None	=> return Err(err!("The delta sink finished twice."; Bug)),
+		};
+		self.head = Some(res!(build.finish(&mut self.out)));
 		Ok(())
 	}
 }

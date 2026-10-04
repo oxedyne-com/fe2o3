@@ -18,6 +18,10 @@ use crate::compile::{
 	Diagnostic,
 	Report,
 };
+use crate::delta::{
+	Changed,
+	Head,
+};
 use crate::door::{
 	self,
 	Failure,
@@ -88,7 +92,7 @@ impl DaimondTypst {
 	/// hold every 64-bit hash exactly.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
-		match self.inst.compile_delta(&project_of(project)) {
+		match self.inst.compile_delta_into(&project_of(project), JsChanged::default()) {
 			Ok(made)	=> ok_delta(&made),
 			Err(fail)	=> err_obj(&fail),
 		}
@@ -385,27 +389,37 @@ fn ok_svg(made: &Made<Vec<String>>) -> JsValue {
 	obj.into()
 }
 
+/// The delta's `changed` array, built as the pages are drawn: each page's SVG goes into a JavaScript string
+/// the moment it is rendered and the Rust copy is dropped, so wasm memory never holds more than one page's SVG.
+#[derive(Default)]
+struct JsChanged {
+	arr:	js_sys::Array,
+}
+
+impl Changed for JsChanged {
+	fn take(&mut self, id: u64, svg: String) -> Outcome<()> {
+		let entry = js_sys::Object::new();
+		set(&entry, "id", &JsValue::from_str(&fmt!("{}", id)));
+		set(&entry, "svg", &JsValue::from_str(&svg));
+		self.arr.push(&entry);
+		Ok(())
+	}
+}
+
 /// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs }`. Ids
 /// (page content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and
 /// would silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
-fn ok_delta(made: &Made<crate::delta::PageDelta>) -> JsValue {
-	let d = &made.product;
+fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
+	let (head, changed) = &made.product;
 	let obj = js_sys::Object::new();
-	set(&obj, "version", &JsValue::from_f64(d.version as f64));
+	set(&obj, "version", &JsValue::from_f64(head.version as f64));
 	let order = js_sys::Array::new();
-	for id in &d.order {
+	for id in &head.order {
 		order.push(&JsValue::from_str(&fmt!("{}", id)));
 	}
 	set(&obj, "order", &order);
-	let changed = js_sys::Array::new();
-	for (id, svg) in &d.changed {
-		let entry = js_sys::Object::new();
-		set(&entry, "id", &JsValue::from_str(&fmt!("{}", id)));
-		set(&entry, "svg", &JsValue::from_str(svg));
-		changed.push(&entry);
-	}
-	set(&obj, "changed", &changed);
-	set(&obj, "reset", &JsValue::from_bool(d.reset));
+	set(&obj, "changed", &changed.arr);
+	set(&obj, "reset", &JsValue::from_bool(head.reset));
 	set_report(&obj, &made.report, &made.needs);
 	obj.into()
 }

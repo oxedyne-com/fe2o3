@@ -28,17 +28,23 @@
 //! furniture fresh; the delta needs the folio in the key, since the consumer reuses the whole SVG by id and
 //! a page whose only change is its printed folio genuinely renders differently.
 //!
-//! **One implementation, two feeds.** A [`Builder`] takes the pages of one compile a page at a time and keeps
-//! the ids and the changed SVG only, never a page. The evaluator's fixpoint feeds it through
-//! [`DeltaSink`](crate::emit::sinks::DeltaSink), which drops each page as it is taken and restarts the
-//! builder when a pass is discarded, so no page of a pass that did not settle reaches `changed`; the curated
-//! reader feeds it a finished list of pages through [`compute`].
+//! **One implementation, two feeds.** A [`Builder`] takes the pages of one compile a page at a time. It hashes
+//! each page to its id, keeps the page itself only when the consumer does not hold that id, and renders
+//! nothing until [`Builder::finish`]. The evaluator's fixpoint feeds it through
+//! [`DeltaSink`](crate::emit::sinks::DeltaSink), which restarts the builder when a pass is discarded; the
+//! fixpoint decides a pass has settled only after its last page, so a page cannot be known final when it is
+//! taken, and a page rendered then would be rendered for nothing whenever another pass follows. Holding the
+//! page and drawing it once, after the pass that stands, costs one frame a page and saves every discarded
+//! pass's SVG. A finished list of pages is fed through [`compute`].
 //!
 //! **Residency.** The prior id set is supplied by the consumer on each compile (its `known` set, the ids it
 //! still holds in its own cache) and returned as the new `order`; the compiler retains none of it between
-//! compiles. The rendered SVG of a page is emitted into `changed` when its id is new and then dropped, never
-//! retained. So the wasm heap holds roughly one page's SVG plus one id per page during a compile, and
-//! nothing between compiles -- not the whole rendered document, and not the prior set. Keeping the prior set
+//! compiles. During a compile the builder holds one id for each page and one frame for each distinct page
+//! the consumer lacks, those of the pass in hand only; a recompile in which the consumer holds the rest
+//! holds almost no frame. At `finish` each frame is drawn, its SVG handed to the [`Changed`] consumer, and
+//! both dropped before the next is drawn, so at most one page's SVG lives in the compiler, and a consumer
+//! that moves each one on, as the browser door does into a JavaScript array, holds none at all. Nothing is
+//! retained between compiles -- not the rendered document, and not the prior set. Keeping the prior set
 //! in the compiler would also be wrong, not merely heavier: a consumer that cleared its cache while the one
 //! singleton compiler lived on would be told nothing changed against a cache holding nothing.
 
@@ -57,24 +63,56 @@ pub struct PageDelta {
 	pub order:		Vec<u64>,			// every page's content id, in reading order
 	pub changed:	Vec<(u64, String)>,	// (id, svg) for each id new this compile, rendered once
 	pub reset:		bool,				// true when the prior set was empty, so `changed` carries all of `order`
+	pub rendered:	u32,				// the SVG documents this compile drew, which is `changed.len()`
 }
 
-/// Builds a [`PageDelta`] one page at a time. Each page's id is its whole-frame content hash; a page whose
-/// id is not in the consumer's `known` set is rendered and carried in `changed`, one whose id is held is left
-/// for the consumer to reuse. An id is rendered at most once, so two byte-identical pages (which share an id)
-/// send one SVG and appear twice in `order`, the consumer resolving both slots to the one cached page.
+impl PageDelta {
+	/// The whole delta from its head and the changed pages a [`Changed`] collected.
+	pub fn of(head: Head, changed: Vec<(u64, String)>) -> Self {
+		Self { version: head.version, order: head.order, changed, reset: head.reset, rendered: head.rendered }
+	}
+}
+
+/// What a delta holds besides its changed pages, which went to a [`Changed`] as they were drawn.
+#[derive(Debug)]
+pub struct Head {
+	pub version:	u32,
+	pub order:		Vec<u64>,
+	pub reset:		bool,
+	pub rendered:	u32,
+}
+
+/// Where a changed page's SVG goes the moment it is drawn, so the compiler never holds the set. A `Vec`
+/// collects them for a caller that wants the whole delta; the browser door pushes each into a JavaScript
+/// array and keeps nothing.
+pub trait Changed {
+	fn take(&mut self, id: u64, svg: String) -> Outcome<()>;
+}
+
+impl Changed for Vec<(u64, String)> {
+	fn take(&mut self, id: u64, svg: String) -> Outcome<()> {
+		self.push((id, svg));
+		Ok(())
+	}
+}
+
+/// Builds a delta one page at a time. Each page's id is its whole-frame content hash; a page whose id is
+/// not in the consumer's `known` set is held to be drawn at [`finish`](Self::finish), one whose id is held
+/// by the consumer is dropped as it is taken. An id is drawn at most once, so two byte-identical pages
+/// (which share an id) send one SVG and appear twice in `order`, the consumer resolving both slots to the
+/// one cached page.
 ///
-/// The builder holds ids and the SVG of the changed pages, never a [`Page`]: a page is borrowed to be hashed
-/// and, if new, rendered, and is the caller's to drop.
+/// The builder holds the frames of the pages the consumer lacks, those of the pass in hand, and no SVG:
+/// see the module note.
 #[derive(Debug)]
 pub struct Builder {
 	known:		HashSet<u64>,
 	reset:		bool,
 	version:	u32,				// the version this delta steps to
 	order:		Vec<u64>,
-	changed:	Vec<(u64, String)>,
-	// The ids rendered so far, so a repeated page is sent once though `order` names it twice.
-	sent:		HashSet<u64>,
+	held:		Vec<(u64, Page)>,	// the new pages, in reading order, each id once
+	queued:		HashSet<u64>,		// the ids in `held`, so a repeated page is held once though `order` names it twice
+	rendered:	u32,				// the SVG documents drawn, counted where each is
 }
 
 impl Builder {
@@ -86,45 +124,51 @@ impl Builder {
 			reset:		known.is_empty(),
 			version:	prior_version.wrapping_add(1),
 			order:		Vec::new(),
-			changed:	Vec::new(),
-			sent:		HashSet::new(),
+			held:		Vec::new(),
+			queued:		HashSet::new(),
+			rendered:	0,
 		}
 	}
 
-	/// Takes the next page in reading order.
-	pub fn page(&mut self, page: &Page) -> Outcome<()> {
-		let id = svg::page_id(page);
+	/// Takes the next page in reading order, and drops it unless the consumer lacks it.
+	pub fn page(&mut self, page: Page) {
+		let id = svg::page_id(&page);
 		self.order.push(id);
-		if !self.known.contains(&id) && self.sent.insert(id) {
-			let rendered = res!(svg::render_page(page));
-			self.changed.push((id, rendered));
+		if !self.known.contains(&id) && self.queued.insert(id) {
+			self.held.push((id, page));
 		}
-		Ok(())
 	}
 
 	/// Forgets every page taken: the pass that gave them was discarded, so none of them is in the document.
 	pub fn restart(&mut self) {
 		self.order.clear();
-		self.changed.clear();
-		self.sent.clear();
+		self.held.clear();
+		self.queued.clear();
 	}
 
-	pub fn finish(self) -> PageDelta {
-		PageDelta {
-			version:	self.version,
-			order:		self.order,
-			changed:	self.changed,
-			reset:		self.reset,
+	/// Draws each page held, in reading order, and hands its SVG to `out` before drawing the next.
+	pub fn finish<C: Changed>(mut self, out: &mut C) -> Outcome<Head> {
+		for (id, page) in std::mem::take(&mut self.held) {
+			let drawn = res!(svg::render_page(&page));
+			drop(page);
+			self.rendered += 1;
+			res!(out.take(id, drawn));
 		}
+		Ok(Head { version: self.version, order: self.order, reset: self.reset, rendered: self.rendered })
 	}
 }
 
 /// Computes the delta between a compile's finished `pages` and the consumer's `prior` id set, as one
-/// [`Builder`] run over them.
-pub fn compute(pages: &[Page], prior: &[u64], prior_version: u32) -> Outcome<PageDelta> {
+/// [`Builder`] run over them. The pages are borrowed, so each one the consumer lacks is cloned to be held.
+pub fn compute<'a, I>(pages: I, prior: &[u64], prior_version: u32) -> Outcome<PageDelta>
+where
+	I: IntoIterator<Item = &'a Page>,
+{
 	let mut build = Builder::new(prior, prior_version);
 	for page in pages {
-		res!(build.page(page));
+		build.page(page.clone());
 	}
-	Ok(build.finish())
+	let mut changed = Vec::new();
+	let head = res!(build.finish(&mut changed));
+	Ok(PageDelta::of(head, changed))
 }
