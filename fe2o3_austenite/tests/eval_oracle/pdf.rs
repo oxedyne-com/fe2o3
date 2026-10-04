@@ -10,6 +10,8 @@ use crate::harness::layout::{
 	OLine,
 	OPage,
 };
+use crate::harness::oracle::work_dir as oracle_dir;
+use crate::harness::typst_command::typst_command;
 
 use oxedyne_fe2o3_austenite::compile;
 use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
@@ -26,10 +28,10 @@ use std::process::Command;
 pub const TYPST:	&str = "/home/jason/bin/typst";
 pub const TOL:		f64 = 1.0;	// points: level 4b's tolerance
 
-/// A scratch directory of the test's own, under the QC cache, never `/tmp`.
+/// A scratch directory of the test's own, under the target directory, never `/tmp`.
 pub fn work_dir(name: &str) -> Outcome<PathBuf> {
-	let home = res!(std::env::var("HOME"));
-	let dir = Path::new(&home).join(".cache").join("austenite-qc").join(name);
+	// Under the test target's own scratch directory, so two worktrees testing at once never share it.
+	let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("austenite-qc").join(name);
 	res!(std::fs::create_dir_all(&dir));
 	Ok(dir)
 }
@@ -57,6 +59,14 @@ pub fn austenite_pdf_with(src: &Path, fonts: FontStore) -> Outcome<Made> {
 	Ok(Made { bytes: out.to_vec(), report, pages })
 }
 
+/// The command that compiles `src` to `out`, under the oracle's cap and with the account's fonts hidden.
+pub fn typst_pdf_command(src: &Path, out: &Path, extra: &[&str]) -> Outcome<Command> {
+	let work = res!(oracle_dir());
+	let mut c = typst_command(TYPST, Some("3G"), &work);
+	c.arg("compile").args(extra).arg(src).arg(out);
+	Ok(c)
+}
+
 /// Typst's PDF of `src`, under the same memory cap as every oracle run.
 pub fn typst_pdf(src: &Path, out: &Path) -> Outcome<()> {
 	typst_pdf_with(src, out, &[])
@@ -64,11 +74,7 @@ pub fn typst_pdf(src: &Path, out: &Path) -> Outcome<()> {
 
 /// As [`typst_pdf`], with `extra` arguments to `typst compile` (a `--font-path`, say).
 pub fn typst_pdf_with(src: &Path, out: &Path, extra: &[&str]) -> Outcome<()> {
-	let status = Command::new("systemd-run")
-		.args(["--user", "--scope", "--quiet", "-p", "MemoryMax=3G", "--slice=claude-rc.slice", TYPST, "compile"])
-		.args(extra)
-		.arg(src).arg(out)
-		.status();
+	let status = res!(typst_pdf_command(src, out, extra)).status();
 	match status {
 		Ok(s) if s.success()	=> Ok(()),
 		other					=> Err(err!("typst did not compile {}: {:?}", src.display(), other; Test)),

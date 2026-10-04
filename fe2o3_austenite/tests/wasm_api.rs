@@ -454,7 +454,7 @@ fn fc_family(path: &Path) -> Outcome<String> {
 fn embedded_families_are_the_names_in_the_font_files() -> Outcome<()> {
 	let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fonts");
 	let mut read = Vec::new();
-	for f in ["LibertinusSerif-Regular.otf", "LibertinusMono-Regular.otf", "NewCMMath-Regular.otf"] {
+	for f in ["LibertinusSerif-Regular.otf", "LibertinusMono-Regular.otf", "NewCMMath-Book.otf"] {
 		read.push(res!(fc_family(&dir.join(f))));
 	}
 	let mut listed: Vec<String> = compile::EMBEDDED_FAMILIES.iter().map(|s| s.to_string()).collect();

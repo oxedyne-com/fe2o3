@@ -417,7 +417,7 @@ pub fn show(engine: &mut Engine, elem: &Content, _styles: &StyleChain) -> Outcom
 	if let Some(Value::Alignment(a)) = elem.get(fid::CELL_ALIGN) {
 		let field = res!(layout_field(engine, span, ElemKind::Align, "alignment"));
 		body = body.styled(Styles::from_style(Style::Property(Property {
-			elem: ElemKind::Align, field, value: Value::Alignment(*a), span,
+			elem: ElemKind::Align, field, value: Value::Alignment(*a), span, liftable: false, outside: false,
 		})));
 	}
 	Ok(Some(body))

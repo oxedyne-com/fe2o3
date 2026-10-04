@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { prepare, repoint } from './packages.mjs';
+
 const DIAG_FULL = 3; // typst.ts diagnostics_format: full (matches www/js/typst.js)
 
 const FONTS = [
@@ -45,10 +47,15 @@ export async function loadAustenite(vendorDir, fresh = false) {
 	const glue = glueUrl(path.join(vendorDir, 'oxedyne_fe2o3_austenite.js'), fresh);
 	const wasmPath = path.join(vendorDir, 'oxedyne_fe2o3_austenite_bg.wasm');
 	const mod = await import(glue);
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
 	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
 	const instance = new mod.DaimondTypst();
 	return {
 		engine: 'austenite',
+		// The wasm instance itself, for a caller that needs a door the wrapper below does not carry
+		// (`supplyPackage`, `queryProject`, ...), and `DaimondTypst`, to make another.
+		instance,
+		DaimondTypst: mod.DaimondTypst,
 		compilePdf(project) {
 			return instance.compileProject(project);
 		},
@@ -69,24 +76,66 @@ export async function loadAustenite(vendorDir, fresh = false) {
 /// the bundled font set, exactly as `getCompiler()` does in `www/js/typst.js`:
 /// a dummy access model (sources are injected, nothing is read from disk) and
 /// the same five bundled fonts. `fresh` gives it a wasm instance of its own.
-export async function loadTypstTs(vendorDir, fresh = false) {
+///
+/// A project's own fonts and binary assets, as `gather.mjs` returns them, are
+/// added the way Daimond adds them: the fonts after the bundled ones, each by
+/// `add_raw_font`; the assets into the shadow filesystem by `map_shadow`, after
+/// every `reset_shadow`. A compile that carries its own `assets` uses those
+/// instead.
+///
+/// Packages are supplied as Daimond's typst.ts leg supplies them (`packages.mjs`):
+/// each package is laid out under `/_pkg` with its `.typ` files re-pointed and a
+/// one-line module that carries the binding, its sources go in with the project's
+/// and its other files with the assets, and every package import in a project
+/// source is re-pointed at that module. There is no registry behind typst.ts, so
+/// an import of a package that was not supplied fails the compile.
+///
+/// # Arguments
+/// * `project` - `{ fonts: [[name, Uint8Array]], assets: [[shadowPath, Uint8Array]],
+///   packages: [{ spec, pack }] }`; a compile that carries its own `packages` uses those instead.
+export async function loadTypstTs(vendorDir, project = {}, fresh = false) {
 	const glue = glueUrl(path.join(vendorDir, 'typst_ts_web_compiler.mjs'), fresh);
 	const wasmPath = path.join(vendorDir, 'typst_ts_web_compiler_bg.wasm');
 	const mod = await import(glue);
-	await mod.default(fs.readFileSync(wasmPath));
+	// The single-object form: the bare buffer makes the glue warn that it is deprecated.
+	await mod.default({ module_or_path: fs.readFileSync(wasmPath) });
 	const builder = new mod.TypstCompilerBuilder();
 	builder.set_dummy_access_model();
 	for (const name of FONTS) {
 		const buf = fs.readFileSync(path.join(vendorDir, 'fonts', name));
 		await builder.add_raw_font(buf);
 	}
+	for (const [, buf] of project.fonts ?? []) {
+		await builder.add_raw_font(buf);
+	}
 	const compiler = await builder.build();
+	const ownAssets = project.assets ?? [];
+	const laidOut = (packages) => {
+		const sources = [];
+		const assets = [];
+		for (const { spec, pack } of packages) {
+			const ready = prepare(spec, pack);
+			sources.push(...ready.sources);
+			assets.push(...ready.assets);
+		}
+		return { sources, assets };
+	};
+	const ownPackages = laidOut(project.packages ?? []);
 	let lastMain = null;
 	function ensureSources(project) {
 		compiler.reset_shadow();
-		for (const [p, text] of project.sources) {
+		const pkg = project.packages ? laidOut(project.packages) : ownPackages;
+		// The project's sources, then the packages', as Daimond's gather orders them; a package import in a
+		// project's own source is re-pointed at the last moment, as it does.
+		const sources = project.sources.map(([p, text]) => [p, p.endsWith('.typ') && text.includes('@') ? repoint(text) : text]);
+		for (const [p, text] of [...sources, ...pkg.sources]) {
 			if (compiler.add_source(p, text) === false) {
 				throw new Error(`typst.ts refused source ${p}`);
+			}
+		}
+		for (const [p, bytes] of [...(project.assets ?? ownAssets), ...pkg.assets]) {
+			if (compiler.map_shadow(p, bytes) === false) {
+				throw new Error(`typst.ts refused asset ${p}`);
 			}
 		}
 		lastMain = project.main;
@@ -125,7 +174,7 @@ export async function loadTypstTs(vendorDir, fresh = false) {
 
 export async function loadEngine(kind, vendorDir, fresh = false) {
 	if (kind === 'austenite') return loadAustenite(vendorDir, fresh);
-	if (kind === 'typstts') return loadTypstTs(vendorDir, fresh);
+	if (kind === 'typstts') return loadTypstTs(vendorDir, {}, fresh);
 	throw new Error(`unknown engine ${kind}`);
 }
 

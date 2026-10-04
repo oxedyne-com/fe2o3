@@ -41,7 +41,7 @@ use oxedyne_fe2o3_austenite::eval::{
 
 use oxedyne_fe2o3_core::prelude::*;
 
-const MIN_FIXTURES: usize = 10;
+const MIN_FIXTURES: usize = 16;
 
 #[test]
 fn page_furniture_matches_the_typst_oracle() -> Outcome<()> {

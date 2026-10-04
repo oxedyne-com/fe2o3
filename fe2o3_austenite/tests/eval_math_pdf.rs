@@ -26,9 +26,9 @@ use oxedyne_fe2o3_core::prelude::*;
 // Typst and glyph by glyph here, which poppler reads as a word break. Each is a glyph-exact match in
 // `eval_math`; the file differs only in the order and grouping of its text. The test requires exactly these
 // to differ, so a fix shrinks the list and a new fault is not hidden in it.
-const KNOWN: [&str; 13] = [
-	"accent_hat", "accent_opts", "call_accents", "call_nested", "call_ops", "call_spread", "call_styles",
-	"matrix", "matrix_aug", "root_syntax", "spreaders", "tall_parens", "variants",
+const KNOWN: [&str; 9] = [
+	"accent_hat", "call_ops", "call_spread", "call_styles", "matrix", "matrix_aug", "root_syntax",
+	"tall_parens", "variants",
 ];
 
 #[test]

@@ -14,8 +14,7 @@ use std::path::{
 };
 
 fn pdf_of(name: &str, files: &[(&str, &str)]) -> Outcome<String> {
-	let home	= res!(std::env::var("HOME"));
-	let dir		= Path::new(&home).join(".cache").join("austenite-qc").join("pdf-info-eval").join(name);
+	let dir		= Path::new(env!("CARGO_TARGET_TMPDIR")).join("pdf-info-eval").join(name);
 	res!(std::fs::create_dir_all(&dir));
 	for (f, text) in files {
 		res!(std::fs::write(dir.join(f), text));
