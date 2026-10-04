@@ -376,6 +376,7 @@ pub struct Evaluated {
 	pub engine:	Engine,
 	pub laid:	Outcome<Laid>,
 	pub blank:	bool,			// the final pass realised a body that sets no content ([`Engine::body`])
+	pub main:	PathBuf,		// the main file, where a diagnostic with no site of its own is reported
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -427,7 +428,7 @@ pub fn assemble_eval_timed<S: PageSink>(
 	// from what the body realised to in the pass that stood, never from the page count nor from the content
 	// as it was evaluated: a `context` that gives nothing is an element until it is resolved.
 	let blank = engine.body == Some(false);
-	Ok(Evaluated { engine, laid, blank })
+	Ok(Evaluated { engine, laid, blank, main: main_path })
 }
 
 /// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory
@@ -474,7 +475,8 @@ impl Evaluated {
 					let (l, c) = s.line_col_in(d.span.start, cols);
 					(s.path.display().to_string(), l, c)
 				},
-				None	=> (String::new(), 0, 0),
+				// A diagnostic raised with no site is reported at 0:0 in the main, as an error is.
+				None	=> (self.main.display().to_string(), 0, 0),
 			};
 			if !d.is_error() {
 				if d.kind == DiagnosticKind::Unsupported {

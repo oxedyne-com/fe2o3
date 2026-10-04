@@ -1263,3 +1263,21 @@ fn a_nest_two_thousand_deep_is_a_limit_error_and_the_next_compile_succeeds_on_th
 	Ok(())
 	})
 }
+
+// The contract places an error with no site at 0:0 in the main, and a warning is no different: its file is
+// never empty.
+#[test]
+fn a_warning_with_no_site_is_reported_at_zero_zero_in_the_main() -> Outcome<()> {
+	let text = "#context [#counter(\"c\").update(counter(\"c\").final().first() + 1)]\nx\n";
+	let mut inst = Instance::new();
+	let made = res!(must_pdf(inst.compile_pdf(&strict(&[("/main.typ", text)]))));
+	let detached: Vec<_> = made.report.diagnostics.iter().filter(|d| d.line == 0).collect();
+	assert!(!detached.is_empty(), "the probe must raise a warning with no site: {:?}", made.report.diagnostics);
+	for d in &made.report.diagnostics {
+		assert_eq!(d.file, "/main.typ", "a diagnostic's file is never empty: {:?}", d);
+	}
+	for d in detached {
+		assert_eq!((d.line, d.col), (0, 0), "{:?}", d);
+	}
+	Ok(())
+}
