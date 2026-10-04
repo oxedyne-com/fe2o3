@@ -932,6 +932,10 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 	let g_fill		= res!(schema::resolve(styles, elem, fid::FILL));
 	let g_align		= res!(schema::resolve(styles, elem, fid::ALIGN));
 	let g_inset		= res!(schema::resolve(styles, elem, fid::INSET));
+	let inset_default = match kind {
+		ElemKind::Table	=> Some(Relative { rel: Ratio(0.0), abs: Length::pt(5.0) }),
+		_				=> None,
+	};
 	let g_stroke	= res!(schema::resolve(styles, elem, fid::STROKE));
 	// A table's side left unspecified is a stroke with no part set: drawn as `1pt + black`, but in a fold
 	// at a shared edge it yields every part to the neighbour's specified stroke. So `stroke: (bottom:
@@ -968,11 +972,13 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 			let v = res!(celled(engine, &g_inset, p.x, p.y, cspan));
 			res!(sides_inset(engine, cspan, &v))
 		};
+		// A side of a table's inset that nothing specifies keeps the default 5 pt: `inset: (y: 8pt)` folds over it.
+		let side = |own: Option<Relative>, grid: Option<Relative>| own.or(grid).or(inset_default).unwrap_or_default();
 		let inset = Sides {
-			left:	own_i.left.or(grid_i.left).unwrap_or_default(),
-			top:	own_i.top.or(grid_i.top).unwrap_or_default(),
-			right:	own_i.right.or(grid_i.right).unwrap_or_default(),
-			bottom:	own_i.bottom.or(grid_i.bottom).unwrap_or_default(),
+			left:	side(own_i.left, grid_i.left),
+			top:	side(own_i.top, grid_i.top),
+			right:	side(own_i.right, grid_i.right),
+			bottom:	side(own_i.bottom, grid_i.bottom),
 		};
 		let own_s	= res!(sides_stroke(engine, cspan, &res!(schema::resolve(styles, &el, fid::CELL_STROKE))));
 		let grid_s	= {
