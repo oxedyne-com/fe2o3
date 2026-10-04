@@ -1409,7 +1409,7 @@ async fn forward_api_proxy(
         if route.upstream_tls { "https://" } else { "http://" },
         upstream_host, upstream_port, upstream_path, hdrs.len());
 
-    if route.upstream_tls {
+    let reply = if route.upstream_tls {
         let tls_cfg = match tls_client {
             Some(cfg) => cfg.clone(),
             None => return Err(err!(
@@ -1435,6 +1435,20 @@ async fn forward_api_proxy(
             &hdrs,
             body,
         ).await
+    };
+    match reply {
+        Ok(msg) => Ok(msg),
+        // An upstream that is down, or that answers with something that is not HTTP, is the
+        // visitor's 502 and the operator's log line. Returned as an error it was neither: it left
+        // the handler, and the connection closed on a visitor who was told nothing.
+        Err(e) => {
+            warn!("{}: API route '{}' could not be served by its upstream {}:{}: {}",
+                id, route.path, upstream_host, upstream_port, e);
+            Ok(HttpMessage::respond_with_text(
+                HttpStatus::BadGateway,
+                "Bad Gateway: upstream proxy error.",
+            ))
+        }
     }
 }
 
