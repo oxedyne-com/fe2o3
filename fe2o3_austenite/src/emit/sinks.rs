@@ -7,8 +7,7 @@
 //! document's metadata, the subset fonts with their `/ToUnicode` maps and the cross-reference table.
 //! [`VectorSink`] renders each page to an SVG document of its own. [`DeltaSink`] is the live view's: it keeps
 //! each page's content id and the frame of only those pages the consumer does not hold, and draws them once the
-//! pass that stands is known. [`CountSink`] counts and
-//! drops, for the heap probe and for tests.
+//! pass that stands is known. [`CountSink`] counts and drops, for the heap probe and for tests.
 
 use crate::delta::{
 	Builder,
