@@ -1535,7 +1535,8 @@ impl<'a> Vm<'a> {
 	fn destructure(&mut self, pat: &SyntaxNode, v: Value, mode: Bind) -> Outcome<()> {
 		match pat.kind() {
 			SyntaxKind::Underscore		=> Ok(()),
-			SyntaxKind::Parenthesized	=> match first_expr(pat) {
+			// The inner pattern may itself be a destructuring, which is no expression: `((a, b))`.
+			SyntaxKind::Parenthesized	=> match pat.children().iter().find(|c| is_pattern(c.kind())) {
 				Some(inner)	=> {
 					let inner = inner.clone();
 					self.destructure(&inner, v, mode)

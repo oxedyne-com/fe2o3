@@ -282,12 +282,23 @@ r="$(door pj_pkg "$S/d_pkg2.pdf" --packages "$S/pk" --exclude assets)"
 expect "door: an --exclude of a directory without sources changes nothing" "$r" "door ok pages 1 kinds none needs 0"
 
 PACKS="$HOME/usr/code/web/apps/oxedyne/daimond/www/assets/typst/packs"
-if [ -f "$PACKS/preview/cetz/0.3.4.pack" ]; then
-	mkproj "$S/pj_cetz" "$HEAD"$'\n#import "@preview/oxifmt:0.2.1": strfmt\n#import "@preview/cetz:0.3.4": canvas, draw\n#strfmt("{} and {}", 1, 2)'
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/typst/packages/preview"
+if [ -f "$PACKS/preview/cetz/0.3.4.pack" ] && [ -d "$CACHE/cetz/0.3.4" ]; then
+	# A cetz canvas that draws paths, through Daimond's own pack and the door, against Typst's own result. The
+	# paths are drawn by a `for ((kind, ..rest)) in` pattern in the package, which the evaluator once did not bind.
+	mkproj "$S/pj_cetz" "$HEAD"$'\n#import "@preview/oxifmt:0.2.1": strfmt\n#import "@preview/cetz:0.3.4": canvas, draw\n#strfmt("{} and {}", 1, 2)\n#canvas({\n  import draw: *\n  line((0, 0), (2, 1))\n  circle((1, 1), radius: 0.5)\n})'
 	r="$(door pj_cetz "$S/d_cetz.pdf" --packages "$PACKS")"
-	expect "door: a project that imports two of Daimond's packs, one the other's dependency, is ok" "$r" "door ok pages 1 kinds none needs 0"
+	expect "door: a cetz canvas that draws a line and a circle, from Daimond's pack, is ok" "$r" "door ok pages 1 kinds none needs 0"
+	gate_typst "$TYPST" compile --root "$S/pj_cetz" "$S/pj_cetz/main.typ" "$S/t_cetz.pdf" > /dev/null 2>&1
+	r="$(python3 "$G" g7 "$S/t_cetz.pdf" "$S/d_cetz.pdf" 2>&1)"
+	p1="$(printf '%s\n' "$r" | awk '$1 == "g7" && $2 == "page" && $3 == 1 { print $4 }')"
+	if [ -n "$p1" ] && awk -v f="$p1" 'BEGIN { exit !(f < 0.05) }'; then
+		ok "door: and its ink is Typst's (G7 $p1 of the page differs)"
+	else
+		fail "door: the cetz drawing's ink differs from Typst's (G7 '$p1')"
+	fi
 else
-	echo "selftest: skip real packs (Daimond's packs are absent)"
+	echo "selftest: skip real packs (Daimond's packs or Typst's cache of cetz 0.3.4 are absent)"
 fi
 
 r="$(gate_cap node "$CRATE/tools/gate/door_pdf.mjs" "$PKG" 2>&1)"
