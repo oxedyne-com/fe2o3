@@ -11,7 +11,7 @@ source "$HERE/lib/host.sh"
 
 AUST_VENDOR="${AUST_VENDOR:?set AUST_VENDOR to the daimond austenite vendor dir}"
 TYPST_VENDOR="${TYPST_VENDOR:?set TYPST_VENDOR to the daimond typst.ts vendor dir}"
-EDITS="${EDITS:-10}"
+EDITS="${EDITS:-50}"
 POSITIONS="${POSITIONS:-5}"
 OUT_DIR="${OUT_DIR:?set OUT_DIR}"
 DOCS=("$@")

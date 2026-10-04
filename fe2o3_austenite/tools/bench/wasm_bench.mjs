@@ -75,7 +75,7 @@ async function main() {
 
 	const project = projectFromFile(args.doc);
 	const [mainPath, baseText] = project.sources[0];
-	const withText = (text) => ({ main: project.main, sources: [[mainPath, text]] });
+	const withText = (text) => ({ main: project.main, sources: [[mainPath, text]], strict: true });
 	const runs = [];
 	const loads = [];
 	let ok = true;

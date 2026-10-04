@@ -89,8 +89,10 @@ baseline.
   produced but headed "TAKEN UNDER LOAD" in bold, in the markdown and as `under_load:
   true` in the JSON.
 - **Incremental edit latency**: `edit_latency.mjs` keeps one compiler instance alive
-  across a scripted run of keystrokes at five positions in turn, each typing one letter
-  onto the end of a word, and times each edit's recompile (the synthetic generator tags
+  across a scripted run of 50 keystrokes (the default) at five positions in turn, each typing one letter
+  onto the end of a word, and times each edit's recompile. The percentiles are nearest-rank
+  (`lib/stats.mjs`: p50 of 50 samples is the 25th smallest, p95 the 48th), and Austenite's projects
+  carry `strict: true`, as Daimond sends it on every door (the synthetic generator tags
   every paragraph with a stable `EDITTOKn` marker, found with its trailing space so that
   `EDITTOK1` never matches the start of `EDITTOK10`).
   Austenite's leg calls `compileProjectDelta` with the `known`-id cache carried forward
@@ -140,6 +142,12 @@ baseline.
 | `edit_latency.mjs` / `edit_latency_runner.sh` | incremental edit-latency leg |
 | `gen_synthetic.py` | deterministic synthetic `.typ` generator, any page count |
 | `aggregate.py` | merges the three legs' JSONL into `bench_report.json` + `bench_report.md`, and the load gate |
+| `typing_sessions.sh` | the typing test (D-20261001-08): rounds of one `edit_latency.mjs` session per engine, the starting engine alternating, each under both Austenite build-slot locks, host readings at each end, a flagged session run once more |
+| `cost_runs.sh` | cold and unchanged wasm compiles, one `wasm_bench.mjs` process per run, the engines interleaved, each under both slot locks |
+| `bench_verdict.mjs` | `typing`: per-session p50/p95, medians, T = max(1.25 x typst.ts, typst.ts + 16 ms), the verdict; `cost`: medians and the ratio against the 1.5 limit |
+| `percentile_check.mjs` | node check that nearest-rank over 1..50 gives p50 = 25 and p95 = 48, and the threshold arithmetic; red when `lib/stats.mjs` indexes with a floor |
+| `lib/stats.mjs` | nearest-rank percentile, median, the typing threshold |
+| `lib/quiet_host.sh` | `with_quiet_host`: runs a command holding both Austenite build-slot locks (append-open, never replaced) |
 | `lib/host.sh` | bash: `/proc/loadavg` + PSI reading, the capped-and-timed single-run helper |
 | `lib/wasm_common.mjs` | node: loads both vendored wasm compilers the way `www/js/typst.js` does, minus its use of `fetch` (Node does not resolve `file://` through `fetch`; confirmed on this host, Node v20.20.2 -- everything here reads with `fs` instead) |
 

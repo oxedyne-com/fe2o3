@@ -21,9 +21,11 @@ const FONTS = [
 
 /// Reads a `.typ` file as one project source at `/main.typ`, the shape both
 /// wasm compile entry points want (`{ main, sources: [[path, text], ...] }`).
+/// The project carries `strict: true`, as Daimond sends it on every door;
+/// typst.ts ignores the field.
 export function projectFromFile(typPath) {
 	const text = fs.readFileSync(typPath, 'utf8');
-	return { main: '/main.typ', sources: [['/main.typ', text]] };
+	return { main: '/main.typ', sources: [['/main.typ', text]], strict: true };
 }
 
 // A glue module is cached by URL, and its init keeps the first wasm instance it
