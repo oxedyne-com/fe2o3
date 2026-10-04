@@ -31,6 +31,7 @@
 // handed in `cfg.host`, which is what lets one module serve a page, a test and a worker.
 import {
 	byteLen,
+	clipChars,
 	createRedactor,
 	createScrubber,
 } from './redact.js';
@@ -39,6 +40,7 @@ export {
 	SECRET_RE,
 	SECRET_RE_LOOSE,
 	byteLen,
+	clipChars,
 	createRedactor,
 	createRunGuard,
 	createScrubber,
@@ -46,6 +48,7 @@ export {
 	scrubDeep,
 	scrubText,
 	secretName,
+	soundText,
 } from './redact.js';
 
 // ── The caps ─────────────────────────────────────────────────────────
@@ -163,7 +166,7 @@ export function createWriter(cfg) {
 			.replace(/\[[0-9]{1,2}(;[0-9]{1,2})*m/g, '')
 			.replace(/\s+/g, ' ')
 			.trim();
-		return v.length > n ? v.slice(0, n) : v;
+		return clipChars(v, n);
 	}
 
 	function device() { try { return String((cfg.device && cfg.device()) || ''); } catch (e) { return ''; } }
