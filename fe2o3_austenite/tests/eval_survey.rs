@@ -16,6 +16,7 @@ use harness::pdf::{
 	TYPST,
 };
 
+use oxedyne_fe2o3_austenite::compile::supply_typst_package_cache;
 use oxedyne_fe2o3_austenite::door::{
 	Failure,
 	Instance,
@@ -303,5 +304,53 @@ fn a_value_that_is_neither_a_string_nor_a_symbol_is_refused_where_a_string_is_ex
 		let f = res!(refuses_alike(&dir, name, src));
 		assert!(!f.head.message.is_empty(), "{}", name);
 	}
+	Ok(())
+}
+
+// Packages: fletcher draws its edges' marks from a table keyed by symbols
+
+// Synthetic documents that use two packages from the cache Typst keeps its own in: a commutative square
+// and a second diagram whose edges are marked by strings and by symbols, a page of marks, shapes and
+// loops, a page of nodes named and joined by paths and a figure, and a canvas of cetz with a plot.
+const FLETCHER: [(&str, &str); 3] = [
+	("square",	include_str!("fixtures/survey/fletcher_square.typ")),
+	("marks",	include_str!("fixtures/survey/fletcher_marks.typ")),
+	("shapes",	include_str!("fixtures/survey/fletcher_shapes.typ")),
+];
+
+/// Is the package in Typst's cache? Without it the test is skipped only on the owner's word.
+fn package_cached(spec: &str) -> bool {
+	let home = std::env::var("HOME").unwrap_or_default();
+	if Path::new(&home).join(".cache/typst/packages/preview").join(spec).is_dir() {
+		return true;
+	}
+	let skip = std::env::var("EVAL_ORACLE_SKIP").map(|v| v == "1").unwrap_or(false);
+	assert!(skip, "no {} in Typst's package cache (set EVAL_ORACLE_SKIP=1 to skip explicitly)", spec);
+	false
+}
+
+#[test]
+fn a_fletcher_diagram_marked_by_symbols_and_strings_builds_to_typsts_pages_and_text() -> Outcome<()> {
+	if !package_cached("fletcher/0.5.7") {
+		return Ok(());
+	}
+	supply_typst_package_cache();
+	let dir = res!(work_dir("fletcher"));
+	for (name, src) in FLETCHER {
+		res!(builds_alike(&dir, name, src));
+	}
+	Ok(())
+}
+
+// Not a fault this unit found: the next construct a package of that kind is known for, held to the same
+// account.
+#[test]
+fn a_cetz_canvas_with_shapes_arcs_and_a_plot_builds_to_typsts_pages_and_text() -> Outcome<()> {
+	if !package_cached("cetz-plot/0.1.1") {
+		return Ok(());
+	}
+	supply_typst_package_cache();
+	let dir = res!(work_dir("cetz"));
+	res!(builds_alike(&dir, "canvas", include_str!("fixtures/survey/cetz_canvas.typ")));
 	Ok(())
 }
