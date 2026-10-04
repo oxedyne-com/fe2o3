@@ -1,0 +1,124 @@
+{
+ "rows": [
+  {
+   "engine": "typst",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 0,
+   "heapPeak": 566231040,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "typst",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 1,
+   "heapPeak": 629145600,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "typst",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 2,
+   "heapPeak": 692060160,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "typst",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 0,
+   "heapPeak": 1160773632,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  },
+  {
+   "engine": "typst",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 1,
+   "heapPeak": 1289748480,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  },
+  {
+   "engine": "typst",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 2,
+   "heapPeak": 1418723328,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 0,
+   "heapPeak": 351063245,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 1,
+   "heapPeak": 390070272,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 300,
+   "mode": "pdf",
+   "run": 2,
+   "heapPeak": 429077299,
+   "rssPeakKb": 100000,
+   "pagesOut": 300,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 0,
+   "heapPeak": 615304397,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 1,
+   "heapPeak": 683671552,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  },
+  {
+   "engine": "austenite",
+   "pages": 1000,
+   "mode": "pdf",
+   "run": 2,
+   "heapPeak": 752038707,
+   "rssPeakKb": 100000,
+   "pagesOut": 1000,
+   "error": null
+  }
+ ]
+}

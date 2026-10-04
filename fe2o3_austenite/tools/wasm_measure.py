@@ -261,6 +261,36 @@ def fonts_in(img):
 			i = h + 1
 
 
+def font_name(img, at):
+	"""The face's own name, from its `name` table: the full name (ID 4), else family and style (IDs 1
+	and 2), else `(unnamed)`.  A Windows or Unicode record is UTF-16BE, a Macintosh one Mac Roman, read
+	as Latin-1 for the ASCII names a font carries."""
+	num = int.from_bytes(img[at + 4:at + 6], 'big')
+	for i in range(num):
+		rec = at + 12 + 16 * i
+		if img[rec:rec + 4] != b'name':
+			continue
+		base = at + int.from_bytes(img[rec + 8:rec + 12], 'big')
+		count = int.from_bytes(img[base + 2:base + 4], 'big')
+		store = base + int.from_bytes(img[base + 4:base + 6], 'big')
+		found = {}
+		for k in range(count):
+			r = base + 6 + 12 * k
+			plat = int.from_bytes(img[r:r + 2], 'big')
+			nid = int.from_bytes(img[r + 6:r + 8], 'big')
+			n = int.from_bytes(img[r + 8:r + 10], 'big')
+			o = int.from_bytes(img[r + 10:r + 12], 'big')
+			raw = img[store + o:store + o + n]
+			text = raw.decode('utf-16-be', 'replace') if plat in (0, 3) else raw.decode('latin-1')
+			if plat in (0, 3) or nid not in found:
+				found[nid] = text
+		if 4 in found:
+			return found[4]
+		if 1 in found:
+			return (found[1] + ' ' + found.get(2, '')).strip()
+	return '(unnamed)'
+
+
 def demangle(sym):
 	"""Legacy Rust mangling (`_ZN3foo3bar17h0123456789abcdefE`) to a path; anything else unchanged."""
 	if not sym.startswith('_ZN'):
@@ -343,8 +373,9 @@ def measure(path, depth):
 	out['code'] = out['sections'].get('code', 0)
 	out['data'] = out['sections'].get('data', 0)
 	out['custom'] = sum(v for k, v in out['sections'].items() if k.startswith('custom:'))
-	fonts = fonts_in(memory_image(buf, segments))
-	out['fonts'] = [{'offset': h, 'bytes': ln} for (h, ln) in fonts]
+	img = memory_image(buf, segments)
+	fonts = fonts_in(img)
+	out['fonts'] = [{'offset': h, 'bytes': ln, 'name': font_name(img, h)} for (h, ln) in fonts]
 	out['font_bytes'] = sum(ln for (_, ln) in fonts)
 	out['raw_minus_fonts'] = out['raw'] - out['font_bytes']
 	out['functions'] = len(bodies)
@@ -382,6 +413,8 @@ def report(m, top):
 	print('  custom        %12d  %s' % (m['custom'], mb(m['custom'])))
 	print('  fonts in data %12d  %s  (%d faces)' % (m['font_bytes'], mb(m['font_bytes']), len(m['fonts'])))
 	print('  raw - fonts   %12d  %s' % (m['raw_minus_fonts'], mb(m['raw_minus_fonts'])))
+	for f in sorted(m['fonts'], key=lambda f: -f['bytes']):
+		print('    face %10d  %s' % (f['bytes'], f['name']))
 	if m['modules'] is None:
 		print('  (no name section: build with names retained for per-module attribution)')
 		return
