@@ -1,0 +1,37 @@
+{
+	# Oxegen UI settings. One key per kind of thing; a change reaches every instance.
+	  Comments sit between ! marks, or between hash marks like these. See www/public/js/ui_schema.js for
+	  every legal key. #
+
+	"copy": {                                   ! what the app says; the key is the string's job !
+		"identity.current_title":   "Current Identity",
+		"identity.others_title":    "Your Other Identities",
+		"identity.create":          "Create Oxenym",
+		"identity.create_note":     "Create a virtual user oxenym",
+		"identity.remaining":       "{real} real and {vuser} virtual oxenyms left, for life",
+		"login.button":             "Login",
+		"login.forgot":             "Forgot Passphrase?",
+		"common.close":             "Close",           ! an aria-label is copy too !
+	},
+
+	"roles": {                                  ! how a kind of thing is drawn; the names are the style gate's !
+		"popup":          { "mark": "none" },               ! was "logo": the small X top-left of every white card !
+		"header":         { "mark_side": "right" },
+		"qr":             { "size": 296.4 },                ! px; the card's width less the buttons' margins !
+		"pulldown":       { "arrow": "shown", "text": "centred" },
+		"identity-card":  { "photo": "avatar" },            # avatar | initials #
+	},
+
+	"kinds": {                                  ! the look of each type, where a type has one !
+		"oxenym": {
+			"real": { "label": "Real: My real oxenym",          "icon": "hand_open_icon" },
+			"mask": { "label": "Mask: A pseudonym",             "icon": "face_them_icon" },
+			"org":  { "label": "Org: An organisation",          "icon": "org_icon" },
+			"bot":  { "label": "Bot: Human controlled software", "icon": "bot_icon" },
+		},
+	},
+
+	"screens": {                                ! composition, for screens laid out in flow (L4, later) !
+		"current_status": [ "current_identity", "other_identities", "switch", "network_info", "qr", "scan" ],
+	},
+}
