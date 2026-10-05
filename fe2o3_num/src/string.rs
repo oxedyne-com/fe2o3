@@ -136,6 +136,10 @@ impl NumberString {
     pub fn source(&self) -> &str { &self.src }
     pub fn radix(&self) -> u32 { self.radix }
     pub fn is_negative(&self) -> bool { self.signeg }
+    /// Is the number below zero? `-0` and `-0.0e5` are not.
+    pub fn is_below_zero(&self) -> bool {
+        self.signeg && self.sigint.chars().chain(self.sigfrac.chars()).any(|c| c != '0')
+    }
     pub fn abs_integer_str(&self) -> &str { &self.sigint }
     pub fn int_string(&self) -> String {
         if self.signeg {
@@ -332,6 +336,7 @@ impl NumberString {
             match c {
                 '0' ..= '9' => {
                     if flags.sig_capture_active {
+                        flags.sig_digit_seen = true;
                         if flags.sigfrac_capture_active {
                             sigfrac.push(c);
                             if c == '0' {
@@ -369,6 +374,7 @@ impl NumberString {
                             }
                         }
                     } else {
+                        flags.exp_digit_seen = true;
                         if c == '0' {
                             if flags.exp_nonzero_lead_detected {
                                 exp.push(c);
@@ -398,6 +404,7 @@ impl NumberString {
                         }
 
                         if radix == 16 {
+                            flags.sig_digit_seen = true;
                             sigint.push(c.to_ascii_lowercase());
                             sigint_digit_count += 1;
                         } else {
@@ -417,7 +424,7 @@ impl NumberString {
                 },
                 '+' | '-' => {
                     if flags.sig_capture_active {
-                        if sigint_digit_count > 0 {
+                        if flags.sig_digit_seen {
                             return Err(err!("{}", Self::errmsg(c, i, &s,
                                 fmt!("but the sign should be the first character"));
                             String, Encode, Numeric, Mismatch));
@@ -439,7 +446,7 @@ impl NumberString {
                             continue;
                         }
                     } else {
-                        if exp_digit_count > 0 {
+                        if flags.exp_digit_seen {
                             return Err(err!("{}", Self::errmsg(c, i, &s,
                                 fmt!("but the sign should be the first character of the exponent"));
                             String, Encode, Numeric, Mismatch));
@@ -495,19 +502,25 @@ impl NumberString {
             }
         }
 
-        if sigint_digit_count == 0 {
-            if flags.prev_char_zero {
-                sigint.push('0');
-                sigint_digit_count += 1;
-            }
+        // A point, an underscore, a radix prefix or an exponent marker is no number without a
+        // digit of its own beside it. The messages echo nothing, since the text may be a value
+        // that a caller must not print.
+        if !flags.sig_digit_seen {
+            return Err(err!(
+                "A number needs at least one digit in its significand, and this one has none";
+            String, Input, Decode, Numeric, Invalid));
+        }
+        if flags.exp_detected && !flags.exp_digit_seen {
+            return Err(err!(
+                "A number needs at least one digit after its exponent marker, and this one has none";
+            String, Input, Decode, Numeric, Invalid));
         }
 
-        //if sigint_digit_count < 1 && !flags.sig_nonzero_lead_detected {
-        //    return Err(err!(
-        //        "The string '{}' does not represent a \
-        //        number", s,
-        //    ), String, Decode, Input, Numeric))
-        //}
+        // The digits were all zeros, which are dropped as they are read: one stays.
+        if sigint_digit_count == 0 {
+            sigint.push('0');
+            sigint_digit_count += 1;
+        }
 
         if flags.exp_detected && exp_digit_count == 0 {
             exp.push('0');
@@ -544,6 +557,8 @@ struct ValidationFlags {
     exp_nonzero_lead_detected:  bool, // applies to exponent
     expneg:                     bool,
     prev_char_zero:             bool, // a way to flag if the previous character was zero
+    sig_digit_seen:             bool, // a digit in the significand, the point's own '0' excepted
+    exp_digit_seen:             bool, // a digit in the exponent, leading zeros included
 }
 
 impl Default for ValidationFlags {
@@ -561,6 +576,8 @@ impl Default for ValidationFlags {
             exp_nonzero_lead_detected:  false,
             expneg:                     false,
             prev_char_zero:             false,
+            sig_digit_seen:             false,
+            exp_digit_seen:             false,
         }
     }
 }
@@ -1449,6 +1466,77 @@ mod tests {
         let ns = res!(NumberString::validate(&s));
         let d = res!(ns.as_bigdecimal());
         assert_eq!(String::from("-12345"), fmt!("{}", d));
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_number_with_no_digit_is_refused_000() {
+        // The significand and, where there is an exponent marker, the exponent each need one digit
+        // of their own; a point, an underscore or a radix prefix is none (U0-14 M1).
+        for s in [
+            "", "-", "+", ".", "-.", "+.", "e", "e2", "E9", ".e5", "-e2", "+e2", "_", "__", "0x", "0b",
+            "0o", "0x_", "-0x", "0x.", "1e", "1E", "1e-", "1e+", "1e_", "1.e", "0e", "0e-", ".e", "-.e",
+            // A sign after a zero digit is not the first character, as after any other digit.
+            "0-5", "00+5", "1e0-5", "1e00+5",
+        ] {
+            assert!(NumberString::validate(s).is_err(), "{:?} should be refused", s);
+        }
+    }
+
+    #[test]
+    fn test_the_refusal_of_a_number_with_no_digit_does_not_echo_it_000() {
+        for s in ["e2", ".e5", "-e2", "1e", "1e-", "0x"] {
+            match NumberString::validate(s) {
+                Ok(_)   => panic!("{:?} should be refused", s),
+                Err(e)  => {
+                    let said = e.msgs().join(" | ").to_lowercase(); // The words, not the file name.
+                    assert!(!said.contains(s), "{:?} is refused with: {}", s, said);
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_negative_zero_is_not_below_zero_000() -> Outcome<()> {
+        for (s, below) in [
+            ("-0", false), ("-00", false), ("-0.0", false), ("-0e5", false), ("-0x0", false),
+            ("0", false), ("+0", false), ("-1", true), ("-0.5", true), ("-.5", true), ("-0.0001", true),
+            ("-0x1", true), ("1", false), ("-10", true),
+        ] {
+            assert_eq!(res!(NumberString::validate(s)).is_below_zero(), below, "{:?}", s);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_a_number_with_a_digit_in_each_part_reads_000() -> Outcome<()> {
+        // (source, significand integer, fraction, exponent, has exponent)
+        for (s, int, frac, exp, has_exp) in [
+            ("0",       "0",    "",     "",     false),
+            ("-0",      "0",    "",     "",     false),
+            ("+0",      "0",    "",     "",     false),
+            ("0e5",     "0",    "",     "5",    true),
+            ("1e2",     "1",    "",     "2",    true),
+            ("1e0",     "1",    "",     "0",    true),
+            ("1e-0",    "1",    "",     "0",    true),
+            ("1e+5",    "1",    "",     "5",    true),
+            ("1.",      "1",    "",     "",     false),
+            ("0.",      "0",    "",     "",     false),
+            (".5",      "0",    "5",    "",     false),
+            ("-.5",     "0",    "5",    "",     false),
+            (".5e1",    "0",    "5",    "1",    true),
+            ("1_000",   "1000", "",     "",     false),
+            ("0xe",     "e",    "",     "",     false),
+            ("0xE2",    "e2",   "",     "",     false),
+            ("0b1",     "1",    "",     "",     false),
+            ("0o7",     "7",    "",     "",     false),
+        ] {
+            let ns = res!(NumberString::validate(s));
+            assert_eq!(ns.abs_integer_str(), int, "{:?}", s);
+            assert_eq!(ns.fraction_str(), frac, "{:?}", s);
+            assert_eq!(ns.exponent_str(), exp, "{:?}", s);
+            assert_eq!(ns.has_exp(), has_exp, "{:?}", s);
+        }
         Ok(())
     }
 }
