@@ -774,7 +774,7 @@ impl Parts {
 				"The pieces of {} come to more than the {} bytes a carrier will put \
 				back together: {} had arrived and another {} followed.",
 				was_id, PART_MAX, sofar, bytes.len();
-			Invalid, Data, Excessive));
+			Input, Invalid, Data, Excessive));
 		}
 		held.bytes.extend_from_slice(&bytes);
 		held.next += 1;
@@ -1105,6 +1105,28 @@ mod tests {
 		] {
 			assert!(Message::from_dat(&wrong.to_dat()).is_err(),
 				"a part {:?} was accepted", wrong);
+		}
+		Ok(())
+	}
+
+	/// A run of pieces that comes to more than a carrier will put back together
+	/// is the sender's input, so the error carries `Input` and Ore's relay
+	/// forwards it to the caller.
+	#[test]
+	fn an_overlong_run_from_a_peer_is_input() -> Outcome<()> {
+		let half = PART_MAX / 2 + 1;
+		let mut parts = Parts::new();
+		for seq in 0..2u64 {
+			let piece = Message::Part { id: oid(6, 2), seq, total: 2, bytes: vec![0u8; half] };
+			match parts.absorb(piece) {
+				Ok(_)	=> assert_eq!(seq, 0, "the second piece was accepted past the limit"),
+				Err(e)	=> {
+					assert_eq!(seq, 1, "the first piece was refused");
+					assert!(e.tags().contains(&ErrTag::Input),
+						"an over-long run from a peer must blame its input; it said {:?}", e.tags());
+					assert!(e.tags().contains(&ErrTag::Excessive), "tags {:?}", e.tags());
+				},
+			}
 		}
 		Ok(())
 	}
