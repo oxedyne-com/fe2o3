@@ -313,3 +313,35 @@ fn test_a_kind_with_no_plain_form_is_refused_00() -> Outcome<()> {
     refused("{\n\"a\": (bin|1,2)}", &["line 2"]);
     Ok(())
 }
+
+#[test]
+fn test_a_map_of_many_keys_is_read_in_linear_time_00() -> Outcome<()> {
+    // The ordered map searched every key it held for each key it added: 40,000 keys took 10 s in
+    // a release build.
+    let mut s = String::from("{");
+    for i in 0..30000 {
+        s.push_str(&fmt!("\"k{}\": {}, ", i, i));
+    }
+    s.push('}');
+    let t0 = std::time::Instant::now();
+    let json = res!(to_json(&s));
+    let took = t0.elapsed();
+    assert!(json.len() > 300000, "the JSON is {} bytes", json.len());
+    assert!(took.as_secs() < 5, "30,000 keys took {:?}", took);
+    Ok(())
+}
+
+#[test]
+fn test_a_comment_where_whitespace_could_be_changes_nothing_00() -> Outcome<()> {
+    let plain = res!(to_json("{\"a\": 1, \"b\": [1, 2]}"));
+    for s in [
+        "{\"a\" # c\n: 1, \"b\": [1, 2]}",
+        "{\"a\": 1 # c\n, \"b\": [1 # d\n, 2]}",
+        "{\"a\": 1, \"b\": [1, 2] # c\n}",
+        "# c\n{\"a\": 1, \"b\": [1, 2]}",
+        "\u{feff}{\"a\": 1, \"b\": [1, 2]}",
+    ] {
+        assert_eq!(res!(to_json(s)), plain, "{:?}", s);
+    }
+    Ok(())
+}

@@ -42,7 +42,10 @@ use oxedyne_fe2o3_text::{
 
 use std::{
     cell::RefCell,
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     convert::TryInto,
     fmt,
     str::FromStr,
@@ -137,6 +140,7 @@ pub struct Cursor {
     prev:   char,   // Previous character.
     line:   usize,  // Line position.
     x:      usize,  // Character position on line.
+    at:     (usize, usize), // Line and column of the character just read, a newline's own.
     path:   Vec<String>, // Keys of the open maps and indices of the open lists, outermost first.
 }
 
@@ -148,14 +152,9 @@ impl Default for Cursor {
             prev:   char::default(),
             line:   1,
             x:      0,
+            at:     (1, 0),
             path:   Vec::new(),
         }
-    }
-}
-
-impl fmt::Display for Cursor {
-    fn fmt (&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "char '{}' line {} pos {}", self.curr, self.line, self.x)
     }
 }
 
@@ -173,12 +172,15 @@ impl Cursor {
         }
         self.abs += 1;
         if c == '\n' {
+            // A newline ends its line, one column past the last character on it.
+            self.at = (self.line, self.x + 1);
             self.line += 1;
             self.x = 0;
         } else {
             if c == '\t' || !c.is_control() {
                 self.x += 1;
             }
+            self.at = (self.line, self.x);
         }
     }
 
@@ -311,6 +313,7 @@ pub struct DecoderStore {
     pub ordmap:     OrdDaticleMap,
     pub slurp:      Slurp,
     pub map_count:  MapCounter,
+    pub seen:       BTreeSet<Dat>, // The bare keys of the map being read.
 }
 
 impl DecoderStore {
@@ -338,6 +341,7 @@ impl DecoderStore {
                 order: cfg.omap_start,
                 delta: cfg.omap_delta,
             },
+            seen:       BTreeSet::new(),
         }
     }
 }
@@ -639,6 +643,8 @@ impl Slurp {
                     return Ok(true);
                 }
                 ' '     |
+                '\t'    |
+                '\r'    |
                 '\n'    => {}
                 ',' => {
                     // Allow for the possibility that we have a tuple without a kindicle.
@@ -721,19 +727,101 @@ impl Kind {
         }
     }
 
+    // A whole number written with a point or an exponent, `1.0`, `10e-1`, `1e3`. It must be whole
+    // and fit the kind. The exponent has three digits at most and the digits expanded are held to
+    // 39, so that `1e999999` costs nothing.
+    #[inline(never)]
+    fn decode_whole_from_decimal(self, ns: &NumberString) -> Outcome<Dat> {
+        let fail = |why: &str| err!(
+            "A {:?} takes a whole number that fits it, and '{}' {}.", self, ns.source(), why;
+            String, Input, Decode, Invalid);
+        if ns.radix() != 10 {
+            return Err(fail("is not a decimal number"));
+        }
+        if ns.exponent_str().len() > 3 {
+            return Err(fail("has an exponent of more than three digits"));
+        }
+        let mut exp: i64 = 0;
+        if ns.has_exp() {
+            exp = match ns.exponent_str().parse::<i64>() {
+                Ok(e)   => e,
+                Err(_)  => return Err(fail("has an exponent that is not a number")),
+            };
+            if ns.exponent_negative() {
+                exp = -exp;
+            }
+        }
+        let frac = ns.fraction_str();
+        let all = fmt!("{}{}", ns.abs_integer_str(), frac);
+        let sig = all.trim_start_matches('0');
+        let scale = exp - frac.len() as i64; // The value is the digits times ten to the scale.
+        let digits = if sig.is_empty() {
+            fmt!("0")
+        } else if scale >= 0 {
+            if sig.len() as i64 + scale > 39 {
+                return Err(fail("is too large"));
+            }
+            fmt!("{}{}", sig, "0".repeat(scale as usize))
+        } else {
+            let drop = (-scale) as usize;
+            if drop > sig.len() || sig[sig.len() - drop..].chars().any(|c| c != '0') {
+                return Err(fail("has a fraction"));
+            }
+            let head = &sig[..sig.len() - drop];
+            if head.is_empty() { fmt!("0") } else { head.to_string() }
+        };
+        let n = match digits.parse::<u128>() {
+            Ok(n)   => n,
+            Err(_)  => return Err(fail("is too large")),
+        };
+        let neg = ns.is_negative() && n != 0;
+        // The signed value, if the kind is signed and it fits an i128.
+        let sval = if neg {
+            if n > (1u128 << 127) { None } else { Some((n as i128).wrapping_neg()) }
+        } else {
+            i128::try_from(n).ok()
+        };
+        macro_rules! fit_u { ($t:ty, $v:ident) => {{
+            if neg {
+                return Err(fail("is negative"));
+            }
+            match <$t>::try_from(n) {
+                Ok(x)   => Dat::$v(x),
+                Err(_)  => return Err(fail("is too large")),
+            }
+        }}}
+        macro_rules! fit_i { ($t:ty, $v:ident) => {{
+            match sval.and_then(|i| <$t>::try_from(i).ok()) {
+                Some(x) => Dat::$v(x),
+                None    => return Err(fail("does not fit")),
+            }
+        }}}
+        Ok(match self {
+            Kind::U8    => fit_u!(u8,   U8),
+            Kind::U16   => fit_u!(u16,  U16),
+            Kind::U32   => fit_u!(u32,  U32),
+            Kind::U64   => fit_u!(u64,  U64),
+            Kind::C64   => fit_u!(u64,  C64),
+            Kind::U128  => fit_u!(u128, U128),
+            Kind::I8    => fit_i!(i8,   I8),
+            Kind::I16   => fit_i!(i16,  I16),
+            Kind::I32   => fit_i!(i32,  I32),
+            Kind::I64   => fit_i!(i64,  I64),
+            Kind::I128  => fit_i!(i128, I128),
+            _ => return Err(fail("is not for a whole-number kind")),
+        })
+    }
+
     #[inline(never)]
     fn decode_number(self, ns: NumberString) -> Outcome<Dat> {
-        // A whole-number kind takes no fraction or exponent.  Only the digits before the point
-        // are parsed below, so without this `(u8|1.5)` read as 1 and `(u8|1e2)` as 1.
+        // A whole-number kind takes `1.0` or `1e3` when the value is whole and fits it. Only the
+        // digits before the point are parsed below, so it is read here, with the work bounded.
         if matches!(self,
             Kind::U8 | Kind::U16 | Kind::U32 | Kind::U64 | Kind::C64 | Kind::U128 |
             Kind::I8 | Kind::I16 | Kind::I32 | Kind::I64 | Kind::I128)
             && (ns.has_point() || ns.has_exp())
         {
-            return Err(err!(
-                "A {:?} takes a whole number, and '{}' has a fraction or an exponent.",
-                self, ns.source();
-            String, Input, Decode, Invalid));
+            return self.decode_whole_from_decimal(&ns);
         }
         match self {
             Kind::U8 => {
@@ -811,10 +899,22 @@ impl Kind {
                 return Ok(Dat::I128(n));
             }
             Kind::F32 => {
-                return Ok(Dat::F32(res!(Float32::from_str(ns.source()))));
+                let f = res!(Float32::from_str(ns.source()));
+                if !f.0.is_finite() {
+                    return Err(err!(
+                        "An F32 cannot hold '{}', which is too large.", ns.source();
+                    String, Input, Decode, Invalid));
+                }
+                return Ok(Dat::F32(f));
             }
             Kind::F64 => {
-                return Ok(Dat::F64(res!(Float64::from_str(ns.source()))));
+                let f = res!(Float64::from_str(ns.source()));
+                if !f.0.is_finite() {
+                    return Err(err!(
+                        "An F64 cannot hold '{}', which is too large.", ns.source();
+                    String, Input, Decode, Invalid));
+                }
+                return Ok(Dat::F64(f));
             }
             Kind::Aint => {
                 if ns.has_point() || ns.has_exp() {
@@ -1037,10 +1137,16 @@ impl Dat {
     {
         // We want to take ownership of the String.
         let s = s.into();
+        // One leading byte order mark is no text, and takes no column.
+        let s = if s.starts_with('\u{feff}') {
+            s['\u{feff}'.len_utf8()..].to_string()
+        } else {
+            s
+        };
         let cursor = RefCell::new(Cursor::default());
         let spot = |error: Error<ErrTag>, cursor: &RefCell<Cursor>| {
             let c = cursor.borrow();
-            Located { error, line: c.line, col: c.x, key: c.key() }
+            Located { error, line: c.at.0, col: c.at.1, key: c.key() }
         };
         if let Err(e) = cfg.limits.check_len(s.len()) {
             return Err(spot(e, &cursor));
@@ -1120,11 +1226,10 @@ impl Dat {
         match Self::next_significant(iter, cfg, cursor) {
             Some(')') => Ok(dat),
             Some(c) => Err(err!(
-                "Found '{}' where the ')' closing the kind was expected. ({})",
-                c, cursor.borrow(); String, Input, Decode, Invalid)),
+                "Found '{}' where the ')' closing the kind was expected.",
+                c; String, Input, Decode, Invalid)),
             None => Err(err!(
-                "The text ended where the ')' closing the kind was expected. ({})",
-                cursor.borrow(); String, Input, Decode, Invalid)),
+                "The text ended where the ')' closing the kind was expected."; String, Input, Decode, Invalid)),
         }
     }
 
@@ -1307,6 +1412,12 @@ impl Dat {
         }
         if cfg.comment_allowed && state.quote_protection == Quote::None {
             // Start comment capturing?
+            if c == cfg.comment1_start_char || c == cfg.comment2_start_char {
+                // A comment is whitespace to what is gathered, so a word before it is ended.
+                if store.slurp.has_content() {
+                    store.slurp.gap = true;
+                }
+            }
             if c == cfg.comment1_start_char {
                 state.comment_capture = Some(CommentCapture::Type1);
                 store.note_config = store.note_config.extract().set_type1(true);
@@ -1434,6 +1545,8 @@ impl Dat {
                 let wraps = res!(Self::opener_wraps(state, true, cursor));
                 if state.molecular_capture == None && !wraps {
                     state.molecular_capture = Some(MolecularCapture::Map);
+                    // A note before the root map is not a note on its first key.
+                    store.comment.clear();
                     // Also honour cfg.use_ordmaps at the top
                     // level. Without this, a root `{...}`
                     // decoded with `use_ordmaps = true` still
@@ -1465,7 +1578,6 @@ impl Dat {
             '}' => {
                 // A terminal branch, so the store is given away.
                 return Ok(Step::Done(res!(Self::close_brace(
-                    cfg,
                     state,
                     store.extract(),
                     cursor,
@@ -1502,7 +1614,7 @@ impl Dat {
     // A ',' ends an item, so an empty slot before it is a missing item.
     fn nothing_before_comma_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
         err!(
-            "A ',' follows nothing, where an item was due ({})", cursor.borrow();
+            "A ',' follows nothing, where an item was due";
             String, Input, Decode, Invalid, Missing)
     }
 
@@ -1521,8 +1633,7 @@ impl Dat {
                 }
             }
             return Err(err!(
-                "A ':' has no key before it, and what follows it is not a note ({})",
-                cursor.borrow(); String, Input, Decode, Invalid, Missing));
+                "A ':' has no key before it, and what follows it is not a note"; String, Input, Decode, Invalid, Missing));
         }
         Ok(())
     }
@@ -1534,13 +1645,14 @@ impl Dat {
             Dat::Str(s)             => s.clone(),
             other                   => fmt!("{}", other),
         };
-        name.chars().take(64).collect()
+        let name: String = name.chars().take(64).collect();
+        crate::string::enc::escape_json_string(&name)
     }
 
     #[inline(never)]
     fn no_separator_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
         err!(
-            "A value follows another with no ',' or ':' between them ({})", cursor.borrow();
+            "A value follows another with no ',' or ':' between them";
         String, Input, Decode, Invalid, Missing)
     }
 
@@ -1576,10 +1688,10 @@ impl Dat {
             Some(MolecularCapture::ListMixed)  |
             Some(MolecularCapture::ListSame)   |
             Some(MolecularCapture::Bytes) =>
-                Err(err!("Expected closure of a store.list with ']'";
+                Err(err!("Expected closure of a list with ']'";
                     String, Input, Decode, Missing)),
             Some(MolecularCapture::Map) =>
-                Err(err!("Expected closure of a store.map with '}}'";
+                Err(err!("Expected closure of a map with '}}'";
                     String, Input, Decode, Missing)),
         }
     }
@@ -1594,12 +1706,12 @@ impl Dat {
         match state.kind_outer.case() {
             KindCase::MoleculeSame => err!(
                 "Elements of a vector of kind {:?} are not daticles, \
-                so no kind should be specified ({})",
-                state.kind_outer, cursor.borrow();
+                so no kind should be specified",
+                state.kind_outer;
             String, Input, Decode, Invalid),
             _ => err!(
                 "The kind for the daticle has already been specified \
-                as {:?} ({})", state.kind_outer, cursor.borrow();
+                as {:?}", state.kind_outer;
             String, Input, Decode, Invalid),
         }
     }
@@ -1607,8 +1719,7 @@ impl Dat {
     #[inline(never)]
     fn stray_bar_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
         err!(
-            "A '|' parts a kind from its value, and follows a '(' and a kind label only ({})",
-            cursor.borrow();
+            "A '|' parts a kind from its value, and follows a '(' and a kind label only";
         String, Input, Decode, Invalid)
     }
 
@@ -1620,8 +1731,8 @@ impl Dat {
         -> Error<ErrTag>
     {
         err!(
-            "The separation character \"|\" for {:?} is superfluous {}.",
-            kind_inner, cursor.borrow();
+            "The separation character \"|\" for {:?} is superfluous.",
+            kind_inner;
         String, Input, Decode, Invalid)
     }
 
@@ -1653,8 +1764,8 @@ impl Dat {
             None        => Ok(true),
             Some(true)  => Ok(false),
             Some(false) => Err(err!(
-                "A '{}' cannot open the value of a {:?} kind ({})",
-                if map { '{' } else { '[' }, state.kind_outer, cursor.borrow();
+                "A '{}' cannot open the value of a {:?} kind",
+                if map { '{' } else { '[' }, state.kind_outer;
             String, Input, Decode, Invalid)),
         }
     }
@@ -1687,52 +1798,53 @@ impl Dat {
             state.comment_capture = None;
             store.comment = store.comment.trim_start().to_string();
             if c == '\n' {
-                if let Some(molecular_capture) = &state.molecular_capture {
-                    let mut dat = match store.val_opt.take() {
-                        Some(dat) => dat, // store.val_opt is now None.
-                        None => {
-                            let dat = if store.slurp.has_content() {
-                                res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
-                            } else {
-                                Dat::Empty
-                            };
-                            dat
+                // A comment is whitespace to an item it follows: it waits, and the ',' or the
+                // closing bracket that ends the item (or the ':' that ends a key) takes it as the
+                // item's note. A comment that follows no item stands alone: it is an entry that
+                // holds only a note, or the note of the value a ':' has just promised.
+                let item = store.val_opt.is_some() || store.slurp.has_content();
+                match &state.molecular_capture {
+                    None => {
+                        if item {
+                            return Err(err!(
+                                "Line comments currently only allowed in molecules \
+                                (lists and maps)."; String, Input, Decode, Invalid));
                         }
-                    };
-                    dat = Dat::ABox(
-                        store.note_config.extract(),
-                        Box::new(dat),
-                        store.comment.extract(),
-                    );
-                    store.slurp = Slurp::new();
-                    match molecular_capture {
-                        MolecularCapture::Map => {
-                            match store.key_opt.take() {
-                                Some(key) => {
-                                    res!(Self::map_insert(
-                                        state.kind_outer == Kind::OrdMap,
-                                        store,
-                                        (key, dat),
-                                    ));
-                                }
-                                None => {
-                                    res!(Self::map_insert(
-                                        state.kind_outer == Kind::OrdMap,
-                                        store,
-                                        (dat, Dat::Empty),
-                                    ));
+                        // Before the root value there is nothing to annotate.
+                        store.comment.clear();
+                    }
+                    Some(_) if item => (),
+                    Some(molecular_capture) => {
+                        let dat = Dat::ABox(
+                            store.note_config.extract(),
+                            Box::new(Dat::Empty),
+                            store.comment.extract(),
+                        );
+                        store.slurp = Slurp::new();
+                        match molecular_capture {
+                            MolecularCapture::Map => {
+                                match store.key_opt.take() {
+                                    Some(key) => {
+                                        res!(Self::map_insert(
+                                            state.kind_outer == Kind::OrdMap,
+                                            store,
+                                            (key, dat),
+                                        ));
+                                    }
+                                    None => {
+                                        res!(Self::map_insert(
+                                            state.kind_outer == Kind::OrdMap,
+                                            store,
+                                            (dat, Dat::Empty),
+                                        ));
+                                    }
                                 }
                             }
-                        }
-                        _ => {
-                            store.list.push(dat);
+                            _ => {
+                                store.list.push(dat);
+                            }
                         }
                     }
-                } else {
-                    return Err(err!(
-                        "Line comments currently only allowed in molecules \
-                        (lists and maps). ({})", cursor.borrow();
-                    String, Input, Decode, Invalid));
                 }
             }
             return Ok(());
@@ -1772,7 +1884,7 @@ impl Dat {
                     return Err(err!(
                         "Closing ')' without a kindicle should have triggered \
                         set MolecularCapture::ListMixed, but instead the state is \
-                        {:?}. ({})", state.molecular_capture, cursor.borrow();
+                        {:?}.", state.molecular_capture;
                     String, Input, Decode, Invalid));
                 }
                 k
@@ -1797,7 +1909,7 @@ impl Dat {
                     return Err(err!(
                         "Closing ')' without a kindicle should have triggered \
                         set MolecularCapture::ListMixed, but instead the state is \
-                        {:?}. ({})", state.molecular_capture, cursor.borrow();
+                        {:?}.", state.molecular_capture;
                     String, Input, Decode, Invalid));
                 }
             }
@@ -1869,7 +1981,7 @@ impl Dat {
                 }
                 None => {
                     return Err(err!(
-                        "Daticle missing in Dat::ABox ({})", cursor.borrow();
+                        "Daticle missing in Dat::ABox";
                     String, Input, Decode, Invalid, Missing));
                 }
             }
@@ -1901,8 +2013,8 @@ impl Dat {
                     Some(d) => return Ok(Some(d)),
                     None => {
                         return Err(err!(
-                            "Failed to capture the daticle of kind {:?} ({})",
-                            kind, cursor.borrow();
+                            "Failed to capture the daticle of kind {:?}",
+                            kind;
                         String, Input, Decode, Invalid));
                     }
                 }
@@ -1923,52 +2035,52 @@ impl Dat {
             1 => Ok(list.remove(0)),
             2 => Ok(Dat::Tup2(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 2-item tuple ({})", cursor.borrow();
+                    "While decoding a 2-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             3 => Ok(Dat::Tup3(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 3-item tuple ({})", cursor.borrow();
+                    "While decoding a 3-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             4 => Ok(Dat::Tup4(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 4-item tuple ({})", cursor.borrow();
+                    "While decoding a 4-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             5 => Ok(Dat::Tup5(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 5-item tuple ({})", cursor.borrow();
+                    "While decoding a 5-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             6 => Ok(Dat::Tup6(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 6-item tuple ({})", cursor.borrow();
+                    "While decoding a 6-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             7 => Ok(Dat::Tup7(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 7-item tuple ({})", cursor.borrow();
+                    "While decoding a 7-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             8 => Ok(Dat::Tup8(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 8-item tuple ({})", cursor.borrow();
+                    "While decoding a 8-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             9 => Ok(Dat::Tup9(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 9-item tuple ({})", cursor.borrow();
+                    "While decoding a 9-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             10 => Ok(Dat::Tup10(Box::new(
                 res!(list.try_into().map_err(|_| err!(
-                    "While decoding a 10-item tuple ({})", cursor.borrow();
+                    "While decoding a 10-item tuple";
                 String, Input, Decode, Invalid)))
             ))),
             n => Err(err!(
-                "Tuples are limited to 10 items, {} found ({}).",
-                n, cursor.borrow();
+                "Tuples are limited to 10 items, {} found.",
+                n;
             String, Input, Decode, Invalid)),
         }
     }
@@ -2126,8 +2238,7 @@ impl Dat {
             }
             _ => {
                 return Err(err!(
-                    "List capture was not actived with a '[' character ({})",
-                    cursor.borrow();
+                    "List capture was not actived with a '[' character";
                 String, Input, Decode, Invalid));
             }
         }
@@ -2143,13 +2254,13 @@ impl Dat {
     {
         match state.molecular_capture {
             None => return Err(err!(
-                    "Map capture not active ({})", cursor.borrow();
+                    "Map capture not active";
             String, Input, Decode, Invalid)),
             Some(MolecularCapture::ListMixed)   |
             Some(MolecularCapture::ListSame)    |
             Some(MolecularCapture::Bytes)       => {
                 return Err(err!(
-                    "List capture active, incompatible character ({})", cursor.borrow();
+                    "List capture active, incompatible character";
                 String, Input, Decode, Invalid));
             }
             Some(MolecularCapture::Map) => {
@@ -2158,7 +2269,7 @@ impl Dat {
                 if store.key_opt.is_some() {
                     return Err(err!(
                         "A ':' follows a key that is already set, by an earlier ':' or by a ',' \
-                        after no value ({})", cursor.borrow(); String, Input, Decode, Invalid));
+                        after no value"; String, Input, Decode, Invalid));
                 }
                 store.key_blank = Self::slot_empty(store);
                 // We're expecting to have a daticle to add to the store.map.
@@ -2188,11 +2299,7 @@ impl Dat {
     }
 
     #[inline(never)]
-    fn close_brace<
-        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
-        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
-    >(
-        cfg:        &DecoderConfig<M1, M2>,
+    fn close_brace(
         state:      &DecoderState,
         mut store:  DecoderStore,
         cursor:     &RefCell<Cursor>,
@@ -2221,13 +2328,9 @@ impl Dat {
                         (key, dat),
                     ));
                 }
-                (None, Some(dat)) => {
+                (None, Some(_)) => {
                     return Err(err!(
-                        "Unpaired value {:?} at end of store.map {} ({})",
-                        dat, match cfg.use_ordmaps {
-                            true => fmt!("{:?}", store.ordmap),
-                            false => fmt!("{:?}", store.map),
-                        }, cursor.borrow();
+                        "A value with no key at the end of a map.";
                     String, Input, Decode, Invalid, Missing));
                 }
                 (Some(key), None) => {
@@ -2244,11 +2347,7 @@ impl Dat {
                         ));
                     } else {
                         return Err(err!(
-                            "Unpaired key {:?} at end of store.map {} ({})",
-                            key, match cfg.use_ordmaps {
-                                true => fmt!("{:?}", store.ordmap),
-                                false => fmt!("{:?}", store.map),
-                            }, cursor.borrow();
+                            "The key {} has no value at the end of a map.", Self::key_name(&key);
                         String, Input, Decode, Invalid, Missing));
                     }
                 }
@@ -2261,7 +2360,7 @@ impl Dat {
             });
         }
         Err(err!(
-            "Map capture was not actived with a '{{' character ({})", cursor.borrow();
+            "Map capture was not actived with a '{{' character";
         String, Input, Decode, Invalid))
     }
 
@@ -2276,13 +2375,14 @@ impl Dat {
         match state.molecular_capture {
             None => {
                 return Err(err!(
-                    "List or map capture not active ({})", cursor.borrow();
+                    "List or map capture not active";
                 String, Input, Decode, Invalid));
             }
             Some(MolecularCapture::Bytes) => {
                 // We're expecting a byte to add to the list.
                 let n = try_extract_dat!(res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8);
                 store.byts.push(n);
+                store.comment.clear();
                 cursor.borrow_mut().name(fmt!("[{}]", store.byts.len()));
                 store.slurp = Slurp::new();
             }
@@ -2297,6 +2397,7 @@ impl Dat {
                     None => res!(Self::process_atom(&mut store.slurp, &kind_same)),
                 };
                 store.list.push(dat);
+                store.comment.clear();
                 cursor.borrow_mut().name(fmt!("[{}]", store.list.len()));
                 store.slurp = Slurp::new();
             }
@@ -2334,8 +2435,7 @@ impl Dat {
                     return Err(match store.key_opt {
                         None => Self::nothing_before_comma_err(cursor),
                         Some(_) => err!(
-                            "A ',' ends a member that has a key and no value ({})",
-                            cursor.borrow(); String, Input, Decode, Invalid, Missing),
+                            "A ',' ends a member that has a key and no value"; String, Input, Decode, Invalid, Missing),
                     });
                 }
                 let mut dat = match store.val_opt.take() {
@@ -2367,9 +2467,9 @@ impl Dat {
                             (key, dat),
                         ));
                     }
-                    None => {
-                        store.key_opt = store.val_opt.take();
-                    }
+                    None => return Err(err!(
+                        "A ',' ends an item that has no ':' before it, so it is neither a key \
+                        with a value nor a note."; String, Input, Decode, Invalid, Missing)),
                 }
                 cursor.borrow_mut().name(String::new());
                 store.val_opt = None;
@@ -2390,28 +2490,27 @@ impl Dat {
     )
         -> Outcome<()>
     {
+        // A key is the same key with a note on it or without. A key that is only a note is kept
+        // whole, so that two comments are two entries.
+        let mut bare = &key;
+        while let Dat::ABox(_, inner, _) = bare {
+            bare = inner;
+        }
+        let probe = if matches!(bare, Dat::Empty) { key.clone() } else { bare.clone() };
+        if !store.seen.insert(probe) {
+            return Err(err!(
+                "The key {} already exists in the map being read.", Self::key_name(&key);
+                Invalid, Input, Exists));
+        }
         match use_ordmap {
             true => {
-                if store.ordmap.iter().any(|(mk, _)| *mk.dat() == key) {
-                    return Err(err!(
-                        "The key {:?} already exists in the {:?} being \
-                        interpreted from the given string.", key, store.ordmap;
-                    Invalid, Input, Exists));
-                }
                 let mkey = MapKey::new(store.map_count.order(), key);
                 store.ordmap.insert(mkey, dat);
                 res!(store.map_count.inc_all());
             }
             false => {
-                if store.map.contains_key(&key) {
-                    return Err(err!(
-                        "The key {:?} already exists in the {:?} being \
-                        interpreted from the given string.", key, store.map;
-                    Invalid, Input, Exists));
-                } else {
-                    store.map.insert(key, dat);
-                    res!(store.map_count.inc());
-                }
+                store.map.insert(key, dat);
+                res!(store.map_count.inc());
             }
         }
         Ok(())

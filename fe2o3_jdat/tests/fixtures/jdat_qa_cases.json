@@ -1,0 +1,722 @@
+[
+{
+"tag": "R-drop",
+"s": "{\n  \"server\": {\"port\": 80}\n  \"db\": {\"path\": \"x.db\"}\n}\n",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\n  \"list\": [1, 2]\n  \"name\": \"x\"\n}\n",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\n  \"a\": (u8|1)\n  \"b\": 2\n}\n",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\n  \"roles\": {\n    \"qr\": {\"size\": 29}\n    \"logo\": {\"size\": 4}\n  }\n}\n",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[1 (u8|2)]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"a\": 1 (u8|2)}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[1(u8|2)]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "x{\"a\":1}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"a\": x{\"b\":1}}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "abc[1]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "\"s\"[1]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[ \"a\" {\"b\":1} ]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"a\": \"x\"[1]}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[\"a\"(u8|1)]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[1 {\"b\":1}]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"a\": 1 {\"b\":1}}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[{\"a\":1}\"b\"]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[[1]x]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"a\":[1]x}",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "[(u8|1)x]",
+"want": "refuse"
+},
+{
+"tag": "R-drop",
+"s": "{\"k\" {\"a\":1}: 2}",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(true",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(none",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "{\"a\": (true}",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "[(true]",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "{\"a\": (}",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(u8",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(u8|",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "{\"a\": (u8}",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "((",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "\"abc",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "'abc",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "[1, \"abc",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "(str|\"abc)",
+"want": "refuse"
+},
+{
+"tag": "R-open",
+"s": "{\"a\": (node}",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "(u8|1|2)",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "{\"a\": (u8|1|2)}",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "[1|2]",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "{\"a\": 1|2}",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "{\"a|b\": 1}",
+"want": "read"
+},
+{
+"tag": "R-bar",
+"s": "{a|b: 1}",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "|",
+"want": "refuse"
+},
+{
+"tag": "R-bar",
+"s": "{\"a\": |}",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(u8|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(i32|[1])",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(str|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(f64|{})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(map|[1])",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(list|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(some|{\"a\":1})",
+"want": "read"
+},
+{
+"tag": "R-kmis",
+"s": "(box|[1])",
+"want": "read"
+},
+{
+"tag": "R-kmis",
+"s": "(some|[1])",
+"want": "read"
+},
+{
+"tag": "R-kmis",
+"s": "{\"x\": (some|{\"a\":1})}",
+"want": "read"
+},
+{
+"tag": "R-kmis",
+"s": "{\"x\": (u8|{\"a\":1})}",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "[(u8|{\"a\":1})]",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(bu8|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(t2|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-kmis",
+"s": "(true|{\"a\":1})",
+"want": "refuse"
+},
+{
+"tag": "R-dup",
+"s": "{\"a\":1, ! c ! \"a\":2}",
+"want": "refuse"
+},
+{
+"tag": "R-dup",
+"s": "{\"a\":1, \"a\" ! c !: 2}",
+"want": "refuse"
+},
+{
+"tag": "R-dup",
+"s": "{\"a\" # c\n: 1, \"a\": 2}",
+"want": "refuse"
+},
+{
+"tag": "R-dup",
+"s": "{\"a\":1,\"a\":2}",
+"want": "refuse"
+},
+{
+"tag": "R-dup",
+"s": "{\"a\":{\"x\":1},\"a\":{\"y\":2}}",
+"want": "refuse"
+},
+{
+"tag": "R-ws",
+"s": "(u8 ! c ! |1)",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "(\n u8 |\n 1\n)",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "{\r\n  \"a\": (u8|1),\r\n  \"b\": (str|\"x\")\r\n}\r\n",
+"want": "read"
+},
+{
+"tag": "R-colon",
+"s": "{:1}",
+"want": "refuse"
+},
+{
+"tag": "R-colon",
+"s": "{\"a\"::1}",
+"want": "refuse"
+},
+{
+"tag": "R-colon",
+"s": "{\"a\":1, :2}",
+"want": "refuse"
+},
+{
+"tag": "R-colon",
+"s": "{\"a\":1,:}",
+"want": "refuse"
+},
+{
+"tag": "R-colon",
+"s": "[:]",
+"want": "refuse"
+},
+{
+"tag": "R-colon",
+"s": "{\"a\": 1:2}",
+"want": "refuse"
+},
+{
+"tag": "R-rootc",
+"s": "# header\n{\"a\":1}",
+"want": "read"
+},
+{
+"tag": "R-rootc",
+"s": "{\"a\":1}\n# trailer",
+"want": "read"
+},
+{
+"tag": "R-rootc",
+"s": "# a #\n# b\n{\"a\":1}",
+"want": "read"
+},
+{
+"tag": "R-rootc",
+"s": "! one !\n! two !\n{\"a\": 1}",
+"want": "read"
+},
+{
+"tag": "R-rootc",
+"s": "{\"a\": 1}\n! open",
+"want": "read"
+},
+{
+"tag": "R-rootc",
+"s": "#\n{\"a\":1}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 9007199254740991}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 9007199254740992}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": -9007199254740992}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 1.5}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 1e400}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": (u64|18446744073709551615)}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 0.1}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 1e-400}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 123456789.123456789}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": (f32|0.1)}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": -0.0}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 0x10}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": (adec|1.25)}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 1e21}",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "{\"n\": 1e22}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"\\u0000\"}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"\u2028\"}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"\\ud800\"}",
+"want": "refuse"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"\\udc00x\"}",
+"want": "refuse"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"\u00e9\ud83d\ude00\"}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": \"a\\\"b\\\\c\"}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": 'x'}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": unq}",
+"want": "read"
+},
+{
+"tag": "R-str",
+"s": "{\"s\": 29x.4}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (none)}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (empty)}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (some|1)}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (box|1)}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (bu8|[1,2])}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (t2|[1,2])}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (c64|5)}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (omap|{\"y\":1,\"x\":2})}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [1,,2]}",
+"want": "refuse"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [,]}",
+"want": "refuse"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [1, # c\n 2]}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [! c ! 1]}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [1 ! c !]}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [1, ! c !]}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": [! c !]}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{1: 2}",
+"want": "read"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\":}",
+"want": "refuse"
+},
+{
+"tag": "R-kinds",
+"s": "{\"a\": (str|\"x\" ! c !)}",
+"want": "read"
+},
+{
+"tag": "Z-box",
+"s": "(box|(true))",
+"want": "read"
+},
+{
+"tag": "Z-box",
+"s": "(some|(none))",
+"want": "read"
+},
+{
+"tag": "Z-box",
+"s": "{\"a\": (some|(true))}",
+"want": "read"
+},
+{
+"tag": "Z-box",
+"s": "[(box|(false)), 1]",
+"want": "read"
+},
+{
+"tag": "Z-box",
+"s": "(box|(u8|1))",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "(u8\r\n|1)",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "(\r\nu8|1)",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "(u8\t|1)",
+"want": "read"
+},
+{
+"tag": "R-ws",
+"s": "{\"a\": (u8\r\n|1)}",
+"want": "read"
+},
+{
+"tag": "R-comma",
+"s": "{\"a\", 1}",
+"want": "refuse"
+},
+{
+"tag": "R-num",
+"s": "(f64|1e400)",
+"want": "refuse"
+},
+{
+"tag": "R-num",
+"s": "(f32|1e39)",
+"want": "refuse"
+},
+{
+"tag": "R-num",
+"s": "(u8|1.0)",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "(u64|1e3)",
+"want": "read"
+},
+{
+"tag": "R-num",
+"s": "(u8|1.5)",
+"want": "refuse"
+},
+{
+"tag": "R-num",
+"s": "(u8|-1.0)",
+"want": "refuse"
+},
+{
+"tag": "R-num",
+"s": "(u8|1e999999)",
+"want": "refuse"
+},
+{
+"tag": "R-cmt",
+"s": "{\"a\": 1 # c\n, \"b\": 2}",
+"want": "read"
+},
+{
+"tag": "R-cmt",
+"s": "[1 # c\n, 2]",
+"want": "read"
+},
+{
+"tag": "R-cmt",
+"s": "{\"a\" # c\n: 1}",
+"want": "read"
+},
+{
+"tag": "R-cmt",
+"s": "{\"a\": 1 # c\n \"b\": 2}",
+"want": "refuse"
+},
+{
+"tag": "R-bom",
+"s": "\ufeff{\"a\":1}",
+"want": "read"
+},
+{
+"tag": "R-bom",
+"s": "\ufeff\ufeff{\"a\":1}",
+"want": "refuse"
+}
+]

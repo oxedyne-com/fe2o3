@@ -195,11 +195,13 @@ fn test_a_user_kind_payload_in_a_container_00() {
 
 #[test]
 fn test_a_whole_number_kind_takes_no_fraction_00() {
-    // Only the digits before the point were parsed, so these read as 1 and 1.
+    // Only the digits before the point were parsed, so these read as 1 and 2. A whole value
+    // written with a point or an exponent is read (lead ruling, U0-5 L3); a fraction is not.
     refused("(u8|1.5)", &["whole number", "1.5"]);
     refused("(i32|-2.5)", &["whole number"]);
-    refused("(u16|1e2)", &["whole number", "1e2"]);
-    refused("{\"n\": (u64|3.0)}", &["whole number", "key n"]);
+    assert_eq!(read("(u16|1e2)"), Dat::U16(100));
+    assert_eq!(read("{\"n\": (u64|3.0)}"), one_key("n", Dat::U64(3)));
+    refused("{\"n\": (u64|3.5)}", &["whole number", "key n"]);
     // A float kind keeps its fraction, and hex digits are not an exponent.
     assert_eq!(read("(f64|1.5)"), Dat::F64(Float64(1.5)));
     assert_eq!(read("(u8|0xff)"), Dat::U8(255));
@@ -444,6 +446,31 @@ fn test_a_comma_with_nothing_before_it_is_refused_00() {
     read("{\"a\": ! a note !, \"b\": 1}");
 }
 
+#[test]
+fn test_a_comma_where_a_colon_belongs_is_refused_00() {
+    // `{"a", 1}` read as {"a": 1}, the comma setting the key; the format's colon is the only
+    // separator of a key from its value (lead ruling, consistent with H2).
+    for s in [
+        "{\"a\", 1}", "{\"a\", 1, \"b\", 2}", "{\"a\": 1, \"b\", 2}", "{1, 2}", "{\"a\" ! c !, 1}",
+        "{! c !, \"a\": 1}", "{\"a\": {\"b\", 1}}", "{\"a\",}", "(map|{\"a\", 1})",
+    ] {
+        refused(s, &["','", "':'"]);
+    }
+    read("{\"a\": 1, \"b\": 2}");
+}
+
+#[test]
+fn test_whitespace_in_a_kind_label_reads_as_a_space_00() {
+    // A tab, a CR and a LF are whitespace as a space is, around a label; a gap inside one is not.
+    for s in ["(u8 |1)", "(u8\t|1)", "(u8\r|1)", "(u8\n|1)", "(u8\r\n|1)", "(\r\nu8|1)", "( \tu8 \t|1)"] {
+        assert_eq!(read(s), Dat::U8(1), "{:?}", s);
+    }
+    assert_eq!(read("{\"a\": (u8\r\n|1)}"), one_key("a", Dat::U8(1)));
+    for s in ["(u 8|1)", "(u\t8|1)", "(u\r\n8|1)"] {
+        refused(s, &["gap"]);
+    }
+}
+
 fn one_key(k: &str, v: Dat) -> Dat {
     map_of(k, v)
 }
@@ -462,4 +489,202 @@ fn test_an_empty_key_is_refused_unless_it_keys_a_note_00() {
     let mut m = BTreeMap::new();
     m.insert(Dat::Empty, Dat::U8(1));
     assert_eq!(read("{(empty): 1}"), Dat::Map(m));
+}
+
+// A note is no part of what a value is, so these compare what was read with the notes taken off.
+fn strip(d: &Dat) -> Dat {
+    match d {
+        Dat::ABox(_, inner, _)  => strip(inner),
+        Dat::Map(m)             => Dat::Map(m.iter().map(|(k, v)| (strip(k), strip(v))).collect()),
+        Dat::List(v)            => Dat::List(v.iter().map(strip).collect()),
+        other                   => other.clone(),
+    }
+}
+
+fn big_map(n: usize) -> String {
+    let mut s = String::from("{");
+    for i in 0..n {
+        s.push_str(&format!("\"k{}\": 0, ", i));
+    }
+    s
+}
+
+#[test]
+fn test_a_duplicate_key_is_refused_in_few_words_00() {
+    // The refusal held a debug print of the whole map being read, megabytes for a large one.
+    let s = format!("{}\"k0\": 1}}", big_map(500));
+    refused(&s, &["The key k0 already exists in the map"]);
+    match Dat::decode_string(&s) {
+        Err(e) => assert!(e.plain().len() < 400, "the refusal is {} bytes", e.plain().len()),
+        Ok(d) => panic!("should be refused, and became {}", d),
+    }
+    // A key behind a note is the same key.
+    refused("{\"a\": 1, ! n ! \"a\": 2}", &["already exists"]);
+    refused("{\"a\": 1, \"b\": 2, # n\n \"a\":! c\n}", &["already exists"]);
+    // As it is in an ordered map.
+    let mut cfg = DecoderConfig::<BTreeMap<_, _>, BTreeMap<_, _>>::default();
+    cfg.use_ordmaps = true;
+    for s in [format!("{}\"k0\": 1}}", big_map(500)), "{\"a\": 1, ! n ! \"a\": 2}".to_string()] {
+        match Dat::decode_string_with_config(s.as_str(), &cfg) {
+            Err(e) => assert!(e.plain().contains("already exists") && e.plain().len() < 400,
+                "the refusal of an ordered map is {}", e.plain()),
+            Ok(d) => panic!("should be refused, and became {}", d),
+        }
+    }
+}
+
+#[test]
+fn test_an_unpaired_member_is_refused_without_the_map_00() {
+    let s = format!("{}\"z\"}}", big_map(500));
+    refused(&s, &["value with no key at the end of a map"]);
+    let s = format!("{}\"z\":}}", big_map(500));
+    refused(&s, &["The key z has no value at the end of a map"]);
+    for s in [format!("{}\"z\"}}", big_map(500)), format!("{}\"z\":}}", big_map(500))] {
+        match Dat::decode_string(&s) {
+            Err(e) => assert!(e.plain().len() < 400, "the refusal is {} bytes", e.plain().len()),
+            Ok(d) => panic!("should be refused, and became {}", d),
+        }
+    }
+}
+
+#[test]
+fn test_a_byte_order_mark_is_not_text_00() {
+    let want = read("{\"a\":1}");
+    assert_eq!(read("\u{feff}{\"a\":1}"), want);
+    assert_eq!(read("\u{feff}\n{\"a\":1}"), want);
+    refused("\u{feff}\u{feff}{\"a\":1}", &[]);
+    refused("{\"a\":1}\u{feff}", &[]);
+    // Inside a string it is a character like another.
+    assert_eq!(read("{\"a\":\"\u{feff}x\"}"), one_key("a", Dat::Str("\u{feff}x".to_string())));
+}
+
+#[test]
+fn test_a_comment_before_the_root_value_is_dropped_00() {
+    for (s, want) in [
+        ("! one !\n{\"a\": 1}", "{\"a\": 1}"),
+        ("# one\n{\"a\": 1}", "{\"a\": 1}"),
+        ("# one\n# two\n{\"a\": 1}", "{\"a\": 1}"),
+        ("! one !\n[1, 2]", "[1, 2]"),
+        ("# one\n[1, 2]", "[1, 2]"),
+        ("# one\n(u8|1)", "(u8|1)"),
+        ("# one\n\"x\"", "\"x\""),
+        ("# one\n42", "42"),
+    ] {
+        assert_eq!(read(s), read(want), "{:?}", s);
+    }
+    // And one after it, or between a value's marks, stays as it was.
+    assert_eq!(read("{\"a\": 1} # end"), read("{\"a\": 1}"));
+    assert_eq!(read("{\"a\": 1} ! end !"), read("{\"a\": 1}"));
+    refused("42 # c\n43", &[]);
+}
+
+#[test]
+fn test_a_whole_number_kind_takes_a_whole_number_in_any_form_00() {
+    assert_eq!(read("(u8|1.0)"), Dat::U8(1));
+    assert_eq!(read("(u8|10e-1)"), Dat::U8(1));
+    assert_eq!(read("(u64|1e3)"), Dat::U64(1000));
+    assert_eq!(read("(i8|-2.0)"), Dat::I8(-2));
+    assert_eq!(read("(i32|-1.5e1)"), Dat::I32(-15));
+    assert_eq!(read("{\"n\": (u16|65535.0)}"), one_key("n", Dat::U16(65535)));
+    let t0 = std::time::Instant::now();
+    for s in [
+        "(u8|1.5)", "(u8|256.0)", "(u8|-1.0)", "(u8|1e-1)", "(u8|1e999999)", "(u64|1e40)",
+        "(u8|1e9999999999999999999)", "(i8|128.0)", "(u8|0.5e1e1)",
+        "(f64|1e400)", "(f32|1e39)", "(f64|-1e400)",
+    ] {
+        refused(s, &[]);
+    }
+    assert!(t0.elapsed().as_secs() < 2, "the refusals took {:?}", t0.elapsed());
+    // A bare number is as it was.
+    assert!(Dat::decode_string("{\"n\": 1e400}").is_ok());
+    assert!(matches!(read("(f64|1e300)"), Dat::F64(_)));
+}
+
+#[test]
+fn test_a_comment_is_allowed_where_whitespace_is_00() {
+    let two = read("{\"a\": 1, \"b\": 2}");
+    for s in [
+        "{\"a\": 1 # c\n, \"b\": 2}",
+        "{\"a\": 1 ! c !, \"b\": 2}",
+        "{\"a\" # c\n: 1, \"b\": 2}",
+        "{\"a\": 1, \"b\" # c\n: 2}",
+        "{\"a\" ! c ! : 1, \"b\": 2}",
+        "{\"a\": 1, \"b\": 2 # c\n}",
+    ] {
+        assert_eq!(strip(&read(s)), strip(&two), "{:?}", s);
+    }
+    let two = read("[1, 2]");
+    for s in ["[1 # c\n, 2]", "[1, 2 # c\n]", "[1 ! c !, 2]", "[1 # a\n\n# b\n, 2]"] {
+        assert_eq!(strip(&read(s)), strip(&two), "{:?}", s);
+    }
+    assert_eq!(strip(&read("[[1] # c\n, 2]")), strip(&read("[[1], 2]")));
+    assert_eq!(strip(&read("{\"a\": [1 # c\n, 2] # d\n, \"b\": {\"x\": 1 # e\n} # f\n}")),
+        strip(&read("{\"a\": [1, 2], \"b\": {\"x\": 1}}")));
+    // The note is kept: it is on the value, and the key comes out bare.
+    assert!(read("{\"a\": 1 # c\n, \"b\": 2}").to_string().contains("#c#"));
+    // A comment is not a separator, nor does it supply a key or a value.
+    for s in [
+        "{\"a\": 1 # c\n \"b\": 2}", "[1 # c\n 2]", "{\"a\" # c\n, \"b\": 2}", "{\"a\": 1 # c\n : 2}",
+        "{\"a\": 1 # c\n,, \"b\": 2}", "{# c\n, \"a\": 1}", "[1, # c\n, 2]", "{\"a\": 1 # c\n\"a\": 2}",
+    ] {
+        refused(s, &[]);
+    }
+    // A comment on a line of its own, or after a ':', is the note it was; one after a ',' is an
+    // entry of its own.
+    assert!(Dat::decode_string("{\"a\": 1 # c\n, # d\n \"b\": 2}").is_ok());
+    assert!(Dat::decode_string("{\"a\": 1,\n # c\n \"b\": 2}").is_ok());
+    assert!(Dat::decode_string("{\"a\":! c\n \"b\": 2}").is_ok());
+}
+
+#[test]
+fn test_a_refusal_at_a_line_end_names_that_line_00() {
+    // The newline that ends a comment closes the entry before it, and the refusal is of that entry.
+    let cfg = DecoderConfig::<BTreeMap<_, _>, BTreeMap<_, _>>::default();
+    match Dat::decode_string_located("{\"a\": 1, \"b\": 2, \"b\":! c\n}", &cfg) {
+        Ok(d) => panic!("should be refused, and became {}", d),
+        Err(at) => assert_eq!((at.line, at.col), (1, 25), "the key is {}", at.key),
+    }
+    match Dat::decode_string_located("{\n\"a\": 1,\n\"a\":! c\n}", &cfg) {
+        Ok(d) => panic!("should be refused, and became {}", d),
+        Err(at) => assert_eq!((at.line, at.col), (3, 8)),
+    }
+}
+
+#[test]
+fn test_a_refusal_holds_no_cursor_dump_and_no_internal_names_00() {
+    for s in [
+        "[1,,2]", "{\"a\", 1}", "{\"a\": 1 \"b\"}", "{:1}", "[1, 2", "{\"a\": 1", "(u8|1", "(u8|1|2)",
+        "{\"a\": 1, \"a\": 2}", "(u8 1)", "[1 2]", "{\"a\"}", "{\"a\":}", "(map|[1])", "(list|{\"a\": 1})",
+        "(u8|(u8|1))", "(tup2|[1])", "(tup2|[1, 2, 3])", "(abox|)", "]", "}", ")", ":", "|",
+    ] {
+        match Dat::decode_string(s) {
+            Ok(d) => panic!("{:?} should be refused, and became {}", s, d),
+            Err(e) => {
+                let msg = e.plain();
+                for bad in ["char '", " pos ", "store.", "DaticleMap", "OrdDaticleMap", "Map({", "List(["] {
+                    assert!(!msg.contains(bad), "the refusal of {:?} holds {:?}: {}", s, bad, msg);
+                }
+            },
+        }
+    }
+    refused("[1, 2", &["list"]);
+    refused("{\"a\": 1", &["map"]);
+}
+
+#[test]
+fn test_a_key_with_a_line_break_is_named_on_one_line_00() {
+    let cfg = DecoderConfig::<BTreeMap<_, _>, BTreeMap<_, _>>::default();
+    for (s, name) in [("{\"a\\nb\": 1 2}", "a\\nb"), ("{\"a\\rb\": 1 2}", "a\\rb"), ("{\"a\\\"b\": 1 2}", "a\\\"b")] {
+        match Dat::decode_string_located(s, &cfg) {
+            Ok(d) => panic!("{:?} should be refused, and became {}", s, d),
+            Err(at) => assert_eq!(at.key, name, "{:?}", s),
+        }
+        match Dat::decode_string(s) {
+            Ok(d) => panic!("{:?} should be refused, and became {}", s, d),
+            Err(e) => {
+                let msg = e.plain();
+                assert!(!msg.contains('\n') && !msg.contains('\r'), "{:?} refused with a break: {:?}", s, msg);
+            },
+        }
+    }
 }
