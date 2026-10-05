@@ -43,6 +43,7 @@ use super::consensus::{
 use super::hotstuff::{
 	replica::Command as HsCommand,
 	types::{
+		BlockHash,
 		NewView,
 		Proposal,
 		Vote,
@@ -86,6 +87,7 @@ use std::collections::{
 };
 use std::sync::{
 	Mutex,
+	MutexGuard,
 	atomic::{
 		AtomicU64,
 		Ordering,
@@ -299,10 +301,24 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		})
 	}
 
+	// The write lock, recovered if a panic poisoned it. It guards `()`, so a
+	// poison carries no torn state: a panic in a resolver has written nothing,
+	// and one in the storage is the storage's own lock to answer for. Failing
+	// every later write instead would stop this peer converging until restart.
+	// Not lock_mutex_or_recover!, which logs, and dist does not.
+	fn write_lock(&self) -> MutexGuard<'_, ()> {
+		match self.write.lock() {
+			Ok(guard)		=> guard,
+			Err(poisoned)	=> poisoned.into_inner(),
+		}
+	}
+
 	// The one path by which a record reaches storage from an eventual table.
 	// None means the local peer is not a holder, so the resolver was not called.
 	// A Take of the bytes already held is a Keep: nothing is written, so two
-	// peers that agree do not echo the record to each other.
+	// peers that agree do not echo the record to each other. A cohort table is
+	// an Err whoever sent the record: consensus is its only verdict, so a peer
+	// cannot overwrite a decided value by the eventual path.
 	fn apply(
 		&self,
 		ctx:	&ResolveCtx,
@@ -310,12 +326,19 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 	)
 		-> Outcome<Option<Verdict>>
 	{
+		let tc = res!(self.table_or_err(&record.table));
+		if !matches!(tc.consistency, Consistency::Eventual) {
+			return Err(err!(
+				"Table '{}' is a cohort table, which takes writes only through consensus, \
+				not as an eventual record.", record.table;
+				Invalid, Input, Mismatch));
+		}
 		if !self.placement.i_am_holder(&record.id) {
 			return Ok(None);
 		}
 		// One record at a time, so the read, the resolve and the write are atomic.
 		// The resolver's view takes only the storage's own lock, for one read.
-		let _guard = lock_mutex!(self.write);
+		let _guard = self.write_lock();
 		let held = res!(self.storage.get(&record.table, &record.id)).map(|r| r.value);
 		let verdict = res!(self.resolver.resolve(
 			ctx,
@@ -522,9 +545,7 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 							Bug, Invalid, Mismatch));
 					}
 					let hash = consensus::block_hash(&block);
-					res!(instance.mark_decided(hash));
-					// Consensus is the verdict on a cohort table, so there is no resolver.
-					res!(self.storage.put(&record));
+					res!(self.store_decided(instance, hash, &record));
 					persisted.push((record.table, record.id));
 				},
 			}
@@ -532,9 +553,40 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		Ok(out)
 	}
 
+	// Stores a decided record, then marks the instance decided, so a failed store
+	// never leaves the instance decided with no record. A second Decide on another
+	// block is refused before anything is stored. The replica is inert once it has
+	// emitted a Decide, so a failed store holds the record in the instance for
+	// cohort_timeout to store again. Consensus is the verdict on a cohort table, so
+	// there is no resolver; the write lock keeps a resolver's cross-table read from
+	// seeing this store half way.
+	fn store_decided(
+		&self,
+		instance:	&mut CohortInstance,
+		hash:		BlockHash,
+		record:		&Record,
+	)
+		-> Outcome<()>
+	{
+		res!(instance.check_decide(hash));
+		let stored = {
+			let _guard = self.write_lock();
+			self.storage.put(record)
+		};
+		if let Err(e) = stored {
+			instance.unstored = Some((hash, record.clone()));
+			return Err(e);
+		}
+		instance.unstored = None;
+		instance.mark_decided(hash)
+	}
+
 	/// The caller owns the timer; on expiry it calls this and dispatches the
 	/// returned envelopes. Empty if the instance is absent -- already decided,
-	/// or never created.
+	/// or never created. An instance whose decided record failed to store is
+	/// stored again here, and the call is an `Err` while the store still fails,
+	/// so the caller keeps its timer until `completed_consensus_put` is reported
+	/// or this call succeeds.
 	pub fn cohort_timeout(
 		&self,
 		table:	&str,
@@ -547,6 +599,10 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 			Some(i) => i,
 			None => return Ok(Vec::new()),
 		};
+		if let Some((hash, record)) = instance.unstored.take() {
+			res!(self.store_decided(instance, hash, &record));
+			return Ok(Vec::new());
+		}
 		if instance.has_decided() {
 			return Ok(Vec::new());
 		}
@@ -908,14 +964,14 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		}
 
 		// Build a push for every requested id we actually have. A failed read is
-		// reported and skipped, so it cannot lose the results above; the peer asks
-		// again next round.
+		// skipped and not listed, since `failed` is for received records and a read
+		// fault here is this peer's own; it cannot lose the results above, and the
+		// peer asks again next round.
 		let mut to_push = Vec::with_capacity(requested_ids.len());
 		for rid in requested_ids {
 			match self.storage.get(&table, &rid) {
-				Ok(Some(r))	=> to_push.push(r),
-				Ok(None)	=> {},
-				Err(e)		=> out.failed.push((table.clone(), rid, e)),
+				Ok(Some(r))			=> to_push.push(r),
+				Ok(None) | Err(_)	=> {},
 			}
 		}
 		if !to_push.is_empty() {

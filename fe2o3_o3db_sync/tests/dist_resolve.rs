@@ -15,7 +15,9 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_o3db_sync::kademlia::id::NodeId;
 use oxedyne_fe2o3_o3db_sync::oam::config::OamConfig;
 use oxedyne_fe2o3_o3db_sync::dist::{
+	cohort,
 	config::{
+		Consistency,
 		DistOzoneConfig,
 		TableConfig,
 	},
@@ -23,6 +25,7 @@ use oxedyne_fe2o3_o3db_sync::dist::{
 		DistOzone,
 		InboundOutcome,
 	},
+	peer_set::PeerSet,
 	record::{
 		Record,
 		RecordDigest,
@@ -48,6 +51,7 @@ use oxedyne_fe2o3_o3db_sync::dist::{
 };
 
 use std::{
+	collections::HashMap,
 	sync::{
 		Arc,
 		Mutex,
@@ -1168,5 +1172,312 @@ fn convergence_bounded() -> Outcome<()> {
 	assert!(text.contains("did not quiesce"), "{:?}", text);
 	assert!(text.contains("seed 0"), "{:?}", text);
 	assert!(deep.contains("did not quiesce") && deep.contains("post-write"), "{:?}", deep);
+	Ok(())
+}
+
+
+// ---------------------------------------------------------------------------
+// Post-QA fixes (2026-10-05): cohort tables, a poisoned lock, one listing per
+// record, a failed Decide store, byte comparison and a missing dependency.
+// ---------------------------------------------------------------------------
+
+/// A holder that also has a cohort table, "ledger", beside the eventual ones.
+fn with_ledger<S: Storage, R: Resolver>(storage: S, resolver: R) -> Outcome<DistOzone<S, R>> {
+	let oam = res!(OamConfig::new(2, 2));
+	let tables = vec![
+		res!(TableConfig::eventual("identity")),
+		res!(TableConfig::eventual("escrow")),
+		res!(TableConfig::cohort_default("ledger")),
+	];
+	let cfg = res!(DistOzoneConfig::new(node(1), vec![node(2)], oam, tables));
+	DistOzone::with_resolver(cfg, storage, resolver)
+}
+
+#[test]
+fn cohort_table_refuses_replicate_put() -> Outcome<()> {
+	let e = res!(with_ledger(MemoryStorage::new(), LastVersionWins));
+	// Stand in for a value a HotStuff Decide stored.
+	res!(e.storage().put(&rec("ledger", rid(7), b"\x01decided")));
+	let out = res!(e.handle_envelope_at(replicate(2, 1, rec("ledger", rid(7), b"\x09forged")), 0));
+	assert_eq!(res!(stored(&e, "ledger", rid(7))), Some(b"\x01decided".to_vec()),
+		"a ReplicatePut overwrote a cohort table's decided value; persisted={:?}", out.persisted);
+	assert!(out.persisted.is_empty());
+	assert_eq!(out.failed.len(), 1, "the refused record is in failed");
+	assert_eq!((out.failed[0].0.as_str(), out.failed[0].1), ("ledger", rid(7)));
+	Ok(())
+}
+
+#[test]
+fn cohort_table_refuses_anti_entropy_push() -> Outcome<()> {
+	let e = res!(with_ledger(TestStorage::new(), LastVersionWins));
+	let out = res!(e.handle_envelope_at(
+		push(2, 1, "ledger", vec![rec("ledger", rid(8), b"undecided")]), 0));
+	assert_eq!(res!(stored(&e, "ledger", rid(8))), None,
+		"an AntiEntropyPush stored a never-decided record in a cohort table; persisted={:?}", out.persisted);
+	assert!(out.persisted.is_empty());
+	assert_eq!(out.failed.len(), 1, "the refused record is in failed");
+	// An anti-entropy reply is the same door.
+	let out = res!(e.handle_envelope_at(
+		reply(2, 1, "ledger", vec![rec("ledger", rid(9), b"undecided")]), 0));
+	assert_eq!(res!(stored(&e, "ledger", rid(9))), None);
+	assert_eq!(out.failed.len(), 1);
+	assert_eq!(e.storage().puts(), 0);
+	Ok(())
+}
+
+/// Panics on a value that begins with "PANIC", and takes any other.
+struct Panicky;
+
+impl Resolver for Panicky {
+	fn resolve<V: ReadView>(
+		&self,
+		_ctx:		&ResolveCtx,
+		_view:		&V,
+		_table:		&str,
+		_id:		&RecordId,
+		_held:		Option<&[u8]>,
+		incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		if incoming.starts_with(b"PANIC") {
+			panic!("resolver bug on one malformed record");
+		}
+		Ok(Verdict::Take(incoming.to_vec()))
+	}
+}
+
+#[test]
+fn resolver_panic_does_not_wedge_engine() -> Outcome<()> {
+	let e = res!(holder(1, 2, MemoryStorage::new(), Panicky));
+	let hit = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+		e.handle_envelope_at(replicate(2, 1, rec("identity", rid(1), b"PANIC")), 0)
+	}));
+	assert!(hit.is_err(), "the resolver was meant to panic");
+	// A different, well-formed record afterwards, by each door.
+	let later = e.put_at(rec("identity", rid(2), b"fine"), 0);
+	assert!(later.is_ok(), "a put after one resolver panic failed: {:?}", later.err());
+	let inbound = res!(e.handle_envelope_at(replicate(2, 1, rec("identity", rid(3), b"fine")), 0));
+	assert!(inbound.failed.is_empty(), "inbound after one resolver panic failed: {:?}", inbound.failed);
+	assert_eq!(inbound.persisted, vec![(s("identity"), rid(3))]);
+	assert_eq!(res!(stored(&e, "identity", rid(1))), None);
+	Ok(())
+}
+
+/// Reads of an id fail once that id has been written.
+struct ReadFailsAfterPut {
+	inner:	MemoryStorage,
+	armed:	Mutex<Vec<RecordId>>,
+}
+
+impl Storage for ReadFailsAfterPut {
+	fn put(&self, record: &Record) -> Outcome<()> {
+		lock_mutex!(self.armed).push(record.id);
+		self.inner.put(record)
+	}
+
+	fn get(&self, table: &str, id: &RecordId) -> Outcome<Option<Record>> {
+		if lock_mutex!(self.armed).contains(id) {
+			return Err(err!("Injected read fault."; IO, Read));
+		}
+		self.inner.get(table, id)
+	}
+
+	fn delete(&self, table: &str, id: &RecordId) -> Outcome<bool> {
+		self.inner.delete(table, id)
+	}
+
+	fn digests(&self, table: &str) -> Outcome<Vec<RecordDigest>> {
+		self.inner.digests(table)
+	}
+}
+
+#[test]
+fn reply_lists_each_record_at_most_once() -> Outcome<()> {
+	let st = ReadFailsAfterPut { inner: MemoryStorage::new(), armed: Mutex::new(Vec::new()) };
+	let e = res!(holder(1, 2, st, LastVersionWins));
+	// An id whose content differs on the two sides is in both halves of a
+	// decode, so it arrives in `records` and is also requested back.
+	let out = res!(e.handle_envelope_at(
+		reply_asking(2, 1, "identity", vec![rec("identity", rid(4), b"v")], vec![rid(4)]),
+		0,
+	));
+	assert_eq!(out.persisted, vec![(s("identity"), rid(4))]);
+	assert!(out.failed.is_empty(),
+		"a local read fault was blamed on the sender: persisted={:?} failed={:?}", out.persisted, out.failed);
+	Ok(())
+}
+
+/// A reply that also asks for ids back.
+fn reply_asking(from: u8, to: u8, table: &str, records: Vec<Record>, requested_ids: Vec<RecordId>) -> Envelope {
+	Envelope::new(node(from), node(to), MsgKind::AntiEntropyReply {
+		table:	s(table),
+		records,
+		requested_ids,
+		bulk:	false,
+	})
+}
+
+/// The leader and members of a cohort, by the engine's own selection.
+fn cohort_for(ids: &[NodeId], table: &str, id: &RecordId, lambda: u64) -> Outcome<(NodeId, Vec<NodeId>)> {
+	let local = ids[0];
+	let mut peers = PeerSet::new();
+	for p in ids.iter().filter(|p| **p != local) {
+		peers.insert(*p);
+	}
+	let c = res!(cohort::select(table, id, &peers, &local, lambda));
+	Ok((c.leader, c.members))
+}
+
+#[test]
+fn decide_store_fault_leaves_instance_undecided() -> Outcome<()> {
+	let ids: Vec<NodeId> = (1..=5).map(node).collect();
+	let mut engines: HashMap<NodeId, DistOzone<TestStorage>> = HashMap::new();
+	for me in &ids {
+		let peers = ids.iter().filter(|p| *p != me).copied().collect();
+		let oam = res!(OamConfig::new(5, 5));
+		let tables = vec![res!(TableConfig::new(
+			"treasury",
+			Consistency::Cohort { lambda: 5 },
+			TableConfig::DEFAULT_AE,
+			TableConfig::DEFAULT_IBLT_CELLS,
+		))];
+		let cfg = res!(DistOzoneConfig::new(*me, peers, oam, tables));
+		engines.insert(*me, res!(DistOzone::new(cfg, TestStorage::new())));
+	}
+	let id = rid(0x42);
+	let record = rec("treasury", id, b"payload");
+	let (leader, members) = res!(cohort_for(&ids, "treasury", &id, 5));
+	// A follower whose store fails when the Decide reaches it.
+	let victim = members[3];
+	res!(engines[&victim].storage().fail_put_of(Some(id)));
+
+	let mut pending = res!(engines[&leader].put(record.clone())).outbound;
+	let mut faulted: Vec<Envelope> = Vec::new();
+	for _ in 0..64 {
+		if pending.is_empty() {
+			break;
+		}
+		let mut next = Vec::new();
+		for env in pending.drain(..) {
+			let to = env.to;
+			match engines[&to].handle_envelope(env.clone()) {
+				Ok(out)					=> next.extend(out.outbound),
+				Err(_) if to == victim	=> faulted.push(env),
+				Err(e)					=> return Err(e),
+			}
+		}
+		pending = next;
+	}
+	assert!(!faulted.is_empty(), "the victim's store fault was never reached");
+	assert_eq!(res!(stored(&engines[&victim], "treasury", id)), None);
+
+	// The replica is inert once it has emitted its Decide, so the decided record
+	// must be held and stored again when the caller's timer fires: still failing
+	// while the fault lasts, stored once it clears.
+	let victim_engine = &engines[&victim];
+	assert!(victim_engine.cohort_timeout("treasury", &id).is_err(),
+		"a failed Decide store was forgotten, not held for a retry");
+	res!(victim_engine.storage().fail_put_of(None));
+	res!(victim_engine.cohort_timeout("treasury", &id));
+	assert_eq!(res!(stored(victim_engine, "treasury", id)), Some(b"payload".to_vec()),
+		"a failed Decide store left the replica decided with no record");
+	// Decided now, so a further timeout is quiet.
+	assert!(res!(victim_engine.cohort_timeout("treasury", &id)).is_empty());
+	Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Known red, carried by A2: the content hash ignores length (2-F1) and
+// anti-entropy repairs only the dialling side (2-F3).
+// ---------------------------------------------------------------------------
+
+/// A mesh of `n` peers on the eventual table "identity", each holding everything.
+fn mesh(n: usize) -> Outcome<Vec<DistOzone<MemoryStorage>>> {
+	let ids: Vec<NodeId> = (0..n).map(|i| node((i + 1) as u8)).collect();
+	let mut out = Vec::new();
+	for me in &ids {
+		let others = ids.iter().filter(|x| *x != me).copied().collect();
+		let oam = res!(OamConfig::new(n as u64, n as u64));
+		let cfg = res!(DistOzoneConfig::new(*me, others, oam, vec![res!(TableConfig::eventual("identity"))]));
+		out.push(res!(DistOzone::new(cfg, MemoryStorage::new())));
+	}
+	Ok(out)
+}
+
+/// One whole anti-entropy exchange, `a` dialling `b`.
+fn exchange(e: &[DistOzone<MemoryStorage>], a: usize, b: usize) -> Outcome<()> {
+	let mut pending = vec![res!(e[a].build_anti_entropy_request("identity", node((b + 1) as u8)))];
+	while let Some(env) = pending.pop() {
+		let to = (env.to.as_bytes()[31] - 1) as usize;
+		let out = res!(e[to].handle_envelope_at(env, 0));
+		assert!(out.failed.is_empty());
+		pending.extend(out.outbound);
+	}
+	Ok(())
+}
+
+#[test]
+#[ignore = "A2: 2-F1, the content hash ignores length, so [AB, 00] and [AB] look equal"]
+fn lww_lost_replicate_not_repaired() -> Outcome<()> {
+	let e = res!(mesh(2));
+	let hi = LastVersionWins::value(7, &[0xAB, 0]);
+	let lo = LastVersionWins::value(7, &[0xAB]);
+	// Each peer writes locally and both replications are lost.
+	res!(e[0].put_at(rec("identity", rid(1), &hi), 0));
+	res!(e[1].put_at(rec("identity", rid(1), &lo), 0));
+	for _ in 0..4 {
+		res!(exchange(&e, 0, 1));
+		res!(exchange(&e, 1, 0));
+	}
+	assert_eq!(res!(stored(&e[0], "identity", rid(1))), Some(hi.clone()));
+	assert_eq!(res!(stored(&e[1], "identity", rid(1))), Some(hi));
+	Ok(())
+}
+
+#[test]
+#[ignore = "A2: 2-F1, the content hash is reversible, so a writer can forge a value with the same digest"]
+fn forged_same_digest_value_never_repaired() -> Outcome<()> {
+	// A value is a version then two 8-byte chunks. The second chunk of the
+	// forgery is solved so the chained hash after it matches the original's.
+	fn mix(mut x: u64) -> u64 {
+		x = (x ^ (x >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+		x = (x ^ (x >> 27)).wrapping_mul(0x94D049BB133111EB);
+		x ^ (x >> 31)
+	}
+	let s_ver = mix(0x9E3779B97F4A7C15u64.wrapping_add(u64::from_le_bytes(9u64.to_be_bytes())));
+	let (p0, p1, p0f) = (0x1111_1111_1111_1111u64, 0x2222_2222_2222_2222u64, 0x3333_3333_3333_3333u64);
+	let p1f = mix(s_ver.wrapping_add(p0)).wrapping_add(p1).wrapping_sub(mix(s_ver.wrapping_add(p0f)));
+	let mut pa = p0.to_le_bytes().to_vec();
+	pa.extend_from_slice(&p1.to_le_bytes());
+	let mut pb = p0f.to_le_bytes().to_vec();
+	pb.extend_from_slice(&p1f.to_le_bytes());
+	let (va, vb) = (LastVersionWins::value(9, &pa), LastVersionWins::value(9, &pb));
+	assert_ne!(va, vb);
+
+	let e = res!(mesh(2));
+	res!(e[0].put_at(rec("identity", rid(1), &va), 0));
+	res!(e[1].put_at(rec("identity", rid(1), &vb), 0));
+	for _ in 0..4 {
+		res!(exchange(&e, 0, 1));
+		res!(exchange(&e, 1, 0));
+	}
+	assert_eq!(res!(stored(&e[0], "identity", rid(1))), res!(stored(&e[1], "identity", rid(1))));
+	Ok(())
+}
+
+#[test]
+#[ignore = "A2: 2-F3, a value difference at one id makes the exchange bulk, so the dialled peer is never offered"]
+fn dialled_peer_not_offered_on_value_divergence() -> Outcome<()> {
+	let e = res!(mesh(2));
+	let v2 = LastVersionWins::value(2, b"new");
+	let v1 = LastVersionWins::value(1, b"old");
+	// Peer 0 holds the newer X and a Y; peer 1 missed both but holds the older X.
+	res!(e[0].put_at(rec("identity", rid(1), &v2), 0));
+	res!(e[0].put_at(rec("identity", rid(2), b"y"), 0));
+	res!(e[1].put_at(rec("identity", rid(1), &v1), 0));
+	res!(exchange(&e, 0, 1));
+	assert_eq!(res!(stored(&e[1], "identity", rid(1))), Some(v2), "the dialled peer kept its stale X");
+	assert_eq!(res!(stored(&e[1], "identity", rid(2))), Some(b"y".to_vec()), "the dialled peer never got Y");
 	Ok(())
 }
