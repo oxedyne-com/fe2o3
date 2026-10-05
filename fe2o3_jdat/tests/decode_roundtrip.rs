@@ -103,9 +103,7 @@ fn run(n: u64, notes: bool) -> (u64, Vec<String>) {
     let mut bad = Vec::new();
     for i in 0..n {
         let dat = gen(&mut r, 4, notes);
-        // The lines encoder drops a note's value from a list or map, so notes go through the one-line form only.
-        let mut encs = vec![("jdat", dat.jdat())];
-        if !notes { encs.push(("lines", dat.jdat_to_lines("  "))); }
+        let encs = vec![("jdat", dat.jdat()), ("lines", dat.jdat_to_lines("  "))];
         for (mode, enc) in encs {
             let s = match enc { Ok(s) => s, Err(e) => { bad.push(fmt!("#{} {} encoder: {}", i, mode, e.plain())); continue; } };
             match Dat::decode_string(&s) {
@@ -116,6 +114,26 @@ fn run(n: u64, notes: bool) -> (u64, Vec<String>) {
         }
     }
     (ok, bad)
+}
+
+// A note keeps its value in the lines encoding, in a list and in a map; only a note on nothing is a bare comment line.
+#[test]
+fn test_jdat_to_lines_keeps_a_notes_value_00() {
+    let note = |v: Dat| Dat::ABox(NoteConfig::default(), Box::new(v), fmt!("c"));
+    let mut m = BTreeMap::new();
+    m.insert(Dat::Str(fmt!("k")), note(Dat::U8(1)));
+    let mut km = BTreeMap::new();
+    km.insert(note(Dat::Str(fmt!("k"))), Dat::U8(2));
+    let cases = vec![
+        Dat::Map(m),
+        Dat::Map(km),
+        Dat::List(vec![Dat::U8(7), note(Dat::U8(1)), note(Dat::Empty), Dat::U8(8)]),
+    ];
+    for dat in cases {
+        let s = match dat.jdat_to_lines("  ") { Ok(s) => s, Err(e) => panic!("encoder: {}", e.plain()) };
+        assert_eq!(Dat::decode_string(&s).ok(), Some(dat.clone()), "lines text {:?} for {:?}", s, dat);
+        assert_eq!(s.contains('1') || s.contains('2'), true, "a value was dropped: {:?}", s);
+    }
 }
 
 #[test]
