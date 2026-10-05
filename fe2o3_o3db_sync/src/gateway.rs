@@ -51,8 +51,11 @@ pub fn load_key(path: &Path) -> Outcome<[u8; DB_KEY_LEN]> {
     Ok(key)
 }
 
-/// Opens and starts a store, leaving garbage collection off unless asked. `cfg_opt` is the
-/// configuration of a store being created, and None reads the store's own.
+/// Opens and starts a store, leaving garbage collection off unless asked, and says how many of its
+/// bots answered a ping. `cfg_opt` is the configuration of a store being created, and None reads
+/// the store's own. The store is returned whatever the count, as `o3db_migrate` and `o3db_sweep`
+/// opened it before this helper existed; a tool that reads and reports on the store calls
+/// [`require_answer`] with the count.
 pub fn open_store(
     root:       &Path,
     cfg_opt:    Option<OzoneConfig>,
@@ -60,7 +63,7 @@ pub fn open_store(
     gc_on:      bool,
     label:      &str,
 )
-    -> Outcome<Db>
+    -> Outcome<(Db, usize)>
 {
     let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&key[..]));
     let crc32 = ChecksumScheme::new_crc32();
@@ -76,9 +79,21 @@ pub fn open_store(
     res!(ok!(db.updated_api()).activate_gc(gc_on));
     thread::sleep(Duration::from_millis(500));
     let (_, msgs) = res!(db.api().ping_bots(constant::USER_REQUEST_WAIT));
-    if msgs.is_empty() {
+    info!("{}: {} bots responded.", label, msgs.len());
+    Ok((db, msgs.len()))
+}
+
+/// Fails when no bot answered (`n` from [`open_store`]). A scan of a store that does not answer
+/// finds nothing, and a report that says "clean" of it would be false.
+pub fn require_answer(
+    n:      usize,
+    label:  &str,
+    root:   &Path,
+)
+    -> Outcome<usize>
+{
+    if n == 0 {
         return Err(err!("{}: no bot of the store at {:?} answered.", label, root; Missing, Data));
     }
-    info!("{}: {} bots responded.", label, msgs.len());
-    Ok(db)
+    Ok(n)
 }

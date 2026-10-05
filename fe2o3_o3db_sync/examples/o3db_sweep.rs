@@ -75,7 +75,7 @@ fn run() -> Outcome<()> {
     // Open the store with garbage collection ON: the sweep needs the collector running to reclaim
     // what it tombstones.
     info!("Opening store at {:?} (gc on)...", args.source);
-    let db = res!(gateway::open_store(&args.source, None, &key, true, "sweep"));
+    let (db, _) = res!(gateway::open_store(&args.source, None, &key, true, "sweep"));
 
     let scan_wait = Wait {
         max_wait:       Duration::from_secs(args.scan_secs),

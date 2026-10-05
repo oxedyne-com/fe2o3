@@ -54,7 +54,13 @@ fn run() -> Outcome<i32> {
     log_set_level!("warn");
     let (dir, key_path) = res!(parse());
     let key = res!(gateway::load_key(&key_path));
-    let db = res!(gateway::open_store(&dir, None, &key, false, "jdat-store-check"));
+    let (db, answered) = res!(gateway::open_store(&dir, None, &key, false, "jdat-store-check"));
+    // A report of "clean" from a store that did not answer would be false, so this tool, which
+    // only reports, stops here.
+    if let Err(e) = gateway::require_answer(answered, "jdat-store-check", &dir) {
+        let _ = db.shutdown();
+        return Err(e);
+    }
     let wait = Wait {
         max_wait:       Duration::from_secs(3600),
         check_interval: constant::CHECK_INTERVAL,

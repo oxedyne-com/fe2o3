@@ -69,13 +69,13 @@ fn run() -> Outcome<()> {
 
     // 1. Open the source read-only: garbage collection off, no writes issued.
     info!("Opening source store at {:?} (gc off, read-only)...", args.source);
-    let src = res!(gateway::open_store(&args.source, None, &key, false, "migrate-src"));
+    let (src, _) = res!(gateway::open_store(&args.source, None, &key, false, "migrate-src"));
 
     // 2. Create the target with the SOURCE'S configuration, so chunk geometry
     //    and encryption parameters match exactly.
     let src_cfg = src.cfg().clone();
     info!("Creating fresh target store at {:?} with the source's configuration...", args.target);
-    let tgt = res!(gateway::open_store(&args.target, Some(src_cfg), &key, false, "migrate-tgt"));
+    let (tgt, _) = res!(gateway::open_store(&args.target, Some(src_cfg), &key, false, "migrate-tgt"));
 
     // 3. Migrate and verify.
     let scan_wait = Wait {

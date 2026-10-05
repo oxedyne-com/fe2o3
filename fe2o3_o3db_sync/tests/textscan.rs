@@ -88,6 +88,12 @@ fn run_stores() -> Outcome<()> {
     req!(planted.texts, 4);
     req!(planted.skipped, 2);
     req!(planted.refused.len(), 3);
+    // Every refusal says where, a line and a column, and the report carries both.
+    let report = planted.report();
+    for r in &planted.refused {
+        req!((r.line >= 1 && r.col >= 1), true);
+        req!(report.contains(&fmt!("line={} col={}", r.line, r.col)), true);
+    }
     req!(got("no separator"), 1);
     req!(got("no separator after a comment"), 1);
     req!(got("whole-number kind with a fraction"), 1);
@@ -95,7 +101,6 @@ fn run_stores() -> Outcome<()> {
     for r in &planted.refused {
         req!((r.store.as_str(), r.at, r.hash.len()), ("o3db", 0, 16));
     }
-    let report = planted.report();
     for word in [SECRET, "hello", "a:2", "ok", "a note"] {
         if report.contains(word) {
             return Err(err!("The report repeats {:?}: {}", word, report; Test, Data));
@@ -182,7 +187,10 @@ fn write_store(
 // Opens the store as the examples do, through the gateway: its own configuration, garbage
 // collection off.
 fn scan_store(root: &Path) -> Outcome<TextScan> {
-    let db = res!(gateway::open_store(root, None, &test_key(), false, "textscan-test"));
+    let (db, answered) = res!(gateway::open_store(root, None, &test_key(), false, "textscan-test"));
+    // A live store answers, and the requirement the scanning tool makes of it is met.
+    req!((answered > 0), true);
+    req!(res!(gateway::require_answer(answered, "textscan-test", root)), answered);
     thread::sleep(Duration::from_secs(1));
     let mut out = TextScan::default();
     res!(textscan::scan_o3db(db.api(), SCAN_WAIT, &mut out));
@@ -222,5 +230,25 @@ fn test_the_gateway_key_is_read_whole_or_refused_00() -> Outcome<()> {
     req!(gateway::load_key(&short).is_err(), true);
     req!(gateway::load_key(&dir.join("absent")).is_err(), true);
     let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn test_a_store_that_gives_no_answer_is_refused_by_the_requirement_alone_00() -> Outcome<()> {
+    // `open_store` hands the store back whatever the count, as it did before the helper, so that
+    // `o3db_migrate` and `o3db_sweep` carry on. Only the tool that reports on the store asks for
+    // an answer. No store gives a zero count to open (with every bot dead the ping itself fails,
+    // and a configuration with no bot divides by zero at start), so the zero is driven here
+    // through the requirement.
+    let root = Path::new("/nowhere");
+    let e = match gateway::require_answer(0, "scan", root) {
+        Ok(n) => return Err(err!("A count of 0 should be refused, and gave {}", n; Test, Data)),
+        Err(e) => e,
+    };
+    if !e.plain().contains("no bot of the store") {
+        return Err(err!("The refusal should say that no bot answered: {}", e.plain(); Test, Data));
+    }
+    req!(res!(gateway::require_answer(28, "scan", root)), 28);
+    req!(res!(gateway::require_answer(1, "scan", root)), 1);
     Ok(())
 }
