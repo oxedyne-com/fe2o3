@@ -83,11 +83,13 @@ pub use self::{
 		RecordId,
 	},
 	resolve::{
+		Convergence,
 		LastVersionWins,
 		ReadView,
 		ResolveCtx,
 		Resolver,
 		StorageView,
 		Verdict,
+		check_convergence,
 	},
 };

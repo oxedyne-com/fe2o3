@@ -29,11 +29,13 @@ use oxedyne_fe2o3_o3db_sync::dist::{
 		RecordId,
 	},
 	resolve::{
+		Convergence,
 		LastVersionWins,
 		ReadView,
 		ResolveCtx,
 		Resolver,
 		Verdict,
+		check_convergence,
 	},
 	storage::{
 		MemoryStorage,
@@ -45,14 +47,20 @@ use oxedyne_fe2o3_o3db_sync::dist::{
 	},
 };
 
-use std::sync::{
-	Arc,
-	Mutex,
-	atomic::{
-		AtomicBool,
-		AtomicUsize,
-		Ordering,
+use std::{
+	sync::{
+		Arc,
+		Mutex,
+		atomic::{
+			AtomicBool,
+			AtomicU64,
+			AtomicUsize,
+			Ordering,
+		},
+		mpsc,
 	},
+	thread,
+	time::Duration,
 };
 
 
@@ -838,5 +846,327 @@ fn last_version_wins_lattice() -> Outcome<()> {
 			assert_eq!(&xy, std::cmp::max(x, y));
 		}
 	}
+	Ok(())
+}
+
+
+// ---------------------------------------------------------------------------
+// R2: atomicity, and the convergence helper.
+// ---------------------------------------------------------------------------
+
+/// A set of bytes, kept sorted and without repeats. A commutative merge.
+fn union(held: Option<&[u8]>, incoming: &[u8]) -> Vec<u8> {
+	let mut set = held.unwrap_or(&[]).to_vec();
+	set.extend_from_slice(incoming);
+	set.sort();
+	set.dedup();
+	set
+}
+
+/// The set union, optionally giving other threads the processor between the
+/// engine's read of the held value and its write of the merge.
+struct Union {
+	pause:	bool,
+}
+
+impl Resolver for Union {
+	fn resolve<V: ReadView>(
+		&self,
+		_ctx:		&ResolveCtx,
+		_view:		&V,
+		_table:		&str,
+		_id:		&RecordId,
+		held:		Option<&[u8]>,
+		incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		let merged = union(held, incoming);
+		if self.pause {
+			thread::yield_now();
+			thread::sleep(Duration::from_micros(100));
+		}
+		Ok(Verdict::Take(merged))
+	}
+}
+
+/// The first value to arrive stands. Not commutative: peers that were first
+/// given different values keep them.
+struct FirstWins;
+
+impl Resolver for FirstWins {
+	fn resolve<V: ReadView>(
+		&self,
+		_ctx:		&ResolveCtx,
+		_view:		&V,
+		_table:		&str,
+		_id:		&RecordId,
+		held:		Option<&[u8]>,
+		incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		match held {
+			Some(_)	=> Ok(Verdict::Keep),
+			None	=> Ok(Verdict::Take(incoming.to_vec())),
+		}
+	}
+}
+
+/// Takes a value no peer has held before, whatever it is offered, so no round
+/// ever stores nothing.
+struct NeverSettles(Arc<AtomicU64>);
+
+impl Resolver for NeverSettles {
+	fn resolve<V: ReadView>(
+		&self,
+		_ctx:		&ResolveCtx,
+		_view:		&V,
+		_table:		&str,
+		_id:		&RecordId,
+		_held:		Option<&[u8]>,
+		_incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		Ok(Verdict::Take(self.0.fetch_add(1, Ordering::SeqCst).to_be_bytes().to_vec()))
+	}
+}
+
+/// Two records may claim one token, a (token, time) pair of bytes, and the
+/// later claim loses it. The held and incoming claims are merged, then any
+/// claim an earlier claim on another record contradicts is dropped, the other
+/// record being confirmed by a point read.
+struct ClaimRule;
+
+const CLAIMANTS: [u8; 3] = [1, 2, 3];
+
+impl Resolver for ClaimRule {
+	fn resolve<V: ReadView>(
+		&self,
+		_ctx:		&ResolveCtx,
+		view:		&V,
+		table:		&str,
+		id:			&RecordId,
+		held:		Option<&[u8]>,
+		incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		// Claims are pairs, so merge them as pairs.
+		let mut claims: Vec<[u8; 2]> = Vec::new();
+		for bytes in [held.unwrap_or(&[]), incoming] {
+			for pair in bytes.chunks_exact(2) {
+				claims.push([pair[0], pair[1]]);
+			}
+		}
+		claims.sort();
+		claims.dedup();
+		let mut kept = Vec::new();
+		for claim in claims {
+			let mut lost = false;
+			for other in CLAIMANTS {
+				if rid(other) == *id {
+					continue;
+				}
+				if let Some(v) = res!(view.get(table, &rid(other))) {
+					for theirs in v.chunks_exact(2) {
+						// The earlier claim, by (time, record), keeps the token.
+						if theirs[0] == claim[0] && (theirs[1], rid(other)) < (claim[1], *id) {
+							lost = true;
+						}
+					}
+				}
+			}
+			if !lost {
+				kept.extend_from_slice(&claim);
+			}
+		}
+		Ok(Verdict::Take(kept))
+	}
+}
+
+fn converge(seeds: std::ops::Range<u64>, max_rounds: usize) -> Convergence {
+	Convergence { peers: 3, seeds, now_ms: 0, max_rounds }
+}
+
+/// The text of an error, with the seed it names.
+fn failure_text(r: Outcome<()>) -> String {
+	match r {
+		Ok(())	=> String::new(),
+		Err(e)	=> fmt!("{}", e),
+	}
+}
+
+#[test]
+fn resolve_and_persist_atomic() -> Outcome<()> {
+	// Four threads each make 50 puts on one key, alternating a local put and an
+	// inbound ReplicatePut, with a resolver that gives the processor away
+	// between reading the held value and returning the merge. Every element is
+	// distinct, so a lost update leaves the final set short of 200.
+	let e = res!(holder(1, 2, MemoryStorage::new(), Union { pause: true }));
+	let all = thread::scope(|sc| -> Outcome<()> {
+		let mut workers = Vec::new();
+		for t in 0..4u8 {
+			let e = &e;
+			workers.push(sc.spawn(move || -> Outcome<()> {
+				for k in 0..50u8 {
+					let record = rec("identity", rid(1), &[t * 50 + k]);
+					if k % 2 == 0 {
+						res!(e.put_at(record, 0));
+					} else {
+						res!(e.handle_envelope_at(replicate(2, 1, record), 0));
+					}
+				}
+				Ok(())
+			}));
+		}
+		for w in workers {
+			match w.join() {
+				Ok(r)	=> res!(r),
+				Err(_)	=> return Err(err!("A worker thread panicked."; Test, Thread)),
+			}
+		}
+		Ok(())
+	});
+	res!(all);
+	let want: Vec<u8> = (0..200u8).collect();
+	assert_eq!(res!(stored(&e, "identity", rid(1))), Some(want));
+	Ok(())
+}
+
+#[test]
+fn non_commutative_fails_convergence() -> Outcome<()> {
+	let records = vec![
+		rec("identity", rid(1), b"x"),
+		rec("identity", rid(1), b"y"),
+		rec("identity", rid(1), b"z"),
+		rec("identity", rid(2), b"p"),
+	];
+	let cfg = converge(0..32, 16);
+	// Last arrival wins: the peers pass values to each other and the final value
+	// follows the order of the exchanges, so it never settles on one answer.
+	let last = check_convergence(&cfg, &["identity"], &records, |_| TakeIncoming, |_, _, _| Ok(Vec::new()));
+	assert!(last.is_err(), "last-arrival-wins passed the convergence check");
+	// First arrival wins: the peers settle at once, on different values.
+	let first = failure_text(check_convergence(
+		&cfg, &["identity"], &records, |_| FirstWins, |_, _, _| Ok(Vec::new()),
+	));
+	assert!(first.contains("differs from peer 0"), "first-arrival-wins: {:?}", first);
+	assert!(first.contains("seed"), "no seed named: {:?}", first);
+	let id1: String = rid(1).as_bytes().iter().map(|b| fmt!("{:02x}", b)).collect();
+	assert!(first.contains(&id1), "the differing id was not named: {:?}", first);
+	Ok(())
+}
+
+#[test]
+fn commutative_passes_convergence() -> Outcome<()> {
+	let records = vec![
+		rec("identity", rid(1), &[1]),
+		rec("identity", rid(1), &[2]),
+		rec("identity", rid(1), &[3, 9]),
+		rec("identity", rid(2), &[4]),
+		rec("escrow", rid(1), &[5]),
+		rec("escrow", rid(1), &[6]),
+	];
+	let cfg = converge(0..32, 16);
+	let tables = ["identity", "escrow"];
+	let calls = AtomicUsize::new(0);
+	res!(check_convergence(
+		&cfg, &tables, &records, |_| Union { pause: false },
+		|_, _, _| {
+			calls.fetch_add(1, Ordering::SeqCst);
+			Ok(Vec::new())
+		},
+	));
+	// The helper ran: every seed stores at least the three keys on some peer.
+	assert!(calls.load(Ordering::SeqCst) >= 32 * 3, "after ran {} times", calls.load(Ordering::SeqCst));
+
+	let versioned = vec![
+		rec("identity", rid(1), &LastVersionWins::value(1, b"a")),
+		rec("identity", rid(1), &LastVersionWins::value(3, b"b")),
+		rec("identity", rid(1), &LastVersionWins::value(2, b"c")),
+		rec("identity", rid(2), &LastVersionWins::value(7, b"d")),
+		rec("escrow", rid(1), &LastVersionWins::value(4, b"e")),
+	];
+	res!(check_convergence(&cfg, &tables, &versioned, |_| LastVersionWins, |_, _, _| Ok(Vec::new())));
+	Ok(())
+}
+
+#[test]
+fn cross_key_needs_after_hook() -> Outcome<()> {
+	// Records 1 and 2 both claim the token 'o'; record 1's claim is earlier. Where
+	// record 2 arrives first, it keeps the claim, and nothing offers it to the
+	// resolver again when record 1 turns up.
+	let records = vec![
+		rec("identity", rid(1), &[b'o', 1]),
+		rec("identity", rid(2), &[b'o', 2]),
+		rec("identity", rid(3), &[b'q', 3]),
+	];
+	let cfg = converge(0..32, 16);
+	let without = failure_text(check_convergence(
+		&cfg, &["identity"], &records, |_| ClaimRule, |_, _, _| Ok(Vec::new()),
+	));
+	assert!(without.contains("differ"), "no divergence without the pass: {:?}", without);
+
+	// The caller's pass: whenever a peer stores a record, offer it the current
+	// bytes of the other claimants, so the rule runs again with the new record in view.
+	let pass = |_peer: usize, e: &DistOzone<MemoryStorage, ClaimRule>, persisted: &[(String, RecordId)]| {
+		let mut puts = Vec::new();
+		for (table, id) in persisted {
+			for other in CLAIMANTS {
+				if rid(other) != *id {
+					if let Some(r) = res!(e.storage().get(table, &rid(other))) {
+						puts.push(r);
+					}
+				}
+			}
+		}
+		Ok(puts)
+	};
+	res!(check_convergence(&cfg, &["identity"], &records, |_| ClaimRule, pass));
+	Ok(())
+}
+
+#[test]
+fn convergence_bounded() -> Outcome<()> {
+	// A resolver that always takes a new value never lets a round store nothing.
+	// The check must report that, not run for ever: it runs on its own thread, so
+	// that a hang fails this test rather than stopping it.
+	let (tx, rx) = mpsc::channel();
+	thread::spawn(move || {
+		let counter = Arc::new(AtomicU64::new(0));
+		let records = vec![
+			rec("identity", rid(1), b"x"),
+			rec("identity", rid(1), b"y"),
+		];
+		let cfg = converge(0..4, 6);
+		let r = check_convergence(
+			&cfg,
+			&["identity"],
+			&records,
+			|_| NeverSettles(counter.clone()),
+			|_, _, _| Ok(Vec::new()),
+		);
+		let first = failure_text(r);
+
+		// The same bound holds for a post-write pass that stores something new
+		// each time it runs.
+		let r = check_convergence(
+			&converge(0..1, 4),
+			&["identity"],
+			&records,
+			|_| NeverSettles(counter.clone()),
+			|_, _, _| Ok(vec![rec("identity", rid(9), b"again")]),
+		);
+		let _ = tx.send((first, failure_text(r)));
+	});
+	let (text, deep) = match rx.recv_timeout(Duration::from_secs(20)) {
+		Ok(texts)	=> texts,
+		Err(_)		=> return Err(err!("check_convergence did not return within 20 s."; Test, Timeout)),
+	};
+	assert!(text.contains("did not quiesce"), "{:?}", text);
+	assert!(text.contains("seed 0"), "{:?}", text);
+	assert!(deep.contains("did not quiesce") && deep.contains("post-write"), "{:?}", deep);
 	Ok(())
 }
