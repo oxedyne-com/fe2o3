@@ -1,7 +1,7 @@
 {
 	# Oxegen UI settings. One key per kind of thing; a change reaches every instance.
-	  Comments sit between ! marks, or between hash marks like these. See www/public/js/ui_schema.js for
-	  every legal key. #
+	# A comment sits between ! marks, or runs from a hash mark to the end of the line. See
+	# www/public/js/ui_schema.js for every legal key.
 
 	"copy": {                                   ! what the app says; the key is the string's job !
 		"identity.current_title":   "Current Identity",
@@ -19,7 +19,7 @@
 		"header":         { "mark_side": "right" },
 		"qr":             { "size": 296.4 },                ! px; the card's width less the buttons' margins !
 		"pulldown":       { "arrow": "shown", "text": "centred" },
-		"identity-card":  { "photo": "avatar" },            # avatar | initials #
+		"identity-card":  { "photo": "avatar" },            # avatar | initials
 	},
 
 	"kinds": {                                  ! the look of each type, where a type has one !

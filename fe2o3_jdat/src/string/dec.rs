@@ -140,6 +140,7 @@ pub struct Cursor {
     prev:   char,   // Previous character.
     line:   usize,  // Line position.
     x:      usize,  // Character position on line.
+    path:   Vec<String>, // Keys of the open maps and indices of the open lists, outermost first.
 }
 
 impl Default for Cursor {
@@ -150,6 +151,7 @@ impl Default for Cursor {
             prev:   char::default(),
             line:   1,
             x:      0,
+            path:   Vec::new(),
         }
     }
 }
@@ -163,8 +165,7 @@ impl fmt::Display for Cursor {
 impl Cursor {
     pub fn advance(
         &mut self,
-        c:                  char,
-        quote_protection:   bool,
+        c: char,
     ) {
         if self.abs > 0 {
             let p = self.curr;
@@ -174,15 +175,56 @@ impl Cursor {
             self.curr = c
         }
         self.abs += 1;
-        if c == '\n' || (quote_protection && c == '\\') {
+        if c == '\n' {
             self.line += 1;
             self.x = 0;
         } else {
-            if !c.is_control() {
+            if c == '\t' || !c.is_control() {
                 self.x += 1;
             }
         }
     }
+
+    // A frame opens, a list at its first index.
+    fn open(&mut self, list: bool) {
+        self.path.push(if list { fmt!("[0]") } else { String::new() });
+    }
+
+    fn close(&mut self) {
+        self.path.pop();
+    }
+
+    // Names the member the innermost frame is reading.
+    fn name(&mut self, name: String) {
+        if let Some(last) = self.path.last_mut() {
+            *last = name;
+        }
+    }
+
+    // The key in the file's own dotted form, `roles.qr.size` or `screens.main[2]`.
+    fn key(&self) -> String {
+        let mut s = String::new();
+        for seg in &self.path {
+            if seg.is_empty() {
+                continue;
+            }
+            if !s.is_empty() && !seg.starts_with('[') {
+                s.push('.');
+            }
+            s.push_str(seg);
+        }
+        s
+    }
+}
+
+/// Where and in which key a text was refused, for a caller that reports the place and keeps the
+/// text to itself.
+#[derive(Debug)]
+pub struct Located {
+    pub error:  Error<ErrTag>,
+    pub line:   usize,
+    pub col:    usize,
+    pub key:    String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -313,6 +355,7 @@ pub enum MolecularCapture {
 enum Descent {
     Kindicle,
     Molecule,
+    Root, // The one list the whole text is.
 }
 
 #[derive(Debug)]
@@ -515,6 +558,7 @@ impl MolecularCapture {
 pub struct Slurp {
     s:          String,
     is_string:  bool,
+    gap:        bool, // Whitespace has ended the value being gathered.
 }
 
 impl Slurp {
@@ -522,12 +566,14 @@ impl Slurp {
         Slurp {
             s:          String::new(),
             is_string:  false,
+            gap:        false,
         }
     }
 
     fn reset(&mut self) {
         self.s = String::new();
         self.is_string = false;
+        self.gap = false;
     }
 
     fn push(&mut self, c: char) {
@@ -551,6 +597,7 @@ impl Slurp {
     }
 
     fn take_string(&mut self) -> String {
+        self.gap = false;
         std::mem::replace(&mut self.s, String::new())
     }
 
@@ -949,16 +996,68 @@ impl Dat {
     )
         -> Outcome<Self>
     {
+        match Self::decode_string_located(s, cfg) {
+            Ok(dat)     => Ok(dat),
+            Err(spot)   => Err(err!(spot.error,
+                "Refused at line {}, column {}{}.", spot.line, spot.col,
+                if spot.key.is_empty() { String::new() } else { fmt!(", key {}", spot.key) };
+                String, Input, Decode, Invalid)),
+        }
+    }
+
+    /// Decodes as `decode_string_with_config` does, and on a refusal says where: the line and
+    /// column of the character being read and the key in the file's own dotted form. The error
+    /// itself is as the decoder made it.
+    pub fn decode_string_located<
+        S: Into<String>,
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        s: S,
+        cfg: &DecoderConfig<M1, M2>,
+    )
+        -> std::result::Result<Self, Located>
+    {
         // We want to take ownership of the String.
         let s = s.into();
-        res!(cfg.limits.check_len(s.len()));
+        let cursor = RefCell::new(Cursor::default());
+        let spot = |error: Error<ErrTag>, cursor: &RefCell<Cursor>| {
+            let c = cursor.borrow();
+            Located { error, line: c.line, col: c.x, key: c.key() }
+        };
+        if let Err(e) = cfg.limits.check_len(s.len()) {
+            return Err(spot(e, &cursor));
+        }
         let mut iter = s.chars().collect::<Vec<_>>().into_iter().enumerate();
-        Self::recursive_decode(
+        let dat = match Self::recursive_decode(
             &mut iter,
             cfg,
             DecoderState::default(),
-            &RefCell::new(Cursor::default()),
-        )
+            &cursor,
+        ) {
+            Ok(dat) => dat,
+            Err(e)  => return Err(spot(e, &cursor)),
+        };
+        // Nothing but whitespace and comments may follow the value.
+        let mut ends: Option<char> = None; // The mark that closes the comment being skipped.
+        for (_, c) in iter {
+            cursor.borrow_mut().advance(c);
+            match ends {
+                Some(end) => if c == end || c == '\n' {
+                    ends = None;
+                },
+                None => if cfg.comment_allowed && c == cfg.comment1_start_char {
+                    ends = Some(cfg.comment1_end_char);
+                } else if cfg.comment_allowed && c == cfg.comment2_start_char {
+                    ends = Some(cfg.comment2_end_char);
+                } else if !matches!(c, ' ' | '\t' | '\n' | '\r') {
+                    return Err(spot(err!(
+                        "Found text after the end of the value; only whitespace and comments \
+                        may follow it."; String, Input, Decode, Invalid), &cursor));
+                },
+            }
+        }
+        Ok(dat)
     }
 
     /// Decodes a value at one level of nesting, recursing at each `(k|`, `[` and `{`.
@@ -981,6 +1080,30 @@ impl Dat {
     /// <lbrac> ::= "[" | "{"
     /// <rbrac> ::= "]" | "}"
     pub fn recursive_decode<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        iter:       &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        cfg:        &DecoderConfig<M1, M2>,
+        state:      DecoderState,
+        cursor:     &RefCell<Cursor>,
+    )
+        -> Outcome<Self>
+    {
+        // The key path is left as it stands on a refusal, so that it names where the fault was.
+        let list = matches!(
+            MolecularCapture::from_kind(&state.kind_outer),
+            Some(MolecularCapture::ListMixed) |
+            Some(MolecularCapture::ListSame)  |
+            Some(MolecularCapture::Bytes));
+        cursor.borrow_mut().open(list);
+        let dat = res!(Self::decode_frame(iter, cfg, state, cursor));
+        cursor.borrow_mut().close();
+        Ok(dat)
+    }
+
+    #[inline(never)]
+    fn decode_frame<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
     >(
@@ -1025,6 +1148,7 @@ impl Dat {
                     ));
                     store.slurp = Slurp::new();
                     match descent {
+                        Descent::Root => return Ok(dat),
                         Descent::Kindicle if Self::kindicle_completes(&state) => return Ok(dat),
                         _ => store.val_opt = Some(dat),
                     }
@@ -1058,7 +1182,7 @@ impl Dat {
         -> Outcome<Step>
     {
         {
-            cursor.borrow_mut().advance(c, state.quote_protection != Quote::None);
+            cursor.borrow_mut().advance(c);
         }
         // String escape handling (RFC 8259 §7). Only active
         // inside a quoted string. Runs ahead of the outer
@@ -1068,6 +1192,12 @@ impl Dat {
             if res!(Self::handle_string_escape(c, state, &mut store.slurp)) {
                 return Ok(Step::Continue);
             }
+        }
+        // A comment is free text: its quotes, brackets and the other mark mean nothing in it, so it
+        // is read before any quote is.
+        if state.comment_capture.is_some() {
+            res!(Self::capture_comment(c, cfg, state, store, cursor));
+            return Ok(Step::Continue);
         }
         if cfg.quote_protection {
             match c {
@@ -1079,6 +1209,9 @@ impl Dat {
                             // the entire string is flagged as a STR kind.
                             store.slurp.flag_as_string();
                         } else {
+                            if store.slurp.gap {
+                                return Err(Self::no_separator_err(cursor));
+                            }
                             state.quote_protection = Quote::Double;
                         }
                         return Ok(Step::Continue);
@@ -1092,6 +1225,9 @@ impl Dat {
                             // the entire string is flagged as a STR kind
                             store.slurp.flag_as_string();
                         } else {
+                            if store.slurp.gap {
+                                return Err(Self::no_separator_err(cursor));
+                            }
                             state.quote_protection = Quote::Single;
                         }
                         return Ok(Step::Continue);
@@ -1099,10 +1235,6 @@ impl Dat {
                 }
                 _ => {}
             }
-        }
-        if state.comment_capture.is_some() {
-            res!(Self::capture_comment(c, cfg, state, store, cursor));
-            return Ok(Step::Continue);
         }
         if cfg.comment_allowed && state.quote_protection == Quote::None {
             // Start comment capturing?
@@ -1144,7 +1276,12 @@ impl Dat {
             // JDAT accepts it alongside space / LF / CR. This lets
             // JSON files using tab indentation round-trip through
             // `Dat::decode_string` unchanged.
-            ' ' | '\t' | '\n' | '\r' => (), // The slurp has taken it, if it wanted it.
+            ' ' | '\t' | '\n' | '\r' => {
+                // The slurp has taken it, if it wanted it. Otherwise it ends the value gathered.
+                if store.slurp.has_content() {
+                    store.slurp.gap = true;
+                }
+            },
             '(' => {
                 if state.kind_outer == Kind::Unknown ||
                     state.kind_outer.case() == KindCase::MoleculeUnitary ||
@@ -1186,6 +1323,7 @@ impl Dat {
                 }
             }
             '[' => {
+                let root_list = state.molecular_capture == None && state.kind_outer == Kind::Unknown;
                 if state.molecular_capture == None {
                     // A `[` that is the whole molecular payload of a dataless user kind --
                     // `(node|[...])` -- resolves in this frame to a bare list, the list analogue
@@ -1216,7 +1354,8 @@ impl Dat {
                 if !state.kind_outer.uses_list_brackets() {
                     new_state.kind_outer = Kind::List;
                 }
-                return Ok(Step::Descend(new_state, Descent::Molecule));
+                return Ok(Step::Descend(new_state,
+                    if root_list { Descent::Root } else { Descent::Molecule }));
             }
             ',' => {
                 res!(Self::comma_handler(cfg, state, cursor, store));
@@ -1273,10 +1412,30 @@ impl Dat {
                 ))));
             }
             _ => {
+                if store.slurp.gap {
+                    return Err(Self::no_separator_err(cursor));
+                }
                 store.slurp.push(c);
             }
         } // match
         Ok(Step::Continue)
+    }
+
+    // A key as the path names it, short.
+    fn key_name(key: &Dat) -> String {
+        let name = match key {
+            Dat::ABox(_, inner, _)  => return Self::key_name(inner),
+            Dat::Str(s)             => s.clone(),
+            other                   => fmt!("{}", other),
+        };
+        name.chars().take(64).collect()
+    }
+
+    #[inline(never)]
+    fn no_separator_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+        err!(
+            "A value follows another with no ',' or ':' between them ({})", cursor.borrow();
+        String, Input, Decode, Invalid, Missing)
     }
 
     #[inline(never)]
@@ -1286,8 +1445,16 @@ impl Dat {
     )
         -> Outcome<Self>
     {
-        if let Some(dat) = store.val_opt.take() {
-            return Ok(dat);
+        // A frame that was opened with a '(' or a bracket and is out of text has lost its closure,
+        // whatever it holds, and what it holds is not the answer.
+        if state.explicit_kind && state.molecular_capture == None {
+            return Err(err!("Expected closure of a kind annotation with ')'";
+                String, Input, Decode, Missing));
+        }
+        if state.molecular_capture == None {
+            if let Some(dat) = store.val_opt.take() {
+                return Ok(dat);
+            }
         }
         match state.molecular_capture {
             None => Self::process_atom(&mut store.slurp, &state.kind_outer),
@@ -1880,6 +2047,7 @@ impl Dat {
                     );
                 }
                 if store.key_opt == None {
+                    cursor.borrow_mut().name(Self::key_name(&dat));
                     store.key_opt = Some(dat);
                     store.val_opt = None;
                 }
@@ -1988,6 +2156,7 @@ impl Dat {
                 // We're expecting a byte to add to the list.
                 let n = try_extract_dat!(res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8);
                 store.byts.push(n);
+                cursor.borrow_mut().name(fmt!("[{}]", store.byts.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::ListSame) => {
@@ -1998,6 +2167,7 @@ impl Dat {
                     None => res!(Self::process_atom(&mut store.slurp, &kind_same)),
                 };
                 store.list.push(dat);
+                cursor.borrow_mut().name(fmt!("[{}]", store.list.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::ListMixed) => {
@@ -2021,6 +2191,7 @@ impl Dat {
                 } else {
                     store.list.push(dat);
                 }
+                cursor.borrow_mut().name(fmt!("[{}]", store.list.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::Map) => {
@@ -2062,6 +2233,7 @@ impl Dat {
                         store.key_opt = store.val_opt.take();
                     }
                 }
+                cursor.borrow_mut().name(String::new());
                 store.val_opt = None;
                 store.slurp = Slurp::new();
             }
