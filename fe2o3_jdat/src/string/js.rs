@@ -34,7 +34,8 @@ impl Dat {
     /// an entry with an empty key and value; both go. A value missing where one is needed, as in
     /// `[1,,2]`, is refused naming its key. With `js_safe`, a whole number past 2^53 - 1 in size
     /// and a float that is not finite are refused too, since `JSON.parse` would round them
-    /// silently.
+    /// silently. A refusal by the decoder names the line, column and key; one found here, after
+    /// the text is read, names the key alone.
     pub fn jdat_to_json(
         s:          &str,
         limits:     &DecodeLimits,
@@ -82,14 +83,24 @@ fn at(path: &[String]) -> String {
     s
 }
 
-fn key_text(key: &Dat, path: &[String]) -> Outcome<String> {
+// Where a refusal happened, in words: the key, or the top level when there is none.
+fn place(path: &[String]) -> String {
+    if path.is_empty() {
+        return fmt!("the top level");
+    }
+    fmt!("key '{}'", at(path))
+}
+
+// The name of a member; `last` is the name before it, to place a nameless one.
+fn key_text(key: &Dat, path: &[String], last: &str) -> Outcome<String> {
     match bare(key) {
         Dat::Str(s) => Ok(s.clone()),
         Dat::Empty  => Err(err!(
-            "A member has no name, in the entry after key '{}'.", at(path);
+            "A member has no name, in {}{}.", place(path),
+            if last.is_empty() { String::new() } else { fmt!(", after the member '{}'", last) };
             Invalid, Input, Decode, Missing)),
         other       => Err(err!(
-            "A name must be a string in JSON, found a {:?} after key '{}'.", other.kind(), at(path);
+            "A name must be a string in JSON, found a {:?} in {}.", other.kind(), place(path);
             Invalid, Input, Decode)),
     }
 }
@@ -103,22 +114,22 @@ fn write_number(dat: &Dat, js_safe: bool, path: &[String], out: &mut String) -> 
             (Some(n), _) => {
                 if js_safe && n.unsigned_abs() > JS_SAFE_INTEGER as u64 {
                     return Err(err!(
-                        "The whole number at key '{}' is past 2^53 - 1 in size, which a browser \
-                        cannot hold exactly.", at(path); Invalid, Input, Decode, Excessive));
+                        "The whole number at {} is past 2^53 - 1 in size, which a browser \
+                        cannot hold exactly.", place(path); Invalid, Input, Decode, Excessive));
                 }
                 out.push_str(&fmt!("{}", n));
             },
             (None, Some(n)) if !js_safe => out.push_str(&fmt!("{}", n)),
             _ => return Err(err!(
-                "The whole number at key '{}' is past 2^53 - 1 in size, which a browser cannot \
-                hold exactly.", at(path); Invalid, Input, Decode, Excessive)),
+                "The whole number at {} is past 2^53 - 1 in size, which a browser cannot \
+                hold exactly.", place(path); Invalid, Input, Decode, Excessive)),
         }
         return Ok(());
     }
     match dat.get_float64() {
         Some(Float64(f)) if f.is_finite() => out.push_str(&fmt!("{}", f)),
         _ => return Err(err!(
-            "The number at key '{}' is not a finite float64, which JSON cannot hold.", at(path);
+            "The number at {} is not a finite float64, which JSON cannot hold.", place(path);
             Invalid, Input, Decode, Excessive)),
     }
     Ok(())
@@ -134,17 +145,19 @@ fn write_members<'a, I: Iterator<Item = (&'a Dat, &'a Dat)>>(
 {
     out.push('{');
     let mut n = 0;
+    let mut last = String::new();
     for (k, v) in members {
         if is_note(k, v) {
             continue;
         }
-        let key = res!(key_text(k, path));
+        let key = res!(key_text(k, path, &last));
         if n > 0 {
             out.push(',');
         }
         out.push('"');
         out.push_str(&escape_json_string(&key));
         out.push_str("\":");
+        last = key.clone();
         path.push(key);
         if matches!(bare(v), Dat::Empty) {
             return Err(err!(
@@ -182,7 +195,7 @@ fn write_json(dat: &Dat, js_safe: bool, path: &mut Vec<String>, out: &mut String
                 }
                 if matches!(bare(item), Dat::Empty) {
                     return Err(err!(
-                        "A list item is missing after item {} at key '{}'.", n, at(path);
+                        "A list item is missing after item {} in {}.", n, place(path);
                         Invalid, Input, Decode, Missing));
                 }
                 if n > 0 {
@@ -198,7 +211,7 @@ fn write_json(dat: &Dat, js_safe: bool, path: &mut Vec<String>, out: &mut String
         Dat::OrdMap(m)          => res!(write_members(m.iter().map(|(k, v)| (k.dat(), v)), js_safe, path, out)),
         Dat::Map(m)             => res!(write_members(m.iter(), js_safe, path, out)),
         other => return Err(err!(
-            "A daticle of kind {:?} at key '{}' has no plain JSON form.", other.kind(), at(path);
+            "A daticle of kind {:?} at {} has no plain JSON form.", other.kind(), place(path);
             Invalid, Input, Unimplemented)),
     }
     Ok(())

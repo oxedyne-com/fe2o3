@@ -718,6 +718,18 @@ impl Kind {
 
     #[inline(never)]
     fn decode_number(self, ns: NumberString) -> Outcome<Dat> {
+        // A whole-number kind takes no fraction or exponent.  Only the digits before the point
+        // are parsed below, so without this `(u8|1.5)` read as 1 and `(u8|1e2)` as 1.
+        if matches!(self,
+            Kind::U8 | Kind::U16 | Kind::U32 | Kind::U64 | Kind::C64 | Kind::U128 |
+            Kind::I8 | Kind::I16 | Kind::I32 | Kind::I64 | Kind::I128)
+            && (ns.has_point() || ns.has_exp())
+        {
+            return Err(err!(
+                "A {:?} takes a whole number, and '{}' has a fraction or an exponent.",
+                self, ns.source();
+            String, Input, Decode, Invalid));
+        }
         match self {
             Kind::U8 => {
                 if ns.is_negative() {

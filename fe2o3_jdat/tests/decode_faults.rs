@@ -14,6 +14,7 @@ use oxedyne_fe2o3_jdat::{
         UsrKinds,
     },
 };
+use oxedyne_fe2o3_num::float::Float64;
 
 use std::collections::BTreeMap;
 
@@ -190,4 +191,17 @@ fn test_a_user_kind_payload_in_a_container_00() {
     ] {
         assert!(at(s).starts_with("refused"), "{} became {}", s, at(s));
     }
+}
+
+#[test]
+fn test_a_whole_number_kind_takes_no_fraction_00() {
+    // Only the digits before the point were parsed, so these read as 1 and 1.
+    refused("(u8|1.5)", &["whole number", "1.5"]);
+    refused("(i32|-2.5)", &["whole number"]);
+    refused("(u16|1e2)", &["whole number", "1e2"]);
+    refused("{\"n\": (u64|3.0)}", &["whole number", "key n"]);
+    // A float kind keeps its fraction, and hex digits are not an exponent.
+    assert_eq!(read("(f64|1.5)"), Dat::F64(Float64(1.5)));
+    assert_eq!(read("(u8|0xff)"), Dat::U8(255));
+    assert_eq!(read("(u16|0x1e5)"), Dat::U16(485));
 }
