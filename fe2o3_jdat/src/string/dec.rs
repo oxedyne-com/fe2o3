@@ -1370,7 +1370,7 @@ impl Dat {
         // A comment is free text: its quotes, brackets and the other mark mean nothing in it, so it
         // is read before any quote is.
         if state.comment_capture.is_some() {
-            res!(Self::capture_comment(c, cfg, state, store, cursor));
+            res!(Self::capture_comment(c, cfg, state, store));
             return Ok(Step::Continue);
         }
         if cfg.quote_protection {
@@ -1384,7 +1384,7 @@ impl Dat {
                             store.slurp.flag_as_string();
                         } else {
                             if Self::slot_full(store) {
-                                return Err(Self::no_separator_err(cursor));
+                                return Err(Self::no_separator_err());
                             }
                             state.quote_protection = Quote::Double;
                         }
@@ -1400,7 +1400,7 @@ impl Dat {
                             store.slurp.flag_as_string();
                         } else {
                             if Self::slot_full(store) {
-                                return Err(Self::no_separator_err(cursor));
+                                return Err(Self::no_separator_err());
                             }
                             state.quote_protection = Quote::Single;
                         }
@@ -1464,7 +1464,7 @@ impl Dat {
             },
             '(' => {
                 if Self::slot_taken(store) {
-                    return Err(Self::no_separator_err(cursor));
+                    return Err(Self::no_separator_err());
                 }
                 if state.kind_outer == Kind::Unknown ||
                     state.kind_outer.case() == KindCase::MoleculeUnitary ||
@@ -1476,7 +1476,7 @@ impl Dat {
                 } else {
                     // "(k1|(k2|v))"
                     //      ^ already expect k1 kind, invalid unless preceded by [ or {
-                    return Err(Self::open_paren_err(state, cursor));
+                    return Err(Self::open_paren_err(state));
                 }
             }
             '|' => {
@@ -1488,7 +1488,7 @@ impl Dat {
                     ));
                     if kind_inner.case() == KindCase::AtomLogic {
                         // An unused '|' separator is not valid, e.g. (true|), (EMPTY|)
-                        return Err(Self::superfluous_bar_err(&kind_inner, cursor));
+                        return Err(Self::superfluous_bar_err(&kind_inner));
                     }
                     state.kind_capture = false;
                     let mut new_state = state.recurse();
@@ -1497,23 +1497,23 @@ impl Dat {
                     return Ok(Step::Descend(new_state, Descent::Kindicle));
                 }
                 // Nothing else is parted by a bar, so a bar here joined values, `(u8|1|2)`.
-                return Err(Self::stray_bar_err(cursor));
+                return Err(Self::stray_bar_err());
             }
             ')' => {
                 // Deal with atoms (e.g. (FALSE)), which should only
                 // ever be processed within a recursion level.
-                match res!(Self::close_paren(cfg, state, store, cursor, comment_required)) {
+                match res!(Self::close_paren(cfg, state, store, comment_required)) {
                     Some(dat) => return Ok(Step::Done(dat)),
                     None => (), // The daticle may yet be one item of a molecule.
                 }
             }
             '[' => {
                 if Self::slot_taken(store) {
-                    return Err(Self::no_separator_err(cursor));
+                    return Err(Self::no_separator_err());
                 }
                 // A wrapper (box, some, user kind) takes the list as its payload, read a level
                 // down like any other; the wrapper wraps it at its own ')'.
-                res!(Self::opener_wraps(state, false, cursor));
+                res!(Self::opener_wraps(state, false));
                 let root_list = state.molecular_capture == None && state.kind_outer == Kind::Unknown;
                 if root_list {
                     state.molecular_capture = Some(MolecularCapture::ListMixed);
@@ -1535,14 +1535,13 @@ impl Dat {
                 return Ok(Step::Done(res!(Self::close_bracket(
                     state.extract(),
                     store.extract(),
-                    cursor,
                 ))));
             }
             '{' => {
                 if Self::slot_taken(store) {
-                    return Err(Self::no_separator_err(cursor));
+                    return Err(Self::no_separator_err());
                 }
-                let wraps = res!(Self::opener_wraps(state, true, cursor));
+                let wraps = res!(Self::opener_wraps(state, true));
                 if state.molecular_capture == None && !wraps {
                     state.molecular_capture = Some(MolecularCapture::Map);
                     // A note before the root map is not a note on its first key.
@@ -1580,12 +1579,11 @@ impl Dat {
                 return Ok(Step::Done(res!(Self::close_brace(
                     state,
                     store.extract(),
-                    cursor,
                 ))));
             }
             _ => {
                 if Self::slot_full(store) {
-                    return Err(Self::no_separator_err(cursor));
+                    return Err(Self::no_separator_err());
                 }
                 store.slurp.push(c);
             }
@@ -1612,7 +1610,7 @@ impl Dat {
     }
 
     // A ',' ends an item, so an empty slot before it is a missing item.
-    fn nothing_before_comma_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+    fn nothing_before_comma_err() -> Error<ErrTag> {
         err!(
             "A ',' follows nothing, where an item was due";
             String, Input, Decode, Invalid, Missing)
@@ -1622,7 +1620,6 @@ impl Dat {
     fn blank_key_err(
         blank:  bool,
         dat:    &Dat,
-        cursor: &RefCell<Cursor>,
     )
         -> Outcome<()>
     {
@@ -1650,7 +1647,7 @@ impl Dat {
     }
 
     #[inline(never)]
-    fn no_separator_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+    fn no_separator_err() -> Error<ErrTag> {
         err!(
             "A value follows another with no ',' or ':' between them";
         String, Input, Decode, Invalid, Missing)
@@ -1699,7 +1696,6 @@ impl Dat {
     #[inline(never)]
     fn open_paren_err(
         state:  &DecoderState,
-        cursor: &RefCell<Cursor>,
     )
         -> Error<ErrTag>
     {
@@ -1717,7 +1713,7 @@ impl Dat {
     }
 
     #[inline(never)]
-    fn stray_bar_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+    fn stray_bar_err() -> Error<ErrTag> {
         err!(
             "A '|' parts a kind from its value, and follows a '(' and a kind label only";
         String, Input, Decode, Invalid)
@@ -1726,7 +1722,6 @@ impl Dat {
     #[inline(never)]
     fn superfluous_bar_err(
         kind_inner: &Kind,
-        cursor:     &RefCell<Cursor>,
     )
         -> Error<ErrTag>
     {
@@ -1745,7 +1740,6 @@ impl Dat {
     fn opener_wraps(
         state:  &DecoderState,
         map:    bool,
-        cursor: &RefCell<Cursor>,
     )
         -> Outcome<bool>
     {
@@ -1779,7 +1773,6 @@ impl Dat {
         cfg:    &DecoderConfig<M1, M2>,
         state:  &mut DecoderState,
         store:  &mut DecoderStore,
-        cursor: &RefCell<Cursor>,
     )
         -> Outcome<()>
     {
@@ -1863,7 +1856,6 @@ impl Dat {
         cfg:                &DecoderConfig<M1, M2>,
         state:              &mut DecoderState,
         store:              &mut DecoderStore,
-        cursor:             &RefCell<Cursor>,
         comment_required:   &mut bool,
     )
         -> Outcome<Option<Self>>
@@ -1940,7 +1932,7 @@ impl Dat {
                     }
                 }
             }
-            return Ok(Some(res!(Self::implicit_tuple(store.list.extract(), cursor))));
+            return Ok(Some(res!(Self::implicit_tuple(store.list.extract()))));
         }
 
         match &kind {
@@ -2026,7 +2018,6 @@ impl Dat {
     #[inline(never)]
     fn implicit_tuple(
         mut list:   Vec<Dat>,
-        cursor:     &RefCell<Cursor>,
     )
         -> Outcome<Self>
     {
@@ -2089,7 +2080,6 @@ impl Dat {
     fn close_bracket(
         mut state:  DecoderState,
         mut store:  DecoderStore,
-        cursor:     &RefCell<Cursor>,
     )
         -> Outcome<Self>
     {
@@ -2302,7 +2292,6 @@ impl Dat {
     fn close_brace(
         state:      &DecoderState,
         mut store:  DecoderStore,
-        cursor:     &RefCell<Cursor>,
     )
         -> Outcome<Self>
     {
@@ -2321,7 +2310,7 @@ impl Dat {
                             store.comment.extract(),
                         );
                     }
-                    res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat, cursor));
+                    res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat));
                     res!(Self::map_insert(
                         state.kind_outer == Kind::OrdMap,
                         &mut store,
@@ -2389,7 +2378,7 @@ impl Dat {
             Some(MolecularCapture::ListSame) => {
                 // We're expecting a daticle to add to the list.
                 if Self::slot_empty(store) {
-                    return Err(Self::nothing_before_comma_err(cursor));
+                    return Err(Self::nothing_before_comma_err());
                 }
                 let kind_same = MolecularCapture::same_kind(&state.kind_outer);
                 let dat = match store.val_opt.take() {
@@ -2404,7 +2393,7 @@ impl Dat {
             Some(MolecularCapture::ListMixed) => {
                 // We're expecting a daticle to add to the list.
                 if Self::slot_empty(store) {
-                    return Err(Self::nothing_before_comma_err(cursor));
+                    return Err(Self::nothing_before_comma_err());
                 }
                 let dat = match store.val_opt.take() { // store.val_opt is now None.
                     Some(dat) => dat, 
@@ -2433,7 +2422,7 @@ impl Dat {
                 // refused here as it is at the closing brace.
                 if Self::slot_empty(store) {
                     return Err(match store.key_opt {
-                        None => Self::nothing_before_comma_err(cursor),
+                        None => Self::nothing_before_comma_err(),
                         Some(_) => err!(
                             "A ',' ends a member that has a key and no value"; String, Input, Decode, Invalid, Missing),
                     });
@@ -2460,7 +2449,7 @@ impl Dat {
                 }
                 match store.key_opt.take() {
                     Some(key) => { // store.key_opt is now None.
-                        res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat, cursor));
+                        res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat));
                         res!(Self::map_insert(
                             state.kind_outer == Kind::OrdMap,
                             &mut store,
