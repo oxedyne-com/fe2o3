@@ -397,3 +397,25 @@ fn test_a_stray_bar_or_colon_is_refused_00() {
         "{ \"a|b\": \"c:d|e\", \"f\" !n|: !: (u8|2)}");
     read("{(u8|1): 2, [3]: 4}");
 }
+
+#[test]
+fn test_an_empty_quoted_key_is_a_key_00() {
+    // A `""` key before a comma was replaced by a random u32 key, the one before the closing
+    // brace was kept, so `{"": 1}` and `{"": 1, "b": 2}` disagreed and the key was lost.
+    let one = |ks: &[&str]| {
+        let mut m = BTreeMap::new();
+        for (i, k) in ks.iter().enumerate() {
+            m.insert(Dat::Str(k.to_string()), Dat::U8(i as u8 + 1));
+        }
+        Dat::Map(m)
+    };
+    assert_eq!(read("{\"\": 1}"), one(&[""]));
+    assert_eq!(read("{\"\": 1, \"b\": 2}"), one(&["", "b"]));
+    assert_eq!(read("{\"b\": 1, \"\": 2}"), one(&["b", ""]));
+    assert_eq!(read("{'': 1, \"c\": 2}"), one(&["", "c"]));
+    // Two empty keys are a duplicate, as any other key is.
+    refused("{\"\": 1, \"\": 2}", &["already exists"]);
+    // The encoder's own text reads back.
+    let d = one(&["", "b"]);
+    assert_eq!(read(&d.jdat().unwrap_or_default()), d);
+}

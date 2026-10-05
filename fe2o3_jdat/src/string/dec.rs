@@ -10,7 +10,6 @@ use crate::{
     note::NoteConfig,
     int::{
         DatInt,
-        DatIntKind,
     },
     kind::{
         KindCase,
@@ -70,7 +69,6 @@ pub struct DecoderConfig<
     pub comment1_end_char:      char,
     pub comment2_start_char:    char,
     pub comment2_end_char:      char,
-    pub default_key:            DatIntKind,
     pub trailing_comma_allowed: bool,
     pub use_ordmaps:            bool,
     pub ukinds_opt:             Option<UsrKinds<M1, M2>>,
@@ -94,7 +92,6 @@ impl<
             comment1_end_char:      '!',
             comment2_start_char:    '#',
             comment2_end_char:      '#',
-            default_key:            DatIntKind::U32,
             trailing_comma_allowed: true,
             use_ordmaps:            false,
             ukinds_opt:             None,
@@ -1418,7 +1415,7 @@ impl Dat {
                     if root_list { Descent::Root } else { Descent::Molecule }));
             }
             ',' => {
-                res!(Self::comma_handler(cfg, state, cursor, store));
+                res!(Self::comma_handler(state, cursor, store));
             }
             ']' => {
                 // A terminal branch, so the state and the store are given away.
@@ -2232,11 +2229,7 @@ impl Dat {
     }
 
     #[inline(never)]
-    fn comma_handler<
-        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
-        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
-    >(
-        cfg:        &DecoderConfig<M1, M2>,
+    fn comma_handler(
         state:      &mut DecoderState,
         cursor:     &RefCell<Cursor>,
         mut store:  &mut DecoderStore,
@@ -2315,11 +2308,6 @@ impl Dat {
                 }
                 match store.key_opt.take() {
                     Some(key) => { // store.key_opt is now None.
-                        let key = match key {
-                            Dat::Str(s) if s.len() == 0 =>
-                                res!(cfg.default_key.rand().to_dat()),
-                            _ => key,
-                        };
                         res!(Self::map_insert(
                             state.kind_outer == Kind::OrdMap,
                             &mut store,
