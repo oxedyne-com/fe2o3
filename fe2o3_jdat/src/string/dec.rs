@@ -302,6 +302,7 @@ impl DecoderState {
 pub struct DecoderStore {
     pub val_opt:    Option<Dat>,
     pub key_opt:    Option<Dat>,
+    pub key_blank:  bool, // The ':' that set the key had nothing before it.
     pub list:       Vec<Dat>,
     pub comment:    String,
     pub note_config:    NoteConfig,
@@ -324,6 +325,7 @@ impl DecoderStore {
         Self {
             val_opt:    None,
             key_opt:    None,
+            key_blank:  false,
             list:       Vec::new(),
             comment:    String::new(),
             note_config:    NoteConfig::default(),
@@ -1492,6 +1494,39 @@ impl Dat {
         store.val_opt.is_some() || store.slurp.has_content()
     }
 
+    // Does the slot hold nothing at all, not a value, a word, a string nor a note?
+    fn slot_empty(store: &DecoderStore) -> bool {
+        store.val_opt.is_none() && !store.slurp.has_content() && store.comment.len() == 0
+    }
+
+    // A ',' ends an item, so an empty slot before it is a missing item.
+    fn nothing_before_comma_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+        err!(
+            "A ',' follows nothing, where an item was due ({})", cursor.borrow();
+            String, Input, Decode, Invalid, Missing)
+    }
+
+    // A key that a ':' set from an empty slot is allowed only to key a note, `:! a note !`.
+    fn blank_key_err(
+        blank:  bool,
+        dat:    &Dat,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Outcome<()>
+    {
+        if blank {
+            if let Dat::ABox(_, inner, _) = dat {
+                if **inner == Dat::Empty {
+                    return Ok(());
+                }
+            }
+            return Err(err!(
+                "A ':' has no key before it, and what follows it is not a note ({})",
+                cursor.borrow(); String, Input, Decode, Invalid, Missing));
+        }
+        Ok(())
+    }
+
     // A key as the path names it, short.
     fn key_name(key: &Dat) -> String {
         let name = match key {
@@ -2125,6 +2160,7 @@ impl Dat {
                         "A ':' follows a key that is already set, by an earlier ':' or by a ',' \
                         after no value ({})", cursor.borrow(); String, Input, Decode, Invalid));
                 }
+                store.key_blank = Self::slot_empty(store);
                 // We're expecting to have a daticle to add to the store.map.
                 let mut dat = match store.val_opt.take() {
                     Some(dat) => dat,
@@ -2178,6 +2214,7 @@ impl Dat {
                             store.comment.extract(),
                         );
                     }
+                    res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat, cursor));
                     res!(Self::map_insert(
                         state.kind_outer == Kind::OrdMap,
                         &mut store,
@@ -2251,6 +2288,9 @@ impl Dat {
             }
             Some(MolecularCapture::ListSame) => {
                 // We're expecting a daticle to add to the list.
+                if Self::slot_empty(store) {
+                    return Err(Self::nothing_before_comma_err(cursor));
+                }
                 let kind_same = MolecularCapture::same_kind(&state.kind_outer);
                 let dat = match store.val_opt.take() {
                     Some(dat) => dat, // store.dt_opt is now None.
@@ -2262,6 +2302,9 @@ impl Dat {
             }
             Some(MolecularCapture::ListMixed) => {
                 // We're expecting a daticle to add to the list.
+                if Self::slot_empty(store) {
+                    return Err(Self::nothing_before_comma_err(cursor));
+                }
                 let dat = match store.val_opt.take() { // store.val_opt is now None.
                     Some(dat) => dat, 
                     None => {
@@ -2285,7 +2328,16 @@ impl Dat {
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::Map) => {
-                // We're expecting a daticle to add to the map.
+                // We're expecting a daticle to add to the map.  A key that has no value is
+                // refused here as it is at the closing brace.
+                if Self::slot_empty(store) {
+                    return Err(match store.key_opt {
+                        None => Self::nothing_before_comma_err(cursor),
+                        Some(_) => err!(
+                            "A ',' ends a member that has a key and no value ({})",
+                            cursor.borrow(); String, Input, Decode, Invalid, Missing),
+                    });
+                }
                 let mut dat = match store.val_opt.take() {
                     Some(dat) => dat, // store.val_opt is now None.
                     None => {
@@ -2308,6 +2360,7 @@ impl Dat {
                 }
                 match store.key_opt.take() {
                     Some(key) => { // store.key_opt is now None.
+                        res!(Self::blank_key_err(std::mem::take(&mut store.key_blank), &dat, cursor));
                         res!(Self::map_insert(
                             state.kind_outer == Kind::OrdMap,
                             &mut store,

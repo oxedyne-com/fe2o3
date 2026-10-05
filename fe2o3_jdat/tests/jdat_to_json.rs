@@ -157,9 +157,9 @@ fn test_trailing_commas_00() -> Outcome<()> {
     assert_eq!(res!(to_json(r#"{"a": [1, 2,], "b": {"c": 3,},}"#)), r#"{"a":[1,2],"b":{"c":3}}"#);
     // A comma with nothing before it is not a trailing one.
     refused("{,}", &["line 1"]);
-    refused("[,]", &["missing", "top level"]);
-    refused("{\"a\": 1,, \"b\": 2}", &["':'", "line 1, column 14"]);
-    refused("[1,,2]", &["missing", "after item 1"]);
+    refused("[,]", &["nothing", "line 1, column 2"]);
+    refused("{\"a\": 1,, \"b\": 2}", &["nothing", "line 1, column 9"]);
+    refused("[1,,2]", &["nothing", "line 1, column 4"]);
     Ok(())
 }
 

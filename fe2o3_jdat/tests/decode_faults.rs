@@ -387,7 +387,6 @@ fn test_a_stray_bar_or_colon_is_refused_00() {
     }
     for s in [
         "{\"a\": 1:2}", "{\"a\"::1}", "{\"a\": 1, \"b\": : 2}", "{\"a\": \"b\": 1}",
-        "{\"a\": 1,, \"b\": 2}",
     ] {
         refused(s, &["':'"]);
     }
@@ -418,4 +417,49 @@ fn test_an_empty_quoted_key_is_a_key_00() {
     // The encoder's own text reads back.
     let d = one(&["", "b"]);
     assert_eq!(read(&d.jdat().unwrap_or_default()), d);
+}
+
+#[test]
+fn test_a_comma_with_nothing_before_it_is_refused_00() {
+    // `[1,,2]` read as [1, (empty), 2] and `{"a": 1,, "b": 2}` was refused only at the colon
+    // after it; a ',' that ends no item is a missing item, in a list as in a map.
+    for s in [
+        "[,]", "[,1]", "[1,,2]", "[1, ,2]", "[1,2,,]", "[ , ]", "(list|[,])", "[[,]]",
+        "{,}", "{,\"a\": 1}", "{\"a\": 1,, \"b\": 2}", "{\"a\": 1, , \"b\": 2}", "{\"a\": {,}}",
+        "{\"a\": [1,,2]}", "(box|[1,,2])", "(t2|[1,,2])",
+    ] {
+        refused(s, &["','", "nothing"]);
+    }
+    // A member that has a key and no value is the same fault as one cut off by the brace.
+    for s in ["{\"a\":,}", "{\"a\": 1, \"b\":, \"c\": 2}", "{\"a\": ,}", "{:,}"] {
+        refused(s, &["no value"]);
+    }
+    // An item, a string, an explicit empty or a note before the comma is something.
+    assert_eq!(read("[1,]"), Dat::List(vec![Dat::U8(1)]));
+    assert_eq!(read("[\"\", 1]"), Dat::List(vec![Dat::Str(fmt!("")), Dat::U8(1)]));
+    assert_eq!(read("[(empty), 1]"), Dat::List(vec![Dat::Empty, Dat::U8(1)]));
+    assert_eq!(read("{\"a\": 1,}"), one_key("a", Dat::U8(1)));
+    assert_eq!(read("{\"a\": (empty), \"b\": \"\"}").to_string(), "{ \"a\": (empty), \"b\": \"\"}");
+    read("[ ! a note ! , 1]");
+    read("{\"a\": ! a note !, \"b\": 1}");
+}
+
+fn one_key(k: &str, v: Dat) -> Dat {
+    map_of(k, v)
+}
+
+#[test]
+fn test_an_empty_key_is_refused_unless_it_keys_a_note_00() {
+    // `{:1}` read as an (empty) key; the format keys a note to the empty dat, `{:! note !,}`.
+    for s in ["{:1}", "{\"a\": 1, :2}", "{ : \"x\"}", "{: ! n ! 5}", "{:[1]}", "{:{}}"] {
+        refused(s, &["':'", "key"]);
+    }
+    refused("{:}", &["key"]);
+    read("{:! a note !}");
+    read("{\"a\": 1, :! a note !, \"b\": 2}");
+    read("{1:2, :! a singleton comment !, ! a self-keyed comment ! 3:4}");
+    // An explicit (empty) is a key, as the encoder writes it.
+    let mut m = BTreeMap::new();
+    m.insert(Dat::Empty, Dat::U8(1));
+    assert_eq!(read("{(empty): 1}"), Dat::Map(m));
 }
