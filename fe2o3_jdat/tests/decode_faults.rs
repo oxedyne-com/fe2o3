@@ -239,3 +239,47 @@ fn test_a_wrapper_round_a_dataless_value_reads_its_own_paren_00() {
     refused("{\"k\": (box|(none)}", &[]);
     refused("[(some|(empty))), 3]", &[]);
 }
+
+#[test]
+fn test_a_finished_value_takes_no_other_before_a_separator_00() {
+    // A value of any kind, once finished, refuses the next until a ',' or a ':'. Each of these
+    // read without a fault: the first value was dropped, or the second joined the wrong key.
+    for s in [
+        "{\n  \"server\": {\"port\": 80}\n  \"db\": {\"path\": \"x.db\"}\n}\n",
+        "{\"roles\": {\"qr\": {\"size\": 29}\n \"logo\": {\"size\": 4}}}",
+        "{\"list\": [1, 2]\n \"name\": \"x\"}",
+        "{\n  \"a\": (u8|1)\n  \"b\": 2\n}",
+        "[{\"a\":1} {\"b\":2}]",
+        "[1 (u8|2)]",
+        "[(u8|1) (u8|2)]",
+        "[[1] [2]]",
+        "[[1] \"x\"]",
+        "[[1] x]",
+        "[{} {}]",
+        "[{} [1]]",
+        "{\"a\": [1] 2}",
+        "{\"a\": 1 [2]}",
+        "{\"a\": 1 {\"b\": 2}}",
+        "{\"a\": \"x\" (u8|1)}",
+        "{\"a\": 'x' [1]}",
+        "{\"a\": (box|(true)) (false)}",
+        "(box|(true) x)",
+        "(box|(true) \"x\")",
+        "x{\"a\":1}",
+        "x[1]",
+        "[x(u8|1)]",
+        "[1(u8|2)]",
+        "[\"a\"[1]]",
+        "(u 8|1)",
+    ] {
+        refused(s, &["no ',' or ':'"]);
+    }
+    refused("{\n  \"server\": {\"port\": 80}\n  \"db\": 1\n}", &["line 3"]);
+    // With the commas, and with a note between, they read. A quote glued to a word is one string.
+    assert_eq!(read("{\"server\": {\"port\": 80},\n \"db\": {\"path\": \"x.db\"}}").to_string(),
+        "{ \"db\": { \"path\": \"x.db\"}, \"server\": { \"port\": (u8|80)}}");
+    assert_eq!(read("[{\"a\":1}, {\"b\":2}]").to_string(), "[ { \"a\": (u8|1)}, { \"b\": (u8|2)}]");
+    assert_eq!(read("[ [1] ! n ! , [2] ]").to_string(), "[ [ (u8|1)] !n !, [ (u8|2)]]");
+    assert_eq!(read("[he\"(]\"o, (u8|1)]"), Dat::List(vec![Dat::Str(fmt!("he(]o")), Dat::U8(1)]));
+    assert_eq!(read("(u8 |1)"), Dat::U8(1));
+}

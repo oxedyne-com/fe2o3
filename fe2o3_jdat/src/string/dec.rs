@@ -630,6 +630,12 @@ impl Slurp {
                 '.'         |
                 '_'         =>
                 {
+                    if self.gap {
+                        return Err(err!(
+                            "Found '{}' at position {} after a gap in a daticle kind; \
+                            no ',' or ':' may be missed.", c, i + 1;
+                        String, Input, Decode, Invalid, Missing));
+                    }
                     self.push(c);
                     return Ok(true);
                 }
@@ -1273,7 +1279,7 @@ impl Dat {
                             // the entire string is flagged as a STR kind.
                             store.slurp.flag_as_string();
                         } else {
-                            if store.slurp.gap {
+                            if Self::slot_full(store) {
                                 return Err(Self::no_separator_err(cursor));
                             }
                             state.quote_protection = Quote::Double;
@@ -1289,7 +1295,7 @@ impl Dat {
                             // the entire string is flagged as a STR kind
                             store.slurp.flag_as_string();
                         } else {
-                            if store.slurp.gap {
+                            if Self::slot_full(store) {
                                 return Err(Self::no_separator_err(cursor));
                             }
                             state.quote_protection = Quote::Single;
@@ -1347,6 +1353,9 @@ impl Dat {
                 }
             },
             '(' => {
+                if Self::slot_taken(store) {
+                    return Err(Self::no_separator_err(cursor));
+                }
                 if state.kind_outer == Kind::Unknown ||
                     state.kind_outer.case() == KindCase::MoleculeUnitary ||
                     state.molecular_capture != None
@@ -1387,6 +1396,9 @@ impl Dat {
                 }
             }
             '[' => {
+                if Self::slot_taken(store) {
+                    return Err(Self::no_separator_err(cursor));
+                }
                 let root_list = state.molecular_capture == None && state.kind_outer == Kind::Unknown;
                 if state.molecular_capture == None {
                     // A `[` that is the whole molecular payload of a dataless user kind --
@@ -1433,6 +1445,9 @@ impl Dat {
                 ))));
             }
             '{' => {
+                if Self::slot_taken(store) {
+                    return Err(Self::no_separator_err(cursor));
+                }
                 if state.molecular_capture == None {
                     state.molecular_capture = Some(MolecularCapture::Map);
                     // Also honour cfg.use_ordmaps at the top
@@ -1476,13 +1491,26 @@ impl Dat {
                 ))));
             }
             _ => {
-                if store.slurp.gap {
+                if Self::slot_full(store) {
                     return Err(Self::no_separator_err(cursor));
                 }
                 store.slurp.push(c);
             }
         } // match
         Ok(Step::Continue)
+    }
+
+    // Does the slot hold a finished value, a nested one or a word or string that whitespace has
+    // ended, so that another may not start before a ',' or ':'?  A quote or a word glued to what
+    // is gathered, `he"(]"o`, is one string and not another value.
+    fn slot_full(store: &DecoderStore) -> bool {
+        store.val_opt.is_some() || store.slurp.gap
+    }
+
+    // As slot_full, and a molecule or a kindicle may not be glued to a word or a string either,
+    // since the word would be dropped.
+    fn slot_taken(store: &DecoderStore) -> bool {
+        store.val_opt.is_some() || store.slurp.has_content()
     }
 
     // A key as the path names it, short.
