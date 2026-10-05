@@ -1,0 +1,269 @@
+//! The store text scan (`textscan`), on a framed log built in memory and on synthetic, ENCRYPTED
+//! Ozone stores, one with planted bad text and one clean.
+//!
+//! - **The framed scan** counts a clean record, a value glued to another, a comma-less comment, a
+//!   fraction in a whole-number kind, a record that is not UTF-8 and a truncated tail, each in its
+//!   class, and the report holds the place and a digest but never a word of what was planted.
+//! - **The Ozone scan** walks the value tree (a list, a map, a box, a byte string) and finds the
+//!   planted text where it lies; a store without any reports no refusal.
+//!
+//! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
+//! Anthropic Claude
+
+use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
+use oxedyne_fe2o3_hash::{
+    csum::ChecksumScheme,
+    hash::HashScheme,
+};
+use oxedyne_fe2o3_jdat::prelude::*;
+use oxedyne_fe2o3_o3db_sync::{
+    base::{
+        cfg::OzoneConfig,
+        constant,
+    },
+    comm::response::Wait,
+    data::core::RestSchemesInput,
+    test::setup,
+    textscan,
+};
+
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{
+        Path,
+        PathBuf,
+    },
+    thread,
+    time::Duration,
+};
+
+
+type Enc = EncryptionScheme;
+type Kh  = HashScheme;
+type Cs  = ChecksumScheme;
+
+const SCAN_WAIT: Wait = Wait {
+    max_wait:       Duration::from_secs(120),
+    check_interval: constant::CHECK_INTERVAL,
+};
+
+// Words planted in the bad text, which no report may ever repeat.
+const SECRET: &str = "s3cret";
+
+fn frame(text: &[u8]) -> Vec<u8> {
+    let mut f = (text.len() as u32).to_be_bytes().to_vec();
+    f.extend_from_slice(text);
+    f
+}
+
+#[test]
+fn test_a_framed_scan_counts_by_class_and_prints_no_text_00() -> Outcome<()> {
+    let glued   = fmt!("{{\"seq\": 3, \"{}\": \"x\" \"y\": 1}}", SECRET);
+    let note    = "{\"seq\": 4, \"a\": 1 # note\n \"b\": 2}";
+    let frac    = "{\"seq\": 5, \"n\": (u8|2.5)}";
+    let mut file = Vec::new();
+    let mut offs = Vec::new();
+    for rec in [
+        frame(b"{\"seq\": 1, \"k\": \"v\"}"),
+        frame(b"{\"seq\": 2, \"k\": [1, 2]}"),
+        frame(glued.as_bytes()),
+        frame(note.as_bytes()),
+        frame(frac.as_bytes()),
+        frame(&[0xff, 0xfe, 0x41]),
+    ] {
+        offs.push(file.len() as u64);
+        file.extend_from_slice(&rec);
+    }
+    // A length that promises more than the file holds.
+    offs.push(file.len() as u64);
+    file.extend_from_slice(&100u32.to_be_bytes());
+    file.extend_from_slice(b"abc");
+
+    let mut out = textscan::TextScan::default();
+    res!(textscan::scan_framed("things.log", &file, &mut out));
+    let got = |class: &str| out.classes.get(class).copied().unwrap_or(0);
+    req!(out.records, 6);
+    req!(out.texts, 5);
+    req!(out.refused.len(), 4);
+    req!(out.truncated, vec![("things.log".to_string(), offs[6])]);
+    req!(got("no separator"), 1);
+    req!(got("no separator after a comment"), 1);
+    req!(got("whole-number kind with a fraction"), 1);
+    req!(got(textscan::NOT_UTF8), 1);
+    // The first refusal is the third record, at its own offset, with its own digest.
+    let first = &out.refused[0];
+    req!((first.rec, first.at, first.line), (3, offs[2], 1));
+    req!(first.hash.len(), 16);
+    req!(first.class, "no separator");
+    req!(out.is_clean(), false);
+    let report = out.report();
+    for word in [SECRET, "seq", "note", "2.5"] {
+        if report.contains(word) {
+            return Err(err!("The report repeats {:?}: {}", word, report; Test, Data));
+        }
+    }
+    for line in ["REFUSED store=things.log rec=3", "TRUNCATED store=things.log at=",
+        "class no separator after a comment: 1", "class whole-number kind with a fraction: 1"]
+    {
+        if !report.contains(line) {
+            return Err(err!("The report lacks {:?}: {}", line, report; Test, Data));
+        }
+    }
+
+    // A clean file reports nothing, and says so.
+    let mut clean = textscan::TextScan::default();
+    res!(textscan::scan_framed("ok.log", &file[..offs[2] as usize], &mut clean));
+    req!((clean.records, clean.texts, clean.refused.len()), (2, 2, 0));
+    req!(clean.is_clean(), true);
+    Ok(())
+}
+
+#[test]
+fn test_a_directory_scan_reads_logs_and_tables_only_00() -> Outcome<()> {
+    let dir = res!(fresh_root("./test_db_textscan_dir"));
+    res!(fs::write(dir.join("b.log"), frame(b"{\"a\": 1 \"b\": 2}")));
+    res!(fs::write(dir.join("a.tbl"), frame(b"{\"a\": 1}")));
+    res!(fs::write(dir.join("notes.txt"), b"{\"a\": 1 \"b\": 2}"));
+    let mut out = textscan::TextScan::default();
+    res!(textscan::scan_dir(&dir, &mut out));
+    req!((out.files, out.records, out.refused.len()), (2, 2, 1));
+    req!(out.refused[0].store.as_str(), "b.log");
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn test_an_ozone_store_scan_finds_planted_text_00() -> Outcome<()> {
+    log_set_level!("warn");
+    let outcome = run_stores();
+    log_finish_wait!();
+    outcome
+}
+
+fn run_stores() -> Outcome<()> {
+    let user = setup::Uid::default();
+
+    // The planted store: clean text, text glued to a text, a comma-less comment in a byte string
+    // inside a list inside a map, a fraction in a box, a plain string and a number; the map's own key is a string that is not text.
+    let planted_root = res!(fresh_root("./test_db_textscan_planted"));
+    let mut inner = BTreeMap::new();
+    inner.insert(Dat::Str(fmt!("k")), Dat::BU8(b"[1 # a note\n 2]".to_vec()));
+    let rows = vec![
+        ("a:1", Dat::Str(fmt!("{{\"ok\": 1}}"))),
+        ("a:2", Dat::Str(fmt!("{{\"k\": 1 \"{}\": 2}}", SECRET))),
+        ("a:3", Dat::List(vec![Dat::U8(1), Dat::Map(inner)])),
+        ("a:4", Dat::Str(fmt!("hello"))),
+        ("a:5", Dat::U64(7)),
+        ("a:6", Dat::Box(Box::new(Dat::Str(fmt!("(u8|1.5)"))))),
+    ];
+    res!(write_store(&planted_root, &rows, user));
+    let planted = res!(scan_store(&planted_root));
+    let got = |class: &str| planted.classes.get(class).copied().unwrap_or(0);
+    req!(planted.records, 6);
+    req!(planted.texts, 4);
+    req!(planted.skipped, 2);
+    req!(planted.refused.len(), 3);
+    req!(got("no separator"), 1);
+    req!(got("no separator after a comment"), 1);
+    req!(got("whole-number kind with a fraction"), 1);
+    req!(planted.is_clean(), false);
+    for r in &planted.refused {
+        req!((r.store.as_str(), r.at, r.hash.len()), ("o3db", 0, 16));
+    }
+    let report = planted.report();
+    for word in [SECRET, "hello", "a:2", "ok", "a note"] {
+        if report.contains(word) {
+            return Err(err!("The report repeats {:?}: {}", word, report; Test, Data));
+        }
+    }
+    let _ = fs::remove_dir_all(&planted_root);
+
+    // The clean store reports no refusal.
+    let clean_root = res!(fresh_root("./test_db_textscan_clean"));
+    let rows = vec![
+        ("a:1", Dat::Str(fmt!("{{\"ok\": 1}}"))),
+        ("a:2", Dat::List(vec![Dat::Str(fmt!("[1, 2]"))])),
+        ("a:3", Dat::U64(7)),
+    ];
+    res!(write_store(&clean_root, &rows, user));
+    let clean = res!(scan_store(&clean_root));
+    req!((clean.records, clean.texts, clean.refused.len()), (3, 2, 0));
+    req!(clean.is_clean(), true);
+    let _ = fs::remove_dir_all(&clean_root);
+    Ok(())
+}
+
+// A 32-byte at-rest key, fixed so the test is deterministic; never a real one.
+fn test_key() -> [u8; 32] { [0x5au8; 32] }
+
+fn schemes_input() -> Outcome<RestSchemesInput<Enc, Kh, Kh, Cs>> {
+    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&test_key()[..]));
+    let crc32 = ChecksumScheme::new_crc32();
+    Ok(RestSchemesInput::new(
+        Some(aes_gcm),
+        None::<HashScheme>,
+        None::<HashScheme>,
+        Some(crc32),
+    ))
+}
+
+fn fresh_root(name: &str) -> Outcome<PathBuf> {
+    let _ = fs::remove_dir_all(name);
+    res!(fs::create_dir_all(name));
+    Ok(res!(Path::new(name).canonicalize()))
+}
+
+fn base_cfg() -> Outcome<OzoneConfig> {
+    let mut cfg = res!(setup::default_cfg());
+    cfg.num_zones               = 3;
+    cfg.num_cbots_per_zone      = 1;
+    cfg.num_fbots_per_zone      = 1;
+    cfg.num_wbots_per_zone      = 1;
+    cfg.num_igbots_per_zone     = 1;
+    cfg.data_file_max_bytes     = 4_000;
+    cfg.rest_chunk_threshold    = 500;
+    cfg.rest_chunk_bytes        = 128;
+    cfg.cache_size_limit_bytes  = 40_000_000;
+    cfg.zone_overrides          = BTreeMap::new();
+    Ok(cfg)
+}
+
+fn write_store(
+    root:   &Path,
+    rows:   &[(&str, Dat)],
+    user:   setup::Uid,
+)
+    -> Outcome<()>
+{
+    let db = res!(setup::start_db(
+        root.to_path_buf(),
+        Some(res!(base_cfg())),
+        res!(schemes_input()),
+        None,
+        false,
+        true,
+    ));
+    thread::sleep(Duration::from_secs(1));
+    for (k, v) in rows {
+        let resp = res!(db.api().store(Dat::Str(k.to_string()), v.clone(), user));
+        res!(resp.recv_store_ack());
+    }
+    thread::sleep(Duration::from_secs(1));
+    res!(db.shutdown());
+    thread::sleep(Duration::from_secs(1));
+    Ok(())
+}
+
+// Opens the store as the example does: its own configuration, garbage collection off.
+fn scan_store(root: &Path) -> Outcome<textscan::TextScan> {
+    let db = res!(setup::start_db(
+        root.to_path_buf(), None, res!(schemes_input()), None, false, false));
+    thread::sleep(Duration::from_secs(1));
+    let mut out = textscan::TextScan::default();
+    res!(textscan::scan_o3db(db.api(), SCAN_WAIT, &mut out));
+    res!(db.shutdown());
+    thread::sleep(Duration::from_secs(1));
+    Ok(out)
+}

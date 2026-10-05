@@ -688,3 +688,42 @@ fn test_a_key_with_a_line_break_is_named_on_one_line_00() {
         }
     }
 }
+
+#[test]
+fn test_a_refusal_has_a_class_00() {
+    // A store scan counts refusals by class and prints no text; the label comes from the
+    // decoder's words, so a reworded refusal fails here and not silently in a count.
+    use oxedyne_fe2o3_jdat::string::dec::Located;
+    let cfg = DecoderConfig::<BTreeMap<_, _>, BTreeMap<_, _>>::default();
+    let class = |s: &str| match Dat::decode_string_located(s, &cfg) {
+        Ok(d) => format!("READ {}", d),
+        Err(at) => at.class(s).to_string(),
+    };
+    for (text, want) in [
+        // A comma-less comment, whichever mark and wherever it falls, and not one in a string.
+        ("[1 # c\n 2]",                 "no separator after a comment"),
+        ("[1 ! c ! 2]",                 "no separator after a comment"),
+        ("{\"a\":1 # c\n \"b\":2}",     "no separator after a comment"),
+        ("[\"a # b\" 2]",               "no separator"),
+        ("[1 2]",                       "no separator"),
+        ("{\"a\":1 \"b\":2}",           "no separator"),
+        ("[1 # c\n, 2 3]",              "no separator"),
+        // A whole-number kind with a fraction.
+        ("(u8|1.5)",                    "whole-number kind with a fraction"),
+        ("{\"n\": (i32|-2.5)}",         "whole-number kind with a fraction"),
+        ("[,]",                         "comma follows nothing"),
+        ("{\"a\", 1}",                  "comma where a colon belongs"),
+        ("{:1}",                        "colon with no key"),
+        ("{\"a\"::1}",                  "second colon"),
+        ("{\"a\":,}",                   "key without value"),
+        ("{\"a\":1,\"a\":2}",           "duplicate key"),
+        ("[1, 2",                       "unclosed"),
+        ("[1] x",                       "text after the value"),
+        ("[1|2]",                       "kind label"),
+    ] {
+        assert_eq!(class(text), want, "the class of {:?}", text);
+        assert!(Located::CLASSES.contains(&want), "{:?} is not a listed class", want);
+    }
+    // A text that reads has no class to give.
+    assert!(class("[1, # c\n 2]").starts_with("READ"));
+}

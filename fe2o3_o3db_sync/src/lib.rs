@@ -156,6 +156,7 @@ pub mod test;
 
 pub mod db;
 pub mod migrate; // Live-set store migration and compaction (drops orphaned chunk records).
+pub mod textscan; // Read-only check of the JDAT text a store holds against the decoder's refusals.
 pub mod sweep; // In-place, online orphan sweep (reclaims orphaned chunk records via supersession).
 pub mod prelude;
 

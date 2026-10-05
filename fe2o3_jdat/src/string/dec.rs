@@ -226,6 +226,140 @@ pub struct Located {
     pub key:    String,
 }
 
+impl Located {
+    // The labels `class` gives, for a caller that counts refusals by class.
+    pub const CLASSES: [&'static str; 15] = [
+        "whole-number kind with a fraction",
+        "whole-number kind, other",
+        "no separator after a comment",
+        "no separator",
+        "comma follows nothing",
+        "comma where a colon belongs",
+        "colon with no key",
+        "second colon",
+        "key without value",
+        "duplicate key",
+        "unclosed",
+        "text after the value",
+        "kind label",
+        "number range",
+        "other",
+    ];
+
+    /// A fixed label for the kind of refusal, so that a scan of many texts can count by class and
+    /// print no text. `text` is the text that was refused, read here and never kept. The label
+    /// comes from the decoder's own words, which `test_a_refusal_has_a_class_00` pins, and one
+    /// refusal is split by the text before it: a value that follows another with no ',' between
+    /// them, with a comment between the two.
+    pub fn class(&self, text: &str) -> &'static str {
+        fn any<F: Fn(&str) -> bool>(said: &[String], f: F) -> bool {
+            said.iter().any(|m| f(m))
+        }
+        let said = self.error.msgs();
+        if any(&said, |m| m.contains("takes a whole number that fits it, and '")) {
+            return if any(&said, |m| m.ends_with("has a fraction.")) {
+                Self::CLASSES[0]
+            } else {
+                Self::CLASSES[1]
+            };
+        }
+        if any(&said, |m| m.contains("A value follows another with no ',' or ':' between them")) {
+            return if Self::follows_comment(text, self.line, self.col) {
+                Self::CLASSES[2]
+            } else {
+                Self::CLASSES[3]
+            };
+        }
+        if any(&said, |m| m.contains("A ',' follows nothing, where an item was due")) {
+            return Self::CLASSES[4];
+        }
+        if any(&said, |m| m.contains("A ',' ends an item that has no ':' before it")) {
+            return Self::CLASSES[5];
+        }
+        if any(&said, |m| m.contains("A ':' has no key before it") ||
+            m.contains("A value with no key at the end of a map"))
+        {
+            return Self::CLASSES[6];
+        }
+        if any(&said, |m| m.contains("A ':' follows a key that is already set")) {
+            return Self::CLASSES[7];
+        }
+        if any(&said, |m| m.contains("A ',' ends a member that has a key and no value") ||
+            m.ends_with("has no value at the end of a map."))
+        {
+            return Self::CLASSES[8];
+        }
+        if any(&said, |m| m.ends_with("already exists in the map being read.")) {
+            return Self::CLASSES[9];
+        }
+        if any(&said, |m| m.contains("Expected closure of") ||
+            m.contains("where the ')' closing the kind was expected"))
+        {
+            return Self::CLASSES[10];
+        }
+        if any(&said, |m| m.contains("Found text after the end of the value")) {
+            return Self::CLASSES[11];
+        }
+        if any(&said, |m| m.contains("A '|' parts a kind") ||
+            m.contains("The separation character") ||
+            m.contains("cannot open the value of a") ||
+            m.contains("The kind for the daticle has already") ||
+            m.contains("are not daticles, so no kind should be specified"))
+        {
+            return Self::CLASSES[12];
+        }
+        if any(&said, |m| m.contains("cannot be negative") || m.contains("cannot hold")) {
+            return Self::CLASSES[13];
+        }
+        Self::CLASSES[14]
+    }
+
+    // Did a comment end the last thing before the character at `line`, `col` (1 based, in
+    // characters)?  A short lexer, since the decoder's refusal is the same with or without one:
+    // quotes with a backslash hide a mark, and a `#` or `!` comment ends at its next same mark or
+    // at its line's end.
+    fn follows_comment(text: &str, line: usize, col: usize) -> bool {
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        let (mut l, mut c) = (1usize, 0usize);
+        let mut quote:      Option<char> = None;
+        let mut mark:       Option<char> = None;
+        let mut escaped     = false;
+        let mut last        = false; // The last thing seen was a comment.
+        for ch in text.chars() {
+            c += 1;
+            if (l, c) == (line, col) {
+                return last;
+            }
+            if ch == '\n' {
+                l += 1;
+                c = 0;
+            }
+            if let Some(m) = mark {
+                if ch == m || ch == '\n' {
+                    mark = None;
+                }
+            } else if let Some(q) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == q {
+                    quote = None;
+                }
+            } else if ch == '#' || ch == '!' {
+                mark = Some(ch);
+                last = true;
+            } else if ch == '"' || ch == '\'' {
+                quote = Some(ch);
+                last = false;
+            } else if !ch.is_whitespace() {
+                last = false;
+            }
+        }
+        last
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommentCapture {
     Type1,
