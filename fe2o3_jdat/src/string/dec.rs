@@ -2079,9 +2079,15 @@ impl Dat {
             // has already been captured into `val_opt` by a nested descend -- a `(node|{...})`
             // value, whose `{...}` decoded a level down and landed here -- keep it: overwriting
             // with `None` silently drops that payload.  The kept payload is wrapped (mol == None)
-            // or committed to the enclosing molecule (mol == Some) by the logic below.
+            // or committed to the enclosing molecule (mol == Some) by the logic below.  An atom
+            // payload, `(node|"abc")`, is still in the slurp at this ')': it is read as an
+            // untyped atom (a quoted string, a number, a word), and the wrap below takes it.
             Kind::Usr(ukid) if ukid.kind().is_none() && store.val_opt.is_none() =>
-                store.val_opt = Some(Dat::Usr(ukid.clone(), None)),
+                store.val_opt = Some(if store.slurp.has_content() {
+                    res!(Self::process_atom(&mut store.slurp, &Kind::Unknown))
+                } else {
+                    Dat::Usr(ukid.clone(), None)
+                }),
             _ => (),
             // We don't necessarily return out of the method here because the
             // daticle might be part of a molecule, with the exception of the outer

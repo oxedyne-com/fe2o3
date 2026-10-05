@@ -1,7 +1,7 @@
 //! The encoder's own output must read back as the daticle it was written from.
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_jdat::{prelude::*, map::MapKey, note::NoteConfig};
+use oxedyne_fe2o3_jdat::{prelude::*, map::MapKey, note::NoteConfig, string::dec::DecoderConfig, usr::{UsrKind, UsrKindCode, UsrKindId, UsrKinds}};
 use oxedyne_fe2o3_num::float::{Float32, Float64};
 use num_bigint::BigInt;
 use std::collections::BTreeMap;
@@ -214,4 +214,92 @@ fn test_roundtrip_systematic_00() {
     }
     assert!(bad.is_empty(), "{} of {} decodes failed, the shortest being: {}", bad.len(), 2 * all.len(),
         bad.first().map(|b| b.chars().take(400).collect::<String>()).unwrap_or_default());
+}
+
+
+fn node_kinds() -> (UsrKindId, UsrKinds<BTreeMap<UsrKindCode, UsrKind>, BTreeMap<String, UsrKindId>>) {
+    let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+    let ukid = UsrKindId::new(1, Some("node"), None);
+    uks.add(ukid.clone()).unwrap_or_default();
+    (ukid, uks)
+}
+
+#[test]
+fn test_a_user_kind_payload_round_trips_of_every_shape_00() {
+    // `(node|"abc")` read as `(node)` and the payload was dropped without a word (U0-13 H1).
+    // Every payload shape the encoder can write for a user kind is read back exactly, bare,
+    // inside a list and inside a map, through both encodings.
+    let (ukid, uks) = node_kinds();
+    let cfg = DecoderConfig::<_, _>::jdat(Some(uks.clone()));
+    let usr = |d: Option<Dat>| Dat::Usr(ukid.clone(), d.map(Box::new));
+    let mut m = BTreeMap::new();
+    m.insert(Dat::Str(fmt!("k")), Dat::U8(1));
+    let payloads = vec![
+        usr(Some(Dat::Str(fmt!("abc")))),
+        usr(Some(Dat::Str(fmt!("")))),
+        usr(Some(Dat::Str(fmt!("a word with ) and | in it")))),
+        usr(Some(Dat::U8(1))),
+        usr(Some(Dat::I32(-7))),
+        usr(Some(Dat::Bool(true))),
+        usr(Some(Dat::Map(m))),
+        usr(Some(Dat::List(vec![Dat::U8(1), Dat::Str(fmt!("x"))]))),
+        usr(Some(Dat::List(Vec::new()))),
+        usr(Some(usr(None))),
+        usr(Some(usr(Some(Dat::Str(fmt!("deep")))))),
+        usr(Some(Dat::Box(Box::new(Dat::Str(fmt!("b")))))),
+        usr(None),
+    ];
+    let mut bad = Vec::new();
+    for p in &payloads {
+        let mut mk = BTreeMap::new();
+        mk.insert(Dat::Str(fmt!("n")), p.clone());
+        for dat in [
+            p.clone(),
+            Dat::List(vec![p.clone(), Dat::U8(3)]),
+            Dat::Map(mk),
+        ] {
+            let encs = [
+                ("jdat", dat.jdat_with_usr_kinds(Some(uks.clone()))),
+                ("lines", dat.jdat_with_usr_kinds_to_lines(Some(uks.clone()), "  ")),
+            ];
+            for (mode, enc) in encs {
+                let s = match enc {
+                    Ok(s) => s,
+                    Err(e) => { bad.push(fmt!("{} encoder: {}", mode, e.plain())); continue; },
+                };
+                match Dat::decode_string_with_config(&s, &cfg) {
+                    Ok(d2) if d2 == dat => (),
+                    Ok(d2) => bad.push(fmt!("{} DIFF text={:?} got={:?}", mode, s, d2)),
+                    Err(e) => bad.push(fmt!("{} ERR text={:?} {}", mode, s, e.plain().replace('\n', " "))),
+                }
+            }
+        }
+    }
+    for b in bad.iter().take(12) { println!("{}", b.chars().take(300).collect::<String>()); }
+    assert!(bad.is_empty(), "{} decodes failed, the first being: {}", bad.len(),
+        bad.first().map(|b| b.chars().take(400).collect::<String>()).unwrap_or_default());
+}
+
+#[test]
+fn test_a_user_kind_atom_payload_written_by_hand_is_kept_00() {
+    let (ukid, uks) = node_kinds();
+    let cfg = DecoderConfig::<_, _>::jdat(Some(uks));
+    let usr = |d: Dat| Dat::Usr(ukid.clone(), Some(Box::new(d)));
+    let read = |s: &str| match Dat::decode_string_with_config(s, &cfg) {
+        Ok(d) => d,
+        Err(e) => panic!("{:?} should read, and was refused: {}", s, e.plain()),
+    };
+    assert_eq!(read("(node|\"abc\")"), usr(Dat::Str(fmt!("abc"))));
+    assert_eq!(read("(node|'abc')"), usr(Dat::Str(fmt!("abc"))));
+    assert_eq!(read("(node|\"\")"), usr(Dat::Str(fmt!(""))));
+    assert_eq!(read("(node|1)"), usr(Dat::U8(1)));
+    assert_eq!(read("(node|word)"), usr(Dat::Str(fmt!("word"))));
+    assert_eq!(read("(node| \"abc\" )"), usr(Dat::Str(fmt!("abc"))));
+    assert_eq!(read("(node)"), Dat::Usr(ukid.clone(), None));
+    assert_eq!(read("[(node|\"a\"), (node|2), (node|w)]"), Dat::List(vec![
+        usr(Dat::Str(fmt!("a"))), usr(Dat::U8(2)), usr(Dat::Str(fmt!("w"))),
+    ]));
+    let mut m = BTreeMap::new();
+    m.insert(Dat::Str(fmt!("k")), usr(Dat::Str(fmt!("v"))));
+    assert_eq!(read("{\"k\": (node|\"v\")}"), Dat::Map(m));
 }
