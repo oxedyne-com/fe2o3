@@ -5,6 +5,7 @@
 //! at a time through `eval::realise`; styles arrive resolved per element as its `StyleChain`.
 
 pub mod block;
+mod carry;
 pub mod decorate;
 pub mod grid;
 pub mod inline;
