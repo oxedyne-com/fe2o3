@@ -787,19 +787,40 @@ impl Parts {
 				"The pieces of {} completed and there is nothing held.", id;
 			Bug, Unreachable)),
 		};
-		let (dat, used) = res!(Dat::from_bytes(&done.bytes));
+		// What the sender put together is the sender's input however it fails to come
+		// apart: the decoders underneath tag some of their refusals and not others (a
+		// name that is not text carries no tag at all), and a caller that forwards
+		// only what is tagged `Input` would answer the rest as its own fault.
+		let (dat, used) = match Dat::from_bytes(&done.bytes) {
+			Ok(pair)	=> pair,
+			Err(e)		=> return Err(err!(e,
+				"The {} pieces of {} came to {} bytes and are not a daticle.",
+				done.total, done.id, done.bytes.len();
+			Decode, Input)),
+		};
 		if used != done.bytes.len() {
 			return Err(err!(
 				"The {} pieces of {} came to {} bytes and decoded from only {} of \
 				them.", done.total, done.id, done.bytes.len(), used;
 			Decode, Input, Mismatch));
 		}
-		let entry = res!(Entry::from_dat(&dat));
+		let entry = match Entry::from_dat(&dat) {
+			Ok(entry)	=> entry,
+			Err(e)		=> return Err(err!(e,
+				"The {} pieces of {} are a daticle and not an operation.", done.total, done.id;
+			Decode, Input)),
+		};
 		// The clear identifier and the one inside are compared for the reason a
 		// veiled entry's two headers are: a carrier that cut an operation up is a
 		// carrier that could have relabelled the pieces, and the record inside is
 		// the signed one.
-		let inside = res!(entry.id());
+		let inside = match entry.id() {
+			Ok(id)	=> id,
+			Err(e)	=> return Err(err!(e,
+				"The {} pieces of {} are an operation with no readable header.",
+				done.total, done.id;
+			Decode, Input)),
+		};
 		if inside != done.id {
 			return Err(err!(
 				"The pieces said they made the operation {} and they make {}. The \
@@ -863,6 +884,7 @@ mod tests {
 		Placing,
 		Record,
 	};
+	use crate::segment::KIND_BARE;
 	use crate::test_support::StubSigner;
 
 	fn oid(replica: u64, counter: u64) -> OpId {
@@ -1127,6 +1149,55 @@ mod tests {
 					assert!(e.tags().contains(&ErrTag::Excessive), "tags {:?}", e.tags());
 				},
 			}
+		}
+		Ok(())
+	}
+
+	/// A completed run that does not decode to an entry is the sender's input, so
+	/// every way it can fail carries `Input` and Ore's relay forwards it to the
+	/// caller, whatever tags the decoder gave the failure underneath.
+	#[test]
+	fn a_completed_run_that_will_not_decode_is_input() -> Outcome<()> {
+		// Bytes that are not a daticle at all, and a daticle that is not an entry,
+		// and an entry whose record inside is not a record.
+		let not_dat = vec![0xffu8; 8];
+		let not_entry = res!(Dat::List(vec![Dat::U8(9)]).to_bytes(Vec::new()));
+		let not_record = res!(Dat::List(vec![Dat::U8(KIND_BARE), Dat::U8(7)])
+			.to_bytes(Vec::new()));
+		// An entry that is whole in every way but one byte of a mark's name, which
+		// is text, no longer is. The text decoder underneath tags its failure with
+		// nothing at all, so this is the case that only a tag put on at the run
+		// itself can reach.
+		let mark = Entry::Bare(Record::new(
+			res!(Header::new(oid(5, 2), vec![oid(5, 1)])),
+			Op::Mark { name: fmt!("five"), body: None, time: None },
+		));
+		let mut not_text = res!(mark.to_dat().to_bytes(Vec::new()));
+		let at = res!(not_text.windows(4).position(|w| w == b"five").ok_or_else(|| err!(
+			"The name of the mark is not in its own encoding."; Test, Missing)));
+		not_text[at] = 0xff;
+		for (what, bytes) in [
+			("bytes that are not a daticle", not_dat),
+			("a daticle that is not an entry", not_entry),
+			("an entry whose record is not one", not_record),
+			("an entry whose name is not text", not_text),
+		] {
+			let mut parts = Parts::new();
+			let half = bytes.len() / 2;
+			let pieces = [bytes[..half].to_vec(), bytes[half..].to_vec()];
+			let mut refused = None;
+			for (seq, chunk) in pieces.into_iter().enumerate() {
+				let piece = Message::Part { id: oid(5, 2), seq: seq as u64, total: 2, bytes: chunk };
+				match parts.absorb(piece) {
+					Ok(_)	=> assert_eq!(seq, 0, "{}: the run was accepted", what),
+					Err(e)	=> refused = Some(e),
+				}
+			}
+			let e = res!(refused.ok_or_else(|| err!(
+				"The run of {} was never refused.", what; Test, Missing)));
+			assert!(e.tags().contains(&ErrTag::Input),
+				"{}: a run from a peer that will not decode must blame its input; it said {:?}",
+				what, e.tags());
 		}
 		Ok(())
 	}
