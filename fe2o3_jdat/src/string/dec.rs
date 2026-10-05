@@ -141,7 +141,6 @@ pub struct Cursor {
     line:   usize,  // Line position.
     x:      usize,  // Character position on line.
     at:     (usize, usize), // Line and column of the character just read, a newline's own.
-    path:   Vec<String>, // Keys of the open maps and indices of the open lists, outermost first.
 }
 
 impl Default for Cursor {
@@ -153,7 +152,6 @@ impl Default for Cursor {
             line:   1,
             x:      0,
             at:     (1, 0),
-            path:   Vec::new(),
         }
     }
 }
@@ -183,47 +181,15 @@ impl Cursor {
             self.at = (self.line, self.x);
         }
     }
-
-    // A frame opens, a list at its first index.
-    fn open(&mut self, list: bool) {
-        self.path.push(if list { fmt!("[0]") } else { String::new() });
-    }
-
-    fn close(&mut self) {
-        self.path.pop();
-    }
-
-    // Names the member the innermost frame is reading.
-    fn name(&mut self, name: String) {
-        if let Some(last) = self.path.last_mut() {
-            *last = name;
-        }
-    }
-
-    // The key in the file's own dotted form, `roles.qr.size` or `screens.main[2]`.
-    fn key(&self) -> String {
-        let mut s = String::new();
-        for seg in &self.path {
-            if seg.is_empty() {
-                continue;
-            }
-            if !s.is_empty() && !seg.starts_with('[') {
-                s.push('.');
-            }
-            s.push_str(seg);
-        }
-        s
-    }
 }
 
-/// Where and in which key a text was refused, for a caller that reports the place and keeps the
-/// text to itself.
+/// Where a text was refused, for a caller that reports the place and keeps the text to itself.
+/// The place is a line and a column and no key: a key may be personal data as a value may be.
 #[derive(Debug)]
 pub struct Located {
     pub error:  Error<ErrTag>,
     pub line:   usize,
     pub col:    usize,
-    pub key:    String,
 }
 
 impl Located {
@@ -256,7 +222,7 @@ impl Located {
             said.iter().any(|m| f(m))
         }
         let said = self.error.msgs();
-        if any(&said, |m| m.contains("takes a whole number that fits it, and '")) {
+        if any(&said, |m| m.contains("takes a whole number that fits it, and this number")) {
             return if any(&said, |m| m.ends_with("has a fraction.")) {
                 Self::CLASSES[0]
             } else {
@@ -301,6 +267,9 @@ impl Located {
             return Self::CLASSES[11];
         }
         if any(&said, |m| m.contains("A '|' parts a kind") ||
+            m.contains("an unrecognised character while capturing daticle kind") ||
+            m.contains("a character after a gap in a daticle kind") ||
+            m.contains("Daticle kind label not recognised") ||
             m.contains("The separation character") ||
             m.contains("cannot open the value of a") ||
             m.contains("The kind for the daticle has already") ||
@@ -749,7 +718,7 @@ impl Slurp {
     #[inline(never)]
     fn char_slurped(
         &mut self,
-        (i, c):  (usize, char),
+        c:      char,
         state:  &mut DecoderState,
     )
         -> Outcome<bool>
@@ -769,8 +738,8 @@ impl Slurp {
                 {
                     if self.gap {
                         return Err(err!(
-                            "Found '{}' at position {} after a gap in a daticle kind; \
-                            no ',' or ':' may be missed.", c, i + 1;
+                            "Found a character after a gap in a daticle kind; \
+                            no ',' or ':' may be missed.";
                         String, Input, Decode, Invalid, Missing));
                     }
                     self.push(c);
@@ -796,7 +765,7 @@ impl Slurp {
                 ')' => return Ok(false),
                 _ => {
                     return Err(err!(
-                        "Found unrecognised '{}' at position {} while capturing daticle kind.", c, i + 1;
+                        "Found an unrecognised character while capturing daticle kind.";
                     String, Input, Decode, Invalid));
                 }
             }
@@ -849,14 +818,16 @@ impl Kind {
     {
         match Self::from_str(s) {
             Ok(k) => Ok(k),
-            Err(e1) => match ukinds_opt {
+            Err(_) => match ukinds_opt {
                 Some(ukids) => match ukids.get_label(s) {
                     Some(ukid) => Ok(Self::Usr(ukid.clone())),
                     None => Err(err!(
-                        "Daticle kind label not recognised as standard or custom: '{}'", s;
+                        "Daticle kind label not recognised as standard or custom";
                     Input, String, Unknown)),
                 }
-                None => Err(err!(e1, "No custom user kinds supplied"; Input, String, Unknown)),
+                None => Err(err!(
+                    "Daticle kind label not recognised as standard, and no custom user kinds \
+                    were supplied"; Input, String, Unknown)),
             }
         }
     }
@@ -867,7 +838,7 @@ impl Kind {
     #[inline(never)]
     fn decode_whole_from_decimal(self, ns: &NumberString) -> Outcome<Dat> {
         let fail = |why: &str| err!(
-            "A {:?} takes a whole number that fits it, and '{}' {}.", self, ns.source(), why;
+            "A {:?} takes a whole number that fits it, and this number {}.", self, why;
             String, Input, Decode, Invalid);
         if ns.radix() != 10 {
             return Err(fail("is not a decimal number"));
@@ -959,40 +930,36 @@ impl Kind {
         }
         match self {
             Kind::U8 => {
-                if ns.is_negative() {
+                if ns.is_below_zero() {
                     return Err(err!(
-                	    "U8 '{}' cannot be negative",
-                        &ns.int_string();
+                	    "A U8 cannot be negative";
                     String, Input, Decode, Invalid));
                 }
                 let n = res!(<u8>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U8(n));
             }
             Kind::U16 => {
-                if ns.is_negative() {
+                if ns.is_below_zero() {
                     return Err(err!(
-                	    "U16 '{}' cannot be negative",
-                        &ns.int_string();
+                	    "A U16 cannot be negative";
                     String, Input, Decode, Invalid));
                 }
                 let n = res!(<u16>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U16(n));
             }
             Kind::U32 => {
-                if ns.is_negative() {
+                if ns.is_below_zero() {
                     return Err(err!(
-                	    "U32 '{}' cannot be negative",
-                        &ns.int_string();
+                	    "A U32 cannot be negative";
                     String, Input, Decode, Invalid));
                 }
                 let n = res!(<u32>::from_str_radix(ns.abs_integer_str(), ns.radix()));
                 return Ok(Dat::U32(n));
             }
             Kind::U64 | Kind::C64 => {
-                if ns.is_negative() {
+                if ns.is_below_zero() {
                     return Err(err!(
-                	    "U64 '{}' cannot be negative",
-                        &ns.int_string();
+                	    "A U64 cannot be negative";
                     String, Input, Decode, Invalid));
                 }
                 let n = res!(<u64>::from_str_radix(ns.abs_integer_str(), ns.radix()));
@@ -1003,10 +970,9 @@ impl Kind {
                 }
             }
             Kind::U128 => {
-                if ns.is_negative() {
+                if ns.is_below_zero() {
                     return Err(err!(
-                	    "U128 '{}' cannot be negative",
-                        &ns.int_string();
+                	    "A U128 cannot be negative";
                     String, Input, Decode, Invalid));
                 }
                 let n = res!(<u128>::from_str_radix(ns.abs_integer_str(), ns.radix()));
@@ -1033,19 +999,29 @@ impl Kind {
                 return Ok(Dat::I128(n));
             }
             Kind::F32 => {
-                let f = res!(Float32::from_str(ns.source()));
+                let f = match Float32::from_str(ns.source()) {
+                    Ok(f)   => f,
+                    Err(_)  => return Err(err!(
+                        "An F32 cannot be read from this number";
+                    String, Input, Decode, Invalid)),
+                };
                 if !f.0.is_finite() {
                     return Err(err!(
-                        "An F32 cannot hold '{}', which is too large.", ns.source();
+                        "An F32 cannot hold this number, which is too large.";
                     String, Input, Decode, Invalid));
                 }
                 return Ok(Dat::F32(f));
             }
             Kind::F64 => {
-                let f = res!(Float64::from_str(ns.source()));
+                let f = match Float64::from_str(ns.source()) {
+                    Ok(f)   => f,
+                    Err(_)  => return Err(err!(
+                        "An F64 cannot be read from this number";
+                    String, Input, Decode, Invalid)),
+                };
                 if !f.0.is_finite() {
                     return Err(err!(
-                        "An F64 cannot hold '{}', which is too large.", ns.source();
+                        "An F64 cannot hold this number, which is too large.";
                     String, Input, Decode, Invalid));
                 }
                 return Ok(Dat::F64(f));
@@ -1056,17 +1032,22 @@ impl Kind {
                         "Decimal or scientific notation not accepted for AINT, use ADEC";
                     String, Input, Decode, Invalid));
                 }
+                // The error of the layer below echoes the number, so it is not kept.
                 match ns.as_bigint() {
-                    Ok(n) => return Ok(Dat::Aint(n)),
-                    Err(e) => return Err(err!(e, "While decoding an integer."; Decode, Integer)),
+                    Ok(n)   => return Ok(Dat::Aint(n)),
+                    Err(_)  => return Err(err!(
+                        "An AINT cannot be read from this number"; Decode, Integer)),
                 }
             }
             Kind::Adec => {
-                return Ok(Dat::Adec(res!(ns.as_bigdecimal())));
+                return match ns.as_bigdecimal() {
+                    Ok(d)   => Ok(Dat::Adec(d)),
+                    Err(_)  => Err(err!(
+                        "An ADEC cannot be read from this number"; Decode, Numeric)),
+                };
             }
             _ => return Err(err!(
-                "NumberString {:?} is of invalid kind {:?}",
-                ns, self;
+                "A number cannot be read as a {:?}", self;
             String, Input, Decode, Invalid)),
         }
     }
@@ -1250,15 +1231,14 @@ impl Dat {
         match Self::decode_string_located(s, cfg) {
             Ok(dat)     => Ok(dat),
             Err(spot)   => Err(err!(spot.error,
-                "Refused at line {}, column {}{}.", spot.line, spot.col,
-                if spot.key.is_empty() { String::new() } else { fmt!(", key {}", spot.key) };
+                "Refused at line {}, column {}.", spot.line, spot.col;
                 String, Input, Decode, Invalid)),
         }
     }
 
     /// Decodes as `decode_string_with_config` does, and on a refusal says where: the line and
-    /// column of the character being read and the key in the file's own dotted form. The error
-    /// itself is as the decoder made it.
+    /// column of the character being read. The error itself is as the decoder made it. No refusal
+    /// holds any of the text, a value's or a key's.
     pub fn decode_string_located<
         S: Into<String>,
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1280,12 +1260,12 @@ impl Dat {
         let cursor = RefCell::new(Cursor::default());
         let spot = |error: Error<ErrTag>, cursor: &RefCell<Cursor>| {
             let c = cursor.borrow();
-            Located { error, line: c.at.0, col: c.at.1, key: c.key() }
+            Located { error, line: c.at.0, col: c.at.1 }
         };
         if let Err(e) = cfg.limits.check_len(s.len()) {
             return Err(spot(e, &cursor));
         }
-        let mut iter = s.chars().collect::<Vec<_>>().into_iter().enumerate();
+        let mut iter = s.chars().collect::<Vec<_>>().into_iter();
         let dat = match Self::recursive_decode(
             &mut iter,
             cfg,
@@ -1311,14 +1291,14 @@ impl Dat {
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
     >(
-        iter:   &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        iter:   &mut std::vec::IntoIter<char>,
         cfg:    &DecoderConfig<M1, M2>,
         cursor: &RefCell<Cursor>,
     )
         -> Option<char>
     {
         let mut ends: Option<char> = None; // The mark that closes the comment being skipped.
-        for (_, c) in iter {
+        for c in iter {
             cursor.borrow_mut().advance(c);
             match ends {
                 Some(end) => if c == end || c == '\n' {
@@ -1347,7 +1327,7 @@ impl Dat {
     >(
         dat:            Self,
         explicit_kind:  bool,
-        iter:           &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        iter:           &mut std::vec::IntoIter<char>,
         cfg:            &DecoderConfig<M1, M2>,
         cursor:         &RefCell<Cursor>,
     )
@@ -1359,9 +1339,9 @@ impl Dat {
         }
         match Self::next_significant(iter, cfg, cursor) {
             Some(')') => Ok(dat),
-            Some(c) => Err(err!(
-                "Found '{}' where the ')' closing the kind was expected.",
-                c; String, Input, Decode, Invalid)),
+            Some(_) => Err(err!(
+                "Found another character where the ')' closing the kind was expected.";
+                String, Input, Decode, Invalid)),
             None => Err(err!(
                 "The text ended where the ')' closing the kind was expected."; String, Input, Decode, Invalid)),
         }
@@ -1390,23 +1370,14 @@ impl Dat {
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
     >(
-        iter:       &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        iter:       &mut std::vec::IntoIter<char>,
         cfg:        &DecoderConfig<M1, M2>,
         state:      DecoderState,
         cursor:     &RefCell<Cursor>,
     )
         -> Outcome<Self>
     {
-        // The key path is left as it stands on a refusal, so that it names where the fault was.
-        let list = matches!(
-            MolecularCapture::from_kind(&state.kind_outer),
-            Some(MolecularCapture::ListMixed) |
-            Some(MolecularCapture::ListSame)  |
-            Some(MolecularCapture::Bytes));
-        cursor.borrow_mut().open(list);
-        let dat = res!(Self::decode_frame(iter, cfg, state, cursor));
-        cursor.borrow_mut().close();
-        Ok(dat)
+        Self::decode_frame(iter, cfg, state, cursor)
     }
 
     #[inline(never)]
@@ -1414,7 +1385,7 @@ impl Dat {
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
     >(
-        mut iter:   &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        mut iter:   &mut std::vec::IntoIter<char>,
         cfg:        &DecoderConfig<M1, M2>,
         mut state:  DecoderState,
         cursor:     &RefCell<Cursor>,
@@ -1433,9 +1404,9 @@ impl Dat {
         state.molecular_capture = MolecularCapture::from_kind(&state.kind_outer);
         let explicit_kind = state.explicit_kind; // A step may give the state away.
 
-        while let Some((i, c)) = iter.next() {
+        while let Some(c) = iter.next() {
             match res!(Self::step(
-                (i, c),
+                c,
                 cfg,
                 &mut state,
                 &mut store,
@@ -1480,7 +1451,7 @@ impl Dat {
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
         M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
     >(
-        (i, c):             (usize, char),
+        c:                  char,
         cfg:                &DecoderConfig<M1, M2>,
         state:              &mut DecoderState,
         store:              &mut DecoderStore,
@@ -1577,7 +1548,7 @@ impl Dat {
                 false
             }
         } else {
-            res!(store.slurp.char_slurped((i, c), state))
+            res!(store.slurp.char_slurped(c, state))
         };
         // Whitespace is offered to the slurp but never ends the character's handling, since a
         // space may also close an atom.
@@ -1662,7 +1633,7 @@ impl Dat {
                     if root_list { Descent::Root } else { Descent::Molecule }));
             }
             ',' => {
-                res!(Self::comma_handler(state, cursor, store));
+                res!(Self::comma_handler(state, store));
             }
             ']' => {
                 // A terminal branch, so the state and the store are given away.
@@ -1706,7 +1677,7 @@ impl Dat {
                 }
             }
             ':' => {
-                res!(Self::colon(state, store, cursor));
+                res!(Self::colon(state, store));
             }
             '}' => {
                 // A terminal branch, so the store is given away.
@@ -1767,17 +1738,6 @@ impl Dat {
                 "A ':' has no key before it, and what follows it is not a note"; String, Input, Decode, Invalid, Missing));
         }
         Ok(())
-    }
-
-    // A key as the path names it, short.
-    fn key_name(key: &Dat) -> String {
-        let name = match key {
-            Dat::ABox(_, inner, _)  => return Self::key_name(inner),
-            Dat::Str(s)             => s.clone(),
-            other                   => fmt!("{}", other),
-        };
-        let name: String = name.chars().take(64).collect();
-        crate::string::enc::escape_json_string(&name)
     }
 
     #[inline(never)]
@@ -1934,8 +1894,8 @@ impl Dat {
                     None => {
                         if item {
                             return Err(err!(
-                                "Line comments currently only allowed in molecules \
-                                (lists and maps)."; String, Input, Decode, Invalid));
+                                "A comment that ends its line follows a value outside any \
+                                list or map, which has nowhere to keep it as a note."; String, Input, Decode, Invalid));
                         }
                         // Before the root value there is nothing to annotate.
                         store.comment.clear();
@@ -2378,7 +2338,6 @@ impl Dat {
     fn colon(
         state:  &DecoderState,
         store:  &mut DecoderStore,
-        cursor: &RefCell<Cursor>,
     )
         -> Outcome<()>
     {
@@ -2420,7 +2379,6 @@ impl Dat {
                         store.comment.extract(),
                     );
                 }
-                cursor.borrow_mut().name(Self::key_name(&dat));
                 store.key_opt = Some(dat);
                 store.slurp = Slurp::new();
             }
@@ -2476,7 +2434,7 @@ impl Dat {
                         ));
                     } else {
                         return Err(err!(
-                            "The key {} has no value at the end of a map.", Self::key_name(&key);
+                            "A key has no value at the end of a map.";
                         String, Input, Decode, Invalid, Missing));
                     }
                 }
@@ -2496,7 +2454,6 @@ impl Dat {
     #[inline(never)]
     fn comma_handler(
         state:      &mut DecoderState,
-        cursor:     &RefCell<Cursor>,
         mut store:  &mut DecoderStore,
     )
         -> Outcome<()>
@@ -2512,7 +2469,6 @@ impl Dat {
                 let n = try_extract_dat!(res!(Self::process_atom(&mut store.slurp, &Kind::U8)), U8);
                 store.byts.push(n);
                 store.comment.clear();
-                cursor.borrow_mut().name(fmt!("[{}]", store.byts.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::ListSame) => {
@@ -2527,7 +2483,6 @@ impl Dat {
                 };
                 store.list.push(dat);
                 store.comment.clear();
-                cursor.borrow_mut().name(fmt!("[{}]", store.list.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::ListMixed) => {
@@ -2554,7 +2509,6 @@ impl Dat {
                 } else {
                     store.list.push(dat);
                 }
-                cursor.borrow_mut().name(fmt!("[{}]", store.list.len()));
                 store.slurp = Slurp::new();
             }
             Some(MolecularCapture::Map) => {
@@ -2600,7 +2554,6 @@ impl Dat {
                         "A ',' ends an item that has no ':' before it, so it is neither a key \
                         with a value nor a note."; String, Input, Decode, Invalid, Missing)),
                 }
-                cursor.borrow_mut().name(String::new());
                 store.val_opt = None;
                 store.slurp = Slurp::new();
             }
@@ -2628,7 +2581,7 @@ impl Dat {
         let probe = if matches!(bare, Dat::Empty) { key.clone() } else { bare.clone() };
         if !store.seen.insert(probe) {
             return Err(err!(
-                "The key {} already exists in the map being read.", Self::key_name(&key);
+                "A duplicate key, which already exists in the map being read.";
                 Invalid, Input, Exists));
         }
         match use_ordmap {
@@ -2682,10 +2635,8 @@ impl Dat {
                         return Ok(true);
                     }
                     _ => return Err(err!(
-                        "Invalid string escape sequence '\\{}' \
-                        inside quoted string. Expected one of \
-                        `\"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, \
-                        `u`.", c;
+                        "Invalid string escape sequence inside quoted string. Expected \
+                        one of `\"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`, `u`.";
                         String, Input, Decode, Invalid)),
                 };
                 slurp.push(translated);
@@ -2714,9 +2665,8 @@ impl Dat {
                 }
                 if (0xDC00..=0xDFFF).contains(&code_unit) {
                     return Err(err!(
-                        "Bare low surrogate U+{:04X} in \\uXXXX \
-                        escape without a preceding high \
-                        surrogate.", code_unit;
+                        "Bare low surrogate in \\uXXXX escape without a preceding high \
+                        surrogate.";
                         String, Input, Decode, Invalid));
                 }
                 // BMP code point, push directly.
@@ -2727,17 +2677,15 @@ impl Dat {
                         Ok(true)
                     }
                     Option::None => Err(err!(
-                        "Invalid Unicode code point U+{:04X} in \
-                        \\uXXXX escape.", new_acc;
+                        "Invalid Unicode code point in \\uXXXX escape.";
                         String, Input, Decode, Invalid)),
                 }
             }
             SurrogateBackslash { high } => {
                 if c != '\\' {
                     return Err(err!(
-                        "High surrogate U+{:04X} not followed by \
-                        a `\\` to start the low-surrogate escape \
-                        (saw {:?}).", high, c;
+                        "High surrogate not followed by a `\\` to start the low-surrogate \
+                        escape.";
                         String, Input, Decode, Invalid));
                 }
                 state.string_escape = SurrogateU { high };
@@ -2746,9 +2694,8 @@ impl Dat {
             SurrogateU { high } => {
                 if c != 'u' {
                     return Err(err!(
-                        "High surrogate U+{:04X} not followed by \
-                        a `\\u` to start the low-surrogate escape \
-                        (saw \\{:?}).", high, c;
+                        "High surrogate not followed by a `\\u` to start the low-surrogate \
+                        escape.";
                         String, Input, Decode, Invalid));
                 }
                 state.string_escape = LowSurrogate {
@@ -2773,9 +2720,7 @@ impl Dat {
                 let low = new_acc as u16;
                 if !(0xDC00..=0xDFFF).contains(&low) {
                     return Err(err!(
-                        "Expected a low surrogate (U+DC00..U+DFFF) \
-                        after high surrogate U+{:04X}, got U+{:04X}.",
-                        high, low;
+                        "Expected a low surrogate (U+DC00..U+DFFF) after a high surrogate.";
                         String, Input, Decode, Invalid));
                 }
                 // Combine the surrogate pair into a
@@ -2790,9 +2735,7 @@ impl Dat {
                         Ok(true)
                     }
                     Option::None => Err(err!(
-                        "Surrogate pair U+{:04X} U+{:04X} does \
-                        not form a valid code point (U+{:06X}).",
-                        high, low, cp;
+                        "Surrogate pair does not form a valid code point.";
                         String, Input, Decode, Invalid)),
                 }
             }
@@ -2805,8 +2748,7 @@ impl Dat {
             'a'..='f'   => Ok((c as u32) - ('a' as u32) + 10),
             'A'..='F'   => Ok((c as u32) - ('A' as u32) + 10),
             _ => Err(err!(
-                "Invalid hex digit '{}' in \\uXXXX escape \
-                sequence.", c;
+                "Invalid hex digit in \\uXXXX escape sequence.";
                 String, Input, Decode, Invalid)),
         }
     }
@@ -2850,7 +2792,13 @@ impl Dat {
             Kind::B16   |
             Kind::B32 if slurp.is_string() => {
                 // Interpret as base2x, which are quoted strings.
-                let byts = res!(base2x::HEMATITE64.from_str(slurp.get_str()));
+                // The error of the layer below echoes the text, so it is not kept.
+                let byts = match base2x::HEMATITE64.from_str(slurp.get_str()) {
+                    Ok(byts)    => byts,
+                    Err(_)      => return Err(err!(
+                        "The quoted string is not in the base encoding that {:?} takes", kind;
+                    String, Input, Decode, Invalid)),
+                };
                 res!(Self::decode_bytes(byts, kind))
             }
             _ => if slurp.is_string() {
@@ -2858,7 +2806,7 @@ impl Dat {
                     Dat::Str(slurp.clone_string())
                 } else {
                     return Err(err!(
-                        "A quoted string '{}' is not compatible with {:?}.", slurp, kind;
+                        "A quoted string is not compatible with {:?}.", kind;
                     String, Input, Decode, Mismatch));
                 }
             } else {
@@ -2882,21 +2830,23 @@ impl Dat {
                                     res!(kind.clone().decode_number(ns))
                                 } else {
                                     match Self::from_untyped_number(&ns) {
-                                        Ok(d) => d,
-                                        Err(e) => return Err(err!(e,
-                                            "While interpreting '{}' with outer kind {:?}.",
-                                            slurp, kind;
+                                        Ok(d)   => d,
+                                        Err(_)  => return Err(err!(
+                                            "The number read within a {:?} is not in a form that \
+                                            kind takes", kind;
                                         String, Input, Decode)),
                                     }
                                 }
                             }
-                            Err(e) => if *kind == Kind::Unknown {
+                            // The error of the layer below echoes the text, so it is not kept.
+                            // Text that is no number is a string wherever no kind was declared
+                            // for the atom, at the top level and as an item of a list or a map.
+                            Err(_) => if *kind == Kind::Unknown || kind.case().accepts_strings() {
                                 Dat::Str(slurp.take_string())
                             } else {
-                                return Err(err!(e,
-                                    "While interpreting '{}' with outer kind {:?}.",
-                                    slurp, kind;
-                                String, Input, Decode));
+                                return Err(err!(
+                                    "The value read for {:?} is not in a form that kind takes",
+                                    kind; String, Input, Decode));
                             }
                         }
                     }
@@ -2917,13 +2867,21 @@ impl Dat {
             return Ok(Dat::U8(0));
         }
         if ns.has_point() || ns.has_exp() {
-            return Ok(Dat::Adec(res!(ns.as_bigdecimal())));
+            return match ns.as_bigdecimal() {
+                Ok(d)   => Ok(Dat::Adec(d)),
+                Err(_)  => Err(err!(
+                    "A decimal cannot be read from this number"; String, Input, Decode)),
+            };
         }
         match u128::from_str_radix(ns.abs_integer_str(), ns.radix()) {
             Ok(nu128) => if ns.is_negative() {
                 if nu128 > (i128::MAX as u128 + 1) {
                     // Below i128::MIN, so only a BigInt holds it.
-                    Ok(Dat::Aint(res!(ns.as_bigint())))
+                    match ns.as_bigint() {
+                        Ok(n)   => Ok(Dat::Aint(n)),
+                        Err(_)  => Err(err!(
+                            "An integer cannot be read from this number"; String, Input, Decode)),
+                    }
                 } else {
                     // The cast of |i128::MIN| wraps to i128::MIN, which is the value wanted;
                     // every other magnitude is negated by hand.
@@ -2938,7 +2896,11 @@ impl Dat {
                 DatInt::from(nu128).min_size().to_dat()
             },
             // Beyond u128.
-            Err(_) => Ok(Dat::Aint(res!(ns.as_bigint()))),
+            Err(_) => match ns.as_bigint() {
+                Ok(n)   => Ok(Dat::Aint(n)),
+                Err(_)  => Err(err!(
+                    "An integer cannot be read from this number"; String, Input, Decode)),
+            },
         }
     }
 

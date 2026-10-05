@@ -123,6 +123,19 @@ pub fn refusal(text: &str) -> Option<(usize, usize, &'static str)> {
     }
 }
 
+/// Is a file's text jdat, and where does it stop? The line `jdat_check` prints for a file, which
+/// is `path: OK` or `path: REFUSED line L col C: tags`: the place and the error's tags, never the
+/// refusal's words and never a key or a value.
+pub fn check_line(path: &str, text: &str) -> (bool, String) {
+    match Dat::decode_string_located(text, &Cfg::default()) {
+        Ok(_)   => (true, fmt!("{}: OK", path)),
+        Err(at) => {
+            let kind = Error::<ErrTag>::tags_display(at.error.tags());
+            (false, fmt!("{}: REFUSED line {} col {}: {}", path, at.line, at.col, kind))
+        },
+    }
+}
+
 /// Reads one framed file's bytes: records of a 4-byte big-endian length and JDAT text.
 pub fn scan_framed(
     store:  &str,

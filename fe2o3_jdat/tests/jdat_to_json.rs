@@ -2,8 +2,8 @@
 //! (the wasm core exports it; U0, D-20261005-12). It reads with `Dat::decode_string`'s rules, so
 //! what the format allows by design stays allowed (a comment ends at its mark or at the end of
 //! its line, trailing commas, `(kind|value)` annotations), and what is wrong is refused with the
-//! line, column and key. What comes out is held to `serde_json`, which did not come from here
-//! and stands for the browser's `JSON.parse`.
+//! line and column, and no key or value, since either may be personal data. What comes out is held
+//! to `serde_json`, which did not come from here and stands for the browser's `JSON.parse`.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
@@ -32,12 +32,21 @@ fn browser(s: &str) -> Outcome<Value> {
 
 // Refuse `s`, and require the message to hold every word in `words`.
 fn refused(s: &str, words: &[&str]) {
+    refused_without(s, words, &[]);
+}
+
+// As `refused`, and the message must hold none of `absent` (a key or a value of `s`).
+fn refused_without(s: &str, words: &[&str], absent: &[&str]) {
     match to_json(s) {
         Ok(json) => panic!("{:?} should be refused, and became {}", s, json),
         Err(e) => {
             let msg = e.plain();
             for w in words {
                 assert!(msg.contains(w), "the refusal of {:?} should hold {:?}, and reads: {}",
+                    s, w, msg);
+            }
+            for w in absent {
+                assert!(!msg.contains(w), "the refusal of {:?} should not hold {:?}, and reads: {}",
                     s, w, msg);
             }
         },
@@ -176,29 +185,29 @@ fn test_kind_annotations_take_the_value_00() -> Outcome<()> {
 
 #[test]
 fn test_kind_annotations_are_checked_00() -> Outcome<()> {
-    refused("{\n\"n\": (u8|300)}", &["line 2", "key n"]);
-    refused("{\n\"n\": (u8|-1)}", &["line 2", "key n"]);
-    refused("{\n\"n\": (u8|1.5)}", &["line 2", "key n"]);
-    refused("{\n\"n\": (f64|\"x\")}", &["line 2", "key n"]);
-    refused("{\n\"n\": (zzz|1)}", &["line 2", "key n"]);
-    refused("{\n\"n\": (u8|1}", &["line 2", "key n"]);
-    refused("{\n\"n\": (u8|1", &["line 2", "key n"]);
+    refused("{\n\"n\": (u8|300)}", &["line 2", "column"]);
+    refused("{\n\"n\": (u8|-1)}", &["line 2", "column"]);
+    refused("{\n\"n\": (u8|1.5)}", &["line 2", "column"]);
+    refused("{\n\"n\": (f64|\"x\")}", &["line 2", "column"]);
+    refused("{\n\"n\": (zzz|1)}", &["line 2", "column"]);
+    refused("{\n\"n\": (u8|1}", &["line 2", "column"]);
+    refused("{\n\"n\": (u8|1", &["line 2", "column"]);
     Ok(())
 }
 
 #[test]
-fn test_error_names_line_and_key_00() -> Outcome<()> {
-    // A bad value, three levels down, on line 4.
-    refused("{\n\t\"roles\": {\n\t\t\"qr\": {\n\t\t\t\"size\": (u8|300),\n\t\t},\n\t},\n}",
-        &["line 4", "roles.qr.size"]);
+fn test_error_names_line_and_position_00() -> Outcome<()> {
+    // A bad value, three levels down, on line 4, and no key in the words.
+    refused_without("{\n\t\"roles\": {\n\t\t\"qr\": {\n\t\t\t\"size\": (u8|300),\n\t\t},\n\t},\n}",
+        &["line 4", "column"], &["roles", "size", "300"]);
     // Column counts characters and not bytes, and a tab as one: the value starts after a tab,
     // a quoted name, a colon and a space.
     refused("{\n\t\"a\": (u8|300)}", &["line 2", "column "]);
     let wide = refused_text("{\n\t\"é日\": (u8|300)}");
     let narrow = refused_text("{\n\t\"ab\": (u8|300)}");
     assert_eq!(wide, narrow, "a multi-byte name must not move the column");
-    // An array element is named by its index.
-    refused("{\n\"screens\": {\"cs\": [\"a\",\n (u8|300)]}}", &["line 3", "screens.cs[1]"]);
+    // An array element is named by its line, and no key.
+    refused_without("{\n\"screens\": {\"cs\": [\"a\",\n (u8|300)]}}", &["line 3"], &["screens", "cs"]);
     Ok(())
 }
 
@@ -246,23 +255,26 @@ fn test_malformed_files_are_refused_00() -> Outcome<()> {
 #[test]
 fn test_a_member_with_no_value_is_refused_00() -> Outcome<()> {
     refused("{\n\"a\": }", &["line 2"]);
-    refused("{\n\"a\": 1,\n\"b\":\n}", &["line 4", "key b"]);
+    refused("{\n\"a\": 1,\n\"bKeyQ\":\n}", &["line 4"]);
+    refused_without("{\n\"a\": 1,\n\"bKeyQ\":\n}", &[], &["bKeyQ"]);
     Ok(())
 }
 
 #[test]
 fn test_duplicate_key_is_refused_00() -> Outcome<()> {
-    refused("{\n\"roles\": {\n\"qr\": 1,\n\"qr\": 2}}", &["line 4", "roles.qr"]);
+    refused_without("{\n\"roles\": {\n\"qrKeyQ\": 1,\n\"qrKeyQ\": 2}}",
+        &["line 4", "duplicate key"], &["roles", "qrKeyQ"]);
     Ok(())
 }
 
 #[test]
 fn test_numbers_a_browser_cannot_hold_are_refused_00() -> Outcome<()> {
-    // These are found after the text is read, so they name the key and not the line.
-    refused("{\n\"n\": 9007199254740993}", &["key 'n'", "2^53"]);
-    refused("{\n\"n\": -9007199254740993}", &["key 'n'", "2^53"]);
-    refused("{\n\"n\": (u64|18446744073709551615)}", &["key 'n'", "2^53"]);
-    refused("{\"a\": {\"n\": [0, 1e999]}}", &["a.n[1]", "finite"]);
+    // These are found after the text is read, so they name the position in the data (the first
+    // member, then the first member of that, then its second item) and not the line or the key.
+    refused_without("{\n\"nKeyQ\": 9007199254740993}", &["the position {0}", "2^53"], &["nKeyQ", "9007"]);
+    refused("{\n\"n\": -9007199254740993}", &["the position {0}", "2^53"]);
+    refused("{\n\"n\": (u64|18446744073709551615)}", &["the position {0}", "2^53"]);
+    refused_without("{\"aKeyQ\": {\"n\": [0, 1e999]}}", &["{0}{0}[1]", "finite"], &["aKeyQ", "999"]);
     assert_eq!(res!(to_json(r#"{"n": 9007199254740991}"#)), r#"{"n":9007199254740991}"#);
     assert_eq!(res!(to_json(r#"{"n": -9007199254740991}"#)), r#"{"n":-9007199254740991}"#);
     Ok(())

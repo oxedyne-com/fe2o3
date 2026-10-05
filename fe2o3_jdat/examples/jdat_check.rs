@@ -5,11 +5,11 @@
 //! jdat_check --logs DIR
 //! ```
 //!
-//! For each path one line is printed: `path: OK`, or `path: REFUSED line L col C key K: kind`, or
+//! For each path one line is printed: `path: OK`, or `path: REFUSED line L col C: kind`, or
 //! `path: UNREADABLE: kind`.  The text of a file is never printed, nor any part of it, and the
-//! kind is taken from the error's tags and not from its message, which may quote the text.  The
-//! key is the file's own dotted path to the member being read, such as `roles.qr.size`.  The exit
-//! status is 0 when every file reads, 1 when one is refused or unreadable, and 2 with no paths.
+//! kind is taken from the error's tags and not from its message.  No key is printed, since a key
+//! may be personal data.  The exit status is 0 when every file reads, 1 when one is refused or
+//! unreadable, and 2 with no paths.
 //!
 //! With `--logs DIR` the directory is an Oxegen data directory: each `.log` and `.tbl` file in it
 //! is a run of records, each a 4-byte big-endian length and the jdat text of one entry. Every
@@ -24,25 +24,12 @@
 //! program that loads it that way.  Built static, this is run on a host to learn which of its
 //! configuration files a stricter decoder would stop at, before the decoder is deployed.
 
-use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_jdat::{
-    prelude::*,
-    string::{
-        dec::DecoderConfig,
-        scan::{
-            self,
-            TextScan,
-        },
-    },
-    usr::{
-        UsrKind,
-        UsrKindCode,
-        UsrKindId,
-    },
+use oxedyne_fe2o3_jdat::string::scan::{
+    self,
+    TextScan,
 };
 
 use std::{
-    collections::BTreeMap,
     env,
     fs,
     path::Path,
@@ -78,7 +65,6 @@ fn main() {
         eprintln!("Usage: jdat_check <path>...   or   jdat_check --logs DIR");
         process::exit(2);
     }
-    let cfg = DecoderConfig::<BTreeMap<UsrKindCode, UsrKind>, BTreeMap<String, UsrKindId>>::default();
     let mut bad = 0;
     for path in &paths {
         let bytes = match fs::read(path) {
@@ -97,14 +83,10 @@ fn main() {
                 continue;
             },
         };
-        match Dat::decode_string_located(text, &cfg) {
-            Ok(_) => println!("{}: OK", path),
-            Err(at) => {
-                let kind = Error::<ErrTag>::tags_display(at.error.tags());
-                println!("{}: REFUSED line {} col {} key {}: {}", path, at.line, at.col,
-                    if at.key.is_empty() { "-" } else { at.key.as_str() }, kind);
-                bad += 1;
-            },
+        let (read, line) = scan::check_line(path, &text);
+        println!("{}", line);
+        if !read {
+            bad += 1;
         }
     }
     process::exit(if bad == 0 { 0 } else { 1 });

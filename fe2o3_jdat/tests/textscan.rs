@@ -2,7 +2,8 @@
 //!
 //! The scan counts a clean record, a value glued to another, a comma-less comment, a fraction in
 //! a whole-number kind, a record that is not UTF-8 and a truncated tail, each in its class, and
-//! the report holds the place and a tag but never a word of what was planted.
+//! the report holds the place (line and column) and a tag but never a word of what was planted,
+//! and `jdat_check`'s line for a file does the same.
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::string::scan;
@@ -59,7 +60,21 @@ fn test_a_framed_scan_counts_by_class_and_prints_no_text_00() -> Outcome<()> {
     req!(first.hash.clone(), scan::tag(glued.as_bytes()));
     req!(first.class, "no separator");
     req!(out.is_clean(), false);
+    // Every refusal of text says where, as a line and a column, and a report line carries both.
+    for r in &out.refused {
+        if r.class != scan::NOT_UTF8 {
+            req!((r.line >= 1 && r.col >= 1), true);
+        }
+    }
     let report = out.report();
+    for line in report.lines().filter(|l| l.starts_with("REFUSED ") && !l.ends_with(scan::NOT_UTF8)) {
+        let num = |label: &str| line.split(' ').filter_map(|w| w.strip_prefix(label))
+            .filter_map(|n| n.parse::<usize>().ok()).next().unwrap_or(0);
+        if num("line=") < 1 || num("col=") < 1 {
+            return Err(err!("A REFUSED line does not say where: {}", line; Test, Data));
+        }
+    }
+    req!(report.contains(&fmt!("line={} col={}", first.line, first.col)), true);
     for word in [SECRET, "seq", "note", "2.5"] {
         if report.contains(word) {
             return Err(err!("The report repeats {:?}: {}", word, report; Test, Data));
@@ -107,5 +122,35 @@ fn test_a_tag_is_sixteen_hex_digits_and_fixed_00() -> Outcome<()> {
     req!(scan::tag(b""), "cbf29ce484222325".to_string());
     req!(scan::tag(b"a"), "af63dc4c8601ec8c".to_string());
     req!(scan::tag(b"foobar"), "85944171f73967e8".to_string());
+    Ok(())
+}
+
+#[test]
+fn test_jdat_check_says_where_and_prints_no_text_00() -> Outcome<()> {
+    // A refused file is one line: its path, the line and the column, and the error's tags. No
+    // key, no value, and none of the refusal's words, which a caller's log would hold.
+    let key = "Qv7kXp";
+    let val = "Zq9xW";
+    for (text, line) in [
+        (fmt!("{{\"{}\": {} \"{}2\": 1}}", key, val, key), 1),
+        (fmt!("{{\n\"a\": 1,\n\"{}\": (u8|{}.5)}}", key, val), 3),
+        (fmt!("{{\"{}\": 1,\n \"{}\": 2}}", key, key), 2),
+        (fmt!("{{\"{}\": [1,, {}]}}", key, val), 1),
+    ] {
+        let (read, said) = scan::check_line("f.jdat", &text);
+        req!(read, false);
+        let want = fmt!("f.jdat: REFUSED line {} col ", line);
+        if !said.starts_with(&want) {
+            return Err(err!("The line should start {:?}, and reads {:?}", want, said; Test, Data));
+        }
+        let col = said[want.len()..].split(':').next().and_then(|n| n.parse::<usize>().ok()).unwrap_or(0);
+        req!((col >= 1), true);
+        for word in [key, val, "7351846"] {
+            if said.contains(word) {
+                return Err(err!("The line repeats {:?}: {}", word, said; Test, Data));
+            }
+        }
+    }
+    req!(scan::check_line("g.jdat", "{\"a\": [1, 2]}"), (true, "g.jdat: OK".to_string()));
     Ok(())
 }

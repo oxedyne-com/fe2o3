@@ -31,11 +31,12 @@ impl Dat {
     /// order written and every comment dropped, for a browser's `JSON.parse`.
     ///
     /// A comment is a note on a value to the decoder (a `Dat::ABox`), and a note standing alone is
-    /// an entry with an empty key and value; both go. A value missing where one is needed, as in
-    /// `[1,,2]`, is refused naming its key. With `js_safe`, a whole number past 2^53 - 1 in size
-    /// and a float that is not finite are refused too, since `JSON.parse` would round them
-    /// silently. A refusal by the decoder names the line, column and key; one found here, after
-    /// the text is read, names the key alone.
+    /// an entry with an empty key and value; both go. With `js_safe`, a whole number past 2^53 - 1
+    /// in size and a float that is not finite are refused too, since `JSON.parse` would round them
+    /// silently. A refusal by the decoder names the line and column, as `[1,,2]` does. One found
+    /// here, after the text is read, names the position in the data, such as `{0}[2]{3}`, the
+    /// fourth member of the third item of the first member, and a refusal holds no key and no
+    /// value, since either may be personal data.
     pub fn jdat_to_json(
         s:          &str,
         limits:     &DecodeLimits,
@@ -72,32 +73,27 @@ fn is_note(key: &Dat, val: &Dat) -> bool {
         && matches!(bare(val), Dat::Empty)
 }
 
+// The position of what is being written, outermost first: `[2]` the third item of a list, `{3}`
+// the fourth member of a map. It holds no key.
 fn at(path: &[String]) -> String {
-    let mut s = String::new();
-    for seg in path {
-        if !s.is_empty() && !seg.starts_with('[') {
-            s.push('.');
-        }
-        s.push_str(seg);
-    }
-    s
+    path.concat()
 }
 
-// Where a refusal happened, in words: the key, or the top level when there is none.
+// Where a refusal happened, in words: the position, or the top level when there is none.
 fn place(path: &[String]) -> String {
     if path.is_empty() {
         return fmt!("the top level");
     }
-    fmt!("key '{}'", at(path))
+    fmt!("the position {}", at(path))
 }
 
-// The name of a member; `last` is the name before it, to place a nameless one.
-fn key_text(key: &Dat, path: &[String], last: &str) -> Outcome<String> {
+// The name of the `n`th member, counting from 0.
+fn key_text(key: &Dat, path: &[String], n: usize) -> Outcome<String> {
     match bare(key) {
         Dat::Str(s) => Ok(s.clone()),
         Dat::Empty  => Err(err!(
             "A member has no name, in {}{}.", place(path),
-            if last.is_empty() { String::new() } else { fmt!(", after the member '{}'", last) };
+            if n == 0 { String::new() } else { fmt!(", after member {}", n - 1) };
             Invalid, Input, Decode, Missing)),
         other       => Err(err!(
             "A name must be a string in JSON, found a {:?} in {}.", other.kind(), place(path);
@@ -145,23 +141,21 @@ fn write_members<'a, I: Iterator<Item = (&'a Dat, &'a Dat)>>(
 {
     out.push('{');
     let mut n = 0;
-    let mut last = String::new();
     for (k, v) in members {
         if is_note(k, v) {
             continue;
         }
-        let key = res!(key_text(k, path, &last));
+        let key = res!(key_text(k, path, n));
         if n > 0 {
             out.push(',');
         }
         out.push('"');
         out.push_str(&escape_json_string(&key));
         out.push_str("\":");
-        last = key.clone();
-        path.push(key);
+        path.push(fmt!("{{{}}}", n));
         if matches!(bare(v), Dat::Empty) {
             return Err(err!(
-                "The member '{}' has no value.", at(path); Invalid, Input, Decode, Missing));
+                "The member at {} has no value.", at(path); Invalid, Input, Decode, Missing));
         }
         res!(write_json(v, js_safe, path, out));
         path.pop();
