@@ -1091,10 +1091,10 @@ impl Dat {
         None
     }
 
-    // A frame ends at its closing character.  A dataless user kind whose payload is a map or a
-    // list, `(node|{...})`, ends at the payload's `}` or `]`, not at the `)` that is still to
-    // come, so the frame reads that `)` itself, past whitespace and comments, and refuses a text
-    // that lacks it.  Every frame then leaves the text just past its own end.
+    // A frame opened by `(kind|` ends at its own `)`.  A dataless user kind whose payload is a map
+    // or a list, `(node|{...})`, ends at the payload's `}` or `]`, with the `)` still to come, so
+    // the frame reads that `)` itself, past whitespace and comments, and refuses a text that
+    // lacks it.  Every frame then leaves the text just past its own end.
     #[inline(never)]
     fn frame_done<
         M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
@@ -1108,9 +1108,8 @@ impl Dat {
     )
         -> Outcome<Self>
     {
-        // An explicit kind whose molecule has a frame of its own, `(omap|{...})`, ends at its own ')'.
-        let curr = cursor.borrow().curr;
-        if !explicit_kind || (curr != '}' && curr != ']') {
+        // A frame that has just read its ')' is done.
+        if !explicit_kind || cursor.borrow().curr == ')' {
             return Ok(dat);
         }
         match Self::next_significant(iter, cfg, cursor) {
@@ -1682,6 +1681,7 @@ impl Dat {
     )
         -> Outcome<Option<Self>>
     {
+        let inner_paren = state.kind_capture; // This ')' may close a kindicle inside the frame.
         let kind_inner = if state.kind_capture {
             // We were capturing a kind, but the daticle finished before
             // | and no data was found.  This is valid for AtomLogic
@@ -1773,6 +1773,11 @@ impl Dat {
             // We don't necessarily return out of the method here because the
             // daticle might be part of a molecule, with the exception of the outer
             // kind being a Dat::ABox.
+        }
+        // A dataless kindicle that is the payload of a kind awaiting it, `(box|(true))`, ends at
+        // its own ')'.  The frame ends at the next one, which wraps the payload.
+        if inner_paren && state.explicit_kind && state.molecular_capture == None {
+            return Ok(None);
         }
         if let Kind::ABox(_) = state.kind_outer {
             match &store.val_opt {

@@ -205,3 +205,37 @@ fn test_a_whole_number_kind_takes_no_fraction_00() {
     assert_eq!(read("(u8|0xff)"), Dat::U8(255));
     assert_eq!(read("(u16|0x1e5)"), Dat::U16(485));
 }
+
+fn bx(d: Dat) -> Dat {
+    Dat::Box(Box::new(d))
+}
+
+fn sm(d: Dat) -> Dat {
+    Dat::Opt(Box::new(Some(d)))
+}
+
+#[test]
+fn test_a_wrapper_round_a_dataless_value_reads_its_own_paren_00() {
+    // The encoder writes these, and the wrapper's frame ended at the inner ')' and left the
+    // outer one over: "Found text after the end of the value".
+    assert_eq!(read("(box|(true))"), bx(Dat::Bool(true)));
+    assert_eq!(read("(box|(false))"), bx(Dat::Bool(false)));
+    assert_eq!(read("(some|(none))"), sm(Dat::Opt(Box::new(None))));
+    assert_eq!(read("(some|(empty))"), sm(Dat::Empty));
+    assert_eq!(read("(some|(some|(none)))"), sm(sm(Dat::Opt(Box::new(None)))));
+    assert_eq!(read("(box|(box|(box|(empty))))"), bx(bx(bx(Dat::Empty))));
+    // The same in a map, where the stray ')' once emptied the map, and in a list.
+    let d = read("{\"k\": (box|(none)), \"j\": (some|(true)), \"i\": 1}");
+    assert_eq!(d.to_string(), "{ \"i\": (u8|1), \"j\": (some|(true)), \"k\": (box|(none))}");
+    assert_eq!(read("[(some|(empty)), (box|(true)), 3]").to_string(),
+        "[ (some|(empty)), (box|(true)), (u8|3)]");
+    // Whitespace and a note may stand inside the wrapper, round its payload.
+    assert_eq!(read("(box| ( true ) )"), bx(Dat::Bool(true)));
+    assert_eq!(read("(box|(true) ! n ! )"), bx(Dat::Bool(true)));
+    // A paren too many, or too few, is a fault wherever it falls.
+    refused("(box|(true)))", &["after the end"]);
+    refused("(box|(true)", &["closure"]);
+    refused("{\"k\": (box|(none)))}", &[]);
+    refused("{\"k\": (box|(none)}", &[]);
+    refused("[(some|(empty))), 3]", &[]);
+}
