@@ -34,38 +34,22 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
-use oxedyne_fe2o3_crypto::enc::EncryptionScheme;
-use oxedyne_fe2o3_hash::{
-    csum::ChecksumScheme,
-    hash::HashScheme,
-};
-use oxedyne_fe2o3_jdat::id::IdDat;
 use oxedyne_fe2o3_o3db_sync::{
     base::constant,
     comm::response::Wait,
-    data::core::RestSchemesInput,
-    db::O3db,
+    gateway::{
+        self,
+        Uid,
+    },
     migrate,
 };
 
 use std::{
-    fs,
-    path::{
-        Path,
-        PathBuf,
-    },
+    path::PathBuf,
     process,
     thread,
     time::Duration,
 };
-
-
-// The gateway's own parameterisation. Change these only to match a store
-// written by a differently configured application.
-type Uid = IdDat<16, u128>;
-type Db  = O3db<16, Uid, EncryptionScheme, HashScheme, HashScheme, ChecksumScheme>;
-
-const DB_KEY_LEN: usize = 32;
 
 
 fn main() {
@@ -81,17 +65,17 @@ fn run() -> Outcome<()> {
     let args = res!(Args::parse());
 
     // Read the at-rest key from disk at runtime. No default, ever.
-    let key = res!(load_key(&args.key_path));
+    let key = res!(gateway::load_key(&args.key_path));
 
     // 1. Open the source read-only: garbage collection off, no writes issued.
     info!("Opening source store at {:?} (gc off, read-only)...", args.source);
-    let src = res!(open_store(&args.source, None, &key, false, "migrate-src"));
+    let src = res!(gateway::open_store(&args.source, None, &key, false, "migrate-src"));
 
     // 2. Create the target with the SOURCE'S configuration, so chunk geometry
     //    and encryption parameters match exactly.
     let src_cfg = src.cfg().clone();
     info!("Creating fresh target store at {:?} with the source's configuration...", args.target);
-    let tgt = res!(open_store(&args.target, Some(src_cfg), &key, false, "migrate-tgt"));
+    let tgt = res!(gateway::open_store(&args.target, Some(src_cfg), &key, false, "migrate-tgt"));
 
     // 3. Migrate and verify.
     let scan_wait = Wait {
@@ -139,57 +123,6 @@ fn run() -> Outcome<()> {
     Ok(())
 }
 
-/// Opens and starts a store, leaving garbage collection off unless asked.
-fn open_store(
-    root:       &Path,
-    cfg_opt:    Option<OzoneConfigT>,
-    key:        &[u8; DB_KEY_LEN],
-    gc_on:      bool,
-    label:      &str,
-)
-    -> Outcome<Db>
-{
-    let aes_gcm = res!(EncryptionScheme::new_aes_256_gcm_with_key(&key[..]));
-    let crc32 = ChecksumScheme::new_crc32();
-    let schms_input = RestSchemesInput::new(
-        Some(aes_gcm),
-        None::<HashScheme>,
-        None::<HashScheme>,
-        Some(crc32),
-    );
-    let mut db: Db = res!(O3db::new(root, cfg_opt, schms_input, Uid::default()));
-    res!(db.start(label.to_string()));
-    // Default is off; state it explicitly so a read never collects.
-    res!(ok!(db.updated_api()).activate_gc(gc_on));
-    thread::sleep(Duration::from_millis(500));
-    let (_, msgs) = res!(db.api().ping_bots(constant::USER_REQUEST_WAIT));
-    info!("{}: {} bots responded.", label, msgs.len());
-    Ok(db)
-}
-
-/// Reads the 32-byte at-rest key, failing loudly if it is absent or the wrong
-/// size. There is deliberately no fallback: a wrong key cannot decrypt a byte.
-fn load_key(path: &Path) -> Outcome<[u8; DB_KEY_LEN]> {
-    if !path.exists() {
-        return Err(err!(
-            "No database key at {:?}. Supply the store's at-rest key with --key; \
-            without it the store cannot be read.", path;
-            Missing, Key, Input));
-    }
-    let bytes = res!(fs::read(path));
-    if bytes.len() != DB_KEY_LEN {
-        return Err(err!(
-            "The database key at {:?} is {} bytes, but must be {}.",
-            path, bytes.len(), DB_KEY_LEN;
-            Invalid, Input, Key));
-    }
-    let mut key = [0u8; DB_KEY_LEN];
-    key.copy_from_slice(&bytes);
-    Ok(key)
-}
-
-// Alias so the signature above does not need the full config path spelled out.
-type OzoneConfigT = oxedyne_fe2o3_o3db_sync::base::cfg::OzoneConfig;
 
 struct Args {
     source:     PathBuf,

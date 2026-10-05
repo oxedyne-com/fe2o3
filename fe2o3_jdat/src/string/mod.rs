@@ -4,3 +4,4 @@ pub mod dec;
 pub mod enc;
 pub mod js;
 pub mod json;
+pub mod scan;
