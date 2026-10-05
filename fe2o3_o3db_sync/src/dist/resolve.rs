@@ -20,7 +20,6 @@ use super::{
 	engine::DistOzone,
 	record::{
 		Record,
-		RecordDigest,
 		RecordId,
 	},
 	storage::{
@@ -154,7 +153,7 @@ pub struct Convergence {
 /// that peer, and its stores are passed to `after` in turn. It then runs full
 /// rounds (the in-flight messages, the deferred puts, and an anti-entropy
 /// exchange between every ordered pair of peers on every table) until a round
-/// stores nothing, and compares the peers' digests, and each seed's final state
+/// stores nothing, and compares the bytes the peers hold, and each seed's final state
 /// with the first seed's. The `Err` names the seed, the table and the first
 /// differing id; it also reports a run that is still storing after
 /// `cfg.max_rounds` ("did not quiesce"), a resolver that fails, and an `after`
@@ -183,7 +182,7 @@ pub fn check_convergence<R, F, P>(
 			"check_convergence needs max_rounds >= 1 and at least one table.";
 			Invalid, Input, Missing));
 	}
-	let mut first: Option<(u64, Vec<Vec<RecordDigest>>)> = None;
+	let mut first: Option<(u64, Vec<Held>)> = None;
 	for seed in cfg.seeds.clone() {
 		let state = match run_seed(cfg, seed, tables, records, &mut new_resolver, &mut after) {
 			Ok(state)	=> state,
@@ -209,8 +208,13 @@ pub fn check_convergence<R, F, P>(
 	Ok(())
 }
 
+// What a peer holds on one table, by id: the stored bytes themselves. A content
+// digest is only a summary and two values can share one, so it is used to list
+// the ids and never to compare the values.
+type Held = Vec<(RecordId, Vec<u8>)>;
+
 // Builds the peers for one seed, drives them to quiescence and returns the
-// final digests of each table, after checking that every peer agrees.
+// final bytes held on each table, after checking that every peer agrees.
 fn run_seed<R, F, P>(
 	cfg:			&Convergence,
 	seed:			u64,
@@ -219,7 +223,7 @@ fn run_seed<R, F, P>(
 	new_resolver:	&mut F,
 	after:			&mut P,
 )
-	-> Outcome<Vec<Vec<RecordDigest>>>
+	-> Outcome<Vec<Held>>
 	where
 		R:	Resolver,
 		F:	FnMut(usize) -> R,
@@ -291,7 +295,16 @@ fn run_seed<R, F, P>(
 		for engine in &run.engines {
 			let mut d = res!(engine.storage().digests(table));
 			d.sort_by(|a, b| a.id.cmp(&b.id));
-			mine.push(d);
+			let mut held = Vec::with_capacity(d.len());
+			for digest in d {
+				let record = res!(engine.storage().get(table, &digest.id));
+				let record = res!(record.ok_or_else(|| err!(
+					"check_convergence: seed {}: table '{}' lists id {} in its digests \
+					but cannot read it.", seed, table, hex(&digest.id);
+					Test, Missing)));
+				held.push((digest.id, record.value));
+			}
+			mine.push(held);
 		}
 		for p in 1..n {
 			if let Some(id) = first_diff(&mine[0], &mine[p]) {
@@ -455,23 +468,23 @@ impl<'a, R, P> Run<'a, R, P>
 	}
 }
 
-// The first id at which two id-sorted digest lists differ in presence or content.
-fn first_diff(a: &[RecordDigest], b: &[RecordDigest]) -> Option<RecordId> {
+// The first id at which two id-sorted lists differ in presence or in bytes.
+fn first_diff(a: &[(RecordId, Vec<u8>)], b: &[(RecordId, Vec<u8>)]) -> Option<RecordId> {
 	let (mut i, mut j) = (0, 0);
 	loop {
 		match (a.get(i), b.get(j)) {
 			(None, None)		=> return None,
-			(Some(x), None)		=> return Some(x.id),
-			(None, Some(y))		=> return Some(y.id),
+			(Some(x), None)		=> return Some(x.0),
+			(None, Some(y))		=> return Some(y.0),
 			(Some(x), Some(y))	=> {
-				if x.id < y.id {
-					return Some(x.id);
+				if x.0 < y.0 {
+					return Some(x.0);
 				}
-				if y.id < x.id {
-					return Some(y.id);
+				if y.0 < x.0 {
+					return Some(y.0);
 				}
-				if x.content != y.content {
-					return Some(x.id);
+				if x.1 != y.1 {
+					return Some(x.0);
 				}
 				i += 1;
 				j += 1;

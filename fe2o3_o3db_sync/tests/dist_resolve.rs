@@ -1387,6 +1387,70 @@ fn decide_store_fault_leaves_instance_undecided() -> Outcome<()> {
 	Ok(())
 }
 
+#[test]
+fn check_detects_trailing_zero_divergence() -> Outcome<()> {
+	// Control: first-arrival-wins on [1] and [2] is caught.
+	let ctl = vec![rec("identity", rid(1), &[1]), rec("identity", rid(1), &[2])];
+	let r = check_convergence(&converge(0..32, 16), &["identity"], &ctl, |_| FirstWins, |_, _, _| Ok(Vec::new()));
+	assert!(r.is_err(), "control: FirstWins on [1] and [2] passed");
+
+	// The same resolver on [1] and [1, 0]: the peers hold different bytes whose
+	// content digests are equal, so only a comparison of the bytes sees it.
+	let recs = vec![rec("identity", rid(1), &[1]), rec("identity", rid(1), &[1, 0])];
+	let text = failure_text(check_convergence(
+		&converge(0..32, 16), &["identity"], &recs, |_| FirstWins, |_, _, _| Ok(Vec::new()),
+	));
+	assert!(text.contains("differs from peer 0"), "FirstWins on [1] and [1, 0] passed: {:?}", text);
+	Ok(())
+}
+
+/// An escrow record needs the identity at its own id: with it missing the rule
+/// says Defer, or Refuse when `refuse` is set (the bug the contract warns of).
+struct NeedsIdentity {
+	refuse: bool,
+}
+
+impl Resolver for NeedsIdentity {
+	fn resolve<V: ReadView>(
+		&self,
+		ctx:		&ResolveCtx,
+		view:		&V,
+		table:		&str,
+		id:			&RecordId,
+		held:		Option<&[u8]>,
+		incoming:	&[u8],
+	)
+		-> Outcome<Verdict>
+	{
+		if table == "escrow" && res!(view.get("identity", id)).is_none() {
+			return Ok(if self.refuse {
+				Verdict::Refuse(s("no identity"))
+			} else {
+				Verdict::Defer
+			});
+		}
+		LastVersionWins.resolve(ctx, view, table, id, held, incoming)
+	}
+}
+
+#[test]
+fn refuse_on_missing_dependency_fails_check() -> Outcome<()> {
+	// The escrow is listed before its identity.
+	let recs = vec![
+		rec("escrow", rid(1), &LastVersionWins::value(1, b"e")),
+		rec("identity", rid(1), &LastVersionWins::value(1, b"i")),
+	];
+	let cfg = converge(0..32, 16);
+	let tables = ["identity", "escrow"];
+	let good = check_convergence(&cfg, &tables, &recs, |_| NeedsIdentity { refuse: false }, |_, _, _| Ok(Vec::new()));
+	assert!(good.is_ok(), "Defer on a missing dependency failed: {:?}", good.err());
+	let bad = failure_text(check_convergence(
+		&cfg, &tables, &recs, |_| NeedsIdentity { refuse: true }, |_, _, _| Ok(Vec::new()),
+	));
+	assert!(!bad.is_empty(), "Refuse on a missing dependency passed the check");
+	Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Known red, carried by A2: the content hash ignores length (2-F1) and
 // anti-entropy repairs only the dialling side (2-F3).
