@@ -359,3 +359,41 @@ fn test_a_plain_list_inside_a_tuple_is_a_list_00() {
     assert_eq!(read("(t2|[ {\"k\": [1, 2]}, 3 ])"),
         Dat::Tup2(Box::new([map_of("k", l12.clone()), Dat::U8(3)])));
 }
+
+#[test]
+fn test_a_kind_or_quote_left_open_at_the_top_is_refused_00() {
+    // Each of these read: `(` as (empty), `(true` as true, `(none` as none, `(u8` as the string
+    // "u8", `"abc` and `'abc` as "abc".
+    for s in ["(", "(true", "(false", "(none", "(empty", "(u8", "(box", "(my_kind", " ( "] {
+        refused(s, &["closure", "')'"]);
+    }
+    for s in ["\"abc", "'abc", "\"", "'", "\"a\\\"", "he\"llo", "{\"a\": \"x}", "[\"x, 1]", "{\"a\": 'x}"] {
+        refused(s, &["closure", "quote"]);
+    }
+    // A quote or a kind that is closed reads, wherever it sits.
+    assert_eq!(read("(true)"), Dat::Bool(true));
+    assert_eq!(read("\"a'b\""), Dat::Str(fmt!("a'b")));
+    assert_eq!(read("'a\"b'"), Dat::Str(fmt!("a\"b")));
+}
+
+#[test]
+fn test_a_stray_bar_or_colon_is_refused_00() {
+    // `(u8|1|2)` read as 12 and `{"a": 1:2}` as {"a": 2}; `{:1}` gave an (empty) key.
+    for s in [
+        "(u8|1|2)", "{\"a\": 1|2}", "[1|2]", "|", "||", "[|]", "{\"a\": |}", "(u8||1)", "a|b",
+        "{a|b: 1}", "(box|(u8|1)|)", "[(u8|1)|]",
+    ] {
+        refused(s, &["'|'"]);
+    }
+    for s in [
+        "{\"a\": 1:2}", "{\"a\"::1}", "{\"a\": 1, \"b\": : 2}", "{\"a\": \"b\": 1}",
+        "{\"a\": 1,, \"b\": 2}",
+    ] {
+        refused(s, &["':'"]);
+    }
+    // The separators in their places, and inside strings and notes, read.
+    assert_eq!(read("(u8|1)"), Dat::U8(1));
+    assert_eq!(read("{\"a|b\": \"c:d|e\", ! n|: ! \"f\": (u8|2)}").to_string(),
+        "{ \"a|b\": \"c:d|e\", \"f\" !n|: !: (u8|2)}");
+    read("{(u8|1): 2, [3]: 4}");
+}

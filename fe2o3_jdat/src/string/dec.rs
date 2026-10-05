@@ -1386,6 +1386,8 @@ impl Dat {
                     new_state.explicit_kind = true;
                     return Ok(Step::Descend(new_state, Descent::Kindicle));
                 }
+                // Nothing else is parted by a bar, so a bar here joined values, `(u8|1|2)`.
+                return Err(Self::stray_bar_err(cursor));
             }
             ')' => {
                 // Deal with atoms (e.g. (FALSE)), which should only
@@ -1517,8 +1519,17 @@ impl Dat {
     )
         -> Outcome<Self>
     {
-        // A frame that was opened with a '(' or a bracket and is out of text has lost its closure,
-        // whatever it holds, and what it holds is not the answer.
+        // A kind label or a quote that is out of text has lost its closure, and so has a frame
+        // that was opened with a '(' or a bracket, whatever it holds, since what it holds is not
+        // the answer.
+        if state.kind_capture {
+            return Err(err!("Expected closure of a kind annotation with ')'";
+                String, Input, Decode, Missing));
+        }
+        if state.quote_protection != Quote::None {
+            return Err(err!("Expected closure of a quoted string with its closing quote";
+                String, Input, Decode, Missing));
+        }
         if state.explicit_kind && state.molecular_capture == None {
             return Err(err!("Expected closure of a kind annotation with ')'";
                 String, Input, Decode, Missing));
@@ -1559,6 +1570,14 @@ impl Dat {
                 as {:?} ({})", state.kind_outer, cursor.borrow();
             String, Input, Decode, Invalid),
         }
+    }
+
+    #[inline(never)]
+    fn stray_bar_err(cursor: &RefCell<Cursor>) -> Error<ErrTag> {
+        err!(
+            "A '|' parts a kind from its value, and follows a '(' and a kind label only ({})",
+            cursor.borrow();
+        String, Input, Decode, Invalid)
     }
 
     #[inline(never)]
@@ -2102,6 +2121,13 @@ impl Dat {
                 String, Input, Decode, Invalid));
             }
             Some(MolecularCapture::Map) => {
+                // A key has one ':'; a second, or one after a ',' that made the item a key
+                // with no value, would drop the first value.
+                if store.key_opt.is_some() {
+                    return Err(err!(
+                        "A ':' follows a key that is already set, by an earlier ':' or by a ',' \
+                        after no value ({})", cursor.borrow(); String, Input, Decode, Invalid));
+                }
                 // We're expecting to have a daticle to add to the store.map.
                 let mut dat = match store.val_opt.take() {
                     Some(dat) => dat,
@@ -2120,11 +2146,8 @@ impl Dat {
                         store.comment.extract(),
                     );
                 }
-                if store.key_opt == None {
-                    cursor.borrow_mut().name(Self::key_name(&dat));
-                    store.key_opt = Some(dat);
-                    store.val_opt = None;
-                }
+                cursor.borrow_mut().name(Self::key_name(&dat));
+                store.key_opt = Some(dat);
                 store.slurp = Slurp::new();
             }
         }

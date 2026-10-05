@@ -158,7 +158,7 @@ fn test_trailing_commas_00() -> Outcome<()> {
     // A comma with nothing before it is not a trailing one.
     refused("{,}", &["line 1"]);
     refused("[,]", &["missing", "top level"]);
-    refused("{\"a\": 1,, \"b\": 2}", &["no name", "after the member 'a'"]);
+    refused("{\"a\": 1,, \"b\": 2}", &["':'", "line 1, column 14"]);
     refused("[1,,2]", &["missing", "after item 1"]);
     Ok(())
 }
