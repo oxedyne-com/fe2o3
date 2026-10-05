@@ -1399,35 +1399,17 @@ impl Dat {
                 if Self::slot_taken(store) {
                     return Err(Self::no_separator_err(cursor));
                 }
+                // A wrapper (box, some, user kind) takes the list as its payload, read a level
+                // down like any other; the wrapper wraps it at its own ')'.
+                res!(Self::opener_wraps(state, false, cursor));
                 let root_list = state.molecular_capture == None && state.kind_outer == Kind::Unknown;
-                if state.molecular_capture == None {
-                    // A `[` that is the whole molecular payload of a dataless user kind --
-                    // `(node|[...])` -- resolves in this frame to a bare list, the list analogue
-                    // of `{` resolving `(node|{...})` to a bare map.  Capture the list here and
-                    // reset the frame's kind to List so `close_bracket` builds it and terminates
-                    // at the matching `]`, leaving the enclosing `)` and any separators to the
-                    // parent frame.  Descending as the ordinary branch below does would not
-                    // terminate the payload frame at `]`, so it would swallow the parent's
-                    // separators.  Without this a `[` under a user kind raised "Found a '['
-                    // which is incompatible".
-                    let dataless_usr = matches!(
-                        &state.kind_outer, Kind::Usr(ukid) if ukid.kind().is_none());
-                    if state.kind_outer == Kind::Unknown {
-                        state.molecular_capture = Some(MolecularCapture::ListMixed);
-                    } else if dataless_usr {
-                        state.molecular_capture = Some(MolecularCapture::ListMixed);
-                        state.kind_outer = Kind::List;
-                        return Ok(Step::Continue);
-                    } else {
-                        match MolecularCapture::from_kind(&state.kind_outer) {
-                            Some(MolecularCapture::Map) |
-                            None => return Err(Self::open_bracket_err(state, cursor)),
-                            _ => (),
-                        }
-                    }
+                if root_list {
+                    state.molecular_capture = Some(MolecularCapture::ListMixed);
                 }
                 let mut new_state = state.recurse();
-                if !state.kind_outer.uses_list_brackets() {
+                // The list is of the kind the `(kind|` just before it names, if it is a list kind.
+                // Any other `[` is a plain list, whatever its parent is.
+                if !(state.explicit_kind && state.kind_outer.uses_list_brackets()) {
                     new_state.kind_outer = Kind::List;
                 }
                 return Ok(Step::Descend(new_state,
@@ -1448,7 +1430,8 @@ impl Dat {
                 if Self::slot_taken(store) {
                     return Err(Self::no_separator_err(cursor));
                 }
-                if state.molecular_capture == None {
+                let wraps = res!(Self::opener_wraps(state, true, cursor));
+                if state.molecular_capture == None && !wraps {
                     state.molecular_capture = Some(MolecularCapture::Map);
                     // Also honour cfg.use_ordmaps at the top
                     // level. Without this, a root `{...}`
@@ -1463,13 +1446,10 @@ impl Dat {
                     let mut new_state = state.recurse();
                     // A nested `{` value is a fresh map unless we are continuing an explicitly
                     // declared map kind -- the `{` right after a `(MAP|` or `(OMAP|` kindicle.
-                    // When the parent carries a non-map explicit kind (a user kind acting as a
-                    // map, say), that kind belongs to the parent, not to this value, so the value
-                    // must be defined as a map here.  Mirrors the `[` branch, which already resets
-                    // to `Kind::List`.  Without this a nested map value inherits the parent's
-                    // non-map kind, leaving its own frame with no map capture.
+                    // Any other kind, a wrapper's included, belongs to the parent, not to this
+                    // value, so the value is defined as a map here, as the `[` arm does for a
+                    // list.
                     if !(state.explicit_kind && state.kind_outer.is_map()) {
-                        // We are free to define the kind of this store.map.
                         match cfg.use_ordmaps {
                             true => new_state.kind_outer = Kind::OrdMap,
                             false => new_state.kind_outer = Kind::Map,
@@ -1594,21 +1574,37 @@ impl Dat {
         String, Input, Decode, Invalid)
     }
 
+    // May this frame take a '[' (`map` false) or a '{' (`map` true)?  Only a frame opened by
+    // `(kind|` is asked.  A map kind takes a '{' and a list kind a '[', each as the frame's own
+    // molecule.  A box, a some or a user kind takes either, as its payload, and answers true so
+    // that the molecule is read a level down.  An atom, and the other molecule's kind, take
+    // neither.
     #[inline(never)]
-    fn open_bracket_err(
+    fn opener_wraps(
         state:  &DecoderState,
+        map:    bool,
         cursor: &RefCell<Cursor>,
     )
-        -> Error<ErrTag>
+        -> Outcome<bool>
     {
-        match MolecularCapture::from_kind(&state.kind_outer) {
-            Some(MolecularCapture::Map) => err!(
-                "Expecting a store.map bracket '{{' but found a '[' ({})", cursor.borrow();
-            String, Input, Decode, Invalid),
-            _ => err!(
-                "Found a '[' which is incompatible with a {:?} ({})",
-                state.kind_outer, cursor.borrow();
-            String, Input, Decode, Invalid),
+        if !state.explicit_kind {
+            return Ok(false);
+        }
+        let fits = match state.molecular_capture {
+            Some(MolecularCapture::Map) => Some(map),
+            Some(_)                     => Some(!map),
+            None                        => match state.kind_outer.case() {
+                KindCase::MoleculeUnitary => None,
+                _ => Some(false),
+            },
+        };
+        match fits {
+            None        => Ok(true),
+            Some(true)  => Ok(false),
+            Some(false) => Err(err!(
+                "A '{}' cannot open the value of a {:?} kind ({})",
+                if map { '{' } else { '[' }, state.kind_outer, cursor.borrow();
+            String, Input, Decode, Invalid)),
         }
     }
 

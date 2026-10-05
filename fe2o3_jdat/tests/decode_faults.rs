@@ -283,3 +283,79 @@ fn test_a_finished_value_takes_no_other_before_a_separator_00() {
     assert_eq!(read("[he\"(]\"o, (u8|1)]"), Dat::List(vec![Dat::Str(fmt!("he(]o")), Dat::U8(1)]));
     assert_eq!(read("(u8 |1)"), Dat::U8(1));
 }
+
+fn map_of(k: &str, v: Dat) -> Dat {
+    let mut m = BTreeMap::new();
+    m.insert(Dat::Str(k.to_string()), v);
+    Dat::Map(m)
+}
+
+#[test]
+fn test_a_kind_takes_only_the_opener_that_fits_it_00() {
+    // A box, a some and a user kind wrap a list or a map; an atom or the other molecule's kind
+    // takes neither. These all read as the bare molecule, wrapper lost, or were refused.
+    assert_eq!(read("(box|{})"), Dat::Box(Box::new(Dat::Map(BTreeMap::new()))));
+    assert_eq!(read("(box|{\"k\": (u8|1)})"), Dat::Box(Box::new(map_of("k", Dat::U8(1)))));
+    assert_eq!(read("(some|{\"k\": (u8|1)})"), Dat::Opt(Box::new(Some(map_of("k", Dat::U8(1))))));
+    assert_eq!(read("(box|[])"), Dat::Box(Box::new(Dat::List(Vec::new()))));
+    assert_eq!(read("(box|[1])"), Dat::Box(Box::new(Dat::List(vec![Dat::U8(1)]))));
+    assert_eq!(read("(some|[1, 2])"),
+        Dat::Opt(Box::new(Some(Dat::List(vec![Dat::U8(1), Dat::U8(2)])))));
+    assert_eq!(read("(box|(some|{\"a\": (box|[1])}))"), Dat::Box(Box::new(Dat::Opt(Box::new(Some(
+        map_of("a", Dat::Box(Box::new(Dat::List(vec![Dat::U8(1)])))))))))
+    );
+    assert_eq!(read("[(box|{}), (some|[])]"), Dat::List(vec![
+        Dat::Box(Box::new(Dat::Map(BTreeMap::new()))),
+        Dat::Opt(Box::new(Some(Dat::List(Vec::new())))),
+    ]));
+    for s in [
+        "(u8|{\"a\":1})", "(str|{\"a\":1})", "(f64|{})", "(bool|{})", "(u8|[1])", "(str|[])",
+        "(map|[1])", "(omap|[1])", "(list|{\"a\":1})", "(t2|{\"a\":1})", "(vek|{})", "(bu8|{})",
+        "{\"x\": (u8|{\"a\":1})}", "{\"x\": (map|[1])}", "[(list|{}), 1]", "{\"x\": (str|[1])}",
+    ] {
+        refused(s, &["line 1"]);
+    }
+    refused("(box|[1] [2])", &["no ',' or ':'"]);
+    refused("(box|{} {})", &["no ',' or ':'"]);
+    refused("(box|{} [1])", &["no ',' or ':'"]);
+    refused("(box|{\"a\":1}", &["closure"]);
+}
+
+#[test]
+fn test_a_user_kind_wraps_its_list_or_map_payload_00() {
+    let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+    let ukid = UsrKindId::new(1, Some("node"), None);
+    uks.add(ukid.clone()).unwrap_or_default();
+    let cfg = DecoderConfig::<_, _>::jdat(Some(uks));
+    let at = |s: &str| match Dat::decode_string_with_config(s, &cfg) {
+        Ok(d) => d,
+        Err(e) => panic!("{:?} should read, and was refused: {}", s, e.plain()),
+    };
+    assert_eq!(at("(node|{\"a\": (u8|1)})"), Dat::Usr(ukid.clone(), Some(Box::new(map_of("a", Dat::U8(1))))));
+    assert_eq!(at("(node|[(u8|1)])"), Dat::Usr(ukid.clone(), Some(Box::new(Dat::List(vec![Dat::U8(1)])))));
+    assert_eq!(at("[(node|[]), (node)]"), Dat::List(vec![
+        Dat::Usr(ukid.clone(), Some(Box::new(Dat::List(Vec::new())))),
+        Dat::Usr(ukid.clone(), None),
+    ]));
+}
+
+#[test]
+fn test_a_plain_list_inside_a_tuple_is_a_list_00() {
+    // The inner list took its parent's kind: `(t2|[ [1, 2], 3 ])` read the inner list as a t2.
+    let l12 = Dat::List(vec![Dat::U8(1), Dat::U8(2)]);
+    assert_eq!(read("(t2|[ [1, 2], 3 ])"), Dat::Tup2(Box::new([l12.clone(), Dat::U8(3)])));
+    assert_eq!(read("(t2|[ 3, [1, 2] ])"), Dat::Tup2(Box::new([Dat::U8(3), l12.clone()])));
+    assert_eq!(read("(t2|[ [], [[1, 2]] ])"), Dat::Tup2(Box::new([
+        Dat::List(Vec::new()), Dat::List(vec![l12.clone()]),
+    ])));
+    assert_eq!(read("(t3|[ [1], (t2|[ [1, 2], 3 ]), 4 ])"), Dat::Tup3(Box::new([
+        Dat::List(vec![Dat::U8(1)]),
+        Dat::Tup2(Box::new([l12.clone(), Dat::U8(3)])),
+        Dat::U8(4),
+    ])));
+    assert_eq!(read("(list|[ [1, 2], [] ])"), Dat::List(vec![l12.clone(), Dat::List(Vec::new())]));
+    assert_eq!(read("(box|(t2|[ [1, 2], 3 ]))"),
+        Dat::Box(Box::new(Dat::Tup2(Box::new([l12.clone(), Dat::U8(3)])))));
+    assert_eq!(read("(t2|[ {\"k\": [1, 2]}, 3 ])"),
+        Dat::Tup2(Box::new([map_of("k", l12.clone()), Dat::U8(3)])));
+}

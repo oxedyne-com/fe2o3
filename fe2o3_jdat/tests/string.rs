@@ -1081,49 +1081,56 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
     }));
 
     res!(test_it(filter, &["String decoding 690", "all", "map", "usr"], || {
-        // A map carried as the payload of a non-map user kind, whose own values are themselves
-        // maps or lists.  The nested `{` value used to inherit the parent's user kind as its
-        // outer kind, leaving the value's frame with no map capture: a non-empty nested map hit
-        // "Map capture not active" at the colon, an empty one "Map capture not actived" at the
-        // closing brace.  Each shape is checked for the exact decoded structure and for a full
-        // decode -> re-encode -> decode round trip.
+        // A user kind carries a map or a list as its payload, `(node|{...})` or `(node|[...])`,
+        // and the user kind wraps it as a box does: the payload is read a level down and the
+        // wrapper wraps it at its own `)`.  It was read as the bare payload, the kind lost, so
+        // the encoder's own `(node|{...})` did not decode to what it was written from.  The
+        // values inside the payload are themselves maps or lists, and a nested `{` value used to
+        // inherit the parent's user kind as its outer kind (a non-empty nested map hit "Map
+        // capture not active" at the colon, an empty one "Map capture not actived" at the
+        // closing brace).  Each shape is checked for the exact structure and for a decode ->
+        // re-encode -> decode round trip.
         let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
         let ukind = UsrKindId::new(1, Some("node"), None);
         res!(uks.add(ukind.clone()));
         let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+        let usr = |d: Dat| Dat::Usr(ukind.clone(), Some(Box::new(d)));
+        let decode = |s: &str| Dat::decode_string_with_config(s, &jdat_dec);
+        let trip = |dat: &Dat| -> Outcome<Dat> {
+            decode(&res!(dat.jdat_with_usr_kinds(jdat_dec.ukinds_opt.clone())))
+        };
 
         // Non-empty nested map value (the reported failure).
-        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":{\"x\":1},\"b\":2})", &jdat_dec));
-        req!(dat, mapdat!{
+        let dat = res!(decode("(node|{\"a\":{\"x\":1},\"b\":2})"));
+        req!(dat, usr(mapdat!{
             "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
             "b".to_string() => 2u8,
-        });
-        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat); // round trip
+        }));
+        req!(res!(trip(&dat)), dat);
 
         // Empty nested map value.
-        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":{},\"b\":1})", &jdat_dec));
-        req!(dat, mapdat!{
+        let dat = res!(decode("(node|{\"a\":{},\"b\":1})"));
+        req!(dat, usr(mapdat!{
             "a".to_string() => mapdat!{},
             "b".to_string() => 1u8,
-        });
-        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat);
+        }));
+        req!(res!(trip(&dat)), dat);
 
         // Empty nested list value, and a deeper mixture, still under the user kind.
-        let dat = res!(Dat::decode_string_with_config(
-            "(node|{\"a\":{},\"b\":[],\"c\":{\"d\":1}})", &jdat_dec));
-        req!(dat, mapdat!{
+        let dat = res!(decode("(node|{\"a\":{},\"b\":[],\"c\":{\"d\":1}})"));
+        req!(dat, usr(mapdat!{
             "a".to_string() => mapdat!{},
             "b".to_string() => listdat![],
             "c".to_string() => mapdat!{ "d".to_string() => 1u8 },
-        });
-        req!(res!(Dat::decode_string(&res!(dat.jdat()))), dat);
+        }));
+        req!(res!(trip(&dat)), dat);
 
         // Control: a list value under the user kind already decoded correctly and must stay so.
-        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":[1],\"b\":2})", &jdat_dec));
-        req!(dat, mapdat!{
+        let dat = res!(decode("(node|{\"a\":[1],\"b\":2})"));
+        req!(dat, usr(mapdat!{
             "a".to_string() => listdat![1u8],
             "b".to_string() => 2u8,
-        });
+        }));
 
         // Control: the same nesting without a user kind must keep decoding as before.
         let dat = res!(Dat::decode_string("{\"a\":{\"x\":1},\"b\":2}"));
@@ -1142,130 +1149,121 @@ pub fn test_string_encdec_func(filter: &'static str) -> Outcome<()> {
     }));
 
     res!(test_it(filter, &["String decoding 691", "all", "map", "usr"], || {
-        // A molecular payload carried by a non-map user kind as a *nested value* used to be
-        // silently dropped on text decode.  Under the fix at close_paren, the payload captured a
-        // level down survives instead of being overwritten with a bare `(node)`:
-        //   - as a map value, `(node|{...})` kept its inner map (was `(node)`, payload lost);
-        //   - as a unitary value, `(node|(node|{...}))` kept the inner payload too.
-        // Each shape is checked for the exact decoded structure and a decode -> re-encode ->
-        // decode round trip.
+        // A user kind inside a user kind keeps every payload and every wrapper: a molecular
+        // payload carried by a user kind as a *nested value* was once silently dropped on text
+        // decode (`(node)` in its place), and then read as the bare payload.  Each shape is
+        // checked for the exact structure and a decode -> re-encode -> decode round trip.
         let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
         let ukind = UsrKindId::new(1, Some("node"), None);
         res!(uks.add(ukind.clone()));
         let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+        let usr = |d: Dat| Dat::Usr(ukind.clone(), Some(Box::new(d)));
+        let decode = |s: &str| Dat::decode_string_with_config(s, &jdat_dec);
+        let trip = |dat: &Dat| -> Outcome<Dat> {
+            decode(&res!(dat.jdat_with_usr_kinds(jdat_dec.ukinds_opt.clone())))
+        };
 
-        // The reported failure: a `(node|{...})` map value.  Its inner map used to vanish,
-        // leaving `(node)`.
-        let dat = res!(Dat::decode_string_with_config(
-            "(node|{\"a\":(node|{\"x\":1}),\"b\":2})", &jdat_dec));
-        req!(dat, mapdat!{
-            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+        // The reported failure: a `(node|{...})` map value.
+        let dat = res!(decode("(node|{\"a\":(node|{\"x\":1}),\"b\":2})"));
+        req!(dat, usr(mapdat!{
+            "a".to_string() => usr(mapdat!{ "x".to_string() => 1u8 }),
             "b".to_string() => 2u8,
-        });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat); // round trip
+        }));
+        req!(res!(trip(&dat)), dat);
 
-        // The `(node|(node|{...}))` form: the inner molecular payload used to vanish too, leaving
-        // `(node|(node))`.  The inner user kind resolves to its bare map payload, kept under the
-        // outer kind.  (No round trip here: a top-level `(node|{...})` re-decodes to a bare map,
-        // an existing asymmetry unrelated to this fix, so the shape is not a fixed point.)
-        let dat = res!(Dat::decode_string_with_config("(node|(node|{\"x\":1}))", &jdat_dec));
-        req!(dat, Dat::Usr(ukind.clone(), Some(Box::new(mapdat!{
-            "x".to_string() => 1u8,
-        }))));
+        // The `(node|(node|{...}))` form: each user kind wraps what is inside it.
+        let dat = res!(decode("(node|(node|{\"x\":1}))"));
+        req!(dat, usr(usr(mapdat!{ "x".to_string() => 1u8 })));
+        req!(res!(trip(&dat)), dat);
 
         // Several sibling user-kind map values, each carrying its own map molecule, and a
         // deeper level of the same nesting.
-        let dat = res!(Dat::decode_string_with_config(
-            "(node|{\"a\":(node|{\"c\":3}),\"b\":(node|{\"d\":(node|{\"e\":4})})})", &jdat_dec));
-        req!(dat, mapdat!{
-            "a".to_string() => mapdat!{ "c".to_string() => 3u8 },
-            "b".to_string() => mapdat!{
-                "d".to_string() => mapdat!{ "e".to_string() => 4u8 },
-            },
-        });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        let dat = res!(decode("(node|{\"a\":(node|{\"c\":3}),\"b\":(node|{\"d\":(node|{\"e\":4})})})"));
+        req!(dat, usr(mapdat!{
+            "a".to_string() => usr(mapdat!{ "c".to_string() => 3u8 }),
+            "b".to_string() => usr(mapdat!{
+                "d".to_string() => usr(mapdat!{ "e".to_string() => 4u8 }),
+            }),
+        }));
+        req!(res!(trip(&dat)), dat);
 
-        // The list analogue: a `(node|[...])` value must keep its list payload, exactly as the
-        // `(node|{...})` map value keeps its map.  Previously this hard-errored with "Found a
-        // '[' which is incompatible".
-        let dat = res!(Dat::decode_string_with_config(
-            "(node|{\"a\":(node|[1,2]),\"b\":2})", &jdat_dec));
-        req!(dat, mapdat!{
-            "a".to_string() => listdat![1u8, 2u8],
+        // The list analogue: a `(node|[...])` value keeps its list payload, as the map one does.
+        let dat = res!(decode("(node|{\"a\":(node|[1,2]),\"b\":2})"));
+        req!(dat, usr(mapdat!{
+            "a".to_string() => usr(listdat![1u8, 2u8]),
             "b".to_string() => 2u8,
-        });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        }));
+        req!(res!(trip(&dat)), dat);
 
-        // A `(node|[...])` list value sitting beside a `(node|{...})` map value, so both molecule
-        // shapes are exercised under the one user kind.
-        let dat = res!(Dat::decode_string_with_config(
-            "(node|{\"a\":(node|[1,2]),\"b\":(node|{\"c\":3})})", &jdat_dec));
-        req!(dat, mapdat!{
-            "a".to_string() => listdat![1u8, 2u8],
-            "b".to_string() => mapdat!{ "c".to_string() => 3u8 },
-        });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        // A `(node|[...])` list value beside a `(node|{...})` map value.
+        let dat = res!(decode("(node|{\"a\":(node|[1,2]),\"b\":(node|{\"c\":3})})"));
+        req!(dat, usr(mapdat!{
+            "a".to_string() => usr(listdat![1u8, 2u8]),
+            "b".to_string() => usr(mapdat!{ "c".to_string() => 3u8 }),
+        }));
+        req!(res!(trip(&dat)), dat);
 
-        // The `(node|(node|[...]))` unitary form keeps the inner list payload under the outer
-        // kind, mirroring the map case above.
-        let dat = res!(Dat::decode_string_with_config("(node|(node|[1,2]))", &jdat_dec));
-        req!(dat, Dat::Usr(ukind.clone(), Some(Box::new(listdat![1u8, 2u8]))));
+        // The `(node|(node|[...]))` unitary form, mirroring the map case above.
+        let dat = res!(decode("(node|(node|[1,2]))"));
+        req!(dat, usr(usr(listdat![1u8, 2u8])));
+        req!(res!(trip(&dat)), dat);
 
         // Control: a dataless `(node)` value with no payload is untouched by the fix.
-        let dat = res!(Dat::decode_string_with_config("(node|{\"a\":(node),\"b\":2})", &jdat_dec));
-        req!(dat, mapdat!{
+        let dat = res!(decode("(node|{\"a\":(node),\"b\":2})"));
+        req!(dat, usr(mapdat!{
             "a".to_string() => res!(Dat::try_from((ukind.clone(), None))),
             "b".to_string() => 2u8,
-        });
+        }));
         Ok(())
     }));
 
     res!(test_it(filter, &["String decoding 692", "all", "map", "usr"], || {
-        // A user-kind value carrying a molecular payload -- `(node|{...})` or `(node|[...])` --
-        // sitting as a VALUE inside a PLAIN map, whose own outer kind is a map, not a user kind.
-        // The payload decoded a level down and the wrapper's closing `)` was left for the plain
-        // map frame, where close_paren rejected it ("should have triggered ListMixed ... Some(Map)")
-        // because the frame is capturing a map, not a mixed list.  Distinct from "String decoding
-        // 690"/"691", where the payload sits UNDER a user kind (the outer kind is `(node|...)`).
+        // A user kind carrying a molecular payload -- `(node|{...})` or `(node|[...])` -- sitting
+        // as a VALUE inside a PLAIN map, whose own outer kind is a map, not a user kind.  The
+        // payload decoded a level down and the wrapper's closing `)` was left for the plain map
+        // frame, where close_paren rejected it ("should have triggered ListMixed ... Some(Map)").
         // Each shape is checked for the exact structure and a decode -> re-encode -> decode trip.
         let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
         let ukind = UsrKindId::new(1, Some("node"), None);
         res!(uks.add(ukind.clone()));
         let jdat_dec = DecoderConfig::<_, _>::jdat(Some(uks));
+        let usr = |d: Dat| Dat::Usr(ukind.clone(), Some(Box::new(d)));
+        let decode = |s: &str| Dat::decode_string_with_config(s, &jdat_dec);
+        let trip = |dat: &Dat| -> Outcome<Dat> {
+            decode(&res!(dat.jdat_with_usr_kinds(jdat_dec.ukinds_opt.clone())))
+        };
 
         // The reported failure: a `(node|{...})` map value in a plain map.
-        let dat = res!(Dat::decode_string_with_config("{\"a\":(node|{\"x\":1})}", &jdat_dec));
+        let dat = res!(decode("{\"a\":(node|{\"x\":1})}"));
         req!(dat, mapdat!{
-            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "a".to_string() => usr(mapdat!{ "x".to_string() => 1u8 }),
         });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat); // round trip
+        req!(res!(trip(&dat)), dat);
 
         // The list analogue: a `(node|[...])` list value in a plain map.
-        let dat = res!(Dat::decode_string_with_config("{\"a\":(node|[1,2])}", &jdat_dec));
+        let dat = res!(decode("{\"a\":(node|[1,2])}"));
         req!(dat, mapdat!{
-            "a".to_string() => listdat![1u8, 2u8],
+            "a".to_string() => usr(listdat![1u8, 2u8]),
         });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        req!(res!(trip(&dat)), dat);
 
         // Siblings of both molecule shapes, with a plain value between them, all in the one map.
-        let dat = res!(Dat::decode_string_with_config(
-            "{\"a\":(node|{\"x\":1}),\"b\":2,\"c\":(node|[3,4])}", &jdat_dec));
+        let dat = res!(decode("{\"a\":(node|{\"x\":1}),\"b\":2,\"c\":(node|[3,4])}"));
         req!(dat, mapdat!{
-            "a".to_string() => mapdat!{ "x".to_string() => 1u8 },
+            "a".to_string() => usr(mapdat!{ "x".to_string() => 1u8 }),
             "b".to_string() => 2u8,
-            "c".to_string() => listdat![3u8, 4u8],
+            "c".to_string() => usr(listdat![3u8, 4u8]),
         });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        req!(res!(trip(&dat)), dat);
 
         // Nested: the `(node|{...})` value sits inside a nested plain map value, not the outer one.
-        let dat = res!(Dat::decode_string_with_config(
-            "{\"a\":{\"b\":(node|{\"x\":1})}}", &jdat_dec));
+        let dat = res!(decode("{\"a\":{\"b\":(node|{\"x\":1})}}"));
         req!(dat, mapdat!{
             "a".to_string() => mapdat!{
-                "b".to_string() => mapdat!{ "x".to_string() => 1u8 },
+                "b".to_string() => usr(mapdat!{ "x".to_string() => 1u8 }),
             },
         });
-        req!(res!(Dat::decode_string_with_config(&res!(dat.jdat()), &jdat_dec)), dat);
+        req!(res!(trip(&dat)), dat);
         Ok(())
     }));
 
