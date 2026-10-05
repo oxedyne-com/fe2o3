@@ -1039,6 +1039,27 @@ impl Dat {
             Err(e)  => return Err(spot(e, &cursor)),
         };
         // Nothing but whitespace and comments may follow the value.
+        if Self::next_significant(&mut iter, cfg, &cursor).is_some() {
+            return Err(spot(err!(
+                "Found text after the end of the value; only whitespace and comments \
+                may follow it."; String, Input, Decode, Invalid), &cursor));
+        }
+        Ok(dat)
+    }
+
+    // Reads past whitespace and comments, and gives the first character that is neither, or None
+    // at the end of the text.  A comment ends at its closing mark or at the end of its line.
+    #[inline(never)]
+    fn next_significant<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        iter:   &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        cfg:    &DecoderConfig<M1, M2>,
+        cursor: &RefCell<Cursor>,
+    )
+        -> Option<char>
+    {
         let mut ends: Option<char> = None; // The mark that closes the comment being skipped.
         for (_, c) in iter {
             cursor.borrow_mut().advance(c);
@@ -1051,13 +1072,44 @@ impl Dat {
                 } else if cfg.comment_allowed && c == cfg.comment2_start_char {
                     ends = Some(cfg.comment2_end_char);
                 } else if !matches!(c, ' ' | '\t' | '\n' | '\r') {
-                    return Err(spot(err!(
-                        "Found text after the end of the value; only whitespace and comments \
-                        may follow it."; String, Input, Decode, Invalid), &cursor));
+                    return Some(c);
                 },
             }
         }
-        Ok(dat)
+        None
+    }
+
+    // A frame ends at its closing character.  A dataless user kind whose payload is a map or a
+    // list, `(node|{...})`, ends at the payload's `}` or `]`, not at the `)` that is still to
+    // come, so the frame reads that `)` itself, past whitespace and comments, and refuses a text
+    // that lacks it.  Every frame then leaves the text just past its own end.
+    #[inline(never)]
+    fn frame_done<
+        M1: MapMut<UsrKindCode, UsrKind> + Clone + fmt::Debug + Default,
+        M2: MapMut<String, UsrKindId> + Clone + fmt::Debug + Default,
+    >(
+        dat:            Self,
+        explicit_kind:  bool,
+        iter:           &mut std::iter::Enumerate<std::vec::IntoIter<char>>,
+        cfg:            &DecoderConfig<M1, M2>,
+        cursor:         &RefCell<Cursor>,
+    )
+        -> Outcome<Self>
+    {
+        // An explicit kind whose molecule has a frame of its own, `(omap|{...})`, ends at its own ')'.
+        let curr = cursor.borrow().curr;
+        if !explicit_kind || (curr != '}' && curr != ']') {
+            return Ok(dat);
+        }
+        match Self::next_significant(iter, cfg, cursor) {
+            Some(')') => Ok(dat),
+            Some(c) => Err(err!(
+                "Found '{}' where the ')' closing the kind was expected. ({})",
+                c, cursor.borrow(); String, Input, Decode, Invalid)),
+            None => Err(err!(
+                "The text ended where the ')' closing the kind was expected. ({})",
+                cursor.borrow(); String, Input, Decode, Invalid)),
+        }
     }
 
     /// Decodes a value at one level of nesting, recursing at each `(k|`, `[` and `{`.
@@ -1124,6 +1176,7 @@ impl Dat {
         let mut store = DecoderStore::new(cfg);
 
         state.molecular_capture = MolecularCapture::from_kind(&state.kind_outer);
+        let explicit_kind = state.explicit_kind; // A step may give the state away.
 
         while let Some((i, c)) = iter.next() {
             match res!(Self::step(
@@ -1135,7 +1188,7 @@ impl Dat {
                 &mut comment_required,
             )) {
                 Step::Continue => (),
-                Step::Done(dat) => return Ok(dat),
+                Step::Done(dat) => return Self::frame_done(dat, explicit_kind, iter, cfg, cursor),
                 Step::Descend(new_state, descent) => {
                     // The one place the decoder descends a level.  Every other part of reading a
                     // character has already returned by now, so the frame that carries the
@@ -1617,26 +1670,6 @@ impl Dat {
     )
         -> Outcome<Option<Self>>
     {
-        // A `)` closing a `(node|{...})` or `(node|[...])` value that sits inside a PLAIN map --
-        // the wrapper's molecular payload decoded a level down and was left in `val_opt` by the
-        // descend, and the payload's own `}` / `]` terminated the child frame, leaving this `)`
-        // for the map frame.  A dataless user-kind value frame does not descend its own `{` (its
-        // `MolecularCapture::from_kind` is None), so it ends at the payload's `}` and hands the
-        // `)` up; a map-kind value frame -- `(omap|{...})` -- does descend and consumes its own
-        // `)`, so it never reaches here.  The payload resolves to a bare map or list (the wrapper
-        // is dropped, exactly as a top-level `(node|{...})` does), so keep it pending: the
-        // enclosing map commits it on the next `,` or `}`.  Without this the `kind == Unknown`
-        // path below rejects the `)` for lack of a ListMixed capture ("should have triggered ...
-        // Some(Map)").  The guard is confined to a genuine plain-map accumulator (`!explicit_kind`)
-        // so it never fires in an explicit map-kind or user-kind value frame, whose own `)` the
-        // existing logic below still terminates on.
-        if !state.kind_capture
-            && !state.explicit_kind
-            && state.molecular_capture == Some(MolecularCapture::Map)
-            && store.val_opt.is_some()
-        {
-            return Ok(None);
-        }
         let kind_inner = if state.kind_capture {
             // We were capturing a kind, but the daticle finished before
             // | and no data was found.  This is valid for AtomLogic

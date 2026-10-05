@@ -9,6 +9,10 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     string::dec::DecoderConfig,
+    usr::{
+        UsrKindId,
+        UsrKinds,
+    },
 };
 
 use std::collections::BTreeMap;
@@ -134,8 +138,56 @@ fn test_the_format_is_kept_00() {
     assert_eq!(read("{\"a\": 'x'}").to_string(), "{ \"a\": \"x\"}");
     assert_eq!(read("{a: 1}").to_string(), "{ \"a\": (u8|1)}");
     assert_eq!(read("{\"a\": (u8|1), \"b\": 0x10,}").to_string(), "{ \"a\": (u8|1), \"b\": (u8|16)}");
-    assert_eq!(read("[1, 2,]").to_string(), "[1, 2]");
+    assert_eq!(read("[1, 2,]").to_string(), "[ (u8|1), (u8|2)]");
     assert!(Dat::decode_string("{\"n\": (u8|300)}").is_err());
     assert!(Dat::decode_string("{\"n\": (zzz|1)}").is_err());
     read("{\"a\": 1, # a note\n \"b\": 2}");
+}
+
+#[test]
+fn test_a_user_kind_payload_keeps_its_closing_paren_00() {
+    // `(node|{...})` ends its frame at the payload's brace, and the root takes the `)` itself.
+    let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+    let ukind = UsrKindId::new(1, Some("node"), None);
+    uks.add(ukind.clone()).unwrap_or_default();
+    let cfg = DecoderConfig::<_, _>::jdat(Some(uks));
+    let at = |s: &str| match Dat::decode_string_located(s, &cfg) {
+        Ok(d) => format!("read {}", d),
+        Err(at) => format!("refused line {} col {}: {}", at.line, at.col, at.error.plain()),
+    };
+    assert!(at("(node|{\"a\":1})").starts_with("read"), "{}", at("(node|{\"a\":1})"));
+    assert!(at("(node|[1, 2])").starts_with("read"));
+    assert!(at("(node|{\"a\":1} ! note ! \n )  # end").starts_with("read"));
+    assert!(at("(node|{\"a\":1}").starts_with("refused"), "open: {}", at("(node|{\"a\":1}"));
+    assert!(at("(node|{\"a\":1} x)").starts_with("refused line 1 col 15"), "{}", at("(node|{\"a\":1} x)"));
+    assert!(at("(node|{\"a\":1}) x").starts_with("refused line 1 col 16"), "{}", at("(node|{\"a\":1}) x"));
+    assert!(at("(node|[1] ").starts_with("refused"));
+}
+
+#[test]
+fn test_a_user_kind_payload_in_a_container_00() {
+    let mut uks = UsrKinds::new(BTreeMap::new(), BTreeMap::new());
+    uks.add(UsrKindId::new(1, Some("node"), None)).unwrap_or_default();
+    let cfg = DecoderConfig::<_, _>::jdat(Some(uks));
+    let at = |s: &str| match Dat::decode_string_located(s, &cfg) {
+        Ok(d) => format!("read {}", d),
+        Err(at) => format!("refused line {} col {}", at.line, at.col),
+    };
+    for s in [
+        "[(node|{\"a\":1}), 2]",
+        "{\"k\": (node|[1, 2]), \"j\": 3}",
+        "{\"k\": (node|{\"a\":(node|{\"b\":1})}) ! after ! , \"j\": 3}",
+        "(node|(node|{\"x\":1}))",
+    ] {
+        assert!(at(s).starts_with("read"), "{} became {}", s, at(s));
+    }
+    // A closing paren too many, or one missing, is a fault wherever it falls.
+    for s in [
+        "{\"k\": (node|{\"a\":1})) }",
+        "{\"k\": (node|{\"a\":1}  }",
+        "[(node|{\"a\":1}), 2))",
+        "(node|(node|{\"x\":1})",
+    ] {
+        assert!(at(s).starts_with("refused"), "{} became {}", s, at(s));
+    }
 }
