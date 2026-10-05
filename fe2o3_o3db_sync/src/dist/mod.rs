@@ -36,6 +36,8 @@
 //!   per process, hand it a [`transport::Transport`] and a
 //!   [`storage::Storage`], then invoke [`engine::DistOzone::put`] and
 //!   [`engine::DistOzone::get`].
+//! - [`resolve::Resolver`] -- the application's rule for the value a record
+//!   holds. The engine stores a record only when the resolver says to.
 //!
 //! # What this module does not own
 //!
@@ -63,6 +65,7 @@ pub mod o3db_storage;
 pub mod peer_set;
 pub mod placement;
 pub mod record;
+pub mod resolve;
 pub mod storage;
 pub mod transport;
 
@@ -78,5 +81,13 @@ pub use self::{
 	record::{
 		Record,
 		RecordId,
+	},
+	resolve::{
+		LastVersionWins,
+		ReadView,
+		ResolveCtx,
+		Resolver,
+		StorageView,
+		Verdict,
 	},
 };
