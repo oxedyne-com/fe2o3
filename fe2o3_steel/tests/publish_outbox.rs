@@ -438,3 +438,86 @@ async fn test_a_long_backing_off_lane_does_not_hold_the_write_lock_08() -> Outco
     assert!(waited * 3 < total, "a writer waited {:?} of a {:?} pass", waited, total);
     Ok(())
 }
+
+// A live post, and `n` confirmed subscribers named `<tag><i>@site.test`.
+fn live_post_and_readers(db: &Handle, slug: &str, tag: &str, n: usize) -> Outcome<Vec<String>> {
+    let rec = Record {
+        slug:       slug.to_string(),
+        author:     String::new(),
+        categories: Vec::new(),
+        state:      PostState::Live,
+        markup:     Markup::Markdown,
+        date:       Some(fmt!("2026-07-17")),
+        source:     fmt!("# A post\n\nAn opening sentence.\n"),
+        deliveries: Vec::new(),
+        tags:       Vec::new(),
+        ai_level:   None,
+    };
+    res!(store::put(db, &rec, "test"));
+    let mut emails = Vec::new();
+    for i in 0..n {
+        let email = fmt!("{}{}@site.test", tag, i);
+        res!(subscribe::add_pending(db, &email, &Window::default(), 1));
+        let sub = res!(subscribe::get(db, &email));
+        let sub = res!(sub.ok_or_else(|| err!("no subscriber"; Test, Missing)));
+        let _ = res!(subscribe::confirm(db, &sub.token, "test"));
+        emails.push(email);
+    }
+    Ok(emails)
+}
+
+// F2b erase: an address erased while its sign-up waits on the queue is not made again by the drainer
+// and is sent nothing, and a confirmed reader's queued copies leave the newsletter lane and its tally.
+#[tokio::test]
+async fn test_an_erased_address_with_queued_mail_is_not_recreated_or_mailed_09() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    res!(outbox::push(&handle, &[
+        Entry::new(Kind::Confirm, "gone@site.test", "", T0 / 1000),
+        Entry::new(Kind::Confirm, "keep@site.test", "", T0 / 1000),
+    ]));
+    // The newsletter is queued for two confirmed readers, one of whom is erased before it is drained.
+    let readers = res!(live_post_and_readers(&handle, "on-rent", "r", 2));
+    let sender = res!(MailSender::new("mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let sender = sender.with_outbound_hourly(3600);
+    res!(send::send_newsletter(&sender, &handle, "on-rent", "test"));
+    assert!(!res!(subscribe::remove(&handle, "gone@site.test", "test")), "a record was found to erase");
+    assert!(res!(subscribe::remove(&handle, &readers[0], "test")), "the reader was not found to erase");
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 1, "the erased sign-up stayed queued");
+    assert_eq!(res!(outbox::queued(&handle, Kind::News)), 1, "the erased reader's copy stayed queued");
+
+    let fake = Fake::default();
+    res!(run_hour(&handle, &fake, sender.pacer()).await);
+    assert!(res!(subscribe::get(&handle, "gone@site.test")).is_none(), "the drainer made the erased record again");
+    assert!(res!(subscribe::get(&handle, &readers[0])).is_none(), "the erased reader came back");
+    let mut to = fake.to.lock().map(|v| v.clone()).unwrap_or_default();
+    to.sort();
+    assert_eq!(to, vec![fmt!("keep@site.test"), readers[1].clone()], "mail went to an erased address");
+    let hist = res!(send::send_history(&handle));
+    assert_eq!((hist[0].attempted, hist[0].sent, hist[0].waiting()), (1, 1, 0),
+        "the erased copy was not taken off the send's tally");
+    Ok(())
+}
+
+// F2b erase: a sign-up the drainer has taken and an erasure then removes is refused when it is applied,
+// and a message it was about to retry is not queued again.
+#[tokio::test]
+async fn test_a_signup_taken_then_erased_is_refused_when_applied_10() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    res!(outbox::push(&handle, &[Entry::new(Kind::Confirm, "gone@site.test", "", T0 / 1000)]));
+    let (seq, entry) = match res!(outbox::take(&handle, Kind::Confirm, T0 / 1000, u64::MAX)) {
+        outbox::Take::Due(seq, e)   => (seq, e),
+        other                       => return Err(err!("the sign-up was not due: {:?}", other; Test, Missing)),
+    };
+    // The erasure comes between the take and the apply.
+    res!(subscribe::remove(&handle, "gone@site.test", "test"));
+    let applied = res!(subscribe::add_pending_from(
+        &handle, &entry.email, &Window::default(), T0 / 1000, Some((entry.kind, seq))));
+    assert!(applied.is_none(), "a sign-up erased after it was taken was applied");
+    assert!(res!(subscribe::get(&handle, "gone@site.test")).is_none(), "the record was made again");
+    // A failed send retried after the erasure puts nothing back.
+    res!(outbox::retry(&handle, seq, &Entry { tries: 1, ..entry }));
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 0, "an erased sign-up was queued again");
+    Ok(())
+}

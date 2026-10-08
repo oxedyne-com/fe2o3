@@ -597,6 +597,30 @@ pub fn add_pending<
 )
 	-> Outcome<Option<Subscriber>>
 {
+	add_pending_from(db, email, w, now, None)
+}
+
+/// As [`add_pending`] for a sign-up that came off the queue at `from`, a lane and a sequence number.
+///
+/// The sign-up is applied only if that entry is still queued, checked under the guard that writes the
+/// record. The drainer takes an entry and acts on it a moment later, and an erasure in between has
+/// removed the entry and the record; without the check the drainer would make the record again. Where
+/// the entry is gone, `None` is returned and nothing is written.
+pub fn add_pending_from<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	w:	&Window,
+	now:	u64,
+	from:	Option<(Kind, u64)>,
+)
+	-> Outcome<Option<Subscriber>>
+{
 	let email = normalise_email(email);
 	if !valid_email(&email) {
 		return Err(err!(
@@ -610,6 +634,11 @@ pub fn add_pending<
 	// The reads of what is there and of the counter, and the writes that replace them, are one step
 	// under the write guard.
 	store::exclusive(db, |dbr, user| -> Outcome<Option<Subscriber>> {
+		if let Some((kind, seq)) = from {
+			if !res!(outbox::queued_at_in(dbr, kind, seq)) {
+				return Ok(None);
+			}
+		}
 		let existing = res!(get_in(dbr, &email));
 		let allowed = res!(rate::permits_in(dbr, &rkey, w, now));
 		// A confirmed address is on the list; do not welcome it twice. A bounced address is
@@ -871,8 +900,8 @@ pub fn mark_sent<
 /// Erases a subscriber outright: the record and its place in the index both, by their address.
 ///
 /// A GDPR erasure, distinct from [`unsubscribe_email`]: an unsubscribe keeps the record so a re-subscribe
-/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no row in the count. Mirrors
-/// [`super::store::delete`]: the key is deleted and the address filtered out of the index, so a listing
+/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no row in the count, no
+/// message queued to the address. Mirrors [`super::store::delete`]: the key is deleted and the address filtered out of the index, so a listing
 /// does not name what is gone. `true` where an address was there to erase.
 pub fn remove<
 	const UIDL: usize,
@@ -895,6 +924,13 @@ pub fn remove<
 		let existed = res!(get_in(dbr, &email)).is_some();
 		res!(dbr.delete(&key_of(&email), user, None));
 		res!(unlist_in(dbr, user, &HashSet::from([email.as_str()])));
+		// What is queued for the address goes under the same guard, so the drainer cannot make the
+		// record again from a sign-up that waits, or mail the address a copy that waits.
+		let queued = res!(outbox::purge_in(dbr, user, &email));
+		if queued > 0 {
+			info!("{}: publish: {} queued message(s) to {} removed with the erasure",
+				id, queued, redact(&email));
+		}
 		Ok(existed)
 	}));
 	if existed {

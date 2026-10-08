@@ -1284,7 +1284,26 @@ pub fn tally_send<
 )
 	-> Outcome<()>
 {
-	store::update(db, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, ())> {
+	store::exclusive(db, |dbr, user| tally_in(dbr, user, index, fate))
+}
+
+/// As [`tally_send`], on a database already write-locked, so a message can end and be counted under
+/// one guard.
+pub fn tally_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	index:	usize,
+	fate:	Fate,
+)
+	-> Outcome<()>
+{
+	store::edit_in(dbr, user, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, ())> {
 		let mut items = res!(sends_of(old));
 		match items.get_mut(index) {
 			Some(item)	=> {

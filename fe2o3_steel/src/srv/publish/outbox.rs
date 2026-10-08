@@ -445,6 +445,80 @@ fn pop_in<
 	})
 }
 
+/// Is an entry still queued at `seq` in a lane, on a database already locked?
+///
+/// The drainer is handed an entry by [`take`] and acts on it later, so an erasure in between can have
+/// removed it. This is how an act that would make a record asks first, under the same guard as the
+/// act.
+pub fn queued_at_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	kind:	Kind,
+	seq:	u64,
+)
+	-> Outcome<bool>
+{
+	Ok(res!(entry_in(dbr, kind, seq)).is_some())
+}
+
+/// Removes every entry queued for an address, in both lanes, on a database already write-locked.
+/// Answers how many went.
+///
+/// For an erasure, which runs it under the guard that deletes the record, so that no entry survives
+/// to make the record again or to send to the address. A newsletter copy that goes is counted
+/// [`Fate::Left`] on its send, as one that finds its subscriber gone is. A history that will not take
+/// the count is logged and does not stop the erasure. The lane's head moves past the places this
+/// leaves empty at its front. `email` is normalised.
+pub fn purge_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	email:	&str,
+)
+	-> Outcome<usize>
+{
+	let mut gone = 0;
+	for kind in KINDS {
+		let start = res!(counter_in(dbr, &head_key(kind)));
+		let tail = res!(counter_in(dbr, &tail_key(kind)));
+		let mut head = start;
+		let mut front = true;	// every place so far is empty
+		for seq in start..tail {
+			match entry_in(dbr, kind, seq) {
+				Ok(Some(e)) if subscribe::normalise_email(&e.email) == email	=> {
+					res!(dbr.delete(&entry_key(kind, seq), user, None));
+					gone += 1;
+					if kind == Kind::News {
+						if let Err(e2) = send::tally_in(dbr, user, e.send as usize, Fate::Left) {
+							warn!("publish: could not count an erased newsletter copy as left: {}", e2);
+						}
+					}
+				}
+				// Left for `take`, which drops what it cannot read.
+				Ok(Some(_)) | Err(_)	=> front = false,
+				Ok(None)		=> {}
+			}
+			if front {
+				head = seq + 1;
+			}
+		}
+		if head != start {
+			res!(dbr.insert(head_key(kind), dat!(head), user, None));
+		}
+	}
+	Ok(gone)
+}
+
 /// Queues entries at the tail of their lanes, in order. Answers how many were queued.
 pub fn push<
 	const UIDL: usize,
@@ -589,8 +663,41 @@ pub fn done<
 	store::exclusive(db, |dbr, user| pop_in(dbr, user, kind, seq))
 }
 
+/// As [`done`] for a newsletter message, counting how it ended on its send under the same guard.
+///
+/// The count is made only where the entry was still queued, so a message an erasure has already taken
+/// off the queue and counted is not counted twice. A history that will not take the count is logged,
+/// and the drainer carries on.
+fn finish<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	entry:	&Entry,
+	seq:	u64,
+	fate:	Fate,
+	id:	&str,
+)
+	-> Outcome<()>
+{
+	store::exclusive(db, |dbr, user| -> Outcome<()> {
+		if !res!(queued_at_in(dbr, entry.kind, seq)) {
+			return Ok(());
+		}
+		res!(pop_in(dbr, user, entry.kind, seq));
+		if let Err(e) = send::tally_in(dbr, user, entry.send as usize, fate) {
+			warn!("{}: publish: could not count a newsletter message as {:?}: {}", id, fate, e);
+		}
+		Ok(())
+	})
+}
+
 /// Queues an entry again, changed, and removes the one it replaces. The new one is written first,
-/// so a stop between the two sends twice at worst and never loses a message.
+/// so a stop between the two sends twice at worst and never loses a message. Where the one it replaces
+/// is already gone, nothing is queued.
 pub fn retry<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -605,6 +712,10 @@ pub fn retry<
 	-> Outcome<()>
 {
 	store::exclusive(db, |dbr, user| -> Outcome<()> {
+		// An entry an erasure has taken off the queue is not put back.
+		if !res!(queued_at_in(dbr, next.kind, seq)) {
+			return Ok(());
+		}
 		res!(push_in(dbr, user, next));
 		pop_in(dbr, user, next.kind, seq)
 	})
@@ -733,8 +844,9 @@ async fn confirm_step<
 	// The entry names an address and nothing else: the sign-up is applied here, at send time, so an
 	// address that has confirmed, left or bounced since is owed nothing, one already sent a
 	// confirmation within its interval or its count is owed no other, and the token in the link is
-	// whatever the record holds now. A repeat sign-up queued behind the first ends here.
-	let sub = match res!(subscribe::add_pending(db, &email, &w, now)) {
+	// whatever the record holds now. A repeat sign-up queued behind the first ends here, and so does one
+	// an erasure removed after it was taken, which is applied only while its entry is still queued.
+	let sub = match res!(subscribe::add_pending_from(db, &email, &w, now, Some((entry.kind, seq)))) {
 		Some(s)	=> s,
 		None	=> {
 			debug!("{}: publish: sign-up of {} owed no confirmation", id, subscribe::redact(&email));
@@ -799,25 +911,6 @@ async fn confirm_step<
 	Ok(step)
 }
 
-// Counts how a newsletter message ended on the send it belongs to. A history that will not take the
-// count does not undo the send, so it is logged and the drainer carries on.
-fn tally<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:	&(Arc<RwLock<DB>>, UID),
-	entry:	&Entry,
-	fate:	Fate,
-	id:	&str,
-) {
-	if let Err(e) = send::tally_send(db, entry.send as usize, fate) {
-		warn!("{}: publish: could not count a newsletter message as {:?}: {}", id, fate, e);
-	}
-}
-
 // A newsletter message that is no longer owed: the post is no longer live, or the subscriber has gone.
 // It leaves the queue and the send set, and uses no slot.
 fn left<
@@ -836,8 +929,7 @@ fn left<
 {
 	debug!("{}: publish: newsletter '{}' to {} skipped, no longer owed",
 		id, entry.slug, subscribe::redact(&entry.email));
-	res!(done(db, entry.kind, seq));
-	tally(db, entry, Fate::Left, id);
+	res!(finish(db, entry, seq, Fate::Left, id));
 	Ok(Step::Worked)
 }
 
@@ -877,8 +969,7 @@ async fn news_step<
 		Err(e)	=> {
 			warn!("{}: publish: newsletter '{}' will not render, so {} is not sent it: {}",
 				id, entry.slug, subscribe::redact(&entry.email), e);
-			res!(done(db, entry.kind, seq));
-			tally(db, &entry, Fate::Failed, id);
+			res!(finish(db, &entry, seq, Fate::Failed, id));
 			return Ok(Step::Worked);
 		}
 	};
@@ -898,15 +989,13 @@ async fn news_step<
 			debug!("{}: publish: newsletter '{}' to {} ({})",
 				id, entry.slug, subscribe::redact(&sub.email), qid);
 			// Gone first, so a failure after the send can never send it twice.
-			res!(done(db, entry.kind, seq));
-			tally(db, &entry, Fate::Sent, id);
+			res!(finish(db, &entry, seq, Fate::Sent, id));
 		}
 		// A permanent failure suppresses the address so no future send reaches it.
 		Err(e) if is_permanent(&e)	=> {
 			warn!("{}: publish: newsletter '{}' to {} failed permanently; suppressing: {}",
 				id, entry.slug, subscribe::redact(&sub.email), e);
-			res!(done(db, entry.kind, seq));
-			tally(db, &entry, Fate::Suppressed, id);
+			res!(finish(db, &entry, seq, Fate::Suppressed, id));
 			if let Err(e2) = subscribe::mark_bounced(db, &sub.email, id) {
 				warn!("{}: publish: could not suppress {}: {}",
 					id, subscribe::redact(&sub.email), e2);
@@ -917,8 +1006,7 @@ async fn news_step<
 			if tries >= TRIES_MAX {
 				warn!("{}: publish: newsletter '{}' to {} given up after {} tries: {}",
 					id, entry.slug, subscribe::redact(&sub.email), tries, e);
-				res!(done(db, entry.kind, seq));
-				tally(db, &entry, Fate::Failed, id);
+				res!(finish(db, &entry, seq, Fate::Failed, id));
 			} else {
 				warn!("{}: publish: newsletter '{}' to {} did not send, try {}: {}",
 					id, entry.slug, subscribe::redact(&sub.email), tries, e);
