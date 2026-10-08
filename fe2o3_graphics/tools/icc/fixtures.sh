@@ -44,11 +44,13 @@ corners | col 3 -i $GS/default_rgb.icc -o '*XYZ' | arr CORNER_XYZ_GS '[f64; 3]'
 for c in 0 100; do for m in 0 100; do for y in 0 100; do for k in 0 100; do echo "$c $m $y $k"; done; done; done; done \
 	| col 3 -t1 -i "$FOGRA" -o '*Lab' | arr FOGRA_LAB '[f64; 3]'
 
-# 6. Ghostscript default_cmyk, perceptual: A2B0 corners to Lab, and B2A0 (a lut8) corners from Lab to CMYK.
+# 6. Ghostscript default_cmyk, relative colorimetric (its three intents share one table; the perceptual one would add
+#    the black point compensation lcms forces whenever the other end is a version 4 profile, which the Lab space is):
+#    A2B corners to Lab, and B2A (a lut8) corners from Lab to CMYK.
 for c in 0 100; do for m in 0 100; do for y in 0 100; do for k in 0 100; do echo "$c $m $y $k"; done; done; done; done \
-	| col 3 -t0 -i $GS/default_cmyk.icc -o '*Lab' | arr GS_CMYK_LAB '[f64; 3]'
+	| col 3 -t1 -i $GS/default_cmyk.icc -o '*Lab' | arr GS_CMYK_LAB '[f64; 3]'
 for l in 0 100; do for a in -128 127; do for b in -128 127; do echo "$l $a $b"; done; done; done \
-	| col 4 -t0 -i '*Lab' -o $GS/default_cmyk.icc | arr GS_LAB_CMYK '[f64; 4]'
+	| col 4 -t1 -i '*Lab' -o $GS/default_cmyk.icc | arr GS_LAB_CMYK '[f64; 4]'
 
 # 7. The descriptions, as `transicc -v3` prints them on the line after "Profile:".
 for p in "$FOGRA" $GS/default_rgb.icc $GS/default_gray.icc $GS/default_cmyk.icc; do

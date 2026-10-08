@@ -13,6 +13,13 @@
 //! grey must reproduce, so the grey level is the destination curve's inverse at that Y. This is the
 //! conversion LittleCMS makes for an RGB source and a grey profile with an XYZ connection space.
 //!
+//! # What is refused
+//!
+//! A grey profile with a Lab connection space is refused by name, since its `kTRC` takes a level to
+//! L* rather than to Y and this path makes no conversion between the two; so is an RGB profile with
+//! a Lab one, a profile lacking a colorant or a curve, and a curve that falls from its start to its
+//! end.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 

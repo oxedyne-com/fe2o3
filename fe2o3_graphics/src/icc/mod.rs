@@ -1,4 +1,4 @@
-//! ICC profiles: a reader of version 2 profiles, the matrix path, and two spaces built in.
+//! ICC profiles: a reader of version 2 and 4 profiles, the matrix path, and two spaces built in.
 //!
 //! [`read`] parses a profile's header, its tag table and the tags a transform is built from, with
 //! every read bounded by the tag's declared size and the file's length. [`matrix`] carries the

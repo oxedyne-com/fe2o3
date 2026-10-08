@@ -10,7 +10,7 @@
 //!
 //! The header; the tag table; and, of the tags in it, `desc`, `wtpt`, `chad`, the colorants
 //! `rXYZ gXYZ bXYZ`, the curves `rTRC gTRC bTRC kTRC` (`curv`, and `para` of a version 4 profile),
-//! and the lookup tables `A2B0 A2B1` and `B2A0 B2A1 B2A2` of types `mft1` and `mft2`. The tables
+//! and the lookup tables `A2B0 A2B1 A2B2` and `B2A0 B2A1 B2A2` of types `mft1` and `mft2`. The tables
 //! are kept as the integers the file holds, with the shape that says how to walk them; this module
 //! does no interpolation.
 //!
@@ -255,7 +255,7 @@ pub struct Profile {
 	pub cols:	[Option<[f64; 3]>; 3],	// rXYZ gXYZ bXYZ
 	pub trcs:	[Option<Curve>; 3],		// rTRC gTRC bTRC
 	pub ktrc:	Option<Curve>,
-	pub a2b:	[Option<Lut>; 2],		// A2B0 A2B1
+	pub a2b:	[Option<Lut>; 3],		// A2B0 A2B1 A2B2
 	pub b2a:	[Option<Lut>; 3],		// B2A0 B2A1 B2A2
 }
 
@@ -342,7 +342,7 @@ impl Profile {
 			cols:	[None, None, None],
 			trcs:	[None, None, None],
 			ktrc:	None,
-			a2b:	[None, None],
+			a2b:	[None, None, None],
 			b2a:	[None, None, None],
 		};
 		p.desc = res!(with_tag(name, whole, &p.tags, *b"desc", read_text)).flatten();
@@ -355,7 +355,7 @@ impl Profile {
 			p.trcs[i] = res!(with_tag(name, whole, &p.tags, sig, read_curve));
 		}
 		p.ktrc = res!(with_tag(name, whole, &p.tags, *b"kTRC", read_curve));
-		for (i, sig) in [*b"A2B0", *b"A2B1"].into_iter().enumerate() {
+		for (i, sig) in [*b"A2B0", *b"A2B1", *b"A2B2"].into_iter().enumerate() {
 			p.a2b[i] = res!(with_tag(name, whole, &p.tags, sig, read_lut));
 			if let Some(lut) = &p.a2b[i] {
 				res!(check_lut(name, sig, lut, &p.head, true));

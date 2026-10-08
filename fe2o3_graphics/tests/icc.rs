@@ -376,21 +376,21 @@ const FOGRA_LAB: &[[f64; 3]] = &[
 ];
 const GS_CMYK_LAB: &[[f64; 3]] = &[
 	[100.0000, -0.0000, -0.0000],
-	[16.8599, 1.4726, 0.0810],
-	[95.0096, -6.3941, 93.4882],
-	[14.1937, -3.3821, 19.6572],
-	[52.7792, 78.8761, -6.8598],
-	[3.2367, 27.8065, -0.6226],
-	[52.4127, 72.4086, 50.0398],
-	[4.9786, 20.7804, 9.5802],
-	[62.8299, -43.0812, -49.4653],
-	[8.0895, -14.3184, -15.6279],
-	[57.9290, -71.3845, 28.6745],
-	[8.2127, -23.2070, 7.6839],
-	[27.6218, 22.9298, -52.4063],
-	[-1.4924, 10.2730, -13.7523],
-	[25.3590, 0.5812, -1.6194],
-	[-0.0000, 1.0462, 0.4424],
+	[22.3529, 1.0703, 0.0586],
+	[95.0812, -6.2969, 90.3516],
+	[20.4856, -2.2578, 11.7109],
+	[53.9537, 76.1406, -6.5625],
+	[13.9767, 15.8789, -0.3906],
+	[53.6045, 69.8125, 45.1953],
+	[15.0398, 11.5742, 6.3789],
+	[63.6106, -41.3945, -48.3359],
+	[16.7754, -8.0195, -9.9844],
+	[58.8848, -67.5430, 27.1289],
+	[16.8413, -13.4687, 4.3789],
+	[30.9191, 19.9883, -48.3633],
+	[10.6265, 7.7031, -9.0977],
+	[29.0119, 0.4844, -1.3555],
+	[11.7724, 0.7656, 0.3281],
 ];
 const GS_LAB_CMYK: &[[f64; 4]] = &[
 	[100.0000, 94.1176, 0.0000, 10.5882],
@@ -606,14 +606,17 @@ fn test_fogra39l_header_tags_and_description_read_as_lcms_reports_them() -> Outc
 	assert_eq!(sigs(&p), FOGRA_TAGS.iter().map(|s| **s).collect::<Vec<Sig>>());
 	assert_eq!(p.desc.as_deref(), Some("FOGRA39L Coated"));
 	let w = res!(p.wtpt.ok_or_else(|| err!("No wtpt."; Missing)));
-	near(w[1], 1.0, 1e-4, "white point Y");
+	// The media white point of a printing condition is the paper, not the D50 of the connection space.
+	near(w[0], 0.8448, 1e-4, "white point X");
+	near(w[1], 0.8763, 1e-4, "white point Y");
+	near(w[2], 0.7462, 1e-4, "white point Z");
 	Ok(())
 }
 
 #[test]
 fn test_fogra39l_lookup_tables_have_the_shape_lcms_walks() -> Outcome<()> {
 	let p = res!(Profile::read("FOGRA39L_coated.icc", &res!(fogra_bytes())));
-	for i in 0..2 {
+	for i in 0..3 {
 		let t = res!(p.a2b[i].as_ref().ok_or_else(|| err!("No A2B{}.", i; Missing)));
 		assert_eq!((t.bits, t.nin, t.nout, t.grid, t.ine, t.oute), (16, 4, 3, 9, 1024, 1024));
 		assert_eq!((t.ins.len(), t.clut.len(), t.outs.len()), (4 * 1024, 9 * 9 * 9 * 9 * 3, 3 * 1024));
@@ -739,6 +742,20 @@ fn test_a_profile_not_made_for_the_reader_is_refused() -> Outcome<()> {
 }
 
 #[test]
+fn test_a_grey_profile_with_a_lab_connection_space_is_refused_by_name() -> Outcome<()> {
+	// A kTRC of no entries is the identity; it is the connection space that the grey path cannot take.
+	let curv = b"curv\0\0\0\0\0\0\0\0".to_vec();
+	let b = build(0x0220_0000, b"mntr", b"GRAY", b"Lab ", &[(*b"kTRC", curv)]);
+	let p = res!(Profile::read("labgrey.icc", &b));
+	let e = match Grey::read(&p) {
+		Ok(_) => return Err(err!("A grey profile with a Lab connection space was read as a grey curve."; Test, Bug)),
+		Err(e) => fmt!("{}", e),
+	};
+	assert!(e.contains("labgrey.icc") && e.contains("Gray") && e.contains("Lab"), "{}", e);
+	Ok(())
+}
+
+#[test]
 fn test_a_hand_built_version_4_srgb_profile_matches_the_built_in_space() -> Outcome<()> {
 	let p = res!(Profile::read("hand_srgb.icc", &srgb_v4()));
 	assert_eq!(p.desc.as_deref(), Some("Hand-built sRGB"));
@@ -828,7 +845,12 @@ fn test_ghostscript_default_cmyk_reads_both_lut_widths_as_lcms_does() -> Outcome
 	assert_eq!((p.head.space, p.head.pcs), (Space::Cmyk, Space::Lab));
 	assert_eq!(sigs(&p), [b"desc", b"cprt", b"wtpt", b"A2B0", b"B2A0", b"A2B1", b"B2A1", b"A2B2", b"B2A2"].iter().map(|s| **s).collect::<Vec<Sig>>());
 	assert_eq!(p.desc.as_deref(), Some("Artifex CMYK SWOP Profile"));
-	// A2B0 is a lut16, B2A0 a lut8.
+	// A2B0 is a lut16, B2A0 a lut8. The three intents share one table, so the relative colorimetric
+	// fixtures (no black point compensation) are the nodes of A2B0 and B2A0 too.
+	for i in 1..3 {
+		let (a0, ai) = (res!(p.a2b[0].as_ref().ok_or_else(|| err!("No A2B0."; Missing))), res!(p.a2b[i].as_ref().ok_or_else(|| err!("No A2B{}.", i; Missing))));
+		assert_eq!((&a0.clut, &a0.ins, &a0.outs), (&ai.clut, &ai.ins, &ai.outs));
+	}
 	let a = res!(p.a2b[0].as_ref().ok_or_else(|| err!("No A2B0."; Missing)));
 	assert_eq!((a.bits, a.nin, a.nout, a.grid, a.ine, a.oute), (16, 4, 3, 9, 256, 2));
 	let b = res!(p.b2a[0].as_ref().ok_or_else(|| err!("No B2A0."; Missing)));
