@@ -2,6 +2,8 @@
 //! start, can be reproduced on a machine that has none of them.  Each is off until a test sets it,
 //! and each is process-wide, so a test that sets one runs in a test binary of its own.
 
+use oxedyne_fe2o3_jdat::Dat;
+
 use std::{
     sync::atomic::{
         AtomicBool,
@@ -18,6 +20,7 @@ static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each gar
 static COMMIT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // between a collection's two renames
 static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
+static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
@@ -64,6 +67,13 @@ pub fn set_forward_delay(d: Duration) {
 /// shutdown's time can run out with written records still queued at it.
 pub fn set_insert_delay(d: Duration) {
     INSERT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a cache bot this long before it enters a chunk tombstone, the record that retires one
+/// chunk of a deleted value, as a cache bot behind a queue of such records would, so that a delete
+/// that does not wait for its chunks can be told from one that does.  Other records are not held.
+pub fn set_chunk_tombstone_delay(d: Duration) {
+    TOMB_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Holds a zone bot this long between reading a directory's entries and opening the files they
@@ -141,6 +151,14 @@ pub(crate) fn forward_delay() {
 
 pub(crate) fn insert_delay() {
     pause(&INSERT_DELAY_MS);
+}
+
+/// A chunk tombstone is written under the chunk's part key as a whole record, so its key is a
+/// five-number tuple and it carries no chunk index of its own.
+pub(crate) fn chunk_tombstone_delay(key: &[u8], cind: Option<usize>) {
+    if cind.is_none() && key.first() == Some(&Dat::TUP5_U64_CODE) {
+        pause(&TOMB_DELAY_MS);
+    }
 }
 
 pub(crate) fn list_delay() {

@@ -247,6 +247,21 @@ impl<
                 let result = self.update_data(floc_new, *ilen, floc_old_opt.as_ref(), from_id);
                 self.result(&result);
             }
+            OzoneMsg::Settle(resp) => {
+                // The `ScheduleOld` this bot forwarded are ahead of the echo in each queue it
+                // goes to, this one's included.  Not held by a collection: a held `ScheduleOld` is
+                // in the buffer, which is where the barrier promises it.
+                let result = self.fbots().and_then(|bots| {
+                    bots.send_to_all(OzoneMsg::SettleEcho(resp.clone()))
+                });
+                if let Err(e) = result {
+                    self.error(e.clone());
+                    self.respond(Err(e), resp);
+                }
+            }
+            OzoneMsg::SettleEcho(resp) => {
+                self.respond(Ok(OzoneMsg::Ok), resp);
+            }
             OzoneMsg::GcAborted(fnum) => {
                 // The collection replaced nothing, so the state held here is still the file's,
                 // and what was buffered meanwhile applies to it as it stands.

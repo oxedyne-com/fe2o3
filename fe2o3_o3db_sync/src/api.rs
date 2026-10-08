@@ -704,9 +704,10 @@ impl<
         //     current bunch key, reconstruct each chunk key from the set_id it stores -- random
         //     for a pre-upgrade value, key-derived for a new one, either way exactly what
         //     `fetch_chunks` reconstructs to read them -- and tombstone each so the ordinary
-        //     supersession path reclaims them.  These carry no responder: the caller waits only
-        //     on the single bunch-key delete below.  The read is confined to the delete path,
-        //     which is rare relative to writes, and only chunked values pay the fan-out.
+        //     supersession path reclaims them.  Each carries a responder of its own and is waited
+        //     for before the bunch-key delete below is sent, so a delete that returns has retired
+        //     every chunk, and one that could not says which.  The read is confined to the delete
+        //     path, which is rare relative to writes, and only chunked values pay the fan-out.
         res!(self.reclaim_chunks_on_delete(k, user, schms2));
 
         // 2. The value we use to indicate deletion is an unencrypted custom usr type.
@@ -765,16 +766,36 @@ impl<
             _ => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
         };
 
-        for i in 1..(pkey.num_parts() + 1) {
+        // Every tombstone is sent before any is waited for, so the chunks retire together; each has
+        // its own responder so that a failure names its chunk.
+        let n = pkey.num_parts();
+        let mut waits = Vec::new();
+        for i in 1..(n + 1) {
             let ck = Dat::Tup5u64([
                 pkey.set_id(),
                 i,
                 pkey.data_len(),
-                pkey.num_parts(),
+                n,
                 pkey.part_size(),
             ]);
-            // No responder: the caller waits only on the single bunch-key delete.
-            res!(self.tombstone_chunk_key(&ck, user, schms2, Self::no_responder()));
+            let resp = self.responder();
+            res!(self.tombstone_chunk_key(&ck, user, schms2, resp.clone()));
+            waits.push((i, resp));
+        }
+        for (i, resp) in waits {
+            // Passed on with its own tags, so a write that landed unconfirmed can be told from one
+            // that did not.
+            if let Err(e) = resp.recv_write_acks(
+                1,
+                constant::USER_REQUEST_TIMEOUT,
+                constant::DURABILITY_TIMEOUT,
+            ) {
+                return Err(err!(e,
+                    "{}: Deleting {:?}: the tombstone of chunk {} of {} was not acknowledged, so \
+                    the value's chunks are not all retired and its bunch key has not been deleted.  \
+                    The delete can be repeated.", self.ozid(), k, i, n;
+                    Write));
+            }
         }
         Ok(())
     }
@@ -1608,6 +1629,59 @@ impl<
             };
         }
         Ok(map)
+    }
+
+    /// The accounting barrier.  When it returns `Ok`, every `UpdateData` and `ScheduleOld` caused by
+    /// a write acknowledged before the call has reached its file bot, or its garbage buffer.  A cache
+    /// bot answers its caller before it tells the file bot of the new record's file, and that file
+    /// bot then tells the file bot of the old record's file, so each stage is asked in turn: the
+    /// cache bots forward the request to every file bot (behind their `UpdateData`), and each file
+    /// bot echoes it to every file bot (behind the `ScheduleOld` it forwarded).  Every file bot
+    /// answers each echo, so a zone owes cache bots times file bots times file bots answers.
+    fn settle(&self, deadline: Duration) -> Outcome<()> {
+        let emsg = "accounting barrier";
+        let resp = self.responder();
+        let mut owed = 0usize;
+        for z in 0..self.cfg().num_zones() {
+            let zind = ZoneInd::new(z);
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, &zind));
+            let fbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::File, &zind));
+            if let Err(e) = cbots.send_to_all(OzoneMsg::Settle(resp.clone())) {
+                return Err(err!(e,
+                    "{}: Cannot send the {} to the cache bots of zone {}.", self.ozid(), emsg, z;
+                    Channel, Write));
+            }
+            owed += cbots.len() * fbots.len() * fbots.len();
+        }
+        let wait = Wait {
+            max_wait:       deadline,
+            check_interval: constant::CHECK_INTERVAL.min(deadline),
+        };
+        let (_, msgs) = match resp.recv_number(owed, wait) {
+            Ok(v) => v,
+            Err(e) => return Err(err!(e,
+                "{}: The {} was not answered by all {} file bot echoes within {:?}.  A bot \
+                answers only when it reaches the request in its queue.",
+                self.ozid(), emsg, owed, deadline;
+                Channel, Timeout)),
+        };
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Ok => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to the {}.", self.ozid(), emsg;
+                    Channel)),
+                msg => return Err(err!(
+                    "{}: Unexpected response to the {}: {:?}", self.ozid(), emsg, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn settle_for_test(&self, deadline: Duration) -> Outcome<()> {
+        self.settle(deadline)
     }
 
     /// The physical length in bytes of every regular file in every zone directory, data, index and

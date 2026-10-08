@@ -99,6 +99,8 @@ pub enum OzoneMsg<
     // Command
     GcControl(GcControl, Responder<UIDL, UID, ENC, KH>), // sup -> gbot, control gc activation
     ClearCache(Responder<UIDL, UID, ENC, KH>),
+    Settle(Responder<UIDL, UID, ENC, KH>),      // api -> cbot -> fbot, the accounting barrier
+    SettleEcho(Responder<UIDL, UID, ENC, KH>),  // fbot -> fbot, answered once the fbot reaches it
     CloseOldLiveFileState {
         fnum_old:       FileNum,
         fnum_new:       FileNum,
