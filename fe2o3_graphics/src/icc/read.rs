@@ -182,9 +182,52 @@ impl Curve {
 		self.eval(0.0) <= self.eval(1.0)
 	}
 
-	/// The `x` with `eval(x) = y`, found by bisection on a curve that [`Curve::rises`].
+	/// The smallest `x` with `eval(x) = y` on a curve that [`Curve::rises`].
+	///
+	/// Each kind of curve has a closed form. The candidate is checked against the curve, and a
+	/// curve that is not monotone, or whose parameters have no closed form, is bisected instead.
 	pub fn inverse(&self, y: f64) -> f64 {
 		let y = y.clamp(0.0, 1.0);
+		match self.closed(y) {
+			Some(x) if (self.eval(x) - y).abs() < 1e-9	=> x,
+			_											=> self.bisect(y),
+		}
+	}
+
+	// The closed form of the inverse, where there is one.
+	fn closed(&self, y: f64) -> Option<f64> {
+		let x = match self {
+			Self::Identity		=> y,
+			Self::Gamma(g) if *g > 0.0	=> y.powf(1.0 / g),
+			Self::Gamma(_)		=> return None,
+			Self::Table(t) if t.len() < 2	=> y,
+			Self::Table(t)		=> {
+				// The first node at or above y, in a table that rises.
+				let k = t.partition_point(|v| (*v as f64) / 65535.0 < y);
+				if k == 0 { return Some(0.0); }
+				if k == t.len() { return Some(1.0); }
+				let (lo, hi) = (t[k - 1] as f64 / 65535.0, t[k] as f64 / 65535.0);
+				((k - 1) as f64 + (y - lo) / (hi - lo)) / (t.len() - 1) as f64
+			},
+			Self::Para { func, p }	=> {
+				let (g, a, b, c, d, e, f) = (p[0], p[1], p[2], p[3], p[4], p[5], p[6]);
+				if g <= 0.0 { return None; }
+				// The power branch inverted: (a x + b)^g + off = y.
+				let pow = |off: f64| if a > 0.0 && y > off { Some(((y - off).powf(1.0 / g) - b) / a) } else { None };
+				match func {
+					0	=> y.powf(1.0 / g),
+					1	=> if y > 0.0 { pow(0.0)? } else { 0.0 },
+					2	=> if y > c { pow(c)? } else { 0.0 },
+					3	=> if c > 0.0 && y < c * d { y / c } else { pow(0.0)? },
+					_	=> if c != 0.0 && y < c * d + f { (y - f) / c } else { pow(e)? },
+				}
+			},
+		};
+		Some(x.clamp(0.0, 1.0))
+	}
+
+	// The smallest `x` with `eval(x) = y` by bisection, for any curve that rises.
+	fn bisect(&self, y: f64) -> f64 {
 		let (mut lo, mut hi) = (0.0f64, 1.0f64);
 		for _ in 0..60 {
 			let mid = 0.5 * (lo + hi);
@@ -194,7 +237,6 @@ impl Curve {
 	}
 }
 
-// A lut8 or lut16 table: input curves, a lattice, output curves.
 #[derive(Clone, Debug)]
 pub struct Lut {
 	pub bits:	u8,			// 8 for mft1, 16 for mft2
