@@ -8,9 +8,11 @@
 //!   with [`ScanOpts::with_str_prefix`] enumerate every chunk for
 //!   [`Cas::ids`], which garbage collection needs. `{hex_addr}` is the
 //!   lowercase-hex [`ContentId`].
-//! - Value: `Dat::BU8(chunk.bytes)`. The address is recoverable from the key,
+//! - Value: `Dat::wrap_dat(chunk.bytes)`, the narrowest byte variant whose
+//!   length field holds the chunk. The address is recoverable from the key,
 //!   so the value carries only the opaque chunk bytes -- ciphertext, when the
-//!   caller has encrypted before storing.
+//!   caller has encrypted before storing. Before 2026-10-08 the value was always
+//!   `Dat::BU8`, whose one-byte length cut a chunk of more than 255 bytes.
 //!
 //! Deletes are tombstones flowing through the ordinary store path, matching
 //! `O3dbStorage`, behind the `dist` feature, so a subsequent `get` sees the
@@ -116,8 +118,8 @@ impl<
 		Ok(())
 	}
 
-	/// Accepts the whole unsigned-bytes family; the store path always writes
-	/// `Dat::BU8`.
+	/// Accepts the whole unsigned-bytes family; the store path writes the variant
+	/// `Dat::wrap_dat` chooses for the chunk's length.
 	fn extract_bytes(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b) | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -165,7 +167,7 @@ impl<
 			Invalid, Input, Mismatch));
 		}
 		let key = Self::encode_key(&chunk.id);
-		let value = Dat::BU8(chunk.bytes.clone());
+		let value = Dat::wrap_dat(chunk.bytes.clone());
 		let resp = res!(self.db.api().store(key, value, self.user));
 		Self::drain_store_ack(&resp)
 	}

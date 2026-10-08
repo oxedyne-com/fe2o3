@@ -43,7 +43,7 @@ pub struct TableConfig {
 	pub name:				String,			// unique within a DistOzoneConfig
 	pub consistency:		Consistency,
 	pub anti_entropy:		Duration,		// ignored for Cohort tables
-	pub iblt_cells:			usize,			// 1.5 x d cells decode a difference of d
+	pub iblt_cells:			usize,			// 1.5 x d cells decode d entries; a value difference is two
 }
 
 impl TableConfig {
@@ -53,9 +53,11 @@ impl TableConfig {
 	// Small high-value tables -- the peer set, the revocation list.
 	pub const HIGH_VALUE_AE: Duration = Duration::from_secs(3);
 
-	// Tuned for a steady-state symmetric difference of up to ~160 records
-	// (256 / 1.5). Larger differences overload the sketch; the anti-entropy
-	// handler falls back to a bulk transfer when decoding fails.
+	// Tuned for a steady-state symmetric difference of up to ~160 sketch
+	// entries (256 / 1.5). A record one peer lacks is one entry; a record the
+	// peers hold at other bytes is two, one on each side. Larger differences
+	// overload the sketch; the anti-entropy handler falls back to a bulk
+	// transfer when decoding fails.
 	pub const DEFAULT_IBLT_CELLS: usize = 256;
 
 	/// The number of hash functions the anti-entropy IBLT uses. Fixed at
