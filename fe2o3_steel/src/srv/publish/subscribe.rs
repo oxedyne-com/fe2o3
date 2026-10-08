@@ -209,7 +209,8 @@ pub fn normalise_email(s: &str) -> String {
 /// Whether a normalised address is one the form will take.
 ///
 /// A shape check, not a delivery guarantee: exactly one `@`, a non-empty local part, a domain that
-/// carries a dot and is not a bare label, no whitespace, and within [`EMAIL_MAX`]. The point is to
+/// carries a dot, is not a bare label and is not an address literal, no whitespace, and within
+/// [`EMAIL_MAX`]. The point is to
 /// refuse what is plainly not an address before it reaches a key and a piece of mail -- the true test
 /// of an address is whether the confirmation to it is ever followed, which is the whole reason for
 /// double opt-in.
@@ -240,6 +241,15 @@ pub fn valid_email(s: &str) -> bool {
 	if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
 		return false;
 	}
+	// An address literal (`[127.0.0.1]`) names a machine, not a mailbox, and a form has no business
+	// aiming this host's mail at one. Nor does a bare IPv4 form (`127.0.0.1`), which no domain is:
+	// a top-level domain is never all digits.
+	if domain.starts_with('[') {
+		return false;
+	}
+	if domain.rsplit('.').next().map_or(true, |tld| tld.chars().all(|c| c.is_ascii_digit())) {
+		return false;
+	}
 	true
 }
 
@@ -254,6 +264,8 @@ pub fn mint_token() -> String {
 pub const TRAP_FIELD: &str = "website";
 
 const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
+
+const TO_PREFIX: &str = "publish/subscribe-to/";	// the counter of confirmations to one address
 
 /// Whether a submission filled in the field no person sees.
 ///
@@ -270,6 +282,16 @@ pub fn trapped(value: &str) -> bool {
 /// address. The store holds no readable record of who signed up from where.
 fn from_hash(addr: &str, salt: &[u8]) -> String {
 	super::comment::hash_with(addr, b"subscribe-from", salt)
+}
+
+/// A salted, one-way rendering of the address a confirmation goes to.
+///
+/// The counter of confirmations to an address lives under this and not on the subscriber record, so
+/// that expiring an unconfirmed record does not hand the limit back, and so that the store keeps no
+/// readable address for someone who never consented. Its own domain separator keeps it apart from
+/// [`from_hash`].
+fn to_hash(email: &str, salt: &[u8]) -> String {
+	super::comment::hash_with(email, b"subscribe-to", salt)
 }
 
 
@@ -532,14 +554,18 @@ fn find_by_token<
 ///
 /// - A **new** or previously **unsubscribed** address is written [`Pending`](SubState::Pending) with a
 ///   fresh token, and `Some(subscriber)` is returned: send them a confirmation.
-/// - An address already **pending** is re-issued a fresh token and re-sent -- the earlier link may be
-///   lost -- and `Some(subscriber)` is returned.
+/// - An address already **pending** keeps its token, since the link already sent to it must go on
+///   working, and `Some(subscriber)` is returned: send the confirmation again.
 /// - An address already **confirmed** is left exactly as it is and `None` is returned: it is on the
 ///   list, and re-confirming it would be a second welcome to someone who never left.
 /// - An address **bounced** is left suppressed and `None` is returned: a permanent failure marked it,
 ///   and a re-subscribe must not resurrect an address the mail server said does not exist.
 ///
-/// The caller answers the same page whichever it gets, so the form never reveals which case it was.
+/// Whatever the address's state, a confirmation is asked for only if `w` allows one more to it at
+/// `now`; otherwise `None` is returned and nothing is written to the subscriber. The counter is read
+/// and changed for every valid address, the confirmed and the bounced included, so no path does less
+/// local work than another. The caller answers the same page whichever it gets, so the form never
+/// reveals which case it was.
 pub fn add_pending<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -549,6 +575,8 @@ pub fn add_pending<
 >(
 	db:	&(Arc<RwLock<DB>>, UID),
 	email:	&str,
+	w:	&Window,
+	now:	u64,
 )
 	-> Outcome<Option<Subscriber>>
 {
@@ -558,16 +586,32 @@ pub fn add_pending<
 			"publish: {} is not a shape an address takes.", redact(&email);
 			Invalid, Input));
 	}
-	// The read of what is there and the write of what replaces it are one step under the write guard.
+	// The secret is read before the write guard is taken. `site_secret` takes the lock itself, and a
+	// std `RwLock` is not re-entrant.
+	let salt = res!(super::comment::site_secret(db));
+	let rkey = fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt));
+	// The reads of what is there and of the counter, and the writes that replace them, are one step
+	// under the write guard.
 	store::exclusive(db, |dbr, user| -> Outcome<Option<Subscriber>> {
-		// An address already confirmed is on the list; do not welcome it twice. A bounced address is
-		// suppressed and stays so -- a re-subscribe does not undo a permanent failure. Neither leaks that
-		// it is known, since the caller shows the same page whether `Some` or `None` comes back.
-		if let Some(existing) = res!(get_in(dbr, &email)) {
-			match existing.state {
+		let existing = res!(get_in(dbr, &email));
+		// The counter moves for every valid address, whatever state it is in.
+		let allowed = res!(rate::allow_in(dbr, user, &rkey, w, now));
+		// A confirmed address is on the list; do not welcome it twice. A bounced address is
+		// suppressed and stays so. Neither leaks that it is known, since the caller shows the same
+		// page whether `Some` or `None` comes back.
+		let kept = match existing {
+			Some(s)	=> match s.state {
 				SubState::Confirmed | SubState::Bounced	=> return Ok(None),
-				_					=> {}
-			}
+				SubState::Pending			=> Some(s),
+				SubState::Unsubscribed			=> None,
+			},
+			None	=> None,
+		};
+		if !allowed {
+			return Ok(None);
+		}
+		if let Some(s) = kept {
+			return Ok(Some(s));
 		}
 		let sub = Subscriber {
 			email:		email.clone(),
@@ -889,9 +933,11 @@ impl Said {
 /// - **A limit per sender**, keyed on a salted hash of where the request came from and counted
 ///   apart from the comment limiter. Over it, the same page again: a form that says "you are doing
 ///   that too often" is a form that tells a script exactly what it has found.
+/// - **A limit per address**, in [`add_pending`], counted whoever asks: a script rotating its
+///   sources still cannot bury one mailbox. Over it the page is the same again.
 ///
-/// Double opt-in is the third layer and the one already here: an address that never confirms hears
-/// nothing further, so the worst a flood achieves is one message per address rather than a
+/// Double opt-in is the further layer and the one already here: an address that never confirms hears
+/// nothing further, so the worst a flood achieves is a few messages per address rather than a
 /// correspondence.
 pub async fn handle_subscribe<
 	const UIDL: usize,
@@ -955,34 +1001,50 @@ pub async fn handle_subscribe<
 		return Said::Invalid.answer(cfg, hdrs);
 	}
 
-	match res!(add_pending(db, &email)) {
-		// New or pending: send the confirmation. A send that fails is logged, and the reader still gets
-		// the same page -- retrying the form re-sends, and saying "we could not email you" would leak
-		// that the address was actionable.
-		Some(sub)	=> {
-			let url = cfg.url_of(&cfg.confirm_path(&sub.token));
-			let from = cfg.newsletter_from(sender);
-			match sender.send_confirmation(&from, &sub.email, &url, &cfg.site_name).await {
-				Ok(_)	=> info!("{}: publish: confirmation sent to {}", id, redact(&sub.email)),
-				// A permanent failure means the address does not exist; suppress it so a retry of the form
-				// does not keep mailing a mailbox the server has refused. A transient failure is left to be
-				// retried by the form, exactly as before.
-				Err(e) if is_permanent(&e)	=> {
-					warn!("{}: publish: confirmation to {} failed permanently; suppressing: {}",
-						id, redact(&sub.email), e);
-					if let Err(e2) = mark_bounced(db, &sub.email, id) {
-						warn!("{}: publish: could not suppress {}: {}", id, redact(&sub.email), e2);
-					}
-				}
-				Err(e)	=> warn!("{}: publish: confirmation to {} did not send: {}",
-					id, redact(&sub.email), e),
-			}
-		}
-		// Already confirmed: send nothing, and answer identically.
-		None		=> debug!("{}: publish: subscribe for an address already on the list", id),
+	match res!(add_pending(db, &email, &cfg.confirm_window(), rate::now_secs())) {
+		// New or pending, and this address is within its limit: ask for a confirmation to go.
+		Some(sub)	=> dispatch_confirmation(cfg, db, sender, &sub, id).await,
+		// Already confirmed, bounced, or past its limit: send nothing, and answer identically.
+		None		=> debug!("{}: publish: subscribe for an address that needs no confirmation", id),
 	}
 
 	Said::Sent.answer(cfg, hdrs)
+}
+
+// The one place a confirmation leaves. Today it is sent here, in the request, so the request waits
+// on SMTP; the outbox replaces this body with a queue entry and the request stops waiting. A send
+// that fails is logged, and the reader still gets the same page -- retrying the form re-sends, and
+// saying "we could not email you" would leak that the address was actionable.
+async fn dispatch_confirmation<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	cfg:	&PublishConfig,
+	db:	&(Arc<RwLock<DB>>, UID),
+	sender:	&Arc<MailSender>,
+	sub:	&Subscriber,
+	id:	&str,
+) {
+	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
+	let from = cfg.newsletter_from(sender);
+	match sender.send_confirmation(&from, &sub.email, &url, &cfg.site_name).await {
+		Ok(_)	=> info!("{}: publish: confirmation sent to {}", id, redact(&sub.email)),
+		// A permanent failure means the address does not exist; suppress it so a retry of the form
+		// does not keep mailing a mailbox the server has refused. A transient failure is left to be
+		// retried by the form, exactly as before.
+		Err(e) if is_permanent(&e)	=> {
+			warn!("{}: publish: confirmation to {} failed permanently; suppressing: {}",
+				id, redact(&sub.email), e);
+			if let Err(e2) = mark_bounced(db, &sub.email, id) {
+				warn!("{}: publish: could not suppress {}: {}", id, redact(&sub.email), e2);
+			}
+		}
+		Err(e)	=> warn!("{}: publish: confirmation to {} did not send: {}",
+			id, redact(&sub.email), e),
+	}
 }
 
 /// Confirms a pending subscriber, for a `GET {path}/confirm?token=...`.
@@ -1080,6 +1142,17 @@ mod tests {
 		assert!(!valid_email("me@example."));
 		assert!(!valid_email("has space@example.com"));
 		assert!(!valid_email(&fmt!("{}@example.com", "x".repeat(EMAIL_MAX))));
+		Ok(())
+	}
+
+	/// An address literal names no mailbox a stranger should be able to aim this host's mail at.
+	#[test]
+	fn test_an_address_literal_is_refused_13() -> Outcome<()> {
+		assert!(!valid_email("user@[127.0.0.1]"));
+		assert!(!valid_email("user@[::1]"));
+		assert!(!valid_email("user@127.0.0.1"));	// a bare IPv4 form: no top-level domain is all digits
+		assert!(valid_email("user@mail.example.com"));
+		assert!(valid_email("user@example.co2"));	// a digit in the last label is still a name
 		Ok(())
 	}
 

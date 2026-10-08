@@ -36,7 +36,7 @@ use std::sync::{
 pub const HOUR_SECS: u64 = 3600;
 
 /// How often one key may act. A bound of 0 is that bound switched off.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Window {
 	pub interval_secs:	u64,	// the shortest gap between two acts
 	pub max:		u32,	// the most acts within one span
@@ -48,6 +48,11 @@ impl Window {
 	/// A window that counts over an hour, as the comment and sign-up limiters do.
 	pub fn hourly(interval_secs: u64, max: u32) -> Self {
 		Self { interval_secs, max, span_secs: HOUR_SECS }
+	}
+
+	/// Are both bounds off, so that the key may always act and nothing need be read?
+	pub fn is_off(&self) -> bool {
+		self.interval_secs == 0 && self.max == 0
 	}
 }
 
@@ -94,10 +99,37 @@ pub fn allow_at<
 )
 	-> Outcome<bool>
 {
-	if w.interval_secs == 0 && w.max == 0 {
+	if w.is_off() {
 		return Ok(true);
 	}
-	store::update(db, &dat!(key.to_string()), |old| -> Outcome<(Edit, bool)> {
+	store::exclusive(db, |dbr, user| allow_in(dbr, user, key, w, now))
+}
+
+/// As [`allow_at`], on a database already write-locked by [`store::exclusive`].
+///
+/// For a caller that must count and change something else in the same step, as the per-recipient
+/// confirmation limit does beside the subscriber record. Inside the guard it must be this and never
+/// [`allow`]: a std `RwLock` is not re-entrant, and `allow` would wait on the guard its own caller
+/// holds.
+pub fn allow_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	key:	&str,
+	w:	&Window,
+	now:	u64,
+)
+	-> Outcome<bool>
+{
+	if w.is_off() {
+		return Ok(true);
+	}
+	store::edit_in(dbr, user, &dat!(key.to_string()), |old| -> Outcome<(Edit, bool)> {
 		Ok(step(old, w, now))
 	})
 }

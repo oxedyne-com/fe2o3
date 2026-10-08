@@ -31,6 +31,7 @@ use oxedyne_fe2o3_steel::{
         publish::{
             PublishConfig,
             Source,
+            rate::Window,
             send::MailSender,
             subscribe::{
                 self,
@@ -164,7 +165,7 @@ async fn test_an_unsubscribe_is_never_refused_03() -> Outcome<()> {
     let (db, uid, _tmp) = res!(common::test_db());
     let handle = (db, uid);
     let web = res!(web());
-    let sub = match res!(subscribe::add_pending(&handle, "reader@nowhere.invalid")) {
+    let sub = match res!(subscribe::add_pending(&handle, "reader@nowhere.invalid", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("the reader did not pend"; Test, Missing)),
     };
@@ -186,7 +187,7 @@ async fn test_a_new_and_a_confirmed_address_get_the_same_json_04() -> Outcome<()
     let (db, uid, _tmp) = res!(common::test_db());
     let handle = (db, uid);
     let web = res!(web());
-    let sub = match res!(subscribe::add_pending(&handle, "known@nowhere.invalid")) {
+    let sub = match res!(subscribe::add_pending(&handle, "known@nowhere.invalid", &Window::default(), 0)) {
         Some(s) => s,
         None    => return Err(err!("the reader did not pend"; Test, Missing)),
     };

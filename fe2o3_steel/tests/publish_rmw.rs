@@ -13,6 +13,7 @@ use oxedyne_fe2o3_steel::srv::publish::{
     Markup,
     PostState,
     comment,
+    rate::Window,
     store::{
         self,
         Record,
@@ -87,7 +88,7 @@ fn concurrent_signups_all_reach_the_index() -> Outcome<()> {
     let (db, uid, _tmp) = res!(common::test_db());
     let handle = (db, uid);
     let results = together(THREADS, |i| {
-        text(subscribe::add_pending(&handle, &fmt!("reader{}@example.com", i)))
+        text(subscribe::add_pending(&handle, &fmt!("reader{}@example.com", i), &Window::default(), 0))
     });
     let subs = res!(all_ok(results));
     assert_eq!(subs.len(), THREADS);

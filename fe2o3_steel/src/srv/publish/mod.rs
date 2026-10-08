@@ -187,6 +187,14 @@ pub struct PublishConfig {
 	// that and nothing else. An office behind one address that genuinely needs more raises it, the
 	// same operational judgement `comment_rate_secs` documents.
 	pub subscribe_rate_hourly:	u32,
+	// How the confirmations to one address are limited, whoever asks for them. The sender limits
+	// above count a source; these count the address, which is what a mail-bombing script names and
+	// rotates its sources around. `confirm_interval_secs` is the shortest gap between two
+	// confirmations to one address (`0` is off) and `confirm_max` the most within
+	// `confirm_window_days` (`0` is off). The window is also how long the address's counter lives.
+	pub confirm_interval_secs:	u64,
+	pub confirm_max:		u32,
+	pub confirm_window_days:	u64,
 	// Whether this site takes comments on its posts. Off unless a site asks for it: a comment
 	// endpoint is an unauthenticated public write, and turning one on for every site that happens
 	// to publish prose -- which is what a default of `true` would do -- is not a decision this
@@ -335,6 +343,9 @@ impl PublishConfig {
 			// loads and takes the defaults, which limit rather than not.
 			subscribe_rate_secs:	res!(get_count("subscribe_rate_secs", 60)),
 			subscribe_rate_hourly:	res!(get_count("subscribe_rate_hourly", 5)) as u32,
+			confirm_interval_secs:	res!(get_count("confirm_interval_secs", 86_400)),
+			confirm_max:		res!(get_count("confirm_max", 3)) as u32,
+			confirm_window_days:	res!(get_count("confirm_window_days", 30)),
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,
 				None			=> false,
@@ -539,6 +550,15 @@ impl PublishConfig {
 			return None;
 		}
 		Some(slug)
+	}
+
+	/// The window the confirmations to one address are counted in.
+	pub fn confirm_window(&self) -> rate::Window {
+		rate::Window {
+			interval_secs:	self.confirm_interval_secs,
+			max:		self.confirm_max,
+			span_secs:	self.confirm_window_days.saturating_mul(86_400),
+		}
 	}
 
 	/// The URL path a confirmation link points at, carrying the subscriber's token.
