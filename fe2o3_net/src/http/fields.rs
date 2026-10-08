@@ -208,6 +208,10 @@ pub enum HeaderName {
     Safe,
     ScheduleReply,
     ScheduleTag,
+    SecFetchDest,
+    SecFetchMode,
+    SecFetchSite,
+    SecFetchUser,
     SecGPC,
     SecPurpose,
     SecTokenBinding,
@@ -443,6 +447,10 @@ impl fmt::Display for HeaderName {
             Self::Safe                      => write!(f, "safe"),
             Self::ScheduleReply             => write!(f, "schedule-reply"),
             Self::ScheduleTag               => write!(f, "schedule-tag"),
+            Self::SecFetchDest              => write!(f, "sec-fetch-dest"),
+            Self::SecFetchMode              => write!(f, "sec-fetch-mode"),
+            Self::SecFetchSite              => write!(f, "sec-fetch-site"),
+            Self::SecFetchUser              => write!(f, "sec-fetch-user"),
             Self::SecGPC                    => write!(f, "sec-gpc"),
             Self::SecPurpose                => write!(f, "sec-purpose"),
             Self::SecTokenBinding           => write!(f, "sec-token-binding"),
@@ -680,6 +688,10 @@ impl From<&str> for HeaderName {
             "safe"					        => Self::Safe,
             "schedule-reply"			    => Self::ScheduleReply,
             "schedule-tag"				    => Self::ScheduleTag,
+            "sec-fetch-dest"			    => Self::SecFetchDest,
+            "sec-fetch-mode"			    => Self::SecFetchMode,
+            "sec-fetch-site"			    => Self::SecFetchSite,
+            "sec-fetch-user"			    => Self::SecFetchUser,
             "sec-gpc"					    => Self::SecGPC,
             "sec-purpose"				    => Self::SecPurpose,
             "sec-token-binding"			    => Self::SecTokenBinding,
@@ -812,6 +824,10 @@ impl HeaderName {
             Self::ProxyAuthorization    |
             Self::Range                 |
             Self::Referer               |
+            Self::SecFetchDest          |
+            Self::SecFetchMode          |
+            Self::SecFetchSite          |
+            Self::SecFetchUser          |
             Self::TE                    |
             Self::UserAgent             => HeaderFieldCategory::Request,
             Self::AcceptRanges          |
@@ -1396,6 +1412,19 @@ impl HeaderFields {
             }
         }
         None
+    }
+
+    /// Does the caller ask for JSON rather than a page?
+    ///
+    /// True when any `Accept` line names `application/json`: a site's own front end, over `fetch`.
+    /// A browser posting a form carries no such line.
+    pub fn wants_json(&self) -> bool {
+        match self.get_list(&HeaderName::Accept) {
+            Some(list) => list.iter().any(|v| {
+                fmt!("{}", v).to_ascii_lowercase().contains("application/json")
+            }),
+            None => false,
+        }
     }
 
     /// Iterate over the header fields according to the `order` map.
