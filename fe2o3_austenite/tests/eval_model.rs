@@ -353,7 +353,7 @@ fn located(k: ElemKind) -> bool { k.locatable() || TYPST_LOCATABLE.contains(&k) 
 fn prepare(engine: &mut Engine, c: &Content, chain: &StyleChain) -> Outcome<Content> {
 	let mut out = c.clone();
 	if let Content::Elem(e) = &mut out {
-		let e = Arc::make_mut(e);
+		let e = e.edit();
 		if e.location.is_none() && (located(e.kind) || e.label.is_some()) {
 			e.location = Some(engine.locator.locate(e.kind, e.span));
 		}

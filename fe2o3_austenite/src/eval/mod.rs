@@ -39,6 +39,7 @@ pub mod content;
 #[allow(clippy::module_inception)]
 pub mod eval;
 pub mod fixpoint;
+pub mod fp;
 pub mod func;
 pub mod import;
 pub mod intro;

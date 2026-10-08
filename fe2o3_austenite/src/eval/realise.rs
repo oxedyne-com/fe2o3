@@ -51,8 +51,8 @@ use crate::timings::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
-
-use std::sync::Arc;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
@@ -188,6 +188,35 @@ impl Pair {
 	pub fn tag(tag: Tag, styles: StyleChain) -> Self { Self { content: Content::empty(), styles, tag: Some(tag) } }
 
 	pub fn is_tag(&self) -> bool { self.tag.is_some() }
+
+	/// The pair as flow sees it: its content, the style chain it is laid out under and its tag. The
+	/// content's own location and place are in it, because flow anchors the pair by them; a span is not.
+	pub fn fingerprint(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_fingerprint(self.content.fingerprint());
+		match self.content.location() {
+			Some(l)	=> { h.write_u8(1); h.write_u64(l.0); }
+			None	=> h.write_u8(0),
+		}
+		match self.content.place() {
+			Some(p)	=> { h.write_u8(1); h.write_u64(p.0); }
+			None	=> h.write_u8(0),
+		}
+		h.write_fingerprint(self.styles.fingerprint());
+		match &self.tag {
+			None					=> h.write_u8(0),
+			Some(Tag::Start(c))		=> {
+				h.write_u8(1);
+				h.write_fingerprint(c.fingerprint());
+				match c.location() {
+					Some(l)	=> { h.write_u8(1); h.write_u64(l.0); }
+					None	=> h.write_u8(0),
+				}
+			}
+			Some(Tag::End(l))		=> { h.write_u8(2); h.write_u64(l.0); }
+		}
+		h.finish()
+	}
 }
 
 /// Does a realised document set any content? Spaces, paragraph breaks, page breaks and column breaks do not,
@@ -621,10 +650,10 @@ impl State<'_> {
 		let result = match step {
 			Step::Recipe(recipe, index) => {
 				if let Content::Elem(e) = &mut output {
-					if Arc::strong_count(e) > 1 {
+					if e.is_shared() {
 						self.engine.bump(Counter::Copied, 1);
 					}
-					Arc::make_mut(e).guards.push(index);
+					e.edit().guards.push(index);
 				}
 				let shown = self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &recipe, output.clone(), &chained));
 				self.engine.delay(mark, target.span(), shown)
@@ -714,7 +743,7 @@ impl State<'_> {
 		let mut output = target.clone();
 		let mut tags = None;
 		if let Content::Sequence(seq) = &mut output {
-			let seq = Arc::make_mut(seq);
+			let seq = seq.edit();
 			if seq.location.is_none() {
 				let loc = self.engine.locator.locate(ElemKind::Sequence, seq.span);
 				seq.location = Some(loc);
@@ -1126,10 +1155,10 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 	let builtin = res!(content::show_set(target, styles));
 	let e = match target {
 		Content::Elem(e)	=> {
-			if Arc::strong_count(e) > 1 {
+			if e.is_shared() {
 				engine.bump(Counter::Copied, 1);
 			}
-			Arc::make_mut(e)
+			e.edit()
 		},
 		_					=> return Ok(None),
 	};
@@ -1158,7 +1187,7 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 	res!(content::synthesise(engine, target, &chain));
 	let loc = match target {
 		Content::Elem(e)	=> {
-			let e = Arc::make_mut(e);
+			let e = e.edit();
 			e.prepared = true;
 			e.location
 		}
