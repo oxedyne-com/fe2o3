@@ -73,8 +73,8 @@ pub fn layout(engine: &mut Engine, elem: &Content, styles: &StyleChain, regions:
 		for row in rows.iter() {
 			if let Value::Array(pair) = row {
 				if let (Some(Value::Content(m)), Some(Value::Content(b))) = (pair.get(0), pair.get(1)) {
-					let body_place = places.as_mut().map(|l| l.next(ElemKind::ListItem, b.fingerprint()));
-					let marker_place = places.as_mut().map(|l| l.next(ElemKind::Align, m.fingerprint()));
+					let body_place = places.as_mut().map(|l| l.next(ElemKind::ListItem, b.shell()));
+					let marker_place = places.as_mut().map(|l| l.next(ElemKind::Align, m.shell()));
 					items.push(Entry { marker: m.clone(), body: b.clone(), marker_place, body_place });
 				}
 			}

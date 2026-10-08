@@ -691,6 +691,17 @@ impl Content {
 		}
 	}
 
+	/// What the content is apart from what it holds: an element's kind, label and fields that hold no content,
+	/// a sequence's label, nothing for styled content. It keys the place of a body laid out
+	/// ([`Locator::next`](crate::eval::locate::Locator::next)), so an edit of what the content holds leaves the place.
+	pub fn shell(&self) -> Fingerprint {
+		match self {
+			Content::Elem(e)		=> fp::elem_shell_fp(e),
+			Content::Sequence(s)	=> fp::seq_shell_fp(s),
+			Content::Styled(_)		=> fp::styled_shell_fp(),
+		}
+	}
+
 	/// Direct children of a sequence or styled content; an element's body is a field, not a child.
 	pub fn children(&self) -> &[Content] {
 		match self {

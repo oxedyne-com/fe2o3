@@ -457,6 +457,48 @@ pub fn elem_fp(e: &Elem) -> Fingerprint {
 	h.finish()
 }
 
+// Does the value hold content, or code that makes it? Such a field is what an edit changes.
+fn holds_content(v: &Value) -> bool {
+	match v {
+		Value::Content(_) | Value::Func(_) | Value::Args(_) | Value::Module(_)	=> true,
+		Value::Array(a)															=> a.iter().any(holds_content),
+		Value::Dict(d)															=> d.iter().any(|(_, x)| holds_content(x)),
+		_																		=> false,
+	}
+}
+
+/// The shell of an element: its kind, label and the fields that hold no content, by id. Typing into the
+/// content it holds leaves its shell as it was, so a place keyed by the shell stays where it is.
+pub fn elem_shell_fp(e: &Elem) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(3);
+	h.write_u64(e.kind as u64);
+	hash_label(&mut h, &e.label);
+	let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().filter(|(_, v)| !holds_content(v)).collect();
+	fields.sort_by_key(|(id, _)| id.0);
+	h.write_usize(fields.len());
+	for (id, v) in fields {
+		h.write_u8(id.0);
+		hash_value(&mut h, v);
+	}
+	h.finish()
+}
+
+/// The shell of a sequence: its label alone, since it holds nothing but children.
+pub fn seq_shell_fp(s: &Sequence) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(4);
+	hash_label(&mut h, &s.label);
+	h.finish()
+}
+
+/// The shell of styled content: nothing, since it holds a child and styles over it.
+pub fn styled_shell_fp() -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	h.write_u8(5);
+	h.finish()
+}
+
 /// The fingerprint of a sequence: its label, guards and children in order.
 pub fn seq_fp(s: &Sequence) -> Fingerprint {
 	let mut h = Fingerprinter::new();

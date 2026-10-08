@@ -1,19 +1,22 @@
 //! Locations under a keystroke (speed programme U6): a location is made from where the element stands, its
-//! kind, what it is and its ordinal among equals there, never from where it was written. Two compiles one
-//! letter apart therefore differ in location only where the content differs (the edited element and the
-//! elements that hold it) and under an element that lays a body out and holds the edit, whose place moves
-//! and takes its body with it. Everything else keeps its location.
+//! kind, what it is and its ordinal among equals there, never from where it was written. Where an element
+//! stands is a place, and an element that lays a body out is given one made from its shell (its kind and the
+//! fields that hold no content) and its ordinal among the same shell there, never from what it holds. Two
+//! compiles one letter apart therefore differ in location only in the edited element, the elements that hold
+//! it and the equal elements that follow an edited one, whose ordinal moves; no place moves, so what lies in
+//! a body keeps its location and a warm introspector still answers for it.
 //!
 //! Each case compiles a document, types one letter into it, compiles again, and lines the two compiles'
 //! located elements up in document order (the structure is the same, only a letter differs). An element is
-//! edited when its source span holds the letter. Three things must hold of every pair of compiles:
+//! edited when its source span holds the letter. Four things must hold of every pair of compiles:
 //!
 //!  1. an edited element whose content differs has a new location, so a location never stands for two
 //!     contents (an element that merely reads what the edit changed, as a reference reads its target's
 //!     text, is not edited and keeps its location);
-//!  2. an element of the same content moves only under a changed element that lays a body out, whose own
-//!     location moved and so took its place with it; and
-//!  3. the elements outside the edit's section of the document do not move at all (the synthetic case).
+//!  2. an element of the same content moves only when an earlier element equal to it changed, so that its
+//!     ordinal among the equals moved;
+//!  3. every element that lays a body out keeps its place; and
+//!  4. the elements outside the edit's section of the document do not move at all (the synthetic case).
 //!
 //! `AUST_LOC_DOCS=a.typ,b.typ cargo test --release --test locate_edit -- --ignored --nocapture` runs the same
 //! comparison over whole documents, at `AUST_LOC_EDITS` (default 6) body paragraphs spread through each.
@@ -39,7 +42,7 @@ struct Rec {
 	loc:	u64,
 	kind:	Option<ElemKind>,	// none for a sequence
 	fp:		u128,
-	place:	bool,				// lays a body out, so gives what it holds a place of its own
+	place:	Option<u64>,		// lays a body out, so gives what it holds a place of its own
 	span:	Span,
 }
 
@@ -62,7 +65,7 @@ fn compiled(name: &str, src: &str) -> Outcome<Vec<Rec>> {
 		loc:	l.0,
 		kind:	r.elem.kind(),
 		fp:		r.elem.fingerprint().as_u128(),
-		place:	r.elem.place().is_some(),
+		place:	r.elem.place().map(|p| p.0),
 		span:	r.elem.span(),
 	})).collect())
 }
@@ -110,7 +113,7 @@ struct Diff {
 	edited:		Vec<usize>,	// the source span holds the letter
 	readers:	Vec<usize>,	// not edited, but the content differs: a reference or an outline entry carrying the text
 	moved:		Vec<usize>,	// not edited, the content the same, the location not
-	holders:	Vec<usize>,	// edited or reading, moved, and laying a body out: whatever follows them may move
+	replaced:	Vec<usize>,	// the place differs
 	shifted:	Vec<usize>,	// every element whose location differs
 }
 
@@ -141,20 +144,25 @@ fn diff(name: &str, a: &[Rec], b: &[Rec], at: usize) -> Outcome<Diff> {
 		} else if x.loc != y.loc {
 			d.moved.push(i);
 		}
-		if (edited || x.fp != y.fp) && x.loc != y.loc && y.place {
-			d.holders.push(i);
+		if x.place != y.place {
+			d.replaced.push(i);
 		}
 	}
 	Ok(d)
 }
 
-/// An element whose content is the same moves only under one that changed, moved and lays a body out.
-fn check(name: &str, b: &[Rec], d: &Diff) -> Outcome<()> {
+/// An element whose content is the same moves only when an earlier element equal to it changed, and no place
+/// moves.
+fn check(name: &str, a: &[Rec], b: &[Rec], d: &Diff) -> Outcome<()> {
 	for &i in &d.moved {
-		if !d.holders.iter().any(|&j| j < i) {
-			return Err(err!("{}: element {} ({:?}) moved and is held by no changed element that lays a body out; \
+		let renumbered = (0..i).any(|j| a[j].kind == a[i].kind && a[j].fp == a[i].fp && b[j].fp != a[j].fp);
+		if !renumbered {
+			return Err(err!("{}: element {} ({:?}) moved and no earlier element equal to it changed; \
 				edited {:?}, reading {:?}, moved {:?}.", name, i, b[i].kind, d.edited, d.readers, d.moved; Test));
 		}
+	}
+	if !d.replaced.is_empty() {
+		return Err(err!("{}: the place of element(s) {:?} moved; edited {:?}.", name, d.replaced, d.edited; Test));
 	}
 	Ok(())
 }
@@ -184,7 +192,7 @@ fn a_letter_typed_into_a_fixture_moves_only_what_holds_it() -> Outcome<()> {
 			let label	= fmt!("{} site {}", name, k);
 			let after	= res!(compiled(&label.replace(' ', "_"), &typed(&base, at, "q")));
 			let d		= res!(diff(&label, &before, &after, at));
-			res!(check(&label, &after, &d));
+			res!(check(&label, &before, &after, &d));
 			cases		+= 1;
 			edited		+= d.edited.len().min(1);
 			total.n			+= d.n;
@@ -201,7 +209,7 @@ fn a_letter_typed_into_a_fixture_moves_only_what_holds_it() -> Outcome<()> {
 }
 
 /// A document of forty sections, each a heading, a paragraph with a footnote and a labelled table. A letter in
-/// one section's paragraph leaves every other section's elements where they were.
+/// one section's paragraph moves that paragraph and nothing else.
 fn sections(n: usize, tag: &str) -> String {
 	let mut s = String::from("#set page(width: 220pt, height: 130pt, margin: 16pt)\n#set text(size: 9pt)\n");
 	for i in 0..n {
@@ -212,20 +220,21 @@ fn sections(n: usize, tag: &str) -> String {
 }
 
 #[test]
-fn a_letter_typed_into_one_section_leaves_the_other_sections_where_they_were() -> Outcome<()> {
+fn a_letter_typed_into_a_paragraph_moves_that_paragraph_and_nothing_else() -> Outcome<()> {
 	let (plain, typed)	= (sections(40, ""), sections(40, "q"));
 	let at				= plain.bytes().zip(typed.bytes()).take_while(|(x, y)| x == y).count();
 	let before	= res!(compiled("sections_a", &plain));
 	let after	= res!(compiled("sections_b", &typed));
 	let d		= res!(diff("sections", &before, &after, at));
-	res!(check("sections", &after, &d));
+	res!(check("sections", &before, &after, &d));
 	assert!(!d.edited.is_empty(), "the letter changed no located element");
-	// A section is a heading, a footnote and a table; the table is a placed element, so it takes its cells.
+	// A section is a heading, a paragraph, its footnote and a table, six located elements in all. The paragraph
+	// is a placed element that holds the edit, and its footnote lies in its body: the paragraph alone moves.
 	let per = before.len() / 40;
 	assert!(per >= 3, "a section holds {} located elements", per);
-	let outside = d.shifted.iter().filter(|&&i| i / per != 17).count();
-	assert!(outside <= 2, "{} elements outside section 17 moved ({:?}), of {}", outside, d.shifted, d.n);
-	assert!(d.shifted.len() <= per + 2, "{} of {} elements changed location", d.shifted.len(), d.n);
+	assert_eq!(d.shifted, d.edited, "more than the edited paragraph moved, of {} elements", d.n);
+	assert_eq!(d.edited.len(), 1, "the letter edited {:?}", d.edited);
+	assert!(d.edited[0] / per == 17, "the edit lies in section {}", d.edited[0] / per);
 	Ok(())
 }
 
@@ -255,6 +264,8 @@ fn an_edited_element_renumbers_only_the_equal_ones_after_it() -> Outcome<()> {
 	for &p in &pars[2..] {
 		assert!(d.shifted.contains(&p), "an equal paragraph after the edit kept its ordinal");
 	}
+	// Their places are made from the shell and its ordinal, which an edit of their text leaves alone.
+	assert!(d.replaced.is_empty(), "the place of {:?} moved", d.replaced);
 	let heads: Vec<usize> = before.iter().enumerate().filter(|(_, r)| r.kind == Some(ElemKind::Heading)).map(|(i, _)| i).collect();
 	assert!(heads.iter().all(|h| !d.shifted.contains(h)), "a heading moved");
 	Ok(())
@@ -275,7 +286,7 @@ fn a_letter_typed_into_a_document_moves_only_what_holds_it() -> Outcome<()> {
 			let at		= all[k * all.len() / edits];
 			let after	= res!(compiled("doc_b", &typed(&base, at, "q")));
 			let d		= res!(diff(doc, &before, &after, at));
-			res!(check(doc, &after, &d));
+			res!(check(doc, &before, &after, &d));
 			println!("{}: edit {} at byte {}: {} located, {} edited, {} reading, {} moved, {} in all", doc, k, at, d.n,
 				d.edited.len(), d.readers.len(), d.moved.len(), d.shifted.len());
 		}

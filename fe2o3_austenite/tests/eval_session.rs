@@ -129,6 +129,70 @@ fn a_compile_that_lays_no_pages_keeps_the_last_introspector() {
 	assert!(warm == cold, "and ends where a cold one ends");
 }
 
+// Numbered sections under an outline, each with a paragraph that reads the heading counter where it stands and
+// refers to the next section. Section 3 holds the same read in a table cell, a list item, a stack child and a
+// block, so that each way of laying a body out gives its content a place. `site` is the one place a word is
+// mistyped ("teh" for "the", the same width); `extra` adds a paragraph to section 1.
+const SITES: usize = 5;
+
+fn numbered(site: Option<usize>, extra: bool) -> String {
+	let w = |k: usize| if site == Some(k) { "teh" } else { "the" };
+	let mut s = String::from("#set page(width: 220pt, height: 600pt, margin: 16pt)\n#set text(size: 9pt)\n\
+		#set heading(numbering: \"1.\")\n#outline()\n");
+	for i in 0..6 {
+		s.push_str(&format!("\n= Section {} <s{}>\n\n", i, i));
+		s.push_str(&format!("Paragraph {} says {} here, in section #context counter(heading).display(), and points to @s{}.\n",
+			i, if i == 2 { w(0) } else { "the" }, (i + 1) % 6));
+		if i == 1 && extra {
+			s.push_str("\nAn added paragraph that reads #context counter(heading).display() as well.\n");
+		}
+		if i == 3 {
+			s.push_str(&format!("\n#table(columns: 1, [Cell says {} in section #context counter(heading).display().])\n", w(1)));
+			s.push_str(&format!("\n- Item says {} in section #context counter(heading).display().\n", w(2)));
+			s.push_str(&format!("\n#stack(dir: ttb, [Stack says {} in section #context counter(heading).display().])\n", w(3)));
+			s.push_str(&format!("\n#block(inset: 4pt)[Block says {} in section #context counter(heading).display().]\n", w(4)));
+		}
+	}
+	s
+}
+
+#[test]
+fn a_word_mistyped_in_content_that_reads_a_counter_settles_warm_in_one_pass_to_the_cold_bytes() {
+	let main = dir("mistyped").join("main.typ");
+	write(&main, &numbered(None, false));
+	let mut s = fresh();
+	let (_, first, _) = pdf(&mut s, &main, false);
+	assert!(first >= 2, "the outline and the references need a second pass cold, took {}", first);
+	for site in 0..SITES {
+		for text in [numbered(Some(site), false), numbered(None, false)] {
+			write(&main, &text);
+			let (warm, passes, was_warm) = pdf(&mut s, &main, false);
+			let (cold, _, _) = pdf(&mut fresh(), &main, false);
+			assert!(was_warm, "the edit at site {} starts warm", site);
+			assert_eq!(passes, 1, "the edit at site {} settles in one pass", site);
+			assert!(warm == cold, "warm and cold bytes differ at site {}", site);
+		}
+	}
+}
+
+// A paragraph inserted renumbers the places of the containers after it, so the warm first pass cannot answer
+// for what they hold; it takes more than one pass, and ends where a cold compile ends.
+#[test]
+fn a_paragraph_inserted_settles_warm_in_few_passes_to_the_cold_bytes() {
+	let main = dir("inserted").join("main.typ");
+	write(&main, &numbered(None, false));
+	let mut s = fresh();
+	let _ = pdf(&mut s, &main, false);
+	for text in [numbered(None, true), numbered(None, false)] {
+		write(&main, &text);
+		let (warm, passes, was_warm) = pdf(&mut s, &main, false);
+		let (cold, _, _) = pdf(&mut fresh(), &main, false);
+		assert!(was_warm, "the structural edit starts warm");
+		assert!(passes <= 3, "the structural edit took {} passes", passes);
+		assert!(warm == cold, "warm and cold bytes differ after a structural edit");
+	}
+}
+
 #[test]
 fn a_font_added_on_disc_renews_the_store_and_an_unchanged_one_keeps_it() {
 	let root = dir("fonts");

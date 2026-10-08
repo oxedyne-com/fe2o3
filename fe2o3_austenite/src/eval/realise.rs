@@ -27,6 +27,7 @@ use crate::eval::content::{
 	FieldSpec,
 	FieldType,
 };
+use crate::eval::fp;
 use crate::eval::locate::Location;
 use crate::eval::styles::{
 	apply_recipe,
@@ -1166,11 +1167,11 @@ fn wants_place(e: &Elem) -> bool { e.place.is_none() && e.kind.has_place() }
 fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
 	// Built-in show-set styles sit outside the user's, which override them.
 	let builtin = res!(content::show_set(target, styles));
-	// A location and a place are keyed by the content's fingerprint, read before `edit` forgets the cell and
-	// only when one is wanted.
-	let fp = match &*target {
-		Content::Elem(e) if wants_location(e) || wants_place(e)	=> Some(target.fingerprint()),
-		_														=> None,
+	// A location is keyed by the content's fingerprint, read before `edit` forgets the cell and only when one is
+	// wanted. A place is keyed by the element's shell, never by what it holds.
+	let key = match &*target {
+		Content::Elem(e) if wants_location(e)	=> Some(target.fingerprint()),
+		_										=> None,
 	};
 	let e = match target {
 		Content::Elem(e)	=> {
@@ -1181,15 +1182,13 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 		},
 		_					=> return Ok(None),
 	};
-	if let Some(fp) = fp {
-		if wants_location(e) {
-			e.location = Some(engine.locator.locate(e.kind, fp));
-		}
-		// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
-		// made and gave a place already (a grid's cell) keeps that.
-		if wants_place(e) {
-			e.place = Some(engine.locator.next(e.kind, fp));
-		}
+	if let Some(key) = key {
+		e.location = Some(engine.locator.locate(e.kind, key));
+	}
+	// An element that lays a body out keeps one place for it however often it is laid out, and however its
+	// body is edited. One a layouter made and gave a place already (a grid's cell) keeps that.
+	if wants_place(e) {
+		e.place = Some(engine.locator.next(e.kind, fp::elem_shell_fp(e)));
 	}
 	map.apply_outer(&builtin);
 	let chain = styles.chain(map);

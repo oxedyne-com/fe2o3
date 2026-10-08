@@ -3403,7 +3403,7 @@ fn layout_stack(engine: &mut Engine, elem: &Content, styles: &StyleChain, region
 		if let Some(sp) = deferred {
 			s.spacing(sp, styles);
 		}
-		let place = places.as_mut().map(|l| l.next(content.kind().unwrap_or(ElemKind::Sequence), content.fingerprint()));
+		let place = places.as_mut().map(|l| l.next(content.kind().unwrap_or(ElemKind::Sequence), content.shell()));
 		res!(s.block(engine, place, &content, styles));
 		deferred = spacing;
 	}
