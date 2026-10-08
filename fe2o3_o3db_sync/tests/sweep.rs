@@ -39,7 +39,10 @@ use oxedyne_fe2o3_iop_db::api::{
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     base::constant,
-    comm::response::Wait,
+    comm::{
+        msg::OzoneMsg,
+        response::Wait,
+    },
     data::core::RestSchemesInput,
     sweep,
     test::setup,
@@ -121,6 +124,28 @@ pub fn test_sweep(_filter: &'static str) -> Outcome<()> {
     Ok(())
 }
 
+/// A store as it was before 2026-10-08, when an overwrite that changed a chunked value's length left
+/// the old chunks to the sweep.  The store now retires them itself, so the orphans the sweep exists
+/// for (those of an older build, or of a crash between the new value and the retire) are seeded
+/// through the write path without the reclaim.
+fn store_without_reclaim(
+    db:     &oxedyne_fe2o3_o3db_sync::db::O3db<{ setup::UID_LEN }, setup::Uid, EncryptionScheme, HashScheme, HashScheme, ChecksumScheme>,
+    k:      Dat,
+    v:      Dat,
+    user:   setup::Uid,
+    schms2: Option<&RestSchemesOverride<EncryptionScheme, HashScheme>>,
+)
+    -> Outcome<usize>
+{
+    let resp = db.api().responder();
+    let msgs = res!(db.api().prepare_write_dat(k, v, user, schms2, resp.clone(), None));
+    let n = msgs.len();
+    res!(resp.send(OzoneMsg::Chunks(n)));
+    res!(db.api().store_bytes(msgs));
+    res!(resp.recv_store_ack());
+    Ok(n)
+}
+
 /// The sweep must retire every orphaned chunk set, reclaim its bytes, leave every live value
 /// byte-identical and every dead tombstone untouched, and leave the store self-consistent across a
 /// restart.  The teeth: garbage collection runs the whole time, yet the orphan bytes do not
@@ -178,7 +203,7 @@ fn sweep_reclaims_orphans(
     //     prior geometry's chunk set is orphaned; the current small value stays live. ---
     for k in 0..n_geo {
         let (_, big) = res!(db.insert(dat!(fmt!("geo:{:03}", k)), value_of(k as u8, VALUE_BYTES), user, schms2));
-        let (_, small) = res!(db.insert(dat!(fmt!("geo:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
+        let small = res!(store_without_reclaim(&db, dat!(fmt!("geo:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
         if big < 2 || small < 2 || small >= big {
             return Err(err!(
                 "Geometry-orphan case geometry wrong: big={} small={} chunks.", big, small;
@@ -211,7 +236,7 @@ fn sweep_reclaims_orphans(
         // count for one of them, and ignored an error.
         res!(resp.recv_store_ack());
         // Overwrite with a tiny unchunked value: supersedes the bunch key, orphans every chunk.
-        res!(db.insert(key.clone(), value_of((k as u8).wrapping_add(1), TINY_BYTES), user, schms2));
+        res!(store_without_reclaim(&db, key.clone(), value_of((k as u8).wrapping_add(1), TINY_BYTES), user, schms2));
     }
 
     // Let the collector fully settle: it reclaims every legitimately superseded record (old bunch
@@ -382,7 +407,7 @@ fn concurrency_is_safe(
     let n_geo = 12usize;
     for k in 0..n_geo {
         res!(db.insert(dat!(fmt!("cgeo:{:03}", k)), value_of(k as u8, VALUE_BYTES), user, schms2));
-        res!(db.insert(dat!(fmt!("cgeo:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
+        res!(store_without_reclaim(&db, dat!(fmt!("cgeo:{:03}", k)), value_of(k as u8, SMALL_BYTES), user, schms2));
     }
     thread::sleep(Duration::from_secs(EPOCH_SKEW_SECS + 3)); // age past the skew
 
