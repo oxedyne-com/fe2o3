@@ -378,7 +378,7 @@ fn a_default_build_holds_none_of_the_metadata_keys() {
 	let mut text = String::from("#set document(title: \"Title\", author: \"Author\", keywords: (\"kw\",))\n");
 	text.push_str(&source(9, "q"));
 	write(&main, &text);
-	let (plan, report) = watch::build(&main, &sets(&["view.open=false"]), None).expect("a build");
+	let (plan, report) = watch::build(Some(&main), &sets(&["view.open=false"]), None).expect("a build");
 	assert!(report.pages >= 1);
 	let bytes = std::fs::read(&plan.spec.out).expect("the PDF");
 	assert!(bytes.starts_with(b"%PDF-1.7"), "the default version");
@@ -386,7 +386,7 @@ fn a_default_build_holds_none_of_the_metadata_keys() {
 		assert!(!has(&bytes, key), "the default PDF holds {}", key);
 	}
 	// The same document asked for its metadata does carry it, so the absence above is the setting's doing.
-	let (plan, _) = watch::build(&main, &sets(&["metadata.document=true", "metadata.engine=true"]), None).expect("a build");
+	let (plan, _) = watch::build(Some(&main), &sets(&["metadata.document=true", "metadata.engine=true"]), None).expect("a build");
 	let bytes = std::fs::read(&plan.spec.out).expect("the PDF");
 	for key in ["/Info", "/Title", "/Author", "/Keywords", "/Creator", "/Producer"] {
 		assert!(has(&bytes, key), "the PDF with metadata lacks {}", key);
@@ -397,28 +397,49 @@ fn a_default_build_holds_none_of_the_metadata_keys() {
 #[test]
 fn the_pdf_settings_shape_the_file() {
 	let (d, main) = project("shape", "");
-	let (plan, _) = watch::build(&main, &[], None).expect("the default");
+	let (plan, _) = watch::build(Some(&main), &[], None).expect("the default");
 	let plain = std::fs::read(&plan.spec.out).expect("the PDF");
 	assert!(has(&plain, "/FlateDecode"), "compressed by default");
 	assert_eq!(plan.spec.out, d.join("main.pdf"));
-	let (plan, _) = watch::build(&main, &sets(&["pdf.compress=false", "pdf.version=1.5", "output=sub/{stem}-x.pdf"]), None).expect("changed");
+	let (plan, _) = watch::build(Some(&main), &sets(&["pdf.compress=false", "pdf.version=1.5", "output=sub/{stem}-x.pdf"]), None).expect("changed");
 	let big = std::fs::read(&plan.spec.out).expect("the PDF");
 	assert_eq!(plan.spec.out, d.join("sub").join("main-x.pdf"));
 	assert!(big.starts_with(b"%PDF-1.5"));
 	// The fonts' streams stay compressed whatever the setting; the pages' do not.
 	assert!(count(&big, "/FlateDecode") < count(&plain, "/FlateDecode"), "page streams left whole");
 	assert!(big.len() > plain.len());
-	let (plan, _) = watch::build(&main, &sets(&["pdf.outline=false"]), None).expect("no outline");
+	let (plan, _) = watch::build(Some(&main), &sets(&["pdf.outline=false"]), None).expect("no outline");
 	let flat = std::fs::read(&plan.spec.out).expect("the PDF");
 	assert!(!has(&flat, "/Outlines"), "no bookmarks when the outline is off");
 }
 
 #[test]
+fn a_build_with_no_source_builds_the_document_the_settings_name() {
+	let (d, main) = project("nosource", "\"document\": \"main.typ\"");
+	let other = d.join("other.typ");
+	write(&other, &source(2, "z"));
+	later();
+	let (plan, report) = watch::build_at(&d, None, &[], None).expect("the document setting");
+	assert_eq!(plan.spec.main, main, "with no source the setting names the document");
+	assert!(report.pages >= 1);
+	let named = std::fs::read(&plan.spec.out).expect("the PDF");
+	assert!(named.starts_with(b"%PDF-"), "a PDF was written");
+	// A named source still wins over the setting.
+	let (plan, _) = watch::build_at(&d, Some(&other), &[], None).expect("a named source");
+	assert_eq!(plan.spec.main, other, "the named source");
+	assert_eq!(plan.spec.out, d.join("other.pdf"));
+	// With neither a source nor a setting, the one document that no other imports is built.
+	let (alone, only) = project("nosource_rule", "");
+	let (plan, _) = watch::build_at(&alone, None, &[], None).expect("the selection rule");
+	assert_eq!(plan.spec.main, only, "the rule picks the one root");
+}
+
+#[test]
 fn two_builds_of_one_document_are_the_same_bytes() {
 	let (_, main) = project("again", "");
-	let (plan, _) = watch::build(&main, &[], None).expect("first");
+	let (plan, _) = watch::build(Some(&main), &[], None).expect("first");
 	let one = std::fs::read(&plan.spec.out).expect("the PDF");
-	let (plan, _) = watch::build(&main, &[], None).expect("second");
+	let (plan, _) = watch::build(Some(&main), &[], None).expect("second");
 	let two = std::fs::read(&plan.spec.out).expect("the PDF");
 	assert!(one == two, "a build is deterministic");
 }
@@ -540,7 +561,7 @@ fn an_edit_is_compiled_warm_in_one_pass_to_the_bytes_a_cold_build_gives() {
 	let cold_dir = dir("tick_warm_cold");
 	let cold_main = cold_dir.join("main.typ");
 	write(&cold_main, &source(9, "edited"));
-	let (plan, _) = watch::build(&cold_main, &sets(&["view.open=false"]), None).expect("a cold build");
+	let (plan, _) = watch::build(Some(&cold_main), &sets(&["view.open=false"]), None).expect("a cold build");
 	assert!(warm == std::fs::read(&plan.spec.out).expect("the cold PDF"), "warm and cold bytes differ");
 	assert!(run.line(&r).contains("warm"));
 }

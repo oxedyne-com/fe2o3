@@ -369,9 +369,16 @@ impl Plan {
 	}
 }
 
-/// `austenite build`: one cold compile of `source` under the settings.
-pub fn build(source: &Path, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
-	let plan = res!(Plan::new(Some(source), sets, timings));
+/// `austenite build`: one cold compile of `source`, or of the document the settings or the selection rule
+/// name when there is none, under the settings.
+pub fn build(source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
+	let cwd = res!(std::env::current_dir());
+	build_at(&cwd, source, sets, timings)
+}
+
+/// As [`build`], with `cwd` the working directory the settings file is looked for from when there is no source.
+pub fn build_at(cwd: &Path, source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
+	let plan = res!(Plan::at(cwd, source, sets, timings));
 	let mut session = plan.session();
 	let mut read = Vec::new();
 	let report = res!(compile_pdf(&plan.spec, &mut session, true, false, &mut read));

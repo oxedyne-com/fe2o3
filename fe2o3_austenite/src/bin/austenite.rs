@@ -628,14 +628,11 @@ fn command_watch(args: &[String]) -> Outcome<()> {
 	watch::Run::new(source, sets, cold, timings).and_then(|run| run.run())
 }
 
-/// `austenite build SOURCE.typ [--set k=v]... [--timings FILE]`: one cold compile under the settings.
+/// `austenite build [SOURCE.typ] [--set k=v]... [--timings FILE]`: one cold compile under the settings, of the
+/// source or, with none named, of the document the settings or the selection rule name.
 fn command_build(args: &[String]) -> Outcome<()> {
 	let (source, sets, _cold, timings) = res!(command_args("build", args));
-	let source = match source {
-		Some(s)	=> s,
-		None	=> return Err(err!("Usage: austenite build SOURCE.typ [--set key=value]... [--timings FILE]"; Input, Invalid, Missing)),
-	};
-	let (plan, stats) = res!(watch::build(&source, &sets, timings.as_deref()));
+	let (plan, stats) = res!(watch::build(source.as_deref(), &sets, timings.as_deref()));
 	println!(
 		"austenite: {} -> {} page(s) in {} pass(es); {} byte(s); {:.2}s; written to {}",
 		plan.spec.main.display(), stats.pages, stats.passes, stats.bytes, stats.secs, plan.spec.out.display());
