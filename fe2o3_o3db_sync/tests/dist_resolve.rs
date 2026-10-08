@@ -991,7 +991,7 @@ impl Resolver for ClaimRule {
 }
 
 fn converge(seeds: std::ops::Range<u64>, max_rounds: usize) -> Convergence {
-	Convergence { peers: 3, seeds, now_ms: 0, max_rounds }
+	Convergence::new(3, seeds, 0, max_rounds)
 }
 
 /// The text of an error, with the seed it names.
@@ -1482,7 +1482,6 @@ fn exchange(e: &[DistOzone<MemoryStorage>], a: usize, b: usize) -> Outcome<()> {
 }
 
 #[test]
-#[ignore = "A2: 2-F1, the content hash ignores length, so [AB, 00] and [AB] look equal"]
 fn lww_lost_replicate_not_repaired() -> Outcome<()> {
 	let e = res!(mesh(2));
 	let hi = LastVersionWins::value(7, &[0xAB, 0]);
@@ -1500,7 +1499,6 @@ fn lww_lost_replicate_not_repaired() -> Outcome<()> {
 }
 
 #[test]
-#[ignore = "A2: 2-F1, the content hash is reversible, so a writer can forge a value with the same digest"]
 fn forged_same_digest_value_never_repaired() -> Outcome<()> {
 	// A value is a version then two 8-byte chunks. The second chunk of the
 	// forgery is solved so the chained hash after it matches the original's.

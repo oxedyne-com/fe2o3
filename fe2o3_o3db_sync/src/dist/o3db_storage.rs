@@ -28,10 +28,9 @@
 //!   bottleneck for large ones. A scan v2 that returns values is the
 //!   planned optimisation; the [`Storage`] trait does not need to
 //!   change to adopt it.
-//! - The content hash is the splitmix64-based 32-byte hash used by
-//!   [`MemoryStorage`](super::storage::MemoryStorage) so that a mixed
-//!   cluster (in-memory peer + O3db-backed peer) converges. A
-//!   cryptographic replacement can slot in without touching the trait.
+//! - The content hash is [`content_hash`], the SHA3-256 protocol hash
+//!   that [`MemoryStorage`](super::storage::MemoryStorage) uses too, so
+//!   that a mixed cluster (in-memory peer + O3db-backed peer) converges.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -40,6 +39,7 @@ use super::record::{
 	Record,
 	RecordDigest,
 	RecordId,
+	content_hash,
 };
 use super::storage::Storage;
 
@@ -252,30 +252,6 @@ impl<
 		out.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
 		Ok(out)
 	}
-}
-
-
-/// A splitmix64-widened 32-byte hash, matching the one
-/// [`MemoryStorage`](super::storage::MemoryStorage) uses so that a mixed
-/// cluster of in-memory and O3db-backed peers does not disagree on digests.
-/// Not cryptographic; see the module doc comment.
-fn content_hash(bytes: &[u8]) -> [u8; 32] {
-	let mut state: u64 = 0x9E3779B97F4A7C15;
-	for chunk in bytes.chunks(8) {
-		let mut buf = [0u8; 8];
-		buf[..chunk.len()].copy_from_slice(chunk);
-		let word = u64::from_le_bytes(buf);
-		state = state.wrapping_add(word);
-		state = (state ^ (state >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-		state = (state ^ (state >> 27)).wrapping_mul(0x94D049BB133111EB);
-		state ^= state >> 31;
-	}
-	let mut out = [0u8; 32];
-	for i in 0..4 {
-		let limb = state.wrapping_mul(0x9E3779B97F4A7C15 ^ (i as u64));
-		out[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_le_bytes());
-	}
-	out
 }
 
 

@@ -133,13 +133,32 @@ impl Resolver for LastVersionWins {
 }
 
 
-/// The shape of a [`check_convergence`] run.
+/// The shape of a [`check_convergence`] run. Built with [`Convergence::new`], so that fields can
+/// be added later.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct Convergence {
 	pub peers:		usize,			// 2 to 5; every peer holds every record
 	pub seeds:		Range<u64>,		// one scatter-and-settle run per seed
-	pub now_ms:		u64,			// the clock every peer is given
+	pub now_ms:		u64,			// the clock every peer starts from, before its skew
 	pub max_rounds:	usize,			// full rounds, and post-write depth, allowed before "did not quiesce"
+	pub skew_ms:	u64,			// each peer's clock leads by a seeded 0 to this; each full round adds this to every clock
+}
+
+impl Convergence {
+	pub fn new(peers: usize, seeds: Range<u64>, now_ms: u64, max_rounds: usize) -> Self {
+		// Every peer reads `now_ms` for the whole run until `with_skew_ms` says otherwise.
+		Self { peers, seeds, now_ms, max_rounds, skew_ms: 0 }
+	}
+
+	/// Gives each peer a clock that leads `now_ms` by an offset drawn once per peer and seed from 0
+	/// to `skew_ms`, and moves every clock on by `skew_ms` at the start of each full round. A rule
+	/// that answers `Defer` until a time comes then converges once the clocks pass it, and one that
+	/// answers `Refuse` to that time fails, because which peer a record landed on decides its fate.
+	pub fn with_skew_ms(mut self, skew_ms: u64) -> Self {
+		self.skew_ms = skew_ms;
+		self
+	}
 }
 
 /// Does the resolver (and the application's `after` pass) make the converged
@@ -154,7 +173,7 @@ pub struct Convergence {
 /// rounds (the in-flight messages, the deferred puts, and an anti-entropy
 /// exchange between every ordered pair of peers on every table) until a round
 /// stores nothing, and compares the bytes the peers hold, and each seed's final state
-/// with the first seed's. The `Err` names the seed, the table and the first
+/// with the first seed's. Every peer reads its own clock (see [`Convergence::with_skew_ms`]). The `Err` names the seed, the table and the first
 /// differing id; it also reports a run that is still storing after
 /// `cfg.max_rounds` ("did not quiesce"), a resolver that fails, and an `after`
 /// chain deeper than `cfg.max_rounds`.
@@ -252,12 +271,21 @@ fn run_seed<R, F, P>(
 			new_resolver(i),
 		)));
 	}
+	// Each peer's offset comes from a generator of its own, so the schedule drawn from `rng` is
+	// the same whatever the skew.
+	let mut skew = SplitMix64(seed ^ 0xC10C_5EED_0FF5_E7D5);
+	let mut clocks = Vec::with_capacity(n);
+	for _ in 0..n {
+		let offset = skew.draw() % cfg.skew_ms.saturating_add(1);
+		clocks.push(cfg.now_ms.saturating_add(offset));
+	}
 	let mut run = Run {
 		seed,
 		engines,
 		ids,
 		rng:		SplitMix64(seed),
-		now_ms:		cfg.now_ms,
+		clocks,
+		skew_ms:	cfg.skew_ms,
 		max_depth:	cfg.max_rounds,
 		after,
 		flight:		Vec::new(),
@@ -325,7 +353,8 @@ struct Run<'a, R: Resolver, P> {
 	engines:	Vec<DistOzone<MemoryStorage, R>>,
 	ids:		Vec<NodeId>,
 	rng:		SplitMix64,
-	now_ms:		u64,
+	clocks:		Vec<u64>,					// each peer's own clock
+	skew_ms:	u64,						// what a full round adds to every clock
 	max_depth:	usize,
 	after:		&'a mut P,
 	flight:		Vec<Envelope>,
@@ -341,7 +370,7 @@ impl<'a, R, P> Run<'a, R, P>
 {
 	// A local put on one peer. Its replication joins the messages in flight.
 	fn local_put(&mut self, peer: usize, record: Record) -> Outcome<()> {
-		let out = res!(self.engines[peer].put_at(record.clone(), self.now_ms));
+		let out = res!(self.engines[peer].put_at(record.clone(), self.clocks[peer]));
 		self.flight.extend(out.outbound);
 		match out.verdict {
 			Some(Verdict::Take(_))	=> self.settle(peer, vec![(record.table, record.id)]),
@@ -370,7 +399,7 @@ impl<'a, R, P> Run<'a, R, P>
 			}
 			let puts = res!((self.after)(p, &self.engines[p], &list));
 			for record in puts {
-				let out = res!(self.engines[p].put_at(record.clone(), self.now_ms));
+				let out = res!(self.engines[p].put_at(record.clone(), self.clocks[p]));
 				self.flight.extend(out.outbound);
 				match out.verdict {
 					Some(Verdict::Take(_))	=> {
@@ -392,7 +421,7 @@ impl<'a, R, P> Run<'a, R, P>
 			let dest = res!(self.ids.iter().position(|id| *id == e.to).ok_or_else(|| err!(
 				"check_convergence: seed {}: envelope for an unknown peer.", self.seed;
 				Invalid, Input, Missing)));
-			let out = res!(self.engines[dest].handle_envelope_at(e, self.now_ms));
+			let out = res!(self.engines[dest].handle_envelope_at(e, self.clocks[dest]));
 			// A resolver fault is a bug in the rule under test, not a verdict.
 			if let Some((table, id, _)) = out.failed.first() {
 				return Err(err!(
@@ -440,6 +469,9 @@ impl<'a, R, P> Run<'a, R, P>
 	// pair on every table. Returns the number of stores the round made.
 	fn round(&mut self, tables: &[&str]) -> Outcome<usize> {
 		self.stored = 0;
+		for clock in &mut self.clocks {
+			*clock = clock.saturating_add(self.skew_ms);
+		}
 		while !self.flight.is_empty() {
 			let i = self.rng.below(self.flight.len());
 			let env = self.flight.swap_remove(i);
