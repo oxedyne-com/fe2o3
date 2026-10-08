@@ -20,6 +20,7 @@
 //! Anthropic Claude
 
 use crate::{
+    addr::is_publicly_routable,
     dns_resolver,
     imap::client::Security,
     smtp::server::read_line,
@@ -204,6 +205,9 @@ pub struct OutboundClient {
     // IP whose PTR lines up.
     pub hostname:       Arc<String>,
     pub tls_config:     Arc<ClientConfig>,  // for STARTTLS, built once
+    // Whether `deliver` may dial an exchange whose address is not publicly routable. Off by
+    // default, and only a fixture on the loopback, or a development host, has a reason to set it.
+    pub allow_private_exchanges: bool,
 }
 
 impl OutboundClient {
@@ -215,6 +219,7 @@ impl OutboundClient {
         Ok(Self {
             hostname:   Arc::new(hostname.into()),
             tls_config: Arc::new(cfg),
+            allow_private_exchanges: false,
         })
     }
 
@@ -226,6 +231,11 @@ impl OutboundClient {
 
     /// Each MX in preference order until one succeeds. The queue id is the first accepting
     /// server's; where every host failed, the error is the last one's.
+    ///
+    /// An exchange at an address that is not publicly routable (see
+    /// [`crate::addr::is_publicly_routable`]) is never dialled unless `allow_private_exchanges` is
+    /// set. Where no exchange is left the error is permanent. Submission to a configured relay
+    /// ([`Self::submit`]) is not filtered.
     pub async fn deliver(
         &self,
         mail_from:  &str,
@@ -297,6 +307,29 @@ impl OutboundClient {
                 IO, Network, Missing));
         }
         let mut targets: Vec<DeliveryTarget> = targets.to_vec();
+        if !self.allow_private_exchanges {
+            // An exchange whose address is loopback, private or otherwise unroutable is never
+            // dialled, whatever name led to it: a record that points mail at the sender's own
+            // network is no exchange for the recipient. Nothing a later try finds will differ,
+            // so where nothing is left the failure is permanent and the address is suppressed.
+            targets.retain(|t| {
+                let routable = is_publicly_routable(&t.addr);
+                if !routable {
+                    warn!("Outbound SMTP: MX {} ({}) is not publicly routable and is not dialled.",
+                        t.host, t.addr);
+                }
+                routable
+            });
+            if targets.is_empty() {
+                let domain = rcpt_to.first()
+                    .and_then(|r| extract_domain(r).ok())
+                    .unwrap_or_default();
+                return Err(err!(
+                    "Every mail exchange of '{}' is at an address that is not publicly routable, \
+                    so nothing was dialled (MX routing).", domain;
+                    IO, Network, Security, Permanent));
+            }
+        }
         targets.sort_by_key(|t| t.preference);
 
         let mut last_err: Option<String> = None;
@@ -1074,8 +1107,11 @@ mod tests {
         false
     }
 
+    // The stand-in exchanges listen on the loopback, which a default client will not dial.
     async fn client() -> Outcome<OutboundClient> {
-        OutboundClient::with_system_roots(EHLO)
+        let mut c = res!(OutboundClient::with_system_roots(EHLO));
+        c.allow_private_exchanges = true;
+        Ok(c)
     }
 
     // ── The submission conversation ───────────────────────────────
@@ -1829,6 +1865,72 @@ mod tests {
         };
         req!(true, msg.contains(&host), "the failing exchange was not named: {}", msg);
         req!(true, msg.contains("550"), "the server's code was dropped: {}", msg);
+        Ok(())
+    }
+
+    // ── Exchanges that are not publicly routable ──
+
+    /// A target at `addr`, on the port of a stand-in that would answer if it were dialled.
+    fn target_at(addr: IpAddr, port: u16) -> DeliveryTarget {
+        DeliveryTarget {
+            host:       fmt!("mx10.example.net"),
+            addr,
+            port,
+            preference: 10,
+        }
+    }
+
+    /// An MX that points at the sender's own network is a request forgery, or a misconfigured
+    /// record: either way the message must not be offered there, and the address must not be
+    /// retried. Each target here shares its port with a live stand-in, so a client that dialled
+    /// would reach it, and the stand-in's transcript says whether it did.
+    #[tokio::test]
+    async fn test_an_exchange_in_private_space_is_refused_without_a_connection_00() -> Outcome<()> {
+        let c = res!(OutboundClient::with_system_roots(EHLO));
+        req!(false, c.allow_private_exchanges, "the default must be to refuse private exchanges");
+        for ip in [
+            "127.0.0.1",            // loopback
+            "10.1.2.3",             // private
+            "169.254.169.254",      // the cloud metadata service
+            "fd00::1",              // unique local
+            "::ffff:127.0.0.1",     // loopback, spelled as a mapped IPv6 address
+        ] {
+            let (stand_in, seen) = res!(provider(Provider::exchange()).await);
+            let tgt = target_at(res!(ip.parse::<IpAddr>().map_err(|e|
+                err!(e, "The test address {}.", ip; Test, Invalid))), stand_in.port());
+            match c.deliver_to_exchanges(&[tgt], "a@example.com",
+                &[fmt!("bob@example.net")], &body(), STALL).await
+            {
+                Ok(_)  => return Err(err!(
+                    "Delivery to {} was reported as a success.", ip; Test, Invalid)),
+                Err(e) => {
+                    req!(true, is_permanent(&e),
+                        "{} was refused as transient, so the address is retried: {}", ip, e);
+                    let msg = fmt!("{}", e);
+                    req!(true, msg.contains("routable"),
+                        "the refusal for {} did not say why: {}", ip, msg);
+                },
+            }
+            // The stand-in is reached by 127.0.0.1 and ::ffff:127.0.0.1 alike, so a client that
+            // dialled either would have spoken to it. Give a late connection time to arrive.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            req!(true, res!(lines_of(&seen)).is_empty(),
+                "{} was dialled although it is not publicly routable", ip);
+        }
+        Ok(())
+    }
+
+    /// A client that opts in may deliver to an exchange on the loopback, which is how the
+    /// stand-ins of these tests, and a development host, are reached.
+    #[tokio::test]
+    async fn test_a_client_that_allows_private_exchanges_delivers_to_one_00() -> Outcome<()> {
+        let (tgt, seen) = res!(exchange_at(Provider::exchange(), 10).await);
+        let mut c = res!(OutboundClient::with_system_roots(EHLO));
+        c.allow_private_exchanges = true;
+        let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&seen)).iter().any(|l| l == "."), "the message never arrived");
         Ok(())
     }
 

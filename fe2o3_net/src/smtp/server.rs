@@ -1209,6 +1209,7 @@ mod tests {
         let client = OutboundClient {
             hostname:   Arc::new(fmt!("client.test.local")),
             tls_config: client_tls,
+            allow_private_exchanges: false,
         };
         let cfg = SubmissionConfig::new(
             HOST.to_string(), addr.port(), Security::StartTls,

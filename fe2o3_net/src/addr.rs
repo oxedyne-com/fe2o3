@@ -4,7 +4,10 @@ use oxedyne_fe2o3_stds::regions::Country;
 use std::{
     convert::TryFrom,
     fmt::{self},
-    net::IpAddr,
+    net::{
+        IpAddr,
+        Ipv6Addr,
+    },
 };
 
 pub struct PhoneNumbers;
@@ -202,6 +205,33 @@ mod tests {
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
+// │ CLIENT KEYS                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// The address a per-client limit is keyed on.
+///
+/// An IPv6 subscriber is given a whole /64 and can take a fresh address from it on every request, so
+/// a limit keyed on the full 128 bits is no limit at all. IPv4 is kept as it is, and an IPv4-mapped
+/// IPv6 address (`::ffff:a.b.c.d`) is the IPv4 address it carries, so one client reached over either
+/// family is one key. Every other IPv6 address becomes the first address of its /64.
+pub fn client_key(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_)   => *ip,
+        IpAddr::V6(v6)  => match v6.to_ipv4_mapped() {
+            Some(v4)    => IpAddr::V4(v4),
+            None        => {
+                let mut o = v6.octets();
+                for b in &mut o[8..] {
+                    *b = 0;
+                }
+                IpAddr::V6(Ipv6Addr::from(o))
+            },
+        },
+    }
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
 // │ OUTBOUND ADDRESS VETTING                                                  │
 // └───────────────────────────────────────────────────────────────────────────┘
 
@@ -356,5 +386,49 @@ mod vetting_tests {
     fn test_literal_loopback_is_refused_without_dns() {
         assert!(resolve_public("127.0.0.1").is_err());
         assert!(resolve_public("::1").is_err());
+    }
+}
+
+#[cfg(test)]
+mod client_key_tests {
+    use super::*;
+
+    fn ip(s: &str) -> IpAddr { s.parse().expect("test address") }
+
+    #[test]
+    fn test_ipv4_is_its_own_key() {
+        for s in ["1.2.3.4", "10.0.0.1", "127.0.0.1", "255.255.255.255"] {
+            assert_eq!(client_key(&ip(s)), ip(s), "{} changed", s);
+        }
+    }
+
+    #[test]
+    fn test_an_ipv4_mapped_address_keys_as_its_ipv4_form() {
+        assert_eq!(client_key(&ip("::ffff:1.2.3.4")), ip("1.2.3.4"));
+        assert_eq!(client_key(&ip("::ffff:127.0.0.1")), ip("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_ipv6_is_masked_to_its_slash_64() {
+        assert_eq!(client_key(&ip("2001:db8:1:2:aaaa:bbbb:cccc:dddd")), ip("2001:db8:1:2::"));
+        assert_eq!(client_key(&ip("2001:db8:1:2::")), ip("2001:db8:1:2::"));
+        assert_eq!(client_key(&ip("::1")), ip("::"));
+    }
+
+    #[test]
+    fn test_two_addresses_in_one_slash_64_share_a_key_and_two_slash_64s_do_not() {
+        let a = client_key(&ip("2001:db8:1:2::1"));
+        let b = client_key(&ip("2001:db8:1:2:ffff:ffff:ffff:ffff"));
+        let c = client_key(&ip("2001:db8:1:3::1"));
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_a_key_is_stable_under_a_second_application() {
+        for s in ["2001:db8:1:2:aaaa:bbbb:cccc:dddd", "::ffff:1.2.3.4", "9.9.9.9"] {
+            let once = client_key(&ip(s));
+            assert_eq!(client_key(&once), once, "{} is not a fixed point", s);
+        }
     }
 }
