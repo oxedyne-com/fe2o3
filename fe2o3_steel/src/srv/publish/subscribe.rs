@@ -1212,7 +1212,7 @@ pub async fn handle_subscribe<
 		return Said::Invalid.answer(cfg, hdrs);
 	}
 
-	queue_signup(db, sender, &email, id);
+	queue_signup(cfg, db, sender, &email, id);
 	Said::Sent.answer(cfg, hdrs)
 }
 
@@ -1221,7 +1221,9 @@ pub async fn handle_subscribe<
 // the limits and sends, so the reply carries no trace of whether the address was new, pending,
 // confirmed or over its limit. A push that fails is logged, and the reader still gets the same page --
 // retrying the form queues it again, and saying "we could not email you" would leak that the address
-// was actionable.
+// was actionable. The queue is capped (`outbox_confirm_max`): past the cap the sign-up is dropped
+// with a warning and the reply is the same page, so a flood fills no more than the cap and nobody
+// can tell by the reply whether theirs was queued.
 fn queue_signup<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1229,17 +1231,21 @@ fn queue_signup<
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
+	cfg:	&PublishConfig,
 	db:	&(Arc<RwLock<DB>>, UID),
 	sender:	&Arc<MailSender>,
 	email:	&str,
 	id:	&str,
 ) {
-	match outbox::push(db, &[Entry::new(Kind::Confirm, email, "", rate::now_secs())]) {
-		Ok(_)	=> {
+	let entry = Entry::new(Kind::Confirm, email, "", rate::now_secs());
+	match outbox::push_capped(db, &entry, cfg.outbox_confirm_max) {
+		Ok(true)	=> {
 			debug!("{}: publish: sign-up of {} queued", id, redact(email));
 			sender.pacer().wake();
 		}
-		Err(e)	=> warn!("{}: publish: sign-up of {} could not be queued: {}", id, redact(email), e),
+		Ok(false)	=> warn!("{}: publish: the confirmation queue is full at {}, so a sign-up of {} is dropped",
+			id, cfg.outbox_confirm_max, redact(email)),
+		Err(e)		=> warn!("{}: publish: sign-up of {} could not be queued: {}", id, redact(email), e),
 	}
 }
 

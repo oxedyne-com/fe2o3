@@ -200,6 +200,11 @@ pub struct PublishConfig {
 	// operator is told the queue is not draining (`0` is off). It catches a ceiling held at 0 and a
 	// newsletter that the ceiling will take hours to send alike, and is told once for the episode.
 	pub outbox_alert_secs:		u64,
+	// How many sign-ups may wait in this site's outbound queue for their confirmation (`0` is no
+	// limit). Past it a sign-up is dropped, with a warning logged, and the reader is shown the same
+	// page as for one that was queued. A drainer sends at the host's ceiling, so without a cap a
+	// script that names many addresses queues hours of confirmations ahead of every real reader.
+	pub outbox_confirm_max:		u64,
 	// How many days a sign-up may wait, unconfirmed, before its record is deleted (`0` is never).
 	// The clock runs from the last confirmation the outbox actually sent, so a sign-up held while
 	// the host's ceiling is 0 has no clock and is kept. A confirmed, unsubscribed or bounced record
@@ -357,6 +362,7 @@ impl PublishConfig {
 			confirm_max:		res!(get_count("confirm_max", 3)) as u32,
 			confirm_window_days:	res!(get_count("confirm_window_days", 30)),
 			outbox_alert_secs:	res!(get_count("outbox_alert_secs", 3600)),
+			outbox_confirm_max:	res!(get_count("outbox_confirm_max", 1000)),
 			pending_expiry_days:	res!(get_count("pending_expiry_days", 7)),
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,

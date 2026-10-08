@@ -22,10 +22,12 @@
 //!
 //! # The two lanes, and the alert
 //!
-//! A confirmation waits in the `c` lane and the newsletter in the `n` lane, and the drainer empties
-//! `c` first, so a sign-up is never kept behind a newsletter. A [`Watch`] reads the queue after each
-//! pass and tells the operator once when the oldest entry has waited past `outbox_alert_secs`, which a
-//! held ceiling and a deep queue both cause, and once more when the queue has drained.
+//! A confirmation waits in the `c` lane and the newsletter in the `n` lane. The drainer takes from `c`
+//! first, so a sign-up is not kept behind a newsletter, but a [`Share`] gives the newsletter the next
+//! slot after [`CONFIRM_RUN`] confirmations in a row, so a stream of sign-ups cannot starve it. The `c`
+//! lane is also capped in depth (see [`push_capped`]). A [`Watch`] reads the queue after each pass and
+//! tells the operator once when the oldest entry has waited past `outbox_alert_secs`, which a held
+//! ceiling and a deep queue both cause, and once more when the queue has drained.
 //!
 //! # A far end that does not answer
 //!
@@ -136,6 +138,9 @@ pub const DEADLINE_SECS: u64 = 150;
 // grows to by doubling each time it times out again.
 pub const BACKOFF_MIN_SECS: u64 = 600;
 pub const BACKOFF_MAX_SECS: u64 = 6 * 3600;
+
+// How many confirmations may take the slots one after another before the newsletter is next.
+pub const CONFIRM_RUN: u32 = 3;
 
 // The most entries one call of `take` looks at. The write guard is held for a call, so a long lane of
 // entries backing off is looked at in parts, with the guard let go between them.
@@ -262,6 +267,33 @@ impl Pacer {
 		let mut slow = lock_mutex!(self.slow);
 		slow.remove(domain);
 		Ok(())
+	}
+}
+
+/// How the drainer divides its slots between the lanes: confirmations first, but the newsletter next
+/// once [`CONFIRM_RUN`] confirmations have taken slots in a row. One for each vhost's drainer.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Share {
+	run:	u32,	// confirmation slots taken since a newsletter slot
+}
+
+impl Share {
+
+	// The lanes in the order the next pass looks at them.
+	fn order(&self) -> [Kind; 2] {
+		if self.run >= CONFIRM_RUN {
+			[Kind::News, Kind::Confirm]
+		} else {
+			[Kind::Confirm, Kind::News]
+		}
+	}
+
+	// Notes that a send of `kind` has taken a slot.
+	fn took(&mut self, kind: Kind) {
+		match kind {
+			Kind::Confirm	=> self.run = self.run.saturating_add(1),
+			Kind::News	=> self.run = 0,
+		}
 	}
 }
 
@@ -619,6 +651,33 @@ pub fn push<
 	Ok(entries.len())
 }
 
+/// Queues one entry at the tail of its lane unless the lane already holds `max` entries (`0` is no
+/// limit). Answers whether it was queued.
+///
+/// The depth is read and the entry written under one guard, so no number of requests at once can
+/// carry a lane past its cap.
+pub fn push_capped<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	entry:	&Entry,
+	max:	u64,
+)
+	-> Outcome<bool>
+{
+	store::exclusive(db, |dbr, user| -> Outcome<bool> {
+		if max > 0 && res!(queued_in(dbr, entry.kind)) >= max {
+			return Ok(false);
+		}
+		res!(push_in(dbr, user, entry));
+		Ok(true)
+	})
+}
+
 /// How many entries wait in a lane.
 pub fn queued<
 	const UIDL: usize,
@@ -833,7 +892,8 @@ pub enum Step {
 ///
 /// `now_ms` is the clock, so a test can run an hour in an instant. The pacer is asked only after the
 /// entry has proved still worth sending, so a skipped entry uses no slot, and an entry for a domain
-/// that has timed out is put back until the block ends, using none. Nothing here holds the
+/// that has timed out is put back until the block ends, using none. `share` decides which lane is
+/// looked at first. Nothing here holds the
 /// database lock across an `.await`, and the self-locking `subscribe` calls are made outside any
 /// [`store::exclusive`].
 pub async fn step<
@@ -848,6 +908,7 @@ pub async fn step<
 	cfg:	&PublishConfig,
 	courier: &C,
 	pacer:	&Pacer,
+	share:	&mut Share,
 	id:	&str,
 	now_ms:	u64,
 )
@@ -859,7 +920,7 @@ pub async fn step<
 	let now = now_ms / 1000;
 	let mut soonest: Option<u64> = None;
 	let mut found: Option<(u64, Entry)> = None;
-	for kind in KINDS {
+	for kind in share.order() {
 		let mut left = u64::MAX;
 		let mut sooner: Option<u64> = None;
 		loop {
@@ -894,8 +955,8 @@ pub async fn step<
 		}),
 	};
 	match entry.kind {
-		Kind::Confirm	=> confirm_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
-		Kind::News	=> news_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
+		Kind::Confirm	=> confirm_step(db, cfg, courier, pacer, share, id, now_ms, seq, entry).await,
+		Kind::News	=> news_step(db, cfg, courier, pacer, share, id, now_ms, seq, entry).await,
 	}
 }
 
@@ -919,6 +980,7 @@ async fn confirm_step<
 	cfg:	&PublishConfig,
 	courier: &C,
 	pacer:	&Pacer,
+	share:	&mut Share,
 	id:	&str,
 	now_ms:	u64,
 	seq:	u64,
@@ -954,7 +1016,7 @@ async fn confirm_step<
 	match res!(pacer.claim(now_ms)) {
 		Pace::Held	=> return Ok(Step::Held),
 		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
-		Pace::Go	=> {}
+		Pace::Go	=> share.took(Kind::Confirm),
 	}
 	let from = cfg.from_or(courier.default_from());
 	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
@@ -1117,6 +1179,7 @@ async fn news_step<
 	cfg:	&PublishConfig,
 	courier: &C,
 	pacer:	&Pacer,
+	share:	&mut Share,
 	id:	&str,
 	now_ms:	u64,
 	seq:	u64,
@@ -1152,7 +1215,7 @@ async fn news_step<
 	match res!(pacer.claim(now_ms)) {
 		Pace::Held	=> return Ok(Step::Held),
 		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
-		Pace::Go	=> {}
+		Pace::Go	=> share.took(Kind::News),
 	}
 	let from = cfg.from_or(courier.default_from());
 	let online = cfg.url_of(&cfg.path_of(&entry.slug));
@@ -1328,13 +1391,14 @@ pub async fn tick<
 	cfg:	&PublishConfig,
 	courier: &C,
 	pacer:	&Pacer,
+	share:	&mut Share,
 	watch:	&mut Watch,
 	id:	&str,
 	now_ms:	u64,
 )
 	-> Outcome<(Step, Option<AlertEvent>)>
 {
-	let stepped = res!(step(db, cfg, courier, pacer, id, now_ms).await);
+	let stepped = res!(step(db, cfg, courier, pacer, share, id, now_ms).await);
 	if stepped == Step::Sent {
 		watch.sent();
 	}
@@ -1436,6 +1500,7 @@ pub async fn run<
 ) {
 	info!("{}: publish: the outbox drainer is running at {} an hour", id, pacer.hourly());
 	let mut watch = Watch::default();
+	let mut share = Share::default();
 	let mut swept: Option<u64> = None;
 	loop {
 		let now = now_ms() / 1000;
@@ -1451,7 +1516,7 @@ pub async fn run<
 		let woken = pacer.wake.notified();
 		tokio::pin!(woken);
 		woken.as_mut().enable();
-		let nap_ms = match tick(&db, &cfg, &*courier, &pacer, &mut watch, &id, now_ms()).await {
+		let nap_ms = match tick(&db, &cfg, &*courier, &pacer, &mut share, &mut watch, &id, now_ms()).await {
 			Ok((stepped, owed))	=> {
 				if let Some(event) = owed {
 					tell(&alerter, &id, event);

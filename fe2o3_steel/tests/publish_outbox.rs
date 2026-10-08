@@ -25,6 +25,7 @@ use oxedyne_fe2o3_steel::srv::{
             Entry,
             Kind,
             Pacer,
+            Share,
             Stats,
             Step,
             Watch,
@@ -155,9 +156,9 @@ fn queue_pending(db: &Handle, n: usize) -> Outcome<Vec<String>> {
 // Runs the drainer for one simulated hour from `T0`, jumping the clock to each slot it is told of.
 async fn run_hour(db: &Handle, fake: &Fake, pacer: &Pacer) -> Outcome<()> {
     let cfg = cfg();
-    let mut now = T0;
+    let (mut now, mut share) = (T0, Share::default());
     loop {
-        match res!(outbox::step(db, &cfg, fake, pacer, "test", now).await) {
+        match res!(outbox::step(db, &cfg, fake, pacer, &mut share, "test", now).await) {
             Step::Sent | Step::Worked   => {},
             Step::Wait(ms)  => {
                 if now + ms >= T0 + HOUR_MS {
@@ -246,11 +247,12 @@ async fn test_a_backlog_is_told_once_and_cleared_once_when_it_drains_03() -> Out
     res!(outbox::push(&handle, &entries));
     let cfg = PublishConfig { outbox_alert_secs: 3600, ..cfg() };
     let (fake, held, mut watch) = (Fake::default(), Pacer::new(0), Watch::default());
+    let mut share = Share::default();
     let mut told = Vec::new();
     // Three hours held, polled every ten minutes.
     for m in (0..=180u64).step_by(10) {
         let (_, owed) = res!(outbox::tick(
-            &handle, &cfg, &fake, &held, &mut watch, "test", T0 + m * 60_000).await);
+            &handle, &cfg, &fake, &held, &mut share, &mut watch, "test", T0 + m * 60_000).await);
         if let Some(e) = owed {
             told.push((m, e));
         }
@@ -267,7 +269,7 @@ async fn test_a_backlog_is_told_once_and_cleared_once_when_it_drains_03() -> Out
     let mut cleared = Vec::new();
     for _ in 0..20 {
         let (stepped, owed) = res!(outbox::tick(
-            &handle, &cfg, &fake, &open, &mut watch, "test", now).await);
+            &handle, &cfg, &fake, &open, &mut share, &mut watch, "test", now).await);
         if let Some(e) = owed {
             cleared.push(e);
         }
@@ -368,10 +370,10 @@ async fn test_three_signups_queued_behind_a_hold_send_one_confirmation_06() -> O
     for d in 0..3u64 {
         res!(outbox::push(&handle, &[Entry::new(Kind::Confirm, "v@site.test", "", base + d * DAY)]));
     }
-    let (fake, pacer) = (Fake::default(), Pacer::new(100));
+    let (fake, pacer, mut share) = (Fake::default(), Pacer::new(100), Share::default());
     let mut now = T0 + 3 * DAY * 1000;
     for _ in 0..20 {
-        match res!(outbox::step(&handle, &cfg, &fake, &pacer, "test", now).await) {
+        match res!(outbox::step(&handle, &cfg, &fake, &pacer, &mut share, "test", now).await) {
             Step::Wait(ms)  => now += ms,
             Step::Idle      => break,
             _               => {},
@@ -462,7 +464,7 @@ async fn test_a_long_backing_off_lane_does_not_hold_the_write_lock_08() -> Outco
     });
     std::thread::sleep(std::time::Duration::from_millis(20));
     let t = Instant::now();
-    res!(outbox::step(&handle, &cfg, &fake, &pacer, "test", T0).await);
+    res!(outbox::step(&handle, &cfg, &fake, &pacer, &mut Share::default(), "test", T0).await);
     let total = t.elapsed();
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let waited = probe.join().unwrap_or_default();
@@ -596,10 +598,11 @@ async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off
     let (mute, cfg) = (Mute::default(), cfg());
     // One send a second, and a deadline of 50 ms.
     let pacer = Pacer::new(3600).with_deadline(Duration::from_millis(50));
+    let mut share = Share::default();
     let mut now = T0;
     let began = Instant::now();
     for _ in 0..12 {
-        let pass = outbox::step(&handle, &cfg, &mute, &pacer, "test", now);
+        let pass = outbox::step(&handle, &cfg, &mute, &pacer, &mut share, "test", now);
         let stepped = match tokio::time::timeout(Duration::from_secs(5), pass).await {
             Ok(r)   => res!(r),
             Err(_)  => return Err(err!("the drainer was held by a delivery that never returned"; Test, Timeout)),
@@ -624,7 +627,7 @@ async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off
 
     // Past the block the host is tried once more, times out again, and is left alone twice as long.
     now = T0 + (outbox::BACKOFF_MIN_SECS + 1) * 1000;
-    let pass = outbox::step(&handle, &cfg, &mute, &pacer, "test", now);
+    let pass = outbox::step(&handle, &cfg, &mute, &pacer, &mut share, "test", now);
     match tokio::time::timeout(Duration::from_secs(5), pass).await {
         Ok(r)   => { res!(r); },
         Err(_)  => return Err(err!("the drainer was held by a delivery that never returned"; Test, Timeout)),
@@ -632,5 +635,62 @@ async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off
     let later = now / 1000;
     assert_eq!(res!(pacer.blocked("hang.test", later)), Some(later + 2 * outbox::BACKOFF_MIN_SECS),
         "a second timeout did not double the wait");
+    Ok(())
+}
+
+// F2c A6: a steady stream of sign-ups does not keep a newsletter off the air. With a confirmation
+// queued before the newsletter's single message and eleven more behind it, the message leaves in the
+// first four slots and not the thirteenth.
+#[tokio::test]
+async fn test_a_newsletter_is_sent_within_four_slots_of_twelve_confirmations_16() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let readers = res!(live_post_and_readers(&handle, "on-rent", "r", 1));
+    let sender = res!(MailSender::new("mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let sender = sender.with_outbound_hourly(3600);
+    let confirmations: Vec<Entry> = (0..12)
+        .map(|i| Entry::new(Kind::Confirm, &fmt!("p{}@site.test", i), "", T0 / 1000))
+        .collect();
+    res!(outbox::push(&handle, &confirmations));
+    assert_eq!(res!(send::send_newsletter(&sender, &handle, "on-rent", "test")).attempted, 1);
+
+    let fake = Fake::default();
+    res!(run_hour(&handle, &fake, sender.pacer()).await);
+    let to = fake.to.lock().map(|v| v.clone()).unwrap_or_default();
+    assert_eq!(to.len(), 13, "the hour did not send the twelve confirmations and the newsletter");
+    let at = res!(to.iter().position(|t| *t == readers[0])
+        .ok_or_else(|| err!("the newsletter was never sent"; Test, Missing)));
+    assert!(at < 4, "the newsletter was sent in slot {}, behind the confirmations", at + 1);
+    Ok(())
+}
+
+// F2c A6: the confirmation queue stops at its cap, a sign-up past it is answered as any other and
+// queues nothing, and the queue takes sign-ups again as the drainer empties it.
+#[tokio::test]
+async fn test_the_confirmation_queue_stops_at_its_cap_17() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let sender = res!(MailSender::new("mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let mail = Some(Arc::new(sender));
+    let cfg = PublishConfig { outbox_confirm_max: 3, ..cfg() };
+    for i in 0..5 {
+        let body = fmt!("email=u{}%40site.test", i);
+        let _ = res!(subscribe::handle_subscribe(
+            &cfg, Some(&handle), &mail, &HeaderFields::default(), body.as_bytes(), None, "test",
+        ).await);
+    }
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 3, "five sign-ups against a cap of three");
+
+    // One leaves, and the room it made is taken by the next sign-up and no more.
+    let (fake, pacer, mut share) = (Fake::default(), Pacer::new(3600), Share::default());
+    assert_eq!(res!(outbox::step(&handle, &cfg, &fake, &pacer, &mut share, "test", T0).await), Step::Sent);
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 2);
+    for i in 5..8 {
+        let body = fmt!("email=u{}%40site.test", i);
+        let _ = res!(subscribe::handle_subscribe(
+            &cfg, Some(&handle), &mail, &HeaderFields::default(), body.as_bytes(), None, "test",
+        ).await);
+    }
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 3, "the queue did not refill to its cap and stop");
     Ok(())
 }
