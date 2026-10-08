@@ -240,7 +240,7 @@ fn reader_during_the_retire_finds_a_whole_value() -> Outcome<()> {
                     Ok(Some((v, _))) if v == new => n_new += 1,
                     other => {
                         bad += 1;
-                        let s: String = fmt!("{:?}", other).chars().take(200).collect();
+                        let s: String = fmt!("{:?}", other).chars().take(700).collect();
                         msg!("a reader found neither value: {}", s);
                     },
                 }
@@ -262,5 +262,48 @@ fn reader_during_the_retire_finds_a_whole_value() -> Outcome<()> {
     assert_eq!(bad, 0, "a reader found a value that was neither the old one nor the new one");
     assert!(n_new >= 1, "the reader never saw the new value, so it did not read while the old chunks were retired");
     res!(s.compact_and_check(&k, 5, 9, TWO));
+    s.end()
+}
+
+// The retire is stamped with the write that causes it.  Stamped when it is sent, a store of the
+// old geometry begun while the first is still becoming durable (its chunks stamped before the
+// retire, its bunch key newer than the first store's) has its chunks superseded by the retire of
+// the chunks it shares, and its bunch key names tombstones (QA A2-6).
+#[test]
+fn retire_does_not_erase_a_newer_value() -> Outcome<()> {
+    let _lock = lock();
+    let s = res!(store("newer"));
+    let k = dat!("newer than the retire");
+    res!(s.put(&k, 5, TWO));
+    assert_eq!(res!(s.num_chunks(&k)), 2, "the value did not split into two chunks");
+    let newer = Dat::BU32(fill_of(9, TWO));
+
+    // The first store (plain, so it must retire the old two chunks) is held at its barrier, and
+    // the second (two chunks again, the old keys) begins inside that hold.
+    hooks::set_barrier_delay(Duration::from_millis(800));
+    let first = {
+        let (db, k) = (s.db.clone(), k.clone());
+        thread::spawn(move || db.insert(k, Dat::BU32(fill_of(7, PLAIN)), Uid::default(), None).map(|_| ()))
+    };
+    thread::sleep(Duration::from_millis(300));
+    let second = {
+        let (db, k, v) = (s.db.clone(), k.clone(), newer.clone());
+        thread::spawn(move || db.insert(k, v, Uid::default(), None).map(|_| ()))
+    };
+    let first = first.join();
+    let second = second.join();
+    hooks::set_barrier_delay(Duration::ZERO);
+    match (first, second) {
+        (Ok(a), Ok(b)) => { res!(a); res!(b); },
+        _ => return Err(err!("A storing thread panicked."; Test, Invalid)),
+    }
+    res!(s.db.api().settle_for_test(Duration::from_secs(10)));
+    match s.db.get(&k, None) {
+        Ok(Some((v, _))) => assert_eq!(v, newer, "the newer value reads back changed"),
+        other => {
+            let t: String = fmt!("{:?}", other).chars().take(300).collect();
+            panic!("the newer value does not read back whole: {}", t);
+        },
+    }
     s.end()
 }

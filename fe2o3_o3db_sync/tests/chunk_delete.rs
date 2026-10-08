@@ -158,3 +158,78 @@ fn chunk_tombstone_failure_fails_delete() -> Outcome<()> {
     res!(db.close());
     Ok(())
 }
+
+// A delete removes what existed when it began.  Its tombstones are stamped once, at the start:
+// stamped as each is sent, an overwrite of the same length begun while the chunk tombstones are
+// becoming durable has chunks newer than theirs and a bunch key older than the bunch tombstone,
+// so the delete takes the value and leaves its chunks live for the orphan sweep (QA A2-6).
+#[test]
+fn delete_does_not_erase_a_later_overwrite() -> Outcome<()> {
+    log_set_level!("error");
+    let _lock = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
+    let db = res!(open("./test_db_chunk_delete_race"));
+    let user = setup::Uid::default();
+    let k = dat!("chunk delete race");
+    res!(db.insert(k.clone(), big(1), user, None));
+    let _ = res!(chunk_keys(&db, &k));
+
+    hooks::set_barrier_delay(Duration::from_millis(1_000));
+    let del = {
+        let (db, k) = (db.clone(), k.clone());
+        std::thread::spawn(move || db.delete(&k, user, None))
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let put = {
+        let (db, k) = (db.clone(), k.clone());
+        std::thread::spawn(move || db.insert(k, big(2), user, None).map(|_| ()))
+    };
+    let del = del.join();
+    let put = put.join();
+    hooks::set_barrier_delay(Duration::ZERO);
+    match (del, put) {
+        (Ok(a), Ok(b)) => { res!(a); res!(b); },
+        _ => return Err(err!("A thread panicked."; Test, Invalid)),
+    }
+    match db.get(&k, None) {
+        Ok(Some((v, _))) => assert_eq!(v, big(2), "the overwrite reads back changed"),
+        other => {
+            let t: String = fmt!("{:?}", other).chars().take(300).collect();
+            panic!("a value begun after the delete began does not read back whole: {}", t);
+        },
+    }
+    res!(db.close());
+    Ok(())
+}
+
+// A chunked delete dispatches every tombstone, the chunks' and the bunch key's, before it waits
+// for any: one round, not the chunks' and then the bunch key's (QA A2-1).  Counted from the order
+// of the steps, not timed.
+#[test]
+fn chunked_delete_is_one_round() -> Outcome<()> {
+    log_set_level!("error");
+    let _lock = match HOOKS.lock() { Ok(g) => g, Err(p) => p.into_inner() };
+    let db = res!(open("./test_db_chunk_delete_round"));
+    let user = setup::Uid::default();
+    let k = dat!("chunk delete round");
+    res!(db.insert(k.clone(), big(3), user, None));
+    let cks = res!(chunk_keys(&db, &k));
+
+    hooks::set_trace(true);
+    let existed = res!(db.delete(&k, user, None));
+    let steps = hooks::trace_steps();
+    hooks::set_trace(false);
+    assert!(existed, "the delete did not find the value");
+    let sent = steps.iter().filter(|s| **s == hooks::Step::Sent).count();
+    assert_eq!(sent, cks.len() + 1, "expected a tombstone for each chunk and the bunch key: {:?}", steps);
+    let first_wait = steps.iter().position(|s| *s == hooks::Step::Waited);
+    let last_send = steps.iter().rposition(|s| *s == hooks::Step::Sent);
+    match (first_wait, last_send) {
+        (Some(w), Some(l)) => assert!(l < w, "the delete waited before it had sent every tombstone: {:?}", steps),
+        _ => return Err(err!("The delete recorded no wait: {:?}", steps; Test, Missing)),
+    }
+    for ck in &cks {
+        assert!(res!(retired(&db, ck)), "chunk {:?} is still live when delete returned", ck);
+    }
+    res!(db.close());
+    Ok(())
+}

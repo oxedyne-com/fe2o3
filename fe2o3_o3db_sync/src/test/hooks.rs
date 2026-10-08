@@ -5,14 +5,27 @@
 use oxedyne_fe2o3_jdat::Dat;
 
 use std::{
-    sync::atomic::{
-        AtomicBool,
-        AtomicU64,
-        Ordering,
+    sync::{
+        Mutex,
+        atomic::{
+            AtomicBool,
+            AtomicU64,
+            Ordering,
+        },
     },
     thread,
     time::Duration,
 };
+
+// What a delete does with its tombstones, in order, for a test that counts rounds (QA A2-1).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Step {
+    Sent,   // a tombstone is dispatched
+    Waited, // the delete begins to wait for one tombstone's answer
+}
+
+static TRACING:  AtomicBool    = AtomicBool::new(false);
+static STEPS:    Mutex<Vec<Step>> = Mutex::new(Vec::new());
 
 static BARRIER_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each barrier
 static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels are handed over
@@ -255,5 +268,29 @@ fn pause(ms: &AtomicU64) {
     let ms = ms.load(Ordering::Relaxed);
     if ms > 0 {
         thread::sleep(Duration::from_millis(ms));
+    }
+}
+
+/// Starts or stops recording the steps of a delete's tombstones, and clears the record.
+pub fn set_trace(on: bool) {
+    TRACING.store(on, Ordering::Relaxed);
+    if let Ok(mut steps) = STEPS.lock() {
+        steps.clear();
+    }
+}
+
+/// The steps recorded since `set_trace(true)`.
+pub fn trace_steps() -> Vec<Step> {
+    match STEPS.lock() {
+        Ok(steps)   => steps.clone(),
+        Err(_)      => Vec::new(),
+    }
+}
+
+pub(crate) fn trace(step: Step) {
+    if TRACING.load(Ordering::Relaxed) {
+        if let Ok(mut steps) = STEPS.lock() {
+            steps.push(step);
+        }
     }
 }
