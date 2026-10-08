@@ -15,6 +15,7 @@
 //! Anthropic Claude
 
 pub mod builtin;
+pub mod lut;
 pub mod matrix;
 pub mod read;
 

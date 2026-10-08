@@ -39,6 +39,16 @@ const MAX_CH:		usize = 4;		// the widest lookup table a colour transform here us
 
 pub type Sig = [u8; 4];
 
+/// FNV-1a over `bytes`, 64 bits: a stable key for a cache, not a defence against forgery.
+pub fn fnv64(bytes: &[u8]) -> u64 {
+	let mut h = 0xcbf2_9ce4_8422_2325u64;
+	for b in bytes {
+		h ^= *b as u64;
+		h = h.wrapping_mul(0x0000_0100_0000_01b3);
+	}
+	h
+}
+
 /// Names a signature for a message, with any byte outside printable ASCII shown as `?`.
 pub fn sig_str(sig: Sig) -> String {
 	sig.iter().map(|b| if (0x20..0x7f).contains(b) { *b as char } else { '?' }).collect()
@@ -247,6 +257,7 @@ impl Lut {
 #[derive(Clone, Debug)]
 pub struct Profile {
 	pub name:	String,					// what the caller calls it, quoted in every message
+	pub id:		u64,					// FNV-1a of the profile's bytes, the identity a transform is cached by
 	pub head:	Header,
 	pub tags:	Vec<TagEntry>,
 	pub desc:	Option<String>,
@@ -334,6 +345,7 @@ impl Profile {
 
 		let mut p = Self {
 			name:	name.to_string(),
+			id:		fnv64(whole),
 			head,
 			tags,
 			desc:	None,
