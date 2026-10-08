@@ -253,7 +253,7 @@ impl Dat {
                         ));
                     }
                     let v = v as usize;
-                    if buf.len() > start - 1 + n + v {
+                    if v <= buf.len().saturating_sub(start + n) {
                         let owned = &buf[start + n .. start + n + v].to_vec();
                         return Ok((
                             Self::ABox(
@@ -320,7 +320,7 @@ impl Dat {
                         let mut list = Vec::new();
                         let mut i = 1 + n;
                         while i < byt_len {
-                            let (dat, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (dat, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], lims, depth + 1, pos + i));
                             i += n;
                             list.push(dat);
                         }
@@ -391,7 +391,7 @@ impl Dat {
                         let mut i = 1 + n;
                         let mut count: usize = 0;
                         while i < byt_len {
-                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], lims, depth + 1, pos + i));
                             i += n;
                             if i >= byt_len {
                                 return Err(err!(
@@ -401,7 +401,7 @@ impl Dat {
                                     key, Self::code_name(buf[0]), count;
                                 Bytes, Input, Decode, Missing));
                             }
-                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], lims, depth + 1, pos + i));
                             i += n;
                             map.insert(key, val);
                             count += 1;
@@ -467,7 +467,7 @@ impl Dat {
                         let mut count: u64 = 0;
                         let mut order: u64 = Dat::OMAP_ORDER_START_DEFAULT;
                         while i < byt_len {
-                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (key, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], lims, depth + 1, pos + i));
                             i += n;
                             if i >= byt_len {
                                 return Err(err!(
@@ -477,7 +477,7 @@ impl Dat {
                                     key, Self::code_name(buf[0]), count;
                                 Bytes, Input, Decode, Missing));
                             }
-                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..], lims, depth + 1, pos + i));
+                            let (val, n) = res!(Dat::from_bytes_depth(&buf[i..byt_len], lims, depth + 1, pos + i));
                             i += n;
                             map.insert(MapKey::new(order, key), val);
                             order = try_add!(order, Dat::OMAP_ORDER_DELTA_DEFAULT);
@@ -1063,7 +1063,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 return Ok((
                                     Self::BC64(buf[1 + n .. 1 + n + v].to_vec()),
                                     1 + n + v,
@@ -1111,7 +1111,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 let owned = &buf[1 + n .. 1 + n + v].to_vec();
                                 return Ok((
                                     Self::Str(res!(std::str::from_utf8(
@@ -1162,7 +1162,7 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 return Ok((
                                     Self::Aint(BigInt::from_signed_bytes_be(
                                         &buf[1 + n .. 1 + n + v]
@@ -1212,7 +1212,14 @@ impl Dat {
                                 ));
                             }
                             let v = v as usize;
-                            if buf.len() > 1 - 1 + n + v {
+                            // The payload ends in an 8-byte exponent, which a shorter one cannot hold.
+                            if v < 8 {
+                                return Err(err!(
+                                    "The Dat::Adec payload of {} bytes cannot hold its 8-byte \
+                                    exponent.", v;
+                                Bytes, Input, Decode, Invalid));
+                            }
+                            if v <= buf.len().saturating_sub(1 + n) {
                                 let bigint = BigInt::from_signed_bytes_be(
                                     &buf[1 + n .. 1 + n + v - 8]
                                 );
