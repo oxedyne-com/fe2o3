@@ -2135,7 +2135,7 @@ pub fn editable(c: &Comment, now_secs: u64) -> bool {
 /// which is lenient by design -- it reads "not a time at all" as *some* time, which was caught by the
 /// test below. A permissive read here would hand an unbounded edit window to any comment whose stamp
 /// was unreadable, so this accepts exactly the shape [`now_stamp`] writes and nothing else.
-fn parse_stamp_secs(s: &str) -> Option<u64> {
+pub(crate) fn parse_stamp_secs(s: &str) -> Option<u64> {
 	let b = s.as_bytes();
 	if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || b[13] != b':' || b[16] != b':' {
 		return None;
@@ -2267,7 +2267,7 @@ pub fn set_comments_open<
 	Ok(())
 }
 
-const RATE_PREFIX: &str = "publish/comment-rate/";
+pub const RATE_PREFIX: &str = "publish/comment-rate/";
 
 
 /// Whether a sender may comment now, and the record of their having done so.

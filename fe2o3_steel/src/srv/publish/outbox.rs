@@ -27,6 +27,12 @@
 //! pass and tells the operator once when the oldest entry has waited past `outbox_alert_secs`, which a
 //! held ceiling and a deep queue both cause, and once more when the queue has drained.
 //!
+//! # The daily sweep
+//!
+//! The same task clears, once a day, what has outlived its use: an unconfirmed sign-up whose last
+//! confirmation was sent `pending_expiry_days` ago, and the rate rows whose windows have passed. See
+//! [`sweep`].
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
@@ -38,6 +44,11 @@ use crate::srv::{
 	publish::{
 		PostState,
 		PublishConfig,
+		comment,
+		rate::{
+			self,
+			Window,
+		},
 		send::{
 			self,
 			Fate,
@@ -1016,6 +1027,63 @@ pub async fn tick<
 	Ok((stepped, owed))
 }
 
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ SWEEP                                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What one sweep removed.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Swept {
+	pub pending:	usize,	// unconfirmed sign-ups past `pending_expiry_days`
+	pub rows:	usize,	// rate rows whose window has passed
+}
+
+/// Removes what has outlived its use: sign-ups that never confirmed, and rate rows whose window has
+/// passed. Run once a day by the drainer, never by a request.
+///
+/// The two halves are independent, so one failing is logged and does not stop the other. The rows
+/// need a scan of the whole store (see [`rate::expire_rows`]), which is why this is a daily sweep
+/// and not work done as each row is touched.
+pub fn sweep<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&PublishConfig,
+	now:	u64,
+	id:	&str,
+)
+	-> Swept
+{
+	let pending = match subscribe::expire_pending(db, cfg.pending_expiry_days, now, id) {
+		Ok(n)	=> n,
+		Err(e)	=> {
+			warn!("{}: publish: expiring unconfirmed sign-ups failed: {}", id, e);
+			0
+		}
+	};
+	let sets = [
+		(subscribe::RATE_PREFIX,	Window::hourly(cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly)),
+		(subscribe::TO_PREFIX,		cfg.confirm_window()),
+		(comment::RATE_PREFIX,		Window::hourly(cfg.comment_rate_secs, cfg.comment_rate_hourly)),
+	];
+	let rows = match rate::expire_rows(db, &sets, now) {
+		Ok(n)	=> n,
+		Err(e)	=> {
+			warn!("{}: publish: expiring spent rate rows failed: {}", id, e);
+			0
+		}
+	};
+	if rows > 0 {
+		info!("{}: publish: {} spent rate row(s) expired", id, rows);
+	}
+	Swept { pending, rows }
+}
+
+
 // Tells the operator, or says in the log that nobody can be told.
 fn tell(alerter: &Option<Alerter>, id: &str, event: AlertEvent) {
 	match alerter {
@@ -1030,12 +1098,15 @@ fn tell(alerter: &Option<Alerter>, id: &str, event: AlertEvent) {
 /// Sleeps until the next slot, or until something is queued, or for [`POLL_SECS`], whichever is
 /// first, and tells the operator through `alerter` what the [`Watch`] finds. A pass that fails is logged and tried again after the poll interval, never in a tight
 /// loop.
+///
+/// Once a day, and once at the start, it also runs [`sweep`] on a blocking thread, since the sweep
+/// scans the store. The bounds are `'static` only for that thread.
 pub async fn run<
 	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
+	UID:	NumIdDat<UIDL> + 'static,
+	ENC:	Encrypter + 'static,
+	KH:	Hasher + 'static,
+	DB:	Database<UIDL, UID, ENC, KH> + 'static,
 	C:	Courier,
 >(
 	db:	(Arc<RwLock<DB>>, UID),
@@ -1047,7 +1118,17 @@ pub async fn run<
 ) {
 	info!("{}: publish: the outbox drainer is running at {} an hour", id, pacer.hourly());
 	let mut watch = Watch::default();
+	let mut swept: Option<u64> = None;
 	loop {
+		let now = now_ms() / 1000;
+		if swept.map_or(true, |t| now.saturating_sub(t) >= DAY_SECS) {
+			// Marked first, so a sweep that fails is tried again tomorrow and not on every pass.
+			swept = Some(now);
+			let (d, c, i) = (db.clone(), cfg.clone(), id.clone());
+			if let Err(e) = tokio::task::spawn_blocking(move || sweep(&d, &c, now, &i)).await {
+				warn!("{}: publish: the daily sweep did not finish: {}", id, e);
+			}
+		}
 		// Registered before the pass, so a push during it is not missed.
 		let woken = pacer.wake.notified();
 		tokio::pin!(woken);

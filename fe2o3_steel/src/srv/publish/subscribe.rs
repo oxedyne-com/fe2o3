@@ -65,9 +65,12 @@ use oxedyne_fe2o3_net::{
 	},
 };
 
-use std::sync::{
-	Arc,
-	RwLock,
+use std::{
+	collections::HashSet,
+	sync::{
+		Arc,
+		RwLock,
+	},
 };
 
 
@@ -276,9 +279,9 @@ pub fn mint_token() -> String {
 // `display: none` or `hidden`, which the better form-fillers skip.
 pub const TRAP_FIELD: &str = "website";
 
-const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
+pub const RATE_PREFIX: &str = "publish/subscribe-rate/";	// apart from the comment counter
 
-const TO_PREFIX: &str = "publish/subscribe-to/";	// the counter of confirmations to one address
+pub const TO_PREFIX: &str = "publish/subscribe-to/";	// the counter of confirmations to one address
 
 /// Whether a submission filled in the field no person sees.
 ///
@@ -868,20 +871,121 @@ pub fn remove<
 		// gone. So a repeat erase honestly says there was nothing to erase.
 		let existed = res!(get_in(dbr, &email)).is_some();
 		res!(dbr.delete(&key_of(&email), user, None));
-		res!(store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
-			let emails = res!(store::names_of(old, "subscriber index"));
-			let kept: Vec<String> = emails.iter().filter(|e| e.as_str() != email).cloned().collect();
-			if kept.len() == emails.len() {
-				return Ok((Edit::Keep, ()));
-			}
-			Ok((Edit::Set(store::names_dat(&kept)), ()))
-		}));
+		res!(unlist_in(dbr, user, &HashSet::from([email.as_str()])));
 		Ok(existed)
 	}));
 	if existed {
 		info!("{}: publish: {} erased from the list by an admin", id, redact(&email));
 	}
 	Ok(existed)
+}
+
+// Takes the addresses in `gone` out of the index, on a database already write-locked. The index is
+// written back once, and not at all where it names none of them.
+fn unlist_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
+	gone:	&HashSet<&str>,
+)
+	-> Outcome<()>
+{
+	store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+		let emails = res!(store::names_of(old, "subscriber index"));
+		let kept: Vec<String> = emails.iter().filter(|e| !gone.contains(e.as_str())).cloned().collect();
+		if kept.len() == emails.len() {
+			return Ok((Edit::Keep, ()));
+		}
+		Ok((Edit::Set(store::names_dat(&kept)), ()))
+	})
+}
+
+// Has a pending subscriber waited `age` seconds since the last confirmation was sent to it?
+//
+// **The clock is `sent`, never `created`.** A record that has been sent nothing has no clock: it is
+// held behind a ceiling of 0, or still in the queue, and expiring it would delete the address before
+// its one confirmation went out. A `sent` that will not read is no clock either, since an age that
+// cannot be shown is not one to delete on. Only a pending record can lapse.
+fn lapsed(sub: &Subscriber, age: u64, now: u64) -> bool {
+	if sub.state != SubState::Pending {
+		return false;
+	}
+	match sub.sent.as_deref().and_then(super::comment::parse_stamp_secs) {
+		Some(t)	=> now.saturating_sub(t) >= age,
+		None	=> false,
+	}
+}
+
+// Subscribers judged under one write guard when expiring. The index is written back once for each
+// chunk, so this also sets how often a long list is rewritten.
+const EXPIRE_CHUNK: usize = 256;
+
+/// Deletes the pending subscribers whose last confirmation was sent `days` or more ago, and says how
+/// many went. A `days` of 0 deletes nothing.
+///
+/// Each goes whole, the record and its place in the index. Only [`SubState::Pending`] lapses: a
+/// confirmed, unsubscribed or bounced record is kept, the last because its suppression is the
+/// reason it exists. The counter of confirmations to the address lives apart, under a hash, so a
+/// lapsed address that signs up again does not find its limit handed back.
+///
+/// The index is walked and no scan is made, so the cost is the size of the list. Every record is
+/// read again under the write guard before it is deleted, so one that has confirmed, left or been
+/// sent another confirmation since the walk is kept.
+pub fn expire_pending<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	days:	u64,
+	now:	u64,
+	id:	&str,
+)
+	-> Outcome<usize>
+{
+	if days == 0 {
+		return Ok(0);
+	}
+	let age = days.saturating_mul(86_400);
+	let mut due = Vec::new();
+	for email in res!(index(db)) {
+		match get(db, &email) {
+			Ok(Some(s)) if lapsed(&s, age, now)	=> due.push(email),
+			Ok(_)					=> {},
+			Err(e)					=> warn!(
+				"{}: publish: skipping subscriber {} while expiring: {}", id, redact(&email), e),
+		}
+	}
+	let mut gone = 0;
+	for chunk in due.chunks(EXPIRE_CHUNK) {
+		gone += res!(store::exclusive(db, |dbr, user| -> Outcome<usize> {
+			let mut done: HashSet<&str> = HashSet::new();
+			for email in chunk {
+				match res!(get_in(dbr, email)) {
+					Some(s) if lapsed(&s, age, now)	=> {
+						res!(dbr.delete(&key_of(email), user, None));
+						done.insert(email.as_str());
+					},
+					_				=> {},
+				}
+			}
+			if !done.is_empty() {
+				res!(unlist_in(dbr, user, &done));
+			}
+			Ok(done.len())
+		}));
+	}
+	if gone > 0 {
+		info!("{}: publish: {} sign-up(s) expired unconfirmed after {} days", id, gone, days);
+	}
+	Ok(gone)
 }
 
 /// An address with its local part masked, for a log line.
