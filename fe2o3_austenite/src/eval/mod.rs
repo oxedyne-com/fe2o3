@@ -75,6 +75,7 @@ use crate::syntax::{
 	Span,
 };
 use crate::timings::{
+	Counter,
 	Phase,
 	Timings,
 };
@@ -212,6 +213,13 @@ impl Engine {
 			t.leave();
 		}
 		out
+	}
+
+	/// Adds `by` to a counter of the timing record's current pass. With no recorder it is a test of the option.
+	pub fn bump(&mut self, c: Counter, by: u64) {
+		if let Some(t) = self.timings.as_mut() {
+			t.bump(c, by);
+		}
 	}
 
 	/// Records an error diagnostic at `span` and returns the error to propagate.

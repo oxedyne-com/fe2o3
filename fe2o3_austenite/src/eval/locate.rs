@@ -60,6 +60,8 @@ impl Locator {
 
 	pub fn reset(&mut self) { *self = Self::default(); }
 
+	pub fn place(&self) -> Place { self.place }
+
 	pub fn locate(&mut self, kind: ElemKind, span: Span) -> Location {
 		Location(self.next_hash(DOMAIN_LOCATION, kind, span))
 	}
