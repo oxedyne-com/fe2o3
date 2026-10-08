@@ -140,6 +140,8 @@ fn reply(from: u8, to: u8, table: &str, records: Vec<Record>) -> Envelope {
 		records,
 		requested_ids:	Vec::new(),
 		bulk:			false,
+		after:			None,
+		next:			None,
 	})
 }
 
@@ -1315,6 +1317,8 @@ fn reply_asking(from: u8, to: u8, table: &str, records: Vec<Record>, requested_i
 		records,
 		requested_ids,
 		bulk:	false,
+		after:			None,
+		next:			None,
 	})
 }
 
@@ -1450,11 +1454,6 @@ fn refuse_on_missing_dependency_fails_check() -> Outcome<()> {
 	assert!(!bad.is_empty(), "Refuse on a missing dependency passed the check");
 	Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Known red, carried by A2: the content hash ignores length (2-F1) and
-// anti-entropy repairs only the dialling side (2-F3).
-// ---------------------------------------------------------------------------
 
 /// A mesh of `n` peers on the eventual table "identity", each holding everything.
 fn mesh(n: usize) -> Outcome<Vec<DistOzone<MemoryStorage>>> {

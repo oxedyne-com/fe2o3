@@ -64,6 +64,7 @@ use super::resolve::{
 	Verdict,
 };
 use super::storage::Storage;
+use super::codec::MAX_ENVELOPE_BYTES;
 use super::transport::{
 	Envelope,
 	MsgKind,
@@ -113,6 +114,48 @@ const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN + 32;
 const ANTI_ENTROPY_VALUE_LEN:	usize = 0;
 
 
+// An anti-entropy reply or push is paged so that no envelope passes the codec's bound. A page
+// takes records in id order while their estimated encoding fits ANTI_ENTROPY_PAGE_BYTES, which
+// leaves a quarter of the bound for the envelope, the requested ids and the estimate's error.
+// The first record that can cross is always taken, so every exchange moves at least one. A
+// record that cannot cross an envelope alone is never sent.
+const ANTI_ENTROPY_PAGE_BYTES:	usize = MAX_ENVELOPE_BYTES / 4 * 3;
+const ANTI_ENTROPY_ALONE_BYTES:	usize = MAX_ENVELOPE_BYTES - 1024 * 1024;
+const RECORD_FRAME_BYTES:		usize = 256;	// over-estimates the id, table name and framing
+
+// What a page does with the next record.
+enum Fit {
+	Take,
+	Never,	// too long to cross an envelope at all
+	Full,	// the page is full, so this record and the rest wait for the next exchange
+}
+
+struct Page {
+	used:	usize,
+	taken:	usize,
+}
+
+impl Page {
+
+	fn new() -> Self {
+		Self { used: 0, taken: 0 }
+	}
+
+	fn fit(&mut self, record: &Record) -> Fit {
+		let size = record.value.len() + record.table.len() + RECORD_FRAME_BYTES;
+		if size > ANTI_ENTROPY_ALONE_BYTES {
+			return Fit::Never;
+		}
+		if self.taken > 0 && self.used + size > ANTI_ENTROPY_PAGE_BYTES {
+			return Fit::Full;
+		}
+		self.used += size;
+		self.taken += 1;
+		Fit::Take
+	}
+}
+
+
 // Choosing more than one peer protects against a single straggler; choosing
 // many wastes bandwidth. Three is the operating-point default referenced in the
 // spec ("an OAM holder" -- plural in realistic deployments).
@@ -134,6 +177,9 @@ pub struct DistOzone<S: Storage, R: Resolver = LastVersionWins> {
 	// An entry is created lazily on the first message, and kept after Decide so
 	// duplicate late messages are silently absorbed.
 	cohorts:		Mutex<HashMap<(String, RecordId), CohortInstance>>,
+	// Where the next paged bulk reply from a peer resumes, for each table. Set by a bulk
+	// reply that stopped short, and cleared by the exchange that finishes the table.
+	resume:			Mutex<HashMap<(String, NodeId), RecordId>>,
 }
 
 /// The in-flight state of a remote read.
@@ -180,6 +226,7 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 			pending_gets:	Mutex::new(HashMap::new()),
 			read_fanout:	DEFAULT_READ_FANOUT,
 			cohorts:		Mutex::new(HashMap::new()),
+			resume:			Mutex::new(HashMap::new()),
 		})
 	}
 
@@ -762,12 +809,12 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 					..InboundOutcome::empty()
 				})
 			}
-			MsgKind::AntiEntropyDigest { table, sketch } => {
-				self.handle_anti_entropy_digest(env.from, table, sketch)
+			MsgKind::AntiEntropyDigest { table, sketch, after } => {
+				self.handle_anti_entropy_digest(env.from, table, sketch, after)
 			}
-			MsgKind::AntiEntropyReply { table, records, requested_ids, bulk } => {
+			MsgKind::AntiEntropyReply { table, records, requested_ids, bulk, after, next } => {
 				self.handle_anti_entropy_reply(
-					&ctx, env.from, table, records, requested_ids, bulk,
+					&ctx, env.from, table, records, requested_ids, bulk, after, next,
 				)
 			}
 			MsgKind::AntiEntropyPush { table, records } => {
@@ -831,12 +878,17 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		}
 		let iblt = res!(self.build_table_iblt(tc));
 		let sketch = iblt.to_bytes();
+		let after = {
+			let resume = lock_mutex!(self.resume);
+			resume.get(&(table.to_string(), target)).copied()
+		};
 		Ok(Envelope::new(
 			self.cfg.local_peer_id,
 			target,
 			MsgKind::AntiEntropyDigest {
 				table:	table.to_string(),
 				sketch,
+				after,
 			},
 		))
 	}
@@ -875,12 +927,21 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 	}
 
 	/// Decodes the symmetric difference against the local sketch and returns an
-	/// [`AntiEntropyReply`][ar] envelope carrying every record the sender lacks or
+	/// [`AntiEntropyReply`][ar] envelope carrying the records the sender lacks or
 	/// holds at other bytes, and the identifiers of the records the recipient lacks or
 	/// holds at other bytes. A value difference at one id is a key on each side, so
 	/// it is both sent and asked for. On sketch overload it falls back to a bulk reply
-	/// of every record the recipient holds for the table, which the sender answers
-	/// with a push of what that bulk lacks or holds at other bytes.
+	/// of the records the recipient holds for the table after `after`, which the sender
+	/// answers with a push of what that bulk lacks or holds at other bytes.
+	///
+	/// The reply is paged to [`ANTI_ENTROPY_PAGE_BYTES`], in id order after `after`,
+	/// and names where it stopped in `next`. The dialler sends `next` back as `after`,
+	/// so the next page begins past every record this one carried, whether or not the
+	/// dialler's resolver took it, and a run of records it keeps refusing cannot hold
+	/// up the records behind them. The page that reaches the end of the difference has
+	/// no `next`, which clears the cursor, and the following exchange starts again from
+	/// the first id, so a refused or deferred record is offered again each lap. The ids
+	/// the reply asks for are held to the same range, `after` up to `next`.
 	///
 	/// [ar]: MsgKind::AntiEntropyReply
 	fn handle_anti_entropy_digest(
@@ -888,6 +949,7 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		from:		NodeId,
 		table:		String,
 		sketch:		Vec<u8>,
+		after:		Option<RecordId>,
 	)
 		-> Outcome<InboundOutcome>
 	{
@@ -905,54 +967,100 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 			value_len:	ANTI_ENTROPY_VALUE_LEN,
 			seed:		tc.iblt_seed(),
 		};
-		let their_iblt = res!(Iblt::from_bytes(&sketch));
-		if their_iblt.config() != expected_cfg {
+		// A sketch is a peer's word for its own sizes, so its header is compared with the
+		// expected shape before the table the header describes is built.
+		let their_cfg = res!(Iblt::config_in(&sketch));
+		if their_cfg != expected_cfg {
 			return Err(err!(
 				"anti-entropy sketch config mismatch for table '{}'.",
 				table;
 				Invalid, Input, Mismatch));
 		}
+		let their_iblt = res!(Iblt::from_bytes(&sketch));
 		let mut mine = res!(self.build_table_iblt(tc));
 		res!(mine.subtract(&their_iblt));
 		let decode = res!(mine.decode());
-		let (records_for_sender, requested_ids, bulk) = match decode {
+		let (records_for_sender, requested_ids, bulk, next) = match decode {
 			DecodeOutcome::Complete { inserted, deleted } => {
 				// `inserted` = keys in mine not in theirs -> records I
 				// should send. `deleted` = keys in theirs not in mine ->
 				// ids I should request. A key is an id and a content hash,
 				// so an id held at other bytes on each side is in both lists.
-				let mut records_for_sender = Vec::with_capacity(inserted.len());
+				let mut ids = Vec::with_capacity(inserted.len());
 				for (key_bytes, _value) in inserted {
 					let rid = res!(Self::anti_entropy_id(&key_bytes));
+					if after.map_or(true, |a| rid > a) {
+						ids.push(rid);
+					}
+				}
+				ids.sort();
+				ids.dedup();
+				let mut page = Page::new();
+				let mut records_for_sender = Vec::with_capacity(ids.len());
+				let mut last = None;
+				let mut next = None;
+				for rid in ids {
 					if let Some(r) = res!(self.storage.get(&table, &rid)) {
-						records_for_sender.push(r);
+						match page.fit(&r) {
+							Fit::Take	=> {
+								records_for_sender.push(r);
+								last = Some(rid);
+							},
+							Fit::Never	=> {},
+							Fit::Full	=> {
+								next = last;
+								break;
+							},
+						}
 					}
 				}
 				// A sketch built by hand can name one id under several
-				// contents, so each id is requested once.
+				// contents, so each id is requested once. Only the ids in
+				// the range of this page are asked for, so that the
+				// dialler's push, which has a page of its own, resumes in
+				// step with the cursor.
 				let mut asked = HashSet::with_capacity(deleted.len());
 				let mut requested_ids = Vec::with_capacity(deleted.len());
 				for (key_bytes, _value) in deleted {
 					let rid = res!(Self::anti_entropy_id(&key_bytes));
+					if after.map_or(false, |a| rid <= a) || next.map_or(false, |n| rid > n) {
+						continue;
+					}
 					if asked.insert(rid) {
 						requested_ids.push(rid);
 					}
 				}
-				(records_for_sender, requested_ids, false)
+				(records_for_sender, requested_ids, false, next)
 			}
 			DecodeOutcome::Incomplete { .. } => {
-				// Sketch overloaded. Fall back to bulk: send everything I
-				// have for this table; the sender absorbs what it lacks.
-				// This is simple and correct; a later optimisation can
-				// teach the sender to retry with a larger sketch.
-				let digests = res!(self.storage.digests(&table));
-				let mut records = Vec::with_capacity(digests.len());
+				// Sketch overloaded. Fall back to bulk: send the next page of
+				// what I have for this table, in id order after `after`; the
+				// sender absorbs what it lacks and asks again from `next`.
+				let mut digests = res!(self.storage.digests(&table));
+				digests.sort_by(|a, b| a.id.cmp(&b.id));
+				let mut page = Page::new();
+				let mut records = Vec::new();
+				let mut last = None;
+				let mut next = None;
 				for d in digests {
+					if after.map_or(false, |a| d.id <= a) {
+						continue;
+					}
 					if let Some(r) = res!(self.storage.get(&table, &d.id)) {
-						records.push(r);
+						match page.fit(&r) {
+							Fit::Take	=> {
+								records.push(r);
+								last = Some(d.id);
+							},
+							Fit::Never	=> {},
+							Fit::Full	=> {
+								next = last;
+								break;
+							},
+						}
 					}
 				}
-				(records, Vec::new(), true)
+				(records, Vec::new(), true, next)
 			}
 		};
 		let reply = Envelope::new(
@@ -963,6 +1071,8 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 				records:		records_for_sender,
 				requested_ids,
 				bulk,
+				after,
+				next,
 			},
 		);
 		Ok(InboundOutcome {
@@ -974,8 +1084,16 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 	/// Applies the records the recipient was missing, and builds an
 	/// [`AntiEntropyPush`][ap] envelope for any records requested in return. The
 	/// push is built from storage after the reply is applied, so the other peer is
-	/// offered the resolved value. A bulk reply names no ids, and is answered with
-	/// every local record the sender's bulk lacks or holds at other bytes.
+	/// offered the resolved value, except at an id where it already holds the bytes
+	/// the reply carried. A bulk reply names no ids, and is answered with every local
+	/// record in its page, the ids after `after` up to `next`, that the sender's page
+	/// lacks or holds at other bytes.
+	///
+	/// The push is paged to [`ANTI_ENTROPY_PAGE_BYTES`] like the reply. What a page
+	/// leaves out is asked for again. A reply that stopped short, or a push that did,
+	/// sets where the next digest to that peer resumes, past every record this
+	/// exchange carried whatever the other resolver made of it; the exchange that
+	/// finishes the difference clears it, and the next lap begins at the first id.
 	///
 	/// [ap]: MsgKind::AntiEntropyPush
 	fn handle_anti_entropy_reply(
@@ -984,8 +1102,10 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		from:			NodeId,
 		table:			String,
 		records:		Vec<Record>,
-		requested_ids:	Vec<RecordId>,
+		mut requested_ids:	Vec<RecordId>,
 		bulk:			bool,
+		after:			Option<RecordId>,
+		next:			Option<RecordId>,
 	)
 		-> Outcome<InboundOutcome>
 	{
@@ -994,8 +1114,9 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		// Offer every record the peer sent us to the resolver. The apply step
 		// re-checks placement, so a stale-N sender cannot push a record to a peer
 		// that has since stopped considering itself a holder.
-		// A record repeated in the reply is applied once. A bulk reply is also kept by
-		// id and content hash, to find what it lacks below.
+		// A record repeated in the reply is applied once. The id and content hash of each
+		// is kept, to find what a bulk page lacks and to leave unechoed what the peer
+		// already holds.
 		let mut out = InboundOutcome::empty();
 		let mut seen = HashSet::with_capacity(records.len());
 		let mut theirs = HashMap::new();
@@ -1007,41 +1128,92 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 			if !seen.insert((record.id, hash)) {
 				continue;
 			}
-			if bulk {
-				theirs.insert(record.id, hash);
-			}
+			theirs.insert(record.id, hash);
 			out.note(&record.table, record.id, self.apply(ctx, &record));
 		}
 
-		// Build a push for every requested id we actually have, each once. A failed
-		// read is skipped and not listed, since `failed` is for received records and a
+		// Build a push for every requested id we actually have, each once, in id order. A
+		// failed read is skipped and not listed, since `failed` is for received records and a
 		// read fault here is this peer's own; it cannot lose the results above, and the
-		// peer asks again next round.
+		// peer asks again next round. An id whose stored bytes are those the peer just
+		// sent is not sent back.
+		requested_ids.sort();
+		let mut page = Page::new();
 		let mut to_push = Vec::with_capacity(requested_ids.len());
 		let mut pushed = HashSet::with_capacity(requested_ids.len());
+		// The next digest resumes where the sender's page stopped, or earlier where this
+		// peer's own push did.
+		let mut resume = next;
+		let mut sent = None;
 		for rid in requested_ids {
 			if !pushed.insert(rid) {
 				continue;
 			}
 			match self.storage.get(&table, &rid) {
-				Ok(Some(r))			=> to_push.push(r),
+				Ok(Some(r))			=> {
+					if theirs.get(&rid) == Some(&content_hash(&r.value)) {
+						continue;
+					}
+					match page.fit(&r) {
+						Fit::Take	=> {
+							to_push.push(r);
+							sent = Some(rid);
+						},
+						Fit::Never	=> {},
+						Fit::Full	=> {
+							resume = sent.or(after);
+							break;
+						},
+					}
+				},
 				Ok(None) | Err(_)	=> {},
 			}
 		}
-		// The sender's bulk is its whole table, so what it lacks, or holds at other bytes
-		// after the apply above, is what it is offered. A failed listing is skipped like
-		// a failed read.
+		// The sender's bulk page holds its records in (after, next], so what it lacks, or
+		// holds at other bytes after the apply above, is what this peer holds in that range.
+		// A failed listing is skipped like a failed read, and the page is asked for again.
 		if bulk {
-			if let Ok(digests) = self.storage.digests(&table) {
-				for d in digests {
-					if theirs.get(&d.id) == Some(&d.content) || !pushed.insert(d.id) {
-						continue;
+			match self.storage.digests(&table) {
+				Ok(mut digests) => {
+					digests.sort_by(|a, b| a.id.cmp(&b.id));
+					let mut last = None;
+					for d in digests {
+						if after.map_or(false, |a| d.id <= a) {
+							continue;
+						}
+						if next.map_or(false, |n| d.id > n) {
+							break;
+						}
+						if theirs.get(&d.id) == Some(&d.content) || !pushed.insert(d.id) {
+							continue;
+						}
+						match self.storage.get(&table, &d.id) {
+							Ok(Some(r))			=> match page.fit(&r) {
+								Fit::Take	=> {
+									to_push.push(r);
+									last = Some(d.id);
+								},
+								Fit::Never	=> {},
+								Fit::Full	=> {
+									// Ask for the sender's records again from the last id sent.
+									resume = last.or(after);
+									break;
+								},
+							},
+							Ok(None) | Err(_)	=> {},
+						}
 					}
-					match self.storage.get(&table, &d.id) {
-						Ok(Some(r))			=> to_push.push(r),
-						Ok(None) | Err(_)	=> {},
-					}
-				}
+				},
+				Err(_) => resume = after,
+			}
+		}
+		// Only a peer this one dials is remembered, so a stranger cannot grow the map.
+		if self.peer_set.contains(&from) {
+			let mut cursors = lock_mutex!(self.resume);
+			let key = (table.clone(), from);
+			match resume {
+				Some(id)	=> { cursors.insert(key, id); },
+				None		=> { cursors.remove(&key); },
 			}
 		}
 		if !to_push.is_empty() {

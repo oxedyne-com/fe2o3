@@ -94,18 +94,23 @@ pub enum MsgKind {
 	// with AntiEntropyReply.
 	AntiEntropyDigest {
 		table:		String,
-		sketch:		Vec<u8>,	// Iblt::to_bytes output, opaque to transport
+		sketch:		Vec<u8>,			// Iblt::to_bytes output, opaque to transport
+		after:		Option<RecordId>,	// resume a paged bulk reply after this id
 	},
 	// Anti-entropy reply: "these records are what I have and you lack; please
 	// send me records with these identifiers". On decode failure -- sketch
 	// overload -- the recipient bulk-replies with every record it holds for
 	// the table and an empty requested-id list, and the originator absorbs
-	// what it lacks. Simple, at the cost of bandwidth on a fresh join.
+	// what it lacks. A reply or push is paged to stay under the codec's envelope
+	// bound: a bulk reply holds the table's records in id order after `after`,
+	// up to `next`, and the originator asks again from `next`.
 	AntiEntropyReply {
 		table:			String,
-		records:		Vec<Record>,	// held here, and lacked by the originator
-		requested_ids:	Vec<RecordId>,	// wanted from the originator
-		bulk:			bool,			// set when the sketch could not decode
+		records:		Vec<Record>,		// held here, and lacked by the originator
+		requested_ids:	Vec<RecordId>,		// wanted from the originator
+		bulk:			bool,				// set when the sketch could not decode
+		after:			Option<RecordId>,	// bulk page starts after this id (None: the start)
+		next:			Option<RecordId>,	// bulk page ends at this id (None: the table ends)
 	},
 	// Anti-entropy push: "here are the records you requested", sent by the
 	// originator in answer to an AntiEntropyReply's requested_ids list.

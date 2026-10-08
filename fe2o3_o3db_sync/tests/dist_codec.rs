@@ -14,6 +14,7 @@ use oxedyne_fe2o3_o3db_sync::{
 		codec::{
 			MAX_ENVELOPE_BYTES,
 			MAX_ENVELOPE_DEPTH,
+			MAX_ENVELOPE_VALUES,
 			WIRE_VERSION,
 		},
 		hotstuff::types::{
@@ -97,22 +98,28 @@ fn samples() -> Vec<Envelope> {
 	v.push(env(MsgKind::GetRequest { request_id: u64::MAX, table: "ledger".to_string(), id: rid(4) }));
 	v.push(env(MsgKind::GetResponse { request_id: 0, record: None }));
 	v.push(env(MsgKind::GetResponse { request_id: 7, record: Some(rec(5, "ledger", 40)) }));
-	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: payload(6, 5000) }));
-	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: Vec::new() }));
-	// AntiEntropyReply: both bulk settings, empty and full vectors.
+	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: payload(6, 5000), after: None }));
+	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: Vec::new(), after: Some(rid(14)) }));
+	// AntiEntropyReply: both bulk settings, empty and full vectors, and every cursor shape.
 	for bulk in [false, true] {
-		v.push(env(MsgKind::AntiEntropyReply {
-			table:			"ledger".to_string(),
-			records:		Vec::new(),
-			requested_ids:	Vec::new(),
-			bulk,
-		}));
-		v.push(env(MsgKind::AntiEntropyReply {
-			table:			"ledger".to_string(),
-			records:		vec![rec(7, "ledger", 10), rec(8, "ledger", 0)],
-			requested_ids:	vec![rid(9), rid(10), rid(11)],
-			bulk,
-		}));
+		for (after, next) in [(None, None), (Some(rid(15)), None), (None, Some(rid(16))), (Some(rid(15)), Some(rid(16)))] {
+			v.push(env(MsgKind::AntiEntropyReply {
+				table:			"ledger".to_string(),
+				records:		Vec::new(),
+				requested_ids:	Vec::new(),
+				bulk,
+				after,
+				next,
+			}));
+			v.push(env(MsgKind::AntiEntropyReply {
+				table:			"ledger".to_string(),
+				records:		vec![rec(7, "ledger", 10), rec(8, "ledger", 0)],
+				requested_ids:	vec![rid(9), rid(10), rid(11)],
+				bulk,
+				after,
+				next,
+			}));
+		}
 	}
 	v.push(env(MsgKind::AntiEntropyPush { table: "ledger".to_string(), records: Vec::new() }));
 	v.push(env(MsgKind::AntiEntropyPush { table: "ledger".to_string(), records: vec![rec(12, "ledger", 300)] }));
@@ -267,10 +274,10 @@ fn wire_layout_is_pinned() -> Outcome<()> {
 			])]),
 		),
 		(
-			env(MsgKind::AntiEntropyDigest { table: "t".to_string(), sketch: payload(1, 4) }),
+			env(MsgKind::AntiEntropyDigest { table: "t".to_string(), sketch: payload(1, 4), after: Some(rid(8)) }),
 			list(vec![Dat::U8(1), b32(1), b32(2), list(vec![
 				Dat::U8(4),
-				list(vec![s("t"), Dat::BU64(payload(1, 4))]),
+				list(vec![s("t"), Dat::BU64(payload(1, 4)), opt(Some(b32(8)))]),
 			])]),
 		),
 		(
@@ -279,10 +286,15 @@ fn wire_layout_is_pinned() -> Outcome<()> {
 				records:		vec![rec(5, "t", 1)],
 				requested_ids:	vec![rid(6), rid(7)],
 				bulk:			true,
+				after:			None,
+				next:			Some(rid(9)),
 			}),
 			list(vec![Dat::U8(1), b32(1), b32(2), list(vec![
 				Dat::U8(5),
-				list(vec![s("t"), list(vec![record_dat(5, "t", 1)]), list(vec![b32(6), b32(7)]), Dat::Bool(true)]),
+				list(vec![
+					s("t"), list(vec![record_dat(5, "t", 1)]), list(vec![b32(6), b32(7)]), Dat::Bool(true),
+					opt(None), opt(Some(b32(9))),
+				]),
 			])]),
 		),
 		(
@@ -457,12 +469,16 @@ fn decode_refuses_malformed() -> Outcome<()> {
 	assert_refused("phase 255", &vote(Dat::U8(255), Dat::U16(3)));
 	assert_refused("a phase as U16", &vote(Dat::U16(2), Dat::U16(3)));
 	assert_refused("a voter as U8", &vote(Dat::U8(2), Dat::U8(3)));
-	let reply = |bulk: Dat| bdat(&list(vec![
+	let reply_with = |bulk: Dat, after: Dat, next: Dat| bdat(&list(vec![
 		Dat::U8(1), b32(1), b32(2),
-		list(vec![Dat::U8(5), list(vec![s("t"), list(vec![]), list(vec![]), bulk])]),
+		list(vec![Dat::U8(5), list(vec![s("t"), list(vec![]), list(vec![]), bulk, after, next])]),
 	]));
+	let reply = |bulk: Dat| reply_with(bulk, opt(None), opt(Some(b32(4))));
 	assert!(Envelope::decode(&reply(Dat::Bool(true))).is_ok(), "The baseline reply must decode.");
 	assert_refused("bulk as a number", &reply(Dat::U8(1)));
+	assert_refused("a cursor without its option", &reply_with(Dat::Bool(true), b32(4), opt(None)));
+	assert_refused("a cursor option holding a number", &reply_with(Dat::Bool(true), opt(None), opt(Some(Dat::U8(4)))));
+	assert_refused("a cursor of the wrong length", &reply_with(Dat::Bool(true), opt(Some(Dat::BU64(vec![1, 2]))), opt(None)));
 	let get = |rec: Dat| bdat(&list(vec![
 		Dat::U8(1), b32(1), b32(2),
 		list(vec![Dat::U8(3), list(vec![Dat::U64(1), rec])]),
@@ -484,6 +500,8 @@ fn decode_accepts_only_what_encode_writes() -> Outcome<()> {
 			records:		vec![rec(5, "t", 2)],
 			requested_ids:	vec![rid(6)],
 			bulk:			true,
+			after:			Some(rid(2)),
+			next:			None,
 		}),
 	];
 	seeds.push(env(MsgKind::CohortNewView {
@@ -619,5 +637,52 @@ fn decode_is_bounded() -> Outcome<()> {
 			"An oversize envelope was not refused as Excessive: {}", e,
 		),
 	}
+	Ok(())
+}
+
+
+// The value cap. A buffer of one-byte values must not become a gibibyte of `Dat`, and no envelope
+// the encoder writes may be refused by the cap.
+
+#[test]
+fn a_16_mib_page_of_small_records_encodes_and_decodes_under_the_value_cap() -> Outcome<()> {
+	let small = |n: u32| {
+		let mut id = [0u8; 32];
+		id[..4].copy_from_slice(&n.to_be_bytes());
+		Record { id: RecordId::from_bytes(id), table: String::new(), value: Vec::new() }
+	};
+	let push = |records: Vec<Record>| env(MsgKind::AntiEntropyPush { table: String::new(), records });
+	// The size of one record, from the difference between two envelopes.
+	let one = res!(push(vec![small(0)]).encode()).len();
+	let two = res!(push(vec![small(0), small(1)]).encode()).len();
+	let each = two - one;
+	let n = (MAX_ENVELOPE_BYTES - one) / each + 1;
+	let records: Vec<Record> = (0..n as u32).map(small).collect();
+	let bytes = res!(push(records).encode());
+	assert!(bytes.len() > MAX_ENVELOPE_BYTES - each, "The page is {} of {} bytes.", bytes.len(), MAX_ENVELOPE_BYTES);
+	// Four values a record: its list, id, table and value.
+	let values = 4 * n;
+	assert!(values < MAX_ENVELOPE_VALUES, "{} values in a full page, over the cap of {}.", values, MAX_ENVELOPE_VALUES);
+	match res!(Envelope::decode(&bytes)).body {
+		MsgKind::AntiEntropyPush { records, .. }	=> assert_eq!(records.len(), n),
+		other										=> return Err(err!("Decoded {:?}.", other; Test, Mismatch)),
+	}
+	Ok(())
+}
+
+#[test]
+fn a_16_mib_list_of_one_byte_values_is_refused_at_the_value_cap() -> Outcome<()> {
+	let n = MAX_ENVELOPE_BYTES - 8;
+	// Under 2^24, so the minimal c64 is three bytes.
+	let mut b = vec![Dat::LIST_CODE, Dat::C64_CODE_START + 3];
+	b.extend_from_slice(&(n as u32).to_be_bytes()[1..]);
+	b.resize(b.len() + n, Dat::EMPTY_CODE);
+	assert!(b.len() <= MAX_ENVELOPE_BYTES);
+	let msg = match Envelope::decode(&b) {
+		Ok(e)	=> return Err(err!("A buffer of one-byte values decoded to {:?}.", e.body.label(); Test, Invalid)),
+		Err(e)	=> fmt!("{}", e),
+	};
+	assert!(msg.contains(&fmt!("maximum of {} values", MAX_ENVELOPE_VALUES)), "The refusal does not name the cap: {}", msg);
+	assert!(msg.contains(&fmt!("value number {}", MAX_ENVELOPE_VALUES + 1)), "The refusal did not stop at the cap: {}", msg);
 	Ok(())
 }

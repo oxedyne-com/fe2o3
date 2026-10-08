@@ -56,6 +56,7 @@ use oxedyne_fe2o3_jdat::bdat::DecodeLimits;
 pub const DECODE_LIMITS: DecodeLimits = DecodeLimits {
 	max_depth:	64,
 	max_bytes:	1024 * 1024,
+	max_items:	DecodeLimits::DEFAULT_MAX_ITEMS,
 };
 
 /// The greatest a single signed operation may be, in bytes of its sealed envelope, before the hub

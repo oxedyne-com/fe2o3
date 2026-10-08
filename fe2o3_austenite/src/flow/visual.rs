@@ -61,7 +61,7 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::{
 		Path,
 		PathBuilder,
@@ -1657,10 +1657,10 @@ fn svg_ops(engine: &mut Engine, styles: &StyleChain, ops: Vec<SvgOp>, t: GTransf
 	let mut out = Vec::with_capacity(ops.len());
 	for op in ops {
 		match op {
-			SvgOp::Fill { path, colour } => out.push(DrawOp::Fill { path: res!(path.transform(&t)), colour }),
+			SvgOp::Fill { path, colour } => out.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: colour.into() }),
 			SvgOp::Stroke { path, colour, stroke } => {
 				let outline = res!(path.stroke(&stroke));
-				out.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour });
+				out.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: colour.into() });
 			},
 			SvgOp::Text { text, local, x, y, size, anchor, colour, .. } => {
 				let shaped = res!(crate::flow::text::shape(engine, &text, styles));
@@ -1681,7 +1681,7 @@ fn svg_ops(engine: &mut Engine, styles: &StyleChain, ops: Vec<SvgOp>, t: GTransf
 						.then(&GTransform::translate(pen_x + glyph.x * k, y - glyph.y * k))
 						.then(&local)
 						.then(&t);
-					out.push(DrawOp::Fill { path: res!(o.transform(&place)), colour });
+					out.push(DrawOp::Fill { path: res!(o.transform(&place)), colour: colour.into() });
 				}
 			},
 			SvgOp::Image { rgba, iw, ih, x, y, w, h } => {
@@ -2075,7 +2075,7 @@ pub fn shape_ops(engine: &mut Engine, s: &Shape, at: P2, span: Span) -> Outcome<
 	let mut ops = Vec::new();
 	let path = res!(s.curve.to_path(at));
 	if let Some(p) = &s.fill {
-		if let Some(colour) = res!(paint_rgba(engine, p, span)) {
+		if let Some(colour) = res!(paint_ink(engine, p, span)) {
 			let fill_path = match s.fill_rule {
 				FillRule::EvenOdd	=> res!(path.even_odd_as_non_zero()),
 				FillRule::NonZero	=> path.clone(),
@@ -2085,7 +2085,7 @@ pub fn shape_ops(engine: &mut Engine, s: &Shape, at: P2, span: Span) -> Outcome<
 	}
 	if let Some(st) = &s.stroke {
 		if st.thickness > 0.0 {
-			if let Some(colour) = res!(paint_rgba(engine, &st.paint, span)) {
+			if let Some(colour) = res!(paint_ink(engine, &st.paint, span)) {
 				let pen = res!(pen_of(st));
 				ops.push(DrawOp::Fill { path: res!(path.stroke(&pen)), colour });
 			}
@@ -2118,15 +2118,15 @@ pub fn pen_of(st: &FixedStroke) -> Outcome<Pen> {
 	Ok(pen)
 }
 
-/// A paint as a flat colour. A gradient is drawn in its middle stop's colour and a tiling not at all,
-/// each with a warning, because the drawing layer carries flat colours only.
-fn paint_rgba(engine: &mut Engine, p: &Paint, span: Span) -> Outcome<Option<Rgba>> {
+/// A paint as a flat ink in the colour's own space. A gradient is drawn in its middle stop's colour and a
+/// tiling not at all, each with a warning, because the drawing layer carries flat colours only.
+pub fn paint_ink(engine: &mut Engine, p: &Paint, span: Span) -> Outcome<Option<Ink>> {
 	match p {
-		Paint::Color(c) => Ok(Some(res!(c.to_rgba()))),
+		Paint::Color(c) => Ok(Some(c.to_ink())),
 		Paint::Gradient(g) => {
 			engine.warn(DiagnosticKind::Unsupported, span, "gradients are drawn in one flat colour: the drawing layer has no shading");
 			match g.stops.get(g.stops.len() / 2) {
-				Some((c, _))	=> Ok(Some(res!(c.to_rgba()))),
+				Some((c, _))	=> Ok(Some(c.to_ink())),
 				None			=> Ok(None),
 			}
 		},

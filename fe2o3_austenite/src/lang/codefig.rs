@@ -37,6 +37,8 @@ use super::parse::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::set::FontSet;
 use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,8 +71,8 @@ impl CodeFigure {
 
 	/// A hash of the figure's whole content, the same wherever the figure stands, so a figure the reader
 	/// read and the one authoring drew are known to be the same figure.
-	pub fn fingerprint(&self) -> u64 {
-		let mut h = crate::memo::Fnv::new();
+	pub fn fingerprint(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
 		h.write_str(&fmt!("{:?}", self));
 		h.finish()
 	}

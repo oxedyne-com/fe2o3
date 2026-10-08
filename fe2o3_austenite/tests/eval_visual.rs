@@ -410,7 +410,7 @@ fn frame_ops(f: &Frame, t: GTransform, out: &mut Vec<Op>) -> Outcome<()> {
 			Item::Ops(ops) => for op in ops {
 				match op {
 					oxedyne_fe2o3_austenite::ir::DrawOp::Fill { path, colour } => out.push(Op::Fill {
-						b: res!(bounds(&res!(path.transform(&it)))), colour: Some(colour.to_hex()[..7].to_lowercase()) }),
+						b: res!(bounds(&res!(path.transform(&it)))), colour: Some(colour.to_rgba().to_hex()[..7].to_lowercase()) }),
 					_ => return Err(err!("unexpected op kind in an image"; Bug)),
 				}
 			},

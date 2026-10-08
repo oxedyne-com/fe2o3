@@ -44,7 +44,11 @@ use crate::eval::value::{
 };
 use crate::eval::Engine;
 use crate::syntax::Span;
-use crate::timings::Phase;
+use crate::timings::{
+	Counter,
+	Phase,
+	Timings,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
@@ -249,6 +253,7 @@ fn realise_with(
 )
 	-> Outcome<(Vec<Pair>, bool)>
 {
+	note_call(engine, content, mode);
 	engine.timed(Phase::Realise, |engine| {
 		let mut s = State {
 			engine,
@@ -293,6 +298,38 @@ fn realise_with(
 		}
 		Ok((out, true))
 	})
+}
+
+// Gives the timing record the realise call about to be made: its mode and what the content is, and the
+// key of where it is realised, which tells a body met again from one met for the first time.
+fn note_call(engine: &mut Engine, content: &Content, mode: RealiseMode) {
+	let place = engine.locator.place().0;
+	if let Some(t) = engine.timings.as_mut() {
+		let m = match mode {
+			RealiseMode::Document	=> "doc",
+			RealiseMode::Flow		=> "flow",
+			RealiseMode::Inline		=> "inline",
+			RealiseMode::Math		=> "math",
+		};
+		let shape = shape_of(content, 0);
+		let span = content.span();
+		let key = Timings::key(&(m, place, span.file.0 as u64, span.start, span.end, &shape));
+		t.note_call(fmt!("{}/{}", m, shape), key);
+	}
+}
+
+// What the content is, for the record: an element's kind, or the kind of the first element of a sequence
+// or a styled run, as far as three levels in.
+fn shape_of(c: &Content, depth: usize) -> String {
+	match c {
+		Content::Elem(e)		=> e.kind.path().to_string(),
+		Content::Sequence(s)	=> match s.children.iter().find(|k| !k.is(ElemKind::Space)) {
+			None						=> "empty".to_string(),
+			Some(first) if depth < 3	=> fmt!("seq>{}", shape_of(first, depth + 1)),
+			Some(_)						=> "seq".to_string(),
+		},
+		Content::Styled(s)		=> if depth < 3 { fmt!("styled>{}", shape_of(&s.child, depth + 1)) } else { "styled".to_string() },
+	}
 }
 
 /// Is the element set inline, within a paragraph, rather than as a block of its own?
@@ -429,6 +466,7 @@ impl State<'_> {
 	}
 
 	fn visit(&mut self, content: &Content, styles: &StyleChain) -> Outcome<()> {
+		self.engine.bump(Counter::Visits, 1);
 		// A tag carried in content (a paragraph's body) goes back into the stream where it stands.
 		if let Some(tag) = Tag::from_content(content) {
 			self.push_tag(tag, styles);
@@ -454,6 +492,7 @@ impl State<'_> {
 
 	/// An element no rule transforms further: grouped, filtered or pushed.
 	fn leaf(&mut self, content: &Content, styles: &StyleChain) -> Outcome<()> {
+		self.engine.bump(Counter::Leaves, 1);
 		if res!(self.visit_grouping_rules(content, styles)) {
 			return Ok(());
 		}
@@ -489,7 +528,7 @@ impl State<'_> {
 			if kind == ElemKind::Text || kind == ElemKind::Symbol {
 				if let Some(Value::Str(t)) = content.get(FieldId(0)) {
 					let t = t.clone();
-					if let Some(m) = res!(find_regex_match_in_str(&t, styles)) {
+					if let Some(m) = res!(self.engine.timed(Phase::Regex, |_| find_regex_match_in_str(&t, styles))) {
 						let pair = Pair::new(content.clone(), styles.clone());
 						res!(self.visit_regex_match(vec![pair], m));
 						return Ok(true);
@@ -539,31 +578,41 @@ impl State<'_> {
 		};
 		// The verdict: the innermost unguarded matching recipe is the step; show-set rules are collected
 		// (all of them, until the element is prepared, whichever side of the step they sit).
-		let mut map = Styles::new();
-		let mut step = None;
-		for (index, recipe) in styles.recipes() {
-			if !res!(recipe.applicable(target, styles)) {
-				continue;
-			}
-			if let Transformation::Style(set) = &recipe.transform {
-				if !prepared {
-					map.apply_outer(set);
+		let recipes = self.engine.timed(Phase::Styles, |_| styles.recipes());
+		self.engine.bump(Counter::Shown, 1);
+		self.engine.bump(Counter::Recipes, recipes.len() as u64);
+		let (mut map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<Step>)> {
+			let mut map = Styles::new();
+			let mut step = None;
+			let mut tried = 0;
+			for (index, recipe) in recipes {
+				tried += 1;
+				if !res!(recipe.applicable(target, styles)) {
+					continue;
 				}
-				continue;
+				if let Transformation::Style(set) = &recipe.transform {
+					if !prepared {
+						map.apply_outer(set);
+					}
+					continue;
+				}
+				if step.is_some() || guards.contains(&index) {
+					continue;
+				}
+				step = Some(Step::Recipe(recipe.clone(), index));
+				if prepared {
+					break;
+				}
 			}
-			if step.is_some() || guards.contains(&index) {
-				continue;
-			}
-			step = Some(Step::Recipe(recipe.clone(), index));
-			if prepared {
-				break;
-			}
-		}
+			engine.bump(Counter::Matched, tried);
+			Ok((map, step))
+		}));
 		let step = step.unwrap_or(Step::Builtin);
 		let mut output = target.clone();
 		let mut tags = None;
 		if !prepared {
-			tags = res!(self.prepare(&mut output, &mut map, styles));
+			self.engine.bump(Counter::Prepared, 1);
+			tags = res!(self.engine.timed(Phase::Show, |engine| prepare(engine, &mut output, &mut map, styles)));
 		}
 		let chained = styles.chain(&map);
 		// A show rule's error does not end the compile here: the element shows as nothing and the error
@@ -572,9 +621,12 @@ impl State<'_> {
 		let result = match step {
 			Step::Recipe(recipe, index) => {
 				if let Content::Elem(e) = &mut output {
+					if Arc::strong_count(e) > 1 {
+						self.engine.bump(Counter::Copied, 1);
+					}
 					Arc::make_mut(e).guards.push(index);
 				}
-				let shown = apply_recipe(self.engine, &recipe, output.clone(), &chained);
+				let shown = self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &recipe, output.clone(), &chained));
 				self.engine.delay(mark, target.span(), shown)
 			}
 			Step::Builtin => match self.builtin_show(&output, &chained) {
@@ -617,7 +669,7 @@ impl State<'_> {
 		if self.keep_model && elem.kind().map(|k| k.family() == Family::Model).unwrap_or(false) {
 			return Ok(None);
 		}
-		native_show(self.engine, elem, styles)
+		self.engine.timed(Phase::Show, |engine| native_show(engine, elem, styles))
 	}
 
 	/// A labelled sequence meets label rules too, and is located and guarded as an element is: its
@@ -627,26 +679,35 @@ impl State<'_> {
 			Content::Sequence(seq)	=> (seq.location.is_some(), seq.guards.clone()),
 			_						=> return Ok(false),
 		};
-		let mut map = Styles::new();
-		let mut step = None;
-		for (index, recipe) in styles.recipes() {
-			if !res!(recipe.applicable(target, styles)) {
-				continue;
-			}
-			if let Transformation::Style(set) = &recipe.transform {
-				if !prepared {
-					map.apply_outer(set);
+		let recipes = self.engine.timed(Phase::Styles, |_| styles.recipes());
+		self.engine.bump(Counter::Shown, 1);
+		self.engine.bump(Counter::Recipes, recipes.len() as u64);
+		let (map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<(Recipe, RecipeIndex)>)> {
+			let mut map = Styles::new();
+			let mut step = None;
+			let mut tried = 0;
+			for (index, recipe) in recipes {
+				tried += 1;
+				if !res!(recipe.applicable(target, styles)) {
+					continue;
 				}
-				continue;
+				if let Transformation::Style(set) = &recipe.transform {
+					if !prepared {
+						map.apply_outer(set);
+					}
+					continue;
+				}
+				if step.is_some() || guards.contains(&index) {
+					continue;
+				}
+				step = Some((recipe.clone(), index));
+				if prepared {
+					break;
+				}
 			}
-			if step.is_some() || guards.contains(&index) {
-				continue;
-			}
-			step = Some((recipe.clone(), index));
-			if prepared {
-				break;
-			}
-		}
+			engine.bump(Counter::Matched, tried);
+			Ok((map, step))
+		}));
 		if prepared && step.is_none() {
 			return Ok(false);
 		}
@@ -670,7 +731,7 @@ impl State<'_> {
 			Some((recipe, _)) => {
 				let chained = styles.chain(&map);
 				let mark = self.engine.diags.len();
-				let shown = apply_recipe(self.engine, &recipe, output.clone(), &chained);
+				let shown = self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &recipe, output.clone(), &chained));
 				let result = self.engine.delay(mark, target.span(), shown);
 				res!(self.visit_output(target, &result, &map, styles));
 			}
@@ -709,46 +770,6 @@ impl State<'_> {
 		Ok(())
 	}
 
-	/// Gives the element its location (when locatable or labelled) and copies the style chain's values
-	/// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
-	fn prepare(&mut self, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
-		// Built-in show-set styles sit outside the user's, which override them.
-		let builtin = res!(content::show_set(target, styles));
-		let e = match target {
-			Content::Elem(e)	=> Arc::make_mut(e),
-			_					=> return Ok(None),
-		};
-		if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
-			e.location = Some(self.engine.locator.locate(e.kind, e.span));
-		}
-		// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
-		// made and gave a place already (a grid's cell) keeps that.
-		if e.place.is_none() && e.kind.has_place() {
-			e.place = Some(self.engine.locator.next(e.kind, e.span));
-		}
-		map.apply_outer(&builtin);
-		let chain = styles.chain(map);
-		for (i, spec) in e.kind.fields().iter().enumerate() {
-			let id = FieldId(i as u8);
-			if !spec.settable || e.fields.iter().any(|(f, _)| *f == id) {
-				continue;
-			}
-			if let Some(v) = res!(chain.get(e.kind, id)) {
-				e.fields.push((id, v));
-			}
-		}
-		res!(content::synthesise(self.engine, target, &chain));
-		let loc = match target {
-			Content::Elem(e)	=> {
-				let e = Arc::make_mut(e);
-				e.prepared = true;
-				e.location
-			}
-			_					=> None,
-		};
-		Ok(loc.map(|l| (Tag::Start(target.clone()), Tag::End(l))))
-	}
-
 	// Styled content
 
 	/// Visits `child` under `local` styles pushed onto `outer`. `leaf` pushes the child without another
@@ -766,7 +787,7 @@ impl State<'_> {
 				_					=> return Err(err!("selector-less recipe vanished"; Bug)),
 			};
 			let chain = outer.chain(&before);
-			let out = res!(apply_recipe(self.engine, &recipe, child.clone().styled(after), &chain));
+			let out = res!(self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &recipe, child.clone().styled(after), &chain)));
 			return self.visit_styled(&out, &before, outer, false);
 		}
 		let mut pagebreak = false;
@@ -842,14 +863,20 @@ impl State<'_> {
 	// Grouping
 
 	fn visit_grouping_rules(&mut self, content: &Content, styles: &StyleChain) -> Outcome<bool> {
-		let matching = self.rules().iter().copied().find(|r| r.trigger(content, self.keep_model));
+		let keep = self.keep_model;
+		let rules = self.rules();
+		let matching = self.engine.timed(Phase::Rules, |_| rules.iter().copied().find(|r| r.trigger(content, keep)));
 		let mut i = 0;
 		while let Some(active) = self.groupings.last().copied() {
 			// A rule of higher priority nests a new group inside the active one.
-			if matching.map(|r| r.priority() > active.rule.priority() && r.nests_in(active.rule)).unwrap_or(false) {
+			let (nests, joins) = self.engine.timed(Phase::Rules, |_| {
+				let nests = matching.map(|r| r.priority() > active.rule.priority() && r.nests_in(active.rule)).unwrap_or(false);
+				(nests, !nests && (active.rule.trigger(content, keep) || active.rule.inner(content)))
+			});
+			if nests {
 				break;
 			}
-			if active.rule.trigger(content, self.keep_model) || active.rule.inner(content) {
+			if joins {
 				self.sink.push(Pair::new(content.clone(), styles.clone()));
 				return Ok(true);
 			}
@@ -910,7 +937,7 @@ impl State<'_> {
 			}
 		}
 		if inline || matches!(self.mode, RealiseMode::Inline | RealiseMode::Math) {
-			res!(collapse_spaces(&mut self.sink, 0));
+			res!(self.engine.timed(Phase::Repack, |_| collapse_spaces(&mut self.sink, 0)));
 		}
 		Ok(())
 	}
@@ -927,6 +954,7 @@ impl State<'_> {
 			Some(g)	=> g,
 			None	=> return Ok(()),
 		};
+		self.engine.bump(Counter::Finished, 1);
 		// Trailing members that did not trigger the group are not part of it.
 		let end = match self.sink[g.start..].iter().rposition(|p| !p.is_tag() && g.rule.trigger(&p.content, self.keep_model)) {
 			Some(i)	=> g.start + i + 1,
@@ -949,8 +977,10 @@ impl State<'_> {
 	}
 
 	fn finish_textual(&mut self, start: usize) -> Outcome<()> {
-		if let Some(m) = res!(find_regex_match_in_elems(&self.sink[start..])) {
-			res!(collapse_spaces(&mut self.sink, start));
+		self.engine.bump(Counter::Textual, 1);
+		let run = &self.sink[start..];
+		if let Some(m) = res!(self.engine.timed(Phase::Regex, |_| find_regex_match_in_elems(run))) {
+			res!(self.engine.timed(Phase::Repack, |_| collapse_spaces(&mut self.sink, start)));
 			let elems = self.sink.split_off(start);
 			return self.visit_regex_match(elems, m);
 		}
@@ -967,7 +997,7 @@ impl State<'_> {
 		let (ms, me) = (m.offset, m.offset + m.text.len());
 		let span = elems.iter().map(|p| p.content.span()).find(|s| !s.is_detached()).unwrap_or(Span::detached());
 		let piece = Content::text(&m.text).with_span(span);
-		let output = res!(apply_recipe(self.engine, &m.recipe, piece, &m.styles));
+		let output = res!(self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &m.recipe, piece, &m.styles)));
 		let mut pending = Some(output);
 		let revoked = m.styles.chain(&Styles::from_style(Style::Revocation(m.index)));
 		let mut cursor = 0;
@@ -1014,10 +1044,10 @@ impl State<'_> {
 	/// A paragraph keeps the tags that fall inside it in its body, as `tag` elements, so a located
 	/// element in running text is found where it is set.
 	fn finish_par(&mut self, start: usize) -> Outcome<()> {
-		res!(collapse_spaces(&mut self.sink, start));
+		res!(self.engine.timed(Phase::Repack, |_| collapse_spaces(&mut self.sink, start)));
 		let elems = self.sink.split_off(start);
 		let span = select_span(&elems);
-		let (body, trunk) = repack(&elems);
+		let (body, trunk) = self.engine.timed(Phase::Repack, |_| repack(&elems));
 		let id = res!(field(ElemKind::Par, "body"));
 		self.pars += 1;
 		let par = Content::new(ElemKind::Par, vec![(id, Value::Content(body))], span);
@@ -1087,6 +1117,54 @@ impl State<'_> {
 		self.sink.extend(ends);
 		Ok(())
 	}
+}
+
+/// Gives the element its location (when locatable or labelled) and copies the style chain's values
+/// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
+fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
+	// Built-in show-set styles sit outside the user's, which override them.
+	let builtin = res!(content::show_set(target, styles));
+	let e = match target {
+		Content::Elem(e)	=> {
+			if Arc::strong_count(e) > 1 {
+				engine.bump(Counter::Copied, 1);
+			}
+			Arc::make_mut(e)
+		},
+		_					=> return Ok(None),
+	};
+	if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
+		e.location = Some(engine.locator.locate(e.kind, e.span));
+	}
+	// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
+	// made and gave a place already (a grid's cell) keeps that.
+	if e.place.is_none() && e.kind.has_place() {
+		e.place = Some(engine.locator.next(e.kind, e.span));
+	}
+	map.apply_outer(&builtin);
+	let chain = styles.chain(map);
+	res!(engine.timed(Phase::Styles, |_| -> Outcome<()> {
+		for (i, spec) in e.kind.fields().iter().enumerate() {
+			let id = FieldId(i as u8);
+			if !spec.settable || e.fields.iter().any(|(f, _)| *f == id) {
+				continue;
+			}
+			if let Some(v) = res!(chain.get(e.kind, id)) {
+				e.fields.push((id, v));
+			}
+		}
+		Ok(())
+	}));
+	res!(content::synthesise(engine, target, &chain));
+	let loc = match target {
+		Content::Elem(e)	=> {
+			let e = Arc::make_mut(e);
+			e.prepared = true;
+			e.location
+		}
+		_					=> None,
+	};
+	Ok(loc.map(|l| (Tag::Start(target.clone()), Tag::End(l))))
 }
 
 /// A schema field the grouping must fill; its absence is the owning unit's gap, reported as such.

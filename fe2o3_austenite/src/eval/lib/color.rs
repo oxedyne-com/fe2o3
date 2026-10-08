@@ -4,9 +4,10 @@
 // Arithmetic is in `f32`, as Typst's (palette's) is, so a component read back with `components()`
 // carries the same rounding. sRGB, linear sRGB, luma, Oklab/Oklch, HSL and HSV convert by formula
 // (Oklab by Ottosson's matrices, luminance by the sRGB primaries). CMYK to RGB is an ICC transform in
-// Typst; it is reproduced here from a 17-point-per-axis grid sampled from the `typst` 0.15.1 oracle
-// (`cmyk_srgb.bin`) with quadrilinear interpolation, within two eight-bit steps of Typst everywhere the
-// oracle was probed. RGB to CMYK is Typst's naive formula; luma to CMYK its fixed ink ratios.
+// Typst; `fe2o3_graphics::colour::cmyk_to_srgb` reproduces it from a 17-point-per-axis grid sampled from
+// the `typst` 0.15.1 oracle with quadrilinear interpolation, within two eight-bit steps of Typst
+// everywhere the oracle was probed. RGB to CMYK is Typst's naive formula; luma to CMYK its fixed ink
+// ratios.
 
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
@@ -43,6 +44,12 @@ use crate::eval::Engine;
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::{
+	cmyk_to_srgb,
+	unit_to_u8,
+	Ink,
+	Rgba,
+};
 
 use std::sync::Arc;
 
@@ -90,9 +97,6 @@ native_fns! {
 mod data {
 	include!("color_data.rs");
 }
-
-static CMYK_GRID: &[u8] = include_bytes!("cmyk_srgb.bin");
-const GRID: usize = 17;
 
 // Typst's own literals, not eight-bit values over 255: `red`'s green is 0.254902, not 65/255, and a mix
 // or conversion rounds on that difference.
@@ -287,34 +291,6 @@ fn hsx_to_rgb(h: f32, s: f32, x: f32, hsv: bool) -> [f32; 3] {
 	[r + m, g + m, b + m]
 }
 
-// CMYK to sRGB through the sampled ICC grid, interpolated quadrilinearly.
-fn cmyk_to_rgb(c: [f32; 4]) -> [f32; 3] {
-	let n = GRID - 1;
-	let mut idx = [0usize; 4];
-	let mut fr = [0f32; 4];
-	for d in 0..4 {
-		let x = c[d].clamp(0.0, 1.0) * n as f32;
-		let i = (x as usize).min(n - 1);
-		idx[d] = i;
-		fr[d] = x - i as f32;
-	}
-	let mut out = [0f32; 3];
-	for corner in 0..16usize {
-		let mut w = 1f32;
-		let mut k = 0usize;
-		for d in 0..4 {
-			let bit = (corner >> (3 - d)) & 1;
-			w *= if bit == 1 { fr[d] } else { 1.0 - fr[d] };
-			k = k * GRID + idx[d] + bit;
-		}
-		for (ch, o) in out.iter_mut().enumerate() {
-			*o += w * CMYK_GRID.get(k * 3 + ch).copied().unwrap_or(0) as f32;
-		}
-	}
-	// The transform's output is eight-bit.
-	[(out[0].round()) / 255.0, (out[1].round()) / 255.0, (out[2].round()) / 255.0]
-}
-
 fn rgb_to_cmyk(r: f32, g: f32, b: f32) -> [f32; 4] {
 	let k = 1.0 - r.max(g).max(b);
 	if k == 1.0 {
@@ -331,7 +307,7 @@ fn to_srgb(c: &Color) -> [f32; 3] {
 		ColorSpace::Luma		=> [a, a, a],
 		ColorSpace::Hsl			=> hsx_to_rgb(a, b, d, false),
 		ColorSpace::Hsv			=> hsx_to_rgb(a, b, d, true),
-		ColorSpace::Cmyk		=> cmyk_to_rgb([a, b, d, e]),
+		ColorSpace::Cmyk		=> cmyk_to_srgb([a, b, d, e]),
 		ColorSpace::LinearRgb	=> [encode(a), encode(b), encode(d)],
 		ColorSpace::Oklab | ColorSpace::Oklch => {
 			let [r, g, bl] = to_linear(c);
@@ -423,14 +399,26 @@ pub fn to_space(c: &Color, space: ColorSpace) -> Color {
 }
 
 // Eight-bit quantisation rounds half to even, as Typst's does: 30% is 0x4c, 10% is 0x1a.
-fn to_u8(x: f32) -> u8 { (x.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8 }
+fn to_u8(x: f32) -> u8 { unit_to_u8(x) }
 
 impl Color {
-	/// The colour as eight-bit sRGB with alpha, for the back end.
-	pub fn to_rgba(&self) -> Outcome<oxedyne_fe2o3_graphics::colour::Rgba> {
-		let [r, g, b] = to_srgb(self);
-		let a = if self.space == ColorSpace::Cmyk { 1.0 } else { self.alpha };
-		Ok(oxedyne_fe2o3_graphics::colour::Rgba::new(to_u8(r), to_u8(g), to_u8(b), to_u8(a)))
+	/// The colour with the space it was written in, for the back end: `luma` stays grey, `cmyk` stays
+	/// CMYK, every other space is eight-bit sRGB.
+	pub fn to_ink(&self) -> Ink {
+		let [a, b, d, e] = self.c;
+		match self.space {
+			ColorSpace::Luma	=> Ink::Grey { v: a, a: to_u8(self.alpha) },
+			ColorSpace::Cmyk	=> Ink::Cmyk { c: a, m: b, y: d, k: e, a: 255 },
+			_					=> {
+				let [r, g, bl] = to_srgb(self);
+				Ink::Rgb(Rgba::new(to_u8(r), to_u8(g), to_u8(bl), to_u8(self.alpha)))
+			},
+		}
+	}
+
+	/// The colour as eight-bit sRGB with alpha, for the screen.
+	pub fn to_rgba(&self) -> Outcome<Rgba> {
+		Ok(self.to_ink().to_rgba())
 	}
 }
 

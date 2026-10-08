@@ -57,6 +57,7 @@ use crate::flow::block::{
 	Rel,
 };
 use crate::flow::{
+	carry,
 	decorate,
 	Parity,
 	RunSetup,
@@ -99,20 +100,20 @@ pub struct PageBody {
 /// The document's realised pairs and the page-level state that slices them into runs.
 #[derive(Debug)]
 pub struct Level {
-	src:		Source,
-	staged:		bool,				// a break is owed an empty page if nothing follows it
-	initial:	StyleChain,			// the styles an empty run takes
-	out:		VecDeque<Item>,		// items made but not yet handed on
-	finished:	bool,
-	open:		bool,				// a run's pairs are being pulled
-	ended:		bool,				// the open run has no more pairs
-	held:		VecDeque<Pair>,		// pairs of the open run cleared to go out
+	pub(super) src:			Source,
+	pub(super) staged:		bool,				// a break is owed an empty page if nothing follows it
+	pub(super) initial:		StyleChain,			// the styles an empty run takes
+	pub(super) out:			VecDeque<Item>,		// items made but not yet handed on
+	pub(super) finished:	bool,
+	pub(super) open:		bool,				// a run's pairs are being pulled
+	pub(super) ended:		bool,				// the open run has no more pairs
+	pub(super) held:		VecDeque<Pair>,		// pairs of the open run cleared to go out
 }
 
 /// Where the realised pairs come from. Interim: the whole document realised at the first pull, then popped
 /// from the front, until a pulled `realise::Stream` replaces it.
 #[derive(Debug)]
-enum Source {
+pub(super) enum Source {
 	Lazy(Content, StyleChain),
 	Pairs(VecDeque<Pair>),
 }
@@ -135,7 +136,7 @@ impl Source {
 
 /// A piece of the document at page level: Typst's page `Item`.
 #[derive(Debug)]
-enum Item {
+pub(super) enum Item {
 	Run(StyleChain),				// content to lay out on pages of one style, from these initial styles
 	Pairs(Vec<Pair>, StyleChain),	// a run of these pairs alone: tags with a page of their own, or none
 	Parity(Parity, StyleChain),		// a blank page, if the page count needs one for the parity
@@ -322,25 +323,25 @@ fn migrate(block: Vec<Pair>) -> (Vec<Pair>, Vec<Pair>) {
 
 /// The open run: its setup, the cursor flowing its pairs, and the regions its pages are laid into.
 #[derive(Debug)]
-struct Active {
-	setup:		Arc<RunSetup>,
-	cursor:		FlowCursor,
-	regions:	Regions,
-	first:		bool,
+pub(super) struct Active {
+	pub(super) setup:	Arc<RunSetup>,
+	pub(super) cursor:	FlowCursor,
+	pub(super) regions:	Regions,
+	pub(super) first:	bool,
 }
 
 /// The document as pages, one at a time. `next_page` yields each page's body; [`crate::driver::place_page`]
 /// places it, and the caller drops it before asking for the next.
 #[derive(Debug)]
 pub struct Paginator {
-	level:		Rc<RefCell<Level>>,
-	span:		Span,
-	active:		Option<Active>,
-	blank:		Option<Arc<RunSetup>>,	// a parity blank page owed before the next run
-	count:		u32,					// pages yielded
-	waiting:	Vec<Tag>,				// tags between pages, for the next page's corner
-	started:	bool,
-	ended:		bool,
+	pub(super) level:	Rc<RefCell<Level>>,
+	pub(super) span:	Span,
+	pub(super) active:	Option<Active>,
+	pub(super) blank:	Option<Arc<RunSetup>>,	// a parity blank page owed before the next run
+	pub(super) count:	u32,					// pages yielded
+	pub(super) waiting:	Vec<Tag>,				// tags between pages, for the next page's corner
+	pub(super) started:	bool,
+	pub(super) ended:	bool,
 }
 
 impl Paginator {
@@ -357,8 +358,31 @@ impl Paginator {
 		}
 	}
 
-	/// The next page's body, or `None` after the last page.
+	/// The next page's body, or `None` after the last page. Under `--timings` it also records the carry state
+	/// the page began in and the pairs it took (see [`carry`]).
 	pub fn next_page(&mut self, engine: &mut Engine) -> Outcome<Option<PageBody>> {
+		if engine.timings.is_none() {
+			return self.page(engine);
+		}
+		let entry = engine.timed(Phase::Probe, |engine| {
+			if let Some(t) = engine.timings.as_mut() {
+				t.take_seen();
+			}
+			carry::entry(self, &engine.locator)
+		});
+		let page = res!(self.page(engine));
+		if let Some(body) = &page {
+			engine.timed(Phase::Probe, |engine| {
+				if let Some(t) = engine.timings.as_mut() {
+					let seen = t.take_seen();
+					t.page(carry::record(&body.setup, &seen, entry));
+				}
+			});
+		}
+		Ok(page)
+	}
+
+	fn page(&mut self, engine: &mut Engine) -> Outcome<Option<PageBody>> {
 		if !self.started {
 			self.started = true;
 			res!(self.advance(engine));

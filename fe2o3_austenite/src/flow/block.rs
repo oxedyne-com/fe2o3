@@ -49,6 +49,7 @@ use crate::eval::{
 	Context,
 	Engine,
 };
+use crate::flow::carry;
 use crate::flow::grid::RowSplit;
 use crate::flow::inline::ParSituation;
 use crate::flow::page::Level;
@@ -67,6 +68,8 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::path::Path;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::cell::RefCell;
 use std::collections::{
@@ -224,26 +227,26 @@ impl Feed {
 
 /// What lazy collection reads from the flow's configuration: the size paragraphs are set against.
 #[derive(Clone, Copy, Debug)]
-struct CollectCfg {
-	width:		f64,
-	height:		f64,
-	expand:		bool,
+pub(super) struct CollectCfg {
+	pub(super) width:	f64,
+	pub(super) height:	f64,
+	pub(super) expand:	bool,
 }
 
 /// The children of a flow collected so far, and the feed they are collected from. A child is made when the
 /// composer first asks for it, so a paragraph is set into lines when the cursor reaches it; those before the
 /// first still needed are dropped.
 #[derive(Clone, Debug)]
-struct Pull {
-	feed:		Feed,
-	children:	VecDeque<Rc<Child>>,
-	base:		usize,		// the index of the first child held
-	done:		bool,		// the feed has no more pairs
-	pulled:		usize,		// pairs taken from the feed
-	par:		ParSituation,	// where the flow stands for the next paragraph's first-line indent
-	cfg:		CollectCfg,
-	mode:		FlowMode,
-	memo:		Vec<Memo>,
+pub(super) struct Pull {
+	pub(super) feed:		Feed,
+	pub(super) children:	VecDeque<Rc<Child>>,
+	pub(super) base:		usize,		// the index of the first child held
+	pub(super) done:		bool,		// the feed has no more pairs
+	pub(super) pulled:		usize,		// pairs taken from the feed
+	pub(super) par:			ParSituation,	// where the flow stands for the next paragraph's first-line indent
+	pub(super) cfg:			CollectCfg,
+	pub(super) mode:		FlowMode,
+	pub(super) memo:		Vec<Memo>,
 }
 
 impl Pull {
@@ -273,6 +276,12 @@ impl Pull {
 						return Ok(None);
 					},
 				};
+				if let Feed::Run(_) = self.feed {
+					// The root feed's pairs are what a page is made from; the probe notes each.
+					if let Some(t) = engine.timings.as_mut() {
+						t.see(carry::pair(&p));
+					}
+				}
 				let alone = self.pulled == 0 && !res!(self.feed.has_more(engine));
 				self.pulled += 1;
 				res!(collect_pair(engine, &p, alone, self.cfg, &mut self.par, &mut out));
@@ -296,10 +305,10 @@ impl Pull {
 /// collected and not yet placed, and what waits for a later region, never its whole content.
 #[derive(Clone, Debug)]
 pub struct FlowCursor {
-	config:		Config,
-	pull:		Pull,
-	work:		Work,
-	finished:	bool,
+	pub(super) config:		Config,
+	pub(super) pull:		Pull,
+	pub(super) work:		Work,
+	pub(super) finished:	bool,
 }
 
 impl FlowCursor {
@@ -543,18 +552,18 @@ impl Regions {
 	}
 
 	/// A hash of everything a layout could depend on, for caching a child's layout.
-	fn key(&self) -> u64 {
-		let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+	fn key(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
 		for v in [self.w, self.h, self.full, self.last.unwrap_or(-1.0)] {
-			h.f(v);
+			h.write_f64(v);
 		}
 		for v in &self.backlog {
-			h.f(*v);
+			h.write_f64(*v);
 		}
-		h.b(self.last.is_some());
-		h.b(self.expand_x);
-		h.b(self.expand_y);
-		h.0
+		h.write_bool(self.last.is_some());
+		h.write_bool(self.expand_x);
+		h.write_bool(self.expand_y);
+		h.finish()
 	}
 
 	/// The regions with every height shrunk by `f`, the widths likewise.
@@ -570,22 +579,6 @@ impl Regions {
 			expand_x:	self.expand_x,
 			expand_y:	self.expand_y,
 		}
-	}
-}
-
-struct Fnv(u64);
-
-impl Fnv {
-	fn f(&mut self, v: f64) {
-		for b in v.to_bits().to_le_bytes() {
-			self.0 ^= b as u64;
-			self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-		}
-	}
-
-	fn b(&mut self, v: bool) {
-		self.0 ^= v as u64;
-		self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
 	}
 }
 
@@ -984,7 +977,7 @@ fn grow(frame: &mut Frame, inset: &[Rel; 4]) {
 
 /// What waits to be placed with the next frame: a tag, or the mark of a float's place in the flow.
 #[derive(Clone, Debug)]
-enum Pending {
+pub(super) enum Pending {
 	Tag(Tag),
 	Mark(u64),
 }
@@ -1000,7 +993,7 @@ impl Pending {
 
 /// A prepared child of a flow, Typst's `Child`.
 #[derive(Debug)]
-enum Child {
+pub(super) enum Child {
 	Tag(Tag),
 	Mark(u64),		// where a float's `place` stands
 	Rel(Rel, u8),	// spacing and its weakness: 0 strong, then block (3), paragraph (4) and leading (5)
@@ -1015,16 +1008,16 @@ enum Child {
 
 /// A laid-out line of a paragraph, and the height it needs to keep with its widow or orphan partner.
 #[derive(Debug)]
-struct LineChild {
-	frame:	Frame,
-	align:	Align2,
-	need:	f64,
+pub(super) struct LineChild {
+	pub(super) frame:	Frame,
+	pub(super) align:	Align2,
+	pub(super) need:	f64,
 }
 
 /// What a block lays out: nothing, content, or its element by that element's own layout routine (a shape,
 /// a grid, a pad, a stack, columns, an equation, `layout`).
 #[derive(Clone, Debug)]
-enum Body {
+pub(super) enum Body {
 	Empty,
 	Content(Content),
 	Layouter,
@@ -1033,11 +1026,11 @@ enum Body {
 /// A block and the styles it is laid out under. An explicit `block` reads its fields; an element Typst
 /// shows as a block reads the `block` styles in force.
 #[derive(Clone, Debug)]
-struct BlockSpec {
-	elem:		Content,
-	styles:		StyleChain,
-	body:		Body,
-	explicit:	bool,
+pub(super) struct BlockSpec {
+	pub(super) elem:		Content,
+	pub(super) styles:		StyleChain,
+	pub(super) body:		Body,
+	pub(super) explicit:	bool,
 }
 
 impl BlockSpec {
@@ -1062,13 +1055,13 @@ impl BlockSpec {
 }
 
 #[derive(Debug)]
-struct SingleChild {
-	align:	Align2,
-	sticky:	bool,
-	alone:	bool,
-	fr:		Option<f64>,
-	spec:	BlockSpec,
-	cell:	RefCell<Option<(u64, Frame)>>,
+pub(super) struct SingleChild {
+	pub(super) align:	Align2,
+	pub(super) sticky:	bool,
+	pub(super) alone:	bool,
+	pub(super) fr:		Option<f64>,
+	pub(super) spec:	BlockSpec,
+	pub(super) cell:	RefCell<Option<(Fingerprint, Frame)>>,
 }
 
 impl SingleChild {
@@ -1090,11 +1083,11 @@ impl SingleChild {
 /// A breakable block. It lays out one fragment per region, each from the continuation the one before
 /// left: see [`MultiChild::fragment`].
 #[derive(Debug)]
-struct MultiChild {
-	align:	Align2,
-	sticky:	bool,
-	alone:	bool,
-	spec:	BlockSpec,
+pub(super) struct MultiChild {
+	pub(super) align:	Align2,
+	pub(super) sticky:	bool,
+	pub(super) alone:	bool,
+	pub(super) spec:	BlockSpec,
 }
 
 /// A fragment laid out in the region being composed, kept so a region laid out again from the same state, as
@@ -1102,10 +1095,10 @@ struct MultiChild {
 /// not the block, so that a block holds no continuation that holds the block; they go when the region is
 /// finished.
 #[derive(Clone, Debug)]
-struct Memo {
+pub(super) struct Memo {
 	child:	usize,					// the block, by address
 	from:	usize,					// the continuation it came from, by address, or zero for the first
-	key:	u64,					// the regions the fragment was laid out in
+	key:	Fingerprint,			// the regions the fragment was laid out in
 	out:	Fragment,
 }
 
@@ -1121,42 +1114,42 @@ struct Fragment {
 /// what a block of fixed height has left. A [`Work`] holds one, and a copy of the work holds the same one,
 /// so laying a region out again starts from the right place.
 #[derive(Debug)]
-struct Spill {
-	child:	Rc<MultiChild>,
-	nested:	Nested,
-	k:		usize,					// fragments yielded
-	fixed:	Option<(f64, f64)>,		// a fixed height, whole and what is left of it
+pub(super) struct Spill {
+	pub(super) child:	Rc<MultiChild>,
+	pub(super) nested:	Nested,
+	pub(super) k:		usize,					// fragments yielded
+	pub(super) fixed:	Option<(f64, f64)>,		// a fixed height, whole and what is left of it
 }
 
 /// What lays out a block's fragments.
 #[derive(Clone, Debug)]
-enum Nested {
+pub(super) enum Nested {
 	Flow(Box<FlowCursor>, Option<[Rel; 4]>),	// the body flowed through the regions, grown by a pad's padding
 	Frames(VecDeque<Frame>, Regions),			// frames laid out as one piece, and the regions they were laid out in
 }
 
 /// A placed child's vertical alignment: `auto` (a float's choice), none (in the flow), or an edge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PlaceY {
+pub(super) enum PlaceY {
 	Auto,
 	Flow,
 	At(Fixed),
 }
 
 #[derive(Debug)]
-struct PlacedChild {
-	align_x:	Fixed,
-	align_y:	PlaceY,
-	parent:		bool,	// `scope: "parent"`
-	float:		bool,
-	clearance:	f64,
-	dx:			Rel,
-	dy:			Rel,
-	alignment:	Option<Alignment>,	// `auto` is none
-	mark:		u64,				// the float's place in the flow, its frame's parent
-	elem:		Content,
-	styles:		StyleChain,
-	cell:		RefCell<Option<(u64, Frame)>>,
+pub(super) struct PlacedChild {
+	pub(super) align_x:		Fixed,
+	pub(super) align_y:		PlaceY,
+	pub(super) parent:		bool,	// `scope: "parent"`
+	pub(super) float:		bool,
+	pub(super) clearance:	f64,
+	pub(super) dx:			Rel,
+	pub(super) dy:			Rel,
+	pub(super) alignment:	Option<Alignment>,	// `auto` is none
+	pub(super) mark:		u64,				// the float's place in the flow, its frame's parent
+	pub(super) elem:		Content,
+	pub(super) styles:		StyleChain,
+	pub(super) cell:		RefCell<Option<(Fingerprint, Frame)>>,
 }
 
 impl PlacedChild {
@@ -1560,21 +1553,21 @@ macro_rules! st {
 
 /// What an insertion is known by once handled: a float by its child, a footnote by its location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Skip {
+pub(super) enum Skip {
 	Child(usize),
 	Loc(Location),
 }
 
 /// The work flow layout has left: Typst's `Work`.
 #[derive(Clone, Debug)]
-struct Work {
-	idx:			usize,							// the first child not yet processed
-	spill:			Option<Rc<Spill>>,
-	floats:			Vec<(usize, Rc<PlacedChild>)>,	// floats queued for a later region, by child
-	footnotes:		Vec<Content>,					// footnotes queued for a later region
-	footnote_spill:	Option<Vec<Frame>>,				// the rest of a footnote that did not fit
-	tags:			Vec<Pending>,					// tags and marks waiting for the next frame
-	skips:			Rc<HashMap<Skip, usize>>,		// insertions already placed, and the child they belong to
+pub(super) struct Work {
+	pub(super) idx:				usize,							// the first child not yet processed
+	pub(super) spill:			Option<Rc<Spill>>,
+	pub(super) floats:			Vec<(usize, Rc<PlacedChild>)>,	// floats queued for a later region, by child
+	pub(super) footnotes:		Vec<Content>,					// footnotes queued for a later region
+	pub(super) footnote_spill:	Option<Vec<Frame>>,				// the rest of a footnote that did not fit
+	pub(super) tags:			Vec<Pending>,					// tags and marks waiting for the next frame
+	pub(super) skips:			Rc<HashMap<Skip, usize>>,		// insertions already placed, and the child they belong to
 }
 
 impl Work {
@@ -1609,27 +1602,27 @@ impl Work {
 }
 
 #[derive(Clone, Debug)]
-struct ColumnConfig {
-	count:	usize,
-	width:	f64,
-	gutter:	f64,
-	rtl:	bool,
+pub(super) struct ColumnConfig {
+	pub(super) count:	usize,
+	pub(super) width:	f64,
+	pub(super) gutter:	f64,
+	pub(super) rtl:		bool,
 }
 
 #[derive(Clone, Debug)]
-struct FootnoteConfig {
-	separator:	Content,
-	clearance:	f64,
-	gap:		f64,
-	expand:		bool,
+pub(super) struct FootnoteConfig {
+	pub(super) separator:	Content,
+	pub(super) clearance:	f64,
+	pub(super) gap:			f64,
+	pub(super) expand:		bool,
 }
 
 #[derive(Clone, Debug)]
-struct Config {
-	mode:		FlowMode,
-	shared:		StyleChain,
-	columns:	ColumnConfig,
-	footnote:	FootnoteConfig,
+pub(super) struct Config {
+	pub(super) mode:		FlowMode,
+	pub(super) shared:		StyleChain,
+	pub(super) columns:		ColumnConfig,
+	pub(super) footnote:	FootnoteConfig,
 }
 
 fn configuration(shared: &StyleChain, regions: &Regions, columns: usize, gutter: Rel, mode: FlowMode) -> Outcome<Config> {

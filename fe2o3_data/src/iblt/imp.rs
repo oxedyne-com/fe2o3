@@ -111,10 +111,20 @@ impl Iblt {
 				"IBLT key_len must be greater than zero.";
 			Invalid, Input));
 		}
+		// The table is sized from the config, which a peer can choose, so the products are checked
+		// before the allocation they ask for.
+		let key_bytes = res!(cfg.num_cells.checked_mul(cfg.key_len).ok_or_else(|| err!(
+			"IBLT dimensions overflow: num_cells {} * key_len {}.",
+			cfg.num_cells, cfg.key_len;
+		Invalid, Input, Size)));
+		let value_bytes = res!(cfg.num_cells.checked_mul(cfg.value_len).ok_or_else(|| err!(
+			"IBLT dimensions overflow: num_cells {} * value_len {}.",
+			cfg.num_cells, cfg.value_len;
+		Invalid, Input, Size)));
 		Ok(Self {
 			cfg,
-			key_xor:	vec![0u8; cfg.num_cells * cfg.key_len],
-			value_xor:	vec![0u8; cfg.num_cells * cfg.value_len],
+			key_xor:	vec![0u8; key_bytes],
+			value_xor:	vec![0u8; value_bytes],
 			fp_xor:		vec![0u64; cfg.num_cells],
 			count:		vec![0i32; cfg.num_cells],
 		})
@@ -267,8 +277,10 @@ impl Iblt {
 		Ok(u64::from_le_bytes(buf) as usize)
 	}
 
-	/// Parses the serialised form produced by [`Iblt::to_bytes`].
-	pub fn from_bytes(bytes: &[u8]) -> Outcome<Self> {
+	/// Reads the configuration out of the header of the serialised form, with no table built
+	/// and nothing allocated, so a reader can compare it with the one it expects before it
+	/// trusts the sizes the header states.
+	pub fn config_in(bytes: &[u8]) -> Outcome<IbltConfig> {
 		if bytes.len() < 8 * 5 {
 			return Err(err!(
 				"IBLT serialised form too short: {} bytes.", bytes.len();
@@ -279,18 +291,40 @@ impl Iblt {
 			buf.copy_from_slice(&bytes[off..off + 8]);
 			u64::from_le_bytes(buf)
 		};
-		let num_cells	= read_u64(0)	as usize;
-		let num_hashes	= read_u64(8)	as usize;
-		let key_len		= read_u64(16)	as usize;
-		let value_len	= read_u64(24)	as usize;
-		let seed		= read_u64(32);
-		let cfg = IbltConfig { num_cells, num_hashes, key_len, value_len, seed };
+		let read_len = |off: usize, field: &str| -> Outcome<usize> {
+			let v = read_u64(off);
+			usize::try_from(v).map_err(|_| err!(
+				"IBLT header {} is {}, more than this platform can address.", field, v;
+			Invalid, Input, Size))
+		};
+		Ok(IbltConfig {
+			num_cells:	res!(read_len(0, "num_cells")),
+			num_hashes:	res!(read_len(8, "num_hashes")),
+			key_len:	res!(read_len(16, "key_len")),
+			value_len:	res!(read_len(24, "value_len")),
+			seed:		read_u64(32),
+		})
+	}
 
-		let per_cell = key_len + value_len + FINGERPRINT_LEN + COUNT_LEN;
+	/// Parses the serialised form produced by [`Iblt::to_bytes`]. The header sizes are summed
+	/// and multiplied with checked arithmetic, and the length of `bytes` is compared with the
+	/// result before the table is built.
+	pub fn from_bytes(bytes: &[u8]) -> Outcome<Self> {
+		let cfg = res!(Self::config_in(bytes));
+		let IbltConfig { num_cells, key_len, value_len, .. } = cfg;
+
+		let per_cell = res!(key_len.checked_add(value_len)
+			.and_then(|n| n.checked_add(FINGERPRINT_LEN + COUNT_LEN))
+			.ok_or_else(|| err!(
+				"IBLT dimensions overflow: key_len {} + value_len {} + cell overhead.",
+				key_len, value_len;
+			Invalid, Input, Size)));
 		let body_len = res!(num_cells.checked_mul(per_cell).ok_or_else(|| err!(
-			"IBLT dimensions overflow: num_cells * per_cell.";
+			"IBLT dimensions overflow: num_cells {} * per_cell {}.", num_cells, per_cell;
 		Invalid, Input, Size)));
-		let expected = 40 + body_len;
+		let expected = res!(body_len.checked_add(40).ok_or_else(|| err!(
+			"IBLT dimensions overflow: header + body {}.", body_len;
+		Invalid, Input, Size)));
 		if bytes.len() != expected {
 			return Err(err!(
 				"IBLT serialised form length mismatch: got {}, expected {}.",

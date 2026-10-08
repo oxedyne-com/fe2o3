@@ -3,6 +3,7 @@
 //! This crate is part of the Hematite collection and provides:
 //! 
 //! - Checksum generation and verification through the [`csum`] module
+//! - 128 bit content fingerprints, for cache keys, in the [`fingerprint`] module
 //! - Cryptographic hashing via the [`hash`] module, supporting algorithms like SHA3-256
 //! - Key derivation functions in the [`kdf`] module, implementing Argon2
 //! - A concurrent sharded hashmap in the [`map`] module for high-performance applications
@@ -31,6 +32,7 @@ use oxedyne_fe2o3_jdat::version::SemVer;
 
 
 pub mod csum;
+pub mod fingerprint;
 pub mod map;
 pub mod hash;
 pub mod kdf;

@@ -55,7 +55,7 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::Path,
 	transform::Transform,
 };
@@ -1364,7 +1364,7 @@ fn emit(mbox: MBox, base: Sp) -> (Vec<Node>, Dims) {
 				// A grown delimiter or radical: its flipped outline as a one-op graphic, seated on the
 				// line by the same shift as a glyph. The box is zero-height, so the shift alone seats it.
 				let g = Graphic::new(
-					vec![DrawOp::Fill { path, colour: Rgba::BLACK }],
+					vec![DrawOp::Fill { path, colour: Ink::BLACK }],
 					Dims::new(p.width, Sp::ZERO, Sp::ZERO));
 				nodes.push(Node::Leaf(Leaf::graphic(g).with_shift(shift)));
 			},

@@ -63,7 +63,10 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::{
+		Ink,
+		Rgba,
+	},
 	path::{
 		Bounds,
 		Path,
@@ -1557,20 +1560,20 @@ fn size_rows<L: CellLayout>(
 
 // Lowering
 
-fn rgba(engine: &mut Engine, span: Span, p: &Paint) -> Outcome<Rgba> {
+fn paint_ink(engine: &mut Engine, span: Span, p: &Paint) -> Outcome<Ink> {
 	match p {
-		Paint::Color(c)		=> c.to_rgba(),
+		Paint::Color(c)		=> Ok(c.to_ink()),
 		Paint::Gradient(g)	=> {
 			// `DrawOp` carries a flat colour only; the first stop stands in, and the loss is said.
 			engine.warn(DiagnosticKind::Unsupported, span, "gradients in grid fills and strokes are drawn in their first colour");
 			match g.stops.first() {
-				Some((c, _))	=> c.to_rgba(),
-				None			=> Ok(Rgba::BLACK),
+				Some((c, _))	=> Ok(c.to_ink()),
+				None			=> Ok(Ink::BLACK),
 			}
 		}
 		Paint::Tiling(_)	=> {
 			engine.warn(DiagnosticKind::Unsupported, span, "tilings in grid fills and strokes are not drawn yet");
-			Ok(Rgba::TRANSPARENT)
+			Ok(Rgba::TRANSPARENT.into())
 		}
 	}
 }
@@ -1638,7 +1641,7 @@ fn part_box(
 
 	let mut ops = Vec::new();
 	for r in &g.fills {
-		let c = res!(rgba(engine, span, &r.paint));
+		let c = res!(paint_ink(engine, span, &r.paint));
 		let (y, rh) = if whole { (r.y - g.top, r.h) } else { (Sp::ZERO, h) };
 		let path = res!(Path::rect(Bounds::new(f(r.x), f(y), f(r.x + r.w), f(y + rh))));
 		ops.push(DrawOp::Fill { path, colour: c });
@@ -1679,7 +1682,7 @@ fn part_box(
 		if s.pen.dash.is_some() {
 			engine.warn(DiagnosticKind::Unsupported, span, "dashed grid lines are drawn solid");
 		}
-		let c = res!(rgba(engine, span, &s.pen.paint));
+		let c = res!(paint_ink(engine, span, &s.pen.paint));
 		ops.push(DrawOp::Stroke { path: res!(segment_path(&s2)), colour: c, width: f(s.pen.thickness) });
 	}
 	overlay(ops, w, h, &mut list);

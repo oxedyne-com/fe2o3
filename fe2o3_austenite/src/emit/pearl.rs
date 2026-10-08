@@ -441,8 +441,8 @@ impl PearlBuilder {
 					// The fill rides as an optional key, present only when the run is not black. A black run
 					// adds nothing, so an all-black document's bytes are exactly what they were before text
 					// carried a colour; the reader defaults a missing key to black.
-					if shaped.colour() != Rgba::BLACK {
-						res!(meta.map_put(dat!("colour"), rgba_to_dat(shaped.colour())));
+					if shaped.colour().to_rgba() != Rgba::BLACK {
+						res!(meta.map_put(dat!("colour"), rgba_to_dat(shaped.colour().to_rgba())));
 					}
 					let leaf = listdat![
 						dat!("text"),
@@ -486,7 +486,7 @@ impl PearlBuilder {
 									res!(bx.to_dat()),
 									res!(by.to_dat()),
 									dat!(write_path_data(path)),
-									rgba_to_dat(*colour),
+									rgba_to_dat(colour.to_rgba()),
 								]);
 							},
 							DrawOp::Stroke { path, colour, width } => {
@@ -495,7 +495,7 @@ impl PearlBuilder {
 									res!(bx.to_dat()),
 									res!(by.to_dat()),
 									dat!(write_path_data(path)),
-									rgba_to_dat(*colour),
+									rgba_to_dat(colour.to_rgba()),
 									dat!(*width),
 								]);
 							},
@@ -1185,6 +1185,7 @@ fn text_leaf_meta(items: &[Dat]) -> Outcome<&Dat> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use oxedyne_fe2o3_graphics::colour::Ink;
 
 	use crate::emit::svg;
 	use crate::font::ShapedText;
@@ -1246,8 +1247,8 @@ mod tests {
 		let fill	= res!(Path::rect(Bounds::new(0.0, 0.0, 40.0, 30.0)));
 		let stroke	= res!(Path::rect(Bounds::new(5.0, 5.0, 35.0, 25.0)));
 		let ops		= vec![
-			DrawOp::Fill { path: fill, colour: Rgba::new(233, 236, 239, 255) },
-			DrawOp::Stroke { path: stroke, colour: Rgba::BLACK, width: 1.0 },
+			DrawOp::Fill { path: fill, colour: Rgba::new(233, 236, 239, 255).into() },
+			DrawOp::Stroke { path: stroke, colour: Ink::BLACK, width: 1.0 },
 		];
 		let graphic	= Graphic::new(ops, Dims::new(Sp::from_pt(40.0), Sp::from_pt(30.0), Sp::ZERO));
 		frame.push(Placed::new(
@@ -1282,7 +1283,7 @@ mod tests {
 	fn dot_graphic(link: Option<LinkTarget>) -> Outcome<Graphic> {
 		let fill = res!(Path::rect(Bounds::new(0.0, 0.0, 20.0, 20.0)));
 		let mut g = Graphic::new(
-			vec![DrawOp::Fill { path: fill, colour: Rgba::BLACK }],
+			vec![DrawOp::Fill { path: fill, colour: Ink::BLACK }],
 			Dims::new(Sp::from_pt(20.0), Sp::from_pt(20.0), Sp::ZERO));
 		g.link = link;
 		Ok(g)
@@ -1510,7 +1511,7 @@ fn bake_placed(placed: &crate::page::Placed, map: &Transform, leaves: &mut Vec<D
 					continue;
 				}
 				let t = Transform::scale(1.0, -1.0).then(&Transform::translate(x + glyph.x, base_y - glyph.y));
-				res!(fill(res!(o.transform(&t)), shaped.colour(), leaves));
+				res!(fill(res!(o.transform(&t)), shaped.colour().to_rgba(), leaves));
 			}
 		},
 		PlacedKind::Rule => {
@@ -1525,11 +1526,11 @@ fn bake_placed(placed: &crate::page::Placed, map: &Transform, leaves: &mut Vec<D
 			let at = Transform::translate(x, y);
 			for op in &g.ops {
 				match op {
-					DrawOp::Fill { path, colour } => res!(fill(res!(path.transform(&at)), *colour, leaves)),
+					DrawOp::Fill { path, colour } => res!(fill(res!(path.transform(&at)), colour.to_rgba(), leaves)),
 					DrawOp::Stroke { path, colour, width } => {
 						let pen = res!(Stroke::new(*width));
 						let outline = res!(res!(path.transform(&at)).stroke(&pen));
-						res!(fill(outline, *colour, leaves));
+						res!(fill(outline, colour.to_rgba(), leaves));
 					},
 					DrawOp::Image { .. } => return Err(err!(
 						"A raster under a transform cannot be written to Pearl v1, which places images \

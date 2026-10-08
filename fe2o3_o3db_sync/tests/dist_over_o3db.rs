@@ -255,6 +255,48 @@ fn opens_puts_closes_reopens_reads_back() -> Outcome<()> {
 }
 
 #[test]
+fn a_dropped_engine_stops_its_bots_and_keeps_what_it_stored() -> Outcome<()> {
+	let _one = lock_mutex!(ONE_AT_A_TIME);
+	let root = res!(fresh_root("dropped"));
+	let idle = res!(threads());
+	let e = res!(open(&root, Some(ozone_cfg()), res!(single(&["identity"])), LastVersionWins));
+	let running = res!(threads());
+	assert!(running > idle + 10, "an open database should run its bots: {} threads before, {} after", idle, running);
+	let out = res!(e.put_at(rec("identity", rid(1), b"kept without a close"), 1_000));
+	assert!(out.local_persisted, "the put was not stored");
+
+	// Dropped as an error path or a panic unwinds it, with no close.
+	drop(e);
+	let dropped = res!(threads());
+	assert!(dropped < idle + (running - idle) / 2,
+		"dropping the engine left the bots running: {} threads before the open, {} open, {} after the drop",
+		idle, running, dropped);
+
+	// The bots were stopped in order, so the same root opens again with the record in it.
+	let e = res!(open(&root, None, res!(single(&["identity"])), LastVersionWins));
+	assert_eq!(res!(held(&e, "identity", rid(1))), Some(b"kept without a close".to_vec()));
+	res!(e.close());
+	Ok(())
+}
+
+#[test]
+fn dropping_a_shared_storage_leaves_the_database_to_its_other_holder() -> Outcome<()> {
+	let _one = lock_mutex!(ONE_AT_A_TIME);
+	let root = res!(fresh_root("dropshared"));
+	let e = res!(open(&root, Some(ozone_cfg()), res!(single(&["identity"])), LastVersionWins));
+	res!(e.put_at(rec("identity", rid(1), b"still open"), 1_000));
+	let extra = Arc::clone(e.storage().db());
+
+	// The engine goes, the database does not: someone else still holds it.
+	drop(e);
+	let storage = O3dbStorage::new(extra, setup::Uid::default());
+	let back = res!(storage.get("identity", &rid(1)));
+	assert_eq!(back.map(|r| r.value), Some(b"still open".to_vec()));
+	res!(storage.close());
+	Ok(())
+}
+
+#[test]
 fn over_o3db_uses_the_given_resolver() -> Outcome<()> {
 	let _one = lock_mutex!(ONE_AT_A_TIME);
 	let root = res!(fresh_root("resolver"));

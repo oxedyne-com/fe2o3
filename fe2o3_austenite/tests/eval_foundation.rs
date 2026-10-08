@@ -24,6 +24,10 @@ use oxedyne_fe2o3_austenite::eval::{
 use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_graphics::colour::{
+	Ink,
+	Rgba,
+};
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{
@@ -598,6 +602,62 @@ fn numbering_trimmed_and_kth_agree_with_typst() -> Outcome<()> {
 	let want: Vec<String> = want.iter().map(|w| w.replace('"', "")).collect();
 	if lines != want {
 		return Err(err!("typst rendered {:?}, austenite gives {:?}", lines, want; Test));
+	}
+	Ok(())
+}
+
+/// The ink a colour value reaches the drawing layer as, and the colour's own sRGB lowering.
+fn ink_of(src: &str) -> Outcome<(Ink, Rgba)> {
+	match eval_line(src) {
+		Ok(Value::Color(c))	=> Ok((c.to_ink(), res!(c.to_rgba()))),
+		Ok(other)			=> Err(err!("{} gave {}, not a colour", src, repr(&other); Test)),
+		Err(m)				=> Err(err!("{}: {}", src, m; Test)),
+	}
+}
+
+/// A colour keeps the space it was written in when it reaches the drawing layer: `luma` is a grey, `cmyk` a
+/// CMYK, and every other space eight-bit sRGB; whichever it is, the ink lowers to the colour's own RGBA.
+#[test]
+fn a_colour_lowers_to_the_ink_of_the_space_it_was_written_in() -> Outcome<()> {
+	let exact: [(&str, Ink); 8] = [
+		("luma(50%)",					Ink::Grey { v: 0.5, a: 255 }),
+		("luma(50%, 25%)",				Ink::Grey { v: 0.5, a: 64 }),
+		("black",						Ink::Grey { v: 0.0, a: 255 }),
+		("white",						Ink::Grey { v: 1.0, a: 255 }),
+		("cmyk(0%, 50%, 100%, 0%)",		Ink::Cmyk { c: 0.0, m: 0.5, y: 1.0, k: 0.0, a: 255 }),
+		("rgb(\"#ff0000\")",			Ink::Rgb(Rgba::new(255, 0, 0, 255))),
+		("rgb(10, 20, 30, 40)",			Ink::Rgb(Rgba::new(10, 20, 30, 40))),
+		("rgb(0, 0, 0)",				Ink::Rgb(Rgba::new(0, 0, 0, 255))),
+	];
+	for (src, want) in exact {
+		let (ink, rgba) = res!(ink_of(src));
+		if ink != want {
+			return Err(err!("{} lowered to {:?}, expected {:?}", src, ink, want; Test));
+		}
+		if ink.to_rgba() != rgba {
+			return Err(err!("{}: the ink gives {:?}, the colour {:?}", src, ink.to_rgba(), rgba; Test));
+		}
+	}
+	// The rest are written in a space the page does not keep, so each is an RGB ink of the colour's own RGBA.
+	for src in [
+		"oklch(70%, 0.1, 40deg)",
+		"color.hsl(120deg, 50%, 50%)",
+		"color.hsv(200deg, 40%, 80%, 50%)",
+		"color.linear-rgb(20%, 40%, 60%)",
+		"color.oklab(60%, 0.1, -0.05)",
+		"oklch(70%, 0.1, 40deg).transparentize(40%)",
+	] {
+		let (ink, rgba) = res!(ink_of(src));
+		match ink {
+			Ink::Rgb(c) if c == rgba	=> (),
+			other						=> return Err(err!("{} lowered to {:?}, expected an RGB ink of {:?}", src, other, rgba; Test)),
+		}
+	}
+	// Grey 0 and RGB 0 lower to one colour yet are two inks, which a fingerprint must tell apart.
+	let (grey, g) = res!(ink_of("luma(0%)"));
+	let (rgb, r) = res!(ink_of("rgb(0, 0, 0)"));
+	if g != r || grey == rgb {
+		return Err(err!("luma(0%) and rgb(0, 0, 0): colours {:?} {:?}, inks {:?} {:?}", g, r, grey, rgb; Test));
 	}
 	Ok(())
 }

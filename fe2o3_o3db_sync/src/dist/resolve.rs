@@ -303,12 +303,21 @@ fn run_seed<R, F, P>(
 		}
 	}
 
+	// A round that stores nothing is quiet, unless the clocks are still moving and a put is
+	// deferred past them: it will be offered again once they reach its time, and the rule may
+	// diverge then.
 	let mut quiet = false;
 	for _ in 0..cfg.max_rounds {
-		if res!(run.round(tables)) == 0 {
+		if res!(run.round(tables)) == 0 && (cfg.skew_ms == 0 || run.deferred.is_empty()) {
 			quiet = true;
 			break;
 		}
+	}
+	if !quiet && !run.deferred.is_empty() {
+		return Err(err!(
+			"check_convergence: seed {} did not quiesce: {} deferred puts still pending \
+			after {} full rounds.", seed, run.deferred.len(), cfg.max_rounds;
+			Test, LimitReached));
 	}
 	if !quiet {
 		return Err(err!(

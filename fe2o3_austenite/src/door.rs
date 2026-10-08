@@ -8,10 +8,10 @@
 //! counts them, and start at 1.
 
 use crate::compile::{
-	self,
 	Cols,
 	Diagnostic,
 	Report,
+	Session,
 	Severity,
 };
 use crate::delta::{
@@ -34,7 +34,6 @@ use crate::eval::eval::{
 	EvalMode,
 };
 use crate::eval::fixpoint::PageSink;
-use crate::eval::intro::Introspector;
 use crate::eval::lib::data;
 use crate::eval::package::{
 	self,
@@ -51,6 +50,11 @@ use crate::vfs;
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{
+	Hash,
+	Hasher,
+};
 use std::path::{
 	Path,
 	PathBuf,
@@ -171,13 +175,21 @@ pub struct Row {
 	pub level:	Option<i64>,		// a heading's depth
 }
 
-/// A long-lived compiler: the embedded faces parsed once, the last good compile's introspector for queries,
-/// and the delta's version tick.
+/// A long-lived compiler: a [`Session`] holding the embedded faces parsed once and the introspector the
+/// next compile starts from, whether the last compile answers queries, and the delta's version tick.
 pub struct Instance {
-	base:		Option<Arc<FontBook>>,		// none only if the embedded bytes would not parse
-	intro:		Option<Arc<Introspector>>,
+	session:	Session,
+	fonts:		Vec<u64>,					// the fingerprints of the project fonts the session's store holds
+	good:		bool,						// the last compile laid pages without a refusal, so queries answer
 	version:	u32,						// the delta's tick
 	budget:		Option<u64>,				// the loop budget of a compile, none for no bound
+}
+
+// A font file's fingerprint, to tell a project's fonts unchanged from one call to the next.
+fn fingerprint(bytes: &[u8]) -> u64 {
+	let mut h = DefaultHasher::new();
+	bytes.hash(&mut h);
+	h.finish()
 }
 
 impl Default for Instance {
@@ -188,9 +200,14 @@ impl Instance {
 	/// Parses the embedded faces once. A face that will not parse is reported by the first compile, never
 	/// here, so a constructor cannot fail.
 	pub fn new() -> Self {
+		let fonts = match FontBook::embedded() {
+			Ok(book)	=> FontStore::with_base(Arc::new(book)),
+			Err(_)		=> FontStore::default(),
+		};
 		Self {
-			base:		FontBook::embedded().ok().map(Arc::new),
-			intro:		None,
+			session:	Session::new(fonts),
+			fonts:		Vec::new(),
+			good:		false,
 			version:	0,
 			budget:		Some(LOOP_BUDGET),
 		}
@@ -206,21 +223,22 @@ impl Instance {
 	/// The loop budget in force: [`LOOP_BUDGET`] until the host sets another.
 	pub fn loop_budget(&self) -> Option<u64> { self.budget }
 
-	/// Compiles to PDF through the evaluator. The chunks are the file; a host copies them out one by one.
+	/// Compiles to PDF through the evaluator, cold, as an explicit output is: the file never depends on the
+	/// compiles before it. The chunks are the file; a host copies them out one by one.
 	pub fn compile_pdf(&mut self, p: &Project) -> Result<Made<Chunks>, Failure> {
 		let sink = match PdfSink::new() {
 			Ok(s)	=> s,
 			Err(e)	=> return Err(Failure::of(&e, &p.main_path())),
 		};
-		self.run(p, sink, |s| s.into_output())
+		self.run(p, sink, true, |s| s.into_output())
 	}
 
-	/// Compiles to one SVG document per page through the evaluator.
+	/// Compiles to one SVG document per page through the evaluator, from the kept introspector.
 	pub fn compile_svg(&mut self, p: &Project) -> Result<Made<Vec<String>>, Failure> {
-		self.run(p, VectorSink::default(), |s| s.into_pages())
+		self.run(p, VectorSink::default(), false, |s| s.into_pages())
 	}
 
-	fn run<S, T, F>(&mut self, p: &Project, mut sink: S, take: F) -> Result<Made<T>, Failure>
+	fn run<S, T, F>(&mut self, p: &Project, mut sink: S, cold: bool, take: F) -> Result<Made<T>, Failure>
 	where
 		S: PageSink,
 		F: FnOnce(S) -> Option<T>,
@@ -228,9 +246,9 @@ impl Instance {
 		let _turn	= turn();
 		let budget	= self.budget;
 		let main	= p.main_path();
-		// A failed compile answers no query, so the kept introspector goes before the compile begins.
-		self.intro	= None;
-		let base = match &self.base {
+		// A failed compile answers no query, so the answer goes before the compile begins.
+		self.good	= false;
+		let base = match self.session.fonts().base() {
 			Some(b)	=> b.clone(),
 			None	=> return Err(Failure::internal(&main, "the embedded font set could not be built")),
 		};
@@ -238,12 +256,19 @@ impl Instance {
 			let _ = vfs::clear();
 			return Err(Failure::of(&e, &main));
 		}
-		let mut fonts = FontStore::with_base(base);
-		for (_, bytes) in &p.fonts {
-			fonts.add_bytes(bytes.clone());
+		// The store is kept while the project's fonts are the same, with its parsed faces and shaping cache,
+		// and made afresh over the embedded faces when they are not, so that no project's fonts reach another's.
+		let held: Vec<u64> = p.fonts.iter().map(|(_, bytes)| fingerprint(bytes)).collect();
+		if held != self.fonts {
+			let mut fonts = FontStore::with_base(base);
+			for (_, bytes) in &p.fonts {
+				fonts.add_bytes(bytes.clone());
+			}
+			self.session.set_fonts(fonts);
+			self.fonts = held;
 		}
 		let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			compile::assemble_eval_timed(&main, Path::new("/"), fonts, &mut sink, None, budget)
+			self.session.compile(&main, Path::new("/"), &mut sink, None, budget, cold)
 		}));
 		let _ = vfs::clear();
 		let done = match caught {
@@ -254,24 +279,21 @@ impl Instance {
 		};
 		let needs	= done.needs();
 		let report	= done.report_in(Cols::Utf16);
-		let laid = match &done.laid {
-			Ok(l)	=> l,
-			Err(e)	=> {
-				// The first error is the one the fixpoint stopped on; the sites after it follow.
-				let mut rest = report.diagnostics.clone();
-				let head = match done.engine.diags.iter().position(|d| d.is_error()) {
-					Some(i)	=> rest.remove(i),
-					None	=> Diagnostic::from_error(e, &main),
-				};
-				return Err(Failure { head, rest, pages: None, skipped: report.skipped.clone(), needs });
-			},
-		};
+		if let Err(e) = &done.laid {
+			// The first error is the one the fixpoint stopped on; the sites after it follow.
+			let mut rest = report.diagnostics.clone();
+			let head = match done.engine.diags.iter().position(|d| d.is_error()) {
+				Some(i)	=> rest.remove(i),
+				None	=> Diagnostic::from_error(e, &main),
+			};
+			return Err(Failure { head, rest, pages: None, skipped: report.skipped.clone(), needs });
+		}
 		if p.strict {
 			if let Some(head) = report.strict_failure(&main) {
 				return Err(Failure::refused(head, &report, needs));
 			}
 		}
-		self.intro = Some(laid.intro.clone());
+		self.good = true;
 		match take(sink) {
 			Some(product)	=> Ok(Made { product, report, needs }),
 			None			=> Err(Failure::internal(&main, "the fixpoint ended with no output")),
@@ -282,7 +304,7 @@ impl Instance {
 	/// of every project font declares. It is read from the font book a compile resolves `font:` against, so
 	/// a family is listed exactly when a compile finds it.
 	pub fn font_families(&self, p: Option<&Project>) -> Vec<String> {
-		let base = match &self.base {
+		let base = match self.session.fonts().base() {
 			Some(b)	=> b.clone(),
 			None	=> return Vec::new(),
 		};
@@ -303,9 +325,9 @@ impl Instance {
 	/// a wrong answer, when nothing has compiled, the selector does not evaluate, or a field cannot be
 	/// written as Typst writes it.
 	pub fn query(&self, selector: &str, field: &str) -> Option<Vec<Row>> {
-		let intro = match &self.intro {
-			Some(i)	=> i.clone(),
-			None	=> return None,
+		let intro = match (self.good, self.session.intro()) {
+			(true, Some(i))	=> i.clone(),
+			_				=> return None,
 		};
 		let _turn = turn();
 		// A fresh engine over the kept introspector evaluates the selector as `typst query` does.
@@ -364,7 +386,8 @@ impl Instance {
 		Some(rows)
 	}
 
-	/// The changed-only page delta through the evaluator, the live view's path. `known` is the page ids the
+	/// The changed-only page delta through the evaluator, the live view's path, warm: it starts from the
+	/// introspector of the compile before it. `known` is the page ids the
 	/// consumer holds; the version is this instance's tick, stepped by a compile that produced a delta and
 	/// left where it was by one that did not, a strict refusal included, so a consumer that dispatches
 	/// compiles without awaiting each can discard a stale return by its version.
@@ -381,7 +404,7 @@ impl Instance {
 	pub fn compile_delta_into<C: Changed>(&mut self, p: &Project, out: C)
 		-> Result<Made<(delta::Head, C)>, Failure>
 	{
-		let made = self.run(p, DeltaSink::new(&p.known, self.version, out), |s| s.into_delta());
+		let made = self.run(p, DeltaSink::new(&p.known, self.version, out), false, |s| s.into_delta());
 		if let Ok(m) = &made {
 			self.version = m.product.0.version;
 		}

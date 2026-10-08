@@ -487,7 +487,7 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 }
 
 /// What `--eval` was asked to compile and how: the source and the output directory, `--root`, each
-/// `--font-path`, `--strict`, `--diag-summary` and `--timings FILE`.
+/// `--font-path`, `--strict`, `--diag-summary`, `--timings FILE` and `--timings-fine`.
 struct EvalJob {
 	source:		String,
 	out_dir:	String,
@@ -496,12 +496,14 @@ struct EvalJob {
 	strict:		bool,
 	diag_summary:	bool,
 	timings_out:	Option<String>,
+	timings_fine:	bool,
 }
 
 /// What a compile through the evaluator reports of itself once its PDF is written.
 struct EvalStats {
 	pages:	u32,
 	passes:	u32,
+	warm:	bool,		// the first pass began from the session's kept introspector
 	bytes:	usize,
 	skip:	Option<String>,	// the terse `skipped:` line, when the watch holds it back to fold into its status line
 	secs:	f64,
@@ -517,14 +519,25 @@ struct EvalStats {
 /// phase's wall time, for the load, the evaluation, every fixpoint pass and the finish, as JSON to `FILE`
 /// after a compile that succeeds; the PDF is the same bytes either way.
 ///
+/// `session` carries the font store and the introspector from one compile to the next. `cold` starts the
+/// compile from no introspector, as the one-shot compile does, so that its output never depends on what was
+/// compiled before it; the watch compiles warm.
+///
 /// `read` is filled with the files the evaluation asked for as soon as it has run, so it is there for a
 /// compile that fails, and holds at least the source when even that could not be read. The PDF is written
 /// whole beside its place and renamed onto it, after every check, so a compile that fails leaves the last
 /// good one as it was and a reader never meets half of one. `fold` holds the `skipped:` line back in the
 /// result for the caller to print, rather than writing it to the standard error.
-fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<EvalStats> {
+fn compile_eval(
+	job:		&EvalJob,
+	session:	&mut compile::Session,
+	cold:		bool,
+	fold:		bool,
+	read:		&mut Vec<PathBuf>,
+)
+	-> Outcome<EvalStats>
+{
 	use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
-	use oxedyne_fe2o3_austenite::flow::text::FontStore;
 	use oxedyne_fe2o3_austenite::timings::{
 		Phase,
 		Timings,
@@ -532,7 +545,7 @@ fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<E
 	use std::io::Write;
 
 	let t		= std::time::Instant::now();
-	let timings	= job.timings_out.as_ref().map(|_| Timings::start());
+	let timings	= job.timings_out.as_ref().map(|_| if job.timings_fine { Timings::start_fine() } else { Timings::start() });
 	let main	= PathBuf::from(&job.source);
 	read.push(main.clone());
 	// The source's own directory, which for a bare file name is the working directory and not the empty
@@ -544,13 +557,9 @@ fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<E
 			_										=> PathBuf::from("."),
 		},
 	};
-	let mut fonts = FontStore::default();
-	for dir in &job.font_paths {
-		fonts.add_dir(PathBuf::from(dir));
-	}
 	compile::supply_typst_package_cache();
 	let mut sink = res!(PdfSink::new());
-	let mut done = res!(compile::assemble_eval_timed(&main, &root, fonts, &mut sink, timings, None));
+	let mut done = res!(session.compile(&main, &root, &mut sink, timings, None, cold));
 	*read = done.files_read();
 	let report = done.report();
 	let mut skip = None;
@@ -611,10 +620,22 @@ fn compile_eval(job: &EvalJob, fold: bool, read: &mut Vec<PathBuf>) -> Outcome<E
 	Ok(EvalStats {
 		pages:	laid.pages,
 		passes:	laid.passes,
+		warm:	done.warm,
 		bytes:	out.len(),
 		skip,
 		secs:	t.elapsed().as_secs_f64(),
 	})
+}
+
+/// A session over the faces `--font-path` names, for a run of compiles.
+fn eval_session(job: &EvalJob) -> compile::Session {
+	use oxedyne_fe2o3_austenite::flow::text::FontStore;
+
+	let mut fonts = FontStore::default();
+	for dir in &job.font_paths {
+		fonts.add_dir(PathBuf::from(dir));
+	}
+	compile::Session::new(fonts)
 }
 
 /// The line `--eval` prints when its compile is done.
@@ -625,7 +646,8 @@ fn print_eval_done(job: &EvalJob, stats: &EvalStats) {
 }
 
 /// `--eval --watch`: compiles through the evaluator, then again whenever a file the last compile read
-/// changes ([`watch::run_read`]). The watched set is the evaluator's own record of what it asked for, so an
+/// changes ([`watch::run_read`]). The rebuilds share one session, so each starts warm from the introspector
+/// of the one before and keeps the parsed fonts; the status line says `warm, 1 pass` or `cold, 3 passes`. The watched set is the evaluator's own record of what it asked for, so an
 /// import, an include, an image, a data file, a package file or a font under `--font-path` each rebuilds, and
 /// a file the document does not use never does. Each rebuild prints one status line, the page count and the
 /// wall, with the `skipped:` line folded on; one that fails prints why and leaves the last good
@@ -634,13 +656,16 @@ fn watch_eval(job: EvalJob) -> Outcome<()> {
 	// Brisk enough to feel live, cheap enough to leave the cores to the compile.
 	let interval = Duration::from_millis(400);
 	println!("[austenite] watching {} -> {}/ (Ctrl-C to stop)", job.source, job.out_dir);
+	let mut session = eval_session(&job);
 	watch::run_read(
 		move || {
 			let mut read = Vec::new();
-			match compile_eval(&job, true, &mut read) {
+			match compile_eval(&job, &mut session, false, true, &mut read) {
 				Ok(stats)	=> {
-					let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s -> {}/",
-						job.source, stats.pages, stats.secs, job.out_dir);
+					let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s, {}, {} pass{} -> {}/",
+						job.source, stats.pages, stats.secs,
+						if stats.warm { "warm" } else { "cold" },
+						stats.passes, if stats.passes == 1 { "" } else { "es" }, job.out_dir);
 					if let Some(skip) = &stats.skip {
 						line.push_str("; ");
 						line.push_str(skip);
@@ -666,6 +691,7 @@ fn main() -> Outcome<()> {
 	let mut strict		= false;
 	let mut diag_summary	= false;
 	let mut timings:	Option<String>	= None;
+	let mut fine		= false;
 	let mut root:		Option<String>	= None;
 	let mut font_paths:	Vec<String>		= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
@@ -679,6 +705,7 @@ fn main() -> Outcome<()> {
 			"--eval"			=> eval = true,
 			"--strict"			=> strict = true,
 			"--diag-summary"	=> diag_summary = true,
+			"--timings-fine"	=> fine = true,
 			"--timings"			=> timings = Some(match args.next() {
 				Some(p)	=> p,
 				None	=> return Err(err!("--timings needs a file argument."; Input, Invalid, Missing)),
@@ -704,7 +731,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
@@ -718,13 +745,17 @@ fn main() -> Outcome<()> {
 	if timings.is_some() && !eval {
 		return Err(err!("--timings needs --eval."; Input, Invalid));
 	}
+	if fine && timings.is_none() {
+		return Err(err!("--timings-fine needs --timings."; Input, Invalid));
+	}
 	if eval {
-		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings };
+		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings, timings_fine: fine };
 		if watching {
 			return watch_eval(job);
 		}
 		let mut read = Vec::new();
-		let stats = res!(compile_eval(&job, false, &mut read));
+		let mut session = eval_session(&job);
+		let stats = res!(compile_eval(&job, &mut session, true, false, &mut read));
 		print_eval_done(&job, &stats);
 		return Ok(());
 	}

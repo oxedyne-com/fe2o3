@@ -7,7 +7,7 @@
 //! - a message kind keeps its number for ever, and a retired kind leaves a gap;
 //! - a change to any layout bumps [`WIRE_VERSION`], and a reader refuses a version it does not
 //!   know with a `Mismatch` rather than guess at its fields;
-//! - a reader never trusts the bytes: [`Envelope::decode`] bounds their length and nesting before
+//! - a reader never trusts the bytes: [`Envelope::decode`] bounds their length, nesting and value count before
 //!   it decodes, names the field of every refusal, and accepts only a shape that
 //!   [`Envelope::encode`] can produce.
 //!
@@ -45,6 +45,10 @@ use crate::kademlia::id::NodeId;
 pub const WIRE_VERSION:			u8		= 1;				// first field of every envelope
 pub const MAX_ENVELOPE_BYTES:	usize	= 16 * 1024 * 1024;	// longest envelope written or read
 pub const MAX_ENVELOPE_DEPTH:	usize	= 12;				// the deepest shape written is nine
+// Most values a decoded envelope may hold. The densest legal shape is a record with no table and no
+// value, 12 bytes a value, so a 16 MiB page of them is about 1.4 million values; a bound of one in
+// 8 bytes leaves room above that and stops a buffer of one-byte values at 2 Mi `Dat`s, not 16 Mi.
+pub const MAX_ENVELOPE_VALUES:	usize	= MAX_ENVELOPE_BYTES / 8;
 
 // Message kind numbers. A number is never reused, even after its kind is retired.
 const KIND_REPLICATE_PUT:		u8 = 1;
@@ -67,7 +71,7 @@ const PHASE_DECIDE:				u8 = 3;
 
 // The limits every received envelope is decoded under.
 fn limits() -> DecodeLimits {
-	DecodeLimits::new(MAX_ENVELOPE_DEPTH, MAX_ENVELOPE_BYTES)
+	DecodeLimits::new(MAX_ENVELOPE_DEPTH, MAX_ENVELOPE_BYTES).with_max_items(MAX_ENVELOPE_VALUES)
 }
 
 // A refusal of a decoded shape, naming the shape, the field and what was found. It holds the
@@ -145,6 +149,13 @@ fn want_opt(dat: Dat, what: &str, field: &str) -> Outcome<Option<Dat>> {
 
 fn opt_dat(o: Option<Dat>) -> Dat {
 	Dat::Opt(Box::new(o))
+}
+
+fn maybe_to_dat<T: ToDat>(item: &Option<T>) -> Outcome<Dat> {
+	match item {
+		Some(t)	=> Ok(opt_dat(Some(res!(t.to_dat())))),
+		None	=> Ok(opt_dat(None)),
+	}
 }
 
 fn list_to_dat<T: ToDat>(items: &[T]) -> Outcome<Dat> {
@@ -477,20 +488,23 @@ impl ToDat for MsgKind {
 					}),
 				]),
 			),
-			Self::AntiEntropyDigest { table, sketch } => (
+			Self::AntiEntropyDigest { table, sketch, after } => (
 				KIND_ANTI_ENTROPY_DIGEST,
 				Dat::List(vec![
 					Dat::Str(table.clone()),
 					Dat::BU64(sketch.clone()),
+					res!(maybe_to_dat(after)),
 				]),
 			),
-			Self::AntiEntropyReply { table, records, requested_ids, bulk } => (
+			Self::AntiEntropyReply { table, records, requested_ids, bulk, after, next } => (
 				KIND_ANTI_ENTROPY_REPLY,
 				Dat::List(vec![
 					Dat::Str(table.clone()),
 					res!(list_to_dat(records)),
 					res!(list_to_dat(requested_ids)),
 					Dat::Bool(*bulk),
+					res!(maybe_to_dat(after)),
+					res!(maybe_to_dat(next)),
 				]),
 			),
 			Self::AntiEntropyPush { table, records } => (
@@ -558,19 +572,22 @@ impl FromDat for MsgKind {
 				})
 			},
 			KIND_ANTI_ENTROPY_DIGEST => {
-				let mut b = res!(Fields::open(body, "AntiEntropyDigest", 2));
+				let mut b = res!(Fields::open(body, "AntiEntropyDigest", 3));
 				Ok(Self::AntiEntropyDigest {
 					table:	res!(b.string("table")),
 					sketch:	res!(b.bytes("sketch")),
+					after:	res!(b.maybe::<RecordId>("after")),
 				})
 			},
 			KIND_ANTI_ENTROPY_REPLY => {
-				let mut b = res!(Fields::open(body, "AntiEntropyReply", 4));
+				let mut b = res!(Fields::open(body, "AntiEntropyReply", 6));
 				Ok(Self::AntiEntropyReply {
 					table:			res!(b.string("table")),
 					records:		res!(b.items::<Record>("records")),
 					requested_ids:	res!(b.items::<RecordId>("requested_ids")),
 					bulk:			res!(b.bool("bulk")),
+					after:			res!(b.maybe::<RecordId>("after")),
+					next:			res!(b.maybe::<RecordId>("next")),
 				})
 			},
 			KIND_ANTI_ENTROPY_PUSH => {
