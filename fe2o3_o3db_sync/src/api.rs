@@ -1928,7 +1928,7 @@ impl<
             check_interval: constant::CHECK_INTERVAL.min(d),
         };
         let bytes_before = res!(self.size_bytes(wait(deadline)));
-        res!(self.new_live_files());
+        res!(self.new_live_files_within(wait(left(&start).max(Duration::from_millis(1)))));
         res!(self.settle(left(&start)));
 
         let resp = self.responder();
@@ -2055,6 +2055,13 @@ impl<
     /// Instruct the wbots to increment to their next live files, to provide a clean slate for
     /// testing.
     pub fn new_live_files(&self) -> Outcome<()> {
+        self.new_live_files_within(constant::CONTROL_REQUEST_WAIT)
+    }
+
+    // As `new_live_files`, for the writers to answer within the given wait.  A caller with a
+    // deadline of its own passes what is left of it, since the writers answer only once they
+    // reach the order in their queues.
+    fn new_live_files_within(&self, wait: Wait) -> Outcome<()> {
         let emsg = "new live files request";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -2066,9 +2073,17 @@ impl<
         }
         // A control operation like `activate_gc`, and queued behind the same zone bot work.
         let nw = self.cfg().num_wbots();
-        let (_, msgs) = match resp.recv_number(nw, constant::CONTROL_REQUEST_WAIT) {
+        let max_wait = wait.max_wait;
+        let (_, msgs) = match resp.recv_number(nw, wait) {
             Ok(v) => v,
-            Err(e) => return Err(self.control_failure(e, emsg, nw, "writer bots")),
+            Err(e) if max_wait >= constant::CONTROL_REQUEST_TIMEOUT => return Err(
+                self.control_failure(e, emsg, nw, "writer bots")),
+            Err(e) => return Err(err!(e,
+                "{}: The {} was not acknowledged by all {} writer bots within the {:?} that the \
+                caller's deadline left.  A writer acknowledges it only once it reaches the order \
+                in its queue.",
+                self.ozid(), emsg, nw, max_wait;
+                Channel, Timeout)),
         };
         for msg in msgs {
             match msg {

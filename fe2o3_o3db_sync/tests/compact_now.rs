@@ -692,3 +692,42 @@ fn deleted_file_is_not_held_open() -> Outcome<()> {
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
 }
+
+// QA A1-4 (2026-10-08): the roll to new live files waited out the control deadline of five
+// minutes instead of the caller's, so a writer behind a long queue held `compact_now` past its
+// deadline before the first check of it.
+#[test]
+fn deadline_bounds_the_roll_to_new_live_files() -> Outcome<()> {
+    let _lock = lock();
+    const N: usize = 8;
+    let s = res!(plain("roll", GC_OFF, 2, 2));
+    let user = Uid::default();
+    for i in 0..(N + 2) {
+        res!(s.db.insert(key(i), value(i, 1), user, None));
+    }
+    res!(s.db.api().settle_for_test(Duration::from_secs(10)));
+
+    // Each supersession a file bot receives from another is held for two seconds, so the writer's
+    // request to close its old live file waits behind them.
+    hooks::set_schedule_delay(Duration::from_secs(2));
+    for i in 0..N {
+        assert!(res!(s.db.delete(&key(i), user, None)), "the delete of key {} found nothing", i);
+    }
+    let t = Instant::now();
+    let result = s.db.compact_now(Duration::from_secs(1));
+    let took = t.elapsed();
+    hooks::set_schedule_delay(Duration::ZERO);
+    let e = match result {
+        Err(e) => e,
+        Ok(r) => return Err(err!("compact_now returned Ok({:?}) with the file bots held.", r; Test, Invalid)),
+    };
+    let text = fmt!("{}", e);
+    msg!("compact_now failed after {:?} with: {}", took, text.chars().take(400).collect::<String>());
+    assert!(e.tags().contains(&ErrTag::Timeout), "the error is not a timeout: {:?}", e.tags());
+    assert!(took < Duration::from_secs(4), "the deadline of one second was kept to {:?}", took);
+
+    // Released, the same call finishes.
+    let report = res!(s.db.compact_now(Duration::from_secs(60)));
+    msg!("{:?}", report);
+    s.end()
+}
