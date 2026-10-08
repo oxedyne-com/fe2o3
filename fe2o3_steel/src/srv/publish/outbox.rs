@@ -27,6 +27,15 @@
 //! pass and tells the operator once when the oldest entry has waited past `outbox_alert_secs`, which a
 //! held ceiling and a deep queue both cause, and once more when the queue has drained.
 //!
+//! # A far end that does not answer
+//!
+//! The drainer is one task for a vhost, so a delivery that never finishes would stop everything behind
+//! it. Each delivery therefore runs under the [`Pacer`]'s deadline. One that overruns is a transient
+//! failure, and the pacer also blocks its domain for a time that doubles whenever the domain times out
+//! again, so a host that answers each step just inside its limit costs the drainer one deadline and not
+//! one for every address at that host. An entry for a blocked domain is put back until the block ends,
+//! using no slot, and the domain is forgotten when a delivery to it is answered.
+//!
 //! # The daily sweep
 //!
 //! The same task clears, once a day, what has outlived its use: an unconfirmed sign-up whose last
@@ -76,6 +85,7 @@ use oxedyne_fe2o3_mail::outbound::retry_after;
 use oxedyne_fe2o3_net::smtp::client::is_permanent;
 
 use std::{
+	collections::HashMap,
 	future::Future,
 	sync::{
 		Arc,
@@ -117,6 +127,16 @@ const DAY_SECS: u64 = 86_400;
 // itself cannot be. A queue is not walked from end to end to find its age.
 const HEAD_LOOK: u64 = 16;
 
+// How long one delivery may take, in seconds, before the drainer gives up on it and goes on. The
+// SMTP client allows a minute for each step and ten for the end of the message, which a far end
+// that answers slowly can spend in full on every exchange address it has.
+pub const DEADLINE_SECS: u64 = 150;
+
+// How long a domain that has timed out is left alone, in seconds: the first time, and the most it
+// grows to by doubling each time it times out again.
+pub const BACKOFF_MIN_SECS: u64 = 600;
+pub const BACKOFF_MAX_SECS: u64 = 6 * 3600;
+
 // The most entries one call of `take` looks at. The write guard is held for a call, so a long lane of
 // entries backing off is looked at in parts, with the guard let go between them.
 pub const TAKE_LOOK: u64 = 256;
@@ -140,15 +160,41 @@ pub enum Pace {
 /// is never exceeded in any hour. The next slot is held in memory only.
 #[derive(Debug)]
 pub struct Pacer {
-	hourly:	u32,		// sends an hour; 0 holds everything
-	next:	Mutex<u64>,	// the earliest millisecond the next send may leave
-	wake:	Notify,		// signalled when something is queued
+	hourly:		u32,					// sends an hour; 0 holds everything
+	deadline:	Duration,				// the longest one delivery may take
+	next:		Mutex<u64>,				// the earliest millisecond the next send may leave
+	slow:		Mutex<HashMap<String, Backoff>>,	// domains that have timed out
+	wake:		Notify,					// signalled when something is queued
+}
+
+// How long a domain is left alone, and the wait that set it, for the next doubling.
+#[derive(Clone, Copy, Debug)]
+struct Backoff {
+	until:	u64,	// unix second the block ends
+	wait:	u64,	// seconds the block was set for
 }
 
 impl Pacer {
 
 	pub fn new(hourly: u32) -> Self {
-		Self { hourly, next: Mutex::new(0), wake: Notify::new() }
+		Self {
+			hourly,
+			deadline:	Duration::from_secs(DEADLINE_SECS),
+			next:		Mutex::new(0),
+			slow:		Mutex::new(HashMap::new()),
+			wake:		Notify::new(),
+		}
+	}
+
+	/// This pacer with `deadline` as the longest one delivery may take, where it would otherwise be
+	/// [`DEADLINE_SECS`].
+	pub fn with_deadline(mut self, deadline: Duration) -> Self {
+		self.deadline = deadline;
+		self
+	}
+
+	pub fn deadline(&self) -> Duration {
+		self.deadline
 	}
 
 	pub fn hourly(&self) -> u32 {
@@ -186,6 +232,36 @@ impl Pacer {
 	/// Wakes every drainer that is idle, after something has been queued.
 	pub fn wake(&self) {
 		self.wake.notify_waiters();
+	}
+
+	/// Until when, in unix seconds, is a domain left alone for having timed out? `None` where it is
+	/// not.
+	pub fn blocked(&self, domain: &str, now: u64) -> Outcome<Option<u64>> {
+		let slow = lock_mutex!(self.slow);
+		Ok(slow.get(domain).filter(|b| b.until > now).map(|b| b.until))
+	}
+
+	/// Notes that a delivery to a domain overran the deadline, and answers when the domain may next
+	/// be tried: [`BACKOFF_MIN_SECS`] from now, then twice the last wait each time the domain times out
+	/// again, to [`BACKOFF_MAX_SECS`]. A domain is remembered for a day after its block ends, so a
+	/// host that times out again as soon as it is tried is not started afresh, and then forgotten.
+	pub fn timed_out(&self, domain: &str, now: u64) -> Outcome<u64> {
+		let mut slow = lock_mutex!(self.slow);
+		slow.retain(|_, b| now < b.until.saturating_add(DAY_SECS));
+		let wait = match slow.get(domain) {
+			Some(b)	=> b.wait.saturating_mul(2).min(BACKOFF_MAX_SECS),
+			None	=> BACKOFF_MIN_SECS,
+		};
+		let until = now.saturating_add(wait);
+		slow.insert(domain.to_string(), Backoff { until, wait });
+		Ok(until)
+	}
+
+	/// Forgets a domain's block, since a delivery to it was answered.
+	pub fn reached(&self, domain: &str) -> Outcome<()> {
+		let mut slow = lock_mutex!(self.slow);
+		slow.remove(domain);
+		Ok(())
 	}
 }
 
@@ -756,7 +832,8 @@ pub enum Step {
 /// Takes the next due entry, in lane order, and sends it if the pacer allows.
 ///
 /// `now_ms` is the clock, so a test can run an hour in an instant. The pacer is asked only after the
-/// entry has proved still worth sending, so a skipped entry uses no slot. Nothing here holds the
+/// entry has proved still worth sending, so a skipped entry uses no slot, and an entry for a domain
+/// that has timed out is put back until the block ends, using none. Nothing here holds the
 /// database lock across an `.await`, and the self-locking `subscribe` calls are made outside any
 /// [`store::exclusive`].
 pub async fn step<
@@ -857,6 +934,10 @@ async fn confirm_step<
 		res!(done(db, entry.kind, seq));
 		return Ok(Step::Worked);
 	}
+	// A domain that has timed out is left alone, and costs no slot and no try until its block ends.
+	if let Some(until) = res!(pacer.blocked(domain_of(&email), now)) {
+		return defer(db, seq, entry, until, id);
+	}
 	// The entry names an address and nothing else: the sign-up is applied here, at send time, so an
 	// address that has confirmed, left or bounced since is owed nothing, one already sent a
 	// confirmation within its interval or its count is owed no other, and the token in the link is
@@ -879,7 +960,7 @@ async fn confirm_step<
 	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
 	let msg = send::build_confirmation_email(&from, &sub.email, &url, &cfg.site_name);
 	let mut step = Step::Worked;
-	match courier.deliver(&from, &sub.email, &msg).await {
+	match send_within(courier, pacer, id, &from, &sub.email, &msg, now).await {
 		Ok(_)	=> {
 			step = Step::Sent;
 			info!("{}: publish: confirmation sent to {}", id, subscribe::redact(&sub.email));
@@ -925,6 +1006,81 @@ async fn confirm_step<
 		}
 	}
 	Ok(step)
+}
+
+// The domain of a normalised address; empty where it has none.
+fn domain_of(email: &str) -> &str {
+	email.rsplit_once('@').map(|(_, d)| d).unwrap_or("")
+}
+
+// Puts an entry back, not to be tried before `until`, because its domain is not answering. Nothing was
+// sent, so no slot is used and no try is counted.
+fn defer<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	seq:	u64,
+	entry:	Entry,
+	until:	u64,
+	id:	&str,
+)
+	-> Outcome<Step>
+{
+	debug!("{}: publish: {} put back until {}, its domain is not answering",
+		id, subscribe::redact(&entry.email), until);
+	let next = Entry { next_try: until, ..entry };
+	res!(retry(db, seq, &next));
+	Ok(Step::Worked)
+}
+
+// Delivers one message, giving up when the pacer's deadline passes so that one far end that does not
+// answer cannot hold the drainer. An overrun is a transient failure like any other, and it also blocks
+// the recipient's domain (see [`Pacer::timed_out`]). A delivery the far end answered, accepting or
+// refusing outright, clears the domain. The bookkeeping never changes the outcome: a message that has
+// left must be reported as sent.
+async fn send_within<C: Courier>(
+	courier: &C,
+	pacer:	&Pacer,
+	id:	&str,
+	from:	&str,
+	to:	&str,
+	msg:	&str,
+	now:	u64,
+)
+	-> Outcome<String>
+{
+	let domain = domain_of(to);
+	match tokio::time::timeout(pacer.deadline(), courier.deliver(from, to, msg)).await {
+		Ok(r)	=> {
+			let answered = match &r {
+				Ok(_)	=> true,
+				Err(e)	=> is_permanent(e),
+			};
+			if answered {
+				if let Err(e) = pacer.reached(domain) {
+					warn!("{}: publish: could not clear {} after a delivery: {}", id, domain, e);
+				}
+			}
+			r
+		}
+		Err(_)	=> {
+			let until = match pacer.timed_out(domain, now) {
+				Ok(t)	=> t,
+				Err(e)	=> {
+					warn!("{}: publish: could not block {} after a timeout: {}", id, domain, e);
+					now
+				}
+			};
+			warn!("{}: publish: {} did not answer within {:?}; left alone until {}",
+				id, domain, pacer.deadline(), until);
+			Err(err!("publish: a delivery to {} did not finish within {:?}.", domain, pacer.deadline();
+				Timeout, Network))
+		}
+	}
 }
 
 // A newsletter message that is no longer owed: the post is no longer live, or the subscriber has gone.
@@ -989,6 +1145,10 @@ async fn news_step<
 			return Ok(Step::Worked);
 		}
 	};
+	// A domain that has timed out is left alone, and costs no slot and no try until its block ends.
+	if let Some(until) = res!(pacer.blocked(domain_of(&sub.email), now)) {
+		return defer(db, seq, entry, until, id);
+	}
 	match res!(pacer.claim(now_ms)) {
 		Pace::Held	=> return Ok(Step::Held),
 		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
@@ -999,7 +1159,7 @@ async fn news_step<
 	let unsub = cfg.url_of(&cfg.unsubscribe_path(&sub.token));
 	let msg = send::build_newsletter_email(&from, &sub.email, &post, &online, &unsub, &cfg.site_name);
 	let mut step = Step::Worked;
-	match courier.deliver(&from, &sub.email, &msg).await {
+	match send_within(courier, pacer, id, &from, &sub.email, &msg, now).await {
 		Ok(qid)	=> {
 			step = Step::Sent;
 			debug!("{}: publish: newsletter '{}' to {} ({})",

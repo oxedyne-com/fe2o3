@@ -53,7 +53,10 @@ use std::{
         Mutex,
         RwLock,
     },
-    time::Instant,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 mod common;
@@ -91,6 +94,36 @@ impl Courier for Fake {
         async move {
             let mut v = lock_mutex!(self.to);
             v.push(to);
+            Ok(fmt!("q1"))
+        }
+    }
+}
+
+// A courier whose far end never answers for one host and accepts for every other, and which notes
+// each address it was asked to deliver to.
+#[derive(Default)]
+struct Mute {
+    asked: Mutex<Vec<String>>,
+}
+
+impl Courier for Mute {
+
+    fn default_from(&self) -> &str {
+        "news@site.test"
+    }
+
+    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+        -> impl Future<Output = Outcome<String>> + Send
+    {
+        let to = to.to_string();
+        async move {
+            {
+                let mut v = lock_mutex!(self.asked);
+                v.push(to.clone());
+            }
+            if to.ends_with("@hang.test") {
+                std::future::pending::<()>().await;
+            }
             Ok(fmt!("q1"))
         }
     }
@@ -548,3 +581,56 @@ async fn test_a_post_still_being_sent_is_not_queued_twice_14() -> Outcome<()> {
     Ok(())
 }
 
+
+// F2c A8: a delivery that never returns holds the drainer for one deadline and no more, its domain is
+// then left alone without a slot or a try being spent on it, and each further timeout doubles the wait.
+#[tokio::test]
+async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off_15() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    res!(outbox::push(&handle, &[
+        Entry::new(Kind::Confirm, "a@hang.test", "", T0 / 1000),
+        Entry::new(Kind::Confirm, "b@hang.test", "", T0 / 1000),
+        Entry::new(Kind::Confirm, "c@fine.test", "", T0 / 1000),
+    ]));
+    let (mute, cfg) = (Mute::default(), cfg());
+    // One send a second, and a deadline of 50 ms.
+    let pacer = Pacer::new(3600).with_deadline(Duration::from_millis(50));
+    let mut now = T0;
+    let began = Instant::now();
+    for _ in 0..12 {
+        let pass = outbox::step(&handle, &cfg, &mute, &pacer, "test", now);
+        let stepped = match tokio::time::timeout(Duration::from_secs(5), pass).await {
+            Ok(r)   => res!(r),
+            Err(_)  => return Err(err!("the drainer was held by a delivery that never returned"; Test, Timeout)),
+        };
+        match stepped {
+            Step::Wait(ms)  => now += ms,
+            Step::Later(_) | Step::Idle => break,
+            _               => {},
+        }
+    }
+    assert!(began.elapsed() < Duration::from_secs(2), "the drainer spent {:?} on one dead host", began.elapsed());
+    let asked = mute.asked.lock().map(|v| v.clone()).unwrap_or_default();
+    assert_eq!(asked, vec![fmt!("a@hang.test"), fmt!("c@fine.test")],
+        "the second address at a host that timed out was dialled, or the third was not reached");
+    // Only the one failed delivery and the one that went took a slot: the put-back used none.
+    assert_eq!(now, T0 + 1000, "an entry put back for a blocked domain used a slot");
+    let first = T0 / 1000;
+    assert_eq!(res!(pacer.blocked("hang.test", first)), Some(first + outbox::BACKOFF_MIN_SECS),
+        "the host was not blocked for the first wait");
+    assert_eq!(res!(pacer.blocked("fine.test", first)), None, "a host that answered was blocked");
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 2, "the two entries for the dead host were lost");
+
+    // Past the block the host is tried once more, times out again, and is left alone twice as long.
+    now = T0 + (outbox::BACKOFF_MIN_SECS + 1) * 1000;
+    let pass = outbox::step(&handle, &cfg, &mute, &pacer, "test", now);
+    match tokio::time::timeout(Duration::from_secs(5), pass).await {
+        Ok(r)   => { res!(r); },
+        Err(_)  => return Err(err!("the drainer was held by a delivery that never returned"; Test, Timeout)),
+    }
+    let later = now / 1000;
+    assert_eq!(res!(pacer.blocked("hang.test", later)), Some(later + 2 * outbox::BACKOFF_MIN_SECS),
+        "a second timeout did not double the wait");
+    Ok(())
+}
