@@ -14,6 +14,7 @@ use crate::delta::{
 	Changed,
 	Head,
 };
+use crate::emit::pdf::PdfOptions;
 use crate::emit::svg;
 use crate::eval::content::ElemKind;
 use crate::eval::fixpoint::PageSink;
@@ -92,6 +93,7 @@ impl Write for Chunks {
 pub struct PdfSink {
 	stream:	Option<PdfStream<Chunks>>,
 	out:	Option<Chunks>,
+	opts:	PdfOptions,
 }
 
 impl std::fmt::Debug for PdfSink {
@@ -102,7 +104,17 @@ impl std::fmt::Debug for PdfSink {
 
 impl PdfSink {
 	pub fn new() -> Outcome<Self> {
-		Ok(Self { stream: Some(res!(PdfStream::open(Chunks::default(), true))), out: None })
+		Self::with_options(PdfOptions::default())
+	}
+
+	/// A sink that writes the PDF as `opts` ask.
+	pub fn with_options(opts: PdfOptions) -> Outcome<Self> {
+		Ok(Self { stream: Some(res!(Self::open(&opts))), out: None, opts })
+	}
+
+	fn open(opts: &PdfOptions) -> Outcome<PdfStream<Chunks>> {
+		let stream = res!(PdfStream::open_version(Chunks::default(), opts.compress, opts.minor));
+		Ok(stream.with_colour_out(opts.colour))
 	}
 
 	/// The finished file, once the fixpoint has run `finish`.
@@ -122,7 +134,7 @@ impl PageSink for PdfSink {
 	}
 
 	fn discard_pass(&mut self) -> Outcome<()> {
-		self.stream	= Some(res!(PdfStream::open(Chunks::default(), true)));
+		self.stream	= Some(res!(Self::open(&self.opts)));
 		self.out	= None;
 		Ok(())
 	}
@@ -132,9 +144,9 @@ impl PageSink for PdfSink {
 			Some(s)	=> s,
 			None	=> return Err(err!("The PDF sink finished twice."; Bug)),
 		};
-		let outline	= res!(outline(engine, intro));
-		let info	= crate::emit::pdf::pdf_info(intro.info());
-		self.out	= Some(res!(stream.close(outline, Some(info))));
+		let outline	= if self.opts.outline { res!(outline(engine, intro)) } else { Vec::new() };
+		let info	= self.opts.info(intro.info());
+		self.out	= Some(res!(stream.close(outline, info)));
 		Ok(())
 	}
 }

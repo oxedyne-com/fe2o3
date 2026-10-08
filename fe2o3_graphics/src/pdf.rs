@@ -690,6 +690,15 @@ impl<W: Write> PdfStream<W> {
 	/// catalogue and the page tree, so a reader that follows the trailer finds them wherever they sit.
 	/// A stream opened here is ended by `close`; `finish` refuses it.
 	pub fn open(out: W, compress: bool) -> Outcome<Self> {
+		Self::open_version(out, compress, 7)
+	}
+
+	/// As [`open`](Self::open), the header naming PDF version 1.`minor`, which may be 4 to 7. The writer
+	/// uses nothing newer than 1.4, so the version is the header's claim and nothing else changes.
+	pub fn open_version(out: W, compress: bool, minor: u8) -> Outcome<Self> {
+		if !(4..=7).contains(&minor) {
+			return Err(err!("A PDF version of 1.{} cannot be written; 1.4 to 1.7 can.", minor; Input, Invalid, Range));
+		}
 		let mut s = Self {
 			out,
 			compress,
@@ -711,7 +720,7 @@ impl<W: Write> PdfStream<W> {
 			page_objs:	Vec::new(),
 			colour_out:	ColourOut::default(),
 		};
-		res!(s.body(b"%PDF-1.7\n"));
+		res!(s.body(fmt!("%PDF-1.{}\n", minor).as_bytes()));
 		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
 		Ok(s)
 	}
@@ -2206,6 +2215,23 @@ mod tests {
 			assert!(bytes[off..].starts_with(want.as_bytes()),
 				"object {} offset {} does not open with '{}'", obj, off, want);
 		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_deferred_stream_names_the_version_it_is_asked_for_24() -> Outcome<()> {
+		for minor in 4..=7u8 {
+			let mut stream = res!(PdfStream::open_version(Vec::new(), true, minor));
+			let mut page = PdfPage::new(50.0, 50.0);
+			page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Rgba::BLACK);
+			res!(stream.page(&page));
+			let bytes = res!(stream.close(Vec::new(), None));
+			let want = fmt!("%PDF-1.{}\n", minor);
+			assert!(bytes.starts_with(want.as_bytes()), "the header says 1.{}", minor);
+		}
+		assert!(PdfStream::open_version(Vec::new(), true, 3).is_err(), "1.3 is below what the writer uses");
+		assert!(PdfStream::open_version(Vec::new(), true, 8).is_err(), "1.8 does not exist");
+		assert!(res!(PdfStream::open(Vec::new(), true)).pages() == 0);
 		Ok(())
 	}
 

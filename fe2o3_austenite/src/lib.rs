@@ -53,6 +53,7 @@ pub mod mathtable;
 pub mod memo;
 pub mod page;
 pub mod plot;
+pub mod settings;
 pub mod syntax;
 pub mod table;
 pub mod theme;

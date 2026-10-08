@@ -1,16 +1,42 @@
-//! Poll-based recompile for the `austenite --watch` mode.
+//! Poll-based recompile for the `austenite --watch` mode, and the `watch` and `build` commands.
 //!
 //! There is no inotify on this fleet, so the watch samples a caller-supplied set of files on a fixed
 //! interval and rebuilds whenever any of them changes. The file set is recomputed each tick from a
 //! closure, so a chapter added to a book's `#include` list (or an asset dropped into its tree) is
 //! picked up without restarting the watch. A file appearing or disappearing counts as a change, since
 //! the snapshot keys on the paths that currently exist.
+//!
+//! [`Run`] is the loop of `austenite watch`, with a [`Run::tick`] that a test can drive; [`compile_pdf`]
+//! is the one compile to a PDF that it, `austenite build` and `austenite --eval` share. The PDF is written
+//! beside its place and renamed onto it, so a reader sees the previous file or the next, never part of one.
+
+use crate::compile::Session;
+use crate::diag;
+use crate::emit::pdf::PdfOptions;
+use crate::emit::sinks::PdfSink;
+use crate::flow::text::FontStore;
+use crate::settings::{
+	self,
+	Settings,
+};
+use crate::timings::{
+	Phase,
+	Timings,
+};
 
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::{
+	BufWriter,
+	Write,
+};
+use std::path::{
+	Path,
+	PathBuf,
+};
 use std::time::{
 	Duration,
 	SystemTime,
@@ -120,6 +146,345 @@ fn snapshot(paths: &[PathBuf]) -> BTreeMap<PathBuf, SystemTime> {
 		}
 	}
 	m
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ ONE COMPILE TO A PDF                                                       │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What one compile to a PDF is asked to do.
+#[derive(Clone, Debug)]
+pub struct Spec {
+	pub main:			PathBuf,
+	pub root:			PathBuf,			// what a leading `/` resolves against
+	pub out:			PathBuf,			// the finished PDF
+	pub strict:			bool,
+	pub diag_summary:	bool,
+	pub timings:		Option<PathBuf>,	// the file the phase timings go to
+	pub timings_fine:	bool,
+	pub pdf:			PdfOptions,
+}
+
+/// What a compile reports of itself once its PDF is written.
+#[derive(Clone, Debug)]
+pub struct Report {
+	pub pages:	u32,
+	pub passes:	u32,
+	pub warm:	bool,			// the first pass began from the session's kept introspector
+	pub bytes:	usize,
+	pub skip:	Option<String>,	// the terse `skipped:` line, when the caller folds it into its status line
+	pub secs:	f64,
+}
+
+/// Compiles `spec.main` through the evaluator under `session` and writes the PDF to `spec.out`.
+/// `cold` starts from no introspector, as a one-shot compile does, so that its bytes never depend on an
+/// earlier compile; the watch compiles warm. The terse `skipped:` line is built from the diagnostics of kind
+/// `unsupported`; under `strict` a refusal of the strict rule fails the compile as Daimond's does.
+/// `diag_summary` adds one stderr line for each severity, kind and construct, counts only
+/// ([`diag::summary_lines`]), and one for each error that names its call and types in Typst's own terms
+/// ([`diag::error_lines`]), on a compile that succeeds and on one that fails. `spec.timings` writes each
+/// phase's wall time, as JSON, after a compile that succeeds; the PDF is the same bytes either way.
+///
+/// `read` is filled with the files the evaluation asked for as soon as it has run, so it is there for a
+/// compile that fails, and holds at least the source when even that could not be read. The PDF is written
+/// whole beside its place and renamed onto it, after every check, so a compile that fails leaves the last
+/// good one as it was and a reader never meets half of one. `fold` holds the `skipped:` line back in the
+/// result for the caller to print, rather than writing it to the standard error.
+pub fn compile_pdf(
+	spec:		&Spec,
+	session:	&mut Session,
+	cold:		bool,
+	fold:		bool,
+	read:		&mut Vec<PathBuf>,
+)
+	-> Outcome<Report>
+{
+	let t		= std::time::Instant::now();
+	let timings	= spec.timings.as_ref().map(|_| if spec.timings_fine { Timings::start_fine() } else { Timings::start() });
+	read.push(spec.main.clone());
+	crate::compile::supply_typst_package_cache();
+	let mut sink = res!(PdfSink::with_options(spec.pdf));
+	let mut done = res!(session.compile(&spec.main, &spec.root, &mut sink, timings, None, cold));
+	*read = done.files_read();
+	let report = done.report();
+	let mut skip = None;
+	if let Some(line) = &report.skipped {
+		if fold {
+			skip = Some(line.clone());
+		} else {
+			eprintln!("[austenite] {}", line);
+		}
+	}
+	// Before the error a failed compile returns, so a run that stops still names what it passed over.
+	if spec.diag_summary {
+		for line in diag::summary_lines(&done.engine.diags) {
+			eprintln!("{}", line);
+		}
+		for line in diag::error_lines(&done.engine.diags, &done.engine.world.sources) {
+			eprintln!("{}", line);
+		}
+	}
+	let laid = match &done.laid {
+		Ok(l)	=> l,
+		Err(e)	=> {
+			for d in &done.engine.diags {
+				eprintln!("{}", d.render(&done.engine.world.sources));
+			}
+			return Err(err!("{}", e.plain(); Input, Invalid));
+		},
+	};
+	if spec.strict {
+		if let Some(refusal) = report.strict_failure(&spec.main) {
+			return Err(err!("{}", refusal.message; Input, Invalid));
+		}
+	}
+	let out = match sink.output() {
+		Some(o)	=> o,
+		None	=> return Err(err!("The fixpoint ended without a finished PDF."; Bug)),
+	};
+	if let Some(t) = done.engine.timings.as_mut() {
+		t.enter(Phase::Write);
+	}
+	if let Some(dir) = spec.out.parent().filter(|d| !d.as_os_str().is_empty()) {
+		res!(std::fs::create_dir_all(dir));
+	}
+	let mut beside = spec.out.as_os_str().to_owned();
+	beside.push(".part");
+	let beside = PathBuf::from(beside);
+	let mut file = BufWriter::new(res!(File::create(&beside)));
+	res!(out.write_to(&mut file));
+	res!(file.flush());
+	drop(file);
+	res!(std::fs::rename(&beside, &spec.out));
+	if let (Some(tm), Some(dest)) = (done.engine.timings.as_mut(), spec.timings.as_ref()) {
+		tm.leave();
+		if let Ok(book) = done.engine.fonts.book() {
+			if let Ok(stats) = book.shape_stats() {
+				tm.set_shape(stats);
+			}
+		}
+		res!(std::fs::write(dest, tm.json(t.elapsed().as_nanos() as u64)));
+	}
+	Ok(Report {
+		pages:	laid.pages,
+		passes:	laid.passes,
+		warm:	done.warm,
+		bytes:	out.len(),
+		skip,
+		secs:	t.elapsed().as_secs_f64(),
+	})
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE COMMANDS                                                               │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What a `watch` or `build` command settled on: the settings, the file they came from, and the compile
+/// they ask for.
+#[derive(Clone, Debug)]
+pub struct Plan {
+	pub settings:	Settings,
+	pub file:		Option<PathBuf>,
+	pub spec:		Spec,
+	base:			PathBuf,	// the directory the root, the document and the fonts are named from
+}
+
+impl Plan {
+	/// Settles the run for `source`, or for the document the settings or the selection rule name when there
+	/// is none. The settings file is the first `austenite.jdat` at or above the source's directory, else the
+	/// working directory; `sets` are the `--set` arguments. A named source wins over the `document` setting.
+	pub fn new(source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<Self> {
+		let cwd = res!(std::env::current_dir());
+		let start = match source {
+			Some(s)	=> s.to_path_buf(),
+			None	=> cwd.clone(),
+		};
+		let file = settings::find(&start);
+		let settings = res!(Settings::resolve(file.as_deref(), sets));
+		let base = match &file {
+			Some(f)	=> f.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| cwd.clone()),
+			None	=> if start.is_dir() { start.clone() } else {
+				start.parent().filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()).unwrap_or_else(|| cwd.clone())
+			},
+		};
+		let main = match source {
+			Some(s)	=> s.to_path_buf(),
+			None	=> if settings.document.is_empty() { res!(settings::select_document(&base)) } else { base.join(&settings.document) },
+		};
+		let main = res!(std::fs::canonicalize(&main));
+		let doc_dir = main.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| base.clone());
+		res!(settings.check_built(&doc_dir));
+		let root = if settings.root.is_empty() { base.clone() } else { base.join(&settings.root) };
+		let spec = Spec {
+			out:			settings.output_path(&main),
+			main,
+			root,
+			strict:			settings.strict,
+			diag_summary:	settings.diagnostics == "summary",
+			timings:		timings.map(|t| t.to_path_buf()),
+			timings_fine:	false,
+			pdf:			res!(settings.pdf_options()),
+		};
+		Ok(Self { settings, file, spec, base })
+	}
+
+	/// A session over the font directories the settings name, relative to the root.
+	pub fn session(&self) -> Session {
+		let mut fonts = FontStore::default();
+		for f in &self.settings.fonts {
+			fonts.add_dir(self.spec.root.join(f));
+		}
+		Session::new(fonts)
+	}
+
+	// Where the settings file is, or would be if made: beside the document root.
+	fn settings_path(&self) -> PathBuf {
+		self.file.clone().unwrap_or_else(|| self.base.join(settings::FILE))
+	}
+}
+
+/// `austenite build`: one cold compile of `source` under the settings.
+pub fn build(source: &Path, sets: &[String], timings: Option<&Path>) -> Outcome<(Plan, Report)> {
+	let plan = res!(Plan::new(Some(source), sets, timings));
+	let mut session = plan.session();
+	let mut read = Vec::new();
+	let report = res!(compile_pdf(&plan.spec, &mut session, true, false, &mut read));
+	Ok((plan, report))
+}
+
+/// What a tick of the watch did.
+#[derive(Clone, Debug)]
+pub enum Tick {
+	Idle,					// nothing watched had changed
+	Built(Report),			// compiled, and the PDF swapped in
+	Failed(String),			// a compile or a settings reload failed; the last good PDF is as it was
+}
+
+/// The loop of `austenite watch`: the files the last compile read, and the settings file, sampled on
+/// each tick; a change compiles through one [`Session`], warm. A change to the settings file reloads them
+/// and compiles cold once. The viewer opens after the first finished PDF and is not opened again.
+pub struct Run {
+	source:		Option<PathBuf>,
+	sets:		Vec<String>,
+	timings:	Option<PathBuf>,
+	cold:		bool,			// every compile cold, as `--cold` asks
+	plan:		Plan,
+	session:	Session,
+	set:		Vec<PathBuf>,	// the last compile's reads, and the settings file
+	seen:		BTreeMap<PathBuf, SystemTime>,
+	first:		bool,
+	cold_next:	bool,			// the next compile starts cold, after a settings change
+	viewed:		bool,
+}
+
+impl Run {
+	pub fn new(source: Option<PathBuf>, sets: Vec<String>, cold: bool, timings: Option<PathBuf>) -> Outcome<Self> {
+		let plan = res!(Plan::new(source.as_deref(), &sets, timings.as_deref()));
+		let session = plan.session();
+		Ok(Self {
+			source, sets, timings, cold, plan, session,
+			set:		Vec::new(),
+			seen:		BTreeMap::new(),
+			first:		true,
+			cold_next:	false,
+			viewed:		false,
+		})
+	}
+
+	pub fn plan(&self) -> &Plan { &self.plan }
+
+	/// One sample of the watched set, and a compile if it moved (or this is the first tick).
+	pub fn tick(&mut self) -> Outcome<Tick> {
+		let before = snapshot(&self.set);
+		if !self.first && before == self.seen {
+			return Ok(Tick::Idle);
+		}
+		let sf = self.plan.settings_path();
+		if !self.first && before.get(&sf) != self.seen.get(&sf) {
+			match Plan::new(self.source.as_deref(), &self.sets, self.timings.as_deref()) {
+				Ok(plan)	=> {
+					self.session.set_fonts(plan.session().fonts().clone());
+					self.plan = plan;
+					self.cold_next = true;
+				},
+				Err(e)		=> {
+					// The old settings stand; the file is seen as it is now, so the error is told once.
+					match before.get(&sf) {
+						Some(t)	=> { self.seen.insert(sf, *t); },
+						None	=> { self.seen.remove(&sf); },
+					}
+					return Ok(Tick::Failed(e.plain()));
+				},
+			}
+		}
+		let began = SystemTime::now();
+		let cold = self.cold || !self.plan.settings.watch.warm || self.cold_next;
+		self.cold_next = false;
+		let mut read = Vec::new();
+		let result = compile_pdf(&self.plan.spec, &mut self.session, cold, true, &mut read);
+		let sf = self.plan.settings_path();
+		let mut files = read;
+		if !files.contains(&sf) {
+			files.push(sf);
+		}
+		self.seen = carry(&self.set, &files, &before, &snapshot(&files), began);
+		self.set = files;
+		self.first = false;
+		match result {
+			Ok(report)	=> {
+				self.view();
+				Ok(Tick::Built(report))
+			},
+			Err(e)		=> Ok(Tick::Failed(e.plain())),
+		}
+	}
+
+	// Opens the viewer the first time a PDF is finished, in the terminal's process group so that its
+	// interrupt reaches it, and never again.
+	fn view(&mut self) {
+		if self.viewed {
+			return;
+		}
+		self.viewed = true;
+		if let Some(app) = self.plan.settings.viewer() {
+			let spawned = std::process::Command::new(&app)
+				.arg(&self.plan.spec.out)
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null())
+				.stderr(std::process::Stdio::null())
+				.spawn();
+			if let Err(e) = spawned {
+				eprintln!("[austenite] the viewer '{}' did not start: {}", app, e);
+			}
+		}
+	}
+
+	/// The status line for a finished compile: pages, passes, warm or cold, and seconds.
+	pub fn line(&self, r: &Report) -> String {
+		let mut line = fmt!("[austenite] {} -> {} page(s), {:.2}s, {}, {} pass{} -> {}",
+			self.plan.spec.main.display(), r.pages, r.secs, if r.warm { "warm" } else { "cold" },
+			r.passes, if r.passes == 1 { "" } else { "es" }, self.plan.spec.out.display());
+		if let Some(skip) = &r.skip {
+			line.push_str("; ");
+			line.push_str(skip);
+		}
+		line
+	}
+
+	/// Runs until interrupted, printing one line for each compile.
+	pub fn run(mut self) -> Outcome<()> {
+		println!("[austenite] watching {} -> {} (Ctrl-C to stop)",
+			self.plan.spec.main.display(), self.plan.spec.out.display());
+		loop {
+			match res!(self.tick()) {
+				Tick::Idle			=> (),
+				Tick::Built(r)		=> println!("{}", self.line(&r)),
+				Tick::Failed(why)	=> eprintln!("[austenite] {}", why),
+			}
+			std::thread::sleep(Duration::from_millis(self.plan.settings.watch.poll_ms));
+		}
+	}
 }
 
 #[cfg(test)]
