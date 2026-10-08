@@ -34,6 +34,7 @@ use oxedyne_fe2o3_austenite::eval::styles::{
 	set_rule,
 	Property,
 	Recipe,
+	RecipeIndex,
 	Style,
 	StyleChain,
 	Styles,
@@ -389,28 +390,132 @@ fn chain_get_folds_and_resolve_folds_the_elements_own_value() {
 	assert_eq!(chain.font_size(), 11.0);
 }
 
+// The caches each link keeps, against the plain walk over all of a chain's styles
+
+/// The recipes in force by the plain walk, innermost first, the way `recipes` computed them before it was
+/// cached per link.
+fn walked_recipes(chain: &StyleChain) -> Vec<(RecipeIndex, Arc<Recipe>)> {
+	let all: Vec<&Style> = chain.walk().collect();
+	let total = all.iter().filter(|s| matches!(s, Style::Recipe(_))).count();
+	let (mut revoked, mut out, mut r) = (Vec::new(), Vec::new(), 0);
+	for s in all {
+		match s {
+			Style::Recipe(recipe) => {
+				let index = RecipeIndex(total - r);
+				r += 1;
+				if !revoked.contains(&index) {
+					out.push((index, recipe.clone()));
+				}
+			}
+			Style::Revocation(i)	=> revoked.push(*i),
+			Style::Property(_)		=> (),
+		}
+	}
+	out
+}
+
+fn walked_values(chain: &StyleChain, kind: ElemKind, field: FieldId) -> Vec<&Value> {
+	chain.walk().filter_map(|s| match s {
+		Style::Property(p) if p.elem == kind && p.field == field	=> Some(&p.value),
+		_															=> None,
+	}).collect()
+}
+
+fn check_caches(chain: &StyleChain, keys: &[(ElemKind, FieldId)]) {
+	let want = walked_recipes(chain);
+	let got = chain.recipes();
+	assert_eq!(got.len(), want.len(), "recipes in force");
+	for (g, (index, recipe)) in got.iter().zip(want.iter()) {
+		assert_eq!(g.index, *index);
+		assert!(Arc::ptr_eq(&g.recipe, recipe), "recipe {:?}", index);
+	}
+	assert!(std::ptr::eq(chain.recipes().as_ptr(), got.as_ptr()), "the list is built once");
+	for (kind, field) in keys {
+		let want = walked_values(chain, *kind, *field);
+		let got = chain.values(*kind, *field);
+		assert_eq!(got.len(), want.len(), "values of {:?}.{:?}", kind, field);
+		for (g, w) in got.iter().zip(want.iter()) {
+			assert!(std::ptr::eq(*g, *w), "value of {:?}.{:?}", kind, field);
+		}
+	}
+}
+
+#[test]
+fn the_per_link_caches_agree_with_the_plain_walk_on_branching_chains() {
+	// 192 keys against the filter's 128 slots, so some keys must share a slot.
+	let keys: Vec<(ElemKind, FieldId)> = ElemKind::ALL.iter().take(48)
+		.flat_map(|k| (0..4u8).map(move |f| (*k, FieldId(f)))).collect();
+	let mut seed = 0x2545_F491_4F6C_DD1Du64;
+	let mut next = move |n: usize| -> usize {
+		seed ^= seed << 13;
+		seed ^= seed >> 7;
+		seed ^= seed << 17;
+		(seed % n as u64) as usize
+	};
+	let mut chains = vec![StyleChain::root()];
+	let mut made = 0;
+	for _ in 0..120 {
+		// Chains branch from any earlier one, so siblings share a parent whose lists are already built.
+		let parent = chains[next(chains.len())].clone();
+		check_caches(&parent, &keys);
+		let mut styles = Styles::new();
+		for _ in 0..next(5) {
+			made += 1;
+			let style = match next(4) {
+				0	=> show_text(&format!("r{}", made), "x"),
+				1	=> Style::Revocation(RecipeIndex(1 + next(8))),
+				_	=> {
+					let (kind, field) = keys[next(keys.len())];
+					Style::Property(Property::new(kind, field, pt(made as f64), Span::detached()))
+				}
+			};
+			styles.push(style);
+		}
+		chains.push(parent.chain(&styles));
+	}
+	// A descendant made after an ancestor was read must not have changed what the ancestor says.
+	for c in &chains {
+		check_caches(c, &keys);
+	}
+}
+
+#[test]
+fn a_link_without_recipes_or_revocations_shares_its_parents_recipe_list() {
+	let ruled = StyleChain::root().chain(&Styles::from_style(show_text("a", "b")));
+	let plain = ruled.chain(&set_prop(ElemKind::Text, 1, pt(3.0)));
+	let deeper = plain.chain(&set_prop(ElemKind::Text, 2, pt(4.0)));
+	assert_eq!(ruled.recipes().len(), 1);
+	assert!(std::ptr::eq(ruled.recipes().as_ptr(), plain.recipes().as_ptr()));
+	assert!(std::ptr::eq(ruled.recipes().as_ptr(), deeper.recipes().as_ptr()));
+	// A recipe in a branch leaves the shared list alone.
+	let branch = plain.chain(&Styles::from_style(show_text("c", "d")));
+	assert_eq!(branch.recipes().len(), 2);
+	assert_eq!(branch.recipes()[0].index, RecipeIndex(2));
+	assert_eq!(deeper.recipes().len(), 1);
+}
+
 // Realisation through text and regex rules, in paragraph (inline) mode
 
 fn sp() -> Content { Content::marker(ElemKind::Space, Span::detached()) }
 fn t(s: &str) -> Content { Content::text(s) }
 
 fn show_text(sel: &str, out: &str) -> Style {
-	Style::Recipe(Recipe {
+	Style::Recipe(Arc::new(Recipe {
 		selector:	Some(Selector::Text(sel.into())),
 		transform:	Transformation::Content(t(out)),
 		span:		Span::detached(),
 		outside:	false,
-	})
+	}))
 }
 
 fn show_regex(pat: &str, out: &str) -> Style {
 	let re = RegexValue::new(pat).unwrap_or_else(|e| panic!("regex {}: {:?}", pat, e));
-	Style::Recipe(Recipe {
+	Style::Recipe(Arc::new(Recipe {
 		selector:	Some(Selector::Regex(Arc::new(re))),
 		transform:	Transformation::Content(t(out)),
 		span:		Span::detached(),
 		outside:	false,
-	})
+	}))
 }
 
 fn engine() -> Engine { Engine::new(World::new(PathBuf::from("/"))) }
@@ -468,7 +573,7 @@ fn a_style_change_stops_a_text_rule() {
 #[test]
 fn a_selectorless_show_replaces_the_rest_of_its_scope() {
 	let rest = Content::sequence(vec![t("b"), sp(), t("c")]);
-	let recipe = Style::Recipe(Recipe { selector: None, transform: Transformation::Content(t("X")), span: Span::detached(), outside: false, });
+	let recipe = Style::Recipe(Arc::new(Recipe { selector: None, transform: Transformation::Content(t("X")), span: Span::detached(), outside: false, }));
 	check_html("show_none.typ", inline(vec![t("a"), sp(), rest.styled(Styles::from_style(recipe))], vec![]));
 }
 
@@ -510,12 +615,12 @@ fn realise_err(content: Content, mode: RealiseMode) -> (Result<(), String>, Engi
 fn realisation_errors_match_the_oracle() {
 	let l = Label::new("l");
 	let meta = || Content::marker(ElemKind::Metadata, Span::detached()).labelled(l.clone());
-	let recipe = Style::Recipe(Recipe {
+	let recipe = Style::Recipe(Arc::new(Recipe {
 		selector:	Some(Selector::Label(l.clone())),
 		transform:	Transformation::Content(meta()),
 		span:		Span::detached(),
 		outside:	false,
-	});
+	}));
 	let (r, e) = realise_err(meta().styled(Styles::from_style(recipe)), RealiseMode::Document);
 	check_error("err_depth.typ", r, &e.diags);
 
@@ -608,7 +713,7 @@ fn selector_matching_matches_the_oracle() {
 // expected behaviour each asserts is noted from the oracle.
 
 fn recipe(sel: Selector, transform: Transformation) -> Styles {
-	Styles::from_style(Style::Recipe(Recipe { selector: Some(sel), transform, span: Span::detached(), outside: false, }))
+	Styles::from_style(Style::Recipe(Arc::new(Recipe { selector: Some(sel), transform, span: Span::detached(), outside: false, })))
 }
 
 fn set_prop(kind: ElemKind, field: u8, v: Value) -> Styles {

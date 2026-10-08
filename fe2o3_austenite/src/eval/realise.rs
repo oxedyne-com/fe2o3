@@ -32,6 +32,7 @@ use crate::eval::styles::{
 	error_hints,
 	Recipe,
 	RecipeIndex,
+	RecipeSlot,
 	Style,
 	StyleChain,
 	Styles,
@@ -53,6 +54,8 @@ use crate::timings::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+
+use std::sync::Arc;
 
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
@@ -460,7 +463,7 @@ enum SpaceState {
 
 /// The show step a verdict chose.
 enum Step {
-	Recipe(Recipe, RecipeIndex),
+	Recipe(Arc<Recipe>, RecipeIndex),
 	Builtin,
 }
 
@@ -468,7 +471,7 @@ struct RegexMatch {
 	offset:	usize,
 	text:	String,
 	index:	RecipeIndex,
-	recipe:	Recipe,
+	recipe:	Arc<Recipe>,
 	styles:	StyleChain,
 }
 
@@ -614,21 +617,21 @@ impl State<'_> {
 			let mut map = Styles::new();
 			let mut step = None;
 			let mut tried = 0;
-			for (index, recipe) in recipes {
+			for slot in recipes {
 				tried += 1;
-				if !res!(recipe.applicable(target, styles)) {
+				if !res!(slot.recipe.applicable(target, styles)) {
 					continue;
 				}
-				if let Transformation::Style(set) = &recipe.transform {
+				if let Transformation::Style(set) = &slot.recipe.transform {
 					if !prepared {
 						map.apply_outer(set);
 					}
 					continue;
 				}
-				if step.is_some() || guards.contains(&index) {
+				if step.is_some() || guards.contains(&slot.index) {
 					continue;
 				}
-				step = Some(Step::Recipe(recipe.clone(), index));
+				step = Some(Step::Recipe(slot.recipe.clone(), slot.index));
 				if prepared {
 					break;
 				}
@@ -711,25 +714,25 @@ impl State<'_> {
 		let recipes = self.engine.timed(Phase::Styles, |_| styles.recipes());
 		self.engine.bump(Counter::Shown, 1);
 		self.engine.bump(Counter::Recipes, recipes.len() as u64);
-		let (map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<(Recipe, RecipeIndex)>)> {
+		let (map, step) = res!(self.engine.timed(Phase::Show, |engine| -> Outcome<(Styles, Option<(Arc<Recipe>, RecipeIndex)>)> {
 			let mut map = Styles::new();
 			let mut step = None;
 			let mut tried = 0;
-			for (index, recipe) in recipes {
+			for slot in recipes {
 				tried += 1;
-				if !res!(recipe.applicable(target, styles)) {
+				if !res!(slot.recipe.applicable(target, styles)) {
 					continue;
 				}
-				if let Transformation::Style(set) = &recipe.transform {
+				if let Transformation::Style(set) = &slot.recipe.transform {
 					if !prepared {
 						map.apply_outer(set);
 					}
 					continue;
 				}
-				if step.is_some() || guards.contains(&index) {
+				if step.is_some() || guards.contains(&slot.index) {
 					continue;
 				}
-				step = Some((recipe.clone(), index));
+				step = Some((slot.recipe.clone(), slot.index));
 				if prepared {
 					break;
 				}
@@ -1376,9 +1379,9 @@ fn find_regex_match_in_elems(elems: &[Pair]) -> Outcome<Option<RegexMatch>> {
 
 /// The leftmost non-empty match of the text and regex rules in force, the innermost rule winning a tie.
 fn find_regex_match_in_str(text: &str, styles: &StyleChain) -> Outcome<Option<RegexMatch>> {
-	let mut best: Option<(usize, usize, RecipeIndex, &Recipe)> = None;
-	for (index, recipe) in styles.recipes() {
-		let sel = match &recipe.selector {
+	let mut best: Option<(usize, usize, &RecipeSlot)> = None;
+	for slot in styles.recipes() {
+		let sel = match &slot.recipe.selector {
 			Some(s)	=> s,
 			None	=> continue,
 		};
@@ -1392,13 +1395,13 @@ fn find_regex_match_in_str(text: &str, styles: &StyleChain) -> Outcome<Option<Re
 		if best.map(|(bs, ..)| bs <= s).unwrap_or(false) {
 			continue;
 		}
-		best = Some((s, e, index, recipe));
+		best = Some((s, e, slot));
 	}
-	Ok(best.map(|(s, e, index, recipe)| RegexMatch {
+	Ok(best.map(|(s, e, slot)| RegexMatch {
 		offset:	s,
 		text:	text[s..e].to_string(),
-		index,
-		recipe:	recipe.clone(),
+		index:	slot.index,
+		recipe:	slot.recipe.clone(),
 		styles:	styles.clone(),
 	}))
 }

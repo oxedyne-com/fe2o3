@@ -51,6 +51,7 @@ use oxedyne_fe2o3_austenite::syntax::Span;
 use oxedyne_fe2o3_core::prelude::*;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const AREA: &str = "realise";
 
@@ -111,12 +112,12 @@ fn typst_text(o: &Oracle, fx: &Fixture) -> Outcome<String> {
 }
 
 fn show_text(sel: &str, out: &str) -> Style {
-	Style::Recipe(Recipe {
+	Style::Recipe(Arc::new(Recipe {
 		selector:	Some(Selector::Text(sel.into())),
 		transform:	Transformation::Content(Content::text(out)),
 		span:		Span::detached(),
 		outside:	false,
-	})
+	}))
 }
 
 /// The equation of `math_rule.typ`, `$ x + x -> x $`, as maths evaluates it: a character is a symbol and

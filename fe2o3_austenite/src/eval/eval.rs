@@ -918,7 +918,7 @@ impl<'a> Vm<'a> {
 			K::ShowRule		=> {
 				// A show rule outside a block's statement list: its styles, for `show: set ..` nesting.
 				let r = res!(self.eval_show(node));
-				Ok(Value::Styles(Styles::from_style(Style::Recipe(r))))
+				Ok(Value::Styles(Styles::from_style(Style::Recipe(Arc::new(r)))))
 			}
 			K::Contextual	=> self.eval_context(node),
 			K::Conditional	=> self.eval_if(node),
