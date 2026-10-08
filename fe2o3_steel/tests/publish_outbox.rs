@@ -10,7 +10,10 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_jdat::prelude::*;
-use oxedyne_fe2o3_net::http::fields::HeaderFields;
+use oxedyne_fe2o3_net::{
+    http::fields::HeaderFields,
+    smtp::client::Dial,
+};
 use oxedyne_fe2o3_steel::srv::{
     alert::AlertEvent,
     id,
@@ -49,6 +52,10 @@ use oxedyne_fe2o3_steel::srv::{
 
 use std::{
     future::Future,
+    net::{
+        IpAddr,
+        Ipv4Addr,
+    },
     sync::{
         Arc,
         Mutex,
@@ -67,6 +74,10 @@ const DAY:      u64 = 86_400;
 const SITE:     &str = "https://site.test";
 const HOUR_MS:  u64 = 3_600_000;
 const T0:       u64 = 1_800_000_000_000;
+
+const HANG_IP:  IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1));
+const FINE_IP:  IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 2));
+const EVIL_IP:  IpAddr = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 3));
 
 type Handle = (Arc<RwLock<common::TestDb>>, id::Uid);
 
@@ -88,7 +99,7 @@ impl Courier for Fake {
         "news@site.test"
     }
 
-    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+    fn deliver(&self, _from: &str, to: &str, _msg: &str, _dial: &Dial)
         -> impl Future<Output = Outcome<String>> + Send
     {
         let to = to.to_string();
@@ -113,7 +124,12 @@ impl Courier for Mute {
         "news@site.test"
     }
 
-    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+    fn exchanges(&self, to: &str) -> impl Future<Output = Outcome<Vec<IpAddr>>> + Send {
+        let ip = if to.ends_with("@hang.test") { HANG_IP } else { FINE_IP };
+        async move { Ok(vec![ip]) }
+    }
+
+    fn deliver(&self, _from: &str, to: &str, _msg: &str, dial: &Dial)
         -> impl Future<Output = Outcome<String>> + Send
     {
         let to = to.to_string();
@@ -123,8 +139,10 @@ impl Courier for Mute {
                 v.push(to.clone());
             }
             if to.ends_with("@hang.test") {
+                res!(dial.dialling(HANG_IP));
                 std::future::pending::<()>().await;
             }
+            res!(dial.dialling(FINE_IP));
             Ok(fmt!("q1"))
         }
     }
@@ -620,9 +638,9 @@ async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off
     // Only the one failed delivery and the one that went took a slot: the put-back used none.
     assert_eq!(now, T0 + 1000, "an entry put back for a blocked domain used a slot");
     let first = T0 / 1000;
-    assert_eq!(res!(pacer.blocked("hang.test", first)), Some(first + outbox::BACKOFF_MIN_SECS),
+    assert_eq!(res!(pacer.blocked(HANG_IP, first)), Some(first + outbox::BACKOFF_MIN_SECS),
         "the host was not blocked for the first wait");
-    assert_eq!(res!(pacer.blocked("fine.test", first)), None, "a host that answered was blocked");
+    assert_eq!(res!(pacer.blocked(FINE_IP, first)), None, "a host that answered was blocked");
     assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 2, "the two entries for the dead host were lost");
 
     // Past the block the host is tried once more, times out again, and is left alone twice as long.
@@ -633,7 +651,7 @@ async fn test_a_courier_that_never_returns_is_given_up_and_its_domain_backed_off
         Err(_)  => return Err(err!("the drainer was held by a delivery that never returned"; Test, Timeout)),
     }
     let later = now / 1000;
-    assert_eq!(res!(pacer.blocked("hang.test", later)), Some(later + 2 * outbox::BACKOFF_MIN_SECS),
+    assert_eq!(res!(pacer.blocked(HANG_IP, later)), Some(later + 2 * outbox::BACKOFF_MIN_SECS),
         "a second timeout did not double the wait");
     Ok(())
 }
@@ -708,7 +726,7 @@ impl Courier for Timed {
         "news@site.test"
     }
 
-    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+    fn deliver(&self, _from: &str, to: &str, _msg: &str, _dial: &Dial)
         -> impl Future<Output = Outcome<String>> + Send
     {
         let to = to.to_string();
@@ -780,7 +798,7 @@ impl Courier for Slow {
         "news@site.test"
     }
 
-    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+    fn deliver(&self, _from: &str, to: &str, _msg: &str, _dial: &Dial)
         -> impl Future<Output = Outcome<String>> + Send
     {
         let to = to.to_string();
@@ -825,5 +843,101 @@ async fn test_a_confirmation_that_timed_out_is_counted_and_not_sent_twice_20() -
     }
     let asked = lock_mutex!(slow.asked).len();
     assert_eq!(asked, 1, "a confirmation that timed out was delivered {} times", asked);
+    Ok(())
+}
+
+// A courier whose far end never answers for any address at a host under .evil.test, and records
+// each address it was asked to deliver to.
+#[derive(Default)]
+struct Tarpit {
+    asked: Mutex<Vec<String>>,
+}
+
+impl Tarpit {
+
+    // Every address at a host under .evil.test has the one exchange, as a wildcard MX gives it.
+    fn ip_of(to: &str) -> IpAddr {
+        if to.ends_with(".evil.test") { EVIL_IP } else { FINE_IP }
+    }
+}
+
+impl Courier for Tarpit {
+
+    fn default_from(&self) -> &str {
+        "news@site.test"
+    }
+
+    fn exchanges(&self, to: &str) -> impl Future<Output = Outcome<Vec<IpAddr>>> + Send {
+        let ip = Self::ip_of(to);
+        async move { Ok(vec![ip]) }
+    }
+
+    fn deliver(&self, _from: &str, to: &str, _msg: &str, dial: &Dial)
+        -> impl Future<Output = Outcome<String>> + Send
+    {
+        let to = to.to_string();
+        async move {
+            {
+                let mut v = lock_mutex!(self.asked);
+                v.push(to.clone());
+            }
+            res!(dial.dialling(Self::ip_of(&to)));
+            if to.ends_with(".evil.test") {
+                std::future::pending::<()>().await;
+            }
+            Ok(fmt!("q1"))
+        }
+    }
+}
+
+// F3 A8: a wildcard MX gives every fresh subdomain the same exchange, so the first delivery that
+// overruns the deadline backs the exchange off and the sign-ups behind it, at other subdomains, are
+// put back without being dialled. Keyed by recipient domain, each one costs a deadline.
+#[tokio::test]
+async fn test_fresh_subdomains_behind_one_exchange_cost_one_backoff_19() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let mut entries: Vec<Entry> = (0..5)
+        .map(|i| Entry::new(Kind::Confirm, &fmt!("x@s{}.evil.test", i), "", T0 / 1000))
+        .collect();
+    entries.push(Entry::new(Kind::Confirm, "good@fine.test", "", T0 / 1000));
+    res!(outbox::push(&handle, &entries));
+    let (tarpit, cfg) = (Tarpit::default(), cfg());
+    let pacer = Pacer::new(3600).with_deadline(Duration::from_millis(50));
+    let mut share = Share::default();
+    let mut now = T0;
+    for _ in 0..40 {
+        match res!(outbox::step(&handle, &cfg, &tarpit, &pacer, &mut share, "test", now).await) {
+            Step::Wait(ms)  => now += ms,
+            Step::Later(_) | Step::Idle => break,
+            _               => {},
+        }
+    }
+    let asked = lock_mutex!(tarpit.asked).clone();
+    let dials = asked.iter().filter(|a| a.ends_with(".evil.test")).count();
+    assert!(asked.iter().any(|a| a == "good@fine.test"), "the good address behind the tarpit was never reached");
+    assert_eq!(dials, 1, "five subdomains of one exchange cost {} dials: {:?}", dials, asked);
+    Ok(())
+}
+
+// F3 lead ruling: an admin erase takes the address's confirmation counter with it, under the same guard,
+// so the erased address starts with its limit whole, and another address's counter is not touched.
+#[tokio::test]
+async fn test_an_admin_erase_clears_the_confirmation_counter_of_the_address_21() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let w = Window { interval_secs: DAY, max: 3, span_secs: 30 * DAY };
+    let now = T0 / 1000;
+    for who in ["v@site.test", "other@site.test"] {
+        assert!(res!(subscribe::add_pending(&handle, who, &w, now)).is_some(), "{} was refused a first confirmation", who);
+        res!(subscribe::count_sent(&handle, who, &w, now));
+        assert!(res!(subscribe::add_pending(&handle, who, &w, now + 60)).is_none(),
+            "{} was owed a second confirmation within the interval", who);
+    }
+    assert!(res!(subscribe::remove(&handle, "v@site.test", "test")), "the address was not found to erase");
+    assert!(res!(subscribe::add_pending(&handle, "v@site.test", &w, now + 60)).is_some(),
+        "an erased address was still held to the counter of its earlier confirmations");
+    assert!(res!(subscribe::add_pending(&handle, "other@site.test", &w, now + 60)).is_none(),
+        "the erase cleared the counter of another address");
     Ok(())
 }

@@ -900,9 +900,12 @@ pub fn mark_sent<
 /// Erases a subscriber outright: the record and its place in the index both, by their address.
 ///
 /// A GDPR erasure, distinct from [`unsubscribe_email`]: an unsubscribe keeps the record so a re-subscribe
-/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no row in the count, no
-/// message queued to the address. Mirrors [`super::store::delete`]: the key is deleted and the address filtered out of the index, so a listing
-/// does not name what is gone. `true` where an address was there to erase.
+/// opts in afresh, whereas this leaves nothing behind -- no state, no token, no counter row of the
+/// confirmations sent to it, no message queued to the address. Mirrors [`super::store::delete`]: the key
+/// is deleted and the address filtered out of the index, so a listing does not name what is gone. The
+/// counter row is the one [`count_sent`] keeps under a hash, so an erased address that signs up again
+/// starts with its limit whole, which is also an operator's remedy for an address held at its limit.
+/// `true` where an address was there to erase.
 pub fn remove<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -917,6 +920,10 @@ pub fn remove<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
+	// The secret is read before the write guard is taken: `site_secret` takes the lock itself, and a std
+	// `RwLock` is not re-entrant.
+	let salt = res!(super::comment::site_secret(db));
+	let rkey = fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt));
 	let existed = res!(store::exclusive(db, |dbr, user| -> Outcome<bool> {
 		// Whether the address was really there, read by key so a tombstone reads as absent -- unlike the
 		// database's own `delete`, which marks a key for deletion and reports success even for one already
@@ -924,6 +931,8 @@ pub fn remove<
 		let existed = res!(get_in(dbr, &email)).is_some();
 		res!(dbr.delete(&key_of(&email), user, None));
 		res!(unlist_in(dbr, user, &HashSet::from([email.as_str()])));
+		// The count of confirmations sent to the address goes with it, under the same guard.
+		res!(dbr.delete(&dat!(rkey.clone()), user, None));
 		// What is queued for the address goes under the same guard, so the drainer cannot make the
 		// record again from a sign-up that waits, or mail the address a copy that waits.
 		let queued = res!(outbox::purge_in(dbr, user, &email));

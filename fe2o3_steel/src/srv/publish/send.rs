@@ -77,7 +77,10 @@ use oxedyne_fe2o3_net::{
 		},
 		msg::HttpMessage,
 	},
-	smtp::client::OutboundClient,
+	smtp::client::{
+		Dial,
+		OutboundClient,
+	},
 };
 use oxedyne_fe2o3_text::doc::html::{
 	escape_attr,
@@ -87,6 +90,7 @@ use oxedyne_fe2o3_text::doc::html::{
 use std::{
 	collections::BTreeMap,
 	future::Future,
+	net::IpAddr,
 	path::Path,
 	sync::{
 		Arc,
@@ -872,12 +876,14 @@ impl MailSender {
 	/// The one door every piece of newsletter mail goes through, the confirmation included. Each signer
 	/// prepends its own `DKIM-Signature`; a key that will not sign is skipped with a warning rather than
 	/// failing the send, since an unsigned message that arrives beats a signed one that does not.
-	/// Returns the remote's queue id.
+	/// Returns the remote's queue id. `dial` names the exchanges to keep away from and notes the ones
+	/// dialled.
 	async fn deliver_signed(
 		&self,
 		from:	&str,
 		to:	&str,
 		msg:	&str,
+		dial:	&Dial,
 	)
 		-> Outcome<String>
 	{
@@ -902,7 +908,7 @@ impl MailSender {
 		// `MAIL FROM:<README <news@example.com>>` refuses it with a 5xx -- which this module reads as
 		// a permanent failure and suppresses the subscriber for good. So the documented shape of
 		// `newsletter_from` would have quietly bounced every address it was ever used with.
-		self.client.deliver(envelope_of(from), &rcpt, &bytes).await
+		self.client.deliver_with(envelope_of(from), &rcpt, &bytes, dial).await
 	}
 
 	/// The signers this message should carry, given the domain its From speaks for.
@@ -950,7 +956,7 @@ impl MailSender {
 		-> Outcome<String>
 	{
 		let msg = build_confirmation_email(from, to, confirm_url, site_name);
-		self.deliver_signed(from, to, &msg).await
+		self.deliver_signed(from, to, &msg, &Dial::default()).await
 	}
 
 	/// Tells an operator that a comment is waiting for a person.
@@ -969,7 +975,7 @@ impl MailSender {
 		-> Outcome<String>
 	{
 		let msg = build_moderation_alert_email(from, to, site_name, post_slug);
-		self.deliver_signed(from, to, &msg).await
+		self.deliver_signed(from, to, &msg, &Dial::default()).await
 	}
 }
 
@@ -1000,10 +1006,14 @@ impl Courier for MailSender {
 		&self.default_from
 	}
 
-	fn deliver(&self, from: &str, to: &str, msg: &str)
+	fn exchanges(&self, to: &str) -> impl Future<Output = Outcome<Vec<IpAddr>>> + Send {
+		self.client.exchanges(to)
+	}
+
+	fn deliver(&self, from: &str, to: &str, msg: &str, dial: &Dial)
 		-> impl Future<Output = Outcome<String>> + Send
 	{
-		self.deliver_signed(from, to, msg)
+		self.deliver_signed(from, to, msg, dial)
 	}
 }
 
@@ -1130,7 +1140,7 @@ pub async fn send_test<
 	// it lands on the bad-token page and nobody is unsubscribed.
 	let unsub = cfg.url_of(&cfg.unsubscribe_path(&subscribe::mint_token()));
 	let msg = build_newsletter_email(from, &to, &post, &online, &unsub, &cfg.site_name);
-	let qid = res!(sender.deliver_signed(from, &to, &msg).await);
+	let qid = res!(sender.deliver_signed(from, &to, &msg, &Dial::default()).await);
 	info!("{}: publish: test of '{}' sent to {} ({})", id, slug, subscribe::redact(&to), qid);
 	Ok(())
 }
