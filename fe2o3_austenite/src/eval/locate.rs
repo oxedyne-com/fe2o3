@@ -62,6 +62,14 @@ impl Locator {
 
 	pub fn place(&self) -> Place { self.place }
 
+	/// The place and the ordinals handed out so far, sorted, for the flow's carry fingerprint: how many
+	/// were handed out and how often, never which.
+	pub fn carry(&self) -> (Place, Vec<u32>) {
+		let mut counts: Vec<u32> = self.seen.values().copied().collect();
+		counts.sort_unstable();
+		(self.place, counts)
+	}
+
 	pub fn locate(&mut self, kind: ElemKind, span: Span) -> Location {
 		Location(self.next_hash(DOMAIN_LOCATION, kind, span))
 	}

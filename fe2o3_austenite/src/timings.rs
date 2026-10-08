@@ -24,6 +24,10 @@
 //! the work and the clock together: the record carries the cost of one read, and a reader takes it off
 //! once for each entry. In a coarse record their time stays in `self`.
 //!
+//! A per-page record of the flow's carry state ([`PageRec`]) rides in the same file, one list for each
+//! pass: it is the measurement of how much of a compile a re-run could reuse, and is made only here. Its
+//! cost is the `probe` phase.
+//!
 //! It reads `std::time::Instant`, which the wasm32-unknown-unknown target does not provide, so only a
 //! native run switches it on.
 
@@ -52,6 +56,7 @@ pub enum Phase {
 	Decorate,
 	Sink,
 	Settle,
+	Probe,
 	// Inside realisation.
 	Rules,
 	Regex,
@@ -61,9 +66,9 @@ pub enum Phase {
 }
 
 impl Phase {
-	pub const COUNT:	usize = 15;
+	pub const COUNT:	usize = 16;
 	pub const RUN:		[Phase; 4] = [Phase::Load, Phase::Eval, Phase::Finish, Phase::Write];
-	pub const PASS:		[Phase; 6] = [Phase::Realise, Phase::Flow, Phase::Place, Phase::Decorate, Phase::Sink, Phase::Settle];
+	pub const PASS:		[Phase; 7] = [Phase::Realise, Phase::Flow, Phase::Place, Phase::Decorate, Phase::Sink, Phase::Settle, Phase::Probe];
 	pub const SUB:		[Phase; 5] = [Phase::Rules, Phase::Regex, Phase::Show, Phase::Repack, Phase::Styles];
 
 	pub fn name(&self) -> &'static str {
@@ -78,6 +83,7 @@ impl Phase {
 			Self::Decorate	=> "decorate",
 			Self::Sink		=> "sink",
 			Self::Settle	=> "settle",
+			Self::Probe		=> "probe",
 			Self::Rules		=> "rules",
 			Self::Regex		=> "regex",
 			Self::Show		=> "show",
@@ -195,6 +201,76 @@ impl Bucket {
 	}
 }
 
+/// The carry state a page was laid out from, as one fingerprint for each part of it, so that two compiles
+/// are compared field by field. The counters are the absolute ones (`count`, `pulled`, `base`, `work_idx`
+/// and `abs`), which shift for every later page when an edit adds a line; the rest are unaffected by such
+/// a shift. Locations, spans and marks are masked everywhere.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Entry {
+	pub count:		u32,	// pages yielded before this one
+	pub paginator:	u64,	// waiting tags, blank, started, ended, the run's setup, regions and first flag
+	pub level:		u64,	// the page-level state, the pairs still to come excluded
+	pub pulled:		usize,	// pairs taken from the root feed
+	pub base:		usize,	// the index of the first root child held
+	pub pull_rest:	u64,	// done, paragraph situation, collect config, mode, feed, the memo's length
+	pub children:	u64,	// the root children collected and not yet placed
+	pub config:		u64,	// the root flow's configuration
+	pub work_idx:	usize,	// the first root child not yet processed
+	pub spill:		u64,	// the breakable block carried over the page break
+	pub floats:		u64,	// floats queued for a later region, their children relative to `work_idx`
+	pub footnotes:	u64,
+	pub foot_spill:	u64,	// the rest of a footnote that did not fit
+	pub tags:		u64,
+	pub skips:		u64,	// insertions placed, their children relative to `work_idx`
+	pub abs:		u64,	// the absolute child indices of `floats` and `skips`
+	pub locator:	u64,	// the place counters
+	pub masked:		u32,	// locations met and masked in the whole entry
+}
+
+impl Entry {
+	// The fields as name and value, in the order the first difference is named.
+	pub fn fields(&self) -> [(&'static str, u64); 17] {
+		[
+			("count",		self.count as u64),
+			("paginator",	self.paginator),
+			("level",		self.level),
+			("pulled",		self.pulled as u64),
+			("base",		self.base as u64),
+			("pull_rest",	self.pull_rest),
+			("children",	self.children),
+			("config",		self.config),
+			("work_idx",	self.work_idx as u64),
+			("spill",		self.spill),
+			("floats",		self.floats),
+			("footnotes",	self.footnotes),
+			("foot_spill",	self.foot_spill),
+			("tags",		self.tags),
+			("skips",		self.skips),
+			("abs",			self.abs),
+			("locator",		self.locator),
+		]
+	}
+
+	fn json(&self) -> String {
+		let cells: Vec<String> = self.fields().iter().map(|(k, v)| fmt!("\"{}\":\"{:x}\"", k, v)).collect();
+		fmt!("{{{},\"masked\":{}}}", cells.join(","), self.masked)
+	}
+}
+
+/// What one page was made from: its pairs, and the carry state it began in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PageRec {
+	pub pairs:	usize,	// pairs taken from the root feed while the page was made
+	pub input:	u64,	// those pairs and the page's run setup, spans and locations masked
+	pub entry:	Entry,
+}
+
+impl PageRec {
+	fn json(&self) -> String {
+		fmt!("{{\"pairs\":{},\"input\":\"{:x}\",\"entry\":{}}}", self.pairs, self.input, self.entry.json())
+	}
+}
+
 #[derive(Debug)]
 pub struct Timings {
 	last:	Instant,		// the last clock read
@@ -203,6 +279,8 @@ pub struct Timings {
 	fine:	bool,			// are the phases entered for every element clocked too?
 	run:	Bucket,
 	passes:	Vec<Bucket>,	// one for each fixpoint pass
+	pages:	Vec<Vec<PageRec>>,	// the pages of each fixpoint pass, in step with `passes`
+	fed:	Vec<u64>,			// fingerprints of the pairs taken from the root feed since the last page record
 	idle:	u64,			// ns spent outside every phase
 	clock:	u64,			// ns one clock read costs, measured when the recorder starts
 	shape:	Option<ShapeStats>,	// the shaped-run cache at the end of the run, once the caller has read it
@@ -227,7 +305,7 @@ impl Timings {
 		open.push(true);
 		Self {
 			last: Instant::now(), stack, open, fine, run, passes: Vec::with_capacity(Phase::PASS.len()),
-			idle: 0, clock, shape: None, seen: HashMap::new(),
+			pages: Vec::new(), fed: Vec::new(), idle: 0, clock, shape: None, seen: HashMap::new(),
 		}
 	}
 
@@ -262,6 +340,22 @@ impl Timings {
 	/// Begins a fixpoint pass: its phases are counted in a bucket of their own.
 	pub fn begin_pass(&mut self) {
 		self.passes.push(Bucket::default());
+		self.pages.push(Vec::new());
+	}
+
+	/// Notes a pair the root feed handed out.
+	pub fn see(&mut self, fp: u64) { self.fed.push(fp); }
+
+	/// The fingerprints noted since the last call.
+	pub fn take_seen(&mut self) -> Vec<u64> { std::mem::take(&mut self.fed) }
+
+	/// Adds a page's record to the current pass.
+	pub fn page(&mut self, rec: PageRec) {
+		if self.pages.is_empty() {
+			self.pages.push(Vec::new());
+		}
+		let last = self.pages.len() - 1;
+		self.pages[last].push(rec);
 	}
 
 	// Adds the time since the last read to the innermost phase, or to the idle time with none open.
@@ -337,8 +431,13 @@ impl Timings {
 	/// caller read it.
 	pub fn json(&self, total: u64) -> String {
 		let passes: Vec<String> = self.passes.iter().map(|b| b.pass_json()).collect();
+		let pages: Vec<String> = self.pages.iter().map(|ps| {
+			let recs: Vec<String> = ps.iter().map(|r| r.json()).collect();
+			fmt!("[{}]", recs.join(","))
+		}).collect();
 		fmt!(
-			"{{\"unit\":\"ns\",\"fine\":{},\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}],\"shape\":{}}}\n",
-			self.fine, total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","), self.shape_json())
+			"{{\"unit\":\"ns\",\"fine\":{},\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}],\"shape\":{},\"pages\":[{}]}}\n",
+			self.fine, total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","), self.shape_json(),
+			pages.join(","))
 	}
 }

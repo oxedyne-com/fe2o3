@@ -167,6 +167,19 @@ fn the_record_holds_every_phase_of_every_pass_and_the_phases_sum_to_the_wall_tim
 	let fine = json::parse(&runs().fine_rec).expect("the fine record is JSON");
 	let found = faults(&fine);
 	assert!(found.is_empty(), "the fine record is unsound: {:#?}\n{}", found, runs().fine_rec);
+	// A page record for every page of every pass, and the probe entered for each.
+	let lists = match record.get("pages") {
+		Some(J::Arr(v))	=> v.as_slice(),
+		_				=> panic!("the record has no pages array"),
+	};
+	assert_eq!(lists.len() as i64, num(&record, &["passes"]), "one list of page records to a pass");
+	for (i, l) in lists.iter().enumerate() {
+		let n = match l {
+			J::Arr(v)	=> v.len(),
+			_			=> panic!("a pass's page records are not a list"),
+		};
+		assert!(n >= 2, "pass {} holds the records of its pages: {}", i + 1, n);
+	}
 }
 
 // Sets the time and the count of every cell named `phase`, in the run or in any pass, to zero.
