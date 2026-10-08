@@ -38,7 +38,10 @@ use std::{
         Ipv4Addr,
         SocketAddr,
     },
-    sync::Arc,
+    sync::{
+        Arc,
+        Mutex,
+    },
     time::Duration,
 };
 
@@ -194,6 +197,47 @@ struct DeliveryTarget {
     preference: u16,        // as the MX record gave it
 }
 
+/// Which mail exchanges one delivery keeps away from, and the one it last dialled.
+///
+/// A caller that has found an exchange not answering (see [`OutboundClient::exchanges`]) names it by
+/// address in [`Self::avoiding`], and `deliver_with` goes on to the next exchange of the recipient's
+/// domain as though it were not listed. The delivery notes each exchange as it dials it, so a caller
+/// that gives up on the delivery while it is under way, by dropping it at a deadline, still knows which
+/// exchange it was waiting on. One `Dial` serves one delivery.
+#[derive(Debug, Default)]
+pub struct Dial {
+    avoid:  Vec<IpAddr>,
+    last:   Mutex<Option<IpAddr>>,
+}
+
+impl Dial {
+
+    /// A dial that never connects to the exchanges at `avoid`.
+    pub fn avoiding(avoid: Vec<IpAddr>) -> Self {
+        Self { avoid, last: Mutex::new(None) }
+    }
+
+    /// Is the exchange at `ip` one this delivery keeps away from?
+    pub fn skips(&self, ip: IpAddr) -> bool {
+        self.avoid.contains(&ip)
+    }
+
+    /// Notes that the exchange at `ip` is the one now being dialled. A courier that is not
+    /// [`OutboundClient`] calls this for each exchange it tries, so the caller can tell which one held
+    /// a delivery up.
+    pub fn dialling(&self, ip: IpAddr) -> Outcome<()> {
+        let mut last = lock_mutex!(self.last);
+        *last = Some(ip);
+        Ok(())
+    }
+
+    /// The exchange most recently dialled, or `None` where none has been.
+    pub fn last(&self) -> Outcome<Option<IpAddr>> {
+        let last = lock_mutex!(self.last);
+        Ok(*last)
+    }
+}
+
 /// Per-process outbound SMTP client.
 ///
 /// Holds a rustls `ClientConfig` initialised with the system trust
@@ -244,6 +288,21 @@ impl OutboundClient {
     )
         -> Outcome<String>
     {
+        self.deliver_with(mail_from, rcpt_to, body, &Dial::default()).await
+    }
+
+    /// [`Self::deliver`], keeping away from the exchanges `dial` names and noting in it each exchange
+    /// it dials. Where every exchange that is left is one `dial` avoids, nothing is dialled and the
+    /// failure is transient.
+    pub async fn deliver_with(
+        &self,
+        mail_from:  &str,
+        rcpt_to:    &[String],
+        body:       &[u8],
+        dial:       &Dial,
+    )
+        -> Outcome<String>
+    {
         if rcpt_to.is_empty() {
             return Err(err!(
                 "OutboundClient::deliver called with no recipients.";
@@ -265,7 +324,30 @@ impl OutboundClient {
             }
         }
 
-        // MX lookup, then resolve each MX host to an A record.
+        let targets = res!(Self::resolve(domain).await);
+        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT, dial).await
+    }
+
+    /// The addresses of the exchanges a message to `rcpt_to` would be dialled at, in preference order,
+    /// found by the lookups `deliver` makes and without dialling any. An exchange this client would
+    /// never dial, being at an address that is not publicly routable, is left out, so the list may be
+    /// empty. A caller uses it to learn which exchanges it has found not answering before it sends.
+    pub async fn exchanges(&self, rcpt_to: &str) -> Outcome<Vec<IpAddr>> {
+        let domain = res!(extract_domain(rcpt_to));
+        let mut targets = res!(Self::resolve(domain).await);
+        targets.retain(|t| self.dialable(t));
+        targets.sort_by_key(|t| t.preference);
+        let mut ips: Vec<IpAddr> = Vec::new();
+        for t in &targets {
+            if !ips.contains(&t.addr) {
+                ips.push(t.addr);
+            }
+        }
+        Ok(ips)
+    }
+
+    // The exchanges of a domain: its MX records, each looked up for its A records.
+    async fn resolve(domain: String) -> Outcome<Vec<DeliveryTarget>> {
         let mxs = res!(
             tokio::task::spawn_blocking(move || dns_resolver::lookup_mx(&domain)).await
                 .map_err(|e| err!("MX lookup task join failure: {}.", e;
@@ -278,8 +360,13 @@ impl OutboundClient {
                 .map_err(|e| err!("Exchange lookup task join failure: {}.", e;
                     IO, Network, Init))
         );
-        let targets = res!(targets);
-        self.deliver_to_exchanges(&targets, mail_from, rcpt_to, body, SMTP_CLIENT_TIMEOUT).await
+        targets
+    }
+
+    // Whether this client may dial the exchange: not at a loopback, private or otherwise unroutable
+    // address, unless `allow_private_exchanges` is set.
+    fn dialable(&self, t: &DeliveryTarget) -> bool {
+        self.allow_private_exchanges || is_publicly_routable(&t.addr)
     }
 
     /// The delivery loop itself, given the exchanges rather than resolving them.
@@ -290,7 +377,8 @@ impl OutboundClient {
     /// jarrah's outbound mail and had no test until 2026-08-17. Private, and takes the exchanges as
     /// an argument rather than reading them from anywhere: this is not a way to configure where mail
     /// goes, it is a way for a fixture to stand in as an exchange. `deadline` bounds each step of
-    /// each conversation, and is an argument so a fixture need not wait a minute to see one pass.
+    /// each conversation, and is an argument so a fixture need not wait a minute to see one pass. `dial`
+    /// names the exchanges to keep away from and notes each one dialled.
     async fn deliver_to_exchanges(
         &self,
         targets:    &[DeliveryTarget],
@@ -298,6 +386,7 @@ impl OutboundClient {
         rcpt_to:    &[String],
         body:       &[u8],
         deadline:   Duration,
+        dial:       &Dial,
     )
         -> Outcome<String>
     {
@@ -331,6 +420,16 @@ impl OutboundClient {
             }
         }
         targets.sort_by_key(|t| t.preference);
+        // An exchange the caller has found not answering is left for another time, so a delivery is
+        // not held up again by the host that held up the last. Where every one is left, nothing has
+        // been shown wrong with the recipient, and the failure is transient.
+        let count = targets.len();
+        targets.retain(|t| !dial.skips(t.addr));
+        if targets.is_empty() {
+            return Err(err!(
+                "Every one of the {} mail exchanges is being avoided, so nothing was dialled.", count;
+                IO, Network));
+        }
 
         let mut last_err: Option<String> = None;
         // Whether any exchange refused this recipient with a 5xx. A permanent rejection -- an unknown
@@ -339,6 +438,7 @@ impl OutboundClient {
         // trying. A 4xx, a timeout or a connection error is transient and carries no such tag.
         let mut permanent = false;
         for tgt in &targets {
+            res!(dial.dialling(tgt.addr));
             match self.try_one(tgt, mail_from, rcpt_to, body, deadline).await {
                 Ok(qid) => return Ok(qid),
                 Err(e) => {
@@ -964,7 +1064,12 @@ mod tests {
     type Transcript = Arc<Mutex<Vec<String>>>;
 
     async fn provider(p: Provider) -> Outcome<(SocketAddr, Transcript)> {
-        let listener = res!(TcpListener::bind("127.0.0.1:0").await
+        provider_on("127.0.0.1", p).await
+    }
+
+    // As `provider`, listening on another loopback address, so two exchanges can differ by address.
+    async fn provider_on(host: &str, p: Provider) -> Outcome<(SocketAddr, Transcript)> {
+        let listener = res!(TcpListener::bind(fmt!("{}:0", host)).await
             .map_err(|e| err!(e, "Binding the stand-in provider."; IO, Network)));
         let addr = res!(listener.local_addr()
             .map_err(|e| err!(e, "Reading the stand-in provider's address."; IO, Network)));
@@ -1694,7 +1799,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(Provider::accepting(), 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "postmaster@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"));
 
         let lines = res!(lines_of(&seen));
@@ -1727,7 +1832,7 @@ mod tests {
         let (bad,  saw_bad)  = res!(exchange_at(dead, 10).await);
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 20).await);
         let qid = res!(c.deliver_to_exchanges(&[good.clone(), bad.clone()],
-            "a@example.com", &[fmt!("bob@example.net")], &body(), WAIT).await);
+            "a@example.com", &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"));
         req!(true, res!(lines_of(&saw_bad)).iter().any(|l| l.starts_with("RCPT TO")),
             "the preferred exchange was skipped: it was never offered the recipient");
@@ -1739,10 +1844,62 @@ mod tests {
         let (good, saw_good) = res!(exchange_at(Provider::exchange(), 10).await);
         let (bad,  saw_bad)  = res!(exchange_at(dead, 20).await);
         res!(c.deliver_to_exchanges(&[bad, good], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."));
         req!(true, res!(lines_of(&saw_bad)).is_empty(),
             "a less-preferred exchange was used while a better one worked");
+        Ok(())
+    }
+
+    /// A stand-in exchange on a loopback address of its own, which a `Dial` can name.
+    async fn exchange_on(host: &str, preference: u16) -> Outcome<(DeliveryTarget, Transcript)> {
+        let (addr, seen) = res!(provider_on(host, Provider::exchange()).await);
+        Ok((DeliveryTarget {
+            host:       fmt!("mx{}.example.net", preference),
+            addr:       addr.ip(),
+            port:       addr.port(),
+            preference,
+        }, seen))
+    }
+
+    /// An exchange the caller has found not answering is not dialled, and the next one takes the
+    /// message. Both would accept it: only the skip keeps the preferred one out, so an empty transcript
+    /// there means it was never dialled, and the dial notes only the exchange that was.
+    #[tokio::test]
+    async fn test_a_skipped_exchange_is_not_dialled_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let (slow, saw_slow) = res!(exchange_on("127.0.0.1", 10).await);
+        let (good, saw_good) = res!(exchange_on("127.0.0.2", 20).await);
+        let dial = Dial::avoiding(vec![slow.addr]);
+        req!(true, dial.skips(slow.addr));
+        req!(false, dial.skips(good.addr));
+        let qid = res!(c.deliver_to_exchanges(&[slow.clone(), good.clone()], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &dial).await);
+        req!(true, qid.contains("STANDIN1"));
+        req!(true, res!(lines_of(&saw_slow)).is_empty(), "an exchange the dial avoids was dialled");
+        req!(true, res!(lines_of(&saw_good)).iter().any(|l| l == "."),
+            "the message did not reach the exchange that was not avoided");
+        req!(Some(good.addr), res!(dial.last()), "the dial did not note the exchange it reached");
+        Ok(())
+    }
+
+    /// Where every exchange is avoided nothing is dialled and the failure is transient, since nothing
+    /// is shown wrong with the recipient.
+    #[tokio::test]
+    async fn test_every_exchange_skipped_is_a_transient_failure_00() -> Outcome<()> {
+        let c = res!(client().await);
+        let (a, saw_a) = res!(exchange_on("127.0.0.1", 10).await);
+        let (b, saw_b) = res!(exchange_on("127.0.0.2", 20).await);
+        let dial = Dial::avoiding(vec![a.addr, b.addr]);
+        match c.deliver_to_exchanges(&[a, b], "a@example.com",
+            &[fmt!("bob@example.net")], &body(), WAIT, &dial).await
+        {
+            Ok(q) => return Err(err!("A delivery avoiding every exchange gave {}.", q; Test, Mismatch)),
+            Err(e) => req!(false, is_permanent(&e), "every exchange avoided was read as permanent"),
+        }
+        req!(true, res!(lines_of(&saw_a)).is_empty() && res!(lines_of(&saw_b)).is_empty(),
+            "an exchange was dialled though all were avoided");
+        req!(None::<IpAddr>, res!(dial.last()), "the dial noted an exchange that was not dialled");
         Ok(())
     }
 
@@ -1757,7 +1914,7 @@ mod tests {
         let (b, _) = res!(exchange_at(dead, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("nobody@example.net")], &body(), WAIT).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("Two 550s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1778,7 +1935,7 @@ mod tests {
         let (b, _) = res!(exchange_at(busy, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[a, b], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("Two 450s were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1801,7 +1958,7 @@ mod tests {
             Provider { banner: 421, ..Provider::exchange() }, 20).await);
         let c = res!(client().await);
         match c.deliver_to_exchanges(&[dead, refusing], "a@example.com",
-            &[fmt!("nobody@example.net")], &body(), WAIT).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Ok(_)  => Err(err!("A 550 and a 421 were reported as a delivery."; Test, Invalid)),
             Err(e) => {
@@ -1822,7 +1979,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(p, 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"), "a refused STARTTLS stopped the delivery");
 
         let lines = res!(lines_of(&seen));
@@ -1838,7 +1995,7 @@ mod tests {
     async fn test_no_exchange_is_a_named_failure_00() -> Outcome<()> {
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!(
@@ -1858,7 +2015,7 @@ mod tests {
         let host = a.host.clone();
         let c = res!(client().await);
         let msg = match c.deliver_to_exchanges(&[a], "a@example.com",
-            &[fmt!("nobody@example.net")], &body(), WAIT).await
+            &[fmt!("nobody@example.net")], &body(), WAIT, &Dial::default()).await
         {
             Err(e) => fmt!("{}", e),
             Ok(_)  => return Err(err!("A 550 was a delivery."; Test, Invalid)),
@@ -1899,7 +2056,7 @@ mod tests {
             let tgt = target_at(res!(ip.parse::<IpAddr>().map_err(|e|
                 err!(e, "The test address {}.", ip; Test, Invalid))), stand_in.port());
             match c.deliver_to_exchanges(&[tgt], "a@example.com",
-                &[fmt!("bob@example.net")], &body(), STALL).await
+                &[fmt!("bob@example.net")], &body(), STALL, &Dial::default()).await
             {
                 Ok(_)  => return Err(err!(
                     "Delivery to {} was reported as a success.", ip; Test, Invalid)),
@@ -1928,7 +2085,7 @@ mod tests {
         let mut c = res!(OutboundClient::with_system_roots(EHLO));
         c.allow_private_exchanges = true;
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"));
         req!(true, res!(lines_of(&seen)).iter().any(|l| l == "."), "the message never arrived");
         Ok(())
@@ -2027,7 +2184,7 @@ mod tests {
         let c = res!(client().await);
         res!(fails_in_time("delivery",
             c.deliver_to_exchanges(&[tgt], "a@example.com", &[fmt!("bob@example.net")],
-                &body(), STALL)).await);
+                &body(), STALL, &Dial::default())).await);
         Ok(())
     }
 
@@ -2042,7 +2199,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(slow, 10).await);
         let c = res!(client().await);
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), STALL).await);
+            &[fmt!("bob@example.net")], &body(), STALL, &Dial::default()).await);
         req!(true, qid.contains("STANDIN1"), "the late acceptance was not read: {}", qid);
         req!(1, res!(lines_of(&seen)).iter().filter(|l| *l == ".").count());
 
@@ -2065,7 +2222,7 @@ mod tests {
         let (tgt, seen) = res!(exchange_at(mute_at_quit, 10).await);
         let start = std::time::Instant::now();
         let qid = res!(c.deliver_to_exchanges(&[tgt], "a@example.com",
-            &[fmt!("bob@example.net")], &body(), WAIT).await);
+            &[fmt!("bob@example.net")], &body(), WAIT, &Dial::default()).await);
         let took = start.elapsed();
         req!(true, qid.contains("STANDIN1"));
         req!(true, res!(lines_of(&seen)).iter().any(|l| l.to_uppercase() == "QUIT"),
