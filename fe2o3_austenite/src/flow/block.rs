@@ -67,6 +67,8 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_graphics::path::Path;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::cell::RefCell;
 use std::collections::{
@@ -543,18 +545,18 @@ impl Regions {
 	}
 
 	/// A hash of everything a layout could depend on, for caching a child's layout.
-	fn key(&self) -> u64 {
-		let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+	fn key(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
 		for v in [self.w, self.h, self.full, self.last.unwrap_or(-1.0)] {
-			h.f(v);
+			h.write_f64(v);
 		}
 		for v in &self.backlog {
-			h.f(*v);
+			h.write_f64(*v);
 		}
-		h.b(self.last.is_some());
-		h.b(self.expand_x);
-		h.b(self.expand_y);
-		h.0
+		h.write_bool(self.last.is_some());
+		h.write_bool(self.expand_x);
+		h.write_bool(self.expand_y);
+		h.finish()
 	}
 
 	/// The regions with every height shrunk by `f`, the widths likewise.
@@ -570,22 +572,6 @@ impl Regions {
 			expand_x:	self.expand_x,
 			expand_y:	self.expand_y,
 		}
-	}
-}
-
-struct Fnv(u64);
-
-impl Fnv {
-	fn f(&mut self, v: f64) {
-		for b in v.to_bits().to_le_bytes() {
-			self.0 ^= b as u64;
-			self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-		}
-	}
-
-	fn b(&mut self, v: bool) {
-		self.0 ^= v as u64;
-		self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
 	}
 }
 
@@ -1068,7 +1054,7 @@ struct SingleChild {
 	alone:	bool,
 	fr:		Option<f64>,
 	spec:	BlockSpec,
-	cell:	RefCell<Option<(u64, Frame)>>,
+	cell:	RefCell<Option<(Fingerprint, Frame)>>,
 }
 
 impl SingleChild {
@@ -1105,7 +1091,7 @@ struct MultiChild {
 struct Memo {
 	child:	usize,					// the block, by address
 	from:	usize,					// the continuation it came from, by address, or zero for the first
-	key:	u64,					// the regions the fragment was laid out in
+	key:	Fingerprint,			// the regions the fragment was laid out in
 	out:	Fragment,
 }
 
@@ -1156,7 +1142,7 @@ struct PlacedChild {
 	mark:		u64,				// the float's place in the flow, its frame's parent
 	elem:		Content,
 	styles:		StyleChain,
-	cell:		RefCell<Option<(u64, Frame)>>,
+	cell:		RefCell<Option<(Fingerprint, Frame)>>,
 }
 
 impl PlacedChild {

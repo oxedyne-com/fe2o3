@@ -17,6 +17,7 @@ use crate::ledger::{
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::HashMap;
 
@@ -59,6 +60,8 @@ impl Locator {
 
 	pub fn reset(&mut self) { *self = Self::default(); }
 
+	pub fn place(&self) -> Place { self.place }
+
 	pub fn locate(&mut self, kind: ElemKind, span: Span) -> Location {
 		Location(self.next_hash(DOMAIN_LOCATION, kind, span))
 	}
@@ -77,13 +80,11 @@ impl Locator {
 	}
 }
 
+// Folds the words to the 64 bits a location and a place hold.
 fn fnv(words: &[u64]) -> u64 {
-	let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+	let mut h = Fingerprinter::new();
 	for w in words {
-		for b in w.to_le_bytes() {
-			h ^= b as u64;
-			h = h.wrapping_mul(0x0000_0100_0000_01b3);
-		}
+		h.write_u64(*w);
 	}
-	h
+	h.finish().fold()
 }

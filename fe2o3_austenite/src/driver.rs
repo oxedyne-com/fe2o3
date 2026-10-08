@@ -1848,10 +1848,10 @@ pub fn place_page<R: Recorder>(body: PageBody, marginals: Marginals, rec: &mut R
 	let mut frame = Frame::new();
 	let colour = match &setup.fill {
 		None					=> None,
-		Some(Paint::Color(c))	=> Some(res!(c.to_rgba())),
+		Some(Paint::Color(c))	=> Some(c.to_ink()),
 		// The drawing layer has flat colours only; a gradient page fill takes its first stop.
 		Some(Paint::Gradient(g)) => match g.stops.first() {
-			Some((c, _))	=> Some(res!(c.to_rgba())),
+			Some((c, _))	=> Some(c.to_ink()),
 			None			=> None,
 		},
 		Some(Paint::Tiling(_)) => return Err(err!(

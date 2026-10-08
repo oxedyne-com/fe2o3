@@ -10,10 +10,8 @@
 //! its own nodes. Leaves are zero-width and seated by fixed glue, so overlapping parts (a script
 //! over a base, a rule over a radicand) need no nested boxes.
 
-use crate::diag::DiagnosticKind;
 use crate::eval::realise::Tag;
 use crate::eval::value::{
-	ColorSpace,
 	LineCap,
 	Paint,
 	Stroke,
@@ -21,6 +19,7 @@ use crate::eval::value::{
 use crate::eval::Engine;
 use crate::flow::visual::{
 	fix_stroke,
+	paint_ink,
 	pen_of,
 	Curve,
 	FixedStroke,
@@ -45,7 +44,7 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_font::shape::Glyph;
-use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::colour::Ink;
 
 use std::sync::Arc;
 
@@ -230,7 +229,7 @@ fn flatten(
 			}
 			FItem::Rect { w, h, fill, pen } => {
 				let c = Curve::rect(*w, *h);
-				if let Some(colour) = res!(rgba(engine, fill, span)) {
+				if let Some(colour) = res!(paint_ink(engine, fill, span)) {
 					ink.push(DrawOp::Fill { path: res!(c.to_path(P2::new(x, y))), colour });
 				}
 				if let Some(pen) = pen {
@@ -252,7 +251,7 @@ fn stroke_ink(engine: &mut Engine, c: &Curve, pen: &Pen, x: f64, y: f64, ink: &m
 	if pen.thickness <= 0.0 {
 		return Ok(());
 	}
-	if let Some(colour) = res!(rgba(engine, &pen.paint, span)) {
+	if let Some(colour) = res!(paint_ink(engine, &pen.paint, span)) {
 		let path = res!(c.to_path(P2::new(x, y)));
 		let p = res!(pen_of(pen));
 		ink.push(DrawOp::Fill { path: res!(path.stroke(&p)), colour });
@@ -268,9 +267,8 @@ fn stroke_ink(engine: &mut Engine, c: &Curve, pen: &Pen, x: f64, y: f64, ink: &m
 // its whole text.
 fn glyph_text(run: &GlyphRun) -> Outcome<ShapedText> {
 	let colour = match &run.fill {
-		Paint::Color(c) if is_black(c)	=> Rgba::BLACK,
-		Paint::Color(c)					=> res!(c.to_rgba()),
-		_								=> Rgba::BLACK,
+		Paint::Color(c)	=> c.to_ink(),
+		_				=> Ink::BLACK,
 	};
 	let starts: Vec<usize> = run.text.char_indices().map(|(i, _)| i).collect();
 	let each = starts.len() == run.glyphs.len();
@@ -291,32 +289,4 @@ fn glyph_text(run: &GlyphRun) -> Outcome<ShapedText> {
 	let vm = res!(run.font.font.metrics(run.size as f32));
 	let dims = Dims::new(Sp::from_pt(px * run.size), Sp::from_pt(vm.ascent as f64), Sp::from_pt(vm.descent as f64));
 	Ok(ShapedText::from_glyphs(run.font.font.clone(), run.size as f32, glyphs, run.text.clone(), colour, dims))
-}
-
-fn is_black(c: &crate::eval::value::Color) -> bool {
-	c.alpha >= 1.0 && match c.space {
-		ColorSpace::Luma	=> c.c[0] == 0.0,
-		ColorSpace::Rgb		=> c.c[0] == 0.0 && c.c[1] == 0.0 && c.c[2] == 0.0,
-		_					=> false,
-	}
-}
-
-/// A paint as a flat colour: black directly, other colours through the colour library, a gradient by its
-/// middle stop and a tiling not at all, each of the last two with a warning.
-pub fn rgba(engine: &mut Engine, p: &Paint, span: Span) -> Outcome<Option<Rgba>> {
-	match p {
-		Paint::Color(c) if is_black(c)	=> Ok(Some(Rgba::BLACK)),
-		Paint::Color(c)					=> Ok(Some(res!(c.to_rgba()))),
-		Paint::Gradient(g) => {
-			engine.warn(DiagnosticKind::Unsupported, span, "gradients are drawn in one flat colour: the drawing layer has no shading");
-			match g.stops.get(g.stops.len() / 2) {
-				Some((c, _))	=> Ok(Some(res!(c.to_rgba()))),
-				None			=> Ok(None),
-			}
-		}
-		Paint::Tiling(_) => {
-			engine.warn(DiagnosticKind::Unsupported, span, "tiling paint is not drawn: the drawing layer has no tiling");
-			Ok(None)
-		}
-	}
 }

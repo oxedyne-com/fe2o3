@@ -40,6 +40,7 @@ use crate::eval::fixpoint::{
 	Laid,
 	PageSink,
 };
+use crate::eval::intro::Introspector;
 use crate::flow::text::FontStore;
 use crate::font::FontMetrics;
 use crate::fonts;
@@ -75,6 +76,7 @@ use std::path::{
 	PathBuf,
 };
 use std::sync::Arc;
+use std::time::SystemTime;
 
 /// The pieces a compile needs after assembly, from either the whole-book path or the lone-file path.
 pub struct Assembled {
@@ -378,6 +380,7 @@ pub struct Evaluated {
 	pub laid:	Outcome<Laid>,
 	pub blank:	bool,			// the final pass realised a body that sets no content ([`Engine::body`])
 	pub main:	PathBuf,		// the main file, where a diagnostic with no site of its own is reported
+	pub warm:	bool,			// the first pass began from a previous compile's introspector
 }
 
 /// Compiles `main_path` through the evaluator: load, evaluate once, then run the fixpoint, which streams
@@ -413,6 +416,23 @@ pub fn assemble_eval_timed<S: PageSink>(
 )
 	-> Outcome<Evaluated>
 {
+	assemble_eval_from(main_path, root, fonts, sink, timings, fuel, None)
+}
+
+// As `assemble_eval_timed`, the first pass reading `warm` where there is one. It is set after the
+// evaluation, so that the evaluation sees what a cold compile's sees; what a warm start can change is the
+// first pass, whose reads the fixpoint checks as it checks every pass's.
+fn assemble_eval_from<S: PageSink>(
+	main_path:	&Path,
+	root:		&Path,
+	fonts:		FontStore,
+	sink:		&mut S,
+	timings:	Option<Timings>,
+	fuel:		Option<u64>,
+	warm:		Option<Arc<Introspector>>,
+)
+	-> Outcome<Evaluated>
+{
 	let canon = |p: &Path| vfs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
 	let main_path	= canon(main_path);
 	let mut world = World::new(canon(root));
@@ -424,15 +444,98 @@ pub fn assemble_eval_timed<S: PageSink>(
 	if let Some(t) = engine.timings.as_mut() {
 		t.leave();	// the load
 	}
+	let started = warm.is_some();
 	let laid = match engine.timed(Phase::Eval, |engine| eval::eval_source(engine, id)) {
-		Ok(module)	=> fixpoint::run(&mut engine, &module, sink),
+		Ok(module)	=> {
+			if let Some(intro) = warm {
+				engine.intro = intro;
+			}
+			fixpoint::run(&mut engine, &module, sink)
+		},
 		Err(e)		=> Err(e),
 	};
 	// Typst lays a main that sets nothing out as one blank page without a word, so a strict caller is told
 	// from what the body realised to in the pass that stood, never from the page count nor from the content
 	// as it was evaluated: a `context` that gives nothing is an element until it is resolved.
 	let blank = engine.body == Some(false);
-	Ok(Evaluated { engine, laid, blank, main: main_path })
+	Ok(Evaluated { engine, laid, blank, main: main_path, warm: started })
+}
+
+// The modification times of the font directories and files a store has scanned, none for one that cannot
+// be statted, so that a font mended, added or removed on disc is seen by a difference.
+fn stamps(fonts: &FontStore) -> Vec<(PathBuf, Option<SystemTime>)> {
+	fonts.scanned().into_iter().map(|p| {
+		let t = std::fs::metadata(&p).and_then(|m| m.modified()).ok();
+		(p, t)
+	}).collect()
+}
+
+/// A compiler that lasts across compiles: the font store, whose parsed faces and shaping cache a second
+/// compile need not build again, and the introspector of the last compile that laid pages, which the
+/// next compile starts from. The package store is the process's, supplied by the host, so a session
+/// holds none of it.
+///
+/// A warm compile reads the kept introspector in its first pass, and the fixpoint then checks every read of
+/// that pass as it checks every pass's. A document that converges therefore ends where a cold compile ends,
+/// usually after one pass in place of three. A compile that lays no pages keeps the last introspector, so
+/// an edit that breaks the document still leaves the next one a warm start. A font file that changes on
+/// disc renews the store before the next compile.
+#[derive(Debug, Default)]
+pub struct Session {
+	fonts:	FontStore,
+	stamp:	Vec<(PathBuf, Option<SystemTime>)>,	// the scanned fonts as they were when the book was built
+	intro:	Option<Arc<Introspector>>,
+}
+
+impl Session {
+	pub fn new(fonts: FontStore) -> Self {
+		Self { fonts, stamp: Vec::new(), intro: None }
+	}
+
+	pub fn fonts(&self) -> &FontStore { &self.fonts }
+
+	/// Replaces the font store, and with it the parsed faces and the shaping cache. The kept introspector
+	/// stays: it records the document's layout, not its faces, and the first pass is checked in any case.
+	pub fn set_fonts(&mut self, fonts: FontStore) {
+		self.fonts	= fonts;
+		self.stamp	= Vec::new();
+	}
+
+	/// The introspector of the last compile that laid pages.
+	pub fn intro(&self) -> Option<&Arc<Introspector>> { self.intro.as_ref() }
+
+	/// Compiles `main_path` as [`assemble_eval_timed`] does, from the kept introspector unless `cold`, which
+	/// an explicit output asks for so that it never depends on what was compiled before it. Whether cold or
+	/// warm, the compile keeps the font store, and the new introspector whenever pages were laid, converged
+	/// or not.
+	pub fn compile<S: PageSink>(
+		&mut self,
+		main_path:	&Path,
+		root:		&Path,
+		sink:		&mut S,
+		timings:	Option<Timings>,
+		fuel:		Option<u64>,
+		cold:		bool,
+	)
+		-> Outcome<Evaluated>
+	{
+		if stamps(&self.fonts) != self.stamp {
+			self.fonts = self.fonts.renewed();
+		}
+		// Built here so that the engine's copy of the store shares the book, and what the compile parses and
+		// shapes stays with the session. A book that cannot be built fails again where the engine first
+		// needs a face, and is reported there.
+		let _ = self.fonts.book();
+		self.stamp = stamps(&self.fonts);
+		let warm = if cold { None } else { self.intro.clone() };
+		let done = res!(assemble_eval_from(main_path, root, self.fonts.clone(), sink, timings, fuel, warm));
+		if let Ok(laid) = &done.laid {
+			if laid.pages > 0 {
+				self.intro = Some(laid.intro.clone());
+			}
+		}
+		Ok(done)
+	}
 }
 
 /// Supplies the packages in Typst's own cache, where `typst` keeps those it has fetched: the directory

@@ -7,10 +7,13 @@
 //! forbids it -- falls back to its filled outline, stored once in a Type-3 font that carries a
 //! `/ToUnicode` of its own, so it too stays extractable.
 //!
-//! The geometry and colour are the crate's own [`Path`], [`Pt`], [`Seg`] and [`Rgba`]; nothing here
+//! The geometry and colour are the crate's own [`Path`], [`Pt`], [`Seg`] and [`Ink`]; nothing here
 //! defines a parallel type. A quadratic segment is elevated to a cubic on the way out, since PDF has
 //! no quadratic operator, and the whole page is flipped in y so the engine's top-left, y-down frame
 //! meets PDF's bottom-left, y-up one.
+//!
+//! A colour is an [`Ink`], and a [`ColourOut`] says how it is written: in the ink's own space (`g`, `rg`
+//! or `k`), or lowered to sRGB, which is what every file written before an ink knew its space holds.
 //!
 //! The bytes are deterministic: no dates are written, the `/ID` is derived from the file's own
 //! content rather than the clock, and the Info dictionary ([`PdfInfo`]) holds only what the caller
@@ -20,7 +23,7 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::colour::Rgba;
+use crate::colour::Ink;
 use crate::pdf_font::{
 	FontFile,
 	FontProgram,
@@ -73,11 +76,11 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 pub enum Draw {
 	Fill {
 		path:	Path,
-		colour:	Rgba,
+		colour:	Ink,
 	},
 	Stroke {
 		path:	Path,
-		colour:	Rgba,
+		colour:	Ink,
 		width:	f64,	// pen width, in points
 	},
 	Image {
@@ -96,7 +99,7 @@ pub enum Draw {
 		y:			f32,		// pen y (the baseline) in the engine frame, points
 		size:		f32,		// point size the glyph is shown at
 		adv:		f32,		// advance in points at that size, for the font's /Widths
-		colour:		Rgba,
+		colour:		Ink,
 		text:		String,		// source scalar(s) this glyph stands for, for /ToUnicode; may be empty
 	},
 	Text {
@@ -105,7 +108,7 @@ pub enum Draw {
 		x:			f32,		// pen x in the engine frame (top-left, y down), points
 		y:			f32,		// the baseline in the engine frame, points
 		size:		f32,		// point size
-		colour:		Rgba,
+		colour:		Ink,
 		text:		String,		// source scalar(s), for /ToUnicode; may be empty
 	},
 	// Opens a group: the draws up to the matching `Pop` are drawn under `matrix` (`[a b c d e f]`, mapping
@@ -120,16 +123,16 @@ pub enum Draw {
 
 impl Draw {
 
-	/// The paint colour of a vector draw, opaque for an image (whose translucency rides its own soft
+	/// The alpha of a vector draw's paint, opaque for an image (whose translucency rides its own soft
 	/// mask, not the page's alpha graphics state).
-	fn colour(&self) -> Rgba {
+	fn alpha(&self) -> u8 {
 		match self {
-			Draw::Fill { colour, .. }	=> *colour,
-			Draw::Stroke { colour, .. }	=> *colour,
-			Draw::Glyph { colour, .. }	=> *colour,
-			Draw::Text { colour, .. }	=> *colour,
-			Draw::Image { .. }			=> Rgba::new(0, 0, 0, 255),
-			Draw::Push { .. } | Draw::Pop	=> Rgba::new(0, 0, 0, 255),
+			Draw::Fill { colour, .. }	=> colour.alpha(),
+			Draw::Stroke { colour, .. }	=> colour.alpha(),
+			Draw::Glyph { colour, .. }	=> colour.alpha(),
+			Draw::Text { colour, .. }	=> colour.alpha(),
+			Draw::Image { .. }			=> 255,
+			Draw::Push { .. } | Draw::Pop	=> 255,
 		}
 	}
 }
@@ -175,8 +178,8 @@ impl PdfPage {
 		self.annots.push(LinkAnnot { x0: x, y0: y, x1: x + w, y1: y + h, uri });
 	}
 
-	pub fn fill(&mut self, path: Path, colour: Rgba) {
-		self.draws.push(Draw::Fill { path, colour });
+	pub fn fill(&mut self, path: Path, colour: impl Into<Ink>) {
+		self.draws.push(Draw::Fill { path, colour: colour.into() });
 	}
 
 	/// Opens a group drawn under `matrix` and clipped to `clip`; see [`Draw::Push`]. Every `push` must be
@@ -190,8 +193,8 @@ impl PdfPage {
 		self.draws.push(Draw::Pop);
 	}
 
-	pub fn stroke(&mut self, path: Path, colour: Rgba, width: f64) {
-		self.draws.push(Draw::Stroke { path, colour, width });
+	pub fn stroke(&mut self, path: Path, colour: impl Into<Ink>, width: f64) {
+		self.draws.push(Draw::Stroke { path, colour: colour.into(), width });
 	}
 
 	/// Places a decoded raster in the rectangle at top-left `(x, y)`, `w` wide and `h` tall, in the
@@ -221,8 +224,8 @@ impl PdfPage {
 	/// glyph is text-extractable, or empty when none is known. The writer stores each distinct outline
 	/// once as a Type-3 `CharProc` and references it here, so a glyph drawn a thousand times costs its
 	/// outline once.
-	pub fn glyph(&mut self, outline: Path, x: f32, y: f32, size: f32, adv: f32, colour: Rgba, text: String) {
-		self.draws.push(Draw::Glyph { outline, x, y, size, adv, colour, text });
+	pub fn glyph(&mut self, outline: Path, x: f32, y: f32, size: f32, adv: f32, colour: impl Into<Ink>, text: String) {
+		self.draws.push(Draw::Glyph { outline, x, y, size, adv, colour: colour.into(), text });
 	}
 
 	/// Adds glyph `gid` of an embeddable font at pen `(x, y)` -- `x` the left, `y` the baseline, in the
@@ -237,10 +240,10 @@ impl PdfPage {
 		x:		f32,
 		y:		f32,
 		size:	f32,
-		colour:	Rgba,
+		colour:	impl Into<Ink>,
 		text:	String,
 	) {
-		self.draws.push(Draw::Text { font, gid, x, y, size, colour, text });
+		self.draws.push(Draw::Text { font, gid, x, y, size, colour: colour.into(), text });
 	}
 }
 
@@ -362,6 +365,27 @@ fn pdf_text_string(s: &str) -> String {
 	}
 }
 
+/// How the writer sets a colour. `Rgb` lowers every ink to sRGB and writes `rg` and `RG`, the bytes a
+/// file carried before an ink knew its space; `Native` writes each ink in its own space, `g` for a
+/// grey, `k` for a CMYK and `rg` for the rest, and the same for the stroke forms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ColourOut {
+	Native,
+	#[default]
+	Rgb,
+}
+
+impl ColourOut {
+
+	// The ink as this mode writes it. An RGB ink is written as `rg`, so lowering is the whole of `Rgb`.
+	fn ink(&self, ink: Ink) -> Ink {
+		match self {
+			Self::Native	=> ink,
+			Self::Rgb		=> Ink::Rgb(ink.to_rgba()),
+		}
+	}
+}
+
 /// Accumulates pages and writes them out as one PDF file.
 #[derive(Clone, Debug, Default)]
 pub struct PdfWriter {
@@ -369,6 +393,7 @@ pub struct PdfWriter {
 	compress:	bool,
 	outline:	Vec<OutlineItem>,
 	info:		Option<PdfInfo>,
+	colour_out:	ColourOut,
 }
 
 impl PdfWriter {
@@ -391,6 +416,12 @@ impl PdfWriter {
 		self
 	}
 
+	/// Sets how colours are written, [`ColourOut::Rgb`] unless told otherwise.
+	pub fn with_colour_out(mut self, out: ColourOut) -> Self {
+		self.colour_out = out;
+		self
+	}
+
 	pub fn add_page(&mut self, page: PdfPage) {
 		self.pages.push(page);
 	}
@@ -408,7 +439,8 @@ impl PdfWriter {
 	/// cannot hold the whole document keeps the identical file by streaming to a file handle instead.
 	pub fn to_bytes(&self) -> Outcome<Vec<u8>> {
 		let mut stream = res!(PdfStream::new_with_outline_and_info(
-			Vec::new(), self.pages.len(), self.compress, self.outline.clone(), self.info.clone()));
+			Vec::new(), self.pages.len(), self.compress, self.outline.clone(), self.info.clone()))
+			.with_colour_out(self.colour_out);
 		for page in &self.pages {
 			res!(stream.page(page));
 		}
@@ -451,6 +483,7 @@ pub struct PdfStream<W: Write> {
 	cid_fonts:	Vec<CidFont>,	// one embedded font per program, in order of first use
 	deferred:	bool,			// opened by `open`: the page tree, outline and Info are written by `close`
 	page_objs:	Vec<usize>,		// a deferred stream's page object numbers, in page order
+	colour_out:	ColourOut,		// how a colour is written, `Rgb` unless set
 }
 
 /// One embedded font: the program, the glyphs shown from it with the text each stands for, and the
@@ -467,7 +500,7 @@ struct CidFont {
 struct TextState {
 	open:	bool,
 	font:	Option<(String, f32)>,
-	colour:	Option<Rgba>,
+	colour:	Option<Ink>,
 	run:	Option<TjRun>,
 }
 
@@ -512,7 +545,7 @@ impl TextState {
 		s:			&mut String,
 		translucent:	bool,
 		alpha:		&mut Option<u8>,
-		colour:		Rgba,
+		colour:		Ink,
 		font:		&str,
 		size:		f32,
 	) {
@@ -522,9 +555,9 @@ impl TextState {
 		}
 		if self.colour != Some(colour) {
 			if translucent {
-				set_alpha(s, alpha, colour.a);
+				set_alpha(s, alpha, colour.alpha());
 			}
-			s.push_str(&fmt!("{} {} {} rg\n", chan(colour.r), chan(colour.g), chan(colour.b)));
+			set_colour(s, colour, false);
 			self.colour = Some(colour);
 		}
 		let want = (font.to_string(), size);
@@ -615,6 +648,7 @@ impl<W: Write> PdfStream<W> {
 			cid_fonts:	Vec::new(),
 			deferred:	false,
 			page_objs:	Vec::new(),
+			colour_out:	ColourOut::default(),
 		};
 
 		res!(s.body(b"%PDF-1.7\n"));
@@ -675,10 +709,17 @@ impl<W: Write> PdfStream<W> {
 			cid_fonts:	Vec::new(),
 			deferred:	true,
 			page_objs:	Vec::new(),
+			colour_out:	ColourOut::default(),
 		};
 		res!(s.body(b"%PDF-1.7\n"));
 		res!(s.body(b"%\xE2\xE3\xCF\xD3\n"));
 		Ok(s)
+	}
+
+	/// Sets how colours are written, [`ColourOut::Rgb`] unless told otherwise. Call it before the first page.
+	pub fn with_colour_out(mut self, out: ColourOut) -> Self {
+		self.colour_out = out;
+		self
 	}
 
 	/// How many pages have been written.
@@ -808,7 +849,8 @@ impl<W: Write> PdfStream<W> {
 		let mut s = String::new();
 		s.push_str(&fmt!("1 0 0 -1 0 {} cm\n", numf(page.height)));
 
-		let translucent = page.draws.iter().any(|d| d.colour().a != 255);
+		let translucent = page.draws.iter().any(|d| d.alpha() != 255);
+		let out = self.colour_out;
 		let mut cur_alpha: Option<u8> = None;
 		let mut img_k = 0;	// the image index, naming each `/Im{k}` XObject in draw order
 		let mut used: Vec<(String, usize)> = Vec::new();
@@ -849,20 +891,18 @@ impl<W: Write> PdfStream<W> {
 				},
 				Draw::Fill { path, colour } => {
 					if translucent {
-						set_alpha(&mut s, &mut cur_alpha, colour.a);
+						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					s.push_str(&fmt!("{} {} {} rg\n",
-						chan(colour.r), chan(colour.g), chan(colour.b)));
+					set_colour(&mut s, out.ink(*colour), false);
 					path_ops(&mut s, path);
 					// Non-zero winding, to match the SVG writer, whose fill-rule defaults to nonzero.
 					s.push_str("f\n");
 				},
 				Draw::Stroke { path, colour, width } => {
 					if translucent {
-						set_alpha(&mut s, &mut cur_alpha, colour.a);
+						set_alpha(&mut s, &mut cur_alpha, colour.alpha());
 					}
-					s.push_str(&fmt!("{} {} {} RG\n",
-						chan(colour.r), chan(colour.g), chan(colour.b)));
+					set_colour(&mut s, out.ink(*colour), true);
 					s.push_str(&fmt!("{} w\n", numf(*width)));
 					path_ops(&mut s, path);
 					s.push_str("S\n");
@@ -876,7 +916,7 @@ impl<W: Write> PdfStream<W> {
 					}
 					ts.flush(&mut s);
 					// Under `d1` a Type-3 glyph paints with the text state's fill colour, set by `begin`.
-					ts.begin(&mut s, translucent, &mut cur_alpha, *colour, &name, *size);
+					ts.begin(&mut s, translucent, &mut cur_alpha, out.ink(*colour), &name, *size);
 					// The text matrix places the glyph and flips it back to y up: the page CTM flips the whole
 					// page in y, and this `[1 0 0 -1 x y]` flips the text within it, so the glyph reads upright.
 					// A per-glyph matrix means the font's advance never moves the pen -- the offset is exact.
@@ -890,13 +930,14 @@ impl<W: Write> PdfStream<W> {
 					if !used.iter().any(|(n, _)| n == &name) {
 						used.push((name.clone(), obj));
 					}
+					let colour = out.ink(*colour);
 					let same_state = ts.open
-						&& ts.colour == Some(*colour)
+						&& ts.colour == Some(colour)
 						&& ts.font.as_ref().map_or(false, |(n, z)| n == &name && z == size);
 					let same_line = same_state && ts.run.as_ref().map_or(false, |r| r.y == *y);
 					if !same_line {
 						ts.flush(&mut s);
-						ts.begin(&mut s, translucent, &mut cur_alpha, *colour, &name, *size);
+						ts.begin(&mut s, translucent, &mut cur_alpha, colour, &name, *size);
 						// One text matrix per run, flipped back to y up within the page's flip; the glyphs
 						// after the first are placed by the font's advances and the run's adjustments.
 						s.push_str(&fmt!("1 0 0 -1 {} {} Tm\n", numf32(*x), numf32(*y)));
@@ -1553,7 +1594,7 @@ fn path_ops(s: &mut String, path: &Path) {
 /// embedded one. An all-opaque page with no
 /// image and no text carries an empty resource dictionary -- byte for byte the original.
 fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[(String, usize)]) -> String {
-	let translucent = page.draws.iter().any(|d| d.colour().a != 255);
+	let translucent = page.draws.iter().any(|d| d.alpha() != 255);
 
 	// The image resource dict, `/Im{k}` in draw order to match the content stream's `Do` names.
 	let xobjects = if img_objs.is_empty() {
@@ -1588,7 +1629,7 @@ fn resources(page: &PdfPage, img_objs: &[(usize, Option<usize>)], page_fonts: &[
 
 	let mut alphas: Vec<u8> = Vec::new();
 	for d in &page.draws {
-		let a = d.colour().a;
+		let a = d.alpha();
 		if !alphas.contains(&a) {
 			alphas.push(a);
 		}
@@ -1614,6 +1655,22 @@ fn set_alpha(s: &mut String, cur: &mut Option<u8>, a: u8) {
 		s.push_str(&fmt!("/GS{} gs\n", a));
 		*cur = Some(a);
 	}
+}
+
+/// Sets the fill colour, or the stroke colour when `stroke`, in the ink's own space: `g` for a grey, `rg`
+/// for an RGB and `k` for a CMYK, and `G`, `RG` and `K` for the stroke.
+fn set_colour(s: &mut String, ink: Ink, stroke: bool) {
+	let (rgb, grey, cmyk) = if stroke { ("RG", "G", "K") } else { ("rg", "g", "k") };
+	match ink {
+		Ink::Grey { v, .. }				=> s.push_str(&fmt!("{} {}\n", unit(v), grey)),
+		Ink::Rgb(c)						=> s.push_str(&fmt!("{} {} {} {}\n", chan(c.r), chan(c.g), chan(c.b), rgb)),
+		Ink::Cmyk { c, m, y, k, .. }	=> s.push_str(&fmt!("{} {} {} {} {}\n", unit(c), unit(m), unit(y), unit(k), cmyk)),
+	}
+}
+
+/// A float colour component from 0 to 1, clamped, with a component that is no number written as 0.
+fn unit(v: f32) -> String {
+	dec6(if v.is_finite() { v.clamp(0.0, 1.0) as f64 } else { 0.0 })
 }
 
 /// One 8-bit channel as a PDF colour component from 0 to 1.
@@ -1667,6 +1724,7 @@ fn deflate(raw: &[u8]) -> Outcome<Vec<u8>> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::colour::Rgba;
 	use crate::path::{
 		Bounds,
 		PathBuilder,
@@ -2219,6 +2277,77 @@ mod tests {
 		let bytes = res!(w.to_bytes());
 		let text = String::from_utf8_lossy(&bytes);
 		assert!(!text.contains("/Info"), "no /Info in the trailer, found: {}", text);
+		Ok(())
+	}
+	// One page of every ink in a fill, a stroke and a glyph, written in `out`.
+	fn inks_page(out: ColourOut) -> Outcome<String> {
+		let mut w = PdfWriter::new().with_colour_out(out);
+		let mut page = PdfPage::new(100.0, 100.0);
+		let r = || Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0));
+		page.fill(res!(r()), Ink::Grey { v: 0.0, a: 255 });
+		page.fill(res!(r()), Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 });
+		page.fill(res!(r()), Rgba::new(255, 0, 0, 255));
+		page.stroke(res!(r()), Ink::Grey { v: 0.5, a: 255 }, 1.0);
+		page.stroke(res!(r()), Ink::Cmyk { c: 1.0, m: 0.5, y: 0.0, k: 0.0, a: 255 }, 1.0);
+		page.stroke(res!(r()), Rgba::new(255, 0, 0, 255), 1.0);
+		page.glyph(res!(tri(0.0)), 10.0, 20.0, 12.0, 8.0, Ink::Grey { v: 0.25, a: 255 }, "O".into());
+		page.glyph(res!(tri(0.0)), 30.0, 20.0, 12.0, 8.0, Ink::Cmyk { c: 0.0, m: 1.0, y: 1.0, k: 0.0, a: 255 }, "O".into());
+		w.add_page(page);
+		Ok(String::from_utf8_lossy(&res!(w.to_bytes())).into_owned())
+	}
+
+	#[test]
+	fn test_native_mode_writes_each_ink_in_its_own_space_20() -> Outcome<()> {
+		let text = res!(inks_page(ColourOut::Native));
+		for want in [
+			"0 g\n", "0 0 0 1 k\n", "1 0 0 rg\n",
+			"0.5 G\n", "1 0.5 0 0 K\n", "1 0 0 RG\n",
+			"0.25 g\n", "0 1 1 0 k\n",
+		] {
+			assert!(text.contains(want), "the native page lacks {:?}: {}", want, text);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_rgb_mode_lowers_every_ink_to_rg_21() -> Outcome<()> {
+		let text = res!(inks_page(ColourOut::Rgb));
+		for gone in [" g\n", " k\n", " G\n", " K\n"] {
+			assert!(!text.contains(gone), "the Rgb page holds {:?}: {}", gone, text);
+		}
+		for want in ["0 0 0 rg\n", "1 0 0 rg\n", "1 0 0 RG\n"] {
+			assert!(text.contains(want), "the Rgb page lacks {:?}: {}", want, text);
+		}
+		Ok(())
+	}
+
+	#[test]
+	fn test_an_unset_mode_is_the_rgb_mode_and_a_grey_equals_its_rgb_there_22() -> Outcome<()> {
+		// The bytes of a file whose inks carry their space are the bytes of one whose colours never did.
+		let page = |ink: Ink| -> Outcome<Vec<u8>> {
+			let mut w = PdfWriter::new();
+			let mut page = PdfPage::new(100.0, 100.0);
+			page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), ink);
+			page.glyph(res!(tri(0.0)), 10.0, 20.0, 12.0, 8.0, ink, "O".into());
+			w.add_page(page);
+			w.to_bytes()
+		};
+		assert_eq!(res!(page(Ink::Grey { v: 0.0, a: 255 })), res!(page(Ink::Rgb(Rgba::BLACK))));
+		assert_eq!(
+			res!(page(Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 })),
+			res!(page(Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 }.to_rgba().into())));
+		Ok(())
+	}
+
+	#[test]
+	fn test_a_translucent_grey_keeps_its_alpha_state_in_native_mode_23() -> Outcome<()> {
+		let mut w = PdfWriter::new().with_colour_out(ColourOut::Native);
+		let mut page = PdfPage::new(100.0, 100.0);
+		page.fill(res!(Path::rect(Bounds::new(1.0, 1.0, 9.0, 9.0))), Ink::Grey { v: 0.5, a: 128 });
+		w.add_page(page);
+		let text = String::from_utf8_lossy(&res!(w.to_bytes())).into_owned();
+		assert!(text.contains("/GS128 gs\n0.5 g\n"), "{}", text);
+		assert!(text.contains("/GS128 << /ca "), "{}", text);
 		Ok(())
 	}
 }

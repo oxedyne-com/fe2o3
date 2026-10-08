@@ -267,6 +267,7 @@ fn draw_text(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use oxedyne_fe2o3_graphics::colour::Ink;
 	use crate::ir::{
 		DrawOp,
 		Dims,
@@ -329,7 +330,7 @@ mod tests {
 		let geom	= PageGeometry::new(Sp::from_pt(200.0), Sp::from_pt(300.0), Sp::from_pt(20.0));
 		let rect	= res!(Path::rect(Bounds::new(0.0, 0.0, 36.0, 36.0)));
 		let graphic	= Graphic::new(
-			vec![DrawOp::Fill { path: rect, colour: Rgba::BLACK }],
+			vec![DrawOp::Fill { path: rect, colour: Ink::BLACK }],
 			Dims::new(Sp::from_pt(36.0), Sp::from_pt(36.0), Sp::ZERO))
 			.with_link("https://need2know.ai/with-ai/doc".to_string());
 		let mut frame = Frame::new();
@@ -351,7 +352,7 @@ mod tests {
 		let geom	= PageGeometry::new(Sp::from_pt(200.0), Sp::from_pt(300.0), Sp::from_pt(20.0));
 		let rect	= res!(Path::rect(Bounds::new(0.0, 0.0, 36.0, 36.0)));
 		let graphic	= Graphic::new(
-			vec![DrawOp::Fill { path: rect, colour: Rgba::BLACK }],
+			vec![DrawOp::Fill { path: rect, colour: Ink::BLACK }],
 			Dims::new(Sp::from_pt(36.0), Sp::from_pt(36.0), Sp::ZERO));
 		let mut frame = Frame::new();
 		frame.push(Placed::new(

@@ -18,7 +18,7 @@ use crate::ledger::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::Ink,
 	path::Path,
 };
 
@@ -276,8 +276,8 @@ pub enum Length {
 /// graphic's own frame, which is y down and in points, so placing the graphic needs only a translation.
 #[derive(Clone, Debug)]
 pub enum DrawOp {
-	Fill { path: Path, colour: Rgba },
-	Stroke { path: Path, colour: Rgba, width: f32 },	// stroke width in points
+	Fill { path: Path, colour: Ink },
+	Stroke { path: Path, colour: Ink, width: f32 },	// stroke width in points
 	// A raster drawn to fill the rectangle at top-left (x, y), w wide and h tall, in the graphic's frame.
 	Image { image: Arc<RasterImage>, x: f32, y: f32, w: f32, h: f32 },
 }

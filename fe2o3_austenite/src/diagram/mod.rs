@@ -41,7 +41,10 @@ use oxedyne_fe2o3_font::{
 	shape::Dir,
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::{
+		Ink,
+		Rgba,
+	},
 	path::Bounds,
 	transform::Transform,
 };
@@ -309,9 +312,9 @@ impl Diagram {
 			// A node's own fill wins; otherwise the diagram style's default fill, or none.
 			let fill = n.fill.or(style.node_fill);
 			if let Some(fill) = fill {
-				ops.push(DrawOp::Fill { path: outline.clone(), colour: fill });
+				ops.push(DrawOp::Fill { path: outline.clone(), colour: fill.into() });
 			}
-			ops.push(DrawOp::Stroke { path: outline, colour: Rgba::BLACK, width: style.node_stroke });
+			ops.push(DrawOp::Stroke { path: outline, colour: Ink::BLACK, width: style.node_stroke });
 			res!(bake_label_centred(&mut ops, &labels[i], style.label_size, r));
 		}
 
@@ -393,12 +396,12 @@ impl Diagram {
 		stroke_pts[n - 1] = layout::retract(tip, prev, style.arrow_len);
 		ops.push(DrawOp::Stroke {
 			path:	res!(layout::stroke_path(&stroke_pts)),
-			colour:	Rgba::BLACK,
+			colour:	Ink::BLACK,
 			width:	style.edge_stroke,
 		});
 		ops.push(DrawOp::Fill {
 			path:	res!(layout::arrowhead(tip, prev, style.arrow_len, style.arrow_half)),
-			colour:	Rgba::BLACK,
+			colour:	Ink::BLACK,
 		});
 
 		if let Some(text) = &e.label {
@@ -538,7 +541,7 @@ fn bake_label(ops: &mut Vec<DrawOp>, shaped: &ShapedText, base_x: Sp, base_y: Sp
 		let t = Transform::scale(1.0, -1.0)
 			.then(&Transform::translate(bx + glyph.x, by - glyph.y));
 		let placed = res!(path.transform(&t));
-		ops.push(DrawOp::Fill { path: placed, colour: Rgba::BLACK });
+		ops.push(DrawOp::Fill { path: placed, colour: Ink::BLACK });
 	}
 	Ok(())
 }

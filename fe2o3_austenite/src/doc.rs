@@ -52,7 +52,6 @@ use crate::ledger::{
 use crate::memo::{
 	BlockEntry,
 	BlockState,
-	Fnv,
 	Memo,
 };
 use crate::linebreak::{
@@ -98,7 +97,10 @@ use oxedyne_fe2o3_font::{
 	},
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::{
+		Ink,
+		Rgba,
+	},
 	path::{
 		Bounds,
 		Path,
@@ -112,6 +114,8 @@ use oxedyne_fe2o3_graphics::{
 	},
 	transform::Transform,
 };
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -855,15 +859,15 @@ struct Authoring<'a> {
 	claim_gather:	ClaimGather,	// the reverse claim index's references, gathered in document order
 	want_claim_index:	bool,		// a `Block::ClaimIndex` placeholder was met, so the claim index is built after the walk
 	claim_index_at:	Option<usize>,	// the body-node position the `Block::ClaimIndex` placeholder sat at, where the listing is spliced in flow
-	global_fp:		u64,			// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
+	global_fp:		Fingerprint,	// the compile-wide fingerprint (theme, geometry, cross-reference targets) every block memo key folds in
 	answers:		Vec<Answered>,	// every answer a setter gave, in document order; a memo hit replays its block's
-	assets:			HashMap<String, u64>,	// each image path's fingerprint this compile ([`asset_fp`]), read once
+	assets:			HashMap<String, Fingerprint>,	// each image path's fingerprint this compile ([`asset_fp`]), read once
 }
 
 /// The fingerprint of the image at `path` as it now stands: the file it resolves to and its bytes, or a
 /// mark that no file answers to it, or that the file will not read.
-fn asset_fp(path: &str) -> u64 {
-	let mut h = Fnv::new();
+fn asset_fp(path: &str) -> Fingerprint {
+	let mut h = Fingerprinter::new();
 	match crate::image::resolve(path) {
 		Ok(Some(file)) => {
 			h.write_str(&file.display().to_string());
@@ -936,7 +940,7 @@ impl<'a> Authoring<'a> {
 		measure:	Sp,
 		bib:		Option<&'a Bibliography>,
 		refs:		HashMap<String, String>,
-		global_fp:	u64,
+		global_fp:	Fingerprint,
 	)
 		-> Self
 	{
@@ -1733,10 +1737,10 @@ impl<'a> Authoring<'a> {
 	/// on its first use and plain after depends on exactly which terms have already been seen, so the set is
 	/// in every key. The fold is by XOR of each term's hash, which needs no sort and updates in step with a
 	/// growing set without ever caring about insertion order.
-	fn seen_hash(&self) -> u64 {
-		let mut acc = 0u64;
+	fn seen_hash(&self) -> Fingerprint {
+		let mut acc = Fingerprint::default();
 		for term in &self.seen {
-			let mut h = Fnv::new();
+			let mut h = Fingerprinter::new();
 			h.write_str(term);
 			acc ^= h.finish();
 		}
@@ -1746,10 +1750,10 @@ impl<'a> Authoring<'a> {
 	/// An order-independent fingerprint of the per-supplement counters (Figure, Table, aside), each folded
 	/// with its current value, so a block that stamps the next figure or table number keys on the number it
 	/// will actually stamp.
-	fn counters_hash(&self) -> u64 {
-		let mut acc = 0u64;
+	fn counters_hash(&self) -> Fingerprint {
+		let mut acc = Fingerprint::default();
 		for (k, v) in &self.counters {
-			let mut h = Fnv::new();
+			let mut h = Fingerprinter::new();
 			h.write_str(k);
 			h.write_u32(*v);
 			acc ^= h.finish();
@@ -1762,10 +1766,10 @@ impl<'a> Authoring<'a> {
 	/// counter state it enters under. Two compiles that reach a block with the same content and the same
 	/// entering state produce byte-identical nodes, so they must share a key; an edit that shifts any of
 	/// those must not.
-	fn block_key(&self, block: &Block, look: Option<&Block>, assets: u64) -> u64 {
-		let mut h = Fnv::new();
+	fn block_key(&self, block: &Block, look: Option<&Block>, assets: Fingerprint) -> Fingerprint {
+		let mut h = Fingerprinter::new();
 		h.write(b"block");
-		h.write_u64(self.global_fp);
+		h.write_fingerprint(self.global_fp);
 		h.write_i32(self.measure.raw());
 		// The block's full content. The derived `Debug` is a faithful, total structural rendering -- it can
 		// never silently drop a field the way a hand-written walker can -- and no type reachable from a
@@ -1778,19 +1782,19 @@ impl<'a> Authoring<'a> {
 		}
 		// What the block's images hold, not only their names: an image replaced, deleted or supplied under
 		// the same path changes what the block sets, so it must miss.
-		h.write_u64(assets);
+		h.write_fingerprint(assets);
 		self.block_state().hash_into(&mut h);
-		h.write_u64(self.seen_hash());
-		h.write_u64(self.counters_hash());
+		h.write_fingerprint(self.seen_hash());
+		h.write_fingerprint(self.counters_hash());
 		h.finish()
 	}
 
 	/// A fingerprint of every image `block` draws, as each now stands: the file its path resolves to and
 	/// that file's bytes, or that none answers to it. Each file is read and hashed once per compile.
-	fn assets_fp(&mut self, block: &Block) -> u64 {
+	fn assets_fp(&mut self, block: &Block) -> Fingerprint {
 		let mut asks = Vec::new();
 		asks_of(std::slice::from_ref(block), &mut asks);
-		let mut h = Fnv::new();
+		let mut h = Fingerprinter::new();
 		for (_, what) in &asks {
 			if let Asked::Image { path, .. } = what {
 				let fp = match self.assets.get(path) {
@@ -1801,7 +1805,7 @@ impl<'a> Authoring<'a> {
 						fp
 					},
 				};
-				h.write_u64(fp);
+				h.write_fingerprint(fp);
 			}
 		}
 		h.finish()
@@ -1893,7 +1897,7 @@ fn memoisable(block: &Block) -> bool {
 /// The markers of a block being authored on a cache miss: its key, where it starts in each accumulator,
 /// and the glossary and supplement state before it ran, so the delta it makes can be captured once it has.
 struct PendingBlock {
-	key:				u64,
+	key:				Fingerprint,
 	i_before:			usize,
 	nodes_before:		usize,
 	heads_before:		usize,
@@ -2045,9 +2049,9 @@ pub fn memo_fingerprint(
 	refs:	&HashMap<String, String>,
 	bib:	Option<&Bibliography>,
 )
-	-> u64
+	-> Fingerprint
 {
-	let mut h = Fnv::new();
+	let mut h = Fingerprinter::new();
 	h.write(b"global");
 	// The theme as data. Its derived `Debug` renders every styled value in a canonical field order, so
 	// two identical themes fingerprint alike and any change to one shows.
@@ -2060,14 +2064,14 @@ pub fn memo_fingerprint(
 	h.write_i32(geom.bottom.raw());
 	// The cross-reference targets, folded order-independently: a label maps to its resolved "Chapter 4"
 	// text, and that text changing (a renumber) must miss every block that sets a reference.
-	let mut rf = 0u64;
+	let mut rf = Fingerprint::default();
 	for (k, v) in refs {
-		let mut e = Fnv::new();
+		let mut e = Fingerprinter::new();
 		e.write_str(k);
 		e.write_str(v);
 		rf ^= e.finish();
 	}
-	h.write_u64(rf);
+	h.write_fingerprint(rf);
 	// The bibliography as data, so editing a `.bib` (which changes the text a `#cite` resolves to without
 	// touching any block's own content) misses every citation-bearing block rather than serving it stale.
 	h.write_bool(bib.is_some());
@@ -3318,17 +3322,17 @@ fn svg_graphic(
 	for op in pic.ops {
 		match op {
 			SvgOp::Fill { path, colour } => {
-				ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+				ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: colour.into() });
 			},
 			SvgOp::Stroke { path, colour, stroke } => {
 				if stroke.dash.is_some() {
 					// Bake the dashes into an outline in the picture's frame, then scale that with the rest.
 					let outline = res!(path.stroke(&stroke));
-					ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour });
+					ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: colour.into() });
 				} else {
 					ops.push(DrawOp::Stroke {
 						path:	res!(path.transform(&t)),
-						colour,
+						colour: colour.into(),
 						width:	stroke.width * s,
 					});
 				}
@@ -3400,7 +3404,7 @@ fn bake_svg_text(
 			.then(&Transform::translate(pen_x + glyph.x, y - glyph.y))
 			.then(local)
 			.then(t);
-		ops.push(DrawOp::Fill { path: res!(outline.transform(&place)), colour });
+		ops.push(DrawOp::Fill { path: res!(outline.transform(&place)), colour: colour.into() });
 	}
 	Ok(())
 }
@@ -3688,8 +3692,8 @@ fn placeholder(measure: Sp) -> Outcome<Graphic> {
 	pb.close();
 	let path	= res!(pb.finish());
 	let ops		= vec![
-		DrawOp::Fill { path: path.clone(), colour: Rgba::opaque(238, 238, 240) },
-		DrawOp::Stroke { path, colour: Rgba::opaque(150, 150, 150), width: 0.8 },
+		DrawOp::Fill { path: path.clone(), colour: Rgba::opaque(238, 238, 240).into() },
+		DrawOp::Stroke { path, colour: Rgba::opaque(150, 150, 150).into(), width: 0.8 },
 	];
 	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w as f64), Sp::from_pt(h as f64), Sp::ZERO)))
 }
@@ -3994,7 +3998,7 @@ fn fm_doc_title_page(
 	let fill	= Rgba::opaque(grey, grey, grey);
 	ops.push(DrawOp::Fill {
 		path:	res!(Path::rect(Bounds::new(-il, -it, -il + side_w, -it + ph))),
-		colour:	fill,
+		colour:	fill.into(),
 	});
 
 	// The top logo, centred across the sidebar, its top edge one `margins.a4` down from the page top -- which
@@ -4201,7 +4205,7 @@ fn title_run_ops(
 			}
 			let t = Transform::scale(1.0, -1.0)
 				.then(&Transform::translate(x + glyph.x, base_y - glyph.y));
-			ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: Rgba::BLACK });
+			ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: Ink::BLACK });
 		}
 		x += shaped.dims().width.to_pt() as f32;
 	}
@@ -5563,7 +5567,7 @@ fn coloured_run(shaped: &ShapedText, colour: Rgba) -> Outcome<Graphic> {
 		}
 		let t = Transform::scale(1.0, -1.0)
 			.then(&Transform::translate(glyph.x, base_y - glyph.y));
-		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: colour.into() });
 	}
 	Ok(Graphic::new(ops, shaped.dims()))
 }
@@ -5747,7 +5751,7 @@ fn doc_banner(
 	let y1			= banner_h - top_pt;
 
 	let mut ops:	Vec<DrawOp>	= Vec::new();
-	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
+	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey.into() });
 
 	// The title in the resolved heading face (the template's `heading-font`, e.g. Graystroke), falling to
 	// the body bold when the tree ships no display face, at the template's 26 pt, small-capped run by run
@@ -5774,7 +5778,7 @@ fn doc_banner(
 			}
 			let t = Transform::scale(1.0, -1.0)
 				.then(&Transform::translate(x_off + glyph.x, base_y - glyph.y));
-			ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Rgba::BLACK });
+			ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Ink::BLACK });
 		}
 		x_off += shaped.dims().width.to_pt() as f32;
 	}
@@ -5819,7 +5823,7 @@ fn section_banner(
 	let y1			= banner_h - top_pt;
 
 	let mut ops:	Vec<DrawOp>	= Vec::new();
-	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
+	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey.into() });
 
 	// The logo, loaded 30 pt tall, its right edge one page margin in from the page's right edge (the content
 	// right edge) and its box centred on the band's vertical middle. Its own ops are in a top-left frame,
@@ -5931,12 +5935,12 @@ fn callout(
 	if fill.a != 0 {
 		let rect	= res!(Path::round_rect(
 			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), frame.radius));
-		ops.push(DrawOp::Fill { path: rect, colour: fill });
+		ops.push(DrawOp::Fill { path: rect, colour: fill.into() });
 	}
 	if let (Some(w), Some(col)) = (style.callout.stroke_left_w, style.callout.stroke_left_col) {
 		if w.to_pt() > 0.0 && col.a != 0 {
 			let bar	= res!(Path::rect(Bounds::new(0.0, 0.0, w.to_pt() as f32, total.to_pt() as f32)));
-			ops.push(DrawOp::Fill { path: bar, colour: col });
+			ops.push(DrawOp::Fill { path: bar, colour: col.into() });
 		}
 	}
 	if !ops.is_empty() {
@@ -5991,7 +5995,7 @@ pub fn measure_blocks(
 	-> Outcome<Dims>
 {
 	let faces		= FaceResolver::default();
-	let mut scratch	= Authoring::new(fonts, geom, &faces, measure, bib, refs.clone(), 0);
+	let mut scratch	= Authoring::new(fonts, geom, &faces, measure, bib, refs.clone(), Fingerprint::default());
 	let nodes		= res!(scratch.material(blocks, style, measure, "a measured flow"));
 	let mut height	= Sp::ZERO;
 	for n in &nodes {
@@ -6019,7 +6023,7 @@ fn rule_divider(nodes: &mut Vec<Node>, measure: Sp, width: Length, thickness: f6
 		Ok(r)	=> r,
 		Err(_)	=> return,
 	};
-	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour }], Dims::new(w, h, Sp::ZERO));
+	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour: colour.into() }], Dims::new(w, h, Sp::ZERO));
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(measure, h, Sp::ZERO))));
 }
 
@@ -6232,7 +6236,7 @@ fn draw_marginalia(
 		if display.is_empty() {
 			continue;
 		}
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, display)).with_colour(colour);
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, display)).with_colour(colour.into());
 		let d		= shaped.dims();
 		// Horizontal, in recto (binding-left) coordinates: a recto page seats the code's left edge at the
 		// block's right edge (the outer margin); a verso page seats its right edge at the block's left edge,
@@ -6455,7 +6459,7 @@ mod tests {
 				Node::HBox(b) | Node::VBox(b)	=> collect_fills(&b.list, out),
 				Node::Leaf(l)					=> if let LeafKind::Graphic(g) = &l.kind {
 					for op in &g.ops {
-						if let DrawOp::Fill { colour, .. } = op { out.push(*colour); }
+						if let DrawOp::Fill { colour, .. } = op { out.push(colour.to_rgba()); }
 					}
 				},
 				_								=> {},
