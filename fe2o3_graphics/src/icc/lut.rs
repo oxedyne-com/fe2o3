@@ -13,7 +13,7 @@
 use crate::icc::read::Lut;
 
 // Where a coordinate lies on a lattice axis: the node below it and the fraction past that node.
-fn locate(x: f64, grid: usize) -> (usize, f64) {
+pub(crate) fn locate(x: f64, grid: usize) -> (usize, f64) {
 	let at = x.clamp(0.0, 1.0) * (grid - 1) as f64;
 	let i = (at.floor() as usize).min(grid - 2);
 	(i, at - i as f64)

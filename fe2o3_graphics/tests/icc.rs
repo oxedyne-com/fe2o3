@@ -37,6 +37,9 @@ use std::{
 	path::PathBuf,
 };
 
+#[path = "icc/xform.rs"]
+mod xform;
+
 const GS: &str = "/usr/share/color/icc/ghostscript";
 const COLORD: &str = "/usr/share/color/icc/colord";
 

@@ -15,9 +15,12 @@
 //! Anthropic Claude
 
 pub mod builtin;
+pub mod grid;
+pub mod lab;
 pub mod lut;
 pub mod matrix;
 pub mod read;
+pub mod transform;
 
 #[cfg(feature = "fogra39")]
 use oxedyne_fe2o3_core::prelude::*;
