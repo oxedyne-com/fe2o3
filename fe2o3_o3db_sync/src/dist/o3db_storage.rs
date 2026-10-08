@@ -8,9 +8,12 @@
 //!   a single table, which the anti-entropy loop needs for its digest
 //!   round. `{hex_id}` is the lowercase-hex encoding of the 32-byte
 //!   [`RecordId`].
-//! - Value: `Dat::BU8(record.value)`. The record's table and id are
+//! - Value: `Dat::BU64(record.value)`. The record's table and id are
 //!   recoverable from the key, so the stored value payload carries only
-//!   the application-opaque bytes.
+//!   the application-opaque bytes. The width matters: a `Dat::BU8` writes
+//!   its length in one byte, so a value of 256 bytes or more was stored
+//!   with its length cut modulo 256 and read back truncated (300 bytes
+//!   came back as 44). Reads still accept every width.
 //!
 //! Reads block on the responder channel through the synchronous
 //! [`OzoneApi::get_wait`] wrapper. Writes and deletes block on
@@ -35,16 +38,23 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+use super::config::DistOzoneConfig;
+use super::engine::DistOzone;
 use super::record::{
 	Record,
 	RecordDigest,
 	RecordId,
 	content_hash,
 };
+use super::resolve::Resolver;
 use super::storage::Storage;
 
 use crate::O3db;
-use crate::base::id::usr_kind_id_deleted;
+use crate::base::{
+	cfg::OzoneConfig,
+	id::usr_kind_id_deleted,
+};
+use crate::data::core::RestSchemesInput;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_iop_crypto::enc::Encrypter;
@@ -58,7 +68,10 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 
-use std::sync::Arc;
+use std::{
+	path::PathBuf,
+	sync::Arc,
+};
 
 
 /// Storage adapter persisting records in a local [`O3db`] instance.
@@ -95,6 +108,29 @@ impl<
 	/// multi-user bookkeeping should layer that above the adapter.
 	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID) -> Self {
 		Self { db, user }
+	}
+
+	/// The database this adapter writes to, for a caller that also reads it directly.
+	/// A clone of this `Arc` keeps [`Self::close`] from shutting the database down.
+	pub fn db(&self) -> &Arc<O3db<UIDL, UID, ENC, KH, PR, CS>> {
+		&self.db
+	}
+
+	/// Shuts the database down, returning once every bot has stopped and what was acknowledged
+	/// is on disk.
+	///
+	/// The adapter must hold the only reference to the database. Another holder would be left
+	/// with a handle to a stopped database, so while one remains this returns an error naming
+	/// how many, and the database stays open under them. [`Arc::try_unwrap`] makes the check
+	/// and the claim in one step, so no holder can slip in between.
+	pub fn close(self) -> Outcome<()> {
+		match Arc::try_unwrap(self.db) {
+			Ok(db)		=> db.shutdown(),
+			Err(db)		=> Err(err!(
+				"Cannot close the O3db behind this storage: {} other reference(s) to it \
+				are still held; drop them first.", Arc::strong_count(&db).saturating_sub(1);
+				Invalid, Input, Unexpected)),
+		}
 	}
 
 	/// Composite key format: `"{table}:{hex_id}"`.
@@ -151,9 +187,9 @@ impl<
 		Ok(())
 	}
 
-	/// Accepts the whole unsigned-bytes family: the store path always writes
-	/// `Dat::BU8`, but the other widths show up where a caller had
-	/// pre-existing data under a different width.
+	/// Accepts the whole unsigned-bytes family: the store path writes `Dat::BU64`,
+	/// but the other widths show up where a caller had pre-existing data under a
+	/// different width.
 	fn extract_value(dat: &Dat) -> Outcome<Vec<u8>> {
 		match dat {
 			Dat::BU8(b)	 | Dat::BU16(b) | Dat::BU32(b) | Dat::BU64(b) =>
@@ -178,7 +214,7 @@ impl<
 {
 	fn put(&self, record: &Record) -> Outcome<()> {
 		let key = Self::encode_key(&record.table, &record.id);
-		let value = Dat::BU8(record.value.clone());
+		let value = Dat::BU64(record.value.clone());
 		let resp = res!(self.db.api().store(key, value, self.user));
 		Self::drain_store_ack(&resp)
 	}
@@ -251,6 +287,58 @@ impl<
 		}
 		out.sort_by(|a, b| a.id.as_bytes().cmp(b.id.as_bytes()));
 		Ok(out)
+	}
+}
+
+
+impl<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL> + 'static,
+	ENC:	Encrypter + 'static,
+	KH:		Hasher + 'static,
+	PR:		Hasher + 'static,
+	CS:		Checksummer + 'static,
+	R:		Resolver,
+>
+	DistOzone<O3dbStorage<UIDL, UID, ENC, KH, PR, CS>, R>
+{
+	/// Opens the Ozone database at `db_root` and runs a distributed engine over it. This was
+	/// first sketched as `O3db::new_distributed`.
+	///
+	/// The database is created if the root is new and reopened, with its data, if not. A
+	/// configuration already saved in the root wins over `ozone_cfg`, which is read only for a
+	/// root without one. Garbage collection is on. `uid` is both the database's user template
+	/// and the identity that stamps every write the engine makes. Pair with [`Self::close`].
+	pub fn over_o3db(
+		db_root:	PathBuf,
+		ozone_cfg:	Option<OzoneConfig>,
+		dist_cfg:	DistOzoneConfig,
+		schemes:	RestSchemesInput<ENC, KH, PR, CS>,
+		uid:		UID,
+		resolver:	R,
+	)
+		-> Outcome<Self>
+	{
+		let mut db = res!(O3db::new(db_root, ozone_cfg, schemes, uid));
+		res!(db.start("dist"));
+		let gc = match db.updated_api() {
+			Ok(api)		=> api.activate_gc(true),
+			Err(e)		=> Err(e),
+		};
+		if let Err(e) = gc {
+			// The bots are running, so stop them before reporting the fault.
+			let _ = db.shutdown();
+			return Err(e);
+		}
+		let storage = O3dbStorage::new(Arc::new(db), uid);
+		Self::with_resolver(dist_cfg, storage, resolver)
+	}
+
+	/// Shuts down the database the engine was opened over by [`Self::over_o3db`]. Fails, leaving
+	/// the database open, while anything else still holds a reference to it; see
+	/// [`O3dbStorage::close`].
+	pub fn close(self) -> Outcome<()> {
+		self.into_storage().close()
 	}
 }
 

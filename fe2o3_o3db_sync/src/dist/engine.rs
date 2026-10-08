@@ -199,6 +199,12 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		&self.storage
 	}
 
+	/// Gives up the engine and hands back the storage it owns, which is the only way to
+	/// close a storage that holds a resource, such as a database.
+	pub fn into_storage(self) -> S {
+		self.storage
+	}
+
 	pub fn resolver(&self) -> &R {
 		&self.resolver
 	}
