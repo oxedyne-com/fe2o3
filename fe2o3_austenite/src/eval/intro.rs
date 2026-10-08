@@ -1018,7 +1018,7 @@ fn apply_update(engine: &mut Engine, span: Span, state: &[u64], update: CounterU
 		CounterUpdate::Func(f)	=> {
 			// A closure's own span, where Typst reports an argument it cannot take.
 			let span = match &f {
-				Func::Closure(c) if !c.span.is_detached()	=> c.span,
+				Func::Closure(c) if !c.span().is_detached()	=> c.span(),
 				_											=> span,
 			};
 			let mut args = Args::new(span);

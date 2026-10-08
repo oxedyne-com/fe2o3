@@ -24,7 +24,6 @@ use crate::eval::content::{
 use crate::eval::func::{
 	Closure,
 	Func,
-	Param,
 };
 use crate::eval::intro::{
 	Counter,
@@ -468,23 +467,11 @@ impl Walk for SyntaxNode {
 	}
 }
 
-impl Walk for Param {
-	fn mix(&self, fp: &mut Fp) {
-		match self {
-			Param::Pos(n)							=> { fp.tag(0); n.mix(fp); },
-			Param::Named { name, default }			=> { fp.tag(1); name.mix(fp); default.mix(fp); },
-			Param::Sink(n)							=> { fp.tag(2); n.mix(fp); },
-		}
-	}
-}
-
 impl Walk for Closure {
 	fn mix(&self, fp: &mut Fp) {
-		let Closure { name, params, body, captured, span: _ } = self;	// span moves with an edit
-		name.mix(fp);
-		params.mix(fp);
-		body.mix(fp);
-		captured.mix(fp);
+		// The name, parameters, body, file and captured scope are in the closure's own fingerprint, which it
+		// keeps: a scope reached by many closures is walked once, not once per path.
+		fp.h.write_fingerprint(self.fingerprint());
 	}
 }
 

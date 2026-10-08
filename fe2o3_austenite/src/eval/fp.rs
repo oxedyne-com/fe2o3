@@ -233,19 +233,22 @@ fn hash_scope(h: &mut Fingerprinter, s: &Scope) {
 	}
 }
 
-fn hash_closure(h: &mut Fingerprinter, c: &Closure) {
-	hash_opt(h, &c.name, |h, n| h.write_str(n));
-	h.write_usize(c.params.len());
-	for p in &c.params {
+/// The fingerprint of a closure: its name, parameters, body text, file and everything it captured.
+pub fn closure_fp(c: &Closure) -> Fingerprint {
+	let mut h = Fingerprinter::new();
+	hash_opt(&mut h, &c.name(), |h, n| h.write_str(n));
+	h.write_usize(c.params().len());
+	for p in c.params() {
 		match p {
 			Param::Pos(node)				=> { h.write_u8(0); h.write_str(&node.full_text()); }
-			Param::Named { name, default }	=> { h.write_u8(1); h.write_str(name); hash_value(h, default); }
-			Param::Sink(name)				=> { h.write_u8(2); hash_opt(h, name, |h, n| h.write_str(n)); }
+			Param::Named { name, default }	=> { h.write_u8(1); h.write_str(name); hash_value(&mut h, default); }
+			Param::Sink(name)				=> { h.write_u8(2); hash_opt(&mut h, name, |h, n| h.write_str(n)); }
 		}
 	}
-	h.write_str(&c.body.full_text());
-	h.write_u16(c.span.file.0);
-	hash_scope(h, &c.captured);
+	h.write_str(&c.body().full_text());
+	h.write_u16(c.span().file.0);
+	hash_scope(&mut h, c.captured());
+	h.finish()
 }
 
 pub fn hash_func(h: &mut Fingerprinter, f: &Func) {
@@ -253,7 +256,7 @@ pub fn hash_func(h: &mut Fingerprinter, f: &Func) {
 		// A native function is a fieldless enum, so its debug form is its identity.
 		Func::Native(n)		=> { h.write_u8(0); h.write_str(&fmt!("{:?}", n)); }
 		Func::Element(k)	=> { h.write_u8(1); h.write_u64(*k as u64); }
-		Func::Closure(c)	=> { h.write_u8(2); hash_closure(h, c); }
+		Func::Closure(c)	=> { h.write_u8(2); h.write_fingerprint(c.fingerprint()); }
 		Func::With(w)		=> { h.write_u8(3); hash_func(h, &w.0); hash_args(h, &w.1); }
 	}
 }

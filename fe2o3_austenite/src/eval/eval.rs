@@ -202,7 +202,7 @@ impl Engine {
 			Func::Closure(c)	=> {
 				let out = call_closure(self, c, func, args);
 				if out.is_err() {
-					let name = c.name.clone().unwrap_or_else(|| "closure".to_string());
+					let name = c.name().unwrap_or("closure").to_string();
 					for d in self.diags[mark..].iter_mut() {
 						if d.is_error() {
 							d.trace.push((span, fmt!("while calling `{}`", name)));
@@ -239,12 +239,12 @@ fn call_closure(engine: &mut Engine, c: &Arc<Closure>, func: &Func, args: Args) 
 	res!(engine.enter_call(args.span));
 	let lib = library();
 	let out = {
-		let mut vm = Vm::new(engine, &c.captured, lib, c.span.file, true, Span::detached());
-		if let Some(name) = &c.name {
-			vm.define(name, Value::Func(func.clone()), c.span);
+		let mut vm = Vm::new(engine, c.captured(), lib, c.span().file, true, Span::detached());
+		if let Some(name) = c.name() {
+			vm.define(name, Value::Func(func.clone()), c.span());
 		}
-		match vm.bind_params(&c.params, args) {
-			Ok(())	=> vm.eval_closure_body(&c.body),
+		match vm.bind_params(c.params(), args) {
+			Ok(())	=> vm.eval_closure_body(c.body()),
 			Err(e)	=> Err(e),
 		}
 	};
@@ -1739,7 +1739,7 @@ impl<'a> Vm<'a> {
 			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "closure has no body")),
 		};
 		let captured = self.capture(node);
-		Ok(Value::Func(Func::Closure(Arc::new(Closure { name, params, body, captured, span: node.span() }))))
+		Ok(Value::Func(Func::Closure(Arc::new(Closure::new(name, params, body, captured, node.span())))))
 	}
 
 	fn bind_params(&mut self, params: &[Param], mut args: Args) -> Outcome<()> {
@@ -2120,7 +2120,7 @@ impl<'a> Vm<'a> {
 			None	=> return Err(self.error(DiagnosticKind::Syntax, node.span(), "context without a body")),
 		};
 		let captured = self.capture(&body);
-		let closure = Closure { name: None, params: Vec::new(), body: body.clone(), captured, span: body.span() };
+		let closure = Closure::new(None, Vec::new(), body.clone(), captured, body.span());
 		let func = Value::Func(Func::Closure(Arc::new(closure)));
 		self.elem(ElemKind::Context, vec![("func", func)], node.span()).map(Value::Content)
 	}

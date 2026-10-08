@@ -1402,8 +1402,8 @@ fn repr_func(f: &Func) -> String {
 	match f {
 		Func::Native(n)		=> n.name().to_string(),
 		Func::Element(k)	=> k.name().to_string(),
-		Func::Closure(c)	=> match &c.name {
-			Some(n)	=> n.clone(),
+		Func::Closure(c)	=> match c.name() {
+			Some(n)	=> n.to_string(),
 			None	=> "(..) => ..".to_string(),
 		},
 		Func::With(_)		=> "(..) => ..".to_string(),
