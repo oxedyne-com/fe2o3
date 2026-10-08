@@ -95,7 +95,7 @@ fn test_a_pending_sign_up_sent_eight_days_ago_is_deleted_from_record_and_index_0
     res!(sent_pending(&handle, "old@site.test", now, 8 * DAY));
     res!(sent_pending(&handle, "new@site.test", now, DAY));
 
-    let swept = outbox::sweep(&handle, &cfg(), now, "test");
+    let swept = outbox::sweep(&handle, &cfg(), now, "test", true);
 
     assert_eq!(swept.pending, 1, "the sweep removed {} sign-ups, not the one that had lapsed", swept.pending);
     assert_eq!(state_of(&handle, "old@site.test")?, None, "the lapsed record is still in the store");
@@ -113,7 +113,7 @@ fn test_a_pending_sign_up_never_sent_a_confirmation_is_kept_however_old_01() -> 
     let held = res!(subscribe::add_pending(&handle, "held@site.test", &Window::default(), now));
     assert!(held.is_some_and(|s| s.sent.is_none()), "a record nothing was sent to has a sent time");
 
-    let swept = outbox::sweep(&handle, &cfg(), now + 400 * DAY, "test");
+    let swept = outbox::sweep(&handle, &cfg(), now + 400 * DAY, "test", false);
 
     assert_eq!(swept, Swept::default(), "the sweep removed {:?} from a store holding one held sign-up", swept);
     assert_eq!(state_of(&handle, "held@site.test")?, Some(SubState::Pending), "a held sign-up expired");
@@ -133,7 +133,7 @@ fn test_confirmed_unsubscribed_and_bounced_records_are_never_expired_02() -> Out
     res!(sent_pending(&handle, "bad@site.test", now, 30 * DAY));
     assert!(res!(subscribe::mark_bounced(&handle, "bad@site.test", "test")));
 
-    let swept = outbox::sweep(&handle, &cfg(), now, "test");
+    let swept = outbox::sweep(&handle, &cfg(), now, "test", true);
 
     assert_eq!(swept.pending, 0, "the sweep removed {} settled records", swept.pending);
     assert_eq!(state_of(&handle, "ok@site.test")?, Some(SubState::Confirmed));
@@ -167,7 +167,7 @@ fn test_a_rate_row_past_its_window_is_deleted_and_a_live_one_kept_03() -> Outcom
     let other = fmt!("publish/subscribe-rates/old");
     assert!(res!(rate::allow_at(&handle, &other, &sender, now - 400 * DAY)));
 
-    let swept = outbox::sweep(&handle, &cfg, now, "test");
+    let swept = outbox::sweep(&handle, &cfg, now, "test", true);
 
     assert_eq!(swept.rows, 3, "the sweep removed {} rows, not the three that had run out", swept.rows);
     for (key, _, ago) in &rows {
@@ -176,5 +176,23 @@ fn test_a_rate_row_past_its_window_is_deleted_and_a_live_one_kept_03() -> Outcom
             key, ago, if spent { "kept" } else { "removed" });
     }
     assert!(row_exists(&handle, &other)?, "a key outside the rate prefixes was removed");
+    Ok(())
+}
+
+// A3: a pending record that was never sent a confirmation expires from its creation while the host is
+// sending; while it is held (a ceiling of 0) nothing expires, which test 01 above shows.
+#[test]
+fn test_a_pending_sign_up_never_sent_a_confirmation_expires_from_creation_while_sending_04() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let now = rate::now_secs();
+    res!(subscribe::add_pending(&handle, "legacy@site.test", &Window::default(), now));
+
+    let swept = outbox::sweep(&handle, &cfg(), now + 3 * DAY, "test", true);
+    assert_eq!(swept.pending, 0, "a record three days old expired");
+    let swept = outbox::sweep(&handle, &cfg(), now + 8 * DAY, "test", true);
+
+    assert_eq!(swept.pending, 1, "a never-sent sign-up eight days old was kept while sending was open");
+    assert_eq!(state_of(&handle, "legacy@site.test")?, None);
     Ok(())
 }

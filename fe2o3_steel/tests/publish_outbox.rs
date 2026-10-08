@@ -8,6 +8,8 @@
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_iop_db::api::Database;
+use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_net::http::fields::HeaderFields;
 use oxedyne_fe2o3_steel::srv::{
     alert::AlertEvent,
@@ -23,6 +25,7 @@ use oxedyne_fe2o3_steel::srv::{
             Entry,
             Kind,
             Pacer,
+            Stats,
             Step,
             Watch,
         },
@@ -38,6 +41,7 @@ use oxedyne_fe2o3_steel::srv::{
         subscribe::{
             self,
             SubState,
+            Subscriber,
         },
     },
 };
@@ -49,9 +53,12 @@ use std::{
         Mutex,
         RwLock,
     },
+    time::Instant,
 };
 
 mod common;
+
+const DAY:      u64 = 86_400;
 
 const SITE:     &str = "https://site.test";
 const HOUR_MS:  u64 = 3_600_000;
@@ -140,11 +147,16 @@ async fn test_a_signup_queues_its_confirmation_and_sends_nothing_00() -> Outcome
     let _ = res!(subscribe::handle_subscribe(
         &cfg(), Some(&handle), &mail, &HeaderFields::default(), b"email=a%40nowhere.invalid", None, "test",
     ).await);
+    // The request wrote one queue entry and no record: the sign-up is applied when the entry is drained.
+    assert!(res!(subscribe::get(&handle, "a@nowhere.invalid")).is_none(), "the request wrote a record");
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 1, "the sign-up was not queued");
+    let (fake, pacer) = (Fake::default(), Pacer::new(100));
+    res!(run_hour(&handle, &fake, &pacer).await);
     let sub = res!(subscribe::get(&handle, "a@nowhere.invalid"));
-    let sub = res!(sub.ok_or_else(|| err!("the sign-up stored no subscriber"; Test, Missing)));
-    assert_eq!(sub.state, SubState::Pending, "the request dialled out and changed the record");
-    assert_eq!(sub.sent, None, "a send was recorded though none had left");
-    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 1, "the confirmation was not queued");
+    let sub = res!(sub.ok_or_else(|| err!("the drainer stored no subscriber"; Test, Missing)));
+    assert_eq!(sub.state, SubState::Pending);
+    assert!(sub.sent.is_some(), "the confirmation left and no send was recorded");
+    assert_eq!(fake.count(), 1);
     Ok(())
 }
 
@@ -284,5 +296,145 @@ async fn test_a_newsletter_is_paced_by_the_ceiling_and_waits_behind_confirmation
     assert_eq!((hist[0].attempted, hist[0].sent, hist[0].waiting()), (10, 2, 8),
         "the send's tally did not follow the queue");
     assert_eq!(res!(outbox::queued(&handle, Kind::News)), 8);
+    Ok(())
+}
+
+// A1: one backlog episode is told once however the head's age wobbles round the threshold. The queue
+// never empties here, so the episode never ends.
+#[test]
+fn test_a_backlog_that_wobbles_round_the_threshold_is_told_once_05() -> Outcome<()> {
+    let mut watch = Watch::default();
+    let (limit, base) = (3600u64, T0 / 1000);
+    let mut told = Vec::new();
+    for i in 0..100u64 {
+        let now = base + i * 36;
+        let age = if i % 2 == 0 { limit + 20 } else { limit - 20 };
+        let st = Stats { queued: 100, oldest: Some(now - age) };
+        if let Some(e) = watch.note("site", &st, 100, limit, now) {
+            told.push(e);
+        }
+    }
+    assert_eq!(told.len(), 1, "a queue that never drained told the operator {} times", told.len());
+    assert!(matches!(told[0], AlertEvent::OutboxBacklog { .. }), "the one telling was {:?}", told[0]);
+    Ok(())
+}
+
+// A2: three sign-ups for one address, queued over three days behind a hold, leave as one
+// confirmation when the hold lifts: "1 a day" is judged when the mail goes, not when it is queued.
+#[tokio::test]
+async fn test_three_signups_queued_behind_a_hold_send_one_confirmation_06() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let cfg = PublishConfig {
+        confirm_interval_secs:  DAY,
+        confirm_max:            3,
+        confirm_window_days:    30,
+        ..cfg()
+    };
+    let base = T0 / 1000;
+    for d in 0..3u64 {
+        res!(outbox::push(&handle, &[Entry::new(Kind::Confirm, "v@site.test", "", base + d * DAY)]));
+    }
+    let (fake, pacer) = (Fake::default(), Pacer::new(100));
+    let mut now = T0 + 3 * DAY * 1000;
+    for _ in 0..20 {
+        match res!(outbox::step(&handle, &cfg, &fake, &pacer, "test", now).await) {
+            Step::Wait(ms)  => now += ms,
+            Step::Idle      => break,
+            _               => {},
+        }
+    }
+    assert_eq!(fake.count(), 1, "three sign-ups in a hold sent {} confirmations", fake.count());
+    assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 0, "a repeat sign-up stayed queued");
+    Ok(())
+}
+
+fn median(mut v: Vec<u128>) -> u128 {
+    v.sort();
+    v[v.len() / 2]
+}
+
+// A7: the reply takes the same time whether the address is new or on the list, at 5,000 subscribers.
+#[tokio::test]
+async fn test_a_new_address_and_a_confirmed_one_are_answered_in_the_same_time_07() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let n = 5000;
+    let mut confirmed = Vec::new();
+    {
+        let guard = lock_read!(handle.0);
+        for i in 0..n {
+            let email = fmt!("c{:05}@site.test", i);
+            let sub = Subscriber {
+                email:      email.clone(),
+                state:      SubState::Confirmed,
+                token:      subscribe::mint_token(),
+                created:    None,
+                sent:       None,
+            };
+            res!(guard.insert(dat!(fmt!("{}{}", subscribe::KEY_PREFIX, email)), sub.to_dat(), handle.1, None));
+            confirmed.push(email);
+        }
+        res!(guard.insert(dat!(subscribe::INDEX_KEY), store::names_dat(&confirmed), handle.1, None));
+    }
+    let sender = res!(MailSender::new("mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let mail = Some(Arc::new(sender.with_outbound_hourly(0)));
+    let (cfg, hdrs) = (cfg(), HeaderFields::default());
+    let (mut fresh, mut known) = (Vec::new(), Vec::new());
+    for i in 0..60usize {
+        let new_body = fmt!("email=new{}%40site.test", i);
+        let old_body = fmt!("email={}", confirmed[i * 7].replace('@', "%40"));
+        let t = Instant::now();
+        res!(subscribe::handle_subscribe(&cfg, Some(&handle), &mail, &hdrs, new_body.as_bytes(), None, "t").await);
+        fresh.push(t.elapsed().as_micros());
+        let t = Instant::now();
+        res!(subscribe::handle_subscribe(&cfg, Some(&handle), &mail, &hdrs, old_body.as_bytes(), None, "t").await);
+        known.push(t.elapsed().as_micros());
+    }
+    let (mf, mk) = (median(fresh.clone()), median(known.clone()));
+    fresh.sort();
+    known.sort();
+    println!("A7 at {} subscribers: new median {} us (p10 {}, p90 {}), confirmed median {} us (p10 {}, p90 {})",
+        n, mf, fresh[6], fresh[54], mk, known[6], known[54]);
+    assert!(fresh[6] <= known[54] && known[6] <= fresh[54],
+        "the reply times of a new ({} us) and a confirmed ({} us) address do not overlap", mf, mk);
+    Ok(())
+}
+
+// B-5: a pass over a long lane of backing-off entries never keeps the write lock for the whole lane.
+#[tokio::test]
+async fn test_a_long_backing_off_lane_does_not_hold_the_write_lock_08() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let base = T0 / 1000;
+    let mut entries = Vec::new();
+    for i in 0..3000 {
+        let mut e = Entry::new(Kind::News, &fmt!("n{}@site.test", i), "post", base);
+        e.next_try = base + 3600;
+        entries.push(e);
+    }
+    res!(outbox::push(&handle, &entries));
+    let (fake, pacer, cfg) = (Fake::default(), Pacer::new(100), cfg());
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (probe_db, flag) = ((handle.0.clone(), handle.1), done.clone());
+    let probe = std::thread::spawn(move || {
+        let mut worst = std::time::Duration::ZERO;
+        while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+            let t = Instant::now();
+            let _ = store::exclusive(&probe_db, |_, _| -> Outcome<()> { Ok(()) });
+            worst = worst.max(t.elapsed());
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+        worst
+    });
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let t = Instant::now();
+    res!(outbox::step(&handle, &cfg, &fake, &pacer, "test", T0).await);
+    let total = t.elapsed();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let waited = probe.join().unwrap_or_default();
+    println!("B-5: a pass over 3000 backing-off entries took {:?}, the longest wait for the lock was {:?}",
+        total, waited);
+    assert!(waited * 3 < total, "a writer waited {:?} of a {:?} pass", waited, total);
     Ok(())
 }

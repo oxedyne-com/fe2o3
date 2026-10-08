@@ -140,6 +140,34 @@ pub fn allow_in<
 	})
 }
 
+/// Would one more act be allowed at `now`? Reads the row and writes nothing, on a database already locked.
+///
+/// For a caller that counts only when the act has happened, as the per-recipient limit does: the
+/// check comes before the act and [`allow_at`] counts it after.
+pub fn permits_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	key:	&str,
+	w:	&Window,
+	now:	u64,
+)
+	-> Outcome<bool>
+{
+	if w.is_off() {
+		return Ok(true);
+	}
+	let old = match res!(dbr.get(&dat!(key.to_string()), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
+	};
+	Ok(step(old, w, now).1)
+}
+
 /// The count a stored row holds, and what one more act at `now` does to it.
 ///
 /// A new window resets the count. The window runs from the act that opened it, not rolling: a rolling

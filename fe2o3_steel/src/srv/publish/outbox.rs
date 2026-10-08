@@ -117,6 +117,10 @@ const DAY_SECS: u64 = 86_400;
 // itself cannot be. A queue is not walked from end to end to find its age.
 const HEAD_LOOK: u64 = 16;
 
+// The most entries one call of `take` looks at. The write guard is held for a call, so a long lane of
+// entries backing off is looked at in parts, with the guard let go between them.
+pub const TAKE_LOOK: u64 = 256;
+
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
 // │ PACER                                                                     │
@@ -217,7 +221,7 @@ pub trait Courier {
 /// The lane an entry waits in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
-	Confirm,	// a double opt-in confirmation, drained first
+	Confirm,	// a sign-up: applied, then its confirmation sent, drained first
 	News,		// one subscriber's copy of a post
 }
 
@@ -491,9 +495,13 @@ pub enum Take {
 	Empty,			// nothing queued
 	Later(u64),		// everything is backing off; the soonest is due at this unix second
 	Due(u64, Entry),	// the entry at this sequence number, still queued until [`done`]
+	More(Option<u64>, u64),	// none due in the part looked at; the soonest so far, and how many are still to look at
 }
 
-/// Finds the first entry in a lane that is due at `now`.
+/// Finds the first entry in a lane that is due at `now`, looking at no more than [`TAKE_LOOK`].
+///
+/// `left` is how many of the lane's entries are still to be looked at: `u64::MAX` to begin, then the
+/// number a [`Take::More`] answered. The caller makes the next call after letting writers in.
 ///
 /// An entry backing off from a failure is moved to the tail, not waited for, so one address whose
 /// mail host is down never holds up the rest. Each is moved at most once in a call. A key that
@@ -509,18 +517,21 @@ pub fn take<
 	db:	&(Arc<RwLock<DB>>, UID),
 	kind:	Kind,
 	now:	u64,
+	left:	u64,
 )
 	-> Outcome<Take>
 {
 	store::exclusive(db, |dbr, user| -> Outcome<Take> {
 		let mut head = res!(counter_in(dbr, &head_key(kind)));
 		let tail = res!(counter_in(dbr, &tail_key(kind)));
-		let mut left = tail.saturating_sub(head);
+		let left = tail.saturating_sub(head).min(left);
+		let mut look = left.min(TAKE_LOOK);
+		let rest = left - look;
 		let mut soonest: Option<u64> = None;
 		let mut out = Take::Empty;
 		let start = head;
-		while left > 0 {
-			left -= 1;
+		while look > 0 {
+			look -= 1;
 			let e = match entry_in(dbr, kind, head) {
 				Ok(Some(e))	=> e,
 				Ok(None)	=> {
@@ -550,8 +561,12 @@ pub fn take<
 		if head != start {
 			res!(dbr.insert(head_key(kind), dat!(head), user, None));
 		}
-		if let (Take::Empty, Some(s)) = (&out, soonest) {
-			out = Take::Later(s);
+		if let Take::Empty = out {
+			if rest > 0 {
+				out = Take::More(soonest, rest);
+			} else if let Some(s) = soonest {
+				out = Take::Later(s);
+			}
 		}
 		Ok(out)
 	})
@@ -641,16 +656,31 @@ pub async fn step<
 	let mut soonest: Option<u64> = None;
 	let mut found: Option<(u64, Entry)> = None;
 	for kind in KINDS {
-		match res!(take(db, kind, now)) {
-			Take::Due(seq, e)	=> {
-				found = Some((seq, e));
-				break;
+		let mut left = u64::MAX;
+		let mut sooner: Option<u64> = None;
+		loop {
+			match res!(take(db, kind, now, left)) {
+				Take::Due(seq, e)	=> {
+					found = Some((seq, e));
+					break;
+				}
+				Take::More(t, rest)	=> {
+					sooner = earliest(sooner, t);
+					left = rest;
+					// The guard is down between the parts; a moment lets the writers that waited in.
+					tokio::time::sleep(Duration::from_millis(1)).await;
+				}
+				Take::Later(t)		=> {
+					sooner = earliest(sooner, Some(t));
+					break;
+				}
+				Take::Empty		=> break,
 			}
-			Take::Later(t)		=> {
-				soonest = Some(soonest.map_or(t, |s| s.min(t)));
-			}
-			Take::Empty		=> {}
 		}
+		if found.is_some() {
+			break;
+		}
+		soonest = earliest(soonest, sooner);
 	}
 	let (seq, entry) = match found {
 		Some(f)	=> f,
@@ -662,6 +692,14 @@ pub async fn step<
 	match entry.kind {
 		Kind::Confirm	=> confirm_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
 		Kind::News	=> news_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
+	}
+}
+
+fn earliest(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+	match (a, b) {
+		(Some(x), Some(y))	=> Some(x.min(y)),
+		(x, None)		=> x,
+		(None, y)		=> y,
 	}
 }
 
@@ -685,13 +723,21 @@ async fn confirm_step<
 	-> Outcome<Step>
 {
 	let now = now_ms / 1000;
-	// Re-read at send time: an address that has confirmed, left or bounced since it was queued is
-	// owed nothing, and the token in the link is whatever the record holds now.
-	let sub = match res!(subscribe::get(db, &entry.email)) {
-		Some(s) if s.state == SubState::Pending	=> s,
-		_					=> {
-			debug!("{}: publish: confirmation to {} skipped, no longer pending",
-				id, subscribe::redact(&entry.email));
+	let w = cfg.confirm_window();
+	let email = subscribe::normalise_email(&entry.email);
+	if !subscribe::valid_email(&email) {
+		warn!("{}: publish: dropping a sign-up that names no address", id);
+		res!(done(db, entry.kind, seq));
+		return Ok(Step::Worked);
+	}
+	// The entry names an address and nothing else: the sign-up is applied here, at send time, so an
+	// address that has confirmed, left or bounced since is owed nothing, one already sent a
+	// confirmation within its interval or its count is owed no other, and the token in the link is
+	// whatever the record holds now. A repeat sign-up queued behind the first ends here.
+	let sub = match res!(subscribe::add_pending(db, &email, &w, now)) {
+		Some(s)	=> s,
+		None	=> {
+			debug!("{}: publish: sign-up of {} owed no confirmation", id, subscribe::redact(&email));
 			res!(done(db, entry.kind, seq));
 			return Ok(Step::Worked);
 		}
@@ -714,6 +760,10 @@ async fn confirm_step<
 			let at = send::iso_of(now as i64).unwrap_or_default();
 			if let Err(e) = subscribe::mark_sent(db, &sub.email, &at) {
 				warn!("{}: publish: could not record the send to {}: {}",
+					id, subscribe::redact(&sub.email), e);
+			}
+			if let Err(e) = subscribe::count_sent(db, &sub.email, &w, now) {
+				warn!("{}: publish: could not count the send to {}: {}",
 					id, subscribe::redact(&sub.email), e);
 			}
 		}
@@ -936,8 +986,10 @@ pub fn stats<
 /// Tells one backlog episode apart from the next, so the operator hears of each once.
 ///
 /// An episode begins when the oldest entry has waited longer than the threshold, is told again each
-/// day it lasts, and ends when the queue is back under it. It lives in memory, so a restart during a
-/// backlog begins a new episode and tells it again.
+/// day it lasts, and ends only when the queue has drained. A queue that stays deep has not recovered
+/// because its oldest entry's age dipped under the threshold, and ending the episode there told the
+/// operator again at every crossing. It lives in memory, so a restart during a backlog begins a new
+/// episode and tells it again.
 #[derive(Clone, Debug, Default)]
 pub struct Watch {
 	since:	Option<u64>,	// unix second the episode was first told
@@ -985,7 +1037,7 @@ impl Watch {
 					hourly,
 				})
 			}
-			(false, Some(since))	=> {
+			(false, Some(since)) if st.queued == 0	=> {
 				let sent = self.sent;
 				*self = Self::default();
 				Some(AlertEvent::OutboxCleared {
@@ -994,7 +1046,7 @@ impl Watch {
 					sent,
 				})
 			}
-			(false, None)		=> None,
+			(false, _)		=> None,
 		}
 	}
 }
@@ -1043,7 +1095,8 @@ pub struct Swept {
 ///
 /// The two halves are independent, so one failing is logged and does not stop the other. The rows
 /// need a scan of the whole store (see [`rate::expire_rows`]), which is why this is a daily sweep
-/// and not work done as each row is touched.
+/// and not work done as each row is touched. `sending` is whether the host's ceiling is above 0; see
+/// [`subscribe::expire_pending`].
 pub fn sweep<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -1055,10 +1108,11 @@ pub fn sweep<
 	cfg:	&PublishConfig,
 	now:	u64,
 	id:	&str,
+	sending: bool,
 )
 	-> Swept
 {
-	let pending = match subscribe::expire_pending(db, cfg.pending_expiry_days, now, id) {
+	let pending = match subscribe::expire_pending(db, cfg.pending_expiry_days, now, id, sending) {
 		Ok(n)	=> n,
 		Err(e)	=> {
 			warn!("{}: publish: expiring unconfirmed sign-ups failed: {}", id, e);
@@ -1124,8 +1178,8 @@ pub async fn run<
 		if swept.map_or(true, |t| now.saturating_sub(t) >= DAY_SECS) {
 			// Marked first, so a sweep that fails is tried again tomorrow and not on every pass.
 			swept = Some(now);
-			let (d, c, i) = (db.clone(), cfg.clone(), id.clone());
-			if let Err(e) = tokio::task::spawn_blocking(move || sweep(&d, &c, now, &i)).await {
+			let (d, c, i, sending) = (db.clone(), cfg.clone(), id.clone(), !pacer.is_held());
+			if let Err(e) = tokio::task::spawn_blocking(move || sweep(&d, &c, now, &i, sending)).await {
 				warn!("{}: publish: the daily sweep did not finish: {}", id, e);
 			}
 		}

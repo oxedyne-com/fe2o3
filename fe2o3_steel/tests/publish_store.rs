@@ -564,6 +564,7 @@ fn six_signups_in_a_day_ask_for_one_confirmation() -> Outcome<()> {
     let mut asked = 0;
     for i in 0..6 {
         if res!(subscribe::add_pending(&handle, "reader@example.com", &w, T0 + i * 600)).is_some() {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, T0 + i * 600));
             asked += 1;
         }
     }
@@ -580,6 +581,7 @@ fn four_signups_over_four_days_ask_for_three() -> Outcome<()> {
     let mut asked = 0;
     for d in 0..4 {
         if res!(subscribe::add_pending(&handle, "reader@example.com", &w, T0 + d * DAY)).is_some() {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, T0 + d * DAY));
             asked += 1;
         }
     }
@@ -600,6 +602,7 @@ fn a_repeat_signup_keeps_the_token() -> Outcome<()> {
     // One allowed repeat, a day on, and one refused, a minute after that.
     for at in [T0 + DAY, T0 + DAY + 60] {
         if let Some(again) = res!(subscribe::add_pending(&handle, "reader@example.com", &w, at)) {
+            res!(subscribe::count_sent(&handle, "reader@example.com", &w, at));
             assert_eq!(again.token, first.token, "a repeat sign-up was handed a new token");
         }
     }

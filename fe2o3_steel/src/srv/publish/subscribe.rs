@@ -578,10 +578,11 @@ fn find_by_token<
 ///   and a re-subscribe must not resurrect an address the mail server said does not exist.
 ///
 /// Whatever the address's state, a confirmation is asked for only if `w` allows one more to it at
-/// `now`; otherwise `None` is returned and nothing is written to the subscriber. The counter is read
-/// and changed for every valid address, the confirmed and the bounced included, so no path does less
-/// local work than another. The caller answers the same page whichever it gets, so the form never
-/// reveals which case it was.
+/// `now`; otherwise `None` is returned and nothing is written to the subscriber. The counter is only
+/// read here. It counts confirmations **sent**, and [`count_sent`] moves it when one has left, so a
+/// sign-up that waits behind a hold or a backlog, or is repeated, spends nothing. This is the
+/// drainer's call, never a request's: the request queues the address and answers, so its reply does
+/// not depend on which of these cases the address is.
 pub fn add_pending<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
@@ -610,11 +611,9 @@ pub fn add_pending<
 	// under the write guard.
 	store::exclusive(db, |dbr, user| -> Outcome<Option<Subscriber>> {
 		let existing = res!(get_in(dbr, &email));
-		// The counter moves for every valid address, whatever state it is in.
-		let allowed = res!(rate::allow_in(dbr, user, &rkey, w, now));
+		let allowed = res!(rate::permits_in(dbr, &rkey, w, now));
 		// A confirmed address is on the list; do not welcome it twice. A bounced address is
-		// suppressed and stays so. Neither leaks that it is known, since the caller shows the same
-		// page whether `Some` or `None` comes back.
+		// suppressed and stays so.
 		let kept = match existing {
 			Some(s)	=> match s.state {
 				SubState::Confirmed | SubState::Bounced	=> return Ok(None),
@@ -639,6 +638,30 @@ pub fn add_pending<
 		res!(put_in(dbr, user, &sub));
 		Ok(Some(sub))
 	})
+}
+
+/// Counts a confirmation sent to an address, in the window `w`, at `now`.
+///
+/// The limit of confirmations to one address is spent here, when the mail has left, and checked in
+/// [`add_pending`] before it goes.
+pub fn count_sent<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	w:	&Window,
+	now:	u64,
+)
+	-> Outcome<()>
+{
+	let email = normalise_email(email);
+	let salt = res!(super::comment::site_secret(db));
+	res!(rate::allow_at(db, &fmt!("{}{}", TO_PREFIX, to_hash(&email, &salt)), w, now));
+	Ok(())
 }
 
 /// What a confirmation link found when it was followed.
@@ -907,18 +930,22 @@ fn unlist_in<
 
 // Has a pending subscriber waited `age` seconds since the last confirmation was sent to it?
 //
-// **The clock is `sent`, never `created`.** A record that has been sent nothing has no clock: it is
-// held behind a ceiling of 0, or still in the queue, and expiring it would delete the address before
-// its one confirmation went out. A `sent` that will not read is no clock either, since an age that
-// cannot be shown is not one to delete on. Only a pending record can lapse.
-fn lapsed(sub: &Subscriber, age: u64, now: u64) -> bool {
+// The clock is `sent`. A record never sent anything (one from before `sent` existed, or whose
+// confirmation was given up) lapses from `created`, but only while the host is `sending`: held behind
+// a ceiling of 0 nothing has been sent to anyone, and an address kept for the hold must outlive it. A
+// `sent` that will not read is no clock, since an age that cannot be shown is not one to delete on.
+// Only a pending record can lapse.
+fn lapsed(sub: &Subscriber, age: u64, now: u64, sending: bool) -> bool {
 	if sub.state != SubState::Pending {
 		return false;
 	}
-	match sub.sent.as_deref().and_then(super::comment::parse_stamp_secs) {
-		Some(t)	=> now.saturating_sub(t) >= age,
-		None	=> false,
-	}
+	let parse = super::comment::parse_stamp_secs;
+	let clock = match (&sub.sent, &sub.created) {
+		(Some(s), _)			=> parse(s),
+		(None, Some(c)) if sending	=> parse(c),
+		_				=> None,
+	};
+	clock.map_or(false, |t| now.saturating_sub(t) >= age)
 }
 
 // Subscribers judged under one write guard when expiring. The index is written back once for each
@@ -926,7 +953,8 @@ fn lapsed(sub: &Subscriber, age: u64, now: u64) -> bool {
 const EXPIRE_CHUNK: usize = 256;
 
 /// Deletes the pending subscribers whose last confirmation was sent `days` or more ago, and says how
-/// many went. A `days` of 0 deletes nothing.
+/// many went. A `days` of 0 deletes nothing. A record never sent one lapses from its creation, while
+/// `sending` says the host's ceiling is above 0.
 ///
 /// Each goes whole, the record and its place in the index. Only [`SubState::Pending`] lapses: a
 /// confirmed, unsubscribed or bounced record is kept, the last because its suppression is the
@@ -947,6 +975,7 @@ pub fn expire_pending<
 	days:	u64,
 	now:	u64,
 	id:	&str,
+	sending: bool,
 )
 	-> Outcome<usize>
 {
@@ -957,7 +986,7 @@ pub fn expire_pending<
 	let mut due = Vec::new();
 	for email in res!(index(db)) {
 		match get(db, &email) {
-			Ok(Some(s)) if lapsed(&s, age, now)	=> due.push(email),
+			Ok(Some(s)) if lapsed(&s, age, now, sending)	=> due.push(email),
 			Ok(_)					=> {},
 			Err(e)					=> warn!(
 				"{}: publish: skipping subscriber {} while expiring: {}", id, redact(&email), e),
@@ -969,7 +998,7 @@ pub fn expire_pending<
 			let mut done: HashSet<&str> = HashSet::new();
 			for email in chunk {
 				match res!(get_in(dbr, email)) {
-					Some(s) if lapsed(&s, age, now)	=> {
+					Some(s) if lapsed(&s, age, now, sending)	=> {
 						res!(dbr.delete(&key_of(email), user, None));
 						done.insert(email.as_str());
 					},
@@ -1147,22 +1176,17 @@ pub async fn handle_subscribe<
 		return Said::Invalid.answer(cfg, hdrs);
 	}
 
-	match res!(add_pending(db, &email, &cfg.confirm_window(), rate::now_secs())) {
-		// New or pending, and this address is within its limit: ask for a confirmation to go.
-		Some(sub)	=> dispatch_confirmation(db, sender, &sub, id),
-		// Already confirmed, bounced, or past its limit: send nothing, and answer identically.
-		None		=> debug!("{}: publish: subscribe for an address that needs no confirmation", id),
-	}
-
+	queue_signup(db, sender, &email, id);
 	Said::Sent.answer(cfg, hdrs)
 }
 
-// The one place a confirmation leaves the request. It is queued, not sent: the request never awaits
-// SMTP, so a new address answers as fast as a confirmed one and the host's sending rate is the
-// outbox's to set. A push that fails is logged, and the reader still gets the same page -- retrying
-// the form queues it again, and saying "we could not email you" would leak that the address was
-// actionable.
-fn dispatch_confirmation<
+// The whole of a sign-up that the request does: one entry on the queue, the same small write for every
+// valid address, whatever state it is in. The drainer applies the sign-up (see [`add_pending`]), judges
+// the limits and sends, so the reply carries no trace of whether the address was new, pending,
+// confirmed or over its limit. A push that fails is logged, and the reader still gets the same page --
+// retrying the form queues it again, and saying "we could not email you" would leak that the address
+// was actionable.
+fn queue_signup<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
@@ -1171,16 +1195,15 @@ fn dispatch_confirmation<
 >(
 	db:	&(Arc<RwLock<DB>>, UID),
 	sender:	&Arc<MailSender>,
-	sub:	&Subscriber,
+	email:	&str,
 	id:	&str,
 ) {
-	match outbox::push(db, &[Entry::new(Kind::Confirm, &sub.email, "", rate::now_secs())]) {
+	match outbox::push(db, &[Entry::new(Kind::Confirm, email, "", rate::now_secs())]) {
 		Ok(_)	=> {
-			debug!("{}: publish: confirmation to {} queued", id, redact(&sub.email));
+			debug!("{}: publish: sign-up of {} queued", id, redact(email));
 			sender.pacer().wake();
 		}
-		Err(e)	=> warn!("{}: publish: confirmation to {} could not be queued: {}",
-			id, redact(&sub.email), e),
+		Err(e)	=> warn!("{}: publish: sign-up of {} could not be queued: {}", id, redact(email), e),
 	}
 }
 
