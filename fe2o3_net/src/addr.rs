@@ -6,6 +6,7 @@ use std::{
     fmt::{self},
     net::{
         IpAddr,
+        Ipv4Addr,
         Ipv6Addr,
     },
 };
@@ -283,11 +284,27 @@ pub fn is_publicly_routable(ip: &IpAddr) -> bool {
             if (seg[0] & 0xffc0) == 0xfe80 { return false; }
             // Documentation, 2001:db8::/32.
             if seg[0] == 0x2001 && seg[1] == 0x0db8 { return false; }
-            // An IPv4-mapped address is only as safe as the IPv4 inside it.
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_publicly_routable(&IpAddr::V4(v4));
+            // Any other form that carries an IPv4 address is only as safe as the IPv4 inside it: the
+            // mapped (::ffff:a.b.c.d), the compatible (::a.b.c.d), NAT64 (64:ff9b::/96) and 6to4
+            // (2002::/16, the address in the next 32 bits). A translator or a tunnel on the path turns
+            // each back into a connection to that IPv4 host.
+            let v4_in = |hi: u16, lo: u16| Ipv4Addr::new(
+                (hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            let embedded = if let Some(v4) = v6.to_ipv4_mapped() {
+                Some(v4)
+            } else if seg[..6].iter().all(|&s| s == 0) {
+                Some(v4_in(seg[6], seg[7]))
+            } else if seg[0] == 0x0064 && seg[1] == 0xff9b && seg[2..6].iter().all(|&s| s == 0) {
+                Some(v4_in(seg[6], seg[7]))
+            } else if seg[0] == 0x2002 {
+                Some(v4_in(seg[1], seg[2]))
+            } else {
+                None
+            };
+            match embedded {
+                Some(v4)    => is_publicly_routable(&IpAddr::V4(v4)),
+                None        => true,
             }
-            true
         }
     }
 }
@@ -379,6 +396,24 @@ mod vetting_tests {
     fn test_ipv6_private_space_is_refused() {
         for s in ["::1", "fc00::1", "fe80::1", "2001:db8::1", "::ffff:127.0.0.1"] {
             assert!(!is_publicly_routable(&v4(s)), "{} should be refused", s);
+        }
+    }
+
+    #[test]
+    fn test_ipv6_forms_that_carry_a_private_ipv4_are_refused() {
+        for s in [
+            "::7f00:1",             // IPv4-compatible 127.0.0.1
+            "::a01:203",            // IPv4-compatible 10.1.2.3
+            "64:ff9b::7f00:1",      // NAT64 127.0.0.1
+            "64:ff9b::a01:203",     // NAT64 10.1.2.3
+            "2002:7f00:1::",        // 6to4 127.0.0.1
+            "2002:a01:203::1",      // 6to4 10.1.2.3
+        ] {
+            assert!(!is_publicly_routable(&v4(s)), "{} should be refused", s);
+        }
+        // The same forms around a public IPv4 stay allowed: it is the inside that is judged.
+        for s in ["64:ff9b::808:808", "2002:808:808::1"] {
+            assert!(is_publicly_routable(&v4(s)), "{} should be allowed", s);
         }
     }
 
