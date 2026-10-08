@@ -466,24 +466,80 @@ impl<
         // adapters erase by, and it supersedes only the bunch key.  The chunks of a chunked value
         // live under keys of their own, so they are retired here, as `delete` retires them, or
         // their bytes would stay live in the data files for ever.
-        if let Dat::Usr(kind, _) = &v {
-            if *kind == id::usr_kind_id_deleted() {
-                res!(self.reclaim_chunks_on_delete(&k, user, schms2));
-            }
+        let deleted = matches!(&v, Dat::Usr(kind, _) if *kind == id::usr_kind_id_deleted());
+        if deleted {
+            res!(self.reclaim_chunks_on_delete(&k, user, schms2));
         }
-        let msgs = res!(self.prepare_write_dat(
-            k,
-            v,
-            user,
-            schms2,
-            resp.clone(),
-            None,
-        ));
+        // Any other store over a chunked value leaves the old chunks live too, unless the new value
+        // writes the very keys they have.  A chunk key carries the length, count and size of its
+        // value as well as the set identifier, so a value of another length shares none of them,
+        // and the ordinary supersession never reaches them.  They are retired here, once the new
+        // value is durable (below), and not before: retired first, a crash would leave the old
+        // bunch key naming chunks that are gone.
+        let old = if deleted { None } else { res!(self.chunk_set_of(&k, schms2)) };
+        let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
+        let (mut msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
         let nchunks = msgs.len();
+        let stale = match &old {
+            Some(pkey) => Self::chunk_keys_of(pkey).into_iter().any(|ck| !datkeys.contains(&ck)),
+            None => false,
+        };
+        let pkey = match old {
+            Some(pkey) if stale => pkey,
+            _ => {
+                if resp.is_some() {
+                    res!(resp.send(OzoneMsg::Chunks(nchunks)));
+                }
+                res!(self.store_bytes(msgs));
+                return Ok(nchunks);
+            },
+        };
+
+        // The write is answered to a responder of our own, so that the old chunks can be retired
+        // between its durability and the caller's answer.  The caller is then given the same
+        // answers it would have had from the writers.
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
+        let own = self.responder();
+        for (msg, _) in msgs.iter_mut() {
+            if let OzoneMsg::Write { resp, .. } = msg {
+                *resp = own.clone();
+            }
+        }
         res!(self.store_bytes(msgs));
+        let acks = own.recv_write_acks(
+            nchunks,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        );
+        match acks {
+            Err(e) => {
+                // Passed on with its tags, as the writers would have sent it.
+                if resp.is_none() {
+                    return Err(e);
+                }
+                res!(resp.send(OzoneMsg::Error(e)));
+            },
+            Ok(acks) => {
+                if let Err(e) = self.retire_chunks(&k, &pkey, &datkeys, user, schms2) {
+                    // The new value is stored and durable; the old chunks are left to the orphan
+                    // sweep, and the caller is not told its write failed.
+                    warn!(sync_log::stream(),
+                        "{}: The value stored at {:?} is durable, but the chunks of the value it \
+                        replaced were not all retired, and wait for the orphan sweep: {}",
+                        self.ozid(), k, e);
+                }
+                if resp.is_some() {
+                    for _ in 0..nchunks {
+                        res!(resp.send(OzoneMsg::Written));
+                    }
+                    for ack in acks {
+                        res!(resp.send(ack));
+                    }
+                }
+            },
+        }
         Ok(nchunks)
     }
 
@@ -551,13 +607,30 @@ impl<
     pub fn prepare_write(
         &self,
         k:          Vec<u8>,
-        mut vbuf:   Vec<u8>,
+        vbuf:       Vec<u8>,
         user:       UID,
         schms2:     Option<&RestSchemesOverride<ENC, KH>>,
         resp:       Responder<UIDL, UID, ENC, KH>,
         set_id_override: Option<u64>,
     )
         -> Outcome<Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>>
+    {
+        let (msgs, _) = res!(self.prepare_write_keyed(k, vbuf, user, schms2, resp, set_id_override));
+        Ok(msgs)
+    }
+
+    /// `prepare_write`, and with the messages the keys of the records they write beyond the main
+    /// key: the bunch key and then each chunk's, none for a value that is not chunked.
+    fn prepare_write_keyed(
+        &self,
+        k:          Vec<u8>,
+        mut vbuf:   Vec<u8>,
+        user:       UID,
+        schms2:     Option<&RestSchemesOverride<ENC, KH>>,
+        resp:       Responder<UIDL, UID, ENC, KH>,
+        set_id_override: Option<u64>,
+    )
+        -> Outcome<(Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>, Vec<Dat>)>
     {
         if vbuf.len() == 0 {
             return Err(err!(
@@ -588,6 +661,7 @@ impl<
         }
 
         let mut msgs = Vec::new();
+        let mut keys = Vec::new();
         let mut meta = Meta::new(user);
         res!(meta.stamp_time_now());
 
@@ -604,6 +678,7 @@ impl<
                 None        => Self::chunk_set_id(&kbuf),
             };
             let datkeys = res!(chunker.keys(set_id, &chunk_state));
+            keys = datkeys.clone();
             
             // 4.2 Store main key -> bunch key.
             let mut bkbuf = res!(datkeys[0].as_bytes());
@@ -665,7 +740,7 @@ impl<
                 *cbwind.zind(),
             ));
         }
-        Ok(msgs)
+        Ok((msgs, keys))
     }
 
     /// This is the write dispatch method, where `WriterBots` are chosen randomly.  Callers must
@@ -786,30 +861,73 @@ impl<
     )
         -> Outcome<()>
     {
+        let pkey = match res!(self.chunk_set_of(k, schms2)) {
+            Some(pkey)  => pkey,
+            None        => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
+        };
+        if let Err(e) = self.retire_chunks(k, &pkey, &[], user, schms2) {
+            return Err(err!(e,
+                "{}: Deleting {:?}: its bunch key has not been deleted.  The delete can be repeated.",
+                self.ozid(), k;
+                Write));
+        }
+        Ok(())
+    }
+
+    /// The part key of the value now at `k`, when that value is chunked.  The read is a whole
+    /// read, so a store pays it only where it must know.
+    fn chunk_set_of(
+        &self,
+        k:      &Dat,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<Option<PartKey>>
+    {
         let enc = self.schemes().encrypter();
         let or_enc = schms2.map(|s| s.encrypter());
 
         let resp = res!(self.fetch_using_schemes(k, schms2));
-        let pkey = match res!(resp.recv_daticle(enc, or_enc)) {
-            (Some((Dat::Tup5u64(tup), _)), _) => PartKey(tup),
-            _ => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
-        };
+        match res!(resp.recv_daticle(enc, or_enc)) {
+            (Some((Dat::Tup5u64(tup), _)), _) => Ok(Some(PartKey(tup))),
+            _ => Ok(None),
+        }
+    }
 
-        // Every tombstone is sent before any is waited for, so the chunks retire together; each has
-        // its own responder so that a failure names its chunk.
+    // The keys of a chunked value's chunk records, which `fetch_chunks` reconstructs likewise.
+    fn chunk_keys_of(pkey: &PartKey) -> Vec<Dat> {
+        let n = pkey.num_parts();
+        (1..(n + 1)).map(|i| Dat::Tup5u64([
+            pkey.set_id(),
+            i,
+            pkey.data_len(),
+            n,
+            pkey.part_size(),
+        ])).collect()
+    }
+
+    /// Tombstones the chunk records of the value `pkey` names, except those under the keys in
+    /// `keep`, and waits until each is answered.  Every tombstone is sent before any is waited
+    /// for, so the chunks retire together; each has its own responder so that a failure names its
+    /// chunk.
+    fn retire_chunks(
+        &self,
+        k:      &Dat,
+        pkey:   &PartKey,
+        keep:   &[Dat],
+        user:   UID,
+        schms2: Option<&RestSchemesOverride<ENC, KH>>,
+    )
+        -> Outcome<()>
+    {
         let n = pkey.num_parts();
         let mut waits = Vec::new();
-        for i in 1..(n + 1) {
-            let ck = Dat::Tup5u64([
-                pkey.set_id(),
-                i,
-                pkey.data_len(),
-                n,
-                pkey.part_size(),
-            ]);
+        for (i, ck) in Self::chunk_keys_of(pkey).into_iter().enumerate() {
+            if keep.contains(&ck) {
+                continue;
+            }
             let resp = self.responder();
             res!(self.tombstone_chunk_key(&ck, user, schms2, resp.clone()));
-            waits.push((i, resp));
+            waits.push((i + 1, resp));
         }
         for (i, resp) in waits {
             // Passed on with its own tags, so a write that landed unconfirmed can be told from one
@@ -820,9 +938,9 @@ impl<
                 constant::DURABILITY_TIMEOUT,
             ) {
                 return Err(err!(e,
-                    "{}: Deleting {:?}: the tombstone of chunk {} of {} was not acknowledged, so \
-                    the value's chunks are not all retired and its bunch key has not been deleted.  \
-                    The delete can be repeated.", self.ozid(), k, i, n;
+                    "{}: Retiring the chunks of {:?}: the tombstone of chunk {} of {} was not \
+                    acknowledged, so the value's chunks are not all retired.",
+                    self.ozid(), k, i, n;
                     Write));
             }
         }
