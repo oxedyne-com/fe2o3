@@ -22,6 +22,7 @@ use crate::eval::content::{
 	FieldType,
 	Fold,
 };
+use crate::eval::fp;
 use crate::eval::func::Func;
 use crate::eval::ops;
 use crate::eval::select::Selector;
@@ -44,6 +45,8 @@ use crate::eval::{
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::sync::Arc;
 
@@ -237,6 +240,9 @@ impl Styles {
 			.collect())
 	}
 
+	/// The fingerprint of the list, span-free.
+	pub fn fingerprint(&self) -> Fingerprint { fp::styles_fp(self) }
+
 	/// Does any style set a property of `kind`?
 	pub fn has_property_of(&self, kind: ElemKind) -> bool {
 		self.iter().any(|s| matches!(s, Style::Property(p) if p.elem == kind))
@@ -247,6 +253,19 @@ impl Styles {
 pub struct ChainLink {
 	pub styles:	Styles,
 	pub parent:	Option<Arc<ChainLink>>,
+}
+
+impl ChainLink {
+	/// The link's styles and its parents', span-free.
+	pub fn fingerprint(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_fingerprint(self.styles.fingerprint());
+		match &self.parent {
+			Some(p)	=> { h.write_u8(1); h.write_fingerprint(p.fingerprint()); }
+			None	=> h.write_u8(0),
+		}
+		h.finish()
+	}
 }
 
 /// The styles in force at a point, innermost first. Cloning is a reference-count bump.
@@ -278,6 +297,14 @@ impl StyleChain {
 	}
 
 	pub fn depth(&self) -> usize { self.links().len() }
+
+	/// The fingerprint of the chain, link for link, span-free.
+	pub fn fingerprint(&self) -> Fingerprint {
+		match &self.head {
+			Some(l)	=> l.fingerprint(),
+			None	=> Fingerprinter::new().finish(),
+		}
+	}
 
 	/// Are both the same chain, link for link? Two chains built separately from equal styles are not.
 	pub fn ptr_eq(&self, other: &StyleChain) -> bool {

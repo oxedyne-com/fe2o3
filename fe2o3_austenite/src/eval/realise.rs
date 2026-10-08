@@ -51,6 +51,8 @@ use crate::timings::{
 };
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::sync::Arc;
 
@@ -188,6 +190,35 @@ impl Pair {
 	pub fn tag(tag: Tag, styles: StyleChain) -> Self { Self { content: Content::empty(), styles, tag: Some(tag) } }
 
 	pub fn is_tag(&self) -> bool { self.tag.is_some() }
+
+	/// The pair as flow sees it: its content, the style chain it is laid out under and its tag. The
+	/// content's own location and place are in it, because flow anchors the pair by them; a span is not.
+	pub fn fingerprint(&self) -> Fingerprint {
+		let mut h = Fingerprinter::new();
+		h.write_fingerprint(self.content.fingerprint());
+		match self.content.location() {
+			Some(l)	=> { h.write_u8(1); h.write_u64(l.0); }
+			None	=> h.write_u8(0),
+		}
+		match self.content.place() {
+			Some(p)	=> { h.write_u8(1); h.write_u64(p.0); }
+			None	=> h.write_u8(0),
+		}
+		h.write_fingerprint(self.styles.fingerprint());
+		match &self.tag {
+			None					=> h.write_u8(0),
+			Some(Tag::Start(c))		=> {
+				h.write_u8(1);
+				h.write_fingerprint(c.fingerprint());
+				match c.location() {
+					Some(l)	=> { h.write_u8(1); h.write_u64(l.0); }
+					None	=> h.write_u8(0),
+				}
+			}
+			Some(Tag::End(l))		=> { h.write_u8(2); h.write_u64(l.0); }
+		}
+		h.finish()
+	}
 }
 
 /// Does a realised document set any content? Spaces, paragraph breaks, page breaks and column breaks do not,

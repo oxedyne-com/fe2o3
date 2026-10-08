@@ -4,6 +4,7 @@
 
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
+use crate::eval::fp;
 use crate::eval::lib;
 use crate::eval::locate::{
 	Location,
@@ -24,6 +25,7 @@ use crate::eval::Engine;
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 
 use std::sync::Arc;
 
@@ -641,6 +643,16 @@ impl Content {
 	pub fn set_place(&mut self, place: Place) {
 		if let Content::Elem(e) = self {
 			Arc::make_mut(e).place = Some(place);
+		}
+	}
+
+	/// What the content is, span-free: kind, label, fields, guards and styles, but not the span, the
+	/// location or the place. Equal text at a shifted offset has an equal fingerprint.
+	pub fn fingerprint(&self) -> Fingerprint {
+		match self {
+			Content::Elem(e)		=> fp::elem_fp(e),
+			Content::Sequence(s)	=> fp::seq_fp(s),
+			Content::Styled(s)		=> fp::styled_fp(s),
 		}
 	}
 

@@ -25,6 +25,7 @@ use crate::eval::content::{
 	ElemKind,
 	FieldId,
 };
+use crate::eval::fp;
 use crate::eval::func::Func;
 use crate::driver::Recorder;
 use crate::eval::lib;
@@ -1302,127 +1303,61 @@ pub fn selector_eq(a: &Selector, b: &Selector) -> bool {
 /// A key for a selector that is equal for equal selectors in every pass.
 fn selector_key(s: &Selector) -> String {
 	let mut h = Fingerprinter::new();
-	hash_selector(&mut h, s);
+	fp::hash_selector(&mut h, s);
 	fmt!("{}", h.finish())
 }
 
-fn hash_selector(h: &mut Fingerprinter, s: &Selector) {
-	match s {
-		Selector::Elem(k, fields) => {
-			h.write_u64(1);
-			h.write_u64(*k as u64);
-			if let Some(fs) = fields {
-				for (id, v) in fs {
-					h.write_u64(id.0 as u64);
-					hash_value(h, v);
-				}
-			}
-		}
-		Selector::Label(l)		=> { h.write_u64(2); h.write_str(l.as_str()); }
-		Selector::Text(t)		=> { h.write_u64(3); h.write_str(t); }
-		Selector::Regex(r)		=> { h.write_u64(4); h.write_str(&r.pattern); }
-		Selector::Location(l)	=> { h.write_u64(5); h.write_u64(l.0); }
-		Selector::Or(ss)		=> { h.write_u64(6); for x in ss { hash_selector(h, x); } }
-		Selector::And(ss)		=> { h.write_u64(7); for x in ss { hash_selector(h, x); } }
-		Selector::Before { selector, end, inclusive } => {
-			h.write_u64(8);
-			hash_selector(h, selector);
-			hash_selector(h, end);
-			h.write_u64(*inclusive as u64);
-		}
-		Selector::After { selector, start, inclusive } => {
-			h.write_u64(9);
-			hash_selector(h, selector);
-			hash_selector(h, start);
-			h.write_u64(*inclusive as u64);
-		}
-	}
+/// Hashes content by what a reader of a query result can observe: its structure, which [`fp`] hashes
+/// span-free, and the locations in it, which a query reader sees and a structural fingerprint does not.
+pub fn hash_content(h: &mut Fingerprinter, c: &Content) {
+	h.write_fingerprint(c.fingerprint());
+	hash_locations(h, c);
 }
 
-/// Hashes content by what a reader of a query result can observe: kinds, fields, labels and locations.
-pub fn hash_content(h: &mut Fingerprinter, c: &Content) {
+// The locations of the content, in walk order. The structure is already in the hash, so the walk is
+// unambiguous.
+fn hash_locations(h: &mut Fingerprinter, c: &Content) {
 	match c {
 		Content::Elem(e) => {
-			h.write_u64(10);
-			h.write_u64(e.kind as u64);
-			if let Some(l) = e.location {
-				h.write_u64(l.0);
-			}
-			if let Some(l) = &e.label {
-				h.write_str(l.as_str());
-			}
+			hash_location(h, e.location);
 			let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().collect();
 			fields.sort_by_key(|(id, _)| id.0);
-			for (id, v) in fields {
-				h.write_u64(id.0 as u64);
-				hash_value(h, v);
+			for (_, v) in fields {
+				hash_value_locations(h, v);
 			}
 		}
 		Content::Sequence(s) => {
-			h.write_u64(11);
-			if let Some(l) = s.location {
-				h.write_u64(l.0);
-			}
-			if let Some(l) = &s.label {
-				h.write_str(l.as_str());
-			}
-			h.write_u64(s.children.len() as u64);
+			hash_location(h, s.location);
 			for k in &s.children {
-				hash_content(h, k);
+				hash_locations(h, k);
 			}
 		}
-		Content::Styled(s) => {
-			h.write_u64(12);
-			h.write_u64(s.styles.len() as u64);
-			hash_content(h, &s.child);
-		}
+		Content::Styled(s) => hash_locations(h, &s.child),
 	}
 }
 
-/// Hashes a value deterministically. Maps are hashed in their insertion order, functions by name and
-/// definition site, and plain data by its debug form, which holds no map.
-pub fn hash_value(h: &mut Fingerprinter, v: &Value) {
-	match v {
-		Value::Content(c)	=> hash_content(h, c),
-		Value::Array(a)		=> {
-			h.write_u64(20);
-			h.write_u64(a.len() as u64);
-			for x in a.iter() {
-				hash_value(h, x);
-			}
-		}
-		Value::Dict(d)		=> {
-			h.write_u64(21);
-			for (k, x) in d.iter() {
-				h.write_str(k);
-				hash_value(h, x);
-			}
-		}
-		Value::Func(f)		=> {
-			h.write_u64(22);
-			h.write_str(f.name().unwrap_or(""));
-			if let Func::Closure(c) = f {
-				h.write_u64(c.span.file.0 as u64);
-				h.write_u64(c.span.start as u64);
-			}
-		}
-		Value::Module(m)	=> { h.write_u64(23); h.write_str(&m.name); }
-		Value::Styles(s)	=> { h.write_u64(24); h.write_u64(s.len() as u64); }
-		Value::Args(a)		=> {
-			h.write_u64(25);
-			for arg in a.items.iter() {
-				h.write_str(arg.name.as_deref().unwrap_or(""));
-				hash_value(h, &arg.value);
-			}
-		}
-		Value::Selector(s)	=> hash_selector(h, s),
-		Value::Location(l)	=> { h.write_u64(26); h.write_u64(l.0); }
-		Value::Str(s)		=> { h.write_u64(27); h.write_str(s); }
-		Value::Label(l)		=> { h.write_u64(28); h.write_str(l.as_str()); }
-		Value::Counter(c)	=> { h.write_u64(29); hash_value(h, &c.key.to_value()); }
-		Value::State(s)		=> { h.write_u64(30); h.write_str(&s.key); hash_value(h, &s.init); }
-		other				=> h.write_str(&fmt!("{:?}", other)),
+fn hash_location(h: &mut Fingerprinter, l: Option<Location>) {
+	match l {
+		Some(l)	=> { h.write_u8(1); h.write_u64(l.0); }
+		None	=> h.write_u8(0),
 	}
+}
+
+fn hash_value_locations(h: &mut Fingerprinter, v: &Value) {
+	match v {
+		Value::Content(c)	=> hash_locations(h, c),
+		Value::Array(a)		=> for x in a.iter() { hash_value_locations(h, x); },
+		Value::Dict(d)		=> for (_, x) in d.iter() { hash_value_locations(h, x); },
+		Value::Args(a)		=> for arg in a.items.iter() { hash_value_locations(h, &arg.value); },
+		_					=> (),
+	}
+}
+
+/// Hashes a value by its structure, span-free ([`fp::hash_value`]), then the locations of any content
+/// in it, which a reader of the value sees.
+pub fn hash_value(h: &mut Fingerprinter, v: &Value) {
+	fp::hash_value(h, v);
+	hash_value_locations(h, v);
 }
 
 /// `location.position()`: the page and the top-left point, as a dictionary.
