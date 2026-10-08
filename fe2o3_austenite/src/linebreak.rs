@@ -659,7 +659,7 @@ fn set_lines(
 				Kind::Boxed(shaped) => {
 					// Every prose box takes the paragraph's fill as it becomes a drawn leaf; black leaves the
 					// glyph emitters' bytes exactly as before.
-					let leaf = Leaf::text(shaped.clone().with_colour(fill));
+					let leaf = Leaf::text(shaped.clone().with_colour(fill.into()));
 					if leaf.dims.height > height { height = leaf.dims.height; }
 					if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 					children.push(Node::Leaf(leaf));
@@ -712,7 +712,7 @@ fn set_lines(
 
 		// A taken discretionary draws its hyphen as the line's last box, in the paragraph's own fill.
 		if let Some(h) = &items[hi].hyphen {
-			let leaf = Leaf::text(h.clone().with_colour(fill));
+			let leaf = Leaf::text(h.clone().with_colour(fill.into()));
 			if leaf.dims.height > height { height = leaf.dims.height; }
 			if leaf.dims.depth > depth { depth = leaf.dims.depth; }
 			children.push(Node::Leaf(leaf));

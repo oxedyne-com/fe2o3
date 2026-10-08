@@ -141,12 +141,12 @@ fn hash_graphic(g: &Graphic, h: &mut Fingerprinter) {
 			DrawOp::Fill { path, colour } => {
 				h.write_u8(0);
 				h.write_str(&write_path_data(path));
-				h.write(&[colour.r, colour.g, colour.b, colour.a]);
+				h.write(&colour.key());
 			},
 			DrawOp::Stroke { path, colour, width } => {
 				h.write_u8(1);
 				h.write_str(&write_path_data(path));
-				h.write(&[colour.r, colour.g, colour.b, colour.a]);
+				h.write(&colour.key());
 				h.write_f32(*width);
 			},
 			DrawOp::Image { image, x, y, w, h: ht } => {
@@ -328,13 +328,13 @@ fn draw_graphic(
 			DrawOp::Fill { path, colour } => {
 				let p = res!(path.transform(&t));
 				out.push_str(&fmt!(
-					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(Some(*colour), None)));
+					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(Some(colour.to_rgba()), None)));
 			},
 			DrawOp::Stroke { path, colour, width } => {
 				let pen	= res!(Stroke::new(*width));
 				let p	= res!(path.transform(&t));
 				out.push_str(&fmt!(
-					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(None, Some((*colour, &pen)))));
+					"  <path d=\"{}\" {}/>\n", write_path_data(&p), presentation(None, Some((colour.to_rgba(), &pen)))));
 			},
 			DrawOp::Image { image, x, y, w, h } => {
 				// The raster is re-encoded to PNG and embedded as a base64 data URI in an `<image>`. Its
@@ -381,7 +381,7 @@ fn draw_text(
 		let placed = res!(path.transform(&t));
 		out.push_str(&fmt!(
 			"  <path d=\"{}\" {}/>\n",
-			write_path_data(&placed), presentation(Some(shaped.colour()), None)));
+			write_path_data(&placed), presentation(Some(shaped.colour().to_rgba()), None)));
 	}
 	Ok(())
 }

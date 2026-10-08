@@ -97,7 +97,10 @@ use oxedyne_fe2o3_font::{
 	},
 };
 use oxedyne_fe2o3_graphics::{
-	colour::Rgba,
+	colour::{
+		Ink,
+		Rgba,
+	},
 	path::{
 		Bounds,
 		Path,
@@ -3319,17 +3322,17 @@ fn svg_graphic(
 	for op in pic.ops {
 		match op {
 			SvgOp::Fill { path, colour } => {
-				ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+				ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: colour.into() });
 			},
 			SvgOp::Stroke { path, colour, stroke } => {
 				if stroke.dash.is_some() {
 					// Bake the dashes into an outline in the picture's frame, then scale that with the rest.
 					let outline = res!(path.stroke(&stroke));
-					ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour });
+					ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: colour.into() });
 				} else {
 					ops.push(DrawOp::Stroke {
 						path:	res!(path.transform(&t)),
-						colour,
+						colour: colour.into(),
 						width:	stroke.width * s,
 					});
 				}
@@ -3401,7 +3404,7 @@ fn bake_svg_text(
 			.then(&Transform::translate(pen_x + glyph.x, y - glyph.y))
 			.then(local)
 			.then(t);
-		ops.push(DrawOp::Fill { path: res!(outline.transform(&place)), colour });
+		ops.push(DrawOp::Fill { path: res!(outline.transform(&place)), colour: colour.into() });
 	}
 	Ok(())
 }
@@ -3689,8 +3692,8 @@ fn placeholder(measure: Sp) -> Outcome<Graphic> {
 	pb.close();
 	let path	= res!(pb.finish());
 	let ops		= vec![
-		DrawOp::Fill { path: path.clone(), colour: Rgba::opaque(238, 238, 240) },
-		DrawOp::Stroke { path, colour: Rgba::opaque(150, 150, 150), width: 0.8 },
+		DrawOp::Fill { path: path.clone(), colour: Rgba::opaque(238, 238, 240).into() },
+		DrawOp::Stroke { path, colour: Rgba::opaque(150, 150, 150).into(), width: 0.8 },
 	];
 	Ok(Graphic::new(ops, Dims::new(Sp::from_pt(w as f64), Sp::from_pt(h as f64), Sp::ZERO)))
 }
@@ -3995,7 +3998,7 @@ fn fm_doc_title_page(
 	let fill	= Rgba::opaque(grey, grey, grey);
 	ops.push(DrawOp::Fill {
 		path:	res!(Path::rect(Bounds::new(-il, -it, -il + side_w, -it + ph))),
-		colour:	fill,
+		colour:	fill.into(),
 	});
 
 	// The top logo, centred across the sidebar, its top edge one `margins.a4` down from the page top -- which
@@ -4202,7 +4205,7 @@ fn title_run_ops(
 			}
 			let t = Transform::scale(1.0, -1.0)
 				.then(&Transform::translate(x + glyph.x, base_y - glyph.y));
-			ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: Rgba::BLACK });
+			ops.push(DrawOp::Fill { path: res!(outline.transform(&t)), colour: Ink::BLACK });
 		}
 		x += shaped.dims().width.to_pt() as f32;
 	}
@@ -5564,7 +5567,7 @@ fn coloured_run(shaped: &ShapedText, colour: Rgba) -> Outcome<Graphic> {
 		}
 		let t = Transform::scale(1.0, -1.0)
 			.then(&Transform::translate(glyph.x, base_y - glyph.y));
-		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour });
+		ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: colour.into() });
 	}
 	Ok(Graphic::new(ops, shaped.dims()))
 }
@@ -5748,7 +5751,7 @@ fn doc_banner(
 	let y1			= banner_h - top_pt;
 
 	let mut ops:	Vec<DrawOp>	= Vec::new();
-	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
+	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey.into() });
 
 	// The title in the resolved heading face (the template's `heading-font`, e.g. Graystroke), falling to
 	// the body bold when the tree ships no display face, at the template's 26 pt, small-capped run by run
@@ -5775,7 +5778,7 @@ fn doc_banner(
 			}
 			let t = Transform::scale(1.0, -1.0)
 				.then(&Transform::translate(x_off + glyph.x, base_y - glyph.y));
-			ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Rgba::BLACK });
+			ops.push(DrawOp::Fill { path: res!(path.transform(&t)), colour: Ink::BLACK });
 		}
 		x_off += shaped.dims().width.to_pt() as f32;
 	}
@@ -5820,7 +5823,7 @@ fn section_banner(
 	let y1			= banner_h - top_pt;
 
 	let mut ops:	Vec<DrawOp>	= Vec::new();
-	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey });
+	ops.push(DrawOp::Fill { path: res!(Path::rect(Bounds::new(x0, y0, x1, y1))), colour: grey.into() });
 
 	// The logo, loaded 30 pt tall, its right edge one page margin in from the page's right edge (the content
 	// right edge) and its box centred on the band's vertical middle. Its own ops are in a top-left frame,
@@ -5932,12 +5935,12 @@ fn callout(
 	if fill.a != 0 {
 		let rect	= res!(Path::round_rect(
 			Bounds::new(0.0, 0.0, measure.to_pt() as f32, total.to_pt() as f32), frame.radius));
-		ops.push(DrawOp::Fill { path: rect, colour: fill });
+		ops.push(DrawOp::Fill { path: rect, colour: fill.into() });
 	}
 	if let (Some(w), Some(col)) = (style.callout.stroke_left_w, style.callout.stroke_left_col) {
 		if w.to_pt() > 0.0 && col.a != 0 {
 			let bar	= res!(Path::rect(Bounds::new(0.0, 0.0, w.to_pt() as f32, total.to_pt() as f32)));
-			ops.push(DrawOp::Fill { path: bar, colour: col });
+			ops.push(DrawOp::Fill { path: bar, colour: col.into() });
 		}
 	}
 	if !ops.is_empty() {
@@ -6020,7 +6023,7 @@ fn rule_divider(nodes: &mut Vec<Node>, measure: Sp, width: Length, thickness: f6
 		Ok(r)	=> r,
 		Err(_)	=> return,
 	};
-	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour }], Dims::new(w, h, Sp::ZERO));
+	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour: colour.into() }], Dims::new(w, h, Sp::ZERO));
 	nodes.push(Node::HBox(BoxNode::new(vec![Node::Leaf(Leaf::graphic(graphic))], Dims::new(measure, h, Sp::ZERO))));
 }
 
@@ -6233,7 +6236,7 @@ fn draw_marginalia(
 		if display.is_empty() {
 			continue;
 		}
-		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, display)).with_colour(colour);
+		let shaped	= res!(ShapedText::new(fonts.clone(), Role::Body, Dir::Ltr, size, display)).with_colour(colour.into());
 		let d		= shaped.dims();
 		// Horizontal, in recto (binding-left) coordinates: a recto page seats the code's left edge at the
 		// block's right edge (the outer margin); a verso page seats its right edge at the block's left edge,
@@ -6456,7 +6459,7 @@ mod tests {
 				Node::HBox(b) | Node::VBox(b)	=> collect_fills(&b.list, out),
 				Node::Leaf(l)					=> if let LeafKind::Graphic(g) = &l.kind {
 					for op in &g.ops {
-						if let DrawOp::Fill { colour, .. } = op { out.push(*colour); }
+						if let DrawOp::Fill { colour, .. } = op { out.push(colour.to_rgba()); }
 					}
 				},
 				_								=> {},

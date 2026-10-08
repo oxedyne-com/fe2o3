@@ -949,7 +949,7 @@ fn fill_band(width: Sp, height: Sp, colour: Rgba) -> Option<Leaf> {
 		return None;
 	}
 	let rect	= Path::rect(Bounds::new(0.0, 0.0, w, h)).ok()?;
-	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour }], Dims::new(Sp::ZERO, height, Sp::ZERO));
+	let graphic	= Graphic::new(vec![DrawOp::Fill { path: rect, colour: colour.into() }], Dims::new(Sp::ZERO, height, Sp::ZERO));
 	Some(Leaf::graphic(graphic))
 }
 

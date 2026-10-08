@@ -22,7 +22,7 @@ use oxedyne_fe2o3_font::{
 		Run,
 	},
 };
-use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::colour::Ink;
 use oxedyne_fe2o3_graphics::path::Path;
 use oxedyne_fe2o3_graphics::transform::Transform;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
@@ -104,7 +104,7 @@ pub struct ShapedText {
 	run:	Run,
 	dims:	Dims,
 	text:	String,	// the shaped source string, so a glyph's cluster recovers its source scalar(s)
-	colour:	Rgba,	// the fill the glyphs draw in; black unless a `#set text(fill:)` sets it
+	colour:	Ink,	// the fill the glyphs draw in; black unless a `#set text(fill:)` sets it
 }
 
 impl ShapedText {
@@ -170,7 +170,7 @@ impl ShapedText {
 		size:	f32,
 		glyphs:	Vec<Glyph>,
 		text:	String,
-		colour:	Rgba,
+		colour:	Ink,
 		dims:	Dims,
 	)
 		-> Self
@@ -193,7 +193,7 @@ impl ShapedText {
 		size:	f32,
 		glyphs:	Vec<Glyph>,
 		text:	String,
-		colour:	Rgba,
+		colour:	Ink,
 		dims:	Dims,
 	)
 		-> Outcome<Self>
@@ -226,18 +226,18 @@ impl ShapedText {
 			Sp::from_pt(vm.ascent as f64),		// height above the baseline
 			Sp::from_pt(vm.descent as f64),		// depth below it
 		);
-		Ok(Self { src, size, run, dims, text: text.to_string(), colour: Rgba::BLACK })
+		Ok(Self { src, size, run, dims, text: text.to_string(), colour: Ink::BLACK })
 	}
 
 	/// The same run set to draw in `colour`. Consumes and returns `self` so a caller can colour a shaped
 	/// box inline without a second binding -- the line breaker paints every prose leaf this way.
-	pub fn with_colour(mut self, colour: Rgba) -> Self {
+	pub fn with_colour(mut self, colour: Ink) -> Self {
 		self.colour = colour;
 		self
 	}
 
 	/// The fill the glyphs draw in, black unless a `#set text(fill:)` set it.
-	pub fn colour(&self) -> Rgba { self.colour }
+	pub fn colour(&self) -> Ink { self.colour }
 
 	pub fn dims(&self) -> Dims { self.dims }
 
@@ -264,7 +264,7 @@ impl ShapedText {
 	/// identically whatever theme produced them.
 	pub fn hash_into(&self, h: &mut Fingerprinter) {
 		h.write_f32(self.size);
-		h.write(&[self.colour.r, self.colour.g, self.colour.b, self.colour.a]);
+		h.write(&self.colour.key());
 		h.write_str(&self.text);
 		h.write_u64(self.run.glyphs.len() as u64);
 		for g in &self.run.glyphs {

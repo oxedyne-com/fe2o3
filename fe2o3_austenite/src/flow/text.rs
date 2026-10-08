@@ -48,7 +48,7 @@ use oxedyne_fe2o3_font::shape::{
 	Glyph as RunGlyph,
 	ShapeSpec,
 };
-use oxedyne_fe2o3_graphics::colour::Rgba;
+use oxedyne_fe2o3_graphics::colour::Ink;
 use oxedyne_fe2o3_graphics::path::{
 	Bounds,
 	Path,
@@ -238,14 +238,14 @@ pub enum DecoLine {
 	Underline { stroke: Option<DecoStroke>, offset: Option<f64>, evade: bool, background: bool },
 	Overline { stroke: Option<DecoStroke>, offset: Option<f64>, evade: bool, background: bool },
 	Strikethrough { stroke: Option<DecoStroke>, offset: Option<f64>, background: bool },
-	Highlight { fill: Option<Rgba>, top: Edge, bottom: Edge },
+	Highlight { fill: Option<Ink>, top: Edge, bottom: Edge },
 }
 
 /// A decoration's stroke, resolved: its colour (the text fill when unset) and thickness in points (the
 /// font's recommended thickness when unset).
 #[derive(Clone, Copy, Debug)]
 pub struct DecoStroke {
-	pub paint:		Option<Rgba>,
+	pub paint:		Option<Ink>,
 	pub thickness:	Option<f64>,
 }
 
@@ -270,7 +270,7 @@ pub struct TextProps {
 	pub rtl:				bool,
 	pub tracking:			f64,
 	pub spacing:			(f64, f64),			// ratio of the space's width, plus points
-	pub fill:				Rgba,
+	pub fill:				Ink,
 	pub baseline:			f64,
 	pub overhang:			bool,
 	pub top_edge:			Edge,
@@ -286,6 +286,10 @@ pub struct TextProps {
 	pub link:				Option<LinkTarget>,	// where the text links (`link.current`)
 	pub link_outset:		f64,				// half the leading, which a link area adds above and below
 }
+
+// Typst's default text fill is `black`, which is `luma(0%)`: a grey, so a writer that keeps the space
+// writes the same bytes for a text that set no fill and one that set `black`.
+const DEFAULT_FILL: Ink = Ink::Grey { v: 0.0, a: 255 };
 
 /// Typst's fallback families, tried after a `font` list when `fallback` is on.
 const FALLBACKS: &[&str] = &[
@@ -321,17 +325,17 @@ pub fn elem_field(styles: &StyleChain, kind: ElemKind, name: &str) -> Outcome<Op
 }
 
 /// A paint as the one colour the back end draws with: a colour as it is, a gradient by its first stop.
-pub fn paint_rgba(v: &Value) -> Outcome<Option<Rgba>> {
+pub fn paint_ink(v: &Value) -> Outcome<Option<Ink>> {
 	match v {
-		Value::Color(c)		=> Ok(Some(res!(c.to_rgba()))),
+		Value::Color(c)		=> Ok(Some(c.to_ink())),
 		Value::Gradient(g)	=> match g.stops.first() {
-			Some((c, _))	=> Ok(Some(res!(c.to_rgba()))),
+			Some((c, _))	=> Ok(Some(c.to_ink())),
 			None			=> Ok(None),
 		},
 		Value::Stroke(s)	=> match &s.paint {
-			Some(Paint::Color(c))		=> Ok(Some(res!(c.to_rgba()))),
+			Some(Paint::Color(c))		=> Ok(Some(c.to_ink())),
 			Some(Paint::Gradient(g))	=> match g.stops.first() {
-				Some((c, _))	=> Ok(Some(res!(c.to_rgba()))),
+				Some((c, _))	=> Ok(Some(c.to_ink())),
 				None			=> Ok(None),
 			},
 			_							=> Ok(None),
@@ -591,9 +595,9 @@ fn deco_stroke(v: Option<&Value>, size: f64) -> Outcome<Option<DecoStroke>> {
 		None	=> return Ok(None),
 	};
 	let paint = match &s.paint {
-		Some(Paint::Color(c))		=> Some(res!(c.to_rgba())),
+		Some(Paint::Color(c))		=> Some(c.to_ink()),
 		Some(Paint::Gradient(g))	=> match g.stops.first() {
-			Some((c, _))	=> Some(res!(c.to_rgba())),
+			Some((c, _))	=> Some(c.to_ink()),
 			None			=> None,
 		},
 		_							=> None,
@@ -640,7 +644,7 @@ fn decos(styles: &StyleChain, size: f64) -> Outcome<Vec<Deco>> {
 					},
 					"highlight"		=> DecoLine::Highlight {
 						fill:	match d.get("fill") {
-							Some(v)	=> res!(paint_rgba(v)),
+							Some(v)	=> res!(paint_ink(v)),
 							None	=> None,
 						},
 						top:	d.get("top-edge").map(|v| Edge::of(v, size, true)).unwrap_or(Edge::Ascender),
@@ -703,8 +707,8 @@ pub fn props(styles: &StyleChain) -> Outcome<TextProps> {
 		_							=> lang_is_rtl(&lang),
 	};
 	let fill = match res!(text_field(styles, "fill")) {
-		Some(v)	=> res!(paint_rgba(&v)).unwrap_or(Rgba::BLACK),
-		None	=> Rgba::BLACK,
+		Some(v)	=> res!(paint_ink(&v)).unwrap_or(DEFAULT_FILL),
+		None	=> DEFAULT_FILL,
 	};
 	let top_edge = res!(text_field(styles, "top-edge")).map(|v| Edge::of(&v, size, true)).unwrap_or(Edge::CapHeight);
 	let bottom_edge = res!(text_field(styles, "bottom-edge")).map(|v| Edge::of(&v, size, false)).unwrap_or(Edge::Baseline);
