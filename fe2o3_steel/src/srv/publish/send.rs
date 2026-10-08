@@ -31,6 +31,11 @@ use crate::srv::publish::{
 		Destination,
 		Rendition,
 	},
+	outbox::{
+		self,
+		Courier,
+		Pacer,
+	},
 	store,
 	subscribe,
 };
@@ -82,6 +87,7 @@ use oxedyne_fe2o3_text::doc::html::{
 
 use std::{
 	collections::BTreeMap,
+	future::Future,
 	path::Path,
 	sync::{
 		Arc,
@@ -807,6 +813,9 @@ pub struct MailSender {
 	// The address the newsletter is from where a site's `publish` block names none, derived from
 	// the mail configuration's signing domain, e.g. `news@<domain>`.
 	default_from:	String,
+	// The host's outbound ceiling and its place in the schedule. Shared by every clone, and so by
+	// every vhost's drainer, because the address and the domain carry one reputation.
+	pacer:		Arc<Pacer>,
 }
 
 impl std::fmt::Debug for MailSender {
@@ -816,6 +825,7 @@ impl std::fmt::Debug for MailSender {
 		f.debug_struct("MailSender")
 			.field("default_from", &self.default_from)
 			.field("dkim", &self.dkim.len())
+			.field("outbound_hourly", &self.pacer.hourly())
 			.finish()
 	}
 }
@@ -839,7 +849,19 @@ impl MailSender {
 			client:	Arc::new(client),
 			dkim,
 			default_from,
+			pacer:	Arc::new(Pacer::new(outbox::HOURLY_DEFAULT)),
 		})
+	}
+
+	/// This sender with an outbound ceiling of `hourly` sends an hour, where `0` holds every send in
+	/// the queue. Set before the sender is cloned into the vhosts.
+	pub fn with_outbound_hourly(mut self, hourly: u32) -> Self {
+		self.pacer = Arc::new(Pacer::new(hourly));
+		self
+	}
+
+	pub fn pacer(&self) -> &Arc<Pacer> {
+		&self.pacer
 	}
 
 	pub fn default_from(&self) -> &str {
@@ -960,11 +982,29 @@ impl MailSender {
 /// the DKIM signing domain so the signature authenticates.
 impl PublishConfig {
 	pub fn newsletter_from(&self, sender: &MailSender) -> String {
+		self.from_or(sender.default_from())
+	}
+
+	/// As [`newsletter_from`](Self::newsletter_from), for a sender that is known only by its default.
+	pub fn from_or(&self, default: &str) -> String {
 		if self.newsletter_from.trim().is_empty() {
-			sender.default_from().to_string()
+			default.to_string()
 		} else {
 			self.newsletter_from.clone()
 		}
+	}
+}
+
+impl Courier for MailSender {
+
+	fn default_from(&self) -> &str {
+		&self.default_from
+	}
+
+	fn deliver(&self, from: &str, to: &str, msg: &str)
+		-> impl Future<Output = Outcome<String>> + Send
+	{
+		self.deliver_signed(from, to, msg)
 	}
 }
 
@@ -1357,7 +1397,7 @@ fn message_id(from: &str) -> String {
 ///
 /// Pure over its strings, so what a subscriber is sent can be tested without a socket. The body is
 /// deliberately spare -- an address that never opted in gets a link and an explanation, no more.
-fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
+pub fn build_confirmation_email(from: &str, to: &str, confirm_url: &str, site_name: &str) -> String {
 	let who = if site_name.trim().is_empty() {
 		fmt!("this site")
 	} else {

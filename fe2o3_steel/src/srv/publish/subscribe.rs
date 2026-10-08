@@ -26,6 +26,11 @@
 use crate::srv::publish::{
 	PublishConfig,
 	json,
+	outbox::{
+		self,
+		Entry,
+		Kind,
+	},
 	send::{
 		self,
 		MailSender,
@@ -58,7 +63,6 @@ use oxedyne_fe2o3_net::{
 		msg::HttpMessage,
 		status::HttpStatus,
 	},
-	smtp::client::is_permanent,
 };
 
 use std::sync::{
@@ -138,6 +142,9 @@ pub struct Subscriber {
 	pub state:	SubState,	// where they are in the double opt-in
 	pub token:	String,		// unguessable, and minted fresh on each sign-up
 	pub created:	Option<String>,	// ISO timestamp, where it is known
+	// ISO timestamp of the last confirmation the outbox actually sent. A pending record held while
+	// the outbound ceiling is 0 has none, and the expiry clock reads this, not `created`.
+	pub sent:	Option<String>,
 }
 
 impl Subscriber {
@@ -155,6 +162,9 @@ impl Subscriber {
 		// post takes: an absent key and an empty value say the one thing.
 		if let Some(c) = &self.created {
 			m.insert(dat!("created"), dat!(c.clone()));
+		}
+		if let Some(t) = &self.sent {
+			m.insert(dat!("sent"), dat!(t.clone()));
 		}
 		Dat::Map(m)
 	}
@@ -178,15 +188,18 @@ impl Subscriber {
 				"publish: a subscriber record names no email.";
 				Invalid, Input, Missing));
 		}
-		let created = match m.get(&dat!("created")) {
-			Some(Dat::Str(s))	=> Some(s.clone()),
-			_			=> None,
+		let stamp = |key: &str| -> Option<String> {
+			match m.get(&dat!(key)) {
+				Some(Dat::Str(s))	=> Some(s.clone()),
+				_			=> None,
+			}
 		};
 		Ok(Self {
 			email,
-			state:	SubState::of(&get_str("state")),
-			token:	get_str("token"),
-			created,
+			state:		SubState::of(&get_str("state")),
+			token:		get_str("token"),
+			created:	stamp("created"),
+			sent:		stamp("sent"),
 		})
 	}
 }
@@ -618,6 +631,7 @@ pub fn add_pending<
 			state:		SubState::Pending,
 			token:		mint_token(),
 			created:	send::iso_now().ok(),
+			sent:		None,
 		};
 		res!(put_in(dbr, user, &sub));
 		Ok(Some(sub))
@@ -800,6 +814,34 @@ pub fn mark_bounced<
 	}
 }
 
+/// Records that a confirmation was sent to a pending subscriber, at an ISO time the caller names.
+///
+/// Only a [`SubState::Pending`] record takes it; a subscriber who has confirmed or left since the
+/// send is left as it is. `true` where the time was written.
+pub fn mark_sent<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	at:	&str,
+)
+	-> Outcome<bool>
+{
+	let email = normalise_email(email);
+	let done = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state != SubState::Pending {
+			return Ok((None, false));
+		}
+		sub.sent = Some(at.to_string());
+		Ok((Some(sub), true))
+	}));
+	Ok(done.unwrap_or(false))
+}
+
 /// Erases a subscriber outright: the record and its place in the index both, by their address.
 ///
 /// A GDPR erasure, distinct from [`unsubscribe_email`]: an unsubscribe keeps the record so a re-subscribe
@@ -912,7 +954,7 @@ impl Said {
 	}
 }
 
-/// Records a pending sign-up and sends the confirmation, for a `POST {path}/subscribe`.
+/// Records a pending sign-up and queues the confirmation, for a `POST {path}/subscribe`.
 ///
 /// Always answers the same "check your inbox" page, whether the address was new, pending or already
 /// confirmed, so nothing here reveals whether an address is on the list. A caller whose `Accept`
@@ -1003,7 +1045,7 @@ pub async fn handle_subscribe<
 
 	match res!(add_pending(db, &email, &cfg.confirm_window(), rate::now_secs())) {
 		// New or pending, and this address is within its limit: ask for a confirmation to go.
-		Some(sub)	=> dispatch_confirmation(cfg, db, sender, &sub, id).await,
+		Some(sub)	=> dispatch_confirmation(db, sender, &sub, id),
 		// Already confirmed, bounced, or past its limit: send nothing, and answer identically.
 		None		=> debug!("{}: publish: subscribe for an address that needs no confirmation", id),
 	}
@@ -1011,38 +1053,29 @@ pub async fn handle_subscribe<
 	Said::Sent.answer(cfg, hdrs)
 }
 
-// The one place a confirmation leaves. Today it is sent here, in the request, so the request waits
-// on SMTP; the outbox replaces this body with a queue entry and the request stops waiting. A send
-// that fails is logged, and the reader still gets the same page -- retrying the form re-sends, and
-// saying "we could not email you" would leak that the address was actionable.
-async fn dispatch_confirmation<
+// The one place a confirmation leaves the request. It is queued, not sent: the request never awaits
+// SMTP, so a new address answers as fast as a confirmed one and the host's sending rate is the
+// outbox's to set. A push that fails is logged, and the reader still gets the same page -- retrying
+// the form queues it again, and saying "we could not email you" would leak that the address was
+// actionable.
+fn dispatch_confirmation<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	cfg:	&PublishConfig,
 	db:	&(Arc<RwLock<DB>>, UID),
 	sender:	&Arc<MailSender>,
 	sub:	&Subscriber,
 	id:	&str,
 ) {
-	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
-	let from = cfg.newsletter_from(sender);
-	match sender.send_confirmation(&from, &sub.email, &url, &cfg.site_name).await {
-		Ok(_)	=> info!("{}: publish: confirmation sent to {}", id, redact(&sub.email)),
-		// A permanent failure means the address does not exist; suppress it so a retry of the form
-		// does not keep mailing a mailbox the server has refused. A transient failure is left to be
-		// retried by the form, exactly as before.
-		Err(e) if is_permanent(&e)	=> {
-			warn!("{}: publish: confirmation to {} failed permanently; suppressing: {}",
-				id, redact(&sub.email), e);
-			if let Err(e2) = mark_bounced(db, &sub.email, id) {
-				warn!("{}: publish: could not suppress {}: {}", id, redact(&sub.email), e2);
-			}
+	match outbox::push(db, &[Entry::new(Kind::Confirm, &sub.email, "", rate::now_secs())]) {
+		Ok(_)	=> {
+			debug!("{}: publish: confirmation to {} queued", id, redact(&sub.email));
+			sender.pacer().wake();
 		}
-		Err(e)	=> warn!("{}: publish: confirmation to {} did not send: {}",
+		Err(e)	=> warn!("{}: publish: confirmation to {} could not be queued: {}",
 			id, redact(&sub.email), e),
 	}
 }
@@ -1164,6 +1197,7 @@ mod tests {
 			state:		SubState::Confirmed,
 			token:		fmt!("abc123"),
 			created:	Some(fmt!("2026-07-18T10:00:00Z")),
+			sent:		Some(fmt!("2026-07-18T10:05:00Z")),
 		};
 		let back = res!(Subscriber::from_dat(&sub.to_dat()));
 		assert_eq!(back, sub);
@@ -1194,6 +1228,7 @@ mod tests {
 			state:		SubState::Bounced,
 			token:		fmt!("tok"),
 			created:	Some(fmt!("2026-07-18T10:00:00Z")),
+			sent:		None,
 		};
 		let back = res!(Subscriber::from_dat(&sub.to_dat()));
 		assert_eq!(back, sub);

@@ -40,6 +40,7 @@ pub mod declare;
 pub mod dest;
 pub mod feed;
 pub mod json;
+pub mod outbox;
 pub mod page;
 pub mod rate;
 pub mod send;

@@ -4670,6 +4670,7 @@ mod tests {
 			state:		state,
 			token:		fmt!("t0000000000000000000000000000000"),
 			created:	created.map(|c| fmt!("{}", c)),
+			sent:		None,
 		}
 	}
 
@@ -5444,6 +5445,7 @@ mod ui_dump {
 			state:		state,
 			token:		fmt!("t0000000000000000000000000000000"),
 			created:	Some(fmt!("{}", created)),
+			sent:		None,
 		};
 		let subs = vec![
 			sub("a@example.com", subscribe::SubState::Confirmed, "2026-07-19T08:00:00Z"),
