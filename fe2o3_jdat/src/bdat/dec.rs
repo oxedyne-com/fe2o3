@@ -266,7 +266,7 @@ impl Dat {
                     } else {
                         return Err(<Dat as FromBytes>::too_few(
                             buf.len(),
-                            start + n + v,
+                            (start + n).saturating_add(v),
                             &Self::code_name(buf[0]),
                             file!(),
                             line!(),
@@ -460,8 +460,10 @@ impl Dat {
                         return Ok((Self::OrdMap(OrdDaticleMap::new()), 1 + n));
                     }
                     let payload_len = payload_len as usize;
-                    let byt_len = 1 + n + payload_len;
-                    if buf.len() > n + payload_len {
+                    // As for the map, the bound is by subtraction, since `payload_len` can be
+                    // near `usize::MAX`.
+                    if payload_len <= buf.len().saturating_sub(1 + n) {
+                        let byt_len = 1 + n + payload_len;
                         let mut map = OrdDaticleMap::new();
                         let mut i = 1 + n;
                         let mut count: u64 = 0;
@@ -1071,7 +1073,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1122,7 +1124,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1172,7 +1174,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1224,7 +1226,7 @@ impl Dat {
                                     &buf[1 + n .. 1 + n + v - 8]
                                 );
                                 let expi64 = i64::from_be_bytes(
-                                    res!(<[u8; 8]>::try_from(&buf[1 + n + v - 8 ..]),
+                                    res!(<[u8; 8]>::try_from(&buf[1 + n + v - 8 .. 1 + n + v]),
                                         Decode, Bytes)
                                 );
                                 return Ok((
@@ -1234,7 +1236,7 @@ impl Dat {
                             } else {
                                 return Err(<Dat as FromBytes>::too_few(
                                     buf.len(),
-                                    1 + n + v,
+                                    (1 + n).saturating_add(v),
                                     &Self::code_name(buf[0]),
                                     file!(),
                                     line!(),
@@ -1354,14 +1356,16 @@ impl Dat {
                     let v = u64::from_be_bytes(
                         res!(<[u8; 8]>::try_from(&buf[1..9]), Decode, Bytes)
                     ) as usize;
-                    if buf.len() > 8 + v {
+                    // `v` is a raw u64 a peer chose, so the bound is by subtraction.
+                    if v <= buf.len().saturating_sub(9) {
                         return Ok((
                             Self::BU64(buf[1 + 8 .. 1 + 8 + v].to_vec()),
                             1 + 8 + v,
                         ));
                     } else {
                         return Err(<Dat as FromBytes>::too_few(
-                            buf.len(), 1 + 8 + v, &Self::code_name(buf[0]), file!(), line!()));
+                            buf.len(), 9usize.saturating_add(v), &Self::code_name(buf[0]),
+                            file!(), line!()));
                     }
                 } else {
                     return Err(<Dat as FromBytes>::too_few(
