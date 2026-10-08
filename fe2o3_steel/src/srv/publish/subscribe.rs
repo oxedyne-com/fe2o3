@@ -30,6 +30,14 @@ use crate::srv::publish::{
 		MailSender,
 	},
 	page,
+	rate::{
+		self,
+		Window,
+	},
+	store::{
+		self,
+		Edit,
+	},
 };
 
 use oxedyne_fe2o3_core::{
@@ -278,36 +286,86 @@ pub fn get<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	match res!(guard.get(&key_of(email), None)) {
-		Some((val, _))	=> Ok(Some(res!(Subscriber::from_dat(&val)))),
-		None		=> Ok(None),
-	}
+	get_in(&*guard, email)
 }
 
-/// Writes a subscriber, adding it to the index if it is new.
-fn put<
+// As `get`, on a database already locked.
+fn get_in<
 	const UIDL: usize,
 	UID:	NumIdDat<UIDL>,
 	ENC:	Encrypter,
 	KH:	Hasher,
 	DB:	Database<UIDL, UID, ENC, KH>,
 >(
-	db:	&(Arc<RwLock<DB>>, UID),
+	dbr:	&DB,
+	email:	&str,
+)
+	-> Outcome<Option<Subscriber>>
+{
+	match res!(dbr.get(&key_of(email), None)) {
+		Some((val, _))	=> Ok(Some(res!(Subscriber::from_dat(&val)))),
+		None		=> Ok(None),
+	}
+}
+
+/// Writes a subscriber, adding it to the index if it is new, on a database already write-locked.
+///
+/// The record and the index entry go in under one write guard. With a read guard two sign-ups each
+/// read the index, added their own address and wrote it back over the other's, and the loser had a
+/// record the list never named.
+fn put_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	user:	UID,
 	sub:	&Subscriber,
 )
 	-> Outcome<()>
 {
-	let (db_arc, user) = db;
-	{
-		let guard = lock_read!(db_arc);
-		res!(guard.insert(key_of(&sub.email), sub.to_dat(), *user, None));
-	}
-	let mut emails = res!(index(db));
-	if !emails.iter().any(|e| e == &sub.email) {
+	res!(dbr.insert(key_of(&sub.email), sub.to_dat(), user, None));
+	store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+		let mut emails = res!(store::names_of(old, "subscriber index"));
+		if emails.iter().any(|e| e == &sub.email) {
+			return Ok((Edit::Keep, ()));
+		}
 		emails.push(sub.email.clone());
-		res!(put_index(db, &emails));
-	}
-	Ok(())
+		Ok((Edit::Set(store::names_dat(&emails)), ()))
+	})
+}
+
+// Reads a subscriber, lets `f` make of it what it will, and writes that back, all under one write
+// guard. `f` answers the subscriber to write, if any, and what the caller wants to know. `None` where
+// the store holds no such address.
+fn amend<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	R,
+	F:	FnOnce(Subscriber) -> Outcome<(Option<Subscriber>, R)>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	email:	&str,
+	f:	F,
+)
+	-> Outcome<Option<R>>
+{
+	store::exclusive(db, |dbr, user| -> Outcome<Option<R>> {
+		let cur = match res!(get_in(dbr, email)) {
+			Some(s)	=> s,
+			None	=> return Ok(None),
+		};
+		let (next, out) = res!(f(cur));
+		if let Some(n) = next {
+			res!(put_in(dbr, user, &n));
+		}
+		Ok(Some(out))
+	})
 }
 
 fn index<
@@ -323,44 +381,12 @@ fn index<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(INDEX_KEY), None)) {
-		Some((v, _))	=> v,
-		// No index is a list nobody has subscribed to, not an error -- the empty list it never wrote.
-		None		=> return Ok(Vec::new()),
+	// No index is a list nobody has subscribed to, not an error -- the empty list it never wrote.
+	let old = match res!(guard.get(&dat!(INDEX_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
 	};
-	let items = match &val {
-		Dat::List(items)	=> items.clone(),
-		Dat::Vek(vek)		=> vek.as_slice().to_vec(),
-		_			=> return Err(err!(
-			"publish: the subscriber index must be a list, not {:?}.", val.kind();
-			Invalid, Input, Mismatch)),
-	};
-	let mut out = Vec::new();
-	for item in &items {
-		if let Dat::Str(s) = item {
-			out.push(s.clone());
-		}
-	}
-	Ok(out)
-}
-
-fn put_index<
-	const UIDL: usize,
-	UID:	NumIdDat<UIDL>,
-	ENC:	Encrypter,
-	KH:	Hasher,
-	DB:	Database<UIDL, UID, ENC, KH>,
->(
-	db:	&(Arc<RwLock<DB>>, UID),
-	emails:	&[String],
-)
-	-> Outcome<()>
-{
-	let (db_arc, user) = db;
-	let list = Dat::List(emails.iter().map(|e| dat!(e.clone())).collect());
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(INDEX_KEY), list, *user, None));
-	Ok(())
+	store::names_of(old, "subscriber index")
 }
 
 /// Every subscriber the store holds, in index order.
@@ -527,23 +553,26 @@ pub fn add_pending<
 			"publish: {} is not a shape an address takes.", redact(&email);
 			Invalid, Input));
 	}
-	// An address already confirmed is on the list; do not welcome it twice. A bounced address is
-	// suppressed and stays so -- a re-subscribe does not undo a permanent failure. Neither leaks that it
-	// is known, since the caller shows the same page whether `Some` or `None` comes back.
-	if let Some(existing) = res!(get(db, &email)) {
-		match existing.state {
-			SubState::Confirmed | SubState::Bounced	=> return Ok(None),
-			_					=> {}
+	// The read of what is there and the write of what replaces it are one step under the write guard.
+	store::exclusive(db, |dbr, user| -> Outcome<Option<Subscriber>> {
+		// An address already confirmed is on the list; do not welcome it twice. A bounced address is
+		// suppressed and stays so -- a re-subscribe does not undo a permanent failure. Neither leaks that
+		// it is known, since the caller shows the same page whether `Some` or `None` comes back.
+		if let Some(existing) = res!(get_in(dbr, &email)) {
+			match existing.state {
+				SubState::Confirmed | SubState::Bounced	=> return Ok(None),
+				_					=> {}
+			}
 		}
-	}
-	let sub = Subscriber {
-		email:		email.clone(),
-		state:		SubState::Pending,
-		token:		mint_token(),
-		created:	send::iso_now().ok(),
-	};
-	res!(put(db, &sub));
-	Ok(Some(sub))
+		let sub = Subscriber {
+			email:		email.clone(),
+			state:		SubState::Pending,
+			token:		mint_token(),
+			created:	send::iso_now().ok(),
+		};
+		res!(put_in(dbr, user, &sub));
+		Ok(Some(sub))
+	})
 }
 
 /// What a confirmation link found when it was followed.
@@ -571,19 +600,29 @@ pub fn confirm<
 )
 	-> Outcome<ConfirmOutcome>
 {
-	let mut sub = match res!(find_by_token(db, token, id)) {
+	let found = match res!(find_by_token(db, token, id)) {
 		Some(s)	=> s,
 		None	=> return Ok(ConfirmOutcome::Unknown),
 	};
-	match sub.state {
-		SubState::Confirmed	=> Ok(ConfirmOutcome::Already),
-		_			=> {
-			sub.state = SubState::Confirmed;
-			res!(put(db, &sub));
-			info!("{}: publish: {} confirmed their subscription", id, redact(&sub.email));
-			Ok(ConfirmOutcome::Confirmed)
+	// The record is read again under the write guard: a re-subscribe may have minted a new token, or an
+	// unsubscribe changed the state, between the search and now.
+	let out = res!(amend(db, &found.email, |mut sub| -> Outcome<(Option<Subscriber>, ConfirmOutcome)> {
+		if sub.token != token {
+			return Ok((None, ConfirmOutcome::Unknown));
 		}
+		match sub.state {
+			SubState::Confirmed	=> Ok((None, ConfirmOutcome::Already)),
+			_			=> {
+				sub.state = SubState::Confirmed;
+				Ok((Some(sub), ConfirmOutcome::Confirmed))
+			}
+		}
+	}));
+	let out = out.unwrap_or(ConfirmOutcome::Unknown);
+	if out == ConfirmOutcome::Confirmed {
+		info!("{}: publish: {} confirmed their subscription", id, redact(&found.email));
 	}
+	Ok(out)
 }
 
 /// What an unsubscribe link found when it was followed.
@@ -610,16 +649,30 @@ pub fn unsubscribe<
 )
 	-> Outcome<UnsubOutcome>
 {
-	let mut sub = match res!(find_by_token(db, token, id)) {
+	let found = match res!(find_by_token(db, token, id)) {
 		Some(s)	=> s,
 		None	=> return Ok(UnsubOutcome::Unknown),
 	};
-	if sub.state != SubState::Unsubscribed {
+	// `Some(true)` where this call changed the state, `Some(false)` where it already was, `None` where
+	// the token no longer names the record.
+	let changed = res!(amend(db, &found.email, |mut sub| -> Outcome<(Option<Subscriber>, Option<bool>)> {
+		if sub.token != token {
+			return Ok((None, None));
+		}
+		if sub.state == SubState::Unsubscribed {
+			return Ok((None, Some(false)));
+		}
 		sub.state = SubState::Unsubscribed;
-		res!(put(db, &sub));
-		info!("{}: publish: {} unsubscribed", id, redact(&sub.email));
+		Ok((Some(sub), Some(true)))
+	}));
+	match changed.flatten() {
+		Some(true)	=> {
+			info!("{}: publish: {} unsubscribed", id, redact(&found.email));
+			Ok(UnsubOutcome::Done)
+		},
+		Some(false)	=> Ok(UnsubOutcome::Done),
+		None		=> Ok(UnsubOutcome::Unknown),
 	}
-	Ok(UnsubOutcome::Done)
 }
 
 /// Sets a subscriber unsubscribed, by their address, for the admin console.
@@ -643,16 +696,21 @@ pub fn unsubscribe_email<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	let mut sub = match res!(get(db, &email)) {
-		Some(s)	=> s,
-		None	=> return Ok(false),
-	};
-	if sub.state != SubState::Unsubscribed {
+	let changed = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state == SubState::Unsubscribed {
+			return Ok((None, false));
+		}
 		sub.state = SubState::Unsubscribed;
-		res!(put(db, &sub));
-		info!("{}: publish: {} unsubscribed by an admin", id, redact(&sub.email));
+		Ok((Some(sub), true))
+	}));
+	match changed {
+		Some(true)	=> {
+			info!("{}: publish: {} unsubscribed by an admin", id, redact(&email));
+			Ok(true)
+		},
+		Some(false)	=> Ok(true),
+		None		=> Ok(false),
 	}
-	Ok(true)
 }
 
 /// Suppresses a subscriber after a permanent delivery failure, by their address.
@@ -676,16 +734,21 @@ pub fn mark_bounced<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	let mut sub = match res!(get(db, &email)) {
-		Some(s)	=> s,
-		None	=> return Ok(false),
-	};
-	if sub.state != SubState::Bounced {
+	let changed = res!(amend(db, &email, |mut sub| -> Outcome<(Option<Subscriber>, bool)> {
+		if sub.state == SubState::Bounced {
+			return Ok((None, false));
+		}
 		sub.state = SubState::Bounced;
-		res!(put(db, &sub));
-		warn!("{}: publish: {} suppressed after a permanent delivery failure", id, redact(&sub.email));
+		Ok((Some(sub), true))
+	}));
+	match changed {
+		Some(true)	=> {
+			warn!("{}: publish: {} suppressed after a permanent delivery failure", id, redact(&email));
+			Ok(true)
+		},
+		Some(false)	=> Ok(true),
+		None		=> Ok(false),
 	}
-	Ok(true)
 }
 
 /// Erases a subscriber outright: the record and its place in the index both, by their address.
@@ -708,18 +771,22 @@ pub fn remove<
 	-> Outcome<bool>
 {
 	let email = normalise_email(email);
-	// Whether the address was really there, read by key so a tombstone reads as absent -- unlike the
-	// database's own `delete`, which marks a key for deletion and reports success even for one already
-	// gone. So a repeat erase honestly says there was nothing to erase.
-	let existed = res!(get(db, &email)).is_some();
-	let (db_arc, user) = db;
-	{
-		let guard = lock_read!(db_arc);
-		res!(guard.delete(&key_of(&email), *user, None));
-	}
-	let emails = res!(index(db));
-	let kept: Vec<String> = emails.into_iter().filter(|e| e != &email).collect();
-	res!(put_index(db, &kept));
+	let existed = res!(store::exclusive(db, |dbr, user| -> Outcome<bool> {
+		// Whether the address was really there, read by key so a tombstone reads as absent -- unlike the
+		// database's own `delete`, which marks a key for deletion and reports success even for one already
+		// gone. So a repeat erase honestly says there was nothing to erase.
+		let existed = res!(get_in(dbr, &email)).is_some();
+		res!(dbr.delete(&key_of(&email), user, None));
+		res!(store::edit_in(dbr, user, &dat!(INDEX_KEY), |old| -> Outcome<(Edit, ())> {
+			let emails = res!(store::names_of(old, "subscriber index"));
+			let kept: Vec<String> = emails.iter().filter(|e| e.as_str() != email).cloned().collect();
+			if kept.len() == emails.len() {
+				return Ok((Edit::Keep, ()));
+			}
+			Ok((Edit::Set(store::names_dat(&kept)), ()))
+		}));
+		Ok(existed)
+	}));
 	if existed {
 		info!("{}: publish: {} erased from the list by an admin", id, redact(&email));
 	}
@@ -823,9 +890,8 @@ pub async fn handle_subscribe<
 	if let Some(addr) = from {
 		let salt = res!(crate::srv::publish::comment::site_secret(db));
 		let hashed = from_hash(addr, &salt);
-		if !res!(crate::srv::publish::comment::rate_allows_at(
-			db, RATE_PREFIX, &hashed, cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly))
-		{
+		let w = Window::hourly(cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly);
+		if !res!(rate::allow(db, &fmt!("{}{}", RATE_PREFIX, hashed), &w)) {
 			info!("{}: publish: a sender is signing up faster than this site allows", id);
 			return Ok(page::subscribe_sent_page(cfg));
 		}

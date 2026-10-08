@@ -1213,13 +1213,12 @@ pub fn record_send<
 )
 	-> Outcome<()>
 {
-	let (db_arc, user) = db;
-	let mut items = res!(sends_list(db));
-	items.push(entry.to_dat());
-	let list = Dat::List(items);
-	let guard = lock_read!(db_arc);
-	res!(guard.insert(dat!(SENDS_KEY), list, *user, None));
-	Ok(())
+	// Under the write guard, so two sends recorded together both land in the list.
+	store::update(db, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, ())> {
+		let mut items = res!(sends_of(old));
+		items.push(entry.to_dat());
+		Ok((store::Edit::Set(Dat::List(items)), ()))
+	})
 }
 
 /// The raw history list, or an empty one where nothing has been sent.
@@ -1236,10 +1235,19 @@ fn sends_list<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let val = match res!(guard.get(&dat!(SENDS_KEY), None)) {
-		Some((v, _))	=> v,
-		// No history is a site that has sent nothing, not an error -- the empty log it never wrote.
-		None		=> return Ok(Vec::new()),
+	let old = match res!(guard.get(&dat!(SENDS_KEY), None)) {
+		Some((v, _))	=> Some(v),
+		None		=> None,
+	};
+	sends_of(old)
+}
+
+// The history list a stored value holds. No value is a site that has sent nothing, not an error -- the
+// empty log it never wrote.
+fn sends_of(val: Option<Dat>) -> Outcome<Vec<Dat>> {
+	let val = match val {
+		Some(v)	=> v,
+		None	=> return Ok(Vec::new()),
 	};
 	match &val {
 		Dat::List(items)	=> Ok(items.clone()),

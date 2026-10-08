@@ -41,6 +41,7 @@ pub mod dest;
 pub mod feed;
 pub mod json;
 pub mod page;
+pub mod rate;
 pub mod send;
 pub mod store;
 pub mod subscribe;
