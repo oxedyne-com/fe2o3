@@ -55,6 +55,8 @@ use crate::ledger::{
 use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::{
 	HashMap,
@@ -280,7 +282,7 @@ pub struct Builder {
 	seen:		HashSet<Location>,
 	pages:		u32,
 	numberings:	Vec<(u32, Value)>,
-	last_hash:	Option<u64>,				// the hash of the latest numbering run's value
+	last_hash:	Option<Fingerprint>,				// the hash of the latest numbering run's value
 	info:		DocInfo,
 }
 
@@ -318,7 +320,7 @@ impl Builder {
 			return;
 		}
 		self.pages = number;
-		let mut h = Fnv::new();
+		let mut h = Fingerprinter::new();
 		hash_value(&mut h, numbering);
 		let h = h.finish();
 		if self.last_hash != Some(h) {
@@ -598,30 +600,30 @@ pub enum Question {
 
 impl Question {
 	/// The answer, hashed, against an introspector.
-	pub fn answer(&self, intro: &Introspector) -> Outcome<u64> {
-		let mut h = Fnv::new();
+	pub fn answer(&self, intro: &Introspector) -> Outcome<Fingerprint> {
+		let mut h = Fingerprinter::new();
 		match self {
 			Question::Query(sel) => {
 				let found = res!(intro.query_indices(sel));
-				h.u64(found.len() as u64);
+				h.write_u64(found.len() as u64);
 				for i in found {
 					if let Some(r) = intro.records.get(i) {
 						hash_content(&mut h, &r.elem);
 					}
 				}
 			}
-			Question::CountBefore(sel, loc) => h.u64(res!(intro.count_before(sel, *loc)) as u64),
-			Question::Page(loc) => h.u64(intro.page(*loc).map(|p| p as u64 + 1).unwrap_or(0)),
+			Question::CountBefore(sel, loc) => h.write_u64(res!(intro.count_before(sel, *loc)) as u64),
+			Question::Page(loc) => h.write_u64(intro.page(*loc).map(|p| p as u64 + 1).unwrap_or(0)),
 			Question::Position(loc) => match intro.position(*loc) {
 				Some(p) => {
-					h.u64(1);
-					h.u64(p.page as u64);
-					h.u64(p.x.0 as u64);
-					h.u64(p.y.0 as u64);
+					h.write_u64(1);
+					h.write_u64(p.page as u64);
+					h.write_u64(p.x.0 as u64);
+					h.write_u64(p.y.0 as u64);
 				}
-				None => h.u64(0),
+				None => h.write_u64(0),
 			},
-			Question::Pages => h.u64(intro.pages as u64),
+			Question::Pages => h.write_u64(intro.pages as u64),
 			Question::PageNumbering(loc) => hash_value(&mut h, &intro.page_numbering(*loc)),
 		}
 		Ok(h.finish())
@@ -645,7 +647,7 @@ impl Question {
 #[derive(Clone, Debug)]
 pub struct Read {
 	pub key:		String,
-	pub answer:		u64,
+	pub answer:		Fingerprint,
 	pub question:	Question,
 	pub subject:	Option<Arc<str>>,	// "value of `counter(heading)`"
 }
@@ -1224,10 +1226,10 @@ fn state_sequence(engine: &mut Engine, state: &State) -> Outcome<Arc<Vec<Value>>
 	let found = res!(query(engine, &state_selector()));
 	let intro = engine.intro.clone();
 	engine.reads.validate_memo(&intro);
-	let mut h = Fnv::new();
-	h.str(&state.key);
+	let mut h = Fingerprinter::new();
+	h.write_str(&state.key);
 	hash_value(&mut h, &state.init);
-	let key = fmt!("{:016x}", h.finish());
+	let key = fmt!("{}", h.finish());
 	if let Some(seq) = engine.reads.states.get(&key) {
 		return Ok(seq.clone());
 	}
@@ -1299,106 +1301,79 @@ pub fn selector_eq(a: &Selector, b: &Selector) -> bool {
 
 /// A key for a selector that is equal for equal selectors in every pass.
 fn selector_key(s: &Selector) -> String {
-	let mut h = Fnv::new();
+	let mut h = Fingerprinter::new();
 	hash_selector(&mut h, s);
-	fmt!("{:016x}", h.finish())
+	fmt!("{}", h.finish())
 }
 
-/// FNV-1a, deterministic across runs, unlike the standard hasher.
-pub struct Fnv(u64);
-
-impl Fnv {
-	pub fn new() -> Self { Fnv(0xcbf2_9ce4_8422_2325) }
-
-	pub fn bytes(&mut self, bs: &[u8]) {
-		for b in bs {
-			self.0 ^= *b as u64;
-			self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
-		}
-	}
-
-	pub fn u64(&mut self, n: u64) { self.bytes(&n.to_le_bytes()); }
-
-	pub fn str(&mut self, s: &str) {
-		self.u64(s.len() as u64);
-		self.bytes(s.as_bytes());
-	}
-
-	pub fn finish(&self) -> u64 { self.0 }
-}
-
-impl Default for Fnv {
-	fn default() -> Self { Self::new() }
-}
-
-fn hash_selector(h: &mut Fnv, s: &Selector) {
+fn hash_selector(h: &mut Fingerprinter, s: &Selector) {
 	match s {
 		Selector::Elem(k, fields) => {
-			h.u64(1);
-			h.u64(*k as u64);
+			h.write_u64(1);
+			h.write_u64(*k as u64);
 			if let Some(fs) = fields {
 				for (id, v) in fs {
-					h.u64(id.0 as u64);
+					h.write_u64(id.0 as u64);
 					hash_value(h, v);
 				}
 			}
 		}
-		Selector::Label(l)		=> { h.u64(2); h.str(l.as_str()); }
-		Selector::Text(t)		=> { h.u64(3); h.str(t); }
-		Selector::Regex(r)		=> { h.u64(4); h.str(&r.pattern); }
-		Selector::Location(l)	=> { h.u64(5); h.u64(l.0); }
-		Selector::Or(ss)		=> { h.u64(6); for x in ss { hash_selector(h, x); } }
-		Selector::And(ss)		=> { h.u64(7); for x in ss { hash_selector(h, x); } }
+		Selector::Label(l)		=> { h.write_u64(2); h.write_str(l.as_str()); }
+		Selector::Text(t)		=> { h.write_u64(3); h.write_str(t); }
+		Selector::Regex(r)		=> { h.write_u64(4); h.write_str(&r.pattern); }
+		Selector::Location(l)	=> { h.write_u64(5); h.write_u64(l.0); }
+		Selector::Or(ss)		=> { h.write_u64(6); for x in ss { hash_selector(h, x); } }
+		Selector::And(ss)		=> { h.write_u64(7); for x in ss { hash_selector(h, x); } }
 		Selector::Before { selector, end, inclusive } => {
-			h.u64(8);
+			h.write_u64(8);
 			hash_selector(h, selector);
 			hash_selector(h, end);
-			h.u64(*inclusive as u64);
+			h.write_u64(*inclusive as u64);
 		}
 		Selector::After { selector, start, inclusive } => {
-			h.u64(9);
+			h.write_u64(9);
 			hash_selector(h, selector);
 			hash_selector(h, start);
-			h.u64(*inclusive as u64);
+			h.write_u64(*inclusive as u64);
 		}
 	}
 }
 
 /// Hashes content by what a reader of a query result can observe: kinds, fields, labels and locations.
-pub fn hash_content(h: &mut Fnv, c: &Content) {
+pub fn hash_content(h: &mut Fingerprinter, c: &Content) {
 	match c {
 		Content::Elem(e) => {
-			h.u64(10);
-			h.u64(e.kind as u64);
+			h.write_u64(10);
+			h.write_u64(e.kind as u64);
 			if let Some(l) = e.location {
-				h.u64(l.0);
+				h.write_u64(l.0);
 			}
 			if let Some(l) = &e.label {
-				h.str(l.as_str());
+				h.write_str(l.as_str());
 			}
 			let mut fields: Vec<&(FieldId, Value)> = e.fields.iter().collect();
 			fields.sort_by_key(|(id, _)| id.0);
 			for (id, v) in fields {
-				h.u64(id.0 as u64);
+				h.write_u64(id.0 as u64);
 				hash_value(h, v);
 			}
 		}
 		Content::Sequence(s) => {
-			h.u64(11);
+			h.write_u64(11);
 			if let Some(l) = s.location {
-				h.u64(l.0);
+				h.write_u64(l.0);
 			}
 			if let Some(l) = &s.label {
-				h.str(l.as_str());
+				h.write_str(l.as_str());
 			}
-			h.u64(s.children.len() as u64);
+			h.write_u64(s.children.len() as u64);
 			for k in &s.children {
 				hash_content(h, k);
 			}
 		}
 		Content::Styled(s) => {
-			h.u64(12);
-			h.u64(s.styles.len() as u64);
+			h.write_u64(12);
+			h.write_u64(s.styles.len() as u64);
 			hash_content(h, &s.child);
 		}
 	}
@@ -1406,47 +1381,47 @@ pub fn hash_content(h: &mut Fnv, c: &Content) {
 
 /// Hashes a value deterministically. Maps are hashed in their insertion order, functions by name and
 /// definition site, and plain data by its debug form, which holds no map.
-pub fn hash_value(h: &mut Fnv, v: &Value) {
+pub fn hash_value(h: &mut Fingerprinter, v: &Value) {
 	match v {
 		Value::Content(c)	=> hash_content(h, c),
 		Value::Array(a)		=> {
-			h.u64(20);
-			h.u64(a.len() as u64);
+			h.write_u64(20);
+			h.write_u64(a.len() as u64);
 			for x in a.iter() {
 				hash_value(h, x);
 			}
 		}
 		Value::Dict(d)		=> {
-			h.u64(21);
+			h.write_u64(21);
 			for (k, x) in d.iter() {
-				h.str(k);
+				h.write_str(k);
 				hash_value(h, x);
 			}
 		}
 		Value::Func(f)		=> {
-			h.u64(22);
-			h.str(f.name().unwrap_or(""));
+			h.write_u64(22);
+			h.write_str(f.name().unwrap_or(""));
 			if let Func::Closure(c) = f {
-				h.u64(c.span.file.0 as u64);
-				h.u64(c.span.start as u64);
+				h.write_u64(c.span.file.0 as u64);
+				h.write_u64(c.span.start as u64);
 			}
 		}
-		Value::Module(m)	=> { h.u64(23); h.str(&m.name); }
-		Value::Styles(s)	=> { h.u64(24); h.u64(s.len() as u64); }
+		Value::Module(m)	=> { h.write_u64(23); h.write_str(&m.name); }
+		Value::Styles(s)	=> { h.write_u64(24); h.write_u64(s.len() as u64); }
 		Value::Args(a)		=> {
-			h.u64(25);
+			h.write_u64(25);
 			for arg in a.items.iter() {
-				h.str(arg.name.as_deref().unwrap_or(""));
+				h.write_str(arg.name.as_deref().unwrap_or(""));
 				hash_value(h, &arg.value);
 			}
 		}
 		Value::Selector(s)	=> hash_selector(h, s),
-		Value::Location(l)	=> { h.u64(26); h.u64(l.0); }
-		Value::Str(s)		=> { h.u64(27); h.str(s); }
-		Value::Label(l)		=> { h.u64(28); h.str(l.as_str()); }
-		Value::Counter(c)	=> { h.u64(29); hash_value(h, &c.key.to_value()); }
-		Value::State(s)		=> { h.u64(30); h.str(&s.key); hash_value(h, &s.init); }
-		other				=> h.str(&fmt!("{:?}", other)),
+		Value::Location(l)	=> { h.write_u64(26); h.write_u64(l.0); }
+		Value::Str(s)		=> { h.write_u64(27); h.write_str(s); }
+		Value::Label(l)		=> { h.write_u64(28); h.write_str(l.as_str()); }
+		Value::Counter(c)	=> { h.write_u64(29); hash_value(h, &c.key.to_value()); }
+		Value::State(s)		=> { h.write_u64(30); h.write_str(&s.key); hash_value(h, &s.init); }
+		other				=> h.write_str(&fmt!("{:?}", other)),
 	}
 }
 

@@ -13,10 +13,7 @@ use crate::ir::{
 	Graphic,
 	Sp,
 };
-use crate::memo::{
-	Fnv,
-	Memo,
-};
+use crate::memo::Memo;
 use crate::page::{
 	Page,
 	Placed,
@@ -38,6 +35,8 @@ use oxedyne_fe2o3_graphics::{
 	},
 	transform::Transform,
 };
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 use oxedyne_fe2o3_text::base64;
 use oxedyne_fe2o3_text::xml::write::escape as xml_escape;
 
@@ -93,7 +92,8 @@ pub fn render_page_memo(page: &Page, memo: &mut Memo) -> Outcome<String> {
 /// folio in the key, since the consumer caches and reuses the whole page SVG by this id, and a page whose
 /// only change is its printed folio renders differently and must be resent.
 pub(crate) fn page_id(page: &Page) -> u64 {
-	page_key(page, &page.frame.placed)
+	// Folded to 64 bits: the id crosses the wasm boundary as a `u64` (the consumer's cache key).
+	page_key(page, &page.frame.placed).fold()
 }
 
 /// The content key of a page's body frame: its geometry and every body-placed item's position, size and
@@ -101,8 +101,8 @@ pub(crate) fn page_id(page: &Page) -> u64 {
 /// placed positions, so a page that changes parity hashes differently and misses, which is correct -- its
 /// body sits at different coordinates. Theme is not in the key because it is baked into the shaped runs
 /// (a run's glyph ids and colour already reflect it) and into the caller's global fingerprint besides.
-fn page_key(page: &Page, body: &[Placed]) -> u64 {
-	let mut h = Fnv::new();
+fn page_key(page: &Page, body: &[Placed]) -> Fingerprint {
+	let mut h = Fingerprinter::new();
 	h.write(b"page");
 	let size = page.geom.media_box();
 	h.write_usize(size.x.as_usize());
@@ -135,7 +135,7 @@ fn page_key(page: &Page, body: &[Placed]) -> u64 {
 
 /// Folds a placed graphic into a page key: each op by its kind, its paint, and its geometry. A path is
 /// hashed by the very `d` string the writer emits, so two paths hash alike exactly when they draw alike.
-fn hash_graphic(g: &Graphic, h: &mut Fnv) {
+fn hash_graphic(g: &Graphic, h: &mut Fingerprinter) {
 	for op in &g.ops {
 		match op {
 			DrawOp::Fill { path, colour } => {
@@ -292,9 +292,9 @@ fn open_group(out: &mut String, p: &Placed, g: &crate::page::Group) -> Outcome<(
 	if let Some(clip) = &g.clip {
 		let t	= Transform::translate(p.x.to_pt() as f32, p.y.to_pt() as f32);
 		let d	= write_path_data(&res!(clip.transform(&t)));
-		let mut h = Fnv::new();
+		let mut h = Fingerprinter::new();
 		h.write_str(&d);
-		let id = fmt!("clip{:016x}", h.finish());
+		let id = fmt!("clip{:016x}", h.finish().fold());
 		out.push_str(&fmt!("  <clipPath id=\"{}\"><path d=\"{}\"/></clipPath>\n", id, d));
 		attrs.push_str(&fmt!(" clip-path=\"url(#{})\"", id));
 	}

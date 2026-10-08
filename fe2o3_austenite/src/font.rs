@@ -25,6 +25,7 @@ use oxedyne_fe2o3_font::{
 use oxedyne_fe2o3_graphics::colour::Rgba;
 use oxedyne_fe2o3_graphics::path::Path;
 use oxedyne_fe2o3_graphics::transform::Transform;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::sync::Arc;
 
@@ -261,7 +262,7 @@ impl ShapedText {
 	/// hashes to decide a body frame is unchanged. The theme is not folded in as such -- it never needs to be, because it has already
 	/// decided these very glyph ids, their positions and the fill, so two runs that hash alike here draw
 	/// identically whatever theme produced them.
-	pub fn hash_into(&self, h: &mut crate::memo::Fnv) {
+	pub fn hash_into(&self, h: &mut Fingerprinter) {
 		h.write_f32(self.size);
 		h.write(&[self.colour.r, self.colour.g, self.colour.b, self.colour.a]);
 		h.write_str(&self.text);
