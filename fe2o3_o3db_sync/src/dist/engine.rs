@@ -54,6 +54,7 @@ use super::placement::Placement;
 use super::record::{
 	Record,
 	RecordId,
+	content_hash,
 };
 use super::resolve::{
 	LastVersionWins,
@@ -83,6 +84,7 @@ use crate::oam::config::OamConfig;
 
 use std::collections::{
 	HashMap,
+	HashSet,
 	hash_map::Entry,
 };
 use std::sync::{
@@ -100,11 +102,15 @@ use std::time::{
 
 
 // Fixed key and value lengths for the anti-entropy IBLT sketches. The key is a
-// 32-byte RecordId and the value is the 32-byte content hash produced by
-// Storage::digests. Matching lengths across peers is mandatory for IBLT
-// subtraction; callers cannot override.
-const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN;
-const ANTI_ENTROPY_VALUE_LEN:	usize = 32;
+// 32-byte RecordId followed by the 32-byte content hash produced by
+// Storage::digests, and the value is empty. A record held at other bytes is
+// therefore another key: it decodes as one entry on each side, and a value
+// difference counts twice against the sketch's capacity. Matching lengths
+// across peers is mandatory for IBLT subtraction (a peer on the older shape,
+// the id as the key and the hash as the value, is refused with a Mismatch);
+// callers cannot override.
+const ANTI_ENTROPY_KEY_LEN:		usize = ID_LEN + 32;
+const ANTI_ENTROPY_VALUE_LEN:	usize = 0;
 
 
 // Choosing more than one peer protects against a single straggler; choosing
@@ -848,16 +854,33 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		let mut iblt = res!(Iblt::new(cfg));
 		let digests = res!(self.storage.digests(&tc.name));
 		for d in digests {
-			res!(iblt.insert(d.id.as_bytes(), &d.content));
+			let mut key = [0u8; ANTI_ENTROPY_KEY_LEN];
+			key[..ID_LEN].copy_from_slice(d.id.as_bytes());
+			key[ID_LEN..].copy_from_slice(&d.content);
+			res!(iblt.insert(&key, &[]));
 		}
 		Ok(iblt)
 	}
 
+	// The record id leads each sketch key. A key of any other length did not come from
+	// this shape of sketch.
+	fn anti_entropy_id(key: &[u8]) -> Outcome<RecordId> {
+		if key.len() != ANTI_ENTROPY_KEY_LEN {
+			return Err(err!(
+				"anti-entropy sketch key is {} bytes, not {}.",
+				key.len(), ANTI_ENTROPY_KEY_LEN;
+				Invalid, Input, Mismatch));
+		}
+		RecordId::from_slice(&key[..ID_LEN])
+	}
+
 	/// Decodes the symmetric difference against the local sketch and returns an
-	/// [`AntiEntropyReply`][ar] envelope carrying records the sender lacks and
-	/// a list of record identifiers the recipient lacks. On sketch overload it
-	/// falls back to a bulk reply of every record the recipient holds for the
-	/// table.
+	/// [`AntiEntropyReply`][ar] envelope carrying every record the sender lacks or
+	/// holds at other bytes, and the identifiers of the records the recipient lacks or
+	/// holds at other bytes. A value difference at one id is a key on each side, so
+	/// it is both sent and asked for. On sketch overload it falls back to a bulk reply
+	/// of every record the recipient holds for the table, which the sender answers
+	/// with a push of what that bulk lacks or holds at other bytes.
 	///
 	/// [ar]: MsgKind::AntiEntropyReply
 	fn handle_anti_entropy_digest(
@@ -896,17 +919,24 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 			DecodeOutcome::Complete { inserted, deleted } => {
 				// `inserted` = keys in mine not in theirs -> records I
 				// should send. `deleted` = keys in theirs not in mine ->
-				// ids I should request.
+				// ids I should request. A key is an id and a content hash,
+				// so an id held at other bytes on each side is in both lists.
 				let mut records_for_sender = Vec::with_capacity(inserted.len());
-				for (key_bytes, _value_hash) in inserted {
-					let rid = res!(RecordId::from_slice(&key_bytes));
+				for (key_bytes, _value) in inserted {
+					let rid = res!(Self::anti_entropy_id(&key_bytes));
 					if let Some(r) = res!(self.storage.get(&table, &rid)) {
 						records_for_sender.push(r);
 					}
 				}
+				// A sketch built by hand can name one id under several
+				// contents, so each id is requested once.
+				let mut asked = HashSet::with_capacity(deleted.len());
 				let mut requested_ids = Vec::with_capacity(deleted.len());
-				for (key_bytes, _value_hash) in deleted {
-					requested_ids.push(res!(RecordId::from_slice(&key_bytes)));
+				for (key_bytes, _value) in deleted {
+					let rid = res!(Self::anti_entropy_id(&key_bytes));
+					if asked.insert(rid) {
+						requested_ids.push(rid);
+					}
 				}
 				(records_for_sender, requested_ids, false)
 			}
@@ -942,7 +972,10 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 	}
 
 	/// Applies the records the recipient was missing, and builds an
-	/// [`AntiEntropyPush`][ap] envelope for any records requested in return.
+	/// [`AntiEntropyPush`][ap] envelope for any records requested in return. The
+	/// push is built from storage after the reply is applied, so the other peer is
+	/// offered the resolved value. A bulk reply names no ids, and is answered with
+	/// every local record the sender's bulk lacks or holds at other bytes.
 	///
 	/// [ap]: MsgKind::AntiEntropyPush
 	fn handle_anti_entropy_reply(
@@ -952,7 +985,7 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		table:			String,
 		records:		Vec<Record>,
 		requested_ids:	Vec<RecordId>,
-		_bulk:			bool,
+		bulk:			bool,
 	)
 		-> Outcome<InboundOutcome>
 	{
@@ -961,23 +994,54 @@ impl<S: Storage, R: Resolver> DistOzone<S, R> {
 		// Offer every record the peer sent us to the resolver. The apply step
 		// re-checks placement, so a stale-N sender cannot push a record to a peer
 		// that has since stopped considering itself a holder.
+		// A record repeated in the reply is applied once. A bulk reply is also kept by
+		// id and content hash, to find what it lacks below.
 		let mut out = InboundOutcome::empty();
+		let mut seen = HashSet::with_capacity(records.len());
+		let mut theirs = HashMap::new();
 		for record in records {
 			if record.table != table {
 				continue;
 			}
+			let hash = content_hash(&record.value);
+			if !seen.insert((record.id, hash)) {
+				continue;
+			}
+			if bulk {
+				theirs.insert(record.id, hash);
+			}
 			out.note(&record.table, record.id, self.apply(ctx, &record));
 		}
 
-		// Build a push for every requested id we actually have. A failed read is
-		// skipped and not listed, since `failed` is for received records and a read
-		// fault here is this peer's own; it cannot lose the results above, and the
+		// Build a push for every requested id we actually have, each once. A failed
+		// read is skipped and not listed, since `failed` is for received records and a
+		// read fault here is this peer's own; it cannot lose the results above, and the
 		// peer asks again next round.
 		let mut to_push = Vec::with_capacity(requested_ids.len());
+		let mut pushed = HashSet::with_capacity(requested_ids.len());
 		for rid in requested_ids {
+			if !pushed.insert(rid) {
+				continue;
+			}
 			match self.storage.get(&table, &rid) {
 				Ok(Some(r))			=> to_push.push(r),
 				Ok(None) | Err(_)	=> {},
+			}
+		}
+		// The sender's bulk is its whole table, so what it lacks, or holds at other bytes
+		// after the apply above, is what it is offered. A failed listing is skipped like
+		// a failed read.
+		if bulk {
+			if let Ok(digests) = self.storage.digests(&table) {
+				for d in digests {
+					if theirs.get(&d.id) == Some(&d.content) || !pushed.insert(d.id) {
+						continue;
+					}
+					match self.storage.get(&table, &d.id) {
+						Ok(Some(r))			=> to_push.push(r),
+						Ok(None) | Err(_)	=> {},
+					}
+				}
 			}
 		}
 		if !to_push.is_empty() {

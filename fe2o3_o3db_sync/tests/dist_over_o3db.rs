@@ -323,7 +323,8 @@ fn memory_and_o3db_peers_decode_empty_difference() -> Outcome<()> {
 	assert_eq!((&m_asks, &o_asks), (&m_ref, &o_ref));
 
 	// One value revised at O3db and at the reference. The mixed pair answers as the reference
-	// pair does, and the answer carries the O3db peer's copy of the record.
+	// pair does, and each way the answer is exactly one record, the answerer's own copy, with the
+	// id asked for in return and no bulk fallback.
 	let newer = b"a longer value than one chunk of eight bytes, revised".to_vec();
 	for e in [&refr] {
 		assert!(res!(e.put_at(rec("identity", rid(3), &newer), 2_000)).local_persisted);
@@ -331,8 +332,8 @@ fn memory_and_o3db_peers_decode_empty_difference() -> Outcome<()> {
 	assert!(res!(o3.put_at(rec("identity", rid(3), &newer), 2_000)).local_persisted);
 	let (m_asks, o_asks, m_ref, o_ref) = res!(both(()));
 	assert_eq!((&m_asks, &o_asks), (&m_ref, &o_ref));
-	assert!(m_asks.0.iter().any(|r| r.id == rid(3) && r.value == newer),
-		"the O3db peer did not offer its revised copy: {:?}", m_asks);
+	assert_eq!(m_asks, (vec![rec("identity", rid(3), &newer)], vec![rid(3)], false));
+	assert_eq!(o_asks, (vec![rec("identity", rid(3), &long)], vec![rid(3)], false));
 
 	// The memory peer takes the revision, and the pair agrees again.
 	assert!(res!(mem.put_at(rec("identity", rid(3), &newer), 2_000)).local_persisted);

@@ -1529,7 +1529,6 @@ fn forged_same_digest_value_never_repaired() -> Outcome<()> {
 }
 
 #[test]
-#[ignore = "A2: 2-F3, a value difference at one id makes the exchange bulk, so the dialled peer is never offered"]
 fn dialled_peer_not_offered_on_value_divergence() -> Outcome<()> {
 	let e = res!(mesh(2));
 	let v2 = LastVersionWins::value(2, b"new");
