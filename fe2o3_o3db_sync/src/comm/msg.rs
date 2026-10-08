@@ -80,7 +80,7 @@ pub enum OzoneMsg<
     Config(OzoneConfig),
     //ConfigConfirm(OzoneBotId, Ticket),
     Finish,
-    FileReplaced(FileNum, FileType), // a collection renamed a new file over this one
+    FileReplaced(FileNum, FileType), // a collection renamed a new file over this one, or compaction deleted it
     GcAborted(FileNum),     // a collection gave up before it replaced anything
     GcCompleted(FileNum, FileState, usize),
     InitTest,

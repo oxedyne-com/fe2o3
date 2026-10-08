@@ -781,6 +781,9 @@ impl<
                 // left in the store counted a file that was gone.
                 res!(self.states_mut().get_state_mut(fnum)).reset();
                 res!(self.states_mut().dec_size(size));
+                // The readers cache open handles, and one left on an unlinked file would keep its
+                // bytes allocated for the life of the process, so they are told it has gone.
+                res!(self.notify_file_replaced(fnum, &[FileType::Data, FileType::Index]));
                 debug!(sync_log::stream(),
                     "{}: All the data in file {} is old, the file has therefore been deleted.",
                     self_id, fnum,

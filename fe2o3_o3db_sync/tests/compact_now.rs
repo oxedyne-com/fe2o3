@@ -21,6 +21,7 @@ use oxedyne_fe2o3_o3db_sync::{
         constant,
     },
     comm::response::Wait,
+    file::core::FileType,
     test::{
         hooks,
         setup::{
@@ -630,4 +631,64 @@ fn zone_bot_error_ends_compact_now_at_once() -> Outcome<()> {
     let report = res!(s.db.compact_now(Duration::from_secs(30)));
     msg!("{:?}", report);
     s.end()
+}
+
+/// The files this process holds open under the root, as the kernel names them: `(deleted)` follows
+/// the path of one whose name has been unlinked.
+fn open_files_under(root: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    if let Ok(list) = std::fs::read_dir("/proc/self/fd") {
+        for entry in list.flatten() {
+            if let Ok(target) = std::fs::read_link(entry.path()) {
+                let t = target.to_string_lossy().to_string();
+                if t.starts_with(&root.to_string_lossy().to_string()) {
+                    found.push(t);
+                }
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+// QA A1-1 (2026-10-08): a file deleted for holding only old records stayed open in the readers'
+// file cache, so its bytes stayed allocated on disk after `compact_now` returned.
+#[test]
+fn deleted_file_is_not_held_open() -> Outcome<()> {
+    let _lock = lock();
+    let s = res!(plain("held_open", GC_OFF, 1, 1));
+    let user = Uid::default();
+    res!(fill(&s.db));
+    res!(s.db.api().settle_for_test(Duration::from_secs(10)));
+    // Reopened, so that the cache holds locations and no values and a read of key 2 goes to a
+    // reader, which opens file 1 and keeps the handle.
+    let (root, cfg, dir) = (s.root.clone(), s.cfg.clone(), s.dir.clone());
+    res!(s.db.close());
+    let db: TestDb = res!(setup::start_db(root.clone(), Some(cfg.clone()), schemes(), None, GC_OFF, false));
+    let mut want: Vec<Option<u8>> = vec![Some(1); NKEYS];
+    assert_eq!(reads(&db, &want, "Before the overwrite"), 0);
+    let dat1 = file(&root, &cfg, FileType::Data, 1).to_string_lossy().to_string();
+    let held = open_files_under(&root);
+    assert!(held.contains(&dat1), "positive control: no reader holds {} open, only {:?}", dat1, held);
+
+    // Every key of file 1 overwritten leaves it holding old records alone.
+    for i in 0..5usize {
+        res!(db.insert(key(i), value(i, 2), user, None));
+        want[i] = Some(2);
+    }
+    res!(db.api().settle_for_test(Duration::from_secs(10)));
+    let needle = match value(2, 1).bytes_ref() { Some(b) => b.clone(), None => Vec::new() };
+    assert!(!files_holding(&root, &cfg, &needle).is_empty(), "positive control: key 2 version 1 is in no file");
+    let report = res!(db.compact_now(Duration::from_secs(30)));
+    msg!("{:?}", report);
+    assert!(report.files_deleted >= 1, "no file was deleted, so the test proves nothing: {:?}", report);
+    assert!(!file(&root, &cfg, FileType::Data, 1).is_file(), "file 1 is still on disk");
+    assert!(files_holding(&root, &cfg, &needle).is_empty(), "key 2 version 1 is still in a data file");
+
+    let gone: Vec<String> = open_files_under(&root).into_iter().filter(|t| t.ends_with(" (deleted)")).collect();
+    assert!(gone.is_empty(), "compact_now returned with deleted files held open: {:?}", gone);
+    assert_eq!(reads(&db, &want, "After compact_now"), 0);
+    res!(db.close());
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }

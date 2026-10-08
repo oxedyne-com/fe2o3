@@ -1133,33 +1133,6 @@ impl<
     }
 
 
-    /// Tells every rbot to drop its cached handle on the given files, because a collection has
-    /// just renamed new ones over them.  Every pool in every zone is told: a file number is only
-    /// unique within a zone, so a same-numbered file elsewhere is invalidated needlessly, but that
-    /// costs one reopen and keeps the notice independent of which zone a reader serves.
-    fn notify_file_replaced(
-        &self,
-        fnum:   FileNum,
-        typs:   &[FileType],
-    )
-        -> Outcome<()>
-    {
-        for pool in self.chans().get_all_workers_of_type(&WorkerType::Reader) {
-            for i in 0..pool.len() {
-                let bot = res!(pool.get_bot(i));
-                for typ in typs {
-                    if let Err(e) = bot.send(OzoneMsg::FileReplaced(fnum, typ.clone())) {
-                        return Err(err!(e,
-                            "{}: Cannot tell rbot {} that {:?} file {} has been replaced.",
-                            self.ozid(), i, typ, fnum;
-                            Channel, Write));
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// This method is similar to the initialisation method `init_cache_data_file` in that the
     /// data file is scanned and a new index file is created, however we must deal with the cache
     /// and deletion scheduling differently.  Initialisation can rely on the chronological order of

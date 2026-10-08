@@ -2001,6 +2001,9 @@ impl<
                 break;
             }
         }
+        // A deleted file's handle in a reader is dropped by a notice queued behind whatever the
+        // reader was doing, and the call is not done while that handle keeps the bytes allocated.
+        res!(self.readers_caught_up(wait(left(&start).max(Duration::from_millis(1)))));
         let bytes_after = res!(self.size_bytes(wait(left(&start).max(Duration::from_millis(1)))));
         Ok(CompactReport {
             files_collected:    collected.len(),
@@ -2008,6 +2011,36 @@ impl<
             bytes_before,
             bytes_after,
         })
+    }
+
+    // Returns once every reader has handled all that was queued to it before the call.
+    fn readers_caught_up(&self, wait: Wait) -> Outcome<()> {
+        let emsg = "reader barrier";
+        let resp = self.responder();
+        let mut n = 0;
+        for pool in self.chans().get_all_workers_of_type(&WorkerType::Reader) {
+            for i in 0..pool.len() {
+                let bot = res!(pool.get_bot(i));
+                if let Err(e) = bot.send(OzoneMsg::Ping(self.ozid().clone(), resp.clone())) {
+                    return Err(err!(e,
+                        "{}: Cannot send the {} to reader {}.", self.ozid(), emsg, i;
+                        Channel, Write));
+                }
+                n += 1;
+            }
+        }
+        let (_, msgs) = res!(resp.recv_number(n, wait));
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Pong(..) => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to the {}.", self.ozid(), emsg; Channel)),
+                msg => return Err(err!(
+                    "{}: Unexpected response to the {}: {:?}", self.ozid(), emsg, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
     }
 
     // Does a sealed file hold bytes that a collection would remove, or is one at work on it?
