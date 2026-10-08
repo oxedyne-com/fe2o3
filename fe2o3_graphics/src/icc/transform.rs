@@ -21,7 +21,9 @@
 //! # Images
 //!
 //! [`crate::icc::grid::Grid`] samples an RGB source on a 33-step lattice, so that a bitmap is
-//! converted by interpolation rather than by the full pipeline for each pixel.
+//! converted by interpolation rather than by the full pipeline for each pixel. A CMYK destination's
+//! output table is a lattice of its own, with creases where the inks turn, and no coarser lattice
+//! follows them, so the grid holds the colour as Lab and the table is read exactly.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -39,6 +41,7 @@ use crate::icc::{
 	},
 	read::{
 		Class,
+		Lut,
 		Profile,
 		Space,
 		fnv64,
@@ -274,6 +277,22 @@ impl Transform {
 	/// The destination colour of the source colour `v`, whose first channels are read; all as
 	/// fractions of full scale, and only the destination's channels meaningful.
 	pub fn eval(&self, v: [f64; 4]) -> [f64; 4] {
+		let x = self.pcs(v);
+		match &self.dst.kind {
+			Kind::Cmyk(_)	=> match self.tail() {
+				Some(b)	=> {
+					let e = lab::lab_enc(b.bits, lab::xyz_to_lab(x));
+					b.eval([e[0], e[1], e[2], 0.0])
+				},
+				None	=> [0.0; 4],	// refused by new
+			},
+			Kind::Grey(g)	=> [g.level(x[1]), 0.0, 0.0, 0.0],
+			Kind::Rgb(_)	=> [0.0; 4],	// refused by new
+		}
+	}
+
+	// The source colour `v` as XYZ (D50), scaled and offset for the intent and the compensation.
+	fn pcs(&self, v: [f64; 4]) -> [f64; 3] {
 		let xyz = match &self.src.kind {
 			Kind::Rgb(m)	=> m.xyz([v[0], v[1], v[2]]),
 			Kind::Grey(g)	=> {
@@ -292,16 +311,26 @@ impl Transform {
 		for i in 0..3 {
 			x[i] = xyz[i] * self.scale[i] + self.off[i];
 		}
+		x
+	}
+
+	// The table that takes Lab to the inks, where the destination is CMYK.
+	pub(crate) fn tail(&self) -> Option<&Lut> {
 		match &self.dst.kind {
-			Kind::Cmyk(p)	=> match lab::pick(&p.b2a, self.intent.tag()) {
-				Some(b)	=> {
-					let e = lab::lab_enc(b.bits, lab::xyz_to_lab(x));
-					b.eval([e[0], e[1], e[2], 0.0])
-				},
-				None	=> [0.0; 4],	// refused by new
+			Kind::Cmyk(p)	=> lab::pick(&p.b2a, self.intent.tag()),
+			_				=> None,
+		}
+	}
+
+	// What the image grid holds for the source colour `v`: the colour in the table's Lab encoding
+	// where the destination has a table, which the grid then reads exactly, else the result.
+	pub(crate) fn node(&self, v: [f64; 4]) -> [f64; 4] {
+		match self.tail() {
+			Some(b)	=> {
+				let e = lab::lab_enc(b.bits, lab::xyz_to_lab(self.pcs(v)));
+				[e[0], e[1], e[2], 0.0]
 			},
-			Kind::Grey(g)	=> [g.level(x[1]), 0.0, 0.0, 0.0],
-			Kind::Rgb(_)	=> [0.0; 4],	// refused by new
+			None	=> self.eval(v),
 		}
 	}
 

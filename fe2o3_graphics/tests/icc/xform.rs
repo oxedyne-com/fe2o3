@@ -266,9 +266,9 @@ fn test_k_alone_is_one_minus_the_level() {
 	assert_eq!(grey_to_k(3.0)[3], 0.0);
 }
 
-#[test]
-fn test_the_grid_is_within_two_levels_of_the_exact_path() -> Outcome<()> {
-	let (src, dst) = (res!(Dev::srgb()), res!(fogra()));
+// The image grid of `src` to `dst` against the exact path, over the swatches, a 17-step cube and 3000
+// random colours, for three intents.
+fn grid_within_two_levels(name: &str, src: &Dev, dst: &Dev) -> Outcome<()> {
 	let mut seed = 0x2545_f491_4f6c_dd1du64;
 	let mut next = move || {
 		seed ^= seed << 13;
@@ -288,7 +288,7 @@ fn test_the_grid_is_within_two_levels_of_the_exact_path() -> Outcome<()> {
 		pts.push([next(), next(), next()]);
 	}
 	for (intent, bpc) in [(Intent::Perceptual, true), (Intent::Relative, false), (Intent::Absolute, false)] {
-		let t = res!(Transform::new(&src, &dst, intent, bpc));
+		let t = res!(Transform::new(src, dst, intent, bpc));
 		let grid = res!(t.grid());
 		assert!(std::ptr::eq(grid, res!(t.grid())), "the grid is built once");
 		let (mut worst, mut at) = (0.0f64, [0.0; 3]);
@@ -301,7 +301,7 @@ fn test_the_grid_is_within_two_levels_of_the_exact_path() -> Outcome<()> {
 				}
 			}
 		}
-		eprintln!("grid {:?} {}: worst error {:.5} ({:.2} of 255) at {:?}", intent, bpc, worst, worst * 255.0, at);
+		eprintln!("grid {} {:?} {}: worst error {:.5} ({:.2} of 255) at {:?}", name, intent, bpc, worst, worst * 255.0, at);
 		assert!(worst <= 2.0 * ONE, "the grid is {:.2} levels from the exact path at {:?}", worst * 255.0, at);
 		// The bulk converter is the same arithmetic.
 		let px = [0u8, 0, 0, 255, 255, 255, 12, 200, 99];
@@ -309,6 +309,36 @@ fn test_the_grid_is_within_two_levels_of_the_exact_path() -> Outcome<()> {
 		assert_eq!(out.len(), 3);
 		assert_eq!(out[2], grid.eval([12.0 / 255.0, 200.0 / 255.0, 99.0 / 255.0]));
 		assert!(grid.convert8(&px[..8]).is_err());
+	}
+	Ok(())
+}
+
+#[test]
+fn test_the_grid_is_within_two_levels_of_the_exact_path() -> Outcome<()> {
+	grid_within_two_levels("FOGRA39L", &res!(Dev::srgb()), &res!(fogra()))
+}
+
+#[test]
+#[ignore = "reads Ghostscript's AGPL profiles from /usr/share/color/icc/ghostscript"]
+fn test_the_ghostscript_grids_are_within_two_levels_of_the_exact_path() -> Outcome<()> {
+	let (cmyk, rgb) = (res!(gs("default_cmyk.icc")), res!(gs("default_rgb.icc")));
+	res!(grid_within_two_levels("SWOP from sRGB", &res!(Dev::srgb()), &cmyk));
+	grid_within_two_levels("SWOP from default RGB", &rgb, &cmyk)
+}
+
+#[test]
+fn test_a_table_with_lab_input_is_read_trilinearly() -> Outcome<()> {
+	let b = res!(fogra_bytes());
+	let p = res!(Profile::read("FOGRA39L_coated.icc", &b));
+	let lut = res!(p.b2a[0].as_ref().ok_or_else(|| err!("FOGRA39L has no B2A0."; Missing)));
+	assert!(lut.lab_in, "the table that takes Lab to the inks has a Lab input");
+	assert!(p.a2b.iter().flatten().all(|t| !t.lab_in), "a table that takes inks to Lab does not");
+	// Lab of sRGB (128, 128, 0), where a tetrahedral reading gives 22.18 4.64 100 51.71.
+	let e = lab::lab_enc(lut.bits, [52.1498, -9.4467, 56.0227]);
+	let got = lut.eval([e[0], e[1], e[2], 0.0]);
+	let want = [28.2597, 11.2871, 99.9313, 44.9683];	// LittleCMS 2.17, in per cent
+	for j in 0..4 {
+		assert!((got[j] * 100.0 - want[j]).abs() < 0.1, "ink {}: {:.4} against LittleCMS's {:.4}", j, got[j] * 100.0, want[j]);
 	}
 	Ok(())
 }
