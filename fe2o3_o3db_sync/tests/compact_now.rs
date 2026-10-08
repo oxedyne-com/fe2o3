@@ -93,7 +93,7 @@ impl Plain {
             None => Vec::new(),
         };
         assert!(!needle.is_empty(), "the needle of key {} version {} is empty", i, ver);
-        dat_files_holding(&self.root, &self.cfg, &needle).len()
+        files_holding(&self.root, &self.cfg, &needle).len()
     }
 
     fn end(self) -> Outcome<()> {
@@ -269,7 +269,7 @@ fn chunked(name: &str, gc_on: bool) -> Outcome<Chunked> {
 
 impl Chunked {
     fn holds(&self, seed: u8) -> Vec<usize> {
-        windows(seed).iter().map(|w| dat_files_holding(&self.root, &self.cfg, w).len()).collect()
+        windows(seed).iter().map(|w| files_holding(&self.root, &self.cfg, w).len()).collect()
     }
 
     fn num_chunks(&self, k: &Dat) -> Outcome<u64> {

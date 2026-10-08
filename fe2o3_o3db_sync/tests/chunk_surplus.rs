@@ -109,7 +109,7 @@ fn store(name: &str) -> Outcome<Store> {
 
 impl Store {
     fn holds(&self, seed: u8, len: usize) -> Vec<usize> {
-        windows(seed, len).iter().map(|w| dat_files_holding(&self.root, &self.cfg, w).len()).collect()
+        windows(seed, len).iter().map(|w| files_holding(&self.root, &self.cfg, w).len()).collect()
     }
 
     fn num_chunks(&self, k: &Dat) -> Outcome<u64> {

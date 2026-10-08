@@ -107,7 +107,7 @@ fn judge_after(db: &TestDb, label: &str) -> usize {
 fn needles(root: &Path, cfg: &OzoneConfig) -> Vec<usize> {
     DELETED.iter().map(|i| {
         let bytes = match value(*i, 1).bytes_ref() { Some(b) => b.to_vec(), None => Vec::new() };
-        dat_files_holding(root, cfg, &bytes).len()
+        files_holding(root, cfg, &bytes).len()
     }).collect()
 }
 

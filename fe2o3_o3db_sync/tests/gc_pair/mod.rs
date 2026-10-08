@@ -31,7 +31,10 @@ use oxedyne_fe2o3_o3db_sync::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     fs,
     path::{
         Path,
@@ -241,24 +244,45 @@ pub fn settled_len(root: &Path, cfg: &OzoneConfig) -> u64 {
     last
 }
 
-/// The data files under the zone root, collection temporaries included, that hold the needle
-/// anywhere in their bytes, found by reading each whole file with nothing of the store's own.
-pub fn dat_files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<PathBuf> {
-    let mut found = Vec::new();
-    let mut stack = vec![cfg.zone_root(root)];
+/// The directories a store keeps files in: its root, which holds the zone root and everything
+/// else the store writes, and the directory of each zone placed elsewhere by an override.
+pub fn store_dirs(root: &Path, cfg: &OzoneConfig) -> Vec<PathBuf> {
+    let mut dirs = vec![root.to_path_buf()];
+    for zmap in cfg.zone_overrides().values() {
+        let dir = match zmap {
+            Dat::Map(m) => match m.get(&dat!("dir")) {
+                Some(Dat::Str(s))   => s.clone(),
+                _                   => String::new(),
+            },
+            _ => String::new(),
+        };
+        let base = if dir.is_empty() { root.to_path_buf() } else { root.join(dir) };
+        dirs.push(cfg.zone_root(&base));
+    }
+    dirs
+}
+
+/// The files of the store, of whatever extension, that hold the needle anywhere in their bytes,
+/// found by reading each whole file under the store root and every overridden zone directory with
+/// nothing of the store's own.  Index files, configuration, temporaries and a zone placed outside
+/// the root are all searched, so that a copy of a deleted value cannot hide in any of them.
+pub fn files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<PathBuf> {
+    let mut found = BTreeSet::new();
+    let mut stack = store_dirs(root, cfg);
+    let mut seen = BTreeSet::new();
     while let Some(d) = stack.pop() {
+        if !seen.insert(d.clone()) {
+            continue;
+        }
         if let Ok(list) = fs::read_dir(&d) {
             for entry in list.flatten() {
                 let p = entry.path();
                 match entry.metadata() {
                     Ok(m) if m.is_dir() => stack.push(p),
                     Ok(m) if m.is_file() => {
-                        let dat = p.extension().map_or(false, |e| e == constant::DATA_FILE_EXT);
-                        if dat {
-                            if let Ok(bytes) = fs::read(&p) {
-                                if needle.len() <= bytes.len() && bytes.windows(needle.len()).any(|w| w == needle) {
-                                    found.push(p);
-                                }
+                        if let Ok(bytes) = fs::read(&p) {
+                            if needle.len() <= bytes.len() && bytes.windows(needle.len()).any(|w| w == needle) {
+                                found.insert(p);
                             }
                         }
                     },
@@ -267,6 +291,5 @@ pub fn dat_files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<P
             }
         }
     }
-    found.sort();
-    found
+    found.into_iter().collect()
 }
