@@ -185,7 +185,7 @@ fn show_ref(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outcome
 		let mut note = found.clone();
 		note.set(res!(common::fid(ElemKind::Footnote, "body")), Value::Label(target.clone()));
 		if let Content::Elem(e) = &mut note {
-			let e = std::sync::Arc::make_mut(e);
+			let e = e.edit();
 			e.location = None;
 			e.prepared = false;
 			e.label = None;

@@ -22,7 +22,11 @@ use crate::eval::content::{
 	FieldType,
 	Fold,
 };
-use crate::eval::fp;
+use crate::eval::fp::{
+	self,
+	Kept,
+	Shared,
+};
 use crate::eval::func::Func;
 use crate::eval::ops;
 use crate::eval::select::Selector;
@@ -47,6 +51,7 @@ use crate::syntax::Span;
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+use oxedyne_fe2o3_hash::fingerprint::LazyFingerprint;
 
 use std::sync::Arc;
 
@@ -167,28 +172,42 @@ impl Style {
 
 /// A list of styles from one `set` or `show`, or several merged. Later entries are inner: they win.
 #[derive(Clone, Debug, Default)]
-pub struct Styles(pub Arc<Vec<Style>>);
+pub struct Styles(Shared<StyleList>);
+
+// The list and its fingerprint cell, shared by every clone of a `Styles`, so the list is hashed once.
+#[derive(Clone, Debug, Default)]
+struct StyleList {
+	v:	Vec<Style>,
+	fp:	LazyFingerprint,
+}
+
+impl Kept for StyleList {
+	fn cell(&mut self) -> &mut LazyFingerprint { &mut self.fp }
+}
 
 impl Styles {
 	pub fn new() -> Self { Self::default() }
 
-	pub fn from_style(s: Style) -> Self { Styles(Arc::new(vec![s])) }
+	pub fn from_style(s: Style) -> Self { Self::from_vec(vec![s]) }
 
-	pub fn from_vec(v: Vec<Style>) -> Self { Styles(Arc::new(v)) }
+	pub fn from_vec(v: Vec<Style>) -> Self { Styles(Shared::new(StyleList { v, fp: LazyFingerprint::new() })) }
 
-	pub fn is_empty(&self) -> bool { self.0.is_empty() }
+	pub fn is_empty(&self) -> bool { self.0.v.is_empty() }
 
-	pub fn len(&self) -> usize { self.0.len() }
+	pub fn len(&self) -> usize { self.0.v.len() }
 
-	pub fn push(&mut self, s: Style) { Arc::make_mut(&mut self.0).push(s); }
+	/// Do both share one list?
+	pub fn ptr_eq(&self, other: &Styles) -> bool { Shared::ptr_eq(&self.0, &other.0) }
 
-	pub fn iter(&self) -> impl Iterator<Item = &Style> { self.0.iter() }
+	pub fn push(&mut self, s: Style) { self.0.edit().v.push(s); }
 
-	pub fn as_slice(&self) -> &[Style] { &self.0 }
+	pub fn iter(&self) -> impl Iterator<Item = &Style> { self.0.v.iter() }
+
+	pub fn as_slice(&self) -> &[Style] { &self.0.v }
 
 	/// Appends `other`'s styles after this one's, as consecutive `set` rules accumulate.
 	pub fn extend(&mut self, other: &Styles) {
-		Arc::make_mut(&mut self.0).extend(other.0.iter().cloned());
+		self.0.edit().v.extend(other.iter().cloned());
 	}
 
 	/// Puts `outer` before these styles, so these keep precedence: Typst's `Styles::apply`.
@@ -196,9 +215,9 @@ impl Styles {
 		if outer.is_empty() {
 			return;
 		}
-		let mut v = (*outer.0).clone();
-		v.extend(self.0.iter().cloned());
-		self.0 = Arc::new(v);
+		let mut v = outer.as_slice().to_vec();
+		v.extend(self.iter().cloned());
+		*self = Styles::from_vec(v);
 	}
 
 	/// The styles marked as applied outside any show rule or container.
@@ -241,7 +260,7 @@ impl Styles {
 	}
 
 	/// The fingerprint of the list, span-free.
-	pub fn fingerprint(&self) -> Fingerprint { fp::styles_fp(self) }
+	pub fn fingerprint(&self) -> Fingerprint { self.0.fp.get_or_init(|| fp::styles_fp(self)) }
 
 	/// Does any style set a property of `kind`?
 	pub fn has_property_of(&self, kind: ElemKind) -> bool {
@@ -249,22 +268,34 @@ impl Styles {
 	}
 }
 
+// Built once by `StyleChain::chain` and never changed, so its fingerprint cell is never stale.
 #[derive(Debug)]
 pub struct ChainLink {
-	pub styles:	Styles,
-	pub parent:	Option<Arc<ChainLink>>,
+	styles:	Styles,
+	parent:	Option<Arc<ChainLink>>,
+	fp:		LazyFingerprint,
 }
 
 impl ChainLink {
+	pub fn new(styles: Styles, parent: Option<Arc<ChainLink>>) -> Self {
+		Self { styles, parent, fp: LazyFingerprint::new() }
+	}
+
+	pub fn styles(&self) -> &Styles { &self.styles }
+
+	pub fn parent(&self) -> Option<&Arc<ChainLink>> { self.parent.as_ref() }
+
 	/// The link's styles and its parents', span-free.
 	pub fn fingerprint(&self) -> Fingerprint {
-		let mut h = Fingerprinter::new();
-		h.write_fingerprint(self.styles.fingerprint());
-		match &self.parent {
-			Some(p)	=> { h.write_u8(1); h.write_fingerprint(p.fingerprint()); }
-			None	=> h.write_u8(0),
-		}
-		h.finish()
+		self.fp.get_or_init(|| {
+			let mut h = Fingerprinter::new();
+			h.write_fingerprint(self.styles.fingerprint());
+			match &self.parent {
+				Some(p)	=> { h.write_u8(1); h.write_fingerprint(p.fingerprint()); }
+				None	=> h.write_u8(0),
+			}
+			h.finish()
+		})
 	}
 }
 
@@ -282,7 +313,7 @@ impl StyleChain {
 		if styles.is_empty() {
 			return self.clone();
 		}
-		StyleChain { head: Some(Arc::new(ChainLink { styles: styles.clone(), parent: self.head.clone() })) }
+		StyleChain { head: Some(Arc::new(ChainLink::new(styles.clone(), self.head.clone()))) }
 	}
 
 	/// The links, innermost first.
@@ -317,12 +348,12 @@ impl StyleChain {
 
 	/// Every style, outermost first: Typst's `to_map`.
 	pub fn flatten(&self) -> Vec<&Style> {
-		self.links().into_iter().rev().flat_map(|l| l.styles.0.iter()).collect()
+		self.links().into_iter().rev().flat_map(|l| l.styles.iter()).collect()
 	}
 
 	/// Every style, innermost first.
 	pub fn walk(&self) -> impl Iterator<Item = &Style> {
-		self.links().into_iter().flat_map(|l| l.styles.0.iter().rev())
+		self.links().into_iter().flat_map(|l| l.styles.as_slice().iter().rev())
 	}
 
 	/// Every recipe with its index, innermost first, skipping those a revocation further in switched off.

@@ -275,7 +275,7 @@ pub fn finish(engine: &mut Engine, args: &mut Args) -> Outcome<()> {
 pub fn synthesise(engine: &mut Engine, elem: &mut Content, styles: &StyleChain) -> Outcome<()> {
 	// A default no schema constant holds is materialised here, as the chain cannot supply it.
 	if let (Some(kind), Content::Elem(e)) = (elem.kind(), &mut *elem) {
-		let e = std::sync::Arc::make_mut(e);
+		let e = e.edit();
 		for (i, spec) in kind.fields().iter().enumerate() {
 			let id = FieldId(i as u8);
 			if !spec.settable || spec.default != crate::eval::content::FieldDefault::Computed

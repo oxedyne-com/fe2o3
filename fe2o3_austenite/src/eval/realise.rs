@@ -54,8 +54,6 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
-use std::sync::Arc;
-
 pub const MAX_SHOW_RULE_DEPTH:	usize	= 64;	// Typst's own limit
 pub const MAX_GROUPING_STEPS:	usize	= 512;	// ditto, for groups that keep producing groups
 
@@ -652,10 +650,10 @@ impl State<'_> {
 		let result = match step {
 			Step::Recipe(recipe, index) => {
 				if let Content::Elem(e) = &mut output {
-					if Arc::strong_count(e) > 1 {
+					if e.is_shared() {
 						self.engine.bump(Counter::Copied, 1);
 					}
-					Arc::make_mut(e).guards.push(index);
+					e.edit().guards.push(index);
 				}
 				let shown = self.engine.timed(Phase::Show, |engine| apply_recipe(engine, &recipe, output.clone(), &chained));
 				self.engine.delay(mark, target.span(), shown)
@@ -745,7 +743,7 @@ impl State<'_> {
 		let mut output = target.clone();
 		let mut tags = None;
 		if let Content::Sequence(seq) = &mut output {
-			let seq = Arc::make_mut(seq);
+			let seq = seq.edit();
 			if seq.location.is_none() {
 				let loc = self.engine.locator.locate(ElemKind::Sequence, seq.span);
 				seq.location = Some(loc);
@@ -1157,10 +1155,10 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 	let builtin = res!(content::show_set(target, styles));
 	let e = match target {
 		Content::Elem(e)	=> {
-			if Arc::strong_count(e) > 1 {
+			if e.is_shared() {
 				engine.bump(Counter::Copied, 1);
 			}
-			Arc::make_mut(e)
+			e.edit()
 		},
 		_					=> return Ok(None),
 	};
@@ -1189,7 +1187,7 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 	res!(content::synthesise(engine, target, &chain));
 	let loc = match target {
 		Content::Elem(e)	=> {
-			let e = Arc::make_mut(e);
+			let e = e.edit();
 			e.prepared = true;
 			e.location
 		}

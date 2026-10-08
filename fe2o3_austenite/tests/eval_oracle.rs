@@ -415,16 +415,11 @@ fn hand_laid(lines: &[(&str, f64)], located: &[(ElemKind, bool, u32, f64, f64)],
 	for (i, (kind, probe, page, x, y)) in located.iter().enumerate() {
 		let loc = Location(0x1000 + i as u64);
 		let label = if *probe { Some(Label::new("probe")) } else { None };
-		let elem = Content::Elem(Arc::new(Elem {
-			kind:		*kind,
-			fields:		Vec::new(),
-			label,
-			location:	Some(loc),
-			span:		Span::detached(),
-			guards:		Vec::new(),
-			prepared:	true,
-			place:		None,
-		}));
+		let mut e = Elem::new(*kind, Vec::new(), Span::detached());
+		e.label = label;
+		e.location = Some(loc);
+		e.prepared = true;
+		let elem = Content::from_elem(e);
 		builder.record(&elem, Position::new(*page, Sp::from_pt(*x), Sp::from_pt(*y + shift)), None);
 	}
 	builder.page(1, &Value::None);

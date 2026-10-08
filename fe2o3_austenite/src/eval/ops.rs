@@ -7,6 +7,7 @@ use crate::eval::content::{
 	ElemKind,
 	Sequence,
 };
+use crate::eval::fp::Shared;
 use crate::eval::func::Func;
 use crate::eval::lib::decimal::Decimal;
 use crate::eval::lib::foundations::repr;
@@ -396,18 +397,18 @@ pub fn join(a: Value, b: Value) -> Outcome<Value> {
 pub fn content_add(a: Content, b: Content) -> Content {
 	match (a, b) {
 		(Content::Sequence(mut x), Content::Sequence(y)) => {
-			Arc::make_mut(&mut x).children.extend(y.children.iter().cloned());
+			x.edit().children.extend(y.children.iter().cloned());
 			Content::Sequence(x)
 		}
 		(Content::Sequence(mut x), b) => {
-			Arc::make_mut(&mut x).children.push(b);
+			x.edit().children.push(b);
 			Content::Sequence(x)
 		}
 		(a, Content::Sequence(mut y)) => {
-			Arc::make_mut(&mut y).children.insert(0, a);
+			y.edit().children.insert(0, a);
 			Content::Sequence(y)
 		}
-		(a, b) => Content::Sequence(Arc::new(Sequence::new(vec![a, b]))),
+		(a, b) => Content::Sequence(Shared::new(Sequence::new(vec![a, b]))),
 	}
 }
 
@@ -644,7 +645,7 @@ pub fn equal(a: &Value, b: &Value) -> bool {
 		(Value::Args(x), Value::Args(y))		=> args_eq(x, y),
 		(Value::Module(x), Value::Module(y))	=> Arc::ptr_eq(x, y) || x.name == y.name,
 		(Value::Type(x), Value::Type(y))		=> x == y,
-		(Value::Styles(x), Value::Styles(y))	=> Arc::ptr_eq(&x.0, &y.0),
+		(Value::Styles(x), Value::Styles(y))	=> x.ptr_eq(y),
 		(Value::Selector(x), Value::Selector(y))	=> Arc::ptr_eq(x, y),
 		(Value::Counter(x), Value::Counter(y))	=> Arc::ptr_eq(x, y),
 		(Value::State(x), Value::State(y))		=> x.key == y.key && equal(&x.init, &y.init),
@@ -694,7 +695,7 @@ fn args_eq(x: &Args, y: &Args) -> bool {
 pub fn content_eq(x: &Content, y: &Content) -> bool {
 	match (x, y) {
 		(Content::Elem(p), Content::Elem(q)) => {
-			if Arc::ptr_eq(p, q) {
+			if Shared::ptr_eq(p, q) {
 				return true;
 			}
 			p.kind == q.kind && p.label == q.label && p.fields.len() == q.fields.len()
@@ -705,7 +706,7 @@ pub fn content_eq(x: &Content, y: &Content) -> bool {
 		(Content::Sequence(p), Content::Sequence(q)) => p.label == q.label
 			&& p.children.len() == q.children.len()
 			&& p.children.iter().zip(q.children.iter()).all(|(a, b)| content_eq(a, b)),
-		(Content::Styled(p), Content::Styled(q)) => Arc::ptr_eq(&p.styles.0, &q.styles.0)
+		(Content::Styled(p), Content::Styled(q)) => p.styles.ptr_eq(&q.styles)
 			&& content_eq(&p.child, &q.child),
 		_ => false,
 	}

@@ -4,11 +4,13 @@
 //! reach a page in the same state with the same pairs lay it out alike, so the fraction of pages whose
 //! `(input, entry)` match the previous compile's is the most a re-run from a page boundary could reuse. The
 //! fingerprint walks every struct by hand with no `..`, so a field added later does not compile until the
-//! walk takes it, and a field the walk drops fails the plants in `tests/eval_carry.rs`.
+//! walk takes it, and a field the walk drops fails the plants in `tests/eval_carry.rs`. Content and styles are
+//! the exception: they read the fingerprints they keep (`eval::fp`), which `tests/fingerprint.rs` guards.
 //!
 //! Spans never enter: a one-letter edit moves every later span, and with it every `Location`, `Place` and
 //! mark, so those hash as their presence only and are counted. Layout caches and the future input are left
-//! out by name. The walk is not memoised, so its cost is an upper bound on a production fingerprint's.
+//! out by name. Content and styles are memoised; the rest of the walk is not, so its cost is an upper bound
+//! on a production fingerprint's.
 
 use crate::eval::args::{
 	Arg,
@@ -16,11 +18,8 @@ use crate::eval::args::{
 };
 use crate::eval::content::{
 	Content,
-	Elem,
 	ElemKind,
 	FieldId,
-	Sequence,
-	Styled,
 };
 use crate::eval::func::{
 	Closure,
@@ -43,7 +42,6 @@ use crate::eval::scope::{
 };
 use crate::eval::select::Selector;
 use crate::eval::styles::{
-	ChainLink,
 	Property,
 	Recipe,
 	RecipeIndex,
@@ -297,52 +295,12 @@ impl<A: Walk, B: Walk, C: Walk> Walk for (A, B, C) {
 // Content
 
 impl Walk for Content {
+	// The content's own fingerprint, which is blind to spans, locations and places, then the presence of the
+	// head's location and place, counted as everywhere else in the walk.
 	fn mix(&self, fp: &mut Fp) {
-		match self {
-			Content::Elem(e)		=> {
-				fp.tag(0);
-				e.mix(fp);
-			},
-			Content::Sequence(s)	=> {
-				fp.tag(1);
-				s.mix(fp);
-			},
-			Content::Styled(s)		=> {
-				fp.tag(2);
-				s.mix(fp);
-			},
-		}
-	}
-}
-
-impl Walk for Elem {
-	fn mix(&self, fp: &mut Fp) {
-		let Elem { kind, fields, label, location, span: _, guards, prepared, place } = self;	// span: moves with an edit
-		kind.mix(fp);
-		fields.mix(fp);
-		label.mix(fp);
-		fp.mask_opt(location);
-		guards.mix(fp);
-		prepared.mix(fp);
-		fp.mask_opt(place);
-	}
-}
-
-impl Walk for Sequence {
-	fn mix(&self, fp: &mut Fp) {
-		let Sequence { children, label, span: _, location, guards } = self;	// span: moves with an edit
-		children.mix(fp);
-		label.mix(fp);
-		fp.mask_opt(location);
-		guards.mix(fp);
-	}
-}
-
-impl Walk for Styled {
-	fn mix(&self, fp: &mut Fp) {
-		let Styled { child, styles } = self;
-		child.mix(fp);
-		styles.mix(fp);
+		fp.h.write_fingerprint(self.fingerprint());
+		fp.mask_opt(&self.location());
+		fp.mask_opt(&self.place());
 	}
 }
 
@@ -629,24 +587,11 @@ impl Walk for Style {
 }
 
 impl Walk for Styles {
-	fn mix(&self, fp: &mut Fp) {
-		let Styles(list) = self;
-		list.mix(fp);
-	}
+	fn mix(&self, fp: &mut Fp) { fp.h.write_fingerprint(self.fingerprint()); }
 }
 
 impl Walk for StyleChain {
-	fn mix(&self, fp: &mut Fp) {
-		let StyleChain { head } = self;
-		let mut at = head.as_ref();
-		while let Some(link) = at {
-			let ChainLink { styles, parent } = &**link;
-			fp.tag(1);
-			styles.mix(fp);
-			at = parent.as_ref();
-		}
-		fp.tag(0);
-	}
+	fn mix(&self, fp: &mut Fp) { fp.h.write_fingerprint(self.fingerprint()); }
 }
 
 // Realised pairs

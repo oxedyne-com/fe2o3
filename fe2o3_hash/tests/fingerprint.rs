@@ -268,11 +268,12 @@ fn a_clone_of_a_lazy_fingerprint_is_empty_so_a_changed_clone_is_never_stale() {
 }
 
 #[test]
-fn a_lazy_fingerprint_takes_no_part_in_equality_or_hashing() {
+fn a_lazy_fingerprint_takes_no_part_in_equality_hashing_or_debug_output() {
 	let a = LazyFingerprint::new();
 	let b = LazyFingerprint::new();
 	b.get_or_init(|| Fingerprint::of(b"set"));
 	assert_eq!(a, b);
+	assert_eq!(format!("{:?}", a), format!("{:?}", b));
 	let h = |l: &LazyFingerprint| {
 		let mut s = DefaultHasher::new();
 		l.hash(&mut s);

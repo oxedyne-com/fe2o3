@@ -4,7 +4,11 @@
 
 use crate::diag::DiagnosticKind;
 use crate::eval::args::Args;
-use crate::eval::fp;
+use crate::eval::fp::{
+	self,
+	Kept,
+	Shared,
+};
 use crate::eval::lib;
 use crate::eval::locate::{
 	Location,
@@ -26,8 +30,7 @@ use crate::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
-
-use std::sync::Arc;
+use oxedyne_fe2o3_hash::fingerprint::LazyFingerprint;
 
 /// Which unit's files hold an element's schema, constructor and native show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -439,6 +442,21 @@ pub struct Elem {
 	pub guards:		Vec<RecipeIndex>,
 	pub prepared:	bool,	// synthesised fields filled and location assigned
 	pub place:		Option<Place>,	// where the body it lays out is realised, given when it is first met
+	fp:				LazyFingerprint,	// private: only a `Shared` handle's `edit` may change an element
+}
+
+impl Elem {
+	/// An element with the given fields: no label, location, guards or place, and not yet prepared.
+	pub fn new(kind: ElemKind, fields: Vec<(FieldId, Value)>, span: Span) -> Self {
+		Self {
+			kind, fields, label: None, location: None, span, guards: Vec::new(), prepared: false, place: None,
+			fp: LazyFingerprint::new(),
+		}
+	}
+}
+
+impl Kept for Elem {
+	fn cell(&mut self) -> &mut LazyFingerprint { &mut self.fp }
 }
 
 /// Content in order. A labelled sequence is located and guarded as an element is, so show rules on
@@ -450,26 +468,43 @@ pub struct Sequence {
 	pub span:		Span,
 	pub location:	Option<Location>,
 	pub guards:		Vec<RecipeIndex>,
+	fp:				LazyFingerprint,
 }
 
 impl Sequence {
 	pub fn new(children: Vec<Content>) -> Self {
-		Self { children, label: None, span: Span::detached(), location: None, guards: Vec::new() }
+		Self {
+			children, label: None, span: Span::detached(), location: None, guards: Vec::new(),
+			fp: LazyFingerprint::new(),
+		}
 	}
+}
+
+impl Kept for Sequence {
+	fn cell(&mut self) -> &mut LazyFingerprint { &mut self.fp }
 }
 
 #[derive(Clone, Debug)]
 pub struct Styled {
 	pub child:	Content,
 	pub styles:	Styles,
+	fp:			LazyFingerprint,
+}
+
+impl Styled {
+	pub fn new(child: Content, styles: Styles) -> Self { Self { child, styles, fp: LazyFingerprint::new() } }
+}
+
+impl Kept for Styled {
+	fn cell(&mut self) -> &mut LazyFingerprint { &mut self.fp }
 }
 
 /// Typst's `content` value: an element, a sequence of content, or content under local styles.
 #[derive(Clone, Debug)]
 pub enum Content {
-	Elem(Arc<Elem>),
-	Sequence(Arc<Sequence>),
-	Styled(Arc<Styled>),
+	Elem(Shared<Elem>),
+	Sequence(Shared<Sequence>),
+	Styled(Shared<Styled>),
 }
 
 impl Default for Content {
@@ -478,14 +513,14 @@ impl Default for Content {
 
 impl Content {
 	pub fn empty() -> Self {
-		Content::Sequence(Arc::new(Sequence::new(Vec::new())))
+		Content::Sequence(Shared::new(Sequence::new(Vec::new())))
 	}
 
 	pub fn new(kind: ElemKind, fields: Vec<(FieldId, Value)>, span: Span) -> Self {
-		Content::Elem(Arc::new(Elem {
-			kind, fields, label: None, location: None, span, guards: Vec::new(), prepared: false, place: None,
-		}))
+		Content::Elem(Shared::new(Elem::new(kind, fields, span)))
 	}
+
+	pub fn from_elem(e: Elem) -> Self { Content::Elem(Shared::new(e)) }
 
 	/// A text element. By contract `text`'s field 0 is its string (`lib/text.rs`).
 	pub fn text(s: &str) -> Self {
@@ -508,14 +543,14 @@ impl Content {
 			}
 			return Content::empty();
 		}
-		Content::Sequence(Arc::new(Sequence::new(children)))
+		Content::Sequence(Shared::new(Sequence::new(children)))
 	}
 
 	pub fn styled(self, styles: Styles) -> Self {
 		if styles.is_empty() {
 			return self;
 		}
-		Content::Styled(Arc::new(Styled { child: self, styles }))
+		Content::Styled(Shared::new(Styled::new(self, styles)))
 	}
 
 	pub fn kind(&self) -> Option<ElemKind> {
@@ -552,8 +587,8 @@ impl Content {
 
 	pub fn with_span(mut self, span: Span) -> Self {
 		match &mut self {
-			Content::Elem(e)		=> Arc::make_mut(e).span = span,
-			Content::Sequence(s)	=> Arc::make_mut(s).span = span,
+			Content::Elem(e)		=> e.edit().span = span,
+			Content::Sequence(s)	=> s.edit().span = span,
 			Content::Styled(_)		=> (),
 		}
 		self
@@ -569,10 +604,10 @@ impl Content {
 
 	pub fn labelled(mut self, label: Label) -> Self {
 		match &mut self {
-			Content::Elem(e)		=> Arc::make_mut(e).label = Some(label),
-			Content::Sequence(s)	=> Arc::make_mut(s).label = Some(label),
+			Content::Elem(e)		=> e.edit().label = Some(label),
+			Content::Sequence(s)	=> s.edit().label = Some(label),
 			Content::Styled(s)		=> {
-				let st = Arc::make_mut(s);
+				let st = s.edit();
 				st.child = st.child.clone().labelled(label);
 			}
 		}
@@ -630,7 +665,7 @@ impl Content {
 	/// Sets a field in place (copy on write); a no-op on a sequence or styled content.
 	pub fn set(&mut self, id: FieldId, value: Value) {
 		if let Content::Elem(e) = self {
-			let e = Arc::make_mut(e);
+			let e = e.edit();
 			match e.fields.iter_mut().find(|(f, _)| *f == id) {
 				Some(slot)	=> slot.1 = value,
 				None		=> e.fields.push((id, value)),
@@ -642,7 +677,7 @@ impl Content {
 	/// content. A layouter that resolves its children itself, as a grid does its cells, gives each one.
 	pub fn set_place(&mut self, place: Place) {
 		if let Content::Elem(e) = self {
-			Arc::make_mut(e).place = Some(place);
+			e.edit().place = Some(place);
 		}
 	}
 
@@ -650,9 +685,9 @@ impl Content {
 	/// location or the place. Equal text at a shifted offset has an equal fingerprint.
 	pub fn fingerprint(&self) -> Fingerprint {
 		match self {
-			Content::Elem(e)		=> fp::elem_fp(e),
-			Content::Sequence(s)	=> fp::seq_fp(s),
-			Content::Styled(s)		=> fp::styled_fp(s),
+			Content::Elem(e)		=> e.fp.get_or_init(|| fp::elem_fp(e)),
+			Content::Sequence(s)	=> s.fp.get_or_init(|| fp::seq_fp(s)),
+			Content::Styled(s)		=> s.fp.get_or_init(|| fp::styled_fp(s)),
 		}
 	}
 

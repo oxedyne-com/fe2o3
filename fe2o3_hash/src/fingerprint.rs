@@ -226,9 +226,10 @@ fn le_word(b: &[u8]) -> u64 {
 }
 
 /// A fingerprint worked out on first use and kept. It is a cache beside a value, not a part of
-/// it, so cloning gives an empty cell, and it takes no part in equality or hashing. A value that
-/// is cloned and then changed therefore never reads the fingerprint of what it was.
-#[derive(Debug, Default)]
+/// it, so cloning gives an empty cell, and it takes no part in equality, hashing or debug output
+/// (which would otherwise differ with whether the fingerprint had been read). A value that is
+/// cloned and then changed therefore never reads the fingerprint of what it was.
+#[derive(Default)]
 pub struct LazyFingerprint {
 	cell: OnceLock<Fingerprint>,
 }
@@ -245,6 +246,10 @@ impl LazyFingerprint {
 
 	/// Forgets the fingerprint. A value changed in place must call this.
 	pub fn clear(&mut self) { self.cell.take(); }
+}
+
+impl fmt::Debug for LazyFingerprint {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str("LazyFingerprint") }
 }
 
 impl Clone for LazyFingerprint {

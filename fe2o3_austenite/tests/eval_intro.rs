@@ -496,16 +496,11 @@ fn intro_fixtures_match_the_typst_oracle() {
 
 /// A metadata element with a value, a label and a location, as realisation would prepare it.
 fn located(v: i64, label: &str, loc: u64) -> Content {
-	Content::Elem(Arc::new(Elem {
-		kind:		ElemKind::Metadata,
-		fields:		vec![(FieldId(0), Value::Int(v))],
-		label:		Some(Label::new(label)),
-		location:	Some(Location(loc)),
-		span:		Span::detached(),
-		guards:		Vec::new(),
-		prepared:	true,
-		place:		None,
-	}))
+	let mut e = Elem::new(ElemKind::Metadata, vec![(FieldId(0), Value::Int(v))], Span::detached());
+	e.label = Some(Label::new(label));
+	e.location = Some(Location(loc));
+	e.prepared = true;
+	Content::from_elem(e)
 }
 
 fn at(page: u32, y: i32) -> Position { Position::new(page, Sp::ZERO, Sp(y)) }

@@ -3,16 +3,31 @@
 //! gives a different one; and a fingerprint read before a change is never the one read after it.
 
 use oxedyne_fe2o3_austenite::eval::content::{
+	build,
+	synthesise,
 	Content,
 	Elem,
 	ElemKind,
 	FieldId,
+	Sequence,
+	Styled,
+};
+use oxedyne_fe2o3_austenite::eval::fp::{
+	elem_fp,
+	Shared,
 };
 use oxedyne_fe2o3_austenite::eval::locate::{
 	Location,
 	Place,
 };
-use oxedyne_fe2o3_austenite::eval::styles::RecipeIndex;
+use oxedyne_fe2o3_austenite::eval::ops::content_add;
+use oxedyne_fe2o3_austenite::eval::styles::{
+	Property,
+	RecipeIndex,
+	StyleChain,
+	Style,
+	Styles,
+};
 use oxedyne_fe2o3_austenite::eval::value::{
 	Label,
 	Value,
@@ -31,7 +46,6 @@ use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 // What a source evaluates to, fingerprinted.
 fn fp(src: &str) -> Outcome<Fingerprint> {
@@ -45,19 +59,10 @@ fn fp(src: &str) -> Outcome<Fingerprint> {
 
 // A metadata element, which holds one value in field 0.
 fn meta(v: Value, span: Span) -> Elem {
-	Elem {
-		kind:		ElemKind::Metadata,
-		fields:		vec![(FieldId(0), v)],
-		label:		None,
-		location:	None,
-		span,
-		guards:		Vec::new(),
-		prepared:	false,
-		place:		None,
-	}
+	Elem::new(ElemKind::Metadata, vec![(FieldId(0), v)], span)
 }
 
-fn elem(e: Elem) -> Content { Content::Elem(Arc::new(e)) }
+fn elem(e: Elem) -> Content { Content::from_elem(e) }
 
 // Two sources of the same shape, the second written at other offsets.
 const SHIFTED: &[(&str, &str, &str)] = &[
@@ -175,4 +180,178 @@ fn the_order_fields_were_set_in_is_not_a_difference() {
 	let mut b = meta(Value::Int(2), Span::detached());
 	b.fields = vec![(FieldId(1), Value::Int(2)), (FieldId(0), Value::Int(1))];
 	assert_eq!(elem(a).fingerprint(), elem(b).fingerprint(), "the order of fields was seen");
+}
+
+// Mutation. A fingerprint read before a change is never the one read after it. Each case reads the
+// fingerprint of a node held by one handle only, so the change is made in place, where a stale cell
+// would show; changes it; and compares with a node built afresh to the same shape, whose cell has never
+// been read.
+
+// The fingerprint after a change is a new one, and the one a cold node of the same shape has.
+fn fresh(what: &str, warm: Fingerprint, now: &Content, cold: &Content) {
+	assert_ne!(warm, now.fingerprint(), "{}: the old fingerprint survived the change", what);
+	assert_eq!(now.fingerprint(), cold.fingerprint(), "{}: the fingerprint is not a cold one", what);
+}
+
+fn t(s: &str) -> Content { Content::text(s) }
+
+fn seq(v: &[&str]) -> Content { Content::sequence(v.iter().map(|s| t(s)).collect()) }
+
+fn prop(n: i64) -> Style {
+	Style::Property(Property::new(ElemKind::Text, FieldId(1), Value::Int(n), Span::detached()))
+}
+
+fn styles(n: &[i64]) -> Styles { Styles::from_vec(n.iter().map(|n| prop(*n)).collect()) }
+
+#[test]
+fn setting_a_field_of_a_warm_element_gives_a_fresh_fingerprint() {
+	let mut c = elem(meta(Value::Int(1), Span::detached()));
+	let warm = c.fingerprint();
+	c.set(FieldId(0), Value::Int(2));
+	fresh("an existing field", warm, &c, &elem(meta(Value::Int(2), Span::detached())));
+	let warm = c.fingerprint();
+	c.set(FieldId(1), Value::Int(5));
+	let cold = Elem::new(ElemKind::Metadata, vec![(FieldId(0), Value::Int(2)), (FieldId(1), Value::Int(5))], Span::detached());
+	fresh("a new field", warm, &c, &elem(cold));
+	if let Content::Elem(e) = &c {
+		assert_eq!(c.fingerprint(), elem_fp(e), "the cell and a pure recomputation differ");
+	}
+	let warm = c.fingerprint();
+	c.set(FieldId(1), Value::Int(5));
+	assert_eq!(warm, c.fingerprint(), "setting a field to the value it has changed the fingerprint");
+}
+
+#[test]
+fn labelling_warm_content_gives_a_fresh_fingerprint() {
+	let label = || Label::new("x");
+	// An element.
+	let c = elem(meta(Value::Int(7), Span::detached()));
+	let warm = c.fingerprint();
+	let c = c.labelled(label());
+	let mut cold = meta(Value::Int(7), Span::detached());
+	cold.label = Some(label());
+	fresh("an element", warm, &c, &elem(cold));
+	// A sequence.
+	let c = seq(&["a", "b"]);
+	let warm = c.fingerprint();
+	let c = c.labelled(label());
+	let mut cold = Sequence::new(vec![t("a"), t("b")]);
+	cold.label = Some(label());
+	fresh("a sequence", warm, &c, &Content::Sequence(Shared::new(cold)));
+	// Styled content, which labels its child.
+	let c = t("a").styled(styles(&[1]));
+	let warm = c.fingerprint();
+	let c = c.labelled(label());
+	let mut child = Elem::new(ElemKind::Text, vec![(FieldId(0), Value::str("a"))], Span::detached());
+	child.label = Some(label());
+	fresh("styled content", warm, &c, &Content::Styled(Shared::new(Styled::new(elem(child), styles(&[1])))));
+}
+
+#[test]
+fn a_place_and_a_span_change_no_fingerprint() {
+	let mut c = elem(meta(Value::Int(7), Span::new(FileId(1), 4, 9)));
+	let warm = c.fingerprint();
+	c.set_place(Place(3));
+	assert_eq!(warm, c.fingerprint(), "a place changed the fingerprint");
+	let c = c.with_span(Span::new(FileId(2), 40, 90));
+	assert_eq!(warm, c.fingerprint(), "a span changed the fingerprint");
+	let c = seq(&["a", "b"]);
+	let warm = c.fingerprint();
+	let c = c.with_span(Span::new(FileId(2), 40, 90));
+	assert_eq!(warm, c.fingerprint(), "a sequence's span changed the fingerprint");
+}
+
+#[test]
+fn adding_to_a_warm_sequence_gives_a_fresh_fingerprint() {
+	let x = seq(&["a", "b"]);
+	let warm = x.fingerprint();
+	fresh("sequence and sequence", warm, &content_add(x, seq(&["c", "d"])), &seq(&["a", "b", "c", "d"]));
+	let x = seq(&["a", "b"]);
+	let warm = x.fingerprint();
+	fresh("sequence and content", warm, &content_add(x, t("c")), &seq(&["a", "b", "c"]));
+	let y = seq(&["b", "c"]);
+	let warm = y.fingerprint();
+	fresh("content and sequence", warm, &content_add(t("a"), y), &seq(&["a", "b", "c"]));
+	let a = t("a");
+	let warm = a.fingerprint();
+	fresh("content and content", warm, &content_add(a, t("b")), &seq(&["a", "b"]));
+}
+
+#[test]
+fn a_child_changed_through_its_parent_gives_the_parent_a_fresh_fingerprint() {
+	let mut c = seq(&["a", "b"]);
+	let warm = c.fingerprint();
+	if let Content::Sequence(s) = &mut c {
+		s.edit().children[0].set(FieldId(0), Value::str("z"));
+	}
+	fresh("a sequence's child", warm, &c, &seq(&["z", "b"]));
+	let mut c = t("a").styled(styles(&[1]));
+	let warm = c.fingerprint();
+	if let Content::Styled(s) = &mut c {
+		s.edit().child.set(FieldId(0), Value::str("z"));
+	}
+	fresh("styled content's child", warm, &c, &t("z").styled(styles(&[1])));
+}
+
+#[test]
+fn growing_a_warm_style_list_gives_a_fresh_fingerprint() {
+	let mut s = styles(&[1]);
+	let warm = s.fingerprint();
+	s.push(prop(2));
+	assert_ne!(warm, s.fingerprint(), "push: the old fingerprint survived");
+	assert_eq!(s.fingerprint(), styles(&[1, 2]).fingerprint(), "push: not a cold fingerprint");
+	let warm = s.fingerprint();
+	s.extend(&styles(&[3, 4]));
+	assert_ne!(warm, s.fingerprint(), "extend: the old fingerprint survived");
+	assert_eq!(s.fingerprint(), styles(&[1, 2, 3, 4]).fingerprint(), "extend: not a cold fingerprint");
+	let warm = s.fingerprint();
+	s.apply_outer(&styles(&[0]));
+	assert_ne!(warm, s.fingerprint(), "apply_outer: the old fingerprint survived");
+	assert_eq!(s.fingerprint(), styles(&[0, 1, 2, 3, 4]).fingerprint(), "apply_outer: not a cold fingerprint");
+	assert_ne!(styles(&[1, 2]).fingerprint(), styles(&[2, 1]).fingerprint(), "the order of styles was not seen");
+	// The list inside styled content changes its fingerprint too, though the styled node is a level up.
+	let mut c = t("a").styled(styles(&[1]));
+	let warm = c.fingerprint();
+	if let Content::Styled(h) = &mut c {
+		h.edit().styles.push(prop(2));
+	}
+	fresh("styled content's styles", warm, &c, &t("a").styled(styles(&[1, 2])));
+}
+
+#[test]
+fn a_clone_that_is_changed_leaves_the_original_fingerprint_alone() {
+	let a = elem(meta(Value::Int(1), Span::detached()));
+	let warm = a.fingerprint();
+	let mut b = a.clone();
+	assert_eq!(b.fingerprint(), warm, "a clone does not fingerprint as its original");
+	b.set(FieldId(0), Value::Int(2));
+	assert_eq!(a.fingerprint(), warm, "the original's fingerprint moved");
+	assert_ne!(b.fingerprint(), warm, "the clone's fingerprint did not move");
+	let a = seq(&["a", "b"]);
+	let warm = a.fingerprint();
+	let b = content_add(a.clone(), t("c"));
+	assert_eq!(a.fingerprint(), warm, "the original sequence's fingerprint moved");
+	assert_eq!(a.fingerprint(), seq(&["a", "b"]).fingerprint(), "the original sequence changed");
+	assert_ne!(b.fingerprint(), warm, "the extended clone's fingerprint did not move");
+	let a = styles(&[1]);
+	let warm = a.fingerprint();
+	let mut b = a.clone();
+	assert!(a.ptr_eq(&b), "a clone of a style list does not share it");
+	b.push(prop(2));
+	assert!(!a.ptr_eq(&b), "a changed clone still shares the list");
+	assert_eq!(a.fingerprint(), warm, "the original style list's fingerprint moved");
+	assert_ne!(b.fingerprint(), warm, "the changed clone's fingerprint did not move");
+}
+
+#[test]
+fn synthesising_a_warm_heading_gives_a_fresh_fingerprint() -> Outcome<()> {
+	let mut engine = Engine::new(World::new(PathBuf::from("/")));
+	let mut h = res!(build(&mut engine, ElemKind::Heading, vec![("body", Value::Content(t("T")))], Span::detached()));
+	let warm = h.fingerprint();
+	res!(synthesise(&mut engine, &mut h, &StyleChain::root()));
+	assert_ne!(warm, h.fingerprint(), "synthesis left the old fingerprint");
+	if let Content::Elem(e) = &h {
+		assert_eq!(h.fingerprint(), elem_fp(e), "the cell and a pure recomputation differ");
+	}
+	Ok(())
 }

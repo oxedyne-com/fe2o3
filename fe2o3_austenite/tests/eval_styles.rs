@@ -660,7 +660,7 @@ fn a_guarded_element_skips_its_recipe_and_locatable_elements_get_tags() {
 	// Guarded against the recipe (index 1, the only one): kept as is, a primitive pushed with its tags.
 	let mut guarded = meta.clone();
 	if let Content::Elem(el) = &mut guarded {
-		Arc::make_mut(el).guards.push(oxedyne_fe2o3_austenite::eval::styles::RecipeIndex(1));
+		el.edit().guards.push(oxedyne_fe2o3_austenite::eval::styles::RecipeIndex(1));
 	}
 	let mut e = engine();
 	let pairs = realise(&mut e, &guarded, &chain, RealiseMode::Inline).unwrap_or_else(|x| panic!("{:?}", x));

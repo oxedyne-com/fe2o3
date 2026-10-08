@@ -11,6 +11,12 @@
 //! its children's fingerprints, which [`Content::fingerprint`] reads from a cell beside the content,
 //! so a shared subtree is hashed once. A content fingerprint leaves out the span, the location and
 //! the place; a reader that sees locations adds them (`intro::hash_content`).
+//!
+//! The cells are kept honest by type. [`Shared`] is the only handle content, an element or a style
+//! list is held by, and it hands out `&mut` only through [`Shared::edit`] and [`Shared::take`], which
+//! forget the fingerprint. `Arc::make_mut` on a unique `Arc` does not clone, so a clone's empty cell
+//! alone would not do: an edit that skipped the reset would leave the old fingerprint on changed
+//! content, and the compiler now refuses any path that could.
 
 use crate::eval::args::Args;
 use crate::eval::content::{
@@ -61,6 +67,11 @@ use crate::eval::value::{
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
+use oxedyne_fe2o3_hash::fingerprint::LazyFingerprint;
+
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
 
 // Hashes a presence flag, then the value if there is one.
 fn hash_opt<T, F: FnOnce(&mut Fingerprinter, &T)>(h: &mut Fingerprinter, v: &Option<T>, f: F) {
@@ -470,4 +481,56 @@ pub fn styles_fp(s: &Styles) -> Fingerprint {
 	let mut h = Fingerprinter::new();
 	hash_styles(&mut h, s);
 	h.finish()
+}
+
+/// A value that keeps its fingerprint in a cell of its own.
+pub trait Kept: Clone {
+	fn cell(&mut self) -> &mut LazyFingerprint;
+}
+
+/// A shared handle on a value and its fingerprint cell. Handles clone as a reference-count bump and
+/// share the cell, so a subtree is hashed once however many parents hold it. The value is readable
+/// through [`Deref`] and changeable only through [`Shared::edit`] or [`Shared::take`].
+pub struct Shared<T: Kept>(Arc<T>);
+
+impl<T: Kept> Shared<T> {
+	pub fn new(v: T) -> Self { Shared(Arc::new(v)) }
+
+	/// The value for change, copied first if another handle shares it, its fingerprint forgotten.
+	pub fn edit(&mut self) -> &mut T {
+		let v = Arc::make_mut(&mut self.0);
+		v.cell().clear();
+		v
+	}
+
+	/// The value itself, copied if another handle shares it, its fingerprint forgotten.
+	pub fn take(self) -> T {
+		let mut v = Arc::try_unwrap(self.0).unwrap_or_else(|a| (*a).clone());
+		v.cell().clear();
+		v
+	}
+
+	/// Does another handle hold the value, so that a change would copy it first?
+	pub fn is_shared(&self) -> bool { Arc::strong_count(&self.0) > 1 }
+
+	/// Do both handles share one value?
+	pub fn ptr_eq(a: &Self, b: &Self) -> bool { Arc::ptr_eq(&a.0, &b.0) }
+}
+
+impl<T: Kept> Deref for Shared<T> {
+	type Target = T;
+	fn deref(&self) -> &T { &self.0 }
+}
+
+impl<T: Kept> Clone for Shared<T> {
+	fn clone(&self) -> Self { Shared(Arc::clone(&self.0)) }
+}
+
+impl<T: Kept + Default> Default for Shared<T> {
+	fn default() -> Self { Shared::new(T::default()) }
+}
+
+// Transparent, so a handle prints as the value it holds.
+impl<T: Kept + fmt::Debug> fmt::Debug for Shared<T> {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { fmt::Debug::fmt(&*self.0, f) }
 }
