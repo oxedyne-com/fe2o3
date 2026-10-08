@@ -296,6 +296,13 @@ impl Plan {
 	/// working directory; `sets` are the `--set` arguments. A named source wins over the `document` setting.
 	pub fn new(source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<Self> {
 		let cwd = res!(std::env::current_dir());
+		Self::at(&cwd, source, sets, timings)
+	}
+
+	/// As [`new`](Self::new), with `cwd` the working directory the settings file is looked for from when there
+	/// is no source.
+	pub fn at(cwd: &Path, source: Option<&Path>, sets: &[String], timings: Option<&Path>) -> Outcome<Self> {
+		let cwd = cwd.to_path_buf();
 		let start = match source {
 			Some(s)	=> s.to_path_buf(),
 			None	=> cwd.clone(),
