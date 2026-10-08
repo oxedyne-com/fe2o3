@@ -528,6 +528,11 @@ impl<
         Ok(found_files)
     }
 
+    /// The length in bytes of every regular file in every zone directory, read now.
+    pub fn size_bytes(&self) -> Outcome<u64> {
+        self.api.size_bytes(constant::USER_REQUEST_WAIT)
+    }
+
     /// Gracefully shut down the database, including the supervisor.
     ///
     /// Consumes the handle, which is the right shape when there is only one.

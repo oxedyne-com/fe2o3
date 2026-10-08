@@ -18,6 +18,7 @@ static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each gar
 static COMMIT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // between a collection's two renames
 static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
+static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
 static BARRIERS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
@@ -63,6 +64,13 @@ pub fn set_forward_delay(d: Duration) {
 /// shutdown's time can run out with written records still queued at it.
 pub fn set_insert_delay(d: Duration) {
     INSERT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a zone bot this long between reading a directory's entries and opening the files they
+/// name, as a directory on a busy disk would, so that a file can be taken away after it has been
+/// listed.
+pub fn set_list_delay(d: Duration) {
+    LIST_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Makes the supervisor panic once it has brought the bots up, before the database is ready, as a
@@ -133,6 +141,10 @@ pub(crate) fn forward_delay() {
 
 pub(crate) fn insert_delay() {
     pause(&INSERT_DELAY_MS);
+}
+
+pub(crate) fn list_delay() {
+    pause(&LIST_DELAY_MS);
 }
 
 pub(crate) fn supervisor_panic() {

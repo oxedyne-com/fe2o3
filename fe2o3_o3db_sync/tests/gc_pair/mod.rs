@@ -191,3 +191,49 @@ pub fn temporaries(dir: &Path) -> Vec<String> {
     }
     found
 }
+
+/// The bytes in every regular file under the zone root, counted by walking the directories with
+/// nothing of the store's own, so that the store's answer has something outside it to be checked
+/// against.
+pub fn zone_files_len(root: &Path, cfg: &OzoneConfig) -> u64 {
+    dir_len(&cfg.zone_root(root))
+}
+
+/// The bytes in every regular file under a directory, subdirectories included.
+pub fn dir_len(dir: &Path) -> u64 {
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(list) = fs::read_dir(&d) {
+            for entry in list.flatten() {
+                match entry.metadata() {
+                    Ok(m) if m.is_dir()     => stack.push(entry.path()),
+                    Ok(m) if m.is_file()    => bytes += m.len(),
+                    _ => (),
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// Waits until the zone files have stopped changing, and gives their length then.
+pub fn settled_len(root: &Path, cfg: &OzoneConfig) -> u64 {
+    let start = Instant::now();
+    let mut last = zone_files_len(root, cfg);
+    let mut quiet = 0;
+    while start.elapsed() < Duration::from_secs(30) {
+        thread::sleep(Duration::from_millis(150));
+        let now = zone_files_len(root, cfg);
+        if now == last {
+            quiet += 1;
+            if quiet >= 4 {
+                break;
+            }
+        } else {
+            quiet = 0;
+            last = now;
+        }
+    }
+    last
+}

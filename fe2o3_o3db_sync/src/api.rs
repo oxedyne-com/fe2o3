@@ -45,6 +45,7 @@ use crate::{
         },
     },
     file::{
+        core::FileEntry,
         state::FileStateMap,
         zdir::ZoneDir,
     },
@@ -1577,14 +1578,13 @@ impl<
         Ok((errs, nbots))
     }
 
-    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
-
-        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
-        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
-        info!(sync_log::stream(), " Size: in bytes");
-        info!(sync_log::stream(), " Mod: seconds since last modified");
-        info!(sync_log::stream(), " Name: object label");
-
+    /// Each zone's directory listing, read by its zone bot when the request arrives.
+    pub fn collect_files(
+        &self,
+        wait: Wait,
+    )
+        -> Outcome<BTreeMap<ZoneInd, BTreeMap<String, FileEntry>>>
+    {
         let emsg = "list files request";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -1607,6 +1607,34 @@ impl<
                     Channel)),
             };
         }
+        Ok(map)
+    }
+
+    /// The physical length in bytes of every regular file in every zone directory, data, index and
+    /// collection temporary alike, read when asked.  It is not the figure [`Self::ozone_state`] gives,
+    /// the file bots' accounted size, which is pushed periodically and lags any write still draining.
+    pub fn size_bytes(&self, wait: Wait) -> Outcome<u64> {
+        let files = res!(self.collect_files(wait));
+        let mut total = 0u64;
+        for (_zind, zmap) in files {
+            for (_name, entry) in zmap {
+                if entry.typ == "f" {
+                    total = total.saturating_add(entry.size);
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
+
+        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
+        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
+        info!(sync_log::stream(), " Size: in bytes");
+        info!(sync_log::stream(), " Mod: seconds since last modified");
+        info!(sync_log::stream(), " Name: object label");
+
+        let map = res!(self.collect_files(wait));
         for (zind, zmap) in map {
             let mut total_size = 0;
             info!(sync_log::stream(), "{:?} directory", zind);
