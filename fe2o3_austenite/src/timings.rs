@@ -18,6 +18,12 @@
 //! also counts the realise calls by the mode and the shape of the content realised and by cause, and a few
 //! work counters (elements visited, show rules matched against, elements copied before they are changed).
 //!
+//! Three of the sub-phases (rules, show, styles) are entered once or twice for every element, a million
+//! times in a pass of a long document, and a clock read costs about as much as the work they time. They are
+//! counted in every record but clocked only in a fine record ([`Timings::start_fine`]), whose time is then
+//! the work and the clock together: the record carries the cost of one read, and a reader takes it off
+//! once for each entry. In a coarse record their time stays in `self`.
+//!
 //! It reads `std::time::Instant`, which the wasm32-unknown-unknown target does not provide, so only a
 //! native run switches it on.
 
@@ -83,6 +89,9 @@ impl Phase {
 	fn index(&self) -> usize { *self as usize }
 
 	fn per_pass(&self) -> bool { Self::PASS.contains(self) || Self::SUB.contains(self) }
+
+	// Is it entered so often that a clock at each end costs as much as the work?
+	fn fine(&self) -> bool { matches!(self, Self::Rules | Self::Show | Self::Styles) }
 }
 
 // What a pass counts besides time.
@@ -189,7 +198,9 @@ impl Bucket {
 #[derive(Debug)]
 pub struct Timings {
 	last:	Instant,		// the last clock read
-	stack:	Vec<Phase>,		// the phases open, outermost first
+	stack:	Vec<Phase>,		// the phases open and clocked, outermost first
+	open:	Vec<bool>,		// every phase open, outermost first: was it clocked?
+	fine:	bool,			// are the phases entered for every element clocked too?
 	run:	Bucket,
 	passes:	Vec<Bucket>,	// one for each fixpoint pass
 	idle:	u64,			// ns spent outside every phase
@@ -200,13 +211,24 @@ pub struct Timings {
 
 impl Timings {
 	/// Starts the recorder with `Load` open, since the clock runs from the moment the compile is asked for.
-	pub fn start() -> Self {
+	pub fn start() -> Self { Self::begin(false) }
+
+	/// As [`Timings::start`], also clocking the phases entered for every element. That costs a clock read
+	/// at each end of each, which is a large share of a long document's compile time.
+	pub fn start_fine() -> Self { Self::begin(true) }
+
+	fn begin(fine: bool) -> Self {
 		let clock = Self::clock_cost();
 		let mut stack = Vec::with_capacity(64);
 		stack.push(Phase::Load);
 		let mut run = Bucket::default();
 		run.n[Phase::Load.index()] = 1;
-		Self { last: Instant::now(), stack, run, passes: Vec::with_capacity(Phase::PASS.len()), idle: 0, clock, shape: None, seen: HashMap::new() }
+		let mut open = Vec::with_capacity(64);
+		open.push(true);
+		Self {
+			last: Instant::now(), stack, open, fine, run, passes: Vec::with_capacity(Phase::PASS.len()),
+			idle: 0, clock, shape: None, seen: HashMap::new(),
+		}
 	}
 
 	fn clock_cost() -> u64 {
@@ -220,15 +242,21 @@ impl Timings {
 
 	/// Opens a phase inside whatever is open, the enclosing phase's clock stopping until it ends.
 	pub fn enter(&mut self, p: Phase) {
-		self.charge_top();
-		self.stack.push(p);
 		self.count(p);
+		let clocked = self.fine || !p.fine();
+		self.open.push(clocked);
+		if clocked {
+			self.charge_top();
+			self.stack.push(p);
+		}
 	}
 
 	/// Closes the innermost phase.
 	pub fn leave(&mut self) {
-		self.charge_top();
-		self.stack.pop();
+		if self.open.pop() == Some(true) {
+			self.charge_top();
+			self.stack.pop();
+		}
 	}
 
 	/// Begins a fixpoint pass: its phases are counted in a bucket of their own.
@@ -310,7 +338,7 @@ impl Timings {
 	pub fn json(&self, total: u64) -> String {
 		let passes: Vec<String> = self.passes.iter().map(|b| b.pass_json()).collect();
 		fmt!(
-			"{{\"unit\":\"ns\",\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}],\"shape\":{}}}\n",
-			total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","), self.shape_json())
+			"{{\"unit\":\"ns\",\"fine\":{},\"total\":{},\"idle\":{},\"clock\":{},\"passes\":{},\"run\":{},\"pass\":[{}],\"shape\":{}}}\n",
+			self.fine, total, self.idle, self.clock, self.passes.len(), self.run.json(&Phase::RUN), passes.join(","), self.shape_json())
 	}
 }

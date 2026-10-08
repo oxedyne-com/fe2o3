@@ -487,7 +487,7 @@ fn print_status(source: &str, out_dir: &str, stats: &CompileStats, elapsed: Dura
 }
 
 /// What `--eval` was asked to compile and how: the source and the output directory, `--root`, each
-/// `--font-path`, `--strict`, `--diag-summary` and `--timings FILE`.
+/// `--font-path`, `--strict`, `--diag-summary`, `--timings FILE` and `--timings-fine`.
 struct EvalJob {
 	source:		String,
 	out_dir:	String,
@@ -496,6 +496,7 @@ struct EvalJob {
 	strict:		bool,
 	diag_summary:	bool,
 	timings_out:	Option<String>,
+	timings_fine:	bool,
 }
 
 /// What a compile through the evaluator reports of itself once its PDF is written.
@@ -544,7 +545,7 @@ fn compile_eval(
 	use std::io::Write;
 
 	let t		= std::time::Instant::now();
-	let timings	= job.timings_out.as_ref().map(|_| Timings::start());
+	let timings	= job.timings_out.as_ref().map(|_| if job.timings_fine { Timings::start_fine() } else { Timings::start() });
 	let main	= PathBuf::from(&job.source);
 	read.push(main.clone());
 	// The source's own directory, which for a bare file name is the working directory and not the empty
@@ -690,6 +691,7 @@ fn main() -> Outcome<()> {
 	let mut strict		= false;
 	let mut diag_summary	= false;
 	let mut timings:	Option<String>	= None;
+	let mut fine		= false;
 	let mut root:		Option<String>	= None;
 	let mut font_paths:	Vec<String>		= Vec::new();
 	let mut ledger_out:	Option<String>	= None;
@@ -703,6 +705,7 @@ fn main() -> Outcome<()> {
 			"--eval"			=> eval = true,
 			"--strict"			=> strict = true,
 			"--diag-summary"	=> diag_summary = true,
+			"--timings-fine"	=> fine = true,
 			"--timings"			=> timings = Some(match args.next() {
 				Some(p)	=> p,
 				None	=> return Err(err!("--timings needs a file argument."; Input, Invalid, Missing)),
@@ -728,7 +731,7 @@ fn main() -> Outcome<()> {
 	let source = match pos.first() {
 		Some(s)	=> s.clone(),
 		None	=> return Err(err!(
-			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
+			"Usage: austenite [--watch] [--pearl] [--explain] [--ledger-out PATH] [--eval [--strict] [--diag-summary] [--timings FILE.json [--timings-fine]] [--root DIR] [--font-path DIR]...] <SOURCE.typ> [OUTPUT_DIR]";
 			Input, Invalid, Missing)),
 	};
 	let out_dir = match pos.get(1) {
@@ -742,8 +745,11 @@ fn main() -> Outcome<()> {
 	if timings.is_some() && !eval {
 		return Err(err!("--timings needs --eval."; Input, Invalid));
 	}
+	if fine && timings.is_none() {
+		return Err(err!("--timings-fine needs --timings."; Input, Invalid));
+	}
 	if eval {
-		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings };
+		let job = EvalJob { source, out_dir, root, font_paths, strict, diag_summary, timings_out: timings, timings_fine: fine };
 		if watching {
 			return watch_eval(job);
 		}
