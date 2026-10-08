@@ -12,7 +12,10 @@ use crate::{
             FileLocation,
             FileNum,
         },
-        state::FileStateMap,
+        state::{
+            FileState,
+            FileStateMap,
+        },
         stored::RecordDigest,
     },
     test::hooks,
@@ -27,6 +30,55 @@ use std::{
     sync::Arc,
     time::Instant,
 };
+
+// How hard a call to collect a file pushes.  `Yes` waives the trigger fraction, `gc_on` and
+// `auto_gc`, and nothing else.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Force {
+    Yes,
+    No,
+}
+
+// What stands between a file and its collection, the first that holds it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Hold {
+    Live,       // still being written
+    Collecting, // a collector is already at it
+    Moves,      // a supersession or re-anchor is in flight
+    Readers,    // a read has it open
+    Undrained,  // writes not yet accounted for
+    Fault,      // the evaluation failed
+}
+
+impl Hold {
+    pub fn why(&self) -> &'static str {
+        match self {
+            Self::Live          => "live",
+            Self::Collecting    => "collecting",
+            Self::Moves         => "pending moves",
+            Self::Readers       => "readers",
+            Self::Undrained     => "undrained",
+            Self::Fault         => "fault",
+        }
+    }
+}
+
+// What `maybe_collect` did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Collect {
+    Started,
+    Deleted,
+    Held(Hold),
+    Declined, // the trigger, `gc_on` or `auto_gc` said no
+}
+
+// The decision, made on a borrow of the file's state and acted on after it.
+enum Plan {
+    Hold(Hold),
+    Declined,
+    Delete(usize), // the file's accounted size, to leave the shard's total
+    Collect(FileState),
+}
 
 #[derive(Clone, Debug)]
 pub enum GcControl {
@@ -232,6 +284,9 @@ impl<
         match msg {
             // WRITE
             OzoneMsg::ScheduleOld(floc, rid, from_id) => {
+                if !processing_buffer {
+                    hooks::schedule_delay();
+                }
                 // [17] Schedule the old file location for deletion.
                 if !self.gc_active(
                     floc.file_number(),
@@ -578,7 +633,7 @@ impl<
         }
 
         // [17.2] Check whether garbage collection should be triggered for the file.
-        self.maybe_collect(floc.file_number())
+        self.maybe_collect(floc.file_number(), Force::No).map(|_| ())
     }
 
     /// Starts a collection of the file if it is eligible now.  A file deferred on any input to
@@ -598,23 +653,33 @@ impl<
     /// retries such a read, but the trigger stays withdrawn until that is measured.  Switching
     /// collection on would hand every file a start-up load had found garbage in to the collectors
     /// at once, and a read of a file waiting its turn waits with it.
-    fn maybe_collect(&mut self, fnum: FileNum) -> Outcome<()> {
+    ///
+    /// `Force::Yes` is a caller's order to collect, an erase's, and waives the three things that
+    /// make the collector wait for garbage to pile up: the trigger fraction, `gc_on` and `auto_gc`.
+    /// Nothing that makes a collection unsafe is waived, and a file held by one of those is
+    /// reported with the first that holds it.
+    fn maybe_collect(&mut self, fnum: FileNum, force: Force) -> Outcome<Collect> {
         let self_id = self.ozid().clone();
-        if self.gc_on {
-            let mut gc_activated = false;
-            match self.states().get_state(fnum) {
-                Ok(fstat) => {
-                    let oldvals = fstat.get_old_sum() as f64;
-                    let datfilemax = self.cfg().data_file_max_bytes as f64;
-                    let trigger = constant::OLD_DATA_PERCENT_GC_TRIGGER;
-                    let oldfrac = 100.0 * (oldvals / datfilemax);
-                    let eligible =
-                        ((oldfrac > trigger) || fstat.is_all_data_old()) &&
-                        fstat.no_pending_moves() &&
-                        !fstat.is_live() &&
-                        !fstat.gc_active() && // Never set a second collector on the same file.
-                        fstat.no_readers() &&
-                        self.gc_auto_active();
+        let ordered = force == Force::Yes;
+        let plan = match self.states().get_state(fnum) {
+            Ok(fstat) => {
+                let oldvals = fstat.get_old_sum() as f64;
+                let datfilemax = self.cfg().data_file_max_bytes as f64;
+                let trigger = constant::OLD_DATA_PERCENT_GC_TRIGGER;
+                let oldfrac = 100.0 * (oldvals / datfilemax);
+                if fstat.is_live() {
+                    Plan::Hold(Hold::Live)
+                } else if fstat.gc_active() { // Never set a second collector on the same file.
+                    Plan::Hold(Hold::Collecting)
+                } else if !fstat.no_pending_moves() {
+                    Plan::Hold(Hold::Moves)
+                } else if !fstat.no_readers() {
+                    Plan::Hold(Hold::Readers)
+                } else if !ordered && !(self.gc_on && self.gc_auto_active()) {
+                    Plan::Declined
+                } else if !ordered && !((oldfrac > trigger) || fstat.is_all_data_old()) {
+                    Plan::Declined
+                } else {
                     // A sealed file may still have writes draining.  A record's bytes reach the
                     // data file in `WriterBot::write` before its accounting does: the accounting
                     // travels writer -> cbot -> fbot as an `UpdateData`, while the seal travels
@@ -631,22 +696,18 @@ impl<
                     // both rolls a file mid-burst and supersedes a whole value's worth of records
                     // at once.  The record whose landing completes the drain brings the file
                     // back here (`update_data`), so deferral only delays.
-                    let drained = if eligible {
-                        let mut dat_path = self.zdir().dir.clone();
-                        dat_path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
-                        match std::fs::metadata(&dat_path) {
-                            Ok(m)  => m.len() == fstat.get_data_file_size() as u64,
-                            // Cannot confirm the file has drained, so do not collect it yet.
-                            Err(_) => false,
-                        }
-                    } else {
-                        false
+                    let mut dat_path = self.zdir().dir.clone();
+                    dat_path.push(ZoneDir::relative_file_path(&FileType::Data, fnum));
+                    let drained = match std::fs::metadata(&dat_path) {
+                        Ok(m)  => m.len() == fstat.get_data_file_size() as u64,
+                        // Cannot confirm the file has drained, so do not collect it yet.
+                        Err(_) => false,
                     };
                     // Case (c) from `register_old`: once the file has fully drained, every parked
                     // supersession must have found its record.  Any left over refers to a record
                     // that is not on disk -- a genuine accounting fault, not the write-path race --
                     // so fail loudly rather than collect a file whose accounting is inconsistent.
-                    if eligible && drained && !fstat.pending_old_empty() {
+                    if drained && !fstat.pending_old_empty() {
                         return Err(err!(
                             "{:?}: File {} has drained (on-disk size equals accounted size) yet \
                             {} superseded record(s) were never inserted: {:?}. This is an \
@@ -654,50 +715,59 @@ impl<
                             self_id, fnum, fstat.pending_old().len(), fstat.pending_old();
                             Bug, Missing, Data));
                     }
-                    if eligible && drained {
-                        // [18.1] Select a gbot to collect the garbage.
-                        debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
-                        let bots = res!(self.igbots());
-                        let (bot, _) = bots.choose_bot(&ChooseBot::Randomly);
-                        if fstat.is_all_old() {
-                            // [18.2] Just delete the data file and its index file if it has no current data.
-                            for ftyp in [FileType::Data, FileType::Index] {
-                                let mut path = self.zdir().dir.clone();
-                                path.push(ZoneDir::relative_file_path(&ftyp, fnum));
-                                if path.is_file() {
-                                    res!(fs::remove_file(path));
-                                }
-                            }
-                            debug!(sync_log::stream(),
-                                "{}: All the data in file {} is old, the file has therefore been deleted.",
-                                self_id, fnum,
-                            );
-                        } else {
-                            res!(bot.send(OzoneMsg::CollectGarbage {
-                                fnum,
-                                fstat:      fstat.clone(),
-                                fbot_index: self.wind().b(),
-                            }));
-                            // [18.3] Create a gc buffer entry.
-                            self.gc_buffer_mut().insert(fnum, Vec::new());
-                            //fstat.set_gc(true); // [#] Moved out of scope due to borrow checker
-                            gc_activated = true;
-                        }
+                    if !drained {
+                        Plan::Hold(Hold::Undrained)
+                    } else if fstat.is_all_old() {
+                        Plan::Delete(fstat.get_data_file_size() + fstat.get_index_file_size())
+                    } else {
+                        Plan::Collect(fstat.clone())
                     }
-                },
-                Err(e) => return Err(err!(e,
-                    "{:?}: Evaluating file {} for collection, which has no state.", self_id, fnum;
-                    Bug, Missing, Data)),
-            }
-            // [#] Moved out to here due to borrow checker.
-            if gc_activated {
-                match self.states_mut().get_state_mut(fnum) {
-                    Ok(fstat) => fstat.set_gc(true),
-                    _ => (), // unreachable
                 }
-            }
+            },
+            Err(e) => return Err(err!(e,
+                "{:?}: Evaluating file {} for collection, which has no state.", self_id, fnum;
+                Bug, Missing, Data)),
+        };
+        match plan {
+            Plan::Hold(hold)    => Ok(Collect::Held(hold)),
+            Plan::Declined      => Ok(Collect::Declined),
+            Plan::Delete(size)  => {
+                // [18.2] Just delete the data file and its index file if it has no current data.
+                debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
+                for ftyp in [FileType::Data, FileType::Index] {
+                    let mut path = self.zdir().dir.clone();
+                    path.push(ZoneDir::relative_file_path(&ftyp, fnum));
+                    if path.is_file() {
+                        res!(fs::remove_file(path));
+                    }
+                }
+                // The state outlived the files until 2026-10-08, with its old bytes still counted
+                // and its sizes still in the shard's total, so that any account of the old bytes
+                // left in the store counted a file that was gone.
+                res!(self.states_mut().get_state_mut(fnum)).reset();
+                res!(self.states_mut().dec_size(size));
+                debug!(sync_log::stream(),
+                    "{}: All the data in file {} is old, the file has therefore been deleted.",
+                    self_id, fnum,
+                );
+                Ok(Collect::Deleted)
+            },
+            Plan::Collect(fstat) => {
+                // [18.1] Select a gbot to collect the garbage.
+                debug!(sync_log::stream(), "{}: Automated garbage collection for file {}", self_id, fnum);
+                let bots = res!(self.igbots());
+                let (bot, _) = bots.choose_bot(&ChooseBot::Randomly);
+                res!(bot.send(OzoneMsg::CollectGarbage {
+                    fnum,
+                    fstat,
+                    fbot_index: self.wind().b(),
+                }));
+                // [18.3] Create a gc buffer entry.
+                self.gc_buffer_mut().insert(fnum, Vec::new());
+                res!(self.states_mut().get_state_mut(fnum)).set_gc(true);
+                Ok(Collect::Started)
+            },
         }
-        Ok(())
     }
 
     fn update_data(
@@ -751,7 +821,7 @@ impl<
 
         // A sealed file's last records land after its seal, and until they do it has not
         // drained and cannot be collected.
-        self.maybe_collect(floc_new.file_number())
+        self.maybe_collect(floc_new.file_number(), Force::No).map(|_| ())
     }
     
     fn close_old_live_file_state(
@@ -798,7 +868,7 @@ impl<
         // Supersessions that reached the file while it was live could not start a collection.
         // The writer has its answer, so a failure here is only logged.
         if fnum_old > 0 {
-            let result = self.maybe_collect(fnum_old);
+            let result = self.maybe_collect(fnum_old, Force::No).map(|_| ());
             self.result(&result);
         }
 

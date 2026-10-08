@@ -19,6 +19,8 @@ static PUBLISH_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before channels
 static COLLECT_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before each garbage collection
 static COMMIT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // between a collection's two renames
 static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supersession is forwarded
+static SCHEDULE_DELAY_MS: AtomicU64 = AtomicU64::new(0);      // before a received supersession is handled
+static SCHEDULES_HELD:   AtomicU64  = AtomicU64::new(0);      // handled after the hold above
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
@@ -61,6 +63,19 @@ pub fn set_commit_delay(d: Duration) {
 /// file after a collection of it has finished.
 pub fn set_forward_delay(d: Duration) {
     FORWARD_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a file bot this long before it handles a supersession it has received from another file
+/// bot, as one behind a long queue would, so that a barrier that stops at the sender can be told
+/// from one that waits for the receiver.  A supersession a bot makes of its own file is not held.
+pub fn set_schedule_delay(d: Duration) {
+    SCHEDULE_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// How many supersessions `set_schedule_delay` has held so far, each counted when its hold ends,
+/// just before the file bot registers it.
+pub fn schedules_held() -> u64 {
+    SCHEDULES_HELD.load(Ordering::Relaxed)
 }
 
 /// Holds every cache bot insert this long, as a cache bot behind a long queue would, so that a
@@ -147,6 +162,13 @@ pub(crate) fn commit_delay() {
 
 pub(crate) fn forward_delay() {
     pause(&FORWARD_DELAY_MS);
+}
+
+pub(crate) fn schedule_delay() {
+    if SCHEDULE_DELAY_MS.load(Ordering::Relaxed) > 0 {
+        pause(&SCHEDULE_DELAY_MS);
+        SCHEDULES_HELD.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn insert_delay() {
