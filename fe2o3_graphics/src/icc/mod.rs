@@ -22,7 +22,6 @@ pub mod matrix;
 pub mod read;
 pub mod transform;
 
-#[cfg(feature = "fogra39")]
 use oxedyne_fe2o3_core::prelude::*;
 
 #[cfg(feature = "fogra39")]
@@ -32,4 +31,10 @@ pub const FOGRA39L: &[u8] = include_bytes!("../../data/icc/FOGRA39L_coated.icc")
 #[cfg(feature = "fogra39")]
 pub fn fogra39l() -> Outcome<read::Profile> {
 	read::Profile::read("FOGRA39L_coated.icc (bundled)", FOGRA39L)
+}
+
+/// Refuses the bundled profile in a build that does not carry it.
+#[cfg(not(feature = "fogra39"))]
+pub fn fogra39l() -> Outcome<read::Profile> {
+	Err(err!("The FOGRA39L Coated profile is not bundled in this build; name a profile file instead."; Invalid, Input, Unimplemented))
 }
