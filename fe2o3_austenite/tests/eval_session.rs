@@ -3,12 +3,18 @@
 //! compares a session's bytes with a fresh session's for the same source, and counts the passes the warm
 //! start saves.
 
+use oxedyne_fe2o3_austenite::caches::{
+	self,
+	Budgets,
+};
 use oxedyne_fe2o3_austenite::compile::{
+	self,
 	Evaluated,
 	Session,
 };
 use oxedyne_fe2o3_austenite::emit::sinks::PdfSink;
 use oxedyne_fe2o3_austenite::flow::text::FontStore;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 
 use std::path::{
 	Path,
@@ -143,4 +149,107 @@ fn a_font_added_on_disc_renews_the_store_and_an_unchanged_one_keeps_it() {
 	write(&fonts.join("two.ttf"), "not a font either");
 	let _ = pdf(&mut s, &main, false);
 	assert_eq!(held(&s), 2, "a file added beside it renews the store, which then meets both");
+}
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ THE CONFIGURATION THE CACHES ARE SCOPED BY                                 │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+fn noto() -> Vec<u8> {
+	let at = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("fe2o3_font").join("fonts").join("NotoSans-Regular.ttf");
+	std::fs::read(at).expect("the Noto Sans file")
+}
+
+fn pair(k: &str, v: &str) -> (String, String) { (k.to_string(), v.to_string()) }
+
+#[test]
+fn the_configuration_is_the_faces_the_inputs_and_the_engine_and_the_order_of_inputs_is_not_a_change() {
+	let faces = Fingerprint::of(b"faces");
+	let one = [pair("lang", "en"), pair("draft", "yes")];
+	let swapped = [pair("draft", "yes"), pair("lang", "en")];
+	let base = caches::configuration(faces, &one, "abc");
+	assert_eq!(base, caches::configuration(faces, &one, "abc"), "the same configuration is the same fingerprint");
+	assert_eq!(base, caches::configuration(faces, &swapped, "abc"), "the order the inputs come in is not a change");
+	assert_ne!(base, caches::configuration(faces, &[pair("lang", "en")], "abc"), "an input dropped is a change");
+	assert_ne!(base, caches::configuration(faces, &[pair("lang", "en"), pair("draft", "no")], "abc"),
+		"an input's value changed is a change");
+	assert_ne!(base, caches::configuration(faces, &[pair("lang", "en"), pair("final", "yes")], "abc"),
+		"an input's name changed is a change");
+	assert_ne!(base, caches::configuration(faces, &[], "abc"), "no inputs at all is a change");
+	assert_ne!(base, caches::configuration(Fingerprint::of(b"other faces"), &one, "abc"), "other faces are a change");
+	assert_ne!(base, caches::configuration(faces, &one, "abd"), "another engine is a change");
+	// A key and a value that run together read as another pair.
+	assert_ne!(caches::configuration(faces, &[pair("ab", "c")], "abc"),
+		caches::configuration(faces, &[pair("a", "bc")], "abc"), "where a pair divides is part of it");
+}
+
+#[test]
+fn the_face_set_is_told_by_its_families_and_its_bytes_in_the_order_added() {
+	let mut plain = FontStore::default();
+	let mut again = FontStore::default();
+	let mut more = FontStore::default();
+	more.add_bytes(noto());
+	let a = plain.book().expect("a book").fingerprint();
+	let b = again.book().expect("a book").fingerprint();
+	let c = more.book().expect("a book").fingerprint();
+	assert_eq!(a, b, "two books made alike have one fingerprint");
+	assert_ne!(a, c, "a face added moves it");
+	let mut flipped = noto();
+	let last = flipped.len() - 1;
+	flipped[last] ^= 1;
+	let mut changed = FontStore::default();
+	changed.add_bytes(flipped);
+	let altered = changed.book().expect("a book");
+	assert_eq!(altered.len(), more.book().expect("a book").len(), "the altered file still parses, as a face");
+	assert_ne!(c, altered.fingerprint(), "a byte of the file changed moves it");
+}
+
+#[test]
+fn a_new_face_empties_the_caches_and_the_same_faces_do_not() {
+	let main = dir("config").join("main.typ");
+	write(&main, &source(3, "q"));
+	let mut s = fresh();
+	assert!(s.caches().config().is_none(), "a session that has compiled nothing holds no configuration");
+	let _ = pdf(&mut s, &main, false);
+	let first = s.caches().config().expect("a compile sets the configuration");
+	assert_eq!(s.caches().resets(), 0, "the first compile has nothing to empty");
+	let _ = pdf(&mut s, &main, false);
+	assert_eq!((s.caches().config(), s.caches().resets()), (Some(first), 0), "the same faces leave the caches");
+	// The configuration is the one the parts name, read where the compile read them.
+	let faces = s.fonts().clone().book().expect("a book").fingerprint();
+	assert_eq!(first, caches::configuration(faces, &caches::sys_inputs(), compile::engine_git_hash()));
+	let mut store = FontStore::default();
+	store.add_bytes(noto());
+	s.set_fonts(store);
+	let _ = pdf(&mut s, &main, false);
+	assert_ne!(s.caches().config(), Some(first), "a face added moves the configuration");
+	assert_eq!(s.caches().resets(), 1, "and the caches were emptied once for it");
+	let _ = pdf(&mut s, &main, false);
+	assert_eq!(s.caches().resets(), 1, "and not again while the faces stand");
+}
+
+#[test]
+fn the_budgets_are_the_hosts_the_shaped_run_cache_takes_its_share_and_the_counters_read_it() {
+	let main = dir("budgets").join("main.typ");
+	write(&main, &source(6, "q"));
+	let mut sink = PdfSink::new().expect("a PDF sink");
+	let root = main.parent().expect("the main's directory");
+	let mut s = fresh();
+	assert_eq!(s.budgets(), Budgets::default());
+	assert_eq!((s.budgets().shapes, s.budgets().pars), (32 << 20, 16 << 20), "the defaults");
+	let done = s.compile(&main, root, &mut sink, None, None, false).expect("the main is readable");
+	assert_eq!(done.counters.shapes.budget, 32 << 20, "the shaped-run cache holds the default share");
+	assert!(done.counters.shapes.misses > 0 && done.counters.shapes.entries > 0, "and the compile shaped into it");
+	assert_eq!(s.caches().counters, done.counters, "the session keeps what the result reports");
+	assert_eq!((done.counters.replayed, done.counters.relaid, done.counters.par_hits, done.counters.par_misses),
+		(0, 0, 0, 0), "the page and paragraph counts are zero until those caches exist");
+	let set = Budgets { shapes: 1 << 20, pars: 2 << 20, ledger: 3 << 20 };
+	s.set_budgets(set);
+	assert_eq!(s.budgets(), set);
+	assert_eq!(s.fonts().clone().book().expect("a book").shape_stats().expect("stats").budget, 1 << 20,
+		"the shaped-run cache takes its budget at once");
+	let mut sink = PdfSink::new().expect("a PDF sink");
+	let done = s.compile(&main, root, &mut sink, None, None, false).expect("the main is readable");
+	assert_eq!(done.counters.shapes.budget, 1 << 20);
+	assert_eq!(s.caches().resets(), 0, "a budget is not part of the configuration");
 }

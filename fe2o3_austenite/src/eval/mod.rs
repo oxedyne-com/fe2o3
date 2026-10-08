@@ -54,6 +54,7 @@ pub mod select;
 pub mod styles;
 pub mod value;
 
+use crate::caches::Caches;
 use crate::diag::{
 	Diagnostic,
 	DiagnosticKind,
@@ -175,6 +176,7 @@ pub struct Engine {
 	pub fonts:		FontStore,			// faces for shaping and `measure` (U6a)
 	pub body:		Option<bool>,		// whether the pass's realised body set content; none until it is realised
 	pub timings:	Option<Timings>,	// the per-phase clock of `--timings`; none costs a test of the option
+	pub caches:		Caches,				// the session's, lent for the compile and taken back after it
 }
 
 /// The kind of an error a native function raised with `err!` and no diagnostic of its own: the kind its
@@ -201,6 +203,7 @@ impl Engine {
 			fonts:		FontStore::default(),
 			body:		None,
 			timings:	None,
+			caches:		Caches::default(),
 		}
 	}
 

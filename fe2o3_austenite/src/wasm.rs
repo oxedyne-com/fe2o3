@@ -13,6 +13,7 @@
 //! UTF-16 code units. A project carrying `strict: true` turns a result that was not set as written into
 //! such a failure, so a partial PDF never reads as success.
 
+use crate::caches::Counters;
 use crate::compile::{
 	self,
 	Diagnostic,
@@ -61,7 +62,8 @@ impl DaimondTypst {
 	/// set as written, and `skipped` the constructs passed over among them. Under `strict` an error, a
 	/// warning of a refusing kind, zero pages or a main that sets no content is returned as `{ error }`
 	/// instead of a PDF; a `lint` or `limit` warning, or a document still moving after the fifth pass,
-	/// stands beside the PDF. `needs` lists the packages an import asked for that were not supplied.
+	/// stands beside the PDF. `needs` lists the packages an import asked for that were not supplied. A
+	/// success also carries `counters`, as [`Self::set_cache_budget`] describes.
 	#[wasm_bindgen(js_name = compileProject)]
 	pub fn compile_project(&mut self, project: &JsValue) -> JsValue {
 		match self.inst.compile_pdf(&project_of(project)) {
@@ -72,7 +74,7 @@ impl DaimondTypst {
 
 	/// The fast live-view path: compiles a project to per-page SVG (already glyph outlines), `{ svg:
 	/// string[], pages, diagnostics, skipped, needs }` on success or `{ error, diagnostics, skipped, needs
-	/// }` otherwise, `strict` as for [`Self::compile_project`].
+	/// }` otherwise, `strict` as for [`Self::compile_project`]. A success also carries `counters`.
 	#[wasm_bindgen(js_name = compileProjectVector)]
 	pub fn compile_project_vector(&mut self, project: &JsValue) -> JsValue {
 		match self.inst.compile_svg(&project_of(project)) {
@@ -89,7 +91,7 @@ impl DaimondTypst {
 	/// consumer that has cleared its cache sends `known: []` and gets a full resend (`reset: true`). The
 	/// `version` is this instance's tick, stepped by each delta and left where it was by a refusal. See
 	/// [`crate::delta`] for the shape. Ids are opaque decimal strings, since a JavaScript number cannot
-	/// hold every 64-bit hash exactly.
+	/// hold every 64-bit hash exactly. A success also carries `counters`.
 	#[wasm_bindgen(js_name = compileProjectDelta)]
 	pub fn compile_project_delta(&mut self, project: &JsValue) -> JsValue {
 		match self.inst.compile_delta_into(&project_of(project), JsChanged::default()) {
@@ -150,6 +152,43 @@ impl DaimondTypst {
 				});
 			},
 			None	=> set(&obj, "error", &JsValue::from_str("the loop budget is a whole number of iterations, or null")),
+		}
+		obj.into()
+	}
+
+	/// Sets the bytes each cache of the session may hold: `{ shapes, pars, ledger }`, each a whole number
+	/// of bytes or left out to stand. A new instance holds 32 MiB of shaped runs and 16 MiB of paragraphs,
+	/// and the ledger's is set with the ledger. A cache at its budget stops taking entries and loses none,
+	/// so a lower budget slows a compile and changes nothing it makes. Returns `{ cacheBudget: { shapes,
+	/// pars, ledger } }`, the budgets now in force, or `{ error }` and no change, naming the first field
+	/// that is not a whole number of bytes. A project is document data and cannot set it.
+	///
+	/// A successful compile carries `counters: { replayed, relaid, parHits, parMisses, shapes: { entries,
+	/// bytes, budget, hits, misses, evictions } }`: the pages replayed from the ledger and laid again, the
+	/// paragraph cache's hits and misses, and the shaped-run cache as the compile left it (its hits,
+	/// misses and evictions are cumulative over the session's book). The page and paragraph counts are zero
+	/// until those caches exist.
+	#[wasm_bindgen(js_name = setCacheBudget)]
+	pub fn set_cache_budget(&mut self, budgets: &JsValue) -> JsValue {
+		let obj = js_sys::Object::new();
+		let field = |name: &str| -> Option<f64> {
+			let v = js_sys::Reflect::get(budgets, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED);
+			if v.is_undefined() {
+				None
+			} else {
+				Some(v.as_f64().unwrap_or(f64::NAN))
+			}
+		};
+		match self.inst.cache_budget().with(field("shapes"), field("pars"), field("ledger")) {
+			Ok(b)	=> {
+				self.inst.set_cache_budget(b);
+				let now = js_sys::Object::new();
+				set(&now, "shapes",	&JsValue::from_f64(b.shapes as f64));
+				set(&now, "pars",	&JsValue::from_f64(b.pars as f64));
+				set(&now, "ledger",	&JsValue::from_f64(b.ledger as f64));
+				set(&obj, "cacheBudget", &now);
+			},
+			Err(e)	=> set(&obj, "error", &JsValue::from_str(&fmt!("{}", e))),
 		}
 		obj.into()
 	}
@@ -372,6 +411,24 @@ fn set_report(obj: &js_sys::Object, rep: &Report, needs: &[String]) {
 	set(obj, "needs", &strings_js(needs));
 }
 
+/// Sets `counters`, what the session's caches did in the compile.
+fn set_counters(obj: &js_sys::Object, c: &Counters) {
+	let shapes = js_sys::Object::new();
+	set(&shapes, "entries",		&JsValue::from_f64(c.shapes.entries as f64));
+	set(&shapes, "bytes",		&JsValue::from_f64(c.shapes.bytes as f64));
+	set(&shapes, "budget",		&JsValue::from_f64(c.shapes.budget as f64));
+	set(&shapes, "hits",		&JsValue::from_f64(c.shapes.hits as f64));
+	set(&shapes, "misses",		&JsValue::from_f64(c.shapes.misses as f64));
+	set(&shapes, "evictions",	&JsValue::from_f64(c.shapes.evictions as f64));
+	let out = js_sys::Object::new();
+	set(&out, "replayed",	&JsValue::from_f64(c.replayed as f64));
+	set(&out, "relaid",		&JsValue::from_f64(c.relaid as f64));
+	set(&out, "parHits",	&JsValue::from_f64(c.par_hits as f64));
+	set(&out, "parMisses",	&JsValue::from_f64(c.par_misses as f64));
+	set(&out, "shapes",		&shapes);
+	set(obj, "counters", &out);
+}
+
 fn opt_str(s: Option<&str>) -> JsValue {
 	match s {
 		Some(s)	=> JsValue::from_str(s),
@@ -395,8 +452,8 @@ fn diagnostics_array(diags: &[Diagnostic]) -> js_sys::Array {
 	arr
 }
 
-/// `{ pdf: Uint8Array, pages, diagnostics, skipped, needs }`. The array is allocated at its final length
-/// and the chunks are copied in one by one, so the file never exists twice in the wasm heap.
+/// `{ pdf: Uint8Array, pages, diagnostics, skipped, needs, counters }`. The array is allocated at its final
+/// length and the chunks are copied in one by one, so the file never exists twice in the wasm heap.
 fn ok_pdf(made: &Made<crate::emit::sinks::Chunks>) -> JsValue {
 	let obj = js_sys::Object::new();
 	let pdf = js_sys::Uint8Array::new_with_length(made.product.len() as u32);
@@ -408,14 +465,16 @@ fn ok_pdf(made: &Made<crate::emit::sinks::Chunks>) -> JsValue {
 	}
 	set(&obj, "pdf", &pdf);
 	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
 	obj.into()
 }
 
-/// `{ svg: string[], pages, diagnostics, skipped, needs }`.
+/// `{ svg: string[], pages, diagnostics, skipped, needs, counters }`.
 fn ok_svg(made: &Made<Vec<String>>) -> JsValue {
 	let obj = js_sys::Object::new();
 	set(&obj, "svg", &strings_js(&made.product));
 	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
 	obj.into()
 }
 
@@ -436,8 +495,8 @@ impl Changed for JsChanged {
 	}
 }
 
-/// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs }`. Ids
-/// (page content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and
+/// `{ version, order: string[], changed: [{ id, svg }], reset, pages, diagnostics, skipped, needs, counters }`.
+/// Ids (page content hashes) are decimal strings, since a JavaScript number holds only 53 bits exactly and
 /// would silently corrupt a 64-bit hash; the consumer treats them as opaque keys.
 fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
 	let (head, changed) = &made.product;
@@ -451,6 +510,7 @@ fn ok_delta(made: &Made<(Head, JsChanged)>) -> JsValue {
 	set(&obj, "changed", &changed.arr);
 	set(&obj, "reset", &JsValue::from_bool(head.reset));
 	set_report(&obj, &made.report, &made.needs);
+	set_counters(&obj, &made.counters);
 	obj.into()
 }
 

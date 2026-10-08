@@ -7,6 +7,11 @@
 //! globals, so a call takes one turn at a time. Columns on this surface count UTF-16 code units, as JavaScript
 //! counts them, and start at 1.
 
+use crate::caches::{
+	Budgets,
+	Caches,
+	Counters,
+};
 use crate::compile::{
 	Cols,
 	Diagnostic,
@@ -103,12 +108,13 @@ impl Project {
 	}
 }
 
-/// A compile that produced its artefact: the artefact, every site not set as written, and the packages the
-/// project asked for that nobody supplied.
+/// A compile that produced its artefact: the artefact, every site not set as written, the packages the
+/// project asked for that nobody supplied, and what the session's caches did.
 pub struct Made<T> {
 	pub product:	T,
 	pub report:		Report,
 	pub needs:		Vec<String>,
+	pub counters:	Counters,
 }
 
 /// A compile that did not: the error's own site first, then the sites that follow it.
@@ -223,6 +229,19 @@ impl Instance {
 	/// The loop budget in force: [`LOOP_BUDGET`] until the host sets another.
 	pub fn loop_budget(&self) -> Option<u64> { self.budget }
 
+	/// Sets the bytes each of the session's caches may hold, from the next compile. Like the loop budget it
+	/// is the host's option and never a project's: a lower one slows a compile and changes nothing it makes.
+	/// It outlasts a panic, which drops the session's caches and keeps the budgets.
+	pub fn set_cache_budget(&mut self, budgets: Budgets) {
+		self.session.set_budgets(budgets);
+	}
+
+	/// The cache budgets in force: [`Budgets::default`] until the host sets others.
+	pub fn cache_budget(&self) -> Budgets { self.session.budgets() }
+
+	/// The session's caches, for the counters of the last compile and the configuration they were made under.
+	pub fn caches(&self) -> &Caches { self.session.caches() }
+
 	/// Compiles to PDF through the evaluator, cold, as an explicit output is: the file never depends on the
 	/// compiles before it. The chunks are the file; a host copies them out one by one.
 	pub fn compile_pdf(&mut self, p: &Project) -> Result<Made<Chunks>, Failure> {
@@ -245,6 +264,7 @@ impl Instance {
 	{
 		let _turn	= turn();
 		let budget	= self.budget;
+		let budgets	= self.session.budgets();	// read before the compile lends its caches, budgets included, to the engine
 		let main	= p.main_path();
 		// A failed compile answers no query, so the answer goes before the compile begins.
 		self.good	= false;
@@ -260,7 +280,7 @@ impl Instance {
 		// and made afresh over the embedded faces when they are not, so that no project's fonts reach another's.
 		let held: Vec<u64> = p.fonts.iter().map(|(_, bytes)| fingerprint(bytes)).collect();
 		if held != self.fonts {
-			let mut fonts = FontStore::with_base(base);
+			let mut fonts = FontStore::with_base(base.clone());
 			for (_, bytes) in &p.fonts {
 				fonts.add_bytes(bytes.clone());
 			}
@@ -274,11 +294,19 @@ impl Instance {
 		let done = match caught {
 			Ok(Ok(d))	=> d,
 			Ok(Err(e))	=> return Err(Failure::of(&e, &main)),
-			Err(_)		=> return Err(Failure::internal(&main,
-				"the compiler panicked while compiling, so no document was produced")),
+			Err(_)		=> {
+				// A panic leaves the session in a state nobody has examined, its caches included, so the
+				// whole session goes and the next compile begins from the embedded faces and the budgets.
+				// The project's fonts are added again then.
+				self.session	= Session::with_budgets(FontStore::with_base(base), budgets);
+				self.fonts		= Vec::new();
+				return Err(Failure::internal(&main,
+					"the compiler panicked while compiling, so no document was produced"));
+			},
 		};
-		let needs	= done.needs();
-		let report	= done.report_in(Cols::Utf16);
+		let needs		= done.needs();
+		let report		= done.report_in(Cols::Utf16);
+		let counters	= done.counters;
 		if let Err(e) = &done.laid {
 			// The first error is the one the fixpoint stopped on; the sites after it follow.
 			let mut rest = report.diagnostics.clone();
@@ -295,7 +323,7 @@ impl Instance {
 		}
 		self.good = true;
 		match take(sink) {
-			Some(product)	=> Ok(Made { product, report, needs }),
+			Some(product)	=> Ok(Made { product, report, needs, counters }),
 			None			=> Err(Failure::internal(&main, "the fixpoint ended with no output")),
 		}
 	}
@@ -396,6 +424,7 @@ impl Instance {
 			product:	delta::PageDelta::of(m.product.0, m.product.1),
 			report:		m.report,
 			needs:		m.needs,
+			counters:	m.counters,
 		})
 	}
 

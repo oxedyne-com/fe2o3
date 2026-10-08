@@ -30,6 +30,7 @@
 
 pub mod bib;
 pub mod book;
+pub mod caches;
 pub mod compile;
 pub mod delta;
 pub mod diag;

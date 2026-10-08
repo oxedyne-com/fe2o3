@@ -3,6 +3,7 @@
 //! `DaimondTypst` calls with the source map installed as it installs one. External facts check each: the
 //! PDF's page count from `pdfinfo`, the embedded family names from `fc-scan`, the commit from `git`.
 
+use oxedyne_fe2o3_austenite::caches::Budgets;
 use oxedyne_fe2o3_austenite::compile::{
 	self,
 	Diagnostic,
@@ -639,5 +640,48 @@ fn engine_identity_is_the_crate_version_and_the_built_commit() -> Outcome<()> {
 	let hash = compile::engine_git_hash();
 	assert_eq!(head.len(), 12, "git must name the commit: {:?}", head);
 	assert!(hash == head || hash == fmt!("{}-dirty", head), "built from {:?}, HEAD is {:?}", hash, head);
+	Ok(())
+}
+
+/// `setCacheBudget` reads each field of the object it is given as `Option<f64>` (left out, or a JavaScript
+/// number) and hands the three to [`Budgets::with`], which owns the validation.
+#[test]
+fn the_cache_budgets_are_whole_bytes_and_a_refusal_changes_nothing() -> Outcome<()> {
+	let held = Budgets::default();
+	assert_eq!((held.shapes, held.pars, held.ledger), (32 << 20, 16 << 20, 0));
+
+	let set = res!(held.with(Some(1024.0), Some(2048.0), Some(4096.0)));
+	assert_eq!(set, Budgets { shapes: 1024, pars: 2048, ledger: 4096 });
+	let part = res!(set.with(None, Some(0.0), None));
+	assert_eq!(part, Budgets { shapes: 1024, pars: 0, ledger: 4096 }, "a field left out stands, and zero is a budget");
+	assert_eq!(res!(set.with(None, None, None)), set, "nothing given changes nothing");
+	let top = 9_007_199_254_740_991.0;
+	assert_eq!(res!(held.with(Some(top), None, None)).shapes, top as usize, "the largest whole number JavaScript holds");
+
+	for (name, given) in [
+		("shapes",	f64::NAN),
+		("shapes",	-1.0),
+		("shapes",	0.5),
+		("shapes",	f64::INFINITY),
+		("shapes",	9_007_199_254_740_992.0),
+		("pars",	f64::NAN),
+		("pars",	-0.5),
+		("pars",	1e300),
+		("ledger",	f64::NEG_INFINITY),
+		("ledger",	2.5),
+	] {
+		let (a, b, c) = match name {
+			"shapes"	=> (Some(given), None, None),
+			"pars"		=> (None, Some(given), None),
+			_			=> (None, None, Some(given)),
+		};
+		match set.with(a, b, c) {
+			Ok(got)	=> return Err(err!("A {} budget of {} was accepted as {:?}.", name, given, got; Test)),
+			Err(e)	=> assert!(e.plain().contains(name), "the refusal names the {} field: {}", name, e.plain()),
+		}
+	}
+	// One bad field refuses the lot, so a host never half-applies a change.
+	assert!(set.with(Some(1.0), Some(-1.0), Some(3.0)).is_err());
+	assert!(set.with(Some(1.0), Some(2.0), Some(f64::NAN)).is_err());
 	Ok(())
 }
