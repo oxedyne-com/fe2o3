@@ -144,12 +144,13 @@ use crate::ledger::{
 	AnchorKind,
 	Ref,
 };
-use crate::memo::Fnv;
 use crate::syntax::SyntaxNode;
 use crate::timings::{
 	Entry,
 	PageRec,
 };
+
+use oxedyne_fe2o3_hash::fingerprint::Fingerprinter;
 
 use std::collections::VecDeque;
 use std::fmt::Write;
@@ -160,14 +161,14 @@ use std::sync::Arc;
 
 /// A running fingerprint and the number of locations, places and marks it masked.
 pub(super) struct Fp {
-	h:		Fnv,
+	h:		Fingerprinter,
 	masked:	u32,
 }
 
 // Feeds `Debug` text straight into the hash, so a leaf value costs no allocation.
-struct FnvWriter<'a>(&'a mut Fnv);
+struct FpWriter<'a>(&'a mut Fingerprinter);
 
-impl Write for FnvWriter<'_> {
+impl Write for FpWriter<'_> {
 	fn write_str(&mut self, s: &str) -> std::fmt::Result {
 		self.0.write(s.as_bytes());
 		Ok(())
@@ -175,11 +176,11 @@ impl Write for FnvWriter<'_> {
 }
 
 impl Fp {
-	pub(super) fn new() -> Self { Self { h: Fnv::new(), masked: 0 } }
+	pub(super) fn new() -> Self { Self { h: Fingerprinter::new(), masked: 0 } }
 
 	// Hashes a value by its derived `Debug` text, which holds every field and so cannot omit one.
 	fn dbg<T: std::fmt::Debug + ?Sized>(&mut self, v: &T) {
-		let _ = write!(FnvWriter(&mut self.h), "{:?}", v);
+		let _ = write!(FpWriter(&mut self.h), "{:?}", v);
 	}
 
 	fn tag(&mut self, t: u8) { self.h.write_u8(t); }
@@ -206,7 +207,7 @@ impl Fp {
 	// Ends the walk, adding its masked count to `into`.
 	fn seal(self, into: &mut u32) -> u64 {
 		*into += self.masked;
-		self.h.finish()
+		self.h.finish().fold()
 	}
 }
 
@@ -1174,7 +1175,7 @@ impl Walk for Level {
 pub(super) fn pair(p: &Pair) -> u64 {
 	let mut fp = Fp::new();
 	p.mix(&mut fp);
-	fp.h.finish()
+	fp.h.finish().fold()
 }
 
 /// The carry state the paginator is in before it makes its next page, one fingerprint to a part.
@@ -1290,5 +1291,5 @@ pub(super) fn record(setup: &RunSetup, seen: &[u64], entry: Entry) -> PageRec {
 	let mut fp = Fp::new();
 	setup.mix(&mut fp);
 	seen.mix(&mut fp);
-	PageRec { pairs: seen.len(), input: fp.h.finish(), entry }
+	PageRec { pairs: seen.len(), input: fp.h.finish().fold(), entry }
 }
