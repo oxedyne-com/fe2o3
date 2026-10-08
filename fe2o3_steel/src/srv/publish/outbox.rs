@@ -1000,6 +1000,14 @@ async fn confirm_step<
 	if let Some(until) = res!(pacer.blocked(domain_of(&email), now)) {
 		return defer(db, seq, entry, until, id);
 	}
+	// The slot is taken for every entry, before the sign-up is looked at. An entry that ends unsent (a
+	// repeat, or an address that has confirmed, left or bounced) takes the same gap as one that is sent,
+	// so when the entries behind it leave says nothing about whether the address was on the list.
+	match res!(pacer.claim(now_ms)) {
+		Pace::Held	=> return Ok(Step::Held),
+		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
+		Pace::Go	=> share.took(Kind::Confirm),
+	}
 	// The entry names an address and nothing else: the sign-up is applied here, at send time, so an
 	// address that has confirmed, left or bounced since is owed nothing, one already sent a
 	// confirmation within its interval or its count is owed no other, and the token in the link is
@@ -1013,11 +1021,6 @@ async fn confirm_step<
 			return Ok(Step::Worked);
 		}
 	};
-	match res!(pacer.claim(now_ms)) {
-		Pace::Held	=> return Ok(Step::Held),
-		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
-		Pace::Go	=> share.took(Kind::Confirm),
-	}
 	let from = cfg.from_or(courier.default_from());
 	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
 	let msg = send::build_confirmation_email(&from, &sub.email, &url, &cfg.site_name);
@@ -1050,6 +1053,15 @@ async fn confirm_step<
 			}
 		}
 		Err(e)	=> {
+			// A delivery that overran the deadline may have been taken: a far end can accept the whole
+			// message and be slow to say so. It counts against the address as a send does, so the
+			// retry is judged against the interval and does not send a second copy.
+			if e.tags().contains(&ErrTag::Timeout) {
+				if let Err(e2) = subscribe::count_sent(db, &sub.email, &w, now) {
+					warn!("{}: publish: could not count the timed-out send to {}: {}",
+						id, subscribe::redact(&sub.email), e2);
+				}
+			}
 			let tries = entry.tries + 1;
 			if tries >= TRIES_MAX {
 				warn!("{}: publish: confirmation to {} given up after {} tries: {}",

@@ -694,3 +694,136 @@ async fn test_the_confirmation_queue_stops_at_its_cap_17() -> Outcome<()> {
     assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 3, "the queue did not refill to its cap and stop");
     Ok(())
 }
+
+// A sender that notes the clock the test set when each address was handed to it.
+#[derive(Default)]
+struct Timed {
+    to:     Mutex<Vec<(u64, String)>>,
+    clock:  Mutex<u64>,
+}
+
+impl Courier for Timed {
+
+    fn default_from(&self) -> &str {
+        "news@site.test"
+    }
+
+    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+        -> impl Future<Output = Outcome<String>> + Send
+    {
+        let to = to.to_string();
+        async move {
+            let at = *lock_mutex!(self.clock);
+            let mut v = lock_mutex!(self.to);
+            v.push((at, to));
+            Ok(fmt!("q1"))
+        }
+    }
+}
+
+// F3 S1: an entry the drainer skips takes a slot as one it sends does, so when a stranger's own
+// confirmation leaves says nothing about whether the address queued ahead of it was a member.
+#[tokio::test]
+async fn test_a_skipped_entry_takes_a_slot_as_a_sent_one_does_18() -> Outcome<()> {
+    let mut gaps = Vec::new();
+    for state in [None, Some(SubState::Confirmed), Some(SubState::Bounced)] {
+        let (db, uid, _tmp) = res!(common::test_db());
+        let handle = (db, uid);
+        let victim = "v@site.test";
+        if let Some(state) = state {
+            let guard = lock_read!(handle.0);
+            let sub = Subscriber {
+                email:      fmt!("{}", victim),
+                state,
+                token:      subscribe::mint_token(),
+                created:    None,
+                sent:       None,
+            };
+            res!(guard.insert(dat!(fmt!("{}{}", subscribe::KEY_PREFIX, victim)), sub.to_dat(), handle.1, None));
+        }
+        res!(outbox::push(&handle, &[
+            Entry::new(Kind::Confirm, victim, "", T0 / 1000),
+            Entry::new(Kind::Confirm, "me@attacker.test", "", T0 / 1000),
+        ]));
+        let (timed, pacer, mut share, cfg) = (Timed::default(), Pacer::new(100), Share::default(), cfg());
+        let mut now = T0;
+        for _ in 0..20 {
+            *lock_mutex!(timed.clock) = now;
+            match res!(outbox::step(&handle, &cfg, &timed, &pacer, &mut share, "test", now).await) {
+                Step::Wait(ms)  => now += ms,
+                Step::Idle      => break,
+                _               => {},
+            }
+        }
+        let to = lock_mutex!(timed.to).clone();
+        let mine = res!(to.iter().find(|x| x.1 == "me@attacker.test")
+            .map(|x| x.0 - T0)
+            .ok_or_else(|| err!("the stranger's own confirmation was never sent"; Test, Missing)));
+        gaps.push(mine);
+    }
+    assert!(gaps[0] == gaps[1] && gaps[0] == gaps[2],
+        "when a stranger's own confirmation leaves depends on the state of the address ahead of it: {:?} ms \
+        (new, confirmed, bounced)", gaps);
+    Ok(())
+}
+
+// A courier that takes the first message and never reports it accepted, as a far end does that
+// takes the whole of DATA and is slow to say so, and answers at once after that.
+#[derive(Default)]
+struct Slow {
+    asked: Mutex<Vec<String>>,
+}
+
+impl Courier for Slow {
+
+    fn default_from(&self) -> &str {
+        "news@site.test"
+    }
+
+    fn deliver(&self, _from: &str, to: &str, _msg: &str)
+        -> impl Future<Output = Outcome<String>> + Send
+    {
+        let to = to.to_string();
+        async move {
+            let first = {
+                let mut v = lock_mutex!(self.asked);
+                v.push(to);
+                v.len() == 1
+            };
+            if first {
+                std::future::pending::<()>().await;
+            }
+            Ok(fmt!("q1"))
+        }
+    }
+}
+
+// F3 S3: a confirmation whose delivery overruns the deadline may have been taken, so it counts
+// against the address's interval, and the retry that follows does not send a second copy.
+#[tokio::test]
+async fn test_a_confirmation_that_timed_out_is_counted_and_not_sent_twice_20() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let cfg = PublishConfig {
+        confirm_interval_secs:  DAY,
+        confirm_max:            3,
+        confirm_window_days:    30,
+        ..cfg()
+    };
+    res!(outbox::push(&handle, &[Entry::new(Kind::Confirm, "v@site.test", "", T0 / 1000)]));
+    let (slow, share) = (Slow::default(), &mut Share::default());
+    let pacer = Pacer::new(100).with_deadline(Duration::from_millis(50));
+    assert_eq!(res!(outbox::step(&handle, &cfg, &slow, &pacer, share, "test", T0).await), Step::Worked);
+    // Past the retry wait and any block on the host, on the same day.
+    let mut now = T0 + 3_600_000;
+    for _ in 0..10 {
+        match res!(outbox::step(&handle, &cfg, &slow, &pacer, share, "test", now).await) {
+            Step::Wait(ms)  => now += ms,
+            Step::Later(_) | Step::Idle => break,
+            _               => {},
+        }
+    }
+    let asked = lock_mutex!(slow.asked).len();
+    assert_eq!(asked, 1, "a confirmation that timed out was delivered {} times", asked);
+    Ok(())
+}
