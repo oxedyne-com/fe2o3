@@ -158,8 +158,9 @@ impl DaimondTypst {
 
 	/// Sets the bytes each cache of the session may hold: `{ shapes, pars, ledger }`, each a whole number
 	/// of bytes or left out to stand. A new instance holds 32 MiB of shaped runs and 16 MiB of paragraphs,
-	/// and the ledger's is set with the ledger. A cache at its budget stops taking entries and loses none,
-	/// so a lower budget slows a compile and changes nothing it makes. Returns `{ cacheBudget: { shapes,
+	/// and the ledger's is set with the ledger. The shaped-run cache at its budget evicts its least recently used
+	/// result, and a cache swept by generation refuses a new entry and loses none, so a lower budget slows a
+	/// compile and changes nothing it makes. Returns `{ cacheBudget: { shapes,
 	/// pars, ledger } }`, the budgets now in force, or `{ error }` and no change, naming the first field
 	/// that is not a whole number of bytes. A project is document data and cannot set it.
 	///

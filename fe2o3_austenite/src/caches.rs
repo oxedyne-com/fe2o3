@@ -30,8 +30,9 @@ const JS_WHOLE: f64 = 9_007_199_254_740_991.0;
 // │ BUDGETS                                                                    │
 // └───────────────────────────────────────────────────────────────────────────┘
 
-/// The bytes each cache may hold, set by the host. A cache that reaches its budget stops taking entries and
-/// loses none, so a lower budget slows a compile and never changes what it makes.
+/// The bytes each cache may hold, set by the host. The shaped-run cache at its budget evicts its least recently
+/// used result; a cache swept by generation refuses a new entry and loses none. A lower budget slows a compile
+/// and never changes what it makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Budgets {
 	pub shapes:	usize,
