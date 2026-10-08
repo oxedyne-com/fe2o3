@@ -550,7 +550,21 @@ impl<
         self.close()
     }
 
+    /// Shuts the database down through a borrow, waiting for as long as the bots take to stop.
     pub fn close(&self) -> Outcome<()> {
+        self.close_by(None)
+    }
+
+    /// Shuts the database down like [`Self::close`], but gives up after `within` rather than
+    /// wait for ever on a bot that will not stop.  A timeout leaves the database marked as
+    /// closed, since the supervisor has been told to stop and nothing more can be asked of it,
+    /// and returns an error naming the wait.  This is what a `Drop` calls, which must return.
+    pub fn close_within(&self, within: Duration) -> Outcome<()> {
+        self.close_by(Some(within))
+    }
+
+    fn close_by(&self, within: Option<Duration>) -> Outcome<()> {
+        let begun = Instant::now();
         // Held for the whole of the shutdown, so that a second caller waits
         // here and finds the work already done rather than doing it again.
         let mut closing = lock_mutex!(self.closing,
@@ -577,7 +591,11 @@ impl<
                 Channel, Write));
         }
         warn!(sync_log::stream(), "Shutdown: Waiting for response from supervisor...");
-        match res!(resp.recv_timeout(constant::USER_REQUEST_TIMEOUT)) {
+        let reply_within = match within {
+            Some(w) => w.min(constant::USER_REQUEST_TIMEOUT),
+            None    => constant::USER_REQUEST_TIMEOUT,
+        };
+        match res!(resp.recv_timeout(reply_within)) {
             OzoneMsg::Error(e) => return Err(err!(e,
                 "{}: The supervisor had a problem during shutdown.", self_id;
                 Thread)),
@@ -590,10 +608,18 @@ impl<
             verification of termination of all threads...");
         // Taken rather than cloned: `WaitGroup::wait` counts the clones that are
         // left, so waiting on a copy while the original lives never returns.
-        if let Some(wg) = closing.wg.take() {
-            wg.wait();
-        }
+        let stopped = match (closing.wg.take(), within) {
+            (Some(wg), Some(w))     => res!(Self::await_stopped(wg, w.saturating_sub(begun.elapsed()))),
+            (Some(wg), None)        => { wg.wait(); true },
+            (None, _)               => true,
+        };
         closing.done = true;
+        if !stopped {
+            return Err(err!(
+                "{}: The database's bots had not all stopped {:?} after it was closed.",
+                self_id, within.unwrap_or_default();
+                Timeout, Excessive));
+        }
         warn!(sync_log::stream(), "Shutdown: Verified.");
         Ok(())
     }

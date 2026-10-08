@@ -52,6 +52,7 @@ use super::storage::Storage;
 use crate::O3db;
 use crate::base::{
 	cfg::OzoneConfig,
+	constant,
 	id::usr_kind_id_deleted,
 };
 use crate::data::core::RestSchemesInput;
@@ -90,6 +91,7 @@ pub struct O3dbStorage<
 > {
 	db:		Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>,
 	user:	UID,
+	closed:	bool,	// Set once a close has been tried, so that the drop does not try again.
 }
 
 impl<
@@ -107,7 +109,7 @@ impl<
 	/// authorship beyond this. Applications that need finer-grained
 	/// multi-user bookkeeping should layer that above the adapter.
 	pub fn new(db: Arc<O3db<UIDL, UID, ENC, KH, PR, CS>>, user: UID) -> Self {
-		Self { db, user }
+		Self { db, user, closed: false }
 	}
 
 	/// The database this adapter writes to, for a caller that also reads it directly.
@@ -121,14 +123,21 @@ impl<
 	///
 	/// The adapter must hold the only reference to the database. Another holder would be left
 	/// with a handle to a stopped database, so while one remains this returns an error naming
-	/// how many, and the database stays open under them. [`Arc::try_unwrap`] makes the check
-	/// and the claim in one step, so no holder can slip in between.
-	pub fn close(self) -> Outcome<()> {
-		match Arc::try_unwrap(self.db) {
-			Ok(db)		=> db.shutdown(),
-			Err(db)		=> Err(err!(
+	/// how many, and the database stays open under them. [`Arc::get_mut`] makes the check and
+	/// the claim in one step, so no holder can slip in between.
+	///
+	/// An adapter dropped without a close shuts the database down itself, waiting at most
+	/// `USER_REQUEST_TIMEOUT` for the bots, and logs a failure rather than return it.
+	pub fn close(mut self) -> Outcome<()> {
+		let others = (Arc::strong_count(&self.db) + Arc::weak_count(&self.db)).saturating_sub(1);
+		match Arc::get_mut(&mut self.db) {
+			Some(db)	=> {
+				self.closed = true;
+				db.close()
+			},
+			None		=> Err(err!(
 				"Cannot close the O3db behind this storage: {} other reference(s) to it \
-				are still held; drop them first.", Arc::strong_count(&db).saturating_sub(1);
+				are still held; drop them first.", others;
 				Invalid, Input, Unexpected)),
 		}
 	}
@@ -198,6 +207,33 @@ impl<
 				"O3dbStorage expected a byte-vector Dat value, got {:?}.",
 				other;
 				Decode, Unexpected)),
+		}
+	}
+}
+
+impl<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL> + 'static,
+	ENC:	Encrypter + 'static,
+	KH:		Hasher + 'static,
+	PR:		Hasher + 'static,
+	CS:		Checksummer + 'static,
+>
+	Drop for O3dbStorage<UIDL, UID, ENC, KH, PR, CS>
+{
+	// Stops the bots of a database whose adapter went out of scope without a close, as an error
+	// path or an unwinding panic does, so that they do not run on over the files for ever.  A
+	// database another holder shares is theirs to close.  This neither panics nor waits past
+	// the bound, so a bot that will not stop is logged and left.
+	fn drop(&mut self) {
+		if self.closed || Arc::strong_count(&self.db) != 1 {
+			return;
+		}
+		if let Err(e) = self.db.close_within(constant::USER_REQUEST_TIMEOUT) {
+			error!(sync_log::stream(), err!(e,
+				"The storage was dropped without a close, and the database behind it did not \
+				shut down cleanly.";
+				IO, Thread));
 		}
 	}
 }
@@ -308,7 +344,8 @@ impl<
 	/// The database is created if the root is new and reopened, with its data, if not. A
 	/// configuration already saved in the root wins over `ozone_cfg`, which is read only for a
 	/// root without one. Garbage collection is on. `uid` is both the database's user template
-	/// and the identity that stamps every write the engine makes. Pair with [`Self::close`].
+	/// and the identity that stamps every write the engine makes. Pair with [`Self::close`]; an
+	/// engine dropped without one still stops the database, but only logs a failure to.
 	pub fn over_o3db(
 		db_root:	PathBuf,
 		ozone_cfg:	Option<OzoneConfig>,
