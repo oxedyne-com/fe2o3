@@ -88,6 +88,16 @@ impl FontStore {
 		Self { base: Some(base), ..Self::default() }
 	}
 
+	/// The book of embedded faces the host parsed, if it supplied one.
+	pub fn base(&self) -> Option<&Arc<FontBook>> {
+		self.base.as_ref()
+	}
+
+	/// The same inputs with the book to be built afresh, so that a font file changed on disc is read again.
+	pub fn renewed(&self) -> Self {
+		Self { book: None, ..self.clone() }
+	}
+
 	/// Adds every font file beneath `dir` in the vfs, after the embedded faces.
 	pub fn add_dir(&mut self, dir: PathBuf) {
 		self.dirs.push(dir);

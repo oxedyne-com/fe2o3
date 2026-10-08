@@ -1144,6 +1144,37 @@ fn a_failed_compile_clears_the_kept_introspector() -> Outcome<()> {
 }
 
 #[test]
+fn the_live_view_compiles_warm_and_the_pdf_export_cold_and_all_three_agree_with_a_fresh_instance() -> Outcome<()> {
+	let edited = BOOK.replacen("First <a>", "Firsq <a>", 1);
+	let mut inst = Instance::new();
+	let p = project(&[("/main.typ", BOOK)]);
+	let first = match inst.compile_delta(&p) {
+		Ok(m)	=> m,
+		Err(f)	=> return Err(err!("The delta refused: {}", f.head; Test)),
+	};
+	assert_eq!(inst.query("heading", "").map(|r| r.len()), Some(3), "the delta leaves its introspector for queries");
+	// A failure between two good compiles answers no query, and the compile after it still answers.
+	res!(must_fail(inst.compile_pdf(&strict(&[("/main.typ", "= Gone\n#import \"nowhere.typ\": x\n")]))));
+	assert!(inst.query("heading", "").is_none());
+	let p2 = project(&[("/main.typ", edited.as_str())]);
+	let svg = match inst.compile_svg(&p2) {
+		Ok(m)	=> m.product,
+		Err(f)	=> return Err(err!("The vector door refused: {}", f.head; Test)),
+	};
+	assert_eq!(inst.query("heading", "").map(|r| r.len()), Some(3));
+	let fresh_svg = match Instance::new().compile_svg(&p2) {
+		Ok(m)	=> m.product,
+		Err(f)	=> return Err(err!("The vector door refused: {}", f.head; Test)),
+	};
+	assert_eq!(svg, fresh_svg, "a warm vector compile equals a cold one");
+	let warm = pdf_of(&res!(must_pdf(inst.compile_pdf(&p2))));
+	let cold = pdf_of(&res!(must_pdf(Instance::new().compile_pdf(&p2))));
+	assert!(warm == cold, "the PDF export is the same bytes with or without the compiles before it");
+	assert!(first.report.pages > 0);
+	Ok(())
+}
+
+#[test]
 fn heading_rows_keep_title_a_plain_string_and_page_a_one_based_number_across_pages() -> Outcome<()> {
 	let text = "#set page(height: 80pt, margin: 8pt)\n\
 		= Intro\nWords here.\n#pagebreak()\n\
