@@ -14,6 +14,7 @@ use oxedyne_fe2o3_o3db_sync::{
 		codec::{
 			MAX_ENVELOPE_BYTES,
 			MAX_ENVELOPE_DEPTH,
+			MAX_ENVELOPE_VALUES,
 			WIRE_VERSION,
 		},
 		hotstuff::types::{
@@ -636,5 +637,52 @@ fn decode_is_bounded() -> Outcome<()> {
 			"An oversize envelope was not refused as Excessive: {}", e,
 		),
 	}
+	Ok(())
+}
+
+
+// The value cap. A buffer of one-byte values must not become a gibibyte of `Dat`, and no envelope
+// the encoder writes may be refused by the cap.
+
+#[test]
+fn a_16_mib_page_of_small_records_encodes_and_decodes_under_the_value_cap() -> Outcome<()> {
+	let small = |n: u32| {
+		let mut id = [0u8; 32];
+		id[..4].copy_from_slice(&n.to_be_bytes());
+		Record { id: RecordId::from_bytes(id), table: String::new(), value: Vec::new() }
+	};
+	let push = |records: Vec<Record>| env(MsgKind::AntiEntropyPush { table: String::new(), records });
+	// The size of one record, from the difference between two envelopes.
+	let one = res!(push(vec![small(0)]).encode()).len();
+	let two = res!(push(vec![small(0), small(1)]).encode()).len();
+	let each = two - one;
+	let n = (MAX_ENVELOPE_BYTES - one) / each + 1;
+	let records: Vec<Record> = (0..n as u32).map(small).collect();
+	let bytes = res!(push(records).encode());
+	assert!(bytes.len() > MAX_ENVELOPE_BYTES - each, "The page is {} of {} bytes.", bytes.len(), MAX_ENVELOPE_BYTES);
+	// Four values a record: its list, id, table and value.
+	let values = 4 * n;
+	assert!(values < MAX_ENVELOPE_VALUES, "{} values in a full page, over the cap of {}.", values, MAX_ENVELOPE_VALUES);
+	match res!(Envelope::decode(&bytes)).body {
+		MsgKind::AntiEntropyPush { records, .. }	=> assert_eq!(records.len(), n),
+		other										=> return Err(err!("Decoded {:?}.", other; Test, Mismatch)),
+	}
+	Ok(())
+}
+
+#[test]
+fn a_16_mib_list_of_one_byte_values_is_refused_at_the_value_cap() -> Outcome<()> {
+	let n = MAX_ENVELOPE_BYTES - 8;
+	// Under 2^24, so the minimal c64 is three bytes.
+	let mut b = vec![Dat::LIST_CODE, Dat::C64_CODE_START + 3];
+	b.extend_from_slice(&(n as u32).to_be_bytes()[1..]);
+	b.resize(b.len() + n, Dat::EMPTY_CODE);
+	assert!(b.len() <= MAX_ENVELOPE_BYTES);
+	let msg = match Envelope::decode(&b) {
+		Ok(e)	=> return Err(err!("A buffer of one-byte values decoded to {:?}.", e.body.label(); Test, Invalid)),
+		Err(e)	=> fmt!("{}", e),
+	};
+	assert!(msg.contains(&fmt!("maximum of {} values", MAX_ENVELOPE_VALUES)), "The refusal does not name the cap: {}", msg);
+	assert!(msg.contains(&fmt!("value number {}", MAX_ENVELOPE_VALUES + 1)), "The refusal did not stop at the cap: {}", msg);
 	Ok(())
 }

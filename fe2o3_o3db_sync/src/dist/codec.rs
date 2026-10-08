@@ -7,7 +7,7 @@
 //! - a message kind keeps its number for ever, and a retired kind leaves a gap;
 //! - a change to any layout bumps [`WIRE_VERSION`], and a reader refuses a version it does not
 //!   know with a `Mismatch` rather than guess at its fields;
-//! - a reader never trusts the bytes: [`Envelope::decode`] bounds their length and nesting before
+//! - a reader never trusts the bytes: [`Envelope::decode`] bounds their length, nesting and value count before
 //!   it decodes, names the field of every refusal, and accepts only a shape that
 //!   [`Envelope::encode`] can produce.
 //!
@@ -45,6 +45,10 @@ use crate::kademlia::id::NodeId;
 pub const WIRE_VERSION:			u8		= 1;				// first field of every envelope
 pub const MAX_ENVELOPE_BYTES:	usize	= 16 * 1024 * 1024;	// longest envelope written or read
 pub const MAX_ENVELOPE_DEPTH:	usize	= 12;				// the deepest shape written is nine
+// Most values a decoded envelope may hold. The densest legal shape is a record with no table and no
+// value, 12 bytes a value, so a 16 MiB page of them is about 1.4 million values; a bound of one in
+// 8 bytes leaves room above that and stops a buffer of one-byte values at 2 Mi `Dat`s, not 16 Mi.
+pub const MAX_ENVELOPE_VALUES:	usize	= MAX_ENVELOPE_BYTES / 8;
 
 // Message kind numbers. A number is never reused, even after its kind is retired.
 const KIND_REPLICATE_PUT:		u8 = 1;
@@ -67,7 +71,7 @@ const PHASE_DECIDE:				u8 = 3;
 
 // The limits every received envelope is decoded under.
 fn limits() -> DecodeLimits {
-	DecodeLimits::new(MAX_ENVELOPE_DEPTH, MAX_ENVELOPE_BYTES)
+	DecodeLimits::new(MAX_ENVELOPE_DEPTH, MAX_ENVELOPE_BYTES).with_max_items(MAX_ENVELOPE_VALUES)
 }
 
 // A refusal of a decoded shape, naming the shape, the field and what was found. It holds the
