@@ -24,17 +24,25 @@ use std::sync::OnceLock;
 
 // A forward read, the page total on its first page, so the fixpoint takes more than one pass; furniture on
 // every page; a show rule on an element and one on a word, so realisation runs user code and searches text;
+// an outline and a reference with no answer until the first pass, so the second pass realises new bodies;
 // and enough pages for each phase to be measurable.
 const DOC: &str = "\
 #set page(width: 220pt, height: 260pt, margin: 24pt, header: [Header], footer: context counter(page).display())
 #show heading: it => block(fill: luma(235), inset: 4pt, it.body)
 #show \"Sentence\": strong
+#set heading(numbering: \"1.\")
 #context [Pages: #counter(page).final().first()]
+
+#outline()
 
 #for i in range(1, 15) [
 = Section #i
 #for j in range(1, 16) [Sentence #j of section #i sets some words in a paragraph. ]
 ]
+
+#heading[Last]<sec>
+
+See @sec.
 ";
 
 struct Runs {
@@ -313,6 +321,13 @@ fn check_split(text: &str, fine: bool) {
 		_					=> 0,
 	}).sum();
 	assert!(later >= 1, "a second pass realised nothing it had realised before:\n{}", text);
+	// The outline and the reference have no answer until the first pass has laid the document out, so the
+	// second pass realises bodies that did not exist before it.
+	let fresh: i64 = each.iter().skip(1).map(|p| match p.get("calls") {
+		Some(J::Obj(kv))	=> kv.iter().map(|(_, c)| num(c, &["new"])).sum::<i64>(),
+		_					=> 0,
+	}).sum();
+	assert!(fresh >= 1, "a later pass realised no body that was not there before:\n{}", text);
 }
 
 // The value at `path` below `j`, if the objects on the way hold it.
