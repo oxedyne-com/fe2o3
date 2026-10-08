@@ -659,7 +659,7 @@ impl Dat {
     // A fixed-width byte variant writes its length in a field of that width, so a payload
     // longer than the field can state would be written with its length cut and read back as a
     // shorter value followed by stray bytes. Refuse it here, where the length is known.
-    fn check_width(kind: &str, len: usize, max: u64) -> Outcome<()> {
+    pub(crate) fn check_width(kind: &str, len: usize, max: u64) -> Outcome<()> {
         if (len as u64) > max {
             return Err(err!(
                 "A Dat::{} payload of {} bytes exceeds the {} bytes its length field can state; \

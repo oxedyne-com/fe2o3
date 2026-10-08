@@ -165,3 +165,57 @@ fn wrap_bytes_var_chooses_a_width_that_fits() -> Outcome<()> {
 	}
 	Ok(())
 }
+
+
+// The text decoder. A text that names a width writes a payload the encoder would refuse, so
+// the decoder refuses it too, at the parse and not when the value is stored.
+
+fn text_bytes(kind: &str, n: usize) -> String {
+	let items: Vec<String> = payload(n).iter().map(|b| fmt!("{}", b)).collect();
+	fmt!("({}|[{}])", kind, items.join(", "))
+}
+
+#[test]
+fn text_bu8_holds_255_and_refuses_256() -> Outcome<()> {
+	let full = res!(Dat::decode_string(text_bytes("bu8", 255)));
+	assert_eq!(full, Dat::BU8(payload(255)));
+	// What the text decoder accepts, the encoder writes.
+	assert_eq!(res!(round_trip(&full)), full);
+
+	let msg = match Dat::decode_string(text_bytes("bu8", 256)) {
+		Ok(d)	=> return Err(err!("The text decoder built {:?} wider than a BU8 states.", d.kind(); Test, Invalid, Data)),
+		Err(e)	=> fmt!("{}", e),
+	};
+	res!(check_names(&msg, &["BU8", "256", "255"]));
+	Ok(())
+}
+
+#[test]
+fn text_bu8_refuses_300_bytes_that_the_encoder_would_cut_to_44() -> Outcome<()> {
+	assert!(Dat::decode_string(text_bytes("bu8", 300)).is_err());
+	Ok(())
+}
+
+#[test]
+fn text_bu16_holds_65535_and_refuses_65536() -> Outcome<()> {
+	let full = res!(Dat::decode_string(text_bytes("bu16", 65_535)));
+	assert_eq!(full, Dat::BU16(payload(65_535)));
+	assert_eq!(res!(round_trip(&full)), full);
+
+	let msg = match Dat::decode_string(text_bytes("bu16", 65_536)) {
+		Ok(d)	=> return Err(err!("The text decoder built {:?} wider than a BU16 states.", d.kind(); Test, Invalid, Data)),
+		Err(e)	=> fmt!("{}", e),
+	};
+	res!(check_names(&msg, &["BU16", "65536", "65535"]));
+	Ok(())
+}
+
+#[test]
+fn text_bu32_and_bu64_take_what_a_narrower_width_refuses() -> Outcome<()> {
+	let wide = res!(Dat::decode_string(text_bytes("bu32", 70_000)));
+	assert_eq!(wide, Dat::BU32(payload(70_000)));
+	assert_eq!(res!(round_trip(&wide)), wide);
+	let wide = res!(Dat::decode_string(text_bytes("bu64", 300)));
+	assert_eq!(wide, Dat::BU64(payload(300)));
+	Ok(())
+}

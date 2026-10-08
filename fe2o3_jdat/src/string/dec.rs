@@ -2907,9 +2907,18 @@ impl Dat {
     #[inline(never)]
     fn decode_bytes(v: Vec<u8>, k: &Kind) -> Outcome<Self> {
         Ok(match k {
-            Kind::BU8   => Self::BU8(v),
-            Kind::BU16  => Self::BU16(v),
-            Kind::BU32  => Self::BU32(v),
+            Kind::BU8   => {
+                res!(Self::check_width("BU8", v.len(), u8::MAX as u64));
+                Self::BU8(v)
+            },
+            Kind::BU16  => {
+                res!(Self::check_width("BU16", v.len(), u16::MAX as u64));
+                Self::BU16(v)
+            },
+            Kind::BU32  => {
+                res!(Self::check_width("BU32", v.len(), u32::MAX as u64));
+                Self::BU32(v)
+            },
             Kind::BU64  => Self::BU64(v),
             Kind::BC64  => Self::BC64(v),
             Kind::B2    => Self::B2(res!(<[u8; 2]>::try_from(&v[..]), Decode, Bytes)),
