@@ -37,6 +37,7 @@ static SCHEDULES_HELD:   AtomicU64  = AtomicU64::new(0);      // handled after t
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
 static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reader's pin and its read
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
+static CHUNK_DELAY_MS:   AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
 static BARRIER_FAILS:    AtomicBool = AtomicBool::new(false); // every durability barrier fails
@@ -103,6 +104,13 @@ pub fn set_read_delay(d: Duration) {
 /// shutdown's time can run out with written records still queued at it.
 pub fn set_insert_delay(d: Duration) {
     INSERT_DELAY_MS.store(millis(d), Ordering::Relaxed);
+}
+
+/// Holds a cache bot this long before it enters a chunk of a value, as a chunk's writer behind a
+/// slower disk than the bunch key's would, so that a bunch key made readable before its chunks can
+/// be told from one made readable after them.  The bunch key and other records are not held.
+pub fn set_chunk_insert_delay(d: Duration) {
+    CHUNK_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Holds a cache bot this long before it enters a chunk tombstone, the record that retires one
@@ -216,6 +224,14 @@ pub(crate) fn insert_delay() {
 pub(crate) fn chunk_tombstone_delay(key: &[u8], cind: Option<usize>) {
     if cind.is_none() && key.first() == Some(&Dat::TUP5_U64_CODE) {
         pause(&TOMB_DELAY_MS);
+    }
+}
+
+/// A chunk of a value carries its index in the stored key, counted from one; the bunch key is
+/// index zero.
+pub(crate) fn chunk_insert_delay(cind: Option<usize>) {
+    if matches!(cind, Some(i) if i > 0) {
+        pause(&CHUNK_DELAY_MS);
     }
 }
 

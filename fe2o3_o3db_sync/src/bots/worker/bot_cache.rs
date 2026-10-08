@@ -312,6 +312,7 @@ impl<
     {
         hooks::insert_delay();
         hooks::chunk_tombstone_delay(&key, cind);
+        hooks::chunk_insert_delay(cind);
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
         let floc_old_opt = match self.cache.insert(

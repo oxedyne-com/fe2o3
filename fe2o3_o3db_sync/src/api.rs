@@ -440,6 +440,12 @@ impl<
     /// * `schms2` - `RestSchemesOverride` overrides database schemes (e.g. key hashing, encryption).
     /// * `resp` - a `Responder` channel.
     ///
+    /// The chunks of a chunked value are stored first, and the call waits until every one is
+    /// written, durable and readable before it sends the bunch key, so that no reader finds a
+    /// bunch key whose chunks are missing.  A chunk that fails stops the store there: the caller
+    /// is told it failed, and since the bunch key is never written the failure is not tagged
+    /// `Unconfirmed`.
+    ///
     /// Returns the number of chunks.  The first message in the `Responder` will be an
     /// `OzoneMsg::Chunks` containing the number of chunks.  Each record written is then answered
     /// twice: `OzoneMsg::Written` once it is appended, and a final answer once it is durable under
@@ -476,7 +482,7 @@ impl<
         // bunch key naming chunks that are gone.
         let old = if deleted { None } else { res!(self.chunk_set_of(&k, schms2)) };
         let (kbuf, vbuf) = res!(Encode::encode_dat(k.clone(), v));
-        let (mut msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
+        let (msgs, datkeys) = res!(self.prepare_write_keyed(kbuf, vbuf, user, schms2, resp.clone(), None));
         let nchunks = msgs.len();
         // Every tombstone this store sends is stamped with the store's own time (see
         // `tombstone_chunk_key_at`).
@@ -498,7 +504,11 @@ impl<
                 if resp.is_some() {
                     res!(resp.send(OzoneMsg::Chunks(nchunks)));
                 }
-                res!(self.store_bytes(msgs));
+                let (head, chunks) = res!(Self::head_and_chunks(msgs));
+                if !res!(self.store_chunks_first(chunks, &resp)) {
+                    return Ok(nchunks);
+                }
+                res!(self.store_bytes(vec![head]));
                 if let Some((pkey, waits)) = retiring {
                     if let Err(e) = self.await_retired(&k, &pkey, waits) {
                         let e = err!(e,
@@ -524,15 +534,17 @@ impl<
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
-        let own = self.responder();
-        for (msg, _) in msgs.iter_mut() {
-            if let OzoneMsg::Write { resp, .. } = msg {
-                *resp = own.clone();
-            }
+        let (mut head, chunks) = res!(Self::head_and_chunks(msgs));
+        if !res!(self.store_chunks_first(chunks, &resp)) {
+            return Ok(nchunks);
         }
-        res!(self.store_bytes(msgs));
+        let own = self.responder();
+        if let (OzoneMsg::Write { resp, .. }, _) = &mut head {
+            *resp = own.clone();
+        }
+        res!(self.store_bytes(vec![head]));
         let acks = own.recv_write_acks(
-            nchunks,
+            1,
             constant::USER_REQUEST_TIMEOUT,
             constant::DURABILITY_TIMEOUT,
         );
@@ -554,9 +566,7 @@ impl<
                         self.ozid(), k, e);
                 }
                 if resp.is_some() {
-                    for _ in 0..nchunks {
-                        res!(resp.send(OzoneMsg::Written));
-                    }
+                    res!(resp.send(OzoneMsg::Written));
                     for ack in acks {
                         res!(resp.send(ack));
                     }
@@ -564,6 +574,92 @@ impl<
             },
         }
         Ok(nchunks)
+    }
+
+    // Stores the chunks of a chunked value and waits until every one is written, durable and
+    // readable.  Records are made readable one at a time, each when its own writer's barrier
+    // completes, so a bunch key sent beside its chunks was readable for as long as the slowest
+    // chunk took, and a reader in that window found a key whose chunks were "not found" (A3 round
+    // 2a, 2026-10-09; 115 broken reads in one run on a loaded disk).  The bunch key goes after
+    // this returns true, so that a reader finds the value it replaces, or none, until the value
+    // that names its chunks has all of them.  The chunks' answers are passed to `resp` as they
+    // stand, and the bunch key's follow from its own writer.
+    //
+    // Returns false when a chunk failed.  The caller has then been told, in `resp`, that the
+    // write failed and not that it is `Unconfirmed`, since nothing of the value will be published;
+    // the chunks that did land have no bunch key and wait for the orphan sweep.  Without a
+    // `resp`, the failure is the returned error.
+    fn store_chunks_first(
+        &self,
+        chunks: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
+        resp:   &Responder<UIDL, UID, ENC, KH>,
+    )
+        -> Outcome<bool>
+    {
+        let n = chunks.len();
+        if n == 0 {
+            return Ok(true);
+        }
+        let own = self.responder();
+        let mut chunks = chunks;
+        for (msg, _) in chunks.iter_mut() {
+            if let OzoneMsg::Write { resp, .. } = msg {
+                *resp = own.clone();
+            }
+        }
+        res!(self.store_bytes(chunks));
+        match own.recv_write_acks(
+            n,
+            constant::USER_REQUEST_TIMEOUT,
+            constant::DURABILITY_TIMEOUT,
+        ) {
+            Ok(acks) => {
+                if resp.is_some() {
+                    for _ in 0..n {
+                        res!(resp.send(OzoneMsg::Written));
+                    }
+                    for ack in acks {
+                        res!(resp.send(ack));
+                    }
+                }
+                Ok(true)
+            },
+            Err(e) => {
+                // A new error, not a wrapper: the tags of a chain are all reported, and the
+                // `Unconfirmed` of a chunk that was written but not confirmed would say a write
+                // that publishes nothing may yet land.
+                let e = if e.tags().contains(&ErrTag::Timeout) {
+                    err!("{}: Storing a chunked value, its {} chunks were not all written and \
+                        readable in time, so its bunch key was not written and nothing was \
+                        stored.  Chunks that landed wait for the orphan sweep: {}",
+                        self.ozid(), n, e;
+                        Write, Timeout)
+                } else {
+                    err!("{}: Storing a chunked value, a chunk failed, so its bunch key was not \
+                        written and nothing was stored.  Chunks that landed wait for the orphan \
+                        sweep: {}", self.ozid(), e;
+                        Write)
+                };
+                if resp.is_none() {
+                    return Err(e);
+                }
+                res!(resp.send(OzoneMsg::Error(e)));
+                Ok(false)
+            },
+        }
+    }
+
+    // The record that publishes a prepared write, which is the bunch key of a chunked value and
+    // the only record of any other, and the chunks that follow it.
+    fn head_and_chunks(
+        msgs: Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>,
+    )
+        -> Outcome<((OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd), Vec<(OzoneMsg<UIDL, UID, ENC, KH>, ZoneInd)>)>
+    {
+        let mut msgs = msgs.into_iter();
+        let head = res!(msgs.next().ok_or_else(|| err!(
+            "A prepared write holds no record."; Bug, Missing)));
+        Ok((head, msgs.collect()))
     }
 
     /// Store forcing the chunk set identifier rather than deriving it from the key.  Test and
@@ -593,7 +689,10 @@ impl<
         if resp.is_some() {
             res!(resp.send(OzoneMsg::Chunks(nchunks)));
         }
-        res!(self.store_bytes(msgs));
+        let (head, chunks) = res!(Self::head_and_chunks(msgs));
+        if res!(self.store_chunks_first(chunks, &resp)) {
+            res!(self.store_bytes(vec![head]));
+        }
         Ok(nchunks)
     }
 
