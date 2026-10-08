@@ -84,6 +84,13 @@
 //! dichromacies for checking that a palette does not lean on a colour distinction a
 //! colour-blind viewer cannot see.
 //!
+//! # ICC profiles
+//!
+//! [`icc`] reads an ICC profile -- the header, the tag table, the colorants and curves of a matrix
+//! profile and the lookup tables of a printer's -- and refuses, by tag and profile, a profile it
+//! cannot read rather than substituting another. It carries the matrix path and sRGB and sGray as
+//! formulas; the `fogra39` feature adds the bytes of FOGRA39L Coated.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 #![forbid(unsafe_code)]
@@ -94,6 +101,7 @@ pub mod colour;
 pub mod h264;
 pub mod heif;
 pub mod hevc;
+pub mod icc;
 pub mod jpeg;
 pub mod matroska;
 pub mod mp4;
