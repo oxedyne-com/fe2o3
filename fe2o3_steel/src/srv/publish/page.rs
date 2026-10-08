@@ -28,6 +28,7 @@ use crate::srv::publish::{
 	},
 	date_text,
 	read_mins,
+	subscribe::TRAP_FIELD,
 };
 
 #[cfg(test)]
@@ -310,7 +311,9 @@ fn index(
 	body.push_str("<p>New posts by email. Confirm once, unsubscribe from any message.</p>\n");
 	body.push_str("<form class=\"aside-subscribe\" method=\"post\" action=\"");
 	escape_attr(&mut body, &cfg.subscribe_path());
-	body.push_str("\">\n<input type=\"email\" name=\"email\" id=\"aside-subscribe-email\" \
+	body.push_str("\">\n");
+	body.push_str(&trap_field("aside-subscribe-hp", "aside-subscribe-website"));
+	body.push_str("<input type=\"email\" name=\"email\" id=\"aside-subscribe-email\" \
 		placeholder=\"you@example.com\" autocomplete=\"email\" aria-label=\"Email\" required>\n");
 	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
 	body.push_str("</form>\n</section>\n");
@@ -1008,6 +1011,14 @@ fn meta_name(out: &mut String, name: &str, content: &str) {
 // │ THE NEWSLETTER'S PUBLIC PAGES                                             │
 // └───────────────────────────────────────────────────────────────────────────┘
 
+// What a sign-up is told, in the words the page and the JSON answer share.
+pub const SENT_TEXT:		&str = "If that address can receive mail, a confirmation link is on its way. \
+	Follow it to start receiving posts. Nothing arrives until you do.";
+pub const INVALID_TEXT:		&str = "Check the address and try again. It should look like you@example.com.";
+pub const REFUSED_TEXT:		&str = "That request did not come from this site.";
+pub const UNAVAILABLE_TEXT:	&str = "Email subscriptions are not set up on this site at the moment. \
+	Nothing has been recorded.";
+
 /// The themed sign-up form, served at `GET {path}/subscribe`.
 ///
 /// A working, script-free form the site can link to directly, and the shape the site's own inline form
@@ -1019,7 +1030,9 @@ pub fn subscribe_form_page(cfg: &PublishConfig) -> HttpMessage {
 	body.push_str("<p>Get new posts by email. Confirm once, and unsubscribe from any message.</p>\n");
 	body.push_str("<form class=\"aside-subscribe\" id=\"aside-subscribe-form\" method=\"post\" action=\"");
 	escape_attr(&mut body, &cfg.subscribe_path());
-	body.push_str("\">\n<label for=\"aside-subscribe-email\">Email</label>\n");
+	body.push_str("\">\n");
+	body.push_str(&trap_field("aside-subscribe-hp", "aside-subscribe-website"));
+	body.push_str("<label for=\"aside-subscribe-email\">Email</label>\n");
 	body.push_str("<input type=\"email\" name=\"email\" id=\"aside-subscribe-email\" \
 		placeholder=\"you@example.com\" autocomplete=\"email\" required>\n");
 	body.push_str("<button type=\"submit\" class=\"aside-subscribe-btn\">Subscribe</button>\n");
@@ -1032,8 +1045,7 @@ pub fn subscribe_form_page(cfg: &PublishConfig) -> HttpMessage {
 pub fn subscribe_sent_page(cfg: &PublishConfig) -> HttpMessage {
 	let body = subscribe_result(
 		"Check your inbox",
-		"If that address can receive mail, a confirmation link is on its way. Follow it to start \
-		receiving posts. Nothing arrives until you do.",
+		SENT_TEXT,
 	);
 	subscribe_page(cfg, "Check your inbox", &body, HttpStatus::OK)
 }
@@ -1084,7 +1096,7 @@ pub fn subscribe_bad_token_page(cfg: &PublishConfig) -> HttpMessage {
 pub fn subscribe_invalid_page(cfg: &PublishConfig) -> HttpMessage {
 	let body = subscribe_result(
 		"That does not look like an email",
-		"Check the address and try again. It should look like you@example.com.",
+		INVALID_TEXT,
 	);
 	subscribe_page(cfg, "Check the address", &body, HttpStatus::OK)
 }
@@ -1094,7 +1106,7 @@ pub fn subscribe_invalid_page(cfg: &PublishConfig) -> HttpMessage {
 pub fn subscribe_unavailable_page(cfg: &PublishConfig) -> HttpMessage {
 	let body = subscribe_result(
 		"Signups are not available yet",
-		"Email subscriptions are not set up on this site at the moment. Nothing has been recorded.",
+		UNAVAILABLE_TEXT,
 	);
 	subscribe_page(cfg, "Not available", &body, HttpStatus::OK)
 }
@@ -2125,6 +2137,28 @@ mod tests {
 		}
 		Ok(())
 	}
+
+	/// Both sign-up forms, the standalone page and the one beneath the index, carry the field no
+	/// person fills in, off-screen and out of the tab order; and the comment form's is unchanged.
+	#[test]
+	fn test_both_subscribe_forms_carry_the_trap_field_31() -> Outcome<()> {
+		let c = cfg();
+		let own = String::from_utf8_lossy(&subscribe_form_page(&c).body).to_string();
+		let inline = String::from_utf8_lossy(&res!(index(&c, &[], &[], "", "test")).body).to_string();
+		for (what, body) in [("the sign-up page", own), ("the index's form", inline)] {
+			assert!(body.contains(r#"name="website" tabindex="-1" autocomplete="off""#),
+				"{} has no trap field: {}", what, body);
+			assert!(body.contains("left:-9999px"), "{}'s trap field is not off-screen: {}", what, body);
+		}
+		assert_eq!(trap_field("comment-hp", "comment-website"),
+			"<div class=\"comment-hp\" aria-hidden=\"true\" \
+			style=\"position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden\">\
+			<label for=\"comment-website\">Website</label>\
+			<input type=\"text\" id=\"comment-website\" name=\"website\" tabindex=\"-1\" \
+			autocomplete=\"off\"></div>\n",
+			"the comment form's trap field changed");
+		Ok(())
+	}
 }
 
 
@@ -2341,6 +2375,27 @@ fn edit_form(path: &str, c: &crate::srv::publish::comment::Comment, token: &str)
 	s
 }
 
+/// The field no person fills in, for a form to carry beside the real ones.
+///
+/// Every form that takes a public write wears the same one, under the same name
+/// ([`TRAP_FIELD`]), so what reads the field reads it once. The class and the id are the form's
+/// own, since two forms on a page cannot share an id.
+fn trap_field(class: &str, id: &str) -> String {
+	let mut s = String::from("<div class=\"");
+	escape_attr(&mut s, class);
+	s.push_str("\" aria-hidden=\"true\" \
+		style=\"position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden\">\
+		<label for=\"");
+	escape_attr(&mut s, id);
+	s.push_str("\">Website</label>\
+		<input type=\"text\" id=\"");
+	escape_attr(&mut s, id);
+	s.push_str("\" name=\"");
+	s.push_str(TRAP_FIELD);
+	s.push_str("\" tabindex=\"-1\" autocomplete=\"off\"></div>\n");
+	s
+}
+
 /// The form for writing one.
 ///
 /// Three things a reader does not see and one they do. The honeypot is a field a person cannot fill
@@ -2378,11 +2433,7 @@ fn comment_form(cfg: &PublishConfig, post: &Post, view: &CommentsView, parent: O
 	// stylesheet -- a site brings its own -- so a class here is a rule that may never exist, and a
 	// honeypot a reader can see is a field they will fill in and have their comment silently refused
 	// for. Measured in a browser: with only a class, it rendered as an ordinary visible input.
-	s.push_str("<div class=\"comment-hp\" aria-hidden=\"true\" \
-		style=\"position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden\">\
-		<label for=\"comment-website\">Website</label>\
-		<input type=\"text\" id=\"comment-website\" name=\"website\" tabindex=\"-1\" \
-		autocomplete=\"off\"></div>\n");
+	s.push_str(&trap_field("comment-hp", "comment-website"));
 
 	s.push_str("<div class=\"comment-fields\">\n");
 	s.push_str("<label class=\"comment-lbl\" for=\"comment-name\">Name\

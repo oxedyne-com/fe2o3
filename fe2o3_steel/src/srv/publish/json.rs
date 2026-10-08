@@ -31,6 +31,7 @@ use oxedyne_fe2o3_net::http::{
 		HeaderName,
 	},
 	msg::HttpMessage,
+	status::HttpStatus,
 };
 
 
@@ -150,6 +151,26 @@ pub fn serve(
 	Ok(cache::generated(resp))
 }
 
+/// What a public form is told when its caller asked for JSON: `{"said": ..., "message": ...}`.
+///
+/// `said` is a word a site's own front end can map to its own wording, and `message` is Steel's
+/// generic English for the same thing. The body is a pure function of the two, so every outcome that
+/// says the same thing says it in the same bytes.
+pub fn said(status: HttpStatus, said: &str, message: &str) -> Outcome<HttpMessage> {
+	let body_dat = create_dat_ordmap(vec![
+		(dat!("said"),		dat!(said.to_string())),
+		(dat!("message"),	dat!(message.to_string())),
+	]);
+	let json_cfg = EncoderConfig::<(), ()>::json(None);
+	let body_json = res!(body_dat.encode_string_with_config(&json_cfg));
+	let resp = HttpMessage::new_response(status)
+		.with_field(
+			HeaderName::ContentType,
+			HeaderFieldValue::Generic(fmt!("application/json")),
+		)
+		.with_body(body_json.into_bytes());
+	Ok(cache::generated(resp))
+}
 
 #[cfg(test)]
 mod tests {

@@ -46,6 +46,8 @@ pub mod send;
 pub mod store;
 pub mod subscribe;
 
+use crate::srv::cache;
+
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_datime::time::{
 	CalClock,
@@ -57,6 +59,12 @@ use oxedyne_fe2o3_iop_hash::api::Hasher;
 use oxedyne_fe2o3_jdat::{
 	prelude::*,
 	id::NumIdDat,
+};
+use oxedyne_fe2o3_net::http::{
+	fields::HeaderFields,
+	msg::HttpMessage,
+	origin::cross_site,
+	status::HttpStatus,
 };
 use oxedyne_fe2o3_text::doc::{
 	Block,
@@ -565,6 +573,35 @@ impl PublishConfig {
 		} else {
 			None
 		}
+	}
+
+	/// Refuses a public write that a browser sent from another site, or answers `None` to let it on.
+	///
+	/// The writes covered are the sign-up, a comment, a comment's edit and a comment's preview: each
+	/// is a form any page can aim a visitor's browser at. A one-click unsubscribe is not covered,
+	/// since a mail client posts it with no `Origin` and its token is the credential. The answer is a
+	/// `403`, in JSON (`{"said":"refused"}`) for a caller that asked for it. It is read from the
+	/// headers alone, so it costs no database read and a refused post stores nothing.
+	pub fn refuse_cross_site(
+		&self,
+		path:		&str,
+		headers:	&HeaderFields,
+		id:		&str,
+	)
+		-> Outcome<Option<HttpMessage>>
+	{
+		let is_write = self.subscription_of(path) == Some(Subscription::Subscribe)
+			|| self.comment_slug(path).is_some()
+			|| self.comment_edit_slug(path).is_some()
+			|| self.comment_preview_slug(path).is_some();
+		if !is_write || !cross_site(headers, &self.base_url) {
+			return Ok(None);
+		}
+		info!("{}: publish: a post to {} came from another site; refused", id, path);
+		if headers.wants_json() {
+			return Ok(Some(res!(json::said(HttpStatus::Forbidden, "refused", page::REFUSED_TEXT))));
+		}
+		Ok(Some(cache::generated(HttpMessage::respond_with_text(HttpStatus::Forbidden, "Forbidden."))))
 	}
 
 	fn confirm_bare_path(&self) -> String {

@@ -25,6 +25,7 @@
 
 use crate::srv::publish::{
 	PublishConfig,
+	json,
 	send::{
 		self,
 		MailSender,
@@ -52,7 +53,11 @@ use oxedyne_fe2o3_jdat::{
 	id::NumIdDat,
 };
 use oxedyne_fe2o3_net::{
-	http::msg::HttpMessage,
+	http::{
+		fields::HeaderFields,
+		msg::HttpMessage,
+		status::HttpStatus,
+	},
 	smtp::client::is_permanent,
 };
 
@@ -820,10 +825,54 @@ pub fn subscribe_form(cfg: &PublishConfig) -> HttpMessage {
 	page::subscribe_form_page(cfg)
 }
 
+/// What a sign-up is told, as a page or, for a caller asking for JSON, as `{"said", "message"}`.
+///
+/// `Sent` is every outcome that looks like success -- a new address, a pending one, a confirmed one,
+/// a trapped fill and a sender over its limit -- so it is no oracle for the list. A site may map
+/// `said` to its own words and ignore `message`, which is Steel's generic English.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Said {
+	Sent,
+	Invalid,
+	Unavailable,
+}
+
+impl Said {
+
+	fn as_str(&self) -> &'static str {
+		match self {
+			Self::Sent		=> "sent",
+			Self::Invalid		=> "invalid",
+			Self::Unavailable	=> "unavailable",
+		}
+	}
+
+	fn text(&self) -> &'static str {
+		match self {
+			Self::Sent		=> page::SENT_TEXT,
+			Self::Invalid		=> page::INVALID_TEXT,
+			Self::Unavailable	=> page::UNAVAILABLE_TEXT,
+		}
+	}
+
+	// The same answer in the form the caller asked for. All three are a 200, as the pages always were.
+	fn answer(self, cfg: &PublishConfig, headers: &HeaderFields) -> Outcome<HttpMessage> {
+		if headers.wants_json() {
+			return json::said(HttpStatus::OK, self.as_str(), self.text());
+		}
+		Ok(match self {
+			Self::Sent		=> page::subscribe_sent_page(cfg),
+			Self::Invalid		=> page::subscribe_invalid_page(cfg),
+			Self::Unavailable	=> page::subscribe_unavailable_page(cfg),
+		})
+	}
+}
+
 /// Records a pending sign-up and sends the confirmation, for a `POST {path}/subscribe`.
 ///
 /// Always answers the same "check your inbox" page, whether the address was new, pending or already
-/// confirmed, so nothing here reveals whether an address is on the list. Where mail is not configured,
+/// confirmed, so nothing here reveals whether an address is on the list. A caller whose `Accept`
+/// asks for JSON gets `{"said", "message"}` instead, with the same property. Where mail is not configured,
 /// or the site has no canonical origin to build an absolute confirmation link from, it says the
 /// newsletter is not set up rather than storing a pending subscriber it can never confirm.
 ///
@@ -854,6 +903,7 @@ pub async fn handle_subscribe<
 	cfg:	&PublishConfig,
 	db:	Option<&(Arc<RwLock<DB>>, UID)>,
 	mail:	&Option<Arc<MailSender>>,
+	hdrs:	&HeaderFields,
 	body:	&[u8],
 	from:	Option<&str>,
 	id:	&str,
@@ -862,18 +912,18 @@ pub async fn handle_subscribe<
 {
 	let db = match db {
 		Some(db)	=> db,
-		None		=> return Ok(page::subscribe_unavailable_page(cfg)),
+		None		=> return Said::Unavailable.answer(cfg, hdrs),
 	};
 	// The newsletter needs a sender to post the confirmation, and an absolute origin to build the link
 	// it carries. Missing either, the honest answer is that signup is not available -- not a pending row
 	// that will wait for a confirmation nothing can send.
 	let sender = match mail {
 		Some(m)	=> m,
-		None	=> return Ok(page::subscribe_unavailable_page(cfg)),
+		None	=> return Said::Unavailable.answer(cfg, hdrs),
 	};
 	if cfg.base_url.is_empty() {
 		warn!("{}: publish: a subscribe arrived but the site has no base_url for a confirm link", id);
-		return Ok(page::subscribe_unavailable_page(cfg));
+		return Said::Unavailable.answer(cfg, hdrs);
 	}
 
 	// The trap, read before the address: a filled one means nothing else about this submission is
@@ -881,7 +931,7 @@ pub async fn handle_subscribe<
 	let trap = crate::srv::console::form_field(body, TRAP_FIELD).unwrap_or_default();
 	if trapped(&trap) {
 		info!("{}: publish: a sign-up filled the field no person sees; dropped", id);
-		return Ok(page::subscribe_sent_page(cfg));
+		return Said::Sent.answer(cfg, hdrs);
 	}
 
 	// What this sender is allowed. A refusal costs one read and writes no subscriber, which is why
@@ -893,7 +943,7 @@ pub async fn handle_subscribe<
 		let w = Window::hourly(cfg.subscribe_rate_secs, cfg.subscribe_rate_hourly);
 		if !res!(rate::allow(db, &fmt!("{}{}", RATE_PREFIX, hashed), &w)) {
 			info!("{}: publish: a sender is signing up faster than this site allows", id);
-			return Ok(page::subscribe_sent_page(cfg));
+			return Said::Sent.answer(cfg, hdrs);
 		}
 	}
 
@@ -902,7 +952,7 @@ pub async fn handle_subscribe<
 	// A plainly malformed address is told so on its own page: that reveals nothing about the list, only
 	// about what was typed.
 	if !valid_email(&email) {
-		return Ok(page::subscribe_invalid_page(cfg));
+		return Said::Invalid.answer(cfg, hdrs);
 	}
 
 	match res!(add_pending(db, &email)) {
@@ -932,7 +982,7 @@ pub async fn handle_subscribe<
 		None		=> debug!("{}: publish: subscribe for an address already on the list", id),
 	}
 
-	Ok(page::subscribe_sent_page(cfg))
+	Said::Sent.answer(cfg, hdrs)
 }
 
 /// Confirms a pending subscriber, for a `GET {path}/confirm?token=...`.
