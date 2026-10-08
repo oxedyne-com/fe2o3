@@ -97,22 +97,28 @@ fn samples() -> Vec<Envelope> {
 	v.push(env(MsgKind::GetRequest { request_id: u64::MAX, table: "ledger".to_string(), id: rid(4) }));
 	v.push(env(MsgKind::GetResponse { request_id: 0, record: None }));
 	v.push(env(MsgKind::GetResponse { request_id: 7, record: Some(rec(5, "ledger", 40)) }));
-	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: payload(6, 5000) }));
-	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: Vec::new() }));
-	// AntiEntropyReply: both bulk settings, empty and full vectors.
+	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: payload(6, 5000), after: None }));
+	v.push(env(MsgKind::AntiEntropyDigest { table: "ledger".to_string(), sketch: Vec::new(), after: Some(rid(14)) }));
+	// AntiEntropyReply: both bulk settings, empty and full vectors, and every cursor shape.
 	for bulk in [false, true] {
-		v.push(env(MsgKind::AntiEntropyReply {
-			table:			"ledger".to_string(),
-			records:		Vec::new(),
-			requested_ids:	Vec::new(),
-			bulk,
-		}));
-		v.push(env(MsgKind::AntiEntropyReply {
-			table:			"ledger".to_string(),
-			records:		vec![rec(7, "ledger", 10), rec(8, "ledger", 0)],
-			requested_ids:	vec![rid(9), rid(10), rid(11)],
-			bulk,
-		}));
+		for (after, next) in [(None, None), (Some(rid(15)), None), (None, Some(rid(16))), (Some(rid(15)), Some(rid(16)))] {
+			v.push(env(MsgKind::AntiEntropyReply {
+				table:			"ledger".to_string(),
+				records:		Vec::new(),
+				requested_ids:	Vec::new(),
+				bulk,
+				after,
+				next,
+			}));
+			v.push(env(MsgKind::AntiEntropyReply {
+				table:			"ledger".to_string(),
+				records:		vec![rec(7, "ledger", 10), rec(8, "ledger", 0)],
+				requested_ids:	vec![rid(9), rid(10), rid(11)],
+				bulk,
+				after,
+				next,
+			}));
+		}
 	}
 	v.push(env(MsgKind::AntiEntropyPush { table: "ledger".to_string(), records: Vec::new() }));
 	v.push(env(MsgKind::AntiEntropyPush { table: "ledger".to_string(), records: vec![rec(12, "ledger", 300)] }));
@@ -267,10 +273,10 @@ fn wire_layout_is_pinned() -> Outcome<()> {
 			])]),
 		),
 		(
-			env(MsgKind::AntiEntropyDigest { table: "t".to_string(), sketch: payload(1, 4) }),
+			env(MsgKind::AntiEntropyDigest { table: "t".to_string(), sketch: payload(1, 4), after: Some(rid(8)) }),
 			list(vec![Dat::U8(1), b32(1), b32(2), list(vec![
 				Dat::U8(4),
-				list(vec![s("t"), Dat::BU64(payload(1, 4))]),
+				list(vec![s("t"), Dat::BU64(payload(1, 4)), opt(Some(b32(8)))]),
 			])]),
 		),
 		(
@@ -279,10 +285,15 @@ fn wire_layout_is_pinned() -> Outcome<()> {
 				records:		vec![rec(5, "t", 1)],
 				requested_ids:	vec![rid(6), rid(7)],
 				bulk:			true,
+				after:			None,
+				next:			Some(rid(9)),
 			}),
 			list(vec![Dat::U8(1), b32(1), b32(2), list(vec![
 				Dat::U8(5),
-				list(vec![s("t"), list(vec![record_dat(5, "t", 1)]), list(vec![b32(6), b32(7)]), Dat::Bool(true)]),
+				list(vec![
+					s("t"), list(vec![record_dat(5, "t", 1)]), list(vec![b32(6), b32(7)]), Dat::Bool(true),
+					opt(None), opt(Some(b32(9))),
+				]),
 			])]),
 		),
 		(
@@ -457,12 +468,16 @@ fn decode_refuses_malformed() -> Outcome<()> {
 	assert_refused("phase 255", &vote(Dat::U8(255), Dat::U16(3)));
 	assert_refused("a phase as U16", &vote(Dat::U16(2), Dat::U16(3)));
 	assert_refused("a voter as U8", &vote(Dat::U8(2), Dat::U8(3)));
-	let reply = |bulk: Dat| bdat(&list(vec![
+	let reply_with = |bulk: Dat, after: Dat, next: Dat| bdat(&list(vec![
 		Dat::U8(1), b32(1), b32(2),
-		list(vec![Dat::U8(5), list(vec![s("t"), list(vec![]), list(vec![]), bulk])]),
+		list(vec![Dat::U8(5), list(vec![s("t"), list(vec![]), list(vec![]), bulk, after, next])]),
 	]));
+	let reply = |bulk: Dat| reply_with(bulk, opt(None), opt(Some(b32(4))));
 	assert!(Envelope::decode(&reply(Dat::Bool(true))).is_ok(), "The baseline reply must decode.");
 	assert_refused("bulk as a number", &reply(Dat::U8(1)));
+	assert_refused("a cursor without its option", &reply_with(Dat::Bool(true), b32(4), opt(None)));
+	assert_refused("a cursor option holding a number", &reply_with(Dat::Bool(true), opt(None), opt(Some(Dat::U8(4)))));
+	assert_refused("a cursor of the wrong length", &reply_with(Dat::Bool(true), opt(Some(Dat::BU64(vec![1, 2]))), opt(None)));
 	let get = |rec: Dat| bdat(&list(vec![
 		Dat::U8(1), b32(1), b32(2),
 		list(vec![Dat::U8(3), list(vec![Dat::U64(1), rec])]),
@@ -484,6 +499,8 @@ fn decode_accepts_only_what_encode_writes() -> Outcome<()> {
 			records:		vec![rec(5, "t", 2)],
 			requested_ids:	vec![rid(6)],
 			bulk:			true,
+			after:			Some(rid(2)),
+			next:			None,
 		}),
 	];
 	seeds.push(env(MsgKind::CohortNewView {

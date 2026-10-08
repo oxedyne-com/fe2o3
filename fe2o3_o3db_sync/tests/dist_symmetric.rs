@@ -229,13 +229,15 @@ fn digest_envelope(from: u8, to: u8, sketch: Vec<u8>) -> Envelope {
 	Envelope::new(node(from), node(to), MsgKind::AntiEntropyDigest {
 		table:	"identity".to_string(),
 		sketch,
+		after:	None,
 	})
 }
 
 
 // One id at two values among twenty shared records: the sketch decodes, the reply is not bulk,
-// and it carries that one record and asks for that one id. The dialler resolves, so the push
-// carries the newer value whichever side held it.
+// and it carries that one record and asks for that one id. The dialler resolves, so both peers end
+// on the newer value; the push carries it only when the dialler held it, and is empty when it took
+// the listener's own bytes.
 #[test]
 fn value_divergence_decodes_without_bulk() -> Outcome<()> {
 	let v1 = ver(1, b"old");
@@ -256,8 +258,11 @@ fn value_divergence_decodes_without_bulk() -> Outcome<()> {
 		assert!(!legs.bulk, "{}: a value difference made the exchange bulk", who);
 		assert_eq!(legs.records, vec![rec(rid(100), lv)], "{}: the reply", who);
 		assert_eq!(legs.requested, vec![rid(100)], "{}: the ids asked for", who);
-		assert_eq!(legs.pushes, 1, "{}: the pushes", who);
-		assert_eq!(legs.pushed, vec![rec(rid(100), &v2)], "{}: the push", who);
+		// The push offers the listener the dialler's value only when the listener lacks it:
+		// when the listener's own newer bytes were taken, they are not sent back.
+		let (pushes, pushed) = if dialler_newer { (1, vec![rec(rid(100), &v2)]) } else { (0, Vec::new()) };
+		assert_eq!(legs.pushes, pushes, "{}: the pushes", who);
+		assert_eq!(legs.pushed, pushed, "{}: the push", who);
 		assert_eq!(res!(stored(&d, rid(100))), Some(v2.clone()), "{}: the dialler", who);
 		assert_eq!(res!(stored(&l, rid(100))), Some(v2.clone()), "{}: the listener", who);
 		assert_eq!(res!(table_ids(&d)).len(), 21);
@@ -392,6 +397,8 @@ fn duplicate_requests_and_records_applied_once() -> Outcome<()> {
 		records:		vec![r.clone(), r.clone(), q.clone(), r.clone()],
 		requested_ids:	vec![rid(7), rid(7), rid(8), rid(7), rid(8)],
 		bulk:			false,
+		after:			None,
+		next:			None,
 	});
 	let out = res!(e.handle_envelope_at(env, 1_000));
 	assert_eq!(e.resolver().calls.load(Ordering::SeqCst), 2, "the resolver saw a repeated record");
@@ -423,6 +430,8 @@ fn bulk_push_names_each_record_once() -> Outcome<()> {
 		records:		vec![rec(rid(3), &ver(1, b"b")), rec(rid(4), &ver(1, b"d"))],
 		requested_ids:	vec![rid(1), rid(1)],
 		bulk:			true,
+		after:			None,
+		next:			None,
 	});
 	let out = res!(e.handle_envelope_at(env, 1_000));
 	assert_eq!(out.outbound.len(), 1);

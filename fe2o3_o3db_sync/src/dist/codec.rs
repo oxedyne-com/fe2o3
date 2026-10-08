@@ -147,6 +147,13 @@ fn opt_dat(o: Option<Dat>) -> Dat {
 	Dat::Opt(Box::new(o))
 }
 
+fn maybe_to_dat<T: ToDat>(item: &Option<T>) -> Outcome<Dat> {
+	match item {
+		Some(t)	=> Ok(opt_dat(Some(res!(t.to_dat())))),
+		None	=> Ok(opt_dat(None)),
+	}
+}
+
 fn list_to_dat<T: ToDat>(items: &[T]) -> Outcome<Dat> {
 	let mut v = Vec::with_capacity(items.len());
 	for item in items {
@@ -477,20 +484,23 @@ impl ToDat for MsgKind {
 					}),
 				]),
 			),
-			Self::AntiEntropyDigest { table, sketch } => (
+			Self::AntiEntropyDigest { table, sketch, after } => (
 				KIND_ANTI_ENTROPY_DIGEST,
 				Dat::List(vec![
 					Dat::Str(table.clone()),
 					Dat::BU64(sketch.clone()),
+					res!(maybe_to_dat(after)),
 				]),
 			),
-			Self::AntiEntropyReply { table, records, requested_ids, bulk } => (
+			Self::AntiEntropyReply { table, records, requested_ids, bulk, after, next } => (
 				KIND_ANTI_ENTROPY_REPLY,
 				Dat::List(vec![
 					Dat::Str(table.clone()),
 					res!(list_to_dat(records)),
 					res!(list_to_dat(requested_ids)),
 					Dat::Bool(*bulk),
+					res!(maybe_to_dat(after)),
+					res!(maybe_to_dat(next)),
 				]),
 			),
 			Self::AntiEntropyPush { table, records } => (
@@ -558,19 +568,22 @@ impl FromDat for MsgKind {
 				})
 			},
 			KIND_ANTI_ENTROPY_DIGEST => {
-				let mut b = res!(Fields::open(body, "AntiEntropyDigest", 2));
+				let mut b = res!(Fields::open(body, "AntiEntropyDigest", 3));
 				Ok(Self::AntiEntropyDigest {
 					table:	res!(b.string("table")),
 					sketch:	res!(b.bytes("sketch")),
+					after:	res!(b.maybe::<RecordId>("after")),
 				})
 			},
 			KIND_ANTI_ENTROPY_REPLY => {
-				let mut b = res!(Fields::open(body, "AntiEntropyReply", 4));
+				let mut b = res!(Fields::open(body, "AntiEntropyReply", 6));
 				Ok(Self::AntiEntropyReply {
 					table:			res!(b.string("table")),
 					records:		res!(b.items::<Record>("records")),
 					requested_ids:	res!(b.items::<RecordId>("requested_ids")),
 					bulk:			res!(b.bool("bulk")),
+					after:			res!(b.maybe::<RecordId>("after")),
+					next:			res!(b.maybe::<RecordId>("next")),
 				})
 			},
 			KIND_ANTI_ENTROPY_PUSH => {
