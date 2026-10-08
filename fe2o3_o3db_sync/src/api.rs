@@ -15,7 +15,10 @@ use crate::{
         bot_zone::ZoneState,
         worker::{
             bot::WorkerType,
-            bot_file::GcControl,
+            bot_file::{
+                Hold,
+                GcControl,
+            },
             bot_reader::ReadResult,
         },
     },
@@ -46,11 +49,16 @@ use crate::{
     },
     file::{
         core::FileEntry,
-        state::FileStateMap,
+        floc::FileNum,
+        state::{
+            FileState,
+            FileStateMap,
+        },
         zdir::ZoneDir,
     },
 };
 
+use oxedyne_fe2o3_core::channels::Recv;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::PartKey,
@@ -75,7 +83,10 @@ use oxedyne_fe2o3_namex::id::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::{
         Path,
         PathBuf,
@@ -86,6 +97,15 @@ use std::{
     },
 };
 
+
+// What `OzoneApi::compact_now` did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactReport {
+    pub files_collected:    usize,  // files a collection was started on
+    pub files_deleted:      usize,  // files removed for holding only old records
+    pub bytes_before:       u64,    // length of the zone directories before the call rolled the live files
+    pub bytes_after:        u64,    // the same once nothing sealed held an old byte
+}
 
 #[derive(Clone, Debug)]
 pub struct OzoneApi<
@@ -1759,6 +1779,117 @@ impl<
             };
         }
         Ok(map)
+    }
+
+    /// Collects every old byte that a write acknowledged before the call left behind, and returns
+    /// once none is held by a sealed file, or fails at the deadline naming each file that still
+    /// holds one and why.
+    ///
+    /// The live files are rolled first, since a live file is never collected, then the accounting
+    /// barrier makes every supersession of an acknowledged write visible to the file bots.  Every
+    /// quarter of a second the file bots are ordered to collect what they hold, `Force::Yes`, which
+    /// waives the collector's trigger fraction and its switches and nothing that protects a read:
+    /// a file with a reader, a move in flight or a writer still draining is asked again, not
+    /// collected.  A zone bot that cannot pass the order on fails the call at once, not at the
+    /// deadline.
+    pub fn compact_now(&self, deadline: Duration) -> Outcome<CompactReport> {
+        let emsg = "compaction";
+        let start = Instant::now();
+        let left = |start: &Instant| deadline.saturating_sub(start.elapsed());
+        let wait = |d: Duration| Wait {
+            max_wait:       d,
+            check_interval: constant::CHECK_INTERVAL.min(d),
+        };
+        let bytes_before = res!(self.size_bytes(wait(deadline)));
+        res!(self.new_live_files());
+        res!(self.settle(left(&start)));
+
+        let resp = self.responder();
+        let chan = res!(resp.channel().ok_or_else(|| err!(
+            "{}: The responder for {} has no channel.", self.ozid(), emsg; Channel, Missing)));
+        let mut collected = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        let mut waiting: BTreeMap<WorkerInd, Vec<(FileNum, Hold)>> = BTreeMap::new();
+        let mut ordered: Option<Instant> = None;
+        loop {
+            if start.elapsed() > deadline {
+                // The files that still hold old bytes, from the state the last pass saw.
+                let states = res!(self.collect_file_states(constant::USER_REQUEST_WAIT));
+                let mut held = Vec::new();
+                for (wind, fmap) in &states {
+                    for (fnum, fstat) in fmap.map() {
+                        if Self::holds_old_bytes(fstat) {
+                            let why = match waiting.get(wind).and_then(|w| w.iter().find(|(f, _)| f == fnum)) {
+                                Some((_, hold)) => hold.why(),
+                                None if fstat.gc_active() => "collecting",
+                                None => "not yet ordered",
+                            };
+                            held.push(fmt!("file {} of zone {} ({})", fnum, wind.z() + 1, why));
+                        }
+                    }
+                }
+                return Err(err!(
+                    "{}: The {} did not finish within {:?}.  Sealed files still holding old bytes: {}.",
+                    self.ozid(), emsg, deadline, held.join(", ");
+                    Channel, Timeout));
+            }
+            if ordered.map_or(true, |t| t.elapsed() >= Duration::from_millis(250)) {
+                if let Err(e) = self.chans().sup().send(
+                    OzoneMsg::GcControl(GcControl::Compact, resp.clone())
+                ) {
+                    return Err(err!(e,
+                        "{}: Cannot send the {} order to supervisor.", self.ozid(), emsg;
+                        Channel, Write));
+                }
+                ordered = Some(Instant::now());
+            }
+            // Reports, until the file bots are quiet for a moment.  A failed order ends the wait.
+            while let Recv::Result(Ok(msg)) = chan.recv_timeout(Duration::from_millis(50)) {
+                match msg {
+                    OzoneMsg::CompactReport { wind, started, deleted: gone, waiting: held } => {
+                        for fnum in started {
+                            collected.insert((wind, fnum));
+                        }
+                        for fnum in gone {
+                            deleted.insert((wind, fnum));
+                        }
+                        waiting.insert(wind, held);
+                    },
+                    OzoneMsg::Error(e) => return Err(err!(e,
+                        "{}: In response to the {} order.", self.ozid(), emsg;
+                        Channel)),
+                    msg => return Err(err!(
+                        "{}: Unexpected response to the {} order: {:?}", self.ozid(), emsg, msg;
+                        Channel, Unexpected)),
+                }
+            }
+            let states = res!(self.collect_file_states(wait(left(&start).max(Duration::from_millis(1)))));
+            let mut pending = false;
+            for (_wind, fmap) in &states {
+                for (_fnum, fstat) in fmap.map() {
+                    pending |= Self::holds_old_bytes(fstat);
+                }
+            }
+            if !pending {
+                break;
+            }
+        }
+        let bytes_after = res!(self.size_bytes(wait(left(&start).max(Duration::from_millis(1)))));
+        Ok(CompactReport {
+            files_collected:    collected.len(),
+            files_deleted:      deleted.len(),
+            bytes_before,
+            bytes_after,
+        })
+    }
+
+    // Does a sealed file hold bytes that a collection would remove, or is one at work on it?
+    fn holds_old_bytes(fstat: &FileState) -> bool {
+        !fstat.is_live() && (
+            fstat.gc_active() ||
+            fstat.get_old_sum() > 0 ||
+            (!fstat.data_map_empty() && fstat.is_all_old())
+        )
     }
 
     /// Instruct the wbots to increment to their next live files, to provide a clean slate for

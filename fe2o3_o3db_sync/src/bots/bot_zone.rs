@@ -7,7 +7,10 @@ use crate::{
     },
     bots::{
         base::bot_deps::*,
-        worker::bot::WorkerType,
+        worker::{
+            bot::WorkerType,
+            bot_file::GcControl,
+        },
     },
     comm::{
         channels::{
@@ -168,6 +171,16 @@ impl<
                     match self.fwd_msg_to_pool(&WorkerType::Cache, msg) {
                         Err(e) => self.error(e),
                         Ok(_) => (),
+                    }
+                },
+                OzoneMsg::GcControl(GcControl::Compact, resp) => {
+                    // Each file bot answers the caller itself with its own report, so the zone
+                    // bot owes the caller nothing but the failure to pass the order on.
+                    if let Err(e) = self.fwd_msg_to_pool(&WorkerType::File,
+                        OzoneMsg::GcControl(GcControl::Compact, resp.clone()),
+                    ) {
+                        self.error(e.clone());
+                        self.respond(Err(e), &resp);
                     }
                 },
                 OzoneMsg::GcControl(gc_ctrl, resp) => {

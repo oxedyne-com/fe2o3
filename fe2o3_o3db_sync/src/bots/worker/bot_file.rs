@@ -84,7 +84,7 @@ enum Plan {
 pub enum GcControl {
     On(bool), // switch gc on or off
     Auto(bool), // set auto gc
-    Manual(FileNum), // file number
+    Compact, // collect every file with old bytes now; each fbot answers with a `CompactReport`
 }
 
 #[derive(Debug)]
@@ -523,16 +523,51 @@ impl<
                 );
                 self.respond(result, &resp);
             },
-            OzoneMsg::GcControl(gc_ctrl, _) => {
+            OzoneMsg::GcControl(gc_ctrl, resp) => {
                 match gc_ctrl {
                     GcControl::On(state) => self.gc_on = state,
                     GcControl::Auto(state) => self.auto_gc = state,
-                    GcControl::Manual(_) => warn!(sync_log::stream(), "Manual gc not yet implemented."),
+                    GcControl::Compact => self.compact(&resp),
                 }
             }
             _ => return self.listen_more(msg),
         }
         LoopBreak(false)
+    }
+
+    /// Orders the collection of every sealed file of this shard that holds old bytes, or holds
+    /// nothing, and answers with what each came to.  A file held by something is asked again
+    /// when the caller asks again, which is what `OzoneApi::compact_now` does until none is.
+    fn compact(&mut self, resp: &Responder<UIDL, UID, ENC, KH>) {
+        let mut cands = Vec::new();
+        for (fnum, fstat) in self.states().map() {
+            if !fstat.is_live() && (fstat.get_old_sum() > 0 || fstat.is_all_old()) {
+                let mut path = self.zdir().dir.clone();
+                path.push(ZoneDir::relative_file_path(&FileType::Data, *fnum));
+                if path.is_file() {
+                    cands.push(*fnum);
+                }
+            }
+        }
+        let (mut started, mut deleted, mut waiting) = (Vec::new(), Vec::new(), Vec::new());
+        for fnum in cands {
+            match self.maybe_collect(fnum, Force::Yes) {
+                Ok(Collect::Started)    => started.push(fnum),
+                Ok(Collect::Deleted)    => deleted.push(fnum),
+                Ok(Collect::Held(hold)) => waiting.push((fnum, hold)),
+                Ok(Collect::Declined)   => (), // Force::Yes leaves nothing to decline.
+                Err(e) => {
+                    self.error(e);
+                    waiting.push((fnum, Hold::Fault));
+                },
+            }
+        }
+        self.respond(Ok(OzoneMsg::CompactReport {
+            wind: self.wind().clone(),
+            started,
+            deleted,
+            waiting,
+        }), resp);
     }
 
     /// Capture read and write messages related to a file in a buffer while its garbage is being

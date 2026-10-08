@@ -10,7 +10,10 @@ use crate::{
     },
     bots::{
         worker::{
-            bot_file::GcControl,
+            bot_file::{
+                GcControl,
+                Hold,
+            },
             bot_reader::ReadResult,
         },
         bot_zone::ZoneState,
@@ -174,6 +177,12 @@ pub enum OzoneMsg<
     },
     // Respond
     Chunks(usize), // Number of chunks.
+    CompactReport {         // fbot -> caller of `compact_now`, one per file bot per round
+        wind:       WorkerInd,
+        started:    Vec<FileNum>,           // collections begun this round
+        deleted:    Vec<FileNum>,           // files that held only old records, removed
+        waiting:    Vec<(FileNum, Hold)>,   // files with old bytes, and what holds each
+    },
     DumpCacheResponse(WorkerInd, Cache<UIDL, UID>),
     DumpFileStatesResponse(WorkerInd, FileStateMap),
     Error(Error<ErrTag>),

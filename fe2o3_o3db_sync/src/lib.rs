@@ -170,4 +170,7 @@ pub mod oam; // Oxegen Allocation Mechanism placement primitive for the distribu
 #[cfg(feature = "dist")]
 pub mod dist;
 
-pub use crate::db::O3db;
+pub use crate::{
+    api::CompactReport,
+    db::O3db,
+};
