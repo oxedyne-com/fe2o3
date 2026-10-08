@@ -2966,6 +2966,11 @@ async fn do_newsletter<
 		}
 		Err(e)			=> {
 			warn!("{}: console: '{}' newsletter '{}' failed: {}", id, who, slug, e);
+			if e.tags().contains(&ErrTag::Exists) {
+				return Ok(subs_back_with(
+					&fmt!("newsletter '{}' is still being sent; it can be queued again once it has gone", slug),
+					json));
+			}
 			Ok(subs_back_with("the newsletter could not be queued; the log says why", json))
 		}
 	}

@@ -558,8 +558,24 @@ pub fn queued<
 {
 	let (db_arc, _) = db;
 	let guard = lock_read!(db_arc);
-	let head = res!(counter_in(&*guard, &head_key(kind)));
-	let tail = res!(counter_in(&*guard, &tail_key(kind)));
+	queued_in(&*guard, kind)
+}
+
+/// As [`queued`], on a database already locked.
+pub fn queued_in<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	dbr:	&DB,
+	kind:	Kind,
+)
+	-> Outcome<u64>
+{
+	let head = res!(counter_in(dbr, &head_key(kind)));
+	let tail = res!(counter_in(dbr, &tail_key(kind)));
 	Ok(tail.saturating_sub(head))
 }
 

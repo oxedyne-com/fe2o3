@@ -521,3 +521,30 @@ async fn test_a_signup_taken_then_erased_is_refused_when_applied_10() -> Outcome
     assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 0, "an erased sign-up was queued again");
     Ok(())
 }
+// F2b A9: a post still being sent is not queued a second time, and may be again once it has drained.
+#[tokio::test]
+async fn test_a_post_still_being_sent_is_not_queued_twice_14() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let _ = res!(live_post_and_readers(&handle, "on-rent", "r", 3));
+    let sender = res!(MailSender::new("mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let sender = sender.with_outbound_hourly(3600);
+    let first = res!(send::send_newsletter(&sender, &handle, "on-rent", "test"));
+    assert_eq!(first.attempted, 3);
+    assert!(send::send_newsletter(&sender, &handle, "on-rent", "test").is_err(),
+        "a post with three messages waiting was queued again");
+    assert_eq!(res!(outbox::queued(&handle, Kind::News)), 3, "the refused send queued messages");
+    assert_eq!(res!(send::send_history(&handle)).len(), 1, "the refused send was recorded");
+    // Another post is not held up by it.
+    let _ = res!(live_post_and_readers(&handle, "on-work", "w", 0));
+    assert_eq!(res!(send::send_newsletter(&sender, &handle, "on-work", "test")).attempted, 3,
+        "a different post was refused");
+
+    let fake = Fake::default();
+    res!(run_hour(&handle, &fake, sender.pacer()).await);
+    assert_eq!(fake.count(), 6, "both posts were not sent to all three");
+    assert_eq!(res!(send::send_newsletter(&sender, &handle, "on-rent", "test")).attempted, 3,
+        "a drained send was refused a second");
+    Ok(())
+}
+

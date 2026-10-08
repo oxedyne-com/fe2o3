@@ -1246,6 +1246,11 @@ fn as_usize(d: Option<&Dat>) -> usize {
 /// Appends one send to the history, reading the list and writing it back with the entry on the end.
 /// Answers the entry's place in the history, which the queued messages name.
 ///
+/// Refused where the post's latest send still has messages waiting while the newsletter lane holds any,
+/// since a second send would mail every one of them twice. The test and the write are one step under the
+/// write guard, so two sends begun together cannot both pass. A tally that disagrees with an empty lane
+/// (a queue lost to a fault) is not waited on.
+///
 /// Index-driven, no scan: the whole history is one list under [`SENDS_KEY`], read, pushed to, and
 /// written -- the same shape the subscriber index takes. Newest is last on disk; [`send_history`] hands
 /// it back newest first.
@@ -1261,12 +1266,24 @@ pub fn record_send<
 )
 	-> Outcome<usize>
 {
-	// Under the write guard, so two sends recorded together both land in the list.
-	store::update(db, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, usize)> {
-		let mut items = res!(sends_of(old));
-		items.push(entry.to_dat());
-		let at = items.len() - 1;
-		Ok((store::Edit::Set(Dat::List(items)), at))
+	store::exclusive(db, |dbr, user| -> Outcome<usize> {
+		store::edit_in(dbr, user, &dat!(SENDS_KEY), |old| -> Outcome<(store::Edit, usize)> {
+			let mut items = res!(sends_of(old));
+			let latest = items.iter().rev()
+				.map(SendEntry::from_dat)
+				.find(|e| e.slug == entry.slug);
+			if let Some(prev) = latest {
+				if prev.waiting() > 0 && res!(outbox::queued_in(dbr, Kind::News)) > 0 {
+					return Err(err!(
+						"publish: '{}' is still being sent, with {} message(s) waiting, so it is not \
+						queued again.", entry.slug, prev.waiting();
+						Exists, Input));
+				}
+			}
+			items.push(entry.to_dat());
+			let at = items.len() - 1;
+			Ok((store::Edit::Set(Dat::List(items)), at))
+		})
 	})
 }
 
