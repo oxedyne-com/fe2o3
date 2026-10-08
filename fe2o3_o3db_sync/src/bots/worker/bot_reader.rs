@@ -30,6 +30,7 @@ use crate::{
         },
         stored::StoredKey,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_iop_db::api::Meta;
@@ -377,6 +378,7 @@ impl<
             if postgc {
                 self.drop_cached_file(fnum, &FileType::Data);
             }
+            hooks::read_delay();
             let result = self.read_checked(floc, &key, &meta);
 
             // <8> Advise the fbot that reading has finished so it can decrement the reader count it

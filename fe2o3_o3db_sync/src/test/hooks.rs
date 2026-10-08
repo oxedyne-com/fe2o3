@@ -22,6 +22,7 @@ static FORWARD_DELAY_MS: AtomicU64  = AtomicU64::new(0);      // before a supers
 static SCHEDULE_DELAY_MS: AtomicU64 = AtomicU64::new(0);      // before a received supersession is handled
 static SCHEDULES_HELD:   AtomicU64  = AtomicU64::new(0);      // handled after the hold above
 static INSERT_DELAY_MS:  AtomicU64  = AtomicU64::new(0);      // before each cache bot insert
+static READ_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a reader's pin and its read
 static TOMB_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // before a cache bot enters a chunk tombstone
 static LIST_DELAY_MS:    AtomicU64  = AtomicU64::new(0);      // between a directory's listing and its opens
 static SUP_PANICS:       AtomicBool = AtomicBool::new(false); // the supervisor panics starting up
@@ -32,6 +33,7 @@ static SYNCERS_STOPPED:  AtomicU64  = AtomicU64::new(0);      // stopped by the 
 static PAIR_HAND_FAILS:  AtomicBool = AtomicBool::new(false); // new live pairs cannot be handed over
 static COLLECT_FAILS:    AtomicBool = AtomicBool::new(false); // every collection fails before it commits
 static COLLECTS_FAILED:  AtomicU64  = AtomicU64::new(0);      // failed by the switch above
+static COMPACT_FAILS:    AtomicBool = AtomicBool::new(false); // the zone bots cannot pass on a compaction order
 
 /// Holds every durability barrier this long before it syncs, as an fsync queued behind the rest
 /// of a busy disk's writes would be held.
@@ -76,6 +78,12 @@ pub fn set_schedule_delay(d: Duration) {
 /// just before the file bot registers it.
 pub fn schedules_held() -> u64 {
     SCHEDULES_HELD.load(Ordering::Relaxed)
+}
+
+/// Holds a reader this long after its file bot has pinned the file for it and before it reads, as
+/// a reader on a slow disk would be, so that a file can be kept pinned while a test looks at it.
+pub fn set_read_delay(d: Duration) {
+    READ_DELAY_MS.store(millis(d), Ordering::Relaxed);
 }
 
 /// Holds every cache bot insert this long, as a cache bot behind a long queue would, so that a
@@ -139,9 +147,20 @@ pub fn set_collect_failure(on: bool) {
     COLLECT_FAILS.store(on, Ordering::Relaxed);
 }
 
+/// Makes every zone bot fail to pass a compaction order on to its file bots, as a zone bot whose
+/// file pool has gone would, so that the call that gave the order can be seen to stop at the
+/// zone bot's error and not wait out its deadline.
+pub fn set_compact_failure(on: bool) {
+    COMPACT_FAILS.store(on, Ordering::Relaxed);
+}
+
 /// How many collections `set_collect_failure` has failed so far.
 pub fn collections_failed() -> u64 {
     COLLECTS_FAILED.load(Ordering::Relaxed)
+}
+
+pub(crate) fn compact_fails() -> bool {
+    COMPACT_FAILS.load(Ordering::Relaxed)
 }
 
 pub(crate) fn barrier_delay() {
@@ -169,6 +188,10 @@ pub(crate) fn schedule_delay() {
         pause(&SCHEDULE_DELAY_MS);
         SCHEDULES_HELD.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+pub(crate) fn read_delay() {
+    pause(&READ_DELAY_MS);
 }
 
 pub(crate) fn insert_delay() {

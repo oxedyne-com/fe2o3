@@ -462,6 +462,15 @@ impl<
     )
         -> Outcome<usize>
     {
+        // A store of the deleted marker is a delete by another road, the one the distributed
+        // adapters erase by, and it supersedes only the bunch key.  The chunks of a chunked value
+        // live under keys of their own, so they are retired here, as `delete` retires them, or
+        // their bytes would stay live in the data files for ever.
+        if let Dat::Usr(kind, _) = &v {
+            if *kind == id::usr_kind_id_deleted() {
+                res!(self.reclaim_chunks_on_delete(&k, user, schms2));
+            }
+        }
         let msgs = res!(self.prepare_write_dat(
             k,
             v,

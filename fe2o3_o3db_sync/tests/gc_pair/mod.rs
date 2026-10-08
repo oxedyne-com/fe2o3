@@ -14,7 +14,10 @@ use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     O3db,
-    base::cfg::OzoneConfig,
+    base::{
+        cfg::OzoneConfig,
+        constant,
+    },
     data::core::RestSchemesInput,
     file::{
         core::FileType,
@@ -236,4 +239,34 @@ pub fn settled_len(root: &Path, cfg: &OzoneConfig) -> u64 {
         }
     }
     last
+}
+
+/// The data files under the zone root, collection temporaries included, that hold the needle
+/// anywhere in their bytes, found by reading each whole file with nothing of the store's own.
+pub fn dat_files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![cfg.zone_root(root)];
+    while let Some(d) = stack.pop() {
+        if let Ok(list) = fs::read_dir(&d) {
+            for entry in list.flatten() {
+                let p = entry.path();
+                match entry.metadata() {
+                    Ok(m) if m.is_dir() => stack.push(p),
+                    Ok(m) if m.is_file() => {
+                        let dat = p.extension().map_or(false, |e| e == constant::DATA_FILE_EXT);
+                        if dat {
+                            if let Ok(bytes) = fs::read(&p) {
+                                if needle.len() <= bytes.len() && bytes.windows(needle.len()).any(|w| w == needle) {
+                                    found.push(p);
+                                }
+                            }
+                        }
+                    },
+                    _ => (),
+                }
+            }
+        }
+    }
+    found.sort();
+    found
 }

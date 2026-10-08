@@ -176,9 +176,14 @@ impl<
                 OzoneMsg::GcControl(GcControl::Compact, resp) => {
                     // Each file bot answers the caller itself with its own report, so the zone
                     // bot owes the caller nothing but the failure to pass the order on.
-                    if let Err(e) = self.fwd_msg_to_pool(&WorkerType::File,
-                        OzoneMsg::GcControl(GcControl::Compact, resp.clone()),
-                    ) {
+                    let sent = if hooks::compact_fails() {
+                        Err(err!("{}: Test hook: the compaction order cannot be passed to the file \
+                            bots.", self.ozid(); Test, Channel, Write))
+                    } else {
+                        self.fwd_msg_to_pool(&WorkerType::File,
+                            OzoneMsg::GcControl(GcControl::Compact, resp.clone()))
+                    };
+                    if let Err(e) = sent {
                         self.error(e.clone());
                         self.respond(Err(e), &resp);
                     }
