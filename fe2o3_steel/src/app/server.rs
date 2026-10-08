@@ -1003,6 +1003,8 @@ async fn open_dbs_on_unseal(
         return;
     }
     let handle = tokio::runtime::Handle::current();
+    // Each drainer tells the operator through the host's alerter, where there is one.
+    let alerter = admin_state.alerter().cloned();
 
     let enc_key = match admin_state.await_master_key().await {
         Ok(k) => k,
@@ -1046,6 +1048,7 @@ async fn open_dbs_on_unseal(
                     cfg.clone(),
                     mail.clone(),
                     mail.pacer().clone(),
+                    alerter.clone(),
                     spec.vhost_key.clone(),
                 ));
             }

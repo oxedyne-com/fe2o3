@@ -214,6 +214,22 @@ pub enum AlertEvent {
         lost:       u32,        // the deliveries that failed in the episode
         were_secs:  u64,        // from the first of them to this success
     },
+    // A site's outbound queue is not draining: its oldest entry has waited past the site's
+    // threshold, because the ceiling is held at 0, or set low against a long newsletter, or the
+    // drainer is stuck. Told once for the episode, and daily while it lasts, as a channel failure is.
+    OutboxBacklog {
+        site:        String,    // the vhost whose queue it is
+        queued:      u64,       // entries waiting
+        oldest_secs: u64,       // how long the oldest has waited
+        hourly:      u32,       // the host's ceiling, 0 holding every send
+    },
+    // The end of that story, owed so that a held queue the operator then released is seen to have
+    // emptied.
+    OutboxCleared {
+        site:       String,
+        were_secs:  u64,        // from the first telling to the queue being back under its threshold
+        sent:       u64,        // messages sent while it lasted
+    },
 }
 
 /// How loudly an event should be delivered.
@@ -251,6 +267,9 @@ impl AlertEvent {
             Self::ChannelFailing { channel: Channel::Mail, .. }	=> Severity::Critical,
             Self::ChannelFailing { channel: Channel::Sms, .. }	=> Severity::Notice,
             Self::ChannelRestored { .. }			=> Severity::Notice,
+            // The queue is the site's own mail, so it is told by mail, not by text.
+            Self::OutboxBacklog { .. }				=> Severity::Notice,
+            Self::OutboxCleared { .. }				=> Severity::Notice,
         }
     }
 
@@ -301,6 +320,11 @@ impl AlertEvent {
                 "[steel:{}] {} FAILING ({} in a row)", host, channel.alerts(), failures),
             Self::ChannelRestored { channel, were_secs, .. } => fmt!(
                 "[steel:{}] {} working again after {}m", host, channel.alerts(), were_secs / 60),
+            Self::OutboxBacklog { site, queued, oldest_secs, .. } => fmt!(
+                "[steel:{}] {} mail backed up: {} waiting, the oldest {}m",
+                host, site, queued, oldest_secs / 60),
+            Self::OutboxCleared { site, were_secs, .. } => fmt!(
+                "[steel:{}] {} mail queue cleared after {}m", host, site, were_secs / 60),
         }
     }
 
@@ -423,6 +447,32 @@ impl AlertEvent {
                 Those alerts were not sent again. Each is in the log on {host}, under \
                 \"ALERT NOT DELIVERED\".\n",
                 host = host, by = channel.by(), lost = lost, mins = were_secs / 60),
+            Self::OutboxBacklog { site, queued, oldest_secs, hourly } => fmt!(
+                "The mail queue for {site} on {host} is not draining.\n\n\
+                Waiting: {queued}\n\
+                Oldest:  {mins} minute(s)\n\
+                Ceiling: {ceiling}\n\n\
+                {why} A confirmation is sent before any newsletter, and a ceiling is shared by every \
+                site on this host, because the address and the domain carry one reputation. Nothing \
+                has been dropped. This is repeated once a day while the queue stays behind, and the \
+                queue draining ends it with a message of its own.\n",
+                site = site, host = host, queued = queued, mins = oldest_secs / 60,
+                ceiling = if *hourly == 0 {
+                    fmt!("0 an hour, which holds every send")
+                } else {
+                    fmt!("{} an hour", hourly)
+                },
+                why = if *hourly == 0 {
+                    "The ceiling is 0, so nothing leaves until `mail.outbound_hourly` is raised."
+                } else {
+                    "At this ceiling a long newsletter takes hours to go out, or the mail host is \
+                    refusing it; the log says which."
+                }),
+            Self::OutboxCleared { site, were_secs, sent } => fmt!(
+                "The mail queue for {site} on {host} is back under its threshold.\n\n\
+                Sent:  {sent} message(s) while it was behind\n\
+                Over:  {mins} minute(s)\n",
+                site = site, host = host, sent = sent, mins = were_secs / 60),
         }
     }
 }

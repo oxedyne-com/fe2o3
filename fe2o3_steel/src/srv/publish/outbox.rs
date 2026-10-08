@@ -20,19 +20,36 @@
 //! one reputation, not one for each site. The pacer spaces sends evenly (no bursts), and it is held
 //! in memory, so a restart can add at most one send to the schedule.
 //!
+//! # The two lanes, and the alert
+//!
+//! A confirmation waits in the `c` lane and the newsletter in the `n` lane, and the drainer empties
+//! `c` first, so a sign-up is never kept behind a newsletter. A [`Watch`] reads the queue after each
+//! pass and tells the operator once when the oldest entry has waited past `outbox_alert_secs`, which a
+//! held ceiling and a deep queue both cause, and once more when the queue has drained.
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
-use crate::srv::publish::{
-	PublishConfig,
-	send,
-	store::{
-		self,
-		Edit,
+use crate::srv::{
+	alert::{
+		AlertEvent,
+		Alerter,
 	},
-	subscribe::{
-		self,
-		SubState,
+	publish::{
+		PostState,
+		PublishConfig,
+		send::{
+			self,
+			Fate,
+		},
+		store::{
+			self,
+			Edit,
+		},
+		subscribe::{
+			self,
+			SubState,
+		},
 	},
 };
 
@@ -81,7 +98,13 @@ const PUSH_CHUNK: usize = 64;
 const HOUR_MS: u64 = 3_600_000;
 
 // The lanes, in the order they are drained.
-const KINDS: [Kind; 1] = [Kind::Confirm];
+const KINDS: [Kind; 2] = [Kind::Confirm, Kind::News];
+
+const DAY_SECS: u64 = 86_400;
+
+// How many places from the head of a lane to look for an entry that can be read, when the head
+// itself cannot be. A queue is not walked from end to end to find its age.
+const HEAD_LOOK: u64 = 16;
 
 
 // ┌───────────────────────────────────────────────────────────────────────────┐
@@ -184,6 +207,7 @@ pub trait Courier {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
 	Confirm,	// a double opt-in confirmation, drained first
+	News,		// one subscriber's copy of a post
 }
 
 impl Kind {
@@ -191,12 +215,14 @@ impl Kind {
 	pub fn as_str(&self) -> &'static str {
 		match self {
 			Self::Confirm	=> "confirm",
+			Self::News	=> "news",
 		}
 	}
 
 	pub fn of(s: &str) -> Option<Self> {
 		match s {
 			"confirm"	=> Some(Self::Confirm),
+			"news"		=> Some(Self::News),
 			_		=> None,
 		}
 	}
@@ -204,6 +230,7 @@ impl Kind {
 	fn lane(&self) -> &'static str {
 		match self {
 			Self::Confirm	=> "c",
+			Self::News	=> "n",
 		}
 	}
 }
@@ -214,6 +241,7 @@ pub struct Entry {
 	pub kind:	Kind,
 	pub email:	String,		// normalised
 	pub slug:	String,		// the post, for a newsletter entry; empty otherwise
+	pub send:	u64,		// the place of the send in the history, for a newsletter entry; 0 otherwise
 	pub enqueued:	u64,		// unix seconds the entry was first queued, kept through retries
 	pub tries:	u32,		// attempts that have failed
 	pub next_try:	u64,		// unix seconds before which the entry is not tried
@@ -227,10 +255,17 @@ impl Entry {
 			kind,
 			email:		email.to_string(),
 			slug:		slug.to_string(),
+			send:		0,
 			enqueued:	now,
 			tries:		0,
 			next_try:	now,
 		}
+	}
+
+	/// This entry, counted on the history entry at `index`.
+	pub fn for_send(mut self, index: u64) -> Self {
+		self.send = index;
+		self
 	}
 
 	pub fn to_dat(&self) -> Dat {
@@ -239,6 +274,7 @@ impl Entry {
 		m.insert(dat!("email"),		dat!(self.email.clone()));
 		if !self.slug.is_empty() {
 			m.insert(dat!("slug"),	dat!(self.slug.clone()));
+			m.insert(dat!("send"),	dat!(self.send));
 		}
 		m.insert(dat!("enqueued"),	dat!(self.enqueued));
 		m.insert(dat!("tries"),		dat!(self.tries as u64));
@@ -270,6 +306,7 @@ impl Entry {
 			kind,
 			email,
 			slug:		text("slug"),
+			send:		number(m.get(&dat!("send"))),
 			enqueued:	number(m.get(&dat!("enqueued"))),
 			tries:		number(m.get(&dat!("tries"))).min(u32::MAX as u64) as u32,
 			next_try:	number(m.get(&dat!("next_try"))),
@@ -555,7 +592,8 @@ pub fn retry<
 /// What one pass of the drainer did.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Step {
-	Worked,		// an entry was sent, skipped or given up; call again at once
+	Sent,		// a message was accepted by the far end; call again at once
+	Worked,		// an entry was skipped, refused, retried or given up; call again at once
 	Wait(u64),	// the next slot is this many milliseconds away
 	Later(u64),	// every entry is backing off; the soonest is this many seconds away
 	Idle,		// nothing is queued
@@ -612,6 +650,7 @@ pub async fn step<
 	};
 	match entry.kind {
 		Kind::Confirm	=> confirm_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
+		Kind::News	=> news_step(db, cfg, courier, pacer, id, now_ms, seq, entry).await,
 	}
 }
 
@@ -654,8 +693,10 @@ async fn confirm_step<
 	let from = cfg.from_or(courier.default_from());
 	let url = cfg.url_of(&cfg.confirm_path(&sub.token));
 	let msg = send::build_confirmation_email(&from, &sub.email, &url, &cfg.site_name);
+	let mut step = Step::Worked;
 	match courier.deliver(&from, &sub.email, &msg).await {
 		Ok(_)	=> {
+			step = Step::Sent;
 			info!("{}: publish: confirmation sent to {}", id, subscribe::redact(&sub.email));
 			// Gone first, so a failure after the send can never send it twice.
 			res!(done(db, entry.kind, seq));
@@ -694,13 +735,300 @@ async fn confirm_step<
 			}
 		}
 	}
+	Ok(step)
+}
+
+// Counts how a newsletter message ended on the send it belongs to. A history that will not take the
+// count does not undo the send, so it is logged and the drainer carries on.
+fn tally<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	entry:	&Entry,
+	fate:	Fate,
+	id:	&str,
+) {
+	if let Err(e) = send::tally_send(db, entry.send as usize, fate) {
+		warn!("{}: publish: could not count a newsletter message as {:?}: {}", id, fate, e);
+	}
+}
+
+// A newsletter message that is no longer owed: the post is no longer live, or the subscriber has gone.
+// It leaves the queue and the send set, and uses no slot.
+fn left<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	entry:	&Entry,
+	seq:	u64,
+	id:	&str,
+)
+	-> Outcome<Step>
+{
+	debug!("{}: publish: newsletter '{}' to {} skipped, no longer owed",
+		id, entry.slug, subscribe::redact(&entry.email));
+	res!(done(db, entry.kind, seq));
+	tally(db, entry, Fate::Left, id);
 	Ok(Step::Worked)
+}
+
+async fn news_step<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	C:	Courier,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&PublishConfig,
+	courier: &C,
+	pacer:	&Pacer,
+	id:	&str,
+	now_ms:	u64,
+	seq:	u64,
+	entry:	Entry,
+)
+	-> Outcome<Step>
+{
+	let now = now_ms / 1000;
+	// Re-read at send time: a post unpublished, or a subscriber who has left, since the entry was
+	// queued is owed nothing, and the unsubscribe link carries the token the record holds now.
+	let rec = match res!(store::get(db, &entry.slug)) {
+		Some(r) if r.state == PostState::Live	=> r,
+		_					=> return left(db, &entry, seq, id),
+	};
+	let sub = match res!(subscribe::get(db, &entry.email)) {
+		Some(s) if s.state == SubState::Confirmed	=> s,
+		_						=> return left(db, &entry, seq, id),
+	};
+	// Rendered before the slot is claimed, so a post that will not render costs no slot.
+	let post = match rec.render() {
+		Ok(p)	=> p,
+		Err(e)	=> {
+			warn!("{}: publish: newsletter '{}' will not render, so {} is not sent it: {}",
+				id, entry.slug, subscribe::redact(&entry.email), e);
+			res!(done(db, entry.kind, seq));
+			tally(db, &entry, Fate::Failed, id);
+			return Ok(Step::Worked);
+		}
+	};
+	match res!(pacer.claim(now_ms)) {
+		Pace::Held	=> return Ok(Step::Held),
+		Pace::Wait(ms)	=> return Ok(Step::Wait(ms)),
+		Pace::Go	=> {}
+	}
+	let from = cfg.from_or(courier.default_from());
+	let online = cfg.url_of(&cfg.path_of(&entry.slug));
+	let unsub = cfg.url_of(&cfg.unsubscribe_path(&sub.token));
+	let msg = send::build_newsletter_email(&from, &sub.email, &post, &online, &unsub, &cfg.site_name);
+	let mut step = Step::Worked;
+	match courier.deliver(&from, &sub.email, &msg).await {
+		Ok(qid)	=> {
+			step = Step::Sent;
+			debug!("{}: publish: newsletter '{}' to {} ({})",
+				id, entry.slug, subscribe::redact(&sub.email), qid);
+			// Gone first, so a failure after the send can never send it twice.
+			res!(done(db, entry.kind, seq));
+			tally(db, &entry, Fate::Sent, id);
+		}
+		// A permanent failure suppresses the address so no future send reaches it.
+		Err(e) if is_permanent(&e)	=> {
+			warn!("{}: publish: newsletter '{}' to {} failed permanently; suppressing: {}",
+				id, entry.slug, subscribe::redact(&sub.email), e);
+			res!(done(db, entry.kind, seq));
+			tally(db, &entry, Fate::Suppressed, id);
+			if let Err(e2) = subscribe::mark_bounced(db, &sub.email, id) {
+				warn!("{}: publish: could not suppress {}: {}",
+					id, subscribe::redact(&sub.email), e2);
+			}
+		}
+		Err(e)	=> {
+			let tries = entry.tries + 1;
+			if tries >= TRIES_MAX {
+				warn!("{}: publish: newsletter '{}' to {} given up after {} tries: {}",
+					id, entry.slug, subscribe::redact(&sub.email), tries, e);
+				res!(done(db, entry.kind, seq));
+				tally(db, &entry, Fate::Failed, id);
+			} else {
+				warn!("{}: publish: newsletter '{}' to {} did not send, try {}: {}",
+					id, entry.slug, subscribe::redact(&sub.email), tries, e);
+				let next = Entry {
+					tries,
+					next_try:	now + retry_after(tries),
+					..entry
+				};
+				res!(retry(db, seq, &next));
+			}
+		}
+	}
+	Ok(step)
+}
+
+
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ WATCH                                                                     │
+// └───────────────────────────────────────────────────────────────────────────┘
+
+/// What the queue holds, as the alert reads it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Stats {
+	pub queued:	u64,		// entries in every lane, including those backing off
+	pub oldest:	Option<u64>,	// unix second the oldest lane head was first queued; None if empty
+}
+
+/// Reads the queue's depth and the age of what waits longest at the head of a lane.
+///
+/// An entry retried goes to the tail but keeps the time it was first queued, so a lane's head is its
+/// oldest entry except while one is backing off, which [`retry_after`] keeps well inside any alert
+/// threshold worth setting.
+pub fn stats<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+)
+	-> Outcome<Stats>
+{
+	let (db_arc, _) = db;
+	let guard = lock_read!(db_arc);
+	let mut out = Stats::default();
+	for kind in KINDS {
+		let head = res!(counter_in(&*guard, &head_key(kind)));
+		let tail = res!(counter_in(&*guard, &tail_key(kind)));
+		if tail <= head {
+			continue;
+		}
+		out.queued += tail - head;
+		let end = tail.min(head.saturating_add(HEAD_LOOK));
+		for at in head..end {
+			if let Ok(Some(e)) = entry_in(&*guard, kind, at) {
+				out.oldest = Some(out.oldest.map_or(e.enqueued, |o| o.min(e.enqueued)));
+				break;
+			}
+		}
+	}
+	Ok(out)
+}
+
+/// Tells one backlog episode apart from the next, so the operator hears of each once.
+///
+/// An episode begins when the oldest entry has waited longer than the threshold, is told again each
+/// day it lasts, and ends when the queue is back under it. It lives in memory, so a restart during a
+/// backlog begins a new episode and tells it again.
+#[derive(Clone, Debug, Default)]
+pub struct Watch {
+	since:	Option<u64>,	// unix second the episode was first told
+	told:	u64,		// unix second of the latest telling
+	sent:	u64,		// messages sent since the episode began
+}
+
+impl Watch {
+
+	/// Counts a message sent, if an episode is open.
+	pub fn sent(&mut self) {
+		if self.since.is_some() {
+			self.sent += 1;
+		}
+	}
+
+	/// What, if anything, the operator is owed at `now`, given what the queue holds. A `limit` of 0
+	/// turns the alert off.
+	pub fn note(&mut self, site: &str, st: &Stats, hourly: u32, limit: u64, now: u64)
+		-> Option<AlertEvent>
+	{
+		let waited = st.oldest.map_or(0, |o| now.saturating_sub(o));
+		let over = limit > 0 && st.queued > 0 && waited > limit;
+		match (over, self.since) {
+			(true, None)		=> {
+				self.since = Some(now);
+				self.told = now;
+				self.sent = 0;
+				Some(AlertEvent::OutboxBacklog {
+					site:		site.to_string(),
+					queued:		st.queued,
+					oldest_secs:	waited,
+					hourly,
+				})
+			}
+			(true, Some(_))		=> {
+				if now.saturating_sub(self.told) < DAY_SECS {
+					return None;
+				}
+				self.told = now;
+				Some(AlertEvent::OutboxBacklog {
+					site:		site.to_string(),
+					queued:		st.queued,
+					oldest_secs:	waited,
+					hourly,
+				})
+			}
+			(false, Some(since))	=> {
+				let sent = self.sent;
+				*self = Self::default();
+				Some(AlertEvent::OutboxCleared {
+					site:		site.to_string(),
+					were_secs:	now.saturating_sub(since),
+					sent,
+				})
+			}
+			(false, None)		=> None,
+		}
+	}
+}
+
+/// One pass of the drainer, then a look at the queue: the step it took and the alert it owes.
+pub async fn tick<
+	const UIDL: usize,
+	UID:	NumIdDat<UIDL>,
+	ENC:	Encrypter,
+	KH:	Hasher,
+	DB:	Database<UIDL, UID, ENC, KH>,
+	C:	Courier,
+>(
+	db:	&(Arc<RwLock<DB>>, UID),
+	cfg:	&PublishConfig,
+	courier: &C,
+	pacer:	&Pacer,
+	watch:	&mut Watch,
+	id:	&str,
+	now_ms:	u64,
+)
+	-> Outcome<(Step, Option<AlertEvent>)>
+{
+	let stepped = res!(step(db, cfg, courier, pacer, id, now_ms).await);
+	if stepped == Step::Sent {
+		watch.sent();
+	}
+	let st = res!(stats(db));
+	let owed = watch.note(id, &st, pacer.hourly(), cfg.outbox_alert_secs, now_ms / 1000);
+	Ok((stepped, owed))
+}
+
+// Tells the operator, or says in the log that nobody can be told.
+fn tell(alerter: &Option<Alerter>, id: &str, event: AlertEvent) {
+	match alerter {
+		Some(a)	=> a.raise(event),
+		None	=> warn!("{}: publish: {} (no alerter is configured, so nobody is told)",
+			id, event.subject(id)),
+	}
 }
 
 /// Drains a vhost's queue for as long as the server runs.
 ///
 /// Sleeps until the next slot, or until something is queued, or for [`POLL_SECS`], whichever is
-/// first. A pass that fails is logged and tried again after the poll interval, never in a tight
+/// first, and tells the operator through `alerter` what the [`Watch`] finds. A pass that fails is logged and tried again after the poll interval, never in a tight
 /// loop.
 pub async fn run<
 	const UIDL: usize,
@@ -714,20 +1042,28 @@ pub async fn run<
 	cfg:	Arc<PublishConfig>,
 	courier: Arc<C>,
 	pacer:	Arc<Pacer>,
+	alerter: Option<Alerter>,
 	id:	String,
 ) {
 	info!("{}: publish: the outbox drainer is running at {} an hour", id, pacer.hourly());
+	let mut watch = Watch::default();
 	loop {
 		// Registered before the pass, so a push during it is not missed.
 		let woken = pacer.wake.notified();
 		tokio::pin!(woken);
 		woken.as_mut().enable();
-		let nap_ms = match step(&db, &cfg, &*courier, &pacer, &id, now_ms()).await {
-			Ok(Step::Worked)	=> continue,
-			Ok(Step::Wait(ms))	=> ms,
-			Ok(Step::Later(s))	=> s.min(POLL_SECS).saturating_mul(1000),
-			Ok(Step::Idle)		=> POLL_SECS * 1000,
-			Ok(Step::Held)		=> POLL_SECS * 1000,
+		let nap_ms = match tick(&db, &cfg, &*courier, &pacer, &mut watch, &id, now_ms()).await {
+			Ok((stepped, owed))	=> {
+				if let Some(event) = owed {
+					tell(&alerter, &id, event);
+				}
+				match stepped {
+					Step::Sent | Step::Worked	=> continue,
+					Step::Wait(ms)			=> ms,
+					Step::Later(s)			=> s.min(POLL_SECS).saturating_mul(1000),
+					Step::Idle | Step::Held		=> POLL_SECS * 1000,
+				}
+			}
 			Err(e)			=> {
 				warn!("{}: publish: the outbox drainer failed: {}", id, e);
 				POLL_SECS * 1000

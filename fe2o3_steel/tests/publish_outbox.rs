@@ -10,8 +10,11 @@
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_net::http::fields::HeaderFields;
 use oxedyne_fe2o3_steel::srv::{
+    alert::AlertEvent,
     id,
     publish::{
+        Markup,
+        PostState,
         PublishConfig,
         Source,
         outbox::{
@@ -21,9 +24,17 @@ use oxedyne_fe2o3_steel::srv::{
             Kind,
             Pacer,
             Step,
+            Watch,
         },
         rate::Window,
-        send::MailSender,
+        send::{
+            self,
+            MailSender,
+        },
+        store::{
+            self,
+            Record,
+        },
         subscribe::{
             self,
             SubState,
@@ -107,7 +118,7 @@ async fn run_hour(db: &Handle, fake: &Fake, pacer: &Pacer) -> Outcome<()> {
     let mut now = T0;
     loop {
         match res!(outbox::step(db, &cfg, fake, pacer, "test", now).await) {
-            Step::Worked    => {},
+            Step::Sent | Step::Worked   => {},
             Step::Wait(ms)  => {
                 if now + ms >= T0 + HOUR_MS {
                     break;
@@ -173,5 +184,105 @@ async fn test_a_record_no_longer_pending_is_skipped_02() -> Outcome<()> {
     let sent = fake.to.lock().map(|v| v.clone()).unwrap_or_default();
     assert_eq!(sent, vec![emails[1].clone()], "a confirmed address was sent a confirmation");
     assert_eq!(res!(outbox::queued(&handle, Kind::Confirm)), 0, "the skipped entry stayed queued");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_a_backlog_is_told_once_and_cleared_once_when_it_drains_03() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    // Three confirmations queued at T0, behind a ceiling held at 0.
+    let mut entries = Vec::new();
+    for i in 0..3 {
+        let email = fmt!("b{}@site.test", i);
+        res!(subscribe::add_pending(&handle, &email, &Window::default(), 1));
+        entries.push(Entry::new(Kind::Confirm, &email, "", T0 / 1000));
+    }
+    res!(outbox::push(&handle, &entries));
+    let cfg = PublishConfig { outbox_alert_secs: 3600, ..cfg() };
+    let (fake, held, mut watch) = (Fake::default(), Pacer::new(0), Watch::default());
+    let mut told = Vec::new();
+    // Three hours held, polled every ten minutes.
+    for m in (0..=180u64).step_by(10) {
+        let (_, owed) = res!(outbox::tick(
+            &handle, &cfg, &fake, &held, &mut watch, "test", T0 + m * 60_000).await);
+        if let Some(e) = owed {
+            told.push((m, e));
+        }
+    }
+    assert_eq!(told.len(), 1, "a backlog lasting three hours was told {} times, not once", told.len());
+    assert_eq!(told[0].0, 70, "the backlog was not told at the first poll past the threshold");
+    assert!(matches!(&told[0].1, AlertEvent::OutboxBacklog { queued: 3, hourly: 0, .. }),
+        "the backlog told the wrong thing: {:?}", told[0].1);
+    assert_eq!(fake.count(), 0, "a held ceiling sent mail");
+
+    // The ceiling is raised, and the queue drains.
+    let open = Pacer::new(3600);
+    let mut now = T0 + 180 * 60_000;
+    let mut cleared = Vec::new();
+    for _ in 0..20 {
+        let (stepped, owed) = res!(outbox::tick(
+            &handle, &cfg, &fake, &open, &mut watch, "test", now).await);
+        if let Some(e) = owed {
+            cleared.push(e);
+        }
+        match stepped {
+            Step::Wait(ms)  => now += ms,
+            Step::Idle      => break,
+            _               => {},
+        }
+    }
+    assert_eq!(fake.count(), 3, "the released queue did not send all three");
+    assert_eq!(cleared.len(), 1, "draining told {} things, not one", cleared.len());
+    assert!(matches!(&cleared[0], AlertEvent::OutboxCleared { sent: 3, .. }),
+        "draining told the wrong thing: {:?}", cleared[0]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_a_newsletter_is_paced_by_the_ceiling_and_waits_behind_confirmations_04() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    let rec = Record {
+        slug:       fmt!("on-rent"),
+        author:     String::new(),
+        categories: Vec::new(),
+        state:      PostState::Live,
+        markup:     Markup::Markdown,
+        date:       Some(fmt!("2026-07-17")),
+        source:     fmt!("# On rent\n\nAn opening sentence.\n"),
+        deliveries: Vec::new(),
+        tags:       Vec::new(),
+        ai_level:   None,
+    };
+    res!(store::put(&handle, &rec, "test"));
+    // Ten confirmed subscribers.
+    for i in 0..10 {
+        let email = fmt!("n{}@site.test", i);
+        res!(subscribe::add_pending(&handle, &email, &Window::default(), 1));
+        let sub = res!(subscribe::get(&handle, &email));
+        let sub = res!(sub.ok_or_else(|| err!("no subscriber"; Test, Missing)));
+        let _ = res!(subscribe::confirm(&handle, &sub.token, "test"));
+    }
+    let sender = res!(MailSender::new(
+        "mail.site.test".to_string(), Vec::new(), "news@site.test".to_string()));
+    let sender = sender.with_outbound_hourly(3);
+    let report = res!(send::send_newsletter(&sender, &handle, "on-rent", "test"));
+    assert_eq!(report.attempted, 10, "the newsletter was not queued for all ten");
+    assert_eq!(res!(outbox::queued(&handle, Kind::News)), 10);
+    // A sign-up queued after the newsletter.
+    res!(subscribe::add_pending(&handle, "late@site.test", &Window::default(), 1));
+    res!(outbox::push(&handle, &[Entry::new(Kind::Confirm, "late@site.test", "", T0 / 1000)]));
+
+    let fake = Fake::default();
+    res!(run_hour(&handle, &fake, sender.pacer()).await);
+    let to = fake.to.lock().map(|v| v.clone()).unwrap_or_default();
+    assert_eq!(to.len(), 3, "a ceiling of 3 an hour sent {} messages in the hour", to.len());
+    assert_eq!(to[0], "late@site.test", "the newsletter went before the confirmation");
+    let hist = res!(send::send_history(&handle));
+    assert_eq!(hist.len(), 1);
+    assert_eq!((hist[0].attempted, hist[0].sent, hist[0].waiting()), (10, 2, 8),
+        "the send's tally did not follow the queue");
+    assert_eq!(res!(outbox::queued(&handle, Kind::News)), 8);
     Ok(())
 }

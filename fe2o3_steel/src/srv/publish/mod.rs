@@ -196,6 +196,10 @@ pub struct PublishConfig {
 	pub confirm_interval_secs:	u64,
 	pub confirm_max:		u32,
 	pub confirm_window_days:	u64,
+	// How long the oldest entry in this site's outbound queue may wait, in seconds, before the
+	// operator is told the queue is not draining (`0` is off). It catches a ceiling held at 0 and a
+	// newsletter that the ceiling will take hours to send alike, and is told once for the episode.
+	pub outbox_alert_secs:		u64,
 	// Whether this site takes comments on its posts. Off unless a site asks for it: a comment
 	// endpoint is an unauthenticated public write, and turning one on for every site that happens
 	// to publish prose -- which is what a default of `true` would do -- is not a decision this
@@ -347,6 +351,7 @@ impl PublishConfig {
 			confirm_interval_secs:	res!(get_count("confirm_interval_secs", 86_400)),
 			confirm_max:		res!(get_count("confirm_max", 3)) as u32,
 			confirm_window_days:	res!(get_count("confirm_window_days", 30)),
+			outbox_alert_secs:	res!(get_count("outbox_alert_secs", 3600)),
 			comments:		match m.get(&dat!("comments")) {
 				Some(Dat::Bool(b))	=> *b,
 				None			=> false,

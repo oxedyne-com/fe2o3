@@ -220,6 +220,7 @@ mod tests {
 			confirm_interval_secs:	0,
 			confirm_max:		0,
 			confirm_window_days:	0,
+			outbox_alert_secs:	0,
 			newsletter_from:	String::new(),
 			categories:		vec![],
 			default_author:		String::new(),
