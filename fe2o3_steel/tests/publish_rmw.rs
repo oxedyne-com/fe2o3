@@ -137,3 +137,32 @@ fn concurrent_first_callers_share_one_secret() -> Outcome<()> {
     }
     Ok(())
 }
+
+/// An author's edit and an admin's approval of the same comment, racing, never lose the edit.
+#[test]
+fn concurrent_edit_and_moderation_keep_the_edit() -> Outcome<()> {
+    let (db, uid, _tmp) = res!(common::test_db());
+    let handle = (db, uid);
+    for round in 0..40 {
+        let id = fmt!("c{}", round);
+        res!(comment::put(&handle, &comment::Comment {
+            id:         id.clone(),
+            slug:       fmt!("post"),
+            body:       fmt!("the original words"),
+            created:    fmt!("2026-10-09T00:00:00Z"),
+            ..Default::default()
+        }));
+        let results = together(8, |i| {
+            if i % 2 == 0 {
+                text(comment::edit(&handle, "post", &id, "the edited words").map(|_| ()))
+            } else {
+                text(comment::set_state(&handle, "post", &id, comment::CommentState::Approved, None).map(|_| ()))
+            }
+        });
+        res!(all_ok(results));
+        let got = res!(comment::get(&handle, "post", &id));
+        let got = res!(got.ok_or_else(|| err!("the comment vanished"; Test, Missing)));
+        assert_eq!(got.body, "the edited words", "round {}: a moderation wrote back the old body", round);
+    }
+    Ok(())
+}

@@ -939,13 +939,20 @@ pub fn set_state<
 )
 	-> Outcome<bool>
 {
-	let mut c = match res!(get(db, slug, id)) {
+	// One step under the write guard: a concurrent edit or moderation cannot be written over.
+	let found = res!(store::update(db, &key_of(slug, id), |old| -> Outcome<(Edit, Option<Comment>)> {
+		let mut c = match old {
+			Some(v)	=> res!(Comment::from_dat(&v)),
+			None	=> return Ok((Edit::Keep, None)),
+		};
+		c.state = state;
+		c.reason = reason;
+		Ok((Edit::Set(c.to_dat()), Some(c)))
+	}));
+	let c = match found {
 		Some(c)	=> c,
 		None	=> return Ok(false),
 	};
-	c.state = state;
-	c.reason = reason;
-	res!(put(db, &c));
 
 	if state == CommentState::Approved {
 		if let Some(h) = c.author.handle() {
@@ -2196,20 +2203,22 @@ pub fn edit<
 )
 	-> Outcome<bool>
 {
-	let mut c = match res!(get(db, slug, id)) {
-		Some(c)	=> c,
-		None	=> return Ok(false),
-	};
 	if !valid_body(body) {
 		return Ok(false);
 	}
-	c.body = body.trim().to_string();
-	if c.state == CommentState::Approved {
-		c.state = CommentState::Pending;
-		c.reason = Some(fmt!("edited by its author after it was published"));
-	}
-	res!(put(db, &c));
-	Ok(true)
+	// One step under the write guard, so an approval racing the edit cannot write the old body back.
+	store::update(db, &key_of(slug, id), |old| -> Outcome<(Edit, bool)> {
+		let mut c = match old {
+			Some(v)	=> res!(Comment::from_dat(&v)),
+			None	=> return Ok((Edit::Keep, false)),
+		};
+		c.body = body.trim().to_string();
+		if c.state == CommentState::Approved {
+			c.state = CommentState::Pending;
+			c.reason = Some(fmt!("edited by its author after it was published"));
+		}
+		Ok((Edit::Set(c.to_dat()), true))
+	})
 }
 
 const OPEN_KEY: &str = "publish/comments-open";
