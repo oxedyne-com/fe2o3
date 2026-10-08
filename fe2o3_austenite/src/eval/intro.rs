@@ -54,6 +54,7 @@ use crate::ledger::{
 	Position,
 };
 use crate::syntax::Span;
+use crate::timings::Phase;
 
 use oxedyne_fe2o3_core::prelude::*;
 use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
@@ -812,9 +813,11 @@ pub fn document_info(styles: &StyleChain) -> Outcome<DocInfo> {
 }
 
 pub fn query(engine: &mut Engine, selector: &Selector) -> Outcome<Vec<Content>> {
-	res!(ask(engine, Question::Query(selector.clone())));
-	let intro = engine.intro.clone();
-	intro.query(selector)
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Query(selector.clone())));
+		let intro = engine.intro.clone();
+		intro.query(selector)
+	})
 }
 
 /// The one element carrying `label`, or Typst's error for none and for several. Answered without a
@@ -837,24 +840,32 @@ pub fn query_label_opt(engine: &mut Engine, label: &Label, span: Span) -> Outcom
 }
 
 pub fn position(engine: &mut Engine, loc: Location) -> Outcome<Option<Position>> {
-	res!(ask(engine, Question::Position(loc)));
-	Ok(engine.intro.position(loc))
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Position(loc)));
+		Ok(engine.intro.position(loc))
+	})
 }
 
 /// The page `loc` landed on. Asked apart from its position, it settles as soon as the page does.
 pub fn page(engine: &mut Engine, loc: Location) -> Outcome<Option<u32>> {
-	res!(ask(engine, Question::Page(loc)));
-	Ok(engine.intro.page(loc))
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Page(loc)));
+		Ok(engine.intro.page(loc))
+	})
 }
 
 pub fn pages(engine: &mut Engine) -> Outcome<u32> {
-	res!(ask(engine, Question::Pages));
-	Ok(engine.intro.pages)
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::Pages));
+		Ok(engine.intro.pages)
+	})
 }
 
 pub fn page_numbering(engine: &mut Engine, loc: Location) -> Outcome<Value> {
-	res!(ask(engine, Question::PageNumbering(loc)));
-	Ok(engine.intro.page_numbering(loc))
+	engine.timed(Phase::Intro, |engine| {
+		res!(ask(engine, Question::PageNumbering(loc)));
+		Ok(engine.intro.page_numbering(loc))
+	})
 }
 
 fn count_before(engine: &mut Engine, selector: &Selector, loc: Location) -> Outcome<usize> {
@@ -1079,7 +1090,7 @@ fn moves(counter: &Counter, e: &Content) -> bool {
 
 /// The counter's value at a location: after every update at or before it.
 pub fn counter_at(engine: &mut Engine, counter: &Counter, loc: Location) -> Outcome<Vec<u64>> {
-	attributed(engine, counter_subject(counter), |engine| {
+	engine.timed(Phase::Intro, |engine| attributed(engine, counter_subject(counter), |engine| {
 		let seq = res!(counter_sequence(engine, counter));
 		let sel = counter_selector(counter);
 		let (mut state, pg) = res!(stop_at(engine, &sel, &seq, |e| moves(counter, e), loc));
@@ -1090,12 +1101,12 @@ pub fn counter_at(engine: &mut Engine, counter: &Counter, loc: Location) -> Outc
 			}
 		}
 		Ok(state)
-	})
+	}))
 }
 
 /// The counter's value at the end of the document.
 pub fn counter_final(engine: &mut Engine, counter: &Counter) -> Outcome<Vec<u64>> {
-	attributed(engine, counter_subject(counter), |engine| {
+	engine.timed(Phase::Intro, |engine| attributed(engine, counter_subject(counter), |engine| {
 		let seq = res!(counter_sequence(engine, counter));
 		let (mut state, pg) = match seq.last() {
 			Some(s)	=> s.clone(),
@@ -1108,7 +1119,7 @@ pub fn counter_final(engine: &mut Engine, counter: &Counter) -> Outcome<Vec<u64>
 			}
 		}
 		Ok(state)
-	})
+	}))
 }
 
 /// The top-level number at `loc` and at the end, together: what `display(both: true)` formats.
@@ -1260,17 +1271,17 @@ fn state_sequence(engine: &mut Engine, state: &State) -> Outcome<Arc<Vec<Value>>
 }
 
 pub fn state_at(engine: &mut Engine, state: &State, loc: Location) -> Outcome<Value> {
-	attributed(engine, state_subject(state), |engine| {
+	engine.timed(Phase::Intro, |engine| attributed(engine, state_subject(state), |engine| {
 		let seq = res!(state_sequence(engine, state));
 		stop_at(engine, &state_selector(), &seq, |e| updates(state, e), loc)
-	})
+	}))
 }
 
 pub fn state_final(engine: &mut Engine, state: &State) -> Outcome<Value> {
-	attributed(engine, state_subject(state), |engine| {
+	engine.timed(Phase::Intro, |engine| attributed(engine, state_subject(state), |engine| {
 		let seq = res!(state_sequence(engine, state));
 		Ok(seq.last().cloned().unwrap_or(Value::None))
-	})
+	}))
 }
 
 // Equality and hashing that are stable from pass to pass
