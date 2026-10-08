@@ -36,6 +36,7 @@
 //!   per process, hand it a [`transport::Transport`] and a
 //!   [`storage::Storage`], then invoke [`engine::DistOzone::put`] and
 //!   [`engine::DistOzone::get`].
+//! - [`codec`] -- the binary wire form of an [`transport::Envelope`], bounded on decode.
 //! - [`resolve::Resolver`] -- the application's rule for the value a record
 //!   holds. The engine stores a record only when the resolver says to.
 //!
@@ -56,6 +57,7 @@
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
+pub mod codec;
 pub mod cohort;
 pub mod config;
 pub mod consensus;
@@ -70,6 +72,11 @@ pub mod storage;
 pub mod transport;
 
 pub use self::{
+	codec::{
+		MAX_ENVELOPE_BYTES,
+		MAX_ENVELOPE_DEPTH,
+		WIRE_VERSION,
+	},
 	config::{
 		Consistency,
 		DistOzoneConfig,
