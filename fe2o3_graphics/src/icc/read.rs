@@ -202,6 +202,7 @@ pub struct Lut {
 	pub nout:	usize,
 	pub grid:	usize,		// lattice nodes along each input axis
 	pub mat:	[f64; 9],	// row major; applies to XYZ input only
+	pub lab_in:	bool,		// is the input side Lab, which LittleCMS interpolates trilinearly
 	pub ine:	usize,		// entries in each input curve
 	pub oute:	usize,		// entries in each output curve
 	pub ins:	Vec<u16>,	// nin curves of ine entries
@@ -369,14 +370,16 @@ impl Profile {
 		p.ktrc = res!(with_tag(name, whole, &p.tags, *b"kTRC", read_curve));
 		for (i, sig) in [*b"A2B0", *b"A2B1", *b"A2B2"].into_iter().enumerate() {
 			p.a2b[i] = res!(with_tag(name, whole, &p.tags, sig, read_lut));
-			if let Some(lut) = &p.a2b[i] {
+			if let Some(lut) = &mut p.a2b[i] {
 				res!(check_lut(name, sig, lut, &p.head, true));
+				lut.lab_in = p.head.space == Space::Lab;
 			}
 		}
 		for (i, sig) in [*b"B2A0", *b"B2A1", *b"B2A2"].into_iter().enumerate() {
 			p.b2a[i] = res!(with_tag(name, whole, &p.tags, sig, read_lut));
-			if let Some(lut) = &p.b2a[i] {
+			if let Some(lut) = &mut p.b2a[i] {
 				res!(check_lut(name, sig, lut, &p.head, false));
+				lut.lab_in = p.head.pcs == Space::Lab;
 			}
 		}
 		Ok(p)
@@ -609,7 +612,7 @@ fn read_lut(rd: &Rd) -> Outcome<Lut> {
 	let ins = res!(read(start, n_in));
 	let clut = res!(read(start + n_in * width, n_clut));
 	let outs = res!(read(start + (n_in + n_clut) * width, n_out));
-	Ok(Lut { bits, nin, nout, grid, mat, ine, oute, ins, clut, outs })
+	Ok(Lut { bits, nin, nout, grid, mat, lab_in: false, ine, oute, ins, clut, outs })
 }
 
 // Does a lookup table's shape fit the profile it is in?

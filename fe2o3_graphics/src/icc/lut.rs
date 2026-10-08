@@ -6,6 +6,9 @@
 //! already there. The curves are interpolated linearly between their entries. The lattice is
 //! interpolated tetrahedrally on its last three axes, as LittleCMS does, and linearly on a fourth
 //! axis before them; a lattice of fewer axes uses the same rules (one is linear, two bilinear).
+//! A lattice of three axes whose input side is Lab, as in a `B2A` table, is the exception:
+//! LittleCMS reads such a table trilinearly, and a tetrahedral reading differs from it by up to
+//! 17 levels in a saturated colour, because Lab is not uniform along the cell diagonal.
 //!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
@@ -46,6 +49,22 @@ pub fn tetra<F: Fn(usize) -> [f64; 4]>(node: F, base: usize, s: [usize; 3], f: [
 	let mut r = [0.0; 4];
 	for j in 0..4 {
 		r[j] = w[0] * n0[j] + w[1] * n1[j] + w[2] * n2[j] + w[3] * n3[j];
+	}
+	r
+}
+
+/// Trilinear interpolation in the cell of a 3-D lattice, with the arguments of [`tetra`].
+pub fn trilinear<F: Fn(usize) -> [f64; 4]>(node: F, base: usize, s: [usize; 3], f: [f64; 3]) -> [f64; 4] {
+	let mut r = [0.0; 4];
+	for c in 0..8usize {
+		let (mut w, mut at) = (1.0, base);
+		for k in 0..3 {
+			if (c >> k) & 1 == 1 { w *= f[k]; at += s[k]; } else { w *= 1.0 - f[k]; }
+		}
+		let n = node(at);
+		for j in 0..4 {
+			r[j] += w * n[j];
+		}
 	}
 	r
 }
@@ -100,7 +119,8 @@ impl Lut {
 			},
 			3	=> {
 				let base = base + axes[0].0 * stride[0] + axes[1].0 * stride[1] + axes[2].0 * stride[2];
-				tetra(|n| self.at(n), base, [stride[0], stride[1], stride[2]], [axes[0].1, axes[1].1, axes[2].1])
+				let (s, f) = ([stride[0], stride[1], stride[2]], [axes[0].1, axes[1].1, axes[2].1]);
+				if self.lab_in { trilinear(|n| self.at(n), base, s, f) } else { tetra(|n| self.at(n), base, s, f) }
 			},
 			_	=> {
 				let (i, f) = axes[0];
