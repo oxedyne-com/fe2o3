@@ -54,6 +54,7 @@ fn lock() -> MutexGuard<'static, ()> {
 
 const CSIZE:    usize = 600;    // bytes in a chunk
 const FIVE:     usize = 2_900;  // a value of five chunks
+const FIVE_B:   usize = 2_800;  // another value of five
 const TWO:      usize = 1_100;  // a value of two
 const PLAIN:    usize = 500;    // below the threshold, so not chunked
 
@@ -199,6 +200,21 @@ fn same_geometry_keeps_the_new_chunks() -> Outcome<()> {
     res!(s.put(&k, 6, FIVE));
     res!(s.compact_and_check(&k, 5, 6, FIVE));
     assert!(s.holds(6, FIVE).iter().all(|n| *n >= 1), "the new value's own chunks were erased: {:?}", s.holds(6, FIVE));
+    s.end()
+}
+
+// The same count of chunks of another length shares no chunk key with the old value, because the
+// length is part of the key, so all five old chunks are left and all five must go (QA A1-3).
+#[test]
+fn same_count_other_length_leaves_no_old_chunk() -> Outcome<()> {
+    let _lock = lock();
+    let s = res!(store("count"));
+    let k = dat!("five over five");
+    res!(s.five(&k, 5));
+    res!(s.put(&k, 6, FIVE_B));
+    assert_eq!(res!(s.num_chunks(&k)), 5, "the overwrite did not split into five chunks");
+    res!(s.compact_and_check(&k, 5, 6, FIVE_B));
+    assert!(s.holds(6, FIVE_B).iter().all(|n| *n >= 1), "the new value's own chunks were erased: {:?}", s.holds(6, FIVE_B));
     s.end()
 }
 
