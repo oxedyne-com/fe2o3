@@ -267,7 +267,7 @@ impl Pixmap {
 			// the shape is still there to be filled even where its shading is not.
 			None => {
 				let last = match grad.stops().last() {
-					Some(s) => s.colour,
+					Some(s) => s.colour.to_rgba(),
 					None => return Ok(()),
 				};
 				return self.fill_path_with(path, t, last, clip, rule);

@@ -7,6 +7,7 @@ pub use crate::{
 	blur::Shadow,
 	colour::{
 		ColourVision,
+		Ink,
 		Rgba,
 	},
 	jpeg::{

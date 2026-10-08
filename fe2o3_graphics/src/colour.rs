@@ -1,9 +1,24 @@
 //! Colours and alpha compositing.
 //!
+//! [`Rgba`] is the screen's colour. [`Ink`] is a colour with the space it was written in -- grey,
+//! RGB or CMYK -- for a writer that can keep the space; every screen consumer lowers it with
+//! [`Ink::to_rgba`].
+//!
 //! [Written with AI entirely](https://need2know.ai/entirely-ai/code)\
 //! Anthropic Claude
 
 use oxedyne_fe2o3_core::prelude::*;
+
+use std::hash::{
+	Hash,
+	Hasher,
+};
+
+// Typst's CMYK to sRGB: its ICC transform, sampled on a 17-point-per-axis grid from the `typst` 0.15.1
+// oracle and interpolated quadrilinearly. It lands within two eight-bit steps of Typst everywhere the
+// oracle was probed. Three bytes (r, g, b) per grid point, the cyan axis varying slowest.
+static CMYK_GRID:	&[u8] = include_bytes!("cmyk_srgb.bin");
+const CMYK_POINTS:	usize = 17;
 
 /// An 8-bit-per-channel colour with straight, non-premultiplied alpha.
 ///
@@ -194,17 +209,160 @@ impl Rgba {
 	}
 }
 
+/// One unit-range component as an 8-bit value, rounding half to even as Typst does: 30% is 0x4c, 10%
+/// is 0x1a.
+pub fn unit_to_u8(x: f32) -> u8 {
+	(x.clamp(0.0, 1.0) * 255.0).round_ties_even() as u8
+}
+
+/// CMYK to gamma-encoded sRGB, each component from 0 to 1, by Typst's transform as sampled on a grid
+/// and interpolated quadrilinearly. The result is quantised to eight bits and returned as a fraction.
+pub fn cmyk_to_srgb(c: [f32; 4]) -> [f32; 3] {
+	let n = CMYK_POINTS - 1;
+	let mut idx = [0usize; 4];
+	let mut fr = [0f32; 4];
+	for d in 0..4 {
+		let x = c[d].clamp(0.0, 1.0) * n as f32;
+		let i = (x as usize).min(n - 1);
+		idx[d] = i;
+		fr[d] = x - i as f32;
+	}
+	let mut out = [0f32; 3];
+	for corner in 0..16usize {
+		let mut w = 1f32;
+		let mut k = 0usize;
+		for d in 0..4 {
+			let bit = (corner >> (3 - d)) & 1;
+			w *= if bit == 1 { fr[d] } else { 1.0 - fr[d] };
+			k = k * CMYK_POINTS + idx[d] + bit;
+		}
+		for (ch, o) in out.iter_mut().enumerate() {
+			*o += w * CMYK_GRID.get(k * 3 + ch).copied().unwrap_or(0) as f32;
+		}
+	}
+	// The transform's output is eight-bit.
+	[(out[0].round()) / 255.0, (out[1].round()) / 255.0, (out[2].round()) / 255.0]
+}
+
+/// A colour with the space it was written in.
+///
+/// Typst keeps the split -- `luma` stays grey, `cmyk` stays CMYK, every other space is RGB -- so a
+/// writer that can keep it (a PDF in its native mode) writes `g`, `k` or `rg`, and one that cannot
+/// lowers the ink with [`Ink::to_rgba`]. Grey is the gamma-encoded value of Typst's `luma`, and the
+/// CMYK components are ink coverages, each from 0 to 1.
+///
+/// Equality and hashing go by bit pattern, so `Grey(0)` and `Rgb(0, 0, 0)` are two inks although they
+/// lower to one colour, and a fingerprint built on an ink tells them apart.
+#[derive(Clone, Copy, Debug)]
+pub enum Ink {
+	Grey { v: f32, a: u8 },							// 0 black to 1 white
+	Rgb(Rgba),
+	Cmyk { c: f32, m: f32, y: f32, k: f32, a: u8 },	// each coverage 0 to 1
+}
+
+impl Ink {
+
+	// Plain black and white as RGB, the defaults a drawing falls back to. Typst's `black` is a grey and
+	// reaches the drawing as `Grey` through the evaluator's lowering.
+	pub const BLACK:	Self = Self::Rgb(Rgba::BLACK);
+	pub const WHITE:	Self = Self::Rgb(Rgba::WHITE);
+
+	/// The ink on the screen: grey and CMYK lowered by Typst's formulas, RGB as it is.
+	pub fn to_rgba(&self) -> Rgba {
+		match *self {
+			Self::Grey { v, a }					=> {
+				let g = unit_to_u8(v);
+				Rgba::new(g, g, g, a)
+			},
+			Self::Rgb(c)						=> c,
+			Self::Cmyk { c, m, y, k, a }		=> {
+				let [r, g, b] = cmyk_to_srgb([c, m, y, k]);
+				Rgba::new(unit_to_u8(r), unit_to_u8(g), unit_to_u8(b), a)
+			},
+		}
+	}
+
+	/// The alpha, 0 transparent to 255 opaque, whatever the space.
+	pub fn alpha(&self) -> u8 {
+		match *self {
+			Self::Grey { a, .. }	=> a,
+			Self::Rgb(c)			=> c.a,
+			Self::Cmyk { a, .. }	=> a,
+		}
+	}
+
+	/// The ink with its alpha replaced and its space kept.
+	pub fn with_alpha(&self, a: u8) -> Self {
+		match *self {
+			Self::Grey { v, .. }				=> Self::Grey { v, a },
+			Self::Rgb(c)						=> Self::Rgb(Rgba { a, ..c }),
+			Self::Cmyk { c, m, y, k, .. }		=> Self::Cmyk { c, m, y, k, a },
+		}
+	}
+
+	/// The bytes equality and hashing go by: a space tag, the alpha, then the components' bit patterns
+	/// (an RGB ink's three bytes ahead of zeros). A caller folding an ink into a fingerprint writes
+	/// these and nothing else.
+	pub fn key(&self) -> [u8; 18] {
+		let mut b = [0u8; 18];
+		let f = |b: &mut [u8; 18], at: usize, x: f32| b[at..at + 4].copy_from_slice(&x.to_bits().to_le_bytes());
+		match *self {
+			Self::Grey { v, a }				=> {
+				b[0] = 0;
+				b[1] = a;
+				f(&mut b, 2, v);
+			},
+			Self::Rgb(c)					=> {
+				b[0] = 1;
+				b[1] = c.a;
+				b[2] = c.r;
+				b[3] = c.g;
+				b[4] = c.b;
+			},
+			Self::Cmyk { c, m, y, k, a }	=> {
+				b[0] = 2;
+				b[1] = a;
+				f(&mut b, 2, c);
+				f(&mut b, 6, m);
+				f(&mut b, 10, y);
+				f(&mut b, 14, k);
+			},
+		}
+		b
+	}
+}
+
+impl PartialEq for Ink {
+	fn eq(&self, other: &Self) -> bool {
+		self.key() == other.key()
+	}
+}
+
+impl Eq for Ink {}
+
+impl Hash for Ink {
+	fn hash<H: Hasher>(&self, state: &mut H) {
+		self.key().hash(state);
+	}
+}
+
+impl From<Rgba> for Ink {
+	fn from(c: Rgba) -> Self {
+		Self::Rgb(c)
+	}
+}
+
 /// One colour of a gradient, at a position along it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stop {
 	pub at:	f32,		// zero at the start of the gradient, one at the end
-	pub colour: Rgba,
+	pub colour: Ink,
 }
 
 impl Stop {
 
-	pub fn new(at: f32, colour: Rgba) -> Self {
-		Self { at, colour }
+	pub fn new(at: f32, colour: impl Into<Ink>) -> Self {
+		Self { at, colour: colour.into() }
 	}
 }
 
@@ -231,7 +389,7 @@ pub enum Gradient {
 impl Gradient {
 
 	/// A gradient of two colours along a line.
-	pub fn two(from: (f32, f32), to: (f32, f32), start: Rgba, end: Rgba) -> Self {
+	pub fn two(from: (f32, f32), to: (f32, f32), start: impl Into<Ink>, end: impl Into<Ink>) -> Self {
 		Self::Linear {
 			from,
 			to,
@@ -305,7 +463,8 @@ impl Gradient {
 	/// The colour at a position along the gradient, the stops taken as already sorted.
 	///
 	/// Interpolation is linear in straight, non-premultiplied sRGB on all four channels, which is
-	/// what an SVG gradient specifies and so what a caller comparing against a browser will see.
+	/// what an SVG gradient specifies and so what a caller comparing against a browser will see. A
+	/// stop in another space is lowered to sRGB first.
 	pub fn sample(&self, t: f32) -> Rgba {
 		let stops = self.stops();
 		let first = match stops.first() {
@@ -313,11 +472,11 @@ impl Gradient {
 			None => return Rgba::TRANSPARENT,
 		};
 		if t <= first.at {
-			return first.colour;
+			return first.colour.to_rgba();
 		}
 		let last = &stops[stops.len() - 1];
 		if t >= last.at {
-			return last.colour;
+			return last.colour.to_rgba();
 		}
 		for pair in stops.windows(2) {
 			let (a, b) = (&pair[0], &pair[1]);
@@ -325,21 +484,22 @@ impl Gradient {
 				let span = b.at - a.at;
 				// Two stops at the same position are a hard edge, and the second wins.
 				if span <= 0.0 {
-					return b.colour;
+					return b.colour.to_rgba();
 				}
+				let (ca, cb) = (a.colour.to_rgba(), b.colour.to_rgba());
 				let f = (t - a.at) / span;
 				let ch = |p: u8, q: u8| -> u8 {
 					((p as f32) + ((q as f32) - (p as f32)) * f + 0.5).clamp(0.0, 255.0) as u8
 				};
 				return Rgba {
-					r: ch(a.colour.r, b.colour.r),
-					g: ch(a.colour.g, b.colour.g),
-					b: ch(a.colour.b, b.colour.b),
-					a: ch(a.colour.a, b.colour.a),
+					r: ch(ca.r, cb.r),
+					g: ch(ca.g, cb.g),
+					b: ch(ca.b, cb.b),
+					a: ch(ca.a, cb.a),
 				};
 			}
 		}
-		last.colour
+		last.colour.to_rgba()
 	}
 }
 
@@ -574,4 +734,49 @@ mod tests {
 		Ok(())
 	}
 
+	#[test]
+	fn test_an_ink_tells_a_grey_from_the_rgb_it_lowers_to_16() {
+		let grey = Ink::Grey { v: 0.0, a: 255 };
+		let rgb = Ink::from(Rgba::BLACK);
+		assert_eq!(grey.to_rgba(), rgb.to_rgba());
+		assert_ne!(grey, rgb);
+		assert_ne!(grey.key(), rgb.key());
+		let h = |i: Ink| { let mut s = std::collections::hash_map::DefaultHasher::new(); i.hash(&mut s); s.finish() };
+		assert_ne!(h(grey), h(rgb));
+		assert_eq!(h(grey), h(Ink::Grey { v: 0.0, a: 255 }));
+	}
+
+	#[test]
+	fn test_an_ink_lowers_by_typsts_formulas_17() {
+		// A luma is its value in every channel, rounding half to even: 30% is 0x4c, 10% is 0x1a.
+		assert_eq!(Ink::Grey { v: 0.3, a: 255 }.to_rgba(), Rgba::new(0x4c, 0x4c, 0x4c, 255));
+		assert_eq!(Ink::Grey { v: 0.1, a: 7 }.to_rgba(), Rgba::new(0x1a, 0x1a, 0x1a, 7));
+		// The CMYK corners of the sampled transform: no ink is white, full black ink is near black.
+		assert_eq!(Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 0.0, a: 255 }.to_rgba(), Rgba::WHITE);
+		let k = Ink::Cmyk { c: 0.0, m: 0.0, y: 0.0, k: 1.0, a: 255 }.to_rgba();
+		assert!(k.r < 60 && k.g < 60 && k.b < 60 && k.a == 255, "{:?}", k);
+		assert_eq!(Ink::Rgb(Rgba::new(1, 2, 3, 4)).to_rgba(), Rgba::new(1, 2, 3, 4));
+	}
+
+	#[test]
+	fn test_an_ink_alpha_is_read_and_replaced_in_every_space_18() {
+		for i in [
+			Ink::Grey { v: 0.5, a: 10 },
+			Ink::Rgb(Rgba::new(1, 2, 3, 10)),
+			Ink::Cmyk { c: 0.1, m: 0.2, y: 0.3, k: 0.4, a: 10 },
+		] {
+			assert_eq!(i.alpha(), 10);
+			let j = i.with_alpha(99);
+			assert_eq!(j.alpha(), 99);
+			assert_eq!(j.with_alpha(10), i);
+		}
+	}
+
+	#[test]
+	fn test_a_gradient_samples_a_stop_in_another_space_as_its_srgb_19() {
+		let g = Gradient::two((0.0, 0.0), (10.0, 0.0), Ink::Grey { v: 0.0, a: 255 }, Ink::Grey { v: 1.0, a: 255 });
+		assert_eq!(g.sample(0.0), Rgba::BLACK);
+		assert_eq!(g.sample(1.0), Rgba::WHITE);
+		assert_eq!(g.sample(0.5), Rgba::new(128, 128, 128, 255));
+	}
 }
