@@ -78,6 +78,7 @@ use oxedyne_fe2o3_austenite::page::{
 use oxedyne_fe2o3_austenite::syntax::Span;
 
 use oxedyne_fe2o3_core::prelude::*;
+use oxedyne_fe2o3_hash::fingerprint::Fingerprint;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -639,31 +640,31 @@ fn place_streams_each_page_to_the_sink() -> Outcome<()> {
 /// `Locator::root()` does.
 #[test]
 fn measure_takes_none_of_the_documents_ordinals() -> Outcome<()> {
-	let span = Span::detached();
+	let fp = Fingerprint::of(b"a heading");
 	let mut e = Engine::new(World::new(PathBuf::from("/")));
-	let first = e.locator.locate(ElemKind::Heading, span);
+	let first = e.locator.locate(ElemKind::Heading, fp);
 	let inside = res!(intro::detached(&mut e, |e| {
-		let a = e.locator.locate(ElemKind::Heading, span);
-		let b = e.locator.locate(ElemKind::Heading, span);
+		let a = e.locator.locate(ElemKind::Heading, fp);
+		let b = e.locator.locate(ElemKind::Heading, fp);
 		Ok((a, b))
 	}));
-	let second = e.locator.locate(ElemKind::Heading, span);
+	let second = e.locator.locate(ElemKind::Heading, fp);
 	// What a document that measured nothing locates its second heading at.
 	let mut quiet = Engine::new(World::new(PathBuf::from("/")));
-	assert_eq!(quiet.locator.locate(ElemKind::Heading, span), first);
-	let want = quiet.locator.locate(ElemKind::Heading, span);
+	assert_eq!(quiet.locator.locate(ElemKind::Heading, fp), first);
+	let want = quiet.locator.locate(ElemKind::Heading, fp);
 	assert_eq!(second, want, "the second heading of the document took an ordinal the measured layout used");
 	assert_eq!(inside.0, first, "a measured element is located under a fresh root");
 	assert_ne!(inside.0, inside.1, "ordinals still count inside the measured layout");
 	assert_ne!(second, first);
 	// The locator comes back when the layout fails.
 	let failed: Outcome<()> = intro::detached(&mut e, |e| {
-		e.locator.locate(ElemKind::Heading, span);
+		e.locator.locate(ElemKind::Heading, fp);
 		Err(err!("a measured layout failed"; Test))
 	});
 	assert!(failed.is_err());
-	let third = e.locator.locate(ElemKind::Heading, span);
-	assert_eq!(third, quiet.locator.locate(ElemKind::Heading, span), "an error left the measured ordinals behind");
+	let third = e.locator.locate(ElemKind::Heading, fp);
+	assert_eq!(third, quiet.locator.locate(ElemKind::Heading, fp), "an error left the measured ordinals behind");
 	Ok(())
 }
 

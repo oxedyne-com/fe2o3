@@ -955,7 +955,7 @@ pub fn resolve(engine: &mut Engine, elem: &Content, styles: &StyleChain) -> Outc
 		let cspan	= p.elem.span();
 		let mut el	= p.elem;
 		if let (Some(l), Some(k)) = (places.as_mut(), el.kind()) {
-			el.set_place(l.next(k, cspan));
+			el.set_place(l.next(k, el.fingerprint()));
 		}
 		let fill = match res!(schema::resolve(styles, &el, fid::CELL_FILL)) {
 			Value::Auto	=> {

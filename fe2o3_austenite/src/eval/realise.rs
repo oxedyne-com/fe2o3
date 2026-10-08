@@ -19,6 +19,7 @@ use crate::eval::content::{
 	self,
 	native_show,
 	Content,
+	Elem,
 	ElemKind,
 	Family,
 	FieldDefault,
@@ -745,10 +746,15 @@ impl State<'_> {
 		}
 		let mut output = target.clone();
 		let mut tags = None;
+		// The fingerprint is read before `edit` forgets the cell, and only for a sequence yet to be located.
+		let fp = match &output {
+			Content::Sequence(seq) if seq.location.is_none()	=> Some(output.fingerprint()),
+			_													=> None,
+		};
 		if let Content::Sequence(seq) = &mut output {
 			let seq = seq.edit();
-			if seq.location.is_none() {
-				let loc = self.engine.locator.locate(ElemKind::Sequence, seq.span);
+			if let (None, Some(fp)) = (seq.location, fp) {
+				let loc = self.engine.locator.locate(ElemKind::Sequence, fp);
 				seq.location = Some(loc);
 				tags = Some(loc);
 			}
@@ -1151,11 +1157,21 @@ impl State<'_> {
 	}
 }
 
+fn wants_location(e: &Elem) -> bool { e.location.is_none() && (e.kind.locatable() || e.label.is_some()) }
+
+fn wants_place(e: &Elem) -> bool { e.place.is_none() && e.kind.has_place() }
+
 /// Gives the element its location (when locatable or labelled) and copies the style chain's values
 /// of its unset settable fields into it, so a show rule sees them; returns its tags when located.
 fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: &StyleChain) -> Outcome<Option<(Tag, Tag)>> {
 	// Built-in show-set styles sit outside the user's, which override them.
 	let builtin = res!(content::show_set(target, styles));
+	// A location and a place are keyed by the content's fingerprint, read before `edit` forgets the cell and
+	// only when one is wanted.
+	let fp = match &*target {
+		Content::Elem(e) if wants_location(e) || wants_place(e)	=> Some(target.fingerprint()),
+		_														=> None,
+	};
 	let e = match target {
 		Content::Elem(e)	=> {
 			if e.is_shared() {
@@ -1165,13 +1181,15 @@ fn prepare(engine: &mut Engine, target: &mut Content, map: &mut Styles, styles: 
 		},
 		_					=> return Ok(None),
 	};
-	if e.location.is_none() && (e.kind.locatable() || e.label.is_some()) {
-		e.location = Some(engine.locator.locate(e.kind, e.span));
-	}
-	// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
-	// made and gave a place already (a grid's cell) keeps that.
-	if e.place.is_none() && e.kind.has_place() {
-		e.place = Some(engine.locator.next(e.kind, e.span));
+	if let Some(fp) = fp {
+		if wants_location(e) {
+			e.location = Some(engine.locator.locate(e.kind, fp));
+		}
+		// An element that lays a body out keeps one place for it however often it is laid out. One a layouter
+		// made and gave a place already (a grid's cell) keeps that.
+		if wants_place(e) {
+			e.place = Some(engine.locator.next(e.kind, fp));
+		}
 	}
 	map.apply_outer(&builtin);
 	let chain = styles.chain(map);

@@ -204,7 +204,7 @@ impl Bucket {
 /// The carry state a page was laid out from, as one fingerprint for each part of it, so that two compiles
 /// are compared field by field. The counters are the absolute ones (`count`, `pulled`, `base`, `work_idx`
 /// and `abs`), which shift for every later page when an edit adds a line; the rest are unaffected by such
-/// a shift. Locations, spans and marks are masked everywhere.
+/// a shift. Source offsets are masked everywhere; locations, places and marks are hashed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Entry {
 	pub count:		u32,	// pages yielded before this one
@@ -224,7 +224,7 @@ pub struct Entry {
 	pub skips:		u64,	// insertions placed, their children relative to `work_idx`
 	pub abs:		u64,	// the absolute child indices of `floats` and `skips`
 	pub locator:	u64,	// the place counters
-	pub masked:		u32,	// locations met and masked in the whole entry
+	pub masked:		u32,	// source offsets met and masked in the whole entry
 }
 
 impl Entry {
@@ -261,7 +261,7 @@ impl Entry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PageRec {
 	pub pairs:	usize,	// pairs taken from the root feed while the page was made
-	pub input:	u64,	// those pairs and the page's run setup, spans and locations masked
+	pub input:	u64,	// those pairs and the page's run setup, source offsets masked
 	pub entry:	Entry,
 }
 

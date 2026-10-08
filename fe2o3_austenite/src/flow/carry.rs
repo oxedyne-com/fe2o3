@@ -7,10 +7,11 @@
 //! walk takes it, and a field the walk drops fails the plants in `tests/eval_carry.rs`. Content and styles are
 //! the exception: they read the fingerprints they keep (`eval::fp`), which `tests/fingerprint.rs` guards.
 //!
-//! Spans never enter: a one-letter edit moves every later span, and with it every `Location`, `Place` and
-//! mark, so those hash as their presence only and are counted. Layout caches and the future input are left
-//! out by name. Content and styles are memoised; the rest of the walk is not, so its cost is an upper bound
-//! on a production fingerprint's.
+//! Source offsets never enter: a one-letter edit moves every later one, so each hashes as its presence only
+//! and is counted. Locations, places and marks are hashed by value, as the locator (`eval::locate`) keys them
+//! by content and not by position, so an edit moves only those of the edited element, what holds it and what
+//! lies under it. Layout caches and the future input are left out by name. Content and styles are memoised;
+//! the rest of the walk is not, so its cost is an upper bound on a production fingerprint's.
 
 use crate::eval::args::{
 	Arg,
@@ -138,7 +139,6 @@ use crate::ir::{
 };
 use crate::ledger::{
 	AnchorId,
-	AnchorKind,
 	Ref,
 };
 use crate::syntax::SyntaxNode;
@@ -156,7 +156,7 @@ use std::sync::Arc;
 
 // The accumulator
 
-/// A running fingerprint and the number of locations, places and marks it masked.
+/// A running fingerprint and the number of source offsets it hashed as their presence only.
 pub(super) struct Fp {
 	h:		Fingerprinter,
 	masked:	u32,
@@ -187,16 +187,31 @@ impl Fp {
 		self.h.write(b);
 	}
 
-	// A location, place or mark: present, and counted, never hashed.
+	// A source offset: present, and counted, never hashed, because an edit moves every later one.
 	fn mask(&mut self) {
 		self.h.write_u8(0xfe);
 		self.masked += 1;
 	}
 
-	// Presence only of an optional location, place or mark.
+	// Presence only of an optional source offset.
 	fn mask_opt<T>(&mut self, o: &Option<T>) {
 		match o {
 			Some(_)	=> self.mask(),
+			None	=> self.tag(0),
+		}
+	}
+
+	// A location, place or mark, by its value: the locator keys these by content, so one stays put when an
+	// edit moves the source around it.
+	fn loc(&mut self, v: u64) {
+		self.h.write_u8(0xfe);
+		self.h.write_u64(v);
+	}
+
+	// An optional location, place or mark, by its value.
+	fn loc_opt(&mut self, o: Option<u64>) {
+		match o {
+			Some(v)	=> self.loc(v),
 			None	=> self.tag(0),
 		}
 	}
@@ -294,12 +309,12 @@ impl<A: Walk, B: Walk, C: Walk> Walk for (A, B, C) {
 // Content
 
 impl Walk for Content {
-	// The content's own fingerprint, which is blind to spans, locations and places, then the presence of the
-	// head's location and place, counted as everywhere else in the walk.
+	// The content's own fingerprint, which is blind to spans, locations and places, then the head's location
+	// and place by value.
 	fn mix(&self, fp: &mut Fp) {
 		fp.h.write_fingerprint(self.fingerprint());
-		fp.mask_opt(&self.location());
-		fp.mask_opt(&self.place());
+		fp.loc_opt(self.location().map(|l| l.0));
+		fp.loc_opt(self.place().map(|p| p.0));
 	}
 }
 
@@ -344,7 +359,7 @@ impl Walk for Value {
 			Value::Selector(v)	=> { fp.tag(33); v.mix(fp); },
 			Value::Counter(v)	=> { fp.tag(34); v.mix(fp); },
 			Value::State(v)		=> { fp.tag(35); v.mix(fp); },
-			Value::Location(_)	=> { fp.tag(36); fp.mask(); },
+			Value::Location(l)	=> { fp.tag(36); fp.loc(l.0); },
 		}
 	}
 }
@@ -512,7 +527,7 @@ impl Walk for Selector {
 			Selector::Label(l)		=> { fp.tag(1); l.mix(fp); },
 			Selector::Text(t)		=> { fp.tag(2); t.mix(fp); },
 			Selector::Regex(r)		=> { fp.tag(3); r.mix(fp); },
-			Selector::Location(_)	=> { fp.tag(4); fp.mask(); },
+			Selector::Location(l)	=> { fp.tag(4); fp.loc(l.0); },
 			Selector::Or(v)			=> { fp.tag(5); v.mix(fp); },
 			Selector::And(v)		=> { fp.tag(6); v.mix(fp); },
 			Selector::Before { selector, end, inclusive }	=> {
@@ -587,7 +602,7 @@ impl Walk for Tag {
 	fn mix(&self, fp: &mut Fp) {
 		match self {
 			Tag::Start(c)	=> { fp.tag(0); c.mix(fp); },
-			Tag::End(_)		=> { fp.tag(1); fp.mask(); },
+			Tag::End(l)		=> { fp.tag(1); fp.loc(l.0); },
 		}
 	}
 }
@@ -607,10 +622,7 @@ impl Walk for AnchorId {
 	fn mix(&self, fp: &mut Fp) {
 		let AnchorId { kind, key } = self;
 		fp.dbg(kind);
-		match kind {
-			AnchorKind::Location	=> fp.mask(),	// keyed by a location's hash
-			_						=> key.mix(fp),
-		}
+		key.mix(fp);	// a location's anchor is keyed by the location's hash
 	}
 }
 
@@ -759,7 +771,7 @@ impl Walk for FrameNode {
 		let FrameNode { dims, items, parent } = self;
 		dims.mix(fp);
 		items.mix(fp);
-		fp.mask_opt(parent);
+		fp.loc_opt(*parent);
 	}
 }
 
@@ -789,7 +801,7 @@ impl Walk for Node {
 			Node::Transform(t)		=> { fp.tag(12); t.mix(fp); },
 			Node::Clip(c)			=> { fp.tag(13); c.mix(fp); },
 			Node::Tag(t)			=> { fp.tag(14); t.mix(fp); },
-			Node::Mark(_)			=> { fp.tag(15); fp.mask(); },
+			Node::Mark(m)			=> { fp.tag(15); fp.loc(*m); },
 		}
 	}
 }
@@ -801,7 +813,7 @@ impl Walk for Frame {
 		h.mix(fp);
 		baseline.mix(fp);
 		items.mix(fp);
-		fp.mask_opt(parent);
+		fp.loc_opt(*parent);
 	}
 }
 
@@ -848,7 +860,7 @@ impl Walk for Pending {
 	fn mix(&self, fp: &mut Fp) {
 		match self {
 			Pending::Tag(t)		=> { fp.tag(0); t.mix(fp); },
-			Pending::Mark(_)	=> { fp.tag(1); fp.mask(); },
+			Pending::Mark(m)	=> { fp.tag(1); fp.loc(*m); },
 		}
 	}
 }
@@ -906,8 +918,8 @@ impl Walk for MultiChild {
 impl Walk for PlacedChild {
 	fn mix(&self, fp: &mut Fp) {
 		let PlacedChild {
-			align_x, align_y, parent, float, clearance, dx, dy, alignment, mark: _, elem, styles, cell: _,
-		} = self;	// mark: a location's hash; cell: a layout cache
+			align_x, align_y, parent, float, clearance, dx, dy, alignment, mark, elem, styles, cell: _,
+		} = self;	// cell: a layout cache
 		align_x.mix(fp);
 		align_y.mix(fp);
 		parent.mix(fp);
@@ -916,7 +928,7 @@ impl Walk for PlacedChild {
 		dx.mix(fp);
 		dy.mix(fp);
 		alignment.mix(fp);
-		fp.mask();
+		fp.loc(*mark);
 		elem.mix(fp);
 		styles.mix(fp);
 	}
@@ -926,7 +938,7 @@ impl Walk for Child {
 	fn mix(&self, fp: &mut Fp) {
 		match self {
 			Child::Tag(t)			=> { fp.tag(0); t.mix(fp); },
-			Child::Mark(_)			=> { fp.tag(1); fp.mask(); },
+			Child::Mark(m)			=> { fp.tag(1); fp.loc(*m); },
 			Child::Rel(r, w)		=> { fp.tag(2); r.mix(fp); w.mix(fp); },
 			Child::Fr(f, w)			=> { fp.tag(3); f.mix(fp); w.mix(fp); },
 			Child::Line(l)			=> { fp.tag(4); l.mix(fp); },
@@ -1000,31 +1012,29 @@ impl Walk for Config {
 	}
 }
 
-// A skip's child index, absolute or relative to the first child not yet processed, and its location masked.
-fn skip_fp(skip: &Skip, at: usize, idx: usize, relative: bool) -> (u64, u32) {
+// A skip's child index, absolute or relative to the first child not yet processed, or its location.
+fn skip_fp(skip: &Skip, at: usize, idx: usize, relative: bool) -> u64 {
 	let mut fp = Fp::new();
 	match skip {
 		Skip::Child(i)	=> {
 			fp.tag(0);
 			fp.h.write_usize(if relative { i.wrapping_sub(idx) } else { *i });
 		},
-		Skip::Loc(_)	=> {
+		Skip::Loc(l)	=> {
 			fp.tag(1);
-			fp.mask();
+			fp.loc(l.0);
 		},
 	}
 	fp.h.write_usize(if relative { at.wrapping_sub(idx) } else { at });
 	let mut masked = 0;
-	(fp.seal(&mut masked), masked)
+	fp.seal(&mut masked)
 }
 
 // The skips as an unordered set, sorted by fingerprint.
 fn skips_fp(work: &Work, relative: bool, fp: &mut Fp) {
 	let mut each: Vec<u64> = Vec::with_capacity(work.skips.len());
 	for (skip, at) in work.skips.iter() {
-		let (h, m) = skip_fp(skip, *at, work.idx, relative);
-		fp.masked += m;
-		each.push(h);
+		each.push(skip_fp(skip, *at, work.idx, relative));
 	}
 	each.sort_unstable();
 	each.mix(fp);
@@ -1210,7 +1220,7 @@ pub(super) fn entry(p: &Paginator, loc: &Locator) -> Entry {
 	// The place counters: how many were handed out and how often, never which.
 	let (place, counts) = loc.carry();
 	let mut fp = Fp::new();
-	fp.mask_opt(&Some(place));
+	fp.loc(place.0);
 	counts.mix(&mut fp);
 	e.locator = fp.seal(&mut m);
 
