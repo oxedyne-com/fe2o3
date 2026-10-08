@@ -670,20 +670,6 @@ impl Dat {
         Ok(())
     }
 
-    pub fn byte_wrapper_var_len(len: usize) -> Outcome<u8> {
-        if len <= u8::MAX as usize { Ok(2) }
-        else if len <= u16::MAX as usize { Ok(3) }
-        else if len <= u32::MAX as usize { Ok(5) }
-        else if len <= u64::MAX as usize { Ok(9) }
-        else {
-            Err(err!(
-                "The byte length of {}, which exceeds the maximum u64::MAX = {},
-                cannot be represented a variable size Dat byte wrapper.",
-                len, u64::MAX;
-            Size, TooBig))
-        }
-    }
-
     pub fn wrap_dat(byts: Vec<u8>) -> Self {
         let len = byts.len();
         if len < u8::MAX as usize {

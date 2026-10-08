@@ -268,3 +268,57 @@ fn decode_preserves_completeness_under_reorder() -> Outcome<()> {
 	assert_eq!(a.to_bytes(), b.to_bytes());
 	Ok(())
 }
+
+
+// A header is a peer's word for its own sizes, so none of its sums or products may wrap.
+fn header(num_cells: u64, num_hashes: u64, key_len: u64, value_len: u64, body: usize) -> Vec<u8> {
+	let mut b = Vec::with_capacity(40 + body);
+	for v in [num_cells, num_hashes, key_len, value_len, 0u64] {
+		b.extend_from_slice(&v.to_le_bytes());
+	}
+	b.extend_from_slice(&vec![0u8; body]);
+	b
+}
+
+#[test]
+fn from_bytes_refuses_a_header_whose_lengths_overflow() -> Outcome<()> {
+	// key_len + value_len wraps to 64 and the body is one cell of that width.
+	let sum = header(1, 1, 1 << 63, (1 << 63) + 64, 76);
+	let e = Iblt::from_bytes(&sum);
+	assert!(e.is_err(), "a key_len + value_len that wraps was accepted");
+	let msg = format!("{:?}", e.err());
+	assert!(msg.contains("key_len") && msg.contains("value_len"), "the error names neither field: {}", msg);
+	// num_cells * per_cell wraps.
+	let prod = header(1 << 62, 3, 8, 0, 0);
+	assert!(Iblt::from_bytes(&prod).is_err(), "a num_cells * per_cell that wraps was accepted");
+	// A body shorter than the header states is refused before anything is allocated.
+	let short = header(1 << 40, 3, 8, 0, 10);
+	assert!(Iblt::from_bytes(&short).is_err());
+	Ok(())
+}
+
+#[test]
+fn new_refuses_dimensions_that_overflow() -> Outcome<()> {
+	let cfg = IbltConfig {
+		num_cells: usize::MAX / 2, num_hashes: 3, key_len: 8, value_len: 0, seed: 0,
+	};
+	assert!(Iblt::new(cfg).is_err(), "num_cells * key_len wraps");
+	let cfg = IbltConfig {
+		num_cells: 4, num_hashes: 3, key_len: 8, value_len: usize::MAX / 2, seed: 0,
+	};
+	assert!(Iblt::new(cfg).is_err(), "num_cells * value_len wraps");
+	Ok(())
+}
+
+#[test]
+fn config_in_reads_the_header_without_a_table() -> Outcome<()> {
+	let cfg = key_only_cfg(32, 3);
+	let iblt = res!(Iblt::new(cfg));
+	assert_eq!(res!(Iblt::config_in(&iblt.to_bytes())), cfg);
+	// The header alone is enough, whatever follows it.
+	let hostile = header(5, 2, 1 << 63, (1 << 63) + 64, 0);
+	let got = res!(Iblt::config_in(&hostile));
+	assert_eq!((got.num_cells, got.key_len), (5, 1 << 63));
+	assert!(Iblt::config_in(&[0u8; 39]).is_err());
+	Ok(())
+}
