@@ -146,6 +146,17 @@ impl<
                             self.cache_mut().clear_all_values(); 
                             self.respond(Ok(OzoneMsg::Ok), &resp);
                         },
+                        OzoneMsg::Settle(resp) => {
+                            // Everything this bot has inserted has had its `UpdateData` sent, so
+                            // the file bots reach the request after it.
+                            let result = self.fbots().and_then(|bots| {
+                                bots.send_to_all(OzoneMsg::Settle(resp.clone()))
+                            });
+                            if let Err(e) = result {
+                                self.error(e.clone());
+                                self.respond(Err(e), &resp);
+                            }
+                        },
                         OzoneMsg::SetCacheSizeLimit(size_lim) => {
                             self.cache_mut().set_lim(size_lim);
                         },
@@ -300,6 +311,7 @@ impl<
         -> Outcome<()>
     {
         hooks::insert_delay();
+        hooks::chunk_tombstone_delay(&key, cind);
         // [12] Insert the data into the key-chosen zone cache.
         let floc_new = floc.clone();
         let floc_old_opt = match self.cache.insert(

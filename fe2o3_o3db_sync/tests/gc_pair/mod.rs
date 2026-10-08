@@ -14,7 +14,10 @@ use oxedyne_fe2o3_iop_db::api::Database;
 use oxedyne_fe2o3_jdat::prelude::*;
 use oxedyne_fe2o3_o3db_sync::{
     O3db,
-    base::cfg::OzoneConfig,
+    base::{
+        cfg::OzoneConfig,
+        constant,
+    },
     data::core::RestSchemesInput,
     file::{
         core::FileType,
@@ -189,5 +192,81 @@ pub fn temporaries(dir: &Path) -> Vec<String> {
             }
         }
     }
+    found
+}
+
+/// The bytes in every regular file under the zone root, counted by walking the directories with
+/// nothing of the store's own, so that the store's answer has something outside it to be checked
+/// against.
+pub fn zone_files_len(root: &Path, cfg: &OzoneConfig) -> u64 {
+    dir_len(&cfg.zone_root(root))
+}
+
+/// The bytes in every regular file under a directory, subdirectories included.
+pub fn dir_len(dir: &Path) -> u64 {
+    let mut bytes = 0u64;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        if let Ok(list) = fs::read_dir(&d) {
+            for entry in list.flatten() {
+                match entry.metadata() {
+                    Ok(m) if m.is_dir()     => stack.push(entry.path()),
+                    Ok(m) if m.is_file()    => bytes += m.len(),
+                    _ => (),
+                }
+            }
+        }
+    }
+    bytes
+}
+
+/// Waits until the zone files have stopped changing, and gives their length then.
+pub fn settled_len(root: &Path, cfg: &OzoneConfig) -> u64 {
+    let start = Instant::now();
+    let mut last = zone_files_len(root, cfg);
+    let mut quiet = 0;
+    while start.elapsed() < Duration::from_secs(30) {
+        thread::sleep(Duration::from_millis(150));
+        let now = zone_files_len(root, cfg);
+        if now == last {
+            quiet += 1;
+            if quiet >= 4 {
+                break;
+            }
+        } else {
+            quiet = 0;
+            last = now;
+        }
+    }
+    last
+}
+
+/// The data files under the zone root, collection temporaries included, that hold the needle
+/// anywhere in their bytes, found by reading each whole file with nothing of the store's own.
+pub fn dat_files_holding(root: &Path, cfg: &OzoneConfig, needle: &[u8]) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut stack = vec![cfg.zone_root(root)];
+    while let Some(d) = stack.pop() {
+        if let Ok(list) = fs::read_dir(&d) {
+            for entry in list.flatten() {
+                let p = entry.path();
+                match entry.metadata() {
+                    Ok(m) if m.is_dir() => stack.push(p),
+                    Ok(m) if m.is_file() => {
+                        let dat = p.extension().map_or(false, |e| e == constant::DATA_FILE_EXT);
+                        if dat {
+                            if let Ok(bytes) = fs::read(&p) {
+                                if needle.len() <= bytes.len() && bytes.windows(needle.len()).any(|w| w == needle) {
+                                    found.push(p);
+                                }
+                            }
+                        }
+                    },
+                    _ => (),
+                }
+            }
+        }
+    }
+    found.sort();
     found
 }

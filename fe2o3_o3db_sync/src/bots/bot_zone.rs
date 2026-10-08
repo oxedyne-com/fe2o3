@@ -7,7 +7,10 @@ use crate::{
     },
     bots::{
         base::bot_deps::*,
-        worker::bot::WorkerType,
+        worker::{
+            bot::WorkerType,
+            bot_file::GcControl,
+        },
     },
     comm::{
         channels::{
@@ -27,6 +30,7 @@ use crate::{
         },
         zdir::ZoneDir,
     },
+    test::hooks,
 };
 
 use oxedyne_fe2o3_core::{
@@ -41,6 +45,7 @@ use std::{
         self,
         File,
     },
+    io::ErrorKind,
     sync::Arc,
     time::Instant,
 };
@@ -166,6 +171,21 @@ impl<
                     match self.fwd_msg_to_pool(&WorkerType::Cache, msg) {
                         Err(e) => self.error(e),
                         Ok(_) => (),
+                    }
+                },
+                OzoneMsg::GcControl(GcControl::Compact, resp) => {
+                    // Each file bot answers the caller itself with its own report, so the zone
+                    // bot owes the caller nothing but the failure to pass the order on.
+                    let sent = if hooks::compact_fails() {
+                        Err(err!("{}: Test hook: the compaction order cannot be passed to the file \
+                            bots.", self.ozid(); Test, Channel, Write))
+                    } else {
+                        self.fwd_msg_to_pool(&WorkerType::File,
+                            OzoneMsg::GcControl(GcControl::Compact, resp.clone()))
+                    };
+                    if let Err(e) = sent {
+                        self.error(e.clone());
+                        self.respond(Err(e), &resp);
                     }
                 },
                 OzoneMsg::GcControl(gc_ctrl, resp) => {
@@ -713,10 +733,22 @@ impl<
     pub fn read_files(&mut self) -> Outcome<BTreeMap<String, FileEntry>> {
         let mut map = BTreeMap::new();
         let list = res!(fs::read_dir(self.zdir().dir.clone()));
+        let mut paths = Vec::new();
         for item in list {
             let item = res!(item);
-            let path = item.path();
-            let file = res!(File::open(&path));
+            paths.push(item.path());
+        }
+        hooks::list_delay();
+        for path in paths {
+            let file = match File::open(&path) {
+                Ok(file) => file,
+                // A collection renamed it away or deleted it since the directory was read, so it
+                // is not on the disk any more and has no length to give.
+                Err(e) if e.kind() == ErrorKind::NotFound => continue,
+                Err(e) => return Err(err!(e,
+                    "{}: Cannot open {:?} listing the files of {:?}.", self.ozid(), path, self.zind();
+                    IO, File, Read)),
+            };
             let metadata = res!(file.metadata());
             let ftyp = metadata.file_type();
             let typ = if ftyp.is_dir() {
@@ -728,7 +760,6 @@ impl<
             };
             let elapsed = res!(metadata.modified()).elapsed();
             let mods = res!(elapsed).as_secs();
-            //let mods = res!(res!(metadata.modified()).elapsed()).as_secs();
             let size = metadata.len();
             let name = match path.file_name() {
                 Some(s) => match s.to_os_string().into_string() {

@@ -15,7 +15,10 @@ use crate::{
         bot_zone::ZoneState,
         worker::{
             bot::WorkerType,
-            bot_file::GcControl,
+            bot_file::{
+                Hold,
+                GcControl,
+            },
             bot_reader::ReadResult,
         },
     },
@@ -45,11 +48,17 @@ use crate::{
         },
     },
     file::{
-        state::FileStateMap,
+        core::FileEntry,
+        floc::FileNum,
+        state::{
+            FileState,
+            FileStateMap,
+        },
         zdir::ZoneDir,
     },
 };
 
+use oxedyne_fe2o3_core::channels::Recv;
 use oxedyne_fe2o3_jdat::{
     prelude::*,
     chunk::PartKey,
@@ -74,7 +83,10 @@ use oxedyne_fe2o3_namex::id::{
 };
 
 use std::{
-    collections::BTreeMap,
+    collections::{
+        BTreeMap,
+        BTreeSet,
+    },
     path::{
         Path,
         PathBuf,
@@ -85,6 +97,15 @@ use std::{
     },
 };
 
+
+// What `OzoneApi::compact_now` did.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CompactReport {
+    pub files_collected:    usize,  // files a collection was started on
+    pub files_deleted:      usize,  // files removed for holding only old records
+    pub bytes_before:       u64,    // length of the zone directories before the call rolled the live files
+    pub bytes_after:        u64,    // the same once nothing sealed held an old byte
+}
 
 #[derive(Clone, Debug)]
 pub struct OzoneApi<
@@ -441,6 +462,15 @@ impl<
     )
         -> Outcome<usize>
     {
+        // A store of the deleted marker is a delete by another road, the one the distributed
+        // adapters erase by, and it supersedes only the bunch key.  The chunks of a chunked value
+        // live under keys of their own, so they are retired here, as `delete` retires them, or
+        // their bytes would stay live in the data files for ever.
+        if let Dat::Usr(kind, _) = &v {
+            if *kind == id::usr_kind_id_deleted() {
+                res!(self.reclaim_chunks_on_delete(&k, user, schms2));
+            }
+        }
         let msgs = res!(self.prepare_write_dat(
             k,
             v,
@@ -703,9 +733,10 @@ impl<
         //     current bunch key, reconstruct each chunk key from the set_id it stores -- random
         //     for a pre-upgrade value, key-derived for a new one, either way exactly what
         //     `fetch_chunks` reconstructs to read them -- and tombstone each so the ordinary
-        //     supersession path reclaims them.  These carry no responder: the caller waits only
-        //     on the single bunch-key delete below.  The read is confined to the delete path,
-        //     which is rare relative to writes, and only chunked values pay the fan-out.
+        //     supersession path reclaims them.  Each carries a responder of its own and is waited
+        //     for before the bunch-key delete below is sent, so a delete that returns has retired
+        //     every chunk, and one that could not says which.  The read is confined to the delete
+        //     path, which is rare relative to writes, and only chunked values pay the fan-out.
         res!(self.reclaim_chunks_on_delete(k, user, schms2));
 
         // 2. The value we use to indicate deletion is an unencrypted custom usr type.
@@ -764,16 +795,36 @@ impl<
             _ => return Ok(()), // Not chunked, or the key is absent: nothing extra to reclaim.
         };
 
-        for i in 1..(pkey.num_parts() + 1) {
+        // Every tombstone is sent before any is waited for, so the chunks retire together; each has
+        // its own responder so that a failure names its chunk.
+        let n = pkey.num_parts();
+        let mut waits = Vec::new();
+        for i in 1..(n + 1) {
             let ck = Dat::Tup5u64([
                 pkey.set_id(),
                 i,
                 pkey.data_len(),
-                pkey.num_parts(),
+                n,
                 pkey.part_size(),
             ]);
-            // No responder: the caller waits only on the single bunch-key delete.
-            res!(self.tombstone_chunk_key(&ck, user, schms2, Self::no_responder()));
+            let resp = self.responder();
+            res!(self.tombstone_chunk_key(&ck, user, schms2, resp.clone()));
+            waits.push((i, resp));
+        }
+        for (i, resp) in waits {
+            // Passed on with its own tags, so a write that landed unconfirmed can be told from one
+            // that did not.
+            if let Err(e) = resp.recv_write_acks(
+                1,
+                constant::USER_REQUEST_TIMEOUT,
+                constant::DURABILITY_TIMEOUT,
+            ) {
+                return Err(err!(e,
+                    "{}: Deleting {:?}: the tombstone of chunk {} of {} was not acknowledged, so \
+                    the value's chunks are not all retired and its bunch key has not been deleted.  \
+                    The delete can be repeated.", self.ozid(), k, i, n;
+                    Write));
+            }
         }
         Ok(())
     }
@@ -1577,14 +1628,13 @@ impl<
         Ok((errs, nbots))
     }
 
-    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
-
-        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
-        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
-        info!(sync_log::stream(), " Size: in bytes");
-        info!(sync_log::stream(), " Mod: seconds since last modified");
-        info!(sync_log::stream(), " Name: object label");
-
+    /// Each zone's directory listing, read by its zone bot when the request arrives.
+    pub fn collect_files(
+        &self,
+        wait: Wait,
+    )
+        -> Outcome<BTreeMap<ZoneInd, BTreeMap<String, FileEntry>>>
+    {
         let emsg = "list files request";
         let resp = self.responder();
         if let Err(e) = self.chans().sup().send(
@@ -1607,6 +1657,87 @@ impl<
                     Channel)),
             };
         }
+        Ok(map)
+    }
+
+    /// The accounting barrier.  When it returns `Ok`, every `UpdateData` and `ScheduleOld` caused by
+    /// a write acknowledged before the call has reached its file bot, or its garbage buffer.  A cache
+    /// bot answers its caller before it tells the file bot of the new record's file, and that file
+    /// bot then tells the file bot of the old record's file, so each stage is asked in turn: the
+    /// cache bots forward the request to every file bot (behind their `UpdateData`), and each file
+    /// bot echoes it to every file bot (behind the `ScheduleOld` it forwarded).  Every file bot
+    /// answers each echo, so a zone owes cache bots times file bots times file bots answers.
+    fn settle(&self, deadline: Duration) -> Outcome<()> {
+        let emsg = "accounting barrier";
+        let resp = self.responder();
+        let mut owed = 0usize;
+        for z in 0..self.cfg().num_zones() {
+            let zind = ZoneInd::new(z);
+            let cbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::Cache, &zind));
+            let fbots = res!(self.chans().get_workers_of_type_in_zone(&WorkerType::File, &zind));
+            if let Err(e) = cbots.send_to_all(OzoneMsg::Settle(resp.clone())) {
+                return Err(err!(e,
+                    "{}: Cannot send the {} to the cache bots of zone {}.", self.ozid(), emsg, z;
+                    Channel, Write));
+            }
+            owed += cbots.len() * fbots.len() * fbots.len();
+        }
+        let wait = Wait {
+            max_wait:       deadline,
+            check_interval: constant::CHECK_INTERVAL.min(deadline),
+        };
+        let (_, msgs) = match resp.recv_number(owed, wait) {
+            Ok(v) => v,
+            Err(e) => return Err(err!(e,
+                "{}: The {} was not answered by all {} file bot echoes within {:?}.  A bot \
+                answers only when it reaches the request in its queue.",
+                self.ozid(), emsg, owed, deadline;
+                Channel, Timeout)),
+        };
+        for msg in msgs {
+            match msg {
+                OzoneMsg::Ok => (),
+                OzoneMsg::Error(e) => return Err(err!(e,
+                    "{}: In response to the {}.", self.ozid(), emsg;
+                    Channel)),
+                msg => return Err(err!(
+                    "{}: Unexpected response to the {}: {:?}", self.ozid(), emsg, msg;
+                    Channel, Unexpected)),
+            }
+        }
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn settle_for_test(&self, deadline: Duration) -> Outcome<()> {
+        self.settle(deadline)
+    }
+
+    /// The physical length in bytes of every regular file in every zone directory, data, index and
+    /// collection temporary alike, read when asked.  It is not the figure [`Self::ozone_state`] gives,
+    /// the file bots' accounted size, which is pushed periodically and lags any write still draining.
+    pub fn size_bytes(&self, wait: Wait) -> Outcome<u64> {
+        let files = res!(self.collect_files(wait));
+        let mut total = 0u64;
+        for (_zind, zmap) in files {
+            for (_name, entry) in zmap {
+                if entry.typ == "f" {
+                    total = total.saturating_add(entry.size);
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    pub fn list_files(&self, wait: Wait) -> Outcome<()> {
+
+        info!(sync_log::stream(), "Directory listing for {} zones, key:", self.cfg().num_zones());
+        info!(sync_log::stream(), " Typ: f File | d Directory | s Symlink");
+        info!(sync_log::stream(), " Size: in bytes");
+        info!(sync_log::stream(), " Mod: seconds since last modified");
+        info!(sync_log::stream(), " Name: object label");
+
+        let map = res!(self.collect_files(wait));
         for (zind, zmap) in map {
             let mut total_size = 0;
             info!(sync_log::stream(), "{:?} directory", zind);
@@ -1657,6 +1788,117 @@ impl<
             };
         }
         Ok(map)
+    }
+
+    /// Collects every old byte that a write acknowledged before the call left behind, and returns
+    /// once none is held by a sealed file, or fails at the deadline naming each file that still
+    /// holds one and why.
+    ///
+    /// The live files are rolled first, since a live file is never collected, then the accounting
+    /// barrier makes every supersession of an acknowledged write visible to the file bots.  Every
+    /// quarter of a second the file bots are ordered to collect what they hold, `Force::Yes`, which
+    /// waives the collector's trigger fraction and its switches and nothing that protects a read:
+    /// a file with a reader, a move in flight or a writer still draining is asked again, not
+    /// collected.  A zone bot that cannot pass the order on fails the call at once, not at the
+    /// deadline.
+    pub fn compact_now(&self, deadline: Duration) -> Outcome<CompactReport> {
+        let emsg = "compaction";
+        let start = Instant::now();
+        let left = |start: &Instant| deadline.saturating_sub(start.elapsed());
+        let wait = |d: Duration| Wait {
+            max_wait:       d,
+            check_interval: constant::CHECK_INTERVAL.min(d),
+        };
+        let bytes_before = res!(self.size_bytes(wait(deadline)));
+        res!(self.new_live_files());
+        res!(self.settle(left(&start)));
+
+        let resp = self.responder();
+        let chan = res!(resp.channel().ok_or_else(|| err!(
+            "{}: The responder for {} has no channel.", self.ozid(), emsg; Channel, Missing)));
+        let mut collected = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        let mut waiting: BTreeMap<WorkerInd, Vec<(FileNum, Hold)>> = BTreeMap::new();
+        let mut ordered: Option<Instant> = None;
+        loop {
+            if start.elapsed() > deadline {
+                // The files that still hold old bytes, from the state the last pass saw.
+                let states = res!(self.collect_file_states(constant::USER_REQUEST_WAIT));
+                let mut held = Vec::new();
+                for (wind, fmap) in &states {
+                    for (fnum, fstat) in fmap.map() {
+                        if Self::holds_old_bytes(fstat) {
+                            let why = match waiting.get(wind).and_then(|w| w.iter().find(|(f, _)| f == fnum)) {
+                                Some((_, hold)) => hold.why(),
+                                None if fstat.gc_active() => "collecting",
+                                None => "not yet ordered",
+                            };
+                            held.push(fmt!("file {} of zone {} ({})", fnum, wind.z() + 1, why));
+                        }
+                    }
+                }
+                return Err(err!(
+                    "{}: The {} did not finish within {:?}.  Sealed files still holding old bytes: {}.",
+                    self.ozid(), emsg, deadline, held.join(", ");
+                    Channel, Timeout));
+            }
+            if ordered.map_or(true, |t| t.elapsed() >= Duration::from_millis(250)) {
+                if let Err(e) = self.chans().sup().send(
+                    OzoneMsg::GcControl(GcControl::Compact, resp.clone())
+                ) {
+                    return Err(err!(e,
+                        "{}: Cannot send the {} order to supervisor.", self.ozid(), emsg;
+                        Channel, Write));
+                }
+                ordered = Some(Instant::now());
+            }
+            // Reports, until the file bots are quiet for a moment.  A failed order ends the wait.
+            while let Recv::Result(Ok(msg)) = chan.recv_timeout(Duration::from_millis(50)) {
+                match msg {
+                    OzoneMsg::CompactReport { wind, started, deleted: gone, waiting: held } => {
+                        for fnum in started {
+                            collected.insert((wind, fnum));
+                        }
+                        for fnum in gone {
+                            deleted.insert((wind, fnum));
+                        }
+                        waiting.insert(wind, held);
+                    },
+                    OzoneMsg::Error(e) => return Err(err!(e,
+                        "{}: In response to the {} order.", self.ozid(), emsg;
+                        Channel)),
+                    msg => return Err(err!(
+                        "{}: Unexpected response to the {} order: {:?}", self.ozid(), emsg, msg;
+                        Channel, Unexpected)),
+                }
+            }
+            let states = res!(self.collect_file_states(wait(left(&start).max(Duration::from_millis(1)))));
+            let mut pending = false;
+            for (_wind, fmap) in &states {
+                for (_fnum, fstat) in fmap.map() {
+                    pending |= Self::holds_old_bytes(fstat);
+                }
+            }
+            if !pending {
+                break;
+            }
+        }
+        let bytes_after = res!(self.size_bytes(wait(left(&start).max(Duration::from_millis(1)))));
+        Ok(CompactReport {
+            files_collected:    collected.len(),
+            files_deleted:      deleted.len(),
+            bytes_before,
+            bytes_after,
+        })
+    }
+
+    // Does a sealed file hold bytes that a collection would remove, or is one at work on it?
+    fn holds_old_bytes(fstat: &FileState) -> bool {
+        !fstat.is_live() && (
+            fstat.gc_active() ||
+            fstat.get_old_sum() > 0 ||
+            (!fstat.data_map_empty() && fstat.is_all_old())
+        )
     }
 
     /// Instruct the wbots to increment to their next live files, to provide a clean slate for

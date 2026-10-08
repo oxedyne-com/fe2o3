@@ -10,7 +10,10 @@ use crate::{
     },
     bots::{
         worker::{
-            bot_file::GcControl,
+            bot_file::{
+                GcControl,
+                Hold,
+            },
             bot_reader::ReadResult,
         },
         bot_zone::ZoneState,
@@ -99,6 +102,8 @@ pub enum OzoneMsg<
     // Command
     GcControl(GcControl, Responder<UIDL, UID, ENC, KH>), // sup -> gbot, control gc activation
     ClearCache(Responder<UIDL, UID, ENC, KH>),
+    Settle(Responder<UIDL, UID, ENC, KH>),      // api -> cbot -> fbot, the accounting barrier
+    SettleEcho(Responder<UIDL, UID, ENC, KH>),  // fbot -> fbot, answered once the fbot reaches it
     CloseOldLiveFileState {
         fnum_old:       FileNum,
         fnum_new:       FileNum,
@@ -172,6 +177,12 @@ pub enum OzoneMsg<
     },
     // Respond
     Chunks(usize), // Number of chunks.
+    CompactReport {         // fbot -> caller of `compact_now`, one per file bot per round
+        wind:       WorkerInd,
+        started:    Vec<FileNum>,           // collections begun this round
+        deleted:    Vec<FileNum>,           // files that held only old records, removed
+        waiting:    Vec<(FileNum, Hold)>,   // files with old bytes, and what holds each
+    },
     DumpCacheResponse(WorkerInd, Cache<UIDL, UID>),
     DumpFileStatesResponse(WorkerInd, FileStateMap),
     Error(Error<ErrTag>),

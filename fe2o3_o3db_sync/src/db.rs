@@ -1,5 +1,6 @@
 use crate::{
     prelude::*,
+    api::CompactReport,
     base::{
         constant,
         id::{
@@ -526,6 +527,17 @@ impl<
         }
 
         Ok(found_files)
+    }
+
+    /// The length in bytes of every regular file in every zone directory, read now.
+    pub fn size_bytes(&self) -> Outcome<u64> {
+        self.api.size_bytes(constant::USER_REQUEST_WAIT)
+    }
+
+    /// Collects every old byte that a write acknowledged before the call left in a sealed file,
+    /// and returns when none is left, or fails at the deadline naming the files that hold one.
+    pub fn compact_now(&self, deadline: Duration) -> Outcome<CompactReport> {
+        self.api.compact_now(deadline)
     }
 
     /// Gracefully shut down the database, including the supervisor.
